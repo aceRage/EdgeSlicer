@@ -4550,6 +4550,8 @@ PageShp TabFilament::add_filament_overrides_page()
                         }
                     }
                 }
+                // Orca #11517: let the CheckBox widget's own handler run too, so its image follows the click.
+                evt.Skip();
             }, check_box->GetId());
 
             m_overrides_options[opt_key] = check_box;
