@@ -44,6 +44,7 @@ enum class FuzzySkinType {
     Hole,
     All,
     AllWalls,
+    Disabled_fuzzy,
 };
 
 enum class FuzzySkinMode {
