@@ -63,6 +63,10 @@ public:
     // An error the GUI wanted to show while a request ran (show_error); the request reports it.
     void        note_error(const std::string& message);
     std::string take_error();
+    // Ultra: what the last headless colour import did, so api_project_open can report it.
+    struct ColorImport { size_t input{0}, clusters{0}, reused{0}, added{0}, merged{0}; bool valid{false}; };
+    void        note_color_import(const ColorImport& c);
+    ColorImport take_color_import();
 
     // True while a phone/agent request is being executed on the GUI thread. Confirmation
     // dialogs raised meanwhile (e.g. "adjust these settings automatically?") answer Yes on
@@ -158,6 +162,7 @@ private:
     bool             m_send_running { false }; // one transfer at a time, like the desktop's dialogs
     bool             m_control_running { false }; // and one pause/resume/stop at a time
     std::string      m_title, m_path, m_last_error;
+    ColorImport      m_last_color_import;
     bool             m_slicing { false };
     bool             m_hidden { false };
     std::deque<Attention> m_attention; // ring of auto-answered dialogs, 50 entries
