@@ -197,6 +197,8 @@ set(lisbslic3r_sources
     Format/AMF.hpp
     Format/bbs_3mf.cpp
     Format/bbs_3mf.hpp
+    Format/GLTF.cpp
+    Format/GLTF.hpp
     format.hpp
     Format/OBJ.cpp
     Format/OBJ.hpp
@@ -600,6 +602,7 @@ target_link_libraries(libslic3r
         ${OCCT_LIBS}
         boost_libs
         cereal::cereal
+        cgltf
         clipper
         eigen
         glu-libtess
