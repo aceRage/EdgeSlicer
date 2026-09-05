@@ -105,10 +105,13 @@ static bool detect_steep_overhang(const PrintRegionConfig *config,
 // overhangs or the user's enforcers, minus the blockers). What it cannot answer per-region is the
 // second half of PrintObject::remove_bridges_from_contacts: a STRAIGHT overhang segment that is
 // anchored in the lower layer at both ends and is short enough to bridge gets no support under it,
-// because both generators cut exactly those areas out of their contacts (tree whenever
-// max_bridge_length > 0, normal(auto) only under bridge_no_support - which is what
-// over_support_max_bridge_length already encodes). Such a segment must stay an overhang wall, so
-// it is subtracted here, the same way and with the same offsets the generator subtracts it.
+// because the CLASSIC tree generator cuts exactly those areas out of its contacts whenever
+// max_bridge_length > 0 (TreeSupport.cpp). The normal generator and the organic tree drop every
+// bridge, length unmeasured, under bridge_no_support - there the auto pass stands down and only
+// enforcers can still claim a wall, with a zero length here, so this returns early; see
+// PrintObject::over_support_settings(), which is what over_support_max_bridge_length encodes. Such
+// a segment must stay an overhang wall, so it is subtracted here, the same way and with the same
+// offsets the generator subtracts it.
 //
 // Note both call sites of remove_bridges_from_contacts pass break_bridge = false, so a segment
 // LONGER than max_bridge_length is not cut out and therefore does get support - it stays claimable.

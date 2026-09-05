@@ -50,16 +50,25 @@ The Z-gap condition is not a nicety: at a zero gap the fork already classifies t
 Then, per support type — **the same predicate the fork already uses to decide "this bottom is fully
 supported" in the soluble case, only at a non-zero gap**:
 
-* `normal(auto)` — the generator supports every overhang it detects. With `bridge_no_support` on it
-  drops the *bridgeable* faces from its contacts (`remove_bridges_from_contacts`): a bottom bridge whose
-  fill surface is shorter than `max_bridge_length` in both X and Y gets no support and stays a bridge;
-  a longer one is supported. The classifier reproduces that per-face test on the slice surface minus
-  the wall band.
-* `tree(auto)` — supported when `support_interface_top_layers > 0` and `support_critical_regions_only`
-  is off. Tree runs the same bridgeable-face removal whenever `max_bridge_length > 0`, which is the
-  default (10 mm), so the same per-face test applies. (The first version demanded `max_bridge_length
-  == 0` here and therefore switched itself off on every default tree profile - 2026-09-05 hardware
-  finding, fixed.)
+* `normal(auto)` — the generator supports every overhang it detects. With `bridge_no_support` on,
+  `SupportMaterial.cpp` calls a `remove_bridges_from_contacts` that takes **no length** and drops every
+  bridge it can detect from its contacts, so the feature stands down for the whole object.
+* `tree(auto)`, **organic** (the default tree style; `SupportParameters.hpp` resolves `default`, `grid`
+  and `snug` to organic for a tree type) — supported when `support_interface_top_layers > 0` and
+  `support_critical_regions_only` is off. `TreeSupport3D.cpp` runs the same length-less removal under
+  the same `bridge_no_support` gate, so the feature stands down there too. `TreeSupport::generate()`
+  hands organic trees to `TreeSupport3D` before `detect_overhangs()` runs, so the length rule below
+  never applies to them.
+* `tree(auto)`, **classic** (`tree_slim`, `tree_strong`, `tree_hybrid`) — same two refusals, and
+  `TreeSupport.cpp` drops the *bridgeable* faces whenever `max_bridge_length > 0` (the default, 10 mm),
+  not gated on `bridge_no_support`: a bottom bridge whose fill surface is shorter than
+  `max_bridge_length` in both X and Y gets no support and stays a bridge; a longer one is supported.
+  The classifier reproduces that per-face test on the slice surface minus the wall band. (The first
+  version demanded `max_bridge_length == 0` here and therefore switched itself off on every default
+  tree profile - 2026-09-05 hardware finding; ef20d80316 then applied the per-face test to BOTH
+  support types, which reclassified faces under `bridge_no_support` that nothing would be under -
+  caught by the test suite once fff_print_tests was relinked, and corrected to the per-generator
+  rule above.)
 * `normal(manual)` / `tree(manual)` — support exists only where the user asked for it, so only the
   part of the face covered by a **support enforcer** (enforcer volume or painted enforcer facets,
   projected onto that layer) counts as over support.
@@ -238,8 +247,9 @@ A perimeter segment is retyped `erOverSupportPerimeter` ("Wall over support") wh
    overhang segment, extended by `fw` at both ends, anchored inside the lower layer at both of those
    ends, and no longer than `max_bridge_length + 10`, is offset into a thick line and cut out of the
    generator's contacts. Nothing is printed on top of it, so it stays an overhang wall. It applies
-   for tree whenever `max_bridge_length > 0` and for normal(auto) only under `bridge_no_support` —
-   the same `bridgeable` gate section 3 already computes. Both call sites pass
+   for the classic tree whenever `max_bridge_length > 0` — the same `bridgeable` length section 3
+   already computes; normal(auto) and the organic tree never reach it (under `bridge_no_support` the
+   auto pass stands down, section 3). Both call sites pass
    `break_bridge = false`, so a segment *longer* than `max_bridge_length` is **not** cut out, does
    get support, and is claimable.
 

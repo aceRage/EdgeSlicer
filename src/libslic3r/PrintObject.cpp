@@ -1401,22 +1401,37 @@ PrintObject::OverSupportSettings PrintObject::over_support_settings() const
     // Auto support types put support under every overhang they detect, and a bottom bridge is
     // an overhang by construction. Manual (painted) types only support what the user enforced.
     s.is_auto = is_auto(m_config.support_type.value);
-    // Both generators drop "bridgeable" overhangs from their contacts (remove_bridges_from_contacts):
-    // a bottom bridge whose bounding box is shorter than max_bridge_length in BOTH directions, and a
-    // straight perimeter segment anchored at both ends and shorter than max_bridge_length, get no
-    // support under them and stay real bridges. normal(auto) does this only when bridge_no_support is
-    // on, tree(auto) whenever max_bridge_length > 0 - which is the default (10 mm), so a gate that
-    // demanded 0 here switched the feature off on every default tree profile. Reproduce the per-face
-    // and per-segment tests instead; 0 means nothing is bridgeable.
+    // How a generator refuses to support a bridge is not the same in all three of them, and the
+    // classifier has to follow each one or it will call a face "over support" that nothing will be
+    // under. Read off the three call sites:
+    //   normal(auto)          SupportMaterial.cpp - `if (bridge_no_support) remove_bridges_from_
+    //                         contacts(...)`, which takes NO length and drops every bridge it can
+    //                         detect. The feature stands down for the whole object.
+    //   tree(auto), organic   TreeSupport3D.cpp - the same length-less removal, same gate.
+    //                         TreeSupport::generate() hands organic trees to TreeSupport3D before
+    //                         detect_overhangs() runs, so the length rule never applies here. The
+    //                         default tree style resolves to organic (SupportParameters.hpp).
+    //   tree(auto), classic   TreeSupport.cpp - `if (max_bridge_length > 0) remove_bridges_from_
+    //                         contacts(..., max_bridge_length, ...)`: a bottom bridge shorter than
+    //                         max_bridge_length in BOTH directions, and a straight perimeter segment
+    //                         anchored at both ends and that short, get no support and stay real
+    //                         bridges; a longer one is supported. Not gated on bridge_no_support,
+    //                         and max_bridge_length defaults to 10 mm, so a gate that demanded 0
+    //                         here switched the feature off on every classic tree profile.
+    // s.bridgeable is that length, scaled; 0 means nothing is bridgeable.
     if (s.is_auto) {
         if (m_config.support_type.value == stNormalAuto) {
-            if (m_config.bridge_no_support.value)
-                s.bridgeable = scale_(m_config.max_bridge_length.value);
+            s.is_auto &= ! m_config.bridge_no_support.value;
         } else if (m_config.support_type.value == stTreeAuto) {
             s.is_auto &= (m_config.support_interface_top_layers.value > 0 &&
                           m_config.support_critical_regions_only.value == false);
-            if (m_config.max_bridge_length.value > 0)
-                s.bridgeable = scale_(m_config.max_bridge_length.value);
+            const auto style = m_config.support_style.value;
+            if (style == smsTreeSlim || style == smsTreeStrong || style == smsTreeHybrid) {
+                if (m_config.max_bridge_length.value > 0)
+                    s.bridgeable = scale_(m_config.max_bridge_length.value);
+            } else {
+                s.is_auto &= ! m_config.bridge_no_support.value;
+            }
         }
     }
     this->slice_support_annotations(s.enforcers, s.blockers);
