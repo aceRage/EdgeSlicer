@@ -105,6 +105,24 @@ public:
     // and the option decides whether it forces the interface treatment.
     bool                                            has_bounded_paint_depth = false;
 
+    // Ultra (over-support walls): the region of this layer's plane that has support material under
+    // it, reconstructed at slice time by PrintObject::build_over_support_below() with exactly the
+    // predicate the bottom-face classifier uses. nullptr (the default, and every build with
+    // over_support_surfaces off) means the wall pass stands down and traverse_loops /
+    // traverse_extrusions take their original code path verbatim - which is what keeps the
+    // off-mode G-code byte-identical.
+    // docs/superpowers/specs/2026-09-05-over-support-surfaces.md
+    const Polygons                                 *over_support_below = nullptr;
+    // Scaled max_bridge_length for the perimeter-bridge refusal reproduced from
+    // PrintObject::remove_bridges_from_contacts; 0 = the generators bridge nothing.
+    coord_t                                         over_support_max_bridge_length = 0;
+
+    bool over_support_active() const
+        { return over_support_below != nullptr && ! over_support_below->empty() && lower_slices != nullptr; }
+    // The part of the over-support region that is usable for `overhangs`: the region minus the
+    // straight, both-ends-anchored, short-enough segments the support generators refuse to carry.
+    Polygons over_support_region(const Polylines &overhangs, const BoundingBox &bbox) const;
+
     PerimeterGenerator(
         // Input:
         const SurfaceCollection*    slices,

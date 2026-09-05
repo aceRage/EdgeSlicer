@@ -7942,7 +7942,7 @@ std::string GCode::_extrude(const ExtrusionPath& path, std::string description, 
         _mm3_per_mm *= m_config.bottom_solid_infill_flow_ratio;
     // Ultra (over-support surfaces): the object config has already been applied into m_config for
     // the object being extruded, so this is the per-object value.
-    else if (path.role() == erBottomSurfaceOverSupport)
+    else if (path.role() == erBottomSurfaceOverSupport || path.role() == erOverSupportPerimeter)
         _mm3_per_mm *= m_config.over_support_flow;
     else if (path.role() == erInternalBridgeInfill)
         _mm3_per_mm *= m_config.internal_bridge_flow;
@@ -7979,10 +7979,10 @@ std::string GCode::_extrude(const ExtrusionPath& path, std::string description, 
             speed = m_config.get_abs_value("ironing_speed");
         } else if (path.role() == erBottomSurface) {
             speed = m_config.get_abs_value("initial_layer_infill_speed");
-        } else if (path.role() == erBottomSurfaceOverSupport) {
-            // Ultra (over-support surfaces): 0 means "match the walls around this surface", which
-            // is the whole point of the feature - the surface should look like the outer wall it
-            // is framed by, not like a bridge.
+        } else if (path.role() == erBottomSurfaceOverSupport || path.role() == erOverSupportPerimeter) {
+            // Ultra (over-support surfaces / walls): 0 means "match the walls around this feature",
+            // which is the whole point - the surface, and the wall continuing into it, should look
+            // like the outer wall they are framed by, not like a bridge.
             speed = m_config.over_support_speed.value;
             if (speed <= 0.)
                 speed = m_config.get_abs_value("outer_wall_speed");
@@ -8061,7 +8061,14 @@ std::string GCode::_extrude(const ExtrusionPath& path, std::string description, 
     bool                        variable_speed = false;
     std::vector<ProcessedPoint> new_points{};
 
-    if (m_config.enable_overhang_speed && !this->on_first_layer() && (is_bridge(path.role()) || is_perimeter(path.role()))) {
+    // Ultra (over-support walls): a wall over support is a perimeter for every other purpose, but
+    // it must never reach the overhang degree classification - it overlaps the lower layer by
+    // nothing at all, so the estimator would grade it 4/4 and hand it the bridge speed, undoing the
+    // whole feature. It is excluded here rather than dropped out of is_perimeter(), so seams,
+    // travel/retraction and small-perimeter handling still see it as the wall it is.
+    // docs/superpowers/specs/2026-09-05-over-support-surfaces.md
+    if (m_config.enable_overhang_speed && !this->on_first_layer() && path.role() != erOverSupportPerimeter &&
+        (is_bridge(path.role()) || is_perimeter(path.role()))) {
         bool   is_external = is_external_perimeter(path.role());
         double ref_speed   = is_external ? m_config.get_abs_value("outer_wall_speed") : m_config.get_abs_value("inner_wall_speed");
         if (ref_speed == 0)
@@ -8588,6 +8595,7 @@ std::string GCode::extrusion_role_to_string_for_parser(const ExtrusionRole& role
     case erPerimeter: return "Perimeter";
     case erExternalPerimeter: return "ExternalPerimeter";
     case erOverhangPerimeter: return "OverhangPerimeter";
+    case erOverSupportPerimeter: return "OverSupportPerimeter";
     case erInternalInfill: return "InternalInfill";
     case erSolidInfill: return "SolidInfill";
     case erTopSolidInfill: return "TopSolidInfill";
