@@ -931,6 +931,9 @@ and per-group ironing (deviation 6).
 
 ## 2d. Stage 4 status (2026-09-05): DONE — both tree generators follow the group, both gates green
 
+> **Hardware pass (2026-09-05):** the user ran the Stage 4 checklist on the live build 8f3f3ac35f; the tree
+> support group mechanisms work as described.
+
 Branch `feat/support-sets-stage4`, cut from `feat/ultra-preferences` @ `7c27b20f20`. The baseline the
 gates are measured against is `feat/ultra-preferences` itself (at `e513088d61` by the time the gates
 ran; the only commits between the two touch `src/slic3r/GUI/` and nothing that slices).
