@@ -1274,6 +1274,19 @@ Choice::~Choice()
     if (m_list) { m_list->remove_choice(this); }
 }
 
+// Ultra: the little pictures in an enum dropdown come from resources/images/param_<enum value>.svg
+// and are matched on the enum VALUE name alone - nothing ties a picture to the option it is drawn
+// for. The support settings borrow value names from the infill patterns ("grid", "rectilinear",
+// "concentric", "rectilinear_interlaced"), so "Grid" under Support style, and most of the Interface
+// pattern list, pick up sparse-infill drawings that show something support is never built as. A
+// wrong picture is worse than none, so these three keys get plain text entries.
+static bool option_shows_enum_icons(const t_config_option_key &opt_key)
+{
+    return opt_key != "support_style"
+        && opt_key != "support_interface_pattern"
+        && opt_key != "support_ironing_pattern";
+}
+
 void Choice::BUILD()
 {
     wxSize size(def_width_wider() * m_em_unit, wxDefaultCoord);
@@ -1339,9 +1352,10 @@ void Choice::BUILD()
             int i = 0;
             boost::filesystem::path image_path(Slic3r::resources_dir());
             image_path /= "images";
+            const bool with_icons = option_shows_enum_icons(m_opt.opt_key);
             for (auto el : m_opt.enum_labels) {
                 auto icon_name = "param_" + m_opt.enum_values[i];
-                if (boost::filesystem::exists(image_path / (icon_name + ".svg"))) {
+                if (with_icons && boost::filesystem::exists(image_path / (icon_name + ".svg"))) {
                     ScalableBitmap bm(temp, icon_name, 24);
 				    temp->Append(_(el), bm.bmp());
                 } else {
@@ -1746,7 +1760,7 @@ void Choice::msw_rescale()
         field->SetValue(selection) :
         field->SetSelection(idx);
 #else
-    if (!m_opt.enum_labels.empty()) {
+    if (!m_opt.enum_labels.empty() && option_shows_enum_icons(m_opt.opt_key)) {
         boost::filesystem::path image_path(Slic3r::resources_dir());
         image_path /= "images";
         int i = 0;
