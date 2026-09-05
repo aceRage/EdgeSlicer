@@ -64,16 +64,25 @@ const std::vector<std::string>& support_set_keys()
         std::vector<std::string> out;
         const std::vector<std::string> &excluded = support_set_excluded_keys();
         // Built from the def rather than hard-coded, so a future support key joins sets
-        // automatically. (a) a PrintObjectConfig member and (b) category "Support".
+        // automatically. (a) a member of the per-object OR the per-region config class and
+        // (b) category "Support". PrintRegionConfig joined the rule in Stage 5, when the
+        // over-support keys moved there to act per part: they are Support-category settings a set
+        // should carry, and where a key lives decides how it ACTS, not whether it is a support
+        // setting. Duplicates are impossible - no key is a member of both classes.
+        auto collect = [&out, &excluded](const std::vector<std::string> &keys) {
+            for (const std::string &key : keys) {
+                const ConfigOptionDef *def = print_config_def.get(key);
+                if (def == nullptr || def->category != "Support")
+                    continue;
+                if (std::find(excluded.begin(), excluded.end(), key) != excluded.end())
+                    continue;
+                out.emplace_back(key);
+            }
+        };
         PrintObjectConfig proto;
-        for (const std::string &key : proto.keys()) {
-            const ConfigOptionDef *def = print_config_def.get(key);
-            if (def == nullptr || def->category != "Support")
-                continue;
-            if (std::find(excluded.begin(), excluded.end(), key) != excluded.end())
-                continue;
-            out.emplace_back(key);
-        }
+        collect(proto.keys());
+        PrintRegionConfig region_proto;
+        collect(region_proto.keys());
         std::sort(out.begin(), out.end());
         return out;
     }();

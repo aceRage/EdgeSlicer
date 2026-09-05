@@ -46,17 +46,36 @@ SCENARIO("Support set: the allowed key list", "[SupportSet]")
         REQUIRE(std::adjacent_find(keys.begin(), keys.end()) == keys.end());
     }
 
-    THEN("every key is a PrintObjectConfig member with the Support category")
+    THEN("every key is a per-object or per-region config member with the Support category")
     {
-        PrintObjectConfig proto;
-        const t_config_option_keys object_keys = proto.keys();
+        // PrintRegionConfig joined the derived rule in Stage 5 of the support-sets plan, when the
+        // over-support keys moved there so a PART could carry them (a support set carries them
+        // either way - where a key lives decides how it ACTS, not whether it is a support setting).
+        PrintObjectConfig object_proto;
+        PrintRegionConfig region_proto;
+        const t_config_option_keys object_keys = object_proto.keys();
+        const t_config_option_keys region_keys = region_proto.keys();
         for (const std::string &key : keys) {
             INFO(key);
-            REQUIRE(std::find(object_keys.begin(), object_keys.end(), key) != object_keys.end());
+            const bool in_object = std::find(object_keys.begin(), object_keys.end(), key) != object_keys.end();
+            const bool in_region = std::find(region_keys.begin(), region_keys.end(), key) != region_keys.end();
+            REQUIRE((in_object || in_region));
             const ConfigOptionDef *def = print_config_def.get(key);
             REQUIRE(def != nullptr);
             REQUIRE(def->category == "Support");
         }
+    }
+
+    THEN("the over-support keys are on the list, from PrintRegionConfig")
+    {
+        // The derived rule has to keep reaching them after the move; a set that silently stopped
+        // carrying them would be a quiet regression in Stage 1's feature.
+        REQUIRE(has_key(keys, "over_support_surfaces"));
+        REQUIRE(has_key(keys, "over_support_flow"));
+        REQUIRE(has_key(keys, "over_support_speed"));
+        PrintObjectConfig object_proto;
+        const t_config_option_keys object_keys = object_proto.keys();
+        REQUIRE(std::find(object_keys.begin(), object_keys.end(), std::string("over_support_flow")) == object_keys.end());
     }
 
     THEN("it carries the interface keys a set is for")

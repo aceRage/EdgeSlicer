@@ -188,6 +188,15 @@ bool Layer::is_perimeter_compatible(const PrintRegion& a, const PrintRegion& b)
 		&& config.is_infill_first             == other_config.is_infill_first
 		&& config.inner_wall_speed             == other_config.inner_wall_speed
 		&& config.outer_wall_speed    == other_config.outer_wall_speed
+		// Ultra (over-support surfaces, Stage 5 of the support-sets plan): these three decide how
+		// a bottom shell over support is printed, and they are per PART. Two regions that differ
+		// only in them would otherwise be merged here, and make_perimeters() assigns the merged
+		// group's extrusions to the FIRST region - so the second part would silently print with
+		// the first part's flow and speed. That is exactly why outer_wall_speed and
+		// scarf_joint_flow_ratio are already on this list.
+		&& config.over_support_surfaces == other_config.over_support_surfaces
+		&& config.over_support_flow     == other_config.over_support_flow
+		&& config.over_support_speed    == other_config.over_support_speed
 		&& config.small_perimeter_speed    == other_config.small_perimeter_speed
         && config.gap_infill_speed.value == other_config.gap_infill_speed.value
         && config.filter_out_gap_fill.value == other_config.filter_out_gap_fill.value

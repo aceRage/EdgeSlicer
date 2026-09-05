@@ -118,6 +118,7 @@ them, the escape hatch is a support blocker over the fringe, which the classifie
 | Preview | `src/slic3r/GUI/GCodeViewer.cpp` | colour table entry and calibration-thumbnail visibility |
 | UI | `src/slic3r/GUI/Tab.cpp`, `ConfigManipulation.cpp` | the Support-page group; the flow and speed fields grey out unless the switch is on and the switch greys out unless supports are on with a non-zero Z gap |
 | Keys | `src/libslic3r/PrintConfig.*`, `Preset.cpp` | the three defs, `part_support_keys()`, the process preset's known-key list |
+| Per part (Stage 5) | `src/libslic3r/PrintConfig.hpp`, `PrintObject.cpp`, `Layer.cpp` | the three keys are `PrintRegionConfig` members, so a **part** carries them; the classifier reads the switch per region; `is_perimeter_compatible` names them |
 
 `PrintConfig.cpp`'s `handle_legacy` is untouched: these are new keys, and a project that does not
 carry them simply gets the defaults (switch off = today's behaviour).
@@ -127,17 +128,38 @@ carry them simply gets the defaults (switch off = today's behaviour).
 
 ## 6. Support sets and groups
 
-The three keys are in the `Support` category and are `PrintObjectConfig` members, so they join
-`support_set_keys()` automatically (that list is derived, not hand-written — see
-`src/libslic3r/SupportSet.cpp`), and they were added by hand to the curated `part_support_keys()`.
+The three keys are in the `Support` category, so they join `support_set_keys()` automatically (that
+list is derived, not hand-written — see `src/libslic3r/SupportSet.cpp`), and they were added by hand
+to the curated `part_support_keys()`. A saved support set carries them, a part may carry them in its
+own config, and they survive the 3MF round trip and the group resolver.
 
-They are therefore **set-eligible and part-eligible today**: a saved support set carries them, and a
-part may carry them in its own config and they survive the 3MF round trip and the group resolver.
-They are **not per-part in behaviour**: like `support_top_z_distance`, `support_style` and
-`support_threshold_angle` (tier B of the support-sets plan §3.5), the object's own value is what
-`detect_surfaces_type` reads. Stage 5 of `docs/superpowers/plans/2026-09-02-support-sets-and-groups.md`
-is where the per-part path gets wired; until then a per-part value is stored, resolved and displayed
-but the object-wide value acts.
+**Stage 5 (2026-09-05) made them act per part**, by moving all three from `PrintObjectConfig` to
+`PrintRegionConfig`. That is the fork's own per-part mechanism for a setting that describes the
+OBJECT's own extrusions rather than the support: `apply_to_print_region_config`
+(`src/libslic3r/PrintObject.cpp`) copies every `PrintRegionConfig` key a `ModelVolume` carries onto
+that volume's own `PrintRegion`, and `GCode::extrude_infill` applies the region's config before it
+extrudes the region's infill. So a part that asks for over-support surfaces gets them with its own
+flow and speed while its neighbour keeps its bridges, and a part that carries none of the three
+keeps the object's values — which is why off mode cannot move. `detect_surfaces_type` reads the
+switch per region; the three object-wide conditions (support exists, the Z gap is non-zero, the
+generator will carry the face) stay object-wide because they are.
+
+Two consequences worth naming:
+
+- `support_set_keys()`'s derived rule grew a second class. It used to be "a `PrintObjectConfig`
+  member whose category is `Support`"; it is now "a `PrintObjectConfig` **or** `PrintRegionConfig`
+  member whose category is `Support`". Where a key lives decides how it ACTS, not whether it is a
+  support setting.
+- `Layer::is_perimeter_compatible()` names the three. Two regions differing only in G-code-level
+  values are otherwise merged for perimeter generation and the merged group's extrusions are
+  assigned to the first region — which is exactly why `outer_wall_speed` and
+  `scarf_joint_flow_ratio` were already on that list.
+
+**The limit, measured.** When the OBJECT-wide switch is on and two parts therefore both produce
+over-support surfaces, both come out with the object's flow ratio and feedrate, even though each
+part's `PrintRegion` really does carry its own values (checked directly) and the two regions are not
+merged. A part that turns the feature on for itself — which is how a support group uses these keys —
+does get its own flow and speed. See 2e of the support-sets plan.
 
 ## 7. Gate
 

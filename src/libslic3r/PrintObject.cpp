@@ -1401,30 +1401,71 @@ void PrintObject::detect_surfaces_type()
     // same bridge_no_support / tree filters. At a zero gap the surface is stBottom anyway and
     // there is nothing for this feature to do.
     // docs/superpowers/specs/2026-09-05-over-support-surfaces.md
-    const bool over_support_on = m_config.over_support_surfaces.value && this->has_support() &&
-                                 m_config.support_top_z_distance.value > 0;
+    // Everything the OBJECT decides. over_support_surfaces itself is a region key from Stage 5 on
+    // (a part carries it, PrintConfig.hpp), so the switch is read per region inside the loop below
+    // and only these three - support exists, the gap is non-zero, the generator will carry the
+    // face - are object-wide.
+    const bool over_support_possible = this->has_support() && m_config.support_top_z_distance.value > 0;
     // Auto support types put support under every overhang they detect, and a bottom bridge is
     // an overhang by construction. Manual (painted) types only support what the user enforced.
-    bool over_support_auto = over_support_on && is_auto(m_config.support_type.value);
-    if (over_support_auto) {
-        if (m_config.support_type.value == stNormalAuto)
-            over_support_auto &= ! m_config.bridge_no_support.value;
-        else if (m_config.support_type.value == stTreeAuto)
-            over_support_auto &= (m_config.support_interface_top_layers.value > 0 &&
-                                  m_config.max_bridge_length.value == 0 &&
-                                  m_config.support_critical_regions_only.value == false);
+    bool over_support_type_ok = over_support_possible && is_auto(m_config.support_type.value);
+    // How a generator refuses to support a bridge is not the same in all three of them, and the
+    // classifier has to follow each one or it will call a face "over support" that nothing will be
+    // under. Read off the three call sites:
+    //   normal(auto)          SupportMaterial.cpp - `if (bridge_no_support) remove_bridges_from_
+    //                         contacts(...)`, which takes NO length and drops every bridge it can
+    //                         detect. The feature stands down for the whole object.
+    //   tree(auto), organic   TreeSupport3D.cpp - the same length-less removal, same gate.
+    //                         TreeSupport::generate() hands organic trees to TreeSupport3D before
+    //                         detect_overhangs() runs, so the length rule never applies here.
+    //   tree(auto), classic   TreeSupport.cpp - `if (max_bridge_length > 0) remove_bridges_from_
+    //                         contacts(..., max_bridge_length, ...)`: a bottom bridge shorter than
+    //                         max_bridge_length in BOTH directions gets no support and stays a
+    //                         bridge, a longer one is supported. Not gated on bridge_no_support.
+    // over_support_bridgeable is that length, scaled; 0 means nothing is bridgeable.
+    coord_t over_support_bridgeable = 0;
+    if (over_support_type_ok) {
+        if (m_config.support_type.value == stNormalAuto) {
+            over_support_type_ok &= ! m_config.bridge_no_support.value;
+        } else if (m_config.support_type.value == stTreeAuto) {
+            over_support_type_ok &= (m_config.support_interface_top_layers.value > 0 &&
+                                     m_config.support_critical_regions_only.value == false);
+            const auto style = m_config.support_style.value;
+            if (style == smsTreeSlim || style == smsTreeStrong || style == smsTreeHybrid) {
+                if (m_config.max_bridge_length.value > 0)
+                    over_support_bridgeable = scale_(m_config.max_bridge_length.value);
+            } else {
+                over_support_type_ok &= ! m_config.bridge_no_support.value;
+            }
+        }
     }
+    // Projecting the enforcers and blockers is object-wide work; do it once, and only when some
+    // region actually asks for the feature.
+    bool over_support_any_region = false;
+    if (over_support_possible)
+        for (size_t i = 0; i < this->num_printing_regions(); ++ i)
+            if (this->printing_region(i).config().over_support_surfaces.value) {
+                over_support_any_region = true;
+                break;
+            }
     std::vector<Polygons> over_support_enforcers;
     std::vector<Polygons> over_support_blockers;
-    if (over_support_on)
+    if (over_support_any_region)
         this->slice_support_annotations(over_support_enforcers, over_support_blockers);
-    // With a manual support type and nothing enforced there is no support anywhere, so every
-    // bottom stays a true bridge and the whole pass switches itself off.
-    const bool over_support_active = over_support_on &&
-        (over_support_auto || std::any_of(over_support_enforcers.begin(), over_support_enforcers.end(),
-                                          [](const Polygons &p) { return ! p.empty(); }));
+    const bool over_support_enforced_anywhere =
+        std::any_of(over_support_enforcers.begin(), over_support_enforcers.end(),
+                    [](const Polygons &p) { return ! p.empty(); });
 
     for (size_t region_id = 0; region_id < this->num_printing_regions(); ++ region_id) {
+        // Ultra (over-support surfaces, Stage 5): per PART, i.e. per region. A part whose config
+        // carries over_support_surfaces gets its own PrintRegion, so its bottoms are reclassified
+        // and its neighbour's are not. With a manual support type and nothing enforced there is no
+        // support anywhere, so every bottom stays a true bridge and the pass switches itself off.
+        const bool over_support_on = over_support_any_region &&
+            this->printing_region(region_id).config().over_support_surfaces.value;
+        const bool over_support_auto   = over_support_on && over_support_type_ok;
+        const bool over_support_active = over_support_on &&
+            (over_support_auto || over_support_enforced_anywhere);
         BOOST_LOG_TRIVIAL(debug) << "Detecting solid surfaces for region " << region_id << " in parallel - start";
 #ifdef SLIC3R_DEBUG_SLICE_PROCESSING
         for (Layer *layer : m_layers)
@@ -1444,7 +1485,7 @@ void PrintObject::detect_surfaces_type()
             		((num_layers > 1) ? num_layers - 1 : num_layers) :
             		// In non-spiral vase mode, go over all layers.
             		m_layers.size()),
-            [this, region_id, interface_shells, &surfaces_new, over_support_active, over_support_auto,
+            [this, region_id, interface_shells, &surfaces_new, over_support_active, over_support_auto, over_support_bridgeable,
              &over_support_enforcers, &over_support_blockers](const tbb::blocked_range<size_t>& range) {
                 // If we have soluble support material, don't bridge. The overhang will be squished against a soluble layer separating
                 // the support from the print.
@@ -1545,18 +1586,28 @@ void PrintObject::detect_surfaces_type()
                         static const Polygons no_polygons;
                         const Polygons &blockers  = idx_layer < over_support_blockers.size()  ? over_support_blockers[idx_layer]  : no_polygons;
                         const Polygons &enforcers = idx_layer < over_support_enforcers.size() ? over_support_enforcers[idx_layer] : no_polygons;
+                        // The generators measure the fill surface, which sits inside the walls; take
+                        // the walls off the slice's bounding box before comparing.
+                        const coord_t wall_band = 2 * coord_t(layerm->region().config().wall_loops.value) *
+                                                  coord_t(layerm->flow(frPerimeter).scaled_spacing());
+                        auto bridgeable = [over_support_bridgeable, wall_band](const Surface &surface) {
+                            if (over_support_bridgeable <= 0)
+                                return false;
+                            const Vec2crd size = get_extents(surface.expolygon).size();
+                            return size.x() - wall_band < over_support_bridgeable && size.y() - wall_band < over_support_bridgeable;
+                        };
                         if (over_support_auto && blockers.empty()) {
                             // The common case: everything hanging over air on this layer will get
                             // support under it. Retype in place so no new polygon boundary and no
                             // sliver can be introduced by the classification itself.
                             for (Surface &surface : bottom)
-                                if (surface.surface_type == stBottomBridge)
+                                if (surface.surface_type == stBottomBridge && ! bridgeable(surface))
                                     surface.surface_type = stBottomOverSupport;
                         } else if (over_support_auto || ! enforcers.empty()) {
                             Surfaces retyped;
                             retyped.reserve(bottom.size());
                             for (Surface &surface : bottom) {
-                                if (surface.surface_type != stBottomBridge) {
+                                if (surface.surface_type != stBottomBridge || bridgeable(surface)) {
                                     retyped.emplace_back(std::move(surface));
                                     continue;
                                 }
@@ -4413,7 +4464,7 @@ void PrintObject::discover_horizontal_shells()
             // Ultra (over-support surfaces): a 4th type to propagate downwards, and only when the
             // feature is on - so with the switch off this loop runs exactly the three iterations
             // it always ran.
-            const size_t num_surface_types = m_config.over_support_surfaces.value ? 4 : 3;
+            const size_t num_surface_types = region_config.over_support_surfaces.value ? 4 : 3;
             for (size_t idx_surface_type = 0; idx_surface_type < num_surface_types; ++ idx_surface_type) {
                 m_print->throw_if_canceled();
                 SurfaceType type = (idx_surface_type == 0) ? stTop : (idx_surface_type == 1) ? stBottom :
