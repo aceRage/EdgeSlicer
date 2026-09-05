@@ -50,11 +50,16 @@ The Z-gap condition is not a nicety: at a zero gap the fork already classifies t
 Then, per support type — **the same predicate the fork already uses to decide "this bottom is fully
 supported" in the soluble case, only at a non-zero gap**:
 
-* `normal(auto)` — the generator supports every overhang it detects, **unless** `bridge_no_support` is
-  on, in which case bridges deliberately get no support and stay bridges.
-* `tree(auto)` — supported when `support_interface_top_layers > 0`, `max_bridge_length == 0` and
-  `support_critical_regions_only` is off; otherwise the generator may leave the face unsupported and
-  it stays a bridge.
+* `normal(auto)` — the generator supports every overhang it detects. With `bridge_no_support` on it
+  drops the *bridgeable* faces from its contacts (`remove_bridges_from_contacts`): a bottom bridge whose
+  fill surface is shorter than `max_bridge_length` in both X and Y gets no support and stays a bridge;
+  a longer one is supported. The classifier reproduces that per-face test on the slice surface minus
+  the wall band.
+* `tree(auto)` — supported when `support_interface_top_layers > 0` and `support_critical_regions_only`
+  is off. Tree runs the same bridgeable-face removal whenever `max_bridge_length > 0`, which is the
+  default (10 mm), so the same per-face test applies. (The first version demanded `max_bridge_length
+  == 0` here and therefore switched itself off on every default tree profile - 2026-09-05 hardware
+  finding, fixed.)
 * `normal(manual)` / `tree(manual)` — support exists only where the user asked for it, so only the
   part of the face covered by a **support enforcer** (enforcer volume or painted enforcer facets,
   projected onto that layer) counts as over support.
