@@ -193,7 +193,9 @@ bool Layer::is_perimeter_compatible(const PrintRegion& a, const PrintRegion& b)
 		// only in them would otherwise be merged here, and make_perimeters() assigns the merged
 		// group's extrusions to the FIRST region - so the second part would silently print with
 		// the first part's flow and speed. That is exactly why outer_wall_speed and
-		// scarf_joint_flow_ratio are already on this list.
+		// scarf_joint_flow_ratio are already on this list. The fills have the same merge in
+		// Layer::make_fills, keyed by SurfaceFillParams - over_support_flow / over_support_speed
+		// are named there too (Fill.cpp).
 		&& config.over_support_surfaces == other_config.over_support_surfaces
 		&& config.over_support_flow     == other_config.over_support_flow
 		&& config.over_support_speed    == other_config.over_support_speed
