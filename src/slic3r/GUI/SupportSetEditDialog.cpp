@@ -20,13 +20,24 @@ namespace Slic3r {
 namespace GUI {
 
 // The rows, in the order the process tab's Support page shows them, grouped under the same
-// headings. This is the curated part-level key set of PrintConfig.cpp's part_support_keys() minus
+// headings. Mostly the curated part-level key set of PrintConfig.cpp's part_support_keys(), minus
 // support_interface_filament, which a set never stores as a slot index: it travels as the
-// portable interface_filament_type and gets its own row below. Thirteen option lines plus that
-// one, so every value a set can carry is on this window.
+// portable interface_filament_type and gets its own row below.
+//
+// support_type is the one row here that is NOT a part-level key. The plan's 3.5 puts it in tier C -
+// never per-part - and it stays out of part_support_keys(); a support GROUP therefore does not
+// resolve it and this branch does not change that. But it IS a Support-category PrintObjectConfig
+// key, so support_set_keys() carries it and support_set_apply_to() already writes it into the
+// project. Editing a set without it was the confusing part: "Grid" and "Tree Slim" sit in the same
+// Style list, and which half of that list applies is decided by a value the window did not show.
+// So it is a SET-level value here: shown, saved, applied - and object-wide, like the type is.
+//
+// enable_support is deliberately still absent. A set says how support is built, not whether the
+// object gets any; that stays a per-project decision on the Support page. (support_set_keys()
+// carries it all the same - see the note in collect().)
 static const std::vector<std::string>& keys_support()
 {
-    static const std::vector<std::string> s_keys = { "support_style", "support_threshold_angle" };
+    static const std::vector<std::string> s_keys = { "support_type", "support_style", "support_threshold_angle" };
     return s_keys;
 }
 
@@ -84,6 +95,15 @@ SupportSetEditDialog::SupportSetEditDialog(wxWindow                 *parent,
     , m_set(set)
     , m_filament_config(filament_config)
 {
+    // The window's own background colour, set before a single child exists. The fork's dialogs are
+    // white in light mode and let UpdateDlgDarkUI() at the end of this constructor map that to the
+    // dark background; a dialog that skips this keeps the system's lighter grey and its captions
+    // then look nothing like the process tab's. It has to be FIRST because the two widgets that
+    // draw the group headings copy their parent's background in their constructors and never look
+    // again - OG_CustomCtrl (OG_CustomCtrl.cpp, "SetBackgroundColour(parent->GetBackgroundColour())")
+    // and ::StaticLine (StaticLine.cpp, the same line).
+    SetBackgroundColour(*wxWHITE);
+
     // The editor's own config: the set's values where it has them, the option's own default
     // otherwise, so every row has something to show. Nothing here is connected to the project -
     // the whole point of the window is that changing a set does not change what is being sliced.
@@ -154,8 +174,9 @@ void SupportSetEditDialog::add_group(wxSizer *parent_sizer, const wxString &titl
     // control needs them: update_visibility() is the only thing that gives it a minimum size
     // (without it the group collapses to nothing), and reload_config() is what puts the set's
     // values into the fields - a freshly built field shows the option's default until then.
-    // comDevelop, not the app's mode: a set carries all fourteen keys whatever mode the
-    // window behind this one is in, so every one of them stays on the window.
+    // comDevelop, not the app's mode: a set carries every one of these keys whatever mode the
+    // window behind this one is in (support_type is comSimple, support_style comAdvanced), so
+    // every one of them stays on the window.
     og->update_visibility(comDevelop);
     og->reload_config();
     m_groups.push_back(og);
@@ -269,9 +290,10 @@ void SupportSetEditDialog::toggle_fields()
 
 void SupportSetEditDialog::collect()
 {
-    // Only the keys this window shows are written back. A set carries more than the curated
-    // fourteen (support_set_keys() is the whole Support category minus the excluded list), and
-    // those values are none of the editor's business - they stay exactly as they were on disk.
+    // Only the keys this window shows are written back. A set carries more than these
+    // (support_set_keys() is the whole Support category minus the excluded list - enable_support
+    // and support_object_xy_distance among them), and those values are none of the editor's
+    // business: they stay exactly as they were on disk.
     for (const std::string& key : m_config.keys())
         m_set.values[key] = m_config.opt_serialize(key);
     if (m_filament_combo != nullptr) {
