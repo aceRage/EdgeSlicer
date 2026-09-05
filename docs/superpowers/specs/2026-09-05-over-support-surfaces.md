@@ -371,3 +371,11 @@ Other cases, all with the same 3MF:
 * `support_type = normal(auto)` → 144 blocks / 894 moves at `F=3600`.
 * `support_type = tree(manual)` and `normal(manual)`, no enforcers → **zero** over-support roles of
   either kind, and `Overhang wall` back at its full 312 blocks / 2292 moves.
+
+## 9. Hardware pass
+
+2026-09-05 (evening), live install b0a44585c2 and later: the user confirms the over-support settings
+apply as intended on the test objects (bottom faces and walls over support take the outer-wall flow
+and speed and show as their own feature types in the preview). Root cause of the earlier "no
+effect" report was the tree(auto) gate demanding `max_bridge_length == 0` (section 3, fixed in
+ef20d80316); the walls pass (section 8) landed in the same day's build.
