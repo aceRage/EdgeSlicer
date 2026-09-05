@@ -121,13 +121,7 @@ SupportSetEditDialog::SupportSetEditDialog(wxWindow                 *parent,
     const int em = wxGetApp().em_unit();
     wxBoxSizer* main = new wxBoxSizer(wxVERTICAL);
 
-    wxStaticText* head = new wxStaticText(this, wxID_ANY,
-        _L("These values belong to the support set. Changing them here does not change the "
-           "current project - use Apply on the Support page, or Re-apply set in the Support "
-           "groups window, to put them to work."));
-    head->SetFont(Label::Body_14);
-    head->Wrap(52 * em);
-    main->Add(head, 0, wxEXPAND | wxALL, em / 2);
+    main->AddSpacer(em / 2);
 
     add_group(main, _L("Support"),  keys_support());
     add_interface_filament_row(main);
@@ -208,6 +202,10 @@ void SupportSetEditDialog::add_interface_filament_row(wxSizer *parent_sizer)
 
     wxStaticText* label = new wxStaticText(this, wxID_ANY, _L("Support/raft interface"));
     label->SetFont(Label::Body_14);
+    // A wxStaticText starts on the system button face (#F0F0F0), which UpdateDlgDarkUI does not
+    // map, so it kept a lighter box behind it in dark mode. Give it the dialog's own white; that
+    // one IS mapped, to the same dark grey as the window.
+    label->SetBackgroundColour(*wxWHITE);
     label->SetMinSize(wxSize(field_x - label_x, -1));
     row->Add(label, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, label_x);
 
@@ -250,6 +248,7 @@ void SupportSetEditDialog::add_interface_filament_row(wxSizer *parent_sizer)
 
     m_filament_note = new wxStaticText(this, wxID_ANY, wxEmptyString);
     m_filament_note->SetFont(Label::Body_14);
+    m_filament_note->SetBackgroundColour(*wxWHITE); // same reason as the label above
     parent_sizer->Add(m_filament_note, 0, wxEXPAND | wxLEFT, label_x);
     parent_sizer->AddSpacer(em / 2);
 
