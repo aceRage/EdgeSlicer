@@ -382,6 +382,13 @@ void PrintObject::make_perimeters()
         BOOST_LOG_TRIVIAL(debug) << "Generating extra perimeters for region " << region_id << " in parallel - end";
     }
 
+    // Ultra (over-support walls): the per-layer "there is support under here" region the wall
+    // classifier needs, built once here and dropped again below. When the feature is off this
+    // leaves m_over_support_below empty, LayerRegion::make_perimeters hands the generator a null
+    // pointer, and the generator takes its original code path verbatim - which is what makes the
+    // off-mode G-code byte-identical.
+    this->build_over_support_below();
+
     BOOST_LOG_TRIVIAL(debug) << "Generating perimeters in parallel - start";
     tbb::parallel_for(
         tbb::blocked_range<size_t>(0, m_layers.size()),
@@ -393,6 +400,7 @@ void PrintObject::make_perimeters()
         }
     );
     m_print->throw_if_canceled();
+    this->clear_over_support_below();
     BOOST_LOG_TRIVIAL(debug) << "Generating perimeters in parallel - end";
 
     det_dump_surfaces(*this, "2_make_perimeters_surfaces");
@@ -1044,8 +1052,8 @@ bool PrintObject::invalidate_state_by_config_options(
             || opt_key == "max_bridge_length"
             || opt_key == "support_interface_top_layers"
             || opt_key == "support_critical_regions_only"
-            // Ultra (over-support surfaces): decides the bottom surface type, same as the keys
-            // above it in this group.
+            // Ultra (over-support surfaces / walls): decides the bottom surface type and, since
+            // the walls pass, the wall roles too - same as the keys above it in this group.
             || opt_key == "over_support_surfaces"
             || opt_key == "hole_to_polyhole"
             || opt_key == "hole_to_polyhole_threshold"
@@ -1054,7 +1062,10 @@ bool PrintObject::invalidate_state_by_config_options(
             steps.emplace_back(posSlice);
         } else if (opt_key == "enable_support") {
             steps.emplace_back(posSupportMaterial);
-            if (m_config.support_top_z_distance == 0.) {
+            // Ultra (over-support surfaces / walls): the classifier reads has_support(), so turning
+            // supports on or off changes bottom surface types AND wall roles. Re-slice for it, the
+            // same way the soluble-interface case below already does.
+            if (m_config.support_top_z_distance == 0. || m_config.over_support_surfaces.value) {
             	// Enabling / disabling supports while soluble support interface is enabled.
             	// This changes the bridging logic (bridging enabled without supports, disabled with supports).
             	// Reset everything.
@@ -1370,6 +1381,108 @@ void PrintObject::slice_support_annotations(std::vector<Polygons> &enforcers, st
             blocker = expand(union_(blocker), float(1000. * SCALED_EPSILON));
 }
 
+// Ultra (over-support surfaces / walls): decide, once per object, whether an overhang on this
+// object is really landing on support material rather than hanging over air. The support
+// generator runs AFTER slicing (Print::process), so its contact areas do not exist yet - this is
+// a slice-time reconstruction, and the spec says what it can and cannot see.
+//
+// The predicate is deliberately the one detect_surfaces_type's soluble path already uses to decide
+// "this bottom is fully supported", only at a NON-zero top Z distance: same support types, same
+// bridge_no_support / tree filters. At a zero gap the surface is stBottom anyway and there is
+// nothing for this feature to do.
+// docs/superpowers/specs/2026-09-05-over-support-surfaces.md
+PrintObject::OverSupportSettings PrintObject::over_support_settings() const
+{
+    OverSupportSettings s;
+    s.on = m_config.over_support_surfaces.value && this->has_support() &&
+           m_config.support_top_z_distance.value > 0;
+    if (! s.on)
+        return s;
+    // Auto support types put support under every overhang they detect, and a bottom bridge is
+    // an overhang by construction. Manual (painted) types only support what the user enforced.
+    s.is_auto = is_auto(m_config.support_type.value);
+    // Both generators drop "bridgeable" overhangs from their contacts (remove_bridges_from_contacts):
+    // a bottom bridge whose bounding box is shorter than max_bridge_length in BOTH directions, and a
+    // straight perimeter segment anchored at both ends and shorter than max_bridge_length, get no
+    // support under them and stay real bridges. normal(auto) does this only when bridge_no_support is
+    // on, tree(auto) whenever max_bridge_length > 0 - which is the default (10 mm), so a gate that
+    // demanded 0 here switched the feature off on every default tree profile. Reproduce the per-face
+    // and per-segment tests instead; 0 means nothing is bridgeable.
+    if (s.is_auto) {
+        if (m_config.support_type.value == stNormalAuto) {
+            if (m_config.bridge_no_support.value)
+                s.bridgeable = scale_(m_config.max_bridge_length.value);
+        } else if (m_config.support_type.value == stTreeAuto) {
+            s.is_auto &= (m_config.support_interface_top_layers.value > 0 &&
+                          m_config.support_critical_regions_only.value == false);
+            if (m_config.max_bridge_length.value > 0)
+                s.bridgeable = scale_(m_config.max_bridge_length.value);
+        }
+    }
+    this->slice_support_annotations(s.enforcers, s.blockers);
+    // With a manual support type and nothing enforced there is no support anywhere, so every
+    // overhang stays a true bridge and the whole pass switches itself off.
+    s.active = s.is_auto || std::any_of(s.enforcers.begin(), s.enforcers.end(),
+                                        [](const Polygons &p) { return ! p.empty(); });
+    return s;
+}
+
+// Ultra (over-support walls): turn the settings above into one Polygons per layer - the region of
+// the plane that will have support material under it. The auto case is "everywhere", represented
+// as the layer's own bounding box grown well past the walls, so that the perimeter generator has a
+// single code path (intersect with this) and no special case for "the whole layer".
+void PrintObject::build_over_support_below()
+{
+    this->clear_over_support_below();
+    const OverSupportSettings s = this->over_support_settings();
+    if (! s.active)
+        return;
+    m_over_support_bridgeable = s.bridgeable;
+    if (m_layers.empty())
+        return;
+    // Indexed by Layer::id(), which starts at raft_layers() and not at 0, so that the perimeter
+    // generator can look it up from the layer it is working on. The enforcer / blocker vectors are
+    // indexed by the position in m_layers - that is how slice_volumes_at_layers builds them - hence
+    // the two different subscripts below.
+    m_over_support_below.assign(size_t(m_layers.back()->id()) + 1, Polygons());
+    static const Polygons no_polygons;
+    for (size_t i = 0; i < m_layers.size(); ++ i) {
+        // The first layer sits on the plate, never on support.
+        if (i == 0 || m_layers[i]->lower_layer == nullptr)
+            continue;
+        const Polygons &blockers  = i < s.blockers.size()  ? s.blockers[i]  : no_polygons;
+        const Polygons &enforcers = i < s.enforcers.size() ? s.enforcers[i] : no_polygons;
+        Polygons region;
+        if (s.is_auto) {
+            BoundingBox bbox = get_extents(m_layers[i]->lslices);
+            if (! bbox.defined)
+                continue;
+            bbox.offset(scale_(10.));
+            region = { Polygon(bbox.polygon()) };
+        } else {
+            region = enforcers;
+        }
+        if (region.empty())
+            continue;
+        if (! blockers.empty())
+            region = diff(region, blockers);
+        m_over_support_below[size_t(m_layers[i]->id())] = std::move(region);
+    }
+}
+
+void PrintObject::clear_over_support_below()
+{
+    m_over_support_below.clear();
+    m_over_support_bridgeable = 0;
+}
+
+const Polygons* PrintObject::over_support_below(size_t layer_id) const
+{
+    if (layer_id >= m_over_support_below.size() || m_over_support_below[layer_id].empty())
+        return nullptr;
+    return &m_over_support_below[layer_id];
+}
+
 void PrintObject::detect_surfaces_type()
 {
     BOOST_LOG_TRIVIAL(info) << "Detecting solid surfaces..." << log_memory_info();
@@ -1391,48 +1504,15 @@ void PrintObject::detect_surfaces_type()
         (this->has_bounded_paint_depth() && m_config.paint_depth_solid_interfaces.value));
     size_t num_layers     = spiral_mode ? std::min(size_t(this->printing_region(0).config().bottom_shell_layers), m_layers.size()) : m_layers.size();
 
-    // Ultra (over-support surfaces): decide, once per object, whether a bottom bridge on this
-    // object is really landing on support material rather than hanging over air. The support
-    // generator runs AFTER slicing (Print::process), so its contact areas do not exist yet -
-    // this is a slice-time reconstruction, and the spec says what it can and cannot see.
-    //
-    // The predicate is deliberately the one the soluble path below already uses to decide
-    // "this bottom is fully supported", only at a NON-zero top Z distance: same support types,
-    // same bridge_no_support / tree filters. At a zero gap the surface is stBottom anyway and
-    // there is nothing for this feature to do.
+    // Ultra (over-support surfaces): the slice-time reconstruction of "where will support land",
+    // shared with the wall classifier - see PrintObject::over_support_settings().
     // docs/superpowers/specs/2026-09-05-over-support-surfaces.md
-    const bool over_support_on = m_config.over_support_surfaces.value && this->has_support() &&
-                                 m_config.support_top_z_distance.value > 0;
-    // Auto support types put support under every overhang they detect, and a bottom bridge is
-    // an overhang by construction. Manual (painted) types only support what the user enforced.
-    bool over_support_auto = over_support_on && is_auto(m_config.support_type.value);
-    // Both generators drop "bridgeable" overhangs from their contacts (remove_bridges_from_contacts):
-    // a bottom bridge whose bounding box is shorter than max_bridge_length in BOTH directions gets
-    // no support under it and stays a real bridge, a longer one is supported. normal(auto) does this
-    // only when bridge_no_support is on, tree(auto) whenever max_bridge_length > 0 - which is the
-    // default (10 mm), so a gate that demanded 0 here switched the feature off on every default tree
-    // profile. Reproduce the per-face test instead; 0 means nothing is bridgeable.
-    coord_t over_support_bridgeable = 0;
-    if (over_support_auto) {
-        if (m_config.support_type.value == stNormalAuto) {
-            if (m_config.bridge_no_support.value)
-                over_support_bridgeable = scale_(m_config.max_bridge_length.value);
-        } else if (m_config.support_type.value == stTreeAuto) {
-            over_support_auto &= (m_config.support_interface_top_layers.value > 0 &&
-                                  m_config.support_critical_regions_only.value == false);
-            if (m_config.max_bridge_length.value > 0)
-                over_support_bridgeable = scale_(m_config.max_bridge_length.value);
-        }
-    }
-    std::vector<Polygons> over_support_enforcers;
-    std::vector<Polygons> over_support_blockers;
-    if (over_support_on)
-        this->slice_support_annotations(over_support_enforcers, over_support_blockers);
-    // With a manual support type and nothing enforced there is no support anywhere, so every
-    // bottom stays a true bridge and the whole pass switches itself off.
-    const bool over_support_active = over_support_on &&
-        (over_support_auto || std::any_of(over_support_enforcers.begin(), over_support_enforcers.end(),
-                                          [](const Polygons &p) { return ! p.empty(); }));
+    const OverSupportSettings    over_support             = this->over_support_settings();
+    const bool                   over_support_auto        = over_support.is_auto;
+    const coord_t                over_support_bridgeable  = over_support.bridgeable;
+    const std::vector<Polygons> &over_support_enforcers   = over_support.enforcers;
+    const std::vector<Polygons> &over_support_blockers    = over_support.blockers;
+    const bool                   over_support_active      = over_support.active;
 
     for (size_t region_id = 0; region_id < this->num_printing_regions(); ++ region_id) {
         BOOST_LOG_TRIVIAL(debug) << "Detecting solid surfaces for region " << region_id << " in parallel - start";

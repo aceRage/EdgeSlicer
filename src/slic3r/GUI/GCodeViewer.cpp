@@ -699,6 +699,9 @@ const std::vector<ColorRGBA> GCodeViewer::Extrusion_Role_Colors{ {
     { 1.00f, 0.90f, 0.30f, 1.0f },   // erPerimeter
     { 1.00f, 0.49f, 0.22f, 1.0f },   // erExternalPerimeter
     { 0.12f, 0.12f, 1.00f, 1.0f },   // erOverhangPerimeter
+    // Ultra (over-support walls): a lighter turquoise than the "Bottom surface over support"
+    // (0.16, 0.76, 0.72) this wall runs alongside, so the two read as the same family.
+    { 0.49f, 0.90f, 0.86f, 1.0f },   // erOverSupportPerimeter
     { 0.69f, 0.19f, 0.16f, 1.0f },   // erInternalInfill
     { 0.59f, 0.33f, 0.80f, 1.0f },   // erSolidInfill
     { 0.94f, 0.25f, 0.25f, 1.0f },   // erTopSolidInfill
@@ -1756,6 +1759,7 @@ void GCodeViewer::render_calibration_thumbnail(ThumbnailData& thumbnail_data, un
     m_extrusions.role_visibility_flags = m_extrusions.role_visibility_flags | (1 << erPerimeter);
     m_extrusions.role_visibility_flags = m_extrusions.role_visibility_flags | (1 << erExternalPerimeter);
     m_extrusions.role_visibility_flags = m_extrusions.role_visibility_flags | (1 << erOverhangPerimeter);
+    m_extrusions.role_visibility_flags = m_extrusions.role_visibility_flags | (1 << erOverSupportPerimeter);
     m_extrusions.role_visibility_flags = m_extrusions.role_visibility_flags | (1 << erSolidInfill);
     m_extrusions.role_visibility_flags = m_extrusions.role_visibility_flags | (1 << erTopSolidInfill);
     m_extrusions.role_visibility_flags = m_extrusions.role_visibility_flags | (1 << erInternalInfill);

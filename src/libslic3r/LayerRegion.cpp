@@ -241,6 +241,15 @@ void LayerRegion::make_perimeters(const SurfaceCollection &slices, const LayerRe
     g.overhang_flow         = this->bridging_flow(frPerimeter, object_config.thick_bridges);
     g.solid_infill_flow     = this->flow(frSolidInfill);
 
+    // Ultra (over-support walls): hand the generator the slice-time reconstruction of "there is
+    // support under here" for this layer, the same way lower_slices is handed in. Null (and the
+    // generator's original code path) whenever over_support_surfaces is off.
+    // docs/superpowers/specs/2026-09-05-over-support-surfaces.md
+    if (const Polygons *over_support = this->layer()->object()->over_support_below(this->layer()->id())) {
+        g.over_support_below             = over_support;
+        g.over_support_max_bridge_length = this->layer()->object()->over_support_bridgeable();
+    }
+
     if (this->layer()->object()->config().wall_generator.value == PerimeterGeneratorType::Arachne && !spiral_mode)
         g.process_arachne();
     else

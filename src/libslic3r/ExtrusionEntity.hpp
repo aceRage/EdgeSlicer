@@ -22,6 +22,12 @@ enum ExtrusionRole : uint8_t {
     erPerimeter,
     erExternalPerimeter,
     erOverhangPerimeter,
+    // Ultra (over-support walls): the part of a wall that hangs over the lower layer but lands on
+    // support material. It is a wall, not a bridge: normal perimeter flow (times over_support_flow)
+    // and the outer wall speed (or over_support_speed), so it matches the wall beside it.
+    // Deliberately NOT in is_bridge(): nothing downstream may treat it as an overhang.
+    // docs/superpowers/specs/2026-09-05-over-support-surfaces.md
+    erOverSupportPerimeter,
     erInternalInfill,
     erSolidInfill,
     erTopSolidInfill,
@@ -62,7 +68,18 @@ inline bool is_perimeter(ExtrusionRole role)
 {
     return role == erPerimeter
         || role == erExternalPerimeter
-        || role == erOverhangPerimeter;
+        || role == erOverhangPerimeter
+        // Ultra (over-support walls): a wall for every purpose that asks "is this a wall?"
+        // (seams, travel/retraction, small perimeter speed). The one place that must NOT
+        // see it is GCode's overhang degree classification, which is gated on the role
+        // explicitly - see GCode::_extrude.
+        || role == erOverSupportPerimeter;
+}
+
+// Ultra (over-support walls): true for the wall segments printed on top of support material.
+inline bool is_over_support_perimeter(ExtrusionRole role)
+{
+    return role == erOverSupportPerimeter;
 }
 
 inline bool is_internal_perimeter(ExtrusionRole role)

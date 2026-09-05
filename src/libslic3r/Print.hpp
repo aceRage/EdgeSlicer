@@ -585,6 +585,34 @@ public:
     void                        slice_support_annotations(std::vector<Polygons> &enforcers, std::vector<Polygons> &blockers) const;
     std::vector<Polygons>       slice_support_enforcers() const { return this->slice_support_volumes(ModelVolumeType::SUPPORT_ENFORCER); }
 
+    // Ultra (over-support surfaces / walls): the one slice-time reconstruction of "where will the
+    // support generator put material under this object", shared by the bottom-face classifier
+    // (detect_surfaces_type) and the wall classifier (PerimeterGenerator). Building it twice with
+    // two copies of the predicate is how the two would drift apart, so there is only one.
+    // docs/superpowers/specs/2026-09-05-over-support-surfaces.md
+    struct OverSupportSettings
+    {
+        // over_support_surfaces && has_support() && support_top_z_distance > 0
+        bool                  on         = false;
+        // An auto support type that will actually carry the overhangs it detects.
+        bool                  is_auto    = false;
+        // Anything to do at all: an auto type, or at least one layer with an enforcer.
+        bool                  active     = false;
+        // Scaled max_bridge_length where the generators refuse to support a bridgeable overhang
+        // (remove_bridges_from_contacts); 0 means "nothing is bridgeable".
+        coord_t               bridgeable = 0;
+        std::vector<Polygons> enforcers;
+        std::vector<Polygons> blockers;
+    };
+    OverSupportSettings         over_support_settings() const;
+    // Region of the plane that has support material under it, for the layer with this Layer::id()
+    // (which starts at raft_layers(), not at 0). Returns nullptr when the feature stands down -
+    // which is also every build with the switch off, so the perimeter generator's original code
+    // path is taken verbatim.
+    const Polygons*             over_support_below(size_t layer_id) const;
+    // Scaled max_bridge_length for the perimeter-bridge refusal, 0 = nothing is bridgeable.
+    coord_t                     over_support_bridgeable() const { return m_over_support_bridgeable; }
+
     // Helpers to project custom facets on slices
     void project_and_append_custom_facets(bool seam, EnforcerBlockerType type, std::vector<Polygons>& expolys, std::vector<std::pair<Vec3f,Vec3f>>* vertical_points=nullptr) const;
 
@@ -649,6 +677,10 @@ private:
 
    void _transform_hole_to_polyholes();
 
+    // Ultra (over-support walls): fill / drop m_over_support_below around the perimeter pass.
+    void build_over_support_below();
+    void clear_over_support_below();
+
     // Has any support (not counting the raft).
     void detect_surfaces_type();
     void process_external_surfaces();
@@ -692,6 +724,12 @@ private:
     // this is set to true when LayerRegion->slices is split in top/internal/bottom
     // so that next call to make_perimeters() performs a union() before computing loops
     bool                    				m_typed_slices = false;
+
+    // Ultra (over-support walls): per-layer "there is support under here", alive only for the
+    // duration of the perimeter pass (built at the top of make_perimeters, dropped at its end).
+    // Empty vector = the feature stands down and no wall is reclassified.
+    std::vector<Polygons>                   m_over_support_below;
+    coord_t                                 m_over_support_bridgeable = 0;
 
     std::pair<FillAdaptive::OctreePtr, FillAdaptive::OctreePtr> m_adaptive_fill_octrees;
     FillLightning::GeneratorPtr m_lightning_generator;

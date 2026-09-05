@@ -97,6 +97,63 @@ static bool detect_steep_overhang(const PrintRegionConfig *config,
     return false;
 }
 
+// Ultra (over-support walls): the part of this layer's over-support region that a wall may
+// actually claim, for the overhang polylines of one loop.
+//
+// PrintObject::build_over_support_below() has already answered "will the generator put support
+// here at all" (feature on, has_support, a non-zero top Z gap, an auto type that carries its
+// overhangs or the user's enforcers, minus the blockers). What it cannot answer per-region is the
+// second half of PrintObject::remove_bridges_from_contacts: a STRAIGHT overhang segment that is
+// anchored in the lower layer at both ends and is short enough to bridge gets no support under it,
+// because both generators cut exactly those areas out of their contacts (tree whenever
+// max_bridge_length > 0, normal(auto) only under bridge_no_support - which is what
+// over_support_max_bridge_length already encodes). Such a segment must stay an overhang wall, so
+// it is subtracted here, the same way and with the same offsets the generator subtracts it.
+//
+// Note both call sites of remove_bridges_from_contacts pass break_bridge = false, so a segment
+// LONGER than max_bridge_length is not cut out and therefore does get support - it stays claimable.
+// docs/superpowers/specs/2026-09-05-over-support-surfaces.md
+Polygons PerimeterGenerator::over_support_region(const Polylines &overhangs, const BoundingBox &bbox) const
+{
+    Polygons region = ClipperUtils::clip_clipper_polygons_with_subject_bbox(*this->over_support_below, bbox);
+    if (region.empty() || this->over_support_max_bridge_length <= 0 || overhangs.empty())
+        return region;
+
+    // Extrusion width accounts for the roundings of the extrudates, same as the generator's `fw`.
+    const float  fw      = float(this->ext_perimeter_flow.scaled_width());
+    const float  w       = float(std::max(this->overhang_flow.scaled_width(), this->overhang_flow.scaled_spacing()));
+    const double max_len = double(this->over_support_max_bridge_length) + 10.;
+
+    Polygons bridges;
+    for (const Polyline &src : overhangs) {
+        if (src.size() < 2 || ! src.is_straight())
+            continue;
+        Polyline polyline = src;
+        polyline.extend_start(fw);
+        polyline.extend_end(fw);
+        if (polyline.length() > max_len)
+            // break_bridge == false at every call site: a long segment is not removed from the
+            // contacts, so support is there and this segment may stay a wall over support.
+            continue;
+        // Is the straight perimeter segment supported at both sides?
+        const Point pts[2]       = { polyline.first_point(), polyline.last_point() };
+        bool        supported[2] = { false, false };
+        for (const ExPolygon &ex : *this->lower_slices) {
+            if (supported[0] && supported[1])
+                break;
+            for (int j = 0; j < 2; ++ j)
+                if (! supported[j] && ex.contains(pts[j]))
+                    supported[j] = true;
+        }
+        if (supported[0] && supported[1])
+            // Offset a polyline into a thick line, exactly as remove_bridges_from_contacts does.
+            polygons_append(bridges, offset(polyline, 0.5f * w + 10.f));
+    }
+    if (bridges.empty())
+        return region;
+    return diff(region, union_(bridges));
+}
+
 static ExtrusionEntityCollection traverse_loops(const PerimeterGenerator &perimeter_generator, const PerimeterGeneratorLoops &loops, ThickPolylines &thin_walls,
     bool &steep_overhang_contour, bool &steep_overhang_hole)
 {
@@ -184,6 +241,22 @@ static ExtrusionEntityCollection traverse_loops(const PerimeterGenerator &perime
 
             remain_polines = diff_pl({polygon}, lower_polygons_series_clipped);
 
+            // Ultra (over-support walls): take the part of the overhang that lands on support out
+            // of the overhang before anything else looks at it. It is a wall, not a bridge: normal
+            // perimeter flow and width, its own role, and GCode gives it over_support_flow and the
+            // outer wall speed. Nothing here runs when the feature is off (over_support_active()
+            // is false), so the off-mode paths below are byte-for-byte the ones that shipped.
+            // docs/superpowers/specs/2026-09-05-over-support-surfaces.md
+            Polylines over_support_polines;
+            if (perimeter_generator.over_support_active() && ! remain_polines.empty()) {
+                const Polygons over_region = perimeter_generator.over_support_region(remain_polines, bbox);
+                if (! over_region.empty()) {
+                    over_support_polines = intersection_pl(remain_polines, over_region);
+                    if (! over_support_polines.empty())
+                        remain_polines = diff_pl(remain_polines, over_region);
+                }
+            }
+
             if (!inside_polines.empty())
                 extrusion_paths_append(
                     paths,
@@ -201,6 +274,17 @@ static ExtrusionEntityCollection traverse_loops(const PerimeterGenerator &perime
                                        erOverhangPerimeter, perimeter_generator.mm3_per_mm_overhang(),
                                        perimeter_generator.overhang_flow.width(),
                                        perimeter_generator.overhang_flow.height());
+            }
+
+            // Ultra (over-support walls): the loop's OWN flow (external or internal), not the
+            // bridging flow - that is the whole point, this segment has to look like the wall it
+            // continues.
+            if (! over_support_polines.empty()) {
+                extrusion_paths_append(paths, std::move(over_support_polines),
+                                       erOverSupportPerimeter,
+                                       extrusion_mm3_per_mm,
+                                       extrusion_width,
+                                       (float)perimeter_generator.layer_height);
             }
 
             // Reapply the nearest point search for starting point.
@@ -402,6 +486,52 @@ static ExtrusionEntityCollection traverse_extrusions(const PerimeterGenerator& p
                 }
             }
 
+            // Ultra (over-support walls): the part of this loop's overhang that lands on support.
+            // Built here, before the overhang is emitted, so that the overhang role never sees it:
+            // over_support_clip_paths is the claimable region and non_overhang_clip_paths is what
+            // must be taken away from the overhang. Empty (and skipped entirely) when the feature
+            // is off, so the two appends below stay the ones that shipped.
+            // docs/superpowers/specs/2026-09-05-over-support-surfaces.md
+            ClipperLib_Z::Paths over_support_clip_paths;
+            ClipperLib_Z::Paths non_overhang_clip_paths;
+            if (perimeter_generator.over_support_active()) {
+                Polyline loop_polyline;
+                loop_polyline.points.reserve(extrusion_path.size() + 1);
+                for (const ClipperLib_Z::IntPoint &p : extrusion_path)
+                    loop_polyline.points.emplace_back(coord_t(p.x()), coord_t(p.y()));
+                // Close the loop before diffing, so a segment crossing the seam is one segment for
+                // the bridge test rather than two - the classic path diffs a closed Polygon and
+                // this has to answer the same question.
+                if (extrusion->is_closed && loop_polyline.points.size() > 2 &&
+                    loop_polyline.points.front() != loop_polyline.points.back())
+                    loop_polyline.points.emplace_back(loop_polyline.points.front());
+                const Polygons lower_clipped = ClipperUtils::clip_clipper_polygons_with_subject_bbox(
+                    perimeter_generator.lower_slices_polygons(), extrusion_path_bbox);
+                const Polylines overhangs = diff_pl(Polylines{ loop_polyline }, lower_clipped);
+                Polygons over_region = perimeter_generator.over_support_region(overhangs, extrusion_path_bbox);
+                // Only the overhanging part of the region is a wall over support; the rest of the
+                // loop already sits on the layer below and keeps its normal role.
+                if (! over_region.empty())
+                    over_region = diff(over_region, lower_clipped);
+                if (! over_region.empty()) {
+                    over_support_clip_paths.reserve(over_region.size());
+                    for (const Polygon &poly : over_region) {
+                        if (poly.points.empty())
+                            continue;
+                        over_support_clip_paths.emplace_back();
+                        ClipperLib_Z::Path &out = over_support_clip_paths.back();
+                        out.reserve(poly.points.size());
+                        for (const Point &pt : poly.points)
+                            out.emplace_back(pt.x(), pt.y(), 0);
+                    }
+                    // The overhang is everything outside the lower slices AND outside the
+                    // over-support region: the two sets are disjoint by construction, so
+                    // concatenating them is their union under the non-zero fill rule.
+                    non_overhang_clip_paths = lower_slices_paths;
+                    append(non_overhang_clip_paths, over_support_clip_paths);
+                }
+            }
+
             // get non-overhang paths by intersecting this loop with the grown lower slices
             extrusion_paths_append(paths, clip_extrusion(extrusion_path, lower_slices_paths, ClipperLib_Z::ctIntersection), role,
                                    is_external ? perimeter_generator.ext_perimeter_flow : perimeter_generator.perimeter_flow);
@@ -444,8 +574,17 @@ static ExtrusionEntityCollection traverse_extrusions(const PerimeterGenerator& p
             // get overhang paths by checking what parts of this loop fall
             // outside the grown lower slices (thus where the distance between
             // the loop centerline and original lower slices is >= half nozzle diameter
-            extrusion_paths_append(paths, clip_extrusion(extrusion_path, lower_slices_paths, ClipperLib_Z::ctDifference), erOverhangPerimeter,
-                perimeter_generator.overhang_flow);
+            if (over_support_clip_paths.empty()) {
+                extrusion_paths_append(paths, clip_extrusion(extrusion_path, lower_slices_paths, ClipperLib_Z::ctDifference), erOverhangPerimeter,
+                    perimeter_generator.overhang_flow);
+            } else {
+                // Ultra (over-support walls): the loop's OWN flow, not the bridging flow.
+                extrusion_paths_append(paths, clip_extrusion(extrusion_path, over_support_clip_paths, ClipperLib_Z::ctIntersection),
+                    erOverSupportPerimeter,
+                    is_external ? perimeter_generator.ext_perimeter_flow : perimeter_generator.perimeter_flow);
+                extrusion_paths_append(paths, clip_extrusion(extrusion_path, non_overhang_clip_paths, ClipperLib_Z::ctDifference), erOverhangPerimeter,
+                    perimeter_generator.overhang_flow);
+            }
 
             // Reapply the nearest point search for starting point.
             // We allow polyline reversal because Clipper may have randomly reversed polylines during clipping.
