@@ -153,6 +153,7 @@ SupportSetEditDialog::SupportSetEditDialog(wxWindow                 *parent,
     Bind(wxEVT_CLOSE_WINDOW, [this](wxCloseEvent&) { EndModal(wxID_CANCEL); });
 
     toggle_fields();
+    filter_support_styles();
     SetSizerAndFit(main);
     CenterOnParent();
     wxGetApp().UpdateDlgDarkUI(this);
@@ -165,6 +166,8 @@ void SupportSetEditDialog::add_group(wxSizer *parent_sizer, const wxString &titl
     og->m_on_change = [this](t_config_option_key opt_key, boost::any) {
         if (opt_key == "support_ironing")
             toggle_fields();
+        else if (opt_key == "support_type")
+            filter_support_styles();
     };
     for (const std::string& key : keys)
         if (m_config.has(key))
@@ -276,6 +279,48 @@ void SupportSetEditDialog::update_filament_note()
     m_filament_note->SetForegroundColour(is_warning ? wxColour("#ED6B21")
                                                     : StateColor::darkModeColorFor(wxColour("#8F8F8F")));
     m_filament_note->GetParent()->Layout();
+}
+
+// The Style list only offers the styles that belong to the chosen Type - Default/Grid/Snug for
+// normal, Default and the Tree styles for tree - the same filter TabPrint::toggle_options applies
+// on the process tab (Tab.cpp), so the editor cannot save a Grid style onto a tree set. A style
+// that does not fit the new type falls back to Default, in the field and in the set alike.
+void SupportSetEditDialog::filter_support_styles()
+{
+    Field*                              field = nullptr;
+    std::shared_ptr<ConfigOptionsGroup> owner;
+    for (const std::shared_ptr<ConfigOptionsGroup>& og : m_groups)
+        if ((field = og->get_field("support_style")) != nullptr) {
+            owner = og;
+            break;
+        }
+    auto choice = dynamic_cast<Choice*>(field);
+    if (choice == nullptr)
+        return;
+    auto cb = dynamic_cast<ComboBox*>(choice->window);
+    const ConfigOptionDef* def = print_config_def.get("support_style");
+    if (cb == nullptr || def == nullptr)
+        return;
+    const SupportType      type  = m_config.opt_enum<SupportType>("support_type");
+    const SupportMaterialStyle cur = m_config.opt_enum<SupportMaterialStyle>("support_style");
+    static const std::vector<int> set_normal = { smsDefault, smsGrid, smsSnug };
+    static const std::vector<int> set_tree   = { smsDefault, smsTreeSlim, smsTreeStrong, smsTreeHybrid, smsTreeOrganic };
+    const std::vector<int>& set = is_tree(type) ? set_tree : set_normal;
+
+    auto& opt = const_cast<ConfigOptionDef&>(field->m_opt);
+    opt.enum_values.clear();
+    opt.enum_labels.clear();
+    cb->Clear();
+    for (int i : set) {
+        opt.enum_values.push_back(def->enum_values[i]);
+        opt.enum_labels.push_back(def->enum_labels[i]);
+        cb->Append(_(def->enum_labels[i]));
+    }
+    const bool fits = std::find(set.begin(), set.end(), int(cur)) != set.end();
+    if (! fits)
+        m_config.set_key_value("support_style", new ConfigOptionEnum<SupportMaterialStyle>(smsDefault));
+    // Re-read the (possibly reset) value into the rebuilt list, the way the group filled it at start.
+    owner->reload_config();
 }
 
 void SupportSetEditDialog::toggle_fields()

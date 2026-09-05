@@ -53,6 +53,7 @@ private:
     void add_interface_filament_row(wxSizer *parent_sizer);
     // Grey out the ironing sub-options while ironing is off, the way the process tab does.
     void toggle_fields();
+    void filter_support_styles();
     void update_filament_note();
     void collect();
 
