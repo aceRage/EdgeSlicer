@@ -75,7 +75,17 @@ public:
         // Ultra (support groups, Stage 4b): a classic tree support object carries a group asking
         // for its own interface layer count, which that generator cannot give per part. Appended,
         // so no existing value moves; its own id for the same reason as the one above.
-        SlicingSupportGroupTreeInterfaceLayers
+        SlicingSupportGroupTreeInterfaceLayers,
+        // Ultra (support groups, Stage 5). All three appended, all three with an id of their own:
+        // active_step_add_warning de-duplicates by message id, so two notices sharing one id would
+        // silently overwrite each other's text.
+        // A group asked for a soluble interface, which is object-wide behaviour (plan 3.6).
+        SlicingSupportGroupSoluble,
+        // A group's interface filament sits on a different nozzle than the object's support
+        // interface, so its interface is extruded at a different width (plan R3.4).
+        SlicingSupportGroupInterfaceNozzle,
+        // A group asks for an interface filament slot this printer does not have.
+        SlicingSupportGroupInterfaceFilament
     };
 
     typedef size_t TimeStamp;

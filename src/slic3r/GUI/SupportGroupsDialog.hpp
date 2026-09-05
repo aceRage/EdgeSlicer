@@ -82,8 +82,14 @@ private:
     ObjectID            m_object_id;
     std::vector<Row>    m_rows;
 
+    // The lines the notices are built from, in reading order. Empty when there is nothing to say.
+    std::vector<wxString> notices() const;
+
     wxDataViewListCtrl* m_table          = nullptr;
     wxStaticText*       m_hint           = nullptr;
+    // Ultra (support groups, Stage 5): the inline notice panel. Everything a group can be told
+    // about itself without slicing goes here rather than into a modal or a slicing warning.
+    wxStaticText*       m_notices        = nullptr;
     Button*             m_btn_new        = nullptr;
     Button*             m_btn_rename     = nullptr;
     Button*             m_btn_delete     = nullptr;

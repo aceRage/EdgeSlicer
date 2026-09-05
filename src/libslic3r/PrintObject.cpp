@@ -703,6 +703,43 @@ void PrintObject::generate_support_material()
             this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL,
                 _u8L("Interface layer count is object-wide for classic tree supports; use organic trees or normal supports for per-group interface layers."),
                 PrintStateBase::SlicingSupportGroupTreeInterfaceLayers);
+        // Ultra (support groups, Stage 5): the three notices the plan's Stage 5 list asks for.
+        // All NON_CRITICAL, all raised here for the same reason as the two above.
+        // 1. The soluble rule of 3.6. A zero top Z distance is not a per-part quantity - it sets
+        //    SlicingParameters::soluble_interface, the bottom surface classification and the
+        //    organic-tree static - so the strictest group wins and the WHOLE object follows it.
+        //    Groups asking for a larger gap do not get their own; say so.
+        if (const std::string soluble_group = this->support_group_soluble_name(); ! soluble_group.empty())
+            this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL,
+                Slic3r::format(_u8L("Group \"%1%\" asks for a soluble interface, so this whole object uses a 0 mm top Z distance."),
+                               soluble_group),
+                PrintStateBase::SlicingSupportGroupSoluble);
+        // 2. R3.4. The interface flow width is computed from the nozzle of the filament that draws
+        //    it (support_material_interface_flow, Flow.cpp), so a group whose interface filament
+        //    sits on a different nozzle prints its interface at a different width than the object's
+        //    - which may not tile with it at the claim seam. True of tree roofs as well: they go
+        //    through the same per-group SupportParameters.
+        if (const std::vector<unsigned int> other = this->support_group_interface_extruders_other_nozzle(); ! other.empty()) {
+            std::string slots;
+            for (unsigned int e : other)
+                slots += (slots.empty() ? "" : ", ") + std::to_string(e + 1);
+            this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL,
+                Slic3r::format(_u8L("A support group's interface filament (%1%) is on a different nozzle than this object's support interface, so its interface is extruded at a different width."),
+                               slots),
+                PrintStateBase::SlicingSupportGroupInterfaceNozzle);
+        }
+        // 3. An interface filament this printer does not have. The volume's slot is never clamped -
+        //    the group resolver copies it raw - so it is used as it is all the way down; the user
+        //    has to be the one to fix it.
+        if (const std::vector<int> missing = this->support_group_unresolvable_interface_filaments(); ! missing.empty()) {
+            std::string slots;
+            for (int slot : missing)
+                slots += (slots.empty() ? "" : ", ") + std::to_string(slot);
+            this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL,
+                Slic3r::format(_u8L("A support group asks for interface filament %1%, which is not loaded on this printer."),
+                               slots),
+                PrintStateBase::SlicingSupportGroupInterfaceFilament);
+        }
         this->set_done(posSupportMaterial);
     }
 }
@@ -3558,6 +3595,77 @@ bool PrintObject::has_support_group_interface_layer_override() const
             return true;
     }
     return false;
+}
+
+// Ultra (support groups, Stage 5): plan 3.6 forces m_config.support_top_z_distance to 0 inside
+// object_config_from_model_object, so by the time anything can look the object's own value is
+// already gone. Recompute it the way that function computes it - the print's default object
+// config plus the ModelObject's own overrides - but WITHOUT the group rule, and say nothing when
+// the user asked for a soluble interface themselves.
+std::string PrintObject::support_group_soluble_name() const
+{
+    const ModelObject *object = this->model_object();
+    if (object == nullptr || m_print == nullptr)
+        return std::string();
+    double own = m_print->default_object_config().support_top_z_distance.value;
+    {
+        DynamicPrintConfig src_normalized(object->config.get());
+        src_normalized.normalize_fdm();
+        if (const ConfigOption *opt = src_normalized.option("support_top_z_distance"); opt != nullptr)
+            own = opt->getFloat();
+    }
+    if (own <= 0.)
+        return std::string();
+    for (const ModelVolume *volume : object->volumes) {
+        if (volume == nullptr || ! volume->is_model_part())
+            continue;
+        const ConfigOption *gap = volume->config.option("support_top_z_distance");
+        if (gap == nullptr || gap->getFloat() > 0.)
+            continue;
+        std::string name;
+        if (const ConfigOption *n = volume->config.option("support_group"); n != nullptr)
+            name = n->serialize();
+        return name.empty() ? volume->name : name;
+    }
+    return std::string();
+}
+
+std::vector<unsigned int> PrintObject::support_group_interface_extruders_other_nozzle() const
+{
+    std::vector<unsigned int> out;
+    if (m_print == nullptr)
+        return out;
+    const ConfigOptionFloats &nozzles = m_print->config().nozzle_diameter;
+    // Exactly the expression support_material_interface_flow() uses to pick the nozzle the
+    // object's own support interface is extruded with (Flow.cpp), so "different" here means
+    // "a different interface flow width", which is what R3.4 is about.
+    const double object_nozzle = nozzles.get_at(m_config.support_interface_filament.value - 1);
+    for (unsigned int extruder : this->support_group_interface_extruders())
+        if (std::abs(nozzles.get_at(extruder) - object_nozzle) > EPSILON)
+            out.push_back(extruder);
+    return out;
+}
+
+std::vector<int> PrintObject::support_group_unresolvable_interface_filaments() const
+{
+    std::vector<int> out;
+    const ModelObject *object = this->model_object();
+    if (object == nullptr || m_print == nullptr)
+        return out;
+    // The same count object_config_from_model_object clamps against (PrintApply.cpp passes
+    // m_config.filament_diameter.size()). A volume's slot is NOT clamped - the group resolver
+    // copies it raw - so an out-of-range slot travels through the whole generator, which is
+    // exactly the case 2c's hardware pass left for this stage to report.
+    const int num_filaments = int(m_print->config().filament_diameter.size());
+    for (const ModelVolume *volume : object->volumes) {
+        if (volume == nullptr || ! volume->is_model_part())
+            continue;
+        if (const ConfigOption *opt = volume->config.option("support_interface_filament"); opt != nullptr)
+            if (int slot = opt->getInt(); slot > num_filaments)
+                out.push_back(slot);
+    }
+    sort_remove_duplicates(out);
+    return out;
 }
 
 std::vector<unsigned int> PrintObject::support_group_interface_extruders() const

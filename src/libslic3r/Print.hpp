@@ -568,6 +568,17 @@ public:
     // so the user is told rather than left wondering. Organic trees and normal supports do honour
     // it, and never raise the notice.
     bool                        has_support_group_interface_layer_override() const;
+    // Ultra (support groups, Stage 5): the name of the group that makes the WHOLE object soluble
+    // through the rule of plan 3.6, or "" when no group does (and "" when the user asked for a
+    // zero gap themselves - there is nothing to tell them then).
+    std::string                 support_group_soluble_name() const;
+    // Ultra (support groups, Stage 5 / R3.4): the 0-based interface extruders a group pins that
+    // sit on a nozzle of a different diameter than the object's support interface. Their
+    // interface is extruded at a different width, which need not tile with the object's.
+    std::vector<unsigned int>   support_group_interface_extruders_other_nozzle() const;
+    // Ultra (support groups, Stage 5): the 1-based interface filament slots some group asks for
+    // that this printer does not have. Sorted and unique; empty on every well-formed project.
+    std::vector<int>            support_group_unresolvable_interface_filaments() const;
 
     // Ultra (support groups, plan Stage 3 3.1): slice an explicit set of volumes at this object's
     // layer Zs and union them per layer. This is the body slice_support_volumes() always had; that
