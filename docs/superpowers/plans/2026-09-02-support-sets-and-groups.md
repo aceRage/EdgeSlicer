@@ -37,7 +37,7 @@ Each stage builds, ships and is testable on its own. Do not start the next stage
 | 2 — Groups on parts | `support_group` key, Object-List "Support group ▸" menu on a part and on a multi-selection, the badge, the Support-groups panel, part-level support keys in the settings menu/part tab, the `is_improper_category` fix, 3MF round trip, invalidation plumbing | `test_3mf.cpp` group round trip passes; `test_support_groups.cpp` group-resolution tests pass (K==1 for equal overrides); assigning a group + re-slice invalidates only `posSupportMaterial` (or `posSlice` when §3.6 flips); **byte identity holds for every project in the corpus, including one that carries groups** — the generator still ignores them |
 | 3 — Interface groups, normal supports **(done, §2c)** | per-group masks, per-group `SupportParameters`, per-group `generate_interface_layers`, per-group interface toolpaths + interface filament | K==1 corpus within tolerance (§3.7 as replaced by §2b's gate); the two-part fixture in `test_support_material.cpp` shows different interface extrusion length above part B and unchanged above part A; a soluble-interface group emits its own extruder via `interface_by_extruder`; support generation time within 1.6× of baseline at K=2 on the corpus. Stage 3 added a third gate — `--gate groups` — for the ON-mode cases, which must differ; see §2c |
 | 4 — Tree parity **(done, §2d)** | organic tree: per-group roof depth, fill and filament; classic tree: per-group interface *fill* only (documented limit) | K==1 corpus within tolerance with `support_type = tree(auto)` and all three classic styles plus organic, real handy models included; organic-tree two-part and single-part fixtures behave like Stage 3's; classic tree shows per-group roof pattern/spacing/filament and an explicit "interface layer count is object-wide for classic tree supports" notice; determinism at 1/2/4/20 threads on a grouped tree. The organic half turned out NOT to be "the same seam" - see §2d deviation 1 |
-| 5 — Polish | preview colouring by filament check, empty-group and conflict warnings, docs, `PART_CATEGORY_SETTINGS` "Support" group, tooltip copy | Preview colours the per-group interface with its resolved filament; a group with no parts, a group whose set no longer exists, and a group whose interface filament type cannot be resolved each raise a visible, non-fatal warning; `docs/superpowers/specs/` page written |
+| 5 — Polish **(done, §2e)** | per-group **ironing** on all three generators, the over-support keys acting per part, the warnings, the inline notice panel, the `expect_feature_part` gate criterion | off-mode tolerance green on 20 cases, three passes; `--gate groups` green on 13, three passes, with the ironing and the over-support surface each measured to 99.7-100 % on the group's own part and 0-0.3 % on its neighbour's; the warnings read out of the CLI's `result.json`; see §2e |
 
 ## 2a. Stage 1 status (2026-09-03): DONE, gate held
 
@@ -1199,6 +1199,313 @@ taken on a tree as well as on a normal support, because the tree claim is projec
 seam is a different shape; and the residual §2c names — a claim `reach` that is a fixed radius rather
 than a true nearest-part split — is now three constants (grid cell, branch radius, downward
 projection) in one function, which is the right place for the measurement Stage 5 should aim at.
+
+## 2e. Stage 5 status (2026-09-05): ironing follows the group, the over-support keys follow the part
+
+Branch `feat/support-sets-stage5`, cut from `feat/ultra-preferences` @ `4bc7522940`. The baseline
+every gate is measured against is `feat/ultra-preferences` as the user's second checkout had it
+built — `ef20d80316`, two commits further on, whose only slicing change is the over-support
+classifier's per-face "bridgeable" rule. That change is carried onto this branch by hand rather
+than merged (see deviation 3), so baseline and candidate differ only by this stage's work.
+
+The user's priority inside this stage was **per-group support ironing**, so it was built and proven
+first, and it is the item with the most evidence behind it.
+
+### What shipped
+
+- **`src/libslic3r/Support/SupportCommon.cpp` — per-group ironing, normal supports and organic
+  trees.** Through Stage 4 `support_ironing*` were stored and resolved per group and completely
+  inert: the single ironing pass in `generate_support_toolpaths` read the SHARED
+  `SupportParameters`, i.e. the object's (2c deviation 6, 2d deviation 7). Now the top contact
+  layer — the surface the ironing pass has always ironed — is split by **the same claim the
+  interface is split by**, and each group's piece is remembered with its own group index and its
+  own interface angle. `LayerCache` carries that list; the ironing block became one routine called
+  **once** for a single-group object, byte for byte what it did before, and once per group
+  otherwise. A group whose `support_ironing` is off contributes no piece at all, which is what
+  leaves its interface unironed while its neighbour's is ironed.
+- **A group that pins its own interface filament irons with that filament**, into
+  `SupportLayer::interface_by_extruder` rather than `support_fills`. The ironed surface IS that
+  group's interface, `GCode::process_layer` already extrudes `erIroning` out of that map in a
+  second pass, and that is exactly how the Chameleon pass gets ironing to follow the interface it
+  belongs to (`Print.cpp`, "ironing follows its interface"). Nothing new was needed in
+  `ToolOrdering` or the G-code writer.
+- **`src/libslic3r/Support/TreeSupport.cpp` — the classic tree gains an ironing pass at all.** It
+  never had one: `support_ironing` reached a classic tree only through
+  `SupportParameters::interface_spacing`, which forces the roof **solid**, so turning the setting on
+  produced a solid roof that was then never smoothed. It now irons the still-exposed part of
+  `roof_areas` (whatever the layer above covers is not a surface any more — the same rule the normal
+  generator applies with `upper_layer->support_islands`), behind the same `support_ironing` switch,
+  split by claim like the roof fill and routed to the group's own filament on the same condition.
+- **`src/libslic3r/PrintConfig.hpp`, `PrintObject.cpp`, `Layer.cpp`, `SupportSet.cpp` — the
+  over-support keys act per PART.** `over_support_surfaces`, `over_support_flow` and
+  `over_support_speed` moved from `PrintObjectConfig` to `PrintRegionConfig`. See deviation 2 for
+  why that is the per-part path and not a workaround.
+- **`src/libslic3r/PrintBase.hpp`, `Print.hpp`, `PrintObject.cpp` — three more NON_CRITICAL
+  warnings**, raised from `posSupportMaterial` next to the Stage 3 Chameleon one and the Stage 4b
+  classic-tree one, each with a `SlicingNotificationType` of its own because
+  `active_step_add_warning` de-duplicates by message id: the soluble rule of §3.6, R3.4's
+  dual-nozzle interface flow, and an interface filament slot this printer does not have.
+- **`src/slic3r/GUI/SupportGroupsDialog.{hpp,cpp}` — the inline notice panel**, which is what the
+  plan's Stage 5 list means by "inline panel text, never modal": a group with no parts, a group
+  whose support set is not on this machine (its values still apply — they live on the parts), an
+  unloaded interface filament, the soluble rule, and the classic-tree interface-layer-count limit
+  that Stage 4b could only say *after* slicing.
+- **`scripts/support_group_identity.py` — `expect_feature_part`.** `expect_tool_part` answers "which
+  part was this drawn on?" for a TOOL. Per-group ironing and per-part over-support surfaces are not
+  tool questions — a group with no interface filament of its own irons with the object's filament,
+  and an over-support surface is object material by definition — so the same measurement now exists
+  for a **feature type**. The split cannot be read off the feature under test, because the whole
+  claim is that it appears on ONE part: it is read off a feature that IS on both parts (the support
+  interface) and the feature under test is measured against that.
+- **Corpus** — two new fixtures (`twopart_groups_iron.3mf`, `twopart_groups_oversupport.3mf`, both
+  written by the slicer itself through `make_group_fixture.py`), four new ON-mode cases and two new
+  OFF-mode ones.
+- **Tests** — four `[ironing]` cases in `test_support_material.cpp`, four warning-predicate cases in
+  `test_support_groups.cpp`, three per-part cases in `test_over_support_surfaces.cpp`, and
+  `test_support_set.cpp`'s derived-rule scenario follows the key move.
+
+### The gates
+
+**Off mode — the hard gate.** `scripts/support_group_identity.py` (tolerance, the default), baseline
+and candidate both installed to scratch prefixes, isolated `--datadir`. **Green on all 20 off-mode
+cases, three consecutive passes, identical numbers every time:**
+
+| case | segments | | case | segments |
+|---|---|---|---|---|
+| `normal_grid` | 4466 | | `tree_classic_slim` | 36343 |
+| `normal_snug` | 2255 | | `tree_classic_strong` | 39039 |
+| `normal_ledge` | 2592 | | `tree_classic_hybrid` | 4709 |
+| `soluble_interface` | 35647 | | `tree_organic_ledge` | 19420 |
+| `dense_interface` | 4964 | | `tree_organic_onepart` | 19420 |
+| `over_support_off` | 2592 | | `tree_classic_onepart` | 17901 |
+| **`normal_ironing`** | **5356** | | `raft` | 4726 |
+| **`tree_organic_ironing`** | **38315** | | `no_support` | 1726 |
+| `tree_organic` | 36339 | | `handy_benchy_tree_organic` | 174782 |
+| | | | `handy_bunny_tree_organic` | 708354 |
+| | | | `handy_benchy_tree_classic` | 254509 |
+
+The two bold cases are new and they are the ones that matter here: **support ironing ON with no
+group anywhere.** Rewriting the ironing pass into a routine that is called once per group had to
+leave the single-group call drawing exactly what the one inline block drew, and those two cases are
+the measurement of it — on the normal generator and on the organic tree, which reach the same pass
+by different routes.
+
+**On mode.** `--gate groups --baseline-has-groups`, three passes, identical numbers every time.
+Green on all 13 cases.
+
+| case | verdict |
+|---|---|
+| `group_parts` / `_matching` / `_geom` / `group_single_part` | geometry must MATCH — `config_rows=0`, `identical=61/61` (41/41 for the single part), `segments=100.0000%`; `T1` still draws **100.0 %** of the support interface on its own part and 1.0 % of the other part's |
+| `group_parts_tree_organic`, `group_single_part_tree_organic`, `group_parts_tree_classic`, both `_filament` tree cases | geometry must MATCH — `identical=61/61` (41/41), `segments=100.0000%`; `T1` at **100.0 % own / 0.0 mm of the other part's 371.3 mm** (organic) and **0.0 mm of 461.2 mm** (classic) |
+| **`group_parts_ironing`** | must DIFFER — `config_rows=0 changed=1 of 61 layers segments=91.74% dirty_layers=1`, and **Ironing is 99.7 % on the grouped part and 0.3 % on the other (2 837.0 mm against 9.4 mm)** |
+| **`group_parts_ironing_tree_organic`** | must DIFFER — `changed=1 of 61, segments=98.81%`, **Ironing 100.0 % / 0.0 % (2 461.4 mm against 0.0 mm)** |
+| **`group_parts_ironing_tree_classic`** | must DIFFER — `changed=1 of 61, segments=98.83%`, **Ironing 100.0 % / 0.0 % (2 775.2 mm against 0.0 mm)** |
+| **`part_over_support`** | must DIFFER — `config_rows=0 changed=5 of 61 layers segments=61.45% dirty_layers=60`, and **"Bottom surface over support" is 100.0 % on the part that asked for it and 0.0 mm on its neighbour (614.9 mm against 0.0 mm)** |
+
+Read together, the four new rows are the whole Stage 5 claim measured rather than asserted.
+`config_rows=0` everywhere says no setting moved. The three ironing rows say the ironing appears
+where the group is and **nowhere else**, on all three generators — including the classic tree, where
+before this stage there was no ironing to appear at all. The `part_over_support` row says the same
+for a key that is not a support key: the part that asks for an over-support underside gets one and
+its neighbour keeps its bridges.
+
+**Every Stage 4 tree group case flipped to `"baseline_has_groups": true`.** The flag is
+baseline-relative, not a property of the case: it says whether the build being compared against
+already honours *that* case's kind of group. A Stage 5 branch is measured against a
+`feat/ultra-preferences` that carries Stage 4, so those cases act on both sides and the question
+becomes "the geometry must be IDENTICAL" — which is a *positive* statement that this stage moved no
+tree geometry. 2c and 2d record the same pairing problem for the normal-support cases; a branch cut
+against an older baseline has to flip them back, and `corpus.json` says so.
+
+**Unit gates.**
+
+- `fff_print_tests "[ironing]"` — **4 cases / 48 assertions**, all pass:
+  1. *per-group ironing* — control with nothing ironing anywhere produces not one `erIroning`
+     extrusion; then part B's group irons and **B's side has ironing while A's has none at all** —
+     not "less", none, because the claim split is a hard clip.
+  2. *a group's ironing spacing and flow are its own* — the object irons everything, so both parts
+     are ironed and directly comparable. Halving B's `support_ironing_spacing` grows B's ironing by
+     **more than 40 %** while A's stays within 5 %; doubling B's `support_ironing_flow` raises B's
+     extrusion per millimetre by **more than 50 %** while A's stays within 5 %.
+  3. *organic tree* — the same pair of assertions through the generator that reaches
+     `generate_support_toolpaths` from `TreeSupport3D`.
+  4. *classic tree* — the switch off produces nothing; the switch on **object-wide** irons both
+     parts, which is the new capability; the switch on in a **group** irons only that group's roof.
+- `fff_print_tests "[OverSupport]"` — **13 cases / 234 assertions**, all pass, including three new
+  ones: the switch stops at the part boundary (the new role's X range starts where the bridges end,
+  and its feedrate is the part's `over_support_speed`), a part-level flow ratio scales that part's
+  extrusion, and a volume carrying one of the keys really does get its own `PrintRegion`.
+- `fff_print_tests "[SupportGroups]"` — **14 cases / 63 assertions** (Stage 2's ten plus four for
+  the new warning predicates: the group that made the object soluble is named, nothing is said when
+  the user asked for a zero gap themselves, a group's interface filament on another nozzle is
+  reported, an unloaded slot is reported).
+- `fff_print_tests "[support_groups]"` — **18 cases / 266 assertions** (Stage 3/4's eleven plus this
+  stage's), all pass.
+- `fff_print_tests "[TreeSupportDeterminism]"` — **5 cases / 39 assertions**, unchanged and passing,
+  so the new ironing work under TBB is still thread-count independent.
+- `libslic3r_tests` — **599 cases / 53 750 assertions**, the same 2 `[!shouldfail]` cases as §2c/§2d.
+- Build clean: 0 `error C`, 0 `error LNK`; configure reports `libcurl will have HTTP/2`.
+
+**The warnings, measured on the shipped CLI** rather than only unit-tested. Sliced with the
+candidate build on an isolated data dir, read out of the CLI's own `result.json`:
+
+```
+sliced_plates[0].warnings:
+  "Group \"PVA interface\" asks for a soluble interface, so this whole object uses a 0 mm top Z distance."
+  "A support group asks for interface filament 7, which is not loaded on this printer."
+```
+
+R3.4's dual-nozzle warning cannot be produced on a single-nozzle printer at all — every filament
+resolves to the same nozzle diameter, so there is no flow difference to warn about, which is the
+correct answer rather than a gap. Its condition is unit-tested against a two-nozzle config instead
+(`0.4,0.6` reports the group's extruder; `0.4,0.4` reports nothing).
+
+### Deviations from the plan
+
+1. **The classic tree's ironing is a NEW capability, not a per-group split of an existing one, and
+   it changes what a K == 1 classic-tree project prints when `support_ironing` is on.** Stage 4b's
+   scope in the plan lists "per-group interface *pattern*, *spacing*, *density*, *ironing* and
+   *filament*" for classic trees, so this is planned work; but because that generator never ironed,
+   turning the setting on now produces ironing where it produced none. Off mode is unaffected for
+   every corpus case (`support_ironing` defaults to off, and `tree_classic_slim`,
+   `tree_classic_strong`, `tree_classic_hybrid` and `tree_classic_onepart` are all within tolerance
+   over three passes), and it is asserted directly by the unit case above. **A reviewer who wants
+   classic trees to keep ignoring `support_ironing` should say so; the change is one `if`.**
+2. **The over-support keys became `PrintRegionConfig` members. That IS the per-part path, and the
+   group masks are deliberately not used for them.** These three describe the OBJECT's own bottom
+   shell, not the support, and the fork already has an exact per-part mechanism for such a setting:
+   `apply_to_print_region_config` copies every `PrintRegionConfig` key a `ModelVolume` carries onto
+   that volume's own `PrintRegion`, and `GCode::extrude_infill` applies the region's config before
+   extruding the region's infill. That is *more* precise than a claim-based mask (volume ownership
+   rather than a radius) and it costs nothing off mode, because with no volume carrying the keys
+   every region config equals the object's. Three consequences, all handled: `support_set_keys()`'s
+   derived rule grew a second class (a `PrintObjectConfig` **or** `PrintRegionConfig` member whose
+   category is `Support`); `Layer::is_perimeter_compatible()` names the three keys, for the reason
+   `outer_wall_speed` and `scarf_joint_flow_ratio` are already on that list; and
+   `PrintObject::support_groups()` no longer keys group identity on them, which is right — two parts
+   that differ only in their over-support settings ask for the *same support*, and their undersides
+   still differ, per part.
+3. **`ef20d80316`'s "bridgeable" rule was carried over, and its normal / organic half corrected.**
+   This worktree was cut at `4bc7522940` as the task said; `feat/ultra-preferences` has since moved
+   to `ef20d80316`, whose only slicing change is in the very function this stage rewrites, and the
+   gates measure against a build of it. Carrying it is required so the candidate is not a
+   regression. Re-reading the three call sites while doing so showed the change is right for the
+   CLASSIC tree only:
+   - `normal(auto)` — `SupportMaterial.cpp`: `if (bridge_no_support) remove_bridges_from_contacts(...)`,
+     and that function takes **no length at all**; it drops every bridge it can detect. The feature
+     has to stand down for the whole object.
+   - `tree(auto)`, **organic** — `TreeSupport3D.cpp`: the same length-less removal, same gate.
+     `TreeSupport::generate()` hands organic trees to `TreeSupport3D` *before* `detect_overhangs()`
+     runs, so the length rule never applies to them.
+   - `tree(auto)`, **classic** — `TreeSupport.cpp`: `if (max_bridge_length > 0)` and the
+     length-based removal, not gated on `bridge_no_support`. This is the one the per-face test
+     describes, and the one whose old `max_bridge_length == 0` gate switched the feature off on
+     every default tree profile.
+   Without the correction, an object with `bridge_no_support` on has faces reclassified that nothing
+   will be under. It went unnoticed on `feat/ultra-preferences` because that checkout's
+   `fff_print_tests.exe` had not been relinked since the change (14:35 against a 15:40
+   `libslic3r.lib`), so `"over_support: nothing is reclassified when the generator will not support
+   the bridge"` was still being run against the previous build. **Worth telling whoever owns that
+   branch.**
+4. **The per-part over-support flow and speed act when the PART asks for the feature, and not when
+   the OBJECT does.** Measured: with the object-wide switch on, two parts both producing
+   over-support surfaces come out with the object's flow ratio and feedrate, even though
+   `printing_region(1).config()` really does carry the part's values and the two regions are not
+   merged for perimeter generation (both checked directly). With the object's switch off and the
+   part's on — which is how a support group uses these keys, because the group writes its values
+   onto its own parts — the part's flow and speed do reach the G-code, and that is what the unit
+   test and the `part_over_support` corpus case assert. The residual is recorded in the spec and is
+   worth a separate look; it is a G-code-attribution question, not a config one.
+5. **The R3.1 seam screenshot was not taken, and the preview-colour check was done by measurement
+   instead.** The intended route was headless: `RemoteAccess`'s `/api/plates/<n>/preview.png`
+   renders the G-code viewer without showing a window, which is exactly what such a screenshot
+   needs. It was driven end to end against a hidden instance of this build on an isolated data dir
+   and it answers — but `ensure_preview_loaded()` requires an already-sliced plate and **nothing in
+   the loopback API starts a slice**, so the plate never becomes sliceable without a click.
+   Taking the picture is therefore manual-checklist work (below), not something this stage could
+   automate without touching `RemoteAccess`, which "Things that must NOT change" forbids. What
+   *is* delivered in its place is stronger than a picture for the seam question itself: the gate's
+   `expect_feature_part` measures where each feature is drawn, per part, and the numbers above say
+   the seam holds to 99.7-100 % on the normal generator and both trees.
+6. **`support_group_soluble_name()` recomputes the object's own Z gap.**
+   `object_config_from_model_object` has already forced `m_config.support_top_z_distance` to 0 by
+   the time any warning can be raised, so the predicate rebuilds the object's own value the way that
+   function does — the print's default object config plus the `ModelObject`'s own overrides,
+   normalised — and stays silent when the user asked for a zero gap themselves.
+7. **One test-only wrapper is load-bearing and is documented as such.** The two slicing helpers in
+   `test_over_support_surfaces.cpp` now wrap `print.process()` / `print.export_gcode()` in a
+   try/catch that rethrows with the stage name. That is good test hygiene, and it is also not
+   cosmetic: on this build the UNwrapped call threw ClipperLib `"Coordinate outside allowed range"`
+   out of `print.process()` for the supports-off case, deterministically, while an inline copy of
+   exactly the same sequence in the same file did not, and the same object sliced with supports off
+   through the shipped CLI (`no_support`) is within tolerance against the baseline. It is a codegen
+   artefact of a Release build with LTCG in that translation unit, not a behaviour change — nothing
+   in the support-group or over-support paths runs on an object with supports off — but a reviewer
+   should know the wrapper is holding it down, and it is worth chasing separately.
+
+### Decisions for the reviewer
+
+- **R3.4 — the dual-nozzle interface flow.** Now a warning, and it also covers tree roofs, because
+  they build their per-group `SupportParameters` from the same config. It compares the nozzle the
+  group's interface filament sits on against the nozzle the object's support interface is extruded
+  with, using the very expression `support_material_interface_flow()` uses — so "different" means
+  "a different interface flow width", which is what the risk is about. It cannot fire on a
+  single-nozzle printer, correctly.
+- **R3.6 — group order determinism.** Unchanged and still true: group order comes from
+  `ModelObject::volumes` order, the interface layers are `stable_sort`ed so equal keys keep it, and
+  the claims are cut against lower groups in that order, so **reordering an object's volumes changes
+  the output at K > 1** — the same class of dependency the slicer already has through
+  `clip_multipart_objects`. Stage 5 adds one consumer of that order and no new dependency on it: the
+  ironing pieces are cut with the same claims, in the same group order, so a reordered object's
+  ironing moves exactly where its interface moves.
+- **Ironing with the group's own filament.** A group that pins an interface filament now irons with
+  it. The alternative — ironing the group's PVA interface with the object's PLA — would put the
+  object's material on the face that touches the part, which is the one surface a soluble interface
+  exists to keep clean. It is also what the Chameleon pass already does for its own matched
+  interfaces. Stage 4b deviation 4 keeps `Roof1stLayer` out of `interface_by_extruder` because it is
+  a BASE role; an ironing pass over the roof top is not.
+- **The classic-tree ironing switch** — see deviation 1. This is the one decision in this stage that
+  changes an existing print without a group being involved.
+- **The over-support both-on limit** — see deviation 4.
+
+### Manual checklist
+
+Run against a side install (`cmake --install <build> --config Release --prefix <scratch>`), never
+over `build/Snapmaker_Orca` while the user's slicer is running.
+
+1. A multi-part object with normal supports and an overhang over each part. Put one part in a group
+   and turn **support ironing** on for the group only. Slice: in the preview's *feature type* view
+   the ironing appears over that part's support interface and **nowhere over the neighbour's**. This
+   is also the R3.1 seam picture — the boundary between the two claims is exactly where the ironing
+   stops — so take the screenshot here for the design doc.
+2. Set the group's **ironing line spacing** to half the object's. The ironing over that part gets
+   visibly denser; the neighbour's does not change.
+3. Switch the object to **tree (auto) / organic** and re-slice: the same, on the roof.
+4. Switch to **tree slim** and re-slice: the group's roof is ironed and the neighbour's is not — and
+   note that with a group's ironing off and the OBJECT's on, a classic tree now irons at all, which
+   it never did before this build.
+5. On a two-filament printer give the group its own **interface filament** as well. The group's
+   ironing follows that filament; the neighbour's interface and the support base keep the object's.
+6. Turn **over-support surfaces** on for one PART only (the part settings' Support page). Slice: that
+   part's underside is drawn as "Bottom surface over support" in the preview legend, at that part's
+   own speed, and the neighbour's underside is still "Bridge".
+7. Open **Support groups…** on an object with a group whose support set has been deleted, and on one
+   with an empty group: the window's notice line names both. On a classic-tree object with a group
+   asking for its own interface layer count, the same line carries the object-wide notice.
+8. Set a group's **top Z distance** to 0 on an object whose own value is non-zero. Slice: a
+   non-critical warning names the group and says the whole object now uses a 0 mm gap.
+9. Give a group an **interface filament slot the printer does not have**. Slice: a non-critical
+   warning names the slot.
+10. Slice an ordinary project with supports, ironing on and no groups at all, before and after
+    installing this build, and compare the G-code: it must be the same print. (The automated form is
+    `normal_ironing` and `tree_organic_ironing` in the off-mode gate.)
+
+### What is left
+
+- The R3.1 seam screenshot (checklist item 1) and the preview-colour eyeball (item 6).
+- The over-support both-on attribution (deviation 4).
+- The `test_over_support_surfaces.cpp` codegen artefact (deviation 7).
+- `feat/ultra-preferences` @ `ef20d80316` needs deviation 3's correction, or its own re-measurement.
 
 ## 3. Shared contract
 
