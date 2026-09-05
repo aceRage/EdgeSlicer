@@ -1896,6 +1896,19 @@ void generate_support_toolpaths(
 
         float    ironing_angle;
         Polygons polys_to_iron;
+        // Ultra (support groups, Stage 5): ironing follows the group. A top contact layer is
+        // SHARED between the groups, so it is split by the same claim the interface is split by,
+        // and each piece is remembered with its own group index and its own interface angle; the
+        // pattern, the spacing and the flow that fill it are that group's too. A group whose
+        // support_ironing is off contributes no piece at all, which is exactly what leaves its
+        // interface unironed while its neighbour's is ironed. Empty for a single-group object,
+        // where polys_to_iron above is still what drives the one object-wide pass.
+        struct GroupIroningItem {
+            size_t   group { 0 };
+            float    angle { 0.f };
+            Polygons polys;
+        };
+        std::vector<GroupIroningItem> group_irons;
 
         void add_nonempty_and_sort() {
             for (SupportGeneratorLayerExtruded *item : { &bottom_contact_layer, &top_contact_layer, &interface_layer, &base_interface_layer, &base_layer })
@@ -2018,7 +2031,33 @@ void generate_support_toolpaths(
                         base_layer = std::move(top_contact_layer);
                 }
             } else {
-                if (support_params.ironing && !top_contact_layer.empty()) {
+                if (group_mode && ! top_contact_layer.empty()) {
+                    // Ultra (support groups, Stage 5): the same split the interface gets, applied
+                    // to the surface that is about to be ironed. It has to be taken HERE, before
+                    // loop_interface_processor.generate() and before the interface layer is merged
+                    // in, for the same reason the object-wide capture below is taken here: this is
+                    // the last point at which the polygons are the contact's own.
+                    const Polygons src = top_contact_layer.polygons_to_extrude();
+                    if (! src.empty()) {
+                        const size_t idx_object_layer = support_group_object_layer_index(
+                            *top_contact_layer.layer, true, *object_layer_zs);
+                        for (size_t g = 0; g < num_groups; ++ g) {
+                            const SupportGroupToolpaths &grp = (*groups)[g];
+                            if (! grp.params->ironing)
+                                continue;
+                            Polygons piece = support_group_piece(src, grp.claim, idx_object_layer, g);
+                            if (piece.empty())
+                                continue;
+                            const float angle_g = (grp.params->support_style == smsGrid || grp.config->support_interface_pattern == smipRectilinear) ?
+                                grp.params->interface_angle : grp.params->raft_interface_angle(support_layer.interface_id());
+                            LayerCache::GroupIroningItem gi;
+                            gi.group = g;
+                            gi.angle = angle_g;
+                            gi.polys = std::move(piece);
+                            layer_cache.group_irons.push_back(std::move(gi));
+                        }
+                    }
+                } else if (support_params.ironing && !top_contact_layer.empty()) {
                     // Orca: save the top surface to be ironed later
                     layer_cache.ironing_angle = support_interface_angle; // TODO: should we rotate 90 degrees?
                     layer_cache.polys_to_iron = top_contact_layer.polygons_to_extrude();
@@ -2306,7 +2345,7 @@ void generate_support_toolpaths(
 
     // Now modulate the support layer height in parallel.
     tbb::parallel_for(tbb::blocked_range<size_t>(n_raft_layers, support_layers.size()),
-        [&support_layers, &layer_caches, &support_params, &bbox_object]
+        [&support_layers, &layer_caches, &support_params, &bbox_object, &config, groups]
             (const tbb::blocked_range<size_t>& range) {
         for (size_t support_layer_id = range.begin(); support_layer_id < range.end(); ++ support_layer_id) {
             SupportLayer &support_layer = *support_layers[support_layer_id];
@@ -2331,18 +2370,25 @@ void generate_support_toolpaths(
             }
 
             // Orca: Generate iron toolpath for contact layer
-            if (!layer_cache.polys_to_iron.empty()) {
-                auto f = std::unique_ptr<Fill>(Fill::new_from_type(support_params.ironing_pattern));
+            // Ultra (support groups, Stage 5): one routine, called once for a single-group object
+            // and once per group otherwise. Everything inside it but the destination, the angle and
+            // the SupportParameters is the code that was here before.
+            auto generate_ironing = [&support_layers, &support_layer, &bbox_object, support_layer_id]
+                                    (Polygons &src, float angle, const SupportParameters &params,
+                                     ExtrusionEntitiesPtr &dst) {
+                if (src.empty())
+                    return;
+                auto f = std::unique_ptr<Fill>(Fill::new_from_type(params.ironing_pattern));
                 f->set_bounding_box(bbox_object);
                 f->layer_id        = support_layer.id();
                 f->z               = support_layer.print_z;
                 f->overlap         = 0;
-                f->angle           = layer_cache.ironing_angle;
-                f->spacing         = support_params.ironing_spacing;
+                f->angle           = angle;
+                f->spacing         = params.ironing_spacing;
                 f->link_max_length = (coord_t) scale_(3. * f->spacing);
 
-                ExPolygons polys_to_iron = union_safety_offset_ex(layer_cache.polys_to_iron);
-                layer_cache.polys_to_iron.clear();
+                ExPolygons polys_to_iron = union_safety_offset_ex(src);
+                src.clear();
 
                 // Find the layer above that directly overlaps current layer, clip the overlapped part
                 if (support_layer_id < support_layers.size() - 1) {
@@ -2354,13 +2400,28 @@ void generate_support_toolpaths(
 
                 fill_expolygons_generate_paths(
                     // Destination
-                    support_layer.support_fills.entities,
+                    dst,
                     // Regions to fill
                     std::move(polys_to_iron),
                     // Filler and its parameters
                     f.get(), 1.f,
                     // Extrusion parameters
-                    ExtrusionRole::erIroning, support_params.ironing_flow);
+                    ExtrusionRole::erIroning, params.ironing_flow);
+            };
+            generate_ironing(layer_cache.polys_to_iron, layer_cache.ironing_angle, support_params,
+                             support_layer.support_fills.entities);
+            for (LayerCache::GroupIroningItem &gi : layer_cache.group_irons) {
+                const SupportGroupToolpaths &grp = (*groups)[gi.group];
+                // A group that pins its own interface filament irons its own interface with that
+                // filament: the ironed surface IS that interface, and interface_by_extruder is
+                // where the G-code writer looks for it (GCode.cpp extrudes erIroning out of that
+                // map in a second pass, which is how the Chameleon pass already gets ironing to
+                // follow the interface it belongs to). Every other group irons in support_fills,
+                // i.e. with the object's own support filament, exactly as before.
+                ExtrusionEntitiesPtr *dst = &support_layer.support_fills.entities;
+                if (grp.interface_filament > 0 && grp.interface_filament != config.support_interface_filament.value)
+                    dst = &support_layer.interface_by_extruder[unsigned(grp.interface_filament - 1)].entities;
+                generate_ironing(gi.polys, gi.angle, *grp.params, *dst);
             }
         }
     });

@@ -1001,3 +1001,205 @@ TEST_CASE("SupportMaterial: per-group interface filament, classic tree", "[Suppo
     // It stays on its own part: the corpus gate's expect_tool_part criterion, in miniature.
     CHECK(other_part <= own_part * 0.05);
 }
+
+// ============================================================================================
+// Ultra (support groups, Stage 5): PER-GROUP IRONING.
+//
+// Through Stage 4 support_ironing* were stored and resolved per group and completely inert: the
+// one ironing pass in generate_support_toolpaths read the SHARED SupportParameters, i.e. the
+// object's (2c deviation 6, 2d deviation 7). Stage 5 splits the top contact layer by the same
+// claim the interface is split by, so each group irons its own share with its own pattern,
+// spacing and flow - and a group with ironing OFF leaves its interface unironed while its
+// neighbour's is ironed, which is the assertion below that matters.
+//
+// The classic tree is a fourth thing again: it never had an ironing pass at all, so Stage 5 gave
+// it one, behind the same support_ironing switch. The last case is what says that.
+// ============================================================================================
+
+namespace {
+
+void sum_ironing(const ExtrusionEntityCollection &collection, double split_x,
+                 double &left, double &right, double &e_left, double &e_right)
+{
+    for (const ExtrusionEntity *ee : collection.entities) {
+        if (const auto *eec = dynamic_cast<const ExtrusionEntityCollection*>(ee)) {
+            sum_ironing(*eec, split_x, left, right, e_left, e_right);
+            continue;
+        }
+        if (ee->role() != erIroning)
+            continue;
+        const double len = unscale<double>(ee->length());
+        const double vol = ee->min_mm3_per_mm() * len;
+        if (unscale<double>(ee->first_point().x()) < split_x) {
+            left   += len;
+            e_left += vol;
+        } else {
+            right   += len;
+            e_right += vol;
+        }
+    }
+}
+
+struct IroningMeasure {
+    double left = 0., right = 0., e_left = 0., e_right = 0.;
+    double left_per_mm()  const { return left  > 0. ? e_left  / left  : 0.; }
+    double right_per_mm() const { return right > 0. ? e_right / right : 0.; }
+};
+
+// Support ironing on each side of the two floating parts, counting the ironing a group routed to
+// its own interface filament as well - support_fills is not the only place it can land.
+IroningMeasure ironing_measure(const PrintObject &object)
+{
+    const double   split_x = split_x_between_parts(object);
+    IroningMeasure m;
+    for (const SupportLayer *support_layer : object.support_layers()) {
+        sum_ironing(support_layer->support_fills, split_x, m.left, m.right, m.e_left, m.e_right);
+        for (const auto &kv : support_layer->interface_by_extruder)
+            sum_ironing(kv.second, split_x, m.left, m.right, m.e_left, m.e_right);
+    }
+    return m;
+}
+
+// Run the two-part fixture once and hand back the ironing measurement.
+IroningMeasure run_ironing_case(const DynamicPrintConfig &config,
+                                const std::function<void(ModelObject &)> &tweak,
+                                size_t *num_groups = nullptr)
+{
+    Slic3r::Print print;
+    Slic3r::Model model;
+    make_floating_two_part_print(print, model, config, tweak);
+    REQUIRE(! print.objects().empty());
+    const PrintObject &object = *print.objects().front();
+    REQUIRE(! object.support_layers().empty());
+    if (num_groups != nullptr)
+        *num_groups = object.support_groups().size();
+    return ironing_measure(object);
+}
+
+// Put part B - the floating cube at the larger X - in a group that irons.
+void group_b_irons(ModelObject &object)
+{
+    ModelVolume *part_b = object.volumes.back();
+    part_b->config.set_key_value("support_group", new ConfigOptionString("B"));
+    part_b->config.set_key_value("support_ironing", new ConfigOptionBool(true));
+}
+
+} // namespace
+
+TEST_CASE("SupportMaterial: per-group ironing", "[SupportMaterial][support_groups][ironing]")
+{
+    const DynamicPrintConfig config = group_fixture_config();
+
+    // Control: nothing irons, so there is not one erIroning extrusion anywhere. If this were not
+    // true the case below would pass for the wrong reason.
+    {
+        const IroningMeasure control = run_ironing_case(config, nullptr);
+        REQUIRE(control.left == 0.);
+        REQUIRE(control.right == 0.);
+    }
+
+    size_t               groups = 0;
+    const IroningMeasure m      = run_ironing_case(config, group_b_irons, &groups);
+    REQUIRE(groups == 2);
+    // B's interface is ironed...
+    CHECK(m.right > 1.);
+    // ...and A's, which belongs to the default group and whose support_ironing is off, is not.
+    // Not "less": none at all. The claim split is a hard clip, so a millimetre here would be a
+    // real leak rather than a rounding artefact.
+    CHECK(m.left == 0.);
+}
+
+TEST_CASE("SupportMaterial: a group's ironing spacing and flow are its own",
+          "[SupportMaterial][support_groups][ironing]")
+{
+    // The object irons everything, so BOTH parts are ironed and the two sides are directly
+    // comparable. Only part B's group changes the two numbers that decide how the ironing is
+    // drawn. Neither can act while the ironing pass reads the object's SupportParameters.
+    DynamicPrintConfig config = group_fixture_config();
+    config.set_deserialize_strict({ { "support_ironing", "1" } });
+
+    const IroningMeasure plain = run_ironing_case(config, nullptr);
+    REQUIRE(plain.left > 1.);
+    REQUIRE(plain.right > 1.);
+
+    // Half the spacing over B: twice as many ironing lines over the same area.
+    // opt_float() is only safe on a coFloat option - ConfigBase::option<T>() returns nullptr when
+    // the stored type is not EXACTLY T - and support_ironing_flow is a coPercent, so the flow half
+    // below reads it through opt<ConfigOptionPercent>() instead.
+    const double object_spacing = config.opt_float("support_ironing_spacing");
+    REQUIRE(object_spacing > 0.);
+    size_t               groups = 0;
+    const IroningMeasure denser = run_ironing_case(config, [object_spacing](ModelObject &object) {
+        ModelVolume *part_b = object.volumes.back();
+        part_b->config.set_key_value("support_group", new ConfigOptionString("B"));
+        part_b->config.set_key_value("support_ironing_spacing",
+                                     new ConfigOptionFloat(object_spacing * 0.5));
+    }, &groups);
+    REQUIRE(groups == 2);
+    CHECK(denser.right > plain.right * 1.4);
+    // A is untouched: the shared pipeline ran once and the default group still holds the object's
+    // own ironing parameters.
+    CHECK(std::abs(denser.left - plain.left) <= plain.left * 0.05);
+
+    // Double the flow ratio over B: the same lines, twice the material per millimetre.
+    const ConfigOptionPercent *object_flow = config.opt<ConfigOptionPercent>("support_ironing_flow");
+    REQUIRE(object_flow != nullptr);
+    const double flow_value = object_flow->value;
+    REQUIRE(flow_value > 0.);
+    const IroningMeasure fatter = run_ironing_case(config, [flow_value](ModelObject &object) {
+        ModelVolume *part_b = object.volumes.back();
+        part_b->config.set_key_value("support_group", new ConfigOptionString("B"));
+        part_b->config.set_key_value("support_ironing_flow", new ConfigOptionPercent(flow_value * 2.));
+    });
+    REQUIRE(fatter.right > 1.);
+    REQUIRE(fatter.left > 1.);
+    CHECK(fatter.right_per_mm() > plain.right_per_mm() * 1.5);
+    CHECK(std::abs(fatter.left_per_mm() - plain.left_per_mm()) <= plain.left_per_mm() * 0.05);
+}
+
+TEST_CASE("SupportMaterial: per-group ironing, organic tree",
+          "[SupportMaterial][support_groups][ironing][tree]")
+{
+    // The organic tree draws its roof through the same generate_support_toolpaths, so the same
+    // split applies - and it has to be measured, because the roof reaches that function by a
+    // different route than the normal generator's contacts do.
+    const DynamicPrintConfig config = tree_fixture_config("organic");
+    {
+        const IroningMeasure control = run_ironing_case(config, nullptr);
+        REQUIRE(control.left == 0.);
+        REQUIRE(control.right == 0.);
+    }
+    const IroningMeasure m = run_ironing_case(config, group_b_irons);
+    CHECK(m.right > 1.);
+    CHECK(m.left == 0.);
+}
+
+TEST_CASE("SupportMaterial: per-group ironing, classic tree",
+          "[SupportMaterial][support_groups][ironing][tree]")
+{
+    // A classic tree never ironed its roof at all before this stage: support_ironing reached it
+    // only through SupportParameters::interface_spacing, which forces the roof solid. Two claims
+    // here, in the order they matter:
+    //   1. with the switch on and no group, the roof IS ironed now - the new capability;
+    //   2. with the switch off on the object and on in a group, only that group's roof is ironed.
+    const DynamicPrintConfig config = tree_fixture_config("tree_slim");
+
+    {
+        const IroningMeasure off = run_ironing_case(config, nullptr);
+        REQUIRE(off.left == 0.);
+        REQUIRE(off.right == 0.);
+    }
+    {
+        DynamicPrintConfig object_wide = config;
+        object_wide.set_deserialize_strict({ { "support_ironing", "1" } });
+        const IroningMeasure on = run_ironing_case(object_wide, nullptr);
+        CHECK(on.left > 1.);
+        CHECK(on.right > 1.);
+    }
+
+    size_t               groups = 0;
+    const IroningMeasure m      = run_ironing_case(config, group_b_irons, &groups);
+    REQUIRE(groups == 2);
+    CHECK(m.right > 1.);
+    CHECK(m.left == 0.);
+}
