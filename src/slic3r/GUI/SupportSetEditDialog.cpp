@@ -55,9 +55,10 @@ static const std::vector<std::string>& keys_advanced()
         "support_top_z_distance",
         "support_interface_top_layers", "support_interface_bottom_layers",
         "support_interface_pattern", "support_interface_spacing", "support_bottom_interface_spacing",
-        // Commented out on the process tab (Tab.cpp, "Advanced"), but a set stores it and a group
-        // resolves it, so the editor is the one place it can be seen and changed.
-        "support_interface_loop_pattern",
+        // support_interface_loop_pattern is deliberately NOT here: the process tab hides it
+        // (Tab.cpp, its line is commented out) and it is untested on this fork, so the editor
+        // does not expose it either. A set still carries the key silently, like every other
+        // hidden support key (decision 2026-09-05).
     };
     return s_keys;
 }
