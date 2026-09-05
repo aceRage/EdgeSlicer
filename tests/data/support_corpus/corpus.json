@@ -63,6 +63,16 @@
     "global flag cannot express both. The command-line --baseline-has-groups remains the default",
     "for cases that do not say.",
     "",
+    "Stage 5 (2026-09-05) flipped every Stage 4 TREE group case to \"baseline_has_groups\": true and",
+    "added four of its own with it false. The flag is BASELINE-RELATIVE, not a property of the case:",
+    "it says whether the build being compared against already honours THAT case's kind of group. A",
+    "Stage 5 branch is measured against a feat/ultra-preferences that carries Stage 4, so the tree",
+    "cases now act on both sides and the question becomes \"the geometry must be IDENTICAL\" - which",
+    "is a positive statement that Stage 5 moved no tree geometry. The four new cases - per-group",
+    "ironing on the three generators, and the over-support keys acting per part - are the ones the",
+    "baseline is still blind to, so those must DIFFER. A branch cut against an older baseline has to",
+    "flip them back; 2c and 2d record the same pairing problem for the normal-support cases.",
+    "",
     "The handy models came back too. Stage 2 recorded that every .3mf under resources/handy_models/",
     "segfaulted the CLI on --slice; on this tree all five slice cleanly with tree support, so the",
     "three below are in the corpus as real-geometry off-mode cases. They are the only cases here",
@@ -238,6 +248,32 @@
       ]
     },
     {
+      "name": "normal_ironing",
+      "comment": "OFF MODE, and the regression cover for the Stage 5 ironing refactor. Support ironing ON, no part in a group: the ironing pass in generate_support_toolpaths was rewritten into a routine that is called once for a single-group object and once per group otherwise, and this case is the measurement that the single-group call draws exactly what the one inline block drew.",
+      "models": [
+        "tests/data/support_corpus/twopart_bridge.3mf"
+      ],
+      "args": [
+        "--enable-support=1",
+        "--support-type=normal(auto)",
+        "--support-style=grid",
+        "--support-ironing=1"
+      ]
+    },
+    {
+      "name": "tree_organic_ironing",
+      "comment": "OFF MODE. The same claim through the organic tree, which reaches the very same ironing pass by a different route.",
+      "models": [
+        "tests/data/support_corpus/twopart_bridge.3mf"
+      ],
+      "args": [
+        "--enable-support=1",
+        "--support-type=tree(auto)",
+        "--support-style=organic",
+        "--support-ironing=1"
+      ]
+    },
+    {
       "name": "tree_organic",
       "models": [
         "tests/data/support_corpus/twopart_bridge.3mf"
@@ -379,7 +415,7 @@
     {
       "name": "group_parts_tree_organic",
       "groups": true,
-      "baseline_has_groups": false,
+      "baseline_has_groups": true,
       "comment": "ON MODE, organic tree, one filament. The group asks for five dense roof layers where the object asks for two. An organic tree decides its roof DEPTH when it places the tips (sample_overhang_area), so this is the case that fails if that call is left object-wide.",
       "models": [
         "tests/data/support_corpus/twopart_groups_geom.3mf"
@@ -393,7 +429,7 @@
     {
       "name": "group_single_part_tree_organic",
       "groups": true,
-      "baseline_has_groups": false,
+      "baseline_has_groups": true,
       "comment": "ON MODE, organic tree, ONE part. The default group owns no parts, so nothing in the output shows a claim that failed to reach the contacts - the single-part shape of the bug 2c records, on the tree path.",
       "models": [
         "tests/data/support_corpus/onepart_group.3mf"
@@ -407,7 +443,7 @@
     {
       "name": "group_parts_tree_classic",
       "groups": true,
-      "baseline_has_groups": false,
+      "baseline_has_groups": true,
       "comment": "ON MODE, classic tree. Only the roof FILL follows the group here - its interface spacing and pattern - because the roof layer count is decided object-wide in draw_circles(). The case must still differ from a baseline that fills the whole roof with the object's spacing.",
       "models": [
         "tests/data/support_corpus/twopart_groups_geom.3mf"
@@ -421,7 +457,7 @@
     {
       "name": "group_parts_tree_organic_filament",
       "groups": true,
-      "baseline_has_groups": false,
+      "baseline_has_groups": true,
       "comment": "ON MODE, organic tree, TWO filaments. The group pins its own interface filament: the tool change has to be scheduled and the second filament has to draw the group's own part's interface and essentially none of the other part's.",
       "models": [
         "tests/data/support_corpus/twopart_groups.3mf"
@@ -444,9 +480,88 @@
       ]
     },
     {
-      "name": "group_parts_tree_classic_filament",
+      "name": "group_parts_ironing",
       "groups": true,
       "baseline_has_groups": false,
+      "comment": "ON MODE, normal supports, one filament. The OBJECT does not iron; the group does, with its own ironing spacing. Through Stage 4 support_ironing* were stored and resolved per group and inert - the one ironing pass read the shared SupportParameters - so the baseline draws no ironing anywhere and the candidate must draw it over the grouped part and NOT over its neighbour. expect_feature_part is the criterion that says so: it splits the named feature at a coordinate read off the SUPPORT INTERFACE, which is drawn on both parts, because a feature that appears on one part only has no gap of its own to be split at.",
+      "models": [
+        "tests/data/support_corpus/twopart_groups_iron.3mf"
+      ],
+      "args": [
+        "--enable-support=1",
+        "--support-type=normal(auto)",
+        "--support-style=grid"
+      ],
+      "expect_feature_part": {
+        "feature": "Ironing",
+        "axis": "x",
+        "min_share": 0.95
+      }
+    },
+    {
+      "name": "group_parts_ironing_tree_organic",
+      "groups": true,
+      "baseline_has_groups": false,
+      "comment": "ON MODE, organic tree. The same claim through the generator that reaches generate_support_toolpaths from TreeSupport3D rather than from PrintObjectSupportMaterial.",
+      "models": [
+        "tests/data/support_corpus/twopart_groups_iron.3mf"
+      ],
+      "args": [
+        "--enable-support=1",
+        "--support-type=tree(auto)",
+        "--support-style=organic"
+      ],
+      "expect_feature_part": {
+        "feature": "Ironing",
+        "axis": "x",
+        "min_share": 0.95
+      }
+    },
+    {
+      "name": "group_parts_ironing_tree_classic",
+      "groups": true,
+      "baseline_has_groups": false,
+      "comment": "ON MODE, classic tree - and the one case here that is a NEW capability rather than a per-group split of an existing one. A classic tree never had an ironing pass at all: support_ironing reached it only through SupportParameters::interface_spacing, which forces the roof solid, so the setting produced a solid roof that was never smoothed. Stage 5 gave TreeSupport::generate_toolpaths an ironing pass behind the same switch, split by claim like the roof fill.",
+      "models": [
+        "tests/data/support_corpus/twopart_groups_iron.3mf"
+      ],
+      "args": [
+        "--enable-support=1",
+        "--support-type=tree(auto)",
+        "--support-style=tree_slim"
+      ],
+      "expect_feature_part": {
+        "feature": "Ironing",
+        "axis": "x",
+        "min_share": 0.95
+      }
+    },
+    {
+      "name": "part_over_support",
+      "groups": true,
+      "baseline_has_groups": false,
+      "comment": "ON MODE for the over-support surface keys acting PER PART. The part carries over_support_surfaces, over_support_speed and over_support_flow the way a support group writes its values onto its parts. The baseline has the feature, but as PrintObjectConfig keys, so a part-level value is dropped by apply_to_print_region_config and nothing happens; Stage 5 moved the three to PrintRegionConfig, which is the fork's own per-part path for an object-body setting. Note the support geometry itself must NOT move - these keys describe the object's underside, not the support - which is why the case also carries no support-relevant override.",
+      "models": [
+        "tests/data/support_corpus/twopart_groups_oversupport.3mf"
+      ],
+      "args": [
+        "--enable-support=1",
+        "--support-type=normal(auto)",
+        "--support-style=grid",
+        "--support-top-z-distance=0.2",
+        "--support-interface-top-layers=2",
+        "--support-interface-bottom-layers=2"
+      ],
+      "expect_feature_part": {
+        "feature": "Bottom surface over support",
+        "axis": "x",
+        "min_share": 0.95
+      }
+    },
+    {
+      "name": "group_parts_tree_classic_filament",
+      "groups": true,
+      "baseline_has_groups": true,
       "comment": "ON MODE, classic tree, TWO filaments. Same claim as the organic case above, through the other generator: TreeSupport::generate_toolpaths() writes the group's roof straight into SupportLayer::interface_by_extruder.",
       "models": [
         "tests/data/support_corpus/twopart_groups.3mf"
