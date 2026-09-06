@@ -1204,6 +1204,7 @@ struct Sidebar::priv
     ScalableButton *  m_bpButton_ams_filament;
     ScalableButton *  m_bpButton_set_filament;
     ScalableButton *  m_bpButton_sync_filament = nullptr;
+    ScalableButton *  m_bpButton_add_filament_type = nullptr;
     int                         m_menu_filament_id = -1;
     wxPanel* m_panel_filament_content;
     wxScrolledWindow* m_scrolledWindow_filament_content;
@@ -2076,6 +2077,27 @@ static wxString nozzle_type_key_to_label(const std::string& key)
     if (key == "undefine")
         return _L("Unknown");
     return wxString::FromUTF8(key);
+}
+
+// Which filament sync the "Filaments" row's button performs for the printer
+// preset that is selected right now.  Snapmaker presets keep the fork's own
+// dialog (Sidebar::show_sync_filament_dialog, U1-only); Bambu presets get the
+// AMS sync, which works over the Bambu network and in LAN mode alike.  Every
+// other vendor has nothing to sync from, so the button is hidden.
+enum class FilamentSyncTarget { None, BambuAms, SnapmakerDialog };
+
+static FilamentSyncTarget filament_sync_target_for_current_preset()
+{
+    PresetBundle *pb = wxGetApp().preset_bundle;
+    if (!pb)
+        return FilamentSyncTarget::None;
+    const DynamicPrintConfig &cfg = pb->printers.get_edited_preset().config;
+    const ConfigOptionString *model = cfg.option<ConfigOptionString>("printer_model");
+    if (model && boost::icontains(model->value, "Snapmaker"))
+        return FilamentSyncTarget::SnapmakerDialog;
+    if (pb->is_bbl_vendor())
+        return FilamentSyncTarget::BambuAms;
+    return FilamentSyncTarget::None;
 }
 
 Sidebar::Sidebar(Plater *parent)
@@ -3092,6 +3114,18 @@ Sidebar::Sidebar(Plater *parent)
     h_physical_title->Add(physical_label, 0, wxALIGN_CENTER_VERTICAL);
     h_physical_title->AddStretchSpacer();
 
+    // Add/Remove filaments: the entry point for adding new filament *types*.
+    // It has always lived in the "Filament Management" title bar above, where the
+    // wide "Color Mixing Match" button crowds it out; users look for it here, in
+    // the row that owns the filament slots, so it is repeated on this row too.
+    ScalableButton* add_type_btn = new ScalableButton(p->m_panel_physical_filaments_title, wxID_ANY, "settings");
+    add_type_btn->SetToolTip(_L("Set filaments to use"));
+    add_type_btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
+        p->editing_filament = -1;
+        wxGetApp().run_wizard(ConfigWizard::RR_USER, ConfigWizard::SP_FILAMENTS);
+    });
+    p->m_bpButton_add_filament_type = add_type_btn;
+
     // Spool Manager button (Ultra: Spoolman integration)
     ScalableButton* spool_btn = new ScalableButton(p->m_panel_physical_filaments_title, wxID_ANY, "spool");
     spool_btn->SetToolTip(_L("Spool Manager"));
@@ -3100,11 +3134,15 @@ Sidebar::Sidebar(Plater *parent)
         dlg.ShowModal();
     });
 
-    // Sync filament button
+    // Sync filament button - vendor aware.  Tooltip and visibility are set by
+    // update_filament_sync_button() on every printer-preset change.
     ScalableButton* sync_filament_btn = new ScalableButton(p->m_panel_physical_filaments_title, wxID_ANY, "sync_filament");
     sync_filament_btn->SetToolTip(_L("Sync Filament Information"));
     sync_filament_btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent& e) {
-        show_sync_filament_dialog();
+        if (filament_sync_target_for_current_preset() == FilamentSyncTarget::BambuAms)
+            sync_ams_list();  // reports "select a printer in Device page" when none is connected
+        else
+            show_sync_filament_dialog();
     });
     p->m_bpButton_sync_filament = sync_filament_btn;
 
@@ -3139,6 +3177,7 @@ Sidebar::Sidebar(Plater *parent)
     });
     p->m_bpButton_add_filament = add_btn;
 
+    h_physical_title->Add(add_type_btn, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(10));
     h_physical_title->Add(spool_btn, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(10));
     h_physical_title->Add(sync_filament_btn, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(10));
     h_physical_title->Add(del_btn, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(4));
@@ -3151,6 +3190,8 @@ Sidebar::Sidebar(Plater *parent)
 
     if (p->combos_filament.size() <= 1)
         h_physical_title->Hide(p->m_bpButton_del_filament);
+
+    update_filament_sync_button();
 
     sizer_filaments2->AddSpacer(FromDIP(8));
     sizer_filaments2->Add(p->m_panel_physical_filaments_title, 0, wxEXPAND, 0);
@@ -3651,11 +3692,22 @@ void Sidebar::update_all_preset_comboboxes(bool reload_printer_view)
     p->combo_printer->set_show_machine_connecting_button(false);
     p->combo_printer->set_show_connection_button(false);
 
+    // Both "Filaments" row buttons follow the printer preset.
+    update_filament_sync_button();
+
     if (preset_bundle.use_bbl_network()) {
         ams_btn->Show();
         p_mainframe->set_print_button_to_default(MainFrame::PrintSelectType::ePrintPlate);
     } else {
-        ams_btn->Hide();
+        // AMS sync is not tied to the Bambu cloud: a machine reached over LAN reports
+        // its AMS just the same.  The old rule (use_bbl_network() only) hid the button
+        // for every LAN-mode Bambu printer, which is the fork's default Bambu mode.
+        bool ams_reachable = false;
+        if (is_bbl_vendor) {
+            if (DeviceManager *dev = wxGetApp().getDeviceManager())
+                ams_reachable = dev->get_selected_machine() != nullptr;
+        }
+        ams_btn->Show(ams_reachable);
         auto print_btn_type = MainFrame::PrintSelectType::eExportGcode;
 
         const auto& edit_preset = preset_bundle.printers.get_edited_preset();
@@ -4029,6 +4081,10 @@ void Sidebar::msw_rescale()
     p->m_bpButton_del_filament->msw_rescale();
     p->m_bpButton_ams_filament->msw_rescale();
     p->m_bpButton_set_filament->msw_rescale();
+    if (p->m_bpButton_add_filament_type)
+        p->m_bpButton_add_filament_type->msw_rescale();
+    if (p->m_bpButton_sync_filament)
+        p->m_bpButton_sync_filament->msw_rescale();
     p->m_flushing_volume_btn->Rescale();
     //BBS
     m_bed_type_list->Rescale();
@@ -4102,6 +4158,10 @@ void Sidebar::sys_color_changed()
     p->m_bpButton_del_filament->msw_rescale();
     p->m_bpButton_ams_filament->msw_rescale();
     p->m_bpButton_set_filament->msw_rescale();
+    if (p->m_bpButton_add_filament_type)
+        p->m_bpButton_add_filament_type->msw_rescale();
+    if (p->m_bpButton_sync_filament)
+        p->m_bpButton_sync_filament->msw_rescale();
     p->m_flushing_volume_btn->Rescale();
 
     // BBS
@@ -9268,6 +9328,30 @@ void Sidebar::sync_ams_list()
         }
     }
     Layout();
+}
+
+void Sidebar::update_filament_sync_button()
+{
+    if (!p->m_bpButton_sync_filament || !p->m_panel_physical_filaments_title)
+        return;
+    wxSizer *sizer = p->m_panel_physical_filaments_title->GetSizer();
+    if (!sizer)
+        return;
+
+    switch (filament_sync_target_for_current_preset()) {
+    case FilamentSyncTarget::BambuAms:
+        p->m_bpButton_sync_filament->SetToolTip(_L("Synchronize filament list from AMS"));
+        sizer->Show(p->m_bpButton_sync_filament);
+        break;
+    case FilamentSyncTarget::SnapmakerDialog:
+        p->m_bpButton_sync_filament->SetToolTip(_L("Sync Filament Information"));
+        sizer->Show(p->m_bpButton_sync_filament);
+        break;
+    default:
+        sizer->Hide(p->m_bpButton_sync_filament);
+        break;
+    }
+    p->m_panel_physical_filaments_title->Layout();
 }
 
 void Sidebar::show_sync_filament_dialog()
