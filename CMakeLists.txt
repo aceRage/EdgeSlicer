@@ -741,7 +741,9 @@ file(GLOB L10N_PO_FILES "${BBL_L18N_DIR}/*/Snapmaker_Orca*.po")
 foreach(po_file ${BBL_L10N_PO_FILES})
     GET_FILENAME_COMPONENT(SECOND_FOLDER_ABSOLUTE ${po_file} DIRECTORY)
     string(REGEX REPLACE ".*/(.*)" "\\1" po_dir "${SECOND_FOLDER_ABSOLUTE}" )
-    SET(mo_file "${L10N_DIR}/${po_dir}/Snapmaker_Orca.mo")
+    # The catalog base name must match GUI_App.cpp's AddCatalog(SLIC3R_APP_KEY); the .po
+    # source files keep their historical names (nothing derives the .mo name from them).
+    SET(mo_file "${L10N_DIR}/${po_dir}/EdgeSlicer.mo")
     add_custom_command(
         TARGET gettext_po_to_mo PRE_BUILD
         COMMAND msgfmt ARGS --check-format -o ${mo_file} ${po_file}
@@ -923,7 +925,7 @@ if(BUILD_TESTS)
 endif()
 
 if (NOT WIN32 AND NOT APPLE)
-    set(SLIC3R_APP_CMD "snapmaker-orca")
+    set(SLIC3R_APP_CMD "EdgeSlicer")
     configure_file(${LIBDIR}/dev-utils/platform/unix/build_appimage.sh.in ${CMAKE_CURRENT_BINARY_DIR}/build_appimage.sh USE_SOURCE_PERMISSIONS @ONLY)
 endif()
 
@@ -973,7 +975,7 @@ set (CPACK_PACKAGE_INSTALL_DIRECTORY ${CPACK_PACKAGE_NAME})
 set (CPACK_PACKAGE_ICON "${CMAKE_SOURCE_DIR}/resources/images\\\\Snapmaker_Orca.ico")
 set (CPACK_NSIS_MUI_ICON "${CPACK_PACKAGE_ICON}")
 set (CPACK_NSIS_MUI_UNIICON "${CPACK_PACKAGE_ICON}")
-set (CPACK_NSIS_INSTALLED_ICON_NAME "$INSTDIR\\\\snapmaker-orca.exe")
+set (CPACK_NSIS_INSTALLED_ICON_NAME "$INSTDIR\\\\EdgeSlicer.exe")
 set(CPACK_NSIS_UNINSTALL_NAME "Uninstall")
 # Preinstall guard in one place:
 # 1) Block while app is running.
@@ -981,9 +983,14 @@ set(CPACK_NSIS_UNINSTALL_NAME "Uninstall")
 # We keep this in EXTRA_PREINSTALL because CPack's default .onInit uninstall prompt runs before section logic.
 set(CPACK_NSIS_EXTRA_PREINSTALL_COMMANDS [=[
 SnapmakerOrcaPre_check_loop:
+  ; Three arms: the name we ship now, and the two names this fork shipped under before the
+  ; binary rename. An upgrade over either old install must still be blocked while it runs.
+  ExecWait 'cmd.exe /c tasklist /FI "IMAGENAME eq EdgeSlicer.exe" 2>nul | find /i "EdgeSlicer.exe" >nul' $0
+  IntCmp $0 0 SnapmakerOrcaPre_in_use SnapmakerOrcaPre_try_legacy1 SnapmakerOrcaPre_try_legacy1
+SnapmakerOrcaPre_try_legacy1:
   ExecWait 'cmd.exe /c tasklist /FI "IMAGENAME eq snapmaker-orca.exe" 2>nul | find /i "snapmaker-orca.exe" >nul' $0
-  IntCmp $0 0 SnapmakerOrcaPre_in_use SnapmakerOrcaPre_try_legacy SnapmakerOrcaPre_try_legacy
-SnapmakerOrcaPre_try_legacy:
+  IntCmp $0 0 SnapmakerOrcaPre_in_use SnapmakerOrcaPre_try_legacy2 SnapmakerOrcaPre_try_legacy2
+SnapmakerOrcaPre_try_legacy2:
   ExecWait 'cmd.exe /c tasklist /FI "IMAGENAME eq Snapmaker_Orca.exe" 2>nul | find /i "Snapmaker_Orca.exe" >nul' $0
   IntCmp $0 0 SnapmakerOrcaPre_in_use SnapmakerOrcaPre_idle SnapmakerOrcaPre_idle
 SnapmakerOrcaPre_idle:
@@ -1065,7 +1072,7 @@ file(READ "${CMAKE_SOURCE_DIR}/cmake/nsis/SnapmakerURLProtocols_uninstall.nsh" C
 # Desktop shortcut inside MUI_STARTMENU_WRITE_BEGIN: respects "do not create shortcuts" on the start menu page.
 set(CPACK_NSIS_CREATE_ICONS_EXTRA [=[
   SetShellVarContext current
-  CreateShortCut "$DESKTOP\EdgeSlicer.lnk" "$INSTDIR\snapmaker-orca.exe" "" "$INSTDIR\snapmaker-orca.exe" 0
+  CreateShortCut "$DESKTOP\EdgeSlicer.lnk" "$INSTDIR\EdgeSlicer.exe" "" "$INSTDIR\EdgeSlicer.exe" 0
   SetShellVarContext all
 ]=])
 set(CPACK_NSIS_DELETE_ICONS_EXTRA [=[
@@ -1082,7 +1089,7 @@ set (CPACK_PACKAGE_CHECKSUM SHA256)
 set (CPACK_PACKAGE_INSTALL_REGISTRY_KEY "EdgeSlicer")
 set (CPACK_NSIS_ENABLE_UNINSTALL_BEFORE_INSTALL OFF)
 set (CPACK_NSIS_EXECUTABLES_DIRECTORY ".")
-set(CPACK_PACKAGE_EXECUTABLES "snapmaker-orca;EdgeSlicer")
+set(CPACK_PACKAGE_EXECUTABLES "EdgeSlicer;EdgeSlicer")
 set (CPACK_RESOURCE_FILE_LICENSE ${CMAKE_SOURCE_DIR}/LICENSE.txt) # must also include in install command
 
 # New GUID for the new product: sharing UltraOne's would make the installer treat an

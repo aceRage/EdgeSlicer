@@ -33,7 +33,7 @@ jobs:
           
               if [ -f "$dir/Snapmaker_Orca_${lang}.po" ]; then
                   mkdir -p ./resources/i18n/${lang}/
-                  msgfmt --check-format -o ./resources/i18n/${lang}/Snapmaker_Orca.mo $dir/Snapmaker_Orca_${lang}.po
+                  msgfmt --check-format -o ./resources/i18n/${lang}/EdgeSlicer.mo $dir/Snapmaker_Orca_${lang}.po
                   # Check the exit status of the msgfmt command
                   if [ $? -ne 0 ]; then
                       echo "Error encountered with msgfmt command for language ${lang}."

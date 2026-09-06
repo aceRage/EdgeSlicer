@@ -7,3 +7,7 @@ DeleteRegKey HKLM "Software\Classes\edgeslicer"
 DeleteRegKey HKLM "Software\Classes\ultraone"
 DeleteRegKey HKLM "Software\Classes\snapmaker-ultra"
 SetRegView 32
+
+; Drop the inbound firewall rule the installer pre-created for us.
+nsExec::ExecToLog '"$SYSDIR\netsh.exe" advfirewall firewall delete rule name="EdgeSlicer"'
+Pop $0

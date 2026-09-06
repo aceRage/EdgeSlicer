@@ -7,7 +7,7 @@ Thanks for helping test! This takes about 10 minutes. No technical knowledge nee
 1. Install **Flash Studio Desktop** from flashforge.com if you don't have it already
    (we borrow two connection files from it — we're not allowed to ship them ourselves).
 2. Copy `setup-flashforge.cmd` into the Snapmaker Orca Ultra folder
-   (the folder that contains `snapmaker-orca.exe`) and double-click it.
+   (the folder that contains `EdgeSlicer.exe`) and double-click it.
    It should end with "Done!".
 
 ## The test

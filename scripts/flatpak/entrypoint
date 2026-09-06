@@ -40,4 +40,4 @@ fi
 # Work-around https://github.com/bambulab/BambuStudio/issues/3440
 export LC_ALL=C.UTF-8
 
-exec /app/bin/snapmaker-orca "$@"
+exec /app/bin/EdgeSlicer "$@"

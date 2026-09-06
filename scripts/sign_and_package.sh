@@ -84,8 +84,8 @@ else
     # 检查空格版本名称
     if [ -z "$SOURCE_APP" ]; then
         for possible_path in \
-            "$BUILD_DIR/src/Release/Snapmaker Orca.app" \
-            "$BUILD_DIR/Snapmaker_Orca/Snapmaker Orca.app"
+            "$BUILD_DIR/src/Release/EdgeSlicer.app" \
+            "$BUILD_DIR/Snapmaker_Orca/EdgeSlicer.app"
         do
             if [ -d "$possible_path" ]; then
                 SOURCE_APP="$possible_path"

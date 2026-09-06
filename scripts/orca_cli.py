@@ -2,7 +2,7 @@
 """Drive the Snapmaker-Ultra slicer CLI from Python (or from an AI agent).
 
     from orca_cli import OrcaCli
-    cli = OrcaCli(r"C:\\Program Files\\Snapmaker-Ultra\\snapmaker-orca.exe")
+    cli = OrcaCli(r"C:\\Program Files\\EdgeSlicer\\EdgeSlicer.exe")
     result = cli.slice(["model.stl"],
                        printer="Snapmaker U1 (0.4 nozzle)",
                        process="0.20 Standard @Snapmaker U1 (0.4 nozzle)",
@@ -97,7 +97,7 @@ class OrcaCli:
 
 def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--exe", required=True, help="path to snapmaker-orca.exe")
+    ap.add_argument("--exe", required=True, help="path to EdgeSlicer.exe")
     ap.add_argument("--datadir", help="isolated data directory (user presets live under <datadir>/user)")
     ap.add_argument("--printer"); ap.add_argument("--process")
     ap.add_argument("--filament", action="append", default=[])

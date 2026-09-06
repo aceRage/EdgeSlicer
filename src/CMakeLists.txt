@@ -127,6 +127,11 @@ configure_file(${CMAKE_CURRENT_SOURCE_DIR}/dev-utils/platform/osx/Info.plist.in 
 if (WIN32)
     add_library(Snapmaker_Orca SHARED Snapmaker_Orca.cpp Snapmaker_Orca.hpp dev-utils/BaseException.cpp dev-utils/BaseException.h dev-utils/StackWalker.cpp dev-utils/StackWalker.h sentry_wrapper/SentryWrapper.hpp sentry_wrapper/SentryWrapper.cpp bury_cfg/bury_point.hpp bury_cfg/bury_point.cpp common_func/common_func.hpp common_func/common_func.cpp)
     target_compile_definitions(Snapmaker_Orca PRIVATE BURY_EXPORTS)
+    # The file we ship is named after the brand; the CMake target, the source files and
+    # the exported Snapmaker_Orca_main symbol keep their historical names on purpose --
+    # see the "Binary rename" section of docs/superpowers/specs/2026-09-04-rebrand-plan.md.
+    # The .pdb follows OUTPUT_NAME, so no separate PDB_NAME is needed.
+    set_target_properties(Snapmaker_Orca PROPERTIES OUTPUT_NAME "EdgeSlicer")
 else ()
     add_executable(Snapmaker_Orca Snapmaker_Orca.cpp Snapmaker_Orca.hpp sentry_wrapper/SentryWrapper.hpp sentry_wrapper/SentryWrapper.cpp bury_cfg/bury_point.hpp bury_cfg/bury_point.cpp common_func/common_func.hpp common_func/common_func.cpp)
 endif ()
@@ -136,10 +141,16 @@ if (MINGW)
     set_target_properties(Snapmaker_Orca PROPERTIES PREFIX "")
 endif (MINGW)
 
+if (APPLE)
+    # macOS: the bundle and the binary inside it are named after the brand.
+    set_target_properties(Snapmaker_Orca PROPERTIES OUTPUT_NAME "EdgeSlicer")
+    set(SLIC3R_APP_CMD "EdgeSlicer")
+endif ()
+
 if (NOT WIN32 AND NOT APPLE)
     # Binary name on unix like systems (Linux, Unix)
-    set_target_properties(Snapmaker_Orca PROPERTIES OUTPUT_NAME "snapmaker-orca")
-    set(SLIC3R_APP_CMD "snapmaker-orca")
+    set_target_properties(Snapmaker_Orca PROPERTIES OUTPUT_NAME "EdgeSlicer")
+    set(SLIC3R_APP_CMD "EdgeSlicer")
     configure_file(${CMAKE_CURRENT_SOURCE_DIR}/dev-utils/platform/unix/build_linux_image.sh.in ${CMAKE_CURRENT_BINARY_DIR}/build_linux_image.sh USE_SOURCE_PERMISSIONS @ONLY)
 endif ()
 
@@ -201,7 +212,16 @@ if (WIN32)
     endif()
     target_compile_definitions(Snapmaker_Orca_app_gui PRIVATE -DSLIC3R_WRAPPER_NOCONSOLE)
     add_dependencies(Snapmaker_Orca_app_gui Snapmaker_Orca)
-    set_target_properties(Snapmaker_Orca_app_gui PROPERTIES OUTPUT_NAME "snapmaker-orca")
+    set_target_properties(Snapmaker_Orca_app_gui PROPERTIES OUTPUT_NAME "EdgeSlicer")
+    # The shared library above already produces EdgeSlicer.lib as its import library, and
+    # MSVC derives an executable's default /IMPLIB from the output name too -- so an
+    # EdgeSlicer.exe that links EdgeSlicer.lib fails with LNK1149 (output filename matches
+    # input filename). The shim exports nothing, so its import library is never written;
+    # it just needs a name that is not an input.
+    if (MSVC)
+        target_link_options(Snapmaker_Orca_app_gui PRIVATE
+            "/IMPLIB:$<TARGET_FILE_DIR:Snapmaker_Orca_app_gui>/EdgeSlicer_app_gui.lib")
+    endif ()
     
     if (SLIC3R_SENTRY)
         target_link_libraries(Snapmaker_Orca_app_gui PRIVATE boost_headeronly sentry::sentry nlohmann_json Snapmaker_Orca)
@@ -270,7 +290,7 @@ else ()
     if (APPLE AND NOT CMAKE_MACOSX_BUNDLE)
         # On OSX, the name of the binary matches the name of the Application.
         add_custom_command(TARGET Snapmaker_Orca POST_BUILD
-            COMMAND ln -sf Snapmaker_Orca snapmaker-orca
+            COMMAND ln -sf EdgeSlicer snapmaker-orca
             WORKING_DIRECTORY "$<TARGET_FILE_DIR:Snapmaker_Orca>"
             VERBATIM)
         # Copy Sentry crashpad_handler to executable directory for non-bundle builds (e.g., Xcode debugging)
@@ -303,7 +323,7 @@ else ()
         set(MACOSX_BUNDLE_ICON_FILE Icon.icns)
         set_target_properties(Snapmaker_Orca PROPERTIES
             MACOSX_BUNDLE TRUE
-            MACOSX_BUNDLE_BUNDLE_NAME "Snapmaker Orca"
+            MACOSX_BUNDLE_BUNDLE_NAME "EdgeSlicer"
             MACOSX_BUNDLE_SHORT_VERSION_STRING ${Snapmaker_VERSION}
             MACOSX_BUNDLE_COPYRIGHT "Copyright © 2024-2026 the EdgeSlicer contributors. All rights reserved.")
         # Get the bundle directory by going up from the executable to the .app bundle

@@ -105,7 +105,7 @@ Section "Main program" SecMain
     ; PACK_SOURCE_DIR = compile time only. At runtime this File extracts from embedded payload to $INSTDIR. Exclude include and lib dirs.
     File /r /x "*.pdb" /x "*.ilk" /x "*.exp" /x "*.lib" /x "*.obj" /x "*.idb" /x "*.tlog" /x "*.h" /x "*.hpp" /x "*.c" /x "*.cpp" /x "*.cxx" /x "*.cc" /x "*.vcxproj" /x "*.vcxproj.filters" /x "*.sln" /x "*.cmake" /x "*.py" /x "*.md" /x "*.vcxproj.user" /x "CMakeFiles" /x "RelWithDebInfo" /x "Debug" /x "MinSizeRel" /x ".vs" /x "vcpkg_installed" /x "*.dir" /x "include\*" /x "lib\*" "${PACK_SOURCE_DIR}\*.*"
     
-    IfFileExists "$INSTDIR\snapmaker-orca.exe" 0 extract_error
+    IfFileExists "$INSTDIR\EdgeSlicer.exe" 0 extract_error
     
     DetailPrint "Creating uninstaller..."
     WriteUninstaller "$INSTDIR\Uninstall.exe"
@@ -114,7 +114,7 @@ Section "Main program" SecMain
     WriteRegStr ${PRODUCT_UNINST_ROOT_KEY} "${PRODUCT_UNINST_KEY}" "DisplayName" "${PRODUCT_NAME}"
     WriteRegStr ${PRODUCT_UNINST_ROOT_KEY} "${PRODUCT_UNINST_KEY}" "UninstallString" "$INSTDIR\Uninstall.exe"
     WriteRegStr ${PRODUCT_UNINST_ROOT_KEY} "${PRODUCT_UNINST_KEY}" "InstallLocation" "$INSTDIR"
-    WriteRegStr ${PRODUCT_UNINST_ROOT_KEY} "${PRODUCT_UNINST_KEY}" "DisplayIcon" "$INSTDIR\snapmaker-orca.exe"
+    WriteRegStr ${PRODUCT_UNINST_ROOT_KEY} "${PRODUCT_UNINST_KEY}" "DisplayIcon" "$INSTDIR\EdgeSlicer.exe"
     WriteRegStr ${PRODUCT_UNINST_ROOT_KEY} "${PRODUCT_UNINST_KEY}" "Publisher" "${PRODUCT_PUBLISHER}"
     WriteRegStr ${PRODUCT_UNINST_ROOT_KEY} "${PRODUCT_UNINST_KEY}" "DisplayVersion" "${VERSION}"
     WriteRegStr ${PRODUCT_UNINST_ROOT_KEY} "${PRODUCT_UNINST_KEY}" "URLInfoAbout" "${PRODUCT_WEB_SITE}"
@@ -131,14 +131,23 @@ Section "Main program" SecMain
     SetRegView 64
     WriteRegStr HKLM "Software\Classes\edgeslicer" "" "URL:${PRODUCT_NAME}"
     WriteRegStr HKLM "Software\Classes\edgeslicer" "URL Protocol" ""
-    WriteRegStr HKLM "Software\Classes\edgeslicer\shell\open\command" "" '"$INSTDIR\snapmaker-orca.exe" "%1"'
+    WriteRegStr HKLM "Software\Classes\edgeslicer\shell\open\command" "" '"$INSTDIR\EdgeSlicer.exe" "%1"'
     SetRegView 32
+
+    ; Windows Firewall keys its rules on the image path, so the binary rename would leave
+    ; the old rule dead and pop a consent dialog the first time the LAN/phone service
+    ; listens. Pre-create the inbound rule (delete first, so a reinstall stays idempotent).
+    DetailPrint "Adding the Windows Firewall rule for TCP 13640..."
+    nsExec::ExecToLog '"$SYSDIR\netsh.exe" advfirewall firewall delete rule name="${PRODUCT_NAME}"'
+    Pop $0
+    nsExec::ExecToLog '"$SYSDIR\netsh.exe" advfirewall firewall add rule name="${PRODUCT_NAME}" dir=in action=allow program="$INSTDIR\EdgeSlicer.exe" protocol=TCP localport=13640 profile=private,domain enable=yes'
+    Pop $0
 
     DetailPrint "Installation complete!"
     Goto end_section
     
     extract_error:
-        MessageBox MB_OK|MB_ICONSTOP "Installation failed: snapmaker-orca.exe was not found in the package. The installer may be corrupted."
+        MessageBox MB_OK|MB_ICONSTOP "Installation failed: EdgeSlicer.exe was not found in the package. The installer may be corrupted."
         Abort
     
     end_section:
@@ -147,14 +156,14 @@ SectionEnd
 Section "Desktop shortcut" SecDesktop
     DetailPrint "Creating desktop shortcut..."
     SetShellVarContext current
-    CreateShortcut "$DESKTOP\${PRODUCT_NAME}.lnk" "$INSTDIR\snapmaker-orca.exe" "" "$INSTDIR\snapmaker-orca.exe" 0
+    CreateShortcut "$DESKTOP\${PRODUCT_NAME}.lnk" "$INSTDIR\EdgeSlicer.exe" "" "$INSTDIR\EdgeSlicer.exe" 0
     SetShellVarContext all
 SectionEnd
 
 Section "Start menu shortcut" SecStartMenu
     DetailPrint "Creating start menu shortcut..."
     CreateDirectory "$SMPROGRAMS\${PRODUCT_NAME}"
-    CreateShortcut "$SMPROGRAMS\${PRODUCT_NAME}\${PRODUCT_NAME}.lnk" "$INSTDIR\snapmaker-orca.exe" "" "$INSTDIR\snapmaker-orca.exe" 0
+    CreateShortcut "$SMPROGRAMS\${PRODUCT_NAME}\${PRODUCT_NAME}.lnk" "$INSTDIR\EdgeSlicer.exe" "" "$INSTDIR\EdgeSlicer.exe" 0
     CreateShortcut "$SMPROGRAMS\${PRODUCT_NAME}\Uninstall.lnk" "$INSTDIR\Uninstall.exe" "" "$INSTDIR\Uninstall.exe" 0
 SectionEnd
 
@@ -169,6 +178,8 @@ Section "Uninstall"
     DetailPrint "Uninstalling ${PRODUCT_NAME}..."
     
     DetailPrint "Checking for running processes..."
+    nsExec::ExecToLog 'taskkill /F /IM EdgeSlicer.exe /T'
+    ; the name this fork shipped under before the binary rename
     nsExec::ExecToLog 'taskkill /F /IM snapmaker-orca.exe /T'
     Sleep 500
     
@@ -190,6 +201,11 @@ Section "Uninstall"
     ; the scheme this fork registered under its previous name
     DeleteRegKey HKLM "Software\Classes\ultraone"
     SetRegView 32
+
+    DetailPrint "Removing the Windows Firewall rule..."
+    nsExec::ExecToLog '"$SYSDIR\netsh.exe" advfirewall firewall delete rule name="${PRODUCT_NAME}"'
+    Pop $0
+
     DeleteRegKey ${PRODUCT_UNINST_ROOT_KEY} "${PRODUCT_UNINST_KEY}"
     DeleteRegKey ${PRODUCT_UNINST_ROOT_KEY} "${PRODUCT_INSTALL_KEY}"
     DeleteRegKey HKCU "${PRODUCT_INSTALL_KEY}"
@@ -198,15 +214,19 @@ Section "Uninstall"
 SectionEnd
 
 Function LaunchApp
-    ExecShell "open" "$INSTDIR\snapmaker-orca.exe"
+    ExecShell "open" "$INSTDIR\EdgeSlicer.exe"
 FunctionEnd
 
-; Prevent overwriting locked DLLs when snapmaker-orca (or legacy Snapmaker_Orca.exe) is still running.
+; Prevent overwriting locked DLLs when EdgeSlicer (or a legacy snapmaker-orca.exe /
+; Snapmaker_Orca.exe from before the binary rename) is still running.
 Function EnsureSnapmakerNotRunning
     snapmaker_check_loop:
+        ExecWait 'cmd.exe /c tasklist /FI "IMAGENAME eq EdgeSlicer.exe" 2>nul | find /i "EdgeSlicer.exe" >nul' $0
+        IntCmp $0 0 snapmaker_in_use snapmaker_try_legacy1 snapmaker_try_legacy1
+    snapmaker_try_legacy1:
         ExecWait 'cmd.exe /c tasklist /FI "IMAGENAME eq snapmaker-orca.exe" 2>nul | find /i "snapmaker-orca.exe" >nul' $0
-        IntCmp $0 0 snapmaker_in_use snapmaker_try_legacy snapmaker_try_legacy
-    snapmaker_try_legacy:
+        IntCmp $0 0 snapmaker_in_use snapmaker_try_legacy2 snapmaker_try_legacy2
+    snapmaker_try_legacy2:
         ExecWait 'cmd.exe /c tasklist /FI "IMAGENAME eq Snapmaker_Orca.exe" 2>nul | find /i "Snapmaker_Orca.exe" >nul' $0
         IntCmp $0 0 snapmaker_in_use snapmaker_idle snapmaker_idle
     snapmaker_in_use:
@@ -215,7 +235,7 @@ Function EnsureSnapmakerNotRunning
         SetErrorLevel 7
         Quit
     snapmaker_prompt:
-        MessageBox MB_RETRYCANCEL|MB_ICONEXCLAMATION "${PRODUCT_NAME} is still running (snapmaker-orca.exe).$\r$\nClose the program, then click Retry, or Cancel to exit the installer." IDRETRY snapmaker_check_loop
+        MessageBox MB_RETRYCANCEL|MB_ICONEXCLAMATION "${PRODUCT_NAME} is still running (EdgeSlicer.exe).$\r$\nClose the program, then click Retry, or Cancel to exit the installer." IDRETRY snapmaker_check_loop
         Abort
     snapmaker_idle:
 FunctionEnd

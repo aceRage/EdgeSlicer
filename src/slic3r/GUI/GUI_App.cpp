@@ -2636,6 +2636,14 @@ bool GUI_App::on_init_inner()
     wxLog::SetLogLevel(wxLOG_Message);
 #endif
 
+#ifdef _WIN32
+    // Give the process an explicit AppUserModelID. Without one Windows derives the
+    // taskbar identity from the executable path, so every future rename or move
+    // silently orphans the user's pinned shortcuts. Pinning to this stable id
+    // instead survives them. Must be set before the first window is shown.
+    ::SetCurrentProcessExplicitAppUserModelID(L"aceRage.EdgeSlicer");
+#endif // _WIN32
+
     ::Label::initSysFont();
 
     // Set initialization of image handlers before any UI actions - See GH issue #7469
@@ -2855,6 +2863,13 @@ bool GUI_App::on_init_inner()
     if (m_init_app_config_from_older)
         copy_older_config();
     profiler.mark("copy_older_config_if_needed");
+
+#ifdef __WXMSW__
+    // Before anything re-registers: repair association commands left pointing at an
+    // executable that no longer exists (the binary rename). Runs in the g-code viewer
+    // too, which never reaches the association block below.
+    repair_stale_associations();
+#endif // __WXMSW__
 
     if (is_editor()) {
 #ifdef __WXMSW__
@@ -7677,6 +7692,64 @@ bool GUI_App::check_url_association(std::wstring url_prefix, std::wstring& reg_b
     return key_string == reg_bin;
 #else
     return false;
+#endif // WIN32
+}
+
+#ifdef WIN32
+// Rewrite one HKCU "shell open command" default value if -- and only if -- it names an
+// executable that no longer exists. Returns true when it actually changed something.
+static bool repair_one_stale_command(const wchar_t* key_path, const std::wstring& want_command)
+{
+    wxRegKey key(wxRegKey::HKCU, key_path);
+    if (! key.Exists())
+        return false;
+    const std::wstring current = key.QueryDefaultValue().ToStdWstring();
+    if (current.empty() || current == want_command)
+        return false;
+    // Only the quoted-path form is ours to interpret; anything else the user or another
+    // installer wrote stays untouched.
+    if (current.front() != L'"')
+        return false;
+    const size_t close = current.find(L'"', 1);
+    if (close == std::wstring::npos || close < 2)
+        return false;
+    const std::wstring exe = current.substr(1, close - 1);
+    boost::system::error_code ec;
+    if (boost::filesystem::exists(boost::filesystem::path(exe), ec))
+        return false;   // still a real file -- not stale, leave it alone
+    BOOST_LOG_TRIVIAL(info) << "association self-heal: " << into_u8(wxString(key_path))
+                            << " pointed at a missing executable, rewriting it";
+    key = wxString(want_command);
+    return true;
+}
+#endif // WIN32
+
+// The file associations and the edgeslicer:// scheme are written into HKCU with the
+// full path of the running exe. Renaming the binary (snapmaker-orca.exe -> EdgeSlicer.exe)
+// leaves those commands pointing at a file that is gone, so a double-clicked .3mf or a
+// link gets a "Windows cannot find" box and nothing repairs it until the user re-ticks
+// the association preference. Fix them in place at startup, silently, once.
+void GUI_App::repair_stale_associations()
+{
+#ifdef WIN32
+    wchar_t app_path[MAX_PATH] = { 0 };
+    if (::GetModuleFileNameW(nullptr, app_path, MAX_PATH) == 0)
+        return;
+    const std::wstring want = std::wstring(L"\"") + app_path + L"\" \"%1\"";
+
+    // Both file classes (associate_files writes one ProgID for models and g-code alike;
+    // the second name is listed defensively in case that ever splits) and the URL scheme.
+    static const wchar_t* const key_paths[] = {
+        L"Software\\Classes\\EdgeSlicer.Model.1\\Shell\\Open\\Command",
+        L"Software\\Classes\\EdgeSlicer.GCode.1\\Shell\\Open\\Command",
+        L"Software\\Classes\\edgeslicer\\shell\\open\\command",
+    };
+
+    bool changed = false;
+    for (const wchar_t* path : key_paths)
+        changed |= repair_one_stale_command(path, want);
+    if (changed)
+        ::SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, nullptr, nullptr);
 #endif // WIN32
 }
 

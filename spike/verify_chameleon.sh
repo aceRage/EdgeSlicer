@@ -34,7 +34,7 @@
 #
 # Run from anywhere; the script cd's into its own directory (spike/) first so
 # all the relative harness paths below resolve the same way regardless of the
-# caller's cwd. Requires a built snapmaker-orca.exe (../build/src/Release/).
+# caller's cwd. Requires a built EdgeSlicer.exe (../build/src/Release/).
 #
 # Plain bash (Git Bash on Windows is fine) — uses process substitution, so
 # `bash verify_chameleon.sh` / `./verify_chameleon.sh`, not `sh verify_chameleon.sh`.
@@ -45,7 +45,7 @@ cd "$(dirname "${BASH_SOURCE[0]}")"
 # ---------------------------------------------------------------------------
 # Harness fixtures (per spike/FINDINGS.md harness notes)
 # ---------------------------------------------------------------------------
-EXE="../build/src/Release/snapmaker-orca.exe"
+EXE="../build/src/Release/EdgeSlicer.exe"
 DATADIR="C:/Dev/SnapmakerOrcaSupports/spike/datadir"
 MACHINE_PROFILE="../resources/profiles/BBL/machine/Bambu Lab X1 Carbon 0.4 nozzle.json"
 FIL_PLA="../resources/profiles/BBL/filament/Bambu PLA Basic @BBL X1C.json"
@@ -54,7 +54,7 @@ OBJ_OVERRIDES="spike_process_overrides.json"      # implicit brim_filament_sourc
 CHA_OVERRIDES="spike_chameleon_overrides.json"    # brim_filament_source = nearest_wall
 
 BASELINE="out/baseline_clean.gcode"
-PLATE_OUT="out/plate_1.gcode"   # snapmaker-orca.exe's fixed multi-object-plate output name
+PLATE_OUT="out/plate_1.gcode"   # EdgeSlicer.exe's fixed multi-object-plate output name
 
 OUT_OBJ_1="out/verify_object_1.gcode"
 OUT_OBJ_2="out/verify_object_2.gcode"
@@ -113,7 +113,7 @@ if [ ! -d "$DATADIR" ]; then
     preflight_fail=1
 fi
 if [ "$preflight_fail" -ne 0 ]; then
-    echo "Aborting: harness prerequisites not met (see above). Build snapmaker-orca.exe and/or check spike/ fixtures." >&2
+    echo "Aborting: harness prerequisites not met (see above). Build EdgeSlicer.exe and/or check spike/ fixtures." >&2
     exit 2
 fi
 

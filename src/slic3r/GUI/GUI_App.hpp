@@ -846,6 +846,9 @@ private:
     void            disassociate_files(std::wstring extend);
     bool            check_url_association(std::wstring url_prefix, std::wstring& reg_bin);
     void            associate_url(std::wstring url_prefix);
+    // Rewrites HKCU shell-open commands that still name an executable that is gone
+    // (a binary rename, or an install moved). Silent, Windows only, once per start.
+    void            repair_stale_associations();
     void            disassociate_url(std::wstring url_prefix);
 
     // URL download - PrusaSlicer gets system call to open prusaslicer:// URL which should contain address of download

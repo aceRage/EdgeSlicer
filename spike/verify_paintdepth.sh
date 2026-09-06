@@ -73,7 +73,7 @@
 # Run from anywhere; the script cd's into its own directory (spike/) first.
 # Plain bash (Git Bash on Windows is fine) — uses process substitution, so
 # `bash verify_paintdepth.sh` / `./verify_paintdepth.sh`, not `sh ...`.
-# Requires a built snapmaker-orca.exe (../build/src/Release/) for the branch
+# Requires a built EdgeSlicer.exe (../build/src/Release/) for the branch
 # under test — NOT the baseline binary, which is throwaway/already removed.
 
 set -u
@@ -82,7 +82,7 @@ cd "$(dirname "${BASH_SOURCE[0]}")"
 # ---------------------------------------------------------------------------
 # Harness fixtures
 # ---------------------------------------------------------------------------
-EXE="../build/src/Release/snapmaker-orca.exe"
+EXE="../build/src/Release/EdgeSlicer.exe"
 DATADIR="C:/Dev/SnapmakerOrcaNext/spike/datadir"
 MACHINE_PROFILE="../resources/profiles/BBL/machine/Bambu Lab X1 Carbon 0.4 nozzle.json"
 FIL_PLA="../resources/profiles/BBL/filament/Bambu PLA Basic @BBL X1C.json"
@@ -92,7 +92,7 @@ LEGACY_NONZERO_OVERRIDES="spike_paintdepth_legacy_nonzero.json" # mmu_segmented_
 LEGACY_ZERO_OVERRIDES="spike_paintdepth_legacy_zero.json"       # mmu_segmented_region_max_width = 0 (old key, present but zero)
 
 BASELINE="out/paintdepth_baseline.gcode"
-PLATE_OUT="out/plate_1.gcode"   # snapmaker-orca.exe's fixed single-object-plate output name
+PLATE_OUT="out/plate_1.gcode"   # EdgeSlicer.exe's fixed single-object-plate output name
 
 OUT_DEFAULTS_1="out/paintdepth_defaults_1.gcode"
 OUT_DEFAULTS_2="out/paintdepth_defaults_2.gcode"
@@ -117,7 +117,7 @@ if [ ! -d "$DATADIR" ]; then
     preflight_fail=1
 fi
 if [ "$preflight_fail" -ne 0 ]; then
-    echo "Aborting: harness prerequisites not met (see above). Build snapmaker-orca.exe and/or check spike/ fixtures." >&2
+    echo "Aborting: harness prerequisites not met (see above). Build EdgeSlicer.exe and/or check spike/ fixtures." >&2
     exit 2
 fi
 

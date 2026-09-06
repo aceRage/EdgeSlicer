@@ -500,7 +500,7 @@ def slice_case(exe, datadir, case, presets, outdir, timeout, common_args):
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--baseline", required=True, help="path to the reference snapmaker-orca.exe")
+    ap.add_argument("--baseline", required=True, help="path to the reference EdgeSlicer.exe")
     ap.add_argument("--candidate", required=True, help="path to the exe under test")
     ap.add_argument("--corpus", default=os.path.join(ROOT, "tests", "data", "support_corpus"))
     ap.add_argument("--out", required=True, help="scratch directory for the sliced G-code")

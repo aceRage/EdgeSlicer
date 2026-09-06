@@ -86,7 +86,7 @@ Plate deletion during a slice no longer crashes; fuzzy skin no longer leaves dot
 All builds are on the [Releases](https://github.com/aceRage/EdgeSlicer/releases) page.
 
 - **Windows (64-bit) installer** — `EdgeSlicer_Windows_Installer_V<version>.exe`. Installs **side by side** with the official Snapmaker Orca (own folder, Start-menu entry and Add/Remove entry) and upgrades a previous EdgeSlicer install. It has its own name, icon and data directory, so the two are easy to tell apart.
-- **Windows portable** — `EdgeSlicer_Windows_V<version>_portable.zip`: unzip and run `snapmaker-orca.exe` (needs the Edge WebView2 runtime and the VC++ redistributable, usually already present).
+- **Windows portable** — `EdgeSlicer_Windows_V<version>_portable.zip`: unzip and run `EdgeSlicer.exe` (needs the Edge WebView2 runtime and the VC++ redistributable, usually already present).
 - **Linux (x86_64)** — `EdgeSlicer_Linux_V<version>.AppImage`: `chmod +x` and run. The host must provide WebKitGTK 4.1 and libOpenGL (Ubuntu: `libwebkit2gtk-4.1-0 libopengl0`); they are not bundled.
 - **macOS (Apple silicon)** — the `.dmg` is **unsigned** (no Apple Developer account yet), so macOS refuses it the first time: right-click the app → *Open* → *Open*, or run `xattr -dr com.apple.quarantine "/Applications/EdgeSlicer.app"` once.
 
@@ -106,7 +106,7 @@ build_release_vs2022.bat            # Windows: VS 2022, CMake <= 3.31, git-lfs, 
 cd build && ctest --output-on-failure          # tests (Catch2)
 ```
 
-Headless slicing for scripts and agents: `python scripts/orca_cli.py --exe <snapmaker-orca.exe> --printer "Snapmaker U1 (0.4 nozzle)" --process "0.20 Standard @Snapmaker U1 (0.4 nozzle)" --filament "Snapmaker PLA Matte @U1" --export-3mf out.3mf model.stl` slices with presets by name, streams JSON progress, and returns time/filament estimates, G-code paths and warnings (`result.json`); see [docs/superpowers/specs/2026-09-01-headless-slicer-roadmap.md](docs/superpowers/specs/2026-09-01-headless-slicer-roadmap.md).
+Headless slicing for scripts and agents: `python scripts/orca_cli.py --exe <EdgeSlicer.exe> --printer "Snapmaker U1 (0.4 nozzle)" --process "0.20 Standard @Snapmaker U1 (0.4 nozzle)" --filament "Snapmaker PLA Matte @U1" --export-3mf out.3mf model.stl` slices with presets by name, streams JSON progress, and returns time/filament estimates, G-code paths and warnings (`result.json`); see [docs/superpowers/specs/2026-09-01-headless-slicer-roadmap.md](docs/superpowers/specs/2026-09-01-headless-slicer-roadmap.md).
 
 Windows packaging: `cpack -G NSIS` in `build/` produces the installer (needs NSIS); zip `build/Snapmaker_Orca/` for the portable build. The optional connectivity plugin lives outside this tree and is only built when `src/ultranet/CMakeLists.txt` exists, so the repository builds without it. Run `git lfs pull` after cloning on Windows. See [`CLAUDE.md`](CLAUDE.md) and [`AGENTS.md`](AGENTS.md) for details.
 
