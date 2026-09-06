@@ -101,6 +101,9 @@ std::string export_name_for(int plate, const std::string& extension);
 // `upload_name` defaults are for (-1 = the current one).
 void describe_bambu(MachineObject* m, nlohmann::json& p);
 void list_hosts(nlohmann::json& printers, int plate = -1);
+// The upload name a Snapmaker over the LAN gets for `plate` (always the plate's G-code, whatever
+// the preset's vendor). GUI thread; the LAN listing itself happens off it.
+std::string lan_upload_name(int plate = -1);
 
 } // namespace RemoteSend
 } // namespace GUI

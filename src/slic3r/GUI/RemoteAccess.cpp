@@ -950,11 +950,13 @@ RemoteAccess::ApiResponse RemoteAccess::api_object_transform(const std::string& 
 
 RemoteAccess::ApiResponse RemoteAccess::api_printers(int plate)
 {
-    auto out     = std::make_shared<nlohmann::json>();
-    auto targets = std::make_shared<std::vector<RemoteControl::HostTarget>>();
-    bool ok  = run_on_main([out, targets, plate]() {
+    auto out      = std::make_shared<nlohmann::json>();
+    auto targets  = std::make_shared<std::vector<RemoteControl::HostTarget>>();
+    auto lan_name = std::make_shared<std::string>();
+    bool ok  = run_on_main([out, targets, lan_name, plate]() {
         nlohmann::json& j = *out;
         j["printers"]     = nlohmann::json::array();
+        *lan_name         = RemoteSend::lan_upload_name(plate);
         DeviceManager* dm = wxGetApp().getDeviceManager();
         // The printer preset's print host and the connected Snapmaker are printers too (RemoteSend).
         // `plate` (from ?plate=) says which plate the upload_name defaults are for; -1 = the current one.
@@ -999,6 +1001,22 @@ RemoteAccess::ApiResponse RemoteAccess::api_printers(int plate)
     });
     ApiResponse r;
     if (!ok) { r.status = 503; r.body = json_error("the slicer is busy"); return r; }
+    // The Snapmakers on the LAN: listing them probes each one over HTTP (4 s timeout) when the
+    // 4 s status cache is stale, so it belongs on this request thread, never on the GUI one - on
+    // the GUI thread every Devices-page poll from the phone parked the window for the length of
+    // the probes and the queue never drained (2026-09-06 "not responding"). They go first, as the
+    // list had them before.
+    {
+        nlohmann::json lan = nlohmann::json::array();
+        try { SnapmakerLan::list_printers(lan); } catch (...) {}
+        nlohmann::json merged = nlohmann::json::array();
+        for (nlohmann::json& p : lan) {
+            if (p.value("kind", std::string()) == "snapmaker") p["upload_name"] = *lan_name;
+            merged.push_back(std::move(p));
+        }
+        for (nlohmann::json& p : (*out)["printers"]) merged.push_back(std::move(p));
+        (*out)["printers"] = std::move(merged);
+    }
     // A print host has no live status in the app: ask it over Moonraker's HTTP API from this
     // request thread, never from the GUI one (api_snapmaker_devices probes the same way).
     try { RemoteControl::describe_hosts(*targets, (*out)["printers"]); } catch (...) {}

@@ -1007,19 +1007,18 @@ std::string export_name_for(int plate, const std::string& extension)
     return std::string(base.ToUTF8().data()) + suffix + extension;
 }
 
+std::string lan_upload_name(int plate) { return export_name_for(plate, ".gcode"); }
+
 void list_hosts(json& printers, int plate)
 {
-    // Every Snapmaker on the LAN is a printer the phone can send to, with no connect step.
-    try { SnapmakerLan::list_printers(printers); } catch (...) {}
+    // The Snapmakers on the LAN are listed by the caller from its own thread (RemoteAccess::
+    // api_printers): listing them probes each one over HTTP with a 4 s timeout when the status
+    // cache is stale, and this function runs on the GUI thread. Doing it here froze the whole
+    // window while the phone's Devices page polled (2026-09-06).
     PresetBundle*       bundle = wxGetApp().preset_bundle;
     DynamicPrintConfig& cfg    = bundle->printers.get_edited_preset().config;
     const bool          use_3mf = bundle->is_bbl_vendor();
     const std::string   upload_name = export_name_for(plate, use_3mf ? ".gcode.3mf" : ".gcode");
-    // A Snapmaker over the LAN always takes the plate's G-code (prepare_snapmaker), whatever the
-    // preset's vendor: the phone shows that name in the Send sheet and can still change it.
-    const std::string   lan_name = export_name_for(plate, ".gcode");
-    for (json& p : printers)
-        if (p.value("kind", std::string()) == "snapmaker") p["upload_name"] = lan_name;
     const std::string   url         = cfg.opt_string("print_host");
     if (!url.empty() && !bundle->use_bbl_network()) {
         std::unique_ptr<PrintHost> host(PrintHost::get_print_host(&cfg, false));

@@ -19,6 +19,7 @@
 #include <cstdio>
 #include <future>
 #include <map>
+#include <set>
 #include <mutex>
 
 namespace Slic3r {
@@ -519,20 +520,35 @@ static Status probe(const Device& d, std::vector<Toolhead>* heads = nullptr)
     return s;
 }
 
+// Devices whose probe is in flight right now: a second caller with a stale answer in hand takes
+// that answer instead of queueing another 4 s probe behind the first (the phone's Devices page
+// polls from several request threads at once).
+static std::set<std::string> s_probing;
+
 static Cached probe_cached(const Device& d, bool fresh = false)
 {
-    if (!fresh) {
+    {
         std::lock_guard<std::mutex> lock(s_status_mutex);
         auto                        it = s_status.find(d.id);
-        if (it != s_status.end() && now_ms() - it->second.when < STATUS_TTL_MS)
+        if (!fresh && it != s_status.end() && now_ms() - it->second.when < STATUS_TTL_MS)
             return it->second;
+        if (!fresh && it != s_status.end() && s_probing.count(d.id))
+            return it->second; // stale, but somebody is already refreshing it
+        s_probing.insert(d.id);
     }
     Cached c;
-    c.st   = probe(d, &c.heads);
+    try {
+        c.st = probe(d, &c.heads);
+    } catch (...) {
+        std::lock_guard<std::mutex> lock(s_status_mutex);
+        s_probing.erase(d.id);
+        throw;
+    }
     c.when = now_ms();
     {
         std::lock_guard<std::mutex> lock(s_status_mutex);
         s_status[d.id] = c;
+        s_probing.erase(d.id);
     }
     return c;
 }
