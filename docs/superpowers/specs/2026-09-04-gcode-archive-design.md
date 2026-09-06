@@ -404,9 +404,27 @@ GET    /api/archive?printer=&limit=&since=&pinned=
 GET    /api/archive/{id}
 GET    /api/archive/{id}/thumbnail.png
 POST   /api/archive/{id}/send
-POST   /api/archive/{id}/pin        ?on=0|1
+POST   /api/archive/{id}/pin        ?on=0|1        <- stage 3
 POST   /api/archive/{id}/delete
+DELETE /api/archive/{id}                            <- stage 1's delete, kept
 ```
+
+**What stages 1 and 2 actually shipped**, against the sketch above: `GET /api/archive?printer=`,
+`GET /api/archive/{id}`, `GET /api/archive/{id}/thumbnail.png`, `POST /api/archive/{id}/send`,
+`POST /api/archive/{id}/delete` and the `DELETE /api/archive/{id}` stage 1 already had. `limit`,
+`since` and `pinned` are not implemented (a 100-record listing is one small JSON), and `pin` is
+stage 3. Two deviations from the paragraphs below, both deliberate:
+
+- **A record whose file is gone answers 409, not 410.** Everything else a reprint can refuse -
+  a printer of another kind, a printer that is busy, an empty toolhead - is a 409 already, and the
+  phone treats one refusal shape. The error text names the reason.
+- **`GET /api/archive` and `GET /api/archive/{id}` carry `exists`**, so a row can be shown greyed
+  with *file gone* rather than only failing when it is tapped.
+
+Stage 2 also stops short of the design's full send surface: **reprinting is Snapmaker-LAN and
+print-host only.** A `bambu` or `connect` record refuses with a 409 that says so, for the reason in
+open question 1 - a gcode 3mf whose `PrintParams` were composed for another send is unproven on
+hardware, and the MQTT path starts its print from the PC's own preprint page.
 
 **`GET /api/archive`** → `{ "records": [ … ], "total": 137, "kept": 100, "bytes": 4102338911,
 "dir_set": true }`. Each record is its sidecar minus `presets` and with `file.stored` dropped (a
@@ -524,15 +542,26 @@ Effort is in ideal days for one person who knows this codebase, excluding the ha
 
 | Stage | What | Effort |
 |---|---|---|
-| **1** *(in flight, `feat/gcode-archive`)* | The three Ultra preferences; archive on every send from `RemoteSend::Prepared`; the record layout of §4.2; sidecar v1; newest-N retention; `GET /api/archive` + manifest + allow-list; the gate | 2-3 d |
+| **1** *(done, on `feat/ultra-preferences`)* | The three Ultra preferences; archive on every send from `RemoteSend::Prepared`; the record layout (flat `<id>.json` / `<id><ext>` / `<id>.png` in one folder rather than §4.2's per-record directories); sidecar v1; newest-N retention; `GET /api/archive`, `/thumbnail.png`, `DELETE` + manifest + allow-list; `test_gcode_archive.py` | 2-3 d |
 | **1b** | The four desktop entry points through the same writer (`Plater::print_job_finished`, `Plater::send_job_finished`, `PrintHostJobQueue::priv::perform_job` before `remove_source()`, `SSWCP::sw_MachinePrintStart`) - a small adapter that fills a `Prepared` from what those paths already hold. Without this the preference is called *store any gcode sent to any printer* and means *sent from the phone* | 1 d |
-| **1d** | **Spoolman on phone sends** (suggestion 12, requested by the user 2026-09-04): call `SpoolmanDialog::deduct_after_send_async()` from `RemoteSend::run`'s success path for print-host and Snapmaker sends, the same as the two desktop call sites, so a phone send deducts filament like a desktop one; guarded by the existing `spoolman_deduct` setting; the gate asserts the deduction request reaches a mock Spoolman with the plate's filament usage. Rides in the same writer hook as 1b so the send funnel is written once | 0.5 d |
+| **1d** *(done, `feat/gcode-archive-stage2`)* | **Spoolman on phone sends** (suggestion 12): `RemoteSend::run`'s success path calls `SpoolmanDialog::deduct_after_send_async()` through `CallAfter` for the print-host and Snapmaker-LAN kinds, so the send thread is never held and a Spoolman that is down can only log. The gate (`Spoolman::enabled()` and `spoolman_deduct`) is read on the GUI thread in `prepare()`, kept on `Prepared::spoolman_deduct` and written into the sidecar as `spoolman_deduct` so a record says whether a deduction was attempted. A reprint deducts nothing: there is no plate loaded to deduct. `mock_spoolman.py` + `test_gcode_archive2.py` assert the `PUT /api/v1/spool/{id}/use` reaches it with the plate's grams | 0.5 d |
 | **1c** | The thumbnail, extracted from the archived bytes on a worker thread (§2b): the `; thumbnail` block parser of `SSWCP.cpp:200` for `.gcode`, the miniz pattern of `Snapshot.cpp:179` for `Metadata/plate_*.png` in a 3mf. Retroactive, so it can also fill in records written before it existed | 1 d |
-| **2** | Reprint: `POST /api/archive/{id}/send` built on `RemoteSend::run` with a `prepare_from_record`; `/thumbnail.png`; `/delete`; the **Reprints** tab with the list, filters, one-tap reprint to the same printer and the mapping step pre-filled from the record | 3-4 d |
+| **2** *(done, `feat/gcode-archive-stage2`)* | Reprint: `RemoteSend::prepare_from_record()` fills the same `Prepared` from a record - no re-slice, no project, the archived bytes are the payload - and `POST /api/archive/{id}/send` runs it through the same `RemoteSend::run()`, the same one-send-at-a-time lock and the same `{job, …}` / `GET /api/jobs/{id}` shape as a plate send. Plus `GET /api/archive/{id}`, `POST /api/archive/{id}/delete`, the manifest and allow-list entries, and the phone's **Reprints** tab: newest first with thumbnail, name, printer, when and size, printer filter chips, a detail sheet with one-tap *Reprint to \<printer\>* (confirm, then the Send sheet's own progress) and *Delete*. **Not** done in stage 2: the mapping step pre-filled from the record (the recorded mapping is replayed server-side instead, and a dry run returns the proposal the phone would need), and Bambu / connect reprints | 3-4 d |
 | **3** | Outcome linking (`RemoteEvents` → the record, §7 of the events design), `pinned`, the size cap, dedupe by sha256 with a `sent[]` entry instead of a second copy | 2 d |
 | **4** | Reprint to another printer with the compatibility gate and the destination mapping step; per-printer cap | 2 d |
 | **5** | The hub-side reader: `GET /r/<token>/archive`, the folder pointer in `hub.json`, and "no slicer open → start one, then reprint" | 2 d |
 | **6** *(optional)* | Skip the upload when the printer still holds the file; fleet statistics; the *what can I print now* match over the archive | 2-4 d each |
+
+**What is left, in the order it earns its keep.** 1b (the four desktop entry points - until they are
+wired, *store any gcode sent to any printer* still means *sent from the phone or the Device page*)
+and 1c (the thumbnail extracted from the archived bytes, so a record made by a hidden instance has a
+picture). Then stage 3's `pinned`, outcome linking and sha256 dedupe. Then, on the phone, the
+mapping step pre-filled from the record with the *last time* line (§6, suggestion 9) - stage 2
+replays the recorded mapping faithfully but shows it only as a line of text, so a toolhead whose
+contents changed since is not called out before the confirm. Then stage 4's reprint to another
+printer of the same kind through the picker (`printer=` already accepts one; what is missing is the
+phone's UI and the model / toolhead-count checks), and the Bambu and connect kinds, both of which
+need the hardware pass below.
 
 The gate follows the shape of `test_phone_send.py` / `test_phone_events.py`: an isolated data dir, a
 mock print host, records written by hand into a temp archive folder, and every assertion about
@@ -666,6 +695,44 @@ it, what it costs, and where u1hub has already done it.
     one", adopting prints already running, and taking a printer out of service without unplugging it.
 
 ---
+
+## 11a. Stage 2 hardware checklist
+
+Everything above was proven against `mock_printhost.py` and `mock_spoolman.py`; nothing in stage 2
+has met a real printer. This is what to try on the phone, in this order, with the real machines -
+each step says what should happen, so a wrong answer is recognisable without reading the code.
+
+1. **The list.** Send a plate to the U1 from the phone as usual, then open *Reprints*. The row
+   should be at the top with the file's name, *U1 · LAN*, *just now*, its size and its filament
+   swatches. A record made while a slicer window was hidden may have no preview - that is 1c, not a
+   fault.
+2. **Reprint the last job to the same U1.** Tap the row, tap *Reprint to \<U1\>*, confirm. Watch the
+   bar: it should upload at the archived size, and - for a record that was a print - start with the
+   toolheads the sidecar names. Check on the printer that the file name matches the row, and that
+   the archive did **not** grow by a record (a reprint replays, it does not re-archive).
+3. **Reprint an upload-only record.** The button should say it uploads without starting, and the
+   printer should hold the file without moving.
+4. **The H2S refusal.** Send a plate to the Bambu H2S from the phone so a `bambu` record exists,
+   then try to reprint it. It must refuse with *reprinting to a bambu printer is not supported yet*
+   and offer nothing - not start a print, not upload. (When that limit is lifted, open question 1
+   is what has to be answered first: does an H2S accept a gcode 3mf whose `PrintParams` were
+   composed for a different send?)
+5. **Wrong kind, deliberately.** With both a U1 record and a print-host record in the list, the
+   phone only ever offers the recorded printer, so this one needs the API:
+   `POST /api/archive/<a U1 record>/send` with `confirm=1&printer=host` must answer 409 naming both
+   kinds, and nothing may leave the PC.
+6. **A busy printer.** Start a print on the U1 by hand, then try a reprint to it: 409 saying it is
+   printing, before any upload.
+7. **An empty toolhead.** Unload one toolhead the record used, then reprint: it must refuse with
+   *toolhead N is empty* rather than printing into air.
+8. **Delete.** Delete a record from the phone; the row goes, the file and its preview leave the
+   archive folder on the PC, and the printer is untouched (the copy on the printer stays).
+9. **Spoolman (stage 1d).** With a Spoolman server configured and *Deduct filament usage when
+   sending a print* on, and a spool bound to a slot in the Spool Manager: a phone send to the U1 or
+   to a print host should drop that spool's remaining weight by the plate's grams, and the PC should
+   show the *Spool Manager: deducted …* notification. A **reprint** should deduct nothing.
+10. **The archive folder on a NAS or an external drive.** Point the preference at one, send, and pull
+    the drive mid-send: the send must finish and the archive must only log.
 
 ## 12. Open questions
 

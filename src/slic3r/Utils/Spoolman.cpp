@@ -104,7 +104,13 @@ bool Spoolman::use_weight(int spool_id, double grams, std::string& error)
     bool ok = false;
     json body;
     body["use_weight"] = grams;
-    auto http = Http::put(base + "/api/v1/spool/" + std::to_string(spool_id) + "/use");
+    // put2(), not put(): Http::put() is the file-upload PUT - it sets CURLOPT_UPLOAD, and
+    // http_perform() then installs a read callback whose user data is only ever set by
+    // set_put_body(a path). With a JSON body set through set_post_body() that callback is handed
+    // curl's default read data (stdin) and dereferences it, which takes the process down before
+    // anything reaches the server. put2() is a plain PUT that sends POSTFIELDS, which is what a
+    // Spoolman deduction is. (The same trap is noted at RemoteHub.cpp's go2rtc stream call.)
+    auto http = Http::put2(base + "/api/v1/spool/" + std::to_string(spool_id) + "/use");
     http.timeout_connect(4)
         .timeout_max(10)
         .header("Content-Type", "application/json")

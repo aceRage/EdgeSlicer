@@ -50,6 +50,13 @@ struct Meta
     int         estimated_time_s { 0 };
     double      estimated_weight_g { 0.0 };
     std::string thumbnail_png;  // raw PNG bytes of the plate's small thumbnail, "" = none
+    // Snapmaker over the LAN: which toolhead printed which of the file's filaments, in the wire
+    // form /api/plates/{i}/send takes ("0:2,1:1"). A reprint replays it rather than deriving it
+    // again, which is where "what we printed" and "what we replay" would quietly diverge.
+    std::string mapping;
+    // Stage 1d: a Spoolman deduction was asked for after this send (the preference was on and a
+    // server was configured). Whether the server accepted it is Spoolman's business, not ours.
+    bool        spoolman_deduct { false };
 };
 
 // One archived send, as the sidecar holds it.
@@ -61,6 +68,7 @@ struct Record
     std::string    path;       // its full path on this PC - never leaves the instance API
     long long      size { 0 };
     std::string    sha256;
+    bool           file_present { false }; // the archived file is still on disk (stage 2 can send it)
     bool           has_thumbnail { false };
     std::string    thumbnail_path;
     nlohmann::json json;       // the whole sidecar, as read

@@ -199,6 +199,20 @@ body.dragging .cell iframe, body.dragging .cell img { pointer-events: none; }
 .pushbox .txt b { color: #fff; font-weight: 600; display: block; font-size: 13px; margin-bottom: 2px; }
 .pushbox .dot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: #555; }
 .pushbox.on .dot { background: #5fd08a; }
+/* The Reprints tab: the G-code archive, one row per file this PC has sent to a printer. The row
+   is the whole tap target - a phone has no hover, so a hidden button on a row is a lost button. */
+.view .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+.view .chips .f { padding: 5px 11px; border-radius: 14px; background: #333; color: #bbb; font-size: 12px; cursor: pointer; user-select: none; }
+.view .chips .f.on { background: #0a9e50; color: #fff; }
+.rp { display: flex; gap: 10px; align-items: center; background: #2f2f2f; border-radius: 8px; padding: 8px 10px; margin-bottom: 8px; cursor: pointer; }
+.rp .th { width: 56px; height: 56px; flex: none; border-radius: 6px; background: #222; object-fit: contain; }
+.rp .noth { width: 56px; height: 56px; flex: none; border-radius: 6px; background: #262626; color: #666; display: flex; align-items: center; justify-content: center; font-size: 11px; }
+.rp .body { flex: 1; min-width: 0; }
+.rp .body .name { color: #fff; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rp .body .meta { color: #9a9a9a; font-size: 12px; line-height: 1.5; }
+.rp .body .sw { display: inline-block; width: 10px; height: 10px; border-radius: 3px; border: 1px solid #666; margin-right: 3px; vertical-align: -1px; }
+.rp .chev { flex: none; color: #777; font-size: 16px; }
+.rp.gone { opacity: .5; }
 /* The Devices tab's event list: what the printers have done, newest first, in the card styling. */
 .evbox { background: #2f2f2f; border-radius: 8px; padding: 8px 12px 10px; margin-bottom: 10px; }
 .evbox .evhead { display: flex; align-items: center; gap: 8px; margin-bottom: 2px; }
@@ -279,7 +293,7 @@ body.dragging .cell iframe, body.dragging .cell img { pointer-events: none; }
 </head>
 <body>
 <div id="topbar">
-  <span id="tabs"><span class="tab active" data-view="streams">Streams</span><span class="tab" data-view="prepare">Prepare</span><span class="tab" data-view="devices">Devices</span></span>
+  <span id="tabs"><span class="tab active" data-view="streams">Streams</span><span class="tab" data-view="prepare">Prepare</span><span class="tab" data-view="devices">Devices</span><span class="tab" data-view="reprints">Reprints</span></span>
   <span id="chips"></span>
   <span class="chip" id="addchip">+ Add</span>
   <span class="chip" id="phonechip" title="Open this camera wall on your phone">&#128241; Phone</span>
@@ -293,6 +307,7 @@ body.dragging .cell iframe, body.dragging .cell img { pointer-events: none; }
 <div id="grid"></div>
 <div id="prepare" class="view"></div>
 <div id="devices" class="view"></div>
+<div id="reprints" class="view"></div>
 <div id="sheet"><div class="head"></div><div class="pagetabs"></div><div class="body"></div><div class="toast"></div></div>
 <div id="plate"><div class="head"></div><div class="canvas"></div><div class="ctl"></div></div>
 <div id="send"><div class="head"></div><div class="body"></div></div>
@@ -1208,7 +1223,9 @@ body.dragging .cell iframe, body.dragging .cell img { pointer-events: none; }
         try { localStorage.setItem('snorca_remote_inst', String(id)); } catch (e) {}
         lastPresetsJson = ''; activeJob = null;
         renderInstBar();
-        if (view === 'prepare') refreshPrepare(); else if (view === 'devices') refreshDevices();
+        if (view === 'prepare') refreshPrepare();
+        else if (view === 'devices') refreshDevices();
+        else if (view === 'reprints') { rpJson = ''; refreshReprints(); }
     }
     function refreshInstances(then) {
         hubApi('/instances').then(function(j) {
@@ -1351,12 +1368,14 @@ body.dragging .cell iframe, body.dragging .cell img { pointer-events: none; }
         document.getElementById('grid').style.display = v === 'streams' ? '' : 'none';
         document.getElementById('prepare').style.display = v === 'prepare' ? 'block' : 'none';
         document.getElementById('devices').style.display = v === 'devices' ? 'block' : 'none';
+        document.getElementById('reprints').style.display = v === 'reprints' ? 'block' : 'none';
         document.getElementById('chips').style.display = v === 'streams' ? '' : 'none';
         document.getElementById('layoutbox').style.display = v === 'streams' ? '' : 'none';
         if (v === 'streams') render(); // tile sizes come from the grid's on-screen size
         if (viewTimer) { clearInterval(viewTimer); viewTimer = null; }
         if (v === 'prepare') { lastPresetsJson = ''; refreshInstances(refreshPrepare); viewTimer = setInterval(function() { refreshInstances(refreshPrepare); }, 10000); }
         if (v === 'devices') { refreshEvents(); refreshInstances(refreshDevices); viewTimer = setInterval(function() { refreshEvents(); refreshInstances(refreshDevices); }, 5000); }
+        if (v === 'reprints') { rpJson = ''; refreshInstances(refreshReprints); viewTimer = setInterval(function() { refreshInstances(refreshReprints); }, 15000); }
         try { localStorage.setItem('snorca_remote_view', v); } catch (e) {}
     }
     function el(tag, cls, text) {
@@ -2339,6 +2358,7 @@ body.dragging .cell iframe, body.dragging .cell img { pointer-events: none; }
     // desktop's Send / Print dialogs do (POST /api/plates/{i}/send, followed through /api/jobs) ----
     var sendState = null; // { plate, printers, sel, opts, name, force, phase: pick|confirm|running|done|error, mode, job, timer, percent, text, error, result }
     function sendOpen(plateInfo) {
+        rpClose(); // one full-screen sheet, one send at a time: whichever opens last owns it
         if (sendState && sendState.timer) clearTimeout(sendState.timer);
         sendState = { plate: plateInfo, printers: [], sel: null, opts: {}, name: '', force: false, phase: 'pick', mode: '', job: null, timer: null, percent: 0, text: '', error: '', result: null, filaments: [], map: {} };
         document.getElementById('send').style.display = 'flex';
@@ -2880,6 +2900,309 @@ body.dragging .cell iframe, body.dragging .cell img { pointer-events: none; }
         d.appendChild(el('div', 'k', label));
         return d;
     }
+    // ---- Reprints: the G-code archive (Preferences > Ultra > Store G-Code Files). Every file the
+    // PC has sent to a printer while it was on, newest first, ready to go to a printer again
+    // without the project being open - the stored bytes are the payload, so nothing is re-sliced.
+    // GET /api/archive lists them, POST /api/archive/{id}/send replays one, and the job it answers
+    // with is followed exactly like a plate send's. ----
+    var rpRecords = [], rpFilter = '', rpJson = '', rpState = null;
+    function rpWhen(sec) {
+        var d = Math.floor(Date.now() / 1000 - (sec || 0));
+        if (d < 0) d = 0;
+        if (d < 90) return 'just now';
+        if (d < 5400) return Math.round(d / 60) + ' min ago';
+        if (d < 172800) return Math.round(d / 3600) + ' h ago';
+        return Math.round(d / 86400) + ' days ago';
+    }
+    function rpSize(b) {
+        b = b || 0;
+        if (b >= 1048576) return (b / 1048576).toFixed(1) + ' MB';
+        if (b >= 1024) return Math.round(b / 1024) + ' kB';
+        return b + ' B';
+    }
+    function rpKind(k) {
+        return k === 'printhost' ? 'print host' : k === 'snapmaker' ? 'LAN' : k === 'connect' ? 'connected'
+             : k === 'bambu' ? 'Bambu' : (k || '');
+    }
+    function rpPrinter(rec) { return (rec && rec.printer) || {}; }
+    function rpName(rec) { return (rec && (rec.sent_name || rec.file)) || rec.id; }
+    // A reprint replays the record's own mode: an upload stays an upload, a print stays a print.
+    function rpCanSend(rec) {
+        var k = rpPrinter(rec).kind;
+        return rec.exists !== false && (k === 'snapmaker' || k === 'printhost');
+    }
+    function rpWhyNot(rec) {
+        if (rec.exists === false) return 'The stored file is gone - retention removed it, or the archive folder moved.';
+        var k = rpPrinter(rec).kind;
+        if (k === 'bambu') return 'Reprinting to a Bambu printer is not supported yet. Send that plate from the Prepare tab.';
+        if (k === 'connect') return 'This one went out over the PC\u2019s own connection; send it from the Prepare tab.';
+        return 'This record cannot be sent again.';
+    }
+    function refreshReprints() {
+        var root = document.getElementById('reprints');
+        if (!instSel) {
+            root.innerHTML = '';
+            root.appendChild(el('div', 'empty', 'No slicer is open on the PC. The stored files are listed by the slicer.'));
+            rpJson = '';
+            return;
+        }
+        api('/archive').then(function(j) {
+            rpRecords = j.records || [];
+            var sig = JSON.stringify([!!j.enabled, j.max, rpFilter, rpRecords]);
+            if (sig === rpJson) return; // nothing moved: leave the list, and the scroll, alone
+            rpJson = sig;
+            rpRender(j);
+        }).catch(function(e) {
+            root.innerHTML = '';
+            root.appendChild(el('div', 'empty', 'Cannot reach the slicer: ' + e.message));
+            rpJson = '';
+        });
+    }
+    function rpRender(j) {
+        var root = document.getElementById('reprints');
+        root.innerHTML = '';
+        if (!j.enabled) {
+            root.appendChild(el('div', 'empty', 'Storing G-code files is off. Turn on Preferences \u203a Ultra \u203a Store G-Code Files on the PC, and every file sent to a printer from then on can be sent again from here.'));
+            if (!rpRecords.length) return;
+        }
+        // One chip per printer these files went to, in the order the list has them.
+        var seen = {}, order = [];
+        rpRecords.forEach(function(r) {
+            var p = rpPrinter(r);
+            if (!p.id || seen[p.id]) return;
+            seen[p.id] = p;
+            order.push(p);
+        });
+        if (order.length > 1) {
+            var chips = el('div', 'chips');
+            var all = el('span', 'f' + (rpFilter ? '' : ' on'), 'All');
+            all.onclick = function() { rpFilter = ''; rpJson = ''; refreshReprints(); };
+            chips.appendChild(all);
+            order.forEach(function(p) {
+                var c = el('span', 'f' + (rpFilter === p.id ? ' on' : ''), p.name || p.id);
+                c.onclick = function() { rpFilter = (rpFilter === p.id ? '' : p.id); rpJson = ''; refreshReprints(); };
+                chips.appendChild(c);
+            });
+            root.appendChild(chips);
+        }
+        var rows = rpRecords.filter(function(r) { return !rpFilter || rpPrinter(r).id === rpFilter; });
+        if (!rows.length) {
+            root.appendChild(el('div', 'empty', rpRecords.length
+                ? 'Nothing stored for that printer.'
+                : 'Nothing stored yet. Every file the PC sends to a printer lands here, and can be sent again without the project being open.'));
+            return;
+        }
+        rows.forEach(function(rec) { root.appendChild(rpRow(rec)); });
+    }
+    function rpRow(rec) {
+        var row = el('div', 'rp' + (rec.exists === false ? ' gone' : ''));
+        if (rec.has_thumbnail) {
+            var img = document.createElement('img');
+            img.className = 'th';
+            img.alt = '';
+            img.loading = 'lazy';
+            img.src = instBase() + 'api/archive/' + encodeURIComponent(rec.id) + '/thumbnail.png';
+            img.onerror = function() { var n = el('div', 'noth', 'no preview'); if (img.parentNode) img.parentNode.replaceChild(n, img); };
+            row.appendChild(img);
+        } else {
+            row.appendChild(el('div', 'noth', 'no preview'));
+        }
+        var body = el('div', 'body');
+        body.appendChild(el('div', 'name', rpName(rec)));
+        var p = rpPrinter(rec);
+        var bits = [(p.name || p.id || 'unknown printer') + (p.kind ? ' \u00b7 ' + rpKind(p.kind) : ''), rpWhen(rec.time), rpSize(rec.size)];
+        if (rec.mode === 'print') bits.push('printed');
+        if (rec.exists === false) bits.push('file gone');
+        body.appendChild(el('div', 'meta', bits.join(' \u00b7 ')));
+        var fils = rec.filaments || [];
+        if (fils.length) {
+            var strip = el('div', 'meta');
+            fils.forEach(function(f) {
+                var sw = el('span', 'sw');
+                sw.style.background = /^#[0-9a-fA-F]{6}$/.test(f.colour || '') ? f.colour : '#444';
+                sw.title = (f.type || '') + (f.grams ? ' \u00b7 ' + Math.round(f.grams) + ' g' : '');
+                strip.appendChild(sw);
+            });
+            if (rec.estimated_time_s) strip.appendChild(el('span', '', ' ' + fmtTime(rec.estimated_time_s)));
+            if (rec.estimated_weight_g) strip.appendChild(el('span', '', ' \u00b7 ' + Math.round(rec.estimated_weight_g) + ' g'));
+            body.appendChild(strip);
+        }
+        row.appendChild(body);
+        row.appendChild(el('div', 'chev', '\u203a'));
+        row.onclick = function() { rpOpen(rec); };
+        return row;
+    }
+    // ---- One record, in the same full-screen sheet the Send flow uses: its details, one tap to
+    // send it again, and a delete. The two never share the sheet - opening one closes the other. ----
+    function rpOpen(rec) {
+        sendClose();
+        if (rpState && rpState.timer) clearTimeout(rpState.timer);
+        rpState = { rec: rec, phase: 'view', mode: rec.mode === 'print' ? 'print' : 'upload',
+                    job: null, timer: null, percent: 0, text: '', error: '', result: null };
+        document.getElementById('send').style.display = 'flex';
+        rpRenderSheet();
+    }
+    function rpClose() {
+        if (rpState && rpState.timer) clearTimeout(rpState.timer);
+        rpState = null;
+        document.getElementById('send').style.display = 'none';
+    }
+    function rpRenderSheet() {
+        var s = rpState; if (!s) return;
+        var rec = s.rec, p = rpPrinter(rec);
+        var sh = document.getElementById('send'), head = sh.querySelector('.head'), body = sh.querySelector('.body');
+        // While the transfer runs only the bar and the line under it move: no flicker under a finger.
+        if (s.phase === 'running' && body.querySelector('.bar')) {
+            body.querySelector('.bar div').style.width = (s.percent || 0) + '%';
+            body.querySelector('.info.prog').textContent = s.text || '';
+            return;
+        }
+        head.innerHTML = ''; body.innerHTML = '';
+        head.appendChild(el('div', 'name', rpName(rec)));
+        var close = el('span', 'btn alt', s.phase === 'running' ? 'Hide' : 'Close');
+        close.title = s.phase === 'running' ? 'The transfer keeps running on the PC' : '';
+        close.onclick = rpClose;
+        head.appendChild(close);
+
+        var card = el('div', 'plate', rpName(rec));
+        var sub = [(p.name || p.id || 'unknown printer') + (p.kind ? ' \u00b7 ' + rpKind(p.kind) : ''), rpWhen(rec.time), rpSize(rec.size)];
+        if (rec.project_title) sub.push(rec.project_title);
+        if (rec.plate_name) sub.push(rec.plate_name);
+        else if (typeof rec.plate === 'number' && rec.plate >= 0) sub.push('plate ' + (rec.plate + 1));
+        card.appendChild(el('span', 'sub', sub.join(' \u00b7 ')));
+        body.appendChild(card);
+
+        if (s.phase === 'view' || s.phase === 'confirm' || s.phase === 'trash') {
+            var est = [];
+            if (rec.estimated_time_s) est.push(fmtTime(rec.estimated_time_s));
+            if (rec.estimated_weight_g) est.push(Math.round(rec.estimated_weight_g) + ' g');
+            est.push(rec.mode === 'print' ? 'was uploaded and printed' : 'was uploaded only');
+            body.appendChild(el('div', 'info', est.join(' \u00b7 ')));
+            (rec.filaments || []).forEach(function(f) {
+                var row = el('div', 'maprow');
+                var sw = el('span', 'sw');
+                sw.style.background = /^#[0-9a-fA-F]{6}$/.test(f.colour || '') ? f.colour : '#444';
+                row.appendChild(sw);
+                var who = el('div', 'who', 'Filament ' + ((f.index || 0) + 1) + (f.type ? ' \u00b7 ' + f.type : ''));
+                who.appendChild(el('span', 'sub', f.grams ? Math.round(f.grams) + ' g' : ''));
+                row.appendChild(who);
+                body.appendChild(row);
+            });
+            if (rec.mapping) body.appendChild(el('div', 'info', 'Toolheads last time: ' + rec.mapping.split(',').map(function(pair) {
+                var kv = pair.split(':');
+                return 'filament ' + (parseInt(kv[0], 10) + 1) + ' \u2192 toolhead ' + (parseInt(kv[1], 10) + 1);
+            }).join(', ') + '. The same mapping is replayed.'));
+            if (rec.spoolman_deduct) body.appendChild(el('div', 'info', 'Spool Manager was asked to deduct this file\u2019s filament when it was sent.'));
+            if (s.error) body.appendChild(el('div', 'info err', s.error));
+        }
+
+        if (s.phase === 'view') {
+            var acts = el('div', 'actions');
+            var can = rpCanSend(rec);
+            var go = el('span', 'btn' + (can ? (s.mode === 'print' ? ' warn' : '') : ' dim'),
+                        'Reprint to ' + (p.name || p.id || 'the printer'));
+            go.onclick = function() { if (can) { s.phase = 'confirm'; rpRenderSheet(); } };
+            acts.appendChild(go);
+            var del = el('span', 'btn stop', 'Delete');
+            del.onclick = function() { s.phase = 'trash'; rpRenderSheet(); };
+            acts.appendChild(del);
+            body.appendChild(acts);
+            body.appendChild(el('div', 'info' + (can ? '' : ' warn'), can
+                ? (s.mode === 'print'
+                    ? 'The stored file goes back to that printer under the same name and starts, with the toolheads it used last time. Nothing is re-sliced.'
+                    : 'The stored file goes back to that printer under the same name, without starting it. Nothing is re-sliced.')
+                : rpWhyNot(rec)));
+        } else if (s.phase === 'confirm') {
+            var c = el('div', 'confirm');
+            c.appendChild(el('div', '', s.mode === 'print'
+                ? 'Send ' + rpName(rec) + ' to ' + (p.name || p.id) + ' and start printing now? Make sure the bed is clear and the right filaments are loaded.'
+                : 'Send ' + rpName(rec) + ' to ' + (p.name || p.id) + ' again? It is uploaded, not started.'));
+            var ca = el('div', 'actions');
+            var yes = el('span', 'btn warn', s.mode === 'print' ? 'Start print' : 'Upload');
+            yes.onclick = rpSend;
+            ca.appendChild(yes);
+            var no = el('span', 'btn alt', 'Cancel');
+            no.onclick = function() { s.phase = 'view'; rpRenderSheet(); };
+            ca.appendChild(no);
+            c.appendChild(ca);
+            body.appendChild(c);
+        } else if (s.phase === 'trash') {
+            var d = el('div', 'confirm');
+            d.appendChild(el('div', '', 'Delete ' + rpName(rec) + ' from the PC\u2019s stored files? The file, its details and its preview go; the printer is not touched.'));
+            var da = el('div', 'actions');
+            var dy = el('span', 'btn stop', 'Delete');
+            dy.onclick = rpDelete;
+            da.appendChild(dy);
+            var dn = el('span', 'btn alt', 'Cancel');
+            dn.onclick = function() { s.phase = 'view'; rpRenderSheet(); };
+            da.appendChild(dn);
+            d.appendChild(da);
+            body.appendChild(d);
+        } else {
+            body.appendChild(el('div', 'lbl', (s.mode === 'print' ? 'Reprint' : 'Upload') + ' to ' + (p.name || p.id)));
+            var bar = el('div', 'bar');
+            bar.appendChild(el('div'));
+            bar.firstChild.style.width = (s.percent || 0) + '%';
+            body.appendChild(bar);
+            body.appendChild(el('div', 'info prog', s.text || ''));
+            if (s.phase === 'done') {
+                var dry = s.result && s.result.dry_run;
+                body.appendChild(el('div', 'done', dry ? 'Dry run: nothing was sent.'
+                    : s.mode === 'print'
+                        ? (s.result && s.result.printer_state === 'printing' ? 'Printing started.' : 'Print command sent; the printer should start shortly.')
+                        : 'Uploaded to the printer.'));
+                var oa = el('div', 'actions');
+                var ok = el('span', 'btn', 'Done');
+                ok.onclick = rpClose;
+                oa.appendChild(ok);
+                body.appendChild(oa);
+            } else if (s.phase === 'error') {
+                body.appendChild(el('div', 'info err', s.error));
+                var ea = el('div', 'actions');
+                var back = el('span', 'btn alt', 'Back');
+                back.onclick = function() { s.phase = 'view'; s.error = ''; rpRenderSheet(); };
+                ea.appendChild(back);
+                body.appendChild(ea);
+            }
+        }
+    }
+    function rpSend() {
+        var s = rpState; if (!s) return;
+        var b = 'confirm=1&mode=' + s.mode;
+        s.phase = 'running'; s.percent = 0; s.text = 'Asking the PC for the stored file\u2026'; s.error = ''; s.result = null;
+        rpRenderSheet();
+        api('/archive/' + encodeURIComponent(s.rec.id) + '/send',
+            { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: b })
+            .then(function(j) {
+                if (rpState !== s) return;
+                s.job = j.job;
+                rpPoll();
+            })
+            .catch(function(e) {
+                if (rpState !== s) return;
+                s.phase = 'view'; s.error = e.message; rpRenderSheet();
+            });
+    }
+    function rpPoll() {
+        var s = rpState;
+        if (!s || s.job === null) return;
+        api('/jobs/' + s.job).then(function(j) {
+            if (rpState !== s) return;
+            s.percent = j.percent; s.text = j.text; s.result = j.result || null;
+            if (j.state === 'running') { rpRenderSheet(); s.timer = setTimeout(rpPoll, 1000); return; }
+            if (j.state === 'done') s.phase = 'done'; else { s.phase = 'error'; s.error = j.error || ('Send ' + j.state); }
+            rpRenderSheet();
+            rpJson = '';
+        }).catch(function() { if (rpState === s) s.timer = setTimeout(rpPoll, 2000); });
+    }
+    function rpDelete() {
+        var s = rpState; if (!s) return;
+        var id = s.rec.id;
+        api('/archive/' + encodeURIComponent(id) + '/delete', { method: 'POST' })
+            .then(function() { rpClose(); rpJson = ''; refreshReprints(); })
+            .catch(function(e) { if (rpState === s) { s.phase = 'view'; s.error = e.message; rpRenderSheet(); } });
+    }
+
     function refreshDevices() {
         var root = document.getElementById('devices');
         pushRender(); // the Enable-notifications control survives every redraw of the tab
@@ -3013,7 +3336,7 @@ body.dragging .cell iframe, body.dragging .cell img { pointer-events: none; }
         pushInit();
         var v = 'streams';
         try { v = localStorage.getItem('snorca_remote_view') || 'streams'; } catch (e) {}
-        if (v === 'prepare' || v === 'devices' || v === 'plates') setView(v === 'plates' ? 'prepare' : v);
+        if (v === 'prepare' || v === 'devices' || v === 'reprints' || v === 'plates') setView(v === 'plates' ? 'prepare' : v);
     }
 })();
 </script>

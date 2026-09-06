@@ -37,6 +37,9 @@ struct Request
     // Snapmaker over the LAN: which toolhead prints which of the file's filaments,
     // "<filament>:<toolhead>,..." (0-based). Empty = the auto-match the printer's own app makes.
     std::string mapping;
+    // Stage 2 (a reprint): the G-code archive record whose bytes are the payload. Set by
+    // /api/archive/{id}/send only; a plate send leaves it empty.
+    std::string record;
 };
 
 // Everything prepare() worked out on the GUI thread; run() only performs the transfer.
@@ -66,6 +69,14 @@ struct Prepared
     // Ultra: what the G-code archive records about this send, gathered on the GUI thread by
     // prepare() so run() only has to copy the file it uploaded.
     GcodeArchive::Meta archive_meta;
+    // Stage 2: this send replays an archived record. Its bytes are already in the archive, so
+    // run() neither archives them again nor deducts filament for a plate that is not loaded.
+    bool        from_record { false };
+    std::string record_id;
+    // Stage 1d: after a successful send, ask Spoolman to deduct this plate's filament the way the
+    // desktop's own send path does. Decided on the GUI thread in prepare(), where the preference
+    // and the Spoolman URL can be read; run() only fires it.
+    bool        spoolman_deduct { false };
 };
 
 struct Sink
@@ -86,6 +97,13 @@ bool printer_ready(const std::string& printer);
 // way the desktop does and composes the parameters. {200, ""} with `out` filled, or an HTTP status
 // and an error text for the phone.
 std::pair<int, std::string> prepare(const Request& req, std::shared_ptr<Prepared>& out);
+
+// Stage 2, a reprint: the same Prepared, filled from a G-code archive record instead of from the
+// plater. There is no plate and no project - the archived bytes are the payload and the sidecar is
+// the memory - so nothing is re-sliced and no project has to be open. Any thread but the GUI one:
+// it talks to the printer, and only steps onto the GUI thread for the printer preset. Errors as
+// prepare(), plus 409 when the record's file is gone or the target printer is of another kind.
+std::pair<int, std::string> prepare_from_record(const Request& req, std::shared_ptr<Prepared>& out);
 
 // Worker thread. The upload / print start (or the dry run); reports through the sink and always
 // ends with sink.done.

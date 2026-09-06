@@ -2305,8 +2305,10 @@ static bool instance_api_allowed(const std::string& method, const std::string& s
         return id.find("%2f") == std::string::npos && id.find("%2F") == std::string::npos;
     }
 
-    // /api/archive/<id> (DELETE) and /api/archive/<id>/thumbnail.png. The id is a name the archive
-    // itself made: letters, digits, dot, dash and underscore, one segment, nothing to decode.
+    // /api/archive/<id> (GET the record, DELETE it), /api/archive/<id>/thumbnail.png, and the
+    // stage 2 pair /api/archive/<id>/send and /api/archive/<id>/delete. The id is a name the
+    // archive itself made: letters, digits, dot, dash and underscore, one segment, nothing to
+    // decode - checked here before it reaches a file system, and again by GcodeArchive::find.
     if (sub.compare(0, 13, "/api/archive/") == 0) {
         const std::string rest  = sub.substr(13);
         const size_t      slash = rest.find('/');
@@ -2314,8 +2316,11 @@ static bool instance_api_allowed(const std::string& method, const std::string& s
         if (id.empty() || id.size() > 200) return false;
         if (id.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.") != std::string::npos) return false;
         if (id == "." || id == "..") return false;
-        if (slash == std::string::npos) return del;
-        return get && rest.substr(slash) == "/thumbnail.png";
+        if (slash == std::string::npos) return get || del;
+        const std::string what = rest.substr(slash);
+        if (what == "/thumbnail.png") return get;
+        if (what == "/send" || what == "/delete") return post;
+        return false;
     }
 
     if (sub == "/api" || sub == "/api/")             return get;

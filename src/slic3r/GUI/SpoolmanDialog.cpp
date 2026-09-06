@@ -148,7 +148,15 @@ static std::vector<std::pair<int, double>> collect_plate_usage()
     GCodeProcessorResult* result = plate->get_slice_result();
     if (result == nullptr)
         return usage;
-    const auto* density_opt = wxGetApp().preset_bundle->full_config().option<ConfigOptionFloats>("filament_density");
+    // full_config() returns by value: the pointer option() hands out points into a temporary that
+    // is destroyed at the end of the statement, so reading density_opt->values afterwards was a
+    // use-after-free - harmless-looking until a caller (the phone's send path, 2026-09-06) reached
+    // it often enough for the freed block to be reused, and then it took the whole process down.
+    // One local copy, and the pointer lives as long as the loop that reads it.
+    if (wxGetApp().preset_bundle == nullptr)
+        return usage;
+    const DynamicPrintConfig   full        = wxGetApp().preset_bundle->full_config();
+    const ConfigOptionFloats*  density_opt = full.option<ConfigOptionFloats>("filament_density");
     for (const auto& [extruder, volume_mm3] : result->print_statistics.total_volumes_per_extruder) {
         const int spool_id = SpoolmanDialog::bound_spool_for_slot(int(extruder));
         if (spool_id <= 0 || volume_mm3 <= 0.)
