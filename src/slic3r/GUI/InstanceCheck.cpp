@@ -8,6 +8,7 @@
 #endif
 
 #include "libslic3r/Utils.hpp"
+#include "libslic3r/libslic3r.h"
 #include "libslic3r/Config.hpp"
 
 #include "boost/nowide/convert.hpp"
@@ -105,7 +106,10 @@ namespace instance_check_internal
 			return true;
 		std::wstring classNameString(className);
 		std::wstring wndTextString(wndText);
-		if (wndTextString.find(L"Snapmaker_Orca") != std::wstring::npos && classNameString == L"wxWindowNR") {
+		// The main window title ends in " - <SLIC3R_APP_NAME>" ("EdgeSlicer" since the rebrand); the old
+		// literal never matched again, so a second launch handed off but never raised the window.
+		if ((wndTextString.find(boost::nowide::widen(SLIC3R_APP_NAME)) != std::wstring::npos ||
+		     wndTextString.find(L"Snapmaker_Orca") != std::wstring::npos) && classNameString == L"wxWindowNR") {
 			//check if other instances has same instance hash
 			//if not it is not same version(binary) as this version 
 			HANDLE   handle = GetProp(hwnd, L"Instance_Hash_Minor");
