@@ -194,6 +194,13 @@ modules:
         dest: external-packages/CURL
         sha256: a63ae025bb0a14f119e73250f2c923f4bf89aa93b8d4fafa4a9f5353a96a765a
 
+      # nghttp2 - curl's HTTP/2 provider (deps/NGHTTP2/NGHTTP2.cmake). The flatpak build runs
+      # with no network, so a dependency missing from this list fails at the download step.
+      - type: file
+        url: https://github.com/nghttp2/nghttp2/archive/refs/tags/v1.64.0.zip
+        dest: external-packages/NGHTTP2
+        sha256: 91e9473771928a0eb03f62795d22e18d001a7c7671c6d4e6fe2feb6941d123e8
+
       # MPFR
       - type: file
         url: https://www.mpfr.org/mpfr-4.2.2/mpfr-4.2.2.tar.bz2

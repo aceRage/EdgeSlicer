@@ -28,14 +28,22 @@ elseif (APPLE)
   # macOS: build shared libs so we get libsentry.dylib
   # Note: CURL transport requires OpenSSL, need to link it explicitly
   # DESTDIR already contains /usr/local/ suffix, so use it directly
-  set(_sentry_platform_flags 
+  #
+  # -lnghttp2 is there for exactly the reason -lssl and -lcrypto are. sentry-native's CURL
+  # transport links the *static* libcurl this deps tree builds, and it finds it through CMake's
+  # stock FindCURL module, which hands back the bare path to libcurl.a and none of curl's own
+  # private dependencies. Since curl is now configured with USE_NGHTTP2 (deps/CURL/CURL.cmake),
+  # lib/http2.c leaves every nghttp2_* symbol undefined and libsentry.dylib does not link. The
+  # top-level build covers this by attaching NGHTTP2::nghttp2 to the imported libcurl target, but
+  # a sub-project configured on its own never sees that, so the library is named here.
+  set(_sentry_platform_flags
     ${_sentry_platform_flags}
     -DSENTRY_TRANSPORT_CURL=ON
     -DSENTRY_BUILD_SHARED_LIBS=ON
     -DCMAKE_BUILD_TYPE:STRING=RelWithDebInfo
     -DOPENSSL_ROOT_DIR:PATH=${DESTDIR}
     -DOPENSSL_USE_STATIC_LIBS:BOOL=ON
-    -DCMAKE_SHARED_LINKER_FLAGS:STRING=-L${DESTDIR}/lib\ -lssl\ -lcrypto
+    -DCMAKE_SHARED_LINKER_FLAGS:STRING=-L${DESTDIR}/lib\ -lssl\ -lcrypto\ -lnghttp2
   )
   set(_sentry_cmake_generator -G "Unix Makefiles")
   
@@ -90,7 +98,7 @@ Snapmaker_Orca_add_cmake_project(Sentry
     ${_sentry_platform_flags}
 )
 
-# Sentry depends on CURL which depends on OpenSSL
+# Sentry depends on CURL, which depends on OpenSSL and nghttp2
 # Ensure they are built before Sentry
 if(APPLE)
 	if (TARGET dep_CURL)
@@ -98,6 +106,11 @@ if(APPLE)
 	endif()
 	if (TARGET dep_OpenSSL)
 		add_dependencies(dep_Sentry dep_OpenSSL)
+	endif()
+	# libsentry.dylib links libcurl.a directly and therefore its nghttp2 half as well, so the
+	# archive has to exist by the time sentry links, not merely by the time curl does.
+	if (TARGET dep_NGHTTP2)
+		add_dependencies(dep_Sentry dep_NGHTTP2)
 	endif()
 endif()
 

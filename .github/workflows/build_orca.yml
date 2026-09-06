@@ -49,7 +49,13 @@ jobs:
       - name: Get the version and date on Ubuntu and macOS
         if: inputs.os != 'windows-2022'
         run: |
-          ver_pure=$(grep 'set(Snapmaker_VERSION' version.inc | cut -d '"' -f2)
+          # The version number moved into src/common_func/common_func.hpp; version.inc now only
+          # reads it back, so grepping version.inc yields the literal "${CMAKE_MATCH_1}".
+          ver_pure=$(grep -E '^#define[[:space:]]+Snapmaker_VERSION[[:space:]]+"' src/common_func/common_func.hpp | cut -d '"' -f2)
+          if [ -z "$ver_pure" ]; then
+            echo "Error: could not read Snapmaker_VERSION from src/common_func/common_func.hpp" >&2
+            exit 1
+          fi
           if [[ "${{ github.event_name }}" == "pull_request" ]]; then
             ver="PR-${{ github.event.number }}"
           else
@@ -71,9 +77,12 @@ jobs:
           if ($eventName -eq 'pull_request') {
               $ver = "PR" + $prNumber
           } else {
-              $versionContent = Get-Content version.inc -Raw
-              if ($versionContent -match 'set\(Snapmaker_VERSION "(.*?)"\)') {
+              # See the bash step above: the version number lives in the header now, not version.inc.
+              $versionContent = Get-Content src/common_func/common_func.hpp -Raw
+              if ($versionContent -match '#define\s+Snapmaker_VERSION\s+"(.*?)"') {
                   $ver = $matches[1]
+              } else {
+                  throw "could not read Snapmaker_VERSION from src/common_func/common_func.hpp"
               }
               $ver = "V$ver"
           }
@@ -382,7 +391,9 @@ jobs:
           ubuntu-ver-str: ${{ (inputs.os == 'ubuntu-24.04' && '_Ubuntu2404') || '' }}
         run: |
           ./build_linux.sh -isr
-          mv -n ./build/Snapmaker_Orca_Linux_V${{ env.ver_pure }}.AppImage ./build/Snapmaker_Orca_Linux_AppImage${{ env.ubuntu-ver-str }}_${{ env.ver }}.AppImage
+          # The AppImage is named for SLIC3R_APP_KEY (src/dev-utils/platform/unix/build_appimage.sh.in),
+          # which the rebrand changed from Snapmaker_Orca to EdgeSlicer.
+          mv -n ./build/EdgeSlicer_Linux_V${{ env.ver_pure }}.AppImage ./build/Snapmaker_Orca_Linux_AppImage${{ env.ubuntu-ver-str }}_${{ env.ver }}.AppImage
           chmod +x ./build/Snapmaker_Orca_Linux_AppImage${{ env.ubuntu-ver-str }}_${{ env.ver }}.AppImage
 
       - name: Upload artifacts Ubuntu

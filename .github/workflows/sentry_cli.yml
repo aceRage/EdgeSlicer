@@ -64,8 +64,17 @@ jobs:
         shell: pwsh
         env:
           SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          SENTRY_ORG: ${{ secrets.SENTRY_ORG }}
+          SENTRY_PROJECT: ${{ secrets.SENTRY_PROJECT }}
           SENTRY_LOG_LEVEL: debug
         run: |
+          # See the macOS step: without credentials sentry-cli is called with an empty --org
+          # and fails the release run. Symbol upload is optional.
+          if ([string]::IsNullOrEmpty($env:SENTRY_AUTH_TOKEN) -or [string]::IsNullOrEmpty($env:SENTRY_ORG) -or [string]::IsNullOrEmpty($env:SENTRY_PROJECT)) {
+            Write-Host "::notice::SENTRY_AUTH_TOKEN/SENTRY_ORG/SENTRY_PROJECT are not configured; skipping PDB upload."
+            exit 0
+          }
+
           # Determine upload path - prefer extracted folder if it exists
           $uploadPath = "./symbols"
           if (Test-Path "./symbols/extracted") {
@@ -78,7 +87,7 @@ jobs:
             $pdbFiles | ForEach-Object { Write-Host "  - $($_.FullName)" }
             Write-Host ""
             Write-Host "Starting Sentry upload with debug logging..."
-            sentry-cli.exe --log-level=debug --auth-token $env:SENTRY_AUTH_TOKEN upload-dif --org "${{ secrets.SENTRY_ORG }}" --project "${{ secrets.SENTRY_PROJECT }}" $uploadPath 2>&1 | Out-Host
+            sentry-cli.exe --log-level=debug --auth-token $env:SENTRY_AUTH_TOKEN upload-dif --org "$env:SENTRY_ORG" --project "$env:SENTRY_PROJECT" $uploadPath 2>&1 | Out-Host
             if ($LASTEXITCODE -ne 0) {
               Write-Host "::error::Sentry upload failed with exit code $LASTEXITCODE"
               exit $LASTEXITCODE
@@ -134,8 +143,18 @@ jobs:
         if: inputs.os == 'macos-14'
         env:
           SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          SENTRY_ORG: ${{ secrets.SENTRY_ORG }}
+          SENTRY_PROJECT: ${{ secrets.SENTRY_PROJECT }}
           SENTRY_LOG_LEVEL: debug
         run: |
+          # A fork without Sentry credentials would otherwise call sentry-cli with an empty
+          # --org and fail the whole release run on "organization not found". Symbol upload is
+          # optional; the build artifacts do not depend on it.
+          if [ -z "$SENTRY_AUTH_TOKEN" ] || [ -z "$SENTRY_ORG" ] || [ -z "$SENTRY_PROJECT" ]; then
+            echo "::notice::SENTRY_AUTH_TOKEN/SENTRY_ORG/SENTRY_PROJECT are not configured; skipping dSYM upload."
+            exit 0
+          fi
+
           echo "Checking for dSYM files in ./symbols..."
           find ./symbols -name "*.dSYM" -type d | while read dsym; do
             echo "Found dSYM: $dsym"
@@ -150,7 +169,7 @@ jobs:
             echo ""
             echo "Starting Sentry upload with debug logging..."
             # upload-dif does not support --release flag, it auto-associates with releases
-            sentry-cli --log-level=debug --auth-token "$SENTRY_AUTH_TOKEN" upload-dif --org "${{ secrets.SENTRY_ORG }}" --project "${{ secrets.SENTRY_PROJECT }}" ./symbols
+            sentry-cli --log-level=debug --auth-token "$SENTRY_AUTH_TOKEN" upload-dif --org "$SENTRY_ORG" --project "$SENTRY_PROJECT" ./symbols
             UPLOAD_EXIT_CODE=$?
             if [ $UPLOAD_EXIT_CODE -ne 0 ]; then
               echo "::error::Sentry upload failed with exit code $UPLOAD_EXIT_CODE"
