@@ -23,7 +23,18 @@ endif()
 if(NOT DEFINED BBL_INTERNAL_TESTING)
 set(BBL_INTERNAL_TESTING "0")
 endif()
-set(Snapmaker_VERSION "2.3.6.5")
+# The version number lives in the same header as the brand (Snapmaker_VERSION); read it back
+# rather than repeating it here - the two drifted once (2.3.6 vs 2.3.6.5, 2026-09-06).
+file(STRINGS "${CMAKE_CURRENT_LIST_DIR}/src/common_func/common_func.hpp" _version_defines
+     REGEX "^#define[ \t]+Snapmaker_VERSION[ \t]+\"")
+foreach(_version_line IN LISTS _version_defines)
+    if(_version_line MATCHES "^#define[ \t]+Snapmaker_VERSION[ \t]+\"([^\"]+)\"")
+        set(Snapmaker_VERSION "${CMAKE_MATCH_1}")
+    endif()
+endforeach()
+if(NOT Snapmaker_VERSION)
+    message(FATAL_ERROR "version.inc: could not read Snapmaker_VERSION from src/common_func/common_func.hpp")
+endif()
 set(MIN_FIRM_VER "1.0.0")
 string(REGEX MATCH "^([0-9]+)\\.([0-9]+)\\.([0-9]+)"
        Snapmaker_VERSION_MATCH ${Snapmaker_VERSION})
