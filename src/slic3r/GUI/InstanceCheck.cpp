@@ -14,12 +14,14 @@
 #include "boost/nowide/convert.hpp"
 #include <boost/log/trivial.hpp>
 #include <boost/filesystem/operations.hpp>
+#include <algorithm>
 #include <iostream>
 #include <unordered_map>
 #include <fcntl.h>
 #include <errno.h>
 #include <optional>
 #include <cstdint>
+#include <vector>
 
 #ifdef _WIN32
 #include <strsafe.h>
@@ -106,10 +108,20 @@ namespace instance_check_internal
 			return true;
 		std::wstring classNameString(className);
 		std::wstring wndTextString(wndText);
-		// The main window title ends in " - <SLIC3R_APP_NAME>" ("EdgeSlicer" since the rebrand); the old
-		// literal never matched again, so a second launch handed off but never raised the window.
-		if ((wndTextString.find(boost::nowide::widen(SLIC3R_APP_NAME)) != std::wstring::npos ||
-		     wndTextString.find(L"Snapmaker_Orca") != std::wstring::npos) && classNameString == L"wxWindowNR") {
+		// The main window title ends in " - <SLIC3R_APP_NAME>" ("EdgeSlicer" since the rebrand); a hard-coded
+		// old literal never matched again, so a second launch handed off but never raised the window.
+		// Match the current brand and every name the title carried before it (SLIC3R_LEGACY_APP_KEYS, plus
+		// the spaced spelling the fork's title used), so an older instance is still found.
+		static const std::vector<std::wstring> app_names = [] {
+			std::vector<std::wstring> names{ boost::nowide::widen(SLIC3R_APP_NAME) };
+			for (const std::string& legacy : std::vector<std::string>(SLIC3R_LEGACY_APP_KEYS))
+				names.push_back(boost::nowide::widen(legacy));
+			names.push_back(L"Snapmaker Orca");
+			return names;
+		}();
+		const bool title_matches = std::any_of(app_names.begin(), app_names.end(),
+			[&wndTextString](const std::wstring& name) { return wndTextString.find(name) != std::wstring::npos; });
+		if (title_matches && classNameString == L"wxWindowNR") {
 			//check if other instances has same instance hash
 			//if not it is not same version(binary) as this version 
 			HANDLE   handle = GetProp(hwnd, L"Instance_Hash_Minor");
