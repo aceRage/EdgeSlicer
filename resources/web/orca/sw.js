@@ -39,6 +39,10 @@ function payloadOf(event) {
       if (typeof j.title === 'string' && j.title) data.title = j.title;
       if (typeof j.body === 'string' && j.body) data.body = j.body;
       data.url = typeof j.url === 'string' ? j.url : '';
+      // Both origins the hub answers on, so a click can open the one this phone prefers without a
+      // request back to a PC that may be asleep or on a network the phone is not on.
+      data.lan_url = typeof j.lan_url === 'string' ? j.lan_url : '';
+      data.remote_url = typeof j.remote_url === 'string' ? j.remote_url : '';
       data.tag = typeof j.tag === 'string' ? j.tag : '';
       data.kind = typeof j.kind === 'string' ? j.kind : '';
       data.severity = typeof j.severity === 'string' ? j.severity : 'info';
@@ -62,26 +66,41 @@ self.addEventListener('push', function (event) {
     tag: d.tag || 'snapmaker-orca',
     renotify: !!d.tag,
     requireInteraction: d.severity === 'error',
-    data: { url: d.url || '', kind: d.kind || '' }
+    data: { url: d.url || '', lan_url: d.lan_url || '', remote_url: d.remote_url || '', kind: d.kind || '' }
   };
   // waitUntil keeps the worker alive until the notification is actually shown; showNotification
   // is the only thing inside it, on purpose (rule 2).
   event.waitUntil(self.registration.showNotification(d.title, options));
 });
 
+// Which of the hub's two origins this phone wants. The page writes the preference into
+// localStorage, which a service worker cannot read - workers have no access to it at all - so the
+// page mirrors it into the Cache API, which both can reach. No preference, or no cache entry:
+// the remote link, because it is the one that works from anywhere.
+function connPref() {
+  if (!self.caches) return Promise.resolve('');
+  return self.caches.open('snorca-conn')
+    .then(function (c) { return c.match('/__conn_pref'); })
+    .then(function (r) { return r ? r.text() : ''; })
+    .catch(function () { return ''; });
+}
+
 self.addEventListener('notificationclick', function (event) {
   event.notification.close();
-  var target = (event.notification.data && event.notification.data.url) || '';
+  var d = event.notification.data || {};
   event.waitUntil(
-    self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then(function (list) {
+    Promise.all([self.clients.matchAll({ type: 'window', includeUncontrolled: true }), connPref()]).then(function (r) {
+      var list = r[0], pref = r[1];
       // A window of ours is already open somewhere: bring that one forward rather than opening a
-      // second copy of the same page.
+      // second copy of the same page. This wins over the preference on purpose - the person is
+      // already looking at a working page, and moving them to the other origin would drop it.
       for (var i = 0; i < list.length; i++) {
         var c = list[i];
         if (c.url.indexOf(self.registration.scope) === 0 && 'focus' in c) return c.focus();
       }
-      // Otherwise open the scope itself - './' resolves to /r/<token>/ - and fall back to the
-      // link the hub put in the payload when the scope is not openable.
+      // Otherwise the preferred origin, then the remote one, then whatever single link the hub
+      // sent, then this worker's own scope (which is the origin the notification arrived on).
+      var target = (pref === 'home' && d.lan_url) ? d.lan_url : (d.remote_url || d.url || '');
       if (self.clients.openWindow) return self.clients.openWindow(target || self.registration.scope);
       return undefined;
     })
