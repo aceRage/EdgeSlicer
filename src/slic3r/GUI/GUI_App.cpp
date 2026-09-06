@@ -597,7 +597,7 @@ private:
         {
             title    = "EdgeSlicer";
             version  = std::string("V") + Snapmaker_VERSION;
-            betaText = _L("EdgeSlicer build"); // tells the official Orca/Snapmaker builds and this fork apart at launch
+            betaText = wxEmptyString; // the title already says EdgeSlicer; a second line saying so again was redundant (2026-09-05)
 
             titleFont   = Label::sysFont(20, false);
             versionFont = Label::Body_13;
