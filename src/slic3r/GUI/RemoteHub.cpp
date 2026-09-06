@@ -1455,9 +1455,27 @@ void HubServer::accept_event(json& event)
     int         id = 0;
     {
         std::lock_guard<std::mutex> lock(m_mutex);
+        const long long now_ms = (long long) std::chrono::duration_cast<std::chrono::milliseconds>(
+                                     std::chrono::system_clock::now().time_since_epoch()).count();
+        // Every slicer window watches the same printers and each one reports what it sees, so a
+        // print start arrived once per open window ("started" twice, 10 s apart, 2026-09-06).
+        // The same printer, kind and job inside two minutes is the same event: answer with the
+        // stored one and send nothing again.
+        const std::string pid = p.value("id", std::string());
+        for (auto it = m_events.rbegin(); it != m_events.rend(); ++it) {
+            const json& o = *it;
+            if (now_ms - o.value("time", 0LL) > 120000) break;
+            if (o.value("kind", std::string()) == e["kind"].get<std::string>() &&
+                o.value("job", std::string()) == e.value("job", std::string()) &&
+                o.contains("printer") && o["printer"].value("id", std::string()) == pid) {
+                event = o;
+                BOOST_LOG_TRIVIAL(info) << "RemoteHub: event " << e["kind"].get<std::string>() << " on " << pid
+                                        << " repeated within 2 min by another window - not stored again";
+                return;
+            }
+        }
         e["id"]   = ++m_next_event_id;
-        e["time"] = (long long) std::chrono::duration_cast<std::chrono::milliseconds>(
-                        std::chrono::system_clock::now().time_since_epoch()).count();
+        e["time"] = now_ms;
         m_events.push_back(e);
         while (m_events.size() > MAX_EVENTS) m_events.pop_front();
         save_events_locked();
