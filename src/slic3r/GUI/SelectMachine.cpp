@@ -481,24 +481,23 @@ SelectMachineDialog::SelectMachineDialog(Plater *plater)
 
     m_sizer_prepare->Add(0, 0, 1, wxTOP, FromDIP(12));
 
-    auto hyperlink_sizer = new wxBoxSizer( wxHORIZONTAL );
-    m_hyperlink = new wxHyperlinkCtrl(m_panel_prepare, wxID_ANY, _L("Click here if you can't connect to the printer"), wxT("https://wiki.bambulab.com/en/software/bambu-studio/failed-to-connect-printer"), wxDefaultPosition, wxDefaultSize, wxHL_DEFAULT_STYLE);
-
-    hyperlink_sizer->Add(m_hyperlink, 0, wxALIGN_CENTER | wxALL, 5);
-    m_sizer_prepare->Add(hyperlink_sizer, 0, wxALIGN_CENTER | wxALL, 5);
+    // The "can't connect to the printer" hyperlink used to sit here. It is gone, but the
+    // vertical room it took stays so the prepare page keeps the height of the other pages.
+    m_sizer_prepare->Add(0, FromDIP(12), 0, wxALL, 0);
 
     m_button_ensure = new Button(m_panel_prepare, _L("Send"));
     m_button_ensure->SetBackgroundColor(m_btn_bg_enable);
     m_button_ensure->SetBorderColor(m_btn_bg_enable);
     m_button_ensure->SetTextColor(StateColor::darkModeColorFor("#FFFFFE"));
-    m_button_ensure->SetSize(SELECT_MACHINE_DIALOG_BUTTON_SIZE);
-    m_button_ensure->SetMinSize(SELECT_MACHINE_DIALOG_BUTTON_SIZE);
-    m_button_ensure->SetMinSize(SELECT_MACHINE_DIALOG_BUTTON_SIZE);
+    m_button_ensure->SetSize(SELECT_MACHINE_DIALOG_SEND_BUTTON_SIZE);
+    m_button_ensure->SetMinSize(SELECT_MACHINE_DIALOG_SEND_BUTTON_SIZE);
     m_button_ensure->SetCornerRadius(FromDIP(5));
     m_button_ensure->Bind(wxEVT_BUTTON, &SelectMachineDialog::on_ok_btn, this);
 
+    // Centre the Send button in its row: a stretchy spacer on either side.
     m_sizer_pcont->Add(0, 0, 1, wxEXPAND, 0);
-    m_sizer_pcont->Add(m_button_ensure, 0,wxRIGHT, 0);
+    m_sizer_pcont->Add(m_button_ensure, 0, wxALIGN_CENTER_VERTICAL, 0);
+    m_sizer_pcont->Add(0, 0, 1, wxEXPAND, 0);
 
 
     m_sizer_prepare->Add(m_sizer_pcont, 0, wxEXPAND, 0);
@@ -3081,7 +3080,8 @@ void SelectMachineDialog::on_dpi_changed(const wxRect &suggested_rect)
 
     m_button_refresh->SetMinSize(SELECT_MACHINE_DIALOG_BUTTON_SIZE);
     m_button_refresh->SetCornerRadius(FromDIP(12));
-    m_button_ensure->SetMinSize(SELECT_MACHINE_DIALOG_BUTTON_SIZE);
+    m_button_ensure->SetSize(SELECT_MACHINE_DIALOG_SEND_BUTTON_SIZE);
+    m_button_ensure->SetMinSize(SELECT_MACHINE_DIALOG_SEND_BUTTON_SIZE);
     m_button_ensure->SetCornerRadius(FromDIP(12));
     m_status_bar->msw_rescale();
 
@@ -3152,14 +3152,12 @@ void SelectMachineDialog::set_default()
         m_comboBox_printer->Show(true);
         m_button_refresh->Show(true);
         m_rename_normal_panel->Show(true);
-        m_hyperlink->Show(true);
     }
     else if (m_print_type == PrintFromType::FROM_SDCARD_VIEW) {
         m_stext_printer_title->Show(false);
         m_comboBox_printer->Show(false);
         m_button_refresh->Show(false);
         m_rename_normal_panel->Show(false);
-        m_hyperlink->Show(false);
     }
 
     //project name

@@ -115,6 +115,9 @@ enum class ConfigNozzleIdx : int
 WX_DECLARE_HASH_MAP(int, Material *, wxIntegerHash, wxIntegerEqual, MaterialHash);
 
 #define SELECT_MACHINE_DIALOG_BUTTON_SIZE wxSize(FromDIP(68), FromDIP(23))
+// The Send button on the prepare page is deliberately larger (about 1.6x) than the
+// other dialog buttons and is centred in its row.
+#define SELECT_MACHINE_DIALOG_SEND_BUTTON_SIZE wxSize(FromDIP(109), FromDIP(37))
 #define SELECT_MACHINE_DIALOG_SIMBOOK_SIZE wxSize(FromDIP(370), FromDIP(64))
 #define LIST_REFRESH_INTERVAL 200
 static int get_brightness_value(wxImage image) {
@@ -262,7 +265,6 @@ protected:
     TextInput*                          m_rename_input{nullptr};
     wxTimer*                            m_refresh_timer{ nullptr };
     wxScrolledWindow*                   m_sw_print_failed_info{nullptr};
-    wxHyperlinkCtrl*                    m_hyperlink{nullptr};
     ScalableBitmap *                    rename_editable{nullptr};
     ScalableBitmap *                    rename_editable_light{nullptr};
     wxStaticBitmap *                    timeimg{nullptr};
