@@ -1468,9 +1468,16 @@ MultiNozzleUtils::LayeredNozzleGroupResult ToolOrdering::get_recommended_filamen
             auto manual_filament_map = print_config.filament_map.values;
             std::transform(manual_filament_map.begin(), manual_filament_map.end(), manual_filament_map.begin(), [](int v) { return v - 1; });
             ret = calc_filament_group_for_manual_multi_nozzle(manual_filament_map, context);
-        } else if (has_multiple_nozzle && mode == FilamentMapMode::fmmAutoForMatch) {
+        } else if (has_multiple_nozzle && mode == FilamentMapMode::fmmAutoForMatch &&
+                   std::any_of(context.machine_info.machine_filament_info.begin(), context.machine_info.machine_filament_info.end(),
+                               [](const auto& per_nozzle) { return !per_nozzle.empty(); })) {
             ret = calc_filament_group_for_match_multi_nozzle(context);
         } else {
+            // Match mode with no machine filaments to match against (project or preset asks for
+            // "Auto For Match", no AMS data on this PC) used to throw out of the slice; group for
+            // flush instead, which needs nothing from the printer.
+            if (has_multiple_nozzle && mode == FilamentMapMode::fmmAutoForMatch)
+                BOOST_LOG_TRIVIAL(warning) << "filament map: Auto For Match asked for but no AMS filament data is available; grouping for flush instead";
             FilamentGroup fg(context);
             if (!has_multiple_nozzle)
                 fg.get_custom_seq = create_custom_seq_function(print_config, false);

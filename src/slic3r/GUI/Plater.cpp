@@ -14190,7 +14190,12 @@ bool Plater::priv::restart_background_process(unsigned int state)
                 std::vector<std::string> ams_count;
                 auto infos = ultra_build_extruder_filament_info_from_ams(obj, &ams_count);
                 const size_t profile_nozzles = print->config().nozzle_diameter.values.size();
-                if (dual_nozzle_profile && !infos.empty() && infos.size() == profile_nozzles) {
+                // "A live AMS" means an AMS with filaments in it: a machine whose AMS list is present but
+                // empty (fresh LAN connection, no spool data yet) produced one empty list per nozzle,
+                // which passed the size check and sent match mode an empty machine list - a hard
+                // "Empty ams filament in For-Match mode" slice error on the H2C (2026-09-06).
+                size_t loaded = 0; for (auto& v : infos) loaded += v.size();
+                if (dual_nozzle_profile && !infos.empty() && infos.size() == profile_nozzles && loaded > 0) {
                     print->set_extruder_filament_info(infos);
                     print->set_ultra_ams_count(ams_count);
                     print->set_ultra_force_match_mode(true);
