@@ -1,12 +1,12 @@
-# Snapmaker-Ultra
+# EdgeSlicer
 
 **Bleeding edge featureset, pulled from all slicing worlds. Camera streams, filament manager, expanded printer profiles, expanded assembly and multicolor toolsets.**
 
-[Releases](https://github.com/aceRage/Snapmaker-Ultra/releases) · Windows installer & portable · Linux AppImage · macOS (unsigned) · Based on [Snapmaker Orca](https://github.com/Snapmaker/OrcaSlicer) 2.3.6 (the app still reports itself as Snapmaker Orca 2.3.6.x) · AGPL-3.0
+[Releases](https://github.com/aceRage/EdgeSlicer/releases) · Windows installer & portable · Linux AppImage · macOS (unsigned) · Based on [Snapmaker Orca](https://github.com/Snapmaker/OrcaSlicer) 2.3.6 (the app still reports itself as Snapmaker Orca 2.3.6.x) · AGPL-3.0
 
 ![Stream camera wall, Support Filament Matching, Compare Slices and the Assemble tool's Auto-fit](docs/images/hero.jpg)
 
-Snapmaker-Ultra keeps everything Snapmaker Orca does — Snapmaker U1 / J1 / Artisan / A-series support and the full OrcaSlicer printer library — and adds features pulled from Bambu Studio, OrcaSlicer pull requests and our own work.
+EdgeSlicer keeps everything Snapmaker Orca does — Snapmaker U1 / J1 / Artisan / A-series support and the full OrcaSlicer printer library — and adds features pulled from Bambu Studio, OrcaSlicer pull requests and our own work.
 
 ---
 
@@ -83,10 +83,10 @@ Plate deletion during a slice no longer crashes; fuzzy skin no longer leaves dot
 
 ## Download and install
 
-All builds are on the [Releases](https://github.com/aceRage/Snapmaker-Ultra/releases) page.
+All builds are on the [Releases](https://github.com/aceRage/EdgeSlicer/releases) page.
 
-- **Windows (64-bit) installer** — `Snapmaker-Ultra_Windows_Installer_V<version>.exe`. Installs **side by side** with the official Snapmaker Orca (own folder, Start-menu entry and Add/Remove entry) and upgrades a previous Snapmaker-Ultra install. The splash screen shows *Ultra version* so the two are easy to tell apart.
-- **Windows portable** — `Snapmaker-Ultra_Windows_V<version>_portable.zip`: unzip and run `snapmaker-orca.exe` (needs the Edge WebView2 runtime and the VC++ redistributable, usually already present).
+- **Windows (64-bit) installer** — `EdgeSlicer_Windows_Installer_V<version>.exe`. Installs **side by side** with the official Snapmaker Orca (own folder, Start-menu entry and Add/Remove entry) and upgrades a previous EdgeSlicer install. The splash screen shows *Ultra version* so the two are easy to tell apart.
+- **Windows portable** — `EdgeSlicer_Windows_V<version>_portable.zip`: unzip and run `snapmaker-orca.exe` (needs the Edge WebView2 runtime and the VC++ redistributable, usually already present).
 - **Linux (x86_64)** — `Snapmaker_Orca_Linux_V<version>.AppImage`: `chmod +x` and run. The host must provide WebKitGTK 4.1 and libOpenGL (Ubuntu: `libwebkit2gtk-4.1-0 libopengl0`); they are not bundled.
 - **macOS (Apple silicon)** — the `.dmg` is **unsigned** (no Apple Developer account yet), so macOS refuses it the first time: right-click the app → *Open* → *Open*, or run `xattr -dr com.apple.quarantine "/Applications/Snapmaker Orca.app"` once.
 
@@ -116,11 +116,11 @@ Windows packaging: `cpack -G NSIS` in `build/` produces the installer (needs NSI
 
 | Release | Date | Highlights |
 |---|---|---|
-| [v2.3.6.4-ultra](https://github.com/aceRage/Snapmaker-Ultra/releases/tag/v2.3.6.4-ultra) | 2026-09-01 | Windows installer (side by side), Linux AppImage, unsigned macOS build; assembly tools (Auto-Fit, Assemble-tool Auto-fit with live sliders, triangle/curve/point modes); dual-nozzle grouping; H2D/H2C/X2D/P2S/A2L/H2S profiles + Polymaker catalogue; Support Filament Matching; Bambu Studio preset import |
-| [v2.3.6.3-ultra](https://github.com/aceRage/Snapmaker-Ultra/releases/tag/v2.3.6.3-ultra) | 2026-08-30 | Connectivity-plugin update, Compare Slices, go2rtc cleanup on exit |
-| [v2.3.6.2-ultra](https://github.com/aceRage/Snapmaker-Ultra/releases/tag/v2.3.6.2-ultra) | 2026-08-29 | Bambu LAN connectivity (optional plugin), nozzle flow type, QIDI refresh |
-| [v2.3.6.1-ultra](https://github.com/aceRage/Snapmaker-Ultra/releases/tag/v2.3.6.1-ultra) | 2026-08-28 | Outer wall filament, Spool Manager, Offset layers, Visibility modes, Manifold booleans, Repair/Remesh |
-| [v2.3.6-ultra](https://github.com/aceRage/Snapmaker-Ultra/releases/tag/v2.3.6-ultra) | 2026-08-27 | Stream tab, Keep my printer, Auto-Save, Apply All, Assemble Separately, align helpers |
+| [v2.3.6.4-ultra](https://github.com/aceRage/EdgeSlicer/releases/tag/v2.3.6.4-ultra) | 2026-09-01 | Windows installer (side by side), Linux AppImage, unsigned macOS build; assembly tools (Auto-Fit, Assemble-tool Auto-fit with live sliders, triangle/curve/point modes); dual-nozzle grouping; H2D/H2C/X2D/P2S/A2L/H2S profiles + Polymaker catalogue; Support Filament Matching; Bambu Studio preset import |
+| [v2.3.6.3-ultra](https://github.com/aceRage/EdgeSlicer/releases/tag/v2.3.6.3-ultra) | 2026-08-30 | Connectivity-plugin update, Compare Slices, go2rtc cleanup on exit |
+| [v2.3.6.2-ultra](https://github.com/aceRage/EdgeSlicer/releases/tag/v2.3.6.2-ultra) | 2026-08-29 | Bambu LAN connectivity (optional plugin), nozzle flow type, QIDI refresh |
+| [v2.3.6.1-ultra](https://github.com/aceRage/EdgeSlicer/releases/tag/v2.3.6.1-ultra) | 2026-08-28 | Outer wall filament, Spool Manager, Offset layers, Visibility modes, Manifold booleans, Repair/Remesh |
+| [v2.3.6-ultra](https://github.com/aceRage/EdgeSlicer/releases/tag/v2.3.6-ultra) | 2026-08-27 | Stream tab, Keep my printer, Auto-Save, Apply All, Assemble Separately, align helpers |
 
 **In progress (separate branches):** `feat/paint-depth` — bounded embedding depth for multi-material paint. Flashforge device tab — experimental; the send flow is incomplete and it needs the vendor's own network library, which is **not** distributed with this fork. Dual-nozzle follow-ups — nozzle-aware tool ordering and per-nozzle AMS slot mapping in the send dialog. Next: the Ultra splash and side-by-side identity on the Linux and macOS builds.
 
@@ -128,7 +128,7 @@ Windows packaging: `cpack -G NSIS` in `build/` produces the installer (needs NSI
 
 ## Lineage and licence
 
-Snapmaker-Ultra is licensed under the **GNU Affero General Public License, version 3** ([`LICENSE.txt`](LICENSE.txt)). It is a fork of [Snapmaker Orca](https://github.com/Snapmaker/OrcaSlicer) (Snapmaker), based on [OrcaSlicer](https://github.com/SoftFever/OrcaSlicer) by SoftFever, based on [Bambu Studio](https://github.com/bambulab/BambuStudio) by Bambu Lab, based on [PrusaSlicer](https://github.com/prusa3d/PrusaSlicer) by Prusa Research, based on [Slic3r](https://github.com/Slic3r/Slic3r) by Alessandro Ranellucci and the RepRap community; OrcaSlicer also incorporates features from SuperSlicer by @supermerill. All are AGPL-3.0: if you use any part of this software in any way, even behind a web server, your software must be released under the same licence.
+EdgeSlicer is licensed under the **GNU Affero General Public License, version 3** ([`LICENSE.txt`](LICENSE.txt)). It is a fork of [Snapmaker Orca](https://github.com/Snapmaker/OrcaSlicer) (Snapmaker), based on [OrcaSlicer](https://github.com/SoftFever/OrcaSlicer) by SoftFever, based on [Bambu Studio](https://github.com/bambulab/BambuStudio) by Bambu Lab, based on [PrusaSlicer](https://github.com/prusa3d/PrusaSlicer) by Prusa Research, based on [Slic3r](https://github.com/Slic3r/Slic3r) by Alessandro Ranellucci and the RepRap community; OrcaSlicer also incorporates features from SuperSlicer by @supermerill. All are AGPL-3.0: if you use any part of this software in any way, even behind a web server, your software must be released under the same licence.
 
 Ported features: align/distribute helpers, "Sub merge" (our *Assemble Separately*) and *Z overrides X/Y* from Bambu Studio; *Print unsupported walls last* (#15411), *Merge into Single Part* (#15413), *Undertop surface pattern* (#15389), the JSON-config fix (#15370), per-filament Z offset (#4660), drop-to-bed / bottom-referenced Z (#8194, #5315), machine prepare time (#5796) and the Flashforge Creator 5 profiles (#13259) from OrcaSlicer; the Flashforge device stack from the Orca-Flashforge project.
 
@@ -140,6 +140,6 @@ Snapmaker, Bambu Lab, Flashforge and other printer brands are trademarks of thei
 
 ## Contributing
 
-Bug reports and feature requests go to [GitHub Issues](https://github.com/aceRage/Snapmaker-Ultra/issues) — include the release version, printer and a project `.3mf` where possible. Pull requests target **`main`**; read [`AGENTS.md`](AGENTS.md) for layout and conventions, keep fork-specific settings on the Ultra preferences tab, and prefer porting from upstream with attribution over re-implementing.
+Bug reports and feature requests go to [GitHub Issues](https://github.com/aceRage/EdgeSlicer/issues) — include the release version, printer and a project `.3mf` where possible. Pull requests target **`main`**; read [`AGENTS.md`](AGENTS.md) for layout and conventions, keep fork-specific settings on the Ultra preferences tab, and prefer porting from upstream with attribution over re-implementing.
 
-Security issues: please use a [private security advisory](https://github.com/aceRage/Snapmaker-Ultra/security/advisories/new) on GitHub rather than a public issue.
+Security issues: please use a [private security advisory](https://github.com/aceRage/EdgeSlicer/security/advisories/new) on GitHub rather than a public issue.
