@@ -1,16 +1,54 @@
 # EdgeSlicer
 
-**Bleeding edge featureset, pulled from all slicing worlds. Camera streams, filament manager, expanded printer profiles, expanded assembly and multicolor toolsets.**
+**Bleeding edge featureset, pulled from all slicing worlds. Per-part support control, phone and remote access, camera streams, filament manager, expanded printer profiles, expanded assembly and multicolor toolsets.**
 
-[Releases](https://github.com/aceRage/EdgeSlicer/releases) · Windows installer & portable · Linux AppImage · macOS (unsigned) · Based on [Snapmaker Orca](https://github.com/Snapmaker/OrcaSlicer) 2.3.6 (a fork of Snapmaker Orca; the app reports itself as EdgeSlicer) · AGPL-3.0
+[Releases](https://github.com/aceRage/EdgeSlicer/releases) · Windows installer & portable · Linux AppImage · macOS (unsigned) · Based on [Snapmaker Orca](https://github.com/Snapmaker/OrcaSlicer) 2.3.6 · AGPL-3.0
 
 ![Stream camera wall, Support Filament Matching, Compare Slices and the Assemble tool's Auto-fit](docs/images/hero.jpg)
 
-EdgeSlicer keeps everything Snapmaker Orca does — Snapmaker U1 / J1 / Artisan / A-series support and the full OrcaSlicer printer library — and adds features pulled from Bambu Studio, OrcaSlicer pull requests and our own work.
+EdgeSlicer is a fork of Snapmaker Orca, itself a fork of OrcaSlicer. It keeps everything Snapmaker Orca does — Snapmaker U1 / J1 / Artisan / A-series support, the full OrcaSlicer printer library and its print hosts (Klipper/Moonraker, OctoPrint, Duet, PrusaLink and the rest) — and adds Bambu Lab profiles and LAN sending, per-part support control, and a phone / remote access layer.
+
+The application, its binary (`EdgeSlicer.exe`) and its data directory (`%APPDATA%\EdgeSlicer`) all carry the product name, and the icon is an italic **E** whose stem is a katana with a red edge. It installs and runs beside a stock Snapmaker Orca.
 
 ---
 
 ## Highlights
+
+### Support sets and per-part support groups
+
+- **Support sets** — save the Support-category process settings under a name and apply them to any project. The **Support set** row sits at the top of the process tab's Support page, with *Apply*, a pop-out editor, save, delete and a **Groups** button. A set stores its interface filament as a *type* (*Same as the part*, a loaded material, or PVA / BVOH / HIPS / …), so it travels between printers; applying one copies the values in, after which the process preset shows as modified, like a hand edit.
+- **Support groups** — right-click parts in the object list and use the **Support group** submenu to put them in a named group, either empty (seeded from the object's current settings) or created straight from a support set. A group's values live on the parts themselves, so a project 3MF carries them and a stock OrcaSlicer simply ignores the unknown key. Grouped parts get a `[group]` badge in the object list.
+- **Per group:** interface filament, interface pattern, top / bottom interface layers and spacing, and support ironing (pattern, flow, line spacing). Support style, threshold angle and top Z distance are stored per group but remain object-wide in effect, and the support *base* geometry is never per group — only the interface and its ironing follow one.
+- **Support groups window** (object menu → *Support groups…*, or the *Groups* button) — one row per group showing its parts, interface filament, top Z distance, interface layers, pattern and spacing, and the set it came from; *New*, *Rename*, *Delete*, *Re-apply set* and *Select parts*.
+- **Warnings** say plainly what will not follow a group, both in the window and during slicing: classic tree supports take interface *layer count* object-wide (organic trees and normal supports do not); a group asking for a soluble interface forces a 0 mm top Z distance on the whole object; a group's own interface filament switches Support Filament Matching off for that object; and an interface filament on a different nozzle, or not loaded at all, is called out.
+
+### Over-support surfaces
+
+A bottom face resting on support is normally classified as a bridge, so it takes bridge flow and bridge speed and looks nothing like the walls framing it. Turn on **Over-support surfaces** (process tab → Support, off by default) and those faces — plus the wall segments printed over support, in both the classic and Arachne wall generators — get their own surface type, extrusion role and preview colours (*Bottom surface over support*, *Wall over support*), printed at **Over-support flow** and **Over-support speed**, where `0` means "follow the outer wall speed" so the underside matches the perimeters around it. All three keys are per part, so one part in an object can use them while another does not. True bridges over air are untouched, and with the switch off the G-code is byte-identical.
+
+Because supports are generated *after* slicing, the "is there support under this face" test is a reconstruction of what the generator will do. It can over-claim — build-plate-only supports, small-overhang removal and the sharp-tail heuristics are not modelled — in which case a fringe prints as bottom shell instead of a bridge; a support blocker is the escape hatch. The feature stands down entirely at a zero top Z distance, with supports off, and for manual support types outside enforcers.
+
+### Edge Hub — phone and remote access
+
+- The hub is the same binary run as a **tray-only background process**. It serves the phone page and the camera relays, any slicer window starts it, and it keeps running after you close them.
+- **Phone access on the LAN** — enable it on the hub page and scan the **QR code**. The phone gets `http://<pc>:13640/r/<token>/` with *Streams*, *Prepare* and *Devices* tabs: the camera wall, plate previews and estimates, starting a slice and sending to a printer. The link is token-gated and survives restarts; *New link* rotates it (and invalidates saved links and home-screen icons).
+- **Remote access over [Tailscale](https://tailscale.com)** — with Tailscale installed and signed in on both the PC and the phone, the hub runs `tailscale serve` for you and gives you an `https://<machine>.<tailnet>.ts.net/…` link with its own QR. No port forwarding and no hosting fees. Access is restricted to an allow-list of Tailscale logins, identified by a header the hub trusts only from a loopback peer, on top of the path token.
+- **Slicer windows** — the hub can open further slicer windows, and **hidden** ones that run with no window at all, so the phone can slice and send without anything appearing on the desktop. A hidden instance that would have raised a dialog nobody can answer flags *needs attention* instead, shown on the hub page and in the tray menu; hidden and visible can be toggled either way at any time.
+- The hub page and the tray menu answer only on **loopback**, so no tunnel reaches the control plane.
+
+### Printer event notifications
+
+Each slicer watches its printers and emits an event on a state change — started, resumed, paused, filament runout, finished, failed, cancelled, and new printer error codes — with a cooldown per printer and event kind, and nothing at all on the first poll, so starting the slicer beside a running print does not announce it. The hub raises a tray balloon and fans the event out to whatever you configure on the hub page's **Notifications** card. Every destination has its own severity filter, *Test* button and status badge.
+
+- **Web Push** to the phone's browser, encrypted end to end (RFC 8291 / 8292). Browsers only allow this from a secure origin, so it wants the page installed to the Home Screen and/or reached over the Tailscale HTTPS link.
+- **Pushover**, and **webhooks** — the whole event as JSON, posted to an address you own (Home Assistant, Gotify, Discord, Slack, your own script); https only, except to `127.0.0.1`.
+- **Native app push** — the hub side is complete (APNs and FCM, using your own credentials, payloads encrypted so Apple and Google see only ciphertext). The companion iOS / Android app that would receive it **does not exist yet**; until it ships, use Web Push, Pushover or a webhook.
+
+### Store G-Code Files
+
+Preferences → Extras → **Store G-Code Files** keeps a copy of every G-code this PC sends to a printer — from the desktop or from the phone — beside a JSON sidecar recording which printer it went to (the same printer identity the API uses), the plate and project, the filaments and the estimates, plus the plate thumbnail when there was one. You choose the **Storage folder** (default `<data dir>/gcode_archive`) and a **Maximum Retention** file count (default 100); past that the oldest records are deleted with their sidecars and previews. Off by default.
+
+Stored files can be listed and deleted through the instance API. **Re-sending an archived file from the phone is not built yet** — the archive is the groundwork for it.
 
 ### Bambu Lab, including dual-nozzle — in progress
 
@@ -18,15 +56,16 @@ EdgeSlicer keeps everything Snapmaker Orca does — Snapmaker U1 / J1 / Artisan 
 - **Dual-nozzle slicing** — filaments are grouped onto nozzles automatically (from the connected printer's AMS layout when one is attached), cross-nozzle changes skip the purge, and the grouping is saved in the project 3MF.
 - **Nozzle flow type** (Standard / High Flow) is declared in sliced files and matched to the installed nozzle at send time.
 - **Import Bambu Studio user presets** — one-way mirror of your custom print / filament / machine presets, at startup or via *Sync now*.
-- **Printer connectivity** — an optional network / printer-connectivity plugin, developed separately and not part of this repository, adds live status, camera and send-to-printer for supported Bambu Lab machines (Preferences → Ultra → Bambu Network).
+- **Printer connectivity** — an optional network plugin, developed separately and not part of this repository, adds live status, camera and send-to-printer for supported Bambu Lab machines (Preferences → Extras → Bambu Network).
 - **Status:** slicing is verified; physical validation on Bambu hardware is still in progress — treat this group as beta.
 
 ### Multicolor and materials
 
 - **Support Filament Matching** (opt-in) — supports, interfaces, ironing and brims print in the colour of the surface they touch; **Brim filament → Nearest wall** for brims alone.
 - **Outer wall filament** separate from inner walls.
+- **Paint depth** — a painted multi-material claim can be bounded by wall count or by distance instead of running all the way through the part.
 - **Filament colours and count survive printer switches**; **Apply All** sets every filament slot in one click; **per-filament Z offset**.
-- **Spool Manager** — [Spoolman](https://github.com/Donkie/Spoolman) inventory, spool-to-slot bindings, automatic usage deduction when a job is sent.
+- **Spool Manager** — [Spoolman](https://github.com/Donkie/Spoolman) inventory, spool-to-slot bindings, and optional automatic usage deduction when a job is sent.
 
 ![Normal and tree supports printing in the colour of the surface they touch, and the Support Filament Matching option](docs/images/support-matching.png)
 ![Four brims each printed in the colour of the wall they touch, and the Brim filament: Nearest wall setting](docs/images/brim-match.png)
@@ -49,24 +88,33 @@ EdgeSlicer keeps everything Snapmaker Orca does — Snapmaker U1 / J1 / Artisan 
 
 ### Print quality
 
-- **Offset layers** (experimental), **Print unsupported walls last**, **Undertop surface pattern**, **Z overrides X/Y** support option, **machine prepare time** in estimates, deterministic toolpaths.
+- **Offset layers (experimental)** — odd-numbered walls are shifted by half a layer height so layers interlock. It requires the Arachne wall generator, a first layer height equal to the layer height, matching top-surface and outer-wall line widths, and spiral mode off; the slicer offers to fix all four for you when you switch it on.
+- **Print unsupported walls last**, **Undertop surface pattern**, **Z overrides X/Y** support option, **machine prepare time** in estimates, deterministic toolpaths (classic tree support produces the same G-code at any thread count).
 
 ![Offset layers and Z overrides X/Y print settings](docs/images/print-quality.png)
 
-### Workflow and UX (Preferences → Ultra)
+### Workflow and UX (Preferences → Extras)
 
-- **Auto-Save project**, **Keep my printer when opening project files**, **Skip Settings Mapping Warnings**, **Prefer Last Used Print Profile**, **Seamless System Filament Edits**.
-- **Compare Slices** (View menu) — settings, time and filament diff plus per-layer toolpath comparison of any two slices or sliced files.
-- **Import Config from G-code**, `orcaslicer://` links, silent exit.
-- **Stream tab** — live camera wall up to 9×9 for Snapmaker U1, Moonraker, Bambu Lab (LAN liveview) and Flashforge cameras, plus any RTSP / ONVIF IP camera (Reolink, Amcrest, Hikvision, Tapo, …; Wyze via RTSP firmware or wyze-bridge) with LAN discovery; drag names to reorder; **Phone access** — scan a QR code to watch the same wall on a phone or tablet on your Wi-Fi (token-protected link, camera passwords never leave the PC), with a Plates tab that shows printers, plate previews and estimates and can start slicing; the same link exposes a small JSON API (`/r/<token>/api`) for scripts and agents; bundles the open-source [go2rtc](https://github.com/AlexxIT/go2rtc) helper.
+The fork's own settings live on one **Extras** tab, in six sections:
 
-![Auto-Save project setting on the Ultra preferences tab](docs/images/options-autosave.png)
+- **Project** — Auto-Save project (with an interval), Keep my printer when opening project files, Skip Settings Mapping Warnings, Drop imported models to the bed, Bottom-referenced Z position.
+- **Presets** — Prefer Last Used Print Profile, Seamless System Filament Edits, Import Bambu Studio user presets (plus *Sync now*).
+- **Bambu Network** — enable the plugin, Stealth mode (no Bambu cloud telemetry), legacy plugin for old firmware.
+- **Spool Manager** — enable Spoolman, server URL, deduct filament usage when sending a print.
+- **Phone access** — start hidden (serve the phone without a window), and remember Snapmaker printer certificates so the phone can connect them (off by default, since it keeps a private key at rest).
+- **G-Code Archive** — Store G-Code Files, storage folder, maximum retention.
+
+Elsewhere: **Compare Slices** (View menu) — settings, time and filament diff plus per-layer toolpath comparison of any two slices or sliced files. **Import Config from G-code**. `edgeslicer://` links, with the older `ultraone://`, `snapmaker-orca://` and Printables' `orcaslicer://` spellings still accepted. Silent exit.
+
+**Stream tab** — a live camera wall up to 9×9 for Snapmaker U1, Moonraker, Bambu Lab (LAN liveview) and Flashforge cameras, plus any RTSP / ONVIF IP camera (Reolink, Amcrest, Hikvision, Tapo, …; Wyze via RTSP firmware or wyze-bridge) with LAN discovery; drag names to reorder. It bundles the open-source [go2rtc](https://github.com/AlexxIT/go2rtc) helper, and shares the phone link and QR code described under Edge Hub.
+
+![Auto-Save project setting on the fork's own preferences tab](docs/images/options-autosave.png)
 ![Compare Slices window: time and filament deltas, the changed setting, and a per-layer toolpath overlay](docs/images/compare-slices.png)
 ![Stream tab showing five printer cameras in a 3x2 wall](docs/images/menu-stream.jpg)
 
 ### Fixes to upstream issues
 
-Plate deletion during a slice no longer crashes; fuzzy skin no longer leaves dots or seam blobs; JSON profiles with unquoted numbers/booleans keep their settings; Repair no longer produces inside-out meshes; forced preset and U1 → U1 device switches no longer pop the transfer/discard dialog; the false nozzle-mismatch nag on Bambu sends is gone.
+Plate deletion during a slice no longer crashes; reopening a project with a named plate no longer crashes; fuzzy skin no longer leaves dots or seam blobs; JSON profiles with unquoted numbers/booleans keep their settings; Repair no longer produces inside-out meshes; forced preset and U1 → U1 device switches no longer pop the transfer/discard dialog; the false nozzle-mismatch nag on Bambu sends is gone.
 
 ---
 
@@ -75,28 +123,34 @@ Plate deletion during a slice no longer crashes; fuzzy skin no longer leaves dot
 | Family | Status |
 |---|---|
 | **Snapmaker** U1, J1, Artisan, A250 / A350 (Dual, Quick Swap, Bracing Kit variants) | Inherited from Snapmaker Orca; **physically validated on the U1** |
-| **Bambu Lab** A1 mini, A1, A2L, P1P, P1S, P2S, X1, X1 Carbon, X1E, H2S, H2D, H2D Pro, H2C, X2D | **In progress** — slicing verified, physical validation pending |
+| **Bambu Lab** A1 mini, A1, A2L, P1P, P1S, P2S, X1, X1 Carbon, X1E, H2S, H2D, H2D Pro, H2C, X2D | **In progress** — slicing verified, physical validation pending; sending needs the optional plugin (LAN mode) |
 | **Flashforge** Creator 5, Creator 5 Pro | Profiles only |
 | OrcaSlicer vendor library (Creality, Prusa, Voron, QIDI, Anycubic, Elegoo, Sovol, …) | Unchanged from upstream (QIDI / Anycubic refreshed) |
+
+Print hosts are inherited from OrcaSlicer and unchanged. The **Host Type** list is PrusaLink, PrusaConnect, **Octo/Klipper**, Duet, FlashAir, AstroBox, Repetier, MKS, ESP3D, CrealityPrint, Obico, Flashforge, SimplyPrint and Elegoo Link — a Klipper machine running Moonraker goes under *Octo/Klipper*; there is no separate Moonraker entry in the dropdown.
 
 ---
 
 ## Download and install
 
-All builds are on the [Releases](https://github.com/aceRage/EdgeSlicer/releases) page.
+All builds are on the [Releases](https://github.com/aceRage/EdgeSlicer/releases) page. Each release carries a **Windows installer**, a **Windows portable zip**, a **Linux AppImage** and a **macOS dmg**.
 
-- **Windows (64-bit) installer** — `EdgeSlicer_Windows_Installer_V<version>.exe`. Installs **side by side** with the official Snapmaker Orca (own folder, Start-menu entry and Add/Remove entry) and upgrades a previous EdgeSlicer install. It has its own name, icon and data directory, so the two are easy to tell apart.
-- **Windows portable** — `EdgeSlicer_Windows_V<version>_portable.zip`: unzip and run `EdgeSlicer.exe` (needs the Edge WebView2 runtime and the VC++ redistributable, usually already present).
-- **Linux (x86_64)** — `EdgeSlicer_Linux_V<version>.AppImage`: `chmod +x` and run. The host must provide WebKitGTK 4.1 and libOpenGL (Ubuntu: `libwebkit2gtk-4.1-0 libopengl0`); they are not bundled.
-- **macOS (Apple silicon)** — the `.dmg` is **unsigned** (no Apple Developer account yet), so macOS refuses it the first time: right-click the app → *Open* → *Open*, or run `xattr -dr com.apple.quarantine "/Applications/EdgeSlicer.app"` once.
+- **Windows installer** — installs **side by side** with the official Snapmaker Orca (its own folder, Start-menu entry and Add/Remove entry) and upgrades a previous EdgeSlicer install. It has its own name, icon and data directory, so the two are easy to tell apart.
+- **Windows portable** — unzip and run `EdgeSlicer.exe` (needs the Edge WebView2 runtime and the VC++ redistributable, usually already present).
+- **Linux (x86_64)** — `chmod +x` the AppImage and run it. The host must provide WebKitGTK 4.1 and libOpenGL (Ubuntu: `libwebkit2gtk-4.1-0 libopengl0`); they are not bundled.
+- **macOS (Apple silicon)** — the dmg is **unsigned** (no Apple Developer account), so macOS refuses it the first time: right-click the app → *Open* → *Open*, or run `xattr -dr com.apple.quarantine "/Applications/EdgeSlicer.app"` once.
 
 The Windows packages include the connectivity plugin; the Linux and macOS builds currently do not.
+
+### Data directory and migration
+
+Settings, presets and the hub's state live in `%APPDATA%\EdgeSlicer` (`EdgeSlicer.conf`). The fork has been renamed twice — Snapmaker_Orca → UltraOne → EdgeSlicer — so on first run it **copies** (never moves) the newest legacy data directory it finds into the new one, once, rewriting absolute paths in the config. On Windows it also carries over the embedded browser's profile (`%LOCALAPPDATA%\<name>\EBWebView`), which holds the Stream tab's layout and your Snapmaker account session. Older URL schemes, file associations and uninstall keys stay recognised, so links and shortcuts made under the old names keep working.
 
 ---
 
 ## Build from source
 
-Same toolchain as Snapmaker Orca / OrcaSlicer (CMake, C++17, wxWidgets); deps build into `deps/build/`, the slicer into `build/`.
+Same toolchain as Snapmaker Orca / OrcaSlicer (CMake, C++17, wxWidgets). Dependencies build into `deps/build/OrcaSlicer_dep`, which is then passed to the slicer configure as `CMAKE_PREFIX_PATH=<that>/usr/local`; the slicer builds into `build/` and installs into `build/Snapmaker_Orca/` (the install folder still carries the old name).
 
 ```bash
 build_release_vs2022.bat            # Windows: VS 2022, CMake <= 3.31, git-lfs, Strawberry Perl (deps | slicer | debug)
@@ -106,23 +160,27 @@ build_release_vs2022.bat            # Windows: VS 2022, CMake <= 3.31, git-lfs, 
 cd build && ctest --output-on-failure          # tests (Catch2)
 ```
 
+On Windows the build produces `EdgeSlicer.dll` (the slicer itself) and a small `EdgeSlicer.exe` shim that loads it; the product name is defined once, in `src/common_func/common_func.hpp`, and everything else — CMake, the bundle id, the installer, the data directory — is derived from it.
+
 Headless slicing for scripts and agents: `python scripts/orca_cli.py --exe <EdgeSlicer.exe> --printer "Snapmaker U1 (0.4 nozzle)" --process "0.20 Standard @Snapmaker U1 (0.4 nozzle)" --filament "Snapmaker PLA Matte @U1" --export-3mf out.3mf model.stl` slices with presets by name, streams JSON progress, and returns time/filament estimates, G-code paths and warnings (`result.json`); see [docs/superpowers/specs/2026-09-01-headless-slicer-roadmap.md](docs/superpowers/specs/2026-09-01-headless-slicer-roadmap.md).
 
-Windows packaging: `cpack -G NSIS` in `build/` produces the installer (needs NSIS); zip `build/Snapmaker_Orca/` for the portable build. The optional connectivity plugin lives outside this tree and is only built when `src/ultranet/CMakeLists.txt` exists, so the repository builds without it. Run `git lfs pull` after cloning on Windows. See [`CLAUDE.md`](CLAUDE.md) and [`AGENTS.md`](AGENTS.md) for details.
+Windows packaging: `cpack -G NSIS` in `build/` produces the installer (needs NSIS); zip the install folder for the portable build. The optional connectivity plugin lives outside this tree and is only built when `src/ultranet/CMakeLists.txt` exists, so the repository builds without it. Run `git lfs pull` after cloning on Windows. See [`CLAUDE.md`](CLAUDE.md) and [`AGENTS.md`](AGENTS.md) for details.
 
 ---
 
 ## Status and roadmap
 
-| Release | Date | Highlights |
-|---|---|---|
-| [v2.3.6.4-ultra](https://github.com/aceRage/EdgeSlicer/releases/tag/v2.3.6.4-ultra) | 2026-09-01 | Windows installer (side by side), Linux AppImage, unsigned macOS build; assembly tools (Auto-Fit, Assemble-tool Auto-fit with live sliders, triangle/curve/point modes); dual-nozzle grouping; H2D/H2C/X2D/P2S/A2L/H2S profiles + Polymaker catalogue; Support Filament Matching; Bambu Studio preset import |
-| [v2.3.6.3-ultra](https://github.com/aceRage/EdgeSlicer/releases/tag/v2.3.6.3-ultra) | 2026-08-30 | Connectivity-plugin update, Compare Slices, go2rtc cleanup on exit |
-| [v2.3.6.2-ultra](https://github.com/aceRage/EdgeSlicer/releases/tag/v2.3.6.2-ultra) | 2026-08-29 | Bambu LAN connectivity (optional plugin), nozzle flow type, QIDI refresh |
-| [v2.3.6.1-ultra](https://github.com/aceRage/EdgeSlicer/releases/tag/v2.3.6.1-ultra) | 2026-08-28 | Outer wall filament, Spool Manager, Offset layers, Visibility modes, Manifold booleans, Repair/Remesh |
-| [v2.3.6-ultra](https://github.com/aceRage/EdgeSlicer/releases/tag/v2.3.6-ultra) | 2026-08-27 | Stream tab, Keep my printer, Auto-Save, Apply All, Assemble Separately, align helpers |
+The next release, **v2.3.6.5-edge**, is the first one published under the EdgeSlicer name. Earlier releases were made under the fork's previous names and have been removed, so there is no upgrade path from them other than installing fresh — your data directory is migrated automatically (see above).
 
-**In progress (separate branches):** `feat/paint-depth` — bounded embedding depth for multi-material paint. Flashforge device tab — experimental; the send flow is incomplete and it needs the vendor's own network library, which is **not** distributed with this fork. Dual-nozzle follow-ups — nozzle-aware tool ordering and per-nozzle AMS slot mapping in the send dialog. Next: the Ultra splash and side-by-side identity on the Linux and macOS builds.
+Known limits and work in progress, stated plainly:
+
+- **Bambu Lab** — slicing is verified, hardware validation is not finished.
+- **Native app push** — the hub can send it; the companion app does not exist yet.
+- **G-code archive** — files are stored, listed and deleted; re-sending one from the phone is not built.
+- **Support groups** — the support *base* is never per group, and classic tree supports take interface layer count object-wide.
+- **Flashforge device tab** — experimental; the send flow is incomplete and it needs the vendor's own network library, which is **not** distributed with this fork.
+- **Dual-nozzle follow-ups** — nozzle-aware tool ordering and per-nozzle AMS slot mapping in the send dialog.
+- The EdgeSlicer identity is applied on Windows; the side-by-side identity on the Linux and macOS builds is still to do.
 
 ---
 
@@ -134,12 +192,12 @@ Ported features: align/distribute helpers, "Sub merge" (our *Assemble Separately
 
 Third-party components added by this fork: [Manifold](https://github.com/elalish/manifold) (Apache-2.0); [go2rtc](https://github.com/AlexxIT/go2rtc) v1.9.14 (MIT, bundled unmodified in `resources/tools/go2rtc`); Polymaker presets from [Polymaker3D/Polymaker-Preset](https://github.com/Polymaker3D/Polymaker-Preset) (MIT, notice in `resources/profiles/BBL/filament/PANCHROMA_POLYMAKER_LICENSE.txt`); the pressure-advance calibration pattern adapted from Andrew Ellis' generator (GPL-3.0), itself adapted from Sineos' Marlin generator (GPL-3.0). No proprietary printer-vendor network libraries are included in this repository.
 
-Snapmaker, Bambu Lab, Flashforge and other printer brands are trademarks of their respective owners; this project is not affiliated with or endorsed by any of them.
+Snapmaker, Bambu Lab, Flashforge, Tailscale and other names are trademarks of their respective owners; this project is not affiliated with or endorsed by any of them.
 
 ---
 
 ## Contributing
 
-Bug reports and feature requests go to [GitHub Issues](https://github.com/aceRage/EdgeSlicer/issues) — include the release version, printer and a project `.3mf` where possible. Pull requests target **`main`**; read [`AGENTS.md`](AGENTS.md) for layout and conventions, keep fork-specific settings on the Ultra preferences tab, and prefer porting from upstream with attribution over re-implementing.
+Bug reports and feature requests go to [GitHub Issues](https://github.com/aceRage/EdgeSlicer/issues) — include the release version, printer and a project `.3mf` where possible. Pull requests target **`main`**; read [`AGENTS.md`](AGENTS.md) for layout and conventions, keep fork-specific settings on the Extras preferences tab, and prefer porting from upstream with attribution over re-implementing.
 
 Security issues: please use a [private security advisory](https://github.com/aceRage/EdgeSlicer/security/advisories/new) on GitHub rather than a public issue.
