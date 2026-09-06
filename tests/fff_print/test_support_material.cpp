@@ -916,6 +916,20 @@ TEST_CASE("SupportMaterial: classic tree says its interface layer count is objec
     });
     REQUIRE(! organic_print.objects().empty());
     CHECK(! has_warning_containing(*organic_print.objects().front(), "object-wide for classic tree supports"));
+
+    // A group asking for FEWER layers than the object loses nothing on a classic tree - it gets the
+    // object's count, which is what it would get anyway - so no notice (2026-09-05 hardware pass:
+    // the every-difference rule fired on nearly every classic-tree slice with a set applied).
+    Slic3r::Print fewer_print;
+    Slic3r::Model fewer_model;
+    make_floating_two_part_print(fewer_print, fewer_model, tree_fixture_config("tree_slim"), [](ModelObject &object) {
+        ModelVolume *part_b = object.volumes.back();
+        part_b->config.set_key_value("support_group", new ConfigOptionString("B"));
+        part_b->config.set_key_value("support_interface_top_layers", new ConfigOptionInt(1));
+    });
+    REQUIRE(! fewer_print.objects().empty());
+    CHECK(! fewer_print.objects().front()->has_support_group_interface_layer_override());
+    CHECK(! has_warning_containing(*fewer_print.objects().front(), "object-wide for classic tree supports"));
 }
 
 TEST_CASE("SupportMaterial: per-group interface filament, organic tree", "[SupportMaterial][support_groups][tree]")

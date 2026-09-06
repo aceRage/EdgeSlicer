@@ -3686,7 +3686,11 @@ bool PrintObject::has_support_group_interface_layer_override() const
         int bottom = m_config.support_interface_bottom_layers.value;
         if (const ConfigOption *opt = volume->config.option("support_interface_bottom_layers"); opt != nullptr)
             bottom = opt->getInt();
-        if (top != object_top || resolved_bottom(bottom, top) != object_bottom)
+        // Only a group asking for MORE layers than the object loses anything on a classic tree
+        // (the roof is built with the object's count); a group asking for fewer just gets the
+        // object's, which is what it would get anyway. Saying it for every difference made the
+        // notice fire on nearly every classic-tree slice with a set applied (2026-09-05).
+        if (top > object_top || resolved_bottom(bottom, top) > object_bottom)
             return true;
     }
     return false;

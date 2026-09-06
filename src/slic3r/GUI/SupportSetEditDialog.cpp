@@ -1,6 +1,7 @@
 #include "SupportSetEditDialog.hpp"
 
 #include <algorithm>
+#include <boost/algorithm/string/predicate.hpp>
 
 #include <wx/sizer.h>
 #include <wx/stattext.h>
@@ -216,27 +217,34 @@ void SupportSetEditDialog::add_interface_filament_row(wxSizer *parent_sizer)
                                     "TYPE rather than a slot number. The slot is worked out when the set is "
                                     "applied, on whatever printer that happens to be."));
 
-    // "same" and "soluble" always; then every filament type loaded on this printer, so the usual
-    // choice is one click away. An existing value that is none of those is kept as its own entry
-    // rather than silently rewritten.
-    auto add_entry = [this](const wxString& label, const std::string& value) {
-        if (std::find(m_filament_type_values.begin(), m_filament_type_values.end(), value) != m_filament_type_values.end())
+    // "Same as the part" first; then every filament TYPE loaded on this printer, marked as such,
+    // so the usual choice is one click away; then the common material types, so a set can name a
+    // material this printer does not have loaded and still resolve on one that does. No bare
+    // "Soluble" entry - it names no material (decision 2026-09-05); a set that still stores
+    // "soluble" keeps it as its own entry rather than being silently rewritten.
+    auto has_value = [this](const std::string& value) {
+        return std::any_of(m_filament_type_values.begin(), m_filament_type_values.end(),
+                           [&value](const std::string& v) { return boost::iequals(v, value); });
+    };
+    auto add_entry = [this, &has_value](const wxString& label, const std::string& value) {
+        if (has_value(value))
             return;
         m_filament_combo->Append(label);
         m_filament_type_values.push_back(value);
     };
     add_entry(_L("Same as the part"), "same");
-    add_entry(_L("Soluble"), "soluble");
     if (const ConfigOptionStrings* types = m_filament_config.option<ConfigOptionStrings>("filament_type"); types != nullptr)
         for (const std::string& type : types->values)
             if (!type.empty())
-                add_entry(from_u8(type), type);
+                add_entry(format_wxstr(_L("%1% (loaded)"), from_u8(type)), type);
+    for (const char* type : { "PLA", "PETG", "ABS", "ASA", "TPU", "HIPS", "PC", "PA", "PVA", "BVOH", "PET", "PP" })
+        add_entry(from_u8(type), type);
     if (!m_set.interface_filament_type.empty())
         add_entry(from_u8(m_set.interface_filament_type), m_set.interface_filament_type);
 
     int sel = 0;
     for (size_t i = 0; i < m_filament_type_values.size(); ++ i)
-        if (m_filament_type_values[i] == m_set.interface_filament_type)
+        if (boost::iequals(m_filament_type_values[i], m_set.interface_filament_type))
             sel = int(i);
     m_filament_combo->SetSelection(sel);
     m_filament_combo->Bind(wxEVT_COMBOBOX, [this](wxCommandEvent& evt) {

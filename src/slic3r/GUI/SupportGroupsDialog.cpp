@@ -411,7 +411,9 @@ std::vector<wxString> SupportGroupsDialog::notices() const
                                           "on this printer."), name, opt->getInt()));
         if (classic_tree && ! said_classic_tree) {
             const ConfigOption *top = row.values.option("support_interface_top_layers");
-            if (top != nullptr && top->getInt() != object_int("support_interface_top_layers", top->getInt())) {
+            // Same rule as PrintObject::has_support_group_interface_layer_override: only a group
+            // asking for MORE interface layers than the object loses anything here.
+            if (top != nullptr && top->getInt() > object_int("support_interface_top_layers", top->getInt())) {
                 out.push_back(_L("Interface layer count is object-wide for classic tree supports; use organic "
                                  "trees or normal supports for per-group interface layers."));
                 said_classic_tree = true;
