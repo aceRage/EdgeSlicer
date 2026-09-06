@@ -1803,7 +1803,20 @@ Updates PresetUpdater::priv::get_printer_config_updates(bool update) const
         if (!version_match || (curr_ver < resc_ver)) {
             BOOST_LOG_TRIVIAL(info) << "[Orca Updater]:found newer version " << resc_version << " from resource, old version " << curr_version;
         } else {
-            return {};
+            // Same version, but the resource folder may carry printer files the data dir never got
+            // (new machines added without a version bump: the H2C's O1C2.json and the H2S's
+            // O1S.json were missing from a data dir that predated them, so
+            // load_compatible_settings failed for those printers - 2026-09-06). Copy when anything
+            // is missing.
+            size_t missing = 0;
+            boost::system::error_code ec;
+            for (boost::filesystem::directory_iterator it(resc_folder, ec), end; !ec && it != end; it.increment(ec))
+                if (boost::filesystem::is_regular_file(it->path(), ec) && !boost::filesystem::exists(config_folder / it->path().filename(), ec))
+                    ++missing;
+            if (missing == 0)
+                return {};
+            BOOST_LOG_TRIVIAL(info) << "[Orca Updater]:printer configs at the same version but " << missing
+                                    << " file(s) are missing from the data dir; copying from resource";
         }
     }
     Updates updates;
