@@ -232,14 +232,21 @@ fi
 
 # Get version information
 echo -e "${YELLOW}Getting version information...${NC}"
-if [[ -f "version.inc" ]]; then
-    VER_PURE=$(grep 'set(Snapmaker_VERSION' version.inc | cut -d '"' -f2)
+# The version number lives in src/common_func/common_func.hpp; version.inc only reads it back,
+# so grepping version.inc would yield the literal "${CMAKE_MATCH_1}".
+VERSION_HEADER="src/common_func/common_func.hpp"
+if [[ -f "$VERSION_HEADER" ]]; then
+    VER_PURE=$(grep -E '^#define[[:space:]]+Snapmaker_VERSION[[:space:]]+"' "$VERSION_HEADER" | cut -d '"' -f2)
+    if [[ -z "$VER_PURE" ]]; then
+        echo -e "${RED}Error: could not read Snapmaker_VERSION from $VERSION_HEADER${NC}"
+        exit 1
+    fi
     VER="V$VER_PURE"
     DATE=$(date +'%Y%m%d')
     echo -e "Version: ${GREEN}$VER${NC}"
     echo -e "Date: ${GREEN}$DATE${NC}"
 else
-    echo -e "${RED}Error: version.inc not found${NC}"
+    echo -e "${RED}Error: $VERSION_HEADER not found${NC}"
     exit 1
 fi
 
