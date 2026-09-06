@@ -183,6 +183,9 @@ public:
     std::map<int, DynamicPrintConfig> build_filament_ams_list(MachineObject* obj);
     void sync_ams_list();
     void show_sync_filament_dialog();
+    // Point the "Filaments" row's sync button at the sync that fits the current
+    // printer preset (Bambu AMS / Snapmaker dialog), or hide it for other vendors.
+    void update_filament_sync_button();
     // Orca
     void show_SEMM_buttons(bool bshow);
     void update_dynamic_filament_list();
