@@ -1,0 +1,74 @@
+{
+    "type": "filament",
+    "name": "PolyMax PC @BBL H2C",
+    "inherits": "Generic PC @BBL H2C 0.4 nozzle",
+    "from": "system",
+    "setting_id": "GFSPM02_63",
+    "filament_id": "PMPC02",
+    "instantiation": "true",
+    "additional_cooling_fan_speed": [
+        "0"
+    ],
+    "additional_fan_full_speed_layer": [
+        "0"
+    ],
+    "close_additional_fan_first_x_layers": [
+        "3"
+    ],
+    "fan_min_speed": [
+        "50"
+    ],
+    "filament_density": [
+        "1.19"
+    ],
+    "filament_flow_ratio": [
+        "0.96",
+        "0.96",
+        "0.96"
+    ],
+    "filament_max_volumetric_speed": [
+        "8",
+        "8",
+        "8"
+    ],
+    "filament_printable": [
+        "3"
+    ],
+    "filament_vendor": [
+        "Polymaker"
+    ],
+    "impact_strength_z": [
+        "10"
+    ],
+    "nozzle_temperature": [
+        "260",
+        "260",
+        "260"
+    ],
+    "nozzle_temperature_initial_layer": [
+        "260",
+        "260",
+        "260"
+    ],
+    "nozzle_temperature_range_high": [
+        "270"
+    ],
+    "nozzle_temperature_range_low": [
+        "250"
+    ],
+    "slow_down_layer_time": [
+        "6"
+    ],
+    "temperature_vitrification": [
+        "117"
+    ],
+    "textured_plate_temp": [
+        "105"
+    ],
+    "textured_plate_temp_initial_layer": [
+        "105"
+    ],
+    "compatible_printers": [
+        "Bambu Lab H2C 0.4 nozzle"
+    ]
+}

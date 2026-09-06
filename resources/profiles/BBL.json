@@ -7350,6 +7350,10 @@
             "sub_path": "filament/Bambu ABS @BBL H2C.json"
         },
         {
+            "name": "Polymaker ABS Max @BBL H2C",
+            "sub_path": "filament/Polymaker ABS Max @BBL H2C.json"
+        },
+        {
             "name": "Bambu ABS-GF @BBL H2C 0.4 nozzle",
             "sub_path": "filament/Bambu ABS-GF @BBL H2C 0.4 nozzle.json"
         },
@@ -7460,6 +7464,14 @@
         {
             "name": "Bambu PET-CF @BBL H2C 0.4 nozzle",
             "sub_path": "filament/Bambu PET-CF @BBL H2C 0.4 nozzle.json"
+        },
+        {
+            "name": "Fiberon PET-CF17 @BBL H2C",
+            "sub_path": "filament/Fiberon PET-CF17 @BBL H2C.json"
+        },
+        {
+            "name": "Fiberon PET-GF15 @BBL H2C",
+            "sub_path": "filament/Fiberon PET-GF15 @BBL H2C.json"
         },
         {
             "name": "Bambu PET-CF @BBL H2C",
@@ -7918,6 +7930,14 @@
             "sub_path": "filament/Generic ABS @BBL H2C 0.4 nozzle.json"
         },
         {
+            "name": "Polymaker ABS Pro @BBL H2C",
+            "sub_path": "filament/Polymaker ABS Pro @BBL H2C.json"
+        },
+        {
+            "name": "Polymaker ABS Pro Galaxy @BBL H2C",
+            "sub_path": "filament/Polymaker ABS Pro Galaxy @BBL H2C.json"
+        },
+        {
             "name": "Generic ABS @BBL H2C",
             "sub_path": "filament/Generic ABS @BBL H2C.json"
         },
@@ -7928,6 +7948,18 @@
         {
             "name": "Generic ASA @BBL H2C 0.4 nozzle",
             "sub_path": "filament/Generic ASA @BBL H2C 0.4 nozzle.json"
+        },
+        {
+            "name": "Fiberon ASA-CF08 @BBL H2C",
+            "sub_path": "filament/Fiberon ASA-CF08 @BBL H2C.json"
+        },
+        {
+            "name": "Polylite ASA for TYC Americas @BBL H2C",
+            "sub_path": "filament/Polylite ASA for TYC Americas @BBL H2C.json"
+        },
+        {
+            "name": "Polymaker ASA @BBL H2C",
+            "sub_path": "filament/Polymaker ASA @BBL H2C.json"
         },
         {
             "name": "Generic ASA @BBL H2C",
@@ -7966,12 +7998,36 @@
             "sub_path": "filament/Generic PA @BBL H2C 0.4 nozzle.json"
         },
         {
+            "name": "PolySupport for PA12 @BBL H2C",
+            "sub_path": "filament/PolySupport for PA12 @BBL H2C.json"
+        },
+        {
             "name": "Generic PA @BBL H2C",
             "sub_path": "filament/Generic PA @BBL H2C.json"
         },
         {
             "name": "Generic PA-CF @BBL H2C 0.4 nozzle",
             "sub_path": "filament/Generic PA-CF @BBL H2C 0.4 nozzle.json"
+        },
+        {
+            "name": "Fiberon PA12-CF10 @BBL H2C",
+            "sub_path": "filament/Fiberon PA12-CF10 @BBL H2C.json"
+        },
+        {
+            "name": "Fiberon PA6-CF20 @BBL H2C",
+            "sub_path": "filament/Fiberon PA6-CF20 @BBL H2C.json"
+        },
+        {
+            "name": "Fiberon PA6-GF25 @BBL H2C",
+            "sub_path": "filament/Fiberon PA6-GF25 @BBL H2C.json"
+        },
+        {
+            "name": "Fiberon PA612-CF15 @BBL H2C",
+            "sub_path": "filament/Fiberon PA612-CF15 @BBL H2C.json"
+        },
+        {
+            "name": "Fiberon PA612-ESD @BBL H2C",
+            "sub_path": "filament/Fiberon PA612-ESD @BBL H2C.json"
         },
         {
             "name": "Generic PA-CF @BBL H2C",
@@ -7984,6 +8040,18 @@
         {
             "name": "Generic PC @BBL H2C 0.4 nozzle",
             "sub_path": "filament/Generic PC @BBL H2C 0.4 nozzle.json"
+        },
+        {
+            "name": "PolyLite PC @BBL H2C",
+            "sub_path": "filament/PolyLite PC @BBL H2C.json"
+        },
+        {
+            "name": "PolyMax PC @BBL H2C",
+            "sub_path": "filament/PolyMax PC @BBL H2C.json"
+        },
+        {
+            "name": "PolyMax PETG @BBL H2C",
+            "sub_path": "filament/PolyMax PETG @BBL H2C.json"
         },
         {
             "name": "Generic PC @BBL H2C",
@@ -8020,6 +8088,30 @@
         {
             "name": "Generic PETG @BBL H2C 0.4 nozzle",
             "sub_path": "filament/Generic PETG @BBL H2C 0.4 nozzle.json"
+        },
+        {
+            "name": "Fiberon PETG-ESD @BBL H2C",
+            "sub_path": "filament/Fiberon PETG-ESD @BBL H2C.json"
+        },
+        {
+            "name": "Fiberon PETG-rCF08 @BBL H2C",
+            "sub_path": "filament/Fiberon PETG-rCF08 @BBL H2C.json"
+        },
+        {
+            "name": "PolyLite PETG @BBL H2C",
+            "sub_path": "filament/PolyLite PETG @BBL H2C.json"
+        },
+        {
+            "name": "PolyLite PETG Translucent @BBL H2C",
+            "sub_path": "filament/PolyLite PETG Translucent @BBL H2C.json"
+        },
+        {
+            "name": "Polymaker PETG @BBL H2C",
+            "sub_path": "filament/Polymaker PETG @BBL H2C.json"
+        },
+        {
+            "name": "Polymaker PETG Galaxy @BBL H2C",
+            "sub_path": "filament/Polymaker PETG Galaxy @BBL H2C.json"
         },
         {
             "name": "Generic PETG @BBL H2C",
@@ -8062,6 +8154,158 @@
             "sub_path": "filament/Generic PLA @BBL H2C 0.4 nozzle.json"
         },
         {
+            "name": "Panchroma CoPE @BBL H2C",
+            "sub_path": "filament/Panchroma CoPE @BBL H2C.json"
+        },
+        {
+            "name": "Panchroma PLA @BBL H2C",
+            "sub_path": "filament/Panchroma PLA @BBL H2C.json"
+        },
+        {
+            "name": "Panchroma PLA Celestial @BBL H2C",
+            "sub_path": "filament/Panchroma PLA Celestial @BBL H2C.json"
+        },
+        {
+            "name": "Panchroma PLA Galaxy @BBL H2C",
+            "sub_path": "filament/Panchroma PLA Galaxy @BBL H2C.json"
+        },
+        {
+            "name": "Panchroma PLA Glow @BBL H2C",
+            "sub_path": "filament/Panchroma PLA Glow @BBL H2C.json"
+        },
+        {
+            "name": "Panchroma PLA Luminous @BBL H2C",
+            "sub_path": "filament/Panchroma PLA Luminous @BBL H2C.json"
+        },
+        {
+            "name": "Panchroma PLA Marble @BBL H2C",
+            "sub_path": "filament/Panchroma PLA Marble @BBL H2C.json"
+        },
+        {
+            "name": "Panchroma PLA Matte @BBL H2C",
+            "sub_path": "filament/Panchroma PLA Matte @BBL H2C.json"
+        },
+        {
+            "name": "Panchroma PLA Metallic @BBL H2C",
+            "sub_path": "filament/Panchroma PLA Metallic @BBL H2C.json"
+        },
+        {
+            "name": "Panchroma PLA Neon @BBL H2C",
+            "sub_path": "filament/Panchroma PLA Neon @BBL H2C.json"
+        },
+        {
+            "name": "Panchroma PLA Satin @BBL H2C",
+            "sub_path": "filament/Panchroma PLA Satin @BBL H2C.json"
+        },
+        {
+            "name": "Panchroma PLA Silk @BBL H2C",
+            "sub_path": "filament/Panchroma PLA Silk @BBL H2C.json"
+        },
+        {
+            "name": "Panchroma PLA Starlight @BBL H2C",
+            "sub_path": "filament/Panchroma PLA Starlight @BBL H2C.json"
+        },
+        {
+            "name": "Panchroma PLA Translucent @BBL H2C",
+            "sub_path": "filament/Panchroma PLA Translucent @BBL H2C.json"
+        },
+        {
+            "name": "Panchroma PLA UV Shift @BBL H2C",
+            "sub_path": "filament/Panchroma PLA UV Shift @BBL H2C.json"
+        },
+        {
+            "name": "PolyCast @BBL H2C",
+            "sub_path": "filament/PolyCast @BBL H2C.json"
+        },
+        {
+            "name": "PolyLite CosPLA @BBL H2C",
+            "sub_path": "filament/PolyLite CosPLA @BBL H2C.json"
+        },
+        {
+            "name": "PolyLite LW-PLA @BBL H2C",
+            "sub_path": "filament/PolyLite LW-PLA @BBL H2C.json"
+        },
+        {
+            "name": "PolyLite PLA @BBL H2C",
+            "sub_path": "filament/PolyLite PLA @BBL H2C.json"
+        },
+        {
+            "name": "PolyLite PLA Galaxy @BBL H2C",
+            "sub_path": "filament/PolyLite PLA Galaxy @BBL H2C.json"
+        },
+        {
+            "name": "PolyLite PLA Glow @BBL H2C",
+            "sub_path": "filament/PolyLite PLA Glow @BBL H2C.json"
+        },
+        {
+            "name": "PolyLite PLA Luminous @BBL H2C",
+            "sub_path": "filament/PolyLite PLA Luminous @BBL H2C.json"
+        },
+        {
+            "name": "PolyLite PLA Neon @BBL H2C",
+            "sub_path": "filament/PolyLite PLA Neon @BBL H2C.json"
+        },
+        {
+            "name": "PolyLite PLA Pro @BBL H2C",
+            "sub_path": "filament/PolyLite PLA Pro @BBL H2C.json"
+        },
+        {
+            "name": "PolyLite PLA Pro Metallic @BBL H2C",
+            "sub_path": "filament/PolyLite PLA Pro Metallic @BBL H2C.json"
+        },
+        {
+            "name": "PolyLite PLA Starlight @BBL H2C",
+            "sub_path": "filament/PolyLite PLA Starlight @BBL H2C.json"
+        },
+        {
+            "name": "PolyLite PLA Translucent @BBL H2C",
+            "sub_path": "filament/PolyLite PLA Translucent @BBL H2C.json"
+        },
+        {
+            "name": "PolyMax PLA @BBL H2C",
+            "sub_path": "filament/PolyMax PLA @BBL H2C.json"
+        },
+        {
+            "name": "PolySupport @BBL H2C",
+            "sub_path": "filament/PolySupport @BBL H2C.json"
+        },
+        {
+            "name": "PolyTerra PLA @BBL H2C",
+            "sub_path": "filament/PolyTerra PLA @BBL H2C.json"
+        },
+        {
+            "name": "PolyTerra PLA Marble @BBL H2C",
+            "sub_path": "filament/PolyTerra PLA Marble @BBL H2C.json"
+        },
+        {
+            "name": "PolyTerra PLA+ @BBL H2C",
+            "sub_path": "filament/PolyTerra PLA+ @BBL H2C.json"
+        },
+        {
+            "name": "Polymaker HT-PLA @BBL H2C",
+            "sub_path": "filament/Polymaker HT-PLA @BBL H2C.json"
+        },
+        {
+            "name": "Polymaker HT-PLA Pro @BBL H2C",
+            "sub_path": "filament/Polymaker HT-PLA Pro @BBL H2C.json"
+        },
+        {
+            "name": "Polymaker HT-PLA-GF @BBL H2C",
+            "sub_path": "filament/Polymaker HT-PLA-GF @BBL H2C.json"
+        },
+        {
+            "name": "Polymaker PLA @BBL H2C",
+            "sub_path": "filament/Polymaker PLA @BBL H2C.json"
+        },
+        {
+            "name": "Polymaker PLA Pro @BBL H2C",
+            "sub_path": "filament/Polymaker PLA Pro @BBL H2C.json"
+        },
+        {
+            "name": "Polymaker PLA Pro Metallic @BBL H2C",
+            "sub_path": "filament/Polymaker PLA Pro Metallic @BBL H2C.json"
+        },
+        {
             "name": "Generic PLA @BBL H2C",
             "sub_path": "filament/Generic PLA @BBL H2C.json"
         },
@@ -8088,6 +8332,10 @@
         {
             "name": "Generic PLA-CF @BBL H2C 0.4 nozzle",
             "sub_path": "filament/Generic PLA-CF @BBL H2C 0.4 nozzle.json"
+        },
+        {
+            "name": "PolyLite PLA-CF @BBL H2C",
+            "sub_path": "filament/PolyLite PLA-CF @BBL H2C.json"
         },
         {
             "name": "Generic PLA-CF @BBL H2C",
@@ -8146,6 +8394,14 @@
             "sub_path": "filament/Generic PPS-CF @BBL H2C 0.4 nozzle.json"
         },
         {
+            "name": "Fiberon PPS-CF10 @BBL H2C",
+            "sub_path": "filament/Fiberon PPS-CF10 @BBL H2C.json"
+        },
+        {
+            "name": "Fiberon PPS-GF20 @BBL H2C",
+            "sub_path": "filament/Fiberon PPS-GF20 @BBL H2C.json"
+        },
+        {
             "name": "Generic PPS-CF @BBL H2C",
             "sub_path": "filament/Generic PPS-CF @BBL H2C.json"
         },
@@ -8164,6 +8420,14 @@
         {
             "name": "Generic TPU @BBL H2C 0.4 nozzle",
             "sub_path": "filament/Generic TPU @BBL H2C 0.4 nozzle.json"
+        },
+        {
+            "name": "PolyFlex TPU95 @BBL H2C",
+            "sub_path": "filament/PolyFlex TPU95 @BBL H2C.json"
+        },
+        {
+            "name": "PolyFlex TPU95-HF @BBL H2C",
+            "sub_path": "filament/PolyFlex TPU95-HF @BBL H2C.json"
         },
         {
             "name": "Generic TPU @BBL H2C",
@@ -8194,6 +8458,10 @@
             "sub_path": "filament/PolyLite ABS @BBL H2D.json"
         },
         {
+            "name": "PolyLite ABS @BBL H2C",
+            "sub_path": "filament/PolyLite ABS @BBL H2C.json"
+        },
+        {
             "name": "PolyLite ABS @BBL H2DP 0.2 nozzle",
             "sub_path": "filament/PolyLite ABS @BBL H2DP 0.2 nozzle.json"
         },
@@ -8208,6 +8476,10 @@
         {
             "name": "PolyLite ASA @BBL H2D",
             "sub_path": "filament/PolyLite ASA @BBL H2D.json"
+        },
+        {
+            "name": "PolyLite ASA @BBL H2C",
+            "sub_path": "filament/PolyLite ASA @BBL H2C.json"
         },
         {
             "name": "PolyLite ASA @BBL H2DP 0.2 nozzle",

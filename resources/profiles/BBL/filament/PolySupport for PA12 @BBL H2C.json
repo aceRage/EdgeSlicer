@@ -1,0 +1,115 @@
+{
+    "type": "filament",
+    "name": "PolySupport for PA12 @BBL H2C",
+    "inherits": "Generic PA @BBL H2C 0.4 nozzle",
+    "from": "system",
+    "setting_id": "GFSPM02_66",
+    "filament_id": "PMPA06",
+    "instantiation": "true",
+    "activate_air_filtration": [
+        "0"
+    ],
+    "additional_cooling_fan_speed": [
+        "100"
+    ],
+    "additional_fan_full_speed_layer": [
+        "0"
+    ],
+    "chamber_temperatures": [
+        "0"
+    ],
+    "close_additional_fan_first_x_layers": [
+        "1"
+    ],
+    "close_fan_the_first_x_layers": [
+        "1"
+    ],
+    "cool_plate_temp": [
+        "35"
+    ],
+    "cool_plate_temp_initial_layer": [
+        "35"
+    ],
+    "eng_plate_temp": [
+        "55"
+    ],
+    "eng_plate_temp_initial_layer": [
+        "55"
+    ],
+    "fan_cooling_layer_time": [
+        "30"
+    ],
+    "fan_max_speed": [
+        "100"
+    ],
+    "fan_min_speed": [
+        "80"
+    ],
+    "filament_density": [
+        "1.29"
+    ],
+    "filament_flow_ratio": [
+        "0.97",
+        "0.97",
+        "0.97"
+    ],
+    "filament_printable": [
+        "3"
+    ],
+    "filament_scarf_gap": [
+        "15%"
+    ],
+    "filament_vendor": [
+        "Polymaker"
+    ],
+    "hot_plate_temp": [
+        "55"
+    ],
+    "hot_plate_temp_initial_layer": [
+        "55"
+    ],
+    "impact_strength_z": [
+        "10.0"
+    ],
+    "nozzle_temperature_range_high": [
+        "300"
+    ],
+    "nozzle_temperature_range_low": [
+        "270"
+    ],
+    "overhang_fan_speed": [
+        "100"
+    ],
+    "overhang_fan_threshold": [
+        "50%"
+    ],
+    "reduce_fan_stop_start_freq": [
+        "1"
+    ],
+    "slow_down_layer_time": [
+        "12"
+    ],
+    "slow_down_min_speed": [
+        "10",
+        "20",
+        "10"
+    ],
+    "supertack_plate_temp": [
+        "45"
+    ],
+    "supertack_plate_temp_initial_layer": [
+        "45"
+    ],
+    "temperature_vitrification": [
+        "117"
+    ],
+    "textured_plate_temp": [
+        "50"
+    ],
+    "textured_plate_temp_initial_layer": [
+        "50"
+    ],
+    "compatible_printers": [
+        "Bambu Lab H2C 0.4 nozzle"
+    ]
+}

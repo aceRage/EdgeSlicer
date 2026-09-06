@@ -1,0 +1,62 @@
+{
+    "type": "filament",
+    "name": "PolyLite LW-PLA @BBL H2C",
+    "inherits": "Generic PLA @BBL H2C 0.4 nozzle",
+    "from": "system",
+    "setting_id": "GFSPM02_58",
+    "filament_id": "PMPL30",
+    "instantiation": "true",
+    "additional_cooling_fan_speed": [
+        "100"
+    ],
+    "additional_fan_full_speed_layer": [
+        "0"
+    ],
+    "close_additional_fan_first_x_layers": [
+        "1"
+    ],
+    "filament_density": [
+        "0.9"
+    ],
+    "filament_flow_ratio": [
+        "1.05",
+        "1.05",
+        "1.05"
+    ],
+    "filament_max_volumetric_speed": [
+        "4",
+        "4",
+        "4"
+    ],
+    "filament_printable": [
+        "3"
+    ],
+    "filament_vendor": [
+        "Polymaker"
+    ],
+    "impact_strength_z": [
+        "10.0"
+    ],
+    "nozzle_temperature": [
+        "200",
+        "200",
+        "200"
+    ],
+    "nozzle_temperature_initial_layer": [
+        "200",
+        "200",
+        "200"
+    ],
+    "nozzle_temperature_range_high": [
+        "210"
+    ],
+    "slow_down_layer_time": [
+        "15"
+    ],
+    "temperature_vitrification": [
+        "60"
+    ],
+    "compatible_printers": [
+        "Bambu Lab H2C 0.4 nozzle"
+    ]
+}

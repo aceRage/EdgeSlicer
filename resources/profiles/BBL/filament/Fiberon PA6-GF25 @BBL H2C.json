@@ -1,0 +1,143 @@
+{
+    "type": "filament",
+    "name": "Fiberon PA6-GF25 @BBL H2C",
+    "inherits": "Generic PA-CF @BBL H2C 0.4 nozzle",
+    "from": "system",
+    "setting_id": "GFSPM02_03",
+    "filament_id": "PMPA03",
+    "instantiation": "true",
+    "additional_cooling_fan_speed": [
+        "0"
+    ],
+    "additional_fan_full_speed_layer": [
+        "2"
+    ],
+    "chamber_temperatures": [
+        "0"
+    ],
+    "close_additional_fan_first_x_layers": [
+        "3"
+    ],
+    "counter_coef_1": [
+        "0"
+    ],
+    "counter_coef_2": [
+        "0.008"
+    ],
+    "counter_coef_3": [
+        "-0.041"
+    ],
+    "counter_limit_max": [
+        "0.033"
+    ],
+    "counter_limit_min": [
+        "-0.035"
+    ],
+    "eng_plate_temp": [
+        "50"
+    ],
+    "eng_plate_temp_initial_layer": [
+        "50"
+    ],
+    "fan_cooling_layer_time": [
+        "30"
+    ],
+    "fan_min_speed": [
+        "20"
+    ],
+    "filament_density": [
+        "1.2"
+    ],
+    "filament_flow_ratio": [
+        "0.99",
+        "0.99",
+        "0.99"
+    ],
+    "filament_long_retractions_when_cut": [
+        "0",
+        "0",
+        "0"
+    ],
+    "filament_max_volumetric_speed": [
+        "16",
+        "16",
+        "16"
+    ],
+    "filament_printable": [
+        "3"
+    ],
+    "filament_type": [
+        "PA-GF"
+    ],
+    "filament_vendor": [
+        "Polymaker"
+    ],
+    "hole_coef_1": [
+        "0"
+    ],
+    "hole_coef_2": [
+        "-0.008"
+    ],
+    "hole_coef_3": [
+        "0.23415"
+    ],
+    "hole_limit_max": [
+        "0.22"
+    ],
+    "hole_limit_min": [
+        "0.088"
+    ],
+    "hot_plate_temp": [
+        "50"
+    ],
+    "hot_plate_temp_initial_layer": [
+        "50"
+    ],
+    "impact_strength_z": [
+        "10"
+    ],
+    "long_retractions_when_ec": [
+        "0",
+        "0",
+        "0"
+    ],
+    "no_slow_down_for_cooling_on_outwalls": [
+        "0"
+    ],
+    "nozzle_temperature": [
+        "300",
+        "300",
+        "300"
+    ],
+    "nozzle_temperature_initial_layer": [
+        "300",
+        "300",
+        "300"
+    ],
+    "nozzle_temperature_range_low": [
+        "280"
+    ],
+    "reduce_fan_stop_start_freq": [
+        "1"
+    ],
+    "retraction_distances_when_ec": [
+        "0",
+        "0",
+        "0"
+    ],
+    "slow_down_layer_time": [
+        "10"
+    ],
+    "temperature_vitrification": [
+        "70.4"
+    ],
+    "textured_plate_temp": [
+        "50"
+    ],
+    "textured_plate_temp_initial_layer": [
+        "50"
+    ],
+    "compatible_printers": [
+        "Bambu Lab H2C 0.4 nozzle"
+    ]
+}
