@@ -267,8 +267,8 @@ mkdir -p "$BUILD_DIR"
 rm -rf "$BUILD_DIR/build-dir"
 
 # Check if flatpak manifest exists
-if [[ ! -f "./scripts/flatpak/io.github.acerage.UltraOne.yml" ]]; then
-    echo -e "${RED}Error: Flatpak manifest not found at scripts/flatpak/io.github.acerage.UltraOne.yml${NC}"
+if [[ ! -f "./scripts/flatpak/io.github.acerage.EdgeSlicer.yml" ]]; then
+    echo -e "${RED}Error: Flatpak manifest not found at scripts/flatpak/io.github.acerage.EdgeSlicer.yml${NC}"
     exit 1
 fi
 
@@ -323,7 +323,7 @@ fi
 if ! flatpak-builder \
     "${BUILDER_ARGS[@]}" \
     "$BUILD_DIR/build-dir" \
-    scripts/flatpak/io.github.acerage.UltraOne.yml; then
+    scripts/flatpak/io.github.acerage.EdgeSlicer.yml; then
     echo -e "${RED}Error: flatpak-builder failed${NC}"
     echo -e "${YELLOW}Check the build log above for details${NC}"
     exit 1
@@ -340,7 +340,7 @@ if ! flatpak build-bundle \
     --arch="$ARCH" \
     "$BUILD_DIR/repo" \
     "$BUNDLE_NAME" \
-    io.github.acerage.UltraOne; then
+    io.github.acerage.EdgeSlicer; then
     echo -e "${RED}Error: Failed to create Flatpak bundle${NC}"
     exit 1
 fi
@@ -360,10 +360,10 @@ echo -e "flatpak install --user flathub org.gnome.Platform//49 org.gnome.Sdk//49
 echo -e "flatpak install --user $BUNDLE_NAME"
 echo ""
 echo -e "${BLUE}To run Snapmaker_Orca:${NC}"
-echo -e "flatpak run io.github.acerage.UltraOne"
+echo -e "flatpak run io.github.acerage.EdgeSlicer"
 echo ""
 echo -e "${BLUE}To uninstall:${NC}"
-echo -e "flatpak uninstall --user io.github.acerage.UltraOne"
+echo -e "flatpak uninstall --user io.github.acerage.EdgeSlicer"
 echo ""
 if [[ "$FORCE_CLEAN" != true ]]; then
     echo -e "${BLUE}Cache Management:${NC}"

@@ -3,8 +3,8 @@
 !include "FileFunc.nsh"
 !include "LogicLib.nsh"
 
-!define PRODUCT_NAME "UltraOne"
-!define PRODUCT_PUBLISHER "UltraOne"
+!define PRODUCT_NAME "EdgeSlicer"
+!define PRODUCT_PUBLISHER "EdgeSlicer"
 !define PRODUCT_WEB_SITE "https://github.com/aceRage/Snapmaker-Ultra"
 !define PRODUCT_UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${PRODUCT_NAME}"
 !define PRODUCT_UNINST_ROOT_KEY "HKLM"
@@ -19,12 +19,12 @@
 !endif
 !define PACK_SOURCE_DIR "${SOURCE_DIR}"
 
-; 64-bit app: use PROGRAMFILES64 so default path is C:\Program Files\UltraOne, not (x86)
-!define INSTALL_DIR_RUNTIME "$PROGRAMFILES64\UltraOne"
+; 64-bit app: use PROGRAMFILES64 so default path is C:\Program Files\EdgeSlicer, not (x86)
+!define INSTALL_DIR_RUNTIME "$PROGRAMFILES64\EdgeSlicer"
 InstallDir "${INSTALL_DIR_RUNTIME}"
 
 !ifndef OUTPUT_FILE
-    !define OUTPUT_FILE "UltraOne_Windows_Installer_V${VERSION}.exe"
+    !define OUTPUT_FILE "EdgeSlicer_Windows_Installer_V${VERSION}.exe"
 !endif
 
 ; License page: show LICENSE.txt from repo root (same dir as this .nsi)
@@ -39,7 +39,7 @@ SetCompressor lzma
 
 VIProductVersion "${VERSION}.0"
 VIAddVersionKey "ProductName" "${PRODUCT_NAME}"
-VIAddVersionKey "Comments" "UltraOne is an open source slicer for FDM printers, for Snapmaker and Bambu Lab machines"
+VIAddVersionKey "Comments" "EdgeSlicer is an open source slicer for FDM printers, for Snapmaker and Bambu Lab machines"
 VIAddVersionKey "CompanyName" "${PRODUCT_PUBLISHER}"
 VIAddVersionKey "LegalCopyright" "Copyright (C) the ${PRODUCT_PUBLISHER} contributors"
 VIAddVersionKey "FileDescription" "${PRODUCT_NAME} ${VERSION} Installer"
@@ -125,13 +125,13 @@ Section "Main program" SecMain
     WriteRegStr ${PRODUCT_UNINST_ROOT_KEY} "${PRODUCT_INSTALL_KEY}" "Version" "${VERSION}"
     WriteRegStr ${PRODUCT_UNINST_ROOT_KEY} "${PRODUCT_INSTALL_KEY}" "InstallPath" "$INSTDIR"
 
-    ; URL protocol (same as macOS CFBundleURLSchemes): ultraone://. Registering the official
+    ; URL protocol (same as macOS CFBundleURLSchemes): edgeslicer://. Registering the official
     ; app's snapmaker-orca:// and Snapmaker_Orca:// here took its handlers away machine-wide.
-    DetailPrint "Registering the ultraone:// URL protocol..."
+    DetailPrint "Registering the edgeslicer:// URL protocol..."
     SetRegView 64
-    WriteRegStr HKLM "Software\Classes\ultraone" "" "URL:${PRODUCT_NAME}"
-    WriteRegStr HKLM "Software\Classes\ultraone" "URL Protocol" ""
-    WriteRegStr HKLM "Software\Classes\ultraone\shell\open\command" "" '"$INSTDIR\snapmaker-orca.exe" "%1"'
+    WriteRegStr HKLM "Software\Classes\edgeslicer" "" "URL:${PRODUCT_NAME}"
+    WriteRegStr HKLM "Software\Classes\edgeslicer" "URL Protocol" ""
+    WriteRegStr HKLM "Software\Classes\edgeslicer\shell\open\command" "" '"$INSTDIR\snapmaker-orca.exe" "%1"'
     SetRegView 32
 
     DetailPrint "Installation complete!"
@@ -186,6 +186,8 @@ Section "Uninstall"
     
     DetailPrint "Removing registry entries..."
     SetRegView 64
+    DeleteRegKey HKLM "Software\Classes\edgeslicer"
+    ; the scheme this fork registered under its previous name
     DeleteRegKey HKLM "Software\Classes\ultraone"
     SetRegView 32
     DeleteRegKey ${PRODUCT_UNINST_ROOT_KEY} "${PRODUCT_UNINST_KEY}"

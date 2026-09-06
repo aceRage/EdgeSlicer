@@ -1,11 +1,11 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <component type="desktop">
-    <id>io.github.acerage.UltraOne</id>
-    <launchable type="desktop-id">io.github.acerage.UltraOne.desktop</launchable>
+    <id>io.github.acerage.EdgeSlicer</id>
+    <launchable type="desktop-id">io.github.acerage.EdgeSlicer.desktop</launchable>
     <provides>
-        <id>io.github.acerage.UltraOne.desktop</id>
+        <id>io.github.acerage.EdgeSlicer.desktop</id>
     </provides>
-    <name>UltraOne</name>
+    <name>EdgeSlicer</name>
     <summary>Get even more perfect prints!</summary>
     <developer_name>aceRage</developer_name>
     <url type="homepage">https://github.com/aceRage/Snapmaker-Ultra</url>
