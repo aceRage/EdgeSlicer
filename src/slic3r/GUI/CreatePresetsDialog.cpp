@@ -29,6 +29,9 @@
 #define ORIGIN_TEXT_SIZE wxSize(FromDIP(10), FromDIP(24))
 #define PRINTER_PRESET_VENDOR_SIZE wxSize(FromDIP(150), FromDIP(24))
 #define PRINTER_PRESET_MODEL_SIZE wxSize(FromDIP(280), FromDIP(24))
+#define PRESET_TABLE_PRINTER_SIZE wxSize(FromDIP(210), FromDIP(24))
+#define PRESET_TABLE_NOZZLE_SIZE wxSize(FromDIP(80), FromDIP(24))
+#define PRESET_TABLE_PRESET_SIZE wxSize(FromDIP(240), FromDIP(24))
 #define STATIC_TEXT_COLOUR wxColour("#363636")
 #define PRINTER_LIST_COLOUR wxColour("#EEEEEE")
 #define FILAMENT_OPTION_COLOUR wxColour("#D9D9D9")
@@ -186,14 +189,74 @@ static bool str_is_all_digit(const std::string &str) {
     return true; 
 }
 
-// Custom comparator for case-insensitive sorting
-static bool caseInsensitiveCompare(const std::string& a, const std::string& b) {
-    std::string lowerA = a;
-    std::string lowerB = b;
-    std::transform(lowerA.begin(), lowerA.end(), lowerA.begin(), ::tolower);
-    std::transform(lowerB.begin(), lowerB.end(), lowerB.begin(), ::tolower);
-    return lowerA < lowerB;
+// Natural, case-insensitive comparison. Letters compare without regard to case so that
+// "PLA" and "pla" group together, digit runs compare by value so that "Preset 2" comes
+// before "Preset 10", and a digit run right after "<digit>." is read as a fraction so
+// that "0.15" comes before "0.2" and "0.2" before "0.4".
+static int natural_compare_nocase(const std::string &a, const std::string &b)
+{
+    const size_t na = a.size(), nb = b.size();
+    size_t       ia = 0, ib = 0;
+    while (ia < na && ib < nb) {
+        const unsigned char ca = (unsigned char) a[ia];
+        const unsigned char cb = (unsigned char) b[ib];
+        if (std::isdigit(ca) && std::isdigit(cb)) {
+            const bool frac = ia >= 2 && a[ia - 1] == '.' && std::isdigit((unsigned char) a[ia - 2]) &&
+                              ib >= 2 && b[ib - 1] == '.' && std::isdigit((unsigned char) b[ib - 2]);
+            size_t ja = ia, jb = ib;
+            while (ja < na && std::isdigit((unsigned char) a[ja])) ++ja;
+            while (jb < nb && std::isdigit((unsigned char) b[jb])) ++jb;
+            std::string da = a.substr(ia, ja - ia);
+            std::string db = b.substr(ib, jb - ib);
+            if (frac) {
+                // pad on the right, so "15" and "2" compare as "15" against "20"
+                const size_t len = std::max(da.size(), db.size());
+                da.append(len - da.size(), '0');
+                db.append(len - db.size(), '0');
+            } else {
+                // drop the leading zeros, keeping one digit, then the longer run is the larger number
+                da.erase(0, std::min(da.find_first_not_of('0'), da.size() - 1));
+                db.erase(0, std::min(db.find_first_not_of('0'), db.size() - 1));
+                if (da.size() != db.size()) return da.size() < db.size() ? -1 : 1;
+            }
+            if (da != db) return da < db ? -1 : 1;
+            ia = ja;
+            ib = jb;
+            continue;
+        }
+        const unsigned char la = (unsigned char) std::tolower(ca);
+        const unsigned char lb = (unsigned char) std::tolower(cb);
+        if (la != lb) return la < lb ? -1 : 1;
+        ++ia;
+        ++ib;
+    }
+    if (ia < na) return 1;
+    if (ib < nb) return -1;
+    // equal ignoring case: fall back to a case-sensitive compare so the order stays stable
+    const int cmp = a.compare(b);
+    return cmp < 0 ? -1 : (cmp > 0 ? 1 : 0);
 }
+
+static bool natural_less_nocase(const std::string &a, const std::string &b) { return natural_compare_nocase(a, b) < 0; }
+
+static bool natural_less_nocase(const wxString &a, const wxString &b)
+{
+    return natural_compare_nocase(std::string(a.ToUTF8().data()), std::string(b.ToUTF8().data())) < 0;
+}
+
+static void sort_choices_natural(wxArrayString &choices)
+{
+    std::vector<wxString> sorted;
+    sorted.reserve(choices.GetCount());
+    for (size_t i = 0; i < choices.GetCount(); ++i) sorted.push_back(choices[i]);
+    std::sort(sorted.begin(), sorted.end(), [](const wxString &a, const wxString &b) { return natural_less_nocase(a, b); });
+    choices.Clear();
+    for (const wxString &choice : sorted) choices.Add(choice);
+}
+
+// "Snapmaker U1 (0.4 nozzle) - Mock" -> "Snapmaker U1 - Mock" + "0.4"
+// "Bambu Lab X1 Carbon 0.4 nozzle"   -> "Bambu Lab X1 Carbon" + "0.4"
+static void split_printer_name_nozzle(const std::string &printer_name, std::string &base_name, std::string &nozzle);
 
 static bool delete_filament_preset_by_name(std::string delete_preset_name, std::string &selected_preset_name)
 {
@@ -393,47 +456,6 @@ static std::string get_vendor_name(std::string& preset_name)
     }
 }
 
-static wxBoxSizer *create_select_filament_preset_checkbox(wxWindow *                                    parent,
-                                                          std::string &                                 compatible_printer,
-                                                          std::vector<Preset *>                         presets,
-                                                          std::unordered_map<::CheckBox *, std::pair<std::string, Preset *>> &machine_filament_preset)
-{
-    wxBoxSizer *horizontal_sizer = new wxBoxSizer(wxHORIZONTAL);
-    wxBoxSizer *checkbox_sizer   = new wxBoxSizer(wxVERTICAL);
-    ::CheckBox *checkbox         = new ::CheckBox(parent);
-    checkbox_sizer->Add(checkbox, 0, wxEXPAND | wxRIGHT, 5);
-
-    wxBoxSizer *combobox_sizer = new wxBoxSizer(wxVERTICAL);
-    wxStaticText *machine_name_str = new wxStaticText(parent, wxID_ANY, wxString::FromUTF8(compatible_printer));
-    ComboBox *    combobox        = new ComboBox(parent, wxID_ANY, wxEmptyString, wxDefaultPosition, wxSize(200, 24), 0, nullptr, wxCB_READONLY);
-    combobox->SetBackgroundColor(PRINTER_LIST_COLOUR);
-    combobox->SetBorderColor(*wxWHITE);
-    combobox->SetLabel(_L("Select filament preset"));
-    combobox->Bind(wxEVT_COMBOBOX, [combobox, checkbox, presets, &machine_filament_preset, compatible_printer](wxCommandEvent &e) {
-        combobox->SetLabelColor(*wxBLACK);
-        wxString preset_name = combobox->GetStringSelection();
-        checkbox->SetValue(true);
-        for (Preset *preset : presets) {
-            if (preset_name == wxString::FromUTF8(preset->name)) {
-                machine_filament_preset[checkbox] = std::make_pair(compatible_printer, preset);
-            }
-        }
-        e.Skip();
-    });
-    combobox_sizer->Add(machine_name_str, 0, wxEXPAND, 0);
-    combobox_sizer->Add(combobox, 0, wxEXPAND | wxTOP, 5);
-
-    wxArrayString choices;
-    for (Preset *preset : presets) { 
-        choices.Add(wxString::FromUTF8(preset->name));
-    }
-    combobox->Set(choices);
-
-    horizontal_sizer->Add(checkbox_sizer);
-    horizontal_sizer->Add(combobox_sizer);
-    return horizontal_sizer;
-}
-
 static wxString get_curr_radio_type(std::vector<std::pair<RadioBox *, wxString>> &radio_btns)
 {
     for (std::pair<RadioBox *, wxString> radio_string : radio_btns) {
@@ -607,6 +629,36 @@ static std::string get_printer_nozzle_diameter(std::string printer_name) {
     }
 }
 
+static void split_printer_name_nozzle(const std::string &printer_name, std::string &base_name, std::string &nozzle)
+{
+    nozzle    = get_printer_nozzle_diameter(printer_name);
+    base_name = printer_name;
+    if (nozzle.empty()) return;
+
+    const std::string bracket_token = "(" + nozzle + " nozzle)";
+    const std::string plain_token   = nozzle + " nozzle";
+    size_t            index         = printer_name.find(bracket_token);
+    if (std::string::npos != index) {
+        base_name = printer_name.substr(0, index) + printer_name.substr(index + bracket_token.size());
+    } else {
+        index = printer_name.find(plain_token);
+        if (std::string::npos != index) base_name = printer_name.substr(0, index) + printer_name.substr(index + plain_token.size());
+    }
+
+    // the removed token leaves a double space behind
+    std::string collapsed;
+    bool        prev_space = false;
+    for (const char c : base_name) {
+        const bool is_space = c == ' ';
+        if (is_space && prev_space) continue;
+        collapsed.push_back(c);
+        prev_space = is_space;
+    }
+    base_name = collapsed;
+    boost::algorithm::trim(base_name);
+    if (base_name.empty()) base_name = printer_name;
+}
+
 static void adjust_dialog_in_screen(DPIDialog* dialog) {
     wxSize screen_size = wxGetDisplaySize();
     int    pos_x, pos_y, size_x, size_y, screen_width, screen_height, dialog_x, dialog_y;
@@ -684,6 +736,7 @@ CreateFilamentPresetDialog::CreateFilamentPresetDialog(wxWindow *parent)
     m_main_sizer->Add(create_dialog_buttons(), 0, wxEXPAND);
 
     get_all_visible_printer_name();
+    build_printer_nozzle_map();
     select_curr_radiobox(m_create_type_btns, 0);
 
     this->SetSizer(m_main_sizer);
@@ -709,13 +762,11 @@ void CreateFilamentPresetDialog::on_dpi_changed(const wxRect &suggested_rect) {
     Layout();
 }
 
-bool CreateFilamentPresetDialog::is_check_box_selected()
+bool CreateFilamentPresetDialog::is_preset_selected()
 {
-    for (const auto& checkbox_preset : m_filament_preset) {
-        if (checkbox_preset.first->GetValue()) { return true; }
-    }
+    if (curr_create_filament_type() == m_create_type.base_filament_preset) return !get_table_printer_filament_presets().empty();
 
-    for (const auto& checkbox_preset : m_machint_filament_preset) {
+    for (const auto& checkbox_preset : m_filament_preset) {
         if (checkbox_preset.first->GetValue()) { return true; }
     }
 
@@ -751,8 +802,8 @@ wxBoxSizer *CreateFilamentPresetDialog::create_vendor_item()
         string_vendors.push_back(std::any_cast<std::string>(vendor_any));
     }
 
-    // Sort the vendors alphabetically
-    std::sort(string_vendors.begin(), string_vendors.end(), caseInsensitiveCompare);
+    // Sort the vendors in natural, case-insensitive order
+    std::sort(string_vendors.begin(), string_vendors.end(), [](const std::string &a, const std::string &b) { return natural_less_nocase(a, b); });
 
     wxArrayString choices;
     bool          hasSnapmaker = false;
@@ -848,7 +899,7 @@ wxBoxSizer *CreateFilamentPresetDialog::create_type_item()
     for (const wxString filament : m_system_filament_types_set) {
         filament_type.Add(filament);
     }
-    filament_type.Sort();
+    sort_choices_natural(filament_type);
 
     wxBoxSizer *comboBoxSizer = new wxBoxSizer(wxVERTICAL);
     m_filament_type_combobox  = new ComboBox(this, wxID_ANY, wxEmptyString, wxDefaultPosition, NAME_OPTION_COMBOBOX_SIZE, 0, nullptr, wxCB_READONLY);
@@ -980,7 +1031,11 @@ wxBoxSizer *CreateFilamentPresetDialog::create_filament_preset_item()
         } else {
             BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " not find filament_id corresponding to the type: and the type is" << filament_type;
         }
-        sort_printer_by_nozzle(printer_name_to_filament_preset);
+        // the map above is unordered, and printer name sorts the nozzles of one printer together
+        std::sort(printer_name_to_filament_preset.begin(), printer_name_to_filament_preset.end(),
+                  [](const std::pair<std::string, Preset *> &a, const std::pair<std::string, Preset *> &b) {
+                      return natural_less_nocase(a.first, b.first);
+                  });
         for (std::pair<std::string, Preset *> printer_to_preset : printer_name_to_filament_preset)
             m_filament_presets_sizer->Add(create_checkbox(m_filament_preset_panel, printer_to_preset.first, printer_to_preset.second, m_filament_preset), 0,
                                           wxEXPAND | wxTOP | wxLEFT, FromDIP(5));
@@ -1012,6 +1067,39 @@ wxBoxSizer *CreateFilamentPresetDialog::create_filament_preset_for_printer_item(
     m_filament_presets_sizer = new wxGridSizer(3, FromDIP(5), FromDIP(5));
     m_filament_preset_panel->SetSizer(m_filament_presets_sizer);
     vertical_sizer->Add(m_filament_preset_panel, 0, wxEXPAND | wxTOP | wxALIGN_CENTER_HORIZONTAL, FromDIP(5));
+
+    // "Copy Current Filament Preset" shows this table instead: one row per printer / nozzle / filament preset
+    m_preset_table_panel = new wxPanel(m_scrolled_preset_panel, wxID_ANY);
+    m_preset_table_panel->SetBackgroundColour(PRINTER_LIST_COLOUR);
+    m_preset_table_sizer = new wxBoxSizer(wxVERTICAL);
+
+    wxBoxSizer *header_sizer = new wxBoxSizer(wxHORIZONTAL);
+    auto        add_header   = [this, header_sizer](const wxString &title, const wxSize &size) {
+        wxStaticText *header = new wxStaticText(m_preset_table_panel, wxID_ANY, title, wxDefaultPosition, wxSize(size.GetWidth(), -1));
+        header->SetFont(::Label::Head_13);
+        header_sizer->Add(header, 0, wxRIGHT, FromDIP(8));
+    };
+    add_header(_L("Printer"), PRESET_TABLE_PRINTER_SIZE);
+    add_header(_L("Nozzle"), PRESET_TABLE_NOZZLE_SIZE);
+    add_header(_L("Filament Preset"), PRESET_TABLE_PRESET_SIZE);
+    m_preset_table_sizer->Add(header_sizer, 0, wxLEFT | wxRIGHT | wxTOP, FromDIP(8));
+
+    m_preset_rows_sizer = new wxBoxSizer(wxVERTICAL);
+    m_preset_table_sizer->Add(m_preset_rows_sizer, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, FromDIP(8));
+
+    m_add_row_button = new Button(m_preset_table_panel, _L("+ Add row"));
+    m_add_row_button->SetStyle(ButtonStyle::Regular, ButtonType::Compact);
+    m_add_row_button->Bind(wxEVT_BUTTON, [this](wxCommandEvent &e) {
+        add_preset_table_row("", "");
+        m_scrolled_preset_panel->SetSizerAndFit(m_scrolled_sizer);
+        update_dialog_size();
+        e.Skip();
+    });
+    m_preset_table_sizer->Add(m_add_row_button, 0, wxALL, FromDIP(8));
+
+    m_preset_table_panel->SetSizer(m_preset_table_sizer);
+    m_preset_table_panel->Hide();
+    vertical_sizer->Add(m_preset_table_panel, 0, wxEXPAND | wxTOP | wxALIGN_CENTER_HORIZONTAL, FromDIP(5));
 
     return vertical_sizer;
 }
@@ -1098,7 +1186,7 @@ wxWindow *CreateFilamentPresetDialog::create_dialog_buttons()
             return;
         }
 
-        if (!is_check_box_selected()) {
+        if (!is_preset_selected()) {
             MessageDialog dlg(this, _L("You have not selected a printer or preset yet. Please select at least one."), wxString(SLIC3R_APP_FULL_NAME) + " - " + _L("Info"),
                               wxYES | wxYES_DEFAULT | wxCENTRE);
             dlg.ShowModal();
@@ -1149,31 +1237,29 @@ wxWindow *CreateFilamentPresetDialog::create_dialog_buttons()
             }
         } else if (curr_create_type == m_create_type.base_filament_preset) {
             BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ":clone filament presets  create type  filament preset";
-            for (const auto& checkbox_preset : m_machint_filament_preset) {
-                if (checkbox_preset.first->GetValue()) {
-                    std::string compatible_printer_name = checkbox_preset.second.first;
-                    std::vector<std::string> failures;
-                    Preset const *const      checked_preset = checkbox_preset.second.second;
-                    DynamicConfig            dynamic_config;
-                    dynamic_config.set_key_value("filament_vendor", new ConfigOptionStrings({vendor_name}));
-                    dynamic_config.set_key_value("compatible_printers", new ConfigOptionStrings({compatible_printer_name}));
-                    dynamic_config.set_key_value("filament_type", new ConfigOptionStrings({type_name}));
-                    bool res = preset_bundle->filaments.clone_presets_for_filament(checked_preset, failures, filament_preset_name, user_filament_id, dynamic_config,
-                                                                                   compatible_printer_name);
-                    if (!res) {
-                        std::string failure_names;
-                        for (std::string &failure : failures) { failure_names += failure + "\n"; }
-                        MessageDialog dlg(this, _L("Some existing presets have failed to be created, as follows:\n") + from_u8(failure_names) + _L("\nDo you want to rewrite it?"),
-                                          wxString(SLIC3R_APP_FULL_NAME) + " - " + _L("Info"), wxYES_NO | wxYES_DEFAULT | wxCENTRE);
-                        if (wxID_YES == dlg.ShowModal()) {
-                            res = preset_bundle->filaments.clone_presets_for_filament(checked_preset, failures, filament_preset_name, user_filament_id, dynamic_config,
-                                                                                      compatible_printer_name, true);
-                            BOOST_LOG_TRIVIAL(info) << "clone filament presets  have failures  rewritten  is successful? " << res;
-                        }
+            for (const auto& printer_and_preset : get_table_printer_filament_presets()) {
+                std::string compatible_printer_name = printer_and_preset.first;
+                std::vector<std::string> failures;
+                Preset const *const      checked_preset = printer_and_preset.second;
+                DynamicConfig            dynamic_config;
+                dynamic_config.set_key_value("filament_vendor", new ConfigOptionStrings({vendor_name}));
+                dynamic_config.set_key_value("compatible_printers", new ConfigOptionStrings({compatible_printer_name}));
+                dynamic_config.set_key_value("filament_type", new ConfigOptionStrings({type_name}));
+                bool res = preset_bundle->filaments.clone_presets_for_filament(checked_preset, failures, filament_preset_name, user_filament_id, dynamic_config,
+                                                                               compatible_printer_name);
+                if (!res) {
+                    std::string failure_names;
+                    for (std::string &failure : failures) { failure_names += failure + "\n"; }
+                    MessageDialog dlg(this, _L("Some existing presets have failed to be created, as follows:\n") + from_u8(failure_names) + _L("\nDo you want to rewrite it?"),
+                                      wxString(SLIC3R_APP_FULL_NAME) + " - " + _L("Info"), wxYES_NO | wxYES_DEFAULT | wxCENTRE);
+                    if (wxID_YES == dlg.ShowModal()) {
+                        res = preset_bundle->filaments.clone_presets_for_filament(checked_preset, failures, filament_preset_name, user_filament_id, dynamic_config,
+                                                                                  compatible_printer_name, true);
+                        BOOST_LOG_TRIVIAL(info) << "clone filament presets  have failures  rewritten  is successful? " << res;
                     }
-                    BOOST_LOG_TRIVIAL(info) << "clone filament presets  no failures  is successful? " << res << " old preset is: " << checked_preset->name
-                                            << " compatible_printer_name is: " << compatible_printer_name;
                 }
+                BOOST_LOG_TRIVIAL(info) << "clone filament presets  no failures  is successful? " << res << " old preset is: " << checked_preset->name
+                                        << " compatible_printer_name is: " << compatible_printer_name;
             }
         }
         preset_bundle->update_compatible(PresetSelectCompatibleType::Always);
@@ -1214,7 +1300,9 @@ wxArrayString CreateFilamentPresetDialog::get_filament_preset_choices()
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " base user preset is:" << preset->name;
     }
     
-    int suffix = 0;
+    int                   suffix = 0;
+    std::vector<wxString> snapmaker_choices;
+    std::vector<wxString> other_choices;
     for (const auto& preset : m_filament_choice_map) {
         if (preset.second.empty()) continue;
         std::set<wxString> preset_name_set;
@@ -1233,27 +1321,25 @@ wxArrayString CreateFilamentPresetDialog::get_filament_preset_choices()
             BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " the same filament has different filament(vendor type serial)"; 
         }
         for (const wxString& public_name : preset_name_set) {
+            wxString choice = public_name;
             if (m_public_name_to_filament_id_map.find(public_name) != m_public_name_to_filament_id_map.end()) {
                 suffix++;
-                m_public_name_to_filament_id_map[public_name + "_" + std::to_string(suffix)] = preset.first;
-                if (public_name.find("Snapmaker") != std::string::npos) {
-                    choices.Insert(public_name + "_" + std::to_string(suffix), 0);
-                } else {
-                    choices.Add(public_name + "_" + std::to_string(suffix));
-                }
-                
-                BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " add filament choice: " << choices.back();
-            } else {
-                m_public_name_to_filament_id_map[public_name] = preset.first;
-                if (public_name.find("Snapmaker") != std::string::npos) {
-                    choices.Insert(public_name, 0);
-                } else {
-                    choices.Add(public_name);
-                }
-                BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " add filament choice: " << choices.back();
+                choice = public_name + "_" + std::to_string(suffix);
             }
+            m_public_name_to_filament_id_map[choice] = preset.first;
+            if (choice.find("Snapmaker") != std::string::npos)
+                snapmaker_choices.push_back(choice);
+            else
+                other_choices.push_back(choice);
+            BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " add filament choice: " << choice;
         }
     }
+
+    // the map above is unordered: sort each group, Snapmaker first
+    std::sort(snapmaker_choices.begin(), snapmaker_choices.end(), [](const wxString &a, const wxString &b) { return natural_less_nocase(a, b); });
+    std::sort(other_choices.begin(), other_choices.end(), [](const wxString &a, const wxString &b) { return natural_less_nocase(a, b); });
+    for (const wxString &choice : snapmaker_choices) choices.Add(choice);
+    for (const wxString &choice : other_choices) choices.Add(choice);
 
     return choices;
 }
@@ -1288,6 +1374,8 @@ void CreateFilamentPresetDialog::select_curr_radiobox(std::vector<std::pair<Radi
             if (curr_selected_type == m_create_type.base_filament) {
                 m_filament_preset_text->SetLabel(_L("We could create the filament presets for your following printer:"));
                 m_filament_preset_combobox->Show();
+                m_preset_table_panel->Hide();
+                m_filament_preset_panel->Show();
                 if (_L("Select Type") != m_filament_type_combobox->GetLabel()) {
                     clear_filament_preset_map();
                     wxArrayString filament_preset_choice = get_filament_preset_choices();
@@ -1299,11 +1387,13 @@ void CreateFilamentPresetDialog::select_curr_radiobox(std::vector<std::pair<Radi
                 m_filament_preset_text->SetLabel(_L("We would rename the presets as \"Vendor Type Serial @printer you selected\".\n"
                                                     "To add preset for more printers, please go to printer selection"));
                 m_filament_preset_combobox->Hide();
+                m_filament_preset_panel->Hide();
+                m_preset_table_panel->Show();
                 if (_L("Select Type") != m_filament_type_combobox->GetLabel()) {
-                    
                     clear_filament_preset_map();
                     get_filament_presets_by_machine();
-                    
+                } else {
+                    rebuild_preset_table();
                 }
             }
             m_scrolled_preset_panel->SetSizerAndFit(m_scrolled_sizer);
@@ -1419,18 +1509,11 @@ void CreateFilamentPresetDialog::get_filament_presets_by_machine()
             machine_name_to_presets[compatible_printer_name].push_back(preset);
         }
     }
-    std::vector<std::pair<std::string, std::vector<Preset *>>> printer_name_to_filament_presets;
-    for (std::pair<std::string, std::vector<Preset *>> machine_filament_presets : machine_name_to_presets) {
-        printer_name_to_filament_presets.push_back(machine_filament_presets);
-    }
-    sort_printer_by_nozzle(printer_name_to_filament_presets);
-    m_filament_preset_panel->Freeze();
-    for (std::pair<std::string, std::vector<Preset *>> machine_filament_presets : printer_name_to_filament_presets) {
-        std::string            compatible_printer = machine_filament_presets.first;
-        std::vector<Preset *> &presets      = machine_filament_presets.second;
-        m_filament_presets_sizer->Add(create_select_filament_preset_checkbox(m_filament_preset_panel, compatible_printer, presets, m_machint_filament_preset), 0, wxEXPAND | wxALL, FromDIP(5));
-    }
-    m_filament_preset_panel->Thaw();
+    m_machine_name_to_presets.clear();
+    for (const auto &machine_filament_presets : machine_name_to_presets)
+        m_machine_name_to_presets[machine_filament_presets.first] = machine_filament_presets.second;
+
+    rebuild_preset_table();
 }
 
 void CreateFilamentPresetDialog::get_all_filament_presets()
@@ -1482,9 +1565,15 @@ void CreateFilamentPresetDialog::get_all_visible_printer_name()
 void CreateFilamentPresetDialog::update_dialog_size()
 {
     this->Freeze();
-    m_filament_preset_panel->SetSizerAndFit(m_filament_presets_sizer);
-    int width      = m_filament_preset_panel->GetSize().GetWidth();
-    int height     = m_filament_preset_panel->GetSize().GetHeight();
+    wxWindow *shown_panel = m_filament_preset_panel;
+    if (m_preset_table_panel && m_preset_table_panel->IsShown()) {
+        m_preset_table_panel->SetSizerAndFit(m_preset_table_sizer);
+        shown_panel = m_preset_table_panel;
+    } else {
+        m_filament_preset_panel->SetSizerAndFit(m_filament_presets_sizer);
+    }
+    int width      = shown_panel->GetSize().GetWidth();
+    int height     = shown_panel->GetSize().GetHeight();
     m_scrolled_preset_panel->SetMinSize(wxSize(std::min(1400, width + FromDIP(26)), std::min(600, height + FromDIP(18))));
     m_scrolled_preset_panel->SetMaxSize(wxSize(std::min(1400, width + FromDIP(26)), std::min(600, height + FromDIP(18))));
     m_scrolled_preset_panel->SetSize(wxSize(std::min(1500, width + FromDIP(26)), std::min(600, height + FromDIP(18))));
@@ -1495,51 +1584,228 @@ void CreateFilamentPresetDialog::update_dialog_size()
     this->Thaw();
 }
 
-template<typename T>
-void CreateFilamentPresetDialog::sort_printer_by_nozzle(std::vector<std::pair<std::string, T>> &printer_name_to_filament_preset)
+void CreateFilamentPresetDialog::build_printer_nozzle_map()
 {
-    std::unordered_map<std::string, float> nozzle_diameter = nozzle_diameter_map;
-    std::sort(printer_name_to_filament_preset.begin(), printer_name_to_filament_preset.end(),
-              [&nozzle_diameter](const std::pair<string, T> &a, const std::pair<string, T> &b) {
-                  size_t nozzle_index_a = a.first.find(" nozzle");
-                  size_t nozzle_index_b = b.first.find(" nozzle");
-                  if (nozzle_index_a == std::string::npos || nozzle_index_b == std::string::npos) return a.first < b.first;
-                  std::string nozzle_str_a;
-                  std::string nozzle_str_b;
-                  try {
-                      nozzle_str_a = a.first.substr(0, nozzle_index_a);
-                      nozzle_str_b = b.first.substr(0, nozzle_index_b);
-                      size_t last_space_index = nozzle_str_a.find_last_of(" ");
-                      nozzle_str_a            = nozzle_str_a.substr(last_space_index + 1);
-                      last_space_index        = nozzle_str_b.find_last_of(" ");
-                      nozzle_str_b            = nozzle_str_b.substr(last_space_index + 1);
-                  } catch (...) {
-                      BOOST_LOG_TRIVIAL(info) << "substr filed, and printer name is: " << a.first << " and " << b.first;
-                      return a.first < b.first;
-                  }
-                  float nozzle_a, nozzle_b;
-                  try {
-                      nozzle_a = nozzle_diameter[nozzle_str_a];
-                      nozzle_b = nozzle_diameter[nozzle_str_b];
-                      assert(nozzle_a != 0 && nozzle_b != 0);
-                  } catch (...) {
-                      BOOST_LOG_TRIVIAL(info) << "find nozzle filed, and nozzle is: " << nozzle_str_a << "mm and " << nozzle_str_b << "mm";
-                      return a.first < b.first;
-                  }
-                  float diff_nozzle_a = std::abs(nozzle_a - 0.4);
-                  float diff_nozzle_b = std::abs(nozzle_b - 0.4);
-                  if (nozzle_a == nozzle_b) return a.first < b.first;
-                  if (diff_nozzle_a == diff_nozzle_b) return nozzle_a < nozzle_b;
+    m_printer_base_to_nozzles.clear();
+    m_printer_base_names.clear();
+    for (const std::string &printer_name : m_visible_printers) {
+        std::string base_name, nozzle;
+        split_printer_name_nozzle(printer_name, base_name, nozzle);
+        std::vector<std::pair<std::string, std::string>> &nozzles = m_printer_base_to_nozzles[base_name];
+        const bool taken = std::any_of(nozzles.begin(), nozzles.end(),
+                                       [&nozzle](const std::pair<std::string, std::string> &known) { return known.first == nozzle; });
+        // two presets that reduce to the same printer and nozzle keep their own entries
+        if (taken)
+            m_printer_base_to_nozzles[printer_name].push_back(std::make_pair(nozzle, printer_name));
+        else
+            nozzles.push_back(std::make_pair(nozzle, printer_name));
+    }
+    for (auto &base_and_nozzles : m_printer_base_to_nozzles) {
+        std::sort(base_and_nozzles.second.begin(), base_and_nozzles.second.end(),
+                  [](const std::pair<std::string, std::string> &a, const std::pair<std::string, std::string> &b) {
+                      return natural_less_nocase(a.first, b.first);
+                  });
+        m_printer_base_names.push_back(base_and_nozzles.first);
+    }
+    std::sort(m_printer_base_names.begin(), m_printer_base_names.end(),
+              [](const std::string &a, const std::string &b) { return natural_less_nocase(a, b); });
+}
 
-                  return diff_nozzle_a < diff_nozzle_b;
-              });
+void CreateFilamentPresetDialog::rebuild_preset_table()
+{
+    m_preset_table_panel->Freeze();
+    for (const std::shared_ptr<FilamentPresetRow> &row : m_preset_rows) {
+        m_preset_rows_sizer->Detach(row->panel);
+        row->panel->Destroy();
+    }
+    m_preset_rows.clear();
+
+    // the first row starts on what the user is printing with right now
+    PresetBundle *preset_bundle = wxGetApp().preset_bundle;
+    add_preset_table_row(preset_bundle->printers.get_selected_preset_name(), preset_bundle->filaments.get_selected_preset_name());
+    m_preset_table_panel->Thaw();
+}
+
+void CreateFilamentPresetDialog::add_preset_table_row(const std::string &printer_preset_name, const std::string &filament_preset_name)
+{
+    std::string wanted_base, wanted_nozzle;
+    for (const auto &base_and_nozzles : m_printer_base_to_nozzles) {
+        for (const auto &nozzle_and_printer : base_and_nozzles.second) {
+            if (nozzle_and_printer.second != printer_preset_name) continue;
+            wanted_base   = base_and_nozzles.first;
+            wanted_nozzle = nozzle_and_printer.first;
+        }
+    }
+
+    std::shared_ptr<FilamentPresetRow> row = std::make_shared<FilamentPresetRow>();
+    row->panel                             = new wxPanel(m_preset_table_panel, wxID_ANY);
+    row->panel->SetBackgroundColour(m_preset_table_panel->GetBackgroundColour());
+    wxBoxSizer *row_sizer = new wxBoxSizer(wxHORIZONTAL);
+
+    row->printer_combobox = new ComboBox(row->panel, wxID_ANY, wxEmptyString, wxDefaultPosition, PRESET_TABLE_PRINTER_SIZE, 0, nullptr, wxCB_READONLY);
+    row->printer_combobox->SetBackgroundColor(PRINTER_LIST_COLOUR);
+    row->printer_combobox->SetBorderColor(*wxWHITE);
+    row->printer_combobox->SetLabel(_L("Select Printer"));
+    row->printer_combobox->SetLabelColor(DEFAULT_PROMPT_TEXT_COLOUR);
+    wxArrayString printer_choices;
+    int           printer_selection = -1;
+    for (const std::string &base_name : m_printer_base_names) {
+        if (base_name == wanted_base) printer_selection = (int) printer_choices.GetCount();
+        printer_choices.Add(from_u8(base_name));
+    }
+    row->printer_combobox->Set(printer_choices);
+    if (!printer_choices.IsEmpty()) {
+        row->printer_combobox->SetSelection(printer_selection >= 0 ? printer_selection : 0);
+        row->printer_combobox->SetLabelColor(*wxBLACK);
+    }
+    row_sizer->Add(row->printer_combobox, 0, wxRIGHT | wxALIGN_CENTER_VERTICAL, FromDIP(8));
+
+    row->nozzle_combobox = new ComboBox(row->panel, wxID_ANY, wxEmptyString, wxDefaultPosition, PRESET_TABLE_NOZZLE_SIZE, 0, nullptr, wxCB_READONLY);
+    row->nozzle_combobox->SetBackgroundColor(PRINTER_LIST_COLOUR);
+    row->nozzle_combobox->SetBorderColor(*wxWHITE);
+    row_sizer->Add(row->nozzle_combobox, 0, wxRIGHT | wxALIGN_CENTER_VERTICAL, FromDIP(8));
+
+    row->preset_combobox = new ComboBox(row->panel, wxID_ANY, wxEmptyString, wxDefaultPosition, PRESET_TABLE_PRESET_SIZE, 0, nullptr, wxCB_READONLY);
+    row->preset_combobox->SetBackgroundColor(PRINTER_LIST_COLOUR);
+    row->preset_combobox->SetBorderColor(*wxWHITE);
+    row_sizer->Add(row->preset_combobox, 0, wxRIGHT | wxALIGN_CENTER_VERTICAL, FromDIP(8));
+
+    row->remove_button = new Button(row->panel, _L("Remove"));
+    row->remove_button->SetStyle(ButtonStyle::Alert, ButtonType::Compact);
+    row_sizer->Add(row->remove_button, 0, wxALIGN_CENTER_VERTICAL, 0);
+
+    row->panel->SetSizerAndFit(row_sizer);
+    m_preset_rows_sizer->Add(row->panel, 0, wxEXPAND | wxBOTTOM, FromDIP(5));
+    m_preset_rows.push_back(row);
+
+    update_row_nozzles(row, wanted_nozzle);
+    update_row_presets(row, filament_preset_name);
+
+    row->printer_combobox->Bind(wxEVT_COMBOBOX, [this, row](wxCommandEvent &e) {
+        row->printer_combobox->SetLabelColor(*wxBLACK);
+        update_row_nozzles(row, "");
+        update_row_presets(row, "");
+        e.Skip();
+    });
+    row->nozzle_combobox->Bind(wxEVT_COMBOBOX, [this, row](wxCommandEvent &e) {
+        update_row_presets(row, "");
+        e.Skip();
+    });
+    row->preset_combobox->Bind(wxEVT_COMBOBOX, [row](wxCommandEvent &e) {
+        row->preset_combobox->SetLabelColor(*wxBLACK);
+        e.Skip();
+    });
+    // the button is destroyed with its row, so do not do it from inside its own handler
+    wxPanel *row_panel = row->panel;
+    row->remove_button->Bind(wxEVT_BUTTON, [this, row_panel](wxCommandEvent &e) {
+        wxGetApp().CallAfter([this, row_panel]() { remove_preset_table_row(row_panel); });
+        e.Skip();
+    });
+
+    wxGetApp().UpdateDarkUIWin(row->panel);
+}
+
+void CreateFilamentPresetDialog::remove_preset_table_row(wxPanel *row_panel)
+{
+    for (auto row = m_preset_rows.begin(); row != m_preset_rows.end(); ++row) {
+        if ((*row)->panel != row_panel) continue;
+        m_preset_table_panel->Freeze();
+        m_preset_rows_sizer->Detach(row_panel);
+        row_panel->Destroy();
+        m_preset_rows.erase(row);
+        m_preset_table_panel->Thaw();
+        break;
+    }
+    m_scrolled_preset_panel->SetSizerAndFit(m_scrolled_sizer);
+    update_dialog_size();
+}
+
+void CreateFilamentPresetDialog::update_row_nozzles(const std::shared_ptr<FilamentPresetRow> &row, const std::string &prefer_nozzle)
+{
+    wxArrayString choices;
+    int           selection    = -1;
+    const int     printer_idx  = row->printer_combobox->GetSelection();
+    if (printer_idx >= 0 && printer_idx < (int) m_printer_base_names.size()) {
+        const auto base_and_nozzles = m_printer_base_to_nozzles.find(m_printer_base_names[printer_idx]);
+        if (base_and_nozzles != m_printer_base_to_nozzles.end()) {
+            for (const auto &nozzle_and_printer : base_and_nozzles->second) {
+                if (!prefer_nozzle.empty() && nozzle_and_printer.first == prefer_nozzle) selection = (int) choices.GetCount();
+                choices.Add(nozzle_and_printer.first.empty() ? wxString("-") : from_u8(nozzle_and_printer.first));
+            }
+        }
+    }
+    row->nozzle_combobox->Set(choices);
+    if (choices.IsEmpty()) {
+        row->nozzle_combobox->SetLabel(wxEmptyString);
+    } else {
+        row->nozzle_combobox->SetSelection(selection >= 0 ? selection : 0);
+        row->nozzle_combobox->SetLabelColor(*wxBLACK);
+    }
+}
+
+void CreateFilamentPresetDialog::update_row_presets(const std::shared_ptr<FilamentPresetRow> &row, const std::string &prefer_preset)
+{
+    wxArrayString            choices;
+    int                      selection    = -1;
+    const std::string        printer_name = row_printer_preset_name(row);
+    std::vector<std::string> names;
+    const auto               machine = m_machine_name_to_presets.find(printer_name);
+    if (!printer_name.empty() && machine != m_machine_name_to_presets.end())
+        for (Preset *preset : machine->second) names.push_back(preset->name);
+    // the presets come from an unordered map upstream
+    std::sort(names.begin(), names.end(), [](const std::string &a, const std::string &b) { return natural_less_nocase(a, b); });
+    names.erase(std::unique(names.begin(), names.end()), names.end());
+    for (const std::string &name : names) {
+        if (!prefer_preset.empty() && name == prefer_preset) selection = (int) choices.GetCount();
+        choices.Add(from_u8(name));
+    }
+
+    row->preset_combobox->Set(choices);
+    if (choices.IsEmpty()) {
+        row->preset_combobox->SetLabel(_L("No compatible preset"));
+        row->preset_combobox->SetLabelColor(DEFAULT_PROMPT_TEXT_COLOUR);
+    } else {
+        row->preset_combobox->SetSelection(selection >= 0 ? selection : 0);
+        row->preset_combobox->SetLabelColor(*wxBLACK);
+    }
+}
+
+std::string CreateFilamentPresetDialog::row_printer_preset_name(const std::shared_ptr<FilamentPresetRow> &row) const
+{
+    const int printer_idx = row->printer_combobox->GetSelection();
+    const int nozzle_idx  = row->nozzle_combobox->GetSelection();
+    if (printer_idx < 0 || printer_idx >= (int) m_printer_base_names.size() || nozzle_idx < 0) return "";
+    const auto base_and_nozzles = m_printer_base_to_nozzles.find(m_printer_base_names[printer_idx]);
+    if (base_and_nozzles == m_printer_base_to_nozzles.end() || nozzle_idx >= (int) base_and_nozzles->second.size()) return "";
+    return base_and_nozzles->second[nozzle_idx].second;
+}
+
+std::vector<std::pair<std::string, Preset *>> CreateFilamentPresetDialog::get_table_printer_filament_presets() const
+{
+    std::vector<std::pair<std::string, Preset *>> printer_and_presets;
+    std::set<std::pair<std::string, std::string>> already_added;
+    for (const std::shared_ptr<FilamentPresetRow> &row : m_preset_rows) {
+        const std::string printer_name = row_printer_preset_name(row);
+        const int         preset_idx   = row->preset_combobox->GetSelection();
+        if (printer_name.empty() || preset_idx < 0) continue;
+        const auto machine = m_machine_name_to_presets.find(printer_name);
+        if (machine == m_machine_name_to_presets.end()) continue;
+        const std::string preset_name = into_u8(row->preset_combobox->GetString(preset_idx));
+        for (Preset *preset : machine->second) {
+            if (preset->name != preset_name) continue;
+            if (already_added.insert(std::make_pair(printer_name, preset_name)).second)
+                printer_and_presets.push_back(std::make_pair(printer_name, preset));
+            break;
+        }
+    }
+    return printer_and_presets;
 }
 
 void CreateFilamentPresetDialog::clear_filament_preset_map()
 {
     m_filament_choice_map.clear();
     m_filament_preset.clear();
-    m_machint_filament_preset.clear();
+    m_machine_name_to_presets.clear();
     m_public_name_to_filament_id_map.clear();
     m_filament_preset_panel->Freeze();
     m_filament_presets_sizer->Clear(true);

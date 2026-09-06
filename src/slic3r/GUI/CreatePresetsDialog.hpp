@@ -1,6 +1,7 @@
 #ifndef slic3r_CreatePresetsDialog_hpp_
 #define slic3r_CreatePresetsDialog_hpp_
 
+#include <map>
 #include "libslic3r/Preset.hpp"
 #include "wxExtensions.hpp"
 #include "GUI_Utils.hpp"
@@ -24,7 +25,17 @@ public:
     ~CreateFilamentPresetDialog();
 
 protected:
-    enum FilamentOptionType { 
+    // "Copy Current Filament Preset": one printer / nozzle / filament preset triple the user picked
+    struct FilamentPresetRow
+    {
+        wxPanel * panel            = nullptr;
+        ComboBox *printer_combobox = nullptr;
+        ComboBox *nozzle_combobox  = nullptr;
+        ComboBox *preset_combobox  = nullptr;
+        Button *  remove_button    = nullptr;
+    };
+
+    enum FilamentOptionType {
         VENDOR = 0,
         TYPE,
         SERIAL,
@@ -35,7 +46,7 @@ protected:
 
 protected:
     void on_dpi_changed(const wxRect &suggested_rect) override;
-    bool        is_check_box_selected();
+    bool        is_preset_selected();
     wxBoxSizer *create_item(FilamentOptionType option_type);
     wxBoxSizer *create_vendor_item();
     wxBoxSizer *create_type_item();
@@ -53,9 +64,15 @@ private:
     void          get_filament_presets_by_machine();
     void          get_all_filament_presets();
     void          get_all_visible_printer_name();
+    void          build_printer_nozzle_map();
+    void          rebuild_preset_table();
+    void          add_preset_table_row(const std::string &printer_preset_name, const std::string &filament_preset_name);
+    void          remove_preset_table_row(wxPanel *row_panel);
+    void          update_row_nozzles(const std::shared_ptr<FilamentPresetRow> &row, const std::string &prefer_nozzle);
+    void          update_row_presets(const std::shared_ptr<FilamentPresetRow> &row, const std::string &prefer_preset);
+    std::string   row_printer_preset_name(const std::shared_ptr<FilamentPresetRow> &row) const;
+    std::vector<std::pair<std::string, Preset *>> get_table_printer_filament_presets() const;
     void          update_dialog_size();
-    template<typename T>
-    void          sort_printer_by_nozzle(std::vector<std::pair<std::string, T>> &printer_name_to_filament_preset);
 
 private:
     struct CreateType
@@ -67,7 +84,11 @@ private:
 private:
     std::vector<std::pair<RadioBox *, wxString>>                     m_create_type_btns;
     std::unordered_map<::CheckBox *, std::pair<std::string, Preset *>> m_filament_preset;
-    std::unordered_map<::CheckBox *, std::pair<std::string, Preset *>> m_machint_filament_preset;
+    std::vector<std::shared_ptr<FilamentPresetRow>>                  m_preset_rows;
+    // printer preset name with its nozzle token removed -> (nozzle, printer preset name), nozzle sorted
+    std::map<std::string, std::vector<std::pair<std::string, std::string>>> m_printer_base_to_nozzles;
+    std::vector<std::string>                                         m_printer_base_names; // keys of the above, naturally sorted
+    std::map<std::string, std::vector<Preset *>>                     m_machine_name_to_presets;
     std::unordered_map<std::string, std::vector<Preset *>>           m_filament_choice_map;
     std::unordered_map<wxString, std::string>                        m_public_name_to_filament_id_map;
     std::unordered_map<std::string, Preset *>                        m_all_presets_map;
@@ -88,6 +109,10 @@ private:
     TextInput *                                                      m_filament_serial_input        = nullptr;
     wxBoxSizer *                                                     m_scrolled_sizer               = nullptr;
     wxStaticText *                                                   m_filament_preset_text         = nullptr;
+    wxPanel *                                                        m_preset_table_panel           = nullptr;
+    wxBoxSizer *                                                     m_preset_table_sizer           = nullptr;
+    wxBoxSizer *                                                     m_preset_rows_sizer            = nullptr;
+    Button *                                                         m_add_row_button               = nullptr;
 
 };
 
