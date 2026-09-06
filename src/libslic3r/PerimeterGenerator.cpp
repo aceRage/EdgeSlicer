@@ -157,6 +157,30 @@ Polygons PerimeterGenerator::over_support_region(const Polylines &overhangs, con
     return diff(region, union_(bridges));
 }
 
+// Ultra: offset layers - odd walls print raised by half a layer height; the first offset layer
+// over-extrudes to bond down onto the flat layer below, and the second-to-last under-extrudes with
+// no raise so the flat top layers close cleanly. Both wall generators call this one function, so
+// classic and Arachne write exactly the same two fields for the same layer.
+// docs/superpowers/specs/2026-09-06-offset-layers-classic.md
+static bool offset_layers_apply(const PerimeterGenerator &perimeter_generator, ExtrusionPath &cur_path)
+{
+    bool was_offset = false;
+    if (perimeter_generator.layer_id == 1 && perimeter_generator.number_of_layers >= 4) {
+        cur_path.extrusion_multiplier = 1.5f;
+        was_offset = true;
+    } else if (perimeter_generator.layer_id == int(perimeter_generator.number_of_layers) - 2 &&
+               perimeter_generator.number_of_layers >= 4) {
+        cur_path.extrusion_multiplier = 0.5f;
+        was_offset = true;
+    }
+    if (perimeter_generator.layer_id != int(perimeter_generator.number_of_layers) - 2 &&
+        perimeter_generator.number_of_layers >= 4) {
+        cur_path.z_offset = 0.5f;
+        was_offset = true;
+    }
+    return was_offset;
+}
+
 static ExtrusionEntityCollection traverse_loops(const PerimeterGenerator &perimeter_generator, const PerimeterGeneratorLoops &loops, ThickPolylines &thin_walls,
     bool &steep_overhang_contour, bool &steep_overhang_hole)
 {
@@ -308,6 +332,19 @@ static ExtrusionEntityCollection traverse_loops(const PerimeterGenerator &perime
             path.width = extrusion_width;
             path.height     = (float)perimeter_generator.layer_height;
             paths.emplace_back(std::move(path));
+        }
+
+        // Ultra: offset layers - depth 0 is the outer wall, so "odd depth" is exactly the set of
+        // walls Arachne raises by odd inset_idx. Applied to the flat path list so every path of the
+        // loop inherits it, and guarded so that with the feature off not a line of this runs and the
+        // classic generator is byte-for-byte the one that shipped. Thin walls and gap fill are
+        // appended elsewhere with no wall index and stay flat, which is the point.
+        if (perimeter_generator.config->offset_layers && (loop.depth % 2) == 1) {
+            const int inset_idx = int(loop.depth);
+            for (ExtrusionPath &path : paths) {
+                path.inset_idx = inset_idx;
+                offset_layers_apply(perimeter_generator, path);
+            }
         }
 
         coll.append(ExtrusionLoop(std::move(paths), loop_role));
@@ -649,27 +686,6 @@ static ExtrusionEntityCollection traverse_extrusions(const PerimeterGenerator& p
             extrusion_paths_append(paths, *extrusion, role, is_external ? perimeter_generator.ext_perimeter_flow : perimeter_generator.perimeter_flow);
         }
 
-        // Ultra: offset layers - odd walls print raised by half a layer; the first
-        // offset layer over-extrudes to bond down, the second-to-last under-extrudes
-        // so the (flat) top layers close cleanly.
-        auto check_and_offset_path = [&perimeter_generator](ExtrusionPath& cur_path) {
-            bool was_offset = false;
-            if (perimeter_generator.layer_id == 1 && perimeter_generator.number_of_layers >= 4) {
-                cur_path.extrusion_multiplier = 1.5f;
-                was_offset = true;
-            } else if (perimeter_generator.layer_id == int(perimeter_generator.number_of_layers) - 2 &&
-                       perimeter_generator.number_of_layers >= 4) {
-                cur_path.extrusion_multiplier = 0.5f;
-                was_offset = true;
-            }
-            if (perimeter_generator.layer_id != int(perimeter_generator.number_of_layers) - 2 &&
-                perimeter_generator.number_of_layers >= 4) {
-                cur_path.z_offset = 0.5f;
-                was_offset = true;
-            }
-            return was_offset;
-        };
-
         // Append paths to collection.
         if (!paths.empty()) {
             const int inset_idx = int(extrusion->inset_idx);
@@ -680,7 +696,7 @@ static ExtrusionEntityCollection traverse_extrusions(const PerimeterGenerator& p
             // Applied to the flat path list so every loop/multipath built from it inherits it.
             if (extrusion->inset_idx % 2 == 1 && perimeter_generator.config->offset_layers)
                 for (ExtrusionPath &path : paths)
-                    check_and_offset_path(path);
+                    offset_layers_apply(perimeter_generator, path);
 
             if (extrusion->is_closed) {
                 ExtrusionLoop extrusion_loop(std::move(paths), pg_extrusion.is_contour ? elrDefault : elrHole);
@@ -1682,7 +1698,7 @@ void PerimeterGenerator::process_classic()
                     this->object_config->brim_width.value > 0))
                 entities.reverse();
             // Orca: sandwich mode. Apply after 1st layer.
-            else if ((this->config->wall_sequence == WallSequence::InnerOuterInner) && layer_id > 0){
+            else if ((this->config->wall_sequence == WallSequence::InnerOuterInner) && layer_id > 0 && !this->config->offset_layers){
                 entities.reverse(); // reverse all entities - order them from external to internal
                 if(entities.entities.size()>2){ // 3 walls minimum needed to do inner outer inner ordering
                     int position = 0; // index to run the re-ordering for multiple external perimeters in a single island.
@@ -1779,6 +1795,17 @@ void PerimeterGenerator::process_classic()
                     }
                 }
             }
+            // Ultra: offset layers - the raised (odd) walls have to be laid down after the flat
+            // ones they lean on, which is the rule the Arachne path applies to its ordered
+            // extrusions. A stable partition rather than a sort, so whichever wall order was
+            // chosen above survives inside each of the two groups; an entity with no wall index
+            // (a thin wall) was never raised, so it belongs with the flat group.
+            if (this->config->offset_layers)
+                std::stable_partition(entities.entities.begin(), entities.entities.end(),
+                                      [](const ExtrusionEntity *entity) {
+                                          return entity->inset_idx < 0 || entity->inset_idx % 2 == 0;
+                                      });
+
             defer_unsupported_loops(*this, entities);
 
             // append perimeters for this slice as a collection
