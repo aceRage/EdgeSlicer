@@ -6,11 +6,22 @@
 // The product name lives here and nowhere else. version.inc reads these two lines back
 // out of this header for CMake, and libslic3r.h derives its own names from them, so the
 // three definitions that used to drift apart are now one.
-#define SLIC3R_APP_NAME "UltraOne"
-#define SLIC3R_APP_KEY "UltraOne"
-// The data directory we used to live in, before the rename. Read from here by the
-// first-start migration (DataDirMigration.cpp) and by nothing else, so a later release
-// can drop the migration by deleting one constant and one call.
+#define SLIC3R_APP_NAME "EdgeSlicer"
+#define SLIC3R_APP_KEY "EdgeSlicer"
+// The data directories we used to live in, newest first. There have been two renames now
+// (Snapmaker_Orca -> UltraOne -> EdgeSlicer), so this is a list rather than a constant and
+// the first one that actually exists on disk is the one migrated from: a user coming from
+// UltraOne gets their UltraOne data, a user who skipped that release gets their
+// Snapmaker_Orca data, and nobody gets the older of two directories they both have.
+//
+// Read from here by the first-start migration (DataDirMigration.cpp) and by nothing else,
+// so a later release drops all of this by emptying the list.
+#define SLIC3R_LEGACY_APP_KEYS \
+    {                          \
+        "UltraOne", "Snapmaker_Orca"  \
+    }
+// The oldest of them, kept as a single name for the few places that only need to say
+// "the directory this fork started out in".
 #define SLIC3R_LEGACY_APP_KEY "Snapmaker_Orca"
 #define SLIC3R_VERSION "01.10.01.50"
 #define Snapmaker_VERSION "2.3.6"

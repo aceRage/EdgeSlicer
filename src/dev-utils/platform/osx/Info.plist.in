@@ -31,8 +31,9 @@
       <string>@SLIC3R_APP_NAME@ Open URL</string>
       <key>CFBundleURLSchemes</key>
       <array>
+        <string>edgeslicer</string>
+        <string>edgesliceropen</string>
         <string>ultraone</string>
-        <string>ultraoneopen</string>
         <string>snapmaker-orca</string>
       </array>
     </dict>
@@ -132,7 +133,7 @@
   <key>NSHighResolutionCapable</key>
   <true/>
   <key>NSLocalNetworkUsageDescription</key>
-  <string>UltraOne needs access to your local network to discover and connect to your 3D printer(s), and to serve the app's device interface on localhost.</string>
+  <string>EdgeSlicer needs access to your local network to discover and connect to your 3D printer(s), and to serve the app's device interface on localhost.</string>
   <key>NSBonjourServices</key>
   <array>
     <string>_http._tcp</string>

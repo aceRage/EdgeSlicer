@@ -1,4 +1,4 @@
-# Ultra1: a companion app for iOS and Android (2026-09-04)
+# EdgeSlicer app: a companion app for iOS and Android (2026-09-04)
 
 **The ask.** A real app - one the person installs from an icon, not from a Share sheet - that
 receives print notifications by itself, plays the cameras, drives the printers, and eventually hosts
@@ -9,7 +9,7 @@ directly receive the notifications for itself."*
 the app would use, an MVP, a phased plan with effort, the costs, and the risks. **Documentation
 only - no app code is written on this branch.**
 
-Branch `docs/ultra1-app-plan`, cut from `feat/ultra-preferences` at `eadc7ec8ed`. Codebase facts
+Branch `docs/edgeslicer-app-plan`, cut from `feat/ultra-preferences` at `eadc7ec8ed`. Codebase facts
 carry `file:line` anchors against that commit. Platform facts carry a URL and the date they were
 read; anything that could not be confirmed from a primary source is marked **UNVERIFIED** and must
 not be planned against.
@@ -281,7 +281,7 @@ because Tailscale is a system-wide tunnel and any app's traffic to a `100.x` add
 name routes through it. What we must not do is ship our own NetworkExtension. Embedding Tailscale is
 not an option either: `tsnet` *"is a library that lets you embed Tailscale inside a **Go**
 program"* ([Tailscale, tsnet](https://tailscale.com/docs/features/tsnet), last validated 2026-07-24,
-read 2026-09-04) and there is no official Swift or Kotlin SDK. **Ultra1 depends on the Tailscale app
+read 2026-09-04) and there is no official Swift or Kotlin SDK. **EdgeSlicer app depends on the Tailscale app
 for remote access, exactly as the web page does today.** MagicDNS name resolution for third-party
 apps on iOS is **UNVERIFIED**; prefer storing the `100.x` address alongside the name.
 
@@ -395,7 +395,7 @@ line C++ slicer.
 
 ### 3.3 Recommendation: **A, with a real native layer** - "shell-first, native where it matters"
 
-**Build Ultra1 as a thin native shell (option A) whose native side owns pairing, push, storage,
+**Build EdgeSlicer app as a thin native shell (option A) whose native side owns pairing, push, storage,
 notifications, widgets and offline state, and whose main surface is the hub's own page.** Write the
 shell as two small hand-rolled native projects (Swift + Kotlin) rather than adopting Capacitor
 wholesale, unless a Capacitor scaffold measurably shortens phase 2 - the parts we actually need from
@@ -648,7 +648,7 @@ specs in this directory.
 
 ### 5.1 The MVP, stated exactly
 
-**Ultra1 v0.1 is an iOS and Android app, installed on the user's own devices, that:**
+**EdgeSlicer app v0.1 is an iOS and Android app, installed on the user's own devices, that:**
 
 1. pairs by scanning the QR on the hub page, storing one profile with both URLs (M1);
 2. picks the reachable URL on every launch and shows the page full-screen, with all four tabs
@@ -718,13 +718,13 @@ would hand every user the ability to push to every other user's phone. That is n
 it means **the `.p8` can never be in the repository or in a release artifact.**
 
 **Why the recommendation still works.** In the recommended shape the key is *the user's own*: they
-enrol, they create the key, they sign their own build of Ultra1, and the key sits in their data dir
+enrol, they create the key, they sign their own build of EdgeSlicer app, and the key sits in their data dir
 alongside the VAPID private key that is already there (`settings.json` -> `webpush.vapid.private`).
 Nothing is shared, nothing is distributed, and the hub keeps its "no server we run" property intact.
 This is a genuinely good fit for **one power user with a fork** and a genuinely bad fit for **a
 public app**, and the plan should say so out loud rather than pretend otherwise.
 
-**The open question for a public Ultra1** - and it needs a human decision, not an engineering one:
+**The open question for a public EdgeSlicer app** - and it needs a human decision, not an engineering one:
 
 - **(a) A relay the project hosts.** hub -> a small HTTPS service -> APNs/FCM. It can be built so it
   learns nothing: the payload is already `aes128gcm` ciphertext keyed to the device, so the relay
@@ -733,7 +733,7 @@ public app**, and the plan should say so out loud rather than pretend otherwise.
   content.
 - **(b) Publish the source and let each user build and sign.** Honest, free, and excludes everyone
   who does not own a Mac and $99.
-- **(c) Do not publish; keep Ultra1 personal.** What §5 assumes.
+- **(c) Do not publish; keep EdgeSlicer app personal.** What §5 assumes.
 - **(d) Stay on relays for the public build** (Pushover today) and offer the app only to people who
   bring their own key. A muddle, but a survivable one.
 
@@ -811,7 +811,7 @@ read 2026-09-04).
   doesn't belong on the App Store."* A pure WebView wrapper is refused. The native layer of §3.3 is
   the mitigation and must exist *before* submission, not after a rejection.
 - **4.2.3(i)**: *"Your app should work on its own without requiring installation of another app to
-  function."* This is aimed at other *apps*, not at hardware - but Ultra1 does require the Tailscale
+  function."* This is aimed at other *apps*, not at hardware - but EdgeSlicer app does require the Tailscale
   app for remote use, and it requires a PC running the hub. There is **no guideline that
   affirmatively blesses a hardware-companion app**; the nearest is **3.1.4 Hardware-Specific
   Content**, which permits unlocking features that are *"dependent upon specific hardware to
@@ -957,7 +957,7 @@ All URLs read **2026-09-04** unless a different date is given.
 Branch `feat/app-push`, cut from `feat/ultra-preferences` at `48d24205c3`. This section records
 what phase 1 actually shipped, where it differs from §4.2 above, and exactly what the app must
 send. Where this section and §4.2 disagree, **this section is what the code does** - the
-differences all come from [`2026-09-04-ultra1-phase0-spike.md`](2026-09-04-ultra1-phase0-spike.md),
+differences all come from [`2026-09-04-edgeslicer-app-phase0-spike.md`](2026-09-04-edgeslicer-app-phase0-spike.md),
 which found them by compiling and running against the real dependencies.
 
 Phases 2 and up - the app itself - are unchanged and unstarted.

@@ -11,6 +11,7 @@
 
 #include <cstdlib>
 #include <ctime>
+#include <map>
 #include <sstream>
 #include <utility>
 #include <vector>
@@ -18,6 +19,12 @@
 namespace fs = boost::filesystem;
 
 namespace Slic3r {
+
+const std::vector<std::string>& legacy_data_dir_names()
+{
+    static const std::vector<std::string> names = SLIC3R_LEGACY_APP_KEYS;
+    return names;
+}
 
 const char* legacy_data_dir_name() { return SLIC3R_LEGACY_APP_KEY; }
 
@@ -123,12 +130,17 @@ size_t rewrite_conf_paths(const fs::path& conf, const fs::path& old_dir, const f
 
 // A new data directory nobody has used yet: no config file, no hub settings, no marker from an
 // earlier migration. Whatever else is in it was put there by this very startup.
+//
+// The marker check runs over every legacy key, not just the one we would pick today: a directory
+// carrying `.migrated-from-Snapmaker_Orca` was filled by an earlier run of this code and must not
+// be filled again from UltraOne on top of it.
 static bool is_fresh_scaffold(const fs::path& new_dir)
 {
     boost::system::error_code ec;
     if (fs::exists(new_dir / (std::string(SLIC3R_APP_KEY) + ".conf"), ec)) return false;
     if (fs::exists(new_dir / "hub" / "settings.json", ec)) return false;
-    if (fs::exists(new_dir / (std::string(".migrated-from-") + SLIC3R_LEGACY_APP_KEY), ec)) return false;
+    for (const std::string& key : legacy_data_dir_names())
+        if (fs::exists(new_dir / (".migrated-from-" + key), ec)) return false;
     return true;
 }
 
@@ -174,13 +186,26 @@ DataDirMigrationResult migrate_data_dir(const std::string& parent,
     // The old directory is normally the new one's sibling. Under Flatpak it is not: the app id
     // changed, so the sandbox home changed with it and the old data sits under the *previous*
     // app id's config dir. The launcher points us at it with this variable; nothing else sets it.
-    const char*    legacy_parent = std::getenv("ULTRAONE_LEGACY_DATA_PARENT");
-    const fs::path old_dir = fs::path(legacy_parent && *legacy_parent ? std::string(legacy_parent) : parent)
-                             / SLIC3R_LEGACY_APP_KEY;
-    res.old_dir = old_dir.string();
+    const char*    legacy_parent = std::getenv("EDGESLICER_LEGACY_DATA_PARENT");
+    const fs::path legacy_root = fs::path(legacy_parent && *legacy_parent ? std::string(legacy_parent) : parent);
     res.new_dir = new_dir.string();
 
     boost::system::error_code ec;
+
+    // Newest legacy name first: whichever exists is the one the user was last running, and a
+    // machine that has both (the previous migration copied, so it left Snapmaker_Orca behind)
+    // must take UltraOne rather than the stale directory underneath it.
+    fs::path old_dir;
+    for (const std::string& key : legacy_data_dir_names()) {
+        const fs::path candidate = legacy_root / key;
+        if (fs::is_directory(candidate, ec) && !fs::equivalent(candidate, new_dir, ec)) {
+            old_dir        = candidate;
+            res.legacy_key = key;
+            break;
+        }
+    }
+    // Reported even when nothing is found, so a log line still says where we looked.
+    res.old_dir = old_dir.empty() ? (legacy_root / legacy_data_dir_names().front()).string() : old_dir.string();
     // Startup creates the new directory (its log/ and the default preset scaffold) before this
     // point can always be reached, so "the directory exists" is not the same as "the user has
     // data there". Only a config file, a hub settings file or an earlier migration's marker mean
@@ -190,13 +215,9 @@ DataDirMigrationResult migrate_data_dir(const std::string& parent,
         res.skipped_new_exists = true;
         return res; // already here, whether we made it or the user did
     }
-    if (!fs::is_directory(old_dir, ec)) {
+    if (old_dir.empty()) {
         res.skipped_no_old = true;
         return res; // a clean install; nothing to carry over
-    }
-    if (fs::equivalent(old_dir, new_dir, ec)) {
-        res.skipped_new_exists = true;
-        return res;
     }
 
     // Build the copy beside the target and rename it into place at the end, so a crash or
@@ -241,17 +262,31 @@ DataDirMigrationResult migrate_data_dir(const std::string& parent,
     }
 
     // The config file is named after the app key, so it is renamed with it - along with any
-    // sibling the old build left behind (.conf.bak and friends).
-    const std::string old_stem = std::string(SLIC3R_LEGACY_APP_KEY) + ".";
+    // sibling the old build left behind (.conf.bak and friends). Every legacy stem is looked
+    // for, not just the one we copied from: a directory that came through the first rename
+    // can still be carrying a Snapmaker_Orca.conf.bak the UltraOne build never touched.
     const std::string new_stem = std::string(SLIC3R_APP_KEY) + ".";
-    std::vector<std::pair<fs::path, fs::path>> renames;
-    for (fs::directory_iterator it(staging, ec), end; it != end; ++it) {
-        const std::string name = it->path().filename().string();
-        if (name.rfind(old_stem, 0) == 0)
-            renames.emplace_back(it->path(), staging / (new_stem + name.substr(old_stem.size())));
+    std::vector<std::string> old_stems;
+    old_stems.push_back(res.legacy_key + ".");
+    for (const std::string& key : legacy_data_dir_names())
+        if (key != res.legacy_key)
+            old_stems.push_back(key + ".");
+    std::map<std::string, fs::path> renames; // target name -> source, so a name is claimed once
+    for (const std::string& old_stem : old_stems) {
+        for (fs::directory_iterator it(staging, ec), end; it != end; ++it) {
+            const std::string name = it->path().filename().string();
+            if (name.rfind(old_stem, 0) != 0)
+                continue;
+            const std::string target = new_stem + name.substr(old_stem.size());
+            // The chosen key is walked first, so an older stem never displaces what it produced,
+            // and a file already under the new name is never overwritten either.
+            if (renames.count(target) || fs::exists(staging / target, ec))
+                continue;
+            renames.emplace(target, it->path());
+        }
     }
     for (auto& r : renames)
-        fs::rename(r.first, r.second, ec);
+        fs::rename(r.second, staging / r.first, ec);
 
     // The recent-project list, last_backup_path, settings_folder and the hub upload paths are
     // absolute and point into the old directory. Left alone they would still resolve - the old
@@ -265,7 +300,7 @@ DataDirMigrationResult migrate_data_dir(const std::string& parent,
     // NEW directory only: the old one is left exactly as it was found.
     {
         boost::nowide::ofstream marker(
-            (staging / (std::string(".migrated-from-") + SLIC3R_LEGACY_APP_KEY)).string().c_str(),
+            (staging / (".migrated-from-" + res.legacy_key)).string().c_str(),
             std::ios::binary | std::ios::trunc);
         if (marker) {
             const std::time_t now = std::time(nullptr);
@@ -300,7 +335,7 @@ DataDirMigrationResult migrate_data_dir(const std::string& parent,
     res.ran = true;
     BOOST_LOG_TRIVIAL(warning) << "data dir migration: copied " << res.files_copied << " files ("
                                << res.bytes_copied << " bytes) from " << res.old_dir << " to "
-                               << res.new_dir << ", rewrote " << res.conf_paths_rewritten
+                               << res.new_dir << " (legacy key " << res.legacy_key << "), rewrote " << res.conf_paths_rewritten
                                << " absolute paths in the config; the old directory was left alone";
     return res;
 }

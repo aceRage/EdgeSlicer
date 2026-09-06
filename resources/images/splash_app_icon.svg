@@ -1,5 +1,3 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="140" height="140" viewBox="0 0 140 140">
-<rect x="0" y="0" width="140" height="140" rx="28" fill="#1C1D21"/>
-<path d="M33.25 42.00 V77.70 A23.10 23.10 0 0 0 79.45 77.70 V42.00 H66.15 V77.70 A9.80 9.80 0 0 1 46.55 77.70 V42.00 Z" fill="#FFFFFF"/>
-<path d="M81.55 51.03 L93.45 42.00 L106.75 42.00 L106.75 100.80 L93.45 100.80 L93.45 59.50 Z" fill="#0A9E50"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="140" height="140" viewBox="0 0 140 140" role="img" aria-label="EdgeSlicer">
+<g transform="translate(0.000 0.000) scale(0.27344)"><rect width="512" height="512" rx="112" fill="#14141A"/><g transform="translate(62.4 0) skewX(-12)"><rect x="164" y="104" width="200" height="54" fill="#F2F0EC"/><rect x="164" y="229" width="200" height="54" fill="#F2F0EC"/><rect x="164" y="354" width="200" height="54" fill="#F2F0EC"/><path d="M150 408 L150 120 L160 64 L204 122 L204 408 Z" fill="#F2F0EC"/><path d="M150 408 L150 120 L160 64 L166 128 L166 408 Z" fill="#E0262B"/></g></g>
 </svg>

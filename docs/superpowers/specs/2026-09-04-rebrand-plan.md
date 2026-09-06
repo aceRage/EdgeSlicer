@@ -1,6 +1,6 @@
 # Rebranding Snapmaker Orca Ultra (2026-09-04)
 
-**The trigger.** [`2026-09-04-ultra1-app-plan.md` §R7](2026-09-04-ultra1-app-plan.md) says, of the
+**The trigger.** [`2026-09-04-edgeslicer-app-plan.md` §R7](2026-09-04-edgeslicer-app-plan.md) says, of the
 planned companion app: *"The app cannot be called 'Snapmaker' anything. Pick the neutral name in
 phase 0 and use it everywhere from the first commit."* The user's question follows from it: if the
 app needs a neutral name, **what does the slicer itself need?**
@@ -17,6 +17,13 @@ planned against.
 
 **This is not legal advice.** Nothing below is a legal opinion, and none of the name candidates has
 had a clearance search. Section 3.4 says what a lawyer would actually have to do.
+
+**Update, 2026-09-05.** The rename has since happened twice: to **UltraOne**, and then to
+**EdgeSlicer**, which is the current product name. Sections 1-6 are the original pre-rename
+analysis and still describe a repo that said "Snapmaker Orca"; read them as history.
+**[Section 7](#7-edgeslicer---the-second-rename-2026-09-05) is the record of what the code
+actually says now** - what changed, the icon assets the real logo still has to replace, and
+the questions left open.
 
 ---
 
@@ -37,7 +44,7 @@ had a clearance search. Section 3.4 says what a lawyer would actually have to do
 5. **The rename is 282 files, of which 141 are currently byte-identical to Snapmaker upstream** - so
    it doubles the fork's permanent conflict surface in exactly the files most likely to be touched
    upstream (§4.3, §5.3).
-6. **"Ultra" and "Ultra1" are both bad names** and should be dropped rather than promoted: "Ultra1"
+6. **"Ultra" and "EdgeSlicer app" are both bad names** and should be dropped rather than promoted: "EdgeSlicer app"
    abbreviates to U1, which is Snapmaker's flagship printer (§3.2). Of 32 candidates swept, three
    survive: **Halyard**, **Skerry**, **Alidade** (§3.3). Take two to counsel, not one.
 7. **There is a bigger exposure than the name, and a rename does not touch it.** The fork sends
@@ -88,7 +95,7 @@ did. "The code is AGPL" is not an answer to "may we call it Snapmaker Orca". The
 permissions and we currently hold only the first.
 
 **§13 is the one the phone plane already engages, and the app will engage harder.** The hub serves
-`/r/<token>/` to a browser and, under the Ultra1 plan, to a native app. §13 applies *"if your version
+`/r/<token>/` to a browser and, under the EdgeSlicer app plan, to a native app. §13 applies *"if your version
 supports such interaction"* - it does. The obligation is discharged by the source being public at
 `aceRage/Snapmaker-Ultra`, but the *offer* should be visible from the served pages, not only from the
 desktop About dialog. **This is a gap today:** `resources/web/orca/hub.html` and
@@ -638,11 +645,11 @@ clearly branding nor clearly compatibility.
   true. It is also simply accurate - the profiles ship, the printers work.
 - **Adopt (b) and (c) together.**
 
-### 3.2 Why "Ultra" and "Ultra1" should be dropped
+### 3.2 Why "Ultra" and "EdgeSlicer app" should be dropped
 
 The working names are the weakest candidates on the list.
 
-- **"Ultra1" abbreviates to U1, which is Snapmaker's flagship printer** - a four-toolhead
+- **"EdgeSlicer app" abbreviates to U1, which is Snapmaker's flagship printer** - a four-toolhead
   toolchanger, >$20.6 M on Kickstarter from >20 000 backers, retailing from early 2026
   ([snapmaker.com/en/snapmaker-u1](https://www.snapmaker.com/en/snapmaker-u1);
   [Fabbaloo](https://www.fabbaloo.com/news/snapmaker-launches-u1-affordable-toolchanger-3d-printer-aimed-at-reducing-filament-waste)).
@@ -1004,3 +1011,195 @@ continue drifting.
    (403 to automated fetch), and re-check the Snapmaker marks on tsdr.uspto.gov and the EUIPO
    register directly. **The trademark table in §1.2 is from search extracts, not the primary
    register.**
+
+---
+
+## 7. EdgeSlicer - the second rename (2026-09-05)
+
+**Status: shipped on `feat/rebrand-edgeslicer`, cut from `feat/ultra-preferences` at `ff0fbdaf0b`.**
+This section is the record of what actually changed, written after the fact. Sections 1-6 above are
+the pre-rename analysis and are left as they were - they describe a repo that said "Snapmaker Orca",
+which is no longer true of either name.
+
+### 7.1 Why there are now two renames to carry
+
+The first rename shipped the product as **UltraOne**. Section 3.2 of this document had already argued
+against "Ultra" as a product name and section 3.3 recorded the specific collision - *"**Ultra One**
+already exists in 3D printing twice: MakerGear Ultra One and U3DS UltraOne"* - so the name did not
+survive long. The product is now **EdgeSlicer**.
+
+The consequence that matters is not cosmetic. The data directory is named after `SLIC3R_APP_KEY`, so
+it has now moved twice:
+
+```
+%APPDATA%\Snapmaker_Orca   ->   %APPDATA%\UltraOne   ->   %APPDATA%\EdgeSlicer
+```
+
+and because the UltraOne migration **copied rather than moved** (section 4.3, deliberately, so the
+old build kept working), a machine that went through it has **both** older directories sitting there.
+A migration that just looked for "the old one" would have had two answers and no way to choose. So
+the legacy name is now an **ordered list** rather than a constant, and the first entry that exists
+wins.
+
+### 7.2 What changed
+
+**The name, in the one place it is defined.** `src/common_func/common_func.hpp` - `SLIC3R_APP_NAME`
+and `SLIC3R_APP_KEY` are both `"EdgeSlicer"`. `version.inc` still reads those two lines back out of
+the header for CMake and `libslic3r.h` still derives `SLIC3R_APP_FULL_NAME`, `GCODEVIEWER_APP_NAME`
+and `GCODEVIEWER_APP_KEY` from them, so the phase-1 collapse (section 4.1) held: **the rename touched
+one line for the name and one for the key.** The data directory follows from the key -
+`%APPDATA%\EdgeSlicer`, config file `EdgeSlicer.conf`.
+
+**Identity and packaging.**
+
+| Item | Now | Where |
+|---|---|---|
+| macOS bundle id | `io.github.acerage.EdgeSlicer` | `CMakeLists.txt:156` |
+| Profile validator bundle id | `io.github.acerage.EdgeSlicer.profile-validator` | `src/CMakeLists.txt:108-110` |
+| CPack package name / vendor | `EdgeSlicer` | `CMakeLists.txt:961-962` |
+| Installer filename | `EdgeSlicer_Windows_Installer_V<ver>.exe` | `CMakeLists.txt:969` |
+| NSIS "still running" text | "EdgeSlicer is still running." | `CMakeLists.txt:997` |
+| Uninstall registry key | `EdgeSlicer` | `CMakeLists.txt:1076` |
+| **WiX upgrade GUID** | **`3ac9f21d-6b40-4e77-9d18-58c0e4b7a2f6`** (new) | `CMakeLists.txt:1090` |
+| Desktop shortcut | `EdgeSlicer.lnk` -> `snapmaker-orca.exe` | `CMakeLists.txt:1063` |
+| URL scheme, installer | `edgeslicer://` | `cmake/nsis/SnapmakerURLProtocols_install.nsh` |
+| URL scheme, runtime | `edgeslicer` | `GUI_App::associate_url` |
+| Flatpak app-id, both files renamed | `io.github.acerage.EdgeSlicer` | `scripts/flatpak/` |
+| Linux desktop entry | `Name=EdgeSlicer` | `src/dev-utils/platform/unix/Snapmaker_Orca.desktop` |
+| AppImage / Info.plist names | from `@SLIC3R_APP_KEY@` | unchanged mechanism |
+| Standalone `installer.nsi` | `PRODUCT_NAME` / `PRODUCT_PUBLISHER` `EdgeSlicer` | `installer.nsi:6-7` |
+| About dialog, Snapshot, DesktopIntegration, PrintConfig tooltips | "EdgeSlicer" | ~40 strings |
+| Hub page title and `<h1>`, PWA `name`/`short_name`, tray tooltip and menu | **"Edge Hub"** | `hub.html:6,60`, `RemoteHub.cpp:2366-2367,2911-2986` |
+| Localisation | `UltraOne` -> `EdgeSlicer` in the `.pot` and all 20 `.po` files, **in `msgid` and `msgstr` together** so no translation goes fuzzy | `localization/i18n/` |
+
+**Every older identity stays *accepted*; only the newly-written one changed.** The installer's
+preinstall guard reads the `EdgeSlicer`, `UltraOne` **and** `Snapmaker-Ultra` uninstall keys, in that
+order, so an upgrade from either previous name is still found and offered; it deletes the
+`EdgeSlicer.lnk`, `UltraOne.lnk` and `Snapmaker-Ultra.lnk` desktop shortcuts; the uninstaller removes
+the `edgeslicer`, `ultraone` and `snapmaker-ultra` URL-scheme keys; `is_orca_open()` and
+`InstanceCheck`'s argument regex still accept `ultraone://`, `snapmaker-orca://`, `Snapmaker_Orca://`
+and `orcaslicer://`; and the macOS `CFBundleURLSchemes` array still lists `ultraone` and
+`snapmaker-orca` alongside the new pair. **A link a user bookmarked under either old name still
+opens.**
+
+### 7.3 The migration, now a chain
+
+`src/libslic3r/DataDirMigration.{hpp,cpp}`. The shape from section 4.3 is unchanged - **copy, never
+move; a staging directory renamed into place at the end; the source left byte-for-byte alone** - and
+these are the differences:
+
+1. **`SLIC3R_LEGACY_APP_KEYS` is an ordered list**, `{"UltraOne", "Snapmaker_Orca"}`, newest first.
+   `migrate_data_dir()` walks it and takes the first entry that is a directory on disk. A machine
+   with both takes **UltraOne**, which is the one the user was actually running; the
+   `Snapmaker_Orca` directory underneath it is never read and never touched.
+2. **The marker is per legacy key.** `.migrated-from-UltraOne` or `.migrated-from-Snapmaker_Orca`,
+   naming the directory the data actually came from. `is_fresh_scaffold()` treats **any** of those
+   markers as "this directory has already been through a migration", so a dir filled from
+   `Snapmaker_Orca` by an earlier release is never filled again from `UltraOne` on top of it.
+3. **The `.conf` rename walks every legacy stem**, chosen key first. A directory that came through
+   the first rename can still be carrying a `Snapmaker_Orca.conf.bak` the UltraOne build never
+   touched; a name already claimed by the chosen key is never displaced by an older one.
+4. **A data dir that already has `EdgeSlicer.conf` is skipped**, unchanged from before: a `.conf`, a
+   `hub/settings.json` or any legacy marker means "in use", and nothing else does.
+5. **The fresh-scaffold merge is kept exactly.** Startup creates `log/` (with a log file this very
+   process holds open) and the default preset scaffold before the migration point can be reached, so
+   a directory that exists but has none of the three "in use" signals is merged into rather than
+   replaced - the copy winning over the shipped defaults, the open log left alone.
+6. `hub/settings.json` still moves by `copy_file`, byte for byte, because the **VAPID pair** in it is
+   what every Web Push subscription is bound to (section 2.3). The absolute paths inside the `.conf`
+   are still rewritten and the `# MD5 checksum` line over the document recomputed.
+7. The Flatpak escape hatch is renamed with everything else: `EDGESLICER_LEGACY_DATA_PARENT`.
+8. `DataDirMigrationResult` gained `legacy_key`, and the `--migrate-datadir-test` CLI hook prints it
+   as `MIGRATE_LEGACY_KEY=`, so a test can assert **which** source was chosen rather than only that
+   something was copied.
+
+**Gate.** `test_rebrand_migration_edge.py` (in the `snorca_hubtest` scratch folder, not committed -
+it needs the `dd_lan` fixture) covers: an UltraOne source; a Snapmaker_Orca-only source; **both
+present, UltraOne winning and the older directory provably unread** (the two are built with different
+tokens, so the token in the result names the source); an already-populated `EdgeSlicer` skipped; a
+pre-created fresh scaffold merged into; a second start not re-migrating; and a clean install doing
+nothing and creating nothing.
+
+### 7.4 Icons - what the real logo has to replace
+
+**No icon work was done here.** The placeholder monogram generated by
+`scripts/make_placeholder_logo.py` is still in place under its inherited `Snapmaker_Orca*` filenames.
+The red katana mark is being designed separately, and this is the complete list of files it has to
+land in. **The filenames themselves are not part of this rename** - renaming the asset files means
+touching about 30 code sites and the CMake install rules, and belongs with the executable rename in a
+later phase.
+
+| File (under `resources/images/`) | Size | Where it shows up |
+|---|---|---|
+| `Snapmaker_Orca.ico` | 256 | Windows exe icon (`.rc.in`), CPack/NSIS installer icon, **tray icon** (`RemoteHub.cpp`), desktop integration |
+| `Snapmaker_Orca.icns` | 1024 | macOS bundle icon (`Info.plist.in`) |
+| `Snapmaker_Orca.png` | 256 | Linux desktop integration |
+| `Snapmaker_OrcaTitle.ico` | 154 | **the dialog icon at 28 call sites** (`SetIcon`) - About, Preferences, Plater, calibration, login, all of them |
+| `Snapmaker_OrcaTitle.png` | 256 | title/dialog raster twin |
+| `Snapmaker_Orca_about.svg` | vector | the About dialog wordmark (`AboutDialog.cpp:236`) |
+| `Snapmaker_Orca_192px.png` | 192 | About dialog logo, **PWA `icon-192.png`**, system-info dialog, **Linux hicolor 192x192** |
+| `Snapmaker_Orca_512px.png` | 512 | **PWA `icon-512.png`** |
+| `Snapmaker_Orca_512px_maskable.png` | 512 | **PWA maskable icon** - the phone home-screen icon; needs the safe-zone padding |
+| `Snapmaker_Orca_180px.png` | 180 | **`apple-touch-icon.png`** - the iOS home-screen icon |
+| `Snapmaker_Orca_128px.png` | 128 | main-window icon (`MainFrame.cpp`), tray fallback, **Linux hicolor 128x128** |
+| `Snapmaker_Orca_32px.png` | 32 | **Linux hicolor 32x32** (`CMakeLists.txt:944-947`) |
+| `Snapmaker_Orca-mac_128px.png` | 128 | macOS window icon |
+| `Snapmaker_Orca-mac_256px.ico` | 256 | window icon (`MainFrame.cpp`) |
+| `Snapmaker_Orca_192px_grayscale.png` | 192 | `MsgDialog` |
+| `Snapmaker_Orca_192px_transparent.png` | 192 | `ConfigWizard` |
+| `Snapmaker_Orca_64.png` | 64 | small raster |
+| `Snapmaker_Orca_154.png`, `Snapmaker_Orca_154_title.png` | 154 | title-bar rasters |
+| `Snapmaker_Orca_gray.png`, `_gradient.png`, `_gradient_circle.png`, `_gradient_narrow.png` | 256 | greyed and gradient variants |
+| `splash_app_icon.svg` | vector | **the splash screen's app icon** (`GUI_App.cpp:474`) |
+| `splash_logo.svg`, `splash_logo_dark.svg` | vector | **the splash screen wordmark**, light and dark |
+| `studio_logo.svg` | vector | in-app logo |
+
+**Three of these carry constraints a plain resize will not satisfy.** The maskable 512 needs its
+artwork inside the 80% safe circle or Android crops it. The `.icns` needs the full macOS ladder
+(16/32/128/256/512 at 1x and 2x), not one 1024 scaled down. The `.ico` files need real multi-size
+frames (16/32/48/256), because Windows picks a frame rather than resampling. There is **no separate
+web favicon**: `hub.html` ships without one and the phone page's icons come from the PWA manifest
+served by `RemoteHub.cpp`, so the four PWA entries above are the whole web surface.
+
+### 7.5 Deliberately not changed
+
+- **`snapmaker-orca.exe`.** The output name, the CMake targets (`Snapmaker_Orca`,
+  `Snapmaker_Orca_app_gui`), the source filenames (`src/Snapmaker_Orca.cpp` and friends) and the
+  `.rc.in` / `.desktop` filenames are all still the old spelling. Renaming them is a later phase: it
+  moves about 54 paths, changes the installed binary name and needs its own upgrade note.
+- **The `BBL-Slicer` and `SM-Slicer` User-Agent tokens** (`WebView.cpp:274-302`, `WebView.hpp:9-12`).
+  Section 5.1 calls this the largest exposure in the repo; **the user's decision is to keep them**,
+  because `bambulab.com/sign-in` version-gates its login flavour on `BBL-Slicer` and the login stops
+  working without it. Unchanged by this rename and unaffected by it.
+- **`resources/profiles/Snapmaker*`, the Snapmaker cloud endpoints, the `stream_center.html`
+  references to Snapmaker printers, and every upstream attribution** - all still correct nominative
+  use, exactly as section 2.11 says.
+- **`scripts/make_placeholder_logo.py`** still describes and generates the "U1" monogram. It is left
+  alone on purpose: renaming its docstring without redrawing what it emits would make the file lie
+  about its own output. It goes when the real icon lands.
+- **The "EdgeSlicer app" naming in [`2026-09-04-edgeslicer-app-plan.md`](2026-09-04-edgeslicer-app-plan.md)** - the
+  companion-app plan, its filename and its internal naming. Out of scope here; see section 7.6.
+- **"Ultra" as an internal word** - the `Preference > Ultra` tab, the `// Ultra:` code comments, the
+  release-tag suffix - kept, which is what section 6 question 6 recommended.
+
+### 7.6 Open questions
+
+1. **`Preference > Ultra`** (`Preferences.cpp:1295`). This is the tab collecting every fork-specific
+   option, and it is now the only **user-visible** place the old family name survives. Left as it is,
+   pending a decision: keep "Ultra", rename it to "Edge", or make it descriptive ("Fork options")?
+   **This is a question for the user, not an oversight.**
+2. **"EdgeSlicer" has had no clearance search**, and it is not one of the three names section 3.3
+   shortlisted. It is a **descriptive-adjacent compound** - "Slicer" is the product category and
+   "Edge" is a very common software word with at least one enormous incumbent (Microsoft Edge).
+   Section 3.3's finding was that arbitrary names are the only category with room left in them; this
+   is not one. That is a judgement the user has made with the trade-off in front of them, and section
+   3.4 still describes what a lawyer would have to do before anything ships publicly under it.
+3. **The EdgeSlicer app app plan** still names the companion app "EdgeSlicer app" throughout, including its filename.
+   If that app is still happening (section 6 question 2), its name should be settled in the same
+   breath as this one rather than drifting a third time.
+4. **`README.md` and the repo/URL identity.** The README now says EdgeSlicer, but
+   `CPACK_PACKAGE_HOMEPAGE_URL`, the flatpak metainfo URLs and the README's own release links still
+   point at `github.com/aceRage/Snapmaker-Ultra`. Renaming the GitHub repo is phase 5 and carries the
+   redirect trap section 4.5 describes.
+5. **How long does the migration chain stay?** Every release that keeps it carries two legacy names.
+   The list is designed to be emptied in one edit; the question is which release does it.

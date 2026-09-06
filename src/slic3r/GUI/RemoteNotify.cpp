@@ -246,7 +246,7 @@ static std::string message_text(const json& e)
 static std::string title_text(const json& e)
 {
     std::string t = ev_str(e, "title");
-    if (t.empty()) t = "UltraOne";
+    if (t.empty()) t = "EdgeSlicer";
     return t;
 }
 
@@ -429,7 +429,7 @@ static void worker()
         // because the reason for the worker is the same: nobody's request thread may wait on a
         // network service half a world away.
         if (g_running) WebPush::deliver(ev);
-        // ... and the same again for the native app (Ultra1 phase 1). A third built-in fan-out,
+        // ... and the same again for the native app (EdgeSlicer app phase 1). A third built-in fan-out,
         // over whatever devices have registered, with its own minimum severity. It rides this
         // worker for the reason the worker exists: APNs and FCM are on the other side of the
         // internet and no request thread may wait on them.
@@ -682,7 +682,7 @@ std::pair<int, std::string> test(const std::string& id, const std::string& phone
     e["printer"]  = json{ { "id", "test" }, { "name", "Test" }, { "kind", "printhost" } };
     e["kind"]     = "started";
     e["severity"] = "info";
-    e["title"]    = "UltraOne test";
+    e["title"]    = "EdgeSlicer test";
     e["text"]     = "This is a test notification from the hub on your PC. If you can read it, notifications work.";
     e["test"]     = true;
 

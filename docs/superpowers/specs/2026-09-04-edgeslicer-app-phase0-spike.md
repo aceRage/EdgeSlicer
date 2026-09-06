@@ -1,11 +1,11 @@
-# Ultra1 phase 0: the push-plane technical spike (2026-09-04)
+# EdgeSlicer app phase 0: the push-plane technical spike (2026-09-04)
 
-**What this is.** Phase 0 of [`2026-09-04-ultra1-app-plan.md`](2026-09-04-ultra1-app-plan.md) §5.2 - the
+**What this is.** Phase 0 of [`2026-09-04-edgeslicer-app-plan.md`](2026-09-04-edgeslicer-app-plan.md) §5.2 - the
 spike that decides whether the hub, *as it is built today*, can talk to APNs and FCM at all, plus the
 concrete hub-side design for `AppPush`. It answers the five questions the plan left open, kills or
 confirms risk **R2**, and revises the phase 1 estimate.
 
-Branch `docs/ultra1-phase0-spike`, cut from `feat/ultra-preferences` at `ef81b7c194`. **Documentation
+Branch `docs/edgeslicer-app-phase0-spike`, cut from `feat/ultra-preferences` at `ef81b7c194`. **Documentation
 only - no hub code and no deps are changed on this branch.** Every probe was compiled and run against
 the *real* built dependencies at `C:\Dev\SnapmakerOrca\deps\build\OrcaSlicer_dep\usr\local`; the probe
 sources live in `C:\Users\acesa\AppData\Local\Temp\snorca_hubtest\` and are deliberately not committed.

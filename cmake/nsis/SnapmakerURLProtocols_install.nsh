@@ -7,8 +7,8 @@ SetRegView 64
 ; snapmaker-orca:// / Snapmaker_Orca:// handlers and our uninstall never removes them.
 ; This is the same scheme the running app registers in HKCU (GUI_App::associate_url);
 ; the two used to disagree, which was the collision this comment claimed to avoid.
-WriteRegStr HKLM "Software\Classes\ultraone" "" "URL:UltraOne"
-WriteRegStr HKLM "Software\Classes\ultraone" "URL Protocol" ""
-WriteRegStr HKLM "Software\Classes\ultraone\shell\open\command" "" '"$INSTDIR\snapmaker-orca.exe" "%1"'
+WriteRegStr HKLM "Software\Classes\edgeslicer" "" "URL:EdgeSlicer"
+WriteRegStr HKLM "Software\Classes\edgeslicer" "URL Protocol" ""
+WriteRegStr HKLM "Software\Classes\edgeslicer\shell\open\command" "" '"$INSTDIR\snapmaker-orca.exe" "%1"'
 
 SetRegView 32

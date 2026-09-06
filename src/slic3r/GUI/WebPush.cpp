@@ -72,7 +72,8 @@ static std::vector<Sub>  g_subs;
 static std::string       g_vapid_private, g_vapid_public; // base64url; the private half is a credential
 // The VAPID "sub" claim: the push services want a real contact and Apple answers 403 BadJwtToken to a
 // placeholder domain (an .invalid mailto did exactly that on 2026-09-04); the project page is accepted.
-static const char* const DEFAULT_SUBJECT = "https://github.com/aceRage/Snapmaker-Ultra";
+static const char* const DEFAULT_SUBJECT = "https://github.com/aceRage/EdgeSlicer";
+static const char* const OLD_SUBJECT_REPO = "https://github.com/aceRage/Snapmaker-Ultra"; // the repo before the 2026-09-05 rename (redirects, but say the new name)
 static std::string       g_subject { DEFAULT_SUBJECT };
 static std::string       g_min_severity { "info" };
 static bool              g_enabled { true };
@@ -660,7 +661,7 @@ static SendResult push_with_retries(const Sub& s, const std::string& payload, co
 static std::string payload_for(const json& e, const std::string& link)
 {
     json p;
-    std::string title = ev_str(e, "title", "UltraOne");
+    std::string title = ev_str(e, "title", "EdgeSlicer");
     std::string body  = ev_str(e, "text");
     std::string who;
     if (e.is_object() && e.contains("printer") && e["printer"].is_object()) who = ev_str(e["printer"], "name");
@@ -776,7 +777,8 @@ void start(const json& saved)
             g_enabled      = saved.value("enabled", true);
             g_min_severity = saved.value("min_severity", std::string("info"));
             g_subject      = saved.value("subject", std::string(DEFAULT_SUBJECT));
-            if (g_subject == "mailto:hub@snapmaker-orca.invalid") g_subject = DEFAULT_SUBJECT; // the first build's placeholder, which Apple refuses
+            if (g_subject == "mailto:hub@snapmaker-orca.invalid" || g_subject == OLD_SUBJECT_REPO)
+                g_subject = DEFAULT_SUBJECT; // the first build's placeholder (which Apple refuses), or the pre-rename repo URL
             if (saved.contains("vapid") && saved["vapid"].is_object()) {
                 g_vapid_private = saved["vapid"].value("private", "");
                 g_vapid_public  = saved["vapid"].value("public", "");
@@ -1019,7 +1021,7 @@ std::pair<int, std::string> test(const std::string& phone_link)
     e["printer"]  = json{ { "id", "test" }, { "name", "Test" }, { "kind", "printhost" } };
     e["kind"]     = "started";
     e["severity"] = "info";
-    e["title"]    = "UltraOne test";
+    e["title"]    = "EdgeSlicer test";
     e["text"]     = "This is a test push from the hub on your PC. If you can read it, Web Push works.";
     const std::string payload = payload_for(e, link);
 
