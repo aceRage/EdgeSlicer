@@ -2435,7 +2435,7 @@ void HubServer::handle_phone(tcp::socket& client, Request& r, const std::string&
         respond_json(client, res.first, res.second);
         return;
     }
-    // ---- native app push (Ultra1 phase 1) ----
+    // ---- native app push (EdgeSlicer app phase 1) ----
     if (rest == "/push/device" && r.method == "POST") {
         // The app registering its APNs or FCM token and the public half of the key pair it made.
         // Same shape and same caps as /push/subscription: this is a subscription, with a device

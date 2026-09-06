@@ -597,7 +597,7 @@ private:
         {
             title    = "EdgeSlicer";
             version  = std::string("V") + Snapmaker_VERSION;
-            betaText = _L("Ultra version"); // Ultra: tells the official and Ultra builds apart at launch
+            betaText = _L("EdgeSlicer build"); // tells the official Orca/Snapmaker builds and this fork apart at launch
 
             titleFont   = Label::sysFont(20, false);
             versionFont = Label::Body_13;

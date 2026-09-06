@@ -1292,7 +1292,7 @@ void PreferencesDialog::create()
 #endif
 
     // Tab bar switching between the pages (BambuStudio-style tabbed preferences).
-    std::vector<std::pair<wxString, wxWindow*>> pages = { { _L("General"), general_page }, { _L("Ultra"), ultra_page } };
+    std::vector<std::pair<wxString, wxWindow*>> pages = { { _L("General"), general_page }, { _L("Extras"), ultra_page } };
 #if !BBL_RELEASE_TO_PUBLIC
     pages.emplace_back(_L("Develop"), debug_page);
 #endif

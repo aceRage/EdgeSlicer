@@ -8,7 +8,7 @@
 namespace Slic3r {
 namespace GUI {
 
-// Native app push (Ultra1 phase 1). The third sink on the hub's event seam, beside
+// Native app push (EdgeSlicer app phase 1). The third sink on the hub's event seam, beside
 // RemoteNotify::deliver (the relays) and WebPush::deliver (the browser).
 //
 // What it is for. Web Push only works where the page has a secure context, which on the plain

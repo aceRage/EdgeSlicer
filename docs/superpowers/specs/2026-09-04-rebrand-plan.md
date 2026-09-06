@@ -1,6 +1,6 @@
 # Rebranding Snapmaker Orca Ultra (2026-09-04)
 
-**The trigger.** [`2026-09-04-ultra1-app-plan.md` §R7](2026-09-04-ultra1-app-plan.md) says, of the
+**The trigger.** [`2026-09-04-edgeslicer-app-plan.md` §R7](2026-09-04-edgeslicer-app-plan.md) says, of the
 planned companion app: *"The app cannot be called 'Snapmaker' anything. Pick the neutral name in
 phase 0 and use it everywhere from the first commit."* The user's question follows from it: if the
 app needs a neutral name, **what does the slicer itself need?**
@@ -44,7 +44,7 @@ the questions left open.
 5. **The rename is 282 files, of which 141 are currently byte-identical to Snapmaker upstream** - so
    it doubles the fork's permanent conflict surface in exactly the files most likely to be touched
    upstream (§4.3, §5.3).
-6. **"Ultra" and "Ultra1" are both bad names** and should be dropped rather than promoted: "Ultra1"
+6. **"Ultra" and "EdgeSlicer app" are both bad names** and should be dropped rather than promoted: "EdgeSlicer app"
    abbreviates to U1, which is Snapmaker's flagship printer (§3.2). Of 32 candidates swept, three
    survive: **Halyard**, **Skerry**, **Alidade** (§3.3). Take two to counsel, not one.
 7. **There is a bigger exposure than the name, and a rename does not touch it.** The fork sends
@@ -95,7 +95,7 @@ did. "The code is AGPL" is not an answer to "may we call it Snapmaker Orca". The
 permissions and we currently hold only the first.
 
 **§13 is the one the phone plane already engages, and the app will engage harder.** The hub serves
-`/r/<token>/` to a browser and, under the Ultra1 plan, to a native app. §13 applies *"if your version
+`/r/<token>/` to a browser and, under the EdgeSlicer app plan, to a native app. §13 applies *"if your version
 supports such interaction"* - it does. The obligation is discharged by the source being public at
 `aceRage/Snapmaker-Ultra`, but the *offer* should be visible from the served pages, not only from the
 desktop About dialog. **This is a gap today:** `resources/web/orca/hub.html` and
@@ -645,11 +645,11 @@ clearly branding nor clearly compatibility.
   true. It is also simply accurate - the profiles ship, the printers work.
 - **Adopt (b) and (c) together.**
 
-### 3.2 Why "Ultra" and "Ultra1" should be dropped
+### 3.2 Why "Ultra" and "EdgeSlicer app" should be dropped
 
 The working names are the weakest candidates on the list.
 
-- **"Ultra1" abbreviates to U1, which is Snapmaker's flagship printer** - a four-toolhead
+- **"EdgeSlicer app" abbreviates to U1, which is Snapmaker's flagship printer** - a four-toolhead
   toolchanger, >$20.6 M on Kickstarter from >20 000 backers, retailing from early 2026
   ([snapmaker.com/en/snapmaker-u1](https://www.snapmaker.com/en/snapmaker-u1);
   [Fabbaloo](https://www.fabbaloo.com/news/snapmaker-launches-u1-affordable-toolchanger-3d-printer-aimed-at-reducing-filament-waste)).
@@ -1177,7 +1177,7 @@ served by `RemoteHub.cpp`, so the four PWA entries above are the whole web surfa
 - **`scripts/make_placeholder_logo.py`** still describes and generates the "U1" monogram. It is left
   alone on purpose: renaming its docstring without redrawing what it emits would make the file lie
   about its own output. It goes when the real icon lands.
-- **The "Ultra1" naming in [`2026-09-04-ultra1-app-plan.md`](2026-09-04-ultra1-app-plan.md)** - the
+- **The "EdgeSlicer app" naming in [`2026-09-04-edgeslicer-app-plan.md`](2026-09-04-edgeslicer-app-plan.md)** - the
   companion-app plan, its filename and its internal naming. Out of scope here; see section 7.6.
 - **"Ultra" as an internal word** - the `Preference > Ultra` tab, the `// Ultra:` code comments, the
   release-tag suffix - kept, which is what section 6 question 6 recommended.
@@ -1194,7 +1194,7 @@ served by `RemoteHub.cpp`, so the four PWA entries above are the whole web surfa
    Section 3.3's finding was that arbitrary names are the only category with room left in them; this
    is not one. That is a judgement the user has made with the trade-off in front of them, and section
    3.4 still describes what a lawyer would have to do before anything ships publicly under it.
-3. **The Ultra1 app plan** still names the companion app "Ultra1" throughout, including its filename.
+3. **The EdgeSlicer app app plan** still names the companion app "EdgeSlicer app" throughout, including its filename.
    If that app is still happening (section 6 question 2), its name should be settled in the same
    breath as this one rather than drifting a third time.
 4. **`README.md` and the repo/URL identity.** The README now says EdgeSlicer, but

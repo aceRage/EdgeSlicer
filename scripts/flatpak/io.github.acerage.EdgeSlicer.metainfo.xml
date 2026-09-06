@@ -8,9 +8,9 @@
     <name>EdgeSlicer</name>
     <summary>Get even more perfect prints!</summary>
     <developer_name>aceRage</developer_name>
-    <url type="homepage">https://github.com/aceRage/Snapmaker-Ultra</url>
-    <url type="help">https://github.com/aceRage/Snapmaker-Ultra#readme</url>
-    <url type="bugtracker">https://github.com/aceRage/Snapmaker-Ultra/issues/</url>
+    <url type="homepage">https://github.com/aceRage/EdgeSlicer</url>
+    <url type="help">https://github.com/aceRage/EdgeSlicer#readme</url>
+    <url type="bugtracker">https://github.com/aceRage/EdgeSlicer/issues/</url>
     <metadata_license>0BSD</metadata_license>
     <project_license>AGPL-3.0-only</project_license>
     <content_rating type="oars-1.1" />

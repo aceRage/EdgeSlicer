@@ -429,7 +429,7 @@ static void worker()
         // because the reason for the worker is the same: nobody's request thread may wait on a
         // network service half a world away.
         if (g_running) WebPush::deliver(ev);
-        // ... and the same again for the native app (Ultra1 phase 1). A third built-in fan-out,
+        // ... and the same again for the native app (EdgeSlicer app phase 1). A third built-in fan-out,
         // over whatever devices have registered, with its own minimum severity. It rides this
         // worker for the reason the worker exists: APNs and FCM are on the other side of the
         // internet and no request thread may wait on them.
