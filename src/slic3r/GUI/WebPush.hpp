@@ -62,7 +62,8 @@ std::pair<int, std::string> remove_subscription(const std::string& endpoint);
 // DELETE /hub/push?id=<id>: the hub page removing a row by its short id.
 std::pair<int, std::string> remove(const std::string& id);
 
-// POST /hub/push/options {"min_severity":"info|warning|error", "enabled":bool}.
+// POST /hub/push/options {"min_severity":"info|warning|error", "enabled":bool, and the per-kind
+// filter as either "kinds":[...] or "events":{kind:bool}} - see RemoteEvents.hpp for the list.
 std::pair<int, std::string> set_options(const std::string& body);
 
 // POST /hub/push/test: build a synthetic event and send it to every subscription on this thread

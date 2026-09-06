@@ -48,7 +48,8 @@ nlohmann::json masked_json();
 // POST /hub/notify: add or update one destination from the page's JSON body. Returns {status,
 // body} - 200 with the masked list, or 400 with a plain reason. A field the caller leaves out on
 // an update keeps its stored value, which is how the page can save a destination it only ever
-// saw masked.
+// saw masked. The per-kind filter is read from either `kinds` (an allow-list that replaces it)
+// or `events` (a {kind: bool} patch over it); see RemoteEvents.hpp for the canonical kind list.
 std::pair<int, std::string> configure(const std::string& body);
 
 // DELETE /hub/notify?id=<id>.
@@ -57,7 +58,8 @@ std::pair<int, std::string> remove(const std::string& id);
 // POST /hub/notify/test?id=<id>: build a synthetic "test" event, send it to that one destination
 // on this thread (people are waiting for the answer) and report what the relay said - {ok,
 // status, error} with the relay's own HTTP status, so a wrong topic or a dead server is visible
-// on the page instead of vanishing into the queue.
+// on the page instead of vanishing into the queue. The test wears a kind this destination allows
+// and the answer also carries {kind, kinds, events}, so the page can show what is switched on.
 std::pair<int, std::string> test(const std::string& id, const std::string& phone_link);
 
 // The hub's phone link, used for ntfy's Click: header and Pushover's url field so the

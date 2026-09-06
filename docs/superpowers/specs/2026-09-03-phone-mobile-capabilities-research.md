@@ -706,7 +706,8 @@ file, not `hub.json`, because `shutdown()` deletes `hub.json`:
    "kinds":["runout","error"],"url":"<secret>","header_name":"Authorization","header_value":"<secret>"}]}
 ```
 
-`kinds` empty means every kind; otherwise it is an allow-list applied after `min_severity`.
+`kinds` empty means every kind; otherwise it is an allow-list applied after `min_severity`. The
+per-channel form of that filter, and the two shapes it is written in, are in §2.9.
 
 **What each sender puts on the wire.**
 
@@ -786,7 +787,7 @@ token gate covers them and nothing new was added to the LAN listener's surface. 
 | `DELETE /r/<token>/push/subscription` | main | body `{endpoint}` - the page unsubscribed. Answers `{"ok":true}` whether or not it was there, so it cannot be used to test whether some endpoint is subscribed here |
 | `GET /hub/push` | admin | the masked list, the public key, the count, the minimum severity |
 | `DELETE /hub/push?id=` | admin | forget one phone |
-| `POST /hub/push/options` | admin | `{enabled, min_severity, subject}` |
+| `POST /hub/push/options` | admin | `{enabled, min_severity, subject}`, plus the per-kind filter as `kinds` or `events` (§2.9) |
 | `POST /hub/push/test` | admin | one synthetic push to every phone, on the request thread, no retries; `{ok, results:[{id, endpoint, ok, status, error}]}` |
 | `POST /hub/push/debug` | admin | **only with `SNORCA_DEBUG_ROUTES=1`** (as P4 did): `{op:"encrypt"\|"jwt"\|"topic", ...}`, so the gate can compare this hub's primitives against an independent implementation instead of against themselves. A shipped hub answers 404 |
 
@@ -801,6 +802,7 @@ would silently break every phone that ever subscribed:
 "webpush": {
   "enabled": true,
   "min_severity": "info",
+  "kinds": [],
   "subject": "https://github.com/aceRage/Snapmaker-Ultra",
   "vapid": {"private": "<base64url 32-byte scalar>", "public": "<base64url 65-byte point>"},
   "subscriptions": [
@@ -926,6 +928,92 @@ Not verified here, because it needs a real device and a real push service:
 `screenshots` and `description` in the manifest for Chrome's richer install prompt; and a decision
 on whether the hub should say out loud that it now needs outbound HTTPS to
 `*.push.apple.com` / `fcm.googleapis.com`, and what it should show when that is blocked.
+
+### 2.9 Update: per-event-type filters, as built
+
+Branch `feat/notify-event-filters`. Until now a channel had one dial, the minimum severity, and it
+is a blunt one: "warnings and errors" is the only way to stop start messages, and it takes the
+pauses and the cancellations with them. The ask was the obvious one - *errors and completions, but
+no start messages* - so each channel now also carries a per-kind filter.
+
+**The canonical kind list.** Eight kinds, and they are the eight `RemoteEvents::step()` can emit -
+`src/slic3r/GUI/RemoteEvents.hpp` is where the list lives now (`all_kinds()`, `is_kind()`), header-
+only so the three hub-side channels can share it without linking the watcher:
+
+| kind | severity | emitted when |
+|---|---|---|
+| `started` | info | a watched printer goes to `printing` from anything but `paused`, or straight from one job into the next |
+| `finished` | info | `printing`/`paused`/`preparing` -> `finished` |
+| `failed` | error | the printer goes to `failed`; carries `code` and the printer's own text |
+| `cancelled` | warning | a busy printer goes to `cancelled` |
+| `paused` | warning | `-> paused`, with the printer's stage in the sentence |
+| `resumed` | info | `paused -> printing` |
+| `runout` | warning | `-> paused` with Bambu stage 6, "paused due to filament runout" - the one pause worth waking somebody for |
+| `error` | error | a new `error_code` appears, at any print state; dropped when a `failed` for the same printer came out of the same poll |
+
+There is no `printer_offline`/`printer_online` and no `attention` kind: the watcher deliberately
+says nothing about a printer it cannot see the state of (a first watched snapshot only seeds the
+memory), and "needs a person at this PC" is an instance flag on `/hub/instances`, not an event.
+Adding either would be a change to the watcher, not to this filter.
+
+**The filter.** Per channel, on top of `min_severity`, never instead of it: **a kind is delivered
+when both allow it**. The severity dial keeps meaning exactly what it meant, so nothing anybody
+configured before changes behaviour on upgrade.
+
+Stored as `kinds`, an allow-list; **empty means every kind**, which is what an upgraded hub and a
+new channel both have, so the default is "all on" and the only kinds a person loses are the ones
+their existing `min_severity` was already excluding.
+
+```json
+"notify":  {"destinations": [{"…": "…", "min_severity": "info", "kinds": ["finished", "failed"]}]},
+"webpush": {"enabled": true, "min_severity": "info", "kinds": ["finished", "failed"], "…": "…"},
+"apppush": {"enabled": true, "min_severity": "info", "kinds": [], "…": "…"}
+```
+
+Web Push and the native app hold one list for the whole channel rather than one per subscription
+or per device: they are the same person's phones, and a per-device screen is not a thing anybody
+asked for. Each relay destination (Pushover, each webhook, an ntfy left over from before) has its
+own, since that is where "Home Assistant wants runouts only" lives.
+
+**Reading and writing it.** No new routes - the existing options routes take it:
+`POST /hub/notify` (per destination, with its `id`), `POST /hub/push/options`,
+`POST /hub/apppush/options`. Two shapes are accepted, and they mean different things:
+
+| in the body | meaning |
+|---|---|
+| `"kinds": ["finished","failed"]` | the stored form: an allow-list that **replaces** the filter. `[]` still means "everything", as it always has |
+| `"events": {"started": false}` | the page's form: a **patch** over what is stored. One checkbox is one key, so two tabs toggling different boxes cannot undo each other |
+
+An unknown kind is a `400`. An `events` patch that would turn the last kind off is a `400` too
+(`leave at least one event type on, or turn the whole channel off`): there is no way to store
+"none", the channel already has an on/off of its own, and quietly reading "none" as "all" is the
+one outcome nobody would guess. A list holding all eight is normalised back to `[]`, so ticking
+the last box returns to the default rather than to a filter that has to be widened by hand the day
+a ninth kind appears. A stale kind in a hand-edited `settings.json` is dropped on load, never
+fatal.
+
+Every `GET` (`/hub/notify`, `/hub/push`, `/hub/apppush`) answers with all three of `kinds` (the
+stored allow-list), `events` (every kind with a boolean - what the checkboxes bind to) and
+`all_kinds` (the canonical list, so the page never has to carry its own copy).
+
+**The test button.** `POST /hub/notify/test?id=`, `/hub/push/test` and `/hub/apppush/test` still
+send whatever the filters say - the button is there to prove the relay works - but the synthetic
+event now **wears a kind the filter allows** (`finished` by preference, else the first kind that
+is on), so the emoji, the tag and the priority are the ones a real notification would carry. The
+answer carries `kind`, `kinds` and `events`, and the page says *Test sent as "finished". Sending:
+Finished and Failed.* - which is the sentence that answers "the test arrived but my prints do
+not".
+
+**Hub page.** One compact row of checkboxes under each tab of the Notifications card - *Send: ☑
+Started ☑ Finished ☑ Failed …* - per destination on the Pushover and Webhook tabs, and once for
+the channel on Mobile Web and Native app. Each box saves on its own, and a refused box (the last
+one) springs back with the hub's own reason.
+
+**Gate.** `snorca_hubtest\test_phone_notify2.py`: the Pushover and webhook relays and a mock Web
+Push service in one hub, filters set to "no started", a `started` / `finished` / `failed` trio
+injected through `POST /hub/event`, and exactly two deliveries expected on every channel. It also
+covers the round trip through the options routes, both body shapes, the `400`s, and that the
+filter survives a hub restart.
 
 ---
 

@@ -12,6 +12,8 @@
 // HKDF API and none is used.
 #include "WebPush.hpp"
 
+#include "RemoteEvents.hpp"
+
 #include "slic3r/Utils/Http.hpp"
 
 #include <boost/log/trivial.hpp>
@@ -76,6 +78,10 @@ static const char* const DEFAULT_SUBJECT = "https://github.com/aceRage/EdgeSlice
 static const char* const OLD_SUBJECT_REPO = "https://github.com/aceRage/Snapmaker-Ultra"; // the repo before the 2026-09-05 rename (redirects, but say the new name)
 static std::string       g_subject { DEFAULT_SUBJECT };
 static std::string       g_min_severity { "info" };
+// Which event kinds the phones want, as an allow-list; empty is every kind. One list for the
+// whole channel rather than one per subscription: the phones are the same person's, and a
+// per-device filter is a setting nobody has asked for and a screen nobody wants to fill in.
+static std::vector<std::string> g_kinds;
 static bool              g_enabled { true };
 static std::string       g_phone_link;
 static std::atomic<bool> g_stopping { false }; // set by stop(), so a backoff does not hold up a hub quit
@@ -724,6 +730,7 @@ json settings_json()
     json j;
     j["enabled"]      = g_enabled;
     j["min_severity"] = g_min_severity;
+    j["kinds"]        = g_kinds;
     j["subject"]      = g_subject;
     // The private half never leaves this file. It is the hub's identity to the push services and
     // nothing more - it decrypts nothing - but anyone holding it could push to this hub's phones.
@@ -739,6 +746,9 @@ json masked_json()
     json j;
     j["enabled"]       = g_enabled;
     j["min_severity"]  = g_min_severity;
+    j["kinds"]         = g_kinds;
+    j["events"]        = RemoteEvents::events_map(g_kinds); // the same filter as checkboxes
+    j["all_kinds"]     = RemoteEvents::all_kinds();
     j["subject"]       = g_subject;
     j["public_key"]    = g_vapid_public;    // public by design: the page passes it as applicationServerKey
     j["has_key"]       = !g_vapid_private.empty();
@@ -776,6 +786,12 @@ void start(const json& saved)
         if (saved.is_object()) {
             g_enabled      = saved.value("enabled", true);
             g_min_severity = saved.value("min_severity", std::string("info"));
+            // A kind nobody emits is dropped rather than refused - settings.json is a file a
+            // person may have hand-edited, and one stale name must not stop the hub starting.
+            g_kinds.clear();
+            if (saved.contains("kinds") && saved["kinds"].is_array())
+                for (const auto& k : saved["kinds"])
+                    if (k.is_string() && RemoteEvents::is_kind(k.get<std::string>())) g_kinds.push_back(k.get<std::string>());
             g_subject      = saved.value("subject", std::string(DEFAULT_SUBJECT));
             if (g_subject == "mailto:hub@snapmaker-orca.invalid" || g_subject == OLD_SUBJECT_REPO)
                 g_subject = DEFAULT_SUBJECT; // the first build's placeholder (which Apple refuses), or the pre-rename repo URL
@@ -834,17 +850,22 @@ void set_phone_link(const std::string& url)
 
 void deliver(const json& event)
 {
-    std::vector<Sub> targets;
-    std::string      link, min_sev;
+    std::vector<Sub>         targets;
+    std::vector<std::string> kinds;
+    std::string              link, min_sev;
     {
         std::lock_guard<std::mutex> lock(g_mutex);
         if (!g_enabled || g_subs.empty() || g_vapid_private.empty()) return;
         targets = g_subs;
         link    = g_phone_link;
         min_sev = g_min_severity;
+        kinds   = g_kinds;
     }
     const std::string severity = ev_str(event, "severity", "info");
+    // Both filters have to allow it: the minimum severity is the coarse dial that was here
+    // first and still means what it meant, the kind list is the fine one on top of it.
     if (severity_rank(severity) < severity_rank(min_sev)) return;
+    if (!RemoteEvents::kind_allowed(kinds, ev_str(event, "kind"))) return;
     const std::string payload = payload_for(event, link);
     const std::string printer = event.is_object() && event.contains("printer") && event["printer"].is_object()
                                     ? ev_str(event["printer"], "id") : std::string();
@@ -989,6 +1010,10 @@ std::pair<int, std::string> set_options(const std::string& body)
                 return { 400, json({ { "error", "min_severity must be info, warning or error" } }).dump() };
             g_min_severity = s;
         }
+        if (RemoteEvents::has_kind_filter(in)) {
+            std::string why;
+            if (!RemoteEvents::read_kinds(in, g_kinds, why)) return { 400, json({ { "error", why } }).dump() };
+        }
         if (in.contains("subject") && in["subject"].is_string()) {
             const std::string s = trim(in["subject"].get<std::string>());
             // RFC 8292 says the sub claim is a mailto: or https: URI, and the push services enforce it.
@@ -1006,11 +1031,13 @@ std::pair<int, std::string> set_options(const std::string& body)
 
 std::pair<int, std::string> test(const std::string& phone_link)
 {
-    std::vector<Sub> targets;
-    std::string      link = phone_link;
+    std::vector<Sub>         targets;
+    std::vector<std::string> kinds;
+    std::string              link = phone_link;
     {
         std::lock_guard<std::mutex> lock(g_mutex);
         targets = g_subs;
+        kinds   = g_kinds;
         if (link.empty()) link = g_phone_link;
     }
     if (targets.empty()) return { 200, json({ { "ok", false }, { "error", "no phone has subscribed yet" }, { "results", json::array() } }).dump() };
@@ -1019,7 +1046,9 @@ std::pair<int, std::string> test(const std::string& phone_link)
     e["id"]       = 0;
     e["time"]     = now_ms();
     e["printer"]  = json{ { "id", "test" }, { "name", "Test" }, { "kind", "printhost" } };
-    e["kind"]     = "started";
+    // Dressed as a kind the filter allows, so the notification that arrives is shaped like the
+    // real one it stands in for. Sent whatever the filters say - the button proves the path.
+    e["kind"]     = RemoteEvents::test_kind(kinds);
     e["severity"] = "info";
     e["title"]    = "EdgeSlicer test";
     e["text"]     = "This is a test push from the hub on your PC. If you can read it, Web Push works.";
@@ -1029,7 +1058,7 @@ std::pair<int, std::string> test(const std::string& phone_link)
     json results = json::array();
     bool any     = false;
     for (const Sub& s : targets) {
-        const SendResult r = push_once(s, payload, "info", topic_for("test", "started"));
+        const SendResult r = push_once(s, payload, "info", topic_for("test", e["kind"].get<std::string>()));
         any = any || r.ok;
         json one;
         one["id"]       = s.id;
@@ -1053,6 +1082,11 @@ std::pair<int, std::string> test(const std::string& phone_link)
     json out;
     out["ok"]      = any;
     out["results"] = results;
+    // What the phones would really be sent, next to the kind this test wore, so the page can
+    // say "sent as finished; started is off" rather than leaving somebody guessing.
+    out["kind"]    = e["kind"];
+    out["kinds"]   = RemoteEvents::enabled_kinds(kinds);
+    out["events"]  = RemoteEvents::events_map(kinds);
     return { 200, out.dump() };
 }
 
