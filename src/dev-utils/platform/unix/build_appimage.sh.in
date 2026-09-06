@@ -16,11 +16,26 @@ fi
 mv @SLIC3R_APP_CMD@ AppRun
 chmod +x AppRun
 
-cp resources/images/@SLIC3R_APP_KEY@_192px.png @SLIC3R_APP_KEY@.png
-mkdir -p usr/share/icons/hicolor/192x192/apps
-cp resources/images/@SLIC3R_APP_KEY@_192px.png usr/share/icons/hicolor/192x192/apps/@SLIC3R_APP_KEY@.png
+# The AppStream ID, and so the base name of both the .desktop entry and the metainfo file, comes
+# from scripts/flatpak/: appimagetool rejects a bundle whose metainfo <id> and desktop file name
+# disagree. It is deliberately not @SLIC3R_APP_KEY@ - that is the short app key ("EdgeSlicer"),
+# used for the binary, the icon and the AppImage file name, not the reverse-DNS component id.
+APP_ID="io.github.acerage.EdgeSlicer"
 
-cat >io.github.Snapmaker.Snapmaker_Orca.desktop <<EOF
+# The icon files keep their historical base name: the rebrand replaced the artwork in place rather
+# than renaming the files, and the whole GUI (AboutDialog, ConfigWizard, MsgDialog, ...) still asks
+# for Snapmaker_Orca_192px.png by that name. Only the *installed* icon is named for the app key,
+# which is what the Icon= key below refers to.
+ICON_SRC="resources/images/Snapmaker_Orca_192px.png"
+if [[ ! -f "${ICON_SRC}" ]]; then
+    echo "Error: missing ${ICON_SRC}"
+    exit 1
+fi
+cp "${ICON_SRC}" @SLIC3R_APP_KEY@.png
+mkdir -p usr/share/icons/hicolor/192x192/apps
+cp "${ICON_SRC}" usr/share/icons/hicolor/192x192/apps/@SLIC3R_APP_KEY@.png
+
+cat >${APP_ID}.desktop <<EOF
 [Desktop Entry]
 Name=EdgeSlicer
 Exec=AppRun %F
@@ -33,16 +48,16 @@ MimeType=model/stl;model/3mf;application/vnd.ms-3mfdocument;application/prs.wave
 EOF
 
 mkdir -p usr/share/applications
-cp io.github.Snapmaker.Snapmaker_Orca.desktop usr/share/applications/
+cp ${APP_ID}.desktop usr/share/applications/
 
 mkdir -p usr/share/metainfo
-META_SRC="${REPO_ROOT}/scripts/flatpak/io.github.Snapmaker.Snapmaker_Orca.metainfo.xml"
+META_SRC="${REPO_ROOT}/scripts/flatpak/${APP_ID}.metainfo.xml"
 if [[ ! -f "${META_SRC}" ]]; then
     echo "Error: missing ${META_SRC}"
     exit 1
 fi
-cp "${META_SRC}" usr/share/metainfo/io.github.Snapmaker.Snapmaker_Orca.metainfo.xml
-cp "${META_SRC}" usr/share/metainfo/io.github.Snapmaker.Snapmaker_Orca.appdata.xml
+cp "${META_SRC}" usr/share/metainfo/${APP_ID}.metainfo.xml
+cp "${META_SRC}" usr/share/metainfo/${APP_ID}.appdata.xml
 
 export ARCH=$(uname -m)
 

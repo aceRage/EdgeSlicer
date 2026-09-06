@@ -382,7 +382,9 @@ jobs:
           ubuntu-ver-str: ${{ (inputs.os == 'ubuntu-24.04' && '_Ubuntu2404') || '' }}
         run: |
           ./build_linux.sh -isr
-          mv -n ./build/Snapmaker_Orca_Linux_V${{ env.ver_pure }}.AppImage ./build/Snapmaker_Orca_Linux_AppImage${{ env.ubuntu-ver-str }}_${{ env.ver }}.AppImage
+          # The AppImage is named for SLIC3R_APP_KEY (src/dev-utils/platform/unix/build_appimage.sh.in),
+          # which the rebrand changed from Snapmaker_Orca to EdgeSlicer.
+          mv -n ./build/EdgeSlicer_Linux_V${{ env.ver_pure }}.AppImage ./build/Snapmaker_Orca_Linux_AppImage${{ env.ubuntu-ver-str }}_${{ env.ver }}.AppImage
           chmod +x ./build/Snapmaker_Orca_Linux_AppImage${{ env.ubuntu-ver-str }}_${{ env.ver }}.AppImage
 
       - name: Upload artifacts Ubuntu
