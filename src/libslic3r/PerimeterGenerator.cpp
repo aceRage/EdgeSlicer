@@ -2619,7 +2619,7 @@ void PerimeterGenerator::process_arachne()
         if (this->config->offset_layers) {
             std::sort(ordered_extrusions.begin(), ordered_extrusions.end(),
                 [](const PerimeterGeneratorArachneExtrusion& a, const PerimeterGeneratorArachneExtrusion& b) -> bool {
-                    return a.extrusion->inset_idx % 2 <= b.extrusion->inset_idx % 2;
+                    return a.extrusion->inset_idx % 2 < b.extrusion->inset_idx % 2; // strict: <= is not a strict weak ordering and std::sort on it is UB
                 });
         }
 
