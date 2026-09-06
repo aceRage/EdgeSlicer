@@ -197,6 +197,18 @@ struct Update
                 }
                 if (vendor.empty())
                     return true;
+                // The printer-config set (resources/printers -> <datadir>/printers) is a flat
+                // directory with its own version.txt, not a vendor profile bundle; validating it
+                // as one ("missing preset subdirectories") made every copy of it fail since
+                // upstream's resource-update fix, so new printer files never reached an existing
+                // data dir (H2C: O1C2.json, 2026-09-06).
+                if (target.filename() == "printers") {
+                    if (!fs::exists(staging / "version.txt")) {
+                        BOOST_LOG_TRIVIAL(error) << "Printer config staging is missing version.txt";
+                        return false;
+                    }
+                    return true;
+                }
 
                 const bool has_preset_tree = fs::exists(staging / PRESET_PRINTER_NAME) || fs::exists(staging / PRESET_FILAMENT_NAME) ||
                                              fs::exists(staging / PRESET_PRINT_NAME);
