@@ -22,6 +22,7 @@ add_executable(${_TEST_NAME}_tests
 	test_placeholder_parser.cpp
 	test_polygon.cpp
 	test_profile_load_util.cpp
+	test_project_preset_switch.cpp
 	test_mutable_polygon.cpp
 	test_mutable_priority_queue.cpp
 	test_slice_compare.cpp
