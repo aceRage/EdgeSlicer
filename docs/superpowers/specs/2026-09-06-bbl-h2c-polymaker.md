@@ -369,3 +369,220 @@ Flattening resolves `inherits` + `include` exactly as the loader does.)
 * The **8 pre-existing duplicate-`@base`** validator errors and the 259
   unregistered files under `resources/profiles/BBL/filament/Polymaker/` are
   untouched.
+
+## Orphaned presets rescued
+
+Date: 2026-09-06
+Branch: `fix/bbl-orphaned-presets` (from `fix/bbl-unregistered-filaments` @ 481452001e)
+
+### The orphaning
+
+`resources/profiles/BBL/filament/` held **425 preset files that no longer
+appeared in `BBL.json` → `filament_list`**, so the loader never saw them and no
+Bambu machine offered them. All 425 were registered in OrcaSlicer's own
+`BBL.json`, still present in this repo's history at **e3d55b3c5b** (959 filament
+entries). Fork commit **44f198e1ed "Feature transfer lxy (#130)"** replaced
+`BBL.json` wholesale with a Bambu-derived 512-entry list and dropped them; the
+files themselves were left on disk.
+
+They cover legacy printers only, and every printer they name is in this fork's
+`machine_list`, so those machines simply had no Polymaker / Overture / eSUN /
+SUNLU / AliZ / FusRock filaments at all.
+
+### What was re-registered
+
+**All 425 files, 0 deleted, 0 left unregistered.** `filament_list` 2049 → 2474.
+
+| Folder | Files | Per printer |
+| --- | --- | --- |
+| `filament/Polymaker/` | 247 | A1 48, X1C 48, A1M 44, P1P 44, X1 40, X1E 4, `@base` 19 |
+| `filament/Overture/` | 93 | X1C 20, A1 18, A1M 18, P1P 18, X1 18, `@base` 1 |
+| `filament/SUNLU/` | 62 | A1 13, A1M 13, X1C 13, P1P 10, X1 6, `@base` 7 |
+| `filament/eSUN/` | 7 | A1 2, A1M 2, X1C 2, X1 1 |
+| `filament/P1P/` | 6 | P1P 6 |
+| `filament/AliZ/` | 5 | `@P1-X1` 5 |
+| `filament/FusRock/` | 5 | A1 1, P1P 1, X1C 1, H2D 1, `@base` 1 |
+
+397 are instantiable presets; **28** are abstract `@base` parents
+(`instantiation: false`).
+
+Totals by printer across all folders: **X1C 84, A1 82, P1P 79, A1M 77, X1 65,
+`@base` 28, AliZ `@P1-X1` 5, X1E 4, H2D 1**.
+
+### Ordering
+
+`PresetBundle::load_vendor_configs_from_json` walks `filament_list` **in order**
+and aborts the whole vendor bundle with `can not find inherits <parent> for
+<child>` when a child is listed before its parent. Entries were therefore placed
+by replaying **e3d55b3c5b's own ordering**: each orphan is inserted after the
+nearest preceding e3d55b3c5b entry that still exists in the current list, which
+keeps the historical relative order and drops each block beside its siblings.
+
+That left 8 new entries (`PolyLite ABS/ASA @BBL A1 / A1 0.2 nozzle / P1P / X1C`)
+ahead of their `PolyLite ABS @base` / `PolyLite ASA @base` parents, and their
+own children after them; three repair passes moved 16 entries to just after
+their parent. Final state: **zero children before their parent**, and the 2049
+pre-existing entries — including the 68 H2C Polymaker ones and the 7 Fiberon
+X1C ones — are byte-for-byte unchanged and in their original relative order.
+
+(The 7 pre-existing `Fiberon * @BBL H2D` entries still precede their
+`Fiberon * @base` parents. They load only because those `@base` names also exist
+in `OrcaFilamentLibrary` and the base bundle rescues them. Pre-existing, not
+touched here.)
+
+### Name conflicts: none, so no deletions
+
+The premise was that up to 63 of these names are also registered by Bambu Studio
+master at flat `filament/<name>.json` paths in the newer dual-nozzle array form,
+in which case the flat file should win and the orphan be deleted.
+
+**No such flat file exists in this tree.** A name sweep over all 2478 files under
+`resources/profiles/BBL/filament/` found **zero duplicated preset names**, and
+none of the 425 orphan names was already in `filament_list`. The flat
+`Polymaker` / `Overture` / `eSUN` files this fork does carry are all `@BBL H2C /
+H2D / H2DP / H2S` — the newer printers the orphans do not cover. So the rule
+"register the orphan when the flat Bambu file is absent" applies to all 425:
+**0 deletions, 0 conflicts, no two entries share a name.**
+
+28 of the newly registered `@base` names *do* also exist under
+`resources/profiles/OrcaFilamentLibrary/`. That is not a conflict: they are
+`instantiation: false`, so they never enter a `PresetCollection` and
+`merge_presets` reports no duplicate (0 "duplicated preset" lines in the
+validator, before and after). Their BBL copies differ from the library copies in
+27 of 28 cases (`filament_id`, `filament_max_volumetric_speed`,
+`slow_down_layer_time`, …), and the loader prefers the vendor's own
+`config_maps` over the base bundle, so the rescued BBL children get the BBL
+values — which is what they were written against. **No pre-existing registered
+preset changes which parent it resolves to.**
+
+### Cross-vendor parents resolve
+
+**69** of the rescued files inherit an `@base` that exists only in
+`resources/profiles/OrcaFilamentLibrary/`: 64 Overture (`Overture Air PLA
+@base`, `Easy PLA`, `Rock PLA`, `Silk PLA`, `Super PLA+`, `TPU` — 10 each — and
+`Overture ASA @base` — 4) and 5 AliZ (`AliZ PA-CF / PETG / PETG-CF /
+PETG-Metal / PLA @base`).
+
+They resolve through the base bundle: `load_system_presets_from_json` moves
+`OrcaFilamentLibrary` to the front of the vendor list and passes the loaded
+library as `base_bundle`, and `parse_subfile` falls back to
+`base_bundle->m_config_maps` (and `m_filament_id_maps`) when `inherits` is not in
+the vendor's own map. Verified, not assumed: **all 69 load, none re-pointed,
+none left unregistered**, and `Overture Silk PLA @BBL A1M` — whose parent is
+library-only — slices end to end in the CLI proof below.
+
+### Validation
+
+`scripts/orca_extra_profile_check.py --vendor BBL`
+
+| | Files with errors | Files with warnings |
+| --- | --- | --- |
+| before | 0 | 0 |
+| after | 0 | 0 |
+
+`Snapmaker_Orca_profile_validator` — the binary built for the H2C work
+(`.claude/worktrees/h2c-polymaker/build-validator/src/Release/`, used read-only),
+pointed at scratch copies of `resources/profiles` with the X2D process family
+stripped from `process_list` (16 entries) so the load reaches the filaments, as
+before. Both runs still end "Validation failed" for the pre-existing reason.
+
+| | before | after |
+| --- | --- | --- |
+| `[error]` lines | **1349** | **1349** |
+| distinct files named in errors | 1349 | 1349 |
+| error lines unique to this tree | — | **0** |
+| new presets named in any error | — | **0** |
+| `include not found` warnings | 7 | 7 |
+
+(1349, not the 1141 recorded for the H2C work above, because only the X2D
+**process** family was stripped here — the 208 X2D *filament* errors are left
+in. 1349 − 208 = 1141 exactly, so this is the same error population plus the
+X2D filaments, a superset of the earlier harness.)
+
+The two error sets are **identical**; every one is the pre-existing
+`contains incorrect keys: filament_cooling_before_tower, filament_flush_temp,
+filament_flush_volumetric_speed, which were removed`.
+
+Positive proof, `-l 4`: total `got preset` lines **2351 → 2748, exactly +397** —
+the 397 instantiable new presets, with the 28 `instantiation: false` parents
+correctly silent (that path returns before the log line). Sample, before = 0
+occurrences, after = 1 each:
+
+```
+got preset PolyTerra PLA @BBL A1,   from <profiles>/BBL/filament/Polymaker/PolyTerra PLA @BBL A1.json
+got preset Overture PLA @BBL A1M,   from <profiles>/BBL/filament/Overture/Overture PLA @BBL A1M.json
+got preset eSUN PLA+ @BBL A1M,      from <profiles>/BBL/filament/eSUN/eSUN PLA+ @BBL A1M.json
+got preset PolyLite PLA @BBL X1C,   from <profiles>/BBL/filament/Polymaker/PolyLite PLA @BBL X1C.json
+got preset SUNLU PLA+ @BBL P1P,     from <profiles>/BBL/filament/SUNLU/SUNLU PLA+ @BBL P1P.json
+```
+
+### CLI proof slice
+
+Live read-only `C:\Dev\SnapmakerOrca\build\Snapmaker_Orca\EdgeSlicer.exe` copied
+to a scratch install whose `resources` is a junction to this worktree, isolated
+empty `--datadir`, model `resources/handy_models/OrcaToleranceTest.stl`, printer
+**`Bambu Lab A1 mini 0.4 nozzle`**, process `0.20mm Standard @BBL A1M`. Presets
+selected by name (`--printer-preset` / `--process-preset` /
+`--filament-presets`), so the real vendor bundle and its base-bundle fallback are
+exercised rather than a flattened config.
+
+```
+--filament-presets "Overture PLA @BBL A1M"
+  result.json: "error_string": "Success.", "return_code": 0
+  plate_1.gcode  626024 bytes, 27714 lines, 2.905 g, 955.8 s
+  ; filament_settings_id = "Overture PLA @BBL A1M"
+  ; printer_settings_id  = Bambu Lab A1 mini 0.4 nozzle
+  ; print_settings_id    = 0.20mm Standard @BBL A1M
+  ; filament_vendor = Overture   ; filament_type = PLA
+  ; fan_max_speed = 80   ; fan_min_speed = 60   ; hot_plate_temp = 60
+  ; slow_down_layer_time = 8     ; textured_plate_temp = 65
+```
+
+Those six values are exactly what `Overture PLA @BBL A1M.json` overrides, so the
+rescued file — not its parent — is what the slice used.
+
+```
+--filament-presets "Overture Silk PLA @BBL A1M"     (parent is library-only)
+  result.json: "error_string": "Success.", "return_code": 0
+  ; filament_settings_id = "Overture Silk PLA @BBL A1M"
+  2.795 g, 939.3 s
+```
+
+Negative control: the same command against `HEAD`'s `BBL.json` (temporarily
+restored, then reverted) fails with `preset not found: Overture PLA @BBL A1M`.
+
+One fixup was needed **in the CLI harness only**, unchanged from the H2C run and
+unrelated to any filament value: `--layer-change-gcode "G92 E0"`.
+`Print::validate()`'s relative-E check is guarded by `!is_BBL_printer()`, and
+`Snapmaker_Orca.cpp` sets `is_BBL_printer()` (line ~5382) *after* it calls
+`print->validate()` (line ~5292), so the flag is still false at validation time.
+Pre-existing CLI bug. `prime_tower_brim_width` needed no fixup this time,
+because the preset-by-name path builds the config from the vendor bundle.
+
+### Version bump
+
+`BBL.json` `"version"` **02.00.00.74 → 02.00.00.75**. Existing installs re-sync
+their system profiles only when it rises, so without this the 425 presets would
+appear for new data directories only.
+
+### Not verified / left over
+
+* **No hardware.** These are OrcaSlicer's own vendor presets, restored verbatim;
+  not one value was edited. Nothing was printed.
+* Nothing was **deleted** and nothing was **left unregistered**: 425 of 425
+  files are now in `filament_list`.
+* The only files still unregistered under `BBL/filament/` are the four
+  `fdm_filament_template_direct_*.json` **include templates**, which are pulled
+  in by `include` rather than listed, and correctly so.
+* **Pre-existing, untouched:** the 7 `Fiberon * @BBL H2D` files carry
+  `"include": "fdm_filament_template_direct_dual"`, which the loader resolves
+  relative to `BBL/filament/Polymaker/` and cannot find — 7 `include not found`
+  warnings, identical before and after this change. None of the 425 rescued
+  files uses `include`.
+* **Pre-existing, untouched:** the 1349 `incorrect keys` validator errors, and
+  `process/0.20mm Standard @BBL X2D.json` setting the scalar
+  `enable_overhang_speed` to `1,1,1,1,0,0`, which still aborts a validator run
+  that includes the X2D process family.
+* Whether Bambu Studio master registers 63 of these names at flat paths was
+  **not** checked against upstream — only against this tree, where no such file
+  exists.
