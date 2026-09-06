@@ -2265,6 +2265,17 @@ void GUI_App::init_app_config()
                 else if (mig.ran)
                     g_datadir_migration = mig; // post_init() tells the user what happened
             }
+#ifdef _WIN32
+            // The embedded browser's profile is keyed on the app name as well (wxStandardPaths'
+            // user local data dir + EBWebView): bring the old one across the same way, before
+            // any WebView is created, or the Stream tab and the web logins start from nothing.
+            {
+                const boost::filesystem::path local(wxStandardPaths::Get().GetUserLocalDataDir().ToUTF8().data());
+                std::string from;
+                if (Slic3r::migrate_webview_profile(local.parent_path().string(), local.string(), &from))
+                    BOOST_LOG_TRIVIAL(info) << "browser profile carried over from " << from;
+            }
+#endif
             if (!boost::filesystem::exists(data_dir_path)){
                 boost::filesystem::create_directory(data_dir_path);
             }

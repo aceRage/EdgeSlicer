@@ -58,6 +58,16 @@ const std::vector<std::string>& legacy_data_dir_names();
 // to say one thing.
 const char* legacy_data_dir_name();
 
+// The embedded browser's profile (Windows: %LOCALAPPDATA%\<app name>\EBWebView) is keyed on the
+// app name too, and it is where the web pages keep their localStorage (the Stream tab's layout and
+// selections) and cookies (the Snapmaker account session). It lives beside, not inside, the data
+// dir, so migrate_data_dir never saw it - a rename silently reset the Stream tab and logged the
+// user out (2026-09-06). `local_parent` is the directory the per-app local folders are siblings
+// in; `new_local_dir` is ours. Copies `<legacy>/EBWebView` (newest legacy first) into
+// `new_local_dir/EBWebView` when ours does not exist yet, and leaves a marker so it runs once.
+// Must run before any WebView is created. Returns true when a copy was made.
+bool migrate_webview_profile(const std::string& local_parent, const std::string& new_local_dir, std::string* copied_from = nullptr);
+
 } // namespace Slic3r
 
 #endif // slic3r_DataDirMigration_hpp_

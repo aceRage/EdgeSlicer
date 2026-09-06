@@ -6,6 +6,7 @@
 #include <boost/filesystem.hpp>
 #include <boost/filesystem/fstream.hpp>
 #include <boost/log/trivial.hpp>
+#include <fstream>
 #include <boost/nowide/fstream.hpp>
 #include <boost/uuid/detail/md5.hpp>
 
@@ -338,6 +339,56 @@ DataDirMigrationResult migrate_data_dir(const std::string& parent,
                                << res.new_dir << " (legacy key " << res.legacy_key << "), rewrote " << res.conf_paths_rewritten
                                << " absolute paths in the config; the old directory was left alone";
     return res;
+}
+
+bool migrate_webview_profile(const std::string& local_parent, const std::string& new_local_dir, std::string* copied_from)
+{
+    boost::system::error_code ec;
+    const fs::path parent(local_parent);
+    const fs::path mine    = fs::path(new_local_dir) / "EBWebView";
+    const fs::path marker  = fs::path(new_local_dir) / ".migrated-webview";
+    if (copied_from) copied_from->clear();
+    if (fs::exists(marker, ec) || fs::exists(mine, ec))
+        return false; // already ours, or already done
+    for (const std::string& key : legacy_data_dir_names()) {
+        const fs::path theirs = parent / key / "EBWebView";
+        if (!fs::is_directory(theirs, ec))
+            continue;
+        // Stage beside the target and rename into place, so a half copy never looks like a profile.
+        const fs::path staging = fs::path(new_local_dir) / "EBWebView.migrating";
+        fs::remove_all(staging, ec);
+        fs::create_directories(staging, ec);
+        std::string error;
+        for (fs::recursive_directory_iterator it(theirs, ec), end; it != end; it.increment(ec)) {
+            if (ec) { error = ec.message(); break; }
+            const fs::path rel = fs::relative(it->path(), theirs, ec);
+            const fs::path dst = staging / rel;
+            if (fs::is_directory(it->path(), ec)) {
+                fs::create_directories(dst, ec);
+            } else {
+                fs::create_directories(dst.parent_path(), ec);
+                boost::system::error_code cec;
+                fs::copy_file(it->path(), dst, fs::copy_option::overwrite_if_exists, cec);
+                // Lock files and the browser's own caches may be busy or transient; skip them.
+                if (cec && rel.string().find("lockfile") == std::string::npos && error.empty())
+                    error = it->path().string() + ": " + cec.message();
+            }
+        }
+        if (!error.empty()) {
+            BOOST_LOG_TRIVIAL(warning) << "webview profile migration from " << theirs.string() << " incomplete: " << error;
+        }
+        fs::rename(staging, mine, ec);
+        if (ec) {
+            BOOST_LOG_TRIVIAL(error) << "webview profile migration: could not publish " << mine.string() << ": " << ec.message();
+            fs::remove_all(staging, ec);
+            return false;
+        }
+        std::ofstream(marker.string()) << key << std::endl;
+        BOOST_LOG_TRIVIAL(info) << "webview profile migrated from " << theirs.string() << " to " << mine.string();
+        if (copied_from) *copied_from = theirs.string();
+        return true;
+    }
+    return false;
 }
 
 } // namespace Slic3r
