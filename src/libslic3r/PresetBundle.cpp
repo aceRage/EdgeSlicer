@@ -2904,6 +2904,23 @@ void PresetBundle::load_config_file_config(const std::string &name_or_path, bool
         BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << boost::format(": load printer preset from printer_settings_id");
         load_preset(this->printers, num_filaments + 1, "printer_settings_id", printer_different_keys_set, std::string());
 
+        // Ultra: the printer this project was saved for. clear_compatible_printers() above wiped
+        // "compatible_printers" out of the project's cummulative config, and the scatter loop below
+        // skips that key as well (it is a list of printer names, not a per-filament vector), so a
+        // filament preset split out of a project can end up with no printer binding at all. An empty
+        // binding reads as "fits every printer" in is_compatible_with_printer(), which left a
+        // project's filament slots selected after switching to a machine they were never made for.
+        // Where nothing else states the binding, fall back to the project's own printer -- the same
+        // rule Orca applies when saving a filament preset with an empty compatible_printers.
+        const std::string project_printer_name = this->printers.get_edited_preset().name;
+        auto bind_to_project_printer = [&project_printer_name](DynamicPrintConfig &cfg, const std::string &condition) {
+            if (project_printer_name.empty() || !condition.empty())
+                return;
+            ConfigOptionStrings *compatible = cfg.option<ConfigOptionStrings>("compatible_printers", true);
+            if (compatible->values.empty())
+                compatible->values.push_back(project_printer_name);
+        };
+
         // 3) Now load the filaments. If there are multiple filament presets, split them and load them.
         auto old_filament_profile_names = config.option<ConfigOptionStrings>("filament_settings_id", true);
         old_filament_profile_names->values.resize(num_filaments, std::string());
@@ -2927,6 +2944,7 @@ void PresetBundle::load_config_file_config(const std::string &name_or_path, bool
                 filament_different_keys_set.insert(ignore_settings_list.begin(), ignore_settings_list.end());
 
             std::string filament_id = filament_ids[0];
+            bind_to_project_printer(config, compatible_printers_condition);
             //BBS: add config related logs
             BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << boost::format(": load single filament preset from filament_settings_id");
             if (is_external)
@@ -2970,6 +2988,7 @@ void PresetBundle::load_config_file_config(const std::string &name_or_path, bool
                 cfg.opt_string("compatible_printers_condition", true) = compatible_printers_condition_values[i + 1];
                 cfg.opt_string("compatible_prints_condition",   true) = compatible_prints_condition_values[i];
                 cfg.opt_string("inherits", true)                      = inherits_values[i + 1];
+                bind_to_project_printer(cfg, compatible_printers_condition_values[i + 1]);
 
                 //BBS: add different settings logic
                 std::vector<std::string> filament_different_keys_vector;
@@ -4142,9 +4161,26 @@ void PresetBundle::update_compatible(PresetSelectCompatibleType select_other_pri
             Preset *preset = this->filaments.find_preset(this->filament_presets[idx], false);
             filament_preset_was_compatible[idx] = preset != nullptr && preset->is_compatible;
         }
+        // Ultra: a project-inside filament preset has no alias of its own, so an alias match would
+        // never fire for it and a printer switch would drop the slot onto the new printer's generic
+        // default filament. Match on the system profile it inherits from instead, so "Bambu PLA Matte"
+        // saved in a P1S project lands on "Bambu PLA Matte" for the H2C rather than on plain PLA Basic.
+        auto filament_match_source = [this](Preset *preset) -> Preset * {
+            if (preset != nullptr && preset->alias.empty()) {
+                // Read "inherits" without creating the key, so a lookup cannot dirty the preset.
+                const auto *opt = dynamic_cast<const ConfigOptionString *>(preset->config.option("inherits"));
+                if (opt != nullptr && !opt->value.empty()) {
+                    Preset *parent = this->filaments.find_preset(opt->value, false, true);
+                    if (parent != nullptr)
+                        return parent;
+                }
+            }
+            return preset;
+        };
+
         // First select a first compatible profile for the preset editor.
         this->filaments.update_compatible(printer_preset_with_vendor_profile, &print_preset_with_vendor_profile, select_other_filament_if_incompatible,
-            PreferedFilamentsProfileMatch(this->filaments.get_selected_idx() == size_t(-1) ? nullptr : &this->filaments.get_edited_preset(), prefered_filament_profiles));
+            PreferedFilamentsProfileMatch(this->filaments.get_selected_idx() == size_t(-1) ? nullptr : filament_match_source(&this->filaments.get_edited_preset()), prefered_filament_profiles));
         if (select_other_filament_if_incompatible != PresetSelectCompatibleType::Never) {
             // Verify validity of the current filament presets.
             const std::string prefered_filament_profile = prefered_filament_profiles.empty() ? std::string() : prefered_filament_profiles.front();
@@ -4159,7 +4195,7 @@ void PresetBundle::update_compatible(PresetSelectCompatibleType select_other_pri
                     if (preset == nullptr || (! preset->is_compatible && (select_other_filament_if_incompatible == PresetSelectCompatibleType::Always || filament_preset_was_compatible[idx])))
                         // Pick a compatible profile. If there are prefered_filament_profiles, use them.
                         filament_name = this->filaments.first_compatible(
-                            PreferedFilamentProfileMatch(preset,
+                            PreferedFilamentProfileMatch(filament_match_source(preset),
                                 (idx < prefered_filament_profiles.size()) ? prefered_filament_profiles[idx] : prefered_filament_profile)).name;
                 }
             }
