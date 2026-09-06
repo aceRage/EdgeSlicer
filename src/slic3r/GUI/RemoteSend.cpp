@@ -8,6 +8,7 @@
 #include "PartPlate.hpp"
 #include "Plater.hpp"
 #include "SelectMachine.hpp" // CloudTaskNozzleId
+#include "SpoolmanDialog.hpp" // deduct_after_send_async
 #include "Jobs/PrintJob.hpp" // PrintPrepareData
 #include "libslic3r/Model.hpp"
 #include "libslic3r/PresetBundle.hpp"
@@ -17,6 +18,7 @@
 #include "slic3r/Utils/Http.hpp"
 #include "slic3r/Utils/MoonRaker.hpp"
 #include "slic3r/Utils/NetworkAgent.hpp"
+#include "slic3r/Utils/Spoolman.hpp"
 
 #include <boost/filesystem.hpp>
 #include <boost/log/trivial.hpp>
@@ -676,6 +678,14 @@ std::pair<int, std::string> prepare(const Request& req, std::shared_ptr<Prepared
             m.source       = "phone";
             if (p->kind == "snapmaker") {
                 m.file_name = p->lan_filename;
+                // The wire form /api/plates/{i}/send takes, so a reprint replays it as a copy.
+                std::string wire;
+                for (size_t i = 0; i < p->mapping.size(); ++i) {
+                    if (p->mapping[i] < 0) continue;
+                    if (!wire.empty()) wire += ",";
+                    wire += std::to_string((int) i) + ":" + std::to_string(p->mapping[i]);
+                }
+                m.mapping = wire;
             } else if (p->kind == "bambu") {
                 // The plugin uploads the gcode 3mf; project_name is the print's name, with the
                 // extension only in the upload branch.
@@ -684,10 +694,206 @@ std::pair<int, std::string> prepare(const Request& req, std::shared_ptr<Prepared
             } else {
                 m.file_name = p->upload.upload_path.string();
             }
+            // Stage 1d: a phone send should deduct filament in Spoolman exactly as a desktop one
+            // does. The desktop calls SpoolmanDialog::deduct_after_send_async() from
+            // Plater::print_job_finished and SSWCP's print start; the print-host and Snapmaker-LAN
+            // phone paths never had a call site, so the preference was silently half true. The gate
+            // is read here, on the GUI thread, because Spoolman::base_url() and the preference both
+            // read AppConfig - run() only fires it, and only when the send actually worked.
+            if (p->kind == "printhost" || p->kind == "snapmaker") {
+                AppConfig* cfg      = wxGetApp().app_config;
+                p->spoolman_deduct  = Spoolman::enabled() && cfg && cfg->get("spoolman_deduct") == "true";
+                m.spoolman_deduct   = p->spoolman_deduct;
+            }
             p->archive_meta = std::move(m);
         } catch (...) {}
     }
     return rc;
+}
+
+// ------------------------------------------------- stage 2: send an archived file ----
+
+// The record's filaments, back in the shape a Snapmaker send wants. The sidecar only lists the
+// slots the plate actually used, each with its real index, so the gaps between them are filled in
+// as unused - the mapping is indexed by the file's filament number, not by position in the list.
+static std::vector<SnapmakerLan::FileFilament> file_filaments_of_record(const json& j)
+{
+    std::vector<SnapmakerLan::FileFilament> out;
+    if (!j.contains("filaments") || !j["filaments"].is_array())
+        return out;
+    int highest = -1;
+    for (const json& f : j["filaments"])
+        highest = std::max(highest, f.is_object() ? f.value("index", -1) : -1);
+    for (int i = 0; i <= highest; ++i) {
+        SnapmakerLan::FileFilament f;
+        f.index = i;
+        f.used  = false;
+        out.push_back(f);
+    }
+    for (const json& f : j["filaments"]) {
+        if (!f.is_object()) continue;
+        const int i = f.value("index", -1);
+        if (i < 0 || i >= (int) out.size()) continue;
+        out[i].color  = f.value("colour", std::string());
+        out[i].type   = f.value("type", std::string());
+        out[i].used_g = f.value("grams", 0.0);
+        out[i].used   = true;
+    }
+    return out;
+}
+
+// Which of the four send kinds a printer id names, without asking anything.
+static std::string kind_of_printer(const std::string& id)
+{
+    if (id.compare(0, 3, "sm:") == 0) return "snapmaker";
+    if (id == "host")                 return "printhost";
+    if (id == "connect")              return "connect";
+    return "bambu";
+}
+
+std::pair<int, std::string> prepare_from_record(const Request& req, std::shared_ptr<Prepared>& out)
+{
+    if (req.record.empty())
+        return { 400, "record is required" };
+    const GcodeArchive::Record rec = GcodeArchive::find(req.record);
+    if (rec.id.empty())
+        return { 404, "no such record: " + req.record };
+    // A reprint puts a file on a printer, so it is always deliberate - upload as well as print.
+    if (!req.confirm)
+        return { 400, "sending an archived file needs confirm=1" };
+    boost::system::error_code ec;
+    if (rec.path.empty() || !fs::is_regular_file(fs::path(rec.path), ec))
+        return { 409, "the file of record " + rec.id + " is gone (evicted, or the archive folder moved); it cannot be sent again" };
+
+    const json& j  = rec.json;
+    const json  jp = (j.contains("printer") && j["printer"].is_object()) ? j["printer"] : json::object();
+    const std::string recorded    = jp.value("id", std::string());
+    const std::string recorded_kd = jp.value("kind", std::string());
+    const std::string printer     = req.printer.empty() ? recorded : req.printer;
+    if (printer.empty())
+        return { 409, "this record does not say which printer it went to; name one with printer=" };
+    const std::string kind = kind_of_printer(printer);
+    // Cross-kind is a hard refusal, not a warning: a .gcode.3mf cannot go to a Moonraker host and
+    // a plain .gcode cannot go through the Bambu plugin.
+    if (!recorded_kd.empty() && kind != recorded_kd)
+        return { 409, "this file was sent to a " + recorded_kd + " printer and " + printer + " is a " + kind +
+                          " one; the file a printer takes differs by kind" };
+    // Stage 2 stops where the design's open question 1 does: a Bambu printer handed a gcode 3mf
+    // whose PrintParams were composed for another send is unproven, and the MQTT "connect" path
+    // starts its print from the PC's own preprint page. Both wait for the hardware pass.
+    if (kind == "bambu" || kind == "connect")
+        return { 409, "reprinting to a " + kind + " printer is not supported yet; send that plate from the Prepare tab" };
+
+    const std::string mode = req.mode.empty() ? j.value("mode", std::string("upload")) : req.mode;
+    if (mode != "upload" && mode != "print")
+        return { 400, "mode must be upload or print" };
+
+    // The name the printer is given: the caller's, else the one it was given last time, else the
+    // archived file's own name. Never a directory, whatever the sidecar holds.
+    std::string name = req.name.empty() ? j.value("sent_name", std::string()) : req.name;
+    if (name.empty()) name = rec.file;
+    name = fs::path(name).filename().string();
+    if (name.empty() || name == "." || name == "..") name = rec.file;
+
+    auto p        = std::make_shared<Prepared>();
+    p->mode       = mode;
+    p->plate      = -1;
+    p->dry_run    = req.dry_run || env_flag("SNORCA_SEND_DRYRUN");
+    p->printer_id = printer;
+    p->from_record = true;
+    p->record_id   = rec.id;
+    p->upload.source_path = fs::path(rec.path);
+    p->upload.upload_path = fs::path(name);
+
+    if (kind == "snapmaker") {
+        SnapmakerLan::Device d;
+        if (!SnapmakerLan::find(printer.substr(3), d))
+            return { 404, "no such printer: " + printer };
+        const SnapmakerLan::Status st = SnapmakerLan::status(d);
+        if (!st.online)
+            return { 409, d.name + " is not answering on the network" };
+        if (st.login_required)
+            return { 409, d.name + " asks for a login; the phone can only reach a printer that does not" };
+        if (st.printing())
+            return { 409, d.name + " is " + (st.state == "paused" ? "paused mid-print" : "printing") + " (" + st.filename + ")" };
+        p->kind         = "snapmaker";
+        p->printer_name = d.name.empty() ? d.ip : d.name;
+        p->lan          = d;
+        p->toolheads    = SnapmakerLan::toolheads(d);
+        if (!boost::iends_with(name, ".gcode")) name += ".gcode";
+        p->upload.upload_path = fs::path(name);
+        p->lan_filename       = name;
+        p->file_filaments     = file_filaments_of_record(j);
+        if (mode == "print") {
+            // The record's own mapping is the memory; the caller may override it, and a record
+            // written before mappings were kept falls back to the colour match.
+            const std::string wanted = req.mapping.empty() ? j.value("mapping", std::string()) : req.mapping;
+            std::string       error;
+            if (wanted.empty())
+                p->mapping = SnapmakerLan::auto_match(p->file_filaments, p->toolheads);
+            else if (!parse_mapping(wanted, p->file_filaments.size(), p->mapping, error))
+                return { 400, error };
+            for (const SnapmakerLan::FileFilament& f : p->file_filaments) {
+                if (!f.used || (size_t) f.index >= p->mapping.size()) continue;
+                if (p->mapping[f.index] < 0)
+                    return { 400, "filament " + std::to_string(f.index + 1) + " has no toolhead; every filament the file uses needs one" };
+                if (!p->toolheads.empty() && p->mapping[f.index] >= (int) p->toolheads.size())
+                    return { 400, p->printer_name + " has " + std::to_string(p->toolheads.size()) +
+                                      " toolheads, so there is no toolhead " + std::to_string(p->mapping[f.index] + 1) };
+            }
+            if (!p->toolheads.empty() && !req.force)
+                for (const SnapmakerLan::FileFilament& f : p->file_filaments) {
+                    if (!f.used || (size_t) f.index >= p->mapping.size()) continue;
+                    const int h = p->mapping[f.index];
+                    if (h >= 0 && h < (int) p->toolheads.size() && !p->toolheads[h].loaded)
+                        return { 409, "toolhead " + std::to_string(h + 1) + " is empty; load it, pick another, or send force=1" };
+                }
+        }
+        out = p;
+        return { 200, "" };
+    }
+
+    // A print host: the address is the PC's current printer preset, which only the GUI thread may
+    // read. Nothing else here touches the plater, so this is the one hop onto it.
+    auto host  = std::make_shared<std::shared_ptr<PrintHost>>();
+    auto url   = std::make_shared<std::string>();
+    auto hname = std::make_shared<std::string>();
+    auto rc    = std::make_shared<std::pair<int, std::string>>(200, "");
+    const bool ran = on_main([host, url, hname, rc]() {
+        PresetBundle* bundle = wxGetApp().preset_bundle;
+        if (!bundle) { *rc = { 503, "no preset bundle" }; return; }
+        if (bundle->use_bbl_network()) {
+            *rc = { 409, "the current printer preset sends through the Bambu network; pick that printer by its id" };
+            return;
+        }
+        DynamicPrintConfig& cfg = bundle->printers.get_edited_preset().config;
+        *url = cfg.opt_string("print_host");
+        if (url->empty()) { *rc = { 409, "the printer preset has no print host address" }; return; }
+        host->reset(PrintHost::get_print_host(&cfg, false));
+        if (!*host) { *rc = { 500, "unsupported host type" }; return; }
+        *hname = std::string((*host)->get_name());
+    }, 20000);
+    if (!ran) return { 503, "the slicer is busy" };
+    if (rc->first != 200) return *rc;
+
+    p->kind         = "printhost";
+    p->printer_name = *hname + " " + *url;
+    p->host         = *host;
+    // The archived file keeps the extension it was sent with, so the payload's form is on disk.
+    p->upload.use_3mf = boost::iends_with(rec.file, ".3mf");
+    if (mode == "print") {
+        if (!p->host->get_post_upload_actions().has(PrintHostPostUploadAction::StartPrint))
+            return { 409, *hname + " cannot start a print after the upload" };
+        if (dynamic_cast<Moonraker*>(p->host.get()) != nullptr) {
+            if (dynamic_cast<Moonraker_Mqtt*>(p->host.get()) == nullptr)
+                return { 409, "this Moonraker host can only start prints from the PC's preprint page" };
+            p->two_step = true;
+        }
+    }
+    p->upload.post_action = (mode == "print" && !p->two_step) ? PrintHostPostUploadAction::StartPrint
+                                                              : PrintHostPostUploadAction::None;
+    out = p;
+    return { 200, "" };
 }
 
 // -------------------------------------------------------------------- run ----
@@ -696,9 +902,30 @@ std::pair<int, std::string> prepare(const Request& req, std::shared_ptr<Prepared
 // side note to a send: it reports into the result and can never turn a good send into a failure.
 static void archive_sent(std::shared_ptr<Prepared> p, const std::string& path, json& result)
 {
+    // A reprint replays bytes the archive already holds: recording them a second time would burn
+    // one of the user's kept records on a file that is already there (stage 3 appends to sent[]).
+    if (p->from_record) { result["reprint_of"] = p->record_id; return; }
     if (p->dry_run || !GcodeArchive::enabled()) return;
     const GcodeArchive::Record r = GcodeArchive::archive(path, p->archive_meta);
     if (!r.id.empty()) result["archived"] = r.id;
+}
+
+// Ultra stage 1d: the file is on the printer - deduct its filament from the bound spools, the way
+// Plater::print_job_finished and SSWCP's print start already do for the desktop. CallAfter, never a
+// wait: deduct_after_send_async() reads the plate on the GUI thread and then does the HTTP on a
+// thread of its own, so the send thread is never held up and a Spoolman that is down or wrong can
+// only log. It re-checks the preference itself; p->spoolman_deduct is what prepare() saw.
+static void deduct_spoolman(std::shared_ptr<Prepared> p, json& result)
+{
+    if (p->dry_run || !p->spoolman_deduct) return;
+    result["spoolman_deduct"] = true;
+    try {
+        wxGetApp().CallAfter([]() {
+            try { SpoolmanDialog::deduct_after_send_async(); } catch (...) {}
+        });
+    } catch (...) {
+        BOOST_LOG_TRIVIAL(warning) << "RemoteSend: the Spoolman deduction could not be queued";
+    }
 }
 
 static void run_bambu(std::shared_ptr<Prepared> p, Sink& sink)
@@ -815,10 +1042,13 @@ static void run_host(std::shared_ptr<Prepared> p, Sink& sink)
     result["printer"]     = { { "id", p->printer_id }, { "name", p->printer_name } };
     result["host"]        = p->host->get_name();
     result["url"]         = p->host->get_host();
-    result["source"]      = p->upload.source_path.string();
+    // A reprint's source is inside the archive folder, and the phone must never learn where that
+    // is (the design's privacy line: no paths on the wire). Its id says everything it needs.
+    result["source"]      = p->from_record ? ("archive:" + p->record_id) : p->upload.source_path.string();
     result["upload_path"] = p->upload.upload_path.string();
     result["post_action"] = p->upload.post_action == PrintHostPostUploadAction::StartPrint ? "start_print" : "none";
     result["two_step"]    = p->two_step;
+    if (p->from_record) result["record"] = p->record_id;
     if (p->dry_run) {
         result["dry_run"] = true;
         sink.progress(99, "dry run: nothing was sent");
@@ -841,6 +1071,7 @@ static void run_host(std::shared_ptr<Prepared> p, Sink& sink)
     if (!ok) { sink.done(false, error.empty() ? "upload failed" : error, result); return; }
     result["uploaded"] = true;
     archive_sent(p, p->upload.source_path.string(), result);
+    deduct_spoolman(p, result);
     if (!p->two_step) { sink.done(true, "", result); return; }
 
     sink.progress(97, "starting the print");
@@ -872,8 +1103,9 @@ static void run_snapmaker(std::shared_ptr<Prepared> p, Sink& sink)
     result["mode"]     = p->mode;
     result["printer"]  = { { "id", p->printer_id }, { "name", p->printer_name } };
     result["url"]      = SnapmakerLan::base_url(p->lan);
-    result["source"]   = p->upload.source_path.string();
+    result["source"]   = p->from_record ? ("archive:" + p->record_id) : p->upload.source_path.string();
     result["filename"] = p->lan_filename;
+    if (p->from_record) result["record"] = p->record_id;
     json filaments = json::array();
     for (const SnapmakerLan::FileFilament& f : p->file_filaments) {
         json j;
@@ -906,6 +1138,7 @@ static void run_snapmaker(std::shared_ptr<Prepared> p, Sink& sink)
     }
     result["uploaded"] = true;
     archive_sent(p, p->upload.source_path.string(), result);
+    deduct_spoolman(p, result);
     long long size     = 0;
     if (SnapmakerLan::metadata(p->lan, p->lan_filename, size, error))
         result["size"] = size;

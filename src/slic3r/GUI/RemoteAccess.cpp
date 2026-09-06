@@ -1109,9 +1109,26 @@ RemoteAccess::ApiResponse RemoteAccess::api_archive(const std::string& printer)
         o.erase("path"); // a sidecar never holds one, but never hand one out either
         o.erase("project_path");
         o["has_thumbnail"] = rec.has_thumbnail;
+        o["exists"]        = rec.file_present;
         j["records"].push_back(o);
     }
     r.body = j.dump();
+    return r;
+}
+
+// One record, the same shape as a row of GET /api/archive. `exists` says whether the file is
+// still on disk, which is the difference between a row that can be reprinted and one that cannot.
+RemoteAccess::ApiResponse RemoteAccess::api_archive_one(const std::string& id)
+{
+    ApiResponse                r;
+    const GcodeArchive::Record rec = GcodeArchive::find(id);
+    if (rec.id.empty()) { r.status = 404; r.body = json_error("no such record"); return r; }
+    nlohmann::json o = rec.json;
+    o.erase("path");
+    o.erase("project_path");
+    o["has_thumbnail"] = rec.has_thumbnail;
+    o["exists"]        = rec.file_present;
+    r.body = o.dump();
     return r;
 }
 
@@ -1135,6 +1152,82 @@ RemoteAccess::ApiResponse RemoteAccess::api_archive_delete(const std::string& id
     if (!GcodeArchive::remove(id)) { r.status = 404; r.body = json_error("no such record"); return r; }
     nlohmann::json j;
     j["deleted"] = id;
+    r.body       = j.dump();
+    return r;
+}
+
+// Stage 2: send an archived file again. The bytes in the record are the payload - nothing is
+// re-sliced, no project has to be open, and the plater is not touched at all - but from the job id
+// onwards this is the same send as /api/plates/{i}/send: the same single-flight lock, the same
+// RemoteSend::run() on its own thread, the same /api/jobs/{id} progress. Form: [printer=<id>]
+// [&mode=upload|print]&confirm=1[&force=1][&dry_run=1][&name=][&mapping=0:1,1:2]; `printer` and
+// every option not given fall back to the record.
+RemoteAccess::ApiResponse RemoteAccess::api_archive_send(const std::string& id, const std::string& form_body)
+{
+    ApiResponse r;
+    auto get = [&](const char* k) { return query_param(form_body, k); };
+    RemoteSend::Request req;
+    req.record  = id;
+    req.plate   = -1;
+    req.printer = get("printer");
+    req.mode    = get("mode");
+    req.confirm = get("confirm") == "1";
+    req.force   = get("force") == "1";
+    req.dry_run = get("dry_run") == "1";
+    req.name    = get("name");
+    req.mapping = get("mapping");
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (m_send_running) { r.status = 409; r.body = json_error("a send is already running; wait for it to finish"); return r; }
+        m_send_running = true; // reserved until the job ends, or preparing fails below
+    }
+    // Preparing a reprint reads the archive and asks the printer what it holds; neither wants the
+    // GUI thread, and the run_on_main rule says network I/O never runs on it. RemoteSend::
+    // prepare_from_record steps onto it only for the printer preset.
+    std::shared_ptr<RemoteSend::Prepared> p;
+    std::pair<int, std::string>           result(500, "not run");
+    take_error();
+    try {
+        result = RemoteSend::prepare_from_record(req, p);
+    } catch (const std::exception& e) {
+        result = { 500, std::string("preparing the reprint failed: ") + e.what() };
+    } catch (...) {
+        result = { 500, "preparing the reprint failed" };
+    }
+    if (result.first != 200 || !p) {
+        { std::lock_guard<std::mutex> lock(m_mutex); m_send_running = false; }
+        const std::string shown = take_error();
+        r.status = result.first == 200 ? 500 : result.first;
+        r.body   = json_error(result.second + (shown.empty() ? "" : ": " + shown));
+        return r;
+    }
+    Job job;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        job.id      = m_next_job++;
+        job.plate   = -1;
+        job.kind    = "send";
+        job.state   = "running";
+        job.printer = p->printer_id;
+        job.mode    = p->mode;
+        job.text    = "starting";
+        m_jobs.push_back(job);
+        if (m_jobs.size() > 50)
+            m_jobs.erase(m_jobs.begin());
+    }
+    const int        jid = job.id;
+    RemoteSend::Sink sink;
+    sink.progress = [this, jid](int pct, const std::string& text) { update_job(jid, pct, text); };
+    sink.done     = [this, jid](bool ok, const std::string& error, const nlohmann::json& res) { finish_job(jid, ok, error, res); };
+    std::thread([p, sink]() { RemoteSend::run(p, sink); }).detach();
+    nlohmann::json j;
+    j["job"]     = jid;
+    j["plate"]   = -1;      // a reprint has no plate: the same shape, an index that says so
+    j["record"]  = p->record_id;
+    j["kind"]    = p->kind;
+    j["printer"] = p->printer_name;
+    j["mode"]    = p->mode;
+    j["dry_run"] = p->dry_run;
     r.body       = j.dump();
     return r;
 }
@@ -2096,9 +2189,12 @@ RemoteAccess::ApiResponse RemoteAccess::handle_api(const std::string& method, co
             { {"method", "POST"}, {"path", "/api/settings/process"},       {"description", "form body key=value[&key=value…] (serialized option values); applies like typing into the tab, returns preset/dirty state"} },
             { {"method", "POST"}, {"path", "/api/settings/process/revert"}, {"description", "reset all settings to the last saved preset"} },
             { {"method", "POST"}, {"path", "/api/settings/process/save"},  {"description", "save modifications under the same name (system presets save to '<name> - Custom')"} },
-            { {"method", "GET"},  {"path", "/api/archive[?printer={id}]"}, {"description", "the G-code archive (Preferences > Ultra > Store G-Code Files): every file this PC has sent to a printer while it was on, newest first, as {enabled, max, records}. Each record is {id, time, file, sent_name, size, sha256, printer {id, kind bambu|snapmaker|printhost|connect, name, model}, plate, plate_name, project_title, filaments [{index, type, colour, grams}], estimated_time_s, estimated_weight_g, source desktop|phone, mode upload|print, has_thumbnail} - names and sizes only, never a path on the PC. `printer` filters by the printer id a send used"} },
+            { {"method", "GET"},  {"path", "/api/archive[?printer={id}]"}, {"description", "the G-code archive (Preferences > Ultra > Store G-Code Files): every file this PC has sent to a printer while it was on, newest first, as {enabled, max, records}. Each record is {id, time, file, sent_name, size, sha256, printer {id, kind bambu|snapmaker|printhost|connect, name, model}, plate, plate_name, project_title, filaments [{index, type, colour, grams}], estimated_time_s, estimated_weight_g, source desktop|phone, mode upload|print, has_thumbnail, exists (its file is still on disk), mapping (the toolhead mapping a Snapmaker send used, in the wire form /send takes) and spoolman_deduct (a Spoolman deduction was asked for)} - names and sizes only, never a path on the PC. `printer` filters by the printer id a send used"} },
+            { {"method", "GET"},  {"path", "/api/archive/{id}"},        {"description", "one record, the same fields a row of /api/archive carries plus `exists` (its file is still on disk)"} },
             { {"method", "GET"},  {"path", "/api/archive/{id}/thumbnail.png"}, {"description", "the plate preview stored with that record"} },
-            { {"method", "DELETE"}, {"path", "/api/archive/{id}"},        {"description", "delete one stored file with its details and preview"} }
+            { {"method", "POST"}, {"path", "/api/archive/{id}/send"},     {"description", "form [printer={id}][&mode=upload|print]&confirm=1[&force=1][&dry_run=1][&name=][&mapping=0:1,1:2]: send that archived file to a printer again - the stored bytes are the payload, so nothing is re-sliced and no project has to be open. `printer` and every option not given fall back to the record; confirm=1 is always required. Returns the same job id and progress shape as /api/plates/{index}/send (kind send, followed through /api/jobs/{id}). 404 for an unknown record, 409 when its file is gone or the target printer is of another kind (a .gcode.3mf cannot go to a Moonraker host); reprinting to a bambu or connect printer is not supported yet"} },
+            { {"method", "POST"}, {"path", "/api/archive/{id}/delete"},   {"description", "delete one stored file with its details and preview"} },
+            { {"method", "DELETE"}, {"path", "/api/archive/{id}"},        {"description", "delete one stored file with its details and preview (the same as POST /api/archive/{id}/delete)"} }
         });
         r.body = j.dump();
         return r;
@@ -2216,10 +2312,19 @@ RemoteAccess::ApiResponse RemoteAccess::handle_api(const std::string& method, co
     if (path.compare(0, 9, "/archive/") == 0) {
         const std::string rest  = path.substr(9);
         const size_t      slash = rest.find('/');
+        const std::string what  = slash == std::string::npos ? std::string() : rest.substr(slash);
+        if (slash == std::string::npos && method == "GET")
+            return api_archive_one(rest);
         if (slash == std::string::npos && method == "DELETE")
             return api_archive_delete(rest);
-        if (slash != std::string::npos && rest.substr(slash) == "/thumbnail.png" && method == "GET")
+        if (what == "/thumbnail.png" && method == "GET")
             return api_archive_thumbnail(rest.substr(0, slash));
+        // POST, not DELETE, is the route the phone uses: the hub proxies both, but a POST verb is
+        // what every other action on this API takes and what a form can send.
+        if (what == "/delete" && method == "POST")
+            return api_archive_delete(rest.substr(0, slash));
+        if (what == "/send" && method == "POST")
+            return api_archive_send(rest.substr(0, slash), body.empty() ? query : body);
     }
     r.status = 404;
     r.body   = json_error("no such route; see /api");

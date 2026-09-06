@@ -266,6 +266,8 @@ static json meta_json(const Meta& m)
         j["filaments"].push_back({ { "index", f.index }, { "type", f.type }, { "colour", f.colour }, { "grams", f.grams } });
     if (m.estimated_time_s > 0)     j["estimated_time_s"] = m.estimated_time_s;
     if (m.estimated_weight_g > 0.0) j["estimated_weight_g"] = m.estimated_weight_g;
+    if (!m.mapping.empty())         j["mapping"] = m.mapping;
+    j["spoolman_deduct"] = m.spoolman_deduct;
     return j;
 }
 
@@ -288,6 +290,7 @@ static Record record_from_sidecar(const fs::path& sidecar)
     r.path   = (sidecar.parent_path() / r.file).string();
     const fs::path thumb = sidecar.parent_path() / (r.id + ".png");
     boost::system::error_code ec;
+    r.file_present = !r.file.empty() && fs::is_regular_file(r.path, ec);
     r.has_thumbnail = fs::is_regular_file(thumb, ec);
     if (r.has_thumbnail) r.thumbnail_path = thumb.string();
     return r;
