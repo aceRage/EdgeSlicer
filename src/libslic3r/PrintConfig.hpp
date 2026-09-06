@@ -1013,14 +1013,10 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionEnum<InfillPattern>, support_ironing_pattern))
     ((ConfigOptionPercent,             support_ironing_flow))
     ((ConfigOptionFloat,               support_ironing_spacing))
-    // Ultra (over-support surfaces): bottom surfaces that land on support with a non-zero top Z
-    // distance are classified stBottomOverSupport instead of stBottomBridge and printed with
-    // these, not with the bridge settings. Object-level on purpose, so a part-level support
-    // group can carry them later (Stage 5 of the support-sets plan).
-    // docs/superpowers/specs/2026-09-05-over-support-surfaces.md
-    ((ConfigOptionBool,                over_support_surfaces))
-    ((ConfigOptionFloat,               over_support_flow))
-    ((ConfigOptionFloat,               over_support_speed))
+    // Ultra (over-support surfaces): over_support_surfaces / _flow / _speed used to live here.
+    // Stage 5 of the support-sets plan moved them to PrintRegionConfig so a PART can carry them:
+    // they describe the OBJECT's own bottom shell, not the support, and a part's own region is
+    // where the fork already puts such a value. See the block in PrintRegionConfig below.
     ((ConfigOptionFloat,               xy_hole_compensation))
     ((ConfigOptionFloat,               xy_contour_compensation))
     ((ConfigOptionBool,                flush_into_objects))
@@ -1106,6 +1102,18 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloat,                internal_bridge_flow))
     ((ConfigOptionFloat,                bridge_speed))
     ((ConfigOptionFloatOrPercent,       internal_bridge_speed))
+    // Ultra (over-support surfaces): bottom surfaces that land on support with a non-zero top Z
+    // distance are classified stBottomOverSupport instead of stBottomBridge and printed with
+    // these, not with the bridge settings right above them.
+    // They are PrintRegionConfig members, not PrintObjectConfig ones, and that is what makes them
+    // act PER PART: a ModelVolume carrying one of them gets its own PrintRegion
+    // (apply_to_print_region_config, PrintObject.cpp) and GCode::extrude_infill applies the
+    // region's config before extruding its infill. A part that carries none of them keeps the
+    // object's value. docs/superpowers/specs/2026-09-05-over-support-surfaces.md and 2e of
+    // docs/superpowers/plans/2026-09-02-support-sets-and-groups.md.
+    ((ConfigOptionBool,                 over_support_surfaces))
+    ((ConfigOptionFloat,                over_support_flow))
+    ((ConfigOptionFloat,                over_support_speed))
     ((ConfigOptionEnum<EnsureVerticalShellThickness>,   ensure_vertical_shell_thickness))
     ((ConfigOptionPercent,              top_surface_density))
     ((ConfigOptionPercent,               bottom_surface_density))

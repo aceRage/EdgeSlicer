@@ -300,3 +300,95 @@ TEST_CASE("support_group is defined but belongs to no static config class", "[Su
     PrintConfigDef::handle_legacy(opt_key, value);
     CHECK(opt_key.empty());
 }
+
+// ============================================================================================
+// Ultra (support groups, Stage 5): the three predicates behind the new slicing warnings. The
+// messages themselves are raised from PrintObject::generate_support_material() and were measured
+// on the shipped CLI (2e); what is worth a unit test is the condition each one asks.
+// ============================================================================================
+
+TEST_CASE("support_groups: the group that makes the object soluble is named", "[SupportGroups]")
+{
+    // The object asks for a 0.2 mm gap and a group asks for none, so plan 3.6 forces the WHOLE
+    // object to a zero gap - and object_config_from_model_object has already done it by the time
+    // anything can look, which is why the predicate recomputes the object's own value.
+    Slic3r::Print print;
+    Slic3r::Model model;
+    make_two_part_print(print, model,
+                        {{"enable_support", "1"}, {"support_top_z_distance", "0.2"}},
+                        [](ModelObject &object) {
+                            object.volumes[1]->config.set_key_value("support_top_z_distance",
+                                                                    new ConfigOptionFloat(0.));
+                            object.volumes[1]->config.set_key_value("support_group",
+                                                                    new ConfigOptionString("PVA interface"));
+                        });
+    const PrintObject &obj = first_object(print);
+    CHECK(obj.support_group_soluble_name() == "PVA interface");
+    // ...and the object really did become soluble, which is the thing being explained.
+    CHECK_THAT(obj.config().support_top_z_distance.value, WithinAbs(0., 1e-9));
+}
+
+TEST_CASE("support_groups: nothing is said when the user asked for a soluble interface themselves",
+          "[SupportGroups]")
+{
+    Slic3r::Print print;
+    Slic3r::Model model;
+    make_two_part_print(print, model,
+                        {{"enable_support", "1"}, {"support_top_z_distance", "0"}},
+                        [](ModelObject &object) {
+                            object.volumes[1]->config.set_key_value("support_top_z_distance",
+                                                                    new ConfigOptionFloat(0.));
+                            object.volumes[1]->config.set_key_value("support_group",
+                                                                    new ConfigOptionString("B"));
+                        });
+    CHECK(first_object(print).support_group_soluble_name().empty());
+}
+
+TEST_CASE("support_groups: a group's interface filament on another nozzle is reported (R3.4)",
+          "[SupportGroups]")
+{
+    // The interface flow width comes from the nozzle of the filament that draws it
+    // (support_material_interface_flow), so a group on a different nozzle prints its interface at
+    // a different width than the object's - which need not tile with it at the claim seam.
+    auto extruders_on_other_nozzle = [](const char *nozzles) {
+        Slic3r::Print print;
+        Slic3r::Model model;
+        make_two_part_print(print, model,
+                            {{"enable_support", "1"}, {"support_interface_filament", "1"},
+                             {"nozzle_diameter", nozzles}, {"filament_diameter", "1.75,1.75"},
+                             {"filament_type", "PLA;PLA"}, {"filament_soluble", "0,0"}},
+                            [](ModelObject &object) {
+                                object.volumes[1]->config.set_key_value("support_interface_filament",
+                                                                        new ConfigOptionInt(2));
+                                object.volumes[1]->config.set_key_value("support_group",
+                                                                        new ConfigOptionString("B"));
+                            });
+        return first_object(print).support_group_interface_extruders_other_nozzle();
+    };
+    // Two different nozzles: the group's slot 2 is 0-based extruder 1, and it is reported.
+    CHECK(extruders_on_other_nozzle("0.4,0.6") == std::vector<unsigned int>{ 1u });
+    // The same two filaments on the same nozzle size: nothing to say.
+    CHECK(extruders_on_other_nozzle("0.4,0.4").empty());
+}
+
+TEST_CASE("support_groups: an interface filament this printer does not have is reported",
+          "[SupportGroups]")
+{
+    // A volume's slot is never clamped - the group resolver copies it raw - so it travels through
+    // the whole generator as it is. 2c's hardware pass left this for Stage 5 to report.
+    auto missing = [](int slot) {
+        Slic3r::Print print;
+        Slic3r::Model model;
+        make_two_part_print(print, model, {{"enable_support", "1"}},
+                            [slot](ModelObject &object) {
+                                object.volumes[1]->config.set_key_value("support_interface_filament",
+                                                                        new ConfigOptionInt(slot));
+                                object.volumes[1]->config.set_key_value("support_group",
+                                                                        new ConfigOptionString("B"));
+                            });
+        return first_object(print).support_group_unresolvable_interface_filaments();
+    };
+    CHECK(missing(7) == std::vector<int>{ 7 });
+    // One filament is loaded, so slot 1 exists and nothing is said.
+    CHECK(missing(1).empty());
+}

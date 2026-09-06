@@ -71,6 +71,39 @@ PROFILES = {
             ("support_interface_spacing", "0.15"),
         ],
     },
+    # IRONING: the object does not iron at all; the group does, with its own spacing. Through
+    # Stage 4 support_ironing* were stored and resolved per group and completely inert (the one
+    # ironing pass read the shared, i.e. the object's, SupportParameters), so this fixture sliced
+    # by a Stage 4 build has no ironing anywhere. Stage 5 splits the ironed surface by the group's
+    # claim, so the candidate must draw ironing over the grouped part and none over its neighbour -
+    # which is what the corpus case's expect_feature_part measures.
+    "ironing": {
+        "out":       os.path.join(HERE, "twopart_groups_iron.3mf"),
+        "filaments": "Generic PLA",
+        "metadata": [
+            ("support_group", "Iron"),
+            ("support_ironing", "1"),
+            ("support_ironing_spacing", "0.1"),
+        ],
+    },
+    # OVER-SUPPORT: the part - not the object - asks for its underside to be printed as a bottom
+    # shell rather than as a bridge, with its own flow and speed. These three keys became
+    # PrintRegionConfig members in Stage 5, which is exactly what lets a PART carry them; a Stage 4
+    # baseline has them as object keys and drops a part-level value on the floor.
+    # Note this fixture carries no support-group DIFFERENCE at all in the support sense: the
+    # over-support keys describe the object's own bottom shell, not the support, so
+    # PrintObject::support_groups() still resolves K == 1 and the support geometry is untouched.
+    # That is the point - the only thing that may move is the grouped part's underside.
+    "oversupport": {
+        "out":       os.path.join(HERE, "twopart_groups_oversupport.3mf"),
+        "filaments": "Generic PLA",
+        "metadata": [
+            ("support_group", "Over support"),
+            ("over_support_surfaces", "1"),
+            ("over_support_speed", "25"),
+            ("over_support_flow", "0.9"),
+        ],
+    },
     # SINGLE PART: the object has exactly one MODEL_PART volume and that volume carries the group,
     # so the default group owns no parts at all. There is no neighbour to measure the result
     # against, which is why the too-small claim of the first Stage 3 build could hand this object's

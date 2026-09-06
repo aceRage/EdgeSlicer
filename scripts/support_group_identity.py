@@ -29,7 +29,9 @@ TWO GATES, and the default is the tolerance one:
                     and inverts the question: each one must DIFFER from the baseline, because the
                     baseline ignores the groups and the candidate honours them. It also requires
                     zero changed CONFIG rows, so the difference is provably geometry and not a
-                    settings change, and where a case names "expect_tool" it requires that tool
+                    settings change, where a case names "expect_feature_part" it requires that
+                    feature type to be drawn on the group's own part and not on its neighbour's,
+                    and where a case names "expect_tool" it requires that tool
                     change to appear in the candidate's G-code and NOT in the baseline's.
 
 The two default gates (tolerance, bytes) SKIP the "groups": true cases, for the same reason:
@@ -230,13 +232,17 @@ def has_tool_change(path, token):
     return False
 
 
-def extrusions_by_side(path, feature, axis):
+def extrusions_by_side(path, feature, axis, split=None):
     """Split one feature's extrusions into the two PARTS of a two-part fixture, per tool.
 
     Every corpus fixture that carries a group is one object whose parts sit apart along one axis,
     so the parts separate at the widest gap in the coordinates the feature is drawn at - read off
     the data rather than assumed, exactly as the plan's own hardware measurement did. Returns
     (split, [{tool: mm}, {tool: mm}]), the first dict for the low side.
+
+    Pass `split` to use a coordinate measured from ANOTHER feature. A feature that a group draws
+    on one part only has no inter-part gap of its own, so its own widest gap would fall somewhere
+    inside that one part and every share computed from it would be meaningless.
     """
     ai = 0 if axis == "x" else 1
     tool = None
@@ -279,12 +285,13 @@ def extrusions_by_side(path, feature, axis):
             pos = new
     if not seg:
         return None, [{}, {}]
-    coords = sorted(s[0] for s in seg)
-    gap, split = 0.0, coords[0]
-    for i in range(1, len(coords)):
-        g = coords[i] - coords[i - 1]
-        if g > gap:
-            gap, split = g, 0.5 * (coords[i] + coords[i - 1])
+    if split is None:
+        coords = sorted(s[0] for s in seg)
+        gap, split = 0.0, coords[0]
+        for i in range(1, len(coords)):
+            g = coords[i] - coords[i - 1]
+            if g > gap:
+                gap, split = g, 0.5 * (coords[i] + coords[i - 1])
     sides = [{}, {}]
     for c, tl, d in seg:
         side = sides[0 if c < split else 1]
@@ -349,6 +356,39 @@ def tool_part_ok(case, candidate_path):
     return True, ""
 
 
+def feature_part_ok(case, candidate_path):
+    """expect_feature_part: a FEATURE TYPE stays inside the group's own part.
+
+    This is what per-group ironing and per-part over-support surfaces look like from the outside:
+    the group's part carries the feature and its neighbour does not, and neither one is a tool
+    change, so expect_tool_part cannot see either of them. Returns (ok, detail).
+    """
+    spec = case.get("expect_feature_part")
+    if not spec:
+        return True, ""
+    feature = spec["feature"]
+    axis = spec.get("axis", "x")
+    min_share = float(spec.get("min_share", 0.95))
+    # The coordinate the two parts separate at, read off a feature that is drawn on BOTH of them.
+    split_feature = spec.get("split_feature", "Support interface")
+    split, _sides = extrusions_by_side(candidate_path, split_feature, axis)
+    if split is None:
+        return False, ("the split feature %r is missing, so %r cannot be attributed to a part"
+                       % (split_feature, feature))
+    _s, sides = extrusions_by_side(candidate_path, feature, axis, split=split)
+    totals = [sum(s.values()) for s in sides]
+    total = totals[0] + totals[1]
+    if total <= 0.0:
+        return False, "%s was not drawn at all in the candidate" % feature
+    own = max(totals) / total
+    other = min(totals) / total
+    detail = ("%s is %.1f%% on one part and %.1f%% on the other (%.1f mm / %.1f mm), split at %s=%.2f"
+              % (feature, 100.0 * own, 100.0 * other, max(totals), min(totals), axis, split))
+    if own < min_share:
+        return False, "%s did not stay on the group's own part: %s" % (feature, detail)
+    return True, detail
+
+
 def groups_ok(verdict, case, baseline_path, candidate_path, segment_tolerance=99.0,
               baseline_has_groups=False):
     """The ON-mode criterion: the groups must ACT, and only on the geometry.
@@ -403,11 +443,16 @@ def groups_ok(verdict, case, baseline_path, candidate_path, segment_tolerance=99
     ok, why = tool_part_ok(case, candidate_path)
     if not ok:
         return False, why
+    ok, feature_note = feature_part_ok(case, candidate_path)
+    if not ok:
+        return False, feature_note
     # Put the before/after in the gate's own output: a number nobody has to be shown separately.
     now = tool_part_shares(case, candidate_path)
     if now is None:
-        return True, ""
+        return True, feature_note
     note = "candidate: " + now[3]
+    if feature_note:
+        note += "  |  " + feature_note
     was = tool_part_shares(case, baseline_path)
     if was is not None:
         note += "  (baseline: %.1f%% own / %.1f%% other)" % (100.0 * was[0], 100.0 * was[1])

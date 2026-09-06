@@ -1668,6 +1668,69 @@ void TreeSupport::generate_toolpaths(const TreeSupportGroupContext *groups)
                         }
                     }
                 }
+                // Ultra (support groups, Stage 5 / plan Stage 4b "per-group interface ... ironing"):
+                // iron the exposed top of the roof. A classic tree never did this - support_ironing
+                // reached it only through SupportParameters::interface_spacing, which forces the
+                // roof SOLID, so the setting produced a solid roof that was then never smoothed.
+                // The pass is behind support_ironing exactly as the normal generator's is, and with
+                // groups it is split by the same claim the roof FILL is split by, so each group
+                // irons its own roof with its own pattern, spacing and flow and a group with
+                // ironing off leaves its roof unironed while its neighbour's is ironed.
+                // Only the part of the roof that is still exposed is ironed - whatever the layer
+                // above covers is not a surface any more - which is the same rule the normal
+                // generator applies with upper_layer->support_islands.
+                if (layer_id > 0 && ! ts_layer->roof_areas.empty() &&
+                    (group_mode || m_support_params.ironing)) {
+                    ExPolygons exposed = ts_layer->roof_areas;
+                    if (layer_id + 1 < m_object->support_layer_count()) {
+                        const SupportLayer *upper = m_object->get_support_layer(layer_id + 1);
+                        ExPolygons above;
+                        append(above, upper->base_areas);
+                        append(above, upper->roof_areas);
+                        append(above, upper->roof_1st_layer);
+                        append(above, upper->floor_areas);
+                        if (! above.empty())
+                            exposed = diff_ex(exposed, above);
+                    }
+                    auto iron_piece = [&](ExPolygons pieces, const SupportParameters &par,
+                                          ExtrusionEntitiesPtr &dst) {
+                        if (pieces.empty() || ! par.ironing)
+                            return;
+                        std::unique_ptr<Fill> f(Fill::new_from_type(par.ironing_pattern));
+                        f->set_bounding_box(bbox_object);
+                        f->layer_id        = ts_layer->id();
+                        f->z               = ts_layer->print_z;
+                        f->overlap         = 0;
+                        f->angle           = Geometry::deg2rad(object_config.support_angle.value + 90.);
+                        f->spacing         = par.ironing_spacing;
+                        f->link_max_length = (coord_t) scale_(3. * f->spacing);
+                        FillParams iron_params;
+                        iron_params.density     = 1.f;
+                        iron_params.dont_adjust = true;
+                        fill_expolygons_generate_paths(dst, pieces, f.get(), iron_params, erIroning, par.ironing_flow);
+                    };
+                    if (group_mode) {
+                        const Polygons src = to_polygons(exposed);
+                        for (size_t g = 0; g < groups->groups.size(); ++ g) {
+                            if (! groups->params[g].ironing)
+                                continue;
+                            Polygons piece = support_group_piece(src, &groups->claims[g], idx_object_layer_above, g);
+                            if (piece.empty())
+                                continue;
+                            // A group that pins its own interface filament irons its own roof with
+                            // that filament: the ironed surface IS that roof. Deviation 4 of Stage
+                            // 4b keeps Roof1stLayer out of that map because it is a BASE role; an
+                            // ironing pass over the roof top is not.
+                            ExtrusionEntitiesPtr *dst = &ts_layer->support_fills.entities;
+                            const int filament_g = groups->groups[g].config.support_interface_filament.value;
+                            if (filament_g > 0 && filament_g != m_object_config->support_interface_filament.value)
+                                dst = &ts_layer->interface_by_extruder[unsigned(filament_g - 1)].entities;
+                            iron_piece(union_ex(piece), groups->params[g], *dst);
+                        }
+                    } else {
+                        iron_piece(std::move(exposed), m_support_params, ts_layer->support_fills.entities);
+                    }
+                }
                 if (m_support_params.base_fill_pattern == ipLightning)
                 {
                     double print_z = ts_layer->print_z;

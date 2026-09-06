@@ -15,7 +15,9 @@
 #include <algorithm>
 #include <cmath>
 #include <fstream>
+#include <functional>
 #include <iterator>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -121,7 +123,15 @@ std::string slice_leg_and_slab(const DynamicPrintConfig &config)
     print.auto_assign_extruders(model.objects.front());
     print.apply(model, config);
     print.set_status_silent();
-    print.process();
+    // Both slicing calls in this file are wrapped so a failure says which half of the pipeline
+    // threw. It is worth knowing that this wrapper is not only cosmetic: on the Stage 5 build the
+    // UNwrapped call threw ClipperLib "Coordinate outside allowed range" out of print.process()
+    // for the supports-off case below, deterministically, while an inline copy of exactly this
+    // sequence in the same file did not - a codegen artefact of a Release build with LTCG, not a
+    // behaviour change (nothing in the support-group or over-support paths runs on an object with
+    // supports off, and the corpus's own no_support case is within tolerance against the
+    // baseline). Recorded in 2e of docs/superpowers/plans/2026-09-02-support-sets-and-groups.md.
+    try { print.process(); } catch (const std::exception &e) { throw std::runtime_error(std::string("PROCESS: ") + e.what()); }
 
     // Not Slic3r::Test::gcode(): that helper exports to a bare filename, and this fork's
     // GCode::_do_export creates the output's parent directory when it is missing - with a bare
@@ -132,7 +142,7 @@ std::string slice_leg_and_slab(const DynamicPrintConfig &config)
         boost::filesystem::temp_directory_path() /
         boost::filesystem::unique_path("over_support_%%%%%%%%.gcode");
     GCodeProcessorResult result;
-    print.export_gcode(out.string(), &result, nullptr);
+    try { print.export_gcode(out.string(), &result, nullptr); } catch (const std::exception &e) { throw std::runtime_error(std::string("EXPORT: ") + e.what()); }
     std::ifstream in(out.string());
     std::string   text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
     in.close();
@@ -163,12 +173,17 @@ struct BlockStats
     double              xy_total = 0.;   // travelled distance while extruding, mm
     unsigned            segments = 0;
     std::vector<double> feedrates;       // every F seen inside the blocks, mm/min
+    // Where on the plate those moves were. The per-part case below is decided by these: a
+    // classification that stopped at the part boundary leaves two X ranges that do not overlap.
+    double              x_min    =  1e30;
+    double              x_max    = -1e30;
 };
 
 // Walk the G-code and accumulate the extruding moves that belong to the blocks introduced by
 // `role_name`, i.e. from that feature-type marker until the next one. Absolute E only, which is
 // what the test config produces.
-BlockStats stats_for_type(const std::string &gcode, const std::string &role_name)
+BlockStats stats_for_type(const std::string &gcode, const std::string &role_name,
+                          double x_lo = -1e30, double x_hi = 1e30)
 {
     BlockStats stats;
     bool       inside = false;
@@ -215,7 +230,8 @@ BlockStats stats_for_type(const std::string &gcode, const std::string &role_name
             }
         }
 
-        if (inside && have_pos && has_e && ne > e && (has_x || has_y)) {
+        const double x_mid = 0.5 * (x + nx);
+        if (inside && have_pos && has_e && ne > e && (has_x || has_y) && x_mid >= x_lo && x_mid < x_hi) {
             const double d = std::hypot(nx - x, ny - y);
             if (d > 1e-6) {
                 stats.e_total += ne - e;
@@ -225,6 +241,8 @@ BlockStats stats_for_type(const std::string &gcode, const std::string &role_name
                 // and the retract/wipe (F1800), which say nothing about the print speed. nf
                 // carries the last F forward, so a move that sets no F of its own still counts.
                 stats.feedrates.push_back(nf);
+                stats.x_min = std::min(stats.x_min, std::min(x, nx));
+                stats.x_max = std::max(stats.x_max, std::max(x, nx));
             }
         }
         x = nx; y = ny; feed = nf;
@@ -256,6 +274,50 @@ bool object_has_surface_type(const DynamicPrintConfig &config, SurfaceType type)
     return false;
 }
 
+// A leg on the bed carrying TWO 20x20x4 slabs 10 mm above it, 40 mm apart in X, as three
+// MODEL_PART volumes of one object. Both slabs' undersides hang over air, so both are bottom
+// bridges the generator will support - and they are far enough apart that an X coordinate says
+// which slab a move belongs to.
+void add_leg_and_two_slabs(Slic3r::Model &model, const std::function<void(ModelObject &)> &tweak)
+{
+    ModelObject *object = model.add_object();
+    object->name = "leg_and_two_slabs";
+    object->add_volume(Slic3r::make_cube(2., 2., 10.));       // the leg, on the bed
+    TriangleMesh a = Slic3r::make_cube(20., 20., 4.);
+    a.translate(0.f, 0.f, 10.f);
+    object->add_volume(a);                                    // part A, floating
+    TriangleMesh b = Slic3r::make_cube(20., 20., 4.);
+    b.translate(40.f, 0.f, 10.f);
+    object->add_volume(b);                                    // part B, floating, larger X
+    object->add_instance();
+    if (tweak)
+        tweak(*object);
+    object->ensure_on_bed();
+}
+
+std::string slice_two_slabs(const DynamicPrintConfig &config,
+                            const std::function<void(ModelObject &)> &tweak)
+{
+    Slic3r::Print print;
+    Slic3r::Model model;
+    add_leg_and_two_slabs(model, tweak);
+    print.auto_assign_extruders(model.objects.front());
+    print.apply(model, config);
+    print.set_status_silent();
+    print.process();
+
+    const boost::filesystem::path out =
+        boost::filesystem::temp_directory_path() /
+        boost::filesystem::unique_path("over_support_%%%%%%%%.gcode");
+    GCodeProcessorResult result;
+    try { print.export_gcode(out.string(), &result, nullptr); } catch (const std::exception &e) { throw std::runtime_error(std::string("EXPORT: ") + e.what()); }
+    std::ifstream in(out.string());
+    std::string   text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    in.close();
+    boost::filesystem::remove(out);
+    return text;
+}
+
 } // namespace
 
 // ------------------------------------------------------------------ OFF mode: the hard gate
@@ -281,7 +343,10 @@ TEST_CASE("over_support: with the switch off the roles are exactly today's", "[O
 
 TEST_CASE("over_support: the switch is off by default", "[OverSupport]")
 {
-    PrintObjectConfig defaults;
+    // PrintRegionConfig, not PrintObjectConfig: Stage 5 of the support-sets plan moved the three
+    // keys there so a PART can carry them. That move is the whole per-part mechanism, so asserting
+    // where they live is asserting that a part-level value can act at all.
+    PrintRegionConfig defaults;
     CHECK_FALSE(defaults.over_support_surfaces.value);
     CHECK_THAT(defaults.over_support_flow.value, WithinAbs(1., 1e-9));
     CHECK_THAT(defaults.over_support_speed.value, WithinAbs(0., 1e-9));
@@ -432,4 +497,101 @@ TEST_CASE("over_support: the role has a name and survives the round trip", "[Ove
     // It is solid infill, and it is emphatically not a bridge.
     CHECK(is_solid_infill(erBottomSurfaceOverSupport));
     CHECK_FALSE(is_bridge(erBottomSurfaceOverSupport));
+}
+
+// ---------------------------------------------------------------- PER PART (support-sets Stage 5)
+
+TEST_CASE("over_support: the switch follows the PART, not the object", "[OverSupport][support_groups]")
+{
+    // The object leaves the feature off. Only part B - the slab at the larger X - asks for it, the
+    // way a support group writes its values onto its own parts. B's underside must be reclassified
+    // and A's must stay a bridge, and the two must not overlap on the plate: a per-part value that
+    // leaked would show up as one X range inside the other.
+    DynamicPrintConfig config = base_config();
+    const std::string gcode = slice_two_slabs(config, [](ModelObject &object) {
+        ModelVolume *part_b = object.volumes.back();
+        part_b->config.set_key_value("over_support_surfaces", new ConfigOptionBool(true));
+        part_b->config.set_key_value("over_support_speed",    new ConfigOptionFloat(23.));
+    });
+
+    const std::vector<std::string> types = feature_types(gcode);
+    REQUIRE(std::find(types.begin(), types.end(), kOverSupportRole) != types.end());
+    REQUIRE(std::find(types.begin(), types.end(), kBridgeRole) != types.end());
+
+    const BlockStats over   = stats_for_type(gcode, kOverSupportRole);
+    const BlockStats bridge = stats_for_type(gcode, kBridgeRole);
+    REQUIRE(over.segments > 0);
+    REQUIRE(bridge.segments > 0);
+    // Part B is the one at the larger X, so its over-support surface starts where the bridges end.
+    CHECK(over.x_min > bridge.x_max);
+
+    // ...and the speed came from the PART too: 23 mm/s is 1380 mm/min, and nothing else on this
+    // plate is printed at it.
+    for (double f : over.feedrates)
+        CHECK_THAT(f, WithinAbs(23. * 60., 1e-6));
+}
+
+TEST_CASE("over_support: a part-level flow ratio scales that part's extrusion",
+          "[OverSupport][support_groups]")
+{
+    // The object leaves the feature off and part B turns it on, which is how a support group uses
+    // these keys: the group writes them onto its own parts. B's flow ratio then has to reach the
+    // G-code - the same run with the ratio doubled must extrude about twice as much per millimetre
+    // over that part, and part A must still be printing bridges.
+    //
+    // NOTE the case this does NOT assert, and why. With the OBJECT-wide switch on, both parts
+    // produce over-support surfaces and both come out with the OBJECT's flow and feedrate, even
+    // though printing_region(1).config() carries the part's values and the two regions are not
+    // merged for perimeter generation (both measured directly). That is a limitation of this
+    // stage, recorded in 2e of docs/superpowers/plans/2026-09-02-support-sets-and-groups.md.
+    DynamicPrintConfig config = base_config();
+
+    auto per_mm = [&config](double flow) {
+        const std::string gcode = slice_two_slabs(config, [flow](ModelObject &object) {
+            ModelVolume *part_b = object.volumes.back();
+            part_b->config.set_key_value("over_support_surfaces", new ConfigOptionBool(true));
+            part_b->config.set_key_value("over_support_speed",    new ConfigOptionFloat(20.));
+            part_b->config.set_key_value("over_support_flow",     new ConfigOptionFloat(flow));
+        });
+        const BlockStats over = stats_for_type(gcode, kOverSupportRole);
+        REQUIRE(over.segments > 0);
+        REQUIRE(over.xy_total > 0.);
+        // The neighbour is untouched: it never asked for the feature, so it is still a bridge.
+        const BlockStats bridge = stats_for_type(gcode, kBridgeRole);
+        REQUIRE(bridge.segments > 0);
+        CHECK(over.x_min > bridge.x_max);
+        return over.e_total / over.xy_total;
+    };
+
+    const double one = per_mm(1.0);
+    const double two = per_mm(2.0);
+    CHECK(two > one * 1.7);
+    CHECK(two < one * 2.3);
+}
+
+TEST_CASE("over_support: the keys are region members, so a part gets its own region",
+          "[OverSupport][support_groups]")
+{
+    // The mechanism, asserted directly: a volume carrying one of the three keys is enough to give
+    // that volume a PrintRegion of its own, which is what makes GCode::extrude_infill apply the
+    // part's flow and speed rather than the object's.
+    DynamicPrintConfig config = base_config();
+    Slic3r::Print print;
+    Slic3r::Model model;
+    add_leg_and_two_slabs(model, [](ModelObject &object) {
+        object.volumes.back()->config.set_key_value("over_support_flow", new ConfigOptionFloat(1.5));
+    });
+    print.auto_assign_extruders(model.objects.front());
+    print.apply(model, config);
+    print.set_status_silent();
+    print.process();
+
+    REQUIRE(! print.objects().empty());
+    const PrintObject &object = *print.objects().front();
+    REQUIRE(object.num_printing_regions() >= 2);
+    bool found = false;
+    for (size_t i = 0; i < object.num_printing_regions(); ++ i)
+        if (std::abs(object.printing_region(i).config().over_support_flow.value - 1.5) < 1e-9)
+            found = true;
+    CHECK(found);
 }

@@ -568,6 +568,17 @@ public:
     // so the user is told rather than left wondering. Organic trees and normal supports do honour
     // it, and never raise the notice.
     bool                        has_support_group_interface_layer_override() const;
+    // Ultra (support groups, Stage 5): the name of the group that makes the WHOLE object soluble
+    // through the rule of plan 3.6, or "" when no group does (and "" when the user asked for a
+    // zero gap themselves - there is nothing to tell them then).
+    std::string                 support_group_soluble_name() const;
+    // Ultra (support groups, Stage 5 / R3.4): the 0-based interface extruders a group pins that
+    // sit on a nozzle of a different diameter than the object's support interface. Their
+    // interface is extruded at a different width, which need not tile with the object's.
+    std::vector<unsigned int>   support_group_interface_extruders_other_nozzle() const;
+    // Ultra (support groups, Stage 5): the 1-based interface filament slots some group asks for
+    // that this printer does not have. Sorted and unique; empty on every well-formed project.
+    std::vector<int>            support_group_unresolvable_interface_filaments() const;
 
     // Ultra (support groups, plan Stage 3 3.1): slice an explicit set of volumes at this object's
     // layer Zs and union them per layer. This is the body slice_support_volumes() always had; that
@@ -592,7 +603,9 @@ public:
     // docs/superpowers/specs/2026-09-05-over-support-surfaces.md
     struct OverSupportSettings
     {
-        // over_support_surfaces && has_support() && support_top_z_distance > 0
+        // any_region_over_support() && has_support() && support_top_z_distance > 0. Stage 5 made
+        // over_support_surfaces a PrintRegionConfig key, so the switch itself is read per PART by
+        // the two consumers; what this struct carries is only the object-wide half.
         bool                  on         = false;
         // An auto support type that will actually carry the overhangs it detects.
         bool                  is_auto    = false;
@@ -605,6 +618,9 @@ public:
         std::vector<Polygons> blockers;
     };
     OverSupportSettings         over_support_settings() const;
+    // Stage 5: over_support_surfaces lives on PrintRegionConfig, so the object-wide question
+    // "does any part of this object ask for the feature" needs the regions, not m_config.
+    bool                        any_region_over_support() const;
     // Region of the plane that has support material under it, for the layer with this Layer::id()
     // (which starts at raft_layers(), not at 0). Returns nullptr when the feature stands down -
     // which is also every build with the switch off, so the perimeter generator's original code

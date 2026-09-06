@@ -117,8 +117,13 @@ public:
     // PrintObject::remove_bridges_from_contacts; 0 = the generators bridge nothing.
     coord_t                                         over_support_max_bridge_length = 0;
 
+    // Stage 5: over_support_surfaces is a PrintRegionConfig key, so the switch is this REGION's -
+    // i.e. this part's. over_support_below is the object-wide reconstruction of "there is support
+    // under here" and is built as soon as any part asks; a part that did not ask takes the
+    // generators' original code path verbatim, exactly as every build with the feature off does.
     bool over_support_active() const
-        { return over_support_below != nullptr && ! over_support_below->empty() && lower_slices != nullptr; }
+        { return over_support_below != nullptr && ! over_support_below->empty() && lower_slices != nullptr &&
+                 config != nullptr && config->over_support_surfaces.value; }
     // The part of the over-support region that is usable for `overhangs`: the region minus the
     // straight, both-ends-anchored, short-enough segments the support generators refuse to carry.
     Polygons over_support_region(const Polylines &overhangs, const BoundingBox &bbox) const;

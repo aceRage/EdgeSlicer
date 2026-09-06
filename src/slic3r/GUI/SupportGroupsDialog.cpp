@@ -240,6 +240,11 @@ void SupportGroupsDialog::build_ui()
     add_button(&m_btn_select, _L("Select parts"),
                _L("Select this group's parts in the object list"),
                ButtonStyle::Regular, &SupportGroupsDialog::on_select_parts);
+    m_notices = new wxStaticText(this, wxID_ANY, wxEmptyString);
+    m_notices->SetFont(Label::Body_14);
+    m_notices->SetForegroundColour(wxColour(0xED, 0x6B, 0x21)); // the fork's warning orange
+    main->Add(m_notices, 0, wxEXPAND | wxLEFT | wxRIGHT, em / 2);
+
     buttons->AddStretchSpacer();
     Button* close = new Button(this, _L("Close"));
     close->SetStyle(ButtonStyle::Regular, ButtonType::Compact);
@@ -339,8 +344,81 @@ void SupportGroupsDialog::reload()
     m_hint->SetLabel(format_wxstr(_L("Support groups of \"%1%\". A group's values live on its parts, "
                                      "so the project keeps them; the name is only a label."),
                                   from_u8(mo->name)));
+    if (m_notices != nullptr) {
+        wxString text;
+        for (const wxString &line : this->notices())
+            text += (text.empty() ? wxString() : wxString("\n")) + line;
+        m_notices->SetLabel(text);
+        m_notices->Show(! text.empty());
+    }
     update_buttons();
     Layout();
+}
+
+// Ultra (support groups, Stage 5): everything a group can be told about itself from the MODEL
+// alone. The three that need the sliced object - the soluble rule as it actually landed, the
+// dual-nozzle interface flow and an unresolvable filament as the generator saw it - are slicing
+// warnings raised from PrintObject::generate_support_material(); these are the same facts said
+// earlier, where the user is making the decision.
+std::vector<wxString> SupportGroupsDialog::notices() const
+{
+    std::vector<wxString> out;
+    ModelObject *mo = object();
+    if (mo == nullptr || m_rows.empty())
+        return out;
+
+    DynamicPrintConfig full;
+    if (wxGetApp().preset_bundle != nullptr) {
+        full = wxGetApp().preset_bundle->prints.get_edited_preset().config;
+        full.apply(mo->config.get(), true);
+    }
+    auto object_int = [&full](const char *key, int dflt) {
+        const ConfigOption *opt = full.option(key);
+        return opt == nullptr ? dflt : opt->getInt();
+    };
+    // support_top_z_distance is a coFloat: getInt() throws on it.
+    auto object_float = [&full](const char *key, double dflt) {
+        const ConfigOption *opt = full.option(key);
+        return opt == nullptr ? dflt : opt->getFloat();
+    };
+    const std::string support_type  = full.option("support_type")  != nullptr ? full.option("support_type")->serialize()  : std::string();
+    const std::string support_style = full.option("support_style") != nullptr ? full.option("support_style")->serialize() : std::string();
+    const bool tree = support_type == "tree(auto)" || support_type == "tree(manual)";
+    // The style resolution SupportParameters performs: a tree is built by the CLASSIC generator
+    // only when it explicitly asks for one of the three classic styles.
+    const bool classic_tree = tree && (support_style == "tree_slim" || support_style == "tree_strong" ||
+                                       support_style == "tree_hybrid");
+    const int  num_filaments = wxGetApp().preset_bundle != nullptr ?
+        int(wxGetApp().preset_bundle->filament_presets.size()) : 0;
+
+    bool said_classic_tree = false;
+    for (size_t i = 1; i < m_rows.size(); ++ i) {
+        const Row &row = m_rows[i];
+        const wxString name = from_u8(row.name);
+        if (row.volumes.empty())
+            out.push_back(format_wxstr(_L("Group \"%1%\" has no parts, so it changes nothing. "
+                                          "Select parts in the object list and press New, or delete it."), name));
+        if (! row.has_set && ! row.name.empty())
+            out.push_back(format_wxstr(_L("Group \"%1%\" references a support set that is not on this machine. "
+                                          "Its values still apply - they live on the parts."), name));
+        if (const ConfigOption *opt = row.values.option("support_top_z_distance");
+            opt != nullptr && opt->getFloat() <= 0. && object_float("support_top_z_distance", 0.) > 0.)
+            out.push_back(format_wxstr(_L("Group \"%1%\" asks for a soluble interface, so this whole object "
+                                          "uses a 0 mm top Z distance."), name));
+        if (const ConfigOption *opt = row.values.option("support_interface_filament");
+            opt != nullptr && num_filaments > 0 && opt->getInt() > num_filaments)
+            out.push_back(format_wxstr(_L("Group \"%1%\" asks for interface filament %2%, which is not loaded "
+                                          "on this printer."), name, opt->getInt()));
+        if (classic_tree && ! said_classic_tree) {
+            const ConfigOption *top = row.values.option("support_interface_top_layers");
+            if (top != nullptr && top->getInt() != object_int("support_interface_top_layers", top->getInt())) {
+                out.push_back(_L("Interface layer count is object-wide for classic tree supports; use organic "
+                                 "trees or normal supports for per-group interface layers."));
+                said_classic_tree = true;
+            }
+        }
+    }
+    return out;
 }
 
 void SupportGroupsDialog::update_buttons()
