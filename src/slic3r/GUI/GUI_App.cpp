@@ -424,6 +424,7 @@ public:
         // draw logo and constant info text
         Decorate(m_main_bitmap);
         wxGetApp().UpdateFrameDarkUI(this);
+        apply_rounded_shape();
     }
 
     void SetText(const wxString& text)
@@ -462,15 +463,16 @@ public:
         int width  = bmp.GetWidth();
         int height = bmp.GetHeight();
 
-        const int designSize = 480;
-        auto scaleX = [width, designSize](int value) { return value * width / designSize; };
-        auto scaleY = [height, designSize](int value) { return value * height / designSize; };
+        // Design space 420 x 300 (was a 480 square with the artwork floating in the middle, 2026-09-06).
+        const int designW = 420, designH = 300;
+        auto scaleX = [width, designW](int value) { return value * width / designW; };
+        auto scaleY = [height, designH](int value) { return value * height / designH; };
 
         // Logo icon: 140x140, centered horizontally, y=80
         BitmapCache bmpCache;
-        int logoSize = scaleX(140);
-        int logoX    = scaleX(170);
-        int logoY    = scaleY(80);
+        int logoSize = scaleX(120);
+        int logoX    = scaleX(150);
+        int logoY    = scaleY(36);
         wxBitmap* logoBmp = bmpCache.load_svg("splash_app_icon", logoSize, logoSize);
         if (logoBmp != nullptr)
             memDc.DrawBitmap(*logoBmp, logoX, logoY, true);
@@ -485,7 +487,7 @@ public:
         const int      kern      = -scaleX(1); // the wordmark's slightly negative tracking at the seam
         const int      brandW    = edgeExt.GetWidth() + kern + slicerExt.GetWidth();
         const int      brandX    = (width - brandW) / 2;
-        const int      brandY    = scaleY(236);
+        const int      brandY    = scaleY(168);
         memDc.SetTextForeground(wxColour(23, 23, 23));
         memDc.DrawText(wm_edge, brandX, brandY);
         memDc.SetTextForeground(wxColour(0xE0, 0x26, 0x2B));
@@ -498,7 +500,7 @@ public:
         memDc.DrawText(m_constant_text.version, (width - versionExt.GetWidth()) / 2, brandY + edgeExt.GetHeight() + scaleY(4));
 
         // Beta text below brand, centered
-        int betaY = scaleY(279);
+        int betaY = scaleY(236);
         memDc.SetFont(m_constant_text.versionFont);
         memDc.SetTextForeground(wxColour(143, 143, 143));
         wxSize betaExt = memDc.GetTextExtent(m_constant_text.betaText);
@@ -507,13 +509,31 @@ public:
         memDc.DrawLabel(m_constant_text.betaText, betaRect, wxALIGN_CENTER);
 
         // Dynamic text y position (for SetText)
-        m_action_line_y_position = scaleY(384);
+        m_action_line_y_position = scaleY(258);
+    }
+
+    // Round the window's corners: the frame takes the shape of a rounded rectangle cut from a
+    // mask bitmap (white = keep, black = clip), so the splash is a card rather than a square.
+    void apply_rounded_shape()
+    {
+        const int w = m_main_bitmap.GetWidth(), h = m_main_bitmap.GetHeight();
+        if (w <= 0 || h <= 0) return;
+        wxBitmap   mask(w, h);
+        wxMemoryDC dc(mask);
+        dc.SetBackground(*wxBLACK_BRUSH);
+        dc.Clear();
+        dc.SetBrush(*wxWHITE_BRUSH);
+        dc.SetPen(*wxWHITE_PEN);
+        dc.DrawRoundedRectangle(0, 0, w, h, std::max(8, w / 20));
+        dc.SelectObject(wxNullBitmap);
+        wxRegion region(mask, *wxBLACK);
+        if (region.IsOk()) SetShape(region);
     }
 
     static wxBitmap MakeBitmap()
     {
-        int width = FromDIP(480, nullptr);
-        int height = FromDIP(480, nullptr);
+        int width = FromDIP(420, nullptr);
+        int height = FromDIP(300, nullptr);
 
         wxImage image(width, height);
         wxBitmap new_bmp(image);
