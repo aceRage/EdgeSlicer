@@ -489,14 +489,16 @@ void ConfigManipulation::update_print_fff_config(DynamicPrintConfig* config, con
     
     bool have_arachne = config->opt_enum<PerimeterGeneratorType>("wall_generator") == PerimeterGeneratorType::Arachne;
 
-    // Ultra: offset layers has strict prerequisites (Arachne, equal first/layer height,
-    // matching top-surface/outer-wall line widths, no spiral mode).
+    // Ultra: offset layers has strict prerequisites (equal first/layer height, matching
+    // top-surface/outer-wall line widths, no spiral mode). Both wall generators produce it now,
+    // so the wall generator is no longer one of them.
+    // docs/superpowers/specs/2026-09-06-offset-layers-classic.md
     if (!is_plate_config && config->opt_bool("offset_layers") &&
         (std::abs(config->opt_float("initial_layer_print_height") - config->opt_float("layer_height")) > EPSILON ||
          !(*config->option<ConfigOptionFloatOrPercent>("top_surface_line_width") == *config->option<ConfigOptionFloatOrPercent>("outer_wall_line_width")) ||
-         !have_arachne || config->opt_bool("spiral_mode"))) {
+         config->opt_bool("spiral_mode"))) {
         wxString msg_text = _(L("Offset layers is experimental and requires: first layer height equal to layer height, "
-                                "top surface line width equal to outer wall line width, the Arachne wall generator, and spiral mode off."));
+                                "top surface line width equal to outer wall line width, and spiral mode off."));
         msg_text += "\n\n" + _(L("Change these settings automatically?\n"
                                  "Yes - Adjust the settings and enable offset layers\n"
                                  "No  - Keep the settings and disable offset layers"));
@@ -507,14 +509,12 @@ void ConfigManipulation::update_print_fff_config(DynamicPrintConfig* config, con
         if (answer == wxID_YES) {
             new_conf.set_key_value("initial_layer_print_height", config->option<ConfigOptionFloat>("layer_height")->clone());
             new_conf.set_key_value("top_surface_line_width", config->option<ConfigOptionFloatOrPercent>("outer_wall_line_width")->clone());
-            new_conf.set_key_value("wall_generator", new ConfigOptionEnum<PerimeterGeneratorType>(PerimeterGeneratorType::Arachne));
             new_conf.set_key_value("spiral_mode", new ConfigOptionBool(false));
         } else {
             new_conf.set_key_value("offset_layers", new ConfigOptionBool(false));
         }
         apply(config, &new_conf);
         is_msg_dlg_already_exist = false;
-        have_arachne = config->opt_enum<PerimeterGeneratorType>("wall_generator") == PerimeterGeneratorType::Arachne;
     }
 
     if (config->opt_enum<FuzzySkinMode>("fuzzy_skin_mode") != FuzzySkinMode::Displacement && !have_arachne) {
