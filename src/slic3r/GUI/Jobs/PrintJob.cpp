@@ -22,6 +22,9 @@ static auto file_over_size_str = _u8L("The print file exceeds the maximum allowa
 static auto print_canceled_str    = _u8L("Task canceled.");
 static auto send_print_failed_str = _u8L("Failed to send the print job. Please try again.");
 static auto upload_ftp_failed_str = _u8L("Failed to upload file to ftp. Please try again.");
+// Ultra: the file reached the printer but the printer never started it - the LAN start command
+// was lost. Say so, instead of reporting a successful send the printer knows nothing about.
+static auto lan_not_started_str   = _u8L("The file was uploaded but the printer did not start the job. Check that the printer is reachable and idle, then send again.");
 
 static auto     desc_network_error          = _u8L("Check the current status of the bambu server by clicking on the link above.");
 static auto     desc_file_too_large         = _u8L("The size of the print file is too large. Please adjust the file size and try again.");
@@ -444,10 +447,20 @@ void PrintJob::process(Ctl &ctl)
 
     
     DeviceManager* dev = wxGetApp().getDeviceManager();
-    MachineObject* obj = dev->get_selected_machine();
+    // Ultra: watch the printer this job is addressed to, not whatever the device manager
+    // happens to have selected. The two are meant to agree and now do, but the job knows its
+    // own target and nothing downstream should depend on that invariant holding - otherwise a
+    // send gets "confirmed" against a machine that was never sent anything.
+    MachineObject* obj = dev->get_my_machine(m_dev_id);
+    if (!obj) obj = dev->get_selected_machine();
 
     auto wait_fn = [this, curr_percent, &obj](int state, std::string job_info) {
             BOOST_LOG_TRIVIAL(info) << "print_job: get_job_info = " << job_info;
+
+            if (!obj) {
+                BOOST_LOG_TRIVIAL(info) << "print_job: no machine object for " << m_dev_id;
+                return true;
+            }
 
             if (!obj->is_support_wait_sending_finish) {
                 return true;
@@ -491,6 +504,37 @@ void PrintJob::process(Ctl &ctl)
             }
             BOOST_LOG_TRIVIAL(info) << "print_job: obj is null";
             return true;
+    };
+
+    // Ultra: start_local_print() is the only send path with no wait callback, so the plugin
+    // reports success the moment it has handed the "project_file" command to its MQTT session
+    // - even when that session belongs to another printer or has just died, in which case the
+    // QoS 0 publish is dropped on the floor. The 3mf then sits on the printer's storage, the
+    // printer never starts, and the slicer still says "Successfully sent" (see the H2C:
+    // "print_job: send ok" followed 40 ms later by send_message_to_printer ret=-1 for the same
+    // dev_id). Watch the printer's own report and only call the LAN send finished once it has
+    // actually taken the job.
+    // Only a printer that was reporting to us before the send can be judged this way: if we
+    // never had live status from it, "no job seen" says nothing, so keep the old result.
+    auto lan_started_fn = [this, &ctl, &obj](const std::string& job_id_before, bool was_printing_before,
+                                             bool was_reporting_before) {
+            if (!obj || !was_reporting_before) return true;
+            for (int waited = 0; waited < PRINT_JOB_SENDING_TIMEOUT; waited++) {
+                if (ctl.was_canceled()) return true;
+                if (!obj->job_id_.empty() && obj->job_id_ != job_id_before) {
+                    BOOST_LOG_TRIVIAL(info) << "print_job: lan send confirmed, job_id = " << obj->job_id_;
+                    return true;
+                }
+                if (!was_printing_before && obj->is_in_printing_status(obj->print_status)) {
+                    BOOST_LOG_TRIVIAL(info) << "print_job: lan send confirmed, print_status = " << obj->print_status;
+                    return true;
+                }
+                boost::this_thread::sleep_for(boost::chrono::milliseconds(1000));
+            }
+            BOOST_LOG_TRIVIAL(error) << "print_job: lan send not confirmed by " << m_dev_id
+                                     << ", print_status = " << obj->print_status
+                                     << ", job_id = " << obj->job_id_;
+            return false;
     };
 
 
@@ -564,7 +608,13 @@ void PrintJob::process(Ctl &ctl)
     } else {
         if (this->has_sdcard) {
             ctl.update_status(curr_percent, _u8L("Sending print job over LAN"));
+            const std::string job_id_before       = obj ? obj->job_id_ : std::string();
+            const bool        was_printing_before = obj && obj->is_in_printing_status(obj->print_status);
+            const bool        was_reporting       = obj && obj->is_connected();
             result = m_agent->start_local_print(params, update_fn, cancel_fn);
+            if (result == 0 && !ctl.was_canceled()
+                && !lan_started_fn(job_id_before, was_printing_before, was_reporting))
+                result = BAMBU_NETWORK_ERR_PRINT_LP_PUBLISH_MSG_FAILED;
         } else {
             ctl.update_status(curr_percent, _u8L("An SD card needs to be inserted before printing via LAN."));
             return;
@@ -584,6 +634,8 @@ void PrintJob::process(Ctl &ctl)
             msg_text = timeout_to_upload_str;
         } else if (result == BAMBU_NETWORK_ERR_PRINT_LP_UPLOAD_FTP_FAILED || result == BAMBU_NETWORK_ERR_PRINT_SG_UPLOAD_FTP_FAILED) {
             msg_text = upload_ftp_failed_str;
+        } else if (result == BAMBU_NETWORK_ERR_PRINT_LP_PUBLISH_MSG_FAILED) {
+            msg_text = lan_not_started_str;
         } else if (result == BAMBU_NETWORK_ERR_CANCELED) {
             msg_text = print_canceled_str;
             ctl.update_status(0, msg_text);

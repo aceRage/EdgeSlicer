@@ -990,17 +990,26 @@ void SendToPrinterDialog::on_selection_changed(wxCommandEvent &event)
         }
     }
 
-    if (obj && !obj->get_lan_mode_connection_state()) {
+    if (!obj) {
+        BOOST_LOG_TRIVIAL(error) << "on_selection_changed dev_id not found, selection = " << selection;
+        return;
+    }
+
+    const bool connect_in_flight = obj->get_lan_mode_connection_state();
+    if (!connect_in_flight) {
         obj->command_get_version();
         obj->command_request_push_all();
-        if (!dev->get_selected_machine()) {
-            dev->set_selected_machine(m_printer_last_select, true);
-        }else if (dev->get_selected_machine()->dev_id != m_printer_last_select) {
-            dev->set_selected_machine(m_printer_last_select, true);
-        }
     }
-    else {
-        BOOST_LOG_TRIVIAL(error) << "on_selection_changed dev_id not found";
+
+    // Ultra: point the device manager at the printer the user just picked even while a LAN
+    // connect is still in flight - see SelectMachineDialog::on_selection_changed for why the
+    // old early return validated and addressed the wrong machine.
+    MachineObject* selected_before = dev->get_selected_machine();
+    if (!selected_before || selected_before->dev_id != m_printer_last_select)
+        dev->set_selected_machine(m_printer_last_select, true);
+
+    if (connect_in_flight) {
+        BOOST_LOG_TRIVIAL(info) << "on_selection_changed: lan connect still in flight for " << m_printer_last_select;
         return;
     }
 
