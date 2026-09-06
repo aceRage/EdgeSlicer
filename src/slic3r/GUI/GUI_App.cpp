@@ -475,32 +475,27 @@ public:
         if (logoBmp != nullptr)
             memDc.DrawBitmap(*logoBmp, logoX, logoY, true);
 
-        // Brand name: "EdgeSlicer"
+        // The wordmark, as the branding has it: bold, "Edge" in ink and "Slicer" in the katana
+        // red, tight, centred under the icon; the version on its own line beneath (2026-09-06).
         memDc.SetFont(m_constant_text.titleFont);
+        const wxString wm_edge   = "Edge";
+        const wxString wm_slicer = "Slicer";
+        const wxSize   edgeExt   = memDc.GetTextExtent(wm_edge);
+        const wxSize   slicerExt = memDc.GetTextExtent(wm_slicer);
+        const int      kern      = -scaleX(1); // the wordmark's slightly negative tracking at the seam
+        const int      brandW    = edgeExt.GetWidth() + kern + slicerExt.GetWidth();
+        const int      brandX    = (width - brandW) / 2;
+        const int      brandY    = scaleY(236);
         memDc.SetTextForeground(wxColour(23, 23, 23));
-        wxSize brandExt = memDc.GetTextExtent(m_constant_text.title);
+        memDc.DrawText(wm_edge, brandX, brandY);
+        memDc.SetTextForeground(wxColour(0xE0, 0x26, 0x2B));
+        memDc.DrawText(wm_slicer, brandX + edgeExt.GetWidth() + kern, brandY);
 
-        // Version tag: "V" + current app version
+        // Version tag: "V" + current app version, centred on its own line under the wordmark
         memDc.SetFont(m_constant_text.versionFont);
         memDc.SetTextForeground(wxColour(143, 143, 143));
-        wxSize versionExt = memDc.GetTextExtent(m_constant_text.version);
-
-        // Center brand + gap + tag as a group.
-        int gap    = scaleX(10);
-        int totalW = brandExt.GetWidth() + gap + versionExt.GetWidth();
-        int startX = (width - totalW) / 2;
-        int brandY = scaleY(241);
-        int tagY   = scaleY(251);
-
-        memDc.SetFont(m_constant_text.titleFont);
-        memDc.SetTextForeground(wxColour(23, 23, 23));
-        memDc.DrawText(m_constant_text.title, startX, brandY);
-
-        memDc.SetFont(m_constant_text.versionFont);
-        memDc.SetTextForeground(wxColour(143, 143, 143));
-        memDc.DrawText(m_constant_text.version,
-                       startX + brandExt.GetWidth() + gap,
-                       tagY);
+        const wxSize versionExt = memDc.GetTextExtent(m_constant_text.version);
+        memDc.DrawText(m_constant_text.version, (width - versionExt.GetWidth()) / 2, brandY + edgeExt.GetHeight() + scaleY(4));
 
         // Beta text below brand, centered
         int betaY = scaleY(279);
@@ -599,7 +594,7 @@ private:
             version  = std::string("V") + Snapmaker_VERSION;
             betaText = wxEmptyString; // the title already says EdgeSlicer; a second line saying so again was redundant (2026-09-05)
 
-            titleFont   = Label::sysFont(20, false);
+            titleFont   = Label::sysFont(22, true); // bold, like the wordmark
             versionFont = Label::Body_13;
             loadingFont = Label::Body_11;
         }
