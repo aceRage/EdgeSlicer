@@ -1410,15 +1410,21 @@ correct answer rather than a gap. Its condition is unit-tested against a two-noz
    `libslic3r.lib`), so `"over_support: nothing is reclassified when the generator will not support
    the bridge"` was still being run against the previous build. **Worth telling whoever owns that
    branch.**
-4. **The per-part over-support flow and speed act when the PART asks for the feature, and not when
-   the OBJECT does.** Measured: with the object-wide switch on, two parts both producing
-   over-support surfaces come out with the object's flow ratio and feedrate, even though
-   `printing_region(1).config()` really does carry the part's values and the two regions are not
-   merged for perimeter generation (both checked directly). With the object's switch off and the
-   part's on — which is how a support group uses these keys, because the group writes its values
-   onto its own parts — the part's flow and speed do reach the G-code, and that is what the unit
-   test and the `part_over_support` corpus case assert. The residual is recorded in the spec and is
-   worth a separate look; it is a G-code-attribution question, not a config one.
+4. **The per-part over-support flow and speed acted when the PART asked for the feature, and not
+   when the OBJECT did — fixed on the follow-up commit.** Measured first: with the object-wide
+   switch on, two parts both producing over-support surfaces came out with the object's flow ratio
+   and feedrate, even though `printing_region(1).config()` really did carry the part's values and
+   the two regions were not merged for perimeter generation (both checked directly). With the
+   object's switch off and the part's on — which is how a support group uses these keys, because
+   the group writes its values onto its own parts — the part's flow and speed did reach the G-code,
+   and that is what the unit test and the `part_over_support` corpus case assert. The cause was
+   not `GCode::extrude_infill`'s attribution (its `by_region` index is `print_region_id()`) but
+   the fill merge in `Layer::make_fills`: fill surfaces of every region are grouped by
+   `SurfaceFillParams`, the two keys were not part of it, so two undersides that looked the same to
+   the fill generator became ONE fill attributed to the first region. `over_support_flow` and the
+   effective `over_support_speed` are now `SurfaceFillParams` members (spec §6), and a fourth
+   `[OverSupport]` case asserts the both-on fixture by X window: part A at the object's 20 mm/s,
+   part B at its own 37 mm/s with twice the extrusion per millimetre.
 5. **The R3.1 seam screenshot was not taken, and the preview-colour check was done by measurement
    instead.** The intended route was headless: `RemoteAccess`'s `/api/plates/<n>/preview.png`
    renders the G-code viewer without showing a window, which is exactly what such a screenshot
@@ -1469,7 +1475,9 @@ correct answer rather than a gap. Its condition is unit-tested against a two-noz
   a BASE role; an ironing pass over the roof top is not.
 - **The classic-tree ironing switch** — see deviation 1. This is the one decision in this stage that
   changes an existing print without a group being involved.
-- **The over-support both-on limit** — see deviation 4.
+- **The over-support both-on fix** — see deviation 4. A fill-grouping key, so it can only split
+  fills that were merged before, and only when a region carries an over-support surface: off mode
+  and the single-part case cannot move.
 
 ### Manual checklist
 
@@ -1506,7 +1514,6 @@ over `build/Snapmaker_Orca` while the user's slicer is running.
 ### What is left
 
 - The R3.1 seam screenshot (checklist item 1) and the preview-colour eyeball (item 6).
-- The over-support both-on attribution (deviation 4).
 - The `test_over_support_surfaces.cpp` codegen artefact (deviation 7).
 - `feat/ultra-preferences` @ `ef20d80316` needs deviation 3's correction, or its own re-measurement.
 

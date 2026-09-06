@@ -269,6 +269,14 @@ struct SurfaceFillParams
 	float			sparse_infill_speed = 0;
 	float			top_surface_speed = 0;
 	float			solid_infill_speed = 0;
+    // Ultra (over-support surfaces): the flow ratio and the speed an erBottomSurfaceOverSupport
+    // fill will be extruded with. They are region keys, and two regions whose surfaces would
+    // otherwise be filled identically are MERGED into one fill that is attributed to the first
+    // region - GCode::extrude_infill then applies that one region's config to the lot. Naming
+    // them here keeps two parts with their own values apart, the way solid_infill_speed already
+    // does for internal solid infill. Zero for every other role, so nothing else changes.
+    float			over_support_flow  = 0;
+    float			over_support_speed = 0;
 
     // Params for lattice infill angles
     float lateral_lattice_angle_1 = 0.f;
@@ -307,6 +315,8 @@ struct SurfaceFillParams
 		RETURN_COMPARE_NON_EQUAL(sparse_infill_speed);
 		RETURN_COMPARE_NON_EQUAL(top_surface_speed);
 		RETURN_COMPARE_NON_EQUAL(solid_infill_speed);
+		RETURN_COMPARE_NON_EQUAL(over_support_flow);
+		RETURN_COMPARE_NON_EQUAL(over_support_speed);
         RETURN_COMPARE_NON_EQUAL(lateral_lattice_angle_1);
 		RETURN_COMPARE_NON_EQUAL(lateral_lattice_angle_2);
 		RETURN_COMPARE_NON_EQUAL(symmetric_infill_y_axis);
@@ -335,6 +345,8 @@ struct SurfaceFillParams
 				this->sparse_infill_speed	== rhs.sparse_infill_speed &&
 				this->top_surface_speed		== rhs.top_surface_speed &&
 				this->solid_infill_speed	== rhs.solid_infill_speed &&
+				this->over_support_flow		== rhs.over_support_flow &&
+				this->over_support_speed	== rhs.over_support_speed &&
                 this->lateral_lattice_angle_1		== rhs.lateral_lattice_angle_1 &&
 				this->lateral_lattice_angle_2	    == rhs.lateral_lattice_angle_2 &&
 				this->infill_lock_depth      ==  rhs.infill_lock_depth &&
@@ -950,6 +962,15 @@ std::vector<SurfaceFill> group_fills(const Layer &layer, LockRegionParam &lock_p
                         params.top_surface_speed = region_config.top_surface_speed;
                     } else if (params.extrusion_role == erSolidInfill)
                         params.solid_infill_speed = region_config.internal_solid_infill_speed;
+                    else if (params.extrusion_role == erBottomSurfaceOverSupport) {
+                        // Ultra (over-support surfaces): the EFFECTIVE speed, so that a speed of 0
+                        // ("match the outer wall") still tells two parts with different outer wall
+                        // speeds apart. GCode::_extrude resolves the same way.
+                        params.over_support_flow  = float(region_config.over_support_flow.value);
+                        params.over_support_speed = float(region_config.over_support_speed.value > 0. ?
+                                                          region_config.over_support_speed.value :
+                                                          region_config.get_abs_value("outer_wall_speed"));
+                    }
                 }
 				// Calculate flow spacing for infill pattern generation.
 		        if (surface.is_solid() || is_bridge) {

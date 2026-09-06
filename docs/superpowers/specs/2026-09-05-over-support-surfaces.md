@@ -179,12 +179,25 @@ Two consequences worth naming:
   values are otherwise merged for perimeter generation and the merged group's extrusions are
   assigned to the first region — which is exactly why `outer_wall_speed` and
   `scarf_joint_flow_ratio` were already on that list.
+- `SurfaceFillParams` (`src/libslic3r/Fill/Fill.cpp`) names `over_support_flow` and the *effective*
+  `over_support_speed` (a 0 is resolved to the region's `outer_wall_speed`, the way `GCode::_extrude`
+  resolves it). The fills have the same merge the perimeters have: `Layer::make_fills` groups every
+  region's fill surfaces by those params, and a group's extrusions land in the FIRST region's
+  `fills`, which is the region whose config `GCode::extrude_infill` then applies. Without these two
+  members, two parts whose undersides looked identical to the fill generator were one fill with one
+  region's flow and speed. `solid_infill_speed` and `top_surface_speed` are on the list for the same
+  reason.
 
-**The limit, measured.** When the OBJECT-wide switch is on and two parts therefore both produce
-over-support surfaces, both come out with the object's flow ratio and feedrate, even though each
-part's `PrintRegion` really does carry its own values (checked directly) and the two regions are not
-merged. A part that turns the feature on for itself — which is how a support group uses these keys —
-does get its own flow and speed. See 2e of the support-sets plan.
+**The both-on case, measured before and after.** When the OBJECT-wide switch is on and two parts
+therefore both produce over-support surfaces, the Stage 5 build printed both at the object's flow
+ratio and feedrate although each part's `PrintRegion` carried its own values (checked directly) and
+the two regions were not merged for perimeter generation. The cause was the fill merge above, not
+the config and not `extrude_infill`'s attribution — the `by_region` index there is
+`print_region_id()` and was right all along. With the two keys in `SurfaceFillParams` the two-slab
+fixture prints part A at the object's 20 mm/s and part B at its own 37 mm/s with twice the
+extrusion per millimetre (`"over_support: with the OBJECT switch on a part still keeps its own flow
+and speed"`). A part that turns the feature on for itself — how a support group uses these keys —
+worked before and still does.
 
 ## 7. Gate
 

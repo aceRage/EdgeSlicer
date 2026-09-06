@@ -537,13 +537,8 @@ TEST_CASE("over_support: a part-level flow ratio scales that part's extrusion",
     // The object leaves the feature off and part B turns it on, which is how a support group uses
     // these keys: the group writes them onto its own parts. B's flow ratio then has to reach the
     // G-code - the same run with the ratio doubled must extrude about twice as much per millimetre
-    // over that part, and part A must still be printing bridges.
-    //
-    // NOTE the case this does NOT assert, and why. With the OBJECT-wide switch on, both parts
-    // produce over-support surfaces and both come out with the OBJECT's flow and feedrate, even
-    // though printing_region(1).config() carries the part's values and the two regions are not
-    // merged for perimeter generation (both measured directly). That is a limitation of this
-    // stage, recorded in 2e of docs/superpowers/plans/2026-09-02-support-sets-and-groups.md.
+    // over that part, and part A must still be printing bridges. The OBJECT-wide switch on with
+    // both parts producing surfaces is the next case.
     DynamicPrintConfig config = base_config();
 
     auto per_mm = [&config](double flow) {
@@ -569,12 +564,63 @@ TEST_CASE("over_support: a part-level flow ratio scales that part's extrusion",
     CHECK(two < one * 2.3);
 }
 
+TEST_CASE("over_support: with the OBJECT switch on a part still keeps its own flow and speed",
+          "[OverSupport][support_groups]")
+{
+    // The OBJECT turns the feature on, so BOTH slabs produce over-support surfaces, and part B
+    // carries its own speed and flow ratio. Before the fix both slabs came out at the object's F
+    // and the object's extrusion per millimetre although printing_region(1).config() carried B's
+    // values: Layer::make_fills groups fill surfaces across regions by SurfaceFillParams, the two
+    // over-support keys were not part of those params, so the two slabs' identical-looking
+    // surfaces were merged into ONE fill attributed to the first region, and
+    // GCode::extrude_infill applied that region's config to the lot. The keys are in the params
+    // now; this asserts the two slabs really are extruded apart, by X window.
+    DynamicPrintConfig config = base_config();
+    config.set_deserialize_strict({ { "over_support_surfaces", "1" },
+                                    { "over_support_speed",    "20" },
+                                    { "over_support_flow",     "1" } });
+    const std::string gcode = slice_two_slabs(config, [](ModelObject &object) {
+        ModelVolume *part_b = object.volumes.back();
+        part_b->config.set_key_value("over_support_speed", new ConfigOptionFloat(37.));
+        part_b->config.set_key_value("over_support_flow",  new ConfigOptionFloat(2.));
+    });
+
+    // Nothing on this plate is a bridge any more: both undersides are over support.
+    const std::vector<std::string> types = feature_types(gcode);
+    REQUIRE(std::find(types.begin(), types.end(), kOverSupportRole) != types.end());
+    CHECK(std::find(types.begin(), types.end(), kBridgeRole) == types.end());
+
+    // The slabs are 20 mm wide and 40 mm apart in X, so the midpoint of the role's X range falls
+    // in the gap between them whatever the plate offset is.
+    const BlockStats all = stats_for_type(gcode, kOverSupportRole);
+    REQUIRE(all.segments > 0);
+    const double x_split = 0.5 * (all.x_min + all.x_max);
+    const BlockStats a = stats_for_type(gcode, kOverSupportRole, -1e30, x_split);
+    const BlockStats b = stats_for_type(gcode, kOverSupportRole, x_split, 1e30);
+    REQUIRE(a.segments > 0);
+    REQUIRE(b.segments > 0);
+    REQUIRE(a.xy_total > 0.);
+    REQUIRE(b.xy_total > 0.);
+
+    // Part A prints at the OBJECT's 20 mm/s, part B at its OWN 37 mm/s...
+    for (double f : a.feedrates)
+        CHECK_THAT(f, WithinAbs(20. * 60., 1e-6));
+    for (double f : b.feedrates)
+        CHECK_THAT(f, WithinAbs(37. * 60., 1e-6));
+    // ...and B's flow ratio of 2 doubles its extrusion per millimetre against A's.
+    const double per_mm_a = a.e_total / a.xy_total;
+    const double per_mm_b = b.e_total / b.xy_total;
+    CHECK(per_mm_b > per_mm_a * 1.7);
+    CHECK(per_mm_b < per_mm_a * 2.3);
+}
+
 TEST_CASE("over_support: the keys are region members, so a part gets its own region",
           "[OverSupport][support_groups]")
 {
     // The mechanism, asserted directly: a volume carrying one of the three keys is enough to give
-    // that volume a PrintRegion of its own, which is what makes GCode::extrude_infill apply the
-    // part's flow and speed rather than the object's.
+    // that volume a PrintRegion of its own, which - together with the two keys being part of
+    // SurfaceFillParams, so its fills are not merged into a neighbour's - is what makes
+    // GCode::extrude_infill apply the part's flow and speed rather than the object's.
     DynamicPrintConfig config = base_config();
     Slic3r::Print print;
     Slic3r::Model model;
