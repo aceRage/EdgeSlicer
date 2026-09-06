@@ -55,6 +55,22 @@ using Slic3r::GUI::Config::SnapshotDB;
 // FIXME: Incompat bundle resolution doesn't deal with inherited user presets
 
 namespace Slic3r {
+
+// The profile server states min/max supported PC versions with three components ("2.3.6"),
+// while Snapmaker_VERSION carries a fourth ("2.3.6.5") that Semver folds into the patch number
+// (605 > 6), which made every 2.3.6.x build look newer than the server's maximum and silently
+// switched profile updates off (2026-09-06). Compare on the first three components only.
+static std::string ota_pc_version()
+{
+    std::string v = Snapmaker_VERSION;
+    int dots = 0;
+    for (size_t i = 0; i < v.size(); ++i)
+        if (v[i] == '.' && ++dots == 3)
+            return v.substr(0, i);
+    return v;
+}
+
+
 namespace {
 
 // While profile `MsgUpdateConfig` is shown, Flutter `load_flutter_web` skips its own `MsgUpdateConfig` (no stacked modals).
@@ -1037,7 +1053,7 @@ void PresetUpdater::priv::sync_update_flutter_resource(bool isAuto_check)
                 return Semver::invalid();
             };
      
-            Semver      currentSoftVersion = get_version(Snapmaker_VERSION, matcher);
+            Semver      currentSoftVersion = get_version(ota_pc_version(), matcher);
 
             if (fileVersion.empty())
             {
@@ -1178,7 +1194,7 @@ void PresetUpdater::priv::sync_config(bool isAuto_check)
                 return Semver::invalid();
             };
 
-            Semver currentSoftVersion = get_version(Snapmaker_VERSION, matcher);
+            Semver currentSoftVersion = get_version(ota_pc_version(), matcher);
 
             if (fileVersion.empty()) {
                 if (!isAuto_check) {
