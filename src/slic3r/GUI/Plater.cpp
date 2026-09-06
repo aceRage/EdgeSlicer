@@ -13811,13 +13811,27 @@ static std::vector<std::vector<DynamicPrintConfig>> ultra_build_extruder_filamen
         if (nz < 0 || nz >= nozzles) continue;
         int cap = (int) a->trayList.size();
         if (cap > 0) cap_per_noz[nz][cap] += 1;
+        // The external spool shows up as a one-tray "AMS" with a high id; the grouping's
+        // machine-filament builder (FilamentGroupUtils::build_full_machine_filaments) DROPS any
+        // entry without a tray_name and treats "Ext" as the external spool, exactly like the
+        // AMS sync list (Sidebar::build_filament_ams_list). Without the name every loaded
+        // filament was discarded and match mode saw an empty machine - the H2C's "Empty ams
+        // filament in For-Match mode" slice error (2026-09-06).
+        int ams_no = -1;
+        try { ams_no = std::stoi(kv.first); } catch (...) {}
+        const bool is_ext = cap == 1 && ams_no >= 128;
         for (auto& tv : a->trayList) {
             AmsTray* t = tv.second;
-            if (!t || !t->is_tray_info_ready()) continue;
+            if (!t || !t->is_tray_info_ready() || !t->is_exists) continue;
+            std::string tray_name;
+            if (is_ext) tray_name = "Ext";
+            else if (ams_no >= 0 && !tv.first.empty()) tray_name = std::string(1, char('A' + (ams_no % 26))) + std::string(1, char(tv.first.front() - '0' + '1'));
+            else tray_name = "A1";
             DynamicPrintConfig cfg;
             cfg.set_key_value("filament_type",   new ConfigOptionStrings{ t->get_filament_type() });
             cfg.set_key_value("filament_colour", new ConfigOptionStrings{ into_u8(wxColour("#" + t->color).GetAsString(wxC2S_HTML_SYNTAX)) });
             cfg.set_key_value("filament_id",     new ConfigOptionStrings{ t->setting_id });
+            cfg.set_key_value("tray_name",       new ConfigOptionStrings{ tray_name });
             infos[nz].push_back(std::move(cfg));
         }
     }
