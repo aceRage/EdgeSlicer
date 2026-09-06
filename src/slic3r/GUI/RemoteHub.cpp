@@ -2949,7 +2949,7 @@ public:
             one->Append(base + 1, "Hide window")->Enable(!inst.hidden);
             one->AppendSeparator();
             one->Append(base + 2, "Quit this window");
-            subs->AppendSubMenu(one, wxString::Format("%d \xC2\xB7 %s%s%s", n + 1,
+            subs->AppendSubMenu(one, wxString::Format(wxT("%d \u00B7 %s%s%s"), n + 1, // wide literal: a narrow UTF-8 dot came out as "Â·" (2026-09-06)
                 inst.title.empty() ? wxString("Untitled") : wxString::FromUTF8(inst.title), inst.hidden ? wxString("  (hidden)") : wxString(),
                 inst.needs_attention ? wxString("  (needs attention)") : wxString()));
             m_menu_pids.push_back(inst.pid);
