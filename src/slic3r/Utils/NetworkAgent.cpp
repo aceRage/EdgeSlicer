@@ -212,11 +212,12 @@ std::string NetworkAgent::get_libpath_in_current_directory(std::string library_n
     std::string file_name_string(size_needed, 0);
     ::WideCharToMultiByte(0, 0, file_name, wcslen(file_name), file_name_string.data(), size_needed, nullptr, nullptr);
 
-    std::size_t found = file_name_string.find("snapmaker-orca.exe");
-    if (found == (file_name_string.size() - 16)) {
-        lib_path = library_name + ".dll";
-        lib_path = file_name_string.replace(found, 16, lib_path);
-    }
+    // Do not hard-code the executable name here: it has changed twice, and the old
+    // literal was paired with the wrong length (18 chars, compared against 16), so
+    // this never resolved. Take everything up to the last separator instead.
+    std::size_t sep = file_name_string.find_last_of("\\/");
+    if (sep != std::string::npos)
+        lib_path = file_name_string.substr(0, sep + 1) + library_name + ".dll";
 #else
 #endif
     return lib_path;

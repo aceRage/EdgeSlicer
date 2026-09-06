@@ -203,9 +203,9 @@ function build_slicer() {
         mkdir -p Snapmaker_Orca
         cd Snapmaker_Orca
         # remove previously built app
-        rm -rf "./Snapmaker Orca.app"
+        rm -rf "./EdgeSlicer.app"
         # determine source app path (handle both space and underscore names)
-        APP_SOURCE_PATH="../src$BUILD_DIR_CONFIG_SUBDIR/Snapmaker Orca.app"
+        APP_SOURCE_PATH="../src$BUILD_DIR_CONFIG_SUBDIR/EdgeSlicer.app"
         if [ ! -d "$APP_SOURCE_PATH" ]; then
             APP_SOURCE_PATH="../src$BUILD_DIR_CONFIG_SUBDIR/Snapmaker_Orca.app"
         fi
@@ -214,20 +214,20 @@ function build_slicer() {
             exit 1
         fi
         # fully copy newly built app (rename to canonical name with space)
-        cp -pR "$APP_SOURCE_PATH" "./Snapmaker Orca.app"
+        cp -pR "$APP_SOURCE_PATH" "./EdgeSlicer.app"
         # fix resources
-        resources_path=$(readlink "./Snapmaker Orca.app/Contents/Resources")
-        rm "./Snapmaker Orca.app/Contents/Resources"
-        cp -R "$resources_path" "./Snapmaker Orca.app/Contents/Resources"
+        resources_path=$(readlink "./EdgeSlicer.app/Contents/Resources")
+        rm "./EdgeSlicer.app/Contents/Resources"
+        cp -R "$resources_path" "./EdgeSlicer.app/Contents/Resources"
         # delete .DS_Store file
-        find "./Snapmaker Orca.app/" -name '.DS_Store' -delete
+        find "./EdgeSlicer.app/" -name '.DS_Store' -delete
 
         # Copy Sentry crashpad_handler and libsentry.dylib for crash reporting
         CRASHPAD_HANDLER="${DEPS}/usr/local/bin/crashpad_handler"
         LIBSENTRY="${DEPS}/usr/local/lib/libsentry.dylib"
-        APP_MACOS_DIR='./Snapmaker Orca.app/Contents/MacOS'
-        APP_FRAMEWORKS_DIR='./Snapmaker Orca.app/Contents/Frameworks'
-        EXECUTABLE="${APP_MACOS_DIR}/Snapmaker_Orca"
+        APP_MACOS_DIR='./EdgeSlicer.app/Contents/MacOS'
+        APP_FRAMEWORKS_DIR='./EdgeSlicer.app/Contents/Frameworks'
+        EXECUTABLE="${APP_MACOS_DIR}/EdgeSlicer"
         
         if [ -f "${CRASHPAD_HANDLER}" ]; then
             echo "Copying crashpad_handler to app bundle..."
@@ -323,24 +323,24 @@ function build_universal() {
     echo "Creating universal binary..."
     # PROJECT_BUILD_DIR="$PROJECT_DIR/build_Universal"
     mkdir -p "$PROJECT_BUILD_DIR/Snapmaker_Orca"
-    UNIVERSAL_APP="$PROJECT_BUILD_DIR/Snapmaker_Orca/Snapmaker Orca.app"
+    UNIVERSAL_APP="$PROJECT_BUILD_DIR/Snapmaker_Orca/EdgeSlicer.app"
     rm -rf "$UNIVERSAL_APP"
-    cp -R "$PROJECT_DIR/build/arm64/Snapmaker_Orca/Snapmaker Orca.app" "$UNIVERSAL_APP"
+    cp -R "$PROJECT_DIR/build/arm64/Snapmaker_Orca/EdgeSlicer.app" "$UNIVERSAL_APP"
     
     # Get the binary path inside the .app bundle
-    BINARY_PATH="Contents/MacOS/Snapmaker_Orca"
+    BINARY_PATH="Contents/MacOS/EdgeSlicer"
     
     # Create universal binary using lipo
     lipo -create \
-        "$PROJECT_DIR/build/x86_64/Snapmaker_Orca/Snapmaker Orca.app/$BINARY_PATH" \
-        "$PROJECT_DIR/build/arm64/Snapmaker_Orca/Snapmaker Orca.app/$BINARY_PATH" \
+        "$PROJECT_DIR/build/x86_64/Snapmaker_Orca/EdgeSlicer.app/$BINARY_PATH" \
+        "$PROJECT_DIR/build/arm64/Snapmaker_Orca/EdgeSlicer.app/$BINARY_PATH" \
         -output "$UNIVERSAL_APP/$BINARY_PATH"
         
     echo "Universal binary created at $UNIVERSAL_APP"
     
     # Create universal crashpad_handler if both architectures have it
-    CRASHPAD_ARM64="${PROJECT_DIR}/build/arm64/Snapmaker_Orca/Snapmaker Orca.app/Contents/MacOS/crashpad_handler"
-    CRASHPAD_X86="${PROJECT_DIR}/build/x86_64/Snapmaker_Orca/Snapmaker Orca.app/Contents/MacOS/crashpad_handler"
+    CRASHPAD_ARM64="${PROJECT_DIR}/build/arm64/Snapmaker_Orca/EdgeSlicer.app/Contents/MacOS/crashpad_handler"
+    CRASHPAD_X86="${PROJECT_DIR}/build/x86_64/Snapmaker_Orca/EdgeSlicer.app/Contents/MacOS/crashpad_handler"
     CRASHPAD_UNIVERSAL="${UNIVERSAL_APP}/Contents/MacOS/crashpad_handler"
     if [ -f "${CRASHPAD_ARM64}" ] && [ -f "${CRASHPAD_X86}" ]; then
         echo "Creating universal crashpad_handler..."
@@ -352,8 +352,8 @@ function build_universal() {
     fi
     
     # Create universal libsentry.dylib if both architectures have it
-    LIBSENTRY_ARM64="${PROJECT_DIR}/build/arm64/Snapmaker_Orca/Snapmaker Orca.app/Contents/Frameworks/libsentry.dylib"
-    LIBSENTRY_X86="${PROJECT_DIR}/build/x86_64/Snapmaker_Orca/Snapmaker Orca.app/Contents/Frameworks/libsentry.dylib"
+    LIBSENTRY_ARM64="${PROJECT_DIR}/build/arm64/Snapmaker_Orca/EdgeSlicer.app/Contents/Frameworks/libsentry.dylib"
+    LIBSENTRY_X86="${PROJECT_DIR}/build/x86_64/Snapmaker_Orca/EdgeSlicer.app/Contents/Frameworks/libsentry.dylib"
     LIBSENTRY_UNIVERSAL="${UNIVERSAL_APP}/Contents/Frameworks/libsentry.dylib"
     if [ -f "${LIBSENTRY_ARM64}" ] && [ -f "${LIBSENTRY_X86}" ]; then
         echo "Creating universal libsentry.dylib..."

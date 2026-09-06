@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Smoke test for the headless CLI (Phase A of the headless-slicer roadmap).
 
-    python scripts/orca_cli_smoke.py --exe build/Snapmaker_Orca/snapmaker-orca.exe [--project file.3mf]
+    python scripts/orca_cli_smoke.py --exe build/Snapmaker_Orca/EdgeSlicer.exe [--project file.3mf]
 
 Checks: presets by name on an STL (slice + result.json estimates + progress events + 3mf export),
 error reporting for an unknown preset, and optionally a project 3MF slice (all plates).

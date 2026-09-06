@@ -9,6 +9,15 @@ SetRegView 64
 ; the two used to disagree, which was the collision this comment claimed to avoid.
 WriteRegStr HKLM "Software\Classes\edgeslicer" "" "URL:EdgeSlicer"
 WriteRegStr HKLM "Software\Classes\edgeslicer" "URL Protocol" ""
-WriteRegStr HKLM "Software\Classes\edgeslicer\shell\open\command" "" '"$INSTDIR\snapmaker-orca.exe" "%1"'
+WriteRegStr HKLM "Software\Classes\edgeslicer\shell\open\command" "" '"$INSTDIR\EdgeSlicer.exe" "%1"'
 
 SetRegView 32
+
+; Windows Firewall: the inbound rule keys on the image path, so the rename would
+; otherwise leave the old rule dead and pop a consent dialog on the first LAN listen.
+; Pre-create it (idempotent: delete any rule of the same name first) so the phone/LAN
+; service on TCP 13640 answers straight away. nsExec so nothing flashes a console.
+nsExec::ExecToLog '"$SYSDIR\netsh.exe" advfirewall firewall delete rule name="EdgeSlicer"'
+Pop $0
+nsExec::ExecToLog '"$SYSDIR\netsh.exe" advfirewall firewall add rule name="EdgeSlicer" dir=in action=allow program="$INSTDIR\EdgeSlicer.exe" protocol=TCP localport=13640 profile=private,domain enable=yes'
+Pop $0

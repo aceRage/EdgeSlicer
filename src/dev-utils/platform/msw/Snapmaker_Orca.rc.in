@@ -13,7 +13,7 @@ PRODUCTVERSION @SLIC3R_RC_VERSION@
    VALUE "ProductVersion", "@SLIC3R_BUILD_ID@"
    VALUE "InternalName", "@SLIC3R_APP_NAME@"
    VALUE "LegalCopyright", "Copyright (C) 2024-2026 the @SLIC3R_APP_NAME@ contributors. All rights reserved."
-   VALUE "OriginalFilename", "snapmaker-orca.exe"
+   VALUE "OriginalFilename", "EdgeSlicer.exe"
   }
  }
  BLOCK "VarFileInfo"

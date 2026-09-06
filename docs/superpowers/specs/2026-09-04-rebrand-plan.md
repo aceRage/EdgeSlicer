@@ -1163,10 +1163,11 @@ served by `RemoteHub.cpp`, so the four PWA entries above are the whole web surfa
 
 ### 7.5 Deliberately not changed
 
-- **`snapmaker-orca.exe`.** The output name, the CMake targets (`Snapmaker_Orca`,
-  `Snapmaker_Orca_app_gui`), the source filenames (`src/Snapmaker_Orca.cpp` and friends) and the
-  `.rc.in` / `.desktop` filenames are all still the old spelling. Renaming them is a later phase: it
-  moves about 54 paths, changes the installed binary name and needs its own upgrade note.
+- **`snapmaker-orca.exe`.** *Superseded on 2026-09-05: see section 8.* At the time of this section
+  the output name, the CMake targets, the source filenames and the `.rc.in` / `.desktop` filenames
+  were all still the old spelling. The **output names** have since been renamed to EdgeSlicer;
+  the targets, source filenames and template filenames are still the old spelling and stay that way
+  until approach B (section 8.4).
 - **The `BBL-Slicer` and `SM-Slicer` User-Agent tokens** (`WebView.cpp:274-302`, `WebView.hpp:9-12`).
   Section 5.1 calls this the largest exposure in the repo; **the user's decision is to keep them**,
   because `bambulab.com/sign-in` version-gates its login flavour on `BBL-Slicer` and the login stops
@@ -1203,3 +1204,104 @@ served by `RemoteHub.cpp`, so the four PWA entries above are the whole web surfa
    redirect trap section 4.5 describes.
 5. **How long does the migration chain stay?** Every release that keeps it carries two legacy names.
    The list is designed to be emptied in one edit; the question is which release does it.
+
+## 8. Binary rename (done, 2026-09-05)
+
+Section 7.5 listed `snapmaker-orca.exe` as deliberately not changed. It has now changed. The
+shipped files are `EdgeSlicer.exe`, `EdgeSlicer.dll` and `EdgeSlicer.pdb`; on Linux the binary is
+`EdgeSlicer`, on macOS the bundle is `EdgeSlicer.app` with `EdgeSlicer` inside it.
+
+### 8.1 What changed
+
+This is **approach A**: `OUTPUT_NAME` only. The CMake targets (`Snapmaker_Orca`,
+`Snapmaker_Orca_app_gui`), the source file names (`src/Snapmaker_Orca.cpp`,
+`src/Snapmaker_Orca_app_msvc.cpp`, the `.rc.in` / `.manifest.in` / `.desktop` templates) and the
+exported entry point `Snapmaker_Orca_main` are all unchanged, so every `$<TARGET_FILE...>`
+expression, `install(TARGETS ...)` rule, `Snapmaker_Orca_copy_dlls` call and `--target` in a build
+script or CI workflow keeps working untouched.
+
+| Area | Change |
+| --- | --- |
+| `src/CMakeLists.txt` | `OUTPUT_NAME "EdgeSlicer"` on the WIN32 shared library, on `Snapmaker_Orca_app_gui`, on the Linux binary and (new) on the macOS bundle; the macOS convenience symlink now points `snapmaker-orca` at `EdgeSlicer`; `MACOSX_BUNDLE_BUNDLE_NAME` is `EdgeSlicer`. The `.pdb` follows `OUTPUT_NAME` on its own. |
+| `CMakeLists.txt` | `SLIC3R_APP_CMD "EdgeSlicer"`; `CPACK_NSIS_INSTALLED_ICON_NAME`, the desktop shortcut and `CPACK_PACKAGE_EXECUTABLES` name the new exe; the preinstall running-process guard gained a **third arm** so it blocks on `EdgeSlicer.exe`, `snapmaker-orca.exe` or `Snapmaker_Orca.exe`. |
+| `src/Snapmaker_Orca_app_msvc.cpp` | `LoadLibraryExW(L"EdgeSlicer.dll")` and its two error strings. `GetProcAddress` still asks for `Snapmaker_Orca_main` - the symbol did not move. This is the one edit that fails silently if missed: the shim would exit -1 with no window. |
+| `src/slic3r/Utils/Process.cpp` | the "New Window" / new-instance spawn now launches `EdgeSlicer.exe` (Windows) / `EdgeSlicer` (unix). |
+| `installer.nsi` | `DisplayIcon`, both shortcuts, the extract check, `LaunchApp`, the `edgeslicer://` command path, a `taskkill` for `EdgeSlicer.exe` (the legacy one is kept), and the same three-arm running guard. |
+| `cmake/nsis/SnapmakerURLProtocols_*.nsh` | the HKLM `edgeslicer://` command path, plus the firewall rule below. |
+| `.rc.in`, `.desktop`, `DesktopIntegrationDialog.cpp` | `OriginalFilename`, `Exec=`, `StartupWMClass=`. Icon and `.desktop` **file** names are unchanged - they are asset names, not binary names. |
+| `scripts/flatpak/entrypoint`, `scripts/Dockerfile` | the installed binary they exec. |
+| `build_release_macos.sh`, `scripts/sign_and_package.sh`, `.github/workflows/build_orca.yml` | the app bundle is `EdgeSlicer.app` and the binary inside it `EdgeSlicer`. |
+| `GUI_App.cpp` | first-run association self-heal and an explicit AppUserModelID (8.3). |
+
+**One trap the plan did not anticipate.** Once the DLL is `EdgeSlicer.dll` its import library
+is `EdgeSlicer.lib`, and MSVC derives an executable's default `/IMPLIB` from the output name
+as well - so linking `EdgeSlicer.exe` against `EdgeSlicer.lib` fails with
+`LNK1149: output filename matches input filename`. The shim exports nothing, so its import
+library is never actually written; it only needs a name that is not an input, and
+`src/CMakeLists.txt` now passes `/IMPLIB:.../EdgeSlicer_app_gui.lib` for MSVC. Approach B will
+hit the same wall the moment the two targets share a base name.
+
+Two bugs found on the way and fixed here because the rename touches the same lines:
+
+- **Translations have been dead since the UltraOne rebrand.** `GUI_App.cpp` calls
+  `AddCatalog(SLIC3R_APP_KEY)`, which has been `"EdgeSlicer"`, while the build wrote
+  `Snapmaker_Orca.mo`. The catalog is now built as `EdgeSlicer.mo` (`CMakeLists.txt` gettext block,
+  `scripts/run_gettext.bat`, `scripts/run_gettext.sh`). The `.po` source files keep their names -
+  nothing derives the `.mo` name from them.
+- **`Downloader.cpp`'s URL-scheme regex omitted our own schemes.** It accepted
+  `snapmaker-orca|Snapmaker_Orca|orcaslicer|prusaslicer|bambustudio|cura` but not `edgeslicer` or
+  `ultraone`, so a downloader link in our own scheme was rejected. It now matches
+  `InstanceCheck.cpp:504`.
+- (Also fixed in passing: `NetworkAgent::get_libpath_in_current_directory` hard-coded
+  `"snapmaker-orca.exe"` **and** compared it against a length of 16 for an 18-character name, so it
+  never resolved. It now takes everything up to the last path separator.)
+
+### 8.2 Compatibility
+
+- **Windows Firewall.** Rules key on the image path, so the old rule goes dead and a renamed exe
+  would prompt on its first LAN listen. The installer now pre-creates an inbound allow rule named
+  `EdgeSlicer` for `$INSTDIR\EdgeSlicer.exe` on TCP 13640 (`netsh advfirewall`, delete-then-add so a
+  reinstall is idempotent) and deletes it on uninstall. A **portable** unzip still gets the consent
+  dialog once - there is no installer to pre-create the rule.
+- **Taskbar pins.** A pinned `.lnk` points at the old path and breaks silently. The installer
+  recreates the desktop and Start-menu shortcuts, but an existing *pin* must be redone by the user -
+  worth a release note. To stop the next rename doing this again, the process now sets an explicit
+  AppUserModelID (`aceRage.EdgeSlicer`) before the first window appears, so future pins bind to the
+  id and not to the path.
+- **Open With / file associations.** `EdgeSlicer.Model.1` and the `edgeslicer://` command in HKCU
+  still name the old exe until the user re-ticks the association preference. A first-run self-heal
+  (8.3) rewrites them.
+- **No duplicate binary.** We do **not** also ship a `snapmaker-orca.exe`: two Task Manager entries,
+  two firewall rules and a stale installer guard are worse than a one-time rename. The macOS
+  non-bundle build keeps a `snapmaker-orca` symlink because it costs nothing there.
+- **Uninstall of an older install still works.** The preinstall guard reads the `EdgeSlicer`,
+  `UltraOne` and `Snapmaker-Ultra` uninstall keys, and blocks on all three process names.
+- **Tailscale Serve** is port-based and unaffected. The live build directory
+  `C:\Dev\SnapmakerOrca\build\Snapmaker_Orca` is a *directory* name and was deliberately left alone.
+
+### 8.3 First-run self-heal and AppUserModelID
+
+`GUI_App::repair_stale_associations()` runs once at startup on Windows, before any re-registration
+and in the g-code viewer too. For `EdgeSlicer.Model.1`, `EdgeSlicer.GCode.1` and the `edgeslicer`
+scheme it reads the HKCU `shell open command` default value, and **only** if that value is a quoted
+path whose executable no longer exists does it rewrite it to `GetModuleFileNameW` + `" %1"`. It is
+silent, it never touches a command that still resolves, and it never touches a value in a shape it
+did not write. `SHChangeNotify` fires only when something actually changed.
+
+The AppUserModelID (`aceRage.EdgeSlicer`) is set in `on_init_inner` right after the log target, well
+before the first window.
+
+### 8.4 Deferred: approach B
+
+Approach B - `git mv` of the source files, renaming the CMake targets and the exported
+`Snapmaker_Orca_main` symbol - is **deferred**. It is a mechanical but wide change: 4 test
+`CMakeLists.txt`, the CI workflows, the build scripts, `.doxygen`, `.devcontainer`, and (measured)
+68 `.bat` helpers outside the repo that invoke the targets by name. It must be its own commit, on a
+quiet tree, and never mixed with this one: if the app ever fails to load its DLL, the bisect has to
+be able to separate "the file was renamed" from "the target was renamed".
+
+### 8.5 Not verified here
+
+The NSIS installer is not buildable in this environment, so the firewall rule, the shortcuts,
+`DisplayIcon` and the three-arm guard are **code-reviewed but not executed**. The Linux, macOS and
+flatpak paths are likewise edited but unbuilt.

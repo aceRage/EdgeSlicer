@@ -97,4 +97,4 @@ RUN if [[ "$UID" != "0" ]]; then \
     fi
 # Using an entrypoint instead of CMD because the binary
 # accepts several command line arguments.
-ENTRYPOINT ["/OrcaSlicer/build/package/bin/snapmaker-orca"]
+ENTRYPOINT ["/OrcaSlicer/build/package/bin/EdgeSlicer"]

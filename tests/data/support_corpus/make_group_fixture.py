@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Build twopart_groups.3mf: the corpus case whose parts carry support groups.
 
-    python tests/data/support_corpus/make_group_fixture.py --exe <snapmaker-orca.exe> \
+    python tests/data/support_corpus/make_group_fixture.py --exe <EdgeSlicer.exe> \
            [--datadir <isolated dd>]
 
 Why it is built this way, and not by make_fixtures.py:
@@ -162,7 +162,7 @@ def inject(src, dst, part_id):
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--exe", required=True, help="path to snapmaker-orca.exe (a side install, never the user's tree)")
+    ap.add_argument("--exe", required=True, help="path to EdgeSlicer.exe (a side install, never the user's tree)")
     ap.add_argument("--datadir", help="isolated data directory - always pass this")
     ap.add_argument("--part", type=int, default=2, help="which <part id> gets the group (default 2)")
     ap.add_argument("--profile", choices=sorted(PROFILES), default="filament",
