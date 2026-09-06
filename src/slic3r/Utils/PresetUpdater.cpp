@@ -1,6 +1,7 @@
 #include "PresetUpdater.hpp"
 
 #include <algorithm>
+#include <set>
 #include <boost/filesystem/operations.hpp>
 #include <boost/nowide/fstream.hpp>
 #include <functional>
@@ -133,6 +134,11 @@ struct Update
 
     bool can_install{true};
 
+	// Ultra: a file that rides along with a vendor bundle but is not a configuration package of
+	// its own (the Snapmaker filament rules files). It has to be installed, but listing it in the
+	// update dialog printed the same "<vendor> <version>" row a second and third time.
+	bool is_aux{false};
+
 	Update() {}
 	//BBS: add directory support
 	//BBS: use changelog string instead of url
@@ -249,6 +255,10 @@ wxDEFINE_EVENT(EVT_NO_PRESET_UPDATE, wxCommandEvent);
 wxDEFINE_EVENT(EVT_SLIC3R_VERSION_ONLINE, wxCommandEvent);
 wxDEFINE_EVENT(EVT_SLIC3R_EXPERIMENTAL_VERSION_ONLINE, wxCommandEvent);
 
+
+// Ultra: defined further down next to compare_dotted_version; the download gate in sync_config
+// needs it to read the installed vendor version, and that runs earlier in this file.
+static std::string read_bundle_version_string(const std::string& json_path);
 
 struct PresetUpdater::priv
 {
@@ -1131,13 +1141,28 @@ void PresetUpdater::priv::sync_config(bool isAuto_check)
             auto reservedData2   = dataObj.value("reserved_2", "");
 
             std::string fileName = (cache_profile_path / ("profiles_" + fileVersion + ".zip")).string();
-            // Compare server package against the vendor version actually loaded in the running app (not OTA cache / stale file).
+            // Compare the server package against the vendor version actually loaded in the running app,
+            // and against the one installed in the data dir - whichever is newer.
+            //
+            // Ultra: the in-memory value alone is not enough. PresetBundle::vendors is filled with
+            // emplace(), which keeps the first entry, so it stays at the pre-update version for the rest
+            // of a session in which an update was installed, and it reads 0.0.0 whenever the bundle has
+            // not been loaded. Either way the app re-downloaded the package and re-ran the whole
+            // configuration check on every start against a data dir that was already up to date.
             Semver currentPresetVersion;
             if (GUI::wxGetApp().preset_bundle)
                 currentPresetVersion =
                     GUI::wxGetApp().preset_bundle->get_vendor_profile_version(PresetBundle::SM_BUNDLE);
-            else
-                currentPresetVersion = get_version_from_json(data_dir() + "/system/Snapmaker.json");
+
+            const fs::path installed_json = fs::path(data_dir()) / PRESET_SYSTEM_DIR /
+                                            (std::string(PresetBundle::SM_BUNDLE) + ".json");
+            if (fs::exists(installed_json)) {
+                const std::string installed_str = read_bundle_version_string(installed_json.string());
+                const auto        installed_ver = installed_str.empty() ? boost::optional<Semver>() :
+                                                                          Semver::parse(installed_str);
+                if (installed_ver && currentPresetVersion < *installed_ver)
+                    currentPresetVersion = *installed_ver;
+            }
 
             std::regex matcher("[0-9]+\\.[0-9]+(\\.[0-9]+)*(-[A-Za-z0-9]+)?(\\+[A-Za-z0-9]+)?");
 
@@ -1624,6 +1649,54 @@ static int compare_dotted_version(const std::string& a, const std::string& b)
     return 0;
 }
 
+// Ultra: one row per configuration package.
+//
+// `Updates::updates` is an install plan, not a user-facing list: for a single vendor it carries the
+// vendor json, the vendor directory and the rules files that have to be copied next to it. Only the
+// vendor json is a package a user can be asked about, so directories and `is_aux` entries are
+// dropped and a (vendor, version) pair is listed once.
+//
+// `vendor_dir`, when given, is the system preset directory: a row is listed only when its version is
+// strictly newer than the `<vendor>.json` already installed there, so the dialog can never offer a
+// version the data dir already has. The printer-config path passes nothing (its installed version
+// lives in printers/version.txt, not in a vendor json) and keeps its directory entry.
+static std::vector<GUI::MsgUpdateConfig::Update> build_updates_msg(const Updates &   updates,
+                                                                  bool              skip_directories,
+                                                                  const fs::path *  vendor_dir)
+{
+    std::vector<GUI::MsgUpdateConfig::Update>     msg;
+    std::set<std::pair<std::string, std::string>> seen;
+
+    for (const auto &update : updates.updates) {
+        if (update.is_aux)
+            continue;
+        if (skip_directories && update.is_directory)
+            continue;
+
+        if (vendor_dir != nullptr) {
+            const fs::path installed = *vendor_dir / (update.vendor + ".json");
+            if (fs::exists(installed)) {
+                const std::string installed_str = read_bundle_version_string(installed.string());
+                const auto        installed_ver = installed_str.empty() ? boost::optional<Semver>() :
+                                                                          Semver::parse(installed_str);
+                if (installed_ver && !(*installed_ver < update.version.config_version)) {
+                    BOOST_LOG_TRIVIAL(info)
+                        << format("[Orca Updater]:not offering %1% %2%, %3% is already installed", update.vendor,
+                                  update.version.config_version.to_string(), installed_ver->to_string());
+                    continue;
+                }
+            }
+        }
+
+        if (!seen.emplace(update.vendor, update.version.config_version.to_string()).second)
+            continue;
+
+        msg.emplace_back(update.vendor, update.version.config_version, update.descriptions, update.change_log);
+    }
+
+    return msg;
+}
+
 // Orca: copy/update the vendor profiles from resource to system folder
 void PresetUpdater::priv::check_installed_vendor_profiles() const
 {
@@ -1774,9 +1847,23 @@ Updates PresetUpdater::priv::get_config_updates(const Semver &old_slic3r_version
                 || fs::exists(filament_in_cache)
                 || fs::exists(machine_in_cache)) {
                 // OTA may ship a new vendor before any system vendor JSON exists; avoid reading a missing path.
+                // Ultra: only a vendor with *no* installed json is a new vendor. An installed json that
+                // cannot be read used to fall through as 0.0.0, so the cached bundle was offered on every
+                // start - at a version the data dir may well already have - and accepting it never changed
+                // the answer. Skip such a vendor instead of guessing it is out of date.
                 Semver vendor_ver;
-                if (fs::exists(path_in_vendor))
-                    vendor_ver = get_version_from_json(path_in_vendor.string());
+                if (fs::exists(path_in_vendor)) {
+                    const std::string installed_str = read_bundle_version_string(path_in_vendor.string());
+                    const auto        installed_ver = installed_str.empty() ? boost::optional<Semver>() :
+                                                                              Semver::parse(installed_str);
+                    if (!installed_ver) {
+                        BOOST_LOG_TRIVIAL(warning)
+                            << "[Orca Updater]:cannot read the installed version of " << vendor_name << " from "
+                            << path_in_vendor.string() << ", not offering an update for it";
+                        continue;
+                    }
+                    vendor_ver = *installed_ver;
+                }
 
                 std::map<std::string, std::string> key_values;
                 std::vector<std::string> keys(3);
@@ -1835,17 +1922,18 @@ Updates PresetUpdater::priv::get_config_updates(const Semver &old_slic3r_version
                                                      std::move(changelog), "", force_update, false, legal);
 
                         //BBS: add directory support
+                        // Ultra: the vendor directory used to be replaced twice - once unfiltered and then
+                        // again through should_skip_file, which threw the first copy away. One filtered
+                        // replace leaves exactly the same directory for half the I/O.
                         auto vendor_dir_in_cache = cache_profile_path / vendor_name;
                         if (fs::exists(vendor_dir_in_cache) && fs::is_directory(vendor_dir_in_cache)) {
-                            updates.updates.emplace_back(fs::path(vendor_dir_in_cache), fs::path(vendor_path / vendor_name),
-                                                         Version(), vendor_name, "", "", force_update, true, legal);
+                            updates.updates.emplace_back(cache_profile_path / vendor_name, vendor_path / vendor_name,
+                                                         Version(), vendor_name, "", "", should_skip_file, force_update,
+                                                         true, legal);
                         } else {
                             BOOST_LOG_TRIVIAL(warning) << "[Orca Updater]: skip vendor directory update, source missing: "
                                                        << vendor_dir_in_cache.string();
                         }
-                        updates.updates.emplace_back(cache_profile_path / vendor_name, vendor_path / vendor_name, Version(), vendor_name,
-                                                     "", "",
-                                                     should_skip_file, force_update, true, legal);
 
                         // Rules files are not slicer presets; ensure they are always deployed next to system filament JSON.
                         if (vendor_name == PresetBundle::SM_BUNDLE) {
@@ -1856,6 +1944,7 @@ Updates PresetUpdater::priv::get_config_updates(const Semver &old_slic3r_version
                                     fs::create_directories(rules_dst.parent_path());
                                     updates.updates.emplace_back(std::move(rules_src), std::move(rules_dst), version, vendor_name, "", "",
                                                                  force_update, false, legal);
+                                    updates.updates.back().is_aux = true;
                                 }
                             }
                             {
@@ -1865,6 +1954,7 @@ Updates PresetUpdater::priv::get_config_updates(const Semver &old_slic3r_version
                                     fs::create_directories(rules_dst.parent_path());
                                     updates.updates.emplace_back(std::move(rules_src), std::move(rules_dst), version, vendor_name, "", "",
                                                                  force_update, false, legal);
+                                    updates.updates.back().is_aux = true;
                                 }
                             }
                         }
@@ -2042,12 +2132,13 @@ PresetUpdater::UpdateResult PresetUpdater::config_update(const Semver& old_slic3
         else {
             BOOST_LOG_TRIVIAL(info) << format("[Orca Updater]:Configuration package available. size %1%, need to confirm...", p->waiting_updates.updates.size());
 
-            std::vector<GUI::MsgUpdateConfig::Update> updates_msg;
-            for (const auto& update : updates.updates) {
-                if (update.is_directory)
-                    continue;
-                std::string changelog = update.change_log;
-                updates_msg.emplace_back(update.vendor, update.version.config_version, update.descriptions, std::move(changelog));
+            std::vector<GUI::MsgUpdateConfig::Update> updates_msg = build_updates_msg(updates, true, &p->vendor_path);
+            if (updates_msg.empty()) {
+                // Every candidate is already installed (or is only a file that rides along with one):
+                // there is nothing to ask about, and asking anyway is what made this dialog come back
+                // on data dirs that were up to date.
+                BOOST_LOG_TRIVIAL(info) << "[Orca Updater]:nothing newer than the installed configuration, not asking";
+                return R_NOOP;
             }
 
             GUI::GUI_App *app_ptr = dynamic_cast<GUI::GUI_App *>(&GUI::wxGetApp());
@@ -2123,13 +2214,10 @@ void PresetUpdater::on_update_notification_confirm()
 		return;
 	BOOST_LOG_TRIVIAL(info) << format("Update of %1% bundles available. Asking for confirmation ...", p->waiting_updates.updates.size());
 
-	std::vector<GUI::MsgUpdateConfig::Update> updates_msg;
-	for (const auto& update : p->waiting_updates.updates) {
-		//BBS: skip directory
-		if (update.is_directory)
-			continue;
-		std::string changelog = update.change_log;
-		updates_msg.emplace_back(update.vendor, update.version.config_version, update.descriptions, std::move(changelog));
+	std::vector<GUI::MsgUpdateConfig::Update> updates_msg = build_updates_msg(p->waiting_updates, true, &p->vendor_path);
+	if (updates_msg.empty()) {
+		BOOST_LOG_TRIVIAL(info) << "[Orca Updater]:nothing newer than the installed configuration, not asking";
+		return;
 	}
 
 	GUI::GUI_App *app_ptr = dynamic_cast<GUI::GUI_App *>(&GUI::wxGetApp());
@@ -2157,11 +2245,11 @@ void PresetUpdater::do_printer_config_update()
         return;
     BOOST_LOG_TRIVIAL(info) << "Update of printer configs available. Asking for confirmation ...";
 
-    std::vector<GUI::MsgUpdateConfig::Update> updates_msg;
-    for (const auto &update : p->waiting_printer_updates.updates) {
-        std::string changelog = update.change_log;
-        updates_msg.emplace_back(update.vendor, update.version.config_version, update.descriptions, std::move(changelog));
-    }
+    // The printer config is a directory update and its installed version lives in printers/version.txt,
+    // so it keeps directory rows and is not checked against a vendor json; the de-duplication still applies.
+    std::vector<GUI::MsgUpdateConfig::Update> updates_msg = build_updates_msg(p->waiting_printer_updates, false, nullptr);
+    if (updates_msg.empty())
+        return;
 
     GUI::GUI_App *app_ptr = dynamic_cast<GUI::GUI_App *>(&GUI::wxGetApp());
     int           res     = wxID_CANCEL;
