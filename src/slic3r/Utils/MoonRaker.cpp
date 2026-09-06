@@ -2747,7 +2747,11 @@ void Moonraker_Mqtt::delete_response_target(int64_t id) {
 
 bool Moonraker_Mqtt::check_sn_arrived() {
     auto& wcp_loger = GUI::WCP_Logger::getInstance();
-    bool result = wait_for_sn();
+    // Answer from what is known NOW. This used to be wait_for_sn() with its 6 s busy-wait, and both
+    // callers (RemoteSend::list_hosts, RemoteSnapmaker's status) run on the GUI thread on every
+    // phone poll: with no SN - the logged-out / not-yet-paired case - each poll parked the window
+    // for 6 s and the Devices page kept the queue full (2026-09-06 "not responding").
+    bool result = wait_for_sn(0);
     BOOST_LOG_TRIVIAL(info) << "[Moonraker_Mqtt] checking SN arrival status: " << (result ? "arrived" : "not arrived");
     wcp_loger.add_log("checking SN arrival status: " + std::string((result ? "arrived" : "not arrived")), false, "", "Moonraker_Mqtt", "info");
     return result;
