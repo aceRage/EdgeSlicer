@@ -60,6 +60,12 @@ struct FilamentInfo
     std::vector<int> group_id;                 // logical nozzle ids this filament may map to
     double           nozzle_diameter = 0.;     // nozzle diameter used for this filament
     std::string      nozzle_volume_type = "Standard"; // volume-type label (BBS uses the string form here)
+
+    /* Ultra (H2C 3MF schema): per-filament usage / AMS timing, written into slice_info.config. */
+    bool   used_for_support{false};
+    bool   used_for_object{false};
+    double total_load_time{0.0};
+    double total_unload_time{0.0};
 };
 
 class BBLSliceInfo {

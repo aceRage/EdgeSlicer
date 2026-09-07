@@ -390,3 +390,149 @@ SCENARIO("An unknown support key degrades gracefully the way stock Orca would", 
         }
     }
 }
+
+// The sliced-plate half of Metadata/slice_info.config. A Bambu H2C rejects a plate 3MF that
+// carries only the pre-2.x schema (HMS 05004046), because on that machine the extruder alone does
+// not identify a hotend: extruder 2 holds up to six nozzles. The schema that resolves it is the
+// per-<filament> group_id / nozzle_diameter / volume_type and the <nozzle> table, plus
+// nozzle_volume_type written as one value PER EXTRUDER rather than a single scalar.
+// This asserts the writer and the importer agree on all of that, over a real store/load cycle.
+// No printer was involved; this proves the file's shape, not the firmware's acceptance.
+SCENARIO("A sliced plate carries the multi-nozzle slice_info schema through a 3MF round trip", "[3mf][H2C]") {
+    GIVEN("a plate sliced on a two-extruder machine with each filament on its own nozzle") {
+        Model src_model;
+        ModelObject* src_object = src_model.add_object();
+        src_object->name = "h2c_cube";
+        src_object->add_volume(make_cube(10., 10., 10.))->name = "cube";
+        src_object->add_instance();
+        src_object->ensure_on_bed();
+
+        DynamicPrintConfig store_config = DynamicPrintConfig::full_print_config();
+        // Same libslic3r quirk the support-group case documents above: a coEnums option that came
+        // from a STATIC config class has no keys_map, and the project writer serialises it.
+        for (const std::string& key : store_config.keys())
+            if (const ConfigOption* opt = store_config.option(key); opt != nullptr && opt->type() == coEnums) {
+                store_config.erase(key);
+                store_config.option(key, true);
+            }
+        store_config.set_key_value("nozzle_diameter", new ConfigOptionFloats({ 0.4, 0.4 }));
+        store_config.set_key_value("filament_colour", new ConfigOptionStrings({ "#000000", "#FFFFFF" }));
+        store_config.set_key_value("filament_map",    new ConfigOptionInts({ 1, 2 }));
+        store_config.option<ConfigOptionEnumsGeneric>("extruder_type", true)->values       = { 0, 0 };
+        store_config.option<ConfigOptionEnumsGeneric>("nozzle_volume_type", true)->values  = { 0, 0 };
+
+        // Two logical nozzles, one per extruder; filament 0 on nozzle 0, filament 1 on nozzle 1.
+        std::vector<MultiNozzleUtils::NozzleInfo> nozzle_list(2);
+        nozzle_list[0].diameter = "0.4"; nozzle_list[0].volume_type = nvtStandard; nozzle_list[0].extruder_id = 0; nozzle_list[0].group_id = 0;
+        nozzle_list[1].diameter = "0.4"; nozzle_list[1].volume_type = nvtStandard; nozzle_list[1].extruder_id = 1; nozzle_list[1].group_id = 1;
+        auto group_result = MultiNozzleUtils::LayeredNozzleGroupResult::create({ 0, 1 }, nozzle_list, { 0u, 1u });
+        REQUIRE(group_result);
+
+        PlateData* plate = new PlateData();
+        plate->plate_index      = 0;
+        plate->is_sliced_valid  = true;
+        plate->printer_model_id = "O1C2";
+        plate->nozzle_diameters = "0.4,0.4";
+        plate->gcode_prediction = "1000";
+        plate->gcode_weight     = "12.34";
+        plate->first_layer_time = "42";
+        plate->filament_maps    = { 1, 2 };
+        plate->nozzle_group_result = *group_result;
+        plate->objects_and_instances.emplace_back(0, 0);
+        for (int fid = 0; fid < 2; ++ fid) {
+            FilamentInfo info;
+            info.id                 = fid;
+            info.type               = "PLA";
+            info.color              = fid == 0 ? "#000000" : "#FFFFFF";
+            info.filament_id        = fid == 0 ? "GFA00" : "GFA01";
+            info.used_m             = 1.5f + fid;
+            info.used_g             = 4.5f + fid;
+            info.group_id           = { fid };
+            info.nozzle_diameter    = 0.4;
+            info.nozzle_volume_type = get_nozzle_volume_type_string(nvtStandard);
+            info.used_for_object    = fid == 0;
+            info.used_for_support   = fid == 1;
+            plate->slice_filaments_info.push_back(info);
+        }
+
+        WHEN("the plate is stored into a 3MF and read back") {
+            const std::string test_file = std::string(TEST_DATA_DIR) + "/test_3mf/h2c_slice_info.3mf";
+            const boost::filesystem::path tmp_root = boost::filesystem::temp_directory_path() / "snorca_tests";
+            boost::filesystem::create_directories(tmp_root);
+            Slic3r::set_temporary_dir(tmp_root.string());
+
+            StoreParams store_params;
+            store_params.path            = test_file.c_str();
+            store_params.model           = &src_model;
+            store_params.config          = &store_config;
+            store_params.plate_data_list = { plate };
+            store_params.strategy        = SaveStrategy::Zip64 | SaveStrategy::Silence | SaveStrategy::SkipAuxiliary;
+            const bool stored = store_bbs_3mf(store_params);
+
+            Model                     dst_model;
+            DynamicPrintConfig        dst_config;
+            ConfigSubstitutionContext ctxt{ ForwardCompatibilitySubstitutionRule::EnableSilent };
+            PlateDataPtrs             plate_data;
+            std::vector<Preset*>      project_presets;
+            bool                      is_bbl_3mf = false;
+            Semver                    file_version;
+            const bool loaded = stored && load_bbs_3mf(test_file.c_str(), &dst_config, &ctxt, &dst_model,
+                                                       &plate_data, &project_presets, &is_bbl_3mf, &file_version,
+                                                       nullptr,
+                                                       LoadStrategy::LoadModel | LoadStrategy::LoadConfig |
+                                                       LoadStrategy::AddDefaultInstances | LoadStrategy::Silence);
+
+            THEN("store and load both succeed and one plate comes back") {
+                REQUIRE(stored);
+                REQUIRE(loaded);
+                REQUIRE(plate_data.size() == 1);
+            }
+
+            THEN("nozzle_volume_type is a per-extruder list, not the old single scalar") {
+                REQUIRE(plate_data.size() == 1);
+                // Two extruders, so two values. The old writer emitted "0".
+                REQUIRE(plate_data.front()->nozzle_volume_types == "0 0");
+            }
+
+            THEN("the <nozzle> table survives, so a filament's group_id resolves to a hotend") {
+                REQUIRE(plate_data.size() == 1);
+                const auto& nozzles = plate_data.front()->nozzles_info;
+                REQUIRE(nozzles.size() == 2);
+                REQUIRE(nozzles[0].group_id == 0);
+                REQUIRE(nozzles[0].extruder_id == 0);
+                REQUIRE(nozzles[0].diameter == "0.4");
+                REQUIRE(nozzles[0].volume_type == nvtStandard);
+                REQUIRE(nozzles[1].group_id == 1);
+                REQUIRE(nozzles[1].extruder_id == 1);
+            }
+
+            THEN("every per-filament multi-nozzle attribute round trips") {
+                REQUIRE(plate_data.size() == 1);
+                const auto& filaments = plate_data.front()->slice_filaments_info;
+                REQUIRE(filaments.size() == 2);
+                for (size_t i = 0; i < filaments.size(); ++ i) {
+                    INFO("filament " << i);
+                    REQUIRE(filaments[i].id == int(i));
+                    REQUIRE(filaments[i].group_id == std::vector<int>{ int(i) });
+                    REQUIRE(filaments[i].nozzle_diameter == Approx(0.4));
+                    REQUIRE(filaments[i].nozzle_volume_type == get_nozzle_volume_type_string(nvtStandard));
+                }
+                REQUIRE(filaments[0].used_for_object);
+                REQUIRE(!filaments[0].used_for_support);
+                REQUIRE(!filaments[1].used_for_object);
+                REQUIRE(filaments[1].used_for_support);
+            }
+
+            THEN("the plate keeps the values the printer keys off") {
+                REQUIRE(plate_data.size() == 1);
+                REQUIRE(plate_data.front()->printer_model_id == "O1C2");
+                REQUIRE(plate_data.front()->nozzle_diameters == "0.4,0.4");
+                REQUIRE(plate_data.front()->first_layer_time == "42");
+            }
+
+            release_PlateData_list(plate_data);
+            boost::filesystem::remove(test_file);
+        }
+        delete plate;
+    }
+}

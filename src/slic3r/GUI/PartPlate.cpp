@@ -22,6 +22,7 @@
 #include "libslic3r/Geometry.hpp"
 #include "libslic3r/Tesselate.hpp"
 #include "libslic3r/GCode/ThumbnailData.hpp"
+#include "libslic3r/LocalesUtils.hpp"
 #include "libslic3r/Utils.hpp"
 
 #include "I18N.hpp"
@@ -5584,11 +5585,62 @@ int PartPlateList::store_to_3mf_structure(PlateDataPtrs& plate_data_list, bool w
 							plate_data_item->gcode_weight =wxString::Format("%.2f", ps.total_weight).ToStdString();
 						}
 						plate_data_item->is_support_used = print->is_support_used();
+						plate_data_item->support_material_on_wipe_tower = print->support_material_on_wipe_tower();
 					} else {
 						BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format("print is null!");
 					}
 					//parse filament info
 					plate_data_item->parse_filament_info(m_plate_list[i]->get_slice_result());
+
+					// Ultra (H2C 3MF schema): the multi-nozzle payload of the plate. BambuStudio takes
+					// the grouping result off GCodeProcessorResult; this fork stores it on the Print
+					// (ToolOrdering::reorder_extruders_for_minimum_flush_volume writes it there), so the
+					// same values are read from there and the per-filament nozzle attributes are filled
+					// exactly as BBS PlateData::parse_filament_info does.
+					if (print) {
+						plate_data_item->filament_maps = print->config().filament_map.values;
+						// A machine with no filament->nozzle grouping (every single-extruder printer in
+						// this fork) still gets the per-filament nozzle attributes: BBS always has a
+						// grouping result, whose single-nozzle case is exactly this. Without the
+						// fallback the attributes would go out empty, which is worse than absent.
+						{
+							const auto &nd = print->config().nozzle_diameter.values;
+							std::string volume_type = get_nozzle_volume_type_string(nvtStandard);
+							if (const auto *nvt = print->config().option<ConfigOptionEnumsGeneric>("nozzle_volume_type"))
+								if (!nvt->values.empty())
+									volume_type = get_nozzle_volume_type_string(NozzleVolumeType(nvt->values.front()));
+							for (auto &info : plate_data_item->slice_filaments_info) {
+								info.group_id = { 0 };
+								info.nozzle_diameter = nd.empty() ? 0. : nd.front();
+								info.nozzle_volume_type = volume_type;
+							}
+						}
+						if (auto group_result = print->get_layered_nozzle_group_result()) {
+							plate_data_item->nozzle_group_result = *group_result;
+							for (auto &info : plate_data_item->slice_filaments_info) {
+								auto nozzles_for_filament = group_result->get_nozzles_for_filament(info.id);
+								if (nozzles_for_filament.empty())
+									continue;
+								info.group_id.clear();
+								info.group_id.reserve(nozzles_for_filament.size());
+								std::set<double> diameters;
+								std::set<NozzleVolumeType> volume_types;
+								for (const auto &nozzle : nozzles_for_filament) {
+									info.group_id.emplace_back(nozzle.group_id);
+									diameters.insert(string_to_double_decimal_point(nozzle.diameter.c_str()));
+									volume_types.insert(nozzle.volume_type);
+								}
+								std::sort(info.group_id.begin(), info.group_id.end());
+								info.group_id.erase(std::unique(info.group_id.begin(), info.group_id.end()), info.group_id.end());
+								if (!diameters.empty())
+									info.nozzle_diameter = *diameters.begin();
+								if (volume_types.size() > 1)
+									info.nozzle_volume_type = get_nozzle_volume_type_string(nvtHybrid);
+								else if (!volume_types.empty())
+									info.nozzle_volume_type = get_nozzle_volume_type_string(*volume_types.begin());
+							}
+						}
+					}
 				} else {
 					BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << "slice result = " << m_plate_list[i]->get_slice_result()
 										<< ", result valid = " << m_plate_list[i]->is_slice_result_valid();

@@ -1073,6 +1073,10 @@ public:
     // Ultra (dual-nozzle): the filament->nozzle grouping result, computed externally (GUI/CLI) before
     // process() for AMS-multi-nozzle machines (H2D/H2C/X2D). Null for classic single-/multi-extruder
     // machines (e.g. Snapmaker U1 toolchanger), which keep the existing per-extruder pipeline.
+    // Ultra (H2C 3MF schema): does any object route its support (or support interface) to a
+    // filament that the object body does not use, so the prime tower carries support material?
+    // Ported from BambuStudio Print::support_material_on_wipe_tower.
+    bool support_material_on_wipe_tower() const;
     void set_nozzle_group_result(const std::shared_ptr<MultiNozzleUtils::NozzleGroupResultBase> result) { m_nozzle_group_result = result; }
     const std::shared_ptr<MultiNozzleUtils::NozzleGroupResultBase> get_nozzle_group_result() const { return m_nozzle_group_result; }
     std::shared_ptr<MultiNozzleUtils::LayeredNozzleGroupResult> get_layered_nozzle_group_result() const {

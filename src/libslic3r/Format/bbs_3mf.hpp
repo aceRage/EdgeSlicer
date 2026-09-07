@@ -4,7 +4,9 @@
 #include "../GCode/ThumbnailData.hpp"
 #include "libslic3r/ProjectTask.hpp"
 #include "libslic3r/GCode/GCodeProcessor.hpp"
+#include "libslic3r/MultiNozzleUtils.hpp"
 #include <functional>
+#include <optional>
 
 namespace Slic3r {
 class Model;
@@ -73,6 +75,9 @@ struct PlateData
     std::map<int, std::pair<int, int>> obj_inst_map;
     std::string     printer_model_id;
     std::string     nozzle_diameters;
+    // Ultra (H2C 3MF schema): serialized per-extruder nozzle_volume_type, as read back from
+    // slice_info.config (BambuStudio PlateData::nozzle_volume_types).
+    std::string     nozzle_volume_types;
     std::string     gcode_file;
     std::string     gcode_file_md5;
     std::string     thumbnail_file;
@@ -85,6 +90,7 @@ struct PlateData
     std::string     pattern_bbox_file;
     std::string     gcode_prediction;
     std::string     gcode_weight;
+    std::string     first_layer_time;
     std::string     plate_name;
     std::vector<FilamentInfo> slice_filaments_info;
     std::vector<size_t> skipped_objects;
@@ -93,7 +99,22 @@ struct PlateData
     bool            is_sliced_valid = false;
     bool            toolpath_outside {false};
     bool            is_label_object_enabled {false};
+    bool            support_material_on_wipe_tower {false};
     int             timelapse_warning_code = 0; // 1<<0 sprial vase, 1<<1 by object
+
+    // Ultra (H2C 3MF schema): the multi-nozzle payload BambuStudio carries on PlateData.
+    // filament_maps is 1-based filament -> extruder; nozzle_group_result is the filament ->
+    // logical-nozzle grouping this plate was sliced with (fork: taken from Print, which owns it,
+    // instead of GCodeProcessorResult); nozzles_info is the <nozzle> list read back on import.
+    std::vector<int>          filament_maps;   // 1 base
+    // Hexadecimal number, the 0th digit corresponds to extruder 1, and so on.
+    // 0 means can be printed on this extruder, 1 means cannot.
+    std::vector<int>          limit_filament_maps;
+    std::vector<unsigned int> filament_change_sequence;
+    std::vector<unsigned int> nozzle_change_sequence;
+    std::vector<int>          optimal_assignment;
+    std::optional<MultiNozzleUtils::LayeredNozzleGroupResult> nozzle_group_result;
+    std::vector<MultiNozzleUtils::NozzleInfo> nozzles_info;
 
     std::vector<GCodeProcessorResult::SliceWarning> warnings;
 

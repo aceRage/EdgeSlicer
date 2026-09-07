@@ -169,6 +169,8 @@ const std::string BBS_PROJECT_CONFIG_FILE = "Metadata/project_settings.config";
 const std::string BBS_MODEL_CONFIG_FILE = "Metadata/model_settings.config";
 const std::string BBS_MODEL_CONFIG_RELS_FILE = "Metadata/_rels/model_settings.config.rels";
 const std::string SLICE_INFO_CONFIG_FILE = "Metadata/slice_info.config";
+// Ultra (H2C 3MF schema): per-plate filament / logical-nozzle entry order, as BambuStudio writes it.
+const std::string FILAMENT_SEQUENCE_FILE = "Metadata/filament_sequence.json";
 const std::string BBS_LAYER_HEIGHTS_PROFILE_FILE = "Metadata/layer_heights_profile.txt";
 const std::string LAYER_CONFIG_RANGES_FILE = "Metadata/layer_config_ranges.xml";
 const std::string BRIM_EAR_POINTS_FILE = "Metadata/brim_ear_points.txt";
@@ -211,6 +213,17 @@ static constexpr const char *FILAMENT_COLOR_TAG = "color";
 static constexpr const char *FILAMENT_USED_M_TAG = "used_m";
 static constexpr const char *FILAMENT_USED_G_TAG = "used_g";
 static constexpr const char *FILAMENT_TRAY_INFO_ID_TAG     = "tray_info_idx";
+// Ultra (H2C 3MF schema): the multi-nozzle <filament> attributes and the <nozzle> tag that
+// BambuStudio writes into Metadata/slice_info.config. Names are taken verbatim from
+// BambuStudio src/libslic3r/Format/bbs_3mf.cpp so the printer-side parser sees the same schema.
+static constexpr const char *FILAMENT_USED_FOR_SUPPORT      = "used_for_support";
+static constexpr const char *FILAMENT_USED_FOR_OBJECT       = "used_for_object";
+static constexpr const char *FILAMENT_TOTAL_LOAD_TIME_TAG   = "total_load_time";
+static constexpr const char *FILAMENT_TOTAL_UNLOAD_TIME_TAG = "total_unload_time";
+static constexpr const char *FILAMENT_NOZZLE_GROUP_ID_TAG    = "group_id";
+static constexpr const char *FILAMENT_NOZZLE_DIAMETER_TAG    = "nozzle_diameter";
+static constexpr const char *FILAMENT_NOZZLE_VOLUME_TYPE_TAG = "volume_type";
+static constexpr const char *NOZZLE_TAG                      = "nozzle";
 
 
 static constexpr const char* CONFIG_TAG = "config";
@@ -311,8 +324,17 @@ static constexpr const char* PLATER_NAME_ATTR = "plater_name";
 static constexpr const char* PLATE_IDX_ATTR = "index";
 static constexpr const char* PRINTER_MODEL_ID_ATTR = "printer_model_id";
 static constexpr const char* NOZZLE_DIAMETERS_ATTR = "nozzle_diameters";
-// Ultra: nozzle flow variant as an int (0=Standard, 1=High Flow) - what Bambu firmware validates.
+// Ultra: nozzle flow variant. BambuStudio writes this as one value per extruder (a vector), and
+// the H2C firmware validates it that way; before the H2C schema port the fork wrote a scalar.
 static constexpr const char* NOZZLE_VOLUME_TYPE_ATTR = "nozzle_volume_type";
+static constexpr const char* EXTRUDER_TYPE_ATTR = "extruder_type";
+static constexpr const char* LIMIT_FILAMENT_MAP_ATTR = "limit_filament_maps";
+static constexpr const char* PAUSE_COUNT_ATTR = "pause_count";
+static constexpr const char* FIRST_LAYER_TIME_ATTR = "first_layer_time";
+static constexpr const char* SUPPORT_MATERIAL_ON_WIPE_TOWER_ATTR = "support_material_on_wipe_tower";
+static constexpr const char* ENABLE_FILAMENT_DYNAMIC_MAP_ATTR = "enable_filament_dynamic_map";
+static constexpr const char* HAS_FILAMENT_SWITCHER_ATTR = "has_filament_switcher";
+static constexpr const char* DEFAULT_AMS_TYPE_ATTR = "default_ams_type";
 static constexpr const char* SLICE_PREDICTION_ATTR = "prediction";
 static constexpr const char* SLICE_WEIGHT_ATTR = "weight";
 static constexpr const char* TIMELAPSE_TYPE_ATTR = "timelapse_type";
@@ -638,6 +660,51 @@ static int max_supported_filament_id_from_project_config(const DynamicPrintConfi
     return max_filament_id >= size_t(std::numeric_limits<int>::max()) ? std::numeric_limits<int>::max() : int(max_filament_id);
 }
 
+// Ultra (H2C 3MF schema): serialization helpers ported from BambuStudio bbs_3mf.cpp.
+template<typename T>
+static void add_vector(std::stringstream &stream, const std::vector<T> &values)
+{
+    for (size_t i = 0; i < values.size(); ++i) {
+        stream << values[i];
+        if (i != (values.size() - 1))
+            stream << " ";
+    }
+}
+
+static std::vector<int> parse_int_list(const std::string& value)
+{
+    std::vector<int> out;
+    if (value.empty())
+        return out;
+
+    std::vector<std::string> tokens;
+    boost::split(tokens, value, boost::is_any_of(" ,"), boost::token_compress_on);
+    out.reserve(tokens.size());
+    for (const auto& t : tokens) {
+        if (t.empty())
+            continue;
+        try {
+            out.emplace_back(boost::lexical_cast<int>(t));
+        } catch (...) {
+        }
+    }
+
+    std::sort(out.begin(), out.end());
+    out.erase(std::unique(out.begin(), out.end()), out.end());
+    return out;
+}
+
+static std::string join_int_list_comma(const std::vector<int>& values)
+{
+    std::stringstream stream;
+    for (size_t i = 0; i < values.size(); ++i) {
+        stream << values[i];
+        if (i + 1 < values.size())
+            stream << ",";
+    }
+    return stream.str();
+}
+
 void PlateData::parse_filament_info(GCodeProcessorResult *result)
 {
     if (!result) return;
@@ -659,8 +726,22 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         info.id = it->first;
         info.used_g = used_filament_g;
         info.used_m = used_filament_m;
+        // Ultra (H2C 3MF schema): BambuStudio takes these from GCodeProcessorResult::used_filaments,
+        // which this fork does not track. The per-extruder model / support extrusion volumes the
+        // fork does track carry the same information.
+        {
+            auto model_it = ps.model_volumes_per_extruder.find(it->first);
+            info.used_for_object = (model_it != ps.model_volumes_per_extruder.end()) && (model_it->second > 0.);
+            auto support_it = ps.support_volumes_per_extruder.find(it->first);
+            info.used_for_support = (support_it != ps.support_volumes_per_extruder.end()) && (support_it->second > 0.);
+        }
         slice_filaments_info.push_back(info);
     }
+
+    // Ultra (H2C 3MF schema): first layer print time, as BambuStudio reads it off the slice result.
+    first_layer_time = std::to_string(result->initial_layer_time);
+    filament_change_sequence = result->filament_change_sequence;
+    nozzle_change_sequence   = result->nozzle_change_sequence;
 
     /* only for test
     GCodeProcessorResult::SliceWarning sw;
@@ -1233,6 +1314,10 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         bool _handle_start_config_filament(const char** attributes, unsigned int num_attributes);
         bool _handle_end_config_filament();
 
+        // Ultra (H2C 3MF schema): <nozzle .../> inside a sliced plate.
+        bool _handle_start_config_nozzle(const char** attributes, unsigned int num_attributes);
+        bool _handle_end_config_nozzle();
+
         bool _handle_start_config_warning(const char** attributes, unsigned int num_attributes);
         bool _handle_end_config_warning();
 
@@ -1558,6 +1643,16 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             plate->slice_filaments_info = it->second->slice_filaments_info;
             plate->printer_model_id = it->second->printer_model_id;
             plate->nozzle_diameters = it->second->nozzle_diameters;
+            // Ultra (H2C 3MF schema): the multi-nozzle payload BambuStudio also copies here.
+            plate->nozzle_volume_types = it->second->nozzle_volume_types;
+            plate->nozzles_info = it->second->nozzles_info;
+            plate->filament_maps = it->second->filament_maps;
+            plate->limit_filament_maps = it->second->limit_filament_maps;
+            plate->filament_change_sequence = it->second->filament_change_sequence;
+            plate->nozzle_change_sequence = it->second->nozzle_change_sequence;
+            plate->optimal_assignment = it->second->optimal_assignment;
+            plate->support_material_on_wipe_tower = it->second->support_material_on_wipe_tower;
+            plate->first_layer_time = it->second->first_layer_time;
             plate->warnings = it->second->warnings;
             plate->thumbnail_file = it->second->thumbnail_file;
             if (plate->thumbnail_file.empty()) {
@@ -2221,6 +2316,18 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             plate_data_list[it->first-1]->is_support_used = it->second->is_support_used;
             plate_data_list[it->first-1]->is_label_object_enabled = it->second->is_label_object_enabled;
             plate_data_list[it->first-1]->slice_filaments_info = it->second->slice_filaments_info;
+            plate_data_list[it->first-1]->printer_model_id = it->second->printer_model_id;
+            plate_data_list[it->first-1]->nozzle_diameters = it->second->nozzle_diameters;
+            // Ultra (H2C 3MF schema): the multi-nozzle payload BambuStudio also copies here.
+            plate_data_list[it->first-1]->nozzle_volume_types = it->second->nozzle_volume_types;
+            plate_data_list[it->first-1]->nozzles_info = it->second->nozzles_info;
+            plate_data_list[it->first-1]->filament_maps = it->second->filament_maps;
+            plate_data_list[it->first-1]->limit_filament_maps = it->second->limit_filament_maps;
+            plate_data_list[it->first-1]->filament_change_sequence = it->second->filament_change_sequence;
+            plate_data_list[it->first-1]->nozzle_change_sequence = it->second->nozzle_change_sequence;
+            plate_data_list[it->first-1]->optimal_assignment = it->second->optimal_assignment;
+            plate_data_list[it->first-1]->support_material_on_wipe_tower = it->second->support_material_on_wipe_tower;
+            plate_data_list[it->first-1]->first_layer_time = it->second->first_layer_time;
             plate_data_list[it->first-1]->skipped_objects = it->second->skipped_objects;
             plate_data_list[it->first-1]->warnings = it->second->warnings;
             plate_data_list[it->first-1]->thumbnail_file = (m_load_restore || it->second->thumbnail_file.empty()) ? it->second->thumbnail_file : m_backup_path + "/" + it->second->thumbnail_file;
@@ -3321,6 +3428,8 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             res = _handle_start_config_plater_instance(attributes, num_attributes);
         else if (::strcmp(FILAMENT_TAG, name) == 0)
             res = _handle_start_config_filament(attributes, num_attributes);
+        else if (::strcmp(NOZZLE_TAG, name) == 0)
+            res = _handle_start_config_nozzle(attributes, num_attributes);
         else if (::strcmp(SLICE_WARNING_TAG, name) == 0)
             res = _handle_start_config_warning(attributes, num_attributes);
         else if (::strcmp(ASSEMBLE_TAG, name) == 0)
@@ -3357,6 +3466,8 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             res = _handle_end_config_plater();
         else if (::strcmp(FILAMENT_TAG, name) == 0)
             res = _handle_end_config_filament();
+        else if (::strcmp(NOZZLE_TAG, name) == 0)
+            res = _handle_end_config_nozzle();
         else if (::strcmp(INSTANCE_TAG, name) == 0)
             res = _handle_end_config_plater_instance();
         else if (::strcmp(ASSEMBLE_TAG, name) == 0)
@@ -4367,6 +4478,28 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 if (m_curr_plater)
                     m_curr_plater->nozzle_diameters = value;
             }
+            // Ultra (H2C 3MF schema): BambuStudio stores the per-extruder nozzle volume types
+            // serialized on the plate so a re-opened sliced 3MF keeps them.
+            else if (key == NOZZLE_VOLUME_TYPE_ATTR)
+            {
+                if (m_curr_plater)
+                    m_curr_plater->nozzle_volume_types = value;
+            }
+            else if (key == FIRST_LAYER_TIME_ATTR)
+            {
+                if (m_curr_plater)
+                    m_curr_plater->first_layer_time = value;
+            }
+            else if (key == SUPPORT_MATERIAL_ON_WIPE_TOWER_ATTR)
+            {
+                if (m_curr_plater)
+                    std::istringstream(value) >> std::boolalpha >> m_curr_plater->support_material_on_wipe_tower;
+            }
+            else if (key == LIMIT_FILAMENT_MAP_ATTR)
+            {
+                if (m_curr_plater)
+                    m_curr_plater->limit_filament_maps = parse_int_list(value);
+            }
         }
 
         return true;
@@ -4387,6 +4520,14 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             std::string used_m = bbs_get_attribute_value_string(attributes, num_attributes, FILAMENT_USED_M_TAG);
             std::string used_g = bbs_get_attribute_value_string(attributes, num_attributes, FILAMENT_USED_G_TAG);
             std::string filament_id = bbs_get_attribute_value_string(attributes, num_attributes, FILAMENT_TRAY_INFO_ID_TAG);
+            // Ultra (H2C 3MF schema): the multi-nozzle attributes BambuStudio writes on <filament>.
+            std::string group_id = bbs_get_attribute_value_string(attributes, num_attributes, FILAMENT_NOZZLE_GROUP_ID_TAG);
+            std::string nozzle_diameter = bbs_get_attribute_value_string(attributes, num_attributes, FILAMENT_NOZZLE_DIAMETER_TAG);
+            std::string volume_type = bbs_get_attribute_value_string(attributes, num_attributes, FILAMENT_NOZZLE_VOLUME_TYPE_TAG);
+            std::string used_for_object = bbs_get_attribute_value_string(attributes, num_attributes, FILAMENT_USED_FOR_OBJECT);
+            std::string used_for_support = bbs_get_attribute_value_string(attributes, num_attributes, FILAMENT_USED_FOR_SUPPORT);
+            std::string total_load_time = bbs_get_attribute_value_string(attributes, num_attributes, FILAMENT_TOTAL_LOAD_TIME_TAG);
+            std::string total_unload_time = bbs_get_attribute_value_string(attributes, num_attributes, FILAMENT_TOTAL_UNLOAD_TIME_TAG);
             FilamentInfo filament_info;
             filament_info.id = atoi(id.c_str()) - 1;
             filament_info.type = type;
@@ -4394,8 +4535,50 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             filament_info.used_m = atof(used_m.c_str());
             filament_info.used_g = atof(used_g.c_str());
             filament_info.filament_id = filament_id;
+            filament_info.group_id = parse_int_list(group_id);
+            if (!nozzle_diameter.empty())
+                filament_info.nozzle_diameter = string_to_double_decimal_point(nozzle_diameter);
+            if (!volume_type.empty())
+                filament_info.nozzle_volume_type = volume_type;
+            filament_info.used_for_object  = (used_for_object == "1" || used_for_object == "true");
+            filament_info.used_for_support = (used_for_support == "1" || used_for_support == "true");
+            filament_info.total_load_time   = total_load_time.empty() ? 0.0 : atof(total_load_time.c_str());
+            filament_info.total_unload_time = total_unload_time.empty() ? 0.0 : atof(total_unload_time.c_str());
             m_curr_plater->slice_filaments_info.push_back(filament_info);
         }
+        return true;
+    }
+
+    // Ultra (H2C 3MF schema): <nozzle id=".." extruder_id=".." nozzle_diameter=".." volume_type=".."/>
+    // Ported from BambuStudio _BBS_3MF_Importer::_handle_start_config_nozzle.
+    bool _BBS_3MF_Importer::_handle_start_config_nozzle(const char** attributes, unsigned int num_attributes)
+    {
+        if (m_curr_plater) {
+            std::string id = bbs_get_attribute_value_string(attributes, num_attributes, "id");
+            std::string extruder_id = bbs_get_attribute_value_string(attributes, num_attributes, "extruder_id");
+            std::string nozzle_diameter = bbs_get_attribute_value_string(attributes, num_attributes, "nozzle_diameter");
+            std::string volume_type = bbs_get_attribute_value_string(attributes, num_attributes, "volume_type");
+
+            auto volume_type_str_to_enum = ConfigOptionEnum<NozzleVolumeType>::get_enum_values();
+
+            MultiNozzleUtils::NozzleInfo nozzle_info;
+            nozzle_info.group_id = atoi(id.c_str());
+            nozzle_info.extruder_id = atoi(extruder_id.c_str()) - 1;
+            nozzle_info.diameter = nozzle_diameter;
+
+            if (volume_type_str_to_enum.count(volume_type))
+                nozzle_info.volume_type = NozzleVolumeType(volume_type_str_to_enum.at(volume_type));
+            else
+                nozzle_info.volume_type = NozzleVolumeType::nvtStandard;
+
+            m_curr_plater->nozzles_info.push_back(nozzle_info);
+        }
+        return true;
+    }
+
+    bool _BBS_3MF_Importer::_handle_end_config_nozzle()
+    {
+        // do nothing
         return true;
     }
 
@@ -5684,6 +5867,8 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         bool _add_model_config_file_to_archive(mz_zip_archive& archive, const Model& model, PlateDataPtrs& plate_data_list, const ObjectToObjectDataMap &objects_data, const DynamicPrintConfig& config, int export_plate_idx = -1, bool save_gcode = true, bool use_loaded_id = false);
         bool _add_cut_information_file_to_archive(mz_zip_archive &archive, Model &model);
         bool _add_slice_info_config_file_to_archive(mz_zip_archive &archive, const Model &model, PlateDataPtrs &plate_data_list, const ObjectToObjectDataMap &objects_data, const DynamicPrintConfig& config);
+        // Ultra (H2C 3MF schema): "Metadata/filament_sequence.json" (filament / nozzle entry order).
+        bool _add_filament_sequence_file_to_archive(mz_zip_archive& archive, const PlateDataPtrs& plate_data_list);
         bool _add_gcode_file_to_archive(mz_zip_archive& archive, const Model& model, PlateDataPtrs& plate_data_list, Export3mfProgressFn proFn = nullptr);
         bool _add_custom_gcode_per_print_z_file_to_archive(mz_zip_archive& archive, Model& model, const DynamicPrintConfig* config);
         bool _add_auxiliary_dir_to_archive(mz_zip_archive &archive, const std::string &aux_dir, PackingTemporaryData &data);
@@ -6219,6 +6404,11 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         // This file contains all sliced info of all plates
         if (!_add_slice_info_config_file_to_archive(archive, model, plate_data_list, objects_data, *config)) {
             BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ":" << __LINE__ << boost::format(", _add_slice_info_config_file_to_archive failed\n");
+            return false;
+        }
+
+        if (!_add_filament_sequence_file_to_archive(archive, plate_data_list)) {
+            BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ":" << __LINE__ << boost::format(", _add_filament_sequence_file_to_archive failed\n");
             return false;
         }
 
@@ -7893,40 +8083,111 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                         break;
                     }
                 }
-                stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << PRINTER_MODEL_ID_ATTR       << "\" " << VALUE_ATTR << "=\"" << plate_data->printer_model_id << "\"/>\n";
-                stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << NOZZLE_DIAMETERS_ATTR       << "\" " << VALUE_ATTR << "=\"" << plate_data->nozzle_diameters << "\"/>\n";
-                // Ultra: declare the nozzle flow variant as an int so Bambu firmware can validate it
-                // against the installed nozzle (auto-matched to the connected printer at send time).
+
+                // Ultra (H2C 3MF schema): from here on this block is a port of BambuStudio
+                // _BBS_3MF_Exporter::_add_slice_info_config_file_to_archive. The H2C firmware
+                // rejects a plate that carries only the old (single-value) schema.
+                std::vector<int> extruder_types;
+                if (auto* opt = config.option<ConfigOptionEnumsGeneric>("extruder_type"))
+                    extruder_types = opt->values;
+                std::vector<int> nozzle_volume_types;
+                if (auto* opt = config.option<ConfigOptionEnumsGeneric>("nozzle_volume_type"))
+                    nozzle_volume_types = opt->values;
+
+                // BBS resizes every "printer_extruder_options" key to the extruder count when a
+                // printer preset is loaded, so upstream always has one value per extruder here.
+                // This fork has no such resize, and extruder_type is additionally in
+                // PrintConfigDef::handle_legacy's ignore set, so a two-extruder preset can arrive
+                // with a one-element vector - which is exactly the malformed shape the H2C
+                // rejected. Pad both to the extruder count.
                 {
-                    int nozzle_vol_type = 0; // default Standard
-                    // Ultra: nozzle_volume_type is now per-extruder (coEnums); emit the first extruder's
-                    // value for this single-nozzle metadata attribute.
-                    if (const auto* nvt = config.option<ConfigOptionEnumsGeneric>("nozzle_volume_type"))
-                        if (!nvt->values.empty()) nozzle_vol_type = nvt->values.front();
-                    stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << NOZZLE_VOLUME_TYPE_ATTR << "\" " << VALUE_ATTR << "=\"" << nozzle_vol_type << "\"/>\n";
+                    size_t extruder_count = 1;
+                    if (auto* nd = dynamic_cast<const ConfigOptionFloats*>(config.option("nozzle_diameter")))
+                        extruder_count = std::max<size_t>(nd->values.size(), 1);
+                    auto fit_to_extruders = [extruder_count](std::vector<int>& values) {
+                        if (values.empty())
+                            values.assign(extruder_count, 0);
+                        else if (values.size() < extruder_count)
+                            values.resize(extruder_count, values.back());
+                    };
+                    fit_to_extruders(extruder_types);
+                    fit_to_extruders(nozzle_volume_types);
                 }
+
+                stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << EXTRUDER_TYPE_ATTR << "\" " << VALUE_ATTR << "=\"";
+                add_vector(stream, extruder_types);
+                stream << "\"/>\n";
+
+                stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << NOZZLE_VOLUME_TYPE_ATTR << "\" " << VALUE_ATTR << "=\"";
+                add_vector(stream, nozzle_volume_types);
+                stream << "\"/>\n";
+
+                // BBS reads the diameters straight off the printer config; plate_data carries the
+                // same string (set by both the CLI and the GUI export path) as a fallback.
+                std::string nozzle_diameters_str = plate_data->nozzle_diameters;
+                if (auto* nozzle_diameter_option = dynamic_cast<const ConfigOptionFloats*>(config.option("nozzle_diameter")))
+                    nozzle_diameters_str = nozzle_diameter_option->serialize();
+
+                stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << PRINTER_MODEL_ID_ATTR       << "\" " << VALUE_ATTR << "=\"" << plate_data->printer_model_id << "\"/>\n";
+                stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << NOZZLE_DIAMETERS_ATTR       << "\" " << VALUE_ATTR << "=\"" << nozzle_diameters_str << "\"/>\n";
                 stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << TIMELAPSE_TYPE_ATTR << "\" " << VALUE_ATTR << "=\"" << timelapse_type << "\"/>\n";
                 //stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << TIMELAPSE_ERROR_CODE_ATTR << "\" " << VALUE_ATTR << "=\"" << plate_data->timelapse_warning_code << "\"/>\n";
                 stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << SLICE_PREDICTION_ATTR << "\" " << VALUE_ATTR << "=\"" << plate_data->get_gcode_prediction_str() << "\"/>\n";
                 stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << SLICE_WEIGHT_ATTR      << "\" " << VALUE_ATTR << "=\"" <<  plate_data->get_gcode_weight_str() << "\"/>\n";
+                // Ultra: this fork has no pause-print model (BBS PlateData::pause_printing), so the
+                // count is always 0 and no <pause_list> is written.
+                stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << PAUSE_COUNT_ATTR << "\" " << VALUE_ATTR << "=\"" << 0 << "\"/>\n";
+                stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << FIRST_LAYER_TIME_ATTR      << "\" " << VALUE_ATTR << "=\"" <<  plate_data->first_layer_time << "\"/>\n";
                 stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << OUTSIDE_ATTR      << "\" " << VALUE_ATTR << "=\"" << std::boolalpha<< plate_data->toolpath_outside << "\"/>\n";
                 stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << SUPPORT_USED_ATTR << "\" " << VALUE_ATTR << "=\"" << std::boolalpha<< plate_data->is_support_used << "\"/>\n";
                 stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << LABEL_OBJECT_ENABLED_ATTR << "\" " << VALUE_ATTR << "=\"" << std::boolalpha<< plate_data->is_label_object_enabled << "\"/>\n";
-
-                // TODO: Orca: hack
-                stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << FILAMENT_MAP_ATTR << "\" " << VALUE_ATTR << "=\"";
-                const size_t filaments_count = dynamic_cast<const ConfigOptionStrings*>(config.option("filament_colour"))->values.size();
-                // Ultra (Phase 8): write the real per-filament nozzle map (1-based) when present, so a saved
-                // project keeps the dual-nozzle grouping. Falls back to 1 (single nozzle) per filament when
-                // filament_map is absent/short (classic machines, or not yet grouped).
-                const auto* fmap_opt = dynamic_cast<const ConfigOptionInts*>(config.option("filament_map"));
-                for (int i = 0; i < filaments_count; ++i) {
-                    int v = (fmap_opt && i < (int)fmap_opt->values.size() && fmap_opt->values[i] >= 1) ? fmap_opt->values[i] : 1;
-                    stream << v;
-                    if (i != (filaments_count - 1))
-                        stream << " ";
+                stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << SUPPORT_MATERIAL_ON_WIPE_TOWER_ATTR << "\" " << VALUE_ATTR << "=\"" << std::boolalpha << plate_data->support_material_on_wipe_tower << "\"/>\n";
+                if (plate_data->nozzle_group_result)
+                    stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << ENABLE_FILAMENT_DYNAMIC_MAP_ATTR << "\" " << VALUE_ATTR << "=\"" << std::boolalpha << plate_data->nozzle_group_result->is_support_dynamic_nozzle_map() << "\"/>\n";
+                else
+                    stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << ENABLE_FILAMENT_DYNAMIC_MAP_ATTR << "\" " << VALUE_ATTR << "=\"" << std::boolalpha << false << "\"/>\n";
+                {
+                    bool has_filament_switcher = config.has("has_filament_switcher") ? config.opt_bool("has_filament_switcher") : false;
+                    stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << HAS_FILAMENT_SWITCHER_ATTR << "\" " << VALUE_ATTR << "=\"" << std::boolalpha << has_filament_switcher << "\"/>\n";
                 }
+
+                // filament -> extruder map, 1 based. BBS always carries a full-length filament_map;
+                // this fork leaves it short on classic single-nozzle machines, so pad with 1 there.
+                std::vector<int> filament_maps = plate_data->filament_maps;
+                if (filament_maps.empty()) {
+                    if (auto* opt = config.option<ConfigOptionInts>("filament_map"))
+                        filament_maps = opt->values;
+                }
+                {
+                    size_t filaments_count = 0;
+                    if (auto* colours = dynamic_cast<const ConfigOptionStrings*>(config.option("filament_colour")))
+                        filaments_count = colours->values.size();
+                    if (filament_maps.size() < filaments_count)
+                        filament_maps.resize(filaments_count, 1);
+                    for (int& v : filament_maps)
+                        if (v < 1) v = 1;
+                }
+                stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << FILAMENT_MAP_ATTR << "\" " << VALUE_ATTR << "=\"";
+                add_vector<int>(stream, filament_maps);
                 stream << "\"/>\n";
+
+                if (plate_data->limit_filament_maps.size() > 0) {
+                    stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << LIMIT_FILAMENT_MAP_ATTR << "\" " << VALUE_ATTR << "=\"";
+                    add_vector<int>(stream, plate_data->limit_filament_maps);
+                    stream << "\"/>\n";
+                }
+
+                // AMS type the preset assumes for the time estimation. Written only when the printer
+                // preset defines default_ams_type, exactly as BBS gates it; no BBL preset in this
+                // fork's profile set defines it, so in practice the attribute is absent.
+                {
+                    int default_ams_type = -1;
+                    if (auto* opt = config.option<ConfigOptionInt>("default_ams_type"))
+                        default_ams_type = opt->value;
+                    if (default_ams_type >= 0) {
+                        stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << DEFAULT_AMS_TYPE_ATTR << "\" " << VALUE_ATTR << "=\"" << default_ams_type << "\"/>\n";
+                    }
+                }
 
                 for (auto it = plate_data->objects_and_instances.begin(); it != plate_data->objects_and_instances.end(); it++)
                 {
@@ -7946,8 +8207,15 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                             continue;
                         }
                         inst =  obj->instances[inst_id];
-                        if (m_use_loaded_id && (inst->loaded_id > 0))
+                        if (!inst->printable)
+                            continue;
+                        if (m_use_loaded_id && (inst->loaded_id > 0)) {
                             identify_id = inst->loaded_id;
+                            if (identify_id & 0xFF000000) {
+                                BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ":" << __LINE__ << boost::format(", identify_id %1%, too big, limit the high bits to 0\n") % identify_id;
+                                identify_id = identify_id & 0x00FFFFFF;
+                            }
+                        }
                         else
                             identify_id = inst->id().id;
                         bool skipped = std::find(plate_data->skipped_objects.begin(), plate_data->skipped_objects.end(), identify_id) !=
@@ -7959,16 +8227,36 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
 
                 for (auto it = plate_data->slice_filaments_info.begin(); it != plate_data->slice_filaments_info.end(); it++)
                 {
+                    std::string group_id_value = join_int_list_comma(it->group_id);
                     stream << "    <" << FILAMENT_TAG << " " << FILAMENT_ID_TAG << "=\"" << std::to_string(it->id + 1) << "\" "
                            << FILAMENT_TRAY_INFO_ID_TAG <<"=\""<< it->filament_id <<"\" "
                            << FILAMENT_TYPE_TAG << "=\"" << it->type << "\" "
                            << FILAMENT_COLOR_TAG << "=\"" << it->color << "\" "
                            << FILAMENT_USED_M_TAG << "=\"" << it->used_m << "\" "
-                           << FILAMENT_USED_G_TAG << "=\"" << it->used_g << "\" />\n";
+                           << FILAMENT_USED_G_TAG << "=\"" << it->used_g << "\" "
+                           << FILAMENT_NOZZLE_GROUP_ID_TAG << "=\"" << group_id_value << "\" "
+                           << FILAMENT_NOZZLE_DIAMETER_TAG << "=\"" << it->nozzle_diameter << "\" "
+                           << FILAMENT_NOZZLE_VOLUME_TYPE_TAG << "=\"" << it->nozzle_volume_type << "\" "
+                           << FILAMENT_USED_FOR_OBJECT << "=\"" << it->used_for_object << "\" "
+                           << FILAMENT_USED_FOR_SUPPORT << "=\"" << it->used_for_support << "\" "
+                           << FILAMENT_TOTAL_LOAD_TIME_TAG << "=\"" << it->total_load_time << "\" "
+                           << FILAMENT_TOTAL_UNLOAD_TIME_TAG << "=\"" << it->total_unload_time << "\"/>\n";
                 }
 
                 for (auto it = plate_data->warnings.begin(); it != plate_data->warnings.end(); it++) {
                     stream << "    <" << SLICE_WARNING_TAG << " msg=\"" << it->msg << "\" level=\"" << std::to_string(it->level) << "\" error_code =\"" << it->error_code << "\"  />\n";
+                }
+
+                // The logical nozzles this plate actually used. On the H2C the extruder alone does
+                // not identify the nozzle (extruder 2 holds up to six), so this is what lets the
+                // printer resolve a filament's <filament group_id="..."> to a physical nozzle.
+                if (plate_data->nozzle_group_result) {
+                    auto used_nozzle_list = plate_data->nozzle_group_result->get_used_nozzles_in_extruder();
+                    if (!used_nozzle_list.empty()) {
+                        for (auto& used_nozzle : used_nozzle_list) {
+                            stream << "    <" << NOZZLE_TAG << " " << used_nozzle.serialize() << "/>\n";
+                        }
+                    }
                 }
                 stream << "  </" << PLATE_TAG << ">\n";
             }
@@ -7983,6 +8271,45 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             return false;
         }
 
+        return true;
+    }
+
+    // Ultra (H2C 3MF schema): port of BambuStudio
+    // _BBS_3MF_Exporter::_add_filament_sequence_file_to_archive. Writes the filament entry order and
+    // the matching logical-nozzle order per plate. The "filament_sequence" key is used instead of
+    // "sequence" only when the plate was grouped with a dynamic (selector) nozzle map, which this
+    // fork never produces; "optimal_assignment" has no source here and stays empty.
+    bool _BBS_3MF_Exporter::_add_filament_sequence_file_to_archive(mz_zip_archive& archive, const PlateDataPtrs& plate_data_list)
+    {
+        std::string sequence_str;
+        nlohmann::json j;
+
+        for (size_t idx = 0; idx < plate_data_list.size(); ++idx) {
+            PlateData* plate_data = plate_data_list[idx];
+            if (!plate_data || !plate_data->is_sliced_valid)
+                continue;
+
+            std::string plate_idx = "plate_" + std::to_string(idx + 1);
+            std::vector<unsigned int> sequence = plate_data->filament_change_sequence;
+            std::transform(sequence.begin(), sequence.end(), sequence.begin(), [](unsigned int v) { return v + 1; }); // to 1 based idx
+
+            bool enable_dynamic_map = plate_data->nozzle_group_result && plate_data->nozzle_group_result->is_support_dynamic_nozzle_map();
+            std::string seq_key = enable_dynamic_map ? "filament_sequence" : "sequence";
+            j[plate_idx][seq_key] = sequence;
+            j[plate_idx]["nozzle_sequence"] = plate_data->nozzle_change_sequence;
+            j[plate_idx]["optimal_assignment"] = plate_data->optimal_assignment;
+        }
+
+        if (j.empty())
+            return true;
+
+        sequence_str = j.dump();
+
+        if (!mz_zip_writer_add_mem(&archive, FILAMENT_SEQUENCE_FILE.c_str(), sequence_str.c_str(), sequence_str.size(), MZ_DEFAULT_COMPRESSION)) {
+            add_error("Unable to add filament sequence file to archive");
+            BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ":" << __LINE__ << boost::format(", store filament sequence to 3mf, length %1%, failed\n") % sequence_str.length();
+            return false;
+        }
         return true;
     }
 bool _BBS_3MF_Exporter::_add_gcode_file_to_archive(mz_zip_archive& archive, const Model& model, PlateDataPtrs& plate_data_list, Export3mfProgressFn proFn)
