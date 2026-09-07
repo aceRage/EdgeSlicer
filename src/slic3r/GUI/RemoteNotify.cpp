@@ -62,7 +62,8 @@ static std::deque<json>        g_queue;
 static std::condition_variable g_cv;
 static std::thread             g_worker;
 static std::atomic<bool>       g_running { false };
-static std::string             g_phone_link;
+static std::string             g_phone_link;   // what a Click/url points at: the remote link, or the LAN one
+static std::string             g_lan_link;     // the LAN link, appended to the body when there is one
 
 // ---------------------------------------------------------------- small helpers ----
 
@@ -277,7 +278,15 @@ static SendResult http_post(const std::string& url, const std::string& content_t
     return res;
 }
 
-static SendResult send_ntfy(const Dest& d, const json& e, const std::string& link)
+// One line, and only when the two links differ: a person at home reading this on ntfy or Pushover
+// gets the address that does not go out to the tailnet and back.
+static std::string with_lan(const std::string& message, const std::string& lan, const std::string& link)
+{
+    if (lan.empty() || lan == link) return message;
+    return message + "\n\nOn your home network: " + lan;
+}
+
+static SendResult send_ntfy(const Dest& d, const json& e, const std::string& link, const std::string& lan)
 {
     std::string server = d.server.empty() ? "https://ntfy.sh" : d.server;
     while (!server.empty() && server.back() == '/') server.pop_back();
@@ -291,7 +300,7 @@ static SendResult send_ntfy(const Dest& d, const json& e, const std::string& lin
     h.emplace_back("Tags", kind_tag(ev_str(e, "kind")));
     if (!link.empty()) h.emplace_back("Click", header_safe(link, 400)); // omitted while phone access is off
     if (!d.token.empty()) h.emplace_back("Authorization", "Bearer " + header_safe(d.token, 300));
-    return http_post(url, "text/plain; charset=utf-8", message_text(e), h);
+    return http_post(url, "text/plain; charset=utf-8", with_lan(message_text(e), lan, link), h);
 }
 
 // Pushover's endpoint is fixed - it is one service, not a server the person picks. The gate
@@ -307,33 +316,34 @@ static std::string pushover_endpoint()
     return "https://api.pushover.net/1/messages.json";
 }
 
-static SendResult send_pushover(const Dest& d, const json& e, const std::string& link)
+static SendResult send_pushover(const Dest& d, const json& e, const std::string& link, const std::string& lan)
 {
     if (d.app_token.empty() || d.user_key.empty()) return { false, 0, "this Pushover destination needs both an application token and a user key" };
     std::string body = "token=" + form_encode(d.app_token) + "&user=" + form_encode(d.user_key) +
-                       "&title=" + form_encode(title_text(e)) + "&message=" + form_encode(message_text(e)) +
+                       "&title=" + form_encode(title_text(e)) + "&message=" + form_encode(with_lan(message_text(e), lan, link)) +
                        "&priority=" + std::to_string(pushover_priority(ev_str(e, "severity", "info")));
     if (!link.empty()) body += "&url=" + form_encode(link) + "&url_title=" + form_encode("Open the printer page");
     return http_post(pushover_endpoint(), "application/x-www-form-urlencoded", body, {});
 }
 
-static SendResult send_webhook(const Dest& d, const json& e, const std::string& link)
+static SendResult send_webhook(const Dest& d, const json& e, const std::string& link, const std::string& lan)
 {
     std::string why;
     if (d.url.empty()) return { false, 0, "this webhook has no address" };
     if (!url_allowed(d.url, why)) return { false, 0, why };
     json payload = e;
     if (!link.empty()) payload["link"] = link; // the phone page, for a webhook that wants to link back
+    if (!lan.empty()) payload["lan_link"] = lan; // ... and the same page on the home network
     std::vector<std::pair<std::string, std::string>> h;
     if (!d.header_name.empty()) h.emplace_back(header_safe(d.header_name, 100), header_safe(d.header_value, 400));
     return http_post(d.url, "application/json", payload.dump(), h);
 }
 
-static SendResult send_once(const Dest& d, const json& e, const std::string& link)
+static SendResult send_once(const Dest& d, const json& e, const std::string& link, const std::string& lan)
 {
-    if (d.type == "ntfy") return send_ntfy(d, e, link);
-    if (d.type == "pushover") return send_pushover(d, e, link);
-    if (d.type == "webhook") return send_webhook(d, e, link);
+    if (d.type == "ntfy") return send_ntfy(d, e, link, lan);
+    if (d.type == "pushover") return send_pushover(d, e, link, lan);
+    if (d.type == "webhook") return send_webhook(d, e, link, lan);
     return { false, 0, "unknown destination type" };
 }
 
@@ -358,11 +368,11 @@ static bool sleep_interruptible(int ms)
 
 // Three attempts, 1 s then 3 s apart. Short enough that a "finished" is still news, long enough
 // that a relay hiccup or a laptop's Wi-Fi coming back is ridden out.
-static SendResult send_with_retries(const Dest& d, const json& e, const std::string& link)
+static SendResult send_with_retries(const Dest& d, const json& e, const std::string& link, const std::string& lan)
 {
     SendResult r;
     for (int attempt = 1; attempt <= MAX_TRIES; ++attempt) {
-        r = send_once(d, e, link);
+        r = send_once(d, e, link, lan);
         if (r.ok || !worth_retrying(r)) break;
         if (attempt == MAX_TRIES) break;
         if (!sleep_interruptible(attempt == 1 ? 1000 : 3000)) break;
@@ -408,7 +418,7 @@ static void worker()
     for (;;) {
         json        ev;
         std::vector<Dest> targets;
-        std::string link;
+        std::string link, lan;
         {
             std::unique_lock<std::mutex> lock(g_mutex);
             g_cv.wait(lock, [] { return !g_running || !g_queue.empty(); });
@@ -417,12 +427,13 @@ static void worker()
             ev = g_queue.front();
             g_queue.pop_front();
             link    = g_phone_link;
+            lan     = g_lan_link;
             targets = g_dests;
         }
         for (const Dest& d : targets) {
             if (!g_running) return;
             if (!wants(d, ev)) continue;
-            record(d.id, send_with_retries(d, ev, link));
+            record(d.id, send_with_retries(d, ev, link, lan));
         }
         // Web Push (P7) is not a destination somebody configures - it is a built-in fan-out over
         // whatever phones have subscribed, with its own minimum severity. It rides this worker
@@ -554,10 +565,12 @@ void stop()
     if (g_worker.joinable()) g_worker.join();
 }
 
-void set_phone_link(const std::string& url)
+void set_phone_links(const std::string& remote, const std::string& lan)
 {
     std::lock_guard<std::mutex> lock(g_mutex);
-    g_phone_link = url;
+    // Remote first: a relay's one link has to work from wherever the phone happens to be.
+    g_phone_link = remote.empty() ? lan : remote;
+    g_lan_link   = lan;
 }
 
 void deliver(const json& event)
@@ -686,9 +699,13 @@ std::pair<int, std::string> test(const std::string& id, const std::string& phone
     e["text"]     = "This is a test notification from the hub on your PC. If you can read it, notifications work.";
     e["test"]     = true;
 
-    std::string link = phone_link;
-    if (link.empty()) { std::lock_guard<std::mutex> lock(g_mutex); link = g_phone_link; }
-    const SendResult r = send_once(d, e, link);
+    std::string link = phone_link, lan;
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        if (link.empty()) link = g_phone_link;
+        lan = g_lan_link;
+    }
+    const SendResult r = send_once(d, e, link, lan);
     record(d.id, r);
     json out;
     out["ok"]     = r.ok;

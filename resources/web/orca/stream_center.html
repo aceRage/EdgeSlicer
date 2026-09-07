@@ -52,6 +52,24 @@ body.dragging .cell iframe, body.dragging .cell img { pointer-events: none; }
 #note { color: #999; font-size: 12px; }
 #via { color: #5fd08a; font-size: 12px; margin-right: 10px; white-space: nowrap; }
 #via:empty { display: none; }
+/* The Connection control: which of the hub's two origins this page came from, and the way over
+   to the other one. Always visible on the phone, because the switch is the one thing that always
+   works (a top-level navigation is never blocked as mixed content, unlike any request). */
+#conn { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; white-space: nowrap; }
+#conn:empty { display: none; }
+#conn .connwhere { color: #ddd; padding: 3px 8px; border-radius: 10px; background: #3a3a3a; }
+#conn .connwhere.home { color: #cdebd8; background: #14562f; }
+/* The host itself, so the control says which origin this is and not only which kind. A tailnet
+   name is long and the header is a phone's: it gets its own ellipsis rather than wrapping. */
+#conn .connhost { color: #999; max-width: 34vw; overflow: hidden; text-overflow: ellipsis; }
+.connbtn { display: inline-block; padding: 4px 10px; border-radius: 10px; background: #3a3a3a; color: #fff;
+           border: 1px dashed #777; font-size: 12px; cursor: pointer; user-select: none; -webkit-user-select: none; white-space: nowrap; }
+@media (pointer: coarse) { .connbtn, #conn .connwhere { padding: 6px 12px; font-size: 13px; } }
+/* Per-card stream mode. "Auto - MP4" reads as a badge and opens as a picker. */
+.cell .modepick { position: absolute; left: 8px; bottom: 6px; z-index: 2; max-width: 60%; padding: 2px 6px; border-radius: 10px;
+                  background: rgba(0,0,0,0.55); color: #fff; font-size: 11px; border: 0; -webkit-appearance: none; appearance: none; }
+.cell.expanded .modepick { bottom: calc(6px + env(safe-area-inset-bottom)); left: calc(8px + env(safe-area-inset-left)); }
+@media (pointer: coarse) { .cell .modepick { font-size: 12px; padding: 4px 8px; } }
 #modal-bg { display: none; position: fixed; inset: 0; z-index: 100; background: rgba(0,0,0,0.6); align-items: center; justify-content: center; }
 #modal { background: #333; border-radius: 8px; padding: 18px; min-width: 360px; max-width: 480px; max-height: 92vh; overflow-y: auto; color: #fff; box-shadow: 0 6px 24px rgba(0,0,0,0.5); }
 #modal h3 { font-size: 15px; margin-bottom: 12px; font-weight: 600; }
@@ -298,6 +316,7 @@ body.dragging .cell iframe, body.dragging .cell img { pointer-events: none; }
   <span class="chip" id="addchip">+ Add</span>
   <span class="chip" id="phonechip" title="Open this camera wall on your phone">&#128241; Phone</span>
   <span id="spacer"></span>
+  <span id="conn"></span>
   <span id="via" title="Connected through your Tailscale network"></span>
   <span id="note"></span>
   <span id="layoutbox" title="Grid layout: columns x rows (drag a name to reorder)">
@@ -332,6 +351,98 @@ body.dragging .cell iframe, body.dragging .cell img { pointer-events: none; }
         try { document.cookie = 'rt=' + REMOTE.split('/')[2] + '; path=/; SameSite=Lax'; } catch (e) {}
         document.getElementById('addchip').style.display = 'none';
         document.getElementById('phonechip').style.display = 'none';
+    }
+
+    // ---- Connection: Home (this network) or Away (Tailscale) ------------------------------
+    // The hub serves this same page on two origins - http://<lan ip>:13640/r/<token>/ and
+    // https://<machine>.<tailnet>.ts.net/r/<token>/ - and they share nothing at all: separate
+    // cookie jars, separate localStorage, separate service workers, separate push subscriptions.
+    // Every link a phone was ever handed (a QR code, a notification, a home-screen icon) points at
+    // exactly one of them, and until now the only one it was ever handed was the Tailscale one -
+    // so the phone went out to the tailnet and back even standing next to the PC, and everything
+    // stopped when Tailscale was off. This control is the way across.
+    //
+    // MIXED CONTENT, the constraint that shapes all of this:
+    //   From the https origin, fetch() / XHR / WebSocket to http://192.168.x.x:13640 is *active*
+    //   mixed content. The browser blocks it before a packet leaves and rejects with an opaque
+    //   TypeError, so it cannot even serve as a reachability test. An <img> is *passive* mixed
+    //   content and gets further - but Chromium 81+ and Firefox silently auto-upgrade image loads
+    //   to https, which the hub does not speak, so there the beacon reports failure even at home;
+    //   WebKit still attempts the plain http load, which is why the beacon is worth having on the
+    //   phone this was written for. So the probe can only ever say "yes, go" and never "no, stay".
+    //   A top-level *navigation* from https to http is not mixed content at all - that is why the
+    //   button is always offered and never hidden behind a successful probe.
+    var CONN_KEY   = 'snorca_conn_pref';    // 'home' | 'away' - per origin, like everything else here
+    var CONN_TRIED = 'snorca_conn_tried';   // sessionStorage: at most one automatic hop per tab
+    var connLan = '', connRemote = '';
+    var connHere = location.protocol === 'https:' ? 'away' : 'home';
+    function connOrigin(u) { try { return new URL(u).origin; } catch (e) { return ''; } }
+    function connPref() { try { return localStorage.getItem(CONN_KEY) || ''; } catch (e) { return ''; } }
+    function connSetPref(v) {
+        try { localStorage.setItem(CONN_KEY, v); } catch (e) {}
+        // A service worker cannot read localStorage - workers have no access to it - and a
+        // notification is clicked precisely when no page of ours is open to ask. The Cache API is
+        // reachable from both, so the preference is mirrored there for sw.js's notificationclick.
+        try {
+            if (window.caches) window.caches.open('snorca-conn').then(function(c) {
+                c.put('/__conn_pref', new Response(v, { headers: { 'Content-Type': 'text/plain' } }));
+            }).catch(function() {});
+        } catch (e) {}
+    }
+    function connSwitch(to) {
+        var base = to === 'home' ? connLan : connRemote;
+        if (!base) return;
+        connSetPref(to);
+        try { sessionStorage.removeItem(CONN_TRIED); } catch (e) {}
+        // The same path in the same tab on the other origin. The token is part of the base url the
+        // hub handed us, so nothing has to be carried across by hand.
+        var tail = location.pathname.replace(/^\/r\/[^/]+/, '');
+        location.href = base.replace(/\/$/, '') + tail + location.search + location.hash;
+    }
+    // The beacon: a never-cached 43-byte GIF on the LAN hub (RemoteHub.cpp, /r/<token>/ping.gif).
+    function connProbe(cb) {
+        if (!connLan) { cb(false); return; }
+        var im = new Image(), done = false;
+        var t = setTimeout(function() { if (!done) { done = true; im.src = ''; cb(false); } }, 1500);
+        function end(ok) { if (done) return; done = true; clearTimeout(t); cb(ok); }
+        im.onload = function() { end(true); };
+        im.onerror = function() { end(false); };
+        im.src = connLan + 'ping.gif?t=' + Date.now();   // the query keeps a proxy out of it too
+    }
+    function connMaybeHop() {
+        if (connHere !== 'away' || connPref() !== 'home' || !connLan) return;
+        var tried = '';
+        try { tried = sessionStorage.getItem(CONN_TRIED) || ''; } catch (e) {}
+        if (tried === connLan) return;                 // one attempt per tab per address: never a loop
+        try { sessionStorage.setItem(CONN_TRIED, connLan); } catch (e) {}
+        connProbe(function(ok) { if (ok) connSwitch('home'); });
+    }
+    function connRender() {
+        var box = document.getElementById('conn');
+        if (!box || !REMOTE) return;
+        box.innerHTML = '';
+        var where = el('span', 'connwhere' + (connHere === 'home' ? ' home' : ''), connHere === 'home' ? 'Home' : 'Away');
+        where.title = (connHere === 'home' ? 'Connected over your home network' : 'Connected through Tailscale') + ' (' + location.host + ')';
+        box.appendChild(where);
+        box.appendChild(el('span', 'connhost', location.host));
+        var other = connHere === 'home' ? 'away' : 'home';
+        var url   = other === 'home' ? connLan : connRemote;
+        if (url) {
+            var b = el('span', 'connbtn', other === 'home' ? 'Switch to home network' : 'Switch to remote');
+            b.title = url;
+            b.onclick = function() { connSwitch(other); };
+            box.appendChild(b);
+        }
+    }
+    // A request that failed on the remote origin is very often the tailnet path being down or slow
+    // while the PC is three metres away. Offer the other origin instead of only naming the failure.
+    function connHint(node) {
+        if (!REMOTE || connHere !== 'away' || !connLan || !node) return node;
+        var b = el('span', 'connbtn', 'Try the home network');
+        b.title = connLan;
+        b.onclick = function() { connSwitch('home'); };
+        node.appendChild(b);
+        return node;
     }
 
     function newId() { return 'c' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7); }
@@ -428,9 +539,25 @@ body.dragging .cell iframe, body.dragging .cell img { pointer-events: none; }
             // Remote via Tailscale: the hub reports the tailnet sign-in it admitted.
             var via = document.getElementById('via');
             if (via) via.textContent = s && s.remote_login ? 'Remote · ' + s.remote_login : '';
+            // The hub's two addresses. Which one we are on is settled by comparing origins rather
+            // than by guessing from the scheme, so a loopback preview is not mistaken for the LAN.
+            var wasHere = connHere;
+            connLan    = (s && s.lan_url) || '';
+            connRemote = (s && s.remote_url) || '';
+            if (connRemote && connOrigin(connRemote) === location.origin) connHere = 'away';
+            else if (connLan && connOrigin(connLan) === location.origin) connHere = 'home';
+            connRender();
+            connMaybeHop();
+            // Coming from MSE to the live-friendly order (or back) changes every card's mode.
+            if (wasHere !== connHere) {
+                document.querySelectorAll('#grid .cell').forEach(function(cell) { cell.remove(); });
+                render();
+            }
         }).catch(function(e) {
             console.error('state refresh failed', e);
-            document.getElementById('note').textContent = 'Lost contact with the slicer';
+            var n = document.getElementById('note');
+            n.textContent = 'Lost contact with the slicer';
+            connHint(n);
         });
     }
     function hostById(id) { return state.hosts.filter(function(x) { return x.id === id; })[0]; }
@@ -606,6 +733,84 @@ body.dragging .cell iframe, body.dragging .cell img { pointer-events: none; }
         var h = location.hostname;
         return !(/^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|127\.)/.test(h) || h === 'localhost');
     }
+    // ---- which mode the go2rtc player plays a card in -------------------------------------
+    // video-rtc.js (go2rtc 1.9.14, verbatim) decides in onopen(): if the mode string contains
+    // 'mse' and the browser has MediaSource *or* ManagedMediaSource it takes MSE; else if it
+    // contains 'hls' and the video element can play HLS it takes HLS; else if it contains 'mp4' it
+    // takes mp4. 'webrtc' is started as well when present and wins afterwards if its priority is
+    // higher; 'mjpeg' is a fallback that fires when the first mode reports an error. The order
+    // inside the string is not read - the test is includes() - so choosing a mode is choosing
+    // which words appear in it at all.
+    //
+    // Why not MSE on iOS or over the remote path (the bug this fixes): with MSE the player keeps a
+    // ~5 s sliding window, calls setLiveSeekableRange() on it and leaves the <video> element's
+    // native controls on. On iOS that renders as an ordinary movie with a scrub bar and a play
+    // button, and iOS's MediaSource is ManagedMediaSource, which the system may starve whenever it
+    // decides the buffer or the network is under pressure. Over Tailscale the added latency makes
+    // it starve constantly: it buffers, it pauses, and the person taps play again. mp4 and mjpeg
+    // have neither problem - both set video.controls = false and paint each frame as it arrives,
+    // so there is no timeline to fall behind and nothing to pause.
+    //
+    // Why not HLS: iOS Safari would take that branch happily (canPlayType says yes), but the
+    // player then fetches /hls/... straight off this origin and the hub tunnels exactly one go2rtc
+    // path, /api/ws. HLS would need a second tunnel route here *and* a wider allow_paths in the
+    // generated go2rtc.yaml. mp4 and mjpeg ride the /api/ws tunnel that already exists, so 'hls'
+    // is deliberately never in the string.
+    //
+    // Why not WebRTC by default: the hub's generated go2rtc.yaml sets `webrtc: listen: ""` and
+    // `srtp: listen: ""` (RemoteHub.cpp, start_go2rtc), so go2rtc has no candidate to offer and an
+    // offer is never answered - not even on the LAN; and Tailscale Serve is an HTTPS reverse proxy
+    // that could not carry the UDP media anyway. It stays in the manual list for whoever turns it
+    // on, and WEBRTC_RELAY is the one line to flip when they do.
+    var WEBRTC_RELAY = false;
+    var STREAM_MODES = ['auto', 'webrtc', 'mp4', 'mjpeg', 'mse'];
+    var MODE_LABEL   = { auto: 'Auto', webrtc: 'WebRTC', mp4: 'MP4', mjpeg: 'MJPEG', mse: 'MSE' };
+    var MODE_KEY     = 'snorca_stream_mode';
+    var modePrefs = {};
+    try { modePrefs = JSON.parse(localStorage.getItem(MODE_KEY) || '{}') || {}; } catch (e) {}
+    // Every browser on iOS is WebKit, so the ManagedMediaSource behaviour is the platform's, not
+    // one browser's; the check is for the platform.
+    function iosWebKit() {
+        return /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+               (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+    }
+    function autoStreamMode() {
+        // A desktop browser on the home network keeps exactly what it had: 'mse', byte for byte.
+        if (connHere === 'home' && !iosWebKit()) return 'mse';
+        return WEBRTC_RELAY ? 'webrtc,mp4,mjpeg' : 'mp4,mjpeg';
+    }
+    function streamMode(id) {
+        var p = modePrefs[id];
+        if (p === 'webrtc') return 'webrtc,mp4,mjpeg';  // with a fallback: a dead offer is not a black square
+        if (p === 'mp4' || p === 'mjpeg' || p === 'mse') return p;
+        return autoStreamMode();
+    }
+    function setStreamMode(id, v) {
+        if (v === 'auto') delete modePrefs[id]; else modePrefs[id] = v;
+        try { localStorage.setItem(MODE_KEY, JSON.stringify(modePrefs)); } catch (e) {}
+        document.querySelectorAll('#grid .cell').forEach(function(c) { if (c.dataset.id === id) c.remove(); });
+        render();
+    }
+    // The badge and the override in one control: it reads "Auto \u00b7 MP4" (what is playing) and
+    // opens as a picker. The player inside the iframe shows the mode it actually settled on in its
+    // own corner, which is the check on this one.
+    function modePicker(cell, id) {
+        var active = streamMode(id).split(',')[0];
+        var sel = el('select', 'modepick');
+        sel.title = 'Stream mode for this camera (mode=' + streamMode(id) + ')';
+        sel.setAttribute('aria-label', 'Stream mode');
+        sel.setAttribute('data-active', active);
+        STREAM_MODES.forEach(function(m) {
+            var o = el('option', '', m === 'auto' ? 'Auto \u00b7 ' + MODE_LABEL[active] : MODE_LABEL[m]);
+            o.value = m;
+            if ((modePrefs[id] || 'auto') === m) o.selected = true;
+            sel.appendChild(o);
+        });
+        sel.onchange = function() { setStreamMode(id, sel.value); };
+        sel.onclick = function(e) { e.stopPropagation(); };
+        cell.appendChild(sel);
+    }
+
     // Phone mode cells: everything comes through the slicer's token-gated listener.
     function remoteCell(h, cell) {
         var msg = null;
@@ -613,8 +818,9 @@ body.dragging .cell iframe, body.dragging .cell img { pointer-events: none; }
             var f = document.createElement('iframe');
             f.allow = 'autoplay';
             f.setAttribute('scrolling', 'no'); // iOS otherwise grows the frame to its content
-            f.src = '/stream.html?src=' + encodeURIComponent(h.rname) + '&mode=mse';
+            f.src = '/stream.html?src=' + encodeURIComponent(h.rname) + '&mode=' + encodeURIComponent(streamMode(h.id));
             cell.appendChild(f);
+            modePicker(cell, h.id);
         } else if (h.rkind === 'p1') {
             var im = document.createElement('img');
             im.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;object-fit:contain;';
@@ -1587,7 +1793,11 @@ body.dragging .cell iframe, body.dragging .cell img { pointer-events: none; }
         on.onclick = pushEnable;
         box.appendChild(on);
     }
-    function fail(e) { document.getElementById('note').textContent = e.message || String(e); }
+    function fail(e) {
+        var n = document.getElementById('note');
+        n.textContent = e.message || String(e);
+        connHint(n);
+    }
     function startSlice(plate) {
         api('/slice?plate=' + plate, { method: 'POST' }).then(function(j) {
             activeJob = j.job;
@@ -2721,7 +2931,7 @@ body.dragging .cell iframe, body.dragging .cell img { pointer-events: none; }
             if (setup) setup.remove();
             if (rest) rest.remove();
             rest = el('div', 'rest');
-            rest.appendChild(el('div', 'empty', 'Cannot reach the slicer: ' + e.message));
+            rest.appendChild(connHint(el('div', 'empty', 'Cannot reach the slicer: ' + e.message)));
             root.appendChild(rest);
             lastPresetsJson = '';
         });
@@ -3313,7 +3523,7 @@ body.dragging .cell iframe, body.dragging .cell img { pointer-events: none; }
             var list = root.querySelector('.plist');
             if (!list) { list = el('div', 'plist'); root.appendChild(list); }
             list.innerHTML = '';
-            list.appendChild(el('div', 'empty', 'Cannot reach the slicer: ' + e.message));
+            list.appendChild(connHint(el('div', 'empty', 'Cannot reach the slicer: ' + e.message)));
         });
     }
     if (REMOTE) {
@@ -3327,6 +3537,7 @@ body.dragging .cell iframe, body.dragging .cell img { pointer-events: none; }
     save();
     render();
     if (REMOTE) {
+        connRender();
         fetchRemoteState();
         setInterval(fetchRemoteState, 15000);
         // The badge has to be right whichever tab is open, so the events feed is polled on the

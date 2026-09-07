@@ -77,7 +77,9 @@ static const char* const OLD_SUBJECT_REPO = "https://github.com/aceRage/Snapmake
 static std::string       g_subject { DEFAULT_SUBJECT };
 static std::string       g_min_severity { "info" };
 static bool              g_enabled { true };
-static std::string       g_phone_link;
+static std::string       g_phone_link;   // the link a notification opens by default: remote, else LAN
+static std::string       g_lan_link;     // the same page on the home network ("" when there is none)
+static std::string       g_remote_link;  // the tailnet link ("" while remote access is off)
 static std::atomic<bool> g_stopping { false }; // set by stop(), so a backoff does not hold up a hub quit
 static std::atomic<bool> g_dirty { false }; // settings.json needs rewriting (a subscription was pruned)
 static std::map<std::string, std::pair<std::string, long long>> g_jwt_cache; // audience -> {jwt, exp}
@@ -658,7 +660,7 @@ static SendResult push_with_retries(const Sub& s, const std::string& payload, co
 // What the service worker gets. Everything it needs to render the notification without a single
 // request back to this PC - the phone may be on mobile data, miles from the LAN, and a push that
 // shows nothing costs the permission on iOS.
-static std::string payload_for(const json& e, const std::string& link)
+static std::string payload_for(const json& e, const std::string& link, const std::string& lan, const std::string& remote)
 {
     json p;
     std::string title = ev_str(e, "title", "EdgeSlicer");
@@ -679,6 +681,10 @@ static std::string payload_for(const json& e, const std::string& link)
     p["tag"] = (e.is_object() && e.contains("printer") && e["printer"].is_object() ? ev_str(e["printer"], "id") : std::string()) +
                ":" + ev_str(e, "kind");
     if (!link.empty()) p["url"] = link;
+    // Both origins, so the service worker can open the one this phone prefers without a request
+    // back to a PC that may be asleep or on a network the phone is not on.
+    if (!lan.empty()) p["lan_url"] = lan;
+    if (!remote.empty()) p["remote_url"] = remote;
     if (e.is_object() && e.contains("id") && e["id"].is_number_integer()) p["id"] = e["id"];
     if (e.is_object() && e.contains("time") && e["time"].is_number_integer()) p["time"] = e["time"];
     std::string out = p.dump();
@@ -826,26 +832,30 @@ void stop()
     g_jwt_cache.clear();
 }
 
-void set_phone_link(const std::string& url)
+void set_phone_links(const std::string& remote, const std::string& lan)
 {
     std::lock_guard<std::mutex> lock(g_mutex);
-    g_phone_link = url;
+    g_phone_link  = remote.empty() ? lan : remote;
+    g_lan_link    = lan;
+    g_remote_link = remote;
 }
 
 void deliver(const json& event)
 {
     std::vector<Sub> targets;
-    std::string      link, min_sev;
+    std::string      link, lan, remote, min_sev;
     {
         std::lock_guard<std::mutex> lock(g_mutex);
         if (!g_enabled || g_subs.empty() || g_vapid_private.empty()) return;
         targets = g_subs;
         link    = g_phone_link;
+        lan     = g_lan_link;
+        remote  = g_remote_link;
         min_sev = g_min_severity;
     }
     const std::string severity = ev_str(event, "severity", "info");
     if (severity_rank(severity) < severity_rank(min_sev)) return;
-    const std::string payload = payload_for(event, link);
+    const std::string payload = payload_for(event, link, lan, remote);
     const std::string printer = event.is_object() && event.contains("printer") && event["printer"].is_object()
                                     ? ev_str(event["printer"], "id") : std::string();
     const std::string topic   = topic_for(printer, ev_str(event, "kind"));
@@ -1007,11 +1017,13 @@ std::pair<int, std::string> set_options(const std::string& body)
 std::pair<int, std::string> test(const std::string& phone_link)
 {
     std::vector<Sub> targets;
-    std::string      link = phone_link;
+    std::string      link = phone_link, lan, remote;
     {
         std::lock_guard<std::mutex> lock(g_mutex);
         targets = g_subs;
         if (link.empty()) link = g_phone_link;
+        lan    = g_lan_link;
+        remote = g_remote_link;
     }
     if (targets.empty()) return { 200, json({ { "ok", false }, { "error", "no phone has subscribed yet" }, { "results", json::array() } }).dump() };
 
@@ -1023,7 +1035,7 @@ std::pair<int, std::string> test(const std::string& phone_link)
     e["severity"] = "info";
     e["title"]    = "EdgeSlicer test";
     e["text"]     = "This is a test push from the hub on your PC. If you can read it, Web Push works.";
-    const std::string payload = payload_for(e, link);
+    const std::string payload = payload_for(e, link, lan, remote);
 
     // Sent on this thread, once, with no retries: somebody is watching the page for the answer.
     json results = json::array();

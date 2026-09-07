@@ -76,7 +76,9 @@ void deliver(const nlohmann::json& event);
 
 // The hub's phone link, used as the notification's click target. Empty while phone access is off
 // (the notification still shows, it just has nowhere to go).
-void set_phone_link(const std::string& url);
+// Both phone links. The payload carries the pair; the service worker opens whichever one this
+// phone's owner chose (see resources/web/orca/sw.js), falling back to the remote one.
+void set_phone_links(const std::string& remote, const std::string& lan);
 
 // True when at least one phone is subscribed - lets the hub page and the event path skip the
 // work entirely.

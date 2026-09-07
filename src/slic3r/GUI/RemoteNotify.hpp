@@ -62,7 +62,10 @@ std::pair<int, std::string> test(const std::string& id, const std::string& phone
 
 // The hub's phone link, used for ntfy's Click: header and Pushover's url field so the
 // notification opens the phone page. Empty (and then omitted) while phone access is off.
-void set_phone_link(const std::string& url);
+// Both phone links, whenever the hub's idea of them changes. `remote` (Tailscale) is the one a
+// destination's single Click/url gets, because it works from anywhere; `lan` is appended to the
+// message body so somebody at home can take the fast path instead. Either may be empty.
+void set_phone_links(const std::string& remote, const std::string& lan);
 
 } // namespace RemoteNotify
 } // namespace GUI

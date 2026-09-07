@@ -1208,6 +1208,16 @@ public:
         int         attention { 0 };
     };
     Snapshot snapshot();
+    // The two ways a phone can reach this hub. They are different origins - scheme, host and port
+    // all differ - so nothing a browser keeps on one (cookie, localStorage, service worker, push
+    // subscription) is visible on the other; the page has to be told both and switch deliberately.
+    struct PhoneLinks
+    {
+        std::string lan;                 // http://<lan ip>:<port>/r/<token>/  ("" while phone access is off)
+        std::string remote;              // https://<machine>.<tailnet>.ts.net/r/<token>/  ("" while remote is off)
+        std::vector<std::string> ips;    // the LAN addresses the lan link was picked from
+    };
+    PhoneLinks phone_links();
     // Off and on again keeps the same link. The token is the hub's, remembered in settings.json,
     // and `token` is only taken up by a hub that has none of its own yet (a fresh data dir):
     // a phone's saved link, QR code or home-screen icon must not die because somebody used the
@@ -1333,6 +1343,10 @@ json HubServer::info_json()
         j["ips"] = ips;
         if (!ips.empty()) j["url"] = "http://" + ips.front() + ":" + std::to_string(m_port) + "/r/" + m_token + "/";
     }
+    // Named for what the phone page does with them. `url` is kept as it was (the hub page and the
+    // tray read it); lan_url is the same string, remote_url is the Tailscale one or empty.
+    j["lan_url"]    = j["url"];
+    j["remote_url"] = j["remote"].is_object() ? j["remote"].value("url", std::string()) : std::string();
     return j;
 }
 
@@ -1378,25 +1392,32 @@ void HubServer::write_hub_json()
     update_notify_link();
 }
 
-// The link a notification should open on the phone. The Tailscale one first, because it works
-// from anywhere; the Wi-Fi one otherwise; nothing at all while phone access is off, and then the
-// relay simply gets no link rather than one that cannot resolve.
-void HubServer::update_notify_link()
+// Both links, whenever anything that decides them changes. lan_ips() opens a socket and resolves
+// this PC's own name, so it is never called under the lock.
+HubServer::PhoneLinks HubServer::phone_links()
 {
-    std::string link;
-    bool        phone;
+    bool phone;
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         phone = m_phone;
-        if (m_remote_on && m_ts.serving && !m_ts.dns_name.empty()) link = "https://" + m_ts.dns_name + "/r/" + m_token + "/";
     }
-    if (link.empty() && phone) {
-        const std::vector<std::string> ips = lan_ips();
-        std::lock_guard<std::mutex> lock(m_mutex);
-        if (!ips.empty()) link = "http://" + ips.front() + ":" + std::to_string(m_port) + "/r/" + m_token + "/";
-    }
-    RemoteNotify::set_phone_link(link);
-    WebPush::set_phone_link(link);
+    PhoneLinks l;
+    if (phone) l.ips = lan_ips();
+    std::lock_guard<std::mutex> lock(m_mutex);
+    if (phone && !l.ips.empty()) l.lan = "http://" + l.ips.front() + ":" + std::to_string(m_port) + "/r/" + m_token + "/";
+    if (m_remote_on && m_ts.serving && !m_ts.dns_name.empty()) l.remote = "https://" + m_ts.dns_name + "/r/" + m_token + "/";
+    return l;
+}
+
+// The link a notification should open on the phone. The Tailscale one first, because it works
+// from anywhere; the Wi-Fi one otherwise; nothing at all while phone access is off, and then the
+// relay simply gets no link rather than one that cannot resolve. Both are handed over now: a
+// notification carries the pair, and the phone opens whichever one its owner prefers.
+void HubServer::update_notify_link()
+{
+    const PhoneLinks l = phone_links();
+    RemoteNotify::set_phone_links(l.remote, l.lan);
+    WebPush::set_phone_links(l.remote, l.lan);
 }
 
 // ------------------------------------------------------- printer events ----
@@ -1615,6 +1636,16 @@ void HubServer::start_go2rtc()
             << "  local_auth: true\n"
             << "  allow_paths: [\"/api/ws\", \"/api/streams\", \"/api/onvif\"]\n"
             << "rtsp:\n  listen: \"\"\n"
+            // No WebRTC and no SRTP listener, deliberately. go2rtc would need a UDP port bound on
+            // a LAN interface to offer a host candidate, which is a second way into this PC that
+            // nothing here needs; and it would still not carry video over the remote path, because
+            // Tailscale Serve is an HTTPS reverse proxy - it forwards TCP to 127.0.0.1 and cannot
+            // forward the UDP media WebRTC wants. The phone therefore never gets a usable answer
+            // to a WebRTC offer today; stream_center.html knows that (WEBRTC_RELAY, and the spec
+            // note docs/superpowers/specs/2026-09-06-phone-lan-fallback.md) and picks a mode that
+            // rides the /api/ws tunnel instead. Enabling it means: a webrtc listen port here, a
+            // firewall hole, and - for the remote path - the phone on the tailnet itself rather
+            // than behind Serve.
             << "webrtc:\n  listen: \"\"\n"
             << "srtp:\n  listen: \"\"\n";
     }
@@ -1729,6 +1760,14 @@ std::string HubServer::state_for_phone()
         }
         out["active"] = j.value("active", json::array());
     } catch (...) {}
+    // The phone's own "where am I, and where else could I be" - the Connection control in the page
+    // header reads these. A visitor here already holds the token (and, through Tailscale Serve, an
+    // allow-listed tailnet login), so the PC's LAN address tells them nothing they could not have
+    // learned by looking at the link they used.
+    const PhoneLinks links = phone_links();
+    out["lan_url"]    = links.lan;
+    out["remote_url"] = links.remote;
+    out["ips"]        = links.ips;
     return out.dump();
 }
 
@@ -2398,6 +2437,24 @@ void HubServer::handle_phone(tcp::socket& client, Request& r, const std::string&
         respond(client, 200, "image/png", png);
         return;
     }
+    // ---- the LAN probe target ----
+    // 43 bytes of transparent GIF, and the only thing on the hub a page on the *other* origin can
+    // ask for. The phone page uses it as an <img> beacon to find out whether the LAN hub is
+    // reachable before it navigates there, because on the https (Tailscale) origin a fetch() to
+    // http://<lan ip>:13640 is blocked outright as mixed content and never even reports failure.
+    // An <img> is passive mixed content and gets further in some browsers - see the note in
+    // stream_center.html; the beacon is best-effort and the manual switch is the reliable path.
+    if (r.method == "GET" && rest == "/ping.gif") {
+        static const unsigned char GIF[] = {
+            0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0x01, 0x00, 0x01, 0x00, 0x80, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0xFF, 0xFF, 0xFF, 0x21, 0xF9, 0x04, 0x01, 0x00, 0x00, 0x00, 0x00, 0x2C, 0x00, 0x00,
+            0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x02, 0x02, 0x44, 0x01, 0x00, 0x3B
+        };
+        // Never cached: a cached hit would say "the LAN is reachable" from a train.
+        respond(client, 200, "image/gif", std::string((const char*) GIF, sizeof(GIF)),
+                "Pragma: no-cache\r\nExpires: 0\r\n");
+        return;
+    }
     if (r.method == "GET" && rest == "/sw.js") {
         // Served from under the token so its scope is /r/<token>/ - a worker served from the root
         // would claim every phone link this hub ever hands out.
@@ -2474,7 +2531,8 @@ void HubServer::handle_phone(tcp::socket& client, Request& r, const std::string&
             { {"method", "POST"}, {"path", "/api/instances/open"},  {"description", "body = a .3mf/.stl/.obj/.step file, header X-File-Name = its name; starts a new (hidden) slicer instance with it; ?visible=1 opens a window"} },
             { {"method", "POST"}, {"path", "/i/{id}/open?mode=load|import"}, {"description", "same upload, opened in instance {id}: load = save the current project, then open this project (default for .3mf); import = add the model to the current plate (default otherwise)"} },
             { {"method", "*"},    {"path", "/i/{id}/api/..."},      {"description", "the instance's own API (see GET /i/{id}/api)"} },
-            { {"method", "GET"},  {"path", "/state"},               {"description", "camera list for the stream wall"} },
+            { {"method", "GET"},  {"path", "/state"},               {"description", "camera list for the stream wall, plus lan_url / remote_url / ips: the two origins this hub answers on"} },
+            { {"method", "GET"},  {"path", "/ping.gif"},            {"description", "a 43-byte never-cached GIF; the phone page's beacon for \"is the home network reachable from here\""} },
             { {"method", "GET"},  {"path", "/events?since={id}"},   {"description", "printer events the slicer instances reported (started / finished / failed / cancelled / paused / resumed / runout / error), newest last: {events, last_id}"} },
             { {"method", "GET"},  {"path", "/push/key"},            {"description", "the hub's VAPID public key, for PushManager.subscribe()"} },
             { {"method", "POST"}, {"path", "/push/subscription"},   {"description", "this browser's PushSubscription JSON; re-post it on every launch"} },
