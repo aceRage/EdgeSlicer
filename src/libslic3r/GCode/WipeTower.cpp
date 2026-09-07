@@ -63,7 +63,7 @@ static bool is_valid_gcode(const std::string &gcode)
 class WipeTowerWriter
 {
 public:
-	WipeTowerWriter(float layer_height, float line_width, GCodeFlavor flavor, const std::vector<WipeTower::FilamentParameters>& filament_parameters) :
+	WipeTowerWriter(float layer_height, float line_width, GCodeFlavor flavor, const std::vector<WipeTower::FilamentParameters>& filament_parameters, bool has_nozzle_rack = false) :
 		m_current_pos(std::numeric_limits<float>::max(), std::numeric_limits<float>::max()),
 		m_current_z(0.f),
 		m_current_feedrate(0.f),
@@ -75,7 +75,8 @@ public:
         m_default_analyzer_line_width(line_width),
 #endif // ENABLE_GCODE_VIEWER_DATA_CHECKING
         m_gcode_flavor(flavor),
-        m_filpar(filament_parameters)
+        m_filpar(filament_parameters),
+        m_has_nozzle_rack(has_nozzle_rack)
         {
             // ORCA: This class is only used by BBL printers, so set the parameter appropriately.
             // This fixes an issue where the wipe tower was using BBL tags resulting in statistics for purging in the purge tower not being displayed.
@@ -422,22 +423,22 @@ public:
 	// Let the firmware back up the active speed override value.
 	WipeTowerWriter& speed_override_backup()
     {
-        // BBS: BBL machine don't support speed backup
-#if 0
-        if (m_gcode_flavor == gcfMarlinLegacy || m_gcode_flavor == gcfMarlinFirmware)
+        // Ultra (H2C rack): BambuStudio WipeTower.cpp:1179-1185 emits this for gcfMarlinLegacy /
+        // gcfMarlinFirmware; the gold H2C file carries one "M220 B" per toolchange. Orca had it
+        // #if 0'd out ("BBL machine don't support speed backup"), which is wrong for the rack
+        // machines. Gated on the rack so P1S/H2D output stays unchanged - see
+        // docs/superpowers/specs/2026-09-07-h2c-rack-nozzle-change.md.
+        if (m_has_nozzle_rack && (m_gcode_flavor == gcfMarlinLegacy || m_gcode_flavor == gcfMarlinFirmware))
             m_gcode += "M220 B\n";
-#endif
 		return *this;
     }
 
 	// Let the firmware restore the active speed override value.
 	WipeTowerWriter& speed_override_restore()
 	{
-	    // BBS: BBL machine don't support speed restore
-#if 0
-        if (m_gcode_flavor == gcfMarlinLegacy || m_gcode_flavor == gcfMarlinFirmware)
+	    // Ultra (H2C rack): see speed_override_backup above (BambuStudio WipeTower.cpp:1188-1194).
+        if (m_has_nozzle_rack && (m_gcode_flavor == gcfMarlinLegacy || m_gcode_flavor == gcfMarlinFirmware))
             m_gcode += "M220 R\n";
-#endif
 		return *this;
     }
 
@@ -529,6 +530,7 @@ private:
 #endif // ENABLE_GCODE_VIEWER_DATA_CHECKING
     float         m_used_filament_length = 0.f;
     GCodeFlavor   m_gcode_flavor;
+    bool          m_has_nozzle_rack = false;   // Ultra (H2C rack)
     const std::vector<WipeTower::FilamentParameters>& m_filpar;
 
 	std::string   set_format_X(float x)
@@ -617,6 +619,7 @@ WipeTower::WipeTower(const PrintConfig& config, int plate_idx, Vec3d plate_origi
     m_bridging(10.f),
     m_no_sparse_layers(config.wipe_tower_no_sparse_layers),
     m_gcode_flavor(config.gcode_flavor),
+    m_has_nozzle_rack(Slic3r::has_nozzle_rack(config)),
     m_travel_speed(config.travel_speed),
     m_current_tool(initial_tool),
     //wipe_volumes(flush_matrix)
@@ -766,7 +769,7 @@ WipeTower::ToolChangeResult WipeTower::tool_change(size_t tool, bool extrude_per
         (tool != (unsigned int)(-1) ? wipe_depth + m_depth_traversed - m_perimeter_width
                                     : m_wipe_tower_depth - m_perimeter_width));
 
-	WipeTowerWriter writer(m_layer_height, m_perimeter_width, m_gcode_flavor, m_filpar);
+	WipeTowerWriter writer(m_layer_height, m_perimeter_width, m_gcode_flavor, m_filpar, m_has_nozzle_rack);
 	writer.set_extrusion_flow(m_extrusion_flow)
 		.set_z(m_z_pos)
 		.set_initial_tool(m_current_tool)
@@ -1204,7 +1207,7 @@ WipeTower::ToolChangeResult WipeTower::finish_layer(bool extrude_perimeter, bool
 
     size_t old_tool = m_current_tool;
 
-	WipeTowerWriter writer(m_layer_height, m_perimeter_width, m_gcode_flavor, m_filpar);
+	WipeTowerWriter writer(m_layer_height, m_perimeter_width, m_gcode_flavor, m_filpar, m_has_nozzle_rack);
 	writer.set_extrusion_flow(m_extrusion_flow)
 		.set_z(m_z_pos)
 		.set_initial_tool(m_current_tool)
@@ -1696,7 +1699,7 @@ WipeTower::ToolChangeResult WipeTower::only_generate_out_wall()
 {
     size_t old_tool = m_current_tool;
 
-    WipeTowerWriter writer(m_layer_height, m_perimeter_width, m_gcode_flavor, m_filpar);
+    WipeTowerWriter writer(m_layer_height, m_perimeter_width, m_gcode_flavor, m_filpar, m_has_nozzle_rack);
     writer.set_extrusion_flow(m_extrusion_flow)
         .set_z(m_z_pos)
         .set_initial_tool(m_current_tool)

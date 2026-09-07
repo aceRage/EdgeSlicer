@@ -479,6 +479,12 @@ static t_config_enum_values s_keys_map_PrimeVolumeMode {
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(PrimeVolumeMode)
 
 // Ultra (dual-nozzle) shared helpers (see PrintConfig.hpp).
+bool has_nozzle_rack(const PrintConfig &config)
+{
+    const std::vector<int> &counts = config.extruder_max_nozzle_count.values;
+    return std::any_of(counts.begin(), counts.end(), [](int c) { return c > 1; });
+}
+
 std::string get_nozzle_volume_type_string(NozzleVolumeType nozzle_volume_type)
 {
     for (const auto& kv : s_keys_map_NozzleVolumeType)
@@ -2319,6 +2325,18 @@ void PrintConfigDef::init_fff_params()
     def->min = 0;
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloats { 0. });
+
+    // Ultra (H2C rack): BambuStudio PrintConfig.cpp:3041. The nozzle-change pre-cool target,
+    // read by the wipe tower's nozzle-change block (M104 T<e> S<t> N0 ;Wipe tower nozzle change
+    // pre cooling). 0 disables it. The BBL H2C filament profiles in this tree already carry the
+    // key (Bambu PLA Basic @BBL H2C.json: 180); without this def the loader dropped it.
+    def = this->add("filament_pre_cooling_temperature_nc", coInts);
+    def->label = L("Hotend change");
+    def->tooltip = L("To prevent oozing, the nozzle temperature will be cooled during ramming. Note: only a cooldown command and fan activation are triggered, reaching the target temperature is not guaranteed. 0 means disabled.");
+    def->sidetext = "°C";
+    def->min = 0;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionInts { 0 });
 
     def = this->add("machine_load_filament_time", coFloat);
     def->label = L("Filament load time");

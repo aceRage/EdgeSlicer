@@ -182,6 +182,24 @@ struct LayerResult {
     static LayerResult make_nop_layer_result() { return {"", std::numeric_limits<coord_t>::max(), false, false, true}; }
 };
 
+namespace MultiNozzleUtils { class NozzleGroupResultBase; }
+
+// Ultra (H2C rack): the per-logical-nozzle arrays the H2C change_filament template indexes
+// with current_nozzle_id / next_nozzle_id, and the pure formatter for the in-extruder
+// nozzle-change block. Ports of BambuStudio GCode.cpp:119-155 and WipeTower.cpp:3388-3568
+// (with nozzle_change_line_count == 0). Free functions so libslic3r_tests can reach them -
+// see tests/libslic3r/test_h2c_rack_nozzle_change.cpp.
+std::vector<double>      get_nozzle_diameters_by_nozzle_id(const MultiNozzleUtils::NozzleGroupResultBase *group_result);
+std::vector<std::string> get_nozzle_volume_types_by_nozzle_id(const MultiNozzleUtils::NozzleGroupResultBase *group_result);
+std::string              format_nozzle_change_block(int  old_filament_id,
+                                                    int  new_filament_id,
+                                                    int  old_nozzle_id,
+                                                    int  new_nozzle_id,
+                                                    bool extruder_change,
+                                                    bool dynamic_nozzle_map,
+                                                    int  precool_temp,
+                                                    int  physical_extruder);
+
 class GCode {
 
 public:
@@ -630,6 +648,8 @@ private:
     // Records one filament entry. -1 nozzle id == "no dynamic nozzle map", as in BBS's
     // NOZZLE_ID_FOR_GCODE macro.
     void record_filament_change(unsigned int filament_id);
+    // Ultra (H2C rack): the in-extruder nozzle-change block emitted around a rack change.
+    std::string nozzle_change_gcode(int old_filament_id, int new_filament_id, int old_nozzle_id, int new_nozzle_id, bool extruder_change) const;
     coordf_t m_nominal_z;
     bool m_need_change_layer_lift_z = false;
     int m_start_gcode_filament = -1;
