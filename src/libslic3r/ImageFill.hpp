@@ -290,8 +290,16 @@ void image_fill_subdivide(const Vec3f &a, const Vec3f &b, const Vec3f &c, int de
 // Encode a uniform-depth subdivision with one state per leaf into TriangleSelector's bitstream.
 // `states` holds 4^depth entries per original triangle, in image_fill_subdivide's order.
 // Original triangles whose leaves are all state 0 are omitted, exactly as serialize() omits them.
-TriangleSelector::TriangleSplittingData image_fill_encode(size_t n_original_triangles, int depth,
-                                                          const std::vector<int> &states);
+//
+// `selected` and `existing`, when both given, make this a MERGE rather than a replacement: an
+// original triangle the caller did not select keeps whatever `existing` said about it, copied
+// bit-for-bit out of its bitstream. That is what makes "apply the image only to these faces" leave
+// the rest of the part's painting alone instead of erasing it. `selected` must have one entry per
+// original triangle.
+TriangleSelector::TriangleSplittingData image_fill_encode(
+    size_t n_original_triangles, int depth, const std::vector<int> &states,
+    const std::vector<bool>                       *selected = nullptr,
+    const TriangleSelector::TriangleSplittingData *existing = nullptr);
 
 // How deep to go so that a triangle whose longest edge is `max_edge_mm` ends up with edges of
 // about `detail_mm`, capped at `cap` and at IMAGE_FILL_MAX_LEAVES over `n_triangles`.

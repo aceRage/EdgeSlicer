@@ -166,6 +166,13 @@ Nothing writes the bitstream into the model directly: `image_fill_apply` deseria
 fork's own writer would have produced, and the encoder is validated against the fork's decoder on
 every single call.
 
+**A face selection is a merge, not a replacement.** `image_fill_encode` takes an optional
+`selected` mask and the part's existing painting; an original triangle the caller did not select
+keeps whatever it had, copied bit-for-bit out of the old bitstream. `serialize()` writes its
+entries in ascending triangle order and the bitstream in that same order, so a triangle's bits run
+from its own start index to the next entry's, which is what makes a verbatim copy possible at all.
+Without this, "apply the image only to these faces" would erase every other stroke on the part.
+
 ### Applying
 
 ```cpp
@@ -278,16 +285,27 @@ from `snorca_hubtest/dd_lan`. The user's live install and data directory were ne
 `libslic3r_tests`:
 
 ```
-test cases:   636 |   634 passed | 2 failed as expected
-assertions: 72908 | 72906 passed | 2 failed as expected
+test cases:   639 |   637 passed | 2 failed as expected
+assertions: 72946 | 72944 passed | 2 failed as expected
 ```
 
 The two expected failures are the pre-existing pair in `tests/libslic3r/test_mixed_filament.cpp`.
-Phase 1 was **628 cases** with the same two, so this branch adds **8**: six for the service (hash
-stability, projections, the quad-lands-on-the-quadrants end-to-end, mesh UVs, subdivision, the
-palette and solver), the params round trip, and the 3MF round trip. Two more are tagged out of the
-default run - `[glb]` (the before/after, §6.4) and `[barb]` (which writes the Bar B project, §6.3) -
-and both are counted in the 636.
+Phase 1 was **628 cases** with the same two, so this branch adds **11**, all of them in
+`tests/libslic3r/test_image_fill.cpp` and all of them in the default run:
+
+| case | what it pins |
+| --- | --- |
+| asset hash | the three fixtures' SHA-256s against `make_fixtures.py`'s own output, the empty-input hash, dedupe, `retain()`, and that the decoded pixels are the ones written |
+| projections | known points to known `u`,`v` for planar on each axis, cylindrical on Z and on X, the flips, and MeshUV declining to guess |
+| the quadrants | end to end: a 2 x 2 picture on a 4 x 4 mm quad at depth 3 must put each colour in the right quadrant, read back through the fork's decoder |
+| mesh UVs | the same quad with UVs that rotate the picture a quarter turn, so a projection that ignored them could not pass both |
+| subdivision | 4^n leaves whose areas sum to the original; a painted cube through `ColorSplit::extract_color_patches` with zero open edges at four depths; the encoder round-tripping through `TriangleSelector`; the nibble chain; the depth caps |
+| palette and solver | determinism, counts that add up, the obvious filament for an obvious colour, only allowed filaments, per-face colours, and two identical runs of `image_fill_compute` |
+| params | the `k=v;k=v` round trip, gradients, refusal of a string with no version marker, and a gradient painting with no asset at all |
+| 3MF | apply, save, reload: the painted facets bit-identical, the asset byte-identical under the same hash, the annotation recoverable, and re-applying it reproducing the same painting |
+| `[glb]` | the before/after of §6.5 |
+| `[barb]` | writes the Bar B project of §6.3, asserting the painting first |
+| `[selection]` | a face selection is a merge: the unselected facets' bits are carried over verbatim, only four of the cube's twelve triangles carry anything, and a selection nothing is painted with is refused |
 
 ### 6.2 Bar A - N = 2 new keys
 
@@ -362,7 +380,34 @@ Sliced twice by `snorca_hubtest/bar_b_imgp2.py` on P1S / `0.20mm Standard @BBL X
   Note the contrast with Bar A: the single-filament `OrcaToleranceTest.stl` slice **is** exactly
   reproducible on both builds. It is the multi-material path that is not.
 
-### 6.4 The glTF before/after
+### 6.4 The plan's Bar B - the support corpus, feature off
+
+The plan's own Phase 2 acceptance also names **Bar B** in its original sense:
+`scripts/support_group_identity.py` over `tests/data/support_corpus`, comparing every case's G-code
+between the two builds through the fork's own Slice Compare engine. Run with the phase 1 install as
+the baseline and this branch's as the candidate, all 20 cases:
+
+```
+20 cases: config_rows=2, layers changed=0, a_only=0, b_only=0,
+          segments=100.0000%, dirty_layers=0, est_seconds identical
+changed_config on every case, and nothing else:
+    {"key": "image_fill_detail",  "a": "", "b": "0"}
+    {"key": "image_fill_params",  "a": "", "b": ""}
+RESULT: 20 case(s) differ        (the gate requires ZERO changed config rows)
+```
+
+The corpus covers grid, snug, ledge, soluble and dense interfaces, `over_support_off`, ironing,
+organic and classic trees in four variants, a raft, no support at all, and the three handy models -
+up to 593 layers and 708 354 segments (`handy_bunny_tree_organic`). **Every segment of every layer
+of every case is identical**, including the estimated print time to three decimals. The gate reports
+"differ" purely because its structural criterion is *zero* changed config rows, and N = 2 by
+construction; the plan's wording anticipates exactly this ("plus exactly the N new
+`; <key> = <default>` lines that new `PrintConfig` keys legitimately add").
+
+Worth noting for whoever reads the JSON: `image_fill_params` shows `"a": "", "b": ""` - the values
+agree and the *row* is what is new.
+
+### 6.5 The glTF before/after
 
 `tests/data/image_fill/agent_plaque.glb` and `agent_medallion.glb`, written for this branch by
 `make_glb.py` from `struct` and `zlib` so nothing about them comes from the reader they measure.
@@ -396,7 +441,7 @@ never caught it. Fixed in `decode_png_image`, where the decoder's convention is 
 keeps its one honest rule. This is a second behaviour change to GLB import, and it makes the result
 correct rather than merely different.
 
-### 6.5 GUI
+### 6.6 GUI
 
 A hidden scratch instance of this build (`snorca_hubtest/run_control_app.py`, its own install at
 `inst_imgp2_cand`, its own data dir copied from `dd_lan`) starts on the Bar B project and stays up.
@@ -424,7 +469,21 @@ view, and the undo of an apply.
 5. **Adaptive subdivision.** The depth is uniform per volume. Section 2 says why, and what it costs.
 6. **Phase 3's per-fill-segment resolution.** Out of scope by the plan: Image Fill is still limited
    by facet size, only now the facet size is the user's choice rather than the modeller's.
-7. **The dialog was not clicked.** See the acceptance section of the session report: there is no
-   automation in this repository that can drive a wxWidgets dialog, so the dialog's own behaviour is
-   argued from the model-level API the tests do exercise, plus a hidden instance proving the changed
-   binary starts and stays up.
+7. **A face selection has to be painted on whole facets.** The selection is matched by comparing
+   the paint tool's leaves against the part's own triangles, so a stroke that only covers part of a
+   facet is refused with a message that says so rather than being rounded up or down. Painting a
+   selection with the bucket-fill or the seed-fill tool, which work per facet, is the way to make
+   one. Matching a sub-facet selection would mean intersecting two subdivision trees, which is
+   Phase 3's shape of problem, not this one's.
+8. **The multi-material slice is not reproducible run to run.** §6.3 measures it and shows it
+   predates this branch, but nobody has chased it down. It matters more now than it did, because
+   Image Fill makes multi-material slices something an ordinary user reaches for.
+9. **Nothing paid attention to how long a big fill takes.** `image_fill_compute` walks the leaves
+   twice and does one linear pass over the palette per leaf, so at the 4 000 000-leaf ceiling that
+   is on the order of a billion distance computations. On a cube it is instant; on a dense mesh at
+   a fine detail setting it will be a visible pause with no progress bar. Bucketing the
+   sample-to-palette lookup by the quantiser's own 5-bit key would collapse it to a hash lookup,
+   and that is the first thing to do if anyone complains.
+10. **The dialog was not clicked.** See §6.6: there is no automation in this repository that can
+   drive a wxWidgets dialog, so the dialog's own behaviour is argued from the model-level API the
+   tests do exercise, plus a hidden instance proving the changed binary starts and stays up.

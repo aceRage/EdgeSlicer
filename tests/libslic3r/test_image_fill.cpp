@@ -960,3 +960,94 @@ TEST_CASE("Image Fill: write the Bar B project - a cube with a three-colour imag
     WARN("Bar B project written to " << out << " (" << res.facets_painted << " painted facets, "
          << res.filaments_used.size() << " filaments, subdivision " << res.subdivision_used << ")");
 }
+
+// =============================================================================================
+// 8. A face selection is a merge, not a replacement
+// =============================================================================================
+
+TEST_CASE("Image Fill: applying to a face selection leaves the rest of the painting alone",
+          "[imagefill][selection]")
+{
+    // Paint a cube by hand: facets 0 and 1 with filament 2 (the selection to fill), facets 4 and 5
+    // with filament 3 (paint the user made earlier and must not lose). Then fill only the
+    // filament-2 faces with an image, and check both halves of the promise.
+    TriangleMesh cube = make_cube(10., 10., 10.);
+    const size_t n = cube.its.indices.size();
+    REQUIRE(n == 12);
+    std::vector<int> before(n, 0);
+    before[0] = 2; before[1] = 2;
+    before[4] = 3; before[5] = 3;
+    const auto existing = image_fill_encode(n, 0, before);
+
+    ImageAssetStore   store;
+    const std::string sha = store.add(read_fixture("quad_rgbw.png"));
+
+    ImageFillParams p;
+    p.asset           = sha;
+    p.projection      = ImageFillProjection::Planar;
+    p.axis            = ImageFillAxis::Z;
+    p.subdivision     = 2;
+    p.allowed         = kFilamentIds;
+    p.selection_state = 2;
+
+    const ImageFillResult res = image_fill_compute(cube.its, existing, p, store, kFilamentColors,
+                                                   kFilamentIds);
+    REQUIRE(res.ok);
+
+    TriangleSelector sel(cube);
+    sel.deserialize(res.painting, /*needs_reset=*/true);
+
+    // Bits of one original triangle, so "carried over verbatim" can be asserted literally.
+    auto bits_of = [](const TriangleSelector::TriangleSplittingData &d, int tri) {
+        std::vector<bool> out;
+        for (size_t k = 0; k < d.triangles_to_split.size(); ++k) {
+            if (d.triangles_to_split[k].triangle_idx != tri)
+                continue;
+            const size_t b = size_t(d.triangles_to_split[k].bitstream_start_idx);
+            const size_t e = (k + 1 < d.triangles_to_split.size())
+                                 ? size_t(d.triangles_to_split[k + 1].bitstream_start_idx)
+                                 : d.bitstream.size();
+            out.assign(d.bitstream.begin() + b, d.bitstream.begin() + e);
+            break;
+        }
+        return out;
+    };
+
+    THEN("the two facets that were not selected are carried over bit for bit")
+    {
+        REQUIRE_FALSE(bits_of(existing, 4).empty());
+        CHECK(bits_of(res.painting, 4) == bits_of(existing, 4));
+        CHECK(bits_of(res.painting, 5) == bits_of(existing, 5));
+    }
+    THEN("only four original triangles carry anything: the two filled and the two kept")
+    {
+        REQUIRE(res.painting.triangles_to_split.size() == 4);
+        std::vector<int> ids;
+        for (const auto &m : res.painting.triangles_to_split)
+            ids.push_back(m.triangle_idx);
+        CHECK(ids == std::vector<int>{0, 1, 4, 5});
+    }
+    THEN("the selected facets carry the image, and the leaf count adds up")
+    {
+        // 2 selected facets x 16 leaves, plus the 2 untouched facets that were never split.
+        size_t leaves = 0;
+        for (int st = 1; st <= 16; ++st)
+            leaves += size_t(sel.num_facets(EnforcerBlockerType(st)));
+        CHECK(leaves == 2u * 16u + 2u);
+        // The quad image has four colours and the two selected facets span all of them, so the
+        // fill is not simply the one flat filament it replaced.
+        CHECK(res.filaments_used.size() >= 2);
+        // The facets that were filled no longer read as a single undivided filament 2.
+        CHECK(bits_of(res.painting, 0) != bits_of(existing, 0));
+    }
+
+    SECTION("a selection nothing is painted with is refused, rather than silently painting all")
+    {
+        ImageFillParams q = p;
+        q.selection_state = 5;
+        const ImageFillResult bad = image_fill_compute(cube.its, existing, q, store, kFilamentColors,
+                                                       kFilamentIds);
+        CHECK_FALSE(bad.ok);
+        CHECK_FALSE(bad.error.empty());
+    }
+}

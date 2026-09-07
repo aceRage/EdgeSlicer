@@ -428,17 +428,46 @@ void encode_node(std::vector<bool> &bits, int depth, const int *states, size_t s
 }
 } // namespace
 
-TriangleSelector::TriangleSplittingData image_fill_encode(size_t n_original_triangles, int depth,
-                                                          const std::vector<int> &states)
+TriangleSelector::TriangleSplittingData image_fill_encode(
+    size_t n_original_triangles, int depth, const std::vector<int> &states,
+    const std::vector<bool> *selected, const TriangleSelector::TriangleSplittingData *existing)
 {
     TriangleSelector::TriangleSplittingData data;
     size_t per = 1;
     for (int i = 0; i < depth; ++i) per *= 4;
     if (states.size() != n_original_triangles * per)
         return data;
+    const bool merge = selected != nullptr && existing != nullptr &&
+                       selected->size() == n_original_triangles;
+
+    // Where each original triangle's subtree lives in `existing`. serialize() writes the entries in
+    // ascending triangle order and the bitstream in that same order, so a triangle's bits run from
+    // its own start index to the next entry's - which is what makes a verbatim copy possible.
+    std::map<int, std::pair<size_t, size_t>> carry;
+    if (merge) {
+        const auto &tts = existing->triangles_to_split;
+        for (size_t k = 0; k < tts.size(); ++k) {
+            const size_t begin = size_t(tts[k].bitstream_start_idx);
+            const size_t end   = (k + 1 < tts.size()) ? size_t(tts[k + 1].bitstream_start_idx)
+                                                      : existing->bitstream.size();
+            if (begin <= end && end <= existing->bitstream.size())
+                carry.emplace(tts[k].triangle_idx, std::make_pair(begin, end));
+        }
+    }
 
     data.triangles_to_split.reserve(n_original_triangles);
     for (size_t t = 0; t < n_original_triangles; ++t) {
+        if (merge && !(*selected)[t]) {
+            // Not part of this fill: keep what was there, bit for bit.
+            auto it = carry.find(int(t));
+            if (it == carry.end())
+                continue;   // it carried nothing before either
+            data.triangles_to_split.emplace_back(int(t), int(data.bitstream.size()));
+            data.bitstream.insert(data.bitstream.end(),
+                                  existing->bitstream.begin() + it->second.first,
+                                  existing->bitstream.begin() + it->second.second);
+            continue;
+        }
         const int *s = states.data() + t * per;
         bool any = false;
         for (size_t i = 0; i < per; ++i)
@@ -451,6 +480,8 @@ TriangleSelector::TriangleSplittingData image_fill_encode(size_t n_original_tria
         encode_node(data.bitstream, depth, s, per);
     }
     for (size_t t = 0; t < n_original_triangles; ++t) {
+        if (merge && !(*selected)[t])
+            continue;
         const int *s = states.data() + t * per;
         for (size_t i = 0; i < per; ++i) {
             const int n = s[i];
@@ -458,6 +489,10 @@ TriangleSelector::TriangleSplittingData image_fill_encode(size_t n_original_tria
                 data.used_states[size_t(n)] = true;
         }
     }
+    if (merge)
+        for (size_t st = 0; st < existing->used_states.size() && st < data.used_states.size(); ++st)
+            if (existing->used_states[st])
+                data.used_states[st] = true;
     return data;
 }
 
@@ -669,7 +704,11 @@ ImageFillResult image_fill_compute(const indexed_triangle_set                   
     for (size_t i = 0; i < states.size(); ++i)
         if (states[i] > 0) ++res.facets_painted;
 
-    res.painting = image_fill_encode(mesh.indices.size(), depth, states);
+    // A face selection is a MERGE: only the selected facets take the image, and everything the
+    // part was already painted with survives untouched.
+    res.painting = params.selection_state > 0
+                       ? image_fill_encode(mesh.indices.size(), depth, states, &selected, &existing)
+                       : image_fill_encode(mesh.indices.size(), depth, states);
     std::vector<int> used;
     for (int s : states)
         if (s > 0 && std::find(used.begin(), used.end(), s) == used.end()) used.push_back(s);

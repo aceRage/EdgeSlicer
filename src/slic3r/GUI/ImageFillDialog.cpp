@@ -238,7 +238,10 @@ void ImageFillDialog::collect()
     const int sel       = m_selection->GetSelection();
     m_params.selection_state = (sel > 0 && size_t(sel - 1) < m_painted_states.size()) ? m_painted_states[sel - 1] : 0;
     m_params.detail_mm  = float(m_detail->GetValue());
-    m_params.subdivision = IMAGE_FILL_MAX_SUBDIVISION;   // the cap; detail_mm decides the depth
+    // The control's own promise: 0 mm means "the model's own triangles". image_fill_depth_for_
+    // detail only DERIVES a depth when detail_mm > 0, and otherwise takes `subdivision` as given -
+    // so 0 has to zero the depth too, or the tooltip would be lying by six levels.
+    m_params.subdivision = m_params.detail_mm > 0.f ? IMAGE_FILL_MAX_SUBDIVISION : 0;
 
     m_params.allowed.clear();
     for (size_t i = 0; i < m_filaments.size(); ++i)
