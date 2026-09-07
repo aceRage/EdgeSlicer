@@ -11,6 +11,7 @@ add_executable(${_TEST_NAME}_tests
 	test_clipper_offset.cpp
 	test_clipper_utils.cpp
 	test_config.cpp
+	test_contour_z.cpp
 	test_config_include.cpp
 	test_custom_gcode.cpp
 	test_default_bed_type.cpp
