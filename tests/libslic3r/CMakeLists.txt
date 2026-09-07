@@ -14,6 +14,7 @@ add_executable(${_TEST_NAME}_tests
 	test_config_include.cpp
 	test_custom_gcode.cpp
 	test_default_bed_type.cpp
+	test_dual_nozzle_group.cpp
 	test_elephant_foot_compensation.cpp
 	test_geometry.cpp
 	test_mixed_filament.cpp
