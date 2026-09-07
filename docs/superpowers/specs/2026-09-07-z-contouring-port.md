@@ -128,6 +128,13 @@ Three separate decisions:
 back to the offset base. The two therefore compose by addition, and the *absolute* band is
 identical to upstream's: `[lo + zaa_min_z, print_z + zaa_min_z]`, whether the wall is offset or not.
 
+One nuance the tests pinned: the cap "never above `print_z + zaa_min_z`" is a statement about
+**contoured** moves. Where the raycast says "this is not a top surface" the delta is zero and the
+wall stays exactly where `offset_layers` put it, half a layer up at `print_z + 0.5h`. It must not be
+dragged down to `print_z + zaa_min_z` - that would undo `offset_layers` on every interior layer,
+which is most of the print. Both `test_contour_z.cpp` and the Bar B analyzer distinguish the two
+cases.
+
 **The never-raise clamp.** Upstream forbids raising perimeters (`d > 0 -> d = 0`) so a raised wall
 does not look like a seam. Its reference had to move from `print_z` to the offset base. If it had
 not, the rule would read `d_off > -0.5h -> d_off = -0.5h` in the offset frame, which would force

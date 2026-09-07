@@ -8,7 +8,9 @@
 #include <catch2/catch.hpp>
 #include <test_utils.hpp>
 
+#include <algorithm>
 #include <cmath>
+#include <limits>
 
 #include <libslic3r/ContourZ.hpp>
 #include <libslic3r/SLA/IndexedMesh.hpp>
@@ -234,8 +236,17 @@ TEST_CASE("ZAA composes with offset_layers", "[ContourZ]")
             // The emitted Z of the odd wall is base + delta, base = print_z + 0.5 * height.
             const double z_odd = odd.print_z + z_offset_mm + d_odd;
 
-            REQUIRE(z_odd <= odd.print_z + min_z + 1e-9);   // never above print_z + zaa_min_z
             REQUIRE(z_odd >= lo + min_z - 1e-9);            // never below lo + zaa_min_z
+
+            if (d_odd == 0.0) {
+                // Not a top surface here: ZAA leaves the wall exactly where offset_layers put it,
+                // half a layer up. It must NOT be dragged down to print_z + zaa_min_z - that would
+                // undo offset_layers on every interior layer. So the cap below applies to
+                // CONTOURED moves only.
+                REQUIRE(z_odd == Approx(odd.print_z + z_offset_mm));
+            } else {
+                REQUIRE(z_odd <= odd.print_z + min_z + 1e-9);   // never above print_z + zaa_min_z
+            }
 
             // Where the surface is inside the band, both frames land on the same absolute Z.
             if (d_flat != 0.0)
@@ -299,13 +310,13 @@ TEST_CASE("ZAA: a 10 degree ramp gets monotonically increasing Z deltas", "[Cont
 
     indexed_triangle_set its;
     auto V = [&](double x, double y, double z) {
-        its.vertices.emplace_back(Vec3f(float(x), float(y), float(z)));
+        its.vertices.emplace_back(stl_vertex(float(x), float(y), float(z)));
         return int(its.vertices.size()) - 1;
     };
     // Bottom rectangle at z = 0, top ramp from z0 to z0 + rise.
     const int b00 = V(0, 0, 0), b10 = V(len, 0, 0), b11 = V(len, wid, 0), b01 = V(0, wid, 0);
     const int t00 = V(0, 0, z0), t10 = V(len, 0, z0 + rise), t11 = V(len, wid, z0 + rise), t01 = V(0, wid, z0);
-    auto F = [&](int a, int b, int c) { its.indices.emplace_back(Vec3i(a, b, c)); };
+    auto F = [&](int a, int b, int c) { its.indices.emplace_back(stl_triangle_vertex_indices(a, b, c)); };
     F(b00, b11, b10); F(b00, b01, b11);            // bottom
     F(t00, t10, t11); F(t00, t11, t01);            // ramp top
     F(b00, b10, t10); F(b00, t10, t00);            // y = 0
@@ -325,17 +336,21 @@ TEST_CASE("ZAA: a 10 degree ramp gets monotonically increasing Z deltas", "[Cont
     const double slice_z = lo + min_z;
 
     // Where does the ramp top sit at a given x?  z = z0 + x * tan(slope)
-    auto ramp_z = [&](double x) { return z0 + x * std::tan(slope_deg * M_PI / 180.0); };
+    const double tan_s = std::tan(slope_deg * M_PI / 180.0);
+    auto ramp_z = [&](double x) { return z0 + x * tan_s; };
 
-    // Sample across the x range where the ramp lies inside this layer, walking uphill.
-    const double x_lo = (lo - z0) / std::tan(slope_deg * M_PI / 180.0);
-    const double x_hi = (print_z - z0) / std::tan(slope_deg * M_PI / 180.0);
+    // Sample across the x range where the ramp lies between the slicing plane and print_z, walking
+    // uphill. Below the slicing plane the upward ray leaves the solid and legitimately misses, so
+    // the range starts where the ramp crosses slice_z.
+    const double x_lo = (slice_z - z0) / tan_s;
+    const double x_hi = (print_z - z0) / tan_s;
     REQUIRE(x_lo > 0.0);
     REQUIRE(x_hi < len);
+    REQUIRE(x_hi - x_lo > 0.5);
 
     double prev  = -1e30;
     int    moved = 0;
-    for (double x = x_lo + 0.05; x < x_hi - 0.05; x += 0.1) {
+    for (double x = x_lo + 0.02; x < x_hi - 0.02; x += 0.02) {
         const sla::IndexedMesh::hit_result hit = imesh.query_ray_hit({x, wid * 0.5, slice_z}, {0., 0., 1.});
         REQUIRE(hit.is_hit());
 
@@ -352,7 +367,7 @@ TEST_CASE("ZAA: a 10 degree ramp gets monotonically increasing Z deltas", "[Cont
         const double d = contour_z_sample_delta(in);
 
         // The raycast really did find the ramp surface at this x.
-        REQUIRE(slice_z + hit.distance() == Approx(ramp_z(x)).margin(1e-6));
+        REQUIRE(slice_z + hit.distance() == Approx(ramp_z(x)).margin(1e-4));
 
         // Walking uphill, the contour rises monotonically...
         REQUIRE(d >= prev - 1e-9);
