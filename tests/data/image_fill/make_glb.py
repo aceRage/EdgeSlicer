@@ -8,6 +8,16 @@ from the reader they are used to measure.
 
   agent_plaque.glb    a 40 x 40 x 3 mm slab, 12 triangles, with a 64 x 64 six-colour texture
   agent_medallion.glb a 16-sided prism, 92 triangles, with a 64 x 64 four-band texture
+
+BOTH ARE CLOSED SOLIDS WOUND OUTWARD. That is not a detail: a uniformly inverted mesh is closed
+and locally self-consistent, so admesh's repair reports facets_reversed = 0 and passes it through,
+and the plater then deletes it with "The volume of the object is zero" because its_volume() came
+back negative. The first version of this script got the winding wrong on the plaque's two flat
+faces and on every triangle of the medallion; the tests now assert the signed volume, which is the
+check that would have caught it. If you change any face list here, verify with:
+
+    its_volume(plaque)    ==  40 * 40 * 3   =  4800
+    its_volume(medallion) ~=  16-gon of r 15, height 4
 """
 import binascii
 import json
@@ -103,9 +113,15 @@ def plaque():
     # sample the texture's edges, which is fine and is what a real exporter does for a slab).
     P = [(-sx, -sy, -sz), (sx, -sy, -sz), (sx, -sy, sz), (-sx, -sy, sz),
          (-sx, sy, -sz), (sx, sy, -sz), (sx, sy, sz), (-sx, sy, sz)]
+    # EVERY quad is listed counter-clockwise AS SEEN FROM OUTSIDE, so the cross product of its
+    # first two edges is the outward normal and the closed solid has a POSITIVE signed volume.
+    # The first two used to be listed the other way round: the mesh stayed closed and locally
+    # consistent, so admesh's repair reported nothing, but its volume came out 1600 instead of
+    # 4800 and the two big faces imported with reversed normals. Check with:
+    #     its_volume(mesh) == 40 * 40 * 3
     faces = [
-        ([4, 5, 6, 7], (0, 1, 0)),    # +Y, the face the picture is on
-        ([1, 0, 3, 2], (0, -1, 0)),   # -Y
+        ([7, 6, 5, 4], (0, 1, 0)),    # +Y, the face the picture is on
+        ([2, 3, 0, 1], (0, -1, 0)),   # -Y
         ([3, 2, 6, 7], (0, 0, 1)),
         ([1, 0, 4, 5], (0, 0, -1)),
         ([2, 1, 5, 6], (1, 0, 0)),
@@ -154,7 +170,10 @@ def medallion(sides=16, radius=15.0, half_h=2.0):
                 normals.append((math.cos(a), 0.0, math.sin(a)))
                 uvs.append((u, v))
         b = len(positions) - 4
-        indices += [b, b + 2, b + 3, b, b + 3, b + 1]
+        # b+0 = (a0, bottom)  b+1 = (a0, top)  b+2 = (a1, bottom)  b+3 = (a1, top), and a1 > a0.
+        # Counter-clockwise seen from OUTSIDE the cylinder is bottom-a0, top-a0, top-a1 - the
+        # reverse of what this used to emit, which pointed every wall facet inwards.
+        indices += [b, b + 1, b + 3, b, b + 3, b + 2]
     # two caps, as fans around a centre vertex
     for h, n, flip in ((half_h, (0, 1, 0), False), (-half_h, (0, -1, 0), True)):
         c = len(positions)
@@ -167,10 +186,13 @@ def medallion(sides=16, radius=15.0, half_h=2.0):
             normals.append(n)
             uvs.append((0.5 + 0.5 * math.cos(a), 0.5 + 0.5 * math.sin(a)))
         for i in range(sides):
+            # The ring runs counter-clockwise in the XZ plane, which is CLOCKWISE seen from +Y.
+            # So the TOP cap (n = +Y) has to walk it backwards and the BOTTOM cap forwards -
+            # the opposite of what this used to do, which inverted both caps.
             if flip:
-                indices += [c, c + 1 + i + 1, c + 1 + i]
-            else:
                 indices += [c, c + 1 + i, c + 1 + i + 1]
+            else:
+                indices += [c, c + 1 + i + 1, c + 1 + i]
     return positions, normals, uvs, indices
 
 

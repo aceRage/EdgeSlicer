@@ -445,6 +445,55 @@ less-safe shape. The consequence a reader should know: **a GLB import does not p
 importer has no PNG re-encoder (libslic3r has a decoder only) and a glTF texture may be a JPEG.
 Re-applying Image Fill to an imported part works; it just starts from a picture the user supplies.
 
+### 5.1 The GLB samples were inside out, and nothing noticed
+
+Found while following up the owner's second finding: `agent_medallion.glb` was refused after the
+colour dialog with *"The volume of the object is zero"*, and `agent_plaque.glb` imported with
+reversed normals. **Neither was a zero-thickness sheet.** Both were solids of the right size with
+the wrong **winding**, and the two failures are the same defect at two severities.
+
+| file | signed volume | true volume | closed? | NORMAL vs winding | what it was |
+| --- | --- | --- | --- | --- | --- |
+| `agent_medallion.glb` | **-2755.32** | 2755.32 | yes, and self-consistent | 64/64 disagree | **every** triangle reversed |
+| `agent_plaque.glb` | **+1600.00** | 4800.00 | 8 same-orientation edge pairs | 4/12 disagree | the two flat ±Y faces reversed |
+| `agent_box.glb` (reported "fine") | **+333.67** | 1001.00 | 8 same-orientation edge pairs | 4/12 disagree | the same defect, merely unnoticed |
+| `Duck.glb` (real-world control) | +1195799 | | yes | 2/4212 | clean |
+
+**Why nothing caught it.** `load_gltf` performs no orientation validation, and the admesh repair it
+relies on only reconciles *locally* inconsistent neighbours. A mesh wound uniformly the wrong way
+is closed and self-consistent, so repair reports `facets_reversed="0"` and `backwards_edges="0"`
+and passes it straight through — confirmed by exporting all four through the fork's own CLI, where
+the -2755 survives untouched into the 3MF's `mesh_stat`. `its_volume()` (`TriangleMesh.cpp:1463`)
+then returns that negative number, `Model::removed_objects_with_zero_volume()` (`Model.cpp:1066`)
+tests it against `zero_volume = 1e-10` with a bare `<`, and `Plater::load_files`
+(`Plater.cpp:12487`) deletes the object and reports "The volume of the object is zero" — a message
+that misdescribes the fault (the volume is not zero, it is negative) and arrives *after* the user
+has already answered the colour dialog. The partial case is worse, because there is no message at
+all: the part imports with visibly reversed normals on the flipped faces and a volume wrong by a
+fixed fraction — exactly one third, for a box with one axis pair reversed.
+
+**What was fixed.** `tests/data/image_fill/make_glb.py` is the generator that produced the bad
+samples, so the repo's own fixtures carried the identical defect. Its winding is corrected (the
+plaque's two ±Y quads, and the medallion's wall and both caps), the fixtures are regenerated -
+plaque now **+4800.00** exactly, medallion **+2755.32**, both with zero boundary edges, zero
+non-manifold edges, zero same-orientation pairs and 0% normal/winding disagreement — and
+`test_image_fill.cpp`'s GLB case gains a section that asserts the signed volume of each fixture
+against its analytic value **before** it measures anything about colour. A positive volume alone
+would not have caught the plaque, which was positive and wrong; the size is the check that does.
+The samples under `EdgeSlicer_imagemap_test\samples` are replaced by freshly generated closed
+solids of the same texturing intent (a 40 x 30 x 4 mm textured plaque, a 30 mm x 4 mm UV-mapped
+medallion disc at 128 segments, volume within 0.04% of analytic), with the originals kept as
+`*.bad.glb`.
+
+**Not fixed here, and worth its own change:** `load_gltf` still validates nothing. It should
+compute the signed volume of each closed component after welding, flip a uniformly inverted one and
+say so, and reject or repair a component whose undirected edges are not each used exactly twice
+with opposite orientation; and the plater's gate should tell a negative volume from a degenerate
+one rather than calling both "zero". `tests/data/test_gltf/` is clean — its `box_faces()` helper
+gets the winding right and documents the rule — but `test_gltf.cpp` asserts a positive volume for
+`box_10_20_30.glb` alone (line 68), so no fixture exercises an inverted input at all. An
+inverted-box and a partly-inverted-box fixture belong there.
+
 ---
 
 ## 6. Measurements

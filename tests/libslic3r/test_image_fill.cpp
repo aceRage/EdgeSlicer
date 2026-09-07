@@ -927,6 +927,32 @@ bool measure_glb(const std::string &file, GlbBeforeAfter &out)
 
 TEST_CASE("Image Fill: a textured GLB is at least as good through the new path", "[imagefill][glb]")
 {
+    // BEFORE anything about colour: both fixtures must be closed solids wound OUTWARD. Both were
+    // not, once. A uniformly inverted mesh is closed and locally self-consistent, so admesh
+    // repairs nothing and reports nothing; its_volume() simply comes back negative, and the
+    // plater then deletes the object with "The volume of the object is zero" - after the user has
+    // already answered the colour dialog. The plaque was subtler still: only its two flat faces
+    // were reversed, so it imported with visibly wrong normals and a volume exactly a third of
+    // the truth. Nothing in the import path checks this, so the fixtures check it here.
+    SECTION("the fixtures are closed solids wound outward")
+    {
+        struct Expect { const char *file; float volume; };
+        // 40 x 40 x 3 = 4800 exactly; the medallion is a 16-gon of radius 15, height 4:
+        // 16 * 0.5 * 15^2 * sin(2pi/16) * 4.
+        const float gon = 16.f * 0.5f * 15.f * 15.f * std::sin(6.28318530718f / 16.f) * 4.f;
+        for (const Expect &e : {Expect{"agent_plaque.glb", 4800.f}, Expect{"agent_medallion.glb", gon}}) {
+            Model       m;
+            GltfInfo    info;
+            std::string msg;
+            INFO("fixture " << e.file);
+            REQUIRE(load_gltf((std::string(TEST_DATA_DIR) + "/image_fill/" + e.file).c_str(), &m, info, msg));
+            REQUIRE(m.objects.size() == 1u);
+            const indexed_triangle_set &its = m.objects.front()->volumes.front()->mesh().its;
+            // Positive, and the RIGHT size: a partly inverted solid is still positive, just wrong.
+            CHECK(its_volume(its) == Approx(e.volume).epsilon(0.001));
+        }
+    }
+
     for (const char *file : {"agent_plaque.glb", "agent_medallion.glb"}) {
         GlbBeforeAfter r;
         INFO("file " << file);
