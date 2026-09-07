@@ -17,6 +17,7 @@ add_executable(${_TEST_NAME}_tests
 	test_dual_nozzle_group.cpp
 	test_elephant_foot_compensation.cpp
 	test_geometry.cpp
+	test_h2c_rack_nozzle_change.cpp
 	test_mixed_filament.cpp
 	test_mixed_filament_color_golden.cpp
 	test_triangle_selector.cpp

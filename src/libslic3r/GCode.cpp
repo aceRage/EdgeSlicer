@@ -91,6 +91,126 @@ namespace Slic3r {
 #define L(s) (s)
 #define _(s) Slic3r::I18N::translate(s)
 
+// Ultra (H2C rack): ports of BambuStudio GCode.cpp:119-155. The H2C change_filament template
+// indexes these by *logical nozzle id*, not by extruder: an H2C has 2 extruders but up to 7
+// logical nozzles (1 left + a rack of 6 on the right), so nozzle_diameter (one entry per
+// extruder) is the wrong array and reads out of range for any rack slot past the first.
+std::vector<double> get_nozzle_diameters_by_nozzle_id(const MultiNozzleUtils::NozzleGroupResultBase *group_result)
+{
+    std::vector<double> diameters;
+    if (!group_result)
+        return diameters;
+    for (int id = 0;; ++id) {
+        auto nozzle = group_result->get_nozzle_from_id(id);
+        if (!nozzle)
+            break;
+        diameters.push_back(string_to_double_decimal_point(nozzle->diameter));
+    }
+    return diameters;
+}
+
+// Upstream feeds nozzle_volume_types as strings ("Standard", "TPU High Flow", ...); the H2C
+// change_filament template compares it against those literals.
+std::vector<std::string> get_nozzle_volume_types_by_nozzle_id(const MultiNozzleUtils::NozzleGroupResultBase *group_result)
+{
+    std::vector<std::string> volume_types;
+    if (!group_result)
+        return volume_types;
+
+    int max_nozzle_id = -1;
+    for (unsigned int filament_id : group_result->get_used_filaments()) {
+        for (const auto &nozzle : group_result->get_nozzles_for_filament(int(filament_id))) {
+            if (nozzle.group_id > max_nozzle_id)
+                max_nozzle_id = nozzle.group_id;
+        }
+    }
+    if (max_nozzle_id < 0)
+        max_nozzle_id = 0;
+
+    volume_types.resize(max_nozzle_id + 1, get_nozzle_volume_type_string(NozzleVolumeType::nvtStandard));
+    for (int id = 0; id <= max_nozzle_id; ++id) {
+        auto nozzle = group_result->get_nozzle_from_id(id);
+        if (nozzle)
+            volume_types[id] = get_nozzle_volume_type_string(nozzle->volume_type);
+    }
+    return volume_types;
+}
+
+// Ultra (H2C rack): the in-extruder nozzle-change block. This is BambuStudio
+// WipeTower::ramming(WipeTower.cpp:3388-3568) evaluated with nozzle_change_line_count == 0,
+// which is structurally what this fork has: its Orca-derived wipe tower carries no
+// WipeTowerBlock and therefore no nozzle-change purge area, so upstream's ramming lines, its
+// second M632/M633 pair and its reverse travel are all inside "if (nozzle_change_line_count > 0)"
+// and drop out. What survives is the marker pair and the skippable pre-cool block - which is
+// the whole of the rack-conditional content the firmware reads.
+//   old/new_filament_id : filament (== "extruder" in this fork's naming) ids
+//   old/new_nozzle_id   : logical nozzle ids from the plate grouping result
+//   extruder_change     : true when the two nozzles sit on different extruders; upstream then
+//                         emits the markers only, no M632/M633 (see the gold file: the 98
+//                         extruder changes carry no interlock, the 112 rack changes do).
+std::string format_nozzle_change_block(int  old_filament_id,
+                                       int  new_filament_id,
+                                       int  old_nozzle_id,
+                                       int  new_nozzle_id,
+                                       bool extruder_change,
+                                       bool dynamic_nozzle_map,
+                                       int  precool_temp,
+                                       int  physical_extruder)
+{
+    char        buf[128];
+    std::string gcode;
+    snprintf(buf, sizeof(buf), "; NOZZLE_CHANGE_START OF%d NF%d ON%d NN%d\n", old_filament_id, new_filament_id, old_nozzle_id,
+             new_nozzle_id);
+    gcode += buf;
+
+    if (!extruder_change) {
+        // M632 S<filament> [H<nozzle>] M N - "prepare this filament, nozzle re-select allowed".
+        // H is only written for a dynamic nozzle map (a selector machine); a static map writes no
+        // H, matching the H-1 the same plate already puts on T<f> / M620 S<f>A / M620.6.
+        gcode += "M632 S" + std::to_string(new_filament_id);
+        if (dynamic_nozzle_map && new_nozzle_id >= 0)
+            gcode += " H" + std::to_string(new_nozzle_id);
+        gcode += " M N\n";
+
+        // The pre-cool, inside the skippable block. T is the PHYSICAL extruder
+        // (physical_extruder_map[logical extruder]); N0 marks the line slicer-generated.
+        if (precool_temp != 0) {
+            // M400 first: G1 is non-blocking, so an M104 cool-down must not start mid-travel.
+            gcode += "M400\n";
+            gcode += "M104";
+            if (physical_extruder != -1)
+                gcode += " T" + std::to_string(physical_extruder);
+            gcode += " S" + std::to_string(precool_temp) + " N0 ;Wipe tower nozzle change pre cooling\n";
+            gcode += "M106 S255\n";
+        }
+        gcode += "M633\n";
+    }
+
+    snprintf(buf, sizeof(buf), "; NOZZLE_CHANGE_END OF%d NF%d ON%d NN%d\n", old_filament_id, new_filament_id, old_nozzle_id,
+             new_nozzle_id);
+    gcode += buf;
+    return gcode;
+}
+
+std::string GCode::nozzle_change_gcode(int old_filament_id, int new_filament_id, int old_nozzle_id, int new_nozzle_id, bool extruder_change) const
+{
+    auto group_result = m_curr_print ? m_curr_print->get_layered_nozzle_group_result() : nullptr;
+    if (!group_result)
+        return std::string();
+
+    const int precool = m_config.filament_pre_cooling_temperature_nc.values.empty() ?
+                            0 :
+                            m_config.filament_pre_cooling_temperature_nc.get_at(old_filament_id);
+    int       physical_extruder = -1;
+    if (precool != 0) {
+        const int logical_extruder = group_result->get_extruder_id(old_filament_id, m_layer_index);
+        if (logical_extruder >= 0 && logical_extruder < int(m_config.physical_extruder_map.size()))
+            physical_extruder = m_config.physical_extruder_map.get_at(logical_extruder);
+    }
+    return format_nozzle_change_block(old_filament_id, new_filament_id, old_nozzle_id, new_nozzle_id, extruder_change,
+                                      group_result->is_support_dynamic_nozzle_map(), precool, physical_extruder);
+}
+
 static const float g_min_purge_volume      = 100.f;
 static const float g_purge_volume_one_time = 135.f;
 static const int   g_max_flush_count       = 4;
@@ -506,6 +626,27 @@ std::string WipeTowerIntegration::append_tcr(GCode& gcodegen, const WipeTower::T
     // The count and the sequence entry now happen after the tcr G-code is built, gated on
     // custom_gcode_changes_tool - exactly as upstream GCode.cpp:1253-1257 does.
 
+    // Ultra (H2C rack): the in-extruder nozzle-change block goes into the [filament_end_gcode]
+    // slot, before filament_end_gcode and before change_filament_gcode - the same place
+    // BambuStudio puts nozzle_change_gcode_trans (GCode.cpp:855-899). Rack machines only
+    // (extruder_max_nozzle_count > 1); on P1S/H2D this whole block is skipped and the emitted
+    // g-code is unchanged. See docs/superpowers/specs/2026-09-07-h2c-rack-nozzle-change.md.
+    if (has_nozzle_rack(gcodegen.m_config) && new_extruder_id >= 0) {
+        auto group_result = gcodegen.m_curr_print ? gcodegen.m_curr_print->get_layered_nozzle_group_result() : nullptr;
+        int old_filament_id = gcodegen.writer().extruder() ? (int) gcodegen.writer().extruder()->id() : -1;
+        if (group_result && old_filament_id >= 0 && old_filament_id != (int) new_extruder_id) {
+            const int old_nozzle_id = group_result->get_nozzle_id(old_filament_id, gcodegen.m_layer_index);
+            const int new_nozzle_id = group_result->get_nozzle_id((int) new_extruder_id, gcodegen.m_layer_index);
+            if (old_nozzle_id >= 0 && new_nozzle_id >= 0 && old_nozzle_id != new_nozzle_id) {
+                const bool extruder_change = group_result->get_extruder_id(old_filament_id, gcodegen.m_layer_index) !=
+                                             group_result->get_extruder_id((int) new_extruder_id, gcodegen.m_layer_index);
+                end_filament_gcode_str = gcodegen.nozzle_change_gcode(old_filament_id, (int) new_extruder_id, old_nozzle_id,
+                                                                      new_nozzle_id, extruder_change) +
+                                         end_filament_gcode_str;
+            }
+        }
+    }
+
     // BBS: should be placed before toolchange parsing
     std::string toolchange_retract_str = gcodegen.retract(true, false);
     check_add_eol(toolchange_retract_str);
@@ -525,6 +666,18 @@ std::string WipeTowerIntegration::append_tcr(GCode& gcodegen, const WipeTower::T
         config.set_key_value("next_filament_id", new ConfigOptionInt((int) new_extruder_id));
         config.set_key_value("current_hotend", new ConfigOptionInt(-1));
         config.set_key_value("next_hotend", new ConfigOptionInt(-1));
+        // Ultra (H2C rack): port of BambuStudio GCode.cpp:960-966. The real logical-nozzle ids
+        // and the per-nozzle-id arrays the H2C change_filament template indexes with them. Falls
+        // back to the global single-mapped shim when the plate carries no grouping result.
+        auto group_result_tc = (has_nozzle_rack(gcodegen.m_config) && gcodegen.m_curr_print) ?
+                                   gcodegen.m_curr_print->get_layered_nozzle_group_result() :
+                                   nullptr;
+        if (auto group_result = group_result_tc) {
+            config.set_key_value("current_nozzle_id", new ConfigOptionInt(std::max(0, group_result->get_nozzle_id(std::max(0, previous_extruder_id), gcodegen.m_layer_index))));
+            config.set_key_value("next_nozzle_id", new ConfigOptionInt(std::max(0, group_result->get_nozzle_id((int) new_extruder_id, gcodegen.m_layer_index))));
+            config.set_key_value("nozzle_diameter_at_nozzle_id", new ConfigOptionFloats(get_nozzle_diameters_by_nozzle_id(group_result.get())));
+            config.set_key_value("nozzle_volume_types", new ConfigOptionStrings(get_nozzle_volume_types_by_nozzle_id(group_result.get())));
+        }
         config.set_key_value("layer_num", new ConfigOptionInt(gcodegen.m_layer_index));
         config.set_key_value("layer_z", new ConfigOptionFloat(tcr.print_z));
         config.set_key_value("toolchange_z", new ConfigOptionFloat(z));
@@ -2939,19 +3092,40 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
             const size_t num_nozzles = std::max<size_t>(nd.size(), size_t(1));
             std::vector<double> nozzle_diams(nd.begin(), nd.end());
             if (nozzle_diams.empty()) nozzle_diams.push_back(0.4);
-            this->placeholder_parser().set("nozzle_diameter_at_nozzle_id", new ConfigOptionFloats(nozzle_diams));
 
             std::vector<int> nozzle_vts;
             const auto* nvt = m_config.option<ConfigOptionEnumsGeneric>("nozzle_volume_type");
             for (size_t i = 0; i < num_nozzles; ++i)
                 nozzle_vts.push_back((nvt && i < nvt->size()) ? nvt->get_at(int(i)) : 0);
-            this->placeholder_parser().set("nozzle_volume_types", new ConfigOptionInts(nozzle_vts));
 
-            this->placeholder_parser().set("current_nozzle_id",              new ConfigOptionInt(0));
-            this->placeholder_parser().set("next_nozzle_id",                 new ConfigOptionInt(0));
-            this->placeholder_parser().set("initial_nozzle_id",              new ConfigOptionInt(0));
-            this->placeholder_parser().set("curr_physical_extruder_id",      new ConfigOptionInt(0));
-            this->placeholder_parser().set("most_used_physical_extruder_id", new ConfigOptionInt(0));
+            // Ultra (H2C rack): on a rack machine these arrays are indexed by LOGICAL NOZZLE id,
+            // not by extruder, and there are more nozzles than extruders (H2C: 2 extruders,
+            // up to 7 nozzles). Take them from the grouping result the way BambuStudio does
+            // (GCode.cpp:119-155); keep the per-extruder shim when the plate has no grouping
+            // result, so single-nozzle machines are unaffected.
+            int shim_nozzle_id = 0;
+            int shim_physical_extruder = 0;
+            auto group_result_g = print.get_layered_nozzle_group_result();
+            if (group_result_g && has_nozzle_rack(m_config)) {
+                auto diams = get_nozzle_diameters_by_nozzle_id(group_result_g.get());
+                if (!diams.empty())
+                    nozzle_diams = std::move(diams);
+                this->placeholder_parser().set("nozzle_volume_types", new ConfigOptionStrings(get_nozzle_volume_types_by_nozzle_id(group_result_g.get())));
+                if (auto first = group_result_g->get_first_nozzle_for_filament(int(initial_extruder_id))) {
+                    shim_nozzle_id = std::max(0, first->group_id);
+                    if (first->extruder_id >= 0 && first->extruder_id < int(m_config.physical_extruder_map.size()))
+                        shim_physical_extruder = m_config.physical_extruder_map.get_at(first->extruder_id);
+                }
+            } else {
+                this->placeholder_parser().set("nozzle_volume_types", new ConfigOptionInts(nozzle_vts));
+            }
+            this->placeholder_parser().set("nozzle_diameter_at_nozzle_id", new ConfigOptionFloats(nozzle_diams));
+
+            this->placeholder_parser().set("current_nozzle_id",              new ConfigOptionInt(shim_nozzle_id));
+            this->placeholder_parser().set("next_nozzle_id",                 new ConfigOptionInt(shim_nozzle_id));
+            this->placeholder_parser().set("initial_nozzle_id",              new ConfigOptionInt(shim_nozzle_id));
+            this->placeholder_parser().set("curr_physical_extruder_id",      new ConfigOptionInt(shim_physical_extruder));
+            this->placeholder_parser().set("most_used_physical_extruder_id", new ConfigOptionInt(shim_physical_extruder));
             this->placeholder_parser().set("new_extruder_retracted_length",  new ConfigOptionFloat(0.));
             this->placeholder_parser().set("initial_no_support_filament_id", new ConfigOptionInt(int(initial_extruder_id)));
             // *_hotend = the physical-nozzle id for the filament; BBS's NOZZLE_ID_FOR_GCODE returns -1
@@ -9258,6 +9432,15 @@ std::string GCode::set_extruder(unsigned int extruder_id, double print_z, bool b
     dyn_config.set_key_value("next_filament_id", new ConfigOptionInt((int) extruder_id));
     dyn_config.set_key_value("current_hotend", new ConfigOptionInt(-1));
     dyn_config.set_key_value("next_hotend", new ConfigOptionInt(-1));
+    // Ultra (H2C rack): port of BambuStudio GCode.cpp:8227-8228 - the same real logical-nozzle
+    // ids the wipe-tower path sets, for the toolchange path taken when the prime tower is off.
+    auto group_result_se = (has_nozzle_rack(m_config) && m_curr_print) ? m_curr_print->get_layered_nozzle_group_result() : nullptr;
+    if (auto group_result = group_result_se) {
+        dyn_config.set_key_value("current_nozzle_id", new ConfigOptionInt(std::max(0, group_result->get_nozzle_id(std::max(0, previous_extruder_id), m_layer_index))));
+        dyn_config.set_key_value("next_nozzle_id", new ConfigOptionInt(std::max(0, group_result->get_nozzle_id((int) extruder_id, m_layer_index))));
+        dyn_config.set_key_value("nozzle_diameter_at_nozzle_id", new ConfigOptionFloats(get_nozzle_diameters_by_nozzle_id(group_result.get())));
+        dyn_config.set_key_value("nozzle_volume_types", new ConfigOptionStrings(get_nozzle_volume_types_by_nozzle_id(group_result.get())));
+    }
     dyn_config.set_key_value("layer_num", new ConfigOptionInt(m_layer_index));
     dyn_config.set_key_value("layer_z", new ConfigOptionFloat(print_z));
     dyn_config.set_key_value("max_layer_z", new ConfigOptionFloat(m_max_layer_z));

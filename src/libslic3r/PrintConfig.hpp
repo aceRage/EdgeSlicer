@@ -1331,6 +1331,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionInts,                filament_flush_temp))  // Ultra: BBS 2.x flush temp (0 = use nozzle_temperature_range_high)
     ((ConfigOptionFloats,              filament_flush_volumetric_speed))  // Ultra: BBS 2.x flush speed (0 = use filament_max_volumetric_speed)
     ((ConfigOptionFloats,              filament_cooling_before_tower))  // Ultra: BBS 2.x change_filament (per-filament, °C)
+    ((ConfigOptionInts,                filament_pre_cooling_temperature_nc))  // Ultra (H2C rack): nozzle-change pre-cool target, 0 = off
     ((ConfigOptionInts,                required_nozzle_HRC))
     // BBS
     ((ConfigOptionBool,                scan_first_layer))
@@ -1903,6 +1904,11 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE0(
 #undef PRINT_CONFIG_CLASS_DERIVED_INITCACHE
 #undef PRINT_CONFIG_CLASS_DERIVED_INITIALIZER
 #undef PRINT_CONFIG_CLASS_DERIVED_INITIALIZER_ITEM
+
+// Ultra (H2C rack): true when at least one extruder carries more than one nozzle, i.e. the
+// machine has a swappable nozzle rack (H2C: extruder_max_nozzle_count = 1,6). H2D is 1,1 and
+// P1S has no such option, so both answer false. Same predicate ToolOrdering.cpp already uses.
+bool has_nozzle_rack(const PrintConfig &config);
 
 class CLIActionsConfigDef : public ConfigDef
 {

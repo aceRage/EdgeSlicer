@@ -315,6 +315,8 @@ private:
     bool            m_set_extruder_trimpot      = false;
     bool            m_adhesion                  = true;
     GCodeFlavor     m_gcode_flavor;
+    // Ultra (H2C rack): machine has a swappable nozzle rack (extruder_max_nozzle_count > 1).
+    bool            m_has_nozzle_rack           = false;
 
     // Bed properties
     enum {
