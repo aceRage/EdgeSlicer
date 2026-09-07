@@ -8,10 +8,13 @@
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/Semver.hpp"
 #include "libslic3r/TriangleMesh.hpp"
+#include "libslic3r/TriangleSelector.hpp"
 #include "libslic3r/Utils.hpp"
 
 #include <boost/filesystem/operations.hpp>
 #include <boost/filesystem/path.hpp>
+
+#include "libslic3r/miniz_extension.hpp"
 
 using namespace Slic3r;
 
@@ -535,4 +538,277 @@ SCENARIO("A sliced plate carries the multi-nozzle slice_info schema through a 3M
         }
         delete plate;
     }
+}
+
+// Deft: Metadata/model_settings.config's <object> block order came from a direct range-for over
+// _BBS_3MF_Exporter::ObjectToObjectDataMap, a std::map<ModelObject const*, ObjectData> - so the
+// order was the heap-pointer order of the ModelObjects, which two exports of an equivalent model
+// need not agree on (ASLR, allocator layout, whatever ran before in the process). Everything else
+// about the file - every byte inside one <object> block - was already deterministic; only the
+// relative order of the blocks moved. The fix walks a vector sorted by ObjectData::object_id (the
+// id= attribute, assigned in model.objects order by a per-export counter, not a global one) instead
+// of the map directly. This builds two independently-allocated Model instances with several
+// objects each, so their ModelObjects do not share addresses, exports each, and requires the raw
+// Metadata/model_settings.config bytes to match byte for byte.
+static std::string extract_zip_entry(const std::string& zip_path, const std::string& entry_name)
+{
+    mz_zip_archive archive;
+    mz_zip_zero_struct(&archive);
+    if (!open_zip_reader(&archive, zip_path))
+        return {};
+    size_t size = 0;
+    void*  data = mz_zip_reader_extract_file_to_heap(&archive, entry_name.c_str(), &size, 0);
+    std::string result;
+    if (data != nullptr) {
+        result.assign(static_cast<const char*>(data), size);
+        mz_free(data);
+    }
+    close_zip_reader(&archive);
+    return result;
+}
+
+static void build_multi_object_model(Model& model)
+{
+    // Distinct names/sizes/volume counts per object, several objects, so a pointer-order
+    // permutation would be visible: each object's serialized block differs from the others'.
+    struct Spec { const char* name; double a, b, c; int extra_volumes; };
+    static const Spec specs[] = {
+        { "alpha",   10., 10., 10., 0 },
+        { "bravo",   12.,  8., 14., 1 },
+        { "charlie",  6., 20.,  9., 0 },
+        { "delta",   15., 15.,  5., 2 },
+    };
+    for (const Spec& s : specs) {
+        ModelObject* obj = model.add_object();
+        obj->name = s.name;
+        obj->add_volume(make_cube(s.a, s.b, s.c))->name = std::string(s.name) + "_body";
+        for (int i = 0; i < s.extra_volumes; ++i)
+            obj->add_volume(make_cube(2., 2., 2.))->name = std::string(s.name) + "_extra";
+        obj->add_instance();
+        obj->ensure_on_bed();
+    }
+}
+
+SCENARIO("model_settings.config's object order does not depend on where the Model was allocated", "[3mf][Determinism]") {
+    GIVEN("two independently-built models with the same objects in the same order") {
+        const boost::filesystem::path tmp_root = boost::filesystem::temp_directory_path() / "snorca_tests";
+        boost::filesystem::create_directories(tmp_root);
+        Slic3r::set_temporary_dir(tmp_root.string());
+
+        DynamicPrintConfig store_config = DynamicPrintConfig::full_print_config();
+        for (const std::string& key : store_config.keys())
+            if (const ConfigOption* opt = store_config.option(key); opt != nullptr && opt->type() == coEnums) {
+                store_config.erase(key);
+                store_config.option(key, true);
+            }
+
+        WHEN("the model is exported to a fresh 3MF several times, each from its own Model instance") {
+            const int kRuns = 5;
+            std::vector<std::string> configs;
+            std::vector<std::string> test_files;
+            for (int run = 0; run < kRuns; ++run) {
+                // A fresh Model per run: ModelObject::add_object() allocates with `new`, so these
+                // objects do not share addresses with the previous run's, or with each other -
+                // exactly the condition under which the old pointer-keyed map could reorder them.
+                Model model;
+                build_multi_object_model(model);
+
+                const std::string test_file = (tmp_root / ("det_model_settings_" + std::to_string(run) + ".3mf")).string();
+                test_files.push_back(test_file);
+
+                StoreParams store_params;
+                store_params.path     = test_file.c_str();
+                store_params.model    = &model;
+                store_params.config   = &store_config;
+                store_params.strategy = SaveStrategy::Zip64 | SaveStrategy::Silence | SaveStrategy::SkipAuxiliary;
+                REQUIRE(store_bbs_3mf(store_params));
+
+                configs.push_back(extract_zip_entry(test_file, "Metadata/model_settings.config"));
+            }
+
+            THEN("Metadata/model_settings.config is not empty") {
+                for (const std::string& c : configs)
+                    REQUIRE(!c.empty());
+            }
+
+            THEN("every run's model_settings.config is byte-identical to the first") {
+                for (int run = 1; run < kRuns; ++run) {
+                    INFO("run " << run << " vs run 0");
+                    CHECK(configs[run] == configs[0]);
+                }
+            }
+
+            for (const std::string& f : test_files)
+                boost::filesystem::remove(f);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Deft (slice-determinism, cause B): writes a real 3-colour painted-cube project 3MF to disk so
+// the CLI can slice it several times and the resulting G-code compared. This is a scaled-down,
+// self-contained stand-in for the "Bar B" fixture on origin/feat/imagemap-p2-imagefill
+// (tests/libslic3r/test_image_fill.cpp, "Image Fill: write the Bar B project") - that branch's
+// ImageFill feature is not present here, so the top face is painted directly through
+// TriangleSelector rather than through image_fill_apply, but the shape of the fixture is the
+// same: a cube, three colours, adjacent painted bands sharing mesh edges. That last property is
+// what matters for cause B - two adjacent facets of DIFFERENT colours projecting to the exact
+// same contour_idx/line_idx/position/length in MultiMaterialSegmentation.cpp's
+// post_process_painted_lines is the tie post_process_painted_lines::comp used to leave to
+// thread-arrival order (see PaintedLine::vol_idx/facet_idx and this file's own model_settings.config
+// case above for the same family of bug in a different writer).
+//
+// A box x*y*z whose TOP face is an nx*ny grid, so a paint boundary can land exactly on a shared
+// mesh edge instead of only ever inside one triangle. Adapted from test_color_split.cpp's
+// make_grid_box (that file lives in this same test binary but its statics are not visible here).
+static TriangleMesh det_make_grid_box(double x, double y, double z, int nx, int ny)
+{
+    indexed_triangle_set its;
+    auto V = [&](double px, double py, double pz) { its.vertices.emplace_back(float(px), float(py), float(pz)); return int(its.vertices.size()) - 1; };
+    const int b0 = V(0, 0, 0), b1 = V(x, 0, 0), b2 = V(x, y, 0), b3 = V(0, y, 0);
+    std::vector<int> top((nx + 1) * (ny + 1));
+    for (int j = 0; j <= ny; ++j)
+        for (int i = 0; i <= nx; ++i)
+            top[j * (nx + 1) + i] = V(x * i / nx, y * j / ny, z);
+    auto T = [&](int a, int b, int c) { its.indices.emplace_back(a, b, c); };
+    T(b0, b2, b1); T(b0, b3, b2);                                   // bottom (-Z)
+    for (int j = 0; j < ny; ++j)                                    // top grid (+Z)
+        for (int i = 0; i < nx; ++i) {
+            int p = top[j * (nx + 1) + i], q = top[j * (nx + 1) + i + 1], r = top[(j + 1) * (nx + 1) + i + 1], s = top[(j + 1) * (nx + 1) + i];
+            T(p, q, r); T(p, r, s);
+        }
+    auto side = [&](int bA, int bB, const std::vector<int> &edge) {
+        T(bA, bB, edge.front());
+        for (size_t k = 0; k + 1 < edge.size(); ++k) T(bB, edge[k + 1], edge[k]);
+    };
+    std::vector<int> e_front, e_right, e_back, e_left;
+    for (int i = 0; i <= nx; ++i) e_front.push_back(top[i]);
+    for (int j = 0; j <= ny; ++j) e_right.push_back(top[j * (nx + 1) + nx]);
+    for (int i = nx; i >= 0; --i) e_back.push_back(top[ny * (nx + 1) + i]);
+    for (int j = ny; j >= 0; --j) e_left.push_back(top[j * (nx + 1)]);
+    side(b0, b1, e_front); side(b1, b2, e_right); side(b2, b3, e_back); side(b3, b0, e_left);
+    return TriangleMesh(std::move(its));
+}
+
+TEST_CASE("Deft: write a 3-filament painted-cube project 3MF for the CLI slice-determinism gate", "[3mf][Determinism][barb]")
+{
+    // 30 mm, 60 columns x 20 rows on top (1200 cells, 2400 top facets): three colour bands of 20
+    // columns each, still several millimetres wide (0.5 mm/column - well inside the slicer's
+    // resolution because each band is 20 columns wide), but now with far more shared-edge colour
+    // boundaries and far more painted facets landing on any one layer at once, which is what it
+    // takes for tbb::parallel_for to actually split the facet range across several worker threads
+    // instead of running it on one - the condition cause B's fix (PaintedLine::vol_idx/facet_idx)
+    // exists for. The coarser 12x4 grid this fixture started with did not reproduce the bug even
+    // WITHOUT the fix (negative control, 2026-09-07): too few facets per layer for the range to
+    // split, so the old code happened to run single-threaded on that fixture regardless of the cap.
+    const double        side = 30.;
+    const int           nx = 60, ny = 20;
+    TriangleMesh cube = det_make_grid_box(side, side, side, nx, ny);
+
+    Model        model;
+    ModelObject *object = model.add_object();
+    object->name        = "det_barb_cube";
+    ModelVolume *volume = object->add_volume(cube);
+    volume->name        = "cube";
+    object->add_instance();
+    object->ensure_on_bed();
+
+    TriangleSelector selector(cube);
+    // Top grid facets start right after the 2 bottom facets (see det_make_grid_box): cell (i, j)
+    // is triangles 2 + 2*(j*nx + i) and +1. Colour by column band, so every one of the 3 interior
+    // band boundaries (after column 4 and column 8) sits on a shared vertical mesh edge.
+    for (int j = 0; j < ny; ++j)
+        for (int i = 0; i < nx; ++i) {
+            const int band  = i / (nx / 3);   // 0, 1 or 2
+            const int base  = 2 + 2 * (j * nx + i);
+            selector.set_facet(base,     EnforcerBlockerType(band + 1));
+            selector.set_facet(base + 1, EnforcerBlockerType(band + 1));
+        }
+    REQUIRE(volume->mmu_segmentation_facets.set(selector));
+
+    DynamicPrintConfig cfg = DynamicPrintConfig::full_print_config();
+    for (const std::string& key : cfg.keys())
+        if (const ConfigOption* opt = cfg.option(key); opt != nullptr && opt->type() == coEnums) {
+            cfg.erase(key);
+            cfg.option(key, true);
+        }
+    // Single physical nozzle, three filaments (AMS-style) - the P1S shape report B describes.
+    // printer_model/printer_variant/printable_area mirror the single-filament control fixture
+    // below (a Bambu Lab P1S 0.4 nozzle's published values) so the two projects this file writes
+    // for the CLI slice-determinism gate share the same machine shape - the gate's whole point is
+    // comparing "painted, 3 filaments" against "unpainted, 1 filament" on the report's own printer.
+    cfg.set_num_extruders(1);
+    cfg.set_num_filaments(3);
+    cfg.option<ConfigOptionFloats>("nozzle_diameter")->values = {0.4};
+    cfg.option<ConfigOptionStrings>("filament_colour")->values = {"#E01919", "#19B23F", "#1943E0"};
+    cfg.set_key_value("printer_model",   new ConfigOptionString("Bambu Lab P1S"));
+    cfg.set_key_value("printer_variant", new ConfigOptionString("0.4"));
+    cfg.option<ConfigOptionPoints>("printable_area")->values = {
+        {0., 0.}, {256., 0.}, {256., 256.}, {0., 256.}
+    };
+
+    const boost::filesystem::path tmp_root = boost::filesystem::temp_directory_path() / "snorca_tests";
+    boost::filesystem::create_directories(tmp_root);
+    Slic3r::set_temporary_dir(tmp_root.string());
+    const std::string out = (tmp_root / "det_mmu_bar_b.3mf").string();
+
+    StoreParams sp;
+    sp.path     = out.c_str();
+    sp.model    = &model;
+    sp.config   = &cfg;
+    sp.strategy = SaveStrategy::Zip64 | SaveStrategy::Silence | SaveStrategy::SkipAuxiliary;
+    REQUIRE(store_bbs_3mf(sp));
+    WARN("Determinism Bar-B-style project written to " << out);
+    // Left on disk on purpose - the CLI slice-determinism gate reads it from there.
+}
+
+// Deft (slice-determinism, control): the single-filament counterpart to the Bar B project above.
+// Neither of cause A's or cause B's fixes should be reachable here - one object (so the
+// object_id-sorted vector in _add_model_config_file_to_archive has one entry, in the same order a
+// plain std::map<ModelObject const*, ...> would already have produced) and no mmu_segmentation_facets
+// (so multi_material_segmentation_by_painting's custom_facets is empty for every extruder_idx and
+// PaintedLineVisitor is never constructed) - so this project's slice is the negative control: it
+// must already have been deterministic before this branch, and this branch must not change that.
+// printer_model/printer_variant/bed_shape are set to a Bambu Lab P1S 0.4 nozzle's published values
+// (resources/profiles/BBL/machine/Bambu Lab P1S 0.4 nozzle.json) directly in the project config
+// rather than through the preset "inherits" chain, so a bare CLI slice sees the same machine shape
+// report B was reproduced against without the CLI needing --load-settings to resolve presets by name.
+TEST_CASE("Deft: write a single-filament P1S-shaped project 3MF as the slice-determinism control", "[3mf][Determinism]")
+{
+    Model        model;
+    ModelObject *object = model.add_object();
+    object->name        = "det_control_cube";
+    object->add_volume(make_cube(30., 30., 30.))->name = "cube";
+    object->add_instance();
+    object->ensure_on_bed();
+
+    DynamicPrintConfig cfg = DynamicPrintConfig::full_print_config();
+    for (const std::string& key : cfg.keys())
+        if (const ConfigOption* opt = cfg.option(key); opt != nullptr && opt->type() == coEnums) {
+            cfg.erase(key);
+            cfg.option(key, true);
+        }
+    cfg.set_num_extruders(1);
+    cfg.set_num_filaments(1);
+    cfg.option<ConfigOptionFloats>("nozzle_diameter")->values  = {0.4};
+    cfg.option<ConfigOptionStrings>("filament_colour")->values = {"#FFFFFF"};
+    cfg.set_key_value("printer_model",   new ConfigOptionString("Bambu Lab P1S"));
+    cfg.set_key_value("printer_variant", new ConfigOptionString("0.4"));
+    cfg.option<ConfigOptionPoints>("printable_area")->values = {
+        {0., 0.}, {256., 0.}, {256., 256.}, {0., 256.}
+    };
+
+    const boost::filesystem::path tmp_root = boost::filesystem::temp_directory_path() / "snorca_tests";
+    boost::filesystem::create_directories(tmp_root);
+    Slic3r::set_temporary_dir(tmp_root.string());
+    const std::string out = (tmp_root / "det_control_p1s.3mf").string();
+
+    StoreParams sp;
+    sp.path     = out.c_str();
+    sp.model    = &model;
+    sp.config   = &cfg;
+    sp.strategy = SaveStrategy::Zip64 | SaveStrategy::Silence | SaveStrategy::SkipAuxiliary;
+    REQUIRE(store_bbs_3mf(sp));
+    WARN("Determinism control (single-filament P1S-shaped) project written to " << out);
+    // Left on disk on purpose - the CLI slice-determinism gate reads it from there.
 }

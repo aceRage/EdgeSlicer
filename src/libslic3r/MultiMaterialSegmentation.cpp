@@ -519,6 +519,16 @@ struct PaintedLine
     size_t line_idx;
     Line   projected_line;
     int    color;
+    // Deft: provenance of the facet this line was projected from - a fixed (volume, extruder,
+    // facet) index triple, not a thread id or an arrival order. Two colour-painted facets can
+    // legitimately project to the same contour_idx/line_idx/position/length (e.g. a colour
+    // boundary sitting on a shared mesh edge), and post_process_painted_lines's sort comparator
+    // does not look past those four fields - so without a further deterministic key, std::sort
+    // leaves such a pair in whichever order they happened to be appended by the parallel_for over
+    // facets, i.e. thread-arrival order. These two fields let the comparator finish the ordering
+    // instead of leaving it to std::sort's (undefined, for equal keys) placement.
+    size_t vol_idx   = 0;
+    size_t facet_idx = 0;
 };
 
 struct PaintedLineVisitor
@@ -567,7 +577,7 @@ struct PaintedLineVisitor
                         painted_lines_set.insert(*it_contour_and_segment);
                         {
                             boost::lock_guard<std::mutex> lock(painted_lines_mutex);
-                            painted_lines.push_back({it_contour_and_segment->first, it_contour_and_segment->second, line_to_test_projected, this->color});
+                            painted_lines.push_back({it_contour_and_segment->first, it_contour_and_segment->second, line_to_test_projected, this->color, this->vol_idx, this->facet_idx});
                         }
                     }
                 }
@@ -583,6 +593,9 @@ struct PaintedLineVisitor
     Line                                                                                  line_to_test;
     std::unordered_set<std::pair<size_t, size_t>, boost::hash<std::pair<size_t, size_t>>> painted_lines_set;
     int                                                                                   color             = -1;
+    // Deft: which facet this visitor's line came from - see PaintedLine::vol_idx/facet_idx.
+    size_t                                                                                vol_idx           = 0;
+    size_t                                                                                facet_idx         = 0;
 
     static inline const double                                                            cos_threshold2    = Slic3r::sqr(cos(M_PI * 30. / 180.));
     static inline const double                                                            append_threshold  = 50 * SCALED_EPSILON;
@@ -671,7 +684,7 @@ static std::vector<PaintedLine> filter_painted_lines(const Line &line_to_process
                 if (prev.color == curr.color)
                     prev.projected_line.b = curr.projected_line.b;
                 else
-                    filtered_lines.push_back({curr.contour_idx, curr.line_idx, Line{prev.projected_line.b, curr.projected_line.b}, curr.color});
+                    filtered_lines.push_back({curr.contour_idx, curr.line_idx, Line{prev.projected_line.b, curr.projected_line.b}, curr.color, curr.vol_idx, curr.facet_idx});
             }
         }
     }
@@ -690,15 +703,32 @@ static std::vector<std::vector<PaintedLine>> post_process_painted_lines(const st
     if (painted_lines.empty())
         return {};
 
+    // Deft: this comparator used to stop at (contour_idx, line_idx, start distance, length). Two
+    // painted lines from different facets can agree on all four - most commonly a colour boundary
+    // that sits exactly on a shared mesh edge, which is exactly the case a 3-filament painted
+    // model produces - and std::sort leaves such a pair in whatever order they were appended in,
+    // which is the parallel_for-over-facets thread-arrival order (see PaintedLine::vol_idx /
+    // facet_idx). Falling through to (color, vol_idx, facet_idx) makes this a total order over the
+    // facets actually in the model, so the result no longer depends on how the work was scheduled.
     auto comp = [&contours](const PaintedLine &first, const PaintedLine &second) {
-        Point first_start_p = contours[first.contour_idx].segment_start(first.line_idx);
-        return first.contour_idx < second.contour_idx ||
-               (first.contour_idx == second.contour_idx &&
-                (first.line_idx < second.line_idx ||
-                 (first.line_idx == second.line_idx &&
-                  ((first.projected_line.a - first_start_p).cast<double>().squaredNorm() < (second.projected_line.a - first_start_p).cast<double>().squaredNorm() ||
-                   ((first.projected_line.a - first_start_p).cast<double>().squaredNorm() == (second.projected_line.a - first_start_p).cast<double>().squaredNorm() &&
-                    (first.projected_line.b - first.projected_line.a).cast<double>().squaredNorm() < (second.projected_line.b - second.projected_line.a).cast<double>().squaredNorm())))));
+        if (first.contour_idx != second.contour_idx)
+            return first.contour_idx < second.contour_idx;
+        if (first.line_idx != second.line_idx)
+            return first.line_idx < second.line_idx;
+        Point  first_start_p  = contours[first.contour_idx].segment_start(first.line_idx);
+        double first_dist_sqr = (first.projected_line.a - first_start_p).cast<double>().squaredNorm();
+        double second_dist_sqr = (second.projected_line.a - first_start_p).cast<double>().squaredNorm();
+        if (first_dist_sqr != second_dist_sqr)
+            return first_dist_sqr < second_dist_sqr;
+        double first_len_sqr  = (first.projected_line.b - first.projected_line.a).cast<double>().squaredNorm();
+        double second_len_sqr = (second.projected_line.b - second.projected_line.a).cast<double>().squaredNorm();
+        if (first_len_sqr != second_len_sqr)
+            return first_len_sqr < second_len_sqr;
+        if (first.color != second.color)
+            return first.color < second.color;
+        if (first.vol_idx != second.vol_idx)
+            return first.vol_idx < second.vol_idx;
+        return first.facet_idx < second.facet_idx;
     };
     std::sort(painted_lines.begin(), painted_lines.end(), comp);
 
@@ -3588,9 +3618,14 @@ std::vector<std::vector<ExPolygons>> segmentation_by_painting(const PrintObject 
     }
 
     BOOST_LOG_TRIVIAL(debug) << "Print object segmentation - Projection of painted triangles - Begin";
+    // Deft: a fixed, geometry-independent index for each volume - loop position, not the
+    // ModelVolume pointer (which is not stable between two runs) - fed into PaintedLine::vol_idx
+    // below so the sort comparator in post_process_painted_lines can finish an order that would
+    // otherwise depend on which of two colour-tied facets a thread happened to reach first.
+    size_t volume_idx = 0;
     for (const ModelVolume *mv : print_object.model_object()->volumes) {
         const ModelVolumeFacetsInfo facets_info = extract_facets_info(*mv);
-        tbb::parallel_for(tbb::blocked_range<size_t>(1, num_facets_states), [&mv, &print_object, &facets_info, &layers, &edge_grids, &painted_lines, &painted_lines_mutex, &input_expolygons, &throw_on_cancel_callback](const tbb::blocked_range<size_t> &range) {
+        tbb::parallel_for(tbb::blocked_range<size_t>(1, num_facets_states), [&mv, &print_object, &facets_info, &layers, &edge_grids, &painted_lines, &painted_lines_mutex, &input_expolygons, &throw_on_cancel_callback, volume_idx](const tbb::blocked_range<size_t> &range) {
             for (size_t extruder_idx = range.begin(); extruder_idx < range.end(); ++extruder_idx) {
                 throw_on_cancel_callback();
                 const indexed_triangle_set custom_facets = facets_info.facets_annotation.get_facets(*mv, EnforcerBlockerType(extruder_idx));
@@ -3598,7 +3633,7 @@ std::vector<std::vector<ExPolygons>> segmentation_by_painting(const PrintObject 
                     continue;
 
                 const Transform3f tr = print_object.trafo().cast<float>() * mv->get_matrix().cast<float>();
-                tbb::parallel_for(tbb::blocked_range<size_t>(0, custom_facets.indices.size()), [&tr, &custom_facets, &print_object, &layers, &edge_grids, &input_expolygons, &painted_lines, &painted_lines_mutex, &extruder_idx](const tbb::blocked_range<size_t> &range) {
+                tbb::parallel_for(tbb::blocked_range<size_t>(0, custom_facets.indices.size()), [&tr, &custom_facets, &print_object, &layers, &edge_grids, &input_expolygons, &painted_lines, &painted_lines_mutex, &extruder_idx, volume_idx](const tbb::blocked_range<size_t> &range) {
                     for (size_t facet_idx = range.begin(); facet_idx < range.end(); ++facet_idx) {
                         float min_z = std::numeric_limits<float>::max();
                         float max_z = std::numeric_limits<float>::lowest();
@@ -3672,12 +3707,15 @@ std::vector<std::vector<ExPolygons>> segmentation_by_painting(const PrintObject 
                             PaintedLineVisitor visitor(edge_grids[layer_idx], painted_lines[layer_idx], painted_lines_mutex[mutex_idx], 16);
                             visitor.line_to_test = line_to_test;
                             visitor.color        = int(extruder_idx);
+                            visitor.vol_idx      = volume_idx;
+                            visitor.facet_idx    = facet_idx;
                             edge_grids[layer_idx].visit_cells_intersecting_line(line_to_test.a, line_to_test.b, visitor);
                         }
                     }
                 }); // end of parallel_for
             }
         }); // end of parallel_for
+        ++volume_idx;
     }
     BOOST_LOG_TRIVIAL(debug) << "Print object segmentation - projection of painted triangles - end";
     BOOST_LOG_TRIVIAL(debug) << "Print object segmentation - painted layers count: "
