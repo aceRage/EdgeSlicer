@@ -7950,6 +7950,13 @@ std::string GCode::_extrude(const ExtrusionPath& path, std::string description, 
         return lerp(m_nominal_z + z_offset * height - height, m_nominal_z + z_offset * height, z_ratio);
     };
 
+    // ZAA (Z contouring). The path's BASE Z is the nominal layer Z plus the offset-layers shift;
+    // the contour deltas stored on the path are relative to exactly that base, so the two compose
+    // by addition and the flow below is derived once from the summed local height.
+    const bool   zaa_contoured = path.z_contoured();
+    const double zaa_base_z    = m_nominal_z + double(path.z_offset) * double(path.height);
+    const double zaa_first_z   = zaa_contoured ? zaa_base_z + double(path.z_contour->z_at(path.first_point())) : zaa_base_z;
+
     bool slope_need_z_travel = false;
     if (sloped != nullptr && !sloped->is_flat()) {
         auto target_z       = get_sloped_z(sloped->slope_begin.z_ratio);
@@ -7957,8 +7964,8 @@ std::string GCode::_extrude(const ExtrusionPath& path, std::string description, 
     } else if (sloped == nullptr) {
         // Ultra: offset-layers paths must get their Z travel even when the XY start
         // point coincides with the previous path's end point (raised path after a
-        // flat one, or a flat path after a raised one).
-        slope_need_z_travel = m_writer.will_move_z(path.z_offset != 0.f ? m_nominal_z + path.z_offset * path.height : m_nominal_z);
+        // flat one, or a flat path after a raised one). ZAA rides on the same check.
+        slope_need_z_travel = m_writer.will_move_z(zaa_first_z);
     }
     // Move to first point of extrusion path
     // path is 2D. But in slope lift case, lift z is done in travel_to function.
@@ -7966,13 +7973,24 @@ std::string GCode::_extrude(const ExtrusionPath& path, std::string description, 
     if (!m_last_pos_defined || m_last_pos != path.first_point() || m_need_change_layer_lift_z || slope_need_z_travel) {
         const bool _last_pos_undefined = !m_last_pos_defined;
         gcode += this->travel_to(path.first_point(), path.role(), "move to first " + description + " point",
-                                 sloped == nullptr ? (path.z_offset != 0.f ? m_nominal_z + path.z_offset * path.height : DBL_MAX)
+                                 sloped == nullptr ? ((zaa_contoured || path.z_offset != 0.f) ? zaa_first_z : DBL_MAX)
                                                    : get_sloped_z(sloped->slope_begin.z_ratio));
         m_need_change_layer_lift_z = false;
         // Orca: force restore Z after unknown last pos
         if (_last_pos_undefined && !slope_need_z_travel) {
             gcode += this->writer().travel_to_z(m_last_layer_z, "force restore Z after unknown last pos", true);
         }
+    }
+
+    // ZAA: land on this path's own starting Z whatever the previous path left behind - a contoured
+    // path ends wherever its last sample was, so the following path has to put Z back itself.
+    // Gated on contouring having actually happened, so this whole block is inert when ZAA is off.
+    if (sloped == nullptr && (zaa_contoured || m_zaa_z_dirty)) {
+        const double zaa_current_z = m_writer.get_position().z();
+        if (GCodeFormatter::quantize_xyzf(zaa_current_z) != GCodeFormatter::quantize_xyzf(zaa_first_z))
+            gcode += this->writer().travel_to_z(zaa_first_z,
+                                                zaa_contoured ? "set Z for contouring" : "reset Z after contouring", true);
+        m_zaa_z_dirty = zaa_contoured;
     }
 
     // if needed, write the gcode_label_objects_end then gcode_label_objects_start
@@ -8486,7 +8504,9 @@ std::string GCode::_extrude(const ExtrusionPath& path, std::string description, 
             }
             // BBS: use G1 if not enable arc fitting or has no arc fitting result or in spiral_mode mode or we are doing sloped extrusion
             // Attention: G2 and G3 is not supported in spiral_mode mode
-            if (!m_config.enable_arc_fitting || path.polyline.fitting_result.empty() || m_config.spiral_mode || sloped != nullptr) {
+            // ZAA: a contoured path carries per-point Z, which an arc move cannot express.
+            if (!m_config.enable_arc_fitting || path.polyline.fitting_result.empty() || m_config.spiral_mode || sloped != nullptr ||
+                zaa_contoured) {
                 double path_length  = 0.;
                 double total_length = sloped == nullptr ? 0. : path.polyline.length() * SCALING_FACTOR;
                 for (const Line& line : path.polyline.lines()) {
@@ -8504,7 +8524,20 @@ std::string GCode::_extrude(const ExtrusionPath& path, std::string description, 
                             tempDescription += Slic3r::format(" | Old Flow Value: %0.5f Length: %0.5f", oldE, line_length);
                         }
                     }
-                    if (sloped == nullptr) {
+                    if (zaa_contoured) {
+                        // ZAA: variable Z per point, and the flow follows the LOCAL layer height.
+                        // The height correction is applied exactly once here, on top of the
+                        // e_per_mm that already carries offset-layers' bonding multiplier - the
+                        // two are different quantities (a geometric height ratio and a bonding
+                        // flow ratio) and the bonding layers are not contoured at all, see
+                        // ContourZ.cpp.
+                        const Vec2d  dest2d = this->point_to_gcode(line.b);
+                        const double z_diff = double(path.z_contour->z_at(line.b));
+                        const double e      = dE * contour_z_extrusion_ratio(path.role() == erIroning, double(path.height), z_diff);
+                        gcode += m_writer.extrude_to_xyz(Vec3d(dest2d.x(), dest2d.y(), zaa_base_z + z_diff), e,
+                                                         GCodeWriter::full_gcode_comment ? tempDescription : "",
+                                                         path.is_force_no_extrusion());
+                    } else if (sloped == nullptr) {
                         // Normal extrusion
                         gcode += m_writer.extrude_to_xy(this->point_to_gcode(line.b), dE,
                                                         GCodeWriter::full_gcode_comment ? tempDescription : "",
@@ -8682,7 +8715,13 @@ std::string GCode::_extrude(const ExtrusionPath& path, std::string description, 
                     tempDescription += Slic3r::format(" | Old Flow Value: %0.5f Length: %0.5f", oldE, line_length);
                 }
             }
-            if (sloped == nullptr) {
+            if (zaa_contoured) {
+                // ZAA: see the constant-speed branch above.
+                const double z_diff = double(path.z_contour->z_at(processed_point.p));
+                const double e      = dE * contour_z_extrusion_ratio(path.role() == erIroning, double(path.height), z_diff);
+                gcode += m_writer.extrude_to_xyz(Vec3d(p.x(), p.y(), zaa_base_z + z_diff), e,
+                                                 GCodeWriter::full_gcode_comment ? tempDescription : "");
+            } else if (sloped == nullptr) {
                 // Normal extrusion
                 gcode += m_writer.extrude_to_xy(p, dE, GCodeWriter::full_gcode_comment ? tempDescription : "");
             } else {

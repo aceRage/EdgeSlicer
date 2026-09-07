@@ -32,11 +32,17 @@ void ExtrusionPath::clip_end(double distance)
 
 void ExtrusionPath::simplify(double tolerance)
 {
+    // ZAA: the contoured polyline IS the sample set; dropping points would drop contour detail.
+    if (this->z_contoured())
+        return;
     this->polyline.simplify(tolerance);
 }
 
 void ExtrusionPath::simplify_by_fitting_arc(double tolerance)
 {
+    // ZAA: arc fitting is 2-D and would erase the per-point Z the emitter needs.
+    if (this->z_contoured())
+        return;
     this->polyline.simplify_by_fitting_arc(tolerance);
 }
 
@@ -269,6 +275,10 @@ void ExtrusionLoop::split_at(const Point &point, bool prefer_non_overhang, const
     // Ultra: offset-layers attributes must survive the seam split
     p1.z_offset = path.z_offset;   p1.extrusion_multiplier = path.extrusion_multiplier;
     p2.z_offset = path.z_offset;   p2.extrusion_multiplier = path.extrusion_multiplier;
+    // ZAA: so must the contour samples. They are keyed on coordinates, so both halves - and the
+    // one interpolated point the split introduces - resolve against the same shared sample set.
+    p1.z_contour = path.z_contour;
+    p2.z_contour = path.z_contour;
     path.polyline.split_at(p, &p1.polyline, &p2.polyline);
     
     if (this->paths.size() == 1) {

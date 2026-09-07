@@ -566,6 +566,10 @@ private:
     // Support for G-Code Processor
     float                               m_last_height{ 0.0f };
     float                               m_last_layer_z{ 0.0f };
+    // ZAA (Z contouring): true while the writer Z is still wherever the last contoured path left
+    // it. Nothing acts on the ZAA Z-reset unless contouring actually happened, so a build with
+    // zaa_enabled off emits byte-identical G-code.
+    bool                                m_zaa_z_dirty{ false };
     float                               m_max_layer_z{ 0.0f };
     float                               m_last_width{ 0.0f };
 

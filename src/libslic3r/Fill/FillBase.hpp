@@ -160,6 +160,9 @@ public:
     // Do not sort the fill lines to optimize the print head path?
     virtual bool no_sort() const { return false; }
 
+    // ZAA: keep the fill direction constant on contoured tops, for a consistent surface pattern.
+    bool dont_alternate_fill_direction = false;
+
     virtual bool is_self_crossing() = 0;
 
     // Return true if infill has a consistent pattern between layers.

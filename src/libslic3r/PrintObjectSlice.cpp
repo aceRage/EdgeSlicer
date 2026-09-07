@@ -41,6 +41,35 @@ static void dump_surface_emboss_mixed_layer_state(
     const PrintObjectRegions::LayerRangeRegions &layer_range,
     const std::vector<ExPolygons>               *segmentation_layer);
 
+// ZAA (Z contouring): with ZAA on, the slicing plane moves from mid-layer to lo + zaa_min_z, so
+// that a contoured path can be pushed DOWN by up to (height - zaa_min_z) and UP by zaa_min_z and
+// still describe the same solid. Ported from OrcaSlicer PR #12736 with the follow-ups #13452
+// (approximate range check) and #13766 (layer 0 keeps the plain mid-layer plane; ZAA does not
+// contour the first layer anyway, and moving its plane produced first-layer artifacts).
+static coordf_t compute_slice_z(PrintObject *print_object, size_t i_layer, coordf_t lo, coordf_t hi)
+{
+    bool     zaa_active = false;
+    coordf_t z_offset   = 0.0;
+
+    size_t num_regions = print_object->num_printing_regions();
+    for (size_t rid = 0; rid < num_regions; ++rid) {
+        const auto &rcfg = print_object->printing_region(rid).config();
+        if (rcfg.zaa_enabled) {
+            if (!zaa_active || rcfg.zaa_min_z < z_offset)
+                z_offset = rcfg.zaa_min_z;
+            zaa_active = true;
+        }
+    }
+
+    if (!zaa_active || i_layer == 0)
+        return 0.5 * (lo + hi);
+
+    coordf_t slice_z = lo + z_offset;
+    if ((slice_z < lo && !is_approx(slice_z, lo)) || (slice_z > hi && !is_approx(slice_z, hi)))
+        throw RuntimeError("Bad min Z value");
+    return slice_z;
+}
+
 LayerPtrs new_layers(
     PrintObject                 *print_object,
     // Object layers (pairs of bottom/top Z coordinate), without the raft.
@@ -54,7 +83,7 @@ LayerPtrs new_layers(
     for (size_t i_layer = 0; i_layer < object_layers.size(); i_layer += 2) {
         coordf_t lo = object_layers[i_layer];
         coordf_t hi = object_layers[i_layer + 1];
-        coordf_t slice_z = 0.5 * (lo + hi);
+        coordf_t slice_z = compute_slice_z(print_object, i_layer, lo, hi);
         Layer *layer = new Layer(id ++, print_object, hi - lo, hi + zmin, slice_z);
         out.emplace_back(layer);
         if (prev != nullptr) {
