@@ -2034,11 +2034,17 @@ void SelectMachineDialog::on_send_print()
     DeviceManager* dev = Slic3r::GUI::wxGetApp().getDeviceManager();
     if (!dev) return;
 
-    MachineObject* obj_ = dev->get_selected_machine();
-    assert(obj_->dev_id == m_printer_last_select);
+    // Ultra: build the job from the printer the combobox is on, not from whatever the device
+    // manager last selected. The two can disagree, and the job would then carry another
+    // machine's ip, access code, ftp folder and AMS mapping under this printer's dev_id -
+    // the file lands on one printer while the checks were made against another. (The old
+    // assert below stated the invariant but is compiled out of a release build.)
+    MachineObject* obj_ = dev->get_my_machine(m_printer_last_select);
+    if (obj_ == nullptr) obj_ = dev->get_selected_machine();
     if (obj_ == nullptr) {
         return;
     }
+    assert(obj_->dev_id == m_printer_last_select);
 
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ", print_job: for send task, current printer id =  " << m_printer_last_select << std::endl;
     show_status(PrintDialogStatus::PrintStatusSending);
@@ -2169,10 +2175,14 @@ void SelectMachineDialog::on_send_print()
         m_print_job->task_ams_mapping_info = "";
     }
 
-    /* build nozzles info for multi extruders printers */
-    if (build_nozzles_info(m_print_job->task_nozzles_info)) {
-        BOOST_LOG_TRIVIAL(error) << "build_nozzle_info errors";
-    }
+    /* Build nozzles info for multi extruder printers (the two-nozzle H2D / H2D Pro / H2C).
+     * build_nozzles_info() returns true when it filled the array in; a single nozzle printer
+     * gets an empty array and that is not an error. The old test had the sense inverted and
+     * logged "build_nozzle_info errors" on every successful dual-nozzle build. */
+    if (build_nozzles_info(m_print_job->task_nozzles_info))
+        BOOST_LOG_TRIVIAL(info) << "build_nozzles_info = " << m_print_job->task_nozzles_info;
+    else
+        BOOST_LOG_TRIVIAL(info) << "build_nozzles_info: no per-nozzle info for this printer";
 
     m_print_job->has_sdcard = obj_->get_sdcard_state() == MachineObject::SdcardState::HAS_SDCARD_NORMAL;
 
@@ -2655,29 +2665,45 @@ void SelectMachineDialog::on_selection_changed(wxCommandEvent &event)
         }
     }
 
-    if (obj && !obj->get_lan_mode_connection_state()) {
-        obj->command_get_version();
-        obj->command_request_push_all();
-        if (!dev->get_selected_machine()) {
-            dev->set_selected_machine(m_printer_last_select, true);
-        }else if (dev->get_selected_machine()->dev_id != m_printer_last_select) {
-            dev->set_selected_machine(m_printer_last_select, true);
-        }
-
-        // reset the timelapse check status for I3 structure
-        if (obj->get_printer_arch() == PrinterArch::ARCH_I3) {
-            m_checkbox_list["timelapse"]->SetValue(false);
-            AppConfig *config = wxGetApp().app_config;
-            if (config) config->set_str("print", "timelapse", "0");
-        }
-
-        // Has changed machine unrecoverably
-        GUI::wxGetApp().sidebar().load_ams_list(obj->dev_id, obj);
-        update_select_layout(obj);
-    } else {
-        BOOST_LOG_TRIVIAL(error) << "on_selection_changed dev_id not found";
+    if (!obj) {
+        BOOST_LOG_TRIVIAL(error) << "on_selection_changed dev_id not found, selection = " << selection;
         return;
     }
+
+    // A LAN connect for this printer that has not reported back yet: the connect callback
+    // asks for the version and the status push itself, so do not ask again from here.
+    const bool connect_in_flight = obj->get_lan_mode_connection_state();
+    if (!connect_in_flight) {
+        obj->command_get_version();
+        obj->command_request_push_all();
+    }
+
+    // Ultra: the device manager must follow the printer the user just picked, whatever else
+    // happens below. Everything downstream reads dev->get_selected_machine() - the model
+    // compatibility guard is_blocking_printing(), the nozzle and AMS checks, and the ip /
+    // access code PrintJob sends to - so a selection left pointing at the previously chosen
+    // printer silently validates the plate against one machine and addresses another. This
+    // update used to be skipped whenever a connect was still in flight, and the skip was
+    // logged as "dev_id not found", which it never was.
+    MachineObject* selected_before = dev->get_selected_machine();
+    if (!selected_before || selected_before->dev_id != m_printer_last_select)
+        dev->set_selected_machine(m_printer_last_select, true);
+
+    if (connect_in_flight) {
+        BOOST_LOG_TRIVIAL(info) << "on_selection_changed: lan connect still in flight for " << m_printer_last_select;
+        return;
+    }
+
+    // reset the timelapse check status for I3 structure
+    if (obj->get_printer_arch() == PrinterArch::ARCH_I3) {
+        m_checkbox_list["timelapse"]->SetValue(false);
+        AppConfig *config = wxGetApp().app_config;
+        if (config) config->set_str("print", "timelapse", "0");
+    }
+
+    // Has changed machine unrecoverably
+    GUI::wxGetApp().sidebar().load_ams_list(obj->dev_id, obj);
+    update_select_layout(obj);
 
 
     //reset print status

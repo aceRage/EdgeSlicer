@@ -489,7 +489,10 @@ void MachineObject::set_access_code(std::string code, bool only_refresh)
     this->access_code = code;
     if (only_refresh) {
         AppConfig* config = GUI::wxGetApp().app_config;
-        if (config && !code.empty()) {
+        // Ultra: never key an access code on an empty dev_id. A machine object whose serial is
+        // not known yet would otherwise park a real printer's code under "" in the config,
+        // where it belongs to no printer and is handed out to none.
+        if (config && !code.empty() && !dev_id.empty()) {
             GUI::wxGetApp().app_config->set_str("access_code", dev_id, code);
             DeviceManager::update_local_machine(*this);
         }
@@ -500,7 +503,7 @@ void MachineObject::erase_user_access_code()
 {
     this->user_access_code = "";
     AppConfig* config = GUI::wxGetApp().app_config;
-    if (config) {
+    if (config && !dev_id.empty()) {
         GUI::wxGetApp().app_config->erase("user_access_code", dev_id);
         //GUI::wxGetApp().app_config->save();
     }
@@ -511,7 +514,9 @@ void MachineObject::set_user_access_code(std::string code, bool only_refresh)
     this->user_access_code = code;
     if (only_refresh && !code.empty()) {
         AppConfig* config = GUI::wxGetApp().app_config;
-        if (config && !code.empty()) {
+        // Ultra: same as set_access_code - an empty dev_id is not a printer. This is what put
+        // a stray "": "<code>" entry in user_access_code in the field.
+        if (config && !code.empty() && !dev_id.empty()) {
             GUI::wxGetApp().app_config->set_str("user_access_code", dev_id, code);
             DeviceManager::update_local_machine(*this);
         }
