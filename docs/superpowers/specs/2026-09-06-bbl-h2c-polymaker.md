@@ -586,3 +586,236 @@ appear for new data directories only.
 * Whether Bambu Studio master registers 63 of these names at flat paths was
   **not** checked against upstream — only against this tree, where no such file
   exists.
+
+## The `include` lookup rule, fixed in the loader
+
+Date: 2026-09-06
+Branch: `fix/profile-include-lookup` (from `origin/fix/bbl-fiberon-h2d`, 6d787de607)
+
+The previous section fixed the seven `Fiberon * @BBL H2D` presets' `include` by
+editing the **data** — pointing them at `"../fdm_filament_template_direct_dual"`.
+That works, but it makes those seven files diverge from what upstream ships, so
+the next re-sync of the BBL profiles (which keeps the bare name) silently
+reintroduces the bug. This section fixes the **loader** instead and reverts the
+data.
+
+### The rule, as implemented
+
+`ConfigBase::load_from_json()` (`src/libslic3r/Config.cpp`) resolves each entry
+of a preset's top-level `"include"` array before it deserializes anything.
+`.json` is appended when the entry does not already end in it, and the first
+candidate that opens wins:
+
+1. **A path relative to the including file's own directory.** Unchanged. Every
+   include that resolves today resolves the same way and through the same file,
+   the explicit `"../name"` forms included, so this change cannot move an
+   existing preset onto a different template.
+2. **The including preset's category root** — the nearest ancestor directory
+   named `filament`, `process` or `machine`. For
+   `BBL/filament/Polymaker/Fiberon PA6-CF @BBL H2D.json` that is
+   `BBL/filament/`, which is where all four `fdm_filament_template_direct_*`
+   files live.
+
+A hit through (2) is logged at `debug`:
+
+```
+[debug] Slic3r::ConfigBase::load_from_json: include fdm_filament_template_direct_dual.json
+        of <profiles>/BBL/filament/Polymaker/Fiberon PA12-CF @BBL H2D.json
+        resolved through the preset category root:
+        <profiles>/BBL/filament/fdm_filament_template_direct_dual.json
+```
+
+An include that resolves through neither stays a **warning**, never an error —
+the preset still loads with its own and its parent's keys, exactly as before.
+The warning now names the include and every path that was tried:
+
+```
+[warning] ... include not found: no_such_template.json (included by <file>;
+          tried <dir>/no_such_template.json, <category root>/no_such_template.json)
+```
+
+Merge semantics are untouched: meta keys (`name`, `instantiation`, `from`,
+`inherits`, `type`, `setting_id`, `filament_id`, `version`, `url`,
+`description`, `is_custom_defined`) are never copied, the including file always
+wins over the template, earlier includes win over later ones, and resolution is
+one level deep. Combined with `inherits`, the effective precedence is the same
+as upstream's: **parent, then include, then the preset's own keys.**
+
+### Why the category root, and why not a name lookup
+
+Bambu Studio does not resolve `include` as a path at all.
+`PresetBundle::load_vendor_configs_from_json` (BambuStudio `PresetBundle.cpp`
+~4882) looks the entry up **by name** in `config_maps` — the map of presets it
+has already loaded — and its `filament_list` registers the four
+`fdm_filament_template_*` files as non-instantiated entries at the very top, so
+by the time any preset is read the templates are in the map and a bare name
+resolves from any subfolder.
+
+A true name lookup is not available where this fork resolves includes:
+`ConfigBase::load_from_json` is a `libslic3r` entry point with no access to the
+bundle's preset map, and it is also reached from paths that have no bundle at
+all (project settings, `--load-settings`). But the templates all sit at the
+category root of the vendor's tree, and the loader does know which file it is
+reading — so trying the bare name against that directory reproduces upstream's
+behaviour for upstream's layout. A re-synced BBL tree that writes bare template
+names from any subfolder now resolves them here too.
+
+### What changed
+
+| | |
+| --- | --- |
+| `src/libslic3r/Config.cpp` | the include block: candidate list, category-root walk, `debug` log line, warning now lists what was tried |
+| `tests/libslic3r/test_config_include.cpp` | new — 22 assertions over the cases below |
+| `tests/libslic3r/CMakeLists.txt` | registers the new test file |
+| the 7 `Fiberon * @BBL H2D.json` | reverted to the bare `"fdm_filament_template_direct_dual"` |
+
+The seven filament files are now byte-identical to their state before
+6d787de607, i.e. to the upstream copies. `BBL.json` is **untouched** by this
+change — the `filament_list` ordering fix from 6d787de607 stays exactly as it
+is. (`git diff HEAD^ -- resources/` reports `BBL.json` and nothing else;
+`git diff HEAD -- resources/profiles/BBL.json` is empty.)
+
+### Tests
+
+`tests/libslic3r/test_config_include.cpp`, driven through the same
+`ConfigBase::load_from_json` entry point `PresetBundle` uses for vendor presets.
+Each case builds a throwaway vendor tree under the system temp directory and
+removes it on scope exit.
+
+| Case | Asserts |
+| --- | --- |
+| `filament/Sub/child.json` includes `"template"` by bare name; template at `filament/template.json` | load returns 0; the template's `filament_max_volumetric_speed` and `nozzle_temperature` arrive; the child's own `filament_flow_ratio` still wins over the template's; the template's `instantiation` meta key is not merged |
+| a preset at `filament/` itself includes `"template"` | the plain relative-path resolution still resolves it |
+| `filament/Sub/child.json` includes `"local"`, with `filament/Sub/local.json` present **and** a different `filament/local.json` decoy | the neighbouring file wins — the relative path is still tried first |
+| the same tree, include written `"../local"` | the explicit path is honoured (the decoy's value, not the neighbour's) |
+| `filament/Sub/orphan.json` includes `"no_such_template"` | `REQUIRE_NOTHROW`, load returns 0, the preset's own keys still arrive, and `include` itself never reaches the deserializer |
+
+```
+libslic3r_tests.exe "[ConfigInclude]"   All tests passed (22 assertions in 1 test case)
+libslic3r_tests.exe                     604 test cases | 602 passed | 2 failed as expected
+                                        53822 assertions | 53820 passed | 2 failed as expected
+```
+
+### Validator
+
+`Snapmaker_Orca_profile_validator` built from this worktree
+(`build/src/Release/`), plus the prebuilt binary from the H2C work
+(`.claude/worktrees/h2c-polymaker/build-validator/`, used read-only) standing in
+for the **old** loader. Two scratch copies of `resources/profiles`, both with
+the X2D process family stripped from `process_list` (272 → 256 entries) so the
+load reaches the filaments, as in the earlier sections:
+
+* `prof_after` — this branch: bare `"fdm_filament_template_direct_dual"`.
+* `prof_before` — HEAD (6d787de607): the `"../"` data workaround.
+
+All four runs still end `Validation failed` for the pre-existing reason.
+
+| loader | profiles | `include not found` | resolved via category root | `[error]` lines |
+| --- | --- | --- | --- | --- |
+| old (6d787de607) | `"../"` workaround | 0 | — | 1349 |
+| old (6d787de607) | **bare names** | **7** | — | 1349 |
+| **new** | `"../"` workaround | 0 | 0 | 1349 |
+| **new** | **bare names** | **0** | **7** | 1349 |
+
+Row 2 is the regression this change removes — it is what an upstream re-sync
+produces against the old loader. Row 3 shows the explicit `"../"` form still
+resolving at step 1, never reaching the fallback.
+
+The 1349 errors are **identical** across all four runs — same 1349 lines, same
+1349 distinct files named, zero lines unique to any run — and every one is the
+pre-existing `contains incorrect keys: filament_cooling_before_tower,
+filament_flush_temp, filament_flush_volumetric_speed, which were removed`.
+
+Positive proof, `-l 4`: `got preset` lines **2748 in both** new-loader runs, the
+seven `Fiberon * @BBL H2D` presets among them, and exactly **7**
+`resolved through the preset category root` lines — one per Fiberon file. The
+1187 presets that sit in `BBL/filament/` itself and the 7 `BBL/machine/`
+template consumers all still resolve at step 1 and log nothing.
+
+`scripts/orca_extra_profile_check.py --vendor BBL`: **0 files with errors, 0
+with warnings.**
+
+### CLI proof slice
+
+The live `C:\Dev\SnapmakerOrca\build\Snapmaker_Orca\EdgeSlicer.exe` carries the
+**old** loader, so it cannot prove this change. The slices below use **this
+worktree's own build**, `cmake --install`ed to a scratch prefix (its own
+`resources/`, so the bare-name files are what it reads), with an isolated empty
+`--datadir`. Presets are selected by name, so the real BBL vendor bundle is
+loaded and the include is resolved by the same code path the GUI uses.
+
+```
+printer  Bambu Lab H2D 0.4 nozzle
+process  0.20mm Standard @BBL H2D
+model    resources/handy_models/OrcaToleranceTest.stl
+```
+
+| `--filament-presets` | result | gcode | `include not found` in the whole load |
+| --- | --- | --- | --- |
+| `Fiberon PA6-CF @BBL H2D` | `"error_string": "Success."`, `return_code: 0` | 651 575 B, 26 932 lines, 2.694 g, 830.6 s | 0 |
+| `Fiberon PETG-rCF @BBL H2D` | `"error_string": "Success."`, `return_code: 0` | 651 487 B, 26 984 lines, 2.856 g, 839.0 s | 0 |
+
+The header names the preset that was actually used:
+
+```
+; filament_settings_id = "Fiberon PA6-CF @BBL H2D"
+; printer_settings_id  = Bambu Lab H2D 0.4 nozzle
+; print_settings_id    = 0.20mm Standard @BBL H2D
+; filament_vendor = Polymaker      ; filament_type = PA6-CF
+; nozzle_temperature = 300         ; filament_max_volumetric_speed = 14
+; slow_down_min_speed = 20
+```
+
+Two fixups were needed **in the CLI harness only**, both pre-existing and
+unrelated to any filament value:
+
+* `--layer-change-gcode "G92 E0"` — the relative-E check in `Print::validate()`
+  is guarded by `!is_BBL_printer()`, and `Snapmaker_Orca.cpp` sets that flag
+  *after* it calls `validate()`. Same as the earlier sections.
+* `--prime-tower-brim-width 3` — every `@BBL H2D` process preset ships
+  `"prime_tower_brim_width": "-1"` (upstream's "auto" sentinel) while this
+  fork's `ConfigOptionDef` has `min = 0`, so `m_print_config.validate()` rejects
+  it with `-1 not in range [0,2147483647]` before slicing starts. Pre-existing
+  bug, unrelated to `include`; the earlier sections did not hit it because they
+  sliced on an A1 mini.
+
+Also noted: adding `--export-3mf` to the same command segfaults *after* the
+gcode is written. Reproduced with and without this change's data revert, and on
+a filament with no `include` at all — a pre-existing CLI/H2D issue, not
+investigated here.
+
+**Negative control, and a finding.** Hiding
+`BBL/filament/fdm_filament_template_direct_dual.json` from the scratch install
+turns the run into **498 `include not found` warnings** (the 491 presets in
+`filament/` plus the 7 Fiberon ones) — proof that the app really does resolve
+this template during the vendor load. But the resulting `plate_1.gcode` is
+**byte-identical** to the good run apart from the timestamp line. Every key the
+template carries is either unknown to this fork's `ConfigDef` (dropped by
+`handle_legacy` as a retired key — `filament_flush_temp`,
+`filament_retract_length_nc`, `filament_overhang_*_speed`, … ) or already
+carries the same value in the parent chain. So on this fork **the include
+currently contributes nothing to a sliced result**; what this change buys is the
+absence of the warnings and upstream-compatible semantics, so a future template
+that does carry keys the fork consumes resolves correctly from a subfolder.
+
+### Not verified
+
+* **No hardware.** Nothing was printed.
+* The seven filament files were verified byte-identical to their pre-6d787de607
+  state with `git diff`; they were **not** re-fetched from Bambu Studio master
+  and compared over the network (upstream keeps them at a different path).
+* Non-BBL vendors ship no `include` at all — of `resources/profiles`, 1201 files
+  use it and every one is under `BBL/` — so the new fallback is exercised by BBL
+  only.
+* The third resolution step the brief allowed for — a Bambu-style **name lookup
+  against the loaded preset map** — was **not** implemented: `ConfigBase` has no
+  access to that map at this point. A vendor tree that put its templates
+  somewhere other than the category root would still warn.
+* `"include"` given as a bare **string** rather than an array is still ignored by
+  the include block, and would then fail the whole preset in the deserializer.
+  No file in `resources/profiles` uses that form (all 1201 are arrays); left
+  alone deliberately, to keep the diff to the lookup rule.
+* The `debug` line could not be shown from the CLI slice: the vendor bundle is
+  loaded before `--debug` raises the logging level, so the app's own
+  `resolved through` lines are suppressed. It is shown from the validator, which
+  sets the level first.
