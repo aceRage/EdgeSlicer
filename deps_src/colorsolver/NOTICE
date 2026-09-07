@@ -1,0 +1,62 @@
+ColorSolver
+Copyright (C) 2026 sentientstardust
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+Vendored from OrcaSlicer-ImageMap
+https://github.com/sentientstardust-dev/OrcaSlicer-ImageMap
+commit 92548381056dbf72836b0a1bdc455f238218dbfb (v1.0.44 lineage)
+
+The AGPL-3.0 license text is in the repository LICENSE.txt.
+ColorSolver.hpp / ColorSolver.cpp carry the same license header.
+
+
+Modifications made by the EdgeSlicer fork
+-----------------------------------------
+
+This is a trimmed copy, not the upstream file.  Upstream ColorSolver.cpp is
+2024 lines; this copy keeps the candidate / kd-tree / Oklab core and drops the
+rest.
+
+Kept, essentially unchanged:
+
+  * the sRGB <-> linear and sRGB <-> Oklab conversions
+  * the chroma-dependent Oklab axis weights, the OklabSoftCap4Dark4 dark
+    penalty, and ColorSolverMode / ColorSolverLookupMode
+  * the candidate enumeration over a fixed unit budget
+    (color_solver_total_units_for_component_count, color_solver_candidate_count,
+    build_color_solver_candidates) and its string cache key
+  * both kd-trees (linear sRGB and Oklab), their construction and their
+    branch-and-bound queries, including the best/second-best bookkeeping that
+    BlendClosestTwo needs
+  * solve_color_solver_weights_for_target
+
+Changed:
+
+  * ColorSolverMixModel is deleted.  Upstream could mix through either
+    pigment-painter (GPL-3.0, plus a 36 MiB generated lookup table) or
+    prusa-fdm-mixer; neither library is vendored here.  mix_color_solver_
+    components now calls the fork's own header-only mixer,
+    src/libslic3r/filament_mixer_model.h (MIT, Copyright (c) 2026 Justin Hayes),
+    chained pairwise in the same order and with the same weight accumulation as
+    MixedFilamentManager::blend_color_multi, so the solver's prediction and the
+    colour the user sees on the sidebar chip are the same number.
+  * build_color_solver_candidates takes a ColorSolverConstraints (minimum and
+    maximum share per used component, and a cap on how many components may be
+    non-zero) so the enumeration can honour the batch dialog's existing
+    per-component percentage limits directly, and a candidate budget that drops
+    the unit lattice rather than enumerating an unbounded set.
+  * solve_color_solver_candidate_for_target was added so a caller can read the
+    winning mix's colour straight out of the candidate set.
+
+Dropped entirely (not present in this copy):
+
+  * the ordered-stack / contoning solver and ColorSolverCalibratedStackModel -
+    the Beer-Lambert, TD-effective-alpha, adaptive-spectral and
+    nearest-measured-sample stack models, the stack stretching and beam search,
+    and mix_color_solver_ordered_stack
+  * ColorSolverStackComponentRole
+  * every reference to pigment-painter and prusa-fdm-mixer

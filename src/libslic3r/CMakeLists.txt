@@ -594,6 +594,9 @@ find_package(libnoise REQUIRED)
 target_link_libraries(libslic3r
     PUBLIC
         admesh
+        # PUBLIC so libslic3r_gui and the libslic3r tests both see ColorSolver.hpp;
+        # the batch colour-match dialog is its only caller today.
+        colorsolver
         libigl
         libnest2d
         miniz
