@@ -17,6 +17,8 @@
 #include "Tesselate.hpp"
 #include "TriangleMeshSlicer.hpp"
 #include "Utils.hpp"
+#include "ContourZ.hpp"
+#include "SLA/IndexedMesh.hpp"
 #include "Fill/FillAdaptive.hpp"
 #include "Fill/FillLightning.hpp"
 #include "Format/STL.hpp"
@@ -596,6 +598,97 @@ void PrintObject::ironing()
         BOOST_LOG_TRIVIAL(debug) << "Ironing in parallel - end";
         this->set_done(posIroning);
     }
+}
+
+// ZAA (Z contouring). Whether this object wants the posContouring step at all, and whether any of
+// the guards forbid it. The guards are documented in
+// docs/superpowers/specs/2026-09-07-z-contouring-port.md.
+bool PrintObject::need_z_contouring() const
+{
+    size_t num_regions = this->num_printing_regions();
+    bool   any_enabled = false;
+    for (size_t region_id = 0; region_id < num_regions; region_id++)
+        if (this->printing_region(region_id).config().zaa_enabled) {
+            any_enabled = true;
+            break;
+        }
+    if (!any_enabled)
+        return false;
+
+    // Guard (4a), spiral vase: the vase mode already owns Z along the whole path.
+    if (m_print->config().spiral_mode.value) {
+        BOOST_LOG_TRIVIAL(info) << "ZAA: skipped, spiral vase mode is on";
+        return false;
+    }
+
+    // Guard (3), the fork's local-Z / painted-zone dithering planner (LocalZInterval, SubLayerPlan)
+    // already subdivides the layer's Z budget in painted zones. Two independent things must not
+    // claim the same budget, so ZAA yields to the planner for the whole object.
+    if (m_print->config().dithering_local_z_mode.value) {
+        BOOST_LOG_TRIVIAL(info) << "ZAA: skipped, local-Z dithering owns the layer Z budget";
+        return false;
+    }
+    if (!this->local_z_intervals().empty()) {
+        BOOST_LOG_TRIVIAL(info) << "ZAA: skipped, this object has a sub-layer plan";
+        return false;
+    }
+
+    // Guard (4b), variable / adaptive layer height: ZAA re-purposes the intra-layer height budget,
+    // and a per-layer height profile already varies it. Same exclusion offset_layers documents.
+    if (m_model_object != nullptr && !m_model_object->layer_height_profile.empty()) {
+        BOOST_LOG_TRIVIAL(info) << "ZAA: skipped, object has a variable layer height profile";
+        return false;
+    }
+
+    // Contouring needs a single instance to raycast against; see contour_z().
+    if (m_model_object == nullptr || m_model_object->instances.size() != 1) {
+        BOOST_LOG_TRIVIAL(info) << "ZAA: skipped, unexpected number of instances";
+        return false;
+    }
+
+    return true;
+}
+
+void PrintObject::contour_z()
+{
+    if (!this->set_started(posContouring))
+        return;
+
+    if (!this->need_z_contouring()) {
+        this->set_done(posContouring);
+        return;
+    }
+
+    m_print->set_status(40, L("Z contouring"));
+    BOOST_LOG_TRIVIAL(debug) << "Contouring in parallel - start";
+
+    TriangleMesh mesh = this->m_model_object->raw_mesh();
+
+    ModelInstance           *inst          = m_model_object->instances.front();
+    Point                    center_offset = this->center_offset();
+    Geometry::Transformation trans         = inst->get_transformation();
+
+    double z = this->m_model_object->min_z();
+    trans.set_offset(Vec3d(-unscale<double>(center_offset.x()), -unscale<double>(center_offset.y()), 0));
+    mesh.transform(trans.get_matrix());
+
+    sla::IndexedMesh imesh(mesh);
+    imesh.ground_level_offset(-z);
+
+    tbb::parallel_for(
+        // Contouring starts with the second layer to avoid a build plate collision.
+        tbb::blocked_range<size_t>(1, m_layers.size()),
+        [this, &imesh](const tbb::blocked_range<size_t>& range) {
+            for (size_t layer_idx = range.begin(); layer_idx < range.end(); layer_idx++) {
+                m_print->throw_if_canceled();
+                m_layers[layer_idx]->make_contour_z(imesh);
+            }
+        }
+    );
+    m_print->throw_if_canceled();
+    BOOST_LOG_TRIVIAL(debug) << "Contouring in parallel - end";
+
+    this->set_done(posContouring);
 }
 
 // BBS
@@ -1364,15 +1457,15 @@ bool PrintObject::invalidate_step(PrintObjectStep step)
 
     // propagate to dependent steps
     if (step == posPerimeters) {
-		invalidated |= this->invalidate_steps({ posPrepareInfill, posInfill, posIroning, posSimplifyPath, posSimplifyInfill });
+		invalidated |= this->invalidate_steps({ posPrepareInfill, posInfill, posIroning, posContouring, posSimplifyPath, posSimplifyInfill });
         invalidated |= m_print->invalidate_steps({ psSkirtBrim });
     } else if (step == posPrepareInfill) {
-        invalidated |= this->invalidate_steps({ posInfill, posIroning, posSimplifyPath, posSimplifyInfill });
+        invalidated |= this->invalidate_steps({ posInfill, posIroning, posContouring, posSimplifyPath, posSimplifyInfill });
     } else if (step == posInfill) {
-        invalidated |= this->invalidate_steps({ posIroning, posSimplifyInfill });
+        invalidated |= this->invalidate_steps({ posIroning, posContouring, posSimplifyInfill });
         invalidated |= m_print->invalidate_steps({ psSkirtBrim });
     } else if (step == posSlice) {
-		invalidated |= this->invalidate_steps({ posPerimeters, posPrepareInfill, posInfill, posIroning, posSupportMaterial, posSimplifyPath, posSimplifyInfill });
+		invalidated |= this->invalidate_steps({ posPerimeters, posPrepareInfill, posInfill, posIroning, posContouring, posSupportMaterial, posSimplifyPath, posSimplifyInfill });
         invalidated |= m_print->invalidate_steps({ psSkirtBrim });
         m_slicing_params.valid = false;
         this->clear_local_z_plan();

@@ -18,6 +18,7 @@ class LayerRegion;
 using LayerRegionPtrs = std::vector<LayerRegion*>;
 class PrintRegion;
 class PrintObject;
+namespace sla { class IndexedMesh; }
 
 namespace FillAdaptive {
     struct Octree;
@@ -194,6 +195,9 @@ public:
                                                                            FillAdaptive::Octree *support_fill_octree,
                                                                            FillLightning::Generator* lightning_generator) const;
     void 					make_ironing();
+    // ZAA (Z contouring): raycast the eligible extrusions of this layer into the object's mesh and
+    // attach per-position Z deltas. See ContourZ.cpp.
+    void                    make_contour_z(const sla::IndexedMesh &mesh);
 
     void                    export_region_slices_to_svg(const char *path) const;
     void                    export_region_fill_surfaces_to_svg(const char *path) const;

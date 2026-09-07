@@ -134,6 +134,8 @@ set(lisbslic3r_sources
     Extruder.hpp
     ExtrusionEntityCollection.cpp
     ExtrusionEntityCollection.hpp
+    ContourZ.cpp
+    ContourZ.hpp
     ExtrusionEntity.cpp
     ExtrusionEntity.hpp
     ExtrusionSimulator.cpp
