@@ -234,27 +234,75 @@ group after Ironing; all `comExpert`; all per-object overridable via `GUI_Factor
 
 ## Verification
 
-* `libslic3r_tests` - the existing suite plus `test_contour_z.cpp`, which covers the raycast clamp
-  (both bounds, the "not a top surface" rejection, the miss case, the wider ironing band), the
-  perimeter never-raised rule, the slope rule and its #13552 ramp, the `offset_layers` composition
-  (base Z, absolute band, the never-raise reference, the single flow term), and a real 10 degree
-  ramp mesh raycast through `sla::IndexedMesh` whose samples must rise monotonically and stay inside
-  the clamp.
-* **Bar A** - `scratchpad/bar_a_zaa.py`. With `zaa_enabled` off, a CLI slice of
-  `OrcaToleranceTest.stl` on "Bambu Lab P1S 0.4 nozzle" and on "Snapmaker U1 (0.4 nozzle)"
-  (isolated `--datadir` copied from `snorca_hubtest/dd_lan`), with `offset_layers` off and on, must
-  be byte-identical to the head build apart from the timestamp line and the four new
-  `; zaa_* = ...` config lines.
-* **Bar B** - `scratchpad/bar_b_zaa.py` against `scratchpad/zaa_wedge.stl`, a 40 x 40 mm wedge
-  rising 2 mm -> 12 mm (14.04 degrees). ZAA on at 0.2 mm layers: top-surface moves must carry
-  varying Z within a layer, per-segment E must scale with the local height, no Z below
-  `lo + zaa_min_z` nor above `print_z + zaa_min_z`, and `--export-3mf` (which runs the fork's own
-  `GCodeProcessor`) must succeed. Then the same with `offset_layers` on, and finally spiral vase on,
-  which must skip contouring without an error.
+All three gates were run on 2026-09-07 against a baseline built from `fcaed0bdc0` in its own
+worktree (the main tree had already moved past it, so it was not usable as the head).
+
+### Unit tests - PASS
+
+`libslic3r_tests`: **626 cases, 624 passed, 2 failed as expected** (the head's own two). The head
+had 621 cases; `test_contour_z.cpp` adds 5. It covers the raycast clamp (both bounds, the "not a top
+surface" rejection, the miss case, the wider ironing band), the perimeter never-raised rule, the
+slope rule and the continuity of the #13552 ramp, the `offset_layers` composition (base Z, absolute
+band, the never-raise reference, the single flow term), and a real 10 degree ramp mesh raycast
+through `sla::IndexedMesh` whose samples must rise monotonically and stay inside the clamp.
+
+### Bar A - PASS, all four cases
+
+`scripts/zaa/bar_a_zaa.py`. With `zaa_enabled` off, a CLI slice of `OrcaToleranceTest.stl` with an
+isolated `--datadir` copied from `snorca_hubtest/dd_lan`:
+
+| case | result |
+|---|---|
+| Bambu Lab P1S 0.4 nozzle | identical apart from the timestamp and 4 `zaa_*` lines (24565 lines) |
+| P1S + `offset_layers` | identical, 24951 lines |
+| Snapmaker U1 (0.4 nozzle) | identical, 25521 lines |
+| U1 + `offset_layers` | identical, 26027 lines |
+
+The four added lines are exactly
+`; zaa_dont_alternate_fill_direction = 0`, `; zaa_enabled = 0`, `; zaa_min_z = 0.05`,
+`; zaa_minimize_perimeter_height = 35`, and the baseline carries none of them.
+
+### Bar B - PASS
+
+`scripts/zaa/bar_b_zaa.py` (analysis in `bar_b_report.py`) against the 40 x 40 mm wedge rising
+2 mm -> 12 mm that `scripts/zaa/make_wedge.py` generates - 14.036 degrees, which is what "a 40x40
+wedge from 2 to 12 mm" actually is.
+
+ZAA on, 0.2 mm layers, `--export-3mf` (which runs the fork's own `GCodeProcessor`): slice returns 0
+and writes the 3MF. 25078 moves, **10360 of them contoured** (carrying their own Z), across 50
+layers, and **every one of those 50 layers carries more than one Z**. Contoured features: outer wall
+396, top surface 9964.
+
+* Clamp: 10360 of 10360 inside the absolute band `[lo + zaa_min_z, print_z + zaa_min_z]`, none
+  outside.
+* Flow: `E per mm / ((H + d) / H)` is constant per feature - outer wall `e_per_mm = 0.03076` with
+  0.296 % spread, top surface `0.03108` with 0.357 % spread.
+
+With `offset_layers` also on: 10842 contoured, adding 482 inner-wall moves. 10650 land in the
+absolute band and **192 rest exactly on their own uncontoured base `print_z + 0.5h`** - the raised
+odd walls at points the raycast declared not a top surface, which is the correct behaviour (see the
+nuance above). Nothing lands outside both. The flow fit is the decisive one:
+
+```
+Inner wall   n=482   base = print_z + 0.50*H   e_per_mm = 0.03319   spread 0.365%   ok
+Outer wall   n=396   base = print_z + 0.00*H   e_per_mm = 0.03076   spread 0.296%   ok
+Top surface  n=9964  base = print_z + 0.00*H   e_per_mm = 0.03108   spread 0.357%   ok
+```
+
+The inner walls only fit with the base at `print_z + 0.5h`: their Z **is** the offset base plus the
+contour, and their flow follows the single summed local height. Fitting them against `print_z`
+instead gives a 1.8x error.
+
+Spiral vase on top of ZAA: slices clean, rc 0, no error.
+
+Spot-checked by hand against the mesh: at layer `print_z = 2.2` the outer wall emits `Z2.102` where
+the ramp surface is at 2.1025 and `Z2.177` where it is at 2.1775 - the contour is landing on the
+mesh to within the 0.1 mm resampling, including negative deltas.
 
 ## The hardware test the owner should print
 
-Print `scratchpad/zaa_wedge.stl` (the 40 x 40 mm wedge, 2 mm -> 12 mm) three times at **0.2 mm**
+Generate the wedge with `python scripts/zaa/make_wedge.py wedge.stl` (40 x 40 mm, 2 mm -> 12 mm,
+14.04 degrees) and print it three times at **0.2 mm**
 layers on the same filament and printer, changing nothing else:
 
 1. **ZAA off** - the control. The slope should show clear 0.2 mm stair steps.
