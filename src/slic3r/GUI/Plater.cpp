@@ -16888,6 +16888,9 @@ PlateBBoxData Plater::priv::generate_first_layer_bbox()
     bboxdata.is_seq_print = (curr_plate_seq == PrintSequence::ByObject);
     bboxdata.first_extruder = print->get_tool_ordering().first_extruder();
     bboxdata.bed_type       = bed_type_to_gcode_string(print->config().curr_bed_type.value);
+    // Ultra (H2C nozzle rack): ported from BambuStudio Plater.cpp:16157.
+    if (auto* slice_result = partplate_list.get_curr_plate()->get_slice_result())
+        bboxdata.first_layer_time = slice_result->initial_layer_time;
     // get nozzle diameter
     auto opt_nozzle_diameters = print->config().option<ConfigOptionFloats>("nozzle_diameter");
     if (opt_nozzle_diameters != nullptr)
@@ -16906,10 +16909,15 @@ PlateBBoxData Plater::priv::generate_first_layer_bbox()
     BBoxData data;
     for (auto obj : objects)
     {
+        // Ultra (H2C nozzle rack): PrintObject::get_first_layer_bbox already returns plate-relative
+        // coordinates, so subtracting the plate origin here shifted every object bbox in
+        // Metadata/plate_N.json by exactly one plate origin (measured on the user's plate 5:
+        // -403.2, +444.0 against Bambu Studio's file). Only first_layer_wipe_tower_corners() is in
+        // global coordinates and needs the subtraction, which is why the wipe tower came out right
+        // and the object did not. Upstream BambuStudio (Plater.cpp:16174-16182) does not subtract
+        // here either, and this fork's own CLI path (Snapmaker_Orca.cpp) never did.
         auto bb_scaled = obj->get_first_layer_bbox(data.area, data.layer_height, data.name);
         auto bb = unscaled(bb_scaled);
-        bb.min -= orig2d;
-        bb.max -= orig2d;
         bbox_all.merge(bb);
         data.area *= (SCALING_FACTOR * SCALING_FACTOR); // unscale area
         data.id = obj->id().id;

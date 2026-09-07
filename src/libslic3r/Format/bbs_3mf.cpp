@@ -742,6 +742,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
     first_layer_time = std::to_string(result->initial_layer_time);
     filament_change_sequence = result->filament_change_sequence;
     nozzle_change_sequence   = result->nozzle_change_sequence;
+    optimal_assignment       = result->optimal_assignment;
 
     /* only for test
     GCodeProcessorResult::SliceWarning sw;
@@ -8278,7 +8279,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
     // _BBS_3MF_Exporter::_add_filament_sequence_file_to_archive. Writes the filament entry order and
     // the matching logical-nozzle order per plate. The "filament_sequence" key is used instead of
     // "sequence" only when the plate was grouped with a dynamic (selector) nozzle map, which this
-    // fork never produces; "optimal_assignment" has no source here and stays empty.
+    // fork never produces. "optimal_assignment" comes from GCode.cpp via parse_filament_info.
     bool _BBS_3MF_Exporter::_add_filament_sequence_file_to_archive(mz_zip_archive& archive, const PlateDataPtrs& plate_data_list)
     {
         std::string sequence_str;
@@ -8286,7 +8287,10 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
 
         for (size_t idx = 0; idx < plate_data_list.size(); ++idx) {
             PlateData* plate_data = plate_data_list[idx];
-            if (!plate_data || !plate_data->is_sliced_valid)
+            // Ultra (H2C nozzle rack): upstream skips only a null plate, and so writes an entry
+            // (with empty arrays) for every plate in the project. The H2C's stored-job screen
+            // indexes this map by plate number.
+            if (!plate_data)
                 continue;
 
             std::string plate_idx = "plate_" + std::to_string(idx + 1);
