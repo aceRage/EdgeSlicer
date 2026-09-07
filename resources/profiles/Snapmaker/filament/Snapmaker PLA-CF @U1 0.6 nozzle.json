@@ -52,7 +52,6 @@
     "filament_settings_id": [
         "PLA CF"
     ],
-    "filament_type": ["PLA-CF"],
     "filament_z_hop": ["nil"],
     "filament_z_hop_types": [
         "Slope Lift"

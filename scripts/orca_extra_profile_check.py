@@ -77,6 +77,10 @@ def check_filament_compatible_printers(vendor_folder):
             error += 1
             continue
 
+        # Vendor folders also hold data files that are not presets (Snapmaker's filament colour /
+        # compatibility / hot-bed tables): no "name", nothing to check.
+        if not isinstance(data, dict) or 'name' not in data:
+            continue
         profile_name = data['name']
         if profile_name in profiles:
             print_error(f"Duplicated profile {profile_name}: {file_path}")
@@ -306,6 +310,8 @@ def check_filament_id(vendor, vendor_folder):
             print_error(f"Error processing {file_path}: {e}")
             error += 1
             continue
+        if not isinstance(data, dict) or 'name' not in data:
+            continue  # data file, not a preset
 
         if 'filament_id' not in data:
             continue
