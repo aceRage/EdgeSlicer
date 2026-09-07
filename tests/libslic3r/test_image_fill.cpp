@@ -10,6 +10,8 @@
 #include "libslic3r/TriangleMesh.hpp"
 #include "libslic3r/TriangleSelector.hpp"
 #include "libslic3r/Format/bbs_3mf.hpp"
+#include "libslic3r/Format/GLTF.hpp"
+#include "libslic3r/ObjColorMatch.hpp"
 #include "libslic3r/Utils.hpp"
 
 #include <boost/filesystem.hpp>
@@ -732,4 +734,221 @@ TEST_CASE("Image Fill: apply, save, reload - the painting and the asset are bit-
         REQUIRE(r.ok);
         CHECK(redo_volume->mmu_segmentation_facets.get_data().bitstream == src_painting.bitstream);
     }
+}
+
+// =============================================================================================
+// 6. glTF import: the before/after
+// =============================================================================================
+//
+// The change to GLB import in this phase is that a baseColorTexture is sampled at 16 points per
+// triangle instead of one, and that the ImageFill service - not ObjColorMatch's CIE76 pass -
+// decides which of the chosen filaments each sample belongs to. This measures it, on two files the
+// reader has never seen (tests/data/image_fill/agent_*.glb, written by make_glb.py from struct and
+// zlib, deliberately low-poly with a detailed texture).
+//
+// Both paths run in ONE binary on ONE import, which is a sharper comparison than two builds: the
+// only thing that differs is which of the two Model::import_multi_volume_face_color_deal overloads
+// is called. The filaments are chosen by obj_color_auto_match, exactly as a headless import does,
+// so both sides get the same spools.
+//
+// The metric is the OLD path's own: CIE76 dE between each leaf's true texture colour and the
+// colour of the filament it was painted with, area-weighted (every leaf of a uniform subdivision
+// has the same area). Measuring the new path with the incumbent's metric is the conservative way
+// round.
+namespace {
+
+struct GlbBeforeAfter
+{
+    size_t triangles = 0;
+    size_t leaves    = 0;
+    size_t painted_old = 0, painted_new = 0;
+    size_t filaments_old = 0, filaments_new = 0;
+    double mean_de_old = 0., mean_de_new = 0.;
+    double max_de_old  = 0., max_de_new  = 0.;
+};
+
+bool measure_glb(const std::string &file, GlbBeforeAfter &out)
+{
+    const std::string path = std::string(TEST_DATA_DIR) + "/image_fill/" + file;
+
+    Model       probe;
+    GltfInfo    info;
+    std::string message;
+    if (!load_gltf(path.c_str(), &probe, info, message))
+        return false;
+    if (info.face_colors.empty() || info.sub_face_colors.empty() || info.sub_face_depth <= 0)
+        return false;
+
+    size_t per = 1;
+    for (int i = 0; i < info.sub_face_depth; ++i) per *= 4;
+    out.triangles = info.face_colors.size();
+    out.leaves    = out.triangles * per;
+
+    // The spools a user would have loaded: four, none of them a match for the texture, so the
+    // matcher has to add slots - which is what a real import does.
+    const std::vector<RGBA> existing = {RGBA{1.f, 1.f, 1.f, 1.f}, RGBA{0.f, 0.f, 0.f, 1.f},
+                                        RGBA{0.85f, 0.1f, 0.1f, 1.f}, RGBA{0.1f, 0.2f, 0.8f, 1.f}};
+    ObjColorMatchResult match;
+    if (!obj_color_auto_match(info.face_colors, false, existing, match))
+        return false;
+    if (match.filament_ids.size() != info.face_colors.size())
+        return false;
+
+    auto slot_color = [&](int id) -> RGBA {
+        if (id >= 1 && size_t(id) <= existing.size())
+            return existing[size_t(id) - 1];
+        const size_t k = size_t(id) - 1 - existing.size();
+        return k < match.added_colors.size() ? match.added_colors[k] : RGBA{0.5f, 0.5f, 0.5f, 1.f};
+    };
+
+    // --- the old path: one filament per triangle -------------------------------------------
+    {
+        Model       m;
+        GltfInfo    i2;
+        std::string msg2;
+        if (!load_gltf(path.c_str(), &m, i2, msg2))
+            return false;
+        if (!Model::import_multi_volume_face_color_deal(match.filament_ids, match.first_extruder_id, &m))
+            return false;
+        const ModelVolume *v = m.objects.front()->volumes.front();
+        TriangleSelector   sel(v->mesh());
+        sel.deserialize(v->mmu_segmentation_facets.get_data(), true);
+        std::vector<int> used;
+        double sum = 0.;
+        for (size_t t = 0; t < out.triangles; ++t) {
+            const int id = int(match.filament_ids[t]);
+            if (id > 1) {
+                ++out.painted_old;
+                if (std::find(used.begin(), used.end(), id) == used.end()) used.push_back(id);
+            }
+            const RGBA c = slot_color(id);
+            for (size_t k = 0; k < per; ++k) {
+                const float d = obj_color_distance(info.sub_face_colors[t * per + k], c);
+                sum += double(d);
+                out.max_de_old = std::max(out.max_de_old, double(d));
+            }
+        }
+        out.painted_old *= per;   // in leaves, so the two sides are comparable
+        out.filaments_old = used.size();
+        out.mean_de_old   = sum / double(out.leaves);
+    }
+
+    // --- the new path: one filament per sub-facet --------------------------------------------
+    {
+        Model       m;
+        GltfInfo    i2;
+        std::string msg2;
+        if (!load_gltf(path.c_str(), &m, i2, msg2))
+            return false;
+        if (!Model::import_multi_volume_face_color_deal(match.filament_ids, i2.face_colors,
+                                                        i2.sub_face_colors, i2.sub_face_depth,
+                                                        match.first_extruder_id, &m))
+            return false;
+        const ModelVolume     *v = m.objects.front()->volumes.front();
+        TriangleMesh           tm(v->mesh());
+        const std::vector<int> states = leaf_states(tm, v->mmu_segmentation_facets.get_data(),
+                                                    out.triangles, info.sub_face_depth);
+        std::vector<int> used;
+        double           sum = 0.;
+        for (size_t i = 0; i < out.leaves; ++i) {
+            const int id = states[i];
+            if (id > 1) {
+                ++out.painted_new;
+                if (std::find(used.begin(), used.end(), id) == used.end()) used.push_back(id);
+            }
+            const float d = obj_color_distance(info.sub_face_colors[i], slot_color(id));
+            sum += double(d);
+            out.max_de_new = std::max(out.max_de_new, double(d));
+        }
+        out.filaments_new = used.size();
+        out.mean_de_new   = sum / double(out.leaves);
+    }
+    return true;
+}
+
+} // namespace
+
+TEST_CASE("Image Fill: a textured GLB is at least as good through the new path", "[imagefill][glb]")
+{
+    for (const char *file : {"agent_plaque.glb", "agent_medallion.glb"}) {
+        GlbBeforeAfter r;
+        INFO("file " << file);
+        REQUIRE(measure_glb(file, r));
+
+        // Printed so the numbers land in the run log and can be quoted in the status document.
+        WARN("GLB before/after " << file << ": triangles=" << r.triangles << " leaves=" << r.leaves
+             << " | OLD painted=" << r.painted_old << " filaments=" << r.filaments_old
+             << " meanDE=" << r.mean_de_old << " maxDE=" << r.max_de_old
+             << " | NEW painted=" << r.painted_new << " filaments=" << r.filaments_new
+             << " meanDE=" << r.mean_de_new << " maxDE=" << r.max_de_new);
+
+        // "At least as good", stated three ways.
+        CHECK(r.painted_new >= r.painted_old);
+        CHECK(r.filaments_new >= r.filaments_old);
+        CHECK(r.mean_de_new <= r.mean_de_old);
+    }
+}
+
+// =============================================================================================
+// 7. Bar B: the project a real slice is run on
+// =============================================================================================
+//
+// Bar B is "a real slice of an applied image on a 3-filament setup, previewed via --export-3mf".
+// The slicer's CLI has no Image fill dialog - Snapmaker_Orca.cpp hands read_from_file a null
+// ObjImportColorFn - so the project has to be made here, by the real image_fill_apply, and sliced
+// from disk afterwards. This case is the maker: it writes the project and asserts the painting is
+// what the slice is supposed to show, so the file the CLI slices is never a mystery.
+//
+// Run it on its own with:  libslic3r_tests.exe "[barb]"
+// It leaves %TEMP%\snorca_tests\image_fill_bar_b.3mf behind on purpose.
+TEST_CASE("Image Fill: write the Bar B project - a cube with a three-colour image on its top face",
+          "[imagefill][barb]")
+{
+    // Three filaments, the three the image is made of, so the answer is unambiguous and a tool
+    // change has to happen wherever the picture changes band.
+    const std::vector<std::array<float, 3>> three = {{0.85f, 0.15f, 0.15f},
+                                                     {0.15f, 0.75f, 0.25f},
+                                                     {0.15f, 0.25f, 0.85f}};
+    const std::vector<int> ids = {1, 2, 3};
+
+    Model        model;
+    ModelObject *object = model.add_object();
+    object->name        = "image fill cube";
+    // 30 mm so the bands are several millimetres wide and survive the slicer's own resolution.
+    ModelVolume *volume = object->add_volume(make_cube(30., 30., 30.));
+    volume->name        = "cube";
+    object->add_instance();
+    object->ensure_on_bed();
+
+    const std::string sha = model.image_assets.add(read_fixture("stripes3.png"));
+
+    ImageFillParams p;
+    p.asset       = sha;
+    p.projection  = ImageFillProjection::Planar;
+    p.axis        = ImageFillAxis::Z;   // the picture lies on the top face, u from x, v from y
+    p.subdivision = 4;                  // 16 x 16 leaves per facet: the bands land cleanly
+    p.allowed     = ids;
+
+    const ImageFillResult res = image_fill_apply(*volume, p, model.image_assets, three, ids);
+    REQUIRE(res.ok);
+    // stripes3.png is three horizontal bands, so all three filaments must appear...
+    CHECK(res.filaments_used == std::vector<int>{1, 2, 3});
+    // ...and the whole surface is painted, because every facet of a cube gets a sample.
+    CHECK(res.facets_painted == res.leaves_total);
+    CHECK(res.leaves_total == volume->mesh().its.indices.size() * 256);
+
+    const boost::filesystem::path tmp_root = boost::filesystem::temp_directory_path() / "snorca_tests";
+    boost::filesystem::create_directories(tmp_root);
+    Slic3r::set_temporary_dir(tmp_root.string());
+    const std::string out = (tmp_root / "image_fill_bar_b.3mf").string();
+
+    DynamicPrintConfig cfg = DynamicPrintConfig::full_print_config();
+    StoreParams        sp;
+    sp.path     = out.c_str();
+    sp.model    = &model;
+    sp.config   = &cfg;
+    sp.strategy = SaveStrategy::Zip64 | SaveStrategy::Silence | SaveStrategy::SkipAuxiliary;
+    REQUIRE(store_bbs_3mf(sp));
+    WARN("Bar B project written to " << out << " (" << res.facets_painted << " painted facets, "
+         << res.filaments_used.size() << " filaments, subdivision " << res.subdivision_used << ")");
 }

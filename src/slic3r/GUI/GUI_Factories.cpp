@@ -1928,6 +1928,10 @@ void MenuFactory::create_part_menu()
     append_menu_item(menu, wxID_ANY, _L("Split by painted colour"), _L("Convert the part's colour painting into separate parts, one per filament"),
         [](wxCommandEvent&) { plater()->split_by_color(); }, "split_parts", nullptr,
         []() { return plater()->can_split_by_color(); }, m_parent);
+    // Image Fill (Phase 2): the one menu item the feature adds.
+    append_menu_item(menu, wxID_ANY, _L("Apply image fill..."), _L("Put an image or a gradient on this part, printed with the filaments you allow"),
+        [](wxCommandEvent&) { plater()->apply_image_fill(); }, "", nullptr,
+        []() { return plater()->can_apply_image_fill(); }, m_parent);
 
     menu->AppendSeparator();
     append_menu_item_change_type(menu);
