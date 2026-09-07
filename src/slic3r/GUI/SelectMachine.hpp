@@ -105,11 +105,25 @@ enum class CloudTaskNozzleId : int
     NOZZLE_LEFT     = 1,
 };
 
+/* The numbering used by project_config "filament_map" (1 based, the value stored per
+ * filament). It is NOT the numbering the cloud/LAN task uses - see
+ * s_convert_filament_map_nozzle_id_to_task_nozzle_id in SelectMachine.cpp. */
+enum class FilamentMapNozzleId : int
+{
+    NOZZLE_LEFT     = 1,
+    NOZZLE_RIGHT    = 2,
+};
+
 enum class ConfigNozzleIdx : int
 {
     NOZZLE_LEFT      = 0,
     NOZZLE_RIGHT     = 1,
 };
+
+/* The flow-variant label a print task uses for one nozzle ("standard_flow", "high_flow", ...).
+ * Takes the raw NozzleVolumeType value so this header needs no PrintConfig include. Shared by
+ * the send dialog and the phone send path. */
+std::string get_nozzle_volume_type_cloud_string(int nozzle_volume_type);
 
 
 WX_DECLARE_HASH_MAP(int, Material *, wxIntegerHash, wxIntegerEqual, MaterialHash);
@@ -238,6 +252,8 @@ protected:
     wxWindow*                           select_bed{ nullptr };
     wxWindow*                           select_flow{ nullptr };
     wxWindow*                           select_timelapse{ nullptr };
+    /* Dual-nozzle machines only (H2D / H2D Pro / H2C): nozzle offset calibration. */
+    wxWindow*                           select_nozzle_offset_cali{ nullptr };
     wxWindow*                           select_use_ams{ nullptr };
     wxPanel*                            m_panel_status{ nullptr };
     wxPanel*                            m_basic_panel;

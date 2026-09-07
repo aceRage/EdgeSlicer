@@ -169,6 +169,23 @@ static std::vector<FilamentInfo> plate_filaments(PartPlate* plate)
     return out;
 }
 
+// SelectMachineDialog::get_ams_mapping_result: the per-filament nozzle assignment that tells the
+// printer which nozzle each filament belongs to. project_config "filament_map" numbers the nozzles
+// 1 = left, 2 = right; the task numbers them 1 = left, 0 = right. Empty unless the printer preset
+// really has two nozzles, which is what keeps a single-nozzle payload unchanged.
+static std::vector<int> task_nozzle_ids()
+{
+    std::vector<int> ids;
+    const auto* diam = wxGetApp().preset_bundle->printers.get_edited_preset().config.option<ConfigOptionFloats>("nozzle_diameter");
+    if (!diam || diam->size() != 2) return ids;
+    const auto* fm = wxGetApp().preset_bundle->project_config.option<ConfigOptionInts>("filament_map");
+    if (!fm) return ids;
+    for (int v : fm->values)
+        ids.push_back(v == (int) FilamentMapNozzleId::NOZZLE_RIGHT ? (int) CloudTaskNozzleId::NOZZLE_RIGHT
+                                                                   : (int) CloudTaskNozzleId::NOZZLE_LEFT);
+    return ids;
+}
+
 // SelectMachineDialog::do_ams_mapping + get_ams_mapping_result: the three JSON strings PrintJob
 // forwards (v0 tray list, v1 ams/slot list, per-filament info). Empty when nothing maps.
 static void ams_mapping(MachineObject* obj, const std::vector<FilamentInfo>& filaments, std::string& v0, std::string& v1, std::string& info)
@@ -183,7 +200,8 @@ static void ams_mapping(MachineObject* obj, const std::vector<FilamentInfo>& fil
         if (r.tray_id == -1) ++invalid;
     if (invalid == result.size()) return;
 
-    PresetBundle* bundle = wxGetApp().preset_bundle;
+    PresetBundle*          bundle     = wxGetApp().preset_bundle;
+    const std::vector<int> nozzle_ids = task_nozzle_ids();
     json          j0 = json::array(), j1 = json::array(), ji = json::array();
     for (size_t i = 0; i < bundle->filament_presets.size(); ++i) {
         int  tray_id = -1;
@@ -201,6 +219,7 @@ static void ams_mapping(MachineObject* obj, const std::vector<FilamentInfo>& fil
             item["ams"]          = tray_id;
             item["filamentType"] = k < filaments.size() ? filaments[k].type : result[k].type;
             if (const Preset* p = bundle->filaments.find_preset(bundle->filament_presets[i])) item["filamentId"] = p->filament_id;
+            if (i < nozzle_ids.size()) item["nozzleId"] = nozzle_ids[i];
             item["sourceColor"] = k < filaments.size() ? filaments[k].color : result[k].color;
             item["targetColor"] = result[k].color;
             try {
@@ -223,11 +242,14 @@ static std::string nozzles_info()
     json        arr  = json::array();
     const auto* diam = wxGetApp().preset_bundle->printers.get_edited_preset().config.option<ConfigOptionFloats>("nozzle_diameter");
     if (!diam || diam->size() != 2) return arr.dump();
+    // Per-nozzle flow variant, same source as the send dialog's build_nozzles_info. This used to
+    // be the constant "standard_flow", which is wrong for an H2C's high-flow nozzle.
+    const auto* vol = wxGetApp().preset_bundle->project_config.option<ConfigOptionEnumsGeneric>("nozzle_volume_type");
     for (size_t i = 0; i < 2; ++i) {
         json n;
         n["id"]       = (int) (i == 0 ? CloudTaskNozzleId::NOZZLE_LEFT : CloudTaskNozzleId::NOZZLE_RIGHT);
         n["type"]     = nullptr;
-        n["flowSize"] = "standard_flow";
+        n["flowSize"] = (vol && i < vol->size()) ? get_nozzle_volume_type_cloud_string(vol->get_at(i)) : std::string("standard_flow");
         n["diameter"] = diam->get_at(i);
         arr.push_back(n);
     }
@@ -376,6 +398,12 @@ static std::pair<int, std::string> prepare_bambu(const Request& req, PartPlate* 
         ps.task_layer_inspect    = true;
         ps.task_use_ams          = obj->has_ams() && flag(req.use_ams, true);
         ps.nozzles_info          = nozzles_info();
+        // Nozzle offset calibration, the tri-state the H2 series grew: 0 = off, 1 = on, 2 = auto.
+        // Only a two-nozzle machine has it - nozzles_info is non-empty for exactly those - and it
+        // follows the same [print] AppConfig key the send dialog's checkbox writes, so a phone
+        // send honours what the desktop was last told. Zero elsewhere leaves those payloads alone.
+        if (!ps.nozzles_info.empty() && ps.nozzles_info != "[]")
+            ps.auto_offset_cali = remembered("nozzle_offset_cali") ? 2 : 0;
         if (obj->is_support_ams_mapping() && ps.task_use_ams) {
             ams_mapping(obj, plate_filaments(plate), ps.ams_mapping, ps.ams_mapping2, ps.ams_mapping_info);
         } else if (!ps.task_use_ams) {
