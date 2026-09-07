@@ -498,10 +498,13 @@ std::string WipeTowerIntegration::append_tcr(GCode& gcodegen, const WipeTower::T
             check_add_eol(end_filament_gcode_str);
         }
     }
-    // BBS: increase toolchange count
-    gcodegen.m_toolchange_count++;
-    // Ultra (H2C 3MF schema): record this filament entry for filament_sequence.json.
-    gcodegen.record_filament_change(new_extruder_id);
+    // Ultra (H2C nozzle rack): BambuStudio does NOT count the toolchange here - upstream
+    // GCode.cpp:831 keeps this increment commented out. append_tcr also runs for a sparse
+    // ("CP EMPTY GRID") wipe-tower layer, whose tcr G-code carries no [change_filament_gcode]
+    // placeholder and therefore emits no tool change at all. Counting it there made
+    // M620 O<n> skip (1, 2, 52, ...) and padded filament_sequence.json with phantom entries.
+    // The count and the sequence entry now happen after the tcr G-code is built, gated on
+    // custom_gcode_changes_tool - exactly as upstream GCode.cpp:1253-1257 does.
 
     // BBS: should be placed before toolchange parsing
     std::string toolchange_retract_str = gcodegen.retract(true, false);
@@ -568,7 +571,7 @@ std::string WipeTowerIntegration::append_tcr(GCode& gcodegen, const WipeTower::T
 
             config.set_key_value("max_layer_z", new ConfigOptionFloat(gcodegen.m_max_layer_z));
             config.set_key_value("relative_e_axis", new ConfigOptionBool(full_config.use_relative_e_distances));
-            config.set_key_value("toolchange_count", new ConfigOptionInt((int) gcodegen.m_toolchange_count));
+            config.set_key_value("toolchange_count", new ConfigOptionInt((int) gcodegen.m_toolchange_count + 1));
             // BBS: fan speed is useless placeholer now, but we don't remove it to avoid
             // slicing error in old change_filament_gcode in old 3MF
             config.set_key_value("fan_speed", new ConfigOptionInt((int) 0));
@@ -696,6 +699,13 @@ std::string WipeTowerIntegration::append_tcr(GCode& gcodegen, const WipeTower::T
         tcr_escaped_gcode = gcodegen.placeholder_parser_process("tcr_rotated_gcode", tcr_rotated_gcode, new_extruder_id, &config);
     unescape_string_cstyle(tcr_escaped_gcode, tcr_gcode);
     gcode += tcr_gcode;
+    // Ultra (H2C nozzle rack): port of BambuStudio GCode.cpp:1253-1257. Only a tcr whose G-code
+    // really contains the tool-change command counts towards toolchange_count / M620 O<n> and
+    // towards the filament_sequence.json entry order.
+    if (new_extruder_id >= 0 && custom_gcode_changes_tool(tcr_gcode, gcodegen.writer().toolchange_prefix(), new_extruder_id)) {
+        gcodegen.m_toolchange_count++;
+        gcodegen.record_filament_change(new_extruder_id);
+    }
     check_add_eol(toolchange_gcode_str);
 
     // SoftFever: set new PA for new filament
@@ -1902,6 +1912,58 @@ void GCode::do_export(Print* print, const char* path, GCodeProcessorResult* resu
     m_processor.result().filament_change_sequence = m_filament_change_sequence;
     m_processor.result().nozzle_change_sequence   = m_nozzle_change_sequence;
 
+    // Ultra (H2C nozzle rack): the per-filament physical group assignment that goes into
+    // Metadata/filament_sequence.json as "optimal_assignment". Ported from BambuStudio
+    // GCode.cpp:3482-3517; MultiNozzleUtils::find_optimal_physical_assignment is already in this
+    // fork verbatim. Empty on machines with no grouping result (every single-nozzle printer), so
+    // their output is unchanged.
+    {
+        std::vector<int> optimal_assignment;
+        std::shared_ptr<MultiNozzleUtils::LayeredNozzleGroupResult> group_result;
+        if (m_curr_print)
+            group_result = m_curr_print->get_layered_nozzle_group_result();
+        if (group_result) {
+            auto to_int = [](const std::vector<unsigned int>& in) {
+                std::vector<int> out;
+                out.reserve(in.size());
+                for (unsigned int v : in) out.push_back(int(v));
+                return out;
+            };
+            std::vector<int> logical_filaments;
+            for (unsigned int f : group_result->get_used_filaments())
+                logical_filaments.push_back(int(f));
+            auto nozzle_list = group_result->get_used_nozzles_in_extruder();
+            int  group_count = group_result->get_extruder_count();
+
+            std::vector<int> filament_seq = to_int(m_filament_change_sequence);
+            std::vector<int> nozzle_seq   = to_int(m_nozzle_change_sequence);
+
+            double load_time   = m_config.machine_load_filament_time.value;
+            double unload_time = m_config.machine_unload_filament_time.value;
+            MultiNozzleUtils::FilamentChangeTimeParams time_params;
+            time_params.selector_load_time   = static_cast<float>(load_time / 2);
+            time_params.selector_unload_time = static_cast<float>(unload_time / 2);
+            time_params.standard_load_time   = static_cast<float>(load_time);
+            time_params.standard_unload_time = static_cast<float>(unload_time);
+
+            bool can_compute = !logical_filaments.empty() && !nozzle_list.empty() && !filament_seq.empty() &&
+                               !nozzle_seq.empty() && group_count > 0;
+
+            std::vector<int> final_assignment(m_config.filament_map.values.size(), 0);
+            if (can_compute) {
+                auto used_assignment = MultiNozzleUtils::find_optimal_physical_assignment(
+                    logical_filaments, nozzle_list, filament_seq, nozzle_seq, group_count, time_params);
+                for (size_t idx = 0; idx < logical_filaments.size() && idx < used_assignment.size(); ++idx) {
+                    int filament_id = logical_filaments[idx];
+                    if (filament_id >= 0 && static_cast<size_t>(filament_id) < final_assignment.size())
+                        final_assignment[filament_id] = used_assignment[idx];
+                }
+            }
+            optimal_assignment = std::move(final_assignment);
+        }
+        m_processor.result().optimal_assignment = std::move(optimal_assignment);
+    }
+
     { // BBS:check bed and filament compatible
         const ConfigOptionDef* bed_type_def = print_config_def.get("curr_bed_type");
         assert(bed_type_def != nullptr);
@@ -2321,6 +2383,32 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
             std::ostringstream max_height_z_tip;
             max_height_z_tip << "; max_z_height: " << std::fixed << std::setprecision(2) << max_height_z << '\n';
             file.writeln(max_height_z_tip.str());
+        }
+
+        // Ultra (H2C nozzle rack): ported from BambuStudio GCode.cpp:2461-2476. The printer reads
+        // both lines out of a stored job: "filament" is the 1-based list of filament slots the job
+        // needs (the AMS offering on the machine's own screen), "support_material_on_wipe_tower"
+        // tells it whether the prime tower carries support material. Only for BBL printers, so
+        // non-Bambu output is unchanged.
+        if (is_bbl_printers) {
+            // Upstream feeds this from Print::get_slice_used_filaments(false), which is set from
+            // ToolOrdering::all_extruders() (Print.cpp:2298,2312). This fork keeps the tool ordering
+            // on the wipe-tower data, so it is only populated for a multi-filament plate; fall back
+            // to Print::extruders() (object + support + custom-G-code + wipe-tower filaments,
+            // sorted unique) when there is none, which is the same set for a single-filament plate.
+            std::vector<unsigned int> used_filaments = print.get_tool_ordering().all_extruders();
+            if (used_filaments.empty())
+                used_filaments = print.extruders(true);
+            std::ostringstream out;
+            out << "; filament: ";
+            for (size_t idx = 0; idx < used_filaments.size(); ++idx) {
+                if (idx != 0)
+                    out << ',';
+                out << used_filaments[idx] + 1;
+            }
+            file.writeln(out.str());
+
+            file.write_format("; support_material_on_wipe_tower: %d\n", int(print.support_material_on_wipe_tower()));
         }
 
         file.write_format("; HEADER_BLOCK_END\n\n");
@@ -3235,19 +3323,28 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
         // BBS
         config.set_key_value("layer_z", new ConfigOptionFloat(m_writer.get_position()(2) - m_config.z_offset.value));
         config.set_key_value("max_layer_z", new ConfigOptionFloat(m_max_layer_z));
+        // Ultra (H2C nozzle rack): ported from BambuStudio GCode.cpp:3370-3387. The H2 machine_end_gcode
+        // pulls the loaded filament back to the AMS with "M620.11 P1 I[current_filament_id] ...". Without
+        // current_filament_id in this scope it fell through to the global single-mapped shim (0), so the
+        // job asked the AMS to retract slot 1 instead of the slot that is actually loaded.
+        const int active_filament_id = m_writer.extruder() ? int(m_writer.extruder()->id()) : 0;
         if (print.config().single_extruder_multi_material) {
             // Process the filament_end_gcode for the active filament only.
             int extruder_id = m_writer.extruder()->id();
             config.set_key_value("filament_extruder_id", new ConfigOptionInt(extruder_id));
+            config.set_key_value("current_filament_id", new ConfigOptionInt(extruder_id));
             file.writeln(this->placeholder_parser_process("filament_end_gcode", print.config().filament_end_gcode.get_at(extruder_id),
                                                           extruder_id, &config));
         } else {
             for (const std::string& end_gcode : print.config().filament_end_gcode.values) {
                 int extruder_id = (unsigned int) (&end_gcode - &print.config().filament_end_gcode.values.front());
                 config.set_key_value("filament_extruder_id", new ConfigOptionInt(extruder_id));
+                config.set_key_value("current_filament_id", new ConfigOptionInt(extruder_id));
                 file.writeln(this->placeholder_parser_process("filament_end_gcode", end_gcode, extruder_id, &config));
             }
         }
+        // machine_end_gcode runs for the filament that is actually loaded, not the last one iterated.
+        config.set_key_value("current_filament_id", new ConfigOptionInt(active_filament_id));
         file.writeln(
             this->placeholder_parser_process("machine_end_gcode", print.config().machine_end_gcode, m_writer.extruder()->id(), &config));
     }

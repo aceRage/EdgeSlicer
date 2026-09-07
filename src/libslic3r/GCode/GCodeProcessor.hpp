@@ -227,6 +227,10 @@ inline bool is_bbl_special_tool_command(int tool_number)
         float initial_layer_time{0.f};
         std::vector<unsigned int> filament_change_sequence;
         std::vector<unsigned int> nozzle_change_sequence;
+        // Ultra (H2C nozzle rack): per-filament physical group assignment for
+        // Metadata/filament_sequence.json ("optimal_assignment"); BambuStudio
+        // GCodeProcessorResult::optimal_assignment.
+        std::vector<int> optimal_assignment;
         SettingsIds settings_ids;
         size_t extruders_count;
         bool backtrace_enabled;
@@ -267,6 +271,7 @@ inline bool is_bbl_special_tool_command(int tool_number)
             initial_layer_time = other.initial_layer_time;
             filament_change_sequence = other.filament_change_sequence;
             nozzle_change_sequence = other.nozzle_change_sequence;
+            optimal_assignment = other.optimal_assignment;
             settings_ids = other.settings_ids;
             extruders_count = other.extruders_count;
             extruder_colors = other.extruder_colors;
