@@ -431,6 +431,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/FcmProvider.cpp
     GUI/PrintHostDialogs.cpp
     GUI/PrintHostDialogs.hpp
+    GUI/PrintHostDevicesDialog.cpp
+    GUI/PrintHostDevicesDialog.hpp
     GUI/PrintOptionsDialog.cpp
     GUI/PrintOptionsDialog.hpp
     GUI/PrivacyUpdateDialog.cpp
@@ -773,6 +775,8 @@ set(SLIC3R_GUI_SOURCES
     Utils/PresetUpdater.hpp
     Utils/PrintHost.cpp
     Utils/PrintHost.hpp
+    Utils/PrintHostDevices.cpp
+    Utils/PrintHostDevices.hpp
     Utils/Process.cpp
     Utils/Process.hpp
     Utils/ProfileDescription.hpp

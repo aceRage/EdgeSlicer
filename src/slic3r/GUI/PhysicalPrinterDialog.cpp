@@ -38,6 +38,7 @@
 #include "MsgDialog.hpp"
 #include "OAuthDialog.hpp"
 #include "SimplyPrint.hpp"
+#include "PrintHostDevicesDialog.hpp"
 
 namespace Slic3r {
 namespace GUI {
@@ -242,12 +243,28 @@ void PhysicalPrinterDialog::build_printhost_settings(ConfigOptionsGroup* m_optgr
     };
 
     // Set a wider width for a better alignment
+    // Beside the single address above, the whole list of printers of this model. The editor here
+    // stays exactly as it was: choosing a device in that list writes its address into these same
+    // fields, so every send path keeps reading one preset (phase 1 of the devices feature).
+    auto print_host_devices = [=](wxWindow* parent) {
+        auto sizer = create_sizer_with_btn(parent, &m_printhost_devices_btn, "printer_host_browser", _L("Devices") + " " + dots);
+        m_printhost_devices_btn->SetToolTip(_L("Several printers of this model, by address"));
+        m_printhost_devices_btn->Bind(wxEVT_BUTTON, [this, m_optgroup](wxCommandEvent& e) {
+            if (show_print_host_devices_dialog(this, m_config)) {
+                m_optgroup->reload_config();
+                update();
+            }
+        });
+        return sizer;
+    };
+
     Option option = m_optgroup->get_option("print_host");
     option.opt.width = Field::def_width_wider();
     Line host_line = m_optgroup->create_single_option_line(option);
     host_line.append_widget(printhost_browse);
     host_line.append_widget(print_host_test);
     host_line.append_widget(print_host_logout);
+    host_line.append_widget(print_host_devices);
     m_optgroup->append_line(host_line);
 
     option = m_optgroup->get_option("print_host_webui");
@@ -714,6 +731,8 @@ void PhysicalPrinterDialog::on_dpi_changed(const wxRect& suggested_rect)
     m_printhost_browse_btn->Rescale();
     m_printhost_test_btn->Rescale();
     m_printhost_logout_btn->Rescale();
+    if (m_printhost_devices_btn)
+        m_printhost_devices_btn->Rescale();
     if (m_printhost_cafile_browse_btn)
         m_printhost_cafile_browse_btn->Rescale();
 
