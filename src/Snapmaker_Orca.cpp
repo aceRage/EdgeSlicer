@@ -723,6 +723,78 @@ static int load_key_values_from_json(const std::string &file, std::map<std::stri
     return 0;
 }
 
+// Ultra: resolve a printer_model name ("Bambu Lab H2D") to the vendor model_id ("O1D") that is
+// written into Metadata/slice_info.config as printer_model_id.
+//
+// Upstream BambuStudio (src/BambuStudio.cpp:2343) reads it from
+// resources/profiles/BBL/machine_full/<printer_model>.json. That directory is produced by their
+// internal profile pipeline and is gitignored (BambuStudio/.gitignore:29), so it exists in
+// neither the upstream source tree nor this fork: the lookup silently failed and every
+// CLI-sliced plate got an empty printer_model_id.
+//
+// The GUI takes the value from the vendor bundle instead:
+//   Plater.cpp:21661 -> Preset::get_printer_type() (Preset.cpp:778) ->
+//   VendorProfile::PrinterModel::model_id, filled by
+//   PresetBundle::load_vendor_configs_from_json() (PresetBundle.cpp:3246-3330) from
+//   resources/profiles/<vendor>.json "machine_model_list" -> <vendor>/<sub_path>.
+// This walks the same index, so the CLI and the GUI now agree for every vendor, not just BBL.
+// The machine_full path is still tried first, so a packaged tree that does ship it is unchanged.
+static std::string lookup_printer_model_id(const std::string &printer_model)
+{
+    if (printer_model.empty())
+        return std::string();
+
+    {
+        const std::string machine_full_path = resources_dir() + "/profiles/BBL/machine_full/" + printer_model + ".json";
+        if (boost::filesystem::exists(machine_full_path)) {
+            std::map<std::string, std::string> key_values;
+            if (load_key_values_from_json(machine_full_path, key_values) == 0) {
+                auto it = key_values.find(BBL_JSON_KEY_MODEL_ID);
+                if (it != key_values.end() && !it->second.empty())
+                    return it->second;
+            }
+        }
+    }
+
+    const boost::filesystem::path profiles_dir(resources_dir() + "/profiles");
+    boost::system::error_code ec;
+    if (!boost::filesystem::is_directory(profiles_dir, ec))
+        return std::string();
+    for (boost::filesystem::directory_iterator it(profiles_dir, ec), end; it != end && !ec; it.increment(ec)) {
+        if (!boost::filesystem::is_regular_file(it->status()) || it->path().extension() != ".json")
+            continue;
+        const std::string vendor = it->path().stem().string();
+        try {
+            json j;
+            boost::nowide::ifstream ifs(it->path().string());
+            ifs >> j;
+            ifs.close();
+            if (!j.contains(BBL_JSON_KEY_MACHINE_MODEL_LIST) || !j[BBL_JSON_KEY_MACHINE_MODEL_LIST].is_array())
+                continue;
+            for (const auto &item : j[BBL_JSON_KEY_MACHINE_MODEL_LIST]) {
+                if (!item.contains(BBL_JSON_KEY_NAME) || !item.contains(BBL_JSON_KEY_SUB_PATH))
+                    continue;
+                if (item[BBL_JSON_KEY_NAME].get<std::string>() != printer_model)
+                    continue;
+                const std::string model_file = resources_dir() + "/profiles/" + vendor + "/" + item[BBL_JSON_KEY_SUB_PATH].get<std::string>();
+                std::map<std::string, std::string> model_key_values;
+                if (load_key_values_from_json(model_file, model_key_values) == 0) {
+                    auto found = model_key_values.find(BBL_JSON_KEY_MODEL_ID);
+                    if (found != model_key_values.end() && !found->second.empty()) {
+                        BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(": printer_model %1% -> model_id %2% (vendor %3%)") % printer_model % found->second % vendor;
+                        return found->second;
+                    }
+                }
+            }
+        }
+        catch (const std::exception &err) {
+            BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": failed to parse vendor bundle " << it->path().string() << ": " << err.what();
+        }
+    }
+    BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": no model_id found for printer_model " << printer_model;
+    return std::string();
+}
+
 static std::set<std::string> gcodes_key_set =  {"filament_end_gcode", "filament_start_gcode", "change_filament_gcode", "layer_change_gcode", "machine_end_gcode", "machine_pause_gcode", "machine_start_gcode",
             "template_custom_gcode", "printing_by_object_gcode", "before_layer_change_gcode", "time_lapse_gcode"};
 
@@ -2065,16 +2137,10 @@ int CLI::run(int argc, char **argv)
             //get printer_model_id
             printer_model = config.option<ConfigOptionString>("printer_model", true)->value;
             if (!printer_model.empty()) {
-                std::string printer_model_path = resources_dir() + "/profiles/BBL/machine_full/"+printer_model+".json";
-                if (boost::filesystem::exists(printer_model_path))
-                {
-                    std::map<std::string, std::string> key_values;
-
-                    load_key_values_from_json(printer_model_path, key_values);
-                    if (key_values.find("model_id") != key_values.end()) {
-                        printer_model_id = key_values["model_id"];
-                        BOOST_LOG_TRIVIAL(info) << __FUNCTION__<< boost::format(":%1%, load printer_model_id %2% from current printer model %3%")%__LINE__ %printer_model_id %printer_model;
-                    }
+                std::string model_id = lookup_printer_model_id(printer_model);
+                if (!model_id.empty()) {
+                    printer_model_id = model_id;
+                    BOOST_LOG_TRIVIAL(info) << __FUNCTION__<< boost::format(":%1%, load printer_model_id %2% from current printer model %3%")%__LINE__ %printer_model_id %printer_model;
                 }
             }
 
@@ -2265,16 +2331,10 @@ int CLI::run(int argc, char **argv)
                         //get printer_model_id
                         printer_model = config.option<ConfigOptionString>("printer_model", true)->value;
                         if (!printer_model.empty()) {
-                            std::string printer_model_path = resources_dir() + "/profiles/BBL/machine_full/"+printer_model+".json";
-                            if (boost::filesystem::exists(printer_model_path))
-                            {
-                                std::map<std::string, std::string> key_values;
-
-                                load_key_values_from_json(printer_model_path, key_values);
-                                if (key_values.find("model_id") != key_values.end()) {
-                                    printer_model_id = key_values["model_id"];
-                                    BOOST_LOG_TRIVIAL(info) << __FUNCTION__<< boost::format(":%1%, load printer_model_id %2% from current printer model %3%")%__LINE__ %printer_model_id %printer_model;
-                                }
+                            std::string model_id = lookup_printer_model_id(printer_model);
+                            if (!model_id.empty()) {
+                                printer_model_id = model_id;
+                                BOOST_LOG_TRIVIAL(info) << __FUNCTION__<< boost::format(":%1%, load printer_model_id %2% from current printer model %3%")%__LINE__ %printer_model_id %printer_model;
                             }
                         }
 
@@ -2346,16 +2406,10 @@ int CLI::run(int argc, char **argv)
                     //get printer_model_id
                     printer_model = config.option<ConfigOptionString>("printer_model", true)->value;
                     if (!printer_model.empty()) {
-                        std::string printer_model_path = resources_dir() + "/profiles/BBL/machine_full/"+printer_model+".json";
-                        if (boost::filesystem::exists(printer_model_path))
-                        {
-                            std::map<std::string, std::string> key_values;
-
-                            load_key_values_from_json(printer_model_path, key_values);
-                            if (key_values.find("model_id") != key_values.end()) {
-                                printer_model_id = key_values["model_id"];
-                                BOOST_LOG_TRIVIAL(info) << __FUNCTION__<< boost::format(":%1%, load printer_model_id %2% from current printer model %3%")%__LINE__ %printer_model_id %printer_model;
-                            }
+                        std::string model_id = lookup_printer_model_id(printer_model);
+                        if (!model_id.empty()) {
+                            printer_model_id = model_id;
+                            BOOST_LOG_TRIVIAL(info) << __FUNCTION__<< boost::format(":%1%, load printer_model_id %2% from current printer model %3%")%__LINE__ %printer_model_id %printer_model;
                         }
                     }
 
@@ -5288,6 +5342,32 @@ int CLI::run(int argc, char **argv)
                                 flush_and_exit(CLI_FILAMENTS_DIFFERENT_TEMP);
                             }
                         }
+                        // Ultra: the BBL-vendor flag has to be set BEFORE Print::validate(), because validate()
+                        // branches on it (Print.cpp:2040 the Orca "G92 E0 vs. absolute E" rule, Print.cpp:2063 the
+                        // bed-temperature rule). The GUI does exactly this: BackgroundSlicingProcess::validate()
+                        // (BackgroundSlicingProcess.cpp:678) assigns is_BBL_printer() on the line before it calls
+                        // m_print->validate(). The CLI used to assign it only later, just before Print::process(),
+                        // so every BBL preset was validated as a non-BBL printer and was rejected for not having
+                        // "G92 E0" in layer_change_gcode. Same ordering as upstream BambuStudio would need; upstream
+                        // gets away with the late assignment (BambuStudio.cpp:7094) only because its Print::validate()
+                        // carries no is_BBL_printer()-guarded checks.
+                        //check whether it is bbl printer
+                        std::string& printer_model_string = new_print_config.opt_string("printer_model", true);
+                        bool is_bbl_vendor_preset = false;
+
+                        if (!printer_model_string.empty()) {
+                            is_bbl_vendor_preset = (printer_model_string.compare(0, 9, "Bambu Lab") == 0);
+                            BOOST_LOG_TRIVIAL(info) << boost::format("printer_model_string: %1%, is_bbl_vendor_preset %2%")%printer_model_string %is_bbl_vendor_preset;
+                        }
+                        else {
+                            if (!new_printer_name.empty())
+                                is_bbl_vendor_preset = (new_printer_name.compare(0, 9, "Bambu Lab") == 0);
+                            else if (!current_printer_system_name.empty())
+                                is_bbl_vendor_preset = (current_printer_system_name.compare(0, 9, "Bambu Lab") == 0);
+                            BOOST_LOG_TRIVIAL(info) << boost::format("new_printer_name: %1%, current_printer_system_name %2%, is_bbl_vendor_preset %3%")%new_printer_name %current_printer_system_name %is_bbl_vendor_preset;
+                        }
+                        (dynamic_cast<Print*>(print))->is_BBL_printer() = is_bbl_vendor_preset;
+
                         StringObjectException warning;
                         auto err = print->validate(&warning);
                         if (!err.string.empty()) {
@@ -5364,22 +5444,6 @@ int CLI::run(int argc, char **argv)
                                 g_progress_plate_index = index + 1;
                                 g_progress_plate_count = (plate_to_slice == 0) ? partplate_list.get_plate_count() : 1;
                                 emit_progress(4, warning.string.empty() ? std::string("Slicing begins") : warning.string, !warning.string.empty());
-                                //check whether it is bbl printer
-                                std::string& printer_model_string = new_print_config.opt_string("printer_model", true);
-                                bool is_bbl_vendor_preset = false;
-
-                                if (!printer_model_string.empty()) {
-                                    is_bbl_vendor_preset = (printer_model_string.compare(0, 9, "Bambu Lab") == 0);
-                                    BOOST_LOG_TRIVIAL(info) << boost::format("printer_model_string: %1%, is_bbl_vendor_preset %2%")%printer_model_string %is_bbl_vendor_preset;
-                                }
-                                else {
-                                    if (!new_printer_name.empty())
-                                        is_bbl_vendor_preset = (new_printer_name.compare(0, 9, "Bambu Lab") == 0);
-                                    else if (!current_printer_system_name.empty())
-                                        is_bbl_vendor_preset = (current_printer_system_name.compare(0, 9, "Bambu Lab") == 0);
-                                    BOOST_LOG_TRIVIAL(info) << boost::format("new_printer_name: %1%, current_printer_system_name %2%, is_bbl_vendor_preset %3%")%new_printer_name %current_printer_system_name %is_bbl_vendor_preset;
-                                }
-                                (dynamic_cast<Print*>(print))->is_BBL_printer() = is_bbl_vendor_preset;
 
                                 //update information for brim
                                 const PrintConfig& print_config = print_fff->config();

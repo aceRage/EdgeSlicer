@@ -6758,10 +6758,18 @@ void PrintConfigDef::init_fff_params()
 
     def = this->add("prime_tower_brim_width", coFloat);
     def->label = L("Brim width");
-    def->tooltip = L("Width of the brim.");
+    def->tooltip = L("Width of the brim. A negative value means no prime tower brim; it is the \"auto\" sentinel used by the Bambu Lab, Flashforge and Qidi process profiles.");
     def->sidetext = "mm";	// milimeters, don't need translation
     def->mode = comAdvanced;
-    def->min = 0.;
+    // 128 of the process profiles shipped in resources/profiles (107 BBL, 12 Qidi, 9 Flashforge)
+    // set this to -1, upstream BambuStudio's "auto" sentinel (upstream PrintConfig.cpp:6247 also
+    // declares min = -1). The GUI has always sliced them with that value; only the CLI runs the
+    // range check in Slic3r::validate() (PrintConfig.cpp, "Out of range validation"), so declaring
+    // min = 0 made every BBL/Qidi/Flashforge preset unsliceable from the command line without an
+    // override. Declaring the range the shipped data actually uses fixes the CLI and leaves the
+    // GUI slicing result untouched (this fork has no auto-brim computation: WipeTower.cpp:1310
+    // turns any value < spacing/2 into zero brim loops).
+    def->min = -1.;
     def->set_default_value(new ConfigOptionFloat(3.));
 
     def = this->add("prime_tower_brim_chamfer", coBool);
