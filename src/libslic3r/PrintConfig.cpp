@@ -3986,6 +3986,31 @@ void PrintConfigDef::init_fff_params()
     def->mode     = comAdvanced;
     def->set_default_value(new ConfigOptionEnum<PaintDepthMode>(pdmWalls));
 
+    // Image Fill (Phase 2). See PrintConfig.hpp for why these two keys exist and no more.
+    def           = this->add("image_fill_params", coString);
+    def->label    = L("Image fill");
+    def->tooltip  = L("How an image was applied to this part: the image's content hash, the "
+                    "projection, the axis, the filaments it was allowed to use and the "
+                    "subdivision depth. Written by the Image fill dialog so the settings can be "
+                    "recovered when the project is reopened. The paint itself is stored with the "
+                    "part's other painting; editing this by hand does not change what is "
+                    "printed.");
+    def->mode     = comDevelop;
+    def->cli      = ConfigOptionDef::nocli;
+    def->set_default_value(new ConfigOptionString(""));
+
+    def           = this->add("image_fill_detail", coFloat);
+    def->label    = L("Image fill detail");
+    def->tooltip  = L("The facet size the Image fill dialog starts from, in millimetres. Smaller "
+                    "values subdivide the model further, so the picture is not limited by how "
+                    "coarsely the part was modelled - at the cost of more triangles. 0 uses the "
+                    "dialog's subdivision level as it stands.");
+    def->sidetext = L("mm");
+    def->min      = 0;
+    def->category = L("Advanced");
+    def->mode     = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0.));
+
     def           = this->add("paint_depth_walls", coInt);
     def->label    = L("Paint depth walls");
     // Fix-wave F3: the tooltip described the old `ext_width + (walls-1)*spacing` band, which

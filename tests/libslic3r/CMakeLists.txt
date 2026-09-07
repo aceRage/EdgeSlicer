@@ -9,6 +9,7 @@ add_executable(${_TEST_NAME}_tests
 	test_paint_depth_clamp.cpp
 	test_color_mix_solver.cpp
 	test_color_split.cpp
+	test_image_fill.cpp
 	test_clipper_offset.cpp
 	test_clipper_utils.cpp
 	test_config.cpp

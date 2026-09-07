@@ -14,6 +14,7 @@
 #include "Format/GLTF.hpp"
 #include "Format/svg.hpp"
 // BBS
+#include "ImageFill.hpp"
 #include "FaceDetector.hpp"
 
 #include "libslic3r/Geometry/ConvexHull.hpp"
@@ -101,6 +102,9 @@ Model& Model::assign_copy(const Model &rhs)
     this->md_name = rhs.md_name;
     this->md_value = rhs.md_value;
 
+    // Image Fill (Phase 2): a plain value member, so it copies like any other. Costs no id.
+    this->image_assets = rhs.image_assets;
+
     return *this;
 }
 
@@ -144,6 +148,9 @@ Model& Model::assign_copy(Model &&rhs)
     rhs.model_info.reset();
     this->profile_info = rhs.profile_info;
     rhs.profile_info.reset();
+    // Image Fill (Phase 2): move the image store with everything else.
+    this->image_assets = std::move(rhs.image_assets);
+    rhs.image_assets.clear();
     return *this;
 }
 
@@ -349,8 +356,20 @@ Model Model::read_from_file(const std::string&                                  
                     // this becomes MMU painting, like the OBJ mtl face-colour path.
                     std::vector<unsigned char> face_filament_ids;
                     objFn(gltf_info.face_colors, false, face_filament_ids, first_extruder_id);
-                    if (!face_filament_ids.empty())
-                        result = Model::import_multi_volume_face_color_deal(face_filament_ids, first_extruder_id, &model);
+                    if (!face_filament_ids.empty()) {
+                        // Image Fill (Phase 2): prefer the sub-facet pass - same filaments, but
+                        // the texture decides at 1/16 of a triangle instead of once per triangle.
+                        // It declines (returns false without touching the model) whenever the
+                        // arrays do not line up or there is only one filament to choose, and the
+                        // per-facet path below is then exactly what shipped before.
+                        result = Model::import_multi_volume_face_color_deal(face_filament_ids,
+                                                                            gltf_info.face_colors,
+                                                                            gltf_info.sub_face_colors,
+                                                                            gltf_info.sub_face_depth,
+                                                                            first_extruder_id, &model);
+                        if (!result)
+                            result = Model::import_multi_volume_face_color_deal(face_filament_ids, first_extruder_id, &model);
+                    }
                 } else if (gltf_info.material_colors.size() > 1 && !gltf_info.had_textures) {
                     // A glTF material is per primitive and a primitive is a volume, so whole parts
                     // go to whole filaments - no painting. One material means nothing to choose, so
@@ -3384,17 +3403,37 @@ bool Model::import_multi_volume_vertex_color_deal(const std::vector<unsigned cha
 static bool paint_volume_from_face_colors(ModelVolume *volume, const unsigned char *face_filament_ids,
                                           size_t face_count_in)
 {
-    auto face_count    = volume->mesh().its.indices.size();
-    volume->mmu_segmentation_facets.reserve(face_count);
-    if (volume->mesh().its.indices.size() != face_count_in) { return false; }
-    for (size_t i = 0; i < volume->mesh().its.indices.size(); i++) {
-        auto face         = volume->mesh().its.indices[i];
-        auto filament_id = face_filament_ids[i];
-        if (filament_id <= 1) { continue; }
-        std::string result;
-        get_real_filament_id(filament_id, result);
-        volume->mmu_segmentation_facets.set_triangle_from_string(i, result);
-    }
+    const size_t face_count = volume->mesh().its.indices.size();
+    if (face_count != face_count_in) { return false; }
+    // Image Fill (Phase 2): the states are the ids as given, and the bitstream is written by the
+    // shared encoder (ImageFill.cpp's image_fill_encode) instead of by CONST_FILAMENTS' hex table
+    // through set_triangle_from_string. Same result, one writer - and the encoder is the one the
+    // Image fill dialog uses, so a painted import and a painted image cannot drift apart.
+    //
+    // The `<= 1` skip is kept exactly: id 1 is the part's own filament and was never painted.
+    std::vector<int> states(face_count, 0);
+    for (size_t i = 0; i < face_count; ++i)
+        states[i] = face_filament_ids[i] <= 1 ? 0 : int(face_filament_ids[i]);
+    TriangleSelector sel(volume->mesh());
+    sel.deserialize(image_fill_encode(face_count, 0, states), /*needs_reset=*/true);
+    volume->mmu_segmentation_facets.set(sel);
+    return true;
+}
+
+// Image Fill (Phase 2): paint one volume from SUB-facet colours. `sub_colors` holds 4^depth
+// entries for each of this volume's triangles; `palette` / `palette_ids` are the filaments the
+// colour dialog decided on, with the colour each stands for.
+static bool paint_volume_from_sub_face_colors(ModelVolume *volume, const std::vector<std::array<float, 3>> &sub_colors,
+                                              const std::vector<std::array<float, 3>> &palette,
+                                              const std::vector<int> &palette_ids, int depth)
+{
+    const ImageFillResult res = image_fill_from_face_colors(volume->mesh().its, sub_colors, palette,
+                                                            palette_ids, /*background=*/0, depth);
+    if (!res.ok)
+        return false;
+    TriangleSelector sel(volume->mesh());
+    sel.deserialize(res.painting, /*needs_reset=*/true);
+    volume->mmu_segmentation_facets.set(sel);
     return true;
 }
 
@@ -3435,6 +3474,80 @@ bool Model::import_multi_volume_face_color_deal(const std::vector<unsigned char>
         const size_t count = volume->mesh().its.indices.size();
         volume->config.set("extruder", first_extruder_id);
         if (!paint_volume_from_face_colors(volume, face_filament_ids.data() + offset, count))
+            return false;
+        offset += count;
+    }
+    return true;
+}
+
+// Image Fill (Phase 2): the sub-facet variant. See Model.hpp for why it exists.
+bool Model::import_multi_volume_face_color_deal(const std::vector<unsigned char> &face_filament_ids,
+                                                const std::vector<RGBA>          &face_colors,
+                                                const std::vector<RGBA>          &sub_face_colors,
+                                                int                               depth,
+                                                const unsigned char              &first_extruder_id,
+                                                Model                            *model)
+{
+    size_t per = 1;
+    for (int i = 0; i < depth; ++i) per *= 4;
+    // Any mismatch and this is not a case the sub-facet path can serve; the caller falls back.
+    if (depth <= 0 || face_filament_ids.empty() || face_colors.size() != face_filament_ids.size() ||
+        sub_face_colors.size() != face_colors.size() * per)
+        return false;
+    if (model == nullptr || model->objects.size() != 1)
+        return false;
+    ModelObject *obj = model->objects[0];
+    size_t       total = 0;
+    for (const ModelVolume *v : obj->volumes)
+        total += v->mesh().its.indices.size();
+    if (total != face_filament_ids.size())
+        return false;
+
+    // The palette: one entry per DISTINCT id the dialog handed back, and the colour it stands
+    // for is the mean of the imported colours that were mapped to it. That is exactly the
+    // decision the user (or the headless matcher) made - the sub-facet pass only decides which
+    // of those the finer samples belong to, so a filament nobody chose can never appear.
+    std::vector<int>                  ids;
+    std::vector<std::array<double, 3>> sums;
+    std::vector<size_t>               counts;
+    for (size_t i = 0; i < face_filament_ids.size(); ++i) {
+        const int id = int(face_filament_ids[i]);
+        if (id <= 1)
+            continue;   // id 1 is the part's own filament: not painted, and not a palette entry
+        auto it = std::find(ids.begin(), ids.end(), id);
+        size_t k;
+        if (it == ids.end()) {
+            k = ids.size();
+            ids.push_back(id);
+            sums.push_back({0., 0., 0.});
+            counts.push_back(0);
+        } else {
+            k = size_t(it - ids.begin());
+        }
+        for (int c = 0; c < 3; ++c) sums[k][c] += double(face_colors[i][c]);
+        ++counts[k];
+    }
+    if (ids.size() < 2)
+        return false;   // nothing to choose between; the per-facet path is exactly as good
+
+    std::vector<std::array<float, 3>> palette;
+    palette.reserve(ids.size());
+    for (size_t k = 0; k < ids.size(); ++k)
+        palette.push_back({float(sums[k][0] / double(counts[k])), float(sums[k][1] / double(counts[k])),
+                           float(sums[k][2] / double(counts[k]))});
+
+    obj->config.set("extruder", first_extruder_id);
+    size_t offset = 0;
+    for (ModelVolume *volume : obj->volumes) {
+        const size_t count = volume->mesh().its.indices.size();
+        volume->config.set("extruder", first_extruder_id);
+        std::vector<std::array<float, 3>> slice;
+        slice.reserve(count * per);
+        for (size_t i = 0; i < count * per; ++i) {
+            const RGBA &c = sub_face_colors[offset * per + i];
+            slice.push_back({c[0], c[1], c[2]});
+        }
+        if (!paint_volume_from_sub_face_colors(volume, slice, palette, ids, depth))
             return false;
         offset += count;
     }

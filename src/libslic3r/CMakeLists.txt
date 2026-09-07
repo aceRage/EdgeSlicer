@@ -88,6 +88,8 @@ set(lisbslic3r_sources
     PaintDepth.hpp
     ColorSplit.cpp
     ColorSplit.hpp
+    ImageFill.cpp
+    ImageFill.hpp
     ColorSplitInternal.hpp
     ColorSplitPartition.cpp
     ColorSplitShell.cpp

@@ -33,6 +33,20 @@ struct GltfInfo
     // baseColorTexture was actually sampled; triangles of untextured primitives get their flat
     // material colour so the array always covers every triangle of the object.
     std::vector<RGBA>        face_colors;
+    // Image Fill (Phase 2): the same texture, sampled per SUB-facet instead of once per triangle.
+    // One colour per leaf of a uniform depth-`sub_face_depth` subdivision of every surviving
+    // triangle, in ImageFill's leaf order, concatenated in volume order - so it is
+    // 4^sub_face_depth times as long as face_colors and lines up with it block by block.
+    //
+    // Why it is sampled HERE and not by the ImageFill service: a glTF exporter splits a vertex at
+    // every UV seam, and the reader has to weld those back together before the mesh is printable.
+    // The UVs only line up with the vertices before that weld, so the walk over UV space has to
+    // happen in the reader. Everything after it - quantise, ask the solver, write the bitstream -
+    // is the shared service (Model::import_multi_volume_face_color_deal ->
+    // image_fill_from_face_colors), which is what stops there being two ways to put an image on a
+    // part.
+    std::vector<RGBA>        sub_face_colors;
+    int                      sub_face_depth{0};
     bool                     is_single_material{false};
     bool                     had_textures{false};      // report, never used in v1/v2
     size_t                   dropped_primitives{0};    // points / lines / line loops / strips

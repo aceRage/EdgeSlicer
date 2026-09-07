@@ -7,6 +7,7 @@
 // "this object is tiny, scale it?" prompt instead of needing a rule of its own.
 
 #include "../libslic3r.h"
+#include "../ImageFill.hpp"
 #include "../Model.hpp"
 #include "../TriangleMesh.hpp"
 #include "../format.hpp"
@@ -309,7 +310,21 @@ bool decode_png_image(const unsigned char *bytes, size_t n, TextureImage &out)
     out.width    = img.cols;
     out.height   = img.rows;
     out.channels = (size_t) img.bytes_per_pixel;
-    out.pixels   = std::move(img.buf);
+    // Image Fill (Phase 2) - a pre-existing bug, found by the new tests. png::decode_colored_png
+    // fills its buffer BOTTOM-UP (PNGReadWrite.cpp:163-166 walks the rows backwards), while
+    // TextureImage::sample maps v straight onto the row index because glTF's UV origin is the
+    // image's TOP-left. So every PNG baseColorTexture imported before this line existed was
+    // sampled vertically mirrored. JPEG textures were always right, because libjpeg hands rows
+    // back top-down; only the PNG path was affected, which is why nobody caught it on the JPEG
+    // fixtures. Flip the rows here, where the decoder's convention is known, so `sample` keeps
+    // its one honest rule.
+    out.pixels.resize(img.buf.size());
+    {
+        const size_t stride = img.cols * (size_t) img.bytes_per_pixel;
+        for (size_t y = 0; y < img.rows; ++y)
+            std::memcpy(out.pixels.data() + y * stride,
+                        img.buf.data() + (img.rows - 1 - y) * stride, stride);
+    }
     return out.ok();
 }
 
@@ -586,7 +601,9 @@ RGBA modulate_srgb(const RGBA &texel, const cgltf_float *factor)
 
 // its_remove_degenerate_faces erases faces, so a parallel per-face array has to lose exactly the
 // same entries. Same predicate as TriangleMesh.cpp's, applied to both arrays at once.
-void remove_degenerate_faces_paired(indexed_triangle_set &its, std::vector<RGBA> &face_colors)
+// `sub_face_colors`, when given, holds `sub_stride` entries per triangle and moves in blocks.
+void remove_degenerate_faces_paired(indexed_triangle_set &its, std::vector<RGBA> &face_colors,
+                                    std::vector<RGBA> *sub_face_colors = nullptr, size_t sub_stride = 0)
 {
     size_t w = 0;
     for (size_t r = 0; r < its.indices.size(); ++r) {
@@ -595,11 +612,24 @@ void remove_degenerate_faces_paired(indexed_triangle_set &its, std::vector<RGBA>
             continue;
         its.indices[w] = its.indices[r];
         face_colors[w] = face_colors[r];
+        if (sub_face_colors != nullptr && sub_stride > 0)
+            for (size_t k = 0; k < sub_stride; ++k)
+                (*sub_face_colors)[w * sub_stride + k] = (*sub_face_colors)[r * sub_stride + k];
         ++w;
     }
     its.indices.resize(w);
     face_colors.resize(w);
+    if (sub_face_colors != nullptr && sub_stride > 0)
+        sub_face_colors->resize(w * sub_stride);
 }
+
+// How finely a baseColorTexture is sampled inside each triangle. 2 means 16 samples per triangle
+// and 16 paint states where the old path had one, which is the whole of the fidelity change to
+// glTF import: a detailed texture on a low-poly mesh is no longer quantised to one colour per
+// facet (the "texture import approximates" note in the GLB import status document). It is a
+// constant rather than a setting because the importer has no dialog to put a setting in; a user
+// who wants more re-applies Image Fill from the object menu, where the control lives.
+constexpr int GLTF_TEXTURE_SUBDIVISION = 2;
 
 // Read `prim` and append it to `geo`, transformed by `world`. Returns false only for a damaged
 // file; an empty result (all faces degenerate, say) is a success with no triangles.
@@ -939,6 +969,7 @@ bool load_gltf(const char *path, Model *model, GltfInfo &info, std::string &mess
         int               material_index{-1};
         std::vector<RGBA> vertex_colors;
         std::vector<RGBA> face_colors;    // one per triangle, when a texture was sampled
+        std::vector<RGBA> sub_face_colors;// 4^GLTF_TEXTURE_SUBDIVISION per triangle, same condition
         bool              has_color0{false};
     };
     std::vector<BuiltPart> parts;
@@ -1005,14 +1036,31 @@ bool load_gltf(const char *path, Model *model, GltfInfo &info, std::string &mess
         // Sample at each triangle's centroid UV, while the UVs still line up with the vertices -
         // welding merges vertices that differ only in UV, so this cannot wait until after it.
         std::vector<RGBA> face_colors;
+        std::vector<RGBA> sub_face_colors;
+        size_t            sub_per = 1;
+        for (int i = 0; i < GLTF_TEXTURE_SUBDIVISION; ++i) sub_per *= 4;
         if (tex != nullptr && geo.uvs.size() == geo.its.vertices.size() && !geo.its.indices.empty()) {
             const cgltf_float *factor = prim.material->has_pbr_metallic_roughness
                                             ? prim.material->pbr_metallic_roughness.base_color_factor
                                             : nullptr;
             face_colors.reserve(geo.its.indices.size());
+            sub_face_colors.reserve(geo.its.indices.size() * sub_per);
+            std::vector<ImageFillLeaf> uv_leaves;
             for (const stl_triangle_vertex_indices &f : geo.its.indices) {
                 const Vec2f uv = (geo.uvs[f(0)] + geo.uvs[f(1)] + geo.uvs[f(2)]) / 3.f;
                 face_colors.push_back(modulate_srgb(tex->sample(uv.x(), uv.y()), factor));
+                // The same 4:1 midpoint split ImageFill uses, walked in UV space. A glTF triangle's
+                // TEXCOORD_0 is linear across the face, so a leaf's centroid UV is exactly the UV
+                // of that leaf's centroid in space - no approximation beyond the sampler's own.
+                uv_leaves.clear();
+                image_fill_subdivide(Vec3f(geo.uvs[f(0)].x(), geo.uvs[f(0)].y(), 0.f),
+                                     Vec3f(geo.uvs[f(1)].x(), geo.uvs[f(1)].y(), 0.f),
+                                     Vec3f(geo.uvs[f(2)].x(), geo.uvs[f(2)].y(), 0.f),
+                                     GLTF_TEXTURE_SUBDIVISION, uv_leaves);
+                for (const ImageFillLeaf &leaf : uv_leaves) {
+                    const Vec3f c = leaf.centroid();
+                    sub_face_colors.push_back(modulate_srgb(tex->sample(c.x(), c.y()), factor));
+                }
             }
             any_texture_sampled = true;
         }
@@ -1036,7 +1084,7 @@ bool load_gltf(const char *path, Model *model, GltfInfo &info, std::string &mess
         if (face_colors.empty())
             its_remove_degenerate_faces(geo.its);
         else
-            remove_degenerate_faces_paired(geo.its, face_colors);
+            remove_degenerate_faces_paired(geo.its, face_colors, &sub_face_colors, sub_per);
 
         if (geo.its.indices.empty()) {
             ++empty_after_hygiene;
@@ -1120,6 +1168,7 @@ bool load_gltf(const char *path, Model *model, GltfInfo &info, std::string &mess
         }
 
         part.face_colors = std::move(face_colors);
+        part.sub_face_colors = std::move(sub_face_colors);
         part.world       = world;
         // Note: TriangleMesh(indexed_triangle_set&&) only fills stats, it does not run admesh
         // repair - repair is reachable only through TriangleMesh::from_stl and is STL-only today.
@@ -1191,6 +1240,9 @@ bool load_gltf(const char *path, Model *model, GltfInfo &info, std::string &mess
             // Every triangle of the object needs an entry. A primitive we could not sample - no
             // texture, or an image format we cannot decode - contributes its flat material colour.
             const size_t tris = volume->mesh().its.indices.size();
+            size_t       sub_per = 1;
+            for (int i = 0; i < GLTF_TEXTURE_SUBDIVISION; ++i) sub_per *= 4;
+            info.sub_face_depth = GLTF_TEXTURE_SUBDIVISION;
             if (part.face_colors.size() == tris) {
                 info.face_colors.insert(info.face_colors.end(), part.face_colors.begin(), part.face_colors.end());
             } else {
@@ -1199,6 +1251,18 @@ bool load_gltf(const char *path, Model *model, GltfInfo &info, std::string &mess
                                       ? info.material_colors[part.material_index]
                                       : RGBA{1.f, 1.f, 1.f, 1.f};
                 info.face_colors.insert(info.face_colors.end(), tris, flat);
+            }
+            // The sub-facet array has to cover every triangle too, or the offsets stop lining up.
+            if (part.sub_face_colors.size() == tris * sub_per) {
+                info.sub_face_colors.insert(info.sub_face_colors.end(), part.sub_face_colors.begin(),
+                                            part.sub_face_colors.end());
+            } else {
+                // An unsampled primitive repeats its own per-facet colour across its leaves, so a
+                // mixed object (one textured primitive, one flat) still produces one contiguous
+                // array at one depth.
+                const size_t base = info.face_colors.size() - tris;
+                for (size_t t = 0; t < tris; ++t)
+                    info.sub_face_colors.insert(info.sub_face_colors.end(), sub_per, info.face_colors[base + t]);
             }
         }
     }

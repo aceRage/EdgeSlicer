@@ -178,6 +178,11 @@ const std::string BRIM_EAR_POINTS_FILE = "Metadata/brim_ear_points.txt";
 const std::string SLA_DRAIN_HOLES_FILE = "Metadata/Slic3r_PE_sla_drain_holes.txt";*/
 const std::string CUSTOM_GCODE_PER_PRINT_Z_FILE = "Metadata/custom_gcode_per_layer.xml";
 const std::string AUXILIARY_DIR = "Auxiliaries/";
+// Image Fill (Phase 2): the content-hashed image store. One file per asset, named by its own
+// SHA-256, plus a manifest so a reader can tell an Image Fill asset from any other stray PNG and
+// can check the bytes it got are the bytes that were written.
+const std::string IMAGE_FILL_DIR = "Metadata/image_fill/";
+const std::string IMAGE_FILL_MANIFEST_FILE = "Metadata/image_fill/manifest.json";
 const std::string PROJECT_EMBEDDED_PRINT_PRESETS_FILE = "Metadata/print_setting_";
 const std::string PROJECT_EMBEDDED_SLICE_PRESETS_FILE = "Metadata/process_settings_";
 const std::string PROJECT_EMBEDDED_FILAMENT_PRESETS_FILE = "Metadata/filament_settings_";
@@ -1225,6 +1230,8 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         void _extract_brim_ear_points_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat);
 
         void _extract_custom_gcode_per_print_z_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat);
+        // Image Fill (Phase 2): one Metadata/image_fill/<sha256>.png into Model::image_assets.
+        void _extract_image_fill_asset_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat, Model& model);
 
         void _extract_print_config_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat, DynamicPrintConfig& config, ConfigSubstitutionContext& subs_context, const std::string& archive_filename);
         //BBS: add project config file logic
@@ -1990,6 +1997,13 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                     //extract slice info from archive
                     _extract_xml_from_archive(archive, stat, _handle_start_config_xml_element, _handle_end_config_xml_element);
                     m_parsing_slice_info = false;
+                }
+                else if (boost::algorithm::istarts_with(name, IMAGE_FILL_DIR)) {
+                    // Image Fill assets. The manifest is read for its version only; the payloads
+                    // are re-hashed on the way in, so a file whose name and content disagree is
+                    // dropped rather than trusted - the annotation then simply finds no image.
+                    if (!boost::algorithm::iequals(name, IMAGE_FILL_MANIFEST_FILE))
+                        _extract_image_fill_asset_from_archive(archive, stat, model);
                 }
                 else if (boost::algorithm::istarts_with(name, AUXILIARY_DIR)) {
                     // extract auxiliary directory to temp directory, do nothing for restore
@@ -3220,6 +3234,34 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             if (filename.compare(svg->path_in_3mf) == 0)
                 svg->file_data = m_path_to_emboss_shape_files[filename];
         }
+    }
+
+    void _BBS_3MF_Importer::_extract_image_fill_asset_from_archive(::mz_zip_archive &archive, const mz_zip_archive_file_stat &stat, Model &model)
+    {
+        if (stat.m_uncomp_size == 0 || stat.m_uncomp_size > 64ull * 1024ull * 1024ull) {
+            BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": image fill asset " << stat.m_filename
+                                       << " has an implausible size, skipped";
+            return;
+        }
+        std::vector<uint8_t> bytes(size_t(stat.m_uncomp_size));
+        if (!mz_zip_reader_extract_file_to_mem(&archive, stat.m_filename, bytes.data(), bytes.size(), 0)) {
+            BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": could not read image fill asset "
+                                       << stat.m_filename;
+            return;
+        }
+        // The file name IS the hash; storing re-computes it, so a mismatch is caught here and the
+        // asset is not filed under a name that would then never be looked up.
+        const std::string stored = model.image_assets.add(std::move(bytes));
+        std::string       expect = stat.m_filename;
+        const size_t      slash  = expect.find_last_of('/');
+        if (slash != std::string::npos)
+            expect = expect.substr(slash + 1);
+        const size_t dot = expect.find_last_of('.');
+        if (dot != std::string::npos)
+            expect = expect.substr(0, dot);
+        if (!expect.empty() && !boost::iequals(expect, stored))
+            BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": image fill asset " << stat.m_filename
+                                       << " does not match its own hash (" << stored << ")";
     }
 
     void _BBS_3MF_Importer::_extract_custom_gcode_per_print_z_from_archive(::mz_zip_archive &archive, const mz_zip_archive_file_stat &stat)
@@ -5871,6 +5913,8 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         bool _add_filament_sequence_file_to_archive(mz_zip_archive& archive, const PlateDataPtrs& plate_data_list);
         bool _add_gcode_file_to_archive(mz_zip_archive& archive, const Model& model, PlateDataPtrs& plate_data_list, Export3mfProgressFn proFn = nullptr);
         bool _add_custom_gcode_per_print_z_file_to_archive(mz_zip_archive& archive, Model& model, const DynamicPrintConfig* config);
+        // Image Fill (Phase 2): "Metadata/image_fill/<sha256>.png" plus a manifest.
+        bool _add_image_fill_to_archive(mz_zip_archive& archive, Model& model);
         bool _add_auxiliary_dir_to_archive(mz_zip_archive &archive, const std::string &aux_dir, PackingTemporaryData &data);
 
         static int convert_instance_id_to_resource_id(const Model& model, int obj_id, int instance_id)
@@ -6301,6 +6345,11 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             // Adds custom gcode per height file ("Metadata/Prusa_Slicer_custom_gcode_per_print_z.xml").
             // All custom gcode per height of whole Model are stored here
             if (!_add_custom_gcode_per_print_z_file_to_archive(archive, model, config)) { return false; }
+
+            // Image Fill (Phase 2): the images the project's parts point at, one file per asset,
+            // named by content hash. Written before the config files so a reader that stops early
+            // still has the picture that goes with the painting it has already read.
+            if (!_add_image_fill_to_archive(archive, model)) { return false; }
 
             // BBS progress point
             BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ":" << __LINE__ << boost::format(", before add project_settings\n");
@@ -8374,6 +8423,63 @@ bool _BBS_3MF_Exporter::_add_gcode_file_to_archive(mz_zip_archive& archive, cons
         }
     });
     return result;
+}
+
+bool _BBS_3MF_Exporter::_add_image_fill_to_archive(mz_zip_archive &archive, Model &model)
+{
+    // Which assets are actually pointed at. The annotation lives on ModelVolume::config under
+    // `image_fill_params`; anything the store holds that nothing names is dropped rather than
+    // written, so a project does not grow every picture the user ever tried.
+    std::vector<std::string> used;
+    for (const ModelObject *object : model.objects) {
+        if (object == nullptr)
+            continue;
+        for (const ModelVolume *volume : object->volumes) {
+            if (volume == nullptr)
+                continue;
+            ImageFillParams params;
+            if (image_fill_params_of(*volume, params) && !params.asset.empty() &&
+                std::find(used.begin(), used.end(), params.asset) == used.end())
+                used.push_back(params.asset);
+        }
+    }
+    if (used.empty())
+        return true;
+    std::sort(used.begin(), used.end());   // a stable order, so two saves of one project match
+
+    std::string manifest = "{\n  \"version\": 1,\n  \"assets\": [\n";
+    bool        first    = true;
+    for (const std::string &sha : used) {
+        const ImageAsset *asset = model.image_assets.find(sha);
+        if (asset == nullptr) {
+            // The annotation names a picture this project does not carry. Not fatal - the part
+            // keeps its painting, which is what prints - but worth saying out loud.
+            BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": image fill asset " << sha
+                                       << " is referenced but not present; not written";
+            continue;
+        }
+        const std::string path = IMAGE_FILL_DIR + sha + ".png";
+        // Stored, not deflated: the payload is already a PNG, so compressing it again costs time
+        // and buys nothing, and "stored" is the plainest guarantee the bytes come back as written.
+        if (!mz_zip_writer_add_mem(&archive, path.c_str(), (const void *) asset->bytes.data(),
+                                   asset->bytes.size(), MZ_NO_COMPRESSION)) {
+            add_error("Unable to add an image fill asset to archive");
+            BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ":" << __LINE__ << ", could not add " << path;
+            return false;
+        }
+        if (!first)
+            manifest += ",\n";
+        first = false;
+        manifest += "    { \"sha256\": \"" + sha + "\", \"path\": \"" + path +
+                    "\", \"bytes\": " + std::to_string(asset->bytes.size()) + " }";
+    }
+    manifest += "\n  ]\n}\n";
+    if (!mz_zip_writer_add_mem(&archive, IMAGE_FILL_MANIFEST_FILE.c_str(), (const void *) manifest.data(),
+                               manifest.length(), MZ_DEFAULT_COMPRESSION)) {
+        add_error("Unable to add the image fill manifest to archive");
+        return false;
+    }
+    return true;
 }
 
 bool _BBS_3MF_Exporter::_add_custom_gcode_per_print_z_file_to_archive(mz_zip_archive& archive, Model& model, const DynamicPrintConfig* config)

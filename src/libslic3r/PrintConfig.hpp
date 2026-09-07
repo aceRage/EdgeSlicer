@@ -937,6 +937,26 @@ PRINT_CONFIG_CLASS_DEFINE(
     // mmu_segmented_region_max_width stays defined only so old project/preset files
     // still deserialize (see PrintConfigDef::handle_legacy_composite), but is no
     // longer read directly by the segmentation code (Task 2).
+    // Image Fill (Phase 2, docs/superpowers/specs/2026-09-07-imagemap-phase2-imagefill.md).
+    // TWO keys, and the reason each earns its place:
+    //  * image_fill_params carries one application's settings - the image's content hash, the
+    //    projection, the axis, the allowed filaments, the subdivision depth - as a compact
+    //    `k=v;k=v` string. It rides ModelVolume::config, a ModelConfigObject that already
+    //    exists, which is what lets Image Fill be re-editable after a reload WITHOUT adding an
+    //    ObjectBase-derived member anywhere (the plan's section 5.4 rule, and the thing Bar A's
+    //    "; model label id" check gates). It is descriptive only: the slicer reads the painting
+    //    in mmu_segmentation_facets, never this.
+    //  * image_fill_detail is the project's default target facet size in millimetres for a new
+    //    application. It belongs to the project rather than to AppConfig because the right value
+    //    depends on the part (a 200 mm plaque and a 20 mm token want different numbers) and
+    //    because reopening a project should offer the same default it was made with. 0 means
+    //    "use the dialog's subdivision level as given", which is the shipped default and the
+    //    reason this key changes nothing for anyone who never opens the dialog.
+    // Both live on PrintObjectConfig, so a value stored on a ModelVolume is inert for slicing:
+    // region_config_from_model_volume (PrintObject.cpp) applies only PrintRegionConfig keys from
+    // a volume's config, so these cannot split or merge a region.
+    ((ConfigOptionString,              image_fill_params))
+    ((ConfigOptionFloat,               image_fill_detail))
     ((ConfigOptionEnum<PaintDepthMode>, paint_depth_mode))
     ((ConfigOptionInt,                 paint_depth_walls))
     ((ConfigOptionFloat,               paint_depth_mm))
