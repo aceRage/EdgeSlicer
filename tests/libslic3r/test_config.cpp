@@ -383,3 +383,28 @@ SCENARIO("A config built from the static defaults survives a JSON round trip", "
         }
     }
 }
+
+// Ultra: 128 of the process profiles shipped under resources/profiles (107 Bambu Lab, 12 Qidi,
+// 9 Flashforge) set prime_tower_brim_width to -1, upstream BambuStudio's "auto" sentinel
+// (upstream src/libslic3r/PrintConfig.cpp:6247 declares min = -1 for exactly that reason).
+// This fork declared min = 0, which the GUI never noticed - it does not run Slic3r::validate()
+// on the preset-based slicing path - but the CLI does (src/Snapmaker_Orca.cpp: m_print_config
+// .validate(true)), so every one of those presets was unsliceable from the command line without
+// an explicit --prime-tower-brim-width override. Guard the declared range against a regression.
+TEST_CASE("prime_tower_brim_width accepts the -1 auto sentinel shipped by BBL/Qidi/Flashforge profiles", "[Config]")
+{
+    const ConfigOptionDef *def = Slic3r::print_config_def.get("prime_tower_brim_width");
+    REQUIRE(def != nullptr);
+    CHECK(def->min <= -1.);
+
+    Slic3r::DynamicPrintConfig config = Slic3r::DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict("prime_tower_brim_width", "-1");
+    // under_cli = true: this is the code path the command line takes.
+    const std::map<std::string, std::string> errors = config.validate(true);
+    CHECK(errors.find("prime_tower_brim_width") == errors.end());
+    CHECK(errors.empty());
+
+    // Anything below the sentinel is still rejected.
+    config.set_deserialize_strict("prime_tower_brim_width", "-2");
+    CHECK(config.validate(true).count("prime_tower_brim_width") == 1);
+}
