@@ -455,16 +455,24 @@ SelectMachineDialog::SelectMachineDialog(Plater *plater)
     m_sizer_options = new wxBoxSizer(wxHORIZONTAL);
     select_bed     = create_item_checkbox(_L("Bed Leveling"), this, _L("Bed Leveling"), "bed_leveling");
     select_flow    = create_item_checkbox(_L("Flow Dynamics Calibration"), this, _L("Flow Dynamics Calibration"), "flow_cali");
+    // Dual-nozzle only. BambuStudio calls this "Nozzle Offset Calibration" and defaults it to
+    // Auto for a two-nozzle machine; without it the H2C/H2D never runs its toolhead-offset
+    // calibration for the job and the second nozzle keeps a stale Z offset.
+    select_nozzle_offset_cali = create_item_checkbox(_L("Nozzle Offset Calibration"), this,
+        _L("Calibrate nozzle offsets to enhance print quality.\nChecked: the printer checks for calibration before printing and skips it if unnecessary."),
+        "nozzle_offset_cali");
     select_timelapse = create_item_checkbox(_L("Timelapse"), this, _L("Timelapse"), "timelapse");
     select_use_ams = create_ams_checkbox(_L("Enable AMS"), this, _L("Enable AMS"));
 
     m_sizer_options->Add(select_bed, 0, wxLEFT | wxRIGHT, WRAP_GAP);
     m_sizer_options->Add(select_flow, 0, wxLEFT | wxRIGHT, WRAP_GAP);
+    m_sizer_options->Add(select_nozzle_offset_cali, 0, wxLEFT | wxRIGHT, WRAP_GAP);
     m_sizer_options->Add(select_timelapse, 0, wxLEFT | wxRIGHT, WRAP_GAP);
     m_sizer_options->Add(select_use_ams, 0, wxLEFT | wxRIGHT, WRAP_GAP);
 
     select_bed->Show(false);
     select_flow->Show(false);
+    select_nozzle_offset_cali->Show(false);
     select_timelapse->Show(false);
     select_use_ams->Show(false);
 
@@ -912,6 +920,30 @@ void SelectMachineDialog::update_select_layout(MachineObject *obj)
         select_bed->Hide();
     }
 
+    // Nozzle offset calibration only exists on a machine with more than one nozzle. Upstream
+    // gates it on the device's "support_nozzle_offset_calibration" capability flag; this fork
+    // does not parse that flag (see the bbl_caps_fallback note above), so gate on the machine
+    // having two nozzles, which is the same population in practice.
+    //
+    // Two ways of knowing that, because either one alone has a hole: the device report
+    // (is_multi_extruders) is empty until the printer has pushed an "extruder" block, and the
+    // selected printer preset is right even before that but says nothing about the machine
+    // actually on the other end. Either being sure is enough - showing the option for a printer
+    // that turns out not to support it costs an ignored JSON key, hiding it from an H2C costs
+    // the calibration.
+    if (select_nozzle_offset_cali) {
+        bool two_nozzles = obj && obj->is_multi_extruders();
+        if (!two_nozzles && wxGetApp().preset_bundle) {
+            auto opt_nozzle_diameters = wxGetApp().preset_bundle->printers.get_edited_preset().config.option<ConfigOptionFloats>("nozzle_diameter");
+            two_nozzles = opt_nozzle_diameters && opt_nozzle_diameters->size() == 2;
+        }
+        if (two_nozzles) {
+            select_nozzle_offset_cali->Show();
+        } else {
+            select_nozzle_offset_cali->Hide();
+        }
+    }
+
     if (obj && (obj->is_support_timelapse || bbl_caps_fallback) && is_show_timelapse()) {
         select_timelapse->Show();
         update_timelapse_enable_status();
@@ -1117,6 +1149,20 @@ bool SelectMachineDialog::do_ams_mapping(MachineObject *obj_)
     return true;
 }
 
+/* project_config "filament_map" numbers the nozzles 1 = left, 2 = right; the print task
+ * numbers them 1 = left, 0 = right. Ported from BambuStudio SelectMachine.cpp. */
+static int s_convert_filament_map_nozzle_id_to_task_nozzle_id(int nozzle_id)
+{
+    if (nozzle_id == (int) FilamentMapNozzleId::NOZZLE_LEFT) {
+        return (int) CloudTaskNozzleId::NOZZLE_LEFT;
+    } else if (nozzle_id == (int) FilamentMapNozzleId::NOZZLE_RIGHT) {
+        return (int) CloudTaskNozzleId::NOZZLE_RIGHT;
+    }
+    /* unsupported nozzle id - pass it through rather than asserting in a send path */
+    BOOST_LOG_TRIVIAL(error) << "convert_filament_map_nozzle_id, unexpected nozzle id " << nozzle_id;
+    return nozzle_id;
+}
+
 bool SelectMachineDialog::get_ams_mapping_result(std::string &mapping_array_str, std::string& mapping_array_str2, std::string &ams_mapping_info)
 {
     if (m_ams_mapping_result.empty())
@@ -1139,6 +1185,27 @@ bool SelectMachineDialog::get_ams_mapping_result(std::string &mapping_array_str,
         json mapping_v1_json    = json::array();
 
         json mapping_info_json  = json::array();
+
+        /* Per-filament nozzle assignment, 1 based (1 = left, 2 = right). On a dual-nozzle
+         * machine BambuStudio puts the task form of this into every ams_mapping_info entry as
+         * "nozzleId"; it is what tells the printer which nozzle each filament belongs to, both
+         * for the running job and for the copy it stores for a re-print. Without it a stored
+         * H2D/H2C job looks single-nozzle when re-printed from the screen.
+         *
+         * Only filled for a machine that really has two nozzles: on a single-nozzle printer the
+         * key would be a payload change for no gain, and this fork keeps those payloads exactly
+         * as they were. */
+        std::vector<int> filament_maps;
+        bool             emit_nozzle_id = false;
+        {
+            auto opt_nozzle_diameters = wxGetApp().preset_bundle->printers.get_edited_preset().config.option<ConfigOptionFloats>("nozzle_diameter");
+            if (opt_nozzle_diameters && opt_nozzle_diameters->size() == 2) {
+                if (auto *fm = wxGetApp().preset_bundle->project_config.option<ConfigOptionInts>("filament_map")) {
+                    filament_maps  = fm->values;
+                    emit_nozzle_id = !filament_maps.empty();
+                }
+            }
+        }
 
         for (int i = 0; i < wxGetApp().preset_bundle->filament_presets.size(); i++) {
 
@@ -1165,6 +1232,10 @@ bool SelectMachineDialog::get_ams_mapping_result(std::string &mapping_array_str,
                     if (it != nullptr) {
                         mapping_item["filamentId"] = it->filament_id;
                     }
+                    /* nozzle id */
+                    if (emit_nozzle_id && i >= 0 && i < (int) filament_maps.size())
+                        mapping_item["nozzleId"] = s_convert_filament_map_nozzle_id_to_task_nozzle_id(filament_maps[i]);
+
                     //convert #RRGGBB to RRGGBBAA
                     mapping_item["sourceColor"]     = m_filaments[k].color;
                     mapping_item["targetColor"]     = m_ams_mapping_result[k].color;
@@ -1203,6 +1274,20 @@ bool SelectMachineDialog::get_ams_mapping_result(std::string &mapping_array_str,
     return true;
 }
 
+/* The flow-variant label the print task uses. Ported from BambuStudio SelectMachine.cpp;
+ * the enum values are identical in this fork (PrintConfig.hpp NozzleVolumeType). */
+std::string get_nozzle_volume_type_cloud_string(int nozzle_volume_type)
+{
+    switch ((NozzleVolumeType) nozzle_volume_type) {
+    case NozzleVolumeType::nvtStandard:    return "standard_flow";
+    case NozzleVolumeType::nvtHighFlow:    return "high_flow";
+    case NozzleVolumeType::nvtTPUHighFlow: return "tpu_high_flow";
+    case NozzleVolumeType::nvtE3DHighFlow: return "e3d_high_flow";
+    case NozzleVolumeType::nvtHybrid:      return "hybrid_flow";
+    default:                               return "standard_flow";
+    }
+}
+
 bool SelectMachineDialog::build_nozzles_info(std::string& nozzles_info)
 {
     /* init nozzles info */
@@ -1217,11 +1302,14 @@ bool SelectMachineDialog::build_nozzles_info(std::string& nozzles_info)
         BOOST_LOG_TRIVIAL(error) << "build_nozzles_info, opt_nozzle_diameters is nullptr";
         return false;
     }
-    //auto opt_nozzle_volume_type = preset_bundle->project_config.option<ConfigOptionEnumsGeneric>("nozzle_volume_type");
-    //if (opt_nozzle_volume_type == nullptr) {
-    //    BOOST_LOG_TRIVIAL(error) << "build_nozzles_info, opt_nozzle_volume_type is nullptr";
-    //    return false;
-    //}
+    /* The flow variant declared for each nozzle. It lives in project_config in this fork too
+     * (PresetBundle's project options list), so report the real value instead of pretending
+     * every nozzle is a standard-flow one - an H2C right nozzle is commonly high flow, and the
+     * printer matches the stored job's filaments against this. A missing option is not fatal:
+     * fall back to the old constant. */
+    auto opt_nozzle_volume_type = preset_bundle->project_config.option<ConfigOptionEnumsGeneric>("nozzle_volume_type");
+    if (opt_nozzle_volume_type == nullptr)
+        BOOST_LOG_TRIVIAL(warning) << "build_nozzles_info, opt_nozzle_volume_type is nullptr, assuming standard flow";
     json nozzle_item;
     /* only o1d two nozzles has build_nozzles info now */
     if (opt_nozzle_diameters->size() != 2) {
@@ -1241,9 +1329,10 @@ bool SelectMachineDialog::build_nozzles_info(std::string& nozzles_info)
             continue;
         }
         nozzle_item["type"] = nullptr;
-        //if (i >= 0 && i < opt_nozzle_volume_type->size()) {
-            nozzle_item["flowSize"] = "standard_flow"; // TODO: Orca hack
-        //}
+        if (opt_nozzle_volume_type && i < opt_nozzle_volume_type->size())
+            nozzle_item["flowSize"] = get_nozzle_volume_type_cloud_string(opt_nozzle_volume_type->get_at(i));
+        else
+            nozzle_item["flowSize"] = "standard_flow";
         if (i >= 0 && i < opt_nozzle_diameters->size()) {
             nozzle_item["diameter"] = opt_nozzle_diameters->get_at(i);
         }
@@ -2189,6 +2278,18 @@ void SelectMachineDialog::on_send_print()
 
     bool timelapse_option = select_timelapse->IsShown() ? m_checkbox_list["timelapse"]->GetValue() : true;
 
+    /* Nozzle offset calibration. The wire value is BambuStudio's tri-state:
+     * 0 = off, 1 = on, 2 = auto. This dialog offers a checkbox rather than upstream's
+     * Auto/On/Off switch, and a ticked box means upstream's default for a dual-nozzle
+     * machine - Auto - so the printer checks before the job and skips the calibration when
+     * it is not needed. The option is hidden (and stays 0) on every single-nozzle printer,
+     * which is what keeps their payload byte for byte what it was. */
+    int auto_offset_cali = 0;
+    if (select_nozzle_offset_cali && select_nozzle_offset_cali->IsShown() &&
+        m_checkbox_list["nozzle_offset_cali"]->GetValue()) {
+        auto_offset_cali = 2; /* auto */
+    }
+
     m_print_job->set_print_config(
         MachineBedTypeString[0],
         m_checkbox_list["bed_leveling"]->GetValue(),
@@ -2198,7 +2299,7 @@ void SelectMachineDialog::on_send_print()
         true,
         0, // TODO: Orca hack
         0,
-        0);
+        auto_offset_cali);
 
     if (obj_->has_ams()) {
         m_print_job->task_use_ams = m_checkbox_list["use_ams"]->GetValue();
@@ -3250,6 +3351,7 @@ void SelectMachineDialog::set_default()
     //reset checkbox
     select_bed->Show(false);
     select_flow->Show(false);
+    select_nozzle_offset_cali->Show(false);
     select_timelapse->Show(false);
     select_use_ams->Show(false);
 
@@ -3272,6 +3374,14 @@ void SelectMachineDialog::set_default()
     }
     else {
         m_checkbox_list["timelapse"]->SetValue(true);
+    }
+    // Default on, like the other calibration options and like upstream's "Auto" default for a
+    // dual-nozzle machine. Persisted under the same [print] section key the checkbox writes.
+    if (config && config->get("print", "nozzle_offset_cali") == "0") {
+        m_checkbox_list["nozzle_offset_cali"]->SetValue(false);
+    }
+    else {
+        m_checkbox_list["nozzle_offset_cali"]->SetValue(true);
     }
 
     m_checkbox_list["use_ams"]->SetValue(true);
