@@ -13,6 +13,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 #include <sstream>
 #include <unordered_map>
 
@@ -644,7 +645,11 @@ static size_t nearest_palette(const ImageFillPalette &p, const std::array<float,
 // Nearest-neighbour rather than bilinear on purpose - a facet gets one filament, so smoothing
 // the source before quantising it to at most a few filaments only blurs the edges the printer
 // is about to reproduce hard.
-static std::array<float, 3> sample_image(const ImageAsset &a, float u, float v)
+//
+// Public (not file-static) so image_fill_sample_segment() - the phase 3 fill-segment sampler -
+// reads the SAME pixel for the SAME (u, v) the facet painter below computes, rather than a
+// second implementation that could drift from this one.
+std::array<float, 3> image_fill_sample_pixel(const ImageAsset &a, float u, float v)
 {
     if (a.width == 0 || a.height == 0)
         return {0.f, 0.f, 0.f};
@@ -811,7 +816,7 @@ ImageFillResult image_fill_compute(const indexed_triangle_set                   
             }
             if (!ok) continue;
             const size_t idx = t * per + i;
-            samples[idx] = img != nullptr ? sample_image(*img, u, v) : params.gradient.sample(u, v);
+            samples[idx] = img != nullptr ? image_fill_sample_pixel(*img, u, v) : params.gradient.sample(u, v);
             has_sample[idx] = true;
         }
     }
@@ -931,6 +936,171 @@ bool image_fill_params_of(const ModelVolume &volume, ImageFillParams &out)
     if (opt == nullptr)
         return false;
     return ImageFillParams::from_string(opt->serialize(), out);
+}
+
+// =============================================================================================
+// 9. Phase 3, step 2: the image row sampler
+// =============================================================================================
+
+std::vector<ImageRowSample> image_fill_sample_segment(const ImageFillParams &params, const BoundingBoxf3 &box,
+                                                      const ImageAssetStore &assets, const Vec3f &p0, const Vec3f &p1,
+                                                      const Vec3f &facet_normal, float spacing_mm)
+{
+    std::vector<ImageRowSample> out;
+
+    const ImageAsset *img = nullptr;
+    if (!params.asset.empty())
+        img = assets.pixels(params.asset);   // nullptr on a decode failure - samples come back empty-coloured
+    const bool have_source = (img != nullptr) || params.gradient.enabled;
+
+    const Vec3f  d      = p1 - p0;
+    const double length = double(d.norm());
+
+    size_t n = 0;   // number of INTERVALS; there are n + 1 samples
+    if (length > 1e-9 && spacing_mm > 1e-6f)
+        n = std::max<size_t>(1, size_t(std::llround(length / double(spacing_mm))));
+
+    out.reserve(n + 1);
+    for (size_t i = 0; i <= n; ++i) {
+        const float t = n == 0 ? 0.f : float(i) / float(n);
+        ImageRowSample s;
+        s.pos = p0 + d * t;
+        s.s   = float(length) * t;
+        if (have_source && params.projection != ImageFillProjection::MeshUV) {
+            float u = 0.f, v = 0.f;
+            if (image_fill_project(params, box, s.pos, u, v, &facet_normal)) {
+                s.color     = (img != nullptr) ? image_fill_sample_pixel(*img, u, v) : params.gradient.sample(u, v);
+                s.has_color = true;
+            }
+        }
+        out.push_back(s);
+    }
+    return out;
+}
+
+// =============================================================================================
+// 10. Phase 3, step 3: the XY split with dither
+// =============================================================================================
+
+namespace {
+
+size_t nearest_candidate_index(const std::vector<std::array<float, 3>> &candidates, const std::array<float, 3> &target)
+{
+    size_t best   = 0;
+    float  bestd  = std::numeric_limits<float>::max();
+    for (size_t i = 0; i < candidates.size(); ++i) {
+        const float dr = target[0] - candidates[i][0];
+        const float dg = target[1] - candidates[i][1];
+        const float db = target[2] - candidates[i][2];
+        const float d  = dr * dr + dg * dg + db * db;
+        if (d < bestd) { bestd = d; best = i; }
+    }
+    return best;
+}
+
+} // namespace
+
+std::vector<ImageRowRun> image_fill_dither_segment(const std::vector<ImageRowSample>       &samples,
+                                                   const std::vector<std::array<float, 3>> &candidate_colors,
+                                                   const std::vector<int>                  &candidate_ids,
+                                                   float                                     min_run_len_mm)
+{
+    std::vector<ImageRowRun> runs;
+    if (samples.empty() || candidate_colors.empty() || candidate_colors.size() != candidate_ids.size())
+        return runs;
+
+    // --- per-sample assignment, carrying the quantisation error forward along the path --------
+    std::vector<int> assigned(samples.size(), candidate_ids.front());
+    std::array<float, 3> error{0.f, 0.f, 0.f};
+    bool have_prev = false;
+    for (size_t i = 0; i < samples.size(); ++i) {
+        if (!samples[i].has_color) {
+            // Nothing to diffuse: carry the same id forward (or the first candidate, if this is
+            // the very first sample and there is nothing to carry from), and leave `error` alone.
+            assigned[i] = have_prev ? assigned[i - 1] : candidate_ids.front();
+            continue;
+        }
+        const std::array<float, 3> target{samples[i].color[0] + error[0], samples[i].color[1] + error[1],
+                                          samples[i].color[2] + error[2]};
+        const size_t idx = nearest_candidate_index(candidate_colors, target);
+        assigned[i]      = candidate_ids[idx];
+        error[0]         = target[0] - candidate_colors[idx][0];
+        error[1]         = target[1] - candidate_colors[idx][1];
+        error[2]         = target[2] - candidate_colors[idx][2];
+        have_prev = true;
+    }
+
+    // --- coalesce consecutive same-id samples into runs ---------------------------------------
+    for (size_t i = 0; i < samples.size();) {
+        size_t j = i;
+        while (j + 1 < samples.size() && assigned[j + 1] == assigned[i]) ++j;
+        ImageRowRun run;
+        run.s0          = samples[i].s;
+        run.s1          = samples[j].s;
+        run.filament_id = assigned[i];
+        runs.push_back(run);
+        i = j + 1;
+    }
+
+    // --- enforce the minimum run length ---------------------------------------------------------
+    // Repeatedly fold the globally shortest under-length run into whichever neighbour's own
+    // candidate colour it is closer to (the edge runs have only one neighbour), until every run
+    // meets the floor or only one run remains. Bounded: each pass removes exactly one run.
+    auto color_of_id = [&](int id) -> std::array<float, 3> {
+        for (size_t i = 0; i < candidate_ids.size(); ++i)
+            if (candidate_ids[i] == id) return candidate_colors[i];
+        return candidate_colors.front();
+    };
+    while (runs.size() > 1) {
+        size_t worst     = size_t(-1);
+        float  worst_len = min_run_len_mm;
+        for (size_t i = 0; i < runs.size(); ++i) {
+            const float len = runs[i].length();
+            if (len < worst_len) { worst_len = len; worst = i; }
+        }
+        if (worst == size_t(-1))
+            break;   // every run already meets the floor
+
+        size_t target;
+        if (worst == 0)
+            target = 1;
+        else if (worst + 1 == runs.size())
+            target = worst - 1;
+        else {
+            const std::array<float, 3> wc = color_of_id(runs[worst].filament_id);
+            const std::array<float, 3> lc = color_of_id(runs[worst - 1].filament_id);
+            const std::array<float, 3> rc = color_of_id(runs[worst + 1].filament_id);
+            auto sq = [](const std::array<float, 3> &a, const std::array<float, 3> &b) {
+                const float dr = a[0] - b[0], dg = a[1] - b[1], db = a[2] - b[2];
+                return dr * dr + dg * dg + db * db;
+            };
+            target = (sq(wc, lc) <= sq(wc, rc)) ? worst - 1 : worst + 1;
+        }
+
+        const size_t lo = std::min(worst, target), hi = std::max(worst, target);
+        // The merged run keeps the SURVIVING neighbour's id and spans both; the survivor is
+        // whichever of lo/hi is not `worst`.
+        const int    kept_id = runs[target].filament_id;
+        const float  s0      = std::min(runs[lo].s0, runs[hi].s0);
+        const float  s1      = std::max(runs[lo].s1, runs[hi].s1);
+        runs[lo]             = ImageRowRun{s0, s1, kept_id};
+        runs.erase(runs.begin() + hi);
+    }
+
+    // --- tidy: two adjacent runs that ended up with the same id (possible after a merge) become one.
+    // Adjacency here means adjacent IN THE LIST, not "s1 close to s0": `runs` is always a
+    // contiguous, gap-free partition of the input samples in order, so two neighbouring entries
+    // are touching regardless of how far apart their s values happen to land at the sample
+    // spacing in use.
+    std::vector<ImageRowRun> tidy;
+    tidy.reserve(runs.size());
+    for (const ImageRowRun &r : runs) {
+        if (!tidy.empty() && tidy.back().filament_id == r.filament_id)
+            tidy.back().s1 = std::max(tidy.back().s1, r.s1);
+        else
+            tidy.push_back(r);
+    }
+    return tidy;
 }
 
 } // namespace Slic3r
