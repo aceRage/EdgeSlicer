@@ -500,6 +500,8 @@ std::string WipeTowerIntegration::append_tcr(GCode& gcodegen, const WipeTower::T
     }
     // BBS: increase toolchange count
     gcodegen.m_toolchange_count++;
+    // Ultra (H2C 3MF schema): record this filament entry for filament_sequence.json.
+    gcodegen.record_filament_change(new_extruder_id);
 
     // BBS: should be placed before toolchange parsing
     std::string toolchange_retract_str = gcodegen.retract(true, false);
@@ -1896,6 +1898,9 @@ void GCode::do_export(Print* print, const char* path, GCodeProcessorResult* resu
                                               m_config.retraction_distances_when_cut.get_at(extruder.id()) > 0);
 
     m_processor.result().long_retraction_when_cut = activate_long_retraction_when_cut;
+    // Ultra (H2C 3MF schema): hand the filament / nozzle entry order to the 3MF writer.
+    m_processor.result().filament_change_sequence = m_filament_change_sequence;
+    m_processor.result().nozzle_change_sequence   = m_nozzle_change_sequence;
 
     { // BBS:check bed and filament compatible
         const ConfigOptionDef* bed_type_def = print_config_def.get("curr_bed_type");
@@ -2932,6 +2937,23 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
     // BBS: gcode writer doesn't know where the real position of extruder is after inserting custom gcode
     m_writer.set_current_position_clear(false);
     m_start_gcode_filament = GCodeProcessor::get_gcode_last_filament(machine_start_gcode);
+
+    // Ultra (H2C 3MF schema): mark the first filament used in the print, the way BambuStudio does
+    // (GCode.cpp: file.write_format(";VT%d H%d\n", initial_extruder_id, initial_nozzle_id)).
+    // H is the logical nozzle id, or -1 when the plate has no dynamic nozzle map. Written only for
+    // machines that carry a nozzle grouping (H2D/H2C/X2D); a single-nozzle machine has none, so
+    // its g-code is unchanged.
+    m_filament_change_sequence.clear();
+    m_nozzle_change_sequence.clear();
+    if (auto group_result = print.get_layered_nozzle_group_result()) {
+        int initial_nozzle_id = -1;
+        auto first_nozzle = group_result->get_first_nozzle_for_filament(int(initial_extruder_id));
+        if (group_result->is_support_dynamic_nozzle_map() && first_nozzle)
+            initial_nozzle_id = first_nozzle->group_id;
+        m_filament_change_sequence.emplace_back(initial_extruder_id);
+        m_nozzle_change_sequence.emplace_back(first_nozzle ? first_nozzle->group_id : 0);
+        file.write_format(";VT%d H%d\n", int(initial_extruder_id), initial_nozzle_id);
+    }
 
     // flush FanMover buffer to avoid modifying the start gcode if it's manual.
     if (!machine_start_gcode.empty() && this->m_fan_mover.get() != nullptr)
@@ -8985,6 +9007,23 @@ std::string GCode::retract(bool toolchange, bool is_last_retraction, LiftType li
     return gcode;
 }
 
+// Ultra (H2C 3MF schema): append one entry to the filament / logical-nozzle order. Mirrors what
+// BambuStudio pushes into m_filament_change_sequence / m_nozzle_change_sequence on every filament
+// change. The nozzle id comes from the plate's grouping result; 0 when the machine has none.
+void GCode::record_filament_change(unsigned int filament_id)
+{
+    int nozzle_id = 0;
+    if (m_curr_print) {
+        if (auto group_result = m_curr_print->get_layered_nozzle_group_result()) {
+            auto nozzle = group_result->get_first_nozzle_for_filament(int(filament_id));
+            if (nozzle)
+                nozzle_id = nozzle->group_id;
+        }
+    }
+    m_filament_change_sequence.emplace_back(filament_id);
+    m_nozzle_change_sequence.emplace_back(static_cast<unsigned int>(std::max(0, nozzle_id)));
+}
+
 std::string GCode::set_extruder(unsigned int extruder_id, double print_z, bool by_object)
 {
     if (!m_writer.need_toolchange(extruder_id))
@@ -9024,6 +9063,8 @@ std::string GCode::set_extruder(unsigned int extruder_id, double print_z, bool b
 
     // BBS. Should be placed before retract.
     m_toolchange_count++;
+    // Ultra (H2C 3MF schema): record this filament entry for filament_sequence.json.
+    this->record_filament_change(extruder_id);
 
     // prepend retraction on the current extruder
     std::string gcode = this->retract(true, false);

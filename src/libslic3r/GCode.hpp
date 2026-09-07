@@ -622,6 +622,14 @@ private:
     // BBS
     Print* m_curr_print = nullptr;
     unsigned int m_toolchange_count;
+    // Ultra (H2C 3MF schema): the order filaments were entered, and the logical nozzle each
+    // entry ran on. BambuStudio records these on GCode and copies them to GCodeProcessorResult
+    // for Metadata/filament_sequence.json; the H2C reads the nozzle order from there.
+    std::vector<unsigned int> m_filament_change_sequence;
+    std::vector<unsigned int> m_nozzle_change_sequence;
+    // Records one filament entry. -1 nozzle id == "no dynamic nozzle map", as in BBS's
+    // NOZZLE_ID_FOR_GCODE macro.
+    void record_filament_change(unsigned int filament_id);
     coordf_t m_nominal_z;
     bool m_need_change_layer_lift_z = false;
     int m_start_gcode_filament = -1;

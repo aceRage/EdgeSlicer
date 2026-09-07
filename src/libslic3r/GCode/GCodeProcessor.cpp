@@ -1340,6 +1340,13 @@ void GCodeProcessor::finalize(bool post_process)
     auto it = std::find_if(time_mode.roles_times.begin(), time_mode.roles_times.end(), [](const std::pair<ExtrusionRole, float>& item) { return erCustom == item.first; });
     auto prepare_time = (it != time_mode.roles_times.end()) ? it->second : 0.0f;
 
+    {
+        // Ultra (H2C 3MF schema): first layer time, as BambuStudio computes it
+        // (GCodeProcessor.cpp: m_result.initial_layer_time). Written to slice_info.config.
+        std::vector<float>& first_layer_times = m_result.print_statistics.modes[static_cast<size_t>(PrintEstimatedStatistics::ETimeMode::Normal)].layers_times;
+        m_result.initial_layer_time = first_layer_times.size() > 0 ? std::max(float(0.0), first_layer_times[0] - prepare_time) : 0.f;
+    }
+
     //update times for results
     for (size_t i = 0; i < m_result.moves.size(); i++) {
         //field layer_duration contains the layer id for the move in which the layer_duration has to be set.

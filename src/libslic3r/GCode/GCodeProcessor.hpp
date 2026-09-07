@@ -220,6 +220,13 @@ inline bool is_bbl_special_tool_command(int tool_number)
         int timelapse_warning_code {0};
         bool support_traditional_timelapse{true};
         float printable_height;
+        // Ultra (H2C 3MF schema): first-layer print time, and the order in which filaments /
+        // logical nozzles were entered during the print. Ported from BambuStudio
+        // GCodeProcessorResult (initial_layer_time, filament_change_sequence,
+        // nozzle_change_sequence); consumed by the sliced-3MF writer.
+        float initial_layer_time{0.f};
+        std::vector<unsigned int> filament_change_sequence;
+        std::vector<unsigned int> nozzle_change_sequence;
         SettingsIds settings_ids;
         size_t extruders_count;
         bool backtrace_enabled;
@@ -257,6 +264,9 @@ inline bool is_bbl_special_tool_command(int tool_number)
             long_retraction_when_cut = other.long_retraction_when_cut;
             timelapse_warning_code = other.timelapse_warning_code;
             printable_height = other.printable_height;
+            initial_layer_time = other.initial_layer_time;
+            filament_change_sequence = other.filament_change_sequence;
+            nozzle_change_sequence = other.nozzle_change_sequence;
             settings_ids = other.settings_ids;
             extruders_count = other.extruders_count;
             extruder_colors = other.extruder_colors;

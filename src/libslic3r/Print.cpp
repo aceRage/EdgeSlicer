@@ -2360,6 +2360,35 @@ bool Print::has_support_material() const
     return false;
 }
 
+// Ultra (H2C 3MF schema): ported verbatim from BambuStudio Print::support_material_on_wipe_tower
+// (src/libslic3r/Print.cpp). Reported in slice_info.config so the printer knows the prime tower
+// carries a support-only filament.
+bool Print::support_material_on_wipe_tower() const
+{
+    if (!this->has_wipe_tower() || !this->has_support_material())
+        return false;
+
+    for (const PrintObject *object : m_objects) {
+        if (!object->has_support_material())
+            continue;
+
+        const std::vector<unsigned int> obj_filaments = object->object_extruders();
+        const int                       support_fil   = object->config().support_filament;
+        const int                       support_interface_fil = object->config().support_interface_filament;
+
+        auto support_differs_from_body = [&](int filament_1based) -> bool {
+            if (filament_1based <= 0)
+                return false;
+            const unsigned int filament_0based = static_cast<unsigned int>(filament_1based - 1);
+            return std::find(obj_filaments.begin(), obj_filaments.end(), filament_0based) == obj_filaments.end();
+        };
+
+        if (support_differs_from_body(support_fil) || support_differs_from_body(support_interface_fil))
+            return true;
+    }
+    return false;
+}
+
 /*  This method assigns extruders to the volumes having a material
     but not having extruders set in the volume config. */
 void Print::auto_assign_extruders(ModelObject* model_object) const
