@@ -1,0 +1,72 @@
+{
+    "type": "filament",
+    "name": "PolyLite PLA-CF @BBL H2C",
+    "inherits": "Generic PLA-CF @BBL H2C 0.4 nozzle",
+    "from": "system",
+    "setting_id": "GFSPM02_62",
+    "filament_id": "PMPL31",
+    "instantiation": "true",
+    "additional_cooling_fan_speed": [
+        "75"
+    ],
+    "additional_fan_full_speed_layer": [
+        "0"
+    ],
+    "close_additional_fan_first_x_layers": [
+        "1"
+    ],
+    "cool_plate_temp": [
+        "35"
+    ],
+    "cool_plate_temp_initial_layer": [
+        "35"
+    ],
+    "filament_density": [
+        "1.29"
+    ],
+    "filament_flow_ratio": [
+        "1.04",
+        "1.04",
+        "1.04"
+    ],
+    "filament_printable": [
+        "3"
+    ],
+    "filament_vendor": [
+        "Polymaker"
+    ],
+    "impact_strength_z": [
+        "10.0"
+    ],
+    "nozzle_temperature": [
+        "230",
+        "230",
+        "230"
+    ],
+    "nozzle_temperature_initial_layer": [
+        "230",
+        "230",
+        "230"
+    ],
+    "nozzle_temperature_range_high": [
+        "230"
+    ],
+    "required_nozzle_HRC": [
+        "3"
+    ],
+    "slow_down_layer_time": [
+        "6"
+    ],
+    "supertack_plate_temp": [
+        "45"
+    ],
+    "supertack_plate_temp_initial_layer": [
+        "45"
+    ],
+    "temperature_vitrification": [
+        "64"
+    ],
+    "compatible_printers": [
+        "Bambu Lab H2C 0.4 nozzle"
+    ]
+}

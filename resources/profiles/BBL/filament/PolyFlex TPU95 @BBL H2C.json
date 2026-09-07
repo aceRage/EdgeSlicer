@@ -1,0 +1,52 @@
+{
+    "type": "filament",
+    "name": "PolyFlex TPU95 @BBL H2C",
+    "inherits": "Generic TPU @BBL H2C 0.4 nozzle",
+    "from": "system",
+    "setting_id": "GFSPM02_55",
+    "filament_id": "PMTP01",
+    "instantiation": "true",
+    "additional_fan_full_speed_layer": [
+        "0"
+    ],
+    "close_additional_fan_first_x_layers": [
+        "1"
+    ],
+    "filament_density": [
+        "1.2"
+    ],
+    "filament_flow_ratio": [
+        "1.02",
+        "1.02",
+        "1.02"
+    ],
+    "filament_max_volumetric_speed": [
+        "5",
+        "5",
+        "5"
+    ],
+    "filament_printable": [
+        "3"
+    ],
+    "filament_vendor": [
+        "Polymaker"
+    ],
+    "impact_strength_z": [
+        "10"
+    ],
+    "nozzle_temperature_range_high": [
+        "230"
+    ],
+    "nozzle_temperature_range_low": [
+        "210"
+    ],
+    "slow_down_layer_time": [
+        "6"
+    ],
+    "temperature_vitrification": [
+        "0"
+    ],
+    "compatible_printers": [
+        "Bambu Lab H2C 0.4 nozzle"
+    ]
+}

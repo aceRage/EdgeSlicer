@@ -1,0 +1,34 @@
+{
+    "type": "filament",
+    "name": "PolyLite ASA @BBL H2C",
+    "inherits": "Generic ASA @BBL H2C 0.4 nozzle",
+    "from": "system",
+    "setting_id": "GFSPM02_67",
+    "filament_id": "GFB61",
+    "instantiation": "true",
+    "filament_cost": [
+        "23.6"
+    ],
+    "filament_density": [
+        "1.02"
+    ],
+    "filament_flow_ratio": [
+        "0.95",
+        "0.95",
+        "0.95"
+    ],
+    "filament_max_volumetric_speed": [
+        "13",
+        "13",
+        "13"
+    ],
+    "filament_vendor": [
+        "Polymaker"
+    ],
+    "slow_down_layer_time": [
+        "3"
+    ],
+    "compatible_printers": [
+        "Bambu Lab H2C 0.4 nozzle"
+    ]
+}

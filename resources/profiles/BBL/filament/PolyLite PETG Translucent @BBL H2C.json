@@ -1,0 +1,80 @@
+{
+    "type": "filament",
+    "name": "PolyLite PETG Translucent @BBL H2C",
+    "inherits": "Generic PETG @BBL H2C 0.4 nozzle",
+    "from": "system",
+    "setting_id": "GFSPM02_61",
+    "filament_id": "PMPE05",
+    "instantiation": "true",
+    "additional_cooling_fan_speed": [
+        "0"
+    ],
+    "additional_fan_full_speed_layer": [
+        "0"
+    ],
+    "close_additional_fan_first_x_layers": [
+        "3"
+    ],
+    "fan_cooling_layer_time": [
+        "25"
+    ],
+    "fan_max_speed": [
+        "30"
+    ],
+    "fan_min_speed": [
+        "10"
+    ],
+    "filament_density": [
+        "1.25"
+    ],
+    "filament_flow_ratio": [
+        "0.96",
+        "0.96",
+        "0.96"
+    ],
+    "filament_max_volumetric_speed": [
+        "8",
+        "8",
+        "8"
+    ],
+    "filament_printable": [
+        "3"
+    ],
+    "filament_vendor": [
+        "Polymaker"
+    ],
+    "impact_strength_z": [
+        "10"
+    ],
+    "nozzle_temperature": [
+        "250",
+        "250",
+        "250"
+    ],
+    "nozzle_temperature_initial_layer": [
+        "250",
+        "250",
+        "250"
+    ],
+    "nozzle_temperature_range_high": [
+        "260"
+    ],
+    "nozzle_temperature_range_low": [
+        "230"
+    ],
+    "overhang_fan_speed": [
+        "100"
+    ],
+    "overhang_fan_threshold": [
+        "95%"
+    ],
+    "slow_down_layer_time": [
+        "8"
+    ],
+    "temperature_vitrification": [
+        "81"
+    ],
+    "compatible_printers": [
+        "Bambu Lab H2C 0.4 nozzle"
+    ]
+}

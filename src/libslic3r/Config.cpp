@@ -813,11 +813,30 @@ int ConfigBase::load_from_json(const std::string &file, ConfigSubstitutionContex
         // Ultra: resolve BambuStudio 2.x "include" externalized templates.
         // Newer machine variant JSONs move start/end/layer-change/change-filament/
         // timelapse gcode into separate template files pulled in via a top-level
-        // "include" array. The fork's loader had no native include support, so
-        // resolve+merge here before deserialization: load each included file (path
-        // relative to this file's dir) and copy any key the including file does not
-        // itself define. The including file always wins; earlier includes win over
-        // later ones. One level deep (sufficient for the gcode templates).
+        // "include" array; filament presets pull the shared
+        // fdm_filament_template_direct_* families in the same way. The fork's loader
+        // had no native include support, so resolve+merge here before
+        // deserialization: load each included file and copy any key the including
+        // file does not itself define. The including file always wins; earlier
+        // includes win over later ones. One level deep (sufficient for the
+        // templates upstream ships).
+        //
+        // Resolution order for one include entry, first hit wins:
+        //   1. a path relative to the including file's own directory, + ".json".
+        //      Unchanged, so everything that resolves today keeps resolving exactly
+        //      as it did, explicit "../name" forms included.
+        //   2. the including preset's category root - the nearest ancestor directory
+        //      named filament, process or machine. Bambu Studio resolves "include"
+        //      by NAME against the preset map it has already loaded
+        //      (PresetBundle::load_vendor_configs_from_json), having registered the
+        //      fdm_filament_template_* files as non-instantiated entries at the top
+        //      of filament_list, so a bare template name works there from any
+        //      subfolder. Those templates all sit at the category root, so trying a
+        //      bare name against that directory reproduces upstream's behaviour for
+        //      upstream's layout - an upstream re-sync that keeps bare names does
+        //      not regress. A name lookup proper is not possible at this level:
+        //      ConfigBase has no access to the loaded preset map.
+        // An include that resolves nowhere stays a warning, never an error.
         {
             auto inc_it = j.find("include");
             if (inc_it != j.end() && inc_it->is_array()) {
@@ -825,6 +844,24 @@ int ConfigBase::load_from_json(const std::string &file, ConfigSubstitutionContex
                 size_t sep = file.find_last_of("/\\");
                 if (sep != std::string::npos)
                     base_dir = file.substr(0, sep + 1);
+                // nearest ancestor directory named filament/process/machine, with a
+                // trailing separator; empty when the file sits outside such a tree
+                std::string category_dir;
+                if (sep != std::string::npos) {
+                    std::string dir = file.substr(0, sep);
+                    while (!dir.empty()) {
+                        size_t s = dir.find_last_of("/\\");
+                        std::string leaf = (s == std::string::npos) ? dir : dir.substr(s + 1);
+                        if (boost::iequals(leaf, std::string("filament")) || boost::iequals(leaf, std::string("process"))
+                            || boost::iequals(leaf, std::string("machine"))) {
+                            category_dir = dir + "/";
+                            break;
+                        }
+                        if (s == std::string::npos)
+                            break;
+                        dir = dir.substr(0, s);
+                    }
+                }
                 auto is_meta_key = [](const std::string& k) {
                     // preset meta keys the template files carry - never merge these
                     static const char* mk[] = {"name","instantiation","from","inherits","type",
@@ -839,25 +876,44 @@ int ConfigBase::load_from_json(const std::string &file, ConfigSubstitutionContex
                     // BambuStudio include entries omit the .json extension
                     if (inc_name.size() < 5 || !boost::iends_with(inc_name, ".json"))
                         inc_name += ".json";
-                    std::string inc_path = base_dir + inc_name;
-                    try {
-                        boost::nowide::ifstream inc_ifs(inc_path);
-                        if (!inc_ifs.good()) {
-                            BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": include not found: " << inc_path;
-                            continue;
-                        }
-                        json inc_j;
-                        inc_ifs >> inc_j;
-                        inc_ifs.close();
-                        for (auto iit = inc_j.begin(); iit != inc_j.end(); ++iit) {
-                            std::string k = iit.key();
-                            if (boost::iequals(k, std::string("include")) || is_meta_key(k))
+                    std::vector<std::pair<std::string, const char*>> candidates;
+                    candidates.emplace_back(base_dir + inc_name, "the including file's own directory");
+                    if (!category_dir.empty() && category_dir != base_dir)
+                        candidates.emplace_back(category_dir + inc_name, "the preset category root");
+                    bool resolved = false;
+                    for (size_t ci = 0; ci < candidates.size() && !resolved; ++ci) {
+                        const std::string& inc_path = candidates[ci].first;
+                        try {
+                            boost::nowide::ifstream inc_ifs(inc_path);
+                            if (!inc_ifs.good())
                                 continue;
-                            if (j.find(k) == j.end())
-                                j[k] = iit.value();
+                            json inc_j;
+                            inc_ifs >> inc_j;
+                            inc_ifs.close();
+                            resolved = true;
+                            if (ci > 0)
+                                BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << ": include " << inc_name << " of " << file
+                                                         << " resolved through " << candidates[ci].second << ": " << inc_path;
+                            for (auto iit = inc_j.begin(); iit != inc_j.end(); ++iit) {
+                                std::string k = iit.key();
+                                if (boost::iequals(k, std::string("include")) || is_meta_key(k))
+                                    continue;
+                                if (j.find(k) == j.end())
+                                    j[k] = iit.value();
+                            }
+                        } catch (std::exception& e) {
+                            // the file is there but will not parse - report it and
+                            // stop; a further candidate would be a different template
+                            BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": failed to parse include " << inc_path << ": " << e.what();
+                            resolved = true;
                         }
-                    } catch (std::exception& e) {
-                        BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": failed to parse include " << inc_path << ": " << e.what();
+                    }
+                    if (!resolved) {
+                        std::string tried;
+                        for (const auto& candidate : candidates)
+                            tried += (tried.empty() ? "" : ", ") + candidate.first;
+                        BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": include not found: " << inc_name
+                                                   << " (included by " << file << "; tried " << tried << ")";
                     }
                 }
                 j.erase("include");
