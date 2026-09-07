@@ -963,7 +963,9 @@ bool load_gltf(const char *path, Model *model, GltfInfo &info, std::string &mess
             std::string model_id, code;   // glTF carries neither; leave the Plater's fields empty
             progressFn((int) step, total_steps, cancel, model_id, code);
             if (cancel) {
-                message = _L("Import cancelled.");
+                // A person pressed Cancel: the caller returns an empty model, no error dialog.
+                info.cancelled = true;
+                message.clear();
                 return false;
             }
         }

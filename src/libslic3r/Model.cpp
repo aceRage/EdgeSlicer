@@ -326,6 +326,7 @@ Model Model::read_from_file(const std::string&                                  
     else if (boost::algorithm::iends_with(input_file, ".glb") || boost::algorithm::iends_with(input_file, ".gltf")) {
         GltfInfo gltf_info;
         result = load_gltf(input_file.c_str(), &model, gltf_info, message, nullptr, stlFn);
+        is_cb_cancel = gltf_info.cancelled; // quiet abort, the way a cancelled STEP import returns
         if (result) {
             // On success load_gltf uses `message` for a warning, not an error. Hand it to the
             // caller and clear it, so from here on `message` only ever holds a real failure.

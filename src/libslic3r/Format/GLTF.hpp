@@ -36,6 +36,7 @@ struct GltfInfo
     bool                     is_single_material{false};
     bool                     had_textures{false};      // report, never used in v1/v2
     size_t                   dropped_primitives{0};    // points / lines / line loops / strips
+    bool                     cancelled{false};         // the progress dialog's Cancel: not an error
     size_t                   skipped_nodes{0};         // over the instance cap
     std::vector<std::string> unsupported_extensions;   // from extensionsRequired
 };
