@@ -1,12 +1,12 @@
 # EdgeSlicer
 
-**Bleeding edge featureset, pulled from all slicing worlds. Per-part support control, phone and remote access, camera streams, filament manager, expanded printer profiles, expanded assembly and multicolor toolsets.**
+**Bleeding edge featureset, pulled from all slicing worlds. Per-part support control, a phone app with push notifications and reprints, remote access, camera streams, filament manager, expanded printer profiles, expanded assembly and multicolor toolsets.**
 
 [Releases](https://github.com/aceRage/EdgeSlicer/releases) · Windows installer & portable · Linux AppImage · macOS (unsigned) · Based on [Snapmaker Orca](https://github.com/Snapmaker/OrcaSlicer) 2.3.6 · AGPL-3.0
 
 ![Stream camera wall, Support Filament Matching, Compare Slices and the Assemble tool's Auto-fit](docs/images/hero.jpg)
 
-EdgeSlicer is a fork of Snapmaker Orca, itself a fork of OrcaSlicer. It keeps everything Snapmaker Orca does — Snapmaker U1 / J1 / Artisan / A-series support, the full OrcaSlicer printer library and its print hosts (Klipper/Moonraker, OctoPrint, Duet, PrusaLink and the rest) — and adds Bambu Lab profiles and LAN sending, per-part support control, and a phone / remote access layer.
+EdgeSlicer is a fork of Snapmaker Orca, itself a fork of OrcaSlicer. It keeps everything Snapmaker Orca does — Snapmaker U1 / J1 / Artisan / A-series support, the full OrcaSlicer printer library and its print hosts (Klipper/Moonraker, OctoPrint, Duet, PrusaLink and the rest) — and adds Bambu Lab profiles and LAN sending (validated on an H2C), per-part support control, glTF/GLB import, and a phone / remote access layer with its own companion app.
 
 The application, its binary (`EdgeSlicer.exe`) and its data directory (`%APPDATA%\EdgeSlicer`) all carry the product name, and the icon is an italic **E** whose stem is a katana with a red edge. It installs and runs beside a stock Snapmaker Orca.
 
@@ -31,39 +31,42 @@ Because supports are generated *after* slicing, the "is there support under this
 ### Edge Hub — phone and remote access
 
 - The hub is the same binary run as a **tray-only background process**. It serves the phone page and the camera relays, any slicer window starts it, and it keeps running after you close them.
-- **Phone access on the LAN** — enable it on the hub page and scan the **QR code**. The phone gets `http://<pc>:13640/r/<token>/` with *Streams*, *Prepare* and *Devices* tabs: the camera wall, plate previews and estimates, starting a slice and sending to a printer. The link is token-gated and survives restarts; *New link* rotates it (and invalidates saved links and home-screen icons).
+- **Phone access on the LAN** — enable it on the hub page and scan the **QR code**. The phone gets `http://<pc>:13640/r/<token>/` with *Streams*, *Prepare*, *Devices* and *Reprints* tabs: the camera wall, plate previews and estimates, starting a slice, sending to a printer with a printer and toolhead picker, Pause / Resume / Stop, a plate layout editor, and re-sending any file this PC has printed before. The link is token-gated and survives restarts; *New link* rotates it (and invalidates saved links and home-screen icons).
+- **EdgeSlicer app** (iOS and Android) — a companion app that pairs by scanning the same QR, keeps both the home and the remote address and picks whichever is reachable (home network first, Tailscale when away), shows the hub's pages full screen, and receives native push notifications with the app closed. Camera streams on iOS and over the remote path play as MP4 / MJPEG. Distributed personally for now (TestFlight or a sideloaded APK); not on the app stores.
 - **Remote access over [Tailscale](https://tailscale.com)** — with Tailscale installed and signed in on both the PC and the phone, the hub runs `tailscale serve` for you and gives you an `https://<machine>.<tailnet>.ts.net/…` link with its own QR. No port forwarding and no hosting fees. Access is restricted to an allow-list of Tailscale logins, identified by a header the hub trusts only from a loopback peer, on top of the path token.
 - **Slicer windows** — the hub can open further slicer windows, and **hidden** ones that run with no window at all, so the phone can slice and send without anything appearing on the desktop. A hidden instance that would have raised a dialog nobody can answer flags *needs attention* instead, shown on the hub page and in the tray menu; hidden and visible can be toggled either way at any time.
 - The hub page and the tray menu answer only on **loopback**, so no tunnel reaches the control plane.
 
 ### Printer event notifications
 
-Each slicer watches its printers and emits an event on a state change — started, resumed, paused, filament runout, finished, failed, cancelled, and new printer error codes — with a cooldown per printer and event kind, and nothing at all on the first poll, so starting the slicer beside a running print does not announce it. The hub raises a tray balloon and fans the event out to whatever you configure on the hub page's **Notifications** card. Every destination has its own severity filter, *Test* button and status badge.
+Each slicer watches its printers and emits an event on a state change — started, resumed, paused, filament runout, finished, failed, cancelled, and new printer error codes with the printer's own explanation — with a cooldown per printer and event kind, and nothing at all on the first poll, so starting the slicer beside a running print does not announce it. LAN printers are probed in parallel and a switched-off one is asked again only every 30 s, so one dead address does not slow the rest. The hub raises a tray balloon and fans the event out to whatever you configure on the hub page's **Notifications** card. Every destination has its own severity filter, **checkboxes for the event kinds it wants** (errors and completions without the start messages, say), a *Test* button and a status badge. The same start seen from two slicer windows is one event.
 
 - **Web Push** to the phone's browser, encrypted end to end (RFC 8291 / 8292). Browsers only allow this from a secure origin, so it wants the page installed to the Home Screen and/or reached over the Tailscale HTTPS link.
 - **Pushover**, and **webhooks** — the whole event as JSON, posted to an address you own (Home Assistant, Gotify, Discord, Slack, your own script); https only, except to `127.0.0.1`.
-- **Native app push** — the hub side is complete (APNs and FCM, using your own credentials, payloads encrypted so Apple and Google see only ciphertext). The companion iOS / Android app that would receive it **does not exist yet**; until it ships, use Web Push, Pushover or a webhook.
+- **Native app push** to the EdgeSlicer app — APNs and FCM with your own credentials, payloads encrypted so Apple and Google see only ciphertext; the app registers itself when it pairs.
 
 ### Store G-Code Files
 
 Preferences → Extras → **Store G-Code Files** keeps a copy of every G-code this PC sends to a printer — from the desktop or from the phone — beside a JSON sidecar recording which printer it went to (the same printer identity the API uses), the plate and project, the filaments and the estimates, plus the plate thumbnail when there was one. You choose the **Storage folder** (default `<data dir>/gcode_archive`) and a **Maximum Retention** file count (default 100); past that the oldest records are deleted with their sidecars and previews. Off by default.
 
-Stored files can be listed and deleted through the instance API. **Re-sending an archived file from the phone is not built yet** — the archive is the groundwork for it.
+Stored files can be listed and deleted through the instance API, and the phone's **Reprints** tab lists them — thumbnail, printer, age, size and filament colours — and sends one again with the same confirmation and progress a fresh print gets (Snapmaker-LAN and print-host printers for now). A phone send deducts filament in Spoolman like a desktop send does.
 
 ### Bambu Lab, including dual-nozzle — in progress
 
-- **Profiles** for H2D, H2D Pro, H2C and X2D (dual-nozzle) plus P2S, A2L and H2S, with the full official Polymaker filament catalogue.
+- **Profiles** for H2D, H2D Pro, H2C and X2D (dual-nozzle) plus P2S, A2L and H2S, with the full official Polymaker filament catalogue — including Panchroma, Fiberon and PolyLite presets for the H2C, validated against Polymaker's published presets.
+- **H2C sending works** — the sliced 3MF carries Bambu Studio's multi-nozzle metadata that the H2C firmware requires, and a LAN send waits for the printer to accept the job. Printer error codes resolve to the printer's own text per device series.
 - **Dual-nozzle slicing** — filaments are grouped onto nozzles automatically (from the connected printer's AMS layout when one is attached), cross-nozzle changes skip the purge, and the grouping is saved in the project 3MF.
 - **Nozzle flow type** (Standard / High Flow) is declared in sliced files and matched to the installed nozzle at send time.
 - **Import Bambu Studio user presets** — one-way mirror of your custom print / filament / machine presets, at startup or via *Sync now*.
 - **Printer connectivity** — an optional network plugin, developed separately and not part of this repository, adds live status, camera and send-to-printer for supported Bambu Lab machines (Preferences → Extras → Bambu Network).
-- **Status:** slicing is verified; physical validation on Bambu hardware is still in progress — treat this group as beta.
+- **Status:** slicing is verified on every model; LAN sending and printing are validated on an H2C. Treat the rest of the group as beta.
 
 ### Multicolor and materials
 
 - **Support Filament Matching** (opt-in) — supports, interfaces, ironing and brims print in the colour of the surface they touch; **Brim filament → Nearest wall** for brims alone.
 - **Outer wall filament** separate from inner walls.
 - **Paint depth** — a painted multi-material claim can be bounded by wall count or by distance instead of running all the way through the part.
+- **Split by painted colour** — turn a painted model into separate parts, one closed shell per painted region, placed back where they were.
 - **Filament colours and count survive printer switches**; **Apply All** sets every filament slot in one click; **per-filament Z offset**.
 - **Spool Manager** — [Spoolman](https://github.com/Donkie/Spoolman) inventory, spool-to-slot bindings, and optional automatic usage deduction when a job is sent.
 
@@ -81,6 +84,7 @@ Stored files can be listed and deleted through the instance API. **Re-sending an
 
 ### Modeling and Prepare view
 
+- **glTF / GLB import** — meshes, node hierarchies and transforms, materials mapped to filaments through the same colour dialog OBJ uses, vertex colours and textures sampled to painted faces. Draco-compressed files are refused with a clear message.
 - **Mesh booleans** on the Manifold backend (automatic fallback) with a part picker; **Repair/Remesh** rebuilds any part watertight.
 - **Visibility** — Normal / Ghost (X-ray) / Hidden per object or part, with an eye column in the object list.
 - **Move panel align & distribute**, **bottom-referenced Z**, **keep imported Z** (drop-to-bed toggle), double-click to select a part.
@@ -88,7 +92,8 @@ Stored files can be listed and deleted through the instance API. **Re-sending an
 
 ### Print quality
 
-- **Offset layers (experimental)** — odd-numbered walls are shifted by half a layer height so layers interlock. It requires the Arachne wall generator, a first layer height equal to the layer height, matching top-surface and outer-wall line widths, and spiral mode off; the slicer offers to fix all four for you when you switch it on.
+- **Offset layers (experimental)** — odd-numbered walls are shifted by half a layer height so layers interlock, on both the classic and the Arachne wall generator. It needs a first layer height equal to the layer height, matching top-surface and outer-wall line widths, and spiral mode off; the slicer offers to fix them for you when you switch it on.
+- **Seam position** can be Left or Right as well as Back.
 - **Print unsupported walls last**, **Undertop surface pattern**, **Z overrides X/Y** support option, **machine prepare time** in estimates, deterministic toolpaths (classic tree support produces the same G-code at any thread count).
 
 ![Offset layers and Z overrides X/Y print settings](docs/images/print-quality.png)
@@ -123,7 +128,7 @@ Plate deletion during a slice no longer crashes; reopening a project with a name
 | Family | Status |
 |---|---|
 | **Snapmaker** U1, J1, Artisan, A250 / A350 (Dual, Quick Swap, Bracing Kit variants) | Inherited from Snapmaker Orca; **physically validated on the U1** |
-| **Bambu Lab** A1 mini, A1, A2L, P1P, P1S, P2S, X1, X1 Carbon, X1E, H2S, H2D, H2D Pro, H2C, X2D | **In progress** — slicing verified, physical validation pending; sending needs the optional plugin (LAN mode) |
+| **Bambu Lab** A1 mini, A1, A2L, P1P, P1S, P2S, X1, X1 Carbon, X1E, H2S, H2D, H2D Pro, H2C, X2D | Slicing verified; **LAN sending validated on the H2C**; sending needs the optional plugin (LAN mode) |
 | **Flashforge** Creator 5, Creator 5 Pro | Profiles only |
 | OrcaSlicer vendor library (Creality, Prusa, Voron, QIDI, Anycubic, Elegoo, Sovol, …) | Unchanged from upstream (QIDI / Anycubic refreshed) |
 
@@ -170,13 +175,14 @@ Windows packaging: `cpack -G NSIS` in `build/` produces the installer (needs NSI
 
 ## Status and roadmap
 
-The next release, **v2.3.6.5-edge**, is the first one published under the EdgeSlicer name. Earlier releases were made under the fork's previous names and have been removed, so there is no upgrade path from them other than installing fresh — your data directory is migrated automatically (see above).
+The current release is **[v2.3.6.5-edge](https://github.com/aceRage/EdgeSlicer/releases/tag/v2.3.6.5-edge)** (2026-09-07), the first one published under the EdgeSlicer name. Earlier releases were made under the fork's previous names and have been removed, so there is no upgrade path from them other than installing fresh — your data directory is migrated automatically (see above). glTF import and the per-device printer error texts landed after that release and will be in the next one.
 
 Known limits and work in progress, stated plainly:
 
-- **Bambu Lab** — slicing is verified, hardware validation is not finished.
-- **Native app push** — the hub can send it; the companion app does not exist yet.
-- **G-code archive** — files are stored, listed and deleted; re-sending one from the phone is not built.
+- **Bambu Lab** — slicing is verified; hardware validation covers the H2C, not yet the other models.
+- **EdgeSlicer app** — personal distribution only (TestFlight / sideloaded APK); no store listing.
+- **Reprints** — Snapmaker-LAN and print-host printers; Bambu and the PC's own connection are not yet reprintable from the phone.
+- **Linux and macOS builds** — automated, unsigned, and not yet tried on hardware.
 - **Support groups** — the support *base* is never per group, and classic tree supports take interface layer count object-wide.
 - **Flashforge device tab** — experimental; the send flow is incomplete and it needs the vendor's own network library, which is **not** distributed with this fork.
 - **Dual-nozzle follow-ups** — nozzle-aware tool ordering and per-nozzle AMS slot mapping in the send dialog.
