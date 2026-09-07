@@ -7274,34 +7274,6 @@
             "sub_path": "filament/PolyTerra PLA @BBL H2DP.json"
         },
         {
-            "name": "Fiberon PA12-CF @BBL H2D",
-            "sub_path": "filament/Polymaker/Fiberon PA12-CF @BBL H2D.json"
-        },
-        {
-            "name": "Fiberon PA6-CF @BBL H2D",
-            "sub_path": "filament/Polymaker/Fiberon PA6-CF @BBL H2D.json"
-        },
-        {
-            "name": "Fiberon PA6-GF @BBL H2D",
-            "sub_path": "filament/Polymaker/Fiberon PA6-GF @BBL H2D.json"
-        },
-        {
-            "name": "Fiberon PA612-CF @BBL H2D",
-            "sub_path": "filament/Polymaker/Fiberon PA612-CF @BBL H2D.json"
-        },
-        {
-            "name": "Fiberon PET-CF @BBL H2D",
-            "sub_path": "filament/Polymaker/Fiberon PET-CF @BBL H2D.json"
-        },
-        {
-            "name": "Fiberon PETG-ESD @BBL H2D",
-            "sub_path": "filament/Polymaker/Fiberon PETG-ESD @BBL H2D.json"
-        },
-        {
-            "name": "Fiberon PETG-rCF @BBL H2D",
-            "sub_path": "filament/Polymaker/Fiberon PETG-rCF @BBL H2D.json"
-        },
-        {
             "name": "eSUN PLA+ @BBL H2D 0.2 nozzle",
             "sub_path": "filament/eSUN PLA+ @BBL H2D 0.2 nozzle.json"
         },
@@ -7344,6 +7316,34 @@
         {
             "name": "Fiberon PA12-CF @base",
             "sub_path": "filament/Polymaker/Fiberon PA12-CF @base.json"
+        },
+        {
+            "name": "Fiberon PA12-CF @BBL H2D",
+            "sub_path": "filament/Polymaker/Fiberon PA12-CF @BBL H2D.json"
+        },
+        {
+            "name": "Fiberon PA6-CF @BBL H2D",
+            "sub_path": "filament/Polymaker/Fiberon PA6-CF @BBL H2D.json"
+        },
+        {
+            "name": "Fiberon PA6-GF @BBL H2D",
+            "sub_path": "filament/Polymaker/Fiberon PA6-GF @BBL H2D.json"
+        },
+        {
+            "name": "Fiberon PA612-CF @BBL H2D",
+            "sub_path": "filament/Polymaker/Fiberon PA612-CF @BBL H2D.json"
+        },
+        {
+            "name": "Fiberon PET-CF @BBL H2D",
+            "sub_path": "filament/Polymaker/Fiberon PET-CF @BBL H2D.json"
+        },
+        {
+            "name": "Fiberon PETG-ESD @BBL H2D",
+            "sub_path": "filament/Polymaker/Fiberon PETG-ESD @BBL H2D.json"
+        },
+        {
+            "name": "Fiberon PETG-rCF @BBL H2D",
+            "sub_path": "filament/Polymaker/Fiberon PETG-rCF @BBL H2D.json"
         },
         {
             "name": "SUNLU PETG @base",
