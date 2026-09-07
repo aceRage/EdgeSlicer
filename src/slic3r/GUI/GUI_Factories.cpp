@@ -1835,6 +1835,8 @@ void MenuFactory::create_extra_object_menu()
     append_menu_item_fix_through_netfabb(&m_object_menu);
     // Object Simplify
     append_menu_item_simplify(&m_object_menu);
+    // Image Fill (Phase 2): on the object menu too - a single-part object never opens the part menu.
+    append_menu_item_image_fill(&m_object_menu);
     // merge to single part
     append_menu_item_merge_parts_to_single_part(&m_object_menu);
     // Object Center
@@ -1928,10 +1930,7 @@ void MenuFactory::create_part_menu()
     append_menu_item(menu, wxID_ANY, _L("Split by painted colour"), _L("Convert the part's colour painting into separate parts, one per filament"),
         [](wxCommandEvent&) { plater()->split_by_color(); }, "split_parts", nullptr,
         []() { return plater()->can_split_by_color(); }, m_parent);
-    // Image Fill (Phase 2): the one menu item the feature adds.
-    append_menu_item(menu, wxID_ANY, _L("Apply image fill..."), _L("Put an image or a gradient on this part, printed with the filaments you allow"),
-        [](wxCommandEvent&) { plater()->apply_image_fill(); }, "", nullptr,
-        []() { return plater()->can_apply_image_fill(); }, m_parent);
+    append_menu_item_image_fill(menu);
 
     menu->AppendSeparator();
     append_menu_item_change_type(menu);
@@ -2499,6 +2498,13 @@ void MenuFactory::append_menu_item_simplify(wxMenu* menu)
     wxMenuItem* menu_item = append_menu_item(menu, wxID_ANY, _L("Simplify Model"), "",
         [](wxCommandEvent&) { obj_list()->simplify(); }, "", menu,
         []() {return plater()->can_simplify(); }, m_parent);
+}
+
+void MenuFactory::append_menu_item_image_fill(wxMenu* menu)
+{
+    append_menu_item(menu, wxID_ANY, _L("Apply image fill..."), _L("Put an image or a gradient on this part, printed with the filaments you allow"),
+        [](wxCommandEvent&) { plater()->apply_image_fill(); }, "", menu,
+        []() { return plater()->can_apply_image_fill(); }, m_parent);
 }
 
 void MenuFactory::append_menu_item_center(wxMenu* menu)
