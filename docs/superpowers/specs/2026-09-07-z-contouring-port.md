@@ -299,6 +299,19 @@ Spot-checked by hand against the mesh: at layer `print_z = 2.2` the outer wall e
 the ramp surface is at 2.1025 and `Z2.177` where it is at 2.1775 - the contour is landing on the
 mesh to within the 0.1 mm resampling, including negative deltas.
 
+### The guards, confirmed live
+
+Slicing the wedge at `--debug 4` shows each guard firing by name:
+
+| run | log |
+|---|---|
+| `--zaa-enabled=1` | `Contouring in parallel - start` / `- end`, status "Z contouring" |
+| `+ --spiral-mode=1` | `ZAA: skipped, spiral vase mode is on` |
+| `+ --dithering-local-z-mode=1` | `ZAA: skipped, local-Z dithering owns the layer Z budget` |
+
+The remaining guards - a variable layer-height profile, an object with more than one instance, and
+an existing sub-layer plan - are not reachable from the CLI and were verified by inspection only.
+
 ## The hardware test the owner should print
 
 Generate the wedge with `python scripts/zaa/make_wedge.py wedge.stl` (40 x 40 mm, 2 mm -> 12 mm,
