@@ -1480,13 +1480,18 @@ void HubServer::accept_event(json& event)
                                      std::chrono::system_clock::now().time_since_epoch()).count();
         // Every slicer window watches the same printers and each one reports what it sees, so a
         // print start arrived once per open window ("started" twice, 10 s apart, 2026-09-06).
-        // The same printer, kind and job inside two minutes is the same event: answer with the
-        // stored one and send nothing again.
-        const std::string pid = p.value("id", std::string());
+        // The same printer, kind and job inside two minutes FROM ANOTHER WINDOW is the same
+        // event: answer with the stored one and send nothing again. The same window repeating
+        // itself is not filtered: its watcher only reports edges, so a repeat from it is a real
+        // second event (paused, resumed, paused again), and the synthetic events the gates post
+        // all come from one instance id.
+        const std::string pid      = p.value("id", std::string());
+        const long long   instance = e.value("instance", 0LL);
         for (auto it = m_events.rbegin(); it != m_events.rend(); ++it) {
             const json& o = *it;
             if (now_ms - o.value("time", 0LL) > 120000) break;
-            if (o.value("kind", std::string()) == e["kind"].get<std::string>() &&
+            if (o.value("instance", 0LL) != instance &&
+                o.value("kind", std::string()) == e["kind"].get<std::string>() &&
                 o.value("job", std::string()) == e.value("job", std::string()) &&
                 o.contains("printer") && o["printer"].value("id", std::string()) == pid) {
                 event = o;
