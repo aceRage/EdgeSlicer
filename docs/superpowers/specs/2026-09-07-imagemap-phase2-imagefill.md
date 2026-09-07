@@ -15,6 +15,19 @@ this branch sits on it rather than on the release head.
 > rebased onto it, deliberately: a mid-implementation rebase would have invalidated every
 > measurement below. Phase 1 and Phase 2 should be rebased together, once, before review.
 
+> **Follow-up, 2026-09-07, from hands-on testing.** Three things were reported from a 30 mm cube
+> with a three-vertical-band image. (1) A flat projection painted every face - the top, the bottom
+> and all four sides. Fixed: a projection now lands only on the faces it points at, and the dialog
+> has a "Faces" control and a "From the negative side of the axis" box. (2) A wrap looked like the
+> flat projection. The wrap's arithmetic was right - the tests in section 6.1 now prove the two are
+> different paintings of the same image on the same cube - but nothing about the result *said* which
+> projection had been applied, and the dialog cached the controls from their change events rather
+> than reading them at Apply. Both hardened: `ImageFillDialog::params()` re-reads every control, and
+> the dialog's summary line spells out the projection, the axis, the side and the face rule in
+> words. A wrap also no longer paints the caps. (3) Axis Y and axis Z agreeing on a vertical-band
+> image is arithmetic, not a bug; section 2.2 says why, and it is pinned by a test so nobody
+> "fixes" it. Sections 2.1 and 2.2 are the whole of the new semantics.
+
 ---
 
 ## 1. The user flow, as built
@@ -26,7 +39,9 @@ this branch sits on it rather than on the release head.
      three-colour gradient. A gradient's stops are taken from the first, middle and last allowed
      filament, so it needs no colour pickers and costs the project no payload at all.
    * **Projection** — *Flat, along an axis* / *Wrapped around an axis* / *The model's own texture
-     coordinates*, plus the axis (X/Y/Z) and two mirror checkboxes.
+     coordinates*, plus the axis (X/Y/Z), **which faces it may paint**, **which side of the axis it
+     comes from**, and two mirror checkboxes. Section 2.1 is the whole of what those two new
+     controls mean.
    * **Apply to** — the whole part, or only the faces already painted with one filament by the
      existing colour-painting tool. That is the face selection: no new gizmo, exactly as the plan
      requires.
@@ -94,12 +109,77 @@ bool image_fill_project(const ImageFillParams&, const BoundingBoxf3&, const Vec3
 * **Planar** — `u`, `v` are the point's position along the two axes that are not `axis`, normalised
   over the part's bounding box, in ascending axis order. Axis Z gives (x, y); axis X gives (y, z);
   axis Y gives (x, z).
-* **Cylindrical** — `u = atan2(b, a) / 2π + 0.5` about the box's centre in the two other axes, so
-  `+x` is the middle of the image and `-x` is the seam; `v` runs along `axis`. A point exactly on
-  the axis returns `false` rather than guessing an angle.
+* **Cylindrical** — `u = atan2(b, a) / 2π + 0.5` about the box's centre in the two other axes; `v`
+  runs along `axis`. A point exactly on the axis returns `false` rather than guessing an angle.
+  **The seam is fixed and predictable**: `u = 0` and `u = 1` meet on the **negative side of the
+  first of the two other axes**, and the middle of the image (`u = 0.5`) faces the positive side of
+  it. Wrapping about Z: seam on −X, middle of the image facing +X, `u = 0.25` at −Y and `u = 0.75`
+  at +Y. About Y: seam on −X again, middle facing +X. About X: seam on −Y, middle facing +Y.
+  Rotating the part rotates the seam with it, because the projection is in the part's own space.
 * **MeshUV** — supplied by the caller, not computed. `image_fill_project` returns `false` for it.
 
 `v` runs **up**; the sampler flips it once, so image row 0 is at `v = 1`.
+
+### 2.1 Which faces a projection paints
+
+```cpp
+enum class ImageFillFaces : int { Facing = 0, Through = 1, All = 2 };
+bool image_fill_face_is_painted(const ImageFillParams&, const BoundingBoxf3&,
+                                const Vec3f &normal, const Vec3f &centroid);
+```
+
+A projection is a **direction, not a solid**. The first build of Phase 2 painted every facet, because
+a side facet's centroid still has an (x, y) and so still samples a pixel — which is why a flat
+projection along Z put the picture on the top face **and** on the bottom **and** smeared it down all
+four sides. The rule now, decided once per **original** facet (every leaf of a facet shares its
+plane, so the subdivision refines the sampling and not the geometry):
+
+| `faces` | painted when | in the dialog |
+| --- | --- | --- |
+| `Facing` (default) | `normal · direction > 1e-4` | "Only the faces it points at" |
+| `Through` | `\|normal · direction\| > 1e-4` | "Project through (both sides)" |
+| `All` | always | **not offered** — it is the old behaviour, kept only for the importers, the tests and an old params string |
+
+* **`direction`** is `+axis`, or `−axis` when `axis_negative` (the dialog's "From the negative side
+  of the axis"). So a flat projection along Z lands on what faces up; tick the box and it lands on
+  what faces down instead.
+* **For a cylindrical projection** the direction is not the axis but the facet's own **outward
+  radial** — so a wrap paints the surfaces facing away from the axis and leaves the end caps
+  unpainted, their radial component being exactly zero. `axis_negative` selects the inward-facing
+  surfaces instead, which is what a bore wants; asking for the inside of a solid part is refused
+  with a message rather than silently painting everything.
+* **A facet parallel to the direction is painted by neither `Facing` nor `Through`.** A cube's four
+  sides under a projection along Z score exactly `0`, and `1e-4` is the epsilon that keeps a
+  grazing facet on the same side of the question as an exactly parallel one. Stated plainly: the
+  side faces stay unpainted, and if you want the picture on them you aim the axis at them.
+* **`Through` does not mirror.** The far face takes the same `u`, `v` its position gives, so it
+  reads mirrored when you look at it from behind. "Mirror horizontally" is the control that turns
+  that round; making `Through` mirror by itself would take the choice away.
+* **Painting the whole part is a replacement**, so the faces the image misses come out *unpainted* —
+  that is what "the image is on this face and nowhere else" has to mean. Applying to a **face
+  selection** is still a merge, and the cull now feeds the merge mask too: a facet the projection
+  does not reach keeps the paint it already had. So the way to put one picture on the top and
+  another on the front is to paint each face with the colour tool first and apply per selection.
+* **The annotation always records the rule.** `image_fill_params` gains `pf` (the `faces` value) and
+  `an` (`axis_negative`), and `pf` is written even when it is the default: a string without it is a
+  string from before the rule existed, and it must not be mistaken for one that chose today's
+  default on purpose. Such a string reads back as `Facing`, so re-applying an old annotation does
+  the right thing rather than reproducing the bug — the painting already stored is untouched until
+  the user applies again.
+
+### 2.2 Why axis Y and axis Z look the same, and why that is not a bug
+
+Reported, checked, and deliberately left alone. `u` and `v` are the two axes that are **not** the
+projection axis, in ascending order: Z gives (x, y), Y gives (x, z), X gives (y, z). For an image
+whose colour depends only on `u` — vertical bands, the shape of `bands_rgb.png` — axis Z and axis Y
+are therefore *the same function of position*: both read the colour off **x**. With `faces = All`
+the two paintings are identical facet for facet, which is what the test
+`axis Y matches axis Z for a vertical-band image` pins. Axis **X** reads the colour off **y** and
+does differ.
+
+What the face rule changes about this: with the default `Facing`, axis Z paints the top face and
+axis Y paints the +Y face, so the two now differ *by which faces they reach* even though they agree
+about the colour at any given point. The same test pins that too.
 
 ### Texture coordinates
 

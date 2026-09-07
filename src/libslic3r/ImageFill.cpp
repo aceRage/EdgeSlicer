@@ -162,8 +162,11 @@ bool image_fill_project(const ImageFillParams &params, const BoundingBoxf3 &box,
         const double dx = p[a0] - cx, dy = p[a1] - cy;
         if (dx * dx + dy * dy < 1e-12)
             return false;   // exactly on the axis: no angle to speak of
-        // atan2 in [-pi, pi] -> [0, 1), seam at -x so the image's left and right edges meet
-        // behind the part rather than across its front.
+        // atan2 in [-pi, pi] -> [0, 1). THE SEAM IS PREDICTABLE AND FIXED: u = 0 and u = 1 meet
+        // on the NEGATIVE side of the first of the two axes that are not `axis` - so for a wrap
+        // about Z the seam is on -X and the middle of the image (u = 0.5) faces +X; about Y it is
+        // on -X again with u = 0.5 facing +X; about X it is on -Y with u = 0.5 facing +Y. Turning
+        // the part turns the seam with it, because the projection is in the part's own space.
         u = float(std::atan2(dy, dx) / (2.0 * M_PI) + 0.5);
         if (u >= 1.f) u -= 1.f;
         v = norm(p[ax], box.min[ax], size[ax]);
@@ -173,6 +176,50 @@ bool image_fill_project(const ImageFillParams &params, const BoundingBoxf3 &box,
     if (params.flip_u) u = 1.f - u;
     if (params.flip_v) v = 1.f - v;
     return true;
+}
+
+Vec3f image_fill_direction(const ImageFillParams &params)
+{
+    Vec3f d(0.f, 0.f, 0.f);
+    d[int(params.axis)] = params.axis_negative ? -1.f : 1.f;
+    return d;
+}
+
+bool image_fill_face_is_painted(const ImageFillParams &params, const BoundingBoxf3 &box,
+                                const Vec3f &normal, const Vec3f &centroid)
+{
+    // The UVs decide coverage for a mesh-UV fill, and All is All.
+    if (params.projection == ImageFillProjection::MeshUV || params.faces == ImageFillFaces::All)
+        return true;
+    const float n = normal.norm();
+    if (n <= 0.f)
+        return false;   // a degenerate facet faces nothing
+
+    Vec3f dir;
+    if (params.projection == ImageFillProjection::Cylindrical) {
+        // "Facing" for a wrap means facing away from the axis: the direction is the facet's own
+        // outward radial, so a cylinder's wall is painted and its end caps - whose normals are
+        // parallel to the axis, radial component exactly 0 - are not. axis_negative flips it to
+        // the inward-facing surfaces, which is what a bore wants.
+        const int   ax = int(params.axis);
+        const int   a0 = (ax == 0) ? 1 : 0;
+        const int   a1 = (ax == 2) ? 1 : 2;
+        const float cx = float((box.min[a0] + box.max[a0]) * 0.5);
+        const float cy = float((box.min[a1] + box.max[a1]) * 0.5);
+        Vec3f       r(0.f, 0.f, 0.f);
+        r[a0] = centroid[a0] - cx;
+        r[a1] = centroid[a1] - cy;
+        const float rl = r.norm();
+        if (rl <= 0.f)
+            return false;   // the facet sits on the axis: no outward to speak of
+        dir = (params.axis_negative ? -1.f : 1.f) * (r / rl);
+    } else {
+        dir = image_fill_direction(params);
+    }
+
+    const float cosine = normal.dot(dir) / n;
+    return params.faces == ImageFillFaces::Through ? std::abs(cosine) > IMAGE_FILL_FACING_EPS
+                                                   : cosine > IMAGE_FILL_FACING_EPS;
 }
 
 // =============================================================================================
@@ -203,6 +250,11 @@ std::string ImageFillParams::to_string() const
     os << "v=1";
     if (!asset.empty()) os << ";img=" << asset;
     os << ";proj=" << int(projection) << ";axis=" << int(axis);
+    // Written always, not only when it is not the default: a params string that does not say
+    // which faces it painted is a string from before this rule existed, and it must not be
+    // mistaken for one that chose today's default on purpose.
+    os << ";pf=" << int(faces);
+    if (axis_negative) os << ";an=1";
     if (flip_u) os << ";fu=1";
     if (flip_v) os << ";fv=1";
     os << ";sub=" << subdivision;
@@ -238,6 +290,8 @@ bool ImageFillParams::from_string(const std::string &s, ImageFillParams &out)
         else if (k == "img")   out.asset = val;
         else if (k == "proj")  out.projection = ImageFillProjection(std::max(0, std::min(2, std::atoi(val.c_str()))));
         else if (k == "axis")  out.axis = ImageFillAxis(std::max(0, std::min(2, std::atoi(val.c_str()))));
+        else if (k == "pf")    out.faces = ImageFillFaces(std::max(0, std::min(2, std::atoi(val.c_str()))));
+        else if (k == "an")    out.axis_negative = val != "0";
         else if (k == "fu")    out.flip_u = val != "0";
         else if (k == "fv")    out.flip_v = val != "0";
         else if (k == "sub")   out.subdivision = std::max(0, std::min(IMAGE_FILL_MAX_SUBDIVISION, std::atoi(val.c_str())));
@@ -583,6 +637,10 @@ ImageFillResult image_fill_compute(const indexed_triangle_set                   
         return res;
     }
 
+    // --- the box the projection is normalised over -------------------------------------------
+    BoundingBoxf3 box;
+    for (const Vec3f &v : mesh.vertices) box.merge(v.cast<double>());
+
     // --- which facets take part -------------------------------------------------------------
     // A face selection is the existing MMU paint: only facets whose current state matches
     // `selection_state` are filled. Read through TriangleSelector so a *partially* painted facet
@@ -624,6 +682,30 @@ ImageFillResult image_fill_compute(const indexed_triangle_set                   
         }
     }
 
+    // --- which facets the projection actually lands on ----------------------------------------
+    // The fix for "a planar fill painted every face, including the far one and the sides": a
+    // projection is a direction, so a facet is painted only when it faces that direction. Decided
+    // once per ORIGINAL facet, because every leaf of a facet shares its plane and therefore its
+    // normal - the subdivision refines the sampling, not the geometry.
+    size_t facing_facets = 0;
+    for (size_t t = 0; t < mesh.indices.size(); ++t) {
+        if (!selected[t]) continue;
+        const Vec3i32 &f = mesh.indices[t];
+        const Vec3f   &a = mesh.vertices[f(0)], &b = mesh.vertices[f(1)], &c = mesh.vertices[f(2)];
+        const Vec3f    n = (b - a).cross(c - a);
+        if (image_fill_face_is_painted(params, box, n, (a + b + c) / 3.f))
+            ++facing_facets;
+        else
+            selected[t] = false;
+    }
+    if (facing_facets == 0) {
+        res.error = params.faces == ImageFillFaces::Through
+                        ? "No face of the part is square-on to that axis; try another axis."
+                        : "No face of the part faces that axis; try another axis, the other side "
+                          "of it, or \"Project through (both sides)\".";
+        return res;
+    }
+
     // --- how deep ---------------------------------------------------------------------------
     float max_edge = 0.f;
     for (const Vec3i32 &t : mesh.indices) {
@@ -638,9 +720,6 @@ ImageFillResult image_fill_compute(const indexed_triangle_set                   
     res.leaves_total = mesh.indices.size() * per;
 
     // --- sample -----------------------------------------------------------------------------
-    BoundingBoxf3 box;
-    for (const Vec3f &v : mesh.vertices) box.merge(v.cast<double>());
-
     std::vector<std::array<float, 3>> samples;
     samples.resize(res.leaves_total, {0.f, 0.f, 0.f});
     std::vector<bool> has_sample(res.leaves_total, false);
@@ -705,7 +784,11 @@ ImageFillResult image_fill_compute(const indexed_triangle_set                   
         if (states[i] > 0) ++res.facets_painted;
 
     // A face selection is a MERGE: only the selected facets take the image, and everything the
-    // part was already painted with survives untouched.
+    // part was already painted with survives untouched - and `selected` now also has the facets
+    // the projection does not land on cleared, so those keep their old paint rather than being
+    // wiped by a fill that never reached them. Filling the WHOLE part is still a replacement: the
+    // faces the image misses come out unpainted, which is what "the image is on this face and
+    // nowhere else" has to mean.
     res.painting = params.selection_state > 0
                        ? image_fill_encode(mesh.indices.size(), depth, states, &selected, &existing)
                        : image_fill_encode(mesh.indices.size(), depth, states);

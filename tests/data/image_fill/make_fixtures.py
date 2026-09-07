@@ -61,5 +61,15 @@ write("quad_rgbw.png", png(2, 2, [[R, G], [B, W]]))
 # colour" slice check. 6 rows so each band is exactly two rows.
 write("stripes3.png", png(3, 6, [[R] * 3, [R] * 3, [G] * 3, [G] * 3, [B] * 3, [B] * 3]))
 
+# bands3.png - three VERTICAL bands, so the colour varies with u and not with v. The shape of the
+# picture the projection bug was found with: a flat projection along Z must put these three bands
+# on the top face and leave the four sides alone.
+write("bands3.png", png(3, 1, [[R, G, B]]))
+
+# wrap4.png - four bands around a wrap, offset by half a band so that each of a cube's four side
+# faces falls in the MIDDLE of one band rather than across a boundary. Wrapped about Z the seam is
+# on -X, u = 0.5 faces +X, and the eight columns give: -X white, -Y red, +X green, +Y blue.
+write("wrap4.png", png(8, 1, [[W, R, R, G, G, B, B, W]]))
+
 # ramp_kw.png - a 16-step black-to-white ramp along v, for monotonicity.
 write("ramp_kw.png", png(1, 16, [[(v * 17, v * 17, v * 17)] for v in range(15, -1, -1)]))

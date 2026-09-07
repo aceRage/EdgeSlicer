@@ -49,7 +49,14 @@ public:
 
     // Valid once ShowModal() returned wxID_OK. The asset, if the user picked a new image, is
     // already in the store this was constructed with.
-    ImageFillParams params() const { return m_params; }
+    //
+    // It RE-READS the controls before answering rather than trusting what the last change event
+    // cached. The events are still what drives the preview, but Apply must be the widgets' own
+    // answer: a control whose change event never arrived (a platform that does not send one for
+    // a keyboard-driven wxChoice, a value typed into the spin control and committed by pressing
+    // Apply) would otherwise apply the previous setting while the dialog showed the new one -
+    // which is exactly the shape of "I chose Wrapped and got Flat".
+    ImageFillParams params();
 
 protected:
     void on_dpi_changed(const wxRect &suggested_rect) override {}
@@ -71,6 +78,8 @@ private:
     wxChoice         *m_source_choice   = nullptr;   // image / two-stop / three-stop gradient
     wxChoice         *m_projection      = nullptr;
     wxChoice         *m_axis            = nullptr;
+    wxChoice         *m_faces           = nullptr;   // facing / through
+    wxCheckBox       *m_from_negative   = nullptr;   // the -axis side, or inwards for a wrap
     wxChoice         *m_selection       = nullptr;   // whole part, or one painted state
     wxCheckBox       *m_flip_u          = nullptr;
     wxCheckBox       *m_flip_v          = nullptr;

@@ -107,6 +107,30 @@ enum class ImageFillProjection : int {
 
 enum class ImageFillAxis : int { X = 0, Y = 1, Z = 2 };
 
+// WHICH facets a projection is allowed to paint. A projection is a direction, not a solid: a
+// planar projection along Z is a picture held above the part and shone down at it, so it lands on
+// what faces up and on nothing else. Painting every facet - which is what Phase 2 shipped - puts
+// the image on the far face and smears it down the sides, because a side facet's centroid still
+// has an (x, y) and so still samples a pixel. That is the bug this enum fixes.
+enum class ImageFillFaces : int {
+    // Only facets that face the projection: normal . direction > 0. For a cylinder, only the
+    // facets whose normal points AWAY from the axis. The default, and what the user expects.
+    Facing = 0,
+    // Facing and far facets both: |normal . direction| > 0. The image passes through the part and
+    // lands on the back as well, seen from behind - so it reads mirrored there, and "Mirror
+    // horizontally" is the way to change that. Facets parallel to the direction are still skipped.
+    Through = 1,
+    // Every facet, parallel ones included. Phase 2's original behaviour, kept so the importers,
+    // the tests and an old params string can still ask for it; NOT offered in the dialog, because
+    // "the image is smeared down every side" is not something anyone chose on purpose.
+    All = 2,
+};
+
+// A facet counts as parallel to the projection - and so is never painted by Facing or Through -
+// when the cosine between its unit normal and the projection direction is no bigger than this.
+// A cube's side facets under a planar projection along Z score exactly 0.
+static constexpr float IMAGE_FILL_FACING_EPS = 1e-4f;
+
 // A two- or three-stop linear gradient, used when no image is chosen. Cheap to store (it is
 // three colours and a direction), so it needs no asset and no 3MF payload at all.
 struct ImageFillGradient
@@ -131,6 +155,12 @@ struct ImageFillParams
     ImageFillGradient   gradient;
     ImageFillProjection projection = ImageFillProjection::Planar;
     ImageFillAxis       axis       = ImageFillAxis::Z;
+    // Which side of `axis` the projection comes from. false = the + side (a planar projection
+    // along Z lands on what faces up); true = the - side. Ignored by MeshUV, and for a
+    // cylindrical projection it selects outward-facing (false) or inward-facing (true) surfaces.
+    bool                axis_negative = false;
+    // Which facets the projection may paint. See ImageFillFaces.
+    ImageFillFaces      faces  = ImageFillFaces::Facing;
     bool                flip_u = false;
     bool                flip_v = false;
     // 1-based filament ids the solver may choose from. Empty means "every loaded filament",
@@ -165,6 +195,21 @@ static constexpr size_t IMAGE_FILL_MAX_LEAVES = 4000000;
 // point has no sensible image coordinate (a cylindrical projection exactly on the axis).
 bool image_fill_project(const ImageFillParams &params, const BoundingBoxf3 &box, const Vec3f &p,
                         float &u, float &v);
+
+// The unit direction a planar projection travels along: +axis, or -axis when axis_negative.
+Vec3f image_fill_direction(const ImageFillParams &params);
+
+// Does the projection land on this facet? `normal` need not be normalised; `centroid` is the
+// facet's centre in the same mesh space as `box`, and is what a cylindrical projection needs to
+// know which way "outward" is for this facet. Always true for MeshUV (the UVs decide coverage)
+// and for ImageFillFaces::All.
+//
+// The rule, in one line: Facing is normal . direction > IMAGE_FILL_FACING_EPS, Through is
+// |normal . direction| > IMAGE_FILL_FACING_EPS, and a facet parallel to the direction - a cube's
+// sides under a planar projection along Z, a cylinder's end caps under a cylindrical one - is
+// painted by neither.
+bool image_fill_face_is_painted(const ImageFillParams &params, const BoundingBoxf3 &box,
+                                const Vec3f &normal, const Vec3f &centroid);
 
 // ---------------------------------------------------------------------------------------------
 // 3. The per-facet answer

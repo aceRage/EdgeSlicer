@@ -110,6 +110,30 @@ ImageFillDialog::ImageFillDialog(wxWindow                                      *
     m_axis->SetSelection(int(m_params.axis));
     row(_L("Axis") + ":", m_axis);
 
+    // WHICH faces the projection lands on. "Every face" is deliberately not offered: it is what
+    // the first build did, and painting the far face and both sides with a picture aimed at the
+    // top is a bug, not a mode. An old part that was filled that way keeps its painting;
+    // re-applying it uses the rule below.
+    wxArrayString faces;
+    faces.Add(_L("Only the faces it points at"));
+    faces.Add(_L("Project through (both sides)"));
+    m_faces = new wxChoice(this, wxID_ANY, wxDefaultPosition, wxDefaultSize, faces);
+    m_faces->SetSelection(m_params.faces == ImageFillFaces::Through ? 1 : 0);
+    m_faces->SetToolTip(_L("A flat projection along Z lands on what faces up, and on nothing else - "
+                           "the far face and the sides are left unpainted. \"Project through\" paints "
+                           "the far face as well, where it reads mirrored; \"Mirror horizontally\" "
+                           "turns it back. A face exactly parallel to the axis is never painted.\n\n"
+                           "For a wrap, \"the faces it points at\" means the surfaces facing away from "
+                           "the axis, so a cylinder's end caps are left alone."));
+    row(_L("Faces") + ":", m_faces);
+
+    m_from_negative = new wxCheckBox(this, wxID_ANY, _L("From the negative side of the axis"));
+    m_from_negative->SetValue(m_params.axis_negative);
+    m_from_negative->SetToolTip(_L("Project from -Z instead of +Z (so the image lands on the bottom "
+                                   "rather than the top). For a wrap this selects the inward-facing "
+                                   "surfaces instead of the outward ones."));
+    left->Add(m_from_negative, 0, wxEXPAND | wxTOP, FromDIP(6));
+
     wxBoxSizer *flips = new wxBoxSizer(wxHORIZONTAL);
     m_flip_u = new wxCheckBox(this, wxID_ANY, _L("Mirror horizontally"));
     m_flip_v = new wxCheckBox(this, wxID_ANY, _L("Mirror vertically"));
@@ -185,6 +209,8 @@ ImageFillDialog::ImageFillDialog(wxWindow                                      *
     m_source_choice->Bind(wxEVT_CHOICE, changed);
     m_projection->Bind(wxEVT_CHOICE, changed);
     m_axis->Bind(wxEVT_CHOICE, changed);
+    m_faces->Bind(wxEVT_CHOICE, changed);
+    m_from_negative->Bind(wxEVT_CHECKBOX, changed);
     m_selection->Bind(wxEVT_CHOICE, changed);
     m_flip_u->Bind(wxEVT_CHECKBOX, changed);
     m_flip_v->Bind(wxEVT_CHECKBOX, changed);
@@ -233,6 +259,10 @@ void ImageFillDialog::collect()
     }
     m_params.projection = ImageFillProjection(std::max(0, m_projection->GetSelection()));
     m_params.axis       = ImageFillAxis(std::max(0, m_axis->GetSelection()));
+    // Only the two the dialog offers; ImageFillFaces::All stays reachable from a params string
+    // and from code, and cannot be chosen here by accident.
+    m_params.faces         = m_faces->GetSelection() == 1 ? ImageFillFaces::Through : ImageFillFaces::Facing;
+    m_params.axis_negative = m_from_negative->GetValue();
     m_params.flip_u     = m_flip_u->GetValue();
     m_params.flip_v     = m_flip_v->GetValue();
     const int sel       = m_selection->GetSelection();
@@ -259,7 +289,13 @@ void ImageFillDialog::collect()
                 m_params.gradient.stop_c = m_params.gradient.stop_b, m_params.gradient.stop_b = f.color;
         }
     }
-    m_params.axis = ImageFillAxis(std::max(0, m_axis->GetSelection()));
+}
+
+ImageFillParams ImageFillDialog::params()
+{
+    // Read the controls one last time, so what is applied is what the dialog shows.
+    collect();
+    return m_params;
 }
 
 void ImageFillDialog::refresh_preview()
@@ -275,7 +311,10 @@ void ImageFillDialog::refresh_preview()
             ids.push_back(f.id);
         }
 
-    m_axis->Enable(m_params.projection != ImageFillProjection::MeshUV);
+    const bool axis_matters = m_params.projection != ImageFillProjection::MeshUV;
+    m_axis->Enable(axis_matters);
+    m_faces->Enable(axis_matters);
+    m_from_negative->Enable(axis_matters);
     if (m_ok != nullptr)
         m_ok->Enable(!ids.empty() && (m_params.gradient.enabled || !m_params.asset.empty()));
     m_image_text->SetLabel(m_params.asset.empty() ? _L("(none)") : from_u8(m_image_label));
@@ -350,13 +389,31 @@ void ImageFillDialog::refresh_preview()
     size_t per = 1;
     for (int i = 0; i < depth; ++i) per *= 4;
 
+    // What the fill will actually do, in words, read back out of m_params - so the projection the
+    // dialog is about to apply is visible rather than inferred from a dropdown the user hopes was
+    // read. If this line ever disagrees with the controls, the binding is broken and it shows.
+    wxString how;
+    if (m_params.projection == ImageFillProjection::MeshUV) {
+        how = _L("The model's own texture coordinates");
+    } else {
+        const char     letter    = "XYZ"[int(m_params.axis)];
+        const wxString axis_name = wxString::Format("%s%c", m_params.axis_negative ? "-" : "+", letter);
+        how = m_params.projection == ImageFillProjection::Cylindrical
+                  ? format_wxstr(_L("Wrapped about %1%, seam opposite the middle of the image"), axis_name)
+                  : format_wxstr(_L("Flat along %1%"), axis_name);
+        how += ", ";
+        how += m_params.faces == ImageFillFaces::Through ? _L("through both sides")
+                                                         : _L("only the faces it points at");
+    }
+
     wxString text;
     if (ids.empty())
         text = _L("Tick at least one filament.");
     else if (img == nullptr && !m_params.gradient.enabled)
         text = _L("Choose an image, or pick a gradient.");
     else
-        text = format_wxstr(_L("%1% filaments in use\n%2% painted facets (subdivision level %3%)"),
+        text = how + "\n" +
+               format_wxstr(_L("%1% filaments in use\n%2% facets at most (subdivision level %3%)"),
                             distinct, m_mesh.indices.size() * per, depth);
     m_summary->SetLabel(text);
     Layout();

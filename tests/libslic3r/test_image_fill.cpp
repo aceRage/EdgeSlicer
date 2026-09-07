@@ -20,6 +20,7 @@
 #include <array>
 #include <cmath>
 #include <fstream>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -115,6 +116,10 @@ TEST_CASE("Image Fill: the asset hash is stable and the store is content address
               "2d43f8c92b2d9da66a1bcac7dc453e87386edce930a992f616dc9704cbf19f2c");
         CHECK(image_fill_sha256_hex(read_fixture("ramp_kw.png")) ==
               "e621c916dce53449738f6d26208410c1e0000d26aaefc1e2947e462e57aa6055");
+        CHECK(image_fill_sha256_hex(read_fixture("bands3.png")) ==
+              "4838fcf29581e309d063ffa0121b7c805ba54bb1112d092ac2e4a0bfc3ade9fc");
+        CHECK(image_fill_sha256_hex(read_fixture("wrap4.png")) ==
+              "12654c63fe80a00e183f4b0f710f3c0a774b9cf142cf8bd968a4054ad45addeb");
     }
 
     SECTION("the empty hash is the well-known SHA-256 of nothing")
@@ -391,6 +396,10 @@ TEST_CASE("Image Fill: subdivision is a conforming, T-joint-free refinement", "[
         p.asset       = sha;
         p.projection  = ImageFillProjection::Planar;
         p.axis        = ImageFillAxis::Z;
+        // Every facet, on purpose: this test is about the subdivision leaving no crack, so it
+        // wants the whole surface painted. The DEFAULT is now ImageFillFaces::Facing, which would
+        // paint the top face only and leave extract_color_patches nothing to close.
+        p.faces       = ImageFillFaces::All;
         p.allowed     = kFilamentIds;
 
         for (int depth : {0, 1, 2, 3}) {
@@ -559,6 +568,8 @@ TEST_CASE("Image Fill: the params string round-trips", "[imagefill]")
     p.asset           = "3d27b4ed2fdfdb12b533f2ddf6e113f5f6ad516b1acd9ebb3ed1de5476ec51c6";
     p.projection      = ImageFillProjection::Cylindrical;
     p.axis            = ImageFillAxis::X;
+    p.faces           = ImageFillFaces::Through;
+    p.axis_negative   = true;
     p.flip_u          = true;
     p.subdivision     = 4;
     p.detail_mm       = 0.35f;
@@ -571,6 +582,8 @@ TEST_CASE("Image Fill: the params string round-trips", "[imagefill]")
     CHECK(back.asset == p.asset);
     CHECK(back.projection == p.projection);
     CHECK(back.axis == p.axis);
+    CHECK(back.faces == ImageFillFaces::Through);
+    CHECK(back.axis_negative);
     CHECK(back.flip_u);
     CHECK_FALSE(back.flip_v);
     CHECK(back.subdivision == 4);
@@ -603,6 +616,20 @@ TEST_CASE("Image Fill: the params string round-trips", "[imagefill]")
         ImageFillParams bad;
         CHECK_FALSE(ImageFillParams::from_string("", bad));
         CHECK_FALSE(ImageFillParams::from_string("proj=1;axis=0", bad));   // no version marker
+    }
+
+    SECTION("a string from before the face rule existed reads as the new default, not as All")
+    {
+        // An annotation written by the first Phase 2 build has no `pf`. It painted every facet,
+        // but re-applying it should do the RIGHT thing rather than reproduce the bug, so the
+        // missing key means Facing - and the part keeps the painting it already has until the
+        // user asks for a new one.
+        ImageFillParams old;
+        REQUIRE(ImageFillParams::from_string("v=1;img=abc;proj=0;axis=2;sub=4;f=1,2,3", old));
+        CHECK(old.faces == ImageFillFaces::Facing);
+        CHECK_FALSE(old.axis_negative);
+        // ...and what this build writes always says which rule it used.
+        CHECK(old.to_string().find(";pf=0") != std::string::npos);
     }
 
     SECTION("a gradient with no image paints without an asset")
@@ -934,6 +961,11 @@ TEST_CASE("Image Fill: write the Bar B project - a cube with a three-colour imag
     p.asset       = sha;
     p.projection  = ImageFillProjection::Planar;
     p.axis        = ImageFillAxis::Z;   // the picture lies on the top face, u from x, v from y
+    // Every facet, so this project stays the one the spec's section 6.3 measured: 3072 painted
+    // leaves on 12 facets, three filaments, and a slice with tool changes wherever the picture
+    // changes band. The dialog's default is now Facing; All is still what a Bar B slice wants,
+    // because a cube painted on one face alone would exercise far less of the MMU path.
+    p.faces       = ImageFillFaces::All;
     p.subdivision = 4;                  // 16 x 16 leaves per facet: the bands land cleanly
     p.allowed     = ids;
 
@@ -986,6 +1018,9 @@ TEST_CASE("Image Fill: applying to a face selection leaves the rest of the paint
     p.asset           = sha;
     p.projection      = ImageFillProjection::Planar;
     p.axis            = ImageFillAxis::Z;
+    // The selection is the subject here, so the projection is not allowed to cull anything: the
+    // two facets the user picked must be the two the fill lands on, whichever way they face.
+    p.faces           = ImageFillFaces::All;
     p.subdivision     = 2;
     p.allowed         = kFilamentIds;
     p.selection_state = 2;
@@ -1049,5 +1084,294 @@ TEST_CASE("Image Fill: applying to a face selection leaves the rest of the paint
                                                        kFilamentIds);
         CHECK_FALSE(bad.ok);
         CHECK_FALSE(bad.error.empty());
+    }
+}
+
+// =============================================================================================
+// 9. Which faces a projection lands on, and how the two projections differ
+// =============================================================================================
+//
+// The bugs these pin, both reported from a 30 mm cube with a three-vertical-band image:
+//   1. "Flat, along an axis" with axis Z painted the bands on the top face AND down all four
+//      sides, and on the bottom. A projection is a direction, not a solid: it lands on what faces
+//      it and on nothing else.
+//   2. "Wrapped around an axis" looked like the flat one. The wrap has to vary with the angle
+//      about the axis, so a cube's four sides come out four different colours and its caps -
+//      whose normals are parallel to the axis - come out unpainted.
+//   3. Axis Z and axis Y gave the same answer. For an image whose colour depends only on u that
+//      is arithmetic, not a bug: planar Z takes u from x and so does planar Y. It is pinned here
+//      so nobody "fixes" it, together with axis X, which does differ.
+
+namespace facing_test {
+
+// The unit normal of an original facet, straight from the mesh.
+Vec3f facet_normal(const indexed_triangle_set &its, size_t t)
+{
+    const Vec3i32 &f = its.indices[t];
+    const Vec3f   &a = its.vertices[f(0)], &b = its.vertices[f(1)], &c = its.vertices[f(2)];
+    return (b - a).cross(c - a).normalized();
+}
+
+// Which of the six faces of an axis-aligned box this facet belongs to: 0 = +X, 1 = -X, 2 = +Y,
+// 3 = -Y, 4 = +Z, 5 = -Z. -1 if it is not axis aligned.
+int cube_face_of(const indexed_triangle_set &its, size_t t)
+{
+    const Vec3f n = facet_normal(its, t);
+    for (int ax = 0; ax < 3; ++ax) {
+        if (n[ax] > 0.99f)  return ax * 2;
+        if (n[ax] < -0.99f) return ax * 2 + 1;
+    }
+    return -1;
+}
+
+size_t leaves_per(int depth)
+{
+    size_t per = 1;
+    for (int i = 0; i < depth; ++i) per *= 4;
+    return per;
+}
+
+// The set of box faces that came out with any paint on them.
+std::set<int> painted_faces(const TriangleMesh &cube, const std::vector<int> &states, int depth)
+{
+    const size_t per = leaves_per(depth);
+    std::set<int> out;
+    for (size_t t = 0; t < cube.its.indices.size(); ++t)
+        for (size_t i = 0; i < per; ++i)
+            if (states[t * per + i] != 0) { out.insert(cube_face_of(cube.its, t)); break; }
+    return out;
+}
+
+std::vector<int> run_states(const TriangleMesh &cube, const ImageFillParams &p, const ImageAssetStore &store,
+                     int depth)
+{
+    TriangleSelector::TriangleSplittingData empty;
+    const ImageFillResult r = image_fill_compute(cube.its, empty, p, store, kFilamentColors, kFilamentIds);
+    REQUIRE(r.ok);
+    return leaf_states(cube, r.painting, cube.its.indices.size(), depth);
+}
+
+} // namespace facing_test
+
+using namespace facing_test;
+
+TEST_CASE("Image Fill: a flat projection paints only the faces it points at", "[imagefill][faces]")
+{
+    ImageAssetStore   store;
+    const std::string sha = store.add(read_fixture("bands3.png"));   // R | G | B, vertical bands
+    TriangleMesh      cube = make_cube(20., 20., 20.);
+    const int         depth = 2;
+
+    ImageFillParams p;
+    p.asset       = sha;
+    p.projection  = ImageFillProjection::Planar;
+    p.axis        = ImageFillAxis::Z;
+    p.subdivision = depth;
+    p.allowed     = kFilamentIds;
+
+    SECTION("along +Z it lands on the top face: not the bottom, not the four sides")
+    {
+        const std::vector<int> st = run_states(cube, p, store, depth);
+        CHECK(painted_faces(cube, st, depth) == std::set<int>{4});
+        // ...and the three bands are all there, so "only the top" is not "only one band".
+        std::set<int> used;
+        for (int s : st) if (s != 0) used.insert(s);
+        CHECK(used == std::set<int>{1, 2, 3});
+    }
+
+    SECTION("the other side of the axis lands on the bottom face instead")
+    {
+        ImageFillParams q = p;
+        q.axis_negative = true;
+        CHECK(painted_faces(cube, run_states(cube, q, store, depth), depth) == std::set<int>{5});
+    }
+
+    SECTION("through both sides lands on the top AND the bottom, and still not on the sides")
+    {
+        ImageFillParams q = p;
+        q.faces = ImageFillFaces::Through;
+        CHECK(painted_faces(cube, run_states(cube, q, store, depth), depth) == std::set<int>{4, 5});
+    }
+
+    SECTION("a face parallel to the axis is painted by neither rule")
+    {
+        // The four sides of a cube under a projection along Z have normal . axis == 0 exactly.
+        // Stated directly against the predicate, so the rule is pinned and not only its effect.
+        BoundingBoxf3 box(Vec3d(0, 0, 0), Vec3d(20, 20, 20));
+        const Vec3f   side(1.f, 0.f, 0.f), top(0.f, 0.f, 1.f), bottom(0.f, 0.f, -1.f);
+        const Vec3f   centre(10.f, 10.f, 10.f);
+        ImageFillParams q = p;
+        CHECK(image_fill_face_is_painted(q, box, top, centre));
+        CHECK_FALSE(image_fill_face_is_painted(q, box, bottom, centre));
+        CHECK_FALSE(image_fill_face_is_painted(q, box, side, centre));
+        q.faces = ImageFillFaces::Through;
+        CHECK(image_fill_face_is_painted(q, box, top, centre));
+        CHECK(image_fill_face_is_painted(q, box, bottom, centre));
+        CHECK_FALSE(image_fill_face_is_painted(q, box, side, centre));   // still not the sides
+        q.faces = ImageFillFaces::All;
+        CHECK(image_fill_face_is_painted(q, box, side, centre));         // All means all
+    }
+
+    SECTION("ImageFillFaces::All is the old behaviour, and is still reachable from code")
+    {
+        ImageFillParams q = p;
+        q.faces = ImageFillFaces::All;
+        CHECK(painted_faces(cube, run_states(cube, q, store, depth), depth) ==
+              std::set<int>{0, 1, 2, 3, 4, 5});
+    }
+}
+
+TEST_CASE("Image Fill: a wrap varies with the angle, and is not the flat projection",
+          "[imagefill][faces]")
+{
+    ImageAssetStore   store;
+    const std::string wrap  = store.add(read_fixture("wrap4.png"));    // W R R G G B B W
+    const std::string bands = store.add(read_fixture("bands3.png"));   // R G B
+    TriangleMesh      cube  = make_cube(20., 20., 20.);
+    const int         depth = 2;
+    const size_t      per   = leaves_per(depth);
+
+    ImageFillParams cyl;
+    cyl.asset       = wrap;
+    cyl.projection  = ImageFillProjection::Cylindrical;
+    cyl.axis        = ImageFillAxis::Z;
+    cyl.subdivision = depth;
+    cyl.allowed     = kFilamentIds;
+
+    SECTION("four sides, four colours, and the caps left alone")
+    {
+        const std::vector<int> st = run_states(cube, cyl, store, depth);
+
+        // The caps' normals are parallel to the axis: their outward radial component is exactly
+        // zero, so a wrap does not reach them. That is the documented rule, not an accident.
+        CHECK(painted_faces(cube, st, depth) == std::set<int>{0, 1, 2, 3});
+
+        // wrap4.png is offset by half a band so each side face sits in the MIDDLE of one band:
+        // seam on -X, u = 0.5 facing +X. Expected, per face: -X white(4), -Y red(1), +X green(2),
+        // +Y blue(3). Leaves whose own u lands within a hair of a band edge are skipped - the
+        // nearest-neighbour sampler is allowed either pixel there and this test is not about that.
+        std::map<int, std::set<int>> per_face;
+        size_t                       checked = 0;
+        for (size_t t = 0; t < cube.its.indices.size(); ++t) {
+            const int face = cube_face_of(cube.its, t);
+            if (face > 3) continue;
+            std::vector<ImageFillLeaf> leaves;
+            const Vec3i32 &f = cube.its.indices[t];
+            image_fill_subdivide(cube.its.vertices[f(0)], cube.its.vertices[f(1)],
+                                 cube.its.vertices[f(2)], depth, leaves);
+            for (size_t i = 0; i < leaves.size(); ++i) {
+                const Vec3f c = leaves[i].centroid();
+                const double two_pi = 6.283185307179586;
+                const float  u = float(std::atan2(double(c.y()) - 10.0, double(c.x()) - 10.0) / two_pi + 0.5);
+                bool        near_edge = false;
+                for (float edge : {0.125f, 0.375f, 0.625f, 0.875f})
+                    if (std::abs(u - edge) < 0.01f) near_edge = true;
+                if (near_edge) continue;
+                per_face[face].insert(st[t * per + i]);
+                ++checked;
+            }
+        }
+        REQUIRE(checked > 60);
+        REQUIRE(per_face.size() == 4);
+        for (const auto &kv : per_face) {
+            INFO("box face " << kv.first);
+            CHECK(kv.second.size() == 1);   // one colour per side, all the way across it
+        }
+        CHECK(per_face[0] == std::set<int>{2});   // +X green
+        CHECK(per_face[1] == std::set<int>{4});   // -X white, the seam, both halves the same
+        CHECK(per_face[2] == std::set<int>{3});   // +Y blue
+        CHECK(per_face[3] == std::set<int>{1});   // -Y red
+    }
+
+    SECTION("the inward side is what the other direction selects")
+    {
+        // Nothing of a solid cube faces inwards, so asking for the inward surfaces of one is a
+        // refusal with a message rather than a silent whole-part paint.
+        ImageFillParams q = cyl;
+        q.axis_negative = true;
+        TriangleSelector::TriangleSplittingData empty;
+        const ImageFillResult r = image_fill_compute(cube.its, empty, q, store, kFilamentColors,
+                                                     kFilamentIds);
+        CHECK_FALSE(r.ok);
+        CHECK_FALSE(r.error.empty());
+    }
+
+    SECTION("flat and wrapped are different paintings of the same image on the same cube")
+    {
+        // The reported symptom was that the two dropdown entries produced the same result. With
+        // the default face rule they cannot even touch the same facets...
+        ImageFillParams flat;
+        flat.asset       = bands;
+        flat.projection  = ImageFillProjection::Planar;
+        flat.axis        = ImageFillAxis::Z;
+        flat.subdivision = depth;
+        flat.allowed     = kFilamentIds;
+        ImageFillParams wrapped = flat;
+        wrapped.projection      = ImageFillProjection::Cylindrical;
+
+        CHECK(painted_faces(cube, run_states(cube, flat, store, depth), depth) == std::set<int>{4});
+        CHECK(painted_faces(cube, run_states(cube, wrapped, store, depth), depth) ==
+              std::set<int>{0, 1, 2, 3});
+
+        // ...and even with the culling switched off, so both paint all twelve facets, the two
+        // answers differ on a large share of the leaves. This is the statement that the
+        // cylindrical maths is a wrap and not a second copy of the planar one.
+        flat.faces    = ImageFillFaces::All;
+        wrapped.faces = ImageFillFaces::All;
+        const std::vector<int> a = run_states(cube, flat, store, depth);
+        const std::vector<int> b = run_states(cube, wrapped, store, depth);
+        REQUIRE(a.size() == b.size());
+        size_t differ = 0;
+        for (size_t i = 0; i < a.size(); ++i)
+            if (a[i] != b[i]) ++differ;
+        INFO(differ << " of " << a.size() << " leaves differ");
+        CHECK(differ > a.size() / 5);
+    }
+}
+
+TEST_CASE("Image Fill: axis Y matches axis Z for a vertical-band image, and axis X does not",
+          "[imagefill][faces]")
+{
+    // Reported as suspicious and deliberately NOT changed. A planar projection takes u and v from
+    // the two axes that are not the projection axis, in ascending order: Z gives (x, y), Y gives
+    // (x, z), X gives (y, z). So for an image whose colour depends only on u, Z and Y are the
+    // same function of position - both read the colour off x - and the paintings are identical
+    // facet for facet. Axis X reads it off y instead, and differs.
+    ImageAssetStore   store;
+    const std::string sha = store.add(read_fixture("bands3.png"));
+    TriangleMesh      cube = make_cube(20., 20., 20.);
+    const int         depth = 2;
+
+    ImageFillParams p;
+    p.asset       = sha;
+    p.projection  = ImageFillProjection::Planar;
+    p.subdivision = depth;
+    p.allowed     = kFilamentIds;
+    p.faces       = ImageFillFaces::All;   // compare the projections, not which faces they reach
+
+    p.axis = ImageFillAxis::Z;
+    const std::vector<int> z = run_states(cube, p, store, depth);
+    p.axis = ImageFillAxis::Y;
+    const std::vector<int> y = run_states(cube, p, store, depth);
+    p.axis = ImageFillAxis::X;
+    const std::vector<int> x = run_states(cube, p, store, depth);
+
+    CHECK(z == y);   // arithmetic, not a bug
+    CHECK(z != x);
+    size_t differ = 0;
+    for (size_t i = 0; i < z.size(); ++i)
+        if (z[i] != x[i]) ++differ;
+    CHECK(differ > z.size() / 5);
+
+    SECTION("with the face rule on, Y and Z stop agreeing - they land on different faces")
+    {
+        p.faces = ImageFillFaces::Facing;
+        p.axis  = ImageFillAxis::Z;
+        const std::vector<int> fz = run_states(cube, p, store, depth);
+        p.axis  = ImageFillAxis::Y;
+        const std::vector<int> fy = run_states(cube, p, store, depth);
+        CHECK(fz != fy);
+        CHECK(painted_faces(cube, fz, depth) == std::set<int>{4});
+        CHECK(painted_faces(cube, fy, depth) == std::set<int>{2});
     }
 }
