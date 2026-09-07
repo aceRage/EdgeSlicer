@@ -9360,6 +9360,14 @@ CLIMiscConfigDef::CLIMiscConfigDef()
     def->cli_params = "dir";
     def->set_default_value(new ConfigOptionString());
 
+    // The per-device HMS lookup, without a printer: resolve one error code against the tables
+    // in <resources>/hms and <datadir>/hms and exit. --hms-lookup 31BA0123456789:05004046[:en]
+    def = this->add("hms_lookup", coString);
+    def->label = L("Look up an HMS error code");
+    def->tooltip = L("Development and test only: <serial>:<code>[:<language>] - print the printer's own text for that error code and exit.");
+    def->cli_params = "serial:code[:lang]";
+    def->set_default_value(new ConfigOptionString());
+
     def = this->add("hub_phone", coBool);
     def->label = L("Hub phone access on");
     def->tooltip = L("With --hub: start with phone access (the LAN listener) enabled.");

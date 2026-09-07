@@ -62,11 +62,13 @@ static std::string error_code_text(int code)
     return buf;
 }
 
-// The printer's own words for a print error, when the HMS table has them (StatusPanel shows the same).
-static std::string print_error_message(int code)
+// The printer's own words for a print error, when the HMS table has them (StatusPanel shows the
+// same). The serial is what picks the table: the newer machines have one of their own, and the
+// same code says something else on each of them.
+static std::string print_error_message(const std::string& dev_id, int code)
 {
     wxString msg;
-    if (HMSQuery* q = wxGetApp().get_hms_query(); q && q->query_print_error_msg(code, msg)) return msg.ToUTF8().data();
+    if (HMSQuery* q = wxGetApp().get_hms_query(); q && q->query_print_error_msg(dev_id, code, msg)) return msg.ToUTF8().data();
     return std::string();
 }
 
@@ -340,7 +342,7 @@ static void watch_bambu(std::shared_ptr<Prepared> p, json& result)
             if (obj->print_error != 0 && obj->print_error != p->print_error_before) {
                 w->err      = obj->print_error;
                 w->state    = "error";
-                w->err_text = print_error_message(w->err);
+                w->err_text = print_error_message(obj->dev_id, w->err);
             } else if (p->action == "pause" && obj->print_status == "PAUSE") {
                 w->state = "paused";
             } else if (p->action == "resume" && obj->print_status == "RUNNING") {
@@ -478,7 +480,7 @@ void describe_bambu(MachineObject* m, json& p)
     p["print_status"] = m->print_status;
     p["stage"]        = std::string(m->get_curr_stage().ToUTF8().data());
     if (m->print_error != 0)
-        p["print_error"] = { { "code", error_code_text(m->print_error) }, { "message", print_error_message(m->print_error) } };
+        p["print_error"] = { { "code", error_code_text(m->print_error) }, { "message", print_error_message(m->dev_id, m->print_error) } };
     else
         p["print_error"] = nullptr;
     // The HMS summary: how many the printer is reporting and what the first one says, so a card can
@@ -490,7 +492,7 @@ void describe_bambu(MachineObject* m, json& p)
         const std::string code  = first.get_long_error_code();
         hms["code"]             = code;
         if (HMSQuery* q = wxGetApp().get_hms_query())
-            hms["message"] = std::string(q->query_hms_msg(code).ToUTF8().data());
+            hms["message"] = std::string(q->query_hms_msg(m->dev_id, code).ToUTF8().data());
     }
     p["hms"] = hms;
 }

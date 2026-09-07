@@ -14,6 +14,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
+#include <cstdlib>
 #include <deque>
 #include <memory>
 #include <mutex>
@@ -224,6 +225,22 @@ static PrinterState state_of_json(const json& j)
     p.stage_curr = j.value("stage_curr", -1);
     p.error_code = j.value("error_code", std::string());
     p.error_text = j.value("error_text", std::string());
+    // A snapshot that names a code but no text gets the printer's own sentence, filled in exactly
+    // as snapshot_bambu fills it: `id` is the serial and its first three characters pick the HMS
+    // table. That is what makes this route a check on the per-device lookup and not only on the
+    // transition rule - POST a 31B printer with 05004046 and the event text is the H2C's own
+    // sentence, with no printer anywhere near it.
+    if (p.error_text.empty() && !p.error_code.empty() && p.kind == "bambu") {
+        if (HMSQuery* q = wxGetApp().get_hms_query()) {
+            if (p.error_code.size() == 8) {
+                wxString msg;
+                unsigned long code = std::strtoul(p.error_code.c_str(), nullptr, 16);
+                if (q->query_print_error_msg(p.id, (int) code, msg)) p.error_text = msg.ToUTF8().data();
+            } else {
+                p.error_text = q->query_hms_msg(p.id, p.error_code).ToUTF8().data();
+            }
+        }
+    }
     return p;
 }
 
@@ -280,10 +297,13 @@ static std::string klipper_state(const std::string& s)
     return "idle";
 }
 
-static std::string print_error_message(int code)
+// The serial picks the table: hms_<lang>_31B.json for an H2C, hms_<lang>_094.json for an H2D,
+// the legacy one for an X1 or a P1. Without it the newer machines had no sentence at all and the
+// notification was left with the bare code.
+static std::string print_error_message(const std::string& dev_id, int code)
 {
     wxString msg;
-    if (HMSQuery* q = wxGetApp().get_hms_query(); q && q->query_print_error_msg(code, msg)) return msg.ToUTF8().data();
+    if (HMSQuery* q = wxGetApp().get_hms_query(); q && q->query_print_error_msg(dev_id, code, msg)) return msg.ToUTF8().data();
     return std::string();
 }
 
@@ -316,7 +336,7 @@ static void snapshot_bambu(Snapshot& s)
         } catch (...) {}
         if (m->print_error != 0) {
             p.error_code = hex8(m->print_error);
-            p.error_text = print_error_message(m->print_error);
+            p.error_text = print_error_message(m->dev_id, m->print_error);
         } else {
             // No print error: the worst thing HMS is reporting, if it is serious enough to be worth
             // a notification. HMS_COMMON and HMS_INFO are the printer's chatter and stay off.
@@ -324,7 +344,7 @@ static void snapshot_bambu(Snapshot& s)
                 if (item.msg_level != HMS_FATAL && item.msg_level != HMS_SERIOUS) continue;
                 p.error_code = item.get_long_error_code();
                 if (HMSQuery* q = wxGetApp().get_hms_query())
-                    p.error_text = q->query_hms_msg(p.error_code).ToUTF8().data();
+                    p.error_text = q->query_hms_msg(m->dev_id, p.error_code).ToUTF8().data();
                 break;
             }
         }

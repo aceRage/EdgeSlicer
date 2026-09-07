@@ -100,6 +100,7 @@ using namespace nlohmann;
 #ifdef SLIC3R_GUI
     #include "slic3r/GUI/GUI_Init.hpp"
     #include "slic3r/GUI/RemoteHub.hpp"
+    #include "slic3r/GUI/HMS.hpp"
 #endif /* SLIC3R_GUI */
 
 using namespace Slic3r;
@@ -1370,6 +1371,45 @@ int CLI::run(int argc, char **argv)
     }
 
 #ifdef SLIC3R_GUI
+    // The per-device HMS lookup, with no printer and no window: which table a serial picks, and
+    // what that table says about one code. The tables come from <datadir>/hms and, failing that,
+    // <resources>/hms; the cloud refresh is not reachable from here.
+    // --hms-lookup <serial>:<code>[:<lang>]   e.g. 31BA0123456789:05004046:en
+    if (const ConfigOptionString* look = m_config.opt<ConfigOptionString>("hms_lookup");
+        look && !look->value.empty()) {
+        std::vector<std::string> parts;
+        for (size_t at = 0; at != std::string::npos;) {
+            const size_t sep = look->value.find(':', at);
+            parts.push_back(look->value.substr(at, sep == std::string::npos ? sep : sep - at));
+            at = sep == std::string::npos ? sep : sep + 1;
+        }
+        const std::string dev_id = parts.size() > 0 ? parts[0] : std::string();
+        std::string       code   = parts.size() > 1 ? parts[1] : std::string();
+        for (char& c : code) c = (char) ::toupper((unsigned char) c);
+        const std::string lang = parts.size() > 2 && !parts[2].empty() ? parts[2] : std::string("en");
+        Slic3r::GUI::HMSQuery q;
+        wxString text;
+        bool     found = false;
+        try {
+            if (code.size() <= 8) {
+                found = q.query_print_error_msg_local(dev_id, (int) std::stoul(code, nullptr, 16), lang, text);
+            } else {
+                text  = q.query_hms_msg_local(dev_id, code, lang);
+                found = !text.IsEmpty();
+            }
+        } catch (...) {
+            boost::nowide::cerr << "hms-lookup: `" << look->value << "` is not <serial>:<code>[:<lang>]" << std::endl;
+            return CLI_INVALID_PARAMS;
+        }
+        boost::nowide::cout << "HMS_DEV_ID_TYPE=" << Slic3r::GUI::HMSQuery::get_dev_id_type(dev_id) << std::endl
+                            << "HMS_FILE=" << Slic3r::GUI::HMSQuery::get_hms_file(QUERY_HMS_INFO, lang, Slic3r::GUI::HMSQuery::get_dev_id_type(dev_id)) << std::endl
+                            << "HMS_CODE=" << code << std::endl
+                            << "HMS_LANG=" << lang << std::endl
+                            << "HMS_FOUND=" << (found ? 1 : 0) << std::endl
+                            << "HMS_TEXT=" << text.ToUTF8().data() << std::endl;
+        return 0;
+    }
+
     // Ultra: `--hub` runs the phone-access / camera-relay helper instead of the slicer.
     if (const ConfigOptionBool* hub = m_config.opt<ConfigOptionBool>("hub"); hub && hub->value)
         return Slic3r::GUI::RemoteHub::run_server(m_config.opt_string("hub_token"), m_config.opt_bool("hub_phone"));

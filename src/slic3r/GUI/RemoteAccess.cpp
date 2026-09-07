@@ -5,6 +5,7 @@
 #include "GLCanvas3D.hpp"
 #include "GLToolbar.hpp"
 #include "GUI_App.hpp"
+#include "HMS.hpp"
 #include "MainFrame.hpp"
 #include "PartPlate.hpp"
 #include "Plater.hpp"
@@ -1978,6 +1979,50 @@ RemoteAccess::ApiResponse RemoteAccess::api_debug(const std::string& what, const
     ApiResponse r;
     wxString    on;
     if (!wxGetEnv("SNORCA_DEBUG_ROUTES", &on) || on != "1") { r.status = 404; r.body = json_error("debug routes are off"); return r; }
+    if (what == "hms") {
+        // Which HMS table a serial picks and what that table says about one code - the same
+        // lookup snapshot_bambu does, with every piece that decides it spelled out.
+        //   /api/debug/hms?dev=<serial>&code=<8 or 16 hex>[&lang=<code>]
+        // `local_*` reads the shipped and downloaded tables directly; `live_*` goes through the
+        // app's own HMSQuery, which also refreshes from the cloud in the background. They differ
+        // only when the app has no HMSQuery at all (stealth mode, GUI_App.cpp) or the app's
+        // language is not the one asked for.
+        const std::string dev  = query_param(query, "dev");
+        std::string       code = query_param(query, "code");
+        for (char& c : code) c = (char) ::toupper((unsigned char) c);
+        std::string lang = query_param(query, "lang");
+        if (lang.empty()) lang = HMSQuery::hms_language_code();
+        const std::string   series = HMSQuery::get_dev_id_type(dev);
+        const unsigned long print_error = std::strtoul(code.c_str(), nullptr, 16);
+        nlohmann::json      out;
+        out["dev_id"]        = dev;
+        out["dev_id_type"]   = series;
+        out["code"]          = code;
+        out["lang"]          = lang;
+        out["app_lang"]      = HMSQuery::hms_language_code();
+        out["file"]          = HMSQuery::get_hms_file(QUERY_HMS_INFO, lang, series);
+        out["data_dir"]      = data_dir();
+        out["resources_dir"] = resources_dir();
+        {
+            HMSQuery probe;
+            wxString msg;
+            const bool found = code.size() > 8 ? !(msg = probe.query_hms_msg_local(dev, code, lang)).IsEmpty()
+                                               : probe.query_print_error_msg_local(dev, (int) print_error, lang, msg);
+            out["local_found"] = found;
+            out["local_text"]  = std::string(msg.ToUTF8().data());
+        }
+        HMSQuery* q     = wxGetApp().get_hms_query();
+        out["has_query"] = (q != nullptr);
+        if (q) {
+            wxString msg;
+            const bool found = code.size() > 8 ? !(msg = q->query_hms_msg(dev, code)).IsEmpty()
+                                               : q->query_print_error_msg(dev, (int) print_error, msg);
+            out["live_found"] = found;
+            out["live_text"]  = std::string(msg.ToUTF8().data());
+        }
+        r.body = out.dump();
+        return r;
+    }
     if (what == "events") {
         // Pure: no GUI thread, no printer, no clock. This is how the transition rule is covered.
         try {
