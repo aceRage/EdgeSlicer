@@ -197,6 +197,8 @@ set(lisbslic3r_sources
     Format/AMF.hpp
     Format/bbs_3mf.cpp
     Format/bbs_3mf.hpp
+    Format/GLTF.cpp
+    Format/GLTF.hpp
     format.hpp
     Format/OBJ.cpp
     Format/OBJ.hpp
@@ -337,6 +339,8 @@ set(lisbslic3r_sources
     NormalUtils.hpp
     NSVGUtils.cpp
     NSVGUtils.hpp
+    ObjColorMatch.cpp
+    ObjColorMatch.hpp
     ObjColorUtils.hpp
     ObjectID.cpp
     ObjectID.hpp
@@ -600,6 +604,7 @@ target_link_libraries(libslic3r
         ${OCCT_LIBS}
         boost_libs
         cereal::cereal
+        cgltf
         clipper
         eigen
         glu-libtess
@@ -607,6 +612,7 @@ target_link_libraries(libslic3r
         libslic3r_cgal
         manifold::manifold
         mcut
+        meshoptimizer
         noise::noise
         PNG::PNG
         qhull

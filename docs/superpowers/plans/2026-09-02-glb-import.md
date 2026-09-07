@@ -1164,3 +1164,600 @@ gate on the merge of T6-T8.
 **Total: 6–8 days for Stage 1, plus 3.5–5 for Stage 2 — roughly two working weeks for the
 version users will actually want. Stage 3 adds 1–10 more depending on how much of it is taken;
 the recommended slice is 3a alone (0.5 d), deferring Draco until real files demand it.**
+
+---
+
+## Stage 1 status
+
+Done, on branch `feat/glb-import-stage1` (from `feat/ultra-preferences`), built and verified in the
+`C:\Dev\SnapmakerOrcaNext` worktree on 2026-09-03. All of Stage 1 shipped; the sections below list
+what changed, where it departs from this plan, the gate output, and what the next stage inherits.
+
+### What shipped
+
+| Plan item | File | Note |
+|---|---|---|
+| 1.1 | `deps_src/cgltf/{cgltf.h,CMakeLists.txt,README.md}` | cgltf 1.15 verbatim, MIT. `README.md` added for provenance and the "only `GLTF.cpp` defines `CGLTF_IMPLEMENTATION`" rule |
+| 1.2 | `deps_src/CMakeLists.txt` | `add_subdirectory(cgltf)` in the header-only group |
+| 1.3 | `src/libslic3r/CMakeLists.txt` | `Format/GLTF.{cpp,hpp}` in the source list; `cgltf` linked explicitly in the `PRIVATE` block |
+| 1.4, 1.5 | `src/libslic3r/Format/GLTF.{hpp,cpp}` | the header exactly as §3.1; the reader ~640 lines |
+| 1.6 | `src/libslic3r/Model.cpp` | one `else if` before the `else`, plus the updated message |
+| 1.7, 1.8 | `src/slic3r/GUI/GUI_App.cpp` | both `FT_MODEL` lists and both dialog titles |
+| 1.9 | `src/slic3r/GUI/MainFrame.cpp` | both `#ifdef` branches |
+| 1.10 | `src/slic3r/GUI/Plater.cpp` | `pattern_drop` |
+| 1.11 | `src/slic3r/GUI/RemoteHub.cpp` | `spool_upload` allow-list and the API manifest |
+| 1.12 | `resources/web/orca/stream_center.html` | picker label, regex and message |
+| 1.13 | `src/dev-utils/platform/osx/Info.plist.in` | a `glb`/`gltf` document type. The `obj` block's `CFBundleTypeName = "STL"` copy-paste bug was **not** replicated |
+| 1.14 | — | no CLI change, no Windows association, `Plater.cpp:11633-11637` untouched, all as planned |
+| 1.15 | `tests/libslic3r/test_gltf.cpp`, `tests/data/test_gltf/*` | 14 self-authored fixtures + 3 CC0 Khronos assets, `make_fixtures.py`, `SOURCES.md` |
+| fuzz | `tests/fuzz_gltf/` | driver, `nanosvg_impl.cpp`, `mutate.py` |
+
+`RemoteAccess.cpp` needed **no** change, exactly as §6 predicted: `api_project_open` only filters by
+extension for `mode == "load"` (`.3mf`-only), and a `.glb` arrives as `mode == "import"`.
+
+### Deviations from the plan
+
+1. **`cgltf_validate` refuses on `cgltf_result_data_too_short`** instead of only logging (§5 step 4
+   said "log a warning, do not refuse"). Reason, and it is not a style call: `cgltf_validate` is the
+   only thing that bounds-checks sparse accessor indices (`cgltf.h:1628`,
+   `index_bound >= accessor->count`), and `cgltf_accessor_unpack_floats` does **not** re-check the
+   sparse writer index before `out[writer_index * floats_per_element]` (`cgltf.h:2437-2440`). Without
+   the refusal, a crafted sparse index is a heap write past the end of the reader's own buffer — in a
+   parser reachable from the LAN upload endpoint. `data_too_short` is exactly the
+   "accessor points outside its buffer" family; every other `cgltf_validate` result (the cosmetic
+   `invalid_gltf` family that real files trip) is still only logged, so the plan's intent is kept.
+   The reader also does its own `accessor_data_fits()` check as belt and braces.
+2. **A fifth hygiene step**: `its_compactify_vertices` after `its_remove_degenerate_faces`. Vertices a
+   primitive declares but never indexes would otherwise stay in the mesh and inflate its bounding
+   box — which is what the up-axis/unit assertion measures. It also keeps
+   `GltfInfo::vertex_colors.size()` equal to the real vertex count.
+3. **`SimpleSparseAccessor` is CC-BY-4.0, not CC0.** §"Test assets" group B lists it as CC0; its
+   `README.md` says Creative Commons Attribution 4.0. It was **not** vendored. `sparse_triangle.gltf`
+   + `.bin` was authored instead and covers the same behaviour with numbers we chose (a base triangle
+   whose third vertex is moved from `(0,1,0)` to `(0,5,0)` by a sparse override, so ignoring sparse
+   gives a 1 mm triangle instead of a 5 mm one). The other three group-B assets were confirmed CC0.
+4. **`box_draco.glb` is genuinely Draco-compressed**, not the hand-declared stub the plan allowed for:
+   `npx --yes @gltf-transform/cli@4 draco box_10_20_30.glb box_draco.glb` (glTF-Transform v4.5.0).
+   Stage 3b can invert the assertion against this same file with no new fixture.
+5. **Six fixtures beyond the plan's list**, all cheap and all pinning a stated rule:
+   `unknown_extension.glb` (an unknown required extension is named), `escaping_buffer.gltf` (the
+   buffer-URI containment check), `truncated.glb` (gate item 13, committed rather than generated at
+   test time), `box_meters.glb` (proves the metres rescue fires, so §3.5's "zero new code" claim is
+   tested rather than asserted), `box_10_20_30.stl` (the Slice Compare control), and
+   `Geräte/box-čřšřěá.glb`.
+6. **The fuzz target lives in `tests/fuzz_gltf/`, not `tests/sandboxes/fuzz_gltf/`** — `tests/sandboxes`
+   does not exist in this fork. It is added `EXCLUDE_FROM_ALL`, following the `cpp17` precedent.
+7. **`MAX_GLTF_VOLUMES` is a hard, named error**, per §3.9's "produce a named error"; `skipped_nodes`
+   records how many (node, primitive) pairs were beyond the cap so the caller can still report it.
+8. **Draco is also refused per-primitive**, not only from `extensionsRequired`: an asset may carry
+   `KHR_draco_mesh_compression` on a primitive without requiring it, and cgltf still cannot decode it.
+9. **Cancel returns `false` with "Import cancelled."** — which `Model::read_from_file` turns into a
+   `RuntimeError` and the Plater shows as an error dialog. Honest and non-hanging, but a user-initiated
+   cancel arguably should not raise a dialog. **Reviewer decision**, noted rather than guessed at.
+10. **`GltfInfo::had_textures` sets a warning in `message` on success, where nothing reads it yet** —
+    `Model::read_from_file` only consumes `message` on failure. The flag and the sentence are in place
+    for §2.5's notification; in Stage 1 the warning only reaches the log.
+
+### Gate output
+
+**Automated** — `build/tests/libslic3r/Release/libslic3r_tests.exe "[gltf]"`:
+
+```
+All tests passed (109 assertions in 4 test cases)
+```
+
+Full suite, guarding the "must not change" list — `libslic3r_tests.exe`:
+
+```
+test cases:   588 |   586 passed | 2 failed as expected
+assertions: 52721 | 52719 passed | 2 failed as expected
+```
+
+Every numbered gate item holds. 1 `box_10_20_30.glb` → 1 object, 1 volume, `Vec3d(10,30,20)` (plus
+`open_edges == 0`, 8 welded vertices from 24, `its_volume == 6000`). 2 `.gltf`+`.bin` identical to the
+`.glb`. 3 `SimpleMeshes.gltf` → 2 volumes, distinct names, 1 mm apart in X. 4
+`two_parts_two_materials.glb` → 2 volumes, 2 material colours. 5 `nested_trs.glb` → centre `(5,1,0)`,
+size `(8,2,4)`, and identity rotation/scale on the volume. 6 `strip_and_fan.glb` → 2 and 3 triangles,
+with **both** strip triangles' face normals asserted (see finding 5 below). 7
+`TriangleWithoutIndices.gltf` → 1 triangle. 8 sparse accessor honoured. 9 `points_only.glb` → false,
+"points or lines". 10 `box_draco.glb` → false, "Draco". 11 `BoxVertexColors.glb` → one colour per
+surviving vertex, and `is_mm_painted()` still false. 12 non-ASCII path loads. 13 truncated file →
+"damaged or incomplete", no crash.
+
+**Fuzz** — `python tests/fuzz_gltf/mutate.py --minutes 10 --seed 20260903`:
+
+```
+seeds  : 21
+rounds=2573 cases=102920 findings=0
+```
+
+102,920 mutated files, no crash, no uncaught exception, no `false` with an empty message, and no
+`true` whose `info.parts` disagreed with the model. (The driver checks the return contract, not just
+survival.)
+
+**Manual**, against an instance on the isolated `dd_next` data dir (hub on port 13641), driven
+through its loopback API rather than the GUI:
+
+* `--datadir … box_10_20_30.glb` on the command line → `/api/plates` shows one object named
+  `box scene` (the glTF scene name) with plate footprint `[130.5, 121.0, 140.5, 151.0]`, i.e. 10 × 30
+  mm; `/api/plates/0/layout` reports `size [10.0, 30.0, 20.0]`, `offset [135.5, 136.0, 10.0]`,
+  `rz 0.0`, `scale 1.0` — the up-axis rule, the unit rule and the transform bake, in the real app.
+* `/api/plates/0/thumbnail.png` → a 512×512 render of a clean solid box, no manifold artefacts.
+* Phone upload: `POST /r/<token>/i/<pid>/open?mode=import` with `two_parts_two_materials.glb` →
+  `{"objects":1}` and a second plate object sized `[22.0, 10.0, 10.0]`, exactly the two-box extent
+  after the axis swap. A `.gif` is still refused: `only .3mf, .stl, .obj, .step and .glb files can be
+  opened`. `POST /r/<token>/api/instances/open` with `nested_trs.glb` spools the file and spawns an
+  instance (`ok:true`).
+* **Slice Compare control** — the plan asks for a GUI SliceCompare diff; `SliceCompare` is only
+  reachable from `MainFrame`, so it was run as the strictly stronger CLI equivalent via
+  `scripts/orca_cli.py`: slice `box_10_20_30.glb` and `box_10_20_30.stl` with the same printer,
+  process and filament and compare the G-code. Result: **9198 identical lines**, the only differences
+  being the `; printing object <name>` comment and the file-name header (the GLB's object is named
+  from the glTF scene, the STL's from its file). Identical G-code means no layer, feature or extrusion
+  differences by construction.
+
+### Findings
+
+1. **Experiment 5.1 answered: cgltf compiles clean as C++ under MSVC at this repo's warning level.**
+   Zero errors and zero warnings from `GLTF.cpp`. The `cgltf_impl.c` fallback is not needed. The
+   defensive `#pragma warning(push/disable/pop)` around the include stays as insurance for other
+   toolchains.
+2. **Experiment 5.4 answered:** `cgltf_node_transform_world` does compose the whole chain —
+   `SimpleMeshes` lands its two instances exactly 1 mm apart and `nested_trs` matches the
+   hand-computed centre and extents.
+3. **Experiment 5.5 answered differently than proposed.** Rather than author a closed solid out of a
+   triangle strip (fiddly, and a wrong winding could still cancel out), the test asserts the **face
+   normal of each strip triangle** directly. Triangle 1 only agrees with triangle 0 if the
+   odd-triangle vertex swap was applied, so the fixture discriminates exactly the bug the rule exists
+   to prevent.
+4. **`src/libslic3r/Color.hpp` calls `assert()` without including `<cassert>`.** It only compiles
+   today because every existing consumer pulls it in first. A new translation unit that includes
+   `Format/GLTF.hpp` early hits it. Worked around locally in `tests/fuzz_gltf/fuzz_gltf.cpp`; the
+   shared header was deliberately not touched. Worth a one-line fix in a separate change.
+5. **nanosvg's implementation section includes `<windows.h>`.** Its `min`/`max`/`GetObject` macros
+   break every libslic3r header that follows, so `tests/libslic3r/libslic3r_tests.cpp` only survives
+   `#define NANOSVG_IMPLEMENTATION` because no libslic3r header comes after it. The fuzz target puts
+   it in its own TU (`nanosvg_impl.cpp`), which is what any future test binary should copy.
+6. **`EXCLUDE_FROM_ALL` keeps a target out of the Visual Studio solution**, so
+   `cmake --build --target fuzz_gltf` fails with `MSB1009` there. The per-generator command is in the
+   header of `fuzz_gltf.cpp`.
+7. **Flat primitives log `its_convex_hull: Unable to create convex hull`** (twice for
+   `strip_and_fan.glb`'s two zero-volume sheets). Pre-existing qhull behaviour for planar meshes, not
+   caused by this change, harmless — but a glTF full of decorative flat geometry will produce log
+   noise.
+8. **Hidden instances spawned through `POST /api/instances/open` never register with the hub on this
+   branch.** The process starts, stays alive and responsive, but writes no `<datadir>/hub/instances/
+   <pid>.json`. Reproduced identically with a `.stl`, so it is pre-existing and unrelated to glTF —
+   flagged here because it makes that one phone route unverifiable end to end.
+9. **`C:\Dev\SnapmakerOrcaNext\build`'s `CMAKE_INSTALL_PREFIX` is `C:/Program Files/Snapmaker_Orca`**,
+   unlike the main checkout's `<build>/Snapmaker_Orca`, so `cmake --install` there needs an explicit
+   `--prefix` or it fails on permissions.
+10. **`build_next.bat`'s `bambu_networking` target does not exist in that build tree**, and the app
+    executable is the `Snapmaker_Orca_app_gui` target, not `Snapmaker_Orca` (which is the DLL).
+
+### What Stage 2 inherits
+
+`GltfInfo` is filled in completely already — `material_colors` (deduplicated, sRGB-encoded),
+`parts[i].material_index`, `vertex_colors` (only when *every* kept primitive had `COLOR_0`),
+`is_single_material`, `had_textures`, `dropped_primitives`, `skipped_nodes`,
+`unsupported_extensions`. The sRGB conversion is pinned by a test (`nested_trs.glb`'s linear
+0.2158605 → 0.5). The `Model.cpp` glTF branch has a comment marking where the `objFn` colour path
+hooks in. Nothing in Stage 1 writes `mmu_segmentation_facets`, and a test asserts
+`is_mm_painted() == false` after a `COLOR_0` import, so Stage 2's first change is visible.
+
+---
+
+## Stage 2 status
+
+Done, on branch `feat/glb-import-stage2` (from `feat/glb-import-stage1`), built and verified in the
+`C:\Dev\SnapmakerOrcaNext` worktree on 2026-09-03. All of Stage 2 shipped.
+
+### What shipped
+
+| Plan item | File | Note |
+|---|---|---|
+| 2.1 | `src/libslic3r/Format/GLTF.cpp` | **already done in Stage 1** — `material_colors` (deduplicated, sRGB), `parts[i].material_index`, `vertex_colors`, `is_single_material`, `had_textures`. Re-verified, no change needed |
+| 2.2 | `src/libslic3r/Model.{hpp,cpp}` | `paint_volume_from_vertex_colors()` extracted; `import_volume_color_deal` and `import_multi_volume_vertex_color_deal` added |
+| 2.3 | `src/libslic3r/Model.cpp` | the `objFn` hook in the glTF branch, with the `> 1` material guard and the `had_textures` skip |
+| 2.4 | `src/slic3r/GUI/Plater.cpp` | both `.obj` guards widened to `.obj\|.glb\|.gltf`, kept as a positive extension list |
+| 2.5 | `src/libslic3r/Model.{hpp,cpp}`, `Plater.cpp` | the dropped-texture warning, via a new optional out-parameter (see deviation 1) |
+| tests | `tests/libslic3r/test_gltf.cpp` | 5 new scenarios, 415 `[gltf]` assertions; 2 tagged `[golden]` |
+| fixtures | `tests/data/test_gltf/` | `three_materials.glb`, `textured_two_materials.glb` |
+
+`ObjColorDialog` and `ObjImportColorFn` were reused verbatim — no new callback type, no change to the
+dialog. `obj_import_face_color_deal` was not touched at all.
+
+### Deviations from the plan
+
+1. **`Model::read_from_file` gained an optional trailing `std::string *import_warning = nullptr`.**
+   Change 2.5 says to carry the dropped-texture sentence "through the `message` warning from 3.8"
+   and push it from the Plater — but `read_from_file` reads `message` **only on failure**
+   (`Model.cpp`, the `if (!result)` tail), so on a successful load the sentence had nowhere to go.
+   A defaulted trailing parameter leaves every existing call site untouched and gives the Plater a
+   real channel. The glTF branch moves the sentence out of `message` and clears it, so `message`
+   only ever holds an actual error from that point on.
+2. **A failed colour step now gets its own message.** The plan's snippet assigns
+   `result = Model::import_volume_color_deal(...)`, mirroring OBJ — but a `false` there with an
+   empty `message` would surface as the generic "Loading of a model file failed.", which Stage 1
+   went to some trouble to avoid. The branch adds *"The colours in this glTF file could not be
+   applied to the model."* for that case.
+3. **Experiment 5.3 became a permanent test, not a scratch build.** `QuantKMeans` lives in
+   `src/libslic3r/ObjColorUtils.hpp` and `libslic3r_tests` already links OpenCV, so the experiment
+   is now two scenarios in the suite. Findings below.
+4. **The dead `calc_tri_area` lambda moved across with the rest of the body.** It is provably
+   unreferenced (one declaration, no uses), but leaving it in keeps the transplant a pure move,
+   which is the whole point of doing 2.2 this way. Worth deleting in a separate tidy-up.
+5. **Two extra scenarios beyond the plan's four**: a three-material GLB through the full dialog
+   path, and the same file with a *cancelled* dialog — which is what a hidden instance actually
+   sees (finding 3).
+
+### Gate output
+
+**Automated** — `build/tests/libslic3r/Release/libslic3r_tests.exe "[gltf]"`:
+
+```
+All tests passed (415 assertions in 9 test cases)
+```
+
+Full suite, guarding the "must not change" list:
+
+```
+test cases:   593 |   591 passed | 2 failed as expected
+assertions: 53027 | 53025 passed | 2 failed as expected
+```
+
+The plan's four gate items, plus what was added:
+
+1. `two_parts_two_materials.glb` + a stub returning `{2, 3}` with `first_extruder_id = 2` → volume 0
+   `config.extruder() == 2`, volume 1 `== 3`, and **neither volume `is_mm_painted()`**. The stub also
+   asserts the dialog saw exactly **2** colours — one per material, not one per triangle.
+2. `BoxVertexColors.glb` + a per-vertex stub → `is_mm_painted()` true, the dialog saw exactly one
+   colour per surviving vertex, and the volume's extruder is the first id.
+3. A vertex-colour array one entry short → `import_multi_volume_vertex_color_deal` returns false and
+   **neither** volume is painted; the correct length paints both.
+4. **Golden regression.** Two `[golden]` scenarios pin the exact 3MF/AMF serialisation
+   (`FacetsAnnotation::get_triangle_as_string`) that `obj_import_vertex_color_deal` and
+   `obj_import_face_color_deal` produce for a cube. The vertex fixture's ids
+   (`{2,2,2,3,3,4,2,3}`) make the twelve faces cover all three branches of the moved code —
+   `_3_SAME_COLOR`, `_3_DIFF_COLOR` and `_2_SAME_1_DIFF_COLOR`, the last two including the
+   split-triangle encodings. Note what backs the *"unchanged"* claim: a scripted comparison against
+   `git show HEAD:src/libslic3r/Model.cpp` showed **105 of 105 body lines identical** apart from
+   three intended rebinds, so the move is provably pure; the golden strings guard from here on.
+5. Single-material GLB → the dialog is never opened.
+6. Textured two-material GLB → the dialog is never opened *and* a warning is returned. This file has
+   two materials on purpose, so without the `had_textures` guard it would open the dialog — the test
+   really tests the guard.
+7. A part with no material at all (`strip_and_fan.glb`) → no dialog.
+8. Three-material GLB → three parts on filaments 2, 3 and 4, none painted.
+9. Three-material GLB with a cancelled dialog → geometry still imports, no colour, no failure.
+
+**Manual, on the isolated `dd_next` data dir** (never the user's real one), through the hub's phone
+route:
+
+* A **hidden** instance, 3-material GLB via `POST /r/<token>/i/<pid>/open?mode=import`:
+  **`{"objects":1}`, HTTP 200, in 1 second** — no hang. The plate then holds one object named
+  `traffic light` (the glTF scene name) of size `[34, 10, 10]`, which is the three 10 mm boxes at
+  x 0/12/24 after the axis swap. `needs_attention` stayed false, and the log shows
+  `hidden-mode dialog answered ok: wxDialog "Obj file Import color"`.
+* The textured GLB into the same hidden instance: imported, and **no second dialog** was answered —
+  the `had_textures` guard held in the real app, not just in the test.
+
+### Findings
+
+1. **`read_from_file` cannot report a warning on success.** See deviation 1. The new
+   `import_warning` out-parameter is the general fix; STL and OBJ could use it too.
+2. **`QuantKMeans` is safe for 1–30 colours** (experiment 5.3, now a test). With automatic cluster
+   selection it returns one label per colour and between 1 and n clusters; with an explicit count it
+   never asks OpenCV for more clusters than it has samples, because
+   `more_than_request()` fails and `compute_num_colors()` clamps to the distinct-colour count. And
+   `deal_default_strategy()` **cannot** divide by zero: it early-returns on an empty filament list,
+   and `deal_approximate_match_btn()` guards both `m_result_icon_list.size() == 0` and
+   `map_count < 1` before indexing. There is no division in that path at all.
+3. **On a hidden instance the modal hook answers `ObjColorDialog` with OK, not cancel — and OK
+   silently means cancel.** The plan predicted cancel. What actually happens is more interesting:
+   `default_answer()` finds a real `wxID_OK` child button and the phone path runs in `Request` mode,
+   so the hook returns `wxID_OK`. But the hook returns it *from `ShowModal()` without dispatching any
+   button event*, and `ObjColorDialog` only calls `update_filament_ids()` inside its OK **click
+   handler** — so the caller's `filament_ids` is never written and stays empty. The Plater's
+   `if (ShowModal() != wxID_OK) filament_ids.clear();` then does nothing, because it *was* OK.
+   The outcome is exactly what the plan wanted (imports without colour, never hangs), but by a
+   different route, and the guard that makes it safe is the
+   `material_filament_ids.size() == material_colors.size()` check in the dispatch — that check is
+   load-bearing, not decorative. **Any future dialog whose OK handler does the real work has the
+   same trap**, and a `ClassRule` entry for `ObjColorDialog` answering `wxID_CANCEL` would make the
+   intent explicit rather than accidental. Left alone here because the behaviour is correct and the
+   hidden-mode rules are another plan's territory.
+4. **A single-material glTF opens no dialog**, which is stricter than OBJ (which always asks). This
+   is the answer to research §5.4.3 and it is deliberate: with one material there is nothing to
+   choose, and the normal filament picker still works.
+
+### What Stage 3 inherits
+
+* `paint_volume_from_vertex_colors()` is the shared per-volume painter; Stage 3d's
+  `import_multi_volume_face_color_deal` should be built the same way — refactor the loop body of
+  `Model::obj_import_face_color_deal` into a file-static and leave the OBJ entry point untouched.
+  That function is still **completely unmodified** by Stage 2, and its golden test is already in
+  place to prove the next refactor is also pure.
+* `GltfInfo::had_textures` is set and now reaches the user; when Stage 3d starts sampling textures it
+  should stop setting the flag (or the notification will contradict the result).
+* The `import_warning` channel exists for any future "loaded, but you should know" message.
+* `box_draco.glb` is genuinely Draco-compressed, so Stage 3b inverts an assertion rather than needing
+  a new fixture.
+
+---
+
+## Stage 3 status
+
+Done, on branch `feat/glb-import-stage3` (from `feat/glb-import-stage2`), built and verified in the
+`C:\Dev\SnapmakerOrcaNext` worktree on 2026-09-03.
+
+**Shipped: 3a (quantization), 3c (meshopt), 3d (textures). 3b (Draco) deliberately not taken** —
+this section's own recommendation is to vendor Draco only once real user files turn up compressed,
+because it is the one piece that would force every developer and CI runner to rebuild `deps/`. The
+named refusal from 3.8 stands, and `box_draco.glb` is a genuinely compressed asset waiting for it.
+
+### What shipped
+
+| Plan item | File | Note |
+|---|---|---|
+| tidy | `src/libslic3r/Model.cpp` | the dead `calc_tri_area` lambda that rode along with the Stage 2 transplant |
+| 3a | `tests/data/test_gltf/box_quantized.glb`, `test_gltf.cpp` | **no reader change needed** — see deviation 1 |
+| 3c | `deps_src/meshoptimizer/` (new), `deps_src/CMakeLists.txt`, `src/libslic3r/CMakeLists.txt`, `Format/GLTF.cpp` | decoder-only meshoptimizer v1.2 as a static library in `deps_src/`, the qoi shape |
+| 3c | `tests/data/test_gltf/box_meshopt.glb` | all three meshopt modes plus the octahedral filter, quantized as well |
+| 3d | `Format/GLTF.{hpp,cpp}` | `GltfInfo::face_colors`, centroid-UV sampling, PNG/JPEG decode, image sourcing |
+| 3d | `src/libslic3r/Model.{hpp,cpp}` | `paint_volume_from_face_colors()` extracted, `import_multi_volume_face_color_deal` added, the dispatch branch |
+| 3d | `tests/data/test_gltf/textured_two_regions.glb`, `textured_undecodable.glb` | the two-cluster fixture and the still-dropped case |
+
+`KHR_texture_basisu` is refused by name when **required** (covered by `unknown_extension.glb`) and
+falls back to the dropped-texture warning when merely **used** (covered by
+`textured_undecodable.glb`).
+
+### Deviations from the plan
+
+1. **3a needed no code at all.** The reader has allowed `KHR_mesh_quantization` since Stage 1, and
+   `cgltf_accessor_unpack_floats` plus `cgltf_node_transform_world` already did the right thing.
+   The work was the fixture and the assertion, which is what the plan wanted from it anyway
+   ("silently importing at the wrong scale is the one outcome worse than an error"). The tolerance
+   is 0.02 mm, which is what 16-bit positions over a 30 mm span allow.
+2. **3d samples *before* welding, not after.** The plan says to build face colours after step 4 of
+   the hygiene chain "by re-walking the surviving faces". That cannot work: `its_merge_vertices`
+   merges vertices that differ only in UV — which is every seam an exporter makes — so after it the
+   UVs no longer line up with the vertices. The array is therefore built at triangle-emission time
+   and carried through the chain, with a paired degenerate-removal that drops the same entries from
+   both. The plan's underlying concern (that the array must not desync from the faces) is met; only
+   the order is inverted.
+3. **Image decoding uses the in-tree `png::decode_colored_png` and libjpeg, not OpenCV.** OpenCV is
+   linked to libslic3r and `cv::imdecode` would have been three lines, but this path is reachable
+   from the phone upload endpoint and OpenCV's imgcodecs is a much larger decode surface than the
+   two libraries the plan actually named. Both are capped on encoded bytes (64 MB) and decoded
+   pixels (64 Mpx).
+4. **`had_textures` no longer drives the warning on its own.** It still means "this model had a base
+   colour texture"; the warning now fires only when `face_colors` came back empty, i.e. the texture
+   was really lost. That is 3d's "the dropped-texture notification stops firing", made precise.
+5. **A Stage 2 test changed meaning and was updated.** `textured_two_materials.glb` used to assert
+   "no dialog, texture reported dropped"; with 3d its texture is sampled, so it now asserts "the
+   dialog sees one colour per triangle and nothing is dropped". `textured_undecodable.glb` was added
+   so the dropped-texture path keeps its coverage rather than losing it.
+6. **A primitive that could not be sampled contributes its flat material colour** rather than
+   disqualifying the whole file. `face_colors` must cover every triangle of the object or
+   `import_multi_volume_face_color_deal` rejects it, so a mixed file (one textured primitive, one
+   plain) still works — `textured_two_materials.glb` is exactly that case.
+
+### Gate output
+
+**Automated** — `libslic3r_tests.exe "[gltf]"`:
+
+```
+All tests passed (451 assertions in 10 test cases)
+```
+
+Full suite:
+
+```
+test cases:   594 |   592 passed | 2 failed as expected
+assertions: 53063 | 53061 passed | 2 failed as expected
+```
+
+Both OBJ `[golden]` scenarios still pass, which is what makes "the OBJ path is unchanged" a claim
+rather than a hope — and the face-colour refactor was independently shown to be a **pure move**
+(11 of 11 body lines identical against `git show HEAD`), the same check Stage 2 used for the vertex
+path.
+
+Per plan item:
+
+* **3a** `box_quantized.glb` → `Vec3d(10, 30, 20)`, one object, one volume.
+* **3c** `box_meshopt.glb` → same box, 12 triangles, `open_edges == 0`. The fixture uses TRIANGLES
+  for indices, ATTRIBUTES for positions and octahedral-filtered normals, and is quantized too, so
+  one file covers the whole decoder plus both extensions interacting.
+* **3d** `textured_two_regions.glb` → 12 face colours, exactly 6 red and 6 blue (two clusters, as
+  the plan asks); with a stub dialog mapping red→2 and blue→3 the volume ends up painted with
+  exactly 6 triangles carrying `"8"` and 6 carrying `"0C"` — the right faces, checked through
+  `FacetsAnnotation::get_triangle_as_string`. A per-face array of the wrong length is refused and
+  paints nothing. The dropped-texture warning is empty for this file and non-empty for
+  `textured_undecodable.glb`.
+
+**Fuzz** — the corpus is now 28 files including three textured ones, so the mutation run also
+exercises the PNG and JPEG decoders:
+
+```
+seeds  : 28
+rounds=2273 cases=90920 findings=0
+```
+
+Every seed file also behaves correctly under the driver's contract check (`ok` with matching
+`info.parts`, or `no` with a specific message) — including the new
+`box_meshopt.glb`, `box_quantized.glb`, `textured_two_regions.glb` and `textured_undecodable.glb`.
+
+**Manual, on the isolated `dd_next` data dir**, hidden instance via the phone route:
+`POST /r/<token>/i/<pid>/open?mode=import` with `textured_two_regions.glb` → **HTTP 200 in
+1 second, no hang**, one object of the right size on the plate. See finding 3 for what it does
+*not* do.
+
+### Findings
+
+1. **`cgltf_validate` dereferences `sparse->indices_buffer_view->buffer` without a null check**, and
+   a meshopt-compressed buffer view has no outer buffer at all — the buffer lives in the extension.
+   Enabling meshopt made that combination reachable, so the reader now refuses a sparse accessor
+   whose index or value view has no buffer, before validate runs. Exotic, but it was a crash.
+2. **The in-tree `png::decode_colored_png` only handles 8-bit RGB and RGBA.** A paletted or
+   greyscale PNG — common for small, flat textures, which is exactly the kind this feature is most
+   useful for — is refused and falls back to the dropped-texture warning. Teaching it
+   `png_set_palette_to_rgb` / `png_set_expand_gray_1_2_4_to_8` / `png_set_strip_16` would be a
+   handful of lines in `PNGReadWrite.cpp`, but that file is shared with the SLA and thumbnail paths,
+   so it is left for a separate change rather than widened here.
+3. **A hidden instance still imports a textured GLB *unpainted*.** This is Stage 2 finding 3 again:
+   the modal hook answers `ObjColorDialog` with `wxID_OK` straight out of `ShowModal()`, the OK
+   *click handler* never runs, `update_filament_ids()` never fills `filament_ids`, and the dispatch's
+   length check correctly declines to paint from an empty answer. The import completes in a second
+   and the geometry is right — but the faces are not painted, and the `ObjColorDialog → wxID_CANCEL`
+   rule being added on `fix/side-fixes` will make that outcome *deliberate* rather than accidental,
+   not different. Painting on a headless import would need the hook to run the dialog's accept path
+   (or the Plater to auto-match when there is nobody to ask), which is a separate decision.
+   Painted faces **are** proven end to end through `Model::read_from_file` in the suite — the whole
+   path the app uses, minus the GUI dialog itself.
+4. **Sampling at the centroid gives one colour per triangle**, so a detailed texture on a low-poly
+   mesh is quantised hard — a 12-triangle box gets 12 colours no matter how intricate its texture.
+   That is inherent to the approach this plan chose (and to what the filament count can express),
+   but it is worth saying out loud in the release note: texture import approximates, it does not
+   reproduce.
+5. **meshoptimizer's decoder is four files and ~240 KB of source**, and it built clean under MSVC
+   with no warnings at this repo's level. The `deps_src/` placement means no dependency rebuild for
+   anyone, which is the property Stage 1's decision 4 bought and 3b would have spent.
+
+### What is left
+
+* **3b (Draco)** — the named refusal stands. `box_draco.glb` is genuinely compressed, so when Draco
+  is wanted the Stage 1 assertion is inverted against the same file rather than needing a new one.
+* **Paletted / greyscale / 16-bit PNG textures** (finding 2).
+* **KTX2 / Basis textures** — refused by name when required, dropped with a warning when used.
+* **The hidden-instance colour question** (finding 3), which is a product decision, not a bug.
+
+---
+
+## Stage 4 status
+
+Done, on branch `feat/glb-import-stage4` (from `feat/glb-import-stage3`), built and verified in the
+`C:\Dev\SnapmakerOrcaNext` worktree on 2026-09-03.
+
+Stage 2 and 3 gave the reader colours; Stage 3's finding 3 was that a hidden instance threw them
+away, because `ObjColorDialog` is a window nobody can answer. Most GLB files are coloured and most
+of them arrive from a phone, so this stage makes the headless case match colours itself.
+
+### What shipped
+
+| Piece | File | Note |
+|---|---|---|
+| the policy, pure and testable | `src/libslic3r/ObjColorMatch.{hpp,cpp}` (new) | clustering + slot mapping, no wxWidgets |
+| the wx half | `src/slic3r/GUI/ObjColorDialog.{hpp,cpp}` | `obj_color_auto_match_headless()`, beside the panel so the two cannot drift |
+| the switch | `src/slic3r/GUI/Plater.cpp` | both `ObjImportColorFn` lambdas (import ~12223 and reload-from-disk ~14678) |
+| the report | `src/slic3r/GUI/RemoteAccess.{hpp,cpp}` | `note_color_import` / `take_color_import`, and `colors` in the API response |
+| tests | `tests/libslic3r/test_obj_color_match.cpp` (new) | 218 assertions, tag `[objcolor]` |
+| fixture | `tests/data/test_gltf/many_materials.glb` | 24 materials, more than the 16 slots |
+
+**Interactive mode is untouched**: when `RemoteAccess::dialog_mode() == Mode::Interactive` the
+lambda constructs `ObjColorDialog` exactly as before. **The OBJ path gets the same headless rule**,
+because OBJ and glTF arrive through the same lambda — an `.obj` imported from the phone is now
+auto-matched too, where before it imported colourless.
+
+### The policy
+
+1. Cluster with the panel's own k-means (`QuantKMeans`, the call `ObjColorPanel::deal_algo` makes),
+   honouring `is_single_color` the way the panel's constructor does — one cluster, no k-means.
+2. Sort clusters by how many input colours they carry, so the busiest get first claim on a slot.
+3. For each cluster in that order:
+   * within **CIE76 ΔE 20** of a loaded filament → **reuse** that spool;
+   * else, if fewer than **16** slots exist → **add** one carrying the cluster's colour;
+   * else → **merge** into the nearest slot, where it does the least harm.
+4. Write one id per input colour and `first_extruder_id` from cluster 0 — the two lines
+   `ObjColorPanel::update_filament_ids` ends with, so the existing appliers (per-volume, per-vertex,
+   per-face) paint exactly as if somebody had clicked OK.
+
+### Decisions for the reviewer
+
+1. **Tolerance: CIE76 ΔE ≤ 20, and it is measured, not guessed.** Two oranges (`#FF8800` vs
+   `#FF9900`) are 9.7 apart; a pure red against the dark red spool actually loaded (`#D50000`) is
+   15.9 — that spool should print it; genuinely different hues are far above (green vs yellow 92.7,
+   blue vs red 167). 20 sits in the gap. The constant is `OBJ_COLOR_MATCH_TOLERANCE`, one place to
+   turn if it proves wrong.
+2. **The panel's own colour distance is not in CIE units.** `deal_approximate_match_btn` calls
+   `RGB2Lab(c.Red(), c.Green(), c.Blue())` — 0–255 into a curve whose thresholds assume 0–1 — so its
+   ΔE numbers are inflated and arbitrary. That is pre-existing, harmless for its purpose ("which is
+   nearest"), and **left alone**; but a tolerance needs real units, so `obj_color_distance()` in
+   libslic3r is the correctly scaled implementation of the same formula. Two implementations of
+   CIE76 now exist; unifying them means touching the interactive path, which was out of scope here.
+3. **Merge rule: nearest kept slot, busiest clusters keep their own.** The alternative — merging the
+   *nearest pair* of clusters repeatedly — gives slightly better colour fidelity but can starve a
+   cluster that covers half the model. Prioritising by usage means the colours you see most get
+   their own filament.
+4. **Added slots inherit the current filament preset** and differ only in colour: the code path is
+   `Sidebar::add_custom_filament()`, the same call the dialog's "add filament" button ends up
+   making, so a headless import produces exactly the slots an interactive one would. They are not
+   named; they are numbered like any other slot.
+5. **The reader trusts what exists, not what it planned.** `add_custom_filament` has ceilings of its
+   own and can decline, so after adding, the filament list is re-read and any id past the end is
+   clamped to 1. Painting with a slot that was never created would be worse than not painting.
+
+### Gate output
+
+**Automated** — `libslic3r_tests.exe "[objcolor]"`:
+
+```
+All tests passed (218 assertions in 2 test cases)
+```
+
+The existing gates, unchanged: `"[gltf],[golden]"` → **466 assertions in 12 test cases, all pass**.
+Full suite:
+
+```
+test cases:   596 |   594 passed | 2 failed as expected
+assertions: 53281 | 53279 passed | 2 failed as expected
+```
+
+The unit tests cover reuse within tolerance, adding when there is room, merging when all 16 are
+taken, the 16 cap under 40 distinct colours, single-colour input, one filament loaded versus
+sixteen, empty input, and the distance function against the measurements that chose the tolerance.
+The policy tests inject a trivially predictable metric so they are about the decisions, not about
+colour science.
+
+**Live**, hidden instance on the isolated `dd_next` data dir, imports through the phone route,
+starting from the five filaments it already had (`#FF8800 #FFFFFF #000000 #D50000 #FEC600`):
+
+| Import | `colors` reported | Filaments after | Result |
+|---|---|---|---|
+| `three_materials.glb` | input 3, clusters 3, **reused 1, added 2** | 7 | red reused the loaded `#D50000`; green and blue added. The plate shows three parts in three colours |
+| `textured_two_regions.glb` | input 12, clusters 2, **reused 2, added 0** | 7 | both cluster colours were already loaded by the previous import; faces painted |
+| `BoxVertexColors.glb` | input 8, clusters 8, **reused 5, added 3** | 10 | per-vertex painting visible on the plate |
+| `many_materials.glb` | input 24, clusters 15, **reused 3, added 6, merged 6** | **16** | the cap held and the overflow merged |
+
+Every one completed in **≤ 1 second**, no dialog was answered (`"Obj file Import color"` appears
+zero times in the log), `needs_attention` stayed **false**, and the attention log carries one
+`"auto"` entry per import, e.g.
+`colour import auto-matched 15 colour(s): 3 reused, 6 added, 6 merged`.
+
+### Findings
+
+1. **`QuantKMeans` never returns more than 15 clusters** — `apply()` defaults `max_cluster` to 15,
+   so a 24-material file gives 15 clusters, not 24. The 16-slot cap is therefore reached through
+   *existing + added*, which is exactly what `many_materials.glb` demonstrates (5 existing + 6 added
+   = 11 … then 6 clusters merge because the ramp reused 3). Worth knowing before anyone tries to
+   raise the slot limit: the clustering ceiling would bind first.
+2. **A hidden instance answers the metres prompt with yes.** `BoxVertexColors.glb` is a 1-unit cube,
+   so `looks_like_saved_in_meters()` fires and the modal hook accepts, scaling it ×1000. Pre-existing
+   hidden-mode behaviour, unrelated to colour, but it explains why that cube dwarfs the others on the
+   plate and is worth a line in the release note.
+3. **The plate thumbnail does render per-part filament colours and MMU painting**, which is what
+   makes the live check above conclusive — and retroactively confirms that the Stage 2 and Stage 3
+   hidden imports really were unpainted rather than merely looking that way.
+
+### Manual checklist
+
+* [ ] **Interactive is unchanged**: import a 3-material GLB with the window open — the dialog still
+      appears, with three swatches, and OK still assigns the three filaments.
+* [ ] Import an OBJ with `mtl` colours interactively — dialog as before.
+* [ ] From the phone, import a coloured GLB into a hidden instance — it lands painted, with no
+      dialog and no attention flag, and the response carries `colors`.
+* [ ] From the phone, import an OBJ with vertex colours — same treatment.
+* [ ] Import a GLB whose colours already match loaded spools — `added` is 0 and no new filaments
+      appear.
+* [ ] Import a GLB with more than 16 colours — the filament list stops at 16.
+* [ ] Check the added filaments use the current filament preset and only differ in colour.

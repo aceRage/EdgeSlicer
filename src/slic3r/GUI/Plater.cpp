@@ -12317,8 +12317,35 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                 //ObjImportColorFn obj_color_fun=nullptr;
                 auto obj_color_fun = [this, &path](std::vector<RGBA> &input_colors, bool is_single_color, std::vector<unsigned char> &filament_ids,
                                                    unsigned char &first_extruder_id) {
-                    if (!boost::iends_with(path.string(), ".obj")) { return; }
+                    if (!boost::iends_with(path.string(), ".obj") &&
+                        !boost::iends_with(path.string(), ".glb") &&
+                        !boost::iends_with(path.string(), ".gltf")) { return; }
                     const std::vector<std::string> extruder_colours = wxGetApp().plater()->get_extruder_colors_from_plater_config();
+                    // Nobody is at the PC - a phone-started import, or a hidden instance. Opening
+                    // ObjColorDialog here would block on a window no one can answer, so match the
+                    // colours ourselves and carry on. Same rule for OBJ as for glTF: both arrive
+                    // through this lambda.
+                    if (RemoteAccess::dialog_mode() != RemoteAccess::Mode::Interactive) {
+                        ObjColorAutoMatchInfo info;
+                        if (!obj_color_auto_match_headless(input_colors, is_single_color, extruder_colours,
+                                                           filament_ids, first_extruder_id, info)) {
+                            filament_ids.clear();
+                            return;
+                        }
+                        RemoteAccess::ColorImport c;
+                        c.input = info.input; c.clusters = info.clusters;
+                        c.reused = info.reused; c.added = info.added; c.merged = info.merged;
+                        c.valid = true;
+                        RemoteAccess::get().note_color_import(c);
+                        // Recorded, not raised: this is the intended behaviour, not something that
+                        // needs a person.
+                        RemoteAccess::get().note_attention(
+                            "colour import auto-matched " + std::to_string(info.clusters) + " colour(s): " +
+                            std::to_string(info.reused) + " reused, " + std::to_string(info.added) + " added" +
+                            (info.merged ? ", " + std::to_string(info.merged) + " merged" : ""),
+                            "auto");
+                        return;
+                    }
                     ObjColorDialog                 color_dlg(nullptr, input_colors, is_single_color, extruder_colours, filament_ids, first_extruder_id);
                     if (color_dlg.ShowModal() != wxID_OK) { 
                         filament_ids.clear();
@@ -12375,6 +12402,9 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                             return -1;
                         }, linear, angle, split_compound);
                 }else {
+                    // A load that succeeded can still have something to say - a glTF whose colours
+                    // lived in a texture we did not import, for instance.
+                    std::string import_warning;
                     model = Slic3r::Model:: read_from_file(
                     path.string(), nullptr, nullptr, strategy, &plate_data, &project_presets, &is_xxx, &file_version, nullptr,
                     [this, &dlg, real_filename, &progress_percent, &file_percent, INPUT_FILES_RATIO, total_files, i, &designer_model_id, &designer_country_code](int current, int total, bool &cancel, std::string &mode_id, std::string &code)
@@ -12390,7 +12420,9 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                             cont          = dlg.Update(progress_percent, msg);
                             cancel        = !cont;
                     },
-                    nullptr, 0, obj_color_fun);
+                    nullptr, 0, obj_color_fun, &import_warning);
+                    if (!import_warning.empty() && q->get_notification_manager())
+                        q->get_notification_manager()->push_plater_warning_notification(import_warning);
                 }
 
                 if (designer_model_id.empty() && boost::algorithm::iends_with(path.string(), ".stl")) {
@@ -14790,8 +14822,35 @@ void Plater::priv::reload_from_disk()
     for (size_t i = 0; i < input_paths.size(); ++i) {
         const auto& path = input_paths[i].string();
         auto obj_color_fun = [this, &path](std::vector<RGBA> &input_colors, bool is_single_color, std::vector<unsigned char> &filament_ids, unsigned char &first_extruder_id) {
-            if (!boost::iends_with(path, ".obj")) { return; }
+            if (!boost::iends_with(path, ".obj") &&
+                !boost::iends_with(path, ".glb") &&
+                !boost::iends_with(path, ".gltf")) { return; }
             const std::vector<std::string> extruder_colours = wxGetApp().plater()->get_extruder_colors_from_plater_config();
+            // Nobody is at the PC - a phone-started import, or a hidden instance. Opening
+            // ObjColorDialog here would block on a window no one can answer, so match the
+            // colours ourselves and carry on. Same rule for OBJ as for glTF: both arrive
+            // through this lambda.
+            if (RemoteAccess::dialog_mode() != RemoteAccess::Mode::Interactive) {
+                ObjColorAutoMatchInfo info;
+                if (!obj_color_auto_match_headless(input_colors, is_single_color, extruder_colours,
+                                                   filament_ids, first_extruder_id, info)) {
+                    filament_ids.clear();
+                    return;
+                }
+                RemoteAccess::ColorImport c;
+                c.input = info.input; c.clusters = info.clusters;
+                c.reused = info.reused; c.added = info.added; c.merged = info.merged;
+                c.valid = true;
+                RemoteAccess::get().note_color_import(c);
+                // Recorded, not raised: this is the intended behaviour, not something that
+                // needs a person.
+                RemoteAccess::get().note_attention(
+                    "colour import auto-matched " + std::to_string(info.clusters) + " colour(s): " +
+                    std::to_string(info.reused) + " reused, " + std::to_string(info.added) + " added" +
+                    (info.merged ? ", " + std::to_string(info.merged) + " merged" : ""),
+                    "auto");
+                return;
+            }
             ObjColorDialog                 color_dlg(nullptr, input_colors, is_single_color, extruder_colours, filament_ids, first_extruder_id);
             if (color_dlg.ShowModal() != wxID_OK) { filament_ids.clear(); }
         };
@@ -20174,7 +20233,7 @@ void ProjectDropDialog::on_dpi_changed(const wxRect& suggested_rect)
 //BBS: remove GCodeViewer as seperate APP logic
 bool Plater::load_files(const wxArrayString& filenames)
 {
-    const std::regex pattern_drop(".*[.](stp|step|stl|oltp|obj|amf|3mf|svg|zip)", std::regex::icase);
+    const std::regex pattern_drop(".*[.](stp|step|stl|oltp|obj|amf|3mf|svg|zip|glb|gltf)", std::regex::icase);
     const std::regex pattern_gcode_drop(".*[.](gcode|g)", std::regex::icase);
 
     std::vector<fs::path> normal_paths;
