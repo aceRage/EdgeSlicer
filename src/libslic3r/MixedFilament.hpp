@@ -27,7 +27,13 @@ struct MixedFilament
     enum DistributionMode : uint8_t {
         LayerCycle = 0,
         SameLayerPointillisme = 1,
-        Simple = 2
+        Simple = 2,
+        // Phase 3 (sub-triangle resolution): the row's mix weights vary in XY across a fill
+        // segment, sampled from `image_fill_ref` at extrusion-width resolution and dithered
+        // between the nearest reachable mixes, the way SameLayerPointillisme already splits a
+        // painted mask - except the split boundary comes from the image, not from painted
+        // triangles. See docs/superpowers/specs/2026-09-07-imagemap-phase3-imagerow.md.
+        ImageWeighted = 3
     };
 
     // 1-based physical filament IDs that are combined.
@@ -67,7 +73,16 @@ struct MixedFilament
     // How this mixed row is distributed:
     // - LayerCycle: one filament per layer based on cadence.
     // - SameLayerPointillisme: split painted masks in XY on each layer.
+    // - ImageWeighted: split fill segments in XY on each layer by sampling `image_fill_ref`.
     int distribution_mode = int(Simple);
+
+    // ImageWeighted only: a hex-encoded ImageFillParams::to_string() (ImageFill.hpp) - the
+    // phase 2 asset hash plus the projection that samples it. Hex, not the raw string, because
+    // ImageFillParams::to_string() uses ';' and ',' as field separators, both of which are
+    // already the row/field separators MixedFilamentManager::serialize_custom_entries uses for
+    // the project-config string this struct rides on. Empty for every other mode. Decode with
+    // MixedFilamentManager::decode_image_fill_ref(), then ImageFillParams::from_string().
+    std::string image_fill_ref;
 
     // Optional Local-Z cap for this mixed row. 0 disables the cap.
     int local_z_max_sublayers = 0;
@@ -121,6 +136,7 @@ struct MixedFilament
                gradient_component_weights == rhs.gradient_component_weights &&
                pointillism_all_filaments == rhs.pointillism_all_filaments &&
                distribution_mode == rhs.distribution_mode &&
+               image_fill_ref == rhs.image_fill_ref &&
                local_z_max_sublayers == rhs.local_z_max_sublayers &&
                gradient_enabled == rhs.gradient_enabled &&
                std::abs(gradient_start - rhs.gradient_start) <= k_gradient_epsilon &&
@@ -387,6 +403,13 @@ public:
     static float       canonical_signed_bias_value(float component_a_surface_offset, float component_b_surface_offset);
     static std::string format_surface_offset_token(float value);
     static double      mixed_filament_reference_nozzle_mm(unsigned int component_a, unsigned int component_b, const std::vector<double> &nozzle_diameters);
+
+    // Hex-encode/decode a row's `image_fill_ref` payload (an ImageFillParams::to_string()) so it
+    // survives the ';'/',' - delimited project-config string. Pure, reversible, and exposed here
+    // (rather than only inside MixedFilament.cpp) so the round trip is unit-testable without
+    // pulling in ImageFill.hpp. decode_image_fill_ref returns "" for malformed hex.
+    static std::string encode_image_fill_ref(const std::string &image_fill_params_string);
+    static std::string decode_image_fill_ref(const std::string &encoded);
 
     // Build the T2(pre-delete) -> T3(post-delete) painting remap for the batch-
     // match cleanup path that marks redundant mixed rows deleted. Virtual IDs

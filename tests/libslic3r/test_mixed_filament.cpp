@@ -1164,6 +1164,95 @@ TEST_CASE("Mixed filament full 17-field serialization round-trip", "[MixedFilame
     CHECK(loaded_mf->manual_pattern == "12,21");
 }
 
+TEST_CASE("Mixed filament image_fill_ref hex codec round-trips and rejects malformed hex", "[MixedFilament][ImageRow]")
+{
+    // Pure codec test: no ImageFill.hpp dependency needed, but the payload shape mirrors an
+    // ImageFillParams::to_string() ("v=1;img=<sha256>;proj=0;axis=2;...") to prove the codec
+    // survives the ';'/',' characters that string is built from - the whole reason for hex.
+    const std::string payload = "v=1;img=deadbeefcafef00d;proj=0;axis=2;pf=0;sub=2";
+    const std::string encoded = MixedFilamentManager::encode_image_fill_ref(payload);
+    CHECK(encoded.find(';') == std::string::npos);
+    CHECK(encoded.find(',') == std::string::npos);
+    CHECK(MixedFilamentManager::decode_image_fill_ref(encoded) == payload);
+
+    // Empty payload round-trips to empty (the "no image reference" state every non-ImageWeighted
+    // row is expected to carry).
+    CHECK(MixedFilamentManager::encode_image_fill_ref("").empty());
+    CHECK(MixedFilamentManager::decode_image_fill_ref("").empty());
+
+    // Malformed hex (odd length, or a non-hex character) decodes to "" rather than throwing or
+    // returning garbage bytes - a hand-edited or truncated project file degrades safely.
+    CHECK(MixedFilamentManager::decode_image_fill_ref("abc").empty());
+    CHECK(MixedFilamentManager::decode_image_fill_ref("zz").empty());
+    CHECK(MixedFilamentManager::decode_image_fill_ref("de@d").empty());
+}
+
+TEST_CASE("Mixed filament ImageWeighted mode and image_fill_ref serialize, load and round-trip", "[MixedFilament][ImageRow][Serialization]")
+{
+    const std::vector<std::string> colors = {"#000000", "#808080", "#FFFFFF"};
+    MixedFilamentManager mgr;
+    mgr.add_custom_filament(1, 3, 50, colors);
+
+    auto &mf = mgr.mixed_filaments().front();
+    mf.distribution_mode = int(MixedFilament::ImageWeighted);
+    const std::string params_string = "v=1;img=aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899;proj=0;axis=2;pf=0;sub=2";
+    mf.image_fill_ref = MixedFilamentManager::encode_image_fill_ref(params_string);
+    REQUIRE_FALSE(mf.image_fill_ref.empty());
+
+    const std::string serialized = mgr.serialize_custom_entries();
+    // The row string uses ';' between rows and ',' between fields; the encoded reference must
+    // not introduce either, or it would be silently split into a different, invalid row/field.
+    CHECK(serialized.find("ir" + mf.image_fill_ref) != std::string::npos);
+
+    MixedFilamentManager loaded;
+    loaded.add_custom_filament(1, 2, 50, colors); // unrelated auto pairing trigger row, as the existing round-trip tests do
+    loaded.load_custom_entries(serialized, colors);
+
+    const MixedFilament *loaded_mf = nullptr;
+    for (const auto &row : loaded.mixed_filaments())
+        if (row.custom && row.component_a == 1 && row.component_b == 3) {
+            loaded_mf = &row;
+            break;
+        }
+    REQUIRE(loaded_mf != nullptr);
+    CHECK(loaded_mf->distribution_mode == int(MixedFilament::ImageWeighted));
+    CHECK(loaded_mf->image_fill_ref == mf.image_fill_ref);
+    CHECK(MixedFilamentManager::decode_image_fill_ref(loaded_mf->image_fill_ref) == params_string);
+    CHECK(*loaded_mf == mf);
+}
+
+TEST_CASE("Mixed filament ImageWeighted mode is not clamped away by the pointillism normalizer", "[MixedFilament][ImageRow]")
+{
+    // Regression guard: normalize_distribution_mode_without_pointillism (and the two
+    // clamp_int(distribution_mode, LayerCycle, ...) call sites in load/serialize) used to bound
+    // distribution_mode at Simple (2). Phase 3 raises that bound to ImageWeighted (3); if a
+    // future edit narrows it back, this row would silently come back as Simple and image_fill_ref
+    // would be orphaned data nothing reads.
+    const std::vector<std::string> colors = {"#111111", "#222222"};
+    MixedFilamentManager mgr;
+    mgr.load_custom_entries("1,2,1,1,50,m3,ir" , colors); // ImageWeighted, empty ref
+    REQUIRE(mgr.mixed_filaments().size() == 1);
+    CHECK(mgr.mixed_filaments().front().distribution_mode == int(MixedFilament::ImageWeighted));
+
+    // Also exercise apply_gradient_settings' disable_pointillism_mode() pass, which every mixed
+    // row goes through before serialization - it must leave ImageWeighted alone.
+    mgr.apply_gradient_settings(0, 0.04f, 0.16f, false);
+    CHECK(mgr.mixed_filaments().front().distribution_mode == int(MixedFilament::ImageWeighted));
+}
+
+TEST_CASE("Mixed filament operator== distinguishes rows that differ only by image_fill_ref", "[MixedFilament][ImageRow]")
+{
+    const std::vector<std::string> colors = {"#000000", "#FFFFFF"};
+    MixedFilamentManager mgr;
+    mgr.add_custom_filament(1, 2, 50, colors);
+    MixedFilament a = mgr.mixed_filaments().front();
+    MixedFilament b = a;
+    CHECK(a == b);
+    b.image_fill_ref = MixedFilamentManager::encode_image_fill_ref("v=1;img=abc123");
+    CHECK_FALSE(a == b);
+    CHECK(a != b);
+}
+
 TEST_CASE("Mixed filament legacy 4-token format parsing", "[MixedFilament][Serialization]")
 {
     const std::vector<std::string> colors = {"#FF0000", "#00FF00"};
