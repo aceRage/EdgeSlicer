@@ -98,8 +98,15 @@ ImageFillDialog::ImageFillDialog(wxWindow                                      *
     projections.Add(_L("Flat, along an axis"));
     projections.Add(_L("Wrapped around an axis"));
     projections.Add(_L("The model's own texture coordinates"));
+    // Index 3, matching ImageFillProjection::Box - the choice's selection IS the enum value.
+    projections.Add(_L("On all six sides (box)"));
     m_projection = new wxChoice(this, wxID_ANY, wxDefaultPosition, wxDefaultSize, projections);
     m_projection->SetSelection(int(m_params.projection));
+    m_projection->SetToolTip(_L("\"On all six sides\" is tri-planar: every facet takes the axis it "
+                                "most nearly faces and the picture is projected flat along that axis, "
+                                "so one image lands on all six sides of a box and follows the "
+                                "dominant axis on a curved part. It uses no axis of its own, and "
+                                "every facet is painted, so \"Faces\" does not apply to it."));
     row(_L("Projection") + ":", m_projection);
 
     wxArrayString axes;
@@ -133,6 +140,17 @@ ImageFillDialog::ImageFillDialog(wxWindow                                      *
                                    "rather than the top). For a wrap this selects the inward-facing "
                                    "surfaces instead of the outward ones."));
     left->Add(m_from_negative, 0, wxEXPAND | wxTOP, FromDIP(6));
+
+    m_box_mirror = new wxCheckBox(this, wxID_ANY, _L("Mirror so it reads from outside (box)"));
+    m_box_mirror->SetValue(m_params.box_mirror);
+    m_box_mirror->SetToolTip(_L("Box projection only. \"Up\" in the image is always +Z on the four "
+                                "sides and +Y on the top and the bottom. Left to right runs along "
+                                "the remaining axis in its POSITIVE direction, which matches a flat "
+                                "projection exactly on +X, -Y and +Z - and reads mirrored on the "
+                                "other three, because there you are looking at the projection from "
+                                "behind. Tick this to flip those three, so text reads correctly "
+                                "from outside on all six faces."));
+    left->Add(m_box_mirror, 0, wxEXPAND | wxTOP, FromDIP(6));
 
     wxBoxSizer *flips = new wxBoxSizer(wxHORIZONTAL);
     m_flip_u = new wxCheckBox(this, wxID_ANY, _L("Mirror horizontally"));
@@ -211,6 +229,7 @@ ImageFillDialog::ImageFillDialog(wxWindow                                      *
     m_axis->Bind(wxEVT_CHOICE, changed);
     m_faces->Bind(wxEVT_CHOICE, changed);
     m_from_negative->Bind(wxEVT_CHECKBOX, changed);
+    m_box_mirror->Bind(wxEVT_CHECKBOX, changed);
     m_selection->Bind(wxEVT_CHOICE, changed);
     m_flip_u->Bind(wxEVT_CHECKBOX, changed);
     m_flip_v->Bind(wxEVT_CHECKBOX, changed);
@@ -262,7 +281,13 @@ void ImageFillDialog::collect()
     // Only the two the dialog offers; ImageFillFaces::All stays reachable from a params string
     // and from code, and cannot be chosen here by accident.
     m_params.faces         = m_faces->GetSelection() == 1 ? ImageFillFaces::Through : ImageFillFaces::Facing;
+    // A box projection paints every facet by construction, so "Faces" means nothing there. Force
+    // the default rather than storing whatever the disabled control still holds, so the params
+    // string a box fill records says what it did and re-opening it shows the same thing.
+    if (m_params.projection == ImageFillProjection::Box)
+        m_params.faces = ImageFillFaces::Facing;
     m_params.axis_negative = m_from_negative->GetValue();
+    m_params.box_mirror    = m_box_mirror->GetValue();
     m_params.flip_u     = m_flip_u->GetValue();
     m_params.flip_v     = m_flip_v->GetValue();
     const int sel       = m_selection->GetSelection();
@@ -311,10 +336,16 @@ void ImageFillDialog::refresh_preview()
             ids.push_back(f.id);
         }
 
-    const bool axis_matters = m_params.projection != ImageFillProjection::MeshUV;
+    // A box projection has no axis of its own (every face is its own axis), and it paints every
+    // facet, so neither "Axis", nor "Faces", nor "From the negative side" has anything to say
+    // about it. "Project through (both sides)" in particular is meaningless there and is disabled
+    // rather than offered as a no-op.
+    const bool is_box       = m_params.projection == ImageFillProjection::Box;
+    const bool axis_matters = m_params.projection != ImageFillProjection::MeshUV && !is_box;
     m_axis->Enable(axis_matters);
     m_faces->Enable(axis_matters);
     m_from_negative->Enable(axis_matters);
+    m_box_mirror->Enable(is_box);
     if (m_ok != nullptr)
         m_ok->Enable(!ids.empty() && (m_params.gradient.enabled || !m_params.asset.empty()));
     m_image_text->SetLabel(m_params.asset.empty() ? _L("(none)") : from_u8(m_image_label));
@@ -395,6 +426,11 @@ void ImageFillDialog::refresh_preview()
     wxString how;
     if (m_params.projection == ImageFillProjection::MeshUV) {
         how = _L("The model's own texture coordinates");
+    } else if (m_params.projection == ImageFillProjection::Box) {
+        how = _L("On all six sides, each along the axis it faces");
+        how += ", ";
+        how += m_params.box_mirror ? _L("reading from outside on every face")
+                                   : _L("mirrored on -X, +Y and -Z");
     } else {
         const char     letter    = "XYZ"[int(m_params.axis)];
         const wxString axis_name = wxString::Format("%s%c", m_params.axis_negative ? "-" : "+", letter);

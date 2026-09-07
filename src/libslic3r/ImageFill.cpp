@@ -137,8 +137,21 @@ std::array<float, 3> ImageFillGradient::sample(float u, float v) const
     return out;
 }
 
+int image_fill_box_face(const Vec3f &normal)
+{
+    if (!(normal.squaredNorm() > 0.f))
+        return -1;   // a degenerate facet belongs to no face
+    // Strictly greater, scanning X then Y then Z, so a tie goes to the lower axis index and two
+    // runs on the same mesh always agree.
+    int best = 0;
+    for (int i = 1; i < 3; ++i)
+        if (std::abs(normal[i]) > std::abs(normal[best]))
+            best = i;
+    return best * 2 + (normal[best] < 0.f ? 1 : 0);
+}
+
 bool image_fill_project(const ImageFillParams &params, const BoundingBoxf3 &box, const Vec3f &p,
-                        float &u, float &v)
+                        float &u, float &v, const Vec3f *facet_normal)
 {
     const int  ax = int(params.axis);
     const Vec3d size = box.size();
@@ -170,6 +183,33 @@ bool image_fill_project(const ImageFillParams &params, const BoundingBoxf3 &box,
         u = float(std::atan2(dy, dx) / (2.0 * M_PI) + 0.5);
         if (u >= 1.f) u -= 1.f;
         v = norm(p[ax], box.min[ax], size[ax]);
+    } else if (params.projection == ImageFillProjection::Box) {
+        // TRI-PLANAR. The facet's own dominant normal component picks one of the six box faces,
+        // and the point is then projected flat along THAT axis - so the same picture lands on all
+        // six sides of a box, and on a curved part the blend follows the dominant axis. The face
+        // is chosen from the facet normal, not per vertex and not per leaf, so no facet is split
+        // across two faces and there is no seam that switches part-way across a triangle.
+        if (facet_normal == nullptr)
+            return false;   // Box cannot choose a face without one
+        const int face = image_fill_box_face(*facet_normal);
+        if (face < 0)
+            return false;   // degenerate facet
+        const int  fax = face / 2;             // 0 = X, 1 = Y, 2 = Z
+        const bool neg = (face & 1) != 0;
+        // v runs +Z on the four side faces and +Y on the top and the bottom; u is what is left.
+        const int  va  = (fax == 2) ? 1 : 2;
+        const int  ua  = 3 - fax - va;
+        u = norm(p[ua], box.min[ua], size[ua]);
+        v = norm(p[va], box.min[va], size[va]);
+        // By default u runs in the POSITIVE direction of its axis on every face, which makes
+        // +X, -Y and +Z agree exactly with a planar projection along X, Y and Z - and leaves the
+        // opposite three reading mirrored from outside, exactly as Through's far face does.
+        // box_mirror flips u on those three, i.e. u = v x n everywhere, which is the condition
+        // for the image to read the right way round from outside on all six faces.
+        const bool mirror_here = params.box_mirror &&
+                                 ((fax == 0 && neg) || (fax == 1 && !neg) || (fax == 2 && neg));
+        if (mirror_here)
+            u = 1.f - u;
     } else {
         return false;   // MeshUV is supplied by the caller, not computed here
     }
@@ -188,8 +228,13 @@ Vec3f image_fill_direction(const ImageFillParams &params)
 bool image_fill_face_is_painted(const ImageFillParams &params, const BoundingBoxf3 &box,
                                 const Vec3f &normal, const Vec3f &centroid)
 {
-    // The UVs decide coverage for a mesh-UV fill, and All is All.
-    if (params.projection == ImageFillProjection::MeshUV || params.faces == ImageFillFaces::All)
+    // The UVs decide coverage for a mesh-UV fill, and All is All. A BOX projection paints every
+    // facet too, and for a better reason than either: each facet is projected along its own
+    // dominant axis, so it faces its own projection by construction. There is nothing left for
+    // the faces rule to exclude, which is why `faces` is meaningless for Box and the dialog
+    // disables it rather than offering a choice that would do nothing.
+    if (params.projection == ImageFillProjection::MeshUV || params.faces == ImageFillFaces::All ||
+        params.projection == ImageFillProjection::Box)
         return true;
     const float n = normal.norm();
     if (n <= 0.f)
@@ -257,6 +302,7 @@ std::string ImageFillParams::to_string() const
     if (axis_negative) os << ";an=1";
     if (flip_u) os << ";fu=1";
     if (flip_v) os << ";fv=1";
+    if (box_mirror) os << ";bm=1";
     os << ";sub=" << subdivision;
     if (detail_mm > 0.f) os << ";det=" << f2s(detail_mm);
     if (background != 0) os << ";bg=" << background;
@@ -288,12 +334,13 @@ bool ImageFillParams::from_string(const std::string &s, ImageFillParams &out)
         const std::string k = tok.substr(0, eq), val = tok.substr(eq + 1);
         if (k == "v")          seen_version = true;
         else if (k == "img")   out.asset = val;
-        else if (k == "proj")  out.projection = ImageFillProjection(std::max(0, std::min(2, std::atoi(val.c_str()))));
+        else if (k == "proj")  out.projection = ImageFillProjection(std::max(0, std::min(3, std::atoi(val.c_str()))));
         else if (k == "axis")  out.axis = ImageFillAxis(std::max(0, std::min(2, std::atoi(val.c_str()))));
         else if (k == "pf")    out.faces = ImageFillFaces(std::max(0, std::min(2, std::atoi(val.c_str()))));
         else if (k == "an")    out.axis_negative = val != "0";
         else if (k == "fu")    out.flip_u = val != "0";
         else if (k == "fv")    out.flip_v = val != "0";
+        else if (k == "bm")    out.box_mirror = val != "0";
         else if (k == "sub")   out.subdivision = std::max(0, std::min(IMAGE_FILL_MAX_SUBDIVISION, std::atoi(val.c_str())));
         else if (k == "det")   out.detail_mm = float(std::atof(val.c_str()));
         else if (k == "bg")    out.background = std::atoi(val.c_str());
@@ -729,6 +776,11 @@ ImageFillResult image_fill_compute(const indexed_triangle_set                   
     for (size_t t = 0; t < mesh.indices.size(); ++t) {
         if (!selected[t]) continue;
         const Vec3i32 &f = mesh.indices[t];
+        // The ORIGINAL facet's normal, computed once and used for every one of its leaves: a Box
+        // projection picks its face from this, so all 4^depth leaves of a facet land on the same
+        // face and a triangle can never be cut in half by a projection seam.
+        const Vec3f facet_normal = (mesh.vertices[f(1)] - mesh.vertices[f(0)])
+                                       .cross(mesh.vertices[f(2)] - mesh.vertices[f(0)]);
         leaves.clear();
         image_fill_subdivide(mesh.vertices[f(0)], mesh.vertices[f(1)], mesh.vertices[f(2)], depth, leaves);
         // Mesh UVs are per vertex; a leaf's UV is the same barycentric blend its position is, so
@@ -755,7 +807,7 @@ ImageFillResult image_fill_compute(const indexed_triangle_set                   
                 if (params.flip_u) u = 1.f - u;
                 if (params.flip_v) v = 1.f - v;
             } else {
-                ok = image_fill_project(params, box, leaves[i].centroid(), u, v);
+                ok = image_fill_project(params, box, leaves[i].centroid(), u, v, &facet_normal);
             }
             if (!ok) continue;
             const size_t idx = t * per + i;

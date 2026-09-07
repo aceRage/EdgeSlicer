@@ -80,6 +80,7 @@ private:
     wxChoice         *m_axis            = nullptr;
     wxChoice         *m_faces           = nullptr;   // facing / through
     wxCheckBox       *m_from_negative   = nullptr;   // the -axis side, or inwards for a wrap
+    wxCheckBox       *m_box_mirror      = nullptr;   // Box only: read the right way round outside
     wxChoice         *m_selection       = nullptr;   // whole part, or one painted state
     wxCheckBox       *m_flip_u          = nullptr;
     wxCheckBox       *m_flip_v          = nullptr;

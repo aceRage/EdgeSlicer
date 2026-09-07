@@ -103,6 +103,13 @@ enum class ImageFillProjection : int {
     Cylindrical = 1,
     // The mesh's own UVs, supplied by the caller. This is the glTF/GLB import path.
     MeshUV = 2,
+    // TRI-PLANAR. Every facet takes the axis of its normal's dominant component and is projected
+    // flat along that axis onto the box face it belongs to, so ONE image lands on all six sides
+    // of a box. The choice is made from the FACET normal, once per original facet, so a facet
+    // never switches face part-way across itself and a curved part is blended by the dominant
+    // axis with no mid-facet seams. `axis` and `axis_negative` are ignored: every face is its own
+    // axis. See image_fill_box_face() for the orientation rule.
+    Box = 3,
 };
 
 enum class ImageFillAxis : int { X = 0, Y = 1, Z = 2 };
@@ -163,6 +170,12 @@ struct ImageFillParams
     ImageFillFaces      faces  = ImageFillFaces::Facing;
     bool                flip_u = false;
     bool                flip_v = false;
+    // Box only. false (the default) gives each face the same u the PLANAR projection of that
+    // face's axis would give it, so the +X, -Y and +Z faces agree with Planar X, Y and Z exactly
+    // - and the opposite three (-X, +Y, -Z) read MIRRORED from outside, because you are looking
+    // at that projection from behind. true flips u on exactly those three, so text reads
+    // correctly from outside on all six. Ignored by every other projection.
+    bool                box_mirror = false;
     // 1-based filament ids the solver may choose from. Empty means "every loaded filament",
     // which the caller resolves before calling.
     std::vector<int>    allowed;
@@ -192,17 +205,54 @@ static constexpr size_t IMAGE_FILL_MAX_LEAVES = 4000000;
 
 // The one projection function, shared by every caller. `p` is a point in the volume's own mesh
 // space; `box` is the mesh-space box the projection is normalised over. Returns false when the
-// point has no sensible image coordinate (a cylindrical projection exactly on the axis).
+// point has no sensible image coordinate (a cylindrical projection exactly on the axis, or a Box
+// projection asked without the facet normal it needs to pick a face).
+//
+// `facet_normal` is the ORIGINAL facet's normal - need not be normalised - and is read only by
+// ImageFillProjection::Box, which cannot choose a face without it. Passing it per leaf of one
+// facet is what keeps a facet from switching face part-way across itself.
 bool image_fill_project(const ImageFillParams &params, const BoundingBoxf3 &box, const Vec3f &p,
-                        float &u, float &v);
+                        float &u, float &v, const Vec3f *facet_normal = nullptr);
+
+// Which face of an axis-aligned box a facet belongs to, from its normal's dominant component:
+//
+//   0 = +X   1 = -X   2 = +Y   3 = -Y   4 = +Z   5 = -Z
+//
+// (the same numbering the box-face tests use). A tie goes to the LOWER axis index - X, then Y,
+// then Z - so a facet at exactly 45 degrees between two axes still lands somewhere definite and
+// the same way on every run. Returns -1 only for a degenerate, zero-length normal.
+//
+// THE ORIENTATION RULE, which this face number decides:
+//
+//   * v - "up" in the image - is +Z on the four SIDE faces (dominant axis X or Y) and +Y on the
+//     TOP and the BOTTOM (dominant axis Z). Always, in both mirror modes.
+//   * u - "right" in the image - is the remaining world axis, and by default runs in its POSITIVE
+//     direction on every face. That makes the +X, -Y and +Z faces identical to a planar
+//     projection along X, Y and Z, and leaves -X, +Y and -Z reading mirrored from outside.
+//   * ImageFillParams::box_mirror flips u on those three faces, which is exactly u = v x n for
+//     every face - the condition for the image to read the right way round from outside.
+//
+//     face  |  u (image right)        |  v (image up)   |  u when box_mirror
+//     ------+-------------------------+-----------------+-------------------
+//      +X   |  +Y                     |  +Z             |  +Y  (unchanged)
+//      -X   |  +Y                     |  +Z             |  -Y
+//      +Y   |  +X                     |  +Z             |  -X
+//      -Y   |  +X                     |  +Z             |  +X  (unchanged)
+//      +Z   |  +X                     |  +Y             |  +X  (unchanged)
+//      -Z   |  +X                     |  +Y             |  -X
+//
+// flip_u and flip_v still apply on top, globally, as they do for every other projection.
+int image_fill_box_face(const Vec3f &normal);
 
 // The unit direction a planar projection travels along: +axis, or -axis when axis_negative.
 Vec3f image_fill_direction(const ImageFillParams &params);
 
 // Does the projection land on this facet? `normal` need not be normalised; `centroid` is the
 // facet's centre in the same mesh space as `box`, and is what a cylindrical projection needs to
-// know which way "outward" is for this facet. Always true for MeshUV (the UVs decide coverage)
-// and for ImageFillFaces::All.
+// know which way "outward" is for this facet. Always true for MeshUV (the UVs decide coverage),
+// for ImageFillFaces::All, and for Box - under a tri-planar projection every facet faces its own
+// axis by construction, so there is nothing for the faces rule to exclude and `faces` is
+// meaningless there (the dialog disables it).
 //
 // The rule, in one line: Facing is normal . direction > IMAGE_FILL_FACING_EPS, Through is
 // |normal . direction| > IMAGE_FILL_FACING_EPS, and a facet parallel to the direction - a cube's

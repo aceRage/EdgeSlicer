@@ -17,8 +17,11 @@
 #include <boost/filesystem.hpp>
 #include <boost/nowide/fstream.hpp>
 
+#include <algorithm>
 #include <array>
 #include <cmath>
+#include <map>
+#include <utility>
 #include <fstream>
 #include <set>
 #include <string>
@@ -630,6 +633,31 @@ TEST_CASE("Image Fill: the params string round-trips", "[imagefill]")
         CHECK_FALSE(old.axis_negative);
         // ...and what this build writes always says which rule it used.
         CHECK(old.to_string().find(";pf=0") != std::string::npos);
+    }
+
+    SECTION("a box projection and its mirror flag survive the string")
+    {
+        ImageFillParams b;
+        b.asset      = "abc";
+        b.projection = ImageFillProjection::Box;
+        b.box_mirror = true;
+        b.subdivision = 3;
+        ImageFillParams bb;
+        REQUIRE(ImageFillParams::from_string(b.to_string(), bb));
+        CHECK(bb.projection == ImageFillProjection::Box);
+        CHECK(bb.box_mirror);
+        CHECK(bb.to_string() == b.to_string());
+        // proj=3 must survive the clamp that used to stop at 2, or every saved box fill would
+        // read back as a mesh-UV fill and repaint the part differently on reload.
+        CHECK(b.to_string().find(";proj=3") != std::string::npos);
+        // The flag is written only when it is set, so an unmirrored box fill's string is the
+        // shorter one and an old string without `bm` reads as false.
+        ImageFillParams plain = b;
+        plain.box_mirror = false;
+        CHECK(plain.to_string().find(";bm=") == std::string::npos);
+        ImageFillParams pb;
+        REQUIRE(ImageFillParams::from_string(plain.to_string(), pb));
+        CHECK_FALSE(pb.box_mirror);
     }
 
     SECTION("a gradient with no image paints without an asset")
@@ -1374,4 +1402,383 @@ TEST_CASE("Image Fill: axis Y matches axis Z for a vertical-band image, and axis
         CHECK(painted_faces(cube, fz, depth) == std::set<int>{4});
         CHECK(painted_faces(cube, fy, depth) == std::set<int>{2});
     }
+}
+
+// =============================================================================================
+// 9. The BOX projection - one image on all six sides
+// =============================================================================================
+
+namespace box_test {
+
+// The orientation rule, written out here INDEPENDENTLY of the implementation, straight from the
+// spec's table - so this test measures the rule rather than restating the code that implements it.
+//
+//   face  |  u (image right)  |  v (image up)  |  u when box_mirror
+//    +X   |        +Y         |      +Z        |   +Y  (unchanged)
+//    -X   |        +Y         |      +Z        |   -Y
+//    +Y   |        +X         |      +Z        |   -X
+//    -Y   |        +X         |      +Z        |   +X  (unchanged)
+//    +Z   |        +X         |      +Y        |   +X  (unchanged)
+//    -Z   |        +X         |      +Y        |   -X
+struct FaceAxes { int ua; bool u_flipped_when_mirrored; int va; };
+
+FaceAxes axes_of_face(int face)
+{
+    switch (face) {
+    case 0: return {1, false, 2};   // +X
+    case 1: return {1, true,  2};   // -X
+    case 2: return {0, true,  2};   // +Y
+    case 3: return {0, false, 2};   // -Y
+    case 4: return {0, false, 1};   // +Z
+    default: return {0, true, 1};   // -Z
+    }
+}
+
+// The (u, v) the rule says a point on `face` of a cube spanning [0, side] must get.
+void expected_uv(int face, const Vec3f &p, float side, bool mirror, float &u, float &v)
+{
+    const FaceAxes fa = axes_of_face(face);
+    u = p[fa.ua] / side;
+    v = p[fa.va] / side;
+    if (mirror && fa.u_flipped_when_mirrored)
+        u = 1.f - u;
+}
+
+// quad_rgbw.png is 2x2: row 0 (which is v = 1, the TOP of the image) is red, green; row 1
+// (v = 0) is blue, white. So the filament a point must come out with is a pure function of
+// which half of u and which half of v it is in.
+int expected_filament_quad(float u, float v)
+{
+    if (v > 0.5f) return u < 0.5f ? 1 : 2;   // top row:    red   | green
+    return              u < 0.5f ? 3 : 4;    // bottom row: blue  | white
+}
+
+// An icosphere: 12 vertices, 20 faces, each triangle split into 4 `subdiv` times and every
+// vertex pushed back out to the radius. Chosen over its_make_sphere() on purpose - a UV sphere
+// has degenerate zero-area triangles at its poles, which a projection is entitled to leave
+// unpainted, and that would blunt the point of the "nothing is left unpainted" check.
+indexed_triangle_set icosphere(float radius, int subdiv)
+{
+    const float t = (1.f + std::sqrt(5.f)) / 2.f;
+    std::vector<Vec3f> v = {
+        {-1, t, 0}, {1, t, 0}, {-1, -t, 0}, {1, -t, 0},
+        {0, -1, t}, {0, 1, t}, {0, -1, -t}, {0, 1, -t},
+        {t, 0, -1}, {t, 0, 1}, {-t, 0, -1}, {-t, 0, 1}};
+    std::vector<Vec3i32> f = {
+        {0, 11, 5}, {0, 5, 1}, {0, 1, 7}, {0, 7, 10}, {0, 10, 11},
+        {1, 5, 9}, {5, 11, 4}, {11, 10, 2}, {10, 7, 6}, {7, 1, 8},
+        {3, 9, 4}, {3, 4, 2}, {3, 2, 6}, {3, 6, 8}, {3, 8, 9},
+        {4, 9, 5}, {2, 4, 11}, {6, 2, 10}, {8, 6, 7}, {9, 8, 1}};
+    for (int s = 0; s < subdiv; ++s) {
+        std::vector<Vec3i32> nf;
+        std::map<std::pair<int, int>, int> mid;
+        auto midpoint = [&](int a, int b) {
+            const std::pair<int, int> k(std::min(a, b), std::max(a, b));
+            auto it = mid.find(k);
+            if (it != mid.end()) return it->second;
+            v.push_back((v[a] + v[b]) * 0.5f);
+            const int idx = int(v.size()) - 1;
+            mid.emplace(k, idx);
+            return idx;
+        };
+        for (const Vec3i32 &tri : f) {
+            const int a = midpoint(tri(0), tri(1)), b = midpoint(tri(1), tri(2)), c = midpoint(tri(2), tri(0));
+            nf.push_back({tri(0), a, c});
+            nf.push_back({tri(1), b, a});
+            nf.push_back({tri(2), c, b});
+            nf.push_back({a, b, c});
+        }
+        f.swap(nf);
+    }
+    indexed_triangle_set its;
+    its.vertices.reserve(v.size());
+    for (const Vec3f &p : v) its.vertices.push_back(p.normalized() * radius);
+    its.indices = f;
+    return its;
+}
+
+} // namespace box_test
+
+TEST_CASE("Image Fill: the box projection paints all six sides, each the right way up",
+          "[imagefill][faces][box]")
+{
+    using namespace box_test;
+
+    ImageAssetStore   store;
+    const std::string quad = store.add(read_fixture("quad_rgbw.png"));   // R G / B W
+    const float       side = 20.f;
+    TriangleMesh      cube = make_cube(double(side), double(side), double(side));
+    const int         depth = 2;
+    const size_t      per   = leaves_per(depth);
+
+    ImageFillParams p;
+    p.asset       = quad;
+    p.projection  = ImageFillProjection::Box;
+    p.subdivision = depth;
+    p.allowed     = kFilamentIds;
+
+    SECTION("every one of the six faces is painted, and all four quadrant colours are used")
+    {
+        const std::vector<int> st = run_states(cube, p, store, depth);
+        CHECK(painted_faces(cube, st, depth) == std::set<int>{0, 1, 2, 3, 4, 5});
+        // Nothing is left unpainted at all: a box projection reaches every facet by construction.
+        CHECK(std::count(st.begin(), st.end(), 0) == 0);
+        std::set<int> used;
+        for (int s : st) used.insert(s);
+        CHECK(used == std::set<int>{1, 2, 3, 4});
+    }
+
+    SECTION("the axis and the negative-side flag make no difference to it")
+    {
+        // Box has no axis of its own; if either of these changed the painting, the dialog would
+        // be showing a control that silently matters.
+        const std::vector<int> base = run_states(cube, p, store, depth);
+        ImageFillParams q = p;
+        q.axis = ImageFillAxis::X;
+        CHECK(run_states(cube, q, store, depth) == base);
+        q.axis = ImageFillAxis::Y;
+        q.axis_negative = true;
+        CHECK(run_states(cube, q, store, depth) == base);
+        // ...and neither does "Faces", which is why the dialog disables it.
+        ImageFillParams r = p;
+        r.faces = ImageFillFaces::Through;
+        CHECK(run_states(cube, r, store, depth) == base);
+    }
+
+    SECTION("each face carries the image's quadrants in the orientation the rule states")
+    {
+        for (bool mirror : {false, true}) {
+            ImageFillParams q = p;
+            q.box_mirror = mirror;
+            const std::vector<int> st = run_states(cube, q, store, depth);
+            INFO("box_mirror = " << mirror);
+            size_t checked = 0;
+            for (size_t t = 0; t < cube.its.indices.size(); ++t) {
+                const int face = cube_face_of(cube.its, t);
+                REQUIRE(face >= 0);
+                std::vector<ImageFillLeaf> leaves;
+                const Vec3i32 &tri = cube.its.indices[t];
+                image_fill_subdivide(cube.its.vertices[tri(0)], cube.its.vertices[tri(1)],
+                                     cube.its.vertices[tri(2)], depth, leaves);
+                for (size_t i = 0; i < leaves.size(); ++i) {
+                    const Vec3f c = leaves[i].centroid();
+                    float u = 0.f, v = 0.f;
+                    expected_uv(face, c, side, mirror, u, v);
+                    // The nearest-neighbour sampler may take either pixel exactly on a boundary.
+                    if (std::abs(u - 0.5f) < 1e-3f || std::abs(v - 0.5f) < 1e-3f) continue;
+                    INFO("face " << face << " leaf " << c.x() << "," << c.y() << "," << c.z()
+                                 << " -> u " << u << " v " << v);
+                    CHECK(st[t * per + i] == expected_filament_quad(u, v));
+                    ++checked;
+                }
+            }
+            CHECK(checked > 60);
+        }
+    }
+
+    SECTION("named corners, so the rule is legible and not only computed")
+    {
+        // The four corners of a face, as (filament, description). Read them off the table: the
+        // image's top-left pixel is red, top-right green, bottom-left blue, bottom-right white,
+        // and "top" is v = 1.
+        const std::vector<int> plain    = run_states(cube, p, store, depth);
+        ImageFillParams        m        = p;
+        m.box_mirror                    = true;
+        const std::vector<int> mirrored = run_states(cube, m, store, depth);
+
+        auto state_at = [&](const std::vector<int> &st, int face, const Vec3f &want) {
+            // The leaf of THAT face whose centroid is nearest `want`. Restricted to the face on
+            // purpose: near an edge the nearest leaf of the neighbouring face can be closer, and
+            // the question here is always "what did THIS face get here".
+            size_t best = 0; float bd = 1e30f;
+            for (size_t t = 0; t < cube.its.indices.size(); ++t) {
+                if (cube_face_of(cube.its, t) != face) continue;
+                std::vector<ImageFillLeaf> leaves;
+                const Vec3i32 &tri = cube.its.indices[t];
+                image_fill_subdivide(cube.its.vertices[tri(0)], cube.its.vertices[tri(1)],
+                                     cube.its.vertices[tri(2)], depth, leaves);
+                for (size_t i = 0; i < leaves.size(); ++i) {
+                    const float d = (leaves[i].centroid() - want).squaredNorm();
+                    if (d < bd) { bd = d; best = t * per + i; }
+                }
+            }
+            return st[best];
+        };
+
+        // TOP (+Z): u = +X, v = +Y. Image top-left (red) is at low x, HIGH y.
+        CHECK(state_at(plain, 4, Vec3f(1.f, 19.f, 20.f)) == 1);    // red
+        CHECK(state_at(plain, 4, Vec3f(19.f, 19.f, 20.f)) == 2);   // green
+        CHECK(state_at(plain, 4, Vec3f(1.f, 1.f, 20.f)) == 3);     // blue
+        CHECK(state_at(plain, 4, Vec3f(19.f, 1.f, 20.f)) == 4);    // white
+        // ...which is exactly what a flat projection along +Z gives, mirror or not: +Z is one of
+        // the three faces the mirror leaves alone.
+        CHECK(state_at(mirrored, 4, Vec3f(1.f, 19.f, 20.f)) == 1);
+
+        // FRONT (-Y): u = +X, v = +Z. Red at low x, HIGH z - and the mirror leaves it alone.
+        CHECK(state_at(plain, 3, Vec3f(1.f, 0.f, 19.f)) == 1);
+        CHECK(state_at(plain, 3, Vec3f(19.f, 0.f, 19.f)) == 2);
+        CHECK(state_at(mirrored, 3, Vec3f(1.f, 0.f, 19.f)) == 1);
+
+        // BACK (+Y): u = +X by default, so red lands at LOW x - which, seen from behind the box,
+        // is on the viewer's RIGHT: the picture reads mirrored. With box_mirror it moves to high
+        // x, i.e. the viewer's left, and reads the right way round.
+        CHECK(state_at(plain, 2, Vec3f(1.f, 20.f, 19.f)) == 1);     // red at low x: mirrored
+        CHECK(state_at(mirrored, 2, Vec3f(19.f, 20.f, 19.f)) == 1); // red at high x: readable
+        CHECK(state_at(mirrored, 2, Vec3f(1.f, 20.f, 19.f)) == 2);  // green takes low x
+
+        // RIGHT (+X): u = +Y, v = +Z; the mirror leaves it alone.
+        CHECK(state_at(plain, 0, Vec3f(20.f, 1.f, 19.f)) == 1);
+        CHECK(state_at(mirrored, 0, Vec3f(20.f, 1.f, 19.f)) == 1);
+        // LEFT (-X): u = +Y by default (mirrored from outside); box_mirror flips it.
+        CHECK(state_at(plain, 1, Vec3f(0.f, 1.f, 19.f)) == 1);
+        CHECK(state_at(mirrored, 1, Vec3f(0.f, 19.f, 19.f)) == 1);
+
+        // BOTTOM (-Z): u = +X, v = +Y; box_mirror flips u.
+        CHECK(state_at(plain, 5, Vec3f(1.f, 19.f, 0.f)) == 1);
+        CHECK(state_at(mirrored, 5, Vec3f(19.f, 19.f, 0.f)) == 1);
+    }
+
+    SECTION("the top face agrees, leaf for leaf, with a flat projection along +Z")
+    {
+        // Not a restatement of the rule but a consequence of it: the default box orientation IS
+        // the planar one on +X, -Y and +Z. If this ever stops holding, the two projections have
+        // drifted apart and one of them is wrong.
+        ImageFillParams flat = p;
+        flat.projection = ImageFillProjection::Planar;
+        flat.axis       = ImageFillAxis::Z;
+        const std::vector<int> fz  = run_states(cube, flat, store, depth);
+        const std::vector<int> box = run_states(cube, p, store, depth);
+        size_t compared = 0;
+        for (size_t t = 0; t < cube.its.indices.size(); ++t) {
+            if (cube_face_of(cube.its, t) != 4) continue;   // +Z only; flat paints nothing else
+            for (size_t i = 0; i < per; ++i) {
+                CHECK(box[t * per + i] == fz[t * per + i]);
+                ++compared;
+            }
+        }
+        CHECK(compared > 0);
+    }
+
+    SECTION("mirroring changes the four side faces and the bottom, and leaves +Z alone")
+    {
+        ImageFillParams m = p;
+        m.box_mirror = true;
+        const std::vector<int> plain    = run_states(cube, p, store, depth);
+        const std::vector<int> mirrored = run_states(cube, m, store, depth);
+        CHECK(plain != mirrored);
+        // -X, +Y and -Z are the three the mirror touches; +X, -Y and +Z it must not.
+        for (size_t t = 0; t < cube.its.indices.size(); ++t) {
+            const int face = cube_face_of(cube.its, t);
+            if (face != 0 && face != 3 && face != 4) continue;
+            for (size_t i = 0; i < per; ++i)
+                CHECK(plain[t * per + i] == mirrored[t * per + i]);
+        }
+    }
+}
+
+TEST_CASE("Image Fill: the box projection leaves no facet of a sphere unpainted",
+          "[imagefill][faces][box]")
+{
+    using namespace box_test;
+
+    ImageAssetStore   store;
+    const std::string quad = store.add(read_fixture("quad_rgbw.png"));
+    // Two subdivisions of an icosahedron: 320 facets, none degenerate, normals in every
+    // direction - so "the dominant axis decides" is being asked a real question 320 times.
+    const indexed_triangle_set ball = icosphere(10.f, 2);
+    REQUIRE(ball.indices.size() == 320u);
+    const int    depth = 1;
+    const size_t per   = leaves_per(depth);
+
+    ImageFillParams p;
+    p.asset       = quad;
+    p.projection  = ImageFillProjection::Box;
+    p.subdivision = depth;
+    p.allowed     = kFilamentIds;
+
+    TriangleSelector::TriangleSplittingData empty;
+    const ImageFillResult r = image_fill_compute(ball, empty, p, store, kFilamentColors, kFilamentIds);
+    REQUIRE(r.ok);
+    CHECK(r.leaves_total == ball.indices.size() * per);
+    // THE POINT OF THIS TEST: a tri-planar projection has no unreachable facet. A planar one
+    // leaves the whole far hemisphere and the silhouette band unpainted; this leaves nothing.
+    CHECK(r.facets_painted == r.leaves_total);
+
+    TriangleMesh           tm(ball);
+    const std::vector<int> st = leaf_states(tm, r.painting, ball.indices.size(), depth);
+    CHECK(std::count(st.begin(), st.end(), 0) == 0);
+
+    SECTION("every facet stays on ONE face: no leaf of a facet disagrees with its own normal")
+    {
+        // The seam question. The face is chosen from the FACET normal, so all 4^depth leaves of
+        // one facet must be projected along the same axis - a seam can only ever fall along a
+        // triangle edge, never across the middle of a triangle.
+        for (size_t t = 0; t < ball.indices.size(); ++t) {
+            const Vec3i32 &tri = ball.indices[t];
+            const Vec3f    n   = (ball.vertices[tri(1)] - ball.vertices[tri(0)])
+                                  .cross(ball.vertices[tri(2)] - ball.vertices[tri(0)]);
+            const int face = image_fill_box_face(n);
+            REQUIRE(face >= 0);
+            BoundingBoxf3 box;
+            for (const Vec3f &vtx : ball.vertices) box.merge(vtx.cast<double>());
+            std::vector<ImageFillLeaf> leaves;
+            image_fill_subdivide(ball.vertices[tri(0)], ball.vertices[tri(1)],
+                                 ball.vertices[tri(2)], depth, leaves);
+            for (const ImageFillLeaf &leaf : leaves) {
+                float u = 0.f, v = 0.f;
+                REQUIRE(image_fill_project(p, box, leaf.centroid(), u, v, &n));
+                // The value the rule gives for THAT face, with the whole facet on one face.
+                const FaceAxes fa = axes_of_face(face);
+                const Vec3f    c  = leaf.centroid();
+                const float    eu = float((c[fa.ua] - box.min[fa.ua]) / box.size()[fa.ua]);
+                const float    ev = float((c[fa.va] - box.min[fa.va]) / box.size()[fa.va]);
+                CHECK(u == Approx(eu).margin(1e-5));
+                CHECK(v == Approx(ev).margin(1e-5));
+            }
+        }
+    }
+
+    SECTION("a planar projection on the same ball does leave facets unpainted")
+    {
+        // The control that makes the number above mean something.
+        ImageFillParams flat = p;
+        flat.projection = ImageFillProjection::Planar;
+        flat.axis       = ImageFillAxis::Z;
+        TriangleSelector::TriangleSplittingData e2;
+        const ImageFillResult fr = image_fill_compute(ball, e2, flat, store, kFilamentColors, kFilamentIds);
+        REQUIRE(fr.ok);
+        CHECK(fr.facets_painted < fr.leaves_total);
+    }
+}
+
+TEST_CASE("Image Fill: the box face a normal belongs to", "[imagefill][box]")
+{
+    // The predicate on its own, stated against the numbering the rest of the tests use:
+    // 0 = +X, 1 = -X, 2 = +Y, 3 = -Y, 4 = +Z, 5 = -Z.
+    CHECK(image_fill_box_face(Vec3f(1.f, 0.f, 0.f)) == 0);
+    CHECK(image_fill_box_face(Vec3f(-3.f, 0.f, 0.f)) == 1);
+    CHECK(image_fill_box_face(Vec3f(0.f, 2.f, 0.f)) == 2);
+    CHECK(image_fill_box_face(Vec3f(0.f, -1.f, 0.f)) == 3);
+    CHECK(image_fill_box_face(Vec3f(0.f, 0.f, 0.5f)) == 4);
+    CHECK(image_fill_box_face(Vec3f(0.f, 0.f, -0.5f)) == 5);
+    // The dominant component wins, not the first non-zero one.
+    CHECK(image_fill_box_face(Vec3f(0.3f, 0.9f, 0.2f)) == 2);
+    CHECK(image_fill_box_face(Vec3f(-0.6f, 0.5f, 0.4f)) == 1);
+    // A tie goes to the lower axis index, so the answer is the same on every run.
+    CHECK(image_fill_box_face(Vec3f(1.f, 1.f, 0.f)) == 0);
+    CHECK(image_fill_box_face(Vec3f(0.f, 1.f, 1.f)) == 2);
+    CHECK(image_fill_box_face(Vec3f(1.f, 0.f, 1.f)) == 0);
+    // A degenerate facet belongs nowhere, and a Box projection says so rather than guessing.
+    CHECK(image_fill_box_face(Vec3f(0.f, 0.f, 0.f)) == -1);
+    ImageFillParams p;
+    p.projection = ImageFillProjection::Box;
+    BoundingBoxf3 box(Vec3d(0, 0, 0), Vec3d(10, 10, 10));
+    float u = 0.f, v = 0.f;
+    const Vec3f zero(0.f, 0.f, 0.f), up(0.f, 0.f, 1.f);
+    CHECK_FALSE(image_fill_project(p, box, Vec3f(5.f, 5.f, 10.f), u, v, &zero));
+    // ...and asking without a normal at all is refused rather than answered wrongly.
+    CHECK_FALSE(image_fill_project(p, box, Vec3f(5.f, 5.f, 10.f), u, v));
+    REQUIRE(image_fill_project(p, box, Vec3f(2.f, 8.f, 10.f), u, v, &up));
+    CHECK(u == Approx(0.2f));   // +Z: u = x, v = y
+    CHECK(v == Approx(0.8f));
 }

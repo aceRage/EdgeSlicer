@@ -39,9 +39,11 @@ this branch sits on it rather than on the release head.
      three-colour gradient. A gradient's stops are taken from the first, middle and last allowed
      filament, so it needs no colour pickers and costs the project no payload at all.
    * **Projection** — *Flat, along an axis* / *Wrapped around an axis* / *The model's own texture
-     coordinates*, plus the axis (X/Y/Z), **which faces it may paint**, **which side of the axis it
-     comes from**, and two mirror checkboxes. Section 2.1 is the whole of what those two new
-     controls mean.
+     coordinates* / *On all six sides (box)*, plus the axis (X/Y/Z), **which faces it may paint**,
+     **which side of the axis it comes from**, and two mirror checkboxes. Section 2.1 is the whole
+     of what those two new controls mean; section 2.3 is the box projection, which disables Axis,
+     Faces and "From the negative side" because it uses none of them, and enables one checkbox of
+     its own, *Mirror so it reads from outside (box)*.
    * **Apply to** — the whole part, or only the faces already painted with one filament by the
      existing colour-painting tool. That is the face selection: no new gizmo, exactly as the plan
      requires.
@@ -100,10 +102,11 @@ reproducible rather than merely equivalent.
 ### Projections
 
 ```cpp
-enum class ImageFillProjection { Planar, Cylindrical, MeshUV };
+enum class ImageFillProjection { Planar, Cylindrical, MeshUV, Box };
 enum class ImageFillAxis       { X, Y, Z };
 bool image_fill_project(const ImageFillParams&, const BoundingBoxf3&, const Vec3f &p,
-                        float &u, float &v);
+                        float &u, float &v, const Vec3f *facet_normal = nullptr);
+int  image_fill_box_face(const Vec3f &normal);   // 0 = +X, 1 = -X, 2 = +Y, 3 = -Y, 4 = +Z, 5 = -Z
 ```
 
 * **Planar** — `u`, `v` are the point's position along the two axes that are not `axis`, normalised
@@ -117,6 +120,8 @@ bool image_fill_project(const ImageFillParams&, const BoundingBoxf3&, const Vec3
   at +Y. About Y: seam on −X again, middle facing +X. About X: seam on −Y, middle facing +Y.
   Rotating the part rotates the seam with it, because the projection is in the part's own space.
 * **MeshUV** — supplied by the caller, not computed. `image_fill_project` returns `false` for it.
+* **Box** — tri-planar. Each facet is projected flat along the axis of its own dominant normal
+  component, so one image lands on all six sides of a box. Section 2.3.
 
 `v` runs **up**; the sampler flips it once, so image row 0 is at `v = 1`.
 
@@ -140,6 +145,12 @@ plane, so the subdivision refines the sampling and not the geometry):
 | `Through` | `\|normal · direction\| > 1e-4` | "Project through (both sides)" |
 | `All` | always | **not offered** — it is the old behaviour, kept only for the importers, the tests and an old params string |
 
+**The rule does not apply to a Box projection at all**, and the dialog disables the control there.
+Under a tri-planar projection each facet is projected along the axis it most nearly faces, so it
+faces its own projection by construction and there is nothing left to exclude. `Through` in
+particular would be a no-op, which is why it is disabled rather than offered; `collect()` forces
+`faces = Facing` for Box so the params string a box fill records says what it actually did.
+
 * **`direction`** is `+axis`, or `−axis` when `axis_negative` (the dialog's "From the negative side
   of the axis"). So a flat projection along Z lands on what faces up; tick the box and it lands on
   what faces down instead.
@@ -161,7 +172,10 @@ plane, so the subdivision refines the sampling and not the geometry):
   does not reach keeps the paint it already had. So the way to put one picture on the top and
   another on the front is to paint each face with the colour tool first and apply per selection.
 * **The annotation always records the rule.** `image_fill_params` gains `pf` (the `faces` value) and
-  `an` (`axis_negative`), and `pf` is written even when it is the default: a string without it is a
+  `an` (`axis_negative`) — and, for the box projection, `bm` (`box_mirror`, written only when set,
+  so a string without it reads as the unmirrored default). The `proj` reader's clamp is `min(3, .)`
+  now, not `min(2, .)`: with the old clamp every saved box fill would have read back as a mesh-UV
+  fill and repainted the part differently on reload. `pf` is written even when it is the default: a string without it is a
   string from before the rule existed, and it must not be mistaken for one that chose today's
   default on purpose. Such a string reads back as `Facing`, so re-applying an old annotation does
   the right thing rather than reproducing the bug — the painting already stored is untouched until
@@ -180,6 +194,88 @@ does differ.
 What the face rule changes about this: with the default `Facing`, axis Z paints the top face and
 axis Y paints the +Y face, so the two now differ *by which faces they reach* even though they agree
 about the colour at any given point. The same test pins that too.
+
+### 2.3 The Box projection — one image on all six sides
+
+The owner's finding after the first hands-on test: *"there is currently no way to hit all 3 planes
+with an image, since there is no multiplanar or tri-planar wrapping."* A flat projection paints one
+face; a wrap paints a band and leaves the caps; neither puts a picture on a whole box. `Box` does.
+
+**How a facet chooses its face.** `image_fill_box_face(normal)` takes the axis of the normal's
+**dominant component** and its sign, giving one of six faces — `0 = +X, 1 = -X, 2 = +Y, 3 = -Y,
+4 = +Z, 5 = -Z`. The point is then projected flat along that axis, exactly as `Planar` does for
+its one axis.
+
+* It is the **facet** normal, not a per-vertex one, and it is computed **once per original facet**
+  and reused for all `4^depth` of its leaves. That is what stops a triangle being cut in half by a
+  projection seam: a seam can only ever fall along a triangle edge, never across the middle of a
+  face. The test `no leaf of a facet disagrees with its own normal` pins it on an icosphere.
+* A **tie** — a facet at exactly 45 degrees between two axes — goes to the **lower axis index**
+  (X, then Y, then Z). Arbitrary, but fixed, so two runs on one mesh always agree.
+* A **degenerate** facet (zero-length normal) belongs to no face and `image_fill_project` returns
+  `false` for it, rather than guessing.
+* On a **curved** part the result is a blend by dominant axis: the sphere is divided into six
+  patches whose boundaries follow triangle edges. **No facet is ever left unpainted** — which is
+  the one thing a flat projection can never promise, and the test measures both sides of it.
+
+**The orientation rule, per face.** Two things are fixed and one is a choice.
+
+* `v` — **"up" in the image** — is **+Z** on the four side faces (dominant axis X or Y) and **+Y**
+  on the top and the bottom (dominant axis Z). Always, in both mirror modes. This is what makes a
+  picture stand up the right way as you walk around the part rather than lying on its side.
+* `u` — **"right" in the image** — is the remaining world axis, and **by default runs in its
+  positive direction on every face**.
+* `box_mirror` (the dialog's *Mirror so it reads from outside (box)*) flips `u` on exactly the
+  three faces where the default reads backwards.
+
+| face | `u` (image right) | `v` (image up) | `u` when `box_mirror` |
+| --- | --- | --- | --- |
+| **+X** | +Y | +Z | +Y *(unchanged)* |
+| **-X** | +Y | +Z | **-Y** |
+| **+Y** | +X | +Z | **-X** |
+| **-Y** | +X | +Z | +X *(unchanged)* |
+| **+Z** (top) | +X | +Y | +X *(unchanged)* |
+| **-Z** (bottom) | +X | +Y | **-X** |
+
+**Why that is the default, and what the checkbox is for.** The default column is exactly what the
+`Planar` projection of each axis already gives: `Planar` X is `(y, z)`, Y is `(x, z)`, Z is
+`(x, y)`, taken in ascending axis order. So a box fill's **+X, -Y and +Z faces are identical, leaf
+for leaf, to a flat projection along X, Y and Z** — which the test
+`the top face agrees, leaf for leaf, with a flat projection along +Z` pins as a consequence rather
+than a restatement. The price is that on the opposite three faces you are looking at that same
+projection **from behind**, so it reads mirrored — the same thing `Through`'s far face does, and
+for the same reason.
+
+Ticking the box flips `u` on `-X`, `+Y` and `-Z`, which is the same statement as **`u = v x n` on
+every face**: with `v` up the screen and `n` pointing at you, `v x n` is screen-right, and that is
+the condition for text to read the right way round from outside. So: **leave it off** when you want
+the box faces to agree with flat projections and do not care which way round the back reads;
+**tick it** when the image has text or a logo and should read correctly on all six sides.
+
+`flip_u` and `flip_v` still apply globally on top, as they do for every other projection.
+
+**What `axis` and `axis_negative` do: nothing.** Every face is its own axis. The dialog disables
+both controls, and the test `the axis and the negative-side flag make no difference to it` asserts
+the painting is byte-identical across all three axes and both signs — so a disabled control cannot
+be a control that silently matters.
+
+**What to expect, on a cube, with the two sample images.**
+
+* **`quadrants.png`** (a 2x2 diagonal checker: yellow top-left and bottom-right, dark top-right and
+  bottom-left). Every face gets the whole checker. With the box **unticked**, the yellow runs on
+  the "upper-left to lower-right" diagonal on the top, the front (-Y) and the right (+X), and on
+  the *other* diagonal on the back (+Y), the left (-X) and the bottom — because a horizontal flip
+  turns this checker into its opposite. That flip is the visible signature of the default rule.
+  **Tick the box** and all six faces show yellow on the same diagonal as seen from outside.
+* **`bands_rgb.png`** (three vertical bands: red, green, blue, left to right). The colour depends
+  only on `u`, so every face gets three stripes running **top to bottom** on the four sides (`v` is
+  +Z there) and **parallel to Y** on the top and the bottom. **Unticked**: red is at low X on the
+  front, low Y on the right, and low X on the top and the bottom — so the stripes line up
+  continuously across the front/top edge — but the back and the left read blue-green-red left to
+  right, i.e. reversed. **Ticked**: every face reads red-green-blue left to right when you look at
+  it square-on from outside. Either way the picture **restarts** at the vertical corner edges — a
+  tri-planar projection repeats the image per face and is not continuous around the part; that is
+  what it is, not a defect.
 
 ### Texture coordinates
 
