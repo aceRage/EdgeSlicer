@@ -735,13 +735,48 @@ void gather_enforcers_blockers(GlobalModelInfo &result, const PrintObject *po) {
       << "SeamPlacer: build AABB trees for raycasting enforcers/blockers: end";
 }
 
+// The seam positions that steer the seam toward one side of the bed. They are all one rule with a
+// different axis and sign: score the candidate by `sign * position[axis]` and prefer the largest
+// score. Back is +Y, Right is +X, Left is -X. Returns false for every other setup, which then falls
+// through to the visibility/angle penalty.
+// The sign is applied as a multiplication by exactly +/-1.0f, so the Back path is bit-for-bit the
+// comparison it was before this became a parameter.
+static inline bool directional_seam_axis(SeamPosition setup, int &axis, float &sign)
+{
+  // Every value is listed and there is no default, so a new SeamPosition makes the compiler ask
+  // whether it belongs here.
+  switch (setup) {
+  case spRear:  axis = 1; sign =  1.0f; return true;
+  case spLeft:  axis = 0; sign = -1.0f; return true;
+  case spRight: axis = 0; sign =  1.0f; return true;
+  case spNearest:
+  case spAligned:
+  case spAlignedBack:
+  case spRandom:
+    break;
+  }
+  return false;
+}
+
 struct SeamComparator {
   SeamPosition setup;
   float angle_importance;
+  // Set for spRear/spLeft/spRight; picks out the coordinate the seam is pulled along.
+  bool  directional;
+  int   directional_axis;
+  float directional_sign;
   explicit SeamComparator(SeamPosition setup) :
                                                 setup(setup) {
     angle_importance =
         setup == spNearest ? SeamPlacer::angle_importance_nearest : SeamPlacer::angle_importance_aligned;
+    directional_axis = 1;
+    directional_sign = 1.0f;
+    directional      = directional_seam_axis(setup, directional_axis, directional_sign);
+  }
+
+  // The coordinate this setup maximises, for a directional setup. Meaningless otherwise.
+  float directional_score(const SeamCandidate &c) const {
+    return directional_sign * c.position[directional_axis];
   }
 
   // Standard comparator, must respect the requirements of comparators (e.g. give same result on same inputs) for sorting usage
@@ -770,8 +805,12 @@ struct SeamComparator {
       return false;
     }
 
-    if (setup == SeamPosition::spRear && a.position.y() != b.position.y()) {
-      return a.position.y() > b.position.y();
+    if (directional) {
+      const float score_a = directional_score(a);
+      const float score_b = directional_score(b);
+      if (score_a != score_b) {
+        return score_a > score_b;
+      }
     }
 
     float distance_penalty_a = 0.0f;
@@ -832,8 +871,8 @@ struct SeamComparator {
       return true;
     }
 
-    if (setup == SeamPosition::spRear) {
-      return a.position.y() + SeamPlacer::seam_align_score_tolerance * 5.0f > b.position.y();
+    if (directional) {
+      return directional_score(a) + SeamPlacer::seam_align_score_tolerance * 5.0f > directional_score(b);
     }
 
     float penalty_a = a.overhang + a.visibility
@@ -1357,7 +1396,7 @@ void SeamPlacer::align_seam_points(const PrintObject *po, const SeamPlacerImpl::
         last_point_pos = current.position;
       }
 
-      if (comparator.setup == spRear) {
+      if (comparator.directional) {
         total_length *= 0.3f;
       }
 
@@ -1479,7 +1518,8 @@ void SeamPlacer::init(const Print &print, std::function<void(void)> throw_if_can
           << "SeamPlacer: pick_seam_point : end";
     }
     throw_if_canceled_func();
-    if (configured_seam_preference == spAligned || configured_seam_preference == spRear || configured_seam_preference == spAlignedBack) {
+    if (configured_seam_preference == spAligned || configured_seam_preference == spRear || configured_seam_preference == spAlignedBack ||
+        configured_seam_preference == spLeft || configured_seam_preference == spRight) {
       BOOST_LOG_TRIVIAL(debug)
           << "SeamPlacer: align_seam_points : start";
       align_seam_points(po, comparator);

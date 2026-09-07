@@ -17,6 +17,7 @@ add_executable(${_TEST_NAME}_tests
 	test_support_groups.cpp
 	test_over_support_surfaces.cpp
 	test_offset_layers.cpp
+	test_seam_position.cpp
 	test_tree_support_determinism.cpp
 	test_bed_temperature.cpp
 	test_trianglemesh.cpp
