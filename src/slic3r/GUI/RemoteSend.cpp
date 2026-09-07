@@ -1014,7 +1014,7 @@ static void run_bambu(std::shared_ptr<Prepared> p, Sink& sink)
                 w->err   = obj->print_error;
                 w->state = "error";
                 wxString msg;
-                if (HMSQuery* q = wxGetApp().get_hms_query(); q && q->query_print_error_msg(w->err, msg)) w->err_text = msg.ToUTF8().data();
+                if (HMSQuery* q = wxGetApp().get_hms_query(); q && q->query_print_error_msg(obj->dev_id, w->err, msg)) w->err_text = msg.ToUTF8().data();
             } else if (obj->is_in_printing()) {
                 w->state = "printing";
             }

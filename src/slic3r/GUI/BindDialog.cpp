@@ -770,7 +770,8 @@ PingCodeBindDialog::~PingCodeBindDialog() {
          json j = json::parse(str.utf8_string());
          if (j.contains("err_code")) {
              int error_code = j["err_code"].get<int>();
-             wxGetApp().get_hms_query()->query_print_error_msg(error_code, extra);
+             const std::string dev_id = m_machine_info ? m_machine_info->dev_id : std::string();
+             wxGetApp().get_hms_query()->query_print_error_msg(dev_id, error_code, extra);
          }
      }
      catch (...) {
