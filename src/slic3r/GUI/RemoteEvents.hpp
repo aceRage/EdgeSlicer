@@ -63,6 +63,11 @@ struct Memory
 {
     Snapshot                         last;
     std::map<std::string, long long> last_emit; // "<printer>|<kind>|<code or job>" -> snapshot time
+    // The poll at which each printer was seeded: the first snapshot in which the watcher could
+    // actually see its print state (watched and online). Until a printer has one, and until a
+    // later poll has run, nothing it does can produce an event - the first sight only seeds.
+    // A printer that goes offline or unwatched loses its entry and is seeded again on its return.
+    std::map<std::string, long long> seen_at;
 };
 
 // The transition rule, and the only place an event is decided: the previous memory plus the
@@ -77,6 +82,10 @@ std::vector<Event> step(Memory& mem, const Snapshot& now, long long cooldown_ms 
 void heartbeat();
 void stop();
 // This instance's own recent events (the last 50), for GET /api/events?since=.
+// The answer also carries `watcher`: when the last poll finished, how long it took, and one entry
+// per printer with the poll that seeded it. That is the honest answer to "is this printer being
+// watched yet?" - a caller that needs a state change to be reported rather than silently seeded
+// waits for the printer to carry a seen_at and for last_poll to have moved past it.
 nlohmann::json recent(int since);
 
 // Test hook (the SNORCA_DEBUG_ROUTES back door): run `step` over snapshots handed in as JSON and

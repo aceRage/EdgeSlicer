@@ -410,6 +410,14 @@ struct Cached
 static std::mutex                    s_status_mutex;
 static std::map<std::string, Cached> s_status;
 static const long long               STATUS_TTL_MS = 4000;
+// A printer that did not answer is not asked again for half a minute - the same rule
+// RemoteControl::ask_again applies to print hosts. The probe below spends its connect timeout on
+// every address that is switched off, and the event watcher polls every five seconds: without
+// this, one printer on the shelf costs three seconds of every poll for as long as it is off.
+// The cache entry is kept and served as it stands, so the printer stays in every list with
+// online = false; status_now() (fresh) ignores the backoff, because that is the call made right
+// after telling a printer to do something.
+static const long long               OFFLINE_BACKOFF_MS = 30000;
 
 // "FEE5A5FF" (RRGGBBAA) or an ARGB integer -> "#RRGGBB".
 static std::string color_of(const json& cfg, size_t i)
@@ -530,13 +538,19 @@ static Cached probe_cached(const Device& d, bool fresh = false)
     {
         std::lock_guard<std::mutex> lock(s_status_mutex);
         auto                        it = s_status.find(d.id);
-        if (!fresh && it != s_status.end() && now_ms() - it->second.when < STATUS_TTL_MS)
-            return it->second;
-        if (!fresh && it != s_status.end() && s_probing.count(d.id))
-            return it->second; // stale, but somebody is already refreshing it
+        if (!fresh && it != s_status.end()) {
+            const long long age = now_ms() - it->second.when;
+            if (age < STATUS_TTL_MS)
+                return it->second;
+            if (!it->second.st.online && age < OFFLINE_BACKOFF_MS)
+                return it->second; // off the last time we asked; do not pay the timeout again yet
+            if (s_probing.count(d.id))
+                return it->second; // stale, but somebody is already refreshing it
+        }
         s_probing.insert(d.id);
     }
-    Cached c;
+    Cached          c;
+    const long long started = now_ms();
     try {
         c.st = probe(d, &c.heads);
     } catch (...) {
@@ -545,6 +559,10 @@ static Cached probe_cached(const Device& d, bool fresh = false)
         throw;
     }
     c.when = now_ms();
+    // What a poll actually spent on this printer, for the watcher's own timing line.
+    if (c.when - started > 1000)
+        BOOST_LOG_TRIVIAL(debug) << "[SnapmakerLan] probing " << d.id << " at " << d.ip << " took " << (c.when - started)
+                                 << " ms" << (c.st.online ? "" : " (no answer; not asked again for 30 s)");
     {
         std::lock_guard<std::mutex> lock(s_status_mutex);
         s_status[d.id] = c;

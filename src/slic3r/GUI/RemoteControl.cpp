@@ -556,35 +556,58 @@ static void fill_from_heaters(const json& status, json& p)
     if (!nozzles.empty()) p["nozzles"] = nozzles;
 }
 
+// One address's answer, or the fact that it was not asked (the backoff).
+struct HostAnswer
+{
+    bool        asked { false };
+    json        status, stats;
+    std::string error;
+};
+
 void describe_hosts(const std::vector<HostTarget>& targets, json& printers)
 {
     if (targets.empty() || !printers.is_array()) return;
-    for (const HostTarget& t : targets) {
+    // Side by side, not one after the other: an address that is off must cost this call its own
+    // two-second timeout and not everybody else's as well. Waiting for all of them is therefore
+    // bounded by the longest single request, which is what the caller (the /api/printers probe and
+    // the event watcher's five-second poll) can afford.
+    std::vector<std::future<HostAnswer>> pending;
+    pending.reserve(targets.size());
+    for (const HostTarget& t : targets)
+        pending.push_back(std::async(std::launch::async, [t]() {
+            HostAnswer a;
+            if (t.base.empty() || !ask_again(t.base)) return a;
+            a.asked = true;
+            // Read-only: what the printer says it is doing and how warm it is (the objects the LAN
+            // list asks a Snapmaker for; extruder1.. answer empty where there is no such nozzle).
+            // Never a command.
+            std::string body;
+            if (moonraker_http(t.base + "/printer/objects/query?print_stats&heater_bed&extruder&extruder1&extruder2&extruder3",
+                               false, body, a.error, 2)) {
+                const json j = parse_or_raw(body);
+                if (j.is_object()) {
+                    a.status = j.value("result", json::object()).value("status", json::object());
+                    if (a.status.is_object()) a.stats = a.status.value("print_stats", json::object());
+                }
+            }
+            return a;
+        }));
+    for (size_t i = 0; i < targets.size(); ++i) {
+        const HostTarget& t = targets[i];
+        HostAnswer        a;
+        try {
+            a = pending[i].get();
+        } catch (...) {}
         json* entry = nullptr;
         for (json& p : printers)
             if (p.is_object() && p.value("id", std::string()) == t.id) { entry = &p; break; }
         if (!entry || t.base.empty()) continue;
-        std::string body, error;
-        json        stats, status;
-        if (ask_again(t.base)) {
-            // Read-only: what the printer says it is doing and how warm it is (the objects the LAN
-            // list asks a Snapmaker for; extruder1.. answer empty where there is no such nozzle).
-            // Never a command.
-            if (moonraker_http(t.base + "/printer/objects/query?print_stats&heater_bed&extruder&extruder1&extruder2&extruder3",
-                               false, body, error, 2)) {
-                const json j = parse_or_raw(body);
-                if (j.is_object()) {
-                    status = j.value("result", json::object()).value("status", json::object());
-                    if (status.is_object()) stats = status.value("print_stats", json::object());
-                }
-            }
-            const bool ok = stats.is_object() && !stats.empty();
-            remember_probe(t.base, ok, ok ? stats.value("state", std::string()) : std::string());
-        }
-        const bool answered = stats.is_object() && !stats.empty();
+        const std::string& error    = a.error;
+        const bool         answered = a.stats.is_object() && !a.stats.empty();
+        if (a.asked) remember_probe(t.base, answered, answered ? a.stats.value("state", std::string()) : std::string());
         if (answered) {
-            fill_from_print_stats(stats, *entry);
-            fill_from_heaters(status, *entry);
+            fill_from_print_stats(a.stats, *entry);
+            fill_from_heaters(a.status, *entry);
         } else {
             // It is not a Moonraker printer, or it is off: leave every button off rather than guess.
             (*entry)["can_pause"]   = false;

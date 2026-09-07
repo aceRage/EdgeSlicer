@@ -12,10 +12,13 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdio>
 #include <deque>
+#include <memory>
 #include <mutex>
 #include <thread>
+#include <vector>
 
 #include <wx/utils.h>
 
@@ -29,6 +32,16 @@ using nlohmann::json;
 // pushed to at a few Hz and a Moonraker printer is polled, so anything faster than this buys
 // nothing and costs the GUI thread and the printers' web servers.
 static const long long POLL_MS = 5000;
+
+// How long one poll waits for the LAN printers it asked. It is the longest single request a probe
+// makes (SnapmakerLan::probe asks for the printer's objects with a five-second timeout), so a
+// whole poll can never cost more than one printer's own worst case however many printers there
+// are. A printer slower than that is left at the answer its cache holds; its probe finishes in
+// the background into that same cache and the next poll reads it there.
+static const long long PROBE_BUDGET_MS = 5000;
+
+// A probe worth naming in the poll's timing line.
+static const long long SLOW_PROBE_MS = 1000;
 
 static long long now_ms()
 {
@@ -94,6 +107,13 @@ std::vector<Event> step(Memory& mem, const Snapshot& now, long long cooldown_ms)
     std::vector<Event> out;
     for (const auto& kv : now.printers) {
         const PrinterState& cur = kv.second;
+        // The seeding poll, remembered: the first snapshot in which this printer's state could be
+        // read at all. It says nothing about events - it is what a caller reads to know that the
+        // watcher has this printer in hand, so the next thing it does will be reported.
+        if (cur.watched && cur.online)
+            mem.seen_at.emplace(kv.first, now.at);
+        else
+            mem.seen_at.erase(kv.first);
         auto                prev_it = mem.last.printers.find(kv.first);
         // A printer nobody can see the state of says nothing. Same for one that has only just
         // appeared, or that was offline / unwatched last time: the first watched snapshot seeds the
@@ -176,6 +196,11 @@ std::vector<Event> step(Memory& mem, const Snapshot& now, long long cooldown_ms)
     }
     // Keys of printers that are gone would otherwise accumulate for the life of the process.
     if (mem.last_emit.size() > 256) mem.last_emit.clear();
+    for (auto it = mem.seen_at.begin(); it != mem.seen_at.end();)
+        if (now.printers.count(it->first))
+            ++it;
+        else
+            it = mem.seen_at.erase(it);
     mem.last = now;
     return kept;
 }
@@ -308,16 +333,85 @@ static void snapshot_bambu(Snapshot& s)
 }
 
 // Worker thread: the LAN Snapmakers, over the Moonraker HTTP API they serve themselves. This is
-// the same cached probe /api/printers uses (four-second TTL), so a phone polling the Devices tab
-// and the watcher share the answer instead of asking twice.
-static void snapshot_snapmaker(Snapshot& s)
+// the same cached probe /api/printers uses (four-second TTL, and half a minute of backoff on a
+// printer that did not answer), so a phone polling the Devices tab and the watcher share the answer
+// instead of asking twice.
+//
+// Side by side, not one after the other. Asked in turn, one printer that was switched off added its
+// whole connect timeout to every poll - with three Snapmakers on the LAN and one of them off, the
+// five-second cadence measured thirteen, and a printer that started a job in that gap was seen for
+// the first time already printing, so its start was seeded away instead of announced. Now each
+// device gets its own thread and the poll waits PROBE_BUDGET_MS for all of them together.
+//
+// `slow` collects what to say about the printers that took their time, for the poll's debug line.
+static void snapshot_snapmaker(Snapshot& s, std::string& slow)
 {
-    for (const SnapmakerLan::Device& d : SnapmakerLan::devices()) {
-        SnapmakerLan::Status st;
-        try {
-            st = SnapmakerLan::status(d);
-        } catch (...) {
-            continue;
+    std::vector<SnapmakerLan::Device> list;
+    try {
+        list = SnapmakerLan::devices();
+    } catch (...) {
+        return;
+    }
+    if (list.empty()) return;
+
+    // One slot per device, filled by its own thread. Detached rather than a future: a device that
+    // outruns the budget must not hold this poll open in a destructor - its probe lands in
+    // SnapmakerLan's cache, which is where the next poll finds it.
+    struct Probes
+    {
+        std::mutex                        m;
+        std::condition_variable           cv;
+        std::vector<SnapmakerLan::Status> st;
+        std::vector<bool>                 done;
+        std::vector<long long>            took;
+        size_t                            left { 0 };
+    };
+    auto probes = std::make_shared<Probes>();
+    probes->st.resize(list.size());
+    probes->done.assign(list.size(), false);
+    probes->took.assign(list.size(), 0);
+    probes->left = list.size();
+    for (size_t i = 0; i < list.size(); ++i) {
+        const SnapmakerLan::Device d = list[i];
+        std::thread([probes, d, i]() {
+            const long long        at = now_ms();
+            SnapmakerLan::Status   st;
+            try {
+                st = SnapmakerLan::status(d);
+            } catch (...) {}
+            std::lock_guard<std::mutex> lock(probes->m);
+            probes->st[i]   = st;
+            probes->done[i] = true;
+            probes->took[i] = now_ms() - at;
+            if (probes->left > 0) --probes->left;
+            probes->cv.notify_all();
+        }).detach();
+    }
+
+    std::vector<SnapmakerLan::Status> answers;
+    std::vector<bool>                 done;
+    std::vector<long long>            took;
+    {
+        std::unique_lock<std::mutex> lock(probes->m);
+        probes->cv.wait_for(lock, std::chrono::milliseconds(PROBE_BUDGET_MS), [&probes]() { return probes->left == 0; });
+        answers = probes->st;
+        done    = probes->done;
+        took    = probes->took;
+    }
+
+    std::string note;
+    auto        say = [&note](const std::string& what) { note += (note.empty() ? "" : ", ") + what; };
+    for (size_t i = 0; i < list.size(); ++i) {
+        const SnapmakerLan::Device& d  = list[i];
+        SnapmakerLan::Status        st = answers[i];
+        if (!done[i]) {
+            // Still out. This poll's answer is whatever the cache holds; a printer nobody has ever
+            // reached has none, and offline is exactly what the rule must be told in that case.
+            say(d.id + " over budget");
+            SnapmakerLan::Status cached;
+            st = SnapmakerLan::cached_status(d, cached) ? cached : SnapmakerLan::Status();
+        } else if (took[i] > SLOW_PROBE_MS) {
+            say(d.id + " " + std::to_string(took[i]) + " ms" + (st.online ? "" : " (no answer)"));
         }
         PrinterState p;
         p.id        = "sm:" + d.id;
@@ -335,6 +429,7 @@ static void snapshot_snapmaker(Snapshot& s)
         }
         s.printers[p.id] = p;
     }
+    if (!note.empty()) slow += (slow.empty() ? "" : "; ") + note;
 }
 
 // Worker thread: the printer preset's print host and the Snapmaker connected on the PC's Device
@@ -390,7 +485,11 @@ static std::deque<json> s_recent;          // this instance's own ring, for GET 
 static int              s_next_local = 1;
 static std::atomic<bool> s_busy { false }; // one poll in flight at a time
 static std::atomic<bool> s_stop { false };
-static long long        s_last_poll = 0;
+static long long        s_last_poll = 0;   // GUI thread: when the last poll was started
+// Guarded by s_mutex, for GET /api/events: when the last poll finished (the snapshot's own time)
+// and how long it took. Zero until the watcher has completed one.
+static long long        s_last_done = 0;
+static long long        s_last_took = 0;
 
 static void remember(const json& e)
 {
@@ -411,6 +510,29 @@ json recent(int since)
         if (id > since) out["events"].push_back(e);
     }
     out["last_id"] = last;
+    // What the live watcher has actually seen. `last_poll` is the snapshot time of the last
+    // completed poll and `seen_at` the poll that seeded each printer, so a caller can tell the
+    // difference between "the watcher does not know this printer yet" (nothing it does will be
+    // reported - the first sight only seeds) and "it is being watched" (the next change is an
+    // event). No addresses and no names: this answer is proxied to the phone.
+    json w;
+    w["poll_ms"]      = (long long) POLL_MS;
+    w["last_poll"]    = s_last_done;
+    w["last_poll_ms"] = s_last_took;
+    w["printers"]     = json::array();
+    for (const auto& kv : s_memory.last.printers) {
+        const PrinterState& p = kv.second;
+        json                j;
+        j["id"]      = p.id;
+        j["kind"]    = p.kind;
+        j["online"]  = p.online;
+        j["watched"] = p.watched;
+        j["state"]   = p.state;
+        auto it      = s_memory.seen_at.find(kv.first);
+        if (it != s_memory.seen_at.end()) j["seen_at"] = it->second;
+        w["printers"].push_back(j);
+    }
+    out["watcher"] = w;
     return out;
 }
 
@@ -437,13 +559,23 @@ void heartbeat()
     // it may run on the GUI thread, and the whole point of the watcher is that nobody waits on it.
     s_busy = true;
     std::thread([snap, targets]() {
+        const long long began = now_ms();
+        long long       lan_ms = 0, hosts_ms = 0;
+        std::string     slow;
         try {
-            snapshot_snapmaker(*snap);
+            const long long a = now_ms();
+            snapshot_snapmaker(*snap, slow);
+            const long long b = now_ms();
             snapshot_hosts(*snap, *targets);
+            const long long c = now_ms();
+            lan_ms            = b - a;
+            hosts_ms          = c - b;
             std::vector<Event> events;
             {
                 std::lock_guard<std::mutex> lock(s_mutex);
-                events = step(s_memory, *snap);
+                events      = step(s_memory, *snap);
+                s_last_done = snap->at;
+                s_last_took = now_ms() - began;
             }
             const long pid = (long) wxGetProcessId();
             for (const Event& e : events) {
@@ -465,6 +597,11 @@ void heartbeat()
         } catch (const std::exception& ex) {
             BOOST_LOG_TRIVIAL(debug) << "RemoteEvents: poll failed: " << ex.what();
         } catch (...) {}
+        // The cadence, in the log: the poll is meant to cost a fraction of POLL_MS, and when it
+        // does not this line says which printer took the time.
+        BOOST_LOG_TRIVIAL(debug) << "RemoteEvents: poll took " << (now_ms() - began) << " ms (" << snap->printers.size()
+                                 << " printers; lan " << lan_ms << " ms, hosts " << hosts_ms << " ms)"
+                                 << (slow.empty() ? std::string() : "; slow: " + slow);
         s_busy = false;
     }).detach();
 }
