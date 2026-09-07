@@ -19,6 +19,7 @@
 #include "TextConfiguration.hpp"
 #include "EmbossShape.hpp"
 #include "TriangleSelector.hpp"
+#include "ImageFill.hpp"
 
 //BBS: add bbs 3mf
 #include "Format/bbs_3mf.hpp"
@@ -1539,6 +1540,13 @@ public:
     std::shared_ptr<ModelInfo> model_info = nullptr;
     std::shared_ptr<ModelProfileInfo> profile_info = nullptr;
 
+    // Image Fill (Phase 2): the content-hashed image store. A PLAIN VALUE MEMBER, not an
+    // ObjectBase and not a pointer to one, so it consumes no global object id and cannot shift
+    // "; model label id" - the plan's section 5.4 rule, gated by Bar A. Two parts using the same
+    // picture share one entry because the key is the content's SHA-256; the 3MF writes each
+    // entry once as Metadata/image_fill/<sha256>.png.
+    ImageAssetStore image_assets;
+
     //makerlab information
     std::string mk_name;
     std::string mk_version;
@@ -1620,6 +1628,20 @@ public:
     // Ultra (glTF textures): per-face colours across ALL volumes of the single imported object,
     // with a running face offset. Same encoding as obj_import_face_color_deal.
     static bool    import_multi_volume_face_color_deal(const std::vector<unsigned char> &face_filament_ids, const unsigned char &first_extruder_id, Model *model);
+    // Image Fill (Phase 2): the same thing, but the texture was sampled per SUB-facet. The ids
+    // decided by the colour dialog (or by the headless matcher) fix WHICH filaments exist and
+    // what colour each stands for; the ImageFill service then chooses, per sub-facet, which of
+    // those the sub-facet's own colour is nearest to - measured in Oklab by the phase 1 solver
+    // rather than by ObjColorMatch's CIE76 pass, and written through the same bitstream encoder
+    // the Image fill dialog uses. `sub_face_colors` holds 4^depth entries per triangle across
+    // every volume, in ImageFill's leaf order. Falls back to the per-facet path above when the
+    // lengths do not line up, so a reader that produced no sub-facet colours loses nothing.
+    static bool    import_multi_volume_face_color_deal(const std::vector<unsigned char> &face_filament_ids,
+                                                       const std::vector<RGBA>          &face_colors,
+                                                       const std::vector<RGBA>          &sub_face_colors,
+                                                       int                               depth,
+                                                       const unsigned char              &first_extruder_id,
+                                                       Model                            *model);
     static double findMaxSpeed(const ModelObject* object);
     static double getThermalLength(const ModelVolume* modelVolumePtr);
     static double getThermalLength(const std::vector<ModelVolume*> modelVolumePtrs);

@@ -7,6 +7,7 @@
 
 #include "libslic3r/Format/GLTF.hpp"
 #include "libslic3r/Model.hpp"
+#include "libslic3r/TriangleSelector.hpp"
 #include "libslic3r/ObjColorUtils.hpp"
 #include "libslic3r/TriangleMesh.hpp"
 
@@ -704,10 +705,38 @@ SCENARIO("A baseColorTexture becomes per-face colours", "[gltf]")
             REQUIRE(stub.seen.size() == 12);
             const ModelVolume *v = model.objects.front()->volumes.front();
             REQUIRE(v->is_mm_painted());
-            // Filament 2 is CONST_FILAMENTS[2] == "8" and filament 3 is "0C"; six triangles each.
+            // Image Fill (Phase 2) changed this on purpose. Before: one filament per TRIANGLE,
+            // written as CONST_FILAMENTS' hex string, so this counted `get_triangle_as_string(i)`
+            // == "8" (filament 2) and "0C" (filament 3), six each. Now the texture is sampled at
+            // 16 points inside every triangle (GLTF_TEXTURE_SUBDIVISION = 2) and the ImageFill
+            // service chooses per sub-facet, so each triangle carries a four-way split tree and a
+            // per-triangle string is no longer the right question. Count LEAVES instead: three box
+            // faces are wholly in the red half of the texture and three wholly in the blue half, so
+            // 6 x 16 = 96 leaves of each.
+            TriangleSelector sel(v->mesh());
+            sel.deserialize(v->mmu_segmentation_facets.get_data(), /*needs_reset=*/true);
+            REQUIRE(sel.num_facets(EnforcerBlockerType(2)) == 96);
+            REQUIRE(sel.num_facets(EnforcerBlockerType(3)) == 96);
+            REQUIRE(sel.num_facets(EnforcerBlockerType(1)) == 0);
+        }
+
+        THEN("the per-facet path is still there, and still writes what it always wrote")
+        {
+            // The sub-facet path declines whenever the arrays do not line up or fewer than two
+            // filaments were chosen, and the old call is then what runs. Exercise it directly, so
+            // the fallback is covered by a test and not only by an argument.
+            Slic3r::Model plain;
+            GltfInfo      pinfo;
+            std::string   pmessage;
+            REQUIRE(load_ok("textured_two_regions.glb", plain, pinfo, pmessage));
+            std::vector<unsigned char> ids;
+            for (const RGBA &c : pinfo.face_colors)
+                ids.push_back((unsigned char) (c[0] > 0.9f ? 2 : 3));
+            REQUIRE(Slic3r::Model::import_multi_volume_face_color_deal(ids, 2, &plain));
+            const ModelVolume *pv = plain.objects.front()->volumes.front();
             size_t painted_2 = 0, painted_3 = 0;
-            for (int i = 0; i < (int) v->mesh().its.indices.size(); ++i) {
-                const std::string t = v->mmu_segmentation_facets.get_triangle_as_string(i);
+            for (int i = 0; i < (int) pv->mesh().its.indices.size(); ++i) {
+                const std::string t = pv->mmu_segmentation_facets.get_triangle_as_string(i);
                 if (t == "8") ++painted_2;
                 else if (t == "0C") ++painted_3;
             }

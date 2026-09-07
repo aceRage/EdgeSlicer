@@ -1097,6 +1097,12 @@ bool PrintObject::invalidate_state_by_config_options(
             || opt_key == "hole_to_polyhole_twisted"
             ) {
             steps.emplace_back(posSlice);
+        } else if (opt_key == "image_fill_params" || opt_key == "image_fill_detail") {
+            // Image Fill's annotation and the dialog's default facet size. Both are descriptive:
+            // the slicer reads the painting in mmu_segmentation_facets, which invalidates on its
+            // own, and never reads these. Nothing is invalidated here on purpose - without this
+            // branch the legacy fallback at the end of the chain would invalidate every step for
+            // an edit that cannot change a single extrusion.
         } else if (opt_key == "enable_support") {
             steps.emplace_back(posSupportMaterial);
             // Ultra (over-support surfaces / walls): the classifier reads has_support(), so turning

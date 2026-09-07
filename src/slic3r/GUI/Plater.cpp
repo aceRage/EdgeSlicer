@@ -204,6 +204,7 @@
 #include "FileArchiveDialog.hpp"
 #include "StepMeshDialog.hpp"
 #include "ColorSplitDialog.hpp"
+#include "ImageFillDialog.hpp"
 #include "CloneDialog.hpp"
 #include "WebPreprintDialog.hpp"
 
@@ -25454,6 +25455,127 @@ bool Plater::has_assmeble_view() const { return p->has_assemble_view(); }
 bool Plater::can_replace_with_stl() const { return p->can_replace_with_stl(); }
 bool Plater::can_mirror() const { return p->can_mirror(); }
 bool Plater::can_split(bool to_objects) const { return p->can_split(to_objects); }
+
+// Image Fill (Phase 2). One part, at least one loaded filament, and no painting gizmo holding
+// the very annotation this is about to rewrite.
+bool Plater::can_apply_image_fill() const
+{
+    const int obj_idx = get_selection().get_object_idx();
+    if (obj_idx < 0 || obj_idx >= int(model().objects.size()))
+        return false;
+    for (const ModelVolume *v : model().objects[obj_idx]->volumes)
+        if (v->is_model_part() && !v->mesh().its.indices.empty())
+            return true;
+    return false;
+}
+
+void Plater::apply_image_fill()
+{
+    const int obj_idx = get_selection().get_object_idx();
+    if (obj_idx < 0 || obj_idx >= int(model().objects.size()))
+        return;
+    ModelObject &object = *model().objects[obj_idx];
+
+    if (const GLCanvas3D *canvas = canvas3D()) {
+        const GLGizmosManager::EType gizmo = canvas->get_gizmos_manager().get_current_type();
+        if (gizmo == GLGizmosManager::MmSegmentation) {
+            get_notification_manager()->push_plater_warning_notification(
+                _u8L("Close the colour-painting tool before applying an image fill."));
+            return;
+        }
+    }
+
+    // The part: the selected volume when one is selected, else the object's first model part.
+    ModelVolume *volume = nullptr;
+    // Selection has no "which volume" accessor of its own; the object list's own helper reads it
+    // off the first selected GLVolume, which is what Plater::priv::get_selected_volume_idx does.
+    const int vol_idx = p->get_selected_volume_idx();
+    if (vol_idx >= 0 && vol_idx < int(object.volumes.size()) && object.volumes[vol_idx]->is_model_part())
+        volume = object.volumes[vol_idx];
+    if (volume == nullptr)
+        for (ModelVolume *v : object.volumes)
+            if (v->is_model_part() && !v->mesh().its.indices.empty()) { volume = v; break; }
+    if (volume == nullptr)
+        return;
+
+    // Every loaded filament, physical and mixed alike - a mixed row is just another id with a
+    // colour, so the image can use one without Image Fill knowing what a mix is.
+    std::vector<GUI::ImageFillFilament> filaments;
+    if (const PresetBundle *pb = wxGetApp().preset_bundle) {
+        const ConfigOptionStrings *co = pb->project_config.option<ConfigOptionStrings>("filament_colour");
+        if (co != nullptr)
+            for (size_t i = 0; i < co->values.size(); ++i) {
+                ColorRGBA rgba;
+                if (!decode_color(co->values[i], rgba))
+                    rgba = ColorRGBA(1.f, 1.f, 1.f, 1.f);
+                GUI::ImageFillFilament f;
+                f.id    = int(i) + 1;
+                f.color = {rgba.r(), rgba.g(), rgba.b()};
+                filaments.push_back(f);
+            }
+    }
+    if (filaments.empty()) {
+        get_notification_manager()->push_plater_warning_notification(_u8L("No filaments are loaded."));
+        return;
+    }
+
+    // The states the user has already painted, offered as "apply only to these faces".
+    std::vector<int> painted;
+    {
+        const auto &data = volume->mmu_segmentation_facets.get_data();
+        for (size_t st = 1; st < data.used_states.size(); ++st)
+            if (data.used_states[st])
+                painted.push_back(int(st));
+    }
+
+    ImageFillParams initial;
+    if (!image_fill_params_of(*volume, initial)) {
+        initial = ImageFillParams();
+        // The project's default facet size; 0 means "the model's own triangles".
+        DynamicPrintConfig base = wxGetApp().preset_bundle->full_config();
+        base.apply(object.config.get(), true);
+        if (const ConfigOptionFloat *d = base.option<ConfigOptionFloat>("image_fill_detail"))
+            initial.detail_mm = float(d->value);
+    }
+
+    GUI::ImageFillDialog dlg(this, filaments, initial, &model().image_assets, volume->mesh().its,
+                             volume->mmu_segmentation_facets.get_data(), painted);
+    if (dlg.ShowModal() != wxID_OK)
+        return;
+    const ImageFillParams params = dlg.params();
+
+    std::vector<std::array<float, 3>> colors;
+    std::vector<int>                  ids;
+    for (const GUI::ImageFillFilament &f : filaments)
+        if (std::find(params.allowed.begin(), params.allowed.end(), f.id) != params.allowed.end()) {
+            colors.push_back(f.color);
+            ids.push_back(f.id);
+        }
+
+    take_snapshot("Apply image fill");
+    const ImageFillResult res = image_fill_apply(*volume, params, model().image_assets, colors, ids);
+    if (!res.ok) {
+        show_error(this, from_u8(res.error.empty() ? "The image could not be applied." : res.error));
+        return;
+    }
+    // The store keeps only what something still points at, so a picture the user tried and
+    // replaced does not ride along in the project.
+    {
+        std::vector<std::string> keep;
+        for (const ModelObject *o : model().objects)
+            for (const ModelVolume *v : o->volumes) {
+                ImageFillParams pv;
+                if (image_fill_params_of(*v, pv) && !pv.asset.empty())
+                    keep.push_back(pv.asset);
+            }
+        model().image_assets.retain(keep);
+    }
+    get_notification_manager()->push_notification(
+        format(_u8L("Image fill applied: %1% facets, %2% filaments."), res.facets_painted,
+               res.filaments_used.size()));
+    update();
+    object_list_changed();
+}
 
 bool Plater::can_split_by_color() const
 {
