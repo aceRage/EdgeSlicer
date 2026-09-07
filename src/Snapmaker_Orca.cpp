@@ -3183,6 +3183,36 @@ int CLI::run(int argc, char **argv)
         BOOST_LOG_TRIVIAL(warning) << boost::format("no filament colors found in projects");
     }
 
+    // Ultra: filament_colour is a PROJECT option, not part of a filament preset (it is commented
+    // out of Preset::filament_options), so slicing from --filament-presets / --load-filaments alone
+    // never puts it in the config at all, and the engine falls back to the one-entry
+    // PrintConfig default while every other per-filament vector (filament_type, filament_ids,
+    // filament_settings_id, ...) has filament_count entries. The engine takes
+    // filament_colour.size() as THE filament count -- PresetBundle derives num_filaments from it,
+    // and for the GUI PresetBundle::update_multi_material_filament_presets keeps it aligned to the
+    // filament list, which is why only the CLI was affected. Left short,
+    // ToolOrdering::prepare_flush_matrices builds a 1x1 flush matrix per nozzle and
+    // FilamentGroup::calc_one_change_budget then indexes it by real filament id, reading past the
+    // end (0xC0000005) on the dual-nozzle machines that run the grouper (H2D/H2C/X2D) as soon as a
+    // second filament is in use.
+    //
+    // This runs AFTER the flush-volume block on purpose: that block is entered only when the
+    // project already carries colours (or --filament-colour was given), and it sizes
+    // flush_volumes_matrix filament_count x filament_count, which is a single-nozzle shape. Adding
+    // the colours before it would pull dual-nozzle slices into that branch and hand
+    // prepare_flush_matrices a matrix half the size it slices per nozzle. Leaving the branch alone
+    // keeps the 4x4 PrintConfig default, which every nozzle can be sliced out of.
+    if (filament_count > 0) {
+        ConfigOptionStrings *filament_colors_option = m_print_config.option<ConfigOptionStrings>("filament_colour", true);
+        std::vector<std::string> &filament_colors = filament_colors_option->values;
+        if ((int) filament_colors.size() < filament_count) {
+            const std::string pad_color = filament_colors.empty() ? std::string("#F2754E") : filament_colors.back();
+            BOOST_LOG_TRIVIAL(info) << boost::format("filament_colour has %1% entries for %2% filaments, padding with %3%")
+                                           % filament_colors.size() % filament_count % pad_color;
+            filament_colors.resize(filament_count, pad_color);
+        }
+    }
+
     //BBS: set default to ptFFF
     if (printer_technology == ptUnknown)
         printer_technology = ptFFF;
