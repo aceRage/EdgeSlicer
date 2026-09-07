@@ -365,17 +365,17 @@ from `snorca_hubtest/dd_lan`. The user's live install and data directory were ne
 `libslic3r_tests`:
 
 ```
-test cases:   639 |   637 passed | 2 failed as expected
-assertions: 72946 | 72944 passed | 2 failed as expected
+test cases:   642 |   640 passed | 2 failed as expected
+assertions: 73035 | 73033 passed | 2 failed as expected
 ```
 
 The two expected failures are the pre-existing pair in `tests/libslic3r/test_mixed_filament.cpp`.
-Phase 1 was **628 cases** with the same two, so this branch adds **11**, all of them in
+Phase 1 was **628 cases** with the same two, so this branch adds **14**, all of them in
 `tests/libslic3r/test_image_fill.cpp` and all of them in the default run:
 
 | case | what it pins |
 | --- | --- |
-| asset hash | the three fixtures' SHA-256s against `make_fixtures.py`'s own output, the empty-input hash, dedupe, `retain()`, and that the decoded pixels are the ones written |
+| asset hash | the five fixtures' SHA-256s against `make_fixtures.py`'s own output, the empty-input hash, dedupe, `retain()`, and that the decoded pixels are the ones written. `bands3.png` (three vertical bands) and `wrap4.png` (four bands offset by half a band, so each side of a cube falls in the middle of one) were added for the projection tests |
 | projections | known points to known `u`,`v` for planar on each axis, cylindrical on Z and on X, the flips, and MeshUV declining to guess |
 | the quadrants | end to end: a 2 x 2 picture on a 4 x 4 mm quad at depth 3 must put each colour in the right quadrant, read back through the fork's decoder |
 | mesh UVs | the same quad with UVs that rotate the picture a quarter turn, so a projection that ignored them could not pass both |
@@ -386,6 +386,9 @@ Phase 1 was **628 cases** with the same two, so this branch adds **11**, all of 
 | `[glb]` | the before/after of §6.5 |
 | `[barb]` | writes the Bar B project of §6.3, asserting the painting first |
 | `[selection]` | a face selection is a merge: the unselected facets' bits are carried over verbatim, only four of the cube's twelve triangles carry anything, and a selection nothing is painted with is refused |
+| `[faces]` flat | a flat fill along +Z on a cube touches the top face and no other; `axis_negative` moves it to the bottom; `Through` gives top **and** bottom and still not the sides; `All` gives all six; and the predicate itself is checked against a top, a bottom and a side normal |
+| `[faces]` wrap | a wrap about Z with `wrap4.png` gives the four sides four **different** filaments (-X white, -Y red, +X green, +Y blue, one colour all the way across each face) and leaves both caps unpainted; asking for the inward surfaces of a solid cube is refused; and flat vs wrapped on one cube with one image touch different facets, and disagree on well over a fifth of the leaves even with the culling switched off |
+| `[faces]` axes | axis Y and axis Z produce the **identical** painting for a vertical-band image with `faces = All` (both read the colour off x - section 2.2), axis X does not, and with the face rule on Y and Z part company because they land on different faces |
 
 ### 6.2 Bar A - N = 2 new keys
 
