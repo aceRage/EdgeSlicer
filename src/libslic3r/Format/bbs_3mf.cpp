@@ -7785,8 +7785,23 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         stream << "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
         stream << "<" << CONFIG_TAG << ">\n";
 
+        // Deft: objects_data is a std::map<ModelObject const*, ObjectData>, so a direct range-for
+        // over it iterates in heap-pointer order, which differs between two runs of the same
+        // export (ASLR / allocator layout), even though object_id (assigned above in model.objects
+        // order) is stable. Walk a vector sorted by object_id instead, so the object order in
+        // model_settings.config is a function of the model alone.
+        std::vector<const ObjectToObjectDataMap::value_type*> ordered_objects_data;
+        ordered_objects_data.reserve(objects_data.size());
+        for (const ObjectToObjectDataMap::value_type& kv : objects_data)
+            ordered_objects_data.push_back(&kv);
+        std::sort(ordered_objects_data.begin(), ordered_objects_data.end(),
+            [](const ObjectToObjectDataMap::value_type* a, const ObjectToObjectDataMap::value_type* b) {
+                return a->second.object_id < b->second.object_id;
+            });
+
         if (!m_skip_model)
-        for (const ObjectToObjectDataMap::value_type& obj_metadata : objects_data) {
+        for (const ObjectToObjectDataMap::value_type* obj_metadata_ptr : ordered_objects_data) {
+            const ObjectToObjectDataMap::value_type& obj_metadata = *obj_metadata_ptr;
             auto object_data = obj_metadata.second;
             const ModelObject *obj = object_data.object;
             if (obj != nullptr) {
@@ -8058,7 +8073,8 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         if (!m_skip_model) {
         //BBS: store assemble related info
         stream << "  <" << ASSEMBLE_TAG << ">\n";
-        for (const ObjectToObjectDataMap::value_type& obj_metadata : objects_data) {
+        for (const ObjectToObjectDataMap::value_type* obj_metadata_ptr : ordered_objects_data) {
+            const ObjectToObjectDataMap::value_type& obj_metadata = *obj_metadata_ptr;
             auto object_data = obj_metadata.second;
             const ModelObject* obj = object_data.object;
             if (obj != nullptr) {
