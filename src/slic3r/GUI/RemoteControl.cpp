@@ -6,6 +6,7 @@
 #include "SnapmakerLan.hpp"
 #include "libslic3r/PresetBundle.hpp"
 #include "slic3r/Utils/Http.hpp"
+#include "slic3r/Utils/PrintHostDevices.hpp"
 
 #include <boost/log/trivial.hpp>
 
@@ -510,6 +511,20 @@ void list_host_targets(std::vector<HostTarget>& out)
     std::shared_ptr<PrintHost> connected;
     wxGetApp().get_connect_host(connected);
     if (connected) out.push_back({ "connect", moonraker_base(connected->get_host()) });
+    // The model's own devices (<datadir>/hub/print_host_devices.json), under the ids /api/printers
+    // gives them. Only the Moonraker-shaped ones are worth asking - an Elegoo Link box answers SDCP
+    // over its own websocket and would just spend this call's timeout - so the rest are left with
+    // the "unknown" status list_hosts gave them.
+    if (bundle && !bundle->use_bbl_network()) try {
+        // api_printers calls this before RemoteSend::list_hosts (its HostsAtEnd runs last), so the
+        // import has to happen here too or the very first poll would list the devices without ever
+        // having probed them.
+        PrintHostDevices::migrate_from_presets(*bundle);
+        const std::string model_key = PrintHostDevices::current_model_key(*bundle);
+        for (const PrintHostDevices::Device& d : PrintHostDevices::devices(model_key))
+            if (PrintHostDevices::speaks_moonraker(d.host_type) && !d.address.empty())
+                out.push_back({ "ph:" + d.id, moonraker_base(d.address) });
+    } catch (...) {}
 }
 
 // Klipper's print_stats.state, in the words the rest of this API uses. Only the control fields are
@@ -607,10 +622,18 @@ void describe_hosts(const std::vector<HostTarget>& targets, json& printers)
         const std::string& error    = a.error;
         const bool         answered = a.stats.is_object() && !a.stats.empty();
         if (a.asked) remember_probe(t.base, answered, answered ? a.stats.value("state", std::string()) : std::string());
+        const bool is_device = t.id.compare(0, 3, "ph:") == 0; // a print-host device, not the preset
         if (answered) {
             fill_from_print_stats(a.stats, *entry);
             fill_from_heaters(a.status, *entry);
+            // A device card carries the same `status` string a Snapmaker card does; list_hosts left
+            // it "unknown" for everything that was not probed.
+            if (is_device) {
+                (*entry)["status"] = a.stats.value("state", std::string());
+                (*entry)["online"] = true;
+            }
         } else {
+            if (is_device && a.asked) (*entry)["online"] = false;
             // It is not a Moonraker printer, or it is off: leave every button off rather than guess.
             (*entry)["can_pause"]   = false;
             (*entry)["can_resume"]  = false;

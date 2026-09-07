@@ -18,6 +18,7 @@
 #include "slic3r/Utils/Http.hpp"
 #include "slic3r/Utils/MoonRaker.hpp"
 #include "slic3r/Utils/NetworkAgent.hpp"
+#include "slic3r/Utils/PrintHostDevices.hpp"
 #include "slic3r/Utils/Spoolman.hpp"
 
 #include <boost/filesystem.hpp>
@@ -1296,6 +1297,45 @@ void list_hosts(json& printers, int plate)
         p["upload_name"] = upload_name;
         printers.push_back(p);
     }
+    // The printers of this model, by address (<datadir>/hub/print_host_devices.json). Read-only in
+    // phase 1: the phone's Devices tab can see the whole list, but a send still goes through the one
+    // address the preset holds (the "host" entry above, which is whichever device is current).
+    // Their live state is filled in off this thread by RemoteControl::describe_hosts, which probes
+    // only the Moonraker-shaped ones through its own probe cache; the rest stay "unknown".
+    // A Bambu printer is left out: it has its own device list, in the Device tab.
+    if (!bundle->use_bbl_network()) try {
+        PrintHostDevices::migrate_from_presets(*bundle); // the preset's own address becomes device 1
+        const std::string          model_key = PrintHostDevices::current_model_key(*bundle);
+        const std::string          selected  = PrintHostDevices::current(model_key);
+        const std::string          norm_url  = PrintHostDevices::normalize_address(url);
+        for (const PrintHostDevices::Device& d : PrintHostDevices::devices(model_key)) {
+            json p;
+            p["id"]           = "ph:" + d.id;
+            p["kind"]         = "printhost";
+            p["name"]         = d.display_name();
+            p["model"]        = d.printer_model.empty() ? cfg.opt_string("printer_model") : d.printer_model;
+            p["url"]          = d.address;
+            p["host_type"]    = d.host_type;
+            p["device_id"]    = d.id;
+            p["model_key"]    = model_key;
+            p["alias"]        = d.alias;
+            p["is_current"]   = (!selected.empty() && d.id == selected) ||
+                                (selected.empty() && !norm_url.empty() && PrintHostDevices::normalize_address(d.address) == norm_url);
+            p["online"]       = true;   // no live status until describe_hosts answers for it
+            p["status"]       = "unknown";
+            p["can_upload"]   = false;  // phase 3 turns these on, with a real fan-out behind them
+            p["can_print"]    = false;
+            p["can_pause"]    = false;
+            p["can_resume"]   = false;
+            p["can_stop"]     = false;
+            p["print_error"]  = nullptr;
+            p["upload_name"]  = upload_name;
+            printers.push_back(p);
+        }
+    } catch (const std::exception& e) {
+        BOOST_LOG_TRIVIAL(warning) << "[PrintHostDevices] listing devices failed: " << e.what();
+    } catch (...) {}
+
     std::shared_ptr<PrintHost> connected;
     wxGetApp().get_connect_host(connected);
     if (connected) {
