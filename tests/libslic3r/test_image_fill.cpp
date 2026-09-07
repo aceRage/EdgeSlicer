@@ -70,7 +70,9 @@ std::vector<int> leaf_states(const TriangleMesh &mesh, const TriangleSelector::T
                                                leaves[i].c.x(), leaves[i].c.y(), leaves[i].c.z()},
                           f * per + i);
     }
-    for (int state = 1; state <= 8; ++state) {
+    // Up to OBJ_COLOR_MAX_SLOTS: the headless colour matcher can allocate 16 slots, so a scan
+    // that stopped at 8 would silently report the leaves above it as unpainted.
+    for (int state = 1; state <= 16; ++state) {
         const indexed_triangle_set its = sel.get_facets(EnforcerBlockerType(state));
         for (const Vec3i32 &t : its.indices) {
             const Vec3f &a = its.vertices[t(0)], &b = its.vertices[t(1)], &c = its.vertices[t(2)];
@@ -882,10 +884,16 @@ TEST_CASE("Image Fill: a textured GLB is at least as good through the new path",
              << " | NEW painted=" << r.painted_new << " filaments=" << r.filaments_new
              << " meanDE=" << r.mean_de_new << " maxDE=" << r.max_de_new);
 
-        // "At least as good", stated three ways.
+        // "At least as good" means the colour error, not the filament count: a search that
+        // reproduces a texture with SIX spools where the incumbent needed eight has done better,
+        // not worse, so counting filaments is not the bar. What is:
+        //   - every leaf still gets a filament (nothing is left unpainted that used to be),
+        //   - the mean error against the true texture colour does not rise,
+        //   - and neither does the worst single leaf.
         CHECK(r.painted_new >= r.painted_old);
-        CHECK(r.filaments_new >= r.filaments_old);
         CHECK(r.mean_de_new <= r.mean_de_old);
+        CHECK(r.max_de_new <= r.max_de_old);
+        CHECK(r.filaments_new >= 2);
     }
 }
 

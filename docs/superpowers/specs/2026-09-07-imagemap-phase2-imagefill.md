@@ -124,8 +124,8 @@ Phase 1's own report says a solve costs about 0.3 s per model colour, so the ima
 most 256 representatives **before** the solver is asked anything: a fixed 5-bit-per-channel bucket
 pass, ordered busiest-first with the bucket key breaking ties, and everything past the cap merged
 into its nearest kept representative so the counts still add up. No randomness and no iteration
-count, so two runs on one image give the same palette in the same order — which is half of what
-makes Bar B's determinism claim true.
+count, so two runs on one image give the same palette in the same order. The unit tests pin that
+(§6.1); note that it does not make the whole SLICE reproducible - §6.3 measures where that stops.
 
 The solver call is the Phase 1 solver, used with **`ColorSolverConstraints{min_components = 1,
 max_components = 1}`**. Phase 2's writer is `mmu_segmentation_facets`, which holds one id per
@@ -266,7 +266,150 @@ Re-applying Image Fill to an imported part works; it just starts from a picture 
 
 ## 6. Measurements
 
-*(Filled in from the acceptance runs; see the session report for the raw logs.)*
+Everything below was produced on this branch, in its own build tree
+(`.claude/worktrees/imagemap-p2/build`, VS 2022 x64 Release, `BUILD_TESTS=ON`, deps from
+`C:/Dev/SnapmakerOrca/deps/build/OrcaSlicer_dep/usr/local`), installed to
+`snorca_hubtest/inst_imgp2_cand`, against a baseline installed from the **phase 1** branch's own
+build tree at `snorca_hubtest/inst_imgp1_base`. Every slice ran on an isolated `--datadir` copied
+from `snorca_hubtest/dd_lan`. The user's live install and data directory were never touched.
+
+### 6.1 Unit tests
+
+`libslic3r_tests`:
+
+```
+test cases:   636 |   634 passed | 2 failed as expected
+assertions: 72908 | 72906 passed | 2 failed as expected
+```
+
+The two expected failures are the pre-existing pair in `tests/libslic3r/test_mixed_filament.cpp`.
+Phase 1 was **628 cases** with the same two, so this branch adds **8**: six for the service (hash
+stability, projections, the quad-lands-on-the-quadrants end-to-end, mesh UVs, subdivision, the
+palette and solver), the params round trip, and the 3MF round trip. Two more are tagged out of the
+default run - `[glb]` (the before/after, §6.4) and `[barb]` (which writes the Bar B project, §6.3) -
+and both are counted in the 636.
+
+### 6.2 Bar A - N = 2 new keys
+
+`snorca_hubtest/bar_a_imgp2.py`, `OrcaToleranceTest.stl` on "Bambu Lab P1S 0.4 nozzle" /
+`0.20mm Standard @BBL X1C` / `Generic PLA`:
+
+```
+base lines 24560, cand lines 24562
+base sha256 (timestamp dropped):                 18f37a944317a99395770e6bf29f20f22c474601549329fdc53dc24dacb81ae7
+cand sha256 (timestamp dropped):                 4e3575799be794de08e32439404a06c3badbd878e7ef10f4daceec2f25739bdb
+cand sha256 (timestamp + new keys dropped):      18f37a944317a99395770e6bf29f20f22c474601549329fdc53dc24dacb81ae7
+
+NEW CONFIG LINES IN THE CANDIDATE (N = 2):
+   '; image_fill_detail = 0'
+   '; image_fill_params = '
+
+RESULT: identical apart from the timestamp line and the 2 new key line(s).
+label/M624/M625 lines: base 129, cand 129, identical: True
+   base: ; model label id: 15        cand: ; model label id: 15
+BAR A: PASS
+```
+
+Two things worth naming. The baseline hash is **the same value the phase 1 report recorded**
+(`18f37a94...`), which is an independent check that the baseline install and the harness are the
+ones that document describes. And `; model label id: 15` is unchanged, along with all 129
+label/`M624`/`M625` lines - the automated proof that no `ObjectBase`-derived member was added.
+(PR 10 was measured shifting that number from 15 to 23.)
+
+### 6.3 Bar B - a real three-filament slice of an applied image
+
+The project is a 30 mm cube with `stripes3.png` applied to it through the real `image_fill_apply`
+at subdivision 4, written by `libslic3r_tests.exe "[barb]"` - the CLI cannot make one, because
+`Snapmaker_Orca.cpp` hands `read_from_file` a null `ObjImportColorFn` and so a command-line import
+gets no colour matching at all. 12 facets x 256 leaves = **3072 painted leaves, 3 filaments**.
+
+Sliced twice by `snorca_hubtest/bar_b_imgp2.py` on P1S / `0.20mm Standard @BBL X1C` with three
+`Generic PLA` spools:
+
+| | run 1 | run 2 |
+| --- | --- | --- |
+| G-code lines | 107 928 | 107 916 |
+| tool-change lines | 304 | 304 |
+| tools used | T0, T1, T2 | T0, T1, T2 |
+| estimated time | 30 214.0 s | 30 213.9 s |
+| filament | 71.889 g | 71.890 g |
+
+* **The facets are painted with the allowed ids.** The project's `3D/3dmodel.model` carries
+  `paint_color` on all 12 triangles, each a four-way split tree 341-597 characters long, and the
+  states in them are `4`, `8` and `0C` - filaments 1, 2 and 3, the three the dialog allowed.
+* **Tool changes appear where the image changes colour.** T2 x 149, T1 x 76, T0 x 76 across 304
+  tool-change lines, on a part that would have none without the image.
+* **The annotation and the asset survive the slice.** The exported `--export-3mf` carries
+  `image_fill_params`, `Metadata/image_fill/<sha>.png` and `Metadata/image_fill/manifest.json`, and
+  12 `paint_color` trees in `3D/Objects/image fill cube_1.model`.
+* **The two runs are NOT bit-identical - and neither are two runs of the phase 1 build on the same
+  file.** This is the one acceptance item that does not come back clean, so here is the whole of
+  it. Differences are `M73` progress lines, the header's estimated time by one second, and one
+  top-surface infill fragment. Slicing the same project twice on **each** build and comparing every
+  pair, with `M73` and the time estimate dropped:
+
+  | pair | differing lines | of |
+  | --- | --- | --- |
+  | phase 1 run 1 vs phase 1 run 2 | 313 | 107 220 (0.292 %) |
+  | phase 2 run 1 vs phase 2 run 2 | 210 | 107 237 (0.196 %) |
+  | phase 1 run 2 vs phase 2 run 1 | **180** | 107 213 (0.168 %) |
+  | phase 1 run 1 vs phase 2 run 1 | 490 | 107 220 (0.457 %) |
+
+  The cross-build pair with the *smallest* difference (180 lines) is smaller than either build's
+  own run-to-run difference, so the two builds are indistinguishable from the noise. The
+  non-determinism is a pre-existing property of the MMU-painted path on this box, not something
+  Phase 2 introduced - which is worth someone's attention on its own, but is not this branch's.
+  Note the contrast with Bar A: the single-filament `OrcaToleranceTest.stl` slice **is** exactly
+  reproducible on both builds. It is the multi-material path that is not.
+
+### 6.4 The glTF before/after
+
+`tests/data/image_fill/agent_plaque.glb` and `agent_medallion.glb`, written for this branch by
+`make_glb.py` from `struct` and `zlib` so nothing about them comes from the reader they measure.
+Both are deliberately low-poly with a detailed 64 x 64 texture - the case the GLB import status
+document's gap 4 names. Both paths run in one binary on one import, and both are scored with the
+**old** path's own metric (CIE76 dE from `ObjColorMatch`) against the finest available sampling of
+the texture, area-weighted. The filaments are chosen by `obj_color_auto_match` from a four-spool
+start, exactly as a headless import does, so both sides get the same spools.
+
+| file | triangles | leaves | | painted | filaments | mean dE | max dE |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `agent_plaque.glb` | 12 | 192 | **before** | 192 | 4 | 50.27 | 139.56 |
+| | | | **after** | 192 | 4 | **31.70** | 139.56 |
+| `agent_medallion.glb` | 64 | 1024 | **before** | 1024 | 8 | 48.49 | 170.94 |
+| | | | **after** | 1024 | 8 | **1.90** | **4.74** |
+
+**37 % less colour error on the plaque, 96 % less on the medallion**, with the same filaments and
+nothing left unpainted. The two differ because of what 16 samples per triangle can resolve: the
+plaque's twelve triangles are enormous (each covers a third of a texture carrying six colours and
+an 8-pixel checker), so 16 samples still cannot see the checker; the medallion's wall quads each
+span 1/16 of the texture's width, so 16 samples resolve its bands almost exactly. That is the
+honest shape of this change - it helps most where the mesh is fine enough to carry the detail, and
+a user who wants more re-applies Image Fill from the object menu, where the subdivision control is.
+
+**The pre-existing bug this found.** `png::decode_colored_png` fills its output buffer bottom-up
+(`PNGReadWrite.cpp:163-166` walks the rows backwards), while `GLTF.cpp`'s `TextureImage::sample`
+maps `v` straight onto the row index because glTF's UV origin is the image's *top*-left. So every
+PNG `baseColorTexture` this fork has ever imported was sampled **vertically mirrored**. JPEG
+textures were always right - libjpeg hands rows back top-down - which is why the JPEG fixtures
+never caught it. Fixed in `decode_png_image`, where the decoder's convention is known, so `sample`
+keeps its one honest rule. This is a second behaviour change to GLB import, and it makes the result
+correct rather than merely different.
+
+### 6.5 GUI
+
+A hidden scratch instance of this build (`snorca_hubtest/run_control_app.py`, its own install at
+`inst_imgp2_cand`, its own data dir copied from `dd_lan`) starts on the Bar B project and stays up.
+So the new dialog and the new menu item link and initialise inside the real application.
+
+**Not verified by hand, and this needs saying plainly: nobody clicked anything.** There is no
+automation in this repository that can open a wxWidgets dialog and read it - `run_control_app.py`
+only starts the app hidden, and the phone-control API covers slicing and sending, not dialogs. So
+the dialog's own behaviour rests on (a) the model-level API the eight unit tests do exercise, which
+is everything `Apply` calls, and (b) the fact that `Plater::apply_image_fill` is a thin adapter
+between the two. What was **not** observed: the dialog rendering, the preview thumbnail updating as
+controls change, the file picker accepting a JPEG, the filament checklist, Apply changing the 3D
+view, and the undo of an apply.
 
 ---
 
