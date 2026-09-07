@@ -64,7 +64,8 @@ std::pair<int, std::string> forget_device(const std::string& body);
 // DELETE /hub/apppush?id=<id> - the hub page removing a device by its short id.
 std::pair<int, std::string> remove(const std::string& id);
 
-// POST /hub/apppush/options - enabled, min_severity and the two providers' settings. Credential
+// POST /hub/apppush/options - enabled, min_severity, the per-kind filter (as "kinds":[...] or
+// "events":{kind:bool}; see RemoteEvents.hpp) and the two providers' settings. Credential
 // fields follow take_secret's rule: a value beginning "****" means keep the stored one, so a
 // credential only ever travels inward.
 std::pair<int, std::string> set_options(const std::string& body);

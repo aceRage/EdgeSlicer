@@ -48,6 +48,11 @@ select { background: #222; color: #ddd; border: 1px solid #555; border-radius: 6
 .tab { padding: 6px 12px; font-size: 13px; color: #999; cursor: pointer; user-select: none; border-bottom: 2px solid transparent; margin-bottom: -1px; }
 .tab:hover { color: #ccc; }
 .tab.on { color: #fff; border-bottom-color: #0a9e50; }
+.kinds { margin: 8px 0 2px; font-size: 12px; color: #bbb; line-height: 1.9; }
+.kinds .lbl { color: #999; margin-right: 6px; }
+.kinds label { display: inline-block; margin-right: 10px; white-space: nowrap; cursor: pointer; }
+.kinds label.off { color: #777; }
+.kinds input { vertical-align: -1px; margin-right: 3px; accent-color: #0a9e50; }
 .phonerow { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .phoneicon { width: 22px; height: 22px; color: #0a9e50; flex: none; vertical-align: middle; }
 .acts { margin-top: 8px; }
@@ -220,6 +225,57 @@ select { background: #222; color: #ddd; border: 1px solid #555; border-radius: 6
         var i = el('input'); i.value = value || ''; if (placeholder) i.placeholder = placeholder;
         parent.appendChild(i); return i;
     }
+    // The per-kind filter, the same eight kinds on every channel (RemoteEvents.hpp is the
+    // canonical list; `all_kinds` in each GET is that list, and this table only adds the words a
+    // person reads). A missing `events` map means an older hub with no filter: everything is on.
+    var KIND_WORDS = [['started', 'Started'], ['finished', 'Finished'], ['failed', 'Failed'],
+                      ['cancelled', 'Cancelled'], ['paused', 'Paused'], ['resumed', 'Resumed'],
+                      ['runout', 'Filament runout'], ['error', 'Printer error']];
+    // Each box saves on its own and sends only the kind that moved, because the hub reads
+    // `events` as a patch: a second tab (or the phone) toggling another box cannot be undone by
+    // this one. `save(patch, done)` does the POST for whichever channel owns the row.
+    function kindsRow(events, save) {
+        var wrap = el('div', 'kinds');
+        wrap.appendChild(el('span', 'lbl', 'Send:'));
+        KIND_WORDS.forEach(function(k) {
+            var on = !events || events[k[0]] !== false;
+            var lab = el('label', on ? '' : 'off');
+            var cb = document.createElement('input');
+            cb.type = 'checkbox';
+            cb.checked = on;
+            cb.onchange = function() {
+                var patch = {};
+                patch[k[0]] = cb.checked;
+                cb.disabled = true;
+                save({ events: patch }, function(err) {
+                    cb.disabled = false;
+                    // The hub refuses the last box being turned off - there is an Enable/Disable
+                    // for "nothing", and reading "none" as "all" is what nobody would guess.
+                    if (err) { cb.checked = !cb.checked; alert(err); }
+                    lab.className = cb.checked ? '' : 'off';
+                });
+            };
+            lab.appendChild(cb);
+            lab.appendChild(document.createTextNode(k[1]));
+            wrap.appendChild(lab);
+        });
+        return wrap;
+    }
+    // " Sending: Started, Finished and Failed." - appended to a test answer so the person can
+    // see what is switched on. Nothing at all when the hub did not get as far as sending (no
+    // phone subscribed, no device registered), where naming a filter would only mislead.
+    function sendingNote(kinds) {
+        return kinds && kinds.length ? ' Sending: ' + kindWords(kinds) + '.' : '';
+    }
+    function kindWords(kinds) {
+        if (!kinds || !kinds.length) return 'nothing';
+        var words = kinds.map(function(k) {
+            for (var i = 0; i < KIND_WORDS.length; i++) if (KIND_WORDS[i][0] === k) return KIND_WORDS[i][1];
+            return k;
+        });
+        if (words.length === KIND_WORDS.length) return 'every kind';
+        return words.length === 1 ? words[0] : words.slice(0, -1).join(', ') + ' and ' + words[words.length - 1];
+    }
     function severitySelect(value) {
         var s = document.createElement('select');
         [['info', 'Everything'], ['warning', 'Warnings and errors'], ['error', 'Errors only']].forEach(function(o) {
@@ -323,6 +379,12 @@ select { background: #222; color: #ddd; border: 1px solid #555; border-radius: 6
         row.appendChild(el('div', 'm', destLine(d)));
         if (d.last_error) row.appendChild(el('div', 'err', 'Last error: ' + d.last_error + (d.failures > 1 ? ' (' + d.failures + ' in a row)' : '')));
         if (testNote[d.id]) row.appendChild(el('div', 'note', testNote[d.id]));
+        row.appendChild(kindsRow(d.events, function(patch, done) {
+            jfetch('/hub/notify', 'POST', { id: d.id, events: patch.events }).then(function(r) {
+                if (r.status !== 200) { done(r.j.error || ('The hub refused that (' + r.status + ').')); return; }
+                notify = r.j; lastNotify = null; done(); renderNotify();
+            });
+        }));
         var sev = severitySelect(d.min_severity);
         sev.onchange = function() { jfetch('/hub/notify', 'POST', { id: d.id, min_severity: sev.value }).then(function(r) { notify = r.j; lastNotify = null; renderNotify(); }); };
         row.appendChild(sev);
@@ -333,8 +395,11 @@ select { background: #222; color: #ddd; border: 1px solid #555; border-radius: 6
         test.onclick = function() {
             test.textContent = 'Sending…';
             jfetch('/hub/notify/test?id=' + encodeURIComponent(d.id), 'POST').then(function(r) {
-                testNote[d.id] = r.j.ok ? ('Test sent, the service answered ' + r.j.status + '.')
-                                        : ('Test failed: ' + (r.j.error || ('HTTP ' + r.j.status)) + '.');
+                // The test wears a kind this destination allows, and says which ones are on -
+                // so "the test arrived but my prints do not" answers itself.
+                testNote[d.id] = (r.j.ok ? ('Test sent as "' + (r.j.kind || 'finished') + '", the service answered ' + r.j.status + '.')
+                                         : ('Test failed: ' + (r.j.error || ('HTTP ' + r.j.status)) + '.'))
+                                 + sendingNote(r.j.kinds);
                 lastNotify = null; refreshNotify();
             });
         };
@@ -421,6 +486,12 @@ select { background: #222; color: #ddd; border: 1px solid #555; border-radius: 6
             if (d.last_error) row.appendChild(el('div', 'err', 'Last error: ' + d.last_error + (d.failures > 1 ? ' (' + d.failures + ' in a row)' : '')));
             body.appendChild(row);
         });
+        body.appendChild(kindsRow(push.events, function(patch, done) {
+            jfetch('/hub/push/options', 'POST', { events: patch.events }).then(function(r) {
+                if (r.status !== 200) { done(r.j.error || ('The hub refused that (' + r.status + ').')); return; }
+                push = r.j; lastPush = null; done(); renderPush();
+            });
+        }));
         var acts = el('div', 'acts');
         var sev = severitySelect(push.min_severity);
         sev.onchange = function() { jfetch('/hub/push/options', 'POST', { min_severity: sev.value }).then(function(r) { push = r.j; lastPush = null; renderPush(); }); };
@@ -436,8 +507,9 @@ select { background: #222; color: #ddd; border: 1px solid #555; border-radius: 6
                 test.textContent = 'Sending…';
                 jfetch('/hub/push/test', 'POST', {}).then(function(r) {
                     var res = r.j.results || [];
-                    pushNote = r.j.ok ? ('Test sent to ' + res.length + ' phone(s).')
-                                      : ('Test failed: ' + ((res[0] && (res[0].error || ('HTTP ' + res[0].status))) || r.j.error || 'no answer') + '.');
+                    pushNote = (r.j.ok ? ('Test sent to ' + res.length + ' phone(s) as "' + (r.j.kind || 'finished') + '".')
+                                       : ('Test failed: ' + ((res[0] && (res[0].error || ('HTTP ' + res[0].status))) || r.j.error || 'no answer') + '.'))
+                               + sendingNote(r.j.kinds);
                     lastPush = null; refreshPush();
                 });
             };
@@ -500,6 +572,12 @@ select { background: #222; color: #ddd; border: 1px solid #555; border-radius: 6
             if (d.last_error) row.appendChild(el('div', 'err', 'Last error: ' + d.last_error + (d.failures > 1 ? ' (' + d.failures + ' in a row)' : '')));
             body.appendChild(row);
         });
+        body.appendChild(kindsRow(app.events, function(patch, done) {
+            jfetch('/hub/apppush/options', 'POST', { events: patch.events }).then(function(r) {
+                if (r.status !== 200) { done(r.j.error || ('The hub refused that (' + r.status + ').')); return; }
+                app = r.j; lastApp = null; done(); renderApp();
+            });
+        }));
         var acts = el('div', 'acts');
         var sev = severitySelect(app.min_severity);
         sev.onchange = function() { jfetch('/hub/apppush/options', 'POST', { min_severity: sev.value }).then(function(r) { app = r.j; lastApp = null; renderApp(); }); };
@@ -518,8 +596,9 @@ select { background: #222; color: #ddd; border: 1px solid #555; border-radius: 6
                     // Naming the host is the point of the per-device result: a BadDeviceToken from
                     // a sandbox build sent to the production host is otherwise indistinguishable
                     // from a bug.
-                    appNote = r.j.ok ? ('Test sent to ' + res.length + ' device(s) via ' + (res[0] && res[0].host || 'the push service') + '.')
-                                     : ('Test failed: ' + ((res[0] && (res[0].error || ('HTTP ' + res[0].status))) || r.j.error || 'no answer') + '.');
+                    appNote = (r.j.ok ? ('Test sent to ' + res.length + ' device(s) via ' + (res[0] && res[0].host || 'the push service') + ', as "' + (r.j.kind || 'finished') + '".')
+                                      : ('Test failed: ' + ((res[0] && (res[0].error || ('HTTP ' + res[0].status))) || r.j.error || 'no answer') + '.'))
+                              + sendingNote(r.j.kinds);
                     lastApp = null; refreshApp();
                 });
             };

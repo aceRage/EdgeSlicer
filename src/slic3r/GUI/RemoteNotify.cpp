@@ -2,6 +2,7 @@
 // hub server: libcurl through the fork's Http wrapper, nlohmann::json, one worker thread.
 #include "RemoteNotify.hpp"
 
+#include "RemoteEvents.hpp"
 #include "WebPush.hpp"
 #include "AppPush.hpp"
 #include "slic3r/Utils/Http.hpp"
@@ -385,10 +386,11 @@ static SendResult send_with_retries(const Dest& d, const json& e, const std::str
 static bool wants(const Dest& d, const json& e)
 {
     if (!d.enabled) return false;
+    // The two filters are an AND, and deliberately so: minimum severity is the coarse dial this
+    // destination had before per-kind filters existed and keeps meaning what it meant, while the
+    // kind list is the fine one. An event is sent when both allow it.
     if (severity_rank(ev_str(e, "severity", "info")) < severity_rank(d.min_severity)) return false;
-    if (d.kinds.empty()) return true;
-    const std::string kind = ev_str(e, "kind");
-    return std::find(d.kinds.begin(), d.kinds.end(), kind) != d.kinds.end();
+    return RemoteEvents::kind_allowed(d.kinds, ev_str(e, "kind"));
 }
 
 static void record(const std::string& id, const SendResult& r)
@@ -458,9 +460,11 @@ static Dest from_json(const json& j)
     d.name         = j.value("name", "");
     d.enabled      = j.value("enabled", true);
     d.min_severity = j.value("min_severity", std::string("info"));
+    // A kind nobody emits is dropped rather than refused: settings.json is a file a person may
+    // have hand-edited, and one stale name must not cost them the destination.
     if (j.contains("kinds") && j["kinds"].is_array())
         for (const auto& k : j["kinds"])
-            if (k.is_string()) d.kinds.push_back(k.get<std::string>());
+            if (k.is_string() && RemoteEvents::is_kind(k.get<std::string>())) d.kinds.push_back(k.get<std::string>());
     d.server       = j.value("server", std::string("https://ntfy.sh"));
     d.topic        = j.value("topic", "");
     d.token        = j.value("token", "");
@@ -481,6 +485,8 @@ static json to_json(const Dest& d, bool masked)
     j["enabled"]      = d.enabled;
     j["min_severity"] = d.min_severity;
     j["kinds"]        = d.kinds;
+    // The same filter as a map of every kind, for the page's checkboxes. Derived, never stored.
+    if (masked) j["events"] = RemoteEvents::events_map(d.kinds);
     if (d.type == "ntfy") {
         j["server"] = d.server;
         j["topic"]  = masked ? mask(d.topic) : d.topic;
@@ -529,7 +535,10 @@ json masked_json()
     json j;
     j["destinations"] = json::array();
     for (const Dest& d : g_dests) j["destinations"].push_back(to_json(d, true));
-    j["kinds"]      = json::array({ "started", "finished", "failed", "cancelled", "paused", "resumed", "runout", "error" });
+    // The catalogue, not a filter: `kinds` has been this list since P5 and stays that, and
+    // `all_kinds` is the same list under the name the other two channels use for it.
+    j["kinds"]      = RemoteEvents::all_kinds();
+    j["all_kinds"]  = RemoteEvents::all_kinds();
     j["severities"] = json::array({ "info", "warning", "error" });
     j["phone_link"] = !g_phone_link.empty(); // whether a Click/url link is attached, never the link itself
     return j;
@@ -619,10 +628,9 @@ std::pair<int, std::string> configure(const std::string& body)
             if (s != "info" && s != "warning" && s != "error") return { 400, json({ { "error", "min_severity must be info, warning or error" } }).dump() };
             d.min_severity = s;
         }
-        if (in.contains("kinds") && in["kinds"].is_array()) {
-            d.kinds.clear();
-            for (const auto& k : in["kinds"])
-                if (k.is_string()) d.kinds.push_back(k.get<std::string>());
+        if (RemoteEvents::has_kind_filter(in)) {
+            std::string bad;
+            if (!RemoteEvents::read_kinds(in, d.kinds, bad)) return { 400, json({ { "error", bad } }).dump() };
         }
         if (d.type == "ntfy") {
             take_string(in, "server", d.server);
@@ -693,7 +701,10 @@ std::pair<int, std::string> test(const std::string& id, const std::string& phone
     e["time"]     = now_ms();
     e["instance"] = 0;
     e["printer"]  = json{ { "id", "test" }, { "name", "Test" }, { "kind", "printhost" } };
-    e["kind"]     = "started";
+    // Dressed as a kind this destination actually wants, so the test reads like the thing it
+    // stands in for - the emoji, the tag and the priority a real one would carry. The test is
+    // still sent whatever the filters say: the button is here to prove the relay works.
+    e["kind"]     = RemoteEvents::test_kind(d.kinds);
     e["severity"] = "info";
     e["title"]    = "EdgeSlicer test";
     e["text"]     = "This is a test notification from the hub on your PC. If you can read it, notifications work.";
@@ -711,6 +722,11 @@ std::pair<int, std::string> test(const std::string& id, const std::string& phone
     out["ok"]     = r.ok;
     out["status"] = r.status; // the relay's own HTTP status, straight through
     out["error"]  = scrub(r.error, d);
+    // What this destination would let through, so the page can say "sent as finished; started is
+    // off" instead of leaving somebody to wonder why the real thing never arrives.
+    out["kind"]   = e["kind"];
+    out["kinds"]  = RemoteEvents::enabled_kinds(d.kinds);
+    out["events"] = RemoteEvents::events_map(d.kinds);
     return { 200, out.dump() };
 }
 

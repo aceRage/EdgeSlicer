@@ -10,6 +10,8 @@
 // endpoint - so the same RFC 8291 call serves both and there is one implementation to get right.
 #include "AppPush.hpp"
 
+#include "RemoteEvents.hpp"
+
 #include "AppPushProvider.hpp"
 #include "WebPush.hpp"
 #include "slic3r/Utils/Http.hpp"
@@ -70,6 +72,10 @@ static std::mutex           g_mutex;
 static std::vector<Device>  g_devices;
 static bool                 g_enabled { true };
 static std::string          g_min_severity { "info" };
+// Which event kinds the registered devices want; empty is every kind. One list for the channel,
+// like Web Push - the devices belong to the same person and a per-device filter is a screen
+// nobody has asked for.
+static std::vector<std::string> g_kinds;
 static json                 g_apns_cfg = json::object();
 static json                 g_fcm_cfg  = json::object();
 static std::atomic<bool>    g_stopping { false };
@@ -438,6 +444,7 @@ json settings_json()
     json j;
     j["enabled"]      = g_enabled;
     j["min_severity"] = g_min_severity;
+    j["kinds"]        = g_kinds;
     j["apns"]         = g_apns_cfg;
     j["fcm"]          = g_fcm_cfg;
     j["devices"]      = json::array();
@@ -464,6 +471,9 @@ json masked_json()
     json j;
     j["enabled"]      = g_enabled;
     j["min_severity"] = g_min_severity;
+    j["kinds"]        = g_kinds;
+    j["events"]       = RemoteEvents::events_map(g_kinds); // the same filter as checkboxes
+    j["all_kinds"]    = RemoteEvents::all_kinds();
     j["severities"]   = json::array({ "info", "warning", "error" });
     j["apns"]         = apns_masked(g_apns_cfg);
     j["fcm"]          = fcm_masked(g_fcm_cfg);
@@ -589,19 +599,23 @@ static void record(const Device& sent_to, const PushResult& r)
 
 void deliver(const json& event)
 {
-    std::vector<Device> targets;
-    std::string         min_sev;
-    json                apns_cfg, fcm_cfg;
+    std::vector<Device>      targets;
+    std::vector<std::string> kinds;
+    std::string              min_sev;
+    json                     apns_cfg, fcm_cfg;
     {
         std::lock_guard<std::mutex> lock(g_mutex);
         if (!g_enabled || g_devices.empty()) return;
         targets  = g_devices;
         min_sev  = g_min_severity;
+        kinds    = g_kinds;
         apns_cfg = g_apns_cfg;
         fcm_cfg  = g_fcm_cfg;
     }
     const std::string severity = ev_str(event, "severity", "info");
+    // Severity and kind are an AND, as on every other channel.
     if (severity_rank(severity) < severity_rank(min_sev)) return;
+    if (!RemoteEvents::kind_allowed(kinds, ev_str(event, "kind"))) return;
     const std::string plaintext = plaintext_for(event);
 
     for (const Device& d : targets) {
@@ -765,6 +779,10 @@ std::pair<int, std::string> set_options(const std::string& body)
                 return { 400, json({ { "error", "min_severity must be info, warning or error" } }).dump() };
             g_min_severity = s;
         }
+        if (RemoteEvents::has_kind_filter(in)) {
+            std::string why;
+            if (!RemoteEvents::read_kinds(in, g_kinds, why)) return { 400, json({ { "error", why } }).dump() };
+        }
         if (in.contains("apns") && in["apns"].is_object()) {
             const json& a = in["apns"];
             bool        on = g_apns_cfg.value("enabled", true);
@@ -812,11 +830,13 @@ std::pair<int, std::string> set_options(const std::string& body)
 
 std::pair<int, std::string> test()
 {
-    std::vector<Device> targets;
-    json                apns_cfg, fcm_cfg;
+    std::vector<Device>      targets;
+    std::vector<std::string> kinds;
+    json                     apns_cfg, fcm_cfg;
     {
         std::lock_guard<std::mutex> lock(g_mutex);
         targets  = g_devices;
+        kinds    = g_kinds;
         apns_cfg = g_apns_cfg;
         fcm_cfg  = g_fcm_cfg;
     }
@@ -828,7 +848,9 @@ std::pair<int, std::string> test()
     e["id"]       = 0;
     e["time"]     = now_ms();
     e["printer"]  = json{ { "id", "test" }, { "name", "Test" }, { "kind", "printhost" } };
-    e["kind"]     = "started";
+    // Dressed as a kind the filter allows, so the notification looks like the real one. Sent
+    // whatever the filters say: the button is here to prove the path to the device works.
+    e["kind"]     = RemoteEvents::test_kind(kinds);
     e["severity"] = "info";
     e["title"]    = "Snapmaker Orca test";
     e["text"]     = "This is a test push from the hub on your PC. If you can read it, app push works.";
@@ -870,7 +892,10 @@ std::pair<int, std::string> test()
         results.push_back(one);
         record(d, r);
     }
-    return { 200, json({ { "ok", any }, { "results", results } }).dump() };
+    // The filter goes back with the results so the page can say which kinds are on.
+    return { 200, json({ { "ok", any }, { "results", results }, { "kind", e["kind"] },
+                         { "kinds", RemoteEvents::enabled_kinds(kinds) },
+                         { "events", RemoteEvents::events_map(kinds) } }).dump() };
 }
 
 // ------------------------------------------------------------------ the debug route ----
@@ -912,6 +937,11 @@ void start(const json& saved)
         if (saved.is_object()) {
             g_enabled      = saved.value("enabled", true);
             g_min_severity = saved.value("min_severity", std::string("info"));
+            // A stale kind in a hand-edited settings.json is dropped, never fatal.
+            g_kinds.clear();
+            if (saved.contains("kinds") && saved["kinds"].is_array())
+                for (const auto& k : saved["kinds"])
+                    if (k.is_string() && RemoteEvents::is_kind(k.get<std::string>())) g_kinds.push_back(k.get<std::string>());
             if (saved.contains("apns") && saved["apns"].is_object()) g_apns_cfg = saved["apns"];
             if (saved.contains("fcm") && saved["fcm"].is_object()) g_fcm_cfg = saved["fcm"];
             if (saved.contains("devices") && saved["devices"].is_array())
