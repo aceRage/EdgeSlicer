@@ -1816,18 +1816,29 @@ StringObjectException Print::validate(StringObjectException *warning, Polygons* 
     if (this->has_wipe_tower() && ! m_objects.empty()) {
         // Make sure all extruders use same diameter filament and have the same nozzle diameter
         // EPSILON comparison is used for nozzles and 10 % tolerance is used for filaments
-        double first_nozzle_diam = m_config.nozzle_diameter.get_at(extruders.front());
+        // Mixed nozzle sizes (Phase 2 gate): the prime tower is still generated at ONE line width -
+        // WipeTower::set_extruder() overwrites the single m_perimeter_width scalar for every
+        // registered filament, so a mixed-diameter job would print the tower at whichever nozzle
+        // happened to register last. Refuse the combination with a message that names the way out
+        // instead of warning and printing something wrong. Phase 3 makes the tower per-tool.
+        auto nozzle_dmr_of = [this](unsigned int filament_id_0based) -> double {
+            return m_config.nozzle_diameter.get_at(physical_extruder_for_filament(m_config, filament_id_0based + 1));
+        };
+        double first_nozzle_diam = nozzle_dmr_of(extruders.front());
         double first_filament_diam = m_config.filament_diameter.get_at(extruders.front());
+        for (const auto& extruder_idx : extruders)
+            if (std::abs(nozzle_dmr_of(extruder_idx) - first_nozzle_diam) > EPSILON)
+                return {L("The prime tower does not support mixed nozzle diameters: it is generated at a single line "
+                          "width for every filament. Turn the prime tower off, or use filaments that all print through "
+                          "nozzles of the same diameter."), nullptr, "enable_prime_tower"};
         for (const auto& extruder_idx : extruders) {
-            double nozzle_diam = m_config.nozzle_diameter.get_at(extruder_idx);
             double filament_diam = m_config.filament_diameter.get_at(extruder_idx);
-            if (nozzle_diam - EPSILON > first_nozzle_diam || nozzle_diam + EPSILON < first_nozzle_diam
-                || std::abs((filament_diam - first_filament_diam) / first_filament_diam) > 0.1) {
-                // return { L("Different nozzle diameters and different filament diameters may not work well when prime tower is enabled. It's very experimental, please proceed with caucious.") };
-                    warning->string = L("Different nozzle diameters and different filament diameters may not work well when the prime tower is enabled. It's very experimental, so please proceed with caution.");
-                    warning->opt_key = "nozzle_diameter";
-                    break;
-                }
+            if (warning && std::abs((filament_diam - first_filament_diam) / first_filament_diam) > 0.1) {
+                warning->string = L("Different filament diameters may not work well when the prime tower is enabled. "
+                                    "It's very experimental, so please proceed with caution.");
+                warning->opt_key = "filament_diameter";
+                break;
+            }
         }
 
         if (! m_config.use_relative_e_distances)
@@ -1921,14 +1932,22 @@ StringObjectException Print::validate(StringObjectException *warning, Polygons* 
     }
 
 	{
+        // Mixed nozzle sizes (Phase 1): `extruders` holds 0-based FILAMENT indices. The diameter a
+        // filament prints at is the diameter of the nozzle it is loaded into, which on a machine with
+        // more filaments than nozzles is only known through filament_map - indexing nozzle_diameter
+        // by the filament number silently returned the first nozzle for every filament past the last.
+        auto nozzle_dmr_of_filament0 = [this](unsigned int filament_id_0based) -> double {
+            return m_config.nozzle_diameter.get_at(physical_extruder_for_filament(m_config, filament_id_0based + 1));
+        };
 		// Find the smallest used nozzle diameter and the number of unique nozzle diameters.
 		double min_nozzle_diameter = std::numeric_limits<double>::max();
 		double max_nozzle_diameter = 0;
 		for (unsigned int extruder_id : extruders) {
-			double dmr = m_config.nozzle_diameter.get_at(extruder_id);
+			double dmr = nozzle_dmr_of_filament0(extruder_id);
 			min_nozzle_diameter = std::min(min_nozzle_diameter, dmr);
 			max_nozzle_diameter = std::max(max_nozzle_diameter, dmr);
 		}
+        (void)max_nozzle_diameter;
 
         // BBS: remove L()
 #if 0
@@ -1940,20 +1959,43 @@ StringObjectException Print::validate(StringObjectException *warning, Polygons* 
                 return {L("One or more object were assigned an extruder that the printer does not have.")};
 #endif
 
-        auto validate_extrusion_width = [min_nozzle_diameter, max_nozzle_diameter](const ConfigBase &config, const char *opt_key, double layer_height, std::string &err_msg) -> bool {
-            double extrusion_width_min = config.get_abs_value(opt_key, min_nozzle_diameter);
-            double extrusion_width_max = config.get_abs_value(opt_key, max_nozzle_diameter);
-        	if (extrusion_width_min == 0) {
-        		// Default "auto-generated" extrusion width is always valid.
-        	} else if (extrusion_width_min <= layer_height) {
+        // Mixed nozzle sizes (Phase 1b): the bounds are measured against the diameter of the nozzle
+        // that prints THIS feature, not against the whole print's smallest/largest nozzle. On a
+        // single-diameter machine every caller passes the same number the old code used, so this is
+        // a no-op there.
+        auto validate_extrusion_width = [](double extrusion_width, double nozzle_diameter, double layer_height, std::string &err_msg) -> bool {
+            if (extrusion_width == 0) {
+                // Default "auto-generated" extrusion width is always valid.
+            } else if (extrusion_width <= layer_height) {
                 err_msg = L("Too small line width");
-				return false;
-			} else if (extrusion_width_max > max_nozzle_diameter * MAX_LINE_WIDTH_MULTIPLIER) {
+                return false;
+            } else if (extrusion_width > nozzle_diameter * MAX_LINE_WIDTH_MULTIPLIER) {
                 err_msg = L("Too large line width");
-				return false;
-			}
-			return true;
-		};
+                return false;
+            }
+            return true;
+        };
+
+        // Mixed nozzle sizes (Phase 1c): a feature may not ask its own nozzle for a line wider than
+        // MAX_FEATURE_WIDTH_TO_NOZZLE_RATIO x that nozzle. Nothing checked this before: the only
+        // upper bound was 5 x the COARSEST nozzle of the print, so a 0.62 mm outer wall routed to a
+        // 0.2 mm head sliced silently. The message names the feature and the filament so the user
+        // knows which of the two to change.
+        auto validate_feature_width_vs_nozzle = [](const char *opt_key, unsigned int filament_id, double extrusion_width, double nozzle_diameter, std::string &err_msg) -> bool {
+            if (extrusion_width <= 0. || nozzle_diameter <= 0.)
+                return true;
+            if (extrusion_width <= nozzle_diameter * MAX_FEATURE_WIDTH_TO_NOZZLE_RATIO + EPSILON)
+                return true;
+            const ConfigOptionDef *def = print_config_def.get(opt_key);
+            char buf_w[32], buf_n[32], buf_k[32];
+            snprintf(buf_w, sizeof(buf_w), "%.3f", extrusion_width);
+            snprintf(buf_n, sizeof(buf_n), "%.2f", nozzle_diameter);
+            snprintf(buf_k, sizeof(buf_k), "%.1f", double(MAX_FEATURE_WIDTH_TO_NOZZLE_RATIO));
+            err_msg = (boost::format(L("Line width of %1% (%2% mm) is more than %3% x the diameter of the nozzle that prints it "
+                                       "(filament %4%, nozzle %5% mm). Reduce the line width, or print this feature with a coarser nozzle."))
+                       % (def ? def->label : std::string(opt_key)) % buf_w % buf_k % filament_id % buf_n).str();
+            return false;
+        };
         for (PrintObject *object : m_objects) {
             if (object->has_support_material()) {
                 // BBS: remove useless logics and L()
@@ -2006,40 +2048,104 @@ StringObjectException Print::validate(StringObjectException *warning, Polygons* 
                 }
             }
 
+            // Mixed nozzle sizes (Phase 1a): the layer-height ceiling comes from the nozzles THIS
+            // object actually uses, not from the smallest nozzle anywhere on the printer. An object
+            // that never touches the 0.2 mm head must not be clamped to 0.2 mm because some other
+            // object (or an idle extruder) has one.
+            std::vector<unsigned int> object_filaments = object->object_extruders();   // 0-based filament ids
+            if (object->has_support_material()) {
+                const int sup  = object->config().support_filament.value;
+                const int supi = object->config().support_interface_filament.value;
+                if (sup > 0)
+                    object_filaments.emplace_back(unsigned(sup - 1));
+                if (supi > 0)
+                    object_filaments.emplace_back(unsigned(supi - 1));
+                if (sup == 0 || supi == 0)
+                    // "use whatever filament is current": any filament of the print may print it.
+                    append(object_filaments, extruders);
+            }
+            if (this->has_wipe_tower())
+                // The prime tower shares this object's layer grid and every filament purges into it.
+                append(object_filaments, extruders);
+            sort_remove_duplicates(object_filaments);
+            if (object_filaments.empty())
+                object_filaments = extruders;
+
+            double object_min_nozzle_diameter = std::numeric_limits<double>::max();
+            for (unsigned int filament_id : object_filaments)
+                object_min_nozzle_diameter = std::min(object_min_nozzle_diameter, nozzle_dmr_of_filament0(filament_id));
+
             double initial_layer_print_height = m_config.initial_layer_print_height.value;
             double first_layer_min_nozzle_diameter;
             if (object->has_raft()) {
                 // if we have raft layers, only support material extruder is used on first layer
-                size_t first_layer_extruder = object->config().raft_layers == 1
-                    ? object->config().support_interface_filament-1
-                    : object->config().support_filament-1;
-                first_layer_min_nozzle_diameter = (first_layer_extruder == size_t(-1)) ?
-                    min_nozzle_diameter :
-                    m_config.nozzle_diameter.get_at(first_layer_extruder);
+                int first_layer_filament = object->config().raft_layers == 1
+                    ? object->config().support_interface_filament.value
+                    : object->config().support_filament.value;
+                first_layer_min_nozzle_diameter = (first_layer_filament <= 0) ?
+                    object_min_nozzle_diameter :
+                    nozzle_dmr_of_filament0(unsigned(first_layer_filament - 1));
             } else {
-                // if we don't have raft layers, any nozzle diameter is potentially used in first layer
-                first_layer_min_nozzle_diameter = min_nozzle_diameter;
+                // if we don't have raft layers, any nozzle diameter of this object is potentially used in first layer
+                first_layer_min_nozzle_diameter = object_min_nozzle_diameter;
             }
             if (initial_layer_print_height > first_layer_min_nozzle_diameter)
                 return {L("Layer height cannot exceed nozzle diameter."), object, "initial_layer_print_height"};
 
             // validate layer_height
             double layer_height = object->config().layer_height.value;
-            if (layer_height > min_nozzle_diameter)
+            if (layer_height > object_min_nozzle_diameter)
                 return {L("Layer height cannot exceed nozzle diameter."), object, "layer_height"};
 
-            // Validate extrusion widths.
+            // Validate extrusion widths, each against the nozzle that prints it.
             std::string err_msg;
-            if (!validate_extrusion_width(object->config(), "line_width", layer_height, err_msg))
-            	return {err_msg, object, "line_width"};
+            if (!validate_extrusion_width(object->config().get_abs_value("line_width", object_min_nozzle_diameter),
+                                          object_min_nozzle_diameter, layer_height, err_msg))
+                return {err_msg, object, "line_width"};
             if (object->has_support() || object->has_raft()) {
-                if (!validate_extrusion_width(object->config(), "support_line_width", layer_height, err_msg))
+                const int sup  = object->config().support_filament.value;
+                const int supi = object->config().support_interface_filament.value;
+                // The support line width has to fit the finer of the two support nozzles; filament 0
+                // ("current filament") could be any of the object's, so fall back to its minimum.
+                double support_nozzle_diameter = std::min(nozzle_dmr_of_filament0(unsigned(std::max(sup, 1) - 1)),
+                                                          nozzle_dmr_of_filament0(unsigned(std::max(supi, 1) - 1)));
+                if (sup == 0 || supi == 0)
+                    support_nozzle_diameter = std::min(support_nozzle_diameter, object_min_nozzle_diameter);
+                double support_width = object->config().get_abs_value("support_line_width", support_nozzle_diameter);
+                if (support_width == 0.)
+                    support_width = object->config().get_abs_value("line_width", support_nozzle_diameter);
+                if (!validate_extrusion_width(support_width, support_nozzle_diameter, layer_height, err_msg))
+                    return {err_msg, object, "support_line_width"};
+                if (!validate_feature_width_vs_nozzle("support_line_width", unsigned(std::max(sup, supi)), support_width,
+                                                      support_nozzle_diameter, err_msg))
                     return {err_msg, object, "support_line_width"};
             }
-            for (const char *opt_key : { "inner_wall_line_width", "outer_wall_line_width", "sparse_infill_line_width", "internal_solid_infill_line_width", "top_surface_line_width","skin_infill_line_width" ,"skeleton_infill_line_width"})
-				for (const PrintRegion &region : object->all_regions())
-                    if (!validate_extrusion_width(region.config(), opt_key, layer_height, err_msg))
-		            	return  {err_msg, object, opt_key};
+            // Each width option is bounded against the nozzle of the filament its own FlowRole is
+            // routed to (PrintRegion::extruder), the same mapping PrintRegion::flow() uses to size
+            // the extrusion. skin/skeleton infill ride along with sparse infill.
+            static const std::pair<const char *, FlowRole> s_width_roles[] = {
+                { "inner_wall_line_width",            frPerimeter },
+                { "outer_wall_line_width",            frExternalPerimeter },
+                { "sparse_infill_line_width",         frInfill },
+                { "internal_solid_infill_line_width", frSolidInfill },
+                { "top_surface_line_width",           frTopSolidInfill },
+                { "skin_infill_line_width",           frInfill },
+                { "skeleton_infill_line_width",       frInfill },
+            };
+            for (const auto &width_role : s_width_roles)
+                for (const PrintRegion &region : object->all_regions()) {
+                    const unsigned int filament_id     = region.extruder(width_role.second);
+                    const double       nozzle_diameter = nozzle_dmr_of_filament0(unsigned(std::max<int>(int(filament_id), 1) - 1));
+                    // A role width left at 0 falls back to the object's line_width, exactly as
+                    // PrintRegion::flow() does, so validate the width that will really be used.
+                    double width = region.config().get_abs_value(width_role.first, nozzle_diameter);
+                    if (width == 0.)
+                        width = object->config().get_abs_value("line_width", nozzle_diameter);
+                    if (!validate_extrusion_width(width, nozzle_diameter, layer_height, err_msg))
+                        return {err_msg, object, width_role.first};
+                    if (!validate_feature_width_vs_nozzle(width_role.first, filament_id, width, nozzle_diameter, err_msg))
+                        return {err_msg, object, width_role.first};
+                }
         }
     }
 

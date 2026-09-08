@@ -71,6 +71,12 @@ static constexpr size_t MAXIMUM_FILAMENT_NUMBER = 64;
 // Orca: maximum line width is 5 times the nozzle diameter
 static constexpr float MAX_LINE_WIDTH_MULTIPLIER = 5;
 
+// Mixed nozzle sizes (Phase 1c): per-FEATURE upper bound. MAX_LINE_WIDTH_MULTIPLIER above is a
+// whole-print sanity bound measured against the coarsest nozzle on the machine; this one is
+// measured against the diameter of the nozzle that actually prints the feature, so it catches
+// "the outer wall is routed to the 0.2 mm head but the profile still asks for 0.62 mm lines".
+static constexpr double MAX_FEATURE_WIDTH_TO_NOZZLE_RATIO = 2.0;
+
 extern double SCALING_FACTOR;
 static constexpr double PI = 3.141592653589793238;
 #define POLY_SIDE_COUNT 24 // for brim ear circle
