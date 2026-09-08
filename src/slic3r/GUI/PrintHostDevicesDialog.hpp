@@ -7,7 +7,7 @@
 #include "GUI_Utils.hpp"
 #include "../Utils/PrintHostDevices.hpp"
 
-class wxButton;
+class Button;
 class wxDataViewListCtrl;
 class wxStaticText;
 
@@ -17,20 +17,17 @@ class DynamicPrintConfig;
 
 namespace GUI {
 
-// The device list of one printer model: alias, address, host type, and (from phase 2) status.
+// The device list of one printer model: alias, address, host type and status.
 //
-// Phase 1 keeps the preset as the single source every send path reads: "Set as current" writes the
-// chosen device's address and credentials into the printer preset's host fields, exactly as the
-// single-address editor beside it does, so Send to printer, the hub and the phone all keep working
-// unchanged. Phase 3 replaces that bridge with a real fan-out.
+// No device is "the" device. The preset keeps whatever address the user typed into it and this
+// dialog never writes to it; a send picks a device from this list at send time, and the only thing
+// the store remembers is which one that was last time (last_used_id), so the next send can
+// preselect it.
 class PrintHostDevicesDialog : public DPIDialog
 {
 public:
     PrintHostDevicesDialog(wxWindow* parent, DynamicPrintConfig* config, const std::string& model_key, const wxString& model_label);
     ~PrintHostDevicesDialog() override = default;
-
-    // True when the preset's host fields were changed here, so the caller can refresh its own view.
-    bool config_changed() const { return m_config_changed; }
 
 protected:
     void on_dpi_changed(const wxRect& suggested_rect) override;
@@ -44,7 +41,9 @@ private:
     void on_edit();
     void on_remove();
     void on_test();
-    void on_set_current();
+    // The old single-address editor (PhysicalPrinterDialog), behind an explicit click. Nothing
+    // else opens it any more: the sidebar's connection icon lands on this list instead.
+    void on_edit_connection();
     void update_buttons();
     // The device the row is on, false when nothing is selected.
     bool selected(PrintHostDevices::Device& out) const;
@@ -52,21 +51,21 @@ private:
     DynamicPrintConfig*                     m_config { nullptr };
     std::string                             m_model_key;
     std::vector<PrintHostDevices::Device>   m_devices;
-    std::string                             m_current;
-    bool                                    m_config_changed { false };
+    std::string                             m_last_used;
 
     wxDataViewListCtrl* m_list { nullptr };
-    wxButton*           m_btn_add { nullptr };
-    wxButton*           m_btn_edit { nullptr };
-    wxButton*           m_btn_remove { nullptr };
-    wxButton*           m_btn_test { nullptr };
-    wxButton*           m_btn_current { nullptr };
+    Button*             m_btn_add { nullptr };
+    Button*             m_btn_edit { nullptr };
+    Button*             m_btn_remove { nullptr };
+    Button*             m_btn_test { nullptr };
+    Button*             m_btn_connection { nullptr };
+    Button*             m_btn_close { nullptr };
 };
 
 // Opens the dialog for the printer preset that is selected right now, after importing that preset's
-// own print_host as device 1 if it has never been imported. Returns true when the preset's host
-// fields were changed. Safe to call with no preset bundle (does nothing).
-bool show_print_host_devices_dialog(wxWindow* parent, DynamicPrintConfig* config = nullptr);
+// own print_host as device 1 if it has never been imported. Safe to call with no preset bundle
+// (does nothing).
+void show_print_host_devices_dialog(wxWindow* parent, DynamicPrintConfig* config = nullptr);
 
 } // namespace GUI
 } // namespace Slic3r

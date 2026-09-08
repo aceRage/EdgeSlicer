@@ -345,38 +345,63 @@ bool remove(const std::string& key, const std::string& id)
     if (!found)
         return false;
     node["devices"] = kept;
+    if (str_of(node, "last_used") == id)
+        node["last_used"] = "";
     if (str_of(node, "current") == id)
         node["current"] = "";
     save_store(store);
     return true;
 }
 
-std::string current(const std::string& key)
+std::string last_used_id(const std::string& key)
 {
     std::lock_guard<std::mutex> lock(s_mutex);
-    return str_of(model_node_ro(load_store(), key), "current");
+    // The store is kept in a local: model_node_ro returns a reference *into* it, and binding that
+    // to the temporary load_store() returns leaves it dangling as soon as the statement ends.
+    const json                  store = load_store();
+    const json&                 node  = model_node_ro(store, key);
+    const std::string           id    = str_of(node, "last_used");
+    // A store written by phase 1 has "current" instead - the device its "Use this device" button
+    // had written into the preset. It is the best guess at "the one you last sent to", so it is
+    // read once and then quietly replaced the next time a send happens.
+    return id.empty() ? str_of(node, "current") : id;
 }
 
-void set_current(const std::string& key, const std::string& id)
+void set_last_used(const std::string& key, const std::string& id)
 {
     std::lock_guard<std::mutex> lock(s_mutex);
     json                        store = load_store();
     json&                       node  = model_node(store, key);
-    node["current"]                   = id;
+    node["last_used"]                 = id;
+    // phase 1's key, so an older build reading this file does not resurrect a stale choice.
+    if (node.contains("current"))
+        node["current"] = id;
+    for (json& e : node["devices"])
+        if (str_of(e, "id") == id)
+            e["last_used"] = now_s();
     save_store(store);
 }
 
-void touch(const std::string& key, const std::string& id)
+// -------------------------------------------- "can this plate go anywhere?" ----
+
+bool has_devices(const std::string& key)
 {
-    std::lock_guard<std::mutex> lock(s_mutex);
-    json                        store = load_store();
-    json&                       node  = model_node(store, key);
-    for (json& e : node["devices"])
-        if (str_of(e, "id") == id) {
-            e["last_used"] = now_s();
-            save_store(store);
-            return;
-        }
+    for (const Device& d : devices(key))
+        if (!d.address.empty())
+            return true;
+    return false;
+}
+
+bool can_send_for(const DynamicPrintConfig& config, const std::string& preset_name)
+{
+    if (!trimmed(cfg_str(config, "print_host")).empty())
+        return true;
+    return has_devices(model_key(cfg_str(config, "printer_model"), preset_name));
+}
+
+bool can_send_for(const Preset& printer_preset)
+{
+    return can_send_for(printer_preset.config, printer_preset.name);
 }
 
 // ------------------------------------------------------- the preset bridge ----
@@ -422,6 +447,13 @@ Device from_config(const DynamicPrintConfig& config)
     else
         d.auth_type = "key";
     return d;
+}
+
+DynamicPrintConfig config_for(const Device& d, const DynamicPrintConfig& preset_config)
+{
+    DynamicPrintConfig cfg = preset_config;
+    apply_to_config(d, cfg);
+    return cfg;
 }
 
 void apply_to_config(const Device& d, DynamicPrintConfig& config)
@@ -482,8 +514,9 @@ int migrate_from_presets(const std::vector<PresetHost>& presets)
             d.printer_model = p.printer_model;
             d.created       = now_s();
             node["devices"].push_back(json_of(d));
-            if (str_of(node, "current").empty())
-                node["current"] = d.id;
+            // Deliberately not marked as the model's device: an import is not a send, and this
+            // feature has no "main printer" to be. The send dialog preselects the first row when
+            // nothing was ever sent.
             ++created;
         }
         save_store(store);

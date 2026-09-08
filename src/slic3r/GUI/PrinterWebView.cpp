@@ -11,6 +11,12 @@
 #include <wx/string.h>
 #include <wx/toolbar.h>
 #include <wx/textdlg.h>
+#include <wx/choice.h>
+#include <wx/stattext.h>
+
+#include "libslic3r/PresetBundle.hpp"
+
+#include <algorithm>
 
 #include <slic3r/GUI/Widgets/WebView.hpp>
 #include <wx/webview.h>
@@ -42,8 +48,20 @@ PrinterWebView::PrinterWebView(wxWindow *parent)
     m_browser->Bind(wxEVT_WEBVIEW_LOADED, &PrinterWebView::OnLoaded, this);
     m_browser->Bind(wxEVT_WEBVIEW_SCRIPT_MESSAGE_RECEIVED, &PrinterWebView::OnScriptMessage, this, m_browser->GetId());
 
+    // The device picker, above the page. Created empty and hidden; Sidebar::update_all_preset_
+    // comboboxes fills it in for a print-host printer whose model has devices.
+    m_device_bar   = new wxPanel(this, wxID_ANY);
+    auto* bar_sizer = new wxBoxSizer(wxHORIZONTAL);
+    bar_sizer->Add(new wxStaticText(m_device_bar, wxID_ANY, _L("Printer") + ":"), 0, wxALIGN_CENTER_VERTICAL | wxLEFT | wxRIGHT, FromDIP(8));
+    m_device_choice = new wxChoice(m_device_bar, wxID_ANY);
+    bar_sizer->Add(m_device_choice, 0, wxALIGN_CENTER_VERTICAL | wxTOP | wxBOTTOM, FromDIP(4));
+    m_device_bar->SetSizer(bar_sizer);
+    m_device_bar->Hide();
+    m_device_choice->Bind(wxEVT_CHOICE, [this](wxCommandEvent&) { load_picked_device(); });
+
     SetSizer(topsizer);
 
+    topsizer->Add(m_device_bar, 0, wxEXPAND);
     topsizer->Add(m_browser, wxSizerFlags().Expand().Proportion(1));
 
     update_mode();
@@ -84,6 +102,86 @@ void PrinterWebView::load_url(wxString& url, wxString apikey)
     m_browser->LoadURL(url);
 
     UpdateState();
+}
+
+void PrinterWebView::set_devices(const std::string& model_key, const std::vector<PrintHostDevices::Device>& devices, const std::string& select_id)
+{
+    if (!m_device_bar || !m_device_choice)
+        return;
+    const bool same = m_model_key == model_key && m_devices.size() == devices.size() &&
+                      std::equal(m_devices.begin(), m_devices.end(), devices.begin(),
+                                 [](const PrintHostDevices::Device& a, const PrintHostDevices::Device& b) {
+                                     return a.id == b.id && a.alias == b.alias && a.address == b.address;
+                                 });
+    m_model_key = model_key;
+    m_devices   = devices;
+    if (devices.empty()) {
+        m_device_choice->Clear();
+        if (m_device_bar->IsShown()) {
+            m_device_bar->Hide();
+            Layout();
+        }
+        return;
+    }
+    if (!same) {
+        m_device_choice->Clear();
+        for (const PrintHostDevices::Device& d : devices) {
+            wxString label = from_u8(d.display_name());
+            if (!d.alias.empty() && d.alias != d.address)
+                label += "  " + from_u8(d.address);
+            m_device_choice->Append(label);
+        }
+    }
+    int sel = 0;
+    for (size_t i = 0; i < devices.size(); ++i)
+        if (!select_id.empty() && devices[i].id == select_id)
+            sel = (int) i;
+    m_device_choice->SetSelection(sel);
+    if (!m_device_bar->IsShown()) {
+        m_device_bar->Show();
+        Layout();
+    }
+}
+
+std::string PrinterWebView::picked_device() const
+{
+    if (!m_device_choice)
+        return {};
+    const int sel = m_device_choice->GetSelection();
+    if (sel < 0 || sel >= (int) m_devices.size())
+        return {};
+    return m_devices[sel].id;
+}
+
+void PrinterWebView::load_picked_device()
+{
+    const int sel = m_device_choice ? m_device_choice->GetSelection() : -1;
+    if (sel < 0 || sel >= (int) m_devices.size())
+        return;
+    const PrintHostDevices::Device& d = m_devices[sel];
+    PresetBundle*                   bundle = wxGetApp().preset_bundle;
+    if (!bundle)
+        return;
+    const DynamicPrintConfig& cfg = bundle->printers.get_edited_preset().config;
+    std::string               url = d.address;
+    // print_host_webui is an override for the preset's own address, so it only applies to whichever
+    // device carries that address; every other device is reached at its own.
+    const std::string webui = cfg.opt_string("print_host_webui");
+    if (!webui.empty() &&
+        PrintHostDevices::normalize_address(cfg.opt_string("print_host")) == PrintHostDevices::normalize_address(d.address))
+        url = webui;
+    if (url.empty())
+        return;
+    if (url.find("http://") != 0 && url.find("https://") != 0)
+        url = "http://" + url;
+    // Ultra: remember which device the tab is on, so the next Print preselects the same one.
+    try {
+        if (!m_model_key.empty())
+            PrintHostDevices::set_last_used(m_model_key, d.id);
+    } catch (...) {}
+    wxString wurl   = from_u8(url);
+    wxString apikey = from_u8(d.apikey);
+    load_url(wurl, apikey);
 }
 
 void PrinterWebView::reload()

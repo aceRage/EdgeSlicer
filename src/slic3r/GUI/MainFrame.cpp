@@ -32,6 +32,7 @@
 #include "3DScene.hpp"
 #include "ParamsDialog.hpp"
 #include "PrintHostDialogs.hpp"
+#include "../Utils/PrintHostDevices.hpp"
 #include "wxExtensions.hpp"
 #include "GUI_ObjectList.hpp"
 #include "Mouse3DController.hpp"
@@ -1725,9 +1726,10 @@ bool MainFrame::can_send_gcode() const
         if (wxGetApp().app_config->get("use_new_connect") == "true") {
             return true;
         } else {
-            auto cfg = wxGetApp().preset_bundle->printers.get_edited_preset().config;
-            if (const auto* print_host_opt = cfg.option<ConfigOptionString>("print_host"); print_host_opt)
-                return !print_host_opt->value.empty();
+            // Not "does the preset hold an address" any more: this model may have three printers in
+            // its device list and an empty print_host, which is exactly the case the devices
+            // feature exists for. PrintHostDevices::can_send_for is the one place that decides.
+            return PrintHostDevices::can_send_for(edit_preset);
         }
         
     }

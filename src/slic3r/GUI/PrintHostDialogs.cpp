@@ -30,11 +30,42 @@
 #include "ExtraRenderers.hpp"
 #include "format.hpp"
 #include "WebPreprintDialog.hpp"
+#include "../Utils/PrintHostDevices.hpp"
+#include "../Utils/PrintHostDeviceStatus.hpp"
+#include <wx/choice.h>
+#include <wx/combobox.h>
+#include <wx/panel.h>
 
 namespace fs = boost::filesystem;
 
 namespace Slic3r {
 namespace GUI {
+
+// ------------------------------------------------- the device row + mapping ----
+
+// "#RRGGBB" / "#RRGGBBAA" / "RRGGBB" -> a colour; anything unreadable -> grey.
+static wxColour swatch_colour(const std::string& raw)
+{
+    std::string s = raw;
+    if (!s.empty() && s[0] == '#')
+        s = s.substr(1);
+    if (s.size() >= 6) {
+        wxString hex = from_u8("#" + s.substr(0, 6));
+        wxColour c;
+        if (c.Set(hex))
+            return c;
+    }
+    return wxColour(160, 160, 160);
+}
+
+// Redmean, the same cheap perceptual distance SnapmakerLan::auto_match uses (SnapmakerLan.cpp:830)
+// so the two auto-matches agree about which slot is "the closest colour".
+static double colour_distance(const wxColour& a, const wxColour& b)
+{
+    const double rm = (a.Red() + b.Red()) / 2.0;
+    const double dr = a.Red() - b.Red(), dg = a.Green() - b.Green(), db = a.Blue() - b.Blue();
+    return (2 + rm / 256) * dr * dr + 4 * dg * dg + (2 + (255 - rm) / 256) * db * db;
+}
 
 static const char *CONFIG_KEY_PATH  = "printhost_path";
 static const char *CONFIG_KEY_GROUP = "printhost_group";
@@ -58,6 +89,178 @@ PrintHostSendDialog::PrintHostSendDialog(const fs::path &path, PrintHostPostUplo
     txt_filename->OSXDisableAllSmartSubstitutions();
 #endif
 }
+void PrintHostSendDialog::set_devices(const std::string& model_key, const std::vector<PrintHostDevices::Device>& devices, const std::string& preselect_id)
+{
+    m_model_key    = model_key;
+    m_devices      = devices;
+    m_preselect_id = preselect_id;
+}
+
+void PrintHostSendDialog::set_plate_filaments(std::vector<SendPlateFilament> filaments)
+{
+    m_plate_filaments = std::move(filaments);
+}
+
+std::string PrintHostSendDialog::device_id() const
+{
+    if (m_device_sel < 0 || m_device_sel >= (int) m_devices.size())
+        return {};
+    return m_devices[m_device_sel].id;
+}
+
+std::string PrintHostSendDialog::filament_mapping() const
+{
+    std::string out;
+    for (size_t i = 0; i < m_mapping_choices.size() && i < m_mapping_filament.size(); ++i) {
+        const int sel = m_mapping_choices[i]->GetSelection();
+        if (sel <= 0) // 0 is "As sliced"
+            continue;
+        const int slot = sel - 1;
+        if (slot < 0 || slot >= (int) m_device_status.slots.size())
+            continue;
+        if (!out.empty())
+            out += ",";
+        out += std::to_string(m_mapping_filament[i]) + ":" + std::to_string(m_device_status.slots[slot].index);
+    }
+    return out;
+}
+
+// The target first: which printer this plate is going to, before its file name. With one device it
+// is still shown - a farm of one is a farm, and the row says which address is about to be used.
+void PrintHostSendDialog::build_device_ui()
+{
+    if (m_devices.empty())
+        return;
+
+    wxArrayString names;
+    int           sel = 0;
+    for (size_t i = 0; i < m_devices.size(); ++i) {
+        const PrintHostDevices::Device& d = m_devices[i];
+        wxString                        label = from_u8(d.display_name());
+        if (!d.alias.empty() && d.alias != d.address)
+            label += "  " + from_u8(d.address);
+        names.Add(label);
+        if (!m_preselect_id.empty() && d.id == m_preselect_id)
+            sel = (int) i;
+    }
+    auto* label_device = new wxStaticText(this, wxID_ANY, _L("Printer") + ":");
+    content_sizer->Add(label_device);
+    m_combo_devices = new wxComboBox(this, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize, names, wxCB_READONLY);
+    m_combo_devices->SetSelection(sel);
+    m_device_sel = sel;
+    content_sizer->Add(m_combo_devices, 0, wxEXPAND | wxBOTTOM, VERT_SPACING);
+
+    m_device_note = new wxStaticText(this, wxID_ANY, wxEmptyString);
+    m_device_note->Wrap(CONTENT_WIDTH * wxGetApp().em_unit());
+    content_sizer->Add(m_device_note, 0, wxBOTTOM, VERT_SPACING);
+
+    m_mapping_panel = new wxPanel(this, wxID_ANY);
+    m_mapping_sizer = new wxFlexGridSizer(3, FromDIP(4), FromDIP(8));
+    m_mapping_sizer->AddGrowableCol(2, 1);
+    m_mapping_panel->SetSizer(m_mapping_sizer);
+    content_sizer->Add(m_mapping_panel, 0, wxEXPAND | wxBOTTOM, 2 * VERT_SPACING);
+
+    m_combo_devices->Bind(wxEVT_COMBOBOX, [this](wxCommandEvent&) {
+        m_device_sel = m_combo_devices->GetSelection();
+        refresh_device_status();
+    });
+    refresh_device_status();
+}
+
+// Blocking with a busy cursor, exactly as the devices dialog's Test does: a modal send dialog can
+// afford one short request, and a worker thread would have to outlive a dialog the user can close.
+void PrintHostSendDialog::refresh_device_status()
+{
+    m_device_status = PrintHostDevices::Status();
+    if (m_device_sel >= 0 && m_device_sel < (int) m_devices.size()) {
+        wxBusyCursor wait;
+        m_device_status = PrintHostDevices::probe(m_devices[m_device_sel], 3);
+    }
+    if (m_device_note) {
+        wxString text;
+        if (m_device_status.probed && m_device_status.online && !m_device_status.state.empty())
+            text = format_wxstr(_L("Status: %1%"), from_u8(m_device_status.state));
+        else if (m_device_status.probed && !m_device_status.online)
+            text = _L("Status: unknown");
+        if (!m_device_status.slots_have_filaments && !m_device_status.note.empty()) {
+            if (!text.IsEmpty())
+                text += "  ";
+            // The honest sentence: this protocol has no filament data, so there is nothing to map.
+            text += _(from_u8(m_device_status.note));
+        }
+        m_device_note->SetLabel(text);
+        m_device_note->Wrap(CONTENT_WIDTH * wxGetApp().em_unit());
+        m_device_note->Show(!text.IsEmpty());
+    }
+    rebuild_mapping_rows();
+    content_sizer->Layout();
+    Layout();
+    Fit();
+}
+
+// One row per filament this plate actually uses: its colour, its type, and where it goes. Only when
+// the printer named what is in its slots - a bare list of tools tells nobody anything.
+void PrintHostSendDialog::rebuild_mapping_rows()
+{
+    if (!m_mapping_panel || !m_mapping_sizer)
+        return;
+    m_mapping_choices.clear();
+    m_mapping_filament.clear();
+    m_mapping_sizer->Clear(true);
+
+    const bool can_map = m_device_status.slots_have_filaments && !m_device_status.slots.empty() && !m_plate_filaments.empty();
+    if (!can_map) {
+        m_mapping_panel->Show(false);
+        m_mapping_panel->Layout();
+        return;
+    }
+
+    wxArrayString slot_labels;
+    slot_labels.Add(_L("As sliced"));
+    for (const PrintHostDevices::Slot& s : m_device_status.slots) {
+        wxString l = from_u8(s.label());
+        if (!s.vendor.empty())
+            l += " " + from_u8(s.vendor);
+        slot_labels.Add(l);
+    }
+
+    for (const SendPlateFilament& f : m_plate_filaments) {
+        if (!f.used)
+            continue;
+        auto* swatch = new wxPanel(m_mapping_panel, wxID_ANY, wxDefaultPosition, wxSize(FromDIP(16), FromDIP(16)));
+        swatch->SetBackgroundColour(swatch_colour(f.colour));
+        m_mapping_sizer->Add(swatch, 0, wxALIGN_CENTER_VERTICAL);
+
+        wxString name = format_wxstr(_L("Filament %1%"), f.index + 1);
+        if (!f.type.empty())
+            name += "  " + from_u8(f.type);
+        m_mapping_sizer->Add(new wxStaticText(m_mapping_panel, wxID_ANY, name), 0, wxALIGN_CENTER_VERTICAL);
+
+        auto* choice = new wxChoice(m_mapping_panel, wxID_ANY, wxDefaultPosition, wxDefaultSize, slot_labels);
+        // Auto-match: the closest colour among the slots that have something in them, the same rule
+        // the Snapmaker LAN path uses. "As sliced" whenever nothing is close enough to be obvious.
+        int    best = 0;
+        double best_d = 0;
+        for (size_t i = 0; i < m_device_status.slots.size(); ++i) {
+            const PrintHostDevices::Slot& s = m_device_status.slots[i];
+            if (!s.loaded || s.color.empty())
+                continue;
+            const double dist = colour_distance(swatch_colour(f.colour), swatch_colour(s.color));
+            if (best == 0 || dist < best_d) {
+                best   = (int) i + 1;
+                best_d = dist;
+            }
+        }
+        choice->SetSelection(best);
+        m_mapping_sizer->Add(choice, 1, wxEXPAND);
+        m_mapping_choices.push_back(choice);
+        m_mapping_filament.push_back(f.index);
+    }
+
+    m_mapping_panel->Show(!m_mapping_choices.empty());
+    m_mapping_panel->Layout();
+}
+
 void PrintHostSendDialog::init()
 {
     const auto& path = m_path;
@@ -67,6 +270,9 @@ void PrintHostSendDialog::init()
     m_switch_to_device_tab = true;
 
     const AppConfig* app_config = wxGetApp().app_config;
+
+    // The target before the file name: which of this model's printers this plate is going to.
+    build_device_ui();
 
     auto *label_dir_hint = new wxStaticText(this, wxID_ANY, _L("Please do not include the special characters #, *, ;, \\, /, :, \", <, >, or | in filenames."));
     label_dir_hint->Wrap(CONTENT_WIDTH * wxGetApp().em_unit());

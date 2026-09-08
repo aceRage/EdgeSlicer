@@ -777,6 +777,8 @@ set(SLIC3R_GUI_SOURCES
     Utils/PrintHost.hpp
     Utils/PrintHostDevices.cpp
     Utils/PrintHostDevices.hpp
+    Utils/PrintHostDeviceStatus.cpp
+    Utils/PrintHostDeviceStatus.hpp
     Utils/Process.cpp
     Utils/Process.hpp
     Utils/ProfileDescription.hpp

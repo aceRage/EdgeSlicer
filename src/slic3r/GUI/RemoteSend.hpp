@@ -60,6 +60,9 @@ struct Prepared
     std::shared_ptr<PrintHost> host;
     PrintHostUpload  upload {};
     bool             two_step { false };            // upload with print=false, then printer.print.start over MQTT
+    // One of this printer model's devices (<datadir>/hub/print_host_devices.json), when the target
+    // was "ph:<id>" rather than the preset's own address. Empty for the plain "host" target.
+    std::string      device_id, model_key;
     // Snapmaker over the LAN (Moonraker HTTP): no host object, just the printer and the mapping.
     SnapmakerLan::Device                    lan {};
     std::string                             lan_filename;

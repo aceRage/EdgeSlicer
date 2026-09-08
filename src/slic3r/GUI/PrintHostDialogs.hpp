@@ -12,16 +12,28 @@
 #include "GUI_Utils.hpp"
 #include "MsgDialog.hpp"
 #include "../Utils/PrintHost.hpp"
+#include "../Utils/PrintHostDeviceStatus.hpp"
 #include "libslic3r/PrintConfig.hpp"
 class wxButton;
 class wxTextCtrl;
 class wxChoice;
 class wxComboBox;
 class wxDataViewListCtrl;
+class wxFlexGridSizer;
+class wxStaticText;
 
 namespace Slic3r {
 
 namespace GUI {
+
+// One filament of the plate being sent, as the mapping table shows it.
+struct SendPlateFilament
+{
+    int         index { 0 };   // 0-based, the slicer's filament/extruder number
+    std::string type;          // "PLA"
+    std::string colour;        // "#RRGGBB" or "#RRGGBBAA"
+    bool        used { false }; // this plate's slice result actually used it
+};
 
 class PrintHostSendDialog : public GUI::MsgDialog
 {
@@ -34,6 +46,22 @@ public:
     std::string storage() const;
     bool switch_to_device_tab() const {return m_switch_to_device_tab;}
 
+    // ---- the printer's devices (<datadir>/hub/print_host_devices.json) ----
+    //
+    // Call before init(). With a non-empty list the dialog grows a device dropdown at the top and,
+    // once a device is picked, asks that device what is loaded in it (PrintHostDevices::probe) and
+    // offers a plate-filament -> slot table when it said anything. Most print hosts say nothing -
+    // Elegoo Link has no filament data in its protocol at all - and then the dialog says so and the
+    // plate goes out exactly as it was sliced.
+    void set_devices(const std::string& model_key, const std::vector<PrintHostDevices::Device>& devices, const std::string& preselect_id);
+    // The plate's filaments, for that table. Call before init(); empty = no table.
+    void set_plate_filaments(std::vector<SendPlateFilament> filaments);
+    // The device the user chose, "" when there were none (the preset's own address is the target).
+    std::string device_id() const;
+    // "0:1,1:2" - the plate's filament 0 goes in slot 1, filament 1 in slot 2. Empty when nothing
+    // was mapped, which is every host that reports no slots.
+    std::string filament_mapping() const;
+
     const boost::filesystem::path origin_path() { return m_ori_file_path; }
 
     virtual void EndModal(int ret) override;
@@ -41,9 +69,30 @@ public:
     virtual std::map<std::string, std::string> extendedInfo() const { return {}; }
 
 protected:
+    // Builds the device row and the mapping table into content_sizer. Called from init() before
+    // the file name, so the target is the first thing read and the first thing tabbed to.
+    void build_device_ui();
+    // Asks the picked device what is loaded and rebuilds the mapping table. Blocking, with a busy
+    // cursor and a short timeout - the same shape as the devices dialog's Test button.
+    void refresh_device_status();
+    void rebuild_mapping_rows();
+
     wxTextCtrl *txt_filename;
     wxComboBox *combo_groups;
     wxComboBox* combo_storage;
+    // The devices of this printer model, the one that is picked, and what it said.
+    std::string                           m_model_key;
+    std::vector<PrintHostDevices::Device>  m_devices;
+    std::string                           m_preselect_id;
+    int                                   m_device_sel { -1 };
+    PrintHostDevices::Status              m_device_status;
+    std::vector<SendPlateFilament>        m_plate_filaments;
+    wxComboBox*                           m_combo_devices { nullptr };
+    wxStaticText*                         m_device_note { nullptr };
+    wxWindow*                             m_mapping_panel { nullptr };
+    wxFlexGridSizer*                      m_mapping_sizer { nullptr };
+    std::vector<wxChoice*>                m_mapping_choices;  // one per used plate filament
+    std::vector<int>                      m_mapping_filament; // its filament index
     PrintHostPostUploadAction post_upload_action;
     wxString    m_valid_suffix;
     wxString    m_preselected_storage;

@@ -7,6 +7,7 @@
 #include <catch2/catch.hpp>
 
 #include "slic3r/Utils/PrintHostDevices.hpp"
+#include "slic3r/Utils/PrintHostDeviceStatus.hpp"
 
 #include <boost/filesystem.hpp>
 #include <boost/nowide/fstream.hpp>
@@ -118,15 +119,17 @@ TEST_CASE("PrintHostDevices: an id is stable across edits and reloads", "[PrintH
     REQUIRE(back.size() == 1);
     CHECK(back[0].id == id);
 
-    set_current(key, id);
-    CHECK(current(key) == id);
-    touch(key, id);
+    // last_used is a memory of where the last plate went, not a setting: it names the device and
+    // stamps that device's own timestamp in one go.
+    CHECK(last_used_id(key).empty()); // nothing was ever sent
+    set_last_used(key, id);
+    CHECK(last_used_id(key) == id);
     REQUIRE(find(key, id, found));
     CHECK(found.last_used > 0);
 
     REQUIRE(remove(key, id));
     CHECK(devices(key).empty());
-    CHECK(current(key).empty()); // the current device went with it
+    CHECK(last_used_id(key).empty()); // the memory went with the device
     CHECK_FALSE(remove(key, id));
 }
 
@@ -174,7 +177,7 @@ TEST_CASE("PrintHostDevices: a broken file reads as an empty list", "[PrintHostD
         store.write("{ this is not json ]]");
         CHECK(devices(key).empty());
         CHECK(all_devices().empty());
-        CHECK(current(key).empty());
+        CHECK(last_used_id(key).empty());
         // ... and writing to it repairs it rather than failing.
         Device      d = make_device("Left bay", "192.168.1.41");
         std::string error;
@@ -236,7 +239,9 @@ TEST_CASE("PrintHostDevices: a preset's own address becomes device 1, once", "[P
     CHECK(back[0].address == "192.168.1.41");
     CHECK(back[0].host_type == "elegoolink");
     CHECK(back[0].apikey == "secret");
-    CHECK(current(key) == back[0].id); // and it is what the preset points at
+    // An import is not a send: it does not make the imported device the model's last used one,
+    // because this feature has no "main printer" for it to become.
+    CHECK(last_used_id(key).empty());
     CHECK(devices("Voron 2.4").empty());
 
     // Idempotent: running it again changes nothing.
@@ -265,6 +270,156 @@ TEST_CASE("PrintHostDevices: a preset's own address becomes device 1, once", "[P
     CHECK(migrate_from_presets({ second }) == 1);
     REQUIRE(devices(key).size() == 1);
     CHECK(devices(key)[0].address == "192.168.1.55");
+}
+
+TEST_CASE("PrintHostDevices: a phase-1 store's \"current\" is read as the last used one", "[PrintHostDevices]")
+{
+    // Phase 1 wrote a model-level "current": the device whose address its "Use this device" button
+    // had copied into the preset. That button is gone, but the field is the best guess at "the one
+    // you last sent to", so it is still read - and replaced the next time a send happens.
+    ScopedStore store("phase1current");
+    const std::string key = "Elegoo Centauri Carbon";
+    store.write("{\"version\":1,\"models\":{\"" + key +
+                "\":{\"current\":\"dcafe\",\"devices\":[{\"id\":\"dcafe\",\"address\":\"192.168.1.41\"},"
+                "{\"id\":\"dbeef\",\"address\":\"192.168.1.42\"}]}}}");
+    CHECK(last_used_id(key) == "dcafe");
+
+    set_last_used(key, "dbeef");
+    CHECK(last_used_id(key) == "dbeef");
+    Device found;
+    REQUIRE(find(key, "dbeef", found));
+    CHECK(found.last_used > 0);
+
+    // config_for is what the send builds its job from: a copy, never the preset itself.
+    DynamicPrintConfig preset;
+    preset.opt_string("print_host", true) = "192.168.1.99";
+    REQUIRE(find(key, "dbeef", found));
+    const DynamicPrintConfig job = config_for(found, preset);
+    CHECK(job.opt_string("print_host") == "192.168.1.42");
+    CHECK(preset.opt_string("print_host") == "192.168.1.99"); // untouched
+}
+
+TEST_CASE("PrintHostDevices: the send button follows the devices, not the preset", "[PrintHostDevices]")
+{
+    ScopedStore store("cansend");
+    const std::string key = "Elegoo Centauri Carbon";
+
+    // The preset the send path reads: a printer model, and no address of its own. This is exactly
+    // the case the devices feature exists for, and the Print button has to light up for it.
+    DynamicPrintConfig config;
+    config.opt_string("printer_model", true) = key;
+    config.opt_string("print_host", true)    = "";
+
+    CHECK_FALSE(can_send_for(config, "Elegoo Centauri Carbon 0.4 nozzle"));
+    CHECK_FALSE(has_devices(key));
+
+    // One device with an address is enough - nothing is written to the preset.
+    Device      d = make_device("Left bay", "192.168.1.41", "elegoolink");
+    std::string error;
+    REQUIRE(add(key, d, error));
+    CHECK(has_devices(key));
+    CHECK(can_send_for(config, "Elegoo Centauri Carbon 0.4 nozzle"));
+    CHECK(config.opt_string("print_host").empty()); // still empty: no bridge writes it any more
+
+    // Every nozzle variant of the machine shares the list, so they all send.
+    CHECK(can_send_for(config, "Elegoo Centauri Carbon 0.2 nozzle"));
+
+    // A different model does not borrow it.
+    DynamicPrintConfig other;
+    other.opt_string("printer_model", true) = "Voron 2.4";
+    other.opt_string("print_host", true)    = "";
+    CHECK_FALSE(can_send_for(other, "Voron"));
+    // ... unless the preset carries its own address, the way it always worked.
+    other.opt_string("print_host") = "192.168.1.90";
+    CHECK(can_send_for(other, "Voron"));
+
+    // A device with no address is not a place to send to. (add() refuses one, so this goes in by
+    // hand, the way a hand-edited file would.)
+    REQUIRE(remove(key, d.id));
+    CHECK_FALSE(has_devices(key));
+    store.write("{\"version\":1,\"models\":{\"" + key + "\":{\"devices\":[{\"id\":\"x\",\"address\":\"\"}]}}}");
+    CHECK_FALSE(has_devices(key));
+    CHECK_FALSE(can_send_for(config, "Elegoo Centauri Carbon 0.4 nozzle"));
+}
+
+TEST_CASE("PrintHostDevices: what a device says it has loaded", "[PrintHostDevices]")
+{
+    // No network here: parse_moonraker_status is the half of probe() that turns a Moonraker
+    // `result.status` object into slots, so the parsing is exercised without a printer.
+
+    SECTION("a Snapmaker-flavoured Moonraker names its filaments") {
+        const std::string status =
+            "{\"print_stats\":{\"state\":\"standby\"},"
+            " \"print_task_config\":{"
+            "   \"filament_type\":[\"PLA\",\"PETG\",\"\"],"
+            "   \"filament_sub_type\":[\"Basic\",\"HF\",\"\"],"
+            "   \"filament_vendor\":[\"Polymaker\",\"Generic\",\"\"],"
+            "   \"filament_color_rgba\":[\"FF0000FF\",\"0000FFFF\",\"\"],"
+            "   \"filament_exist\":[true,true,false]}}";
+        const Status st = parse_moonraker_status(status, "octoprint");
+        CHECK(st.probed);
+        CHECK(st.online);
+        CHECK(st.state == "standby");
+        REQUIRE(st.slots.size() == 3);
+        CHECK(st.slots_have_filaments);
+        CHECK(st.slots[0].index == 0);
+        CHECK(st.slots[0].type == "PLA");
+        CHECK(st.slots[0].vendor == "Polymaker");
+        CHECK(st.slots[0].color == "#FF0000"); // the alpha byte is dropped
+        CHECK(st.slots[0].loaded);
+        CHECK(st.slots[1].color == "#0000FF");
+        CHECK_FALSE(st.slots[2].loaded);
+        CHECK(st.note.empty()); // there is something to map, so nothing to apologise for
+        CHECK(st.slots[0].label() == "T1 PLA Basic");
+    }
+
+    SECTION("a stock Klipper names its tools and nothing in them") {
+        const std::string status =
+            "{\"print_stats\":{\"state\":\"printing\"},"
+            " \"extruder\":{\"nozzle_diameter\":0.4,\"temperature\":210},"
+            " \"extruder1\":{\"nozzle_diameter\":0.4,\"temperature\":25}}";
+        const Status st = parse_moonraker_status(status, "octoprint");
+        CHECK(st.online);
+        CHECK(st.state == "printing");
+        REQUIRE(st.slots.size() == 2);
+        CHECK_FALSE(st.slots_have_filaments); // tools, not filaments: no mapping table
+        CHECK(st.slots[1].index == 1);
+        CHECK(st.slots[0].nozzle == Approx(0.4));
+        CHECK_FALSE(st.note.empty());
+    }
+
+    SECTION("something that is not a Moonraker printer") {
+        const Status st = parse_moonraker_status("{}", "octoprint");
+        CHECK_FALSE(st.online);
+        CHECK(st.slots.empty());
+        CHECK_FALSE(st.note.empty());
+    }
+
+    SECTION("Elegoo Link is never asked, and says so") {
+        // Measured against this fork's own ElegooLink: it speaks SDCP over its own websocket and
+        // sends only Cmd 0 (status, one field read) and Cmd 128 (start print). Cmd 1 (Attributes),
+        // where an SDCP device would describe its materials, is declared and never sent.
+        CHECK_FALSE(can_probe("elegoolink"));
+        CHECK(can_probe("octoprint"));
+        const std::string note = no_filament_note("elegoolink");
+        CHECK(note.find("Elegoo Link") != std::string::npos);
+        CHECK(note.find("sent exactly as it was sliced") != std::string::npos);
+
+        Device d   = make_device("Centauri", "192.0.2.1", "elegoolink");
+        Status  st = probe(d, 1); // no network is touched: the host type is not probeable
+        CHECK_FALSE(st.probed);
+        CHECK_FALSE(st.online);
+        CHECK(st.slots.empty());
+        CHECK(st.note == note);
+    }
+
+    SECTION("a device with no address is not probed either") {
+        Device d;
+        d.host_type = "octoprint";
+        const Status st = probe(d, 1);
+        CHECK_FALSE(st.probed);
+        CHECK(st.note == "this device has no address");
+    }
 }
 
 TEST_CASE("PrintHostDevices: the preset bridge writes the fields the send path reads", "[PrintHostDevices]")
