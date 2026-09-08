@@ -593,7 +593,16 @@ struct NamedPresets
                 std::string        reason;
                 cfg.load_from_json(entry.path().string(), ForwardCompatibilitySubstitutionRule::EnableSilent, key_values, reason);
                 if (!reason.empty()) return false;
-                const std::string inherits = key_values.count(BBL_JSON_KEY_INHERITS) ? key_values[BBL_JSON_KEY_INHERITS] : "";
+                std::string inherits = key_values.count(BBL_JSON_KEY_INHERITS) ? key_values[BBL_JSON_KEY_INHERITS] : "";
+                if (inherits.empty()) {
+                    // ConfigBase::load_from_json()'s 4-argument form passes load_inherits_to_config=true,
+                    // so "inherits" lands in the CONFIG and never in key_values (Config.cpp:962). Without
+                    // this fallback a user preset's parent was never resolved and the flattened file came
+                    // out holding only the handful of keys the user preset itself overrides - a --printer-preset
+                    // naming a user preset silently sliced against option-registry defaults.
+                    if (const ConfigOption *opt = cfg.option(BBL_JSON_KEY_INHERITS))
+                        inherits = opt->serialize();
+                }
                 if (!inherits.empty()) {
                     const Preset* parent = find_system(inherits, t);
                     if (!parent) { BOOST_LOG_TRIVIAL(error) << "presets by name: parent '" << inherits << "' of user preset '" << name << "' not found"; return false; }
