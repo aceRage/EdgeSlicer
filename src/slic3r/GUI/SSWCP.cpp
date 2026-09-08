@@ -2386,6 +2386,15 @@ void SSWCP_MachineOption_Instance::sw_MachinePrintStart() {
                 }
             });
 
+            // Ultra: record the job in the G-code archive here, where the print is actually
+            // started, rather than only in sw_FinishPreprint. The pre-print page calls that last
+            // hook when it closes itself, and a person who starts the print and then dismisses the
+            // page - or a page that ends on its own device screen - never reaches it, which is why
+            // U1 sends were missing from Reprints while Bambu ones (archived on the host queue's
+            // own path) were all there. archive_print_once() keeps the two hooks from storing the
+            // same file twice.
+            SSWCP::archive_print_once("print");
+
             // Ultra: deduct the job's filament usage from bound Spoolman spools
             wxGetApp().CallAfter([]() { SpoolmanDialog::deduct_after_send_async(); });
         }
@@ -2821,24 +2830,17 @@ void SSWCP_MachineOption_Instance::sw_FinishPreprint()
             }
 
             // Ultra: the preprint page has just finished handing the plate's G-code to the printer.
-            // Keep a copy of exactly that file (Preferences > Ultra > G-Code Archive).
-            if (status == "success" && GcodeArchive::enabled()) {
-                std::shared_ptr<PrintHost> host = nullptr;
-                wxGetApp().get_connect_host(host);
-                GcodeArchive::Meta am = GcodeArchive::meta_for_plate(-1, (p_dialog && p_dialog->is_send_page()) ? "upload" : "print");
-                am.printer_id   = "connect";
-                am.printer_kind = "connect";
-                am.printer_name = host ? "Snapmaker " + host->get_host() : "Snapmaker";
-                am.file_name    = SSWCP::get_display_filename();
-                // A reprint of this record replays the choice the print was made with, the same way
-                // the phone's LAN sends already do.
-                am.unload_at_end = SSWCP::unload_at_end_was_sent();
-                GcodeArchive::archive(SSWCP::get_active_filename(), am);
-            }
+            // Keep a copy of exactly that file (Preferences > Ultra > G-Code Archive). An upload
+            // that never starts a print only reaches this hook, so it is still archived here;
+            // sw_MachinePrintStart has usually stored a started print already, and
+            // archive_print_once() makes the second call a no-op.
+            if (status == "success")
+                SSWCP::archive_print_once((p_dialog && p_dialog->is_send_page()) ? "upload" : "print");
 
             // The page is done with this print, whatever it decided. A choice nobody used must not
             // reach the next send: a cancelled or failed preprint leaves nothing behind.
             SSWCP::clear_pending_unload_at_end();
+            SSWCP::clear_archived_print();
 
             send_to_js();
             finish_job();
@@ -7152,6 +7154,7 @@ bool SSWCP::m_unload_at_end_decided = false;
 bool SSWCP::m_unload_at_end_was_sent = false;
 std::string SSWCP::m_active_gcode_filename = "";
 std::string SSWCP::m_display_gcode_filename = "";
+std::string SSWCP::m_archived_print_file = "";
 long long   SSWCP::m_active_file_size       = 0;
 
 std::unordered_map<std::string, std::shared_ptr<SSWCP_UserLogin_Instance::SubscribeInfo>>
@@ -7574,6 +7577,51 @@ void SSWCP::note_unload_at_end_sent()
     m_unload_at_end_was_sent = true;
 }
 bool SSWCP::unload_at_end_was_sent() { return m_unload_at_end_was_sent; }
+
+// Ultra: store the file this pre-print page is sending in the G-code archive, once per send.
+//
+// Two hooks can reach this. sw_MachinePrintStart fires when the print is actually started, and is
+// the one that always happens for a U1 print; sw_FinishPreprint fires when the page closes itself
+// and is the only hook an upload-without-print reaches. Whichever comes first stores the record,
+// keyed on the file it stored, so a page that does both - or that retries a late print start -
+// leaves one row in Reprints and not three.
+//
+// Nothing here may fail a send: archive() swallows its own errors, and every precondition just
+// returns.
+void SSWCP::archive_print_once(const std::string& mode)
+{
+    if (!GcodeArchive::enabled()) return;
+    const std::string file = SSWCP::get_active_filename();
+    if (file.empty()) {
+        BOOST_LOG_TRIVIAL(warning) << "SSWCP: nothing to archive - no active G-code file for this send";
+        return;
+    }
+    if (file == m_archived_print_file) return; // already stored by the other hook
+    m_archived_print_file = file;
+
+    std::shared_ptr<PrintHost> host = nullptr;
+    wxGetApp().get_connect_host(host);
+    GcodeArchive::Meta am = GcodeArchive::meta_for_plate(-1, mode);
+    am.printer_id   = "connect";
+    am.printer_kind = "connect";
+    am.printer_name = host ? "Snapmaker " + host->get_host() : "Snapmaker";
+    am.file_name    = SSWCP::get_display_filename();
+    // A reprint of this record replays the choice the print was made with, the same way the
+    // phone's LAN sends already do.
+    am.unload_at_end = SSWCP::unload_at_end_was_sent();
+    const GcodeArchive::Record rec = GcodeArchive::archive(file, am);
+    if (rec.id.empty()) {
+        // Storing failed (the archive is off mid-send, the file went, the folder is full). Let the
+        // other hook try again rather than swallowing this send entirely.
+        m_archived_print_file.clear();
+        BOOST_LOG_TRIVIAL(warning) << "SSWCP: the G-code archive did not store " << file;
+    } else {
+        BOOST_LOG_TRIVIAL(info) << "SSWCP: archived " << rec.id << " (" << mode << ")";
+    }
+}
+
+// A send is over: the next one must be able to store its own file even when it is the same path.
+void SSWCP::clear_archived_print() { m_archived_print_file.clear(); }
 
 // query the info of the machine
 bool SSWCP::query_machine_info(std::shared_ptr<PrintHost>& host, std::string& out_model, std::vector<std::string>& out_nozzle_diameters, std::string& device_name, int timeout_second)

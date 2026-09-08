@@ -680,6 +680,13 @@ public:
     static void note_unload_at_end_sent();
     static bool unload_at_end_was_sent();
 
+    // Ultra: store this send's G-code in the archive, at most once per send. Called both from
+    // sw_MachinePrintStart (every started print, including one whose page is dismissed straight
+    // after) and from sw_FinishPreprint (an upload that never starts). clear_archived_print()
+    // closes the send so the next one can store the same path again.
+    static void archive_print_once(const std::string& mode);
+    static void clear_archived_print();
+
     // get the active file name
     static std::string get_active_filename();
 
@@ -716,6 +723,7 @@ private:
     static bool m_unload_at_end_was_sent;   // and whether it actually reached the printer
     static std::string m_active_gcode_filename; // name of the file which is pretend to be upload and print
     static std::string m_display_gcode_filename; // name for display
+    static std::string m_archived_print_file;   // the file archive_print_once() already stored
 
     // WebSocket Debug Server
     static std::unique_ptr<WebSocketDebugServer> m_debug_server;

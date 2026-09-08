@@ -1164,7 +1164,17 @@ RemoteAccess::ApiResponse RemoteAccess::api_archive_thumbnail(const std::string&
 RemoteAccess::ApiResponse RemoteAccess::api_archive_delete(const std::string& id)
 {
     ApiResponse r;
-    if (!GcodeArchive::remove(id)) { r.status = 404; r.body = json_error("no such record"); return r; }
+    // A delete that fails has two quite different causes, and the phone showed the same words for
+    // both: the record is genuinely gone (someone else deleted it, retention dropped it), or it is
+    // right there in the listing and the files under it would not go. Say which.
+    const bool known = !GcodeArchive::find(id).id.empty();
+    if (!GcodeArchive::remove(id)) {
+        r.status = known ? 500 : 404;
+        r.body   = json_error(known ? "the stored file could not be deleted - it may be open in another program, "
+                                      "or the archive folder is read-only"
+                                    : "no such record - it may already have been deleted");
+        return r;
+    }
     nlohmann::json j;
     j["deleted"] = id;
     r.body       = j.dump();

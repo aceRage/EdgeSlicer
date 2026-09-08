@@ -460,14 +460,40 @@ Record find(const std::string& id)
     if (id.empty() || id.size() > 200 || id != sanitize(id, 200))
         return out;
     try {
-        const fs::path            sidecar = fs::path(dir()) / (id + ".json");
+        const fs::path            root(dir());
+        const fs::path            sidecar = root / (id + ".json");
         boost::system::error_code ec;
-        if (!fs::is_regular_file(sidecar, ec)) return out;
-        Record r = record_from_sidecar(sidecar);
-        if (r.id != id) return Record();
-        return r;
+        if (fs::is_regular_file(sidecar, ec)) {
+            Record r = record_from_sidecar(sidecar);
+            // The sidecar's own "id" is what list() hands out, so it - not the file stem - is what
+            // a caller comes back with. They are the same for every record this module writes, but
+            // a folder that was renamed, restored from a backup or copied from another PC can hold
+            // a sidecar whose stem and "id" have drifted apart. Take it when it names itself right.
+            if (r.id == id) return r;
+            if (r.id.empty()) return Record();
+        }
+        // No sidecar at <id>.json, or one that calls itself something else: the id the caller has
+        // came from list(), so look for the record that actually claims it rather than answering
+        // "no such record" for a row the tab is displaying (that mismatch is what made delete
+        // fail on the phone, with the list left untouched).
+        for (const Record& r : list())
+            if (r.id == id) return r;
     } catch (...) {}
     return out;
+}
+
+// The sidecar a record was actually read from - <id>.json for everything this module writes, and
+// the file that names itself <id> for a folder whose stems have drifted (see find()).
+static fs::path sidecar_path_of(const fs::path& root, const std::string& id)
+{
+    boost::system::error_code ec;
+    const fs::path            direct = root / (id + ".json");
+    if (fs::is_regular_file(direct, ec) && record_from_sidecar(direct).id == id) return direct;
+    for (fs::directory_iterator it(root, ec), end; it != end && !ec; it.increment(ec)) {
+        if (it->path().extension() != ".json") continue;
+        if (record_from_sidecar(it->path()).id == id) return it->path();
+    }
+    return direct;
 }
 
 bool remove(const std::string& id)
@@ -477,9 +503,13 @@ bool remove(const std::string& id)
     try {
         const fs::path            root(dir());
         boost::system::error_code ec;
-        if (!r.file.empty()) fs::remove(root / r.file, ec);
-        fs::remove(root / (r.id + ".png"), ec);
-        fs::remove(root / (r.id + ".json"), ec);
+        // r.path is where record_from_sidecar() resolved the payload, so it removes the file even
+        // when the sidecar sits under a different stem than the record's id.
+        if (!r.path.empty()) fs::remove(fs::path(r.path), ec);
+        else if (!r.file.empty()) fs::remove(root / r.file, ec);
+        if (!r.thumbnail_path.empty()) fs::remove(fs::path(r.thumbnail_path), ec);
+        else fs::remove(root / (r.id + ".png"), ec);
+        fs::remove(sidecar_path_of(root, r.id), ec);
         BOOST_LOG_TRIVIAL(info) << "GcodeArchive: removed " << id;
         return true;
     } catch (...) {}

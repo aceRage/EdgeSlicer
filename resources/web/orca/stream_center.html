@@ -250,6 +250,18 @@ body.dragging .cell iframe, body.dragging .cell img { pointer-events: none; }
 .rp .body .sw { display: inline-block; width: 10px; height: 10px; border-radius: 3px; border: 1px solid #666; margin-right: 3px; vertical-align: -1px; }
 .rp .chev { flex: none; color: #777; font-size: 16px; }
 .rp.gone { opacity: .5; }
+/* Swipe-left to delete, touch only. The row keeps its own look and slides over a Delete panel
+   that is painted underneath it; the desktop's Delete button in the sheet is untouched, because a
+   mouse has no swipe. .rpsw is the clipping frame, .rp inside it is what moves. */
+.rpsw { position: relative; overflow: hidden; border-radius: 8px; margin-bottom: 8px; }
+.rpsw > .rp { margin-bottom: 0; position: relative; z-index: 1; will-change: transform; }
+.rpsw > .rp.slide { transition: transform .18s ease; }
+.rpsw .del { position: absolute; top: 0; right: 0; bottom: 0; width: 96px; border-radius: 8px;
+             background: #b3261e; color: #fff; font-weight: 600; font-size: 14px;
+             display: flex; align-items: center; justify-content: center; cursor: pointer;
+             user-select: none; -webkit-user-select: none; }
+/* While a row is swiped open its own tap must not also open the sheet. */
+.rpsw.open > .rp { cursor: default; }
 /* The Devices tab's event list: what the printers have done, newest first, in the card styling. */
 .evbox { background: #2f2f2f; border-radius: 8px; padding: 8px 12px 10px; margin-bottom: 10px; }
 .evbox .evhead { display: flex; align-items: center; gap: 8px; margin-bottom: 2px; }
@@ -3279,7 +3291,84 @@ body.dragging .cell iframe, body.dragging .cell img { pointer-events: none; }
                 : 'Nothing stored yet. Every file the PC sends to a printer lands here, and can be sent again without the project being open.'));
             return;
         }
-        rows.forEach(function(rec) { root.appendChild(rpRow(rec)); });
+        rows.forEach(function(rec) { root.appendChild(rpSwipeWrap(rpRow(rec), rec)); });
+    }
+    // Swipe-left to delete, on touch screens only. The row is put in a clipping frame over a
+    // Delete panel and follows the finger; past a third of the panel it stays open, otherwise it
+    // springs back. A mouse gets none of this - the sheet's own Delete button is the desktop way -
+    // and a browser without touch events never even builds the panel.
+    var rpOpenRow = null; // the one frame currently swiped open
+    function rpSwipeClose(frame) {
+        if (!frame) return;
+        var row = frame.querySelector('.rp');
+        if (row) { row.classList.add('slide'); row.style.transform = ''; }
+        frame.classList.remove('open');
+        if (rpOpenRow === frame) rpOpenRow = null;
+    }
+    function rpSwipeWrap(row, rec) {
+        if (!('ontouchstart' in window)) return row; // desktop: the plain row, as before
+        var frame = el('div', 'rpsw');
+        var del = el('div', 'del', 'Delete');
+        frame.appendChild(del);
+        frame.appendChild(row);
+
+        var W = 96;               // the panel's width, and so the row's open position
+        var x0 = 0, y0 = 0, dx = 0, dragging = false, decided = false, openAt = 0;
+        row.addEventListener('touchstart', function(e) {
+            if (e.touches.length !== 1) return;
+            if (rpOpenRow && rpOpenRow !== frame) rpSwipeClose(rpOpenRow);
+            var t = e.touches[0];
+            x0 = t.clientX; y0 = t.clientY; dx = 0;
+            dragging = true; decided = false;
+            openAt = frame.classList.contains('open') ? -W : 0;
+            row.classList.remove('slide');
+        }, { passive: true });
+        row.addEventListener('touchmove', function(e) {
+            if (!dragging) return;
+            var t = e.touches[0], mx = t.clientX - x0, my = t.clientY - y0;
+            if (!decided) {
+                // Up or down the list is the list's gesture, not ours: let the page scroll and
+                // give up this swipe entirely.
+                if (Math.abs(my) > Math.abs(mx)) { dragging = false; return; }
+                if (Math.abs(mx) < 8) return;   // too small to call yet
+                decided = true;
+            }
+            dx = Math.max(-W, Math.min(0, openAt + mx));
+            row.style.transform = 'translateX(' + dx + 'px)';
+            if (e.cancelable) e.preventDefault(); // we own this gesture now: don't scroll too
+        }, { passive: false });
+        function end() {
+            if (!dragging) return;
+            dragging = false;
+            row.classList.add('slide');
+            var open = dx <= -W / 3;
+            row.style.transform = open ? 'translateX(-' + W + 'px)' : '';
+            frame.classList.toggle('open', open);
+            rpOpenRow = open ? frame : (rpOpenRow === frame ? null : rpOpenRow);
+        }
+        row.addEventListener('touchend', end, { passive: true });
+        row.addEventListener('touchcancel', end, { passive: true });
+        // An open row's tap closes it instead of opening the sheet; rpRow's own onclick still runs
+        // for a row at rest, so a tap keeps working exactly as it did.
+        row.addEventListener('click', function(e) {
+            if (frame.classList.contains('open')) { e.stopPropagation(); rpSwipeClose(frame); }
+        }, true);
+
+        del.onclick = function() {
+            if (!window.confirm('Delete ' + rpName(rec) + ' from the PC’s stored files? The file, its details and its preview go; the printer is not touched.')) {
+                rpSwipeClose(frame);
+                return;
+            }
+            del.textContent = 'Deleting…';
+            rpDeleteId(rec.id, function(err) {
+                del.textContent = 'Delete';
+                rpSwipeClose(frame);
+                // The refresh rpDeleteId already asked for redraws the list either way; a failure
+                // has to say why, and the tab has nowhere of its own to put a message.
+                if (err) window.alert(err);
+            });
+        };
+        return frame;
     }
     function rpRow(rec) {
         var row = el('div', 'rp' + (rec.exists === false ? ' gone' : ''));
@@ -3482,12 +3571,25 @@ body.dragging .cell iframe, body.dragging .cell img { pointer-events: none; }
             rpJson = '';
         }).catch(function() { if (rpState === s) s.timer = setTimeout(rpPoll, 2000); });
     }
+    // Delete one record. The list is rebuilt from the PC afterwards whatever happened: a record
+    // that went leaves the tab straight away, and one that would not go stays visible carrying the
+    // reason the PC gave, instead of a sheet that closes over an unchanged list.
     function rpDelete() {
         var s = rpState; if (!s) return;
-        var id = s.rec.id;
+        rpDeleteId(s.rec.id, function (err) {
+            if (rpState !== s) return;
+            if (!err) { rpClose(); return; }
+            s.phase = 'view'; s.error = err; rpRenderSheet();
+        });
+    }
+    // The one delete call the sheet and the swipe action share. `done` is given '' on success, or
+    // the PC's own message. rpJson is cleared before the refresh so the listing always redraws:
+    // refreshReprints() compares the answer against it, and a stale signature would leave the
+    // deleted row on screen.
+    function rpDeleteId(id, done) {
         api('/archive/' + encodeURIComponent(id) + '/delete', { method: 'POST' })
-            .then(function() { rpClose(); rpJson = ''; refreshReprints(); })
-            .catch(function(e) { if (rpState === s) { s.phase = 'view'; s.error = e.message; rpRenderSheet(); } });
+            .then(function() { rpJson = ''; refreshReprints(); done(''); })
+            .catch(function(e) { rpJson = ''; refreshReprints(); done(e.message || 'The delete failed.'); });
     }
 
     function refreshDevices() {
