@@ -25,6 +25,7 @@ add_executable(${_TEST_NAME}_tests
 	test_h2c_rack_nozzle_change.cpp
 	test_h2_preload_filaments.cpp
 	test_mixed_filament.cpp
+	test_mixed_nozzle.cpp
 	test_mixed_filament_color_golden.cpp
 	test_triangle_selector.cpp
 	test_local_z_order_optimizer.cpp

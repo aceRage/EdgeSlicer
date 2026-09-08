@@ -2231,7 +2231,14 @@ Sidebar::Sidebar(Plater *parent)
                     wxTheApp->CallAfter([this, diameters_raw]() {
                         NozzleDiameterSelectDialog dlg(
                             wxGetApp().mainframe,
-                            _L("Note: Inconsistent nozzle diameters. Current version does not support mixed diameter printing. Please select one nozzle for this print."),
+                            // Mixed nozzle sizes (Phase 1d): mixed diameters are no longer a dead end -
+                            // per-feature filament assignment already routes each role to its own head and
+                            // sizes the extrusion from that head's nozzle. What is still single-valued is the
+                            // printer PRESET name/variant that filament and process compatibility keys off, so
+                            // the picker stays, as a choice of base preset rather than a refusal.
+                            _L("This printer reports different nozzle diameters on its tool heads. Pick the base nozzle size for the printer preset; "
+                               "you can then give each head its own diameter under Printer settings -> Extruder N, and route each feature to a head "
+                               "under Filaments for Features. Note that the prime tower cannot be used with mixed nozzle diameters yet."),
                             _L("Set Nozzle Diameter"),
                             diameters_raw);
                         if (dlg.ShowModal() == wxID_OK) {

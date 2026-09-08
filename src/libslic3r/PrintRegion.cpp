@@ -94,17 +94,21 @@ Flow PrintRegion::flow(const PrintObject &object, FlowRole role, double layer_he
     if (config_width.value == 0)
         config_width = object.config().line_width;
     
-    // Get the configured nozzle_diameter for the extruder associated to the flow role requested.
-    // Here this->extruder(role) - 1 may underflow to MAX_INT, but then the get_at() will follback to zero'th element, so everything is all right.
-    auto nozzle_diameter = float(print_config.nozzle_diameter.get_at(this->extruder(role) - 1));
+    // Mixed nozzle sizes: resolve which 1-based FILAMENT prints this role, then map that filament
+    // to the physical extruder (nozzle) it is loaded into. nozzle_diameter is indexed by physical
+    // extruder, so on a machine with more filaments than nozzles (H2D/H2C + AMS) indexing it by the
+    // filament number silently returned the first nozzle's diameter for every filament past the
+    // second. Ported from OrcaSlicer PR #13782 (LixNix).
+    auto nozzle_diameter = float(print_config.nozzle_diameter.get_at(physical_extruder_for_filament(print_config, this->extruder(role))));
     return Flow::new_from_config_width(role, config_width, nozzle_diameter, float(layer_height));
 }
 
 coordf_t PrintRegion::nozzle_dmr_avg(const PrintConfig &print_config) const
 {
-    return (print_config.nozzle_diameter.get_at(m_config.wall_filament.value    - 1) + 
-            print_config.nozzle_diameter.get_at(m_config.sparse_infill_filament.value - 1) +
-            print_config.nozzle_diameter.get_at(m_config.solid_infill_filament.value - 1)) / 3.;
+    // Mixed nozzle sizes: map each filament to its physical extruder before reading the diameter.
+    return (print_config.nozzle_diameter.get_at(physical_extruder_for_filament(print_config, m_config.wall_filament.value)) +
+            print_config.nozzle_diameter.get_at(physical_extruder_for_filament(print_config, m_config.sparse_infill_filament.value)) +
+            print_config.nozzle_diameter.get_at(physical_extruder_for_filament(print_config, m_config.solid_infill_filament.value))) / 3.;
 }
 
 coordf_t PrintRegion::bridging_height_avg(const PrintConfig &print_config) const

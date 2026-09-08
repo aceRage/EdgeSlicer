@@ -1939,6 +1939,17 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE0(
 // P1S has no such option, so both answer false. Same predicate ToolOrdering.cpp already uses.
 bool has_nozzle_rack(const PrintConfig &config);
 
+// Mixed nozzle sizes (Phase 1): map a 1-based FILAMENT index to the 0-based PHYSICAL extruder
+// (nozzle) that filament prints through. nozzle_diameter, min_layer_height / max_layer_height and
+// the rest of the per-extruder printer options are indexed by physical extruder, not by filament:
+// on an H2D/H2C (2 nozzles, up to 16 filaments) `nozzle_diameter.get_at(filament - 1)` silently
+// falls back to the FIRST nozzle for every filament past the second. filament_map (1-based) is the
+// assignment the tool orderer already computed. filament_id == 0 means "use whatever tool is
+// current" and resolves to extruder 0, matching what the old get_at(size_t(-1)) fallback did.
+// Ported from OrcaSlicer PR #13782 (LixNix, "Printing with different nozzle sizes"),
+// Flow.cpp::physical_extruder_for_filament.
+size_t physical_extruder_for_filament(const PrintConfig &config, unsigned int filament_id);
+
 class CLIActionsConfigDef : public ConfigDef
 {
 public:
