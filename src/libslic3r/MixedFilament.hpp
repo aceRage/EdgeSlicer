@@ -370,6 +370,15 @@ public:
     // m_mixed. Virtual IDs enumerate enabled mixed rows only.
     int mixed_index_from_filament_id(unsigned int filament_id, size_t num_physical) const;
 
+    // The inverse of mixed_index_from_filament_id(): the virtual filament id an ENABLED,
+    // non-deleted row at m_mixed[index] would be addressed by right now (0 if index is out of
+    // range, or the row at it is disabled/deleted, since a disabled row has no virtual id at
+    // all - see mixed_index_from_filament_id's own "enabled rows only" comment). Callers that
+    // just pushed a new row (e.g. GUI code binding a freshly created row to a part's own
+    // solid_infill_filament) know its index (mixed_filaments().size() - 1) but not, without
+    // walking every row before it, which virtual id that resolves to today.
+    unsigned int filament_id_from_mixed_index(size_t index, size_t num_physical) const;
+
     // Blend N colours using weighted FilamentMixer blending.
     // color_percents: vector of (hex_color, percent) where percents sum to 100.
     static std::string blend_color_multi(

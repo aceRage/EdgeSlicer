@@ -2886,6 +2886,17 @@ const MixedFilament *MixedFilamentManager::mixed_filament_from_id(unsigned int f
     return idx >= 0 ? &m_mixed[size_t(idx)] : nullptr;
 }
 
+unsigned int MixedFilamentManager::filament_id_from_mixed_index(size_t index, size_t num_physical) const
+{
+    if (index >= m_mixed.size() || !m_mixed[index].enabled || m_mixed[index].deleted)
+        return 0;
+    size_t enabled_seen = 0;
+    for (size_t i = 0; i < index; ++i)
+        if (m_mixed[i].enabled && !m_mixed[i].deleted)
+            ++enabled_seen;
+    return unsigned(num_physical) + 1 + unsigned(enabled_seen);
+}
+
 // Get all mixed filament indices that depend on a specific physical filament
 std::vector<size_t> MixedFilamentManager::mixed_filaments_using_physical(unsigned int physical_filament_1based) const
 {

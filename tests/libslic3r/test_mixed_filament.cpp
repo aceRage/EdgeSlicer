@@ -1053,6 +1053,40 @@ TEST_CASE("Mixed filament mixed_index_from_filament_id maps correctly", "[MixedF
     CHECK(mgr.mixed_index_from_filament_id(3, num_physical) == -1);
 }
 
+// Image Row Phase 3, step 5: the GUI checkbox needs the inverse of
+// mixed_index_from_filament_id() to bind a just-created row to a part's own
+// solid_infill_filament without walking every row before it by hand.
+TEST_CASE("Mixed filament filament_id_from_mixed_index is the inverse of mixed_index_from_filament_id",
+          "[MixedFilament][Lifecycle]")
+{
+    const std::vector<std::string> colors = {"#FF0000", "#00FF00", "#0000FF"};
+    MixedFilamentManager mgr;
+    mgr.add_custom_filament(1, 2, 50, colors); // index 0
+    mgr.add_custom_filament(1, 3, 50, colors); // index 1
+    mgr.add_custom_filament(2, 3, 50, colors); // index 2
+    const size_t num_physical = 3;
+
+    CHECK(mgr.filament_id_from_mixed_index(0, num_physical) == 4);
+    CHECK(mgr.filament_id_from_mixed_index(1, num_physical) == 5);
+    CHECK(mgr.filament_id_from_mixed_index(2, num_physical) == 6);
+
+    // Round-trips through mixed_index_from_filament_id for every row.
+    for (size_t i = 0; i < mgr.mixed_filaments().size(); ++i) {
+        const unsigned int vid = mgr.filament_id_from_mixed_index(i, num_physical);
+        CHECK(size_t(mgr.mixed_index_from_filament_id(vid, num_physical)) == i);
+    }
+
+    // Disabling the middle row shifts every later row's virtual id down by one, exactly as
+    // mixed_index_from_filament_id's own "enabled rows only" enumeration requires.
+    mgr.mixed_filaments()[1].enabled = false;
+    CHECK(mgr.filament_id_from_mixed_index(0, num_physical) == 4);
+    CHECK(mgr.filament_id_from_mixed_index(1, num_physical) == 0);   // disabled: no virtual id
+    CHECK(mgr.filament_id_from_mixed_index(2, num_physical) == 5);   // shifted down from 6
+
+    // Out of range is 0, not a garbage read.
+    CHECK(mgr.filament_id_from_mixed_index(99, num_physical) == 0);
+}
+
 TEST_CASE("Mixed filament stable_id allocation and normalize", "[MixedFilament][Lifecycle]")
 {
     MixedFilamentManager mgr;

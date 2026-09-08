@@ -25530,11 +25530,27 @@ void Plater::apply_image_fill()
             initial.detail_mm = float(d->value);
     }
 
+    // Phase 3 (image row): whether this part is ALREADY bound to an enabled ImageWeighted row,
+    // so re-opening the dialog starts with the checkbox ticked - the same promise `initial` makes
+    // for the projection settings above. `filaments.size()` is the physical filament count (see
+    // the loop that built `filaments`, off filament_colour, above).
+    const size_t num_physical = filaments.size();
+    PresetBundle *preset_bundle = wxGetApp().preset_bundle;
+    bool initial_image_row = false;
+    if (preset_bundle != nullptr) {
+        if (const ConfigOptionInt *sif = volume->config.get().option<ConfigOptionInt>("solid_infill_filament")) {
+            const unsigned int vid = unsigned(std::max(0, sif->value));
+            const MixedFilament *mf = preset_bundle->mixed_filaments.mixed_filament_from_id(vid, num_physical);
+            initial_image_row = mf != nullptr && mf->enabled && mf->distribution_mode == int(MixedFilament::ImageWeighted);
+        }
+    }
+
     GUI::ImageFillDialog dlg(this, filaments, initial, &model().image_assets, volume->mesh().its,
-                             volume->mmu_segmentation_facets.get_data(), painted);
+                             volume->mmu_segmentation_facets.get_data(), painted, initial_image_row);
     if (dlg.ShowModal() != wxID_OK)
         return;
     const ImageFillParams params = dlg.params();
+    const bool image_row = dlg.image_row_dither();
 
     std::vector<std::array<float, 3>> colors;
     std::vector<int>                  ids;
@@ -25545,11 +25561,75 @@ void Plater::apply_image_fill()
         }
 
     take_snapshot("Apply image fill");
+    // Phase 2's facet painting always runs, whether or not the image-row checkbox is ticked - the
+    // dialog's own tooltip explains why (a printer/slicer that never reads the row still gets a
+    // correct, if coarser, result).
     const ImageFillResult res = image_fill_apply(*volume, params, model().image_assets, colors, ids);
     if (!res.ok) {
         show_error(this, from_u8(res.error.empty() ? "The image could not be applied." : res.error));
         return;
     }
+
+    // Phase 3 (image row): create-or-update the part's ImageWeighted MixedFilament row and bind
+    // solid_infill_filament to it, or drop the binding (leaving the row itself alone) - see
+    // Fill.cpp's image_row_configured_virtual_id() for the key this reads at slice time, and
+    // docs/superpowers/specs/2026-09-07-imagemap-phase3-imagerow.md's step 5 for the design.
+    if (preset_bundle != nullptr) {
+        MixedFilamentManager &mixed_mgr = preset_bundle->mixed_filaments;
+        const ConfigOptionInt *existing_opt = volume->config.get().option<ConfigOptionInt>("solid_infill_filament");
+        const unsigned int existing_vid = existing_opt != nullptr ? unsigned(std::max(0, existing_opt->value)) : 0;
+        const int existing_idx = existing_vid != 0 ? mixed_mgr.mixed_index_from_filament_id(existing_vid, num_physical) : -1;
+        const bool existing_is_image_row = existing_idx >= 0 &&
+            mixed_mgr.mixed_filaments()[size_t(existing_idx)].distribution_mode == int(MixedFilament::ImageWeighted);
+
+        bool mixed_definitions_changed = false;
+        if (image_row && !ids.empty()) {
+            int row_idx = existing_is_image_row ? existing_idx : -1;
+            if (row_idx < 0) {
+                // add_custom_filament() needs two distinct component ids (they are otherwise
+                // unused by ImageWeighted's own sampling - see the [barb3] test's own comment,
+                // test_image_fill.cpp) and the current physical colours, to seed a valid row.
+                const unsigned int a = unsigned(ids.front());
+                const unsigned int b = ids.size() > 1 ? unsigned(ids[1]) : a;
+                std::vector<std::string> colour_strings;
+                if (const ConfigOptionStrings *co = preset_bundle->project_config.option<ConfigOptionStrings>("filament_colour"))
+                    colour_strings = co->values;
+                mixed_mgr.add_custom_filament(a, b, 50, colour_strings);
+                row_idx = int(mixed_mgr.mixed_filaments().size()) - 1;
+            }
+            if (row_idx >= 0) {
+                MixedFilament &row = mixed_mgr.mixed_filaments()[size_t(row_idx)];
+                row.enabled             = true;
+                row.distribution_mode   = int(MixedFilament::ImageWeighted);
+                row.gradient_component_ids = MixedFilamentManager::encode_gradient_component_ids(
+                    std::vector<unsigned int>(ids.begin(), ids.end()));
+                row.image_fill_ref = MixedFilamentManager::encode_image_fill_ref(params.to_string());
+
+                const unsigned int virtual_id = mixed_mgr.filament_id_from_mixed_index(size_t(row_idx), num_physical);
+                if (virtual_id != 0) {
+                    volume->config.set_key_value("solid_infill_filament", new ConfigOptionInt(int(virtual_id)));
+                    mixed_definitions_changed = true;
+                }
+            }
+        } else if (existing_is_image_row) {
+            // Unticked: remove the BINDING only. The row itself is left alone - it may still be
+            // referenced by another part, or the user may just want to keep it around.
+            volume->config.erase("solid_infill_filament");
+        }
+
+        if (mixed_definitions_changed) {
+            const std::string serialized = mixed_mgr.serialize_custom_entries();
+            if (ConfigOptionString *opt = preset_bundle->project_config.option<ConfigOptionString>("mixed_filament_definitions"))
+                opt->value = serialized;
+            else
+                preset_bundle->project_config.set_key_value("mixed_filament_definitions", new ConfigOptionString(serialized));
+            // Rebuilds the sidebar's Mixed Filaments panel from mixed_mgr (sync_manager=false, so
+            // it uses the row just added/updated rather than re-loading from the persisted string
+            // and losing it) - the same call other programmatic row edits in this file use.
+            sidebar().update_mixed_filament_panel(false);
+        }
+    }
+
     // The store keeps only what something still points at, so a picture the user tried and
     // replaced does not ride along in the project.
     {
