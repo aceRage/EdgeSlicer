@@ -545,6 +545,13 @@ ToolOrdering::ToolOrdering(const Print &print, unsigned int first_extruder, bool
     // executes BEFORE psSkirtBrim populates m_brimMapByExtruder - so a ctor-time hook
     // always observed an empty map on a fresh slice. See Print.cpp for the replacement.
 
+    // H2 preload (preload_all_filaments): add every remaining plate filament to layer 1 so the prime
+    // tower loads them all before layer 2. Must run after the reorder passes (the grouping used to
+    // order the pre-changes is computed there) and before collect_extruder_statistics, which derives
+    // m_first_printing_extruder - the filament machine_start_gcode loads - from layer 1's front.
+    if (this->apply_preload_all_filaments())
+        this->fill_wipe_tower_partitions(print.config(), object_bottom_z, max_layer_height);
+
     this->collect_extruder_statistics(prime_multi_material);
 
     this->mark_skirt_layers(print.config(), max_layer_height);
@@ -1160,6 +1167,126 @@ void ToolOrdering::fill_wipe_tower_partitions(const PrintConfig &config, coordf_
             lt.wipe_tower_layer_height = lt.print_z - wipe_tower_print_z_last;
             wipe_tower_print_z_last = lt.print_z;
         }
+}
+
+// H2 preload (preload_all_filaments): the layer-1 ordering rule. See ToolOrdering.hpp for the
+// contract and apply_preload_all_filaments() below for why this shape keeps the M620 O<n> /
+// filament_sequence.json / optimal_assignment bookkeeping consistent by construction.
+std::vector<unsigned int> preload_first_layer_tool_order(const std::vector<unsigned int> &layer0_extruders,
+                                                         const std::vector<unsigned int> &used_filaments,
+                                                         const std::function<int(unsigned int)> &extruder_of_filament)
+{
+    if (layer0_extruders.empty())
+        return layer0_extruders;
+
+    std::vector<unsigned int> missing;
+    for (unsigned int e : used_filaments)
+        if (std::find(layer0_extruders.begin(), layer0_extruders.end(), e) == layer0_extruders.end())
+            missing.emplace_back(e);
+    sort_remove_duplicates(missing);
+    if (missing.empty())
+        return layer0_extruders;   // layer 1 already touches every filament: nothing to preload.
+
+    auto extruder_of = [&extruder_of_filament](unsigned int filament) -> int {
+        if (!extruder_of_filament)
+            return 0;
+        const int e = extruder_of_filament(filament);
+        return e < 0 ? 0 : e;
+    };
+    const int first_real_extruder = extruder_of(layer0_extruders.front());
+    std::stable_sort(missing.begin(), missing.end(), [&](unsigned int a, unsigned int b) {
+        const int ea = extruder_of(a), eb = extruder_of(b);
+        if (ea != eb) {
+            // The group layer 1 starts on goes last; the rest keep ascending extruder order.
+            const bool a_last = (ea == first_real_extruder), b_last = (eb == first_real_extruder);
+            if (a_last != b_last)
+                return b_last;
+            return ea < eb;
+        }
+        return a < b;
+    });
+
+    std::vector<unsigned int> out = std::move(missing);
+    out.insert(out.end(), layer0_extruders.begin(), layer0_extruders.end());
+    return out;
+}
+
+// H2 preload (preload_all_filaments). Owner's design: "trick it into auto-loading by including all
+// colors on the first layer of the prime tower". Every filament the plate uses that layer 1 does not
+// already print is PREPENDED to layer 1's tool sequence, so Print::_make_wipe_tower plans a real
+// toolchange for each one (normal flush volume from flush_volumes_matrix * flush_multiplier) and
+// GCode::WipeTowerIntegration::append_tcr emits the normal change_filament_gcode - which is why the
+// M620 O<n> counter, filament_sequence.json / nozzle_sequence, optimal_assignment and the H2C rack
+// interlock blocks all stay consistent by construction: nothing here is special-cased, these are
+// ordinary tower toolchanges that happen to sit on layer 1.
+//
+// ORDERING RULE (layer 1):
+//   [ preload-only filaments ] ++ [ layer 1's own sequence, unchanged ]
+// The preload-only filaments are grouped by the physical extruder the dual-nozzle grouping assigned
+// them to (so each extruder's loads are consecutive - a nozzle/rack change is never paid twice for
+// the same extruder), the group belonging to layer 1's FIRST real filament comes last among the
+// preload groups (so the run into the real print costs no extra extruder change), and within a group
+// filaments are ascending by id (deterministic). Layer 1's own order - first_layer_print_sequence,
+// the soluble-first preference, the min-area adhesion order - is never touched, so the sequence still
+// ENDS on the filament layer 1 actually finishes printing with.
+//
+// Runs after reorder_extruders()/reorder_extruders_for_minimum_flush_volume(), so the filament->nozzle
+// grouping is computed from the UNMODIFIED layer list: turning the option on cannot change the
+// grouping, only what layer 1 does with it. The caller re-runs fill_wipe_tower_partitions() afterwards
+// so the tower's layer-1 depth (WipeTower::plan_tower takes max over per-layer toolchanges_depth())
+// accounts for the extra changes.
+bool ToolOrdering::apply_preload_all_filaments()
+{
+    if (m_layer_tools.empty() || m_print_config_ptr == nullptr || m_print_full_config == nullptr)
+        return false;
+    if (!m_print_config_ptr->preload_all_filaments.value)
+        return false;
+    // The pre-changes purge into the prime tower; without it there is nowhere to put them.
+    // Print::validate() refuses this combination up front, this is the belt-and-braces half.
+    if (!m_print_config_ptr->enable_prime_tower.value)
+        return false;
+    // Same gate as the dual-nozzle grouping path: H2D/H2C/X2D only. Classic single-nozzle and
+    // same-variant toolchanger machines (P1S/X1/U1) never enter here, so their g-code is untouched.
+    {
+        int extruder_count = 0;
+        if (!const_cast<DynamicPrintConfig *>(m_print_full_config)->support_different_extruders(extruder_count))
+            return false;
+    }
+
+    // Layer 1 == the first layer that actually prints something.
+    size_t first_idx = size_t(-1);
+    for (size_t i = 0; i < m_layer_tools.size(); ++i)
+        if (!m_layer_tools[i].extruders.empty()) { first_idx = i; break; }
+    if (first_idx == size_t(-1))
+        return false;
+    LayerTools &lt0 = m_layer_tools[first_idx];
+    if (lt0.preserve_extruder_order)
+        return false;
+
+    // Every filament the plate uses (0-based).
+    std::vector<unsigned int> used;
+    for (const LayerTools &lt : m_layer_tools)
+        append(used, lt.extruders);
+    sort_remove_duplicates(used);
+
+    // Group the preload-only filaments by the physical extruder the dual-nozzle grouping put them on,
+    // so each extruder's loads stay together. Layer 0 is the right layer to ask: these changes happen
+    // there, and append_tcr resolves the rack/nozzle ids for the same layer index.
+    auto group = m_print ? m_print->get_layered_nozzle_group_result() : nullptr;
+    std::vector<unsigned int> reordered = preload_first_layer_tool_order(
+        lt0.extruders, used, [&group](unsigned int filament) -> int {
+            return group ? group->get_extruder_id((int) filament, 0) : 0;
+        });
+    if (reordered.size() == lt0.extruders.size())
+        return false;   // layer 1 already touches every filament: nothing to preload.
+    lt0.extruders = std::move(reordered);
+
+    {
+        std::string seq;
+        for (unsigned int e : lt0.extruders) seq += std::to_string(e) + " ";
+        BOOST_LOG_TRIVIAL(warning) << "[H2 preload] first layer tool sequence (0-based filaments): " << seq;
+    }
+    return true;
 }
 
 void ToolOrdering::collect_extruder_statistics(bool prime_multi_material)
