@@ -297,7 +297,8 @@ means undo + re-cut. Acceptable for phase 1.
 | **Mixing with Plug/Dowel/Snap connectors on the same cut** | The flexi path takes over the whole cut and ignores the other connector volumes. Phase 1 does not support mixing. |
 | **Tongue and groove (Dovetail) mode** | Unrelated code path; the flexi family is planar-cut only. |
 | **Cut by contour / part selection** | Not supported in phase 1 — `perform_by_contour()` is untouched, so a flexi joint placed while a part selection is active takes the plain-plane path. |
-| **Multiple flexi joints on one cut** | Phase 1 applies the **first** and logs a warning for the rest. |
+| **Multiple flexi joints on one cut** | Applies the **first** and logs a warning for the rest. |
+| **Which segment carries what** | Double ring / Ball & socket put the solid body on the lower half and the cavity on the upper. **Chain link puts a body on both** and relieves each with the other's clearance-inflated loop; `flexi_is_two_sided()` says which. |
 | **Multi-volume objects** | All solid parts are merged into one mesh per side; the result is two parts, not (parts × 2). Per-volume config follows the first solid volume. Modifiers are carried over to the resulting object. |
 
 ## 5. The guards
@@ -309,10 +310,18 @@ means undo + re-cut. Acceptable for phase 1.
   (`slice_closing_radius = 0.049 mm`) and `C = 0.35 mm` there is a 3.5× margin, so the warning does
   **not** fire on a stock profile — it fires when someone raises the radius, or drops the clearance
   below ~0.1 mm.
+  Note the Gap makes this less catastrophic than it was in phase 1: with a gap wider than the
+  clearance, crossing the threshold welds the *groove* but leaves the two segments separated by the
+  gap, so the joint comes out stiff rather than solid (measured in §7).
 * **Clearance floor from the nozzle** — see §1.5.
-* **`flexi_validate()`** refuses zero clearance, a ring narrower than the clearance, a hub with no
-  room beside it, an out-of-range opening angle, and — the important one — any parameter set where
-  the mouth is not narrower than the lip, i.e. a joint that would pull apart.
+* **Gap floor = the clearance** — see §1.7. `flexi_effective_gap()` clamps it and
+  `flexi_validate()` refuses an explicitly smaller one.
+* **`flexi_validate()`** refuses zero clearance, a gap below the clearance, a ring narrower than the
+  clearance, a hub with no room beside it, an out-of-range opening angle, and — the important one —
+  any parameter set where the mouth is not narrower than the lip, i.e. a joint that would pull
+  apart. For the Chain link it additionally refuses a non-positive wire or stem, a tilt outside
+  0–30°, a length shorter than the width, and loops smaller than `4·wire + 2·C`, which is the
+  sizing rule that makes the interlock possible (§1.6).
 * **Fits inside the cross-section**: the joint sets `connector.radius = flexi_outer_extent()` and
   `connector.height = flexi_protrusion_height()`, so the gizmo's existing
   `is_outside_of_cut_contour()` / `is_conflict_for_connector()` checks flag an oversized joint the
@@ -330,6 +339,12 @@ must **never** get support:
 * The Double ring's groove ceiling is a flat annular bridge of about `ring_width + 2·clearance`
   (2.7 mm at the defaults) — well inside normal bridging range at 0.2 mm layers.
 * The Ball & socket's roof is a dome and self-supports.
+* The **Chain link** has no enclosed cavity at all, so there is nothing for support to get trapped
+  inside. Its two overhangs are both deliberate and both short: the vertical loop's **top span**,
+  a bridge of `link_width` (5.5 mm at the defaults) closing over the loop's own two sides, and the
+  horizontal loop's free half, which is a flat cantilever anchored at its far end and closing back
+  on itself. Both are inside normal bridging range at 0.2 mm layers. Supports off is still the
+  right setting: support under the horizontal loop would fuse it to the segment below.
 * The joint bodies are consumed by the cut, so there is no negative volume left for the support
   generator to see; the cavity is simply absent material inside a normal model part.
 
@@ -382,8 +397,41 @@ Proven by `libslic3r_tests [FlexiJoint]` (8 cases, 117 assertions, all green):
 * 3MF round trip: store + load keeps one object with two watertight model parts.
 * The guards behave as documented.
 
-Proven by the CLI, on **Bambu Lab P1S 0.4 nozzle / 0.20mm Standard @BBL X1C / Bambu PLA Basic**,
-supports off (`enable_support = 0` in every G-code header):
+Proven by the CLI in phase 2, same printer (**Bambu Lab P1S 0.4 nozzle / 0.20mm Standard @BBL X1C
+/ Bambu PLA Basic**), supports off, isolated `--datadir` copied from `dd_ctl`. Gate:
+`snorca_hubtest/gate_flexip2.sh`, `GATE_RC=0`.
+
+* **All three jointed cylinders slice**, `exit=0`, `enable_support = 0` in every header:
+  Chain link 487,150 bytes / 7,403 extrusion moves, Double ring 421,653 / 6,696, Ball & socket
+  525,303 / 8,795.
+* **The Gap survives slicing, for every kind.** Measured from the G-code: over the layers that lie
+  strictly inside the gap, the extruded radius never reaches the wall.
+
+  | kind | gap | faces at Z | max extruded radius in the gap band | wall |
+  |---|---|---|---|---|
+  | Chain link | 1.50 | 9.25 / 10.75 | **4.81 mm** (the two loops) | 9.80 mm |
+  | Double ring | 0.60 | 9.70 / 10.30 | **3.24 mm** (the ring lip at its 3.0 mm mean radius) | 9.79 mm |
+  | Ball & socket | 0.60 | 9.70 / 10.30 | **2.23 mm** (the ball) | 9.78 mm |
+
+  Nothing at all is laid across the rest of the 20 mm face in those layers; the full disc returns
+  on the far side. For the chain link that is six consecutive layers carrying 3–7 moves each,
+  against 50–100 in the solid layers on either side.
+* **The gap-closing guard still bites.** Same ring model, only `slice_closing_radius` changed from
+  the shipped 0.049 to 0.25 (past the guard's `C/2 = 0.175` threshold): the moves inside the gap
+  band collapse from **8 to 2** and the filament goes from **3.41 g to 3.46 g** — the groove's own
+  0.35 mm clearance has been welded shut, exactly as BambuStudio #182 describes and as phase 1
+  measured. What is new is that the **face gap of 0.6 mm survives it**: the segments still separate,
+  the joint is merely stiff. That robustness is a side effect of the Gap parameter and is the
+  reason a gap wider than the clearance is worth having even when the clearance alone would do.
+* **No effect on unrelated models.** `OrcaCube_v2.3mf` sliced on the same preset by this branch and
+  by a head-of-fork baseline install: **2 differing lines in 2,141,791 bytes, both the timestamp
+  comment**. Every extrusion move is byte-identical.
+* **A hidden scratch instance starts.** The scratch install with a data dir copied from `dd_lan`:
+  alive after 45 s, `Responding = True`, no window, and it shuts down on `CloseMainWindow()`. The
+  gate stops only processes whose `Path` starts with its own scratch install prefix.
+
+Proven by the CLI in phase 1, on **Bambu Lab P1S 0.4 nozzle / 0.20mm Standard @BBL X1C / Bambu
+PLA Basic**, supports off (`enable_support = 0` in every G-code header):
 
 * Both jointed cylinders slice with `return_code 0`. Each raises the expected
   *"object has floating regions"* warning — that is what a print-in-place joint is: the female half
@@ -413,9 +461,10 @@ supports off (`enable_support = 0` in every G-code header):
   reaching `post_init: hidden instance warm-up = full`. The only errors in the log are the usual
   "can not find parent for config" noise from user presets in the copied data dir.
 
-**Nobody clicked the gizmo.** The UI code compiles and the app builds and starts, but no human or
-agent has opened the Cut gizmo, picked "Flexi joint", dragged it, or pressed Apply. The owner's
-click test is §8.
+**Nobody clicked the gizmo**, in either phase — see §8. The UI code compiles, the app builds and a
+hidden instance starts, but no human or agent has opened the Cut gizmo, picked Flexi, chosen a
+joint kind, dragged it or pressed Apply. In particular **the connector-bug fix is verified at the
+model level only** (§9): that the button is no longer greyed out is §8 step 10, for the owner.
 
 Also unverified: nothing has been printed. The clearance defaults come from the research's survey of
 maker sources, not from a print on this owner's machine.
@@ -532,6 +581,23 @@ in ImGui state — that the button is no longer greyed — are covered by the ow
 (§8 step 10), not by an automated check.
 
 ## 10. Phase 3 — what is still open
+
+Chain-link specific:
+
+* **The hinge axis is fixed at +X.** The chain link's horizontal loop always runs along the cut
+  frame's +X, so the direction the joint prefers to bend in is decided by the connector's `z_angle`
+  and nothing shows it in the gizmo. It wants a visible orientation handle, or an auto-choice that
+  aligns the loop with the cross-section's major axis.
+* **The rest position is the extended one.** The two loops nest end-to-end, which is where a
+  hanging chain sits and is what makes the interlock roomiest, but it also means the joint has a
+  few tenths of a millimetre of free slop before it takes up. A "preload" that starts the loops
+  part-way through their travel would feel tighter in the hand.
+* **The swing range is not derived, only measured.** The Catch2 sweep checks ±4° about +Y because
+  that is inside `asin(gap / 2R)` for a 20 mm cylinder; the actual range of a chain link is bounded
+  by the loops, not by the faces, and nothing computes it or shows it to the user.
+* **Two loops, not N.** A real chain has many links; one interlocked pair per cut is all this is.
+
+General:
 
 * **Hinge**: a pin plus alternating knuckles, sweeping about the pin axis only. The generator
   (`its_make_revolved` plus a boolean) already covers the shapes; it needs a knuckle count and an
