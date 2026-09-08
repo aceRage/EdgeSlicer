@@ -618,52 +618,106 @@ and on the Quality page under Z contouring. The tooltip carries the `zaa_min_z` 
 brief asked for: at 0.2 mm layers a minimum Z height of 0.08 keeps the slowdown to 2.5x, where
 the 0.05 default asks for 4x on the thinnest segments.
 
-### THE BLOCKER: CoolingBuffer owns one speed per extrusion
+### RESOLVED (2026-09-08, branch `fix/zaa-speed-cooling`): the slowdown capped where it had to scale
 
-**This feature does not currently reach the G-code when `slow_down_for_layer_cooling` is on,**
-which is the default on every profile tested. The scaling is correct and provably applied when
-that option is off; with it on, the emitted file is byte-identical to the unscaled one apart from
-the timestamp, the config line and a 12 um retract difference.
+The feature now reaches the G-code with `slow_down_for_layer_cooling` on, which is the default on
+every profile. What follows replaces the "THE BLOCKER" section that stood here.
 
-The cause is architectural, in `GCode/CoolingBuffer.cpp`:
+#### The cause was the operator, not the folding
 
-* the buffer models **one adjustable speed per extrusion path**. The first `;_EXTRUDE_SET_SPEED`
-  line of a path becomes the block's speed modifier (`active_speed_modifier`), and every movement
-  line after it until `;_EXTRUDE_END` is folded into that modifier and then discarded outright
-  (`line.type = 0; // Don't store this line`, ~line 490);
-* it also asserts that no `G1` inside such a block carries its own `F` (~line 476).
+The earlier diagnosis - that CoolingBuffer folds an extrusion path into one adjustable speed and
+discards the movement lines - is real, and it does defeat both an `F` written into the movement
+`G1` and a bare extra `G1 F` line. But it is not what defeated strategy (c), closing the block with
+`;_EXTRUDE_END` and reopening a new `;_EXTRUDE_SET_SPEED` block per speed change. That strategy
+works: the reopened blocks ARE parsed and ARE kept. Measured, by temporarily disabling the marker
+strip in `apply_layer_cooldown`, the dome at 0.2 mm carries **218 ZAA speed blocks into the cooling
+pass**. The earlier "0 of 7004 segments kept an F" reading came from looking for an `F` word on the
+movement lines, which is not where a reopened block puts it.
 
-Three emission strategies were tried, each defeated by a different half of that:
+What actually destroys the feature is the **operator the layer-time slowdown applies** to those
+blocks. `CoolingBuffer` has two slowdown regimes, and the one that runs for a normal layer is
+`PerExtruderAdjustments::slow_down_to_feedrate()`, which **caps** every adjustable line at one
+common ceiling feed rate:
 
-| strategy | result |
-|---|---|
-| `F` word inside the movement `G1` (what the brief asked for) | violates the assert; in Release the line silently **escapes the layer-time slowdown**. Measured on the dome: contoured outer walls kept running at 9124 mm/min where cooling had slowed the rest of the layer to 2841 - a 3.2x over-speed, strictly worse than doing nothing |
-| a separate `G1 F...` carrying `;_EXTRUDE_SET_SPEED` | folded into the path's first modifier and dropped; 0 of 7004 contoured segments kept an F |
-| `;_EXTRUDE_END` then a new `;_EXTRUDE_SET_SPEED` block per speed change | same; the collapse is not avoided this way |
+```cpp
+if (line.feedrate > min_feedrate) { line.time *= ...; line.feedrate = min_feedrate; }
+```
 
-The matrix, dome at 0.2 mm, model printing time:
+A cap is precisely the wrong operator for this feature. The whole point of `zaa_speed_scaling` is
+that the segments of one contoured path run at *different* speeds in a fixed ratio to their local
+bead height; pinning them all to one ceiling collapses that ratio to a constant. The measurement,
+dome at 0.2 mm, 7029 contoured segments:
+
+| | distinct contoured feed rates | range (mm/min) |
+|---|---|---|
+| cooling off | 205 | 3825 - 9659 |
+| cooling on, before this fix | 23 | 1200 - 3453 |
+
+and the 23 fell into buckets of **exactly 258 segments** - one feed rate per layer. The feature was
+not being deleted; it was being flattened.
+
+(The other regime, `slowdown_to_minimum_feedrate()`, drives every adjustable line to
+`slow_down_min_speed`. It also flattens the ratio, and that is correct: see the saturated case
+below.)
+
+#### The design
+
+The preferred option in the brief, per-segment adjustable lines that the layer-time slowdown still
+scales proportionally, is what is implemented. Contoured paths do **not** opt out of cooling.
+
+* `GCode.cpp` appends `ZAA_COOLING_MARKER` (`;_ZAA_SCALED`) to the reopened block's cooling comment,
+  only when `m_enable_cooling_markers` is on.
+* `CoolingBuffer::parse_layer` tags such a block `CoolingLine::TYPE_ZAA_SCALED`.
+* A tagged block is never capped. It is slowed **proportionally**, by the factor the cap represents
+  for that layer - the fastest ordinary adjustable line divided by the ceiling. Every `F_seg/h_seg`
+  ratio is therefore preserved exactly, while the block still contributes its share of the
+  stretched layer time, so the layer still reaches its cooling target.
+* The material's own `slow_down_min_speed` remains a hard bound on a ZAA block, exactly as it is on
+  every other adjustable line.
+* External-perimeter handling is untouched: `adjust_external` / `dont_slow_down_outer_wall` decide
+  whether a block is adjustable at all, before any of this applies.
+
+The decision is two pure functions in `ContourZ.hpp`, `contour_z_cooling_factor` and
+`contour_z_cooled_feedrate`, so `CoolingBuffer` and the unit tests share one rule.
+
+With `zaa_enabled` or `zaa_speed_scaling` off, no marker is emitted, no line is ever tagged, and
+every cooling path is bit-for-bit the one it was.
+
+#### The saturated case, which is correct and not a failure
+
+When a layer cannot make its cooling target even with everything at `slow_down_min_speed`,
+`slowdown_to_minimum_feedrate()` puts every adjustable line - contoured or not - on that floor.
+The ratio is flattened there and cannot be otherwise: the material's minimum speed is a hard bound
+and such a layer has no speed range left to express a ratio in.
+
+The dome at 0.12 mm is entirely this case. With cooling on, all 1048 contoured moves sit at
+1200 mm/min with the scaling **both on and off**; the same slice with cooling off measures 950
+outer-wall segments at mean 0.000 % deviation. `zaa_speed_report.py` reports this as "nothing
+measurable, saturated" rather than a violation, and still fails on a segment below a floor or off
+the ratio while above one.
+
+#### The matrix, dome at 0.2 mm
 
 | | scaling off | scaling on |
 |---|---|---|
-| `slow_down_for_layer_cooling=1` (default) | 12m 43s | **12m 43s** (no effect) |
-| `slow_down_for_layer_cooling=0` | 6m 21s | 6m 19s |
+| `slow_down_for_layer_cooling=1` (default) | contoured 39.5 s | **contoured 46.3 s (+17.4 %)** |
+| `slow_down_for_layer_cooling=0` | contoured 9.1 s | contoured 11.0 s (+20.9 %) |
 
-With cooling off the scaling demonstrably works, measured on the contoured moves alone:
-**contoured extrusion time 9.1 s -> 11.0 s (+21 %), non-contoured 151.5 s -> 151.5 s** (identical
-to the microsecond). That is the feature doing exactly what it should, on exactly the moves it
-should, and nothing else.
+The whole-print estimate rose 1874 s -> 1884 s with cooling on, so the cooled layer time was not
+undercut. Note the earlier warning still stands in general: the whole-print estimate is not a clean
+measure of this change, because slowing the contoured moves lets the layer-time slowdown relax the
+speed it imposes on the rest of the layer. `bar_b_speed.py` asserts on the contoured extrusion time
+computed from the file, and additionally - with cooling on - that the estimate does not fall.
 
-Note also that the *whole-print* estimate is not a valid measure of this change even when it
-works: slowing the contoured moves lengthens each layer, which makes the layer-time cooling
-slowdown relax the speed it was imposing on the **whole** layer, so the total can legitimately
-come out lower. `bar_b_speed.py` therefore asserts on the contoured extrusion time computed from
-the file, not on the header estimate.
+#### The second-order effect on non-contoured moves, with cooling on
 
-**Resolving this needs a decision that is bigger than this change:** either teach CoolingBuffer to
-carry a per-segment speed profile through a path (it currently reduces a path to one `feedrate`,
-one `time` and one `time_max`), or let a contoured path opt out of the layer-time slowdown and
-accept that ZAA tops are not cooled like the rest of the layer. Neither should be chosen without
-the owner. Until then the key is best treated as effective only with layer-time cooling off.
+Because the contoured moves now take longer, each layer needs *less* slowdown from everything else,
+so the cap relaxes toward the uncooled speed. On the dome at 0.2 mm the non-contoured moves go from
+2841 to 2850 mm/min - 2850 being what they run at uncooled - which gives 1.05 s back on 374 s. This
+is the cooling model working, not the feature leaking. `bar_b_speed.py` keeps the strict "must not
+move at all" assertion for the cooling-off runs, where it still passes to the 0.1 s, and with
+cooling on asserts only the direction: time may be given back, never taken.
+
 
 ### Proofs
 
@@ -690,6 +744,56 @@ the owner. Until then the key is best treated as effective only with layer-time 
   is already scaled, and the largest F in a reference slice is a travel speed. It also skips the
   `G1` after any `G2`/`G3`, whose segment length is not measurable from the previous `G1`.
 * **Bar A**: `scripts/zaa/bar_a_zaa.py`, updated for the fifth `zaa_*` config line.
+
+#### Proofs added by `fix/zaa-speed-cooling` (2026-09-08)
+
+* **`libslic3r_tests`: 716 cases, 714 passed, 2 failed as expected** - the same two pre-existing
+  failures. `[ContourZ]` is now 9 cases / 1565 assertions, all passing; the new case is tagged
+  `[ContourZ][CoolingBuffer]` and covers the interaction directly: the cap being a no-op when it
+  is not biting, the factor being the ratio the cap represents, `F_seg/h_seg` surviving a cooling
+  factor exactly across three bead heights, the material floor still bounding a cooled block,
+  cooling only ever slowing a block, and the cooled path time rising by exactly the factor.
+* **Bar B with cooling ON (the default profile) now PASSES on all four fixtures.** Per case,
+  contoured extrusion time and the whole-print estimate (which must not fall):
+
+  | fixture | contoured | estimate | invariant |
+  |---|---|---|---|
+  | wedge 0.20 | 129.7 -> 141.9 s (+9.4 %) | +8 s | n=336, mean 0.584 % / max 2.584 %, 0 outside the band |
+  | wedge 0.12 | 105.5 -> 132.0 s (+25.1 %) | +35 s | n=316, mean 1.087 % / max 4.348 %, 0 outside the band |
+  | dome 0.20 | 39.5 -> 46.3 s (+17.4 %) | +10 s | n=4864, mean 0.001 % / max 0.575 %, 0 outside the band |
+  | dome 0.12 | saturated (all on the floor) | +0 s | not measurable, see the saturated case above |
+
+  No segment below a floor in any case, and the Z profile is identical to the unscaled slice in
+  all four (7029 vs 7029 on the dome, 17444 vs 17444 on the wedge), so the geometry is untouched.
+* **Bar B with cooling OFF is unregressed** and reproduces the earlier run exactly: wedge 0.2
+  +16.3 %, wedge 0.12 +7.8 %, dome 0.2 +20.9 %, dome 0.12 +29.5 %, non-contoured extrusion time
+  identical in all four, outer wall 3825..9218 mm/min at mean 0.000 % / max 0.575 %.
+* **Bar A**: unchanged and still passing - with `zaa_enabled` off the emitted G-code is
+  byte-identical to the head build apart from the timestamp, on all four cases (P1S and U1, each
+  with and without `offset_layers`).
+
+#### Not verified
+
+* **No hardware print.** Every number above is from the emitted G-code and the slicer's own
+  estimator. Whether holding volumetric flow constant actually improves the 0.2 mm surface is the
+  owner's print test, and it is now worth running with cooling on - which is what the machine will
+  really do - rather than only with it off.
+* **Multi-extruder / multi-material layers.** The proportional factor is computed per extruder
+  (`PerExtruderAdjustments`), which is the right scope, but every fixture here is single-material.
+  A layer where two extruders with different `slow_down_min_speed` values both carry contoured
+  paths has not been exercised.
+* **`dont_slow_down_outer_wall`.** ZAA blocks on external perimeters are simply not marked
+  adjustable when that option is on, so the new code never sees them; this was reasoned through
+  rather than measured.
+* **Arc fitting (`G2`/`G3`).** Contoured segments are emitted as `G1`, and the analyzer skips the
+  `G1` after an arc, so a profile with arc fitting on has not been measured.
+* **The saturated regime is asserted only negatively.** The dome at 0.12 mm with cooling on shows
+  that nothing goes below a floor, but there is no fixture where a layer is saturated *and* still
+  has range left to check a ratio in.
+* **Only `Generic PLA` on `Bambu Lab P1S`.** `slow_down_min_speed` is 20 mm/s there; a material
+  with a much lower or zero minimum takes a different branch of
+  `extruder_range_slow_down_non_proportional` (the `slow_down_min_speed == 0` path calls
+  `slow_down_proportional`, which was already proportional and is untouched) and was not run.
 
 ### At 0.12 mm the scaling engages less, as expected
 
