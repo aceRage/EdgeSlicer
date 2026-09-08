@@ -631,3 +631,99 @@ TEST_CASE("ZAA: the speed hysteresis rule", "[ContourZ]")
         REQUIRE(emissions < 40);
     }
 }
+
+TEST_CASE("ZAA speed scaling survives the layer-time cooling slowdown", "[ContourZ][CoolingBuffer]")
+{
+    // The bug this covers: CoolingBuffer's layer-time slowdown normally CAPS every adjustable line
+    // at a common ceiling feed rate. Applied to the ZAA speed blocks that flattens the whole
+    // feature - measured on the dome at 0.2 mm, 205 distinct contoured feed rates spanning
+    // 3825-9659 mm/min collapsed to 23 spanning 1200-3453, whole layers pinned to a single F.
+    // contour_z_cooling_factor / contour_z_cooled_feedrate are the rule that replaces the cap for
+    // ZAA blocks, and these are the properties the G-code depends on.
+
+    SECTION("the cap is a no-op when it is not biting")
+    {
+        REQUIRE(contour_z_cooling_factor(3000., 6000.) == Approx(1.0));
+        REQUIRE(contour_z_cooling_factor(6000., 6000.) == Approx(1.0));
+        // A non-positive cap cannot slow anything.
+        REQUIRE(contour_z_cooling_factor(6000., 0.) == Approx(1.0));
+        REQUIRE(contour_z_cooling_factor(6000., -1.) == Approx(1.0));
+    }
+
+    SECTION("the factor is the ratio the cap represents for the layer")
+    {
+        // The ordinary lines are being pinned from 9000 to 3000, a 3x stretch.
+        REQUIRE(contour_z_cooling_factor(9000., 3000.) == Approx(3.0));
+        REQUIRE(contour_z_cooling_factor(4500., 3000.) == Approx(1.5));
+    }
+
+    SECTION("a cooled ZAA block keeps F_seg / h_seg exactly")
+    {
+        // This is the Bar B invariant, in the unit test. Three contoured segments of a path at
+        // different local bead heights, each scaled by the feature, then all cooled by one factor.
+        const double F_role = 9000.;   // mm/min
+        const double h_nom  = 0.20;
+        const double hs[]   = {0.20, 0.12, 0.06};
+
+        // Cooling is pinning the ordinary lines from 9000 to 3000 - a 3x stretch.
+        const double factor = contour_z_cooling_factor(9000., 3000.);
+        REQUIRE(factor == Approx(3.0));
+
+        // No material floor in the way, so the ratio must survive untouched.
+        const double min_speed = 0.;
+        double ratio0 = -1.;
+        for (double h_seg : hs) {
+            const double f_seg    = contour_z_segment_feedrate(F_role, h_nom, h_seg, 0., 0.);
+            const double f_cooled = contour_z_cooled_feedrate(f_seg, factor, min_speed);
+            // The feature's own rule, before cooling.
+            REQUIRE(f_seg == Approx(F_role * h_seg / h_nom));
+            // Cooling scaled it and nothing else.
+            REQUIRE(f_cooled == Approx(f_seg / factor));
+            // And the invariant the print quality actually depends on.
+            const double ratio = f_cooled / h_seg;
+            if (ratio0 < 0.)
+                ratio0 = ratio;
+            else
+                REQUIRE(ratio == Approx(ratio0));
+        }
+        // The cooled ratio is the uncooled one divided by the factor: the layer really is slower.
+        REQUIRE(ratio0 == Approx((F_role / h_nom) / factor));
+    }
+
+    SECTION("the material's minimum print speed still bounds a cooled ZAA block")
+    {
+        // slow_down_min_speed is a hard bound the ordinary lines observe, and a ZAA block must not
+        // be taken below it either - even though that does break the ratio for that one segment.
+        const double min_speed = 1200.;               // 20 mm/s in mm/min, the PLA default
+        const double f_seg     = 1500.;
+        REQUIRE(contour_z_cooled_feedrate(f_seg, 3.0, min_speed) == Approx(min_speed));
+        // A block that stays above the floor is scaled normally.
+        REQUIRE(contour_z_cooled_feedrate(9000., 3.0, min_speed) == Approx(3000.));
+    }
+
+    SECTION("cooling only ever slows a ZAA block")
+    {
+        // A factor of 1 or below must leave the block alone, and nothing may speed a block up.
+        REQUIRE(contour_z_cooled_feedrate(6000., 1.0, 0.) == Approx(6000.));
+        REQUIRE(contour_z_cooled_feedrate(6000., 0.5, 0.) == Approx(6000.));
+        for (double factor : {1.0, 1.5, 2.0, 4.0})
+            REQUIRE(contour_z_cooled_feedrate(6000., factor, 0.) <= 6000. + 1e-9);
+    }
+
+    SECTION("the layer really is stretched: cooled time rises by the factor")
+    {
+        // What the cooling pass is buying with the slowdown. One contoured path, three segments,
+        // fixed length each; the total time must rise by exactly the factor when no floor binds.
+        const double F_role = 9000., h_nom = 0.20, len = 10.0;
+        const double hs[] = {0.20, 0.12, 0.06};
+        const double factor = 2.0;
+        double t_plain = 0., t_cooled = 0.;
+        for (double h_seg : hs) {
+            const double f  = contour_z_segment_feedrate(F_role, h_nom, h_seg, 0., 0.);
+            const double fc = contour_z_cooled_feedrate(f, factor, 0.);
+            t_plain  += len / f;
+            t_cooled += len / fc;
+        }
+        REQUIRE(t_cooled == Approx(t_plain * factor));
+    }
+}

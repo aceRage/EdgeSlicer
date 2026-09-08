@@ -8474,10 +8474,20 @@ std::string GCode::_extrude(const ExtrusionPath& path, std::string description, 
     // then independently adjustable, which is what lets the layer-time slowdown still reach
     // these moves. The cost is two extra lines per speed change, which is why the 5 % hysteresis
     // in ContourZ.hpp matters: it holds the changes to 2-3 % of contoured segments on a dome.
+    //
+    // The block additionally carries ZAA_COOLING_MARKER. Reopening the block was necessary but not
+    // sufficient: the layer-time slowdown's usual operator caps every adjustable line at a COMMON
+    // ceiling feed rate, which flattens exactly the per-segment ratio this feature creates (dome at
+    // 0.2 mm: 205 distinct contoured feed rates spanning 3825-9659 mm/min became 23 spanning
+    // 1200-3453, whole layers pinned to a single F). The marker tells CoolingBuffer to slow these
+    // blocks PROPORTIONALLY instead, so F_seg/h_seg survives the slowdown and the layer still
+    // reaches its cooling target.
     const auto zaa_emit_speed = [this, &gcode](double f, const std::string &cooling_comment) {
         if (m_enable_cooling_markers)
             gcode += ";_EXTRUDE_END\n";
-        gcode += m_writer.set_speed(f, "", cooling_comment);
+        gcode += m_writer.set_speed(f, "", m_enable_cooling_markers
+                                               ? cooling_comment + ZAA_COOLING_MARKER
+                                               : cooling_comment);
     };
 
     // ZAA (zaa_speed_scaling): hold the volumetric flow of a contoured segment at the value this

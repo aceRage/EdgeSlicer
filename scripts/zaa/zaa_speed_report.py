@@ -149,11 +149,23 @@ def main():
     ap.add_argument("--layer-height", type=float, default=0.2)
     ap.add_argument("--min-z", type=float, default=0.05)
     ap.add_argument("--tol", type=float, default=0.03)
+    ap.add_argument("--cooling-floor", type=float, default=0.0,
+                    help="slow_down_min_speed in mm/s. With layer-time cooling on, CoolingBuffer "
+                         "may take a segment down to the material's own minimum print speed; a "
+                         "segment sitting on that floor cannot express the F/h ratio any more, so "
+                         "it is counted and excluded exactly like the emitter's own floor.")
+
     ap.add_argument("--offset-layers", action="store_true")
     ap.add_argument("--compare-z", default=None,
                     help="a reference G-code (same slice, scaling off) whose Z profile must match")
     a = ap.parse_args()
     H, MZ, TOL = a.layer_height, a.min_z, a.tol
+    # The speed below which a segment can no longer express the F/h ratio. Normally the emitter's
+    # own 10 mm/s floor; with layer-time cooling on, CoolingBuffer may additionally take a segment
+    # down to the material's slow_down_min_speed, which is a hard bound it shares with every other
+    # adjustable line, so a segment resting on it is excluded and counted rather than failed.
+    eff_floor = max(FLOOR_MM_MIN, a.cooling_floor * 60.0)
+
     bases = [0.0, 0.5 * H] if a.offset_layers else [0.0]
 
     moves = parse(a.gcode)
@@ -195,13 +207,13 @@ def main():
         segs = p["segs"]
         a_ = agg[p["feat"]]
         a_["clamped"] += sum(1 for s in segs if s["h"] > H + 1e-9)
-        a_["floored"] += sum(1 for s in segs if abs(s["f"] - FLOOR_MM_MIN) <= 1e-6)
+        a_["floored"] += sum(1 for s in segs if s["f"] <= eff_floor + 1e-6)
         a_["below_floor"] += sum(1 for s in segs if s["f"] < FLOOR_MM_MIN - 1e-6)
         for s in segs:
             a_["hlo"] = min(a_["hlo"], s["h"]); a_["hhi"] = max(a_["hhi"], s["h"])
             a_["flo"] = min(a_["flo"], s["f"]); a_["fhi"] = max(a_["fhi"], s["f"])
         # Unclamped segments only.
-        free = [s for s in segs if s["h"] <= H + 1e-9 and s["f"] > FLOOR_MM_MIN + 1e-6]
+        free = [s for s in segs if s["h"] <= H + 1e-9 and s["f"] > eff_floor + 1e-6]
         if len(free) < 3:
             continue
         ratios = sorted(s["f"] / s["h"] for s in free)
