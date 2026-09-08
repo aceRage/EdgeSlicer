@@ -743,6 +743,29 @@ void print_region_ref_inc(PrintRegion &r) { ++ r.m_ref_cnt; }
 void print_region_ref_reset(PrintRegion &r) { r.m_ref_cnt = 0; }
 int  print_region_ref_cnt(const PrintRegion &r) { return r.m_ref_cnt; }
 
+// Image Row Phase 3 (fix/imagefill-dither-effect): does `filament_id` name an ENABLED
+// ImageWeighted MixedFilament row that actually references an image? The Image Fill dialog
+// (Plater::apply_image_fill) ALWAYS runs Phase 2's facet painting, tick or no tick, and then
+// binds the part's own solid_infill_filament to the row's virtual id. Without this check the
+// painted-region loop below would overwrite that virtual id with the painted PHYSICAL extruder
+// id on every painted sub-region - and since the image fill paints essentially the whole top
+// surface, that is nearly all of it - so Fill.cpp's image_row_configured_virtual_id() (which
+// reads exactly this key) would see a physical id everywhere and never split anything. The row
+// has to win on TOP SOLID INFILL of the painted faces; walls and sparse infill still follow the
+// painted physical id exactly as before. See docs/superpowers/specs/
+// 2026-09-07-imagemap-phase3-imagerow.md, "the dialog path".
+static bool solid_infill_filament_is_image_row(const MixedFilamentManager &mixed_mgr, int filament_id, size_t num_physical)
+{
+    if (filament_id <= 0)
+        return false;
+    const unsigned int id = unsigned(filament_id);
+    if (!mixed_mgr.is_mixed(id, num_physical))
+        return false;
+    const MixedFilament *mf = mixed_mgr.mixed_filament_from_id(id, num_physical);
+    return mf != nullptr && mf->enabled && mf->distribution_mode == int(MixedFilament::ImageWeighted) &&
+           ! mf->image_fill_ref.empty();
+}
+
 // Verify whether the PrintRegions of a PrintObject are still valid, possibly after updating the region configs.
 // Before region configs are updated, callback_invalidate() is called to possibly stop background processing.
 // Returns false if this object needs to be resliced because regions were merged or split.
@@ -756,6 +779,12 @@ bool verify_update_print_object_regions(
     // paint_depth_mode is picked up on the fast (region-reuse) path too, not just when
     // regions are regenerated from scratch.
     const bool                          paint_sparse_infill,
+    // Image Row Phase 3: see generate_print_object_regions()'s parameters of the same names -
+    // the painted-region loop below MUST mirror that function's own image-row exception, or the
+    // fast (region-reuse) path would silently overwrite the row's virtual id back to the painted
+    // physical id and the dither would stop firing after the first reslice.
+    const MixedFilamentManager         &mixed_mgr,
+    const size_t                        num_physical_filaments,
     const std::function<void(const PrintRegionConfig&, const PrintRegionConfig&, const t_config_option_keys&)> &callback_invalidate)
 {
     // Sort by ModelVolume ID.
@@ -836,7 +865,10 @@ bool verify_update_print_object_regions(
             const PrintObjectRegions::VolumeRegion &parent_region   = layer_range.volume_regions[region.parent];
             PrintRegionConfig                       cfg             = parent_region.region->config();
             cfg.wall_filament.value    = region.extruder_id;
-            cfg.solid_infill_filament.value = region.extruder_id;
+            // Image Row Phase 3: mirrors generate_print_object_regions() - an ImageWeighted row
+            // bound to the parent's solid_infill_filament keeps that virtual id here.
+            if (! solid_infill_filament_is_image_row(mixed_mgr, cfg.solid_infill_filament.value, num_physical_filaments))
+                cfg.solid_infill_filament.value = region.extruder_id;
             // Paint Depth Stage 2 (Task 3 item 2): mirrors generate_print_object_regions() -
             // sparse infill only follows the painted claim when paint_sparse_infill is active.
             if (paint_sparse_infill)
@@ -989,7 +1021,12 @@ static PrintObjectRegions* generate_print_object_regions(
     // set to the painted extruder (true = today's behavior) or left at the parent (base)
     // region's filament. False only when paint_infill_override is unchecked AND paint depth
     // is actually bounded (see the call site in Print::apply for the gating).
-    const bool                                   paint_sparse_infill)
+    const bool                                   paint_sparse_infill,
+    // Image Row Phase 3: the project's mixed-filament manager and the PHYSICAL filament
+    // count, so the painted-region loop below can tell an ImageWeighted row's virtual id
+    // apart from an ordinary filament id - see solid_infill_filament_is_image_row() above.
+    const MixedFilamentManager                  &mixed_mgr,
+    const size_t                                 num_physical_filaments)
 {
     // Reuse the old object or generate a new one.
     auto out = print_object_regions_old ? std::unique_ptr<PrintObjectRegions>(print_object_regions_old) : std::make_unique<PrintObjectRegions>();
@@ -1089,7 +1126,21 @@ static PrintObjectRegions* generate_print_object_regions(
                     mm_paint_applies_to_parent_region(layer_range, parent_region_id)) {
                     PrintRegionConfig cfg = parent_region.region->config();
                     cfg.wall_filament.value    = painted_extruder_id;
-                    cfg.solid_infill_filament.value = painted_extruder_id;
+                    // Image Row Phase 3: an ImageWeighted row bound to this part's own
+                    // solid_infill_filament outranks the paint for TOP SOLID INFILL - the row
+                    // samples the same image at nozzle resolution, which is strictly finer
+                    // than the facet-resolution paint that produced this painted region in the
+                    // first place. Keeping the virtual id here is what lets Fill.cpp's
+                    // image_row_configured_virtual_id() find the row on the painted regions
+                    // that own nearly all of the painted top surface. Walls and sparse infill
+                    // are untouched by the row and still follow the painted physical id.
+                    const bool keep_image_row_solid_infill =
+                        solid_infill_filament_is_image_row(mixed_mgr, cfg.solid_infill_filament.value,
+                                                          num_physical_filaments);
+                    if (! keep_image_row_solid_infill)
+                        cfg.solid_infill_filament.value = painted_extruder_id;
+                    // Read before get_create_region() moves `cfg` out from under us.
+                    const int expected_solid_infill_filament = cfg.solid_infill_filament.value;
                     // Paint Depth Stage 2 (Task 3 item 2): sparse infill only follows the
                     // painted claim when paint_sparse_infill is active; otherwise it keeps
                     // whatever cfg already inherited from the parent (base) region above -
@@ -1103,7 +1154,7 @@ static PrintObjectRegions* generate_print_object_regions(
                     // config as its parent, alias it instead of creating a duplicate PrintRegion.
                     PrintRegion *painted_region = get_create_region(std::move(cfg));
                     if (painted_region->config().wall_filament.value != painted_extruder_id ||
-                        painted_region->config().solid_infill_filament.value != painted_extruder_id ||
+                        painted_region->config().solid_infill_filament.value != expected_solid_infill_filament ||
                         painted_region->config().sparse_infill_filament.value != expected_sparse_infill_filament) {
                         BOOST_LOG_TRIVIAL(warning) << "Painted region filament mismatch"
                                                    << " requested_extruder_id=" << painted_extruder_id
@@ -1982,6 +2033,8 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
                     num_total_filaments,
                     *print_object_regions,
                     paint_sparse_infill,
+                    m_mixed_filament_mgr,
+                    num_extruders,
                     [it_print_object, it_print_object_end, &update_apply_status](const PrintRegionConfig &old_config, const PrintRegionConfig &new_config, const t_config_option_keys &diff_keys) {
                         for (auto it = it_print_object; it != it_print_object_end; ++it)
                             if ((*it)->m_shared_regions != nullptr)
@@ -2009,7 +2062,9 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
                 print_object.is_mm_painted() ? 0.f : float(print_object.config().xy_contour_compensation.value),
                 painting_extruders,
                 print_object.is_fuzzy_skin_painted(),
-                paint_sparse_infill);
+                paint_sparse_infill,
+                m_mixed_filament_mgr,
+                num_extruders);
         }
         for (auto it = it_print_object; it != it_print_object_end; ++it)
             if ((*it)->m_shared_regions) {

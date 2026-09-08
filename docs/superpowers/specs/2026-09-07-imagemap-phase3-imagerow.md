@@ -458,3 +458,145 @@ white PLA), sliced twice:
    row's own filament sequence) a blockier, per-layer-group banding.
    Comparing the two prints side by side is the actual acceptance bar for this feature; nothing
    in CI or the test suite can substitute for it.
+
+## The dialog path: why step 5's checkbox did not change the slice (fix/imagefill-dither-effect)
+
+Date: 2026-09-08
+Branch: `fix/imagefill-dither-effect`, from `feat/ultra-preferences` (32ddb61631)
+Worktree: `C:\Dev\SnapmakerOrcaPhone\.claude\worktrees\imagemap-p3`
+
+The owner's report, verbatim: *"I can see the nozzle resolution does create the mixed filament,
+though it doesn't seem to affect the overall slice."* The sidebar showed the `ImageWeighted` row -
+so step 5's dialog wiring was doing its job - but the sliced top surface came out exactly as
+Phase 2's facet painting alone, with no per-line dither.
+
+### The cause
+
+Step 5's own "Proofs" section records the gap that let this ship: **Bar B drove everything through
+the model-level API and nobody clicked the dialog**. The one thing the dialog does that
+`[barb3]` does not is the very first line of `Plater::apply_image_fill()`'s Apply handler -
+Phase 2's facet painting always runs, tick or no tick:
+
+```
+const ImageFillResult res = image_fill_apply(*volume, params, ...);   // writes mmu_segmentation_facets
+```
+
+That painting is what disabled the row. `PrintApply.cpp`'s `generate_print_object_regions()` ends
+with a "Finally add painting regions" loop that creates one painted `PrintRegion` per painted
+extruder id, and each one did:
+
+```
+cfg.wall_filament.value         = painted_extruder_id;
+cfg.solid_infill_filament.value = painted_extruder_id;   // <- overwrites the row's virtual id
+```
+
+`solid_infill_filament` is exactly the key `Fill.cpp`'s `image_row_configured_virtual_id()` reads
+to decide whether a region is an image row at all. On every painted sub-region it therefore saw a
+PHYSICAL id, `MixedFilamentManager::is_mixed()` said no, and the function returned 0 - no context,
+no split, no dither. And because an image fill paints essentially the whole top surface, virtually
+all of that surface belongs to painted sub-regions: the row stayed bound to a parent region with
+almost no top-solid area left to split. The row was real, correctly serialized, and visible in the
+sidebar the whole time; it simply never reached a region that still named it.
+
+`verify_update_print_object_regions()` (the fast region-reuse path in the same file) carried the
+identical overwrite, so even a lucky first slice would have lost the row on the next reslice.
+
+Measured, on a 50 x 50 x 3 mm plaque with `ramp_kw.png` over three filaments
+(`tests/libslic3r/test_image_row_dialog.cpp`, both cases built through the same model-level calls
+`Plater::apply_image_fill()` makes, in the same order):
+
+| case | top-solid entities on the top layer | split & tagged | region `solid_infill_filament` values present |
+|---|---|---|---|
+| row only, no painting (`[barb3]`'s arrangement) | 3 | **3** | `4` (the row) |
+| dialog path (painting + row), BEFORE the fix | 3 | **0** | `1 2 3 4` |
+| dialog path (painting + row), AFTER the fix | 5 | **5** | `4` |
+
+The `1 2 3 4` row is the whole bug in one line: three painted regions carrying physical ids 1/2/3
+had taken over the top surface.
+
+### The fix
+
+`src/libslic3r/PrintApply.cpp`. A new file-local predicate,
+`solid_infill_filament_is_image_row(mixed_mgr, filament_id, num_physical)`, answers "does this
+filament id name an ENABLED `ImageWeighted` row with a non-empty `image_fill_ref`?" - the same
+test `image_row_configured_virtual_id()` applies at slice time. Both region-building paths
+(`generate_print_object_regions()` and `verify_update_print_object_regions()`, which must stay in
+lockstep or the fix would evaporate on the first reslice) now skip the
+`solid_infill_filament = painted_extruder_id` overwrite when that predicate holds, and both take
+the `MixedFilamentManager` and the PHYSICAL filament count as new parameters to do it.
+
+This is the plan's own stated intent - "if painting and the row conflict, the row must win on top
+solid infill of those faces" - taking the second of the two routes the brief offered (make the
+split read the row through the painted region's config) rather than repainting the faces with the
+row's virtual id, because it changes only which filament a painted region's TOP SOLID INFILL
+resolves to. Walls (`wall_filament`) and sparse infill (`sparse_infill_filament`, still gated by
+`paint_sparse_infill`) are untouched and still follow the painted physical id exactly as before,
+so the paint keeps doing its job everywhere the row does not reach - side walls, internal infill,
+and every surface that is not top solid infill. The row is strictly finer than the paint on the
+one surface it does claim: both sample the same image, the row at nozzle resolution rather than at
+facet resolution.
+
+The painted-region "filament mismatch" warning below the assignment was updated to expect the
+kept virtual id in this case, so the intentional divergence does not log a false alarm.
+
+### What the owner should see in the preview
+
+With the dither ON, the top surface of an image-filled face should show **many short colour runs
+along each fill line** - the colour changing several times within one pass of the nozzle, at
+roughly line-width granularity - rather than the **triangle-shaped patches** Phase 2's facet
+painting produces (a facet is painted one colour, so the patch boundaries follow mesh triangles,
+and on the 50 x 50 plaque's top face there are exactly TWO such triangles, i.e. at most two
+colours in two big diagonal halves). Preview in "Filament"/tool colour mode: the transition should
+read as a gradient made of fine stripes, not as a pair of flat triangles.
+
+On the measured plaque, walking the top layer in Y across four equal bands gives dominant tools
+`1 2 2 3` - black, grey, grey, white - a clean one-directional walk of the palette matching the
+ramp, with all three filaments present. The facet painting alone can only ever reach the two
+colours its two top facets sampled.
+
+### Proofs
+
+- **Unit tests**: `libslic3r_tests`, candidate build - **700 cases, 698 passed, 2 failed as
+  expected** (the same two pre-existing expected failures; 92002 assertions, 92000 passed). The
+  count is higher than step 5's own 656 because this branch is based on the newer
+  `feat/ultra-preferences` tip (32ddb61631), which merged unrelated work, plus the two new cases.
+- **The reproduction test**: `tests/libslic3r/test_image_row_dialog.cpp`, two cases - the row
+  alone (the control, which always worked) and the dialog path (painting + row). The dialog case
+  asserts every top-solid entity is split and tagged, all three filaments appear, and the
+  per-band dominant tool is monotonic across the plaque's Y (`1 2 2 3`, checked with
+  `std::is_sorted` and a first != last guard, measured off the split runs' own geometry weighted
+  by extruded length). Before the fix its `tagged` count is 0 and it fails; after, both pass.
+- **Bar A** (feature off, byte-identical), all three cases, baseline = this branch with the
+  `PrintApply.cpp` change reverted, candidate = the fix, isolated `--datadir` copies:
+  `OrcaToleranceTest.stl` plain (SHA-256 `3ec8e8dd1cf7eb10...`, 24876 significant lines),
+  `onepart_ledge.3mf` with over-support-surfaces on (`602da3f3c4ca75e7...`, 7085 lines), and
+  `OrcaToleranceTest.stl` with offset-layers on (`b2a95f5fc3e1a66b...`, 25259 lines) - **all three
+  byte-identical between baseline and candidate**, with the CONFIG_BLOCK `; key = value` line
+  count unchanged on every case (639 / 640 / 639). This is the expected result by construction:
+  the new branch is gated on a condition (an enabled `ImageWeighted` row with an image reference
+  named by `solid_infill_filament`) that no ordinary slice can satisfy.
+
+### Anything unverified
+
+- **Nobody clicked the dialog.** The reproduction test drives the same model-level API calls
+  `Plater::apply_image_fill()` makes, in the same order, but the GUI path itself still has no
+  automated coverage - unchanged from step 5. The remaining risk this leaves is confined to the
+  dialog's own wiring (which the owner's report already confirms works: the row is created and
+  appears in the sidebar), not to the slicing behaviour this fix changes.
+- **Bar A ran on "Bambu Lab X1 Carbon 0.4 nozzle", not the P1S** the earlier bars used. The shared
+  `snorca_hubtest\dd_lan` data dir has had its BBL vendor removed by another session
+  (`system\BBL.json` renamed to `.pre-ultra-bak`), and `dd_ctl` - which still carries BBL -
+  registers X1 Carbon / H2D / H2C but not P1S, so the P1S preset does not resolve there. The same
+  `0.20mm Standard @BBL X1C` process and `Generic PLA` filament were used. The printer choice does
+  not affect what Bar A measures (byte-identity of a slice that never touches an image row), but
+  it does mean this run is not literally the same command line as step 4's and step 5's Bar A.
+- **No G-code-level Bar B was re-run.** The dither's effect is measured at the `ExtrusionEntity`
+  level (tags and run geometry, in the reproduction test) rather than by re-slicing the Bar B
+  project to G-code and counting `T<n>` commands. Step 4 and step 5 both established that a
+  tagged run reaches G-code as the right tool; this fix changes which regions get tagged, not how
+  a tag is emitted.
+- **No hardware print.** The two-print comparison in "Hardware test for the owner" above remains
+  the actual acceptance bar and is unchanged by this fix - except that, before it, the dither-ON
+  print would have come out identical to the dither-OFF one.
+- The step-5 limits are all unchanged: top solid infill only (not ironing, not Concentric-family
+  patterns), and sample spacing still assumes uniform scale.
