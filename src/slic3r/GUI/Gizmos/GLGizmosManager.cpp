@@ -179,7 +179,7 @@ void GLGizmosManager::switch_gizmos_icon_filename()
             gizmo->set_icon_filename(m_is_dark ? "toolbar_brimears_dark.svg" : "toolbar_brimears.svg");
             break;
         case (EType::Sculpt):
-            gizmo->set_icon_filename(m_is_dark ? "toolbar_modifier_sphere_dark.svg" : "toolbar_modifier_sphere.svg");
+            gizmo->set_icon_filename(m_is_dark ? "toolbar_sculpt_dark.svg" : "toolbar_sculpt.svg");
             break;
         }
 
@@ -223,8 +223,7 @@ bool GLGizmosManager::init()
     m_gizmos.emplace_back(new GLGizmoAssembly(m_parent, m_is_dark ? "toolbar_assembly_dark.svg" : "toolbar_assembly.svg", EType::Assembly));
     m_gizmos.emplace_back(new GLGizmoSimplify(m_parent, "reduce_triangles.svg", EType::Simplify));
     m_gizmos.emplace_back(new GLGizmoBrimEars(m_parent, m_is_dark ? "toolbar_brimears_dark.svg" : "toolbar_brimears.svg", EType::BrimEars));
-    // Ultra (Sculpt): no dedicated art yet - reusing the "modifier sphere" icon as a placeholder.
-    m_gizmos.emplace_back(new GLGizmoSculpt(m_parent, m_is_dark ? "toolbar_modifier_sphere_dark.svg" : "toolbar_modifier_sphere.svg", EType::Sculpt));
+    m_gizmos.emplace_back(new GLGizmoSculpt(m_parent, m_is_dark ? "toolbar_sculpt_dark.svg" : "toolbar_sculpt.svg", EType::Sculpt));
     //m_gizmos.emplace_back(new GLGizmoSlaSupports(m_parent, "sla_supports.svg", sprite_id++));
     //m_gizmos.emplace_back(new GLGizmoFaceDetector(m_parent, "face recognition.svg", sprite_id++));
     //m_gizmos.emplace_back(new GLGizmoHollow(m_parent, "hollow.svg", sprite_id++));

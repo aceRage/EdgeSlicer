@@ -91,6 +91,40 @@ float its_laplacian_energy(const indexed_triangle_set &its)
     return float(energy);
 }
 
+CursorState next_cursor_state(const CursorState &prev, const CursorInput &in)
+{
+    CursorState out = prev;
+
+    switch (in.mode) {
+    case CursorMode::StrokeGrab:
+        // The grabbed patch has moved with the drag; the fresh hit would be on
+        // the stale pre-stroke surface, so ignore it and ride the anchor.
+        out.visible  = true;
+        out.position = in.grab_anchor;
+        break;
+
+    case CursorMode::StrokeHit:
+        // Follow the surface under the mouse, and hold the last position when
+        // the ray misses so a stroke never loses its cursor mid-drag.
+        if (in.hit_valid) {
+            out.visible  = true;
+            out.position = in.hit;
+        } else {
+            out.visible = prev.visible;
+        }
+        break;
+
+    case CursorMode::Hover:
+    default:
+        out.visible = in.hit_valid;
+        if (in.hit_valid)
+            out.position = in.hit;
+        break;
+    }
+
+    return out;
+}
+
 indexed_triangle_set its_subdivide_midpoint(const indexed_triangle_set &its)
 {
     indexed_triangle_set out;

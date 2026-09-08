@@ -139,6 +139,60 @@ private:
     std::vector<uint32_t>               m_scratch_normal_verts;
 };
 
+// ----------------------------------------------------------------------------
+// Cursor tracking
+// ----------------------------------------------------------------------------
+//
+// Where the brush cursor is drawn, frame by frame, factored out of the gizmo so
+// it can be tested without a GL context, a camera or a mouse.
+//
+// The rule the paint gizmos follow is "re-raycast on every mouse move and draw
+// at the hit" - GLGizmoPainterBase::render_cursor() calls update_raycast_cache()
+// with the current mouse position every frame, so its cursor tracks the mouse
+// whether or not a button is held. Sculpt cannot follow that rule verbatim for
+// Grab: a Grab stroke drags the very surface the cursor sits on, and the AABB
+// tree is deliberately left stale for the duration of a stroke, so a fresh
+// raycast mid-Grab returns the PRE-stroke surface and the cursor lags the patch
+// the user is pulling. Hence:
+//
+//   * Grab, mid-stroke: the cursor is the stroke anchor moved by the accumulated
+//     drag - it stays glued to the patch being pulled.
+//   * every other brush, and every hover: the cursor is the fresh hit.
+//   * when the ray misses mid-stroke, the cursor holds its last position rather
+//     than blinking out - the user is still sculpting, and a stroke that runs
+//     off the silhouette should not lose its cursor.
+//   * when the ray misses while merely hovering, the cursor is hidden.
+//
+// Positions are in the mesh's own (volume) coordinates, the space
+// BrushParams::center lives in.
+enum class CursorMode : unsigned char {
+    Hover,      // no button held
+    StrokeGrab, // Grab stroke in progress: follow the dragged surface point
+    StrokeHit   // Inflate/Deflate/Smooth stroke in progress: follow the fresh hit
+};
+
+// One frame's worth of input to the tracker.
+struct CursorInput
+{
+    CursorMode mode      = CursorMode::Hover;
+    // Did the ray hit the (stale) mesh this frame?
+    bool       hit_valid = false;
+    Vec3f      hit       = Vec3f::Zero();
+    // StrokeGrab only: the stroke's anchor plus everything the drag has
+    // accumulated so far, i.e. where the grabbed patch has moved to.
+    Vec3f      grab_anchor = Vec3f::Zero();
+};
+
+// Where to draw the cursor this frame.
+struct CursorState
+{
+    bool  visible  = false;
+    Vec3f position = Vec3f::Zero();
+};
+
+// Pure: next cursor state from the previous one and this frame's input.
+CursorState next_cursor_state(const CursorState &prev, const CursorInput &in);
+
 // Uniform 1:4 midpoint subdivision of the whole mesh. Midpoints are shared
 // between the two triangles of an edge, so a manifold mesh stays manifold and
 // no cracks appear. Triangle winding is preserved.

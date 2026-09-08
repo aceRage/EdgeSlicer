@@ -201,12 +201,21 @@ been exercised. The owner's test:
 1. Load the calibration cube (`resources/handy_models/OrcaCube_v2.3mf`). Select it.
 2. Paint something on it first - a couple of support enforcers, or an MMU colour patch on one face
    - so there is paint to lose.
-3. Open the Sculpt gizmo (the toolbar icon is the modifier-sphere placeholder, last in the bar).
-   The panel should offer Subdivide, because a calibration cube is far too coarse for any brush.
-   Press it. Confirm the paint is gone and the panel said it would be. Press it two or three more
-   times.
+3. Open the Sculpt gizmo (last in the bar). Its icon - a ball with a bump and a brush ring -
+   should sit at the same size as the icons either side of it; v1's placeholder was visibly
+   larger, which is what v1.1 fixed. The panel should offer Subdivide, because a calibration
+   cube is far too coarse for any brush. Press it. Confirm the paint is gone and the panel said
+   it would be. Press it two or three more times.
 4. Re-paint. Now sculpt: Inflate a bump on the top face, Grab it sideways, Smooth the shoulder.
    Check the surface follows the cursor live and that the brush size feels like the sphere drawn.
+   **Watch the cursor sphere through each drag**: it must travel with the mouse from press to
+   release, not sit at the point you clicked (the v1 bug). On a Grab it should stay stuck to the
+   patch you are pulling; on Inflate and Smooth it should ride the surface under the pointer.
+   Drag off the edge of the part mid-stroke - the sphere should hold its last position rather
+   than vanish - then release and hover off the part, where it *should* disappear.
+4a. In the panel, type an exact figure into the box at the end of each slider (mm for brush
+   size, a percentage for strength) and confirm the slider and the on-screen sphere follow.
+   Ctrl+wheel over the model should move the brush-size slider and its box live.
 5. Ctrl+Z once per stroke should walk it back one stroke at a time, not one frame at a time.
 6. Confirm the paint from step 4 is still on the part after the strokes.
 7. Slice. The bump should be in the preview at the layers you expect, with no new "not manifold"
@@ -217,6 +226,86 @@ Also unverified: the brush on a non-uniformly scaled part (the radius is convert
 the three scaling factors, so a 2:1 scale makes the brush elliptical in mesh space); the gizmo on
 an object with several parts (v1 binds to a single selected part and the toolbar entry is inactive
 otherwise); anything in the assemble view (explicitly disabled).
+
+## v1.1 - the polish pass (branch `fix/sculpt-v1-polish`)
+
+The owner's first hands-on test of v1 found the interactive half that
+"[What nobody checked](#what-nobody-checked)" predicted would need it.
+
+**The cursor did not follow the mouse during a drag.** Reported as "the sphere does not
+follow the mouse once the click+drag begins, it just sits at the initial click point",
+while the mesh still deformed correctly. The cause was in `GLGizmoSculpt::on_mouse()`: the
+cursor position `m_hit` was refreshed only under `if (mouse_event.Moving())`, and wx fires
+`Moving()` only while **no** button is held. Once the button went down, every subsequent
+event arrived as `Dragging()`, which advanced the stroke but never touched `m_hit`, so
+`render_cursor_sphere()` kept drawing at the press point for the whole stroke. The paint
+gizmos never had this bug because `GLGizmoPainterBase::render_cursor()` re-runs
+`update_raycast_cache()` from the live mouse position every frame, independently of the
+button state.
+
+The fix routes every path - hover, press, each drag tick and release - through one
+`GLGizmoSculpt::update_cursor()`, which raycasts and then delegates *where the sphere goes*
+to a new pure helper, `Sculpt::next_cursor_state()`. Grab needs its own rule: a Grab stroke
+drags the surface the cursor sits on, and the AABB tree is deliberately stale during a
+stroke, so a fresh raycast mid-Grab returns the pre-stroke surface and the cursor would lag
+the patch being pulled. So Grab rides the stroke anchor as the drag moves it, while
+Inflate/Deflate/Smooth follow the fresh hit. A stroke that runs off the silhouette holds its
+last cursor position instead of blinking out; a *hover* that misses hides it.
+
+**Panel.** Both sliders now carry the paint gizmos' layout: a label column sized to the wider
+of the two labels plus `scaled(1.5f)` of gap (the v1 panel had the labels butting against the
+slider track), the slider itself, and a `BBLDragFloat` box at the end of the row for typing an
+exact value - the same `sliders_left` / `drag_left` / `slider_icon_width` arithmetic
+`GLGizmoFdmSupports` uses. Brush size prints its unit (`%.2f mm`); strength is shown as a
+percentage (`%.0f%%`, 5-100) rather than the raw 0.05-1 multiplier, and both typed values are
+clamped back into range because `BBLDragFloat` does not clamp. Ctrl+wheel needed no new
+plumbing to show up in the panel - the slider reads `m_cursor_radius` out of the member every
+frame, so the existing `set_as_dirty()` is what makes the wheel, the slider, the input box and
+the sphere all agree.
+
+**Icon.** v1 borrowed `toolbar_modifier_sphere.svg`, which rendered visibly larger than its
+neighbours. The cause is the art, not the toolbar: every real gizmo icon in this tree is a
+**40x40 viewBox with its art inset to roughly 4..36**, while `toolbar_modifier_sphere.svg` is a
+**16x16 viewBox with an r=7.5 circle at (8,8)** - art running edge to edge, so scaling it into
+the same slot makes it about 20 % larger optically. `toolbar_sculpt.svg` /
+`toolbar_sculpt_dark.svg` are new, original art drawn to the house convention: 40x40, art
+within 9.5..31.5 x 2.4..35, 1-unit round-capped strokes, outline `#2b3436` light / `#b6b6b6`
+dark, accent `#009688` shared - a ball with a bump pushed out of its shoulder, the brush ring
+on the bump, and an arrow for the push. Registered in `GLGizmosManager::init()` and
+`switch_gizmos_icon_filename()`; the placeholder is no longer referenced by the Sculpt gizmo.
+
+**Cursor colour** now matches the paint gizmos exactly: black at 0.25 alpha on hover
+(`get_cursor_hover_color()`), blue at 0.25 alpha while stroking
+(`get_cursor_sphere_left_button_color()`), replacing v1's bespoke teal.
+
+### What v1.1 proved, and what it did not
+
+Nobody drove the gizmo with a mouse in this pass either, so the cursor fix is proved the only
+way it can be without a hand on the mouse: `Sculpt::next_cursor_state()` was factored out
+precisely so a test can replay a gesture through it. Four new `[SculptCursor]` cases feed it
+the frame-by-frame inputs a real drag produces and assert on the resulting cursor sequence -
+that a six-frame drag yields six distinct positions ending at the last one rather than
+sticking at the first (the regression, stated directly); that a Grab cursor tracks the moved
+anchor and specifically *not* the stale hit; that a stroke running off the part keeps its
+cursor; that a hover off the part hides it. What no test covers is the wiring itself - that
+`on_mouse()`'s `Dragging()` branch calls `update_cursor()` - which needs a GL context and a
+hand on the mouse.
+
+* `libslic3r_tests`: **702 cases, 700 passed, 2 failed as expected** (92,019 assertions), the
+  tree's usual two baseline failures. Note the spec's older "682" figure is stale: the
+  mixed-nozzle and flexi-joint branches merged after v1 brought the base to 698, and the four
+  `[SculptCursor]` cases take it to 702.
+* Build clean: Release `Snapmaker_Orca`, `Snapmaker_Orca_app_gui` and `libslic3r_tests`, zero
+  `error C` / `error LNK`.
+* A hidden scratch instance (`snorca_hubtest/inst_sculptpolish`, datadir copied from `dd_lan`)
+  starts and runs a normal startup, with no SVG-load failure for the new icon.
+* The icons were checked by rendering them in a browser beside `toolbar_move`, `toolbar_flatten`,
+  `toolbar_meshboolean` and `toolbar_brimears` in both themes, against the old placeholder: the
+  new icon matches its neighbours' optical size, the placeholder plainly did not. They have
+  **not** been seen through the app's own nanosvg rasteriser in the toolbar.
+
+Still unverified from v1 and untouched here: the brush on a non-uniformly scaled part, the
+gizmo on a multi-part object, and everything in the assemble view.
 
 ## What v2 and v3 need
 
@@ -264,9 +353,12 @@ logic.
 
 ## Notes for whoever picks this up
 
-* The gizmo has **no art**. It borrows `toolbar_modifier_sphere.svg` /
-  `toolbar_modifier_sphere_dark.svg` as a placeholder, registered in `GLGizmosManager::init()` and
-  in `switch_gizmos_icon_filename()`. Both need swapping when an icon exists.
+* The gizmo's art is `toolbar_sculpt.svg` / `toolbar_sculpt_dark.svg` (added in v1.1, replacing
+  the borrowed `toolbar_modifier_sphere` placeholder), registered in `GLGizmosManager::init()` and
+  in `switch_gizmos_icon_filename()`. They are generated rather than hand-drawn - the geometry is
+  computed so the bump joins the ball tangentially - and the light/dark pair differ only in the
+  outline colour. Keep any replacement to the house convention: 40x40 viewBox, art inset to
+  roughly 4..36, 1-unit round-capped strokes, `#2b3436` / `#b6b6b6` outline, `#009688` accent.
 * `Sculpt` was added at the **end** of `GLGizmosManager::EType`, before `Undefined`, and the gizmo
   is pushed last in `init()` - the enum and the vector must stay in step.
 * The gizmo has no keyboard shortcut (`m_shortcut_key = 0`); every letter worth having is taken.

@@ -159,6 +159,8 @@ void GLGizmoSculpt::detach()
     m_stroke_active  = false;
     m_pending_commit = false;
     m_stroke_dirty_triangles.clear();
+    m_hit_valid   = false;
+    m_cursor      = Sculpt::CursorState{};
 }
 
 void GLGizmoSculpt::data_changed(bool /* is_serializing */)
@@ -373,16 +375,38 @@ void GLGizmoSculpt::cancel_stroke()
         m_session = std::make_unique<Sculpt::SculptSession>(m_volume->mesh().its);
 }
 
+// The cursor sphere is repositioned here, from BOTH the hover path and every
+// drag tick. Doing it only on wxMouseEvent::Moving() (which wx fires only while
+// no button is held) was the v1 bug: once a drag started, wx sent Dragging()
+// instead and the sphere stayed frozen at the click point.
+void GLGizmoSculpt::update_cursor(const Vec2d &mouse_position)
+{
+    m_last_mouse = mouse_position;
+
+    Vec3f hit = Vec3f::Zero();
+    m_hit_valid = raycast(mouse_position, hit);
+    if (m_hit_valid)
+        m_hit = hit;
+
+    Sculpt::CursorInput in;
+    in.hit_valid = m_hit_valid;
+    in.hit       = hit;
+    if (m_stroke_active)
+        in.mode = (m_brush == Brush::Grab) ? Sculpt::CursorMode::StrokeGrab : Sculpt::CursorMode::StrokeHit;
+    // For Grab the stroke centre has already been advanced by the drag, so it is
+    // exactly "the anchor moved by the accumulated drag" the cursor should ride.
+    in.grab_anchor = m_stroke_center_mesh;
+
+    m_cursor = Sculpt::next_cursor_state(m_cursor, in);
+}
+
 bool GLGizmoSculpt::on_mouse(const wxMouseEvent &mouse_event)
 {
     const Vec2d mouse_pos(double(mouse_event.GetX()), double(mouse_event.GetY()));
 
     if (mouse_event.Moving()) {
-        m_last_mouse = mouse_pos;
-        Vec3f hit = Vec3f::Zero();
-        m_hit_valid = raycast(mouse_pos, hit);
-        if (m_hit_valid)
-            m_hit = hit;
+        update_cursor(mouse_pos);
+        m_parent.set_as_dirty();
         return false;
     }
 
@@ -391,11 +415,12 @@ bool GLGizmoSculpt::on_mouse(const wxMouseEvent &mouse_event)
     if (mouse_event.LeftDown()) {
         if (control_down || get_hover_id() != -1)
             return false;
-        m_last_mouse = mouse_pos;
         if (start_stroke(mouse_pos, mouse_event.ShiftDown())) {
+            update_cursor(mouse_pos);
             m_parent.set_as_dirty();
             return true;
         }
+        update_cursor(mouse_pos);
         return false;
     }
     if (mouse_event.Dragging()) {
@@ -406,8 +431,9 @@ bool GLGizmoSculpt::on_mouse(const wxMouseEvent &mouse_event)
             end_stroke();
             return false;
         }
-        m_last_mouse = mouse_pos;
         continue_stroke(mouse_pos, mouse_event.ShiftDown());
+        // After the stroke has advanced, so a Grab cursor rides the moved anchor.
+        update_cursor(mouse_pos);
         m_parent.set_as_dirty();
         return true;
     }
@@ -415,11 +441,15 @@ bool GLGizmoSculpt::on_mouse(const wxMouseEvent &mouse_event)
         if (!m_stroke_active)
             return false;
         end_stroke();
+        // The tree was just rebuilt, so this raycast lands on the sculpted
+        // surface and the cursor settles onto what the stroke actually made.
+        update_cursor(mouse_pos);
         m_parent.set_as_dirty();
         return true;
     }
     if (mouse_event.Leaving()) {
         m_hit_valid = false;
+        m_cursor.visible = false;
     }
     return false;
 }
@@ -432,6 +462,9 @@ bool GLGizmoSculpt::gizmo_event(SLAGizmoEventType action, const Vec2d & /* mouse
         m_cursor_radius = (action == SLAGizmoEventType::MouseWheelDown)
                               ? std::max(m_cursor_radius - CursorRadiusStep, CursorRadiusMin)
                               : std::min(m_cursor_radius + CursorRadiusStep, CursorRadiusMax);
+        // The panel reads m_cursor_radius straight out of the member every frame,
+        // so the slider and its input box follow the wheel with no extra plumbing;
+        // this redraw is what makes both the panel and the sphere show it at once.
         m_parent.set_as_dirty();
         return true;
     }
@@ -487,7 +520,7 @@ void GLGizmoSculpt::refresh_render_volumes(const std::vector<uint32_t> &dirty_tr
 
 void GLGizmoSculpt::render_cursor_sphere() const
 {
-    if (!m_hit_valid || m_volume == nullptr)
+    if (!m_cursor.visible || m_volume == nullptr)
         return;
 
     if (s_cursor_sphere == nullptr) {
@@ -502,12 +535,14 @@ void GLGizmoSculpt::render_cursor_sphere() const
     const Transform3d trafo = volume_trafo();
     const Transform3d scaling_inverse = Geometry::Transformation(trafo).get_scaling_factor_matrix().inverse();
 
-    ColorRGBA color = m_stroke_active ? ColorRGBA(0.0f, 0.7f, 0.6f, 0.35f) : ColorRGBA(0.0f, 0.0f, 0.0f, 0.25f);
+    // The paint gizmos' cursor colours (GLGizmoPainterBase::get_cursor_hover_color
+    // and get_cursor_sphere_left_button_color), so the brush reads the same here.
+    ColorRGBA color = m_stroke_active ? ColorRGBA(0.0f, 0.0f, 1.0f, 0.25f) : ColorRGBA(0.0f, 0.0f, 0.0f, 0.25f);
 
     shader->start_using();
     const Camera &camera = wxGetApp().plater()->get_camera();
     const Transform3d view_model_matrix = camera.get_view_matrix() * trafo *
-                                          Geometry::assemble_transform(m_hit.cast<double>()) * scaling_inverse *
+                                          Geometry::assemble_transform(m_cursor.position.cast<double>()) * scaling_inverse *
                                           Geometry::assemble_transform(Vec3d::Zero(), Vec3d::Zero(), m_cursor_radius * Vec3d::Ones());
     shader->set_uniform("view_model_matrix", view_model_matrix);
     shader->set_uniform("projection_matrix", camera.get_projection_matrix());
@@ -613,8 +648,18 @@ void GLGizmoSculpt::on_render_input_window(float x, float y, float bottom_limit)
         return;
     }
 
-    const float sliders_left  = m_imgui->calc_text_size(m_desc.at("strength")).x + m_imgui->scaled(1.5f);
-    const float sliders_width = m_imgui->scaled(7.0f);
+    // Lay the two sliders out the way the paint gizmos do: the label column is as
+    // wide as the widest label plus a gap, the slider sits at a fixed offset, and
+    // a small drag-input box for typing an exact value goes at the end of the row.
+    // scaled(1.5f) after the text is the gap that keeps the labels off the track -
+    // without it the panel reads as cramped, which is what the v1 panel did.
+    const float space_size     = m_imgui->get_style_scaling() * 8;
+    const float radius_label   = m_imgui->calc_text_size(m_desc.at("radius")).x + m_imgui->scaled(1.5f);
+    const float strength_label = m_imgui->calc_text_size(m_desc.at("strength")).x + m_imgui->scaled(1.5f);
+    const float sliders_left   = std::max(radius_label, strength_label);
+    const float sliders_width  = m_imgui->scaled(7.0f);
+    const float slider_icon_width = m_imgui->get_slider_icon_size().x;
+    const float drag_left      = ImGui::GetStyle().WindowPadding.x + sliders_left + sliders_width - space_size;
 
     ImGui::AlignTextToFramePadding();
     m_imgui->text(m_desc.at("brush"));
@@ -633,17 +678,34 @@ void GLGizmoSculpt::on_render_input_window(float x, float y, float bottom_limit)
 
     ImGui::Separator();
 
+    // Brush size, in world millimetres - the slider prints the unit, the box at
+    // the end takes an exact figure.
     ImGui::AlignTextToFramePadding();
     m_imgui->text(m_desc.at("radius"));
     ImGui::SameLine(sliders_left);
     ImGui::PushItemWidth(sliders_width);
-    m_imgui->bbl_slider_float_style("##sculpt_radius", &m_cursor_radius, CursorRadiusMin, CursorRadiusMax, "%.2f", 1.0f, true);
+    m_imgui->bbl_slider_float_style("##sculpt_radius", &m_cursor_radius, CursorRadiusMin, CursorRadiusMax, "%.2f mm", 1.0f, true);
+    ImGui::SameLine(drag_left);
+    ImGui::PushItemWidth(1.5f * slider_icon_width);
+    ImGui::BBLDragFloat("##sculpt_radius_input", &m_cursor_radius, 0.05f, 0.0f, 0.0f, "%.2f");
+    // BBLDragFloat does not clamp, so a typed figure has to be brought back into
+    // the range the brush and the Ctrl+wheel step both honour.
+    m_cursor_radius = std::clamp(m_cursor_radius, CursorRadiusMin, CursorRadiusMax);
 
+    // Strength is the dimensionless 0.05-1 multiplier from BrushParams, shown as
+    // a percentage because that is what it reads as to a user.
     ImGui::AlignTextToFramePadding();
     m_imgui->text(m_desc.at("strength"));
     ImGui::SameLine(sliders_left);
     ImGui::PushItemWidth(sliders_width);
-    m_imgui->bbl_slider_float_style("##sculpt_strength", &m_strength, 0.05f, 1.0f, "%.2f", 1.0f, true);
+    float strength_pct = m_strength * 100.f;
+    if (m_imgui->bbl_slider_float_style("##sculpt_strength", &strength_pct, StrengthMin * 100.f, 100.f, "%.0f%%", 1.0f, true))
+        m_strength = strength_pct / 100.f;
+    ImGui::SameLine(drag_left);
+    ImGui::PushItemWidth(1.5f * slider_icon_width);
+    if (ImGui::BBLDragFloat("##sculpt_strength_input", &strength_pct, 1.0f, 0.0f, 0.0f, "%.0f"))
+        m_strength = strength_pct / 100.f;
+    m_strength = std::clamp(m_strength, StrengthMin, 1.f);
 
     m_imgui->bbl_checkbox(m_desc.at("falloff"), m_falloff);
     if (m_brush == Brush::Smooth)

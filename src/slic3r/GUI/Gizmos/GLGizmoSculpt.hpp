@@ -75,6 +75,10 @@ private:
     bool project_on_drag_plane(const Vec2d &mouse_position, Vec3d &out) const;
 
     // --- rendering ---
+    // Re-evaluate where the cursor sphere belongs for the current mouse
+    // position. Called on hover AND on every drag tick, which is what makes
+    // the sphere follow the mouse through a stroke.
+    void update_cursor(const Vec2d &mouse_position);
     void render_cursor_sphere() const;
     // Push the touched triangles into the volume's vertex buffer, or - if that
     // buffer cannot be patched - rebuild the model at a throttled rate.
@@ -109,6 +113,8 @@ private:
     static constexpr float CursorRadiusMin  = 0.4f;
     static constexpr float CursorRadiusMax  = 20.f;
     static constexpr float CursorRadiusStep = 0.2f;
+    // The floor BrushParams::strength is documented at; the panel shows it as 5%.
+    static constexpr float StrengthMin      = 0.05f;
     // A midpoint subdivision quadruples the triangle count; refuse past this.
     static constexpr size_t MaxTrianglesAfterSubdivision = 2000000;
 
@@ -123,10 +129,13 @@ private:
     int64_t m_last_render_refresh{0};
     bool    m_partial_gpu_update{true};
 
-    // Hover / cursor.
-    mutable Vec2d m_last_mouse{Vec2d::Zero()};
-    mutable bool  m_hit_valid{false};
-    mutable Vec3f m_hit{Vec3f::Zero()};
+    // Hover / cursor. m_cursor is driven by Sculpt::next_cursor_state() from
+    // both the hover path and the drag path; m_hit_valid/m_hit stay as the raw
+    // last raycast result, which the subdivide check wants.
+    mutable Vec2d               m_last_mouse{Vec2d::Zero()};
+    mutable bool                m_hit_valid{false};
+    mutable Vec3f               m_hit{Vec3f::Zero()};
+    mutable Sculpt::CursorState m_cursor;
 
     std::map<std::string, wxString> m_desc;
 };
