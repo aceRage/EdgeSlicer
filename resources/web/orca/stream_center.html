@@ -17,7 +17,15 @@
 <style>
 * { box-sizing: border-box; margin: 0; padding: 0; }
 html, body { width: 100%; height: 100%; background: #2b2b2b; font-family: 'Segoe UI', Roboto, -apple-system, sans-serif; overflow: hidden; touch-action: manipulation; -webkit-text-size-adjust: 100%; }
-#topbar { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 10px 12px; background: #1f1f1f; padding-top: calc(10px + env(safe-area-inset-top)); padding-left: calc(12px + env(safe-area-inset-left)); padding-right: calc(12px + env(safe-area-inset-right)); }
+/* Header rows: each conceptual group (tabs, camera chips/actions, connection strip) gets its
+   own flex-wrap row so wrapping never mixes unrelated controls onto the same line - the bug
+   this replaced let "Switch to home network" wrap onto the printer filter chips' line, and the
+   filter chips then covered the still-wrapping "Remote · <login>" text underneath them. #topbar
+   is normal flow (not fixed-height), so it is exactly as tall as its rows need to be at any
+   width; #grid/.view read that real height back via --bar-h (see the JS that sets it). */
+#topbar { display: flex; flex-direction: column; gap: 4px; padding: 10px 12px; background: #1f1f1f; padding-top: calc(10px + env(safe-area-inset-top)); padding-left: calc(12px + env(safe-area-inset-left)); padding-right: calc(12px + env(safe-area-inset-right)); }
+#topbar .tbrow { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+#topbar .tbrow:empty { display: none; }
 .chip { display: inline-flex; align-items: center; gap: 6px; padding: 6px 10px; border-radius: 16px; background: #4a4a4a; color: #fff; font-size: 13px; cursor: pointer; user-select: none; -webkit-user-select: none; white-space: nowrap; }
 .chip.active { background: #0a9e50; }
 .chip.over { outline: 2px solid #5fd08a; }
@@ -50,20 +58,31 @@ select { background: #3a3a3a; color: #fff; border: 1px solid #555; border-radius
 .cell.over { outline: 2px solid #5fd08a; outline-offset: -2px; }
 body.dragging .cell iframe, body.dragging .cell img { pointer-events: none; }
 #note { color: #999; font-size: 12px; }
-#via { color: #5fd08a; font-size: 12px; margin-right: 10px; white-space: nowrap; }
+/* "Remote · <login>" sits next to the connection strip in the same row now (see markup), so it
+   always has a line rather than wrapping onto its own unpredictable one. If the row is tight it
+   is the first thing allowed to shrink and ellipsize - the host address and the switch button
+   matter more - so it gets min-width:0 and a small, capped flex-basis instead of pushing them. */
+#via { color: #5fd08a; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; flex: 0 1 auto; max-width: 40%; }
 #via:empty { display: none; }
 /* The Connection control: which of the hub's two origins this page came from, and the way over
    to the other one. Always visible on the phone, because the switch is the one thing that always
-   works (a top-level navigation is never blocked as mixed content, unlike any request). */
-#conn { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; white-space: nowrap; }
+   works (a top-level navigation is never blocked as mixed content, unlike any request). Its own
+   row (see #topbar .tbrow), so it never has to share a line with the tab bar or the filter chips -
+   that mixing is what let the switch button wrap onto the chips' line and get drawn over. */
+#conn { display: flex; align-items: center; gap: 6px; font-size: 12px; flex: 1 1 auto; min-width: 0; }
 #conn:empty { display: none; }
-#conn .connwhere { color: #ddd; padding: 3px 8px; border-radius: 10px; background: #3a3a3a; }
+#conn .connwhere { color: #ddd; padding: 3px 8px; border-radius: 10px; background: #3a3a3a; white-space: nowrap; flex: none; }
 #conn .connwhere.home { color: #cdebd8; background: #14562f; }
 /* The host itself, so the control says which origin this is and not only which kind. A tailnet
-   name is long and the header is a phone's: it gets its own ellipsis rather than wrapping. */
-#conn .connhost { color: #999; max-width: 34vw; overflow: hidden; text-overflow: ellipsis; }
+   name is long and the header is a phone's: it gets its own ellipsis rather than wrapping, and
+   the full address is still available via the title attribute (a long-press/hover tooltip). The
+   flex basis + min-width:0 is what lets the ellipsis actually engage instead of pushing the
+   switch button off-row - a lone max-width on a flex item does not shrink it on its own. */
+#conn .connhost { color: #999; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1 1 auto; }
+/* Never wraps and never shrinks: the switch is the one control that always works, so it keeps
+   its full label and stays clickable rather than folding under the host text. */
 .connbtn { display: inline-block; padding: 4px 10px; border-radius: 10px; background: #3a3a3a; color: #fff;
-           border: 1px dashed #777; font-size: 12px; cursor: pointer; user-select: none; -webkit-user-select: none; white-space: nowrap; }
+           border: 1px dashed #777; font-size: 12px; cursor: pointer; user-select: none; -webkit-user-select: none; white-space: nowrap; flex: none; }
 @media (pointer: coarse) { .connbtn, #conn .connwhere { padding: 6px 12px; font-size: 13px; } }
 /* Per-card stream mode. "Auto - MP4" reads as a badge and opens as a picker. */
 .cell .modepick { position: absolute; left: 8px; bottom: 6px; z-index: 2; max-width: 60%; padding: 2px 6px; border-radius: 10px;
@@ -311,17 +330,23 @@ body.dragging .cell iframe, body.dragging .cell img { pointer-events: none; }
 </head>
 <body>
 <div id="topbar">
-  <span id="tabs"><span class="tab active" data-view="streams">Streams</span><span class="tab" data-view="prepare">Prepare</span><span class="tab" data-view="devices">Devices</span><span class="tab" data-view="reprints">Reprints</span></span>
-  <span id="chips"></span>
-  <span class="chip" id="addchip">+ Add</span>
-  <span class="chip" id="phonechip" title="Open this camera wall on your phone">&#128241; Phone</span>
-  <span id="spacer"></span>
-  <span id="conn"></span>
-  <span id="via" title="Connected through your Tailscale network"></span>
-  <span id="note"></span>
-  <span id="layoutbox" title="Grid layout: columns x rows (drag a name to reorder)">
-    <select id="cols"></select><span>&times;</span><select id="rows"></select>
-  </span>
+  <div class="tbrow">
+    <span id="tabs"><span class="tab active" data-view="streams">Streams</span><span class="tab" data-view="prepare">Prepare</span><span class="tab" data-view="devices">Devices</span><span class="tab" data-view="reprints">Reprints</span></span>
+    <span id="chips"></span>
+    <span class="chip" id="addchip">+ Add</span>
+    <span class="chip" id="phonechip" title="Open this camera wall on your phone">&#128241; Phone</span>
+    <span id="spacer"></span>
+    <span id="note"></span>
+    <span id="layoutbox" title="Grid layout: columns x rows (drag a name to reorder)">
+      <select id="cols"></select><span>&times;</span><select id="rows"></select>
+    </span>
+  </div>
+  <!-- Its own row: the connection strip and the "Remote · <login>" indicator always get a line to
+       themselves now, so they can never wrap into the tab bar or the printer filter chips above. -->
+  <div class="tbrow">
+    <span id="conn"></span>
+    <span id="via" title="Connected through your Tailscale network"></span>
+  </div>
 </div>
 <div id="grid"></div>
 <div id="prepare" class="view"></div>
@@ -424,7 +449,12 @@ body.dragging .cell iframe, body.dragging .cell img { pointer-events: none; }
         var where = el('span', 'connwhere' + (connHere === 'home' ? ' home' : ''), connHere === 'home' ? 'Home' : 'Away');
         where.title = (connHere === 'home' ? 'Connected over your home network' : 'Connected through Tailscale') + ' (' + location.host + ')';
         box.appendChild(where);
-        box.appendChild(el('span', 'connhost', location.host));
+        // The row-2 CSS ellipsizes a long tailnet host instead of letting it wrap and push the
+        // switch button around; the title attribute is where the full address still lives (a
+        // long-press on iOS/Android, a hover on a desktop browser).
+        var hostSpan = el('span', 'connhost', location.host);
+        hostSpan.title = location.host;
+        box.appendChild(hostSpan);
         var other = connHere === 'home' ? 'away' : 'home';
         var url   = other === 'home' ? connLan : connRemote;
         if (url) {
@@ -553,6 +583,11 @@ body.dragging .cell iframe, body.dragging .cell img { pointer-events: none; }
                 document.querySelectorAll('#grid .cell').forEach(function(cell) { cell.remove(); });
                 render();
             }
+            // The via/connRender updates just above can change row 2's height on their own (a
+            // login name or a host appearing for the first time, a "no cameras" note in row 1) -
+            // cheap to redo and avoids a stale --bar-h between polls, which would reopen the
+            // overlap on whichever view is on screen right now.
+            syncBarH();
         }).catch(function(e) {
             console.error('state refresh failed', e);
             var n = document.getElementById('note');
@@ -1209,6 +1244,23 @@ body.dragging .cell iframe, body.dragging .cell img { pointer-events: none; }
     document.addEventListener('keydown', function(e) {
         if (e.key === 'Escape') { var c = document.querySelector('#grid .cell.expanded'); if (c) toggleExpand(c); }
     });
+    // #topbar is normal flow now (see CSS), so its offsetHeight is exactly as tall as its rows
+    // need to be - one row normally, two or three once the connection strip's host/indicator and
+    // the printer filter chips (Reprints) wrap. --bar-h has to land on a shared ancestor of both
+    // #grid and every .view (they are siblings, not nested), or only whichever element it is set
+    // on ever sees it and the other falls back to the hardcoded 52px default - which is what let
+    // #reprints/#prepare/#devices start too high and sit under the header's later lines.
+    function syncBarH() {
+        var barH = document.getElementById('topbar').offsetHeight;
+        document.documentElement.style.setProperty('--bar-h', barH + 'px');
+    }
+    // A ResizeObserver on #topbar itself, rather than syncBarH() calls sprinkled after every
+    // place that can change its content (render(), setView(), connRender(), the "Remote · " text,
+    // the Reprints filter chips, a font finishing its own async load...) - anything that changes
+    // how many rows the header wraps to fires this on its own, including changes this file's
+    // author has not thought to chase down by hand. ResizeObserver callbacks run after layout, so
+    // offsetHeight here is always the settled value, never a mid-reflow one.
+    if (window.ResizeObserver) new ResizeObserver(syncBarH).observe(document.getElementById('topbar'));
     function render() {
         var chips = document.getElementById('chips');
         chips.innerHTML = '';
@@ -1273,9 +1325,7 @@ body.dragging .cell iframe, body.dragging .cell img { pointer-events: none; }
         document.getElementById('cols').value = lay.cols;
         document.getElementById('rows').value = lay.rows;
         var grid = document.getElementById('grid');
-        var barH = document.getElementById('topbar').offsetHeight;
-        grid.style.setProperty('--bar-h', barH + 'px');
-        grid.style.top = barH + 'px';
+        syncBarH();
         grid.style.gridTemplateColumns = 'repeat(' + lay.cols + ', 1fr)';
         // The layout sets the columns and how many rows fit on screen; every selected
         // stream is rendered and extra rows scroll.
@@ -1578,6 +1628,11 @@ body.dragging .cell iframe, body.dragging .cell img { pointer-events: none; }
         document.getElementById('chips').style.display = v === 'streams' ? '' : 'none';
         document.getElementById('layoutbox').style.display = v === 'streams' ? '' : 'none';
         if (v === 'streams') render(); // tile sizes come from the grid's on-screen size
+        // Hiding/showing the camera chips row just changed #topbar's height (fewer rows outside
+        // Streams); every .view reads --bar-h to know where it starts, so it has to be recomputed
+        // right here and not only from render()/resize - otherwise switching to Reprints without
+        // an intervening resize would keep whatever height Streams last measured.
+        else syncBarH();
         if (viewTimer) { clearInterval(viewTimer); viewTimer = null; }
         if (v === 'prepare') { lastPresetsJson = ''; refreshInstances(refreshPrepare); viewTimer = setInterval(function() { refreshInstances(refreshPrepare); }, 10000); }
         if (v === 'devices') { refreshEvents(); refreshInstances(refreshDevices); viewTimer = setInterval(function() { refreshEvents(); refreshInstances(refreshDevices); }, 5000); }
@@ -3538,6 +3593,7 @@ body.dragging .cell iframe, body.dragging .cell img { pointer-events: none; }
     render();
     if (REMOTE) {
         connRender();
+        syncBarH(); // connRender() just gave row 2 its first content; fetchRemoteState() below is async
         fetchRemoteState();
         setInterval(fetchRemoteState, 15000);
         // The badge has to be right whichever tab is open, so the events feed is polled on the
