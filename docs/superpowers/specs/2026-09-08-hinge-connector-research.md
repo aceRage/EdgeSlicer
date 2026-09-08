@@ -437,8 +437,14 @@ has clicked this gizmo either, since it does not exist yet):
 
 ## 7. Phase 1 implemented
 
-Branch `feat/hinge-connector`. This section records what actually shipped against the plan
-above, what the proofs were, and what is explicitly still unverified.
+Branch `feat/hinge-connector`, merged onto `feat/ultra-preferences` after the concurrent
+chain-link orientation work landed there. This section records what actually shipped against
+the plan above, what the proofs were, and what is explicitly still unverified.
+
+Two things came from that merge rather than from this plan. The hinge **reuses**
+`FlexiJointParams::rotation` instead of the connector-level `z_angle` this spec assumed, and
+the hinge's own six fields are written into `Metadata/cut_information.xml` alongside the rest
+of the Flexi parameters, using the per-attribute 3MF serialization that branch introduced.
 
 ### 7.1 What was built
 
@@ -465,10 +471,13 @@ Geometry (`src/libslic3r/FlexiJoint.cpp`), in the cut frame with the hinge axis 
   half's reliefs are the other half's knuckles inflated by `C` plus **the pin inflated by `C`**,
   and subtracting that inflated pin from the half drills every one of its knuckles at exactly
   `R_p + C`. Body and clearance stay two independent, separately testable steps.
-* **Rotation** is the connector's existing `z_angle`. Nothing in the geometry knows about it:
-  `add_flexi_joint_volume()` already spins the connector volume by `-z_angle` about the cut
-  normal, and `perform_with_flexi_joints()` picks that up through `joint_matrix`. A rotated
-  hinge is therefore a *rotated* run, not a differently-generated one.
+* **Rotation** reuses `FlexiJointParams::rotation` - the field the concurrent chain-link
+  orientation work added, in degrees, 0-180 - rather than adding a hinge-specific one. For the
+  chain link that angle turns the ring pair within the cut plane; for the hinge it **is** the
+  pin axis `d`, so it is the joint's main control rather than a secondary one. The geometry
+  applies it the same way `chain_apply_rotation()` does: the run is built along the cut plane's
+  +X and swung to `d = rotate(+X, n, rotation)`. `hinge_footprint_corners()` turns with it, so
+  the contour test needs no extra transform.
 * **Edge placement** is `hinge_edge_offset`, a distance along `-e` (i.e. `-Y` in the joint
   frame). See §7.3 for the correction auto-placement needed.
 
@@ -484,7 +493,7 @@ Geometry (`src/libslic3r/FlexiJoint.cpp`), in the cut frame with the hinge axis 
 | `hinge_fold_upper` | false | | false = the lower half carries the pin |
 | Gap | 0.6 mm | >= clearance | shared with the ring and the ball, per `flexi_default_gap()` |
 | Clearance | `flexi_clearance_floor(nozzle)` = 0.30 on a 0.4 nozzle | | shared, unchanged |
-| Rotation | 0 deg | 0..180 | the existing connector `z_angle`; **this is** the hinge axis |
+| Rotation | 0 deg | 0..180 | `FlexiJointParams::rotation`, shared with the chain link; **this is** the hinge axis |
 
 Auto sizing (`flexi_auto_size()`) derives the run length from the cut cross-section
 (`1.6 x` the inscribed radius, capped at 60 mm), the barrel from `0.35 x` it (2..10 mm), the pin
@@ -538,10 +547,10 @@ surface" placement option (§6's Phase 2 item): flush must mean *nearly* flush.
   byte-for-byte the circle the function used to build by hand.
 
 Each edge is sampled at 8 points as well as its corners, so a notch in the contour cannot be
-stepped over. The footprint is transformed by
-`translation_transform(pos) * m_rotation_m * rotation_transform(-z_angle * UnitZ())` - the same
-composition `add_flexi_joint_volume()` gives the connector volume - so a rotated hinge tests as
-a rotated rectangle rather than a bigger one.
+stepped over. The joint's own Rotation is already baked into the corners the helper returns - it turns them
+exactly as the bodies are turned - so the gizmo only applies
+`translation_transform(pos) * m_rotation_m`, and a rotated hinge tests as a rotated rectangle
+rather than a bigger one.
 
 **This is what fixes the owner's spurious "1 connector is out of cut contour" on chain links.**
 The old test asked "does a disc big enough to swallow the joint fit?", which for a 7 mm long
@@ -556,7 +565,7 @@ horizontal), and the panel then shows an orange warning - never a block. Per §1
 the brief, **horizontal is the easy case** (short bridge over the pin, ordinary overhang
 settings carry it) and vertical is the one needing care (full unsupported circle over the bore,
 teardrop profile deferred to Phase 2). The gizmo derives `d` in world coordinates as
-`(m_rotation_m * Rz(-z_angle)).linear() * UnitX()`.
+`m_rotation_m.linear() * (cos(rotation), sin(rotation), 0)`.
 
 ### 7.6 Proofs
 
@@ -595,11 +604,18 @@ New cases in `tests/libslic3r/test_flexi_joint.cpp`:
   fixed function calls, as §6 anticipated): the chain link fits a contour the old circle test
   rejected, and still fails one it genuinely does not fit; a long thin hinge fits a contour far
   smaller than its own length; the revolved kinds still produce exactly the 60-point circle.
-* **Serialization round trip.** All six new fields survive a cereal binary round trip; the
-  defaults are what old files get and they make a **valid** hinge as they stand; `operator==`
-  and `!=` see the new fields, so undo/redo notices a change to them.
-* **3MF round trip.** A hinged cut object stores and loads as one object with two watertight
-  parts.
+* **Serialization round trip.** All six new fields survive a cereal binary round trip (the
+  undo/redo path); the defaults are what old files get and they make a **valid** hinge as they
+  stand; `operator==` and `!=` see the new fields, so undo/redo notices a change to them.
+* **3MF parameter round trip.** All six fields plus the shared Rotation survive a real
+  `store_bbs_3mf` / `load_bbs_3mf` project round trip as `Metadata/cut_information.xml`
+  attributes, checked field by field and then with `q == p` over the whole struct - so a field
+  added later without a 3MF attribute fails this test. **The kind above all**: the reader
+  clamps the enum against untrusted file content, and that clamp had to be widened to `Hinge`
+  or every saved hinge would have silently reloaded as a double ring. The knuckle count is
+  clamped to 1..9 on read for the same reason - it drives a loop.
+* **3MF geometry round trip.** A hinged cut object stores and loads as one object with two
+  watertight parts.
 
 **Demo.** `libslic3r_tests "Export the hinge demo"` (hidden `[.][HingeDemo]` tag, output
 directory in `SNORCA_HINGE_OUT`) cuts a 40 mm cube at mid height with one 3-knuckle hinge

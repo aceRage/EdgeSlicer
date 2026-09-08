@@ -329,6 +329,8 @@ protected:
     bool   render_flexi_float_input(const std::string& label, float& in_val, float min_val, float max_val, const wxString& tooltip);
     Vec3d  flexi_hinge_axis_world() const;
     float  flexi_hinge_auto_edge_offset() const;
+    // Rotation about the cut normal, in DEGREES (FlexiJointParams::rotation), 0-180.
+    bool   render_flexi_rotation_input(const std::string& label, float& in_val, const wxString& tooltip);
     void   render_flexi_joint_inputs(CutConnectors& connectors);
     void   sync_flexi_params(CutConnectors& connectors, bool resize_from_section);
     double flexi_section_inscribed_radius() const;

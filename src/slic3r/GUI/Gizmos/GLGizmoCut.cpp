@@ -2444,8 +2444,10 @@ double GLGizmoCut3D::flexi_slice_closing_radius() const
 // whether the pin prints the easy way (axis flat on the bed) or needs care.
 Vec3d GLGizmoCut3D::flexi_hinge_axis_world() const
 {
-    // Same composition apply_cut_connectors() gives the connector volume, minus the offset.
-    return (m_rotation_m * rotation_transform(-double(m_connector_angle) * Vec3d::UnitZ())).linear() * Vec3d::UnitX();
+    // The joint frame's +X, turned inside the cut plane by the joint's own Rotation and then
+    // carried into the world by the cut plane's orientation.
+    const double a = double(m_flexi.rotation) * PI / 180.;
+    return m_rotation_m.linear() * Vec3d(std::cos(a), std::sin(a), 0.);
 }
 
 // Auto edge placement (spec 2.2). The barrel has to sit at the EDGE of the cut face, offset
@@ -2460,7 +2462,7 @@ float GLGizmoCut3D::flexi_hinge_auto_edge_offset() const
     // Rotation turns the run in the plane, so the relevant half extent runs between the box's
     // x and y half sizes as the angle sweeps.
     const Vec3d  sz   = m_transformed_bounding_box.size();
-    const double a    = double(m_connector_angle);
+    const double a    = double(m_flexi.rotation) * PI / 180.;
     const double half = std::abs(std::sin(a)) * 0.5 * sz.x() + std::abs(std::cos(a)) * 0.5 * sz.y();
 
     // Park the barrel's outer wall tangent to that edge - but walk it back in until the WHOLE
@@ -2545,6 +2547,39 @@ bool GLGizmoCut3D::render_flexi_float_input(const std::string& label, float& in_
     return true;
 }
 
+// The Flexi joint's Rotation: degrees about the cut normal, laid out like the plain
+// connector's "Rotation" row (slider + numeric field) so the panel reads the same either way.
+// The value lives in FlexiJointParams::rotation, in DEGREES - unlike CutConnector::z_angle,
+// which the plain connector keeps in radians.
+bool GLGizmoCut3D::render_flexi_rotation_input(const std::string& label, float& in_val, const wxString& tooltip)
+{
+    const double slider_width = 0.24 * m_editing_window_width;
+    const double item_in_gap  = 0.01 * m_editing_window_width;
+    const double input_width  = 0.29 * m_editing_window_width;
+
+    ImGui::AlignTextToFramePadding();
+    m_imgui->text(label);
+    ImGui::SameLine(m_label_width);
+    ImGui::PushItemWidth(float(slider_width));
+
+    float val = in_val;
+    const std::string format = "%.0f" "\xC2\xB0";
+    m_imgui->bbl_slider_float_style("##flexi_rot_" + label, &val, 0.f, 180.f, format.c_str(), 1.f, true, from_u8(label));
+
+    ImGui::SameLine(float(m_label_width + slider_width + item_in_gap));
+    ImGui::PushItemWidth(float(input_width));
+    ImGui::BBLDragFloat(("##flexi_rot_input_" + label).c_str(), &val, 0.5f, 0.f, 180.f, format.c_str());
+    if (!tooltip.IsEmpty() && ImGui::IsItemHovered())
+        m_imgui->tooltip(tooltip, ImGui::GetFontSize() * 20.0f);
+
+    if (val < 0.f)   val = 0.f;
+    if (val > 180.f) val = 180.f;
+    if (is_approx(val, in_val))
+        return false;
+    in_val = val;
+    return true;
+}
+
 void GLGizmoCut3D::render_flexi_joint_inputs(CutConnectors& connectors)
 {
     bool changed = false;
@@ -2610,6 +2645,11 @@ void GLGizmoCut3D::render_flexi_joint_inputs(CutConnectors& connectors)
                 changed = true;
             }
         }
+
+        // ROTATION - the same field the chain link turns on, and for the hinge it is not a
+        // secondary control at all: d, the direction the knuckle run points, IS this angle.
+        changed |= render_flexi_rotation_input(m_labels_map["Rotation"], m_flexi.rotation,
+                                               _L("Turns the hinge about the cut normal. This angle IS the pin axis: it decides which way the part folds, and whether the pin ends up lying flat on the bed (easy to print) or standing up (needs care)."));
     } else if (m_flexi.kind == FlexiJointKind::ChainLink) {
         m_imgui->disabled_begin(m_flexi_auto_size);
             changed |= render_flexi_float_input(m_labels_map["Link length"], m_flexi.link_length, 1.f, 80.f,
@@ -2622,7 +2662,9 @@ void GLGizmoCut3D::render_flexi_joint_inputs(CutConnectors& connectors)
                                                 _L("How deep each loop's far end is embedded in its own segment."));
         m_imgui->disabled_end();
         changed |= render_flexi_float_input(m_labels_map["Link tilt"], m_flexi.tilt_angle, 0.f, 30.f,
-                                            _L("How far the horizontal loop is tilted up out of the cut plane, in degrees, so its far end rises into the upper segment."));
+                                            _L("How far the upper ring is tipped inside its own plane, in degrees, so its free end leans clear of the lower ring."));
+        changed |= render_flexi_rotation_input(m_labels_map["Rotation"], m_flexi.rotation,
+                                               _L("Turns the whole link about the cut normal. Both rings turn together, so their planes stay perpendicular to each other; this only chooses where in the cut plane the pair sits - use it to line the rings up with the part, or with the way it prints."));
     } else {
         m_imgui->disabled_begin(m_flexi_auto_size);
             changed |= render_flexi_float_input(m_labels_map[m_flexi.kind == FlexiJointKind::DoubleRing ? "Outer radius" : "Ball radius"],
@@ -2653,17 +2695,6 @@ void GLGizmoCut3D::render_flexi_joint_inputs(CutConnectors& connectors)
         m_flexi.gap = flexi_default_gap(m_flexi.kind);
     changed |= render_flexi_float_input(m_labels_map["Gap"], m_flexi.gap, m_flexi.clearance, 20.f,
                                         _L("Thickness of the cut: how far apart the two segments' faces end up. Each face is set back from the cut plane by half of it, and the joint bridges the gap. A larger gap makes the joint visibly more flexible; it can never be smaller than the clearance."));
-
-    // ROTATION about the cut normal. Every flexi kind has an orientation in the cut plane; for
-    // the hinge this angle IS the pin axis, so it is not an extra control but the main one.
-    // It lives on the connector (z_angle), not in FlexiJointParams, because the connector
-    // volume's own transform already applies it - see add_flexi_joint_volume().
-    if (render_angle_input(m_labels_map["Rotation"], m_connector_angle, 0.f, 0.f, 180.f)) {
-        for (CutConnector& c : connectors)
-            if (c.attribs.type == CutConnectorType::FlexiJoint)
-                c.z_angle = m_connector_angle;
-        changed = true;
-    }
 
     if (m_flexi.kind != FlexiJointKind::ChainLink && m_flexi.kind != FlexiJointKind::Hinge)
         changed |= render_flexi_float_input(m_labels_map["Tilt"], m_flexi.tilt, 0.f, 3.f,
@@ -3437,11 +3468,10 @@ bool GLGizmoCut3D::is_outside_of_cut_contour(size_t idx, const CutConnectors& co
                 vertices.emplace_back(Vec3f(float(q.x()), float(q.y()), 0.f));
             }
         }
-        // The joint frame is spun about the cut normal by the connector's own Rotation, the
-        // same way add_flexi_joint_volume() spins the connector volume - so the footprint of a
-        // rotated hinge is a rotated rectangle, not a bigger one.
-        its_transform(mesh, translation_transform(cur_pos) * m_rotation_m *
-                            rotation_transform(-double(cur_connector.z_angle) * Vec3d::UnitZ()));
+        // The joint's own Rotation is already baked into those corners - the helper turns them
+        // the same way the bodies are turned - so a rotated hinge tests as a rotated rectangle
+        // rather than a bigger one, and nothing extra is applied here.
+        its_transform(mesh, translation_transform(cur_pos) * m_rotation_m);
     }
     else {
         const CutConnectorShape shape = CutConnectorShape(cur_connector.attribs.shape);

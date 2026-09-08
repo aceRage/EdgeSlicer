@@ -252,9 +252,11 @@ enum class CutConnectorType : int {
     , Dowel
     , Snap
     , Undef
-    // Flexi joint - a print-in-place articulated joint. Appended AFTER Undef on purpose:
-    // the 3MF reader validates connector types against Undef, and no flexi connector ever
-    // reaches a 3MF (the flexi cut resolves into plain model parts).
+    // Flexi joint - a print-in-place articulated joint. Appended AFTER Undef so the values of
+    // the three original types are untouched. Since phase 3 a flexi connector DOES reach a 3MF
+    // - a project saved with the joint placed but not yet cut carries it, and its parameters,
+    // in Metadata/cut_information.xml - so the 3MF reader's type range check bounds against
+    // this enumerator rather than against Undef. Keep FlexiJoint last.
     , FlexiJoint
 };
 

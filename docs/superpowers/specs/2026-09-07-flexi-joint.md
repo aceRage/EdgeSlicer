@@ -249,6 +249,146 @@ frame directly (§1.6).
 The rock allowance changes with it: on a full-diameter cut the rim at radius `R` has to climb the
 gap, so the tilt the flat faces permit is `asin(gap / R)`, not `asin(C / R)`.
 
+### 1.8 Chain link, corrected: the two ring planes (phase 3)
+
+**The owner's phase 2 report.** *"In the 3D view the chain link shows one ring lying flat in the
+cut plane and the other looking like a small horizontal torus — it's orienting the vertical ring to
+print horizontally."* And, separately: *"there is no way to rotate the connector."*
+
+**The cause.** §1.6 gave the two loops different roles on purpose — one standing, one lying flat —
+and that was the bug. `chain_horizontal_path()` mapped the upper loop's stadium long axis to `+X`
+and its width to `+Y`, so the loop's plane was spanned by `(d, n × d)`: it **was the cut plane**.
+Only the lower loop actually crossed the plane. Two consequences followed:
+
+* the joint hinged about **one** axis (`+Y`) rather than two — a hinge, not a chain link;
+* the flat loop had to print as a horizontal torus sitting on the upper face, which is what the
+  owner saw in the viewport.
+
+**The rule.** For a chain link at a plane with normal `n` and a unit reference direction `d` lying
+in that plane:
+
+> **Both** ring planes contain `n`, and the two planes are **perpendicular to each other**.
+> Ring A lies in span(`n`, `d`) and is offset along `-n`; ring B lies in span(`n`, `n × d`) and is
+> offset along `+n`. Each ring's free half crosses the cut plane and threads the other's hole.
+
+That is what a chain link is: two rings whose planes are at right angles, interlocked. Neither ring
+lies *in* the cut plane; both pass *through* it.
+
+```
+        looking along +Y                        looking along +X
+   (ring B is edge-on: a line)              (ring A is edge-on: a line)
+
+          ,--.  ring A, in span(n,d)                ,--.  ring B, in span(n, n x d)
+         /    \  centred at z = -off                /    \  centred at z = +off
+   =====|======|=====  z = 0                  =====|======|=====  z = 0
+         \    /                                     \    /
+          `--'  its bottom is embedded               `--'  its top is embedded
+                in the LOWER half                          in the UPPER half
+```
+
+**The offset.** Each ring is centred `off` from the cut plane on **its own** side — ring A at
+`z = -off`, ring B at `z = +off`. That single number is what puts the two centroids on opposite
+sides while both rings still cross the plane, and it has to satisfy three constraints at once
+(`chain_frame()` in `FlexiJoint.cpp`):
+
+| # | constraint | why |
+|---|------------|-----|
+| 1 | `off >= gap/2 + wire` | the ring's centre clears its own segment's face, so the ring is centred in its own half rather than in the gap |
+| 2 | `off >= stem + gap/2 - link_length/2` | the ring's far end is embedded at least `stem` deep in its own segment, which is what attaches it |
+| 3 | `off <= (link_length - wire)/2 - C` | the rings still **thread**: ring B's free end reaches below the top of ring A's hole with the clearance to spare |
+
+The preferred value is `link_length/4` — a quarter length puts the centroids half a length apart
+and leaves each ring's free half well inside the other — clamped into `[max(1,2), 3]`. At the
+defaults (`L = 7`, `wire = 1`, `gap = 1.5`, `stem = 1.5`, `C = 0.35`) that is `off = 1.75 mm`, with
+bounds `[1.75, 2.65]` and an embed depth of `4.5 mm`. When constraint 3 falls below 1 and 2 the
+parameters cannot make an interlocked joint at all, and `flexi_validate()` refuses them with a
+message naming what to change.
+
+`tilt_angle` keeps its job but changes meaning: it now tips ring B about `n × d` — **inside its own
+plane's family** — so ring B's free end leans clear of ring A instead of sitting dead concentric
+with it. `0` is legal and puts both rings on the same axis.
+
+**What this replaces.** §1.6's "vertical loop / horizontal loop" split, its `x_shift` centring and
+its `hcx = L/2` nesting offset are all gone; §1.6 stands as the record of what phase 2 built and
+why it was wrong. The construction line is otherwise unchanged — lower half = (object ∩ {z ≤
+−gap/2}) ∪ A minus dilate(B, C), upper half = (object ∩ {z ≥ +gap/2}) ∪ B minus dilate(A, C) —
+with `A`/`B` now naming the two upright rings. `flexi_min_link_size()` and the two sizing
+constraints of §1.6 are unchanged and still enforced.
+
+### 1.9 Rotation (phase 3)
+
+`FlexiJointParams::rotation` — **degrees, 0–180, default 0**, about the cut normal `n`. The
+reference direction is `d = rotate(d0, n, rotation)` with `d0` the cut plane's own `+X` axis, so
+`rotation = 0` reproduces exactly the orientation every joint had before the field existed.
+
+* **Chain link honours it.** Both rings turn *together*, which is why their planes stay
+  perpendicular to each other; the parameter only chooses where in the cut plane the pair sits.
+  A rotation of 90° swaps the two ring planes, which is what the unit test asserts.
+* **Double ring and Ball & socket ignore it**, and are documented as doing so. They are solids of
+  revolution about `n`, so rotating them produces the identical mesh — the test checks that the
+  body volumes are unchanged at 0° and 90°.
+* It is applied **last**, as a rotation about `+Z` in the cut frame, to the ring centrelines
+  (`chain_apply_rotation()`), so every downstream measure — the swept bodies, the reliefs, the
+  preview — follows for free. `flexi_outer_extent()` is measured about the axis and is therefore
+  rotation-invariant, which is what keeps the gizmo's "fits inside the cross-section" check from
+  moving as the user drags the slider.
+
+**In the UI.** A *Rotation* row in the Cut gizmo's connector panel, shown only when a Flexi
+connector is selected and only for the Chain link kind (the other two would do nothing). It is a
+slider plus a numeric field, laid out by `render_flexi_rotation_input()` to match the plain
+connector's own *Rotation* row, and it applies to the selected connectors exactly the way
+Depth / Size / Gap already do — `sync_flexi_params()` copies `m_flexi` onto every selected flexi
+connector and then calls `update_connector_shape()`, so the preview body in the 3D view is rebuilt
+and the rings visibly turn as the slider moves.
+
+> **Units caution.** `FlexiJointParams::rotation` is in **degrees**. `CutConnector::z_angle`, which
+> the plain connector's identically-named row drives, is in **radians**. They are different fields
+> with different units; flexi connectors leave `z_angle` at 0 and carry their rotation in the
+> geometry, so there is no double rotation.
+
+**Persistence.** The joint's parameters were not written to 3MF at all before phase 3 — a project
+saved with a flexi connector still placed, then reopened, came back with default parameters and a
+silently different joint. `Metadata/cut_information.xml` now carries the whole `FlexiJointParams`
+as attributes on the `<connector>` element, written only for the flexi connector type so nothing
+changes in a file that has no flexi joint:
+
+`flexi_kind`, `flexi_outer_radius`, `flexi_ring_width`, `flexi_ring_height`, `flexi_clearance`,
+`flexi_gap`, `flexi_hub_radius`, `flexi_tilt`, `flexi_neck_ratio`, `flexi_open_angle`,
+`flexi_link_length`, `flexi_link_width`, `flexi_wire`, `flexi_tilt_angle`, `flexi_stem`,
+**`flexi_rotation`**.
+
+The reader treats each as optional with the `FlexiJointParams` default as the fallback, and gates
+the whole block on `flexi_kind` being present, so an older 3MF loads exactly as it used to — with
+`rotation = 0`, the orientation it was always built with. `flexi_kind` is range-checked before the
+enum cast, following the same untrusted-input discipline the surrounding `volume_id` / `type`
+checks already use. The cereal archive (`FlexiJointParams::serialize`, used by undo/redo
+snapshots) gains `rotation` at the end of its field list.
+
+### 1.10 Printability of the two rings (phase 3)
+
+Both rings now stand vertical, so each prints the way the phase 2 *standing* loop already did:
+growing up out of its own segment, with a short self-supporting bridge at the top of its arc. That
+is a real change of character for ring B, which used to lie flat and print as stacked closed rings
+with no bridging at all.
+
+The trade is deliberate and the interlock had to win: a ring lying in the cut plane cannot be part
+of a chain link, whatever it costs to print. What it costs is one overhanging arc per ring. A
+stadium cap of radius `link_width/2` swept with a `wire`-radius tube presents its steepest wall
+near the cap's equator and flattens to horizontal only at the very top, where the span is short
+(about twice the wire radius at the apex) and bridges on a typical 0.2 mm layer at the default
+`wire = 1.0 mm`. Thinner wire makes the bridge shorter still.
+
+Two things follow that are **not** automated:
+
+* **Bed orientation matters and nothing enforces it.** The rings' planes contain the cut normal, so
+  if the cut plane is horizontal (the common case) both rings stand upright and print well. A cut
+  at a steep angle tips the rings with it, and at some angle a ring's arc becomes a genuine
+  overhang. `rotation` turns the pair *within* the cut plane and cannot fix that; only reorienting
+  the object on the bed can.
+* **No support interaction is computed for the rings.** §6 covers the groove ceiling for the
+  revolved kinds; the chain link's arcs are assumed self-supporting and nothing checks that against
+  the actual layer height or overhang-angle settings.
+
 ## 2. Where it lives
 
 | File | What changed |
@@ -349,6 +489,88 @@ must **never** get support:
   generator to see; the cavity is simply absent material inside a normal model part.
 
 ## 7. What is proven, and what is not
+
+### Phase 3
+
+`libslic3r_tests` as a whole: **721 cases, 719 passed, 2 failed as expected** (the same two
+pre-existing expected failures; phase 2's baseline was 706 + the same 2). `[FlexiJoint]` alone:
+**21 cases, 366 assertions, all green** — 16 from phase 2, 5 new, and three of the phase 2 cases
+updated for the corrected geometry.
+
+The ring-plane assertions use a principal-component fit of each ring mesh's vertices: a ring is a
+flat loop swept with a tube, so its vertex cloud is thinnest along its plane's normal, and the
+covariance eigenvector for the smallest eigenvalue *is* that normal. `fit_plane()` in
+`test_flexi_joint.cpp` returns it together with the residual, which is checked to be well under the
+in-plane spread first — otherwise "the normal" would be meaningless.
+
+New in phase 3:
+
+* **Both ring planes contain `n`.** `|normal · n| = 0` to within `1e-3` for *both* rings, and the
+  two ring normals are perpendicular to each other to the same tolerance. This is the assertion
+  phase 2 failed: its upper ring's normal *was* `n`, so the dot product was 1.
+* **Opposite sides.** The two ring centroids sit on opposite sides of the cut plane (`z < 0` and
+  `z > 0`), and with the default parameters they are exact mirror images (`±off`, `off = 1.75 mm`),
+  centred on the joint axis in x and y.
+* **They do not touch**, at gaps of 0.2, 0.35, 1.5 and 2.5 mm: Manifold intersection volume 0.
+  The phase 2 clearance case (`min_surface_distance ≥ C`) also passes again — the corrected tilt
+  axis is what restored it, see below.
+* **Rotation swaps the planes.** At `rotation = 90°` ring A's plane is ring B's at 0° and vice
+  versa. Across 0 / 17 / 45 / 90 / 133 / 180° every invariant holds — watertight, both planes
+  contain `n`, planes perpendicular, opposite sides, zero intersection — each ring's normal is
+  parallel to the direction the rotation predicts to within `2e-3`, and `flexi_outer_extent()` is
+  unchanged, so the "fits inside the cross-section" check does not move as the slider does.
+* **The revolved kinds ignore it**: Double ring's and Ball & socket's body volumes are identical at
+  0° and 90°.
+* **A rotated joint still cuts.** At 55° the cut gives one object, two watertight parts, zero
+  intersection, minimum clearance 0.35 ± 0.05, the faces exactly `gap` apart, and it is still
+  non-separable under a straight pull.
+* **3MF round trip.** A project saved with the joint placed but *not yet cut*, through
+  `store_bbs_3mf` / `load_bbs_3mf`, comes back with the whole `FlexiJointParams` intact
+  (`operator==` on the struct, so a field added later without a 3MF attribute fails here) and still
+  **unprocessed**, so the cut still sees a joint to apply. The rings rebuilt from the loaded
+  parameters have the same planes as the ones that went in.
+* **Old files.** `FlexiJointParams`'s default `rotation` is 0, the reader gates the whole flexi
+  block on `flexi_kind` being present, and a chain link at `rotation = 0` is asserted to be the
+  reference orientation — ring A in the x–z plane, ring B in the y–z plane.
+* **Both hinge axes.** The swing sweep now runs about `+X` *and* `+Y` (phase 2 could only do `+Y`),
+  ±4° each way, intersection-free throughout.
+
+Two phase 2 cases had to be corrected rather than merely re-run:
+
+* the non-separable pull test's `free_travel` bound is derived from the ring offset now, not from
+  the old `vcz` formula;
+* the swing test's title and axes: "swings about the horizontal loop's axis" became "swings about
+  both in-plane axes", which is the property the corrected geometry actually has.
+
+**Two bugs the proof bar caught on the way**, both fixed and both now covered:
+
+* **The tilt axis.** Tipping the upper ring about `+Y` swung its free tip along x, straight towards
+  the lower ring's plane, and ate the clearance: the two wires' closest approach fell to 0.32 mm
+  against a 0.35 mm clearance at only 7° of tilt. Tipping about the ring's own plane normal instead
+  keeps every point in its plane, so the lateral margin the `link_width ≥ 4·wire + 2·C` rule buys is
+  untouched at any tilt (0.75 mm at the defaults).
+* **`CutConnectorType::FlexiJoint` was unreachable through 3MF.** It is enumerated *after* `Undef`,
+  and the reader's range check was `type > int(Undef)` — written when no flexi connector could ever
+  reach a file. Since a flexi joint now does, the bound is the last enumerator. The writer had two
+  matching gates (`ModelObject::is_cut()` and `ModelVolume::is_cut_connector()`, the latter of which
+  demands `is_processed`) that both dropped an uncut joint; both now admit one.
+
+Checked by hand from the exported demo STLs (§8), independently of the Catch2 fit: for `rotation`
+0 / 45 / 90 the two ring normals come out `(0,1,0)`/`(1,0,0)`, `(-0.707,0.707,0)`/`(0.707,0.707,0)`
+and `(1,0,0)`/`(0,1,0)`, every one with `|n · z| = 0.0000`, centroids at `z = -1.750` and `+1.750`.
+
+**Not proven in phase 3:**
+
+* **The gizmo panel itself.** `render_flexi_rotation_input()` needs a GL canvas and wxWidgets, so
+  nothing automated exercises the slider, the "only for Chain link" gating, or that the preview
+  body visibly turns. That is the owner's click test.
+* **Print behaviour.** §1.10's claim that a standing ring's top arc bridges cleanly is reasoning
+  about the geometry plus the phase 2 experience with the one standing ring, not a sliced or
+  printed result. Nothing checks the arcs against the actual layer height or overhang settings.
+* **Rotation on a non-horizontal cut.** Every test cuts a horizontal plane. The rotation is defined
+  in the cut frame and should follow a tilted plane by construction, but no test tilts one.
+* **`rotation` is not auto-chosen.** Nothing aligns the rings with the cross-section's major axis
+  or with the print direction; the value is whatever the user sets.
 
 ### Phase 2
 
@@ -580,21 +802,26 @@ fix the middle step was unreachable through the UI at all. The parts of the fix 
 in ImGui state — that the button is no longer greyed — are covered by the owner's click test
 (§8 step 10), not by an automated check.
 
-## 10. Phase 3 — what is still open
+## 10. Phase 4 — what is still open
 
 Chain-link specific:
 
-* **The hinge axis is fixed at +X.** The chain link's horizontal loop always runs along the cut
-  frame's +X, so the direction the joint prefers to bend in is decided by the connector's `z_angle`
-  and nothing shows it in the gizmo. It wants a visible orientation handle, or an auto-choice that
-  aligns the loop with the cross-section's major axis.
-* **The rest position is the extended one.** The two loops nest end-to-end, which is where a
-  hanging chain sits and is what makes the interlock roomiest, but it also means the joint has a
-  few tenths of a millimetre of free slop before it takes up. A "preload" that starts the loops
-  part-way through their travel would feel tighter in the hand.
-* **The swing range is not derived, only measured.** The Catch2 sweep checks ±4° about +Y because
-  that is inside `asin(gap / 2R)` for a 20 mm cylinder; the actual range of a chain link is bounded
-  by the loops, not by the faces, and nothing computes it or shows it to the user.
+* ~~**The hinge axis is fixed at +X.**~~ **Done in phase 3.** The rings' orientation is now
+  the `rotation` field (§1.9), exposed as a slider in the panel and persisted in the 3MF. What is
+  still missing is the *auto*-choice: nothing aligns the rings with the cross-section's major axis
+  or with the print direction, and there is no draggable handle on the plane — only the numeric
+  slider.
+* **The rest position is the extended one.** The two rings hang concentric-ish about the cut plane,
+  which is where a chain sits and is what makes the interlock roomiest, but it also means the joint
+  has a few tenths of a millimetre of free slop before it takes up. A "preload" that starts the
+  rings part-way through their travel would feel tighter in the hand.
+* **The swing range is not derived, only measured.** The Catch2 sweep checks ±4° about +X and +Y
+  because that is inside `asin(gap / 2R)` for a 20 mm cylinder; the actual range of a chain link is
+  bounded by the rings, not by the faces, and nothing computes it or shows it to the user.
+* **Printability is reasoned about, not measured** (§1.10): both rings now stand vertical and their
+  top arcs are assumed to bridge, but nothing checks that against the layer height or the
+  overhang-angle settings, and nothing warns when a steeply tilted cut plane turns a ring's arc
+  into a real overhang.
 * **Two loops, not N.** A real chain has many links; one interlocked pair per cut is all this is.
 
 General:

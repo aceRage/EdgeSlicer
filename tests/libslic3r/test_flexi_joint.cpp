@@ -4,6 +4,11 @@
 #include <libslic3r/CutUtils.hpp>
 #include <libslic3r/FlexiJoint.hpp>
 #include <libslic3r/Format/3mf.hpp>
+// Metadata/cut_information.xml - where a Flexi joint's parameters live - is a
+// BambuStudio-lineage part, handled only by the project reader/writer pair.
+#include <libslic3r/Format/bbs_3mf.hpp>
+#include <libslic3r/Preset.hpp>
+#include <libslic3r/Utils.hpp>
 #include <libslic3r/Geometry.hpp>
 #include <libslic3r/MeshBoolean.hpp>
 #include <libslic3r/Model.hpp>
@@ -13,6 +18,8 @@
 #include <boost/filesystem/path.hpp>
 
 #include <cereal/archives/binary.hpp>
+// SelfAdjointEigenSolver: the ring-plane fit below is a principal component problem.
+#include <Eigen/Eigenvalues>
 
 #include <algorithm>
 #include <cmath>
@@ -93,7 +100,7 @@ static FlexiJointParams ball_params()
 }
 
 // Build the pre-cut object: one solid cylinder plus one flexi joint connector on the plane.
-static ModelObject* make_jointed_cylinder(Model &model, const FlexiJointParams &p, float z_angle = 0.f)
+static ModelObject* make_jointed_cylinder(Model &model, const FlexiJointParams &p)
 {
     ModelObject *mo = model.add_object();
     mo->name        = "flexi_cylinder";
@@ -107,7 +114,7 @@ static ModelObject* make_jointed_cylinder(Model &model, const FlexiJointParams &
     CutConnector connector;
     connector.pos        = Vec3d(0., 0., CUT_Z);
     connector.rotation_m = Transform3d::Identity();
-    connector.z_angle    = z_angle;
+    connector.z_angle    = 0.f;
     connector.radius     = flexi_outer_extent(p);
     connector.height     = flexi_protrusion_height(p);
     connector.attribs    = CutConnectorAttributes(CutConnectorType::FlexiJoint, CutConnectorStyle::Prism, CutConnectorShape::Circle);
@@ -126,10 +133,10 @@ struct CutHalves
     size_t       objects{ 0 };
 };
 
-static CutHalves cut_with_joint(const FlexiJointParams &p, float z_angle = 0.f)
+static CutHalves cut_with_joint(const FlexiJointParams &p)
 {
     Model model;
-    ModelObject *mo = make_jointed_cylinder(model, p, z_angle);
+    ModelObject *mo = make_jointed_cylinder(model, p);
 
     Cut cut(mo, 0, Geometry::translation_transform(Vec3d(0., 0., CUT_Z)),
             ModelObjectCutAttribute::KeepUpper | ModelObjectCutAttribute::KeepLower | ModelObjectCutAttribute::KeepAsParts);
@@ -204,6 +211,66 @@ static TriangleMesh rotated_about_joint(const TriangleMesh &m, const Vec3d &axis
     out.transform(Geometry::translation_transform(c) * Geometry::rotation_transform(angle * axis) *
                   Geometry::translation_transform(-c));
     return out;
+}
+
+// ------------------------------------------------------------- phase 3: the ring planes
+//
+// A ring is a flat closed loop swept with a tube, so its vertices cluster tightly around ONE
+// plane. Fitting that plane is a principal component problem: the plane's normal is the
+// eigenvector of the vertex covariance with the SMALLEST eigenvalue (the direction the cloud
+// is thinnest in - the tube radius). `plane_fit_normal` returns it, `plane_fit_residual` the
+// RMS thickness in that direction, which is what says "this really is a ring in a plane".
+
+struct FittedPlane
+{
+    Vec3d  centroid{ Vec3d::Zero() };
+    Vec3d  normal{ Vec3d::UnitZ() };
+    double residual{ 0. };   // RMS distance of the vertices from the fitted plane
+    double spread{ 0. };     // RMS distance in the widest direction, for scale
+};
+
+static FittedPlane fit_plane(const std::vector<Vec3d> &pts)
+{
+    FittedPlane out;
+    REQUIRE(pts.size() >= 3);
+    for (const Vec3d &p : pts)
+        out.centroid += p;
+    out.centroid /= double(pts.size());
+
+    Eigen::Matrix3d cov = Eigen::Matrix3d::Zero();
+    for (const Vec3d &p : pts) {
+        const Vec3d d = p - out.centroid;
+        cov += d * d.transpose();
+    }
+    cov /= double(pts.size());
+
+    Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> solver(cov);
+    // Eigenvalues come out ascending: [0] is the thinnest direction = the plane normal.
+    out.normal   = solver.eigenvectors().col(0).normalized();
+    out.residual = std::sqrt(std::max(0., solver.eigenvalues()(0)));
+    out.spread   = std::sqrt(std::max(0., solver.eigenvalues()(2)));
+    return out;
+}
+
+static FittedPlane fit_plane(const indexed_triangle_set &its)
+{
+    std::vector<Vec3d> pts;
+    pts.reserve(its.vertices.size());
+    for (const Vec3f &v : its.vertices)
+        pts.emplace_back(v.cast<double>());
+    return fit_plane(pts);
+}
+
+// The offset of each ring's centre from the cut plane, read straight off the centrelines -
+// the tests derive it rather than duplicating chain_frame()'s clamping arithmetic.
+static double chain_ring_offset(const FlexiJointParams &p)
+{
+    const std::vector<Vec3d> upper = flexi_chain_upper_centreline(p);
+    REQUIRE_FALSE(upper.empty());
+    double z = 0.;
+    for (const Vec3d &v : upper)
+        z += v.z();
+    return z / double(upper.size());
 }
 
 // ------------------------------------------------------------------- the revolve generator
@@ -386,6 +453,187 @@ TEST_CASE("A flexi jointed object survives a 3MF round trip", "[FlexiJoint]")
     }
 }
 
+// Phase 3: the joint's own parameters - `rotation` above all - survive a save/load of a
+// project saved BEFORE the cut, when the connector is still an unprocessed negative volume.
+// Without this the joint silently changed shape when a project was reopened.
+TEST_CASE("Flexi joint parameters survive a 3MF round trip", "[FlexiJoint]")
+{
+    FlexiJointParams p = chain_params();
+    p.rotation = 62.5f;
+    p.wire     = 1.1f;
+    p.stem     = 1.7f;
+    REQUIRE(flexi_validate(p).empty());
+
+    Model model;
+    ModelObject *mo = make_jointed_cylinder(model, p);
+    // The connector volume is there, unprocessed, and carries the parameters.
+    REQUIRE(has_flexi_joint(mo));
+    model.add_default_instances();
+
+    // The PROJECT writer, not Format/3mf.cpp's generic one: Metadata/cut_information.xml is a
+    // BambuStudio-lineage part and only store_bbs_3mf/load_bbs_3mf handle it. This is the pair
+    // the application itself saves and opens projects with.
+    const boost::filesystem::path tmp_root = boost::filesystem::temp_directory_path() / "snorca_tests";
+    boost::filesystem::create_directories(tmp_root);
+    Slic3r::set_temporary_dir(tmp_root.string());
+    const std::string test_file = (tmp_root / "edgeslicer_flexi_params.3mf").string();
+
+    DynamicPrintConfig store_config = DynamicPrintConfig::full_print_config();
+    StoreParams store_params;
+    store_params.path     = test_file.c_str();
+    store_params.model    = &model;
+    store_params.config   = &store_config;
+    store_params.strategy = SaveStrategy::Zip64 | SaveStrategy::Silence | SaveStrategy::SkipAuxiliary;
+    REQUIRE(store_bbs_3mf(store_params));
+
+    Model                     back;
+    DynamicPrintConfig        dst_config;
+    ConfigSubstitutionContext ctxt{ ForwardCompatibilitySubstitutionRule::EnableSilent };
+    PlateDataPtrs             plate_data;
+    std::vector<Preset*>      project_presets;
+    bool                      is_bbl_3mf = false;
+    Semver                    file_version;
+    REQUIRE(load_bbs_3mf(test_file.c_str(), &dst_config, &ctxt, &back, &plate_data, &project_presets,
+                         &is_bbl_3mf, &file_version, nullptr,
+                         LoadStrategy::LoadModel | LoadStrategy::LoadConfig |
+                         LoadStrategy::AddDefaultInstances | LoadStrategy::Silence));
+    release_PlateData_list(plate_data);
+    // SNORCA_FLEXI_KEEP keeps the project on disk, for inspecting the written
+    // Metadata/cut_information.xml by hand.
+    if (!std::getenv("SNORCA_FLEXI_KEEP"))
+        boost::filesystem::remove(test_file);
+
+    REQUIRE(back.objects.size() == 1);
+    const ModelVolume *joint = nullptr;
+    for (const ModelVolume *v : back.objects.front()->volumes)
+        if (v->cut_info.is_flexi_joint())
+            joint = v;
+    REQUIRE(joint != nullptr);
+    // It comes back UNPROCESSED, so the cut still sees a joint to apply.
+    REQUIRE_FALSE(joint->cut_info.is_processed);
+
+    const FlexiJointParams &q = joint->cut_info.flexi;
+    REQUIRE(q.kind == p.kind);
+    REQUIRE(q.rotation    == Approx(p.rotation));
+    REQUIRE(q.wire        == Approx(p.wire));
+    REQUIRE(q.stem        == Approx(p.stem));
+    REQUIRE(q.clearance   == Approx(p.clearance));
+    REQUIRE(q.gap         == Approx(p.gap));
+    REQUIRE(q.link_length == Approx(p.link_length));
+    REQUIRE(q.link_width  == Approx(p.link_width));
+    REQUIRE(q.tilt_angle  == Approx(p.tilt_angle));
+    // The whole struct, so a field added later without a 3MF attribute is caught here.
+    REQUIRE(q == p);
+
+    // The rings that come back are the rings that went in.
+    const FittedPlane a_in  = fit_plane(flexi_lower_bodies(p).front());
+    const FittedPlane a_out = fit_plane(flexi_lower_bodies(q).front());
+    REQUIRE(std::abs(a_in.normal.dot(a_out.normal)) == Approx(1.).margin(1e-6));
+}
+
+TEST_CASE("Hinge parameters survive a 3MF round trip", "[FlexiJoint]")
+{
+    // The same project writer/reader pair, for the hinge's own six fields plus the shared
+    // Rotation. Everything non-default, so a field left out of the 3MF attributes shows up.
+    FlexiJointParams p  = hinge_params();
+    p.hinge_knuckles    = 5;
+    p.hinge_pin_dia     = 2.5f;
+    p.hinge_barrel_dia  = 5.5f;
+    p.hinge_length      = 15.f;
+    p.hinge_edge_offset = 2.75f;
+    p.hinge_fold_upper  = true;
+    p.rotation          = 37.5f;
+    REQUIRE(flexi_validate(p).empty());
+
+    Model model;
+    ModelObject *mo = make_jointed_cylinder(model, p);
+    REQUIRE(has_flexi_joint(mo));
+    model.add_default_instances();
+
+    const boost::filesystem::path tmp_root = boost::filesystem::temp_directory_path() / "snorca_tests";
+    boost::filesystem::create_directories(tmp_root);
+    Slic3r::set_temporary_dir(tmp_root.string());
+    const std::string test_file = (tmp_root / "edgeslicer_hinge_params.3mf").string();
+
+    DynamicPrintConfig store_config = DynamicPrintConfig::full_print_config();
+    StoreParams store_params;
+    store_params.path     = test_file.c_str();
+    store_params.model    = &model;
+    store_params.config   = &store_config;
+    store_params.strategy = SaveStrategy::Zip64 | SaveStrategy::Silence | SaveStrategy::SkipAuxiliary;
+    REQUIRE(store_bbs_3mf(store_params));
+
+    Model                     back;
+    DynamicPrintConfig        dst_config;
+    ConfigSubstitutionContext ctxt{ ForwardCompatibilitySubstitutionRule::EnableSilent };
+    PlateDataPtrs             plate_data;
+    std::vector<Preset*>      project_presets;
+    bool                      is_bbl_3mf = false;
+    Semver                    file_version;
+    REQUIRE(load_bbs_3mf(test_file.c_str(), &dst_config, &ctxt, &back, &plate_data, &project_presets,
+                         &is_bbl_3mf, &file_version, nullptr,
+                         LoadStrategy::LoadModel | LoadStrategy::LoadConfig |
+                         LoadStrategy::AddDefaultInstances | LoadStrategy::Silence));
+    release_PlateData_list(plate_data);
+    if (!std::getenv("SNORCA_FLEXI_KEEP"))
+        boost::filesystem::remove(test_file);
+
+    REQUIRE(back.objects.size() == 1);
+    const ModelVolume *joint = nullptr;
+    for (const ModelVolume *v : back.objects.front()->volumes)
+        if (v->cut_info.is_flexi_joint())
+            joint = v;
+    REQUIRE(joint != nullptr);
+    REQUIRE_FALSE(joint->cut_info.is_processed);
+
+    const FlexiJointParams &q = joint->cut_info.flexi;
+    // The KIND above all: the reader clamps the enum against untrusted file content, and a
+    // clamp that stopped at ChainLink would silently turn every saved hinge into a ring.
+    REQUIRE(q.kind == FlexiJointKind::Hinge);
+    REQUIRE(q.hinge_knuckles    == 5);
+    REQUIRE(q.hinge_pin_dia     == Approx(p.hinge_pin_dia));
+    REQUIRE(q.hinge_barrel_dia  == Approx(p.hinge_barrel_dia));
+    REQUIRE(q.hinge_length      == Approx(p.hinge_length));
+    REQUIRE(q.hinge_edge_offset == Approx(p.hinge_edge_offset));
+    REQUIRE(q.hinge_fold_upper);
+    REQUIRE(q.rotation          == Approx(p.rotation));
+    // The whole struct, so a field added later without a 3MF attribute is caught here.
+    REQUIRE(q == p);
+
+    // And the joint that comes back builds the same bodies as the one that went in.
+    REQUIRE(flexi_lower_bodies(q).size() == flexi_lower_bodies(p).size());
+    REQUIRE(flexi_upper_bodies(q).size() == flexi_upper_bodies(p).size());
+}
+
+// An older 3MF has no flexi attributes at all; it must still load, with the defaults - and
+// `rotation` defaulting to 0 is what keeps such a file's joint where it always was.
+//
+// The reader gates the whole flexi block on the `flexi_kind` attribute being present, and a
+// pre-phase-3 file has none, so every volume it loads keeps the FlexiJointParams the CutInfo
+// constructor gives it. What that leaves is the DEFAULT-CONSTRUCTED struct, so the property
+// worth pinning is that the default is the phase 2 geometry: rotation 0, i.e. the reference
+// direction d0 = the cut plane's own +X.
+TEST_CASE("A flexi joint with no stored rotation is the unrotated one", "[FlexiJoint]")
+{
+    const FlexiJointParams def;
+    REQUIRE(def.rotation == Approx(0.f));
+
+    // A CutInfo built the way the 3MF reader builds it for a file with no flexi attributes.
+    const ModelVolume::CutInfo legacy(CutConnectorType::FlexiJoint, 0.f, 0.1f, true);
+    REQUIRE(legacy.flexi == def);
+    REQUIRE(legacy.flexi.rotation == Approx(0.f));
+
+    // ... and a chain link at rotation 0 is the reference orientation: ring A in the x-z
+    // plane, ring B in the y-z plane.
+    FlexiJointParams p = chain_params();
+    p.rotation = 0.f;
+    REQUIRE(flexi_validate(p).empty());
+    const FittedPlane a = fit_plane(flexi_lower_bodies(p).front());
+    const FittedPlane b = fit_plane(flexi_upper_bodies(p).front());
+    REQUIRE(std::abs(a.normal.y()) == Approx(1.).margin(1e-3));
+    REQUIRE(std::abs(b.normal.x()) == Approx(1.).margin(1e-3));
+}
+
 // ------------------------------------------------------------------------------- the guards
 
 TEST_CASE("Flexi joint guards", "[FlexiJoint]")
@@ -480,6 +728,176 @@ TEST_CASE("Chain link loops are watertight and interlocked", "[FlexiJoint]")
     REQUIRE_FALSE(flexi_validate(bad).empty());
 }
 
+// ================================================ phase 3: the chain link's rotational axis
+//
+// THE BUG (owner's phase 2 report): "in the 3D view the chain link shows one ring lying flat
+// in the cut plane and the other looking like a small horizontal torus - it's orienting the
+// vertical ring to print horizontally."
+//
+// Cause: chain_horizontal_path() mapped the upper ring's stadium long axis to +X and its width
+// to +Y, so the ring's plane was spanned by (d, n x d) - i.e. it WAS the cut plane. Only one
+// of the two rings crossed the plane; the other lay in it. The joint then hinged about a
+// single axis and the flat ring printed as a horizontal torus.
+//
+// The rule this pins down: for a chain link at a plane with normal n, BOTH ring planes contain
+// n (each fitted plane's normal is perpendicular to n), the two ring planes are perpendicular
+// to each other, and the two centroids sit on opposite sides of the cut plane.
+
+TEST_CASE("Chain link rings both stand in planes containing the cut normal", "[FlexiJoint]")
+{
+    const FlexiJointParams p = chain_params();
+    const Vec3d n = Vec3d::UnitZ();          // the cut normal, in the cut frame
+
+    const std::vector<indexed_triangle_set> lower = flexi_lower_bodies(p);
+    const std::vector<indexed_triangle_set> upper = flexi_upper_bodies(p);
+    REQUIRE(lower.size() == 1);
+    REQUIRE(upper.size() == 1);
+
+    const FittedPlane a = fit_plane(lower.front());
+    const FittedPlane b = fit_plane(upper.front());
+
+    // Each ring really IS planar: its thickness in the fitted normal direction is the tube's,
+    // an order of magnitude under its in-plane spread.
+    for (const FittedPlane &f : { a, b }) {
+        INFO("residual " << f.residual << " spread " << f.spread);
+        REQUIRE(f.residual < 0.35 * f.spread);
+    }
+
+    // THE FIX: both ring planes CONTAIN n, i.e. each fitted normal is perpendicular to n.
+    // Phase 2 failed exactly here - the upper ring's normal was n itself, so the dot was 1.
+    REQUIRE(std::abs(a.normal.dot(n)) == Approx(0.).margin(1e-3));
+    REQUIRE(std::abs(b.normal.dot(n)) == Approx(0.).margin(1e-3));
+
+    // ... and the two ring planes are perpendicular to each other.
+    REQUIRE(std::abs(a.normal.dot(b.normal)) == Approx(0.).margin(1e-3));
+
+    // The centroids sit on OPPOSITE sides of the cut plane: the lower ring below, the upper
+    // one above. (The cut frame puts the plane at z == 0.)
+    REQUIRE(a.centroid.z() < 0.);
+    REQUIRE(b.centroid.z() > 0.);
+
+    // With the default parameters they are the mirror image of each other about the plane.
+    REQUIRE(a.centroid.z() == Approx(-b.centroid.z()).margin(1e-6));
+    REQUIRE(a.centroid.x() == Approx(0.).margin(1e-6));
+    REQUIRE(a.centroid.y() == Approx(0.).margin(1e-6));
+
+    // And the rings still do not touch: a Manifold intersection of zero volume with the gap
+    // at 0.2 or more.
+    for (float gap : { 0.2f, 0.35f, 1.5f, 2.5f }) {
+        FlexiJointParams q = p;
+        q.gap = std::max(gap, q.clearance);
+        INFO("gap " << q.gap);
+        if (!flexi_validate(q).empty())
+            continue;
+        const TriangleMesh la(flexi_lower_bodies(q).front());
+        const TriangleMesh ub(flexi_upper_bodies(q).front());
+        REQUIRE(intersection_volume(la, ub) == Approx(0.).margin(1e-3));
+    }
+}
+
+// The new `rotation` field: it turns the whole pair about n, so at 90 degrees the two ring
+// planes have swapped.
+TEST_CASE("Chain link rotation turns both rings about the cut normal", "[FlexiJoint]")
+{
+    const Vec3d n = Vec3d::UnitZ();
+
+    FlexiJointParams p0 = chain_params();
+    p0.rotation = 0.f;
+    REQUIRE(flexi_validate(p0).empty());
+    const FittedPlane a0 = fit_plane(flexi_lower_bodies(p0).front());
+    const FittedPlane b0 = fit_plane(flexi_upper_bodies(p0).front());
+
+    // At 0 the lower ring stands in the x-z plane (normal +-Y) and the upper one in the y-z
+    // plane (normal +-X) - d = the cut plane's own +X axis.
+    REQUIRE(std::abs(a0.normal.y()) == Approx(1.).margin(1e-3));
+    REQUIRE(std::abs(b0.normal.x()) == Approx(1.).margin(1e-3));
+
+    // ROTATING BY 90 DEGREES SWAPS THE TWO RING PLANES.
+    FlexiJointParams p90 = p0;
+    p90.rotation = 90.f;
+    REQUIRE(flexi_validate(p90).empty());
+    const FittedPlane a90 = fit_plane(flexi_lower_bodies(p90).front());
+    const FittedPlane b90 = fit_plane(flexi_upper_bodies(p90).front());
+
+    REQUIRE(std::abs(a90.normal.dot(b0.normal)) == Approx(1.).margin(1e-3));   // A took B's plane
+    REQUIRE(std::abs(b90.normal.dot(a0.normal)) == Approx(1.).margin(1e-3));   // B took A's plane
+
+    // Rotation preserves every invariant the geometry has to keep.
+    for (float deg : { 0.f, 17.f, 45.f, 90.f, 133.f, 180.f }) {
+        FlexiJointParams q = p0;
+        q.rotation = deg;
+        INFO("rotation " << deg);
+        REQUIRE(flexi_validate(q).empty());
+
+        const TriangleMesh la(flexi_lower_bodies(q).front());
+        const TriangleMesh ub(flexi_upper_bodies(q).front());
+        REQUIRE(its_num_open_edges(la.its) == 0);
+        REQUIRE(its_num_open_edges(ub.its) == 0);
+
+        const FittedPlane a = fit_plane(la.its);
+        const FittedPlane b = fit_plane(ub.its);
+        // Both planes still contain n, and stay perpendicular to each other.
+        REQUIRE(std::abs(a.normal.dot(n)) == Approx(0.).margin(1e-3));
+        REQUIRE(std::abs(b.normal.dot(n)) == Approx(0.).margin(1e-3));
+        REQUIRE(std::abs(a.normal.dot(b.normal)) == Approx(0.).margin(1e-3));
+        // Still on opposite sides, still not touching.
+        REQUIRE(a.centroid.z() < 0.);
+        REQUIRE(b.centroid.z() > 0.);
+        REQUIRE(intersection_volume(la, ub) == Approx(0.).margin(1e-3));
+
+        // The rings turn by exactly `deg`. The lower ring's plane normal starts at +-Y, so
+        // after the rotation it must be parallel to R(deg) * Y. A plane normal has no sign, so
+        // compare the two as undirected lines: |n . expected| == 1.
+        const double rad = double(deg) * PI / 180.;
+        const Vec3d  want_normal(-std::sin(rad), std::cos(rad), 0.);
+        INFO("normal " << a.normal.transpose() << " expected " << want_normal.transpose());
+        REQUIRE(std::abs(a.normal.dot(want_normal)) == Approx(1.).margin(2e-3));
+        // ... and the upper ring's normal, which starts at +-X, follows the same turn.
+        const Vec3d  want_b(std::cos(rad), std::sin(rad), 0.);
+        REQUIRE(std::abs(b.normal.dot(want_b)) == Approx(1.).margin(2e-3));
+
+        // The joint's footprint does not grow with rotation: outer_extent is measured about
+        // the axis, so it is rotation invariant.
+        REQUIRE(double(flexi_outer_extent(q)) == Approx(double(flexi_outer_extent(p0))).margin(1e-4));
+    }
+
+    // The revolved kinds have no direction in the plane, so they IGNORE the field: the same
+    // bodies come out whatever it is set to.
+    for (const FlexiJointParams &base : { ring_params(), ball_params() }) {
+        FlexiJointParams r0 = base, r90 = base;
+        r0.rotation  = 0.f;
+        r90.rotation = 90.f;
+        const std::vector<indexed_triangle_set> b0v = flexi_male_bodies(r0);
+        const std::vector<indexed_triangle_set> b90v = flexi_male_bodies(r90);
+        REQUIRE(b0v.size() == b90v.size());
+        for (size_t i = 0; i < b0v.size(); ++ i)
+            REQUIRE(double(its_volume(b90v[i])) == Approx(double(its_volume(b0v[i]))).epsilon(1e-9));
+    }
+}
+
+// A rotated chain link still cuts a real, non-separable, two-part object.
+TEST_CASE("A rotated chain link still cuts and still holds", "[FlexiJoint]")
+{
+    FlexiJointParams p = chain_params();
+    p.rotation = 55.f;
+    REQUIRE(flexi_validate(p).empty());
+
+    const CutHalves h = cut_with_joint(p);
+    REQUIRE(h.objects == 1);
+    REQUIRE(h.volumes == 2);
+    REQUIRE(its_num_open_edges(h.upper.its) == 0);
+    REQUIRE(its_num_open_edges(h.lower.its) == 0);
+    REQUIRE(intersection_volume(h.upper, h.lower) == Approx(0.).margin(1e-3));
+    REQUIRE(min_surface_distance(h.upper, h.lower) == Approx(double(p.clearance)).margin(0.05));
+    REQUIRE(face_to_face_distance(h.upper, h.lower) == Approx(double(p.gap)).margin(0.02));
+
+    // Still non-separable: a straight pull past the joint's slack drives the rings together.
+    const double pull = double(p.gap) + double(p.clearance);
+    TriangleMesh pulled(h.lower);
+    pulled.translate(0.f, 0.f, float(-pull));
+    REQUIRE(intersection_volume(h.upper, pulled) > 1e-2);
+}
+
 TEST_CASE("Chain link cut of a 20 mm cylinder", "[FlexiJoint]")
 {
     const FlexiJointParams p = chain_params();
@@ -518,17 +936,17 @@ TEST_CASE("Chain link is non-separable", "[FlexiJoint]")
     pulled.translate(0.f, 0.f, float(-pull));
     REQUIRE(intersection_volume(h.upper, pulled) > 1e-2);
 
-    // The pull stays blocked over the WHOLE travel the loops could physically make. Beyond
+    // The pull stays blocked over the WHOLE travel the rings could physically make. Beyond
     // that the two centrelines have passed straight through each other, which no rigid body
     // can do; a mesh intersection test on a pure translation stops reporting overlap there
     // even though the parts would have had to break to get that far, so the sweep is bounded
-    // by the real travel. The vertical loop's hole spans z in vcz +- (link_length/2 - wire)
-    // with vcz = -gap/2 - stem + link_length/2, and the horizontal loop's wire bottom sits at
-    // gap/2 + wire - wire = gap/2; the loops can only start to unthread once the hole's top
-    // has dropped past that.
-    const double vcz        = -0.5 * double(p.gap) - double(p.stem) + 0.5 * double(p.link_length);
-    const double hole_top   = vcz + 0.5 * double(p.link_length) - double(p.wire);
-    const double wire_bot   = 0.5 * double(p.gap);
+    // by the real travel. Phase 3: both rings stand upright, centred -+ off from the plane, so
+    // the LOWER ring's hole reaches up to (-off + L/2 - wire) and the UPPER ring's free end
+    // hangs down to (off - L/2). They can only unthread once the former is pulled below the
+    // latter, which is exactly the span between those two z values.
+    const double off        = chain_ring_offset(p);
+    const double hole_top   = -off + 0.5 * double(p.link_length) - double(p.wire);
+    const double wire_bot   =  off - 0.5 * double(p.link_length);
     const double free_travel = hole_top - wire_bot;
     REQUIRE(free_travel > pull);          // the owner's pull test is inside it
     for (int i = 1; i <= 8; ++ i) {
@@ -549,23 +967,24 @@ TEST_CASE("Chain link is non-separable", "[FlexiJoint]")
     }
 }
 
-// The swing: the segments hinge about the horizontal loop's axis.
-TEST_CASE("Chain link swings about the horizontal loop's axis", "[FlexiJoint]")
+// The swing. Phase 3: because the two ring planes are perpendicular, the joint hinges about
+// BOTH in-plane axes, not just one - that is the whole point of a chain link over a hinge.
+TEST_CASE("Chain link swings about both in-plane axes", "[FlexiJoint]")
 {
     const FlexiJointParams p = chain_params();
     const CutHalves h = cut_with_joint(p);
     REQUIRE(h.volumes == 2);
 
-    // The horizontal loop lies with its long axis along +X, so the hinge axis is +Y.
-    // Sweep the lower segment about it and check the joint stays clearance-clean.
-    // 6 degrees is the angle the two flat faces allow before the rim at radius R touches:
-    // asin(gap / (2R)) with gap = 1.5, R = 10 is about 4.3 degrees, so 4 degrees is inside it.
+    // Sweep the lower segment about +X and about +Y and check the joint stays clearance-clean
+    // both ways. 4 degrees is inside what the two flat faces allow before the rim at radius R
+    // touches: asin(gap / (2R)) with gap = 1.5, R = 10 is about 4.3 degrees.
     const double swing_deg = 4.0;
+    for (const Vec3d &axis : { Vec3d::UnitX(), Vec3d::UnitY() })
     for (int deg = 1; deg <= int(swing_deg); ++ deg) {
         for (int sign : { -1, +1 }) {
-            const TriangleMesh swung = rotated_about_joint(h.lower, Vec3d::UnitY(),
+            const TriangleMesh swung = rotated_about_joint(h.lower, axis,
                                                            double(sign) * Geometry::deg2rad(double(deg)));
-            INFO("swing " << (sign * deg) << " deg about +Y");
+            INFO("swing " << (sign * deg) << " deg about " << axis.transpose());
             REQUIRE(intersection_volume(h.upper, swung) == Approx(0.).margin(1e-2));
         }
     }
@@ -995,23 +1414,22 @@ TEST_CASE("Rotation turns the hinge's knuckle run", "[FlexiJoint]")
     REQUIRE(y_span == Approx(double(p.hinge_barrel_dia)));
     REQUIRE(x_span > y_span);
 
-    // The connector's Rotation is applied by the connector VOLUME's transform, not by the
-    // geometry - so a 90 degree rotation turns the same footprint a quarter turn, it does not
-    // make a bigger one. Rotating the corners is exactly what the gizmo's contour test does.
-    const Transform3d rot = Geometry::rotation_transform(-0.5 * PI * Vec3d::UnitZ());
+    // At 90 degrees the footprint helper returns the SAME rectangle a quarter turn round -
+    // not a bigger one. The Rotation field is the one the chain link already uses, shared.
+    FlexiJointParams r90 = p;
+    r90.rotation = 90.f;
     double rx_lo = 1e9, rx_hi = -1e9, ry_lo = 1e9, ry_hi = -1e9;
-    for (const Vec2d &c : corners) {
-        const Vec3d q = rot * Vec3d(c.x(), c.y(), 0.);
-        rx_lo = std::min(rx_lo, q.x()); rx_hi = std::max(rx_hi, q.x());
-        ry_lo = std::min(ry_lo, q.y()); ry_hi = std::max(ry_hi, q.y());
+    for (const Vec2d &c : hinge_footprint_corners(r90)) {
+        rx_lo = std::min(rx_lo, c.x()); rx_hi = std::max(rx_hi, c.x());
+        ry_lo = std::min(ry_lo, c.y()); ry_hi = std::max(ry_hi, c.y());
     }
     // The long axis is now y and the short one x: the run has genuinely turned.
-    REQUIRE(rx_hi - rx_lo == Approx(y_span).margin(1e-9));
-    REQUIRE(ry_hi - ry_lo == Approx(x_span).margin(1e-9));
+    REQUIRE(rx_hi - rx_lo == Approx(y_span).margin(1e-6));
+    REQUIRE(ry_hi - ry_lo == Approx(x_span).margin(1e-6));
 
-    // And the whole cut still works with a rotated connector: the knuckle run comes out along
-    // +Y instead of +X, and the two halves are still separate solids the clearance apart.
-    const CutHalves h = cut_with_joint(p, float(0.5 * PI));
+    // And the whole cut still works rotated: the knuckle run comes out along +Y instead of
+    // +X, and the two halves are still separate solids the clearance apart.
+    const CutHalves h = cut_with_joint(r90);
     REQUIRE(h.objects == 1);
     REQUIRE(h.volumes == 2);
     REQUIRE(intersection_volume(h.upper, h.lower) == Approx(0.).margin(1e-3));
@@ -1045,13 +1463,15 @@ TEST_CASE("Rotation turns the hinge's knuckle run", "[FlexiJoint]")
     // The centreline is out along -Y by the edge offset, nowhere near the origin.
     REQUIRE(0.5 * (b0.min.y() + b0.max.y()) == Approx(hinge_axis_y(p)).margin(0.2));
 
-    // Rotated 90 degrees: length and width have swapped world axes, and the centreline has
-    // moved from -Y to -X - i.e. both the run AND its edge placement turned with the joint.
+    // Rotated 90 degrees: the run's length and width have swapped world axes, and the
+    // centreline has moved off -Y onto +X - a rotation by +90 sends (x, y) to (-y, x), so the
+    // negative edge offset on Y comes back as a positive X. Both the run AND its edge
+    // placement turned with the joint, which is the point.
     const BoundingBoxf b1 = barrel_extent(h.lower);
     INFO("rotated barrel box " << b1.min.transpose() << " .. " << b1.max.transpose());
     REQUIRE(b1.size().y() == Approx(b0.size().x()).margin(0.2));
     REQUIRE(b1.size().x() == Approx(b0.size().y()).margin(0.2));
-    REQUIRE(0.5 * (b1.min.x() + b1.max.x()) == Approx(hinge_axis_y(p)).margin(0.2));
+    REQUIRE(0.5 * (b1.min.x() + b1.max.x()) == Approx(-hinge_axis_y(p)).margin(0.2));
     REQUIRE(0.5 * (b1.min.y() + b1.max.y()) == Approx(0.).margin(0.2));
 }
 
@@ -1134,14 +1554,18 @@ TEST_CASE("The out-of-contour footprint is the joint's real shape", "[FlexiJoint
     SECTION("chain link: the old circle test was the bug") {
         const FlexiJointParams p = chain_params();
 
-        // The joint's real footprint is a SLOT, longer than it is wide.
+        // The joint's real footprint is the rectangle its two rings sweep through the cut
+        // plane. Whatever its aspect ratio, the point is that a RECTANGLE is not a disc: its
+        // corners are what reach furthest, and its edges are much closer in.
         const std::vector<Vec2d> corners = chain_footprint_corners(p);
+        REQUIRE(corners.size() == 4);
         double xlo = 1e9, xhi = -1e9, ylo = 1e9, yhi = -1e9;
         for (const Vec2d &c : corners) {
             xlo = std::min(xlo, c.x()); xhi = std::max(xhi, c.x());
             ylo = std::min(ylo, c.y()); yhi = std::max(yhi, c.y());
         }
-        REQUIRE(xhi - xlo > yhi - ylo);
+        REQUIRE(xhi > xlo);
+        REQUIRE(yhi > ylo);
 
         // The farthest point of the real footprint from the joint origin ...
         double true_r = 0.;
@@ -1218,6 +1642,7 @@ TEST_CASE("The hinge's parameters survive a serialization round trip", "[FlexiJo
     p.hinge_length      = 18.f;
     p.hinge_edge_offset = 3.25f;
     p.hinge_fold_upper  = true;
+    p.rotation          = 37.5f;   // the field shared with the chain link
 
     std::stringstream ss;
     {
@@ -1237,6 +1662,7 @@ TEST_CASE("The hinge's parameters survive a serialization round trip", "[FlexiJo
     REQUIRE(back.hinge_length      == Approx(18.0));
     REQUIRE(back.hinge_edge_offset == Approx(3.25));
     REQUIRE(back.hinge_fold_upper);
+    REQUIRE(back.rotation == Approx(37.5));
     // operator== has to see the new fields too, or an undo/redo would not notice a change.
     REQUIRE(back == p);
     FlexiJointParams other = p;
@@ -1393,5 +1819,75 @@ TEST_CASE("Export flexi joint fixtures", "[.][FlexiJointFixtures]")
         const boost::filesystem::path file = boost::filesystem::path(dir) / c.name;
         REQUIRE(store_3mf(file.string().c_str(), &out, nullptr, false));
         WARN("wrote " << file.string());
+    }
+}
+
+// Phase 3 demo: cut a plain BOX with a chain link and write the two halves, plus the two ring
+// bodies on their own, as STL so the orientation can be checked by eye in any viewer. Hidden
+// like the fixture exporter; run it with the output dir in the environment:
+//   set SNORCA_FLEXI_OUT=<dir> && libslic3r_tests.exe "Export chain link demo"
+TEST_CASE("Export chain link demo", "[.][FlexiChainDemo]")
+{
+    const char *dir = std::getenv("SNORCA_FLEXI_OUT");
+    REQUIRE(dir != nullptr);
+    const boost::filesystem::path out_dir(dir);
+    boost::filesystem::create_directories(out_dir);
+
+    // A 24 x 24 x 24 box cut through its middle.
+    const double BOX = 24.0;
+    const double BOX_CUT = 0.5 * BOX;
+
+    struct Case { const char *tag; float rotation; };
+    for (const Case &c : { Case{ "rot0", 0.f }, Case{ "rot45", 45.f }, Case{ "rot90", 90.f } }) {
+        FlexiJointParams p = chain_params();
+        p.rotation = c.rotation;
+        REQUIRE(flexi_validate(p).empty());
+
+        Model model;
+        ModelObject *mo = model.add_object();
+        mo->name = "flexi_box";
+        // its_make_cube() spans [0, BOX] on every axis. Centre it on x/y IN THE MESH (not with
+        // a volume transform, which add_volume's own re-centring would fight) so the joint,
+        // which is built about the origin, sits in the middle of the cut face.
+        TriangleMesh cube(its_make_cube(BOX, BOX, BOX));
+        cube.translate(float(-0.5 * BOX), float(-0.5 * BOX), 0.f);
+        ModelVolume *v = mo->add_volume(std::move(cube), ModelVolumeType::MODEL_PART, false);
+        v->name = "box";
+        mo->add_instance()->set_transformation(Geometry::Transformation());
+
+        CutConnector connector;
+        connector.pos        = Vec3d(0., 0., BOX_CUT);
+        connector.rotation_m = Transform3d::Identity();
+        connector.z_angle    = 0.f;
+        connector.radius     = flexi_outer_extent(p);
+        connector.height     = flexi_protrusion_height(p);
+        connector.attribs    = CutConnectorAttributes(CutConnectorType::FlexiJoint,
+                                                      CutConnectorStyle::Prism, CutConnectorShape::Circle);
+        connector.flexi      = p;
+        add_flexi_joint_volume(mo, connector, "Flexi joint-1");
+
+        Cut cut(mo, 0, Geometry::translation_transform(Vec3d(0., 0., BOX_CUT)),
+                ModelObjectCutAttribute::KeepUpper | ModelObjectCutAttribute::KeepLower |
+                ModelObjectCutAttribute::KeepAsParts);
+        const ModelObjectPtrs &res = cut.perform_with_plane();
+        REQUIRE(res.size() == 1);
+        REQUIRE(res.front()->volumes.size() == 2);
+
+        for (const ModelVolume *vol : res.front()->volumes) {
+            TriangleMesh m(vol->mesh());
+            m.transform(vol->get_matrix());
+            const std::string name = std::string("chain_") + c.tag +
+                                     (vol->is_from_upper() ? "_upper.stl" : "_lower.stl");
+            const boost::filesystem::path file = out_dir / name;
+            REQUIRE(its_write_stl_ascii(file.string().c_str(), "flexi", m.its));
+            WARN("wrote " << file.string());
+        }
+
+        // The two ring bodies on their own, so the two perpendicular ring planes are obvious
+        // without having to see through the box.
+        its_write_stl_ascii((out_dir / (std::string("chain_") + c.tag + "_ringA.stl")).string().c_str(),
+                            "ringA", flexi_lower_bodies(p).front());
+        its_write_stl_ascii((out_dir / (std::string("chain_") + c.tag + "_ringB.stl")).string().c_str(),
+                            "ringB", flexi_upper_bodies(p).front());
     }
 }

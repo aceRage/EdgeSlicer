@@ -37,6 +37,11 @@ public:
 
     void data_changed(bool is_serializing) override;
     bool on_mouse(const wxMouseEvent &mouse_event) override;
+    // Blender-style modal keys: F / Shift+F size the brush, Ctrl inverts it.
+    // Routed from GLGizmosManager::on_char (F, Shift+F, Enter, Esc), which calls
+    // this BEFORE its handle_shortcut() fallthrough so bare F does not open the
+    // "place face on bed" gizmo while Sculpt is the current one.
+    bool on_sculpt_char(int key_code, bool shift_down, bool ctrl_down);
     // Ctrl + wheel resizes the brush, like the paint gizmos.
     bool gizmo_event(SLAGizmoEventType action, const Vec2d &mouse_position, bool shift_down, bool alt_down, bool control_down);
 
@@ -55,7 +60,7 @@ protected:
     CommonGizmosDataID on_get_requirements() const override;
 
 private:
-    enum class Brush : int { Grab = 0, Inflate = 1, Deflate = 2, Smooth = 3 };
+    enum class Brush : int { Grab = 0, Inflate = 1, Deflate = 2, Smooth = 3, Flatten = 4, Crease = 5 };
 
     // --- session / selection ---
     void attach_to_selection();
@@ -66,11 +71,11 @@ private:
 
     // --- stroke ---
     bool raycast(const Vec2d &mouse_position, Vec3f &hit) const;
-    bool start_stroke(const Vec2d &mouse_position, bool shift_down);
-    void continue_stroke(const Vec2d &mouse_position, bool shift_down);
+    bool start_stroke(const Vec2d &mouse_position, bool shift_down, bool ctrl_down);
+    void continue_stroke(const Vec2d &mouse_position, bool shift_down, bool ctrl_down);
     void end_stroke();
     void cancel_stroke();
-    Sculpt::BrushParams make_brush(const Vec3f &center_mesh, const Vec3f &displacement_mesh, bool shift_down) const;
+    Sculpt::BrushParams make_brush(const Vec3f &center_mesh, const Vec3f &displacement_mesh, bool shift_down, bool ctrl_down) const;
     // Project the mouse onto the plane through the stroke anchor facing the camera.
     bool project_on_drag_plane(const Vec2d &mouse_position, Vec3d &out) const;
 
@@ -83,6 +88,13 @@ private:
     // Push the touched triangles into the volume's vertex buffer, or - if that
     // buffer cannot be patched - rebuild the model at a throttled rate.
     void refresh_render_volumes(const std::vector<uint32_t> &dirty_triangles, bool force);
+
+    // --- modal brush adjust (F / Shift+F) ---
+    void begin_adjust(Sculpt::AdjustTarget target);
+    void update_adjust(const Vec2d &mouse_position);
+    void end_adjust(bool confirm);
+    // Ctrl inverts Inflate/Deflate, Flatten and Crease while a stroke runs.
+    bool brush_inverted(bool ctrl_down) const;
 
     // --- subdivision ---
     bool  needs_subdivision();
@@ -102,6 +114,9 @@ private:
 
     // Brush settings. The radius is in world millimetres, like the paint gizmos'.
     Brush m_brush{Brush::Grab};
+    // Flatten: symmetric by default (bumps down as well as dents up). The Ctrl
+    // variant is Blender's "Fill" - only what is below the plane comes up.
+    bool  m_flatten_fill_only{false};
     float m_cursor_radius{2.f};
     float m_strength{0.5f};
     bool  m_falloff{true};
@@ -117,6 +132,16 @@ private:
     static constexpr float StrengthMin      = 0.05f;
     // A midpoint subdivision quadruples the triangle count; refuse past this.
     static constexpr size_t MaxTrianglesAfterSubdivision = 2000000;
+
+    // Modal brush adjust. While active every mouse move retargets the value and
+    // nothing else; the stroke path is skipped entirely.
+    Sculpt::AdjustState m_adjust;
+    // The plane a Flatten/Crease stroke works against, pinned at stroke start so
+    // the brush levels one plane instead of chasing the surface it is levelling.
+    Vec3f m_stroke_plane_normal{Vec3f::Zero()};
+    // Ctrl state as of the last tick, so the cursor circle can show the inverted
+    // colour on hover and not only mid-stroke.
+    bool  m_ctrl_inverted{false};
 
     // Stroke state.
     bool  m_stroke_active{false};

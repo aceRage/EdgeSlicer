@@ -23,15 +23,21 @@
 //
 // CHAIN LINK. Two interlocking closed loops, each a stadium centreline swept with a tube of
 // radius `wire`, so the joint hinges AND swivels the way two links of a chain do.
-//   * The VERTICAL loop belongs to the LOWER segment: it stands in the x-z plane (long axis
-//     +Z), its far (bottom) end embedded `stem` deep in the lower body, its upper half free.
-//     Printed bottom up it grows straight out of the lower segment and its top span is a short
-//     self-supporting bridge.
-//   * The HORIZONTAL loop belongs to the UPPER segment: it lies just above the upper face
-//     (long axis +X), tilted up by `tilt_angle` about +Y so its far (+x) end rises into the
-//     upper body while its near half stays free and threads the vertical loop. Lying nearly
-//     flat, each of its layers is a closed ring resting on the one below - it prints on the
-//     layer, no bridging.
+// BOTH ring planes contain the cut normal n, and the two planes are PERPENDICULAR to each
+// other - that is what makes it a chain link rather than a ring sitting on a ring. Writing d
+// for a unit reference direction in the cut plane (d = the plane's +X turned by `rotation`):
+//   * The LOWER ring belongs to the LOWER segment: it stands in the plane spanned by (n, d),
+//     long axis along n, its far (bottom) end embedded `stem` deep in the lower body and its
+//     upper half free, reaching up through the cut plane.
+//   * The UPPER ring belongs to the UPPER segment: it stands in the plane spanned by
+//     (n, n x d) - perpendicular to the lower ring's plane - long axis along n, its far (top)
+//     end embedded `stem` deep in the upper body and its lower half free, reaching down
+//     through the cut plane. `tilt_angle` tips it slightly about n x d so its free end leans
+//     clear of the lower ring rather than sitting concentric with it.
+// Their free halves overlap around the cut plane, and because the planes are perpendicular
+// each ring threads the other's hole there. Printed bottom up, each ring grows out of its own
+// segment and its top arc is a short self-supporting bridge - the same print behaviour the
+// standing ring already had, now on both.
 // The two are LINKED (each threads the other's hole), so the joint is non-separable without
 // either loop touching the other. Two sizing constraints make that possible: a loop's hole is
 // a stadium of length L-2t and width W-2t, and the other loop's wire (radius t) has to pass
@@ -78,8 +84,8 @@ enum class FlexiJointKind : int {
     DoubleRing = 0,
     // Secondary: a ball on a neck captured by a socket whose mouth is narrower than the ball.
     BallSocket = 1,
-    // Two interlocking closed loops, one lying in the cut plane and one standing along the
-    // cut normal, hinging and swivelling like two links of a chain.
+    // Two interlocking closed loops, both standing along the cut normal in planes
+    // perpendicular to each other, hinging and swivelling like two links of a chain.
     ChainLink = 2,
     // A print-in-place pin hinge: N alternating knuckles along an in-plane axis with one
     // continuous pin through them, placed at the edge of the cut face so the halves fold shut.
@@ -120,8 +126,9 @@ struct FlexiJointParams
     float link_width{ 5.5f };
     // Tube radius of the wire the centreline is swept with.
     float wire{ 1.0f };
-    // How far the horizontal loop is tilted up out of the cut plane, in degrees, so its far
-    // end rises into the upper segment while its near half stays free.
+    // How far the UPPER ring is tipped about n x d, in degrees, so its free (lower) end leans
+    // clear of the lower ring instead of sitting concentric with it. Stays within the ring's
+    // own plane family; 0 is legal and puts both rings on the same axis.
     float tilt_angle{ 7.0f };
     // How deep each loop's far end is embedded in its own segment.
     float stem{ 1.5f };
@@ -144,6 +151,19 @@ struct FlexiJointParams
     // lower half, which is the default; true swaps the two parities.
     bool hinge_fold_upper{ false };
 
+    // ------------------------------------------ kinds that have a direction in the cut plane
+    // Rotation of the joint about the cut normal n, in degrees. The reference direction d0 is
+    // the cut plane's own +X axis, and the joint is built along d = rotate(d0, n, rotation).
+    // Only kinds that HAVE a direction in the cut plane honour it: the chain link does - it
+    // turns both rings together, so their planes stay perpendicular to each other and only
+    // the pair's orientation within the plane changes - and so does the HINGE, for which d is
+    // the pin axis itself and the whole point of the control. Double ring and ball & socket
+    // are solids of revolution about n, so rotating them changes nothing and they IGNORE this
+    // value. 0-180 is the whole range: a chain link at 180 degrees presents the same two ring
+    // planes as at 0, and a hinge presents the same pin axis. Default 0 - which is also what
+    // an older 3MF without the field loads as.
+    float rotation{ 0.f };
+
     bool operator==(const FlexiJointParams &o) const
     {
         return kind == o.kind && is_approx(outer_radius, o.outer_radius) && is_approx(ring_width, o.ring_width) &&
@@ -154,14 +174,15 @@ struct FlexiJointParams
                is_approx(wire, o.wire) && is_approx(tilt_angle, o.tilt_angle) && is_approx(stem, o.stem) &&
                hinge_knuckles == o.hinge_knuckles && is_approx(hinge_pin_dia, o.hinge_pin_dia) &&
                is_approx(hinge_barrel_dia, o.hinge_barrel_dia) && is_approx(hinge_length, o.hinge_length) &&
-               is_approx(hinge_edge_offset, o.hinge_edge_offset) && hinge_fold_upper == o.hinge_fold_upper;
+               is_approx(hinge_edge_offset, o.hinge_edge_offset) && hinge_fold_upper == o.hinge_fold_upper &&
+               is_approx(rotation, o.rotation);
     }
     bool operator!=(const FlexiJointParams &o) const { return !(*this == o); }
 
     template<class Archive> void serialize(Archive &ar)
     {
         ar(kind, outer_radius, ring_width, ring_height, clearance, hub_radius, tilt, neck_ratio, open_angle,
-           gap, link_length, link_width, wire, tilt_angle, stem,
+           gap, link_length, link_width, wire, tilt_angle, stem, rotation,
            hinge_knuckles, hinge_pin_dia, hinge_barrel_dia, hinge_length, hinge_edge_offset, hinge_fold_upper);
     }
 };
@@ -211,8 +232,8 @@ inline bool flexi_is_captive(const FlexiJointParams &p) { return flexi_mouth_hal
 // disconnected component (the ring and the optional hub are separate solids).
 
 // For the revolved kinds these are the male protrusion and the female cavity. For the chain
-// link, `male` is the vertical loop (which belongs to the LOWER segment) and `female` is the
-// horizontal loop (which belongs to the UPPER segment); each segment is then relieved by the
+// link, `male` is the LOWER ring (in the plane spanned by n and d) and `female` is the UPPER
+// ring (in the plane spanned by n and n x d); each segment is then relieved by the
 // OTHER loop inflated by the clearance - see flexi_lower_reliefs() / flexi_upper_reliefs().
 std::vector<indexed_triangle_set> flexi_male_bodies(const FlexiJointParams &p);
 std::vector<indexed_triangle_set> flexi_female_cavities(const FlexiJointParams &p);
@@ -236,6 +257,12 @@ std::vector<indexed_triangle_set> flexi_upper_reliefs(const FlexiJointParams &p)
 // The meridional (r, z) profiles the two above revolve; exposed for tests/preview.
 std::vector<std::vector<Vec2d>> flexi_male_profiles(const FlexiJointParams &p);
 std::vector<std::vector<Vec2d>> flexi_female_profiles(const FlexiJointParams &p);
+
+// Chain link only: the two rings' CENTRELINES in the cut frame, after `rotation`. Empty for
+// the other kinds. Exposed so the gizmo and the tests can reason about the ring planes
+// without re-deriving the frame.
+std::vector<Vec3d> flexi_chain_lower_centreline(const FlexiJointParams &p);
+std::vector<Vec3d> flexi_chain_upper_centreline(const FlexiJointParams &p);
 
 // A single preview body: the male lip plus the female cavity shell, for the gizmo's
 // connector-style preview on the cut plane.
