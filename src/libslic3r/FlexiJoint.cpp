@@ -137,6 +137,114 @@ static std::vector<Vec3d> chain_horizontal_path(const FlexiJointParams &p)
     return out;
 }
 
+// ---------------------------------------------------------------------------------- hinge
+//
+// The hinge lives in the cut frame with its axis along +X. `e = n x d` is +Y, and the barrel
+// centreline sits at y = -hinge_edge_offset, z = 0 - straddling the cut plane exactly the way
+// every other flexi body does, so the segment split at -+ gap/2 cuts nothing but the object.
+//
+// The run of N knuckles is centred on x == 0. Slot i spans [x_i - S/2, x_i + S/2) with
+// S = hinge_length / N, and the cylinder inside it is only S - gap long, centred in the slot -
+// which puts exactly `gap` between every pair of facing knuckle end faces, including the two
+// at the ends of the run (where there is nothing facing them, so it just shortens the run by
+// gap/2 at each end). No Clipper offset is involved: a cylinder shortened uniformly along its
+// own axis is still a cylinder, so the arithmetic IS the clearance.
+
+int hinge_knuckle_count(const FlexiJointParams &p)
+{
+    return std::max(1, std::min(9, p.hinge_knuckles));
+}
+
+double hinge_slot_length(const FlexiJointParams &p)
+{
+    return std::max(EPSILON, double(p.hinge_length) / double(hinge_knuckle_count(p)));
+}
+
+double hinge_knuckle_length(const FlexiJointParams &p)
+{
+    // Never let the gap eat the whole knuckle: leave at least a tenth of the slot solid, so a
+    // silly gap/length combination degrades into a stubby hinge instead of an empty mesh.
+    const double S = hinge_slot_length(p);
+    return std::max(0.1 * S, S - double(flexi_effective_gap(p)));
+}
+
+double hinge_slot_centre(const FlexiJointParams &p, int i)
+{
+    const int    N = hinge_knuckle_count(p);
+    const double S = hinge_slot_length(p);
+    // Slot i's centre, with the whole run of N slots centred on 0.
+    return (double(i) - 0.5 * double(N - 1)) * S;
+}
+
+bool hinge_knuckle_is_lower(const FlexiJointParams &p, int i)
+{
+    // Even index = lower by default; the fold-side flag swaps both parities at once, which is
+    // the whole of what it does (it moves the pin to the other half with its knuckles).
+    const bool even = (i % 2) == 0;
+    return p.hinge_fold_upper ? !even : even;
+}
+
+// One knuckle barrel: a cylinder of radius `r` and length `len` along +X, centred at x == cx
+// on the barrel centreline. its_make_cylinder builds along +Z from z == 0, so it is rotated
+// +Y-wards by 90 degrees and then translated.
+static indexed_triangle_set hinge_cylinder(const FlexiJointParams &p, double cx, double r, double len)
+{
+    indexed_triangle_set its = its_make_cylinder(r, len, 2. * M_PI / double(FLEXI_SECTORS));
+    // +Z -> +X, and the cylinder's z == 0 end lands at x == cx - len/2.
+    Transform3d m = Transform3d::Identity();
+    m.translate(Vec3d(cx - 0.5 * len, hinge_axis_y(p), 0.));
+    m.rotate(Eigen::AngleAxisd(0.5 * M_PI, Vec3d::UnitY()));
+    its_transform(its, m);
+    return its;
+}
+
+// The continuous pin: one cylinder of radius `r` spanning the WHOLE knuckle run, ends flush
+// with the outermost knuckles' outer faces so nothing sticks out past the barrel.
+static indexed_triangle_set hinge_pin(const FlexiJointParams &p, double r)
+{
+    const int    N  = hinge_knuckle_count(p);
+    const double x0 = hinge_slot_centre(p, 0)     - 0.5 * hinge_knuckle_length(p);
+    const double x1 = hinge_slot_centre(p, N - 1) + 0.5 * hinge_knuckle_length(p);
+    return hinge_cylinder(p, 0.5 * (x0 + x1), r, std::max(EPSILON, x1 - x0));
+}
+
+// The knuckles of one half, each already merged with the pin (lower) or left plain (upper).
+// `lower` picks the parity; the caller adds the pin or the bore.
+static std::vector<indexed_triangle_set> hinge_knuckles(const FlexiJointParams &p, bool lower)
+{
+    const int    N   = hinge_knuckle_count(p);
+    const double Ro  = 0.5 * double(p.hinge_barrel_dia);
+    const double len = hinge_knuckle_length(p);
+    std::vector<indexed_triangle_set> out;
+    for (int i = 0; i < N; ++ i)
+        if (hinge_knuckle_is_lower(p, i) == lower)
+            out.emplace_back(hinge_cylinder(p, hinge_slot_centre(p, i), Ro, len));
+    return out;
+}
+
+// The same knuckles grown by the clearance in every direction: radius + C, and C longer at
+// each end face. This is the relief the OTHER half is carved with.
+static std::vector<indexed_triangle_set> hinge_inflated_knuckles(const FlexiJointParams &p, bool lower)
+{
+    const int    N   = hinge_knuckle_count(p);
+    const double C   = double(p.clearance);
+    const double Ro  = 0.5 * double(p.hinge_barrel_dia) + C;
+    const double len = hinge_knuckle_length(p) + 2. * C;
+    std::vector<indexed_triangle_set> out;
+    for (int i = 0; i < N; ++ i)
+        if (hinge_knuckle_is_lower(p, i) == lower)
+            out.emplace_back(hinge_cylinder(p, hinge_slot_centre(p, i), Ro, len));
+    return out;
+}
+
+std::vector<Vec2d> hinge_footprint_corners(const FlexiJointParams &p, double pad)
+{
+    const double hx = 0.5 * double(p.hinge_length) + pad;
+    const double hy = 0.5 * double(p.hinge_barrel_dia) + pad;
+    const double cy = hinge_axis_y(p);
+    return { Vec2d(-hx, cy - hy), Vec2d(hx, cy - hy), Vec2d(hx, cy + hy), Vec2d(-hx, cy + hy) };
+}
+
 // ---------------------------------------------------------------------------------- defaults
 
 float flexi_default_hub_radius(const FlexiJointParams &p)
@@ -152,6 +260,9 @@ float flexi_default_gap(FlexiJointKind kind)
     // Ring / ball: those only rotate and rock in place, so the gap just has to keep the flat
     // faces from rubbing; 0.6 mm is three 0.2 mm layers, enough to stay open after slicing
     // and small enough that the joint does not look like a mistake.
+    // Hinge: the knuckle end faces are `gap` apart along the axis and the two segments' flat
+    // faces are `gap` apart across it, and a pin hinge only has to turn, not swing through
+    // itself - so it takes the same 0.6 mm the ring and the ball do, not the chain's 1.5.
     return kind == FlexiJointKind::ChainLink ? 1.5f : 0.6f;
 }
 
@@ -188,6 +299,20 @@ FlexiJointParams flexi_auto_size(FlexiJointParams p, double inscribed_radius)
         // The lip has to fit inside its own outer radius.
         p.ring_width = std::min(p.ring_width, 0.8f * p.outer_radius);
         p.hub_radius = flexi_default_hub_radius(p);
+    } else if (p.kind == FlexiJointKind::Hinge && inscribed_radius > 0.) {
+        // The hinge is sized by the cut face it has to lie along: the run gets most of the
+        // available width, and the barrel scales with it but stays printable and stays well
+        // clear of the pin (barrel >= pin + 2 x clearance + 2 x a nozzle-ish wall).
+        const double span = std::max(2.0, 1.6 * inscribed_radius);
+        p.hinge_length    = float(std::min(span, 60.));
+        double barrel     = std::max(2.0, std::min(0.35 * inscribed_radius, 10.));
+        double pin        = std::max(1.0, 0.45 * barrel);
+        // Keep a real wall around the bore whatever the clearance ends up being.
+        const double wall = 0.8;
+        if (barrel < pin + 2. * double(p.clearance) + 2. * wall)
+            barrel = pin + 2. * double(p.clearance) + 2. * wall;
+        p.hinge_barrel_dia = float(barrel);
+        p.hinge_pin_dia    = float(pin);
     } else if (p.kind == FlexiJointKind::ChainLink && inscribed_radius > 0.) {
         // The chain link is sized by its own outer extent, not by outer_radius: scale the
         // loops so the whole interlocked assembly fits inside the cross section with a
@@ -221,6 +346,9 @@ FlexiJointParams flexi_auto_size(FlexiJointParams p, double inscribed_radius)
 
 float flexi_protrusion_height(const FlexiJointParams &p)
 {
+    if (p.kind == FlexiJointKind::Hinge)
+        // The barrel straddles the cut plane, so it reaches its own outer radius above it.
+        return 0.5f * p.hinge_barrel_dia;
     if (p.kind == FlexiJointKind::ChainLink) {
         // The tallest thing above the cut plane is the vertical loop's top.
         const ChainLinkFrame f = chain_frame(p);
@@ -260,6 +388,15 @@ static double flexi_ball_centre_z(const FlexiJointParams &p)
 
 float flexi_outer_extent(const FlexiJointParams &p)
 {
+    if (p.kind == FlexiJointKind::Hinge) {
+        // The farthest corner of the knuckle run's rectangle from the joint origin. The gizmo
+        // still uses this for the connector's picking radius and preview scale; the CONTOUR
+        // test uses hinge_footprint_corners() instead, which is the point of that function.
+        double best = 0.;
+        for (const Vec2d &c : hinge_footprint_corners(p, double(p.clearance)))
+            best = std::max(best, c.norm());
+        return float(best);
+    }
     if (p.kind == FlexiJointKind::ChainLink) {
         double best = 0.;
         for (const std::vector<Vec3d> &path : { chain_vertical_path(p), chain_horizontal_path(p) })
@@ -272,6 +409,11 @@ float flexi_outer_extent(const FlexiJointParams &p)
 
 float flexi_mouth_half_width(const FlexiJointParams &p)
 {
+    if (p.kind == FlexiJointKind::Hinge)
+        // A pin hinge is captive because the bore wraps the pin all the way round: the "mouth"
+        // is the bore and the "lip" is the barrel's outer wall, so the generic captive test
+        // below asks exactly the right question - is there wall left outside the bore?
+        return float(hinge_bore_radius(p));
     if (p.kind == FlexiJointKind::ChainLink)
         // A chain link is not captive by a narrow mouth but by the two loops being LINKED.
         // Report the hole a loop's wire has to pass, and the wire it has to pass, so the
@@ -284,6 +426,8 @@ float flexi_mouth_half_width(const FlexiJointParams &p)
 
 float flexi_lip_half_width(const FlexiJointParams &p)
 {
+    if (p.kind == FlexiJointKind::Hinge)
+        return 0.5f * p.hinge_barrel_dia;
     if (p.kind == FlexiJointKind::ChainLink)
         return std::min(p.link_length, p.link_width) - 2.f * p.wire;
     if (p.kind == FlexiJointKind::DoubleRing)
@@ -489,6 +633,20 @@ static std::vector<indexed_triangle_set> revolve_all(const std::vector<std::vect
 
 std::vector<indexed_triangle_set> flexi_male_bodies(const FlexiJointParams &p)
 {
+    if (p.kind == FlexiJointKind::Hinge) {
+        // The hinge's "male" body is whatever the LOWER segment owns: its own knuckles, plus
+        // the ONE continuous pin when the fold side leaves the pin down here. They are
+        // returned as separate components because the cut pipeline unions the list entry by
+        // entry - the same way the ring and its hub are separate - and that union is what
+        // fuses the pin to its knuckles in the finished half.
+        std::vector<indexed_triangle_set> out = hinge_knuckles(p, true);
+        // The pin travels with the half that owns knuckle 0 - which the fold-side flag is
+        // exactly what decides. hinge_knuckle_is_lower() already folds the flag in, so asking
+        // it about knuckle 0 is the whole test.
+        if (hinge_knuckle_is_lower(p, 0))
+            out.emplace_back(hinge_pin(p, 0.5 * double(p.hinge_pin_dia)));
+        return out;
+    }
     if (p.kind == FlexiJointKind::ChainLink)
         // The chain link's "male" body is the vertical loop, which belongs to the LOWER
         // segment. There is no revolved profile for it.
@@ -498,6 +656,18 @@ std::vector<indexed_triangle_set> flexi_male_bodies(const FlexiJointParams &p)
 
 std::vector<indexed_triangle_set> flexi_female_cavities(const FlexiJointParams &p)
 {
+    if (p.kind == FlexiJointKind::Hinge) {
+        // ... and its "female" body is what the UPPER segment owns: the other parity of
+        // knuckle, plus the pin if the fold side put it up here. Like the chain link's, these
+        // are SOLID bodies to union in, not a cavity to subtract. The BORE is not cut here:
+        // it falls out of the relief pass' inflated pin, which the cut pipeline subtracts from
+        // this half right after unioning these in. That keeps "the body" and "the clearance"
+        // two independent, separately testable steps, exactly as the ring's lip and groove.
+        std::vector<indexed_triangle_set> out = hinge_knuckles(p, false);
+        if (!hinge_knuckle_is_lower(p, 0))
+            out.emplace_back(hinge_pin(p, 0.5 * double(p.hinge_pin_dia)));
+        return out;
+    }
     if (p.kind == FlexiJointKind::ChainLink)
         // ... and its "female" body is the horizontal loop, on the UPPER segment. It is a
         // solid body, not a cavity; flexi_upper_reliefs() carries what gets subtracted.
@@ -515,7 +685,7 @@ std::vector<indexed_triangle_set> flexi_upper_bodies(const FlexiJointParams &p)
 {
     // Only the chain link puts a solid body on the upper segment; the revolved kinds put a
     // cavity there instead.
-    if (p.kind == FlexiJointKind::ChainLink)
+    if (p.kind == FlexiJointKind::ChainLink || p.kind == FlexiJointKind::Hinge)
         return flexi_female_cavities(p);
     return {};
 }
@@ -526,6 +696,17 @@ std::vector<indexed_triangle_set> flexi_lower_reliefs(const FlexiJointParams &p)
     // dips near the lower body. A tube offset uniformly by C is simply a fatter tube, so the
     // relief is the same centreline swept with radius wire + C - which is why the measured
     // clearance comes out exactly C here too, with no Clipper dilation involved.
+    if (p.kind == FlexiJointKind::Hinge) {
+        // The lower segment has to make room for everything the UPPER half owns: that half's
+        // knuckles grown by the clearance in every direction - radius + C, and C longer at
+        // each end face - plus the pin, when the fold-side flag has put the pin up there. A
+        // cylinder offset uniformly is still a cylinder, so the measured clearance comes out
+        // exactly C here too, with no Clipper dilation involved.
+        std::vector<indexed_triangle_set> out = hinge_inflated_knuckles(p, false);
+        if (!hinge_knuckle_is_lower(p, 0))
+            out.emplace_back(hinge_pin(p, 0.5 * double(p.hinge_pin_dia) + double(p.clearance)));
+        return out;
+    }
     if (p.kind == FlexiJointKind::ChainLink)
         return { its_make_swept_loop(chain_horizontal_path(p), double(p.wire) + double(p.clearance),
                                      FLEXI_WIRE_SECTORS) };
@@ -534,6 +715,17 @@ std::vector<indexed_triangle_set> flexi_lower_reliefs(const FlexiJointParams &p)
 
 std::vector<indexed_triangle_set> flexi_upper_reliefs(const FlexiJointParams &p)
 {
+    if (p.kind == FlexiJointKind::Hinge) {
+        // The upper segment clears everything the LOWER half owns: that half's knuckles
+        // inflated by C, plus - when the pin lives down there - the pin inflated by C along
+        // its whole length, which IS the bore, drilled through every knuckle on this side at
+        // exactly pin radius + C. The knuckle inflation is also what holds the inter-knuckle
+        // gap open: each cylinder was built `gap` short of its slot and is now C fatter.
+        std::vector<indexed_triangle_set> out = hinge_inflated_knuckles(p, true);
+        if (hinge_knuckle_is_lower(p, 0))
+            out.emplace_back(hinge_pin(p, 0.5 * double(p.hinge_pin_dia) + double(p.clearance)));
+        return out;
+    }
     if (p.kind == FlexiJointKind::ChainLink)
         return { its_make_swept_loop(chain_vertical_path(p), double(p.wire) + double(p.clearance),
                                      FLEXI_WIRE_SECTORS) };
@@ -544,6 +736,15 @@ std::vector<indexed_triangle_set> flexi_upper_reliefs(const FlexiJointParams &p)
 indexed_triangle_set flexi_preview_body(const FlexiJointParams &p)
 {
     indexed_triangle_set out;
+    if (p.kind == FlexiJointKind::Hinge) {
+        // Show the whole barrel run - every knuckle of both halves, plus the pin - because
+        // that is the envelope the user is positioning against the cut face's edge.
+        for (const indexed_triangle_set &its : flexi_male_bodies(p))
+            its_merge(out, its);
+        for (const indexed_triangle_set &its : flexi_female_cavities(p))
+            its_merge(out, its);
+        return out;
+    }
     if (p.kind == FlexiJointKind::ChainLink) {
         // Show both interlocked loops, at their clearance-inflated size, because that is the
         // envelope that actually has to fit inside the cut cross section.
@@ -559,16 +760,79 @@ indexed_triangle_set flexi_preview_body(const FlexiJointParams &p)
     return out;
 }
 
+// ------------------------------------------------------------------------------- footprints
+//
+// What the joint actually occupies ON THE CUT PLANE, so the gizmo can ask "does this fit
+// inside the cut contour?" about the real shape instead of a circumscribing circle. The old
+// circle test rejects a long thin joint that fits the contour perfectly well - which is what
+// the chain link was hitting: its outer extent is the distance to the far end of a 7 mm loop,
+// so a disc of that radius sticks out of contours the loops themselves clear easily.
+
+std::vector<Vec2d> chain_footprint_corners(const FlexiJointParams &p, double pad)
+{
+    // Both loops' centrelines projected onto the cut plane, grown by the wire radius: that is
+    // the slot the interlocked pair sweeps through the plane. A rectangle around it is a
+    // tight, safe approximation - it is what the pair needs, and it is not a disc.
+    double xlo = 0., xhi = 0., ylo = 0., yhi = 0.;
+    bool   first = true;
+    for (const std::vector<Vec3d> &path : { chain_vertical_path(p), chain_horizontal_path(p) })
+        for (const Vec3d &v : path) {
+            if (first) { xlo = xhi = v.x(); ylo = yhi = v.y(); first = false; continue; }
+            xlo = std::min(xlo, v.x()); xhi = std::max(xhi, v.x());
+            ylo = std::min(ylo, v.y()); yhi = std::max(yhi, v.y());
+        }
+    const double m = double(p.wire) + double(p.clearance) + pad;
+    xlo -= m; xhi += m; ylo -= m; yhi += m;
+    return { Vec2d(xlo, ylo), Vec2d(xhi, ylo), Vec2d(xhi, yhi), Vec2d(xlo, yhi) };
+}
+
+std::vector<Vec2d> flexi_footprint_corners(const FlexiJointParams &p, double pad)
+{
+    if (p.kind == FlexiJointKind::Hinge)
+        return hinge_footprint_corners(p, pad);
+    if (p.kind == FlexiJointKind::ChainLink)
+        return chain_footprint_corners(p, pad);
+    // The revolved kinds really are round: sample the disc the gizmo used to sample by hand.
+    const double r = double(flexi_outer_extent(p)) + pad;
+    std::vector<Vec2d> out;
+    const int          n = 60;
+    out.reserve(n);
+    for (int i = 0; i < n; ++ i) {
+        const double a = 2. * M_PI * double(i) / double(n);
+        out.emplace_back(r * std::cos(a), r * std::sin(a));
+    }
+    return out;
+}
+
 // ------------------------------------------------------------------------------------ guards
 
 std::string flexi_validate(const FlexiJointParams &p)
 {
-    if (p.kind != FlexiJointKind::ChainLink && p.outer_radius <= 0.5f)
+    if (p.kind != FlexiJointKind::ChainLink && p.kind != FlexiJointKind::Hinge && p.outer_radius <= 0.5f)
         return "Joint radius is too small.";
     if (p.clearance <= 0.f)
         return "Clearance must be greater than zero, otherwise the joint prints as one solid.";
     if (p.gap > 0.f && p.gap < p.clearance)
         return "Gap cannot be smaller than the clearance.";
+    if (p.kind == FlexiJointKind::Hinge) {
+        if (p.hinge_knuckles < 1 || p.hinge_knuckles > 9)
+            return "A hinge needs between 1 and 9 knuckles.";
+        if (p.hinge_pin_dia <= 0.f)
+            return "Pin diameter must be greater than zero.";
+        // The barrel has to hold the bore AND leave a wall around it, or the knuckle prints
+        // as a ring of nothing.
+        if (double(p.hinge_barrel_dia) <= 2. * hinge_bore_radius(p) + 0.4)
+            return "Barrel diameter is too small for this pin and clearance: it has to clear "
+                   "the pin, twice the clearance and a wall on each side.";
+        if (p.hinge_length <= 0.f)
+            return "Hinge length must be greater than zero.";
+        // Every knuckle loses `gap` of its slot to the end-face clearances; below that the
+        // knuckles vanish and the hinge is just a loose pin.
+        if (hinge_slot_length(p) <= double(flexi_effective_gap(p)) + 0.2)
+            return "Too many knuckles for this hinge length and gap: each knuckle needs more "
+                   "than the gap plus 0.2 mm of length.";
+        return std::string();
+    }
     if (p.kind == FlexiJointKind::ChainLink) {
         if (p.wire <= 0.f)
             return "Wire thickness must be greater than zero.";

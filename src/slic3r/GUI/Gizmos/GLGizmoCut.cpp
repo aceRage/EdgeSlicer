@@ -197,7 +197,7 @@ GLGizmoCut3D::GLGizmoCut3D(GLCanvas3D& parent, const std::string& icon_filename,
     // NOTE: indexed by CutConnectorType, so the Undef slot has to be filled before FlexiJoint.
     m_connector_types = { _u8L("Plug"), _u8L("Dowel"), _u8L("Snap"), "", _u8L("Flexi") };
 
-    m_flexi_kinds = { _u8L("Double ring"), _u8L("Ball & socket"), _u8L("Chain link") };
+    m_flexi_kinds = { _u8L("Double ring"), _u8L("Ball & socket"), _u8L("Chain link"), _u8L("Hinge") };
 
     m_connector_styles = { _u8L("Prism"), _u8L("Frustum")
 //              , _u8L("Claw")
@@ -242,6 +242,11 @@ GLGizmoCut3D::GLGizmoCut3D(GLCanvas3D& parent, const std::string& icon_filename,
         {"Wire"         , _u8L("Wire thickness")},
         {"Link tilt"    , _u8L("Loop tilt")},
         {"Stem"         , _u8L("Stem depth")},
+        {"Knuckles"     , _u8L("Knuckles")},
+        {"Pin dia"      , _u8L("Pin diameter")},
+        {"Barrel dia"   , _u8L("Barrel diameter")},
+        {"Hinge length" , _u8L("Hinge length")},
+        {"Edge offset"  , _u8L("Edge offset")},
     };
 
 //    update_connector_shape();
@@ -2434,6 +2439,54 @@ double GLGizmoCut3D::flexi_slice_closing_radius() const
     return 0.049;
 }
 
+// The hinge axis d in WORLD coordinates: the joint frame's +X, spun by the connector's own
+// Rotation about the cut normal and then by the cut plane's orientation. This is what decides
+// whether the pin prints the easy way (axis flat on the bed) or needs care.
+Vec3d GLGizmoCut3D::flexi_hinge_axis_world() const
+{
+    // Same composition apply_cut_connectors() gives the connector volume, minus the offset.
+    return (m_rotation_m * rotation_transform(-double(m_connector_angle) * Vec3d::UnitZ())).linear() * Vec3d::UnitX();
+}
+
+// Auto edge placement (spec 2.2). The barrel has to sit at the EDGE of the cut face, offset
+// along -e (e = n x d), or the two halves collide the moment they start to fold: material
+// behind the hinge line on each half sweeps through the other's. Phase 1 uses the object's
+// bounding box measured in the cut plane's own frame - the same approximation
+// flexi_section_inscribed_radius() already makes - rather than a contour-exact offset, which
+// the spec defers with it.
+float GLGizmoCut3D::flexi_hinge_auto_edge_offset() const
+{
+    // How far it is from the joint origin out to the cut face's edge along e. The connector's
+    // Rotation turns the run in the plane, so the relevant half extent runs between the box's
+    // x and y half sizes as the angle sweeps.
+    const Vec3d  sz   = m_transformed_bounding_box.size();
+    const double a    = double(m_connector_angle);
+    const double half = std::abs(std::sin(a)) * 0.5 * sz.x() + std::abs(std::cos(a)) * 0.5 * sz.y();
+
+    // Park the barrel's outer wall tangent to that edge - but walk it back in until the WHOLE
+    // knuckle run fits, not just its centre. On a round or tapered cut face the run's far ends
+    // reach further out than its middle does, so a barrel tangent to the widest point of the
+    // face has its ends hanging in the air. Backing off by the sagitta of the run's own
+    // half-length against the face's inscribed circle is the cheap, always-safe version of
+    // that: on a square face it costs nothing worth seeing, and on a round one it is exactly
+    // the correction needed.
+    const double r_in = flexi_section_inscribed_radius();
+    const double hl   = 0.5 * double(m_flexi.hinge_length);
+    double       reach = half;
+    if (r_in > 0. && hl < r_in)
+        // The chord at half-length: how far out the run's ENDS can sit and still be inside a
+        // circle of radius r_in.
+        reach = std::min(reach, std::sqrt(r_in * r_in - hl * hl));
+
+    // One last step back. A barrel whose outer wall lands EXACTLY on the part's own side face
+    // gives the boolean two coplanar surfaces to union across, which is the classic way to
+    // make Manifold (and mcut behind it) give up - and a failed boolean drops the whole joint,
+    // not just the placement. A tenth of a millimetre of bite into the wall costs nothing
+    // visually and keeps every face transverse.
+    const double off = reach - 0.5 * double(m_flexi.hinge_barrel_dia) - 0.1;
+    return float(std::max(0., off));
+}
+
 void GLGizmoCut3D::sync_flexi_params(CutConnectors& connectors, bool resize_from_section)
 {
     m_flexi.kind = FlexiJointKind(m_flexi_kind_id);
@@ -2449,6 +2502,11 @@ void GLGizmoCut3D::sync_flexi_params(CutConnectors& connectors, bool resize_from
 
     if (resize_from_section && m_flexi_auto_size)
         m_flexi = flexi_auto_size(m_flexi, flexi_section_inscribed_radius());
+
+    // The hinge's edge placement follows the cut face, so it is recomputed whenever the size
+    // or the rotation changes - unless the user has taken the wheel with "Auto edge" off.
+    if (m_flexi.kind == FlexiJointKind::Hinge && m_flexi_hinge_auto_edge)
+        m_flexi.hinge_edge_offset = flexi_hinge_auto_edge_offset();
 
     // Keep radius/height in sync so the existing "fits inside the contour" and overlap
     // checks, the preview scaling and the raycasters all keep working unchanged.
@@ -2499,7 +2557,60 @@ void GLGizmoCut3D::render_flexi_joint_inputs(CutConnectors& connectors)
     if (m_imgui->bbl_checkbox(_L("Auto size from the cut cross-section"), m_flexi_auto_size) && m_flexi_auto_size)
         sync_flexi_params(connectors, true);
 
-    if (m_flexi.kind == FlexiJointKind::ChainLink) {
+    if (m_flexi.kind == FlexiJointKind::Hinge) {
+        // Knuckle count is an int, and an ODD one is self-centring: the middle knuckle sits on
+        // the joint origin, so the hinge does not drift off the point the user clicked.
+        {
+            ImGui::AlignTextToFramePadding();
+            m_imgui->text(m_labels_map["Knuckles"]);
+            ImGui::SameLine(m_label_width);
+            ImGui::PushItemWidth(0.55f * float(m_editing_window_width));
+            static const int knuckles_min = 1;
+            static const int knuckles_max = 9;
+            int n = hinge_knuckle_count(m_flexi);
+            if (ImGui::BBLSliderScalar("##flexi_knuckles", ImGuiDataType_S32, &n, &knuckles_min, &knuckles_max, "%d")) {
+                n = std::max(knuckles_min, std::min(knuckles_max, n));
+                if (n != m_flexi.hinge_knuckles) {
+                    m_flexi.hinge_knuckles = n;
+                    changed = true;
+                }
+            }
+            if (ImGui::IsItemHovered())
+                m_imgui->tooltip(_L("How many knuckles the hinge is split into, alternating between the two halves. An odd count centres the hinge on the point you clicked; an even one shifts it by half a knuckle."), ImGui::GetFontSize() * 20.0f);
+        }
+
+        m_imgui->disabled_begin(m_flexi_auto_size);
+            changed |= render_flexi_float_input(m_labels_map["Pin dia"], m_flexi.hinge_pin_dia, 0.4f, 20.f,
+                                                _L("Diameter of the pin that runs through every knuckle. The pin is one continuous solid, integral to whichever half the Fold side names."));
+            changed |= render_flexi_float_input(m_labels_map["Barrel dia"], m_flexi.hinge_barrel_dia, 1.f, 40.f,
+                                                _L("Outer diameter of each knuckle. It has to clear the pin, the clearance on both sides and a wall on each side."));
+            changed |= render_flexi_float_input(m_labels_map["Hinge length"], m_flexi.hinge_length, 2.f, 200.f,
+                                                _L("Overall length of the knuckle run along the hinge axis. Each knuckle gets an equal share of it, less the gap at each end face."));
+        m_imgui->disabled_end();
+
+        // Edge placement: the barrel belongs at the EDGE of the cut face, or the halves cannot
+        // fold shut without colliding. Auto parks it there; the number stays editable for the
+        // protruding / flush / recessed cases.
+        if (m_imgui->bbl_checkbox(_L("Auto edge placement"), m_flexi_hinge_auto_edge) && m_flexi_hinge_auto_edge) {
+            m_flexi.hinge_edge_offset = flexi_hinge_auto_edge_offset();
+            changed = true;
+        }
+        m_imgui->disabled_begin(m_flexi_hinge_auto_edge);
+            changed |= render_flexi_float_input(m_labels_map["Edge offset"], m_flexi.hinge_edge_offset, 0.f, 200.f,
+                                                _L("How far the barrel sits out from the cut plane's centre, towards the edge of the cut face. The halves can only fold shut when the barrel is at (or past) that edge."));
+        m_imgui->disabled_end();
+
+        // Which half owns the pin. The cut's male/female split is a Z-order convention that has
+        // nothing to do with which way the user wants the part to open, so this has to be a
+        // flag rather than something derived.
+        {
+            bool upper = m_flexi.hinge_fold_upper;
+            if (m_imgui->bbl_checkbox(_L("Fold side: the upper half carries the pin"), upper)) {
+                m_flexi.hinge_fold_upper = upper;
+                changed = true;
+            }
+        }
+    } else if (m_flexi.kind == FlexiJointKind::ChainLink) {
         m_imgui->disabled_begin(m_flexi_auto_size);
             changed |= render_flexi_float_input(m_labels_map["Link length"], m_flexi.link_length, 1.f, 80.f,
                                                 _L("Overall length of each loop, along the loop's long axis."));
@@ -2543,7 +2654,18 @@ void GLGizmoCut3D::render_flexi_joint_inputs(CutConnectors& connectors)
     changed |= render_flexi_float_input(m_labels_map["Gap"], m_flexi.gap, m_flexi.clearance, 20.f,
                                         _L("Thickness of the cut: how far apart the two segments' faces end up. Each face is set back from the cut plane by half of it, and the joint bridges the gap. A larger gap makes the joint visibly more flexible; it can never be smaller than the clearance."));
 
-    if (m_flexi.kind != FlexiJointKind::ChainLink)
+    // ROTATION about the cut normal. Every flexi kind has an orientation in the cut plane; for
+    // the hinge this angle IS the pin axis, so it is not an extra control but the main one.
+    // It lives on the connector (z_angle), not in FlexiJointParams, because the connector
+    // volume's own transform already applies it - see add_flexi_joint_volume().
+    if (render_angle_input(m_labels_map["Rotation"], m_connector_angle, 0.f, 0.f, 180.f)) {
+        for (CutConnector& c : connectors)
+            if (c.attribs.type == CutConnectorType::FlexiJoint)
+                c.z_angle = m_connector_angle;
+        changed = true;
+    }
+
+    if (m_flexi.kind != FlexiJointKind::ChainLink && m_flexi.kind != FlexiJointKind::Hinge)
         changed |= render_flexi_float_input(m_labels_map["Tilt"], m_flexi.tilt, 0.f, 3.f,
                                             _L("Extra headroom carved into the groove so the segment can rock."));
 
@@ -2561,6 +2683,17 @@ void GLGizmoCut3D::render_flexi_joint_inputs(CutConnectors& connectors)
     const std::string invalid = flexi_validate(m_flexi);
     if (!invalid.empty())
         m_imgui->text_colored(ImGuiWrapper::COL_ORANGE_LIGHT, invalid);
+
+    // PIN AXIS PRINTABILITY. A pin lying flat on the bed is the EASY case - the bore's roof is
+    // a short bridge the ordinary overhang settings carry. A pin standing up along Z is the one
+    // that needs care, because the bore's roof becomes a full unsupported circle and the moving
+    // interface runs across the layers. Warn, never block: the user may well know better, and
+    // the teardrop bore that fixes it properly is phase 2.
+    if (m_flexi.kind == FlexiJointKind::Hinge && hinge_axis_needs_care(flexi_hinge_axis_world()))
+        m_imgui->text_colored(ImGuiWrapper::COL_ORANGE_LIGHT,
+            _u8L("This hinge's pin axis is not horizontal. A vertical or steeply tilted pin axis needs "
+                 "support inside the bore; rotate the part, or change Rotation so the axis lies flat, "
+                 "or expect to support the bore by hand."));
 
     const double closing_radius = flexi_slice_closing_radius();
     if (flexi_gap_closing_conflict(m_flexi, closing_radius))
@@ -3278,23 +3411,55 @@ bool GLGizmoCut3D::is_outside_of_cut_contour(size_t idx, const CutConnectors& co
 
     // check if connector bottom contour is out of clipping plane
     const CutConnector& cur_connector = connectors[idx];
-    const CutConnectorShape shape = CutConnectorShape(cur_connector.attribs.shape);
-    const int   sectorCount = shape == CutConnectorShape::Triangle  ? 3 :
-                              shape == CutConnectorShape::Square    ? 4 :
-                              shape == CutConnectorShape::Circle    ? 60: // supposably, 60 points are enough for conflict detection
-                              shape == CutConnectorShape::Hexagon   ? 6 : 1 ;
 
     indexed_triangle_set mesh;
     auto& vertices = mesh.vertices;
-    vertices.reserve(sectorCount + 1);
 
-    float fa = 2 * PI / sectorCount;
-    auto vec = Eigen::Vector2f(0, cur_connector.radius);
-    for (float angle = 0; angle < 2.f * PI; angle += fa) {
-        Vec2f p = Eigen::Rotation2Df(angle) * vec;
-        vertices.emplace_back(Vec3f(p(0), p(1), 0.f));
+    if (cur_connector.attribs.type == CutConnectorType::FlexiJoint) {
+        // A FLEXI joint is not a disc. The hinge is a long thin rectangle along its own axis;
+        // the chain link is the slot its two loops sweep through the plane. Testing either
+        // against a CIRCLE of radius flexi_outer_extent() - the distance to the farthest corner
+        // of that shape - rejects joints that fit the cut contour with room to spare, which is
+        // exactly the spurious "1 connector is out of cut contour" the chain link was getting.
+        // The footprint helper returns the real outline, already padded by the clearance, in
+        // the joint's own frame; sampling its EDGES as well as its corners is what catches a
+        // contour notch that a corners-only test would step over.
+        const std::vector<Vec2d> corners = flexi_footprint_corners(cur_connector.flexi);
+        const size_t             n       = corners.size();
+        const int                per_edge = 8;
+        vertices.reserve(n * size_t(per_edge));
+        for (size_t i = 0; i < n; ++ i) {
+            const Vec2d& a = corners[i];
+            const Vec2d& b = corners[(i + 1) % n];
+            for (int k = 0; k < per_edge; ++ k) {
+                const double t = double(k) / double(per_edge);
+                const Vec2d  q = a + t * (b - a);
+                vertices.emplace_back(Vec3f(float(q.x()), float(q.y()), 0.f));
+            }
+        }
+        // The joint frame is spun about the cut normal by the connector's own Rotation, the
+        // same way add_flexi_joint_volume() spins the connector volume - so the footprint of a
+        // rotated hinge is a rotated rectangle, not a bigger one.
+        its_transform(mesh, translation_transform(cur_pos) * m_rotation_m *
+                            rotation_transform(-double(cur_connector.z_angle) * Vec3d::UnitZ()));
     }
-    its_transform(mesh, translation_transform(cur_pos) * m_rotation_m);
+    else {
+        const CutConnectorShape shape = CutConnectorShape(cur_connector.attribs.shape);
+        const int   sectorCount = shape == CutConnectorShape::Triangle  ? 3 :
+                                  shape == CutConnectorShape::Square    ? 4 :
+                                  shape == CutConnectorShape::Circle    ? 60: // supposably, 60 points are enough for conflict detection
+                                  shape == CutConnectorShape::Hexagon   ? 6 : 1 ;
+
+        vertices.reserve(sectorCount + 1);
+
+        float fa = 2 * PI / sectorCount;
+        auto vec = Eigen::Vector2f(0, cur_connector.radius);
+        for (float angle = 0; angle < 2.f * PI; angle += fa) {
+            Vec2f p = Eigen::Rotation2Df(angle) * vec;
+            vertices.emplace_back(Vec3f(p(0), p(1), 0.f));
+        }
+        its_transform(mesh, translation_transform(cur_pos) * m_rotation_m);
+    }
 
     for (const Vec3f& vertex : vertices) {
         if (m_c->object_clipper()) {

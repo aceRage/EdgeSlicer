@@ -432,3 +432,219 @@ has clicked this gizmo either, since it does not exist yet):
    that the two halves do not collide before reaching the intended closed angle — this is the one
    check that only a physical print (or an in-slicer motion preview, not yet built) can really
    validate, since §2.2's auto placement is a heuristic, not a proof.
+
+---
+
+## 7. Phase 1 implemented
+
+Branch `feat/hinge-connector`. This section records what actually shipped against the plan
+above, what the proofs were, and what is explicitly still unverified.
+
+### 7.1 What was built
+
+`FlexiJointKind::Hinge` is a fourth kind under `CutConnectorType::FlexiJoint`. As §2.5
+predicted, `Cut::perform_with_flexi_joints()` needed **no structural change at all**: the hinge
+fills the same four generic lists the chain link does (`flexi_lower_bodies` /
+`flexi_upper_bodies` / `flexi_lower_reliefs` / `flexi_upper_reliefs`), and the existing
+Manifold-with-mcut-fallback plumbing runs them unchanged.
+
+Geometry (`src/libslic3r/FlexiJoint.cpp`), in the cut frame with the hinge axis along **+X**:
+
+* `N` knuckle **slots** of length `S = hinge_length / N`, the run centred on the joint origin.
+  Knuckle `i` is a cylinder of length `S - gap` centred in slot `i`, so **every** pair of
+  facing knuckle end faces is exactly `gap` apart. That is pure placement arithmetic - no
+  Clipper pass - because a cylinder shortened uniformly along its own axis is still a cylinder,
+  exactly as §2.5 argued.
+* Even-indexed knuckles belong to the lower half, odd to the upper; `hinge_fold_upper` swaps
+  both parities at once (§2.3).
+* The **pin** is one continuous cylinder spanning the whole run, returned as its own component
+  in the pin-bearing half's body list. The cut pipeline unions the list entry by entry, so the
+  union is what fuses pin to knuckles - the same way the double ring's lip and hub are separate
+  components.
+* The **bore** is not cut in the body pass. It falls out of the relief pass: the bore-side
+  half's reliefs are the other half's knuckles inflated by `C` plus **the pin inflated by `C`**,
+  and subtracting that inflated pin from the half drills every one of its knuckles at exactly
+  `R_p + C`. Body and clearance stay two independent, separately testable steps.
+* **Rotation** is the connector's existing `z_angle`. Nothing in the geometry knows about it:
+  `add_flexi_joint_volume()` already spins the connector volume by `-z_angle` about the cut
+  normal, and `perform_with_flexi_joints()` picks that up through `joint_matrix`. A rotated
+  hinge is therefore a *rotated* run, not a differently-generated one.
+* **Edge placement** is `hinge_edge_offset`, a distance along `-e` (i.e. `-Y` in the joint
+  frame). See §7.3 for the correction auto-placement needed.
+
+### 7.2 Parameters and defaults
+
+| Field | Default | Range | Notes |
+|---|---|---|---|
+| `hinge_knuckles` | 3 | 1..9 | odd is self-centring; the panel slider enforces the range |
+| `hinge_pin_dia` | 2.0 mm | 0.4..20 | |
+| `hinge_barrel_dia` | 4.0 mm | 1..40 | must exceed pin + 2xClearance + 0.4 wall, enforced in `flexi_validate()` |
+| `hinge_length` | 12.0 mm | 2..200 | the whole run, end face to end face |
+| `hinge_edge_offset` | 0 (auto) | 0..200 | auto by default; the checkbox releases it |
+| `hinge_fold_upper` | false | | false = the lower half carries the pin |
+| Gap | 0.6 mm | >= clearance | shared with the ring and the ball, per `flexi_default_gap()` |
+| Clearance | `flexi_clearance_floor(nozzle)` = 0.30 on a 0.4 nozzle | | shared, unchanged |
+| Rotation | 0 deg | 0..180 | the existing connector `z_angle`; **this is** the hinge axis |
+
+Auto sizing (`flexi_auto_size()`) derives the run length from the cut cross-section
+(`1.6 x` the inscribed radius, capped at 60 mm), the barrel from `0.35 x` it (2..10 mm), the pin
+from `0.45 x` the barrel, and then widens the barrel if needed so it still clears the pin,
+twice the clearance and a 0.8 mm wall on each side.
+
+Note on the clearance default: §1/§4 recommended a hinge-specific 0.30 mm pin clearance rather
+than Flexi's 0.35. That value **is** what a 0.4 mm nozzle produces today, because
+`flexi_clearance_floor(0.4) == 0.30` and the gizmo floors the clearance at it - so the
+recommended number arrives without a separate per-kind default. A distinct `hinge_clearance`
+field was deliberately not added: one clearance knob per joint is easier to reason about, and
+the per-nozzle table in §4 is already what the floor implements.
+
+### 7.3 The auto edge placement correction
+
+§2.2 says to park the barrel so its outer surface is tangent to the cut face's edge. Built that
+way and tested against the round cut face of the 20 mm cylinder, the **middle** of the barrel
+is tangent but the run's two far **corners** hang outside the contour - a 12 mm run at the
+widest point of a 20 mm circle overhangs by 1.7 mm at each end.
+
+Auto placement therefore parks the barrel at the **chord at half the run's length**:
+`reach = sqrt(r_in^2 - (hinge_length/2)^2)`, then out by the barrel radius. On a square or
+rectangular cut face this costs essentially nothing; on a round one it is exactly the correction
+needed, and it puts the run's far corners *on* the rim - as far out as the hinge can go with its
+whole footprint still inside the face. This is still a bounding-box/inscribed-circle
+approximation, the same one §5's risk (b) says Phase 1 should accept.
+
+**And a second correction, found the hard way.** A barrel parked so its outer wall lands
+*exactly* on the part's own side face - which is what "tangent to the edge" literally means on
+a flat-sided part - gives the Manifold union two **coplanar** surfaces to work across. On the
+40 mm demo cube that made the boolean fail outright, and a failed boolean does not degrade
+gracefully: `perform_with_flexi_joints()` logs and falls back to two plain halves, so the whole
+joint silently disappears. Auto placement therefore backs off a further **0.1 mm**, biting that
+much into the wall so every face stays transverse. It is invisible on the part and it is the
+difference between a hinge and no hinge. Worth remembering for any future "flush with the
+surface" placement option (§6's Phase 2 item): flush must mean *nearly* flush.
+
+### 7.4 The out-of-contour fix
+
+`GLGizmoCut3D::is_outside_of_cut_contour()` now branches on
+`cur_connector.attribs.type == CutConnectorType::FlexiJoint` and samples
+`flexi_footprint_corners()` - the joint's **real** outline - instead of a circle of radius
+`flexi_outer_extent()`:
+
+* **Hinge**: the knuckle run's rectangle, `hinge_length` by `hinge_barrel_dia`, offset by the
+  edge offset.
+* **Chain link**: the bounding rectangle of both loops' centrelines projected onto the cut
+  plane, grown by `wire + clearance` - the slot the interlocked pair actually sweeps through
+  the plane.
+* **Double ring / ball & socket**: a 60-gon on the disc of radius `flexi_outer_extent()`, i.e.
+  byte-for-byte the circle the function used to build by hand.
+
+Each edge is sampled at 8 points as well as its corners, so a notch in the contour cannot be
+stepped over. The footprint is transformed by
+`translation_transform(pos) * m_rotation_m * rotation_transform(-z_angle * UnitZ())` - the same
+composition `add_flexi_joint_volume()` gives the connector volume - so a rotated hinge tests as
+a rotated rectangle rather than a bigger one.
+
+**This is what fixes the owner's spurious "1 connector is out of cut contour" on chain links.**
+The old test asked "does a disc big enough to swallow the joint fit?", which for a 7 mm long
+chain link means a disc of radius ~4.9 mm in *every* direction, when what the joint needs is
+that reach in *one* direction and about half of it across. `flexi_outer_extent()` is still what
+sizes the connector's picking radius and preview - only the contour test changed.
+
+### 7.5 Printability warning
+
+`hinge_axis_needs_care(axis_world)` returns true when `|d.z| / |d| > 0.1` (about 6 degrees off
+horizontal), and the panel then shows an orange warning - never a block. Per §1's correction of
+the brief, **horizontal is the easy case** (short bridge over the pin, ordinary overhang
+settings carry it) and vertical is the one needing care (full unsupported circle over the bore,
+teardrop profile deferred to Phase 2). The gizmo derives `d` in world coordinates as
+`(m_rotation_m * Rz(-z_angle)).linear() * UnitX()`.
+
+### 7.6 Proofs
+
+Build: `BUILD_EXIT=0` in a dedicated worktree build tree configured like `build` with
+`-DBUILD_TESTS=ON`. `libslic3r_tests "[FlexiJoint]"` - all cases pass, including every
+pre-existing Flexi and Chain link case, unchanged.
+
+New cases in `tests/libslic3r/test_flexi_joint.cpp`:
+
+* **Knuckles alternate.** For `N = 1, 2, 3, 4, 5, 9`: consecutive knuckles belong to opposite
+  halves; the fold-side flag inverts every parity; the two halves' body lists partition the run
+  (`ceil(N/2) + 1` bodies on the pin side counting the pin, `floor(N/2)` on the other); the run
+  is centred on the joint origin.
+* **Pin continuity.** The pin is watertight, **one** connected component (union-find over its
+  triangles), spans exactly from the first knuckle's outer face to the last one's, has the
+  declared radius, and its volume matches a solid cylinder to 2% - it is not a tube. Every
+  bore-side knuckle's slot lies strictly inside the pin's span, so the pin really does pass
+  through them.
+* **Non-intersection with Gap.** The finished cut's two halves have **zero** boolean
+  intersection volume and a minimum surface distance of **0.34988 mm** against a declared
+  clearance of 0.35 - and `>= 0.2` as the proof bar asks.
+* **Knuckle end-face gaps.** At gaps of 0.4, 0.6 and 1.2 mm: slot length minus knuckle length
+  equals the gap exactly, and every facing pair of end faces is that far apart, `>= gap`.
+* **Barrel at the contour edge.** Every corner of the footprint is inside the cut contour, the
+  run's far corners sit *on* the rim (as far out as it can go), and pushing the offset 0.5 mm
+  further puts corners outside - which is what the fixed contour check now catches.
+* **Rotation.** The footprint's long and short axes swap under a 90 degree rotation (same
+  rectangle, turned); and a full cut with `z_angle = 90 deg` produces material above the cut
+  plane spread along Y where the unrotated cut spreads it along X, the same size either way.
+* **Pin-axis warning.** Fires for vertical and steeply tilted axes, stays quiet for horizontal
+  ones and for a few degrees off flat, and does not nag on a degenerate axis.
+* **Guards.** A barrel too small for its bore plus a wall, too many knuckles for the length, and
+  out-of-range knuckle counts are all refused; the hinge is captive (bore < barrel); auto sizing
+  produces a valid hinge at inscribed radii of 5, 10 and 20 mm.
+* **Footprint vs. the old circle** (the gizmo needs a GL canvas, so this tests the helper the
+  fixed function calls, as §6 anticipated): the chain link fits a contour the old circle test
+  rejected, and still fails one it genuinely does not fit; a long thin hinge fits a contour far
+  smaller than its own length; the revolved kinds still produce exactly the 60-point circle.
+* **Serialization round trip.** All six new fields survive a cereal binary round trip; the
+  defaults are what old files get and they make a **valid** hinge as they stand; `operator==`
+  and `!=` see the new fields, so undo/redo notices a change to them.
+* **3MF round trip.** A hinged cut object stores and loads as one object with two watertight
+  parts.
+
+**Demo.** `libslic3r_tests "Export the hinge demo"` (hidden `[.][HingeDemo]` tag, output
+directory in `SNORCA_HINGE_OUT`) cuts a 40 mm cube at mid height with one 3-knuckle hinge
+(3 mm pin, 6 mm barrel, 24 mm run, Gap 0.6, Clearance 0.30) and writes
+`hinge_demo_upper.stl`, `hinge_demo_lower.stl` and `hinge_demo.3mf`.
+
+### 7.7 Unverified
+
+* **Nobody has clicked it.** The gizmo cannot be instantiated in `libslic3r_tests` (no GL
+  canvas), so the panel rows, the Rotation control inside the Flexi block, the auto-edge
+  checkbox, the knuckle slider and the warning text have been compiled but never rendered. The
+  same caveat the Flexi spec's §8 carries.
+* **Nothing has been printed.** Every clearance claim here is measured on the mesh, not on
+  plastic. The 0.30 mm clearance and the bridge over the bore are the two things only a print
+  can settle.
+* **The contour check is proven at the helper, not through the gizmo.** `flexi_footprint_corners()`
+  is tested directly; that `is_outside_of_cut_contour()` calls it correctly is code review plus a
+  clean build, not a test.
+* **Concave and multi-lobe cut faces.** Auto placement uses the bounding box and the inscribed
+  circle, per §5's risk (b). A cut face with a notch where the hinge lands will place badly - the
+  contour check will *catch* it, but the auto offset will not have avoided it.
+* **Even knuckle counts** are allowed and tested for topology, but an even run puts a
+  knuckle-to-knuckle boundary on the joint origin rather than a knuckle, so the hinge is not
+  self-centring there. That is by design (§3) and is not warned about in the panel.
+* **Axial captivity.** As §6 flags: nothing stops the pin sliding out along its own axis. The
+  hinge is captive against sideways pull (the bore wraps the pin) but not against axial pull.
+  End caps are a Phase 2 item.
+
+### 7.8 Physical print checklist
+
+1. Open `hinge_demo.3mf` from the demo export (or cut your own: any part, Cut gizmo,
+   Type = Flexi, Joint = Hinge, defaults).
+2. 0.4 mm nozzle, 0.2 mm layer, PLA. Same rig as the Flexi spec's prints, for comparison.
+3. Confirm `slice_closing_radius` is at its stock 0.049 mm. The panel warns if it is not; at
+   0.30 mm clearance the safe ceiling is 0.15 mm.
+4. Check the pin-axis warning behaves: rotate the part before cutting so the cut plane tilts,
+   and confirm the orange line appears as the axis leaves horizontal and goes away again.
+5. Orient so the pin axis lies **flat on the bed**. Slice with supports off (or build-plate
+   only). In preview, step through the knuckle layers: expect a short bridge over the pin
+   clearance at the top of each bore and nothing else unsupported.
+6. Print. Remove from the bed without tools.
+7. Confirm: the hinge swings without cracking; the two halves are not fused; the halves cannot
+   be pulled apart sideways. If fused, raise Clearance one step (§4's per-nozzle table) and
+   re-check `slice_closing_radius`; consider dropping flow 2-5% per §1.
+8. Fold the part fully closed and confirm the two halves do not collide before the intended
+   angle. This is the one check only a print settles - §2.2/§7.3's placement is a heuristic,
+   not a proof.
+9. Note whether the pin can be pushed out along its axis (§7.7). Expected: yes, in Phase 1.

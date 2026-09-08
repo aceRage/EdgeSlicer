@@ -40,9 +40,30 @@
 // radius t + C - a uniform offset of a tube IS a fatter tube, so the clearance is exact here
 // too.
 //
+// HINGE. A print-in-place pin hinge: N alternating knuckles strung along an in-plane axis,
+// with one continuous pin running through all of them.
+//   * The in-plane axis is +X in the cut frame; the connector's own Rotation (z_angle) spins
+//     the whole joint about the cut normal, so nothing here has to know about it.
+//   * Knuckle i occupies a slot of length K along +X; the run of N slots is centred on the
+//     joint origin. Even-indexed knuckles belong to the LOWER segment, odd-indexed ones to the
+//     UPPER segment (swapped by `hinge_fold_upper`). Each cylinder is generated gap/2 short at
+//     each end of its slot, so every pair of facing knuckle end faces is exactly `gap` apart -
+//     pure placement arithmetic, no Clipper pass, because a cylinder shortened uniformly is
+//     still a cylinder.
+//   * The PIN is one continuous cylinder of radius R_p spanning the whole run, integral to the
+//     half that owns the even knuckles. The other half's knuckles are bored to R_p + clearance,
+//     so the pin turns inside them with exactly the clearance all round.
+//   * The barrel sits at the EDGE of the cut face, offset along -e (e = n x d = +Y in the cut
+//     frame) by `hinge_edge_offset`, so that when the two halves fold shut there is no material
+//     behind the hinge line for them to collide with. The gizmo fills that offset in from the
+//     cut contour; the geometry here just honours it.
+// Phase 1 is horizontal-pin-axis only in the sense that a non-horizontal axis is WARNED about
+// (not blocked) in the gizmo: a vertical pin axis needs a teardrop bore, which is phase 2.
+//
 // The cut splits the object at z == -gap/2 for the male half and at z == +gap/2 for the
 // female half (for the revolved kinds the female face additionally clears the male body by C).
 
+#include <cmath>
 #include <string>
 #include <vector>
 
@@ -60,6 +81,9 @@ enum class FlexiJointKind : int {
     // Two interlocking closed loops, one lying in the cut plane and one standing along the
     // cut normal, hinging and swivelling like two links of a chain.
     ChainLink = 2,
+    // A print-in-place pin hinge: N alternating knuckles along an in-plane axis with one
+    // continuous pin through them, placed at the edge of the cut face so the halves fold shut.
+    Hinge = 3,
 };
 
 struct FlexiJointParams
@@ -102,6 +126,24 @@ struct FlexiJointParams
     // How deep each loop's far end is embedded in its own segment.
     float stem{ 1.5f };
 
+    // ----------------------------------------------------------------------- Hinge only
+    // Number of knuckles along the hinge axis. Odd counts are self-centring (the middle
+    // knuckle sits on the joint origin), which is why the default is 3. 1..9.
+    int hinge_knuckles{ 3 };
+    // Diameter of the continuous pin.
+    float hinge_pin_dia{ 2.0f };
+    // Outer diameter of each knuckle barrel. Has to clear the pin, its bore clearance and a
+    // printable wall: see flexi_validate().
+    float hinge_barrel_dia{ 4.0f };
+    // Overall length of the knuckle run along the hinge axis, end face to end face.
+    float hinge_length{ 12.0f };
+    // How far the barrel centreline is pushed out from the cut face's edge along -e.
+    // The gizmo computes this from the cut contour; 0 leaves the barrel on the joint origin.
+    float hinge_edge_offset{ 0.0f };
+    // Which half carries the pin (and therefore the even-indexed knuckles). false = the
+    // lower half, which is the default; true swaps the two parities.
+    bool hinge_fold_upper{ false };
+
     bool operator==(const FlexiJointParams &o) const
     {
         return kind == o.kind && is_approx(outer_radius, o.outer_radius) && is_approx(ring_width, o.ring_width) &&
@@ -109,14 +151,18 @@ struct FlexiJointParams
                is_approx(gap, o.gap) && is_approx(hub_radius, o.hub_radius) && is_approx(tilt, o.tilt) &&
                is_approx(neck_ratio, o.neck_ratio) && is_approx(open_angle, o.open_angle) &&
                is_approx(link_length, o.link_length) && is_approx(link_width, o.link_width) &&
-               is_approx(wire, o.wire) && is_approx(tilt_angle, o.tilt_angle) && is_approx(stem, o.stem);
+               is_approx(wire, o.wire) && is_approx(tilt_angle, o.tilt_angle) && is_approx(stem, o.stem) &&
+               hinge_knuckles == o.hinge_knuckles && is_approx(hinge_pin_dia, o.hinge_pin_dia) &&
+               is_approx(hinge_barrel_dia, o.hinge_barrel_dia) && is_approx(hinge_length, o.hinge_length) &&
+               is_approx(hinge_edge_offset, o.hinge_edge_offset) && hinge_fold_upper == o.hinge_fold_upper;
     }
     bool operator!=(const FlexiJointParams &o) const { return !(*this == o); }
 
     template<class Archive> void serialize(Archive &ar)
     {
         ar(kind, outer_radius, ring_width, ring_height, clearance, hub_radius, tilt, neck_ratio, open_angle,
-           gap, link_length, link_width, wire, tilt_angle, stem);
+           gap, link_length, link_width, wire, tilt_angle, stem,
+           hinge_knuckles, hinge_pin_dia, hinge_barrel_dia, hinge_length, hinge_edge_offset, hinge_fold_upper);
     }
 };
 
@@ -173,7 +219,10 @@ std::vector<indexed_triangle_set> flexi_female_cavities(const FlexiJointParams &
 
 // True when the kind builds a body on BOTH segments (chain link) rather than a protrusion on
 // the male one and a cavity on the female one.
-inline bool flexi_is_two_sided(const FlexiJointParams &p) { return p.kind == FlexiJointKind::ChainLink; }
+inline bool flexi_is_two_sided(const FlexiJointParams &p)
+{
+    return p.kind == FlexiJointKind::ChainLink || p.kind == FlexiJointKind::Hinge;
+}
 
 // The bodies to UNION into the lower / upper segment.
 std::vector<indexed_triangle_set> flexi_lower_bodies(const FlexiJointParams &p);
@@ -191,6 +240,60 @@ std::vector<std::vector<Vec2d>> flexi_female_profiles(const FlexiJointParams &p)
 // A single preview body: the male lip plus the female cavity shell, for the gizmo's
 // connector-style preview on the cut plane.
 indexed_triangle_set flexi_preview_body(const FlexiJointParams &p);
+
+// ------------------------------------------------------------------------------------- hinge
+
+// Number of knuckles actually used: p.hinge_knuckles clamped into 1..9.
+int   hinge_knuckle_count(const FlexiJointParams &p);
+// Length of one knuckle SLOT along the hinge axis: hinge_length / N. Each cylinder is built
+// gap/2 short at each end of its slot, so the solid part is slot - gap long.
+double hinge_slot_length(const FlexiJointParams &p);
+// The solid length of one knuckle cylinder: slot - gap, floored so it never inverts.
+double hinge_knuckle_length(const FlexiJointParams &p);
+// Centre of knuckle slot i along the hinge axis (+X in the cut frame), the run centred on 0.
+double hinge_slot_centre(const FlexiJointParams &p, int i);
+// True when knuckle i belongs to the LOWER segment (and therefore carries the pin).
+bool  hinge_knuckle_is_lower(const FlexiJointParams &p, int i);
+// Radius of the bore drilled through the knuckles that do NOT carry the pin.
+inline double hinge_bore_radius(const FlexiJointParams &p)
+{
+    return 0.5 * double(p.hinge_pin_dia) + double(p.clearance);
+}
+// The barrel centreline's offset from the joint origin along -e (e = n x d = +Y here), i.e.
+// how far out towards the cut face's edge the hinge sits.
+inline double hinge_axis_y(const FlexiJointParams &p) { return -double(p.hinge_edge_offset); }
+
+// The hinge's real footprint on the cut plane: the four corners of the knuckle run's oriented
+// rectangle - hinge_length along the axis by the barrel diameter across it, centred on the
+// barrel centreline - each grown by `pad`. In the JOINT's own frame (axis = +X); the caller
+// rotates by the connector's z_angle and translates to the connector position. This is what
+// the gizmo's "fits inside the cut contour" test has to sample instead of a circle: a long
+// thin hinge fits contours that its circumscribing circle does not.
+std::vector<Vec2d> hinge_footprint_corners(const FlexiJointParams &p, double pad = 0.);
+
+// The same idea for the chain link: the two loops sweep a SLOT through the cut plane, not a
+// disc. Returns the corners of that slot's bounding rectangle in the joint frame, padded.
+std::vector<Vec2d> chain_footprint_corners(const FlexiJointParams &p, double pad = 0.);
+
+// The footprint the gizmo should test for ANY flexi kind: the real rectangle for the hinge
+// and the chain link, and for the revolved kinds a 60-gon on the disc of radius
+// flexi_outer_extent() - exactly the circle the gizmo used to build by hand. Always at least
+// three points, always in the joint frame.
+std::vector<Vec2d> flexi_footprint_corners(const FlexiJointParams &p, double pad = 0.);
+
+// PRINTABILITY OF THE PIN AXIS. A pin whose axis is HORIZONTAL (parallel to the bed) is the
+// easy case: nothing about the bore has to bridge more than the pin's own width, and the
+// ordinary overhang/bridging settings carry it. A pin whose axis is VERTICAL is the hard one -
+// every layer of the bore is a plain ring, but the SEAM between the two halves then runs
+// across the printed layers and the bore's roof is a full unsupported circle. `axis_world` is
+// the hinge axis d in WORLD coordinates (the +X of the joint frame, spun by the connector's
+// rotation and the cut plane's own orientation). Returns true when the axis is more than about
+// 6 degrees off horizontal, which is what the gizmo warns - never blocks - on.
+inline bool hinge_axis_needs_care(const Vec3d &axis_world)
+{
+    const double n = axis_world.norm();
+    return n > EPSILON && std::abs(axis_world.z()) / n > 0.1;
+}
 
 // ------------------------------------------------------------------------------------ guards
 
