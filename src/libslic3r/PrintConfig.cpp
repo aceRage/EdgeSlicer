@@ -4383,6 +4383,21 @@ void PrintConfigDef::init_fff_params()
     def->mode     = comAdvanced;   // upstream uses comExpert; this fork has no such tier
     def->set_default_value(new ConfigOptionFloat(0.05));
 
+    def = this->add("zaa_speed_scaling", coBool);
+    def->label    = L("Constant flow speed scaling");
+    def->category = L("Quality");
+    def->tooltip  = L("Keep volumetric flow constant on contoured moves by slowing thin segments.\n"
+                      "A contoured bead varies between the minimum Z height and the layer height, so at "
+                      "the role's unchanged speed the thin end is starved of material and the Z axis has "
+                      "least time exactly where it moves most. This scales the feed rate by "
+                      "(local height / layer height), so every contoured segment extrudes at the same "
+                      "rate the role would at the nominal layer height. Contoured segments are only ever "
+                      "slowed, never sped up beyond the role's speed, and never below 10 mm/s.\n"
+                      "At 0.2 mm layers a minimum Z height of 0.08 keeps the slowdown to 2.5x; the 0.05 "
+                      "default asks for 4x on the thinnest segments.");
+    def->mode     = comAdvanced;   // alongside the other zaa_* keys
+    def->set_default_value(new ConfigOptionBool(true));
+
     def = this->add("layer_change_gcode", coString);
     def->label = L("Layer change G-code");
     def->tooltip = L("This G-code is inserted at every layer change after the Z lift.");

@@ -557,3 +557,161 @@ mesh. If the owner wants the effect ZAA is famous for, the dome - or a shallower
 *larger* layer height, where the exposed band is wider than the walls - is the model that shows it.
 A 0.3 mm ZAA print of the dome is worth a look for the same reason: upstream reports it as still
 close to a conventional 0.1 mm finish at about half the time.
+
+## Constant-flow speed scaling (2026-09-08, branch `feat/z-contouring-speed`)
+
+The owner printed the reviewed version on 2026-09-08 and reported it "looks much better", with
+one remaining complaint: **at 0.2 mm layers the contoured surface is a little rougher than at
+thinner layers**. The diagnosis in the brief: the ZAA band is a full layer high, so a contoured
+segment swings from a 0.25 mm bead down to the 0.05 mm `zaa_min_z` minimum *at the role's
+unchanged speed*. The thin end is starved of material and the Z axis is doing its fastest work
+exactly where the bead is thinnest.
+
+### The rule
+
+For every contoured extrusion segment, with `H` the nominal layer height and `h_seg` the
+segment's local height (`H` plus the trapezoid mean of its two endpoint contour deltas - exactly
+the height the segment's `E` was already scaled by):
+
+```
+F_seg = clamp( F_role * h_seg / H , floor , F_role )   then capped by max_volumetric_speed
+```
+
+* `F_role` is the feed rate the segment was about to run at, so the scaling **composes with**
+  rather than overrides every dynamic slowdown the fork already applies: overhang grading and
+  the curled-perimeter estimator (which sets its own per-point F, scaled here in turn),
+  small-perimeter / resonance avoidance, the initial-layer ramp, and the
+  `filament_max_volumetric_speed` cap that `speed` has already been clamped to.
+* **Never above `F_role`.** A contoured bead can sit up to `zaa_min_z` proud (the top half of the
+  band, on top surfaces) and the ratio would ask for a speed-up; the role speed is a deliberate
+  ceiling, so contoured moves are only ever slowed.
+* **Floor:** a fixed `ZAA_MIN_SPEED_MM_S = 10 mm/s`, not a config key. It is a lower bound on sane
+  behaviour rather than a tuning knob - below it a print move becomes a dwell that oozes - and it
+  never raises F above a role that is already slower than it.
+* **Hysteresis:** `ZAA_SPEED_HYSTERESIS = 0.05`. Consecutive segments whose local height is within
+  5 % of the height that set the F in force keep that F. This bounds the flow error the hysteresis
+  itself introduces at exactly 5 %, and it is what keeps the F changes down to 2-3 % of contoured
+  segments on a dome (41-45 % on the wedge, whose contour is one continuous ramp).
+
+Both `contour_z_segment_feedrate()` and `contour_z_speed_within_hysteresis()` are pure functions
+in `ContourZ.{hpp,cpp}`, driven directly by the tests.
+
+**A note on the brief's formula.** The brief wrote the rule as `F_seg = F_role * (h_nominal /
+h_seg)` while also requiring that "a thin segment slows down", that the 10 mm/s floor be
+reachable, and that "the time estimate reflect the slower thin segments". Those cannot both hold:
+with `h_nominal / h_seg` a thin segment asks for a *higher* F, the never-exceed clamp then pins it
+at `F_role`, and the rule becomes inert on exactly the walls the owner complained about. Measured
+on the dome, all 6266 contoured outer-wall segments are thinner than nominal, so that reading
+changes nothing on them and the floor is unreachable (the slowest it can go is `H / (H + min_z)` =
+0.8 x `F_role`). The transposed form above satisfies every clause of the brief, so that is what is
+implemented; the two orderings are otherwise identical.
+
+### The key
+
+| key | type | default | meaning |
+|---|---|---|---|
+| `zaa_speed_scaling` | bool | `true` | keep volumetric flow constant on contoured moves by slowing thin segments |
+
+Placed next to the other four `zaa_*` keys in `PrintConfig.cpp`, greyed out with them by
+`ConfigManipulation` when `zaa_enabled` is off, per-object overridable via `GUI_Factories.cpp`,
+and on the Quality page under Z contouring. The tooltip carries the `zaa_min_z` guidance the
+brief asked for: at 0.2 mm layers a minimum Z height of 0.08 keeps the slowdown to 2.5x, where
+the 0.05 default asks for 4x on the thinnest segments.
+
+### THE BLOCKER: CoolingBuffer owns one speed per extrusion
+
+**This feature does not currently reach the G-code when `slow_down_for_layer_cooling` is on,**
+which is the default on every profile tested. The scaling is correct and provably applied when
+that option is off; with it on, the emitted file is byte-identical to the unscaled one apart from
+the timestamp, the config line and a 12 um retract difference.
+
+The cause is architectural, in `GCode/CoolingBuffer.cpp`:
+
+* the buffer models **one adjustable speed per extrusion path**. The first `;_EXTRUDE_SET_SPEED`
+  line of a path becomes the block's speed modifier (`active_speed_modifier`), and every movement
+  line after it until `;_EXTRUDE_END` is folded into that modifier and then discarded outright
+  (`line.type = 0; // Don't store this line`, ~line 490);
+* it also asserts that no `G1` inside such a block carries its own `F` (~line 476).
+
+Three emission strategies were tried, each defeated by a different half of that:
+
+| strategy | result |
+|---|---|
+| `F` word inside the movement `G1` (what the brief asked for) | violates the assert; in Release the line silently **escapes the layer-time slowdown**. Measured on the dome: contoured outer walls kept running at 9124 mm/min where cooling had slowed the rest of the layer to 2841 - a 3.2x over-speed, strictly worse than doing nothing |
+| a separate `G1 F...` carrying `;_EXTRUDE_SET_SPEED` | folded into the path's first modifier and dropped; 0 of 7004 contoured segments kept an F |
+| `;_EXTRUDE_END` then a new `;_EXTRUDE_SET_SPEED` block per speed change | same; the collapse is not avoided this way |
+
+The matrix, dome at 0.2 mm, model printing time:
+
+| | scaling off | scaling on |
+|---|---|---|
+| `slow_down_for_layer_cooling=1` (default) | 12m 43s | **12m 43s** (no effect) |
+| `slow_down_for_layer_cooling=0` | 6m 21s | 6m 19s |
+
+With cooling off the scaling demonstrably works, measured on the contoured moves alone:
+**contoured extrusion time 9.1 s -> 11.0 s (+21 %), non-contoured 151.5 s -> 151.5 s** (identical
+to the microsecond). That is the feature doing exactly what it should, on exactly the moves it
+should, and nothing else.
+
+Note also that the *whole-print* estimate is not a valid measure of this change even when it
+works: slowing the contoured moves lengthens each layer, which makes the layer-time cooling
+slowdown relax the speed it was imposing on the **whole** layer, so the total can legitimately
+come out lower. `bar_b_speed.py` therefore asserts on the contoured extrusion time computed from
+the file, not on the header estimate.
+
+**Resolving this needs a decision that is bigger than this change:** either teach CoolingBuffer to
+carry a per-segment speed profile through a path (it currently reduces a path to one `feedrate`,
+one `time` and one `time_max`), or let a contoured path opt out of the layer-time slowdown and
+accept that ZAA tops are not cooled like the rest of the layer. Neither should be chosen without
+the owner. Until then the key is best treated as effective only with layer-time cooling off.
+
+### Proofs
+
+* **`libslic3r_tests`: 700 cases, 698 passed, 2 failed as expected** (the head's own two). The
+  `[ContourZ]` tag is 8 cases / 1473 assertions, all passing: the review's six plus two new ones
+  for the scaling rule (constant flow on a thin segment, the never-speed-up clamp swept across
+  the whole height range, the floor and its interaction with an already-slow role, the volumetric
+  cap winning over both, degenerate inputs, and monotonicity in the local height) and for the
+  hysteresis (the band's two sides, no-F-yet, the bounded flow error, and that a slowly drifting
+  profile emits exactly one F while a real ramp emits more than one but far fewer than one per
+  segment).
+* **Bar B (`scripts/zaa/bar_b_speed.py` + `zaa_speed_report.py`)**: on the wedge and the dome at
+  0.2 and 0.12 mm, with `slow_down_for_layer_cooling` off, every contoured path satisfies the
+  within-path invariant `F_seg / h_seg = F_role / H` to **0.000 % mean / 0.575 % max** on the
+  outer wall and the inner wall, with the residual on top surfaces bounded by the 5 % hysteresis
+  band and **nothing outside it**; no segment below the floor; `--export-3mf` accepted every
+  case; and the **Z profile is identical to the unscaled slice in every run** - 7029 vs 7029
+  values on the dome, 17444 vs 17444 on the wedge - so every jitter and bead-height number the
+  2026-09-07 review measured is untouched by construction.
+* The analyzer measures a **within-path** ratio rather than an absolute flow precisely so it needs
+  no role-speed reference. Two earlier versions that inferred `F_role` (from the maximum F in the
+  scaled file, then from a reference slice) both reported phantom 11 % and 87 % errors: a path
+  whose contour is flat-but-not-nominal is scaled uniformly, so the largest F in the scaled file
+  is already scaled, and the largest F in a reference slice is a travel speed. It also skips the
+  `G1` after any `G2`/`G3`, whose segment length is not measurable from the previous `G1`.
+* **Bar A**: `scripts/zaa/bar_a_zaa.py`, updated for the fifth `zaa_*` config line.
+
+### At 0.12 mm the scaling engages less, as expected
+
+On the dome the contoured outer wall spans `h_seg` 0.079..0.189 mm at 0.2 mm layers (F 3825..9218,
+a 2.4x spread) but only 0.063..0.105 mm at 0.12 mm layers (F 6252..10537, a 1.7x spread), and the
+share of contoured segments needing an F change falls from 2.9 % to 2.1 %. The wedge shows the
+same: 0.102..0.200 mm at 0.2 mm against 0.102..0.120 mm at 0.12 mm. Thinner layers give the band
+less room to vary, which is the same reason the owner saw less roughness there.
+
+### The print test the owner should run
+
+The same two models as the review - `scripts/zaa/make_wedge.py` and `scripts/zaa/make_dome.py` -
+at **0.2 mm**, ZAA on, changing only `zaa_speed_scaling`:
+
+1. **dome, scaling off** - the 2026-09-08 print, the control.
+2. **dome, scaling on**.
+3. **wedge, scaling off**.
+4. **wedge, scaling on**.
+
+**Set `slow_down_for_layer_cooling` off for all four**, or 2 and 4 will be byte-identical to 1 and
+3 - see the blocker above. What to look for: on the dome's cap, where the bead is thinnest and the
+Z axis moves most, whether the surface is smoother and the extrusion width more even; and whether
+the thin end of any contoured run still shows the starved, under-filled look that motivated this.
+A `zaa_min_z` of 0.08 is worth a fifth print at 0.2 mm: it halves the worst-case slowdown from 4x
+to 2.5x and may be the better trade at this layer height.

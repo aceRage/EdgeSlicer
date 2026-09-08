@@ -189,6 +189,55 @@ void contour_z_smooth_profile(std::vector<double> &d, int radius)
     d.swap(out);
 }
 
+double contour_z_segment_feedrate(double f_role_mm_min,
+                                  double h_nominal,
+                                  double h_seg,
+                                  double max_vol_mm3_s,
+                                  double mm3_per_mm_seg)
+{
+    if (f_role_mm_min <= 0.0 || h_nominal <= 1e-9 || h_seg <= 1e-9)
+        return f_role_mm_min;
+
+    // Constant volumetric flow.
+    //
+    // The emitter has ALREADY scaled this segment's E by (h_seg / h_nominal) - the bead really
+    // is that much thinner. What the role's F was chosen for is a bead h_nominal tall: at that
+    // F the extruder delivers its nominal mm3/s. Running the same F over a bead (h_seg/h_nominal)
+    // as tall means the material has to be laid down over the same distance in the same time out
+    // of a much smaller cross-section - the thin end starves, and the Z axis is making its
+    // fastest moves exactly there. Scaling F by the same ratio restores the balance: the melt
+    // rate, the volume per unit of path, and the time the Z axis has for each step all return to
+    // what the role was tuned for.
+    //
+    //     F_seg = F_role * h_seg / h_nominal
+    //
+    // so a half-height segment runs at half speed and a segment at the nominal height is
+    // untouched.
+    double f = f_role_mm_min * (h_seg / h_nominal);
+
+    // Never above the role's own feed rate. A contoured bead can sit up to zaa_min_z PROUD of
+    // the nominal height (the top half of the band, on top surfaces), and the ratio would then
+    // ask for a speed-up. The role speed is a deliberate ceiling that already carries every
+    // dynamic slowdown the fork applies, so ZAA is not allowed to run past it: contoured moves
+    // are only ever slowed.
+    f = std::min(f, f_role_mm_min);
+
+    // Floor. At zaa_min_z 0.05 on a 0.2 mm layer the thinnest bead asks for a quarter of the
+    // role's speed, and a role already slowed by an overhang can put that under 10 mm/s, where
+    // the move stops being a print move and starts being a dwell that oozes.
+    const double floor_mm_min = ZAA_MIN_SPEED_MM_S * 60.0;
+    f = std::max(f, std::min(floor_mm_min, f_role_mm_min));
+
+    // The filament's volumetric cap, on the segment's OWN cross-section. The scaling itself can
+    // only reduce flow, but the floor above can push F back up on a very thin bead, and the
+    // never-exceed clamp leaves a thicker-than-nominal bead running at the role's full F with a
+    // larger cross-section than the cap was computed for. Applied last so it always wins.
+    if (max_vol_mm3_s > 0.0 && mm3_per_mm_seg > 1e-12)
+        f = std::min(f, 60.0 * max_vol_mm3_s / mm3_per_mm_seg);
+
+    return f;
+}
+
 static bool contour_extrusion_path(LayerRegion *region, const sla::IndexedMesh &mesh, ExtrusionPath &path)
 {
     if (path.role() != erTopSolidInfill && path.role() != erIroning && path.role() != erExternalPerimeter &&

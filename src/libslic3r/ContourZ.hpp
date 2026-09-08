@@ -1,6 +1,7 @@
 #ifndef slic3r_ContourZ_hpp_
 #define slic3r_ContourZ_hpp_
 
+#include <cmath>
 #include <cstdint>
 #include <memory>
 #include <unordered_map>
@@ -110,6 +111,80 @@ static constexpr double ZAA_COLLAPSE_TOLERANCE_MM = 0.001;
 // is under the printer's Z resolution but the path would still lose arc fitting and gain a Z
 // word on every move. Applied per path, never per sample, so it can never introduce a step.
 static constexpr double ZAA_MIN_PATH_DELTA_MM = 0.010;
+
+// ---------------------------------------------------------------------------------------------
+// Constant-volumetric-flow speed scaling on contoured segments (zaa_speed_scaling).
+//
+// A contoured segment's bead is (height + d) tall while the role's feed rate F was chosen for a
+// bead `height` tall. At 0.2 mm layers a segment can swing from the nominal 0.20 mm bead down to
+// zaa_min_z (0.05 mm), a 4x drop in the material laid per mm at an unchanged F: the thin end
+// starves and the Z axis is doing its fastest work exactly where the bead is thinnest. Holding
+// the flow at what the role was tuned for at the nominal layer height means scaling F by the
+// same height ratio the E was scaled by, so a quarter-height bead runs at a quarter speed.
+// ---------------------------------------------------------------------------------------------
+
+// Absolute floor for a scaled feed rate, mm/min (10 mm/s). A thin segment on a steep contour can
+// ask for an arbitrarily small F; below roughly this the move stops being a print move and starts
+// being a dwell that oozes, and the cooling/pressure-advance models downstream are not calibrated
+// for it. Chosen as a fixed constant rather than a config key: it is a lower bound on sane
+// behaviour, not a tuning knob, and every printer profile in the tree prints something at 10 mm/s.
+static constexpr double ZAA_MIN_SPEED_MM_S = 10.0;
+
+// Hysteresis band for the emitted F. Consecutive contoured segments whose local layer height is
+// within this fraction of the height that set the current F keep that F.
+//
+// This matters more than it looks. The scaled F cannot be written into the movement G1 itself:
+// CoolingBuffer only slows lines inside a ";_EXTRUDE_SET_SPEED" block and asserts that no G1
+// inside one carries its own F (CoolingBuffer.cpp ~476), so an embedded F escapes the layer-time
+// slowdown entirely - measured on the dome, contoured outer walls kept running at 9124 mm/min
+// where cooling had slowed the rest of the layer to 2841. So each change costs its own `G1 F...`
+// line, and without a deadband a smoothed contour profile - which changes by a micron or two per
+// 0.1 mm sample - would emit one on almost every move for a correction under a percent.
+//
+// 5 % of the local height is under the quantisation the profile already carries (1 um on a 200 um
+// layer is 0.5 %), and it bounds the flow error the hysteresis itself can introduce at exactly
+// 5 %. Measured: it holds the F words to 2-3 % of contoured segments on the dome and 41-45 % on
+// the wedge, whose contour is a continuous ramp.
+static constexpr double ZAA_SPEED_HYSTERESIS = 0.05;
+
+// The scaled feed rate for one contoured segment, mm/min.
+//
+//     F_seg = F_role * h_seg / h_nominal,  clamped to [floor, F_role] and then to the volumetric cap
+//
+// The segment's E has already been scaled by the same h_seg / h_nominal ratio, so scaling F by
+// it too is what returns the extruder's melt rate - and the time the Z axis is given for each
+// step - to what the role was tuned for at the nominal layer height. A half-height bead runs at
+// half speed; a bead at the nominal height is untouched.
+//
+//   f_role_mm_min   the feed rate the role would have used, in mm/min (already carrying every
+//                   dynamic slowdown this fork applies - overhang grading, small perimeters,
+//                   resonance avoidance, the filament volumetric cap - because it is the F that
+//                   was about to be emitted for this segment).
+//   h_nominal       the path's nominal layer height, mm.
+//   h_seg           the segment's local layer height, mm - height + the trapezoid mean of the two
+//                   endpoints' contour deltas, i.e. exactly the height the E of this segment was
+//                   computed from, so flow really is held constant.
+//   max_vol_mm3_s   filament_max_volumetric_speed, mm3/s; <= 0 means no cap.
+//   mm3_per_mm_seg  the segment's actual volumetric cross-section, mm3/mm, i.e. the path's
+//                   _mm3_per_mm scaled by the same height ratio the E was scaled by.
+//
+// Never raises F above f_role_mm_min: a thick segment (d > 0, which only top surfaces get, and
+// only inside the +zaa_min_z half of the band) would otherwise speed up past a role speed the
+// user set deliberately. Only thin segments are slowed.
+double contour_z_segment_feedrate(double f_role_mm_min,
+                                  double h_nominal,
+                                  double h_seg,
+                                  double max_vol_mm3_s,
+                                  double mm3_per_mm_seg);
+
+// True when a segment whose local height is h_seg may keep an F that was set for a segment of
+// local height h_ref. Both heights in mm. A non-positive h_ref means "no F set yet".
+inline bool contour_z_speed_within_hysteresis(double h_ref, double h_seg)
+{
+    if (h_ref <= 0.0 || h_seg <= 0.0)
+        return false;
+    return std::abs(h_seg - h_ref) <= ZAA_SPEED_HYSTERESIS * h_ref;
+}
 
 // Everything the per-sample decision needs. Deliberately free of ExtrusionRole / LayerRegion so
 // that the decision is a pure function of numbers and can be unit tested on its own
