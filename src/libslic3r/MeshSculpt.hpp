@@ -29,7 +29,9 @@ namespace Sculpt {
 enum class BrushType : unsigned char {
     Grab,    // drag the surface with the mouse, in the view plane
     Inflate, // push the surface along its vertex normals (or pull it in)
-    Smooth   // Laplacian relaxation, optionally Taubin lambda/mu
+    Smooth,  // Laplacian relaxation, optionally Taubin lambda/mu
+    Flatten, // move vertices onto a plane fitted to the patch under the brush
+    Crease   // pinch toward the stroke axis and push along -normal (or +normal)
 };
 
 // Brush weight at distance d from the brush centre for a brush of radius r.
@@ -56,6 +58,22 @@ struct BrushParams
     // Inflate: displacement along the vertex normal at full weight, in mesh units.
     float     amount  = 0.1f;
     bool      deflate = false;
+
+    // Flatten / Crease: the plane (Flatten) or the axis (Crease) the brush works
+    // against. A zero normal means "fit it from the patch under the brush", which
+    // is what the gizmo does every tick; a caller may pin it to hold one plane
+    // for a whole stroke.
+    Vec3f     plane_normal = Vec3f::Zero();
+    // Flatten: false moves every vertex toward the plane (symmetric - a bump is
+    // pushed down and a dent is pulled up). true is Blender's "Fill": only the
+    // vertices BELOW the plane (on the -normal side) move, so dents are filled
+    // and bumps are left alone.
+    bool      fill_only = false;
+    // Crease: false is a valley (pinch + push along -normal), true is a ridge
+    // (pinch + push along +normal).
+    bool      ridge = false;
+    // Crease: the size of the normal push relative to the tangential pinch.
+    float     crease_normal_ratio = 1.f;
 
     // Smooth
     int       iterations = 1;
@@ -192,6 +210,72 @@ struct CursorState
 
 // Pure: next cursor state from the previous one and this frame's input.
 CursorState next_cursor_state(const CursorState &prev, const CursorInput &in);
+
+// ----------------------------------------------------------------------------
+// Modal brush-parameter adjustment (Blender's F / Shift+F)
+// ----------------------------------------------------------------------------
+//
+// Press F, move the mouse sideways, click or Enter to confirm, Esc or right
+// click to go back. The gizmo owns the wx plumbing; the arithmetic and the state
+// machine live here so they can be tested without a window.
+//
+// The mapping is multiplicative for the radius (a drag of AdjustFullScalePx to
+// the right doubles it, the same to the left halves it, so the feel is the same
+// at 0.5 mm and at 15 mm) and additive for the strength (the whole 0..1 range
+// spans AdjustFullScalePx of travel).
+enum class AdjustTarget : unsigned char { None, Radius, Strength };
+
+struct AdjustState
+{
+    AdjustTarget target      = AdjustTarget::None;
+    // The value when the modal started; Esc / right click restores exactly this.
+    float        start_value = 0.f;
+    // Mouse x when the modal started.
+    double       start_x     = 0.;
+    // The live value: what the panel input and the on-screen circle show.
+    float        value       = 0.f;
+
+    bool active() const { return target != AdjustTarget::None; }
+};
+
+// Pixels of horizontal travel for one doubling (radius) or for the whole 0..1
+// span (strength).
+inline constexpr double AdjustFullScalePx = 240.;
+
+// Begin a modal adjustment.
+AdjustState adjust_begin(AdjustTarget target, float current_value, double mouse_x);
+// One mouse-move frame. `value` is recomputed from the TOTAL travel since the
+// start rather than accumulated, so the gesture is exactly reversible: coming
+// back to the starting x returns the starting value.
+AdjustState adjust_move(const AdjustState &state, double mouse_x, float value_min, float value_max);
+// Confirm: the live value stands.
+float adjust_confirm(const AdjustState &state);
+// Cancel: the value goes back to what it was when the modal began.
+float adjust_cancel(const AdjustState &state);
+
+// True when Ctrl inverts this brush. Grab and Smooth are unaffected: there is no
+// sensible opposite of dragging a patch, and an "anti-smooth" brush would just
+// amplify noise.
+bool brush_inverts_with_ctrl(BrushType type);
+
+// Area-weighted plane through the vertices under the brush: `origin` is the
+// weighted centroid, `normal` the weighted average of the vertex normals.
+// Returns false when the brush covers nothing usable.
+bool fit_plane(const indexed_triangle_set  &its,
+               const std::vector<Vec3f>    &vertex_normals,
+               const std::vector<uint32_t> &vertices,
+               const Vec3f                 &center,
+               float                        radius,
+               bool                         falloff,
+               Vec3f                       &origin,
+               Vec3f                       &normal);
+
+// Mean squared distance of `vertices` to the plane (origin, normal): the
+// flatness measure a Flatten stroke has to reduce.
+float plane_distance_variance(const indexed_triangle_set  &its,
+                              const std::vector<uint32_t> &vertices,
+                              const Vec3f                 &origin,
+                              const Vec3f                 &normal);
 
 // Uniform 1:4 midpoint subdivision of the whole mesh. Midpoints are shared
 // between the two triangles of an edge, so a manifold mesh stays manifold and

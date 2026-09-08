@@ -307,6 +307,250 @@ hand on the mouse.
 Still unverified from v1 and untouched here: the brush on a non-uniformly scaled part, the
 gizmo on a multi-part object, and everything in the assemble view.
 
+## v2 - two more brushes, Blender's modal keys, and a panel that stops moving (branch `feat/sculpt-v2`)
+
+The owner's second hands-on test, on v1.1. Three things came back: the Subdivide button could
+not be clicked, the panel hung off the end of the toolbar, and the brush set was too thin for
+print-prep touch-ups. Branch `feat/sculpt-v2` off `feat/ultra-preferences` (`6f9360cecb`).
+
+### The Subdivide button could not be reached
+
+Reported as: the coarse-mesh note and the Subdivide button "appear only while the cursor
+hovers the part, and vanish the instant the cursor leaves it, resizing the whole panel - so
+the button can never be reached."
+
+The cause is `GLGizmoSculpt::needs_subdivision()`, which in v1 opened with
+
+```cpp
+if (!m_session || !m_hit_valid)
+    return false;
+```
+
+`m_hit_valid` is the last raycast result, false whenever the cursor is off the part. So the
+whole `if (needs_subdivision())` block - two lines of text and the button - existed only while
+the pointer was over the mesh. The panel carried `ImGuiWindowFlags_AlwaysAutoResize`, so
+losing those rows shrank the window; and the pointer necessarily leaves the part on its way to
+the button, which is exactly when the button disappeared out from under it. The button was
+unreachable by construction, not by a race.
+
+Three changes, and the row is now unconditional:
+
+* **`needs_subdivision()` no longer depends on the hover.** When the cursor is over the part
+  it still asks the local question (mean edge length of the triangles under the brush, via
+  `SculptSession::local_edge_length()`); when it is not, it asks the same question of the
+  whole mesh (`its_average_edge_length()`). The answer may change as the cursor moves - that
+  is fine and wanted - but the row's *presence* never does.
+* **The Subdivide row is always drawn.** Above it sits one wrapped note, which is the coarse
+  warning when subdividing is called for ("The mesh here is too coarse for this brush size.
+  Subdividing changes the triangles, so painted supports, seams, colours and fuzzy skin on
+  this part are cleared."), the cap message when a subdivision would blow past
+  `MaxTrianglesAfterSubdivision`, and otherwise the neutral one-liner "Mesh is fine enough for
+  this brush." The button below is enabled whenever a subdivision is actually possible, which
+  is the honest condition - a mesh that is already fine enough can still be subdivided, and a
+  user may want that. Only the 2M-triangle cap disables it (`ImGuiWrapper::disabled_begin()`).
+* **The panel has a fixed width and every long string wraps to it.**
+  `ImGuiWindowFlags_AlwaysAutoResize` is gone, replaced by
+  `ImGui::SetNextWindowSize({m_imgui->scaled(16.f), 0})` plus `ImGuiWindowFlags_NoResize`, so
+  only the height is left to the contents. Every multi-word note goes through
+  `ImGuiWrapper::text_wrapped(..., ImGui::GetContentRegionAvail().x)` rather than `text()`.
+  The triangle count stays on one line, as asked.
+
+Two knock-on layout changes fall out of the fixed width. The slider width was a hardcoded
+`scaled(7.0f)`; it is now whatever is left after the label column and the numeric input
+(`wrap_width - sliders_left - 1.5f * slider_icon_width - space_size`, floored at
+`scaled(3.0f)`), so a longer translation cannot push the row past the window edge. And six
+brush radios no longer fit on one line, so the radio row wraps: each radio measures itself
+(`calc_text_size` + frame height + inner spacing) and starts a new line when the current one
+is full, instead of an unconditional `SameLine()`.
+
+### The panel opened off the end of the toolbar
+
+`GLGizmosManager::do_render_overlay()` hands each gizmo the x of **its own toolbar icon**, and
+Sculpt was added at the end of `EType`, so its icon is the last one on the bar and a panel
+drawn rightward from there runs off the canvas. The paint gizmos anchor at their icon in
+exactly the same way - `GLGizmoFdmSupports::on_render_input_window()` is the same
+`GizmoImguiSetNextWIndowPos(x, y, ImGuiCond_Always, 0.0f, 0.0f)` call - they simply sit
+further left on the bar and never notice.
+
+`GLGizmoBase::GizmoImguiSetNextWIndowPos()` already contains the clamp that fixes this:
+
+```cpp
+if (x + w > canvas_width) x = canvas_width - w;
+```
+
+but the one-argument overload passes `last_input_window_width`, i.e. **the width the window
+had on the previous frame**. Under `AlwaysAutoResize` that was whatever the previous frame's
+contents happened to need - and, on the frame the hover state changed, exactly the wrong
+number. Now that the width is pinned, v2 calls the four-argument overload with the real width
+directly, so the clamp is exact: the panel opens toward the centre of the bar with its right
+edge flush against the canvas edge, and the position no longer depends on what was drawn last
+frame. No new positioning scheme was invented - this is the existing clamp, fed a number it
+can trust.
+
+### Two new brushes
+
+Both live in `Sculpt::SculptSession::apply()` beside the others, both are vertex-only, and
+both therefore go through the same annotation-preserving commit
+(`Sculpt::commit_sculpted_mesh()`, no `clear_before_change_mesh()`). Both honour
+`BrushParams::strength` and the Smooth-falloff toggle the same way every v1 brush does, via
+the shared `weights[i] = strength * falloff_weight(d, r)` computed once at the top of
+`apply()`.
+
+**Flatten.** Fits a plane to the patch under the brush and slides each vertex toward it by
+`weight`. The fit is `Sculpt::fit_plane()`: the origin is the falloff-weighted centroid of the
+vertices in the brush, the normal the falloff-weighted average of their vertex normals -
+"centroid + area-weighted normal", the first of the two options the brief offered. It
+accumulates in `double`, because a `float` accumulator loses the plane offset on a part
+sitting far from the origin. The move is `v -= weight * signed_distance * normal`, so weight 1
+lands a vertex exactly **on** the plane and can never overshoot past it; that is what makes a
+full-strength stroke read as "flatten" and what keeps repeated ticks stable.
+
+The plane's *direction* is fitted once, at `start_stroke()`, and pinned for the whole stroke
+(`m_stroke_plane_normal`, passed as `BrushParams::plane_normal`); the offset is refitted every
+tick so the plane stays on the surface. Refitting the direction every tick makes the brush
+chase the surface it has just levelled and never converge.
+
+**Ctrl-variant: Blender's "Fill"** (`BrushParams::fill_only`). The default is symmetric - a
+bump is pushed down and a dent pulled up. Inverted, only the vertices **below** the plane (on
+the -normal side) move, so dents are filled and bumps are left standing. That is the pairing
+the brief allowed, and it is the one documented here.
+
+**Crease.** Blender's crease is pinch + inward push, and that is what this is. The pinch is
+movement toward the brush's centre line - the line through the brush centre along the fitted
+surface normal - computed by projecting the vertex's offset from the centre onto the tangent
+plane (`rel - rel.dot(n) * n`) and moving `weight` of the way in. The push is
+`weight * ratio * 0.25 * radius` along `-normal`, scaled to the brush so a crease is as deep
+as the brush is wide whatever the brush size - the same trick Inflate plays with its `amount`.
+Inverted (Ctrl) the normal push flips sign and a ridge is raised; the pinch is unchanged,
+which is why the ridge is exactly the valley mirrored in the normal direction.
+
+The brush radio row is now, in order: **Grab, Inflate, Deflate, Smooth, Flatten, Crease.**
+
+### Blender-style hotkeys
+
+| Key | While | Does |
+| --- | --- | --- |
+| `F`, then move the mouse | gizmo open, mouse over the 3D scene | Adjusts **Brush size**. Rightward motion grows the radius, leftward shrinks it. The on-screen circle resizes live and the panel's numeric input shows the value as it changes. |
+| `Shift+F`, then move the mouse | as above | Adjusts **Strength**, over its 5-100 % range. |
+| Left click, or `Enter` | a size/strength modal is running | Confirms - the new value stands. |
+| `Esc`, or right click | a size/strength modal is running | Cancels - the value goes back to what it was when the modal began. |
+| `Ctrl` held during a stroke | Inflate/Deflate, Flatten, Crease | Inverts the brush: Inflate acts as Deflate and back, Flatten becomes Fill, Crease becomes Ridge. The cursor circle turns **red** while inverted. |
+| `Ctrl` held during a stroke | Grab, Smooth | Nothing - no inverse exists. Ctrl+click keeps its canvas meaning for these two brushes. |
+| `Shift` held during a stroke | as v1 | Inverts, as before. Holding Shift *and* Ctrl is a double negative and cancels. |
+| `Ctrl` + mouse wheel | gizmo open | Brush size, as v1. Unchanged. |
+| `Esc` | a stroke is running | Cancels the stroke, as v1. Unchanged. |
+
+The mapping is deliberately different for the two values. Brush size is **multiplicative** - a
+drag of `Sculpt::AdjustFullScalePx` (240 px) to the right doubles the radius and the same
+travel left halves it - so the gesture feels the same at 0.5 mm and at 15 mm. Strength is
+**additive**: 240 px spans the whole 0.05-1 range. Both recompute the value from the *total*
+travel since the modal began rather than accumulating per-frame deltas, so the gesture is
+exactly reversible: bringing the mouse back to where it started returns the starting value,
+with no drift.
+
+While a modal runs the cursor circle turns **amber**, and it stays on screen even when the
+mouse is off the part - the whole point of the gesture is watching the circle resize. The
+panel prints "Brush size: move the mouse, click to keep it, Esc to cancel" in place of its
+usual note.
+
+#### Conflicts found, and how each was resolved
+
+**`F` is already "Gizmo place face on bed".** `KBShortcutsDialog` lists it, and it is
+dispatched from `GLGizmosManager::handle_shortcut()`, which `on_char()` reaches as a
+fallthrough after its own switch. Resolution: Sculpt's key handler is called at the **top** of
+`GLGizmosManager::on_char()`, gated on `m_current == Sculpt`, and returns true only for the
+keys it actually wants (`F`, and `Enter`/`Esc` while a modal runs). Bare `F` therefore sizes
+the brush while the Sculpt gizmo is open and opens the flatten gizmo everywhere else, which is
+the least surprising reading: a modal key belongs to the tool that is open. The gizmo returns
+false for everything else, so nothing else is stolen - `Shift+A` still arranges, `1`-`9` still
+set the filament, `Esc` still closes the gizmo when no stroke or modal is running.
+
+**`Ctrl` is the canvas's additive-selection modifier, and v1's own "end the stroke" gesture.**
+`GLGizmoSculpt::on_mouse()` returned false on a Ctrl+LeftDown so the canvas could handle it,
+and ended any stroke on a Ctrl+Drag, "matching the paint gizmos". Both are now conditional on
+`Sculpt::brush_inverts_with_ctrl()`: for Inflate/Deflate, Flatten and Crease, Ctrl is the
+invert modifier and the gizmo keeps the event; for Grab and Smooth, where Ctrl means nothing
+to the brush, the v1 behaviour is untouched and the canvas still gets the click. This is the
+narrowest resolution available - the Ctrl gesture is only taken away on the brushes that have
+something to do with it.
+
+**ImGui focus.** `GLCanvas3D::on_char()` gives ImGui first refusal
+(`if (imgui->update_key_data(evt)) { render(); return; }`) and returns before
+`m_gizmos.on_char()` is reached, so a character typed into the panel's Brush size or Strength
+input box never reaches the gizmo's key handler. `F` typed into a numeric input is just an
+`F`. No extra guard was needed; the ordering already provides it.
+
+**`Enter`.** Unbound on the canvas except in a `Shift+Ctrl`/`Shift+Alt` combination, so
+consuming a bare `Enter` while a modal runs takes nothing away.
+
+### What changed, file by file
+
+* `src/libslic3r/MeshSculpt.{hpp,cpp}` - `BrushType::Flatten` and `BrushType::Crease` plus
+  their `BrushParams` fields (`plane_normal`, `fill_only`, `ridge`, `crease_normal_ratio`);
+  `fit_plane()`; `plane_distance_variance()`; the modal state machine
+  (`AdjustTarget`, `AdjustState`, `adjust_begin/move/confirm/cancel`, `AdjustFullScalePx`);
+  `brush_inverts_with_ctrl()`.
+* `src/slic3r/GUI/Gizmos/GLGizmoSculpt.{hpp,cpp}` - the two new brushes in the enum and in
+  `make_brush()`; the plane pinned at `start_stroke()`; `ctrl_down` threaded through
+  `start_stroke`/`continue_stroke`/`make_brush`; `begin_adjust`/`update_adjust`/`end_adjust`
+  and `on_sculpt_char()`; the modal's ownership of the mouse in `on_mouse()`; the amber and
+  red cursor colours; `needs_subdivision()` no longer hover-gated; the whole panel rewrite.
+* `src/slic3r/GUI/Gizmos/GLGizmosManager.cpp` - Sculpt's key handler called first in
+  `on_char()`.
+* `src/slic3r/GUI/KBShortcutsDialog.cpp` - a "Sculpt Gizmo" section.
+* `tests/libslic3r/test_mesh_sculpt.cpp` - nine new cases.
+
+### What v2 proved
+
+* **Build**: `BUILD_EXIT=0`. Release `Snapmaker_Orca`, `Snapmaker_Orca_app_gui` and
+  `libslic3r_tests` in the branch's own worktree build tree, zero `error C` / `error LNK`.
+* **Tests**: `libslic3r_tests` - **726 cases, 724 passed, 2 failed as expected** (103,997
+  assertions), the tree's two usual baseline failures and nothing else. The nine new cases all
+  pass. (v1.1's 702 is the stale figure: the base grew to 717 between the branches, and the
+  nine new cases take it to 726.)
+  * `[SculptFlatten]` - Flatten cuts the plane-distance variance of a bumped, saw-toothed
+    patch by more than half and lands the full-weight centre vertex exactly on the plane;
+    the Fill variant lifts every vertex below the plane and moves not one above it, while the
+    symmetric variant levels both sides; half the strength is exactly half the move,
+    vertex by vertex, and with the falloff off every vertex in the brush lands on the plane;
+    `fit_plane()` recovers the known normal and centroid of a tilted grid and refuses an
+    empty patch.
+  * `[SculptCrease]` - on a flat grid, every vertex in the brush ends closer to the centre
+    line (by exactly `(1-w)` of its original radius) and lower (by exactly
+    `w * 0.25 * radius`), with the on-axis vertex dropping without pinching; the inverted
+    brush is the valley mirrored in z with an identical pinch; on a sphere the pinch is
+    toward the *brush axis* rather than the mesh origin, the volume goes down, and the mesh
+    stays closed.
+  * `[SculptAdjust]` - the radius modal doubles on a full-scale rightward drag and halves on
+    the leftward one, is smooth (a half-scale drag is a factor of √2), is exactly reversible
+    after wandering, and clamps at both ends; the strength modal is additive over its range
+    and likewise reversible; confirm keeps the live value and cancel restores the start;
+    `brush_inverts_with_ctrl()` is true for exactly Inflate/Flatten/Crease.
+  * The existing "a sculpt stroke never changes the triangle indices" case now runs Flatten
+    and Crease as well, so both are covered by the annotation-preserving invariant.
+* **Launch**: a hidden scratch instance (`snorca_hubtest/inst_sculpt2`, datadir copied from
+  `dd_ctl`) starts and runs a normal startup, then was stopped by PID.
+
+### What nobody checked
+
+Nobody drove this with a mouse or a keyboard. Everything in the interaction half is argued
+from the code and proved only where a pure helper could be factored out - which is why
+`fit_plane()`, the brush kernels and the whole modal state machine live in `MeshSculpt` rather
+than in the gizmo. Specifically **unverified**:
+
+* That the panel is actually the right width on screen, that the wrapped notes look right, and
+  that the Subdivide button can now be clicked. The reasoning is above; nobody clicked it.
+* That the panel now opens toward the centre of the toolbar. The clamp is the tree's own and
+  is now fed a correct width, but the result has not been seen.
+* That `F` and `Shift+F` fire, that the circle resizes live, and that click/Enter/Esc/right
+  click end the modal as described. The arithmetic is tested; the wx routing is not.
+* That the Ctrl-invert cursor colour reads as intended, and that taking Ctrl+click away from
+  the canvas on three of the six brushes is not itself surprising in practice.
+* That Flatten and Crease *feel* right under a real stroke - the tests prove what they do to
+  the vertices, not that the resulting brush is pleasant to use.
+* Everything still unverified from v1 and v1.1: the brush on a non-uniformly scaled part, the
+  gizmo on a multi-part object, and the assemble view.
+
 ## What v2 and v3 need
 
 **v2** - the interaction polish, none of which changes the topology story:

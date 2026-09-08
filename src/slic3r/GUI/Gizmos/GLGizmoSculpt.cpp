@@ -54,6 +54,8 @@ bool GLGizmoSculpt::on_init()
     m_desc["inflate"]            = _L("Inflate");
     m_desc["deflate"]            = _L("Deflate");
     m_desc["smooth"]             = _L("Smooth");
+    m_desc["flatten"]            = _L("Flatten");
+    m_desc["crease"]             = _L("Crease");
     m_desc["radius"]             = _L("Brush size");
     m_desc["radius_caption"]     = ctrl + _L("Mouse wheel");
     m_desc["strength"]           = _L("Strength");
@@ -63,9 +65,15 @@ bool GLGizmoSculpt::on_init()
     m_desc["sculpt"]             = _L("Sculpt");
     m_desc["invert_caption"]     = shift + _L("Left mouse button");
     m_desc["invert"]             = _L("Invert the brush");
+    m_desc["adjust_radius"]      = _L("F, then move the mouse: brush size");
+    m_desc["adjust_strength"]    = shift + _L("F, then move the mouse: strength");
+    m_desc["adjusting_radius"]   = _L("Brush size: move the mouse, click to keep it, Esc to cancel");
+    m_desc["adjusting_strength"] = _L("Strength: move the mouse, click to keep it, Esc to cancel");
+    m_desc["inverted"]           = _L("Ctrl held: the brush is inverted");
     m_desc["subdivide"]          = _L("Subdivide");
     m_desc["subdivide_hint"]     = _L("The mesh here is too coarse for this brush size.");
     m_desc["subdivide_warning"]  = _L("Subdividing changes the triangles, so painted supports, seams, colours and fuzzy skin on this part are cleared.");
+    m_desc["subdivide_fine"]     = _L("Mesh is fine enough for this brush.");
     m_desc["no_part"]            = _L("Select a single part to sculpt it.");
     m_desc["paint_kept"]         = _L("Sculpting keeps painted supports, seams, colours and fuzzy skin.");
 
@@ -237,13 +245,35 @@ bool GLGizmoSculpt::project_on_drag_plane(const Vec2d &mouse_position, Vec3d &ou
     return true;
 }
 
-Sculpt::BrushParams GLGizmoSculpt::make_brush(const Vec3f &center_mesh, const Vec3f &displacement_mesh, bool shift_down) const
+// Ctrl inverts Inflate/Deflate, Flatten and Crease. Grab and Smooth have no
+// meaningful opposite, so Ctrl does nothing for them (Sculpt::
+// brush_inverts_with_ctrl is the single place that decision lives).
+bool GLGizmoSculpt::brush_inverted(bool ctrl_down) const
+{
+    if (! ctrl_down)
+        return false;
+    switch (m_brush) {
+    case Brush::Inflate:
+    case Brush::Deflate: return Sculpt::brush_inverts_with_ctrl(Sculpt::BrushType::Inflate);
+    case Brush::Flatten: return Sculpt::brush_inverts_with_ctrl(Sculpt::BrushType::Flatten);
+    case Brush::Crease:  return Sculpt::brush_inverts_with_ctrl(Sculpt::BrushType::Crease);
+    case Brush::Grab:
+    case Brush::Smooth:
+    default:             return false;
+    }
+}
+
+Sculpt::BrushParams GLGizmoSculpt::make_brush(const Vec3f &center_mesh, const Vec3f &displacement_mesh, bool shift_down, bool ctrl_down) const
 {
     Sculpt::BrushParams p;
     p.center   = center_mesh;
     p.radius   = float(double(m_cursor_radius) / mesh_scale());
     p.strength = m_strength;
     p.falloff  = m_falloff;
+
+    // Shift and Ctrl both invert; holding both is a double negative and cancels,
+    // which is the least surprising reading of "each of them flips the brush".
+    const bool invert = shift_down != brush_inverted(ctrl_down);
 
     switch (m_brush) {
     case Brush::Grab:
@@ -258,7 +288,7 @@ Sculpt::BrushParams GLGizmoSculpt::make_brush(const Vec3f &center_mesh, const Ve
         p.amount  = 0.06f * p.radius;
         p.deflate = (m_brush == Brush::Deflate);
         // Shift inverts the brush, the way the paint gizmos use it to erase.
-        if (shift_down)
+        if (invert)
             p.deflate = !p.deflate;
         break;
     case Brush::Smooth:
@@ -266,11 +296,27 @@ Sculpt::BrushParams GLGizmoSculpt::make_brush(const Vec3f &center_mesh, const Ve
         p.iterations = 1;
         p.taubin     = m_taubin;
         break;
+    case Brush::Flatten:
+        p.type      = Sculpt::BrushType::Flatten;
+        // The plane direction is pinned at stroke start, so a long stroke levels
+        // one plane instead of chasing the surface it has just flattened.
+        p.plane_normal = m_stroke_plane_normal;
+        // Inverted, Flatten becomes Blender's "Fill": only the vertices below
+        // the plane come up, so a dent is filled and the bumps are left alone.
+        p.fill_only    = invert ? ! m_flatten_fill_only : m_flatten_fill_only;
+        break;
+    case Brush::Crease:
+        p.type      = Sculpt::BrushType::Crease;
+        p.plane_normal = m_stroke_plane_normal;
+        // Inverted, the valley becomes a ridge.
+        p.ridge     = invert;
+        p.crease_normal_ratio = 1.f;
+        break;
     }
     return p;
 }
 
-bool GLGizmoSculpt::start_stroke(const Vec2d &mouse_position, bool shift_down)
+bool GLGizmoSculpt::start_stroke(const Vec2d &mouse_position, bool shift_down, bool ctrl_down)
 {
     if (m_volume == nullptr || !m_session)
         return false;
@@ -286,14 +332,27 @@ bool GLGizmoSculpt::start_stroke(const Vec2d &mouse_position, bool shift_down)
     m_stroke_dirty_triangles.clear();
     m_last_render_refresh = 0;
 
+    // Flatten and Crease both work against a plane. Fit it once, here, and hold
+    // it for the whole stroke: refitting every tick makes Flatten chase the
+    // surface it has already levelled and never converge.
+    m_stroke_plane_normal = Vec3f::Zero();
+    if (m_brush == Brush::Flatten || m_brush == Brush::Crease) {
+        const float radius_mesh = float(double(m_cursor_radius) / mesh_scale());
+        std::vector<uint32_t> verts;
+        m_session->collect_vertices_in_radius(hit, radius_mesh, verts);
+        Vec3f origin = Vec3f::Zero(), normal = Vec3f::Zero();
+        if (Sculpt::fit_plane(m_session->mesh(), m_session->vertex_normals(), verts, hit, radius_mesh, m_falloff, origin, normal))
+            m_stroke_plane_normal = normal;
+    }
+
     // Grab needs a drag before it does anything; the other brushes act on the
     // click itself.
     if (m_brush != Brush::Grab)
-        continue_stroke(mouse_position, shift_down);
+        continue_stroke(mouse_position, shift_down, ctrl_down);
     return true;
 }
 
-void GLGizmoSculpt::continue_stroke(const Vec2d &mouse_position, bool shift_down)
+void GLGizmoSculpt::continue_stroke(const Vec2d &mouse_position, bool shift_down, bool ctrl_down)
 {
     if (!m_stroke_active || !m_session || m_volume == nullptr)
         return;
@@ -323,7 +382,7 @@ void GLGizmoSculpt::continue_stroke(const Vec2d &mouse_position, bool shift_down
         m_stroke_center_mesh = center_mesh;
     }
 
-    m_session->apply(make_brush(center_mesh, displacement_mesh, shift_down), m_stroke_step);
+    m_session->apply(make_brush(center_mesh, displacement_mesh, shift_down, ctrl_down), m_stroke_step);
     if (m_stroke_step.empty())
         return;
 
@@ -371,6 +430,7 @@ void GLGizmoSculpt::cancel_stroke()
 {
     m_stroke_active  = false;
     m_pending_commit = false;
+    m_stroke_plane_normal = Vec3f::Zero();
     if (m_volume != nullptr)
         m_session = std::make_unique<Sculpt::SculptSession>(m_volume->mesh().its);
 }
@@ -403,19 +463,53 @@ void GLGizmoSculpt::update_cursor(const Vec2d &mouse_position)
 bool GLGizmoSculpt::on_mouse(const wxMouseEvent &mouse_event)
 {
     const Vec2d mouse_pos(double(mouse_event.GetX()), double(mouse_event.GetY()));
+    const bool  control_down = mouse_event.CmdDown();
+
+    // The F / Shift+F modal owns the mouse outright while it runs: moving sizes
+    // the brush, left click keeps the new value, right click puts it back. No
+    // stroke may start and the canvas must not see the click.
+    if (m_adjust.active()) {
+        if (mouse_event.Moving() || mouse_event.Dragging()) {
+            update_adjust(mouse_pos);
+            m_parent.set_as_dirty();
+            return true;
+        }
+        if (mouse_event.LeftDown() || mouse_event.LeftUp()) {
+            if (mouse_event.LeftDown())
+                end_adjust(/* confirm */ true);
+            m_parent.set_as_dirty();
+            return true;
+        }
+        if (mouse_event.RightDown() || mouse_event.RightUp()) {
+            if (mouse_event.RightDown())
+                end_adjust(/* confirm */ false);
+            m_parent.set_as_dirty();
+            return true;
+        }
+        return true;
+    }
 
     if (mouse_event.Moving()) {
+        // Ctrl on hover already recolours the cursor, so the inverted state is
+        // visible before the stroke starts rather than only during it.
+        m_ctrl_inverted = brush_inverted(control_down);
         update_cursor(mouse_pos);
         m_parent.set_as_dirty();
         return false;
     }
 
-    const bool control_down = mouse_event.CmdDown();
-
     if (mouse_event.LeftDown()) {
-        if (control_down || get_hover_id() != -1)
+        if (get_hover_id() != -1)
             return false;
-        if (start_stroke(mouse_pos, mouse_event.ShiftDown())) {
+        m_ctrl_inverted = brush_inverted(control_down);
+        // Ctrl is the brush-invert modifier for Inflate/Flatten/Crease, so it
+        // must NOT fall through to the canvas (which reads Ctrl+click as an
+        // additive selection) for those brushes. For Grab and Smooth, where Ctrl
+        // means nothing to the brush, the old behaviour stands and the canvas
+        // keeps the click.
+        if (control_down && ! m_ctrl_inverted)
+            return false;
+        if (start_stroke(mouse_pos, mouse_event.ShiftDown(), control_down)) {
             update_cursor(mouse_pos);
             m_parent.set_as_dirty();
             return true;
@@ -426,12 +520,15 @@ bool GLGizmoSculpt::on_mouse(const wxMouseEvent &mouse_event)
     if (mouse_event.Dragging()) {
         if (!m_stroke_active)
             return false;
-        if (control_down) {
-            // Ctrl mid-drag ends the stroke, matching the paint gizmos.
+        m_ctrl_inverted = brush_inverted(control_down);
+        // Ctrl mid-drag used to end the stroke, matching the paint gizmos. Now
+        // that Ctrl is the invert modifier it may only do that for the brushes
+        // Ctrl does not invert.
+        if (control_down && ! m_ctrl_inverted) {
             end_stroke();
             return false;
         }
-        continue_stroke(mouse_pos, mouse_event.ShiftDown());
+        continue_stroke(mouse_pos, mouse_event.ShiftDown(), control_down);
         // After the stroke has advanced, so a Grab cursor rides the moved anchor.
         update_cursor(mouse_pos);
         m_parent.set_as_dirty();
@@ -454,6 +551,78 @@ bool GLGizmoSculpt::on_mouse(const wxMouseEvent &mouse_event)
     return false;
 }
 
+// ----------------------------------------------------------------------------
+// modal brush adjust (F / Shift+F)
+// ----------------------------------------------------------------------------
+
+void GLGizmoSculpt::begin_adjust(Sculpt::AdjustTarget target)
+{
+    if (m_volume == nullptr || m_stroke_active)
+        return;
+    const float current = (target == Sculpt::AdjustTarget::Radius) ? m_cursor_radius : m_strength;
+    m_adjust = Sculpt::adjust_begin(target, current, m_last_mouse.x());
+    m_parent.set_as_dirty();
+}
+
+void GLGizmoSculpt::update_adjust(const Vec2d &mouse_position)
+{
+    if (! m_adjust.active())
+        return;
+    m_last_mouse = mouse_position;
+    if (m_adjust.target == Sculpt::AdjustTarget::Radius) {
+        m_adjust = Sculpt::adjust_move(m_adjust, mouse_position.x(), CursorRadiusMin, CursorRadiusMax);
+        // Live, so the panel input and the on-screen circle both show it as it
+        // changes - that is the whole point of the modal.
+        m_cursor_radius = m_adjust.value;
+    } else {
+        m_adjust = Sculpt::adjust_move(m_adjust, mouse_position.x(), StrengthMin, 1.f);
+        m_strength = m_adjust.value;
+    }
+}
+
+void GLGizmoSculpt::end_adjust(bool confirm)
+{
+    if (! m_adjust.active())
+        return;
+    const float value = confirm ? Sculpt::adjust_confirm(m_adjust) : Sculpt::adjust_cancel(m_adjust);
+    if (m_adjust.target == Sculpt::AdjustTarget::Radius)
+        m_cursor_radius = std::clamp(value, CursorRadiusMin, CursorRadiusMax);
+    else
+        m_strength = std::clamp(value, StrengthMin, 1.f);
+    m_adjust = Sculpt::AdjustState{};
+    m_parent.set_as_dirty();
+}
+
+// Called from GLGizmosManager::on_char while Sculpt is the current gizmo, before
+// its handle_shortcut() fallthrough - otherwise a bare F would open the "place
+// face on bed" gizmo instead of sizing the brush. Returns true when the key was
+// consumed. ImGui gets first refusal upstream, so a typed F in the numeric input
+// boxes never reaches here.
+bool GLGizmoSculpt::on_sculpt_char(int key_code, bool shift_down, bool /* ctrl_down */)
+{
+    if (m_state != On || m_volume == nullptr)
+        return false;
+
+    if (m_adjust.active()) {
+        if (key_code == WXK_RETURN || key_code == WXK_NUMPAD_ENTER) {
+            end_adjust(/* confirm */ true);
+            return true;
+        }
+        if (key_code == WXK_ESCAPE) {
+            end_adjust(/* confirm */ false);
+            return true;
+        }
+        // Anything else is swallowed: the modal owns the keyboard until it ends.
+        return true;
+    }
+
+    if (key_code == 'f' || key_code == 'F') {
+        begin_adjust(shift_down ? Sculpt::AdjustTarget::Strength : Sculpt::AdjustTarget::Radius);
+        return true;
+    }
+    return false;
+}
+
 bool GLGizmoSculpt::gizmo_event(SLAGizmoEventType action, const Vec2d & /* mouse_position */, bool /* shift_down */, bool /* alt_down */, bool control_down)
 {
     if (action == SLAGizmoEventType::MouseWheelUp || action == SLAGizmoEventType::MouseWheelDown) {
@@ -468,10 +637,16 @@ bool GLGizmoSculpt::gizmo_event(SLAGizmoEventType action, const Vec2d & /* mouse
         m_parent.set_as_dirty();
         return true;
     }
-    if (action == SLAGizmoEventType::Escape && m_stroke_active) {
-        cancel_stroke();
-        m_parent.set_as_dirty();
-        return true;
+    if (action == SLAGizmoEventType::Escape) {
+        if (m_adjust.active()) {
+            end_adjust(/* confirm */ false);
+            return true;
+        }
+        if (m_stroke_active) {
+            cancel_stroke();
+            m_parent.set_as_dirty();
+            return true;
+        }
     }
     return false;
 }
@@ -520,7 +695,10 @@ void GLGizmoSculpt::refresh_render_volumes(const std::vector<uint32_t> &dirty_tr
 
 void GLGizmoSculpt::render_cursor_sphere() const
 {
-    if (!m_cursor.visible || m_volume == nullptr)
+    // While the F modal runs the mouse may well be off the part, but the whole
+    // point of the gesture is watching the circle resize - so keep it on screen
+    // at wherever it last was.
+    if ((!m_cursor.visible && !m_adjust.active()) || m_volume == nullptr)
         return;
 
     if (s_cursor_sphere == nullptr) {
@@ -537,7 +715,15 @@ void GLGizmoSculpt::render_cursor_sphere() const
 
     // The paint gizmos' cursor colours (GLGizmoPainterBase::get_cursor_hover_color
     // and get_cursor_sphere_left_button_color), so the brush reads the same here.
+    // Inverted (Ctrl held on a brush Ctrl inverts) it goes red, which is the only
+    // on-screen indication that the next stroke will run the other way. While the
+    // F modal is sizing the brush the circle goes amber, so the sphere the user is
+    // watching grow is visibly the thing being changed.
     ColorRGBA color = m_stroke_active ? ColorRGBA(0.0f, 0.0f, 1.0f, 0.25f) : ColorRGBA(0.0f, 0.0f, 0.0f, 0.25f);
+    if (m_adjust.active())
+        color = ColorRGBA(1.0f, 0.6f, 0.0f, 0.25f);
+    else if (m_ctrl_inverted)
+        color = ColorRGBA(0.9f, 0.1f, 0.1f, 0.25f);
 
     shader->start_using();
     const Camera &camera = wxGetApp().plater()->get_camera();
@@ -580,12 +766,21 @@ size_t GLGizmoSculpt::subdivided_triangle_count() const
     return m_session ? 4 * m_session->triangles_count() : 0;
 }
 
+// Whether the mesh under the brush is too coarse for it.
+//
+// v1 asked this of the patch under the cursor, so the answer - and with it the
+// whole Subdivide row - appeared and vanished as the mouse crossed the part, and
+// the panel resized under the pointer so the button could never be clicked. It
+// is now asked of the WHOLE mesh (the mean edge length over everything) whenever
+// the cursor is off the part, so the row's presence never depends on hover; only
+// the number it reports does.
 bool GLGizmoSculpt::needs_subdivision()
 {
-    if (!m_session || !m_hit_valid)
+    if (!m_session)
         return false;
     const float radius_mesh = float(double(m_cursor_radius) / mesh_scale());
-    const float edge = m_session->local_edge_length(m_hit, radius_mesh);
+    const float edge = m_hit_valid ? m_session->local_edge_length(m_hit, radius_mesh)
+                                   : its_average_edge_length(m_session->mesh());
     if (edge <= 0.f)
         return false;
     return edge > radius_mesh * m_subdivide_ratio;
@@ -630,19 +825,42 @@ void GLGizmoSculpt::on_render_input_window(float x, float y, float bottom_limit)
     if (!m_c->selection_info() || !m_c->selection_info()->model_object())
         return;
 
+    // v1 let the window auto-size, so the panel's width and height changed with
+    // its contents - and since the Subdivide row only existed while the cursor
+    // was over the part, the panel resized out from under the pointer the moment
+    // the user moved toward the button. A fixed width, and a Subdivide row that
+    // is always present, are the two halves of the fix. The width is the paint
+    // gizmos' order of magnitude, expressed in the same scaled units so it
+    // survives DPI scaling.
+    const float window_width  = m_imgui->scaled(16.0f);
     const float approx_height = m_imgui->scaled(20.f);
     y = std::min(y, bottom_limit - approx_height);
+
+    // The toolbar hands us the x of the gizmo's own icon, and Sculpt is the LAST
+    // icon on the bar, so a panel drawn rightwards from there hangs off the end
+    // of the canvas. GizmoImguiSetNextWIndowPos() already knows how to pull a
+    // window back inside - but it clamps against last_input_window_width, i.e.
+    // the width of the PREVIOUS frame, which under AlwaysAutoResize was whatever
+    // the last frame's contents happened to need. Passing the real width (which
+    // is now fixed) makes that clamp exact: the panel opens toward the centre of
+    // the bar, its right edge flush with the canvas edge, and it never hangs off.
 #if BBS_TOOLBAR_ON_TOP
-    GizmoImguiSetNextWIndowPos(x, y, ImGuiCond_Always, 0.0f, 0.0f);
+    GizmoImguiSetNextWIndowPos(x, y, window_width, 0.f, ImGuiCond_Always, 0.0f, 0.0f);
 #else
-    GizmoImguiSetNextWIndowPos(x, y, ImGuiCond_Always, 1.0f, 0.0f);
+    GizmoImguiSetNextWIndowPos(x, y, window_width, 0.f, ImGuiCond_Always, 1.0f, 0.0f);
 #endif
+    ImGui::SetNextWindowSize(ImVec2(window_width, 0.f), ImGuiCond_Always);
 
     ImGuiWrapper::push_toolbar_style(m_parent.get_scale());
-    GizmoImguiBegin(get_name(), ImGuiWindowFlags_NoMove | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoTitleBar);
+    // No AlwaysAutoResize: the width is pinned above, and only the height is left
+    // to the contents.
+    GizmoImguiBegin(get_name(), ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoTitleBar);
+
+    // Everything the panel wraps to. Inside the window, so the padding is known.
+    const float wrap_width = ImGui::GetContentRegionAvail().x;
 
     if (m_volume == nullptr || !m_session) {
-        m_imgui->text(m_desc.at("no_part"));
+        m_imgui->text_wrapped(m_desc.at("no_part"), wrap_width);
         GizmoImguiEnd();
         ImGuiWrapper::pop_toolbar_style();
         return;
@@ -657,21 +875,40 @@ void GLGizmoSculpt::on_render_input_window(float x, float y, float bottom_limit)
     const float radius_label   = m_imgui->calc_text_size(m_desc.at("radius")).x + m_imgui->scaled(1.5f);
     const float strength_label = m_imgui->calc_text_size(m_desc.at("strength")).x + m_imgui->scaled(1.5f);
     const float sliders_left   = std::max(radius_label, strength_label);
-    const float sliders_width  = m_imgui->scaled(7.0f);
     const float slider_icon_width = m_imgui->get_slider_icon_size().x;
+    // The window is fixed-width now, so the slider takes what is left after the
+    // label column and the numeric box rather than a hardcoded width - otherwise
+    // the row would overflow or leave a gap depending on the translation.
+    const float sliders_width  = std::max(m_imgui->scaled(3.0f),
+                                          wrap_width - sliders_left - 1.5f * slider_icon_width - space_size);
     const float drag_left      = ImGui::GetStyle().WindowPadding.x + sliders_left + sliders_width - space_size;
 
     ImGui::AlignTextToFramePadding();
     m_imgui->text(m_desc.at("brush"));
 
-    const std::array<std::pair<Brush, const char *>, 4> brushes = {
+    // Six brushes no longer fit on one line inside a fixed-width panel, so they
+    // wrap: a radio goes on the current line while it fits and starts a new line
+    // when it does not. The order is the one the spec fixes - Grab, Inflate,
+    // Deflate, Smooth, Flatten, Crease.
+    const std::array<std::pair<Brush, const char *>, 6> brushes = {
         std::make_pair(Brush::Grab, "grab"),
         std::make_pair(Brush::Inflate, "inflate"),
         std::make_pair(Brush::Deflate, "deflate"),
-        std::make_pair(Brush::Smooth, "smooth")};
+        std::make_pair(Brush::Smooth, "smooth"),
+        std::make_pair(Brush::Flatten, "flatten"),
+        std::make_pair(Brush::Crease, "crease")};
+    const float radio_extra = ImGui::GetFrameHeight() + ImGui::GetStyle().ItemInnerSpacing.x + ImGui::GetStyle().ItemSpacing.x;
+    float line_used = 0.f;
     for (size_t i = 0; i < brushes.size(); ++i) {
-        if (i != 0)
-            ImGui::SameLine();
+        const float item_width = m_imgui->calc_text_size(m_desc.at(brushes[i].second)).x + radio_extra;
+        if (i != 0) {
+            if (line_used + item_width <= wrap_width) {
+                ImGui::SameLine();
+            } else {
+                line_used = 0.f;
+            }
+        }
+        line_used += item_width;
         if (m_imgui->radio_button(m_desc.at(brushes[i].second), m_brush == brushes[i].first))
             m_brush = brushes[i].first;
     }
@@ -713,20 +950,44 @@ void GLGizmoSculpt::on_render_input_window(float x, float y, float bottom_limit)
 
     ImGui::Separator();
 
+    // One line, always: the count may change as the cursor moves, the layout
+    // must not.
     m_imgui->text(GUI::format_wxstr(_L("%1% triangles"), m_session->triangles_count()));
 
-    if (needs_subdivision()) {
-        m_imgui->text(m_desc.at("subdivide_hint"));
-        if (subdivided_triangle_count() > MaxTrianglesAfterSubdivision) {
-            m_imgui->text(GUI::format_wxstr(_L("Subdividing would exceed %1% triangles."), MaxTrianglesAfterSubdivision));
-        } else {
-            m_imgui->text(m_desc.at("subdivide_warning"));
-            if (m_imgui->button(GUI::format_wxstr(_L("Subdivide to %1% triangles"), subdivided_triangle_count())))
-                wxGetApp().CallAfter([this]() { do_subdivide(); });
-        }
-    } else {
-        m_imgui->text(m_desc.at("paint_kept"));
-    }
+    // While a modal is running, say so where the user is already looking.
+    if (m_adjust.active())
+        m_imgui->text_wrapped(m_adjust.target == Sculpt::AdjustTarget::Radius ? m_desc.at("adjusting_radius")
+                                                                             : m_desc.at("adjusting_strength"),
+                              wrap_width);
+    else if (m_ctrl_inverted)
+        m_imgui->text_wrapped(m_desc.at("inverted"), wrap_width);
+    else
+        m_imgui->text_wrapped(m_desc.at("paint_kept"), wrap_width);
+
+    ImGui::Separator();
+
+    // The Subdivide row is ALWAYS here - the note above it changes, the row does
+    // not appear and disappear. v1 drew it only while the cursor was over the
+    // part, so the panel resized the instant the pointer left and the button was
+    // unreachable.
+    const bool   needs   = needs_subdivision();
+    const size_t after   = subdivided_triangle_count();
+    const bool   too_big = after > MaxTrianglesAfterSubdivision;
+
+    if (needs && ! too_big)
+        m_imgui->text_wrapped(m_desc.at("subdivide_hint") + " " + m_desc.at("subdivide_warning"), wrap_width);
+    else if (needs && too_big)
+        m_imgui->text_wrapped(GUI::format_wxstr(_L("Subdividing would exceed %1% triangles."), MaxTrianglesAfterSubdivision), wrap_width);
+    else
+        m_imgui->text_wrapped(m_desc.at("subdivide_fine"), wrap_width);
+
+    // Enabled whenever a subdivision is actually possible, which is the honest
+    // condition: a mesh that is already fine enough can still be subdivided, and
+    // the user may want to. Only the triangle cap disables it.
+    m_imgui->disabled_begin(too_big);
+    if (m_imgui->button(GUI::format_wxstr(_L("Subdivide to %1% triangles"), after)) && ! too_big)
+        wxGetApp().CallAfter([this]() { do_subdivide(); });
+    m_imgui->disabled_end();
 
     GizmoImguiEnd();
     ImGuiWrapper::pop_toolbar_style();
