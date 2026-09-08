@@ -2711,6 +2711,9 @@ void GLGizmoCut3D::render_flexi_joint_inputs(CutConnectors& connectors)
         sync_flexi_params(connectors, false);
 
     // --- guards -------------------------------------------------------------------------
+    // The guard texts are long sentences: wrapped to the panel's own width so a warning never
+    // stretches the window across the part the user is trying to look at.
+    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + m_label_width + m_control_width);
     const std::string invalid = flexi_validate(m_flexi);
     if (!invalid.empty())
         m_imgui->text_colored(ImGuiWrapper::COL_ORANGE_LIGHT, invalid);
@@ -2735,6 +2738,7 @@ void GLGizmoCut3D::render_flexi_joint_inputs(CutConnectors& connectors)
             _u8L("or raise the clearance."));
 
     m_imgui->text(_L("Both halves stay parts of one object so the joint prints in place."));
+    ImGui::PopTextWrapPos();
 }
 
 void GLGizmoCut3D::render_build_size()
