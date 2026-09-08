@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 
 using namespace Slic3r;
 
@@ -349,4 +350,36 @@ TEST_CASE("Flexi joint guards", "[FlexiJoint]")
     p.neck_ratio = 0.94f;
     REQUIRE_FALSE(flexi_is_captive(p));
     REQUIRE_FALSE(flexi_validate(p).empty());
+}
+
+// --------------------------------------------------------------------- fixture exporter
+
+// Hidden (Catch2 "[.]" tag: it does not run in the default suite). Writes the two jointed
+// cylinders the CLI slicing proofs use. Run it explicitly with the output dir in the
+// environment:
+//   set SNORCA_FLEXI_OUT=C:	mp && libslic3r_tests.exe "Export flexi joint fixtures"
+TEST_CASE("Export flexi joint fixtures", "[.][FlexiJointFixtures]")
+{
+    const char *dir = std::getenv("SNORCA_FLEXI_OUT");
+    REQUIRE(dir != nullptr);
+
+    struct { const char *name; FlexiJointParams p; } cases[] = {
+        { "flexi_ring.3mf", ring_params() },
+        { "flexi_ball.3mf", ball_params() },
+    };
+    for (const auto &c : cases) {
+        Model model;
+        ModelObject *mo = make_jointed_cylinder(model, c.p);
+        Cut cut(mo, 0, Geometry::translation_transform(Vec3d(0., 0., CUT_Z)),
+                ModelObjectCutAttribute::KeepUpper | ModelObjectCutAttribute::KeepLower | ModelObjectCutAttribute::KeepAsParts);
+        const ModelObjectPtrs &res = cut.perform_with_plane();
+        REQUIRE(res.size() == 1);
+        Model out;
+        for (ModelObject *o : res)
+            out.add_object(*o);
+        out.add_default_instances();
+        const boost::filesystem::path file = boost::filesystem::path(dir) / c.name;
+        REQUIRE(store_3mf(file.string().c_str(), &out, nullptr, false));
+        WARN("wrote " << file.string());
+    }
 }
