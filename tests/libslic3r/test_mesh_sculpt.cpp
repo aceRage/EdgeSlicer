@@ -592,6 +592,142 @@ static void bench_stroke(size_t target_triangles, const char *label)
     CHECK(tick_ms < 60.0);
 }
 
+// ----------------------------------------------------------------------------
+// cursor tracking
+// ----------------------------------------------------------------------------
+//
+// The v1 bug the owner hit: "the sphere does not follow the mouse once the
+// click+drag begins, it just sits at the initial click point." Nobody drives the
+// gizmo with a mouse in this session, so what is tested here is the pure helper
+// the gizmo now delegates the decision to (Sculpt::next_cursor_state), fed the
+// frame-by-frame inputs a real drag would produce. The gizmo side - calling it
+// from wxMouseEvent::Dragging() as well as Moving() - is a one-line wiring the
+// test cannot reach without a GL context.
+
+// Replay a whole gesture through the tracker and return the cursor position at
+// each frame, which is exactly the sequence the sphere would be drawn at.
+static std::vector<CursorState> replay(const std::vector<CursorInput> &frames)
+{
+    std::vector<CursorState> out;
+    CursorState state;
+    for (const CursorInput &in : frames) {
+        state = next_cursor_state(state, in);
+        out.push_back(state);
+    }
+    return out;
+}
+
+TEST_CASE("The cursor follows the mouse through a drag, not just on hover", "[Sculpt][SculptCursor]")
+{
+    // A straight drag across the surface: the raycast hit walks with the mouse.
+    // This is the Inflate/Smooth case - the fresh hit is the cursor.
+    std::vector<CursorInput> frames;
+    for (int i = 0; i < 6; ++i) {
+        CursorInput in;
+        // Frame 0 is the hover before the press; the rest are drag ticks.
+        in.mode      = (i == 0) ? CursorMode::Hover : CursorMode::StrokeHit;
+        in.hit_valid = true;
+        in.hit       = Vec3f(float(i), 0.f, 0.f);
+        frames.push_back(in);
+    }
+
+    const std::vector<CursorState> seen = replay(frames);
+    REQUIRE(seen.size() == frames.size());
+
+    // Every frame is visible and sits exactly on that frame's hit: the cursor
+    // moved six times, rather than sticking at the press point.
+    for (size_t i = 0; i < seen.size(); ++i) {
+        INFO("frame " << i);
+        CHECK(seen[i].visible);
+        CHECK(seen[i].position.x() == Approx(float(i)));
+    }
+
+    // The regression itself, stated directly: the cursor is not still at the
+    // point the drag started from.
+    CHECK(seen.back().position.x() != Approx(seen.front().position.x()));
+    CHECK(seen.back().position.x() == Approx(5.f));
+}
+
+TEST_CASE("A Grab cursor rides the dragged surface, not the stale raycast", "[Sculpt][SculptCursor]")
+{
+    // Grab drags the very surface the cursor sits on, and the AABB tree is left
+    // stale for the duration of a stroke - so the fresh hit lags behind the
+    // patch being pulled. The cursor must follow the anchor instead.
+    const Vec3f anchor0(10.f, 0.f, 0.f);
+
+    std::vector<CursorInput> frames;
+    for (int i = 0; i < 5; ++i) {
+        CursorInput in;
+        in.mode        = CursorMode::StrokeGrab;
+        in.hit_valid   = true;
+        // The stale surface barely moves: this is what a raycast would return.
+        in.hit         = anchor0;
+        // ...while the grabbed patch has been pulled i units along +y.
+        in.grab_anchor = anchor0 + Vec3f(0.f, float(i), 0.f);
+        frames.push_back(in);
+    }
+
+    const std::vector<CursorState> seen = replay(frames);
+    for (size_t i = 0; i < seen.size(); ++i) {
+        INFO("frame " << i);
+        CHECK(seen[i].visible);
+        // The cursor tracks the moved anchor...
+        CHECK(seen[i].position.y() == Approx(float(i)));
+        // ...and specifically NOT the stale hit, which never left y = 0.
+        if (i > 0)
+            CHECK(seen[i].position.y() != Approx(frames[i].hit.y()));
+    }
+}
+
+TEST_CASE("A stroke keeps its cursor when the ray runs off the part", "[Sculpt][SculptCursor]")
+{
+    // Dragging past the silhouette must not make the sphere blink out: the user
+    // is still sculpting. The cursor holds its last position instead.
+    std::vector<CursorInput> frames;
+
+    CursorInput on;
+    on.mode      = CursorMode::StrokeHit;
+    on.hit_valid = true;
+    on.hit       = Vec3f(3.f, 4.f, 5.f);
+    frames.push_back(on);
+
+    CursorInput off;               // the ray misses this frame
+    off.mode      = CursorMode::StrokeHit;
+    off.hit_valid = false;
+    frames.push_back(off);
+    frames.push_back(off);
+
+    const std::vector<CursorState> seen = replay(frames);
+    CHECK(seen[0].visible);
+    for (size_t i = 1; i < seen.size(); ++i) {
+        INFO("frame " << i);
+        CHECK(seen[i].visible);
+        CHECK(seen[i].position.x() == Approx(3.f));
+        CHECK(seen[i].position.y() == Approx(4.f));
+        CHECK(seen[i].position.z() == Approx(5.f));
+    }
+}
+
+TEST_CASE("Hovering off the part hides the cursor", "[Sculpt][SculptCursor]")
+{
+    // The hover case is the opposite of the stroke case: no button is held, so
+    // a miss means there is nothing to point at and the sphere is hidden.
+    CursorInput on;
+    on.mode      = CursorMode::Hover;
+    on.hit_valid = true;
+    on.hit       = Vec3f(1.f, 2.f, 3.f);
+
+    CursorInput off;
+    off.mode      = CursorMode::Hover;
+    off.hit_valid = false;
+
+    const std::vector<CursorState> seen = replay({on, off, on});
+    CHECK(seen[0].visible);
+    CHECK_FALSE(seen[1].visible);
+    CHECK(seen[2].visible);
+    CHECK(seen[2].position.y() == Approx(2.f));
+}
+
 TEST_CASE("Sculpt stroke latency on large meshes", "[Sculpt][SculptBench]")
 {
     bench_stroke(200000, "200k");
