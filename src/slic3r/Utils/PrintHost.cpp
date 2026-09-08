@@ -25,6 +25,7 @@
 #include "../GUI/PrintHostDialogs.hpp"
 #include "../GUI/MainFrame.hpp"
 #include "../GUI/GcodeArchive.hpp"
+#include "../GUI/SnapmakerLan.hpp" // Ultra: END_UNLOAD_FILAMENT, built in one place for every send path
 #include "Obico.hpp"
 #include "Flashforge.hpp"
 #include "SimplyPrint.hpp"
@@ -335,6 +336,74 @@ void PrintHostJobQueue::priv::perform_job(PrintHostJob the_job)
     const std::string archive_device   = the_job.device_id;
     const std::string archive_dev_name = the_job.device_name;
     const std::string archive_mapping  = the_job.filament_mapping;
+    const bool        archive_unload   = the_job.unload_at_end;
+
+    // "Unload filaments when the print ends", for a Snapmaker tool changer only. The flag cannot
+    // ride inside the G-code: the firmware refuses SET_PRINT_PREFERENCES while print_stats.state is
+    // "printing", so it has to reach the printer before the job starts. This queue uploads with
+    // print=true in one request, so the preference goes out just ahead of it.
+    //
+    // Nothing here runs unless the send dialog offered the checkbox and it was ticked, and the
+    // dialog only offers it for a Snapmaker tool changer starting a print. Every other host - every
+    // Moonraker, OctoPrint, Duet, Elegoo ... send - reaches the upload below having executed not one
+    // extra statement, and a failure to set the preference is logged and never fails the send: the
+    // print is what the person asked for, the unload is a convenience on top of it.
+    if (archive_unload && archive_print) {
+        GUI::SnapmakerLan::Device d;
+        d.ip = the_job.printhost->get_host();
+        // "http://10.0.0.106:80/" and friends: SnapmakerLan wants the bare host and a port.
+        {
+            std::string h = d.ip;
+            const size_t scheme = h.find("://");
+            if (scheme != std::string::npos)
+                h = h.substr(scheme + 3);
+            if (const size_t slash = h.find('/'); slash != std::string::npos)
+                h = h.substr(0, slash);
+            if (const size_t colon = h.rfind(':'); colon != std::string::npos) {
+                try {
+                    d.port = std::stoi(h.substr(colon + 1));
+                } catch (...) {}
+                h = h.substr(0, colon);
+            }
+            d.ip = h;
+        }
+        // Which toolheads this print uses: the dialog's own mapping ("0:1,1:2" - filament:slot),
+        // and, when nothing was mapped, the file goes out as sliced and toolhead 0 is the one it
+        // runs on.
+        std::vector<int> used;
+        {
+            std::string field;
+            std::string list = archive_mapping + ",";
+            bool        after_colon = false;
+            for (char c : list) {
+                if (c == ':') {
+                    after_colon = true;
+                    field.clear();
+                } else if (c == ',') {
+                    if (after_colon && !field.empty()) {
+                        try {
+                            const int t = std::stoi(field);
+                            if (t >= 0 && std::find(used.begin(), used.end(), t) == used.end())
+                                used.push_back(t);
+                        } catch (...) {}
+                    }
+                    after_colon = false;
+                    field.clear();
+                } else {
+                    field += c;
+                }
+            }
+        }
+        if (used.empty())
+            used.push_back(0);
+        const std::string script = "SET_PRINT_PREFERENCES " + GUI::SnapmakerLan::end_unload_parameter(used);
+        std::string       err;
+        if (!GUI::SnapmakerLan::run_script(d, script, err))
+            BOOST_LOG_TRIVIAL(error) << "PrintHostJobQueue: the printer refused the end-of-print unload preference ("
+                                     << err << "); the print goes ahead without it";
+        else
+            BOOST_LOG_TRIVIAL(info) << "PrintHostJobQueue: sent " << script;
+    }
 
     bool success = the_job.printhost->upload(std::move(the_job.upload_data),
         [this](Http::Progress progress, bool &cancel)   { this->progress_fn(std::move(progress), cancel); },
@@ -356,6 +425,7 @@ void PrintHostJobQueue::priv::perform_job(PrintHostJob the_job)
             am.printer_name = archive_dev_name.empty() ? (host_name + " " + host_url) : archive_dev_name;
             am.file_name    = archive_name;
             am.mapping      = archive_mapping;
+            am.unload_at_end = archive_unload && archive_print;
             GUI::GcodeArchive::archive(archive_source, am);
         }
         if (the_job.switch_to_device_tab) {

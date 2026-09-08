@@ -6,6 +6,8 @@
 
 #include <nlohmann/json.hpp>
 
+#include "SnapmakerTaskConfig.hpp" // TOOLHEAD_COUNT, end_unload_parameter, with_end_unload
+
 namespace Slic3r {
 namespace GUI {
 
@@ -121,10 +123,9 @@ struct FileFilament
 // Returns one toolhead per filament (-1 for a filament the file does not use).
 std::vector<int> auto_match(const std::vector<FileFilament>& filaments, const std::vector<Toolhead>& heads);
 
-// How many physical toolheads the print_task_config arrays hold on this printer family (the U1's
-// firmware PHYSICAL_EXTRUDER_NUM). The firmware clamps a longer list and zeroes what it is not
-// given, so sending exactly this many flags is both safe and complete.
-constexpr int TOOLHEAD_COUNT = 4;
+// POST /printer/gcode/script?script= - one or more macros, run at once. The transport every
+// task-config command below travels on.
+bool run_script(const Device& d, const std::string& script, std::string& error);
 
 // The macros for one mapping, without the start (what a dry run reports).
 // `unload_at_end` adds END_UNLOAD_FILAMENT=[..] to SET_PRINT_PREFERENCES: a 1 for every toolhead

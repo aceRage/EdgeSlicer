@@ -1,6 +1,9 @@
 # Unload filaments at end of print (Snapmaker U1)
 
 Branch `feat/u1-unload-at-end`, from `feat/ultra-preferences` at `bfc949efca`.
+Follow-up branch `feat/u1-unload-per-send`, from `feat/ultra-preferences` at `32ddb61631`: the
+option moves from "a printer-preset switch only" to "a printer-preset default the send dialog
+overrides per print" (§6), which is what the owner asked for once the first branch was in.
 
 ## The short version
 
@@ -142,11 +145,15 @@ the printer is idle and will accept it.
 print it replays did — exactly how `mapping` is already handled. A record written before this
 existed has no such key and reprints unchanged.
 
-**Not covered.** The PC's own Device tab starts Snapmaker prints from the bundled compiled Flutter
-web app (`resources/web/flutter_web/main.dart.js`) over SSWCP/MQTT, not from C++. That bundle builds
-its own `SET_PRINT_PREFERENCES` line and cannot be extended from this repo, so a print started from
-the Device tab does not carry the flag. Prints sent from the phone/agent API's LAN path (and
-reprints of those from the archive) do.
+**Not covered (as of the first branch).** The PC's own Device tab starts Snapmaker prints from the
+bundled compiled Flutter web app (`resources/web/flutter_web/main.dart.js`) over SSWCP/MQTT, not
+from C++. That bundle builds its own `SET_PRINT_PREFERENCES` line and cannot be extended from this
+repo, so a print started from the Device tab does not carry the flag. Prints sent from the
+phone/agent API's LAN path (and reprints of those from the archive) do.
+
+— **Superseded by §6.** The bundle cannot be *edited*, but it does not send its script itself: it
+hands the finished text to the slicer over SSWCP, and the slicer is what puts it on the wire. So the
+desktop send is covered after all, by amending that text on its way out.
 
 ## 3. Proofs
 
@@ -219,3 +226,144 @@ for prints this instance did not send, would:
 
 That path needs no `end_unload_filament` at all: it is the same `AUTO_FEEDING` the firmware's own
 `SM_PRINT_END_AUTO_UNLOAD_FILAMENT` runs, issued directly while the printer is idle.
+
+
+## 6. Follow-up: the choice moves to the send dialog (`feat/u1-unload-per-send`)
+
+> "it would be better to locate the option in the 'Send G-code to printer host' dialog. It can stay
+> in the machine tab and default the value here, but it should be able to be overridden with each
+> print." — the owner, after §2 shipped.
+
+A printer-preset switch is a setting you change once and then forget you changed. Whether *this*
+print's filaments should come out is a decision about this print: the plate might be the last of the
+day, or the first of five in the same material. So the preset keeps the default and the send dialog
+carries the answer.
+
+### 6.1 How the desktop's U1 send actually reaches the printer (what existed before)
+
+Worth writing down, because §2's "Not covered" got it half wrong.
+
+`Plater::send_gcode_to_printhost` has two branches, and a Snapmaker U1 always takes the **first**
+one (`is_snapmaker_u1`, from `printer_model`, forced regardless of `use_new_connect`):
+
+1. `PrintHostSendDialog` — the dialog in the owner's screenshot: file name, *Upload* /
+   *Upload and Print* / *Cancel*. It is shown, its answers are copied into the `PrintHostJob`…
+2. …and then the job is **not** enqueued. `WebPreprintDialog` opens instead: a `wxWebView` on
+   `resources/web/flutter_web/index.html`, and *that* page does the whole upload-and-start
+   conversation. `PrintHostJobQueue` never sees a U1 job, so nothing in `PrintHost.cpp`, `OctoPrint.cpp`
+   or `MoonRaker.cpp` runs for one — and the device dropdown from `feat/printhost-devices-p2`
+   (`set_devices`) is only wired into the *second* branch, so a U1's dialog does not show it.
+
+The page does not talk to the printer directly either. It calls back into C++ over SSWCP:
+
+* `sw_SendGCodes` — one blob of Klipper macros, which for a print start is composed by the bundle's
+  own `setPrePrintConfiguration` as, verbatim from `main.dart.js`:
+
+  ```
+  SET_PRINT_EXTRUDER_MAP CONFIG_EXTRUDER=<i> MAP_EXTRUDER=<t>\n   (one per filament)
+  SET_PRINT_USED_EXTRUDERS EXTRUDERS=<t,t,…>\n
+  SET_PRINT_PREFERENCES <k>=<v> <k>=<v> …
+  ```
+
+  — the same three macros, in the same order, that `SnapmakerLan::mapping_script` builds for the
+  phone's LAN path. (The bundle's own field list stops at `extruders_replenished`: it has never
+  heard of `end_unload_filament`, which is why the *value* has to come from us.)
+* then `sw_MachinePrintStart` — `host->async_start_print_job(filename, …)`.
+
+**So: before this branch the desktop path sent `SET_PRINT_PREFERENCES` on every U1 print start, and
+it went through C++ — it simply had no `END_UNLOAD_FILAMENT` on it.** The checkbox is not a lie: it
+is one more parameter on a line the slicer was already forwarding.
+
+### 6.2 What changed
+
+**One builder, three callers.** `SnapmakerLan::end_unload_parameter(used_toolheads)` composes the
+`END_UNLOAD_FILAMENT=[..]` literal (four entries, no spaces, an explicit 0 for every toolhead the
+job does not use). `mapping_script` calls it, and so does the queue path; nothing builds that array
+by hand any more. `SnapmakerLan::with_end_unload(script)` is the desktop's form: it reads the used
+toolheads off a script's own `SET_PRINT_USED_EXTRUDERS` line and appends the parameter to the
+`SET_PRINT_PREFERENCES` line already in it. A script with no such line, one that already carries the
+flag, or anything that is not a task-config script at all comes back unchanged — the page sends
+plenty of other scripts through the same call.
+
+**The dialog.** `PrintHostSendDialog::offer_unload_at_end(preset_default)` (called before `init()`,
+and only when `is_snapmaker_toolchanger` says the printer can do it) grows a checkbox
+*"Unload filaments when the print ends"* under the file name, ticked from the preset.
+`unload_at_end()` returns it — and returns **false for a plain *Upload***: an upload starts nothing,
+so there is no end of print, and the flag would otherwise sit on the printer waiting for whatever
+job someone starts next. Both branches of `send_gcode_to_printhost` call it, so the checkbox is
+there whether the printer takes the Flutter path or the queue.
+
+**The desktop wire.** The dialog's answer is left in `SSWCP::set_pending_unload_at_end`, and
+`sw_SendGCodes` runs every script it is handed through `with_end_unload` before forwarding it. Only
+a script that really carries the macros is touched (`amended`), and the flag is then cleared:
+the choice belongs to the print it was made for. `sw_FinishPreprint` clears it again for a cancelled
+or failed preprint, and records `unload_at_end` in the G-code archive sidecar, so a reprint of a
+desktop send replays what that send did — the same as the LAN path already did.
+
+**The queue wire.** For a Snapmaker tool changer that does reach `PrintHostJobQueue::perform_job`
+(no U1 does today, but the branch is not U1-only), the preference goes out as its own
+`SET_PRINT_PREFERENCES END_UNLOAD_FILAMENT=[..]` over `SnapmakerLan::run_script` — the printer is
+still idle at that point, so it is accepted — just before the upload-with-`print=true`. The
+toolheads come from the dialog's own `filament_mapping`. **Guarded twice:** the whole block is
+inside `if (the_job.unload_at_end && archive_print)`, and `unload_at_end` is false unless the dialog
+offered the checkbox, which it only does for a Snapmaker tool changer. Every Moonraker, OctoPrint,
+Duet, Elegoo… send reaches the upload having executed not one extra statement. A refusal is logged
+and never fails the send: the print is what the person asked for.
+
+`SnapmakerLan.cpp`'s file-static `gcode_script` became the public `run_script` for this (§5 wanted
+it anyway); no behaviour changed with the rename.
+
+**The phone.** `unload_at_end=0|1` is now an optional parameter of `POST /api/plates/{i}/send` and
+`POST /api/archive/{id}/send`; without it the printer preset (or, for a reprint, the record) decides,
+exactly as before. The dry run reports `unload_supported` beside `unload_at_end`, and the send
+sheet's Snapmaker mapping step grows a toggle from those two — next to the toolhead chips, defaulted
+to the preset, sent only when the printer supports it.
+
+**The Machine tab.** `unload_filaments_at_end` is now `comSimple`, so it is visible without switching
+to Advanced (`toggle_options` still hides the line for every non-tool-changer), and its tooltip ends
+with "This is only the default: the Send G-code to printer host dialog can override it for a single
+print."
+
+### 6.3 Proofs
+
+* `slic3rutils_tests` grows `snapmaker_unload_tests.cpp`: `end_unload_parameter` (four entries, no
+  spaces, out-of-range ignored), `mapping_script` on/off, and `with_end_unload` — that it amends the
+  page's real script shape, agrees character-for-character with what the LAN path builds for the same
+  job, reads the toolheads off the script rather than a mapping order, leaves non-task-config
+  scripts alone, never adds the flag twice, and survives CRLF. Counts in the branch's report.
+* `test_u1_unload.py` gains an override pass: a phone send with `unload_at_end=1` against a preset
+  default of `0` puts `END_UNLOAD_FILAMENT=[0,1,1,0]` on the mock's wire, and `unload_at_end=0`
+  against a preset default of `1` sends none — the preset is the default and the request wins.
+* The LAN gate (`gate_all.sh lan`) against a scratch install of this build.
+
+### 6.4 Nobody clicked the dialog
+
+The checkbox itself was never clicked: this work ran with no person at the PC, and driving a modal
+wx dialog from an agent is not a proof of anything. What *is* proven is everything the click feeds:
+the builders under unit test, the phone's equivalent of the same override end to end against the
+mock, and that the desktop's script really passes through `sw_SendGCodes` (§6.1). For the owner:
+
+1. U1 preset → Machine → Basic information → *End of print*: the switch is now visible in **Simple**
+   mode. Leave it **off**.
+2. Slice a two-colour plate and press **Print** → the *Send G-code to printer host* dialog. Confirm
+   *"Unload filaments when the print ends"* is below the file name and **unticked** (it followed the
+   preset). Tick it, press **Upload and Print**.
+3. Before the job starts: `GET http://<u1-ip>/printer/objects/query?print_task_config` —
+   `end_unload_filament` should be `true` for exactly the toolheads the job uses. (§4 step 3.)
+4. Send the same plate again, this time leaving the box **unticked**: the printer should hold
+   `end_unload_filament = [false × 4]`, proving the dialog overrides in both directions.
+5. Turn the preset switch **on** and open the dialog once more: the box should come up **ticked**.
+6. Press **Upload** (not *Upload and Print*) with the box ticked: nothing should be started and
+   `end_unload_filament` should stay as it was — an upload has no end of print.
+7. The phone's send sheet: on the toolhead-mapping step the same toggle appears, ticked from the
+   preset; flipping it changes what the printer holds the same way.
+
+### 6.5 Unverified
+
+* No real printer was touched (the U1s were off limits), so §4's hardware list still stands and
+  §6.4's list is added to it.
+* The desktop dialog's checkbox has not been seen on screen; its wiring is proven only through the
+  code path and the shared builder's tests.
+* `PrintHostJobQueue`'s Snapmaker branch (§6.2, "the queue wire") has no live target today: no
+  Snapmaker preset reaches that branch, because `is_snapmaker_u1` diverts the U1 and no other
+  Snapmaker tool changer ships. It is exercised only by inspection.

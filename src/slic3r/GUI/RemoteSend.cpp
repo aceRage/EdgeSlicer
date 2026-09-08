@@ -558,7 +558,13 @@ static std::pair<int, std::string> prepare_snapmaker(const Request& req, PartPla
     if (PresetBundle* bundle = wxGetApp().preset_bundle) {
         const DynamicPrintConfig& pcfg = bundle->printers.get_edited_preset().config;
         const ConfigOptionBool* unload = pcfg.option<ConfigOptionBool>("unload_filaments_at_end");
-        p->unload_at_end = unload != nullptr && unload->value && is_snapmaker_toolchanger(pcfg);
+        p->unload_supported = is_snapmaker_toolchanger(pcfg);
+        p->unload_at_end    = unload != nullptr && unload->value && p->unload_supported;
+        // The preset is only the default. The send sheet - like the desktop's send dialog - can
+        // say otherwise for this print, in either direction, as long as the printer is one that
+        // can do it at all.
+        if (!req.unload_at_end.empty() && p->unload_supported)
+            p->unload_at_end = req.unload_at_end == "1" || req.unload_at_end == "true";
     }
     if (req.mode == "print") {
         std::string error;
@@ -888,7 +894,11 @@ std::pair<int, std::string> prepare_from_record(const Request& req, std::shared_
         p->file_filaments     = file_filaments_of_record(j);
         // A reprint unloads if the print it replays did. A record written before this existed has
         // no such key and reprints the way it always has.
+        p->unload_supported   = true; // an archived Snapmaker send: the same family, the same firmware
         p->unload_at_end      = j.value("unload_at_end", false);
+        // ... unless this reprint says otherwise, exactly as it may override the mapping.
+        if (!req.unload_at_end.empty())
+            p->unload_at_end = req.unload_at_end == "1" || req.unload_at_end == "true";
         if (mode == "print") {
             // The record's own mapping is the memory; the caller may override it, and a record
             // written before mappings were kept falls back to the colour match.
@@ -1187,6 +1197,7 @@ static void run_snapmaker(std::shared_ptr<Prepared> p, Sink& sink)
         result["mapping"]        = p->mapping;
         result["mapping_script"] = SnapmakerLan::mapping_script(p->mapping, p->unload_at_end);
         result["unload_at_end"]  = p->unload_at_end;
+        result["unload_supported"] = p->unload_supported;
     }
     if (p->dry_run) {
         result["dry_run"] = true;

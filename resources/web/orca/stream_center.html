@@ -2728,6 +2728,21 @@ body.dragging .cell iframe, body.dragging .cell img { pointer-events: none; }
                         body.appendChild(el('div', 'info warn', 'Toolhead ' + (head.index + 1) + ' is empty.'));
                 });
                 body.appendChild(el('div', 'info', 'Pre-filled by matching the colours, the way the printer\'s own app does. Change any row you like.'));
+                // "Unload filaments when the print ends": the printer preset holds the default (the
+                // dry run above reported it), this is the override for this print. Shown only when
+                // the printer can do it - a tool changer whose firmware PRINT_END acts on the flag.
+                if (s.unloadSupported) {
+                    var ur = el('div', 'row unload');
+                    var ub = el('span', 'btn' + (s.unload ? '' : ' alt'), (s.unload ? '\u2713 ' : '') + 'Unload filaments when the print ends');
+                    ub.setAttribute('role', 'switch');
+                    ub.setAttribute('aria-checked', s.unload ? 'true' : 'false');
+                    ub.onclick = function() { s.unload = !s.unload; sendRender(); };
+                    ur.appendChild(ub);
+                    body.appendChild(ur);
+                    body.appendChild(el('div', 'info', s.unload
+                        ? 'The printer will unload the toolheads this print used once it is done, skipping any that holds a flexible filament.'
+                        : 'The filaments stay loaded when the print ends. The printer preset sets the default; this changes it for this print only.'));
+                }
                 var cm = el('div', 'actions');
                 var gom = el('span', 'btn warn', 'Start print');
                 gom.onclick = function() { sendStart('print'); };
@@ -2777,6 +2792,10 @@ body.dragging .cell iframe, body.dragging .cell img { pointer-events: none; }
                 if (sendState !== s) return;
                 var res = job.result || {};
                 s.filaments = res.filaments || [];
+                // The printer preset's own "unload filaments at end of print", and whether this
+                // printer can do it at all. The toggle below starts here and overrides it.
+                s.unloadSupported = res.unload_supported === true;
+                s.unload = res.unload_at_end === true;
                 s.map = {};
                 s.filaments.forEach(function(f) { if (f.used) s.map[f.index] = f.toolhead >= 0 ? f.toolhead : 0; });
                 s.phase = 'map';
@@ -2811,6 +2830,9 @@ body.dragging .cell iframe, body.dragging .cell img { pointer-events: none; }
         if (p.kind === 'snapmaker' && mode === 'print' && s.map) {
             var pairs = Object.keys(s.map).map(function(k) { return k + ':' + s.map[k]; });
             if (pairs.length) body += '&mapping=' + encodeURIComponent(pairs.join(','));
+            // Only when the sheet actually asked: without it the PC uses the printer preset's own
+            // default, which is what a send from anywhere else does.
+            if (s.unloadSupported) body += '&unload_at_end=' + (s.unload ? '1' : '0');
         }
         s.mode = mode; s.phase = 'running'; s.percent = 0; s.text = 'Preparing the plate file on the PC…'; s.error = ''; s.result = null;
         sendRender();

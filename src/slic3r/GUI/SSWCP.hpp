@@ -655,6 +655,27 @@ public:
     // update the display name
     static void update_display_filename(const std::string& display_name);
 
+    // ---- "unload filaments when the print ends" for the send about to happen ----
+    //
+    // The desktop's Snapmaker send does not build the printer's task-config script: the bundled
+    // Device page does, and hands it here as one sw_SendGCodes blob (SET_PRINT_EXTRUDER_MAP.. /
+    // SET_PRINT_USED_EXTRUDERS.. / SET_PRINT_PREFERENCES..) just before it starts the print. So the
+    // send dialog records its checkbox here and sw_SendGCodes amends that one line on its way out -
+    // the same END_UNLOAD_FILAMENT the phone's LAN path puts there, from the same builder
+    // (SnapmakerLan::with_end_unload). The flag is consumed by the send it was set for and cleared
+    // again, so nothing leaks into the next one.
+    static void set_pending_unload_at_end(bool on);
+    static bool pending_unload_at_end();
+    static void clear_pending_unload_at_end();
+    // True once the flag really went out with a print's task-config script. Each sw_ call is its
+    // own instance, so the send that amends the script and the sw_FinishPreprint that archives the
+    // file cannot share a member; the archive sidecar reads this.
+    // Records that the flag really went out with a print's task-config script, and clears the
+    // pending choice in the same breath. Each sw_ call is its own instance, so the send that
+    // amends the script and the sw_FinishPreprint that archives the file cannot share a member.
+    static void note_unload_at_end_sent();
+    static bool unload_at_end_was_sent();
+
     // get the active file name
     static std::string get_active_filename();
 
@@ -686,6 +707,8 @@ private:
     static TimeoutMap<SSWCP_Instance*, std::shared_ptr<SSWCP_Instance>> m_instance_list;  // Active instances
     static constexpr std::chrono::milliseconds DEFAULT_INSTANCE_TIMEOUT{80000}; // Default timeout (8s)
 
+    static bool m_pending_unload_at_end;    // the send dialog's "unload when the print ends"
+    static bool m_unload_at_end_was_sent;   // and whether it actually reached the printer
     static std::string m_active_gcode_filename; // name of the file which is pretend to be upload and print
     static std::string m_display_gcode_filename; // name for display
 

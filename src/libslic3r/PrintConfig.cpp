@@ -1844,8 +1844,9 @@ void PrintConfigDef::init_fff_params()
                      "(Snapmaker tool changers only). The printer does the unloading itself, at the "
                      "end of its own PRINT_END routine, and skips any toolhead holding a flexible "
                      "filament. This is sent with the print, so it only applies to prints started "
-                     "from this slicer.");
-    def->mode = comAdvanced;
+                     "from this slicer. This is only the default: the Send G-code to printer host "
+                     "dialog can override it for a single print.");
+    def->mode = comSimple;
     def->set_default_value(new ConfigOptionBool(false));
 
     def             = this->add("printing_by_object_gcode", coString);

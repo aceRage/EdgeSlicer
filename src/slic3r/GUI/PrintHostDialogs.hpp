@@ -62,6 +62,16 @@ public:
     // was mapped, which is every host that reports no slots.
     std::string filament_mapping() const;
 
+    // ---- "unload filaments when the print ends" (Snapmaker tool changers) ----
+    //
+    // Call before init() with the printer preset's unload_filaments_at_end for a Snapmaker tool
+    // changer, and not at all for anything else: the checkbox exists only when offered. The preset
+    // is the default, this dialog is the override, and the answer travels with the job.
+    void offer_unload_at_end(bool preset_default);
+    // What the checkbox says. False when it was never offered, and false for a plain Upload: there
+    // is no print to end.
+    bool unload_at_end() const;
+
     const boost::filesystem::path origin_path() { return m_ori_file_path; }
 
     virtual void EndModal(int ret) override;
@@ -93,6 +103,10 @@ protected:
     wxFlexGridSizer*                      m_mapping_sizer { nullptr };
     std::vector<wxChoice*>                m_mapping_choices;  // one per used plate filament
     std::vector<int>                      m_mapping_filament; // its filament index
+    // The end-of-print unload, when this printer is a Snapmaker tool changer.
+    bool                                  m_offer_unload { false };
+    bool                                  m_unload_default { false };
+    wxCheckBox*                           m_check_unload { nullptr };
     PrintHostPostUploadAction post_upload_action;
     wxString    m_valid_suffix;
     wxString    m_preselected_storage;

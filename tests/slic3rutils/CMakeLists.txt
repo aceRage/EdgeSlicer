@@ -2,6 +2,7 @@ get_filename_component(_TEST_NAME ${CMAKE_CURRENT_LIST_DIR} NAME)
 add_executable(${_TEST_NAME}_tests
     ${_TEST_NAME}_tests_main.cpp
     printhost_devices_tests.cpp
+    snapmaker_unload_tests.cpp
     )
 
 target_link_libraries(${_TEST_NAME}_tests test_common libslic3r_gui libslic3r)

@@ -7,6 +7,7 @@
 #include "DownloadManager.hpp"
 #include "RemoteSnapmaker.hpp" // Ultra: the phone's own connect reuses this connect's credentials
 #include "GcodeArchive.hpp"    // Ultra: the desktop's Snapmaker send is archived when it finishes
+#include "SnapmakerTaskConfig.hpp" // Ultra: END_UNLOAD_FILAMENT is built in one place for every send path
 #include "Timelapse/TimelapseDownloadPopup.hpp"
 #include "nlohmann/json.hpp"
 #include "slic3r/GUI/Tab.hpp"
@@ -2313,6 +2314,29 @@ void SSWCP_MachineOption_Instance::sw_SendGCodes() {
                 str_codes.push_back(m_param_data["script"].get<std::string>());
             }
 
+            // The send dialog's "unload filaments when the print ends", for this send only. The
+            // page builds the task-config script (SET_PRINT_EXTRUDER_MAP / SET_PRINT_USED_EXTRUDERS
+            // / SET_PRINT_PREFERENCES) and sends it here just before the print start; the flag has
+            // to be one more parameter on that existing SET_PRINT_PREFERENCES line, because the
+            // firmware refuses a second one once the print has begun. Only a script that actually
+            // carries those macros is touched, so a page sending anything else is untouched.
+            if (SSWCP::pending_unload_at_end()) {
+                bool amended = false;
+                for (std::string& code : str_codes) {
+                    const std::string with = SnapmakerLan::with_end_unload(code);
+                    if (with != code) {
+                        code    = with;
+                        amended = true;
+                    }
+                }
+                if (amended) {
+                    // Answered: the choice belongs to the print it was made for, and the printer
+                    // now holds the flags. A later send makes its own choice.
+                    SSWCP::note_unload_at_end_sent();
+                    BOOST_LOG_TRIVIAL(info) << "SSWCP: END_UNLOAD_FILAMENT added to the print-start preferences";
+                }
+            }
+
             if (!host) {
                 handle_general_fail();
                 return;
@@ -2795,8 +2819,15 @@ void SSWCP_MachineOption_Instance::sw_FinishPreprint()
                 am.printer_kind = "connect";
                 am.printer_name = host ? "Snapmaker " + host->get_host() : "Snapmaker";
                 am.file_name    = SSWCP::get_display_filename();
+                // A reprint of this record replays the choice the print was made with, the same way
+                // the phone's LAN sends already do.
+                am.unload_at_end = SSWCP::unload_at_end_was_sent();
                 GcodeArchive::archive(SSWCP::get_active_filename(), am);
             }
+
+            // The page is done with this print, whatever it decided. A choice nobody used must not
+            // reach the next send: a cancelled or failed preprint leaves nothing behind.
+            SSWCP::clear_pending_unload_at_end();
 
             send_to_js();
             finish_job();
@@ -7105,6 +7136,8 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_publish()
 TimeoutMap<SSWCP_Instance*, std::shared_ptr<SSWCP_Instance>> SSWCP::m_instance_list;
 constexpr std::chrono::milliseconds SSWCP::DEFAULT_INSTANCE_TIMEOUT;
 
+bool SSWCP::m_pending_unload_at_end = false;
+bool SSWCP::m_unload_at_end_was_sent = false;
 std::string SSWCP::m_active_gcode_filename = "";
 std::string SSWCP::m_display_gcode_filename = "";
 long long   SSWCP::m_active_file_size       = 0;
@@ -7506,6 +7539,21 @@ void SSWCP::update_active_filename(const std::string& filename)
 {
     m_active_gcode_filename = filename;
 }
+
+// the send dialog's "unload filaments when the print ends", for the send about to happen
+void SSWCP::set_pending_unload_at_end(bool on)
+{
+    m_pending_unload_at_end  = on;
+    m_unload_at_end_was_sent = false; // a fresh send has not sent anything yet
+}
+bool SSWCP::pending_unload_at_end() { return m_pending_unload_at_end; }
+void SSWCP::clear_pending_unload_at_end() { m_pending_unload_at_end = false; }
+void SSWCP::note_unload_at_end_sent()
+{
+    m_unload_at_end_was_sent = true;
+    m_pending_unload_at_end  = false; // the choice belongs to the print it was made for
+}
+bool SSWCP::unload_at_end_was_sent() { return m_unload_at_end_was_sent; }
 
 // query the info of the machine
 bool SSWCP::query_machine_info(std::shared_ptr<PrintHost>& host, std::string& out_model, std::vector<std::string>& out_nozzle_diameters, std::string& device_name, int timeout_second)

@@ -1175,7 +1175,8 @@ RemoteAccess::ApiResponse RemoteAccess::api_archive_delete(const std::string& id
 // re-sliced, no project has to be open, and the plater is not touched at all - but from the job id
 // onwards this is the same send as /api/plates/{i}/send: the same single-flight lock, the same
 // RemoteSend::run() on its own thread, the same /api/jobs/{id} progress. Form: [printer=<id>]
-// [&mode=upload|print]&confirm=1[&force=1][&dry_run=1][&name=][&mapping=0:1,1:2]; `printer` and
+// [&mode=upload|print]&confirm=1[&force=1][&dry_run=1][&name=][&mapping=0:1,1:2]
+// [&unload_at_end=0|1]; `printer` and
 // every option not given fall back to the record.
 RemoteAccess::ApiResponse RemoteAccess::api_archive_send(const std::string& id, const std::string& form_body)
 {
@@ -1191,6 +1192,7 @@ RemoteAccess::ApiResponse RemoteAccess::api_archive_send(const std::string& id, 
     req.dry_run = get("dry_run") == "1";
     req.name    = get("name");
     req.mapping = get("mapping");
+    req.unload_at_end = get("unload_at_end");
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         if (m_send_running) { r.status = 409; r.body = json_error("a send is already running; wait for it to finish"); return r; }
@@ -1249,7 +1251,9 @@ RemoteAccess::ApiResponse RemoteAccess::api_archive_send(const std::string& id, 
 
 // Send the sliced plate to a printer the way the desktop's Print / Send dialogs would, without
 // showing them (RemoteSend). Form: printer=<id>&mode=upload|print[&confirm=1][&force=1][&dry_run=1]
-// [&bed_leveling=&flow_cali=&timelapse=&vibration_cali=&use_ams=][&name=]. Returns a job id; the
+// [&bed_leveling=&flow_cali=&timelapse=&vibration_cali=&use_ams=][&name=][&mapping=0:1,1:2]
+// [&unload_at_end=0|1] (Snapmaker tool changers: the printer preset's own setting is the default).
+// Returns a job id; the
 // transfer runs on its own thread and /api/jobs/{id} follows it (kind send).
 RemoteAccess::ApiResponse RemoteAccess::api_send(int plate, const std::string& form_body)
 {
@@ -1270,6 +1274,7 @@ RemoteAccess::ApiResponse RemoteAccess::api_send(int plate, const std::string& f
     req.use_ams        = tri("use_ams");
     req.name           = get("name");
     req.mapping        = get("mapping");
+    req.unload_at_end  = get("unload_at_end");
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         if (m_send_running) { r.status = 409; r.body = json_error("a send is already running; wait for it to finish"); return r; }
