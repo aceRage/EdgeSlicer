@@ -1,0 +1,12 @@
+<svg width="1000" height="1000" viewBox="0 0 1000 1000" fill="none" xmlns="http://www.w3.org/2000/svg">
+<!-- Neutral placeholder for a FlashForge printer model render that is not present in the
+     upstream Orca-Flashforge resources/images set. Generic enclosed-printer line art, no
+     branding. Replace with the real product render when upstream ships one. -->
+<rect x="220" y="230" width="560" height="540" rx="28" stroke="#909090" stroke-width="16"/>
+<rect x="286" y="300" width="428" height="330" rx="12" stroke="#909090" stroke-width="12"/>
+<line x1="286" y1="392" x2="714" y2="392" stroke="#909090" stroke-width="12"/>
+<rect x="452" y="392" width="96" height="74" rx="8" stroke="#909090" stroke-width="12"/>
+<line x1="500" y1="466" x2="500" y2="514" stroke="#909090" stroke-width="12"/>
+<line x1="330" y1="596" x2="670" y2="596" stroke="#909090" stroke-width="14"/>
+<rect x="286" y="672" width="180" height="46" rx="10" stroke="#909090" stroke-width="12"/>
+</svg>
