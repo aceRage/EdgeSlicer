@@ -422,6 +422,67 @@ TEST_CASE("PrintHostDevices: what a device says it has loaded", "[PrintHostDevic
     }
 }
 
+TEST_CASE("PrintHostDevices: which send a preset takes", "[PrintHostDevices]")
+{
+    // The regression this case exists for. `use_new_connect` is a GLOBAL app-config flag: SSWCP and
+    // SMPhysicalPrinterDialog set it to "true" the moment any Snapmaker machine connects, and
+    // nothing clears it when the user then selects a different printer preset. The send branch used
+    // to read it on its own (`use_new_connect == "true" || is_snapmaker_u1`), so on a PC with a
+    // Snapmaker U1 on the LAN, selecting an Elegoo Centauri Carbon and pressing Print handed the
+    // plate to WebPreprintDialog - the Snapmaker pre-treat page - instead of uploading it to the
+    // Elegoo host.
+
+    SECTION("a print-host printer never takes the Snapmaker flow, flag or no flag")
+    {
+        // The owner's machine: an Elegoo Centauri Carbon with a U1 connected beside it.
+        CHECK(send_flow_for("Elegoo Centauri Carbon", true) == SendFlow::PrintHost);
+        CHECK(send_flow_for("Elegoo Centauri Carbon", false) == SendFlow::PrintHost);
+
+        // And every other host type this store is for.
+        for (const char* model : {"Prusa MK4", "Voron 2.4", "Duet Delta", "Creality K1", "Custom Printer"}) {
+            CAPTURE(model);
+            CHECK(send_flow_for(model, true) == SendFlow::PrintHost);
+            CHECK(send_flow_for(model, false) == SendFlow::PrintHost);
+        }
+    }
+
+    SECTION("a U1 always takes the connect flow, as it did before the fix")
+    {
+        // Unchanged behaviour: the U1's toolhead mapping page is the only way to pick its tools.
+        CHECK(send_flow_for("Snapmaker U1", true) == SendFlow::SnapmakerConnect);
+        CHECK(send_flow_for("Snapmaker U1", false) == SendFlow::SnapmakerConnect);
+        // The model name is matched case-insensitively, the way the rest of the GUI matches it.
+        CHECK(send_flow_for("snapmaker u1 (0.4 nozzle)", false) == SendFlow::SnapmakerConnect);
+    }
+
+    SECTION("another Snapmaker follows its own connection")
+    {
+        CHECK(send_flow_for("Snapmaker Artisan", true) == SendFlow::SnapmakerConnect);
+        // Not connected: it is reached at whatever print_host it holds, like any other host.
+        CHECK(send_flow_for("Snapmaker Artisan", false) == SendFlow::PrintHost);
+    }
+
+    SECTION("an empty model name is a print host, not a Snapmaker")
+    {
+        // A hand-made preset with no printer_model at all must not be swept into the connect flow.
+        CHECK(send_flow_for("", true) == SendFlow::PrintHost);
+        CHECK(send_flow_for("", false) == SendFlow::PrintHost);
+    }
+
+    SECTION("the model predicates themselves")
+    {
+        CHECK(is_snapmaker_model("Snapmaker U1"));
+        CHECK(is_snapmaker_model("SNAPMAKER Artisan"));
+        CHECK_FALSE(is_snapmaker_model("Elegoo Centauri Carbon"));
+        CHECK_FALSE(is_snapmaker_model(""));
+
+        CHECK(is_snapmaker_u1_model("Snapmaker U1"));
+        CHECK_FALSE(is_snapmaker_u1_model("Snapmaker Artisan"));
+        // "U1" without the vendor is not a U1: a model name is vendor-qualified in practice.
+        CHECK_FALSE(is_snapmaker_u1_model("Elegoo U1"));
+    }
+}
+
 TEST_CASE("PrintHostDevices: the preset bridge writes the fields the send path reads", "[PrintHostDevices]")
 {
     // A bare config: apply_to_config creates the options it needs, so this works on a preset's

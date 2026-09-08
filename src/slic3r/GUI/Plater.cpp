@@ -197,6 +197,7 @@
 #include "nlohmann/json.hpp"
 
 #include "PhysicalPrinterDialog.hpp"
+#include "../Utils/PrintHostDevices.hpp"
 #include "PrintHostDevicesDialog.hpp"
 #include "PrinterWebView.hpp"
 #include "PrintHostDialogs.hpp"
@@ -3736,7 +3737,17 @@ void Sidebar::update_all_preset_comboboxes(bool reload_printer_view)
 
         static bool is_sm_page = false;
 
-        if (!use_new_connection && !is_snapmaker_u1 && reload_printer_view) {
+        // A print-host preset gets the print-host row (the connection icon, the device list, Send)
+        // whatever some *other* machine's connection did. Testing use_new_connection on its own
+        // pushed every non-Snapmaker preset - an Elegoo Centauri Carbon, say - down the Snapmaker
+        // side the moment any Snapmaker had connected: no connection icon, no device list, and the
+        // Device tab on missing_connection.html.
+        const bool takes_printhost_row = PrintHostDevices::send_flow_for(printer_model_opt ? printer_model_opt->value :
+                                                                                             std::string(),
+                                                                        use_new_connection) ==
+                                         PrintHostDevices::SendFlow::PrintHost;
+
+        if (takes_printhost_row && reload_printer_view) {
 
             p->combo_printer->set_show_connection_button(true);
             // The printers of this model, by address. The Device tab follows whichever one the picker
@@ -22429,17 +22440,19 @@ void Plater::send_gcode_legacy(int plate_idx, Export3mfProgressFn proFn, bool us
         ph_preselect.clear();
     }
 
-    // Snapmaker U1
+    // Which of the two sends this plate takes. NOT "use_new_connect" on its own: that flag is
+    // global and sticky (any connected Snapmaker sets it, nothing clears it when the preset
+    // changes), so on a PC with a Snapmaker on the LAN it sent an Elegoo Centauri Carbon's plate
+    // into WebPreprintDialog - the Snapmaker pre-treat page - instead of uploading it to the Elegoo
+    // host. PrintHostDevices::send_flow_for weighs it against the selected preset's own model.
     const auto preset = wxGetApp().preset_bundle->printers.get_edited_preset();
     auto       printer_config    = wxGetApp().preset_bundle->printers.get_edited_preset().config;
     auto       printer_model_opt = printer_config.option<ConfigOptionString>("printer_model");
-    bool       is_snapmaker_u1   = false;
-    if (printer_model_opt) {
-        std::string printer_model = printer_model_opt->value;
-        is_snapmaker_u1           = boost::icontains(printer_model, "Snapmaker") && boost::icontains(printer_model, "U1");
-    }
+    const std::string printer_model = printer_model_opt ? printer_model_opt->value : std::string();
+    const bool        connect_flow_active = wxGetApp().app_config->get("use_new_connect") == "true";
 
-    if (wxGetApp().app_config->get("use_new_connect") == "true" || is_snapmaker_u1) {
+    if (PrintHostDevices::send_flow_for(printer_model, connect_flow_active) ==
+        PrintHostDevices::SendFlow::SnapmakerConnect) {
         // firstly upload and open upload download dialog,
         // get default name       
         // Obtain default output path
