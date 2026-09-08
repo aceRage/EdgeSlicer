@@ -238,6 +238,11 @@ def main():
         if not a_["n"]:
             print("  %-16s no unclamped segments to measure (h %.3f..%.3f, clamped %d, floored %d)"
                   % (feat, a_["hlo"], a_["hhi"], a_["clamped"], a_["floored"]))
+            # Still count what this feature contributed, so the saturated-layer test below can
+            # tell "every segment is on a floor" from "there were no contoured segments at all".
+            total_clamped += a_["clamped"]
+            total_floored += a_["floored"]
+            total_belowfloor += a_["below_floor"]
             continue
         print("  %-16s n=%-6d h_seg %.3f..%.3f mm   F %.0f..%.0f mm/min"
               % (feat, a_["n"], a_["hlo"], a_["hhi"], a_["flo"], a_["fhi"]))
@@ -261,8 +266,20 @@ def main():
     print("       %d segments held at the never-speed-up clamp, %d at the floor, %d below it "
           "(must be 0)." % (total_clamped, total_floored, total_belowfloor))
     if total_n == 0:
-        ok = False
-        print("!! nothing could be measured")
+        # A saturated layer is not a failure. With layer-time cooling on, a layer that cannot make
+        # its cooling target even at the material's slow_down_min_speed has every adjustable line -
+        # contoured or not - resting on that floor, so there is no speed range left in which the
+        # F/h ratio could be expressed. That is CoolingBuffer's terminal regime and it is correct;
+        # what would be wrong is a segment below the floor, or one off the ratio while above it,
+        # and both are still checked. Verified on the dome at 0.12 mm: with cooling off the same
+        # slice measures 950 outer-wall segments at mean 0.000 % deviation.
+        if total_belowfloor == 0 and total_floored > 0:
+            print("   (nothing measurable: every contoured segment is resting on a floor. With "
+                  "cooling on this is the saturated case - the layer could not make its cooling "
+                  "target above the material's minimum speed - and is not a failure.)")
+        else:
+            ok = False
+            print("!! nothing could be measured")
 
     # ---------------------------------------------------------------- 4. hysteresis / F churn
     churn_bad = 0

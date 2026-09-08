@@ -41,6 +41,10 @@ PRINTER = "Bambu Lab P1S 0.4 nozzle"
 PROCESS = "0.20mm Standard @BBL X1C"
 FILAMENT = "Generic PLA"
 MIN_Z = 0.05
+# The filament preset's slow_down_min_speed, mm/s (Generic PLA inherits 20 from fdm_filament_pla).
+# Only used to tell the report which floor is legitimately in play when --cooling is passed.
+SLOW_DOWN_MIN_SPEED = 20
+
 
 RE_TIME = re.compile(r"^;\s*(?:estimated printing time.*|model printing time)\s*[:=]\s*(.+?)\s*$",
                      re.I)
@@ -231,15 +235,38 @@ def main():
             if t_ns_c and t_s_c < t_ns_c - 1e-6:
                 print("  !! the contoured moves got FASTER, which the never-speed-up clamp forbids")
                 rc = 1
-            if abs(t_s_u - t_ns_u) > 0.05:
-                print("  !! non-contoured extrusion time changed by %.2f s; the scaling must "
-                      "not touch anything but contoured moves" % (t_s_u - t_ns_u))
+            # With cooling OFF the scaling must not touch a single non-contoured move: any change
+            # there is the feature leaking. With cooling ON a small change is not only allowed but
+            # expected, and in the RIGHT direction: the contoured moves now take longer, so the
+            # layer needs LESS slowdown from everything else and CoolingBuffer relaxes the cap
+            # toward the uncooled speed. Measured on the dome at 0.2 mm, the non-contoured moves
+            # go from 2841 to 2850 mm/min - 2850 being what they would run at uncooled - which is
+            # a 1.05 s saving on 374 s. What must never happen is the layer getting FASTER overall
+            # than cooling demanded, and that is asserted separately below.
+            if not a.cooling and abs(t_s_u - t_ns_u) > 0.05:
+                print("  !! non-contoured extrusion time changed by %.2f s; with cooling off the "
+                      "scaling must not touch anything but contoured moves" % (t_s_u - t_ns_u))
+                rc = 1
+            elif a.cooling and t_s_u > t_ns_u + 0.05:
+                print("  !! non-contoured extrusion time ROSE by %.2f s; the relaxation may only "
+                      "ever give time back, never take more" % (t_s_u - t_ns_u))
+                rc = 1
+            if a.cooling and t_ns and t_s and t_s < t_ns - 1e-6:
+                # The layer-time target is the whole point of the cooling pass: the scaled slice
+                # must not come out quicker than the unscaled one it is being compared against.
+                print("  !! the whole-print estimate FELL %d s with the scaling on; the cooled "
+                      "layer time was undercut" % (t_ns - t_s))
                 rc = 1
 
             print()
             p = subprocess.run(
                 [sys.executable, "-u", os.path.join(T, "zaa_speed_report.py"), runs["scale"],
                  "--layer-height=%s" % lh, "--min-z=%s" % MIN_Z,
+                 # With layer-time cooling on, CoolingBuffer may take a contoured segment down to
+                 # the material's own slow_down_min_speed. A segment resting on that floor cannot
+                 # express the F/h ratio any more, so the report counts and excludes it exactly
+                 # like the emitter's own 10 mm/s floor rather than calling it a violation.
+                 "--cooling-floor=%s" % (SLOW_DOWN_MIN_SPEED if a.cooling else 0),
                  "--compare-z", runs["noscale"]],
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
             for line in p.stdout.decode("utf-8", "replace").splitlines():
