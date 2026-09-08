@@ -2343,10 +2343,8 @@ void SSWCP_MachineOption_Instance::sw_SendGCodes() {
                     }
                 }
                 if (amended) {
-                    // Answered: the choice belongs to the print it was made for, and the printer
-                    // now holds the flags. A later send makes its own choice.
                     SSWCP::note_unload_at_end_sent();
-                    BOOST_LOG_TRIVIAL(info) << "SSWCP: END_UNLOAD_FILAMENT added to the print-start preferences";
+                    BOOST_LOG_TRIVIAL(warning) << "SSWCP: END_UNLOAD_FILAMENT added to the print-start preferences";
                 }
             }
 
@@ -7570,9 +7568,10 @@ void SSWCP::clear_pending_unload_at_end()
 }
 void SSWCP::note_unload_at_end_sent()
 {
+    // The choice stays armed until sw_FinishPreprint clears it: the page resends the same
+    // print-start script when the printer's answer is late (a 3 s retry was seen in the field), and
+    // a retry without the flag would have the firmware zero the array it had just been given.
     m_unload_at_end_was_sent = true;
-    m_pending_unload_at_end  = false; // the choice belongs to the print it was made for
-    m_unload_at_end_decided  = false;
 }
 bool SSWCP::unload_at_end_was_sent() { return m_unload_at_end_was_sent; }
 
