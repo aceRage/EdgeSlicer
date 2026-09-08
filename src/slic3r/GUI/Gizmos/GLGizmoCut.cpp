@@ -194,7 +194,10 @@ GLGizmoCut3D::GLGizmoCut3D(GLCanvas3D& parent, const std::string& icon_filename,
 
     m_connector_modes = { _u8L("Auto"), _u8L("Manual") };
 
-    m_connector_types = { _u8L("Plug"), _u8L("Dowel"), _u8L("Snap") };
+    // NOTE: indexed by CutConnectorType, so the Undef slot has to be filled before FlexiJoint.
+    m_connector_types = { _u8L("Plug"), _u8L("Dowel"), _u8L("Snap"), "", _u8L("Flexi joint") };
+
+    m_flexi_kinds = { _u8L("Double ring"), _u8L("Ball & socket") };
 
     m_connector_styles = { _u8L("Prism"), _u8L("Frustum")
 //              , _u8L("Claw")
@@ -224,6 +227,15 @@ GLGizmoCut3D::GLGizmoCut3D(GLCanvas3D& parent, const std::string& icon_filename,
         {"Width"        , _u8L("Width")},
         {"Flap Angle"   , _u8L("Flap Angle")},
         {"Groove Angle" , _u8L("Groove Angle")},
+        {"Joint"        , _u8L("Joint")},
+        {"Outer radius" , _u8L("Outer radius")},
+        {"Ring width"   , _u8L("Ring width")},
+        {"Ring height"  , _u8L("Ring height")},
+        {"Clearance"    , _u8L("Clearance")},
+        {"Hub radius"   , _u8L("Hub radius")},
+        {"Tilt"         , _u8L("Tilt allowance")},
+        {"Ball radius"  , _u8L("Ball radius")},
+        {"Opening"      , _u8L("Opening angle")},
     };
 
 //    update_connector_shape();
@@ -2278,9 +2290,19 @@ void GLGizmoCut3D::render_connectors_input_window(CutConnectors &connectors, flo
     bool type_changed = render_connect_type_radio_button(CutConnectorType::Plug);
     type_changed     |= render_connect_type_radio_button(CutConnectorType::Dowel);
     type_changed     |= render_connect_type_radio_button(CutConnectorType::Snap);
+    type_changed     |= render_connect_type_radio_button(CutConnectorType::FlexiJoint);
     if (type_changed)
         apply_selected_connectors([this, &connectors] (size_t idx) { connectors[idx].attribs.type = CutConnectorType(m_connector_type); });
     ImGuiWrapper::pop_radio_style();
+
+    if (is_flexi_joint_type()) {
+        if (type_changed)
+            sync_flexi_params(connectors, true);
+        render_flexi_joint_inputs(connectors);
+        ImGui::Separator();
+        render_connectors_window_footer(x, y);
+        return;
+    }
 
     m_imgui->disabled_begin(m_connector_type != CutConnectorType::Plug);
         if (type_changed && m_connector_type == CutConnectorType::Dowel) {
@@ -2329,6 +2351,11 @@ void GLGizmoCut3D::render_connectors_input_window(CutConnectors &connectors, flo
 
     ImGui::Separator();
 
+    render_connectors_window_footer(x, y);
+}
+
+void GLGizmoCut3D::render_connectors_window_footer(float x, float y)
+{
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(6.0f, 10.0f));
     float get_cur_y = ImGui::GetContentRegionMax().y + ImGui::GetFrameHeight() + y;
     show_tooltip_information(x, get_cur_y);
@@ -2350,6 +2377,145 @@ void GLGizmoCut3D::render_connectors_input_window(CutConnectors &connectors, flo
     }
 
     ImGui::PopStyleVar(2);
+}
+
+// ------------------------------------------------------------------------ Flexi joint UI
+
+double GLGizmoCut3D::flexi_section_inscribed_radius() const
+{
+    // Phase 1 approximation of "the inscribed circle of the cut cross section": half the
+    // smaller side of the object's bounding box measured in the cut plane's own frame.
+    // (Contour-exact inscribed circle is phase 2 - see the spec.)
+    const Vec3d sz = m_transformed_bounding_box.size();
+    return 0.5 * std::min(sz.x(), sz.y());
+}
+
+float GLGizmoCut3D::flexi_nozzle_diameter() const
+{
+    try {
+        const auto* opt = wxGetApp().preset_bundle->printers.get_edited_preset().config.option<ConfigOptionFloats>("nozzle_diameter");
+        if (opt && !opt->values.empty())
+            return float(opt->get_at(0));
+    } catch (...) {}
+    return 0.4f;
+}
+
+double GLGizmoCut3D::flexi_slice_closing_radius() const
+{
+    try {
+        const auto* opt = wxGetApp().preset_bundle->prints.get_edited_preset().config.option<ConfigOptionFloat>("slice_closing_radius");
+        if (opt)
+            return opt->value;
+    } catch (...) {}
+    return 0.049;
+}
+
+void GLGizmoCut3D::sync_flexi_params(CutConnectors& connectors, bool resize_from_section)
+{
+    m_flexi.kind = FlexiJointKind(m_flexi_kind_id);
+
+    const float floor_c = flexi_clearance_floor(double(flexi_nozzle_diameter()));
+    if (m_flexi.clearance < floor_c)
+        m_flexi.clearance = floor_c;
+
+    if (resize_from_section && m_flexi_auto_size)
+        m_flexi = flexi_auto_size(m_flexi, flexi_section_inscribed_radius());
+
+    // Keep radius/height in sync so the existing "fits inside the contour" and overlap
+    // checks, the preview scaling and the raycasters all keep working unchanged.
+    const float r = flexi_outer_extent(m_flexi);
+    const float h = flexi_protrusion_height(m_flexi);
+    m_connector_size          = 2.f * r;
+    m_connector_depth_ratio   = h;
+
+    for (CutConnector& c : connectors)
+        if (c.attribs.type == CutConnectorType::FlexiJoint) {
+            c.flexi  = m_flexi;
+            c.radius = r;
+            c.height = h;
+        }
+
+    update_connector_shape();
+    update_raycasters_for_picking();
+    check_and_update_connectors_state();
+}
+
+bool GLGizmoCut3D::render_flexi_float_input(const std::string& label, float& in_val, float min_val, float max_val, const wxString& tooltip)
+{
+    ImGui::AlignTextToFramePadding();
+    m_imgui->text(label);
+    ImGui::SameLine(m_label_width);
+    ImGui::PushItemWidth(0.55f * float(m_editing_window_width));
+    float val = in_val;
+    ImGui::BBLDragFloat(("##flexi_" + label).c_str(), &val, 0.01f, min_val, max_val, "%.2f");
+    if (!tooltip.IsEmpty() && ImGui::IsItemHovered())
+        m_imgui->tooltip(tooltip, ImGui::GetFontSize() * 20.0f);
+    if (val < min_val) val = min_val;
+    if (val > max_val) val = max_val;
+    if (is_approx(val, in_val))
+        return false;
+    in_val = val;
+    return true;
+}
+
+void GLGizmoCut3D::render_flexi_joint_inputs(CutConnectors& connectors)
+{
+    bool changed = false;
+
+    if (render_combo(m_labels_map["Joint"], m_flexi_kinds, m_flexi_kind_id, m_label_width, m_editing_window_width)) {
+        m_flexi.kind = FlexiJointKind(m_flexi_kind_id);
+        sync_flexi_params(connectors, true);
+    }
+
+    if (m_imgui->bbl_checkbox(_L("Auto size from the cut cross-section"), m_flexi_auto_size) && m_flexi_auto_size)
+        sync_flexi_params(connectors, true);
+
+    m_imgui->disabled_begin(m_flexi_auto_size);
+        changed |= render_flexi_float_input(m_labels_map[m_flexi.kind == FlexiJointKind::DoubleRing ? "Outer radius" : "Ball radius"],
+                                            m_flexi.outer_radius, 0.6f, 60.f,
+                                            _L("Outer radius of the joint. Auto = 0.4 x the inscribed radius of the cut cross-section."));
+    m_imgui->disabled_end();
+
+    if (m_flexi.kind == FlexiJointKind::DoubleRing) {
+        changed |= render_flexi_float_input(m_labels_map["Ring width"], m_flexi.ring_width, 0.4f, 20.f,
+                                            _L("Radial thickness of the ring lip."));
+        changed |= render_flexi_float_input(m_labels_map["Ring height"], m_flexi.ring_height, 0.4f, 20.f,
+                                            _L("How far the ring lip reaches into the groove."));
+    } else {
+        changed |= render_flexi_float_input(m_labels_map["Opening"], m_flexi.open_angle, 10.f, 75.f,
+                                            _L("Half angle of the socket mouth, in degrees. Smaller keeps the ball captive, larger gives more movement."));
+    }
+
+    const float floor_c = flexi_clearance_floor(double(flexi_nozzle_diameter()));
+    changed |= render_flexi_float_input(m_labels_map["Clearance"], m_flexi.clearance, floor_c, 2.f,
+                                        _L("Gap between every male face and the matching female face. The floor comes from the nozzle diameter of the active printer preset."));
+    changed |= render_flexi_float_input(m_labels_map["Tilt"], m_flexi.tilt, 0.f, 3.f,
+                                        _L("Extra headroom carved into the groove so the segment can rock."));
+
+    if (m_flexi.kind == FlexiJointKind::DoubleRing) {
+        m_imgui->disabled_begin(m_flexi_auto_size);
+            changed |= render_flexi_float_input(m_labels_map["Hub radius"], m_flexi.hub_radius, 0.f, 60.f,
+                                                _L("Radius of the solid central hub that keeps the joint from collapsing. 0 disables it."));
+        m_imgui->disabled_end();
+    }
+
+    if (changed)
+        sync_flexi_params(connectors, false);
+
+    // --- guards -------------------------------------------------------------------------
+    const std::string invalid = flexi_validate(m_flexi);
+    if (!invalid.empty())
+        m_imgui->text_colored(ImGuiWrapper::COL_ORANGE_LIGHT, invalid);
+
+    const double closing_radius = flexi_slice_closing_radius();
+    if (flexi_gap_closing_conflict(m_flexi, closing_radius))
+        m_imgui->text_colored(ImGuiWrapper::COL_ORANGE_LIGHT,
+            _u8L("Slice gap closing radius") + " (" + double_to_string(closing_radius, 3).ToStdString() + " mm) " +
+            _u8L("will fuse this clearance shut. Keep it below") + " " +
+            double_to_string(flexi_max_safe_gap_closing_radius(m_flexi), 3).ToStdString() + " mm, " +
+            _u8L("or raise the clearance."));
+
+    m_imgui->text(_L("Both halves stay parts of one object so the joint prints in place."));
 }
 
 void GLGizmoCut3D::render_build_size()
@@ -2826,7 +2992,15 @@ void GLGizmoCut3D::render_cut_plane_input_window(CutConnectors &connectors, floa
             if (m_part_selection.valid())
                 m_keep_as_parts = false;
 
+            const bool flexi_placed = std::any_of(connectors.begin(), connectors.end(),
+                                                  [](const CutConnector& c) { return c.attribs.type == CutConnectorType::FlexiJoint; });
+            m_imgui->disabled_begin(flexi_placed);
             m_imgui->bbl_checkbox(_L("Cut to parts"), m_keep_as_parts);
+            m_imgui->disabled_end();
+            if (flexi_placed) {
+                m_keep_as_parts = true;
+                m_imgui->text(_L("A Flexi joint always keeps both halves as parts of one object."));
+            }
             if (m_keep_as_parts) {
                 m_keep_upper = m_keep_lower = true;
                 m_place_on_cut_upper = m_place_on_cut_lower = false;
@@ -3300,7 +3474,10 @@ void GLGizmoCut3D::apply_connectors_in_model(ModelObject* mo, int &dowels_count)
         for (CutConnector&connector : mo->cut_connectors) {
             connector.rotation_m = m_rotation_m;
 
-            if (connector.attribs.type == CutConnectorType::Dowel) {
+            if (connector.attribs.type == CutConnectorType::FlexiJoint) {
+                // The flexi bodies straddle the cut plane by construction: no centre shift.
+            }
+            else if (connector.attribs.type == CutConnectorType::Dowel) {
                 if (connector.attribs.style == CutConnectorStyle::Prism)
                     connector.height *= 2;
                 dowels_count ++;
@@ -3421,6 +3598,10 @@ void GLGizmoCut3D::perform_cut(const Selection& selection)
 
         int dowels_count = 0;
         const bool has_connectors = !mo->cut_connectors.empty();
+        // A flexi joint only works print-in-place, so it forces keep-as-parts (one object,
+        // two volumes) no matter what the Cut-to-parts / separate-objects checkboxes say.
+        const bool has_flexi = std::any_of(mo->cut_connectors.begin(), mo->cut_connectors.end(),
+                                           [](const CutConnector& c) { return c.attribs.type == CutConnectorType::FlexiJoint; });
         // update connectors pos as offset of its center before cut performing
         apply_connectors_in_model(cut_mo , dowels_count);
 
@@ -3428,7 +3609,7 @@ void GLGizmoCut3D::perform_cut(const Selection& selection)
 
         ModelObjectCutAttributes attributes = only_if(has_connectors ? true : m_keep_upper, ModelObjectCutAttribute::KeepUpper) |
                                               only_if(has_connectors ? true : m_keep_lower, ModelObjectCutAttribute::KeepLower) |
-                                              only_if(has_connectors ? false : m_keep_as_parts, ModelObjectCutAttribute::KeepAsParts) |
+                                              only_if(has_flexi ? true : (has_connectors ? false : m_keep_as_parts), ModelObjectCutAttribute::KeepAsParts) |
                                               only_if(m_place_on_cut_upper, ModelObjectCutAttribute::PlaceOnCutUpper) |
                                               only_if(m_place_on_cut_lower, ModelObjectCutAttribute::PlaceOnCutLower) |
                                               only_if(m_rotate_upper, ModelObjectCutAttribute::FlipUpper) |
@@ -3593,11 +3774,29 @@ void GLGizmoCut3D::init_connector_shapes()
                 m_shapes[attribs].mesh_raycaster = std::make_unique<MeshRaycaster>(std::make_shared<const TriangleMesh>(std::move(its)));
             }
         }
+
+    // The Flexi joint has one cached shape, rebuilt whenever its parameters change.
+    {
+        const CutConnectorAttributes attribs = { CutConnectorType::FlexiJoint, CutConnectorStyle::Prism, CutConnectorShape::Circle };
+        indexed_triangle_set its = get_connector_mesh(attribs);
+        m_shapes[attribs].model.init_from(its);
+        m_shapes[attribs].mesh_raycaster = std::make_unique<MeshRaycaster>(std::make_shared<const TriangleMesh>(std::move(its)));
+    }
 }
 
 void GLGizmoCut3D::update_connector_shape()
 {
     CutConnectorAttributes attribs = { m_connector_type, CutConnectorStyle(m_connector_style), CutConnectorShape(m_connector_shape_id) };
+
+    if (m_connector_type == CutConnectorType::FlexiJoint) {
+        // One cached shape per flexi joint; it is rebuilt on every parameter change.
+        attribs = { CutConnectorType::FlexiJoint, CutConnectorStyle::Prism, CutConnectorShape::Circle };
+        indexed_triangle_set its = get_connector_mesh(attribs);
+        m_shapes[attribs].reset();
+        m_shapes[attribs].model.init_from(its);
+        m_shapes[attribs].mesh_raycaster = std::make_unique<MeshRaycaster>(std::make_shared<const TriangleMesh>(std::move(its)));
+        return;
+    }
 
     if (m_connector_type == CutConnectorType::Snap) {
         indexed_triangle_set its = get_connector_mesh(attribs);
@@ -3698,13 +3897,17 @@ bool GLGizmoCut3D::add_connector(CutConnectors& connectors, const Vec2d& mouse_p
         Plater::TakeSnapshot snapshot(wxGetApp().plater(), _u8L("Add connector"), UndoRedo::SnapshotType::GizmoAction);
         unselect_all_connectors();
 
+        const bool flexi = is_flexi_joint_type();
         connectors.emplace_back(pos, m_rotation_m,
-                                m_connector_size * 0.5f, m_connector_depth_ratio,
+                                flexi ? flexi_outer_extent(m_flexi)      : m_connector_size * 0.5f,
+                                flexi ? flexi_protrusion_height(m_flexi) : m_connector_depth_ratio,
                                 m_connector_size_tolerance * 0.5f, m_connector_depth_ratio_tolerance,
                                 m_connector_angle,
                                 CutConnectorAttributes( CutConnectorType(m_connector_type),
-                                                        CutConnectorStyle(m_connector_style),
-                                                        CutConnectorShape(m_connector_shape_id)));
+                                                        flexi ? CutConnectorStyle::Prism  : CutConnectorStyle(m_connector_style),
+                                                        flexi ? CutConnectorShape::Circle : CutConnectorShape(m_connector_shape_id)));
+        if (flexi)
+            connectors.back().flexi = m_flexi;
         m_selected.push_back(true);
         m_selected_count = 1;
         assert(m_selected.size() == connectors.size());
@@ -3900,6 +4103,16 @@ indexed_triangle_set GLGizmoCut3D::get_connector_mesh(CutConnectorAttributes con
         break;
     }
 
+    if (connector_attributes.type == CutConnectorType::FlexiJoint) {
+        // The flexi bodies are generated in millimetres; normalize them by the same
+        // (radius, radius, height) the renderer/raycaster/bbox checks scale connectors by.
+        connector_mesh = flexi_preview_body(m_flexi);
+        const double r = std::max(0.001f, flexi_outer_extent(m_flexi));
+        const double h = std::max(0.001f, flexi_protrusion_height(m_flexi));
+        its_transform(connector_mesh, scale_transform(Vec3d(1. / r, 1. / r, 1. / h)));
+        return connector_mesh;
+    }
+
     if (connector_attributes.type == CutConnectorType::Snap)
         connector_mesh = its_make_snap(1.0, 1.0, m_snap_space_proportion, m_snap_bulge_proportion);
     else if (connector_attributes.style == CutConnectorStyle::Prism)
@@ -3921,6 +4134,10 @@ void GLGizmoCut3D::apply_cut_connectors(ModelObject* mo, const std::string& conn
 
     size_t connector_id = mo->cut_id.connectors_cnt();
     for (const CutConnector& connector : mo->cut_connectors) {
+        if (connector.attribs.type == CutConnectorType::FlexiJoint) {
+            add_flexi_joint_volume(mo, connector, connector_name + "-" + std::to_string(++connector_id));
+            continue;
+        }
         TriangleMesh mesh = TriangleMesh(get_connector_mesh(connector.attribs));
         // Mesh will be centered when loading.
         ModelVolume* new_volume = mo->add_volume(std::move(mesh), ModelVolumeType::NEGATIVE_VOLUME);
