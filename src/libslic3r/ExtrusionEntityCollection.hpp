@@ -31,9 +31,29 @@ public:
 
     ExtrusionEntitiesPtr entities;     // we own these entities
     bool no_sort;
+    // Phase 3 (image row, sub-triangle resolution): 0 for every entity that is not part of an
+    // ImageWeighted mixed row's split top-solid-infill surface - which is every entity in every
+    // print that does not use the feature, so this field never differs from its default there and
+    // changes no comparator, no grouping and no G-code (Bar A). When nonzero it is a 1-based
+    // PHYSICAL filament id (not a virtual mixed id - it already came out of
+    // image_fill_dither_segment()'s candidate_ids, which are physical), and it names the ONE
+    // filament every entity inside this collection must be printed with. Set by
+    // Fill.cpp's split_top_infill_by_image_row() on the small per-run collections it creates (one
+    // run = one collection, so this is never a mix within one collection); read by
+    // ToolOrdering.cpp's collect_extruders (so the layer's tool list includes every run's
+    // filament), GCode.cpp's configured_extruder_id/configured_filament_id_1based (so the run
+    // actually extrudes with that filament instead of the region's nominal
+    // solid_infill_filament), and LayerTools::extruder() (so WipingExtrusions::is_overriddable's
+    // soluble check asks about the right filament too). See
+    // docs/superpowers/specs/2026-09-07-imagemap-phase3-imagerow.md, step 4.
+    unsigned int image_row_extruder_1based = 0;
     ExtrusionEntityCollection(): no_sort(false) {}
-    ExtrusionEntityCollection(const ExtrusionEntityCollection &other) : no_sort(other.no_sort), is_reverse(other.is_reverse) { this->append(other.entities); }
-    ExtrusionEntityCollection(ExtrusionEntityCollection &&other) : entities(std::move(other.entities)), no_sort(other.no_sort), is_reverse(other.is_reverse) {}
+    ExtrusionEntityCollection(const ExtrusionEntityCollection &other)
+        : no_sort(other.no_sort), is_reverse(other.is_reverse), image_row_extruder_1based(other.image_row_extruder_1based)
+        { this->append(other.entities); }
+    ExtrusionEntityCollection(ExtrusionEntityCollection &&other)
+        : entities(std::move(other.entities)), no_sort(other.no_sort), is_reverse(other.is_reverse),
+          image_row_extruder_1based(other.image_row_extruder_1based) {}
     explicit ExtrusionEntityCollection(const ExtrusionPaths &paths);
     ExtrusionEntityCollection& operator=(const ExtrusionEntityCollection &other);
     ExtrusionEntityCollection& operator=(ExtrusionEntityCollection &&other)
@@ -41,6 +61,7 @@ public:
         this->entities = std::move(other.entities);
         this->no_sort  = other.no_sort;
         is_reverse     = other.is_reverse;
+        image_row_extruder_1based = other.image_row_extruder_1based;
         return *this;
     }
     ~ExtrusionEntityCollection() { clear(); }

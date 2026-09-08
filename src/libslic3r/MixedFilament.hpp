@@ -2,6 +2,7 @@
 #ifndef slic3r_MixedFilament_hpp_
 #define slic3r_MixedFilament_hpp_
 
+#include <array>
 #include <string>
 #include <vector>
 #include <algorithm>
@@ -410,6 +411,12 @@ public:
     // pulling in ImageFill.hpp. decode_image_fill_ref returns "" for malformed hex.
     static std::string encode_image_fill_ref(const std::string &image_fill_params_string);
     static std::string decode_image_fill_ref(const std::string &encoded);
+
+    // Phase 3, step 4: a physical filament's configured hex colour ("#RRGGBB" or "#RRGGBBAA"),
+    // as sRGB 0..1 - the format image_fill_dither_segment()'s candidate_colors expects. Reuses
+    // the same hex parser blend_color()/blend_color_multi() already trust (MixedFilament.cpp's
+    // file-local parse_hex_color); malformed input decodes as black, exactly like that parser.
+    static std::array<float, 3> hex_to_srgb01(const std::string &hex);
 
     // Build the T2(pre-delete) -> T3(post-delete) painting remap for the batch-
     // match cleanup path that marks redundant mixed rows deleted. Virtual IDs

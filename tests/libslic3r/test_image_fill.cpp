@@ -6,7 +6,9 @@
 
 #include "libslic3r/ImageFill.hpp"
 #include "libslic3r/ColorSplit.hpp"
+#include "libslic3r/MixedFilament.hpp"
 #include "libslic3r/Model.hpp"
+#include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/TriangleMesh.hpp"
 #include "libslic3r/TriangleSelector.hpp"
 #include "libslic3r/Format/bbs_3mf.hpp"
@@ -1046,6 +1048,105 @@ TEST_CASE("Image Fill: write the Bar B project - a cube with a three-colour imag
     REQUIRE(store_bbs_3mf(sp));
     WARN("Bar B project written to " << out << " (" << res.facets_painted << " painted facets, "
          << res.filaments_used.size() << " filaments, subdivision " << res.subdivision_used << ")");
+}
+
+// =============================================================================================
+// 7b. Phase 3, step 4 Bar B - the image row: a plaque, a black-to-white ramp, three filaments
+// =============================================================================================
+//
+// Unlike the [barb] project above, this one carries NO mmu_segmentation_facets painting at all -
+// the image row is not a per-facet feature. What it needs instead is a MixedFilament row whose
+// distribution_mode is ImageWeighted, with image_fill_ref pointing at the ramp and
+// gradient_component_ids naming the three allowed physical filaments, referenced from
+// solid_infill_filament so Fill.cpp's split_top_infill_by_image_row() picks it up for the
+// plaque's (only) top surface. See docs/superpowers/specs/2026-09-07-imagemap-phase3-imagerow.md.
+//
+// Run it on its own with:  libslic3r_tests.exe "[barb3]"
+// It leaves %TEMP%\snorca_tests\image_row_bar_b.3mf behind on purpose - that is the file
+// snorca_hubtest's bar_b_imgrow_p3s4.py slices from disk.
+TEST_CASE("Image Fill Phase 3: write the Bar B project - a plaque with a black-to-white image row",
+          "[imagefill][ImageRow][barb3]")
+{
+    const std::vector<std::string> colors = {"#000000", "#808080", "#FFFFFF"};
+
+    Model        model;
+    ModelObject *object = model.add_object();
+    object->name        = "image row plaque";
+    // 50 x 50 mm footprint, 3 mm tall - the plan's own Bar B shape.
+    ModelVolume *volume = object->add_volume(make_cube(50., 50., 3.));
+    volume->name        = "plaque";
+    object->add_instance();
+    object->ensure_on_bed();
+
+    // ramp_kw.png is a 1 x 16 vertical ramp, white (row 0) to black (row 15) - see
+    // docs/superpowers/specs/2026-09-07-imagemap-phase2-imagefill.md's fixture list. A Planar
+    // projection along Z gives u from x, v from y (the same convention the [barb] cube above
+    // documents), so the ramp varies along the plaque's Y axis: one edge samples near-white, the
+    // opposite edge near-black, with every shade in between at the rows in between - exactly the
+    // "8 bands, monotonically increasing dark coverage" shape Bar B measures.
+    const std::string sha = model.image_assets.add(read_fixture("ramp_kw.png"));
+
+    ImageFillParams p;
+    p.asset      = sha;
+    p.projection = ImageFillProjection::Planar;
+    p.axis       = ImageFillAxis::Z;
+    p.allowed    = {1, 2, 3};
+
+    // The row: three physical filaments (black, mid-grey, white - the id order matches `colors`
+    // above 1-based), ImageWeighted, referencing the ramp. add_custom_filament()'s own A/B pair
+    // (1, 2) is unused by ImageWeighted's sampling - image_row_context_for_region() reads
+    // gradient_component_ids instead (see that field's own comment, MixedFilament.hpp) - but it
+    // still has to be a valid distinct pair for add_custom_filament() to accept the row at all.
+    MixedFilamentManager mgr;
+    mgr.add_custom_filament(1, 2, 50, colors);
+    REQUIRE(mgr.mixed_filaments().size() == 1);
+    MixedFilament &mf = mgr.mixed_filaments().front();
+    mf.distribution_mode      = int(MixedFilament::ImageWeighted);
+    mf.gradient_component_ids = "123";
+    mf.image_fill_ref          = MixedFilamentManager::encode_image_fill_ref(p.to_string());
+    REQUIRE_FALSE(mf.image_fill_ref.empty());
+    const std::string serialized = mgr.serialize_custom_entries();
+
+    // Virtual ids are enumerated over enabled rows starting at num_physical + 1 (see
+    // MixedFilamentManager's own allocator, MixedFilament.cpp) - with 3 physical filaments and
+    // this row being the only, first, enabled custom row, its virtual id is 4.
+    const int virtual_id = int(colors.size()) + 1;
+
+    const boost::filesystem::path tmp_root = boost::filesystem::temp_directory_path() / "snorca_tests";
+    boost::filesystem::create_directories(tmp_root);
+    Slic3r::set_temporary_dir(tmp_root.string());
+    const std::string out = (tmp_root / "image_row_bar_b.3mf").string();
+
+    DynamicPrintConfig cfg = DynamicPrintConfig::full_print_config();
+    // mixed_filament_definitions is project-wide state (which rows exist at all), not a
+    // per-region print setting, so it belongs on the global config - and does survive
+    // --process-preset/--filament-presets at CLI slice time (verified empirically: a plain
+    // global solid_infill_filament override here does NOT survive process-preset selection,
+    // because that key IS part of the process preset's own domain; mixed_filament_definitions
+    // is not).
+    cfg.set_key_value("mixed_filament_definitions", new ConfigOptionString(serialized));
+    if (ConfigOptionStrings *colours_opt = cfg.option<ConfigOptionStrings>("filament_colour", true))
+        colours_opt->values = colors;
+
+    // solid_infill_filament (and the two fill-direction keys below) are PrintRegionConfig, i.e.
+    // per-part settings - putting them on the VOLUME's own config, the same place
+    // image_fill_apply() writes image_fill_params (ImageFill.cpp), is what makes them survive
+    // --process-preset selection: a part's own settings override the process preset for that
+    // part, exactly like the GUI's "add settings" panel.
+    volume->config.set_key_value("solid_infill_filament", new ConfigOptionInt(virtual_id));
+    // Force horizontal fill lines (one Y per line), stacked along Y - so each line samples one
+    // roughly-constant band of the ramp instead of sweeping across the whole gradient itself.
+    volume->config.set_key_value("solid_infill_direction", new ConfigOptionFloat(0.));
+    volume->config.set_key_value("top_surface_pattern", new ConfigOptionEnum<InfillPattern>(ipMonotonic));
+
+    StoreParams sp;
+    sp.path     = out.c_str();
+    sp.model    = &model;
+    sp.config   = &cfg;
+    sp.strategy = SaveStrategy::Zip64 | SaveStrategy::Silence | SaveStrategy::SkipAuxiliary;
+    REQUIRE(store_bbs_3mf(sp));
+    WARN("Bar B (image row) project written to " << out << " (virtual filament id "
+         << virtual_id << ", image_fill_ref len " << mf.image_fill_ref.size() << ")");
 }
 
 // =============================================================================================

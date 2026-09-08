@@ -286,6 +286,12 @@ std::string MixedFilamentManager::decode_image_fill_ref(const std::string &encod
     return hex_decode_bytes(encoded);
 }
 
+std::array<float, 3> MixedFilamentManager::hex_to_srgb01(const std::string &hex)
+{
+    const RGBf f = to_rgbf(parse_hex_color(hex));
+    return {f.r, f.g, f.b};
+}
+
 std::string MixedFilamentManager::format_surface_offset_token(float value)
 {
     std::ostringstream ss;

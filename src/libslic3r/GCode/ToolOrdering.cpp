@@ -344,6 +344,15 @@ unsigned int LayerTools::extruder(const ExtrusionEntityCollection &extrusions, c
 	assert(region.config().wall_filament.value > 0);
 	assert(region.config().sparse_infill_filament.value > 0);
 	assert(region.config().solid_infill_filament.value > 0);
+    // Phase 3 (image row): this collection already carries its own physical filament (0 for
+    // every collection in every print that does not use the feature) - see
+    // ExtrusionEntityCollection::image_row_extruder_1based's own comment. Answering from the
+    // region's config here would be wrong for the one caller of this method that is not
+    // ToolOrdering::collect_extruders itself: WipingExtrusions::is_overriddable()'s soluble
+    // check, which would otherwise ask "is the REGION's nominal filament soluble" about a
+    // collection that never prints with it.
+    if (extrusions.image_row_extruder_1based != 0)
+        return resolve_mixed_1based(extrusions.image_row_extruder_1based) - 1;
     if (extrusions.has_infill()) {
         const ExtrusionRole role = extrusions.entities.empty() ? erNone : extrusions.entities.front()->role();
         if (internal_solid_infill_uses_sparse_filament(region, role))
@@ -851,6 +860,24 @@ void ToolOrdering::collect_extruders(const PrintObject &object, const std::vecto
                 // fill represents infill extrusions of a single island.
                 const auto *fill = dynamic_cast<const ExtrusionEntityCollection*>(ee);
                 ExtrusionRole role = fill->entities.empty() ? erNone : fill->entities.front()->role();
+
+                // Phase 3 (image row): Fill.cpp's split_top_infill_by_image_row() already tagged
+                // this collection with the ONE physical filament every entity inside it prints
+                // with (image_row_extruder_1based; 0 for every collection in every print that
+                // does not use the feature). Register that id directly and skip the
+                // has_solid_infill/has_sparse_infill bucket below for this collection: that
+                // bucket would otherwise register the ROW's un-split resolve() fallback (a
+                // gradient-cycle single id, see MixedFilamentManager::resolve()) instead of - or
+                // in addition to - the id this collection actually prints with, and could miss a
+                // physical id the fallback's own per-layer cycle never visits on this layer.
+                if (fill->image_row_extruder_1based != 0) {
+                    layer_tools.extruders.emplace_back(resolve_mixed(fill->image_row_extruder_1based,
+                                                                      layerCount, float(layer->print_z),
+                                                                      float(layer->height), &object));
+                    layer_tools.has_object = true;
+                    continue;
+                }
+
                 // Wave A fix-wave / I-3 (.superpowers/sdd/2026-08-31-paint-depth/wave-a-review.md):
                 // bucket through the SAME fill_filament_source resolution GCode.cpp's emission
                 // uses (single source of truth), instead of a second, independently-drifted copy

@@ -5246,6 +5246,15 @@ LayerResult GCode::process_layer(const Print& print,
         if (entity_type == GCode::ObjectByExtruder::Island::Region::INFILL) {
             if (layer_tools.extruder_override != 0)
                 return layer_tools.extruder_override;
+            // Phase 3 (image row): a per-run collection already knows its own physical filament
+            // (0 for every collection in every print that does not use the feature) - see
+            // ExtrusionEntityCollection::image_row_extruder_1based. A caller of THIS function
+            // (pointillism_sequence_for_filament) uses the return value to look up a
+            // SameLayerPointillisme sequence, which an image row is not, so returning the
+            // already-physical id here is exactly right: is_mixed() on a physical id is false,
+            // so that lookup harmlessly misses rather than misinterpreting it.
+            if (entities.image_row_extruder_1based != 0)
+                return entities.image_row_extruder_1based;
             const ExtrusionRole role = entities.entities.empty() ? erNone : entities.entities.front()->role();
             switch (fill_filament_source(region.config(), role)) {
             case FillFilamentSource::Wall:        return unsigned(region.config().wall_filament.value);
@@ -5261,6 +5270,12 @@ LayerResult GCode::process_layer(const Print& print,
                                                  const ExtrusionEntityCollection&                    entities,
                                                  const PrintRegion&                                  region) -> int {
         if (entity_type == GCode::ObjectByExtruder::Island::Region::INFILL) {
+            // Phase 3 (image row): see configured_filament_id_1based's own comment just above -
+            // same field, same "0 unless the feature is in use" guarantee, and the same
+            // per-layer extruder_override precedence (an override still wins over a run's own
+            // filament, exactly as it wins over the region's nominal one).
+            if (entities.image_row_extruder_1based != 0 && layer_tools.extruder_override == 0)
+                return int(entities.image_row_extruder_1based) - 1;
             const ExtrusionRole role = entities.entities.empty() ? erNone : entities.entities.front()->role();
             switch (fill_filament_source(region.config(), role)) {
             case FillFilamentSource::Wall:        return int(layer_tools.wall_filament(region));

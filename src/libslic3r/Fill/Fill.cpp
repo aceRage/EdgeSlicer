@@ -4,7 +4,10 @@
 
 #include "../ClipperUtils.hpp"
 #include "../Geometry.hpp"
+#include "../ImageFill.hpp"
 #include "../Layer.hpp"
+#include "../MixedFilament.hpp"
+#include "../Model.hpp"
 #include "../Print.hpp"
 #include "../PrintConfig.hpp"
 #include "../Surface.hpp"
@@ -288,6 +291,23 @@ struct SurfaceFillParams
     // Params for Lateral honeycomb
     float infill_overhang_angle = 60.f;
 
+    // Phase 3 (image row, sub-triangle resolution): the CONFIGURED 1-based virtual filament id
+    // (region_config.solid_infill_filament.value, before mixed-filament resolution) when this is
+    // an erTopSolidInfill fill whose row is an enabled ImageWeighted MixedFilament with a
+    // decodable image_fill_ref; 0 otherwise - which is every fill in every print that does not
+    // use the feature, so this field is always 0 there and changes no comparison, no grouping and
+    // no G-code (Bar A). It exists so two top surfaces that would otherwise share one
+    // SurfaceFillParams group (same pattern/density/flow/speed/role) but read DIFFERENT images -
+    // or one reads an image and the other does not - are never merged into one SurfaceFill and
+    // filled under a single region_id: group_fills() picks the group's FIRST region for
+    // `fill.region_id` (same as the over_support_flow/over_support_speed precedent below), and
+    // Layer::make_fills's split_top_infill_by_image_row() resolves the image row from THAT
+    // region's config - a wrong merge would apply one part's image to another part's geometry.
+    // Unlike over_support_flow/over_support_speed this never affects WALL generation (only fills
+    // are split), so it is deliberately NOT added to Layer::is_perimeter_compatible - see the
+    // phase 3 doc's "why not the fourth list" note.
+    int             image_row_filament_id = 0;
+
 	bool operator<(const SurfaceFillParams &rhs) const {
 #define RETURN_COMPARE_NON_EQUAL(KEY) if (this->KEY < rhs.KEY) return true; if (this->KEY > rhs.KEY) return false;
 #define RETURN_COMPARE_NON_EQUAL_TYPED(TYPE, KEY) if (TYPE(this->KEY) < TYPE(rhs.KEY)) return true; if (TYPE(this->KEY) > TYPE(rhs.KEY)) return false;
@@ -322,6 +342,7 @@ struct SurfaceFillParams
 		RETURN_COMPARE_NON_EQUAL(symmetric_infill_y_axis);
 		RETURN_COMPARE_NON_EQUAL(infill_lock_depth);
 		RETURN_COMPARE_NON_EQUAL(skin_infill_depth);		RETURN_COMPARE_NON_EQUAL(infill_overhang_angle);
+		RETURN_COMPARE_NON_EQUAL(image_row_filament_id);
 
 		return false;
 	}
@@ -351,7 +372,8 @@ struct SurfaceFillParams
 				this->lateral_lattice_angle_2	    == rhs.lateral_lattice_angle_2 &&
 				this->infill_lock_depth      ==  rhs.infill_lock_depth &&
 				this->skin_infill_depth      ==  rhs.skin_infill_depth &&
-                this->infill_overhang_angle == rhs.infill_overhang_angle;
+                this->infill_overhang_angle == rhs.infill_overhang_angle &&
+                this->image_row_filament_id == rhs.image_row_filament_id;
 	}
 };
 
@@ -828,6 +850,284 @@ void split_solid_surface(size_t layer_id, const SurfaceFill &fill, ExPolygons &n
 #endif
 }
 
+// =================================================================================================
+// Phase 3 (image row, sub-triangle resolution), step 4: wiring the sampler and the dither
+// (ImageFill.hpp, steps 2-3) into top-solid-infill fill generation.
+//
+// Spec: docs/superpowers/specs/2026-09-07-imagemap-phase3-imagerow.md, step 4.
+//
+// WHERE THIS RUNS: erTopSolidInfill only (not walls, not ironing yet - see the phase 3 doc's
+// "what step 5 still needs"), and only when region_config.solid_infill_filament resolves through
+// MixedFilamentManager to an ENABLED row whose distribution_mode is ImageWeighted and whose
+// image_fill_ref decodes. Every other fill - which is every fill in a print that does not use
+// this feature - takes none of the branches below, so Bar A stays byte-identical.
+//
+// COORDINATE SPACES: fill polylines live in the PrintObject's own working space (what
+// PrintObject::trafo_centered() maps INTO); image_fill_project()'s `box`/`p`/`facet_normal`
+// are in the volume's own MESH space (what ModelVolume::mesh() is expressed in - see
+// image_fill_apply(), ImageFill.cpp, which passes volume.mesh().its straight through). This file
+// applies trafo_centered().inverse() to go from a fill point back to mesh space.
+//
+// ASSUMPTION (stated, not enforced - out of scope for step 4, see the phase 3 doc): the part is a
+// single model-part volume with an identity local matrix, i.e. it was not itself moved/rotated
+// relative to the object it belongs to (only the OBJECT'S OWN placement, via trafo_centered(),
+// is undone). A multi-volume object, or a single volume with its own non-identity matrix, still
+// slices and still prints - it just is not sub-triangle-resolved, exactly as if no image row were
+// configured, because image_row_context_for_region() below picks the first is_model_part()
+// volume and never reads its matrix. Bar A/B do not exercise this path (both use single,
+// untransformed volumes) so it is UNVERIFIED beyond this reasoning.
+namespace {
+
+// The cheap half: does this region's top-solid-infill filament name an ImageWeighted row at all?
+// Returns the CONFIGURED (pre-resolution) 1-based virtual id, or 0. Used by group_fills() as the
+// SurfaceFillParams key (image_row_filament_id) so two top surfaces reading different images -
+// or one image and one plain filament - are never merged into one fill pass; see that field's own
+// comment for why a wrong merge would be a real correctness bug, not just a missed optimisation.
+unsigned int image_row_configured_virtual_id(const PrintObject &object, const PrintRegionConfig &region_config)
+{
+    const Print *print = object.print();
+    if (print == nullptr)
+        return 0;
+    const size_t num_physical = print->config().filament_diameter.size();
+    const unsigned int configured_id = unsigned(std::max(0, region_config.solid_infill_filament.value));
+    const MixedFilamentManager &mixed_mgr = print->mixed_filament_manager();
+    if (!mixed_mgr.is_mixed(configured_id, num_physical))
+        return 0;
+    const MixedFilament *mf = mixed_mgr.mixed_filament_from_id(configured_id, num_physical);
+    if (mf == nullptr || !mf->enabled || mf->distribution_mode != int(MixedFilament::ImageWeighted) || mf->image_fill_ref.empty())
+        return 0;
+    return configured_id;
+}
+
+// Everything image_fill_sample_segment()/image_fill_dither_segment() need for one region's top
+// solid infill, built once per SurfaceFill (not per polyline). false means "not an image row here"
+// (row missing/disabled/undecodable, fewer than 2 usable candidates, or no model-part volume
+// found) and leaves `ctx` untouched - the caller then falls back to the ORIGINAL, unsplit fill.
+struct ImageRowContext
+{
+    const MixedFilament             *row = nullptr;
+    ImageFillParams                  params;
+    std::vector<int>                 candidate_ids;       // physical, 1-based
+    std::vector<std::array<float,3>> candidate_colors;     // parallel to candidate_ids, sRGB 0..1
+    BoundingBoxf3                    mesh_box;
+    Transform3d                      mesh_from_print = Transform3d::Identity();
+    Vec3f                            facet_normal_mesh { 0.f, 0.f, 1.f };
+    float                            min_run_len_mm = 0.4f;
+    float                            sample_spacing_mm = 0.4f;
+};
+
+bool image_row_context_for_region(const PrintObject &object, const PrintRegionConfig &region_config,
+                                  float flow_width_mm, ImageRowContext &ctx)
+{
+    const Print *print = object.print();
+    if (print == nullptr)
+        return false;
+    const size_t num_physical = print->config().filament_diameter.size();
+    const unsigned int configured_id = image_row_configured_virtual_id(object, region_config);
+    if (configured_id == 0)
+        return false;
+    const MixedFilamentManager &mixed_mgr = print->mixed_filament_manager();
+    const MixedFilament *mf = mixed_mgr.mixed_filament_from_id(configured_id, num_physical);
+    if (mf == nullptr)
+        return false; // image_row_configured_virtual_id already checked this; defensive only.
+
+    const std::string raw = MixedFilamentManager::decode_image_fill_ref(mf->image_fill_ref);
+    if (raw.empty() || !ImageFillParams::from_string(raw, ctx.params))
+        return false;
+
+    // The row's allowed filaments: reuse gradient_component_ids (already decoded elsewhere for
+    // the layer-cycle gradient sequence) rather than adding a parallel list - an ImageWeighted
+    // row's "allowed" set IS that field, just consumed differently. Fall back to the plain A/B
+    // pair for a row that was never given 3+ ids.
+    std::vector<unsigned int> allowed = MixedFilamentManager::decode_gradient_component_ids(mf->gradient_component_ids, num_physical);
+    if (allowed.size() < 2)
+        allowed = {mf->component_a, mf->component_b};
+
+    const std::vector<std::string> &filament_colours = print->config().filament_colour.values;
+    for (unsigned int id : allowed) {
+        if (id < 1 || id > num_physical || id > filament_colours.size())
+            continue;
+        ctx.candidate_ids.push_back(int(id));
+        ctx.candidate_colors.push_back(MixedFilamentManager::hex_to_srgb01(filament_colours[id - 1]));
+    }
+    if (ctx.candidate_ids.size() < 2)
+        return false;
+
+    const ModelObject *mo = object.model_object();
+    const ModelVolume  *mv = nullptr;
+    if (mo != nullptr)
+        for (const ModelVolume *v : mo->volumes)
+            if (v != nullptr && v->is_model_part()) { mv = v; break; }
+    if (mv == nullptr)
+        return false;
+
+    // Same box image_fill_compute() itself computes (ImageFill.cpp) - from the raw mesh, so a
+    // point that lands in a facet's own plane samples exactly where Phase 2's facet painting did.
+    for (const Vec3f &v : mv->mesh().its.vertices)
+        ctx.mesh_box.merge(v.cast<double>());
+    if (!ctx.mesh_box.defined)
+        return false;
+
+    // Mesh space <- print space; see this block's header comment for the identity-matrix
+    // assumption this inverse relies on.
+    ctx.mesh_from_print = object.trafo_centered().inverse();
+    const Vec3f up_mesh = (ctx.mesh_from_print.linear().cast<float>() * Vec3f(0.f, 0.f, 1.f));
+    ctx.facet_normal_mesh = up_mesh.norm() > 1e-9f ? up_mesh.normalized() : Vec3f(0.f, 0.f, 1.f);
+
+    ctx.row = mf;
+    // Resolution is bounded by extrusion width, not by an arbitrary constant: a run shorter than
+    // the nozzle can print is folded into a neighbour by image_fill_dither_segment() itself.
+    const float w = flow_width_mm > 0.05f ? flow_width_mm : 0.4f;
+    ctx.min_run_len_mm    = w;
+    ctx.sample_spacing_mm = w;
+    return true;
+}
+
+// Samples one straight ExtrusionPath's polyline through the image row and dithers it into runs.
+// `print_z` is the layer's Z in the SAME mm units as the polyline's unscaled X/Y (print space).
+// Returns empty when the path is degenerate (fewer than 2 points) or every sample declined a
+// colour (image_fill_project() failing along the whole path - a cylindrical projection exactly on
+// axis, say): the caller then keeps the path unsplit.
+std::vector<ImageRowRun> image_row_runs_for_path(const ImageAssetStore &assets, const ImageRowContext &ctx,
+                                                 const Polyline &polyline, double print_z)
+{
+    const Points &pts = polyline.points;
+    if (pts.size() < 2)
+        return {};
+
+    std::vector<ImageRowSample> samples;
+    float cumulative = 0.f;
+    bool  any_color   = false;
+    for (size_t i = 0; i + 1 < pts.size(); ++i) {
+        const Vec3d p0_print(unscale<double>(pts[i].x()),     unscale<double>(pts[i].y()),     print_z);
+        const Vec3d p1_print(unscale<double>(pts[i + 1].x()), unscale<double>(pts[i + 1].y()), print_z);
+        const Vec3f p0_mesh = (ctx.mesh_from_print * p0_print).cast<float>();
+        const Vec3f p1_mesh = (ctx.mesh_from_print * p1_print).cast<float>();
+
+        std::vector<ImageRowSample> seg = image_fill_sample_segment(ctx.params, ctx.mesh_box, assets, p0_mesh, p1_mesh,
+                                                                     ctx.facet_normal_mesh, ctx.sample_spacing_mm);
+        // seg[0] duplicates the previous segment's last sample (same physical point) - skip it
+        // past the first segment so a point shared by two consecutive fill segments is sampled
+        // exactly once, at one arc-length position, not twice at the same position under two
+        // different running error-diffusion states.
+        for (size_t k = (i == 0 ? 0 : 1); k < seg.size(); ++k) {
+            ImageRowSample s = seg[k];
+            s.s += cumulative;
+            any_color = any_color || s.has_color;
+            samples.push_back(s);
+        }
+        if (!seg.empty())
+            cumulative += seg.back().s;
+    }
+    if (!any_color)
+        return {};
+
+    return image_fill_dither_segment(samples, ctx.candidate_colors, ctx.candidate_ids, ctx.min_run_len_mm);
+}
+
+// Cuts `src`'s polyline into `runs`' pieces (arc length in mm, print space - see the caller's
+// stated assumption that mesh-space and print-space arc length agree, i.e. no non-uniform scale)
+// and returns one new heap ExtrusionPath per run, in the SAME order as `runs`. Copies every
+// attribute of `src` (role, flow, width, height, z_offset, extrusion_multiplier, reversibility)
+// via ExtrusionPath's own copy constructor, so a run differs from the original path ONLY in its
+// polyline - it prints at the same width, height and speed the un-split path would have.
+std::vector<ExtrusionPath *> split_extrusion_path_by_runs(const ExtrusionPath &src, const std::vector<ImageRowRun> &runs)
+{
+    std::vector<ExtrusionPath *> out;
+    out.reserve(runs.size());
+    Polyline remaining = src.polyline;
+    for (size_t i = 0; i < runs.size(); ++i) {
+        Polyline piece;
+        if (i + 1 == runs.size()) {
+            // Last run takes whatever is left, so the pieces reconstruct the ORIGINAL polyline
+            // exactly (no fp gap/overlap from run.s1 not landing exactly on remaining's own end).
+            piece = remaining;
+        } else {
+            const double cut_mm = std::max(0.0, double(runs[i].length()));
+            Polyline rest;
+            if (!remaining.split_at_length(scale_(cut_mm), &piece, &rest) || piece.points.size() < 2) {
+                // Degenerate cut (e.g. a run shorter than one internal unit): keep everything in
+                // this run rather than emit a zero-length path, and stop - the remaining runs
+                // have nothing left to claim. Rare; min_run_len_mm already keeps runs well above
+                // this floor in practice.
+                piece     = remaining;
+                out.push_back(new ExtrusionPath(src));
+                out.back()->polyline = piece;
+                return out;
+            }
+            remaining = rest;
+        }
+        if (piece.points.size() < 2)
+            continue;
+        auto *path = new ExtrusionPath(src);
+        path->polyline = piece;
+        out.push_back(path);
+    }
+    return out;
+}
+
+// The whole per-surface post-process: for every ExtrusionPath child of `eec` (a plain, non-arachne
+// top-solid-infill path - arachne/variable-width paths and anything already a collection are left
+// untouched, a documented step-4 limitation, see the phase 3 doc), split it into per-run pieces
+// and wrap each in its own small ExtrusionEntityCollection tagged with that run's physical
+// filament (ExtrusionEntityCollection::image_row_extruder_1based). Non-ExtrusionPath children
+// (e.g. the gap-fill collection _create_gap_fill nests inside `eec`) are copied through unchanged.
+// Returns the replacement top-level entities for `eec`'s slot in layerm->fills.entities - always
+// at least one (falls back to `eec` itself, untouched, when nothing could be split).
+std::vector<ExtrusionEntityCollection *> split_top_infill_by_image_row(const ImageAssetStore &assets, const ImageRowContext &ctx,
+                                                                       double print_z, ExtrusionEntityCollection *eec)
+{
+    std::vector<ExtrusionEntityCollection *> out;
+    bool split_any = false;
+
+    for (ExtrusionEntity *child : eec->entities) {
+        auto *path_candidate = dynamic_cast<ExtrusionPath *>(child);
+        // Only erTopSolidInfill paths are eligible: _create_gap_fill() may nest an erGapFill
+        // ExtrusionPath in the same collection, and gap fill deliberately follows wall_filament
+        // (see fill_filament_source()'s own comment in PrintRegion.cpp) rather than
+        // solid_infill_filament - overriding it here would fight that fix.
+        ExtrusionPath *path = (path_candidate != nullptr && path_candidate->role() == erTopSolidInfill) ? path_candidate : nullptr;
+        std::vector<ImageRowRun> runs = path != nullptr ? image_row_runs_for_path(assets, ctx, path->polyline, print_z)
+                                                        : std::vector<ImageRowRun>();
+        if (path == nullptr || runs.size() < 2) {
+            // Not an ExtrusionPath (leave grouped with the ORIGINAL role/extruder - e.g. gap
+            // fill), or only one run (the whole path is one filament - still tag it, so it is not
+            // silently printed with the region's un-split resolve() fallback instead of the
+            // colour the image actually chose).
+            auto *solo = new ExtrusionEntityCollection();
+            solo->no_sort = eec->no_sort;
+            solo->entities.push_back(child->clone());
+            if (path != nullptr && runs.size() == 1)
+                solo->image_row_extruder_1based = unsigned(runs.front().filament_id);
+            out.push_back(solo);
+            continue;
+        }
+        split_any = true;
+        std::vector<ExtrusionPath *> pieces = split_extrusion_path_by_runs(*path, runs);
+        for (size_t i = 0; i < pieces.size() && i < runs.size(); ++i) {
+            auto *run_eec = new ExtrusionEntityCollection();
+            run_eec->no_sort = eec->no_sort;
+            run_eec->entities.push_back(pieces[i]);
+            run_eec->image_row_extruder_1based = unsigned(runs[i].filament_id);
+            out.push_back(run_eec);
+        }
+    }
+
+    if (out.empty()) {
+        out.push_back(eec);
+        return out;
+    }
+    // eec's children were either cloned (solo case) or handed off to a new path object that owns
+    // the same heap Polyline data by value (split case, via ExtrusionPath's copy ctor) - either
+    // way `eec` itself is now unreferenced and must be deleted so its old children do not leak
+    // AND are not double-freed (its dtor deletes `entities`, none of which are shared with `out`).
+    (void)split_any;
+    delete eec;
+    return out;
+}
+
+} // namespace
+
 std::vector<SurfaceFill> group_fills(const Layer &layer, LockRegionParam &lock_param)
 {
 	std::vector<SurfaceFill> surface_fills;
@@ -916,6 +1216,9 @@ std::vector<SurfaceFill> group_fills(const Layer &layer, LockRegionParam &lock_p
                 } else if (surface.is_solid()) {
                     if (surface.is_top()) {
                         params.extrusion_role = erTopSolidInfill;
+                        // Phase 3 (image row): see this field's own comment above - 0 for every
+                        // print that does not use the feature.
+                        params.image_row_filament_id = int(image_row_configured_virtual_id(*layer.object(), region_config));
                     } else if (surface.is_bottom_over_support()) {
                         // Ultra (over-support surfaces): a bottom shell in geometry - the pattern,
                         // the density and the flow above all came from the bottom-surface branch -
@@ -1348,6 +1651,17 @@ void Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
         }
 		if (surface_fill.params.pattern == ipGrid)
 			params.can_reverse = false;
+
+		// Phase 3 (image row): built once per SurfaceFill, not per ExPolygon - region_config and
+		// flow are the same for every expolygon this SurfaceFill owns. `image_row_ctx_ok` false
+		// (the overwhelming common case: any print not using the feature) means the loop below
+		// runs exactly as it did before this phase, byte for byte.
+		ImageRowContext image_row_ctx;
+		const bool image_row_ctx_ok = surface_fill.params.extrusion_role == erTopSolidInfill &&
+		                              surface_fill.params.image_row_filament_id != 0 &&
+		                              image_row_context_for_region(*this->object(), region_config,
+		                                                           float(surface_fill.params.flow.width()), image_row_ctx);
+
 		for (ExPolygon& expoly : surface_fill.expolygons) {
 
       f->no_overlap_expolygons = intersection_ex(surface_fill.no_overlap_expolygons, ExPolygons() = {expoly}, ApplySafetyOffset::Yes);
@@ -1369,9 +1683,38 @@ void Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                 params.dont_adjust = true;
             }
 			// BBS: make fill
+			ExtrusionEntitiesPtr &region_fill_entities = m_regions[surface_fill.region_id]->fills.entities;
+			const size_t entities_before = region_fill_entities.size();
 			f->fill_surface_extrusion(&surface_fill.surface,
 				params,
-				m_regions[surface_fill.region_id]->fills.entities);
+				region_fill_entities);
+
+			// Phase 3 (image row): fill_surface_extrusion() above pushed the new top-level
+			// entities for this expolygon (normally exactly one collection; FillLockedZag's own
+			// override can push more, so every newly pushed entity in [entities_before, end) is
+			// handled, not just the last). Replace each with one small collection per dithered
+			// run, tagged with its own physical filament - see
+			// split_top_infill_by_image_row()'s own header comment.
+			if (image_row_ctx_ok && region_fill_entities.size() > entities_before) {
+				ExtrusionEntitiesPtr new_entities(region_fill_entities.begin() + entities_before, region_fill_entities.end());
+				region_fill_entities.erase(region_fill_entities.begin() + entities_before, region_fill_entities.end());
+				for (ExtrusionEntity *ee : new_entities) {
+					auto *eec = dynamic_cast<ExtrusionEntityCollection *>(ee);
+					assert(eec != nullptr);
+					if (eec == nullptr) {
+						// Should not happen (make_fills()'s own assert below expects every
+						// top-level fill entity to be a collection) - keep it as-is rather than
+						// drop geometry.
+						region_fill_entities.push_back(ee);
+						continue;
+					}
+					std::vector<ExtrusionEntityCollection *> replaced =
+						split_top_infill_by_image_row(this->object()->model_object()->get_model()->image_assets,
+						                              image_row_ctx, this->print_z, eec);
+					for (ExtrusionEntityCollection *r : replaced)
+						region_fill_entities.push_back(r);
+				}
+			}
 		}
     }
 

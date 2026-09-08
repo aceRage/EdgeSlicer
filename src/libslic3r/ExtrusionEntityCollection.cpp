@@ -31,6 +31,7 @@ ExtrusionEntityCollection& ExtrusionEntityCollection::operator=(const ExtrusionE
     for (size_t i = 0; i < this->entities.size(); ++i)
         this->entities[i] = this->entities[i]->clone();
     this->no_sort       = other.no_sort;
+    this->image_row_extruder_1based = other.image_row_extruder_1based;
     return *this;
 }
 
@@ -38,6 +39,7 @@ void ExtrusionEntityCollection::swap(ExtrusionEntityCollection &c)
 {
     std::swap(this->entities, c.entities);
     std::swap(this->no_sort, c.no_sort);
+    std::swap(this->image_row_extruder_1based, c.image_row_extruder_1based);
 }
 
 void ExtrusionEntityCollection::clear()
