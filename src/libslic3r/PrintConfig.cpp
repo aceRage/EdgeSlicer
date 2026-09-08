@@ -1839,7 +1839,7 @@ void PrintConfigDef::init_fff_params()
     // SET_PRINT_PREFERENCES / SET_PRINT_TASK_PARAMETERS while print_stats.state is "printing" - so
     // it travels as a preset value the send path turns into END_UNLOAD_FILAMENT before the start.
     def = this->add("unload_filaments_at_end", coBool);
-    def->label = L("Unload filaments at end of print");
+    def->label = L("Unload filaments after print");
     def->tooltip = L("Ask the printer to unload the filaments this print used once it has finished "
                      "(Snapmaker tool changers only). The printer does the unloading itself, at the "
                      "end of its own PRINT_END routine, and skips any toolhead holding a flexible "

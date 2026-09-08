@@ -338,7 +338,7 @@ void PrintHostJobQueue::priv::perform_job(PrintHostJob the_job)
     const std::string archive_mapping  = the_job.filament_mapping;
     const bool        archive_unload   = the_job.unload_at_end;
 
-    // "Unload filaments when the print ends", for a Snapmaker tool changer only. The flag cannot
+    // "Unload filaments after print", for a Snapmaker tool changer only. The flag cannot
     // ride inside the G-code: the firmware refuses SET_PRINT_PREFERENCES while print_stats.state is
     // "printing", so it has to reach the printer before the job starts. This queue uploads with
     // print=true in one request, so the preference goes out just ahead of it.

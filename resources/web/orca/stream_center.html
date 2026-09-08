@@ -2728,12 +2728,12 @@ body.dragging .cell iframe, body.dragging .cell img { pointer-events: none; }
                         body.appendChild(el('div', 'info warn', 'Toolhead ' + (head.index + 1) + ' is empty.'));
                 });
                 body.appendChild(el('div', 'info', 'Pre-filled by matching the colours, the way the printer\'s own app does. Change any row you like.'));
-                // "Unload filaments when the print ends": the printer preset holds the default (the
+                // "Unload filaments after print": the printer preset holds the default (the
                 // dry run above reported it), this is the override for this print. Shown only when
                 // the printer can do it - a tool changer whose firmware PRINT_END acts on the flag.
                 if (s.unloadSupported) {
                     var ur = el('div', 'row unload');
-                    var ub = el('span', 'btn' + (s.unload ? '' : ' alt'), (s.unload ? '\u2713 ' : '') + 'Unload filaments when the print ends');
+                    var ub = el('span', 'btn' + (s.unload ? '' : ' alt'), (s.unload ? '\u2713 ' : '') + 'Unload filaments after print');
                     ub.setAttribute('role', 'switch');
                     ub.setAttribute('aria-checked', s.unload ? 'true' : 'false');
                     ub.onclick = function() { s.unload = !s.unload; sendRender(); };

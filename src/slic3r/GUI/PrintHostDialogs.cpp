@@ -300,7 +300,7 @@ void PrintHostSendDialog::init()
     // it is told to before the job starts. The printer preset holds the default; this is where a
     // single print overrides it, which is the only place a person actually decides it.
     if (m_offer_unload) {
-        m_check_unload = new wxCheckBox(this, wxID_ANY, _L("Unload filaments when the print ends"));
+        m_check_unload = new wxCheckBox(this, wxID_ANY, _L("Unload filaments after print"));
         m_check_unload->SetValue(m_unload_default);
         m_check_unload->SetToolTip(_L("The printer unloads the toolheads this print used once it has finished, "
                                       "skipping any that holds a flexible filament. The printer preset sets the "

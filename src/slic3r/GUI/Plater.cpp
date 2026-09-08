@@ -22440,7 +22440,7 @@ void Plater::send_gcode_legacy(int plate_idx, Export3mfProgressFn proFn, bool us
         is_snapmaker_u1           = boost::icontains(printer_model, "Snapmaker") && boost::icontains(printer_model, "U1");
     }
 
-    // "Unload filaments at end of print": the printer preset holds the default and the send dialog
+    // "Unload filaments after print": the printer preset holds the default and the send dialog
     // below overrides it for this print. Only a Snapmaker tool changer is offered it - nothing else
     // has a firmware PRINT_END that acts on the flag.
     const bool offer_unload_at_end = is_snapmaker_toolchanger(printer_config);
