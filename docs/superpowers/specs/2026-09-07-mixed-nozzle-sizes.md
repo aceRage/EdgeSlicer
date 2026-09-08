@@ -1,6 +1,9 @@
-# Mixed nozzle sizes in one slice - Phase 1 (validation scoping) and Phase 2 (U1 proof)
+# Mixed nozzle sizes in one slice - Phase 1 (validation scoping), Phase 2 (U1 proof)
+# and Phase 3 (the UI)
 
-Branch `feat/mixed-nozzle-p1`, from `feat/ultra-preferences` at `67a2d25eb3`.
+Phases 1-2: branch `feat/mixed-nozzle-p1`, from `feat/ultra-preferences` at `67a2d25eb3`,
+merged at `cb75c67bed`.
+Phase 3: branch `feat/mixed-nozzle-ui`, from `feat/ultra-preferences` at `32ddb61631`.
 Research: `mixed_nozzle_sizes_research.md` (2026-09-07).
 
 ## What this is about
@@ -231,14 +234,193 @@ and a region whose width exceeds its resolved slot's bound is refused by the sam
   expressible.
 - **`extruder_line_width`**, a per-extruder absolute-mm override (same PR), for when a 0.2 mm head's
   right width is not a clean % of a 0.6-based profile.
-- **Preset compatibility.** A mixed printer preset matches no shipped filament preset's
-  `compatible_printers`, because those are keyed to a single `printer_variant` string. The Phase 2
-  proof sidesteps this by loading the 0.6 filament preset for both heads (the diameter comes from the
-  printer preset, not the filament). A shipped mixed-nozzle workflow needs either relaxed
-  compatibility for the mismatched head or a preset matrix.
-- **The plater dialog** now explains that each head can carry its own diameter, but it still does not
-  write the device's reported per-head diameters into the printer preset. That is the natural next
-  GUI step and was left out of Phase 1 as untestable headlessly.
+- **Preset compatibility.** Answered in Phase 3 for the *slot list* (see "Filament compatibility"
+  below): each slot now offers the presets cut for its own nozzle. What is still open is that a
+  filament preset's per-nozzle *values* (temperatures, flow ratio, max volumetric speed) still come
+  from whichever single preset the slot holds - Bambu Studio expresses that with
+  `filament_extruder_variant`, which this fork does not have. Scoped in "Phase 5" below.
+- **The plater dialog** ~~still does not write the device's reported per-head diameters into the
+  printer preset~~ - done in Phase 3 (`apply_reported_nozzle_diameters`, Plater.cpp).
+
+## Phase 3 - the UI
+
+The owner's report: *"for mixed nozzles, currently trying to change a single-size nozzle forces the
+change to all nozzles (with a warning pop-up)."*
+
+Phases 1 and 2 made a mixed job slice correctly, but only from the CLI with hand-written presets.
+Phase 3 is the part a person touches.
+
+### Where the forced apply actually lived
+
+Not where it looks. `TabPrinter::build_unregular_pages()`'s per-extruder `m_on_change`
+(`src/slic3r/GUI/Tab.cpp`) does hold a "diameters of all extruders will be set to the new value"
+dialog, but it was already guarded by `single_extruder_multi_material`, and every machine this work
+is about declares `single_extruder_multi_material = 0` (`fdm_U1.json`; the H2D/H2C presets likewise).
+So on a U1 that block never ran.
+
+What the owner was hitting is the **sidebar's nozzle-size combobox**
+(`Sidebar::update_nozzle_settings`, `src/slic3r/GUI/Plater.cpp`), which was unguarded:
+
+- it displayed `printer_variant` - a single string per printer preset - so a mixed vector was
+  invisible and every head's tab showed the same number;
+- picking a size wrote that string into *every* combo and then called `select_preset()` on the
+  preset `get_similar_printer_preset()` returned, which replaces the whole `nozzle_diameter` vector
+  with that preset's. That is the "forces the change to all nozzles";
+- the pop-up ("Note: Changing this will sync all other nozzles to the same diameter.", shown only
+  for a Snapmaker U1, with a "Don't show this again" box) announced the sync but could not stop it -
+  it was `wxOK`, a single button.
+
+Two sibling paths shared the same semantics and are fixed with it: the device-report handler
+(`Plater.cpp`, the `NozzleDiameterSelectDialog` branch) and the phone/remote
+`api_select_preset("nozzle", ...)` (`RemoteAccess.cpp`), both of which go through
+`get_similar_printer_preset` + `select_preset`.
+
+For reference, Bambu Studio has the identical extruder-page block **commented out**
+(`C:/Dev/BambuStudio/src/slic3r/GUI/Tab.cpp`) and instead simply disables the `nozzle_diameter`
+field for BBL printers, whose per-head diameters come from the device; per-extruder editing is
+otherwise free there. FOrcaSlicer carries this fork's SEMM-guarded block verbatim and adds no
+per-head diameter UI at all - its multi-nozzle work is a different axis (per-slot *process* presets,
+`m_fos_slot_configs`).
+
+### 1. Per-extruder editing on the Extruder N pages
+
+New shared predicates in `src/libslic3r/PrintConfig.{hpp,cpp}`, next to Phase 1's
+`physical_extruder_for_filament`:
+
+| helper | answers |
+| --- | --- |
+| `supports_mixed_nozzle_diameters(config)` | may this machine hold different nozzles at once? (>1 extruder and not SEMM) |
+| `has_mixed_nozzle_diameters(config)` | does it right now? |
+| `nozzle_diameter_summary(config)` | `"0.6"` uniform, `"0.6 / 0.2"` mixed - what the sidebar shows |
+| `nozzle_diameter_for_filament(config, id)` | the nozzle a filament slot prints through |
+
+The extruder-page handler now branches on `single_extruder_multi_material` rather than being gated
+by it:
+
+- **SEMM** (and single-nozzle machines, which never reach the branch): unchanged. One physical
+  nozzle, so all values must agree; Yes applies to all, No reverts.
+- **Mixed-capable** (U1, H2D/H2C/X2D, any >1-extruder non-SEMM printer): the edit lands on extruder
+  N alone and a three-button dialog *offers* the alternative - "Only Extruder N" / "Apply 0.6 mm to
+  all extruders" / "Cancel".
+
+Note the deliberate inversion of the wx button roles in that branch: **YES is "only this
+extruder"**, not "apply to all". `MessageDialog::ShowModal` (`MsgDialog.cpp`) auto-answers YES when
+a phone or agent request is driving the GUI, so YES has to be the answer that keeps what the user
+typed. Getting this backwards would have made every remote-driven diameter change silently
+sync all heads - the exact bug being fixed.
+
+After the change the handler also refreshes the sidebar's nozzle summary and the per-slot filament
+lists, both of which read `nozzle_diameter`.
+
+### 2. The sidebar variant picker no longer overwrites a mixed vector
+
+- **Display**: with mixed diameters each nozzle tab shows *its own head's* diameter (read from
+  `nozzle_diameter[i]`, not from `printer_variant`), and the combo's tooltip names the whole set
+  ("Nozzle diameters on this printer: 0.6 / 0.2 mm") and says where to edit them. A head whose
+  diameter has no matching printer variant gets its value appended as a choice so the combo is not
+  blank. Uniform machines are untouched: still `printer_variant`, still the same list.
+- **Picking**: on a mixed-capable printer that currently *is* mixed, selecting a size now asks
+  first - "Keep per-extruder diameters" (default, and the remote-safe YES) vs "Set all extruders to
+  0.4 mm". Declining restores the summary and changes nothing. On a uniform or SEMM printer nothing
+  is asked and the old path runs unchanged.
+- **Device sync**: `apply_reported_nozzle_diameters()` (`Plater.cpp`) is new. After the user picks a
+  *base* preset for a machine that reported different head diameters, it writes the reported
+  per-head values back over the freshly selected preset's `nozzle_diameter`. This closes the gap
+  Phase 1 left open ("still does not write the device's reported per-head diameters into the printer
+  preset"): a U1 with a 0.6 and a 0.2 head now arrives configured, instead of needing the diameters
+  retyped under Extruder N. Unreadable or out-of-range readings leave that head at the base
+  preset's value.
+
+### 3. Filament preset compatibility - the decision
+
+**What was done: a per-slot display filter. What was deliberately not done: porting Bambu Studio's
+`filament_extruder_variant` machinery.**
+
+The fork's compatibility model is a single `bool Preset::is_compatible`, computed once per filament
+preset in `PresetCollection::update_compatible_internal` against the whole printer preset, via
+`is_compatible_with_printer` (name match on `compatible_printers`, or a `compatible_printers_condition`
+expression). It has no slot dimension and cannot acquire one without changing what a `Preset` is.
+
+So the rule is applied where the slot is known - `PlaterPresetComboBox::update()`, which has
+`m_filament_idx` - as a narrowing filter, in `Preset.cpp`:
+
+- `filament_preset_nozzle_diameter(preset, printers)`: the nozzle a filament preset was cut for.
+  Resolved by looking up the printer presets its `compatible_printers` names and reading their
+  `printer_variant`, **not** by parsing "0.2 nozzle" out of the preset's display name - the name is a
+  display string vendors spell differently (`@U1 0.2 nozzle`, `@BBL H2D 0.2 nozzle`) while
+  `compatible_printers` is the machine-readable declaration the loader already validates. A preset
+  spanning several variants, or naming none, answers 0 = "fits any nozzle".
+- `filament_preset_fits_slot(preset, printers, filament_id)`: true unless the printer really carries
+  different diameters **and** the preset claims a nozzle size **and** that size differs from this
+  slot's nozzle. The currently selected preset is always kept in the list, so no slot can go blank.
+
+The narrowing is therefore inert on every machine that is not currently mixed - a P1S, an H2D with
+two 0.4s, a U1 with four 0.6s all see exactly the list they saw before. Only a genuinely mixed
+machine sees slot 2 offering 0.2 presets while slot 1 offers 0.6 ones.
+
+**Why not the Bambu Studio port.** Bambu Studio solves the harder half of this - a filament preset
+holding *different values per extruder variant* - with `filament_extruder_variant` /
+`print_extruder_variant` / `printer_extruder_variant` / `extruder_variant_list` plus
+`ConfigBase::update_values_to_printer_extruders`, `filament_self_index` and the
+`get_extruder_variant_string(ExtruderType, NozzleVolumeType)` keying (`PrintConfig.cpp`,
+`Preset.cpp:236/921`, `PresetBundle.cpp:160-231` and 3335-3490). That is a change to the preset file
+format, the inheritance flattening, the loader's validation and every per-filament option's arity.
+Half-porting it would give presets that this fork's own `Preset::normalize` and the 3MF
+round-trip cannot read back. Scoped as Phase 5 below rather than started.
+
+### Phase 3 proofs
+
+| # | proof | result |
+| --- | --- | --- |
+| 1 | clean Release build of the worktree (app + GUI + `libslic3r_tests` + paho) | `BUILD_EXIT=0`, no `error C`/`error LNK`, no new warnings in the touched files |
+| 2 | `libslic3r_tests` | **699 cases, 697 passed, 2 failed as expected** (the known base failures); 91 999 assertions |
+| 3 | `tests/libslic3r/test_mixed_nozzle.cpp`, the new `[MixedNozzle]` scenario | 8 cases / 48 assertions, all pass |
+| 4 | hidden scratch instance, data dir copied from `snorca_hubtest/dd_lan` | starts, GUI loads (327 MB WS, 993 handles), no fatal/exception/assert in its log |
+| 5 | the Phase 2 CLI gate, `snorca_hubtest/gate_mixnozzle.sh` | **rc=0**, all 8 proofs; U1 0.6+0.2 still slices at widths 0.62 / 0.24 |
+
+Proof 5 re-ran unchanged against a fresh install of this branch (`inst_mixcand`), i.e. the Phase 3
+UI work did not disturb the Phase 1/2 slicing result: the mixed job is still byte-identical to the
+baseline (156 197 lines), P1S (82 519) and H2D 0.4+0.4 (85 776) still byte-identical, and the four
+refusals still fire with the same messages.
+
+One test-side defect was found and fixed while writing proof 3: the Phase 1 test helper
+`mixed_nozzle_config()` built its "toolchanger" from `DynamicPrintConfig::full_print_config()`, and
+the option registry defaults `single_extruder_multi_material` to **true** (`PrintConfig.cpp`). Every
+real U1 / H2D / H2C preset overrides it to 0, but the synthetic config did not, so it read as an
+SEMM machine. Phase 1's checks did not consult that key, so nothing was wrong before; Phase 3's do,
+and the helper now sets it explicitly.
+
+### Nobody clicked a dialog
+
+Every dialog above is wxWidgets and was **not** exercised: no agent clicked through the Printer
+settings pages, the sidebar combo or the device-sync picker. What is proven is the layer underneath
+them - the config-level predicates each dialog branches on - plus that the app builds, starts and
+still slices a mixed job identically. The owner's clicks:
+
+1. **Per-extruder editing.** Select a `Snapmaker U1 (0.6 nozzle)` preset. Printer settings ->
+   Extruder 2 -> nozzle diameter 0.2. Expect: a dialog that *offers* ("Only Extruder 2" focused by
+   default / "Apply 0.2 mm to all extruders" / "Cancel"), **not** a warning that announces a forced
+   sync. Take the default. Then Extruder 1 still reads 0.6 and Extruders 3/4 still read 0.6.
+2. **The sidebar shows the mix.** With that preset dirty, the sidebar's nozzle tabs should show
+   0.6 on Nozzle 1 and 0.2 on Nozzle 2, and hovering a combo should say "Nozzle diameters on this
+   printer: 0.6 / 0.2 / 0.6 / 0.6 mm". Picking 0.4 there should now **ask** ("Keep per-extruder
+   diameters" vs "Set all extruders to 0.4 mm"); keeping should leave the mix intact.
+3. **Filament slot 2 offers 0.2 presets.** In the filament slot combo for slot 2, the offered
+   presets should be the `@U1 0.2 nozzle` ones; slot 1 should still offer the `@U1 0.6 nozzle` ones.
+   Slots whose preset is already selected keep showing it either way.
+4. **Nothing changed on a uniform machine.** Switch to a P1S or an unmodified U1 0.6 preset: no new
+   dialog anywhere, the sidebar combo behaves exactly as before, and every filament slot offers the
+   same list it always did.
+
+### Phase 5 - per-extruder filament VALUES (not started)
+
+Phase 3 decides which presets a slot may *offer*. It does not let one filament preset carry
+different nozzle temperatures / flow ratios / volumetric caps per head. Doing that means porting
+Bambu Studio's extruder-variant machinery listed above: `filament_extruder_variant` and siblings,
+`update_values_to_printer_extruders`, `filament_self_index`, and the loader/normalize/3MF paths that
+validate and round-trip them. Acceptance: one filament preset selected in both slots of a mixed
+machine yields different `nozzle_temperature` and `filament_max_volumetric_speed` per head in the
+G-code, and a 3MF saved from that session reopens with both sets intact.
 
 ## Owner's hardware test
 

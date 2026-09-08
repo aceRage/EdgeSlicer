@@ -509,6 +509,66 @@ size_t physical_extruder_for_filament(const PrintConfig &config, unsigned int fi
     return direct < nozzle_count ? direct : 0;
 }
 
+// Mixed nozzle sizes (Phase 3, UI) - see PrintConfig.hpp.
+bool supports_mixed_nozzle_diameters(const ConfigBase &config)
+{
+    const auto *nozzle = config.option<ConfigOptionFloats>("nozzle_diameter");
+    if (nozzle == nullptr || nozzle->values.size() < 2)
+        return false;
+    const auto *semm = config.option<ConfigOptionBool>("single_extruder_multi_material");
+    return semm == nullptr || !semm->value;
+}
+
+bool supports_mixed_nozzle_diameters(const PrintConfig &config)
+{
+    return config.nozzle_diameter.values.size() >= 2 && !config.single_extruder_multi_material.value;
+}
+
+bool has_mixed_nozzle_diameters(const std::vector<double> &nozzle_diameters)
+{
+    if (nozzle_diameters.size() < 2)
+        return false;
+    const double first = nozzle_diameters.front();
+    return std::any_of(nozzle_diameters.begin() + 1, nozzle_diameters.end(),
+                       [first](double d) { return std::abs(d - first) > EPSILON; });
+}
+
+bool has_mixed_nozzle_diameters(const ConfigBase &config)
+{
+    const auto *nozzle = config.option<ConfigOptionFloats>("nozzle_diameter");
+    return nozzle != nullptr && has_mixed_nozzle_diameters(nozzle->values);
+}
+
+std::string nozzle_diameter_summary(const std::vector<double> &nozzle_diameters)
+{
+    if (nozzle_diameters.empty())
+        return std::string();
+    if (!has_mixed_nozzle_diameters(nozzle_diameters))
+        return format_diameter_to_str(nozzle_diameters.front());
+    std::string out;
+    for (double d : nozzle_diameters) {
+        if (!out.empty())
+            out += " / ";
+        out += format_diameter_to_str(d);
+    }
+    return out;
+}
+
+std::string nozzle_diameter_summary(const ConfigBase &config)
+{
+    const auto *nozzle = config.option<ConfigOptionFloats>("nozzle_diameter");
+    return nozzle == nullptr ? std::string() : nozzle_diameter_summary(nozzle->values);
+}
+
+double nozzle_diameter_for_filament(const PrintConfig &config, unsigned int filament_id)
+{
+    const std::vector<double> &nozzles = config.nozzle_diameter.values;
+    if (nozzles.empty())
+        return 0.;
+    const size_t extruder = physical_extruder_for_filament(config, filament_id);
+    return nozzles[std::min(extruder, nozzles.size() - 1)];
+}
+
 std::string get_nozzle_volume_type_string(NozzleVolumeType nozzle_volume_type)
 {
     for (const auto& kv : s_keys_map_NozzleVolumeType)

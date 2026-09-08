@@ -379,6 +379,23 @@ bool is_compatible_with_print  (const PresetWithVendorProfile &preset, const Pre
 bool is_compatible_with_printer(const PresetWithVendorProfile &preset, const PresetWithVendorProfile &active_printer, const DynamicPrintConfig *extra_config);
 bool is_compatible_with_printer(const PresetWithVendorProfile &preset, const PresetWithVendorProfile &active_printer);
 
+// Mixed nozzle sizes (Phase 3): the nozzle diameter a FILAMENT preset was cut for, in mm, or 0
+// when it does not name one. Filament presets are per nozzle variant ("Generic ABS @U1 0.2
+// nozzle", "Bambu ABS @BBL H2D 0.6 nozzle") and declare that by listing the printer presets they
+// belong to in `compatible_printers`; the diameter is that printer preset's `printer_variant`.
+// Resolved from the printer collection so no name parsing is involved. Presets that list printer
+// presets of several different variants, or none at all, answer 0 = "fits any nozzle".
+double filament_preset_nozzle_diameter(const Preset &filament_preset, const PresetCollection &printers);
+
+// Mixed nozzle sizes (Phase 3): may filament slot `filament_id` (1-based) offer this filament
+// preset, given the printer's per-extruder nozzle diameters? True unless BOTH the preset names a
+// nozzle diameter AND the printer really carries different diameters AND the slot's own nozzle is
+// a different size. On a printer whose nozzles all match (or one that cannot mix), every slot sees
+// the same list it always did, so this narrows nothing that used to be offered.
+bool filament_preset_fits_slot(const Preset &filament_preset, const PresetCollection &printers, unsigned int filament_id);
+
+
+
 enum class PresetSelectCompatibleType {
 	// Never select a compatible preset if the newly selected profile is not compatible.
 	Never,

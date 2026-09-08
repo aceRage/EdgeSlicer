@@ -1329,6 +1329,15 @@ void PlaterPresetComboBox::update()
         if (!preset.is_visible || (!preset.is_compatible && !is_selected))
             continue;
 
+        // Mixed nozzle sizes (Phase 3): filament presets are cut per nozzle variant ("@U1 0.2
+        // nozzle"), and `is_compatible` is a single per-preset flag computed against the WHOLE
+        // printer preset - it cannot say "fits slot 2 but not slot 1". When the printer really
+        // carries different diameters, narrow each slot's list to the presets cut for that slot's
+        // own nozzle. The currently selected preset is always kept so a slot never shows blank.
+        if (m_type == Preset::TYPE_FILAMENT && !is_selected && m_filament_idx >= 0 &&
+            !filament_preset_fits_slot(preset, m_preset_bundle->printers, unsigned(m_filament_idx + 1)))
+            continue;
+
         bool single_bar = false;
         if (m_type == Preset::TYPE_FILAMENT)
         {

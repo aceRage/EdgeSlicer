@@ -5291,41 +5291,97 @@ if (is_marlin_flavor)
 
                 optgroup->m_on_change = [this, extruder_idx](const t_config_option_key& opt_key, boost::any value)
                 {
-                    bool is_SEMM = m_config->opt_bool("single_extruder_multi_material");
-                    if (is_SEMM && m_extruders_count > 1 && opt_key.find_first_of("nozzle_diameter") != std::string::npos)
+                    // Mixed nozzle sizes (Phase 3): changing extruder N's diameter changes only
+                    // extruder N on a machine that can carry different nozzles at the same time (a
+                    // toolchanger such as the Snapmaker U1, or a dual-extruder H2D / H2C / X2D).
+                    // On such a machine we OFFER to apply the value to every extruder and default
+                    // to leaving the others alone. On a single-extruder multi-material printer
+                    // every filament goes through the SAME physical nozzle, so a per-extruder
+                    // diameter is meaningless and the old forced sync is kept unchanged.
+                    if (m_extruders_count > 1 && opt_key.find("nozzle_diameter") != std::string::npos)
                     {
                         SuppressBackgroundProcessingUpdate sbpu;
-                        const double new_nd = boost::any_cast<double>(value);
+                        const bool          is_SEMM = m_config->opt_bool("single_extruder_multi_material");
+                        const double        new_nd  = boost::any_cast<double>(value);
                         std::vector<double> nozzle_diameters = static_cast<const ConfigOptionFloats*>(m_config->option("nozzle_diameter"))->values;
 
-                        // if value was changed
-                        if (fabs(nozzle_diameters[extruder_idx == 0 ? 1 : 0] - new_nd) > EPSILON)
-                        {
-                            const wxString msg_text = _(L("This is a single extruder multi-material printer, diameters of all extruders "
-                                "will be set to the new value. Do you want to proceed?"));
-                            //wxMessageDialog dialog(parent(), msg_text, _(L("Nozzle diameter")), wxICON_WARNING | wxYES_NO);
-                            MessageDialog dialog(parent(), msg_text, _(L("Nozzle diameter")), wxICON_WARNING | wxYES_NO);
+                        // Does any other extruder still differ from the value just entered?
+                        bool others_differ = false;
+                        for (size_t i = 0; i < nozzle_diameters.size(); ++i)
+                            if (i != extruder_idx && fabs(nozzle_diameters[i] - new_nd) > EPSILON)
+                                others_differ = true;
 
-                            DynamicPrintConfig new_conf = *m_config;
-                            if (dialog.ShowModal() == wxID_YES) {
-                                for (size_t i = 0; i < nozzle_diameters.size(); i++) {
-                                    if (i == extruder_idx)
-                                        continue;
-                                    nozzle_diameters[i] = new_nd;
-                                }
+                        if (others_differ) {
+                            bool apply_to_all = false;
+                            bool revert       = false;
+                            if (is_SEMM) {
+                                // Unchanged behaviour for SEMM: one physical nozzle, so every value
+                                // must agree. Yes = adopt the new value everywhere, No = revert.
+                                const wxString msg_text = _L("This is a single extruder multi-material printer, diameters of all extruders "
+                                                             "will be set to the new value. Do you want to proceed?");
+                                MessageDialog dialog(parent(), msg_text, _L("Nozzle diameter"), wxICON_WARNING | wxYES_NO);
+                                if (dialog.ShowModal() == wxID_YES)
+                                    apply_to_all = true;
+                                else
+                                    revert = true;
+                            } else {
+                                // Mixed diameters are supported here: an offer, not a forced action.
+                                // Note the button roles are deliberately inverted with respect to
+                                // the SEMM branch - YES is "only this extruder". MessageDialog
+                                // auto-answers YES when a phone/agent request drives the GUI
+                                // (MsgDialog.cpp), so YES must be the harmless answer that keeps
+                                // the per-extruder value the user just typed.
+                                const wxString diameter_str = from_u8(format_diameter_to_str(new_nd));
+                                const wxString msg_text     = wxString::Format(
+                                    _L("This printer's extruders can carry nozzles of different diameters, so this change "
+                                       "applies to Extruder %d only.\n\nApply %s mm to every extruder instead?"),
+                                    int(extruder_idx + 1), diameter_str);
+                                MessageDialog dialog(parent(), msg_text, _L("Nozzle diameter"),
+                                                     wxICON_INFORMATION | wxYES_NO | wxCANCEL);
+                                dialog.SetButtonLabel(wxID_YES, wxString::Format(_L("Only Extruder %d"), int(extruder_idx + 1)), true);
+                                dialog.SetButtonLabel(wxID_NO, wxString::Format(_L("Apply %s mm to all extruders"), diameter_str));
+                                dialog.SetButtonLabel(wxID_CANCEL, _L("Cancel"));
+                                const int res = dialog.ShowModal();
+                                if (res == wxID_NO)
+                                    apply_to_all = true;
+                                else if (res == wxID_CANCEL)
+                                    revert = true;
+                                // wxID_YES (the focused default): keep the per-extruder value,
+                                // write nothing.
                             }
-                            else
-                                nozzle_diameters[extruder_idx] = nozzle_diameters[extruder_idx == 0 ? 1 : 0];
 
-                            new_conf.set_key_value("nozzle_diameter", new ConfigOptionFloats(nozzle_diameters));
-                            load_config(new_conf);
+                            if (apply_to_all || revert) {
+                                if (apply_to_all) {
+                                    for (size_t i = 0; i < nozzle_diameters.size(); i++) {
+                                        if (i == extruder_idx)
+                                            continue;
+                                        nozzle_diameters[i] = new_nd;
+                                    }
+                                } else {
+                                    // Put back what this extruder had before the edit.
+                                    const auto *saved = static_cast<const ConfigOptionFloats *>(
+                                        m_presets->get_edited_preset().config.option("nozzle_diameter"));
+                                    if (saved != nullptr && extruder_idx < saved->values.size())
+                                        nozzle_diameters[extruder_idx] = saved->values[extruder_idx];
+                                }
+                                DynamicPrintConfig new_conf = *m_config;
+                                new_conf.set_key_value("nozzle_diameter", new ConfigOptionFloats(nozzle_diameters));
+                                load_config(new_conf);
+                            }
                         }
                     }
 
                     update_dirty();
                     update();
-                    if (opt_key.find("nozzle_diameter") != std::string::npos)
+                    if (opt_key.find("nozzle_diameter") != std::string::npos) {
                         validate_filament_hot_bed_nozzle_relation(parent());
+                        // The sidebar's nozzle summary and the per-slot filament lists both read
+                        // nozzle_diameter, so refresh them as soon as one extruder changes.
+                        if (wxGetApp().plater() != nullptr) {
+                            wxGetApp().plater()->sidebar().update_nozzle_settings(false);
+                            wxGetApp().plater()->sidebar().update_presets(Preset::TYPE_FILAMENT);
+                        }
+                    }
                 };
 
                 optgroup = page->new_optgroup(L("Layer height limits"), L"param_layer_height");

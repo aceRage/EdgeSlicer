@@ -739,6 +739,73 @@ bool is_compatible_with_printer(const PresetWithVendorProfile &preset, const Pre
     return is_compatible_with_printer(preset, active_printer, &config);
 }
 
+// Mixed nozzle sizes (Phase 3) - see Preset.hpp.
+//
+// Why this is resolved through the printer collection rather than by parsing "0.2 nozzle" out of
+// the filament preset's name: the name is a display string and vendors spell it differently
+// ("@U1 0.2 nozzle", "@BBL H2D 0.2 nozzle"), whereas `compatible_printers` is the machine-readable
+// declaration the loader already validates, and `printer_variant` on the printer preset it names
+// IS the nozzle size that preset was cut for.
+double filament_preset_nozzle_diameter(const Preset &filament_preset, const PresetCollection &printers)
+{
+    const auto *compatible = filament_preset.config.option<ConfigOptionStrings>("compatible_printers");
+    if (compatible == nullptr || compatible->values.empty())
+        return 0.;
+
+    double found = 0.;
+    for (const std::string &printer_name : compatible->values) {
+        const Preset *printer = printers.find_preset(printer_name, false);
+        if (printer == nullptr)
+            continue;
+        const std::string variant = printer->config.opt_string("printer_variant");
+        if (variant.empty())
+            continue;
+        double d = 0.;
+        try {
+            size_t used = 0;
+            d = std::stod(variant, &used);
+            if (used != variant.size())
+                continue; // a variant that is not a plain diameter, e.g. a hardware revision
+        } catch (const std::exception &) {
+            continue;
+        }
+        if (d <= 0.)
+            continue;
+        if (found == 0.)
+            found = d;
+        else if (std::abs(found - d) > EPSILON)
+            return 0.; // spans several nozzle sizes: not tied to one, so it fits any slot
+    }
+    return found;
+}
+
+bool filament_preset_fits_slot(const Preset &filament_preset, const PresetCollection &printers, unsigned int filament_id)
+{
+    const DynamicPrintConfig &printer_config = printers.get_edited_preset().config;
+    // Nothing to narrow unless this machine can hold different nozzles AND currently does.
+    if (!supports_mixed_nozzle_diameters(printer_config) || !has_mixed_nozzle_diameters(printer_config))
+        return true;
+
+    const double preset_nozzle = filament_preset_nozzle_diameter(filament_preset, printers);
+    if (preset_nozzle <= 0.)
+        return true; // the preset does not claim a nozzle size, so it fits every slot
+
+    const auto *nozzle = printer_config.option<ConfigOptionFloats>("nozzle_diameter");
+    if (nozzle == nullptr || nozzle->values.empty())
+        return true;
+
+    // Which physical nozzle does this slot print through? On a toolchanger the filament index IS
+    // the extruder; on an AMS-fed machine filament_map says. physical_extruder_for_filament wants a
+    // PrintConfig, and a printer preset's DynamicPrintConfig is not one, so resolve the same way it
+    // does for the shapes a printer preset can express (filament_map lives in the PROJECT config,
+    // not in the printer preset, so the direct mapping is all that is available here).
+    const size_t extruder = filament_id == 0 ? 0 : size_t(filament_id - 1);
+    if (extruder >= nozzle->values.size())
+        return true; // more filament slots than nozzles and no map to consult: do not narrow
+
+    return std::abs(nozzle->values[extruder] - preset_nozzle) <= EPSILON;
+}
+
 void Preset::set_visible_from_appconfig(const AppConfig &app_config)
 {
     //BBS: add config related log

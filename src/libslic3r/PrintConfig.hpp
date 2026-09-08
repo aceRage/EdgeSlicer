@@ -1950,6 +1950,32 @@ bool has_nozzle_rack(const PrintConfig &config);
 // Flow.cpp::physical_extruder_for_filament.
 size_t physical_extruder_for_filament(const PrintConfig &config, unsigned int filament_id);
 
+// Mixed nozzle sizes (Phase 3, UI): true when this machine may carry nozzles of different
+// diameters at the same time - more than one physical extruder and NOT a single-extruder
+// multi-material machine (an SEMM printer routes every filament through one physical nozzle, so
+// there is nothing to mix). Toolchangers (Snapmaker U1) and dual-extruder machines
+// (Bambu H2D / H2C / X2D) answer true; a P1S or an AMS-fed X1C answers false.
+//
+// Both overloads read only `nozzle_diameter` and `single_extruder_multi_material`, so the
+// ConfigBase one works on a printer preset's own config as well as on a full PrintConfig.
+bool supports_mixed_nozzle_diameters(const ConfigBase &config);
+bool supports_mixed_nozzle_diameters(const PrintConfig &config);
+
+// True when `nozzle_diameter` actually holds more than one distinct value (within EPSILON).
+bool has_mixed_nozzle_diameters(const std::vector<double> &nozzle_diameters);
+bool has_mixed_nozzle_diameters(const ConfigBase &config);
+
+// The one-line summary the sidebar shows in place of a single variant string: "0.6" when every
+// nozzle matches, "0.6 / 0.2" when they differ (in extruder order, duplicates kept so the reader
+// can count heads). Empty when `nozzle_diameter` is missing or empty.
+std::string nozzle_diameter_summary(const std::vector<double> &nozzle_diameters);
+std::string nozzle_diameter_summary(const ConfigBase &config);
+
+// The nozzle diameter that filament slot `filament_id` (1-based) prints through, resolved via
+// physical_extruder_for_filament. 0 when the config has no nozzle_diameter. This is what the
+// per-slot filament preset compatibility rule measures against.
+double nozzle_diameter_for_filament(const PrintConfig &config, unsigned int filament_id);
+
 class CLIActionsConfigDef : public ConfigDef
 {
 public:
