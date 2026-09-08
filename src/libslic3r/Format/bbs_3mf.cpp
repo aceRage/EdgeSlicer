@@ -951,6 +951,16 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 int   type;
                 float r_tolerance;
                 float h_tolerance;
+                // Only meaningful when type == CutConnectorType::FlexiJoint. `has_flexi` is
+                // false for a 3MF written before the flexi attributes existed; the loader then
+                // leaves the volume's FlexiJointParams at their defaults, which is what lets an
+                // older file open unchanged - flexi_rotation in particular defaults to 0, the
+                // orientation every pre-phase-3 file was built with.
+                bool             has_flexi{ false };
+                // Whether the joint has already been consumed by a cut. Defaults to true,
+                // which is what every pre-phase-3 file's connectors were loaded as.
+                bool             processed{ true };
+                FlexiJointParams flexi;
             };
             CutObjectBase          id;
             std::vector<Connector> connectors;
@@ -2217,12 +2227,23 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                         add_error("Invalid cut connector volume_id " + std::to_string(connector.volume_id));
                         continue;
                     }
-                    if (connector.type < 0 || connector.type > int(CutConnectorType::Undef)) {
+                    // CutConnectorType::FlexiJoint is appended AFTER Undef, so the historic
+                    // "<= Undef" bound would reject it. Since phase 3 a Flexi joint does reach
+                    // a 3MF (a project saved with the joint placed but not yet cut), so the
+                    // bound is the last enumerator instead - still a range check on untrusted
+                    // file content, just one that covers the whole enum.
+                    if (connector.type < 0 || connector.type > int(CutConnectorType::FlexiJoint)) {
                         add_error("Invalid cut connector type " + std::to_string(connector.type));
                         continue;
                     }
                     model_object->volumes[connector.volume_id]->cut_info =
-                        ModelVolume::CutInfo(CutConnectorType(connector.type), connector.r_tolerance, connector.h_tolerance, true);
+                        ModelVolume::CutInfo(CutConnectorType(connector.type), connector.r_tolerance,
+                                             connector.h_tolerance, connector.processed);
+                    // A Flexi joint rebuilds its geometry from these at cut time, so carry
+                    // them across the round trip. Absent in a pre-phase-3 file, in which case
+                    // the defaults set by CutInfo stand.
+                    if (connector.has_flexi)
+                        model_object->volumes[connector.volume_id]->cut_info.flexi = connector.flexi;
                 }
             }
         }
@@ -2648,6 +2669,36 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                                                                   connector_tree.get<int>("<xmlattr>.type"),
                                                                   connector_tree.get<float>("<xmlattr>.r_tolerance"),
                                                                   connector_tree.get<float>("<xmlattr>.h_tolerance")};
+                            // The Flexi joint's own parameters, written since phase 3. Every
+                            // one falls back to the FlexiJointParams default when the file
+                            // predates it, so an older 3MF loads exactly as it used to - and
+                            // in particular flexi_rotation defaults to 0, the orientation the
+                            // joint was always built with before the field existed.
+                            if (connector_tree.get_optional<int>("<xmlattr>.flexi_kind")) {
+                                const FlexiJointParams  def;
+                                FlexiJointParams&       fj = connector.flexi;
+                                const int kind = connector_tree.get<int>("<xmlattr>.flexi_kind", int(def.kind));
+                                // Untrusted file content: clamp the enum before casting.
+                                fj.kind = (kind >= int(FlexiJointKind::DoubleRing) && kind <= int(FlexiJointKind::ChainLink)) ?
+                                          FlexiJointKind(kind) : def.kind;
+                                fj.outer_radius = connector_tree.get<float>("<xmlattr>.flexi_outer_radius", def.outer_radius);
+                                fj.ring_width   = connector_tree.get<float>("<xmlattr>.flexi_ring_width",   def.ring_width);
+                                fj.ring_height  = connector_tree.get<float>("<xmlattr>.flexi_ring_height",  def.ring_height);
+                                fj.clearance    = connector_tree.get<float>("<xmlattr>.flexi_clearance",    def.clearance);
+                                fj.gap          = connector_tree.get<float>("<xmlattr>.flexi_gap",          def.gap);
+                                fj.hub_radius   = connector_tree.get<float>("<xmlattr>.flexi_hub_radius",   def.hub_radius);
+                                fj.tilt         = connector_tree.get<float>("<xmlattr>.flexi_tilt",         def.tilt);
+                                fj.neck_ratio   = connector_tree.get<float>("<xmlattr>.flexi_neck_ratio",   def.neck_ratio);
+                                fj.open_angle   = connector_tree.get<float>("<xmlattr>.flexi_open_angle",   def.open_angle);
+                                fj.link_length  = connector_tree.get<float>("<xmlattr>.flexi_link_length",  def.link_length);
+                                fj.link_width   = connector_tree.get<float>("<xmlattr>.flexi_link_width",   def.link_width);
+                                fj.wire         = connector_tree.get<float>("<xmlattr>.flexi_wire",         def.wire);
+                                fj.tilt_angle   = connector_tree.get<float>("<xmlattr>.flexi_tilt_angle",   def.tilt_angle);
+                                fj.stem         = connector_tree.get<float>("<xmlattr>.flexi_stem",         def.stem);
+                                fj.rotation     = connector_tree.get<float>("<xmlattr>.flexi_rotation",     def.rotation);
+                                connector.processed = connector_tree.get<int>("<xmlattr>.processed", 1) != 0;
+                                connector.has_flexi = true;
+                            }
                             connectors.emplace_back(connector);
                         }
                     }
@@ -7433,7 +7484,13 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         unsigned int object_cnt = 0;
         for (const ModelObject* object : model.objects) {
             object_cnt++;
-            if (!object->is_cut())
+            // A Flexi joint placed but not yet cut lives on an object that is not "cut" yet,
+            // and its connector volume is not is_processed. Both gates below would drop it, so
+            // the joint's parameters never reached the file and a reopened project came back
+            // with a differently shaped joint. Let such an object through as well.
+            const bool carries_flexi = std::any_of(object->volumes.begin(), object->volumes.end(),
+                                                   [](const ModelVolume* v) { return v->cut_info.is_flexi_joint(); });
+            if (!object->is_cut() && !carries_flexi)
                 continue;
             pt::ptree& obj_tree = tree.add("objects.object", "");
 
@@ -7450,12 +7507,40 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             int volume_idx = -1;
             for (const ModelVolume* volume : object->volumes) {
                 ++volume_idx;
-                if (volume->is_cut_connector()) {
+                // is_cut_connector() also demands is_processed; an unprocessed Flexi joint is
+                // exactly the case that has to be written, so admit it too.
+                if (volume->is_cut_connector() || volume->cut_info.is_flexi_joint()) {
                     pt::ptree& connectors_tree = obj_tree.add("connectors.connector", "");
                     connectors_tree.put("<xmlattr>.volume_id",   volume_idx);
                     connectors_tree.put("<xmlattr>.type",        int(volume->cut_info.connector_type));
                     connectors_tree.put("<xmlattr>.r_tolerance", volume->cut_info.radius_tolerance);
                     connectors_tree.put("<xmlattr>.h_tolerance", volume->cut_info.height_tolerance);
+                    // A Flexi joint regenerates its whole geometry from these parameters at
+                    // cut time, so they have to survive a save/load or a project reopened
+                    // before the cut would come back with a different joint. Written only for
+                    // the flexi type, so nothing changes in a file that has no flexi joint.
+                    if (volume->cut_info.is_flexi_joint()) {
+                        // A joint that has not been cut yet has to come back UNPROCESSED, or
+                        // reopening the project would leave a joint the cut then ignores.
+                        connectors_tree.put("<xmlattr>.processed", volume->cut_info.is_processed ? 1 : 0);
+                        const FlexiJointParams& fj = volume->cut_info.flexi;
+                        connectors_tree.put("<xmlattr>.flexi_kind",         int(fj.kind));
+                        connectors_tree.put("<xmlattr>.flexi_outer_radius", fj.outer_radius);
+                        connectors_tree.put("<xmlattr>.flexi_ring_width",   fj.ring_width);
+                        connectors_tree.put("<xmlattr>.flexi_ring_height",  fj.ring_height);
+                        connectors_tree.put("<xmlattr>.flexi_clearance",    fj.clearance);
+                        connectors_tree.put("<xmlattr>.flexi_gap",          fj.gap);
+                        connectors_tree.put("<xmlattr>.flexi_hub_radius",   fj.hub_radius);
+                        connectors_tree.put("<xmlattr>.flexi_tilt",         fj.tilt);
+                        connectors_tree.put("<xmlattr>.flexi_neck_ratio",   fj.neck_ratio);
+                        connectors_tree.put("<xmlattr>.flexi_open_angle",   fj.open_angle);
+                        connectors_tree.put("<xmlattr>.flexi_link_length",  fj.link_length);
+                        connectors_tree.put("<xmlattr>.flexi_link_width",   fj.link_width);
+                        connectors_tree.put("<xmlattr>.flexi_wire",         fj.wire);
+                        connectors_tree.put("<xmlattr>.flexi_tilt_angle",   fj.tilt_angle);
+                        connectors_tree.put("<xmlattr>.flexi_stem",         fj.stem);
+                        connectors_tree.put("<xmlattr>.flexi_rotation",     fj.rotation);
+                    }
                 }
             }
         }

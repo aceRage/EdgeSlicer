@@ -2487,6 +2487,39 @@ bool GLGizmoCut3D::render_flexi_float_input(const std::string& label, float& in_
     return true;
 }
 
+// The Flexi joint's Rotation: degrees about the cut normal, laid out like the plain
+// connector's "Rotation" row (slider + numeric field) so the panel reads the same either way.
+// The value lives in FlexiJointParams::rotation, in DEGREES - unlike CutConnector::z_angle,
+// which the plain connector keeps in radians.
+bool GLGizmoCut3D::render_flexi_rotation_input(const std::string& label, float& in_val, const wxString& tooltip)
+{
+    const double slider_width = 0.24 * m_editing_window_width;
+    const double item_in_gap  = 0.01 * m_editing_window_width;
+    const double input_width  = 0.29 * m_editing_window_width;
+
+    ImGui::AlignTextToFramePadding();
+    m_imgui->text(label);
+    ImGui::SameLine(m_label_width);
+    ImGui::PushItemWidth(float(slider_width));
+
+    float val = in_val;
+    const std::string format = "%.0f" "\xC2\xB0";
+    m_imgui->bbl_slider_float_style("##flexi_rot_" + label, &val, 0.f, 180.f, format.c_str(), 1.f, true, from_u8(label));
+
+    ImGui::SameLine(float(m_label_width + slider_width + item_in_gap));
+    ImGui::PushItemWidth(float(input_width));
+    ImGui::BBLDragFloat(("##flexi_rot_input_" + label).c_str(), &val, 0.5f, 0.f, 180.f, format.c_str());
+    if (!tooltip.IsEmpty() && ImGui::IsItemHovered())
+        m_imgui->tooltip(tooltip, ImGui::GetFontSize() * 20.0f);
+
+    if (val < 0.f)   val = 0.f;
+    if (val > 180.f) val = 180.f;
+    if (is_approx(val, in_val))
+        return false;
+    in_val = val;
+    return true;
+}
+
 void GLGizmoCut3D::render_flexi_joint_inputs(CutConnectors& connectors)
 {
     bool changed = false;
@@ -2511,7 +2544,9 @@ void GLGizmoCut3D::render_flexi_joint_inputs(CutConnectors& connectors)
                                                 _L("How deep each loop's far end is embedded in its own segment."));
         m_imgui->disabled_end();
         changed |= render_flexi_float_input(m_labels_map["Link tilt"], m_flexi.tilt_angle, 0.f, 30.f,
-                                            _L("How far the horizontal loop is tilted up out of the cut plane, in degrees, so its far end rises into the upper segment."));
+                                            _L("How far the upper ring is tipped inside its own plane, in degrees, so its free end leans clear of the lower ring."));
+        changed |= render_flexi_rotation_input(m_labels_map["Rotation"], m_flexi.rotation,
+                                               _L("Turns the whole link about the cut normal. Both rings turn together, so their planes stay perpendicular to each other; this only chooses where in the cut plane the pair sits - use it to line the rings up with the part, or with the way it prints."));
     } else {
         m_imgui->disabled_begin(m_flexi_auto_size);
             changed |= render_flexi_float_input(m_labels_map[m_flexi.kind == FlexiJointKind::DoubleRing ? "Outer radius" : "Ball radius"],

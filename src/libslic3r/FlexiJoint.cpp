@@ -49,25 +49,62 @@ static double flexi_revolved_z_shift(const FlexiJointParams &p)
 // semicircular caps of radius W/2, so the loop has overall length L and width W and no
 // corners for the swept tube to pinch at. Each is then swept with a tube of radius `wire`.
 //
+// THE TWO PLANES. A chain link is two rings that each pass THROUGH the cut plane, so BOTH
+// ring planes have to contain the cut normal n, and the two planes have to be perpendicular
+// to each other - that is the whole reason the joint hinges in two directions instead of one.
+// Writing d for a unit reference direction lying in the cut plane:
+//   LOWER ring (A): its plane is spanned by (n, d)     -> the x-z plane, centre pushed to -n.
+//   UPPER ring (B): its plane is spanned by (n, n x d) -> the y-z plane, centre pushed to +n.
+// Both long axes run along n. Their spans overlap around z == 0, and because the planes are
+// perpendicular each ring threads the other's hole there. Phase 2 laid ring B down IN the cut
+// plane (spanned by d and n x d) instead - which is why the owner saw one ring standing and
+// one lying flat, and why the joint hinged on only one axis. See the phase 3 spec section.
+//
+// THE OFFSET. Each ring is centred `off` from the cut plane on ITS OWN side: the lower ring
+// at z == -off, the upper one at z == +off. That is what puts the two centroids on opposite
+// sides of the plane while both rings still cross it, and it is the single number that has to
+// satisfy all three of the joint's constraints at once:
+//   (1) The ring's centre has to clear its own segment's face, or the ring would be centred in
+//       the gap rather than in its own half:      off >= gap/2 + wire.
+//   (2) The ring's far end has to be embedded at least `stem` deep in its own segment, which
+//       is what attaches it:                      off >= stem + gap/2 - L/2.
+//   (3) The two rings still have to THREAD each other: the upper ring's free (bottom) end has
+//       to reach below the top of the lower ring's hole with the clearance to spare, i.e.
+//       off - L/2 <= -off + (L/2 - wire) - C, so  off <= (L - wire)/2 - C.
+// The preferred value is L/4 - a quarter of the ring length puts the centroids a half length
+// apart and leaves each ring's free half threaded through the other; it is clamped into
+// [max of (1) and (2), (3)]. When (3) is below the lower bounds the parameters cannot make an
+// interlocked joint at all and flexi_validate() refuses them.
+//
 // The frame, in the cut frame (cut plane z == 0, faces at -+ gap/2):
-//   VERTICAL loop  (LOWER segment): in the x-z plane (normal +Y), long axis +Z, centre
-//       (x_shift, 0, vcz) with vcz = -gap/2 - stem + L/2, so its bottom centreline extremity
-//       sits `stem` below the lower face and the loop is anchored in the lower body.
-//   HORIZONTAL loop (UPPER segment): long axis +X, tilted up by tilt_angle about +Y, plane
-//       at z = +gap/2 + wire so it lies immediately on top of the upper face, centre
-//       (x_shift + L/2, 0, hcz). The +L/2 offset is what nests its near cap inside the
-//       vertical loop's hole; the far (+x) end rises into the upper body.
-//   x_shift centres the whole assembly on the joint axis, so the joint is not lopsided and
-//       the gizmo's "fits in the cross section" test means what it says.
+//   LOWER ring: in the x-z plane (normal +Y), long axis +Z, centre (0, 0, -off). Its bottom
+//       extremity is embedded in the lower body; its top half is free, reaching up through
+//       the cut plane.
+//   UPPER ring: in the y-z plane (normal +X), long axis +Z, centre (0, 0, +off) - the mirror
+//       image in the perpendicular plane. Its top extremity is embedded in the upper body;
+//       its bottom half is free, reaching down through the cut plane and threading the
+//       lower ring's hole.
+//   `tilt_angle` tips the UPPER ring about +Y so its free end leans clear of the lower ring
+//       instead of sitting dead concentric with it; 0 is a legal value.
+//
+// PRINTABILITY. Both rings now stand vertical, so each has a self-supporting bridge at the
+// top of its arc and prints the way the phase 2 "vertical" ring already did; see the spec's
+// phase 3 printability note.
 
 struct ChainLinkFrame
 {
     double L{ 0. }, W{ 0. }, t{ 0. };
     double gap{ 0. }, face_lo{ 0. }, face_hi{ 0. };
-    double vcz{ 0. };          // vertical loop centre z
-    double hcz{ 0. }, hcx{ 0. };  // horizontal loop centre
-    double shift{ 0. };        // x shift that centres the assembly
-    double vert_top{ 0. };     // topmost vertical centreline z
+    double off{ 0. };          // each ring's centre offset from the plane, on its own side
+    double off_min{ 0. }, off_max{ 0. };
+    double lcz{ 0. };          // lower ring centre z (x-z plane)
+    double ucz{ 0. };          // upper ring centre z (y-z plane)
+    double tilt{ 0. };         // upper ring tilt about +Y, radians
+    double lower_top{ 0. };    // topmost lower-ring centreline z
+    double upper_bot{ 0. };    // bottommost upper-ring centreline z
+    double embed{ 0. };        // how deep each ring's far end sits inside its own segment
+    double interlock{ 0. };    // how far the upper ring's free end reaches past the top of
+                               // the lower ring's hole (must stay positive for a real link)
 };
 
 static ChainLinkFrame chain_frame(const FlexiJointParams &p)
@@ -79,15 +116,20 @@ static ChainLinkFrame chain_frame(const FlexiJointParams &p)
     f.gap     = double(flexi_effective_gap(p));
     f.face_lo = -0.5 * f.gap;
     f.face_hi = +0.5 * f.gap;
-    f.vcz     = f.face_lo - double(p.stem) + 0.5 * f.L;
-    f.hcz     = f.face_hi + f.t;
-    f.hcx     = 0.5 * f.L;
-    const double ca = std::cos(double(p.tilt_angle) * M_PI / 180.);
-    // The union spans x from -W/2 - t (the vertical loop's near side) to hcx + L/2*ca + t.
-    const double xlo = -0.5 * f.W - f.t;
-    const double xhi = f.hcx + 0.5 * f.L * ca + f.t;
-    f.shift   = -0.5 * (xlo + xhi);
-    f.vert_top = f.vcz + 0.5 * f.L;
+
+    f.off_min = std::max(0.5 * f.gap + f.t, double(p.stem) + 0.5 * f.gap - 0.5 * f.L);
+    f.off_max = 0.5 * (f.L - f.t) - double(p.clearance);
+    f.off     = std::min(std::max(0.25 * f.L, f.off_min), std::max(f.off_min, f.off_max));
+
+    f.lcz     = -f.off;
+    f.ucz     = +f.off;
+    f.tilt    = double(p.tilt_angle) * M_PI / 180.;
+    f.lower_top = f.lcz + 0.5 * f.L;
+    f.upper_bot = f.ucz - 0.5 * f.L;
+    f.embed     = f.off + 0.5 * f.L - 0.5 * f.gap;
+    // The lower ring's hole reaches up to lower_top - t; the upper ring's free end reaches
+    // down to upper_bot. The link is real only while the latter is genuinely below the former.
+    f.interlock = (f.lower_top - f.t) - f.upper_bot;
     return f;
 }
 
@@ -115,25 +157,55 @@ static std::vector<Vec2d> stadium_path(double L, double W, int cap_steps)
     return pts;
 }
 
-// The vertical loop's centreline: the stadium's long axis (a) maps to +Z, its width (b) to X.
-static std::vector<Vec3d> chain_vertical_path(const FlexiJointParams &p)
+// THE ROTATION. `p.rotation` turns the whole two-ring assembly about the cut normal n, so
+// d = rotate(d0, n, rotation) with d0 = +X, the cut plane's own X axis. Both rings turn
+// together, which keeps their planes perpendicular; the parameter only chooses where in the
+// cut plane the pair sits. Applied last, as a rotation about +Z in the cut frame.
+static void chain_apply_rotation(std::vector<Vec3d> &path, const FlexiJointParams &p)
+{
+    const double a = double(p.rotation) * M_PI / 180.;
+    if (std::abs(a) <= EPSILON)
+        return;
+    const double ca = std::cos(a), sa = std::sin(a);
+    for (Vec3d &v : path)
+        v = Vec3d(ca * v.x() - sa * v.y(), sa * v.x() + ca * v.y(), v.z());
+}
+
+// The LOWER ring's centreline: the stadium's long axis (a) maps to +Z and its width (b) to X,
+// so the ring stands in the x-z plane - the plane spanned by (n, d).
+static std::vector<Vec3d> chain_lower_path(const FlexiJointParams &p)
 {
     const ChainLinkFrame f = chain_frame(p);
     std::vector<Vec3d>   out;
     for (const Vec2d &ab : stadium_path(f.L, f.W, FLEXI_CAP_STEPS))
-        out.emplace_back(ab.y() + f.shift, 0., f.vcz + ab.x());
+        out.emplace_back(ab.y(), 0., f.lcz + ab.x());
+    chain_apply_rotation(out, p);
     return out;
 }
 
-// The horizontal loop's centreline: long axis (a) to +X tilted up about +Y, width (b) to Y.
-static std::vector<Vec3d> chain_horizontal_path(const FlexiJointParams &p)
+// The UPPER ring's centreline: long axis (a) to +Z and width (b) to Y, so the ring stands in
+// the y-z plane - the plane spanned by (n, n x d), perpendicular to the lower ring's. It is
+// then tipped by tilt_angle INSIDE that plane, about +X (the ring's own plane normal), which
+// leans its free (lower) end clear of the lower ring.
+//
+// THE TILT AXIS MATTERS. Tipping about +Y instead would swing the ring's free tip out along
+// x - straight towards the LOWER ring's plane - and eat into the clearance: at the defaults
+// the two wires' closest approach drops from 0.75 mm to 0.32 mm at only 7 degrees, i.e. below
+// the 0.35 mm clearance. Tipping about the ring's own normal keeps every point in the y-z
+// plane, so the lateral margin (which is what the `link_width >= 4*wire + 2*C` rule buys) is
+// untouched whatever the tilt.
+static std::vector<Vec3d> chain_upper_path(const FlexiJointParams &p)
 {
     const ChainLinkFrame f  = chain_frame(p);
-    const double         ca = std::cos(double(p.tilt_angle) * M_PI / 180.);
-    const double         sa = std::sin(double(p.tilt_angle) * M_PI / 180.);
+    const double         ca = std::cos(f.tilt), sa = std::sin(f.tilt);
     std::vector<Vec3d>   out;
-    for (const Vec2d &ab : stadium_path(f.L, f.W, FLEXI_CAP_STEPS))
-        out.emplace_back(f.hcx + ab.x() * ca + f.shift, ab.y(), f.hcz + ab.x() * sa);
+    for (const Vec2d &ab : stadium_path(f.L, f.W, FLEXI_CAP_STEPS)) {
+        // In the ring's own frame: x = 0 (its plane's normal), y = width, z = long axis.
+        const double y = ab.y(), z = ab.x();
+        // Tip about +X, inside the y-z plane: (y, z) -> (y cos - z sin, y sin + z cos).
+        out.emplace_back(0., y * ca - z * sa, f.ucz + y * sa + z * ca);
+    }
+    chain_apply_rotation(out, p);
     return out;
 }
 
@@ -222,9 +294,13 @@ FlexiJointParams flexi_auto_size(FlexiJointParams p, double inscribed_radius)
 float flexi_protrusion_height(const FlexiJointParams &p)
 {
     if (p.kind == FlexiJointKind::ChainLink) {
-        // The tallest thing above the cut plane is the vertical loop's top.
+        // Both rings straddle the plane now, so the tallest thing above it is whichever ring
+        // reaches higher: the lower ring's free top, or the upper ring's anchored top. The
+        // upper ring is tipped inside its own plane, which lifts its far corner by
+        // (W/2) sin(tilt) on top of the (L/2) cos(tilt) the long axis reaches.
         const ChainLinkFrame f = chain_frame(p);
-        return float(f.vert_top + double(p.wire));
+        const double         utop = f.ucz + 0.5 * f.L * std::cos(f.tilt) + 0.5 * f.W * std::sin(f.tilt);
+        return float(std::max(f.lower_top, utop) + double(p.wire));
     }
     const double shift = flexi_revolved_z_shift(p);
     if (p.kind == FlexiJointKind::DoubleRing)
@@ -262,7 +338,7 @@ float flexi_outer_extent(const FlexiJointParams &p)
 {
     if (p.kind == FlexiJointKind::ChainLink) {
         double best = 0.;
-        for (const std::vector<Vec3d> &path : { chain_vertical_path(p), chain_horizontal_path(p) })
+        for (const std::vector<Vec3d> &path : { chain_lower_path(p), chain_upper_path(p) })
             for (const Vec3d &v : path)
                 best = std::max(best, std::hypot(v.x(), v.y()));
         return float(best + double(p.wire) + double(p.clearance));
@@ -487,21 +563,32 @@ static std::vector<indexed_triangle_set> revolve_all(const std::vector<std::vect
     return out;
 }
 
+std::vector<Vec3d> flexi_chain_lower_centreline(const FlexiJointParams &p)
+{
+    return p.kind == FlexiJointKind::ChainLink ? chain_lower_path(p) : std::vector<Vec3d>{};
+}
+
+std::vector<Vec3d> flexi_chain_upper_centreline(const FlexiJointParams &p)
+{
+    return p.kind == FlexiJointKind::ChainLink ? chain_upper_path(p) : std::vector<Vec3d>{};
+}
+
 std::vector<indexed_triangle_set> flexi_male_bodies(const FlexiJointParams &p)
 {
     if (p.kind == FlexiJointKind::ChainLink)
-        // The chain link's "male" body is the vertical loop, which belongs to the LOWER
-        // segment. There is no revolved profile for it.
-        return { its_make_swept_loop(chain_vertical_path(p), double(p.wire), FLEXI_WIRE_SECTORS) };
+        // The chain link's "male" body is the LOWER ring, in the plane spanned by (n, d).
+        // There is no revolved profile for it.
+        return { its_make_swept_loop(chain_lower_path(p), double(p.wire), FLEXI_WIRE_SECTORS) };
     return revolve_all(flexi_male_profiles(p));
 }
 
 std::vector<indexed_triangle_set> flexi_female_cavities(const FlexiJointParams &p)
 {
     if (p.kind == FlexiJointKind::ChainLink)
-        // ... and its "female" body is the horizontal loop, on the UPPER segment. It is a
-        // solid body, not a cavity; flexi_upper_reliefs() carries what gets subtracted.
-        return { its_make_swept_loop(chain_horizontal_path(p), double(p.wire), FLEXI_WIRE_SECTORS) };
+        // ... and its "female" body is the UPPER ring, in the perpendicular plane spanned by
+        // (n, n x d). It is a solid body, not a cavity; flexi_upper_reliefs() carries what
+        // gets subtracted.
+        return { its_make_swept_loop(chain_upper_path(p), double(p.wire), FLEXI_WIRE_SECTORS) };
     return revolve_all(flexi_female_profiles(p));
 }
 
@@ -522,12 +609,12 @@ std::vector<indexed_triangle_set> flexi_upper_bodies(const FlexiJointParams &p)
 
 std::vector<indexed_triangle_set> flexi_lower_reliefs(const FlexiJointParams &p)
 {
-    // The lower segment has to make room for the OTHER loop (the horizontal one) wherever it
-    // dips near the lower body. A tube offset uniformly by C is simply a fatter tube, so the
+    // The lower segment has to make room for the OTHER ring (the upper one) wherever its free
+    // end dips near the lower body. A tube offset uniformly by C is simply a fatter tube, so the
     // relief is the same centreline swept with radius wire + C - which is why the measured
     // clearance comes out exactly C here too, with no Clipper dilation involved.
     if (p.kind == FlexiJointKind::ChainLink)
-        return { its_make_swept_loop(chain_horizontal_path(p), double(p.wire) + double(p.clearance),
+        return { its_make_swept_loop(chain_upper_path(p), double(p.wire) + double(p.clearance),
                                      FLEXI_WIRE_SECTORS) };
     return {};
 }
@@ -535,7 +622,7 @@ std::vector<indexed_triangle_set> flexi_lower_reliefs(const FlexiJointParams &p)
 std::vector<indexed_triangle_set> flexi_upper_reliefs(const FlexiJointParams &p)
 {
     if (p.kind == FlexiJointKind::ChainLink)
-        return { its_make_swept_loop(chain_vertical_path(p), double(p.wire) + double(p.clearance),
+        return { its_make_swept_loop(chain_lower_path(p), double(p.wire) + double(p.clearance),
                                      FLEXI_WIRE_SECTORS) };
     // Revolved kinds: the cavity IS the relief.
     return flexi_female_cavities(p);
@@ -580,9 +667,19 @@ std::string flexi_validate(const FlexiJointParams &p)
         if (p.link_length < p.link_width)
             return "Link length must be at least the link width.";
         if (p.tilt_angle < 0.f || p.tilt_angle > 30.f)
-            return "The horizontal loop's tilt must be between 0 and 30 degrees.";
+            return "The upper ring's tilt must be between 0 and 30 degrees.";
         if (p.stem <= 0.f)
-            return "Stem depth must be greater than zero, or the loop is not attached.";
+            return "Stem depth must be greater than zero, or the ring is not attached.";
+        if (p.rotation < 0.f || p.rotation > 180.f)
+            return "Rotation must be between 0 and 180 degrees.";
+        // Both rings straddle the cut plane, each centred `off` into its own half. The three
+        // constraints on `off` (clear its own face, embed `stem` deep, still thread the other
+        // ring) have to leave a value that satisfies them all - see chain_frame().
+        const ChainLinkFrame f = chain_frame(p);
+        if (f.off_max < f.off_min || f.interlock <= 0.)
+            return "The rings cannot interlock with these proportions: each has to sit clear of "
+                   "its own cut face and still reach through the other ring's hole. Lengthen "
+                   "the link, or reduce the gap, the stem or the wire.";
         return std::string();
     }
     if (p.kind == FlexiJointKind::DoubleRing) {
