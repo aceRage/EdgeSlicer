@@ -133,6 +133,12 @@ class GLGizmoCut3D : public GLGizmoBase
     float m_snap_bulge_proportion{ 0.15f };
     float m_snap_space_proportion{ 0.3f };
 
+    // Input params for the Flexi joint connector family (print-in-place articulated joint).
+    FlexiJointParams m_flexi;
+    int              m_flexi_kind_id{ int(FlexiJointKind::DoubleRing) };
+    bool             m_flexi_auto_size{ true };
+    std::vector<std::string> m_flexi_kinds;
+
     bool m_hide_cut_plane{ false };
     bool m_connectors_editing{ false };
     bool m_cut_plane_as_circle{ false };
@@ -310,6 +316,15 @@ protected:
     void render_groove_angle_input(const std::string &label, float &in_val, const float &init_val, float min_val, float max_val);
     bool render_angle_input(const std::string& label, float& in_val, const float& init_val, float min_val, float max_val);
     void render_snap_specific_input(const std::string& label, const wxString& tooltip, float& in_val, const float& init_val, const float min_val, const float max_val);
+    void render_connectors_window_footer(float x, float y);
+    // Flexi joint
+    bool   is_flexi_joint_type() const { return m_connector_type == CutConnectorType::FlexiJoint; }
+    bool   render_flexi_float_input(const std::string& label, float& in_val, float min_val, float max_val, const wxString& tooltip);
+    void   render_flexi_joint_inputs(CutConnectors& connectors);
+    void   sync_flexi_params(CutConnectors& connectors, bool resize_from_section);
+    double flexi_section_inscribed_radius() const;
+    float  flexi_nozzle_diameter() const;
+    double flexi_slice_closing_radius() const;
     void render_cut_plane_input_window(CutConnectors &connectors, float x, float y, float bottom_limit);
     void init_input_window_data(CutConnectors &connectors);
     void render_input_window_warning() const;

@@ -1060,6 +1060,68 @@ indexed_triangle_set its_make_torus(double r, double h, double fa)
     return mesh;
 }
 
+indexed_triangle_set its_make_revolved(const std::vector<Vec2d> &profile_rz, int sectors)
+{
+    indexed_triangle_set mesh;
+    const size_t n = profile_rz.size();
+    if (n < 3 || sectors < 3)
+        return mesh;
+
+    // Normalize the winding: we need the (r, z) loop counter-clockwise so the revolved
+    // triangles come out with outward normals.
+    std::vector<Vec2d> prof = profile_rz;
+    double area2 = 0.;
+    for (size_t i = 0; i < n; ++ i) {
+        const Vec2d &a = prof[i];
+        const Vec2d &b = prof[(i + 1) % n];
+        area2 += a.x() * b.y() - b.x() * a.y();
+    }
+    if (area2 < 0.)
+        std::reverse(prof.begin(), prof.end());
+
+    const double axis_eps = 1e-9;
+    std::vector<int>  base(n, 0);
+    std::vector<char> on_axis(n, 0);
+
+    mesh.vertices.reserve(n * size_t(sectors));
+    for (size_t i = 0; i < n; ++ i) {
+        const double r = prof[i].x();
+        const double z = prof[i].y();
+        on_axis[i] = r <= axis_eps ? 1 : 0;
+        base[i]    = int(mesh.vertices.size());
+        if (on_axis[i])
+            mesh.vertices.emplace_back(Vec3f(0.f, 0.f, float(z)));
+        else
+            for (int j = 0; j < sectors; ++ j) {
+                const double a = 2. * M_PI * double(j) / double(sectors);
+                mesh.vertices.emplace_back(Vec3d(r * std::cos(a), r * std::sin(a), z).cast<float>());
+            }
+    }
+
+    auto vid = [&base, &on_axis](size_t i, int j) { return on_axis[i] ? base[i] : base[i] + j; };
+
+    mesh.indices.reserve(2 * n * size_t(sectors));
+    for (size_t i = 0; i < n; ++ i) {
+        const size_t i2 = (i + 1) % n;
+        if (on_axis[i] && on_axis[i2])
+            // Segment lying on the axis of revolution: contributes no surface.
+            continue;
+        for (int j = 0; j < sectors; ++ j) {
+            const int j2 = (j + 1) % sectors;
+            const int a = vid(i,  j);
+            const int b = vid(i,  j2);
+            const int c = vid(i2, j2);
+            const int d = vid(i2, j);
+            if (!on_axis[i])
+                mesh.indices.emplace_back(Vec3i32(a, b, c));
+            if (!on_axis[i2])
+                mesh.indices.emplace_back(Vec3i32(a, c, d));
+        }
+    }
+
+    return mesh;
+}
+
 indexed_triangle_set its_make_cone(double r, double h, double fa)
 {
     indexed_triangle_set mesh;

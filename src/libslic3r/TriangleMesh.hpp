@@ -339,6 +339,12 @@ indexed_triangle_set    its_make_cylinder(double r, double h, double fa=(2*PI/18
 indexed_triangle_set    its_make_cone(double r, double h, double fa=(2*PI/180));
 indexed_triangle_set    its_make_frustum(double r, double h, double fa=(2*PI/180));
 indexed_triangle_set    its_make_torus(double r, double h, double fa);
+// Generic surface of revolution about the Z axis.
+// `profile_rz` is a CLOSED loop of (radius, z) points with radius >= 0, wound counter-clockwise
+// in the (r, z) half plane. Points with radius == 0 collapse onto the axis, so the same
+// generator produces ring/torus topology (no point on the axis) and sphere/lathe topology
+// (the loop closes along the axis). The result is watertight with outward normals.
+indexed_triangle_set    its_make_revolved(const std::vector<Vec2d> &profile_rz, int sectors);
 indexed_triangle_set    its_make_frustum_dowel(double r, double h, int sectorCount);
 indexed_triangle_set    its_make_pyramid(float base, float height);
 indexed_triangle_set    its_make_sphere(double radius, double fa);

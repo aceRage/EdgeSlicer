@@ -3,6 +3,8 @@
 #include "Geometry.hpp"
 #include "libslic3r.h"
 #include "Model.hpp"
+#include "FlexiJoint.hpp"
+#include "MeshBoolean.hpp"
 #include "TriangleMeshSlicer.hpp"
 #include "TriangleSelector.hpp"
 #include "ObjectID.hpp"
@@ -289,12 +291,187 @@ void Cut::finalize(const ModelObjectPtrs& objects)
 }
 
 
+// ---------------------------------------------------------------------------- flexi joints
+
+static bool is_unprocessed_flexi_volume(const ModelVolume* v)
+{
+    return !v->is_model_part() && v->cut_info.is_connector && !v->cut_info.is_processed &&
+           is_flexi_connector_type(v->cut_info.connector_type);
+}
+
+bool has_flexi_joint(const ModelObject* mo)
+{
+    if (!mo)
+        return false;
+    for (const ModelVolume* v : mo->volumes)
+        if (is_unprocessed_flexi_volume(v))
+            return true;
+    return false;
+}
+
+ModelVolume* add_flexi_joint_volume(ModelObject* mo, const CutConnector& connector, const std::string& name)
+{
+    using namespace Geometry;
+
+    indexed_triangle_set body;
+    for (const indexed_triangle_set& its : flexi_male_bodies(connector.flexi))
+        its_merge(body, its);
+
+    // modify_to_center_geometry = false: the flexi bodies are already positioned relative to
+    // the cut plane (they straddle z == 0), so re-centring them would move the joint.
+    ModelVolume* vol = mo->add_volume(TriangleMesh(std::move(body)), ModelVolumeType::NEGATIVE_VOLUME, false);
+    // The bodies are generated in millimetres already, so no scaling here: the transform only
+    // moves the joint onto the cut plane and spins it about the plane normal.
+    vol->set_transformation(translation_transform(connector.pos) * connector.rotation_m *
+                            rotation_transform(-connector.z_angle * Vec3d::UnitZ()));
+    vol->cut_info = ModelVolume::CutInfo(connector.attribs.type, connector.radius_tolerance, connector.height_tolerance);
+    vol->cut_info.flexi = connector.flexi;
+    vol->name = name;
+    return vol;
+}
+
+// Manifold first, mcut as the fallback - the same chain the Mesh Boolean gizmo uses.
+static bool flexi_boolean(TriangleMesh& a, const TriangleMesh& b, const std::string& op)
+{
+    std::vector<TriangleMesh> dst;
+    bool ok = MeshBoolean::mfd::make_boolean(a, b, dst, op);
+    if (!ok) {
+        BOOST_LOG_TRIVIAL(warning) << "Flexi joint: Manifold boolean " << op << " failed, falling back to mcut";
+        dst.clear();
+        try {
+            MeshBoolean::mcut::make_boolean(a, b, dst, op);
+        } catch (const std::exception& ex) {
+            BOOST_LOG_TRIVIAL(error) << "Flexi joint: mcut boolean " << op << " failed: " << ex.what();
+            return false;
+        }
+    }
+    if (dst.empty())
+        return false;
+    TriangleMesh out = dst.front();
+    for (size_t i = 1; i < dst.size(); ++ i)
+        out.merge(dst[i]);
+    if (out.empty())
+        return false;
+    a = std::move(out);
+    return true;
+}
+
+const ModelObjectPtrs& Cut::perform_with_flexi_joints()
+{
+    using namespace Geometry;
+
+    ModelObject* mo = m_model.objects.front();
+
+    BOOST_LOG_TRIVIAL(trace) << "Cut::perform_with_flexi_joints - start";
+
+    // The two halves must stay parts of ONE object or the joint is not print-in-place:
+    // this cut type forces keep-as-parts, keep-upper and keep-lower on regardless of the
+    // gizmo's checkboxes (they are disabled in the UI while a flexi joint is placed).
+    ModelObject* out{ nullptr };
+    mo->clone_for_cut(&out);
+
+    const auto           instance_matrix    = mo->instances[m_instance]->get_transformation().get_matrix_no_offset();
+    const Transformation cut_transformation = Transformation(m_cut_matrix);
+    const Transform3d    inverse_cut_matrix = cut_transformation.get_rotation_matrix().inverse() * translation_transform(-1. * cut_transformation.get_offset());
+
+    // Phase 1: exactly one joint per cut. Extra joints are ignored with a warning.
+    FlexiJointParams params;
+    Transform3d      joint_matrix = Transform3d::Identity();
+    ModelVolume*     first_solid  = nullptr;
+    int              joints       = 0;
+    for (ModelVolume* v : mo->volumes) {
+        if (is_unprocessed_flexi_volume(v)) {
+            if (++ joints == 1) {
+                params       = v->cut_info.flexi;
+                joint_matrix = inverse_cut_matrix * v->get_matrix();
+            }
+            v->cut_info.set_processed();
+        } else if (v->is_model_part() && !v->mesh().empty() && first_solid == nullptr)
+            first_solid = v;
+    }
+    if (joints > 1)
+        BOOST_LOG_TRIVIAL(warning) << "Flexi joint: " << joints << " joints placed, only the first is applied (phase 1)";
+    if (first_solid == nullptr) {
+        m_model = Model();
+        m_model.objects.push_back(out);
+        return m_model.objects;
+    }
+
+    const double clearance = double(params.clearance);
+
+    // Merge every solid part of the object into one mesh in the cut frame. Phase 1 limitation:
+    // an object made of several model parts comes out of a flexi cut as two parts, not as
+    // (parts x 2); per-volume config follows the first solid volume.
+    TriangleMesh solid;
+    for (ModelVolume* v : mo->volumes) {
+        if (!v->is_model_part() || v->mesh().empty())
+            continue;
+        TriangleMesh m(v->mesh());
+        m.transform(inverse_cut_matrix * instance_matrix * v->get_matrix(), true);
+        solid.merge(m);
+    }
+
+    // The male half is everything below the plane; the female half starts one clearance
+    // higher, which is what opens the gap between the two flat mating faces.
+    indexed_triangle_set upper_its, lower_its;
+    cut_mesh(solid.its, 0.f, nullptr, &lower_its);
+    cut_mesh(solid.its, float(clearance), &upper_its, nullptr);
+
+    TriangleMesh lower_mesh(std::move(lower_its));
+    TriangleMesh upper_mesh(std::move(upper_its));
+
+    bool boolean_ok = !lower_mesh.empty() && !upper_mesh.empty();
+
+    if (boolean_ok)
+        for (const indexed_triangle_set& its : flexi_male_bodies(params)) {
+            TriangleMesh body(its);
+            body.transform(joint_matrix);
+            if (!flexi_boolean(lower_mesh, body, "UNION")) { boolean_ok = false; break; }
+        }
+    if (boolean_ok)
+        for (const indexed_triangle_set& its : flexi_female_cavities(params)) {
+            TriangleMesh cavity(its);
+            cavity.transform(joint_matrix);
+            if (!flexi_boolean(upper_mesh, cavity, "A_NOT_B")) { boolean_ok = false; break; }
+        }
+
+    if (!boolean_ok)
+        BOOST_LOG_TRIVIAL(error) << "Flexi joint: boolean failed, the cut falls back to two plain halves";
+
+    add_cut_volume(upper_mesh, out, first_solid, m_cut_matrix, "_A");
+    if (!lower_mesh.empty()) {
+        add_cut_volume(lower_mesh, out, first_solid, m_cut_matrix, "_B");
+        out->volumes.back()->cut_info.is_from_upper = false;
+    }
+    // Keep the modifiers, drop the (now consumed) connector volumes.
+    for (ModelVolume* v : mo->volumes)
+        if (!v->is_model_part() && !v->cut_info.is_connector) {
+            ModelVolume* copy = out->add_volume(*v);
+            copy->set_transformation(Transformation(instance_matrix * v->get_matrix()));
+        }
+
+    ModelObjectPtrs cut_object_ptrs;
+    if (!out->volumes.empty()) {
+        reset_instance_transformation(out, m_instance, m_cut_matrix);
+        cut_object_ptrs.push_back(out);
+    } else
+        m_model.objects.push_back(out);
+
+    BOOST_LOG_TRIVIAL(trace) << "Cut::perform_with_flexi_joints - end";
+
+    finalize(cut_object_ptrs);
+    return m_model.objects;
+}
+
 const ModelObjectPtrs& Cut::perform_with_plane()
 {
     if (!m_attributes.has(ModelObjectCutAttribute::KeepUpper) && !m_attributes.has(ModelObjectCutAttribute::KeepLower)) {
         m_model.clear_objects();
         return m_model.objects;
     }
+
+    if (!m_model.objects.empty() && has_flexi_joint(m_model.objects.front()))
+        return perform_with_flexi_joints();
 
     ModelObject* mo = m_model.objects.front();
 
