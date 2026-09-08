@@ -3885,6 +3885,11 @@ void Sidebar::update_all_preset_comboboxes(bool reload_printer_view)
                                                              MainFrame::PrintSelectType::eSendGcode;
             p_mainframe->set_print_button_to_default(print_btn_type);
 
+            // The device picker belongs to the print-host row only: coming back from an Elegoo to a
+            // U1 must not leave the Elegoo's devices listed above the Snapmaker page.
+            if (p_mainframe->m_printer_view)
+                p_mainframe->m_printer_view->set_devices(std::string(), {}, std::string());
+
             if (is_snapmaker_u1) {
 
                 auto        devices     = wxGetApp().app_config->get_devices();
