@@ -785,7 +785,7 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
 
     // ZAA: the three detail settings only matter once Z contouring is on.
     bool has_zaa = config->opt_bool("zaa_enabled");
-    for (auto el : {"zaa_minimize_perimeter_height", "zaa_min_z", "zaa_dont_alternate_fill_direction"})
+    for (auto el : {"zaa_minimize_perimeter_height", "zaa_min_z", "zaa_dont_alternate_fill_direction", "zaa_speed_scaling"})
         toggle_line(el, has_zaa);
 
     bool have_sequential_printing = (config->opt_enum<PrintSequence>("print_sequence") == PrintSequence::ByObject);

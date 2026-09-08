@@ -454,3 +454,180 @@ TEST_CASE("ZAA: a 10 degree ramp gets monotonically increasing Z deltas", "[Cont
     // It is a real contour, not a flat run of zeros.
     REQUIRE(moved > 10);
 }
+
+
+TEST_CASE("ZAA: constant-volumetric-flow speed scaling", "[ContourZ]")
+{
+    // The rule: F_seg = F_role * h_nominal / h_seg, clamped to [floor, F_role], then to the
+    // filament's volumetric cap. See docs/superpowers/specs/2026-09-07-z-contouring-port.md,
+    // "Constant-flow speed scaling".
+    const double h_nominal = 0.20;
+    const double F_role    = 6000.;   // 100 mm/s, in mm/min
+    const double no_cap    = 0.;
+    const double no_mm3    = 0.;
+
+    SECTION("a thin segment is slowed in proportion to its height")
+    {
+        // Half the nominal height -> half the feed rate. The segment's E was already scaled by
+        // the same ratio, so the extruder's melt rate and the time the Z axis gets per step both
+        // return to what the role was tuned for at the nominal layer height.
+        const double h_seg = 0.10;
+        const double f     = contour_z_segment_feedrate(F_role, h_nominal, h_seg, no_cap, no_mm3);
+        REQUIRE(f == Approx(3000.).margin(1e-6));
+        REQUIRE(f / h_seg == Approx(F_role / h_nominal).margin(1e-6));
+
+        // The thinnest bead ZAA can produce at the 0.05 default: a quarter of the role's speed.
+        REQUIRE(contour_z_segment_feedrate(F_role, h_nominal, 0.05, no_cap, no_mm3) ==
+                Approx(1500.).margin(1e-6));
+    }
+
+    SECTION("a full-height segment is untouched")
+    {
+        REQUIRE(contour_z_segment_feedrate(F_role, h_nominal, h_nominal, no_cap, no_mm3) ==
+                Approx(F_role).margin(1e-9));
+    }
+
+    SECTION("a thick segment never speeds up past the role's F")
+    {
+        // A contoured top surface can sit up to +zaa_min_z proud, i.e. a 0.25 mm bead on a 0.20
+        // mm layer, and the ratio would ask for F * 1.25. The role speed is a deliberate ceiling,
+        // so contoured moves are only ever slowed.
+        REQUIRE(contour_z_segment_feedrate(F_role, h_nominal, 0.25, no_cap, no_mm3) ==
+                Approx(F_role).margin(1e-9));
+        for (double h_seg = 0.02; h_seg <= 0.40; h_seg += 0.005)
+            REQUIRE(contour_z_segment_feedrate(F_role, h_nominal, h_seg, no_cap, no_mm3) <= F_role + 1e-9);
+    }
+
+    SECTION("the floor stops a very thin segment becoming a dwell")
+    {
+        // At 100 mm/s the 0.05 mm minimum bead asks for 25 mm/s, comfortably above the floor.
+        REQUIRE(contour_z_segment_feedrate(F_role, h_nominal, 0.05, no_cap, no_mm3) ==
+                Approx(1500.).margin(1e-6));
+        // But a role already slowed to 30 mm/s by an overhang would ask for 7.5 mm/s there, and
+        // the floor holds it at 10.
+        const double f = contour_z_segment_feedrate(30. * 60., h_nominal, 0.05, no_cap, no_mm3);
+        REQUIRE(f == Approx(ZAA_MIN_SPEED_MM_S * 60.).margin(1e-6));
+        // And nothing, at any height, is ever emitted below the floor.
+        for (double h_seg = 0.005; h_seg <= 0.30; h_seg += 0.005)
+            REQUIRE(contour_z_segment_feedrate(F_role, h_nominal, h_seg, no_cap, no_mm3) >=
+                    ZAA_MIN_SPEED_MM_S * 60. - 1e-9);
+    }
+
+    SECTION("the floor never raises F above a role that is already slower than the floor")
+    {
+        // Ironing at 5 mm/s: the floor must not speed it up to 10.
+        const double slow = 5. * 60.;
+        REQUIRE(contour_z_segment_feedrate(slow, h_nominal, 0.05, no_cap, no_mm3) == Approx(slow).margin(1e-9));
+    }
+
+    SECTION("the volumetric cap wins over both the scaling and the floor")
+    {
+        // A 0.5 mm3/s filament with a 0.05 mm3/mm segment can only run at 10 mm/s = 600 mm/min.
+        const double max_vol        = 0.5;   // mm3/s
+        const double mm3_per_mm_seg = 0.05;  // mm3/mm
+        const double f = contour_z_segment_feedrate(F_role, h_nominal, h_nominal, max_vol, mm3_per_mm_seg);
+        REQUIRE(f == Approx(600.).margin(1e-6));
+        REQUIRE(f * mm3_per_mm_seg / 60. <= max_vol + 1e-9);
+        // And it still wins where the floor would otherwise have raised F.
+        const double tiny_cap = 0.05;
+        const double f2 = contour_z_segment_feedrate(F_role, h_nominal, 0.02, tiny_cap, mm3_per_mm_seg);
+        REQUIRE(f2 * mm3_per_mm_seg / 60. <= tiny_cap + 1e-9);
+        REQUIRE(f2 < ZAA_MIN_SPEED_MM_S * 60.);
+    }
+
+    SECTION("degenerate inputs are pass-throughs, never zero or negative")
+    {
+        REQUIRE(contour_z_segment_feedrate(F_role, 0., 0.1, no_cap, no_mm3) == Approx(F_role));
+        REQUIRE(contour_z_segment_feedrate(F_role, h_nominal, 0., no_cap, no_mm3) == Approx(F_role));
+        REQUIRE(contour_z_segment_feedrate(F_role, h_nominal, -0.1, no_cap, no_mm3) == Approx(F_role));
+        REQUIRE(contour_z_segment_feedrate(0., h_nominal, 0.1, no_cap, no_mm3) == Approx(0.));
+    }
+
+    SECTION("the rule is monotone non-decreasing in the local height")
+    {
+        // A thinner bead is never run faster than a thicker one, so the emitted F profile
+        // follows the contour rather than oscillating against it.
+        double prev = -1.;
+        for (double h_seg = 0.01; h_seg <= 0.40 + 1e-9; h_seg += 0.005) {
+            const double f = contour_z_segment_feedrate(F_role, h_nominal, h_seg, no_cap, no_mm3);
+            REQUIRE(f >= prev - 1e-9);
+            prev = f;
+        }
+    }
+}
+
+TEST_CASE("ZAA: the speed hysteresis rule", "[ContourZ]")
+{
+    // Consecutive contoured segments whose local height is within 5 % of the height that set the
+    // F in force keep that F, so a smoothed profile that changes by a micron per 0.1 mm sample
+    // does not emit an F word on every move.
+    const double h_ref = 0.20;
+
+    SECTION("inside the band keeps the F, outside re-emits")
+    {
+        REQUIRE(contour_z_speed_within_hysteresis(h_ref, 0.200));
+        REQUIRE(contour_z_speed_within_hysteresis(h_ref, 0.205));   // +2.5 %
+        REQUIRE(contour_z_speed_within_hysteresis(h_ref, 0.195));   // -2.5 %
+        // The boundary itself (+-exactly 5 %) is not pinned: 0.190 and 0.210 sit on it and
+        // binary floating point can land either side. Just inside and just outside are.
+        REQUIRE(contour_z_speed_within_hysteresis(h_ref, 0.2099));
+        REQUIRE(contour_z_speed_within_hysteresis(h_ref, 0.1901));
+        REQUIRE_FALSE(contour_z_speed_within_hysteresis(h_ref, 0.211));
+        REQUIRE_FALSE(contour_z_speed_within_hysteresis(h_ref, 0.189));
+        REQUIRE_FALSE(contour_z_speed_within_hysteresis(h_ref, 0.100));
+    }
+
+    SECTION("no F in force yet always re-emits")
+    {
+        REQUIRE_FALSE(contour_z_speed_within_hysteresis(0., 0.20));
+        REQUIRE_FALSE(contour_z_speed_within_hysteresis(-1., 0.20));
+        REQUIRE_FALSE(contour_z_speed_within_hysteresis(h_ref, 0.));
+    }
+
+    SECTION("the flow error the hysteresis can introduce is bounded by the band")
+    {
+        // Whenever a segment is allowed to keep the previous F, the flow it actually runs at
+        // differs from nominal by exactly h_seg / h_ref, which the band bounds at 5 %.
+        const double F_role = 6000.;
+        const double h_nom  = 0.20;
+        for (double h_seg = 0.05; h_seg <= 0.30; h_seg += 0.0011) {
+            if (!contour_z_speed_within_hysteresis(h_ref, h_seg))
+                continue;
+            // The F in force is the one h_ref asked for.
+            const double f_in_force = contour_z_segment_feedrate(F_role, h_nom, h_ref, 0., 0.);
+            const double flow_kept  = f_in_force * h_seg;
+            const double flow_exact = contour_z_segment_feedrate(F_role, h_nom, h_seg, 0., 0.) * h_seg;
+            REQUIRE(std::abs(flow_kept - flow_exact) <= 0.05 * flow_exact + 1e-6);
+        }
+    }
+
+    SECTION("a monotone profile inside one band emits exactly one F")
+    {
+        // Walk a slowly drifting profile the way the emitter does and count the emissions.
+        double h_in_force = 0.;
+        int    emissions  = 0;
+        for (int i = 0; i < 40; ++i) {
+            const double h_seg = 0.200 - 0.0001 * i;   // 200 um down to 196.1 um, all within 5 %
+            if (!contour_z_speed_within_hysteresis(h_in_force, h_seg)) {
+                ++emissions;
+                h_in_force = h_seg;
+            }
+        }
+        REQUIRE(emissions == 1);
+
+        // A real ramp that leaves the band does re-emit, and only when it has to.
+        h_in_force = 0.;
+        emissions  = 0;
+        for (int i = 0; i < 40; ++i) {
+            const double h_seg = 0.200 - 0.004 * i;    // 200 um down to 44 um
+            if (h_seg <= 0.)
+                break;
+            if (!contour_z_speed_within_hysteresis(h_in_force, h_seg)) {
+                ++emissions;
+                h_in_force = h_seg;
+            }
+        }
+        REQUIRE(emissions > 1);
+        REQUIRE(emissions < 40);
+    }
+}

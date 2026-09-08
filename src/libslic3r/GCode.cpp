@@ -8459,6 +8459,47 @@ std::string GCode::_extrude(const ExtrusionPath& path, std::string description, 
 
     double F = speed * 60; // convert mm/sec to mm/min
 
+    // ZAA (zaa_speed_scaling): emit a new feed rate for the contoured segments that follow.
+    //
+    // CoolingBuffer models one extrusion as ONE adjustable speed: the first
+    // ";_EXTRUDE_SET_SPEED" line of a path becomes the block's speed modifier and every
+    // movement line after it is folded into that modifier and then dropped
+    // (CoolingBuffer.cpp ~470-491, `line.type = 0; // Don't store this line`). It also asserts
+    // that no G1 inside such a block carries its own F (~476), so writing F into the movement
+    // line is not an option either - and in Release that assert is gone and the line simply
+    // escapes the layer-time slowdown: measured on the dome, contoured outer walls kept running
+    // at 9124 mm/min where cooling had slowed the rest of the layer to 2841.
+    //
+    // So a ZAA speed change closes the current cooling block and opens a new one. Each block is
+    // then independently adjustable, which is what lets the layer-time slowdown still reach
+    // these moves. The cost is two extra lines per speed change, which is why the 5 % hysteresis
+    // in ContourZ.hpp matters: it holds the changes to 2-3 % of contoured segments on a dome.
+    const auto zaa_emit_speed = [this, &gcode](double f, const std::string &cooling_comment) {
+        if (m_enable_cooling_markers)
+            gcode += ";_EXTRUDE_END\n";
+        gcode += m_writer.set_speed(f, "", cooling_comment);
+    };
+
+    // ZAA (zaa_speed_scaling): hold the volumetric flow of a contoured segment at the value this
+    // role would have had at the nominal layer height, by scaling F by the inverse height ratio.
+    //
+    // The band is a full layer high, so at 0.2 mm layers a contoured bead swings from the nominal
+    // 0.20 mm down to zaa_min_z (0.05 mm) at an unchanged F: the thin end is starved of material
+    // and the Z axis is working hardest exactly where the bead is thinnest, which is what the
+    // owner's 2026-09-08 print showed as a rougher surface at 0.2 mm than at thinner layers.
+    //
+    // The reference F is the one this path was about to run at, so the scaling composes with -
+    // rather than overrides - every dynamic slowdown the fork already applies: the overhang
+    // grading and curled-perimeter slowdown in new_points below (which sets its own per-point F,
+    // scaled here in turn), small-perimeter / resonance avoidance, the initial-layer ramp, and the
+    // filament_max_volumetric_speed cap that `speed` has already been clamped to.
+    const bool   zaa_speed_scaling = zaa_contoured && m_config.zaa_speed_scaling.value;
+    const double zaa_h_nominal     = double(path.height);
+    const double zaa_max_vol       = EXTRUDER_CONFIG(filament_max_volumetric_speed);
+    // The local height that set the F currently in force, mm; <= 0 means "no scaled F emitted yet
+    // on this path", which forces the first contoured segment to emit one.
+    double       zaa_speed_h_ref   = 0.;
+
     // Orca: Dynamic PA
     // If adaptive PA is enabled, by default evaluate PA on all extrusion moves
     bool is_pa_calib = m_curr_print->calib_mode() == CalibMode::Calib_PA_Line ||
@@ -8728,8 +8769,32 @@ std::string GCode::_extrude(const ExtrusionPath& path, std::string description, 
                         // case on the wedge, alternating sign, which is a width variation the eye
                         // reads as fuzz. The trapezoid rule is the exact volume for a linear ramp.
                         const double z_prev = double(path.z_contour->z_at(line.a));
-                        const double e      = dE * contour_z_extrusion_ratio(path.role() == erIroning, double(path.height),
-                                                                             0.5 * (z_prev + z_diff));
+                        const double z_mean = 0.5 * (z_prev + z_diff);
+                        const double ratio  = contour_z_extrusion_ratio(path.role() == erIroning, double(path.height), z_mean);
+                        const double e      = dE * ratio;
+                        // ZAA speed scaling. The segment's local height is exactly the height the
+                        // E above was derived from (the trapezoid mean), so scaling F by the same
+                        // ratio holds the extruder's melt rate at what the role was tuned for.
+                        //
+                        // It is emitted as its own `G1 F...` carrying the cooling marker, NOT as
+                        // an F word inside the movement G1. CoolingBuffer only ever slows lines
+                        // that sit inside a ";_EXTRUDE_SET_SPEED" block, and it asserts that no
+                        // G1 inside such a block carries its own F (CoolingBuffer.cpp ~476). An
+                        // F written into the movement line is therefore invisible to the layer-
+                        // time slowdown: measured on the dome, contoured outer walls kept running
+                        // at 9124 mm/min where cooling had slowed the rest of the layer to 2841.
+                        // A separate F line costs one G-code line per speed change - and the 5 %
+                        // hysteresis below is what keeps that from being one per move.
+                        if (zaa_speed_scaling) {
+                            const double h_seg = zaa_h_nominal + z_mean;
+                            if (!contour_z_speed_within_hysteresis(zaa_speed_h_ref, h_seg)) {
+                                const double zaa_F = contour_z_segment_feedrate(F, zaa_h_nominal, h_seg,
+                                                                               zaa_max_vol, _mm3_per_mm * ratio);
+                                if (zaa_F > 0. && std::abs(zaa_F - m_writer.get_current_speed()) > 1e-6)
+                                    zaa_emit_speed(zaa_F, comment);
+                                zaa_speed_h_ref = h_seg;
+                            }
+                        }
                         gcode += m_writer.extrude_to_xyz(Vec3d(dest2d.x(), dest2d.y(), zaa_base_z + z_diff), e,
                                                          GCodeWriter::full_gcode_comment ? tempDescription : "",
                                                          path.is_force_no_extrusion());
@@ -8898,9 +8963,12 @@ std::string GCode::_extrude(const ExtrusionPath& path, std::string description, 
             if ((std::abs(last_set_speed - new_speed) > 60)) {
                 gcode += m_writer.set_speed(new_speed, "", comment);
                 last_set_speed = new_speed;
+                // ZAA: the base feed rate just changed, so any scaled F in force is stale.
+                zaa_speed_h_ref = 0.;
             } else if ((std::abs(F - new_speed) <= 60)) {
                 gcode += m_writer.set_speed(F, "", comment);
                 last_set_speed = F;
+                zaa_speed_h_ref = 0.;
             }
             auto dE = e_per_mm * line_length;
             if (_needSAFC(path)) {
@@ -8915,8 +8983,24 @@ std::string GCode::_extrude(const ExtrusionPath& path, std::string description, 
                 // ZAA: see the constant-speed branch above, including the trapezoid height.
                 const double z_diff = double(path.z_contour->z_at(processed_point.p));
                 const double z_prev = double(path.z_contour->z_at(pre_processed_point.p));
-                const double e      = dE * contour_z_extrusion_ratio(path.role() == erIroning, double(path.height),
-                                                                     0.5 * (z_prev + z_diff));
+                const double z_mean = 0.5 * (z_prev + z_diff);
+                const double ratio  = contour_z_extrusion_ratio(path.role() == erIroning, double(path.height), z_mean);
+                const double e      = dE * ratio;
+                // ZAA speed scaling on top of the per-point dynamic speed: the reference is
+                // last_set_speed, i.e. the F the overhang / curled-perimeter estimator just put in
+                // force for this segment, so the two compose and the slower of the two wins.
+                // Emitted as its own F line for the cooling reason documented in the
+                // constant-speed branch above.
+                if (zaa_speed_scaling) {
+                    const double h_seg = zaa_h_nominal + z_mean;
+                    if (!contour_z_speed_within_hysteresis(zaa_speed_h_ref, h_seg)) {
+                        const double zaa_F = contour_z_segment_feedrate(last_set_speed, zaa_h_nominal, h_seg,
+                                                                       zaa_max_vol, _mm3_per_mm * ratio);
+                        if (zaa_F > 0. && std::abs(zaa_F - m_writer.get_current_speed()) > 1e-6)
+                            zaa_emit_speed(zaa_F, comment);
+                        zaa_speed_h_ref = h_seg;
+                    }
+                }
                 gcode += m_writer.extrude_to_xyz(Vec3d(p.x(), p.y(), zaa_base_z + z_diff), e,
                                                  GCodeWriter::full_gcode_comment ? tempDescription : "");
             } else if (sloped == nullptr) {
