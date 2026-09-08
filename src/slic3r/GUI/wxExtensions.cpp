@@ -2,10 +2,15 @@
 
 #include <stdexcept>
 #include <cmath>
+#include <algorithm>
+#include <cstring>
+#include <mutex>
+#include <set>
 
 #include <wx/sizer.h>
 
 #include <boost/algorithm/string/replace.hpp>
+#include <boost/log/trivial.hpp>
 
 #include "GUI.hpp"
 #include "GUI_App.hpp"
@@ -427,6 +432,35 @@ wxBitmap create_menu_bitmap(const std::string& bmp_name)
 }
 
 // win is used to get a correct em_unit value
+// Ultra: a bitmap that is missing from resources/images must never take the UI down.
+// Historically both create_scaled_bitmap() overloads threw Slic3r::RuntimeError("Could not
+// load bitmap: ..."), which surfaced as a modal error dialog (and, on a path with no handler,
+// killed the frame) - a single absent icon could make a whole tab unreachable. Now the miss is
+// logged once per name and a transparent bitmap of the requested size is returned instead, so
+// the control lays out with a blank icon. Debug builds still assert so a missing asset is
+// caught during development.
+static wxBitmap missing_bitmap_placeholder(const std::string& bmp_name, unsigned int width, unsigned int height)
+{
+    static std::set<std::string>  reported;
+    static std::mutex             reported_mutex;
+    {
+        std::lock_guard<std::mutex> lock(reported_mutex);
+        if (reported.insert(bmp_name).second)
+            BOOST_LOG_TRIVIAL(warning) << "Could not load bitmap: " << bmp_name
+                                       << " - using a transparent placeholder";
+    }
+    assert(! "Could not load bitmap - missing file in resources/images");
+
+    // Never hand back an invalid wxBitmap: callers do SetBitmap()/DrawBitmap() without an
+    // IsOk() check and wxWidgets asserts (or draws nothing at all) on an invalid one.
+    const int w = std::max<int>(1, (int) width);
+    const int h = std::max<int>(1, (int) height);
+    wxImage image(w, h, true /* clear to black */);
+    image.InitAlpha();
+    memset(image.GetAlpha(), 0, (size_t) w * (size_t) h);
+    return wxBitmap(std::move(image));
+}
+
 // It's important for bitmaps of dialogs.
 // if win == nullptr, em_unit value of MainFrame will be used
 wxBitmap create_scaled_bitmap(  const std::string& bmp_name_in, 
@@ -462,8 +496,8 @@ wxBitmap create_scaled_bitmap(  const std::string& bmp_name_in,
     }
 
     if (bmp == nullptr) {
-        // Neither SVG nor PNG has been found, raise error
-        throw Slic3r::RuntimeError("Could not load bitmap: " + bmp_name);
+        // Neither SVG nor PNG has been found - warn and fall back to a blank icon.
+        return missing_bitmap_placeholder(bmp_name, width == 0 ? height : width, height);
     }
 
     return *bmp;
@@ -481,8 +515,8 @@ wxBitmap create_scaled_bitmap2(const std::string& bmp_name_in, Slic3r::GUI::Bitm
 
     wxBitmap* bmp = cache.load_svg2(bmp_name, width, height, grayscale, false, array_new_color, resize ? em_unit(win) * 0.1f : 0.f);
     if (bmp == nullptr) {
-        // No SVG found
-        throw Slic3r::RuntimeError("Could not load bitmap: " + bmp_name);
+        // No SVG found - warn and fall back to a blank icon.
+        return missing_bitmap_placeholder(bmp_name, width == 0 ? height : width, height);
     }
     return *bmp;
 }

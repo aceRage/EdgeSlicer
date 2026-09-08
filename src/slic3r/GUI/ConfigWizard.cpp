@@ -2367,6 +2367,20 @@ static std::string get_first_added_preset(const std::map<std::string, std::strin
     return *diff.begin();
 }
 
+// Ultra: BundleMap is an unordered_map, so iterating it directly makes the "first enabled
+// vendor wins" fallback below depend on hash-bucket order - the same fresh install could
+// pick a different vendor's printer on a different STL or with a different set of vendor
+// JSONs present. Walk the vendor ids in sorted order instead so the choice is reproducible.
+static std::vector<std::string> sorted_bundle_ids(const BundleMap& bundles)
+{
+    std::vector<std::string> ids;
+    ids.reserve(bundles.size());
+    for (const auto& bundle : bundles)
+        ids.emplace_back(bundle.first);
+    std::sort(ids.begin(), ids.end());
+    return ids;
+}
+
 bool ConfigWizard::priv::apply_config(AppConfig *app_config, PresetBundle *preset_bundle, const PresetUpdater *updater, bool& apply_keeped_changes)
 {
     wxString header, caption = _L("Configuration is edited in ConfigWizard");
@@ -2393,13 +2407,21 @@ bool ConfigWizard::priv::apply_config(AppConfig *app_config, PresetBundle *prese
         }
         return pt;
     };
-    // Prusa printers are considered first, then 3rd party.
-    if (preferred_pt = get_preferred_printer_technology("BBL", bundles.sm_bundle());
+    // Ultra: the in-house bundle is considered first, then 3rd party.
+    // The key must name the same vendor as the bundle that is passed alongside it: both
+    // helpers look the enabled-model set up in app_config under `bundle_name` and then
+    // intersect it with `bundle.vendor_profile->models`. This used to pass the literal
+    // "BBL" together with bundles.sm_bundle() (a rebrand slip), and because the Bambu and
+    // Snapmaker model-id namespaces are disjoint the intersection was always empty - the
+    // preferred-printer fast path was dead code and every wizard run fell through to the
+    // scan below.
+    if (preferred_pt = get_preferred_printer_technology(PresetBundle::SM_BUNDLE, bundles.sm_bundle());
         preferred_pt == ptAny || (preferred_pt == ptSLA && suppress_sla_printer)) {
-        for (const auto& bundle : bundles) {
+        for (const std::string& vendor_id : sorted_bundle_ids(bundles)) {
+            const Bundle& bundle = bundles.at(vendor_id);
             //BBS: set BBL as default
-            if (bundle.second.is_sm_bundle) { continue; }
-            if (PrinterTechnology pt = get_preferred_printer_technology(bundle.first, bundle.second); pt == ptAny)
+            if (bundle.is_sm_bundle) { continue; }
+            if (PrinterTechnology pt = get_preferred_printer_technology(vendor_id, bundle); pt == ptAny)
                 continue;
             else if (preferred_pt == ptAny)
                 preferred_pt = pt;
@@ -2515,12 +2537,13 @@ bool ConfigWizard::priv::apply_config(AppConfig *app_config, PresetBundle *prese
             variant.clear();
         return std::string();
     };
-    // Prusa printers are considered first, then 3rd party.
-    if (preferred_model = get_preferred_printer_model("BBL", bundles.sm_bundle(), preferred_variant);
+    // Ultra: same key/bundle pairing fix as for the printer technology above.
+    if (preferred_model = get_preferred_printer_model(PresetBundle::SM_BUNDLE, bundles.sm_bundle(), preferred_variant);
         preferred_model.empty()) {
-        for (const auto& bundle : bundles) {
-            if (bundle.second.is_sm_bundle) { continue; }
-            if (preferred_model = get_preferred_printer_model(bundle.first, bundle.second, preferred_variant);
+        for (const std::string& vendor_id : sorted_bundle_ids(bundles)) {
+            const Bundle& bundle = bundles.at(vendor_id);
+            if (bundle.is_sm_bundle) { continue; }
+            if (preferred_model = get_preferred_printer_model(vendor_id, bundle, preferred_variant);
                 !preferred_model.empty())
                     break;
         }
