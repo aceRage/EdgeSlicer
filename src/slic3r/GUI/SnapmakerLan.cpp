@@ -877,7 +877,7 @@ std::vector<int> auto_match(const std::vector<FileFilament>& filaments, const st
 
 // The macros for one mapping, without the start: mapping[i] is the toolhead that prints the file's
 // filament i, -1 for a filament the file does not use.
-std::string mapping_script(const std::vector<int>& mapping)
+std::string mapping_script(const std::vector<int>& mapping, bool unload_at_end)
 {
     std::string      script;
     std::vector<int> used; // every toolhead once, in the order the file first uses it
@@ -895,13 +895,23 @@ std::string mapping_script(const std::vector<int>& mapping)
     for (size_t i = 0; i < used.size(); ++i)
         script += (i ? "," : "") + std::to_string(used[i]);
     script += "\nSET_PRINT_PREFERENCES BED_LEVEL=0 FLOW_CALIBRATE=0 TIME_LAPSE_CAMERA=0";
+    // END_UNLOAD_FILAMENT is a per-toolhead list the firmware parses with ast.literal_eval, so it
+    // is a Python list literal with no spaces in it (a Klipper parameter value ends at a space).
+    // The firmware zeroes the whole array first, so the toolheads this job does not use are told
+    // "no" explicitly rather than inheriting whatever the last job left behind.
+    if (unload_at_end) {
+        script += " END_UNLOAD_FILAMENT=[";
+        for (int t = 0; t < TOOLHEAD_COUNT; ++t)
+            script += std::string(t ? "," : "") + (std::find(used.begin(), used.end(), t) != used.end() ? "1" : "0");
+        script += "]";
+    }
     return script;
 }
 
-bool start_print_mapped(const Device& d, const std::string& filename, const std::vector<int>& mapping, json& sent,
-                        std::string& error)
+bool start_print_mapped(const Device& d, const std::string& filename, const std::vector<int>& mapping,
+                        bool unload_at_end, json& sent, std::string& error)
 {
-    const std::string script = mapping_script(mapping);
+    const std::string script = mapping_script(mapping, unload_at_end);
     sent["mapping_script"]   = script;
     if (!script.empty() && !gcode_script(d, script, error)) {
         error = "the printer refused the toolhead mapping: " + error;

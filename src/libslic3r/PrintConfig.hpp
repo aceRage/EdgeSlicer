@@ -1328,6 +1328,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     //BBS
     ((ConfigOptionBool,                enable_arc_fitting))
     ((ConfigOptionString,              machine_end_gcode))
+    ((ConfigOptionBool,                unload_filaments_at_end))
     ((ConfigOptionStrings,             filament_end_gcode))
     ((ConfigOptionFloats,              filament_flow_ratio))
     ((ConfigOptionBools,               enable_pressure_advance))
@@ -2066,6 +2067,11 @@ private:
 
 bool is_XL_printer(const DynamicPrintConfig &cfg);
 bool is_XL_printer(const PrintConfig &cfg);
+
+// A Snapmaker tool changer (the U1 family): a Snapmaker with more than one toolhead, each with its
+// own nozzle - not an AMS-style single-extruder multi-material machine. Only this firmware knows
+// what to do with the end-of-print unload flag, so it is the only place the option is offered.
+bool is_snapmaker_toolchanger(const ConfigBase &cfg);
 
 Points get_bed_shape(const DynamicPrintConfig &cfg);
 Points get_bed_shape(const PrintConfig &cfg);

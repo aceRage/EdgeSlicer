@@ -8,6 +8,7 @@
 #include <set>
 #include <boost/algorithm/string/replace.hpp>
 #include <boost/algorithm/string/case_conv.hpp>
+#include <boost/algorithm/string/predicate.hpp>
 #include <boost/format.hpp>
 #include <boost/lexical_cast.hpp>
 #include <boost/log/trivial.hpp>
@@ -1809,6 +1810,20 @@ void PrintConfigDef::init_fff_params()
     def->height = 12;
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionString("M104 S0 ; turn off temperature\nG28 X0  ; home X axis\nM84     ; disable motors\n"));
+
+    // Snapmaker tool changers (U1): ask the printer to unload every filament this job used once
+    // the job is done. The flag does not live in the G-code - the printer's firmware refuses
+    // SET_PRINT_PREFERENCES / SET_PRINT_TASK_PARAMETERS while print_stats.state is "printing" - so
+    // it travels as a preset value the send path turns into END_UNLOAD_FILAMENT before the start.
+    def = this->add("unload_filaments_at_end", coBool);
+    def->label = L("Unload filaments at end of print");
+    def->tooltip = L("Ask the printer to unload the filaments this print used once it has finished "
+                     "(Snapmaker tool changers only). The printer does the unloading itself, at the "
+                     "end of its own PRINT_END routine, and skips any toolhead holding a flexible "
+                     "filament. This is sent with the print, so it only applies to prints started "
+                     "from this slicer.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
 
     def             = this->add("printing_by_object_gcode", coString);
     def->label      = L("Between Object G-code");
@@ -9941,6 +9956,20 @@ bool is_XL_printer(const DynamicPrintConfig &cfg)
 bool is_XL_printer(const PrintConfig &cfg)
 {
     return is_XL_printer(cfg.printer_notes.value);
+}
+
+bool is_snapmaker_toolchanger(const ConfigBase &cfg)
+{
+    const ConfigOptionString *model = cfg.option<ConfigOptionString>("printer_model");
+    if (model == nullptr || !boost::algorithm::icontains(model->value, "Snapmaker"))
+        return false;
+    const ConfigOptionFloats *nozzles = cfg.option<ConfigOptionFloats>("nozzle_diameter");
+    if (nozzles == nullptr || nozzles->values.size() < 2)
+        return false;
+    // An AMS / single-nozzle multi-material machine has one physical toolhead, so there is nothing
+    // per-toolhead to unload.
+    const ConfigOptionBool *semm = cfg.option<ConfigOptionBool>("single_extruder_multi_material");
+    return semm == nullptr || !semm->value;
 }
 } // namespace Slic3r
 

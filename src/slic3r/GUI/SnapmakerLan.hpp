@@ -121,14 +121,21 @@ struct FileFilament
 // Returns one toolhead per filament (-1 for a filament the file does not use).
 std::vector<int> auto_match(const std::vector<FileFilament>& filaments, const std::vector<Toolhead>& heads);
 
+// How many physical toolheads the print_task_config arrays hold on this printer family (the U1's
+// firmware PHYSICAL_EXTRUDER_NUM). The firmware clamps a longer list and zeroes what it is not
+// given, so sending exactly this many flags is both safe and complete.
+constexpr int TOOLHEAD_COUNT = 4;
+
 // The macros for one mapping, without the start (what a dry run reports).
-std::string mapping_script(const std::vector<int>& mapping);
+// `unload_at_end` adds END_UNLOAD_FILAMENT=[..] to SET_PRINT_PREFERENCES: a 1 for every toolhead
+// this print uses, so the firmware's PRINT_END unloads them once the job is done.
+std::string mapping_script(const std::vector<int>& mapping, bool unload_at_end = false);
 
 // Start `filename` with that mapping: the SET_PRINT_EXTRUDER_MAP / SET_PRINT_USED_EXTRUDERS /
 // SET_PRINT_PREFERENCES macros, then SDCARD_PRINT_FILE, each a POST /printer/gcode/script.
 // `sent` receives the scripts. mapping[i] = the toolhead for the file's filament i.
 bool start_print_mapped(const Device& d, const std::string& filename, const std::vector<int>& mapping,
-                        nlohmann::json& sent, std::string& error);
+                        bool unload_at_end, nlohmann::json& sent, std::string& error);
 
 std::string base_url(const Device& d);
 

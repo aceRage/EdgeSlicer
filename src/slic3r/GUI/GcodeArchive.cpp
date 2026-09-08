@@ -267,6 +267,7 @@ static json meta_json(const Meta& m)
     if (m.estimated_time_s > 0)     j["estimated_time_s"] = m.estimated_time_s;
     if (m.estimated_weight_g > 0.0) j["estimated_weight_g"] = m.estimated_weight_g;
     if (!m.mapping.empty())         j["mapping"] = m.mapping;
+    if (m.unload_at_end)            j["unload_at_end"] = true;
     j["spoolman_deduct"] = m.spoolman_deduct;
     return j;
 }
