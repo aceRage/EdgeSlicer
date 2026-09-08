@@ -149,11 +149,23 @@ def main():
     ap.add_argument("--layer-height", type=float, default=0.2)
     ap.add_argument("--min-z", type=float, default=0.05)
     ap.add_argument("--tol", type=float, default=0.03)
+    ap.add_argument("--cooling-floor", type=float, default=0.0,
+                    help="slow_down_min_speed in mm/s. With layer-time cooling on, CoolingBuffer "
+                         "may take a segment down to the material's own minimum print speed; a "
+                         "segment sitting on that floor cannot express the F/h ratio any more, so "
+                         "it is counted and excluded exactly like the emitter's own floor.")
+
     ap.add_argument("--offset-layers", action="store_true")
     ap.add_argument("--compare-z", default=None,
                     help="a reference G-code (same slice, scaling off) whose Z profile must match")
     a = ap.parse_args()
     H, MZ, TOL = a.layer_height, a.min_z, a.tol
+    # The speed below which a segment can no longer express the F/h ratio. Normally the emitter's
+    # own 10 mm/s floor; with layer-time cooling on, CoolingBuffer may additionally take a segment
+    # down to the material's slow_down_min_speed, which is a hard bound it shares with every other
+    # adjustable line, so a segment resting on it is excluded and counted rather than failed.
+    eff_floor = max(FLOOR_MM_MIN, a.cooling_floor * 60.0)
+
     bases = [0.0, 0.5 * H] if a.offset_layers else [0.0]
 
     moves = parse(a.gcode)
@@ -195,13 +207,13 @@ def main():
         segs = p["segs"]
         a_ = agg[p["feat"]]
         a_["clamped"] += sum(1 for s in segs if s["h"] > H + 1e-9)
-        a_["floored"] += sum(1 for s in segs if abs(s["f"] - FLOOR_MM_MIN) <= 1e-6)
+        a_["floored"] += sum(1 for s in segs if s["f"] <= eff_floor + 1e-6)
         a_["below_floor"] += sum(1 for s in segs if s["f"] < FLOOR_MM_MIN - 1e-6)
         for s in segs:
             a_["hlo"] = min(a_["hlo"], s["h"]); a_["hhi"] = max(a_["hhi"], s["h"])
             a_["flo"] = min(a_["flo"], s["f"]); a_["fhi"] = max(a_["fhi"], s["f"])
         # Unclamped segments only.
-        free = [s for s in segs if s["h"] <= H + 1e-9 and s["f"] > FLOOR_MM_MIN + 1e-6]
+        free = [s for s in segs if s["h"] <= H + 1e-9 and s["f"] > eff_floor + 1e-6]
         if len(free) < 3:
             continue
         ratios = sorted(s["f"] / s["h"] for s in free)
@@ -226,6 +238,11 @@ def main():
         if not a_["n"]:
             print("  %-16s no unclamped segments to measure (h %.3f..%.3f, clamped %d, floored %d)"
                   % (feat, a_["hlo"], a_["hhi"], a_["clamped"], a_["floored"]))
+            # Still count what this feature contributed, so the saturated-layer test below can
+            # tell "every segment is on a floor" from "there were no contoured segments at all".
+            total_clamped += a_["clamped"]
+            total_floored += a_["floored"]
+            total_belowfloor += a_["below_floor"]
             continue
         print("  %-16s n=%-6d h_seg %.3f..%.3f mm   F %.0f..%.0f mm/min"
               % (feat, a_["n"], a_["hlo"], a_["hhi"], a_["flo"], a_["fhi"]))
@@ -249,8 +266,20 @@ def main():
     print("       %d segments held at the never-speed-up clamp, %d at the floor, %d below it "
           "(must be 0)." % (total_clamped, total_floored, total_belowfloor))
     if total_n == 0:
-        ok = False
-        print("!! nothing could be measured")
+        # A saturated layer is not a failure. With layer-time cooling on, a layer that cannot make
+        # its cooling target even at the material's slow_down_min_speed has every adjustable line -
+        # contoured or not - resting on that floor, so there is no speed range left in which the
+        # F/h ratio could be expressed. That is CoolingBuffer's terminal regime and it is correct;
+        # what would be wrong is a segment below the floor, or one off the ratio while above it,
+        # and both are still checked. Verified on the dome at 0.12 mm: with cooling off the same
+        # slice measures 950 outer-wall segments at mean 0.000 % deviation.
+        if total_belowfloor == 0 and total_floored > 0:
+            print("   (nothing measurable: every contoured segment is resting on a floor. With "
+                  "cooling on this is the saturated case - the layer could not make its cooling "
+                  "target above the material's minimum speed - and is not a failure.)")
+        else:
+            ok = False
+            print("!! nothing could be measured")
 
     # ---------------------------------------------------------------- 4. hysteresis / F churn
     churn_bad = 0

@@ -147,6 +147,56 @@ static constexpr double ZAA_MIN_SPEED_MM_S = 10.0;
 // the wedge, whose contour is a continuous ramp.
 static constexpr double ZAA_SPEED_HYSTERESIS = 0.05;
 
+// The cooling marker a ZAA-scaled speed block carries, appended after ";_EXTRUDE_SET_SPEED".
+//
+// CoolingBuffer's layer-time slowdown has two regimes. When it only needs to stretch a layer a
+// little it caps every adjustable line at a common ceiling feed rate (`slow_down_to_feedrate`),
+// which is exactly the wrong operator for this feature: the whole point of zaa_speed_scaling is
+// that the segments of one contoured path run at DIFFERENT speeds in a fixed ratio to their local
+// bead height, and a common ceiling flattens that ratio to a constant. Measured on the dome at
+// 0.2 mm: the 7029 contoured segments carry 205 distinct feed rates spanning 3825-9659 mm/min
+// with cooling off, and collapse to 23 values spanning 1200-3453 with cooling on - whole layers
+// pinned to a single F, which is the "the feature does not reach the G-code" symptom.
+//
+// A block carrying this marker is instead only ever slowed PROPORTIONALLY, by the same factor as
+// the rest of its layer, so F_seg/h_seg stays constant while the layer still reaches its cooling
+// target. See CoolingBuffer.cpp, CoolingLine::TYPE_ZAA_SCALED.
+static constexpr const char *ZAA_COOLING_MARKER = ";_ZAA_SCALED";
+
+// The factor a ZAA-scaled cooling block is slowed by when the layer-time slowdown is capping the
+// ordinary adjustable lines at `cap_feedrate`.
+//
+// The ordinary rule is a CAP: every adjustable line above the ceiling is pinned to it. Applied to
+// ZAA blocks that destroys the feature, because the whole point is that the segments of one
+// contoured path run at different speeds in a fixed ratio to their local bead height.
+//
+// So ZAA blocks are scaled instead, by the ratio the cap represents for the layer: reference /
+// cap, where `reference` is the fastest ordinary adjustable line - the speed the cap is really
+// acting on. A ZAA block at any speed is divided by that same factor, so every F_seg/h_seg ratio
+// is preserved exactly while the block contributes its share of the stretched layer time.
+//
+//   reference_feedrate  fastest ordinary (non-ZAA) adjustable feed rate on this extruder, mm/s;
+//                       when a layer has none, the caller passes the fastest ZAA feed rate, which
+//                       applies the same rule to the blocks themselves.
+//   cap_feedrate        the ceiling the ordinary lines are being pinned to, mm/s.
+//
+// Returns 1.0 (no slowdown) when the cap is not actually biting.
+inline double contour_z_cooling_factor(double reference_feedrate, double cap_feedrate)
+{
+    if (cap_feedrate <= 0.0 || reference_feedrate <= cap_feedrate)
+        return 1.0;
+    return reference_feedrate / cap_feedrate;
+}
+
+// The feed rate a ZAA-scaled block ends at once the layer-time slowdown has applied `factor`,
+// never below the material's own minimum print speed. All speeds in the same unit.
+inline double contour_z_cooled_feedrate(double f_seg, double factor, double min_speed)
+{
+    if (factor <= 1.0 || f_seg <= 0.0)
+        return f_seg;
+    return std::max(f_seg / factor, min_speed);
+}
+
 // The scaled feed rate for one contoured segment, mm/min.
 //
 //     F_seg = F_role * h_seg / h_nominal,  clamped to [floor, F_role] and then to the volumetric cap

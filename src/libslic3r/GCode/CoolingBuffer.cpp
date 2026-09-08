@@ -1,5 +1,6 @@
 #include "../GCode.hpp"
 #include "CoolingBuffer.hpp"
+#include "../ContourZ.hpp"
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/algorithm/string/replace.hpp>
 #include <boost/log/trivial.hpp>
@@ -71,6 +72,10 @@ struct CoolingLine
         // ORCA: Add support for ironing fan speed control
         TYPE_IRONING_FAN_START         = 1 << 19,
         TYPE_IRONING_FAN_END           = 1 << 20,
+        // ZAA (zaa_speed_scaling): this speed block was emitted by the Z-contouring code and
+        // its feed rate encodes the local bead height (F_seg proportional to h_seg). Such a
+        // block may only ever be slowed PROPORTIONALLY - see slow_down_to_feedrate().
+        TYPE_ZAA_SCALED                = 1 << 21,
     };
 
     CoolingLine(unsigned int type, size_t  line_start, size_t  line_end) :
@@ -146,6 +151,12 @@ struct PerExtruderAdjustments
     }
     // Slow down the adjustable extrusions to the minimum feedrate allowed for the current extruder material.
     // Used by both proportional and non-proportional slow down.
+    //
+    // ZAA note: this is the terminal case, reached only when the layer cannot make its cooling
+    // target even with everything at slow_down_min_speed. Every adjustable line - ZAA-scaled or
+    // not - ends at that same floor, so the constant-flow ratio is necessarily flattened here.
+    // That is correct: the material's minimum speed is a hard bound, and a layer this starved for
+    // time has no speed range left to express the ratio in. Every other regime preserves it.
     float slowdown_to_minimum_feedrate(bool slowdown_external_perimeters) {
         float time_total = 0.f;
         for (CoolingLine &line : lines) {
@@ -199,12 +210,43 @@ struct PerExtruderAdjustments
     float time_stretch_when_slowing_down_to_feedrate(float min_feedrate) const {
         float time_stretch = 0.f;
         assert(this->slow_down_min_speed < min_feedrate + EPSILON);
+        // ZAA (zaa_speed_scaling): a contoured block's feed rate encodes its local bead height, so
+        // it must be scaled, not capped. The factor a capped line at `reference` would experience
+        // is what the ZAA lines are stretched by too, which keeps every F_seg/h_seg ratio intact
+        // while contributing the same kind of time to the layer budget. `reference` is the fastest
+        // non-ZAA adjustable line, i.e. the speed the cap is really acting on.
+        const float zaa_factor = this->zaa_proportional_factor(min_feedrate);
         for (size_t i = 0; i < n_lines_adjustable; ++ i) {
             const CoolingLine &line = lines[i];
-            if (line.feedrate > min_feedrate)
+            if (line.type & CoolingLine::TYPE_ZAA_SCALED) {
+                if (zaa_factor > 1.f)
+                    time_stretch += line.time * (zaa_factor - 1.f);
+            } else if (line.feedrate > min_feedrate)
                 time_stretch += line.time * (line.feedrate / min_feedrate - 1.f);
         }
         return time_stretch;
+    }
+
+    // The proportional factor a ZAA-scaled block is slowed by when the non-ZAA adjustable lines are
+    // capped at `min_feedrate`. Derived from the fastest non-ZAA adjustable line so that ZAA blocks
+    // are slowed by the same relative amount the layer as a whole is being slowed by - never pinned
+    // to a common speed, which would destroy the constant-flow ratio this feature exists to create.
+    //
+    // With no non-ZAA adjustable line to reference (a layer that is nothing but contoured moves)
+    // the ZAA blocks fall back to the ratio between their own fastest line and the cap, which is
+    // the same rule applied to themselves.
+    float zaa_proportional_factor(float min_feedrate) const {
+        if (min_feedrate <= 0.f)
+            return 1.f;
+        float reference = 0.f;
+        for (size_t i = 0; i < n_lines_adjustable; ++ i)
+            if (!(lines[i].type & CoolingLine::TYPE_ZAA_SCALED))
+                reference = std::max(reference, lines[i].feedrate);
+        if (reference <= 0.f)
+            for (size_t i = 0; i < n_lines_adjustable; ++ i)
+                if (lines[i].type & CoolingLine::TYPE_ZAA_SCALED)
+                    reference = std::max(reference, lines[i].feedrate);
+        return float(contour_z_cooling_factor(reference, min_feedrate));
     }
 
     // Slow down all adjustable lines down to min_feedrate.
@@ -212,10 +254,26 @@ struct PerExtruderAdjustments
     // Used by non-proportional slow down.
     void slow_down_to_feedrate(float min_feedrate) {
         assert(this->slow_down_min_speed < min_feedrate + EPSILON);
+        // See time_stretch_when_slowing_down_to_feedrate(): ZAA-scaled blocks are slowed by a
+        // common FACTOR (preserving F_seg/h_seg across the segments of a contoured path), every
+        // other adjustable line is capped at the common ceiling as before.
+        const float zaa_factor = this->zaa_proportional_factor(min_feedrate);
         float time_total = 0.f;
         for (size_t i = 0; i < n_lines_adjustable; ++ i) {
             CoolingLine &line = lines[i];
-            if (line.feedrate > min_feedrate) {
+            if (line.type & CoolingLine::TYPE_ZAA_SCALED) {
+                if (zaa_factor > 1.f && line.feedrate > 0.f) {
+                    // Respect the material's own floor: a ZAA block is never taken below
+                    // slow_down_min_speed, the same bound the capped lines observe.
+                    const float target = float(contour_z_cooled_feedrate(line.feedrate, zaa_factor,
+                                                                        this->slow_down_min_speed));
+                    if (target < line.feedrate) {
+                        line.time *= line.feedrate / target;
+                        line.feedrate = target;
+                        line.slowdown = true;
+                    }
+                }
+            } else if (line.feedrate > min_feedrate) {
                 line.time *= std::max(1.f, line.feedrate / min_feedrate);
                 line.feedrate = min_feedrate;
                 line.slowdown = true;
@@ -433,6 +491,10 @@ std::vector<PerExtruderAdjustments> CoolingBuffer::parse_layer_gcode(const std::
             // hence the slowdown algorithm ignores it.
             if (boost::contains(sline, ";_EXTRUDE_SET_SPEED") && ! wipe && adjust_external) {
                 line.type |= CoolingLine::TYPE_ADJUSTABLE;
+                // ZAA (zaa_speed_scaling): this block's F encodes the segment's local bead height,
+                // so the slowdown must scale it rather than cap it. See CoolingLine::TYPE_ZAA_SCALED.
+                if (boost::contains(sline, ZAA_COOLING_MARKER))
+                    line.type |= CoolingLine::TYPE_ZAA_SCALED;
                 active_speed_modifier = adjustment->lines.size();
             }
             if ((line.type & CoolingLine::TYPE_G92) == 0) {
@@ -963,6 +1025,8 @@ std::string CoolingBuffer::apply_layer_cooldown(
                     // Process comments, remove ";_EXTRUDE_SET_SPEED", ";_EXTERNAL_PERIMETER", ";_WIPE"
                     std::string comment(end, line_end);
                     boost::replace_all(comment, ";_EXTRUDE_SET_SPEED", "");
+                    // ZAA (zaa_speed_scaling): the marker is internal to the cooling pass.
+                    boost::replace_all(comment, ZAA_COOLING_MARKER, "");
                     if (line->type & CoolingLine::TYPE_EXTERNAL_PERIMETER)
                         boost::replace_all(comment, ";_EXTERNAL_PERIMETER", "");
                     if (line->type & CoolingLine::TYPE_WIPE)
