@@ -4793,6 +4793,11 @@ void TabPrinter::build_fff()
         optgroup->append_single_option_line("support_chamber_temp_control", "chamber-temperature");
         optgroup->append_single_option_line("support_air_filtration", "air-filtration");
 
+        // Only a Snapmaker tool changer can do this; toggle_options() hides the whole line for
+        // every other printer, so nobody is offered a switch their machine will ignore.
+        optgroup = page->new_optgroup(L("End of print"), "param_gcode");
+        optgroup->append_single_option_line("unload_filaments_at_end");
+
         auto edit_custom_gcode_fn = [this](const t_config_option_key& opt_key) { edit_custom_gcode(opt_key); };
 
     const int gcode_field_height = 15; // 150
@@ -5514,6 +5519,10 @@ void TabPrinter::toggle_options()
         // SoftFever: hide non-BBL settings
         for (auto el : {"use_firmware_retraction", "use_relative_e_distances", "support_multi_bed_types", "pellet_modded_printer", "bed_mesh_max", "bed_mesh_min", "bed_mesh_probe_distance", "adaptive_bed_mesh_margin", "thumbnails"})
           toggle_line(el, !is_BBL_printer);
+
+        // "Unload filaments at end of print" is a Snapmaker tool-changer preference: the flag goes
+        // to the printer with the print start, and only that firmware's PRINT_END acts on it.
+        toggle_line("unload_filaments_at_end", is_snapmaker_toolchanger(*m_config));
     }
 
     if (m_active_page->title() == L("Multimaterial")) {

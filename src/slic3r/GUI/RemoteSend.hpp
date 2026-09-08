@@ -66,6 +66,10 @@ struct Prepared
     std::vector<SnapmakerLan::FileFilament> file_filaments;
     std::vector<int>                        mapping;      // toolhead per file filament, -1 = unused
     std::vector<SnapmakerLan::Toolhead>     toolheads;
+    // The printer preset's unload_filaments_at_end, for a Snapmaker tool changer. The flag cannot
+    // ride in the G-code (the firmware refuses print_task_config commands while it is printing),
+    // so it goes with the print start as END_UNLOAD_FILAMENT.
+    bool                                    unload_at_end { false };
     // Ultra: what the G-code archive records about this send, gathered on the GUI thread by
     // prepare() so run() only has to copy the file it uploaded.
     GcodeArchive::Meta archive_meta;

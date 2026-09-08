@@ -54,6 +54,10 @@ struct Meta
     // form /api/plates/{i}/send takes ("0:2,1:1"). A reprint replays it rather than deriving it
     // again, which is where "what we printed" and "what we replay" would quietly diverge.
     std::string mapping;
+    // Snapmaker tool changers: this send asked the printer to unload the filaments it used when it
+    // is done (the printer preset's unload_filaments_at_end). Kept for the same reason `mapping`
+    // is - a reprint should behave the way the print it replays did.
+    bool        unload_at_end { false };
     // Stage 1d: a Spoolman deduction was asked for after this send (the preference was on and a
     // server was configured). Whether the server accepted it is Spoolman's business, not ours.
     bool        spoolman_deduct { false };

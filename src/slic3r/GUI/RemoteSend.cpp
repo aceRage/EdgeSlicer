@@ -553,6 +553,13 @@ static std::pair<int, std::string> prepare_snapmaker(const Request& req, PartPla
     p->upload.upload_path = fs::path(name);
     p->lan_filename       = name;
     p->file_filaments     = file_filaments_of(plate);
+    // The end-of-print unload the printer will do for us, if this preset asks for it. Read here,
+    // on the GUI thread, with the same preset the plate was sliced against.
+    if (PresetBundle* bundle = wxGetApp().preset_bundle) {
+        const DynamicPrintConfig& pcfg = bundle->printers.get_edited_preset().config;
+        const ConfigOptionBool* unload = pcfg.option<ConfigOptionBool>("unload_filaments_at_end");
+        p->unload_at_end = unload != nullptr && unload->value && is_snapmaker_toolchanger(pcfg);
+    }
     if (req.mode == "print") {
         std::string error;
         if (req.mapping.empty())
@@ -715,6 +722,7 @@ std::pair<int, std::string> prepare(const Request& req, std::shared_ptr<Prepared
                     wire += std::to_string((int) i) + ":" + std::to_string(p->mapping[i]);
                 }
                 m.mapping = wire;
+                m.unload_at_end = p->unload_at_end;
             } else if (p->kind == "bambu") {
                 // The plugin uploads the gcode 3mf; project_name is the print's name, with the
                 // extension only in the upload branch.
@@ -853,6 +861,9 @@ std::pair<int, std::string> prepare_from_record(const Request& req, std::shared_
         p->upload.upload_path = fs::path(name);
         p->lan_filename       = name;
         p->file_filaments     = file_filaments_of_record(j);
+        // A reprint unloads if the print it replays did. A record written before this existed has
+        // no such key and reprints the way it always has.
+        p->unload_at_end      = j.value("unload_at_end", false);
         if (mode == "print") {
             // The record's own mapping is the memory; the caller may override it, and a record
             // written before mappings were kept falls back to the colour match.
@@ -1149,7 +1160,8 @@ static void run_snapmaker(std::shared_ptr<Prepared> p, Sink& sink)
     result["filaments"] = filaments;
     if (p->mode == "print") {
         result["mapping"]        = p->mapping;
-        result["mapping_script"] = SnapmakerLan::mapping_script(p->mapping);
+        result["mapping_script"] = SnapmakerLan::mapping_script(p->mapping, p->unload_at_end);
+        result["unload_at_end"]  = p->unload_at_end;
     }
     if (p->dry_run) {
         result["dry_run"] = true;
@@ -1183,7 +1195,7 @@ static void run_snapmaker(std::shared_ptr<Prepared> p, Sink& sink)
     // A printer that reports no toolheads at all (a plain Klipper machine someone added by IP) has
     // nothing to map: the standard start is right for it.
     const bool mapped = !p->toolheads.empty();
-    bool       ok     = mapped ? SnapmakerLan::start_print_mapped(p->lan, p->lan_filename, p->mapping, sent, error)
+    bool       ok     = mapped ? SnapmakerLan::start_print_mapped(p->lan, p->lan_filename, p->mapping, p->unload_at_end, sent, error)
                                : SnapmakerLan::start_print(p->lan, p->lan_filename, error);
     result["start"] = sent;
     if (!ok) {
