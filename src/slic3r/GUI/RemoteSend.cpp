@@ -609,6 +609,12 @@ static std::pair<int, std::string> prepare_host(const Request& req, PartPlate* p
         p->printer_name = d.display_name();
         p->device_id    = d.id;
         p->model_key    = model_key;
+        // Where the last plate went, so the desktop send dialog and the Device tab preselect the
+        // printer the phone just used. Recorded here rather than after the upload, exactly as the
+        // desktop records it when its dialog is confirmed: it is the choice, not the outcome.
+        try {
+            PrintHostDevices::set_last_used(model_key, d.id);
+        } catch (...) {}
     } else {
         if (bundle->use_bbl_network()) return { 409, "the current printer preset sends through the Bambu network; pick that printer by its id" };
         const std::string url = cfg.opt_string("print_host");

@@ -7,6 +7,7 @@
 #include <catch2/catch.hpp>
 
 #include "slic3r/Utils/PrintHostDevices.hpp"
+#include "slic3r/Utils/PrintHostDeviceStatus.hpp"
 
 #include <boost/filesystem.hpp>
 #include <boost/nowide/fstream.hpp>
@@ -339,6 +340,86 @@ TEST_CASE("PrintHostDevices: the send button follows the devices, not the preset
     store.write("{\"version\":1,\"models\":{\"" + key + "\":{\"devices\":[{\"id\":\"x\",\"address\":\"\"}]}}}");
     CHECK_FALSE(has_devices(key));
     CHECK_FALSE(can_send_for(config, "Elegoo Centauri Carbon 0.4 nozzle"));
+}
+
+TEST_CASE("PrintHostDevices: what a device says it has loaded", "[PrintHostDevices]")
+{
+    // No network here: parse_moonraker_status is the half of probe() that turns a Moonraker
+    // `result.status` object into slots, so the parsing is exercised without a printer.
+
+    SECTION("a Snapmaker-flavoured Moonraker names its filaments") {
+        const std::string status =
+            "{\"print_stats\":{\"state\":\"standby\"},"
+            " \"print_task_config\":{"
+            "   \"filament_type\":[\"PLA\",\"PETG\",\"\"],"
+            "   \"filament_sub_type\":[\"Basic\",\"HF\",\"\"],"
+            "   \"filament_vendor\":[\"Polymaker\",\"Generic\",\"\"],"
+            "   \"filament_color_rgba\":[\"FF0000FF\",\"0000FFFF\",\"\"],"
+            "   \"filament_exist\":[true,true,false]}}";
+        const Status st = parse_moonraker_status(status, "octoprint");
+        CHECK(st.probed);
+        CHECK(st.online);
+        CHECK(st.state == "standby");
+        REQUIRE(st.slots.size() == 3);
+        CHECK(st.slots_have_filaments);
+        CHECK(st.slots[0].index == 0);
+        CHECK(st.slots[0].type == "PLA");
+        CHECK(st.slots[0].vendor == "Polymaker");
+        CHECK(st.slots[0].color == "#FF0000"); // the alpha byte is dropped
+        CHECK(st.slots[0].loaded);
+        CHECK(st.slots[1].color == "#0000FF");
+        CHECK_FALSE(st.slots[2].loaded);
+        CHECK(st.note.empty()); // there is something to map, so nothing to apologise for
+        CHECK(st.slots[0].label() == "T1 PLA Basic");
+    }
+
+    SECTION("a stock Klipper names its tools and nothing in them") {
+        const std::string status =
+            "{\"print_stats\":{\"state\":\"printing\"},"
+            " \"extruder\":{\"nozzle_diameter\":0.4,\"temperature\":210},"
+            " \"extruder1\":{\"nozzle_diameter\":0.4,\"temperature\":25}}";
+        const Status st = parse_moonraker_status(status, "octoprint");
+        CHECK(st.online);
+        CHECK(st.state == "printing");
+        REQUIRE(st.slots.size() == 2);
+        CHECK_FALSE(st.slots_have_filaments); // tools, not filaments: no mapping table
+        CHECK(st.slots[1].index == 1);
+        CHECK(st.slots[0].nozzle == Approx(0.4));
+        CHECK_FALSE(st.note.empty());
+    }
+
+    SECTION("something that is not a Moonraker printer") {
+        const Status st = parse_moonraker_status("{}", "octoprint");
+        CHECK_FALSE(st.online);
+        CHECK(st.slots.empty());
+        CHECK_FALSE(st.note.empty());
+    }
+
+    SECTION("Elegoo Link is never asked, and says so") {
+        // Measured against this fork's own ElegooLink: it speaks SDCP over its own websocket and
+        // sends only Cmd 0 (status, one field read) and Cmd 128 (start print). Cmd 1 (Attributes),
+        // where an SDCP device would describe its materials, is declared and never sent.
+        CHECK_FALSE(can_probe("elegoolink"));
+        CHECK(can_probe("octoprint"));
+        const std::string note = no_filament_note("elegoolink");
+        CHECK(note.find("Elegoo Link") != std::string::npos);
+        CHECK(note.find("sent exactly as it was sliced") != std::string::npos);
+
+        Device d   = make_device("Centauri", "192.0.2.1", "elegoolink");
+        Status  st = probe(d, 1); // no network is touched: the host type is not probeable
+        CHECK_FALSE(st.probed);
+        CHECK_FALSE(st.online);
+        CHECK(st.slots.empty());
+        CHECK(st.note == note);
+    }
+
+    SECTION("a device with no address is not probed either") {
+        Device d;
+        d.host_type = "octoprint";
+        const Status st = probe(d, 1);
+        CHECK_FALSE(st.probed);
+        CHECK(st.note == "this device has no address");
+    }
 }
 
 TEST_CASE("PrintHostDevices: the preset bridge writes the fields the send path reads", "[PrintHostDevices]")

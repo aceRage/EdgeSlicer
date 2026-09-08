@@ -178,6 +178,26 @@ static void slots_from_extruders(const json& status, std::vector<Slot>& out)
     }
 }
 
+// The network-free half: a Moonraker `result.status` object -> what this dialog can say about the
+// printer. Shared by probe() and by parse_moonraker_status(), which is what the tests call.
+static Status fill_from_status(const json& status, const std::string& host_type_key)
+{
+    Status st;
+    if (!status.is_object() || status.empty()) {
+        st.note = "this printer answered, but not as a Moonraker printer.";
+        return st;
+    }
+    st.online = true;
+    if (status.contains("print_stats") && status["print_stats"].is_object())
+        st.state = str_at(status["print_stats"], "state");
+    slots_from_print_task_config(status, st.slots, st.slots_have_filaments);
+    if (st.slots.empty())
+        slots_from_extruders(status, st.slots);
+    if (st.slots.empty() || !st.slots_have_filaments)
+        st.note = no_filament_note(host_type_key);
+    return st;
+}
+
 Status probe(const Device& d, int timeout_s)
 {
     Status st;
@@ -212,18 +232,22 @@ Status probe(const Device& d, int timeout_s)
         return st;
     }
     const json status = j.is_object() ? j.value("result", json::object()).value("status", json::object()) : json::object();
-    if (!status.is_object() || status.empty()) {
-        st.note = "this printer answered, but not as a Moonraker printer.";
-        return st;
+    Status parsed = fill_from_status(status, d.host_type);
+    parsed.probed  = true;
+    parsed.error   = st.error;
+    return parsed;
+}
+
+Status parse_moonraker_status(const std::string& status_json, const std::string& host_type_key)
+{
+    json status;
+    try {
+        status = json::parse(status_json);
+    } catch (...) {
+        status = json::object();
     }
-    st.online = true;
-    if (status.contains("print_stats") && status["print_stats"].is_object())
-        st.state = str_at(status["print_stats"], "state");
-    slots_from_print_task_config(status, st.slots, st.slots_have_filaments);
-    if (st.slots.empty())
-        slots_from_extruders(status, st.slots);
-    if (st.slots.empty() || !st.slots_have_filaments)
-        st.note = no_filament_note(d.host_type);
+    Status st = fill_from_status(status, host_type_key);
+    st.probed = can_probe(host_type_key);
     return st;
 }
 

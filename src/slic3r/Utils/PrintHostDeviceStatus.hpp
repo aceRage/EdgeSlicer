@@ -64,6 +64,11 @@ struct Status
 // Blocking, off the GUI thread. `timeout_s` is per HTTP call.
 Status probe(const Device& d, int timeout_s = 3);
 
+// The half of probe() that has no network in it: a Moonraker `result.status` object turned
+// into slots and a state. Exposed so the parsing is exercised by the Catch2 suite instead of
+// only by a printer on somebody's desk. `status_json` is the JSON text of that object.
+Status parse_moonraker_status(const std::string& status_json, const std::string& host_type_key);
+
 // What can be said before asking: false for every host type this fork has no status client for.
 bool   can_probe(const std::string& host_type_key);
 // The sentence the dialog shows when `probe()` came back with nothing to map.
