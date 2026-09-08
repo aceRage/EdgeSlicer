@@ -20,6 +20,7 @@
 #include "EmbossShape.hpp"
 #include "TriangleSelector.hpp"
 #include "ImageFill.hpp"
+#include "FlexiJoint.hpp"
 
 //BBS: add bbs 3mf
 #include "Format/bbs_3mf.hpp"
@@ -251,7 +252,13 @@ enum class CutConnectorType : int {
     , Dowel
     , Snap
     , Undef
+    // Flexi joint - a print-in-place articulated joint. Appended AFTER Undef on purpose:
+    // the 3MF reader validates connector types against Undef, and no flexi connector ever
+    // reaches a 3MF (the flexi cut resolves into plain model parts).
+    , FlexiJoint
 };
+
+inline bool is_flexi_connector_type(CutConnectorType t) { return t == CutConnectorType::FlexiJoint; }
 
 enum class CutConnectorStyle : int {
     Prism
@@ -314,6 +321,8 @@ struct CutConnector
     float height_tolerance;// [0.f : 1.f]
     float z_angle {0.f};
     CutConnectorAttributes attribs;
+    // Only meaningful when attribs.type == CutConnectorType::FlexiJoint.
+    FlexiJointParams flexi;
 
     CutConnector()
         : pos(Vec3d::Zero()), rotation_m(Transform3d::Identity()), radius(5.f), height(10.f), radius_tolerance(0.f), height_tolerance(0.1f), z_angle(0.f)
@@ -324,14 +333,15 @@ struct CutConnector
     {}
 
     CutConnector(const CutConnector& rhs) :
-        CutConnector(rhs.pos, rhs.rotation_m, rhs.radius, rhs.height, rhs.radius_tolerance, rhs.height_tolerance, rhs.z_angle, rhs.attribs) {}
+        CutConnector(rhs.pos, rhs.rotation_m, rhs.radius, rhs.height, rhs.radius_tolerance, rhs.height_tolerance, rhs.z_angle, rhs.attribs)
+    { flexi = rhs.flexi; }
 
     bool operator==(const CutConnector& other) const;
 
     bool operator!=(const CutConnector& other) const { return !(other == (*this)); }
 
     template<class Archive> inline void serialize(Archive& ar) {
-        ar(pos, rotation_m, radius, height, radius_tolerance, height_tolerance, z_angle, attribs);
+        ar(pos, rotation_m, radius, height, radius_tolerance, height_tolerance, z_angle, attribs, flexi);
     }
 };
 
@@ -832,6 +842,10 @@ public:
         CutConnectorType    connector_type{ CutConnectorType::Plug };
         float               radius_tolerance{ 0.f };// [0.f : 1.f]
         float               height_tolerance{ 0.f };// [0.f : 1.f]
+        // Only meaningful when connector_type == CutConnectorType::FlexiJoint. The cut
+        // regenerates both the male body and the female cavity from these, so they have to
+        // travel with the connector volume from the gizmo down into CutUtils.
+        FlexiJointParams    flexi;
 
         CutInfo() = default;
         CutInfo(CutConnectorType type, float rad_tolerance, float h_tolerance, bool processed = false) :
@@ -846,8 +860,10 @@ public:
         void invalidate()    { is_connector = false; }
         void reset_from_upper() { is_from_upper = true; }
 
+        bool is_flexi_joint() const { return is_connector && is_flexi_connector_type(connector_type); }
+
         template<class Archive> inline void serialize(Archive& ar) {
-            ar(is_connector, is_processed, connector_type, radius_tolerance, height_tolerance);
+            ar(is_connector, is_processed, connector_type, radius_tolerance, height_tolerance, flexi);
         }
     };
     CutInfo             cut_info;

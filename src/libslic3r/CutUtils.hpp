@@ -11,6 +11,15 @@ namespace Slic3r {
 
 using ModelObjectPtrs = std::vector<ModelObject*>;
 
+// Append the NEGATIVE_VOLUME that carries a flexi joint into `mo` before the cut runs.
+// The volume's mesh is the male body; Cut regenerates both bodies from cut_info.flexi, so
+// the mesh is only there for previews and for "does it intersect the contour" checks.
+// Lives in libslic3r (not in the gizmo) so tests can drive the whole apply path headless.
+ModelVolume* add_flexi_joint_volume(ModelObject* mo, const CutConnector& connector, const std::string& name);
+
+// True when this object carries at least one unprocessed flexi joint connector.
+bool has_flexi_joint(const ModelObject* mo);
+
 enum class ModelObjectCutAttribute : int { KeepUpper, KeepLower, KeepAsParts, FlipUpper, FlipLower, PlaceOnCutUpper, PlaceOnCutLower, CreateDowels, InvalidateCutInfo };
 using ModelObjectCutAttributes = enum_bitmask<ModelObjectCutAttribute>;
 ENABLE_ENUM_BITMASK_OPERATORS(ModelObjectCutAttribute);
@@ -56,6 +65,9 @@ public:
     };
 
     const ModelObjectPtrs& perform_with_plane();
+    // Flexi joint cut: one object, two watertight model parts, a real Manifold boolean.
+    // perform_with_plane() dispatches here automatically when a flexi connector is present.
+    const ModelObjectPtrs& perform_with_flexi_joints();
     const ModelObjectPtrs& perform_by_contour(std::vector<Part> parts, int dowels_count);
     const ModelObjectPtrs& perform_with_groove(const Groove& groove, const Transform3d& rotation_m, bool keep_as_parts = false);
 
