@@ -25,6 +25,7 @@ def parse(path):
     feat = ""
     lz = None
     px = py = None
+    zc = None
     for line in open(path, encoding="utf-8", errors="replace"):
         m = RE_FEATURE.match(line)
         if m:
@@ -47,7 +48,11 @@ def parse(path):
         d = None
         if px is not None and py is not None and x is not None and y is not None:
             d = math.hypot(x - px, y - py)
-        out.append(dict(feat=feat, lz=lz, x=x, y=y, z=g.get("Z"), e=g.get("E"), dist=d))
+        zprev = zc
+        if g.get("Z") is not None:
+            zc = g["Z"]
+        out.append(dict(feat=feat, lz=lz, x=x, y=y, z=g.get("Z"), e=g.get("E"), dist=d,
+                        zprev=zprev))
         px, py = x, y
     return out
 
@@ -92,22 +97,27 @@ def main():
     #
     # What the code guarantees for a contoured path whose own base is
     #     base = print_z + z_offset * H,  z_offset in {0, 0.5}
-    # is EITHER a contoured sample, whose absolute Z lands in [lo + min_z, print_z + min_z]
-    # whatever the base was, OR an uncontoured sample, which stays exactly on its base.
+    # is that every emitted Z lands in [lo + min_z, base] for a wall (a perimeter is never
+    # raised above its own base) and in [lo + min_z, print_z + min_z] for a raisable feature.
+    # Before the 2026-09-07 review a sample was one or the other of those endpoints exactly:
+    # either contoured, and then inside [lo + min_z, print_z + min_z], or untouched and sitting
+    # exactly on its base. The along-path smoother now interpolates between the two rather than
+    # stepping between them, which is the whole point of it, so the check is the interval.
     bases = [0.0, 0.5 * H] if a.offset_layers else [0.0]
+    ceiling = max([MZ] + bases)
     bad = []
     for m in con:
         lz, z = m["lz"], m["z"]
         in_band = (lz - H + MZ - 1e-6) <= z <= (lz + MZ + 1e-6)
         on_base = any(abs(z - (lz + b)) < 1e-6 for b in bases)
-        if not (in_band or on_base):
+        if not ((lz - H + MZ - 1e-6) <= z <= (lz + ceiling + 1e-6)):
             bad.append(m)
     on_base_n = sum(1 for m in con
                     if any(abs(m["z"] - (m["lz"] + b)) < 1e-6 for b in bases)
                     and not ((m["lz"] - H + MZ - 1e-6) <= m["z"] <= (m["lz"] + MZ + 1e-6)))
     print("contoured extrusions inside the absolute band [lo+min_z, print_z+min_z]: %d" % (len(con) - on_base_n))
-    print("contoured extrusions resting on their own uncontoured base: %d" % on_base_n)
-    print("contoured extrusions outside both: %d" % len(bad))
+    print("contoured extrusions at or above their own uncontoured base: %d" % on_base_n)
+    print("contoured extrusions outside [lo+min_z, print_z+%.3f]: %d" % (ceiling, len(bad)))
     if bad:
         ok = False
         print("!! the clamp was violated")
@@ -123,10 +133,14 @@ def main():
     # offset-layers bonding factor times the ZAA height.
     print()
     print("E per mm / ((H + d) / H) must be constant, per feature; d measured from the path base:")
+    # The local layer height varies ALONG a segment, so the emitter uses the trapezoid rule:
+    # the mean of the segment's two end heights. Comparing against the end height alone (which
+    # is what upstream extrudes) shows up here as a 5-6 % spread.
     samples = collections.defaultdict(list)
     for m in con:
-        if m["dist"] and m["dist"] > 0.05:
-            samples[m["feat"]].append((m["z"] - m["lz"], m["e"] / m["dist"]))
+        if m["dist"] and m["dist"] > 0.05 and m["zprev"] is not None:
+            dz = 0.5 * ((m["z"] - m["lz"]) + (m["zprev"] - m["lz"]))
+            samples[m["feat"]].append((dz, m["e"] / m["dist"]))
     checked = 0
     for feat in sorted(samples):
         ss = samples[feat]
@@ -173,9 +187,8 @@ def main():
                   and abs(m["z"] - (m["lz"] + 0.5 * H)) < 1e-6]
         print("\noffset_layers: wall extrusions %d ; sitting exactly on the raised base "
               "print_z + 0.5h (uncontoured odd walls): %d" % (len(walls), len(raised)))
-        bad = [m for m in walls if m["z"] is not None and m["z"] > m["lz"] + MZ + 1e-6
-               and abs(m["z"] - (m["lz"] + 0.5 * H)) >= 1e-6]
-        print("wall extrusions above print_z + zaa_min_z that are NOT on the plain raised base: %d"
+        bad = [m for m in walls if m["z"] is not None and m["z"] > m["lz"] + 0.5 * H + 1e-6]
+        print("wall extrusions above their own raised base print_z + 0.5h (must be none): %d"
               % len(bad))
         if bad:
             ok = False

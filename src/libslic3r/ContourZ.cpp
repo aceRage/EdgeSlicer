@@ -94,10 +94,15 @@ static double slope_from_normal(const Eigen::Vector3d &normal)
 // artifacts when minimize wall height non-zero"). Upstream applies the slope drop as a HARD STEP
 // at zaa_minimize_perimeter_height: a wall whose slope crosses the threshold part-way along gets a
 // half-line-width Z jump mid-path, which is what shreds the perimeter. The upstream advice is to
-// set the angle to 0, i.e. to turn the feature off. Instead we ramp the adjustment in continuously
-// over this band above the threshold, so no sample can ever step by more than
-// (half_width / band) * one_sample. Above threshold + band the result is identical to upstream.
-static constexpr double ZAA_SLOPE_RAMP_DEGREES = 5.0;
+// set the angle to 0, i.e. to turn the feature off. Instead the adjustment fades in over
+// ZAA_SLOPE_RAMP_DEGREES above the threshold, as a smoothstep so that the derivative is continuous
+// too - a hard ramp is continuous in value but its corner still shows up as a change of the
+// wall's per-layer bead height. Above threshold + band the result is identical to upstream.
+static double slope_ramp(double degrees_above_threshold)
+{
+    const double t = std::clamp(degrees_above_threshold / ZAA_SLOPE_RAMP_DEGREES, 0.0, 1.0);
+    return t * t * (3.0 - 2.0 * t);
+}
 
 // The whole per-sample decision, as a pure function of numbers. Unit tested directly by
 // tests/libslic3r/test_contour_z.cpp.
@@ -125,32 +130,37 @@ double contour_z_sample_delta(const ContourZSampleInput &in)
                 // Cannot happen: sin() of an angle in [0, pi/2] is non-negative, so
                 // follow_slope_down() is non-positive. Belt and braces, and never a throw.
                 adjustment = 0;
-            // EdgeSlicer guard for OrcaSlicer#13552, see ZAA_SLOPE_RAMP_DEGREES above.
-            const double ramp = std::clamp((slope_degrees - in.minimize_perimeter_height_deg) / ZAA_SLOPE_RAMP_DEGREES,
-                                           0.0, 1.0);
-            d += adjustment * ramp;
+            // EdgeSlicer guard for OrcaSlicer#13552, see slope_ramp() above.
+            d += adjustment * slope_ramp(slope_degrees - in.minimize_perimeter_height_deg);
             if (d < min_down)
                 d = min_down;
         }
     }
 
-    if (!in.hit || d < -in.height || d > max_up + 0.03)
+    if (!in.hit || d < -in.height)
         // This point is too far from the mesh edge, probably because this is not a top surface.
         // Do not contour it: leave the path at its own base, which means a delta of zero in the
         // path's own frame.
         return 0.0;
 
+    if (d > max_up) {
+        // Upstream pins everything in (max_up, max_up + tolerance] to exactly max_up and returns 0
+        // beyond, so two samples a micron apart in mesh height are emitted a full max_up apart.
+        // On a 14 degree wedge that is a 50 um ridge one bead wide along every top-surface band
+        // boundary, on every layer. Fade to zero across the same tolerance instead: identical to
+        // upstream at d == max_up and at d == max_up + tolerance, continuous in between.
+        const double over = d - max_up;
+        if (over >= ZAA_TOP_TOLERANCE_MM)
+            return 0.0;
+        d = max_up * (1.0 - over / ZAA_TOP_TOLERANCE_MM);
+    } else if (d < min_down) {
+        d = min_down;
+    }
+
     // Shift into the path's own frame (guard 1a, offset_layers). For a flat path z_offset_mm is 0
     // and this is a no-op; for an offset_layers odd wall the whole band moves down by exactly the
     // amount the wall was raised by, so the absolute band stays [lo + min_z, print_z + min_z].
-    double       d_off        = d - in.z_offset_mm;
-    const double max_up_off   = max_up - in.z_offset_mm;
-    const double min_down_off = min_down - in.z_offset_mm;
-
-    if (d_off < min_down_off)
-        d_off = min_down_off;
-    else if (d_off > max_up_off)
-        d_off = max_up_off;
+    double d_off = d - in.z_offset_mm;
 
     if (in.is_perimeter && d_off > 0)
         // Do not increase the height of perimeters as this may create the appearance of a seam.
@@ -160,6 +170,23 @@ double contour_z_sample_delta(const ContourZSampleInput &in)
         d_off = 0;
 
     return d_off;
+}
+
+void contour_z_smooth_profile(std::vector<double> &d, int radius)
+{
+    if (radius < 1 || d.size() < 3)
+        return;
+    const int           n = int(d.size());
+    std::vector<double> out(d.size());
+    for (int i = 0; i < n; ++i) {
+        const int lo = std::max(0, i - radius);
+        const int hi = std::min(n - 1, i + radius);
+        double    sum = 0.0;
+        for (int j = lo; j <= hi; ++j)
+            sum += d[j];
+        out[i] = sum / double(hi - lo + 1);
+    }
+    d.swap(out);
 }
 
 static bool contour_extrusion_path(LayerRegion *region, const sla::IndexedMesh &mesh, ExtrusionPath &path)
@@ -194,15 +221,19 @@ static bool contour_extrusion_path(LayerRegion *region, const sla::IndexedMesh &
     const double z_offset_mm = double(path.z_offset) * double(height);
 
     const Points &points = path.polyline.points;
-    const double  resolution_mm = 0.1;
-
-    Pointf3s contoured_points;
-    bool     was_contoured = false;
+    const double  resolution_mm = ZAA_SAMPLE_RESOLUTION_MM;
 
     if (points.size() < 2)
         // Safety check (upstream #13508). The loop below does not handle paths with fewer than two
         // points correctly.
         return false;
+
+    // Pass 1: resample and raycast. Upstream collapses collinear samples inside this loop; here the
+    // whole profile is collected first, because it has to be smoothed as a sequence before the
+    // collapse decides which samples survive.
+    std::vector<Vec2d>  sample_xy;
+    std::vector<double> sample_d;
+    std::vector<char>   sample_is_original;
 
     for (Points::const_iterator it = points.begin(); it != points.end() - 1; ++it) {
         const Vec2d p1d(unscale_(it->x()), unscale_(it->y()));
@@ -241,32 +272,61 @@ static bool contour_extrusion_path(LayerRegion *region, const sla::IndexedMesh &
 
             const double d_off = contour_z_sample_delta(in);
 
-            if (std::abs(d_off) > EPSILON)
-                was_contoured = true;
-
-            const Vec3d new_point = {p.x(), p.y(), d_off};
-
-            if (contoured_points.size() >= 2 && i != 0) {
-                // Normally, if the new point is collinear with the last two points, we do not add
-                // it to the list of contoured points; we move the last point instead, to avoid a
-                // large number of very short segments. But if the new point corresponds to a point
-                // of the original path (i == 0) we add it anyway, so that a three-point polyline
-                // cannot collapse into a degenerate two-point one (upstream #13508).
-                const double dist = line_alg::distance_to_infinite_squared(
-                    Linef3{contoured_points[contoured_points.size() - 2], contoured_points[contoured_points.size() - 1]},
-                    new_point);
-                if (dist < EPSILON * EPSILON) {
-                    contoured_points[contoured_points.size() - 1] = new_point;
-                    continue;
-                }
+            if (!sample_xy.empty() && (p - sample_xy.back()).squaredNorm() < 1e-18) {
+                // The last sample of one polyline segment and the first of the next are the same
+                // point. Keep one, and keep the "this is a point of the original path" flag.
+                if (i == 0)
+                    sample_is_original.back() = 1;
+                continue;
             }
 
-            contoured_points.push_back(new_point);
+            sample_xy.push_back(p);
+            sample_d.push_back(d_off);
+            sample_is_original.push_back(i == 0 ? 1 : 0);
         }
     }
 
-    if (!was_contoured)
+    if (sample_xy.size() < 2)
         return false;
+
+    // Pass 2: low-pass the profile along the path. The raycast follows the mesh exactly, and on a
+    // straight ramp that is what we want and what a moving average preserves. What it removes is
+    // the sample-to-sample noise: the slope term's dependence on the local facet normal, the facet
+    // boundaries themselves, and the corners the clamps introduce.
+    contour_z_smooth_profile(sample_d, ZAA_SMOOTH_RADIUS_SAMPLES);
+
+    // Pass 3: the per-path deadband. A path whose entire profile is under ZAA_MIN_PATH_DELTA_MM is
+    // left alone rather than contoured by a micron - it would lose arc fitting and gain a Z word on
+    // every move for a contour the machine cannot express. Per path, so it cannot create a step.
+    double max_abs_d = 0.0;
+    for (double v : sample_d)
+        max_abs_d = std::max(max_abs_d, std::abs(v));
+    if (max_abs_d < ZAA_MIN_PATH_DELTA_MM)
+        return false;
+
+    // Pass 4: collapse collinear samples, as upstream, but on the smoothed profile.
+    Pointf3s contoured_points;
+    contoured_points.reserve(sample_xy.size());
+    for (size_t k = 0; k < sample_xy.size(); ++k) {
+        const Vec3d new_point = {sample_xy[k].x(), sample_xy[k].y(), sample_d[k]};
+
+        if (contoured_points.size() >= 2 && !sample_is_original[k]) {
+            // Normally, if the new point is collinear with the last two points, we do not add it to
+            // the list of contoured points; we move the last point instead, to avoid a large number
+            // of very short segments. But if the new point corresponds to a point of the original
+            // path we add it anyway, so that a three-point polyline cannot collapse into a
+            // degenerate two-point one (upstream #13508).
+            const double dist = line_alg::distance_to_infinite_squared(
+                Linef3{contoured_points[contoured_points.size() - 2], contoured_points[contoured_points.size() - 1]},
+                new_point);
+            if (dist < ZAA_COLLAPSE_TOLERANCE_MM * ZAA_COLLAPSE_TOLERANCE_MM) {
+                contoured_points[contoured_points.size() - 1] = new_point;
+                continue;
+            }
+        }
+
+        contoured_points.push_back(new_point);
+    }
 
     if (contoured_points.size() < 2)
         return false;

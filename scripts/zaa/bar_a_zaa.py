@@ -110,8 +110,12 @@ def main():
             if len(c_zaa) != 4:
                 print("    !!  expected exactly 4 zaa_* lines on the candidate")
                 rc = 1
-            if b_zaa:
-                print("    !!  the baseline should carry no zaa_* lines")
+            # The original run of this gate had a pre-ZAA baseline, which carried no zaa_* lines
+            # at all. Since the port merged (89d41a4328) the head carries them too, so the
+            # baseline may legitimately have either none (a pre-ZAA build) or exactly the
+            # candidate's four.
+            if b_zaa and b_zaa != c_zaa:
+                print("    !!  the baseline's zaa_* lines differ from the candidate's")
                 rc = 1
         else:
             rc = 1
