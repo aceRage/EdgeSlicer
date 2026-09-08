@@ -345,6 +345,13 @@ indexed_triangle_set    its_make_torus(double r, double h, double fa);
 // generator produces ring/torus topology (no point on the axis) and sphere/lathe topology
 // (the loop closes along the axis). The result is watertight with outward normals.
 indexed_triangle_set    its_make_revolved(const std::vector<Vec2d> &profile_rz, int sectors);
+// A closed tube of radius `tube_r` swept along the CLOSED 3D polyline `path` (the last point
+// joins back to the first), with `sectors` facets around the tube. The cross-section frame is
+// carried along the path by parallel transport (a rotation-minimising frame) and the residual
+// twist is spread over the loop so the seam closes exactly, which makes the tube watertight
+// with no end caps. Consecutive duplicate points are dropped; fewer than 3 distinct points or
+// fewer than 3 sectors returns an empty mesh.
+indexed_triangle_set    its_make_swept_loop(const std::vector<Vec3d> &path, double tube_r, int sectors);
 indexed_triangle_set    its_make_frustum_dowel(double r, double h, int sectorCount);
 indexed_triangle_set    its_make_pyramid(float base, float height);
 indexed_triangle_set    its_make_sphere(double radius, double fa);

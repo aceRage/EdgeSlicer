@@ -137,6 +137,11 @@ class GLGizmoCut3D : public GLGizmoBase
     FlexiJointParams m_flexi;
     int              m_flexi_kind_id{ int(FlexiJointKind::DoubleRing) };
     bool             m_flexi_auto_size{ true };
+    // Set when a cut used a Flexi joint, so the next time the gizmo opens the after-cut
+    // state that the flexi path forced (keep-as-parts, both Keep flags, the connector type)
+    // is put back to its defaults instead of staying stuck - which used to grey out
+    // "Add connectors" for the rest of the session.
+    bool             m_flexi_forced_after_cut{ false };
     std::vector<std::string> m_flexi_kinds;
 
     bool m_hide_cut_plane{ false };

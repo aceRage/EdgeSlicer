@@ -314,7 +314,11 @@ ModelVolume* add_flexi_joint_volume(ModelObject* mo, const CutConnector& connect
     using namespace Geometry;
 
     indexed_triangle_set body;
-    for (const indexed_triangle_set& its : flexi_male_bodies(connector.flexi))
+    for (const indexed_triangle_set& its : flexi_lower_bodies(connector.flexi))
+        its_merge(body, its);
+    // The chain link also puts a body on the upper segment; carry it too so the negative
+    // volume the gizmo leaves behind is the whole joint, not half of it.
+    for (const indexed_triangle_set& its : flexi_upper_bodies(connector.flexi))
         its_merge(body, its);
 
     // modify_to_center_geometry = false: the flexi bodies are already positioned relative to
@@ -398,6 +402,15 @@ const ModelObjectPtrs& Cut::perform_with_flexi_joints()
     }
 
     const double clearance = double(params.clearance);
+    // THE GAP: the two segments' flat cut faces are set back from the cut plane by gap/2
+    // each, so they end up `gap` apart and the joint bodies bridge that distance. The
+    // revolved kinds additionally need the female face to clear the male body by the
+    // clearance, so their upper face goes to gap/2 + clearance... no: the cavity already
+    // carries the clearance, and the male body itself is generated relative to the FACES,
+    // so gap/2 on each side is the whole story. See FlexiJoint.hpp.
+    const double gap     = double(flexi_effective_gap(params));
+    const double face_lo = -0.5 * gap;
+    const double face_hi = +0.5 * gap;
 
     // Merge every solid part of the object into one mesh in the cut frame. Phase 1 limitation:
     // an object made of several model parts comes out of a flexi cut as two parts, not as
@@ -411,28 +424,44 @@ const ModelObjectPtrs& Cut::perform_with_flexi_joints()
         solid.merge(m);
     }
 
-    // The male half is everything below the plane; the female half starts one clearance
-    // higher, which is what opens the gap between the two flat mating faces.
+    // The lower segment ends at -gap/2, the upper one starts at +gap/2: that is what opens
+    // the gap between the two flat mating faces.
     indexed_triangle_set upper_its, lower_its;
-    cut_mesh(solid.its, 0.f, nullptr, &lower_its);
-    cut_mesh(solid.its, float(clearance), &upper_its, nullptr);
+    cut_mesh(solid.its, float(face_lo), nullptr, &lower_its);
+    cut_mesh(solid.its, float(face_hi), &upper_its, nullptr);
 
     TriangleMesh lower_mesh(std::move(lower_its));
     TriangleMesh upper_mesh(std::move(upper_its));
 
     bool boolean_ok = !lower_mesh.empty() && !upper_mesh.empty();
 
+    // Union each segment's own joint body into it, then subtract the OTHER side's body
+    // inflated by the clearance. For the revolved kinds the lower relief list is empty and
+    // the upper relief is the dilated male body, so this reduces to the phase 1 behaviour;
+    // for the chain link both segments get a body and both get a relief.
     if (boolean_ok)
-        for (const indexed_triangle_set& its : flexi_male_bodies(params)) {
+        for (const indexed_triangle_set& its : flexi_lower_bodies(params)) {
             TriangleMesh body(its);
             body.transform(joint_matrix);
             if (!flexi_boolean(lower_mesh, body, "UNION")) { boolean_ok = false; break; }
         }
     if (boolean_ok)
-        for (const indexed_triangle_set& its : flexi_female_cavities(params)) {
-            TriangleMesh cavity(its);
-            cavity.transform(joint_matrix);
-            if (!flexi_boolean(upper_mesh, cavity, "A_NOT_B")) { boolean_ok = false; break; }
+        for (const indexed_triangle_set& its : flexi_upper_bodies(params)) {
+            TriangleMesh body(its);
+            body.transform(joint_matrix);
+            if (!flexi_boolean(upper_mesh, body, "UNION")) { boolean_ok = false; break; }
+        }
+    if (boolean_ok)
+        for (const indexed_triangle_set& its : flexi_lower_reliefs(params)) {
+            TriangleMesh relief(its);
+            relief.transform(joint_matrix);
+            if (!flexi_boolean(lower_mesh, relief, "A_NOT_B")) { boolean_ok = false; break; }
+        }
+    if (boolean_ok)
+        for (const indexed_triangle_set& its : flexi_upper_reliefs(params)) {
+            TriangleMesh relief(its);
+            relief.transform(joint_matrix);
+            if (!flexi_boolean(upper_mesh, relief, "A_NOT_B")) { boolean_ok = false; break; }
         }
 
     if (!boolean_ok)
