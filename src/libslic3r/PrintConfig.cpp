@@ -486,6 +486,29 @@ bool has_nozzle_rack(const PrintConfig &config)
     return std::any_of(counts.begin(), counts.end(), [](int c) { return c > 1; });
 }
 
+// Mixed nozzle sizes (Phase 1), ported from OrcaSlicer PR #13782 (LixNix) - see PrintConfig.hpp.
+size_t physical_extruder_for_filament(const PrintConfig &config, unsigned int filament_id)
+{
+    if (filament_id == 0)
+        return 0;
+    const size_t direct         = size_t(filament_id - 1);
+    const size_t nozzle_count   = config.nozzle_diameter.values.size();
+    const size_t filament_count = config.filament_diameter.values.size();
+    if (nozzle_count == 0)
+        return 0;
+    // When the printer has at least as many nozzles as filaments, every filament owns a physical
+    // extruder (a toolchanger such as the U1, or any printer without an AMS sharing one nozzle),
+    // so the filament index already IS the physical extruder. Only when more filaments share
+    // fewer nozzles do we need filament_map.
+    if (filament_count <= nozzle_count)
+        return direct < nozzle_count ? direct : 0;
+    const std::vector<int> &fmap = config.filament_map.values;
+    if (direct < fmap.size() && fmap[direct] >= 1 && size_t(fmap[direct]) <= nozzle_count)
+        return size_t(fmap[direct] - 1);
+    // filament_map not populated for this filament yet: best effort.
+    return direct < nozzle_count ? direct : 0;
+}
+
 std::string get_nozzle_volume_type_string(NozzleVolumeType nozzle_volume_type)
 {
     for (const auto& kv : s_keys_map_NozzleVolumeType)

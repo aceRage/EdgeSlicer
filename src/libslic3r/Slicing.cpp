@@ -25,20 +25,27 @@ static const coordf_t MIN_LAYER_HEIGHT = 0.01;
 static const coordf_t MIN_LAYER_HEIGHT_DEFAULT = 0.07;
 static const double LAYER_HEIGHT_CHANGE_STEP = 0.04;
 
+// Mixed nozzle sizes: `idx_filament` is a 1-based FILAMENT index (0 = "whatever tool is current",
+// the convention support_filament / support_interface_filament use). min_layer_height,
+// max_layer_height and nozzle_diameter are per PHYSICAL extruder, so the filament has to be mapped
+// through filament_map first - indexing them by the filament number gave the first nozzle's limits
+// to every filament past the nozzle count.
 // Minimum layer height for the variable layer height algorithm.
-inline coordf_t min_layer_height_from_nozzle(const PrintConfig &print_config, int idx_nozzle)
+inline coordf_t min_layer_height_from_nozzle(const PrintConfig &print_config, int idx_filament)
 {
-    coordf_t min_layer_height = print_config.min_layer_height.get_at(idx_nozzle - 1);
+    const size_t idx_nozzle = physical_extruder_for_filament(print_config, unsigned(std::max(0, idx_filament)));
+    coordf_t min_layer_height = print_config.min_layer_height.get_at(idx_nozzle);
     return (min_layer_height == 0.) ? MIN_LAYER_HEIGHT_DEFAULT : std::max(MIN_LAYER_HEIGHT, min_layer_height);
 }
 
 // Maximum layer height for the variable layer height algorithm, 3/4 of a nozzle dimaeter by default,
 // it should not be smaller than the minimum layer height.
-inline coordf_t max_layer_height_from_nozzle(const PrintConfig &print_config, int idx_nozzle)
+inline coordf_t max_layer_height_from_nozzle(const PrintConfig &print_config, int idx_filament)
 {
-    coordf_t min_layer_height = min_layer_height_from_nozzle(print_config, idx_nozzle);
-    coordf_t max_layer_height = print_config.max_layer_height.get_at(idx_nozzle - 1);
-    coordf_t nozzle_dmr       = print_config.nozzle_diameter.get_at(idx_nozzle - 1);
+    const size_t idx_nozzle = physical_extruder_for_filament(print_config, unsigned(std::max(0, idx_filament)));
+    coordf_t min_layer_height = min_layer_height_from_nozzle(print_config, idx_filament);
+    coordf_t max_layer_height = print_config.max_layer_height.get_at(idx_nozzle);
+    coordf_t nozzle_dmr       = print_config.nozzle_diameter.get_at(idx_nozzle);
     return std::max(min_layer_height, (max_layer_height == 0.) ? (0.75 * nozzle_dmr) : max_layer_height);
 }
 
@@ -107,8 +114,12 @@ SlicingParameters SlicingParameters::create_from_config(
         params.max_layer_height = std::min(params.max_layer_height, max_layer_height_from_nozzle(print_config, 0));
     } else {
         for (unsigned int extruder_id : object_extruders) {
-            params.min_layer_height = std::max(params.min_layer_height, min_layer_height_from_nozzle(print_config, extruder_id));
-            params.max_layer_height = std::min(params.max_layer_height, max_layer_height_from_nozzle(print_config, extruder_id));
+            // object_extruders holds 0-based FILAMENT indices (PrintRegion::collect_object_printing_extruders);
+            // the helpers above take the 1-based filament convention, so shift by one. Before this fix
+            // filament 2 was asking for filament 1's limits and filament 1 for the LAST extruder's.
+            const int idx_filament = int(extruder_id) + 1;
+            params.min_layer_height = std::max(params.min_layer_height, min_layer_height_from_nozzle(print_config, idx_filament));
+            params.max_layer_height = std::min(params.max_layer_height, max_layer_height_from_nozzle(print_config, idx_filament));
         }
     }
     params.min_layer_height = std::min(params.min_layer_height, params.layer_height);
