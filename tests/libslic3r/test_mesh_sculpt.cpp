@@ -559,9 +559,12 @@ static void bench_stroke(size_t target_triangles, const char *label)
     session.apply(p);
     const auto t2 = clock::now();
     const int ticks = 50;
-    size_t touched = 0;
-    for (int i = 0; i < ticks; ++i)
-        touched = session.apply(p).moved_vertices.size();
+    size_t touched = 0, dirty = 0;
+    for (int i = 0; i < ticks; ++i) {
+        const StrokeStep s = session.apply(p);
+        touched = s.moved_vertices.size();
+        dirty   = s.dirty_triangles.size();
+    }
     const auto t3 = clock::now();
 
     const auto t4a = clock::now();
@@ -578,6 +581,8 @@ static void bench_stroke(size_t target_triangles, const char *label)
               << " session_setup_ms=" << setup_ms
               << " brush_tick_ms=" << tick_ms
               << " vertices_touched=" << touched
+              << " dirty_triangles=" << dirty
+              << " subdata_bytes=" << (dirty * 72)
               << " tree_rebuild_ms=" << retree_ms
               << std::endl;
 
