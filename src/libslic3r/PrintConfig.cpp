@@ -6747,6 +6747,19 @@ void PrintConfigDef::init_fff_params()
     def->mode = comSimple;
     def->set_default_value(new ConfigOptionBool(false));
 
+    // H2 preload: load every filament the plate uses during the first layer, through the prime
+    // tower, instead of at the layer where each one is first needed. Dual-extruder Bambu machines
+    // (H2D/H2C/X2D) only - the UI hides it elsewhere and ToolOrdering gates on the same condition
+    // (DynamicPrintConfig::support_different_extruders), the way preheat_time is dual-extruder only.
+    // See docs/superpowers/specs/2026-09-07-h2-preload-filaments.md.
+    def = this->add("preload_all_filaments", coBool);
+    def->label = L("Preload all filaments");
+    def->tooltip = L("Loads every filament used on the plate during the first layer through the prime tower, "
+                     "so later colour changes do not pause mid-layer. Costs one purge per filament at the start "
+                     "of the print. Requires the prime tower.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
     def = this->add("flush_volumes_vector", coFloats);
     // BBS: remove _L()
     def->label = ("Purging volumes - load/unload volumes");

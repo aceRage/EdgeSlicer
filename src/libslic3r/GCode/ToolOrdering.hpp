@@ -10,6 +10,8 @@
 #include <utility>
 #include <set>
 #include <map>
+#include <vector>
+#include <functional>
 
 #include <boost/container/small_vector.hpp>
 
@@ -94,6 +96,21 @@ private:
     bool something_overridden = false;
     const LayerTools* m_layer_tools = nullptr;    // so we know which LayerTools object this belongs to
 };
+
+// H2 preload (preload_all_filaments): layer 1's tool-sequence rule, factored out of ToolOrdering so
+// it can be exercised without building a Print. Given layer 1's own (already ordered) sequence, the
+// set of filaments used anywhere on the plate, and a filament -> physical-extruder lookup, returns
+// layer 1's new sequence:
+//
+//     [ preload-only filaments ] ++ [ layer0_extruders, unchanged ]
+//
+// The preload-only filaments (used on the plate but not printed on layer 1) are grouped by physical
+// extruder so each extruder's loads are consecutive, the group that layer 1's FIRST filament belongs
+// to is placed last among them, and within a group filaments are ascending by id. Layer 1's own order
+// is never reordered, so the result still ends on the filament layer 1 actually finishes with.
+std::vector<unsigned int> preload_first_layer_tool_order(const std::vector<unsigned int> &layer0_extruders,
+                                                         const std::vector<unsigned int> &used_filaments,
+                                                         const std::function<int(unsigned int)> &extruder_of_filament);
 
 class LayerTools
 {
@@ -225,6 +242,10 @@ private:
     void                reorder_extruders(std::vector<unsigned int> tool_order_layer0);
     void 				fill_wipe_tower_partitions(const PrintConfig &config, coordf_t object_bottom_z, coordf_t max_layer_height);
     bool                insert_wipe_tower_extruder();   
+    // H2 preload (preload_all_filaments): prepend every plate filament that layer 1 does not
+    // already print to layer 1's tool sequence, so the prime tower performs a real toolchange
+    // for each of them on layer 1. Returns true when it changed the first layer.
+    bool                apply_preload_all_filaments();
     void                mark_skirt_layers(const PrintConfig &config, coordf_t max_layer_height);
     void 				collect_extruder_statistics(bool prime_multi_material);
     void                reorder_extruders_for_minimum_flush_volume();

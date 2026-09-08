@@ -806,6 +806,16 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
     for (auto el : { "prime_tower_width", "prime_tower_brim_width"})
         toggle_line(el, have_prime_tower);
 
+    // H2 preload (preload_all_filaments): dual-extruder Bambu machines (H2D/H2C/X2D) only - the same
+    // DynamicPrintConfig::support_different_extruders() gate ToolOrdering uses - and only meaningful
+    // with the prime tower on, which is where the layer-1 pre-changes purge.
+    {
+        int preload_extruder_count = 0;
+        const bool is_grouping_machine = preset_bundle->printers.get_edited_preset().config.support_different_extruders(preload_extruder_count);
+        toggle_line("preload_all_filaments", is_grouping_machine);
+        toggle_field("preload_all_filaments", is_grouping_machine && have_prime_tower);
+    }
+
     for (auto el : {"wall_filament", "outer_wall_filament", "sparse_infill_filament", "solid_infill_filament", "wipe_tower_filament"})
         toggle_line(el, !bSEMM);
 

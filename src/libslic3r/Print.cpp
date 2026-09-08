@@ -796,6 +796,7 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
             || opt_key == "textured_plate_temp" 
             || opt_key == "graphic_effect_plate_temp"
             || opt_key == "enable_prime_tower"
+            || opt_key == "preload_all_filaments"
             || opt_key == "prime_tower_width"
             || opt_key == "prime_tower_brim_width"
             || opt_key == "first_layer_print_sequence"
@@ -1804,6 +1805,13 @@ StringObjectException Print::validate(StringObjectException *warning, Polygons* 
                 if (! check_object_layers_fixed(print_object.slicing_parameters(), layers))
                     return {_u8L("Variable layer height is not supported with Organic supports.") };
         }
+
+    // H2 preload: the pre-changes purge into the prime tower, so refuse the combination up front
+    // rather than silently doing nothing. Points the user at enable_prime_tower.
+    if (m_config.preload_all_filaments.value && !m_config.enable_prime_tower.value)
+        return {L("\"Preload all filaments\" requires the prime tower: every filament is loaded and purged into it "
+                  "on the first layer. Enable the prime tower, or turn \"Preload all filaments\" off."),
+                nullptr, "enable_prime_tower"};
 
     if (this->has_wipe_tower() && ! m_objects.empty()) {
         // Make sure all extruders use same diameter filament and have the same nozzle diameter
