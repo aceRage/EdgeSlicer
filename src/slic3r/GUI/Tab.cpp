@@ -5576,7 +5576,7 @@ void TabPrinter::toggle_options()
         for (auto el : {"use_firmware_retraction", "use_relative_e_distances", "support_multi_bed_types", "pellet_modded_printer", "bed_mesh_max", "bed_mesh_min", "bed_mesh_probe_distance", "adaptive_bed_mesh_margin", "thumbnails"})
           toggle_line(el, !is_BBL_printer);
 
-        // "Unload filaments at end of print" is a Snapmaker tool-changer preference: the flag goes
+        // "Unload filaments after print" is a Snapmaker tool-changer preference: the flag goes
         // to the printer with the print start, and only that firmware's PRINT_END acts on it.
         toggle_line("unload_filaments_at_end", is_snapmaker_toolchanger(*m_config));
     }

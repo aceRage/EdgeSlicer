@@ -419,6 +419,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/RemoteSnapmaker.cpp
     GUI/RemoteSnapmaker.hpp
     GUI/SnapmakerLan.cpp
+    GUI/SnapmakerTaskConfig.hpp
+    GUI/SnapmakerTaskConfig.cpp
     GUI/SnapmakerLan.hpp
     GUI/RemoteHub.cpp
     GUI/RemoteHub.hpp

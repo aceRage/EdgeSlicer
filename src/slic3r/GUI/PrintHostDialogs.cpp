@@ -125,6 +125,21 @@ std::string PrintHostSendDialog::filament_mapping() const
     return out;
 }
 
+void PrintHostSendDialog::offer_unload_at_end(bool preset_default)
+{
+    m_offer_unload   = true;
+    m_unload_default = preset_default;
+}
+
+bool PrintHostSendDialog::unload_at_end() const
+{
+    // A plain Upload starts nothing, so there is no end of print to unload at; the flag would sit
+    // on the printer waiting for whatever job someone starts next.
+    if (!m_check_unload || post_upload_action != PrintHostPostUploadAction::StartPrint)
+        return false;
+    return m_check_unload->GetValue();
+}
+
 // The target first: which printer this plate is going to, before its file name. With one device it
 // is still shown - a farm of one is a farm, and the row says which address is about to be used.
 void PrintHostSendDialog::build_device_ui()
@@ -280,6 +295,18 @@ void PrintHostSendDialog::init()
     content_sizer->Add(txt_filename, 0, wxEXPAND);
     content_sizer->Add(label_dir_hint);
     content_sizer->AddSpacer(VERT_SPACING);
+
+    // Snapmaker tool changers: the printer's own PRINT_END unloads the filaments this job used, if
+    // it is told to before the job starts. The printer preset holds the default; this is where a
+    // single print overrides it, which is the only place a person actually decides it.
+    if (m_offer_unload) {
+        m_check_unload = new wxCheckBox(this, wxID_ANY, _L("Unload filaments after print"));
+        m_check_unload->SetValue(m_unload_default);
+        m_check_unload->SetToolTip(_L("The printer unloads the toolheads this print used once it has finished, "
+                                      "skipping any that holds a flexible filament. The printer preset sets the "
+                                      "default; this box changes it for this print only."));
+        content_sizer->Add(m_check_unload, 0, wxBOTTOM, VERT_SPACING);
+    }
     
     if (combo_groups != nullptr) {
         // Repetier specific: Show a selection of file groups.

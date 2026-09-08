@@ -764,7 +764,7 @@ bool metadata(const Device& d, const std::string& filename, long long& size, std
 // no request builder - and what u1hub sends (it ends with SDCARD_PRINT_FILE, which is what
 // /printer/print/start runs). server.files.start_local_print is in any case registered on the
 // printer's websocket and MQTT transports only: over HTTP it answers "Method not found".
-static bool gcode_script(const Device& d, const std::string& script, std::string& error)
+bool run_script(const Device& d, const std::string& script, std::string& error)
 {
     bool ok = false;
     Http::post(base_url(d) + "/printer/gcode/script?script=" + Http::url_encode(script))
@@ -895,16 +895,8 @@ std::string mapping_script(const std::vector<int>& mapping, bool unload_at_end)
     for (size_t i = 0; i < used.size(); ++i)
         script += (i ? "," : "") + std::to_string(used[i]);
     script += "\nSET_PRINT_PREFERENCES BED_LEVEL=0 FLOW_CALIBRATE=0 TIME_LAPSE_CAMERA=0";
-    // END_UNLOAD_FILAMENT is a per-toolhead list the firmware parses with ast.literal_eval, so it
-    // is a Python list literal with no spaces in it (a Klipper parameter value ends at a space).
-    // The firmware zeroes the whole array first, so the toolheads this job does not use are told
-    // "no" explicitly rather than inheriting whatever the last job left behind.
-    if (unload_at_end) {
-        script += " END_UNLOAD_FILAMENT=[";
-        for (int t = 0; t < TOOLHEAD_COUNT; ++t)
-            script += std::string(t ? "," : "") + (std::find(used.begin(), used.end(), t) != used.end() ? "1" : "0");
-        script += "]";
-    }
+    if (unload_at_end)
+        script += " " + end_unload_parameter(used);
     return script;
 }
 
@@ -913,7 +905,7 @@ bool start_print_mapped(const Device& d, const std::string& filename, const std:
 {
     const std::string script = mapping_script(mapping, unload_at_end);
     sent["mapping_script"]   = script;
-    if (!script.empty() && !gcode_script(d, script, error)) {
+    if (!script.empty() && !run_script(d, script, error)) {
         error = "the printer refused the toolhead mapping: " + error;
         return false;
     }

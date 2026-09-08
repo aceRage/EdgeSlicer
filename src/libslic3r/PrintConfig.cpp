@@ -1899,13 +1899,14 @@ void PrintConfigDef::init_fff_params()
     // SET_PRINT_PREFERENCES / SET_PRINT_TASK_PARAMETERS while print_stats.state is "printing" - so
     // it travels as a preset value the send path turns into END_UNLOAD_FILAMENT before the start.
     def = this->add("unload_filaments_at_end", coBool);
-    def->label = L("Unload filaments at end of print");
+    def->label = L("Unload filaments after print");
     def->tooltip = L("Ask the printer to unload the filaments this print used once it has finished "
                      "(Snapmaker tool changers only). The printer does the unloading itself, at the "
                      "end of its own PRINT_END routine, and skips any toolhead holding a flexible "
                      "filament. This is sent with the print, so it only applies to prints started "
-                     "from this slicer.");
-    def->mode = comAdvanced;
+                     "from this slicer. This is only the default: the Send G-code to printer host "
+                     "dialog can override it for a single print.");
+    def->mode = comSimple;
     def->set_default_value(new ConfigOptionBool(false));
 
     def             = this->add("printing_by_object_gcode", coString);

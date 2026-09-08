@@ -210,6 +210,7 @@
 #include "ImageFillDialog.hpp"
 #include "CloneDialog.hpp"
 #include "WebPreprintDialog.hpp"
+#include "SSWCP.hpp" // Ultra: the U1 send leaves its end-of-print unload choice for sw_SendGCodes
 
 #include "filamentsync/SyncConfirmDialog.hpp"
 #include "filamentsync/SyncFilamentColorDialog.hpp"
@@ -22533,6 +22534,16 @@ void Plater::send_gcode_legacy(int plate_idx, Export3mfProgressFn proFn, bool us
     const std::string printer_model = printer_model_opt ? printer_model_opt->value : std::string();
     const bool        connect_flow_active = wxGetApp().app_config->get("use_new_connect") == "true";
 
+    // "Unload filaments after print": the printer preset holds the default and the send dialog
+    // below overrides it for this print. Only a Snapmaker tool changer is offered it - nothing else
+    // has a firmware PRINT_END that acts on the flag.
+    const bool offer_unload_at_end = is_snapmaker_toolchanger(printer_config);
+    bool       unload_at_end_default = false;
+    if (offer_unload_at_end) {
+        const ConfigOptionBool* u = printer_config.option<ConfigOptionBool>("unload_filaments_at_end");
+        unload_at_end_default     = u != nullptr && u->value;
+    }
+
     if (PrintHostDevices::send_flow_for(printer_model, connect_flow_active) ==
         PrintHostDevices::SendFlow::SnapmakerConnect) {
         // firstly upload and open upload download dialog,
@@ -22572,8 +22583,11 @@ void Plater::send_gcode_legacy(int plate_idx, Export3mfProgressFn proFn, bool us
         auto                config = get_app_config();
         PrintHostSendDialog dlg(default_output_file, PrintHostPostUploadAction::StartPrint, groups, storage_paths, storage_names,
                                 config->get_bool("open_device_tab_post_upload"));
+        if (offer_unload_at_end)
+            dlg.offer_unload_at_end(unload_at_end_default);
         dlg.init();
         if (dlg.ShowModal() == wxID_CANCEL) {
+            SSWCP::set_pending_unload_at_end(false);
             return;
         }
         config->set_bool("open_device_tab_post_upload", dlg.switch_to_device_tab());
@@ -22582,7 +22596,15 @@ void Plater::send_gcode_legacy(int plate_idx, Export3mfProgressFn proFn, bool us
         upload_job.upload_data.post_action = dlg.post_action();
         upload_job.upload_data.group       = dlg.group();
         upload_job.upload_data.storage     = dlg.storage();
+        upload_job.unload_at_end           = dlg.unload_at_end();
 
+        // This path does not upload through the print-host queue: the bundled Device page below
+        // does the whole task-config-and-start conversation, and hands its script to the slicer
+        // over SSWCP. So the answer is left there for sw_SendGCodes to put on the printer's own
+        // SET_PRINT_PREFERENCES line, which is the only place the firmware will accept it (the
+        // command is refused once the print has begun). A plain Upload starts nothing and sends
+        // nothing: dlg.unload_at_end() is false unless the person pressed Upload and Print.
+        SSWCP::set_pending_unload_at_end(upload_job.unload_at_end);
 
         WebPreprintDialog* dialog = new WebPreprintDialog();
         dialog->set_swtich_to_device(dlg.switch_to_device_tab());
@@ -22653,6 +22675,8 @@ void Plater::send_gcode_legacy(int plate_idx, Export3mfProgressFn proFn, bool us
     PrintHostSendDialog dlg(default_output_file, upload_job.printhost->get_post_upload_actions(), groups, storage_paths, storage_names, config->get_bool("open_device_tab_post_upload"));
     dlg.set_devices(ph_model_key, ph_devices, ph_preselect);
     dlg.set_plate_filaments(plate_filaments_for_send(plate_idx));
+    if (offer_unload_at_end)
+        dlg.offer_unload_at_end(unload_at_end_default);
     dlg.init();
     if (dlg.ShowModal() == wxID_OK) {
         config->set_bool("open_device_tab_post_upload", dlg.switch_to_device_tab());
@@ -22687,6 +22711,7 @@ void Plater::send_gcode_legacy(int plate_idx, Export3mfProgressFn proFn, bool us
             } catch (...) {}
         }
         upload_job.filament_mapping        = dlg.filament_mapping();
+        upload_job.unload_at_end           = dlg.unload_at_end();
         upload_job.switch_to_device_tab    = dlg.switch_to_device_tab();
         upload_job.upload_data.upload_path = dlg.filename();
         upload_job.upload_data.post_action = dlg.post_action();

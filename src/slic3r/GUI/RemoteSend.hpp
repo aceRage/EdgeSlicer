@@ -37,6 +37,10 @@ struct Request
     // Snapmaker over the LAN: which toolhead prints which of the file's filaments,
     // "<filament>:<toolhead>,..." (0-based). Empty = the auto-match the printer's own app makes.
     std::string mapping;
+    // Snapmaker over the LAN: "unload the filaments this print used when it ends". Empty = the
+    // printer preset's own unload_filaments_at_end (or, for a reprint, what the archived send did);
+    // "1"/"0" overrides it for this send only, the way the desktop send dialog's checkbox does.
+    std::string unload_at_end;
     // Stage 2 (a reprint): the G-code archive record whose bytes are the payload. Set by
     // /api/archive/{id}/send only; a plate send leaves it empty.
     std::string record;
@@ -73,6 +77,9 @@ struct Prepared
     // ride in the G-code (the firmware refuses print_task_config commands while it is printing),
     // so it goes with the print start as END_UNLOAD_FILAMENT.
     bool                                    unload_at_end { false };
+    // Whether this printer can do it at all (is_snapmaker_toolchanger). The send sheet shows its
+    // toggle only when it can, and the dry run reports both so the sheet needs no second request.
+    bool                                    unload_supported { false };
     // Ultra: what the G-code archive records about this send, gathered on the GUI thread by
     // prepare() so run() only has to copy the file it uploaded.
     GcodeArchive::Meta archive_meta;

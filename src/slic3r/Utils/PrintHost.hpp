@@ -219,6 +219,12 @@ struct PrintHostJob
     // "0:1,1:2" - the plate's filament 0 goes in the printer's slot 1. Empty for every host that
     // reports no slots, which is most of them.
     std::string filament_mapping;
+    // Snapmaker tool changers: this print should end with the printer unloading the toolheads it
+    // used. The send dialog's checkbox, defaulted from the printer preset's
+    // unload_filaments_at_end and overridable per send. The flag cannot ride in the G-code (the
+    // firmware refuses print_task_config commands mid-print), so it goes on the
+    // SET_PRINT_PREFERENCES line the task-config script sends before the start.
+    bool        unload_at_end { false };
 
     PrintHostJob() {}
     PrintHostJob(const PrintHostJob&) = delete;
@@ -230,6 +236,7 @@ struct PrintHostJob
         , device_id(std::move(other.device_id))
         , device_name(std::move(other.device_name))
         , filament_mapping(std::move(other.filament_mapping))
+        , unload_at_end(other.unload_at_end)
     {}
 
     PrintHostJob(DynamicPrintConfig *config)
@@ -246,6 +253,7 @@ struct PrintHostJob
         device_id        = std::move(other.device_id);
         device_name      = std::move(other.device_name);
         filament_mapping = std::move(other.filament_mapping);
+        unload_at_end    = other.unload_at_end;
         return *this;
     }
 
