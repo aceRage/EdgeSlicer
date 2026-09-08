@@ -195,9 +195,9 @@ GLGizmoCut3D::GLGizmoCut3D(GLCanvas3D& parent, const std::string& icon_filename,
     m_connector_modes = { _u8L("Auto"), _u8L("Manual") };
 
     // NOTE: indexed by CutConnectorType, so the Undef slot has to be filled before FlexiJoint.
-    m_connector_types = { _u8L("Plug"), _u8L("Dowel"), _u8L("Snap"), "", _u8L("Flexi joint") };
+    m_connector_types = { _u8L("Plug"), _u8L("Dowel"), _u8L("Snap"), "", _u8L("Flexi") };
 
-    m_flexi_kinds = { _u8L("Double ring"), _u8L("Ball & socket") };
+    m_flexi_kinds = { _u8L("Double ring"), _u8L("Ball & socket"), _u8L("Chain link") };
 
     m_connector_styles = { _u8L("Prism"), _u8L("Frustum")
 //              , _u8L("Claw")
@@ -236,6 +236,12 @@ GLGizmoCut3D::GLGizmoCut3D(GLCanvas3D& parent, const std::string& icon_filename,
         {"Tilt"         , _u8L("Tilt allowance")},
         {"Ball radius"  , _u8L("Ball radius")},
         {"Opening"      , _u8L("Opening angle")},
+        {"Gap"          , _u8L("Gap")},
+        {"Link length"  , _u8L("Link length")},
+        {"Link width"   , _u8L("Link width")},
+        {"Wire"         , _u8L("Wire thickness")},
+        {"Link tilt"    , _u8L("Loop tilt")},
+        {"Stem"         , _u8L("Stem depth")},
     };
 
 //    update_connector_shape();
@@ -1293,6 +1299,24 @@ void GLGizmoCut3D::on_set_state()
     m_facet_picker.set_active(false); // never leave pick-face armed across open/close
     if (m_state == On) {
         m_parent.set_use_color_clip_plane(true);
+
+        // A Flexi joint forces "Cut to parts" and both "Keep" flags on for the duration of its
+        // cut. Those are plain gizmo members on a singleton, so without this they would stay
+        // forced after the cut and grey out "Add connectors" (which is disabled whenever
+        // keep-as-parts is set or either half is dropped) on every later cut - the bug the
+        // owner hit, where the connector option only came back after restarting the slicer.
+        // Opening the gizmo is the natural place to clear it: it is once per cut.
+        if (m_flexi_forced_after_cut) {
+            m_keep_as_parts        = false;
+            m_keep_upper           = true;
+            m_keep_lower           = true;
+            m_place_on_cut_upper   = false;
+            m_place_on_cut_lower   = false;
+            m_rotate_upper         = false;
+            m_rotate_lower         = false;
+            m_connector_type       = CutConnectorType::Plug;
+            m_flexi_forced_after_cut = false;
+        }
 
         update_bb();
         m_connectors_editing = !m_selected.empty();
@@ -2417,6 +2441,11 @@ void GLGizmoCut3D::sync_flexi_params(CutConnectors& connectors, bool resize_from
     const float floor_c = flexi_clearance_floor(double(flexi_nozzle_diameter()));
     if (m_flexi.clearance < floor_c)
         m_flexi.clearance = floor_c;
+    // The gap defaults per kind and can never close below the clearance.
+    if (m_flexi.gap <= 0.f)
+        m_flexi.gap = flexi_default_gap(m_flexi.kind);
+    if (m_flexi.gap < m_flexi.clearance)
+        m_flexi.gap = m_flexi.clearance;
 
     if (resize_from_section && m_flexi_auto_size)
         m_flexi = flexi_auto_size(m_flexi, flexi_section_inscribed_radius());
@@ -2470,27 +2499,53 @@ void GLGizmoCut3D::render_flexi_joint_inputs(CutConnectors& connectors)
     if (m_imgui->bbl_checkbox(_L("Auto size from the cut cross-section"), m_flexi_auto_size) && m_flexi_auto_size)
         sync_flexi_params(connectors, true);
 
-    m_imgui->disabled_begin(m_flexi_auto_size);
-        changed |= render_flexi_float_input(m_labels_map[m_flexi.kind == FlexiJointKind::DoubleRing ? "Outer radius" : "Ball radius"],
-                                            m_flexi.outer_radius, 0.6f, 60.f,
-                                            _L("Outer radius of the joint. Auto = 0.4 x the inscribed radius of the cut cross-section."));
-    m_imgui->disabled_end();
-
-    if (m_flexi.kind == FlexiJointKind::DoubleRing) {
-        changed |= render_flexi_float_input(m_labels_map["Ring width"], m_flexi.ring_width, 0.4f, 20.f,
-                                            _L("Radial thickness of the ring lip."));
-        changed |= render_flexi_float_input(m_labels_map["Ring height"], m_flexi.ring_height, 0.4f, 20.f,
-                                            _L("How far the ring lip reaches into the groove."));
+    if (m_flexi.kind == FlexiJointKind::ChainLink) {
+        m_imgui->disabled_begin(m_flexi_auto_size);
+            changed |= render_flexi_float_input(m_labels_map["Link length"], m_flexi.link_length, 1.f, 80.f,
+                                                _L("Overall length of each loop, along the loop's long axis."));
+            changed |= render_flexi_float_input(m_labels_map["Link width"], m_flexi.link_width, 1.f, 80.f,
+                                                _L("Overall width of each loop, across the loop. The loop's opening has to pass the other loop's wire."));
+            changed |= render_flexi_float_input(m_labels_map["Wire"], m_flexi.wire, 0.2f, 10.f,
+                                                _L("Tube radius of the wire each loop is made of."));
+            changed |= render_flexi_float_input(m_labels_map["Stem"], m_flexi.stem, 0.2f, 20.f,
+                                                _L("How deep each loop's far end is embedded in its own segment."));
+        m_imgui->disabled_end();
+        changed |= render_flexi_float_input(m_labels_map["Link tilt"], m_flexi.tilt_angle, 0.f, 30.f,
+                                            _L("How far the horizontal loop is tilted up out of the cut plane, in degrees, so its far end rises into the upper segment."));
     } else {
-        changed |= render_flexi_float_input(m_labels_map["Opening"], m_flexi.open_angle, 10.f, 75.f,
-                                            _L("Half angle of the socket mouth, in degrees. Smaller keeps the ball captive, larger gives more movement."));
+        m_imgui->disabled_begin(m_flexi_auto_size);
+            changed |= render_flexi_float_input(m_labels_map[m_flexi.kind == FlexiJointKind::DoubleRing ? "Outer radius" : "Ball radius"],
+                                                m_flexi.outer_radius, 0.6f, 60.f,
+                                                _L("Outer radius of the joint. Auto = 0.4 x the inscribed radius of the cut cross-section."));
+        m_imgui->disabled_end();
+
+        if (m_flexi.kind == FlexiJointKind::DoubleRing) {
+            changed |= render_flexi_float_input(m_labels_map["Ring width"], m_flexi.ring_width, 0.4f, 20.f,
+                                                _L("Radial thickness of the ring lip."));
+            changed |= render_flexi_float_input(m_labels_map["Ring height"], m_flexi.ring_height, 0.4f, 20.f,
+                                                _L("How far the ring lip reaches into the groove."));
+        } else {
+            changed |= render_flexi_float_input(m_labels_map["Opening"], m_flexi.open_angle, 10.f, 75.f,
+                                                _L("Half angle of the socket mouth, in degrees. Smaller keeps the ball captive, larger gives more movement."));
+        }
     }
 
     const float floor_c = flexi_clearance_floor(double(flexi_nozzle_diameter()));
     changed |= render_flexi_float_input(m_labels_map["Clearance"], m_flexi.clearance, floor_c, 2.f,
-                                        _L("Gap between every male face and the matching female face. The floor comes from the nozzle diameter of the active printer preset."));
-    changed |= render_flexi_float_input(m_labels_map["Tilt"], m_flexi.tilt, 0.f, 3.f,
-                                        _L("Extra headroom carved into the groove so the segment can rock."));
+                                        _L("Space left between the joint's moving surfaces so they do not fuse. The floor comes from the nozzle diameter of the active printer preset."));
+
+    // The GAP is the thickness of the cut itself: how far apart the two segments' flat faces
+    // end up. It applies to every joint kind, and it is what actually makes the segment bend -
+    // a joint whose faces nearly touch barely moves. It can never be smaller than the
+    // clearance.
+    if (m_flexi.gap <= 0.f)
+        m_flexi.gap = flexi_default_gap(m_flexi.kind);
+    changed |= render_flexi_float_input(m_labels_map["Gap"], m_flexi.gap, m_flexi.clearance, 20.f,
+                                        _L("Thickness of the cut: how far apart the two segments' faces end up. Each face is set back from the cut plane by half of it, and the joint bridges the gap. A larger gap makes the joint visibly more flexible; it can never be smaller than the clearance."));
+
+    if (m_flexi.kind != FlexiJointKind::ChainLink)
+        changed |= render_flexi_float_input(m_labels_map["Tilt"], m_flexi.tilt, 0.f, 3.f,
+                                            _L("Extra headroom carved into the groove so the segment can rock."));
 
     if (m_flexi.kind == FlexiJointKind::DoubleRing) {
         m_imgui->disabled_begin(m_flexi_auto_size);
@@ -2994,14 +3049,19 @@ void GLGizmoCut3D::render_cut_plane_input_window(CutConnectors &connectors, floa
 
             const bool flexi_placed = std::any_of(connectors.begin(), connectors.end(),
                                                   [](const CutConnector& c) { return c.attribs.type == CutConnectorType::FlexiJoint; });
+            // A Flexi joint forces keep-as-parts, but that force must NOT be written back into
+            // m_keep_as_parts: the gizmo is a singleton and that member outlives the cut, so a
+            // sticky `true` there disables "Add connectors" (and the Keep / Place on cut
+            // checkboxes) for every later cut until the app restarts. Show the forced value,
+            // keep the user's own setting intact, and let perform_cut() apply the force.
+            bool shown_keep_as_parts = flexi_placed ? true : m_keep_as_parts;
             m_imgui->disabled_begin(flexi_placed);
-            m_imgui->bbl_checkbox(_L("Cut to parts"), m_keep_as_parts);
+            if (m_imgui->bbl_checkbox(_L("Cut to parts"), shown_keep_as_parts) && !flexi_placed)
+                m_keep_as_parts = shown_keep_as_parts;
             m_imgui->disabled_end();
-            if (flexi_placed) {
-                m_keep_as_parts = true;
-                m_imgui->text(_L("A Flexi joint always keeps both halves as parts of one object."));
-            }
-            if (m_keep_as_parts) {
+            if (flexi_placed)
+                m_imgui->text(_L("A Flexi cut always keeps both halves as parts of one object."));
+            if (shown_keep_as_parts) {
                 m_keep_upper = m_keep_lower = true;
                 m_place_on_cut_upper = m_place_on_cut_lower = false;
                 m_rotate_upper = m_rotate_lower = false;
@@ -3602,6 +3662,10 @@ void GLGizmoCut3D::perform_cut(const Selection& selection)
         // two volumes) no matter what the Cut-to-parts / separate-objects checkboxes say.
         const bool has_flexi = std::any_of(mo->cut_connectors.begin(), mo->cut_connectors.end(),
                                            [](const CutConnector& c) { return c.attribs.type == CutConnectorType::FlexiJoint; });
+        // Remember it so on_set_state() can put the after-cut checkboxes (and the connector
+        // type) back to their defaults the next time the gizmo opens; see on_set_state().
+        if (has_flexi)
+            m_flexi_forced_after_cut = true;
         // update connectors pos as offset of its center before cut performing
         apply_connectors_in_model(cut_mo , dowels_count);
 

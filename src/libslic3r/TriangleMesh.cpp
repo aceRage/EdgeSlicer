@@ -1060,6 +1060,116 @@ indexed_triangle_set its_make_torus(double r, double h, double fa)
     return mesh;
 }
 
+indexed_triangle_set its_make_swept_loop(const std::vector<Vec3d> &path_in, double tube_r, int sectors)
+{
+    indexed_triangle_set mesh;
+    if (sectors < 3 || tube_r <= 0.)
+        return mesh;
+
+    // Drop consecutive duplicates (including the wrap-around pair).
+    std::vector<Vec3d> path;
+    path.reserve(path_in.size());
+    for (const Vec3d &p : path_in)
+        if (path.empty() || (p - path.back()).norm() > EPSILON)
+            path.emplace_back(p);
+    while (path.size() > 1 && (path.front() - path.back()).norm() <= EPSILON)
+        path.pop_back();
+    const size_t n = path.size();
+    if (n < 3)
+        return mesh;
+
+    // Tangent at each node: the normalized average of the two adjacent edge directions, so
+    // the cross-section stays perpendicular to the path through corners.
+    std::vector<Vec3d> tangent(n);
+    for (size_t i = 0; i < n; ++ i) {
+        const Vec3d prev = (path[i] - path[(i + n - 1) % n]).normalized();
+        const Vec3d next = (path[(i + 1) % n] - path[i]).normalized();
+        Vec3d       t    = prev + next;
+        if (t.norm() < EPSILON)
+            t = next;   // 180 degree reversal: fall back to the outgoing edge
+        tangent[i] = t.normalized();
+    }
+
+    // Parallel transport a reference vector around the loop (rotation-minimising frame).
+    auto any_perp = [](const Vec3d &t) {
+        const Vec3d a = std::abs(t.x()) < 0.9 ? Vec3d::UnitX() : Vec3d::UnitY();
+        return t.cross(a).normalized();
+    };
+    std::vector<Vec3d> u(n), v(n);
+    u[0] = any_perp(tangent[0]);
+    for (size_t i = 1; i < n; ++ i) {
+        // Rotate u[i-1] from tangent[i-1] onto tangent[i].
+        const Vec3d t0 = tangent[i - 1], t1 = tangent[i];
+        const Vec3d ax = t0.cross(t1);
+        Vec3d       up = u[i - 1];
+        const double s = ax.norm();
+        if (s > EPSILON) {
+            const double ang = std::atan2(s, t0.dot(t1));
+            up = Eigen::AngleAxisd(ang, ax / s) * up;
+        }
+        // Re-orthogonalize against drift.
+        up = (up - t1 * t1.dot(up));
+        if (up.norm() < EPSILON)
+            up = any_perp(t1);
+        u[i] = up.normalized();
+    }
+
+    // After going all the way round, u[0] transported back onto tangent[0] differs from the
+    // starting u[0] by a residual twist. Spread it linearly over the nodes so the seam closes.
+    double residual = 0.;
+    {
+        const Vec3d t0 = tangent[n - 1], t1 = tangent[0];
+        const Vec3d ax = t0.cross(t1);
+        Vec3d       up = u[n - 1];
+        const double s = ax.norm();
+        if (s > EPSILON) {
+            const double ang = std::atan2(s, t0.dot(t1));
+            up = Eigen::AngleAxisd(ang, ax / s) * up;
+        }
+        up = (up - t1 * t1.dot(up));
+        if (up.norm() > EPSILON) {
+            up = up.normalized();
+            const Vec3d w0 = tangent[0].cross(u[0]);
+            residual = std::atan2(w0.dot(up), u[0].dot(up));
+        }
+    }
+    for (size_t i = 0; i < n; ++ i) {
+        const double phi = -residual * double(i) / double(n);
+        const Vec3d  w   = tangent[i].cross(u[i]);
+        const Vec3d  uu  = std::cos(phi) * u[i] + std::sin(phi) * w;
+        u[i] = uu.normalized();
+        v[i] = tangent[i].cross(u[i]).normalized();
+    }
+
+    mesh.vertices.reserve(n * size_t(sectors));
+    for (size_t i = 0; i < n; ++ i)
+        for (int j = 0; j < sectors; ++ j) {
+            const double a = 2. * M_PI * double(j) / double(sectors);
+            mesh.vertices.emplace_back((path[i] + tube_r * (std::cos(a) * u[i] + std::sin(a) * v[i])).cast<float>());
+        }
+
+    mesh.indices.reserve(2 * n * size_t(sectors));
+    for (size_t i = 0; i < n; ++ i) {
+        const size_t i2 = (i + 1) % n;
+        for (int j = 0; j < sectors; ++ j) {
+            const int j2 = (j + 1) % sectors;
+            const int a  = int(i  * size_t(sectors)) + j;
+            const int b  = int(i  * size_t(sectors)) + j2;
+            const int c  = int(i2 * size_t(sectors)) + j2;
+            const int d  = int(i2 * size_t(sectors)) + j;
+            mesh.indices.emplace_back(Vec3i32(a, b, c));
+            mesh.indices.emplace_back(Vec3i32(a, c, d));
+        }
+    }
+
+    // Orient outward: a tube swept along a loop has positive volume when wound correctly.
+    if (its_volume(mesh) < 0.f)
+        for (Vec3i32 &f : mesh.indices)
+            std::swap(f[1], f[2]);
+
+    return mesh;
+}
+
 indexed_triangle_set its_make_revolved(const std::vector<Vec2d> &profile_rz, int sectors)
 {
     indexed_triangle_set mesh;
