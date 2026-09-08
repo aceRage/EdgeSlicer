@@ -2679,7 +2679,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                                 FlexiJointParams&       fj = connector.flexi;
                                 const int kind = connector_tree.get<int>("<xmlattr>.flexi_kind", int(def.kind));
                                 // Untrusted file content: clamp the enum before casting.
-                                fj.kind = (kind >= int(FlexiJointKind::DoubleRing) && kind <= int(FlexiJointKind::ChainLink)) ?
+                                fj.kind = (kind >= int(FlexiJointKind::DoubleRing) && kind <= int(FlexiJointKind::Hinge)) ?
                                           FlexiJointKind(kind) : def.kind;
                                 fj.outer_radius = connector_tree.get<float>("<xmlattr>.flexi_outer_radius", def.outer_radius);
                                 fj.ring_width   = connector_tree.get<float>("<xmlattr>.flexi_ring_width",   def.ring_width);
@@ -2696,6 +2696,14 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                                 fj.tilt_angle   = connector_tree.get<float>("<xmlattr>.flexi_tilt_angle",   def.tilt_angle);
                                 fj.stem         = connector_tree.get<float>("<xmlattr>.flexi_stem",         def.stem);
                                 fj.rotation     = connector_tree.get<float>("<xmlattr>.flexi_rotation",     def.rotation);
+                                // Untrusted file content: the knuckle count drives a loop, so clamp it.
+                                fj.hinge_knuckles    = std::max(1, std::min(9,
+                                                       connector_tree.get<int>("<xmlattr>.flexi_hinge_knuckles", def.hinge_knuckles)));
+                                fj.hinge_pin_dia     = connector_tree.get<float>("<xmlattr>.flexi_hinge_pin_dia",     def.hinge_pin_dia);
+                                fj.hinge_barrel_dia  = connector_tree.get<float>("<xmlattr>.flexi_hinge_barrel_dia",  def.hinge_barrel_dia);
+                                fj.hinge_length      = connector_tree.get<float>("<xmlattr>.flexi_hinge_length",      def.hinge_length);
+                                fj.hinge_edge_offset = connector_tree.get<float>("<xmlattr>.flexi_hinge_edge_offset", def.hinge_edge_offset);
+                                fj.hinge_fold_upper  = connector_tree.get<int>  ("<xmlattr>.flexi_hinge_fold_upper",  int(def.hinge_fold_upper)) != 0;
                                 connector.processed = connector_tree.get<int>("<xmlattr>.processed", 1) != 0;
                                 connector.has_flexi = true;
                             }
@@ -7540,6 +7548,15 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                         connectors_tree.put("<xmlattr>.flexi_tilt_angle",   fj.tilt_angle);
                         connectors_tree.put("<xmlattr>.flexi_stem",         fj.stem);
                         connectors_tree.put("<xmlattr>.flexi_rotation",     fj.rotation);
+                        // Hinge. A 3MF written before the hinge existed simply has none of
+                        // these, and the reader below falls back to the defaults - which are
+                        // themselves a valid 3-knuckle hinge.
+                        connectors_tree.put("<xmlattr>.flexi_hinge_knuckles",    fj.hinge_knuckles);
+                        connectors_tree.put("<xmlattr>.flexi_hinge_pin_dia",     fj.hinge_pin_dia);
+                        connectors_tree.put("<xmlattr>.flexi_hinge_barrel_dia",  fj.hinge_barrel_dia);
+                        connectors_tree.put("<xmlattr>.flexi_hinge_length",      fj.hinge_length);
+                        connectors_tree.put("<xmlattr>.flexi_hinge_edge_offset", fj.hinge_edge_offset);
+                        connectors_tree.put("<xmlattr>.flexi_hinge_fold_upper",  int(fj.hinge_fold_upper));
                     }
                 }
             }
