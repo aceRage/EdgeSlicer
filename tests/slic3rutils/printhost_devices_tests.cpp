@@ -118,15 +118,17 @@ TEST_CASE("PrintHostDevices: an id is stable across edits and reloads", "[PrintH
     REQUIRE(back.size() == 1);
     CHECK(back[0].id == id);
 
-    set_current(key, id);
-    CHECK(current(key) == id);
-    touch(key, id);
+    // last_used is a memory of where the last plate went, not a setting: it names the device and
+    // stamps that device's own timestamp in one go.
+    CHECK(last_used_id(key).empty()); // nothing was ever sent
+    set_last_used(key, id);
+    CHECK(last_used_id(key) == id);
     REQUIRE(find(key, id, found));
     CHECK(found.last_used > 0);
 
     REQUIRE(remove(key, id));
     CHECK(devices(key).empty());
-    CHECK(current(key).empty()); // the current device went with it
+    CHECK(last_used_id(key).empty()); // the memory went with the device
     CHECK_FALSE(remove(key, id));
 }
 
@@ -174,7 +176,7 @@ TEST_CASE("PrintHostDevices: a broken file reads as an empty list", "[PrintHostD
         store.write("{ this is not json ]]");
         CHECK(devices(key).empty());
         CHECK(all_devices().empty());
-        CHECK(current(key).empty());
+        CHECK(last_used_id(key).empty());
         // ... and writing to it repairs it rather than failing.
         Device      d = make_device("Left bay", "192.168.1.41");
         std::string error;
@@ -236,7 +238,9 @@ TEST_CASE("PrintHostDevices: a preset's own address becomes device 1, once", "[P
     CHECK(back[0].address == "192.168.1.41");
     CHECK(back[0].host_type == "elegoolink");
     CHECK(back[0].apikey == "secret");
-    CHECK(current(key) == back[0].id); // and it is what the preset points at
+    // An import is not a send: it does not make the imported device the model's last used one,
+    // because this feature has no "main printer" for it to become.
+    CHECK(last_used_id(key).empty());
     CHECK(devices("Voron 2.4").empty());
 
     // Idempotent: running it again changes nothing.
@@ -265,6 +269,33 @@ TEST_CASE("PrintHostDevices: a preset's own address becomes device 1, once", "[P
     CHECK(migrate_from_presets({ second }) == 1);
     REQUIRE(devices(key).size() == 1);
     CHECK(devices(key)[0].address == "192.168.1.55");
+}
+
+TEST_CASE("PrintHostDevices: a phase-1 store's \"current\" is read as the last used one", "[PrintHostDevices]")
+{
+    // Phase 1 wrote a model-level "current": the device whose address its "Use this device" button
+    // had copied into the preset. That button is gone, but the field is the best guess at "the one
+    // you last sent to", so it is still read - and replaced the next time a send happens.
+    ScopedStore store("phase1current");
+    const std::string key = "Elegoo Centauri Carbon";
+    store.write("{\"version\":1,\"models\":{\"" + key +
+                "\":{\"current\":\"dcafe\",\"devices\":[{\"id\":\"dcafe\",\"address\":\"192.168.1.41\"},"
+                "{\"id\":\"dbeef\",\"address\":\"192.168.1.42\"}]}}}");
+    CHECK(last_used_id(key) == "dcafe");
+
+    set_last_used(key, "dbeef");
+    CHECK(last_used_id(key) == "dbeef");
+    Device found;
+    REQUIRE(find(key, "dbeef", found));
+    CHECK(found.last_used > 0);
+
+    // config_for is what the send builds its job from: a copy, never the preset itself.
+    DynamicPrintConfig preset;
+    preset.opt_string("print_host", true) = "192.168.1.99";
+    REQUIRE(find(key, "dbeef", found));
+    const DynamicPrintConfig job = config_for(found, preset);
+    CHECK(job.opt_string("print_host") == "192.168.1.42");
+    CHECK(preset.opt_string("print_host") == "192.168.1.99"); // untouched
 }
 
 TEST_CASE("PrintHostDevices: the preset bridge writes the fields the send path reads", "[PrintHostDevices]")

@@ -243,18 +243,13 @@ void PhysicalPrinterDialog::build_printhost_settings(ConfigOptionsGroup* m_optgr
     };
 
     // Set a wider width for a better alignment
-    // Beside the single address above, the whole list of printers of this model. The editor here
-    // stays exactly as it was: choosing a device in that list writes its address into these same
-    // fields, so every send path keeps reading one preset (phase 1 of the devices feature).
+    // Beside the single address above, the whole list of printers of this model. That list never
+    // writes back into these fields: a send chooses one of its devices at send time, and this
+    // editor keeps editing the preset's own address, for whoever wants exactly that.
     auto print_host_devices = [=](wxWindow* parent) {
         auto sizer = create_sizer_with_btn(parent, &m_printhost_devices_btn, "printer_host_browser", _L("Devices") + " " + dots);
         m_printhost_devices_btn->SetToolTip(_L("Several printers of this model, by address"));
-        m_printhost_devices_btn->Bind(wxEVT_BUTTON, [this, m_optgroup](wxCommandEvent& e) {
-            if (show_print_host_devices_dialog(this, m_config)) {
-                m_optgroup->reload_config();
-                update();
-            }
-        });
+        m_printhost_devices_btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent& e) { show_print_host_devices_dialog(this, m_config); });
         return sizer;
     };
 

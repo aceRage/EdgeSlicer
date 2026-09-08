@@ -1306,7 +1306,7 @@ void list_hosts(json& printers, int plate)
     if (!bundle->use_bbl_network()) try {
         PrintHostDevices::migrate_from_presets(*bundle); // the preset's own address becomes device 1
         const std::string          model_key = PrintHostDevices::current_model_key(*bundle);
-        const std::string          selected  = PrintHostDevices::current(model_key);
+        const std::string          selected  = PrintHostDevices::last_used_id(model_key);
         const std::string          norm_url  = PrintHostDevices::normalize_address(url);
         for (const PrintHostDevices::Device& d : PrintHostDevices::devices(model_key)) {
             json p;
@@ -1319,8 +1319,13 @@ void list_hosts(json& printers, int plate)
             p["device_id"]    = d.id;
             p["model_key"]    = model_key;
             p["alias"]        = d.alias;
-            p["is_current"]   = (!selected.empty() && d.id == selected) ||
-                                (selected.empty() && !norm_url.empty() && PrintHostDevices::normalize_address(d.address) == norm_url);
+            // Not "the main printer" - the one the last plate went to, which is what the desktop
+            // send dialog and the Device tab preselect. Falls back to whichever device happens to
+            // carry the preset's own address when nothing was ever sent.
+            const bool is_last = (!selected.empty() && d.id == selected) ||
+                                 (selected.empty() && !norm_url.empty() && PrintHostDevices::normalize_address(d.address) == norm_url);
+            p["last_used"]    = is_last;
+            p["is_current"]   = is_last; // phase 1's name for it, kept so the phone's list still reads
             p["online"]       = true;   // no live status until describe_hosts answers for it
             p["status"]       = "unknown";
             p["can_upload"]   = false;  // phase 3 turns these on, with a real fan-out behind them

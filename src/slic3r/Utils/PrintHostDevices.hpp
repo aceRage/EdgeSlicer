@@ -101,19 +101,27 @@ bool                                            add(const std::string& model_key
 // collides with another one.
 bool                                            update(const std::string& model_key, const Device& d, std::string& error);
 bool                                            remove(const std::string& model_key, const std::string& id);
-// The device the preset currently points at, "" when none was ever chosen.
-std::string                                     current(const std::string& model_key);
-void                                            set_current(const std::string& model_key, const std::string& id);
-// Records that this device was just used (last_used).
-void                                            touch(const std::string& model_key, const std::string& id);
+// The device this model was last sent to, "" when none ever was. It is a *memory*, not a
+// setting: nothing about the preset changes with it, it only decides which row the send dialog
+// and the Device tab preselect. (Phase 1 called this "current" and let a button write the chosen
+// device into the preset; that made one device the model's main printer, which is exactly the
+// shape this feature exists to remove.)
+std::string                                     last_used_id(const std::string& model_key);
+// Records that this device was just used: the model's last_used_id and the device's own
+// last_used timestamp, together.
+void                                            set_last_used(const std::string& model_key, const std::string& id);
 
-// ---- the preset bridge (phase 1: the preset is still what every send path reads) ----
+// ---- config <-> device ----
 
 // Reads the host fields of a printer preset's config into a device (id and alias left empty).
 Device from_config(const DynamicPrintConfig& config);
-// Writes a device's address and credentials back into a printer preset's config, exactly the fields
-// the single-address host editor writes. Every existing send path keeps working unchanged.
+// Puts a device's address and credentials into a config - the fields PrintHost::get_print_host
+// reads. It is meant for a *copy* of the preset's config: the send builds one per device and hands
+// it to PrintHostJob, and the dialog's Test builds one to probe with. The preset itself is never
+// written to by this feature (phase 1's "Use this device" did, and no longer exists).
 void   apply_to_config(const Device& d, DynamicPrintConfig& config);
+// A copy of the printer preset's config with `d` applied - the one-liner every caller wanted.
+DynamicPrintConfig config_for(const Device& d, const DynamicPrintConfig& preset_config);
 
 // host_type as the config enum, defaulting to htOctoPrint for an unknown or empty key.
 PrintHostType host_type_enum(const std::string& key);

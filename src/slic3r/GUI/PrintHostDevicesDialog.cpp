@@ -179,13 +179,11 @@ PrintHostDevicesDialog::PrintHostDevicesDialog(wxWindow* parent, DynamicPrintCon
     m_btn_edit   = new wxButton(this, wxID_ANY, _L("Edit") + dots);
     m_btn_remove = new wxButton(this, wxID_ANY, _L("Remove"));
     m_btn_test   = new wxButton(this, wxID_ANY, _L("Test"));
-    m_btn_current = new wxButton(this, wxID_ANY, _L("Use this device"));
     auto* btn_close = new wxButton(this, wxID_CANCEL, _L("Close"));
     btns->Add(m_btn_add, 0, wxRIGHT, FromDIP(5));
     btns->Add(m_btn_edit, 0, wxRIGHT, FromDIP(5));
     btns->Add(m_btn_remove, 0, wxRIGHT, FromDIP(5));
     btns->Add(m_btn_test, 0, wxRIGHT, FromDIP(5));
-    btns->Add(m_btn_current, 0);
     btns->AddStretchSpacer();
     btns->Add(btn_close, 0);
     top->Add(btns, 0, wxEXPAND | wxALL, FromDIP(10));
@@ -198,7 +196,6 @@ PrintHostDevicesDialog::PrintHostDevicesDialog(wxWindow* parent, DynamicPrintCon
     m_btn_edit->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { on_edit(); });
     m_btn_remove->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { on_remove(); });
     m_btn_test->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { on_test(); });
-    m_btn_current->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { on_set_current(); });
     m_list->Bind(wxEVT_DATAVIEW_SELECTION_CHANGED, [this](wxDataViewEvent&) { update_buttons(); });
     m_list->Bind(wxEVT_DATAVIEW_ITEM_ACTIVATED, [this](wxDataViewEvent&) { on_edit(); });
 
@@ -212,13 +209,15 @@ void PrintHostDevicesDialog::reload()
 {
     const int keep = m_list->GetSelectedRow();
     m_devices      = PrintHostDevices::devices(m_model_key);
-    m_current      = PrintHostDevices::current(m_model_key);
+    m_last_used    = PrintHostDevices::last_used_id(m_model_key);
     m_list->DeleteAllItems();
     for (const Device& d : m_devices) {
         wxVector<wxVariant> row;
         wxString            name = from_u8(d.display_name());
-        if (!m_current.empty() && d.id == m_current)
-            name += " " + _L("(current)");
+        // Not "the current printer" - only where the last plate went, which is what the send
+        // dialog will preselect.
+        if (!m_last_used.empty() && d.id == m_last_used)
+            name += " " + _L("(last used)");
         row.push_back(wxVariant(name));
         row.push_back(wxVariant(from_u8(d.address)));
         row.push_back(wxVariant(host_type_label(d.host_type)));
@@ -245,7 +244,6 @@ void PrintHostDevicesDialog::update_buttons()
     m_btn_edit->Enable(has);
     m_btn_remove->Enable(has);
     m_btn_test->Enable(has);
-    m_btn_current->Enable(has && m_config != nullptr);
 }
 
 void PrintHostDevicesDialog::on_add()
@@ -283,11 +281,6 @@ void PrintHostDevicesDialog::on_edit()
         show_error(this, from_u8(error));
         return;
     }
-    // The device the preset points at was just renamed or readdressed: keep the preset in step.
-    if (m_config && edited.id == m_current) {
-        PrintHostDevices::apply_to_config(edited, *m_config);
-        m_config_changed = true;
-    }
     reload();
 }
 
@@ -315,8 +308,7 @@ void PrintHostDevicesDialog::on_test()
     }
     // The same test the single-address editor runs, against a copy of the preset's config with this
     // device's address and credentials in it - the preset itself is not touched.
-    DynamicPrintConfig cfg = *m_config;
-    PrintHostDevices::apply_to_config(d, cfg);
+    DynamicPrintConfig cfg = PrintHostDevices::config_for(d, *m_config);
     std::unique_ptr<PrintHost> host(PrintHost::get_print_host(&cfg, false));
     if (!host) {
         show_error(this, _L("Could not get a valid Printer Host reference"));
@@ -334,20 +326,6 @@ void PrintHostDevicesDialog::on_test()
         show_error(this, host->get_test_failed_msg(msg));
 }
 
-void PrintHostDevicesDialog::on_set_current()
-{
-    Device d;
-    if (!selected(d) || !m_config)
-        return;
-    // The phase-1 bridge: the preset stays the one address every send path reads, this only decides
-    // which device it holds. Phase 3 replaces it with a real fan-out over the whole list.
-    PrintHostDevices::apply_to_config(d, *m_config);
-    PrintHostDevices::set_current(m_model_key, d.id);
-    PrintHostDevices::touch(m_model_key, d.id);
-    m_config_changed = true;
-    reload();
-}
-
 void PrintHostDevicesDialog::on_dpi_changed(const wxRect& suggested_rect)
 {
     const int em = GetTextExtent("m").x;
@@ -355,11 +333,11 @@ void PrintHostDevicesDialog::on_dpi_changed(const wxRect& suggested_rect)
     Refresh();
 }
 
-bool show_print_host_devices_dialog(wxWindow* parent, DynamicPrintConfig* config)
+void show_print_host_devices_dialog(wxWindow* parent, DynamicPrintConfig* config)
 {
     PresetBundle* bundle = wxGetApp().preset_bundle;
     if (!bundle)
-        return false;
+        return;
     // First time this model is looked at, the preset's own address becomes device 1.
     try {
         PrintHostDevices::migrate_from_presets(*bundle);
@@ -370,7 +348,6 @@ bool show_print_host_devices_dialog(wxWindow* parent, DynamicPrintConfig* config
     PrintHostDevicesDialog dlg(parent, config ? config : &bundle->printers.get_edited_preset().config, key,
                                from_u8(label.empty() ? preset.name : label));
     dlg.ShowModal();
-    return dlg.config_changed();
 }
 
 } // namespace GUI
