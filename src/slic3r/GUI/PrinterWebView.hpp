@@ -26,6 +26,14 @@
 #include "wx/textctrl.h"
 #include <wx/timer.h>
 
+#include <string>
+#include <vector>
+
+#include "../Utils/PrintHostDevices.hpp"
+
+class wxChoice;
+class wxStaticText;
+
 
 namespace Slic3r {
 namespace GUI {
@@ -48,12 +56,27 @@ public:
     void sendMessage(const std::string& msg);
     wxWebView* get_browser() const { return m_browser; }
 
+    // The printers of this model, by address. With more than nothing in the list the tab grows a
+    // picker above the page and shows whichever device is chosen there, rather than always the one
+    // address the preset happens to hold. An empty list hides the picker again (a Bambu or
+    // Snapmaker printer, or a model with no devices), which is what the tab did before.
+    void set_devices(const std::string& model_key, const std::vector<PrintHostDevices::Device>& devices, const std::string& select_id);
+    // The device the picker is on, "" when there is none.
+    std::string picked_device() const;
+
 private:
     void SendAPIKey();
+    // Loads the picked device's web UI. Uses the preset's print_host_webui only for the device that
+    // carries the preset's own address: that override is a property of that one machine's URL.
+    void load_picked_device();
 
     wxWebView* m_browser;
     long m_zoomFactor;
     wxString m_apikey;
+    wxPanel*      m_device_bar { nullptr };
+    wxChoice*     m_device_choice { nullptr };
+    std::string   m_model_key;
+    std::vector<PrintHostDevices::Device> m_devices;
 
     // DECLARE_EVENT_TABLE()
 };

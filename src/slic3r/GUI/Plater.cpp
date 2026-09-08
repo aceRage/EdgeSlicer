@@ -198,6 +198,7 @@
 
 #include "PhysicalPrinterDialog.hpp"
 #include "PrintHostDevicesDialog.hpp"
+#include "PrinterWebView.hpp"
 #include "PrintHostDialogs.hpp"
 #include "PlateSettingsDialog.hpp"
 #include "DailyTips.hpp"
@@ -3731,6 +3732,26 @@ void Sidebar::update_all_preset_comboboxes(bool reload_printer_view)
         if (!use_new_connection && !is_snapmaker_u1 && reload_printer_view) {
 
             p->combo_printer->set_show_connection_button(true);
+            // The printers of this model, by address. The Device tab follows whichever one the picker
+            // above the page is on (the last one sent to, or the first), instead of always the one
+            // address the preset holds; and Print is a send whenever any of them has an address,
+            // even when the preset's own print_host is empty.
+            std::vector<PrintHostDevices::Device> ph_devices;
+            std::string                          ph_model_key, ph_pick;
+            try {
+                PrintHostDevices::migrate_from_presets(preset_bundle);
+                ph_model_key = PrintHostDevices::current_model_key(preset_bundle);
+                ph_devices   = PrintHostDevices::devices(ph_model_key);
+                ph_pick      = PrintHostDevices::last_used_id(ph_model_key);
+            } catch (...) {}
+            const PrintHostDevices::Device* ph_picked = nullptr;
+            for (const PrintHostDevices::Device& d : ph_devices)
+                if (!ph_pick.empty() && d.id == ph_pick)
+                    ph_picked = &d;
+            if (!ph_picked && !ph_devices.empty())
+                ph_picked = &ph_devices.front();
+            ph_pick = ph_picked ? ph_picked->id : std::string();
+
             wxString url = cfg.opt_string("print_host_webui").empty() ? cfg.opt_string("print_host") : cfg.opt_string("print_host_webui");
             wxString apikey;
             if (url.empty()) {
@@ -3750,8 +3771,25 @@ void Sidebar::update_all_preset_comboboxes(bool reload_printer_view)
                     url = wxString::FromUTF8(LOCALHOST_URL + std::to_string(wxGetApp().get_page_http_port()) + "/web/flutter_web/index.html?path=3");
                 }
             }
-            
+
+            // The picked device wins over the preset's address. print_host_webui is an override for
+            // the preset's own address, so it survives only for the device that carries it.
+            if (ph_picked && !ph_picked->address.empty()) {
+                const std::string webui = cfg.opt_string("print_host_webui");
+                const bool        is_preset_address = PrintHostDevices::normalize_address(cfg.opt_string("print_host")) ==
+                                               PrintHostDevices::normalize_address(ph_picked->address);
+                std::string device_url = (is_preset_address && !webui.empty()) ? webui : ph_picked->address;
+                url                    = from_u8(device_url);
+                if (!url.Lower().starts_with("http"))
+                    url = wxString::Format("http://%s", url);
+                apikey         = from_u8(ph_picked->apikey);
+                print_btn_type = preset_bundle.is_bbl_vendor() ? MainFrame::PrintSelectType::ePrintPlate :
+                                                                 MainFrame::PrintSelectType::eSendGcode;
+            }
+
             p_mainframe->load_printer_url(url, apikey);
+            if (p_mainframe->m_printer_view)
+                p_mainframe->m_printer_view->set_devices(ph_model_key, ph_devices, ph_pick);
             is_sm_page = false;
 
             p_mainframe->set_print_button_to_default(print_btn_type);
