@@ -197,6 +197,7 @@
 #include "nlohmann/json.hpp"
 
 #include "PhysicalPrinterDialog.hpp"
+#include "PrintHostDevicesDialog.hpp"
 #include "PrintHostDialogs.hpp"
 #include "PlateSettingsDialog.hpp"
 #include "DailyTips.hpp"
@@ -2368,9 +2369,10 @@ Sidebar::Sidebar(Plater *parent)
             });
         
         combo_printer->bind_connection_button_handler([this]() {
-                wxGetApp().sm_disconnect_current_machine();
-                PhysicalPrinterDialog dlg(this->GetParent());
-                dlg.ShowModal();
+                // The printers of this model, by address - not the single-address editor. That one
+                // is still one click away, behind "Edit connection..." inside this dialog; it used
+                // to open unasked, which made a farm look like one printer's settings page.
+                show_print_host_devices_dialog(this->GetParent());
             });
 
         combo_printer->bind_machine_connecting_button_handler([this]() {

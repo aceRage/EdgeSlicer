@@ -7,7 +7,7 @@
 #include "GUI_Utils.hpp"
 #include "../Utils/PrintHostDevices.hpp"
 
-class wxButton;
+class Button;
 class wxDataViewListCtrl;
 class wxStaticText;
 
@@ -41,6 +41,9 @@ private:
     void on_edit();
     void on_remove();
     void on_test();
+    // The old single-address editor (PhysicalPrinterDialog), behind an explicit click. Nothing
+    // else opens it any more: the sidebar's connection icon lands on this list instead.
+    void on_edit_connection();
     void update_buttons();
     // The device the row is on, false when nothing is selected.
     bool selected(PrintHostDevices::Device& out) const;
@@ -51,10 +54,12 @@ private:
     std::string                             m_last_used;
 
     wxDataViewListCtrl* m_list { nullptr };
-    wxButton*           m_btn_add { nullptr };
-    wxButton*           m_btn_edit { nullptr };
-    wxButton*           m_btn_remove { nullptr };
-    wxButton*           m_btn_test { nullptr };
+    Button*             m_btn_add { nullptr };
+    Button*             m_btn_edit { nullptr };
+    Button*             m_btn_remove { nullptr };
+    Button*             m_btn_test { nullptr };
+    Button*             m_btn_connection { nullptr };
+    Button*             m_btn_close { nullptr };
 };
 
 // Opens the dialog for the printer preset that is selected right now, after importing that preset's
