@@ -667,6 +667,10 @@ public:
     static void set_pending_unload_at_end(bool on);
     static bool pending_unload_at_end();
     static void clear_pending_unload_at_end();
+    // Whether a send dialog made that choice for the print about to start. When none did (the
+    // Device page started the print on its own, or the file was merely uploaded earlier), the
+    // printer preset's default decides instead.
+    static bool unload_at_end_decided();
     // True once the flag really went out with a print's task-config script. Each sw_ call is its
     // own instance, so the send that amends the script and the sw_FinishPreprint that archives the
     // file cannot share a member; the archive sidecar reads this.
@@ -708,6 +712,7 @@ private:
     static constexpr std::chrono::milliseconds DEFAULT_INSTANCE_TIMEOUT{80000}; // Default timeout (8s)
 
     static bool m_pending_unload_at_end;    // the send dialog's "unload when the print ends"
+    static bool m_unload_at_end_decided;    // and whether a dialog actually made that choice
     static bool m_unload_at_end_was_sent;   // and whether it actually reached the printer
     static std::string m_active_gcode_filename; // name of the file which is pretend to be upload and print
     static std::string m_display_gcode_filename; // name for display

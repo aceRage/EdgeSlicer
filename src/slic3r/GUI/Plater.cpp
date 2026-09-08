@@ -22587,7 +22587,7 @@ void Plater::send_gcode_legacy(int plate_idx, Export3mfProgressFn proFn, bool us
             dlg.offer_unload_at_end(unload_at_end_default);
         dlg.init();
         if (dlg.ShowModal() == wxID_CANCEL) {
-            SSWCP::set_pending_unload_at_end(false);
+            SSWCP::clear_pending_unload_at_end();
             return;
         }
         config->set_bool("open_device_tab_post_upload", dlg.switch_to_device_tab());
@@ -22604,7 +22604,10 @@ void Plater::send_gcode_legacy(int plate_idx, Export3mfProgressFn proFn, bool us
         // SET_PRINT_PREFERENCES line, which is the only place the firmware will accept it (the
         // command is refused once the print has begun). A plain Upload starts nothing and sends
         // nothing: dlg.unload_at_end() is false unless the person pressed Upload and Print.
-        SSWCP::set_pending_unload_at_end(upload_job.unload_at_end);
+        if (dlg.post_action() == PrintHostPostUploadAction::StartPrint)
+            SSWCP::set_pending_unload_at_end(upload_job.unload_at_end);
+        else
+            SSWCP::clear_pending_unload_at_end(); // a later start from the Device page follows the preset
 
         WebPreprintDialog* dialog = new WebPreprintDialog();
         dialog->set_swtich_to_device(dlg.switch_to_device_tab());

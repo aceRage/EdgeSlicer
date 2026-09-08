@@ -2320,7 +2320,20 @@ void SSWCP_MachineOption_Instance::sw_SendGCodes() {
             // to be one more parameter on that existing SET_PRINT_PREFERENCES line, because the
             // firmware refuses a second one once the print has begun. Only a script that actually
             // carries those macros is touched, so a page sending anything else is untouched.
-            if (SSWCP::pending_unload_at_end()) {
+            //
+            // When no send dialog made the choice - the Device page started a print on its own, or
+            // the file was uploaded earlier and started from the printer's list - the printer
+            // preset's "Unload filaments after print" decides, for a Snapmaker tool changer only.
+            bool want_unload = SSWCP::pending_unload_at_end();
+            if (!SSWCP::unload_at_end_decided()) {
+                want_unload = false;
+                if (PresetBundle* bundle = wxGetApp().preset_bundle) {
+                    const DynamicPrintConfig& pcfg = bundle->printers.get_edited_preset().config;
+                    const ConfigOptionBool*   u    = pcfg.option<ConfigOptionBool>("unload_filaments_at_end");
+                    want_unload = u != nullptr && u->value && is_snapmaker_toolchanger(pcfg);
+                }
+            }
+            if (want_unload) {
                 bool amended = false;
                 for (std::string& code : str_codes) {
                     const std::string with = SnapmakerLan::with_end_unload(code);
@@ -7137,6 +7150,7 @@ TimeoutMap<SSWCP_Instance*, std::shared_ptr<SSWCP_Instance>> SSWCP::m_instance_l
 constexpr std::chrono::milliseconds SSWCP::DEFAULT_INSTANCE_TIMEOUT;
 
 bool SSWCP::m_pending_unload_at_end = false;
+bool SSWCP::m_unload_at_end_decided = false;
 bool SSWCP::m_unload_at_end_was_sent = false;
 std::string SSWCP::m_active_gcode_filename = "";
 std::string SSWCP::m_display_gcode_filename = "";
@@ -7544,14 +7558,21 @@ void SSWCP::update_active_filename(const std::string& filename)
 void SSWCP::set_pending_unload_at_end(bool on)
 {
     m_pending_unload_at_end  = on;
+    m_unload_at_end_decided  = true;
     m_unload_at_end_was_sent = false; // a fresh send has not sent anything yet
 }
 bool SSWCP::pending_unload_at_end() { return m_pending_unload_at_end; }
-void SSWCP::clear_pending_unload_at_end() { m_pending_unload_at_end = false; }
+bool SSWCP::unload_at_end_decided() { return m_unload_at_end_decided; }
+void SSWCP::clear_pending_unload_at_end()
+{
+    m_pending_unload_at_end = false;
+    m_unload_at_end_decided = false;
+}
 void SSWCP::note_unload_at_end_sent()
 {
     m_unload_at_end_was_sent = true;
     m_pending_unload_at_end  = false; // the choice belongs to the print it was made for
+    m_unload_at_end_decided  = false;
 }
 bool SSWCP::unload_at_end_was_sent() { return m_unload_at_end_was_sent; }
 
