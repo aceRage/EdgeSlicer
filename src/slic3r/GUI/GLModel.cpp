@@ -475,6 +475,66 @@ void GLModel::init_from(const indexed_triangle_set& its)
     }
 }
 
+bool GLModel::can_update_triangles_in_place() const
+{
+    const Geometry& data = m_render_data.geometry;
+    return m_render_data.vbo_id != 0
+        && m_render_data.vertices_count > 0
+        && data.format.type == Geometry::EPrimitiveType::Triangles
+        && data.format.vertex_layout == Geometry::EVertexLayout::P3N3
+        // send_to_gpu() drops the CPU side copy; if it is still here the model has
+        // not been uploaded yet and there is nothing to patch.
+        && data.vertices.empty();
+}
+
+bool GLModel::update_triangles_in_place(const indexed_triangle_set& its, const std::vector<uint32_t>& triangle_ids)
+{
+    if (!can_update_triangles_in_place())
+        return false;
+    // The buffer holds three unshared vertices per triangle, in triangle order.
+    if (m_render_data.vertices_count != 3 * its.indices.size())
+        return false;
+    if (triangle_ids.empty())
+        return true;
+
+    static constexpr size_t floats_per_triangle = 18; // 3 vertices * (3 position + 3 normal)
+    static constexpr size_t bytes_per_triangle  = floats_per_triangle * sizeof(float);
+
+    std::vector<float> payload;
+    glsafe(::glBindBuffer(GL_ARRAY_BUFFER, m_render_data.vbo_id));
+    size_t run_start = 0;
+    while (run_start < triangle_ids.size()) {
+        // Coalesce consecutive triangle ids into one upload.
+        size_t run_end = run_start + 1;
+        while (run_end < triangle_ids.size() && triangle_ids[run_end] == triangle_ids[run_end - 1] + 1)
+            ++run_end;
+        const size_t count = run_end - run_start;
+        payload.clear();
+        payload.reserve(count * floats_per_triangle);
+        for (size_t i = run_start; i < run_end; ++i) {
+            const stl_triangle_vertex_indices face = its.indices[triangle_ids[i]];
+            const stl_vertex vertex[3] = { its.vertices[face[0]], its.vertices[face[1]], its.vertices[face[2]] };
+            const stl_vertex n = face_normal_normalized(vertex);
+            for (size_t j = 0; j < 3; ++j) {
+                payload.emplace_back(vertex[j].x());
+                payload.emplace_back(vertex[j].y());
+                payload.emplace_back(vertex[j].z());
+                payload.emplace_back(n.x());
+                payload.emplace_back(n.y());
+                payload.emplace_back(n.z());
+                m_bounding_box.merge(vertex[j].cast<double>());
+            }
+        }
+        glsafe(::glBufferSubData(GL_ARRAY_BUFFER,
+                                 static_cast<GLintptr>(size_t(triangle_ids[run_start]) * bytes_per_triangle),
+                                 static_cast<GLsizeiptr>(count * bytes_per_triangle),
+                                 payload.data()));
+        run_start = run_end;
+    }
+    glsafe(::glBindBuffer(GL_ARRAY_BUFFER, 0));
+    return true;
+}
+
 void GLModel::init_from(const Polygons& polygons, float z)
 {
     if (is_initialized()) {
