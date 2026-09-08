@@ -258,22 +258,203 @@ domain and DO survive as embedded project config, which is why only `solid_infil
 for a clean band pattern, `solid_infill_direction`/`top_surface_pattern`) needed the CLI-argument
 route. `snorca_hubtest/slice_barb3.py` has the final recipe.
 
-## What step 5 still needs
+## Step 5 (this session): the GUI checkbox, the transform fix, and closing the doc
 
-- **The GUI checkbox**: "Nozzle-resolution dither (top surfaces)" - no GUI work was done this
-  session; `ImageWeighted` is reachable today only by hand-constructing a `MixedFilament` row
-  (as the `[barb3]` test does) or by editing a project's `mixed_filament_definitions` string
-  directly. The dialog needs a way to set `distribution_mode = ImageWeighted` and populate
-  `image_fill_ref` from the existing Image Fill flow's own asset/projection picker.
-- **Doc completion**: this file. Also worth a follow-up note in the plan's own Phase 3 acceptance
-  section once step 5 lands, since the plan's "GUI check - preview shows the dither" line is still
-  open (see "What is NOT wired" above).
-- **The identity-matrix assumption**: worth either enforcing (skip the split with a clear reason
-  when the picked volume's matrix is non-identity, or when there is more than one model-part
-  volume) or properly generalising (look up the actual owning `ModelVolume` for a given
-  `LayerRegion`/`PrintRegion`, the way `PrintObjectRegions` does for painted regions) before this
-  ships to real multi-volume parts.
-- **Ironing and Arachne-pattern top surfaces**: both currently fall back silently to the
-  un-split `resolve()` cycle; worth deciding whether that is acceptable shipped behaviour or
-  whether ironing specifically should be wired the same way top solid infill was.
-- **Preview**: the 3D view does not yet reflect per-run colours for an image-row surface.
+### User flow
+
+1. Select a part (or a volume within it), open **Right-click > Apply image fill...** (the Phase 2
+   dialog, `ImageFillDialog`).
+2. Pick an image (or a gradient), a projection, the filaments it may use, and Detail (mm) exactly
+   as Phase 2 already worked - none of that changed.
+3. Tick **"Nozzle-resolution dither (top surfaces)"**. Its tooltip says exactly what it does and
+   does not cover (see "Limits" below).
+4. Press **Apply**. `Plater::apply_image_fill()` (Plater.cpp):
+   - always runs Phase 2's facet fill (`image_fill_apply()`) first, tick or no tick - a slicer that
+     never reads the image row still gets a correct, if coarser, result;
+   - if the box is ticked, creates (first time) or updates (re-apply) one `MixedFilament` row on
+     the project: `distribution_mode = ImageWeighted`, `gradient_component_ids` = the dialog's
+     allowed-filament list, `image_fill_ref` = the applied `ImageFillParams`, `enabled = true`;
+     then sets the PART's own `solid_infill_filament` (a per-volume config override, the same key
+     `image_row_configured_virtual_id()` reads at slice time) to that row's virtual id;
+   - if the box is unticked and the part was previously bound to an ImageWeighted row, erases the
+     part's `solid_infill_filament` override - the row itself is left in
+     `mixed_filament_definitions` untouched (it may be used by another part, or the user may want
+     to keep it for later; step 5 does not attempt "is anyone still using this row" cleanup);
+   - persists the row change to `mixed_filament_definitions` (both the live print config and
+     `PresetBundle::project_config`) and calls `Sidebar::update_mixed_filament_panel(false)`, the
+     same call other programmatic mixed-row edits in this file use - the new/updated row appears
+     in the sidebar's Mixed Filaments panel exactly like a row added via "Add Gradient"/"Add
+     Pattern"/"Add Color", with its own colour chip and summary line.
+5. Re-opening the dialog on a part already bound to an enabled ImageWeighted row starts with the
+   checkbox already ticked (`ImageFillDialog`'s new `initial_image_row` constructor argument,
+   worked out by `Plater::apply_image_fill()` from the part's current `solid_infill_filament`
+   before the dialog is constructed) - the same promise `initial` already made for the projection
+   controls.
+
+New public API used by the above, added this session: `MixedFilamentManager::
+filament_id_from_mixed_index()` (MixedFilament.hpp/.cpp) - the inverse of the pre-existing
+`mixed_index_from_filament_id()`, needed because the GUI knows a just-created row's position in
+the manager's own vector but not, without walking every row before it, which virtual id that
+resolves to. Unit-tested in test_mixed_filament.cpp.
+
+### The instance/volume transform fix (item 2)
+
+Reading `image_row_context_for_region()`'s own step-4 code turned up that the "identity-matrix
+assumption" it documented was two different claims bundled together, only one of which was
+actually a gap:
+
+- **The shared instance rotation/scale was ALREADY correct before this session.** Every
+  `PrintObject` is built from instances that share one rotation/scale (`PrintObject::trafo()`,
+  set from `PrintInstances::trafo` at construction - `PrintApply.cpp`), so
+  `object.trafo_centered()` already reflected it. There was nothing to fix here; step 5 adds
+  `tests/libslic3r/test_image_row_transform.cpp`'s first case (a plaque on a 90-degree-rotated
+  instance) to actually pin the claim instead of leaving it asserted-but-untested.
+- **The volume's own local matrix (`ModelVolume::get_matrix()`) really was ignored**, and so was
+  which volume a multi-volume object's region should even read (the code always took the
+  object's FIRST `is_model_part()` volume, regardless of which `PrintRegion` was asking). Fixed
+  by two changes in `src/libslic3r/Fill/Fill.cpp`:
+  - `image_row_owning_volume()` (new): resolves the ACTUAL `ModelVolume` backing a given
+    `PrintRegion`, via `PrintObjectRegions::layer_ranges[].volume_regions` - the same volume<->
+    region map `PrintObjectRegions` already builds for painted-region resolution. Falls back to
+    the old "first model-part volume" behaviour when the map does not (yet) know the region, so
+    the single-volume case that step 4's Bar A/B verified is unaffected.
+  - `image_row_context_for_region()`'s `mesh_from_print` is now `(object.trafo_centered() *
+    mv->get_matrix()).inverse()`, the same composition `PrintObject.cpp` already uses for
+    facet-modifier slicing (its `slice_mesh_slabs()` calls), instead of `trafo_centered()` alone.
+  - `image_row_configured_virtual_id()` and `image_row_context_for_region()` both now take the
+    `PrintRegion&` itself (not just its `PrintRegionConfig`), so the owning-volume lookup has a
+    `PrintRegion*` to match against `volume_regions[].region`.
+  - `tests/libslic3r/test_image_row_transform.cpp`'s second case is the regression guard: two
+    model-part volumes in one object, each with its own local offset (70 mm apart - more than
+    either plaque's own 50 mm span, so a wrong transform or wrong-volume resolution cannot
+    coincidentally land inside the right box, but small enough that the combined footprint still
+    fits the bare `full_print_config()` bed) and its own `ImageWeighted` row, plus different
+    `wall_loops` so the two stay separate `PrintRegion`s (see the unit-tests bullet under
+    "Proofs" for why that last part is needed - without it `Layer::is_perimeter_compatible()`
+    merges them). If either volume resolution or the matrix composition regressed, the second
+    plaque's sample points would land nowhere near its own mesh bounding box and its top surface
+    would silently fall back to the un-split `resolve()` cycle (zero
+    `image_row_extruder_1based`-tagged entities, or a single degenerate colour) - the test
+    asserts every top-solid entity that exists for BOTH regions is fully split (none partially)
+    and genuinely multi-coloured.
+
+**Still not fixed** (documented, not attempted this session - see Fill.cpp's own updated header
+comment): sample spacing and run-length cuts still treat mesh-space arc length as equal to
+print-space arc length, exact only for a uniform-scale transform. A non-uniformly scaled volume
+or instance would sample at a slightly wrong density and cut runs at slightly wrong lengths; it
+would not crash or land colours grossly wrong. Neither Bar A/B nor the new transform tests use a
+non-uniform scale.
+
+### Ironing and Arachne-pattern top surfaces (item 3): documented, not wired
+
+Chose **document, don't wire** for both, for the reason the phase-3 doc already gave for leaving
+step 4 as it was: ironing's own fill loop (`Layer::make_ironing()`) has different geometry
+semantics from `Layer::make_fills()`'s (thin cover lines, one extruder per ironed region, not a
+polyline to re-sample per-run), and a Concentric-family (or other Arachne-driven) top surface
+pattern never produces a plain `ExtrusionPath` for `split_top_infill_by_image_row()` to cut in
+the first place - wiring either properly would be a materially different, separately-scoped
+change, not a step-5-sized addition to an already-large session.
+
+What ships instead:
+- The dialog's checkbox tooltip says, verbatim, "Top solid infill only: ironing and any top
+  surface pattern that is not Rectilinear or Monotonic (Concentric-family patterns, in
+  particular) are not affected by this option and keep using the coarser per-layer colour cycle
+  a mixed filament normally uses."
+- Two new one-time log lines (`BOOST_LOG_TRIVIAL(warning)`, each gated by its own
+  `std::atomic<bool>` so it fires once per process, not once per layer) in Fill.cpp:
+  `log_image_row_ironing_not_split_once()` (fires when an ImageWeighted row's ironing pass would
+  run) and `log_image_row_pattern_not_split_once()` (fires the first time
+  `split_top_infill_by_image_row()` meets a top-solid-infill child that is not a plain
+  `ExtrusionPath` - i.e. an Arachne/Concentric-family pattern).
+
+### Preview (item 4): already correct, verified rather than changed
+
+The 3D preview's "Filament"/tool colour view is driven entirely by `GCodeProcessor::process_T()`
+reading live `T<n>` commands out of the G-code (`m_extruder_id` / `m_cp_color`,
+GCodeProcessor.cpp) - it has no idea an `ExtrusionEntityCollection` exists, let alone that one
+carries `image_row_extruder_1based`. Step 4 already made `ToolOrdering`/`GCode.cpp` emit the
+RIGHT `T<n>` for each run (that is the whole point of the feature), so this view was already
+correct before step 5 touched anything; nothing needed to change. Verified on Bar B: T0/T1/T2
+commands appear correctly interleaved across the top layer's runs (see "Proofs" below for the
+exact counts) - a slice opened in the Preview tab's "Filament" colour mode would show the
+plaque's top layer coloured in a clean black-to-grey-to-white band, matching the ramp, not a
+single flat colour. The one thing this does NOT cover, unchanged from step 4's own note: a view
+that colours by the REGION's nominal (un-split) filament rather than by G-code tool - if this
+fork has one - would still show the region's single nominal colour for an image-row surface,
+because that kind of view reads a pre-slice attribute the split does not touch. No such view was
+found or changed this session.
+
+### Limits (for the doc and for support questions)
+
+- Top solid infill only - not ironing, not a Concentric-family top surface pattern (see above).
+- A single model-part volume with an identity local matrix samples exactly as before (Bar A/B's
+  own case, still byte-identical/verified). A volume with its own transform, or a second
+  model-part volume, is now sampled correctly (this session's fix) but is not yet covered by any
+  hardware print (see below).
+- Sample spacing assumes uniform scale (see "still not fixed" above).
+- Unticking the checkbox never deletes the `MixedFilament` row it was bound to, only the part's
+  own binding to it - a project can accumulate unused `ImageWeighted` rows the way it can
+  accumulate any other unused mixed-filament row today.
+- The GUI path (this dialog) is not exercised by an automated test - see "Proofs".
+
+### Proofs
+
+- **Unit tests**: `libslic3r_tests`, candidate build - **656 cases, 654 passed, 2 failed as
+  expected** (the SAME two pre-existing expected failures as the step-3/step-4 baseline, zero
+  unexpected failures; 78126 assertions, 78124 passed). Step 5 adds three new cases:
+  `tests/libslic3r/test_image_row_transform.cpp`'s rotated-instance case and multi-volume case,
+  and `test_mixed_filament.cpp`'s `filament_id_from_mixed_index` round-trip test. The
+  multi-volume case surfaced, and had to work around (not fix - out of scope), a pre-existing
+  engine characteristic unrelated to this fix: `Layer::is_perimeter_compatible()` deliberately
+  does not compare `solid_infill_filament` (see that function's own comment, Layer.cpp), so two
+  volumes differing ONLY in it get their perimeters (and, per `Layer::make_perimeters()`'s merge
+  path, most of their fill area) merged into one - the test gives the two volumes different
+  `wall_loops` too, to keep them independent regions, and its own comment records what was
+  learned diagnosing this (empirically, via a temporary counting helper, since removed down to
+  the two permanent invariant checks it left behind: every top-solid entity that exists is fully
+  split, and never partially).
+- **Bar A**: `OrcaToleranceTest.stl` on "Bambu Lab P1S 0.4 nozzle" / "0.20mm Standard @BBL X1C" /
+  "Generic PLA", isolated `--datadir` copies of `dd_lan`, baseline = the step-4 tip (079551947d,
+  `inst_imgrow_p3s4_cand`), candidate = this session's build (`inst_imgrow_p3s5_cand`) -
+  **byte-identical G-code apart from the timestamp line** (SHA-256
+  `4e3575799be794de08e32439404a06c3badbd878e7ef10f4daceec2f25739bdb` both sides, 24562 lines both
+  sides), 0 new `; key = value` CONFIG_BLOCK lines, 129 label/M624/M625 lines unchanged. Also
+  re-run against the same baseline (`bar_a_p3s4_features.py`'s own recipe, unmodified): the
+  over-support-surfaces corpus case (`onepart_ledge.3mf`, over-support-surfaces on) and the
+  offset-layers case (`OrcaToleranceTest.stl`, offset-layers on) - both still byte-identical
+  (SHA-256 matched on both sides for each case).
+- **Bar B**: the `[barb3]` plaque (unchanged since step 4 - step 5 does not touch its own test),
+  sliced with the step-5 candidate on the same printer/process/filaments as step 4's own Bar B -
+  **three tools present in the top layer** (T0/T1/T2), the same black-to-grey-to-white band
+  progression step 4 measured (T0 dominant bands 0-1, T1 bands 2-5, T2 bands 6-7, same ~1 mm
+  residual step 4's own spec attributed to a fixed-length wipe/purge move, not image content),
+  max 3 tool changes in any one layer (bound `2*(3-1)=4`, satisfied). Determinism: two runs of
+  the SAME candidate binary on the SAME project produced byte-identical G-code (SHA-256
+  `a1f10cc5b31b4909c24654e3aa0d5670e44019409f75e324916e45161e78e019` both runs). Driven entirely
+  through the model-level API (`image_fill_apply()` + `MixedFilamentManager`), exactly the way
+  the dialog's own Apply handler drives it - **nobody clicked the dialog**; the GUI checkbox
+  path itself has no automated coverage this session. This same slice is also item 4's
+  (preview) evidence: T0/T1/T2 all appear correctly interleaved within the top layer, exactly
+  matching the per-band runs `split_top_infill_by_image_row()` produced - proof that
+  `GCodeProcessor`'s tool-based colouring (see item 4's own write-up) will show the right colour
+  per run.
+- A hidden scratch `EdgeSlicer.exe` instance (the step-5 candidate, `inst_imgrow_p3s5_cand`) was
+  started on a fresh copy of `dd_lan` and left running (confirmed alive after startup), as a
+  smoke check that the candidate GUI binary - built with the new checkbox code - starts cleanly.
+  Not a functional test of the dialog: nobody clicked it.
+
+### Hardware test for the owner
+
+A 50 x 50 mm plaque, a black-to-white ramp image, three filaments loaded (e.g. black / mid-grey /
+white PLA), sliced twice:
+
+1. **Dither ON**: apply the image fill as usual, tick "Nozzle-resolution dither (top surfaces)",
+   pick all three filaments, Apply, slice, print. Expect the top surface to look like a smooth
+   gradient at the printer's own line-width resolution - individual line-to-line colour steps
+   should be hard to pick out by eye, unlike a facet-limited or per-layer-cycle transition.
+2. **Dither OFF** (same image, same three filaments, untick the box - or apply Phase 2's plain
+   facet fill only): expect a visibly coarser transition - either the facet size Detail (mm) was
+   set to, or (if no image fill was applied to the region at all and it just cycles through the
+   row's own filament sequence) a blockier, per-layer-group banding.
+   Comparing the two prints side by side is the actual acceptance bar for this feature; nothing
+   in CI or the test suite can substitute for it.
