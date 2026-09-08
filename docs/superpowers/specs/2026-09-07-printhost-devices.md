@@ -427,6 +427,100 @@ the GUI was compiled, not exercised. The clicks that need a person, with one Ele
 7. For the mapping table, point a second device at `mock_printhost.py` (`127.0.0.1:18089`, host type
    Octo/Klipper) and pick it in the send dialog: four slots, a row per plate filament.
 
+## Phase 2 follow-up: the Elegoo Upload routing (`fix/elegoo-upload-routing`)
+
+The owner, with an Elegoo Centauri Carbon selected and a Snapmaker U1 on the same LAN:
+
+> "for the Elegoo printer, it allows the 'print' option, but the 'upload' option leads the user to
+> the Snapmaker U1-specific pre-treat menu."
+
+### The cause
+
+`use_new_connect` is an app-config key, and it is **global and sticky**. SSWCP
+(`SSWCP.cpp:6954`), `SMPhysicalPrinterDialog::OnOK` (`SMPhysicalPrinterDialog.cpp:701`) and
+`RemoteSnapmaker`'s `announce_connected` all set it to `"true"` the moment *any* Snapmaker machine
+connects; only a disconnect clears it. Nothing about it is per-preset - it is the state of one
+connection, and it survives every printer-preset change.
+
+Three places read it on its own, as if it meant "this printer uses the connect flow":
+
+| Where | What it decided | What went wrong with an Elegoo selected |
+|---|---|---|
+| `Plater::send_gcode_legacy` (`Plater.cpp:22442`) | `use_new_connect \|\| is_snapmaker_u1` → the whole Snapmaker arm: a `PrintHostSendDialog` built with `StartPrint` and **no `set_devices`**, then `WebPreprintDialog` | Print handed the plate to the Snapmaker pre-print page instead of building a `PrintHostJob` |
+| `MainFrame::can_send_gcode` (`MainFrame.cpp:1726`) | `use_new_connect` → Print always enabled | Enabled for a preset with no address and no devices, whose Print then opened that page |
+| `Sidebar::update_all_preset_comboboxes` (`Plater.cpp:3739`) | `!use_new_connection && !is_snapmaker_u1` gated the *entire* print-host row | No connection icon, no device list, no `set_devices` - and the Device tab on `missing_connection.html` |
+
+That third row is why the owner's screenshot has **no "Printer:" dropdown**. The dropdown is not
+gated on device count - `build_device_ui` draws it for one device on purpose ("a farm of one is a
+farm") - it was simply never given a list, because the Elegoo preset never reached the print-host
+branch at all.
+
+And why "Upload and Print" looked right while "Upload" did not: **both** went to
+`WebPreprintDialog`, and `set_send_page(post_action == None)` picks which page it shows. `Upload and
+Print` (`StartPrint`) got the *pre-print* page, whose own Print button does start a print - so it
+appeared to work. `Upload` (`None`) got the *pre-treat* page - the U1 toolhead-mapping page - with
+an Elegoo file and nothing to map. Neither ever built a `PrintHostJob`; one of the two just happened
+to end in a print.
+
+### The fix
+
+One wx-free decision function in the store, so the question has a single answer and a test:
+
+```cpp
+enum class SendFlow { PrintHost, SnapmakerConnect };
+SendFlow send_flow_for(const std::string& printer_model, bool connect_flow_active);
+```
+
+* a **non-Snapmaker** `printer_model` → always `PrintHost`, whatever the flag says. This is the fix:
+  an Elegoo Link, Octo/Klipper, PrusaLink, Duet, Repetier or SimplyPrint printer takes the
+  print-host path, so Upload is a `PrintHostJob` with `post_action = None` and Upload and Print is
+  `StartPrint`, both against the device chosen in the dropdown;
+* a **Snapmaker U1** → always `SnapmakerConnect`, exactly as before the fix (its toolhead mapping
+  page is the only way to choose the tools for a plate);
+* **any other Snapmaker** → follows its own connection: `SnapmakerConnect` when connected, otherwise
+  the `print_host` address it holds like any other host;
+* an **empty** `printer_model` (a hand-made preset) → `PrintHost`, never swept into the connect flow.
+
+All three call sites above route through it, so the button, the sidebar row and the send it triggers
+cannot disagree. The flag is never read alone again.
+
+### The device dropdown with one device
+
+Kept as it was, and now actually reached: **shown whenever the model has a device list**, including
+a list of one. The migration imports the preset's own address as device 1, so any preset that can
+send at all has at least one row - the user always sees which address the plate is about to go to.
+The only case with no dropdown is a preset with no address anywhere, where Send is disabled.
+
+### Proofs
+
+* Clean Release build of the worktree (`Snapmaker_Orca`, `Snapmaker_Orca_app_gui`,
+  `slic3rutils_tests`), VS2022 x64, `BUILD_TESTS=ON`.
+* `slic3rutils_tests "[PrintHostDevices]"`: the new case **"which send a preset takes"** puts every
+  (model, flag) combination through `send_flow_for` - the Centauri with the flag on and off, five
+  other print hosts, the U1 both ways, another Snapmaker both ways, an empty model name - plus the
+  two model predicates.
+* `snorca_hubtest/test_printhost_devices_p2.py` gained the end-to-end half: a `mode=upload` send to
+  a `ph:` device lands on `mock_printhost.py` with **`print=false`**, starts **no** print, and makes
+  **no** pre-print call (the mock records every `/printer/gcode/script`, so a Snapmaker
+  `SET_PRINT_EXTRUDER_MAP` / `SET_PRINT_USED_EXTRUDERS` pass would show); a new section D sends
+  `mode=print` to the same device and requires that one **does** start, so the two modes are proved
+  different rather than uniformly broken.
+* The LAN and archive gates against a scratch install of this build.
+
+**Nobody clicked the dialogs.** The desktop branch is compiled and its decision is unit-tested; the
+end-to-end evidence is the hub's dispatch, which shares the contract but not the buggy branch. The
+clicks that need a person, with the Elegoo Centauri Carbon selected **while a Snapmaker U1 is
+connected** (that is the broken state - with nothing connected it always worked):
+
+1. Slice a plate, press **Print**. The send dialog opens with a **Printer:** dropdown naming the
+   Centauri - not the Snapmaker pre-treat page.
+2. **Upload**. The file appears on the printer and **no further dialog opens**; the Snapmaker
+   pre-treat page must not appear.
+3. Slice again, **Upload and Print**. The print starts.
+4. The sidebar's printer row shows the connection (wifi) icon, and the Device tab shows the
+   Centauri's own web UI rather than `missing_connection.html`.
+5. Select the U1 again: its Print must still open the Snapmaker pre-print page, unchanged.
+
 ## Phases 3-5
 
 Phase 2 turned the read-only list into the thing a send actually targets, which changes what is left.

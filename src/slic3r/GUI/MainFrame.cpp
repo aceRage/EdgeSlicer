@@ -1712,26 +1712,21 @@ bool MainFrame::can_send_gcode() const
 
         auto printer_config    = wxGetApp().preset_bundle->printers.get_edited_preset().config;
         auto printer_model_opt = printer_config.option<ConfigOptionString>("printer_model");
-        bool is_snapmaker_u1   = false;
-        if (printer_model_opt) {
-            std::string printer_model = printer_model_opt->value;
-            is_snapmaker_u1           = boost::icontains(printer_model, "Snapmaker") && boost::icontains(printer_model, "U1");
-        }
+        const std::string printer_model = printer_model_opt ? printer_model_opt->value : std::string();
+        const bool        connect_flow_active = wxGetApp().app_config->get("use_new_connect") == "true";
 
-        if (is_snapmaker_u1)
-        {
+        // The same question Plater::send_gcode_legacy asks, so the button and the send it triggers
+        // cannot disagree. "use_new_connect" alone said yes for every preset once any Snapmaker had
+        // connected - including an Elegoo with no address anywhere, whose Print then opened the
+        // Snapmaker pre-treat page.
+        if (PrintHostDevices::send_flow_for(printer_model, connect_flow_active) ==
+            PrintHostDevices::SendFlow::SnapmakerConnect)
             return true;
-        }
 
-        if (wxGetApp().app_config->get("use_new_connect") == "true") {
-            return true;
-        } else {
-            // Not "does the preset hold an address" any more: this model may have three printers in
-            // its device list and an empty print_host, which is exactly the case the devices
-            // feature exists for. PrintHostDevices::can_send_for is the one place that decides.
-            return PrintHostDevices::can_send_for(edit_preset);
-        }
-        
+        // Not "does the preset hold an address" any more: this model may have three printers in
+        // its device list and an empty print_host, which is exactly the case the devices
+        // feature exists for. PrintHostDevices::can_send_for is the one place that decides.
+        return PrintHostDevices::can_send_for(edit_preset);
     }
     return true;
 }

@@ -4,6 +4,7 @@
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/Utils.hpp"
 
+#include <boost/algorithm/string/predicate.hpp>
 #include <boost/algorithm/string/trim.hpp>
 #include <boost/filesystem.hpp>
 #include <boost/log/trivial.hpp>
@@ -402,6 +403,54 @@ bool can_send_for(const DynamicPrintConfig& config, const std::string& preset_na
 bool can_send_for(const Preset& printer_preset)
 {
     return can_send_for(printer_preset.config, printer_preset.name);
+}
+
+// ------------------------------------------------------------- which send ----
+
+bool is_snapmaker_model(const std::string& printer_model)
+{
+    // The machines whose send goes through SSWCP's connect flow and its web pre-print page. A
+    // printer_model string is vendor-qualified in practice ("Snapmaker U1", "Snapmaker Artisan",
+    // "Elegoo Centauri Carbon"), which is why the vendor word is enough here even though it is
+    // deliberately not part of model_key().
+    return boost::icontains(printer_model, "Snapmaker");
+}
+
+bool is_snapmaker_u1_model(const std::string& printer_model)
+{
+    // The same test the rest of the GUI makes (MainFrame.cpp, Plater.cpp, PlateSettingsDialog.cpp):
+    // "Snapmaker" and "U1" both in the model name.
+    return boost::icontains(printer_model, "Snapmaker") && boost::icontains(printer_model, "U1");
+}
+
+SendFlow send_flow_for(const std::string& printer_model, bool connect_flow_active)
+{
+    // The one decision, in one place, and deliberately wx-free so the Catch2 suite can put every
+    // combination of (model, flag) through it.
+    //
+    // The bug this exists to stop: the branch in Plater::send_gcode_legacy used to read
+    //
+    //     app_config->get("use_new_connect") == "true" || is_snapmaker_u1
+    //
+    // and `use_new_connect` is a *global* app-config flag. SSWCP and SMPhysicalPrinterDialog set it
+    // to "true" the moment any Snapmaker machine connects, and nothing clears it when the user then
+    // selects a different printer preset. So on a PC with a Snapmaker on the LAN, selecting an
+    // Elegoo Centauri Carbon and pressing Print handed the plate to WebPreprintDialog - the
+    // Snapmaker pre-treat page - instead of uploading it to the Elegoo host. "Upload and Print"
+    // looked right only because that page's own Print button happens to start a print; "Upload"
+    // landed the user on the pre-treat page with nothing to pre-treat.
+    //
+    // The flag is now only ever consulted *together with* the selected preset's own model, so a
+    // print-host printer takes the print-host path whatever some other machine's connection did.
+    if (!is_snapmaker_model(printer_model))
+        return SendFlow::PrintHost;
+    // A U1 is unchanged from before the fix: it always takes the connect flow, because its toolhead
+    // mapping page is the only way to choose the tools for a plate.
+    if (is_snapmaker_u1_model(printer_model))
+        return SendFlow::SnapmakerConnect;
+    // Any other Snapmaker follows the connection: connected -> the pre-print page, otherwise the
+    // print_host address it holds like any other host.
+    return connect_flow_active ? SendFlow::SnapmakerConnect : SendFlow::PrintHost;
 }
 
 // ------------------------------------------------------- the preset bridge ----

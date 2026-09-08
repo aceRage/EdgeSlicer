@@ -126,6 +126,38 @@ bool has_devices(const std::string& model_key);
 bool can_send_for(const Preset& printer_preset);
 bool can_send_for(const DynamicPrintConfig& config, const std::string& preset_name);
 
+// ---- which of the two sends ----
+
+// The fork has two send paths, and which one a plate takes is this question.
+enum class SendFlow
+{
+    // PrintHostJob against a print_host address: Octo/Klipper, Elegoo Link, PrusaLink, Duet,
+    // Repetier, SimplyPrint ... Upload is post_action None, Upload and Print is StartPrint, and no
+    // web page is involved.
+    PrintHost,
+    // Snapmaker's own connect flow: WebPreprintDialog, the SSWCP pre-print / pre-treat page and the
+    // toolhead mapping that goes with it.
+    SnapmakerConnect,
+};
+
+// True when this printer_model names a Snapmaker machine.
+bool is_snapmaker_model(const std::string& printer_model);
+
+// True when this printer_model names a Snapmaker U1, the tool-changer whose send always goes
+// through the connect flow (its toolhead mapping page is the only way to choose the tools).
+bool is_snapmaker_u1_model(const std::string& printer_model);
+
+// Which send path the *selected preset* takes.
+//
+//   printer_model        - the selected printer preset's printer_model.
+//   connect_flow_active  - app_config "use_new_connect", i.e. "a Snapmaker is connected right now".
+//
+// The flag alone is not an answer: it is global and sticky (SSWCP / SMPhysicalPrinterDialog set it
+// when any Snapmaker connects, and nothing clears it when the preset changes), so reading it on its
+// own routed an Elegoo Centauri Carbon's Upload into the Snapmaker pre-treat page. A non-Snapmaker
+// preset therefore always takes PrintHost, whatever the flag says.
+SendFlow send_flow_for(const std::string& printer_model, bool connect_flow_active);
+
 // ---- config <-> device ----
 
 // Reads the host fields of a printer preset's config into a device (id and alias left empty).
