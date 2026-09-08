@@ -70,6 +70,47 @@ private:
 
 using ContourZSamplesPtr = std::shared_ptr<const ContourZSamples>;
 
+// ---------------------------------------------------------------------------------------------
+// The tuning constants of the pass. All of them exist because of a measured artifact on a real
+// slice; see docs/superpowers/specs/2026-09-07-z-contouring-port.md, "The review".
+// ---------------------------------------------------------------------------------------------
+
+// Resampling resolution along a path, mm. Upstream's value.
+static constexpr double ZAA_SAMPLE_RESOLUTION_MM = 0.1;
+
+// Upstream's tolerance above max_up inside which a sample still counts as a top surface. Above
+// max_up upstream pins the delta to exactly max_up and then drops it to 0 the moment the mesh is
+// one micron further up, i.e. a full max_up (50 um by default) step between two neighbouring
+// samples. Here the delta fades from max_up to 0 across the same tolerance instead.
+static constexpr double ZAA_TOP_TOLERANCE_MM = 0.03;
+
+// The slope band above zaa_minimize_perimeter_height over which the -half_width*sin(slope)
+// adjustment fades in (EdgeSlicer's guard for the still-open upstream bug OrcaSlicer#13552).
+// Upstream applies it as a hard step. The fade is a smoothstep, so both the value and its
+// derivative are continuous: the adjustment cannot change the wall's Z faster than the mesh's
+// own slope changes. Measured on a 30 mm hemisphere, a 5 degree band still let the outer wall's
+// per-layer bead height jump 39 um where the surface slope crossed the threshold; 20 degrees
+// spreads the same 0.12 mm over enough layers that the jump falls under 10 um.
+static constexpr double ZAA_SLOPE_RAMP_DEGREES = 20.0;
+
+// Half width, in samples, of the symmetric moving average applied to a path's delta profile
+// before it is written out. A straight ramp is a fixed point of a moving average, so the mesh
+// following is untouched; what it removes is the sample-to-sample noise the slope term and the
+// mesh facets inject, which is what reads as fuzzy skin on the outer wall.
+static constexpr int ZAA_SMOOTH_RADIUS_SAMPLES = 3;
+
+// How far a sample may sit off the chord between its neighbours and still be dropped as
+// collinear. Upstream uses EPSILON (0.1 um), which was fine for a raw, piecewise-linear
+// raycast profile but keeps nearly every sample of a smoothed one - the wedge's G-code grew
+// 44 %. One micron is under the printer's Z resolution and holds the emitted profile to within
+// a micron of the smoothed one.
+static constexpr double ZAA_COLLAPSE_TOLERANCE_MM = 0.001;
+
+// A path whose whole profile stays inside this band is left uncontoured. Below this the contour
+// is under the printer's Z resolution but the path would still lose arc fitting and gain a Z
+// word on every move. Applied per path, never per sample, so it can never introduce a step.
+static constexpr double ZAA_MIN_PATH_DELTA_MM = 0.010;
+
 // Everything the per-sample decision needs. Deliberately free of ExtrusionRole / LayerRegion so
 // that the decision is a pure function of numbers and can be unit tested on its own
 // (tests/libslic3r/test_contour_z.cpp).
@@ -101,6 +142,11 @@ struct ContourZSampleInput
 
 // The Z delta for one sample, in mm, relative to the path's own base Z. See ContourZ.cpp.
 double contour_z_sample_delta(const ContourZSampleInput &in);
+
+// Symmetric moving average over a path's delta profile, window radius in samples, shrinking at
+// the two ends. Every output is a convex combination of inputs, so a profile that satisfied the
+// clamp still satisfies it and a profile that was everywhere <= 0 (a perimeter) stays <= 0.
+void contour_z_smooth_profile(std::vector<double> &d, int radius);
 
 // The single height correction the G-code emitter applies to the flow of a contoured segment.
 // The local layer height is (height + z_diff); ironing keeps its configured flow.

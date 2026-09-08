@@ -312,25 +312,248 @@ Slicing the wedge at `--debug 4` shows each guard firing by name:
 The remaining guards - a variable layer-height profile, an object with more than one instance, and
 an existing sub-layer plan - are not reachable from the CLI and were verified by inspection only.
 
+## The review (2026-09-07) - "it looks like fuzzy skin"
+
+The owner printed the wedge on the live install at `bfc949efca` with the defaults and reported that
+the effect was **lackluster**, and that "the way the outer nozzle movement looks, it almost ends up
+looking like fuzzy skin because of the uneven movements it's doing."
+
+That is a fair description of what the G-code actually contained. Everything below was measured on
+real slices (P1S 0.4 nozzle, `0.20mm Standard @BBL X1C`, Generic PLA, 0.2 mm layers, an isolated
+`--datadir` copied from `snorca_hubtest/dd_lan`) of four models: the 40 x 40 wedge
+(`scripts/zaa/make_wedge.py`, a constant 14.04 degrees), a 30 mm hemisphere on a 2 mm plinth
+(`scripts/zaa/make_dome.py`, every slope from 0 to 90 degrees), the same hemisphere at a coarse
+tessellation (40 x 20 facets), and an ellipsoid (the same dome scaled 0.5 in Y), which is the only
+one of the four whose surface slope varies *around* a single outer-wall loop.
+
+Two new analyzers do the measuring, and both are committed:
+
+* `scripts/zaa/zaa_jitter.py` - **within** a layer: the distribution of the Z step between
+  neighbouring extrusion moves along one contoured path, its second difference (how fast the Z
+  *slope* changes), and the number of sign reversals. A true ramp has a large first difference and
+  a near-zero second one; fuzz is the opposite.
+* `scripts/zaa/zaa_wall_profile.py` - **across** layers: the outer wall's Z offset from `print_z`
+  layer by layer, and the effective bead height that results. A wall printing 190, 232, 193,
+  230 um reads as banding however smooth each individual layer is.
+
+### What was NOT wrong
+
+* **The raycast follows the mesh exactly.** On the wedge the surface height is known analytically
+  (`z = 2 + 0.25*(x-108)` in plate coordinates), and every in-band contoured move was compared
+  against it: top surface 4935 moves, error **0.00 um**; outer wall 300 moves, error mean 0.31 um,
+  max 0.50 um (the G-code's own 1 um Z quantisation). Facet crossings, the AABB tree and the 0.1 mm
+  resampling are not the noise source.
+* **Z is emitted in the same `G1` as X/Y/E**, never as a separate move. The wedge's 25032-move file
+  contains 115 bare `G1 Z...` lines and every one of them is an ordinary layer change or Z hop.
+  There is no per-segment Z stutter for the firmware's look-ahead to trip over.
+* **The `offset_layers` composition is not engaged when `offset_layers` is off** - `z_offset` is 0,
+  `z_offset_mm` is 0 and both the clamp shift and `zaa_base_z` reduce to identities. Bar A's
+  byte-identity on the two `_ofs` cases is the same statement from the other side.
+* **This is not a porting divergence.** Upstream contours `erExternalPerimeter` and `erPerimeter`
+  exactly as this port does: same four eligible roles, same 0.1 mm resampling, same
+  `-half_width*sin(slope)` rule above `zaa_minimize_perimeter_height`, same never-raise clamp, same
+  `z_contoured` early-out in `simplify()` / `simplify_by_fitting_arc()`, same per-point Z in the
+  extrusion move. Upstream does **not** leave outer walls straight. So the fuzz is upstream's, and
+  #13552 is the same bug seen along the path rather than across the layers.
+
+### What was wrong - three findings, with numbers
+
+**1. The slope rule is the fuzz.** `-half_width * sin(slope)` is a function of the local surface
+*normal*, not of the local surface *height*, so it injects up to `half_width` (0.21 mm at a 0.42 mm
+external width, a full layer) of Z that has nothing to do with flattening the staircase. Wherever
+the surface slope varies quickly - around a loop on a non-axisymmetric model, or from layer to
+layer on any curve - the wall's Z varies with it.
+
+| measurement | slope rule on (default 35) | slope rule off (`=0`) |
+|---|---|---|
+| ellipsoid, within one outer-wall loop, \|dZ\| max | **28 um** | 5 um |
+| ellipsoid, same, \|d2Z\| max (change of slope between neighbours) | **32 um** | 5 um |
+| ellipsoid, same, sign reversals | **505 of 8561 steps (5.90 %)** | 22 of 2654 (0.83 %) |
+| hemisphere, outer-wall bead height across layers | **185..232 um, sd 11.4** | 185..194 um, sd 2.5 |
+| hemisphere, biggest layer-to-layer change of bead height | **39 um** | 4 um |
+
+The 39 um jump sits exactly where the hemisphere's surface slope crosses 35 degrees: the 5 degree
+ramp this port added for #13552 is crossed in about four layers there, so the whole
+`0.21*sin(35) = 0.12 mm` arrives over four layers. On the coarsely tessellated hemisphere, where the
+facet normals quantise the slope, the same measurement was **174..271 um with an 80 um jump**.
+
+**2. The top-of-band tolerance is a 50 um cliff.** Upstream pins every sample whose mesh is between
+`max_up` and `max_up + 0.03` to exactly `max_up`, then drops the next one - a micron further up - to
+zero. Two neighbouring beads therefore differ by a full `zaa_min_z`, 50 um by default.
+
+On the wedge this was not a detail, it was **the entire top-surface contouring**: the emitted delta
+took only the values 0 and +50 um (measured range `[0, +50]`, `|dZ|` mean 25 um, and every second
+difference exactly 50 um), a ridge one bead wide repeated every 0.8 mm across the whole ramp. The
+hemisphere and the ellipsoid showed the same 50 um step on their top surfaces.
+
+**3. The flow used the wrong height.** The emitter (like upstream) scaled `E` by
+`(height + z_at(end)) / height`, i.e. by the local height at the segment's **end point**, while the
+height varies linearly along the segment. Against the trapezoid - the exact volume for a linear
+ramp - the error on Z-transition segments measured **mean 12.2 %, max 18.8 %** on the wedge's outer
+wall and **mean 12.5 %** on its top surface, over 3535 segments, alternating in sign. An extrusion
+whose width alternates by a tenth at every Z step is a fuzzy-looking extrusion.
+
+### One more thing the numbers said: on a shallow ramp there is not much for ZAA to contour
+
+At 0.2 mm layers on a 14 degree ramp the band of a layer whose surface is within one layer height is
+`0.2 / tan(14) = 0.8 mm` wide, and two walls (0.42 + 0.45 mm) consume all of it. Everything the
+slicer then labels "Top surface" is the external-infill margin, which lies *under* the next layer,
+0.05 to 0.40 mm below its own surface. So on a wedge the only real ZAA effect is the outer wall
+riding down onto the mesh at the leading edge (98 um at the last measured layer, exactly the mesh),
+and the useful part of the top-surface contouring never gets a chance. That is the "lackluster"
+half of the report, and it is a property of the technique at that slope and layer height, not of
+the port: a dome, whose exposed top is wide, is contoured over `[-107, 0]` um on its cap.
+
+### The fix
+
+All six changes are in `ContourZ.{hpp,cpp}` and the two emitter sites in `GCode.cpp`. No new config
+key: every constant is documented in `ContourZ.hpp` next to the measurement that set it.
+
+| # | change | why |
+|---|---|---|
+| 1 | `slope_ramp()`: **smoothstep over `ZAA_SLOPE_RAMP_DEGREES = 20`** (was linear over 5) | finding 1. Smoothstep makes the derivative continuous too, so the *bead height* cannot step either; 20 degrees spreads the 0.12 mm over enough layers that the crossing disappears into the layer height |
+| 2 | the top tolerance **fades** from `max_up` to 0 across `ZAA_TOP_TOLERANCE_MM` instead of being pinned then dropped | finding 2. Identical to upstream at both ends of the band, continuous in between |
+| 3 | **`contour_z_smooth_profile()`**, a symmetric moving average of radius `ZAA_SMOOTH_RADIUS_SAMPLES = 3` (a 0.6 mm window) over each path's delta profile | findings 1 and 2, and mesh facet noise generally. A straight ramp is a fixed point of a moving average, so mesh following is untouched; every output is a convex combination of inputs, so the clamps and the never-raise rule survive it |
+| 4 | a per-path deadband, `ZAA_MIN_PATH_DELTA_MM = 0.010`: a path whose whole profile is under 10 um is left uncontoured | flat-ish walls stay straight instead of gaining a Z word per move and losing arc fitting for a contour the machine cannot express. Per *path*, so it can never introduce a step |
+| 5 | the collinear collapse gets a real tolerance, `ZAA_COLLAPSE_TOLERANCE_MM = 0.001` (was `EPSILON`, 0.1 um) | a smoothed profile is a curve, and at 0.1 um almost no sample collapses; this holds the emitted profile within a micron of the smoothed one at a third of the point count |
+| 6 | the flow uses the **trapezoid**: `0.5 * (z_at(a) + z_at(b))` | finding 3 |
+
+The pass is now: resample and raycast the whole path -> smooth the profile -> deadband -> collapse,
+rather than upstream's interleaved sample-and-collapse. Nothing else about the pipeline moved.
+
+`contour_z_smooth_profile()` is exported so the tests can drive it directly, and
+`ZAA_SLOPE_RAMP_DEGREES` moved from `ContourZ.cpp` to the header for the same reason.
+
+### The result, on the same four models
+
+Outer wall, **within** a layer (`scripts/zaa/zaa_jitter.py`, microns):
+
+| model | \|dZ\| max before -> after | \|d2Z\| max before -> after | reversals before -> after |
+|---|---|---|---|
+| wedge | 75 -> 56 (the true 14 degree ramp) | 75 -> 46 | 0 -> 0 |
+| hemisphere | 2 -> 1 | 4 -> 1 | 11 -> 0 |
+| ellipsoid | 28 -> **8** | 32 -> **8** | 505 (5.90 %) -> **186 (2.10 %)** |
+
+Top surface, within a layer:
+
+| model | \|dZ\| max | \|d2Z\| max | emitted delta range |
+|---|---|---|---|
+| wedge | 50 -> **7** | 50 -> **5** | `[0, +50]` -> `[0, +16]` |
+| hemisphere | 50 -> 23 | 50 -> 12 | `[-107, +50]` -> `[-101, +35]` |
+| coarse hemisphere | 59 -> 28 | 51 -> 26 | `[-112, +50]` -> `[-105, +37]` |
+| ellipsoid | 50 -> 15 | 50 -> 7 | `[-105, +50]` -> `[-93, +36]` |
+
+The residual 23-28 um on the curved tops is the mesh: 23 um over a 0.1 mm sample is a 13 degree
+surface, which is what a hemisphere's cap edge is. The **second** difference is the fuzz measure,
+and it is down to 5-12 um everywhere except the coarse mesh's facet boundaries.
+
+Outer wall, **across** layers (`scripts/zaa/zaa_wall_profile.py`, bead height in microns):
+
+| model | before | after |
+|---|---|---|
+| hemisphere | 185..232, sd 11.4, max jump **39** | 185..211, sd 7.3, max jump **21** |
+| coarse hemisphere | 174..271, sd 11.9, max jump **80** | 168..226, sd 7.5, max jump **39** |
+| ellipsoid | 172..224, sd 9.2, max jump **28.5** | 176..204, sd 7.0, max jump **10** |
+| wedge | 137.5..200, sd 8.2, max jump 62 | unchanged (a 14 degree ramp never reaches the 35 degree threshold, so there was no slope term to smooth; the profile is pure mesh) |
+
+Flow: the Bar B fit of `E per mm / ((H + d)/H)` with `d` the trapezoid height is now **0.278 %**
+spread on the outer wall, **0.305 %** on the top surface and **0.238 %** on the offset-layers inner
+wall - tighter than the port's original end-point fit (0.296 / 0.357 / 0.365 %), which is the
+independent confirmation that the trapezoid is the right height term.
+
+The cost is G-code size, because a smoothed profile collapses less: the wedge grows from 865 KB /
+25032 `G1` to 1128 KB / 32237 (+30 %), the hemisphere 536 KB -> 610 KB (+14 %), the ellipsoid
+773 KB -> 778 KB (+0.7 %).
+
+### Proofs re-run after the change
+
+* **`libslic3r_tests`: 657 cases, 655 passed, 2 failed as expected** (the head's own two). The
+  `[ContourZ]` tag alone is 6 cases / 1278 assertions, all passing: the existing five updated for
+  the faded tolerance and the smoothstep ramp (which now also asserts that the *step between steps*
+  never jumps, i.e. the derivative is continuous), plus a new case for
+  `contour_z_smooth_profile()` - a ramp is a fixed point, alternating 40 um noise comes out under
+  10 um, every output stays inside the input's range, and a short profile or a zero radius is
+  returned untouched.
+* **Bar A: PASS, all four cases.** `scripts/zaa/bar_a_zaa.py`, baseline = a build of the head
+  `bfc949efca` (`snorca_hubtest/inst_u1base`), candidate = this branch: with `zaa_enabled` off the
+  P1S and U1 slices of `OrcaToleranceTest.stl` are identical apart from the timestamp, with and
+  without `offset_layers` (24568 / 24954 / 25524 / 26030 lines). The script itself needed one
+  change: its baseline used to be a *pre*-ZAA build and it asserted the baseline carried no `zaa_*`
+  config lines; now that the port is merged the head carries them too, so it asserts they match the
+  candidate's instead.
+* **Bar B: PASS.** `scripts/zaa/bar_b_zaa.py` on the wedge: 17444 contoured moves over 50 layers,
+  every layer carrying more than one Z, none outside `[lo + min_z, print_z + min_z]`; with
+  `offset_layers` also on, 18118 contoured moves, 240 of them at their own raised base and none
+  above it; `--export-3mf` (which runs the fork's own `GCodeProcessor`) writes the file in both
+  cases; spiral vase on top of ZAA still slices clean. Two assertions in `bar_b_report.py` were
+  updated for the reviewed behaviour and the reasons are in the file: the flow check now uses the
+  trapezoid, and the clamp check accepts the *interval* between `lo + min_z` and a wall's own base
+  rather than only its two endpoints - the smoother's whole job is to interpolate between an
+  uncontoured stretch of a wall and a contoured one instead of stepping between them.
+* `--export-3mf` also accepted the hemisphere, and `--ironing-type=top` with ZAA on slices clean
+  with ironing present in the output.
+
+### What is still not addressed
+
+* **The slope rule remains a bias term driven by the surface normal.** The geometrically exact
+  version of "lower the wall until its outer edge meets the model" is a second raycast at the
+  point `half_width` outboard along the path normal, which needs the path's orientation and is a
+  bigger change than a review should make. `sin(slope)` is also only an approximation of the
+  `tan(slope)` the geometry asks for, and it diverges badly above 45 degrees - upstream's, kept.
+* **The lower rejection is still a cliff.** `d < -height` returns 0 while `d` just above it clamps
+  to `-(height - min_z)`, a 150 um step in principle. It did not fire on any of the four models
+  (the deepest delta measured was -125 um), so it was left as upstream rather than faded like the
+  upper one.
+* **Upstream #13540** - downward-facing surfaces - still unaddressed, as before.
+* **The preview still draws contoured paths flat**, as the minimal variant always did.
+* **No print was made of the fixed G-code.** Everything above is measured on the emitted file.
+
+
 ## The hardware test the owner should print
 
-Generate the wedge with `python scripts/zaa/make_wedge.py wedge.stl` (40 x 40 mm, 2 mm -> 12 mm,
-14.04 degrees) and print it three times at **0.2 mm**
-layers on the same filament and printer, changing nothing else:
+Generate both models:
 
-1. **ZAA off** - the control. The slope should show clear 0.2 mm stair steps.
-2. **ZAA on** (`zaa_enabled`, defaults otherwise: `zaa_min_z` 0.05, minimize-wall-height 35).
-3. **ZAA on + offset layers on** - the interaction this port had to get right.
+```
+python scripts/zaa/make_wedge.py wedge.stl     # 40 x 40 mm, 2 -> 12 mm, 14.04 degrees
+python scripts/zaa/make_dome.py  dome.stl      # 30 mm hemisphere on a 2 mm plinth
+```
 
-Compare the slope by eye under a raking light and by running a fingernail down it across the steps.
-Expect (2) to feel and look close to a 0.1 mm print of (1). Things to look for specifically:
+The wedge is the constant-slope case and the dome is the varying-slope case - the dome is the one
+that showed the artifact this review fixed, because its surface slope sweeps the whole range and
+crosses `zaa_minimize_perimeter_height` part-way up. Print at **0.2 mm** layers, same filament and
+printer, changing nothing else.
 
-* the wall along the top edge of the ramp - #13552's artifact class is missing or shredded
-  perimeters where the slope crosses 35 degrees; the ramp is a constant 14 degrees so it should not
-  trigger, but the short end faces will cross it;
-* nozzle-skirt drag where the head fills from high to low (a known ZAA artifact upstream);
-* on (3), that the odd walls still interlock and that nothing sits proud of the top surface -
-  the port's claim is that a contoured odd wall lands on the mesh and never above `print_z + 0.05`.
+**The before/after test.** The interesting comparison now is not only ZAA on versus off, it is this
+branch versus what the owner already printed on `bfc949efca`. Print, in this order:
 
-Also worth a look: a 0.3 mm ZAA print, which upstream reports as still close to a conventional
-0.1 mm finish and about half the time.
+1. **wedge, ZAA off** - the control. The slope should show clear 0.2 mm stair steps.
+2. **wedge, ZAA on** (`zaa_enabled`, defaults otherwise: `zaa_min_z` 0.05,
+   minimize-wall-height 35).
+3. **dome, ZAA off** - the control for the curved case.
+4. **dome, ZAA on** - the one to compare against the 2026-09-07 print.
+5. **wedge, ZAA on + offset layers on** - the interaction this port had to get right.
+
+Compare by eye under a raking light and by running a fingernail across the steps. What to look for,
+now that the numbers say what changed:
+
+* **On the dome, the band where the surface passes 35 degrees** - roughly 11 to 14 mm up on a
+  30 mm hemisphere. That is where the outer wall's bead height used to swing from 193 to 232 um
+  over four layers; it should no longer read as a band.
+* **On the wedge's ramp, the regular ridges every 0.8 mm** - one bead wide, 50 um proud, the
+  top-of-band cliff. They should be gone; the top surface's emitted range is now `[0, +16]` um
+  instead of `[0, +50]`.
+* **Bead width consistency wherever the nozzle changes Z** - the trapezoid flow removed an
+  alternating 12 % width error at every Z transition.
+* the wall along the top edge of the ramp - upstream #13552's artifact class is missing or
+  shredded perimeters where the slope crosses 35 degrees; the wedge's short end faces cross it;
+* nozzle-skirt drag where the head fills from high to low (a known ZAA artifact upstream, and one
+  this review does not touch);
+* on (5), that the odd walls still interlock and that nothing sits proud of the top surface - the
+  port's claim is that a contoured odd wall lands on the mesh and never above its own base.
+
+And the honest expectation for the wedge specifically: at 0.2 mm and 14 degrees the exposed band is
+0.8 mm and the two walls fill it, so ZAA's whole effect there is the outer wall riding onto the
+mesh. If the owner wants the effect ZAA is famous for, the dome - or a shallower slope at a
+*larger* layer height, where the exposed band is wider than the walls - is the model that shows it.
+A 0.3 mm ZAA print of the dome is worth a look for the same reason: upstream reports it as still
+close to a conventional 0.1 mm finish at about half the time.

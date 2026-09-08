@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <vector>
 
 #include <libslic3r/ContourZ.hpp>
 #include <libslic3r/SLA/IndexedMesh.hpp>
@@ -61,12 +62,29 @@ TEST_CASE("ZAA: the raycast clamp", "[ContourZ]")
         set_surface_at(in, 0.02);
         REQUIRE(contour_z_sample_delta(in) == Approx(0.02));
 
-        // Anything above min_z + 0.03 is treated as "not a top surface" and left alone.
-        set_surface_at(in, min_z + 0.02); // 0.07, inside the +0.03 tolerance -> clamped to min_z
+        // Above min_z the delta fades to zero across ZAA_TOP_TOLERANCE_MM instead of being pinned
+        // at min_z and then dropped to 0 in one step (upstream's behaviour, a 50 um ridge one bead
+        // wide along every top-surface band boundary - see the review section of the port doc).
+        set_surface_at(in, min_z);
         REQUIRE(contour_z_sample_delta(in) == Approx(min_z));
 
-        set_surface_at(in, min_z + 0.05); // 0.10, outside the tolerance -> no contouring at all
+        set_surface_at(in, min_z + ZAA_TOP_TOLERANCE_MM / 3.0);
+        REQUIRE(contour_z_sample_delta(in) == Approx(min_z * 2.0 / 3.0));
+
+        set_surface_at(in, min_z + ZAA_TOP_TOLERANCE_MM);
         REQUIRE(contour_z_sample_delta(in) == Approx(0.0).margin(1e-9));
+
+        set_surface_at(in, min_z + 0.05); // outside the tolerance -> no contouring at all
+        REQUIRE(contour_z_sample_delta(in) == Approx(0.0).margin(1e-9));
+
+        // and the fade is continuous: no step anywhere across the tolerance band.
+        double prev = min_z;
+        for (double over = 0.0; over <= ZAA_TOP_TOLERANCE_MM + 0.01; over += 0.0005) {
+            set_surface_at(in, min_z + over);
+            const double d = contour_z_sample_delta(in);
+            REQUIRE(std::abs(d - prev) < 0.002);
+            prev = d;
+        }
     }
 
     SECTION("top solid infill is clamped down to -(height - zaa_min_z)")
@@ -194,22 +212,75 @@ TEST_CASE("ZAA: the slope rule", "[ContourZ]")
     {
         // Upstream applies the full drop the instant the slope crosses the threshold, so a wall
         // whose slope varies across the threshold gets a half-line-width Z step mid-path. Here the
-        // adjustment is continuous, and it reaches the upstream value 5 degrees above threshold.
+        // adjustment fades in over ZAA_SLOPE_RAMP_DEGREES as a SMOOTHSTEP, so the derivative is
+        // continuous too: neither the value nor the rate of change can jump.
         in.half_width = 0.1;
-        double prev = 0.0;
-        for (double slope = 30.0; slope <= 45.0; slope += 0.25) {
+        double prev = 0.0, prev_step = 0.0;
+        for (double slope = 30.0; slope <= 35.0 + ZAA_SLOPE_RAMP_DEGREES + 5.0; slope += 0.25) {
             in.hit_normal = normal_for_slope(slope);
             const double d = contour_z_sample_delta(in);
             REQUIRE(d <= prev + 1e-9);             // monotonically non-increasing
-            REQUIRE(std::abs(d - prev) < 0.01);    // and never a step
-            prev = d;
+            REQUIRE(std::abs(d - prev) < 0.004);   // and never a step
+            const double step = d - prev;
+            REQUIRE(std::abs(step - prev_step) < 0.002); // nor a corner
+            prev_step = step;
+            prev      = d;
         }
         // At threshold + ramp and beyond, identical to upstream's hard rule.
-        for (double slope : {40.0, 50.0, 70.0}) {
+        for (double slope : {35.0 + ZAA_SLOPE_RAMP_DEGREES, 60.0, 70.0}) {
             in.hit_normal = normal_for_slope(slope);
             const double upstream = -0.1 * std::sin(slope * M_PI / 180.0);
             REQUIRE(contour_z_sample_delta(in) == Approx(std::max(upstream, -(height - min_z))));
         }
+    }
+}
+
+TEST_CASE("ZAA: the along-path profile smoother", "[ContourZ]")
+{
+    SECTION("a straight ramp is a fixed point - the mesh following is not blurred")
+    {
+        std::vector<double> d;
+        for (int i = 0; i < 40; ++i)
+            d.push_back(-0.0025 * i); // 2.5 um per 0.1 mm sample, i.e. a 1.4 degree ramp
+        std::vector<double> ref = d;
+        contour_z_smooth_profile(d, ZAA_SMOOTH_RADIUS_SAMPLES);
+        // Everything but the two end windows is untouched; a moving average reproduces a line.
+        for (size_t i = ZAA_SMOOTH_RADIUS_SAMPLES; i + ZAA_SMOOTH_RADIUS_SAMPLES < d.size(); ++i)
+            REQUIRE(d[i] == Approx(ref[i]).margin(1e-12));
+    }
+
+    SECTION("alternating noise is attenuated")
+    {
+        std::vector<double> d;
+        for (int i = 0; i < 40; ++i)
+            d.push_back(i % 2 ? -0.05 : -0.09); // 40 um of sample-to-sample fuzz
+        contour_z_smooth_profile(d, ZAA_SMOOTH_RADIUS_SAMPLES);
+        double worst = 0.0;
+        for (size_t i = ZAA_SMOOTH_RADIUS_SAMPLES; i + ZAA_SMOOTH_RADIUS_SAMPLES + 1 < d.size(); ++i)
+            worst = std::max(worst, std::abs(d[i + 1] - d[i]));
+        REQUIRE(worst < 0.010); // 40 um of fuzz down to under 10
+    }
+
+    SECTION("every output stays inside the input's range, so the clamps survive")
+    {
+        std::vector<double> d{-0.15, 0.0, -0.15, -0.02, 0.0, -0.15, -0.15, 0.0, -0.07};
+        contour_z_smooth_profile(d, ZAA_SMOOTH_RADIUS_SAMPLES);
+        for (double v : d) {
+            REQUIRE(v <= 0.0 + 1e-12);
+            REQUIRE(v >= -0.15 - 1e-12);
+        }
+    }
+
+    SECTION("a radius of zero, or a profile too short to smooth, is left alone")
+    {
+        std::vector<double> d{-0.1, 0.0, -0.1};
+        std::vector<double> ref = d;
+        contour_z_smooth_profile(d, 0);
+        REQUIRE(d == ref);
+        std::vector<double> two{-0.1, 0.0};
+        std::vector<double> two_ref = two;
+        contour_z_smooth_profile(two, ZAA_SMOOTH_RADIUS_SAMPLES);
+        REQUIRE(two == two_ref);
     }
 }
 
