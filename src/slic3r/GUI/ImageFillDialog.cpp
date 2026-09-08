@@ -56,7 +56,8 @@ ImageFillDialog::ImageFillDialog(wxWindow                                      *
                                  ImageAssetStore                               *assets,
                                  const indexed_triangle_set                    &mesh,
                                  const TriangleSelector::TriangleSplittingData &existing,
-                                 const std::vector<int>                        &painted_states)
+                                 const std::vector<int>                        &painted_states,
+                                 bool                                            initial_image_row)
     : DPIDialog(parent, wxID_ANY, _L("Apply image fill"), wxDefaultPosition, wxDefaultSize,
                 wxDEFAULT_DIALOG_STYLE)
     , m_params(initial)
@@ -199,6 +200,22 @@ ImageFillDialog::ImageFillDialog(wxWindow                                      *
                             "more detail and more triangles. 0 keeps the model's own triangles."));
     row(_L("Detail (mm)") + ":", m_detail);
 
+    // ---- Phase 3: the image row ----------------------------------------------------------------
+    // This does not replace the facet painting above - image_fill_apply() always runs on Apply, so
+    // a printer/slicer that never reads image_row_extruder_1based still gets a correct, if coarser,
+    // result. Ticking this ALSO creates (or updates) an ImageWeighted MixedFilament row bound to
+    // this part's solid_infill_filament, so top solid infill is additionally re-sampled directly at
+    // extrusion-width resolution instead of being limited to the model's own facet size.
+    m_image_row = new wxCheckBox(this, wxID_ANY, _L("Nozzle-resolution dither (top surfaces)"));
+    m_image_row->SetValue(initial_image_row);
+    m_image_row->SetToolTip(_L("Re-samples the image directly along each top solid infill line, at "
+                               "nozzle-extrusion-width resolution, instead of the facet-size limit above. "
+                               "Top solid infill only: ironing and any top surface pattern that is not "
+                               "Rectilinear or Monotonic (Concentric-family patterns, in particular) are "
+                               "not affected by this option and keep using the coarser per-layer colour "
+                               "cycle a mixed filament normally uses."));
+    left->Add(m_image_row, 0, wxEXPAND | wxTOP, FromDIP(10));
+
     cols->Add(left, 1, wxEXPAND | wxALL, FromDIP(10));
 
     // ---- the preview ------------------------------------------------------------------------------
@@ -321,6 +338,11 @@ ImageFillParams ImageFillDialog::params()
     // Read the controls one last time, so what is applied is what the dialog shows.
     collect();
     return m_params;
+}
+
+bool ImageFillDialog::image_row_dither() const
+{
+    return m_image_row != nullptr && m_image_row->GetValue();
 }
 
 void ImageFillDialog::refresh_preview()

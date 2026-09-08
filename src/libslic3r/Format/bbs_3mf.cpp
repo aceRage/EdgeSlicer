@@ -5914,8 +5914,10 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         bool _add_filament_sequence_file_to_archive(mz_zip_archive& archive, const PlateDataPtrs& plate_data_list);
         bool _add_gcode_file_to_archive(mz_zip_archive& archive, const Model& model, PlateDataPtrs& plate_data_list, Export3mfProgressFn proFn = nullptr);
         bool _add_custom_gcode_per_print_z_file_to_archive(mz_zip_archive& archive, Model& model, const DynamicPrintConfig* config);
-        // Image Fill (Phase 2): "Metadata/image_fill/<sha256>.png" plus a manifest.
-        bool _add_image_fill_to_archive(mz_zip_archive& archive, Model& model);
+        // Image Fill (Phase 2): "Metadata/image_fill/<sha256>.png" plus a manifest. `config` is
+        // Phase 3's addition (image row): a project-wide mixed_filament_definitions row can also
+        // reference an asset, and that reference does not live on any ModelVolume.
+        bool _add_image_fill_to_archive(mz_zip_archive& archive, Model& model, const DynamicPrintConfig* config);
         bool _add_auxiliary_dir_to_archive(mz_zip_archive &archive, const std::string &aux_dir, PackingTemporaryData &data);
 
         static int convert_instance_id_to_resource_id(const Model& model, int obj_id, int instance_id)
@@ -6350,7 +6352,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             // Image Fill (Phase 2): the images the project's parts point at, one file per asset,
             // named by content hash. Written before the config files so a reader that stops early
             // still has the picture that goes with the painting it has already read.
-            if (!_add_image_fill_to_archive(archive, model)) { return false; }
+            if (!_add_image_fill_to_archive(archive, model, config)) { return false; }
 
             // BBS progress point
             BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ":" << __LINE__ << boost::format(", before add project_settings\n");
@@ -8445,11 +8447,11 @@ bool _BBS_3MF_Exporter::_add_gcode_file_to_archive(mz_zip_archive& archive, cons
     return result;
 }
 
-bool _BBS_3MF_Exporter::_add_image_fill_to_archive(mz_zip_archive &archive, Model &model)
+bool _BBS_3MF_Exporter::_add_image_fill_to_archive(mz_zip_archive &archive, Model &model, const DynamicPrintConfig *config)
 {
-    // Which assets are actually pointed at. The annotation lives on ModelVolume::config under
-    // `image_fill_params`; anything the store holds that nothing names is dropped rather than
-    // written, so a project does not grow every picture the user ever tried.
+    // Which assets are actually pointed at. The Phase 2 annotation lives on ModelVolume::config
+    // under `image_fill_params`; anything the store holds that nothing names is dropped rather
+    // than written, so a project does not grow every picture the user ever tried.
     std::vector<std::string> used;
     for (const ModelObject *object : model.objects) {
         if (object == nullptr)
@@ -8461,6 +8463,41 @@ bool _BBS_3MF_Exporter::_add_image_fill_to_archive(mz_zip_archive &archive, Mode
             if (image_fill_params_of(*volume, params) && !params.asset.empty() &&
                 std::find(used.begin(), used.end(), params.asset) == used.end())
                 used.push_back(params.asset);
+        }
+    }
+    // Phase 3 (image row): a MixedFilament row can ALSO reference an asset, via its
+    // image_fill_ref (a hex-encoded ImageFillParams::to_string()) - and that reference lives on
+    // no ModelVolume at all, so the scan above never sees it. Without this, a project whose only
+    // image reference is an ImageWeighted row would silently lose the picture on every save: the
+    // config string round-trips fine, but the PNG it points at does not exist to decode, and
+    // Fill.cpp's image_row_context_for_region() finds no image (see that function's own
+    // asset-not-found path). filament_colour need not be the print's real colours here - decoding
+    // structural fields (distribution_mode, image_fill_ref) does not depend on them, only
+    // load_custom_entries()'s own "at least 2 physical filaments" guard does, so any placeholder
+    // list of the right SIZE is enough.
+    if (config != nullptr && config->has("mixed_filament_definitions")) {
+        const std::string serialized = config->opt_string("mixed_filament_definitions");
+        if (!serialized.empty()) {
+            size_t n = 0;
+            if (config->has("filament_colour"))
+                n = config->opt<ConfigOptionStrings>("filament_colour")->values.size();
+            if (n < 2 && config->has("filament_diameter"))
+                n = config->opt<ConfigOptionFloats>("filament_diameter")->values.size();
+            if (n >= 2) {
+                std::vector<std::string> placeholder_colours(n, "#808080");
+                MixedFilamentManager scratch_mgr;
+                scratch_mgr.load_custom_entries(serialized, placeholder_colours);
+                for (const MixedFilament &row : scratch_mgr.mixed_filaments()) {
+                    if (!row.enabled || row.distribution_mode != int(MixedFilament::ImageWeighted) || row.image_fill_ref.empty())
+                        continue;
+                    ImageFillParams row_params;
+                    const std::string raw = MixedFilamentManager::decode_image_fill_ref(row.image_fill_ref);
+                    if (raw.empty() || !ImageFillParams::from_string(raw, row_params) || row_params.asset.empty())
+                        continue;
+                    if (std::find(used.begin(), used.end(), row_params.asset) == used.end())
+                        used.push_back(row_params.asset);
+                }
+            }
         }
     }
     if (used.empty())

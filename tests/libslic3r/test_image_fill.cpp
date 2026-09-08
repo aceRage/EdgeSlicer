@@ -6,7 +6,9 @@
 
 #include "libslic3r/ImageFill.hpp"
 #include "libslic3r/ColorSplit.hpp"
+#include "libslic3r/MixedFilament.hpp"
 #include "libslic3r/Model.hpp"
+#include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/TriangleMesh.hpp"
 #include "libslic3r/TriangleSelector.hpp"
 #include "libslic3r/Format/bbs_3mf.hpp"
@@ -20,6 +22,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <limits>
 #include <map>
 #include <utility>
 #include <fstream>
@@ -1048,6 +1051,105 @@ TEST_CASE("Image Fill: write the Bar B project - a cube with a three-colour imag
 }
 
 // =============================================================================================
+// 7b. Phase 3, step 4 Bar B - the image row: a plaque, a black-to-white ramp, three filaments
+// =============================================================================================
+//
+// Unlike the [barb] project above, this one carries NO mmu_segmentation_facets painting at all -
+// the image row is not a per-facet feature. What it needs instead is a MixedFilament row whose
+// distribution_mode is ImageWeighted, with image_fill_ref pointing at the ramp and
+// gradient_component_ids naming the three allowed physical filaments, referenced from
+// solid_infill_filament so Fill.cpp's split_top_infill_by_image_row() picks it up for the
+// plaque's (only) top surface. See docs/superpowers/specs/2026-09-07-imagemap-phase3-imagerow.md.
+//
+// Run it on its own with:  libslic3r_tests.exe "[barb3]"
+// It leaves %TEMP%\snorca_tests\image_row_bar_b.3mf behind on purpose - that is the file
+// snorca_hubtest's bar_b_imgrow_p3s4.py slices from disk.
+TEST_CASE("Image Fill Phase 3: write the Bar B project - a plaque with a black-to-white image row",
+          "[imagefill][ImageRow][barb3]")
+{
+    const std::vector<std::string> colors = {"#000000", "#808080", "#FFFFFF"};
+
+    Model        model;
+    ModelObject *object = model.add_object();
+    object->name        = "image row plaque";
+    // 50 x 50 mm footprint, 3 mm tall - the plan's own Bar B shape.
+    ModelVolume *volume = object->add_volume(make_cube(50., 50., 3.));
+    volume->name        = "plaque";
+    object->add_instance();
+    object->ensure_on_bed();
+
+    // ramp_kw.png is a 1 x 16 vertical ramp, white (row 0) to black (row 15) - see
+    // docs/superpowers/specs/2026-09-07-imagemap-phase2-imagefill.md's fixture list. A Planar
+    // projection along Z gives u from x, v from y (the same convention the [barb] cube above
+    // documents), so the ramp varies along the plaque's Y axis: one edge samples near-white, the
+    // opposite edge near-black, with every shade in between at the rows in between - exactly the
+    // "8 bands, monotonically increasing dark coverage" shape Bar B measures.
+    const std::string sha = model.image_assets.add(read_fixture("ramp_kw.png"));
+
+    ImageFillParams p;
+    p.asset      = sha;
+    p.projection = ImageFillProjection::Planar;
+    p.axis       = ImageFillAxis::Z;
+    p.allowed    = {1, 2, 3};
+
+    // The row: three physical filaments (black, mid-grey, white - the id order matches `colors`
+    // above 1-based), ImageWeighted, referencing the ramp. add_custom_filament()'s own A/B pair
+    // (1, 2) is unused by ImageWeighted's sampling - image_row_context_for_region() reads
+    // gradient_component_ids instead (see that field's own comment, MixedFilament.hpp) - but it
+    // still has to be a valid distinct pair for add_custom_filament() to accept the row at all.
+    MixedFilamentManager mgr;
+    mgr.add_custom_filament(1, 2, 50, colors);
+    REQUIRE(mgr.mixed_filaments().size() == 1);
+    MixedFilament &mf = mgr.mixed_filaments().front();
+    mf.distribution_mode      = int(MixedFilament::ImageWeighted);
+    mf.gradient_component_ids = "123";
+    mf.image_fill_ref          = MixedFilamentManager::encode_image_fill_ref(p.to_string());
+    REQUIRE_FALSE(mf.image_fill_ref.empty());
+    const std::string serialized = mgr.serialize_custom_entries();
+
+    // Virtual ids are enumerated over enabled rows starting at num_physical + 1 (see
+    // MixedFilamentManager's own allocator, MixedFilament.cpp) - with 3 physical filaments and
+    // this row being the only, first, enabled custom row, its virtual id is 4.
+    const int virtual_id = int(colors.size()) + 1;
+
+    const boost::filesystem::path tmp_root = boost::filesystem::temp_directory_path() / "snorca_tests";
+    boost::filesystem::create_directories(tmp_root);
+    Slic3r::set_temporary_dir(tmp_root.string());
+    const std::string out = (tmp_root / "image_row_bar_b.3mf").string();
+
+    DynamicPrintConfig cfg = DynamicPrintConfig::full_print_config();
+    // mixed_filament_definitions is project-wide state (which rows exist at all), not a
+    // per-region print setting, so it belongs on the global config - and does survive
+    // --process-preset/--filament-presets at CLI slice time (verified empirically: a plain
+    // global solid_infill_filament override here does NOT survive process-preset selection,
+    // because that key IS part of the process preset's own domain; mixed_filament_definitions
+    // is not).
+    cfg.set_key_value("mixed_filament_definitions", new ConfigOptionString(serialized));
+    if (ConfigOptionStrings *colours_opt = cfg.option<ConfigOptionStrings>("filament_colour", true))
+        colours_opt->values = colors;
+
+    // solid_infill_filament (and the two fill-direction keys below) are PrintRegionConfig, i.e.
+    // per-part settings - putting them on the VOLUME's own config, the same place
+    // image_fill_apply() writes image_fill_params (ImageFill.cpp), is what makes them survive
+    // --process-preset selection: a part's own settings override the process preset for that
+    // part, exactly like the GUI's "add settings" panel.
+    volume->config.set_key_value("solid_infill_filament", new ConfigOptionInt(virtual_id));
+    // Force horizontal fill lines (one Y per line), stacked along Y - so each line samples one
+    // roughly-constant band of the ramp instead of sweeping across the whole gradient itself.
+    volume->config.set_key_value("solid_infill_direction", new ConfigOptionFloat(0.));
+    volume->config.set_key_value("top_surface_pattern", new ConfigOptionEnum<InfillPattern>(ipMonotonic));
+
+    StoreParams sp;
+    sp.path     = out.c_str();
+    sp.model    = &model;
+    sp.config   = &cfg;
+    sp.strategy = SaveStrategy::Zip64 | SaveStrategy::Silence | SaveStrategy::SkipAuxiliary;
+    REQUIRE(store_bbs_3mf(sp));
+    WARN("Bar B (image row) project written to " << out << " (virtual filament id "
+         << virtual_id << ", image_fill_ref len " << mf.image_fill_ref.size() << ")");
+}
+
+// =============================================================================================
 // 8. A face selection is a merge, not a replacement
 // =============================================================================================
 
@@ -1774,6 +1876,354 @@ TEST_CASE("Image Fill: the box projection leaves no facet of a sphere unpainted"
         const ImageFillResult fr = image_fill_compute(ball, e2, flat, store, kFilamentColors, kFilamentIds);
         REQUIRE(fr.ok);
         CHECK(fr.facets_painted < fr.leaves_total);
+    }
+}
+
+// =============================================================================================
+// Phase 3, step 2: the image row sampler
+// =============================================================================================
+//
+// Spec: docs/superpowers/specs/2026-09-07-imagemap-edgeslicer-plan.md, section 4, Phase 3.
+// image_fill_sample_segment() has to answer the same question image_fill_compute() answers per
+// leaf centroid - "what colour does the image put here" - but for an arbitrary point on a fill
+// segment rather than a subdivision leaf. The tests below hold it to that in two ways: agreement
+// with the real facet-painting pipeline on a cube (not merely "both call the same helper" in the
+// abstract), and known colours at known positions against the same fixtures the phase 2 tests use.
+
+TEST_CASE("Image Fill: the segment sampler agrees with the facet painter at facet centroids",
+          "[imagefill][imagerow]")
+{
+    ImageAssetStore   store;
+    const std::string quad = store.add(read_fixture("quad_rgbw.png"));
+    TriangleMesh      cube = make_cube(20., 20., 20.);
+    BoundingBoxf3     box;
+    for (const Vec3f &v : cube.its.vertices) box.merge(v.cast<double>());
+
+    // Runs image_fill_compute() at subdivision 0 - one leaf per facet, so a leaf's centroid IS
+    // the facet's centroid - then, for every leaf compute() actually painted, asks the sampler
+    // for the colour at that same centroid (a zero-length "segment") and replicates compute()'s
+    // own nearest-palette lookup on the sampler's answer. The two must agree on the FILAMENT ID,
+    // which only happens if they agreed on u, v and on the pixel first: end to end, not merely
+    // "both call image_fill_project somewhere".
+    auto check_against_compute = [&](const ImageFillParams &p) {
+        TriangleSelector::TriangleSplittingData empty;
+        const ImageFillResult r = image_fill_compute(cube.its, empty, p, store, kFilamentColors, kFilamentIds);
+        REQUIRE(r.ok);
+        REQUIRE(r.subdivision_used == 0);
+        const std::vector<int> states = leaf_states(cube, r.painting, cube.its.indices.size(), 0);
+        size_t checked = 0;
+        for (size_t t = 0; t < cube.its.indices.size(); ++t) {
+            if (states[t] == 0)
+                continue;   // a facet Facing culled (the sides, for the flat case) - not this test's question
+            const Vec3i32 &f = cube.its.indices[t];
+            const Vec3f   &a = cube.its.vertices[f(0)], &b = cube.its.vertices[f(1)], &c = cube.its.vertices[f(2)];
+            const Vec3f    n        = (b - a).cross(c - a);
+            const Vec3f    centroid = (a + b + c) / 3.f;
+
+            const std::vector<ImageRowSample> s = image_fill_sample_segment(p, box, store, centroid, centroid, n, 1.f);
+            REQUIRE(s.size() == 1);
+            REQUIRE(s[0].has_color);
+
+            size_t best  = 0;
+            float  bestd = std::numeric_limits<float>::max();
+            for (size_t i = 0; i < r.palette.colors.size(); ++i) {
+                const float dr = s[0].color[0] - r.palette.colors[i][0];
+                const float dg = s[0].color[1] - r.palette.colors[i][1];
+                const float db = s[0].color[2] - r.palette.colors[i][2];
+                const float d  = dr * dr + dg * dg + db * db;
+                if (d < bestd) { bestd = d; best = i; }
+            }
+            CHECK(r.palette.filament[best] == states[t]);
+            ++checked;
+        }
+        CHECK(checked > 0);
+    };
+
+    SECTION("flat, along +Z")
+    {
+        ImageFillParams p;
+        p.asset       = quad;
+        p.projection  = ImageFillProjection::Planar;
+        p.axis        = ImageFillAxis::Z;
+        p.subdivision = 0;
+        p.allowed     = kFilamentIds;
+        check_against_compute(p);
+    }
+    SECTION("box (tri-planar) - every one of the twelve facets, not just the top")
+    {
+        ImageFillParams p;
+        p.asset       = quad;
+        p.projection  = ImageFillProjection::Box;
+        p.subdivision = 0;
+        p.allowed     = kFilamentIds;
+        check_against_compute(p);
+    }
+}
+
+TEST_CASE("Image Fill: the segment sampler reads known colours at known positions", "[imagefill][imagerow]")
+{
+    ImageAssetStore store;
+    const Vec3f     up(0.f, 0.f, 1.f);
+
+    SECTION("bands3.png: three vertical bands, colour depends only on u")
+    {
+        const std::string sha = store.add(read_fixture("bands3.png"));
+        BoundingBoxf3      box;
+        box.merge(Vec3d(0, 0, 0));
+        box.merge(Vec3d(9, 3, 0));
+
+        ImageFillParams p;
+        p.asset      = sha;
+        p.projection = ImageFillProjection::Planar;
+        p.axis       = ImageFillAxis::Z;
+
+        const std::vector<ImageRowSample> s =
+            image_fill_sample_segment(p, box, store, Vec3f(0.f, 1.5f, 0.f), Vec3f(9.f, 1.5f, 0.f), up, 1.f);
+        REQUIRE(s.size() == 10);   // length 9, spacing 1 -> 9 intervals -> 10 samples, endpoints exact
+        for (const ImageRowSample &sample : s) CHECK(sample.has_color);
+
+        const std::array<float, 3> R{1.f, 0.f, 0.f}, G{0.f, 1.f, 0.f}, B{0.f, 0.f, 1.f};
+        CHECK(s[1].color == R);   // x = 1, u = 1/9  -> red band
+        CHECK(s[4].color == G);   // x = 4, u = 4/9  -> green band
+        CHECK(s[7].color == B);   // x = 7, u = 7/9  -> blue band
+        CHECK(s[4].s == Approx(4.f));
+        CHECK(s.back().pos.x() == Approx(9.f));   // the endpoint lands exactly, not one spacing short
+    }
+
+    SECTION("quad_rgbw.png: R G / B W, colour depends on both u and v")
+    {
+        const std::string sha = store.add(read_fixture("quad_rgbw.png"));
+        BoundingBoxf3      box;
+        box.merge(Vec3d(0, 0, 0));
+        box.merge(Vec3d(4, 4, 0));
+
+        ImageFillParams p;
+        p.asset      = sha;
+        p.projection = ImageFillProjection::Planar;
+        p.axis       = ImageFillAxis::Z;
+
+        // y = 3 -> v = 0.75 > 0.5, the TOP row: red on the left half, green on the right.
+        const std::vector<ImageRowSample> top =
+            image_fill_sample_segment(p, box, store, Vec3f(0.5f, 3.f, 0.f), Vec3f(3.5f, 3.f, 0.f), up, 0.5f);
+        REQUIRE(top.size() == 7);
+        CHECK(top.front().color == std::array<float, 3>{1.f, 0.f, 0.f});
+        CHECK(top.back().color == std::array<float, 3>{0.f, 1.f, 0.f});
+
+        // y = 1 -> v = 0.25 < 0.5, the BOTTOM row: blue then white.
+        const std::vector<ImageRowSample> bottom =
+            image_fill_sample_segment(p, box, store, Vec3f(0.5f, 1.f, 0.f), Vec3f(3.5f, 1.f, 0.f), up, 0.5f);
+        CHECK(bottom.front().color == std::array<float, 3>{0.f, 0.f, 1.f});
+        CHECK(bottom.back().color == std::array<float, 3>{1.f, 1.f, 1.f});
+    }
+
+    SECTION("a gradient, with no image at all, samples too")
+    {
+        ImageFillParams p;
+        p.gradient.enabled   = true;
+        p.gradient.stop_a    = {0.f, 0.f, 0.f};
+        p.gradient.stop_b    = {1.f, 1.f, 1.f};
+        p.gradient.direction = 0;   // along u
+        BoundingBoxf3 box;
+        box.merge(Vec3d(0, 0, 0));
+        box.merge(Vec3d(10, 1, 0));
+
+        const std::vector<ImageRowSample> s =
+            image_fill_sample_segment(p, box, store, Vec3f(0.f, 0.5f, 0.f), Vec3f(10.f, 0.5f, 0.f), up, 5.f);
+        REQUIRE(s.size() == 3);
+        for (const ImageRowSample &sample : s) CHECK(sample.has_color);
+        CHECK(s.front().color[0] == Approx(0.f).margin(1e-5f));
+        CHECK(s.back().color[0] == Approx(1.f).margin(1e-5f));
+    }
+
+    SECTION("MeshUV declines: a bare position has no UV to project through")
+    {
+        ImageFillParams p;
+        p.projection = ImageFillProjection::MeshUV;
+        BoundingBoxf3 box;
+        box.merge(Vec3d(0, 0, 0));
+        box.merge(Vec3d(1, 1, 0));
+        const std::vector<ImageRowSample> s = image_fill_sample_segment(p, box, store, Vec3f(0, 0, 0), Vec3f(1, 0, 0), up, 1.f);
+        for (const ImageRowSample &sample : s) CHECK_FALSE(sample.has_color);
+    }
+
+    SECTION("no image and no gradient: every sample declines rather than guessing")
+    {
+        ImageFillParams p;   // asset empty, gradient disabled: nothing to sample
+        BoundingBoxf3    box;
+        box.merge(Vec3d(0, 0, 0));
+        box.merge(Vec3d(1, 1, 0));
+        const std::vector<ImageRowSample> s = image_fill_sample_segment(p, box, store, Vec3f(0, 0, 0), Vec3f(1, 0, 0), up, 1.f);
+        for (const ImageRowSample &sample : s) CHECK_FALSE(sample.has_color);
+    }
+
+    SECTION("a zero-length segment gives exactly one sample, at s = 0")
+    {
+        const std::string sha = store.add(read_fixture("bands3.png"));
+        BoundingBoxf3      box;
+        box.merge(Vec3d(0, 0, 0));
+        box.merge(Vec3d(9, 3, 0));
+        ImageFillParams p;
+        p.asset      = sha;
+        p.projection = ImageFillProjection::Planar;
+        p.axis       = ImageFillAxis::Z;
+        const std::vector<ImageRowSample> s =
+            image_fill_sample_segment(p, box, store, Vec3f(4.f, 1.f, 0.f), Vec3f(4.f, 1.f, 0.f), up, 1.f);
+        REQUIRE(s.size() == 1);
+        CHECK(s[0].s == 0.f);
+        CHECK(s[0].has_color);
+    }
+}
+
+// =============================================================================================
+// Phase 3, step 3: the XY split with dither
+// =============================================================================================
+//
+// image_fill_dither_segment() turns the sampler's colour ramp into filament runs by carrying the
+// quantisation error forward along the path (1-D error diffusion). Nothing here touches the
+// slicing pipeline - no Fill.cpp, LayerRegion.cpp or ToolOrdering.cpp change - so these are tests
+// of a pure function against hand-built ImageRowSample vectors, not of a slice.
+
+TEST_CASE("Image Fill: the XY dither turns a sampled ramp into filament runs", "[imagefill][imagerow][dither]")
+{
+    const std::vector<std::array<float, 3>> kDarkLight = {{0.f, 0.f, 0.f}, {1.f, 1.f, 1.f}};
+    const std::vector<int>                  kDarkLightIds = {1, 2};   // 1 = dark, 2 = light
+
+    SECTION("a solid colour gives one run")
+    {
+        std::vector<ImageRowSample> samples;
+        for (int i = 0; i < 20; ++i) {
+            ImageRowSample s;
+            s.s         = float(i) * 0.4f;
+            s.has_color = true;
+            s.color     = {1.f, 1.f, 1.f};
+            samples.push_back(s);
+        }
+        const auto runs = image_fill_dither_segment(samples, kDarkLight, kDarkLightIds, 0.4f);
+        REQUIRE(runs.size() == 1);
+        CHECK(runs[0].filament_id == 2);
+        CHECK(runs[0].s0 == Approx(0.f));
+        CHECK(runs[0].s1 == Approx(19.f * 0.4f));
+    }
+
+    SECTION("two runs of the same input are identical")
+    {
+        std::vector<ImageRowSample> samples;
+        for (int i = 0; i < 40; ++i) {
+            ImageRowSample s;
+            s.s         = float(i) * 0.4f;
+            s.has_color = true;
+            s.color     = {0.5f, 0.5f, 0.5f};   // a uniform mid-grey: dithers into more than one run
+            samples.push_back(s);
+        }
+        const auto r1 = image_fill_dither_segment(samples, kDarkLight, kDarkLightIds, 0.f);
+        const auto r2 = image_fill_dither_segment(samples, kDarkLight, kDarkLightIds, 0.f);
+        REQUIRE(r1.size() == r2.size());
+        for (size_t i = 0; i < r1.size(); ++i) {
+            CHECK(r1[i].s0 == r2[i].s0);
+            CHECK(r1[i].s1 == r2[i].s1);
+            CHECK(r1[i].filament_id == r2[i].filament_id);
+        }
+        CHECK(r1.size() > 1);
+    }
+
+    SECTION("a black-to-white ramp across 8 bands: dark-run length is monotonic, no reversal")
+    {
+        const int   bands    = 8;
+        const int   per_band = 30;
+        const float ds       = 1.f;   // mm between samples
+
+        std::vector<ImageRowSample> samples;
+        samples.reserve(size_t(bands * per_band));
+        // Band 0 is white (g = 1), band 7 is black (g = 0): walking the ramp start to end goes
+        // white -> black, so the dark filament's run length per band must climb monotonically
+        // with no reversal - "a black-to-white ramp... monotonically increasing dark-filament
+        // run length... with no reversal", read in the direction that makes it literally true.
+        for (int b = 0; b < bands; ++b) {
+            const float g = 1.f - float(b) / float(bands - 1);
+            for (int i = 0; i < per_band; ++i) {
+                ImageRowSample s;
+                s.s         = float(samples.size()) * ds;
+                s.has_color = true;
+                s.color     = {g, g, g};
+                samples.push_back(s);
+            }
+        }
+
+        const auto runs = image_fill_dither_segment(samples, kDarkLight, kDarkLightIds, 0.f);
+
+        std::vector<float> dark_len(size_t(bands), 0.f);
+        const float        band_span = float(per_band) * ds;
+        for (const ImageRowRun &r : runs) {
+            if (r.filament_id != 1)   // 1 = dark
+                continue;
+            for (int b = 0; b < bands; ++b) {
+                const float band_lo  = float(b) * band_span;
+                const float band_hi  = band_lo + band_span;
+                const float overlap  = std::min(r.s1, band_hi) - std::max(r.s0, band_lo);
+                if (overlap > 0.f) dark_len[size_t(b)] += overlap;
+            }
+        }
+        for (int b = 0; b + 1 < bands; ++b) {
+            INFO("band " << b << " dark_len=" << dark_len[size_t(b)] << " vs band " << (b + 1)
+                          << " dark_len=" << dark_len[size_t(b + 1)]);
+            CHECK(dark_len[size_t(b)] <= dark_len[size_t(b + 1)] + 1e-3f);
+        }
+        CHECK(dark_len.front() < dark_len.back());
+    }
+
+    SECTION("minimum run length is honoured")
+    {
+        // dark [0..9], a one-sample light BLIP at 10 (shorter than the floor), dark [11..29], a
+        // five-sample light BLOCK at [30..34] (as long as the floor, so it should survive), dark
+        // [35..39].
+        std::vector<ImageRowSample> samples;
+        for (int i = 0; i < 40; ++i) {
+            ImageRowSample s;
+            s.s         = float(i);
+            s.has_color = true;
+            const bool light = (i == 10) || (i >= 30 && i <= 34);
+            s.color = light ? std::array<float, 3>{1.f, 1.f, 1.f} : std::array<float, 3>{0.f, 0.f, 0.f};
+            samples.push_back(s);
+        }
+
+        const auto unmerged = image_fill_dither_segment(samples, kDarkLight, kDarkLightIds, 0.f);
+        // Without a floor the blip survives as its own (zero-length) run.
+        CHECK(std::any_of(unmerged.begin(), unmerged.end(),
+                          [](const ImageRowRun &r) { return r.filament_id == 2 && r.length() == 0.f; }));
+
+        const auto merged = image_fill_dither_segment(samples, kDarkLight, kDarkLightIds, 2.f);
+        for (const ImageRowRun &r : merged)
+            CHECK((r.length() >= 2.f || merged.size() == 1));
+        // The blip is gone, folded into the dark it interrupted...
+        const size_t light_runs =
+            std::count_if(merged.begin(), merged.end(), [](const ImageRowRun &r) { return r.filament_id == 2; });
+        CHECK(light_runs == 1);
+        // ...but the five-sample block, which already met the floor, survived on its own.
+        auto it = std::find_if(merged.begin(), merged.end(), [](const ImageRowRun &r) { return r.filament_id == 2; });
+        REQUIRE(it != merged.end());
+        CHECK(it->s0 == Approx(30.f));
+        CHECK(it->s1 == Approx(34.f));
+    }
+
+    SECTION("declining samples extend the previous run rather than crashing")
+    {
+        std::vector<ImageRowSample> samples;
+        ImageRowSample a; a.s = 0.f; a.has_color = true;  a.color = {1.f, 1.f, 1.f};
+        ImageRowSample b; b.s = 1.f; b.has_color = false;   // e.g. a cylindrical sample exactly on the axis
+        ImageRowSample c; c.s = 2.f; c.has_color = true;  c.color = {1.f, 1.f, 1.f};
+        samples = {a, b, c};
+        const auto runs = image_fill_dither_segment(samples, kDarkLight, kDarkLightIds, 0.f);
+        REQUIRE(runs.size() == 1);
+        CHECK(runs[0].filament_id == 2);
+    }
+
+    SECTION("empty input and mismatched candidate arrays are refused rather than crashing")
+    {
+        CHECK(image_fill_dither_segment({}, kDarkLight, kDarkLightIds, 0.4f).empty());
+        std::vector<ImageRowSample> one(1);
+        one[0].has_color = true;
+        CHECK(image_fill_dither_segment(one, {}, {}, 0.4f).empty());
+        CHECK(image_fill_dither_segment(one, kDarkLight, {1}, 0.4f).empty());   // size mismatch
     }
 }
 

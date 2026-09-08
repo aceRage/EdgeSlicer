@@ -400,6 +400,108 @@ TriangleSelector::TriangleSplittingData image_fill_encode(
 // about `detail_mm`, capped at `cap` and at IMAGE_FILL_MAX_LEAVES over `n_triangles`.
 int image_fill_depth_for_detail(float max_edge_mm, float detail_mm, int cap, size_t n_triangles);
 
+// ---------------------------------------------------------------------------------------------
+// 7. Phase 3, step 2: the image row sampler - one fill segment, N samples along it
+// ---------------------------------------------------------------------------------------------
+//
+// Spec: docs/superpowers/specs/2026-09-07-imagemap-edgeslicer-plan.md, Phase 3. Everything below
+// stays outside the slicing pipeline: it is called by nothing in Fill.cpp, LayerRegion.cpp or
+// ToolOrdering.cpp yet - that wiring is a later step. What is here answers one question a caller
+// in that pipeline will eventually ask: "what colour does the image put at this point on this
+// fill segment", at extrusion-width resolution instead of facet resolution.
+
+// The pixel a decoded (u, v) reads, top row first, clamped, nearest-neighbour. Exposed so
+// image_fill_sample_segment() and image_fill_compute()'s facet painting read the SAME function -
+// which is what makes a segment lying in a facet's own plane sample identically to that facet's
+// own leaf centroids: both end up computing image_fill_project() then this, on the same inputs.
+std::array<float, 3> image_fill_sample_pixel(const ImageAsset &asset, float u, float v);
+
+// One sample along a fill segment.
+struct ImageRowSample
+{
+    float                s = 0.f;    // arc length from the segment's start, same units as p0/p1
+    Vec3f                pos = Vec3f(0.f, 0.f, 0.f);
+    // false where the projection declines a colour at this point - the same cases
+    // image_fill_project() itself declines (a cylindrical projection exactly on the axis, a Box
+    // projection off a degenerate facet normal), or where there is neither an image nor an
+    // enabled gradient to sample.
+    bool                 has_color = false;
+    std::array<float, 3> color{0.f, 0.f, 0.f};   // sRGB 0..1, meaningful only when has_color
+};
+
+// Samples the image (or the gradient, when `params.asset` is empty) at evenly spaced points
+// along the straight segment `p0` -> `p1`, both in the volume's own mesh space (their z already
+// carries the layer height a caller in the real pipeline would supply). Reuses
+// image_fill_project() - the same function image_fill_compute() calls per leaf centroid - so a
+// segment lying in a facet's plane gets EXACTLY the facet painter's u, v at any point on that
+// plane, and therefore exactly its colour: this is what "a segment on the top face maps where
+// phase 2's facet painting maps it" means, made precise enough to test.
+//
+// `facet_normal` is the plane the segment lies in - the caller's job to supply, exactly as
+// image_fill_compute() computes it once per original facet and reuses it for every leaf. It is
+// read only by a Box projection (to choose a face) and by the `faces` culling rule, which this
+// function does NOT apply - a fill segment was already placed on a facet the caller decided is
+// part of the fill, so "is this facet facing the projection" is not this function's question to
+// re-ask; it always returns a colour when image_fill_project() succeeds, for every projection
+// except MeshUV, which a bare position cannot resolve without the triangle it came from (that is
+// the caller's job in the real pipeline, not this pure function's - see the header note above).
+//
+// There are always at least 1 sample; for a non-degenerate segment there are at least 2 (both
+// endpoints), spaced ~`spacing_mm` apart with the endpoints always exact even when that shortens
+// the last interval - so two segments sharing an endpoint always agree on that shared point's
+// colour, which matters once fill segments are stitched into a fill line.
+std::vector<ImageRowSample> image_fill_sample_segment(const ImageFillParams &params, const BoundingBoxf3 &box,
+                                                      const ImageAssetStore &assets, const Vec3f &p0, const Vec3f &p1,
+                                                      const Vec3f &facet_normal, float spacing_mm);
+
+// ---------------------------------------------------------------------------------------------
+// 8. Phase 3, step 3: the XY split with dither - sampled colours become filament runs
+// ---------------------------------------------------------------------------------------------
+
+// One run of one filament id along a sampled fill segment, in the same arc-length units
+// (`ImageRowSample::s`) the sampler above reports.
+struct ImageRowRun
+{
+    float s0 = 0.f;          // start, inclusive, mm from the segment's start
+    float s1 = 0.f;          // end, inclusive, mm from the segment's start
+    int   filament_id = 0;   // one of candidate_ids, verbatim
+
+    float length() const { return s1 - s0; }
+};
+
+// Turns a sampled colour ramp into a sequence of single-filament runs by 1-D error-diffusion
+// dithering against the row's own reachable colours (`candidate_colors`, parallel to
+// `candidate_ids` - phase 1's solver output for an ImageWeighted row's allowed filaments, or
+// simply the row's fixed physical pair; either way, plain (id, colour) pairs is all this
+// function needs to know about a "reachable mix").
+//
+// Per sample i, in order:
+//   target         = colors[i] + carried_error                 (carried_error starts at 0)
+//   chosen         = the candidate in candidate_colors nearest `target` (squared sRGB distance -
+//                    the same space image_fill_compute's own nearest-palette lookup measures in)
+//   carried_error <- target - candidate_colors[chosen]          (passed to sample i + 1)
+//
+// That is "dithering between the two or three nearest reachable mixes" made concrete: choosing
+// the single nearest candidate to a running target and carrying the leftover error forward is
+// exactly Floyd-Steinberg's rule generalised from two grey levels to a small palette, and it
+// finds the same answer a fixed local shortlist would - the nearest candidate to any target is,
+// by definition, always inside whatever "nearest few" shortlist a caller could have precomputed,
+// so nothing is lost by searching the whole list fresh each time, and nothing about the search
+// depends on iteration order or randomness: two calls on identical input produce identical
+// output. A sample with `has_color == false` extends the previous sample's run without updating
+// the carried error (there is no colour there to diffuse); the first such sample, if there is no
+// previous one, takes `candidate_ids.front()`.
+//
+// Consecutive samples that dither to the same id merge into one run. A run shorter than
+// `min_run_len_mm` - shorter than the nozzle can print - is folded into whichever neighbour run's
+// own candidate colour is closer to its own (the edge run has only one neighbour), repeated until
+// every run meets the floor or only one run is left; adjacent runs merged down to the same id are
+// then joined, so the output never has two consecutive entries with the same filament_id.
+std::vector<ImageRowRun> image_fill_dither_segment(const std::vector<ImageRowSample>       &samples,
+                                                   const std::vector<std::array<float, 3>> &candidate_colors,
+                                                   const std::vector<int>                  &candidate_ids,
+                                                   float                                     min_run_len_mm);
+
 } // namespace Slic3r
 
 #endif // slic3r_ImageFill_hpp_
