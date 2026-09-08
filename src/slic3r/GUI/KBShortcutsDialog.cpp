@@ -276,6 +276,21 @@ void KBShortcutsDialog::fill_shortcuts()
         };
         m_full_shortcuts.push_back({{_L("Gizmo"), ""}, gizmos_shortcuts});
 
+        // These only fire while the Sculpt gizmo is open, which is why they are
+        // their own section rather than lines in the Gizmo one: F is bound to
+        // "place face on bed" everywhere else, and Ctrl means additive selection
+        // everywhere else.
+        Shortcuts sculpt_shortcuts = {
+            {L("Left mouse button"), L("Sculpt: apply the brush")},
+            {ctrl + L("Mouse wheel"), L("Sculpt: adjust brush size")},
+            {"F", L("Sculpt: adjust brush size - then move the mouse, click or Enter to keep it, Esc to cancel")},
+            {shift + "F", L("Sculpt: adjust strength - then move the mouse, click or Enter to keep it, Esc to cancel")},
+            {L("Ctrl"), L("Sculpt: hold to invert the brush (Inflate/Deflate, Flatten/Fill, Crease/Ridge)")},
+            {L("Shift"), L("Sculpt: hold to invert the brush")},
+            {L("Esc"), L("Sculpt: cancel the stroke or the brush-size adjustment")},
+        };
+        m_full_shortcuts.push_back({{_L("Sculpt Gizmo"), ""}, sculpt_shortcuts});
+
         Shortcuts object_list_shortcuts = {
             {"1-9", L("Set extruder number for the objects and parts") },
             {L("Del"), L("Delete objects, parts, modifiers")},

@@ -803,6 +803,22 @@ bool GLGizmosManager::on_char(wxKeyEvent& evt)
 
     bool processed = false;
 
+    // Sculpt's Blender-style modal keys get first refusal, ahead of everything
+    // below including the handle_shortcut() fallthrough - a bare F while the
+    // Sculpt gizmo is open sizes the brush, and must not open the "place face on
+    // bed" gizmo that F is otherwise bound to. The gizmo returns false for keys
+    // it does not want, so nothing else is stolen. ImGui has already had its
+    // turn upstream (GLCanvas3D::on_char returns early once imgui takes the
+    // key), so a character typed into one of the panel's numeric boxes never
+    // reaches here.
+    if (m_current == Sculpt) {
+        if (auto *sculpt = dynamic_cast<GLGizmoSculpt *>(m_gizmos[Sculpt].get());
+            sculpt != nullptr && sculpt->on_sculpt_char(keyCode, evt.ShiftDown(), evt.CmdDown())) {
+            m_parent.set_as_dirty();
+            return true;
+        }
+    }
+
     if ((evt.GetModifiers() & ctrlMask) != 0) {
         switch (keyCode)
         {

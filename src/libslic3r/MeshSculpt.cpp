@@ -19,6 +19,114 @@ float falloff_weight(float d, float r)
     return t * t;
 }
 
+// ----------------------------------------------------------------------------
+// Modal brush-parameter adjustment
+// ----------------------------------------------------------------------------
+
+AdjustState adjust_begin(AdjustTarget target, float current_value, double mouse_x)
+{
+    AdjustState st;
+    st.target      = target;
+    st.start_value = current_value;
+    st.start_x     = mouse_x;
+    st.value       = current_value;
+    return st;
+}
+
+AdjustState adjust_move(const AdjustState &state, double mouse_x, float value_min, float value_max)
+{
+    AdjustState st = state;
+    if (! st.active())
+        return st;
+
+    const double dx = mouse_x - st.start_x;
+    if (st.target == AdjustTarget::Radius) {
+        // Multiplicative: right doubles, left halves, so the gesture feels the
+        // same whatever the radius already is. A start value of zero would pin
+        // the brush at zero, so fall back to the range floor.
+        const float base = st.start_value > 0.f ? st.start_value : std::max(value_min, 1e-4f);
+        st.value = float(double(base) * std::exp2(dx / AdjustFullScalePx));
+    } else {
+        // Additive over the full range.
+        st.value = float(double(st.start_value) + dx / AdjustFullScalePx * double(value_max - value_min));
+    }
+    st.value = std::clamp(st.value, value_min, value_max);
+    return st;
+}
+
+float adjust_confirm(const AdjustState &state) { return state.value; }
+float adjust_cancel(const AdjustState &state) { return state.start_value; }
+
+bool brush_inverts_with_ctrl(BrushType type)
+{
+    switch (type) {
+    case BrushType::Inflate:
+    case BrushType::Flatten:
+    case BrushType::Crease:
+        return true;
+    case BrushType::Grab:
+    case BrushType::Smooth:
+    default:
+        return false;
+    }
+}
+
+// ----------------------------------------------------------------------------
+// plane fitting (Flatten / Crease)
+// ----------------------------------------------------------------------------
+
+bool fit_plane(const indexed_triangle_set  &its,
+               const std::vector<Vec3f>    &vertex_normals,
+               const std::vector<uint32_t> &vertices,
+               const Vec3f                 &center,
+               float                        radius,
+               bool                         falloff,
+               Vec3f                       &origin,
+               Vec3f                       &normal)
+{
+    if (vertices.empty())
+        return false;
+
+    // Doubles throughout: the sums run over the whole patch and a float
+    // accumulator loses the plane offset on a part sitting far from the origin.
+    Vec3d  centroid = Vec3d::Zero();
+    Vec3d  n_sum    = Vec3d::Zero();
+    double wsum     = 0.;
+    for (uint32_t v : vertices) {
+        const float d = (its.vertices[v] - center).norm();
+        const float w = falloff ? falloff_weight(d, radius) : (d < radius ? 1.f : 0.f);
+        if (w <= 0.f)
+            continue;
+        centroid += double(w) * its.vertices[v].cast<double>();
+        n_sum    += double(w) * vertex_normals[v].cast<double>();
+        wsum     += double(w);
+    }
+    if (wsum <= 0.)
+        return false;
+
+    origin = (centroid / wsum).cast<float>();
+    const double len = n_sum.norm();
+    if (len < 1e-9)
+        return false;
+    normal = (n_sum / len).cast<float>();
+    return true;
+}
+
+float plane_distance_variance(const indexed_triangle_set  &its,
+                              const std::vector<uint32_t> &vertices,
+                              const Vec3f                 &origin,
+                              const Vec3f                 &normal)
+{
+    if (vertices.empty())
+        return 0.f;
+    double sum = 0.;
+    for (uint32_t v : vertices) {
+        const double d = double((its.vertices[v] - origin).dot(normal));
+        sum += d * d;
+    }
+    return float(sum / double(vertices.size()));
+}
+
 std::vector<Vec3f> its_vertex_normals(const indexed_triangle_set &its)
 {
     std::vector<Vec3f> normals(its.vertices.size(), Vec3f::Zero());
@@ -385,6 +493,71 @@ void SculptSession::apply(const BrushParams &params, StrokeStep &step)
         const float sign = params.deflate ? -1.f : 1.f;
         for (size_t i = 0; i < verts.size(); ++i)
             m_its.vertices[verts[i]] += (weights[i] * params.amount * sign) * m_vertex_normals[verts[i]];
+        break;
+    }
+    case BrushType::Flatten: {
+        // Fit the plane to the patch under the brush, then slide each vertex
+        // toward it by strength * falloff. A weight of 1 lands the vertex
+        // exactly on the plane, which is what makes a full-strength stroke read
+        // as "flatten" - and what keeps it stable, because the move can never
+        // overshoot past the plane.
+        Vec3f origin = Vec3f::Zero();
+        Vec3f normal = params.plane_normal;
+        if (normal.squaredNorm() > 1e-12f) {
+            // The caller pinned the direction (a stroke holds one plane so the
+            // brush does not chase the surface it is levelling); the offset
+            // still comes from the patch, so the plane sits on the surface.
+            normal.normalize();
+            Vec3f fitted_normal = Vec3f::Zero();
+            if (! fit_plane(m_its, m_vertex_normals, verts, params.center, params.radius, params.falloff,
+                            origin, fitted_normal))
+                break;
+        } else if (! fit_plane(m_its, m_vertex_normals, verts, params.center, params.radius, params.falloff,
+                               origin, normal)) {
+            break;
+        }
+        for (size_t i = 0; i < verts.size(); ++i) {
+            const uint32_t v = verts[i];
+            // Signed distance, positive on the +normal side of the plane.
+            const float d = (m_its.vertices[v] - origin).dot(normal);
+            // Blender's "Fill" only lifts what sits below the plane; the
+            // symmetric variant pushes bumps down as well as filling dents.
+            if (params.fill_only && d >= 0.f)
+                continue;
+            m_its.vertices[v] -= (weights[i] * d) * normal;
+        }
+        break;
+    }
+    case BrushType::Crease: {
+        // Blender's crease: pinch the vertices toward the brush's centre line
+        // (the line through the brush centre along the surface normal) while
+        // pushing them along -normal, so the two together cut a sharp valley.
+        // Inverted (ridge) the normal push flips and a ridge is raised instead.
+        const Vec3f origin = params.center;
+        Vec3f       normal = params.plane_normal;
+        if (normal.squaredNorm() > 1e-12f) {
+            normal.normalize();
+        } else {
+            Vec3f fitted_origin = Vec3f::Zero();
+            if (! fit_plane(m_its, m_vertex_normals, verts, params.center, params.radius, params.falloff,
+                            fitted_origin, normal))
+                break;
+        }
+        const float sign = params.ridge ? 1.f : -1.f;
+        // Scaled to the brush so the ridge is as deep as the brush is wide,
+        // whatever the brush size - the same trick Inflate plays with `amount`.
+        const float normal_push = sign * params.crease_normal_ratio * 0.25f * params.radius;
+        for (size_t i = 0; i < verts.size(); ++i) {
+            const uint32_t v   = verts[i];
+            const Vec3f    rel = m_its.vertices[v] - origin;
+            // Drop the normal component: what is left points from the centre
+            // line out to the vertex, inside the tangent plane.
+            const Vec3f    tangential = rel - rel.dot(normal) * normal;
+            // Pinch a fraction of the way in to the centre line ...
+            m_its.vertices[v] -= weights[i] * tangential;
+            // ... and push in (or out) along the normal.
+            m_its.vertices[v] += (weights[i] * normal_push) * normal;
+        }
         break;
     }
     case BrushType::Smooth: {
