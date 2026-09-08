@@ -172,6 +172,16 @@ namespace GUI {
         void init_from(const Polygons& polygons, float z);
         bool init_from_file(const std::string& filename);
 
+        // Ultra (Sculpt): refresh a subset of the triangles of an already uploaded
+        // buffer in place, instead of tearing the GLModel down and re-uploading it.
+        // Only works for the exploded P3N3 triangle soup that init_from(indexed_triangle_set)
+        // produces - three unshared vertices per triangle, in triangle order, so a
+        // run of consecutive triangles is one contiguous glBufferSubData range.
+        bool can_update_triangles_in_place() const;
+        // `triangle_ids` must be sorted ascending and refer to `its`, which must have
+        // the same triangle count the model was built from.
+        bool update_triangles_in_place(const indexed_triangle_set& its, const std::vector<uint32_t>& triangle_ids);
+
         void set_color(const ColorRGBA& color) { m_render_data.geometry.color = color; }
         const ColorRGBA& get_color() const { return m_render_data.geometry.color; }
 

@@ -764,6 +764,9 @@ public:
 
     unsigned int get_volumes_count() const;
     const GLVolumeCollection& get_volumes() const { return m_volumes; }
+    // Ultra (Sculpt): the sculpt gizmo patches a volume's vertex buffer in place
+    // during a stroke instead of reloading the whole scene.
+    GLVolumeCollection& get_volumes() { return m_volumes; }
     enum class ResetVolumesMode {
         Normal,
         CanvasDestruction
