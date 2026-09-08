@@ -1,6 +1,9 @@
 #include <assert.h>
 #include <stdio.h>
+#include <atomic>
 #include <memory>
+
+#include <boost/log/trivial.hpp>
 
 #include "../ClipperUtils.hpp"
 #include "../Geometry.hpp"
@@ -866,17 +869,56 @@ void split_solid_surface(size_t layer_id, const SurfaceFill &fill, ExPolygons &n
 // PrintObject::trafo_centered() maps INTO); image_fill_project()'s `box`/`p`/`facet_normal`
 // are in the volume's own MESH space (what ModelVolume::mesh() is expressed in - see
 // image_fill_apply(), ImageFill.cpp, which passes volume.mesh().its straight through). This file
-// applies trafo_centered().inverse() to go from a fill point back to mesh space.
+// applies (trafo_centered() * mv->get_matrix()).inverse() to go from a fill point back to mesh
+// space - see the step 5 update below for why mv->get_matrix() is now part of that composition.
 //
-// ASSUMPTION (stated, not enforced - out of scope for step 4, see the phase 3 doc): the part is a
-// single model-part volume with an identity local matrix, i.e. it was not itself moved/rotated
-// relative to the object it belongs to (only the OBJECT'S OWN placement, via trafo_centered(),
-// is undone). A multi-volume object, or a single volume with its own non-identity matrix, still
-// slices and still prints - it just is not sub-triangle-resolved, exactly as if no image row were
-// configured, because image_row_context_for_region() below picks the first is_model_part()
-// volume and never reads its matrix. Bar A/B do not exercise this path (both use single,
-// untransformed volumes) so it is UNVERIFIED beyond this reasoning.
+// STEP 5 UPDATE: the identity-matrix assumption above described step 4's state. It no longer
+// holds - image_row_owning_volume() below resolves the ACTUAL ModelVolume backing a given
+// PrintRegion (via PrintObjectRegions::layer_ranges[].volume_regions, the same map
+// PrintObjectRegions builds for painted regions) instead of always taking the object's first
+// model-part volume, and image_row_context_for_region() folds that volume's OWN local matrix
+// (ModelVolume::get_matrix()) into the mesh<-print transform, the same composition
+// PrintObject.cpp already uses for facet-modifier slicing (trafo_centered() * mv->get_matrix(),
+// see PrintObject.cpp's slice_mesh_slabs() calls). A multi-volume object now resolves each
+// LayerRegion against its own owning volume; a volume moved/rotated independently of its object
+// (a non-identity ModelVolume::get_matrix()) is now sampled correctly instead of silently
+// degrading to the un-split resolve() cycle. NOT fixed by this change (see the phase 3 doc's own
+// "second, related simplification" note): sample spacing and run-length cuts still treat mesh-
+// space arc length as equal to print-space arc length, which is only exact for a uniform-scale
+// transform - a non-uniformly scaled volume or instance would still sample at a slightly wrong
+// density and cut runs at slightly wrong lengths, though it will not crash or land colours
+// grossly wrong. Tests: tests/libslic3r/test_image_row_transform.cpp.
 namespace {
+
+// Step 5, item 3: ironing and Arachne/Concentric-family top surfaces still fall back silently to
+// the row's un-split resolve() cycle (see the phase 3 doc's "what is NOT wired" section - neither
+// was touched by this session, deliberately: ironing's own fill loop has different geometry
+// semantics from make_fills()'s, and a Concentric-family top surface never produces a plain
+// ExtrusionPath for split_top_infill_by_image_row() to cut). The GUI checkbox's own tooltip says
+// "top solid infill only" for exactly this reason (ImageFillDialog.cpp) - these two helpers turn
+// that same fact into one log line per case, the first time it is actually hit, so a user or a
+// future maintainer looking at the log (not just the tooltip) can tell the fallback fired.
+void log_image_row_ironing_not_split_once()
+{
+    static std::atomic<bool> warned{false};
+    if (!warned.exchange(true))
+        BOOST_LOG_TRIVIAL(warning) << "Image row (ImageWeighted top-solid-infill dithering): ironing is not "
+                                       "sub-triangle-resolved - an ironed surface prints with the row's own "
+                                       "per-layer colour cycle instead. See docs/superpowers/specs/"
+                                       "2026-09-07-imagemap-phase3-imagerow.md, step 5.";
+}
+
+void log_image_row_pattern_not_split_once()
+{
+    static std::atomic<bool> warned{false};
+    if (!warned.exchange(true))
+        BOOST_LOG_TRIVIAL(warning) << "Image row (ImageWeighted top-solid-infill dithering): this top surface's "
+                                       "fill pattern does not produce a plain extrusion path (Concentric-family "
+                                       "or another Arachne-driven pattern) - it is not sub-triangle-resolved and "
+                                       "prints with the row's own per-layer colour cycle instead. Rectilinear and "
+                                       "Monotonic top surfaces are unaffected. See docs/superpowers/specs/"
+                                       "2026-09-07-imagemap-phase3-imagerow.md, step 5.";
+}
 
 // The cheap half: does this region's top-solid-infill filament name an ImageWeighted row at all?
 // Returns the CONFIGURED (pre-resolution) 1-based virtual id, or 0. Used by group_fills() as the
@@ -899,6 +941,29 @@ unsigned int image_row_configured_virtual_id(const PrintObject &object, const Pr
     return configured_id;
 }
 
+// Step 5: resolves the ACTUAL ModelVolume that backs `region` on `object`, using the same
+// volume<->region map PrintObjectRegions already builds for painted-region resolution
+// (layer_ranges[].volume_regions - one entry per (layer range, source ModelVolume), each
+// carrying the PrintRegion pointer it was clipped/merged into). Falls back to the object's first
+// model-part volume when the map is unavailable or does not (yet) know this region - e.g. a
+// PrintObject whose shared_regions() has not been (re)built at the point this is called - which
+// reproduces step 4's original behaviour exactly for the single-volume case that behaviour was
+// verified against.
+const ModelVolume *image_row_owning_volume(const PrintObject &object, const PrintRegion &region)
+{
+    if (const PrintObjectRegions *shared = object.shared_regions(); shared != nullptr)
+        for (const PrintObjectRegions::LayerRangeRegions &range : shared->layer_ranges)
+            for (const PrintObjectRegions::VolumeRegion &vr : range.volume_regions)
+                if (vr.region == &region && vr.model_volume != nullptr && vr.model_volume->is_model_part())
+                    return vr.model_volume;
+    const ModelObject *mo = object.model_object();
+    if (mo != nullptr)
+        for (const ModelVolume *v : mo->volumes)
+            if (v != nullptr && v->is_model_part())
+                return v;
+    return nullptr;
+}
+
 // Everything image_fill_sample_segment()/image_fill_dither_segment() need for one region's top
 // solid infill, built once per SurfaceFill (not per polyline). false means "not an image row here"
 // (row missing/disabled/undecodable, fewer than 2 usable candidates, or no model-part volume
@@ -916,9 +981,10 @@ struct ImageRowContext
     float                            sample_spacing_mm = 0.4f;
 };
 
-bool image_row_context_for_region(const PrintObject &object, const PrintRegionConfig &region_config,
+bool image_row_context_for_region(const PrintObject &object, const PrintRegion &region,
                                   float flow_width_mm, ImageRowContext &ctx)
 {
+    const PrintRegionConfig &region_config = region.config();
     const Print *print = object.print();
     if (print == nullptr)
         return false;
@@ -953,11 +1019,9 @@ bool image_row_context_for_region(const PrintObject &object, const PrintRegionCo
     if (ctx.candidate_ids.size() < 2)
         return false;
 
-    const ModelObject *mo = object.model_object();
-    const ModelVolume  *mv = nullptr;
-    if (mo != nullptr)
-        for (const ModelVolume *v : mo->volumes)
-            if (v != nullptr && v->is_model_part()) { mv = v; break; }
+    // Step 5: resolve the volume that ACTUALLY backs this region (multi-volume objects each get
+    // their own volume here), not just "the object's first model-part volume".
+    const ModelVolume *mv = image_row_owning_volume(object, region);
     if (mv == nullptr)
         return false;
 
@@ -968,9 +1032,14 @@ bool image_row_context_for_region(const PrintObject &object, const PrintRegionCo
     if (!ctx.mesh_box.defined)
         return false;
 
-    // Mesh space <- print space; see this block's header comment for the identity-matrix
-    // assumption this inverse relies on.
-    ctx.mesh_from_print = object.trafo_centered().inverse();
+    // Mesh space <- print space: the object's own placement (trafo_centered(), which already
+    // folds in the shared instance rotation/scale that every instance sharing this PrintObject
+    // has in common - only per-instance translation is handled separately, at G-code emission)
+    // composed with THIS VOLUME's own local matrix, exactly as PrintObject's own facet-modifier
+    // slicing composes them (see PrintObject.cpp's slice_mesh_slabs() calls: trafo_centered() *
+    // mv->get_matrix()). A volume moved/rotated/scaled independently of its object is now sampled
+    // in the right place instead of silently falling back to the un-split resolve() cycle.
+    ctx.mesh_from_print = (object.trafo_centered() * mv->get_matrix()).inverse();
     const Vec3f up_mesh = (ctx.mesh_from_print.linear().cast<float>() * Vec3f(0.f, 0.f, 1.f));
     ctx.facet_normal_mesh = up_mesh.norm() > 1e-9f ? up_mesh.normalized() : Vec3f(0.f, 0.f, 1.f);
 
@@ -1087,6 +1156,14 @@ std::vector<ExtrusionEntityCollection *> split_top_infill_by_image_row(const Ima
         // (see fill_filament_source()'s own comment in PrintRegion.cpp) rather than
         // solid_infill_filament - overriding it here would fight that fix.
         ExtrusionPath *path = (path_candidate != nullptr && path_candidate->role() == erTopSolidInfill) ? path_candidate : nullptr;
+        // Step 5, item 3: a Concentric-family (or other Arachne-driven) top surface pattern never
+        // produces a plain ExtrusionPath here - it is an ExtrusionMultiPath/ExtrusionLoop instead,
+        // so path_candidate is null even though this child's own role IS erTopSolidInfill. That
+        // case is not a gap-fill child (role would be erGapFill, not erTopSolidInfill) and not
+        // covered by "only one run" below - flag it once so the fallback is visible in the log,
+        // not just inferred from the checkbox's own tooltip.
+        if (path_candidate == nullptr && child->role() == erTopSolidInfill)
+            log_image_row_pattern_not_split_once();
         std::vector<ImageRowRun> runs = path != nullptr ? image_row_runs_for_path(assets, ctx, path->polyline, print_z)
                                                         : std::vector<ImageRowRun>();
         if (path == nullptr || runs.size() < 2) {
@@ -1659,7 +1736,7 @@ void Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
 		ImageRowContext image_row_ctx;
 		const bool image_row_ctx_ok = surface_fill.params.extrusion_role == erTopSolidInfill &&
 		                              surface_fill.params.image_row_filament_id != 0 &&
-		                              image_row_context_for_region(*this->object(), region_config,
+		                              image_row_context_for_region(*this->object(), layerm->region(),
 		                                                           float(surface_fill.params.flow.width()), image_row_ctx);
 
 		for (ExPolygon& expoly : surface_fill.expolygons) {
@@ -1952,6 +2029,12 @@ void Layer::make_ironing()
 					// Iron just the infill.
 					ironing_params.extruder = config.solid_infill_filament;
 				}
+				// Step 5, item 3: ironing_params.extruder above is left as the ROW's own virtual
+				// id (resolve()'s job, further down, turns it into a physical one) - it is never
+				// re-sampled per the image the way split_top_infill_by_image_row() re-samples
+				// top-solid-infill paths. See log_image_row_ironing_not_split_once()'s own comment.
+				if (image_row_configured_virtual_id(*this->object(), config) != 0)
+					log_image_row_ironing_not_split_once();
 			}
 			if (ironing_params.extruder != -1) {
 				//TODO just_infill is currently not used.
