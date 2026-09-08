@@ -41,6 +41,11 @@ DynamicPrintConfig mixed_nozzle_config(double nozzle_1, double nozzle_2)
     config.option<ConfigOptionFloats>("max_layer_height")->values  = { 0.45, 0.15 };
     // The prime tower is a separate axis (see the Phase 2 gate test); keep it out of the way.
     config.option<ConfigOptionBool>("enable_prime_tower")->value   = false;
+    // A toolchanger is NOT single-extruder multi-material. The option registry defaults this key
+    // to true (PrintConfig.cpp), which every real U1 / H2D / H2C preset overrides with 0; a config
+    // built from full_print_config() does not, so say so here. Phase 3 reads it to decide whether
+    // mixed diameters are even possible on this machine.
+    config.option<ConfigOptionBool>("single_extruder_multi_material")->value = false;
     // Pin the widths that would otherwise resolve from a bare option registry default of a
     // literal 0 - Flow treats 0 as "auto", but the validator has to see a real number to test.
     config.option<ConfigOptionFloatOrPercent>("line_width")->value                        = 0.42;
@@ -361,6 +366,130 @@ SCENARIO("Mixed nozzle (d): the prime tower refuses mixed diameters", "[MixedNoz
             const std::string message = validate_message(model, config);
             INFO(message);
             REQUIRE(message.find("prime tower does not support mixed nozzle diameters") == std::string::npos);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Phase 3 (UI): the config-level rule the Printer settings pages and the sidebar are built on.
+//
+// The dialogs themselves are wxWidgets and are not exercised here (nobody clicks them - see the
+// spec's owner-test list). What IS testable, and what every one of those code paths asks first, is:
+//   - may this machine hold different nozzles at once (supports_mixed_nozzle_diameters),
+//   - does it currently (has_mixed_nozzle_diameters),
+//   - what does the sidebar print in place of a single printer_variant (nozzle_diameter_summary),
+//   - and which nozzle does a given filament slot print through (nozzle_diameter_for_filament).
+// ---------------------------------------------------------------------------------------------
+
+SCENARIO("mixed nozzle sizes: per-extruder diameters are independent", "[MixedNozzle]")
+{
+    GIVEN("a toolchanger whose extruder 2 is given a finer nozzle")
+    {
+        DynamicPrintConfig config = mixed_nozzle_config(0.6, 0.6);
+
+        THEN("it starts out uniform")
+        {
+            REQUIRE(supports_mixed_nozzle_diameters(config));
+            REQUIRE_FALSE(has_mixed_nozzle_diameters(config));
+            REQUIRE(nozzle_diameter_summary(config) == "0.6");
+        }
+
+        // This is the edit the Extruder 2 page makes: one element of the vector, nothing else.
+        config.option<ConfigOptionFloats>("nozzle_diameter")->values[1] = 0.2;
+
+        THEN("extruder 1 is untouched and only extruder 2 changed")
+        {
+            const std::vector<double> &nozzles = config.option<ConfigOptionFloats>("nozzle_diameter")->values;
+            REQUIRE(nozzles.size() == 2);
+            REQUIRE(nozzles[0] == Approx(0.6));
+            REQUIRE(nozzles[1] == Approx(0.2));
+        }
+
+        THEN("the machine now reads as mixed and the sidebar summary names both heads")
+        {
+            REQUIRE(has_mixed_nozzle_diameters(config));
+            REQUIRE(nozzle_diameter_summary(config) == "0.6 / 0.2");
+        }
+
+        THEN("each filament slot resolves to its own nozzle")
+        {
+            PrintConfig print_config;
+            print_config.apply(config, true);
+            REQUIRE(nozzle_diameter_for_filament(print_config, 1) == Approx(0.6));
+            REQUIRE(nozzle_diameter_for_filament(print_config, 2) == Approx(0.2));
+        }
+    }
+
+    GIVEN("a four-head U1-shaped toolchanger with one fine head")
+    {
+        DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+        config.set_num_extruders(4);
+        config.option<ConfigOptionBool>("single_extruder_multi_material")->value = false;
+        config.option<ConfigOptionFloats>("nozzle_diameter")->values = { 0.6, 0.2, 0.6, 0.6 };
+
+        THEN("the summary keeps head order and keeps duplicates so heads can be counted")
+        {
+            REQUIRE(has_mixed_nozzle_diameters(config));
+            REQUIRE(nozzle_diameter_summary(config) == "0.6 / 0.2 / 0.6 / 0.6");
+        }
+    }
+
+    GIVEN("a single-nozzle printer")
+    {
+        DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+        config.set_num_extruders(1);
+        config.option<ConfigOptionFloats>("nozzle_diameter")->values = { 0.4 };
+
+        THEN("there is nothing to mix, and the summary is the plain diameter")
+        {
+            REQUIRE_FALSE(supports_mixed_nozzle_diameters(config));
+            REQUIRE_FALSE(has_mixed_nozzle_diameters(config));
+            REQUIRE(nozzle_diameter_summary(config) == "0.4");
+        }
+    }
+
+    GIVEN("a single-extruder multi-material printer with two declared extruders")
+    {
+        DynamicPrintConfig config = mixed_nozzle_config(0.4, 0.4);
+        config.option<ConfigOptionBool>("single_extruder_multi_material")->value = true;
+
+        THEN("mixing is refused: every filament goes through the same physical nozzle")
+        {
+            REQUIRE_FALSE(supports_mixed_nozzle_diameters(config));
+        }
+
+        THEN("so the old forced-sync behaviour is what the Extruder pages must keep")
+        {
+            PrintConfig print_config;
+            print_config.apply(config, true);
+            REQUIRE_FALSE(supports_mixed_nozzle_diameters(print_config));
+        }
+    }
+
+    GIVEN("an AMS-shaped machine: four filaments sharing two nozzles of different sizes")
+    {
+        DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+        config.set_num_extruders(2);
+        config.set_num_filaments(4);
+        config.option<ConfigOptionBool>("single_extruder_multi_material")->value = false;
+        config.option<ConfigOptionFloats>("nozzle_diameter")->values   = { 0.6, 0.2 };
+        config.option<ConfigOptionFloats>("filament_diameter")->values = { 1.75, 1.75, 1.75, 1.75 };
+        // filaments 1 and 3 on the coarse head, 2 and 4 on the fine one (filament_map is 1-based).
+        config.option<ConfigOptionInts>("filament_map")->values        = { 1, 2, 1, 2 };
+
+        THEN("each slot resolves through filament_map, not by slot index")
+        {
+            PrintConfig print_config;
+            print_config.apply(config, true);
+            REQUIRE(nozzle_diameter_for_filament(print_config, 1) == Approx(0.6));
+            REQUIRE(nozzle_diameter_for_filament(print_config, 2) == Approx(0.2));
+            REQUIRE(nozzle_diameter_for_filament(print_config, 3) == Approx(0.6));
+            REQUIRE(nozzle_diameter_for_filament(print_config, 4) == Approx(0.2));
+        }
+
+        THEN("and the summary still describes the two physical heads, not the four slots")
+        {
+            REQUIRE(nozzle_diameter_summary(config) == "0.6 / 0.2");
         }
     }
 }
