@@ -298,6 +298,49 @@ TEST_CASE("PrintHostDevices: a phase-1 store's \"current\" is read as the last u
     CHECK(preset.opt_string("print_host") == "192.168.1.99"); // untouched
 }
 
+TEST_CASE("PrintHostDevices: the send button follows the devices, not the preset", "[PrintHostDevices]")
+{
+    ScopedStore store("cansend");
+    const std::string key = "Elegoo Centauri Carbon";
+
+    // The preset the send path reads: a printer model, and no address of its own. This is exactly
+    // the case the devices feature exists for, and the Print button has to light up for it.
+    DynamicPrintConfig config;
+    config.opt_string("printer_model", true) = key;
+    config.opt_string("print_host", true)    = "";
+
+    CHECK_FALSE(can_send_for(config, "Elegoo Centauri Carbon 0.4 nozzle"));
+    CHECK_FALSE(has_devices(key));
+
+    // One device with an address is enough - nothing is written to the preset.
+    Device      d = make_device("Left bay", "192.168.1.41", "elegoolink");
+    std::string error;
+    REQUIRE(add(key, d, error));
+    CHECK(has_devices(key));
+    CHECK(can_send_for(config, "Elegoo Centauri Carbon 0.4 nozzle"));
+    CHECK(config.opt_string("print_host").empty()); // still empty: no bridge writes it any more
+
+    // Every nozzle variant of the machine shares the list, so they all send.
+    CHECK(can_send_for(config, "Elegoo Centauri Carbon 0.2 nozzle"));
+
+    // A different model does not borrow it.
+    DynamicPrintConfig other;
+    other.opt_string("printer_model", true) = "Voron 2.4";
+    other.opt_string("print_host", true)    = "";
+    CHECK_FALSE(can_send_for(other, "Voron"));
+    // ... unless the preset carries its own address, the way it always worked.
+    other.opt_string("print_host") = "192.168.1.90";
+    CHECK(can_send_for(other, "Voron"));
+
+    // A device with no address is not a place to send to. (add() refuses one, so this goes in by
+    // hand, the way a hand-edited file would.)
+    REQUIRE(remove(key, d.id));
+    CHECK_FALSE(has_devices(key));
+    store.write("{\"version\":1,\"models\":{\"" + key + "\":{\"devices\":[{\"id\":\"x\",\"address\":\"\"}]}}}");
+    CHECK_FALSE(has_devices(key));
+    CHECK_FALSE(can_send_for(config, "Elegoo Centauri Carbon 0.4 nozzle"));
+}
+
 TEST_CASE("PrintHostDevices: the preset bridge writes the fields the send path reads", "[PrintHostDevices]")
 {
     // A bare config: apply_to_config creates the options it needs, so this works on a preset's

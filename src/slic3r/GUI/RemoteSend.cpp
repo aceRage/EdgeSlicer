@@ -593,6 +593,22 @@ static std::pair<int, std::string> prepare_host(const Request& req, PartPlate* p
         if (!host) return { 409, "no Snapmaker printer is connected on the PC's Device tab" };
         p->kind         = "connect";
         p->printer_name = "Snapmaker " + host->get_host();
+    } else if (req.printer.compare(0, 3, "ph:") == 0) {
+        // One of this model's devices, by id. The address and credentials come from the device,
+        // not from the preset - the preset may have no print_host at all.
+        if (bundle->use_bbl_network()) return { 409, "the current printer preset sends through the Bambu network; pick that printer by its id" };
+        const std::string        model_key = PrintHostDevices::current_model_key(*bundle);
+        PrintHostDevices::Device d;
+        if (!PrintHostDevices::find(model_key, req.printer.substr(3), d))
+            return { 404, "no such device for this printer model: " + req.printer };
+        if (d.address.empty()) return { 409, d.display_name() + " has no address" };
+        DynamicPrintConfig dev_cfg = PrintHostDevices::config_for(d, cfg);
+        host.reset(PrintHost::get_print_host(&dev_cfg, false));
+        if (!host) return { 500, "unsupported host type" };
+        p->kind         = "printhost";
+        p->printer_name = d.display_name();
+        p->device_id    = d.id;
+        p->model_key    = model_key;
     } else {
         if (bundle->use_bbl_network()) return { 409, "the current printer preset sends through the Bambu network; pick that printer by its id" };
         const std::string url = cfg.opt_string("print_host");
@@ -643,7 +659,9 @@ std::pair<int, std::string> preselect(const Request& req, bool& wait)
 {
     wait = false;
     if (req.printer.empty()) return { 400, "printer is required" };
-    if (req.printer == "host" || req.printer == "connect" || req.printer.compare(0, 3, "sm:") == 0) return { 200, "" };
+    if (req.printer == "host" || req.printer == "connect" || req.printer.compare(0, 3, "sm:") == 0 ||
+        req.printer.compare(0, 3, "ph:") == 0)
+        return { 200, "" };
     DeviceManager* dm = wxGetApp().getDeviceManager();
     if (!dm) return { 503, "no device manager" };
     MachineObject* obj = find_machine(dm, req.printer);
@@ -694,7 +712,8 @@ std::pair<int, std::string> prepare(const Request& req, std::shared_ptr<Prepared
     p->printer_id = req.printer;
     std::pair<int, std::string> rc;
     if (req.printer.compare(0, 3, "sm:") == 0)                  rc = prepare_snapmaker(req, plate, p, out);
-    else if (req.printer == "host" || req.printer == "connect") rc = prepare_host(req, plate, p, out);
+    else if (req.printer == "host" || req.printer == "connect"
+             || req.printer.compare(0, 3, "ph:") == 0)          rc = prepare_host(req, plate, p, out);
     else                                                        rc = prepare_bambu(req, plate, p, out);
     // Ultra: everything the G-code archive wants about this plate, read here on the GUI thread; the
     // file name and the printer identity are what the branch above worked out. Never fails a send.
@@ -1328,8 +1347,16 @@ void list_hosts(json& printers, int plate)
             p["is_current"]   = is_last; // phase 1's name for it, kept so the phone's list still reads
             p["online"]       = true;   // no live status until describe_hosts answers for it
             p["status"]       = "unknown";
-            p["can_upload"]   = false;  // phase 3 turns these on, with a real fan-out behind them
-            p["can_print"]    = false;
+            // A device with an address can be sent to, whatever the preset's own print_host says:
+            // POST /api/plates/{i}/send?printer=ph:<id> builds the host from this device.
+            std::unique_ptr<PrintHost> dev_host;
+            if (!d.address.empty()) {
+                DynamicPrintConfig dev_cfg = PrintHostDevices::config_for(d, cfg);
+                dev_host.reset(PrintHost::get_print_host(&dev_cfg, false));
+            }
+            p["can_upload"]   = dev_host != nullptr;
+            p["can_print"]    = dev_host && dev_host->get_post_upload_actions().has(PrintHostPostUploadAction::StartPrint) &&
+                                (dynamic_cast<Moonraker*>(dev_host.get()) == nullptr || dynamic_cast<Moonraker_Mqtt*>(dev_host.get()) != nullptr);
             p["can_pause"]    = false;
             p["can_resume"]   = false;
             p["can_stop"]     = false;

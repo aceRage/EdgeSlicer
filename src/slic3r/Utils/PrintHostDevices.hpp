@@ -111,6 +111,21 @@ std::string                                     last_used_id(const std::string& 
 // last_used timestamp, together.
 void                                            set_last_used(const std::string& model_key, const std::string& id);
 
+// ---- "can this plate go anywhere?" ----
+
+// True when this model has at least one device with an address.
+bool has_devices(const std::string& model_key);
+
+// The send enable condition, in one place. A plate can be sent when the printer preset's own
+// print_host has an address (the way it always worked) OR when the model has at least one device
+// that does - a preset with an empty print_host but three printers in its list is exactly the case
+// this feature exists for, and the Print button has to light up for it.
+//
+// Every place that used to test print_host emptiness routes through here: MainFrame::can_send_gcode
+// (the desktop Print/Send button) and RemoteSend::list_hosts (the phone's can_upload/can_print).
+bool can_send_for(const Preset& printer_preset);
+bool can_send_for(const DynamicPrintConfig& config, const std::string& preset_name);
+
 // ---- config <-> device ----
 
 // Reads the host fields of a printer preset's config into a device (id and alias left empty).

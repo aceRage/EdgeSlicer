@@ -382,6 +382,28 @@ void set_last_used(const std::string& key, const std::string& id)
     save_store(store);
 }
 
+// -------------------------------------------- "can this plate go anywhere?" ----
+
+bool has_devices(const std::string& key)
+{
+    for (const Device& d : devices(key))
+        if (!d.address.empty())
+            return true;
+    return false;
+}
+
+bool can_send_for(const DynamicPrintConfig& config, const std::string& preset_name)
+{
+    if (!trimmed(cfg_str(config, "print_host")).empty())
+        return true;
+    return has_devices(model_key(cfg_str(config, "printer_model"), preset_name));
+}
+
+bool can_send_for(const Preset& printer_preset)
+{
+    return can_send_for(printer_preset.config, printer_preset.name);
+}
+
 // ------------------------------------------------------- the preset bridge ----
 
 PrintHostType host_type_enum(const std::string& key)
