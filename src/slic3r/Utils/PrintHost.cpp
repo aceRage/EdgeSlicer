@@ -331,6 +331,10 @@ void PrintHostJobQueue::priv::perform_job(PrintHostJob the_job)
     const bool        archive_print  = the_job.upload_data.post_action == PrintHostPostUploadAction::StartPrint;
     const std::string host_name      = the_job.printhost->get_name();
     const std::string host_url       = the_job.printhost->get_host();
+    // Which device of the printer model this went to, when the send dialog picked one.
+    const std::string archive_device   = the_job.device_id;
+    const std::string archive_dev_name = the_job.device_name;
+    const std::string archive_mapping  = the_job.filament_mapping;
 
     bool success = the_job.printhost->upload(std::move(the_job.upload_data),
         [this](Http::Progress progress, bool &cancel)   { this->progress_fn(std::move(progress), cancel); },
@@ -344,10 +348,14 @@ void PrintHostJobQueue::priv::perform_job(PrintHostJob the_job)
         // Archive). Archiving never fails an upload.
         if (GUI::GcodeArchive::enabled()) {
             GUI::GcodeArchive::Meta am = GUI::GcodeArchive::meta_for_plate(-1, archive_print ? "print" : "upload");
-            am.printer_id   = "host";
+            // "ph:<device id>" when the send picked one of this model's devices, so a reprint can be
+            // replayed to the printer it actually went to; "host" (the preset's own address) when
+            // there were none, exactly as before.
+            am.printer_id   = archive_device.empty() ? std::string("host") : ("ph:" + archive_device);
             am.printer_kind = "printhost";
-            am.printer_name = host_name + " " + host_url;
+            am.printer_name = archive_dev_name.empty() ? (host_name + " " + host_url) : archive_dev_name;
             am.file_name    = archive_name;
+            am.mapping      = archive_mapping;
             GUI::GcodeArchive::archive(archive_source, am);
         }
         if (the_job.switch_to_device_tab) {

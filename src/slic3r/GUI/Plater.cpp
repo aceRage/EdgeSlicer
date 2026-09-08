@@ -22254,6 +22254,38 @@ void Plater::reslice_SLA_until_step(SLAPrintObjectStep step, const ModelObject &
     // and let the background processing start.
     this->p->restart_background_process(state | priv::UPDATE_BACKGROUND_PROCESS_FORCE_RESTART);
 }
+// The plate's filaments, for the send dialog's "which slot does this go in" table. Same reading as
+// the hub's own file_filaments_of (RemoteSend.cpp:455) and as the Device page's
+// sw_GetFileFilamentMapping: the project's colours and types, and which of them this plate's slice
+// result actually used.
+static std::vector<SendPlateFilament> plate_filaments_for_send(int plate_idx)
+{
+    std::vector<SendPlateFilament> out;
+    PresetBundle*                  bundle = wxGetApp().preset_bundle;
+    Plater*                        plater = wxGetApp().plater();
+    if (!bundle || !plater)
+        return out;
+    PartPlateList& plates = plater->get_partplate_list();
+    PartPlate*     plate  = (plate_idx >= 0 && plate_idx < plates.get_plate_count()) ? plates.get_plate(plate_idx) : plates.get_curr_plate();
+    const DynamicPrintConfig   full    = bundle->full_config();
+    const ConfigOptionStrings* colours = bundle->project_config.option<ConfigOptionStrings>("filament_colour");
+    const ConfigOptionStrings* types   = full.option<ConfigOptionStrings>("filament_type");
+    std::map<size_t, double>   volumes;
+    if (plate && plate->is_slice_result_valid() && plate->get_slice_result())
+        for (const auto& kv : plate->get_slice_result()->print_statistics.total_volumes_per_extruder)
+            volumes[kv.first] = kv.second;
+    for (size_t i = 0; i < bundle->filament_presets.size(); ++i) {
+        SendPlateFilament f;
+        f.index  = (int) i;
+        f.colour = (colours && i < colours->values.size()) ? colours->values[i] : std::string();
+        f.type   = (types && i < types->values.size()) ? types->values[i] : std::string();
+        auto it  = volumes.find(i);
+        f.used   = it != volumes.end() && it->second > 0;
+        out.push_back(std::move(f));
+    }
+    return out;
+}
+
 void Plater::send_gcode_legacy(int plate_idx, Export3mfProgressFn proFn, bool use_3mf)
 {
     // if physical_printer is selected, send gcode for this printer
@@ -22324,6 +22356,33 @@ void Plater::send_gcode_legacy(int plate_idx, Export3mfProgressFn proFn, bool us
         return;
 
     PrintHostJob upload_job;
+
+    // The printers of this model, by address (<datadir>/hub/print_host_devices.json). The plate goes
+    // to one of them, chosen in the send dialog below; the preset's own print_host is only the
+    // target when the model has no devices at all. That is why the Print button is enabled for a
+    // preset with an empty print_host and a full device list (PrintHostDevices::can_send_for).
+    std::vector<PrintHostDevices::Device> ph_devices;
+    std::string                          ph_model_key;
+    std::string                          ph_preselect;
+    DynamicPrintConfig                   ph_config = *physical_printer_config;
+    if (PresetBundle* ph_bundle = wxGetApp().preset_bundle; ph_bundle && !ph_bundle->use_bbl_network()) {
+        try {
+            PrintHostDevices::migrate_from_presets(*ph_bundle);
+            ph_model_key = PrintHostDevices::current_model_key(*ph_bundle);
+            ph_devices   = PrintHostDevices::devices(ph_model_key);
+            ph_preselect = PrintHostDevices::last_used_id(ph_model_key);
+        } catch (...) {}
+    }
+    if (!ph_devices.empty()) {
+        size_t ph_index = 0;
+        for (size_t i = 0; i < ph_devices.size(); ++i)
+            if (!ph_preselect.empty() && ph_devices[i].id == ph_preselect)
+                ph_index = i;
+        ph_preselect = ph_devices[ph_index].id;
+        PrintHostDevices::apply_to_config(ph_devices[ph_index], ph_config);
+    } else {
+        ph_preselect.clear();
+    }
 
     // Snapmaker U1
     const auto preset = wxGetApp().preset_bundle->printers.get_edited_preset();
@@ -22401,7 +22460,9 @@ void Plater::send_gcode_legacy(int plate_idx, Export3mfProgressFn proFn, bool us
         return;
     }
     else {
-        upload_job = PrintHostJob(physical_printer_config);
+        // ph_config is the preset's config with the preselected device's address applied, or the
+        // preset's own when this model has no devices.
+        upload_job = PrintHostJob(&ph_config);
     }
 
     if (upload_job.empty())
@@ -22450,9 +22511,42 @@ void Plater::send_gcode_legacy(int plate_idx, Export3mfProgressFn proFn, bool us
 
     auto config = get_app_config();
     PrintHostSendDialog dlg(default_output_file, upload_job.printhost->get_post_upload_actions(), groups, storage_paths, storage_names, config->get_bool("open_device_tab_post_upload"));
+    dlg.set_devices(ph_model_key, ph_devices, ph_preselect);
+    dlg.set_plate_filaments(plate_filaments_for_send(plate_idx));
     dlg.init();
     if (dlg.ShowModal() == wxID_OK) {
         config->set_bool("open_device_tab_post_upload", dlg.switch_to_device_tab());
+        // The device the dialog settled on: the job is rebuilt against it, so the upload goes to
+        // that address whatever the preset holds.
+        const std::string chosen = dlg.device_id();
+        if (!chosen.empty() && chosen != ph_preselect) {
+            for (const PrintHostDevices::Device& d : ph_devices)
+                if (d.id == chosen) {
+                    ph_config = *physical_printer_config;
+                    PrintHostDevices::apply_to_config(d, ph_config);
+                    PrintHostJob rebuilt(&ph_config);
+                    if (rebuilt.empty()) {
+                        show_error(this, _L("Could not get a valid Printer Host reference"), false);
+                        return;
+                    }
+                    rebuilt.upload_data = std::move(upload_job.upload_data);
+                    upload_job          = std::move(rebuilt);
+                    break;
+                }
+        }
+        if (!chosen.empty()) {
+            for (const PrintHostDevices::Device& d : ph_devices)
+                if (d.id == chosen) {
+                    upload_job.device_id   = d.id;
+                    upload_job.device_name = d.display_name();
+                    break;
+                }
+            // Remembered so the next send preselects it. Not a setting, not the preset: a memory.
+            try {
+                PrintHostDevices::set_last_used(ph_model_key, chosen);
+            } catch (...) {}
+        }
+        upload_job.filament_mapping        = dlg.filament_mapping();
         upload_job.switch_to_device_tab    = dlg.switch_to_device_tab();
         upload_job.upload_data.upload_path = dlg.filename();
         upload_job.upload_data.post_action = dlg.post_action();

@@ -210,6 +210,15 @@ struct PrintHostJob
     std::unique_ptr<PrintHost> printhost;
     bool switch_to_device_tab{false};
     bool cancelled = false;
+    // Which of the printer model's devices this job is going to
+    // (<datadir>/hub/print_host_devices.json), when the send dialog picked one. The queue records
+    // it in the G-code archive's sidecar as "ph:<id>", so a reprint knows which printer it was -
+    // the hook phase 5's "send this again, to that one" needs, and cheap to fill in now.
+    std::string device_id;
+    std::string device_name;
+    // "0:1,1:2" - the plate's filament 0 goes in the printer's slot 1. Empty for every host that
+    // reports no slots, which is most of them.
+    std::string filament_mapping;
 
     PrintHostJob() {}
     PrintHostJob(const PrintHostJob&) = delete;
@@ -218,6 +227,9 @@ struct PrintHostJob
         , printhost(std::move(other.printhost))
         , switch_to_device_tab(other.switch_to_device_tab)
         , cancelled(other.cancelled)
+        , device_id(std::move(other.device_id))
+        , device_name(std::move(other.device_name))
+        , filament_mapping(std::move(other.filament_mapping))
     {}
 
     PrintHostJob(DynamicPrintConfig *config)
@@ -231,6 +243,9 @@ struct PrintHostJob
         printhost   = std::move(other.printhost);
         switch_to_device_tab = other.switch_to_device_tab;
         cancelled = other.cancelled;
+        device_id        = std::move(other.device_id);
+        device_name      = std::move(other.device_name);
+        filament_mapping = std::move(other.filament_mapping);
         return *this;
     }
 
