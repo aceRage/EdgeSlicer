@@ -2160,7 +2160,9 @@ void GCode::do_export(Print* print, const char* path, GCodeProcessorResult* resu
     BOOST_LOG_TRIVIAL(info) << "Exporting G-code finished" << log_memory_info();
     print->set_done(psGCodeExport);
 
-    if (is_BBL_Printer())
+    // `result` is optional (see the `result != nullptr` guard above); null-check it
+    // here as well instead of dereferencing it on the is_BBL_Printer() path.
+    if (is_BBL_Printer() && result != nullptr)
         result->label_object_enabled = m_enable_exclude_object;
 
     // Write the profiler measurements to file

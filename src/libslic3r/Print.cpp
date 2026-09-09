@@ -4794,7 +4794,13 @@ std::string Print::export_gcode(const std::string& path_template, GCodeProcessor
     gcode.do_export(this, path.c_str(), result, thumbnail_cb);
 
     //BBS
-    result->conflict_result = m_conflict_result;
+    // `result` is optional and documented as such by the `result == nullptr` branch
+    // above ("running from command line"), so it must be null-checked here too.
+    // Dereferencing it unconditionally segfaulted every caller that passes nullptr -
+    // which is every Slic3r::Test::gcode() call in tests/fff_print, taking the whole
+    // fff_print_tests binary down mid-run.
+    if (result != nullptr)
+        result->conflict_result = m_conflict_result;
     return path.c_str();
 }
 
@@ -4815,6 +4821,11 @@ void Print::_make_skirt()
         size_t skirt_layers = this->has_infinite_skirt() ?
             object->layer_count() :
             std::min(size_t(m_config.skirt_height.value), object->layer_count());
+        // `skirt_layers` is 0 when the object sliced to no layers at all, or when
+        // skirt_height is 0. `skirt_layers - 1` is size_t arithmetic, so it wrapped to
+        // SIZE_MAX and indexed m_layers far out of bounds - a segfault, not a bad value.
+        if (skirt_layers == 0)
+            continue;
         skirt_height_z = std::max(skirt_height_z, object->m_layers[skirt_layers-1]->print_z);
     }
 

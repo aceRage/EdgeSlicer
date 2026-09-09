@@ -10,8 +10,20 @@ SCENARIO("lift() is not ignored after unlift() at normal values of Z", "[GCodeWr
     GIVEN("A config from a file and a single extruder.") {
         GCodeWriter writer;
         GCodeConfig &config = writer.config;
-        config.load(std::string(TEST_DATA_DIR) + "/fff_print_tests/test_gcodewriter/config_lift_unlift.ini", ForwardCompatibilitySubstitutionRule::Disable);
+        // ConfigBase::load() dispatches on the file extension and, since Bambu
+        // commented load_from_ini() out of it (Config.cpp:783), rejects .ini with
+        // "unsupported format for config file" and returns an EMPTY config - which
+        // left z_hop at its 0 default and made every lift() below emit nothing.
+        // load_from_ini() itself is still present and works, so call it directly.
+        config.load_from_ini(std::string(TEST_DATA_DIR) + "/fff_print_tests/test_gcodewriter/config_lift_unlift.ini", ForwardCompatibilitySubstitutionRule::Disable);
 
+        // FORK BEHAVIOUR (Bambu "lazy lift"): GCodeWriter::lift() no longer emits the Z
+        // move itself. Unless spiral_vase is set it only records the pending lift in
+        // m_to_lift (GCodeWriter.cpp:866-875) and returns "", leaving travel_to_xy() to
+        // fold the hop into the next travel move. The upstream contract this scenario was
+        // written against - "lift() returns g-code" - therefore only holds on the
+        // spiral_vase path, which is what these calls now exercise. The property under
+        // test is unchanged: a lift after an unlift must not be ignored.
         std::vector<unsigned int> extruder_ids {0};
         writer.set_extruders(extruder_ids);
         writer.set_extruder(0);
@@ -20,13 +32,13 @@ SCENARIO("lift() is not ignored after unlift() at normal values of Z", "[GCodeWr
             double trouble_Z = 203;
             writer.travel_to_z(trouble_Z);
             AND_WHEN("GcodeWriter::Lift() is called") {
-                REQUIRE(writer.lift().size() > 0);
+                REQUIRE(writer.lift(LiftType::NormalLift, true).size() > 0);
                 AND_WHEN("Z is moved post-lift to the same delta as the config Z lift") {
                     REQUIRE(writer.travel_to_z(trouble_Z + config.z_hop.values[0]).size() == 0);
                     AND_WHEN("GCodeWriter::Unlift() is called") {
                         REQUIRE(writer.unlift().size() == 0); // we're the same height so no additional move happens.
                         THEN("GCodeWriter::Lift() emits gcode.") {
-                            REQUIRE(writer.lift().size() > 0);
+                            REQUIRE(writer.lift(LiftType::NormalLift, true).size() > 0);
                         }
                     }
                 }
@@ -36,13 +48,13 @@ SCENARIO("lift() is not ignored after unlift() at normal values of Z", "[GCodeWr
             double trouble_Z = 500003;
             writer.travel_to_z(trouble_Z);
             AND_WHEN("GcodeWriter::Lift() is called") {
-                REQUIRE(writer.lift().size() > 0);
+                REQUIRE(writer.lift(LiftType::NormalLift, true).size() > 0);
                 AND_WHEN("Z is moved post-lift to the same delta as the config Z lift") {
                     REQUIRE(writer.travel_to_z(trouble_Z + config.z_hop.values[0]).size() == 0);
                     AND_WHEN("GCodeWriter::Unlift() is called") {
                         REQUIRE(writer.unlift().size() == 0); // we're the same height so no additional move happens.
                         THEN("GCodeWriter::Lift() emits gcode.") {
-                            REQUIRE(writer.lift().size() > 0);
+                            REQUIRE(writer.lift(LiftType::NormalLift, true).size() > 0);
                         }
                     }
                 }
@@ -52,13 +64,13 @@ SCENARIO("lift() is not ignored after unlift() at normal values of Z", "[GCodeWr
             double trouble_Z = 10.3;
             writer.travel_to_z(trouble_Z);
             AND_WHEN("GcodeWriter::Lift() is called") {
-                REQUIRE(writer.lift().size() > 0);
+                REQUIRE(writer.lift(LiftType::NormalLift, true).size() > 0);
                 AND_WHEN("Z is moved post-lift to the same delta as the config Z lift") {
                     REQUIRE(writer.travel_to_z(trouble_Z + config.z_hop.values[0]).size() == 0);
                     AND_WHEN("GCodeWriter::Unlift() is called") {
                         REQUIRE(writer.unlift().size() == 0); // we're the same height so no additional move happens.
                         THEN("GCodeWriter::Lift() emits gcode.") {
-                            REQUIRE(writer.lift().size() > 0);
+                            REQUIRE(writer.lift(LiftType::NormalLift, true).size() > 0);
                         }
                     }
                 }

@@ -280,9 +280,46 @@ void init_and_process_print(std::initializer_list<TriangleMesh> meshes, Slic3r::
 	print.process();
 }
 
+// The per-run scratch directory every Test::gcode() export writes into.
+//
+// GCode::do_export() (src/libslic3r/GCode.cpp) does
+//     fs::path folder = fs::path(path).parent_path();
+//     if (!fs::exists(folder)) fs::create_directory(folder);
+// on the destination path. The old harness passed boost::filesystem::unique_path()
+// straight through - a BARE FILENAME with no directory component - so parent_path()
+// was the empty path, fs::exists("") is false, and fs::create_directory("") threw a
+// boost::filesystem::filesystem_error out of every test that exported G-code. Give
+// the export an absolute path under a real, existing directory instead.
+const boost::filesystem::path& scratch_dir()
+{
+	static const boost::filesystem::path dir = [] {
+		boost::filesystem::path d = boost::filesystem::temp_directory_path() /
+			("fff_print_tests-" + boost::filesystem::unique_path("%%%%-%%%%-%%%%").string());
+		boost::system::error_code ec;
+		boost::filesystem::create_directories(d, ec);
+		return d;
+	}();
+	return dir;
+}
+
+// Removes the scratch directory when the test binary exits, so a run leaves nothing
+// behind in the system temp directory even though individual exports are unlinked.
+struct TestGCodeDirCleanup {
+	~TestGCodeDirCleanup() {
+		boost::system::error_code ec;
+		boost::filesystem::remove_all(scratch_dir(), ec);
+	}
+};
+static TestGCodeDirCleanup s_test_gcode_dir_cleanup;
+
+boost::filesystem::path scratch_path(const std::string &extension)
+{
+	return scratch_dir() / (boost::filesystem::unique_path("%%%%-%%%%-%%%%-%%%%").string() + extension);
+}
+
 std::string gcode(Print & print)
 {
-	boost::filesystem::path temp = boost::filesystem::unique_path();
+	boost::filesystem::path temp = scratch_path();
     print.set_status_silent();
     print.process();
     print.export_gcode(temp.string(), nullptr, nullptr);

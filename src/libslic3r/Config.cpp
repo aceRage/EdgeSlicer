@@ -613,6 +613,13 @@ bool ConfigBase::set_deserialize_raw(const t_config_option_key &opt_key_src, con
 
     ConfigOption *opt = this->option(opt_key, true);
     assert(opt != nullptr);
+    if (opt == nullptr)
+        // A StaticConfig (e.g. GCodeConfig) returns nullptr for a key that exists in the
+        // shared PrintConfigDef but has no member on THIS config - loading a whole-profile
+        // file into one is full of such keys. The assert above is compiled out in Release,
+        // so every line below used to dereference a null pointer and segfault. Treat the
+        // key as unknown, which is exactly how the ptree loader above already handles it.
+        throw UnknownOptionException(opt_key);
     bool success     = false;
     bool substituted = false;
     if (optdef->type == coBools && substitutions_ctxt.rule != ForwardCompatibilitySubstitutionRule::Disable) {
