@@ -305,7 +305,8 @@ public:
     BoundingBoxf3 get_objects_bounding_box();
 
     Vec3d get_origin() { return m_origin; }
-    // plate_extruder_size: filaments purged on the plate; 0 derives them from its objects.
+    // plate_extruder_size: a floor on the filaments purged on the plate; its own are always
+    //                      counted, so 0 sizes for exactly those.
     // use_global_objects skips the containment test, which the CLI needs before objects are
     // assigned to plates - the layer height is then the project's thinnest, which over-reserves.
     WipeTowerFootprint estimate_wipe_tower_footprint(const DynamicPrintConfig & config, int plate_extruder_size = 0, bool use_global_objects = false) const;

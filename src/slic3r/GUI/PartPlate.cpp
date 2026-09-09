@@ -24,6 +24,7 @@
 #include "libslic3r/Tesselate.hpp"
 #include "libslic3r/GCode/ThumbnailData.hpp"
 #include "libslic3r/GCode/WipeTower.hpp"
+#include "libslic3r/GCode/WipeTower2.hpp"
 #include "libslic3r/GCode/WipeTowerEstimate.hpp"
 #include "libslic3r/LocalesUtils.hpp"
 #include "libslic3r/Utils.hpp"
@@ -1740,22 +1741,22 @@ WipeTowerFootprint PartPlate::estimate_wipe_tower_footprint(const DynamicPrintCo
 {
     // The CLI calls this too, so the plate's filaments are derived from the passed config:
     // get_extruders(bool) reads the same keys off wxGetApp()'s presets, which the CLI has none of.
-    std::vector<int> plate_extruders;
-    if (plate_extruder_size == 0) {
-        plate_extruders     = get_extruders(true, config, config);
-        plate_extruder_size = int(plate_extruders.size());
-    }
+    // An explicit count is a floor: init-time and arrange estimates size an empty plate for that
+    // many generic filaments, the lowest ids not already on the plate.
+    std::vector<int> plate_extruders = get_extruders(true, config, config);
+    for (int id = 1; int(plate_extruders.size()) < plate_extruder_size; ++id)
+        if (std::find(plate_extruders.begin(), plate_extruders.end(), id) == plate_extruders.end())
+            plate_extruders.push_back(id);
     // The wipe tower filament joins the tool ordering even when unused (Print::extruders), so
-    // validation counts it. An explicit count is the plate's painted filaments, which never do.
+    // validation counts it - but only where there is a tower to join, which is the
+    // has_wipe_tower() half of that guard.
     const ConfigOption *wipe_tower_filament_opt = config.option("wipe_tower_filament");
+    const ConfigOption *enable_prime_tower_opt  = config.option("enable_prime_tower");
     const int           wipe_tower_filament     = wipe_tower_filament_opt != nullptr ? wipe_tower_filament_opt->getInt() : 0;
-    if (plate_extruder_size > 1 && wipe_tower_filament > 0) {
-        if (plate_extruders.empty())
-            plate_extruders = get_extruders(true, config, config);
-        if (std::find(plate_extruders.begin(), plate_extruders.end(), wipe_tower_filament) == plate_extruders.end())
-            ++plate_extruder_size;
-    }
-    if (plate_extruder_size == 0)
+    if (enable_prime_tower_opt != nullptr && enable_prime_tower_opt->getBool() && plate_extruders.size() > 1 && wipe_tower_filament > 0 &&
+        std::find(plate_extruders.begin(), plate_extruders.end(), wipe_tower_filament) == plate_extruders.end())
+        plate_extruders.push_back(wipe_tower_filament);
+    if (plate_extruders.empty())
         return WipeTowerFootprint();
 
     // Tallest object on this plate and the thinnest layer it is sliced at, resolved per object
@@ -1783,7 +1784,11 @@ WipeTowerFootprint PartPlate::estimate_wipe_tower_footprint(const DynamicPrintCo
     if (layer_height == std::numeric_limits<double>::max())
         layer_height = global_layer_height;
 
-    return Slic3r::estimate_wipe_tower_footprint(config, size_t(plate_extruder_size), layer_height, max_height);
+    std::vector<unsigned int> filament_ids;
+    for (int id : plate_extruders)
+        if (id > 0)
+            filament_ids.push_back(static_cast<unsigned int>(id - 1));
+    return Slic3r::estimate_wipe_tower_footprint(config, resolve_wipe_tower_type(config), filament_ids, layer_height, max_height);
 }
 
 arrangement::ArrangePolygon PartPlate::estimate_wipe_tower_polygon(const DynamicPrintConfig& config, int plate_index, int plate_extruder_size, bool use_global_objects) const
@@ -1804,14 +1809,36 @@ arrangement::ArrangePolygon PartPlate::estimate_wipe_tower_polygon(const Dynamic
 	float depth = wt_size(1);
 	// Resolved brim, not the raw option: "Auto" (-1) would yield a margin of 0 and let the
 	// clamp put the brim off the bed. Matches set_default_wipe_tower_pos_for_plate.
-	const float wp_brim_width = float(footprint.brim_width);
-	const float margin        = WIPE_TOWER_MARGIN + wp_brim_width;
+	float wp_brim_width = float(footprint.brim_width);
+	// A Type2 stabilization cone bulges past the body box like a brim does - fold its worst-axis
+	// bulge into the same margin (Type1 ignores the cone option).
+	const auto *cone_wall_opt  = config.option("wipe_tower_wall_type");
+	const auto *cone_angle_opt = config.option("wipe_tower_cone_angle");
+	if (cone_wall_opt != nullptr && cone_wall_opt->getInt() == int(WipeTowerWallType::wtwCone) && cone_angle_opt != nullptr &&
+	    cone_angle_opt->getFloat() > EPSILON && resolve_wipe_tower_type(config) == WipeTowerType::Type2) {
+		const BoundingBox cb = get_extents(WipeTower2::cone_base_polygon(w, depth, wt_size.z(), cone_angle_opt->getFloat()));
+		wp_brim_width += float(std::max({0., unscaled(cb.max.x()) - w, unscaled(cb.max.y()) - depth, -unscaled(cb.min.x()), -unscaled(cb.min.y())}));
+	}
+	// A position valid by WIPE_TOWER_MARGIN is the user's choice and stays untouched; an
+	// invalid one is re-placed with the comfort margin (falling back to the validity bounds
+	// on cramped plates). std::clamp is UB if lo > hi, so keep every hi >= lo.
+	const float margin = WIPE_TOWER_MARGIN + wp_brim_width;
 	BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format("arrange wipe_tower: wp_brim_width %1%") % wp_brim_width;
-
-	// A tower too deep for the plate leaves no valid position: clamping with hi < lo is UB and
-	// in release silently returns the negative hi.
-	x = std::clamp(x, margin, std::max(margin, (float)plate_width - w - margin));
-	y = std::clamp(y, margin, std::max(margin, (float)plate_depth - depth - margin));
+	const float x_hi   = std::max(margin, (float) plate_width - w - margin);
+	const float y_hi   = std::max(margin, (float) plate_depth - depth - margin);
+	const float margin_c = (float) WIPE_TOWER_AUTO_MARGIN + wp_brim_width;
+	float x_lo_c = margin_c, x_hi_c = (float) plate_width - w - margin_c;
+	if (x_lo_c > x_hi_c) { x_lo_c = margin; x_hi_c = x_hi; }
+	float y_lo_c = margin_c, y_hi_c = (float) plate_depth - depth - margin_c;
+	if (y_lo_c > y_hi_c) { y_lo_c = margin; y_hi_c = y_hi; }
+	// Drag clamps reach this limit through the volume's bounding box (post-slice: the real
+	// mesh, a couple of mm inside this reserved estimate), so a drop can land slightly out
+	// of bounds — snap it onto the bound; only far-out positions get the comfort re-place.
+	const float tol = 5.f;
+	if (x < margin - tol || x > x_hi + tol) x = std::clamp(x, x_lo_c, x_hi_c);
+	else                                    x = std::clamp(x, margin, x_hi);
+	if (y < margin - tol || y > y_hi + tol) y = std::clamp(y, y_lo_c, y_hi_c);
+	else                                    y = std::clamp(y, margin, y_hi);
     wt_pos(0) = x;
     wt_pos(1) = y;
     wt_pos(2) = 0.f;
@@ -3643,12 +3670,27 @@ void PartPlateList::set_default_wipe_tower_pos_for_plate(int plate_idx)
 
     auto printer_structure_opt = wxGetApp().preset_bundle->printers.get_edited_preset().config.option<ConfigOptionEnum<PrinterStructure>>("printer_structure");
     // set the default position, the same with print config(left top)
-    ConfigOptionFloat wt_x_opt(WIPE_TOWER_DEFAULT_X_POS);
-    ConfigOptionFloat wt_y_opt(WIPE_TOWER_DEFAULT_Y_POS);
+    float x = WIPE_TOWER_DEFAULT_X_POS;
+    float y = WIPE_TOWER_DEFAULT_Y_POS;
     if (printer_structure_opt && printer_structure_opt->value == PrinterStructure::psI3) {
-        wt_x_opt = ConfigOptionFloat(I3_WIPE_TOWER_DEFAULT_X_POS);
-        wt_y_opt = ConfigOptionFloat(I3_WIPE_TOWER_DEFAULT_Y_POS);
+        x = I3_WIPE_TOWER_DEFAULT_X_POS;
+        y = I3_WIPE_TOWER_DEFAULT_Y_POS;
     }
+
+    PartPlate *part_plate = get_plate(plate_idx);
+    if (part_plate != nullptr) {
+        DynamicPrintConfig full_config = wxGetApp().preset_bundle->full_config();
+        const WipeTowerFootprint footprint = part_plate->estimate_wipe_tower_footprint(full_config, 2);
+        const float brim_width = float(footprint.brim_width);
+        const float margin     = float(WIPE_TOWER_AUTO_MARGIN) + brim_width;
+        const float w          = float(footprint.width);
+        const float d          = float(footprint.depth);
+        x = std::clamp(x, margin, std::max(margin, float(m_plate_width) - w - margin));
+        y = std::clamp(y, margin, std::max(margin, float(m_plate_depth) - d - margin));
+    }
+
+    ConfigOptionFloat wt_x_opt(x);
+    ConfigOptionFloat wt_y_opt(y);
     dynamic_cast<ConfigOptionFloats *>(proj_cfg.option("wipe_tower_x"))->set_at(&wt_x_opt, plate_idx, 0);
     dynamic_cast<ConfigOptionFloats *>(proj_cfg.option("wipe_tower_y"))->set_at(&wt_y_opt, plate_idx, 0);
 }

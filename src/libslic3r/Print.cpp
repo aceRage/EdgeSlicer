@@ -1592,6 +1592,7 @@ static StringObjectException layered_print_cleareance_valid(const Print &print, 
     const WipeTowerData &wipe_tower_estimate = print.wipe_tower_data(filaments_count);
     float                width               = wipe_tower_estimate.width;
     float                depth               = wipe_tower_estimate.depth;
+    float                brim_width          = wipe_tower_estimate.brim_width;
 
     Polygons convex_hulls_temp;
     // No gate on "is there a tower": one that is not printed estimates to zero, so the hull
@@ -1599,10 +1600,10 @@ static StringObjectException layered_print_cleareance_valid(const Print &print, 
     // no tool change to purge for (smooth timelapse / wrapping detection).
     if (width > EPSILON && depth > EPSILON) {
         Polygon wipe_tower_convex_hull;
-        wipe_tower_convex_hull.points.emplace_back(scale_(x), scale_(y));
-        wipe_tower_convex_hull.points.emplace_back(scale_(x + width), scale_(y));
-        wipe_tower_convex_hull.points.emplace_back(scale_(x + width), scale_(y + depth));
-        wipe_tower_convex_hull.points.emplace_back(scale_(x), scale_(y + depth));
+        wipe_tower_convex_hull.points.emplace_back(scale_(x - brim_width), scale_(y - brim_width));
+        wipe_tower_convex_hull.points.emplace_back(scale_(x + width + brim_width), scale_(y - brim_width));
+        wipe_tower_convex_hull.points.emplace_back(scale_(x + width + brim_width), scale_(y + depth + brim_width));
+        wipe_tower_convex_hull.points.emplace_back(scale_(x - brim_width), scale_(y + depth + brim_width));
         wipe_tower_convex_hull.rotate(Geometry::deg2rad(a), Point(scale_(x), scale_(y)));
         convex_hulls_temp.push_back(wipe_tower_convex_hull);
     }
@@ -5176,7 +5177,7 @@ const WipeTowerData &Print::wipe_tower_data(size_t filaments_cnt) const
     if (max_height < EPSILON)
         return m_wipe_tower_data;
 
-    const WipeTowerFootprint footprint = estimate_wipe_tower_footprint(m_config, filaments_cnt, layer_height, max_height);
+    const WipeTowerFootprint footprint = estimate_wipe_tower_footprint(m_config, resolve_wipe_tower_type(m_config), this->extruders(true), layer_height, max_height);
     WipeTowerData &data = const_cast<Print *>(this)->m_wipe_tower_data;
     data.depth      = float(footprint.depth);
     data.width      = float(footprint.width);
