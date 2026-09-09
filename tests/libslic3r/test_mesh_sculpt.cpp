@@ -1082,6 +1082,581 @@ static void bench_stroke(size_t target_triangles, const char *label)
 }
 
 // ----------------------------------------------------------------------------
+// v3, phase 3a: the new brushes
+// ----------------------------------------------------------------------------
+
+TEST_CASE("Pinch pulls in toward the brush axis and leaves the plane distance alone", "[Sculpt][SculptPinch]")
+{
+    // A flat grid, so the fitted axis is +z, "toward the axis" is radially
+    // inward in xy, and "no normal component" is "z did not change" - the
+    // simplest possible statement of Pinch's defining property.
+    const indexed_triangle_set grid = make_grid(41, 0.5f);
+    SculptSession session(grid);
+
+    BrushParams p;
+    p.type     = BrushType::Pinch;
+    p.center   = Vec3f(10.f, 10.f, 0.f);
+    p.radius   = 3.f;
+    p.strength = 0.5f;
+    p.falloff  = true;
+
+    const std::vector<uint32_t> verts = session.vertices_in_radius(p.center, p.radius);
+    REQUIRE(verts.size() > 20);
+
+    const StrokeStep step = session.apply(p);
+    REQUIRE_FALSE(step.empty());
+
+    size_t pulled = 0, checked = 0;
+    for (uint32_t v : verts) {
+        const Vec3f before = grid.vertices[v];
+        const Vec3f after  = session.mesh().vertices[v];
+        const float d      = (before - p.center).norm();
+        const float w      = falloff_weight(d, p.radius) * p.strength;
+        if (w < 1e-3f)
+            continue;
+        ++checked;
+
+        // The distance to the fitted plane is untouched: that IS "the move has
+        // no normal component", stated without reimplementing the projection.
+        CHECK(after.z() == Approx(before.z()).margin(1e-6));
+
+        const float r_before = (Vec3f(before.x(), before.y(), 0.f) - Vec3f(p.center.x(), p.center.y(), 0.f)).norm();
+        const float r_after  = (Vec3f(after.x(), after.y(), 0.f) - Vec3f(p.center.x(), p.center.y(), 0.f)).norm();
+        if (r_before > 1e-4f) {
+            CHECK(r_after < r_before);
+            // A straight lerp toward the axis, exactly by the weight.
+            CHECK(r_after == Approx((1.f - w) * r_before).margin(1e-4));
+            ++pulled;
+        }
+    }
+    CHECK(checked > 20);
+    CHECK(pulled > 20);
+
+    // Nothing outside the brush moved.
+    for (size_t i = 0; i < grid.vertices.size(); ++i)
+        if ((grid.vertices[i] - p.center).norm() >= p.radius)
+            CHECK(session.mesh().vertices[i] == grid.vertices[i]);
+}
+
+TEST_CASE("Magnify is Pinch with the sign flipped, vertex for vertex", "[Sculpt][SculptPinch]")
+{
+    const indexed_triangle_set grid = make_grid(41, 0.5f);
+
+    BrushParams p;
+    p.type     = BrushType::Pinch;
+    p.center   = Vec3f(10.f, 10.f, 0.f);
+    p.radius   = 3.f;
+    p.strength = 0.4f;
+    p.falloff  = true;
+
+    SculptSession pinch(grid);
+    p.magnify = false;
+    pinch.apply(p);
+
+    SculptSession magnify(grid);
+    p.magnify = true;
+    magnify.apply(p);
+
+    const std::vector<uint32_t> verts = SculptSession(grid).vertices_in_radius(p.center, p.radius);
+    size_t checked = 0;
+    for (uint32_t v : verts) {
+        const Vec3f v0 = grid.vertices[v];
+        const Vec3f a  = pinch.mesh().vertices[v];
+        const Vec3f b  = magnify.mesh().vertices[v];
+        if ((a - v0).norm() < 1e-6f)
+            continue;
+        ++checked;
+        // Equal and opposite displacements: the one bool is the whole difference.
+        CHECK((b - v0).x() == Approx(-(a - v0).x()).margin(1e-6));
+        CHECK((b - v0).y() == Approx(-(a - v0).y()).margin(1e-6));
+        CHECK((b - v0).z() == Approx(-(a - v0).z()).margin(1e-6));
+        // And Magnify really does push out.
+        CHECK((Vec3f(b.x(), b.y(), 0.f) - Vec3f(p.center.x(), p.center.y(), 0.f)).norm() >
+              (Vec3f(v0.x(), v0.y(), 0.f) - Vec3f(p.center.x(), p.center.y(), 0.f)).norm());
+    }
+    CHECK(checked > 20);
+}
+
+TEST_CASE("Nudge moves every vertex orthogonally to its own normal", "[Sculpt][SculptNudge]")
+{
+    // A sphere, so the vertex normals point every which way and "orthogonal to
+    // its OWN normal" is a real constraint rather than a restatement of the
+    // drag direction.
+    const indexed_triangle_set sphere = its_make_sphere(10.0, 2 * PI / 60);
+    SculptSession session(sphere);
+
+    BrushParams p;
+    p.type         = BrushType::Nudge;
+    p.center       = Vec3f(0.f, 0.f, 10.f);
+    p.radius       = 4.f;
+    p.strength     = 1.f;
+    p.falloff      = true;
+    // Deliberately not tangential to the surface anywhere: the brush has to do
+    // the projection itself.
+    p.displacement = Vec3f(0.3f, 0.1f, 0.4f);
+
+    const std::vector<uint32_t> verts = session.vertices_in_radius(p.center, p.radius);
+    REQUIRE(verts.size() > 20);
+    const std::vector<Vec3f> normals = session.vertex_normals();
+
+    const StrokeStep step = session.apply(p);
+    REQUIRE_FALSE(step.empty());
+
+    size_t checked = 0;
+    for (uint32_t v : verts) {
+        const Vec3f move = session.mesh().vertices[v] - sphere.vertices[v];
+        if (move.norm() < 1e-5f)
+            continue;
+        ++checked;
+        // The move lies in the vertex's tangent plane: that is Nudge's whole
+        // difference from Grab, which would carry the full 3D displacement.
+        CHECK(move.dot(normals[v]) == Approx(0.f).margin(1e-5));
+        // And it points the way the drag did, in that plane.
+        const Vec3f tan = p.displacement - p.displacement.dot(normals[v]) * normals[v];
+        CHECK(move.normalized().dot(tan.normalized()) == Approx(1.f).margin(1e-4));
+    }
+    CHECK(checked > 20);
+
+    // Grab, by contrast, carries the normal component too.
+    SculptSession grabbed(sphere);
+    p.type = BrushType::Grab;
+    grabbed.apply(p);
+    bool differs = false;
+    for (uint32_t v : verts)
+        if ((grabbed.mesh().vertices[v] - session.mesh().vertices[v]).norm() > 1e-4f)
+            differs = true;
+    CHECK(differs);
+}
+
+TEST_CASE("Snake Hook accumulates like a Grab whose anchor rides the cursor", "[Sculpt][SculptSnakeHook]")
+{
+    const indexed_triangle_set sphere = its_make_sphere(10.0, 2 * PI / 60);
+
+    BrushParams p;
+    p.type         = BrushType::SnakeHook;
+    p.radius       = 3.f;
+    p.strength     = 1.f;
+    p.falloff      = true;
+    p.displacement = Vec3f(0.f, 0.f, 0.6f);
+
+    // Ten ticks of a drag straight up the +z axis, with the centre following the
+    // accumulated displacement - which is exactly what the gizmo feeds it.
+    SculptSession hook(sphere);
+    Vec3f centre = Vec3f(0.f, 0.f, 10.f);
+    for (int i = 0; i < 10; ++i) {
+        centre += p.displacement;
+        p.center = centre;
+        hook.apply(p);
+    }
+
+    // A fixed-anchor Grab over the same total displacement, for contrast.
+    SculptSession grab(sphere);
+    BrushParams g = p;
+    g.type   = BrushType::Grab;
+    g.center = Vec3f(0.f, 0.f, 10.f);
+    for (int i = 0; i < 10; ++i)
+        grab.apply(g);
+
+    // Snake Hook pulls a horn: the apex ends up well above the original surface,
+    // and the brush keeps finding fresh geometry as it travels.
+    float hook_max = -1e9f, grab_max = -1e9f;
+    for (const Vec3f &v : hook.mesh().vertices)
+        hook_max = std::max(hook_max, v.z());
+    for (const Vec3f &v : grab.mesh().vertices)
+        grab_max = std::max(grab_max, v.z());
+    INFO("hook apex " << hook_max << " grab apex " << grab_max);
+    CHECK(hook_max > 10.f);
+
+    // Vertex-only: the topology is untouched and the mesh stays closed.
+    CHECK(hook.mesh().indices.size() == sphere.indices.size());
+    CHECK(its_num_open_edges(hook.mesh()) == 0);
+}
+
+TEST_CASE("Clay Strips builds up to the target offset and never retracts", "[Sculpt][SculptClay]")
+{
+    // A flat grid: the fitted plane is z = 0 with normal +z, so the target is
+    // z = clay_offset and every assertion is about z directly.
+    const indexed_triangle_set grid = make_grid(41, 0.5f);
+    SculptSession session(grid);
+
+    BrushParams p;
+    p.type        = BrushType::ClayStrips;
+    p.center      = Vec3f(10.f, 10.f, 0.f);
+    p.radius      = 3.f;
+    p.strength    = 1.f;
+    // No falloff, so every vertex in the brush gets weight 1 and should land
+    // exactly on the target - the hardest, most exact case.
+    p.falloff     = false;
+    p.clay_offset = 0.4f;
+    // The plane is pinned for the stroke, both direction AND offset, exactly as
+    // the gizmo pins it at start_stroke(). Refitting the offset every tick would
+    // measure the target from the material the previous tick just laid down and
+    // a held stroke would climb by clay_offset per tick - which is precisely the
+    // divergence this pin exists to prevent, and what the second-tick assertion
+    // below is really testing.
+    p.plane_normal = Vec3f::UnitZ();
+    p.plane_origin = Vec3f(10.f, 10.f, 0.f);
+
+    const std::vector<uint32_t> verts = session.vertices_in_radius(p.center, p.radius);
+    REQUIRE(verts.size() > 20);
+
+    session.apply(p);
+    for (uint32_t v : verts)
+        CHECK(session.mesh().vertices[v].z() == Approx(p.clay_offset).margin(1e-5));
+
+    // A second tick changes nothing: everything is already at the target, and
+    // the one-sided clamp refuses to retract it. That non-accumulation is what
+    // distinguishes Clay Strips from Inflate.
+    const std::vector<Vec3f> after_one = session.mesh().vertices;
+    session.apply(p);
+    for (uint32_t v : verts)
+        CHECK(session.mesh().vertices[v].z() == Approx(after_one[v].z()).margin(1e-6));
+
+    // A vertex already above the target is left strictly alone.
+    indexed_triangle_set raised = make_grid(41, 0.5f);
+    const uint32_t high = uint32_t(20 * 41 + 20);
+    raised.vertices[high].z() = 2.f;
+    SculptSession s2(raised);
+    BrushParams q = p;
+    q.clay_offset = 0.4f;
+    s2.apply(q);
+    CHECK(s2.mesh().vertices[high].z() == raised.vertices[high].z());
+
+    // Ctrl carves: a negative offset cuts a trench and, symmetrically, leaves a
+    // vertex already below the target alone.
+    SculptSession carve(grid);
+    q = p;
+    q.clay_offset = -0.4f;
+    carve.apply(q);
+    for (uint32_t v : verts)
+        CHECK(carve.mesh().vertices[v].z() == Approx(-0.4f).margin(1e-5));
+}
+
+TEST_CASE("Ctrl inverts the v3 brushes that have an opposite, and only those", "[Sculpt][SculptAdjust]")
+{
+    CHECK(brush_inverts_with_ctrl(BrushType::Pinch));       // Magnify
+    CHECK(brush_inverts_with_ctrl(BrushType::ClayStrips));  // carve
+    CHECK(brush_inverts_with_ctrl(BrushType::Mask));        // erase
+    // A drag has no opposite, exactly as for Grab.
+    CHECK_FALSE(brush_inverts_with_ctrl(BrushType::Nudge));
+    CHECK_FALSE(brush_inverts_with_ctrl(BrushType::SnakeHook));
+}
+
+// ----------------------------------------------------------------------------
+// v3, phase 3b: the mask
+// ----------------------------------------------------------------------------
+
+// A box with two separate feet: two disjoint bottom islands at the same z_min,
+// which is the case the research spec flags as easy to get wrong by baking in a
+// single-loop assumption.
+static indexed_triangle_set make_two_footed_part()
+{
+    indexed_triangle_set a = its_make_cube(10., 10., 10.);
+    indexed_triangle_set b = its_make_cube(10., 10., 10.);
+    for (Vec3f &v : b.vertices)
+        v.x() += 30.f;
+    const uint32_t off = uint32_t(a.vertices.size());
+    a.vertices.insert(a.vertices.end(), b.vertices.begin(), b.vertices.end());
+    for (const Vec3i32 &f : b.indices)
+        a.indices.emplace_back(Vec3i32(f(0) + int(off), f(1) + int(off), f(2) + int(off)));
+    return a;
+}
+
+TEST_CASE("Bed-contact detection finds the flat bottom, and every island of it", "[Sculpt][SculptMask]")
+{
+    const indexed_triangle_set cube = its_subdivide_midpoint(its_make_cube(20., 20., 20.));
+    SculptSession session(cube);
+
+    REQUIRE(session.detect_bed_contact() > 0);
+    CHECK(session.bed_z_min() == Approx(0.f).margin(1e-6));
+    // Every detected vertex really is on the bottom face.
+    for (uint32_t v : session.bed_contact_vertices())
+        CHECK(session.mesh().vertices[v].z() == Approx(0.f).margin(1e-4));
+    // And every vertex on the bottom face was detected.
+    size_t on_bottom = 0;
+    for (const Vec3f &v : cube.vertices)
+        if (std::abs(v.z()) < 1e-4f)
+            ++on_bottom;
+    CHECK(session.bed_contact_vertices().size() == on_bottom);
+
+    // Two feet: the predicate is per-facet, so both islands join the set with no
+    // flood fill and no single-island assumption anywhere.
+    const indexed_triangle_set two = make_two_footed_part();
+    SculptSession twofoot(two);
+    REQUIRE(twofoot.detect_bed_contact() > 0);
+    bool left = false, right = false;
+    for (uint32_t v : twofoot.bed_contact_vertices()) {
+        if (twofoot.mesh().vertices[v].x() < 15.f)
+            left = true;
+        else
+            right = true;
+    }
+    CHECK(left);
+    CHECK(right);
+    // And the footprint comes back as two loops, not one.
+    const auto loops = bed_footprint_loops(twofoot.mesh(), twofoot.bed_contact_vertices());
+    CHECK(loops.size() == 2);
+
+    // A sphere touches the bed at a point, not a face: nothing to protect, and
+    // the detection says so rather than doing something surprising.
+    SculptSession ball(its_make_sphere(10.0, 2 * PI / 30));
+    CHECK(ball.detect_bed_contact() == 0);
+    CHECK(ball.bed_contact_vertices().empty());
+}
+
+TEST_CASE("A masked vertex is untouched by every brush, bit for bit", "[Sculpt][SculptMask]")
+{
+    // The hardest case the plan asks for: strength 1, falloff off, and the brush
+    // centred on and covering the whole masked bottom face, so every masked
+    // vertex would otherwise get full weight.
+    const indexed_triangle_set cube = its_subdivide_midpoint(its_subdivide_midpoint(its_make_cube(20., 20., 20.)));
+
+    const std::vector<BrushType> all = {
+        BrushType::Grab, BrushType::Inflate, BrushType::Smooth, BrushType::Flatten,
+        BrushType::Crease, BrushType::Pinch, BrushType::Nudge, BrushType::SnakeHook,
+        BrushType::ClayStrips};
+
+    for (BrushType type : all) {
+        SculptSession session(cube);
+        REQUIRE(session.detect_bed_contact() > 0);
+        session.set_bed_contact_enabled(true);
+        const std::vector<uint32_t> masked = session.bed_contact_vertices();
+        REQUIRE(!masked.empty());
+
+        BrushParams p;
+        p.type         = type;
+        p.center       = Vec3f(10.f, 10.f, 0.f);
+        p.radius       = 40.f;   // the whole part
+        p.strength     = 1.f;
+        p.falloff      = false;  // no weight decay anywhere
+        p.displacement = Vec3f(1.f, 1.f, 1.f);
+        p.amount       = 1.f;
+        p.clay_offset  = 2.f;
+        p.iterations   = 3;
+
+        const StrokeStep step = session.apply(p);
+        INFO("brush " << int(type));
+
+        // Not merely "moved by zero": a masked vertex is dropped from the
+        // touched set outright, so it never appears in moved_vertices ...
+        for (uint32_t m : masked)
+            CHECK(std::find(step.moved_vertices.begin(), step.moved_vertices.end(), m) == step.moved_vertices.end());
+        // ... and its position is bit-identical, with no tolerance at all.
+        for (uint32_t m : masked)
+            CHECK(session.mesh().vertices[m] == cube.vertices[m]);
+
+        // Something unmasked did move, otherwise the assertion is vacuous.
+        bool moved = false;
+        for (size_t i = 0; i < cube.vertices.size() && !moved; ++i)
+            moved = session.mesh().vertices[i] != cube.vertices[i];
+        CHECK(moved);
+    }
+}
+
+TEST_CASE("The bed face survives Subdivide plus a Smooth stroke unchanged", "[Sculpt][SculptMask]")
+{
+    const indexed_triangle_set cube = its_subdivide_midpoint(its_make_cube(20., 20., 20.));
+
+    SculptSession before(cube);
+    REQUIRE(before.detect_bed_contact() > 0);
+    const float z_min = before.bed_z_min();
+    const std::vector<uint32_t> bed_before = before.bed_contact_vertices();
+
+    // Footprint of the original, for the area/perimeter comparison below.
+    const auto loops_before = bed_footprint_loops(cube, bed_before);
+    REQUIRE(loops_before.size() == 1);
+    const double area_before = loop_area_xy(cube, loops_before.front());
+    const double peri_before = loop_perimeter_xy(cube, loops_before.front());
+    CHECK(area_before == Approx(400.).epsilon(1e-9));
+
+    // Subdivide with the bed pinned, then re-detect (subdivision renumbers, so
+    // the mask is recomputed from the new mesh - exactly what the gizmo does).
+    const indexed_triangle_set sub = its_subdivide_midpoint(cube, bed_before, z_min);
+    SculptSession session(sub);
+    REQUIRE(session.detect_bed_contact() > 0);
+    session.set_bed_contact_enabled(true);
+    const std::vector<uint32_t> bed_after_sub = session.bed_contact_vertices();
+
+    // Every bed vertex, old or newly introduced, is at exactly z_min - bitwise,
+    // because the pin snaps rather than trusting the float midpoint.
+    for (uint32_t v : bed_after_sub)
+        CHECK(sub.vertices[v].z() == z_min);
+
+    // Now a Smooth stroke that covers the whole part, bottom face included.
+    BrushParams p;
+    p.type       = BrushType::Smooth;
+    p.center     = Vec3f(10.f, 10.f, 0.f);
+    p.radius     = 40.f;
+    p.strength   = 1.f;
+    p.falloff    = false;
+    p.iterations = 5;
+    session.apply(p);
+
+    // Bit-identical in z, not merely close: the masked vertices were never in
+    // the touched set at all.
+    for (uint32_t v : bed_after_sub)
+        CHECK(session.mesh().vertices[v].z() == z_min);
+
+    // And the footprint outline itself - area and perimeter - is unchanged. The
+    // subdivided outline has twice as many vertices, but they are the midpoints
+    // of the old edges, so the polygon is geometrically the same.
+    const auto loops_after = bed_footprint_loops(session.mesh(), bed_after_sub);
+    REQUIRE(loops_after.size() == 1);
+    const double area_after = loop_area_xy(session.mesh(), loops_after.front());
+    const double peri_after = loop_perimeter_xy(session.mesh(), loops_after.front());
+    CHECK(std::abs(area_after - area_before) < 1e-6);
+    CHECK(std::abs(peri_after - peri_before) < 1e-6);
+}
+
+TEST_CASE("Sharp-edge protection pins the cube's edges and the threshold moves it", "[Sculpt][SculptMask]")
+{
+    const indexed_triangle_set cube = its_subdivide_midpoint(its_make_cube(20., 20., 20.));
+    SculptSession session(cube);
+
+    // A cube's edges are 90 degrees, so a 60-degree threshold catches every
+    // vertex on an edge or corner and nothing in the middle of a face.
+    const size_t sharp = session.detect_sharp_edges(60.f);
+    REQUIRE(sharp > 0);
+    CHECK(sharp < cube.vertices.size());
+
+    // Raise the threshold past 90 and the cube has no sharp edges left at all.
+    SculptSession loose(cube);
+    CHECK(loose.detect_sharp_edges(100.f) == 0);
+
+    // With it on, a Smooth stroke over the whole cube leaves the edges alone -
+    // which is the point: Smooth would otherwise round the cube's corners off.
+    SculptSession guarded(cube);
+    REQUIRE(guarded.detect_sharp_edges(60.f) > 0);
+    guarded.set_sharp_edge_enabled(true);
+    BrushParams p;
+    p.type       = BrushType::Smooth;
+    p.center     = Vec3f(10.f, 10.f, 10.f);
+    p.radius     = 40.f;
+    p.strength   = 1.f;
+    p.falloff    = false;
+    p.iterations = 3;
+    const StrokeStep step = guarded.apply(p);
+    // A corner vertex - the extreme case - is bit-identical.
+    for (size_t i = 0; i < cube.vertices.size(); ++i) {
+        const Vec3f &v = cube.vertices[i];
+        const bool corner = (std::abs(v.x()) < 1e-4f || std::abs(v.x() - 20.f) < 1e-4f) &&
+                            (std::abs(v.y()) < 1e-4f || std::abs(v.y() - 20.f) < 1e-4f) &&
+                            (std::abs(v.z()) < 1e-4f || std::abs(v.z() - 20.f) < 1e-4f);
+        if (corner)
+            CHECK(guarded.mesh().vertices[i] == v);
+    }
+    CHECK_FALSE(step.empty());
+}
+
+TEST_CASE("The Mask brush paints protection on and Ctrl paints it off", "[Sculpt][SculptMask]")
+{
+    const indexed_triangle_set grid = make_grid(41, 0.5f);
+    SculptSession session(grid);
+    CHECK_FALSE(session.has_painted_mask());
+
+    BrushParams paint;
+    paint.type        = BrushType::Mask;
+    paint.center      = Vec3f(10.f, 10.f, 0.f);
+    paint.radius      = 3.f;
+    paint.strength    = 1.f;
+    paint.falloff     = false;
+    paint.mask_amount = 1.f;
+
+    const std::vector<uint32_t> under = session.vertices_in_radius(paint.center, paint.radius);
+    REQUIRE(under.size() > 20);
+
+    session.apply(paint);
+    CHECK(session.has_painted_mask());
+    // The Mask brush moves nothing at all - that is what makes it a mask brush
+    // and not a sculpt brush that happens to write a side table.
+    for (size_t i = 0; i < grid.vertices.size(); ++i)
+        CHECK(session.mesh().vertices[i] == grid.vertices[i]);
+    for (uint32_t v : under)
+        CHECK(session.effective_mask(v) == Approx(0.f).margin(1e-6));
+
+    // And a sculpt brush now refuses to touch the painted patch.
+    BrushParams p;
+    p.type     = BrushType::Inflate;
+    p.center   = paint.center;
+    p.radius   = 4.f;
+    p.strength = 1.f;
+    p.falloff  = false;
+    p.amount   = 1.f;
+    session.apply(p);
+    for (uint32_t v : under)
+        CHECK(session.mesh().vertices[v] == grid.vertices[v]);
+
+    // Ctrl erases it again ...
+    BrushParams erase = paint;
+    erase.mask_amount = -1.f;
+    session.apply(erase);
+    for (uint32_t v : under)
+        CHECK(session.effective_mask(v) == Approx(1.f).margin(1e-6));
+    // ... and now the same sculpt brush does move them.
+    session.apply(p);
+    size_t moved = 0;
+    for (uint32_t v : under)
+        if (session.mesh().vertices[v] != grid.vertices[v])
+            ++moved;
+    CHECK(moved > 20);
+
+    // Clear puts it back to nothing.
+    session.clear_painted_mask();
+    CHECK_FALSE(session.has_painted_mask());
+    CHECK_FALSE(session.any_mask());
+}
+
+TEST_CASE("The mask damps a partially painted vertex rather than pinning it", "[Sculpt][SculptMask]")
+{
+    // The mask is a float, not a bool, so half a stroke's worth of paint should
+    // halve the brush rather than stop it - that is what lets the boundary of a
+    // painted region be soft.
+    const indexed_triangle_set grid = make_grid(41, 0.5f);
+    SculptSession session(grid);
+
+    BrushParams paint;
+    paint.type        = BrushType::Mask;
+    paint.center      = Vec3f(10.f, 10.f, 0.f);
+    paint.radius      = 3.f;
+    paint.strength    = 0.5f;   // half the mask
+    paint.falloff     = false;
+    paint.mask_amount = 1.f;
+    session.apply(paint);
+
+    const std::vector<uint32_t> under = session.vertices_in_radius(paint.center, 2.f);
+    REQUIRE(under.size() > 10);
+    for (uint32_t v : under)
+        CHECK(session.effective_mask(v) == Approx(0.5f).margin(1e-5));
+
+    BrushParams p;
+    p.type         = BrushType::Grab;
+    p.center       = paint.center;
+    p.radius       = 3.f;
+    p.strength     = 1.f;
+    p.falloff      = false;
+    p.displacement = Vec3f(0.f, 0.f, 1.f);
+    session.apply(p);
+    for (uint32_t v : under)
+        // Half the mask, half the move.
+        CHECK(session.mesh().vertices[v].z() == Approx(0.5f).margin(1e-5));
+}
+
+TEST_CASE("Subdivide without a bed set behaves exactly as it did before v3", "[Sculpt][SculptMask]")
+{
+    // The pin is opt-in: the one-argument overload must be byte-for-byte the old
+    // behaviour, so nothing that already called it changes.
+    const indexed_triangle_set cube = its_make_cube(20., 20., 20.);
+    const indexed_triangle_set a = its_subdivide_midpoint(cube);
+    const indexed_triangle_set b = its_subdivide_midpoint(cube, {}, 0.f);
+    REQUIRE(a.vertices.size() == b.vertices.size());
+    for (size_t i = 0; i < a.vertices.size(); ++i)
+        CHECK(a.vertices[i] == b.vertices[i]);
+    REQUIRE(a.indices.size() == b.indices.size());
+    for (size_t i = 0; i < a.indices.size(); ++i)
+        CHECK(a.indices[i] == b.indices[i]);
+}
+
+// ----------------------------------------------------------------------------
 // cursor tracking
 // ----------------------------------------------------------------------------
 //

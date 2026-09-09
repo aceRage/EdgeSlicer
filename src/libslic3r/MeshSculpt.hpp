@@ -27,11 +27,18 @@ class ModelVolume;
 namespace Sculpt {
 
 enum class BrushType : unsigned char {
-    Grab,    // drag the surface with the mouse, in the view plane
-    Inflate, // push the surface along its vertex normals (or pull it in)
-    Smooth,  // Laplacian relaxation, optionally Taubin lambda/mu
-    Flatten, // move vertices onto a plane fitted to the patch under the brush
-    Crease   // pinch toward the stroke axis and push along -normal (or +normal)
+    Grab,       // drag the surface with the mouse, in the view plane
+    Inflate,    // push the surface along its vertex normals (or pull it in)
+    Smooth,     // Laplacian relaxation, optionally Taubin lambda/mu
+    Flatten,    // move vertices onto a plane fitted to the patch under the brush
+    Crease,     // pinch toward the stroke axis and push along -normal (or +normal)
+    // v3 (phase 3a)
+    Pinch,      // Crease's tangential pull with the normal push removed; Ctrl = Magnify
+    Nudge,      // slide the surface along the drag, projected into each tangent plane
+    SnakeHook,  // Grab whose anchor rides the cursor - the gizmo feeds a moving centre
+    ClayStrips, // build up toward a plane offset above the fitted one; Ctrl carves
+    // v3 (phase 3b): paints the per-vertex mask instead of moving anything
+    Mask
 };
 
 // Brush weight at distance d from the brush centre for a brush of radius r.
@@ -74,6 +81,29 @@ struct BrushParams
     bool      ridge = false;
     // Crease: the size of the normal push relative to the tangential pinch.
     float     crease_normal_ratio = 1.f;
+
+    // Pinch: true pushes outward instead of in - Blender's Magnify, which rides
+    // in on Ctrl the way Deflate rides on Inflate rather than being its own brush.
+    bool      magnify = false;
+
+    // Clay Strips: the plane the target offset is measured from. A zero-length
+    // normal in plane_normal means "fit it every tick", which for Clay Strips
+    // would refit onto the material the previous tick just laid down and let a
+    // held stroke climb without limit - so the gizmo pins BOTH the direction
+    // (plane_normal) and this origin at start_stroke() and holds them for the
+    // whole stroke. Only used when plane_normal is non-zero.
+    Vec3f     plane_origin = Vec3f::Zero();
+    // Clay Strips: the target standoff above the fitted plane, in mesh units
+    // (Blender's "Plane Offset"). A vertex already above the target is left
+    // alone - the move is one-sided, which is what makes repeated ticks build a
+    // plateau instead of drifting outward the way repeated Inflate ticks do.
+    // Negative carves toward a plane BELOW the surface, which is the Ctrl
+    // variant.
+    float     clay_offset = 0.f;
+
+    // Mask: how much mask a full-weight tick paints on. Positive paints the
+    // protection ON (mask -> 0, "do not sculpt here"), negative erases it.
+    float     mask_amount = 1.f;
 
     // Smooth
     int       iterations = 1;
@@ -136,7 +166,60 @@ public:
     // The one-ring of a vertex, appended to `out` (which is cleared first).
     void one_ring(uint32_t vertex, std::vector<uint32_t> &out) const;
 
+    // ------------------------------------------------------------------------
+    // v3 (phase 3b): the per-vertex mask
+    // ------------------------------------------------------------------------
+    //
+    // One float in [0,1] per vertex, multiplied into the shared weight loop that
+    // EVERY brush goes through, so one line covers every present and future
+    // brush. 1 means "sculpt here normally", 0 means "this vertex is protected".
+    // A fully masked vertex is dropped from the touched set outright rather than
+    // moved with weight zero, so it is provably untouched: it never reaches
+    // StrokeStep::moved_vertices and its position stays bit-identical.
+    //
+    // Three sources compose by taking the minimum (the strictest protection
+    // wins): auto bed-contact detection, auto sharp-edge detection, and the Mask
+    // brush. Each is kept separately so a toggle can be turned off again without
+    // losing what the others found; effective_mask() is their combination.
+
+    // Auto: vertices of a facet whose normal is within `normal_tol_deg` of -Z
+    // and all of whose vertices sit within `eps` of the mesh's z_min. Returns
+    // the number of vertices detected. Handles any number of disjoint bottom
+    // islands - the predicate is per-facet, not a flood fill from one seed.
+    size_t detect_bed_contact(float eps_rel = 1e-4f, float normal_tol_deg = 10.f);
+    // Auto: vertices touching an edge whose dihedral angle exceeds the
+    // threshold. Returns the number of vertices detected.
+    size_t detect_sharp_edges(float dihedral_deg = 60.f);
+
+    void set_bed_contact_enabled(bool on) { m_bed_mask_enabled = on; }
+    void set_sharp_edge_enabled(bool on)  { m_sharp_mask_enabled = on; }
+    bool bed_contact_enabled() const { return m_bed_mask_enabled; }
+    bool sharp_edge_enabled() const  { return m_sharp_mask_enabled; }
+    // How many vertices each auto pass found, whether or not it is enabled -
+    // the panel greys "Protect bed contact" out when there is nothing to protect.
+    size_t bed_contact_count() const { return m_bed_contact_count; }
+    size_t sharp_edge_count() const  { return m_sharp_edge_count; }
+    // z_min of the mesh, in volume coordinates: what the bed face is re-snapped
+    // to across a subdivide.
+    float  bed_z_min() const { return m_bed_z_min; }
+    // The bed-contact vertices, sorted. Empty when detection found none.
+    const std::vector<uint32_t> &bed_contact_vertices() const { return m_bed_contact_vertices; }
+
+    // The painted mask, 1 = unpainted. Only the Mask brush writes it.
+    const std::vector<float> &painted_mask() const { return m_painted_mask; }
+    void clear_painted_mask();
+    bool has_painted_mask() const { return m_painted_mask_dirty; }
+
+    // The combination the weight loop actually consults: min over the enabled
+    // sources. 1 for every vertex when nothing is masked.
+    float effective_mask(uint32_t v) const;
+    // True when anything at all is masked, so the overlay can skip its work.
+    bool  any_mask() const;
+
 private:
+    // The axis a Crease/Pinch tick works against: the caller's pinned direction
+    // if it gave one, else the fitted normal of the patch under the brush.
+    bool brush_axis(const BrushParams &params, const std::vector<uint32_t> &verts, Vec3f &normal);
     void build_adjacency();
     void recompute_normals(const std::vector<uint32_t> &triangles);
 
@@ -146,6 +229,19 @@ private:
     std::vector<uint32_t>               m_vertex_faces;
     std::vector<uint32_t>               m_vertex_faces_start;
     std::vector<Vec3f>                  m_vertex_normals;
+
+    // v3 masks. Each is 1 for "not protected"; empty means "this source found
+    // nothing", which is the same as all-ones and is cheaper to test.
+    std::vector<float>                  m_bed_mask;
+    std::vector<float>                  m_sharp_mask;
+    std::vector<float>                  m_painted_mask;
+    std::vector<uint32_t>               m_bed_contact_vertices;
+    bool                                m_bed_mask_enabled{false};
+    bool                                m_sharp_mask_enabled{false};
+    bool                                m_painted_mask_dirty{false};
+    size_t                              m_bed_contact_count{0};
+    size_t                              m_sharp_edge_count{0};
+    float                               m_bed_z_min{0.f};
 
     // Scratch reused between ticks so a stroke allocates nothing.
     std::vector<uint32_t>               m_stamp;      // per-vertex visit epoch
@@ -281,7 +377,36 @@ float plane_distance_variance(const indexed_triangle_set  &its,
 // between the two triangles of an edge, so a manifold mesh stays manifold and
 // no cracks appear. Triangle winding is preserved.
 // THIS CHANGES its.indices - every facet annotation on the volume is invalidated.
-indexed_triangle_set its_subdivide_midpoint(const indexed_triangle_set &its);
+//
+// `pin_z` is the v3 bed-contact guarantee: when `bed_vertices` is non-empty,
+// every NEW vertex whose edge has both endpoints in that set is snapped to
+// exactly `pin_z` afterwards. Existing vertices are never moved by midpoint
+// subdivision at all (it only appends), so their z is already bit-identical.
+//
+// A midpoint of a boundary edge - one bed endpoint, one not - needs no
+// correction: the midpoint of a straight segment lies on that segment by
+// construction, so the footprint polygon gains a collinear vertex and its area
+// and perimeter are unchanged. That only stops being true for a remesh that can
+// place a new boundary vertex somewhere other than an edge's midpoint, which
+// uniform subdivision never does. Written down here so it is not re-derived.
+indexed_triangle_set its_subdivide_midpoint(const indexed_triangle_set        &its,
+                                            const std::vector<uint32_t>       &bed_vertices,
+                                            float                              pin_z);
+inline indexed_triangle_set its_subdivide_midpoint(const indexed_triangle_set &its)
+{
+    return its_subdivide_midpoint(its, {}, 0.f);
+}
+
+// The bed-contact footprint, as one closed loop of vertex indices per island:
+// the boundary edges of the bed-contact facet set, chained. Used by the tests to
+// assert the outline's area and perimeter are unchanged; multiple disjoint feet
+// give multiple loops, which is why this is a vector of loops and not one.
+std::vector<std::vector<uint32_t>> bed_footprint_loops(const indexed_triangle_set &its,
+                                                       const std::vector<uint32_t> &bed_vertices);
+
+// Shoelace area (in xy) and perimeter of one loop. Area is unsigned.
+double loop_area_xy(const indexed_triangle_set &its, const std::vector<uint32_t> &loop);
+double loop_perimeter_xy(const indexed_triangle_set &its, const std::vector<uint32_t> &loop);
 
 // Area-weighted vertex normals (the cross product of the two triangle edges is
 // already proportional to twice the triangle area, so summing unnormalised face
