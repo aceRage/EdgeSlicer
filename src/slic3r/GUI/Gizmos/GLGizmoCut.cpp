@@ -197,7 +197,9 @@ GLGizmoCut3D::GLGizmoCut3D(GLCanvas3D& parent, const std::string& icon_filename,
     // NOTE: indexed by CutConnectorType, so the Undef slot has to be filled before FlexiJoint.
     m_connector_types = { _u8L("Plug"), _u8L("Dowel"), _u8L("Snap"), "", _u8L("Flexi") };
 
-    m_flexi_kinds = { _u8L("Double ring"), _u8L("Ball & socket"), _u8L("Chain link"), _u8L("Hinge") };
+    // NOTE: indexed by FlexiJointKind, so the order here has to follow the enum exactly.
+    m_flexi_kinds = { _u8L("Double ring"), _u8L("Ball & socket"), _u8L("Chain link"), _u8L("Hinge"),
+                      _u8L("Thread"), _u8L("Bayonet") };
 
     m_connector_styles = { _u8L("Prism"), _u8L("Frustum")
 //              , _u8L("Claw")
@@ -247,6 +249,18 @@ GLGizmoCut3D::GLGizmoCut3D(GLCanvas3D& parent, const std::string& icon_filename,
         {"Barrel dia"   , _u8L("Barrel diameter")},
         {"Hinge length" , _u8L("Hinge length")},
         {"Edge offset"  , _u8L("Edge offset")},
+        {"Major dia"    , _u8L("Major diameter")},
+        {"Pitch"        , _u8L("Pitch")},
+        {"Starts"       , _u8L("Starts")},
+        {"Turns"        , _u8L("Turns")},
+        {"Lead-in"      , _u8L("Lead-in turns")},
+        {"Lugs"         , _u8L("Lugs")},
+        {"Lug height"   , _u8L("Lug height")},
+        {"Lug thickness", _u8L("Lug thickness")},
+        {"Lug arc"      , _u8L("Lug width")},
+        {"Lock angle"   , _u8L("Lock angle")},
+        {"Entry depth"  , _u8L("Entry depth")},
+        {"Detent"       , _u8L("Detent")},
     };
 
 //    update_connector_shape();
@@ -2450,6 +2464,14 @@ Vec3d GLGizmoCut3D::flexi_hinge_axis_world() const
     return m_rotation_m.linear() * Vec3d(std::cos(a), std::sin(a), 0.);
 }
 
+// The cut NORMAL in world coordinates: the joint frame's +Z carried out through the cut
+// plane's orientation. A thread or a bayonet wants this vertical - the mirror image of what
+// the hinge's pin axis wants - so this is what the twist-lock printability warning reads.
+Vec3d GLGizmoCut3D::flexi_twist_axis_world() const
+{
+    return m_rotation_m.linear() * Vec3d::UnitZ();
+}
+
 // Auto edge placement (spec 2.2). The barrel has to sit at the EDGE of the cut face, offset
 // along -e (e = n x d), or the two halves collide the moment they start to fold: material
 // behind the hinge line on each half sweeps through the other's. Phase 1 uses the object's
@@ -2592,7 +2614,113 @@ void GLGizmoCut3D::render_flexi_joint_inputs(CutConnectors& connectors)
     if (m_imgui->bbl_checkbox(_L("Auto size from the cut cross-section"), m_flexi_auto_size) && m_flexi_auto_size)
         sync_flexi_params(connectors, true);
 
-    if (m_flexi.kind == FlexiJointKind::Hinge) {
+    if (flexi_kind_is_twist(m_flexi.kind)) {
+        // A TWIST LOCK. Everything here is sized off the major diameter, which auto-sizing
+        // parks at 0.7 x the cut section's inscribed radius.
+        m_imgui->disabled_begin(m_flexi_auto_size);
+            changed |= render_flexi_float_input(m_labels_map["Major dia"], m_flexi.thread_major_dia, 4.f, 200.f,
+                                                _L("Outside diameter of the thread, or of the bayonet's lug circle. Auto = 0.7 x the inscribed radius of the cut cross-section."));
+        m_imgui->disabled_end();
+
+        if (m_flexi.kind == FlexiJointKind::Thread) {
+            m_imgui->disabled_begin(m_flexi_auto_size);
+                changed |= render_flexi_float_input(m_labels_map["Pitch"], m_flexi.thread_pitch, 1.f, 20.f,
+                                                    _L("How far the thread rises per turn. A coarse pitch prints far better than a fine one: 2 mm is the floor on a 0.4 mm nozzle, 3 to 4 mm is the comfortable range."));
+            m_imgui->disabled_end();
+
+            // Starts. An N-start thread seats in 360/N degrees, which is the whole difference
+            // between a lid and a fastener.
+            {
+                ImGui::AlignTextToFramePadding();
+                m_imgui->text(m_labels_map["Starts"]);
+                ImGui::SameLine(m_label_width);
+                ImGui::PushItemWidth(0.55f * float(m_editing_window_width));
+                static const int starts_min = 1;
+                static const int starts_max = 4;
+                int n = thread_start_count(m_flexi);
+                if (ImGui::BBLSliderScalar("##flexi_starts", ImGuiDataType_S32, &n, &starts_min, &starts_max, "%d")) {
+                    n = std::max(starts_min, std::min(starts_max, n));
+                    if (n != m_flexi.thread_starts) {
+                        m_flexi.thread_starts = n;
+                        changed = true;
+                    }
+                }
+                if (ImGui::IsItemHovered())
+                    m_imgui->tooltip(_L("How many thread strands run side by side. An N-start thread does up in 360/N degrees of turn: 2 starts gives a half-turn lid, 4 a quarter-turn one."), ImGui::GetFontSize() * 20.0f);
+            }
+
+            changed |= render_flexi_float_input(m_labels_map["Turns"], m_flexi.thread_turns, 0.25f, 10.f,
+                                                _L("How many full revolutions of thread there are. 1.25 is the usual jar and pill-bottle range: enough to seat without winding it on forever."));
+            changed |= render_flexi_float_input(m_labels_map["Lead-in"], m_flexi.thread_lead_turns, 0.f, 2.f,
+                                                _L("How much of a turn, at each end, the thread fades to nothing over. This is the lead-in chamfer: it is what lets the two halves catch at any relative angle instead of having to be lined up."));
+            {
+                bool lh = m_flexi.thread_left_hand;
+                if (m_imgui->bbl_checkbox(_L("Left-hand thread"), lh)) {
+                    m_flexi.thread_left_hand = lh;
+                    changed = true;
+                }
+            }
+        } else {
+            // Bayonet.
+            {
+                ImGui::AlignTextToFramePadding();
+                m_imgui->text(m_labels_map["Lugs"]);
+                ImGui::SameLine(m_label_width);
+                ImGui::PushItemWidth(0.55f * float(m_editing_window_width));
+                static const int lugs_min = 2;
+                static const int lugs_max = 4;
+                int n = bayonet_lug_count(m_flexi);
+                if (ImGui::BBLSliderScalar("##flexi_lugs", ImGuiDataType_S32, &n, &lugs_min, &lugs_max, "%d")) {
+                    n = std::max(lugs_min, std::min(lugs_max, n));
+                    if (n != m_flexi.bayonet_lugs) {
+                        m_flexi.bayonet_lugs = n;
+                        changed = true;
+                    }
+                }
+                if (ImGui::IsItemHovered())
+                    m_imgui->tooltip(_L("How many lugs ride in the bayonet's slots, evenly spaced around the plug. Three is the usual compromise between holding power and having wall left between the slots."), ImGui::GetFontSize() * 20.0f);
+            }
+            m_imgui->disabled_begin(m_flexi_auto_size);
+                changed |= render_flexi_float_input(m_labels_map["Lug height"], m_flexi.bayonet_lug_height, 0.4f, 10.f,
+                                                    _L("How far each lug stands out of the plug wall."));
+                changed |= render_flexi_float_input(m_labels_map["Lug thickness"], m_flexi.bayonet_lug_thickness, 0.4f, 10.f,
+                                                    _L("How tall each lug is along the axis. This is what carries the pull-out load, so it wants at least a few layers."));
+            m_imgui->disabled_end();
+            changed |= render_flexi_float_input(m_labels_map["Lug arc"], m_flexi.bayonet_lug_arc, 5.f, 90.f,
+                                                _L("Angular width of one lug, in degrees. It has to share its slice of the bore with the entry channel and the track."));
+            changed |= render_flexi_float_input(m_labels_map["Lock angle"], m_flexi.bayonet_lock_angle, 20.f, 120.f,
+                                                _L("How far the lid turns to lock, in degrees. 60 to 90 is the usual quarter-turn range; it is clamped so the track cannot run into the next lug's channel."));
+            changed |= render_flexi_float_input(m_labels_map["Entry depth"], m_flexi.bayonet_entry_depth, 0.5f, 40.f,
+                                                _L("How far the lid pushes straight in before it can be turned. It has to be at least the lug's own thickness."));
+            changed |= render_flexi_float_input(m_labels_map["Detent"], m_flexi.bayonet_detent, 0.f, 3.f,
+                                                _L("Height of the bump at the end of the track that the lug clicks over, so the lid stops where it locks instead of turning back. 0 leaves the track plain."));
+            {
+                bool lh = m_flexi.thread_left_hand;
+                if (m_imgui->bbl_checkbox(_L("Turn the other way to lock"), lh)) {
+                    m_flexi.thread_left_hand = lh;
+                    changed = true;
+                }
+            }
+        }
+
+        // Which half is the LID, i.e. which one carries the male fastener and comes off.
+        {
+            bool upper = m_flexi.thread_lid_upper;
+            if (m_imgui->bbl_checkbox(_L("Lid side: the upper half screws on"), upper)) {
+                m_flexi.thread_lid_upper = upper;
+                changed = true;
+            }
+            if (ImGui::IsItemHovered())
+                m_imgui->tooltip(_L("Which half carries the male thread or the lugged plug - i.e. which one is the cap. The other half gets the bore."), ImGui::GetFontSize() * 20.0f);
+        }
+
+        // ROTATION - for a thread this is the START ANGLE, which is what decides where the lid
+        // points when it is done up.
+        changed |= render_flexi_rotation_input(m_labels_map["Rotation"], m_flexi.rotation,
+                                               m_flexi.kind == FlexiJointKind::Thread ?
+                                               _L("The thread's start angle: where the first strand begins around the axis. Turning it turns where the lid ends up pointing when it is screwed down.") :
+                                               _L("Where the first lug sits around the axis. Turning it turns where the lid ends up pointing when it is locked."));
+    } else if (m_flexi.kind == FlexiJointKind::Hinge) {
         // Knuckle count is an int, and an ODD one is self-centring: the middle knuckle sits on
         // the joint origin, so the hinge does not drift off the point the user clicked.
         {
@@ -2696,7 +2824,8 @@ void GLGizmoCut3D::render_flexi_joint_inputs(CutConnectors& connectors)
     changed |= render_flexi_float_input(m_labels_map["Gap"], m_flexi.gap, m_flexi.clearance, 20.f,
                                         _L("Thickness of the cut: how far apart the two segments' faces end up. Each face is set back from the cut plane by half of it, and the joint bridges the gap. A larger gap makes the joint visibly more flexible; it can never be smaller than the clearance."));
 
-    if (m_flexi.kind != FlexiJointKind::ChainLink && m_flexi.kind != FlexiJointKind::Hinge)
+    if (m_flexi.kind != FlexiJointKind::ChainLink && m_flexi.kind != FlexiJointKind::Hinge &&
+        !flexi_kind_is_twist(m_flexi.kind))
         changed |= render_flexi_float_input(m_labels_map["Tilt"], m_flexi.tilt, 0.f, 3.f,
                                             _L("Extra headroom carved into the groove so the segment can rock."));
 
@@ -2729,6 +2858,19 @@ void GLGizmoCut3D::render_flexi_joint_inputs(CutConnectors& connectors)
                  "support inside the bore; rotate the part, or change Rotation so the axis lies flat, "
                  "or expect to support the bore by hand."));
 
+    // TWIST AXIS PRINTABILITY - the mirror image of the hinge's warning. A thread or a bayonet
+    // wants its axis UPRIGHT: laid on its side, every turn's upper flank is a horizontal
+    // overhang that sags into the very clearance the fit depends on, and the lid binds. Warn,
+    // never block: the user may well reorient the part before slicing.
+    if (flexi_kind_is_twist(m_flexi.kind) && twist_axis_needs_care(flexi_twist_axis_world()))
+        m_imgui->text_colored(ImGuiWrapper::COL_ORANGE_LIGHT,
+            m_flexi.kind == FlexiJointKind::Thread ?
+            _u8L("This cut's axis is not vertical. A thread printed on its side has every turn's "
+                 "upper flank hanging in the air, which sags into the clearance and jams the lid; "
+                 "rotate the part so the cut normal points up, or expect a poor fit.") :
+            _u8L("This cut's axis is not vertical. A bayonet printed on its side has its lugs and "
+                 "slots overhanging; rotate the part so the cut normal points up for the best fit."));
+
     const double closing_radius = flexi_slice_closing_radius();
     if (flexi_gap_closing_conflict(m_flexi, closing_radius))
         m_imgui->text_colored(ImGuiWrapper::COL_ORANGE_LIGHT,
@@ -2737,7 +2879,15 @@ void GLGizmoCut3D::render_flexi_joint_inputs(CutConnectors& connectors)
             double_to_string(flexi_max_safe_gap_closing_radius(m_flexi), 3).ToStdString() + " mm, " +
             _u8L("or raise the clearance."));
 
-    m_imgui->text(_L("Both halves stay parts of one object so the joint prints in place."));
+    if (flexi_kind_is_twist(m_flexi.kind)) {
+        if (m_flexi.kind == FlexiJointKind::Thread)
+            m_imgui->text(_L("The lid screws on. The two halves print in place as one object; "
+                             "unscrew them after printing."));
+        else
+            m_imgui->text(_L("The lid pushes in and turns to lock. The two halves print in place "
+                             "as one object."));
+    } else
+        m_imgui->text(_L("Both halves stay parts of one object so the joint prints in place."));
     ImGui::PopTextWrapPos();
 }
 

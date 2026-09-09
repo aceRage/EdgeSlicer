@@ -328,6 +328,7 @@ protected:
     bool   is_flexi_joint_type() const { return m_connector_type == CutConnectorType::FlexiJoint; }
     bool   render_flexi_float_input(const std::string& label, float& in_val, float min_val, float max_val, const wxString& tooltip);
     Vec3d  flexi_hinge_axis_world() const;
+    Vec3d  flexi_twist_axis_world() const;
     float  flexi_hinge_auto_edge_offset() const;
     // Rotation about the cut normal, in DEGREES (FlexiJointParams::rotation), 0-180.
     bool   render_flexi_rotation_input(const std::string& label, float& in_val, const wxString& tooltip);

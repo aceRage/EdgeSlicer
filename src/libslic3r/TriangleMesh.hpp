@@ -352,6 +352,27 @@ indexed_triangle_set    its_make_revolved(const std::vector<Vec2d> &profile_rz, 
 // with no end caps. Consecutive duplicate points are dropped; fewer than 3 distinct points or
 // fewer than 3 sectors returns an empty mesh.
 indexed_triangle_set    its_make_swept_loop(const std::vector<Vec3d> &path, double tube_r, int sectors);
+// A HELICAL RIBBON - the primitive behind the Thread connector.
+// `profile_rz` is a CLOSED 2D profile written in the strand's own (radial outward, axial)
+// frame, i.e. a polygon of offsets from the helix's own centreline. It is swept along a helix
+// of centreline radius `radius` about +Z, rising `pitch` per turn for `turns` turns, faceted
+// with `segments_per_turn` steps per turn. `starts` intertwined strands come back as one mesh
+// each: the same helix repeated, 360/starts apart in phase and pitch/starts apart in height,
+// which is exactly what an N-start thread is. `phase_deg` turns them all about +Z (the thread
+// start angle) and `left_hand` flips the sense of the rise.
+// Unlike its_make_swept_loop the path does NOT close, so there is no residual twist to spread:
+// every step is the same rotation about +Z plus the same rise along it - the helix's own frame,
+// known analytically. `lead_frac` tapers the profile's RADIAL extent linearly to zero over that
+// fraction of a turn at EACH end, which is both the printable lead-in chamfer and what closes
+// the ribbon's ends without a cap mesh; at lead_frac == 0 the ends are capped flat instead.
+// The helix runs from z == 0 up to z == pitch * turns. Each returned mesh is watertight.
+// Fewer than 3 profile points, a non-positive radius/pitch/turns, fewer than 3 segments per
+// turn or a starts count outside 1..8 returns an empty vector.
+std::vector<indexed_triangle_set> its_make_helical_sweep(const std::vector<Vec2d> &profile_rz,
+                                                        double radius, double pitch, int starts,
+                                                        double turns, int segments_per_turn,
+                                                        bool left_hand = false, double phase_deg = 0.,
+                                                        double lead_frac = 0.5);
 indexed_triangle_set    its_make_frustum_dowel(double r, double h, int sectorCount);
 indexed_triangle_set    its_make_pyramid(float base, float height);
 indexed_triangle_set    its_make_sphere(double radius, double fa);
