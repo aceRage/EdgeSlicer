@@ -16800,6 +16800,12 @@ void Plater::priv::on_filament_color_changed(wxCommandEvent &event)
 
 void Plater::priv::install_network_plugin(wxCommandEvent &event)
 {
+    // Ultra (plug-in guards): the Device tab's "install network plugin" link. Our own plug-in is
+    // already there in that case, and this dialog would download Bambu's package over it.
+    if (wxGetApp().is_ultranet_plugin_installed()) {
+        BOOST_LOG_TRIVIAL(info) << "[UltraNet] UltraNet present, Bambu CDN download disabled (Device-tab install link ignored)";
+        return;
+    }
     wxGetApp().ShowDownNetPluginDlg();
     return;
 }
@@ -16828,6 +16834,12 @@ void Plater::priv::update_plugin_when_launch(wxCommandEvent &event)
 
 void Plater::priv::show_install_plugin_hint(wxCommandEvent &event)
 {
+    // Ultra (plug-in guards): the notification's only action is the Bambu CDN download, so it is
+    // pointless (and would overwrite our plug-in) once UltraNet is installed.
+    if (wxGetApp().is_ultranet_plugin_installed()) {
+        BOOST_LOG_TRIVIAL(info) << "[UltraNet] UltraNet present, Bambu CDN download disabled (install-plugin hint suppressed)";
+        return;
+    }
     notification_manager->bbl_show_plugin_install_notification(into_u8(_L("Network Plug-in is not detected. Network related features are unavailable.")));
 }
 

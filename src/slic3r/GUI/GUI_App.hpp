@@ -325,6 +325,8 @@ private:
     std::vector<bool> m_create_preset_blocked { false, false, false, false, false, false }; // excceed limit
     bool m_networking_compatible { false };
     bool m_networking_need_update { false };
+    // Ultra (plug-in guards): cached "data_dir/plugins holds our own plug-in" answer.
+    bool m_ultranet_plugin_installed { false };
     bool m_networking_cancel_update { false };
     std::shared_ptr<UpgradeNetworkJob> m_upgrade_network_job;
 
@@ -548,6 +550,16 @@ private:
     void            ShowUserGuide();
     void            ShowDownNetPluginDlg();
     void            ShowUserLogin(bool show = true);
+    // Ultra (plug-in guards): true when data_dir/plugins holds OUR clean-room plug-in (a
+    // bambu_networking library sitting next to the ultranet marker file). Every Bambu CDN
+    // download and update prompt is gated on this - see PluginGuard.hpp. It is filesystem state,
+    // so it is answered from a value cached at startup and refreshed after an install.
+    bool            is_ultranet_plugin_installed() const { return m_ultranet_plugin_installed; }
+    void            refresh_ultranet_plugin_state();
+    // The one guarded entry point for "the user asked to sign in to a Bambu account": with no
+    // agent loaded it offers the plug-in download (or asks for a restart, when our own plug-in is
+    // already installed) instead of opening a sign-in page whose ticket has nowhere to go.
+    void            ShowUserLoginGuarded();
     void            ShowOnlyFilament();
     //BBS
     void            request_login(bool show_user_info = false);
