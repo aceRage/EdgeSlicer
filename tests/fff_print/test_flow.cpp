@@ -21,22 +21,25 @@ SCENARIO("Extrusion width specifics", "[Flow]") {
         DynamicPrintConfig config = Slic3r::DynamicPrintConfig::full_print_config();
 		config.set_deserialize_strict({
 			{ "brim_width",			2 },
-			{ "skirts",				1 },
-			{ "perimeters",			3 },
-			{ "fill_density",		"40%" },
-			{ "first_layer_height", 0.3 }
+			{ "skirt_loops",				1 },
+			{ "wall_loops",			3 },
+			{ "sparse_infill_density",		"40%" },
+			{ "initial_layer_print_height", 0.3 }
 			});
 
         WHEN("first layer width set to 2mm") {
             Slic3r::Model model;
-            config.set("first_layer_extrusion_width", 2);
+            config.set("initial_layer_line_width", 2);
             Slic3r::Print print;
             Slic3r::Test::init_print({TestMesh::cube_20x20x20}, print, model, config);
 
             std::vector<double> E_per_mm_bottom;
             std::string gcode = Test::gcode(print);
             Slic3r::GCodeReader parser;
-            const double layer_height = config.opt_float("layer_height");
+            // The FIRST layer is printed at initial_layer_print_height (set to 0.3 above),
+            // not at layer_height (0.2 by default), so filtering on layer_height matched no
+            // extrusion at all and E_per_mm_bottom came back empty.
+            const double layer_height = config.opt_float("initial_layer_print_height");
             parser.parse_buffer(gcode, [&E_per_mm_bottom, layer_height] (Slic3r::GCodeReader& self, const Slic3r::GCodeReader::GCodeLine& line)
             { 
                 if (self.z() == Approx(layer_height).margin(0.01)) { // only consider first layer

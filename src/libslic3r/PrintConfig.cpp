@@ -728,6 +728,14 @@ PrintConfigDef::PrintConfigDef()
     assign_printer_technology_to_unknown(this->options, ptAny);
     this->init_fff_params();
     this->init_extruder_option_keys();
+    // init_filament_option_keys() populates m_filament_option_keys (and
+    // m_filament_retract_keys) but was never called, so both stayed EMPTY and
+    // DynamicPrintConfig::set_num_filaments() - which iterates filament_option_keys() -
+    // silently resized nothing. Any programmatically built multi-filament config kept a
+    // 1-element filament_diameter, and Print::object_extruders()/support_material_extruders()
+    // then clamped every extruder index >= filament_diameter.size() back to 0, so only
+    // extruder 0 was ever reported as used.
+    this->init_filament_option_keys();
     assign_printer_technology_to_unknown(this->options, ptFFF);
     this->init_sla_params();
     assign_printer_technology_to_unknown(this->options, ptSLA);
