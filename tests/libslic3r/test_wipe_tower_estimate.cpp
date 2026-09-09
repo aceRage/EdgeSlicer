@@ -138,7 +138,7 @@ TEST_CASE("The tower is sized for the first layer when it is the thinnest", "[Wi
     const double at_thinnest = estimate(config, 3, 0.2, 5.).depth;
     CHECK_THAT(estimate(config, 3, 0.28, 5.).depth, WithinAbs(at_thinnest, 1e-9));
     config.set_key_value("initial_layer_print_height", new ConfigOptionFloat(0.3));
-    CHECK(estimate(config, 3, 0.28, 5.).depth < at_thinnest || at_thinnest <= WipeTower::get_limit_depth_by_height(5.f) + EPSILON);
+    CHECK((estimate(config, 3, 0.28, 5.).depth < at_thinnest || at_thinnest <= WipeTower::get_limit_depth_by_height(5.f) + EPSILON));
 }
 
 TEST_CASE("Object height sets the stability floor and the auto brim", "[WipeTowerEstimate]") {
