@@ -2953,6 +2953,9 @@ void GLCanvas3D::reload_scene(bool refresh_immediately, bool force_full_scene_re
         bool timelapse_enabled = timelapse_type ? (timelapse_type->value == TimelapseType::tlSmooth) : false;
 
         if (wt && (timelapse_enabled || filaments_count > 1)) {
+            // The tower size estimate reads printer- and filament-scope keys, which the print preset
+            // does not carry; built once here rather than per plate.
+            const DynamicPrintConfig full_config = wxGetApp().preset_bundle->full_config();
             for (int plate_id = 0; plate_id < n_plates; plate_id++) {
                 // If print ByObject and there is only one object in the plate, the wipe tower is allowed to be generated.
                 PartPlate* part_plate = ppl.get_plate(plate_id);
@@ -2965,49 +2968,32 @@ void GLCanvas3D::reload_scene(bool refresh_immediately, bool force_full_scene_re
                 DynamicPrintConfig& proj_cfg = wxGetApp().preset_bundle->project_config;
                 float x = dynamic_cast<const ConfigOptionFloats*>(proj_cfg.option("wipe_tower_x"))->get_at(plate_id);
                 float y = dynamic_cast<const ConfigOptionFloats*>(proj_cfg.option("wipe_tower_y"))->get_at(plate_id);
-                float w = dynamic_cast<const ConfigOptionFloat*>(m_config->option("prime_tower_width"))->value;
                 float a = dynamic_cast<const ConfigOptionFloat*>(proj_cfg.option("wipe_tower_rotation_angle"))->value;
-                float tower_brim_width = dynamic_cast<const ConfigOptionFloat*>(m_config->option("prime_tower_brim_width"))->value;
-                // BBS
-                // float v = dynamic_cast<const ConfigOptionFloat*>(m_config->option("prime_volume"))->value;
                 Vec3d plate_origin = ppl.get_plate(plate_id)->get_origin();
 
-                const Print* print = m_process->fff_print();
-                const auto& wipe_tower_data = print->wipe_tower_data(filaments_count);
-                float brim_width = wipe_tower_data.brim_width;
-                const DynamicPrintConfig &print_cfg   = wxGetApp().preset_bundle->prints.get_edited_preset().config;
-                Vec3d wipe_tower_size = ppl.get_plate(plate_id)->estimate_wipe_tower_size(print_cfg, w, wipe_tower_data.depth);
+                if (part_plate->get_objects_on_this_plate().empty()) continue;
 
-                const float   margin     = WIPE_TOWER_MARGIN + tower_brim_width;
-                BoundingBoxf3 plate_bbox = wxGetApp().plater()->get_partplate_list().get_plate(plate_id)->get_bounding_box();
-                coordf_t plate_bbox_x_max_local_coord = plate_bbox.max(0) - plate_origin(0);
-                coordf_t plate_bbox_y_max_local_coord = plate_bbox.max(1) - plate_origin(1);
-                bool need_update = false;
-                if (x + margin + wipe_tower_size(0) > plate_bbox_x_max_local_coord) {
-                    x = plate_bbox_x_max_local_coord - wipe_tower_size(0) - margin;
-                    need_update = true;
-                }
-                else if (x < margin) {
-                    x = margin;
-                    need_update = true;
-                }
-                if (need_update) {
-                    ConfigOptionFloat wt_x_opt(x);
-                    dynamic_cast<ConfigOptionFloats *>(proj_cfg.option("wipe_tower_x"))->set_at(&wt_x_opt, plate_id, 0);
-                    need_update = false;
-                }
+                // Body and brim from this plate's own estimate: m_process->fff_print() is the
+                // selected plate's, so an auto brim drew every tower with that plate's brim.
+                const WipeTowerFootprint footprint = part_plate->estimate_wipe_tower_footprint(full_config);
+                // The estimate is also the answer to whether this plate prints a tower;
+                // deciding it here as well only gave the two room to drift.
+                if (footprint.depth <= 0.) continue;
+                float brim_width = float(footprint.brim_width);
+                Vec3d wipe_tower_size(footprint.width, footprint.depth, footprint.height);
 
-                if (y + margin + wipe_tower_size(1) > plate_bbox_y_max_local_coord) {
-                    y = plate_bbox_y_max_local_coord - wipe_tower_size(1) - margin;
-                    need_update = true;
-                }
-                else if (y < margin) {
-                    y = margin;
-                    need_update = true;
-                }
-                if (need_update) {
-                    ConfigOptionFloat wt_y_opt(y);
-                    dynamic_cast<ConfigOptionFloats *>(proj_cfg.option("wipe_tower_y"))->set_at(&wt_y_opt, plate_id, 0);
+                // set_default_wipe_tower_pos_for_plate doesn't rerun when painting changes the
+                // filament count, so redo its clamp here on every reload.
+                {
+                    Vec3d clamped_pos, clamped_size;
+                    part_plate->estimate_wipe_tower_polygon(full_config, plate_id, clamped_pos, clamped_size);
+                    if (std::abs(x - (float) clamped_pos(0)) > EPSILON || std::abs(y - (float) clamped_pos(1)) > EPSILON) {
+                        x = (float) clamped_pos(0);
+                        y = (float) clamped_pos(1);
+                        ConfigOptionFloat wt_x_opt(x), wt_y_opt(y);
+                        dynamic_cast<ConfigOptionFloats*>(proj_cfg.option("wipe_tower_x"))->set_at(&wt_x_opt, plate_id, 0);
+                        dynamic_cast<ConfigOptionFloats*>(proj_cfg.option("wipe_tower_y"))->set_at(&wt_y_opt, plate_id, 0);
+                    }
                 }
 
                 int volume_idx_wipe_tower_new = m_volumes.load_wipe_tower_preview(

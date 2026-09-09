@@ -2,6 +2,7 @@
 
 #include <cassert>
 #include <iostream>
+#include <map>
 #include <vector>
 #include <numeric>
 #include <sstream>
@@ -10,6 +11,7 @@
 #include "GCodeProcessor.hpp"
 #include "BoundingBox.hpp"
 #include "LocalesUtils.hpp"
+#include "Triangulation.hpp"
 
 
 namespace Slic3r
@@ -604,6 +606,168 @@ WipeTower::ToolChangeResult WipeTower::construct_tcr(WipeTowerWriter& writer,
 const std::map<float, float> WipeTower::min_depth_per_height = {
     {100.f, 20.f}, {250.f, 40.f}
 };
+
+float WipeTower::get_limit_depth_by_height(float max_height)
+{
+    float min_wipe_tower_depth = 0.f;
+    auto  iter                 = WipeTower::min_depth_per_height.begin();
+    while (iter != WipeTower::min_depth_per_height.end()) {
+        auto curr_height_to_depth = *iter;
+
+        // This is the case that wipe tower height is lower than the first min_depth_to_height member.
+        if (curr_height_to_depth.first >= max_height) {
+            min_wipe_tower_depth = curr_height_to_depth.second;
+            break;
+        }
+
+        iter++;
+
+        // If curr_height_to_depth is the last member, use its min_depth.
+        if (iter == WipeTower::min_depth_per_height.end()) {
+            min_wipe_tower_depth = curr_height_to_depth.second;
+            break;
+        }
+
+        // If wipe tower height is between the current and next member, set the min_depth as linear interpolation between them
+        auto next_height_to_depth = *iter;
+        if (next_height_to_depth.first > max_height) {
+            float height_base    = curr_height_to_depth.first;
+            float height_diff    = next_height_to_depth.first - curr_height_to_depth.first;
+            float min_depth_base = curr_height_to_depth.second;
+            float depth_diff     = next_height_to_depth.second - curr_height_to_depth.second;
+
+            min_wipe_tower_depth = min_depth_base + (max_height - curr_height_to_depth.first) / height_diff * depth_diff;
+            break;
+        }
+    }
+    return min_wipe_tower_depth;
+}
+
+float WipeTower::get_auto_brim_by_height(float max_height)
+{
+    if (max_height < 100)
+        return max_height / 100.f * 8.f;
+    return 8.f;
+}
+
+static const double wrapping_wipe_tower_depth = 10;
+static const std::map<float, float> nozzle_diameter_to_nozzle_change_width{{0.2f, 0.5f}, {0.4f, 1.0f}, {0.6f, 1.2f}, {0.8f, 1.4f}};
+
+float WipeTower::estimate_brim_real_width(float brim_width, float nozzle_diameter, float first_layer_height, bool type2)
+{
+    if (brim_width <= 0.f)
+        return brim_width;
+    const float spacing = nozzle_diameter * 1.25f - first_layer_height * float(1. - M_PI_4); // Width_To_Nozzle_Ratio
+    if (spacing <= EPSILON)
+        return brim_width;
+    const int loops_num = int((brim_width + spacing / 2.f) / spacing);
+    return loops_num * spacing + (type2 ? 0.f : spacing / 2.f);
+}
+
+float WipeTower::get_wrapping_detection_depth()
+{
+    return float(wrapping_wipe_tower_depth);
+}
+
+float WipeTower::nozzle_change_perimeter_width(float nozzle_diameter)
+{
+    auto it = nozzle_diameter_to_nozzle_change_width.find(nozzle_diameter);
+    return it != nozzle_diameter_to_nozzle_change_width.end() ? it->second : 2.f * nozzle_diameter * 1.25f;
+}
+
+float WipeTower::estimate_tower_blocks_depth(const std::vector<PurgeEstimate> &purges, float width, float layer_height, float nozzle_diameter, float extra_spacing)
+{
+    if (purges.empty() || layer_height < EPSILON || nozzle_diameter < EPSILON)
+        return 0.f;
+    const float pw         = nozzle_diameter * 1.25f; // Width_To_Nozzle_Ratio
+    const float ncpw       = nozzle_change_perimeter_width(nozzle_diameter);
+    const float line_width = width - 2.f * pw;
+    if (line_width <= EPSILON)
+        return 0.f;
+    // Line cross-section as volume_to_length() sees it; the infill gap stretches the perimeter
+    // width by the configured ratio and nozzle-change lines keep their own width
+    // (calc_block_infill_gap).
+    auto        line_area   = [layer_height](float w) { return layer_height * (w - layer_height * float(1. - M_PI_4)); };
+    const float extra_width = (extra_spacing - 1.f) * pw;
+    const float gap         = pw + extra_width;
+    const float nc_gap      = ncpw + extra_width;
+    // A layer purges into at most (filaments - 1) targets, so a category holding every filament
+    // never sees its smallest purge (the layer's first filament) in its worst layer.
+    struct Block { float depth = 0.f; float min_purge = 0.f; size_t filaments = 0; };
+    std::map<int, Block> blocks;
+    for (const PurgeEstimate &purge : purges) {
+        Block      &block       = blocks[purge.category];
+        const float purge_depth = std::ceil(purge.prime_volume / line_area(pw) / line_width) * gap;
+        block.min_purge         = block.filaments == 0 ? purge_depth : std::min(block.min_purge, purge_depth);
+        block.depth += purge_depth;
+        ++block.filaments;
+        if (purge.filament_change_length > EPSILON) {
+            // The leaving filament is rammed over the nozzle-change flow, again in whole lines.
+            const float filament_area = float(M_PI) * purge.filament_diameter * purge.filament_diameter / 4.f;
+            const float nc_length     = purge.filament_change_length * filament_area / line_area(ncpw);
+            block.depth += std::ceil(nc_length / (width - ncpw - pw)) * nc_gap;
+        }
+    }
+    float depth = pw; // plan_tower_new starts the first block one perimeter width in
+    for (const auto &[category, block] : blocks)
+        depth += block.filaments == purges.size() ? block.depth - block.min_purge : block.depth;
+    return depth;
+}
+
+float WipeTower::rib_footprint_side(float width, float depth, float rib_width, float extra_rib_length, float max_height)
+{
+    if (width < EPSILON || depth < EPSILON)
+        return 0.f;
+    // Ribs run the diagonal; below the height-based minimum they are extended rather than the
+    // body, then by the extra length, never ending up shorter than the diagonal.
+    const float diagonal   = std::sqrt(width * width + depth * depth);
+    float       rib_length = diagonal;
+    if (depth + EPSILON < get_limit_depth_by_height(max_height))
+        rib_length = std::max(rib_length, get_limit_depth_by_height(max_height) * float(std::sqrt(2.)));
+    rib_length = std::max(diagonal, rib_length + extra_rib_length);
+    // Half the extension at each end of the diagonal plus half the rib width, projected onto the axes.
+    const float rib_w    = std::min(rib_width, std::min(width, depth) / 2.f);
+    const float per_side = ((rib_length - diagonal) / 2.f + rib_w / 2.f) / float(std::sqrt(2.));
+    return std::max(width, depth) + 2.f * per_side;
+}
+
+float WipeTower::estimate_rib_tower_bbox_side(const std::vector<PurgeEstimate> &purges, float width, float layer_height, float nozzle_diameter, float extra_spacing, float rib_width, float extra_rib_length, float max_height)
+{
+    if (purges.empty() || width < EPSILON || layer_height < EPSILON || nozzle_diameter < EPSILON)
+        return 0.f;
+    const float pw     = nozzle_diameter * 1.25f; // Width_To_Nozzle_Ratio
+    const float square = align_ceil(std::sqrt(estimate_tower_blocks_depth(purges, width, layer_height, nozzle_diameter, extra_spacing) * width), pw);
+    const float depth  = estimate_tower_blocks_depth(purges, square, layer_height, nozzle_diameter, extra_spacing);
+    return rib_footprint_side(square, depth, rib_width, extra_rib_length, max_height);
+}
+
+TriangleMesh WipeTower::its_make_rib_brim(const Polygon &brim, float layer_height)
+{
+    TriangleMesh res;
+    if (brim.area() < scaled(EPSILON))
+        return res;
+    int offset = int(brim.size());
+    res.its.vertices.reserve(brim.size() * 2);
+    auto faces = Triangulation::triangulate(brim);
+    res.its.indices.reserve(brim.size() * 2 + 2 * faces.size());
+    for (auto &t : faces) res.its.indices.push_back({t[1], t[0], t[2]});
+    for (auto &t : faces) res.its.indices.push_back({t[0] + offset, t[1] + offset, t[2] + offset});
+
+    for (int i = 0; i < int(brim.size()); i++)
+        res.its.vertices.push_back({unscaled<float>(brim[i][0]), unscaled<float>(brim[i][1]), 0});
+    for (int i = 0; i < int(brim.size()); i++)
+        res.its.vertices.push_back({unscaled<float>(brim[i][0]), unscaled<float>(brim[i][1]), layer_height});
+
+    for (int i = 0; i < offset; i++) {
+        int a = i;
+        int b = (i + 1) % offset;
+        int c = i + offset;
+        int d = b + offset;
+        res.its.indices.push_back({a, b, c});
+        res.its.indices.push_back({d, c, b});
+    }
+    return res;
+}
 
 WipeTower::WipeTower(const PrintConfig& config, int plate_idx, Vec3d plate_origin, const float prime_volume, size_t initial_tool, const float wipe_tower_height) :
     m_semm(config.single_extruder_multi_material.value),

@@ -6,6 +6,7 @@
 #include "PrintBase.hpp"
 
 #include "BoundingBox.hpp"
+#include "Polygon.hpp"
 #include "ExtrusionEntityCollection.hpp"
 #include "Flow.hpp"
 #include "Point.hpp"
@@ -24,6 +25,7 @@
 #include <Eigen/Geometry>
 
 #include <functional>
+#include <optional>
 #include <set>
 #include <vector>
 
@@ -939,10 +941,22 @@ struct WipeTowerData
 
     // Depth of the wipe tower to pass to GLCanvas3D for exact bounding box:
     float                                                 depth;
+    // Effective width (a rib wall squares the tower): the estimate until generation, then the
+    // generated width, so it never disagrees with depth.
+    float                                                 width;
     std::vector<std::pair<float, float>>                  z_and_depth_pairs;
     std::vector<std::vector<WipeTower::box_coordinates>>  local_z_reserve_boxes;
     float                                                 brim_width;
     float                                                 height;
+    // First-layer outline of the generated tower (brim included), used as the generation-time
+    // backstop so a brim that grew over exclusion or off the bed cannot write G-code.
+    struct WipeTowerMeshData
+    {
+        Polygon bottom;
+    };
+    std::optional<WipeTowerMeshData>                      wipe_tower_mesh_data;
+
+    void construct_mesh(float width, float depth, float height, float brim_width, bool is_rib_wipe_tower, float rib_width, float rib_length, bool fillet_wall, float cone_angle = 0.f);
 
     void clear() {
         priming.reset(nullptr);
@@ -952,8 +966,10 @@ struct WipeTowerData
         used_filament.clear();
         number_of_toolchanges = -1;
         depth = 0.f;
+        width = 0.f;
         local_z_reserve_boxes.clear();
         brim_width = 0.f;
+        wipe_tower_mesh_data.reset();
     }
 
 private:
