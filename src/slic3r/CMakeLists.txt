@@ -423,6 +423,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/SnapmakerTaskConfig.cpp
     GUI/WizardNetworking.hpp
     GUI/WizardNetworking.cpp
+    GUI/PluginGuard.hpp
+    GUI/PluginGuard.cpp
     GUI/SnapmakerLan.hpp
     GUI/RemoteHub.cpp
     GUI/RemoteHub.hpp

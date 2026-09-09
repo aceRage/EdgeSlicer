@@ -104,6 +104,7 @@
 #include "../Utils/UndoRedo.hpp"
 #include "slic3r/Config/Snapshot.hpp"
 #include "Preferences.hpp"
+#include "PluginGuard.hpp"
 #include "PresetMirror.hpp"
 #include "Tab.hpp"
 #include "SysInfoDialog.hpp"
@@ -1183,6 +1184,13 @@ void GUI_App::post_init()
         hms_query = new HMSQuery();
 
     m_show_gcode_window = app_config->get_bool("show_gcode_window");
+    // Ultra (plug-in guards): "the plug-in needs updating" means "its version does not match the
+    // Bambu build we were forked from", which is true of our own plug-in by construction. Acting on
+    // it would download Bambu's package over ours, so it is dropped while UltraNet is installed.
+    if (m_networking_need_update && m_ultranet_plugin_installed) {
+        BOOST_LOG_TRIVIAL(info) << "[UltraNet] UltraNet present, Bambu CDN download disabled (network plug-in update prompt skipped)";
+        m_networking_need_update = false;
+    }
     if (m_networking_need_update && m_hub_managed && RemoteAccess::get().hidden()) {
         RemoteAccess::get().raise_attention("the network plug-in needs updating", "manual");
     } else if (m_networking_need_update) {
@@ -1656,6 +1664,14 @@ int GUI_App::install_plugin(std::string name, std::string package_name, InstallP
     std::string target_file_path = (fs::temp_directory_path() / package_name).string();
 
     BOOST_LOG_TRIVIAL(info) << "[install_plugin] enter";
+    // Ultra (plug-in guards): this unzips Bambu's CDN package straight over data_dir/plugins. When
+    // our own clean-room plug-in lives there, that would silently replace it - refuse. The check is
+    // re-read from disk rather than taken from the cache so a late first-run copy is still seen.
+    refresh_ultranet_plugin_state();
+    if (m_ultranet_plugin_installed) {
+        BOOST_LOG_TRIVIAL(info) << "[UltraNet] UltraNet present, Bambu CDN download disabled (install_plugin refused)";
+        return -1;
+    }
     // get plugin folder
     std::string data_dir_str = data_dir();
     boost::filesystem::path data_dir_path(data_dir_str);
@@ -3052,10 +3068,22 @@ bool GUI_App::on_init_inner()
                     if (fs::exists(bundled / name))
                         fs::copy_file(bundled / name, pf / name, fs::copy_option::overwrite_if_exists, ec);
                 }
+                // Ultra (plug-in guards): leave a marker beside the DLLs. The library name is
+                // Bambu's, so the file alone cannot say whose plug-in this is; the marker is what
+                // stops install_plugin() and the update prompts from replacing ours with a CDN
+                // download. The sidecar folder may ship its own copy - prefer that one.
+                if (fs::exists(bundled / kUltraNetMarkerName)) {
+                    fs::copy_file(bundled / kUltraNetMarkerName, pf / kUltraNetMarkerName, fs::copy_option::overwrite_if_exists, ec);
+                } else {
+                    boost::nowide::ofstream marker((pf / kUltraNetMarkerName).string().c_str());
+                    marker << "UltraNet: EdgeSlicer's own network plug-in. Do not replace with the Bambu CDN package." << std::endl;
+                }
                 BOOST_LOG_TRIVIAL(info) << "[UltraNet] installed bundled network plugin to " << pf.string();
             }
         }
     } catch (...) {}
+
+    refresh_ultranet_plugin_state();
 
     // Ultra Net: the clean-room network plugin is bundled with the app. If it's present in
     // data_dir/plugins, networking is effectively "installed" - force the flag on so a reset
@@ -4212,8 +4240,79 @@ if (res) {
     }
 }
 
+// Ultra (plug-in guards): re-read data_dir/plugins and cache whether the plug-in installed there
+// is ours. Called at startup (right after the first-run copy) and after an install, so the answer
+// never goes stale while the app is running.
+void GUI_App::refresh_ultranet_plugin_state()
+{
+    bool plugin_present = false, marker = false;
+    try {
+        namespace fs = boost::filesystem;
+        fs::path pf = fs::path(data_dir()) / "plugins";
+        plugin_present =
+            fs::exists(pf / "bambu_networking.dll") ||
+            fs::exists(pf / "libbambu_networking.so") ||
+            fs::exists(pf / "libbambu_networking.dylib");
+        marker = fs::exists(pf / kUltraNetMarkerName);
+    } catch (...) {}
+    const bool was = m_ultranet_plugin_installed;
+    m_ultranet_plugin_installed = is_ultranet_plugin(plugin_present, marker);
+    if (m_ultranet_plugin_installed)
+        BOOST_LOG_TRIVIAL(info) << "[UltraNet] UltraNet present, Bambu CDN download disabled";
+    else if (was)
+        BOOST_LOG_TRIVIAL(info) << "[UltraNet] UltraNet no longer present, Bambu CDN download re-enabled";
+    else
+        BOOST_LOG_TRIVIAL(info) << "[UltraNet] no UltraNet plugin (present=" << plugin_present
+                                << ", marker=" << marker << "), Bambu CDN download path available";
+}
+
+// Ultra (plug-in guards): the guarded way in to Account > Login. Bambu cloud sign-in ends with the
+// system browser hitting our loopback on 13650 and the ticket being handed to the network plug-in;
+// with no agent loaded there is nothing to hand it to and the user just watches the sign-in page
+// fail. Offer the plug-in instead - or, when our own plug-in is already installed, ask for the
+// restart that actually loads it (never the CDN download, which would overwrite ours).
+void GUI_App::ShowUserLoginGuarded()
+{
+    const LoginGuardAction action = plugin_guard_decision(
+        /*plugin_present*/ m_ultranet_plugin_installed, // marker+dll already folded together
+        /*ultranet_marker*/ m_ultranet_plugin_installed,
+        app_config ? app_config->get_bool("installed_networking") : false,
+        getAgent() != nullptr);
+
+    if (action == LoginGuardAction::ShowLogin) {
+        ShowUserLogin();
+        return;
+    }
+
+    if (action == LoginGuardAction::RestartRequired) {
+        BOOST_LOG_TRIVIAL(info) << "[UltraNet] login guard armed: no agent but UltraNet is installed, asking for a restart";
+        MessageDialog dlg(nullptr,
+                          _L("The network plug-in is installed but not loaded yet. Please restart EdgeSlicer and sign in again."),
+                          _L("Sign in to Bambu Lab"), wxOK | wxICON_INFORMATION);
+        dlg.ShowModal();
+        return;
+    }
+
+    BOOST_LOG_TRIVIAL(info) << "[UltraNet] login guard armed: no network agent, offering the plug-in download instead of the sign-in page";
+    MessageDialog dlg(nullptr,
+                      _L("Signing in to a Bambu account needs the network plugin. Install it now?"),
+                      _L("Sign in to Bambu Lab"), wxYES_NO | wxICON_QUESTION);
+    if (dlg.ShowModal() != wxID_YES)
+        return;
+    ShowDownNetPluginDlg();
+    // After a successful install the plug-in still needs the restart before an agent exists, so
+    // the retry is the user's: the next Login click either signs in or lands on the branch above.
+    refresh_ultranet_plugin_state();
+}
+
 void GUI_App::ShowDownNetPluginDlg() {
     try {
+        // Ultra (plug-in guards): our own plug-in is installed. This dialog downloads Bambu's
+        // package from their CDN and unzips it over data_dir/plugins, which would replace it.
+        if (m_ultranet_plugin_installed) {
+            BOOST_LOG_TRIVIAL(info) << "[UltraNet] UltraNet present, Bambu CDN download disabled (download dialog suppressed)";
+            return;
+        }
         if (m_hub_managed && RemoteAccess::get().hidden()) { RemoteAccess::get().raise_attention("the network plug-in needs installing", "manual"); return; }
         auto iter = std::find_if(dialogStack.begin(), dialogStack.end(), [](auto dialog) {
             return dynamic_cast<DownloadProgressDialog *>(dialog) != nullptr;
@@ -4557,7 +4656,9 @@ void GUI_App::sm_request_user_logout()
 //BBS
 void GUI_App::request_login(bool show_user_info)
 {
-    ShowUserLogin();
+    // Ultra (plug-in guards): the menu/topbar Login action. Guarded so a fresh install with no
+    // plug-in offers the download instead of a sign-in page that cannot complete.
+    ShowUserLoginGuarded();
 
     if (show_user_info) {
         get_login_info();
@@ -4630,7 +4731,9 @@ bool GUI_App::check_login()
     }
 
     if (!result) {
-        ShowUserLogin();
+        // Ultra (plug-in guards): the single choke point every cloud action on the Device tab goes
+        // through. With no agent this is exactly the case the guard exists for.
+        ShowUserLoginGuarded();
     }
     return result;
 }
@@ -4827,7 +4930,12 @@ std::string GUI_App::handle_web_request(std::string cmd)
                 }
             }
             else if (command_str.compare("begin_network_plugin_download") == 0) {
-                CallAfter([this] { wxGetApp().ShowDownNetPluginDlg(); });
+                // Ultra (plug-in guards): the home-page banner. ShowDownNetPluginDlg() refuses on
+                // its own when our plug-in is installed; logging here says which entry point asked.
+                if (m_ultranet_plugin_installed)
+                    BOOST_LOG_TRIVIAL(info) << "[UltraNet] UltraNet present, Bambu CDN download disabled (home-page banner ignored)";
+                else
+                    CallAfter([this] { wxGetApp().ShowDownNetPluginDlg(); });
             }
             else if (command_str.compare("get_web_shortcut") == 0) {
                 if (root.get_child_optional("key_event") != boost::none) {

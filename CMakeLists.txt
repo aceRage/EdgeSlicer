@@ -940,6 +940,18 @@ if (WIN32)
     # sign-in falls back to the Bambu CDN download.
     if (ULTRANET_BIN_DIR AND EXISTS "${ULTRANET_BIN_DIR}/bambu_networking.dll")
         install(DIRECTORY "${ULTRANET_BIN_DIR}/" DESTINATION "./ultranet" FILES_MATCHING PATTERN "*.dll")
+        # The marker that tells our plugin apart from Bambu's (the library name is the same). The
+        # first-run copier carries it into <data dir>/plugins, where every Bambu CDN download and
+        # update prompt is gated on it - see src/slic3r/GUI/PluginGuard.hpp. Ship the sidecar's own
+        # copy when it has one, otherwise generate it.
+        if (EXISTS "${ULTRANET_BIN_DIR}/ultranet.txt")
+            install(FILES "${ULTRANET_BIN_DIR}/ultranet.txt" DESTINATION "./ultranet")
+        else()
+            file(WRITE "${CMAKE_BINARY_DIR}/ultranet.txt"
+                 "UltraNet: EdgeSlicer's own network plug-in. Do not replace with the Bambu CDN package.
+")
+            install(FILES "${CMAKE_BINARY_DIR}/ultranet.txt" DESTINATION "./ultranet")
+        endif()
         message(STATUS "EdgeSlicer: shipping the network plugin from ${ULTRANET_BIN_DIR}")
     endif()
     set(CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS_SKIP TRUE)
