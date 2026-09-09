@@ -3080,6 +3080,23 @@ bool GUI_App::on_init_inner()
                 }
                 BOOST_LOG_TRIVIAL(info) << "[UltraNet] installed bundled network plugin to " << pf.string();
             }
+        } else if (!fs::exists(pf / kUltraNetMarkerName)) {
+            // The plug-in is already there but carries no marker: an install that predates the
+            // marker (2.3.7.0 shipped the DLLs alone) or a hand copy. If it is byte-identical to
+            // the sidecar we ship, it is ours - mark it so the CDN paths leave it alone.
+            fs::path exe_dir = fs::path(wxStandardPaths::Get().GetExecutablePath().ToUTF8().data()).parent_path();
+            fs::path bundled = exe_dir / "ultranet" / "bambu_networking.dll";
+            boost::system::error_code ec;
+            if (fs::exists(bundled) && fs::file_size(bundled, ec) == fs::file_size(pf / "bambu_networking.dll", ec)) {
+                boost::nowide::ifstream a(bundled.string().c_str(), std::ios::binary), b((pf / "bambu_networking.dll").string().c_str(), std::ios::binary);
+                std::string sa((std::istreambuf_iterator<char>(a)), std::istreambuf_iterator<char>());
+                std::string sb((std::istreambuf_iterator<char>(b)), std::istreambuf_iterator<char>());
+                if (!sa.empty() && sa == sb) {
+                    boost::nowide::ofstream marker((pf / kUltraNetMarkerName).string().c_str());
+                    marker << "UltraNet: EdgeSlicer's own network plug-in. Do not replace with the Bambu CDN package." << std::endl;
+                    BOOST_LOG_TRIVIAL(info) << "[UltraNet] existing plug-in matches the bundled one; marker written";
+                }
+            }
         }
     } catch (...) {}
 
