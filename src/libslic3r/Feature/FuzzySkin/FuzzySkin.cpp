@@ -1,3 +1,4 @@
+#include <cmath>
 #include <random>
 
 #include "libslic3r/Algorithm/LineSplit.hpp"
@@ -110,18 +111,15 @@ void fuzzy_polyline(Points& poly, bool closed, coordf_t slice_z, const FuzzySkin
 }
 
 // Thanks Cura developers for this function.
-void fuzzy_extrusion_line(Arachne::ExtrusionJunctions& ext_lines, coordf_t slice_z, const FuzzySkinConfig& cfg)
+void fuzzy_extrusion_line(Arachne::ExtrusionJunctions& ext_lines, coordf_t slice_z, coordf_t layer_height, const FuzzySkinConfig& cfg)
 {
     std::unique_ptr<noise::module::Module> noise = get_noise_module(cfg);
 
     const double min_dist_between_points = cfg.point_distance * 3. / 4.; // hardcoded: the point distance may vary between 3/4 and 5/4 the supplied value
     const double range_random_point_dist = cfg.point_distance / 2.;
-    // Ultra fix: this floor is applied to SCALED widths, so it must be a scaled value.
-    // The previous raw 0.01 (four orders of magnitude below SCALED_EPSILON) allowed
-    // negative noise excursions to clamp junction widths to effectively zero,
-    // producing degenerate near-zero-flow segments that print as distinct dots on
-    // outer walls in Extrusion/Combined mode. Matches BambuStudio's fixed port.
-    const double min_extrusion_width = scaled<double>(0.01);
+    // ExtrusionJunction::w is a scaled coord_t, so this floor must be scaled too.
+    // Flow::rounded_rectangle_extrusion_spacing() requires width > height * (1 - 0.25 * PI); keep 5% above it.
+    const double min_extrusion_width = scaled<double>(layer_height * (1. - 0.25 * M_PI) * 1.05);
     double dist_left_over = random_value() * (min_dist_between_points / 2.); // the distance to be traversed on the line before making the first new point
 
     auto* p0 = &ext_lines.front();
@@ -345,12 +343,13 @@ Polygon apply_fuzzy_skin(const Polygon& polygon, const PerimeterGenerator& perim
 void apply_fuzzy_skin(Arachne::ExtrusionLine* extrusion, const PerimeterGenerator& perimeter_generator, const bool is_contour)
 {
     const auto  slice_z = perimeter_generator.slice_z;
+    const auto  layer_height = perimeter_generator.layer_height;
     const auto& regions = perimeter_generator.regions_by_fuzzify;
     if (regions.size() == 1) { // optimization
         const auto& config  = regions.begin()->first;
         const bool  fuzzify = should_fuzzify(config, perimeter_generator.layer_id, extrusion->inset_idx, is_contour);
         if (fuzzify)
-            fuzzy_extrusion_line(extrusion->junctions, slice_z, config);
+            fuzzy_extrusion_line(extrusion->junctions, slice_z, layer_height, config);
     } else {
         // Find all affective regions
         std::vector<std::pair<const FuzzySkinConfig&, const ExPolygons&>> fuzzified_regions;
@@ -372,17 +371,17 @@ void apply_fuzzy_skin(Arachne::ExtrusionLine* extrusion, const PerimeterGenerato
                 // Fuzzy splitted extrusion
                 if (std::all_of(splitted.begin(), splitted.end(), [](const Algorithm::SplitLineJunction& j) { return j.clipped; })) {
                     // The entire polygon is fuzzified
-                    fuzzy_extrusion_line(extrusion->junctions, slice_z, r.first);
+                    fuzzy_extrusion_line(extrusion->junctions, slice_z, layer_height, r.first);
                 } else {
                     const auto                              current_ext = extrusion->junctions;
                     std::vector<Arachne::ExtrusionJunction> segment;
                     segment.reserve(current_ext.size());
                     extrusion->junctions.clear();
 
-                    const auto fuzzy_current_segment = [&segment, &extrusion, &r, slice_z]() {
+                    const auto fuzzy_current_segment = [&segment, &extrusion, &r, slice_z, layer_height]() {
                         extrusion->junctions.push_back(segment.front());
                         const auto back = segment.back();
-                        fuzzy_extrusion_line(segment, slice_z, r.first);
+                        fuzzy_extrusion_line(segment, slice_z, layer_height, r.first);
                         extrusion->junctions.insert(extrusion->junctions.end(), segment.begin(), segment.end());
                         extrusion->junctions.push_back(back);
                         segment.clear();
