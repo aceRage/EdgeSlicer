@@ -5333,11 +5333,13 @@ void Print::_make_wipe_tower()
         m_wipe_tower_data.depth      = wipe_tower.get_depth();
         m_wipe_tower_data.width      = wipe_tower.width();
         m_wipe_tower_data.brim_width = wipe_tower.get_brim_width();
+        // The Type1 (Bambu-style) tower ignores the cone wall option, exactly as the pre-slice
+        // estimate (estimate_wipe_tower_first_layer_outline) does, so the two footprints agree.
         m_wipe_tower_data.construct_mesh(wipe_tower.width(), wipe_tower.get_depth(), wipe_tower.get_height(), wipe_tower.get_brim_width(),
                                          m_config.wipe_tower_wall_type.value == WipeTowerWallType::wtwRib,
                                          float(m_config.wipe_tower_rib_width), float(m_config.wipe_tower_extra_rib_length),
                                          m_config.wipe_tower_fillet_wall,
-                                         m_config.wipe_tower_wall_type.value == WipeTowerWallType::wtwCone ? float(m_config.wipe_tower_cone_angle) : 0.f);
+                                         0.f);
 
         // Unload the current filament over the purge tower.
         coordf_t layer_height = m_objects.front()->config().layer_height.value;
