@@ -224,3 +224,142 @@ single-wall cone or the classic overhang-angle test) once with `fuzzy_skin_skip_
 and once `= true`, same fuzzy settings otherwise; compare the printed overhang region for curling/
 stringing with the option on vs. off, and confirm the fuzzed (supported) region still looks
 textured on both.
+
+## 8. Implemented
+
+Branch `feat/fuzzy-skin-skip-overhangs`, off `origin/feat/ultra-preferences` at 1afca41fab. The
+option shipped as researched above: one bool, no new threshold, the support test run inside the
+fuzz pass against the polygons the overhang split already builds.
+
+### Hook points
+
+| What | Where |
+| --- | --- |
+| Option definition | `src/libslic3r/PrintConfig.cpp`, after `fuzzy_skin_persistence` |
+| Config member | `src/libslic3r/PrintConfig.hpp`, `PrintRegionConfig` |
+| GUI line | `src/slic3r/GUI/Tab.cpp`, Fuzzy Skin optgroup, after `fuzzy_skin_first_layer` |
+| GUI dependency | `src/slic3r/GUI/ConfigManipulation.cpp` - shown only when `fuzzy_skin != none` **and** `detect_overhang_wall` is on, since it reuses that detection's polygons |
+| Fuzz config | `FuzzySkinConfig::skip_overhangs` (`PerimeterGenerator.hpp`), in `operator==` and the hash, populated in `group_region_by_fuzzify` |
+| Support region | `fuzzy_skip_overhangs_wanted()` / `fuzzy_support_region()` in `FuzzySkin.cpp` |
+| Classic fuzz | `fuzzy_polyline(..., const Polygons* support)` |
+| Arachne fuzz | `fuzzy_extrusion_line(..., const Polygons* support)` |
+
+The support region is what section 2 predicted, per generator:
+
+* **Classic** - `m_lower_polygons_series` / `m_external_lower_polygons_series` index 0: the lower
+  slices offset by `-0.5*width + 0.5*(end-start)/(overhang_sampling_number-1)`, about -0.17 mm on a
+  0.42 mm outer wall over a 0.4 nozzle. That is the same set `traverse_loops` clips the loop against
+  to decide `erOverhangPerimeter`, so the fuzz boundary and the role boundary are one boundary.
+* **Arachne** - `process_arachne` never fills the width-indexed series (only `process_classic`
+  does), so the Arachne overload falls back to `lower_slices_polygons()`, the `+nozzle/2` growth its
+  own `clip_extrusion` overhang split uses. Same principle, one definition of "overhang" per
+  generator, shared with the role assignment.
+
+`fuzzy_skip_overhangs_wanted()` is the single gate. It returns false - so the fuzz functions get a
+null `support` and take their original code path verbatim - when the option is off for every
+fuzzified region, when `lower_slices == nullptr`, when `detect_overhang_wall` is off, or when
+`layer_id <= raft_layers`. That last one is the first-layer rule: the first printed layer sits on
+the bed and is never an overhang.
+
+### The blend
+
+`support_blend_factors()` turns the per-sample supported/unsupported flags into a factor in [0, 1]
+that multiplies the displacement (and, in Extrusion/Combined mode, the width delta):
+
+* 0 at every unsupported sample.
+* A linear ramp back to 1 over `kBlendSamples + 1 = 3` samples on either side of an unsupported run,
+  computed as a two-sweep distance transform over the sample sequence - O(n), wrapping for a closed
+  loop, clamped at the ends for an open segment from the paint splitter.
+* A supported run shorter than the ramp never reaches 1, the graceful degradation the risk list
+  wanted for short overhang runs and small point distances.
+
+Sampling cadence is untouched: an unsupported sample is emitted at its exact un-jittered position,
+never dropped, so segment length statistics, the `while (out.size() < 3)` fallback and the Arachne
+closing-segment trim all see the same number of points as before. Seam handling is unchanged - the
+endpoint connect and the closing-segment spacing trim still run after the displacement pass, exactly
+where they ran before.
+
+In Extrusion and Combined mode an unsupported junction gets neither a position shift nor a width
+change: over open air a fatter or thinner bead reaches past the wall as far as a sideways shift
+does, so both are held.
+
+### Proofs
+
+**Bar A (option OFF) - passed.** This branch's CLI against a build of its own base commit
+(1afca41fab, a second worktree), four projects, each sliced into its own scratch copy of the control
+data dir: OrcaToleranceTest plain, the overhang pyramid classic, the same under Arachne, and the
+same with `detect_overhang_wall` forced on. All four are **identical apart from the timestamp line
+and the single new `; fuzzy_skin_skip_overhangs = 0` line in the config block** - the whole diff, in
+every case, is those two lines.
+
+The comparison is against the branch's own base, not against the live install: the install is a
+different branch (e72923e917) whose G-code differs from this base for reasons unrelated to this
+change.
+
+> **Fuzzy skin is not deterministic on this codebase**, so a Bar A over a project that actually
+> fuzzes is impossible in principle. `FuzzySkin.cpp:random_value()` seeds from `std::random_device`
+> (falling back to a hash of the thread id), and the same baseline exe run twice on the same
+> fuzzy-skin project differs by ~27,600 G-code lines. That was measured, not assumed. The Bar A
+> above therefore proves the new code is inert on every path that does not fuzz - which is every
+> existing project that does not already use fuzzy skin - and the ON-mode behaviour is proved by the
+> unit test and the demo instead.
+
+**Unit test** `tests/fff_print/test_fuzzy_skin_overhangs.cpp`, added to
+`tests/fff_print/CMakeLists.txt`. 39 assertions, green on three consecutive runs (worth stating,
+given the RNG above). Model: the inverted pyramid this spec suggests, a 10x10 mm foot on the bed
+widening to 38x38 mm over 5 mm - about 70 degrees from vertical, so each 0.2 mm layer steps ~0.56 mm
+past the one below and its whole wall is unsupported, while the first layer sits on the bed and is
+not. Fuzzy skin thickness 0.3, point distance 0.8, `fuzzy_skin_first_layer` on so the first layer is
+the control. Six cases: fuzzy skin off entirely (the zero), the option OFF, the option ON for
+external walls, ON for all walls, and ON under Arachne for both fuzzy modes. Each measures the
+"waviness" of a layer's outer wall - the mean distance of its points from its own bounding
+rectangle, which the model's square cross-section makes a direct read of the displacement - plus a
+95th-percentile point-spacing bound that excludes a hard step at a blend boundary.
+
+Two things the test taught, both recorded in its comments because they are traps for the next
+person:
+
+* **45 degrees is too shallow to test this.** At 45 degrees a 0.2 mm layer steps out 0.2 mm, which
+  is *smaller than the support tolerance itself*, so no wall point is ever unambiguously
+  unsupported.
+* **A large single-step cantilever does not work either.** On the one layer where a wide slab first
+  appears over a narrow column, the wall comes out of the generator with the raw slice polygon's ~30
+  points rather than a resampled path: that area is handled as a bridge and its wall never reaches
+  the fuzz pass, so there is nothing there for the option to act on.
+
+**Demo** - `<scratchpad>/fuzzy_overhang_demo/`, the pyramid sliced with the option off and on by the
+same exe, with `NOTES.md` giving the per-layer figures and the `; CHANGE_LAYER` line numbers to
+compare. The result is unambiguous: **layer 1 is identical (10 extrusion moves either way)** - the
+bed is not an overhang - and from layer 4 up the ON file carries ~60-65% of the OFF file's moves
+(5387 vs 3232 overall). Reading the ON file's outer wall on a high layer shows four moves on four
+exact coordinates: the wall over air is exactly the rectangle it would have been without fuzzy skin.
+
+**Suites.** `libslic3r_tests`: 783 cases, 781 passed, 2 failed-as-expected. `fff_print_tests`: 9 of
+18 cases fail - and the **baseline worktree fails the identical 9 cases and 23 assertions in the
+identical files** (`test_data`, `test_flow`, `test_gcodewriter`, `test_model`, `test_print`,
+`test_printgcode`, `test_skirt_brim`), so all of them are pre-existing. They are the bare-filename
+export bug already recorded in `test_over_support_surfaces.cpp`. Note that `test_skirt_brim`'s
+SIGSEGV aborts the default run before it reaches the new case, so the new test is run by tag
+(`fff_print_tests.exe "[FuzzySkinOverhangs]"`) - which is how the three green runs above were taken.
+
+### Unverified
+
+* **No physical print.** The owner print test in section 7 has not been run. Nothing here shows the
+  curling actually goes away on a real overhang - only that the toolpath over air is the un-fuzzed
+  one.
+* **Nobody clicked the checkbox.** The Tab.cpp line and the ConfigManipulation dependency compile
+  and follow the neighbouring fuzzy options' pattern, but the GUI was never launched and the option
+  was never toggled by hand. Every ON-mode result above comes from the CLI or the unit test setting
+  the key directly.
+* **Perf was not profiled.** The per-sample `contains()` against the lower slices is the cost
+  section 6 flagged. It runs only with the option on, and against the cached polygon set, but no
+  timing was taken; the bbox pre-filter / AABB tree mitigation remains a follow-up.
+* **Extrusion and Combined modes are reasoned, not measured.** The width-hold is implemented and
+  compiles, but every assertion above is in Displacement mode; the other two need a width-aware
+  yardstick.
+* **The unit test's ON-mode tolerance is 0.1 mm, not 1e-3.** The un-fuzzed control does meet 1e-3,
+  and the demo G-code shows the wall over air collapsing to exact coordinates, but the measured
+  ON-mode residual on an overhang layer is ~0.05 mm. That is understood to be the blend ramp around
+  the seam junction - real, wanted displacement on a wall the overhang split has cut down to a dozen
+  points - rather than surviving jitter, which would be an order of magnitude larger. It was
+  reasoned from the numbers and the demo, not isolated with a dedicated experiment.

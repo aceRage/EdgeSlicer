@@ -16,6 +16,7 @@ add_executable(${_TEST_NAME}_tests
 	test_support_material.cpp
 	test_support_groups.cpp
 	test_over_support_surfaces.cpp
+	test_fuzzy_skin_overhangs.cpp
 	test_offset_layers.cpp
 	test_seam_position.cpp
 	test_tree_support_determinism.cpp

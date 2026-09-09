@@ -3372,6 +3372,18 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloat(0.5));
 
+    def = this->add("fuzzy_skin_skip_overhangs", coBool);
+    def->label = L("Skip fuzzy skin on overhangs");
+    def->category = L("Others");
+    def->tooltip = L("Do not apply fuzzy skin to the parts of a wall that are not supported by the layer below. "
+                     "Overhanging and bridging wall segments keep their original, unfuzzed path, so the jitter "
+                     "does not push extrusion out into open air where it would curl. The displacement is faded "
+                     "out over a couple of sample points on either side of the boundary, so there is no step "
+                     "between the fuzzed and the clean part of the wall. The first layer is never treated as an "
+                     "overhang.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
     def = this->add("filter_out_gap_fill", coFloat);
     def->label = L("Filter out tiny gaps");
     def->category = L("Layers and Perimeters");

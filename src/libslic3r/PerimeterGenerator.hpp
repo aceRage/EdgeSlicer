@@ -21,6 +21,12 @@ struct FuzzySkinConfig
     int           noise_octaves;
     double        noise_persistence;
     FuzzySkinMode mode;
+    // Fuzzy skin over overhangs: hold the sampled points at their un-jittered position wherever the
+    // wall is not carried by the layer below. Off by default; when it is off the fuzz functions take
+    // their original code path verbatim (they early-return before any support work), which is what
+    // keeps the off-mode G-code byte-identical.
+    // docs/superpowers/specs/2026-09-09-fuzzy-skin-overhang-research.md
+    bool          skip_overhangs { false };
 
     bool operator==(const FuzzySkinConfig& r) const
     {
@@ -32,7 +38,8 @@ struct FuzzySkinConfig
             && noise_scale == r.noise_scale
             && noise_octaves == r.noise_octaves
             && noise_persistence == r.noise_persistence
-            && mode == r.mode;
+            && mode == r.mode
+            && skip_overhangs == r.skip_overhangs;
     }
 
     bool operator!=(const FuzzySkinConfig& r) const { return !(*this == r); }
@@ -52,6 +59,7 @@ template<> struct hash<Slic3r::FuzzySkinConfig>
         boost::hash_combine(seed, std::hash<double>{}(c.noise_scale));
         boost::hash_combine(seed, std::hash<int>{}(c.noise_octaves));
         boost::hash_combine(seed, std::hash<double>{}(c.noise_persistence));
+        boost::hash_combine(seed, std::hash<bool>{}(c.skip_overhangs));
         return seed;
     }
 };
