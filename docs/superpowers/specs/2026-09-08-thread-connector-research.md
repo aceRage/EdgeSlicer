@@ -431,3 +431,270 @@ at the shipped `slice_closing_radius` default.
    before/after proof Flexi ran (§7 of that spec, the `slice_closing_radius` 0.049 → 0.25 → 1.0
    table).
 6. Note any seam-related catch point while turning; correlate with the seam setting used per §5.
+
+---
+
+# Implemented (phases 1+2)
+
+Branch `feat/thread-connector` off `feat/ultra-preferences`. Both phases landed in one pass:
+`FlexiJointKind::Thread` (4) and `FlexiJointKind::Bayonet` (5), appended after `Hinge` (3) so no
+existing enumerator renumbers - the 3MF stores the integer.
+
+**Where the research was wrong, and what shipped instead.** The research recommended a new
+`CutConnectorType::Thread` alongside Plug/Dowel/Snap/Flexi. That is not what was built: both
+kinds are new *Flexi kinds*, because the cut pipeline
+(`Cut::perform_with_flexi_joints()` in `CutUtils.cpp`) is already kind-agnostic - it asks for
+`flexi_lower_bodies` / `flexi_upper_bodies` / `flexi_lower_reliefs` / `flexi_upper_reliefs` and
+unions/subtracts whatever comes back. Adding a kind cost **zero** lines in `CutUtils.cpp`; adding
+a connector type would have meant a parallel pipeline. The research's reason for keeping them
+apart (a thread "does not want Flexi's Gap") turned out to be a *parameter default* question, not
+a structural one: `flexi_default_gap()` returns 0.4 mm for the twist kinds - the saw kerf that
+keeps the faces from fusing - against 0.6 for the revolved kinds and 1.5 for the chain link.
+
+## Parameters and defaults
+
+Shared by both kinds (`FlexiJointParams`, `FlexiJoint.hpp`):
+
+| Field | Meaning | Default |
+|---|---|---|
+| `thread_major_dia` | major thread diameter / bayonet lug-circle diameter | 12 mm; auto = 0.7 x the cut section's inscribed radius, capped so the bore plus its 1.2 mm wall stays inside the section |
+| `thread_lid_upper` | which half carries the male fastener (the "cap") | true (upper) |
+| `clearance` | the fit, all round | 0.25 mm, floored at `flexi_clearance_floor()` |
+| `gap` | the cut's own thickness | 0.4 mm |
+| `rotation` | thread START ANGLE / first lug's angle | 0, range 0-360 |
+
+Thread only:
+
+| Field | Meaning | Default |
+|---|---|---|
+| `thread_pitch` | axial rise per turn | **6 mm** |
+| `thread_starts` | intertwined strands, 1-4 | 2 |
+| `thread_turns` | revolutions of engagement | 1.25 |
+| `thread_left_hand` | hand | false (right) |
+| `thread_lead_turns` | lead-in taper at EACH end, in turns | 0.5 |
+
+Bayonet only:
+
+| Field | Meaning | Default |
+|---|---|---|
+| `bayonet_lugs` | lugs, 2-4 | 3 |
+| `bayonet_lug_height` | radial stand-out | 1.6 mm (auto: 0.14 x major dia) |
+| `bayonet_lug_thickness` | axial height of the lug | 2.4 mm (auto: 0.20 x major dia) |
+| `bayonet_lug_arc` | angular width of one lug | 30 deg |
+| `bayonet_lock_angle` | how far the lid turns to lock | 75 deg |
+| `bayonet_entry_depth` | axial run of the entry channel | 4 mm |
+| `bayonet_detent` | detent bump height, 0 disables | 0.35 mm |
+
+### THE PITCH IS NOT THE CREST SPACING - the one thing the research got materially wrong
+
+The research's whole pitch analysis (its table of "pitch vs. layer height", the "pitch >= 2 mm"
+floor, the depth = 0.3-0.4 x pitch convention) is written for a **single-start** thread, where the
+pitch and the crest-to-crest distance are the same number. They are not the same on a multi-start
+thread: strand *s* sits `pitch x s/starts` above strand 0, so an N-start thread puts **N crests in
+every pitch** and the spacing is `pitch / starts` (`thread_crest_spacing()`).
+
+Every printability rule the research states is really a rule about the **spacing**, and applying
+them to the pitch on the recommended 2-start default gives a thread half as coarse as intended.
+Worse, it is not merely cosmetic: the female groove is the male profile grown by the clearance, so
+it is `2C/cos(30 deg) + 0.6C` taller than the thread - and at the research's recommended 3 mm
+pitch with 2 starts the groove's own turns **overlap and merge into one plain annular cavity**.
+That "thread" holds nothing at all: the lid pulls straight off. This was caught by the pull-out
+test, not by inspection.
+
+So: `thread_depth()` caps itself so that the profile plus the groove's growth fits inside the
+crest spacing with a tenth of it left as wall, the crest flat is `0.25 x spacing` (not
+`0.25 x pitch`), auto-sizing picks a *spacing* of `0.25 x major dia` clamped to 2-6 mm and then
+multiplies by the start count, and the **default pitch is 6 mm** because the default start count
+is 2 - which gives the 3 mm crest spacing the research actually recommends, done up in half a
+turn. `flexi_validate()` refuses the case where even the smallest buildable depth will not fit.
+
+## Geometry
+
+**`its_make_helical_sweep()`** (`TriangleMesh.{hpp,cpp}`) - the new primitive. A closed 2D profile
+in the strand's own (radial, axial) frame swept along a helix about +Z: `radius`, `pitch`,
+`starts`, `turns`, `segments_per_turn`, `left_hand`, `phase_deg`, `lead_frac`. One mesh per start.
+As the research predicted, it is *simpler* than `its_make_swept_loop()`: an open helical path has
+no residual twist to spread, because every step is the same rotation about +Z plus the same rise.
+Each strand is watertight and single-component; `lead_frac` tapers the profile's **radial** extent
+to zero over that fraction of a turn at each end, which is both the lead-in chamfer and what
+closes the ribbon's ends without a cap mesh (`lead_frac == 0` caps them flat instead).
+
+One trap, and it cost a debugging cycle: turning strand *s* by `360/starts` **and** lifting it by
+`pitch/starts` cancels out - the helix rises `pitch` per turn, so the turn drops it by exactly
+what the lift restores, and all N strands land on top of each other. Strands are lifted and **not**
+turned.
+
+**Male thread** = core cylinder at the minor radius, from a little above the lid face down past
+the band, union N helical strands.
+
+**Female relief** = bore + groove, and both of those differ from the research's plan:
+
+* **The bore is `minor radius + clearance`, not `major + clearance`.** A bore wide enough to
+  swallow the male *crest* swallows the groove with it - the groove spans from the minor radius
+  out to the major one - and the female half comes out a plain tube with no thread in it.
+* **The groove is a dilation of the profile, not a radial shift of it.** The research says to
+  "sweep the same profile at radius R + clearance". That gives *zero* clearance along the flanks:
+  a trapezoid slid radially still has both flanks on the same pair of parallel lines. The groove
+  is `thread_profile_grown(p, 0, C)` - each edge moved out along its own normal, which lengthens
+  both flats by `C / cos(30 deg)` - on the **same** centreline. The root corners need a further
+  `0.6 x C` of flat, because a true offset rounds a convex corner with an arc and a four-point
+  polygon cannot carry one; the mitre falls short at the sharp (60 deg) root corners specifically.
+  It costs nothing: that flat sits inside the bore anyway.
+* **The groove runs all the way out of the mouth.** It is swept `turns + 0.5` turns *above* the
+  thread as well as 0.5 below. A groove that only clears where the thread *sits* leaves a solid
+  rim between itself and the bore mouth, and the lid's topmost coil jams against it on the way
+  out - the lid screws in and will not screw out. A real tapped hole has no such rim.
+* The research's "meridional-offset shortcut does not apply" was right, and the reason it gives
+  is right. Its proposed replacement was not.
+
+**Bayonet.** Male = plug cylinder at `major/2 - lug height` plus N annular-sector lugs. Female =
+bore (`plug radius + C`) plus, per lug, an L-shaped slot: an axial entry channel from the mouth
+down to the track, then the track itself. **The rest pose is LOCKED** - the lugs are built where
+they sit when the lid is done up, so a cut comes out of the gizmo as a closed container - which
+puts the entry channel a lock angle *back* from them.
+
+**The detent cannot be a body.** The cut pipeline unions each half's bodies in *before* it
+subtracts its reliefs, so a bump added as a body and then crossed by the very track that runs past
+it is carved away again - it never bit at all on the first attempt. It is left **standing** by the
+relief instead: the track is cut as two sectors with an uncut sliver between them, radially
+outboard of the lug's path, and that sliver is the female half's own material. Keep it narrow (6
+deg, capped at `0.12 x lock angle`): the lug is `lug_arc` wide, so it is in contact with a bump of
+*b* degrees over `arc + b` degrees of travel, and a wide bump is a brake rather than a click.
+
+**Footprint** (`flexi_footprint_corners`, used by `GLGizmoCut3D::is_outside_of_cut_contour()`): a
+60-gon on the circle of `major/2 + clearance + 1.2 mm` - the **female bore's outer wall**, which is
+the widest thing either kind puts on the cut plane, not the male thread. `flexi_outer_extent()`
+returns that radius for both kinds, so the disc branch of the footprint helper is reached with the
+right number and no new branch was needed.
+
+## Panel
+
+Both kinds in the Flexi kind combo (`m_flexi_kinds`, indexed by the enum). Per-kind fields, with
+everything irrelevant hidden the way the hinge does it: Major diameter (auto-sizable) for both;
+Pitch / Starts / Turns / Lead-in / Left-hand for Thread; Lugs / Lug height / Lug thickness / Lug
+width / Lock angle / Entry depth / Detent for Bayonet; Lid side and Rotation for both. Tilt
+allowance is hidden for both (it is a rocking allowance for the revolved kinds). Rotation's
+tooltip is type-conditional: "thread start angle" vs "where the first lug sits".
+
+**Printability warning** - `twist_axis_needs_care()`, the exact mirror of `hinge_axis_needs_care()`
+and warned the same way (orange text, never a block): the hinge wants its pin axis *horizontal*,
+a twist lock wants its own axis *vertical*, and both are read off the cut plane's world
+orientation (`flexi_twist_axis_world()` returns `m_rotation_m.linear() * UnitZ`). Fires past about
+6 degrees off vertical.
+
+## 3MF
+
+14 new attributes on `<connector>` in `Metadata/cut_information.xml`, written unconditionally and
+read with `FlexiJointParams`'s own defaults as the fallback, so a file written before them loads
+exactly as it used to. `thread_starts` and `bayonet_lugs` are clamped on read (they drive loops).
+**The kind clamp was widened from `<= Hinge` to `<= Bayonet`** - without that, every saved Thread
+or Bayonet would silently reload as a Double ring, which the round-trip test pins first.
+
+## Proofs
+
+`tests/libslic3r/test_flexi_joint.cpp`, 14 new cases (52 in the file, all passing). The full
+`libslic3r_tests` suite: **762 cases, 760 passed, 2 failed as expected** (the two known
+pre-existing failures), 104,713 assertions.
+
+* `its_make_helical_sweep` - watertight (`its_num_open_edges == 0`) and **single-component** per
+  strand at 1/2/4 starts, equal volumes across strands, degenerate inputs return empty.
+* Hand - a right-hand helix's quarter-turn point lands at +Y, a left-hand one at -Y.
+* Thread bodies watertight; the groove is strictly fatter and longer than the thread; the grown
+  profile is wider in **both** directions than the plain one (the dilation-vs-shift distinction).
+* **Rest pose**: intersection volume of the two cut halves == 0 at Gap 0.4, clearance 0.25.
+* **Clearance == the parameter**: measured on the profiles, per **edge** - all four faces (crest,
+  root, both flanks) clear by >= C - and per corner, >= C too once the root flat's extra extension
+  is in. Measured face-to-face rather than mesh-to-mesh on purpose, and the test says why: the two
+  halves share a boolean-generated boundary and carry coincident vertices along every re-triangulated
+  seam, so a vertex-to-surface distance there reports microns and means nothing.
+* **It unscrews**: 9 poses along the coupled helical motion (rotate by theta, rise by
+  `pitch x theta/2pi`), intersection 0 at every one. The lead here is `thread_pitch`, not
+  `pitch x starts` - the textbook formula is written where "pitch" means the crest spacing.
+* **It holds**: pulled straight up without turning, by a range of fractions of the crest spacing,
+  it fouls the groove. This is the test that caught the merged-groove bug.
+* **Lid side**: `thread_lid_upper = false` mirrors the whole assembly, the male thread becomes the
+  lower half's body, and the lid still unscrews cleanly downward (hand flips back with the mirror).
+* **Rotation is the start angle**: the first strand's lowest ring turns by 90 deg when Rotation
+  does; a rotated thread still cuts and still holds.
+* Bayonet: bodies watertight, lugs reach exactly the major radius; cut halves clear at the locked
+  rest pose and the faces are a Gap apart; **the turn** (7 poses along the free part of the track,
+  clear), **the entry** (7 poses lifting out at the entry angle, clear), **the lock** (pulling up
+  at the locked angle collides - which IS the mechanism), and the **detent** (walking all 21 poses
+  of the track: the plain track is clear end to end, the detented one is not, and it bites over 1
+  to 14 poses, not the whole track).
+* Guards: 8 thread refusals, 8 bayonet refusals, the crest-spacing invariant, the gap-closing
+  guard at the 0.049 default and at 0.2, the twist-axis warning either side of vertical, auto
+  sizing at inscribed radii 6/10/25 for both kinds, and the footprint being a circle of the bore's
+  outer wall that fits the 10 mm test cylinder.
+* **3MF round trip** for both kinds with every new field non-default, asserting the kind survives
+  and then the whole struct (`q == p`), so a field added later without a 3MF attribute fails here.
+* **cereal round trip** for both kinds (the undo/redo and volume-snapshot path).
+
+## Demo
+
+`"Export the twist lock demo"` (hidden, `[.][TwistDemo]`), `SNORCA_TWIST_OUT=<dir>`. A 30 mm
+diameter, 40 mm tall cylinder cut 10 mm from the top - the pill bottle - once with a Thread and
+once with a Bayonet. Written to the scratchpad's `thread_demo/`:
+
+| File | Triangles |
+|---|---|
+| `thread_demo_lid.stl` | 4,486 |
+| `thread_demo_body.stl` | 12,276 |
+| `thread_demo.3mf` | both halves, one object |
+| `bayonet_demo_lid.stl` | 1,836 |
+| `bayonet_demo_body.stl` | 2,842 |
+| `bayonet_demo.3mf` | both halves, one object |
+
+The research's estimate was 3,000-6,000 triangles per half. The lid halves land in that range; the
+threaded *body* is twice it, because the groove is swept `turns + 0.5` turns longer than the
+thread (the run-out that lets the lid come off) and the boolean re-triangulates all of it.
+
+Thread demo parameters as the test solves them: major 21 mm, **pitch 3.75 mm** with 2 starts
+(crest spacing 1.875 mm), depth 0.426 mm, turns 1.25, threaded band 7.5 mm.
+
+**Auto sizing cannot see how deep the lid is.** It knows the cut's *width* (the inscribed radius)
+and nothing about how much material is behind the face, so on this bottle it picks a 21 mm major
+diameter and a pitch that wants a 19 mm plug - inside a 10 mm lid. The demo solves the pitch
+against the lid depth instead. This is a real gap in the UI: a user auto-sizing a Thread on a
+shallow lid gets a plug that runs out the top of it. Worth a follow-up (the gizmo does know the
+object's bounding box in the cut frame, which is what `flexi_section_inscribed_radius()` and the
+hinge's auto edge placement already use).
+
+## Unverified
+
+**Nobody has clicked anything and nothing has been printed.** Specifically:
+
+* The panel was never opened. Every field, tooltip, disable rule, kind-combo entry and the
+  printability warning is compile-checked and reasoned from the hinge's working pattern, not seen.
+* No G-code was produced. The clearance's survival through `slice_closing_radius` is *predicted*
+  by `flexi_gap_closing_conflict()` (0.25 mm clearance -> safe up to 0.125, against the 0.049 mm
+  shipped default, a 2.5x margin) and asserted in the guard test, but no slice was run and no
+  extrusion path was inspected - unlike the Flexi phase-2 work, which did.
+* Nothing was printed. Every fit claim is a Manifold volume/distance claim about the meshes.
+* The seam analysis in section 5 of this research is untouched: no seam guidance surfaces in the
+  panel, and no per-object modifier is attached (section 5's "open question" is still open).
+* `xy_hole_compensation` / `xy_contour_compensation` still silently eat into the clearance, as
+  section 5 predicts. Not surfaced, not compensated.
+* The Manifold-robustness spike the research asked for before committing to the panel was not run
+  separately - robustness was established the hard way, by the geometry tests, and the eager
+  Manifold-with-mcut-fallback (`flexi_boolean()`) was reused verbatim and never had to fall back
+  in any test.
+
+## Print checklist
+
+1. Open `thread_demo.3mf` and `bayonet_demo.3mf`, axis vertical (the cut normal is +Z as
+   exported - do not lay them on their side, which is what the panel warning is about).
+2. 0.4 mm nozzle, 0.2 mm layers. Leave `slice_closing_radius` at its 0.049 mm default for the
+   first print.
+3. Thread: the crests should be flat-topped and crisp, not blobbed. At a 1.875 mm crest spacing
+   and 0.2 mm layers that is about 9 layers per crest - thin. If it prints badly, raise the pitch
+   (which raises the spacing) rather than the depth.
+4. Thread: the lid should catch within a quarter turn (the lead-in working) and seat inside 1.25
+   turns, and should need deliberate turning to come off - not fall off, not need pliers.
+5. Bayonet: the lid should drop straight in through the channels, turn about 75 degrees, and
+   **click** past the detent. If it drags for the whole turn the bump is too wide; if it does not
+   click at all, raise `bayonet_detent`.
+6. Repeat the thread with `slice_closing_radius` raised past 0.125 mm and confirm the predicted
+   "welds shut" failure actually reproduces - the same before/after proof Flexi ran.
+7. Check the female half's bore wall (1.2 mm, fixed) has not delaminated on the body half; that
+   number is a guess from the research's "1-1.5 mm of core wall" and has never been loaded.
