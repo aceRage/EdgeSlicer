@@ -7,6 +7,7 @@
 #include "slic3r/GUI/wxExtensions.hpp"
 #include "slic3r/GUI/GUI_App.hpp"
 #include "slic3r/GUI/DeviceManager.hpp"   // Ultra P4: post-login cloud device discovery
+#include "slic3r/GUI/HttpServer.hpp"     // LOCALHOST_PORT / BBL_LOGIN_LOCALHOST_URL
 #include "sentry_wrapper/SentryWrapper.hpp"
 
 #include <wx/sizer.h>
@@ -374,11 +375,21 @@ void ZUserLogin::OnScriptMessage(wxWebViewEvent &evt)
             CallAfter([this, sequence_id] {
                 json ack_j;
                 ack_j["command"] = "get_localhost_url";
-                // Ultra P4: advertise http://localhost:<port> (NOT 127.0.0.1). Real Bambu
-                // Studio uses "localhost"; bambulab's sign-in callback validates redirect_url
-                // and rejects the 127.0.0.1 form -> the callback page 404s. localhost still
-                // resolves to our loopback server on 127.0.0.1.
-                ack_j["response"]["base_url"] = std::string("http://localhost:") + std::to_string(wxGetApp().get_http_port());
+                // Ultra: advertise http://localhost:<port> (NOT 127.0.0.1) - bambulab's
+                // sign-in callback validates redirect_url and rejects the 127.0.0.1 form.
+                // Report the port the server actually bound; it is LOCALHOST_PORT (13618),
+                // the port bambulab's third-party redirect is registered against. If the
+                // bind fell back to another port (13618 already taken by another slicer),
+                // the third-party leg cannot work at all - log it loudly so the owner sees
+                // why, instead of the user just getting a 404 in the browser.
+                auto bound_port = wxGetApp().get_http_port();
+                if (bound_port != LOCALHOST_PORT) {
+                    BOOST_LOG_TRIVIAL(error) << "thirdparty_login: loopback bound to port " << bound_port
+                                             << " instead of " << LOCALHOST_PORT
+                                             << " - third-party (Google) sign-in will fail; is another "
+                                                "Bambu Studio / OrcaSlicer running?";
+                }
+                ack_j["response"]["base_url"] = std::string(BBL_LOGIN_LOCALHOST_URL) + std::to_string(bound_port);
                 ack_j["response"]["result"] = "success";
                 ack_j["sequence_id"] = sequence_id;
                 wxString str_js = wxString::Format("window.postMessage(%s)", ack_j.dump());

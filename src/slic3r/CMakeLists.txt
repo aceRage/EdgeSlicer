@@ -763,6 +763,8 @@ set(SLIC3R_GUI_SOURCES
     Utils/Http.hpp
     Utils/InstanceID.cpp
     Utils/InstanceID.hpp
+    Utils/LoginUserAgent.cpp
+    Utils/LoginUserAgent.hpp
     Utils/json_diff.cpp
     Utils/json_diff.hpp
     Utils/minilzo_extension.cpp
