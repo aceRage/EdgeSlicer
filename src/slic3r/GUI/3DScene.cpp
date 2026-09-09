@@ -910,6 +910,19 @@ void GLVolumeCollection::render(GLVolumeCollection::ERenderType      type,
     if (disable_cullface)
         glsafe(::glDisable(GL_CULL_FACE));
 
+    // Cut gizmo, phase 2: a GHOSTED half (0 < alpha < 1) has to blend, and it
+    // has to stop writing depth - otherwise it would keep occluding the cut
+    // sheet and the far half behind it, which is precisely what ghosting is for.
+    // Only the colour-clip path can produce this, so nothing else pays for it.
+    const bool ghost_side = m_use_color_clip_plane &&
+                            ((m_color_clip_plane_alphas[0] > 0.f && m_color_clip_plane_alphas[0] < 1.f) ||
+                             (m_color_clip_plane_alphas[1] > 0.f && m_color_clip_plane_alphas[1] < 1.f));
+    if (ghost_side) {
+        glsafe(::glEnable(GL_BLEND));
+        glsafe(::glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA));
+        glsafe(::glDepthMask(GL_FALSE));
+    }
+
     for (GLVolumeWithIdAndZ& volume : to_render) {
         //CPU Frustum culling
         auto _worldAABB = volume.first->transformed_bounding_box();
@@ -953,6 +966,12 @@ void GLVolumeCollection::render(GLVolumeCollection::ERenderType      type,
         shader->set_uniform("color_clip_plane", m_color_clip_plane);
         shader->set_uniform("uniform_color_clip_plane_1", m_color_clip_plane_colors[0]);
         shader->set_uniform("uniform_color_clip_plane_2", m_color_clip_plane_colors[1]);
+        // Per-side visibility (cut gizmo, phase 2). Always set, so the shader
+        // never reads an uninitialised uniform left over from another gizmo:
+        // { 1, 1 } is two solid halves, which is what everything but the cut
+        // gizmo's Visible/Ghost/Hidden control ever asks for.
+        shader->set_uniform("color_clip_side_alpha_1", m_color_clip_plane_alphas[0]);
+        shader->set_uniform("color_clip_side_alpha_2", m_color_clip_plane_alphas[1]);
         // Curved cut: split the two halves by the sheet's height field rather
         // than by the flat plane. Texture unit 3 - 0 is taken by depth_tex in
         // the outline pass below, 1 and 2 by the environment map.
@@ -1049,6 +1068,12 @@ void GLVolumeCollection::render(GLVolumeCollection::ERenderType      type,
 
     if (disable_cullface)
         glsafe(::glEnable(GL_CULL_FACE));
+
+    if (ghost_side) {
+        glsafe(::glDepthMask(GL_TRUE));
+        if (type != ERenderType::Transparent)
+            glsafe(::glDisable(GL_BLEND));
+    }
 
     if (type == ERenderType::Transparent)
         glsafe(::glDisable(GL_BLEND));

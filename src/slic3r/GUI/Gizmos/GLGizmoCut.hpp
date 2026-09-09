@@ -196,6 +196,49 @@ class GLGizmoCut3D : public GLGizmoBase
     // so the drag stays fluid, and the panel says the face is catching up.
     bool           m_curved_cap_stale{ false };
 
+    // --- Phase 2 -----------------------------------------------------------
+    // (1) FIT. The sheet is sized to the cut's own cross-section, not to the
+    // object's bounding-box diagonal, so the handles land over the material.
+    // The fit is DEBOUNCED to the end of a plane drag: it costs a pass over the
+    // instance mesh, and a plane being dragged would pay it every frame.
+    bool           m_curved_fit_pending{ false };
+    // The plane pose the current fit was computed for, so the fit is redone when
+    // (and only when) the plane has actually moved or turned.
+    Vec3d          m_curved_fit_center{ Vec3d::Zero() };
+    Transform3d    m_curved_fit_rotation{ Transform3d::Identity() };
+    bool           m_curved_fit_valid{ false };
+    void           fit_curved_sheet_to_section(bool force = false);
+    void           request_curved_fit() { m_curved_fit_pending = true; }
+    // The instance mesh in the CUT PLANE's frame, which both the fit and the
+    // snap need. Empty when there is no selection or no raycaster yet.
+    bool           curved_instance_mesh_in_plane(indexed_triangle_set& out) const;
+
+    // (2) SIDE VISIBILITY. Per half: solid, ghosted (translucent, no depth
+    // write) or hidden (the shader discards it). Both default to Visible and
+    // are reset when the gizmo closes.
+    enum class SideVisibility : int { Visible = 0, Ghost = 1, Hidden = 2 };
+    SideVisibility m_upper_visibility{ SideVisibility::Visible };
+    SideVisibility m_lower_visibility{ SideVisibility::Visible };
+    static float   side_visibility_alpha(SideVisibility v);
+    void           apply_side_visibility();
+    void           render_side_visibility_inputs();
+
+    // (3) SNAP. Right-click-drag on a handle pulls it onto the model surface.
+    // While the button is held the handle follows the nearest surface hit under
+    // it; release commits. Shift carries the neighbours along with the Bend
+    // radius falloff, exactly as a left drag does.
+    int            m_curved_snap_ctl{ -1 };
+    bool           m_curved_snap_falloff{ false };
+    // The last hit, in the plane frame, for the crosshair the gesture draws.
+    bool           m_curved_snap_hit_valid{ false };
+    Vec3d          m_curved_snap_hit{ Vec3d::Zero() };
+    // The instance mesh in the plane frame, cached for the duration of one snap
+    // gesture: it does not change while the button is down, and re-deriving it
+    // per motion event would stall the drag on a heavy model.
+    indexed_triangle_set m_curved_snap_mesh;
+    bool           curved_snap_apply(int ctl, bool falloff);
+    void           render_curved_snap_marker();
+
     bool m_hide_cut_plane{ false };
     bool m_connectors_editing{ false };
     bool m_cut_plane_as_circle{ false };
@@ -432,6 +475,10 @@ private:
     // --- Curved cut (phase 1) ---------------------------------------------
     bool   is_curved_surface() const { return m_curved_surface && CutMode(m_mode) == CutMode::cutPlanar; }
     // Half extent the sheet needs so it covers the object under the cut plane.
+    // The FALLBACK extent, used before the first successful cross-section fit
+    // (and when the plane misses the object): the bounding-box based size phase
+    // 1 always used. fit_curved_sheet_to_section() replaces it as soon as it has
+    // a cross-section to fit to.
     double curved_sheet_half_size() const;
     void   update_curved_sheet_model();
     void   invalidate_curved_sheet() { m_curved_sheet_dirty = true; m_curved_sheet_tex_dirty = true; m_curved_cap_dirty = true; }

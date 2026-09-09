@@ -796,3 +796,487 @@ TEST_CASE("Curved cut: rotated demo export", "[CurvedCut][.demo]")
     }
     WARN("rotated demo written to " << out.string());
 }
+
+// ===========================================================================
+// PHASE 2
+//
+// (a) A rectangular sheet, and what an extent change does to the surface.
+// (b) The cross-section fit.
+// (c) The snap helper.
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// (P2-1) A rectangular domain evaluates and samples over the rectangle, and an
+// extent change RE-SAMPLES the surface so it stays put in the plane rather than
+// stretching with the new rectangle - the same contract set_resolution() has.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("Curved cut: a rectangular sheet re-samples on an extent change", "[CurvedCut]")
+{
+    CurvedCutSheet sheet(7);
+    sheet.set_half_size(30.0, 12.0);
+    REQUIRE(sheet.half_size_u() == Approx(30.0));
+    REQUIRE(sheet.half_size_v() == Approx(12.0));
+    // half_size() is the square API: the larger of the two, so a caller that
+    // only wants "how big is this sheet" still gets a covering answer.
+    REQUIRE(sheet.half_size() == Approx(30.0));
+
+    // The control grid really is laid over the rectangle.
+    REQUIRE(sheet.control_xy(0, 0).x() == Approx(-30.0));
+    REQUIRE(sheet.control_xy(0, 0).y() == Approx(-12.0));
+    REQUIRE(sheet.control_xy(6, 6).x() == Approx(30.0));
+    REQUIRE(sheet.control_xy(6, 6).y() == Approx(12.0));
+
+    // ... and so is the dense sample grid.
+    {
+        const indexed_triangle_set its = sheet.sample_sheet(9);
+        double mx = 0.0, my = 0.0;
+        for (const Vec3f& v : its.vertices) {
+            mx = std::max(mx, double(std::abs(v.x())));
+            my = std::max(my, double(std::abs(v.y())));
+        }
+        REQUIRE(mx == Approx(30.0));
+        REQUIRE(my == Approx(12.0));
+    }
+
+    // A smooth bump the control grid can actually resolve - the same shape a
+    // falloff drag produces, and the case the re-fit has to survive.
+    for (int j = 0; j < 7; ++ j)
+        for (int i = 0; i < 7; ++ i) {
+            const double x = sheet.control_xy(i, j).x();
+            const double y = sheet.control_xy(i, j).y();
+            sheet.at(i, j) = 6.0 * std::exp(-(x * x) / (2.0 * 14.0 * 14.0) - (y * y) / (2.0 * 6.0 * 6.0));
+        }
+
+    // Reference: the surface in LOCAL MILLIMETRES over the region that is inside
+    // both the old and the new rectangle. That is the region the contract is
+    // about - outside it there is nothing to preserve.
+    const double keep_u = 20.0, keep_v = 9.0;
+    const int    N = 21;
+    std::vector<double> ref(size_t(N) * N);
+    for (int j = 0; j < N; ++ j)
+        for (int i = 0; i < N; ++ i) {
+            const double x = (2.0 * double(i) / (N - 1) - 1.0) * keep_u;
+            const double y = (2.0 * double(j) / (N - 1) - 1.0) * keep_v;
+            ref[size_t(j) * N + i] = sheet.evaluate_local(x, y);
+        }
+    const double amp = sheet.max_displacement();
+    REQUIRE(amp == Approx(6.0).margin(1e-9));
+
+    // Grow the rectangle, re-sampling. The bump must stay where it was, at the
+    // size it was: this is the thing the owner would notice if it broke, because
+    // the plane moving would drag his bend around with it.
+    CurvedCutSheet grown = sheet;
+    grown.set_half_size(45.0, 20.0, /*resample*/ true);
+    REQUIRE(grown.half_size_u() == Approx(45.0));
+    REQUIRE(grown.half_size_v() == Approx(20.0));
+    REQUIRE(!grown.is_flat());
+
+    double max_err = 0.0;
+    for (int j = 0; j < N; ++ j)
+        for (int i = 0; i < N; ++ i) {
+            const double x = (2.0 * double(i) / (N - 1) - 1.0) * keep_u;
+            const double y = (2.0 * double(j) / (N - 1) - 1.0) * keep_v;
+            max_err = std::max(max_err, std::abs(grown.evaluate_local(x, y) - ref[size_t(j) * N + i]));
+        }
+    INFO("rectangular re-sample max error " << max_err << " mm of " << amp << " mm amplitude");
+    // A re-fit onto a differently phased grid, exactly like the 5 -> 7 grid
+    // resize test: some detail between the old nodes is lost. 10% of amplitude
+    // is the regression guard, not an accuracy claim.
+    REQUIRE(max_err < 0.10 * amp);
+
+    // The peak keeps its height and stays over the centre.
+    REQUIRE(grown.evaluate_local(0.0, 0.0) == Approx(6.0).margin(0.10 * amp));
+
+    // WITHOUT resample the old behaviour stands: the control values are kept, so
+    // the surface is STRETCHED onto the new rectangle. Documented, not a bug -
+    // some callers (and the phase 1 tests) want exactly that.
+    CurvedCutSheet stretched = sheet;
+    stretched.set_half_size(45.0, 20.0, /*resample*/ false);
+    REQUIRE(stretched.values() == sheet.values());
+    // The whole bump is now spread over a 45 mm half extent instead of 30, so
+    // at a fixed 30 mm out the stretched sheet reads what the original read at
+    // 20 mm - i.e. much HIGHER, because the bump has been pulled outwards with
+    // the rectangle. That is exactly the drift the `resample` flag exists to
+    // prevent, and it is what the fitted sheet must never do.
+    REQUIRE(stretched.evaluate_local(30.0, 0.0) > sheet.evaluate_local(30.0, 0.0));
+    REQUIRE(stretched.evaluate_local(30.0, 0.0) == Approx(sheet.evaluate_local(20.0, 0.0)).margin(1e-9));
+    // ... whereas the RE-SAMPLED sheet still reads what the original read there.
+    REQUIRE(grown.evaluate_local(30.0, 0.0) == Approx(sheet.evaluate_local(30.0, 0.0)).margin(0.10 * amp));
+
+    // A flat sheet re-sampled is still exactly flat: the phase 1 invariant.
+    CurvedCutSheet flat(5);
+    flat.set_half_size(10.0, 3.0);
+    flat.set_half_size(40.0, 25.0, /*resample*/ true);
+    REQUIRE(flat.is_flat());
+}
+
+// ---------------------------------------------------------------------------
+// (P2-2) The cross-section fit. A 40 x 20 x 10 box cut by a VERTICAL plane: the
+// outline is 40 x 10 (or 20 x 10, depending which way the plane faces), and the
+// sheet has to be that plus the margin - not the bbox diagonal phase 1 used.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("Curved cut: the sheet fits the cut's cross-section", "[CurvedCut]")
+{
+    // A 40 x 20 x 10 box centred on the origin, already in the plane frame.
+    auto box = [](double sx, double sy, double sz) {
+        indexed_triangle_set its = its_make_cube(sx, sy, sz);
+        for (Vec3f& v : its.vertices)
+            v -= Vec3f(float(0.5 * sx), float(0.5 * sy), float(0.5 * sz));
+        return its;
+    };
+
+    const double margin_rel = 0.15, margin_abs = 5.0;
+
+    // A HORIZONTAL cut (the plane frame is the world frame): the section is the
+    // 40 x 20 footprint.
+    {
+        const indexed_triangle_set b = box(40.0, 20.0, 10.0);
+        double hu = 0.0, hv = 0.0;
+        REQUIRE(curved_cut_fit_extent(b, hu, hv, margin_rel, margin_abs));
+        // half extents of the outline: 20 and 10.
+        REQUIRE(hu == Approx(20.0 + std::max(0.15 * 20.0, 5.0)));   // 20 + 5   = 25
+        REQUIRE(hv == Approx(10.0 + std::max(0.15 * 10.0, 5.0)));   // 10 + 5   = 15
+        // And it is nothing like the bbox-diagonal extent phase 1 would use:
+        // that is 0.5 * sqrt(40^2 + 20^2 + 10^2) ~ 22.9, scaled up again by the
+        // plane's radius koef, and SQUARE - so on the short axis the handles
+        // sat well off the part.
+        REQUIRE(hv < 0.5 * Vec3d(40, 20, 10).norm());
+    }
+
+    // A VERTICAL cut: rotate the box 90 degrees about X, so the plane z == 0 now
+    // slices it lengthways and the section is 40 x 10.
+    {
+        indexed_triangle_set b = box(40.0, 20.0, 10.0);
+        its_transform(b, Geometry::rotation_transform(0.5 * PI * Vec3d::UnitX()));
+        double hu = 0.0, hv = 0.0;
+        REQUIRE(curved_cut_fit_extent(b, hu, hv, margin_rel, margin_abs));
+        REQUIRE(hu == Approx(20.0 + 5.0));   // the 40 mm axis is untouched by an X rotation
+        REQUIRE(hv == Approx(5.0 + 5.0));    // the 10 mm axis has rotated into the plane
+    }
+
+    // A LARGE section takes the relative margin, not the absolute one.
+    {
+        const indexed_triangle_set b = box(200.0, 100.0, 10.0);
+        double hu = 0.0, hv = 0.0;
+        REQUIRE(curved_cut_fit_extent(b, hu, hv, margin_rel, margin_abs));
+        REQUIRE(hu == Approx(100.0 * 1.15));
+        REQUIRE(hv == Approx(50.0 * 1.15));
+    }
+
+    // A plane that MISSES the object reports failure, so the caller keeps the
+    // extent it has instead of collapsing the sheet to nothing.
+    {
+        indexed_triangle_set b = box(40.0, 20.0, 10.0);
+        its_translate(b, Vec3f(0.f, 0.f, 100.f));
+        double hu = 1.0, hv = 1.0;
+        REQUIRE(!curved_cut_fit_extent(b, hu, hv, margin_rel, margin_abs));
+        REQUIRE(hu == Approx(1.0));   // untouched
+        REQUIRE(hv == Approx(1.0));
+    }
+
+    // An empty mesh is a failure too, not a crash.
+    {
+        const indexed_triangle_set empty;
+        double hu = 3.0, hv = 4.0;
+        REQUIRE(!curved_cut_fit_extent(empty, hu, hv));
+        REQUIRE(hu == Approx(3.0));
+        REQUIRE(hv == Approx(4.0));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// (P2-3) The snap helper: given a mesh and a handle position in the plane frame,
+// the SIGNED local-Z distance to the nearest surface, in either direction.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("Curved cut: the snap helper finds the nearest surface", "[CurvedCut]")
+{
+    const indexed_triangle_set cube = centred_cube();   // 40 mm, faces at +-20
+
+    SECTION("a cube") {
+        double d = 0.0;
+
+        // Above the top face: the nearest surface is the top, 5 mm DOWN.
+        REQUIRE(curved_cut_snap_distance(cube, Vec3d(0.0, 0.0, 25.0), d));
+        REQUIRE(d == Approx(-5.0));
+
+        // Below the bottom face: the nearest is the bottom, 5 mm UP.
+        REQUIRE(curved_cut_snap_distance(cube, Vec3d(0.0, 0.0, -25.0), d));
+        REQUIRE(d == Approx(5.0));
+
+        // INSIDE, nearer the top: it snaps out to the top, not through to the
+        // bottom. "Nearest hit in either direction" is the whole rule.
+        REQUIRE(curved_cut_snap_distance(cube, Vec3d(0.0, 0.0, 12.0), d));
+        REQUIRE(d == Approx(8.0));
+
+        // Inside, nearer the bottom.
+        REQUIRE(curved_cut_snap_distance(cube, Vec3d(0.0, 0.0, -12.0), d));
+        REQUIRE(d == Approx(-8.0));
+
+        // Exactly on the top face: zero, not a jump to the far one.
+        REQUIRE(curved_cut_snap_distance(cube, Vec3d(0.0, 0.0, 20.0), d));
+        REQUIRE(d == Approx(0.0).margin(1e-9));
+
+        // Off to the side of the cube entirely: no hit, and the caller must
+        // leave its control point alone.
+        REQUIRE(!curved_cut_snap_distance(cube, Vec3d(100.0, 0.0, 0.0), d));
+
+        // A handle over a corner region but still off the footprint.
+        REQUIRE(!curved_cut_snap_distance(cube, Vec3d(21.0, 21.0, 0.0), d));
+    }
+
+    SECTION("a domed mesh") {
+        // A spherical cap: z = sqrt(R^2 - r^2) - sqrt(R^2 - r_max^2) over a disc
+        // of radius r_max, so the apex is at the centre and the rim comes down to
+        // z == 0, closed there with a flat base disc. That is what a real STL of
+        // a domed top looks like to the helper - a curved shell over a flat face,
+        // with the shell nearer over the middle and the base nearer near the rim.
+        const double R = 30.0, r_max = 20.0;
+        const int    RINGS = 32, SEGS = 64;
+        const double z_off = std::sqrt(R * R - r_max * r_max);
+        auto dome_z = [R, z_off](double r) { return std::sqrt(std::max(0.0, R * R - r * r)) - z_off; };
+        const double apex = dome_z(0.0);   // ~7.64
+
+        indexed_triangle_set dome;
+        // Vertex 0 is the apex; then RINGS rings out to the rim at r_max.
+        dome.vertices.emplace_back(Vec3f(0.f, 0.f, float(apex)));
+        for (int k = 1; k <= RINGS; ++ k) {
+            const double r = r_max * double(k) / double(RINGS);
+            for (int s = 0; s < SEGS; ++ s) {
+                const double a = 2.0 * PI * double(s) / double(SEGS);
+                dome.vertices.emplace_back(Vec3f(float(r * std::cos(a)), float(r * std::sin(a)), float(dome_z(r))));
+            }
+        }
+        auto vid = [SEGS](int ring, int seg) { return 1 + (ring - 1) * SEGS + (seg % SEGS); };
+        for (int s = 0; s < SEGS; ++ s)
+            dome.indices.emplace_back(Vec3i32(0, vid(1, s), vid(1, s + 1)));
+        for (int k = 1; k < RINGS; ++ k)
+            for (int s = 0; s < SEGS; ++ s) {
+                dome.indices.emplace_back(Vec3i32(vid(k, s), vid(k + 1, s), vid(k + 1, s + 1)));
+                dome.indices.emplace_back(Vec3i32(vid(k, s), vid(k + 1, s + 1), vid(k, s + 1)));
+            }
+        // The flat base at z == 0: a fan from the centre out to the rim ring,
+        // which really is at z == 0 now, so this is a disc and not a cone.
+        const int base_c = int(dome.vertices.size());
+        dome.vertices.emplace_back(Vec3f(0.f, 0.f, 0.f));
+        for (int s = 0; s < SEGS; ++ s)
+            dome.indices.emplace_back(Vec3i32(base_c, vid(RINGS, s + 1), vid(RINGS, s)));
+
+        double d = 0.0;
+        // Directly over the apex, 4 mm above it: the shell is 4 mm down, the
+        // base further, so it snaps onto the shell.
+        REQUIRE(curved_cut_snap_distance(dome, Vec3d(0.0, 0.0, apex + 4.0), d));
+        REQUIRE(d == Approx(-4.0).margin(1e-6));
+
+        // Over the flank at r = 15, 2 mm above the shell. The MESH is not the
+        // analytic surface - a query point between two rings hits a facet that
+        // is a chord below the sphere - so the hit is checked against the shell's
+        // neighbourhood rather than an exact figure. What matters is that it went
+        // DOWN, onto the shell, and not through to the base.
+        const double zr   = dome_z(15.0);   // ~5.99
+        const double from = zr + 2.0;
+        REQUIRE(curved_cut_snap_distance(dome, Vec3d(15.0, 0.0, from), d));
+        REQUIRE(d < 0.0);
+        const double hit_z = from + d;
+        INFO("flank hit at z = " << hit_z << " (analytic shell " << zr << ", apex " << apex << ")");
+        REQUIRE(hit_z == Approx(zr).margin(0.15));   // on the shell, within a facet
+        REQUIRE(hit_z > 1.0);                        // ... nowhere near the base
+
+        // Near the rim at r = 19.5 the shell is almost down at the base, and a
+        // handle just under the base plane snaps UP onto the base.
+        REQUIRE(curved_cut_snap_distance(dome, Vec3d(19.5, 0.0, -0.3), d));
+        REQUIRE(d == Approx(0.3).margin(1e-6));
+
+        // Below the base under the middle: it snaps UP onto the base, not all
+        // the way through to the shell above it.
+        REQUIRE(curved_cut_snap_distance(dome, Vec3d(5.0, 0.0, -6.0), d));
+        REQUIRE(d == Approx(6.0).margin(1e-6));
+
+        // Inside the dome, nearer the base than the shell: it snaps DOWN.
+        REQUIRE(curved_cut_snap_distance(dome, Vec3d(0.0, 0.0, 1.0), d));
+        REQUIRE(d == Approx(-1.0).margin(1e-6));
+
+        // Inside, nearer the shell: it snaps UP.
+        REQUIRE(curved_cut_snap_distance(dome, Vec3d(0.0, 0.0, apex - 1.0), d));
+        REQUIRE(d == Approx(1.0).margin(1e-6));
+
+        // Off the disc: no hit.
+        REQUIRE(!curved_cut_snap_distance(dome, Vec3d(25.0, 0.0, 5.0), d));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// (P2-4) The end-to-end gesture the gizmo performs: fit the sheet to a section,
+// snap a handle onto the surface, and cut. The point is that the pieces compose
+// - the fit does not flatten the sheet and the snap produces a real bend.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("Curved cut: fit then snap produces a real curved cut", "[CurvedCut]")
+{
+    const indexed_triangle_set cube = centred_cube();   // 40 mm, faces at +-20
+
+    double hu = 0.0, hv = 0.0;
+    REQUIRE(curved_cut_fit_extent(cube, hu, hv, 0.15, 5.0));
+    REQUIRE(hu == Approx(25.0));
+    REQUIRE(hv == Approx(25.0));
+
+    CurvedCutSheet sheet(5);
+    sheet.set_half_size(hu, hv, /*resample*/ true);
+    REQUIRE(sheet.is_flat());
+
+    // Snap the centre handle onto the cube's TOP face. A handle sitting exactly
+    // at z = 0 is 20 mm from both faces - a genuine tie, and which of the two a
+    // tie resolves to is not a contract worth pinning - so lift it 1 mm first,
+    // the way a user who wants the top would. The top is then 19 mm away and the
+    // bottom 21, so the helper must report +19.
+    // (The rim handles are at +-25, off the cube's 20 mm footprint, so they
+    // report no hit - which is what leaves them where they are.)
+    const Vec2d c = sheet.control_xy(2, 2);
+    sheet.at(2, 2) = 1.0;
+    double d = 0.0;
+    REQUIRE(curved_cut_snap_distance(cube, Vec3d(c.x(), c.y(), sheet.at(2, 2)), d));
+    REQUIRE(d == Approx(19.0));
+    // A tie really is a tie: from dead centre it lands on one face or the other,
+    // 20 mm away, and either is a correct answer.
+    {
+        double tie = 0.0;
+        REQUIRE(curved_cut_snap_distance(cube, Vec3d(c.x(), c.y(), 0.0), tie));
+        REQUIRE(std::abs(tie) == Approx(20.0));
+    }
+    sheet.at(2, 2) = 0.0;
+    REQUIRE(sheet.is_flat());
+
+    double corner = 0.0;
+    const Vec2d rim = sheet.control_xy(0, 0);
+    REQUIRE(!curved_cut_snap_distance(cube, Vec3d(rim.x(), rim.y(), 0.0), corner));
+
+    // Apply it the way the gesture does, with the falloff pulling the
+    // neighbours: a dome, not a spike. The sheet starts flat again (the 1 mm
+    // lift above was undone), so the peak is the snap distance itself.
+    sheet.grab(c, 1.5 * (2.0 * hu / 4.0), d, /*falloff*/ true);
+    REQUIRE(!sheet.is_flat());
+    REQUIRE(sheet.max_displacement() == Approx(19.0));
+
+    // ... and it still cuts into two closed halves whose volumes add up. The
+    // dome reaches to within 1 mm of the top face over the centre, so this is
+    // also a near-tangent boolean - the case most likely to produce a sliver.
+    indexed_triangle_set upper, lower;
+    REQUIRE(curved_cut_split(cube, sheet, &upper, &lower));
+    REQUIRE(!upper.empty());
+    REQUIRE(!lower.empty());
+    REQUIRE(its_num_open_edges(upper) == 0);
+    REQUIRE(its_num_open_edges(lower) == 0);
+    // 1e-4 relative, looser than the 1e-6 the phase 1 cube tests hold to,
+    // because this is deliberately the near-tangent case: the dome comes to
+    // within 1 mm of the top face, so the boolean's seam runs almost along that
+    // face and the sliver it leaves is a facet of the 128-sample cutter thick.
+    // Both halves are closed (checked above), so nothing leaked - the cutter is
+    // discretised, and this is how much that costs.
+    const double total = double(its_volume(upper)) + double(its_volume(lower));
+    REQUIRE(std::abs(total - CUBE * CUBE * CUBE) / (CUBE * CUBE * CUBE) < 1e-4);
+    // The sheet reaches almost to the top face over the middle, so the lower
+    // half takes clearly more than half the cube - about 61% here. The bend
+    // radius is 1.5 control spacings, so the dome covers the middle and the
+    // sheet is still flat at the rim; it is not a raised lid over the whole
+    // footprint, and the fraction says so.
+    const double lower_frac = double(its_volume(lower)) / (CUBE * CUBE * CUBE);
+    INFO("lower half is " << 100.0 * lower_frac << "% of the cube");
+    REQUIRE(lower_frac > 0.55);
+    REQUIRE(lower_frac < 0.75);
+}
+
+// ---------------------------------------------------------------------------
+// (P2-5) The slab still covers a part LARGER than the sheet, now that the sheet
+// is fitted to a cross-section and so is routinely smaller than the object.
+// This is the phase 1 guarantee restated for a RECTANGULAR sheet: the widening
+// is per axis and it must not move the surface.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("Curved cut: a rectangular sheet's slab still covers a larger part", "[CurvedCut]")
+{
+    // A deliberately lopsided sheet: 18 mm along u, 7 mm along v, with a dome.
+    CurvedCutSheet sheet(5);
+    sheet.set_half_size(18.0, 7.0);
+    sheet.at(2, 2) = 5.0;
+
+    BoundingBoxf3 bbox;
+    bbox.merge(Vec3d(-60, -35, -20));
+    bbox.merge(Vec3d(60, 35, 20));
+
+    // Widened per axis, as curved_cut_split() does.
+    const indexed_triangle_set slab = curved_cut_lower_slab(sheet, bbox, 128, 65.0, 40.0);
+    REQUIRE(its_num_open_edges(slab) == 0);
+
+    double ext_u = 0.0, ext_v = 0.0, peak = -1e30, peak_x = 0.0, peak_y = 0.0;
+    for (const Vec3f& v : slab.vertices) {
+        ext_u = std::max(ext_u, double(std::abs(v.x())));
+        ext_v = std::max(ext_v, double(std::abs(v.y())));
+        if (double(v.z()) > peak) { peak = double(v.z()); peak_x = double(v.x()); peak_y = double(v.y()); }
+    }
+    REQUIRE(ext_u >= 64.0);        // really widened past the object on u ...
+    REQUIRE(ext_v >= 39.0);        // ... and on v, independently
+    // ... and the dome kept its height at the sheet's own centre. (The sample
+    // grid now straddles the peak, so a chord sag below 5 mm is expected.)
+    REQUIRE(peak == Approx(5.0).margin(0.25));
+    REQUIRE(std::abs(peak_x) < 3.0);
+    REQUIRE(std::abs(peak_y) < 3.0);
+    // Outside the sheet's own domain the border height (zero) is extruded, not
+    // stretched: look only at the top surface, the floor sits far below.
+    for (const Vec3f& v : slab.vertices)
+        if (double(v.z()) > -10.0 && (double(std::abs(v.x())) > 22.0 || double(std::abs(v.y())) > 11.0))
+            REQUIRE(std::abs(double(v.z())) < 0.01);
+
+    // And the whole thing still cuts a part far larger than the sheet in two.
+    indexed_triangle_set big = its_make_cube(100.0, 60.0, 30.0);
+    its_translate(big, Vec3f(-50.f, -30.f, -15.f));
+    indexed_triangle_set upper, lower;
+    REQUIRE(curved_cut_split(big, sheet, &upper, &lower));
+    REQUIRE(!upper.empty());
+    REQUIRE(!lower.empty());
+    REQUIRE(its_num_open_edges(upper) == 0);
+    REQUIRE(its_num_open_edges(lower) == 0);
+    // 1e-4 relative, not the 1e-6 the 40 mm cube tests use: the slab here is
+    // sampled at 128 across 130 mm, so its facets are ~1 mm and the boolean's
+    // seam follows them. That is a discretisation of the CUTTER, not a leak -
+    // both halves are closed (checked above) and nothing is lost between them
+    // beyond a facet's worth.
+    const double total = double(its_volume(upper)) + double(its_volume(lower));
+    REQUIRE(std::abs(total - 100.0 * 60.0 * 30.0) / (100.0 * 60.0 * 30.0) < 1e-4);
+}
+
+// ---------------------------------------------------------------------------
+// (P2-6) The resolution ceiling moved to 15, and a 15 x 15 grid still behaves:
+// it re-samples, it evaluates, and it cuts.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("Curved cut: a 15 x 15 control grid", "[CurvedCut]")
+{
+    REQUIRE(CurvedCutSheet::MaxResolution == 15);
+
+    CurvedCutSheet sheet(5);
+    sheet.set_half_size(20.0, 20.0);
+    sheet.at(2, 2) = 6.0;
+    const double before = sheet.evaluate(0.5, 0.5);
+    REQUIRE(before == Approx(6.0));
+
+    sheet.set_resolution(15);
+    REQUIRE(sheet.resolution() == 15);
+    REQUIRE(sheet.values().size() == 15u * 15u);
+    // 5 -> 15 IS a refinement (u = 0, .25, .5, .75, 1 are all 15-grid nodes), so
+    // the surface must come through essentially exactly.
+    REQUIRE(sheet.evaluate(0.5, 0.5) == Approx(before).margin(1e-9));
+    REQUIRE(sheet.max_displacement() == Approx(6.0).margin(1e-9));
+
+    // Clamping still holds at the top of the range.
+    CurvedCutSheet over(5);
+    over.set_resolution(99);
+    REQUIRE(over.resolution() == 15);
+
+    // And a 15 x 15 sheet cuts.
+    indexed_triangle_set upper, lower;
+    REQUIRE(curved_cut_split(centred_cube(), sheet, &upper, &lower));
+    REQUIRE(!upper.empty());
+    REQUIRE(!lower.empty());
+}

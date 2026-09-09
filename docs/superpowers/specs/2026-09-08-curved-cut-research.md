@@ -599,3 +599,74 @@ Perform cut. The specific claim that has only been reasoned about, not observed,
 the cut: `get_cut_matrix()` is still read after the reset (as it always was, which is why the flat
 cut worked), and `on_set_state()` is not the only thing `activate_gizmo(Undefined)` triggers. The
 owner click-test remains the gate.
+
+## Phase 2
+
+Branch `feat/curved-cut-p2`, from `feat/ultra-preferences`. Three things the owner asked for after using phase 1: most control points landed outside the part, he could not see the result from the far side, and he wanted to pull handles onto the model rather than eyeball them.
+
+### 2.1 Sheet fitted to the cross-section
+
+**Was.** `curved_sheet_half_size()` returned `m_cut_plane_radius_koef * m_radius`, i.e. the flat plane model's own extent, which comes from the object's bounding-box **diagonal**. On a cube that is roughly right. On anything else it is not: for a 40 x 20 x 10 box the diagonal is 45.8 mm, so a 5 x 5 grid spread over ±(koef × 22.9) put most handles in empty space and only the middle one or two over material. Rotate the plane and it gets worse — the extent does not know which way the plane faces.
+
+**Now.** `curved_cut_fit_extent()` (libslic3r/CurvedCut.cpp) intersects the instance mesh — already expressed in the cut plane's frame — with `z == 0`, takes the bounding box of the crossings, and adds `max(15% of the extent, 5 mm)` on each side. The sheet is sized to that.
+
+The fit collects **crossing points**, not a polygon: every point of the section lies on an edge that crosses the plane (or on a vertex sitting exactly in it), so the box those points give is the box the outline has, and there is no contour assembly to go wrong on a coplanar edge, an on-plane vertex, or a non-manifold seam. A point counted twice costs nothing — it is still a point on the section.
+
+**Rectangular sheet.** `CurvedCutSheet` now carries `half_size_u` / `half_size_v` instead of one `half_size`. `(u,v)` still run over `[0,1]²`; they map onto a rectangle now. The square API is kept and still means what it did: `half_size()` reports the larger of the two, `set_half_size(hs)` makes the domain square again. Everything downstream that took one extent — `curved_cut_lower_slab`, the shader uniform — grew a second one, and the slab's widening in `curved_cut_split` is now **per axis** (a square widening from the larger side would cover the object correctly but spend the fixed 128-sample budget on empty space along the short axis and coarsen the cut where it actually cuts).
+
+**Re-sampling.** `set_half_size(u, v, resample = true)` re-samples the current surface onto the new rectangle, taking each control point's height from the old surface at the **same local (x,y) in millimetres** — clamped at the old border, the same rule `evaluate()` uses. The surface therefore stays put in the plane while the rectangle around it grows or shrinks. That is the only sensible reading of "the shape survives": a bend drawn over the part must not slide or scale when the plane is nudged. Passing `resample = false` keeps phase 1's behaviour (control values untouched, so the surface stretches onto the new rectangle) for the callers and tests that want it.
+
+**Debouncing.** The fit walks the instance mesh, so it is not free. `on_dragging` only *marks* it pending (`request_curved_fit()`); `on_stop_dragging` pays for it. Switching Flat → Curved forces one immediately — the user has just asked for the sheet, so there is nothing to debounce. A new bounding box (`update_bb`) drops the fit and falls back to the bbox extent until the next fit.
+
+**Knock-ons.** `MaxResolution` is 15 (was 9); the "N x N" label is unchanged because the grid is still N x N — only the rectangle it is drawn over is not square. `default_curved_bend_radius()` is 1.5 spacings of the **smaller** axis: the radius is one number and `grab()` measures a circular distance, so 1.5 of the larger spacing would already reach three neighbours deep along the short axis.
+
+### 2.2 Side visibility
+
+A three-state control per half — **Visible / Ghost / Hidden** — in the cut panel. It is offered for a flat cut as well as a curved one; "let me see the other half" has nothing to do with the sheet.
+
+- **Ghost** draws the half at 25% alpha with **depth writes off**. Depth writes matter: a translucent half that still wrote depth would go on occluding the sheet and the far half, which is the whole point of ghosting.
+- **Hidden** is a `discard` in the fragment shader. Not alpha 0 — a zero-alpha fragment still writes depth and keeps occluding.
+
+Implemented as two new uniforms on the existing colour-clip path (`color_clip_side_alpha_1/2` in `resources/shaders/{110,140}/gouraud.fs`): `1.0` solid, `0 < a < 1` ghosted, **negative** hidden. `GLVolumeCollection` sets them every frame from `m_color_clip_plane_alphas`, default `{1, 1}`, so nothing but the cut gizmo ever sees a change. `GLVolumeCollection::render` turns blending on and depth writes off for the pass when either side is ghosted.
+
+Side 1 is the **upper** half in both paths, which is why one pair of uniforms covers flat and curved:
+- flat — `set_color_clip_plane()` stores `-normal`, so `color_clip_plane_dot` is negative above the plane, and `apply_color_clip_plane_colors()` feeds side 1 with `UPPER_PART_COLOR`;
+- curved — `side = h - local.z`, negative when the fragment is above the sheet.
+
+Both halves reset to Visible whenever the gizmo opens or closes: this is a preview aid, not a preference.
+
+### 2.3 Handle snapping
+
+**Right-click-drag a handle** and it rides the model surface directly under it, live, until the button comes up. **Shift + right-click-drag** carries the neighbours with it, using the Bend radius falloff — the same `grab()` a left drag uses, with `delta = hit - current`. One undo snapshot, taken on the press, exactly as the left drag does. A small orange crosshair marks the hit while the button is held.
+
+"Under it" means **along the plane normal in both directions**, nearest hit wins: a handle floating above the part snaps down onto it, one buried inside snaps out to whichever face is closer. When there is no surface either way — a handle out past the silhouette, which the 15% margin guarantees several of — the point is left exactly where it is.
+
+`curved_cut_snap_distance()` is the pure core, and is what the tests drive: given a mesh and a position, both in the plane frame, it returns the signed local-Z offset to the nearest surface. It is a line/triangle test in the XY projection rather than a ray cast, because "nearest in either direction" wants both sides in one pass. The gizmo derives the instance mesh in the plane frame once per gesture (`curved_instance_mesh_in_plane()`) and caches it for the duration — re-deriving it per motion event would stall the drag on a heavy model.
+
+**This gesture needs 2.2.** The surface it finds is often on the far side of the part from the camera, and you cannot aim at what you cannot see. The panel says so, in as many words.
+
+### 2.4 What did not change
+
+"Curved but untouched = flat cut" is untouched. `CurvedCutSheet::is_flat()` still short-circuits `evaluate()`, `Cut::perform_with_curved_sheet()` still dispatches a flat sheet straight into `perform_with_plane()`, and the fit's re-sampling of a flat sheet is still exactly flat (checked). The existing `[CurvedCut]` tests all pass unchanged.
+
+### Proofs
+
+New `[CurvedCut]` cases in `tests/libslic3r/test_curved_cut.cpp`:
+
+| Case | What it pins |
+| --- | --- |
+| `a rectangular sheet re-samples on an extent change` | the rectangle really is rectangular (control grid, dense sample grid, `half_size()` as the max); growing 30×12 → 45×20 with `resample` keeps the surface within 10% of amplitude over the shared region and the peak at its height and place; without `resample` the control values are untouched and the surface stretches; a flat sheet re-sampled is still exactly flat |
+| `the sheet fits the cut's cross-section` | 40×20×10 box, horizontal plane → 25 × 15 (outline half-extents 20 and 10, plus the 5 mm absolute margin), and that is not the bbox-diagonal figure; the same box rotated 90° about X → 25 × 10; a 200×100 section takes the 15% relative margin instead; a plane that misses, and an empty mesh, both report failure and leave the caller's extents untouched |
+| `the snap helper finds the nearest surface` | on a 40 mm cube: above → −5, below → +5, inside-nearer-the-top → +8, inside-nearer-the-bottom → −8, exactly on a face → 0, off the footprint → no hit. On a domed mesh (analytic dome over a flat base, meshed as a ring grid): over the apex, over the flank, and the base winning when it is nearer; off the disc → no hit |
+| `fit then snap produces a real curved cut` | the three pieces compose — fit a cube (25 × 25), snap the centre handle onto the top face (+20 exactly), rim handles report no hit, the falloff grab makes a dome, and the cut still yields two closed halves whose volumes add to the cube's |
+| `a rectangular sheet's slab still covers a larger part` | phase 1's slab guarantee restated for a rectangle: an 18 × 7 sheet widened to 65 × 40 stays watertight, keeps the dome's height at the sheet's own centre, extrudes the border height (not a stretch) outside the domain, and cuts a 100×60×30 part in two with the volumes adding up |
+| `a 15 x 15 control grid` | the new ceiling: 5 → 15 is a refinement so the surface comes through exactly, `set_resolution(99)` clamps to 15, and a 15×15 sheet cuts |
+
+### Unverified
+
+**Nobody clicked it.** Everything above is proved by the unit tests, a clean build, and a scratch instance that launches without shader errors. None of the three features has been driven by hand in the running gizmo:
+
+- the fit's *feel* — whether 15% / 5 mm puts the handles where the owner wants them on his actual parts, and whether debouncing to drag-end is responsive enough or reads as lag;
+- Ghost's *appearance* — the 25% alpha and the depth-write-off pass are argued from first principles, not looked at; whether the ghosted half reads as "there but see-through" or as mud is a judgement only the eye makes. Ghost interacts with the existing transparent render pass, and that interaction has not been watched;
+- the snap *gesture* — whether right-drag is discoverable, whether the crosshair is visible against a light model, and whether the live re-apply is smooth on a mesh of real size. The mesh is cached per gesture precisely because it might not be, but nobody has held the button down on a 2 M-triangle model;
+- the panel *layout* — three radio buttons on each of two rows inside the existing cut panel width has not been seen; it may wrap.

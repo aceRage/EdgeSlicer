@@ -44,10 +44,20 @@ uniform SlopeDetection slope;
 uniform bool  curved_sheet_active;
 uniform sampler2D curved_sheet_tex;
 uniform mat4  curved_sheet_matrix;
-uniform float curved_sheet_half_size;
+// Phase 2: the sheet's domain is a RECTANGLE fitted to the cut's cross-section,
+// so u and v have their own half extent.
+uniform vec2  curved_sheet_half_size;
 // 0.0: the texture holds f in mm. Otherwise it holds (f/range + 1)/2, which is
 // what the GL 2.1 fallback has to do - GL_LUMINANCE is fixed point on [0,1].
 uniform float curved_sheet_range;
+
+// Phase 2, side visibility. Per-half alpha for the two colour-clip sides, so a
+// half can be shown solid (1.0), ghosted (~0.25) or hidden. A NEGATIVE value
+// means hidden: the fragment is discarded outright, which is the only way to see
+// through a half rather than through it dimly. The C++ side sets 1.0/1.0 by
+// default, so the flat cut and every other colour-clip user is untouched.
+uniform float color_clip_side_alpha_1;
+uniform float color_clip_side_alpha_2;
 
 //BBS: add outline_color
 uniform bool is_outline;
@@ -151,9 +161,9 @@ void main()
 		if (curved_sheet_active) {
 			vec3 local = (curved_sheet_matrix * vec4(world_pos.xyz, 1.0)).xyz;
 			vec2 uv = local.xy / (2.0 * curved_sheet_half_size) + vec2(0.5, 0.5);
-			// Outside the sheet's square domain the height field is not defined;
-			// clamp so the split continues along the border value rather than
-			// snapping back to the flat plane at the sheet's edge.
+			// Outside the sheet's domain the height field is not defined; clamp
+			// so the split continues along the border value rather than snapping
+			// back to the flat plane at the sheet's edge.
 			float h = texture2D(curved_sheet_tex, clamp(uv, 0.0, 1.0)).r;
 			if (curved_sheet_range > 0.0)
 				h = (2.0 * h - 1.0) * curved_sheet_range;
@@ -161,8 +171,15 @@ void main()
 			// set_color_clip_plane), so keep the same sign convention here.
 			side = h - local.z;
 		}
-		color.rgb = (side < 0.0) ? uniform_color_clip_plane_1.rgb : uniform_color_clip_plane_2.rgb;
-		color.a = uniform_color.a;
+		bool first = side < 0.0;
+		// Side visibility. Hidden is a discard, not an alpha of zero: a
+		// zero-alpha fragment still writes depth and would keep hiding whatever
+		// is behind it, which is the whole point of hiding the near half.
+		float side_alpha = first ? color_clip_side_alpha_1 : color_clip_side_alpha_2;
+		if (side_alpha < 0.0)
+			discard;
+		color.rgb = first ? uniform_color_clip_plane_1.rgb : uniform_color_clip_plane_2.rgb;
+		color.a = uniform_color.a * side_alpha;
     }
     else
 	    color = uniform_color;
