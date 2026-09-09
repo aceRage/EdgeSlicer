@@ -4,6 +4,7 @@
 #include "enum_bitmask.hpp"
 #include "Point.hpp"
 #include "Model.hpp"
+#include "CurvedCut.hpp"
 
 #include <vector>
 
@@ -65,6 +66,12 @@ public:
     };
 
     const ModelObjectPtrs& perform_with_plane();
+    // Curved cut, phase 1: split by a height field z = f(u,v) over the cut plane
+    // instead of by the plane itself. A sheet with every control point at zero IS
+    // the plane, and this routes straight into perform_with_plane() in that case, so
+    // a zero-displacement curved cut runs the same code path as today's flat cut and
+    // its output is bit-identical. No connectors on a curved cut in phase 1.
+    const ModelObjectPtrs& perform_with_curved_sheet(const CurvedCutSheet& sheet);
     // Flexi joint cut: one object, two watertight model parts, a real Manifold boolean.
     // perform_with_plane() dispatches here automatically when a flexi connector is present.
     const ModelObjectPtrs& perform_with_flexi_joints();

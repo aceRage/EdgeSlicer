@@ -9,6 +9,7 @@
 #include "libslic3r/TriangleMesh.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/CutUtils.hpp"
+#include "libslic3r/CurvedCut.hpp"
 #include "imgui/imgui.h"
 
 namespace Slic3r {
@@ -145,6 +146,31 @@ class GLGizmoCut3D : public GLGizmoBase
     // "Add connectors" for the rest of the session.
     bool             m_flexi_forced_after_cut{ false };
     std::vector<std::string> m_flexi_kinds;
+
+    // --- Curved cut (phase 1) ---------------------------------------------
+    // Surface: Flat | Curved. Curved replaces the flat cut plane with a height
+    // field z = f(u,v) defined over it by a coarse control grid, upsampled to a
+    // dense sheet for the preview and for the cut. Nothing here is persisted:
+    // the cut is baked, exactly as a plane cut is, and the grid lives only for
+    // the gizmo session.
+    bool           m_curved_surface{ false };
+    CurvedCutSheet m_curved_sheet;
+    int            m_curved_resolution{ CurvedCutSheet::DefaultResolution };
+    // Brush radius for the control-point grab, in world mm, and whether the
+    // Sculpt gizmo's falloff applies. F / Shift+F adjust it the way Sculpt does.
+    float          m_curved_brush_radius{ 10.f };
+    bool           m_curved_falloff{ true };
+    // The dense sheet, rebuilt whenever the grid changes.
+    GLModel        m_curved_sheet_model;
+    bool           m_curved_sheet_dirty{ true };
+    // Drag state: which control point is under the cursor / being dragged.
+    int            m_curved_hover_ctl{ -1 };
+    int            m_curved_drag_ctl{ -1 };
+    Vec3d          m_curved_drag_anchor_world{ Vec3d::Zero() };
+    // The control grid as it stood when the drag started: a drag is absolute,
+    // so every tick re-applies the whole displacement to this snapshot.
+    std::vector<double> m_curved_drag_grid;
+    bool           m_curved_drag_took_snapshot{ false };
 
     bool m_hide_cut_plane{ false };
     bool m_connectors_editing{ false };
@@ -378,6 +404,26 @@ private:
     bool is_outside_of_cut_contour(size_t idx, const CutConnectors& connectors, const Vec3d cur_pos);
     bool is_conflict_for_connector(size_t idx, const CutConnectors& connectors, const Vec3d cur_pos);
     void render_connectors();
+
+    // --- Curved cut (phase 1) ---------------------------------------------
+    bool   is_curved_surface() const { return m_curved_surface && CutMode(m_mode) == CutMode::cutPlanar; }
+    // Half extent the sheet needs so it covers the object under the cut plane.
+    double curved_sheet_half_size() const;
+    void   update_curved_sheet_model();
+    void   invalidate_curved_sheet() { m_curved_sheet_dirty = true; }
+    void   render_curved_sheet();
+    void   render_curved_control_points();
+    // World position of control point (i,j), i.e. through the base plane's
+    // own rotate/translate, so the sheet follows the plane.
+    Vec3d  curved_control_world(int i, int j) const;
+    // Screen-space pick of the nearest control point; -1 when none is close.
+    int    curved_pick_control(const Vec2d& mouse_position) const;
+    // Project the mouse onto the camera-facing plane through the drag anchor,
+    // the way GLGizmoSculpt does, and return the displacement along the cut
+    // plane normal only - f(u,v) is a height, not a free 3D position.
+    bool   curved_drag_delta(const Vec2d& mouse_position, double& delta) const;
+    bool   curved_on_mouse(const wxMouseEvent& mouse_event);
+    void   render_curved_surface_inputs();
 
     bool can_perform_cut() const;
     bool has_valid_groove() const;
