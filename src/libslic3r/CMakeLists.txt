@@ -116,6 +116,8 @@ set(lisbslic3r_sources
     DataDirMigration.hpp
     CutUtils.cpp
     CutUtils.hpp
+    CurvedCut.cpp
+    CurvedCut.hpp
     EdgeGrid.cpp
     EdgeGrid.hpp
     ElephantFootCompensation.cpp

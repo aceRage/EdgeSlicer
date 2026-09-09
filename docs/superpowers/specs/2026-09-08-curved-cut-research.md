@@ -234,3 +234,160 @@ them fitting together (no connectors needed for this click-test, per phase 1 sco
   useful reminder that "curved-looking" results have historically been achieved here by chaining
   flat operations, and this proposal is the first true curved (non-piecewise-flat) cutting surface
   in this cut-family.
+
+---
+
+## Phase 1 implemented
+
+Branch `feat/curved-cut`, cut from `origin/feat/ultra-preferences` with
+`origin/feat/thread-connector` merged in first (that branch adds the Thread and Bayonet Flexi kinds
+in `GLGizmoCut.cpp` / `FlexiJoint.*`; building on it avoids a later conflict — the one conflict
+was in `render_flexi_joint_inputs`' trailing hint text and was resolved in its favour, keeping
+this branch's `ImGui::PopTextWrapPos()`).
+
+### What shipped
+
+**`src/libslic3r/CurvedCut.{hpp,cpp}` — the representation and the cut.**
+
+- `CurvedCutSheet`: a coarse control grid (default 5x5, user 3..9 as the task asked; the research
+  text above said 4..64, which was too wide to be useful — nine handles a side is already 81
+  handles) over the cut plane's own frame, holding one displacement in mm per control point.
+- Interpolation is **Catmull-Rom**, not the bicubic B-spline the research section left open. The
+  reason is the phase-1 invariant: Catmull-Rom *interpolates* its control points, so a control
+  point's displacement IS the surface height there. That makes "drag this handle to 8 mm and the
+  face is 8 mm deep there" literally true, makes the height-sampling proof meaningful, and makes
+  a grid whose nodes are a subset of a finer grid's nodes resample exactly. A B-spline only
+  approximates its control points and would have failed all three.
+- `evaluate(u,v)` short-circuits to exactly `0.0` when every control point is zero, so the flat
+  case is bit-exact rather than merely near-zero.
+- `grab()` / `smooth()`: the editing operations, using `Sculpt::falloff_weight` from
+  `MeshSculpt.hpp` — the actual sculpt-brush falloff, not a reimplementation of it.
+- `sample_sheet()`, `curved_cut_lower_slab()`: the dense sheet, and the closed slab built by
+  offsetting it down to a floor below the object's bbox and stitching a four-sided rim, so the
+  cutter is watertight (the research section flagged this as the thing a naive offset gets wrong).
+  Side walls are vertical in local Z, never along the sheet normal, so a steep sheet cannot fold
+  the slab into itself.
+- `curved_cut_split()`: two booleans, `object ∩ slab` and `object − slab`, through
+  `MeshBoolean::mfd::make_boolean` with the `mcut` fallback — the same chain `flexi_boolean` uses
+  in `CutUtils.cpp`.
+
+**`Cut::perform_with_curved_sheet()` in `CutUtils.{hpp,cpp}`** — the same shape as
+`perform_with_plane()`: same clone/`add_cut_volume`/`post_process`/`reset_instance_transformation`
+path, so the result object and part structure, the undo snapshot, and the after-cut options behave
+as they do for a plane cut. Its first statement is:
+
+```
+if (sheet.is_flat())
+    return perform_with_plane();
+```
+
+so a zero-displacement curved cut is not "a boolean that happens to agree with the plane cut" — it
+is the plane cut, same function, byte for byte.
+
+**`GLGizmoCut3D`** — a `Surface: Flat | Curved` radio pair in the cut-plane window, plus, in
+Curved mode: a control-points slider (3..9), a brush-radius slider, a Falloff checkbox, and
+Smooth / Reset surface buttons. The deformed sheet renders with the same translucent
+`CUT_PLANE_DEF_COLOR` / `CUT_PLANE_ERR_COLOR` material as the flat plane; control points are small
+spheres that highlight on hover. The sheet is built in the base plane's frame and drawn through
+`translation_transform(m_plane_center) * m_rotation_m`, the same matrix the flat plane uses, so
+the existing rotate/translate grabbers move the sheet with the plane, unchanged. A control-point
+drag is one undo step per gesture (snapshot on mouse-down), and is *absolute* — each tick
+re-applies the whole displacement to the grid as it stood at drag start, so a drag returning to
+its origin cancels itself instead of accumulating.
+
+Nothing new is written to the 3MF. The cut is baked, as plane cuts are; the control grid is
+session state and `on_set_state()` resets it whenever the gizmo opens or closes.
+
+### Disabled in Curved mode
+
+- **Connectors.** "Add connectors" / "Edit connectors" is greyed with the note *"Connectors are not
+  available on a curved cut yet."* — phase 1 scope, matching how the flat cut shipped before
+  connectors existed. Phase 2 (per section 3 above) is where per-connector local frames go.
+- **The Surface toggle itself** is disabled once connectors exist on the object, so you cannot
+  strand placed connectors by switching to Curved.
+- **Tongue-and-groove** is a separate `CutMode` and is unaffected; the Surface toggle only appears
+  for `cutPlanar`.
+- Still **available and unchanged**: Keep upper / Keep lower, Place on cut, Flip, Cut to parts.
+  These act on the resulting halves and have nothing to do with how the halves were separated.
+  Place-on-cut on a curved half rotates it so the *base plane* is down — the curved face is not
+  flat, so it will not sit flush; that is inherent, not a bug, and it is why the flat plane
+  remains what the option is defined against.
+
+### Performance: sheet size against boolean time
+
+40 mm cube, 8 mm dome, both booleans (Manifold), Release, measured by the `[.perf]` case in
+`test_curved_cut.cpp`:
+
+| samples | slab triangles | both booleans | result triangles |
+|---|---|---|---|
+| 32x32 | 4 092 | 10 ms | 1 528 |
+| 64x64 | 16 380 | 36 ms | 5 112 |
+| **128x128** | **65 532** | **131 ms** | **18 424** |
+| 192x192 | 147 452 | 300 ms | 39 928 |
+| 256x256 | 262 140 | 530 ms | 69 624 |
+
+Cost is essentially linear in slab triangle count here, because the cube is trivial and the slab
+dominates; on a real print mesh the object side dominates instead, as the research section
+predicted.
+
+**The preview and the cut sample at different rates, deliberately.** The sampled sheet is
+piecewise linear, so it sits below the true surface by a chord sag falling as 1/N²: for this
+8 mm dome over an 80 mm span that is **0.040 mm at 64x64 but 0.0098 mm at 128x128**. The proof bar
+asks the cut face to match `f(u,v)` within 0.02 mm, which 64x64 does *not* meet — so
+`CurvedCutSheet::CutSamples` is 128 and `DefaultSamples` (preview only, rebuilt every drag tick)
+stays 64. This was found by the test failing at 64x64, not assumed.
+
+### Proofs
+
+`tests/libslic3r/test_curved_cut.cpp`, all passing:
+
+1. **Flat sheet = flat cut.** `evaluate()` returns exactly `0.0` at 441 sample points; and the
+   full `Cut` path with a flat sheet produces the same volumes as `perform_with_plane()` — same
+   triangle count, same index arrays, vertices identical to 1e-9.
+2. **Domed sheet on a 40 mm cube.** `volume(upper) + volume(lower)` matches the cube's volume to
+   better than 1e-6 relative (28 245.1 + 35 754.9 = 64 000.0). The cut face, sampled at 25 points
+   across the footprint on *both* halves, matches `f(u,v)` within 0.02 mm.
+3. **Watertight and disjoint.** `its_num_open_edges` is 0 for both halves; intersecting them gives
+   less than 1e-6 of the cube's volume.
+4. **Grid resize preserves the surface.** 3 -> 9 -> 3 is an exact refinement (the 3x3 nodes are
+   9x9 nodes) and round-trips to 1e-9. 5 -> 7 is a *refit*, not a refinement — the 5x5 interior
+   nodes at u = 0.25, 0.75 are not 7x7 nodes — and costs ~0.26 mm on a smooth 8 mm surface, ~3% of
+   amplitude; a one-cell spike, the worst case, costs ~0.76 mm. Both are bounded relative to
+   amplitude as regression guards. This is a property of resampling between coarse grids of
+   different phase, not a defect, and it is written down so a change that makes it worse shows up.
+
+Also covered: Catmull-Rom really interpolates its control points; `grab` gives the centre the full
+delta, neighbours a falloff-weighted fraction, and the rim nothing (and no-falloff moves everything
+inside the radius the whole way); `smooth` pulls a spike down without flattening it; `reset` is
+exactly flat; the slab is closed with positive volume at 8, 32 and 64 samples.
+
+Full `libslic3r_tests`: 767 passed, 2 failed — the two known pre-existing failures in
+`test_mixed_filament.cpp`, unrelated to this work.
+
+**Demo**: `curved_cut_upper.stl`, `curved_cut_lower.stl`, `curved_cut_demo.3mf` (both halves as the
+two parts of one object), produced by the `[.demo]` case from the same code the tests exercise —
+set `EDGESLICER_CURVED_CUT_DEMO_DIR` to regenerate.
+
+### Unverified
+
+**Nobody has clicked this.** Everything above is proved headless, through `libslic3r`. The GUI
+compiles and the app launches clean with a scratch data dir, but no human has opened the Cut
+gizmo, switched Surface to Curved, dragged a handle and looked at the result. Specifically
+unverified by eye:
+
+- Whether the control-point handles are the right size and whether the ~18 px screen-space pick
+  radius feels right at typical zoom levels.
+- Whether the sheet reads correctly against the model — the preview is a thin two-sided slab, and
+  z-fighting against the object's own surface at grazing angles has not been checked.
+- Whether a drag feels natural. The drag maps mouse motion onto a camera-facing plane and keeps
+  only the component along the cut normal (the Sculpt gizmo's projection), which means a drag is
+  very insensitive when looking straight down the normal. Sculpt has the same property; whether it
+  is acceptable here has not been judged.
+- The interaction between a control-point drag and the plane's own grabbers when a handle sits
+  visually on top of a grabber. Handles get first refusal by design, but which one a user *expects*
+  to win in that overlap has not been tested.
+- `F` / `Shift+F` modal brush sizing was **not** wired up (the task allowed a plain radius slider
+  as the cheap alternative, and that is what shipped) — `GLGizmoSculpt`'s version routes through
+  `GLGizmosManager::on_char`, which would need a second gizmo hooked into that path.
+
+The owner click-test in section 7 above is still the outstanding gate.
