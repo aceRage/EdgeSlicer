@@ -4,6 +4,7 @@ add_executable(${_TEST_NAME}_tests
 	${_TEST_NAME}_tests.cpp
 	test_3mf.cpp
 	test_aabbindirect.cpp
+	test_assembly_face_pick.cpp
 	test_chameleon_brim.cpp
 	test_paint_depth.cpp
 	test_paint_depth_clamp.cpp
