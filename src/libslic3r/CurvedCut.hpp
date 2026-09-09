@@ -21,16 +21,17 @@ namespace Slic3r {
 //
 // Coordinates: the sheet lives in the cut plane's own frame, the same frame
 // cut_mesh() slices at z == 0. (u,v) run over [0,1]^2 and map linearly onto
-// [-half_size, +half_size] in local X and Y; f is in millimetres along local Z.
+// [-half_size_u, +half_size_u] x [-half_size_v, +half_size_v] in local X and Y;
+// f is in millimetres along local Z.
 // ---------------------------------------------------------------------------
 
 class CurvedCutSheet
 {
 public:
-    // Control grid resolution limits. The gizmo exposes 3..9; the maths works
+    // Control grid resolution limits. The gizmo exposes 3..15; the maths works
     // for any n >= 2 but a 2x2 grid cannot bend, only tilt.
     static const int MinResolution = 3;
-    static const int MaxResolution = 9;
+    static const int MaxResolution = 15;
     static const int DefaultResolution = 5;
     // Dense sample resolution for the PREVIEW sheet. 64x64 is plenty to look
     // right and cheap to rebuild every drag tick.
@@ -54,10 +55,31 @@ public:
     // represent it (exactly, when the new grid is a refinement).
     void set_resolution(int resolution);
 
-    // Half extent of the sheet's square domain in the cut plane, in mm. The
-    // sheet must cover the object's footprint under the cut plane.
-    double half_size() const { return m_half_size; }
-    void   set_half_size(double hs) { m_half_size = std::max(hs, 1e-6); }
+    // Half extent of the sheet's domain in the cut plane, in mm. The sheet must
+    // cover the object's footprint under the cut plane.
+    //
+    // PHASE 2: the domain is a RECTANGLE, so u and v get their own half extents.
+    // half_size() is kept as the square API (it reports the larger of the two,
+    // and setting it makes the domain square again), so every caller that only
+    // ever wanted "the sheet is this big" still compiles and still means what it
+    // used to. Nothing about the height field changes: (u,v) still run over
+    // [0,1]^2, they just map onto a rectangle now.
+    double half_size() const { return std::max(m_half_size_u, m_half_size_v); }
+    void   set_half_size(double hs) { set_half_size(hs, hs); }
+    double half_size_u() const { return m_half_size_u; }
+    double half_size_v() const { return m_half_size_v; }
+    // Change the domain. `resample` re-samples the CURRENT surface onto the new
+    // extent the way set_resolution() re-samples onto a new grid: each control
+    // point takes the height the OLD surface had at the SAME local (x,y) in mm,
+    // clamped at the old domain's border. The surface therefore stays put in the
+    // cut plane while the rectangle around it grows or shrinks - which is what
+    // "the shape survives a re-fit" has to mean, since a bend the user drew over
+    // the part must not slide or scale when the plane is nudged.
+    //
+    // Without `resample` the control heights are left alone, so the surface is
+    // STRETCHED onto the new rectangle - phase 1's set_half_size() behaviour,
+    // kept for the callers (and tests) that want exactly that.
+    void set_half_size(double hs_u, double hs_v, bool resample = false);
 
     // Control point displacement along the plane normal, in mm.
     double  at(int i, int j) const { return m_z[size_t(j) * m_resolution + i]; }
@@ -104,9 +126,45 @@ public:
 
 private:
     int                 m_resolution{DefaultResolution};
-    double              m_half_size{50.0};
+    double              m_half_size_u{50.0};
+    double              m_half_size_v{50.0};
     std::vector<double> m_z;
 };
+
+// ---------------------------------------------------------------------------
+// Phase 2: fitting the sheet to the cut's own cross-section.
+//
+// Phase 1 sized the sheet from the object's bounding-box diagonal, so on
+// anything that is not a cube most control points landed in empty space well
+// outside the part and only a couple of them did anything. The fit below
+// intersects the object with the cut plane and sizes the sheet to THAT outline
+// instead, so the handles sit over the material being cut.
+// ---------------------------------------------------------------------------
+
+// Half extents (u,v) of `mesh`'s cross-section at z == 0 in the cut plane's own
+// frame, plus a margin of max(`margin_rel` * extent, `margin_abs`) on each side.
+// `mesh` must already be in the plane frame (the same frame cut_mesh() slices).
+//
+// Returns false when the plane misses the mesh entirely (no crossing edge), in
+// which case the caller should keep the extent it has - an empty cross-section
+// is not a reason to collapse the sheet to nothing.
+bool curved_cut_fit_extent(const indexed_triangle_set& mesh,
+                           double&                     half_size_u,
+                           double&                     half_size_v,
+                           double                      margin_rel = 0.15,
+                           double                      margin_abs = 5.0);
+
+// Signed distance from `pos` (in the cut plane's frame) to the nearest surface
+// of `mesh` (also in that frame) along the plane normal, i.e. along local Z.
+// Both directions are tried and the NEARER hit wins; the sign is the local-Z
+// offset of the hit from `pos`. This is the pure core of the gizmo's
+// right-click "snap the handle onto the model" gesture.
+//
+// Returns false when the ray misses in both directions, in which case the
+// caller must leave the control point where it is.
+bool curved_cut_snap_distance(const indexed_triangle_set& mesh,
+                              const Vec3d&                pos,
+                              double&                     distance);
 
 // Build the closed slab that everything below the sheet gets intersected with:
 // the sheet, offset DOWN to a floor well below `bbox`, with a rim stitched
@@ -120,7 +178,10 @@ private:
 // sheet is never rescaled to fit: outside its domain evaluate_local() clamps and
 // the boundary height is extruded outwards, so widening the slab moves no part of
 // the surface that lies over the object.
-indexed_triangle_set curved_cut_lower_slab(const CurvedCutSheet& sheet, const BoundingBoxf3& bbox, int samples = CurvedCutSheet::CutSamples, double extent = -1.0);
+// `extent` applies to BOTH axes; `extent_v`, when positive, overrides it for v so
+// a rectangular sheet can be widened per axis. (A square `extent` still works and
+// still means what it did in phase 1.)
+indexed_triangle_set curved_cut_lower_slab(const CurvedCutSheet& sheet, const BoundingBoxf3& bbox, int samples = CurvedCutSheet::CutSamples, double extent = -1.0, double extent_v = -1.0);
 
 // Split `mesh` (already in the cut plane's frame) by the sheet. Returns false
 // when both booleans failed. Either output pointer may be null.

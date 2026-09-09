@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace Slic3r {
 
@@ -34,8 +35,40 @@ void CurvedCutSheet::set_values(const std::vector<double>& z)
 
 Vec2d CurvedCutSheet::control_xy(int i, int j) const
 {
-    return Vec2d((2.0 * control_u(i) - 1.0) * m_half_size,
-                 (2.0 * control_u(j) - 1.0) * m_half_size);
+    return Vec2d((2.0 * control_u(i) - 1.0) * m_half_size_u,
+                 (2.0 * control_u(j) - 1.0) * m_half_size_v);
+}
+
+void CurvedCutSheet::set_half_size(double hs_u, double hs_v, bool resample)
+{
+    hs_u = std::max(hs_u, 1e-6);
+    hs_v = std::max(hs_v, 1e-6);
+    if (hs_u == m_half_size_u && hs_v == m_half_size_v)
+        return;
+
+    if (!resample || is_flat()) {
+        m_half_size_u = hs_u;
+        m_half_size_v = hs_v;
+        return;
+    }
+
+    // Keep the SURFACE fixed in the plane, not the control values: each new
+    // control point takes the old surface's height at the same local (x,y) in
+    // mm. evaluate_local() clamps outside the old domain, so a point that ends
+    // up beyond the old rectangle picks up the border value rather than an
+    // extrapolated overshoot - the same clamped-boundary rule evaluate() uses.
+    const int           n = m_resolution;
+    std::vector<double> nz(size_t(n) * size_t(n), 0.0);
+    for (int j = 0; j < n; ++ j) {
+        const double y = (2.0 * control_u(j) - 1.0) * hs_v;
+        for (int i = 0; i < n; ++ i) {
+            const double x = (2.0 * control_u(i) - 1.0) * hs_u;
+            nz[size_t(j) * n + i] = evaluate_local(x, y);
+        }
+    }
+    m_half_size_u = hs_u;
+    m_half_size_v = hs_v;
+    m_z           = std::move(nz);
 }
 
 Vec3d CurvedCutSheet::control_pos(int i, int j) const
@@ -115,8 +148,8 @@ double CurvedCutSheet::evaluate(double u, double v) const
 
 double CurvedCutSheet::evaluate_local(double x, double y) const
 {
-    const double u = 0.5 * (x / m_half_size + 1.0);
-    const double v = 0.5 * (y / m_half_size + 1.0);
+    const double u = 0.5 * (x / m_half_size_u + 1.0);
+    const double v = 0.5 * (y / m_half_size_v + 1.0);
     return evaluate(u, v);
 }
 
@@ -199,10 +232,10 @@ indexed_triangle_set CurvedCutSheet::sample_sheet(int samples) const
     its.vertices.reserve(size_t(n) * size_t(n));
     for (int j = 0; j < n; ++ j) {
         const double v = double(j) / double(n - 1);
-        const double y = (2.0 * v - 1.0) * m_half_size;
+        const double y = (2.0 * v - 1.0) * m_half_size_v;
         for (int i = 0; i < n; ++ i) {
             const double u = double(i) / double(n - 1);
-            const double x = (2.0 * u - 1.0) * m_half_size;
+            const double x = (2.0 * u - 1.0) * m_half_size_u;
             its.vertices.emplace_back(Vec3f(float(x), float(y), float(evaluate(u, v))));
         }
     }
@@ -224,7 +257,115 @@ indexed_triangle_set CurvedCutSheet::sample_sheet(int samples) const
 // The cutter solid
 // ---------------------------------------------------------------------------
 
-indexed_triangle_set curved_cut_lower_slab(const CurvedCutSheet& sheet, const BoundingBoxf3& bbox, int samples, double extent)
+// ---------------------------------------------------------------------------
+// Phase 2: fitting to the cross-section, and snapping to the surface
+// ---------------------------------------------------------------------------
+
+bool curved_cut_fit_extent(const indexed_triangle_set& mesh,
+                           double&                     half_size_u,
+                           double&                     half_size_v,
+                           double                      margin_rel,
+                           double                      margin_abs)
+{
+    if (mesh.empty())
+        return false;
+
+    // The cross-section's bounding box, gathered straight from the edges that
+    // cross z == 0. No polygon assembly: the outline's BOUNDING BOX is all the
+    // fit needs, and every point of the outline lies on such an edge, so the
+    // box the crossings give is the box the outline has. That also sidesteps
+    // every degenerate case a contour builder has to handle (an edge lying in
+    // the plane, a vertex exactly on it, a non-manifold seam) - a crossing that
+    // is counted twice, or a coplanar edge whose endpoints are both taken, only
+    // ever contributes points that ARE on the section.
+    double min_x =  std::numeric_limits<double>::max();
+    double max_x = -std::numeric_limits<double>::max();
+    double min_y =  std::numeric_limits<double>::max();
+    double max_y = -std::numeric_limits<double>::max();
+    bool   any   = false;
+
+    auto take = [&](const Vec3d& p) {
+        min_x = std::min(min_x, p.x());
+        max_x = std::max(max_x, p.x());
+        min_y = std::min(min_y, p.y());
+        max_y = std::max(max_y, p.y());
+        any   = true;
+    };
+
+    for (const Vec3i32& tri : mesh.indices)
+        for (int e = 0; e < 3; ++ e) {
+            const Vec3d a = mesh.vertices[tri(e)].cast<double>();
+            const Vec3d b = mesh.vertices[tri((e + 1) % 3)].cast<double>();
+            const double za = a.z(), zb = b.z();
+            if (za == 0.0)
+                take(a);
+            if ((za < 0.0 && zb > 0.0) || (za > 0.0 && zb < 0.0)) {
+                const double t = za / (za - zb);
+                take(a + t * (b - a));
+            }
+        }
+
+    if (!any)
+        return false;
+
+    // Degenerate in one axis (a plane grazing a flat face along a line) still
+    // gives a usable fit once the margin is added, so only the "no crossing at
+    // all" case above is a failure.
+    const double ext_u = 0.5 * (max_x - min_x);
+    const double ext_v = 0.5 * (max_y - min_y);
+    half_size_u = std::max(ext_u + std::max(margin_rel * ext_u, margin_abs), 1e-6);
+    half_size_v = std::max(ext_v + std::max(margin_rel * ext_v, margin_abs), 1e-6);
+    return true;
+}
+
+bool curved_cut_snap_distance(const indexed_triangle_set& mesh,
+                              const Vec3d&                pos,
+                              double&                     distance)
+{
+    if (mesh.empty())
+        return false;
+
+    // Walk the triangles and intersect the vertical line x = pos.x, y = pos.y
+    // with each, keeping the hit whose |z - pos.z| is smallest. A line/triangle
+    // test rather than a ray one: "nearest hit in EITHER direction" is what the
+    // gesture wants (a handle floating above the part snaps down, one buried
+    // inside snaps to whichever face is closer), and one pass gets both.
+    bool   found = false;
+    double best  = 0.0;
+
+    for (const Vec3i32& tri : mesh.indices) {
+        const Vec3d a = mesh.vertices[tri(0)].cast<double>();
+        const Vec3d b = mesh.vertices[tri(1)].cast<double>();
+        const Vec3d c = mesh.vertices[tri(2)].cast<double>();
+
+        // Barycentric solve in the XY projection. A triangle seen edge-on from
+        // +Z projects to zero area and is skipped: it can only add a hit that a
+        // neighbouring, non-degenerate face already provides.
+        const double d = (b.y() - c.y()) * (a.x() - c.x()) + (c.x() - b.x()) * (a.y() - c.y());
+        if (std::abs(d) < 1e-12)
+            continue;
+        const double l0 = ((b.y() - c.y()) * (pos.x() - c.x()) + (c.x() - b.x()) * (pos.y() - c.y())) / d;
+        const double l1 = ((c.y() - a.y()) * (pos.x() - c.x()) + (a.x() - c.x()) * (pos.y() - c.y())) / d;
+        const double l2 = 1.0 - l0 - l1;
+        const double eps = -1e-9;
+        if (l0 < eps || l1 < eps || l2 < eps)
+            continue;
+
+        const double z    = l0 * a.z() + l1 * b.z() + l2 * c.z();
+        const double sign = z - pos.z();
+        if (!found || std::abs(sign) < std::abs(best)) {
+            best  = sign;
+            found = true;
+        }
+    }
+
+    if (!found)
+        return false;
+    distance = best;
+    return true;
+}
+
+indexed_triangle_set curved_cut_lower_slab(const CurvedCutSheet& sheet, const BoundingBoxf3& bbox, int samples, double extent, double extent_v)
 {
     const int n = std::max(samples, 2);
 
@@ -239,14 +380,16 @@ indexed_triangle_set curved_cut_lower_slab(const CurvedCutSheet& sheet, const Bo
     // (x,y) through evaluate_local() - not by (u,v) - is what keeps the surface
     // itself fixed: over the sheet's domain the heights are unchanged, and beyond
     // it the clamped edge value is extruded straight outwards.
-    const double hs = extent > 0.0 ? std::max(extent, sheet.half_size()) : sheet.half_size();
+    const double hs   = extent   > 0.0 ? std::max(extent,   sheet.half_size_u()) : sheet.half_size_u();
+    const double hs_v = extent_v > 0.0 ? std::max(extent_v, sheet.half_size_v())
+                                       : (extent > 0.0 ? std::max(extent, sheet.half_size_v()) : sheet.half_size_v());
 
     // Top surface (the sheet) then the floor, both as n x n grids so the rim
     // stitches vertex-for-vertex and the slab comes out watertight.
     its.vertices.reserve(size_t(n) * size_t(n) * 2);
     for (int j = 0; j < n; ++ j) {
         const double v = double(j) / double(n - 1);
-        const double y = (2.0 * v - 1.0) * hs;
+        const double y = (2.0 * v - 1.0) * hs_v;
         for (int i = 0; i < n; ++ i) {
             const double u = double(i) / double(n - 1);
             const double x = (2.0 * u - 1.0) * hs;
@@ -255,7 +398,7 @@ indexed_triangle_set curved_cut_lower_slab(const CurvedCutSheet& sheet, const Bo
     }
     const int base = n * n;
     for (int j = 0; j < n; ++ j) {
-        const double y = (2.0 * (double(j) / double(n - 1)) - 1.0) * hs;
+        const double y = (2.0 * (double(j) / double(n - 1)) - 1.0) * hs_v;
         for (int i = 0; i < n; ++ i) {
             const double x = (2.0 * (double(i) / double(n - 1)) - 1.0) * hs;
             its.vertices.emplace_back(Vec3f(float(x), float(y), float(floor_z)));
@@ -342,15 +485,21 @@ bool curved_cut_split(const indexed_triangle_set& mesh,
     // so a small part under a large plane would get a differently shaped cut than
     // the one the gizmo drew (and, at a rotated plane where the object's footprint
     // in the cut frame is much larger than the sheet, a nearly flat one).
-    BoundingBoxf3 bbox   = object.bounding_box();
-    double        extent = sheet.half_size();
+    // Phase 2: the sheet's domain is a rectangle, so the slab is widened PER
+    // AXIS. Taking one square extent from the larger side would still cover the
+    // object, but it would spend the slab's fixed sample budget on empty space
+    // along the short axis and coarsen the surface where it actually cuts.
+    BoundingBoxf3 bbox     = object.bounding_box();
+    double        extent   = sheet.half_size_u();
+    double        extent_v = sheet.half_size_v();
     if (bbox.defined) {
-        const double need = 1.05 * std::max(std::max(std::abs(bbox.min.x()), std::abs(bbox.max.x())),
-                                            std::max(std::abs(bbox.min.y()), std::abs(bbox.max.y()))) + 1.0;
-        extent = std::max(extent, need);
+        const double need_u = 1.05 * std::max(std::abs(bbox.min.x()), std::abs(bbox.max.x())) + 1.0;
+        const double need_v = 1.05 * std::max(std::abs(bbox.min.y()), std::abs(bbox.max.y())) + 1.0;
+        extent   = std::max(extent,   need_u);
+        extent_v = std::max(extent_v, need_v);
     }
 
-    TriangleMesh slab(curved_cut_lower_slab(sheet, bbox, samples, extent));
+    TriangleMesh slab(curved_cut_lower_slab(sheet, bbox, samples, extent, extent_v));
 
     bool ok = true;
     if (lower != nullptr) {

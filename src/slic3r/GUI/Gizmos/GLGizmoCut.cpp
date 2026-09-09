@@ -536,6 +536,9 @@ void GLGizmoCut3D::update_clipper()
     // upper/lower halves follow it instead of the flat plane above. A flat (or
     // untouched) sheet clears it, and the plain plane split stands.
     apply_curved_color_clip();
+    // Per-side visibility rides the same update: the colour clip is shared
+    // state on the canvas, so it has to be re-armed whenever the clip is.
+    apply_side_visibility();
 
     put_connectors_on_cut_plane(normal, offset);
 
@@ -1108,14 +1111,94 @@ void GLGizmoCut3D::render_grabber_connection(const ColorRGBA& color, Transform3d
 
 double GLGizmoCut3D::curved_sheet_half_size() const
 {
-    // The same extent the flat plane model is drawn at, so the sheet reads as
-    // "the plane, bent" rather than as a differently sized object.
+    // The FALLBACK only. Phase 1 sized the sheet at the flat plane model's own
+    // extent, which is derived from the object's bounding-box diagonal, so on a
+    // slab or a rotated plane most control points sat well outside the part -
+    // the owner's complaint. fit_curved_sheet_to_section() replaces this with a
+    // fit to the cut's own cross-section; this value is what the sheet starts at
+    // and what it falls back to when the plane misses the object entirely.
     return double(m_cut_plane_radius_koef) * m_radius;
+}
+
+// The instance mesh (every model-part volume, merged) expressed in the CUT
+// PLANE's own frame - the frame the sheet lives in and cut_mesh() slices at
+// z == 0. Both the cross-section fit and the handle snap work there, so they
+// share one derivation.
+bool GLGizmoCut3D::curved_instance_mesh_in_plane(indexed_triangle_set& out) const
+{
+    out.clear();
+
+    const CommonGizmosDataObjects::SelectionInfo* sel = m_c->selection_info();
+    const ModelObject* mo = sel ? sel->model_object() : nullptr;
+    if (mo == nullptr)
+        return false;
+
+    const int inst_idx = sel->get_active_instance();
+    if (inst_idx < 0 || inst_idx >= int(mo->instances.size()))
+        return false;
+
+    const Transform3d inst_matrix   = mo->instances[inst_idx]->get_transformation().get_matrix();
+    const Transform3d world_to_plane = (translation_transform(m_plane_center) * m_rotation_m).inverse();
+
+    for (const ModelVolume* mv : mo->volumes) {
+        if (!mv->is_model_part() || mv->mesh().empty())
+            continue;
+        indexed_triangle_set part = mv->mesh().its;
+        its_transform(part, world_to_plane * inst_matrix * mv->get_matrix());
+        its_merge(out, part);
+    }
+    return !out.empty();
+}
+
+void GLGizmoCut3D::fit_curved_sheet_to_section(bool force)
+{
+    if (!m_curved_surface)
+        return;
+
+    // Only re-fit when the plane has actually moved or turned. A fit costs a
+    // pass over the instance mesh; a redraw must not pay for one.
+    const bool moved = !m_curved_fit_valid ||
+                       !m_curved_fit_center.isApprox(m_plane_center) ||
+                       !m_curved_fit_rotation.isApprox(m_rotation_m);
+    if (!force && !moved)
+        return;
+
+    indexed_triangle_set mesh;
+    if (!curved_instance_mesh_in_plane(mesh))
+        return;
+
+    double hs_u = 0.0, hs_v = 0.0;
+    // 15% of the outline, or 5 mm, whichever is larger: the relative term keeps
+    // a big part's handles clear of the silhouette, the absolute one keeps a
+    // small part from getting a sheet barely wider than itself.
+    if (!curved_cut_fit_extent(mesh, hs_u, hs_v, 0.15, 5.0)) {
+        // The plane misses the object. Keep the extent we have rather than
+        // collapsing the sheet to nothing.
+        return;
+    }
+
+    // RE-SAMPLE, so the surface the user drew stays where it is in the plane
+    // while the rectangle around it changes - the same contract set_resolution()
+    // honours for a grid change.
+    m_curved_sheet.set_half_size(hs_u, hs_v, /*resample*/ true);
+
+    m_curved_fit_center   = m_plane_center;
+    m_curved_fit_rotation = m_rotation_m;
+    m_curved_fit_valid    = true;
+    m_curved_fit_pending  = false;
+
+    // The spacing changed, so the default bend radius did too. Only follow it
+    // while the user has not overridden it - m_curved_brush_radius <= 0 is the
+    // "not set yet" marker the panel already uses.
+    if (m_curved_brush_radius <= 0.f)
+        m_curved_brush_radius = default_curved_bend_radius();
+
+    invalidate_curved_sheet();
+    m_curved_hover_ctl = m_curved_drag_ctl = -1;
 }
 
 void GLGizmoCut3D::update_curved_sheet_model()
 {
-    m_curved_sheet.set_half_size(curved_sheet_half_size());
     m_curved_sheet_model.reset();
 
     // The dense sheet as a two-sided slab thin enough to read as a surface:
@@ -1162,9 +1245,15 @@ void GLGizmoCut3D::update_curved_sheet_model()
 // point can still be bent on its own by turning it down.
 float GLGizmoCut3D::default_curved_bend_radius() const
 {
+    // Phase 2: the domain is a rectangle, so u and v have different spacings.
+    // The radius is one number (grab() measures a circular distance), so take
+    // the SMALLER spacing: 1.5 of the larger would already reach past three
+    // neighbours along the short axis, which is not "carry your neighbours"
+    // any more, it is "bend the whole sheet".
     const int    n       = std::max(2, m_curved_sheet.resolution());
-    const double spacing = 2.0 * m_curved_sheet.half_size() / double(n - 1);
-    return float(std::max(1.0, 1.5 * spacing));
+    const double sp_u    = 2.0 * m_curved_sheet.half_size_u() / double(n - 1);
+    const double sp_v    = 2.0 * m_curved_sheet.half_size_v() / double(n - 1);
+    return float(std::max(1.0, 1.5 * std::min(sp_u, sp_v)));
 }
 
 void GLGizmoCut3D::render_curved_sheet()
@@ -1291,7 +1380,7 @@ void GLGizmoCut3D::release_curved_sheet_texture()
     m_curved_cap_dirty = true;
     m_curved_cap_key   = 0;
     m_curved_cap_stale = false;
-    m_parent.set_curved_color_clip(0, Transform3d::Identity(), 1.0);
+    m_parent.set_curved_color_clip(0, Transform3d::Identity(), 1.0, 1.0);
 }
 
 void GLGizmoCut3D::apply_curved_color_clip()
@@ -1299,11 +1388,10 @@ void GLGizmoCut3D::apply_curved_color_clip()
     // Only a sheet that is actually bent takes over the split: "Curved but
     // untouched" must stay exactly the flat cut, preview included.
     if (!is_curved_surface() || m_curved_sheet.is_flat() || m_connectors_editing || m_hide_cut_plane) {
-        m_parent.set_curved_color_clip(0, Transform3d::Identity(), 1.0);
+        m_parent.set_curved_color_clip(0, Transform3d::Identity(), 1.0, 1.0);
         return;
     }
 
-    m_curved_sheet.set_half_size(curved_sheet_half_size());
     update_curved_sheet_texture();
 
     // The sheet lives in the cut plane's own frame - the frame the plane model
@@ -1311,8 +1399,42 @@ void GLGizmoCut3D::apply_curved_color_clip()
     // inverts the same rotation and offset). Its inverse takes a world point
     // into that frame, which is what the fragment shader needs.
     const Transform3d plane_to_world = translation_transform(m_plane_center) * m_rotation_m;
-    m_parent.set_curved_color_clip(m_curved_sheet_tex, plane_to_world.inverse(), m_curved_sheet.half_size(),
+    m_parent.set_curved_color_clip(m_curved_sheet_tex, plane_to_world.inverse(),
+                                   m_curved_sheet.half_size_u(), m_curved_sheet.half_size_v(),
                                    m_curved_sheet_encoded ? m_curved_sheet_range : 0.);
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2 (2): side visibility.
+//
+// The two coloured halves the colour-clip shader draws can each be solid,
+// ghosted or hidden. Ghost is a translucent draw with depth WRITES off, so the
+// sheet and the far half show through it; Hidden is a discard in the shader,
+// because a zero-alpha fragment would still write depth and go on occluding.
+// Both default to Visible and are reset when the gizmo closes.
+// ---------------------------------------------------------------------------
+
+float GLGizmoCut3D::side_visibility_alpha(SideVisibility v)
+{
+    switch (v) {
+    case SideVisibility::Ghost:  return 0.25f;
+    case SideVisibility::Hidden: return -1.f; // negative == discard, see gouraud.fs
+    default:                     return 1.f;
+    }
+}
+
+void GLGizmoCut3D::apply_side_visibility()
+{
+    // Side 1 is the UPPER half, side 2 the lower, and that holds in both the
+    // flat and the curved path:
+    //  - flat: set_color_clip_plane() stores -normal, so color_clip_plane_dot is
+    //    negative above the plane; apply_color_clip_plane_colors() feeds side 1
+    //    with UPPER_PART_COLOR.
+    //  - curved: side = h - local.z, negative when local.z is above the sheet.
+    // (The camera direction flips m_clp_normal for the object clipper, not for
+    // the colour clip, so no is_looking_forward() swap belongs here.)
+    m_parent.set_color_clip_plane_alphas(side_visibility_alpha(m_upper_visibility),
+                                         side_visibility_alpha(m_lower_visibility));
 }
 
 void GLGizmoCut3D::update_curved_cap_model()
@@ -1353,16 +1475,17 @@ void GLGizmoCut3D::update_curved_cap_model()
     if (plane_to_vol.empty())
         return;
 
-    const int    n  = CurvedCutSheet::DefaultSamples;
-    const double hs = m_curved_sheet.half_size();
+    const int    n    = CurvedCutSheet::DefaultSamples;
+    const double hs_u = m_curved_sheet.half_size_u();
+    const double hs_v = m_curved_sheet.half_size_v();
 
     std::vector<Vec3d> pts(size_t(n) * size_t(n));
     for (int j = 0; j < n; ++ j) {
         const double v = double(j) / double(n - 1);
-        const double y = (2.0 * v - 1.0) * hs;
+        const double y = (2.0 * v - 1.0) * hs_v;
         for (int i = 0; i < n; ++ i) {
             const double u = double(i) / double(n - 1);
-            pts[size_t(j) * n + i] = Vec3d((2.0 * u - 1.0) * hs, y, m_curved_sheet.evaluate(u, v));
+            pts[size_t(j) * n + i] = Vec3d((2.0 * u - 1.0) * hs_u, y, m_curved_sheet.evaluate(u, v));
         }
     }
 
@@ -1398,7 +1521,10 @@ void GLGizmoCut3D::update_curved_cap_model()
     init_data.format = { GLModel::Geometry::EPrimitiveType::Triangles, GLModel::Geometry::EVertexLayout::P3N3 };
     auto idx = [n](int i, int j) { return size_t(j) * size_t(n) + size_t(i); };
 
-    const double du = 2.0 * hs / double(n - 1);
+    // One sample spacing per axis: on a rectangular sheet they differ, and a
+    // finite difference taken over the wrong step gives the wrong slope.
+    const double du = 2.0 * hs_u / double(n - 1);
+    const double dv = 2.0 * hs_v / double(n - 1);
     std::vector<int> remap(pts.size(), -1);
     std::vector<Vec3i32> tris;
     for (int j = 0; j + 1 < n; ++ j)
@@ -1413,8 +1539,8 @@ void GLGizmoCut3D::update_curved_cap_model()
                     // so the face is shaded as the curve it is rather than flat.
                     const double fx = (m_curved_sheet.evaluate_local(pts[s].x() + du, pts[s].y()) -
                                        m_curved_sheet.evaluate_local(pts[s].x() - du, pts[s].y())) / (2.0 * du);
-                    const double fy = (m_curved_sheet.evaluate_local(pts[s].x(), pts[s].y() + du) -
-                                       m_curved_sheet.evaluate_local(pts[s].x(), pts[s].y() - du)) / (2.0 * du);
+                    const double fy = (m_curved_sheet.evaluate_local(pts[s].x(), pts[s].y() + dv) -
+                                       m_curved_sheet.evaluate_local(pts[s].x(), pts[s].y() - dv)) / (2.0 * dv);
                     const Vec3d nrm = Vec3d(-fx, -fy, 1.0).normalized();
                     init_data.add_vertex((Vec3f) pts[s].cast<float>(), (Vec3f) nrm.cast<float>());
                 }
@@ -1445,7 +1571,8 @@ void GLGizmoCut3D::render_curved_cap()
     auto mix = [&key](double d) { key = key * 1000003u + std::hash<double>{}(d); };
     for (double z : m_curved_sheet.values())
         mix(z);
-    mix(m_curved_sheet.half_size());
+    mix(m_curved_sheet.half_size_u());
+    mix(m_curved_sheet.half_size_v());
     for (int i = 0; i < 3; ++ i)
         mix(m_plane_center[i]);
     for (int r = 0; r < 3; ++ r)
@@ -1503,13 +1630,111 @@ void GLGizmoCut3D::render_curved_control_points()
     for (int j = 0; j < n; ++ j)
         for (int i = 0; i < n; ++ i) {
             const int  id      = j * n + i;
-            const bool hovered = (id == m_curved_hover_ctl) || (id == m_curved_drag_ctl);
+            const bool hovered = (id == m_curved_hover_ctl) || (id == m_curved_drag_ctl) || (id == m_curved_snap_ctl);
             const ColorRGBA color = hovered ? ColorRGBA::ORANGE() :
                                     m_curved_sheet.at(i, j) != 0.0 ? GRABBER_COLOR : ColorRGBA::GRAY();
             render_model(m_sphere.model, color,
                          view_matrix * translation_transform(curved_control_world(i, j)) *
                          scale_transform(hovered ? size * 1.4 : size));
         }
+
+    render_curved_snap_marker();
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2 (3): snapping a handle onto the model.
+//
+// Right-click-drag a handle: it rides the model surface directly under it,
+// updating live, and the button release commits (one undo snapshot, taken on
+// the press, exactly as the left drag does). Shift carries the neighbours along
+// with the Bend radius falloff.
+//
+// "Under it" is along the plane normal in BOTH directions - a handle floating
+// above the part snaps down onto it, one buried inside snaps out to whichever
+// face is nearer. That means the surface it finds may be on the far side of the
+// object from the camera, which is exactly why this wants the side-visibility
+// control above: hide or ghost the near half and you can see what you are
+// snapping to.
+// ---------------------------------------------------------------------------
+
+bool GLGizmoCut3D::curved_snap_apply(int ctl, bool falloff)
+{
+    if (ctl < 0 || m_curved_snap_mesh.empty())
+        return false;
+
+    const int   n = m_curved_sheet.resolution();
+    const int   i = ctl % n;
+    const int   j = ctl / n;
+    const Vec2d xy = m_curved_sheet.control_xy(i, j);
+
+    // The gesture is ABSOLUTE, like the left drag: measure and apply from the
+    // grid the gesture STARTED on, never from the sheet as it stands. Measuring
+    // from the current sheet would find the handle already sitting on the
+    // surface after the first event, report a delta of zero, and then apply
+    // that zero to the start grid - undoing the snap on the very next motion.
+    const size_t k0  = size_t(j) * size_t(n) + size_t(i);
+    const double z0  = k0 < m_curved_drag_grid.size() ? m_curved_drag_grid[k0] : m_curved_sheet.at(i, j);
+    const Vec3d  pos(xy.x(), xy.y(), z0);
+
+    double dist = 0.0;
+    if (!curved_cut_snap_distance(m_curved_snap_mesh, pos, dist)) {
+        // No surface above or below this handle. Leave the point alone - the
+        // gesture is a no-op there, not a reason to fling it to zero.
+        m_curved_snap_hit_valid = false;
+        return false;
+    }
+
+    m_curved_snap_hit       = Vec3d(xy.x(), xy.y(), z0 + dist);
+    m_curved_snap_hit_valid = true;
+
+    m_curved_sheet.set_values(m_curved_drag_grid);
+    if (falloff && m_curved_brush_radius > 0.f)
+        m_curved_sheet.grab(xy, double(m_curved_brush_radius), dist, m_curved_falloff);
+    else
+        m_curved_sheet.at(i, j) += dist;
+
+    invalidate_curved_sheet();
+    return true;
+}
+
+void GLGizmoCut3D::render_curved_snap_marker()
+{
+    if (m_curved_snap_ctl < 0 || !m_curved_snap_hit_valid)
+        return;
+
+    GLShaderProgram* shader = wxGetApp().get_shader("flat");
+    if (shader == nullptr)
+        return;
+
+    const Camera& camera = wxGetApp().plater()->get_camera();
+    const double  mean   = get_grabber_mean_size(m_bounding_box);
+    const double  arm    = 0.6 * get_half_size(mean);
+
+    // A three-axis crosshair at the hit, in the PLANE's frame, so it reads as
+    // "this is where the handle is going to land on the surface".
+    GLModel::Geometry g;
+    g.format = { GLModel::Geometry::EPrimitiveType::Lines, GLModel::Geometry::EVertexLayout::P3 };
+    g.reserve_vertices(6);
+    g.reserve_indices(6);
+    for (int a = 0; a < 3; ++ a) {
+        Vec3d d = Vec3d::Zero();
+        d[a] = arm;
+        g.add_vertex((Vec3f) (m_curved_snap_hit - d).cast<float>());
+        g.add_vertex((Vec3f) (m_curved_snap_hit + d).cast<float>());
+        g.add_line((unsigned int) (2 * a), (unsigned int) (2 * a + 1));
+    }
+    GLModel marker;
+    marker.init_from(std::move(g));
+    marker.set_color(ColorRGBA::ORANGE());
+
+    shader->start_using();
+    shader->set_uniform("projection_matrix", camera.get_projection_matrix());
+    shader->set_uniform("view_model_matrix",
+                        camera.get_view_matrix() * translation_transform(m_plane_center) * m_rotation_m);
+    glsafe(::glLineWidth(2.f));
+    marker.render();
+    glsafe(::glLineWidth(1.f));
+    shader->stop_using();
 }
 
 int GLGizmoCut3D::curved_pick_control(const Vec2d& mouse_position) const
@@ -1568,6 +1793,47 @@ bool GLGizmoCut3D::curved_on_mouse(const wxMouseEvent& mouse_event)
 
     const Vec2d mouse_pos(mouse_event.GetX(), mouse_event.GetY());
 
+    // --- snap gesture (right button held) ---------------------------------
+    if (m_curved_snap_ctl >= 0) {
+        if (mouse_event.Dragging() || mouse_event.Moving()) {
+            // The handle does not follow the CURSOR - it follows the surface
+            // under itself. Re-applying on every motion event is what makes it
+            // live: the plane or the grid may have moved under the gesture.
+            if (curved_snap_apply(m_curved_snap_ctl, m_curved_snap_falloff))
+                m_parent.set_as_dirty();
+            return true;
+        }
+        if (mouse_event.RightUp() || mouse_event.Leaving()) {
+            // Release commits: the snapshot was taken on the press, so there is
+            // nothing to do but drop the gesture state.
+            m_curved_snap_ctl       = -1;
+            m_curved_snap_hit_valid = false;
+            m_curved_snap_mesh.clear();
+            m_parent.set_as_dirty();
+            return true;
+        }
+        return true;
+    }
+
+    if (mouse_event.RightDown() && !mouse_event.CmdDown()) {
+        const int ctl = curved_pick_control(mouse_pos);
+        if (ctl < 0)
+            return false; // not on a handle: let the normal right-click through
+        // The mesh in the plane frame is fixed for the whole gesture; derive it
+        // once here rather than per motion event.
+        if (!curved_instance_mesh_in_plane(m_curved_snap_mesh))
+            return false;
+        Plater::TakeSnapshot snapshot(wxGetApp().plater(), _u8L("Snap curved cut handle"), UndoRedo::SnapshotType::GizmoAction);
+        m_curved_snap_ctl       = ctl;
+        m_curved_hover_ctl      = ctl;
+        m_curved_snap_falloff   = mouse_event.ShiftDown();
+        m_curved_drag_grid      = m_curved_sheet.values();
+        m_curved_snap_hit_valid = false;
+        curved_snap_apply(ctl, m_curved_snap_falloff);
+        m_parent.set_as_dirty();
+        return true;
+    }
+
     if (m_curved_drag_ctl >= 0) {
         if (mouse_event.Dragging()) {
             double delta = 0.0;
@@ -1622,6 +1888,49 @@ bool GLGizmoCut3D::curved_on_mouse(const wxMouseEvent& mouse_event)
     return false;
 }
 
+// Visible / Ghost / Hidden, per half. Three radio buttons a side rather than a
+// combo: the state has to be readable at a glance while the user is looking at
+// the model, not at the panel.
+void GLGizmoCut3D::render_side_visibility_inputs()
+{
+    auto row = [this](const wxString& label, const char* id, SideVisibility& value) {
+        ImGui::AlignTextToFramePadding();
+        m_imgui->text(label + ": ");
+        ImGui::SameLine(m_label_width);
+
+        // The button labels have to differ between the two rows or ImGui treats
+        // them as the same widget; the "##u"/"##l" suffix is invisible and does
+        // exactly that.
+        const std::string suffix = std::string("##") + id;
+        struct { const char* key; SideVisibility v; } opts[3] = {
+            { "Visible", SideVisibility::Visible },
+            { "Ghost",   SideVisibility::Ghost   },
+            { "Hidden",  SideVisibility::Hidden  },
+        };
+        for (int k = 0; k < 3; ++ k) {
+            if (k > 0)
+                ImGui::SameLine();
+            const std::string lbl = _u8L(opts[k].key) + suffix;
+            bool sel = value == opts[k].v;
+            if (m_imgui->bbl_radio_button(lbl.c_str(), sel)) {
+                value = opts[k].v;
+                apply_side_visibility();
+                m_parent.set_as_dirty();
+            }
+        }
+    };
+
+    ImGui::Separator();
+    ImGui::AlignTextToFramePadding();
+    m_imgui->text(_L("Show halves") + ": ");
+    row(_L("Upper"), "u", m_upper_visibility);
+    row(_L("Lower"), "l", m_lower_visibility);
+    ImGui::PushTextWrapPos(m_editing_window_width);
+    m_imgui->text(_L("Ghost draws a half translucent so the cut surface and the other half show through; "
+                     "Hidden leaves it out of the preview entirely. Neither changes the cut."));
+    ImGui::PopTextWrapPos();
+}
+
 void GLGizmoCut3D::render_curved_surface_inputs()
 {
     ImGui::Separator();
@@ -1644,9 +1953,18 @@ void GLGizmoCut3D::render_curved_surface_inputs()
     bool curved = m_curved_surface;
     if (m_imgui->bbl_radio_button(curved_label.c_str(), curved)) {
         m_curved_surface = true;
+        // Start from the fallback extent, then fit to the cross-section at once
+        // - the user has just asked for the sheet, so there is nothing to
+        // debounce and the handles should already be over the part.
         m_curved_sheet.set_half_size(curved_sheet_half_size());
+        m_curved_fit_valid = false;
+        fit_curved_sheet_to_section(/*force*/ true);
         invalidate_curved_sheet();
     }
+
+    // Side visibility is useful on a flat cut too - "let me see the other half"
+    // has nothing to do with the sheet - so it is offered in both modes.
+    render_side_visibility_inputs();
 
     if (!m_curved_surface)
         return;
@@ -1701,6 +2019,9 @@ void GLGizmoCut3D::render_curved_surface_inputs()
     ImGui::PushTextWrapPos(m_editing_window_width);
     m_imgui->text(_L("Drag a handle to bend the cut surface. With every handle at zero the cut is "
                      "exactly the flat plane cut."));
+    m_imgui->text(_L("Right-click-drag a handle to snap it onto the model surface; hold Shift to carry "
+                     "its neighbours with it. The surface it finds may be on the far side of the part - "
+                     "set that half to Ghost or Hidden above to see it."));
     // The shaded halves follow the sheet every frame (the shader does the split);
     // only the cut FACE waits for the drag to finish, so say which one is behind.
     if (m_curved_cap_stale)
@@ -1950,6 +2271,16 @@ void GLGizmoCut3D::on_set_state()
     m_curved_surface = false;
     m_curved_sheet.reset(m_curved_resolution);
     m_curved_hover_ctl = m_curved_drag_ctl = -1;
+    // Phase 2 session state goes with it: the fit has to be recomputed for the
+    // next object, and side visibility is a preview aid, not a preference, so
+    // both halves come back Visible every time the gizmo opens or closes.
+    m_curved_fit_valid      = false;
+    m_curved_fit_pending    = false;
+    m_curved_snap_ctl       = -1;
+    m_curved_snap_hit_valid = false;
+    m_curved_snap_mesh.clear();
+    m_upper_visibility = m_lower_visibility = SideVisibility::Visible;
+    apply_side_visibility();
     invalidate_curved_sheet();
     release_curved_sheet_texture();
     if (m_state == On) {
@@ -2354,6 +2685,15 @@ void GLGizmoCut3D::on_dragging(const UpdateData& data)
         dragging_connector(data);
     check_and_update_connectors_state();
 
+    // The cross-section fit is DEBOUNCED to the end of the drag: it walks the
+    // instance mesh, so paying for it on every frame of a plane drag would stall
+    // the drag on any real model. Note the intent here and honour it in
+    // on_stop_dragging().
+    if (m_curved_surface && (m_hover_id == Z || m_hover_id == CutPlane || m_hover_id == CutPlaneXMove ||
+                             m_hover_id == CutPlaneYMove || m_hover_id == X || m_hover_id == Y ||
+                             m_hover_id == CutPlaneZRotation))
+        request_curved_fit();
+
     if (CutMode(m_mode) == CutMode::cutTongueAndGroove)
         reset_cut_by_contours();
 }
@@ -2380,6 +2720,14 @@ void GLGizmoCut3D::on_stop_dragging()
         if (m_was_cut_plane_dragged)
             Plater::TakeSnapshot snapshot(wxGetApp().plater(), _u8L("Move cut plane"), UndoRedo::SnapshotType::GizmoAction);
         m_ar_plane_center = m_plane_center;
+    }
+
+    // The drag is over, so pay for the re-fit now. It re-samples the surface
+    // onto the new rectangle, so a bend the user drew stays where it is in the
+    // plane rather than sliding or stretching with the new extent.
+    if (m_curved_fit_pending) {
+        m_curved_fit_pending = false;
+        fit_curved_sheet_to_section();
     }
 
     if (CutMode(m_mode) == CutMode::cutTongueAndGroove)
@@ -2498,9 +2846,12 @@ void GLGizmoCut3D::update_bb()
         m_groove.width = m_groove.width_init = 4.0f * m_groove.depth;
         m_groove.flaps_angle = m_groove.flaps_angle_init = float(PI) / 3.f;
         m_groove.angle = m_groove.angle_init = 0.f;
-        // The curved sheet's extent is derived from m_radius, so a new bounding
-        // box means a new sheet - the control grid itself is kept.
+        // A new bounding box means a new object (or a new instance), so the
+        // fallback extent and the cross-section fit both have to be redone -
+        // the control grid itself is kept.
         invalidate_curved_sheet();
+        m_curved_fit_valid = false;
+        m_curved_sheet.set_half_size(curved_sheet_half_size());
         m_curved_hover_ctl = m_curved_drag_ctl = -1;
         m_plane.reset();
         m_cone.reset();
@@ -4715,7 +5066,7 @@ void GLGizmoCut3D::perform_cut(const Selection& selection)
         const bool cut_curved = !cut_with_groove && !cut_by_contour && curved_surface && !curved_sheet.is_flat();
         if (curved_surface)
             BOOST_LOG_TRIVIAL(warning) << "Curved cut: perform, resolution=" << curved_sheet.resolution()
-                                       << " half_size=" << curved_sheet.half_size()
+                                       << " half_size=" << curved_sheet.half_size_u() << "x" << curved_sheet.half_size_v()
                                        << " max_displacement=" << curved_sheet.max_displacement()
                                        << " is_flat=" << curved_sheet.is_flat()
                                        << " cut_curved=" << cut_curved;
