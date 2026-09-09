@@ -5331,6 +5331,11 @@ void Print::_make_wipe_tower()
         m_wipe_tower_data.depth      = wipe_tower.get_depth();
         m_wipe_tower_data.width      = wipe_tower.width();
         m_wipe_tower_data.brim_width = wipe_tower.get_brim_width();
+        m_wipe_tower_data.construct_mesh(wipe_tower.width(), wipe_tower.get_depth(), wipe_tower.get_height(), wipe_tower.get_brim_width(),
+                                         m_config.wipe_tower_wall_type.value == WipeTowerWallType::wtwRib,
+                                         float(m_config.wipe_tower_rib_width), float(m_config.wipe_tower_extra_rib_length),
+                                         m_config.wipe_tower_fillet_wall,
+                                         m_config.wipe_tower_wall_type.value == WipeTowerWallType::wtwCone ? float(m_config.wipe_tower_cone_angle) : 0.f);
 
         // Unload the current filament over the purge tower.
         coordf_t layer_height = m_objects.front()->config().layer_height.value;
@@ -5470,6 +5475,11 @@ void Print::_make_wipe_tower()
         m_wipe_tower_data.local_z_reserve_boxes = wipe_tower.get_local_z_reserve_boxes();
         m_wipe_tower_data.brim_width        = wipe_tower.get_brim_width();
         m_wipe_tower_data.height            = wipe_tower.get_wipe_tower_height();
+        m_wipe_tower_data.construct_mesh(wipe_tower.width(), wipe_tower.get_depth(), wipe_tower.get_wipe_tower_height(),
+                                         wipe_tower.get_brim_width(), m_config.wipe_tower_wall_type.value == WipeTowerWallType::wtwRib,
+                                         float(m_config.wipe_tower_rib_width), float(m_config.wipe_tower_extra_rib_length),
+                                         m_config.wipe_tower_fillet_wall,
+                                         m_config.wipe_tower_wall_type.value == WipeTowerWallType::wtwCone ? float(m_config.wipe_tower_cone_angle) : 0.f);
 
         // Unload the current filament over the purge tower.
         coordf_t layer_height = m_objects.front()->config().layer_height.value;
@@ -5499,6 +5509,42 @@ void Print::_make_wipe_tower()
                                                   config().wipe_tower_rotation_angle, config().wipe_tower_cone_angle,
                                                   {scale_(origin.x()), scale_(origin.y())});
         m_fake_wipe_tower.outer_wall = wipe_tower.get_outer_wall();
+    }
+
+    // The clamps and checks above work from estimates; re-test the exact generated footprint
+    // so an off-plate tower fails with a clear error instead of exporting unprintable G-code.
+    if (m_wipe_tower_data.wipe_tower_mesh_data) {
+        Polygon footprint = m_wipe_tower_data.wipe_tower_mesh_data->bottom; // includes brim
+        footprint.rotate(Geometry::deg2rad(m_config.wipe_tower_rotation_angle.value));
+        footprint.translate(Point(scale_(m_config.wipe_tower_x.get_at(m_plate_index)),
+                                  scale_(m_config.wipe_tower_y.get_at(m_plate_index))));
+        Polygon printable_poly;
+        printable_poly.points = get_bed_shape(m_config);
+        const Polygons printable_polys{printable_poly};
+        if (!printable_poly.empty() && !diff(Polygons{footprint}, printable_polys).empty()) {
+            const BoundingBox fp = get_extents(footprint);
+            const BoundingBox pr = get_extents(printable_polys);
+            BOOST_LOG_TRIVIAL(error) << boost::format("wipe tower footprint [%1%,%2%]-[%3%,%4%] leaves printable [%5%,%6%]-[%7%,%8%]") %
+                unscaled(fp.min.x()) % unscaled(fp.min.y()) % unscaled(fp.max.x()) % unscaled(fp.max.y()) %
+                unscaled(pr.min.x()) % unscaled(pr.min.y()) % unscaled(pr.max.x()) % unscaled(pr.max.y());
+            throw Slic3r::SlicingError(L("Prime Tower") + L(" is partially outside the printable area, and it cannot be printed.\n"));
+        }
+        // Keep the existing msgid (do not add "an").
+        if (!intersection(get_bed_excluded_area(m_config), Polygons{footprint}).empty())
+            throw Slic3r::SlicingError(L("Prime Tower") + L(" is too close to exclusion area, and collisions will be caused.\n"));
+    }
+}
+
+void WipeTowerData::construct_mesh(float width, float depth, float height, float brim_width, bool /*is_rib_wipe_tower*/, float /*rib_width*/, float /*rib_length*/, bool /*fillet_wall*/, float cone_angle)
+{
+    wipe_tower_mesh_data = WipeTowerMeshData{};
+    if (width <= EPSILON || depth <= EPSILON)
+        return;
+    wipe_tower_mesh_data->bottom = WipeTower2::cone_base_polygon(width, depth, height, cone_angle);
+    if (brim_width > EPSILON) {
+        Polygons brimmed = offset(wipe_tower_mesh_data->bottom, float(scale_(brim_width)));
+        if (!brimmed.empty())
+            wipe_tower_mesh_data->bottom = brimmed.front();
     }
 }
 
