@@ -3,6 +3,7 @@
 #include "libslic3r/GCode/WipeTower.hpp"
 #include "libslic3r/GCode/WipeTower2.hpp"
 #include "libslic3r/GCode/WipeTowerEstimate.hpp"
+#include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/PrintConfig.hpp"
 
 #include <cmath>
@@ -271,6 +272,18 @@ TEST_CASE("The shipped defaults size the tower from the flush matrix", "[WipeTow
     const double flush_volume = WipeTower2::estimate_semm_flush_volume(config, 2);
     const double expected     = std::max(double(WipeTower::get_limit_depth_by_height(5.f)), flush_volume / (0.2 * 50.));
     CHECK_THAT(estimate(config, 2, 0.2, 5.).depth, WithinAbs(expected, 1e-6));
+}
+
+TEST_CASE("Type2 cone first-layer outline matches the cone base", "[WipeTowerEstimate]") {
+    DynamicPrintConfig config = make_config("cone");
+    config.set_key_value("wipe_tower_cone_angle", new ConfigOptionFloat(25.));
+    const Polygon cone = estimate_wipe_tower_first_layer_outline(config, WipeTowerType::Type2, 35., 20., 100.);
+    const Polygon box  = WipeTower2::cone_base_polygon(35., 20., 100., 0.);
+    CHECK(cone.points.size() > 4);
+    CHECK(diff(Polygons{box}, Polygons{cone}).empty());
+    CHECK(estimate_wipe_tower_first_layer_outline(config, WipeTowerType::Type1, 35., 20., 100.).points.size() == 4);
+    config.set_deserialize_strict("wipe_tower_wall_type", "rectangle");
+    CHECK(estimate_wipe_tower_first_layer_outline(config, WipeTowerType::Type2, 35., 20., 100.).points.size() == 4);
 }
 
 TEST_CASE("A config missing a tower key falls back to that key's default", "[WipeTowerEstimate]") {

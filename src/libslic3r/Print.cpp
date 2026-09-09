@@ -1599,12 +1599,14 @@ static StringObjectException layered_print_cleareance_valid(const Print &print, 
     // is degenerate and every check passes. Re-deriving it here missed towers printed with
     // no tool change to purge for (smooth timelapse / wrapping detection).
     if (width > EPSILON && depth > EPSILON) {
-        Polygon wipe_tower_convex_hull;
-        wipe_tower_convex_hull.points.emplace_back(scale_(x - brim_width), scale_(y - brim_width));
-        wipe_tower_convex_hull.points.emplace_back(scale_(x + width + brim_width), scale_(y - brim_width));
-        wipe_tower_convex_hull.points.emplace_back(scale_(x + width + brim_width), scale_(y + depth + brim_width));
-        wipe_tower_convex_hull.points.emplace_back(scale_(x - brim_width), scale_(y + depth + brim_width));
-        wipe_tower_convex_hull.rotate(Geometry::deg2rad(a), Point(scale_(x), scale_(y)));
+        Polygon wipe_tower_convex_hull = estimate_wipe_tower_first_layer_outline(config, resolve_wipe_tower_type(config), width, depth, wipe_tower_estimate.height);
+        if (brim_width > EPSILON) {
+            Polygons brimmed = offset(wipe_tower_convex_hull, float(scale_(brim_width)));
+            if (!brimmed.empty())
+                wipe_tower_convex_hull = brimmed.front();
+        }
+        wipe_tower_convex_hull.rotate(Geometry::deg2rad(a));
+        wipe_tower_convex_hull.translate(Point(scale_(x), scale_(y)));
         convex_hulls_temp.push_back(wipe_tower_convex_hull);
     }
     if (!intersection(convex_hulls_other, convex_hulls_temp).empty()) {

@@ -800,19 +800,12 @@ int GLVolumeCollection::load_wipe_tower_preview(
     if (show_brim) {
         // A Type2 cone-wall tower's base bulges past the body box — follow the real base
         // outline instead of the rectangle. Type1 ignores the cone option.
-        Polygon cone_base;
-        {
-            // Preset enums are ConfigOptionEnumGeneric, so read them by value; the planner is
-            // resolved as the estimate resolves it, off the printer preset.
-            const DynamicPrintConfig &print_cfg   = GUI::wxGetApp().preset_bundle->prints.get_edited_preset().config;
-            const DynamicPrintConfig &printer_cfg = GUI::wxGetApp().preset_bundle->printers.get_edited_preset().config;
-            const ConfigOption       *wall_opt    = print_cfg.option("wipe_tower_wall_type");
-            if (wall_opt != nullptr && wall_opt->getInt() == int(WipeTowerWallType::wtwCone) && resolve_wipe_tower_type(printer_cfg) == WipeTowerType::Type2)
-                cone_base = WipeTower2::cone_base_polygon(width, depth, height, print_cfg.opt_float("wipe_tower_cone_angle"));
-        }
-        if (!cone_base.empty()) {
-            Polygons brim_outline = offset(cone_base, scaled(brim_width));
-            brim_slab = WipeTower::its_make_rib_brim(brim_outline.empty() ? cone_base : brim_outline.front(), brim_height);
+        const DynamicPrintConfig &print_cfg   = GUI::wxGetApp().preset_bundle->prints.get_edited_preset().config;
+        const DynamicPrintConfig &printer_cfg = GUI::wxGetApp().preset_bundle->printers.get_edited_preset().config;
+        const Polygon             outline     = estimate_wipe_tower_first_layer_outline(print_cfg, resolve_wipe_tower_type(printer_cfg), width, depth, height);
+        if (outline.size() > 4) {
+            Polygons brim_outline = offset(outline, scaled(brim_width));
+            brim_slab = WipeTower::its_make_rib_brim(brim_outline.empty() ? outline : brim_outline.front(), brim_height);
         } else {
             brim_slab = make_cube(width + 2.f * brim_width, depth + 2.f * brim_width, brim_height);
             brim_slab.translate({-brim_width, -brim_width, 0.f});
