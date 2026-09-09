@@ -158,7 +158,8 @@ class GLGizmoCut3D : public GLGizmoBase
     int            m_curved_resolution{ CurvedCutSheet::DefaultResolution };
     // Brush radius for the control-point grab, in world mm, and whether the
     // Sculpt gizmo's falloff applies. F / Shift+F adjust it the way Sculpt does.
-    float          m_curved_brush_radius{ 10.f };
+    float          m_curved_brush_radius{ 0.f }; // 0 = take default_curved_bend_radius() on first use
+    float          default_curved_bend_radius() const;
     bool           m_curved_falloff{ true };
     // The dense sheet, rebuilt whenever the grid changes.
     GLModel        m_curved_sheet_model;

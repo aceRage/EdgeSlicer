@@ -1153,6 +1153,15 @@ void GLGizmoCut3D::update_curved_sheet_model()
     m_curved_sheet_dirty = false;
 }
 
+// 1.5 control spacings: enough for a handle to carry its neighbours, small enough that a single
+// point can still be bent on its own by turning it down.
+float GLGizmoCut3D::default_curved_bend_radius() const
+{
+    const int    n       = std::max(2, m_curved_sheet.resolution());
+    const double spacing = 2.0 * m_curved_sheet.half_size() / double(n - 1);
+    return float(std::max(1.0, 1.5 * spacing));
+}
+
 void GLGizmoCut3D::render_curved_sheet()
 {
     if (cut_line_processing())
@@ -1360,22 +1369,33 @@ void GLGizmoCut3D::render_curved_surface_inputs()
     // Control grid resolution. Resizing re-samples the current surface onto the
     // new grid, so the shape survives the change.
     int res = m_curved_sheet.resolution();
+    if (m_curved_brush_radius <= 0.f)
+        m_curved_brush_radius = default_curved_bend_radius();
     ImGui::AlignTextToFramePadding();
     m_imgui->text(_L("Control points") + ": ");
     ImGui::SameLine(m_label_width);
     ImGui::PushItemWidth(m_control_width * 0.7f);
-    if (ImGui::SliderInt("##curved_res", &res, CurvedCutSheet::MinResolution, CurvedCutSheet::MaxResolution, "%d x %d")) {
+    // ImGui formats ONE value: "%d x %d" read a second, garbage integer. Spell the label out.
+    char res_fmt[32];
+    snprintf(res_fmt, sizeof(res_fmt), "%d x %d", res, res);
+    if (ImGui::SliderInt("##curved_res", &res, CurvedCutSheet::MinResolution, CurvedCutSheet::MaxResolution, res_fmt)) {
         m_curved_sheet.set_resolution(res);
         m_curved_resolution = m_curved_sheet.resolution();
         m_curved_hover_ctl = m_curved_drag_ctl = -1;
         invalidate_curved_sheet();
+        m_curved_brush_radius = default_curved_bend_radius();
     }
 
+    // How far a dragged handle pulls its neighbours along (falloff-weighted), so the sheet bends
+    // as one surface instead of spiking at a single control point. Defaults to 1.5 control
+    // spacings; 1 spacing moves the dragged handle alone.
     ImGui::AlignTextToFramePadding();
-    m_imgui->text(_L("Brush radius") + ": ");
+    m_imgui->text(_L("Bend radius") + ": ");
     ImGui::SameLine(m_label_width);
     ImGui::PushItemWidth(m_control_width * 0.7f);
-    ImGui::SliderFloat("##curved_radius", &m_curved_brush_radius, 1.f, 60.f, "%.1f mm");
+    ImGui::SliderFloat("##curved_radius", &m_curved_brush_radius, 1.f, 200.f, "%.1f mm");
+    if (ImGui::IsItemHovered())
+        m_imgui->tooltip(_u8L("Neighbouring control points within this distance follow a dragged handle, less the further they are. Small: bend one point; large: bend the whole sheet.").c_str(), ImGui::GetFontSize() * 20.f);
 
     m_imgui->bbl_checkbox(_L("Falloff"), m_curved_falloff);
 
