@@ -5915,17 +5915,13 @@ void GUI_App::stop_sync_user_preset()
 void GUI_App::start_http_server()
 {
     if (!m_http_server.is_started()) {
-        // Ultra: bind the SAME loopback port Bambu Studio uses (LOCALHOST_PORT 13618).
-        // The fork moved this to 13650 to avoid clashing with a concurrently running
-        // Bambu Studio / OrcaSlicer, on the assumption that bambulab.com honours whatever
-        // localhost port we advertise via get_localhost_url. It does not: the third-party
-        // (Google) leg leaves the webview for the SYSTEM BROWSER, and the redirect target
-        // it comes back on is fixed on bambulab's side at the registered 13618 callback -
-        // our advertised 13650 is not a registered redirect target. The browser therefore
-        // either hits nothing on 13618 or reaches another slicer, and the user sees a 404.
-        // Colliding with a concurrently running Bambu Studio is the lesser problem, and is
-        // exactly how every other Bambu-Studio-derived slicer behaves.
-        m_http_server.setPort(LOCALHOST_PORT);
+        // Ultra P4: a DEDICATED OAuth-callback port (13650), not Bambu Studio's 13618, so a
+        // concurrently running Bambu Studio / OrcaSlicer cannot swallow our callback. bambulab.com
+        // does honour the localhost port we advertise through get_localhost_url: a user's 404
+        // report of 2026-09-08 carried the URL http://localhost:13650/?ticket=...&redirect_url=...,
+        // i.e. Google's redirect reached this port. That 404 was ours - the ticket exchange had no
+        // network plugin to run through - and is now a redirect with result=fail instead.
+        m_http_server.setPort(13650);
         m_http_server.start();
     }
     // The OAuth callback listener is short-lived; the 5s health-check auto-restart can
