@@ -532,6 +532,11 @@ void GLGizmoCut3D::update_clipper()
 
     m_c->object_clipper()->set_range_and_pos(normal, offset, dist);
 
+    // Curved surface: hand the sheet to the volume shader so the coloured
+    // upper/lower halves follow it instead of the flat plane above. A flat (or
+    // untouched) sheet clears it, and the plain plane split stands.
+    apply_curved_color_clip();
+
     put_connectors_on_cut_plane(normal, offset);
 
     if (m_raycasters.empty())
@@ -1200,6 +1205,286 @@ void GLGizmoCut3D::render_curved_sheet()
     shader->stop_using();
 }
 
+// ---------------------------------------------------------------------------
+// Curved PREVIEW.
+//
+// The coloured upper/lower halves come from the volume shader, which until now
+// split them by the FLAT cut plane (GLVolumeCollection::set_color_clip_plane +
+// color_clip_plane in gouraud.vs). With a bent sheet that reads as "a flat cut
+// with the curve as a sort of centre point" - the sheet is drawn curved but the
+// colours ignore it.
+//
+// Two pieces fix that:
+//  * the halves: the height field goes to the shader as a small float texture
+//    plus the world -> plane frame, and gouraud.fs compares the fragment's own
+//    local z against f(u,v). Per fragment, so it is exact whatever the mesh
+//    tessellation is, and free during a drag - the texture is 64x64 floats.
+//  * the cut face: MeshClipper slices at a single z, so its cap can only ever
+//    be flat. The curved cap is the sheet restricted to the object's interior,
+//    which is a point-in-mesh test per sample rather than a boolean: one ray
+//    per sample along the plane normal, parity of the hits ahead of it. A few
+//    ms for a 64x64 grid, against ~130 ms for the slab boolean on a 40 mm cube.
+// ---------------------------------------------------------------------------
+
+void GLGizmoCut3D::update_curved_sheet_texture()
+{
+    if (!m_curved_sheet_tex_dirty && m_curved_sheet_tex != 0)
+        return;
+
+    const int n = CurvedCutSheet::DefaultSamples;
+    std::vector<float> h(size_t(n) * size_t(n));
+    for (int j = 0; j < n; ++ j) {
+        const double v = double(j) / double(n - 1);
+        for (int i = 0; i < n; ++ i)
+            h[size_t(j) * n + i] = float(m_curved_sheet.evaluate(double(i) / double(n - 1), v));
+    }
+
+    if (m_curved_sheet_tex == 0) {
+        GLuint id = 0;
+        glsafe(::glGenTextures(1, &id));
+        m_curved_sheet_tex = (unsigned int) id;
+    }
+
+    glsafe(::glActiveTexture(GL_TEXTURE3));
+    glsafe(::glBindTexture(GL_TEXTURE_2D, (GLuint) m_curved_sheet_tex));
+    glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR));
+    glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR));
+    // CLAMP_TO_EDGE, not REPEAT: outside the sheet's square domain the split
+    // has to continue along the border height, not wrap round to the far side.
+    glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE));
+    glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE));
+    glsafe(::glPixelStorei(GL_UNPACK_ALIGNMENT, 1));
+    // GL_R32F / GL_RED are core from 3.0, which is what the 140 shaders run on
+    // (GLShadersManager picks 140/ at >= 3.1). The 110 fallback runs on a 2.1
+    // context where neither name is guaranteed, so use GL_LUMINANCE there - it
+    // reads back in .r all the same. GL_LUMINANCE is fixed point and clamps to
+    // [0,1], so encode f there as (f/range + 1)/2 and undo it in the shader;
+    // curved_sheet_encoded tells the shader which of the two it is looking at.
+    m_curved_sheet_range = std::max(1e-6, 2.0 * std::max(1.0, m_curved_sheet.max_displacement()));
+    if (wxGetApp().is_gl_version_greater_or_equal_to(3, 0)) {
+        m_curved_sheet_encoded = false;
+        glsafe(::glTexImage2D(GL_TEXTURE_2D, 0, GL_R32F, n, n, 0, GL_RED, GL_FLOAT, h.data()));
+    }
+    else {
+        m_curved_sheet_encoded = true;
+        for (float& f : h)
+            f = float(0.5 * (double(f) / m_curved_sheet_range + 1.0));
+        glsafe(::glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE, n, n, 0, GL_LUMINANCE, GL_FLOAT, h.data()));
+    }
+    glsafe(::glBindTexture(GL_TEXTURE_2D, 0));
+    glsafe(::glActiveTexture(GL_TEXTURE0));
+
+    m_curved_sheet_tex_dirty = false;
+}
+
+void GLGizmoCut3D::release_curved_sheet_texture()
+{
+    if (m_curved_sheet_tex != 0) {
+        GLuint id = (GLuint) m_curved_sheet_tex;
+        glsafe(::glDeleteTextures(1, &id));
+        m_curved_sheet_tex = 0;
+    }
+    m_curved_sheet_tex_dirty = true;
+    m_curved_sheet_encoded   = false;
+    m_curved_sheet_range     = 1.0;
+    m_curved_cap_model.reset();
+    m_curved_cap_dirty = true;
+    m_curved_cap_key   = 0;
+    m_curved_cap_stale = false;
+    m_parent.set_curved_color_clip(0, Transform3d::Identity(), 1.0);
+}
+
+void GLGizmoCut3D::apply_curved_color_clip()
+{
+    // Only a sheet that is actually bent takes over the split: "Curved but
+    // untouched" must stay exactly the flat cut, preview included.
+    if (!is_curved_surface() || m_curved_sheet.is_flat() || m_connectors_editing || m_hide_cut_plane) {
+        m_parent.set_curved_color_clip(0, Transform3d::Identity(), 1.0);
+        return;
+    }
+
+    m_curved_sheet.set_half_size(curved_sheet_half_size());
+    update_curved_sheet_texture();
+
+    // The sheet lives in the cut plane's own frame - the frame the plane model
+    // is drawn in, and the frame the cut itself works in (process_volume_curved_cut
+    // inverts the same rotation and offset). Its inverse takes a world point
+    // into that frame, which is what the fragment shader needs.
+    const Transform3d plane_to_world = translation_transform(m_plane_center) * m_rotation_m;
+    m_parent.set_curved_color_clip(m_curved_sheet_tex, plane_to_world.inverse(), m_curved_sheet.half_size(),
+                                   m_curved_sheet_encoded ? m_curved_sheet_range : 0.);
+}
+
+void GLGizmoCut3D::update_curved_cap_model()
+{
+    m_curved_cap_model.reset();
+    m_curved_cap_dirty = false;
+
+    const CommonGizmosDataObjects::SelectionInfo* sel = m_c->selection_info();
+    const ModelObject* mo = sel ? sel->model_object() : nullptr;
+    if (mo == nullptr || m_c->raycaster() == nullptr)
+        return;
+    const std::vector<const MeshRaycaster*> rcs = m_c->raycaster()->raycasters();
+    if (rcs.empty())
+        return;
+
+    const int inst_idx = sel->get_active_instance();
+    if (inst_idx < 0 || inst_idx >= int(mo->instances.size()))
+        return;
+    const Transform3d inst_matrix = mo->instances[inst_idx]->get_transformation().get_matrix();
+
+    const Transform3d plane_to_world = translation_transform(m_plane_center) * m_rotation_m;
+    const Transform3d world_to_plane = plane_to_world.inverse();
+
+    // One raycaster per model-part volume, in that volume's own coordinates
+    // (see Raycaster::on_update), so each needs its own plane -> volume map.
+    std::vector<Transform3d> plane_to_vol;
+    {
+        size_t k = 0;
+        for (const ModelVolume* mv : mo->volumes) {
+            if (!mv->is_model_part())
+                continue;
+            if (k >= rcs.size())
+                break;
+            plane_to_vol.emplace_back((world_to_plane * inst_matrix * mv->get_matrix()).inverse());
+            ++ k;
+        }
+    }
+    if (plane_to_vol.empty())
+        return;
+
+    const int    n  = CurvedCutSheet::DefaultSamples;
+    const double hs = m_curved_sheet.half_size();
+
+    std::vector<Vec3d> pts(size_t(n) * size_t(n));
+    for (int j = 0; j < n; ++ j) {
+        const double v = double(j) / double(n - 1);
+        const double y = (2.0 * v - 1.0) * hs;
+        for (int i = 0; i < n; ++ i) {
+            const double u = double(i) / double(n - 1);
+            pts[size_t(j) * n + i] = Vec3d((2.0 * u - 1.0) * hs, y, m_curved_sheet.evaluate(u, v));
+        }
+    }
+
+    // Inside test: shoot the sample point along the plane's +Z and count the
+    // hits ahead of it. Odd means the point is inside that volume. One ray per
+    // sample, not a boolean, and it is exactly the test the cap needs - the cap
+    // IS the sheet, wherever the object is.
+    std::vector<char> inside(pts.size(), 0);
+    for (size_t vi = 0; vi < plane_to_vol.size(); ++ vi) {
+        const AABBMesh& em = rcs[vi]->get_aabb_mesh();
+        Vec3d dir = plane_to_vol[vi].linear() * Vec3d::UnitZ();
+        if (dir.norm() < EPSILON)
+            continue;
+        dir.normalize();
+        for (size_t p = 0; p < pts.size(); ++ p) {
+            if (inside[p])
+                continue;
+            const std::vector<AABBMesh::hit_result> hits = em.query_ray_hits(plane_to_vol[vi] * pts[p], dir);
+            size_t ahead = 0;
+            for (const AABBMesh::hit_result& hr : hits)
+                if (hr.is_hit() && hr.distance() > 0.)
+                    ++ ahead;
+            if ((ahead & 1) != 0)
+                inside[p] = 1;
+        }
+    }
+
+    // Triangulate the cells whose four corners are all inside. A cell with a
+    // corner outside straddles the silhouette; dropping it costs at most one
+    // sample spacing of cap round the rim, and the object's own shaded surface
+    // shows through there, so the face still reads as closed.
+    GLModel::Geometry init_data;
+    init_data.format = { GLModel::Geometry::EPrimitiveType::Triangles, GLModel::Geometry::EVertexLayout::P3N3 };
+    auto idx = [n](int i, int j) { return size_t(j) * size_t(n) + size_t(i); };
+
+    const double du = 2.0 * hs / double(n - 1);
+    std::vector<int> remap(pts.size(), -1);
+    std::vector<Vec3i32> tris;
+    for (int j = 0; j + 1 < n; ++ j)
+        for (int i = 0; i + 1 < n; ++ i) {
+            const size_t corner[4] = { idx(i, j), idx(i + 1, j), idx(i + 1, j + 1), idx(i, j + 1) };
+            if (!inside[corner[0]] || !inside[corner[1]] || !inside[corner[2]] || !inside[corner[3]])
+                continue;
+            for (size_t s : corner)
+                if (remap[s] < 0) {
+                    remap[s] = int(init_data.vertices_count());
+                    // The height field's own surface normal, (-df/dx, -df/dy, 1),
+                    // so the face is shaded as the curve it is rather than flat.
+                    const double fx = (m_curved_sheet.evaluate_local(pts[s].x() + du, pts[s].y()) -
+                                       m_curved_sheet.evaluate_local(pts[s].x() - du, pts[s].y())) / (2.0 * du);
+                    const double fy = (m_curved_sheet.evaluate_local(pts[s].x(), pts[s].y() + du) -
+                                       m_curved_sheet.evaluate_local(pts[s].x(), pts[s].y() - du)) / (2.0 * du);
+                    const Vec3d nrm = Vec3d(-fx, -fy, 1.0).normalized();
+                    init_data.add_vertex((Vec3f) pts[s].cast<float>(), (Vec3f) nrm.cast<float>());
+                }
+            tris.emplace_back(Vec3i32(remap[corner[0]], remap[corner[1]], remap[corner[2]]));
+            tris.emplace_back(Vec3i32(remap[corner[0]], remap[corner[2]], remap[corner[3]]));
+        }
+
+    if (tris.empty())
+        return;
+    init_data.reserve_indices(tris.size() * 3);
+    for (const Vec3i32& t : tris)
+        init_data.add_triangle((unsigned int) t(0), (unsigned int) t(1), (unsigned int) t(2));
+
+    m_curved_cap_model.init_from(std::move(init_data));
+}
+
+void GLGizmoCut3D::render_curved_cap()
+{
+    if (!is_curved_surface() || m_curved_sheet.is_flat() || m_connectors_editing)
+        return;
+
+    // The cap costs a ray per sample, so key it on everything it depends on and
+    // skip the redraws (camera orbit, hover) that changed none of it. While a
+    // control point is being dragged the cap is left as it was and the panel
+    // says so, which keeps the drag at the frame rate the shaded halves - which
+    // are only a texture upload - already run at.
+    size_t key = 0;
+    auto mix = [&key](double d) { key = key * 1000003u + std::hash<double>{}(d); };
+    for (double z : m_curved_sheet.values())
+        mix(z);
+    mix(m_curved_sheet.half_size());
+    for (int i = 0; i < 3; ++ i)
+        mix(m_plane_center[i]);
+    for (int r = 0; r < 3; ++ r)
+        for (int c = 0; c < 3; ++ c)
+            mix(m_rotation_m(r, c));
+
+    if (m_curved_drag_ctl >= 0)
+        m_curved_cap_stale = (key != m_curved_cap_key);
+    else if (key != m_curved_cap_key || m_curved_cap_dirty) {
+        m_curved_cap_key   = key;
+        m_curved_cap_stale = false;
+        update_curved_cap_model();
+    }
+
+    if (!m_curved_cap_model.is_initialized())
+        return;
+
+    GLShaderProgram* shader = wxGetApp().get_shader("flat");
+    if (shader == nullptr)
+        return;
+
+    const Camera& camera = wxGetApp().plater()->get_camera();
+    shader->start_using();
+    shader->set_uniform("projection_matrix", camera.get_projection_matrix());
+    shader->set_uniform("view_model_matrix", camera.get_view_matrix() * translation_transform(m_plane_center) * m_rotation_m);
+    // The same two colours the flat cap uses, picked by which half is towards
+    // the camera - see is_looking_forward() and apply_color_clip_plane_colors().
+    m_curved_cap_model.set_color(is_looking_forward() ? LOWER_PART_COLOR : UPPER_PART_COLOR);
+
+    GLboolean cull_face = GL_FALSE;
+    ::glGetBooleanv(GL_CULL_FACE, &cull_face);
+    glsafe(::glDisable(GL_CULL_FACE));
+    m_curved_cap_model.render();
+    if (cull_face)
+        glsafe(::glEnable(GL_CULL_FACE));
+
+    shader->stop_using();
+}
+
 Vec3d GLGizmoCut3D::curved_control_world(int i, int j) const
 {
     return m_plane_center + m_rotation_m * m_curved_sheet.control_pos(i, j);
@@ -1416,6 +1701,10 @@ void GLGizmoCut3D::render_curved_surface_inputs()
     ImGui::PushTextWrapPos(m_editing_window_width);
     m_imgui->text(_L("Drag a handle to bend the cut surface. With every handle at zero the cut is "
                      "exactly the flat plane cut."));
+    // The shaded halves follow the sheet every frame (the shader does the split);
+    // only the cut FACE waits for the drag to finish, so say which one is behind.
+    if (m_curved_cap_stale)
+        m_imgui->text_colored(ImGuiWrapper::COL_ORANGE_LIGHT, _L("Cut face updating…"));
     m_imgui->text_colored(ImGuiWrapper::COL_ORANGE_LIGHT,
                           _L("Connectors are not available on a curved cut yet."));
     ImGui::PopTextWrapPos();
@@ -1662,6 +1951,7 @@ void GLGizmoCut3D::on_set_state()
     m_curved_sheet.reset(m_curved_resolution);
     m_curved_hover_ctl = m_curved_drag_ctl = -1;
     invalidate_curved_sheet();
+    release_curved_sheet_texture();
     if (m_state == On) {
         m_parent.set_use_color_clip_plane(true);
 
@@ -2282,6 +2572,14 @@ void GLGizmoCut3D::init_rendering_items()
 
 void GLGizmoCut3D::render_clipper_cut()
 {
+    // A bent sheet gets its cut face from render_curved_cap(): MeshClipper
+    // slices at a single z, so the clipper's cap is flat by construction and
+    // drawing it here would put a flat disc through the curved one.
+    if (is_curved_surface() && !m_curved_sheet.is_flat() && !m_connectors_editing) {
+        render_curved_cap();
+        return;
+    }
+
     if (! m_connectors_editing)
         ::glDisable(GL_DEPTH_TEST);
 

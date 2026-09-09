@@ -369,6 +369,139 @@ TEST_CASE("Curved cut: sheet size against boolean cost", "[CurvedCut][.perf]")
     }
 }
 
+// ---------------------------------------------------------------------------
+// (2b) The cut MATRIX, not just the sheet: a vertical cut plane, off-centre.
+//
+// The gizmo lets the base plane be rotated and translated, and the sheet rides
+// on that plane's frame. So the interesting failure is not the sheet maths - it
+// is whether Cut::perform_with_curved_sheet carries the SAME frame the flat cut
+// uses. If it did not, a bent sheet under a rotated plane would land somewhere
+// else entirely, or the two halves would not add up to the cube.
+//
+// Here the plane is rotated 90 degrees about X (so its normal is world -Y: a
+// vertical cut plane) and translated 7 mm off centre along that normal. The
+// proof is threefold: the halves' volumes sum to the cube, both are closed, and
+// the mating face sits at f(u,v) in the PLANE'S OWN frame - which is only true
+// if the frame survived the round trip.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("Curved cut: a rotated, off-centre cut plane keeps its frame", "[CurvedCut]")
+{
+    const indexed_triangle_set cube        = centred_cube();
+    const double               cube_volume = double(its_volume(cube));
+
+    // A dome, tall enough that a frame mistake could not hide inside tolerance.
+    const double         dome   = 8.0;
+    const CurvedCutSheet sheet  = dome_sheet(dome);
+    const double         offset = 7.0;
+
+    // The gizmo builds the cut matrix as translation * rotation, and Cut splits
+    // it back into get_rotation_matrix() and get_offset(); build it the same way.
+    // 90 degrees about X sends local +Z to world -Y, so the plane is vertical.
+    const Transform3d rotation = Geometry::rotation_transform(Vec3d(0.5 * PI, 0., 0.));
+    // Off centre ALONG THE NORMAL, so the cut is not through the middle: the
+    // plane's own origin ends up at world (0, -7, 0).
+    const Vec3d       plane_origin = rotation * Vec3d(0., 0., offset);
+    const Transform3d cut_matrix   = Geometry::translation_transform(plane_origin) * rotation;
+
+    // Sanity: the frame really is rotated and off centre.
+    REQUIRE((rotation * Vec3d::UnitZ() - Vec3d(0., -1., 0.)).norm() < 1e-12);
+    REQUIRE((plane_origin - Vec3d(0., -offset, 0.)).norm() < 1e-12);
+
+    Model model;
+    ModelObject* mo = model.add_object();
+    mo->add_volume(TriangleMesh(cube));
+    mo->add_instance();
+    // NOTE: no ensure_on_bed(). The cube stays centred on the origin so the
+    // plane frame above is the frame the assertions below use; dropping it onto
+    // the bed would add an instance offset the test would have to undo again.
+
+    Cut cut(mo, 0, cut_matrix, ModelObjectCutAttribute::KeepUpper | ModelObjectCutAttribute::KeepLower);
+    const ModelObjectPtrs& res = cut.perform_with_curved_sheet(sheet);
+    REQUIRE(res.size() == 2);
+
+    // Cut re-frames each half onto the cut plane (reset_instance_transformation),
+    // so pull the meshes back into world coordinates the way the viewer does.
+    auto world_its = [](const ModelObject* obj) {
+        indexed_triangle_set out;
+        const Transform3d inst = obj->instances.front()->get_transformation().get_matrix();
+        for (const ModelVolume* v : obj->volumes) {
+            if (!v->is_model_part())
+                continue;
+            TriangleMesh m(v->mesh());
+            m.transform(inst * v->get_matrix(), true);
+            its_merge(out, m.its);
+        }
+        return out;
+    };
+
+    const indexed_triangle_set a = world_its(res[0]);
+    const indexed_triangle_set b = world_its(res[1]);
+    REQUIRE(!a.empty());
+    REQUIRE(!b.empty());
+
+    // (i) The halves add up to the cube.
+    const double va = double(its_volume(a));
+    const double vb = double(its_volume(b));
+    REQUIRE(std::abs(va + vb - cube_volume) / cube_volume < 1e-5);
+    // Both halves are real: the off-centre plane cannot have thrown one away.
+    REQUIRE(va > 0.05 * cube_volume);
+    REQUIRE(vb > 0.05 * cube_volume);
+
+    // (ii) Both halves are closed.
+    REQUIRE(its_num_open_edges(a) == 0);
+    REQUIRE(its_num_open_edges(b) == 0);
+
+    // (iii) The cut face is f(u,v) in the PLANE'S frame. Take every vertex of
+    // both halves into that frame; a vertex whose (x,y) is inside the cube's
+    // footprint under the plane and whose local z is anywhere near the sheet
+    // must be ON the sheet. A frame error - the rotation applied the wrong way
+    // round, the offset taken along the wrong axis - moves the face bodily and
+    // shows up here immediately.
+    const Transform3d world_to_plane = cut_matrix.inverse();
+
+    size_t sampled = 0;
+    double worst   = 0.;
+    for (const indexed_triangle_set* half : { &a, &b })
+        for (const Vec3f& vf : half->vertices) {
+            const Vec3d p = world_to_plane * vf.cast<double>();
+            // Well inside the cube's cross-section, so this is face, not rim:
+            // the cube spans +-20 in x and (after the rotation) +-20 in the
+            // plane's y as well.
+            if (std::abs(p.x()) > 16.0 || std::abs(p.y()) > 16.0)
+                continue;
+            const double f = sheet.evaluate_local(p.x(), p.y());
+            // The sampled sheet sits a chord sag below the true surface, and the
+            // boolean adds vertices along the object's own faces too, so only
+            // judge the vertices that are meant to be on the face at all.
+            if (std::abs(p.z() - f) > 0.5)
+                continue;
+            worst = std::max(worst, std::abs(p.z() - f));
+            ++ sampled;
+        }
+
+    // The face has to have actually been found - a frame error that moved it
+    // out of the window above would leave this at zero.
+    REQUIRE(sampled > 100);
+    INFO("worst deviation from f(u,v) in the plane frame: " << worst << " mm over " << sampled << " vertices");
+    REQUIRE(worst < 0.02);
+
+    // And the dome really did bend the cut: the face is not the flat plane.
+    // A dome of `dome` mm over the cube's footprint must show up as a spread of
+    // local z on the face far larger than the 0.02 mm tolerance above.
+    double zmin = 1e30, zmax = -1e30;
+    for (const Vec3f& vf : a.vertices) {
+        const Vec3d p = world_to_plane * vf.cast<double>();
+        if (std::abs(p.x()) > 16.0 || std::abs(p.y()) > 16.0)
+            continue;
+        if (std::abs(p.z() - sheet.evaluate_local(p.x(), p.y())) > 0.5)
+            continue;
+        zmin = std::min(zmin, p.z());
+        zmax = std::max(zmax, p.z());
+    }
+    REQUIRE(zmax - zmin > 0.5 * dome);
+}
+
 TEST_CASE("Curved cut: the slab is a watertight solid", "[CurvedCut]")
 {
     const CurvedCutSheet sheet = dome_sheet(8.0);

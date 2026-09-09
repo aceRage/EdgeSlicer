@@ -417,6 +417,16 @@ private:
     bool m_use_color_clip_plane{ false };
     std::array<ColorRGBA, 2> m_color_clip_plane_colors{ ColorRGBA::RED(), ColorRGBA::BLUE() };
 
+    // Curved cut sheet (cut gizmo, Surface = Curved). When the texture id is
+    // non-zero the two halves are split by the height field it holds instead of
+    // by m_color_clip_plane, evaluated per fragment in the cut plane's frame.
+    unsigned int m_curved_sheet_tex{ 0 };
+    Transform3d  m_curved_sheet_matrix{ Transform3d::Identity() };
+    float        m_curved_sheet_half_size{ 1.f };
+    // Non-zero when the texture holds f encoded as (f/range + 1)/2 rather than
+    // f itself - the GL 2.1 fallback, where GL_LUMINANCE clamps to [0,1].
+    float        m_curved_sheet_range{ 0.f };
+
     struct Slope
     {
         // toggle for slope rendering
@@ -505,6 +515,16 @@ public:
         m_color_clip_plane[3] = offset;
     }
     void set_color_clip_plane_colors(const std::array<ColorRGBA, 2>& colors) { m_color_clip_plane_colors = colors; }
+    // world -> cut plane frame, and the sheet's half extent in that frame. Pass
+    // tex == 0 to go back to the plain flat colour split.
+    // range == 0 means the texture holds f directly; otherwise it holds
+    // (f/range + 1)/2 and the shader undoes that.
+    void set_curved_color_clip(unsigned int tex, const Transform3d& world_to_plane, double half_size, double range = 0.) {
+        m_curved_sheet_tex       = tex;
+        m_curved_sheet_matrix    = world_to_plane;
+        m_curved_sheet_half_size = float(half_size);
+        m_curved_sheet_range     = float(range);
+    }
 
     bool is_slope_GlobalActive() const { return m_slope.isGlobalActive; }
     bool is_slope_active() const { return m_slope.active; }

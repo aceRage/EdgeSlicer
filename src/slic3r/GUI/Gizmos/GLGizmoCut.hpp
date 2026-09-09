@@ -172,6 +172,29 @@ class GLGizmoCut3D : public GLGizmoBase
     // so every tick re-applies the whole displacement to this snapshot.
     std::vector<double> m_curved_drag_grid;
     bool           m_curved_drag_took_snapshot{ false };
+    // --- Curved PREVIEW ----------------------------------------------------
+    // The height field, uploaded as a DefaultSamples x DefaultSamples single
+    // channel float texture, is what makes the shaded upper/lower split follow
+    // the sheet instead of the flat plane. See gouraud.fs (curved_sheet_*).
+    unsigned int   m_curved_sheet_tex{ 0 };
+    bool           m_curved_sheet_tex_dirty{ true };
+    // On the GL 2.1 fallback the only float-ish texture is GL_LUMINANCE, which
+    // clamps to [0,1], so f is stored there as (f/range + 1)/2 and decoded in
+    // the shader. On 3.0+ it is a plain GL_R32F and neither of these is used.
+    bool           m_curved_sheet_encoded{ false };
+    double         m_curved_sheet_range{ 1.0 };
+    // The cut face (the coloured cross-section). The flat path gets it from
+    // MeshClipper, which slices at one z and so can only ever produce a flat
+    // cap; for a curved sheet the cap is the sheet itself restricted to the
+    // object's interior, sampled here on the same grid the sheet is drawn on.
+    GLModel        m_curved_cap_model;
+    bool           m_curved_cap_dirty{ true };
+    // Hash of everything the cap depends on, so a redraw that changed nothing
+    // (camera orbit, hover) does not pay for a rebuild.
+    size_t         m_curved_cap_key{ 0 };
+    // Set while a control point is being dragged: the cap is not rebuilt then,
+    // so the drag stays fluid, and the panel says the face is catching up.
+    bool           m_curved_cap_stale{ false };
 
     bool m_hide_cut_plane{ false };
     bool m_connectors_editing{ false };
@@ -411,9 +434,16 @@ private:
     // Half extent the sheet needs so it covers the object under the cut plane.
     double curved_sheet_half_size() const;
     void   update_curved_sheet_model();
-    void   invalidate_curved_sheet() { m_curved_sheet_dirty = true; }
+    void   invalidate_curved_sheet() { m_curved_sheet_dirty = true; m_curved_sheet_tex_dirty = true; m_curved_cap_dirty = true; }
     void   render_curved_sheet();
     void   render_curved_control_points();
+    // Upload / drop the height-field texture and point the volume shader at it.
+    void   update_curved_sheet_texture();
+    void   apply_curved_color_clip();
+    void   release_curved_sheet_texture();
+    // Rebuild the curved cut face from the sheet and the instance mesh.
+    void   update_curved_cap_model();
+    void   render_curved_cap();
     // World position of control point (i,j), i.e. through the base plane's
     // own rotate/translate, so the sheet follows the plane.
     Vec3d  curved_control_world(int i, int j) const;

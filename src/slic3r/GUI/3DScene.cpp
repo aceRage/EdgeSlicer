@@ -953,6 +953,20 @@ void GLVolumeCollection::render(GLVolumeCollection::ERenderType      type,
         shader->set_uniform("color_clip_plane", m_color_clip_plane);
         shader->set_uniform("uniform_color_clip_plane_1", m_color_clip_plane_colors[0]);
         shader->set_uniform("uniform_color_clip_plane_2", m_color_clip_plane_colors[1]);
+        // Curved cut: split the two halves by the sheet's height field rather
+        // than by the flat plane. Texture unit 3 - 0 is taken by depth_tex in
+        // the outline pass below, 1 and 2 by the environment map.
+        const bool curved_split = m_use_color_clip_plane && m_curved_sheet_tex != 0;
+        shader->set_uniform("curved_sheet_active", curved_split);
+        if (curved_split) {
+            glsafe(::glActiveTexture(GL_TEXTURE3));
+            glsafe(::glBindTexture(GL_TEXTURE_2D, (GLuint) m_curved_sheet_tex));
+            glsafe(::glActiveTexture(GL_TEXTURE0));
+            shader->set_uniform("curved_sheet_tex", 3);
+            shader->set_uniform("curved_sheet_matrix", m_curved_sheet_matrix);
+            shader->set_uniform("curved_sheet_half_size", m_curved_sheet_half_size);
+            shader->set_uniform("curved_sheet_range", m_curved_sheet_range);
+        }
         // BOOST_LOG_TRIVIAL(info) << boost::format("set uniform_color to {%1%, %2%, %3%, %4%}, with_outline=%5%, selected %6%")
         //     %volume.first->render_color[0]%volume.first->render_color[1]%volume.first->render_color[2]%volume.first->render_color[3]
         //     %with_outline%volume.first->selected;
