@@ -4670,7 +4670,9 @@ void GLGizmoCut3D::perform_cut(const Selection& selection)
         ScopeGuard part_selection_killer([this]() { m_part_selection = PartSelection(); });
 
         const bool cut_with_groove = CutMode(m_mode) == CutMode::cutTongueAndGroove;
-        const bool cut_by_contour = !cut_with_groove && m_part_selection.valid();
+        // A bent sheet wins over a part selection: the contour cut is a plane cut and would
+        // silently discard the curve (second route to a flat result, via right-click part picking).
+        const bool cut_by_contour = !cut_with_groove && m_part_selection.valid() && !(curved_surface && !curved_sheet.is_flat());
 
         ModelObject* cut_mo = cut_by_contour ? m_part_selection.model_object() : nullptr;
         if (cut_mo)
