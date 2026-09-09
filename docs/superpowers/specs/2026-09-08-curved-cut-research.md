@@ -368,6 +368,131 @@ Full `libslic3r_tests`: 767 passed, 2 failed — the two known pre-existing fail
 two parts of one object), produced by the `[.demo]` case from the same code the tests exercise —
 set `EDGESLICER_CURVED_CUT_DEMO_DIR` to regenerate.
 
+## Preview
+
+The owner bent the sheet with a vertical cut plane through a small part and reported "it's just a
+flat cut with the curve as a sort of centre point". The cut itself was right; the *preview* was not.
+
+Two things draw the cut in the gizmo, and both were flat:
+
+- **The coloured halves.** `GLGizmoCut3D::update_clipper()` calls
+  `m_parent.set_color_clip_plane(normal, offset)`, and `gouraud.vs` turned that into a single
+  per-vertex scalar `color_clip_plane_dot = dot(world_pos, color_clip_plane)`, which `gouraud.fs`
+  used to pick cyan or magenta. That is a plane test, so the halves were split by the flat plane no
+  matter how far the sheet was bent — the sheet was drawn curved beside a flat colour split, which
+  is exactly the "curve as a centre point" the owner saw.
+- **The cut face.** `render_clipper_cut()` goes through `ObjectClipper` -> `MeshClipper`, which
+  slices the mesh at one `z` (`slice_mesh(*m_mesh, height_mesh, ...)`) and triangulates the
+  resulting `ExPolygons` in the plane. A single-height slice can only ever produce a flat cap.
+
+### Approach chosen, and why
+
+**The halves: a height-field clip in the fragment shader** (the preferred route in the brief).
+
+The height field goes to the volume shader as a 64x64 single-channel float texture plus the world
+-> cut-plane matrix and the sheet's half extent (`GLVolumeCollection::set_curved_color_clip`, set
+from `GLGizmoCut3D::apply_curved_color_clip()` inside `update_clipper()`). `gouraud.fs` takes the
+fragment's own `world_pos` into the plane frame, samples `f(u,v)` there and compares against the
+fragment's local `z`.
+
+The comparison had to move from the vertex shader to the fragment shader. A per-vertex dot only
+bends as finely as the mesh is tessellated, so on a coarse model the split would still have looked
+like flat facets; per fragment it is exact for any mesh. The sign convention is kept as it was:
+`set_color_clip_plane` stores `-normal`, so negative means "above", and `side = h - local.z` is
+negative exactly when the fragment is above the sheet.
+
+Two details that are not obvious:
+
+- **`GL_CLAMP_TO_EDGE`**, not `GL_REPEAT`. Outside the sheet's square domain the split continues
+  along the border height instead of wrapping to the far side of the sheet.
+- **The GL 2.1 fallback.** `GLShadersManager` picks `140/` at GL >= 3.1 and `110/` below it.
+  `GL_R32F` / `GL_RED` are core from 3.0, so the 110 path uses `GL_LUMINANCE`, which is fixed point
+  on [0,1]; `f` is encoded there as `(f/range + 1)/2` and the shader undoes it when the
+  `curved_sheet_range` uniform is non-zero. Both shader versions carry the same code.
+
+**The cut face: the sheet, restricted to the object's interior.**
+
+Generalising `MeshClipper` to a height field would mean replacing its planar slice with a curved
+one — a real rewrite of code every gizmo depends on. Running the actual slab boolean
+(`curved_cut_split`) for the preview is the other extreme: ~130 ms for a 40 mm cube, which needs the
+debounce the brief describes.
+
+Neither was necessary, because the cap has a much cheaper definition: the cap **is** the sheet,
+wherever the object is. So `update_curved_cap_model()` walks the same 64x64 sheet samples the
+preview is drawn from, and for each one asks whether it is inside the object — one ray along the
+plane normal per sample, parity of the hits ahead of it, through the `AABBMesh` the gizmo's
+`Raycaster` already holds. Cells whose four corners are all inside get triangulated, shaded with the
+height field's own normal `(-df/dx, -df/dy, 1)`, and drawn in the same colour the flat cap used.
+
+`render_clipper_cut()` routes to this instead of the clipper's cap whenever the sheet is bent, so
+there is never a flat disc drawn through the curved one.
+
+### Performance
+
+The halves cost nothing per frame — the split is a texture lookup, and the texture is 64x64 floats
+(16 kB), re-uploaded only when the control grid changes. A drag therefore runs at full frame rate
+with the colours following the sheet live, which is what the brief's shader route was after.
+
+The cap is a few ms for 4096 rays against a `AABBMesh`, keyed on a hash of the control grid, the
+sheet's half size and the plane's own position and rotation, so redraws that changed none of it
+(camera orbit, hover) do not rebuild it. It is still skipped *during* a control-point drag, with a
+"Cut face updating…" note in the panel, so a drag can never be held up by it; the drag's `LeftUp`
+already calls `set_as_dirty()`, so the face catches up on the next frame. This is a cheaper policy
+than the ~150 ms debounce the brief allowed for the boolean route, and it needs no timer.
+
+### The rotated-plane proof
+
+The gizmo lets the base plane be rotated and translated, and the sheet rides on that plane's frame,
+so the failure worth testing is not the sheet maths — it is whether `Cut::perform_with_curved_sheet`
+carries the same frame the flat cut does.
+
+`tests/libslic3r/test_curved_cut.cpp`, *"Curved cut: a rotated, off-centre cut plane keeps its
+frame"*: a 40 mm cube, a domed sheet (8 mm at the centre control point), the cut plane rotated 90
+degrees about X — so its normal is world -Y, a vertical cut plane, the case the owner hit — and
+translated 7 mm off centre along that normal. It asserts:
+
+1. the two halves' volumes sum to the cube within 1e-5 relative, and neither half is degenerate;
+2. `its_num_open_edges` is 0 for both, so both are closed;
+3. every face vertex, taken into the plane's own frame, matches `f(u,v)` within **0.02 mm**;
+4. and the face really is bent — the spread of local `z` across it is more than half the dome
+   height, so a flat cut could not pass.
+
+It passes as written: `perform_with_curved_sheet` was already applying the cut matrix correctly
+(`process_volume_curved_cut` builds the same `invert_cut_matrix` from `get_rotation_matrix()` and
+`get_offset()` that the flat path does). **No frame fix was needed** — the bug was entirely in the
+preview. The test is the guard that keeps it that way.
+
+### Unchanged
+
+"Curved but untouched" is still exactly the flat cut, preview included: `apply_curved_color_clip()`
+clears the height-field clip whenever `m_curved_sheet.is_flat()`, so a flat sheet leaves both the
+colour split and the clipper's cap on the plain plane path. The connector UI is still disabled in
+Curved mode with the same note.
+
+### Unverified
+
+**Nobody has looked at this.** The build is clean and `libslic3r_tests` passes (bar the two known
+pre-existing `test_mixed_filament.cpp` failures), and the app launches with a scratch data dir with
+no shader compile errors in the log — but no human has opened the Cut gizmo, bent the sheet and
+seen the coloured halves and the cut face follow it. Specifically unverified by eye:
+
+- Whether the split reads correctly at the sheet's rim, where `GL_CLAMP_TO_EDGE` continues the
+  border height outwards. On a part narrower than the sheet this region is off the model entirely,
+  but on a part that overhangs the sheet it decides the colouring and has not been looked at.
+- The cap's rim. Cells with any corner outside the object are dropped, so the face can fall up to
+  one sample spacing (the plane's own extent / 63) short of the silhouette. The object's own shaded
+  surface shows through there, so it should read as the edge rather than as a gap, but that is a
+  judgement about how it looks, not a measurement.
+- Whether the cap z-fights the object's surface where the sheet grazes it. The flat path offsets
+  its cap by 0.001-0.002 mm along the normal for exactly this reason; the curved cap does not,
+  because it is drawn with depth test on and the object's own geometry is what it is cutting.
+- The **GL 2.1 / `110/` path has not been exercised at all.** The dev machine reports GL >= 3.1, so
+  every run so far took the `140/` shader and the `GL_R32F` upload. The `GL_LUMINANCE` encode/decode
+  pair is written and compiles, but nothing has run it.
+- Interaction with "Cut to parts", part selection and the tongue-and-groove mode was not
+  re-checked; the height-field clip is gated on `CutMode::cutPlanar` through `is_curved_surface()`,
+  so those should be untouched, but that is by construction rather than by test.
+
 ### Unverified
 
 **Nobody has clicked this.** Everything above is proved headless, through `libslic3r`. The GUI
