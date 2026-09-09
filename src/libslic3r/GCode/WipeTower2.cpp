@@ -2,7 +2,8 @@
 #include "WipeTower2.hpp"
 
 #include <cassert>
-#include <iostream>
+#include <algorithm>
+#include <cmath>
 #include <vector>
 #include <numeric>
 #include <memory>
@@ -16,6 +17,7 @@
 #include "LocalesUtils.hpp"
 #include "Geometry.hpp"
 #include "PrintConfig.hpp"
+#include "Config.hpp"
 #include "Surface.hpp"
 #include "Fill/FillRectilinear.hpp"
 
@@ -2434,6 +2436,53 @@ std::vector<std::vector<float>> WipeTower2::extract_wipe_volumes(const PrintConf
     }
 
     return wipe_volumes;
+}
+
+float WipeTower2::estimate_semm_flush_volume(const ConfigBase& config, size_t filaments_cnt)
+{
+    const auto *matrix_opt = dynamic_cast<const ConfigOptionFloats *>(config.option("flush_volumes_matrix"));
+    if (matrix_opt == nullptr || matrix_opt->values.empty())
+        return 0.f;
+
+    std::vector<float> wiping_matrix(cast<float>(matrix_opt->values));
+    float              scale = 1.f;
+    if (const auto *mult = dynamic_cast<const ConfigOptionFloats *>(config.option("flush_multiplier"));
+        mult != nullptr && !mult->values.empty())
+        scale = float(mult->get_at(0));
+    else if (const auto *mult_f = dynamic_cast<const ConfigOptionFloat *>(config.option("flush_multiplier")))
+        scale = float(mult_f->value);
+
+    const bool purge_in_tower = config.option("purge_in_prime_tower") != nullptr && config.option("purge_in_prime_tower")->getBool();
+    const bool semm           = config.option("single_extruder_multi_material") != nullptr &&
+                      config.option("single_extruder_multi_material")->getBool();
+    if (!purge_in_tower || !semm)
+        std::fill(wiping_matrix.begin(), wiping_matrix.end(), 0.f);
+
+    const unsigned int number_of_extruders = (unsigned int) (sqrt(wiping_matrix.size()) + EPSILON);
+    if (number_of_extruders == 0)
+        return 0.f;
+
+    std::vector<std::vector<float>> wipe_volumes;
+    for (size_t i = 0; i < number_of_extruders; ++i)
+        wipe_volumes.push_back(
+            std::vector<float>(wiping_matrix.begin() + i * number_of_extruders, wiping_matrix.begin() + (i + 1) * number_of_extruders));
+
+    const auto *minimal_purge = dynamic_cast<const ConfigOptionFloats *>(config.option("filament_minimal_purge_on_wipe_tower"));
+    for (unsigned int i = 0; i < number_of_extruders; ++i)
+        for (unsigned int j = 0; j < number_of_extruders; ++j) {
+            wipe_volumes[i][j] *= scale;
+            if (minimal_purge != nullptr)
+                wipe_volumes[i][j] = std::max<float>(wipe_volumes[i][j], float(minimal_purge->get_at(j)));
+        }
+
+    float maximum = 0.f;
+    for (const std::vector<float> &v : wipe_volumes)
+        maximum += *std::max_element(v.begin(), v.end());
+    maximum = maximum * filaments_cnt / wipe_volumes.size();
+
+    // Orca: it's overshooting a bit, so let's reduce it a bit
+    maximum *= 0.6f;
+    return maximum;
 }
 
 static float get_wipe_depth(float volume, float layer_height, float perimeter_width, float extra_flow, float extra_spacing, float width)

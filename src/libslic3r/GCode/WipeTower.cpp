@@ -605,6 +605,49 @@ const std::map<float, float> WipeTower::min_depth_per_height = {
     {100.f, 20.f}, {250.f, 40.f}
 };
 
+float WipeTower::get_limit_depth_by_height(float max_height)
+{
+    float min_wipe_tower_depth = 0.f;
+    auto  iter                 = WipeTower::min_depth_per_height.begin();
+    while (iter != WipeTower::min_depth_per_height.end()) {
+        auto curr_height_to_depth = *iter;
+
+        // This is the case that wipe tower height is lower than the first min_depth_to_height member.
+        if (curr_height_to_depth.first >= max_height) {
+            min_wipe_tower_depth = curr_height_to_depth.second;
+            break;
+        }
+
+        iter++;
+
+        // If curr_height_to_depth is the last member, use its min_depth.
+        if (iter == WipeTower::min_depth_per_height.end()) {
+            min_wipe_tower_depth = curr_height_to_depth.second;
+            break;
+        }
+
+        // If wipe tower height is between the current and next member, set the min_depth as linear interpolation between them
+        auto next_height_to_depth = *iter;
+        if (next_height_to_depth.first > max_height) {
+            float height_base    = curr_height_to_depth.first;
+            float height_diff    = next_height_to_depth.first - curr_height_to_depth.first;
+            float min_depth_base = curr_height_to_depth.second;
+            float depth_diff     = next_height_to_depth.second - curr_height_to_depth.second;
+
+            min_wipe_tower_depth = min_depth_base + (max_height - curr_height_to_depth.first) / height_diff * depth_diff;
+            break;
+        }
+    }
+    return min_wipe_tower_depth;
+}
+
+float WipeTower::get_auto_brim_by_height(float max_height)
+{
+    if (max_height < 100)
+        return max_height / 100.f * 8.f;
+    return 8.f;
+}
+
 WipeTower::WipeTower(const PrintConfig& config, int plate_idx, Vec3d plate_origin, const float prime_volume, size_t initial_tool, const float wipe_tower_height) :
     m_semm(config.single_extruder_multi_material.value),
     m_wipe_tower_pos(config.wipe_tower_x.get_at(plate_idx), config.wipe_tower_y.get_at(plate_idx)),

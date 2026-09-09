@@ -11,6 +11,7 @@
 #include "libslic3r/GCode/GCodeProcessor.hpp"
 #include "libslic3r/Format/bbs_3mf.hpp"
 #include "libslic3r/Slicing.hpp"
+#include "libslic3r/GCode/WipeTowerEstimate.hpp"
 #include "libslic3r/Arrange.hpp"
 #include "Plater.hpp"
 #include "libslic3r/Model.hpp"
@@ -304,9 +305,14 @@ public:
     BoundingBoxf3 get_objects_bounding_box();
 
     Vec3d get_origin() { return m_origin; }
-    Vec3d estimate_wipe_tower_size(const DynamicPrintConfig & config, const double w, const double d, int plate_extruder_size = 0, bool use_global_objects = false) const;
+    // plate_extruder_size: filaments purged on the plate; 0 derives them from its objects.
+    // use_global_objects skips the containment test, which the CLI needs before objects are
+    // assigned to plates - the layer height is then the project's thinnest, which over-reserves.
+    WipeTowerFootprint estimate_wipe_tower_footprint(const DynamicPrintConfig & config, int plate_extruder_size = 0, bool use_global_objects = false) const;
     arrangement::ArrangePolygon estimate_wipe_tower_polygon(const DynamicPrintConfig & config, int plate_index, int plate_extruder_size = 0, bool use_global_objects = false) const;
+    arrangement::ArrangePolygon estimate_wipe_tower_polygon(const DynamicPrintConfig & config, int plate_index, Vec3d& wt_pos, Vec3d& wt_size, int plate_extruder_size = 0, bool use_global_objects = false) const;
     std::vector<int> get_extruders(bool conside_custom_gcode = false) const;
+    std::vector<int> get_extruders(bool conside_custom_gcode, const DynamicPrintConfig& glb_config, const DynamicPrintConfig& project_config) const;
     std::vector<int> get_extruders_under_cli(bool conside_custom_gcode, DynamicPrintConfig& full_config) const;
     std::vector<int> get_extruders_without_support(bool conside_custom_gcode = false) const;
     std::vector<int> get_used_extruders();
@@ -317,6 +323,8 @@ public:
     bool contain_instance_totally(ModelObject* object, int instance_id) const;
     //judge whether instance is totally included in plate or not
     bool contain_instance_totally(int obj_id, int instance_id) const;
+    //judge whether any of the object's instances is totally included in plate or not
+    bool contain_any_instance_totally(int obj_id) const;
 
     //judge whether the plate's origin is at the left of instance or not
     bool is_left_top_of(int obj_id, int instance_id);

@@ -3642,12 +3642,17 @@ int CLI::run(int argc, char **argv)
                                  << " brim_chamfer=" << brim_chamfer
                                  << " brim_chamfer_max_width=" << brim_chamfer_max_width;
 
-        Vec3d wipe_tower_size = plate->estimate_wipe_tower_size(print_config, plate_obj_size_info.wipe_width, wipe_volume, filaments_cnt);
-        plate_obj_size_info.wipe_depth = wipe_tower_size(1);
+        // Body and brim from one estimate: resolving an auto (-1) brim against a different
+        // height would size the two halves of the same tower from two different objects.
+        const WipeTowerFootprint footprint = plate->estimate_wipe_tower_footprint(print_config, filaments_cnt);
+        brim_width = float(footprint.brim_width);
+        plate_obj_size_info.wipe_width = footprint.width;
+        plate_obj_size_info.wipe_depth = footprint.depth;
         BOOST_LOG_TRIVIAL(debug) << "check_plate_wipe_tower estimate result"
                                  << " plate=" << (plate_index + 1)
                                  << " wipe_depth=" << plate_obj_size_info.wipe_depth
-                                 << " wipe_height=" << wipe_tower_size(2);
+                                 << " wipe_height=" << footprint.height
+                                 << " resolved_brim_width=" << brim_width;
 
         Vec3d origin = plate->get_origin();
         Vec3d start(origin(0) + plate_obj_size_info.wipe_x - brim_width, origin(1) + plate_obj_size_info.wipe_y, 0.f);
@@ -4736,17 +4741,14 @@ int CLI::run(int argc, char **argv)
 
                             //float depth = v * (filaments_cnt - 1) / (layer_height * w);
 
-                            Vec3d wipe_tower_size = cur_plate->estimate_wipe_tower_size(m_print_config, w, v, filaments_cnt);
+                            const WipeTowerFootprint footprint = cur_plate->estimate_wipe_tower_footprint(m_print_config, filaments_cnt);
+                            Vec3d wipe_tower_size(footprint.width, footprint.depth, footprint.height);
                             Vec3d plate_origin = cur_plate->get_origin();
                             int plate_width, plate_depth, plate_height;
                             partplate_list.get_plate_size(plate_width, plate_depth, plate_height);
                             float depth = wipe_tower_size(1);
-                            float margin = 15.f, wp_brim_width = 0.f;
-                            ConfigOption *wipe_tower_brim_width_opt = m_print_config.option("prime_tower_brim_width");
-                            if (wipe_tower_brim_width_opt ) {
-                                wp_brim_width = wipe_tower_brim_width_opt->getFloat();
-                                BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format("arrange wipe_tower: wp_brim_width %1%")%wp_brim_width;
-                            }
+                            float margin = 15.f, wp_brim_width = float(footprint.brim_width);
+                            BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format("arrange wipe_tower: wp_brim_width %1%")%wp_brim_width;
 
                             BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format("arrange wipe_tower: x=%1%, y=%2%, width=%3%, depth=%4%, angle=%5%, prime_volume=%6%, filaments_cnt=%7%, layer_height=%8%, plate_width=%9%, plate_depth=%10%")
                                                             %x %y %w %depth %a %v %filaments_cnt %layer_height %plate_width %plate_depth;
