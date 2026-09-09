@@ -391,3 +391,86 @@ unverified by eye:
   `GLGizmosManager::on_char`, which would need a second gizmo hooked into that path.
 
 The owner click-test in section 7 above is still the outstanding gate.
+
+## Bug: flat result
+
+**Reported** on the live build (3269fec61b): Surface = Curved, a strongly S-bent sheet across a
+small part on a *vertical* cut plane (rotated 90 deg about X, offset from the object's centre),
+"Perform cut" produced a flat cut at the plane and ignored the sheet entirely — "just a flat cut
+with the curve as a sort of centre point". The flat preview colouring matched the flat result.
+
+### Cause
+
+`GLGizmoCut3D::perform_cut()` calls `m_parent.reset_all_gizmos()` *before* it builds the `Cut`, and
+that closes the Cut gizmo, which runs `on_set_state()`, which deliberately flattens the session-only
+surface (`m_curved_surface = false; m_curved_sheet.reset(...)`). By the time the very next block
+evaluated `is_curved_surface() && !m_curved_sheet.is_flat()`, both were already false, so the cut
+fell through to `perform_with_plane()` — the plain flat plane cut, at exactly the plane the sheet had
+been drawn on. Nothing about the geometry was wrong; the surface simply no longer existed when the
+cut was asked for. A second, latent defect made the same symptom possible even with the state fixed:
+`curved_cut_split()` widened the sheet itself (`s.set_half_size(need)`) to make the cutter reach past
+the object, which drags the control points outwards and *stretches* the surface — on a rotated plane,
+where the object's footprint in the cut frame is far larger than the sheet, that flattens a real bend
+into a shallow ripple.
+
+### Fix
+
+- `perform_cut()` now snapshots the Curved/Flat choice and a copy of the sheet **before**
+  `reset_all_gizmos()`, and performs the cut from that snapshot. One `BOOST_LOG_TRIVIAL(warning)` at
+  the call site prints resolution, half size, max displacement, `is_flat` and the resulting
+  `cut_curved`, so a future report carries its own diagnosis in the log.
+- `curved_cut_lower_slab()` takes an explicit `extent` and samples the top surface through
+  `evaluate_local(x, y)` rather than by `(u, v)`. `curved_cut_split()` now widens the **slab**, never
+  the sheet: over the sheet's own domain the heights are untouched, and outside it the clamped rim
+  value is extruded straight outwards.
+
+"Curved but untouched = flat cut" is unchanged — `perform_with_curved_sheet()` still dispatches a
+flat sheet into `perform_with_plane()`, and the gizmo still gates `cut_curved` on `!is_flat()`.
+
+### Proofs
+
+Three new cases in `tests/libslic3r/test_curved_cut.cpp`, all green:
+
+- **"a rotated, offset plane cuts curved"** — a 40 mm cube through the whole `Cut` path with a cut
+  matrix rotated 90 deg about X and offset 10 mm along its own normal, with a 5 mm dome. Both halves
+  have zero open edges and their volumes sum to the cube within 1e-4 relative; the halves are
+  unequal, so the offset is real. Mapped back into the *cut plane's own frame* (`cut_matrix.inverse()
+  * volume_matrix` — the instance transform is re-seated after the cut and must not be used), the
+  upper half spans local z in [0, 10] as the geometry demands, its cut face's height matches
+  `f(u,v)` within 0.02 mm at 4604 of its 4608 vertices, and it deviates from flat by more than 1 mm,
+  so the face is genuinely not planar. The flat-result guards are the two that would fail loudly on
+  the reported bug: no point of the upper half sits *below* the sheet by more than 0.05 mm (a flat
+  cut at z == 0 puts the dome's 5 mm crown a full 5 mm underneath the face), and the upper half's
+  volume is 13.65 cm3 against the 16.0 cm3 a flat 10x40x40 slice would give — the missing 2.35 cm3
+  is the dome's own.
+- **"the gizmo's fit sequence keeps the displacement"** — the gizmo's own call order
+  `set_half_size(30) → set_resolution(5) → grab(...) → set_half_size(52) → set_resolution(9)`, then
+  a real `curved_cut_split`. The displacement survives every step and the split still conserves
+  volume.
+- **"a wider slab keeps the sheet's own heights"** — a 20 mm sheet with a 5 mm dome, slab built at
+  70 mm: the slab really is 70 mm wide, the dome keeps its 5 mm peak at the sheet's own centre, and
+  every top vertex beyond the sheet's domain is at zero (extruded, not stretched).
+
+Existing curved-cut cases unchanged and still passing: 13 cases, 11191 assertions. Full
+`libslic3r_tests`: 786 cases, 784 passed, 2 failed as expected — the same two known pre-existing
+`test_mixed_filament.cpp` failures, unrelated to this work.
+
+Note that the rotated-plane case caught a *second* wrong assumption while it was being written: the
+first draft reconstructed the cut frame through the part's instance transform and read the face at
+the wrong place. `add_cut_volume()` bakes `cut_matrix` into the stored mesh, `add_volume()` then
+re-centres it into the volume matrix, and `reset_instance_transformation()` zeroes the instance
+rotation afterwards — so `cut_matrix.inverse() * volume_matrix` on the raw volume mesh is the only
+correct way back, and that is worth knowing for any future test on this path.
+
+**Demo**: the rotated-plane cube halves as `rotated_cut_A.stl` / `rotated_cut_B.stl`, written by the
+new `[.demo]` case from the same code the tests exercise.
+
+### Unverified
+
+**Nobody has clicked this either.** The fix is proved headless through `libslic3r` and the GUI
+compiles, but no human has reopened the Cut gizmo, bent a sheet on a vertical plane and pressed
+Perform cut. The specific claim that has only been reasoned about, not observed, is that
+`reset_all_gizmos()` was the *only* consumer of gizmo state that ran between the user's click and
+the cut: `get_cut_matrix()` is still read after the reset (as it always was, which is why the flat
+cut worked), and `on_set_state()` is not the only thing `activate_gizmo(Undefined)` triggers. The
+owner click-test remains the gate.
