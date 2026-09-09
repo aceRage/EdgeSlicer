@@ -1041,7 +1041,7 @@ bool image_row_context_for_region(const PrintObject &object, const PrintRegion &
     // in the right place instead of silently falling back to the un-split resolve() cycle.
     ctx.mesh_from_print = (object.trafo_centered() * mv->get_matrix()).inverse();
     const Vec3f up_mesh = (ctx.mesh_from_print.linear().cast<float>() * Vec3f(0.f, 0.f, 1.f));
-    ctx.facet_normal_mesh = up_mesh.norm() > 1e-9f ? up_mesh.normalized() : Vec3f(0.f, 0.f, 1.f);
+    ctx.facet_normal_mesh = up_mesh.norm() > 1e-9f ? Vec3f(up_mesh.normalized()) : Vec3f(0.f, 0.f, 1.f);
 
     ctx.row = mf;
     // Resolution is bounded by extrusion width, not by an arbitrary constant: a run shorter than
