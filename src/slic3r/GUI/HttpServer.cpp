@@ -659,10 +659,23 @@ std::shared_ptr<HttpServer::Response> HttpServer::bbl_auth_handle_request(const 
     std::string   refresh_expires_in_str = url_get_param(url, "refresh_expires_in");
     NetworkAgent* agent                  = wxGetApp().getAgent();
 
-    // Ultra P4: third-party (Google/OAuth) ticket flow. The loopback receives
-    // ?ticket=<t>&redirect_url=...; exchange the ticket for real tokens, then continue
-    // exactly like the legacy access_token flow below.
-    if (access_token.empty() && agent && boost::contains(url, "ticket")) {
+    // Ultra: upstream routes /refresh_token separately (Agora GoLive camera URLs); it is
+    // NOT a login callback and must never fall through to the login handler, which would
+    // answer it with a 404. We do not implement the Agora refresh, but we answer it the
+    // way upstream does when its parameters are absent rather than 404ing the login flow.
+    if (boost::starts_with(url, "/refresh_token")) {
+        BOOST_LOG_TRIVIAL(info) << "thirdparty_login: /refresh_token request (not a login callback)";
+        return std::make_shared<ResponseNotFound>();
+    }
+
+    // Ultra: third-party (Google/OAuth) ticket flow. The system browser lands on the
+    // loopback with ?ticket=<t>&redirect_url=<url>; exchange the ticket for real tokens
+    // (upstream TicketLoginTask::do_request_login_info) and then redirect the browser to
+    // redirect_url with ?result=success / ?result=fail - upstream NEVER answers a
+    // well-formed ticket callback with a 404, even when the exchange fails, because the
+    // browser would then show a bare 404 page instead of bambulab's own failure page.
+    const bool has_ticket = boost::contains(url, "ticket");
+    if (access_token.empty() && agent && has_ticket) {
         std::string  ticket  = url_get_param(url, "ticket");
         unsigned int tk_code = 0;
         std::string  tk_body;
@@ -732,6 +745,17 @@ std::shared_ptr<HttpServer::Response> HttpServer::bbl_auth_handle_request(const 
             std::string location_str = (boost::format("%1%?result=fail&error=%2%") % redirect_url % error_str).str();
             return std::make_shared<ResponseRedirect>(location_str);
         }
+    } else if (has_ticket && !redirect_url.empty()) {
+        // Ticket exchange failed (bad/expired ticket, network, agent missing). Upstream
+        // answers this with a 302 to redirect_url?result=fail, not a 404.
+        BOOST_LOG_TRIVIAL(info) << "thirdparty_login: ticket exchange failed, redirecting with result=fail";
+        std::string location_str = (boost::format("%1%?result=fail&error=ticket_exchange_failed") % redirect_url).str();
+        return std::make_shared<ResponseRedirect>(location_str);
+    } else if (has_ticket) {
+        // A ticket arrived but no redirect_url to send the browser back to; show a plain
+        // failure page rather than a 404 so the user sees why nothing happened.
+        BOOST_LOG_TRIVIAL(info) << "thirdparty_login: ticket present but redirect_url missing";
+        return std::make_shared<ResponseLoginFailed>();
     } else {
         return std::make_shared<ResponseNotFound>();
     }
@@ -839,6 +863,19 @@ void HttpServer::ResponseRedirect::write_response(std::stringstream& ssOut)
     ssOut << "Access-Control-Allow-Origin: *\r\n";           // CORS头
     ssOut << "\r\n";                                         // 头和主体之间的空行（必须）
     ssOut << sHTML;                                          // 响应体（长度必须匹配）
+}
+
+void HttpServer::ResponseLoginFailed::write_response(std::stringstream& ssOut)
+{
+    const std::string sHTML = "<html><body><h1>Sign-in failed</h1>"
+                              "<p>The sign-in could not be completed. You can close this page and try again "
+                              "in the slicer.</p></body></html>";
+    ssOut << "HTTP/1.1 200 OK\r\n";
+    ssOut << "Content-Type: text/html\r\n";
+    ssOut << "Content-Length: " << sHTML.size() << "\r\n";
+    ssOut << "Access-Control-Allow-Origin: *\r\n";
+    ssOut << "\r\n";
+    ssOut << sHTML;
 }
 
 void HttpServer::ResponseNotFound::write_response(std::stringstream& ssOut)

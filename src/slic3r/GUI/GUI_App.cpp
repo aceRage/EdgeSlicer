@@ -4046,6 +4046,18 @@ void GUI_App::start_remote_access()
     RemoteAccess::get().set_hidden(m_hub_managed); // before start(): goes into <pid>.json
     RemoteAccess::get().start();
 
+    // Ultra: SNORCA_LOGIN_LOOPBACK=1 starts the Bambu third-party (Google) login loopback
+    // server at startup instead of waiting for the sign-in page's get_localhost_url call.
+    // Test-only knob (test_login_loopback.py): it lets the loopback's routes and its bound
+    // port be gated without any credentials or a live bambulab page. No effect unless set.
+    {
+        wxString loopback_env;
+        if (wxGetEnv("SNORCA_LOGIN_LOOPBACK", &loopback_env) && loopback_env == "1") {
+            BOOST_LOG_TRIVIAL(info) << "SNORCA_LOGIN_LOOPBACK=1: starting the login loopback server at startup";
+            start_http_server();
+        }
+    }
+
     // Phone access left on last time: bring the hub up with the same link. The token here only
     // seeds a data folder that has never had one - the hub remembers its own and keeps it, so a
     // "New link" made from the tray is not undone by a slicer starting with an older copy.
@@ -5903,11 +5915,17 @@ void GUI_App::stop_sync_user_preset()
 void GUI_App::start_http_server()
 {
     if (!m_http_server.is_started()) {
-        // Ultra P4: use a DEDICATED OAuth-callback port (not 13618). Bambu Studio and
-        // OrcaSlicer also bind 13618, so whichever grabbed it first would win the OAuth
-        // handoff. We advertise this port via get_localhost_url (get_http_port()), and
-        // bambulab redirects the ticket to whatever localhost port we report.
-        m_http_server.setPort(13650);
+        // Ultra: bind the SAME loopback port Bambu Studio uses (LOCALHOST_PORT 13618).
+        // The fork moved this to 13650 to avoid clashing with a concurrently running
+        // Bambu Studio / OrcaSlicer, on the assumption that bambulab.com honours whatever
+        // localhost port we advertise via get_localhost_url. It does not: the third-party
+        // (Google) leg leaves the webview for the SYSTEM BROWSER, and the redirect target
+        // it comes back on is fixed on bambulab's side at the registered 13618 callback -
+        // our advertised 13650 is not a registered redirect target. The browser therefore
+        // either hits nothing on 13618 or reaches another slicer, and the user sees a 404.
+        // Colliding with a concurrently running Bambu Studio is the lesser problem, and is
+        // exactly how every other Bambu-Studio-derived slicer behaves.
+        m_http_server.setPort(LOCALHOST_PORT);
         m_http_server.start();
     }
     // The OAuth callback listener is short-lived; the 5s health-check auto-restart can

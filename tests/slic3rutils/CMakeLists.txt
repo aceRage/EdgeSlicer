@@ -4,6 +4,7 @@ add_executable(${_TEST_NAME}_tests
     printhost_devices_tests.cpp
     snapmaker_unload_tests.cpp
     wizard_networking_tests.cpp
+    login_useragent_tests.cpp
     )
 
 target_link_libraries(${_TEST_NAME}_tests test_common libslic3r_gui libslic3r)
