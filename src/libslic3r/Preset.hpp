@@ -379,6 +379,8 @@ bool is_compatible_with_print  (const PresetWithVendorProfile &preset, const Pre
 bool is_compatible_with_printer(const PresetWithVendorProfile &preset, const PresetWithVendorProfile &active_printer, const DynamicPrintConfig *extra_config);
 bool is_compatible_with_printer(const PresetWithVendorProfile &preset, const PresetWithVendorProfile &active_printer);
 
+class PresetCollection; // defined below; GCC/Clang need the name before these declarations
+
 // Mixed nozzle sizes (Phase 3): the nozzle diameter a FILAMENT preset was cut for, in mm, or 0
 // when it does not name one. Filament presets are per nozzle variant ("Generic ABS @U1 0.2
 // nozzle", "Bambu ABS @BBL H2D 0.6 nozzle") and declare that by listing the printer presets they
