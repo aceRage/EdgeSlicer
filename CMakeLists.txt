@@ -933,6 +933,15 @@ endif()
 # Resources install target, configure fhs.hpp on UNIX
 if (WIN32)
     install(DIRECTORY "${SLIC3R_RESOURCES_DIR}/" DESTINATION "./resources")
+    # EdgeSlicer: the bundled network plugin (UltraNet, a private clean-room component built in
+    # the same toolchain). The host copies <exe dir>/ultranet/*.dll into <data dir>/plugins on
+    # first run (GUI_App). Point ULTRANET_BIN_DIR at a folder holding bambu_networking.dll and
+    # BambuSource.dll to ship it; without it the packages carry no plugin and Bambu cloud
+    # sign-in falls back to the Bambu CDN download.
+    if (ULTRANET_BIN_DIR AND EXISTS "${ULTRANET_BIN_DIR}/bambu_networking.dll")
+        install(DIRECTORY "${ULTRANET_BIN_DIR}/" DESTINATION "./ultranet" FILES_MATCHING PATTERN "*.dll")
+        message(STATUS "EdgeSlicer: shipping the network plugin from ${ULTRANET_BIN_DIR}")
+    endif()
     set(CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS_SKIP TRUE)
     include(InstallRequiredSystemLibraries)
     install (PROGRAMS ${CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS} DESTINATION ".")
