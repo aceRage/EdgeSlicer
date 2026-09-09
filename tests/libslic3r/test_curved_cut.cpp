@@ -559,3 +559,240 @@ TEST_CASE("Curved cut: demo export", "[CurvedCut][.demo]")
          << " open edges upper " << its_num_open_edges(upper)
          << " lower " << its_num_open_edges(lower));
 }
+
+// ---------------------------------------------------------------------------
+// (10) The gizmo's own call sequence must not lose the displacement.
+//
+// The gizmo re-fits the sheet to the object every time it rebuilds the preview
+// model (update_curved_sheet_model -> set_half_size(curved_sheet_half_size())),
+// and the control-point slider re-samples the grid. Neither may zero the
+// surface, and set_half_size must not move the surface over the object either:
+// it changes the sheet's DOMAIN, and the cut has to keep evaluating the same
+// f(u,v) over the object's footprint.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("Curved cut: the gizmo's fit sequence keeps the displacement", "[CurvedCut]")
+{
+    CurvedCutSheet sheet(5);
+    // The sequence a drag actually produces: fit, set the grid, drag a handle,
+    // then fit again with a different extent (a new bounding box, a moved plane).
+    sheet.set_half_size(30.0);
+    sheet.set_resolution(5);
+    const Vec2d handle = sheet.control_xy(2, 2);
+    sheet.grab(handle, 20.0, 6.0, /*falloff*/ true);
+    REQUIRE(!sheet.is_flat());
+    const double peak = sheet.max_displacement();
+    REQUIRE(peak == Approx(6.0));
+
+    sheet.set_half_size(52.0);
+    REQUIRE(!sheet.is_flat());
+    REQUIRE(sheet.max_displacement() == Approx(peak));
+
+    // A grid resize in between must not flatten it either.
+    sheet.set_resolution(9);
+    REQUIRE(!sheet.is_flat());
+    REQUIRE(sheet.max_displacement() > 0.5 * peak);
+
+    // And the cut must still see a curve: the slab widening curved_cut_split()
+    // does may not rescale the sheet, so the height over the object's footprint
+    // is the height the gizmo drew.
+    const indexed_triangle_set cube = centred_cube();
+    indexed_triangle_set upper, lower;
+    REQUIRE(curved_cut_split(cube, sheet, &upper, &lower));
+    REQUIRE(!upper.empty());
+    REQUIRE(!lower.empty());
+    REQUIRE(std::abs(double(its_volume(upper)) + double(its_volume(lower)) - CUBE * CUBE * CUBE) / (CUBE * CUBE * CUBE) < 1e-6);
+}
+
+// ---------------------------------------------------------------------------
+// (11) Widening the slab past the sheet must not move the surface.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("Curved cut: a wider slab keeps the sheet's own heights", "[CurvedCut]")
+{
+    const CurvedCutSheet sheet = dome_sheet(5.0, 5, 20.0);
+
+    BoundingBoxf3 bbox;
+    bbox.merge(Vec3d(-60, -60, -20));
+    bbox.merge(Vec3d(60, 60, 20));
+
+    // The object reaches far past the sheet, so curved_cut_lower_slab has to be
+    // built at 70 mm. The dome's own peak stays where the sheet puts it.
+    const indexed_triangle_set slab = curved_cut_lower_slab(sheet, bbox, 128, 70.0);
+    REQUIRE(its_num_open_edges(slab) == 0);
+
+    double peak = -1e30, peak_x = 0.0, peak_y = 0.0;
+    double half_extent = 0.0;
+    for (const Vec3f& v : slab.vertices) {
+        half_extent = std::max(half_extent, double(std::abs(v.x())));
+        if (double(v.z()) > peak) { peak = double(v.z()); peak_x = double(v.x()); peak_y = double(v.y()); }
+    }
+    REQUIRE(half_extent >= 69.0);              // the slab really was widened
+    // ... and the dome kept its height. The 128-sample grid now spans 140 mm, so its
+    // 1.1 mm spacing straddles rather than hits the peak: the sampled maximum sits a
+    // chord sag below 5 mm. Nowhere near stretched flat, which is what the old
+    // set_half_size() rescale would have produced here (~0.9 mm).
+    REQUIRE(peak == Approx(5.0).margin(0.15));
+    REQUIRE(std::abs(peak_x) < 2.0);           // ... at the sheet's own centre
+    REQUIRE(std::abs(peak_y) < 2.0);
+    // Outside the sheet's domain the rim value (zero) is extruded, not stretched.
+    // (Floor vertices sit far below; only look at the top sheet.)
+    for (const Vec3f& v : slab.vertices)
+        if (std::abs(double(v.x())) > 25.0 && double(v.z()) > -10.0)
+            REQUIRE(std::abs(double(v.z())) < 0.01);
+}
+
+// ---------------------------------------------------------------------------
+// (12) A ROTATED, OFFSET cut plane through Cut::perform_with_curved_sheet.
+//
+// The bug the owner hit: a vertical plane (rotated 90 deg about X) offset from
+// the object's centre came out FLAT. This drives the whole Cut path, not
+// curved_cut_split() on an axis-aligned mesh, and checks the cut face in the
+// CUT PLANE'S OWN frame - the frame the sheet lives in.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("Curved cut: a rotated, offset plane cuts curved", "[CurvedCut]")
+{
+    // A 40 mm cube with its centre at the origin, one instance.
+    Model model;
+    ModelObject* mo = model.add_object();
+    mo->name = "cube";
+    mo->add_volume(TriangleMesh(centred_cube()))->name = "cube_v";
+    mo->add_instance();
+
+    // The cut plane: rotated 90 degrees about X (a VERTICAL plane whose normal
+    // is world -Y), then offset 10 mm from the object's centre along its normal.
+    const Transform3d rotation   = Transform3d(Eigen::AngleAxisd(0.5 * PI, Vec3d::UnitX()));
+    const Vec3d       offset     = rotation * Vec3d(0.0, 0.0, 10.0);
+    const Transform3d cut_matrix = Geometry::translation_transform(offset) * rotation;
+
+    // A 5 mm dome, the shape the gizmo's centre handle makes.
+    CurvedCutSheet sheet(5);
+    sheet.set_half_size(40.0);
+    sheet.at(2, 2) = 5.0;
+    REQUIRE(!sheet.is_flat());
+
+    ModelObjectCutAttributes attributes = ModelObjectCutAttribute::KeepUpper | ModelObjectCutAttribute::KeepLower;
+    Cut cut(mo, 0, cut_matrix, attributes);
+    const ModelObjectPtrs& parts = cut.perform_with_curved_sheet(sheet);
+    REQUIRE(parts.size() == 2);
+
+    // Volumes sum to the cube, and both halves are closed.
+    double total = 0.0;
+    std::vector<double> vols;
+    for (const ModelObject* part : parts) {
+        REQUIRE(part->volumes.size() == 1);
+        const indexed_triangle_set& its = part->volumes.front()->mesh().its;
+        REQUIRE(!its.empty());
+        REQUIRE(its_num_open_edges(its) == 0);
+        const double v = std::abs(double(its_volume(its)));
+        vols.push_back(v);
+        total += v;
+    }
+    REQUIRE(std::abs(total - CUBE * CUBE * CUBE) / (CUBE * CUBE * CUBE) < 1e-4);
+
+    // The 10 mm offset means the plane sits 10 mm off centre, so the halves are
+    // NOT equal: 30x40x40 and 10x40x40, plus/minus the dome's own volume.
+    const size_t small_idx = vols[0] < vols[1] ? 0 : 1;
+    REQUIRE(vols[small_idx] < 0.5 * CUBE * CUBE * CUBE);
+    REQUIRE(vols[1 - small_idx] > 0.5 * CUBE * CUBE * CUBE);
+
+    // The cut face, back in the CUT PLANE'S frame - the frame the sheet lives in.
+    // add_cut_volume() bakes cut_matrix into the mesh it stores, and add_volume()
+    // then re-centres that mesh and puts the shift in the volume matrix. So the way
+    // back is cut_matrix.inverse() * volume_matrix. The INSTANCE transform must NOT
+    // come in: post_process() re-seats it after the cut.
+    const ModelObject* small_part = parts[small_idx];
+    const Transform3d  m          = cut_matrix.inverse() * small_part->volumes.front()->get_matrix();
+
+    std::vector<Vec3d> pts;
+    pts.reserve(small_part->volumes.front()->mesh().its.vertices.size());
+    for (const Vec3f& v : small_part->volumes.front()->mesh().its.vertices)
+        pts.emplace_back(m * v.cast<double>());
+
+    // The frame mapping itself: the cube spans local z in [-30, +10] (the plane sits
+    // 10 mm off centre along its own normal), so the small half is the UPPER slice,
+    // between the sheet and local z == +10, and its rim reaches down to z == 0 where
+    // the sheet is undisplaced.
+    double zmin = 1e30, zmax = -1e30;
+    for (const Vec3d& p : pts) { zmin = std::min(zmin, p.z()); zmax = std::max(zmax, p.z()); }
+    INFO("small half local z range: [" << zmin << ", " << zmax << "]");
+    REQUIRE(zmax == Approx(10.0).margin(0.05));
+    REQUIRE(zmin == Approx(0.0).margin(0.05));
+
+    // THE FLAT-RESULT GUARD, in volume. A flat cut at this plane gives a plain
+    // 10 x 40 x 40 = 16000 mm3 box. The 5 mm dome lifts the cut face into the upper
+    // half and takes a real bite out of it, so a curved cut is measurably smaller -
+    // and the missing volume is the dome's own, ~2.3 cm3 for this sheet.
+    const double flat_upper = 10.0 * CUBE * CUBE;
+    INFO("upper half volume " << vols[small_idx] << " vs flat " << flat_upper);
+    REQUIRE(vols[small_idx] < flat_upper - 1000.0);
+    REQUIRE(vols[small_idx] > flat_upper - 4000.0);
+
+    // Every point on the cut face has local z == f(x,y) within 0.02 mm, and the
+    // face is genuinely NOT planar: for a 5 mm dome its deviation from the best
+    // fit plane (z == const, by the dome's symmetry) exceeds 1 mm.
+    int    on_face           = 0;
+    double max_dev_from_flat = 0.0;
+    for (const Vec3d& p : pts) {
+        const double f = sheet.evaluate_local(p.x(), p.y());
+        if (std::abs(p.z() - f) < 0.02) {
+            ++ on_face;
+            max_dev_from_flat = std::max(max_dev_from_flat, std::abs(f));
+        }
+    }
+    INFO("points on the cut face: " << on_face << " of " << pts.size());
+    REQUIRE(on_face > 20);
+    REQUIRE(max_dev_from_flat > 1.0);
+
+    // ... and the half really lies on ONE side of the sheet: being the upper one, no
+    // point of it may sit BELOW the sheet beyond boolean noise. This is the check
+    // that fails outright if the cut ignored the sheet and went flat at z == 0 - the
+    // dome's 5 mm crown would then be 5 mm underneath the flat face.
+    double below = 0.0;
+    for (const Vec3d& p : pts)
+        below = std::max(below, sheet.evaluate_local(p.x(), p.y()) - p.z());
+    INFO("deepest point below the sheet: " << below);
+    REQUIRE(below < 0.05);
+}
+
+// ---------------------------------------------------------------------------
+// (13) Rotated-plane demo export, alongside the axis-aligned one.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("Curved cut: rotated demo export", "[CurvedCut][.demo]")
+{
+    const char* dir = std::getenv("EDGESLICER_CURVED_CUT_DEMO_DIR");
+    if (dir == nullptr || dir[0] == 0)
+        return;
+
+    const boost::filesystem::path out = boost::filesystem::path(dir) / "rotated";
+    boost::filesystem::create_directories(out);
+
+    Model model;
+    ModelObject* mo = model.add_object();
+    mo->name = "cube";
+    mo->add_volume(TriangleMesh(centred_cube()))->name = "cube_v";
+    mo->add_instance();
+
+    const Transform3d rotation   = Transform3d(Eigen::AngleAxisd(0.5 * PI, Vec3d::UnitX()));
+    const Vec3d       offset     = rotation * Vec3d(0.0, 0.0, 10.0);
+    const Transform3d cut_matrix = Geometry::translation_transform(offset) * rotation;
+
+    CurvedCutSheet sheet(5);
+    sheet.set_half_size(40.0);
+    sheet.at(2, 2) = 5.0;
+
+    Cut cut(mo, 0, cut_matrix, ModelObjectCutAttribute::KeepUpper | ModelObjectCutAttribute::KeepLower);
+    const ModelObjectPtrs& parts = cut.perform_with_curved_sheet(sheet);
+    REQUIRE(parts.size() == 2);
+
+    int idx = 0;
+    for (const ModelObject* part : parts) {
+        TriangleMesh     m(part->volumes.front()->mesh());
+        const std::string name = (idx == 0 ? "rotated_cut_A.stl" : "rotated_cut_B.stl");
+        REQUIRE(store_stl((out / name).string().c_str(), &m, true));
+        ++ idx;
+    }
+    WARN("rotated demo written to " << out.string());
+}

@@ -224,7 +224,7 @@ indexed_triangle_set CurvedCutSheet::sample_sheet(int samples) const
 // The cutter solid
 // ---------------------------------------------------------------------------
 
-indexed_triangle_set curved_cut_lower_slab(const CurvedCutSheet& sheet, const BoundingBoxf3& bbox, int samples)
+indexed_triangle_set curved_cut_lower_slab(const CurvedCutSheet& sheet, const BoundingBoxf3& bbox, int samples, double extent)
 {
     const int n = std::max(samples, 2);
 
@@ -235,7 +235,11 @@ indexed_triangle_set curved_cut_lower_slab(const CurvedCutSheet& sheet, const Bo
                                     -sheet.max_displacement()) - slack;
 
     indexed_triangle_set its;
-    const double hs = sheet.half_size();
+    // The slab may be built WIDER than the sheet's own domain. Sampling by local
+    // (x,y) through evaluate_local() - not by (u,v) - is what keeps the surface
+    // itself fixed: over the sheet's domain the heights are unchanged, and beyond
+    // it the clamped edge value is extruded straight outwards.
+    const double hs = extent > 0.0 ? std::max(extent, sheet.half_size()) : sheet.half_size();
 
     // Top surface (the sheet) then the floor, both as n x n grids so the rim
     // stitches vertex-for-vertex and the slab comes out watertight.
@@ -246,7 +250,7 @@ indexed_triangle_set curved_cut_lower_slab(const CurvedCutSheet& sheet, const Bo
         for (int i = 0; i < n; ++ i) {
             const double u = double(i) / double(n - 1);
             const double x = (2.0 * u - 1.0) * hs;
-            its.vertices.emplace_back(Vec3f(float(x), float(y), float(sheet.evaluate(u, v))));
+            its.vertices.emplace_back(Vec3f(float(x), float(y), float(sheet.evaluate_local(x, y))));
         }
     }
     const int base = n * n;
@@ -332,18 +336,21 @@ bool curved_cut_split(const indexed_triangle_set& mesh,
 
     TriangleMesh object(mesh);
 
-    // The slab must reach past the object on every side, or "below the sheet"
-    // is only defined over part of it.
-    BoundingBoxf3  bbox = object.bounding_box();
-    CurvedCutSheet s    = sheet;
+    // The slab must reach past the object on every side, or "below the sheet" is
+    // only defined over part of it. WIDEN THE SLAB, never the sheet: set_half_size()
+    // on the sheet would drag its control points outwards and stretch the surface,
+    // so a small part under a large plane would get a differently shaped cut than
+    // the one the gizmo drew (and, at a rotated plane where the object's footprint
+    // in the cut frame is much larger than the sheet, a nearly flat one).
+    BoundingBoxf3 bbox   = object.bounding_box();
+    double        extent = sheet.half_size();
     if (bbox.defined) {
         const double need = 1.05 * std::max(std::max(std::abs(bbox.min.x()), std::abs(bbox.max.x())),
                                             std::max(std::abs(bbox.min.y()), std::abs(bbox.max.y()))) + 1.0;
-        if (s.half_size() < need)
-            s.set_half_size(need);
+        extent = std::max(extent, need);
     }
 
-    TriangleMesh slab(curved_cut_lower_slab(s, bbox, samples));
+    TriangleMesh slab(curved_cut_lower_slab(sheet, bbox, samples, extent));
 
     bool ok = true;
     if (lower != nullptr) {

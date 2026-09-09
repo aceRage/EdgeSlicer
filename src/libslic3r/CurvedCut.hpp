@@ -115,7 +115,12 @@ private:
 //
 // The slab's side walls are vertical (along local Z), never along the sheet
 // normal, so a steep sheet cannot make the slab self-intersect.
-indexed_triangle_set curved_cut_lower_slab(const CurvedCutSheet& sheet, const BoundingBoxf3& bbox, int samples = CurvedCutSheet::CutSamples);
+// `extent`, when positive, is the half extent the slab is BUILT at, which may be
+// larger than the sheet's own domain so the slab reaches past the object. The
+// sheet is never rescaled to fit: outside its domain evaluate_local() clamps and
+// the boundary height is extruded outwards, so widening the slab moves no part of
+// the surface that lies over the object.
+indexed_triangle_set curved_cut_lower_slab(const CurvedCutSheet& sheet, const BoundingBoxf3& bbox, int samples = CurvedCutSheet::CutSamples, double extent = -1.0);
 
 // Split `mesh` (already in the cut plane's frame) by the sheet. Returns false
 // when both booleans failed. Either output pointer may be null.

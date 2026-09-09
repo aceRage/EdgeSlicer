@@ -4652,6 +4652,13 @@ void GLGizmoCut3D::perform_cut(const Selection& selection)
     if (!mo)
         return;
 
+    // The curved sheet is session state that on_set_state() flattens when the gizmo
+    // closes - and reset_all_gizmos() below closes it. Take the surface (and the
+    // Curved/Flat choice) BEFORE that, or the cut would be performed against a sheet
+    // that has just been zeroed and come out as the plain flat plane cut.
+    const bool           curved_surface = is_curved_surface();
+    const CurvedCutSheet curved_sheet   = m_curved_sheet;
+
     // deactivate CutGizmo and than perform a cut
     m_parent.reset_all_gizmos();
 
@@ -4703,12 +4710,18 @@ void GLGizmoCut3D::perform_cut(const Selection& selection)
         // with every control point at zero routes back into perform_with_plane()
         // inside Cut, so "Curved but untouched" is the flat cut, not an
         // approximation of it.
-        const bool cut_curved = !cut_with_groove && !cut_by_contour && is_curved_surface() && !m_curved_sheet.is_flat();
+        const bool cut_curved = !cut_with_groove && !cut_by_contour && curved_surface && !curved_sheet.is_flat();
+        if (curved_surface)
+            BOOST_LOG_TRIVIAL(warning) << "Curved cut: perform, resolution=" << curved_sheet.resolution()
+                                       << " half_size=" << curved_sheet.half_size()
+                                       << " max_displacement=" << curved_sheet.max_displacement()
+                                       << " is_flat=" << curved_sheet.is_flat()
+                                       << " cut_curved=" << cut_curved;
 
         Cut cut(cut_mo, instance_idx, get_cut_matrix(selection), attributes);
         const ModelObjectPtrs& new_objects = cut_by_contour    ? cut.perform_by_contour(m_part_selection.get_cut_parts(), dowels_count):
                                              cut_with_groove   ? cut.perform_with_groove(m_groove, m_rotation_m) :
-                                             cut_curved        ? cut.perform_with_curved_sheet(m_curved_sheet) :
+                                             cut_curved        ? cut.perform_with_curved_sheet(curved_sheet) :
                                                                  cut.perform_with_plane();
 
         // fix_non_manifold_edges
