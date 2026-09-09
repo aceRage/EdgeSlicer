@@ -1989,6 +1989,12 @@ void MenuFactory::create_bbl_part_menu()
     append_menu_items_mirror(menu);
     // Ultra: per-part visibility inside assemblies
     append_menu_items_visibility(menu);
+    // "Separate": pull this one part out of the assembly into its own object, keeping its
+    // position (single-part variant of Assemble Separately; same implementation). This is the
+    // part menu the object list actually shows - create_part_menu() is not used.
+    append_menu_item(menu, wxID_ANY, _L("Separate"), _L("Move this part into a new object, keeping its position in space"),
+        [](wxCommandEvent&) { obj_list()->assemble_separately(); }, "", nullptr,
+        []() { return obj_list()->can_assemble_separately(); }, m_parent);
     wxMenu* split_menu = new wxMenu();
     if (!split_menu)
         return;
