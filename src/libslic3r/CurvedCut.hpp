@@ -79,6 +79,18 @@ public:
     // Without `resample` the control heights are left alone, so the surface is
     // STRETCHED onto the new rectangle - phase 1's set_half_size() behaviour,
     // kept for the callers (and tests) that want exactly that.
+    //
+    // PHASE 3: re-sampling is IDEMPOTENT. Re-sampling reads the surface through
+    // Catmull-Rom and writes control values back, and that round trip is lossy
+    // at a different grid phase - so re-sampling from the PREVIOUS re-sample
+    // compounds the loss, and a plane drag (which produces a stream of re-fits)
+    // used to walk the border away from where the user drew it. The sheet
+    // therefore keeps a REFERENCE grid: the last surface an EDIT produced, with
+    // the extent it was edited at. Every re-sample reads that reference, never
+    // the previously re-sampled values, so N re-fits cost exactly what one costs
+    // and returning to an earlier extent returns to that extent's values
+    // bit-for-bit. Any edit (grab / smooth / reset / set_values / set_resolution)
+    // republishes the reference.
     void set_half_size(double hs_u, double hs_v, bool resample = false);
 
     // Control point displacement along the plane normal, in mm.
@@ -86,6 +98,14 @@ public:
     double& at(int i, int j)       { return m_z[size_t(j) * m_resolution + i]; }
     const std::vector<double>& values() const { return m_z; }
     void set_values(const std::vector<double>& z);
+
+    // The reference extent the current control values were last EDITED at. Equal
+    // to the live extent unless a re-sample has moved the domain since.
+    double reference_half_size_u() const { return m_ref_half_size_u; }
+    double reference_half_size_v() const { return m_ref_half_size_v; }
+    // Adopt the current (re-sampled) values as the new reference, i.e. "this is
+    // the shape now, forget where it came from". An edit does this implicitly.
+    void   commit_reference();
 
     // (u,v) in [0,1]^2 of control point (i,j).
     double control_u(int i) const { return m_resolution < 2 ? 0.5 : double(i) / double(m_resolution - 1); }
@@ -125,10 +145,18 @@ public:
     indexed_triangle_set sample_sheet(int samples = DefaultSamples) const;
 
 private:
+    // The reference grid + extent every re-sample reads from (see set_half_size).
+    // Kept in step with m_z by commit_reference(), which every editing entry
+    // point calls.
+    void publish_reference();
+
     int                 m_resolution{DefaultResolution};
     double              m_half_size_u{50.0};
     double              m_half_size_v{50.0};
     std::vector<double> m_z;
+    double              m_ref_half_size_u{50.0};
+    double              m_ref_half_size_v{50.0};
+    std::vector<double> m_ref_z;
 };
 
 // ---------------------------------------------------------------------------
@@ -153,6 +181,89 @@ bool curved_cut_fit_extent(const indexed_triangle_set& mesh,
                            double&                     half_size_v,
                            double                      margin_rel = 0.15,
                            double                      margin_abs = 5.0);
+
+// ---------------------------------------------------------------------------
+// Phase 3: fitting the sheet to the WHOLE part, not to the cross-section.
+//
+// curved_cut_fit_extent() sizes the sheet to the plane's intersection with the
+// object. That is the right place for the HANDLES but the wrong extent for the
+// CUTTER: outside the sheet's own domain evaluate_local() clamps, so the slab
+// extrudes the sheet's RIM height outwards, and a part that is wider above or
+// below the plane than it is AT the plane gets sliced by that extruded rim
+// rather than by the surface the user drew. Bend the sheet hard enough and the
+// rim leaves the part entirely on one side, and that side comes back empty -
+// the reported "it removes the smaller part".
+//
+// The fix is to fit the extent to the bounding box of the WHOLE mesh projected
+// onto the plane's (u,v) axes, so no part of the object ever lies outside the
+// sheet's own domain and the extruded rim never touches material. The handles
+// stay usable because the projection is a superset of the cross-section, not a
+// different place - see curved_cut_default_resolution() for keeping the spacing
+// sane once the domain covers the whole part.
+//
+// Returns false only for an empty mesh.
+bool curved_cut_fit_projection_extent(const indexed_triangle_set& mesh,
+                                      double&                     half_size_u,
+                                      double&                     half_size_v,
+                                      double                      margin_rel = 0.15,
+                                      double                      margin_abs = 5.0);
+
+// The control-grid resolution to use for a domain of these half extents: enough
+// points that the spacing lands near `target_spacing` mm, clamped into
+// [min_res, MaxResolution]. Fitting to the whole projection makes the domain
+// bigger than the cross-section fit did, so a fixed 5 x 5 would spread the
+// handles too thin on a large part; this keeps them at a workable pitch.
+int curved_cut_default_resolution(double half_size_u,
+                                  double half_size_v,
+                                  double target_spacing = 10.0,
+                                  int    min_res        = 5);
+
+// ---------------------------------------------------------------------------
+// Phase 3: which side of the sheet is empty, cheaply.
+//
+// A pure sign test: for every vertex of `mesh` (in the plane frame), compare its
+// local z against the sheet's height there. Any vertex strictly above makes the
+// upper side non-empty, any vertex strictly below makes the lower one non-empty.
+// This is what the gizmo warns from before the user commits to a cut - it costs
+// one pass over the vertices, where the actual answer costs two booleans.
+//
+// It is a CONSERVATIVE test in the direction that matters: it can only claim a
+// side is non-empty when a vertex is on that side, and a mesh with a vertex on
+// one side always has material there. (The converse - a side with no vertex but
+// with material, from a face crossing the sheet between its vertices - cannot
+// happen for a closed mesh: the material on that side is bounded by faces, and
+// those faces have vertices.)
+//
+// `thickness` is the kerf: with t > 0 the test is against the OFFSET faces, so a
+// side counts as empty when the kerf has eaten everything that was on it.
+// ---------------------------------------------------------------------------
+// Phase 3: cut thickness ("kerf"), shared by the flat and the curved cut.
+// ---------------------------------------------------------------------------
+
+// The panel's range, in mm. 0 is "no kerf" and is the default; above 20 mm a
+// "cut" is really "split into two parts with a big hole between them", which the
+// user can get by cutting twice.
+static constexpr double CutThicknessMin = 0.0;
+static constexpr double CutThicknessMax = 20.0;
+
+// Where the removed band sits relative to the cut surface.
+enum class CutThicknessOffset {
+    Centred,   // [surface - t/2, surface + t/2]   (the default)
+    Above,     // [surface,       surface + t]     - the band is taken from the upper half
+    Below      // [surface - t,   surface      ]   - ... from the lower half
+};
+
+// The two face offsets a thickness produces along the plane normal, in mm:
+// `lo` is where the LOWER half's face sits, `hi` where the UPPER half's does.
+// Always lo <= 0 <= hi and hi - lo == thickness (clamped at 0).
+void curved_cut_thickness_faces(double thickness, CutThicknessOffset offset, double& lo, double& hi);
+
+void curved_cut_empty_sides(const indexed_triangle_set& mesh,
+                            const CurvedCutSheet&       sheet,
+                            bool&                       upper_empty,
+                            bool&                       lower_empty,
+                            double                      thickness = 0.0,
+                            CutThicknessOffset          offset    = CutThicknessOffset::Centred);
 
 // Signed distance from `pos` (in the cut plane's frame) to the nearest surface
 // of `mesh` (also in that frame) along the plane normal, i.e. along local Z.
@@ -181,17 +292,28 @@ bool curved_cut_snap_distance(const indexed_triangle_set& mesh,
 // `extent` applies to BOTH axes; `extent_v`, when positive, overrides it for v so
 // a rectangular sheet can be widened per axis. (A square `extent` still works and
 // still means what it did in phase 1.)
-indexed_triangle_set curved_cut_lower_slab(const CurvedCutSheet& sheet, const BoundingBoxf3& bbox, int samples = CurvedCutSheet::CutSamples, double extent = -1.0, double extent_v = -1.0);
+// `offset`, in mm along local Z, raises or lowers the whole slab's TOP surface
+// (the sheet) without touching the floor, which is what a cut thickness needs:
+// the material to remove is the band between sheet - t/2 and sheet + t/2, i.e.
+// the difference of two of these slabs. The rim and the floor are unchanged, so
+// the result is watertight the same way.
+indexed_triangle_set curved_cut_lower_slab(const CurvedCutSheet& sheet, const BoundingBoxf3& bbox, int samples = CurvedCutSheet::CutSamples, double extent = -1.0, double extent_v = -1.0, double offset = 0.0);
 
 // Split `mesh` (already in the cut plane's frame) by the sheet. Returns false
 // when both booleans failed. Either output pointer may be null.
 // Manifold first, mcut as the fallback - the same chain the flexi joint cut and
 // the Mesh Boolean gizmo use.
+// `thickness`, in mm, is the KERF: a band of material centred on the sheet is
+// removed, so the upper half keeps what is above sheet + t/2 and the lower half
+// what is below sheet - t/2. thickness == 0 is the original two-boolean cut,
+// bit-for-bit - the offset slabs are only built when t > 0.
 bool curved_cut_split(const indexed_triangle_set& mesh,
                       const CurvedCutSheet&       sheet,
                       indexed_triangle_set*       upper,
                       indexed_triangle_set*       lower,
-                      int                         samples = CurvedCutSheet::CutSamples);
+                      int                         samples   = CurvedCutSheet::CutSamples,
+                      double                      thickness = 0.0,
+                      CutThicknessOffset          offset    = CutThicknessOffset::Centred);
 
 // ---------------------------------------------------------------------------
 // Phase 2 fixes: side visibility, as a PURE contract.

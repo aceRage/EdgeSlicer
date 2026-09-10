@@ -17,6 +17,7 @@
 #include "imgui/imgui_internal.h"
 #include "slic3r/GUI/Field.hpp"
 #include "slic3r/GUI/MsgDialog.hpp"
+#include "slic3r/GUI/NotificationManager.hpp"
 #include "FixModelByWin10.hpp"
 
 namespace Slic3r {
@@ -1001,8 +1002,22 @@ void GLGizmoCut3D::render_cut_plane()
     m_plane.model.set_color(cp_clr);
 
     const Transform3d view_model_matrix = camera.get_view_matrix() * translation_transform(m_plane_center) * m_rotation_m;
-    shader->set_uniform("view_model_matrix", view_model_matrix);
-    m_plane.model.render();
+    // PHASE 3: with a cut thickness the plane is drawn TWICE, at the two faces the
+    // kerf produces, so the translucent band between them is the material that
+    // will be removed. At thickness 0 the two offsets are both zero and this is
+    // the single draw it always was.
+    double face_lo = 0.0, face_hi = 0.0;
+    cut_thickness_faces(face_lo, face_hi);
+    if (face_hi > face_lo) {
+        for (double off : { face_lo, face_hi }) {
+            shader->set_uniform("view_model_matrix", view_model_matrix * translation_transform(off * Vec3d::UnitZ()));
+            m_plane.model.render();
+        }
+    }
+    else {
+        shader->set_uniform("view_model_matrix", view_model_matrix);
+        m_plane.model.render();
+    }
 
     glsafe(::glEnable(GL_CULL_FACE));
     glsafe(::glDisable(GL_BLEND));
@@ -1168,13 +1183,45 @@ void GLGizmoCut3D::fit_curved_sheet_to_section(bool force)
         return;
 
     double hs_u = 0.0, hs_v = 0.0;
-    // 15% of the outline, or 5 mm, whichever is larger: the relative term keeps
-    // a big part's handles clear of the silhouette, the absolute one keeps a
-    // small part from getting a sheet barely wider than itself.
-    if (!curved_cut_fit_extent(mesh, hs_u, hs_v, 0.15, 5.0)) {
-        // The plane misses the object. Keep the extent we have rather than
-        // collapsing the sheet to nothing.
+    // PHASE 3: the WHOLE part projected onto the plane's axes, not the plane's
+    // cross-section. Beyond the sheet's own domain the cut slab extrudes the
+    // sheet's RIM height outwards, so anything of the part that hangs outside the
+    // domain is cut by that extruded rim rather than by the surface the user
+    // drew - and on a part that is wider above or below the plane than it is AT
+    // the plane, a strongly bent sheet takes the rim clear off the part and one
+    // side comes back empty. Covering the whole projection means the rim never
+    // touches material. See curved_cut_fit_projection_extent().
+    //
+    // 15% of the extent, or 5 mm, whichever is larger: the relative term keeps a
+    // big part's handles clear of the silhouette, the absolute one keeps a small
+    // part from getting a sheet barely wider than itself.
+    if (!curved_cut_fit_projection_extent(mesh, hs_u, hs_v, 0.15, 5.0)) {
+        // An empty mesh. Keep the extent we have rather than collapsing the
+        // sheet to nothing.
         return;
+    }
+
+    // SNAP THE EXTENT. A plane drag re-fits every time the plane moves, and a
+    // continuously varying extent would re-sample the grid continuously. The
+    // projection's extent does not depend on where the plane sits ALONG its
+    // normal at all, so in the common gesture (sliding the cut position) the
+    // snapped extent is simply constant and no re-sample happens. 0.5 mm is far
+    // below anything visible on a handle.
+    auto snap = [](double v) { return std::ceil(v * 2.0 - 1e-9) * 0.5; };
+    hs_u = snap(hs_u);
+    hs_v = snap(hs_v);
+
+    // The domain now covers the whole part, which on a large model is much bigger
+    // than the cross-section fit was, so a fixed 5 x 5 would spread the handles
+    // too thin. Aim for ~10 mm spacing, clamped into 5..MaxResolution. The user's
+    // own slider choice wins once they have made one.
+    if (!m_curved_res_user_set) {
+        const int res = curved_cut_default_resolution(hs_u, hs_v, 10.0, CurvedCutSheet::DefaultResolution);
+        if (res != m_curved_sheet.resolution()) {
+            m_curved_sheet.set_resolution(res);
+            m_curved_resolution = m_curved_sheet.resolution();
+            m_curved_hover_ctl = m_curved_drag_ctl = -1;
+        }
     }
 
     // RE-SAMPLE, so the surface the user drew stays where it is in the plane
@@ -1193,8 +1240,41 @@ void GLGizmoCut3D::fit_curved_sheet_to_section(bool force)
     if (m_curved_brush_radius <= 0.f)
         m_curved_brush_radius = default_curved_bend_radius();
 
+    // The sheet moved, so which side is empty may have changed.
+    update_curved_empty_sides();
+
     invalidate_curved_sheet();
     m_curved_hover_ctl = m_curved_drag_ctl = -1;
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3: the empty-side warning.
+//
+// curved_cut_split() already REPORTS an empty half (it returns false and leaves
+// that side's mesh empty), but only once the user has committed to the cut and
+// paid for two booleans. The panel needs the same answer before the click, so it
+// asks the cheap question instead: is there any vertex of the part on that side
+// of the sheet? One pass over the vertices, refreshed with the fit and after
+// every edit, against two booleans.
+// ---------------------------------------------------------------------------
+
+void GLGizmoCut3D::update_curved_empty_sides()
+{
+    m_curved_upper_empty = m_curved_lower_empty = false;
+    if (!is_curved_surface())
+        return;
+
+    indexed_triangle_set mesh;
+    if (!curved_instance_mesh_in_plane(mesh))
+        return;
+
+    curved_cut_empty_sides(mesh, m_curved_sheet, m_curved_upper_empty, m_curved_lower_empty,
+                           double(m_cut_thickness), cut_thickness_offset());
+}
+
+void GLGizmoCut3D::cut_thickness_faces(double& lo, double& hi) const
+{
+    curved_cut_thickness_faces(double(m_cut_thickness), cut_thickness_offset(), lo, hi);
 }
 
 void GLGizmoCut3D::update_curved_sheet_model()
@@ -1285,8 +1365,21 @@ void GLGizmoCut3D::render_curved_sheet()
     // The sheet rides on the base plane's own frame, so the existing rotate and
     // translate of the plane move the sheet with it.
     const Transform3d view_model_matrix = camera.get_view_matrix() * translation_transform(m_plane_center) * m_rotation_m;
-    shader->set_uniform("view_model_matrix", view_model_matrix);
-    m_curved_sheet_model.render();
+    // PHASE 3: the same two-surface draw the flat plane does for a cut thickness.
+    // The sheet is a height field over local Z, so offsetting the whole model
+    // along local Z IS the offset surface - no re-sampling needed.
+    double face_lo = 0.0, face_hi = 0.0;
+    cut_thickness_faces(face_lo, face_hi);
+    if (face_hi > face_lo) {
+        for (double off : { face_lo, face_hi }) {
+            shader->set_uniform("view_model_matrix", view_model_matrix * translation_transform(off * Vec3d::UnitZ()));
+            m_curved_sheet_model.render();
+        }
+    }
+    else {
+        shader->set_uniform("view_model_matrix", view_model_matrix);
+        m_curved_sheet_model.render();
+    }
 
     glsafe(::glEnable(GL_CULL_FACE));
     glsafe(::glDisable(GL_BLEND));
@@ -2031,6 +2124,8 @@ void GLGizmoCut3D::render_curved_surface_inputs()
     char res_fmt[32];
     snprintf(res_fmt, sizeof(res_fmt), "%d x %d", res, res);
     if (ImGui::SliderInt("##curved_res", &res, CurvedCutSheet::MinResolution, CurvedCutSheet::MaxResolution, res_fmt)) {
+        // The user has an opinion now, so the fit stops choosing for them.
+        m_curved_res_user_set = true;
         m_curved_sheet.set_resolution(res);
         m_curved_resolution = m_curved_sheet.resolution();
         m_curved_hover_ctl = m_curved_drag_ctl = -1;
@@ -2075,9 +2170,83 @@ void GLGizmoCut3D::render_curved_surface_inputs()
     // only the cut FACE waits for the drag to finish, so say which one is behind.
     if (m_curved_cap_stale)
         m_imgui->text_colored(ImGuiWrapper::COL_ORANGE_LIGHT, _L("Cut face updating…"));
+    // PHASE 3: say so BEFORE the cut when the sheet does not cross the part. The
+    // cut still runs - it produces the one non-empty half rather than refusing -
+    // but silence was the thing the owner reported as "it removes the smaller
+    // part", so the reason is on screen.
+    if (m_curved_upper_empty)
+        m_imgui->text_colored(ImGuiWrapper::COL_ORANGE_LIGHT,
+                              _L("The surface does not cross the part on the upper side; that side would be empty."));
+    if (m_curved_lower_empty)
+        m_imgui->text_colored(ImGuiWrapper::COL_ORANGE_LIGHT,
+                              _L("The surface does not cross the part on the lower side; that side would be empty."));
     m_imgui->text_colored(ImGuiWrapper::COL_ORANGE_LIGHT,
                           _L("Connectors are not available on a curved cut yet."));
     ImGui::PopTextWrapPos();
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3: cut thickness ("kerf"). Shared by Flat and Curved - it is a property
+// of the CUT, not of the surface, so it sits next to the cut position rather
+// than inside the curved-surface block.
+// ---------------------------------------------------------------------------
+
+void GLGizmoCut3D::render_cut_thickness_input()
+{
+    ImGui::AlignTextToFramePadding();
+    m_imgui->text(_L("Thickness") + ": ");
+    ImGui::SameLine(m_label_width);
+    ImGui::PushItemWidth(m_control_width * 0.7f);
+
+    float t = m_cut_thickness;
+    if (ImGui::SliderFloat("##cut_thickness", &t, float(CutThicknessMin), float(CutThicknessMax), "%.2f mm")) {
+        m_cut_thickness = std::clamp(t, float(CutThicknessMin), float(CutThicknessMax));
+        update_curved_empty_sides();
+        invalidate_curved_sheet();
+    }
+    if (ImGui::IsItemHovered())
+        m_imgui->tooltip(_u8L("Width of the band of material the cut removes, measured along the cut normal. "
+                              "0 is a zero-width cut - the two halves meet exactly, as they do today.").c_str(),
+                         ImGui::GetFontSize() * 20.f);
+
+    if (m_cut_thickness > 0.f) {
+        // Which side the band is taken from. Centred is the default and is what
+        // a saw does; Above / Below let the user keep one half's face exactly on
+        // the plane they positioned.
+        const std::string centred_label = _u8L("Centred");
+        const std::string above_label   = _u8L("Above");
+        const std::string below_label   = _u8L("Below");
+
+        ImGui::AlignTextToFramePadding();
+        m_imgui->text(_L("Remove from") + ": ");
+        ImGui::SameLine(m_label_width);
+        bool centred = m_cut_thickness_offset == int(CutThicknessOffset::Centred);
+        if (m_imgui->bbl_radio_button(centred_label.c_str(), centred)) {
+            m_cut_thickness_offset = int(CutThicknessOffset::Centred);
+            update_curved_empty_sides();
+            invalidate_curved_sheet();
+        }
+        ImGui::SameLine();
+        bool above = m_cut_thickness_offset == int(CutThicknessOffset::Above);
+        if (m_imgui->bbl_radio_button(above_label.c_str(), above)) {
+            m_cut_thickness_offset = int(CutThicknessOffset::Above);
+            update_curved_empty_sides();
+            invalidate_curved_sheet();
+        }
+        ImGui::SameLine();
+        bool below = m_cut_thickness_offset == int(CutThicknessOffset::Below);
+        if (m_imgui->bbl_radio_button(below_label.c_str(), below)) {
+            m_cut_thickness_offset = int(CutThicknessOffset::Below);
+            update_curved_empty_sides();
+            invalidate_curved_sheet();
+        }
+
+        ImGui::PushTextWrapPos(m_editing_window_width);
+        m_imgui->text_colored(ImGuiWrapper::COL_ORANGE_LIGHT,
+                              _L("The two halves will be this far apart. Connectors span the gap; "
+                                 "a Thread connector needs a thickness below its pitch to stay usable."));
+        ImGui::PopTextWrapPos();
+    }
 }
 
 void GLGizmoCut3D::render_cut_plane_grabbers()
@@ -2328,6 +2497,13 @@ void GLGizmoCut3D::on_set_state()
     m_curved_snap_ctl       = -1;
     m_curved_snap_hit_valid = false;
     m_curved_snap_mesh.clear();
+    // Phase 3 session state. The thickness is a property of ONE cut, not a
+    // preference: leaving it set would silently kerf the next object the user
+    // cuts, which is the sticky-m_keep_as_parts bug in a new place.
+    m_cut_thickness        = 0.f;
+    m_cut_thickness_offset = int(CutThicknessOffset::Centred);
+    m_curved_res_user_set  = false;
+    m_curved_upper_empty = m_curved_lower_empty = false;
     m_upper_visibility = m_lower_visibility = SideVisibility::Visible;
     apply_side_visibility();
     invalidate_curved_sheet();
@@ -4328,6 +4504,10 @@ void GLGizmoCut3D::render_cut_plane_input_window(CutConnectors &connectors, floa
 //        render_flip_plane_button();
 
         if (mode == CutMode::cutPlanar) {
+            // Cut thickness ("kerf"), next to the cut position - it is a property
+            // of the cut, not of the surface, and applies to Flat and Curved alike.
+            render_cut_thickness_input();
+
             // Surface: Flat / Curved, and the curved surface's own controls.
             m_imgui->disabled_begin(has_connectors);
             render_curved_surface_inputs();
@@ -4946,20 +5126,45 @@ void GLGizmoCut3D::apply_connectors_in_model(ModelObject* mo, int &dowels_count)
     if (m_connector_mode == CutConnectorMode::Manual) {
         clear_selection();
 
+        // PHASE 3: the cut thickness. A connector's job is to hold the two halves
+        // together, so with a kerf it has to SPAN the gap as well as reach into
+        // both halves - its length grows by the thickness, and the pocket depth
+        // that gets cut into each half is then measured from that half's OFFSET
+        // face, not from the mid surface. Both fall out of one change:
+        //
+        //   - the length grows by t, so the reach into each half is unchanged;
+        //   - the centre moves to the middle of the LENGTHENED body, which for a
+        //     Plug (which sits entirely on the upper side of the plane today)
+        //     means starting at the LOWER face rather than at the mid surface.
+        //
+        // A Dowel already straddles the plane symmetrically (its height is
+        // doubled below), so lengthening it by t keeps it centred and no shift
+        // is needed. A Flexi joint opens its own gap and the kerf is added to
+        // THAT instead, inside perform_with_flexi_joints() - see CutUtils.cpp.
+        double face_lo = 0.0, face_hi = 0.0;
+        cut_thickness_faces(face_lo, face_hi);
+        const double kerf = face_hi - face_lo;
+
         for (CutConnector&connector : mo->cut_connectors) {
             connector.rotation_m = m_rotation_m;
 
             if (connector.attribs.type == CutConnectorType::FlexiJoint) {
                 // The flexi bodies straddle the cut plane by construction: no centre shift.
+                // The kerf reaches them through the joint's own gap, not here.
             }
             else if (connector.attribs.type == CutConnectorType::Dowel) {
                 if (connector.attribs.style == CutConnectorStyle::Prism)
                     connector.height *= 2;
+                // Symmetric about the plane, so it only has to get longer.
+                connector.height += float(kerf);
                 dowels_count ++;
             }
             else {
                 // calculate shift of the connector center regarding to the position on the cut plane
-                connector.pos += m_cut_normal * 0.5 * double(connector.height);
+                // With a kerf the body starts at the lower face and is `kerf` longer,
+                // so its centre lands at face_lo + height/2 rather than at height/2.
+                connector.height += float(kerf);
+                connector.pos += m_cut_normal * (face_lo + 0.5 * double(connector.height));
             }
         }
         apply_cut_connectors(mo, _u8L("Connector"));
@@ -5058,6 +5263,10 @@ void GLGizmoCut3D::perform_cut(const Selection& selection)
     // that has just been zeroed and come out as the plain flat plane cut.
     const bool           curved_surface = is_curved_surface();
     const CurvedCutSheet curved_sheet   = m_curved_sheet;
+    // Same reason: the thickness is session state and reset_all_gizmos() below
+    // closes the gizmo. Take it first.
+    const double         cut_thickness  = CutMode(m_mode) == CutMode::cutTongueAndGroove ? 0.0 : double(m_cut_thickness);
+    const CutThicknessOffset thickness_offset = cut_thickness_offset();
 
     // deactivate CutGizmo and than perform a cut
     m_parent.reset_all_gizmos();
@@ -5120,11 +5329,24 @@ void GLGizmoCut3D::perform_cut(const Selection& selection)
                                        << " is_flat=" << curved_sheet.is_flat()
                                        << " cut_curved=" << cut_curved;
 
+        // PHASE 3: an empty half is NOT a refusal - the cut runs and produces the
+        // one half that has material - but it must not be silent. The panel warns
+        // before the click; this is the notification for the click itself, so a
+        // user who did not read the panel still learns why one part came back.
+        if (curved_surface && !curved_sheet.is_flat() && (m_curved_upper_empty || m_curved_lower_empty)) {
+            const wxString which = m_curved_upper_empty && m_curved_lower_empty ? _L("both sides")
+                                 : m_curved_upper_empty                         ? _L("the upper side")
+                                                                                : _L("the lower side");
+            wxGetApp().plater()->get_notification_manager()->push_notification(
+                NotificationType::CustomNotification, NotificationManager::NotificationLevel::WarningNotificationLevel,
+                into_u8(format_wxstr(_L("Cut: the surface does not cross the part on %1%, so that half is empty."), which)));
+        }
+
         Cut cut(cut_mo, instance_idx, get_cut_matrix(selection), attributes);
         const ModelObjectPtrs& new_objects = cut_by_contour    ? cut.perform_by_contour(m_part_selection.get_cut_parts(), dowels_count):
                                              cut_with_groove   ? cut.perform_with_groove(m_groove, m_rotation_m) :
-                                             cut_curved        ? cut.perform_with_curved_sheet(curved_sheet) :
-                                                                 cut.perform_with_plane();
+                                             cut_curved        ? cut.perform_with_curved_sheet(curved_sheet, cut_thickness, thickness_offset) :
+                                                                 cut.perform_with_plane(cut_thickness, thickness_offset);
 
         // fix_non_manifold_edges
 #ifdef HAS_WIN10SDK

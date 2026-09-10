@@ -239,6 +239,39 @@ class GLGizmoCut3D : public GLGizmoBase
     bool           curved_snap_apply(int ctl, bool falloff);
     void           render_curved_snap_marker();
 
+    // --- Phase 3 -----------------------------------------------------------
+    // (1) THE FIT COVERS THE WHOLE PART. Phase 2 fitted the sheet to the plane's
+    // cross-section; outside the sheet's domain the slab extrudes the RIM height
+    // outwards, so a part wider above or below the plane got cut by that rim and
+    // a strongly bent sheet could leave one side empty. The extent is now the
+    // whole instance mesh projected onto the plane's axes, and the control-grid
+    // resolution follows the extent so the handles keep a workable pitch.
+    // curved_cut_default_resolution() picks it; the user's own choice wins once
+    // they have moved the slider.
+    bool           m_curved_res_user_set{ false };
+
+    // (2) THE EMPTY-SIDE WARNING. A sign test of the instance mesh's vertices
+    // against the sheet, refreshed with the fit and after every edit, so the
+    // panel can say "that side would be empty" before the user commits.
+    bool           m_curved_upper_empty{ false };
+    bool           m_curved_lower_empty{ false };
+    void           update_curved_empty_sides();
+    // The flat cut has the same failure mode (a plane clear of the part), and
+    // has_valid_contour() already covers it, so this is only computed in Curved.
+
+    // (3) CUT THICKNESS ("kerf"), for BOTH Flat and Curved: a band of material
+    // centred on the cut surface is removed, so the two halves come apart with a
+    // real gap between them. Session state like everything else in this gizmo -
+    // the cut is baked and a plane cut persists nothing today, so there is
+    // nothing to write to the 3MF.
+    float          m_cut_thickness{ 0.f };
+    int            m_cut_thickness_offset{ int(CutThicknessOffset::Centred) };
+    CutThicknessOffset cut_thickness_offset() const { return CutThicknessOffset(m_cut_thickness_offset); }
+    // The two face offsets the current thickness produces, in mm along the cut
+    // normal: lo <= 0 <= hi, hi - lo == thickness.
+    void           cut_thickness_faces(double& lo, double& hi) const;
+    void           render_cut_thickness_input();
+
     bool m_hide_cut_plane{ false };
     bool m_connectors_editing{ false };
     bool m_cut_plane_as_circle{ false };

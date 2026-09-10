@@ -32,6 +32,11 @@ class Cut {
     int                         m_instance;
     const Transform3d           m_cut_matrix;
     ModelObjectCutAttributes    m_attributes;
+    // The cut thickness ("kerf") the current perform_with_plane() was asked for,
+    // stashed so perform_with_flexi_joints() - which it dispatches into without
+    // arguments - can widen the joint's gap by it. Zero for every other entry
+    // point, which is the no-kerf behaviour.
+    double                      m_kerf{ 0.0 };
 
     void post_process(ModelObject* object, ModelObjectPtrs& objects, bool keep, bool place_on_cut, bool flip);
     void post_process(ModelObject* upper_object, ModelObject* lower_object, ModelObjectPtrs& objects);
@@ -65,13 +70,18 @@ public:
         bool is_modifier;
     };
 
-    const ModelObjectPtrs& perform_with_plane();
+    // `thickness` is the CUT THICKNESS ("kerf"), in mm along the cut normal: a
+    // band of material centred on the cut surface is removed, so the upper half
+    // keeps what is above +t/2 and the lower half what is below -t/2. Zero (the
+    // default) is the original cut, bit-for-bit - the offset slice is only taken
+    // when t > 0. See CurvedCut.hpp for the shared range and offset enum.
+    const ModelObjectPtrs& perform_with_plane(double thickness = 0.0, CutThicknessOffset offset = CutThicknessOffset::Centred);
     // Curved cut, phase 1: split by a height field z = f(u,v) over the cut plane
     // instead of by the plane itself. A sheet with every control point at zero IS
     // the plane, and this routes straight into perform_with_plane() in that case, so
     // a zero-displacement curved cut runs the same code path as today's flat cut and
     // its output is bit-identical. No connectors on a curved cut in phase 1.
-    const ModelObjectPtrs& perform_with_curved_sheet(const CurvedCutSheet& sheet);
+    const ModelObjectPtrs& perform_with_curved_sheet(const CurvedCutSheet& sheet, double thickness = 0.0, CutThicknessOffset offset = CutThicknessOffset::Centred);
     // Flexi joint cut: one object, two watertight model parts, a real Manifold boolean.
     // perform_with_plane() dispatches here automatically when a flexi connector is present.
     const ModelObjectPtrs& perform_with_flexi_joints();

@@ -20,17 +20,29 @@ const int CurvedCutSheet::CutSamples;
 // Control grid
 // ---------------------------------------------------------------------------
 
+void CurvedCutSheet::publish_reference()
+{
+    m_ref_z           = m_z;
+    m_ref_half_size_u = m_half_size_u;
+    m_ref_half_size_v = m_half_size_v;
+}
+
+void CurvedCutSheet::commit_reference() { publish_reference(); }
+
 void CurvedCutSheet::reset(int resolution)
 {
     if (resolution > 0)
         m_resolution = std::clamp(resolution, MinResolution, MaxResolution);
     m_z.assign(size_t(m_resolution) * size_t(m_resolution), 0.0);
+    publish_reference();
 }
 
 void CurvedCutSheet::set_values(const std::vector<double>& z)
 {
-    if (z.size() == m_z.size())
+    if (z.size() == m_z.size()) {
         m_z = z;
+        publish_reference();
+    }
 }
 
 Vec2d CurvedCutSheet::control_xy(int i, int j) const
@@ -49,26 +61,81 @@ void CurvedCutSheet::set_half_size(double hs_u, double hs_v, bool resample)
     if (!resample || is_flat()) {
         m_half_size_u = hs_u;
         m_half_size_v = hs_v;
+        // A stretch (resample == false) IS an edit of the surface - it takes the
+        // control values with it - so the reference follows. A flat sheet has
+        // nothing to lose either way.
+        publish_reference();
         return;
     }
 
     // Keep the SURFACE fixed in the plane, not the control values: each new
-    // control point takes the old surface's height at the same local (x,y) in
-    // mm. evaluate_local() clamps outside the old domain, so a point that ends
-    // up beyond the old rectangle picks up the border value rather than an
-    // extrapolated overshoot - the same clamped-boundary rule evaluate() uses.
+    // control point takes the REFERENCE surface's height at the same local (x,y)
+    // in mm. evaluate_local() clamps outside the reference domain, so a point
+    // that ends up beyond that rectangle picks up the border value rather than
+    // an extrapolated overshoot - the same clamped-boundary rule evaluate() uses.
+    //
+    // PHASE 3: reading the REFERENCE, not the live values, is what makes this
+    // idempotent. Re-sampling is a lossy round trip through Catmull-Rom whenever
+    // the grid phase changes, and feeding each re-sample its predecessor's output
+    // compounds that loss without bound over a plane drag. Reading the reference
+    // makes every re-fit a single hop from the shape the user actually drew: two
+    // re-fits to the same extent give the same values, and coming back to an
+    // earlier extent reproduces it exactly.
+    // THE STALE REFERENCE. at() hands out a mutable reference, so a caller can
+    // change the surface without going through any of the editing entry points
+    // that republish - the tests do exactly that, and so could future code. Catch
+    // it here: if the live values are NOT what the reference produces at the
+    // CURRENT extent, the surface has been edited behind our back and the live
+    // values are the truth. Republish before re-sampling, or the re-sample would
+    // resurrect a surface the caller has already replaced.
+    //
+    // The check is exact equality against the values the reference was published
+    // with (the extent has not moved since, or a previous re-sample updated
+    // neither), so it costs one vector compare and never fires spuriously.
+    if (m_ref_z.size() != m_z.size() ||
+        (m_ref_half_size_u == m_half_size_u && m_ref_half_size_v == m_half_size_v && m_ref_z != m_z))
+        publish_reference();
+
     const int           n = m_resolution;
     std::vector<double> nz(size_t(n) * size_t(n), 0.0);
-    for (int j = 0; j < n; ++ j) {
-        const double y = (2.0 * control_u(j) - 1.0) * hs_v;
-        for (int i = 0; i < n; ++ i) {
-            const double x = (2.0 * control_u(i) - 1.0) * hs_u;
-            nz[size_t(j) * n + i] = evaluate_local(x, y);
+    if (m_ref_z.size() == m_z.size()) {
+        // Evaluate the reference surface: temporarily wear the reference values
+        // and extent, sample, then put the new ones on. (evaluate_local() reads
+        // m_z / m_half_size_*, and the reference is the same grid resolution, so
+        // this is a swap rather than a second evaluator.)
+        std::vector<double> live_z    = std::move(m_z);
+        const double        live_hs_u = m_half_size_u;
+        const double        live_hs_v = m_half_size_v;
+        m_z           = m_ref_z;
+        m_half_size_u = m_ref_half_size_u;
+        m_half_size_v = m_ref_half_size_v;
+        for (int j = 0; j < n; ++ j) {
+            const double y = (2.0 * control_u(j) - 1.0) * hs_v;
+            for (int i = 0; i < n; ++ i) {
+                const double x = (2.0 * control_u(i) - 1.0) * hs_u;
+                nz[size_t(j) * n + i] = evaluate_local(x, y);
+            }
+        }
+        m_z           = std::move(live_z);
+        m_half_size_u = live_hs_u;
+        m_half_size_v = live_hs_v;
+    }
+    else {
+        // No usable reference (a resolution change left it stale) - fall back to
+        // the live surface, which is what phase 2 always did.
+        for (int j = 0; j < n; ++ j) {
+            const double y = (2.0 * control_u(j) - 1.0) * hs_v;
+            for (int i = 0; i < n; ++ i) {
+                const double x = (2.0 * control_u(i) - 1.0) * hs_u;
+                nz[size_t(j) * n + i] = evaluate_local(x, y);
+            }
         }
     }
     m_half_size_u = hs_u;
     m_half_size_v = hs_v;
     m_z           = std::move(nz);
+    // NOT publish_reference(): the whole point is that the reference outlives the
+    // re-sample. A later edit republishes it.
 }
 
 Vec3d CurvedCutSheet::control_pos(int i, int j) const
@@ -173,6 +240,9 @@ void CurvedCutSheet::set_resolution(int resolution)
         }
     m_resolution = n;
     m_z          = std::move(nz);
+    // The reference grid is sized to the OLD resolution and is now unusable, and
+    // a resolution change is an edit of the surface anyway.
+    publish_reference();
 }
 
 // ---------------------------------------------------------------------------
@@ -192,6 +262,7 @@ void CurvedCutSheet::grab(const Vec2d& center_xy, double radius, double delta, b
             const double w = falloff ? double(Sculpt::falloff_weight(float(d), float(radius))) : 1.0;
             at(i, j) += delta * w;
         }
+    publish_reference();
 }
 
 void CurvedCutSheet::smooth(double strength, const Vec2d* center_xy, double radius, bool falloff)
@@ -219,6 +290,7 @@ void CurvedCutSheet::smooth(double strength, const Vec2d* center_xy, double radi
             const double avg = 0.25 * (z_at(i - 1, j) + z_at(i + 1, j) + z_at(i, j - 1) + z_at(i, j + 1));
             at(i, j) = src[size_t(j) * m_resolution + i] * (1.0 - strength * w) + avg * (strength * w);
         }
+    publish_reference();
 }
 
 // ---------------------------------------------------------------------------
@@ -318,6 +390,88 @@ bool curved_cut_fit_extent(const indexed_triangle_set& mesh,
     return true;
 }
 
+bool curved_cut_fit_projection_extent(const indexed_triangle_set& mesh,
+                                     double&                     half_size_u,
+                                     double&                     half_size_v,
+                                     double                      margin_rel,
+                                     double                      margin_abs)
+{
+    if (mesh.empty())
+        return false;
+
+    // Every vertex, projected onto the plane's own (u,v) axes - which in the
+    // plane frame is simply dropping z. No crossing test at all: the point of
+    // this fit is that it does NOT depend on where the plane sits inside the
+    // part, so a plane that misses the part entirely still gets a domain that
+    // covers it (and the empty-side warning, not a collapsed sheet, is what
+    // tells the user about the miss).
+    double min_x =  std::numeric_limits<double>::max();
+    double max_x = -std::numeric_limits<double>::max();
+    double min_y =  std::numeric_limits<double>::max();
+    double max_y = -std::numeric_limits<double>::max();
+    for (const Vec3f& v : mesh.vertices) {
+        min_x = std::min(min_x, double(v.x()));
+        max_x = std::max(max_x, double(v.x()));
+        min_y = std::min(min_y, double(v.y()));
+        max_y = std::max(max_y, double(v.y()));
+    }
+
+    // The domain is centred on the plane's origin, which is where the sheet's
+    // frame is, so the half extent has to reach the FURTHER side - taking half
+    // the width would leave the part hanging out of an off-centre box.
+    const double ext_u = std::max(std::abs(min_x), std::abs(max_x));
+    const double ext_v = std::max(std::abs(min_y), std::abs(max_y));
+    half_size_u = std::max(ext_u + std::max(margin_rel * ext_u, margin_abs), 1e-6);
+    half_size_v = std::max(ext_v + std::max(margin_rel * ext_v, margin_abs), 1e-6);
+    return true;
+}
+
+int curved_cut_default_resolution(double half_size_u, double half_size_v, double target_spacing, int min_res)
+{
+    if (target_spacing <= 0.0)
+        return CurvedCutSheet::DefaultResolution;
+    // Spacing is set by the LONGER axis: the grid is n x n over a rectangle, so
+    // the long side is where the handles thin out first.
+    const double span = 2.0 * std::max(half_size_u, half_size_v);
+    // n points span (n - 1) cells.
+    const int    n    = int(std::lround(span / target_spacing)) + 1;
+    return std::clamp(n, std::max(min_res, CurvedCutSheet::MinResolution), CurvedCutSheet::MaxResolution);
+}
+
+void curved_cut_thickness_faces(double thickness, CutThicknessOffset offset, double& lo, double& hi)
+{
+    const double t = std::max(0.0, thickness);
+    switch (offset) {
+    case CutThicknessOffset::Above: lo = 0.0;       hi = t;        break;
+    case CutThicknessOffset::Below: lo = -t;        hi = 0.0;      break;
+    default:                        lo = -0.5 * t;  hi = 0.5 * t;  break;
+    }
+}
+
+void curved_cut_empty_sides(const indexed_triangle_set& mesh,
+                            const CurvedCutSheet&       sheet,
+                            bool&                       upper_empty,
+                            bool&                       lower_empty,
+                            double                      thickness,
+                            CutThicknessOffset          offset)
+{
+    double lo = 0.0, hi = 0.0;
+    curved_cut_thickness_faces(thickness, offset, lo, hi);
+
+    upper_empty = true;
+    lower_empty = true;
+    for (const Vec3f& v : mesh.vertices) {
+        const double h = sheet.evaluate_local(double(v.x()), double(v.y()));
+        const double d = double(v.z()) - h;
+        if (d > hi)
+            upper_empty = false;
+        else if (d < lo)
+            lower_empty = false;
+        if (!upper_empty && !lower_empty)
+            return;
+    }
+}
+
 bool curved_cut_snap_distance(const indexed_triangle_set& mesh,
                               const Vec3d&                pos,
                               double&                     distance)
@@ -365,7 +519,7 @@ bool curved_cut_snap_distance(const indexed_triangle_set& mesh,
     return true;
 }
 
-indexed_triangle_set curved_cut_lower_slab(const CurvedCutSheet& sheet, const BoundingBoxf3& bbox, int samples, double extent, double extent_v)
+indexed_triangle_set curved_cut_lower_slab(const CurvedCutSheet& sheet, const BoundingBoxf3& bbox, int samples, double extent, double extent_v, double offset)
 {
     const int n = std::max(samples, 2);
 
@@ -373,7 +527,7 @@ indexed_triangle_set curved_cut_lower_slab(const CurvedCutSheet& sheet, const Bo
     const double diag  = bbox.defined ? bbox.size().norm() : 100.0;
     const double slack = std::max(1.0, 0.1 * diag);
     const double floor_z = std::min(bbox.defined ? bbox.min.z() : -slack,
-                                    -sheet.max_displacement()) - slack;
+                                    -sheet.max_displacement() + std::min(0.0, offset)) - slack;
 
     indexed_triangle_set its;
     // The slab may be built WIDER than the sheet's own domain. Sampling by local
@@ -393,7 +547,7 @@ indexed_triangle_set curved_cut_lower_slab(const CurvedCutSheet& sheet, const Bo
         for (int i = 0; i < n; ++ i) {
             const double u = double(i) / double(n - 1);
             const double x = (2.0 * u - 1.0) * hs;
-            its.vertices.emplace_back(Vec3f(float(x), float(y), float(sheet.evaluate_local(x, y))));
+            its.vertices.emplace_back(Vec3f(float(x), float(y), float(sheet.evaluate_local(x, y) + offset)));
         }
     }
     const int base = n * n;
@@ -472,7 +626,9 @@ bool curved_cut_split(const indexed_triangle_set& mesh,
                       const CurvedCutSheet&       sheet,
                       indexed_triangle_set*       upper,
                       indexed_triangle_set*       lower,
-                      int                         samples)
+                      int                         samples,
+                      double                      thickness,
+                      CutThicknessOffset          offset)
 {
     if (mesh.empty())
         return false;
@@ -516,7 +672,23 @@ bool curved_cut_split(const indexed_triangle_set& mesh,
             std::swap(t(1), t(2));
     }
 
-    TriangleMesh slab(curved_cut_lower_slab(sheet, bbox, samples, extent, extent_v));
+    // PHASE 3: the kerf. With a thickness the two halves are cut by DIFFERENT
+    // surfaces - the lower half at sheet - t/2, the upper at sheet + t/2 - so the
+    // band between them is removed from both. At t == 0 the two offsets are both
+    // zero and the two slabs are the same object, which is why the t == 0 path
+    // below builds ONE slab and runs exactly the boolean pair phase 2 ran: the
+    // no-thickness output is not "close to" the old one, it is the old one.
+    const double t = std::max(0.0, thickness);
+    double face_lo = 0.0, face_hi = 0.0;
+    curved_cut_thickness_faces(t, offset, face_lo, face_hi);
+
+    TriangleMesh slab(curved_cut_lower_slab(sheet, bbox, samples, extent, extent_v, face_lo));
+    // The upper half is cut by the slab whose top sits at face_hi. Only built when
+    // the kerf actually separates the two faces.
+    const bool   kerf = t > 0.0;
+    TriangleMesh slab_hi = kerf ? TriangleMesh(curved_cut_lower_slab(sheet, bbox, samples, extent, extent_v, face_hi))
+                                : TriangleMesh();
+    const TriangleMesh& upper_cutter = kerf ? slab_hi : slab;
 
     // THE "ONLY ONE HALF SURVIVES" FIX, part 2: never let ONE failed boolean
     // cost the caller a half.
@@ -533,8 +705,12 @@ bool curved_cut_split(const indexed_triangle_set& mesh,
     // (object - kept), another boolean against a solid the first one already
     // proved workable. Only when the direct boolean AND the complement both fail
     // is a half really unavailable.
-    auto complement = [&object](const indexed_triangle_set& kept, indexed_triangle_set& out) -> bool {
-        if (kept.empty())
+    // The complement recovery is only sound when the two halves partition the
+    // object, which a kerf deliberately breaks (the band belongs to neither).
+    // With a kerf a failed boolean stays failed rather than being "recovered" as
+    // the other half plus the band.
+    auto complement = [&object, kerf](const indexed_triangle_set& kept, indexed_triangle_set& out) -> bool {
+        if (kept.empty() || kerf)
             return false;
         TriangleMesh rest;
         if (!curved_boolean(object, TriangleMesh(kept), "A_NOT_B", rest) || rest.its.empty())
@@ -554,7 +730,7 @@ bool curved_cut_split(const indexed_triangle_set& mesh,
     }
     {
         TriangleMesh out;
-        if (curved_boolean(object, slab, "A_NOT_B", out) && !out.its.empty()) {
+        if (curved_boolean(object, upper_cutter, "A_NOT_B", out) && !out.its.empty()) {
             upper_its  = std::move(out.its);
             have_upper = true;
         }
