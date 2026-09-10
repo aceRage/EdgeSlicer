@@ -1234,6 +1234,11 @@ void GLGizmoCut3D::fit_curved_sheet_to_section(bool force)
     m_curved_fit_valid    = true;
     m_curved_fit_pending  = false;
 
+    // PHASE 4: the sheet's WORLD position just changed (the plane moved or
+    // turned), so the connector pick mesh - which is the sheet in world space -
+    // has to be rebuilt before the next click.
+    m_curved_pick_dirty = true;
+
     // The spacing changed, so the default bend radius did too. Only follow it
     // while the user has not overridden it - m_curved_brush_radius <= 0 is the
     // "not set yet" marker the panel already uses.
@@ -1759,6 +1764,176 @@ Vec3d GLGizmoCut3D::curved_control_world(int i, int j) const
     return m_plane_center + m_rotation_m * m_curved_sheet.control_pos(i, j);
 }
 
+// ---------------------------------------------------------------------------
+// PHASE 4: connectors on a curved cut.
+//
+// A connector is stored as a position in the OBJECT's frame plus a rotation.
+// On a flat cut that rotation is the plane's, shared by every connector, and the
+// position lies on the plane. On a curved cut both become per-connector and both
+// are derived from the SHEET - and, crucially, derived on demand rather than
+// stored, so the connector carries no new state: the (u,v) is just the position's
+// own in-plane part, and the height and the frame are read from f(u,v) whenever
+// they are needed. That is what makes a connector FOLLOW a later sheet edit, and
+// it is why the 3MF round trip needs nothing new (the baked pos + rotation_m
+// that already persist are exactly what a re-opened project needs to draw the
+// connector where it was, sheet or no sheet).
+// ---------------------------------------------------------------------------
+
+Vec2d GLGizmoCut3D::connector_plane_xy(const Vec3d& pos_object) const
+{
+    const CommonGizmosDataObjects::SelectionInfo* sel = m_c->selection_info();
+    Vec3d instance_offset = Vec3d::Zero();
+    double sla_shift = 0.0;
+    if (sel && sel->model_object() && sel->get_active_instance() >= 0) {
+        instance_offset = sel->model_object()->instances[sel->get_active_instance()]->get_offset();
+        sla_shift       = double(sel->get_sla_shift());
+    }
+    Vec3d world = pos_object + instance_offset;
+    world.z() += sla_shift;
+    const Vec3d local = m_rotation_m.inverse() * (world - m_plane_center);
+    return Vec2d(local.x(), local.y());
+}
+
+Vec3d GLGizmoCut3D::project_onto_cut_plane(const Vec3d& pos_world) const
+{
+    const Vec3d local = m_rotation_m.inverse() * (pos_world - m_plane_center);
+    return m_plane_center + m_rotation_m * Vec3d(local.x(), local.y(), 0.0);
+}
+
+Transform3d GLGizmoCut3D::connector_rotation_m(const Vec3d& pos_object) const
+{
+    if (!is_curved_surface() || m_curved_sheet.is_flat())
+        return m_rotation_m;
+    const Vec2d xy = connector_plane_xy(pos_object);
+    // The sheet's frame is expressed in the PLANE's frame, so composing it after
+    // m_rotation_m puts it in the world - and on a flat sheet it is the identity,
+    // so this collapses to m_rotation_m exactly.
+    return m_rotation_m * curved_cut_sheet_frame(m_curved_sheet, xy.x(), xy.y());
+}
+
+Transform3d GLGizmoCut3D::connector_rotation_m(const CutConnector& connector) const
+{
+    return connector_rotation_m(connector.pos);
+}
+
+Vec3d GLGizmoCut3D::connector_pos_on_sheet(const Vec3d& pos_object) const
+{
+    if (!is_curved_surface() || m_curved_sheet.is_flat())
+        return pos_object;
+    const Vec2d  xy = connector_plane_xy(pos_object);
+    const double f  = m_curved_sheet.evaluate_local(xy.x(), xy.y());
+    // Lift along the PLANE normal by f: the point (x, y, f) in the plane frame is
+    // the point of the sheet over (x,y), which is where the connector belongs.
+    return pos_object + f * (m_rotation_m.linear() * Vec3d::UnitZ());
+}
+
+void GLGizmoCut3D::update_curved_sheet_raycaster()
+{
+    if (!m_curved_pick_dirty && m_curved_pick_raycaster)
+        return;
+
+    // The same dense grid the preview draws, so the ray hits exactly the surface
+    // the user is looking at, taken to the WORLD through the base plane's frame.
+    indexed_triangle_set its = m_curved_sheet.sample_sheet(CurvedCutSheet::DefaultSamples);
+    its_transform(its, translation_transform(m_plane_center) * m_rotation_m);
+    m_curved_pick_mesh = TriangleMesh(std::move(its));
+    m_curved_pick_raycaster = m_curved_pick_mesh.empty() ? nullptr
+                            : std::make_unique<MeshRaycaster>(std::make_shared<const TriangleMesh>(m_curved_pick_mesh));
+    m_curved_pick_dirty = false;
+}
+
+bool GLGizmoCut3D::unproject_on_curved_sheet(const Vec2d& mouse_position, Vec3d& pos, Vec3d& pos_world, bool respect_contours)
+{
+    if (!is_curved_surface() || m_curved_sheet.is_flat())
+        return unproject_on_cut_plane(mouse_position, pos, pos_world, respect_contours);
+
+    update_curved_sheet_raycaster();
+    if (!m_curved_pick_raycaster)
+        return unproject_on_cut_plane(mouse_position, pos, pos_world, respect_contours);
+
+    const Camera& camera = wxGetApp().plater()->get_camera();
+    Vec3f hit_f, normal_f;
+    // The sheet mesh is already in the world, so the raycaster's own transform is
+    // the identity here.
+    if (!m_curved_pick_raycaster->unproject_on_mesh(mouse_position, Transform3d::Identity(), camera, hit_f, normal_f))
+        // The ray missed the sheet entirely (the user clicked past its rim).
+        // Fall back to the flat plane so the click still lands somewhere sensible
+        // rather than doing nothing.
+        return unproject_on_cut_plane(mouse_position, pos, pos_world, respect_contours);
+
+    const Vec3d hit = hit_f.cast<double>();
+
+    if (respect_contours) {
+        // The contour test is a 2D test in the CLIP PLANE's frame, so it has to
+        // see the point projected back down onto the plane - the sheet point
+        // itself sits off the plane by f and would test against the wrong place.
+        const Vec3d local = m_rotation_m.inverse() * (hit - m_plane_center);
+        const Vec3d on_plane = m_plane_center + m_rotation_m * Vec3d(local.x(), local.y(), 0.0);
+        if (m_c->object_clipper()) {
+            const int cont_id = m_c->object_clipper()->is_projection_inside_cut(on_plane);
+            if (cont_id == -1)
+                return false;
+            if (m_part_selection.valid()) {
+                const std::vector<size_t>& ign = *m_part_selection.get_ignored_contours_ptr();
+                if (std::find(ign.begin(), ign.end(), size_t(cont_id)) != ign.end())
+                    return false;
+            }
+        }
+    }
+
+    const CommonGizmosDataObjects::SelectionInfo* sel = m_c->selection_info();
+    Vec3d hit_d = hit;
+    if (sel && sel->model_object() && sel->get_active_instance() >= 0) {
+        hit_d -= sel->model_object()->instances[sel->get_active_instance()]->get_offset();
+        hit_d.z() -= double(sel->get_sla_shift());
+    }
+
+    pos       = hit_d;
+    pos_world = hit;
+    return true;
+}
+
+double GLGizmoCut3D::connector_extent(const CutConnector& connector) const
+{
+    if (connector.attribs.type == CutConnectorType::FlexiJoint) {
+        // The joint's real outline, not a bounding circle: a hinge is long and
+        // thin, and it is its LONG dimension that decides whether the patch under
+        // it is flat enough for the knuckle run to sit straight.
+        double e = 0.0;
+        for (const Vec2d& c : flexi_footprint_corners(connector.flexi))
+            e = std::max(e, c.norm());
+        return e > 0.0 ? e : double(connector.radius);
+    }
+    return double(connector.radius);
+}
+
+void GLGizmoCut3D::update_curved_connector_warnings()
+{
+    m_curved_tilted_connectors = 0;
+    m_curved_unflat_connectors = 0;
+    if (!is_curved_surface() || m_curved_sheet.is_flat())
+        return;
+    const CommonGizmosDataObjects::SelectionInfo* sel = m_c->selection_info();
+    const ModelObject* mo = sel ? sel->model_object() : nullptr;
+    if (mo == nullptr)
+        return;
+
+    for (const CutConnector& connector : mo->cut_connectors) {
+        const Vec2d xy = connector_plane_xy(connector.pos);
+        if (curved_cut_sheet_tilt_deg(m_curved_sheet, xy.x(), xy.y()) > CurvedConnectorTiltWarnDeg)
+            ++ m_curved_tilted_connectors;
+        // Only the STRAIGHT-featured kinds care: a hinge's knuckle run and a
+        // thread's pitch line are generated as if for a plane, so a patch whose
+        // curvature radius is comparable to the connector's own extent will not
+        // let them mate. A plug or a dowel is a solid of revolution about the
+        // local normal and sits fine on a curved patch.
+        if (connector.attribs.type == CutConnectorType::FlexiJoint &&
+            (connector.flexi.kind == FlexiJointKind::Hinge || connector.flexi.kind == FlexiJointKind::Thread) &&
+            !curved_cut_patch_is_flat_enough(m_curved_sheet, xy.x(), xy.y(), connector_extent(connector)))
+            ++ m_curved_unflat_connectors;
+    }
+}
+
 void GLGizmoCut3D::render_curved_control_points()
 {
     glsafe(::glClear(GL_DEPTH_BUFFER_BIT));
@@ -2180,8 +2355,21 @@ void GLGizmoCut3D::render_curved_surface_inputs()
     if (m_curved_lower_empty)
         m_imgui->text_colored(ImGuiWrapper::COL_ORANGE_LIGHT,
                               _L("The surface does not cross the part on the lower side; that side would be empty."));
-    m_imgui->text_colored(ImGuiWrapper::COL_ORANGE_LIGHT,
-                          _L("Connectors are not available on a curved cut yet."));
+    // PHASE 4: connectors are available now, and these are the two things a
+    // connector on a curved surface can be wrong about. Both are ADVISORY - the
+    // cut runs either way, because a deliberately tilted connector (or a hinge on
+    // a gentle bend) is a legitimate thing to ask for.
+    if (m_curved_tilted_connectors > 0)
+        m_imgui->text_colored(ImGuiWrapper::COL_ORANGE_LIGHT,
+                              format_wxstr(_L("%1% connector(s) stand more than %2%\u00b0 off the cut direction; "
+                                              "they will print at an angle and may need supports."),
+                                           m_curved_tilted_connectors, int(CurvedConnectorTiltWarnDeg)));
+    if (m_curved_unflat_connectors > 0)
+        m_imgui->text_colored(ImGuiWrapper::COL_ORANGE_LIGHT,
+                              format_wxstr(_L("%1% Hinge/Thread connector(s) sit on a patch that curves too tightly "
+                                              "for their straight features to mate. Flatten the surface under them "
+                                              "or use a Plug, Dowel or Double ring instead."),
+                                           m_curved_unflat_connectors));
     ImGui::PopTextWrapPos();
 }
 
@@ -2666,7 +2854,9 @@ void GLGizmoCut3D::update_raycasters_for_picking_transform()
             pos[Z] += sla_shift;
 
             const Transform3d scale_trafo = scale_transform(Vec3f(connector.radius, connector.radius, height).cast<double>());
-            m_raycasters[i]->set_transform(translation_transform(pos) * m_rotation_m * scale_trafo);
+            // PHASE 4: on a curved cut the connector stands on the SHEET, so it is
+            // picked where it is drawn - at the sheet point, on the sheet's frame.
+            m_raycasters[i]->set_transform(translation_transform(pos) * connector_rotation_m(connector.pos) * scale_trafo);
         }
     }
     else if (!cut_line_processing()){
@@ -2892,8 +3082,13 @@ void GLGizmoCut3D::dragging_connector(const GLGizmoBase::UpdateData &data)
     Vec3d                   pos;
     Vec3d                   pos_world;
 
-    if (unproject_on_cut_plane(data.mouse_pos.cast<double>(), pos, pos_world)) {
-        connectors[m_hover_id - m_connectors_group_id].pos = pos;
+    // PHASE 4: dragging a connector SLIDES it on the sheet - the ray is re-hit
+    // against the surface every motion, so the connector rides the curve rather
+    // than sliding on the flat plane and then popping back onto the sheet.
+    if (unproject_on_curved_sheet(data.mouse_pos.cast<double>(), pos, pos_world)) {
+        CutConnector& c = connectors[m_hover_id - m_connectors_group_id];
+        c.pos        = pos;
+        c.rotation_m = connector_rotation_m(pos);
         update_raycasters_for_picking_transform();
     }
 }
@@ -4515,9 +4710,12 @@ void GLGizmoCut3D::render_cut_plane_input_window(CutConnectors &connectors, floa
 
             add_vertical_scaled_interval(0.75f);
 
-            // Phase 1: no connectors on a curved cut. The button is disabled with
-            // a note rather than hidden, so the reason is visible.
-            m_imgui->disabled_begin(is_curved_surface() || !m_keep_upper || !m_keep_lower || m_keep_as_parts || (m_part_selection.valid() && m_part_selection.is_one_object()));
+            // PHASE 4: connectors ARE available on a curved cut. They stand on the
+            // sheet, on the sheet's own frame at their (u,v) - see
+            // connector_rotation_m(). The remaining conditions are the flat cut's
+            // own (both halves kept, not cut-to-parts, not a one-object contour
+            // selection), unchanged.
+            m_imgui->disabled_begin(!m_keep_upper || !m_keep_lower || m_keep_as_parts || (m_part_selection.valid() && m_part_selection.is_one_object()));
                 if (m_imgui->button(has_connectors ? _L("Edit connectors") : _L("Add connectors")))
                     set_connectors_editing(true);
             m_imgui->disabled_end();
@@ -4871,7 +5069,9 @@ bool GLGizmoCut3D::is_outside_of_cut_contour(size_t idx, const CutConnectors& co
         // The joint's own Rotation is already baked into those corners - the helper turns them
         // the same way the bodies are turned - so a rotated hinge tests as a rotated rectangle
         // rather than a bigger one, and nothing extra is applied here.
-        its_transform(mesh, translation_transform(cur_pos) * m_rotation_m);
+        // PHASE 4: on a curved cut the footprint is laid out in the SHEET's tangent
+        // plane at the connector, not in the cut plane - see the projection below.
+        its_transform(mesh, translation_transform(cur_pos) * connector_rotation_m(cur_connector));
     }
     else {
         const CutConnectorShape shape = CutConnectorShape(cur_connector.attribs.shape);
@@ -4888,12 +5088,19 @@ bool GLGizmoCut3D::is_outside_of_cut_contour(size_t idx, const CutConnectors& co
             Vec2f p = Eigen::Rotation2Df(angle) * vec;
             vertices.emplace_back(Vec3f(p(0), p(1), 0.f));
         }
-        its_transform(mesh, translation_transform(cur_pos) * m_rotation_m);
+        its_transform(mesh, translation_transform(cur_pos) * connector_rotation_m(cur_connector));
     }
 
+    // PHASE 4: the clipper's contour test is a 2D test in the CUT PLANE's frame.
+    // A footprint sampled in the sheet's TANGENT plane sits off the cut plane by
+    // f(u,v) and is tilted, so each sample is projected back down the plane normal
+    // onto the plane before it is tested - which is exactly "does the footprint,
+    // seen from the cut direction, stay inside the object's section here". On a
+    // flat cut the projection is the identity and this is the original test.
     for (const Vec3f& vertex : vertices) {
         if (m_c->object_clipper()) {
-            int contour_idx = m_c->object_clipper()->is_projection_inside_cut(vertex.cast<double>());
+            const Vec3d vtx = project_onto_cut_plane(vertex.cast<double>());
+            int contour_idx = m_c->object_clipper()->is_projection_inside_cut(vtx);
             bool is_invalid = (contour_idx == -1);
             if (m_part_selection.valid() && ! is_invalid) {
                 assert(contour_idx >= 0);
@@ -4917,7 +5124,7 @@ bool GLGizmoCut3D::is_conflict_for_connector(size_t idx, const CutConnectors& co
 
     const CutConnector& cur_connector = connectors[idx];    
 
-    const Transform3d matrix = translation_transform(cur_pos) * m_rotation_m *
+    const Transform3d matrix = translation_transform(cur_pos) * connector_rotation_m(cur_connector) *
                                scale_transform(Vec3f(cur_connector.radius, cur_connector.radius, cur_connector.height).cast<double>());
     const BoundingBoxf3 cur_tbb = m_shapes[cur_connector.attribs].model.get_bounding_box().transformed(matrix);
 
@@ -4963,6 +5170,11 @@ void GLGizmoCut3D::check_and_update_connectors_state()
         if (is_conflict_for_connector(i, connectors, pos))
             m_invalid_connectors_idxs.emplace_back(i);
      }
+
+     // PHASE 4: the tilt / flat-patch advisories ride along with the conflict
+     // check, so they are refreshed by every edit that could change them (a
+     // connector moved, a sheet handle dragged, the plane turned).
+     update_curved_connector_warnings();
 }
 
 void GLGizmoCut3D::toggle_model_objects_visibility()
@@ -5054,7 +5266,10 @@ void GLGizmoCut3D::render_connectors()
         else if (!looking_forward)
             pos += 0.05 * m_clp_normal;
 
-        const Transform3d view_model_matrix = camera.get_view_matrix() * translation_transform(pos) * m_rotation_m *
+        // PHASE 4: the connector's own frame - the sheet's local frame at its
+        // (u,v) on a curved cut, m_rotation_m on a flat one (and on a flat sheet
+        // the two are the same matrix, so nothing about the flat path moves).
+        const Transform3d view_model_matrix = camera.get_view_matrix() * translation_transform(pos) * connector_rotation_m(connector.pos) *
                                               rotation_transform(-connector.z_angle * Vec3d::UnitZ()) *
                                               scale_transform(Vec3f(connector.radius, connector.radius, height).cast<double>());
 
@@ -5145,8 +5360,20 @@ void GLGizmoCut3D::apply_connectors_in_model(ModelObject* mo, int &dowels_count)
         cut_thickness_faces(face_lo, face_hi);
         const double kerf = face_hi - face_lo;
 
+        // PHASE 4: on a curved cut every connector gets its OWN frame - the
+        // sheet's local frame at its (u,v) - and its own normal, so the kerf's
+        // centre shift below is measured along the surface normal there rather
+        // than along the plane normal. On a flat cut (or a flat sheet) the frame
+        // IS m_rotation_m and the normal IS m_cut_normal, so the flat path is
+        // untouched and a curved-but-flat cut produces the same volumes.
         for (CutConnector&connector : mo->cut_connectors) {
-            connector.rotation_m = m_rotation_m;
+            // Re-derive from the sheet at bake time so the connector follows any
+            // edit made since it was placed, then BAKE it: from here on the
+            // connector carries a plain position and rotation, which is what the
+            // cut path and the 3MF both already understand.
+            connector.pos        = connector_pos_on_sheet(connector.pos);
+            connector.rotation_m = connector_rotation_m(connector.pos);
+            const Vec3d conn_normal = connector.rotation_m.linear() * Vec3d::UnitZ();
 
             if (connector.attribs.type == CutConnectorType::FlexiJoint) {
                 // The flexi bodies straddle the cut plane by construction: no centre shift.
@@ -5163,8 +5390,12 @@ void GLGizmoCut3D::apply_connectors_in_model(ModelObject* mo, int &dowels_count)
                 // calculate shift of the connector center regarding to the position on the cut plane
                 // With a kerf the body starts at the lower face and is `kerf` longer,
                 // so its centre lands at face_lo + height/2 rather than at height/2.
+                // PHASE 4: measured along the CONNECTOR's own normal - on a curved
+                // cut that is the sheet normal at its (u,v), which is the direction
+                // the body actually points, so the plug still bridges the gap when
+                // the surface is tilted under it.
                 connector.height += float(kerf);
-                connector.pos += m_cut_normal * (face_lo + 0.5 * double(connector.height));
+                connector.pos += conn_normal * (face_lo + 0.5 * double(connector.height));
             }
         }
         apply_cut_connectors(mo, _u8L("Connector"));
@@ -5616,12 +5847,16 @@ bool GLGizmoCut3D::add_connector(CutConnectors& connectors, const Vec2d& mouse_p
 
     Vec3d pos;
     Vec3d pos_world;
-    if (unproject_on_cut_plane(mouse_position.cast<double>(), pos, pos_world)) {
+    // PHASE 4: on a curved cut the click hits the SHEET, not the plane, so the
+    // connector lands on the surface the user is looking at. The stored rotation
+    // is the sheet's frame there - and it is re-derived on every use, so a later
+    // sheet edit moves the connector with the surface.
+    if (unproject_on_curved_sheet(mouse_position.cast<double>(), pos, pos_world)) {
         Plater::TakeSnapshot snapshot(wxGetApp().plater(), _u8L("Add connector"), UndoRedo::SnapshotType::GizmoAction);
         unselect_all_connectors();
 
         const bool flexi = is_flexi_joint_type();
-        connectors.emplace_back(pos, m_rotation_m,
+        connectors.emplace_back(pos, connector_rotation_m(pos),
                                 flexi ? flexi_outer_extent(m_flexi)      : m_connector_size * 0.5f,
                                 flexi ? flexi_protrusion_height(m_flexi) : m_connector_depth_ratio,
                                 m_connector_size_tolerance * 0.5f, m_connector_depth_ratio_tolerance,

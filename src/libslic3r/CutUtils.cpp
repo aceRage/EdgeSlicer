@@ -596,6 +596,17 @@ const ModelObjectPtrs& Cut::perform_with_curved_sheet(const CurvedCutSheet& shee
         return m_model.objects;
     }
 
+    // PHASE 4: a flexi joint on a curved cut. The joint's two segments are
+    // separated by its OWN gap - two flat faces `gap` apart - and the bodies are
+    // generated relative to those faces, so a flexi cut cannot also be a curved
+    // one: the surface between the segments IS the joint's face pair. A flexi
+    // joint therefore takes the flexi path (with the joint standing on the
+    // sheet's frame, which the gizmo has already baked into the connector's
+    // rotation_m), the same way a flat cut with a flexi joint does.
+    m_kerf = std::max(0.0, thickness);
+    if (!m_model.objects.empty() && has_flexi_joint(m_model.objects.front()))
+        return perform_with_flexi_joints();
+
     ModelObject* mo = m_model.objects.front();
 
     BOOST_LOG_TRIVIAL(trace) << "Cut::perform_with_curved_sheet - start";
@@ -608,19 +619,33 @@ const ModelObjectPtrs& Cut::perform_with_curved_sheet(const CurvedCutSheet& shee
     if (m_attributes.has(ModelObjectCutAttribute::KeepLower) && !m_attributes.has(ModelObjectCutAttribute::KeepAsParts))
         mo->clone_for_cut(&lower);
 
+    std::vector<ModelObject*> dowels;
+
     const auto           instance_matrix    = mo->instances[m_instance]->get_transformation().get_matrix_no_offset();
     const Transformation cut_transformation = Transformation(m_cut_matrix);
     const Transform3d    inverse_cut_matrix = cut_transformation.get_rotation_matrix().inverse() * translation_transform(-1. * cut_transformation.get_offset());
 
+    // PHASE 4: connectors. A connector volume reaches here already carrying its
+    // own frame - translation_transform(pos) * rotation_m * ... - because the
+    // gizmo builds it that way, and on a curved cut rotation_m is the SHEET's
+    // frame at the connector's (u,v) rather than the plane's. So nothing in the
+    // connector path itself has to know about the sheet: the plug/dowel/snap
+    // solids and their pockets are built by exactly the same helper the flat cut
+    // uses, and the tilt rides in through the volume's transform.
+    //
+    // The one place the sheet does matter is the DOWEL, which is cut in half so
+    // that each half goes to its own object. process_connector_cut() slices it
+    // with the flat cut_mesh(), which is the RIGHT thing here: the dowel's own
+    // frame is already the sheet's frame, so "flat, in the dowel's frame" IS
+    // "tangent to the sheet at the dowel". See process_connector_curved_cut().
     for (ModelVolume* volume : mo->volumes) {
         volume->reset_extra_facets();
 
-        // Phase 1 has no connectors on a curved cut (the gizmo disables the
-        // connector UI in Curved mode), so a non-model-part volume here is a
-        // modifier and is distributed the same way the flat cut distributes one.
         if (!volume->is_model_part()) {
             if (volume->cut_info.is_processed)
                 process_modifier_cut(volume, instance_matrix, inverse_cut_matrix, m_attributes, upper, lower);
+            else
+                process_connector_cut(volume, instance_matrix, m_cut_matrix, m_attributes, upper, lower, dowels);
         }
         else if (!volume->mesh().empty())
             process_solid_part_curved_cut(volume, instance_matrix, m_cut_matrix, m_attributes, sheet, upper, lower, thickness, offset);
@@ -656,6 +681,19 @@ const ModelObjectPtrs& Cut::perform_with_curved_sheet(const CurvedCutSheet& shee
         post_process(upper, lower, cut_object_ptrs);
         delete_extra_modifiers(upper);
         delete_extra_modifiers(lower);
+
+        // PHASE 4: a Dowel asks for a third object carrying the pin itself, the
+        // same as on a flat cut. The pin is already generated in the sheet's own
+        // frame, so it comes out standing along the surface normal at its (u,v),
+        // and reset_instance_transformation() puts it flat on the bed for
+        // printing exactly the way the flat path does.
+        if (m_attributes.has(ModelObjectCutAttribute::CreateDowels) && !dowels.empty()) {
+            for (auto dowel : dowels) {
+                reset_instance_transformation(dowel, m_instance);
+                dowel->name += "-Dowel-" + dowel->volumes[0]->name;
+                cut_object_ptrs.push_back(dowel);
+            }
+        }
     }
 
     BOOST_LOG_TRIVIAL(trace) << "Cut::perform_with_curved_sheet - end";

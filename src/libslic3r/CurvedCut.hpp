@@ -316,6 +316,76 @@ bool curved_cut_split(const indexed_triangle_set& mesh,
                       CutThicknessOffset          offset    = CutThicknessOffset::Centred);
 
 // ---------------------------------------------------------------------------
+// Phase 4: connectors on a curved cut.
+//
+// A connector on a FLAT cut lives in the plane's own frame: one shared
+// rotation_m for every connector, pos on z == 0. On a CURVED cut neither holds.
+// The sheet is a surface, so a connector sits at (u,v) on it - at height
+// f(u,v), NOT at zero - and it has to stand along the surface's own normal
+// there, not along the plane's. Everything below is that frame, and it is all
+// derived from the height field, so nothing here needs the sheet mesh.
+//
+// The frame is the SAME SHAPE the flat path already uses (a rotation about the
+// connector's own origin), which is why the whole cut path downstream is
+// unchanged: a connector volume reaches Cut carrying
+// translation_transform(pos) * rotation_m, and phase 4 only changes what those
+// two are. On a flat sheet the normal is +Z and the frame is the identity, so
+// a curved-but-flat cut produces the same connector volumes, bit for bit.
+// ---------------------------------------------------------------------------
+
+// Unit surface normal of the sheet at local (x,y) in the cut plane's frame,
+// from the height-field gradient: n = normalize(-df/dx, -df/dy, 1). Always has
+// a positive z component (a height field cannot overhang), so "up" never flips.
+// Outside the domain evaluate_local() clamps and the gradient goes to zero, i.e.
+// the normal is +Z - the same thing the extruded rim does to the cut.
+Vec3d curved_cut_sheet_normal(const CurvedCutSheet& sheet, double x, double y);
+
+// The point on the sheet above local (x,y): (x, y, f(x,y)).
+inline Vec3d curved_cut_sheet_point(const CurvedCutSheet& sheet, double x, double y)
+{
+    return Vec3d(x, y, sheet.evaluate_local(x, y));
+}
+
+// The connector's LOCAL FRAME at local (x,y), as a rotation in the cut plane's
+// frame: local Z is the sheet normal there, and local X is the plane's own X
+// projected onto the tangent plane and then turned by `z_angle` radians about
+// the normal. That projection is what makes the frame CONTINUOUS over the sheet
+// and equal to the identity on a flat one - picking any old perpendicular would
+// spin the connector as it slides.
+//
+// Degenerate case: when the surface is so steep that the plane's X is nearly
+// parallel to the normal, the plane's Y is projected instead. A height field
+// cannot reach 90 degrees, so this only guards the numerics.
+Transform3d curved_cut_sheet_frame(const CurvedCutSheet& sheet, double x, double y, double z_angle = 0.0);
+
+// Angle between the sheet normal at (x,y) and the plane normal (+Z), in degrees.
+// The gizmo warns above CurvedConnectorTiltWarnDeg: a connector standing that
+// far off the build direction prints at an angle and may need supports.
+double curved_cut_sheet_tilt_deg(const CurvedCutSheet& sheet, double x, double y);
+
+// Above this tilt (degrees) the gizmo warns that the connector prints at an angle.
+static constexpr double CurvedConnectorTiltWarnDeg = 60.0;
+
+// The smaller principal radius of curvature of the sheet at local (x,y), in mm,
+// from the second derivatives of the height field. Returns a large value
+// (std::numeric_limits<double>::max()) where the surface is locally flat.
+//
+// A Hinge or a Thread needs a locally FLAT patch: its knuckle run / its pitch
+// line is a straight feature generated as if for a plane, so on a surface whose
+// radius of curvature is comparable to the connector's own extent the body will
+// not sit flush. The gizmo warns (it does not block) below
+// CurvedConnectorFlatPatchFactor times the connector's extent.
+double curved_cut_sheet_curvature_radius(const CurvedCutSheet& sheet, double x, double y);
+
+// A locally flat patch means radius >= this many times the connector's extent.
+static constexpr double CurvedConnectorFlatPatchFactor = 3.0;
+
+// True when a connector of this extent (its largest in-plane half size, mm) at
+// local (x,y) sits on a patch flat enough for a straight-featured kind (Hinge,
+// Thread) to mate. Purely advisory - the gizmo warns, nothing refuses.
+bool curved_cut_patch_is_flat_enough(const CurvedCutSheet& sheet, double x, double y, double extent);
+
+// ---------------------------------------------------------------------------
 // Phase 2 fixes: side visibility, as a PURE contract.
 //
 // The gizmo lets each half of the preview be Visible, Ghost or Hidden, and the
