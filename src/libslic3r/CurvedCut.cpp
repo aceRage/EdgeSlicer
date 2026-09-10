@@ -499,28 +499,118 @@ bool curved_cut_split(const indexed_triangle_set& mesh,
         extent_v = std::max(extent_v, need_v);
     }
 
+    // THE "ONLY ONE HALF SURVIVES" FIX, part 1: the object's winding.
+    //
+    // Both booleans decide "inside" from face orientation, so an object whose
+    // triangles are wound inwards - a flipped-normal import, or a mesh a previous
+    // repair left inside out - reports its COMPLEMENT as its interior. The
+    // INTERSECTION then comes back empty (or as the whole part) while the A_NOT_B
+    // still succeeds, and the caller sees exactly one half. Detect it from the
+    // signed volume, which is negative for precisely this case, and flip the copy
+    // handed to the boolean. its_volume() is one pass over the triangles and this
+    // runs once per cut, so it costs nothing measurable.
+    if (its_volume(object.its) < 0.f) {
+        BOOST_LOG_TRIVIAL(warning) << "Curved cut: the input mesh is wound inwards (negative signed volume); "
+                                      "flipping it before the boolean";
+        for (Vec3i32& t : object.its.indices)
+            std::swap(t(1), t(2));
+    }
+
     TriangleMesh slab(curved_cut_lower_slab(sheet, bbox, samples, extent, extent_v));
+
+    // THE "ONLY ONE HALF SURVIVES" FIX, part 2: never let ONE failed boolean
+    // cost the caller a half.
+    //
+    // Each side used to be its own all-or-nothing boolean, and a failure just
+    // cleared that side and logged. Downstream, an empty mesh is indistinguishable
+    // from "this half does not exist": add_cut_volume() returns early on an empty
+    // mesh, the cloned ModelObject ends up with no volumes, and post_process()
+    // drops it - so the user gets one part back from a two-part cut, with nothing
+    // on screen to say why. That is the reported bug.
+    //
+    // So: run BOTH sides whenever either was asked for, and when exactly one came
+    // back, recover the other from the complement - the missing half is
+    // (object - kept), another boolean against a solid the first one already
+    // proved workable. Only when the direct boolean AND the complement both fail
+    // is a half really unavailable.
+    auto complement = [&object](const indexed_triangle_set& kept, indexed_triangle_set& out) -> bool {
+        if (kept.empty())
+            return false;
+        TriangleMesh rest;
+        if (!curved_boolean(object, TriangleMesh(kept), "A_NOT_B", rest) || rest.its.empty())
+            return false;
+        out = rest.its;
+        return true;
+    };
+
+    indexed_triangle_set lower_its, upper_its;
+    bool have_lower = false, have_upper = false;
+    {
+        TriangleMesh out;
+        if (curved_boolean(object, slab, "INTERSECTION", out) && !out.its.empty()) {
+            lower_its  = std::move(out.its);
+            have_lower = true;
+        }
+    }
+    {
+        TriangleMesh out;
+        if (curved_boolean(object, slab, "A_NOT_B", out) && !out.its.empty()) {
+            upper_its  = std::move(out.its);
+            have_upper = true;
+        }
+    }
+
+    if (!have_upper && have_lower) {
+        BOOST_LOG_TRIVIAL(warning) << "Curved cut: the upper boolean gave nothing; recovering it as object - lower";
+        have_upper = complement(lower_its, upper_its);
+    }
+    else if (!have_lower && have_upper) {
+        BOOST_LOG_TRIVIAL(warning) << "Curved cut: the lower boolean gave nothing; recovering it as object - upper";
+        have_lower = complement(upper_its, lower_its);
+    }
 
     bool ok = true;
     if (lower != nullptr) {
-        TriangleMesh out;
-        if (curved_boolean(object, slab, "INTERSECTION", out))
-            *lower = out.its;
+        if (have_lower)
+            *lower = std::move(lower_its);
         else {
             lower->clear();
             ok = false;
         }
     }
     if (upper != nullptr) {
-        TriangleMesh out;
-        if (curved_boolean(object, slab, "A_NOT_B", out))
-            *upper = out.its;
+        if (have_upper)
+            *upper = std::move(upper_its);
         else {
             upper->clear();
             ok = false;
         }
     }
     return ok;
+}
+
+
+// ---------------------------------------------------------------------------
+// Phase 2 fixes: side visibility contract (see CurvedCut.hpp).
+// ---------------------------------------------------------------------------
+
+float curved_cut_side_alpha(CurvedCutSideVisibility v)
+{
+    switch (v) {
+    case CurvedCutSideVisibility::Ghost:  return 0.25f;
+    case CurvedCutSideVisibility::Hidden: return -1.f; // negative == discard, see gouraud.fs
+    default:                              return 1.f;
+    }
+}
+
+bool curved_cut_side_is_ghost(float alpha)
+{
+    return alpha > 0.f && alpha < 1.f;
+}
+
+bool curved_cut_has_ghost_side(float alpha_1, float alpha_2)
+{
+    return curved_cut_side_is_ghost(alpha_1) || curved_cut_side_is_ghost(alpha_2);
 }
 
 } // namespace Slic3r

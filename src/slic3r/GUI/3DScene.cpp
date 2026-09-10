@@ -9,6 +9,7 @@
 #include "Camera.hpp"
 #include "Frustum.hpp"
 #include "libslic3r/BuildVolume.hpp"
+#include "libslic3r/CurvedCut.hpp"
 #include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/ExtrusionEntityCollection.hpp"
 #include "libslic3r/Geometry.hpp"
@@ -938,17 +939,52 @@ void GLVolumeCollection::render(GLVolumeCollection::ERenderType      type,
     if (disable_cullface)
         glsafe(::glDisable(GL_CULL_FACE));
 
-    // Cut gizmo, phase 2: a GHOSTED half (0 < alpha < 1) has to blend, and it
-    // has to stop writing depth - otherwise it would keep occluding the cut
-    // sheet and the far half behind it, which is precisely what ghosting is for.
-    // Only the colour-clip path can produce this, so nothing else pays for it.
+    // Cut gizmo, phase 2 fix: a GHOSTED half (0 < alpha < 1) has to blend, and it
+    // has to stop writing depth - otherwise it would keep occluding the cut sheet
+    // and the far half behind it, which is precisely what ghosting is for.
+    //
+    // THE BUG THIS REPLACES: turning depth writes off once, around the whole
+    // draw, took them away from the SOLID half too. With no depth buffer the
+    // solid half's own back faces blended over its front faces in triangle
+    // order and its silhouette dissolved, so all that stayed legible was the
+    // cut face - for both halves, which is exactly what was reported.
+    //
+    // The fix is TWO PASSES over the same volume list:
+    //   pass 0  every non-ghost side, depth writes ON, no blending (the ghost
+    //           side is suppressed by forcing its alpha negative, which the
+    //           shader already treats as a discard);
+    //   pass 1  only the ghost side, blended, depth writes OFF, drawn after the
+    //           opaque geometry so it composites over what is behind it.
+    // With no ghost side there is one pass and the state is untouched, so every
+    // other caller of the colour clip - and every non-cut draw - is unaffected.
+    std::array<float, 2> side_alphas{ 1.f, 1.f };
+    if (m_use_color_clip_plane)
+        side_alphas = m_color_clip_plane_alphas;
     const bool ghost_side = m_use_color_clip_plane &&
-                            ((m_color_clip_plane_alphas[0] > 0.f && m_color_clip_plane_alphas[0] < 1.f) ||
-                             (m_color_clip_plane_alphas[1] > 0.f && m_color_clip_plane_alphas[1] < 1.f));
+                            curved_cut_has_ghost_side(side_alphas[0], side_alphas[1]);
+    const int  n_passes   = ghost_side ? 2 : 1;
+
+    for (int ghost_pass = 0; ghost_pass < n_passes; ++ ghost_pass) {
+
+    // Per-pass side alphas. A side is drawn in exactly one of the two passes, so
+    // nothing is drawn twice and nothing is dropped.
+    std::array<float, 2> pass_alphas = side_alphas;
     if (ghost_side) {
-        glsafe(::glEnable(GL_BLEND));
-        glsafe(::glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA));
-        glsafe(::glDepthMask(GL_FALSE));
+        for (int s = 0; s < 2; ++ s) {
+            const bool is_ghost = curved_cut_side_is_ghost(side_alphas[s]);
+            if ((ghost_pass == 1) != is_ghost)
+                pass_alphas[s] = -1.f;   // not this pass: discard in the shader
+        }
+        if (ghost_pass == 1) {
+            glsafe(::glEnable(GL_BLEND));
+            glsafe(::glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA));
+            glsafe(::glDepthMask(GL_FALSE));
+        }
+        else {
+            glsafe(::glDepthMask(GL_TRUE));
+            if (type != ERenderType::Transparent)
+                glsafe(::glDisable(GL_BLEND));
+        }
     }
 
     for (GLVolumeWithIdAndZ& volume : to_render) {
@@ -998,8 +1034,8 @@ void GLVolumeCollection::render(GLVolumeCollection::ERenderType      type,
         // never reads an uninitialised uniform left over from another gizmo:
         // { 1, 1 } is two solid halves, which is what everything but the cut
         // gizmo's Visible/Ghost/Hidden control ever asks for.
-        shader->set_uniform("color_clip_side_alpha_1", m_color_clip_plane_alphas[0]);
-        shader->set_uniform("color_clip_side_alpha_2", m_color_clip_plane_alphas[1]);
+        shader->set_uniform("color_clip_side_alpha_1", pass_alphas[0]);
+        shader->set_uniform("color_clip_side_alpha_2", pass_alphas[1]);
         // Curved cut: split the two halves by the sheet's height field rather
         // than by the flat plane. Texture unit 3 - 0 is taken by depth_tex in
         // the outline pass below, 1 and 2 by the environment map.
@@ -1075,6 +1111,8 @@ void GLVolumeCollection::render(GLVolumeCollection::ERenderType      type,
         glsafe(::glBindBuffer(GL_ARRAY_BUFFER, 0));
         glsafe(::glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0));
     }
+
+    } // ghost_pass
 
     if (m_show_sinking_contours) {
         shader->stop_using();

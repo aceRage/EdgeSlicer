@@ -193,6 +193,38 @@ bool curved_cut_split(const indexed_triangle_set& mesh,
                       indexed_triangle_set*       lower,
                       int                         samples = CurvedCutSheet::CutSamples);
 
+// ---------------------------------------------------------------------------
+// Phase 2 fixes: side visibility, as a PURE contract.
+//
+// The gizmo lets each half of the preview be Visible, Ghost or Hidden, and the
+// state reaches the fragment shader as one float per side. Nobody can look at a
+// headless build's framebuffer, so the mapping and the draw-order predicate that
+// depends on it live here, out of the GUI, where a test can pin them:
+//
+//   Visible -> 1.0   solid, drawn in the opaque pass with depth writes ON
+//   Ghost   -> 0.25  blended, drawn in a SECOND pass with depth writes OFF
+//   Hidden  -> < 0   discarded in the shader (a zero alpha would still write
+//                    depth and go on occluding, which is the opposite of hiding)
+//
+// The two-pass split is the fix for "Ghost showed only the cut face": a single
+// pass with depth writes off for the WHOLE volume left the solid half with no
+// depth buffer either, so its own back faces blended over its front faces and
+// all that survived was the cap. See GLVolumeCollection::render.
+// ---------------------------------------------------------------------------
+
+enum class CurvedCutSideVisibility { Visible, Ghost, Hidden };
+
+// The per-side alpha uniform (color_clip_side_alpha_1 / _2 in gouraud.fs).
+float curved_cut_side_alpha(CurvedCutSideVisibility v);
+
+// True when `alpha` is a GHOST alpha: strictly between fully transparent and
+// fully solid. Hidden (negative) is not a ghost - it is a discard - and Visible
+// (1.0) is not one either.
+bool curved_cut_side_is_ghost(float alpha);
+
+// True when either side is ghosted, i.e. the draw needs the extra blended pass.
+bool curved_cut_has_ghost_side(float alpha_1, float alpha_2);
+
 } // namespace Slic3r
 
 #endif /* slic3r_CurvedCut_hpp_ */
