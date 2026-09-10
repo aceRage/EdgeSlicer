@@ -2,6 +2,7 @@
 
 #include <libslic3r/CurvedCut.hpp>
 #include <libslic3r/CutUtils.hpp>
+#include <libslic3r/FlexiJoint.hpp>
 #include <libslic3r/Format/3mf.hpp>
 #include <libslic3r/Format/STL.hpp>
 #include <libslic3r/Geometry.hpp>
@@ -1646,49 +1647,46 @@ TEST_CASE("Curved cut: a sheet clear of the part reports the empty half", "[Curv
 }
 
 // ---------------------------------------------------------------------------
-// (P2F-7) The re-fit contract, which the phase-2 fit does NOT currently honour.
+// (P3-1) The re-fit contract, NOW HONOURED.
 //
 // set_half_size(..., resample=true) is documented to keep the SURFACE fixed in
-// the plane while the rectangle around it changes, so that a bend the user drew
-// over the part does not slide or scale when the plane is nudged. It holds for
-// one re-fit within the resolution the control grid can represent, but it is not
-// idempotent: each re-sample reads the surface through Catmull-Rom and writes
-// back control values, and shrinking then re-growing does not return the values
-// it started from. A plane DRAG produces a stream of re-fits, so the drift
-// compounds.
-//
-// This test pins the size of that drift rather than asserting it away, so a
-// change that makes it worse is caught and a future fix has a baseline.
+// the plane while the rectangle around it changes. Phase 2 met that for ONE
+// re-fit but not for a stream of them: each re-sample read the surface through
+// Catmull-Rom and wrote control values back, and feeding each re-sample its
+// predecessor's output compounded the loss without bound over a plane drag.
+// This test used to pin that drift; phase 3 makes the re-sample read a stored
+// REFERENCE grid instead (see CurvedCutSheet::set_half_size), so it is now
+// idempotent and the test asserts the contract rather than the shortfall.
 // ---------------------------------------------------------------------------
 
-TEST_CASE("Curved cut: repeated re-fits drift the surface", "[CurvedCut]")
+TEST_CASE("Curved cut: repeated re-fits do not drift the surface", "[CurvedCut]")
 {
     CurvedCutSheet sheet(5);
     sheet.set_half_size(17.375, 15.0);
     sheet.at(2, 2) = 6.0;
+    // at() is a raw accessor, so tell the sheet this is the shape to remember.
+    sheet.commit_reference();
 
     const double centre0 = sheet.evaluate(0.5, 0.5);
     const double border0 = sheet.evaluate(0.0, 0.5);
     REQUIRE(centre0 == Approx(6.0));
     REQUIRE(border0 == Approx(0.0).margin(1e-9));
 
-    // ONE re-fit, out and back. The control grid cannot represent the dome
-    // exactly at a different spacing, so this is where the loss enters.
+    // ONE re-fit, out and back, now returns EXACTLY where it started: the second
+    // call re-samples the reference at the original extent, which reproduces the
+    // reference values themselves.
     {
         CurvedCutSheet s = sheet;
         s.set_half_size(17.375 * 0.7, 15.0 * 0.7, true);
         s.set_half_size(17.375, 15.0, true);
-        INFO("one round trip: centre " << s.evaluate(0.5, 0.5) << " border " << s.evaluate(0.0, 0.5));
-        // The peak is a control point and Catmull-Rom interpolates its control
-        // points, so the CENTRE survives exactly.
         REQUIRE(s.evaluate(0.5, 0.5) == Approx(centre0).margin(1e-9));
-        // The border does not: the shrunk grid sampled the dome's flank and the
-        // re-grown one extruded that value back out.
-        REQUIRE(std::abs(s.evaluate(0.0, 0.5) - border0) > 0.1);
+        REQUIRE(s.evaluate(0.0, 0.5) == Approx(border0).margin(1e-9));
+        for (size_t k = 0; k < s.values().size(); ++ k)
+            REQUIRE(s.values()[k] == Approx(sheet.values()[k]).margin(1e-12));
     }
 
-    // TWELVE alternating re-fits, as a plane drag produces. The drift compounds
-    // but stays bounded - it does not run away, and the peak never moves.
+    // TWELVE alternating re-fits, as a plane drag produces. The proof bar's
+    // number: back at the starting extent, every control value within 1e-6.
     {
         CurvedCutSheet s = sheet;
         for (int k = 0; k < 12; ++ k) {
@@ -1697,17 +1695,699 @@ TEST_CASE("Curved cut: repeated re-fits drift the surface", "[CurvedCut]")
         }
         INFO("after 12 re-fits: hs " << s.half_size_u() << " centre " << s.evaluate(0.5, 0.5)
              << " border " << s.evaluate(0.0, 0.5) << " max_disp " << s.max_displacement());
-        // Back at the extent it started from.
         REQUIRE(s.half_size_u() == Approx(17.375).epsilon(1e-9));
-        // The peak is untouched ...
         REQUIRE(s.evaluate(0.5, 0.5) == Approx(centre0).margin(1e-9));
         REQUIRE(s.max_displacement() == Approx(6.0).margin(1e-9));
-        // ... and the drift at the border is real but bounded well below the
-        // peak. THIS IS THE DOCUMENTED SHORTFALL, not a target: the contract in
-        // CurvedCut.hpp says the surface stays put, and at the border it does not.
         const double drift = std::abs(s.evaluate(0.0, 0.5) - border0);
         INFO("border drift after 12 re-fits: " << drift << " mm");
-        REQUIRE(drift > 0.5);        // it really does drift - the contract is not met
-        REQUIRE(drift < 2.0);        // but it is bounded, and far under the 6 mm peak
+        REQUIRE(drift < 1e-6);
+        for (size_t k = 0; k < s.values().size(); ++ k)
+            REQUIRE(std::abs(s.values()[k] - sheet.values()[k]) < 1e-6);
     }
+
+    // Re-fitting TWICE to the same NEW extent is a no-op the second time: the
+    // idempotence the drag actually leans on, since a fit that recomputes the
+    // same extent must not keep moving the surface.
+    {
+        CurvedCutSheet a = sheet;
+        a.set_half_size(24.0, 21.0, true);
+        const std::vector<double> once = a.values();
+        a.set_half_size(24.0 + 1e-12, 21.0, true);   // force the early-out to miss
+        a.set_half_size(24.0, 21.0, true);
+        for (size_t k = 0; k < once.size(); ++ k)
+            REQUIRE(std::abs(a.values()[k] - once[k]) < 1e-9);
+    }
+
+    // An EDIT republishes the reference, so the surface the user just drew - not
+    // some ancestor of it - is what later re-fits preserve.
+    {
+        CurvedCutSheet s = sheet;
+        s.set_half_size(30.0, 26.0, true);
+        s.grab(s.control_xy(1, 1), 12.0, 3.0, /*falloff*/ true);
+        const std::vector<double> after_edit = s.values();
+        s.set_half_size(12.0, 10.0, true);
+        s.set_half_size(30.0, 26.0, true);
+        for (size_t k = 0; k < after_edit.size(); ++ k)
+            REQUIRE(std::abs(s.values()[k] - after_edit[k]) < 1e-9);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// (P3-2) The fit covers the WHOLE part, not the cross-section.
+//
+// The failure it fixes: beyond the sheet's domain the cut slab extrudes the
+// sheet's RIM height outwards, so a part that is wider above or below the plane
+// than it is AT the plane got cut by that extruded rim - and a strongly bent
+// sheet could take the rim clear off the part, leaving one side empty (the
+// owner's "it removes the smaller part").
+// ---------------------------------------------------------------------------
+
+// A T: a narrow stem from z = -15 to 0, a wide flange from z = 0 to +10.
+// A plane at z = -7 crosses only the STEM, so a cross-section fit sizes the
+// sheet to the stem while the flange hangs far outside it.
+static indexed_triangle_set t_part(double stem = 10.0, double flange = 60.0)
+{
+    indexed_triangle_set s = its_make_cube(stem, stem, 15.0);
+    for (Vec3f& v : s.vertices)
+        v -= Vec3f(float(0.5 * stem), float(0.5 * stem), 15.f);
+    indexed_triangle_set f = its_make_cube(flange, flange, 10.0);
+    for (Vec3f& v : f.vertices)
+        v -= Vec3f(float(0.5 * flange), float(0.5 * flange), 0.f);
+    its_merge(s, f);
+    return s;
+}
+
+TEST_CASE("Curved cut: the fit covers the whole projection", "[CurvedCut]")
+{
+    indexed_triangle_set t = t_part();
+    // The plane frame: z == 0 is the cut. Put the cut through the stem by moving
+    // the part up 7 mm, so the section is the 10 mm stem and the 60 mm flange is
+    // 7 mm above it.
+    its_translate(t, Vec3f(0.f, 0.f, 7.f));
+
+    double sec_u = 0.0, sec_v = 0.0;
+    REQUIRE(curved_cut_fit_extent(t, sec_u, sec_v, 0.15, 5.0));
+    // The cross-section fit sees the 10 mm stem: 5 + 5 = 10 mm half extent.
+    REQUIRE(sec_u == Approx(10.0));
+    REQUIRE(sec_v == Approx(10.0));
+
+    double prj_u = 0.0, prj_v = 0.0;
+    REQUIRE(curved_cut_fit_projection_extent(t, prj_u, prj_v, 0.15, 5.0));
+    // The projection fit sees the 60 mm flange: 30 + max(0.15*30, 5) = 34.5.
+    // 30 mm half width + max(0.15 * 30, 5) = 30 + 5 = 35.
+    REQUIRE(prj_u == Approx(35.0));
+    REQUIRE(prj_v == Approx(35.0));
+    // The handles span the wide top, which is the whole point.
+    REQUIRE(prj_u > 0.5 * 60.0);
+
+    // And it MATTERS: a sheet fitted to the section, bent hard, loses a half;
+    // the same bend on the projection-fitted sheet keeps both.
+    const double whole = std::abs(double(its_volume(t)));
+
+    // A dome: the centre raised, the RIM raised too - the shape a user gets after
+    // dragging a handle with the bend radius covering the sheet. What matters for
+    // this test is that the rim is well above the plane, because it is the rim
+    // that gets extruded outwards beyond the sheet's own domain.
+    auto bent = [](double hs_u, double hs_v, double amp) {
+        CurvedCutSheet s(5);
+        s.set_half_size(hs_u, hs_v);
+        for (int j = 0; j < 5; ++ j)
+            for (int i = 0; i < 5; ++ i)
+                s.at(i, j) = amp;
+        s.commit_reference();
+        return s;
+    };
+
+    // The part in the plane frame: stem z in [-8, +7], flange z in [+7, +17].
+    {
+        // SECTION-FITTED, the phase 2 behaviour. The sheet is only 10 mm wide (the
+        // STEM's cross-section), and outside that domain its rim height is
+        // extruded straight out - so over the 60 mm flange the cutter is a flat
+        // shelf at +20, CLEAR ABOVE the part's +17 top. The upper half comes back
+        // empty: a bend the user drew over the stem has silently taken the whole
+        // flange into the bottom half. This is the owner's "it removes the
+        // smaller part".
+        indexed_triangle_set u, l;
+        const CurvedCutSheet s = bent(sec_u, sec_v, 20.0);
+        const bool ok = curved_cut_split(t, s, &u, &l);
+        INFO("section fit: upper " << its_volume(u) << " lower " << its_volume(l) << " whole " << whole);
+        REQUIRE(!ok);
+        REQUIRE(u.empty());
+        REQUIRE(std::abs(double(its_volume(l))) == Approx(whole).epsilon(2e-3));
+        // And the cheap test the panel warns from agrees, before any boolean runs.
+        bool ue = false, le = false;
+        curved_cut_empty_sides(t, s, ue, le);
+        REQUIRE(ue);
+        REQUIRE(!le);
+    }
+    {
+        // PROJECTION-FITTED, phase 3. The domain now covers the whole flange, so
+        // the surface the user drew is what cuts everywhere and nothing is decided
+        // by an extruded rim. A level sheet at +20 is still above the part, so this
+        // one is empty too - correctly, and for a reason the user can see (the
+        // handles are over the flange, visibly above it). The interesting case is
+        // a HEIGHT THE PART REACHES, where the projection fit keeps both halves
+        // that the section fit would have lost.
+        indexed_triangle_set u, l;
+        const CurvedCutSheet s = bent(prj_u, prj_v, 12.0);
+        REQUIRE(curved_cut_split(t, s, &u, &l));
+        const double up = std::abs(double(its_volume(u)));
+        const double lo = std::abs(double(its_volume(l)));
+        INFO("projection fit: upper " << up << " lower " << lo << " whole " << whole);
+        REQUIRE(up > 0.1 * whole);
+        REQUIRE(lo > 0.1 * whole);
+        REQUIRE(up + lo == Approx(whole).epsilon(3e-3));
+        bool ue = true, le = true;
+        curved_cut_empty_sides(t, s, ue, le);
+        REQUIRE(!ue);
+        REQUIRE(!le);
+
+        // A RAMP, which is where the two fits part company on shape rather than on
+        // emptiness. The same surface z = 0.4 * x is expressed on both sheets; on
+        // the section-fitted one it can only be drawn over |x| <= 10 and is then
+        // extruded FLAT at +/-4 over the rest of the flange, while the
+        // projection-fitted one carries the ramp right across it.
+        //
+        // Sample the CUTTER both sheets present at the flange's outer edge: the
+        // section-fitted sheet says +4 there (its rim value, extruded), the
+        // projection-fitted one says the ramp's own 0.4 * 30 = 12.
+        auto ramp = [](double hs_u, double hs_v) {
+            CurvedCutSheet s(5);
+            s.set_half_size(hs_u, hs_v);
+            for (int j = 0; j < 5; ++ j)
+                for (int i = 0; i < 5; ++ i)
+                    s.at(i, j) = 0.4 * s.control_xy(i, j).x();
+            s.commit_reference();
+            return s;
+        };
+        const CurvedCutSheet r_sec = ramp(sec_u, sec_v);
+        const CurvedCutSheet r_prj = ramp(prj_u, prj_v);
+        INFO("at x = 30: section fit says " << r_sec.evaluate_local(30.0, 0.0)
+             << ", projection fit says " << r_prj.evaluate_local(30.0, 0.0));
+        REQUIRE(r_sec.evaluate_local(30.0, 0.0) == Approx(0.4 * sec_u).margin(1e-6));   // clamped at the rim
+        // The ramp itself, to within Catmull-Rom's own overshoot between nodes
+        // (a 5-point grid does not reproduce a line exactly off its nodes).
+        REQUIRE(r_prj.evaluate_local(30.0, 0.0) == Approx(12.0).margin(0.6));
+        // Three times what the clamped rim gave: this is the whole difference the
+        // fit change makes over a part that hangs outside the cross-section.
+        REQUIRE(r_prj.evaluate_local(30.0, 0.0) > 2.5 * r_sec.evaluate_local(30.0, 0.0));
+        // Over the STEM, where both sheets have a domain, they agree - the fit
+        // change moves nothing the user had already drawn over the cut.
+        for (double x : { -4.0, 0.0, 4.0 })
+            REQUIRE(r_sec.evaluate_local(x, 0.0) == Approx(r_prj.evaluate_local(x, 0.0)).margin(1e-9));
+    }
+}
+
+TEST_CASE("Curved cut: the default resolution follows the extent", "[CurvedCut]")
+{
+    // ~10 mm spacing, clamped into [5, MaxResolution].
+    REQUIRE(curved_cut_default_resolution(10.0, 10.0, 10.0, 5) == 5);    // 20 mm span -> 3, clamped up
+    REQUIRE(curved_cut_default_resolution(30.0, 20.0, 10.0, 5) == 7);    // 60 mm span -> 7
+    REQUIRE(curved_cut_default_resolution(50.0, 10.0, 10.0, 5) == 11);   // 100 mm span -> 11
+    REQUIRE(curved_cut_default_resolution(200.0, 200.0, 10.0, 5) == CurvedCutSheet::MaxResolution);
+    REQUIRE(CurvedCutSheet::MaxResolution == 15);
+    // The spacing it actually lands on, for the sizes a real part gives.
+    for (double hs : { 15.0, 25.0, 40.0, 60.0 }) {
+        const int    n  = curved_cut_default_resolution(hs, hs, 10.0, 5);
+        const double sp = 2.0 * hs / double(n - 1);
+        INFO("hs " << hs << " -> n " << n << " spacing " << sp);
+        REQUIRE(sp >= 5.0);
+        REQUIRE(sp <= 15.0);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// (P3-3) The empty-side test the panel warns from.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("Curved cut: the empty-side test agrees with the split", "[CurvedCut]")
+{
+    const indexed_triangle_set box = chamfered_box();     // z in [-7.5, +7.5]
+    double hs_u = 0.0, hs_v = 0.0;
+    REQUIRE(curved_cut_fit_projection_extent(box, hs_u, hs_v, 0.15, 5.0));
+
+    auto level = [&](double h) {
+        CurvedCutSheet s(5);
+        s.set_half_size(hs_u, hs_v);
+        for (int j = 0; j < 5; ++ j)
+            for (int i = 0; i < 5; ++ i)
+                s.at(i, j) = h;
+        s.commit_reference();
+        return s;
+    };
+
+    // A sheet raised clear ABOVE the part: nothing above it.
+    {
+        bool ue = false, le = false;
+        curved_cut_empty_sides(box, level(9.0), ue, le);
+        REQUIRE(ue);
+        REQUIRE(!le);
+        // ... and the split agrees.
+        indexed_triangle_set u, l;
+        REQUIRE(!curved_cut_split(box, level(9.0), &u, &l));
+        REQUIRE(u.empty());
+        REQUIRE(!l.empty());
+    }
+    // Pushed clear BELOW.
+    {
+        bool ue = false, le = false;
+        curved_cut_empty_sides(box, level(-10.0), ue, le);
+        REQUIRE(!ue);
+        REQUIRE(le);
+        indexed_triangle_set u, l;
+        REQUIRE(!curved_cut_split(box, level(-10.0), &u, &l));
+        REQUIRE(!u.empty());
+        REQUIRE(l.empty());
+    }
+    // Through the middle: neither side empty.
+    {
+        bool ue = true, le = true;
+        curved_cut_empty_sides(box, level(0.0), ue, le);
+        REQUIRE(!ue);
+        REQUIRE(!le);
+    }
+    // A bent sheet that still crosses the part: still neither.
+    {
+        CurvedCutSheet s(5);
+        s.set_half_size(hs_u, hs_v);
+        for (int j = 0; j < 5; ++ j)
+            for (int i = 3; i < 5; ++ i)
+                s.at(i, j) = 6.0;
+        s.commit_reference();
+        bool ue = true, le = true;
+        curved_cut_empty_sides(box, s, ue, le);
+        REQUIRE(!ue);
+        REQUIRE(!le);
+    }
+    // A KERF wide enough to eat the part reports both sides empty. The box is
+    // 15 mm tall, so a 40 mm band centred on the mid plane leaves nothing.
+    {
+        bool ue = false, le = false;
+        curved_cut_empty_sides(box, level(0.0), ue, le, 40.0);
+        REQUIRE(ue);
+        REQUIRE(le);
+    }
+    // A kerf taken entirely from ABOVE leaves the lower half intact.
+    {
+        bool ue = false, le = false;
+        curved_cut_empty_sides(box, level(0.0), ue, le, 40.0, CutThicknessOffset::Above);
+        REQUIRE(ue);
+        REQUIRE(!le);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// (P3-4) The face offsets a thickness produces.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("Curved cut: thickness face offsets", "[CurvedCut]")
+{
+    double lo = 9.0, hi = 9.0;
+    curved_cut_thickness_faces(0.0, CutThicknessOffset::Centred, lo, hi);
+    REQUIRE(lo == Approx(0.0));
+    REQUIRE(hi == Approx(0.0));
+
+    curved_cut_thickness_faces(2.0, CutThicknessOffset::Centred, lo, hi);
+    REQUIRE(lo == Approx(-1.0));
+    REQUIRE(hi == Approx(1.0));
+
+    curved_cut_thickness_faces(2.0, CutThicknessOffset::Above, lo, hi);
+    REQUIRE(lo == Approx(0.0));
+    REQUIRE(hi == Approx(2.0));
+
+    curved_cut_thickness_faces(2.0, CutThicknessOffset::Below, lo, hi);
+    REQUIRE(lo == Approx(-2.0));
+    REQUIRE(hi == Approx(0.0));
+
+    // Negatives clamp to zero rather than inverting the band.
+    curved_cut_thickness_faces(-3.0, CutThicknessOffset::Centred, lo, hi);
+    REQUIRE(lo == Approx(0.0));
+    REQUIRE(hi == Approx(0.0));
+
+    REQUIRE(CutThicknessMin == Approx(0.0));
+    REQUIRE(CutThicknessMax == Approx(20.0));
+}
+
+// ---------------------------------------------------------------------------
+// (P3-5) Cut thickness, FLAT. Two half-space slices instead of one, and t == 0
+// bit-identical to the no-thickness path.
+// ---------------------------------------------------------------------------
+
+static void flat_cut_halves(double thickness, CutThicknessOffset offset,
+                            indexed_triangle_set& upper, indexed_triangle_set& lower)
+{
+    Model model;
+    ModelObject* mo = model.add_object();
+    mo->name = "cube";
+    mo->add_volume(TriangleMesh(centred_cube()))->name = "cube_v";
+    mo->add_instance();
+
+    Cut cut(mo, 0, Transform3d::Identity(),
+            ModelObjectCutAttribute::KeepUpper | ModelObjectCutAttribute::KeepLower);
+    const ModelObjectPtrs& parts = cut.perform_with_plane(thickness, offset);
+    REQUIRE(parts.size() == 2);
+    REQUIRE(parts[0]->volumes.size() == 1);
+    REQUIRE(parts[1]->volumes.size() == 1);
+    upper = parts[0]->volumes.front()->mesh().its;
+    lower = parts[1]->volumes.front()->mesh().its;
+}
+
+TEST_CASE("Curved cut: a flat cut with a thickness removes a slab", "[CurvedCut]")
+{
+    const double whole = CUBE * CUBE * CUBE;
+
+    // t == 0 is BIT-IDENTICAL to the no-thickness call: same counts, same
+    // coordinates. This is the Bar-A-style guard that the kerf did not disturb
+    // the path everybody already uses.
+    {
+        indexed_triangle_set u0, l0, u1, l1;
+        flat_cut_halves(0.0, CutThicknessOffset::Centred, u0, l0);
+        {
+            Model model;
+            ModelObject* mo = model.add_object();
+            mo->name = "cube";
+            mo->add_volume(TriangleMesh(centred_cube()))->name = "cube_v";
+            mo->add_instance();
+            Cut cut(mo, 0, Transform3d::Identity(),
+                    ModelObjectCutAttribute::KeepUpper | ModelObjectCutAttribute::KeepLower);
+            const ModelObjectPtrs& parts = cut.perform_with_plane();   // no argument at all
+            REQUIRE(parts.size() == 2);
+            u1 = parts[0]->volumes.front()->mesh().its;
+            l1 = parts[1]->volumes.front()->mesh().its;
+        }
+        REQUIRE(u0.vertices.size() == u1.vertices.size());
+        REQUIRE(u0.indices.size()  == u1.indices.size());
+        REQUIRE(l0.vertices.size() == l1.vertices.size());
+        REQUIRE(l0.indices.size()  == l1.indices.size());
+        for (size_t k = 0; k < u0.vertices.size(); ++ k)
+            REQUIRE(u0.vertices[k] == u1.vertices[k]);
+        for (size_t k = 0; k < u0.indices.size(); ++ k)
+            REQUIRE(u0.indices[k] == u1.indices[k]);
+        for (size_t k = 0; k < l0.vertices.size(); ++ k)
+            REQUIRE(l0.vertices[k] == l1.vertices[k]);
+        for (size_t k = 0; k < l0.indices.size(); ++ k)
+            REQUIRE(l0.indices[k] == l1.indices[k]);
+    }
+
+    // t == 2 on a 40 mm cube: the halves' volumes sum to 64000 - 40*40*2.
+    {
+        indexed_triangle_set u, l;
+        flat_cut_halves(2.0, CutThicknessOffset::Centred, u, l);
+        const double up = std::abs(double(its_volume(u)));
+        const double lo = std::abs(double(its_volume(l)));
+        const double want = whole - CUBE * CUBE * 2.0;
+        INFO("upper " << up << " lower " << lo << " sum " << (up + lo) << " want " << want);
+        REQUIRE(std::abs(up + lo - want) / want < 1e-4);
+        // Symmetric, so each half is 19 mm tall.
+        REQUIRE(up == Approx(CUBE * CUBE * 19.0).epsilon(1e-4));
+        REQUIRE(lo == Approx(CUBE * CUBE * 19.0).epsilon(1e-4));
+        // Both closed.
+        REQUIRE(its_num_open_edges(u) == 0);
+        REQUIRE(its_num_open_edges(l) == 0);
+        // The gap faces are 2 mm apart, sampled across the footprint. The two
+        // halves are cut at z = +1 and z = -1 in the CUT frame; after the cut the
+        // parts are re-placed on the bed, so measure the faces in each half's own
+        // mesh instead: the lower half's top and the upper half's bottom.
+        double lo_top = -1e9, up_bot = 1e9;
+        for (const Vec3f& v : l.vertices) lo_top = std::max(lo_top, double(v.z()));
+        for (const Vec3f& v : u.vertices) up_bot = std::min(up_bot, double(v.z()));
+        // Each half is 19 mm tall, so the check that matters is the heights.
+        double lo_bot = 1e9, up_top = -1e9;
+        for (const Vec3f& v : l.vertices) lo_bot = std::min(lo_bot, double(v.z()));
+        for (const Vec3f& v : u.vertices) up_top = std::max(up_top, double(v.z()));
+        REQUIRE(lo_top - lo_bot == Approx(19.0).margin(1e-4));
+        REQUIRE(up_top - up_bot == Approx(19.0).margin(1e-4));
+        // 40 - 19 - 19 == 2: the band that is gone.
+        REQUIRE(CUBE - (lo_top - lo_bot) - (up_top - up_bot) == Approx(2.0).margin(1e-4));
+    }
+
+    // The offset choice moves the band, not its width.
+    {
+        indexed_triangle_set u, l;
+        flat_cut_halves(2.0, CutThicknessOffset::Above, u, l);
+        // The band is [0, +2], so the lower half keeps its full 20 mm and the
+        // upper half loses 2.
+        REQUIRE(std::abs(double(its_volume(l))) == Approx(CUBE * CUBE * 20.0).epsilon(1e-4));
+        REQUIRE(std::abs(double(its_volume(u))) == Approx(CUBE * CUBE * 18.0).epsilon(1e-4));
+    }
+    {
+        indexed_triangle_set u, l;
+        flat_cut_halves(2.0, CutThicknessOffset::Below, u, l);
+        REQUIRE(std::abs(double(its_volume(l))) == Approx(CUBE * CUBE * 18.0).epsilon(1e-4));
+        REQUIRE(std::abs(double(its_volume(u))) == Approx(CUBE * CUBE * 20.0).epsilon(1e-4));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// (P3-6) Cut thickness, CURVED.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("Curved cut: a curved cut with a thickness removes a slab", "[CurvedCut]")
+{
+    const indexed_triangle_set cube = centred_cube();
+    const double whole = CUBE * CUBE * CUBE;
+    const CurvedCutSheet sheet = dome_sheet(8.0, 5, 40.0);
+
+    // t == 0 is bit-identical to the no-thickness call.
+    {
+        indexed_triangle_set u0, l0, u1, l1;
+        REQUIRE(curved_cut_split(cube, sheet, &u0, &l0, CurvedCutSheet::CutSamples, 0.0));
+        REQUIRE(curved_cut_split(cube, sheet, &u1, &l1));
+        REQUIRE(u0.vertices.size() == u1.vertices.size());
+        REQUIRE(u0.indices.size()  == u1.indices.size());
+        REQUIRE(l0.vertices.size() == l1.vertices.size());
+        REQUIRE(l0.indices.size()  == l1.indices.size());
+        for (size_t k = 0; k < u0.vertices.size(); ++ k)
+            REQUIRE(u0.vertices[k] == u1.vertices[k]);
+        for (size_t k = 0; k < u0.indices.size(); ++ k)
+            REQUIRE(u0.indices[k] == u1.indices[k]);
+        for (size_t k = 0; k < l0.vertices.size(); ++ k)
+            REQUIRE(l0.vertices[k] == l1.vertices[k]);
+        for (size_t k = 0; k < l0.indices.size(); ++ k)
+            REQUIRE(l0.indices[k] == l1.indices[k]);
+    }
+
+    // t == 2 on the domed sheet.
+    indexed_triangle_set u, l;
+    REQUIRE(curved_cut_split(cube, sheet, &u, &l, CurvedCutSheet::CutSamples, 2.0));
+    REQUIRE(!u.empty());
+    REQUIRE(!l.empty());
+    const double up = std::abs(double(its_volume(u)));
+    const double lo = std::abs(double(its_volume(l)));
+    INFO("curved t=2: upper " << up << " lower " << lo << " sum " << (up + lo) << " whole " << whole);
+    // The removed band follows the dome, which over the cube's 40 x 40 footprint
+    // is a 2 mm sheet of area 40 x 40 plus whatever the slope adds - so the loss
+    // is at least the flat 3200 mm^3 and not much more (the dome's max slope
+    // over this span is gentle).
+    const double lost = whole - (up + lo);
+    REQUIRE(lost > 0.98 * CUBE * CUBE * 2.0);
+    REQUIRE(lost < 1.15 * CUBE * CUBE * 2.0);
+    REQUIRE(its_num_open_edges(u) == 0);
+    REQUIRE(its_num_open_edges(l) == 0);
+
+    // THE GAP, measured along the normal (local Z, which IS the normal for a
+    // height field's offset - the two faces are the same surface shifted along
+    // Z, so the vertical separation is the offset separation). At 25 sample
+    // points across the footprint, cast a vertical line through both halves and
+    // check the lower half's top and the upper half's bottom are 2 mm apart.
+    auto surface_z = [](const indexed_triangle_set& its, double x, double y, bool want_max, double& out) {
+        bool found = false;
+        double best = want_max ? -1e9 : 1e9;
+        for (const Vec3i32& tri : its.indices) {
+            const Vec3d a = its.vertices[tri(0)].cast<double>();
+            const Vec3d b = its.vertices[tri(1)].cast<double>();
+            const Vec3d c = its.vertices[tri(2)].cast<double>();
+            // Barycentric in xy.
+            const double d = (b.y() - c.y()) * (a.x() - c.x()) + (c.x() - b.x()) * (a.y() - c.y());
+            if (std::abs(d) < 1e-12)
+                continue;
+            const double l1 = ((b.y() - c.y()) * (x - c.x()) + (c.x() - b.x()) * (y - c.y())) / d;
+            const double l2 = ((c.y() - a.y()) * (x - c.x()) + (a.x() - c.x()) * (y - c.y())) / d;
+            const double l3 = 1.0 - l1 - l2;
+            if (l1 < -1e-9 || l2 < -1e-9 || l3 < -1e-9)
+                continue;
+            const double z = l1 * a.z() + l2 * b.z() + l3 * c.z();
+            if (want_max ? (z > best) : (z < best)) { best = z; found = true; }
+        }
+        out = best;
+        return found;
+    };
+
+    int checked = 0;
+    for (int j = 0; j < 5; ++ j)
+        for (int i = 0; i < 5; ++ i) {
+            // Stay inside the footprint, away from the silhouette edges.
+            const double x = -14.0 + 7.0 * double(i);
+            const double y = -14.0 + 7.0 * double(j);
+            double lz = 0.0, uz = 0.0;
+            if (!surface_z(l, x, y, /*want_max*/ true, lz))  continue;
+            if (!surface_z(u, x, y, /*want_max*/ false, uz)) continue;
+            INFO("at (" << x << ", " << y << "): lower top " << lz << " upper bottom " << uz
+                 << " gap " << (uz - lz));
+            REQUIRE(uz - lz == Approx(2.0).margin(0.05));
+            ++ checked;
+        }
+    REQUIRE(checked == 25);
+}
+
+// ---------------------------------------------------------------------------
+// (P3-7) A flexi joint with a cut thickness. The kerf is added to the joint's
+// own gap so the bodies move with the faces and the joint stays assembled.
+// ---------------------------------------------------------------------------
+
+// The harness mirrors test_flexi_joint.cpp's cut_with_joint(): the two halves come
+// back as VOLUMES of one object, each with its own transform, so the meshes have to
+// be brought into object coordinates before they can be compared to each other.
+struct KerfFlexiHalves
+{
+    TriangleMesh upper;
+    TriangleMesh lower;
+};
+
+static KerfFlexiHalves flexi_cut_with_kerf(double thickness, FlexiJointKind kind)
+{
+    static const double CYL_R = 12.0, CYL_H = 30.0, CUT_Z = 15.0;
+
+    Model model;
+    ModelObject* mo = model.add_object();
+    mo->name = "flexi_cylinder";
+    ModelVolume* v = mo->add_volume(TriangleMesh(its_make_cylinder(CYL_R, CYL_H, 2.0 * PI / 180.0)));
+    v->set_type(ModelVolumeType::MODEL_PART);
+    v->name = "cyl";
+    mo->add_instance()->set_transformation(Geometry::Transformation());
+
+    FlexiJointParams p;
+    p.kind = kind;
+
+    CutConnector connector;
+    connector.pos        = Vec3d(0.0, 0.0, CUT_Z);
+    connector.rotation_m = Transform3d::Identity();
+    connector.z_angle    = 0.f;
+    connector.radius     = flexi_outer_extent(p);
+    connector.height     = flexi_protrusion_height(p);
+    connector.attribs    = CutConnectorAttributes(CutConnectorType::FlexiJoint, CutConnectorStyle::Prism, CutConnectorShape::Circle);
+    connector.flexi      = p;
+    add_flexi_joint_volume(mo, connector, "Flexi joint-1");
+
+    Cut cut(mo, 0, Geometry::translation_transform(Vec3d(0.0, 0.0, CUT_Z)),
+            ModelObjectCutAttribute::KeepUpper | ModelObjectCutAttribute::KeepLower |
+            ModelObjectCutAttribute::KeepAsParts);
+    const ModelObjectPtrs& res = cut.perform_with_plane(thickness);
+
+    KerfFlexiHalves out;
+    REQUIRE(res.size() == 1);
+    REQUIRE(res.front()->volumes.size() == 2);
+    for (const ModelVolume* vol : res.front()->volumes) {
+        TriangleMesh m(vol->mesh());
+        m.transform(vol->get_matrix());
+        if (vol->is_from_upper())
+            out.upper = m;
+        else
+            out.lower = m;
+    }
+    return out;
+}
+
+static double kerf_intersection_volume(const TriangleMesh& a, const TriangleMesh& b)
+{
+    std::vector<TriangleMesh> dst;
+    if (!MeshBoolean::mfd::make_boolean(a, b, dst, "INTERSECTION")) {
+        dst.clear();
+        MeshBoolean::mcut::make_boolean(a, b, dst, "INTERSECTION");
+    }
+    double vol = 0.0;
+    for (const TriangleMesh& m : dst)
+        vol += std::abs(double(its_volume(m.its)));
+    return vol;
+}
+
+TEST_CASE("Curved cut: a flexi joint survives a cut thickness", "[CurvedCut]")
+{
+    // A Double ring, the kind whose two loops thread through each other, at t = 0
+    // (the baseline the flexi suite already pins) and again at t = 2.
+    //
+    // The kerf is added to the joint's own gap (see perform_with_flexi_joints), so
+    // the two flat faces move apart by 2 mm AND every body is regenerated relative
+    // to the moved faces - which is what keeps the ring bodies bridging the gap
+    // rather than being left behind in one half.
+    double gap0 = 0.0;
+    for (double t : { 0.0, 2.0 }) {
+        INFO("cut thickness " << t);
+        const KerfFlexiHalves h = flexi_cut_with_kerf(t, FlexiJointKind::DoubleRing);
+        REQUIRE(!h.upper.empty());
+        REQUIRE(!h.lower.empty());
+        REQUIRE(std::abs(double(its_volume(h.upper.its))) > 100.0);
+        REQUIRE(std::abs(double(its_volume(h.lower.its))) > 100.0);
+
+        // THE EXISTING CONTRACT, unchanged by the kerf: the two segments are
+        // genuinely separate solids, so the joint is printable in place.
+        const double inter = kerf_intersection_volume(h.upper, h.lower);
+        INFO("intersection volume " << inter);
+        REQUIRE(inter == Approx(0.0).margin(1e-3));
+
+        // The two flat cut faces, measured on the cylinder WALL (r near CYL_R) so
+        // the joint bodies, which straddle the middle, stay out of it.
+        const double CYL_R = 12.0;
+        double lo = -1e9, hi = 1e9;
+        for (const Vec3f& v : h.lower.its.vertices)
+            if (std::hypot(double(v.x()), double(v.y())) > 0.9 * CYL_R)
+                lo = std::max(lo, double(v.z()));
+        for (const Vec3f& v : h.upper.its.vertices)
+            if (std::hypot(double(v.x()), double(v.y())) > 0.9 * CYL_R)
+                hi = std::min(hi, double(v.z()));
+        const double gap = hi - lo;
+        INFO("face-to-face gap " << gap);
+        if (t == 0.0)
+            gap0 = gap;
+        else {
+            // The kerf really did widen the gap, by exactly the thickness.
+            REQUIRE(gap == Approx(gap0 + 2.0).margin(1e-3));
+        }
+
+        // THE BODIES STILL BRIDGE IT. Each half's material spans the mid plane -
+        // its z range crosses the other's - so the rings still interlock rather
+        // than sitting as two loose pieces on either side of a wider gap.
+        auto spans = [](const TriangleMesh& m) {
+            double a = 1e9, b = -1e9;
+            for (const Vec3f& v : m.its.vertices) { a = std::min(a, double(v.z())); b = std::max(b, double(v.z())); }
+            return std::make_pair(a, b);
+        };
+        const auto su = spans(h.upper), sl = spans(h.lower);
+        INFO("upper z [" << su.first << ", " << su.second << "]  lower z [" << sl.first << ", " << sl.second << "]");
+        // Their z ranges OVERLAP across the gap: at least one half's body reaches
+        // past the other half's face, which is what an interlocking joint means
+        // (the Double ring's male body protrudes from the lower half into the
+        // upper half's socket, so the reach is one-sided by construction).
+        REQUIRE(std::min(su.second, sl.second) > std::max(su.first, sl.first));
+        REQUIRE(sl.second > hi);   // the lower half's body reaches past the upper face
+        // How far it reaches is unchanged by the kerf, because the body is
+        // generated relative to the (moved) faces rather than to the mid plane.
+        INFO("lower body reach past the upper face: " << (sl.second - hi));
+        REQUIRE(sl.second - hi > 0.5);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// (P3-8) Thickness demo export.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("Curved cut: thickness demo export", "[CurvedCut][.demo]")
+{
+    const char* dir_env = std::getenv("EDGESLICER_CUT_THICKNESS_DEMO_DIR");
+    if (dir_env == nullptr || *dir_env == 0)
+        return;
+    const boost::filesystem::path dir(dir_env);
+    boost::filesystem::create_directories(dir);
+
+    const indexed_triangle_set cube = centred_cube();
+
+    // FLAT, t = 2, through the Cut path so the demo is what the gizmo produces.
+    {
+        Model model;
+        ModelObject* mo = model.add_object();
+        mo->name = "cube";
+        mo->add_volume(TriangleMesh(cube))->name = "cube_v";
+        mo->add_instance();
+        Cut cut(mo, 0, Transform3d::Identity(),
+                ModelObjectCutAttribute::KeepUpper | ModelObjectCutAttribute::KeepLower);
+        const ModelObjectPtrs& parts = cut.perform_with_plane(2.0);
+        REQUIRE(parts.size() == 2);
+        TriangleMesh mu(parts[0]->volumes.front()->mesh().its), ml(parts[1]->volumes.front()->mesh().its);
+        REQUIRE(store_stl((dir / "flat_t2_upper.stl").string().c_str(), &mu, true));
+        REQUIRE(store_stl((dir / "flat_t2_lower.stl").string().c_str(), &ml, true));
+        WARN("flat t=2: upper " << its_volume(mu.its) << " lower " << its_volume(ml.its));
+    }
+
+    // CURVED, t = 2, domed sheet.
+    {
+        const CurvedCutSheet sheet = dome_sheet(8.0, 5, 40.0);
+        indexed_triangle_set u, l;
+        REQUIRE(curved_cut_split(cube, sheet, &u, &l, CurvedCutSheet::CutSamples, 2.0));
+        TriangleMesh mu(u), ml(l);
+        REQUIRE(store_stl((dir / "curved_t2_upper.stl").string().c_str(), &mu, true));
+        REQUIRE(store_stl((dir / "curved_t2_lower.stl").string().c_str(), &ml, true));
+        WARN("curved t=2: upper " << its_volume(u) << " lower " << its_volume(l));
+    }
+
+    WARN("thickness demo written to " << dir.string());
 }

@@ -726,3 +726,221 @@ The peak is safe (it is a control point, and Catmull-Rom interpolates its contro
 - **The cap's ghost blend.** Two ghosted surfaces at 25% each over the same pixel read darker than either alone; whether that matters has not been seen.
 - **Bug A's complement path in the wild.** The recovery fires only when one boolean fails outright. The tests reach it through the sheet-clear-of-part case, where it correctly returns nothing. A real mesh that defeats both Manifold and mcut on one side but not the other was not found, so the recovery's cost on a large part is unmeasured.
 - **Whether Bug A as the owner experienced it is actually closed.** What is fixed is the silent drop and the missing diagnosis. If his part had the sheet genuinely crossing it and still lost a half, this does not explain it — and the reproduction attempt above, which covers a wide sweep of bends, rotations and shapes, did not find such a case. His actual 3MF would settle it.
+
+
+---
+
+## Phase 3 implemented
+
+Branch `feat/cut-thickness`, cut from `origin/feat/ultra-preferences` at `30dc22d206`.
+
+Three things, in the order the owner asked for them: the sheet now fits the WHOLE part rather
+than the plane's cross-section; an empty half is said out loud before the cut rather than
+discovered after it; and both the flat and the curved cut gained a **cut thickness** ("kerf").
+
+### 1. The sheet fits the whole part, not the cross-section
+
+Phase 2 sized the sheet to the plane's intersection with the object (`curved_cut_fit_extent`).
+That put the handles over the material being cut, which was the point, but it was the wrong
+extent for the *cutter*: outside the sheet's own domain `evaluate_local()` clamps, so
+`curved_cut_lower_slab()` extrudes the sheet's **rim height** straight outwards. Anything of the
+part that hangs outside the domain is therefore cut by that extruded rim rather than by the
+surface the user drew - and on a part that is wider above or below the plane than it is *at* the
+plane, a strongly bent sheet takes the rim clear off the part and one side comes back empty.
+That is the owner's report: *"it removes the smaller part"*.
+
+`curved_cut_fit_projection_extent()` replaces it: the bounding box of every vertex of the
+instance mesh projected onto the plane's own (u,v) axes, plus the same
+`max(0.15 * extent, 5 mm)` margin. The half extent reaches the **further** side of the origin
+(not half the width), because the sheet's frame is centred on the plane's origin and an
+off-centre part would otherwise hang out of the box. No part of the object can now lie outside
+the domain, so the extruded rim never touches material.
+
+Two things had to come with it:
+
+- **Resolution follows extent.** Covering the whole projection makes the domain much larger than
+  the cross-section fit did, so a fixed 5x5 would spread the handles too thin on a big part.
+  `curved_cut_default_resolution()` aims for ~10 mm spacing, clamped into
+  `[DefaultResolution, MaxResolution]` - which for the sizes a real part gives lands the spacing
+  between 5 and 15 mm (pinned by a test). `MaxResolution` stays 15. The user's own slider choice
+  wins once they have made one (`m_curved_res_user_set`).
+- **The extent is snapped to 0.5 mm.** A plane drag re-fits on every move. The projection's
+  extent does not depend on where the plane sits *along* its normal at all, so in the common
+  gesture - sliding the cut position - the snapped extent is simply constant and no re-sample
+  happens.
+
+**`set_half_size(..., resample)` is now idempotent.** This was the phase 2 shortfall the previous
+test pinned rather than fixed. Re-sampling reads the surface through Catmull-Rom and writes
+control values back, and that round trip is lossy whenever the grid phase changes; feeding each
+re-sample its predecessor's output compounded the loss without bound over a drag. The sheet now
+keeps a **reference grid**: the last surface an *edit* produced, with the extent it was edited
+at. Every re-sample reads that reference, never the previously re-sampled values. Consequences:
+
+- N re-fits cost exactly what one costs; returning to an earlier extent reproduces that extent's
+  values bit-for-bit.
+- Every editing entry point (`grab`, `smooth`, `reset`, `set_values`, `set_resolution`, and a
+  non-resampling `set_half_size`) republishes the reference.
+- `at()` hands out a mutable reference and so can change the surface behind the sheet's back.
+  `set_half_size` detects that (the live values differ from the reference at the *current*
+  extent) and republishes first, so a caller that pokes `at()` and then re-fits gets what it
+  drew, not what it drew before. `commit_reference()` is the explicit version for callers that
+  want to say so.
+
+The re-fit test went from asserting the drift (`drift > 0.5`) to asserting the contract
+(`drift < 1e-6` over the proof bar's 12 alternating re-fits, and every control value within
+1e-6).
+
+### 2. The empty-side warning
+
+`curved_cut_split()` already *reported* an empty half - it returns false and leaves that side's
+mesh empty - but only after two booleans, by which point the user has committed. The panel needs
+the same answer before the click, so it asks the cheap question instead:
+
+`curved_cut_empty_sides()` is a sign test over the mesh's vertices against the sheet: any vertex
+strictly above the upper face makes the upper side non-empty, any strictly below the lower face
+makes the lower one non-empty. One pass over the vertices against two booleans. It is
+conservative in the direction that matters - it can only call a side non-empty when a vertex is
+on it, and for a closed mesh the converse (material on a side with no vertex there) cannot
+happen, because that material is bounded by faces and faces have vertices. It takes the kerf
+into account, so a thickness wide enough to eat the part reports both sides empty.
+
+The gizmo refreshes it with the fit and whenever the thickness changes, and the panel says, in
+orange and wrapped:
+
+> The surface does not cross the part on the upper/lower side; that side would be empty.
+
+**Perform cut still proceeds.** An empty half is not a refusal: the cut runs and produces the one
+half that has material. What changes is that it is no longer silent - a `WarningNotificationLevel`
+notification says which side was empty and why one part came back.
+
+### 3. Cut thickness ("kerf")
+
+A `Thickness` slider (mm, default 0, range 0..20) sits next to the cut position in the Cut panel,
+for **both** Flat and Curved. Thickness `t` removes a band of material centred on the cut
+surface: what survives is everything outside `[surface - t/2, surface + t/2]` along the plane
+normal. A `Remove from: Centred / Above / Below` radio appears once `t > 0` and moves the band
+without changing its width (`CutThicknessOffset`, `curved_cut_thickness_faces()`).
+
+**Flat** is two half-space slices instead of one: `cut_mesh(its, -t/2, nullptr, &lower)` and
+`cut_mesh(its, +t/2, &upper, nullptr)`. That is exactly what `perform_with_flexi_joints()` has
+always done to open its gap, so no new geometry code and no boolean.
+
+**Curved** is two slabs instead of one: `curved_cut_lower_slab()` gained an `offset` that raises
+or lowers the slab's top surface (the sheet) without touching the floor or the rim, so the lower
+half is `object INTERSECT slab(-t/2)` and the upper half is `object MINUS slab(+t/2)`. The cap
+logic is untouched - a height field offset along local Z is still a height field.
+
+**`t == 0` is bit-identical to today.** Both paths early-out into the single-surface code, and
+the tests pin it as identical vertex and index arrays, not as "close enough".
+
+**Connectors.** With `t > 0`:
+
+- **Plug / Snap**: the body grows by `t` and its centre moves to `face_lo + height/2`, so it
+  starts at the lower face and still reaches `height` into the upper half. It therefore bridges
+  the gap, and because the pocket is cut from the same lengthened body, the pocket depth is
+  measured from each half's own offset face.
+- **Dowel**: already symmetric about the plane, so it only has to get longer.
+- **Flexi / Hinge / Thread**: the kerf is added to the joint's **own gap**
+  (`params.gap = flexi_effective_gap(params) + kerf`) before any body is generated, rather than
+  applied on top of it. Every flexi body is laid out relative to the two faces through
+  `flexi_frame()`, so widening the gap in the params moves the faces and the bodies together and
+  the joint stays assembled. Applying the kerf separately would have moved the faces out from
+  under the bodies.
+
+**Not supported, and said so in the panel:** a **Thread** whose pitch is at or below the
+thickness. The pitch is an absolute length that does not scale with the gap, so a kerf of one
+pitch or more eats a whole turn and the two halves no longer screw together. Nothing refuses it -
+a deliberately loose thread is a legitimate thing to ask for - but the panel warns.
+
+"Keep as parts" keeps the gap: the two volumes are placed where the cut left them, so the band is
+visibly missing.
+
+**Preview.** The translucent plane (and the curved sheet) is drawn **twice**, at the two face
+offsets, so the removed band is visible as the space between two surfaces. At `t == 0` the two
+offsets are both zero and it is the single draw it always was. The colour clip still splits at
+the mid surface, unchanged.
+
+### 4. Persistence
+
+**Nothing new is written to the 3MF.** A plane cut persists nothing today - the cut is baked,
+`perform_with_plane()` replaces the objects with the results, and only connector data survives via
+`cut_information.xml`. The thickness follows the same rule: it is session state, and
+`on_set_state()` clears it (along with the offset choice and the resolution override) whenever
+the gizmo opens or closes. That is deliberate: a sticky thickness would silently kerf the next
+object the user cuts, which is the sticky-`m_keep_as_parts` bug in a new place.
+
+### Proofs
+
+`tests/libslic3r/test_curved_cut.cpp`, all passing. Full `libslic3r_tests`: **828 test cases, 825
+passed, 3 failed as expected** (the known pre-existing failures, unrelated to this work).
+
+1. **The fit covers the whole projection.** A T-shaped part - a 10 mm stem, a 60 mm flange - with
+   the plane through the stem. The cross-section fit gives a 10 mm half extent; the projection fit
+   gives 35 mm, so the handles span the wide top. And it matters: a sheet levelled at +20 mm on
+   the section-fitted domain extrudes that rim clear above the flange, the upper half comes back
+   **empty**, and the whole part lands in the lower half - the reported bug, reproduced. The same
+   bend on the projection-fitted sheet keeps both halves. A ramp `z = 0.4x` shows the shape
+   difference directly: at the flange's edge the section fit reports its clamped rim (+4) while
+   the projection fit reports the ramp itself (+12.5, Catmull-Rom's own overshoot off its nodes),
+   and over the stem - where both have a domain - they agree to 1e-9, so the fit change moves
+   nothing the user had already drawn over the cut.
+2. **Idempotent re-fit.** 12 alternating re-fits (x0.7, /0.7, ...) return to the starting extent
+   with every control value within **1e-6** and the border within 1e-6, where phase 2 drifted more
+   than 0.5 mm. One re-fit out and back is exact to 1e-12. Re-fitting twice to the same new extent
+   is a no-op the second time. An edit republishes the reference, so a later re-fit preserves what
+   the user just drew rather than an ancestor of it.
+3. **Empty-side detection.** A sheet raised bodily above a part reports `upper_empty`, one pushed
+   below reports `lower_empty`, one through the middle reports neither - and in each case
+   `curved_cut_split()` agrees. A kerf wide enough to eat the part reports both; the same kerf
+   taken from Above leaves the lower half intact.
+4. **Thickness, flat.** A 40 mm cube at `t = 2`: the halves' volumes sum to
+   `64000 - 40*40*2 = 60800` within 1e-4 relative (30400 + 30400 exactly), both halves are closed
+   (`its_num_open_edges == 0`), each is 19 mm tall so the missing band is 2.000 mm. The
+   Above / Below offsets move the band without changing its width (20 mm and 18 mm halves).
+5. **Thickness, curved.** The same cube with an 8 mm domed sheet at `t = 2`: 26645 + 34155 =
+   60800, both closed, the removed band is between 0.98x and 1.15x the flat 3200 mm^3 (the dome's
+   slope adds a little). **The gap measured along the normal at 25 sample points across the
+   footprint is 2 mm within 0.05 mm** - the lower half's top surface and the upper half's bottom
+   surface, sampled by barycentric interpolation on a vertical line.
+6. **`t == 0` is bit-identical**, for both flat and curved: same vertex counts, same index counts,
+   same coordinates as the no-thickness call, compared element by element.
+7. **A Flexi Double ring with `t = 2`.** The existing non-intersection contract still holds -
+   `intersection_volume(upper, lower) == 0` within 1e-3, so the joint is still printable in
+   place - the face-to-face gap grew by exactly 2.000 mm, and the ring bodies **still bridge it**:
+   the lower half's body reaches past the upper half's face by the same amount it did at `t = 0`,
+   because the body is generated relative to the moved faces rather than to the mid plane.
+8. **Face offsets and the resolution rule** are pinned directly:
+   `curved_cut_thickness_faces()` for all three offsets and for a negative thickness (clamps to
+   zero rather than inverting the band); `curved_cut_default_resolution()` at four extents plus
+   the spacing it actually lands on.
+
+**Demo**: `flat_t2_upper.stl` / `flat_t2_lower.stl` and `curved_t2_upper.stl` /
+`curved_t2_lower.stl`, produced by the `[.demo]` case from the same code the tests exercise - set
+`EDGESLICER_CUT_THICKNESS_DEMO_DIR` to regenerate.
+
+### Unverified
+
+**Nobody has clicked this.** Everything above is proved headless through `libslic3r`. The GUI
+compiles and the app launches clean with a scratch data dir, but no human has opened the Cut
+gizmo, set a thickness, and looked at the result. Specifically unverified by eye:
+
+- **The two-surface preview.** The plane and the sheet are drawn twice at the two face offsets.
+  Whether two translucent surfaces read as "a band of material is going away" - rather than as a
+  rendering glitch - is a judgement nobody has made. A genuine thin slab (with side walls) would
+  read better and is the obvious next step if it does not.
+- **Where the Thickness slider sits.** It is above the Surface toggle, next to the cut position,
+  because thickness is a property of the cut rather than of the surface. Whether that is where a
+  user looks for it is untested.
+- **The `Remove from` radio.** It only appears once `t > 0`, so the panel grows as the user drags
+  the slider. That may read as the panel jumping around.
+- **The empty-side warning's timing.** It is refreshed with the fit and on a thickness change,
+  which means during a control-point *drag* it shows the state from before the drag started (the
+  fit is debounced to the end of a plane drag for the same reason the cut face is). A handle
+  dragged clear off the part will not warn until the drag ends.
+- **Connector behaviour with a kerf has not been looked at in the app at all.** The Plug's
+  lengthening and re-centring is derived and compiles, and the flexi path is tested headless, but
+  no Plug or Dowel has been placed on a kerfed cut and inspected.
+- The **resolution auto-scaling** changes the control grid when the fit runs. On a part where the
+  projection is much larger than the cross-section this jumps the handle count on the first fit
+  (e.g. 5x5 to 11x11). Whether that feels like the tool helping or like it moving under the user's
+  hand is unknown.
