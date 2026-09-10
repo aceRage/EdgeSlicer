@@ -349,13 +349,22 @@ void HttpServer::stop()
     
     // 重启检查已集成到健康检查中，无需单独停止
     
+    // Join the health-check thread BEFORE taking m_server_mtx: is_healthy()
+    // and restart() run on that thread and also take this lock. Locking first
+    // then joining would deadlock against an in-flight health check.
+    // Then join the io thread before stop_all(): the io thread was still
+    // dispatching handlers, and handlers themselves call IOServer::stop(session)
+    // — mutating the same sessions set from two threads at once.
+    std::lock_guard<std::mutex> lock(m_server_mtx);
     if (server_) {
-        server_->acceptor.close();
-        server_->stop_all();
+        boost::system::error_code ignored_ec;
+        server_->acceptor.close(ignored_ec);
         server_->io_service.stop();
     }
     if (m_http_server_thread.joinable())
         m_http_server_thread.join();
+    if (server_)
+        server_->stop_all();
     server_.reset();
 }
 
@@ -367,13 +376,20 @@ void HttpServer::restart()
     // 只停止HTTP服务器，不停止健康检查和重启检查线程
     start_http_server = false;
     
+    // Hold the lock across teardown AND start(): if is_healthy() ran in the
+    // gap between the two it would see server_ == nullptr and trigger another
+    // restart on top of this one. Health-check / restart-check threads stay
+    // running (Edge); only the io server lifecycle is serialized here.
+    std::lock_guard<std::mutex> lock(m_server_mtx);
     if (server_) {
-        server_->acceptor.close();
-        server_->stop_all();
+        boost::system::error_code ignored_ec;
+        server_->acceptor.close(ignored_ec);
         server_->io_service.stop();
     }
     if (m_http_server_thread.joinable())
         m_http_server_thread.join();
+    if (server_)
+        server_->stop_all();
     server_.reset();
     
     BOOST_LOG_TRIVIAL(debug) << "Waiting for resources to be released...";
@@ -387,6 +403,8 @@ void HttpServer::restart()
 
 bool HttpServer::is_healthy()
 {
+    // May run on the health-check thread concurrently with stop()/restart().
+    std::lock_guard<std::mutex> lock(m_server_mtx);
     if (!start_http_server || !server_) {
         BOOST_LOG_TRIVIAL(fatal) << "Health check failed: server not started or server object is null";
         return false;
