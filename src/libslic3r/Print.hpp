@@ -1350,7 +1350,11 @@ private:
     bool                                    m_support_used {false};
 
     //BBS: plate's origin
-    Vec3d   m_origin;
+    // Eigen does not value-initialise a Vec3d member, and a Print built without
+    // set_plate_origin() (the test harness, the CLI) then reads garbage here.
+    // wipe_tower_x + m_origin(0) became +-inf, scale_() of which is INT64_MIN, and
+    // the translated prime-tower hull tripped ClipperLib's range test in validate().
+    Vec3d   m_origin { Vec3d::Zero() };
     //BBS: modified_count
     int     m_modified_count {0};
     //BBS
