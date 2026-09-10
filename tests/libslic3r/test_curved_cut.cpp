@@ -1280,3 +1280,434 @@ TEST_CASE("Curved cut: a 15 x 15 control grid", "[CurvedCut]")
     REQUIRE(!upper.empty());
     REQUIRE(!lower.empty());
 }
+
+// ---------------------------------------------------------------------------
+// (P2F-1) The owner's case: an ASYMMETRIC part, a rotated off-centre plane and
+// a strongly bent S-shaped sheet, with BOTH halves kept. The report was that
+// only one half survived - the smaller one vanished.
+// ---------------------------------------------------------------------------
+
+// A 30 x 20 x 15 box with one top corner chamfered off, centred on the origin.
+// Asymmetric on purpose: a symmetric part cannot tell "the smaller half was
+// dropped" from "the halves came out equal".
+static indexed_triangle_set chamfered_box(double sx = 30.0, double sy = 20.0, double sz = 15.0)
+{
+    indexed_triangle_set its = its_make_cube(sx, sy, sz);
+    its_translate(its, Vec3f(float(-0.5 * sx), float(-0.5 * sy), float(-0.5 * sz)));
+    // Chamfer: pull the +x/+z edge's two top vertices inwards along x. Done by
+    // moving vertices rather than by a boolean, so the mesh stays closed and the
+    // helper has no dependency on the boolean under test.
+    for (Vec3f& v : its.vertices)
+        if (v.x() > float(0.5 * sx) - 1e-3f && v.z() > float(0.5 * sz) - 1e-3f)
+            v.x() -= float(0.35 * sx);
+    return its;
+}
+
+// An S-shaped sheet: one half of the grid pushed up, the other pushed down, so
+// the surface swings hard through the part rather than doming gently.
+static CurvedCutSheet s_sheet(double amp, double hs_u, double hs_v, int resolution = 5)
+{
+    CurvedCutSheet sheet(resolution);
+    sheet.set_half_size(hs_u, hs_v);
+    for (int j = 0; j < resolution; ++ j)
+        for (int i = 0; i < resolution; ++ i) {
+            const double u = sheet.control_u(i);
+            sheet.at(i, j) = amp * std::sin(2.0 * PI * u);
+        }
+    return sheet;
+}
+
+// The volume of a chamfered_box(), computed from its own mesh so the expectation
+// cannot drift from the helper.
+static double chamfered_box_volume()
+{
+    return std::abs(double(its_volume(chamfered_box())));
+}
+
+TEST_CASE("Curved cut: an asymmetric part on a rotated plane keeps BOTH halves", "[CurvedCut]")
+{
+    Model model;
+    ModelObject* mo = model.add_object();
+    mo->name = "chamfer";
+    mo->add_volume(TriangleMesh(chamfered_box()))->name = "chamfer_v";
+    mo->add_instance();
+
+    // A plane rotated about two axes and offset off centre along its own normal.
+    const Transform3d rotation = Transform3d(Eigen::AngleAxisd(0.35 * PI, Vec3d::UnitX()) *
+                                             Eigen::AngleAxisd(0.20 * PI, Vec3d::UnitY()));
+    const Vec3d       offset   = rotation * Vec3d(0.0, 0.0, 2.5);
+    const Transform3d cut_matrix = Geometry::translation_transform(offset) * rotation;
+
+    // The sheet the gizmo would have after its phase-2 fit: sized to the cut's
+    // own cross-section, not to the bounding-box diagonal.
+    indexed_triangle_set in_plane = chamfered_box();
+    its_transform(in_plane, cut_matrix.inverse());
+    double hs_u = 0.0, hs_v = 0.0;
+    REQUIRE(curved_cut_fit_extent(in_plane, hs_u, hs_v, 0.15, 5.0));
+    INFO("fitted sheet half extents: " << hs_u << " x " << hs_v);
+
+    CurvedCutSheet sheet = s_sheet(4.0, hs_u, hs_v);
+    REQUIRE(!sheet.is_flat());
+    REQUIRE(sheet.max_displacement() > 3.0);
+
+    ModelObjectCutAttributes attributes = ModelObjectCutAttribute::KeepUpper | ModelObjectCutAttribute::KeepLower;
+    Cut cut(mo, 0, cut_matrix, attributes);
+    const ModelObjectPtrs& parts = cut.perform_with_curved_sheet(sheet);
+
+    // THE BUG: only one part came back.
+    REQUIRE(parts.size() == 2);
+
+    double total = 0.0;
+    for (const ModelObject* part : parts) {
+        REQUIRE(part->volumes.size() == 1);
+        const indexed_triangle_set& its = part->volumes.front()->mesh().its;
+        REQUIRE(!its.empty());
+        REQUIRE(its_num_open_edges(its) == 0);
+        const double v = std::abs(double(its_volume(its)));
+        INFO("half volume " << v);
+        REQUIRE(v > 1.0);   // neither half is a sliver left over from a bad clip
+        total += v;
+    }
+    const double whole = chamfered_box_volume();
+    INFO("total " << total << " vs whole " << whole);
+    REQUIRE(std::abs(total - whole) / whole < 1e-4);
+}
+
+// ---------------------------------------------------------------------------
+// (P2F-2) The same split at the mesh level, plus the inverted-winding input the
+// report suspected: a flipped-normal object must not make the "inside" test
+// invert and swallow a half.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("Curved cut: inverted winding still gives two halves", "[CurvedCut]")
+{
+    indexed_triangle_set box = chamfered_box();
+    const double whole = std::abs(double(its_volume(box)));
+    REQUIRE(its_volume(box) > 0.f);      // the helper is wound outwards
+
+    CurvedCutSheet sheet = s_sheet(4.0, 22.0, 16.0);
+
+    // Baseline: the correctly wound mesh.
+    {
+        indexed_triangle_set upper, lower;
+        REQUIRE(curved_cut_split(box, sheet, &upper, &lower));
+        REQUIRE(!upper.empty());
+        REQUIRE(!lower.empty());
+        REQUIRE(its_num_open_edges(upper) == 0);
+        REQUIRE(its_num_open_edges(lower) == 0);
+        const double total = std::abs(double(its_volume(upper))) + std::abs(double(its_volume(lower)));
+        REQUIRE(std::abs(total - whole) / whole < 1e-4);
+    }
+
+    // Flipped: every triangle's winding reversed, so its_volume() goes negative
+    // and every face normal points into the solid.
+    indexed_triangle_set flipped = box;
+    for (Vec3i32& t : flipped.indices)
+        std::swap(t(1), t(2));
+    REQUIRE(its_volume(flipped) < 0.f);
+
+    indexed_triangle_set upper, lower;
+    REQUIRE(curved_cut_split(flipped, sheet, &upper, &lower));
+    REQUIRE(!upper.empty());
+    REQUIRE(!lower.empty());
+    REQUIRE(its_num_open_edges(upper) == 0);
+    REQUIRE(its_num_open_edges(lower) == 0);
+    const double total = std::abs(double(its_volume(upper))) + std::abs(double(its_volume(lower)));
+    INFO("flipped total " << total << " vs whole " << whole);
+    REQUIRE(std::abs(total - whole) / whole < 1e-4);
+}
+
+// ---------------------------------------------------------------------------
+// (P2F-3) The other keep modes on the same asymmetric case.
+// ---------------------------------------------------------------------------
+
+static double cut_total_volume(ModelObjectCutAttributes attributes, const CurvedCutSheet& sheet,
+                               const Transform3d& cut_matrix, size_t& n_objects, size_t& n_volumes)
+{
+    Model model;
+    ModelObject* mo = model.add_object();
+    mo->name = "chamfer";
+    mo->add_volume(TriangleMesh(chamfered_box()))->name = "chamfer_v";
+    mo->add_instance();
+
+    Cut cut(mo, 0, cut_matrix, attributes);
+    const ModelObjectPtrs& parts = cut.perform_with_curved_sheet(sheet);
+    n_objects = parts.size();
+    n_volumes = 0;
+    double total = 0.0;
+    for (const ModelObject* part : parts) {
+        n_volumes += part->volumes.size();
+        for (const ModelVolume* v : part->volumes)
+            total += std::abs(double(its_volume(v->mesh().its)));
+    }
+    return total;
+}
+
+TEST_CASE("Curved cut: keep-one and cut-to-parts on an asymmetric part", "[CurvedCut]")
+{
+    const Transform3d rotation = Transform3d(Eigen::AngleAxisd(0.35 * PI, Vec3d::UnitX()) *
+                                             Eigen::AngleAxisd(0.20 * PI, Vec3d::UnitY()));
+    const Transform3d cut_matrix = Geometry::translation_transform(rotation * Vec3d(0.0, 0.0, 2.5)) * rotation;
+    const CurvedCutSheet sheet = s_sheet(4.0, 22.0, 16.0);
+    const double whole = chamfered_box_volume();
+
+    size_t n_obj = 0, n_vol = 0;
+
+    // Both: two objects, one volume each, volume conserved.
+    const double both = cut_total_volume(ModelObjectCutAttribute::KeepUpper | ModelObjectCutAttribute::KeepLower,
+                                         sheet, cut_matrix, n_obj, n_vol);
+    REQUIRE(n_obj == 2);
+    REQUIRE(n_vol == 2);
+    REQUIRE(std::abs(both - whole) / whole < 1e-4);
+
+    // Upper only.
+    const double up = cut_total_volume(ModelObjectCutAttribute::KeepUpper, sheet, cut_matrix, n_obj, n_vol);
+    REQUIRE(n_obj == 1);
+    REQUIRE(n_vol == 1);
+    REQUIRE(up > 1.0);
+    REQUIRE(up < whole);
+
+    // Lower only.
+    const double lo = cut_total_volume(ModelObjectCutAttribute::KeepLower, sheet, cut_matrix, n_obj, n_vol);
+    REQUIRE(n_obj == 1);
+    REQUIRE(n_vol == 1);
+    REQUIRE(lo > 1.0);
+    REQUIRE(lo < whole);
+
+    // The two one-sided runs reproduce the two-sided split.
+    INFO("upper " << up << " + lower " << lo << " vs whole " << whole);
+    REQUIRE(std::abs(up + lo - whole) / whole < 1e-4);
+
+    // Cut to parts: ONE object holding BOTH halves as separate volumes.
+    const double parts = cut_total_volume(ModelObjectCutAttribute::KeepUpper | ModelObjectCutAttribute::KeepLower |
+                                              ModelObjectCutAttribute::KeepAsParts,
+                                          sheet, cut_matrix, n_obj, n_vol);
+    REQUIRE(n_obj == 1);
+    REQUIRE(n_vol == 2);
+    REQUIRE(std::abs(parts - whole) / whole < 1e-4);
+}
+
+// ---------------------------------------------------------------------------
+// (P2F-4) Side visibility: the alpha the gizmo hands the shader per state.
+// Nobody can look at the scratch instance, so the contract is pinned here
+// instead - Visible solid, Ghost translucent, Hidden negative (a discard, not a
+// zero alpha, because a zero-alpha fragment still writes depth).
+// ---------------------------------------------------------------------------
+
+TEST_CASE("Curved cut: side visibility alpha", "[CurvedCut]")
+{
+    REQUIRE(curved_cut_side_alpha(CurvedCutSideVisibility::Visible) == Approx(1.f));
+    REQUIRE(curved_cut_side_alpha(CurvedCutSideVisibility::Ghost)   == Approx(0.25f));
+    REQUIRE(curved_cut_side_alpha(CurvedCutSideVisibility::Hidden)  < 0.f);
+
+    // Ghost is what the two-pass draw keys off: strictly between 0 and 1.
+    const float g = curved_cut_side_alpha(CurvedCutSideVisibility::Ghost);
+    REQUIRE(g > 0.f);
+    REQUIRE(g < 1.f);
+    REQUIRE(curved_cut_side_is_ghost(g));
+    REQUIRE(!curved_cut_side_is_ghost(curved_cut_side_alpha(CurvedCutSideVisibility::Visible)));
+    REQUIRE(!curved_cut_side_is_ghost(curved_cut_side_alpha(CurvedCutSideVisibility::Hidden)));
+
+    // And the pass split: with one side ghosted the opaque pass must still draw
+    // the OTHER side, and the ghost pass only the ghosted one.
+    const float vis = curved_cut_side_alpha(CurvedCutSideVisibility::Visible);
+    REQUIRE(curved_cut_has_ghost_side(vis, g));
+    REQUIRE(curved_cut_has_ghost_side(g, vis));
+    REQUIRE(!curved_cut_has_ghost_side(vis, vis));
+    REQUIRE(!curved_cut_has_ghost_side(vis, curved_cut_side_alpha(CurvedCutSideVisibility::Hidden)));
+}
+
+// ---------------------------------------------------------------------------
+// (P2F-5) Demo export for the asymmetric rotated case.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("Curved cut: asymmetric demo export", "[CurvedCut][.demo]")
+{
+    const char* dir = std::getenv("EDGESLICER_CURVED_CUT_DEMO_DIR");
+    if (dir == nullptr || dir[0] == 0)
+        return;
+
+    const boost::filesystem::path out = boost::filesystem::path(dir) / "asym";
+    boost::filesystem::create_directories(out);
+
+    Model model;
+    ModelObject* mo = model.add_object();
+    mo->name = "chamfer";
+    mo->add_volume(TriangleMesh(chamfered_box()))->name = "chamfer_v";
+    mo->add_instance();
+
+    const Transform3d rotation = Transform3d(Eigen::AngleAxisd(0.35 * PI, Vec3d::UnitX()) *
+                                             Eigen::AngleAxisd(0.20 * PI, Vec3d::UnitY()));
+    const Transform3d cut_matrix = Geometry::translation_transform(rotation * Vec3d(0.0, 0.0, 2.5)) * rotation;
+    const CurvedCutSheet sheet = s_sheet(4.0, 22.0, 16.0);
+
+    ModelObjectCutAttributes attributes = ModelObjectCutAttribute::KeepUpper | ModelObjectCutAttribute::KeepLower;
+    Cut cut(mo, 0, cut_matrix, attributes);
+    const ModelObjectPtrs& parts = cut.perform_with_curved_sheet(sheet);
+    REQUIRE(parts.size() == 2);
+
+    for (size_t i = 0; i < parts.size(); ++ i) {
+        TriangleMesh m(parts[i]->volumes.front()->mesh());
+        m.transform(parts[i]->volumes.front()->get_matrix());
+        its_write_stl_ascii((out / (i == 0 ? "upper.stl" : "lower.stl")).string().c_str(),
+                            i == 0 ? "curved_cut_upper" : "curved_cut_lower", m.its);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// (P2F-6) The ONE case that really does yield a single half, and what it must
+// do about it.
+//
+// Hunting the owner's "only one half survives" report turned up exactly one
+// mechanism that empties a half, and it is geometric rather than a bug in the
+// boolean: a sheet that lies entirely ABOVE (or entirely BELOW) the part does
+// not cross it, so one side is genuinely empty. curved_cut_lower_slab() extrudes
+// the sheet's BORDER height outwards past the sheet's own domain, so once the
+// border clears the part's top the whole object is inside the slab and the upper
+// half is nothing - which is the right answer, not a lost half.
+//
+// What was wrong is what happened NEXT: the split cleared that side and returned,
+// and downstream an empty mesh is indistinguishable from "this half does not
+// exist" (add_cut_volume() returns early, the cloned ModelObject has no volumes,
+// post_process() drops it). The user got one part back with nothing to say why.
+// So the contract pinned here is: the split REPORTS the failure (ok == false),
+// the surviving half is the whole part, and the recovery does not invent
+// geometry to paper over it.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("Curved cut: a sheet clear of the part reports the empty half", "[CurvedCut]")
+{
+    indexed_triangle_set box = chamfered_box();          // z in [-7.5, +7.5]
+    const double whole = std::abs(double(its_volume(box)));
+
+    double hs_u = 0.0, hs_v = 0.0;
+    REQUIRE(curved_cut_fit_extent(box, hs_u, hs_v, 0.15, 5.0));
+
+    // A sheet raised bodily above the part's top face. Every control point is at
+    // +9, so the surface - and the border the slab extrudes outwards - is at +9,
+    // clear of the +7.5 top.
+    CurvedCutSheet high(5);
+    high.set_half_size(hs_u, hs_v);
+    for (int j = 0; j < 5; ++ j)
+        for (int i = 0; i < 5; ++ i)
+            high.at(i, j) = 9.0;
+    REQUIRE(!high.is_flat());
+
+    indexed_triangle_set upper, lower;
+    const bool ok = curved_cut_split(box, high, &upper, &lower);
+
+    // The empty half is REPORTED, not swallowed.
+    REQUIRE(!ok);
+    // The lower half is the whole part - the sheet is above everything.
+    REQUIRE(!lower.empty());
+    REQUIRE(std::abs(double(its_volume(lower))) == Approx(whole).epsilon(1e-4));
+    // ... and nothing was invented for the upper. The complement recovery runs
+    // (object - lower) and correctly gets nothing, rather than manufacturing a
+    // sliver that would print as a stray shell.
+    REQUIRE(upper.empty());
+
+    // Mirrored: a sheet pushed bodily BELOW the part.
+    CurvedCutSheet low(5);
+    low.set_half_size(hs_u, hs_v);
+    for (int j = 0; j < 5; ++ j)
+        for (int i = 0; i < 5; ++ i)
+            low.at(i, j) = -10.0;
+
+    indexed_triangle_set upper2, lower2;
+    const bool ok2 = curved_cut_split(box, low, &upper2, &lower2);
+    REQUIRE(!ok2);
+    REQUIRE(!upper2.empty());
+    REQUIRE(std::abs(double(its_volume(upper2))) == Approx(whole).epsilon(1e-4));
+    REQUIRE(lower2.empty());
+
+    // And the boundary: a sheet that still CROSSES the part keeps both halves,
+    // however hard it is bent. This is the guard that says the extrusion of the
+    // border is only ever a problem once the sheet has left the part entirely.
+    for (double h : { 4.0, 8.0, 10.0, 14.0 }) {
+        CurvedCutSheet bent(5);
+        bent.set_half_size(hs_u, hs_v);
+        for (int j = 0; j < 5; ++ j)
+            for (int i = 3; i < 5; ++ i)   // the +u half, border column included
+                bent.at(i, j) = h;
+        indexed_triangle_set u, l;
+        INFO("one-sided bend of " << h << " mm");
+        REQUIRE(curved_cut_split(box, bent, &u, &l));
+        REQUIRE(!u.empty());
+        REQUIRE(!l.empty());
+        const double total = std::abs(double(its_volume(u))) + std::abs(double(its_volume(l)));
+        // 5e-4 relative, not the 1e-4 the gentler cases hold: a 14 mm bend over a
+        // 17 mm half-extent is steep enough that the slab's 128-sample facets are
+        // a visible fraction of a millimetre where they cross the part, and the
+        // boolean's seam follows those facets. That is a discretisation of the
+        // CUTTER, not a leak - both halves are closed (checked above) and nothing
+        // is lost between them beyond a facet's worth.
+        REQUIRE(std::abs(total - whole) / whole < 5e-4);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// (P2F-7) The re-fit contract, which the phase-2 fit does NOT currently honour.
+//
+// set_half_size(..., resample=true) is documented to keep the SURFACE fixed in
+// the plane while the rectangle around it changes, so that a bend the user drew
+// over the part does not slide or scale when the plane is nudged. It holds for
+// one re-fit within the resolution the control grid can represent, but it is not
+// idempotent: each re-sample reads the surface through Catmull-Rom and writes
+// back control values, and shrinking then re-growing does not return the values
+// it started from. A plane DRAG produces a stream of re-fits, so the drift
+// compounds.
+//
+// This test pins the size of that drift rather than asserting it away, so a
+// change that makes it worse is caught and a future fix has a baseline.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("Curved cut: repeated re-fits drift the surface", "[CurvedCut]")
+{
+    CurvedCutSheet sheet(5);
+    sheet.set_half_size(17.375, 15.0);
+    sheet.at(2, 2) = 6.0;
+
+    const double centre0 = sheet.evaluate(0.5, 0.5);
+    const double border0 = sheet.evaluate(0.0, 0.5);
+    REQUIRE(centre0 == Approx(6.0));
+    REQUIRE(border0 == Approx(0.0).margin(1e-9));
+
+    // ONE re-fit, out and back. The control grid cannot represent the dome
+    // exactly at a different spacing, so this is where the loss enters.
+    {
+        CurvedCutSheet s = sheet;
+        s.set_half_size(17.375 * 0.7, 15.0 * 0.7, true);
+        s.set_half_size(17.375, 15.0, true);
+        INFO("one round trip: centre " << s.evaluate(0.5, 0.5) << " border " << s.evaluate(0.0, 0.5));
+        // The peak is a control point and Catmull-Rom interpolates its control
+        // points, so the CENTRE survives exactly.
+        REQUIRE(s.evaluate(0.5, 0.5) == Approx(centre0).margin(1e-9));
+        // The border does not: the shrunk grid sampled the dome's flank and the
+        // re-grown one extruded that value back out.
+        REQUIRE(std::abs(s.evaluate(0.0, 0.5) - border0) > 0.1);
+    }
+
+    // TWELVE alternating re-fits, as a plane drag produces. The drift compounds
+    // but stays bounded - it does not run away, and the peak never moves.
+    {
+        CurvedCutSheet s = sheet;
+        for (int k = 0; k < 12; ++ k) {
+            const double f = (k % 2 == 0) ? 0.7 : 1.0 / 0.7;
+            s.set_half_size(s.half_size_u() * f, s.half_size_v() * f, true);
+        }
+        INFO("after 12 re-fits: hs " << s.half_size_u() << " centre " << s.evaluate(0.5, 0.5)
+             << " border " << s.evaluate(0.0, 0.5) << " max_disp " << s.max_displacement());
+        // Back at the extent it started from.
+        REQUIRE(s.half_size_u() == Approx(17.375).epsilon(1e-9));
+        // The peak is untouched ...
+        REQUIRE(s.evaluate(0.5, 0.5) == Approx(centre0).margin(1e-9));
+        REQUIRE(s.max_displacement() == Approx(6.0).margin(1e-9));
+        // ... and the drift at the border is real but bounded well below the
+        // peak. THIS IS THE DOCUMENTED SHORTFALL, not a target: the contract in
+        // CurvedCut.hpp says the surface stays put, and at the border it does not.
+        const double drift = std::abs(s.evaluate(0.0, 0.5) - border0);
+        INFO("border drift after 12 re-fits: " << drift << " mm");
+        REQUIRE(drift > 0.5);        // it really does drift - the contract is not met
+        REQUIRE(drift < 2.0);        // but it is bounded, and far under the 6 mm peak
+    }
+}

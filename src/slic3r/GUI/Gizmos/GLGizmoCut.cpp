@@ -1416,10 +1416,13 @@ void GLGizmoCut3D::apply_curved_color_clip()
 
 float GLGizmoCut3D::side_visibility_alpha(SideVisibility v)
 {
+    // One source of truth: the contract lives in libslic3r (curved_cut_side_alpha)
+    // so a headless test can pin it - nobody can look at the rendered result, and
+    // the two-pass draw in GLVolumeCollection::render keys off the same helpers.
     switch (v) {
-    case SideVisibility::Ghost:  return 0.25f;
-    case SideVisibility::Hidden: return -1.f; // negative == discard, see gouraud.fs
-    default:                     return 1.f;
+    case SideVisibility::Ghost:  return curved_cut_side_alpha(CurvedCutSideVisibility::Ghost);
+    case SideVisibility::Hidden: return curved_cut_side_alpha(CurvedCutSideVisibility::Hidden);
+    default:                     return curved_cut_side_alpha(CurvedCutSideVisibility::Visible);
     }
 }
 
@@ -1590,6 +1593,32 @@ void GLGizmoCut3D::render_curved_cap()
     if (!m_curved_cap_model.is_initialized())
         return;
 
+    // Phase 2 fix: the cap FOLLOWS the visibility of the side it belongs to.
+    // Before, it was always drawn solid, so a half set to Ghost or Hidden still
+    // showed a fully opaque cut face floating where the half used to be - which
+    // is what "only the intersection of the plane and the part is drawn" meant
+    // in the report.
+    //
+    // The cap is the face of whichever half is towards the camera (the same
+    // choice is_looking_forward() already makes for its colour). When that half
+    // is Hidden the cap belongs to the FAR half instead, so it is drawn in the
+    // far half's colour and follows the far half's state; when both are hidden
+    // there is no face left to draw.
+    const bool near_is_lower = is_looking_forward();
+    SideVisibility near_vis  = near_is_lower ? m_lower_visibility : m_upper_visibility;
+    SideVisibility far_vis   = near_is_lower ? m_upper_visibility : m_lower_visibility;
+    ColorRGBA      cap_color = near_is_lower ? LOWER_PART_COLOR : UPPER_PART_COLOR;
+    if (near_vis == SideVisibility::Hidden) {
+        // The near half is gone; the cut face the camera now sees is the far one.
+        near_vis  = far_vis;
+        cap_color = near_is_lower ? UPPER_PART_COLOR : LOWER_PART_COLOR;
+    }
+    if (near_vis == SideVisibility::Hidden)
+        return;
+
+    const float cap_alpha = side_visibility_alpha(near_vis);
+    cap_color.a(cap_color.a() * cap_alpha);
+
     GLShaderProgram* shader = wxGetApp().get_shader("flat");
     if (shader == nullptr)
         return;
@@ -1600,12 +1629,32 @@ void GLGizmoCut3D::render_curved_cap()
     shader->set_uniform("view_model_matrix", camera.get_view_matrix() * translation_transform(m_plane_center) * m_rotation_m);
     // The same two colours the flat cap uses, picked by which half is towards
     // the camera - see is_looking_forward() and apply_color_clip_plane_colors().
-    m_curved_cap_model.set_color(is_looking_forward() ? LOWER_PART_COLOR : UPPER_PART_COLOR);
+    m_curved_cap_model.set_color(cap_color);
 
     GLboolean cull_face = GL_FALSE;
     ::glGetBooleanv(GL_CULL_FACE, &cull_face);
     glsafe(::glDisable(GL_CULL_FACE));
+
+    // A ghosted cap blends and does not write depth, the same rule the ghosted
+    // half itself follows in GLVolumeCollection::render.
+    GLboolean was_blend = GL_FALSE;
+    GLboolean depth_mask = GL_TRUE;
+    const bool ghost_cap = curved_cut_side_is_ghost(cap_alpha);
+    if (ghost_cap) {
+        ::glGetBooleanv(GL_BLEND, &was_blend);
+        ::glGetBooleanv(GL_DEPTH_WRITEMASK, &depth_mask);
+        glsafe(::glEnable(GL_BLEND));
+        glsafe(::glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA));
+        glsafe(::glDepthMask(GL_FALSE));
+    }
+
     m_curved_cap_model.render();
+
+    if (ghost_cap) {
+        glsafe(::glDepthMask(depth_mask));
+        if (!was_blend)
+            glsafe(::glDisable(GL_BLEND));
+    }
     if (cull_face)
         glsafe(::glEnable(GL_CULL_FACE));
 

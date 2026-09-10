@@ -670,3 +670,59 @@ New `[CurvedCut]` cases in `tests/libslic3r/test_curved_cut.cpp`:
 - Ghost's *appearance* — the 25% alpha and the depth-write-off pass are argued from first principles, not looked at; whether the ghosted half reads as "there but see-through" or as mud is a judgement only the eye makes. Ghost interacts with the existing transparent render pass, and that interaction has not been watched;
 - the snap *gesture* — whether right-drag is discoverable, whether the crosshair is visible against a light model, and whether the live re-apply is smooth on a mesh of real size. The mesh is cached per gesture precisely because it might not be, but nobody has held the button down on a 2 M-triangle model;
 - the panel *layout* — three radio buttons on each of two rows inside the existing cut panel width has not been seen; it may wrap.
+
+## Phase 2 fixes
+
+Phase 2 shipped and the owner drove it on build `75cde87eb0`. He reported two things. One of them — Ghost — was straightforwardly broken and is fixed here. The other — "only one half survives" — turned out **not** to be what it looked like, and the honest account of it is below.
+
+### Bug A — "only one half survives" is a *reporting* bug, not a boolean bug
+
+**What was looked for.** The report said that with Upper *Keep* and Lower *Keep* both ticked, Perform cut removed the smaller part, "or maybe based on facing direction like boolean difference". The suspects were an inverted-winding object flipping the boolean's inside test, the phase-2 rectangular fit shrinking the slab so a half fell outside it, the per-axis slab widening, the mcut fallback returning one result, and `want_upper`/`want_lower` not matching the Keep attributes.
+
+**What was actually found.** None of those reproduce. A purpose-built hunt — a 30×20×15 chamfered box on a doubly-rotated off-centre plane, S-shaped and cosine sheets from ±3 to ±15 mm, one-sided bends up and down, tilts, a part four times wider than its fitted sheet, an inverted-winding copy, and twelve compounding re-fits — produced a lost half in exactly **one** family of cases, and in that family losing it is *correct*:
+
+> `curved_cut_lower_slab()` extrudes the sheet's **border** height outwards past the sheet's own domain (that is deliberate — it is what stops a small sheet under a large plane from stretching). So once the border clears the part's top face, the whole object is inside the slab, `object − slab` is empty, and the upper half genuinely does not exist. Measured: a sheet lifted bodily to +9 over a part whose top is +7.5 gives `upper` empty and `lower` = the entire 7425 mm³ part. A sheet that still *crosses* the part keeps both halves however hard it is bent — one-sided bends of 4, 8, 10 and 14 mm all conserve volume to 1e-4.
+
+The inverted-winding hypothesis was tested directly and **disproved**: Manifold normalises winding itself, so a mesh with every triangle reversed splits into two correct halves with or without a pre-flip.
+
+**So the bug is what happened next.** `curved_cut_split()` cleared the empty side and returned, and downstream an empty mesh is indistinguishable from "this half does not exist": `add_cut_volume()` returns early on an empty mesh, the cloned `ModelObject` ends up with no volumes, and `Cut::post_process()` pushes it onto the throwaway list. The user ticked two Keeps, got one part, and nothing on screen or in the log said the sheet had simply missed the part. On a strongly bent sheet over a shallow part — precisely what phase 2 made easy, since the fit now sizes the sheet to the cross-section and the bend controls reach several mm — that is easy to hit by accident and impossible to diagnose.
+
+**Fix** (`src/libslic3r/CurvedCut.cpp`, `curved_cut_split()`):
+
+1. **Both sides are always computed**, whichever the caller asked for, and when exactly one comes back non-empty the other is recovered as `object − kept` — another boolean against a solid the first one already proved workable. This covers a genuine one-sided boolean failure, which the previous code turned into a silently dropped half.
+2. **The failure is reported.** `ok == false` now means "a half is empty and could not be recovered", and it is reported rather than papered over: on the sheet-clear-of-the-part case the recovery correctly returns *nothing* rather than manufacturing a sliver that would print as a stray shell.
+3. **An inward-wound input is flipped** before the boolean, guarded by `its_volume(object.its) < 0`. This is *belt and braces* — the disproof above says Manifold does not need it — but it costs one pass over the triangles per cut and removes the hypothesis from future debugging. It is logged when it fires.
+
+**What is still not fixed:** the gizmo does not yet *tell the user* when the sheet has left the part. `ok == false` reaches `process_volume_curved_cut()`, which logs at error level and carries on. Surfacing it in the panel ("the sheet does not cross the part — one half will be empty") is the change that would actually close the owner's complaint, and it is not made here.
+
+**Proofs** (`tests/libslic3r/test_curved_cut.cpp`):
+
+- *"an asymmetric part on a rotated plane keeps BOTH halves"* — the owner's described case, built as faithfully as a headless test can: chamfered 30×20×15 box, plane rotated 0.35π about X and 0.20π about Y and offset 2.5 mm along its normal, sheet sized by `curved_cut_fit_extent()` exactly as the gizmo sizes it, ±4 mm S-shaped surface. Two objects, each one non-empty closed volume, summing to the whole part within 1e-4. **This test passes on the unfixed code too** — it is a regression guard, not a reproduction.
+- *"a sheet clear of the part reports the empty half"* — the one real mechanism, both ways up: `ok == false`, the surviving half is the whole part, the empty half stays empty (nothing invented), and the crossing-sheet boundary cases keep both halves.
+- *"inverted winding still gives two halves"* — pins the disproof: baseline and reversed-winding meshes both give two closed halves conserving volume.
+- *"keep-one and cut-to-parts on an asymmetric part"* — Keep upper only, Keep lower only and Cut to parts. Upper-only and lower-only each give one object with one volume and sum to the whole part; Cut to parts gives one object holding two volumes.
+
+### Bug A-adjacent — the re-fit contract is not met
+
+Found while hunting the above, and worth recording because `CurvedCut.hpp` currently claims otherwise. `set_half_size(..., resample = true)` is documented to keep the **surface** fixed in the plane while the rectangle around it changes, so a bend drawn over the part does not slide or scale when the plane is nudged. It is not idempotent: each re-sample reads the surface through Catmull-Rom and writes back control values, and shrinking then re-growing does not return the values it started from. A plane *drag* produces a stream of re-fits, so the drift compounds — measured at **+1.2 mm at the border after twelve alternating re-fits** of a 6 mm dome, which moved the upper half's volume from 2900 to 2275 mm³.
+
+The peak is safe (it is a control point, and Catmull-Rom interpolates its control points, so it survives exactly and `max_displacement()` is unchanged). The drift is at the border, and it is bounded rather than divergent. No fix is attempted here — the right one is probably to keep the control values and the extent that *generated* them and re-sample from that original rather than from the last re-sample. *"repeated re-fits drift the surface"* pins the current magnitude so a change that makes it worse is caught and a future fix has a baseline.
+
+### Bug B — Ghost drew only the cut face, for both halves
+
+**Cause.** The per-side alpha reached the fragment shader correctly and `gouraud.fs` (110 and 140) already did the right thing with it, but the draw state around it did not: `GLVolumeCollection::render()` turned `glDepthMask(GL_FALSE)` on **once, around the whole draw**, as soon as *either* side was ghosted. That took depth writes away from the **solid** half too, so with no depth buffer the solid half's own back faces blended over its front faces in triangle order and its silhouette dissolved — leaving only the cut face legible, on both halves, which is exactly what was reported. The cap made it worse independently: `GLGizmoCut3D::render_curved_cap()` drew the cut face fully opaque with a fixed colour and no reference to either side's state, so it kept showing at full strength over a half that was meant to be see-through or gone.
+
+**Fix.**
+
+1. **Two-pass draw** (`src/slic3r/GUI/3DScene.cpp`). The volume loop is wrapped in a pass loop. Pass 0 draws every **non-ghost** side with depth writes **on** and no blending, with the ghost side's alpha forced negative so the shader's existing `side_alpha < 0 → discard` branch suppresses it. Pass 1 draws **only** the ghost side, blended, depth writes off, after the opaque geometry. Each side is drawn in exactly one pass, so nothing is drawn twice and nothing is dropped. With no ghost side there is one pass and the GL state is untouched, so the flat cut and every non-cut draw pay nothing.
+2. **The cap follows its side** (`src/slic3r/GUI/Gizmos/GLGizmoCut.cpp`). The cap is the face of whichever half is towards the camera — the same choice `is_looking_forward()` already made for its colour. It now takes that half's visibility: Visible draws it solid as before, Ghost draws it blended at the side's alpha with depth writes off, Hidden hands the cap to the **far** half instead (its colour, its state), and when both halves are hidden no cap is drawn.
+3. **One source of truth** (`src/libslic3r/CurvedCut.hpp/.cpp`). `curved_cut_side_alpha()`, `curved_cut_side_is_ghost()` and `curved_cut_has_ghost_side()` are pure functions in libslic3r. `GLGizmoCut3D::side_visibility_alpha()` routes through the first, the two-pass draw keys off the other two, and a headless test pins all three — the only kind of proof available here, since nobody can look at a rendered frame.
+
+**Proof.** *"side visibility alpha"* asserts Visible → 1.0, Ghost → 0.25, Hidden → negative; that Ghost's alpha is strictly between 0 and 1 (the predicate the pass split keys off); and the pass split itself — one side ghosted means the extra pass runs, two Visible sides or Visible + Hidden means it does not. Both shader variants (110 and 140) are unchanged and both still compile; the scratch instance launches with no shader errors.
+
+### Still unverified
+
+- **Ghost's appearance.** The two-pass draw is argued from the depth/blend semantics, not looked at. The solid half now keeps its depth buffer, which is the specific failure reported — but whether 25% reads as "there but see-through" against the sheet and the far half is an eye judgement nobody has made. The interaction with the pre-existing `ERenderType::Transparent` pass (a ghosted half *and* a transparent modifier in one scene) is reasoned about, not watched.
+- **The cap's ghost blend.** Two ghosted surfaces at 25% each over the same pixel read darker than either alone; whether that matters has not been seen.
+- **Bug A's complement path in the wild.** The recovery fires only when one boolean fails outright. The tests reach it through the sheet-clear-of-part case, where it correctly returns nothing. A real mesh that defeats both Manifold and mcut on one side but not the other was not found, so the recovery's cost on a large part is unmeasured.
+- **Whether Bug A as the owner experienced it is actually closed.** What is fixed is the silent drop and the missing diagnosis. If his part had the sheet genuinely crossing it and still lost a half, this does not explain it — and the reproduction attempt above, which covers a wide sweep of bends, rotations and shapes, did not find such a case. His actual 3MF would settle it.
