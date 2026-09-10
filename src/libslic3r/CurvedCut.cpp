@@ -789,4 +789,126 @@ bool curved_cut_has_ghost_side(float alpha_1, float alpha_2)
     return curved_cut_side_is_ghost(alpha_1) || curved_cut_side_is_ghost(alpha_2);
 }
 
+// ---------------------------------------------------------------------------
+// Phase 4: connectors on a curved cut - the sheet's local frame
+// ---------------------------------------------------------------------------
+
+// Step for the finite differences that give the gradient and the curvature, in
+// mm. The height field is a Catmull-Rom spline, so it is C1 and a central
+// difference converges; 1e-3 mm is far below any feature a user can draw and far
+// above the double-precision noise floor of evaluate_local().
+static constexpr double SheetDiffStep = 1e-3;
+
+static inline void sheet_gradient(const CurvedCutSheet& sheet, double x, double y, double& fx, double& fy)
+{
+    const double h = SheetDiffStep;
+    fx = (sheet.evaluate_local(x + h, y) - sheet.evaluate_local(x - h, y)) / (2.0 * h);
+    fy = (sheet.evaluate_local(x, y + h) - sheet.evaluate_local(x, y - h)) / (2.0 * h);
+}
+
+Vec3d curved_cut_sheet_normal(const CurvedCutSheet& sheet, double x, double y)
+{
+    // A height field z = f(x,y) has the (unnormalized) normal (-fx, -fy, 1).
+    // The z component is 1 before normalization and stays positive after, so the
+    // normal never flips - which is what lets a connector's "up" follow the
+    // surface without ever turning the connector inside out.
+    if (sheet.is_flat())
+        return Vec3d::UnitZ();
+
+    double fx = 0.0, fy = 0.0;
+    sheet_gradient(sheet, x, y, fx, fy);
+    Vec3d n(-fx, -fy, 1.0);
+    const double len = n.norm();
+    if (len < EPSILON)
+        return Vec3d::UnitZ();
+    return n / len;
+}
+
+Transform3d curved_cut_sheet_frame(const CurvedCutSheet& sheet, double x, double y, double z_angle)
+{
+    const Vec3d n = curved_cut_sheet_normal(sheet, x, y);
+
+    // A FLAT sheet must give back the IDENTITY, not "a rotation that happens to
+    // be numerically identity" - a curved-but-flat cut has to reproduce the
+    // plane path's connector volumes bit for bit, and Eigen's Quaternion route
+    // would not necessarily land on exactly 1/0/0/0.
+    if (sheet.is_flat() || (n - Vec3d::UnitZ()).norm() < EPSILON) {
+        if (std::abs(z_angle) < EPSILON)
+            return Transform3d::Identity();
+        return Transform3d(Eigen::AngleAxisd(z_angle, Vec3d::UnitZ()));
+    }
+
+    // Local X: the plane's own X projected onto the tangent plane. Continuous in
+    // (x,y) and equal to +X on a flat patch, so a connector slid across the sheet
+    // turns smoothly rather than snapping to some arbitrary perpendicular.
+    Vec3d ex = Vec3d::UnitX() - n.dot(Vec3d::UnitX()) * n;
+    if (ex.norm() < 1e-6) {
+        // Nearly vertical surface: fall back to the plane's Y. A height field
+        // cannot actually reach 90 degrees, so this only guards the numerics.
+        ex = Vec3d::UnitY() - n.dot(Vec3d::UnitY()) * n;
+    }
+    ex.normalize();
+    Vec3d ey = n.cross(ex);
+    ey.normalize();
+
+    Matrix3d m;
+    m.col(0) = ex;
+    m.col(1) = ey;
+    m.col(2) = n;
+
+    Transform3d frame(Transform3d::Identity());
+    frame.linear() = m;
+    if (std::abs(z_angle) >= EPSILON)
+        frame = frame * Transform3d(Eigen::AngleAxisd(z_angle, Vec3d::UnitZ()));
+    return frame;
+}
+
+double curved_cut_sheet_tilt_deg(const CurvedCutSheet& sheet, double x, double y)
+{
+    const Vec3d n = curved_cut_sheet_normal(sheet, x, y);
+    const double c = std::clamp(n.z(), -1.0, 1.0);
+    return std::acos(c) * 180.0 / PI;
+}
+
+double curved_cut_sheet_curvature_radius(const CurvedCutSheet& sheet, double x, double y)
+{
+    if (sheet.is_flat())
+        return std::numeric_limits<double>::max();
+
+    // Second derivatives by central differences, at a step large enough that the
+    // second difference is not swamped by the noise in the first: the error of a
+    // second central difference goes as eps/h^2, so h is taken bigger here than
+    // for the gradient.
+    const double h = 0.05;
+    const double f  = sheet.evaluate_local(x, y);
+    const double fxx = (sheet.evaluate_local(x + h, y) - 2.0 * f + sheet.evaluate_local(x - h, y)) / (h * h);
+    const double fyy = (sheet.evaluate_local(x, y + h) - 2.0 * f + sheet.evaluate_local(x, y - h)) / (h * h);
+    const double fxy = (sheet.evaluate_local(x + h, y + h) - sheet.evaluate_local(x + h, y - h)
+                      - sheet.evaluate_local(x - h, y + h) + sheet.evaluate_local(x - h, y - h)) / (4.0 * h * h);
+
+    double fx = 0.0, fy = 0.0;
+    sheet_gradient(sheet, x, y, fx, fy);
+    const double p = 1.0 + fx * fx + fy * fy;
+    const double sp = std::sqrt(p);
+
+    // Mean and Gaussian curvature of a Monge patch. The principal curvatures are
+    // H +/- sqrt(H^2 - K); the LARGER |curvature| is the SMALLER radius, which is
+    // the one that decides whether a straight-featured connector can sit flush.
+    const double K = (fxx * fyy - fxy * fxy) / (p * p);
+    const double H = ((1.0 + fy * fy) * fxx - 2.0 * fx * fy * fxy + (1.0 + fx * fx) * fyy) / (2.0 * p * sp);
+    const double disc = std::max(0.0, H * H - K);
+    const double root = std::sqrt(disc);
+    const double k = std::max(std::abs(H + root), std::abs(H - root));
+    if (k < 1e-9)
+        return std::numeric_limits<double>::max();
+    return 1.0 / k;
+}
+
+bool curved_cut_patch_is_flat_enough(const CurvedCutSheet& sheet, double x, double y, double extent)
+{
+    if (extent <= 0.0)
+        return true;
+    return curved_cut_sheet_curvature_radius(sheet, x, y) >= CurvedConnectorFlatPatchFactor * extent;
+}
+
 } // namespace Slic3r

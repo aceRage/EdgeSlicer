@@ -4,6 +4,14 @@
 #include <libslic3r/CutUtils.hpp>
 #include <libslic3r/FlexiJoint.hpp>
 #include <libslic3r/Format/3mf.hpp>
+// PHASE 4: Metadata/cut_information.xml - where a connector's baked position and
+// frame live - is a BambuStudio-lineage part, so the connector round trip needs
+// the PROJECT writer/reader pair rather than the generic 3MF one.
+#include <libslic3r/Format/bbs_3mf.hpp>
+#include <libslic3r/PresetBundle.hpp>
+// PHASE 4: SelfAdjointEigenSolver, for fitting a connector's axis out of its
+// own vertices. Eigen's core header does not pull the decompositions in.
+#include <Eigen/Eigenvalues>
 #include <libslic3r/Format/STL.hpp>
 #include <libslic3r/Geometry.hpp>
 #include <libslic3r/MeshBoolean.hpp>
@@ -2390,4 +2398,699 @@ TEST_CASE("Curved cut: thickness demo export", "[CurvedCut][.demo]")
     }
 
     WARN("thickness demo written to " << dir.string());
+}
+
+// ---------------------------------------------------------------------------
+// PHASE 4: connectors on a curved cut.
+//
+// A connector on a curved cut is the SAME object it is on a flat one - a
+// position plus a rotation - only both are now taken from the SHEET rather than
+// from the plane. Everything below proves that one sentence:
+//
+//   * on a flat sheet the two are the same matrix, so the cut is bit-identical;
+//   * on a domed sheet the connector stands along the surface normal at its own
+//     (u,v), which is checked against the analytic gradient;
+//   * the kerf lengthens the connector along THAT normal, so it still bridges;
+//   * the footprint test is done on the sheet, so a rim connector is rejected;
+//   * and what persists to a 3MF is the baked position and frame, which is all a
+//     re-opened project needs.
+//
+// The gizmo's own frame builder is curved_cut_sheet_frame(); these tests drive
+// it directly and then drive the cut with the volumes it produces, which is
+// exactly what apply_connectors_in_model() does in the app.
+// ---------------------------------------------------------------------------
+
+// The connector volume the gizmo builds, built here the same way
+// GLGizmoCut3D::apply_cut_connectors() builds it: a unit cylinder scaled by
+// (radius, radius, height) and placed by translation * rotation. Keeping this in
+// step with the gizmo is what makes these tests mean anything about the app.
+static ModelVolume* add_plug_volume(ModelObject* mo, const Vec3d& pos, const Transform3d& rot,
+                                    double radius, double height, const std::string& name)
+{
+    using namespace Slic3r::Geometry;
+    TriangleMesh mesh(its_make_cylinder(1.0, 1.0, 2 * PI / 360.));
+    ModelVolume* v = mo->add_volume(std::move(mesh), ModelVolumeType::NEGATIVE_VOLUME);
+    v->set_transformation(translation_transform(pos) * rot * scale_transform(Vec3d(radius, radius, height)));
+    v->cut_info = ModelVolume::CutInfo(CutConnectorType::Plug, 0.f, 0.1f);
+    v->name = name;
+    return v;
+}
+
+// The centre shift apply_connectors_in_model() applies to a Plug: the body
+// starts at the lower kerf face and is `kerf` longer, so its centre lands at
+// face_lo + height/2 - measured along the CONNECTOR's own normal.
+struct PlugPlacement
+{
+    Vec3d       pos;      // centre of the body, in the object frame
+    Transform3d rot;      // the connector's frame
+    double      height;   // after the kerf lengthened it
+};
+
+static PlugPlacement plug_placement(const CurvedCutSheet& sheet, double x, double y,
+                                    double height, double thickness, CutThicknessOffset off)
+{
+    double face_lo = 0.0, face_hi = 0.0;
+    curved_cut_thickness_faces(thickness, off, face_lo, face_hi);
+    const double kerf = face_hi - face_lo;
+
+    PlugPlacement p;
+    p.rot    = curved_cut_sheet_frame(sheet, x, y);
+    p.height = height + kerf;
+    const Vec3d n = p.rot.linear() * Vec3d::UnitZ();
+    // The point ON THE SHEET, then the centre shift along the local normal.
+    p.pos = Vec3d(x, y, sheet.evaluate_local(x, y)) + n * (face_lo + 0.5 * p.height);
+    return p;
+}
+
+// Fit a cylinder's axis from its vertices: the direction of largest variance is
+// the axis of a solid of revolution that is longer than it is wide.
+static Vec3d fit_axis(const indexed_triangle_set& its)
+{
+    REQUIRE(!its.vertices.empty());
+    Vec3d c = Vec3d::Zero();
+    for (const Vec3f& v : its.vertices)
+        c += v.cast<double>();
+    c /= double(its.vertices.size());
+
+    Matrix3d cov = Matrix3d::Zero();
+    for (const Vec3f& v : its.vertices) {
+        const Vec3d d = v.cast<double>() - c;
+        cov += d * d.transpose();
+    }
+    Eigen::SelfAdjointEigenSolver<Matrix3d> es(cov);
+    // Largest eigenvalue last.
+    Vec3d axis = es.eigenvectors().col(2);
+    if (axis.z() < 0.0)
+        axis = -axis;
+    return axis.normalized();
+}
+
+// The analytic normal of the Catmull-Rom dome, by finite differences on the
+// sheet itself - i.e. the same thing curved_cut_sheet_normal() computes, but
+// spelled out here so the test is not just calling the code it is testing.
+static Vec3d analytic_normal(const CurvedCutSheet& sheet, double x, double y)
+{
+    const double h = 1e-4;
+    const double fx = (sheet.evaluate_local(x + h, y) - sheet.evaluate_local(x - h, y)) / (2 * h);
+    const double fy = (sheet.evaluate_local(x, y + h) - sheet.evaluate_local(x, y - h)) / (2 * h);
+    return Vec3d(-fx, -fy, 1.0).normalized();
+}
+
+static double its_volume_of(const indexed_triangle_set& its)
+{
+    return double(its_volume(its));
+}
+
+// (a) A flat sheet with connectors == the plane cut with the same connectors.
+TEST_CASE("Curved cut: connectors on a flat sheet are the plane cut's connectors", "[CurvedCut]")
+{
+    using namespace Slic3r::Geometry;
+
+    // The frame builder itself: on a flat sheet it is the identity, EXACTLY -
+    // not "identity to within epsilon" - which is what lets the two paths
+    // produce the same matrices and therefore the same meshes.
+    CurvedCutSheet flat(5);
+    flat.set_half_size(40.0);
+    REQUIRE(flat.is_flat());
+    for (double x : { -20.0, 0.0, 13.5 })
+        for (double y : { -8.0, 0.0, 17.0 }) {
+            const Transform3d f = curved_cut_sheet_frame(flat, x, y);
+            REQUIRE(f.matrix() == Transform3d::Identity().matrix());
+            const Vec3d n = curved_cut_sheet_normal(flat, x, y);
+            REQUIRE(n.x() == 0.0);
+            REQUIRE(n.y() == 0.0);
+            REQUIRE(n.z() == 1.0);
+            REQUIRE(curved_cut_sheet_tilt_deg(flat, x, y) == Approx(0.0).margin(1e-9));
+        }
+
+    struct Halves { indexed_triangle_set upper, lower; size_t nvol_u, nvol_l; };
+
+    auto run = [&](bool curved) {
+        Model model;
+        ModelObject* mo = model.add_object();
+        mo->name = "cube";
+        mo->add_volume(TriangleMesh(centred_cube()))->name = "cube_v";
+        // Two plugs, the way apply_connectors_in_model() leaves them: centre
+        // shifted up by height/2 (no kerf), frame = the sheet's frame there.
+        for (const Vec2d& xy : { Vec2d(-8.0, 3.0), Vec2d(9.5, -6.0) }) {
+            const PlugPlacement p = plug_placement(flat, xy.x(), xy.y(), 10.0, 0.0, CutThicknessOffset::Centred);
+            add_plug_volume(mo, p.pos, p.rot, 4.0, p.height, "plug");
+        }
+        mo->add_instance();
+
+        Cut cut(mo, 0, Transform3d::Identity(),
+                ModelObjectCutAttribute::KeepUpper | ModelObjectCutAttribute::KeepLower);
+        const ModelObjectPtrs& parts = curved ? cut.perform_with_curved_sheet(flat) : cut.perform_with_plane();
+        REQUIRE(parts.size() == 2);
+
+        Halves h;
+        h.nvol_u = parts[0]->volumes.size();
+        h.nvol_l = parts[1]->volumes.size();
+        h.upper  = parts[0]->volumes.front()->mesh().its;
+        h.lower  = parts[1]->volumes.front()->mesh().its;
+        return h;
+    };
+
+    const Halves plane  = run(false);
+    const Halves curved = run(true);
+
+    // Same number of volumes on each side - the connectors reached both halves.
+    REQUIRE(curved.nvol_u == plane.nvol_u);
+    REQUIRE(curved.nvol_l == plane.nvol_l);
+    REQUIRE(plane.nvol_u == 3); // the solid + two connector pockets
+    REQUIRE(plane.nvol_l == 3); // the solid + two connector plugs
+
+    // BIT-IDENTICAL, vertex by vertex. A flat curved cut routes into
+    // perform_with_plane(), so this is the same function - the test is that
+    // nothing in the connector path took a different branch on the way in.
+    REQUIRE(curved.upper.vertices.size() == plane.upper.vertices.size());
+    REQUIRE(curved.upper.indices.size()  == plane.upper.indices.size());
+    REQUIRE(curved.lower.vertices.size() == plane.lower.vertices.size());
+    REQUIRE(curved.lower.indices.size()  == plane.lower.indices.size());
+    for (size_t i = 0; i < plane.upper.vertices.size(); ++ i)
+        REQUIRE(curved.upper.vertices[i] == plane.upper.vertices[i]);
+    for (size_t i = 0; i < plane.lower.vertices.size(); ++ i)
+        REQUIRE(curved.lower.vertices[i] == plane.lower.vertices[i]);
+}
+
+// (b) A domed sheet: the plug stands along the sheet normal at its own point.
+TEST_CASE("Curved cut: a plug on a dome stands along the sheet normal", "[CurvedCut]")
+{
+    using namespace Slic3r::Geometry;
+
+    const CurvedCutSheet dome = dome_sheet(8.0, 5, 40.0);
+    REQUIRE_FALSE(dome.is_flat());
+
+    // OFF-CENTRE on purpose: at the apex the normal is +Z and the test would
+    // pass with a plane frame too. Here the surface really slopes.
+    const double px = -12.0, py = 7.0;
+    const Vec3d  want = analytic_normal(dome, px, py);
+    // The slope has to be worth measuring, or the proof is vacuous.
+    REQUIRE(std::acos(std::clamp(want.z(), -1.0, 1.0)) * 180.0 / PI > 5.0);
+
+    const Vec3d got = curved_cut_sheet_normal(dome, px, py);
+    REQUIRE(std::acos(std::clamp(got.dot(want), -1.0, 1.0)) * 180.0 / PI < 0.5);
+
+    // The frame is orthonormal, right handed, and its Z IS that normal.
+    const Transform3d frame = curved_cut_sheet_frame(dome, px, py);
+    const Matrix3d    m     = frame.linear();
+    REQUIRE((m.transpose() * m - Matrix3d::Identity()).norm() < 1e-9);
+    REQUIRE(m.determinant() == Approx(1.0).margin(1e-9));
+    REQUIRE((m.col(2) - got).norm() < 1e-9);
+    // Local X is the plane's X projected onto the tangent plane: it has no
+    // component along the normal and it still points broadly along +X.
+    REQUIRE(std::abs(m.col(0).dot(got)) < 1e-9);
+    REQUIRE(m.col(0).x() > 0.5);
+
+    const double radius = 4.0, height = 10.0;
+    const PlugPlacement p = plug_placement(dome, px, py, height, 0.0, CutThicknessOffset::Centred);
+
+    Model model;
+    ModelObject* mo = model.add_object();
+    mo->name = "cube";
+    mo->add_volume(TriangleMesh(centred_cube()))->name = "cube_v";
+    add_plug_volume(mo, p.pos, p.rot, radius, p.height, "plug");
+    mo->add_instance();
+
+    Cut cut(mo, 0, Transform3d::Identity(),
+            ModelObjectCutAttribute::KeepUpper | ModelObjectCutAttribute::KeepLower);
+    const ModelObjectPtrs& parts = cut.perform_with_curved_sheet(dome);
+    REQUIRE(parts.size() == 2);
+
+    ModelObject* upper = parts[0];
+    ModelObject* lower = parts[1];
+    // The solid plus the connector on each side.
+    REQUIRE(upper->volumes.size() == 2);
+    REQUIRE(lower->volumes.size() == 2);
+
+    const indexed_triangle_set& up_solid = upper->volumes.front()->mesh().its;
+    const indexed_triangle_set& lo_solid = lower->volumes.front()->mesh().its;
+    REQUIRE(its_num_open_edges(up_solid) == 0);
+    REQUIRE(its_num_open_edges(lo_solid) == 0);
+
+    // THE AXIS. The plug volume that landed in the lower half is the solid pin;
+    // fit its axis from its own vertices, in the OBJECT frame, and compare with
+    // the analytic normal.
+    const ModelVolume* pin = lower->volumes.back();
+    REQUIRE(pin->cut_info.is_connector);
+    indexed_triangle_set pin_its = pin->mesh().its;
+    its_transform(pin_its, pin->get_matrix());
+    const Vec3d axis = fit_axis(pin_its);
+    const double ang = std::acos(std::clamp(std::abs(axis.dot(want)), -1.0, 1.0)) * 180.0 / PI;
+    INFO("plug axis " << axis.transpose() << " vs sheet normal " << want.transpose());
+    REQUIRE(ang < 0.5);
+
+    // ... and it is NOT the plane normal, or the test would pass on the flat path.
+    const double ang_plane = std::acos(std::clamp(std::abs(axis.z()), -1.0, 1.0)) * 180.0 / PI;
+    REQUIRE(ang_plane > 5.0);
+
+    // Volume accounting: the two solid halves plus the pocket the plug carved out
+    // of the upper half account for the whole cube. The pocket IS the pin's own
+    // volume where the pin sits inside the upper half, so upper + lower + (the
+    // part of the pin above the sheet) == the cube.
+    const double whole = CUBE * CUBE * CUBE;
+    const double v_up  = its_volume_of(up_solid);
+    const double v_lo  = its_volume_of(lo_solid);
+    // The pin protrudes into... no: the pin's SOLID sits in the LOWER half and
+    // its pocket is cut from the UPPER one, so the sum of the two solids is the
+    // cube MINUS the pocket. The pocket is the pin above the sheet, which for a
+    // plug placed at height/2 above the surface is half the cylinder.
+    const double pocket = PI * radius * radius * (0.5 * p.height);
+    INFO("upper " << v_up << " lower " << v_lo << " pocket " << pocket << " whole " << whole);
+    REQUIRE(std::abs((v_up + v_lo + pocket) - whole) / whole < 1e-2);
+
+    // THE PROTRUSION. A Plug is not cut in half the way a Dowel is: the WHOLE
+    // body goes to the lower half as a solid part and the upper half gets the
+    // matching pocket. So what "protrudes" means for a plug is that the body
+    // stands on the cut surface and reaches `height` PAST it into the upper
+    // half - measured, again, along the LOCAL normal, which is the whole point.
+    const Vec3d sheet_pt = Vec3d(px, py, dome.evaluate_local(px, py));
+    double lo_end = std::numeric_limits<double>::max();
+    double hi_end = -std::numeric_limits<double>::max();
+    double off_axis = 0.0;
+    for (const Vec3f& v : pin_its.vertices) {
+        const Vec3d d = v.cast<double>() - sheet_pt;
+        const double along = d.dot(want);
+        lo_end = std::min(lo_end, along);
+        hi_end = std::max(hi_end, along);
+        off_axis = std::max(off_axis, (d - along * want).norm());
+    }
+    INFO("plug spans " << lo_end << " .. " << hi_end << " along the local normal, radius " << off_axis);
+    // It starts ON the surface and reaches `height` beyond it.
+    REQUIRE(lo_end == Approx(0.0).margin(1e-3));
+    REQUIRE(hi_end == Approx(height).margin(1e-3));
+    // ... and it really is a cylinder of the asked-for radius about that axis,
+    // i.e. the body was not sheared by the tilted frame.
+    REQUIRE(off_axis == Approx(radius).margin(0.02));
+}
+
+// (c) A DoubleRing Flexi on a dome: the rings stand on the local normal and the
+//     two halves still do not intersect.
+TEST_CASE("Curved cut: a Flexi double ring on a dome uses the sheet's frame", "[CurvedCut]")
+{
+    using namespace Slic3r::Geometry;
+
+    const CurvedCutSheet dome = dome_sheet(6.0, 5, 40.0);
+    const double px = -10.0, py = 6.0;
+    const Vec3d  want = analytic_normal(dome, px, py);
+    REQUIRE(std::acos(std::clamp(want.z(), -1.0, 1.0)) * 180.0 / PI > 4.0);
+
+    FlexiJointParams params;
+    params.kind         = FlexiJointKind::DoubleRing;
+    params.outer_radius = 5.0f;
+    params.ring_width   = 2.0f;
+    params.ring_height  = 1.5f;
+    params.clearance    = 0.35f;
+
+    CutConnector connector;
+    connector.attribs = CutConnectorAttributes(CutConnectorType::FlexiJoint,
+                                               CutConnectorStyle::Prism, CutConnectorShape::Circle);
+    connector.flexi   = params;
+    // The gizmo's phase 4 placement: on the sheet, on the sheet's frame.
+    connector.pos        = Vec3d(px, py, dome.evaluate_local(px, py));
+    connector.rotation_m = curved_cut_sheet_frame(dome, px, py);
+
+    Model model;
+    ModelObject* mo = model.add_object();
+    mo->name = "cube";
+    mo->add_volume(TriangleMesh(centred_cube()))->name = "cube_v";
+    add_flexi_joint_volume(mo, connector, "joint");
+    REQUIRE(has_flexi_joint(mo));
+    mo->add_instance();
+
+    Cut cut(mo, 0, Transform3d::Identity(),
+            ModelObjectCutAttribute::KeepUpper | ModelObjectCutAttribute::KeepLower |
+            ModelObjectCutAttribute::KeepAsParts);
+    // A flexi joint takes the flexi path even from the curved entry point - the
+    // joint's own gap IS the surface between the segments. The point of the test
+    // is that the joint stands on the SHEET's frame while it does so.
+    const ModelObjectPtrs& parts = cut.perform_with_curved_sheet(dome);
+    REQUIRE(parts.size() == 1);
+    REQUIRE(parts.front()->volumes.size() == 2);
+
+    TriangleMesh a(parts.front()->volumes[0]->mesh());
+    a.transform(parts.front()->volumes[0]->get_matrix());
+    TriangleMesh b(parts.front()->volumes[1]->mesh());
+    b.transform(parts.front()->volumes[1]->get_matrix());
+
+    // Print-in-place: the two segments must not share any volume.
+    std::vector<TriangleMesh> inter;
+    const bool ok = MeshBoolean::mfd::make_boolean(a, b, inter, "INTERSECTION");
+    REQUIRE(ok);
+    double v = 0.0;
+    for (TriangleMesh& m : inter)
+        v += double(m.volume());
+    INFO("intersection volume " << v);
+    REQUIRE(std::abs(v) < 1e-3);
+
+    // THE RINGS' AXIS. The joint volume was placed on the sheet frame, so the
+    // ring bodies - which are solids of revolution about their own local Z -
+    // come out with their axis along the sheet normal. Fit it from the body the
+    // gizmo actually built.
+    indexed_triangle_set ring;
+    for (const indexed_triangle_set& its : flexi_lower_bodies(params))
+        its_merge(ring, its);
+    its_transform(ring, translation_transform(connector.pos) * connector.rotation_m);
+    // A ring is a flat disc: its axis is the direction of SMALLEST variance, so
+    // fit_axis (largest) is wrong here - take the plane normal instead.
+    Vec3d c = Vec3d::Zero();
+    for (const Vec3f& p : ring.vertices)
+        c += p.cast<double>();
+    c /= double(ring.vertices.size());
+    Matrix3d cov = Matrix3d::Zero();
+    for (const Vec3f& p : ring.vertices) {
+        const Vec3d d = p.cast<double>() - c;
+        cov += d * d.transpose();
+    }
+    Eigen::SelfAdjointEigenSolver<Matrix3d> es(cov);
+    Vec3d axis = es.eigenvectors().col(0).normalized(); // smallest variance
+    const double ang = std::acos(std::clamp(std::abs(axis.dot(want)), -1.0, 1.0)) * 180.0 / PI;
+    INFO("ring axis " << axis.transpose() << " vs sheet normal " << want.transpose());
+    REQUIRE(ang < 0.5);
+    REQUIRE(std::acos(std::clamp(std::abs(axis.z()), -1.0, 1.0)) * 180.0 / PI > 4.0);
+}
+
+// (d) A kerf on a dome: the plug grows by t ALONG THE LOCAL NORMAL and still
+//     bridges the gap.
+TEST_CASE("Curved cut: a plug on a dome bridges a cut thickness", "[CurvedCut]")
+{
+    using namespace Slic3r::Geometry;
+
+    const CurvedCutSheet dome = dome_sheet(8.0, 5, 40.0);
+    const double px = -12.0, py = 7.0;
+    const Vec3d  want = analytic_normal(dome, px, py);
+    const double t = 2.0;
+    const double height = 10.0;
+
+    const PlugPlacement p0 = plug_placement(dome, px, py, height, 0.0, CutThicknessOffset::Centred);
+    const PlugPlacement p2 = plug_placement(dome, px, py, height, t,   CutThicknessOffset::Centred);
+
+    // The body got exactly t longer...
+    REQUIRE(p2.height == Approx(p0.height + t));
+    // ... its frame did not turn (the kerf moves the body, it does not tilt it)...
+    REQUIRE((p2.rot.matrix() - p0.rot.matrix()).norm() < 1e-12);
+    // ... and its centre moved DOWN along the LOCAL NORMAL, not along +Z: with a
+    // centred kerf the body starts at -t/2 and is t longer, so the centre sits
+    // t/2 lower than it did, measured along n.
+    const Vec3d dpos = p2.pos - p0.pos;
+    REQUIRE(dpos.dot(want) == Approx(0.0).margin(1e-9));
+    // The shift is purely along the normal - no sideways drift.
+    REQUIRE((dpos - dpos.dot(want) * want).norm() < 1e-9);
+
+    // THE BRIDGE. The body has to reach past BOTH kerf faces: its lower end sits
+    // at face_lo relative to the sheet along n, its upper end at face_lo+height+t.
+    double face_lo = 0.0, face_hi = 0.0;
+    curved_cut_thickness_faces(t, CutThicknessOffset::Centred, face_lo, face_hi);
+    const Vec3d sheet_pt = Vec3d(px, py, dome.evaluate_local(px, py));
+    const double lo_end = (p2.pos - sheet_pt).dot(want) - 0.5 * p2.height;
+    const double hi_end = (p2.pos - sheet_pt).dot(want) + 0.5 * p2.height;
+    REQUIRE(lo_end == Approx(face_lo).margin(1e-9));
+    REQUIRE(hi_end == Approx(face_lo + height + t).margin(1e-9));
+    // It spans the whole removed band: below face_lo and above face_hi.
+    REQUIRE(lo_end <= face_lo + 1e-9);
+    REQUIRE(hi_end >= face_hi + 1e-9);
+
+    // And the cut itself runs: two closed halves with the plug in one of them.
+    Model model;
+    ModelObject* mo = model.add_object();
+    mo->name = "cube";
+    mo->add_volume(TriangleMesh(centred_cube()))->name = "cube_v";
+    add_plug_volume(mo, p2.pos, p2.rot, 4.0, p2.height, "plug");
+    mo->add_instance();
+
+    Cut cut(mo, 0, Transform3d::Identity(),
+            ModelObjectCutAttribute::KeepUpper | ModelObjectCutAttribute::KeepLower);
+    const ModelObjectPtrs& parts = cut.perform_with_curved_sheet(dome, t, CutThicknessOffset::Centred);
+    REQUIRE(parts.size() == 2);
+    REQUIRE(its_num_open_edges(parts[0]->volumes.front()->mesh().its) == 0);
+    REQUIRE(its_num_open_edges(parts[1]->volumes.front()->mesh().its) == 0);
+    // The kerf really removed material.
+    const double whole = CUBE * CUBE * CUBE;
+    const double sum = its_volume_of(parts[0]->volumes.front()->mesh().its) +
+                       its_volume_of(parts[1]->volumes.front()->mesh().its);
+    INFO("kerfed halves sum " << sum << " of " << whole);
+    REQUIRE(sum < whole - 0.5 * CUBE * CUBE * t);
+}
+
+// (e) The footprint test on the sheet: a connector near the rim is rejected, one
+//     in the middle is accepted.
+//
+// The gizmo asks the CLIPPER, which needs a GL context. The geometry underneath
+// it does not: the footprint is sampled in the connector's own tangent plane,
+// projected back down onto the cut plane, and tested against the object's
+// section there. That projection is the whole phase 4 change, so it is what this
+// pins - with a plain point-in-polygon test standing in for the clipper.
+TEST_CASE("Curved cut: a connector's footprint is tested on the sheet", "[CurvedCut]")
+{
+    using namespace Slic3r::Geometry;
+
+    const CurvedCutSheet dome = dome_sheet(8.0, 5, 40.0);
+    const double half = 0.5 * CUBE;
+
+    // The footprint of a connector at (x,y), sampled in the sheet's TANGENT
+    // plane there and projected back onto the cut plane - i.e. what
+    // is_outside_of_cut_contour() now feeds the clipper.
+    auto footprint_outside = [&](double x, double y, double radius) {
+        const Transform3d frame = curved_cut_sheet_frame(dome, x, y);
+        const Vec3d       pos(x, y, dome.evaluate_local(x, y));
+        for (int k = 0; k < 60; ++ k) {
+            const double a = 2.0 * PI * double(k) / 60.0;
+            const Vec3d  local(radius * std::cos(a), radius * std::sin(a), 0.0);
+            const Vec3d  world = pos + frame * local;
+            // Project down the plane normal onto the cut plane: drop z.
+            if (std::abs(world.x()) > half || std::abs(world.y()) > half)
+                return true;
+        }
+        return false;
+    };
+
+    const double radius = 4.0;
+    // In the middle: accepted.
+    REQUIRE_FALSE(footprint_outside(0.0, 0.0, radius));
+    REQUIRE_FALSE(footprint_outside(-8.0, 5.0, radius));
+    // Near the rim: rejected, because the footprint hangs over the edge.
+    REQUIRE(footprint_outside(half - 1.0, 0.0, radius));
+    REQUIRE(footprint_outside(0.0, -(half - 2.0), radius));
+
+    // The TILT is what makes this different from the flat test: on a slope the
+    // footprint's projection is an ELLIPSE, narrower than the disc, so a
+    // connector that the flat test would reject can be accepted - and the
+    // projection is what says so. Measure the projected width directly.
+    const double px = -14.0, py = 0.0;
+    const Transform3d frame = curved_cut_sheet_frame(dome, px, py);
+    REQUIRE(curved_cut_sheet_tilt_deg(dome, px, py) > 5.0);
+    double wx = 0.0;
+    for (int k = 0; k < 180; ++ k) {
+        const double a = 2.0 * PI * double(k) / 180.0;
+        const Vec3d  local(radius * std::cos(a), radius * std::sin(a), 0.0);
+        wx = std::max(wx, std::abs((frame * local).x()));
+    }
+    INFO("projected half width " << wx << " of " << radius);
+    REQUIRE(wx < radius);            // foreshortened by the tilt
+    REQUIRE(wx > 0.5 * radius);      // but not collapsed
+
+    // The tilt and flat-patch advisories, which the panel reports.
+    REQUIRE(curved_cut_sheet_tilt_deg(dome, 0.0, 0.0) == Approx(0.0).margin(1e-6));
+    // A 3 mm connector on this dome is fine; a 40 mm one is not.
+    REQUIRE(curved_cut_patch_is_flat_enough(dome, px, py, 3.0));
+    REQUIRE_FALSE(curved_cut_patch_is_flat_enough(dome, px, py, 200.0));
+    // On a flat sheet everything is flat enough, at any size.
+    CurvedCutSheet flat(5);
+    flat.set_half_size(40.0);
+    REQUIRE(curved_cut_patch_is_flat_enough(flat, 3.0, -2.0, 1e6));
+    REQUIRE(curved_cut_sheet_curvature_radius(flat, 3.0, -2.0) > 1e30);
+    // The dome's radius is finite and of the right order: an 8 mm rise over a
+    // 40 mm half span is a radius in the tens of mm, not in the thousands.
+    const double r = curved_cut_sheet_curvature_radius(dome, 0.0, 0.0);
+    INFO("dome apex curvature radius " << r);
+    REQUIRE(r > 5.0);
+    REQUIRE(r < 2000.0);
+}
+
+// (f) The 3MF round trip: a curved-cut connector's baked position and frame.
+//
+// WHAT ACTUALLY PERSISTS. A CutConnector - the entry in ModelObject::cut_connectors
+// - is pre-cut gizmo session state and reaches no 3MF, on a flat cut or a curved
+// one. What persists is the connector VOLUME the gizmo bakes out of it
+// (apply_cut_connectors), whose transform is
+//
+//     translation_transform(pos) * rotation_m * rotation(-z_angle) * scale(r,r,h)
+//
+// - i.e. the connector's position and its frame, baked into the volume matrix,
+// plus its type and tolerances in Metadata/cut_information.xml. That is exactly
+// what phase 4 needed to keep working, and it needed NOTHING NEW: the frame is a
+// plain rotation whether it came from the plane or from the sheet, so a project
+// re-opened without the sheet still puts the connector back where it stood and
+// standing the way it stood.
+TEST_CASE("Curved cut: a curved-cut connector survives a 3MF round trip", "[CurvedCut]")
+{
+    using namespace Slic3r::Geometry;
+
+    const CurvedCutSheet dome = dome_sheet(8.0, 5, 40.0);
+    const double px = -12.0, py = 7.0;
+
+    const double radius = 4.0, height = 10.0;
+    const PlugPlacement p = plug_placement(dome, px, py, height, 0.0, CutThicknessOffset::Centred);
+    const Vec3d normal_in = p.rot.linear() * Vec3d::UnitZ();
+    // The frame really is tilted, or the test would prove nothing a flat cut
+    // does not already prove.
+    REQUIRE(std::acos(std::clamp(normal_in.z(), -1.0, 1.0)) * 180.0 / PI > 5.0);
+    // ... and the position really is off the cut plane, which is the other half
+    // of "a curved connector is not a flat one".
+    REQUIRE(std::abs(dome.evaluate_local(px, py)) > 1.0);
+
+    Model model;
+    ModelObject* mo = model.add_object();
+    mo->name = "cube";
+    mo->add_volume(TriangleMesh(centred_cube()))->name = "cube_v";
+    ModelVolume* plug = add_plug_volume(mo, p.pos, p.rot, radius, p.height, "Connector-1");
+    // is_cut_connector() gates the writer, and it demands a PROCESSED connector
+    // on a cut object - which is what a connector looks like after the cut has
+    // run, i.e. the state a saved project is actually in.
+    plug->cut_info.set_processed();
+    mo->cut_id.init();
+    model.add_default_instances();
+    const Transform3d matrix_in = plug->get_matrix();
+
+    const boost::filesystem::path tmp_root = boost::filesystem::temp_directory_path() / "snorca_tests";
+    boost::filesystem::create_directories(tmp_root);
+    Slic3r::set_temporary_dir(tmp_root.string());
+    const std::string test_file = (tmp_root / "edgeslicer_curved_connector.3mf").string();
+
+    DynamicPrintConfig store_config = DynamicPrintConfig::full_print_config();
+    StoreParams store_params;
+    store_params.path     = test_file.c_str();
+    store_params.model    = &model;
+    store_params.config   = &store_config;
+    store_params.strategy = SaveStrategy::Zip64 | SaveStrategy::Silence | SaveStrategy::SkipAuxiliary;
+    REQUIRE(store_bbs_3mf(store_params));
+
+    Model                     back;
+    DynamicPrintConfig        dst_config;
+    ConfigSubstitutionContext ctxt{ ForwardCompatibilitySubstitutionRule::EnableSilent };
+    PlateDataPtrs             plate_data;
+    std::vector<Preset*>      project_presets;
+    bool                      is_bbl_3mf = false;
+    Semver                    file_version;
+    REQUIRE(load_bbs_3mf(test_file.c_str(), &dst_config, &ctxt, &back, &plate_data, &project_presets,
+                         &is_bbl_3mf, &file_version, nullptr,
+                         LoadStrategy::LoadModel | LoadStrategy::LoadConfig |
+                         LoadStrategy::AddDefaultInstances | LoadStrategy::Silence));
+    release_PlateData_list(plate_data);
+    if (!std::getenv("SNORCA_CURVED_KEEP"))
+        boost::filesystem::remove(test_file);
+
+    REQUIRE(back.objects.size() == 1);
+    const ModelVolume* out = nullptr;
+    for (const ModelVolume* v : back.objects.front()->volumes)
+        if (v->cut_info.is_connector)
+            out = v;
+    REQUIRE(out != nullptr);
+    REQUIRE(out->cut_info.connector_type == CutConnectorType::Plug);
+
+    // THE FRAME. The volume's rotation is the sheet's frame at the connector's
+    // (u,v), and it came back turning the connector the same way - so the
+    // re-opened project draws it standing on the surface normal it was placed
+    // on, with no sheet anywhere in the file.
+    const Transform3d matrix_out = out->get_matrix();
+    const Vec3d normal_out = (matrix_out.linear() * Vec3d::UnitZ()).normalized();
+    INFO("normal in " << normal_in.transpose() << " out " << normal_out.transpose());
+    REQUIRE(std::acos(std::clamp(normal_out.dot(normal_in), -1.0, 1.0)) * 180.0 / PI < 0.1);
+    // ... and it is NOT the plane normal, which is the phase 4 part.
+    REQUIRE(std::acos(std::clamp(std::abs(normal_out.z()), -1.0, 1.0)) * 180.0 / PI > 5.0);
+
+    // THE POSITION, including its height off the cut plane. A flat connector's
+    // baked position sits on z == 0 in the plane frame; this one does not, and
+    // the 3MF carries all three components either way.
+    const Vec3d pos_in  = matrix_in.translation();
+    const Vec3d pos_out = matrix_out.translation();
+    INFO("pos in " << pos_in.transpose() << " out " << pos_out.transpose());
+    REQUIRE((pos_out - pos_in).norm() < 1e-3);
+
+    // The whole transform, so a scale or a shear introduced on the way through
+    // would show up here rather than in a later surprise.
+    REQUIRE((matrix_out.matrix() - matrix_in.matrix()).norm() < 1e-3);
+
+    // And the round-tripped volume still cuts: the mesh it carries is the same
+    // plug, so re-cutting the reopened project puts the same solid in the lower
+    // half and the same pocket in the upper one.
+    REQUIRE(out->mesh().its.vertices.size() == plug->mesh().its.vertices.size());
+}
+
+// Demo export: a dome-cut cube with two plugs and one double ring.
+// Skipped unless EDGESLICER_CURVED_CONNECTOR_DEMO_DIR names a directory.
+TEST_CASE("Curved cut: connector demo export", "[CurvedCut][.demo]")
+{
+    using namespace Slic3r::Geometry;
+
+    const char* dir = std::getenv("EDGESLICER_CURVED_CONNECTOR_DEMO_DIR");
+    if (dir == nullptr)
+        return;
+    boost::filesystem::create_directories(dir);
+
+    const CurvedCutSheet dome = dome_sheet(8.0, 5, 40.0);
+
+    // ---- two plugs -------------------------------------------------------
+    {
+        Model model;
+        ModelObject* mo = model.add_object();
+        mo->name = "cube";
+        mo->add_volume(TriangleMesh(centred_cube()))->name = "cube_v";
+        for (const Vec2d& xy : { Vec2d(-11.0, 6.0), Vec2d(10.0, -7.0) }) {
+            const PlugPlacement p = plug_placement(dome, xy.x(), xy.y(), 10.0, 0.0, CutThicknessOffset::Centred);
+            add_plug_volume(mo, p.pos, p.rot, 4.0, p.height, "plug");
+        }
+        mo->add_instance();
+
+        Cut cut(mo, 0, Transform3d::Identity(),
+                ModelObjectCutAttribute::KeepUpper | ModelObjectCutAttribute::KeepLower);
+        const ModelObjectPtrs& parts = cut.perform_with_curved_sheet(dome);
+        REQUIRE(parts.size() == 2);
+        for (size_t i = 0; i < parts.size(); ++ i) {
+            TriangleMesh merged;
+            for (const ModelVolume* v : parts[i]->volumes) {
+                TriangleMesh m(v->mesh());
+                m.transform(v->get_matrix());
+                merged.merge(m);
+            }
+            const std::string name = std::string(dir) + "/plugs_" + (i == 0 ? "upper" : "lower") + ".stl";
+            REQUIRE(store_stl(name.c_str(), &merged, true));
+        }
+    }
+
+    // ---- one double ring -------------------------------------------------
+    {
+        FlexiJointParams params;
+        params.kind         = FlexiJointKind::DoubleRing;
+        params.outer_radius = 6.0f;
+        params.ring_width   = 2.0f;
+        params.ring_height  = 1.5f;
+
+        CutConnector connector;
+        connector.attribs    = CutConnectorAttributes(CutConnectorType::FlexiJoint,
+                                                      CutConnectorStyle::Prism, CutConnectorShape::Circle);
+        connector.flexi      = params;
+        connector.pos        = Vec3d(-9.0, 5.0, dome.evaluate_local(-9.0, 5.0));
+        connector.rotation_m = curved_cut_sheet_frame(dome, -9.0, 5.0);
+
+        Model model;
+        ModelObject* mo = model.add_object();
+        mo->name = "cube";
+        mo->add_volume(TriangleMesh(centred_cube()))->name = "cube_v";
+        add_flexi_joint_volume(mo, connector, "joint");
+        mo->add_instance();
+
+        Cut cut(mo, 0, Transform3d::Identity(),
+                ModelObjectCutAttribute::KeepUpper | ModelObjectCutAttribute::KeepLower |
+                ModelObjectCutAttribute::KeepAsParts);
+        const ModelObjectPtrs& parts = cut.perform_with_curved_sheet(dome);
+        REQUIRE(parts.size() == 1);
+        const ModelObject* out = parts.front();
+        for (size_t i = 0; i < out->volumes.size(); ++ i) {
+            TriangleMesh m(out->volumes[i]->mesh());
+            m.transform(out->volumes[i]->get_matrix());
+            const std::string name = std::string(dir) + "/ring_" + (i == 0 ? "upper" : "lower") + ".stl";
+            REQUIRE(store_stl(name.c_str(), &m, true));
+        }
+    }
 }

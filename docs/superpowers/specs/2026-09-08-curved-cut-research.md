@@ -944,3 +944,212 @@ gizmo, set a thickness, and looked at the result. Specifically unverified by eye
   projection is much larger than the cross-section this jumps the handle count on the first fit
   (e.g. 5x5 to 11x11). Whether that feels like the tool helping or like it moving under the user's
   hand is unknown.
+
+---
+
+## Phase 4: connectors
+
+Section 3 above asked what a connector on a curved cut would have to become. The answer turned out
+to be smaller than that section expected: **a connector is still a position plus a rotation, and
+the only change is where those two come from.** On a flat cut they come from the plane — one shared
+`m_rotation_m` for every connector, and a position on `z == 0`. On a curved cut they come from the
+**sheet** — the connector's own `(u,v)` gives it a height `f(u,v)` and a local frame from the
+height-field gradient there. Nothing downstream of that had to learn about height fields.
+
+That is why the diff is mostly one function (`connector_rotation_m`) called at the six places that
+used to say `m_rotation_m`, plus one already-existing loop (`process_connector_cut`) admitted into
+the curved cut's volume walk.
+
+### Placement
+
+`Add connectors` is enabled in Curved mode. A click is intersected with the **sheet**, not the
+plane: `unproject_on_curved_sheet()` raycasts the dense 64×64 preview grid — the very mesh the user
+is looking at — taken to world space through the base plane's frame, and hands back the hit in the
+object's frame. A ray that misses the sheet entirely (a click past its rim) falls back to the flat
+`unproject_on_cut_plane()`, so a click just off the bend still lands somewhere sensible rather than
+doing nothing. The pick mesh is rebuilt lazily and invalidated by anything that moves the sheet in
+the world: a handle drag, a resolution change, a re-fit, a plane move or turn.
+
+Dragging a connector **slides it on the sheet** — `dragging_connector()` re-hits the surface on
+every motion and re-derives the frame, so the connector rides the curve instead of sliding on the
+flat plane and popping back.
+
+Nothing new is stored on the connector. Its `(u,v)` is just the in-plane part of the position it
+already carries, and the height and frame are read from `f(u,v)` on every use, right up until
+`apply_connectors_in_model()` bakes them at cut time. **A connector therefore follows later sheet
+edits**: bend the surface under a placed connector and it rises with it.
+
+### The frame
+
+`curved_cut_sheet_frame(sheet, x, y, z_angle)`, in `CurvedCut.{hpp,cpp}`:
+
+- **local Z** = `curved_cut_sheet_normal()` = `normalize(-∂f/∂x, -∂f/∂y, 1)`, by central differences
+  at 1e-3 mm. A height field cannot overhang, so the z component is positive before normalization
+  and stays positive after — the connector's "up" never flips as it slides.
+- **local X** = the plane's own X **projected onto the tangent plane**, then turned by `z_angle`
+  about the normal. The projection is what makes the frame *continuous* over the sheet and equal to
+  `+X` on a flat patch; picking any old perpendicular would spin the connector as it moved. (A
+  near-vertical surface falls back to projecting the plane's Y. A height field cannot actually reach
+  90°, so that branch only guards the numerics.)
+- **local Y** = `Z × X`.
+
+On a flat sheet the function returns `Transform3d::Identity()` **exactly** — not "identity to within
+epsilon" — by an early return rather than through Eigen's quaternion route. That is what makes the
+curved-but-flat equivalence bit-for-bit rather than approximate.
+
+### The footprint check
+
+`is_outside_of_cut_contour()` still samples the connector's footprint (a disc for Plug/Dowel/Snap,
+`flexi_footprint_corners()`'s real outline with 8 samples per edge for a Flexi) — but now it lays
+that footprint out in the connector's **own tilted frame** and then projects each sample **back down
+the plane normal onto the cut plane** before asking the clipper, because the clipper's contour test
+is a 2-D test in the plane's frame and a sample sitting `f(u,v)` off the plane would test against
+the wrong place. Read geometrically: *does the footprint, seen from the cut direction, stay inside
+the object's section here.*
+
+A side effect worth knowing: on a slope the projected footprint is an **ellipse**, narrower than the
+disc, so a tilted connector near a contour edge can be accepted where the flat test would have
+rejected it. That is correct — the material it actually needs is the projected area.
+
+On a flat cut the projection is the identity and this is the original test, unchanged.
+
+### The cut
+
+`perform_with_curved_sheet()` gained the connector branch its volume walk was missing:
+
+```
+if (!volume->is_model_part()) {
+    if (volume->cut_info.is_processed) process_modifier_cut(...);
+    else                               process_connector_cut(...);   // <- phase 4
+}
+```
+
+— i.e. **the same helper the flat cut uses**, unchanged. This works because a connector volume
+reaches `Cut` already carrying `translation_transform(pos) * rotation_m * …`, and phase 4 only
+changed what those two are. The plug/dowel/snap solids and their pockets are built in the
+connector's local frame for free; the tilt rides in through the volume's own transform.
+
+The `Dowel` is the one case worth spelling out. `process_connector_cut()` splits a dowel with the
+flat `cut_mesh()` — and that is the *right* thing here, because the dowel's own frame is already the
+sheet's frame at its `(u,v)`, so "flat, in the dowel's frame" **is** "tangent to the sheet at the
+dowel". Its third object (the printable pin) is produced and reset onto the bed exactly as on a flat
+cut.
+
+**Flexi joints** dispatch out to `perform_with_flexi_joints()` from the curved entry point too, the
+same way a flat cut with a flexi joint does. A flexi cut cannot *also* be a curved one: the joint
+opens its own gap between two flat faces and generates its bodies relative to those faces, so the
+surface between the two segments **is** the joint's face pair. What phase 4 gives it is the frame —
+the joint stands on the sheet's normal at its own point rather than on the plane's.
+
+### Kerf interaction
+
+Phase 3 lengthened a connector by the kerf `t` and moved its centre to `face_lo + height/2` **along
+`m_cut_normal`**. Phase 4 measures that same shift **along the connector's own normal** — the sheet
+normal at its `(u,v)`. So a plug on a tilted patch still bridges the removed band: its lower end
+lands on `face_lo` and its upper end on `face_lo + height + t`, both measured along the direction the
+body actually points. On a flat cut (or a flat sheet) `conn_normal == m_cut_normal` and the phase 3
+behaviour is untouched.
+
+### Limits and warnings
+
+Both **advisory** — orange, wrapped, in the curved panel. Nothing refuses a cut, because a
+deliberately tilted connector (or a hinge on a gentle bend) is a legitimate thing to ask for.
+
+1. **Tilt.** When the local normal is more than `CurvedConnectorTiltWarnDeg` (60°) off the plane
+   normal, the panel says the connector will print at an angle and may need supports.
+2. **Flat patch.** `curved_cut_sheet_curvature_radius()` computes the *smaller* principal radius of
+   curvature from the Monge-patch second derivatives (`H ± √(H²−K)`, larger |curvature| wins).
+   `Hinge` and `Thread` need a locally flat patch — a knuckle run and a pitch line are straight
+   features generated as if for a plane — so the panel warns when that radius is below
+   `CurvedConnectorFlatPatchFactor` (3×) the connector's own extent. A Plug, Dowel, Snap, DoubleRing,
+   BallSocket or ChainLink is a solid of revolution about the local normal and sits fine on a curved
+   patch, so none of them trip it.
+
+`Keep as parts` behaves exactly as on a flat cut (it is the same `post_process` path). Persistence
+is unchanged and needed nothing new — see below.
+
+### Persistence
+
+Worth stating plainly, because section 3 guessed differently: **`ModelObject::cut_connectors` reaches
+no 3MF, on a flat cut or a curved one.** It is pre-cut gizmo session state. What persists is the
+connector **volume** the gizmo bakes out of it (`apply_cut_connectors`), whose transform is
+
+```
+translation_transform(pos) * rotation_m * rotation(-z_angle) * scale(r, r, h)
+```
+
+— the position and the frame, baked into the volume matrix — plus its type and tolerances in
+`Metadata/cut_information.xml`. A curved connector's frame is a plain rotation just like a flat one's,
+and its position simply has a non-zero height in the plane frame. So a project re-opened *without the
+sheet* (which is session state, like the plane) still puts the connector back where it stood,
+standing the way it stood, with **no new 3MF fields at all**.
+
+### Proofs
+
+All in `tests/libslic3r/test_curved_cut.cpp`, tag `[CurvedCut]`.
+
+1. **Curved-but-flat is bit-identical.** `curved_cut_sheet_frame()` on a flat sheet returns the
+   identity matrix by `==`, not by tolerance, at nine sample points; the normal is exactly
+   `(0,0,1)`. A cube with two plug connectors cut by a flat sheet and by the plane produces the
+   **same vertex and index counts and the same coordinates, element by element**, on both halves,
+   and the same volume counts (3 per side: the solid plus two connector volumes).
+2. **The axis follows the sheet.** A domed sheet, a plug at an off-centre point where the surface
+   slopes by more than 5°: the plug's cylinder axis, fitted from its own vertices by the largest
+   principal direction of their covariance, is **within 0.5°** of the analytic gradient normal (and
+   more than 5° off the plane normal, so a flat frame would have failed). Both halves closed
+   (`its_num_open_edges == 0`); `upper + lower + pocket == cube` within 1e-2 relative; the plug spans
+   `0 … height` along the local normal with an off-axis radius equal to its own, so the tilted frame
+   rotated the body without shearing it.
+3. **A DoubleRing Flexi on a dome.** The two segments' **intersection volume is 0** within 1e-3
+   (still print-in-place), and the rings' axis — fitted as the *smallest*-variance direction, a ring
+   being a disc — is within 0.5° of the local normal and more than 4° off the plane's.
+4. **The kerf bridges along the local normal.** `t = 2` on a domed sheet: the body is exactly 2 mm
+   longer, its frame did not turn (`‖ΔM‖ < 1e-12`), its centre moved purely along `n` with no
+   sideways drift, and its two ends land on `face_lo` and `face_lo + height + t` to 1e-9 — so it
+   reaches past both kerf faces. The cut itself runs, both halves closed, and the removed band is
+   really gone.
+5. **The footprint on the sheet.** A connector in the middle is accepted, one near the rim rejected,
+   with the footprint sampled in the tilted tangent plane and projected back onto the cut plane. The
+   projected half width on a slope is measured directly: **less than the disc's radius** (fore­
+   shortened by the tilt) but more than half of it (not collapsed). Plus the advisories: tilt is 0 at
+   the apex, a 3 mm connector passes the flat-patch test on this dome and a 200 mm one fails it,
+   everything passes on a flat sheet at any size, and the dome's apex curvature radius is finite and
+   of the right order (between 5 mm and 2000 mm for an 8 mm rise over a 40 mm half span).
+6. **3MF round trip.** A baked, processed plug connector volume on a cut object, saved with
+   `store_bbs_3mf` and read back with `load_bbs_3mf`: it comes back as a connector of type `Plug`,
+   its normal within **0.1°** of what went in (and still more than 5° off the plane normal), its
+   position within 1e-3 mm, its **whole transform** within 1e-3 by Frobenius norm, and its mesh
+   intact.
+
+**Demo**: `plugs_upper.stl` / `plugs_lower.stl` (a dome-cut cube with two plugs) and
+`ring_upper.stl` / `ring_lower.stl` (the same cube with one DoubleRing), produced by the `[.demo]`
+case from the same code the tests exercise — set `EDGESLICER_CURVED_CONNECTOR_DEMO_DIR` to
+regenerate.
+
+### Unverified
+
+**Nobody has clicked this.** Everything above is proved headless through `libslic3r`. The GUI
+compiles and the app launches clean with a scratch data dir, but no human has opened the Cut gizmo,
+switched to Curved, bent the sheet, placed a connector on it and looked at the result. Specifically
+unverified by eye:
+
+- **Where the click lands.** The raycast is against the 64×64 *preview* sample grid while the cut
+  uses the 128×128 one, so a connector sits on the preview surface, up to the chord sag between the
+  two (~0.03 mm on an 8 mm dome over 80 mm) off the surface the cut actually makes. That is far
+  below any printable tolerance but it has not been looked at.
+- **Whether the glyph reads as tilted.** The connector model is drawn on the local frame, so on a
+  steep patch it leans. Whether that reads as "standing on the surface" or as "broken" is a
+  judgement nobody has made.
+- **Dragging across a steep patch.** The drag re-hits the sheet every motion, so on a surface that
+  turns away from the camera the connector can jump to a different part of the sheet the ray hits
+  first. Not seen.
+- **The two warnings' wording and timing.** They are refreshed with the conflict check, so they
+  follow a connector move immediately but a *sheet handle* drag only when that drag ends (the same
+  debounce the empty-side warning has). A handle dragged to tilt a connector past 60° will not warn
+  until the drag ends.
+- **The flat-patch threshold.** 3× the connector extent is a guess, not a measured printability
+  limit. It has not been checked against a printed hinge on a real bend.
+- **Connectors plus a kerf plus a curve, together.** Each pair is tested; the triple is tested
+  headless (proof 4) but has never been printed or eyeballed.
+- **`Keep as parts` with connectors on a curved cut.** It takes the same `post_process` path as the
+  flat cut and is not separately covered by a test.

@@ -256,6 +256,20 @@ class GLGizmoCut3D : public GLGizmoBase
     bool           m_curved_upper_empty{ false };
     bool           m_curved_lower_empty{ false };
     void           update_curved_empty_sides();
+
+    // --- PHASE 4: connectors on the sheet ----------------------------------
+    // The sheet as a WORLD-frame triangle mesh, plus a raycaster over it, so a
+    // click can be intersected with the surface the user drew rather than with
+    // the flat clipping plane. Rebuilt lazily from the same dense sample grid
+    // the preview uses (DefaultSamples), so what the user clicks IS what they
+    // see. Held by pointer because MeshRaycaster is not default-constructible.
+    std::unique_ptr<MeshRaycaster> m_curved_pick_raycaster;
+    TriangleMesh   m_curved_pick_mesh;
+    bool           m_curved_pick_dirty{ true };
+    // Warning counts for the connector panel, refreshed with the connector
+    // state. Advisory only: nothing here refuses a cut.
+    int            m_curved_tilted_connectors{ 0 };
+    int            m_curved_unflat_connectors{ 0 };
     // The flat cut has the same failure mode (a plane clear of the part), and
     // has_valid_contour() already covers it, so this is only computed in Curved.
 
@@ -514,7 +528,10 @@ private:
     // a cross-section to fit to.
     double curved_sheet_half_size() const;
     void   update_curved_sheet_model();
-    void   invalidate_curved_sheet() { m_curved_sheet_dirty = true; m_curved_sheet_tex_dirty = true; m_curved_cap_dirty = true; }
+    // PHASE 4: the connector PICK mesh is invalidated with the sheet too - a
+    // click has to hit the surface as it stands, not as it was before the last
+    // handle drag.
+    void   invalidate_curved_sheet() { m_curved_sheet_dirty = true; m_curved_sheet_tex_dirty = true; m_curved_cap_dirty = true; m_curved_pick_dirty = true; }
     void   render_curved_sheet();
     void   render_curved_control_points();
     // Upload / drop the height-field texture and point the volume shader at it.
@@ -535,6 +552,50 @@ private:
     bool   curved_drag_delta(const Vec2d& mouse_position, double& delta) const;
     bool   curved_on_mouse(const wxMouseEvent& mouse_event);
     void   render_curved_surface_inputs();
+
+    // --- Curved cut (phase 4): connectors on the sheet ---------------------
+    // A connector on a curved cut stands on the SHEET, not on the plane: its
+    // position is the point of the sheet under the mouse and its frame is the
+    // sheet's frame there. Everything below is that, and it is all a pure
+    // function of the connector's own position, so no connector carries any new
+    // state - which is what keeps the 3MF round trip working (see
+    // apply_connectors_in_model()).
+
+    // Local (x,y) in the cut plane's frame of a connector position given in the
+    // OBJECT's frame (which is what CutConnector::pos holds).
+    Vec2d  connector_plane_xy(const Vec3d& pos_object) const;
+    // Drop a world point straight down the plane normal onto the cut plane. The
+    // clipper's contour test is a 2D test in the plane's frame, so a footprint
+    // sample taken in the sheet's TILTED tangent plane has to come back here
+    // before it can be tested. Identity in effect for a point already on the
+    // plane, so the flat path is unchanged.
+    Vec3d  project_onto_cut_plane(const Vec3d& pos_world) const;
+    // The connector's frame: the sheet's local frame at its (x,y) in Curved
+    // mode, m_rotation_m in Flat mode. This is the ONE place the two differ, and
+    // on a flat sheet the sheet frame IS m_rotation_m, so a curved-but-flat cut
+    // renders and cuts exactly like a flat one.
+    Transform3d connector_rotation_m(const Vec3d& pos_object) const;
+    // Same, for a connector already in the list (uses its own z_angle for the
+    // in-plane direction, the way the flat path applies z_angle separately).
+    Transform3d connector_rotation_m(const CutConnector& connector) const;
+    // Raise `pos_object` onto the sheet: keep its (x,y) in the plane frame and
+    // take its height from f(x,y). A no-op in Flat mode.
+    Vec3d  connector_pos_on_sheet(const Vec3d& pos_object) const;
+    // Intersect the mouse ray with the SHEET (the dense sample mesh) rather than
+    // with the flat clipping plane, and return the hit in the object's frame.
+    // Falls back to the flat unproject when the ray misses the sheet, so a click
+    // just off the bend still lands somewhere sensible.
+    bool   unproject_on_curved_sheet(const Vec2d& mouse_position, Vec3d& pos, Vec3d& pos_world, bool respect_contours = true);
+    // The sheet as a world-frame triangle mesh + its raycaster, rebuilt lazily.
+    void   update_curved_sheet_raycaster();
+    void   invalidate_curved_sheet_raycaster() { m_curved_pick_dirty = true; }
+    // The connector's largest in-plane half extent, in mm - what the flat-patch
+    // test measures the local curvature radius against.
+    double connector_extent(const CutConnector& connector) const;
+    // Warnings gathered for the connector panel: how many connectors stand more
+    // than CurvedConnectorTiltWarnDeg off the plane normal, and how many are a
+    // straight-featured Flexi kind (Hinge / Thread) on too tight a patch.
+    void   update_curved_connector_warnings();
 
     bool can_perform_cut() const;
     bool has_valid_groove() const;
