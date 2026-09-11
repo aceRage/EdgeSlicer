@@ -54,6 +54,7 @@ Stored files can be listed and deleted through the instance API, and the phone's
 ### Bambu Lab, including dual-nozzle — in progress
 
 - **Profiles** for H2D, H2D Pro, H2C and X2D (dual-nozzle) plus P2S, A2L and H2S, with the full official Polymaker filament catalogue — including Panchroma, Fiberon and PolyLite presets for the H2C, validated against Polymaker's published presets.
+- **Printer error texts per series** — HMS and error messages resolve per printer family instead of one shared table.
 - **H2C sending works** — the sliced 3MF carries Bambu Studio's multi-nozzle metadata that the H2C firmware requires, and a LAN send waits for the printer to accept the job. The H2C's rack nozzle change is emitted the way Bambu Studio does it, and nozzle offset calibration can be requested from the send dialog. Printer error codes resolve to the printer's own text per device series.
 - **P1 and A1 on the LAN** — the network plug-in ships with the Windows packages and the setup wizard turns it on for Bambu printers, so LAN printers are found on a fresh install; sign-in offers the plug-in instead of a dead page when it is missing. A P1 or A1 that started the print no longer reports "did not acknowledge the start command", and uploads honour the printer's SD-card folder.
 - **Dual-nozzle slicing** — filaments are grouped onto nozzles automatically (from the connected printer's AMS layout when one is attached), cross-nozzle changes skip the purge, and the grouping is saved in the project 3MF. Dual-extruder machines can load every colour on the first layer, so nothing waits on a mid-print load.
@@ -195,7 +196,7 @@ Windows packaging: `cpack -G NSIS` in `build/` produces the installer (needs NSI
 
 ## Status and roadmap
 
-The current release is **[v2.3.8.0-edge](https://github.com/aceRage/EdgeSlicer/releases/tag/v2.3.8.0-edge)** (2026-09-11), following v2.3.7.0-edge (2026-09-09). Releases before v2.3.7.0-edge (including v2.3.6.5-edge, the first under the EdgeSlicer name) have been removed, so there is no upgrade path from them other than installing fresh — your data directory is migrated automatically (see above).
+The current release is **[v2.3.8.0-edge](https://github.com/aceRage/EdgeSlicer/releases/tag/v2.3.8.0-edge)** (2026-09-11), the first release recommended for Bambu Lab printers (v2.3.7.0-edge shipped without the LAN discovery firewall rule and the live-view camera component, and v2.3.6.5-edge without the network plug-in, so both have been removed), so there is no upgrade path from them other than installing fresh — your data directory is migrated automatically (see above).
 
 Known limits and work in progress, stated plainly:
 
