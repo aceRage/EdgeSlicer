@@ -498,6 +498,10 @@ set(SLIC3R_GUI_SOURCES
     GUI/FlashForge/DeviceListPanel.hpp
     GUI/FlashForge/ExportLogs.cpp
     GUI/FlashForge/ExportLogs.hpp
+    GUI/FlashForge/FFDiagnostics.cpp
+    GUI/FlashForge/FFDiagnostics.hpp
+    GUI/FlashForge/FFDiagnosticsDialog.cpp
+    GUI/FlashForge/FFDiagnosticsDialog.hpp
     GUI/FlashForge/FFDownloadTool.cpp
     GUI/FlashForge/FFDownloadTool.hpp
     GUI/FlashForge/FFTextCtrl.cpp

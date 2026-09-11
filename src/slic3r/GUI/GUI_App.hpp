@@ -320,6 +320,12 @@ private:
     NetworkAgent* m_agent { nullptr };
     // Ultra: Flashforge device stack (Orca-Flashforge port)
     DeviceObjectOpr* m_device_opr { nullptr };
+    // Ultra: why the FlashForge stack is unusable, so the Device tab can say so instead of
+    // rendering an empty page. Empty m_flashnetwork_error means the library loaded.
+    std::string              m_flashnetwork_error;
+    std::string              m_flashnetwork_path;
+    std::vector<std::string> m_flashnetwork_searched;
+    bool                     m_flashnetwork_loaded { false };
     wxImage          m_usr_pic_image;
     std::vector<std::string> need_delete_presets;   // store setting ids of preset
     std::vector<bool> m_create_preset_blocked { false, false, false, false, false, false }; // excceed limit
@@ -570,6 +576,16 @@ private:
     std::string     get_bambu_user_name();
     // Ultra: Flashforge device stack (Orca-Flashforge port) - FF cloud login lands in Phase B, LAN-only until then
     bool            is_flashforge_login() { return false; }
+    // Ultra: FlashForge LAN support needs FlashForge's closed FlashNetwork library, which we
+    // redistribute (there is no public URL to fetch it from). These report whether it came up,
+    // so the Device tab can show a real message and the diagnostics zip can record the facts.
+    bool            flashnetwork_loaded() const { return m_flashnetwork_loaded; }
+    const std::string &flashnetwork_error() const { return m_flashnetwork_error; }
+    const std::string &flashnetwork_path() const { return m_flashnetwork_path; }
+    const std::vector<std::string> &flashnetwork_searched() const { return m_flashnetwork_searched; }
+    // Loads the library from an explicit path the user picked with "Locate", or re-runs the
+    // normal search after a "Download". Returns true when the stack is up afterwards.
+    bool            init_flashnetwork(const std::string &explicit_path = std::string());
     DeviceObjectOpr* getDeviceObjectOpr();
     wxString        get_homepage_url();
     std::string     handle_web_request(std::string cmd, const std::vector<std::string>& limitCmds);
