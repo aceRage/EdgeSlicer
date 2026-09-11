@@ -18,13 +18,18 @@ CloneDialog::CloneDialog(wxWindow *parent)
     auto v_sizer = new wxBoxSizer(wxVERTICAL);
     auto f_sizer = new wxFlexGridSizer(2, 2, FromDIP(4) , FromDIP(20));
 
-    auto count_label = new wxStaticText(this, wxID_ANY, _L("Number of copies:"), wxDefaultPosition, wxDefaultSize, 0);
+    // ::Label rather than a bare wxStaticText: a plain wxStaticText reports the system button
+    // face (#F0F0F0) as its background, which StateColor maps to #3F3F46 - a lighter grey than the
+    // dialog's own #2D2D31 - so UpdateDlgDarkUI() painted a band behind every label in dark mode.
+    // Label takes the parent's background in its constructor, so it maps to the same colour as the
+    // window. Same reason in FillBedDialog.
+    auto count_label = new ::Label(this, Label::Body_14, _L("Number of copies:"));
     m_count_spin = new SpinInput(this, wxEmptyString, "", wxDefaultPosition, wxSize(FromDIP(120), -1), wxSP_ARROW_KEYS, 1, 1000, 1);
     m_count_spin->GetTextCtrl()->SetFocus();
     f_sizer->Add(count_label  , 0, wxEXPAND | wxALIGN_CENTER_VERTICAL);
     f_sizer->Add(m_count_spin, 0, wxALIGN_CENTER_VERTICAL);
 
-    auto arrange_label = new wxStaticText(this, wxID_ANY, _L("Auto arrange plate after cloning") + ":", wxDefaultPosition, wxDefaultSize, 0);
+    auto arrange_label = new ::Label(this, Label::Body_14, _L("Auto arrange plate after cloning") + ":");
     arrange_label->Wrap(FromDIP(300));
     m_arrange_cb = new ::CheckBox(this);
     m_arrange_cb->SetValue(m_config->get("auto_arrange") == "true");

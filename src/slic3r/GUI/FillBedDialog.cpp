@@ -21,6 +21,7 @@ static const char *CFG_ALLOW_ROT     = "allow_rotation";
 static const char *CFG_EDGE_MARGIN   = "edge_margin";
 static const char *CFG_FRONT_ENABLED = "front_margin_enabled";
 static const char *CFG_FRONT_MARGIN  = "front_margin";
+static const char *CFG_LAYOUT        = "layout";
 
 static const double MARGIN_MAX = 50.;
 
@@ -50,6 +51,9 @@ FillBedSettings FillBedDialog::load_from_config(const FillBedSettings &defaults)
         s.allow_rotation = cfg->get(CFG_SECTION, CFG_ALLOW_ROT) == "true";
     if (cfg->has(CFG_SECTION, CFG_FRONT_ENABLED))
         s.front_enabled = cfg->get(CFG_SECTION, CFG_FRONT_ENABLED) == "true";
+    if (cfg->has(CFG_SECTION, CFG_LAYOUT))
+        s.layout = cfg->get(CFG_SECTION, CFG_LAYOUT) == "grid" ? fill_bed::Layout::Grid
+                                                               : fill_bed::Layout::Compact;
 
     s.gap          = std::clamp(s.gap, 0., MARGIN_MAX);
     s.edge_margin  = std::clamp(s.edge_margin, 0., MARGIN_MAX);
@@ -66,7 +70,8 @@ FillBedDialog::FillBedDialog(wxWindow              *parent,
                              double                 bed_w,
                              double                 bed_h,
                              double                 brim_width,
-                             bool                   is_seq_print)
+                             bool                   is_seq_print,
+                             std::function<int(const FillBedSettings &)> grid_counter)
     : DPIDialog(parent ? parent : static_cast<wxWindow *>(wxGetApp().mainframe),
                 wxID_ANY,
                 _L("Fill bed with copies"),
@@ -82,6 +87,8 @@ FillBedDialog::FillBedDialog(wxWindow              *parent,
     , m_brim_width(brim_width)
     , m_is_seq_print(is_seq_print)
 {
+    m_grid_counter = std::move(grid_counter);
+
     SetBackgroundColour(*wxWHITE);
     SetFont(Label::Body_14);
 
@@ -103,8 +110,13 @@ FillBedDialog::FillBedDialog(wxWindow              *parent,
         return in;
     };
 
+    // Every label here is a ::Label, not a bare wxStaticText. A wxStaticText reports the system
+    // button face (#F0F0F0) as its background; StateColor maps that to #3F3F46, which is LIGHTER
+    // than the dialog's own #2D2D31, so UpdateDlgDarkUI() painted a distinct grey band behind
+    // each label in dark mode. ::Label copies the parent's background in its constructor, so it
+    // maps to the same colour as the window. Same fix in CloneDialog.
     // ---- minimum gap between copies -----------------------------------------------------------
-    auto gap_label = new wxStaticText(this, wxID_ANY, _L("Minimum gap between copies") + ":", wxDefaultPosition, wxDefaultSize, 0);
+    auto gap_label = new ::Label(this, Label::Body_14, _L("Minimum gap between copies") + ":");
     m_gap_input    = make_input(m_settings.gap);
     m_gap_input->SetToolTip(_L("The clear distance left between neighbouring copies, measured "
                                "between their outlines. Sequential printing and tree supports may "
@@ -114,7 +126,7 @@ FillBedDialog::FillBedDialog(wxWindow              *parent,
     f_sizer->Add(m_gap_input, 0, wxALIGN_CENTER_VERTICAL);
 
     // ---- allow rotation -----------------------------------------------------------------------
-    auto rotate_label = new wxStaticText(this, wxID_ANY, _L("Allow rotation") + ":", wxDefaultPosition, wxDefaultSize, 0);
+    auto rotate_label = new ::Label(this, Label::Body_14, _L("Allow rotation") + ":");
     rotate_label->Wrap(FromDIP(300));
     m_rotate_cb = new ::CheckBox(this);
     m_rotate_cb->SetValue(m_settings.allow_rotation);
@@ -127,8 +139,30 @@ FillBedDialog::FillBedDialog(wxWindow              *parent,
     f_sizer->Add(rotate_label, 0, wxEXPAND | wxALIGN_CENTER_VERTICAL);
     f_sizer->Add(m_rotate_cb, 0, wxALIGN_CENTER_VERTICAL | wxTOP | wxBOTTOM, FromDIP(5));
 
+    // ---- layout ---------------------------------------------------------------------------
+    const wxString layout_tip = _L("Compact nestles copies into whatever pocket the packer finds - "
+                                   "denser for awkward outlines, but the result looks irregular and "
+                                   "it is capped at a few hundred copies. Grid tiles the bed with the "
+                                   "part's bounding box at the exact gap, tries both orientations when "
+                                   "rotation is allowed, and skips the cells that hit an exclusion "
+                                   "region, the wipe tower or an object already on the plate.");
+
+    auto layout_label = new ::Label(this, Label::Body_14, _L("Layout") + ":");
+    layout_label->SetToolTip(layout_tip);
+    m_layout_combo = new ::ComboBox(this, wxID_ANY, wxEmptyString, wxDefaultPosition, input_size, 0, nullptr, wxCB_READONLY);
+    m_layout_combo->Append(_L("Compact"));
+    m_layout_combo->Append(_L("Grid"));
+    m_layout_combo->SetSelection(m_settings.layout == fill_bed::Layout::Grid ? 1 : 0);
+    m_layout_combo->SetToolTip(layout_tip);
+    m_layout_combo->Bind(wxEVT_COMBOBOX, [this](wxCommandEvent &e) {
+        e.Skip();
+        update_estimate();
+    });
+    f_sizer->Add(layout_label, 0, wxEXPAND | wxALIGN_CENTER_VERTICAL);
+    f_sizer->Add(m_layout_combo, 0, wxALIGN_CENTER_VERTICAL);
+
     // ---- minimum distance from the bed edge ---------------------------------------------------
-    auto edge_label = new wxStaticText(this, wxID_ANY, _L("Minimum distance from bed edge") + ":", wxDefaultPosition, wxDefaultSize, 0);
+    auto edge_label = new ::Label(this, Label::Body_14, _L("Minimum distance from bed edge") + ":");
     edge_label->Wrap(FromDIP(300));
     m_edge_input = make_input(m_settings.edge_margin);
     m_edge_input->SetToolTip(_L("Keep every copy at least this far from all four bed edges."));
@@ -144,7 +178,7 @@ FillBedDialog::FillBedDialog(wxWindow              *parent,
                                   "never brings a copy closer to the front than the general edge "
                                   "distance above.");
 
-    auto front_label = new wxStaticText(this, wxID_ANY, _L("Keep the front edge clear") + ":", wxDefaultPosition, wxDefaultSize, 0);
+    auto front_label = new ::Label(this, Label::Body_14, _L("Keep the front edge clear") + ":");
     front_label->Wrap(FromDIP(300));
     front_label->SetToolTip(front_tip);
     m_front_cb = new ::CheckBox(this);
@@ -153,7 +187,7 @@ FillBedDialog::FillBedDialog(wxWindow              *parent,
     f_sizer->Add(front_label, 0, wxEXPAND | wxALIGN_CENTER_VERTICAL);
     f_sizer->Add(m_front_cb, 0, wxALIGN_CENTER_VERTICAL | wxTOP | wxBOTTOM, FromDIP(5));
 
-    auto front_mm_label = new wxStaticText(this, wxID_ANY, _L("Distance from the front edge") + ":", wxDefaultPosition, wxDefaultSize, 0);
+    auto front_mm_label = new ::Label(this, Label::Body_14, _L("Distance from the front edge") + ":");
     front_mm_label->Wrap(FromDIP(300));
     front_mm_label->SetToolTip(front_tip);
     m_front_input = make_input(m_settings.front_margin);
@@ -173,18 +207,23 @@ FillBedDialog::FillBedDialog(wxWindow              *parent,
     // ---- info and the live estimate -----------------------------------------------------------
     auto info_sizer = new wxBoxSizer(wxVERTICAL);
 
-    auto around_text = new wxStaticText(this, wxID_ANY, _L("Fills around existing objects on this plate"), wxDefaultPosition, wxDefaultSize, 0);
+    auto around_text = new ::Label(this, Label::Body_14, _L("Fills around existing objects on this plate"));
     around_text->Wrap(FromDIP(320));
-    around_text->SetForegroundColour(StateColor::darkModeColorFor(wxColour("#6B6B6B")));
+    // The light-mode tone only. UpdateDlgDarkUI() at the end of the constructor maps it to
+    // #818183 for dark mode; pre-mapping it here would hand that pass a colour it does not
+    // know and leave the label at whatever its lightness sanity check produced.
+    around_text->SetForegroundColour(wxColour("#6B6B6B"));
     info_sizer->Add(around_text, 0, wxALIGN_LEFT);
 
-    m_estimate_text = new wxStaticText(this, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize, 0);
-    m_estimate_text->SetFont(Label::Head_14);
+    m_estimate_text = new ::Label(this, Label::Head_14, wxEmptyString);
     info_sizer->Add(m_estimate_text, 0, wxALIGN_LEFT | wxTOP, FromDIP(6));
 
-    m_warning_text = new wxStaticText(this, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize, 0);
+    m_warning_text = new ::Label(this, Label::Body_14, wxEmptyString);
     m_warning_text->Wrap(FromDIP(320));
-    m_warning_text->SetForegroundColour(StateColor::darkModeColorFor(wxColour("#D9534F")));
+    // #D9534F is not in StateColor's dark map, so it survives UpdateDlgDarkUI() unchanged -
+    // which is what a warning red should do. Left explicit rather than mapped for the same
+    // reason as the line above.
+    m_warning_text->SetForegroundColour(wxColour("#D9534F"));
     info_sizer->Add(m_warning_text, 0, wxALIGN_LEFT | wxTOP, FromDIP(4));
 
     v_sizer->Add(info_sizer, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(10));
@@ -194,11 +233,7 @@ FillBedDialog::FillBedDialog(wxWindow              *parent,
 
     dlg_btns->GetOK()->SetLabel(_L("Fill"));
     dlg_btns->GetOK()->Bind(wxEVT_BUTTON, [this](wxCommandEvent &e) {
-        m_settings.gap            = std::clamp(read_mm(m_gap_input, m_settings.gap), 0., MARGIN_MAX);
-        m_settings.allow_rotation = m_rotate_cb->GetValue();
-        m_settings.edge_margin    = std::clamp(read_mm(m_edge_input, m_settings.edge_margin), 0., MARGIN_MAX);
-        m_settings.front_enabled  = m_front_cb->GetValue();
-        m_settings.front_margin   = std::clamp(read_mm(m_front_input, m_settings.front_margin), 0., MARGIN_MAX);
+        m_settings = current_settings();
         save_to_config();
         EndModal(wxID_OK);
     });
@@ -216,6 +251,22 @@ FillBedDialog::FillBedDialog(wxWindow              *parent,
     wxGetApp().UpdateDlgDarkUI(this);
 }
 
+// What the controls hold right now, clamped. The estimate and OK read the same thing, so the
+// number on the label is the number the job is given.
+FillBedSettings FillBedDialog::current_settings() const
+{
+    FillBedSettings s = m_settings;
+    s.gap            = std::clamp(read_mm(m_gap_input, m_settings.gap), 0., MARGIN_MAX);
+    s.allow_rotation = m_rotate_cb != nullptr ? m_rotate_cb->GetValue() : m_settings.allow_rotation;
+    s.edge_margin    = std::clamp(read_mm(m_edge_input, m_settings.edge_margin), 0., MARGIN_MAX);
+    s.front_enabled  = m_front_cb != nullptr ? m_front_cb->GetValue() : m_settings.front_enabled;
+    s.front_margin   = std::clamp(read_mm(m_front_input, m_settings.front_margin), 0., MARGIN_MAX);
+    s.layout         = (m_layout_combo != nullptr && m_layout_combo->GetSelection() == 1)
+                           ? fill_bed::Layout::Grid
+                           : fill_bed::Layout::Compact;
+    return s;
+}
+
 double FillBedDialog::read_mm(TextInput *input, double fallback) const
 {
     if (input == nullptr)
@@ -229,10 +280,11 @@ double FillBedDialog::read_mm(TextInput *input, double fallback) const
 
 void FillBedDialog::update_estimate()
 {
-    const double gap   = std::clamp(read_mm(m_gap_input, m_settings.gap), 0., MARGIN_MAX);
-    const double edge  = std::clamp(read_mm(m_edge_input, m_settings.edge_margin), 0., MARGIN_MAX);
-    const bool   fr_on = m_front_cb != nullptr && m_front_cb->GetValue();
-    const double front = fr_on ? std::max(edge, std::clamp(read_mm(m_front_input, m_settings.front_margin), 0., MARGIN_MAX)) : edge;
+    const FillBedSettings cur   = current_settings();
+    const double          gap   = cur.gap;
+    const double          edge  = cur.edge_margin;
+    const double          front = cur.front_enabled ? std::max(edge, cur.front_margin) : edge;
+    const bool            grid  = cur.layout == fill_bed::Layout::Grid;
 
     // The same rectangle the per-side shrink will hand the packer: the whole edge margin off
     // left/right/back, the effective front margin off the front. The bed area passed in has
@@ -244,13 +296,24 @@ void FillBedDialog::update_estimate()
     const double free = std::max(0., std::min(m_bed_area, w * h) - m_occupied);
 
     // The gap the packer will really use, so the label does not promise copies the brim rule
-    // will not allow. Rotation is not modelled - the estimate is the un-rotated tiling, and a
-    // rotated pack can only do better.
+    // will not allow.
     const double eff_gap = std::max(gap, m_brim_width);
-    const int    n       = fill_bed::estimate_count(m_template_w, m_template_h, eff_gap, free);
+
+    // Grid is deterministic, so the count is exact: the job builds the real grid against the
+    // real bed outline and the real obstacles and just reports how many cells came back.
+    // Compact has no such closed form, so it keeps the tiling estimate - rotation is not
+    // modelled there either, and a rotated pack can only do better.
+    const int tiled = fill_bed::estimate_count(m_template_w, m_template_h, eff_gap, free);
+    int       n     = tiled;
+    bool      exact = false;
+    if (grid && m_grid_counter) {
+        n     = m_grid_counter(cur);
+        exact = true;
+    }
 
     if (m_estimate_text != nullptr)
-        m_estimate_text->SetLabel(wxString::Format(_L("Estimated copies: %d"), n));
+        m_estimate_text->SetLabel(exact ? wxString::Format(_L("Copies: %d"), n)
+                                        : wxString::Format(_L("Estimated copies: %d"), n));
 
     if (m_warning_text != nullptr) {
         wxString warn;
@@ -261,6 +324,13 @@ void FillBedDialog::update_estimate()
             warn = wxString::Format(_L("The template's brim is %.1f mm wide, so the gap used will "
                                        "be at least that much."),
                                     m_brim_width);
+        // Compact is O(n^2), so above the cap the fill switches to Grid by itself rather than
+        // leaving most of the bed empty. Say so before the user presses Fill, not after.
+        if (!grid && tiled > fill_bed::COUNT_CAP) {
+            if (!warn.empty())
+                warn += "\n";
+            warn += wxString::Format(_L("Grid layout will be used above %d copies."), fill_bed::COUNT_CAP);
+        }
         m_warning_text->SetLabel(warn);
         m_warning_text->Wrap(FromDIP(320));
     }
@@ -280,6 +350,7 @@ void FillBedDialog::save_to_config() const
     cfg->set(CFG_SECTION, CFG_EDGE_MARGIN, mm_str(m_settings.edge_margin).ToStdString());
     cfg->set(CFG_SECTION, CFG_FRONT_ENABLED, m_settings.front_enabled);
     cfg->set(CFG_SECTION, CFG_FRONT_MARGIN, mm_str(m_settings.front_margin).ToStdString());
+    cfg->set(CFG_SECTION, CFG_LAYOUT, m_settings.layout == fill_bed::Layout::Grid ? "grid" : "compact");
 }
 
 void FillBedDialog::on_dpi_changed(const wxRect &suggested_rect)

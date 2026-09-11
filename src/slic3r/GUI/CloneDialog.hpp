@@ -9,6 +9,7 @@
 #include "Widgets/SpinInput.hpp"
 #include "Widgets/DialogButtons.hpp"
 #include "Widgets/CheckBox.hpp"
+#include "Widgets/Label.hpp"
 #include "Widgets/ProgressBar.hpp"
 
 namespace Slic3r { namespace GUI {

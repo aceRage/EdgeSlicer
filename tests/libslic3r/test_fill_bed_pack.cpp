@@ -311,3 +311,238 @@ TEST_CASE("fill bed: the same input packs the same way twice", "[fill_bed]")
             REQUIRE(a[i].translation == b[i].translation);
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// the Grid layout
+// ---------------------------------------------------------------------------------------------
+
+// The template as the grid sees it: an ExPolygon in scaled coordinates. grid_pack() returns a
+// translation relative to the template's own position, so these helpers place the result the same
+// way FillBedJob does.
+static BoundingBox cell_box(const ExPolygon &tmpl, const fill_bed::GridCell &cell)
+{
+    ExPolygon e = tmpl;
+    if (cell.rotation != 0.)
+        e.rotate(cell.rotation);
+    e.translate(cell.translation.x(), cell.translation.y());
+    return e.contour.bounding_box();
+}
+
+// A mm-sized axis-aligned rectangle centred on the origin.
+static ExPolygon mm_rect(double w, double h)
+{
+    const coord_t hw = coord_t(scaled(w / 2.));
+    const coord_t hh = coord_t(scaled(h / 2.));
+    Polygon p{{-hw, -hh}, {hw, -hh}, {hw, hh}, {-hw, hh}};
+    return ExPolygon{p};
+}
+
+// An L: a `side` square with a `notch` square bitten out of its top-right corner. Its bounding
+// box is still side x side, which is what a bounding-box tiling packs.
+static ExPolygon mm_L(double side, double notch)
+{
+    const coord_t s = coord_t(scaled(side));
+    const coord_t n = coord_t(scaled(notch));
+    Polygon p{{0, 0}, {s, 0}, {s, s - n}, {s - n, s - n}, {s - n, s}, {0, s}};
+    return ExPolygon{p};
+}
+
+// A fixed obstacle: an axis-aligned mm box at an absolute position on the bed.
+static fill_bed::GridObstacle box_obstacle(double x0, double y0, double w, double h, double inflation = 0.)
+{
+    const coord_t X = coord_t(scaled(x0)), Y = coord_t(scaled(y0));
+    const coord_t W = coord_t(scaled(w)), H = coord_t(scaled(h));
+    fill_bed::GridObstacle ob;
+    ob.outline   = Polygon{{X, Y}, {X + W, Y}, {X + W, Y + H}, {X, Y + H}};
+    ob.inflation = coord_t(scaled(inflation));
+    return ob;
+}
+
+TEST_CASE("fill bed: the grid count matches the closed form", "[fill_bed]")
+{
+    // The spec's case: a 20 mm square on a 200x200 bed, gap 3, edge margin 10.
+    // The bed the packer gets is 180x180 (10 mm off each side). n copies span
+    // n*20 + (n-1)*3 = 23n - 3, so the largest n with 23n - 3 <= 180 is floor(183/23) = 7.
+    const ExPolygon tmpl = mm_rect(20., 20.);
+    const Points    bed  = fill_bed::shrink_bed_per_side(mm_bed(200., 200.), 10., 0., false, 0., 0.);
+
+    const auto cells = fill_bed::grid_pack(tmpl, bed, coord_t(scaled(3.)), false, {});
+
+    const int per_side = int((180. + 3.) / 23.);
+    REQUIRE(per_side == 7);
+    REQUIRE(cells.size() == size_t(per_side * per_side));
+    REQUIRE(fill_bed::grid_count(tmpl, bed, coord_t(scaled(3.)), false, {}) == cells.size());
+
+    // Every copy inside the bed, and the neighbours exactly one gap apart.
+    const BoundingBox bb = bed_bbox(bed);
+    std::vector<BoundingBox> boxes;
+    for (const auto &c : cells) {
+        const BoundingBox cb = cell_box(tmpl, c);
+        REQUIRE(bb.contains(cb));
+        boxes.emplace_back(cb);
+    }
+
+    // The step between the first two columns is exactly 23 mm.
+    REQUIRE(unscaled<double>(boxes[1].min.x() - boxes[0].min.x()) == Approx(23.).margin(1e-6));
+    // ...and between the first two rows.
+    REQUIRE(unscaled<double>(boxes[per_side].min.y() - boxes[0].min.y()) == Approx(23.).margin(1e-6));
+
+    // The block is centred: the slack left over is split evenly between the two sides.
+    const double used = 23. * per_side - 3.;   // 158
+    const double slack = (180. - used) / 2.;
+    REQUIRE(unscaled<double>(boxes[0].min.x()) == Approx(10. + slack).margin(1e-3));
+    REQUIRE(unscaled<double>(boxes[0].min.y()) == Approx(10. + slack).margin(1e-3));
+}
+
+TEST_CASE("fill bed: the grid honours the gap, not the bed margin", "[fill_bed]")
+{
+    // Gap 0 on a bare 200x200 bed: exactly 10 per side.
+    const ExPolygon tmpl = mm_rect(20., 20.);
+    const Points    bed  = mm_bed(200., 200.);
+
+    REQUIRE(fill_bed::grid_count(tmpl, bed, 0, false, {}) == 100);
+
+    // A wider gap costs copies but must not also eat into the bed edge: at gap 3 the outermost
+    // copy still sits at the bed edge plus the centring slack, never gap + something.
+    const auto cells = fill_bed::grid_pack(tmpl, bed, coord_t(scaled(3.)), false, {});
+    const int  n     = int((200. + 3.) / 23.);   // 8
+    REQUIRE(cells.size() == size_t(n * n));
+    const double slack = (200. - (23. * n - 3.)) / 2.;
+    REQUIRE(unscaled<double>(cell_box(tmpl, cells[0]).min.x()) == Approx(slack).margin(1e-3));
+}
+
+TEST_CASE("fill bed: a fixed object removes exactly the cells it covers", "[fill_bed]")
+{
+    // 20 mm square, gap 0, bare 200x200 bed: a clean 10x10 grid on a 20 mm pitch, so cell
+    // (col, row) occupies [20*col, 20*col+20] x [20*row, 20*row+20].
+    const ExPolygon tmpl = mm_rect(20., 20.);
+    const Points    bed  = mm_bed(200., 200.);
+    const coord_t   gap  = 0;
+
+    const size_t bare = fill_bed::grid_count(tmpl, bed, gap, false, {});
+    REQUIRE(bare == 100);
+
+    // An obstacle sitting squarely on the four middle cells (columns 4-5, rows 4-5), pulled in
+    // by a hair so that merely TOUCHING a neighbouring cell does not count as covering it.
+    const auto ob = box_obstacle(80.5, 80.5, 39., 39.);
+    const auto cells = fill_bed::grid_pack(tmpl, bed, gap, false, {ob});
+
+    REQUIRE(cells.size() == bare - 4);
+
+    // And none of what is left overlaps the obstacle.
+    const BoundingBox ob_bb = ob.outline.bounding_box();
+    for (const auto &c : cells)
+        REQUIRE_FALSE(cell_box(tmpl, c).overlap(ob_bb));
+}
+
+TEST_CASE("fill bed: an obstacle's own clearance keeps copies further off", "[fill_bed]")
+{
+    const ExPolygon tmpl = mm_rect(20., 20.);
+    const Points    bed  = mm_bed(200., 200.);
+
+    // The same four middle cells, but now the obstacle carries 10 mm of its own clearance - an
+    // exclusion region's rule, which is NOT the copy-to-copy gap. It reaches into the ring of
+    // cells around it, so more than four go.
+    const auto tight = fill_bed::grid_count(tmpl, bed, 0, false, {box_obstacle(80.5, 80.5, 39., 39.)});
+    const auto wide  = fill_bed::grid_count(tmpl, bed, 0, false, {box_obstacle(80.5, 80.5, 39., 39., 10.)});
+    REQUIRE(wide < tight);
+}
+
+TEST_CASE("fill bed: rotation picks the better orientation", "[fill_bed]")
+{
+    // A 10x40 part on a 100x200 bed, gap 0.
+    //   0 deg:  floor(100/10) x floor(200/40) =  10 x 5 =  50
+    //  90 deg:  the box is 40x10, so floor(100/40) x floor(200/10) = 2 x 20 = 40
+    // Unrotated wins here, and the tie-break must leave the copies alone.
+    const ExPolygon tall = mm_rect(10., 40.);
+    const Points    bed  = mm_bed(100., 200.);
+    REQUIRE(fill_bed::grid_count(tall, bed, 0, false, {}) == 50);
+    REQUIRE(fill_bed::grid_count(tall, bed, 0, true, {}) == 50);
+    for (const auto &c : fill_bed::grid_pack(tall, bed, 0, true, {}))
+        REQUIRE(c.rotation == Approx(0.));
+
+    // Turn the part on its side and rotation has to rescue it: a 40x10 part is the 90-degree
+    // case of the one above, so allowing rotation must recover the same 50.
+    const ExPolygon wide = mm_rect(40., 10.);
+    REQUIRE(fill_bed::grid_count(wide, bed, 0, false, {}) == 40);
+    REQUIRE(fill_bed::grid_count(wide, bed, 0, true, {}) == 50);
+    for (const auto &c : fill_bed::grid_pack(wide, bed, 0, true, {}))
+        REQUIRE(std::abs(c.rotation) == Approx(PI / 2.));
+}
+
+TEST_CASE("fill bed: an L-shape packs at least as many as its bounding box allows", "[fill_bed]")
+{
+    // A 12x12 L with a 6x6 notch. The grid tiles bounding boxes, so it must place exactly as
+    // many as the 12x12 square does - never fewer. Beating it would mean nesting into the
+    // concavity, which is the spec's optional "true outlines" item and deliberately not done.
+    const ExPolygon L      = mm_L(12., 6.);
+    const ExPolygon square = mm_rect(12., 12.);
+    const Points    bed    = mm_bed(200., 200.);
+    const coord_t   gap    = coord_t(scaled(3.));
+
+    const size_t n_L  = fill_bed::grid_count(L, bed, gap, false, {});
+    const size_t n_sq = fill_bed::grid_count(square, bed, gap, false, {});
+
+    REQUIRE(n_L >= n_sq);
+    REQUIRE(n_L == n_sq);
+
+    // The closed form, as a guard against both moving together for the wrong reason:
+    // 15n - 3 <= 200 -> n = 13.
+    REQUIRE(n_sq == size_t(13 * 13));
+}
+
+TEST_CASE("fill bed: margins 0 / front 40 leave every copy behind the front strip", "[fill_bed]")
+{
+    // The spec's margin case, run end to end: edge 0, front 40 on a 200x200 bed.
+    const ExPolygon tmpl = mm_rect(20., 20.);
+    const Points    bed  = fill_bed::shrink_bed_per_side(mm_bed(200., 200.), 0., 40., true, 0., 0.);
+
+    const auto cells = fill_bed::grid_pack(tmpl, bed, coord_t(scaled(3.)), false, {});
+    REQUIRE(!cells.empty());
+
+    for (const auto &c : cells) {
+        const BoundingBox cb = cell_box(tmpl, c);
+        REQUIRE(unscaled<double>(cb.min.y()) >= 40. - 1e-6);
+        REQUIRE(unscaled<double>(cb.min.x()) >= 0. - 1e-6);
+        REQUIRE(unscaled<double>(cb.max.x()) <= 200. + 1e-6);
+        REQUIRE(unscaled<double>(cb.max.y()) <= 200. + 1e-6);
+    }
+
+    // The front strip really costs rows: 160 mm of depth rather than 200.
+    REQUIRE(cells.size() < fill_bed::grid_count(tmpl, mm_bed(200., 200.), coord_t(scaled(3.)), false, {}));
+}
+
+TEST_CASE("fill bed: the grid is deterministic and degenerate input is empty", "[fill_bed]")
+{
+    const ExPolygon tmpl = mm_rect(20., 20.);
+    const Points    bed  = mm_bed(200., 200.);
+    const coord_t   gap  = coord_t(scaled(3.));
+
+    const auto a = fill_bed::grid_pack(tmpl, bed, gap, true, {});
+    const auto b = fill_bed::grid_pack(tmpl, bed, gap, true, {});
+    REQUIRE(a.size() == b.size());
+    for (size_t i = 0; i < a.size(); ++i) {
+        REQUIRE(a[i].translation == b[i].translation);
+        REQUIRE(a[i].rotation == Approx(b[i].rotation));
+    }
+
+    // A part bigger than the bed, an empty bed, and an empty template all place nothing.
+    REQUIRE(fill_bed::grid_pack(mm_rect(300., 300.), bed, gap, true, {}).empty());
+    REQUIRE(fill_bed::grid_pack(tmpl, Points{}, gap, true, {}).empty());
+    REQUIRE(fill_bed::grid_pack(ExPolygon{}, bed, gap, true, {}).empty());
+
+    // max_cells keeps a contiguous block from the front-left.
+    const auto capped = fill_bed::grid_pack(tmpl, bed, gap, false, {}, 5);
+    REQUIRE(capped.size() == 5);
+    for (size_t i = 0; i < capped.size(); ++i)
+        REQUIRE(capped[i].translation == a[i].translation);
+}
+
+TEST_CASE("fill bed: the Compact cap is the number the dialog promises", "[fill_bed]")
+{
+    // The dialog says "Grid layout will be used above COUNT_CAP copies", and FillBedJob switches
+    // at exactly that number. Phase 2 raised it from 100 to 150 because the ad-hoc bounding-box
+    // branch that used to catch everything above 100 is gone.
+    REQUIRE(fill_bed::COUNT_CAP == 150);
+    REQUIRE(fill_bed::estimate_count_with_overshoot(1., 1., 0., 400. * 400.) == fill_bed::COUNT_CAP);
+}

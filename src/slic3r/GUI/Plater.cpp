@@ -21128,7 +21128,12 @@ void Plater::fill_bed_with_instances()
                       bed_w,
                       bed_h,
                       double(template_ap.brim_width),
-                      def_params.is_seq_print);
+                      def_params.is_seq_print,
+                      // Grid is deterministic, so the label can be exact rather than an
+                      // estimate: build the real grid against the real bed and the real
+                      // obstacles and report how many cells came back. Cheap - it is a tiling
+                      // plus a bounding-box test per cell, no packing.
+                      [this](const FillBedSettings &s) { return FillBedJob::grid_copies_for(this, s); });
     if (dlg.ShowModal() != wxID_OK)
         return;
 
