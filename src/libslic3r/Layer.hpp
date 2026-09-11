@@ -18,6 +18,8 @@ class LayerRegion;
 using LayerRegionPtrs = std::vector<LayerRegion*>;
 class PrintRegion;
 class PrintObject;
+// Locked Zag skin/skeleton parameters, defined in Fill/FillBase.hpp.
+struct LockRegionParam;
 namespace sla { class IndexedMesh; }
 
 namespace FillAdaptive {
@@ -191,6 +193,12 @@ public:
     // Phony version of make_fills() without parameters for Perl integration only.
     void                    make_fills() { this->make_fills(nullptr, nullptr); }
     void                    make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive::Octree* support_fill_octree, FillLightning::Generator* lightning_generator = nullptr);
+    // Locked Zag phase 2b: collect this layer's non-internal fill surfaces into lock_param.outlook
+    // and hand them to the sparse infill, so the skin band hugs the model contour. Only does
+    // anything for a region whose sparse pattern is Locked Zag with
+    // infill_instead_top_bottom_surfaces on. Defined in Fill/Fill.cpp (friend to Layer), ported
+    // from BambuStudio's Layer::set_outlook_range.
+    void                    set_outlook_range(LockRegionParam &lock_param);
     Polylines               generate_sparse_infill_polylines_for_anchoring(FillAdaptive::Octree *adaptive_fill_octree,
                                                                            FillAdaptive::Octree *support_fill_octree,
                                                                            FillLightning::Generator* lightning_generator) const;
