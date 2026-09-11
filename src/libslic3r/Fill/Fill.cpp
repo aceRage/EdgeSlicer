@@ -289,6 +289,12 @@ struct SurfaceFillParams
     float lateral_lattice_angle_2 = 0.f;
     float infill_lock_depth          = 0;
     float skin_infill_depth          = 0;
+    // Locked Zag per-band patterns. ipCount = "same as the sparse infill pattern" (the default),
+    // which is what Locked Zag did before these options existed. Only read inside the
+    // `pattern == ipLockedZag` guard below, so every other print leaves them at ipCount and
+    // neither the ordering nor the equality below sees any change.
+    InfillPattern locked_skin_infill_pattern     = ipCount;
+    InfillPattern locked_skeleton_infill_pattern = ipCount;
     bool symmetric_infill_y_axis = false;
 
     // Params for Lateral honeycomb
@@ -344,7 +350,10 @@ struct SurfaceFillParams
 		RETURN_COMPARE_NON_EQUAL(lateral_lattice_angle_2);
 		RETURN_COMPARE_NON_EQUAL(symmetric_infill_y_axis);
 		RETURN_COMPARE_NON_EQUAL(infill_lock_depth);
-		RETURN_COMPARE_NON_EQUAL(skin_infill_depth);		RETURN_COMPARE_NON_EQUAL(infill_overhang_angle);
+		RETURN_COMPARE_NON_EQUAL(skin_infill_depth);
+		RETURN_COMPARE_NON_EQUAL_TYPED(unsigned, locked_skin_infill_pattern);
+		RETURN_COMPARE_NON_EQUAL_TYPED(unsigned, locked_skeleton_infill_pattern);
+		RETURN_COMPARE_NON_EQUAL(infill_overhang_angle);
 		RETURN_COMPARE_NON_EQUAL(image_row_filament_id);
 
 		return false;
@@ -375,6 +384,8 @@ struct SurfaceFillParams
 				this->lateral_lattice_angle_2	    == rhs.lateral_lattice_angle_2 &&
 				this->infill_lock_depth      ==  rhs.infill_lock_depth &&
 				this->skin_infill_depth      ==  rhs.skin_infill_depth &&
+				this->locked_skin_infill_pattern     == rhs.locked_skin_infill_pattern &&
+				this->locked_skeleton_infill_pattern == rhs.locked_skeleton_infill_pattern &&
                 this->infill_overhang_angle == rhs.infill_overhang_angle &&
                 this->image_row_filament_id == rhs.image_row_filament_id;
 	}
@@ -1251,6 +1262,10 @@ std::vector<SurfaceFill> group_fills(const Layer &layer, LockRegionParam &lock_p
                 if (params.pattern == ipLockedZag) {
                     params.infill_lock_depth = scale_(region_config.infill_lock_depth);
                     params.skin_infill_depth = scale_(region_config.skin_infill_depth);
+                    // ipCount here means "keep the sparse infill pattern", which FillLockedZag
+                    // reads as "draw the band with my own fill_surface()" - the pre-feature path.
+                    params.locked_skin_infill_pattern     = region_config.locked_skin_infill_pattern.value;
+                    params.locked_skeleton_infill_pattern = region_config.locked_skeleton_infill_pattern.value;
                 }
                 if (params.pattern == ipCrossZag || params.pattern == ipLockedZag) {
                     params.symmetric_infill_y_axis = region_config.symmetric_infill_y_axis;
@@ -1389,6 +1404,16 @@ std::vector<SurfaceFill> group_fills(const Layer &layer, LockRegionParam &lock_p
 
 					// add skin density
 					append_density_param(lock_param.skeleton_density_params, float(0.01 * region_config.skeleton_infill_density), surface.expolygon);
+
+					// Locked Zag phase 2b: only the contour-hugging path needs the depths keyed by
+					// region, because there the erosion is applied per outlook-trimmed area rather
+					// than once to the whole surface. Leaving the maps empty otherwise keeps
+					// FillLockedZag on its scalar-depth fallback, which is bit-for-bit the split
+					// this code did before the feature landed.
+					if (region_config.infill_instead_top_bottom_surfaces) {
+						append_density_param(lock_param.skin_depths_params, float(scale_(region_config.skin_infill_depth)), surface.expolygon);
+						append_density_param(lock_param.locked_depths_params, float(scale_(region_config.infill_lock_depth)), surface.expolygon);
+					}
 
 				}
 
@@ -1622,6 +1647,41 @@ void export_group_fills_to_svg(const char *path, const std::vector<SurfaceFill> 
 }
 #endif
 
+// Locked Zag phase 2b: hand the layer's own top/bottom fill surfaces to the sparse infill, so the
+// skin band follows the model contour instead of a uniform depth-offset band, and fill those
+// surfaces with sparse infill rather than solid. Ported from BambuStudio's Layer::set_outlook_range
+// (src/libslic3r/Fill/Fill.cpp) - both trees AGPL-3.0; rewritten here because this tree's
+// SurfaceCollection::keep_type has no ExPolygons out-parameter.
+//
+// Does nothing at all unless some region asks for it, and infill_instead_top_bottom_surfaces
+// defaults to off - so for every existing profile this function leaves the layer untouched and
+// lock_param.outlook stays empty.
+void Layer::set_outlook_range(LockRegionParam &lock_param)
+{
+    for (size_t region_id = 0; region_id < this->regions().size(); ++region_id) {
+        LayerRegion &layerm = *this->regions()[region_id];
+        const PrintRegionConfig &config = layerm.region().config();
+        if (! config.infill_instead_top_bottom_surfaces || config.sparse_infill_pattern != ipLockedZag)
+            continue;
+
+        // Everything that is not plain internal sparse infill - the top and bottom shells, the
+        // solid infill under them, bridges - becomes skin, and is re-typed to stInternal so the
+        // sparse infill (rather than the solid fills) is what draws it.
+        ExPolygons non_internal;
+        for (const Surface &surface : layerm.fill_surfaces.surfaces)
+            if (surface.surface_type != stInternal)
+                non_internal.push_back(surface.expolygon);
+        if (non_internal.empty())
+            continue;
+
+        append(lock_param.outlook, non_internal);
+        lock_param.outlook = union_safety_offset_ex(lock_param.outlook);
+
+        layerm.fill_surfaces.keep_type(stInternal);
+        layerm.fill_surfaces.append(std::move(non_internal), stInternal);
+    }
+}
+
 // friend to Layer
 void Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive::Octree* support_fill_octree, FillLightning::Generator* lightning_generator)
 {
@@ -1633,6 +1693,8 @@ void Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
 //	this->export_region_fill_surfaces_to_svg_debug("10_fill-initial");
 #endif /* SLIC3R_DEBUG_SLICE_PROCESSING */
     LockRegionParam lock_param;
+    // Locked Zag contour-hugging skin; a no-op unless a region turns it on.
+    this->set_outlook_range(lock_param);
     std::vector<SurfaceFill>     surface_fills = group_fills(*this, lock_param);
 	const Slic3r::BoundingBox bbox 			= this->object()->bounding_box();
 	const auto                resolution 	= this->object()->print()->config().resolution.value;
@@ -1720,6 +1782,8 @@ void Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
             params.infill_lock_depth = surface_fill.params.infill_lock_depth;
             params.skin_infill_depth = surface_fill.params.skin_infill_depth;
             f->set_lock_region_param(lock_param);
+            f->set_skin_and_skeleton_pattern(surface_fill.params.locked_skin_infill_pattern,
+                                             surface_fill.params.locked_skeleton_infill_pattern);
 		}
         if (surface_fill.params.pattern == ipCrossZag || surface_fill.params.pattern == ipLockedZag) {
             if (f->layer_id % 2 == 0) {

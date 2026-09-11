@@ -1176,6 +1176,14 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloat,                sparse_infill_speed))
     ((ConfigOptionPercent, skeleton_infill_density))
     ((ConfigOptionPercent, skin_infill_density))
+    // Locked Zag: the fill pattern each band is drawn with. ipCount ("same as the sparse infill
+    // pattern") is the default and reproduces the pre-feature behaviour exactly, so an existing
+    // Locked Zag profile slices byte-identically until the user picks something else.
+    ((ConfigOptionEnum<InfillPattern>, locked_skin_infill_pattern))
+    ((ConfigOptionEnum<InfillPattern>, locked_skeleton_infill_pattern))
+    // Locked Zag skin follows the model's own top/bottom surfaces instead of a uniform
+    // depth-offset band. Ported from BambuStudio (Fill.cpp Layer::set_outlook_range).
+    ((ConfigOptionBool, infill_instead_top_bottom_surfaces))
     ((ConfigOptionFloat, infill_lock_depth))
     ((ConfigOptionFloat, skin_infill_depth))
     ((ConfigOptionFloatOrPercent, skin_infill_line_width))

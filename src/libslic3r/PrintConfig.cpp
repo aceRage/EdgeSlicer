@@ -3975,6 +3975,157 @@ void PrintConfigDef::init_fff_params()
     def->mode     = comAdvanced;
     def->set_default_value(new ConfigOptionFloatOrPercent(100, true));
 
+    // Locked Zag per-band patterns. Key names match BambuStudio's so a Bambu preset or 3MF that
+    // carries them imports here unchanged (handle_legacy maps Bambu's "zig-zag" spelling of
+    // rectilinear, which this tree does not use). The default is "default" = ipCount = "keep the
+    // sparse infill pattern", which is what Locked Zag did before this feature existed, so an
+    // existing profile slices byte for byte the same until the user changes one of these.
+    // See docs/superpowers/specs/2026-09-10-locked-zag-skin-skeleton.md.
+    def           = this->add("locked_skin_infill_pattern", coEnum);
+    def->label    = L("Skin infill pattern");
+    def->category = L("Strength");
+    def->tooltip  = L("Line pattern drawn in the skin band - the shell of sparse infill within "
+                      "\"Skin infill depth\" of the model surface. \"Same as sparse infill\" uses the "
+                      "sparse infill pattern, so only density and line width tell the two bands apart.");
+    def->mode     = comAdvanced;
+    // Same sub-pattern menu for both bands. It is deliberately NOT the full sparse_infill_pattern
+    // list: a sub-filler is built by Fill::new_from_type() inside FillLockedZag and only inherits
+    // the state FillLockedZag itself carries, so the three patterns that need per-object state
+    // built elsewhere in the pipeline are excluded:
+    //   * adaptivecubic / supportcubic - PrintObject::prepare_adaptive_infill_data() only builds
+    //     an octree when a region's own sparse_infill_pattern asks for one, so with lockedzag
+    //     selected Fill::adapt_fill_octree is null and FillAdaptive::Filler dereferences it.
+    //   * lightning - same story via prepare_lightning_infill_data(); the generator is null.
+    //   * lockedzag itself - it would recurse into a second skin/skeleton split.
+    // Everything else is stateless given layer_id/z/spacing/angle/bounding_box, which
+    // FillLockedZag::copy_fill_data() hands over (concentric additionally gets the print configs).
+    def->enum_keys_map = &ConfigOptionEnum<InfillPattern>::get_enum_values();
+    def->enum_values.push_back("default");
+    def->enum_values.push_back("rectilinear");
+    def->enum_values.push_back("alignedrectilinear");
+    def->enum_values.push_back("zigzag");
+    def->enum_values.push_back("crosszag");
+    def->enum_values.push_back("line");
+    def->enum_values.push_back("grid");
+    def->enum_values.push_back("triangles");
+    def->enum_values.push_back("tri-hexagon");
+    def->enum_values.push_back("cubic");
+    def->enum_values.push_back("quartercubic");
+    def->enum_values.push_back("honeycomb");
+    def->enum_values.push_back("3dhoneycomb");
+    def->enum_values.push_back("lateral-honeycomb");
+    def->enum_values.push_back("lateral-lattice");
+    def->enum_values.push_back("crosshatch");
+    def->enum_values.push_back("tpmsd");
+    def->enum_values.push_back("tpmsfk");
+    def->enum_values.push_back("gyroid");
+    def->enum_values.push_back("concentric");
+    def->enum_values.push_back("hilbertcurve");
+    def->enum_values.push_back("archimedeanchords");
+    def->enum_values.push_back("octagramspiral");
+    def->enum_labels.push_back(L("Same as sparse infill"));
+    def->enum_labels.push_back(L("Rectilinear"));
+    def->enum_labels.push_back(L("Aligned Rectilinear"));
+    def->enum_labels.push_back(L("Zig Zag"));
+    def->enum_labels.push_back(L("Cross Zag"));
+    def->enum_labels.push_back(L("Line"));
+    def->enum_labels.push_back(L("Grid"));
+    def->enum_labels.push_back(L("Triangles"));
+    def->enum_labels.push_back(L("Tri-hexagon"));
+    def->enum_labels.push_back(L("Cubic"));
+    def->enum_labels.push_back(L("Quarter Cubic"));
+    def->enum_labels.push_back(L("Honeycomb"));
+    def->enum_labels.push_back(L("3D Honeycomb"));
+    def->enum_labels.push_back(L("Lateral Honeycomb"));
+    def->enum_labels.push_back(L("Lateral Lattice"));
+    def->enum_labels.push_back(L("Cross Hatch"));
+    def->enum_labels.push_back(L("TPMS-D"));
+    def->enum_labels.push_back(L("TPMS-FK"));
+    def->enum_labels.push_back(L("Gyroid"));
+    def->enum_labels.push_back(L("Concentric"));
+    def->enum_labels.push_back(L("Hilbert Curve"));
+    def->enum_labels.push_back(L("Archimedean Chords"));
+    def->enum_labels.push_back(L("Octagram Spiral"));
+    def->set_default_value(new ConfigOptionEnum<InfillPattern>(ipCount));
+
+    def           = this->add("locked_skeleton_infill_pattern", coEnum);
+    def->label    = L("Skeleton infill pattern");
+    def->category = L("Strength");
+    def->tooltip  = L("Line pattern drawn in the skeleton band - everything deeper inside the model "
+                      "than the skin. \"Same as sparse infill\" uses the sparse infill pattern, so only "
+                      "density and line width tell the two bands apart.");
+    def->mode     = comAdvanced;
+    // Same sub-pattern menu for both bands. It is deliberately NOT the full sparse_infill_pattern
+    // list: a sub-filler is built by Fill::new_from_type() inside FillLockedZag and only inherits
+    // the state FillLockedZag itself carries, so the three patterns that need per-object state
+    // built elsewhere in the pipeline are excluded:
+    //   * adaptivecubic / supportcubic - PrintObject::prepare_adaptive_infill_data() only builds
+    //     an octree when a region's own sparse_infill_pattern asks for one, so with lockedzag
+    //     selected Fill::adapt_fill_octree is null and FillAdaptive::Filler dereferences it.
+    //   * lightning - same story via prepare_lightning_infill_data(); the generator is null.
+    //   * lockedzag itself - it would recurse into a second skin/skeleton split.
+    // Everything else is stateless given layer_id/z/spacing/angle/bounding_box, which
+    // FillLockedZag::copy_fill_data() hands over (concentric additionally gets the print configs).
+    def->enum_keys_map = &ConfigOptionEnum<InfillPattern>::get_enum_values();
+    def->enum_values.push_back("default");
+    def->enum_values.push_back("rectilinear");
+    def->enum_values.push_back("alignedrectilinear");
+    def->enum_values.push_back("zigzag");
+    def->enum_values.push_back("crosszag");
+    def->enum_values.push_back("line");
+    def->enum_values.push_back("grid");
+    def->enum_values.push_back("triangles");
+    def->enum_values.push_back("tri-hexagon");
+    def->enum_values.push_back("cubic");
+    def->enum_values.push_back("quartercubic");
+    def->enum_values.push_back("honeycomb");
+    def->enum_values.push_back("3dhoneycomb");
+    def->enum_values.push_back("lateral-honeycomb");
+    def->enum_values.push_back("lateral-lattice");
+    def->enum_values.push_back("crosshatch");
+    def->enum_values.push_back("tpmsd");
+    def->enum_values.push_back("tpmsfk");
+    def->enum_values.push_back("gyroid");
+    def->enum_values.push_back("concentric");
+    def->enum_values.push_back("hilbertcurve");
+    def->enum_values.push_back("archimedeanchords");
+    def->enum_values.push_back("octagramspiral");
+    def->enum_labels.push_back(L("Same as sparse infill"));
+    def->enum_labels.push_back(L("Rectilinear"));
+    def->enum_labels.push_back(L("Aligned Rectilinear"));
+    def->enum_labels.push_back(L("Zig Zag"));
+    def->enum_labels.push_back(L("Cross Zag"));
+    def->enum_labels.push_back(L("Line"));
+    def->enum_labels.push_back(L("Grid"));
+    def->enum_labels.push_back(L("Triangles"));
+    def->enum_labels.push_back(L("Tri-hexagon"));
+    def->enum_labels.push_back(L("Cubic"));
+    def->enum_labels.push_back(L("Quarter Cubic"));
+    def->enum_labels.push_back(L("Honeycomb"));
+    def->enum_labels.push_back(L("3D Honeycomb"));
+    def->enum_labels.push_back(L("Lateral Honeycomb"));
+    def->enum_labels.push_back(L("Lateral Lattice"));
+    def->enum_labels.push_back(L("Cross Hatch"));
+    def->enum_labels.push_back(L("TPMS-D"));
+    def->enum_labels.push_back(L("TPMS-FK"));
+    def->enum_labels.push_back(L("Gyroid"));
+    def->enum_labels.push_back(L("Concentric"));
+    def->enum_labels.push_back(L("Hilbert Curve"));
+    def->enum_labels.push_back(L("Archimedean Chords"));
+    def->enum_labels.push_back(L("Octagram Spiral"));
+    def->set_default_value(new ConfigOptionEnum<InfillPattern>(ipCount));
+
+    // Ported from BambuStudio (Layer::set_outlook_range, src/libslic3r/Fill/Fill.cpp) - both trees
+    // are AGPL-3.0; re-implemented against this tree's shapes rather than copied.
+    def           = this->add("infill_instead_top_bottom_surfaces", coBool);
+    def->label    = L("Skin follows the surface");
+    def->category = L("Strength");
+    def->tooltip  = L("Locked Zag only. Fills the model's top and bottom surfaces with the skin band "
+                      "instead of solid infill, so the skin hugs the contour of the model rather than "
+                      "sitting in a band of uniform depth below it. Turn off for a plain depth-offset skin.");
+    def->mode     = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
     def           = this->add("symmetric_infill_y_axis", coBool);
     def->label    = L("Symmetric infill Y axis");
     def->category = L("Strength");
@@ -8290,12 +8441,19 @@ void PrintConfigDef::handle_legacy(t_config_option_key &opt_key, std::string &va
         // "nearest_wall" and "nearest_surface" now mean the same thing: matching ON.
         opt_key = "support_filament_matching";
         value = (value == "nearest_wall" || value == "nearest_surface") ? "1" : "0";
-    } else if ((opt_key == "sparse_infill_pattern"         ||
-                opt_key == "top_surface_pattern"           ||
-                opt_key == "undertop_surface_pattern"      ||
-                opt_key == "bottom_surface_pattern"        ||
-                opt_key == "internal_solid_infill_pattern" ||
-                opt_key == "ironing_pattern"               ||
+    } else if ((opt_key == "sparse_infill_pattern"            ||
+                opt_key == "top_surface_pattern"              ||
+                opt_key == "undertop_surface_pattern"         ||
+                opt_key == "bottom_surface_pattern"           ||
+                opt_key == "internal_solid_infill_pattern"    ||
+                opt_key == "ironing_pattern"                  ||
+                // Bambu spells ipRectilinear "zig-zag" in its own InfillPattern key map
+                // (PrintConfig.cpp s_keys_map_InfillPattern) and uses that spelling in the
+                // locked_sk*_infill_pattern enum value lists; this tree spells it "rectilinear",
+                // so a Bambu preset/3MF carrying these keys needs the same remap the other
+                // pattern keys already get.
+                opt_key == "locked_skin_infill_pattern"       ||
+                opt_key == "locked_skeleton_infill_pattern"   ||
                 opt_key == "support_ironing_pattern") && value == "zig-zag") {
         value = "rectilinear";
     }

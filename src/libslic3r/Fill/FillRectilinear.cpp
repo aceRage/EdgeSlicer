@@ -3488,27 +3488,137 @@ void FillMonotonicLineWGapFill::fill_surface_by_lines(const Surface* surface, co
     }
 }*/
 
+// ---------------------------------------------------------------------------------------------
+// Locked Zag: per-band fill patterns and the contour-hugging skin.
+//
+// The skin/skeleton split, the per-band density bands and the per-band flow re-split were already
+// here; what this block adds is (a) drawing each band with its own InfillPattern, by building a
+// second Fill through Fill::new_from_type() instead of calling this->fill_surface() twice, and
+// (b) the "outlook" refinement, in which the layer's own top/bottom surfaces are handed to the
+// skin so it follows the model contour rather than a uniform depth-offset band.
+//
+// Both ideas come from BambuStudio (src/libslic3r/Fill/FillRectilinear.cpp,
+// FillLockedZag::get_skin_and_skeleton_area / generate_skeleton_pattern / generate_skin_pattern,
+// and Fill.cpp Layer::set_outlook_range). Both trees are AGPL-3.0. This is a re-implementation,
+// not a copy: this tree routes the depths through FillParams as plain scaled floats where Bambu
+// routes them only through LockRegionParam, its line widths are coFloatOrPercent rather than
+// coFloat, and the "keep the sparse pattern" default (ipCount) has no Bambu equivalent - Bambu's
+// options default to concrete patterns, which would change existing profiles' output.
+// See docs/superpowers/specs/2026-09-10-locked-zag-skin-skeleton.md.
+// ---------------------------------------------------------------------------------------------
+
+std::unique_ptr<Fill> FillLockedZag::make_band_filler(InfillPattern pattern) const
+{
+    // ipCount = "same as sparse infill pattern": the band keeps this filler's own behaviour, and
+    // the caller falls back to this->fill_surface(). This is the default, and it is what makes an
+    // existing Locked Zag profile slice exactly as it did before the per-band patterns existed.
+    if (pattern == ipCount || pattern == ipLockedZag)
+        return nullptr;
+    std::unique_ptr<Fill> filler(Fill::new_from_type(pattern));
+    if (filler)
+        filler->copy_fill_data(static_cast<const Fill *>(this));
+    return filler;
+}
+
+void FillLockedZag::get_skin_and_skeleton_area(ExPolygons &skin, ExPolygons &skeleton, const Surface &surface, const FillParams &params)
+{
+    if (this->lock_param.outlook.empty() && this->lock_param.skin_depths_params.empty()) {
+        // Plain depth-offset split - identical to what this method replaced: everything deeper
+        // than skin_infill_depth is skeleton, the rest is skin.
+        skeleton = offset_ex({surface.expolygon}, -double(params.skin_infill_depth));
+        skin     = diff_ex(surface.expolygon, skeleton);
+        return;
+    }
+
+    // Contour-hugging split. The layer's non-internal fill surfaces (its own top/bottom skin) are
+    // skin whatever their depth; the rest is eroded by this region's own skin depth.
+    ExPolygons outlook_here = this->lock_param.outlook.empty() ? ExPolygons() : intersection_ex(surface.expolygon, this->lock_param.outlook);
+    ExPolygons left         = outlook_here.empty() ? ExPolygons{surface.expolygon} : diff_ex(surface.expolygon, this->lock_param.outlook);
+
+    if (this->lock_param.skin_depths_params.empty()) {
+        skeleton = offset_ex(left, -double(params.skin_infill_depth));
+    } else {
+        for (const auto &skin_depth : this->lock_param.skin_depths_params) {
+            ExPolygons eroded = offset_ex(left, -double(skin_depth.first));
+            ExPolygons res    = intersection_ex(eroded, union_safety_offset_ex(skin_depth.second));
+            skeleton.insert(skeleton.end(), res.begin(), res.end());
+        }
+        skeleton = union_safety_offset_ex(skeleton);
+    }
+    skin = union_ex(outlook_here, diff_ex(surface.expolygon, skeleton));
+}
+
+Polylines FillLockedZag::generate_skeleton_pattern(FillParams params, Surface surface, const ExPolygons &skeleton, const ExPolygon &origin)
+{
+    Polylines             out;
+    std::unique_ptr<Fill> pattern = this->make_band_filler(this->skeleton_pattern);
+
+    // horiz_move is the Cross Zag layer shift; it only means anything to a Cross Zag filler. The
+    // pre-existing code zeroed it unconditionally for the skeleton, which is exactly right when
+    // the skeleton keeps this filler's own (Locked Zag / Rectilinear) pattern.
+    if (this->skeleton_pattern != ipCrossZag)
+        params.horiz_move = 0;
+
+    // Per-region lock depths. With none recorded (nothing populated the map) fall back to the
+    // single scalar depth FillParams carries, which is the pre-feature behaviour.
+    std::map<float, ExPolygons> locked_depths = this->lock_param.locked_depths_params;
+    for (auto &depth : locked_depths)
+        depth.second = union_safety_offset_ex(depth.second);
+
+    for (const auto &density : this->lock_param.skeleton_density_params) {
+        ExPolygons exps = intersection_ex(union_safety_offset_ex(density.second), skeleton);
+        ExPolygons exps_offset;
+        if (locked_depths.empty()) {
+            exps_offset = intersection_ex(offset_ex(exps, double(params.infill_lock_depth)), origin);
+        } else {
+            for (const auto &depth : locked_depths) {
+                ExPolygons res        = intersection_ex(exps, depth.second);
+                ExPolygons res_offset = intersection_ex(offset_ex(res, double(depth.first)), origin);
+                exps_offset.insert(exps_offset.end(), res_offset.begin(), res_offset.end());
+            }
+            exps_offset = union_safety_offset_ex(exps_offset);
+        }
+        params.density = density.first;
+        for (ExPolygon &exp : exps_offset) {
+            surface.expolygon = exp;
+            Polylines lines   = pattern ? pattern->fill_surface(&surface, params) : this->fill_surface(&surface, params);
+            out.insert(out.end(), lines.begin(), lines.end());
+        }
+    }
+    return out;
+}
+
+Polylines FillLockedZag::generate_skin_pattern(FillParams params, Surface surface, const ExPolygons &skin)
+{
+    Polylines             out;
+    std::unique_ptr<Fill> pattern = this->make_band_filler(this->skin_pattern);
+
+    // The skin is not itself a locked-zag fill - clearing the flag stops the sub-fill (or this
+    // filler) from recursing into another skin/skeleton split.
+    params.locked_zag = false;
+    if (pattern && this->skin_pattern != ipCrossZag)
+        params.horiz_move = 0;
+
+    for (const auto &density : this->lock_param.skin_density_params) {
+        ExPolygons exps = intersection_ex(union_safety_offset_ex(density.second), skin);
+        params.density  = density.first;
+        for (ExPolygon &exp : exps) {
+            surface.expolygon = exp;
+            Polylines lines   = pattern ? pattern->fill_surface(&surface, params) : this->fill_surface(&surface, params);
+            out.insert(out.end(), lines.begin(), lines.end());
+        }
+    }
+    return out;
+}
+
 void FillLockedZag::fill_surface_locked_zag (const Surface *                          surface,
                                              const FillParams &                       params,
                                              std::vector<std::pair<Polylines, Flow>> &multi_width_polyline)
 {
-    // merge different part exps
-    // diff skin flow
-    Polylines skin_lines;
-    Polylines skeloton_lines;
-    double    offset_threshold  = params.skin_infill_depth;
-    double    overlap_threshold = params.infill_lock_depth;
-    Surface   cross_surface     = *surface;
-    Surface   zig_surface       = *surface;
-    // inner exps
-    // inner union exps
-    ExPolygons zig_expas   = offset_ex({surface->expolygon}, -offset_threshold);
-    ExPolygons cross_expas = diff_ex(surface->expolygon, zig_expas);
+    ExPolygons skin_areas;
+    ExPolygons skeleton_areas;
+    this->get_skin_and_skeleton_area(skin_areas, skeleton_areas, *surface, params);
 
-    bool       zig_get    = false;
-    FillParams zig_params = params;
-    zig_params.horiz_move = 0;
-    // generate skeleton for diff density
     auto generate_for_different_flow = [&multi_width_polyline](const std::map<Flow, ExPolygons> &flow_params, const Polylines &polylines) {
         auto it = flow_params.begin();
         while (it != flow_params.end()) {
@@ -3520,41 +3630,10 @@ void FillLockedZag::fill_surface_locked_zag (const Surface *                    
         }
     };
 
-    auto it = this->lock_param.skeleton_density_params.begin();
-    while (it != this->lock_param.skeleton_density_params.end()) {
-        ExPolygons region_exp = union_safety_offset_ex(it->second);
-        ExPolygons exps       = intersection_ex(region_exp, zig_expas);
-        zig_params.density    = it->first;
-        exps                  = intersection_ex(offset_ex(exps, overlap_threshold), surface->expolygon);
-        for (ExPolygon &exp : exps) {
-            zig_surface.expolygon = exp;
+    Polylines skeleton_lines = this->generate_skeleton_pattern(params, *surface, skeleton_areas, surface->expolygon);
+    generate_for_different_flow(this->lock_param.skeleton_flow_params, skeleton_lines);
 
-            Polylines zig_polylines_out = this->fill_surface(&zig_surface, zig_params);
-            skeloton_lines.insert(skeloton_lines.end(), zig_polylines_out.begin(), zig_polylines_out.end());
-        }
-        it++;
-    }
-
-    // set skeleton flow
-    generate_for_different_flow(this->lock_param.skeleton_flow_params, skeloton_lines);
-
-    // skin exps
-    bool       cross_get      = false;
-    FillParams cross_params   = params;
-    cross_params.locked_zag = false;
-    auto skin_density         = this->lock_param.skin_density_params.begin();
-    while (skin_density != this->lock_param.skin_density_params.end()) {
-        ExPolygons region_exp = union_safety_offset_ex(skin_density->second);
-        ExPolygons exps       = intersection_ex(region_exp, cross_expas);
-        cross_params.density  = skin_density->first;
-        for (ExPolygon &exp : exps) {
-            cross_surface.expolygon       = exp;
-            Polylines cross_polylines_out = this->fill_surface(&cross_surface, cross_params);
-            skin_lines.insert(skin_lines.end(), cross_polylines_out.begin(), cross_polylines_out.end());
-        }
-        skin_density++;
-    }
-
+    Polylines skin_lines = this->generate_skin_pattern(params, *surface, skin_areas);
     generate_for_different_flow(this->lock_param.skin_flow_params, skin_lines);
 }
 
