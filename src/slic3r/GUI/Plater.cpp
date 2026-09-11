@@ -137,6 +137,7 @@
 #include "Jobs/OrientJob.hpp"
 #include "Jobs/ArrangeJob.hpp"
 #include "Jobs/FillBedJob.hpp"
+#include "ScaleToVolumeDialog.hpp"
 #include "Jobs/RotoptimizeJob.hpp"
 #include "Jobs/SLAImportJob.hpp"
 #include "Jobs/SLAImportDialog.hpp"
@@ -13615,10 +13616,33 @@ void Plater::priv::split_volume()
 
 void Plater::priv::scale_selection_to_fit_print_volume()
 {
+    Selection &selection = this->view3D->get_canvas3d()->get_selection();
+    if (selection.is_empty())
+        return;
+
+    const BuildVolume &build_volume = this->bed.build_volume();
+
+    // Everything the dialog needs to warn before the user commits: the volume the gaps eat into,
+    // whether the bed is round (non-uniform then fills the inscribed square rather than the
+    // rectangle the label implies), and whether a non-uniform scale would shear the selection.
+    const bool is_circular = build_volume.type() == BuildVolume_Type::Circle;
+    const Vec3d volume_size = is_circular
+                                  ? Vec3d(2. * unscale<double>(build_volume.circle().radius),
+                                          2. * unscale<double>(build_volume.circle().radius),
+                                          build_volume.printable_height())
+                                  : build_volume.bounding_volume().size();
+
+    ScaleToVolumeDialog dlg(this->q, ScaleToVolumeSettings{}, volume_size, is_circular,
+                            !selection.is_axis_aligned());
+    if (dlg.ShowModal() != wxID_OK)
+        return;
+
+    const ScaleToVolumeSettings &s = dlg.settings();
+
 #if ENABLE_ENHANCED_PRINT_VOLUME_FIT
-    this->view3D->get_canvas3d()->get_selection().scale_to_fit_print_volume(this->bed.build_volume());
+    selection.scale_to_fit_print_volume(build_volume, s);
 #else
-    this->view3D->get_canvas3d()->get_selection().scale_to_fit_print_volume(*config);
+    selection.scale_to_fit_print_volume(*config, s);
 #endif // ENABLE_ENHANCED_PRINT_VOLUME_FIT
 }
 

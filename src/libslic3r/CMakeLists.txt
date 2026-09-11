@@ -403,6 +403,7 @@ set(lisbslic3r_sources
     ProjectTask.hpp
     QuadricEdgeCollapse.cpp
     QuadricEdgeCollapse.hpp
+    ScaleToVolume.hpp
     Semver.cpp
     Shape/TextShape.cpp
     Shape/TextShape.hpp

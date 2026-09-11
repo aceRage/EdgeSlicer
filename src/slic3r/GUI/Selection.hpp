@@ -2,6 +2,7 @@
 #define slic3r_GUI_Selection_hpp_
 
 #include "libslic3r/Geometry.hpp"
+#include "libslic3r/ScaleToVolume.hpp"
 #include "GUI_Geometry.hpp"
 #include "GLModel.hpp"
 
@@ -335,10 +336,13 @@ public:
     void rotate(const Vec3d& rotation, TransformationType transformation_type);
     void flattening_rotate(const Vec3d& normal);
     void scale(const Vec3d& scale, TransformationType transformation_type);
+    // True when every selected instance is square to the bed (each Euler angle a multiple of 90
+    // degrees). A non-uniform world-frame scale shears anything else; the dialog warns on it.
+    bool is_axis_aligned() const;
 #if ENABLE_ENHANCED_PRINT_VOLUME_FIT
-    void scale_to_fit_print_volume(const BuildVolume& volume);
+    void scale_to_fit_print_volume(const BuildVolume& volume, const scale_to_volume::Settings& settings);
 #else
-    void scale_to_fit_print_volume(const DynamicPrintConfig& config);
+    void scale_to_fit_print_volume(const DynamicPrintConfig& config, const scale_to_volume::Settings& settings);
 #endif // ENABLE_ENHANCED_PRINT_VOLUME_FIT
     void scale_and_translate(const Vec3d &scale, const Vec3d &world_translation, TransformationType transformation_type);
     void mirror(Axis axis, TransformationType transformation_type);
