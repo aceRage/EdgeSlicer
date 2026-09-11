@@ -6,7 +6,7 @@
 
 ![Stream camera wall, Support Filament Matching, Compare Slices and the Assemble tool's Auto-fit](docs/images/hero.jpg)
 
-EdgeSlicer is a fork of Snapmaker Orca, itself a fork of OrcaSlicer. It keeps everything Snapmaker Orca does — Snapmaker U1 / J1 / Artisan / A-series support, the full OrcaSlicer printer library and its print hosts (Klipper/Moonraker, OctoPrint, Duet, PrusaLink and the rest) — and adds Bambu Lab profiles and LAN sending (validated on an H2C), per-part support control, glTF/GLB import, and a phone / remote access layer with its own companion app.
+EdgeSlicer is a fork of Snapmaker Orca, itself a fork of OrcaSlicer. It keeps everything Snapmaker Orca does — Snapmaker U1 / J1 / Artisan / A-series support, the full OrcaSlicer printer library and its print hosts (Klipper/Moonraker, OctoPrint, Duet, PrusaLink and the rest) — and adds Bambu Lab profiles and LAN sending (validated on an H2C), per-part support control, glTF/GLB import, sculpting and cut-tool joints, and a phone / remote access layer with its own companion app.
 
 The application, its binary (`EdgeSlicer.exe`) and its data directory (`%APPDATA%\EdgeSlicer`) all carry the product name, and the icon is an italic **E** whose stem is a katana with a red edge. It installs and runs beside a stock Snapmaker Orca.
 
@@ -31,9 +31,9 @@ Because supports are generated *after* slicing, the "is there support under this
 ### Edge Hub — phone and remote access
 
 - The hub is the same binary run as a **tray-only background process**. It serves the phone page and the camera relays, any slicer window starts it, and it keeps running after you close them.
-- **Phone access on the LAN** — enable it on the hub page and scan the **QR code**. The phone gets `http://<pc>:13640/r/<token>/` with *Streams*, *Prepare*, *Devices* and *Reprints* tabs: the camera wall, plate previews and estimates, starting a slice, sending to a printer with a printer and toolhead picker, Pause / Resume / Stop, a plate layout editor, and re-sending any file this PC has printed before. The link is token-gated and survives restarts; *New link* rotates it (and invalidates saved links and home-screen icons).
+- **Phone access on the LAN** — enable it on the hub page and scan the **QR code**. The phone gets `http://<pc>:13640/r/<token>/` with *Streams*, *Prepare*, *Devices* and *Reprints* tabs: the camera wall, plate previews and estimates, starting a slice, sending to a printer with a printer and toolhead picker, Pause / Resume / Stop, a plate layout editor, and re-sending any file this PC has printed before. In *Reprints*, swipe a row left to delete it. The link is token-gated and survives restarts; *New link* rotates it (and invalidates saved links and home-screen icons).
 - **EdgeSlicer app** (iOS and Android) — a companion app that pairs by scanning the same QR, keeps both the home and the remote address and picks whichever is reachable (home network first, Tailscale when away), shows the hub's pages full screen, and receives native push notifications with the app closed. Camera streams on iOS and over the remote path play as MP4 / MJPEG. Distributed personally for now (TestFlight or a sideloaded APK); not on the app stores.
-- **Remote access over [Tailscale](https://tailscale.com)** — with Tailscale installed and signed in on both the PC and the phone, the hub runs `tailscale serve` for you and gives you an `https://<machine>.<tailnet>.ts.net/…` link with its own QR. No port forwarding and no hosting fees. Access is restricted to an allow-list of Tailscale logins, identified by a header the hub trusts only from a loopback peer, on top of the path token.
+- **Remote access over [Tailscale](https://tailscale.com)** — with Tailscale installed and signed in on both the PC and the phone, the hub runs `tailscale serve` for you and gives you an `https://<machine>.<tailnet>.ts.net/…` link with its own QR. No port forwarding and no hosting fees. Access is restricted to an allow-list of Tailscale logins, identified by a header the hub trusts only from a loopback peer, on top of the path token. Remote access and its allow-list are kept apart from the hub's runtime record, so they survive quitting the hub instead of coming back off.
 - **Slicer windows** — the hub can open further slicer windows, and **hidden** ones that run with no window at all, so the phone can slice and send without anything appearing on the desktop. A hidden instance that would have raised a dialog nobody can answer flags *needs attention* instead, shown on the hub page and in the tray menu; hidden and visible can be toggled either way at any time.
 - The hub page and the tray menu answer only on **loopback**, so no tunnel reaches the control plane.
 
@@ -54,12 +54,20 @@ Stored files can be listed and deleted through the instance API, and the phone's
 ### Bambu Lab, including dual-nozzle — in progress
 
 - **Profiles** for H2D, H2D Pro, H2C and X2D (dual-nozzle) plus P2S, A2L and H2S, with the full official Polymaker filament catalogue — including Panchroma, Fiberon and PolyLite presets for the H2C, validated against Polymaker's published presets.
-- **H2C sending works** — the sliced 3MF carries Bambu Studio's multi-nozzle metadata that the H2C firmware requires, and a LAN send waits for the printer to accept the job. Printer error codes resolve to the printer's own text per device series.
-- **Dual-nozzle slicing** — filaments are grouped onto nozzles automatically (from the connected printer's AMS layout when one is attached), cross-nozzle changes skip the purge, and the grouping is saved in the project 3MF.
+- **H2C sending works** — the sliced 3MF carries Bambu Studio's multi-nozzle metadata that the H2C firmware requires, and a LAN send waits for the printer to accept the job. The H2C's rack nozzle change is emitted the way Bambu Studio does it, and nozzle offset calibration can be requested from the send dialog. Printer error codes resolve to the printer's own text per device series.
+- **P1 and A1 on the LAN** — the network plug-in ships with the Windows packages and the setup wizard turns it on for Bambu printers, so LAN printers are found on a fresh install; sign-in offers the plug-in instead of a dead page when it is missing. A P1 or A1 that started the print no longer reports "did not acknowledge the start command", and uploads honour the printer's SD-card folder.
+- **Dual-nozzle slicing** — filaments are grouped onto nozzles automatically (from the connected printer's AMS layout when one is attached), cross-nozzle changes skip the purge, and the grouping is saved in the project 3MF. Dual-extruder machines can load every colour on the first layer, so nothing waits on a mid-print load.
+- **Mixed nozzle sizes** — each extruder can have its own nozzle diameter. Every feature is mapped to the extruder that can print it, and widths and layer heights are checked against the nozzle actually used; changing one diameter no longer forces it onto the others.
 - **Nozzle flow type** (Standard / High Flow) is declared in sliced files and matched to the installed nozzle at send time.
 - **Import Bambu Studio user presets** — one-way mirror of your custom print / filament / machine presets, at startup or via *Sync now*.
-- **Printer connectivity** — an optional network plugin, developed separately and not part of this repository, adds live status, camera and send-to-printer for supported Bambu Lab machines (Preferences → Extras → Bambu Network).
+- **Printer connectivity** — a network plug-in (UltraNet), developed separately and not part of this repository, adds live status, camera and send-to-printer for supported Bambu Lab machines (Preferences → Extras → Bambu Network). It is bundled with the Windows packages. Live view additionally needs Bambu's own camera component, which cannot be redistributed here, so the Device tab offers to download it once.
 - **Status:** slicing is verified on every model; LAN sending and printing are validated on an H2C. Treat the rest of the group as beta.
+
+### Printer devices
+
+Several printers of the same model each get their own entry in a **Devices** list, so they are no longer one shared slot. Printing is enabled as soon as any of them is known, the send dialog has a device dropdown and the Device tab a picker, and Elegoo uploads go to the Elegoo host rather than the Snapmaker page.
+
+On the **Snapmaker U1**, *Unload filaments after print* is a machine setting with a per-print checkbox in the send dialog; the printer unloads the toolheads it used when the job ends. U1 jobs are recorded in Reprints.
 
 ### Multicolor and materials
 
@@ -79,12 +87,19 @@ Stored files can be listed and deleted through the instance API, and the phone's
 - **Auto-Fit Assembly** — right-click a multi-selection: the largest part stays fixed, the rest mate to it by matching faces, holes and pegs, and everything merges into one print-ready object.
 - **Assemble tool → Auto-fit** — pick one feature on each part (flat face, circular rim, a single triangle or a curved patch), press *Auto-fit*, nudge with the live **Rotate / Offset** sliders, then **Merge parts**. Rotation is chosen by outline fit *and* a whole-mesh collision check, so pegs seat square without intersecting.
 - New assembly modes **Triangle and triangle** and **Curve and curve**; **Point and point** snaps to vertices at any zoom and has one-click **Coincide points**.
+- **Flexi joints in the Cut tool** — join the halves of a cut part with a print-in-place joint instead of a plug: a double ring, a ball and socket, a chain link, a hinge with a chosen number of knuckles that lets the halves fold shut, a screw-top **thread**, or a quarter-turn **bayonet** lock. Set the clearance and turn the joint to suit the part. Joints survive saving and reopening a project, and the slicer warns when a gap-closing setting would fuse them.
+- **Curved cut** — the cut plane can bend into a curved sheet: drag the control points, snap them to the model with a right-click drag, set the density, and give either half Visible, Ghost or Hidden so the result reads from both sides. Both halves are always kept, and connectors, Flexi joints included, sit on the curved surface.
+- **Cut thickness** — flat and curved cuts can remove a slab of material (a kerf) centred on, above or below the cut, so reassembled halves leave room for glue or a joint; connectors grow to span the gap. Zero, the default, cuts as before.
 
 ![Assemble tool: the four assembly modes, and a curve-and-curve mate with Auto-fit, live Rotate / Offset sliders and Merge parts](docs/images/assembly.png)
 
 ### Modeling and Prepare view
 
 - **glTF / GLB import** — meshes, node hierarchies and transforms, materials mapped to filaments through the same colour dialog OBJ uses, vertex colours and textures sampled to painted faces. Draco-compressed files are refused with a clear message.
+- **Sculpt** — a sculpting tool on the toolbar: grab, inflate, deflate, smooth, flatten, crease, pinch, magnify, nudge, snake hook and clay strips, with undo per stroke and a mask brush that protects painted vertices. The bed contact and sharp edges are protected automatically, and painted supports, seams and colours stay where they are. Press F and move the mouse to resize the brush, Shift+F for strength, hold Ctrl to invert; a coarse mesh can be subdivided from the same panel.
+- **Image Fill** — project an image onto a part (flat, wrapped, box, or from the model's own texture coordinates) and print it in the loaded filaments. With nozzle-resolution dithering on, the top surface is built from short colour runs following the image, so shades between your filaments come out as mixes rather than nearest-colour blocks.
+- **Fill bed with copies** — a dialog for the gap between copies, the distance from the bed edge, an optional larger margin at the front (where printers draw their calibration lines) and whether copies may rotate, with a live count. Compact packing no longer gives up early and leaves strips empty, a **Grid** layout gives an exact regular block, and filling plate 2 or later puts the copies on that plate. The entry sits under *Clone* in the object menu.
+- **Scale to build volume** — on the object menu for every printer, with a dialog for uniform or per-axis scaling, an edge gap, a top gap and auto-centre. Non-uniform scaling of a rotated part warns before it shears.
 - **Mesh booleans** on the Manifold backend (automatic fallback) with a part picker; **Repair/Remesh** rebuilds any part watertight.
 - **Visibility** — Normal / Ghost (X-ray) / Hidden per object or part, with an eye column in the object list.
 - **Move panel align & distribute**, **bottom-referenced Z**, **keep imported Z** (drop-to-bed toggle), double-click to select a part.
@@ -93,8 +108,12 @@ Stored files can be listed and deleted through the instance API, and the phone's
 ### Print quality
 
 - **Offset layers (experimental)** — odd-numbered walls are shifted by half a layer height so layers interlock, on both the classic and the Arachne wall generator. It needs a first layer height equal to the layer height, matching top-surface and outer-wall line widths, and spiral mode off; the slicer offers to fix them for you when you switch it on.
+- **Z contouring** — smooths the staircase on shallow top surfaces by shaping each layer to the model. Speed scaling keeps the flow steady across the shaped path, and it works with layer cooling on. Off by default; tune the angle and minimum height per profile.
+- **Locked Zag infill** — the skin and the skeleton can each take their own infill pattern, as in Bambu Studio, and *skin follows the surface* hugs the contour on sloped tops. Existing profiles slice exactly as before until you opt in, and Bambu profiles that set these keys import as-is.
+- **Fuzzy skin** — overhanging wall segments can be left unfuzzed, so the jitter stops pushing extrusion into open air, and a width floor tied to the layer height keeps Extrusion and Combined modes from aborting a slice.
 - **Seam position** can be Left or Right as well as Back.
-- **Print unsupported walls last**, **Undertop surface pattern**, **Z overrides X/Y** support option, **machine prepare time** in estimates, deterministic toolpaths (classic tree support produces the same G-code at any thread count).
+- **Print unsupported walls last**, **Undertop surface pattern**, **Z overrides X/Y** support option, **machine prepare time** in estimates.
+- **Deterministic slicing** — slice lines are sorted after the parallel pass, so the same project gives the same G-code every time, at any thread count. Internal bridges anchor correctly over Hilbert Curve and Octagram Spiral infill, and the wipe tower's footprint, placement and preview match what is printed, from the command line too.
 
 ![Offset layers and Z overrides X/Y print settings](docs/images/print-quality.png)
 
@@ -119,7 +138,7 @@ Elsewhere: **Compare Slices** (View menu) — settings, time and filament diff p
 
 ### Fixes to upstream issues
 
-Plate deletion during a slice no longer crashes; reopening a project with a named plate no longer crashes; fuzzy skin no longer leaves dots or seam blobs; JSON profiles with unquoted numbers/booleans keep their settings; Repair no longer produces inside-out meshes; forced preset and U1 → U1 device switches no longer pop the transfer/discard dialog; the false nozzle-mismatch nag on Bambu sends is gone.
+Plate deletion during a slice no longer crashes; reopening a project with a named plate no longer crashes; fuzzy skin no longer leaves dots or seam blobs; JSON profiles with unquoted numbers/booleans keep their settings; Repair no longer produces inside-out meshes; forced preset and U1 → U1 device switches no longer pop the transfer/discard dialog; the false nozzle-mismatch nag on Bambu sends is gone; face-and-face assembly snapping picks the facet under the cursor again; the preset comparison dialog no longer crashes on missing options or old presets; over-long ASCII STL scans are bounded; the setup wizard picks a sensible default printer instead of an arbitrary one; and a missing icon can no longer block the app, so the Flashforge Device tab opens.
 
 ---
 
@@ -128,7 +147,7 @@ Plate deletion during a slice no longer crashes; reopening a project with a name
 | Family | Status |
 |---|---|
 | **Snapmaker** U1, J1, Artisan, A250 / A350 (Dual, Quick Swap, Bracing Kit variants) | Inherited from Snapmaker Orca; **physically validated on the U1** |
-| **Bambu Lab** A1 mini, A1, A2L, P1P, P1S, P2S, X1, X1 Carbon, X1E, H2S, H2D, H2D Pro, H2C, X2D | Slicing verified; **LAN sending validated on the H2C**; sending needs the optional plugin (LAN mode) |
+| **Bambu Lab** A1 mini, A1, A2L, P1P, P1S, P2S, X1, X1 Carbon, X1E, H2S, H2D, H2D Pro, H2C, X2D | Slicing verified; **LAN sending validated on the H2C**, and P1 / A1 LAN status and sending work with the bundled plug-in; live view needs Bambu's camera component, downloaded on request |
 | **Flashforge** Creator 5, Creator 5 Pro | Profiles only |
 | OrcaSlicer vendor library (Creality, Prusa, Voron, QIDI, Anycubic, Elegoo, Sovol, …) | Unchanged from upstream (QIDI / Anycubic refreshed) |
 
@@ -140,12 +159,12 @@ Print hosts are inherited from OrcaSlicer and unchanged. The **Host Type** list 
 
 All builds are on the [Releases](https://github.com/aceRage/EdgeSlicer/releases) page. Each release carries a **Windows installer**, a **Windows portable zip**, a **Linux AppImage** and a **macOS dmg**.
 
-- **Windows installer** — installs **side by side** with the official Snapmaker Orca (its own folder, Start-menu entry and Add/Remove entry) and upgrades a previous EdgeSlicer install. It has its own name, icon and data directory, so the two are easy to tell apart.
-- **Windows portable** — unzip and run `EdgeSlicer.exe` (needs the Edge WebView2 runtime and the VC++ redistributable, usually already present).
+- **Windows installer** — installs **side by side** with the official Snapmaker Orca (its own folder, Start-menu entry and Add/Remove entry) and upgrades a previous EdgeSlicer install. It has its own name, icon and data directory, so the two are easy to tell apart. It also adds two firewall rules: **TCP 13640** for the Edge Hub and **UDP 2021 / 1990** for Bambu LAN discovery, so LAN printers are found without waiting on Windows' first-run prompt.
+- **Windows portable** — unzip and run `EdgeSlicer.exe` (needs the Edge WebView2 runtime and the VC++ redistributable, usually already present). It asks for the firewall once on first start.
 - **Linux (x86_64)** — `chmod +x` the AppImage and run it. The host must provide WebKitGTK 4.1 and libOpenGL (Ubuntu: `libwebkit2gtk-4.1-0 libopengl0`); they are not bundled.
 - **macOS (Apple silicon)** — the dmg is **unsigned** (no Apple Developer account), so macOS refuses it the first time: right-click the app → *Open* → *Open*, or run `xattr -dr com.apple.quarantine "/Applications/EdgeSlicer.app"` once.
 
-The Windows packages include the connectivity plugin; the Linux and macOS builds currently do not.
+Both Windows packages include the Bambu network plug-in (UltraNet); the Linux and macOS builds currently do not. A **standalone plug-in zip** is published beside them, to repair an earlier install that predates the bundling. The Linux AppImage and the macOS dmg are automated, unsigned builds of the same commit and have not been tried on hardware.
 
 ### Data directory and migration
 
@@ -175,11 +194,12 @@ Windows packaging: `cpack -G NSIS` in `build/` produces the installer (needs NSI
 
 ## Status and roadmap
 
-The current release is **[v2.3.6.5-edge](https://github.com/aceRage/EdgeSlicer/releases/tag/v2.3.6.5-edge)** (2026-09-07), the first one published under the EdgeSlicer name. Earlier releases were made under the fork's previous names and have been removed, so there is no upgrade path from them other than installing fresh — your data directory is migrated automatically (see above). glTF import and the per-device printer error texts landed after that release and will be in the next one.
+The current release is **[v2.3.8.0-edge](https://github.com/aceRage/EdgeSlicer/releases/tag/v2.3.8.0-edge)** (2026-09-11), following v2.3.7.0-edge (2026-09-09). Releases before v2.3.6.5-edge were made under the fork's previous names and have been removed, so there is no upgrade path from them other than installing fresh — your data directory is migrated automatically (see above).
 
 Known limits and work in progress, stated plainly:
 
 - **Bambu Lab** — slicing is verified; hardware validation covers the H2C, not yet the other models.
+- **Previews** — curved cut, Flexi joints (thread and bayonet included), Sculpt, Image Fill dithering and the fill-bed Grid layout have not yet been printed on hardware by the maintainer; check the first print.
 - **EdgeSlicer app** — personal distribution only (TestFlight / sideloaded APK); no store listing.
 - **Reprints** — Snapmaker-LAN and print-host printers; Bambu and the PC's own connection are not yet reprintable from the phone.
 - **Linux and macOS builds** — automated, unsigned, and not yet tried on hardware.
