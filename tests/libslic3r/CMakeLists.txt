@@ -24,6 +24,7 @@ add_executable(${_TEST_NAME}_tests
 	test_dual_nozzle_group.cpp
 	test_elephant_foot_compensation.cpp
 	test_flexi_joint.cpp
+	test_fuzzy_skin.cpp
 	test_geometry.cpp
 	test_h2c_rack_nozzle_change.cpp
 	test_h2_preload_filaments.cpp

@@ -14,7 +14,7 @@ namespace Slic3r::Feature::FuzzySkin {
 // cfg.skip_overhangs == false, both mean "behave exactly as before".
 void fuzzy_polyline(Points& poly, bool closed, coordf_t slice_z, const FuzzySkinConfig& cfg, const Polygons* support = nullptr);
 
-void fuzzy_extrusion_line(Arachne::ExtrusionJunctions& ext_lines, coordf_t slice_z, const FuzzySkinConfig& cfg, const Polygons* support = nullptr);
+void fuzzy_extrusion_line(Arachne::ExtrusionJunctions& ext_lines, coordf_t slice_z, coordf_t layer_height, const FuzzySkinConfig& cfg, const Polygons* support = nullptr);
 
 void group_region_by_fuzzify(PerimeterGenerator& g);
 
