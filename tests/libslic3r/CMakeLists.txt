@@ -42,6 +42,7 @@ add_executable(${_TEST_NAME}_tests
 	test_mutable_priority_queue.cpp
 	test_gltf.cpp
 	test_obj_color_match.cpp
+	test_scale_to_volume.cpp
 	test_slice_compare.cpp
 	test_stl.cpp
 	test_support_set.cpp

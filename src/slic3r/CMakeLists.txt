@@ -568,6 +568,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/RemovableDriveManager.hpp
     GUI/SavePresetDialog.cpp
     GUI/SavePresetDialog.hpp
+    GUI/ScaleToVolumeDialog.cpp
+    GUI/ScaleToVolumeDialog.hpp
     GUI/SceneRaycaster.cpp
     GUI/SceneRaycaster.hpp
     GUI/Search.cpp
