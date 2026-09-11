@@ -157,6 +157,8 @@ set(lisbslic3r_sources
     FilamentColorLibrary.hpp
     FilamentHotBedNozzleRules.cpp
     FilamentHotBedNozzleRules.hpp
+    FillBedPack.cpp
+    FillBedPack.hpp
     Fill/Fill3DHoneycomb.cpp
     Fill/Fill3DHoneycomb.hpp
     Fill/FillAdaptive.cpp

@@ -86,6 +86,7 @@
 #include "libslic3r/Format/bbs_3mf.hpp"
 #include "libslic3r/GCode/ThumbnailData.hpp"
 #include "libslic3r/Model.hpp"
+#include "libslic3r/ModelArrange.hpp"   // get_instance_arrange_poly, for the Fill bed dialog's defaults
 #include "libslic3r/Measure.hpp"
 #include "libslic3r/Geometry.hpp"
 #include "libslic3r/TriangleMesh.hpp"
@@ -21056,10 +21057,83 @@ void Plater::set_number_of_copies(/*size_t num*/)
 void Plater::fill_bed_with_instances()
 {
     auto &w = get_ui_job_worker();
-    if (w.is_idle()) {
-        p->take_snapshot(_u8L("Arrange"));
-        replace_job(w, std::make_unique<FillBedJob>());
+    if (!w.is_idle())
+        return;
+
+    // Both entry points - the object right-click menu item and the Clone dialog's Fill button -
+    // land here, so showing the dialog here gives them one behaviour.
+    FillBedSettings defaults;
+
+    const int obj_idx = get_selected_object_idx();
+    ModelObject *mo   = (obj_idx >= 0 && obj_idx < int(p->model.objects.size())) ? p->model.objects[obj_idx] : nullptr;
+    if (mo == nullptr || mo->instances.empty())
+        return;
+
+    const DynamicPrintConfig &global_config = wxGetApp().preset_bundle->full_config();
+    int inst_idx = std::max(get_selection().get_instance_idx(), 0);
+    if (inst_idx >= int(mo->instances.size()))
+        inst_idx = 0;
+    arrangement::ArrangePolygon template_ap = get_instance_arrange_poly(mo->instances[inst_idx], global_config);
+
+    // Today's gap: the arrange toolbar spacing when it is set, the template's own brim width
+    // otherwise - which is what "auto" resolves to in update_selected_items_inflation. So an
+    // untouched dialog reproduces the current behaviour.
+    arrangement::ArrangeParams def_params = init_arrange_params(this);
+    defaults.gap = def_params.min_obj_distance != 0 ? unscaled<double>(def_params.min_obj_distance)
+                                                    : double(template_ap.brim_width);
+
+    // Today's effective bed margin: bed_shrink_x/y (1 mm, or the sequential-print value) plus the
+    // skirt distance, exactly what get_shrink_bedpts will take off anyway.
+    arrangement::ArrangeParams margin_params = def_params;
+    arrangement::ArrangePolygons one{template_ap};
+    arrangement::update_arrange_params(margin_params, config(), one);
+    defaults.edge_margin = std::max(0.f, std::max(margin_params.bed_shrink_x, margin_params.bed_shrink_y));
+    defaults.front_enabled = false;
+    // A starting point for the front strip when the user first ticks the override: the purge /
+    // flow-calibration band on the printers that have one is a few tens of mm deep.
+    defaults.front_margin  = std::max(defaults.edge_margin, 40.);
+    defaults.allow_rotation = def_params.allow_rotations;
+
+    // Geometry for the live "Estimated copies" label: the bed as the packer will see it, minus
+    // what the other objects on this plate already occupy.
+    const Points  shrunk_bed = arrangement::get_shrink_bedpts(config(), margin_params);
+    const Polygon bed_poly{shrunk_bed};
+    const BoundingBox bed_bb   = bed_poly.bounding_box();
+    const double      sc       = scaled<double>(1.) * scaled(1.);
+    const double      bed_area = std::abs(bed_poly.area()) / sc;
+    const double      bed_w    = unscaled<double>(bed_bb.size().x());
+    const double      bed_h    = unscaled<double>(bed_bb.size().y());
+
+    PartPlate *plate = p->partplate_list.get_curr_plate();
+    double occupied  = 0.;
+    for (size_t oidx = 0; oidx < p->model.objects.size(); ++ oidx) {
+        if (int(oidx) == obj_idx)
+            continue;
+        ModelObject *other = p->model.objects[oidx];
+        for (size_t iidx = 0; iidx < other->instances.size(); ++ iidx) {
+            if (plate != nullptr && !plate->contain_instance(oidx, iidx))
+                continue;
+            occupied += get_instance_arrange_poly(other->instances[iidx], global_config).poly.area() / sc;
+        }
     }
+
+    const BoundingBox tmpl_bb = template_ap.poly.contour.bounding_box();
+
+    FillBedDialog dlg(this,
+                      defaults,
+                      unscaled<double>(tmpl_bb.size().x()),
+                      unscaled<double>(tmpl_bb.size().y()),
+                      bed_area,
+                      occupied,
+                      bed_w,
+                      bed_h,
+                      double(template_ap.brim_width),
+                      def_params.is_seq_print);
+    if (dlg.ShowModal() != wxID_OK)
+        return;
+
+    p->take_snapshot(_u8L("Arrange"));
+    replace_job(w, std::make_unique<FillBedJob>(dlg.settings()));
 }
 
 bool Plater::is_selection_empty() const
