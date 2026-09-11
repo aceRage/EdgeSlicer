@@ -868,10 +868,10 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
     toggle_line("fuzzy_skin_scale", fuzzy_skin_noise_type != NoiseType::Classic);
     toggle_line("fuzzy_skin_octaves", fuzzy_skin_noise_type != NoiseType::Classic && fuzzy_skin_noise_type != NoiseType::Voronoi);
     toggle_line("fuzzy_skin_persistence", fuzzy_skin_noise_type == NoiseType::Perlin || fuzzy_skin_noise_type == NoiseType::Billow);
-    // The overhang skip needs both fuzzy skin itself and the overhang wall detection whose
-    // lower-layer polygons it reuses; without either there is nothing for it to act on.
-    toggle_line("fuzzy_skin_skip_overhangs", config->opt_enum<FuzzySkinType>("fuzzy_skin") != FuzzySkinType::None &&
-                                             config->opt_bool("detect_overhang_wall"));
+    // The overhang skip reuses the lower-layer polygons of overhang wall detection; without it
+    // there is nothing to act on. It is NOT gated on the fuzzy_skin type: "None" still gets fuzzy
+    // skin wherever it is painted on, and the other fuzzy rows stay visible for the same reason.
+    toggle_line("fuzzy_skin_skip_overhangs", config->opt_bool("detect_overhang_wall"));
 
     bool have_arachne = config->opt_enum<PerimeterGeneratorType>("wall_generator") == PerimeterGeneratorType::Arachne;
     for (auto el : { "wall_transition_length", "wall_transition_filter_deviation", "wall_transition_angle",
