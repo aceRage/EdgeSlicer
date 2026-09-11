@@ -869,6 +869,25 @@ private:
     std::string     get_plugin_url(std::string name, std::string country_code);
     int             download_plugin(std::string name, std::string package_name, InstallProgressFn pro_fn = nullptr, WasCancelledFn cancel_fn = nullptr);
     int             install_plugin(std::string name, std::string package_name, InstallProgressFn pro_fn = nullptr, WasCancelledFn cancel_fn = nullptr);
+
+    // Ultra (live view): Bambu's camera component (BambuSource), the DirectShow source filter the
+    // Device-tab live view plays through. It is NOT part of UltraNet - we ship only a placeholder
+    // of that name so the agent's LoadLibrary probe succeeds - so this is the one Bambu CDN path
+    // that stays open while UltraNet is installed. It downloads Bambu's network plug-in package
+    // and extracts ONLY BambuSource (and live555 when present) into plugins/ and cameratools/;
+    // bambu_networking and the UltraNet marker are never touched. Returns 0 on success.
+    int             install_bambu_camera_component(InstallProgressFn pro_fn = nullptr, WasCancelledFn cancel_fn = nullptr);
+    // Ask the user whether to fetch the component, then do it with a progress dialog and register
+    // the filter. Returns true when it is installed, so the caller may retry playback.
+    bool            offer_bambu_camera_component(wxWindow *parent);
+    // True when <data_dir>/plugins holds a real BambuSource rather than our placeholder.
+    bool            has_bambu_camera_component() const;
+    // Register the installed BambuSource DirectShow filter: writes the HKCR\bambu source-filter
+    // CLSID and runs regsvr32 on it (two UAC prompts). Windows only; a no-op elsewhere. Refuses
+    // outright when the DLL does not export DllRegisterServer, which is what made the stock path
+    // fail with "the entry-point DllRegisterServer was not found".
+    bool            register_bambu_source_filter();
+
     std::string     get_http_url(std::string country_code, std::string path = {});
     std::string     get_model_http_url(std::string country_code);
     bool            is_compatibility_version();

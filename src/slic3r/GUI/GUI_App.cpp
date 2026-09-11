@@ -33,6 +33,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cctype>
+#include <cstring>
 #include <iterator>
 #include <exception>
 #include <cstdlib>
@@ -144,6 +145,7 @@
 #ifdef __WXMSW__
 #include <dbt.h>
 #include <shlobj.h>
+#include <shellapi.h> // ShellExecuteEx, for registering the Bambu camera component
 
 #ifdef __WINDOWS__
 #ifdef _MSW_DARK_MODE
@@ -1792,6 +1794,219 @@ int GUI_App::install_plugin(std::string name, std::string package_name, InstallP
     return 0;
 }
 
+// ---------------------------------------------------------------------------------------------
+// Ultra (live view): Bambu's camera component.
+//
+// The Device-tab live view plays through BambuSource, a proprietary DirectShow source filter. It
+// is not something UltraNet replaces - we ship a ~9.7 KB placeholder under that name purely so the
+// agent's LoadLibrary probe of the plug-ins folder succeeds. The filter itself only ever arrives in
+// Bambu's network plug-in package, and every other route to that package is (correctly) shut off
+// while UltraNet is installed. This is the one deliberate exception, and it is surgical: only
+// BambuSource and live555 are taken out of the zip, so bambu_networking.dll and the ultranet.txt
+// marker are never at risk.
+
+bool GUI_App::has_bambu_camera_component() const
+{
+    namespace fs = boost::filesystem;
+    return exports_dll_register_server(fs::path(data_dir()) / "plugins" / bambu_source_library_name());
+}
+
+int GUI_App::install_bambu_camera_component(InstallProgressFn pro_fn, WasCancelledFn cancel_fn)
+{
+    namespace fs = boost::filesystem;
+    bool cancel = false;
+
+    const std::string package_name = "camera_component.zip";
+    // Deliberately NOT install_plugin(): that unzips the whole package over plugins/ and is refused
+    // while UltraNet is installed. download_plugin() only fetches, so it is safe to reuse as is.
+    int result = download_plugin("plugins", package_name, pro_fn, cancel_fn);
+    if (result < 0) {
+        BOOST_LOG_TRIVIAL(error) << "[camera component] download failed";
+        return result;
+    }
+
+    const std::string zip_path = (fs::temp_directory_path() / package_name).string();
+    mz_zip_archive archive;
+    mz_zip_zero_struct(&archive);
+    if (!open_zip_reader(&archive, zip_path)) {
+        BOOST_LOG_TRIVIAL(error) << "[camera component] cannot open package " << zip_path;
+        if (pro_fn) pro_fn(InstallStatusUnzipFailed, 0, cancel);
+        return InstallStatusUnzipFailed;
+    }
+
+    // Only these two, matched on the bare filename so a package that nests them in a folder still
+    // works. Anything else in the zip - bambu_networking above all - is ignored.
+    const std::string want_source = bambu_source_library_name();
+    const std::string want_live555 =
+#if defined(_WIN32)
+        "live555.dll";
+#elif defined(__APPLE__)
+        "liblive555.dylib";
+#else
+        "liblive555.so";
+#endif
+
+    const fs::path plugins_dir     = fs::path(data_dir()) / "plugins";
+    const fs::path cameratools_dir = fs::path(data_dir()) / "cameratools";
+    boost::system::error_code ec;
+    fs::create_directories(plugins_dir, ec);
+    fs::create_directories(cameratools_dir, ec);
+
+    bool got_source = false;
+    const mz_uint num_entries = mz_zip_reader_get_num_files(&archive);
+    mz_zip_archive_file_stat stat;
+    for (mz_uint i = 0; i < num_entries; ++i) {
+        if (m_networking_cancel_update || (cancel_fn && cancel_fn())) {
+            close_zip_reader(&archive);
+            BOOST_LOG_TRIVIAL(info) << "[camera component] cancelled by user";
+            return -1;
+        }
+        if (!mz_zip_reader_file_stat(&archive, i, &stat) || stat.m_uncomp_size == 0)
+            continue;
+        std::string entry;
+        if (stat.m_is_utf8) {
+            entry = stat.m_filename;
+        } else {
+            std::string extra(1024, 0);
+            size_t n = mz_zip_reader_get_extra(&archive, stat.m_file_index, extra.data(), extra.size());
+            entry = decode(extra.substr(0, n), stat.m_filename);
+        }
+        const std::string leaf = fs::path(entry).filename().string();
+        const bool is_source  = boost::iequals(leaf, want_source);
+        const bool is_live555 = boost::iequals(leaf, want_live555);
+        if (!is_source && !is_live555)
+            continue;
+
+        // Extract to a temp file first, so a half-written download can never leave a truncated
+        // filter sitting where a working one used to be.
+        const fs::path staged = fs::temp_directory_path() / (std::string("edgeslicer_cam_") + leaf);
+        std::string staged_enc = encode_path(staged.string().c_str());
+        mz_bool res = mz_zip_reader_extract_to_file(&archive, stat.m_file_index, staged_enc.c_str(), 0);
+#ifdef WIN32
+        if (res == 0) {
+            std::wstring staged_w = boost::locale::conv::utf_to_utf<wchar_t>(staged.generic_string());
+            res = mz_zip_reader_extract_to_file_w(&archive, stat.m_file_index, staged_w.c_str(), 0);
+        }
+#endif
+        if (res == 0) {
+            BOOST_LOG_TRIVIAL(error) << "[camera component] failed to extract " << leaf;
+            continue;
+        }
+        if (is_source && !exports_dll_register_server(staged)) {
+            // Whatever we just pulled out is not a registrable filter; refuse to install it rather
+            // than recreating the very bug we are fixing.
+            BOOST_LOG_TRIVIAL(error) << "[camera component] extracted " << leaf
+                                     << " does not export DllRegisterServer; refusing to install it";
+            fs::remove(staged, ec);
+            continue;
+        }
+        for (const fs::path &dir : {plugins_dir, cameratools_dir}) {
+            fs::copy_file(staged, dir / leaf, fs::copy_option::overwrite_if_exists, ec);
+            if (ec)
+                BOOST_LOG_TRIVIAL(error) << "[camera component] copy to " << dir.string() << " failed: " << ec.message();
+        }
+        fs::remove(staged, ec);
+        if (is_source)
+            got_source = true;
+        BOOST_LOG_TRIVIAL(info) << "[camera component] installed " << leaf;
+    }
+    close_zip_reader(&archive);
+    fs::remove(fs::path(zip_path), ec);
+
+    if (!got_source) {
+        BOOST_LOG_TRIVIAL(error) << "[camera component] package contained no usable " << want_source;
+        if (pro_fn) pro_fn(InstallStatusUnzipFailed, 0, cancel);
+        return InstallStatusUnzipFailed;
+    }
+    if (pro_fn) pro_fn(InstallStatusInstallCompleted, 100, cancel);
+    BOOST_LOG_TRIVIAL(info) << "[camera component] success";
+    return 0;
+}
+
+bool GUI_App::register_bambu_source_filter()
+{
+#ifdef __WIN32__
+    namespace fs = boost::filesystem;
+    const fs::path dll_path = fs::path(data_dir()) / "plugins" / bambu_source_library_name();
+    // The guard that was missing: regsvr32 on a DLL with no DllRegisterServer can only produce the
+    // error the user reported, so never start the UAC dance unless the entry point is really there.
+    if (!exports_dll_register_server(dll_path)) {
+        BOOST_LOG_TRIVIAL(info) << "[camera component] not registering " << dll_path.string()
+                                << ": no DllRegisterServer export";
+        return false;
+    }
+
+    std::string regContent = R"(Windows Registry Editor Version 5.00
+[HKEY_CLASSES_ROOT\bambu]
+"Source Filter"="{233E64FB-2041-4A6C-AFAB-FF9BCF83E7AA}"
+)";
+    auto reg_path = (fs::temp_directory_path() / fs::unique_path()).replace_extension(".reg");
+    {
+        boost::nowide::ofstream temp_reg_file(reg_path.string().c_str());
+        if (!temp_reg_file)
+            return false;
+        temp_reg_file << regContent;
+    }
+    auto sei_params = L"/q /s " + reg_path.wstring();
+    SHELLEXECUTEINFO sei{sizeof(sei), SEE_MASK_NOCLOSEPROCESS, NULL, L"open",
+                         L"regedit", sei_params.c_str(), SW_HIDE, SW_HIDE};
+    ::ShellExecuteEx(&sei);
+
+    std::wstring quoted_dll_path = L"\"" + dll_path.wstring() + L"\"";
+    SHELLEXECUTEINFO info{sizeof(info), 0, NULL, L"runas", L"regsvr32", quoted_dll_path.c_str(), SW_HIDE};
+    ::ShellExecuteEx(&info);
+
+    boost::system::error_code ec;
+    fs::remove(reg_path, ec);
+    BOOST_LOG_TRIVIAL(info) << "[camera component] registered " << dll_path.string();
+    return true;
+#else
+    return false;
+#endif
+}
+
+bool GUI_App::offer_bambu_camera_component(wxWindow *parent)
+{
+#ifdef __WIN32__
+    MessageDialog dlg(parent,
+                      _L("Live view needs Bambu's camera component (BambuSource.dll), which is not part of "
+                         "EdgeSlicer's network plug-in.\n\nDownload it from Bambu Lab now?"),
+                      _L("Camera component required"), wxYES_NO | wxICON_INFORMATION);
+    if (dlg.ShowModal() != wxID_YES)
+        return false;
+
+    // The DownloadProgressDialog job machinery routes through install_plugin(), which must stay
+    // refused while UltraNet is installed, so run the fetch synchronously behind a busy cursor
+    // rather than reusing that dialog.
+    int result = 0;
+    {
+        wxBusyCursor busy;
+        result = install_bambu_camera_component();
+    }
+    if (result != 0) {
+        MessageDialog err(parent,
+                          _L("Could not download Bambu's camera component. Please check your internet connection "
+                             "and try again.") + wxString::Format("\n\n(error %d)", result),
+                          _L("Download failed"), wxOK | wxICON_ERROR);
+        err.ShowModal();
+        return false;
+    }
+    // Register the freshly installed filter (this is the UAC prompt the user expects, and now it
+    // acts on a DLL that really does export DllRegisterServer).
+    register_bambu_source_filter();
+    return true;
+#else
+    // The CDN package is Windows-only for now: on macOS/Linux live view uses the platform media
+    // stack and there is no registrable DirectShow filter to fetch.
+    MessageDialog dlg(parent,
+                      _L("Live view needs Bambu's camera component, which is not part of EdgeSlicer's network "
+                         "plug-in and is not available for this platform."),
+                      _L("Camera component required"), wxOK | wxICON_INFORMATION);
+    dlg.ShowModal();
+    return false;
+#endif
+}
+
 void GUI_App::restart_networking()
 {
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__<< boost::format(" enter, mainframe %1%")%mainframe;
@@ -3065,8 +3280,17 @@ bool GUI_App::on_init_inner()
                 boost::system::error_code ec;
                 fs::create_directories(pf, ec);
                 for (const char* name : {"bambu_networking.dll", "BambuSource.dll"}) {
-                    if (fs::exists(bundled / name))
-                        fs::copy_file(bundled / name, pf / name, fs::copy_option::overwrite_if_exists, ec);
+                    if (! fs::exists(bundled / name))
+                        continue;
+                    // Ultra (live view): our sidecar BambuSource is a placeholder. If the user has
+                    // already fetched Bambu's real camera component into plugins/, it must survive
+                    // this upgrade - stamping the stub back over it would break live view again.
+                    if (std::strcmp(name, "BambuSource.dll") == 0 &&
+                        ! may_overwrite_bambusource(fs::exists(pf / name), exports_dll_register_server(pf / name))) {
+                        BOOST_LOG_TRIVIAL(info) << "[UltraNet] keeping the installed Bambu camera component in " << pf.string();
+                        continue;
+                    }
+                    fs::copy_file(bundled / name, pf / name, fs::copy_option::overwrite_if_exists, ec);
                 }
                 // Ultra (plug-in guards): leave a marker beside the DLLs. The library name is
                 // Bambu's, so the file alone cannot say whose plug-in this is; the marker is what
