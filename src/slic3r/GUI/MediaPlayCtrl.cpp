@@ -7,6 +7,7 @@
 #include "I18N.hpp"
 #include "MsgDialog.hpp"
 #include "DownloadProgressDialog.hpp"
+#include "PluginGuard.hpp"
 
 #include <boost/lexical_cast.hpp>
 #include <boost/log/trivial.hpp>
@@ -479,7 +480,16 @@ void MediaPlayCtrl::ToggleStream()
         // create stream pipeline
         bool need_install = false;
         if (!start_stream_service(&need_install)) {
-            if (!need_install) return;
+            if (!need_install) {
+                // Ultra (live view): the virtual camera needs the same BambuSource filter the
+                // player does. If the only copy we have is our placeholder, say so and offer the
+                // real component rather than failing mutely.
+                namespace fs = boost::filesystem;
+                const fs::path plugin_source = fs::path(data_dir()) / "plugins" / bambu_source_library_name();
+                if (is_ultranet_bambusource_stub(plugin_source))
+                    wxGetApp().offer_bambu_camera_component(this);
+                return;
+            }
             auto res = MessageDialog(this->GetParent(), _L("Virtual Camera Tools is required for this task!\nDo you want to install them?"), _L("Info"),
                                     wxOK | wxCANCEL).ShowModal();
             if (res == wxID_OK) {
@@ -770,8 +780,36 @@ bool MediaPlayCtrl::start_stream_service(bool *need_install)
         for (auto dll : {L"BambuSource.dll", L"live555.dll"}) {
             auto file_dll  = tools_dir + dll;
             auto file_dll2 = plugins_dir + dll;
-            if (!boost::filesystem::exists(file_dll) || boost::filesystem::last_write_time(file_dll) != boost::filesystem::last_write_time(file_dll2))
-                boost::filesystem::copy_file(file_dll2, file_dll, boost::filesystem::copy_option::overwrite_if_exists);
+            if (!boost::filesystem::exists(file_dll2))
+                continue;
+            // Ultra (live view): BambuSource in our plug-ins folder may be the ~9.7 KB placeholder
+            // we ship so NetworkAgent's LoadLibrary probe succeeds - it is not Bambu's DirectShow
+            // filter and cannot be registered. Copying it over cameratools would destroy a real
+            // filter the user downloaded, so decide per file instead of blindly stamping.
+            const bool is_source = std::wstring(dll) == L"BambuSource.dll";
+            if (is_source) {
+                const boost::filesystem::path src(file_dll2), dst(file_dll);
+                bool same_time = false;
+                if (boost::filesystem::exists(dst)) {
+                    boost::system::error_code ec;
+                    same_time = boost::filesystem::last_write_time(dst, ec) == boost::filesystem::last_write_time(src, ec) && !ec;
+                }
+                const auto decision = camera_tools_copy_decision(is_ultranet_bambusource_stub(src),
+                                                                 exports_dll_register_server(dst),
+                                                                 same_time);
+                if (decision == CameraToolsCopy::SkipStubMissingComponent) {
+                    BOOST_LOG_TRIVIAL(info) << "[UltraNet] cameratools: plug-ins BambuSource is our stub, not copying; "
+                                               "live view needs Bambu's camera component";
+                    if (need_install) *need_install = false;
+                    return false;
+                }
+                if (decision == CameraToolsCopy::KeepExisting)
+                    continue;
+            } else if (boost::filesystem::exists(file_dll) &&
+                       boost::filesystem::last_write_time(file_dll) == boost::filesystem::last_write_time(file_dll2)) {
+                continue;
+            }
+            boost::filesystem::copy_file(file_dll2, file_dll, boost::filesystem::copy_option::overwrite_if_exists);
         }
         boost::process::child process_source(file_source, file_url2.ToStdWstring(), boost::process::start_dir(tools_dir), 
                                              boost::process::windows::create_no_window, 

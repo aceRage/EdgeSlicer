@@ -1,5 +1,13 @@
 #include "PluginGuard.hpp"
 
+#include <cstdint>
+#include <cstring>
+#include <fstream>
+#include <string>
+#include <vector>
+
+#include <boost/filesystem/operations.hpp>
+
 namespace Slic3r { namespace GUI {
 
 const char *const kUltraNetMarkerName = "ultranet.txt";
@@ -38,6 +46,188 @@ LoginGuardAction plugin_guard_decision(bool plugin_present,
     // three, and it is also where the user turns the preference back on.
     (void) installed_networking;
     return LoginGuardAction::OfferPluginDownload;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Camera component (BambuSource).
+
+const char *bambu_source_library_name()
+{
+#if defined(_WIN32)
+    return "BambuSource.dll";
+#elif defined(__APPLE__)
+    return "libBambuSource.dylib";
+#else
+    return "libBambuSource.so";
+#endif
+}
+
+namespace {
+
+// Little-endian scalar reads out of a byte buffer, bounds-checked. The file is attacker-adjacent
+// (it can be anything the user dropped in the plug-ins folder), so every read is guarded and a
+// malformed image simply answers "not a real filter".
+template<typename T> bool read_le(const std::vector<char> &buf, std::size_t off, T &out)
+{
+    if (off > buf.size() || buf.size() - off < sizeof(T))
+        return false;
+    std::uint64_t v = 0;
+    for (std::size_t i = 0; i < sizeof(T); ++i)
+        v |= static_cast<std::uint64_t>(static_cast<unsigned char>(buf[off + i])) << (8 * i);
+    out = static_cast<T>(v);
+    return true;
+}
+
+// Map a PE relative virtual address to a file offset using the section table.
+bool rva_to_offset(const std::vector<char> &buf,
+                   std::size_t              section_table,
+                   std::uint16_t            num_sections,
+                   std::uint32_t            rva,
+                   std::size_t &            out)
+{
+    for (std::uint16_t i = 0; i < num_sections; ++i) {
+        const std::size_t sh = section_table + std::size_t(i) * 40; // IMAGE_SECTION_HEADER
+        std::uint32_t virt_size = 0, virt_addr = 0, raw_size = 0, raw_ptr = 0;
+        if (! read_le(buf, sh + 8, virt_size) || ! read_le(buf, sh + 12, virt_addr) ||
+            ! read_le(buf, sh + 16, raw_size) || ! read_le(buf, sh + 20, raw_ptr))
+            return false;
+        // A section's in-memory size may exceed its raw size; only the raw part exists in the file.
+        const std::uint32_t span = virt_size > raw_size ? raw_size : virt_size;
+        if (span == 0 || rva < virt_addr || rva >= virt_addr + span)
+            continue;
+        const std::uint64_t off = std::uint64_t(raw_ptr) + (rva - virt_addr);
+        if (off >= buf.size())
+            return false;
+        out = std::size_t(off);
+        return true;
+    }
+    return false;
+}
+
+// Does the PE image in `buf` export the symbol `want`?
+bool pe_exports(const std::vector<char> &buf, const char *want)
+{
+    std::uint16_t mz = 0;
+    if (! read_le(buf, 0, mz) || mz != 0x5A4D) // "MZ"
+        return false;
+    std::uint32_t e_lfanew = 0;
+    if (! read_le(buf, 0x3C, e_lfanew))
+        return false;
+    const std::size_t pe = e_lfanew;
+    std::uint32_t sig = 0;
+    if (! read_le(buf, pe, sig) || sig != 0x00004550) // "PE\0\0"
+        return false;
+
+    std::uint16_t num_sections = 0, opt_size = 0, magic = 0;
+    if (! read_le(buf, pe + 6, num_sections) || ! read_le(buf, pe + 20, opt_size))
+        return false;
+    const std::size_t opt = pe + 24;
+    if (! read_le(buf, opt, magic))
+        return false;
+    // The export directory is data directory 0; it sits at a different offset in PE32 vs PE32+.
+    const std::size_t dd0 = opt + (magic == 0x20B ? 112 : 96);
+    std::uint32_t export_rva = 0, export_size = 0;
+    if (! read_le(buf, dd0, export_rva) || ! read_le(buf, dd0 + 4, export_size))
+        return false;
+    if (export_rva == 0 || export_size == 0)
+        return false; // no export table at all - this is what our stub looks like
+
+    const std::size_t section_table = opt + opt_size;
+    std::size_t exp_off = 0;
+    if (! rva_to_offset(buf, section_table, num_sections, export_rva, exp_off))
+        return false;
+
+    std::uint32_t num_names = 0, names_rva = 0;
+    if (! read_le(buf, exp_off + 24, num_names) || ! read_le(buf, exp_off + 32, names_rva))
+        return false;
+    if (num_names == 0 || names_rva == 0)
+        return false;
+    std::size_t names_off = 0;
+    if (! rva_to_offset(buf, section_table, num_sections, names_rva, names_off))
+        return false;
+
+    const std::size_t want_len = std::strlen(want);
+    // Cap the walk: a corrupt header could claim a huge name count.
+    const std::uint32_t cap = num_names > 65536u ? 65536u : num_names;
+    for (std::uint32_t i = 0; i < cap; ++i) {
+        std::uint32_t name_rva = 0;
+        if (! read_le(buf, names_off + std::size_t(i) * 4, name_rva))
+            return false;
+        std::size_t name_off = 0;
+        if (! rva_to_offset(buf, section_table, num_sections, name_rva, name_off))
+            continue;
+        // Compare in place, refusing to run off the end of the buffer.
+        if (buf.size() - name_off <= want_len)
+            continue;
+        if (std::memcmp(buf.data() + name_off, want, want_len) == 0 && buf[name_off + want_len] == '\0')
+            return true;
+    }
+    return false;
+}
+
+} // namespace
+
+bool exports_dll_register_server(const boost::filesystem::path &dll)
+{
+    boost::system::error_code ec;
+    if (! boost::filesystem::exists(dll, ec) || ec)
+        return false;
+    const boost::uintmax_t size = boost::filesystem::file_size(dll, ec);
+    // Guard both ends: too small to be a PE at all, or too large to slurp (the real filter is ~5 MB;
+    // 256 MB is far past anything legitimate).
+    if (ec || size < 64 || size > 256ull * 1024 * 1024)
+        return false;
+
+    std::vector<char> buf;
+    try {
+        std::ifstream f(dll.string().c_str(), std::ios::binary);
+        if (! f)
+            return false;
+        buf.resize(std::size_t(size));
+        f.read(buf.data(), std::streamsize(buf.size()));
+        if (std::size_t(f.gcount()) != buf.size())
+            return false;
+    } catch (...) {
+        return false;
+    }
+
+    // The exported-symbol question is only meaningful for a PE. On macOS/Linux the shipped stub is
+    // likewise a placeholder with no such entry point; a Mach-O/ELF is not a PE, so pe_exports()
+    // answers false and the caller treats the file as "not a real filter", which is the behaviour
+    // we want there too (the download path is Windows-only for now).
+    return pe_exports(buf, "DllRegisterServer");
+}
+
+bool is_ultranet_bambusource_stub(const boost::filesystem::path &dll)
+{
+    boost::system::error_code ec;
+    if (! boost::filesystem::exists(dll, ec) || ec)
+        return false; // nothing there is "missing", not "our stub"
+    // The marker is what makes this folder ours. Without it we must not claim the file is a stub.
+    if (! boost::filesystem::exists(dll.parent_path() / kUltraNetMarkerName, ec) || ec)
+        return false;
+    return ! exports_dll_register_server(dll);
+}
+
+CameraToolsCopy camera_tools_copy_decision(bool plugins_copy_is_stub,
+                                           bool cameratools_has_real_filter,
+                                           bool cameratools_up_to_date)
+{
+    // A real filter already in cameratools is the best thing present - never overwrite it, and in
+    // particular never with the stub (the second half of the reported bug: the user downloads the
+    // component, then the next Play stamps our 9.7 KB placeholder over it).
+    if (cameratools_has_real_filter)
+        return CameraToolsCopy::KeepExisting;
+    if (plugins_copy_is_stub)
+        return CameraToolsCopy::SkipStubMissingComponent;
+    return cameratools_up_to_date ? CameraToolsCopy::KeepExisting : CameraToolsCopy::CopyFromPlugins;
+}
+
+bool may_overwrite_bambusource(bool dest_exists, bool dest_is_real_filter)
+{
+    // Upgrades re-run the first-run copier. A real filter the user fetched from Bambu must outlive
+    // that; anything else (absent, or our own stub from a previous version) may be refreshed.
+    return ! (dest_exists && dest_is_real_filter);
 }
 
 } } // namespace Slic3r::GUI
