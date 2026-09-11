@@ -1823,9 +1823,10 @@ void MenuFactory::create_object_menu()
 
 void MenuFactory::create_extra_object_menu()
 {
-    //append_menu_item_fill_bed(&m_object_menu);
     // Object Clone
     append_menu_item_clone(&m_object_menu);
+    // Straight to the fill dialog, without going through the Clone dialog's Fill button.
+    append_menu_item_fill_bed(&m_object_menu);
     // Ultra: per-object visibility (Normal / Ghost / Hidden)
     append_menu_items_visibility(&m_object_menu);
     // Ultra (support groups): the per-object Support groups window. Non-modal, so it stays open
