@@ -3,10 +3,15 @@
 
 #include "GUI_Utils.hpp"
 
+#include "libslic3r/FillBedPack.hpp"
+
 #include "Widgets/CheckBox.hpp"
+#include "Widgets/ComboBox.hpp"
 #include "Widgets/DialogButtons.hpp"
 #include "Widgets/Label.hpp"
 #include "Widgets/TextInput.hpp"
+
+#include <functional>
 
 #include <wx/stattext.h>
 
@@ -28,6 +33,8 @@ struct FillBedSettings
     // Minimum distance from the front (min-Y) bed edge, mm. Effective value is
     // max(front_margin, edge_margin).
     double front_margin   = 0.;
+    // Compact packs with the NFP packer (today's path); Grid tiles the template's bounding box.
+    fill_bed::Layout layout = fill_bed::Layout::Compact;
 };
 
 // The dialog shown before a bed fill. Both entry points - the object right-click menu item and
@@ -47,7 +54,12 @@ public:
                   double                 bed_w,
                   double                 bed_h,
                   double                 brim_width,
-                  bool                   is_seq_print);
+                  bool                   is_seq_print,
+                  // Returns the EXACT number of copies the Grid layout would place for the
+                  // given gap, edge margin, front margin and rotation flag - the job owns the
+                  // bed outline and the obstacles, so it hands the dialog a closure rather than
+                  // the geometry. Null falls back to the tiling estimate.
+                  std::function<int(const FillBedSettings &)> grid_counter = nullptr);
 
     // Valid after ShowModal() returns wxID_OK. Also written back to AppConfig at that point.
     const FillBedSettings &settings() const { return m_settings; }
@@ -68,9 +80,15 @@ private:
     ::CheckBox *m_rotate_cb       = nullptr;
     TextInput *m_edge_input       = nullptr;
     ::CheckBox *m_front_cb        = nullptr;
-    TextInput *m_front_input      = nullptr;
-    wxStaticText *m_estimate_text = nullptr;
-    wxStaticText *m_warning_text  = nullptr;
+    TextInput  *m_front_input     = nullptr;
+    ::ComboBox *m_layout_combo    = nullptr;
+    ::Label    *m_estimate_text   = nullptr;
+    ::Label    *m_warning_text    = nullptr;
+
+    std::function<int(const FillBedSettings &)> m_grid_counter;
+
+    // The values the inputs currently hold, clamped - what the estimate and OK both read.
+    FillBedSettings current_settings() const;
 
     // Geometry the estimate needs; all mm / mm^2.
     double m_template_w   = 0.;
