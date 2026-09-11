@@ -107,6 +107,30 @@ public:
     // the shape now, forget where it came from". An edit does this implicitly.
     void   commit_reference();
 
+    // --- frame flip --------------------------------------------------------
+    // Carry the sheet through a 180-degree rotation of the CUT PLANE FRAME about
+    // one of its own in-plane axes (the gizmo's "flip cut plane" / right-click
+    // switch-sides gesture, which does m_rotation_m * rotation_transform(PI * X)).
+    //
+    // The frame's X survives, its Y and Z negate. A point that was at local
+    // (x, y, z) is at (x, -y, -z) in the NEW frame, so for the world surface to
+    // be unchanged the height field must satisfy
+    //
+    //     f_new(x, -y) = -f_old(x, y)
+    //
+    // which on the control grid is exactly "mirror the rows along v, negate every
+    // value". flip_about_u() does that (a rotation about the frame's X: v and z
+    // negate); flip_about_v() is the same for a rotation about the frame's Y
+    // (u and z negate). Both are EXACT - no evaluation, no re-sampling, no loss -
+    // and both are their own inverse.
+    //
+    // The control grid is symmetric in (u,v) about its centre, so mirroring the
+    // indices lands exactly on grid points and the extent is unchanged; the
+    // reference grid is republished, so a later re-fit re-samples the FLIPPED
+    // surface rather than resurrecting the pre-flip one.
+    void flip_about_u();
+    void flip_about_v();
+
     // (u,v) in [0,1]^2 of control point (i,j).
     double control_u(int i) const { return m_resolution < 2 ? 0.5 : double(i) / double(m_resolution - 1); }
     // Local (x,y) of control point (i,j), in the cut plane frame.

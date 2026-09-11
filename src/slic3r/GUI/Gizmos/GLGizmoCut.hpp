@@ -172,6 +172,47 @@ class GLGizmoCut3D : public GLGizmoBase
     // so every tick re-applies the whole displacement to this snapshot.
     std::vector<double> m_curved_drag_grid;
     bool           m_curved_drag_took_snapshot{ false };
+
+    // --- Curved cut: gizmo-local undo/redo ---------------------------------
+    // The sheet is SESSION state. It lives in the gizmo, not in the Model, so
+    // the plater's own undo stack cannot restore it: the TakeSnapshot calls that
+    // already bracket the sheet edits roll the MODEL back and leave the control
+    // grid exactly where it was, which is why Ctrl+Z did nothing to a handle
+    // that had been dragged slightly out of place.
+    //
+    // So the gizmo keeps its own stack, in the shape GLGizmoSculpt uses for a
+    // stroke: one entry per COMPLETED edit, pushed at the start of the gesture
+    // (drag, snap) or before an instant edit (Smooth, Reset, resolution change,
+    // flip), and consumed by Ctrl+Z / Ctrl+Y / Ctrl+Shift+Z while the Cut gizmo
+    // is open and the canvas has focus. Keyboard handling goes through the same
+    // first-refusal hook Sculpt uses (GLGizmosManager::on_char), so the two
+    // gizmos behave the same way and the canvas's own Ctrl+Z is only reached
+    // when this stack has nothing to give.
+    //
+    // An entry carries the extent and resolution as well as the values: a
+    // resolution change or a re-fit alters those, and restoring values against
+    // the wrong grid would be meaningless.
+    struct CurvedSheetState {
+        std::vector<double> values;
+        int                 resolution{ 0 };
+        double              half_size_u{ 0.0 };
+        double              half_size_v{ 0.0 };
+    };
+    std::vector<CurvedSheetState> m_curved_undo;
+    std::vector<CurvedSheetState> m_curved_redo;
+    // Deep history is not the point - a handful of handle nudges is - and each
+    // entry is at most MaxResolution^2 doubles.
+    static const size_t           CurvedUndoLimit = 64;
+
+    CurvedSheetState curved_sheet_state() const;
+    void             apply_curved_sheet_state(const CurvedSheetState& st);
+    // Push the CURRENT sheet onto the undo stack and drop the redo branch. Call
+    // BEFORE changing the sheet, so the entry is the state to come back to.
+    void             push_curved_undo();
+    bool             curved_undo();
+    bool             curved_redo();
+    void             clear_curved_undo() { m_curved_undo.clear(); m_curved_redo.clear(); }
+
     // --- Curved PREVIEW ----------------------------------------------------
     // The height field, uploaded as a DefaultSamples x DefaultSamples single
     // channel float texture, is what makes the shaded upper/lower split follow
@@ -401,6 +442,39 @@ public:
     std::string get_tooltip() const override;
     bool unproject_on_cut_plane(const Vec2d& mouse_pos, Vec3d& pos, Vec3d& pos_world, bool respect_contours = true);
     bool gizmo_event(SLAGizmoEventType action, const Vec2d& mouse_position, bool shift_down, bool alt_down, bool control_down);
+
+    // --- bounded cut-surface hit test --------------------------------------
+    // Is the mouse ray actually ON the drawn cut surface?
+    //
+    // The picking mesh registered for CutPlane is the flat plane's frustum at
+    // m_cut_plane_radius_koef * m_radius - 1.5x the object's bounding-box half
+    // diagonal - so it reaches well past the part and, in Curved mode, has
+    // nothing to do with the sheet that is actually drawn. A click on empty
+    // canvas that happens to land on that oversized quad started a plane drag
+    // and moved the cut by accident while the user was only navigating.
+    //
+    // This bounds the hit to what is RENDERED: the drawn quad in Flat mode, and
+    // the sheet's own rectangular domain (half_size_u/v, at the sheet's actual
+    // height) in Curved mode. Both the hover highlight and the drag go through
+    // it, so the highlight never promises a grab that the click will not honour.
+    //
+    // Connectors, control handles and the rotation grabbers are picked by their
+    // own raycasters and are untouched by this.
+    bool mouse_on_cut_surface(const Vec2d& mouse_position) const;
+    // Last mouse-move answer from mouse_on_cut_surface(), so the HIGHLIGHT can
+    // follow the same bound as the click without re-raycasting every frame.
+    // Only meaningful while m_hover_id == CutPlane.
+    bool m_cut_surface_hovered{ false };
+    // First-refusal keyboard hook, in the shape GLGizmoSculpt::on_sculpt_char
+    // has: GLGizmosManager::on_char offers the key here BEFORE the canvas's own
+    // Ctrl+Z / Ctrl+Y get it, so an undo while the Cut gizmo is open rolls back
+    // a sheet edit if there is one to roll back, and otherwise falls through to
+    // the plater's undo untouched. Returns true when the key was consumed.
+    bool on_cut_char(int key_code, bool shift_down, bool ctrl_down);
+
+    // m_hover_id == CutPlane AND the ray is within the drawn extent.
+    bool cut_surface_hovered(const Vec2d& mouse_position) const
+        { return m_hover_id == CutPlane && mouse_on_cut_surface(mouse_position); }
 
     bool is_in_editing_mode() const override { return m_connectors_editing; }
     bool is_selection_rectangle_dragging() const override { return m_selection_rectangle.is_dragging(); }
