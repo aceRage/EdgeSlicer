@@ -3094,3 +3094,126 @@ TEST_CASE("Curved cut: connector demo export", "[CurvedCut][.demo]")
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Flipping the cut plane must CARRY the sheet.
+//
+// The gizmo's "switch sides" gesture turns the plane frame 180 degrees about its
+// own X (m_rotation_m * rotation_transform(PI * UnitX)). That frame change alone
+// would leave the sheet's control values describing a DIFFERENT world surface -
+// the reported "right-click partially flattens the sheet". flip_about_u() is the
+// matching change to the height field, and the contract it has to keep is the
+// strongest one available: the surface in WORLD space is identical before and
+// after, only which half counts as upper and which as lower swaps.
+// ---------------------------------------------------------------------------
+TEST_CASE("Curved cut: flipping the frame carries the sheet", "[CurvedCut]")
+{
+    // A deliberately ASYMMETRIC surface: a symmetric one would pass a mirror
+    // test for the wrong reason.
+    auto make_lopsided = []() {
+        CurvedCutSheet s(7);
+        s.set_half_size(30.0, 20.0);
+        for (int j = 0; j < s.resolution(); ++ j)
+            for (int i = 0; i < s.resolution(); ++ i) {
+                const Vec2d xy = s.control_xy(i, j);
+                s.at(i, j) = 0.05 * xy.x() + 0.004 * xy.y() * xy.y() - 0.0009 * xy.x() * xy.x() * xy.y();
+            }
+        s.commit_reference();
+        return s;
+    };
+
+    // The frame turn the gizmo performs, as a transform of the plane frame.
+    const Transform3d flip_u = Eigen::Affine3d(Eigen::AngleAxisd(PI, Vec3d::UnitX()));
+    const Transform3d flip_v = Eigen::Affine3d(Eigen::AngleAxisd(PI, Vec3d::UnitY()));
+
+    // A point of the sheet in world space, given the plane frame the sheet lives in.
+    auto world_point = [](const CurvedCutSheet& s, const Transform3d& frame, double x, double y) {
+        return frame * Vec3d(x, y, s.evaluate_local(x, y));
+    };
+
+    SECTION("flip about u: the world surface is unchanged")
+    {
+        const CurvedCutSheet before = make_lopsided();
+        CurvedCutSheet       after  = before;
+        after.flip_about_u();
+
+        // Same domain, same resolution: a flip must not re-fit anything.
+        REQUIRE(after.resolution() == before.resolution());
+        REQUIRE(after.half_size_u() == Approx(before.half_size_u()));
+        REQUIRE(after.half_size_v() == Approx(before.half_size_v()));
+
+        // Sample densely over the whole domain, off the control points as well as
+        // on them, and compare the two surfaces in WORLD space. The flipped sheet
+        // is read in the flipped frame, which is what the gizmo will do.
+        const int    N  = 41;
+        double       worst = 0.0;
+        for (int b = 0; b < N; ++ b) {
+            const double y = before.half_size_v() * (2.0 * double(b) / double(N - 1) - 1.0);
+            for (int a = 0; a < N; ++ a) {
+                const double x = before.half_size_u() * (2.0 * double(a) / double(N - 1) - 1.0);
+                // The SAME world column: in the flipped frame that column is at
+                // local (x, -y), because the frame's Y negated.
+                const Vec3d p0 = world_point(before, Transform3d::Identity(), x, y);
+                const Vec3d p1 = world_point(after,  flip_u,                 x, -y);
+                worst = std::max(worst, (p1 - p0).norm());
+            }
+        }
+        INFO("worst world-space deviation: " << worst << " mm");
+        REQUIRE(worst < 1e-6);
+    }
+
+    SECTION("flip about v: the world surface is unchanged")
+    {
+        const CurvedCutSheet before = make_lopsided();
+        CurvedCutSheet       after  = before;
+        after.flip_about_v();
+
+        const int N  = 41;
+        double    worst = 0.0;
+        for (int b = 0; b < N; ++ b) {
+            const double y = before.half_size_v() * (2.0 * double(b) / double(N - 1) - 1.0);
+            for (int a = 0; a < N; ++ a) {
+                const double x = before.half_size_u() * (2.0 * double(a) / double(N - 1) - 1.0);
+                const Vec3d p0 = world_point(before, Transform3d::Identity(), x, y);
+                const Vec3d p1 = world_point(after,  flip_v,                 -x, y);
+                worst = std::max(worst, (p1 - p0).norm());
+            }
+        }
+        INFO("worst world-space deviation: " << worst << " mm");
+        REQUIRE(worst < 1e-6);
+    }
+
+    SECTION("a flip is its own inverse, bit for bit")
+    {
+        const CurvedCutSheet before = make_lopsided();
+        CurvedCutSheet       there  = before;
+        there.flip_about_u();
+        there.flip_about_u();
+        REQUIRE(there.values() == before.values());
+
+        CurvedCutSheet there_v = before;
+        there_v.flip_about_v();
+        there_v.flip_about_v();
+        REQUIRE(there_v.values() == before.values());
+    }
+
+    SECTION("a flat sheet stays flat, and a flip republishes the reference")
+    {
+        CurvedCutSheet flat(5);
+        flat.flip_about_u();
+        REQUIRE(flat.is_flat());
+
+        // The reference has to follow the flip: otherwise the next extent re-fit
+        // would re-sample the PRE-flip surface and quietly undo it. Re-fitting to
+        // a different extent and back must reproduce the FLIPPED shape.
+        CurvedCutSheet s = make_lopsided();
+        s.flip_about_u();
+        const std::vector<double> flipped = s.values();
+        const double hs_u = s.half_size_u(), hs_v = s.half_size_v();
+        s.set_half_size(hs_u * 1.4, hs_v * 1.4, /*resample*/ true);
+        s.set_half_size(hs_u, hs_v, /*resample*/ true);
+        REQUIRE(s.values().size() == flipped.size());
+        for (size_t k = 0; k < flipped.size(); ++ k)
+            REQUIRE(s.values()[k] == Approx(flipped[k]).margin(1e-9));
+    }
+}

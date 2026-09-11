@@ -45,6 +45,35 @@ void CurvedCutSheet::set_values(const std::vector<double>& z)
     }
 }
 
+// A 180-degree turn of the plane frame about its own X: local y and z both
+// negate, so the height field must become f_new(x, -y) = -f_old(x, y). On the
+// control grid that is "mirror j, negate the value" - exact, and self-inverse.
+void CurvedCutSheet::flip_about_u()
+{
+    const int           n = m_resolution;
+    std::vector<double> nz(m_z.size(), 0.0);
+    for (int j = 0; j < n; ++ j)
+        for (int i = 0; i < n; ++ i)
+            nz[size_t(j) * n + i] = -m_z[size_t(n - 1 - j) * n + i];
+    m_z = std::move(nz);
+    // A flip IS an edit of the surface, so the reference follows it. Leaving the
+    // pre-flip reference in place would let the next extent re-fit re-sample the
+    // OLD surface and quietly undo the flip.
+    publish_reference();
+}
+
+// The same for a turn about the frame's Y: local x and z negate, so mirror i.
+void CurvedCutSheet::flip_about_v()
+{
+    const int           n = m_resolution;
+    std::vector<double> nz(m_z.size(), 0.0);
+    for (int j = 0; j < n; ++ j)
+        for (int i = 0; i < n; ++ i)
+            nz[size_t(j) * n + i] = -m_z[size_t(j) * n + (n - 1 - i)];
+    m_z = std::move(nz);
+    publish_reference();
+}
+
 Vec2d CurvedCutSheet::control_xy(int i, int j) const
 {
     return Vec2d((2.0 * control_u(i) - 1.0) * m_half_size_u,
