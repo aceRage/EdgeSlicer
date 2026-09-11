@@ -92,6 +92,7 @@
 #include "MainFrame.hpp"
 #include "slic3r/GUI/FlashForge/DeviceData.hpp"
 #include "slic3r/GUI/FlashForge/MultiComMgr.hpp"
+#include "slic3r/GUI/FlashForge/FFDiagnostics.hpp"
 #include "Plater.hpp"
 #include "GLCanvas3D.hpp"
 #include "GeneratedConfig.hpp"
@@ -3809,23 +3810,67 @@ __retry:
 
     profiler.note(std::string("create_network_agent=") + (create_network_agent ? "true" : "false"));
 
-    // Ultra: Flashforge device stack - initialize their network lib when the
-    // user has dropped FlashNetwork.dll (from a Flash Studio install) beside the
-    // executable. Without it the Flashforge Device tab simply lists no devices.
-    {
-        wxFileName appFileName(wxStandardPaths::Get().GetExecutablePath());
-        const wxString dllPathW = appFileName.GetPathWithSep() + "FlashNetwork.dll";
-        const std::string dllPath = std::string(dllPathW.ToUTF8());
-        if (wxFileName::FileExists(dllPathW)) {
-            if (MultiComMgr::inst()->initalize(dllPath, data_dir()))
-                BOOST_LOG_TRIVIAL(info) << "FlashNetwork initialized from " << dllPath;
-            else
-                BOOST_LOG_TRIVIAL(error) << "FlashNetwork found but failed to initialize: " << dllPath;
-        } else {
-            BOOST_LOG_TRIVIAL(info) << "FlashNetwork.dll not present; Flashforge device connectivity disabled";
+    // Ultra: Flashforge device stack. Their closed FlashNetwork library is shipped beside the
+    // executable (FLASHNETWORK_BIN_DIR); a user who has to place it by hand can also drop it in
+    // <data dir>/plugins. Failure is recorded rather than only logged, so the Device tab can show
+    // what went wrong instead of an empty page.
+    init_flashnetwork();
+
+    return true;
+}
+
+// Ultra: bring up FlashForge's FlashNetwork library.
+//
+// The library is FlashForge's, closed, and published nowhere but inside their own installers, so
+// EdgeSlicer redistributes it unmodified rather than downloading it on demand. It is searched for
+// beside the executable first (where the installer puts it) and then in <data dir>/plugins (the
+// only place a user without administrator rights can fill in by hand).
+//
+// Every outcome is recorded on the app object. An empty Device tab tells a user nothing; the tab
+// reads these back and shows the paths that were tried with a Download/Locate action.
+bool GUI_App::init_flashnetwork(const std::string &explicit_path)
+{
+    if (m_flashnetwork_loaded)
+        return true;
+
+    m_flashnetwork_error.clear();
+    m_flashnetwork_path.clear();
+    m_flashnetwork_searched.clear();
+
+    wxFileName appFileName(wxStandardPaths::Get().GetExecutablePath());
+    const std::string exe_dir = std::string(appFileName.GetPath().ToUTF8());
+
+    if (!explicit_path.empty()) {
+        m_flashnetwork_searched.push_back(explicit_path);
+    } else {
+        m_flashnetwork_searched = ff_flashnetwork_search_paths(exe_dir, data_dir());
+    }
+
+    std::string found;
+    for (const std::string &candidate : m_flashnetwork_searched) {
+        if (wxFileName::FileExists(wxString::FromUTF8(candidate.c_str()))) {
+            found = candidate;
+            break;
         }
     }
 
+    if (found.empty()) {
+        m_flashnetwork_error = ff_flashnetwork_missing_text(m_flashnetwork_searched);
+        BOOST_LOG_TRIVIAL(info) << "FlashNetwork.dll not present; Flashforge device connectivity disabled";
+        return false;
+    }
+
+    m_flashnetwork_path = found;
+    if (!MultiComMgr::inst()->initalize(found, data_dir())) {
+        // Found but would not load: wrong architecture, a truncated copy, or a DLL that needs a
+        // runtime this machine lacks. The path is the useful half of the message.
+        m_flashnetwork_error = ff_flashnetwork_load_failed_text(found);
+        BOOST_LOG_TRIVIAL(error) << "FlashNetwork found but failed to initialize: " << found;
+        return false;
+    }
+
+    m_flashnetwork_loaded = true;
+    BOOST_LOG_TRIVIAL(info) << "FlashNetwork initialized from " << found;
     return true;
 }
 

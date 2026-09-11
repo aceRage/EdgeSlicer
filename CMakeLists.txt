@@ -954,6 +954,26 @@ if (WIN32)
         endif()
         message(STATUS "EdgeSlicer: shipping the network plugin from ${ULTRANET_BIN_DIR}")
     endif()
+
+    # EdgeSlicer: FlashForge's FlashNetwork library. The FlashForge device tab drives Creator 5 and
+    # friends entirely through this closed, pre-built DLL - without it the tab cannot initialise and
+    # no LAN send is possible. FlashForge publishes it nowhere: it exists only inside their Flash
+    # Studio Desktop installers, so there is no URL to download it from on first need and it has to
+    # be shipped. Point FLASHNETWORK_BIN_DIR at a folder holding FlashNetwork.dll to include it:
+    #
+    #   -DFLASHNETWORK_BIN_DIR=C:/path/to/flashnetwork_out/ship
+    #
+    # The library is redistributed unmodified; see docs/superpowers/specs/2026-09-11-flashforge-lan-ship.md
+    # for its provenance (Flash Studio Desktop 1.7.13) and the sha256 it is pinned to. It is x64 and
+    # needs only the MSVC runtime we already ship, so no companion DLLs travel with it.
+    if (FLASHNETWORK_BIN_DIR AND EXISTS "${FLASHNETWORK_BIN_DIR}/FlashNetwork.dll")
+        install(FILES "${FLASHNETWORK_BIN_DIR}/FlashNetwork.dll" DESTINATION ".")
+        # Any companion DLLs a future build of the library may need.
+        install(DIRECTORY "${FLASHNETWORK_BIN_DIR}/" DESTINATION "." FILES_MATCHING PATTERN "*.dll")
+        message(STATUS "EdgeSlicer: shipping FlashForge's FlashNetwork library from ${FLASHNETWORK_BIN_DIR}")
+    else()
+        message(STATUS "EdgeSlicer: no FLASHNETWORK_BIN_DIR - FlashForge LAN printing will be unavailable in this package")
+    endif()
     set(CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS_SKIP TRUE)
     include(InstallRequiredSystemLibraries)
     install (PROGRAMS ${CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS} DESTINATION ".")
