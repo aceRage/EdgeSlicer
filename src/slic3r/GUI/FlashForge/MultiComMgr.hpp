@@ -35,6 +35,21 @@ public:
 
     bool initalize(const std::string &dllPath, const std::string &dataDir);
 
+    // FlashNetwork fixes its log level in fnet_initlize and offers no runtime setter, so raising
+    // it means tearing the stack down and bringing it back up. Diagnostics does exactly that, so
+    // a user can produce debug logs without creating the FLASHNETWORK_DEBUG marker file by hand
+    // and restarting. Returns false when the stack was never up, or the re-init failed (in which
+    // case it is left down and the caller should say so).
+    bool setDebugLogging(bool debug);
+
+    bool debugLogging() const { return m_debugLogging; }
+
+    // Where FlashNetwork writes its logs: <data dir>/FlashNetwork. Empty before initalize().
+    const std::string &logFileDir() const { return m_logFileDir; }
+
+    // The library version string (fnet_getVersion), or empty when nothing is loaded.
+    std::string libraryVersion();
+
     void uninitalize();
 
     fnet::FlashNetworkIntfc *networkIntfc();
@@ -152,6 +167,11 @@ private:
     std::unique_ptr<WanDevMaintainThd>       m_wanDevMaintainThd;
     std::unique_ptr<WanDevSendGcodeThd>      m_sendGcodeThd;
     std::unique_ptr<fnet::FlashNetworkIntfc> m_networkIntfc;
+    // Remembered so setDebugLogging() can re-initalize with a different log level.
+    std::string m_dllPath;
+    std::string m_dataDir;
+    std::string m_logFileDir;
+    bool        m_debugLogging { false };
     std::unique_ptr<ComThreadPool>           m_threadPool;
     WaitEvent                                m_threadExitEvent;
 };

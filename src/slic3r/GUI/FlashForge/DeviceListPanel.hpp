@@ -202,6 +202,7 @@ private:
     void copyDeviceInfo(DeviceInfoItemPanel::DeviceInfo& dest, const DeviceInfoItemPanel::DeviceInfo& source);
 
     void onFilterButtonClicked(wxMouseEvent &event);
+    void onTestConnection(wxCommandEvent &event);
     void onNetworkTypeToggled(wxCommandEvent& event);
     void onStaticModeToggled(wxCommandEvent &event);
     void onDeviceListUpdated(DeviceListUpdateEvent& event);
@@ -257,6 +258,10 @@ private:
     FFToggleButton* m_wlan_btn {nullptr};
     FFToggleButton* m_lan_btn {nullptr};
     FFBitmapToggleButton* m_static_btn {nullptr};
+    // Opens the LAN connection test / diagnostics dialog, prefilled from the selected device.
+    // It is here rather than on a device card because the case that needs it most is the one
+    // where no card appeared at all.
+    wxButton* m_test_btn {nullptr};
     
     wxWebView*        m_webBanner{nullptr};
     wxSimplebook*   m_simple_book {nullptr};
