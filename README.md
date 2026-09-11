@@ -76,7 +76,7 @@ On the **Snapmaker U1**, *Unload filaments after print* is a machine setting wit
 - **Paint depth** — a painted multi-material claim can be bounded by wall count or by distance instead of running all the way through the part.
 - **Split by painted colour** — turn a painted model into separate parts, one closed shell per painted region, placed back where they were.
 - **Filament colours and count survive printer switches**; **Apply All** sets every filament slot in one click; **per-filament Z offset**.
-- **Spool Manager** — [Spoolman](https://github.com/Donkie/Spoolman) inventory, spool-to-slot bindings, and optional automatic usage deduction when a job is sent.
+- **Spool Manager** — [Spoolman](https://github.com/Donkie/Spoolman) inventory, spool-to-slot bindings, and optional automatic usage deduction when a job is sent. A Reprint or a send from the phone deducts filament the same way a desktop send does.
 
 ![Normal and tree supports printing in the colour of the surface they touch, and the Support Filament Matching option](docs/images/support-matching.png)
 ![Four brims each printed in the colour of the wall they touch, and the Brim filament: Nearest wall setting](docs/images/brim-match.png)
@@ -112,6 +112,7 @@ On the **Snapmaker U1**, *Unload filaments after print* is a machine setting wit
 - **Locked Zag infill** — the skin and the skeleton can each take their own infill pattern, as in Bambu Studio, and *skin follows the surface* hugs the contour on sloped tops. Existing profiles slice exactly as before until you opt in, and Bambu profiles that set these keys import as-is.
 - **Fuzzy skin** — overhanging wall segments can be left unfuzzed, so the jitter stops pushing extrusion into open air, and a width floor tied to the layer height keeps Extrusion and Combined modes from aborting a slice.
 - **Seam position** can be Left or Right as well as Back.
+- **Create filament** dialog is sorted and easier to scan.
 - **Print unsupported walls last**, **Undertop surface pattern**, **Z overrides X/Y** support option, **machine prepare time** in estimates.
 - **Deterministic slicing** — slice lines are sorted after the parallel pass, so the same project gives the same G-code every time, at any thread count. Internal bridges anchor correctly over Hilbert Curve and Octagram Spiral infill, and the wipe tower's footprint, placement and preview match what is printed, from the command line too.
 
@@ -194,7 +195,7 @@ Windows packaging: `cpack -G NSIS` in `build/` produces the installer (needs NSI
 
 ## Status and roadmap
 
-The current release is **[v2.3.8.0-edge](https://github.com/aceRage/EdgeSlicer/releases/tag/v2.3.8.0-edge)** (2026-09-11), following v2.3.7.0-edge (2026-09-09). Releases before v2.3.6.5-edge were made under the fork's previous names and have been removed, so there is no upgrade path from them other than installing fresh — your data directory is migrated automatically (see above).
+The current release is **[v2.3.8.0-edge](https://github.com/aceRage/EdgeSlicer/releases/tag/v2.3.8.0-edge)** (2026-09-11), following v2.3.7.0-edge (2026-09-09). Releases before v2.3.7.0-edge (including v2.3.6.5-edge, the first under the EdgeSlicer name) have been removed, so there is no upgrade path from them other than installing fresh — your data directory is migrated automatically (see above).
 
 Known limits and work in progress, stated plainly:
 
