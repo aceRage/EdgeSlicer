@@ -1089,7 +1089,8 @@ void MenuFactory::append_menu_item_change_extruder(wxMenu* menu)
 void MenuFactory::append_menu_item_scale_selection_to_fit_print_volume(wxMenu* menu)
 {
     append_menu_item(menu, wxID_ANY, _L("Scale to build volume"), _L("Scale an object to fit the build volume"),
-        [](wxCommandEvent&) { plater()->scale_selection_to_fit_print_volume(); }, "", menu);
+        [](wxCommandEvent&) { plater()->scale_selection_to_fit_print_volume(); }, "", menu,
+        []() { return plater()->can_scale_to_print_volume(); }, m_parent);
 }
 
 void MenuFactory::append_menu_items_flush_options(wxMenu* menu)
@@ -1849,6 +1850,9 @@ void MenuFactory::create_extra_object_menu()
     append_menu_item_center(&m_object_menu);
     // Object Drop
     append_menu_item_drop(&m_object_menu);
+    // The BBL object menu is built here, not by create_common_object_menu, so the upstream
+    // "Scale to build volume" entry never reached it.
+    append_menu_item_scale_selection_to_fit_print_volume(&m_object_menu);
     // Object Split
     wxMenu* split_menu = new wxMenu();
     if (!split_menu)
