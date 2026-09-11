@@ -78,6 +78,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/CameraUtils.hpp
     GUI/CloneDialog.cpp
     GUI/CloneDialog.hpp
+    GUI/FillBedDialog.cpp
+    GUI/FillBedDialog.hpp
     GUI/ColorSplitDialog.cpp
     GUI/ColorSplitDialog.hpp
     GUI/ImageFillDialog.cpp

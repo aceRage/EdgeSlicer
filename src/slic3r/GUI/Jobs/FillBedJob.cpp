@@ -7,6 +7,7 @@
 #include "slic3r/GUI/GLCanvas3D.hpp"
 #include "slic3r/GUI/GUI_ObjectList.hpp"
 #include "libnest2d/common.hpp"
+#include "libslic3r/FillBedPack.hpp"
 
 #include <numeric>
 
@@ -24,6 +25,13 @@ void FillBedJob::prepare()
     m_bedpts.clear();
 
     params = init_arrange_params(m_plater);
+    // The dialog gap goes in AFTER init_arrange_params, which sets min_obj_distance from the
+    // arrange toolbar spacing (and zeroes it when the plate's print sequence differs from the
+    // global one). It still goes through params.min_obj_distance, so update_selected_items_inflation
+    // can raise it for sequential-print clearance. 0 keeps today's "auto" behaviour.
+    if (m_settings.gap > 0.)
+        params.min_obj_distance = scaled(m_settings.gap);
+    params.allow_rotations = m_settings.allow_rotation;
 
     m_object_idx = m_plater->get_selected_object_idx();
     if (m_object_idx == -1)
@@ -145,22 +153,57 @@ void FillBedJob::prepare()
 
     double sc = scaled<double>(1.) * scaled(1.);
 
-    auto polys = offset_ex(m_selected.front().poly, params.min_obj_distance / 2);
-    ExPolygon poly = polys.empty() ? m_selected.front().poly : polys.front();
-    double poly_area = poly.area() / sc;
     double unsel_area = std::accumulate(m_unselected.begin(),
                                         m_unselected.end(), 0.,
                                         [cur_plate_index](double s, const auto &ap) {
                                             //BBS: m_unselected instance is in the same partplate
                                             return s + (ap.bed_idx == cur_plate_index) * ap.poly.area();
-                                            //return s + (ap.bed_idx == 0) * ap.poly.area();
                                         }) / sc;
 
-    double fixed_area = unsel_area + m_selected.size() * poly_area;
-    double bed_area   = Polygon{m_bedpts}.area() / sc;
+    // The bed the packer will really get: arrange's own shrink, then the user's edge margins.
+    // update_arrange_params() +=s the skirt distance into bed_shrink_x/y, so it must not run on
+    // the member `params` here - process() runs it there. A copy keeps this idempotent without
+    // touching Arrange.cpp.
+    arrangement::ArrangeParams est_params = params;
+    update_arrange_params(est_params, m_plater->config(), m_selected);
+    // Sequential print raises min_obj_distance to the extruder clearance; that happens inside
+    // update_selected_items_inflation, so run it on throwaway copies of the items to learn the
+    // real gap without disturbing the ones process() will pack.
+    {
+        ArrangePolygons probe = m_selected;
+        update_selected_items_inflation(probe, m_plater->config(), est_params);
+    }
+    const Points est_bedpts = apply_user_bed_margins(get_shrink_bedpts(m_plater->config(), est_params), est_params);
+    const double bed_area   = std::abs(Polygon{est_bedpts}.area()) / sc;
 
-    // This is the maximum number of items, the real number will always be close but less.
-    int needed_items = (bed_area - fixed_area) / poly_area;
+    // The area already taken by the objects staying put, plus the copies of the template that
+    // are already on the plate.
+    const double sel_area   = m_selected.front().poly.area() / sc;
+    const double free_area  = std::max(0., bed_area - unsel_area - double(m_selected.size()) * sel_area);
+
+    // The gap the packer will really use. update_selected_items_inflation() takes the
+    // min_obj_distance/2 branch once a distance is set, dropping the brim entirely, so the fill
+    // path widens the gap to the brim where the brim is wider - a 1 mm gap on a tree-support
+    // object would otherwise mean colliding brims.
+    double brim_max = 0.;
+    for (const ArrangePolygon &ap : m_selected) brim_max = std::max(brim_max, double(ap.brim_width));
+    const double eff_gap = std::max(unscaled<double>(est_params.min_obj_distance), brim_max);
+    if (m_settings.gap > 0.)
+        params.min_obj_distance = scaled(eff_gap);
+
+    const BoundingBox tmpl_bb = m_selected.front().poly.contour.bounding_box();
+    const double tmpl_w = unscaled<double>(tmpl_bb.size().x());
+    const double tmpl_h = unscaled<double>(tmpl_bb.size().y());
+
+    // A tiling estimate, not an area ratio: the gap is SHARED between neighbours, so a copy
+    // occupies (w+gap)*(h+gap) rather than the area of its fully inflated outline. The overshoot
+    // means a slightly optimistic pack is never starved of items; whatever lands on a virtual bed
+    // is dropped by finalize().
+    int needed_items = fill_bed::estimate_count_with_overshoot(tmpl_w, tmpl_h, eff_gap, free_area);
+    // process() still routes more than 100 items to the old bounding-box grid branch, which
+    // ignores the gap, the margins and the other objects. Keep the TOTAL at or below that so
+    // phase 1 always takes the NFP path the dialog drives.
+    needed_items = std::max(0, std::min(needed_items, fill_bed::COUNT_CAP - int(m_selected.size())));
 
     //int sel_id = m_plater->get_selection().get_instance_idx();
     // if the selection is not a single instance, choose the first as template
@@ -204,7 +247,8 @@ void FillBedJob::process(Ctl &ctl)
     if (m_object_idx == -1 || m_selected.empty()) return;
 
     update_arrange_params(params, m_plater->config(), m_selected);
-    m_bedpts = get_shrink_bedpts(m_plater->config(), params);
+    // arrange's own shrink first, then the user's fill-only edge / front margins on top.
+    m_bedpts = apply_user_bed_margins(get_shrink_bedpts(m_plater->config(), params), params);
 
     auto &partplate_list               = m_plater->get_partplate_list();
     auto &print                        = wxGetApp().plater()->get_partplate_list().get_current_fff_print();
@@ -217,19 +261,18 @@ void FillBedJob::process(Ctl &ctl)
     update_selected_items_inflation(m_selected, m_plater->config(), params);
     update_unselected_items_inflation(m_unselected, m_plater->config(), params);
 
-    bool do_stop = false;
-    params.stopcondition = [&ctl, &do_stop]() {
-        return ctl.was_canceled() || do_stop;
-    };
+    // NO early stop. The old on_packed/do_stop pair aborted the whole pack the moment one
+    // clone landed on plate 1 - with a greedy TOP_RIGHT start that usually happened while
+    // space remained at the far corner, leaving a whole strip of the bed empty. The surplus
+    // clones are simply discarded: finalize() skips every item with bed_idx != 0, and the
+    // cloning setter only fires inside the bed_idx == 0 branch.
+    params.stopcondition = [&ctl]() { return ctl.was_canceled(); };
 
     params.progressind = [this, &ctl, &statustxt](unsigned st,std::string str="") {
          if (st > 0)
              ctl.update_status(st * 100 / status_range(), statustxt + " " + str);
     };
 
-    params.on_packed = [&do_stop] (const ArrangePolygon &ap) {
-        do_stop = ap.bed_idx > 0 && ap.priority == 0;
-    };
     // final align用的是凸包，在有fixed item的情况下可能找到的参考点位置是错的，这里就不做了。见STUDIO-3265
     params.do_final_align = !is_bbl;
 
@@ -256,6 +299,22 @@ void FillBedJob::process(Ctl &ctl)
 }
 
 FillBedJob::FillBedJob() : m_plater{wxGetApp().plater()} {}
+
+FillBedJob::FillBedJob(const FillBedSettings &settings) : m_settings(settings), m_plater{wxGetApp().plater()} {}
+
+// The user's edge margin on all four sides and the front override on the min-Y edge, applied
+// to a bed outline that get_shrink_bedpts has already shrunk. Each side only moves by what
+// arrange has not already taken off, so margins of 0 are bit-identical to the old behaviour
+// and the dialog can never place a copy CLOSER to the edge than arrange would.
+Points FillBedJob::apply_user_bed_margins(const Points &bedpts, const arrangement::ArrangeParams &p) const
+{
+    return fill_bed::shrink_bed_per_side(bedpts,
+                                         m_settings.edge_margin,
+                                         m_settings.front_margin,
+                                         m_settings.front_enabled,
+                                         p.bed_shrink_x,
+                                         p.bed_shrink_y);
+}
 
 void FillBedJob::finalize(bool canceled, std::exception_ptr &eptr)
 {
