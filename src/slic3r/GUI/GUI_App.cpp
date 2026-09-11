@@ -1834,18 +1834,9 @@ int GUI_App::install_bambu_camera_component(InstallProgressFn pro_fn, WasCancell
         return InstallStatusUnzipFailed;
     }
 
-    // Only these two, matched on the bare filename so a package that nests them in a folder still
-    // works. Anything else in the zip - bambu_networking above all - is ignored.
+    // Matched on the bare filename so a package that nests them in a folder still works. The
+    // network library is never taken: bambu_networking.dll and the ultranet.txt marker stay ours.
     const std::string want_source = bambu_source_library_name();
-    const std::string want_live555 =
-#if defined(_WIN32)
-        "live555.dll";
-#elif defined(__APPLE__)
-        "liblive555.dylib";
-#else
-        "liblive555.so";
-#endif
-
     const fs::path plugins_dir     = fs::path(data_dir()) / "plugins";
     const fs::path cameratools_dir = fs::path(data_dir()) / "cameratools";
     boost::system::error_code ec;
@@ -1873,8 +1864,13 @@ int GUI_App::install_bambu_camera_component(InstallProgressFn pro_fn, WasCancell
         }
         const std::string leaf = fs::path(entry).filename().string();
         const bool is_source  = boost::iequals(leaf, want_source);
-        const bool is_live555 = boost::iequals(leaf, want_live555);
-        if (!is_source && !is_live555)
+        // Bambu's package carries the filter's own dependencies next to it (live555 for LAN RTSP,
+        // the agora_* / libaosl set for cloud streams); the filter fails to load without them, so
+        // every shared library in the package is taken - except the network library, which is ours.
+        const std::string leaf_lower = boost::to_lower_copy(leaf);
+        const bool is_library = boost::ends_with(leaf_lower, ".dll") || boost::ends_with(leaf_lower, ".dylib") || boost::ends_with(leaf_lower, ".so");
+        const bool is_network = boost::starts_with(leaf_lower, "bambu_networking") || boost::starts_with(leaf_lower, "libbambu_networking");
+        if (!is_source && (!is_library || is_network))
             continue;
 
         // Extract to a temp file first, so a half-written download can never leave a truncated
