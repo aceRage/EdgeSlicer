@@ -342,7 +342,7 @@ static std::string collapse_for(const std::string& printer_id, const std::string
 static std::string plaintext_for(const json& e)
 {
     json        p;
-    std::string title = ev_str(e, "title", "Snapmaker Orca");
+    std::string title = ev_str(e, "title", "EdgeSlicer");
     std::string body  = ev_str(e, "text");
     std::string who;
     if (e.is_object() && e.contains("printer") && e["printer"].is_object()) who = ev_str(e["printer"], "name");
@@ -852,7 +852,7 @@ std::pair<int, std::string> test()
     // whatever the filters say: the button is here to prove the path to the device works.
     e["kind"]     = RemoteEvents::test_kind(kinds);
     e["severity"] = "info";
-    e["title"]    = "Snapmaker Orca test";
+    e["title"]    = "EdgeSlicer test";
     e["text"]     = "This is a test push from the hub on your PC. If you can read it, app push works.";
     const std::string plaintext = plaintext_for(e);
 
