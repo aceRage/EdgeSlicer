@@ -1437,6 +1437,31 @@ void GLCanvas3D::toggle_selected_volume_visibility(bool selected_visible)
             }
         }
     }
+    // The Measure/Assembly gizmo hides everything but the selection while it is open and shows
+    // everything again when it closes. Both halves used to write GLVolume::is_active only, leaving
+    // the picking raycasters behind: reload_scene() re-registers every raycaster with
+    // set_active(v->is_active), so any reload that happened while the gizmo had the scene hidden
+    // baked "inactive" into the raycasters, and the show-all pass never undid it. The volumes then
+    // rendered normally but SceneRaycaster::hit() skipped them, so clicking an object in the 3D
+    // view selected nothing until the next full reload_scene(). Keep the two in step here, the way
+    // toggle_model_objects_visibility()/toggle_sla_auxiliaries_visibility() already do.
+    sync_volume_raycasters_state();
+}
+
+// Bring the Volume picking raycasters back in step with GLVolume::is_active. Any code that flips
+// is_active without touching the raycasters (and any reload_scene() that ran while such a flip was
+// in force) leaves the two out of sync, which shows up as objects that render but cannot be picked.
+void GLCanvas3D::sync_volume_raycasters_state()
+{
+    std::vector<std::shared_ptr<SceneRaycasterItem>>* raycasters = get_raycasters_for_picking(SceneRaycaster::EType::Volume);
+    if (raycasters == nullptr)
+        return;
+    for (const GLVolume* vol : m_volumes.volumes) {
+        auto it = std::find_if(raycasters->begin(), raycasters->end(),
+                               [vol](std::shared_ptr<SceneRaycasterItem> item) { return item->get_raycaster() == vol->mesh_raycaster.get(); });
+        if (it != raycasters->end())
+            (*it)->set_active(vol->is_active);
+    }
 }
 
 void GLCanvas3D::toggle_sla_auxiliaries_visibility(bool visible, const ModelObject *mo, int instance_idx)
@@ -1506,6 +1531,7 @@ void GLCanvas3D::clear_object_view_modes()
         v->ghost     = false;
     }
     m_object_view_modes.clear();
+    sync_volume_raycasters_state();
     m_dirty = true;
     request_extra_frame();
 }
@@ -1548,6 +1574,8 @@ void GLCanvas3D::apply_object_view_modes()
             v->ghost = true;
         }
     }
+    // Hidden flips is_active, so the picking raycasters have to follow it.
+    sync_volume_raycasters_state();
     m_dirty = true;
 }
 
