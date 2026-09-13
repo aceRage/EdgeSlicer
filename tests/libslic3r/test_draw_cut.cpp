@@ -493,6 +493,13 @@ TEST_CASE("Draw cut: the plug does not depend on which way the loop was drawn", 
         REQUIRE(s.is_closed());
         DrawCutParams params;
         params.extension = 5.0;
+        // PHASE 3: on a FLAT face a lip of 0 is a flat shelf lying along the face, so
+        // the band never enters the material and there is no plug to compare. The
+        // winding question this case asks is about the cut surface, not about the
+        // angle, so give it an angle that actually cuts - 90, the straight-walled
+        // plug the ruled strip used to make here.
+        params.angle_deg = 90.0;
+        params.depth     = 6.0;
         indexed_triangle_set up, lo;
         REQUIRE(draw_cut_split(cube, s, params, &up, &lo, nullptr));
         return std::make_pair(up, lo);
@@ -864,6 +871,11 @@ TEST_CASE("Draw cut: Depth stops the cut short of through-all", "[DrawCut]")
     params.extension   = 4.0;
     params.through_all = false;
     params.depth       = 10.0; // a 10 mm deep pocket in a 40 mm cube
+    // PHASE 3: Depth is the band's travel along d(p), and d(p) is straight down only
+    // at a 90 degree lip. With that, Depth is the pocket's depth exactly as it was
+    // under the ruled strip, which is what this case measures. What Depth does at
+    // other angles is covered by the new `Depth sizes the flat core`.
+    params.angle_deg   = 90.0;
 
     indexed_triangle_set upper, lower;
     REQUIRE(draw_cut_split(cube, stroke, params, &upper, &lower, nullptr));
@@ -922,34 +934,51 @@ TEST_CASE("Draw cut: Depth stops the cut short of through-all", "[DrawCut]")
 
 // The closed-form frustum volume for a draft of `angle_deg` cut `h` deep in z
 // from a circle of radius R.
-static double frustum_volume(double R, double h, double angle_deg)
+[[maybe_unused]] static double frustum_volume(double R, double h, double angle_deg)
 {
     const double r2 = R + h * std::tan(angle_deg * M_PI / 180.0);
     return M_PI * h / 3.0 * (R * R + R * r2 + r2 * r2);
 }
 
 // The ruling depth that cuts `h` deep in z at `angle_deg`.
-static double ruling_depth_for(double h, double angle_deg)
+[[maybe_unused]] static double ruling_depth_for(double h, double angle_deg)
 {
     return h / std::cos(angle_deg * M_PI / 180.0);
 }
 
-TEST_CASE("Draw cut: a positive angle flares the plug into a frustum", "[DrawCut]")
+// PHASE 3 (2026-09-13). The two cases that used to live here measured the SIGNED
+// DRAFT ANGLE against a closed-form frustum, by cutting a CLOSED loop on a cube
+// and weighing the plug. Phase 3 replaced the closed-loop surface: a loop is now a
+// band plus a flat core, and `angle_deg` is the unsigned LIP ANGLE (0..90) rather
+// than a signed draft, so a frustum is no longer the shape that cut makes and
+// there is nothing left for those assertions to be true of.
+//
+// The draft itself is NOT gone - it is still exactly what an OPEN stroke's ruled
+// strip does, and draw_cut_inward_dir() is still its implementation (the three
+// structural cases below test it directly and are unchanged). So the measurement
+// is kept, retargeted at the surface that still has a draft: an open stroke swept
+// across the cube. The closed-loop replacements for what these used to cover are
+// `the band's inward slope is the angle` and `the angle changes the plug without
+// changing the flat core's plane`, in the phase 3 block at the end of this file.
+
+TEST_CASE("Draw cut: a draft angle tilts an open stroke's ruled strip", "[DrawCut]")
 {
+    // The open stroke keeps the phase 1/2 model, so the draft still means what it
+    // meant: the ruling is the inward normal rotated towards the outward binormal,
+    // and the cut face leans by exactly that much.
     const indexed_triangle_set cube = centred_cube();
     const double cube_volume = double(its_volume(cube));
 
-    const double R = 12.0, H = 8.0, ANGLE = 30.0;
+    const double ANGLE = 30.0;
 
-    DrawCutStroke stroke = circle_on_top(R, 96);
+    DrawCutStroke stroke = line_on_top(30.0, 60);
     REQUIRE(stroke.finish(1.0, 0.0) == DrawCutError::None);
-    REQUIRE(stroke.is_closed());
+    REQUIRE_FALSE(stroke.is_closed());
 
     DrawCutParams params;
     params.direction   = DrawCutDirection::SurfaceNormal;
-    params.extension   = 3.0;
-    params.through_all = false;
-    params.depth       = ruling_depth_for(H, ANGLE);
+    params.extension   = 5.0;
+    params.through_all = true;
     params.angle_deg   = ANGLE;
 
     indexed_triangle_set upper, lower;
@@ -959,90 +988,56 @@ TEST_CASE("Draw cut: a positive angle flares the plug into a frustum", "[DrawCut
     REQUIRE(watertight(upper));
     REQUIRE(watertight(lower));
 
-    // THE HEADLINE: the plug's volume matches the closed form within 5%, which is
-    // the tolerance the brief asks for.
-    const double plug = double(its_volume(upper));
-    REQUIRE(plug == Approx(frustum_volume(R, H, ANGLE)).epsilon(0.05));
+    // Material is conserved: a draft changes the SHAPE of the cut, not how much
+    // material there is.
+    REQUIRE(double(its_volume(upper)) + double(its_volume(lower)) ==
+            Approx(cube_volume).epsilon(1e-3));
 
-    // And it is a FRUSTUM, not a cylinder: a positive angle makes it visibly bigger
-    // than the straight cut would have been (1.43x here - well outside the 5%).
-    const double cylinder = M_PI * R * R * H;
-    REQUIRE(plug > 1.2 * cylinder);
-
-    // Volume is still conserved - a draft angle changes the SHAPE of the cut, not
-    // how much material there is.
-    REQUIRE(plug + double(its_volume(lower)) == Approx(cube_volume).epsilon(1e-3));
-
-    // The geometry the volume is standing in for: the plug is WIDER AT THE BOTTOM.
-    BoundingBoxf3 bb;
-    for (const Vec3f& v : upper.vertices)
-        bb.merge(v.cast<double>());
-    REQUIRE(bb.max.z() == Approx(0.5 * CUBE).margin(0.2));
-    REQUIRE(bb.min.z() == Approx(0.5 * CUBE - H).margin(0.4));
-
-    double r_top = 0.0, r_bottom = 0.0;
-    for (const Vec3f& v : upper.vertices) {
-        const Vec3d p = v.cast<double>();
-        const double r = p.head<2>().norm();
-        if (p.z() > bb.max.z() - 1.0)
-            r_top = std::max(r_top, r);
-        if (p.z() < bb.min.z() + 1.0)
-            r_bottom = std::max(r_bottom, r);
+    // THE RULING LEANS BY THE ANGLE, at every sample. This is the structural fact
+    // the frustum volume used to stand in for.
+    for (size_t i = 0; i < stroke.path().size(); ++ i) {
+        const Vec3d d = draw_cut_inward_dir(stroke, params, i);
+        const Vec3d n = stroke.path()[i].normal;
+        REQUIRE(std::acos(std::clamp(d.dot(-n), -1.0, 1.0)) * 180.0 / M_PI ==
+                Approx(ANGLE).margin(1e-6));
     }
-    REQUIRE(r_top == Approx(R).margin(0.3));
-    REQUIRE(r_bottom == Approx(R + H * std::tan(ANGLE * M_PI / 180.0)).margin(0.5));
-    REQUIRE(r_bottom > r_top);
 }
 
-TEST_CASE("Draw cut: a negative angle undercuts the plug", "[DrawCut]")
+TEST_CASE("Draw cut: a negative draft leans an open stroke's strip the other way", "[DrawCut]")
 {
     const indexed_triangle_set cube = centred_cube();
-    const double cube_volume = double(its_volume(cube));
 
-    const double R = 12.0, H = 8.0, ANGLE = -30.0;
-
-    DrawCutStroke stroke = circle_on_top(R, 96);
+    DrawCutStroke stroke = line_on_top(30.0, 60);
     REQUIRE(stroke.finish(1.0, 0.0) == DrawCutError::None);
 
-    DrawCutParams params;
-    params.direction   = DrawCutDirection::SurfaceNormal;
-    params.extension   = 3.0;
-    params.through_all = false;
-    params.depth       = ruling_depth_for(H, ANGLE);
-    params.angle_deg   = ANGLE;
-
-    indexed_triangle_set upper, lower;
-    DrawCutError err = DrawCutError::None;
-    REQUIRE(draw_cut_split(cube, stroke, params, &upper, &lower, &err));
-    REQUIRE(err == DrawCutError::None);
-    REQUIRE(watertight(upper));
-    REQUIRE(watertight(lower));
-
-    const double plug = double(its_volume(upper));
-    REQUIRE(plug == Approx(frustum_volume(R, H, ANGLE)).epsilon(0.05));
-
-    // AN UNDERCUT PLUG: narrower at the bottom than at the top, so it cannot be
-    // lifted straight out - which is the whole point of a negative angle. It is
-    // therefore SMALLER than the straight cut, the mirror of the +30 case.
-    const double cylinder = M_PI * R * R * H;
-    REQUIRE(plug < 0.8 * cylinder);
-
-    REQUIRE(plug + double(its_volume(lower)) == Approx(cube_volume).epsilon(1e-3));
-
-    BoundingBoxf3 bb;
-    for (const Vec3f& v : upper.vertices)
-        bb.merge(v.cast<double>());
-    double r_top = 0.0, r_bottom = 0.0;
-    for (const Vec3f& v : upper.vertices) {
-        const Vec3d p = v.cast<double>();
-        const double r = p.head<2>().norm();
-        if (p.z() > bb.max.z() - 1.0)
-            r_top = std::max(r_top, r);
-        if (p.z() < bb.min.z() + 1.0)
-            r_bottom = std::max(r_bottom, r);
+    DrawCutParams pos, neg;
+    for (DrawCutParams* p : { &pos, &neg }) {
+        p->direction   = DrawCutDirection::SurfaceNormal;
+        p->extension   = 5.0;
+        p->through_all = true;
     }
-    REQUIRE(r_bottom < r_top);
-    REQUIRE(r_bottom == Approx(R + H * std::tan(ANGLE * M_PI / 180.0)).margin(0.5));
+    pos.angle_deg = +30.0;
+    neg.angle_deg = -30.0;
+
+    // The two drafts are mirror images about the untilted ruling: the same lean,
+    // the other way along the binormal. That is the sign convention, and it is what
+    // made one plug a flare and the other an undercut under the old closed-loop
+    // model.
+    for (size_t i = 0; i < stroke.path().size(); ++ i) {
+        const Vec3d dp = draw_cut_inward_dir(stroke, pos, i);
+        const Vec3d dn = draw_cut_inward_dir(stroke, neg, i);
+        const Vec3d b  = stroke.binormal(i);
+        REQUIRE(dp.dot(b) == Approx(-dn.dot(b)).margin(1e-9));
+        REQUIRE(dp.dot(stroke.path()[i].normal) ==
+                Approx(dn.dot(stroke.path()[i].normal)).margin(1e-9));
+    }
+
+    indexed_triangle_set u, l;
+    REQUIRE(draw_cut_split(cube, stroke, neg, &u, &l, nullptr));
+    REQUIRE(watertight(u));
+    REQUIRE(watertight(l));
+    REQUIRE(double(its_volume(u)) + double(its_volume(l)) ==
+            Approx(double(its_volume(cube))).epsilon(1e-3));
 }
 
 TEST_CASE("Draw cut: angle 0 is bit-for-bit the phase 1 cut", "[DrawCut]")
@@ -1425,6 +1420,13 @@ TEST_CASE("Draw cut: the surface point and frame agree with the cutter", "[DrawC
     params.extension   = 3.0;
     params.through_all = false;
     params.depth       = 10.0;
+    // PHASE 3: a closed loop's surface is the band, and the band's direction is the
+    // lip angle applied to the in-plane inward direction. The setting that makes it
+    // travel STRAIGHT DOWN from a flat top face - the geometry this case was written
+    // against, and still the one it wants - is a 90 degree lip, i.e. a straight-walled
+    // plug. At the phase-3 default of 0 the band runs horizontally inward along the
+    // face instead, which is a flat shelf: a different, also correct, surface.
+    params.angle_deg   = 90.0;
 
     // w == 0 is ON the stroke, so the surface point at a sample's own arc length is
     // that sample. This is the anchor everything else is measured from.
@@ -1570,6 +1572,11 @@ TEST_CASE("Draw cut: the surface tilt reads the strip's own normal", "[DrawCut]"
     DrawCutParams params;
     params.through_all = false;
     params.depth       = 10.0;
+    // PHASE 3: "cut straight down" from a flat top face is the 90 degree lip - the
+    // straight-walled plug. At the default lip of 0 the band lies along the face and
+    // its normal is vertical, so the tilt is 0: also correct, and a connector there
+    // prints flat rather than sideways.
+    params.angle_deg   = 90.0;
 
     REQUIRE(draw_cut_surface_tilt_deg(ring, params, 10.0, 5.0) == Approx(90.0).margin(2.0));
     REQUIRE(draw_cut_surface_tilt_deg(ring, params, 10.0, 5.0) > CurvedConnectorTiltWarnDeg);
@@ -2643,4 +2650,572 @@ TEST_CASE("Draw cut chain: an empty close path is exactly force_close, and a sho
     REQUIRE_FALSE(tiny.is_closed());
     REQUIRE(tiny.close_along_path(face_run(Vec3d(1, 0, 0), Vec3d(0, 0, 0), Vec3d::UnitZ(), 4)));
     REQUIRE(tiny.is_closed());
+}
+
+// ===========================================================================
+// PHASE 3 (2026-09-13): THE BAND AND THE FLAT CORE.
+//
+// The owner's report was that the closed-loop cut was useless: Depth projected
+// outwards, Through all drove rulings through the part at whatever angles the
+// surface normals had, and there was no flat face for the two halves to meet on.
+// The surface is now a BAND (from the skin, in at the lip angle) plus a FLAT
+// CORE (the best-fit plane of the loop, inside the band). These cases pin that
+// down: the core is planar, the band's slope is the angle, and Depth sizes the
+// core rather than reaching through the part.
+// ===========================================================================
+
+// A cylinder about the Z axis, radius r, height h, centred on the origin - the
+// article the owner drew on. `seg` controls the tessellation.
+static indexed_triangle_set centred_cylinder(double r, double h, int seg = 128)
+{
+    indexed_triangle_set its = its_make_cylinder(r, h, 2.0 * M_PI / double(seg));
+    // its_make_cylinder stands on z == 0; centre it.
+    for (Vec3f& v : its.vertices)
+        v.z() -= float(0.5 * h);
+    return its;
+}
+
+// A WAVY closed loop round a cylinder at z ~= mid, amplitude `amp` in z. The
+// normals are the cylinder's own outward radial ones, which is what a raycast
+// onto the barrel would have produced. This is deliberately NOT planar: the
+// whole point of the core plane is that a wavy line still yields a flat mating
+// face.
+static DrawCutStroke wavy_loop_on_cylinder(double r, double z_mid, double amp,
+                                           int n = 96, int lobes = 3)
+{
+    DrawCutStroke stroke;
+    for (int i = 0; i < n; ++ i) {
+        const double a = 2.0 * M_PI * double(i) / double(n);
+        const double z = z_mid + amp * std::sin(double(lobes) * a);
+        stroke.append(Vec3d(r * std::cos(a), r * std::sin(a), z),
+                      Vec3d(std::cos(a), std::sin(a), 0.0), size_t(i));
+    }
+    // Come back to the start so finish() decides closed from the gap.
+    stroke.append(Vec3d(r, 0.0, z_mid), Vec3d(1, 0, 0), 0);
+    return stroke;
+}
+
+// The signed distance of `p` from the plane (n, c).
+static double plane_dist(const Vec3d& p, const Vec3d& n, const Vec3d& c)
+{
+    return (p - c).dot(n);
+}
+
+// The vertices of `its` that lie within `tol` of the plane (n, c), and the worst
+// deviation among them. `count` is how many; `worst` the largest |distance|,
+// which for a genuinely planar face should be at the tolerance floor rather than
+// anywhere near it.
+static size_t vertices_on_plane(const indexed_triangle_set& its, const Vec3d& n,
+                                const Vec3d& c, double tol, double* worst = nullptr)
+{
+    size_t count = 0;
+    double w = 0.0;
+    for (const Vec3f& v : its.vertices) {
+        const double d = std::abs(plane_dist(v.cast<double>(), n, c));
+        if (d <= tol) {
+            ++ count;
+            w = std::max(w, d);
+        }
+    }
+    if (worst != nullptr)
+        *worst = w;
+    return count;
+}
+
+// ---------------------------------------------------------------------------
+// (A) THE CORE PLANE FIT.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("Draw cut: the core plane fits a wavy loop and is flat", "[DrawCut]")
+{
+    DrawCutStroke stroke = wavy_loop_on_cylinder(20.0, 0.0, 5.0);
+    REQUIRE(stroke.finish(1.0, 0.0) == DrawCutError::None);
+    REQUIRE(stroke.is_closed());
+
+    DrawCutParams params;
+    Vec3d n, c;
+    REQUIRE(draw_cut_core_plane(stroke, params, n, c));
+
+    // A loop that wanders +-5 mm in z round a cylinder still has Z as its
+    // area-weighted normal: the wave is symmetric, so it cancels.
+    REQUIRE(std::abs(std::abs(n.z()) - 1.0) < 1e-3);
+    // The centroid sits on the axis, at the loop's mean height.
+    REQUIRE(c.x() == Approx(0.0).margin(0.2));
+    REQUIRE(c.y() == Approx(0.0).margin(0.2));
+    REQUIRE(c.z() == Approx(0.0).margin(0.2));
+}
+
+TEST_CASE("Draw cut: Axis direction forces the core normal to that axis", "[DrawCut]")
+{
+    // A loop whose own best fit is Z, asked to use X instead.
+    DrawCutStroke stroke = circle_on_top(10.0, 96);
+    REQUIRE(stroke.finish(1.0, 0.0) == DrawCutError::None);
+
+    DrawCutParams params;
+    params.direction = DrawCutDirection::AxisX;
+    Vec3d n, c;
+    REQUIRE(draw_cut_core_plane(stroke, params, n, c));
+    REQUIRE(std::abs(std::abs(n.x()) - 1.0) < 1e-9);
+    // The centroid is still the loop's own, so the plane passes through it.
+    REQUIRE(c.z() == Approx(0.5 * CUBE).margin(1e-6));
+}
+
+TEST_CASE("Draw cut: the band direction is the angle between inward and the normal", "[DrawCut]")
+{
+    const Vec3d inward = -Vec3d::UnitX();   // towards the axis
+    const Vec3d n      =  Vec3d::UnitZ();   // core normal
+
+    // 0: straight in, perpendicular to n - a flat shelf.
+    const Vec3d d0 = draw_cut_band_dir(inward, n, 0.0);
+    REQUIRE(d0.dot(n) == Approx(0.0).margin(1e-9));
+    REQUIRE(d0.dot(inward) == Approx(1.0).margin(1e-9));
+
+    // 90: straight along -n - a straight wall.
+    const Vec3d d90 = draw_cut_band_dir(inward, n, 90.0);
+    REQUIRE(d90.dot(n) == Approx(-1.0).margin(1e-9));
+
+    // 45: equal parts of each, and still unit.
+    const Vec3d d45 = draw_cut_band_dir(inward, n, 45.0);
+    REQUIRE(d45.norm() == Approx(1.0).margin(1e-9));
+    REQUIRE(d45.dot(inward) == Approx(std::sqrt(0.5)).margin(1e-9));
+    REQUIRE(d45.dot(n) == Approx(-std::sqrt(0.5)).margin(1e-9));
+
+    // Out of range is clamped rather than allowed to travel back out of the part.
+    REQUIRE(draw_cut_band_dir(inward, n, -30.0).dot(n) == Approx(0.0).margin(1e-9));
+    REQUIRE(draw_cut_band_dir(inward, n, 130.0).dot(n) == Approx(-1.0).margin(1e-9));
+}
+
+// ---------------------------------------------------------------------------
+// (B) THE CUT ITSELF. The spec's headline case.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("Draw cut: a wavy loop round a cylinder gives two watertight halves with a flat core", "[DrawCut]")
+{
+    const indexed_triangle_set cyl = centred_cylinder(20.0, 60.0);
+    REQUIRE(watertight(cyl));
+
+    // z ~= 30 in the spec's frame is the middle in ours (the cylinder is centred),
+    // which is the same cut: a loop round the barrel, half way up.
+    DrawCutStroke stroke = wavy_loop_on_cylinder(20.0, 0.0, 5.0);
+    REQUIRE(stroke.finish(1.0, 0.1) == DrawCutError::None);
+    REQUIRE(stroke.is_closed());
+
+    DrawCutParams params;
+    params.direction   = DrawCutDirection::SurfaceNormal;
+    params.extension   = 3.0;
+    params.through_all = false;
+    params.depth       = 3.0;
+    params.angle_deg   = 0.0;
+
+    indexed_triangle_set upper, lower;
+    REQUIRE(draw_cut_split(cyl, stroke, params, &upper, &lower, nullptr));
+
+    REQUIRE(watertight(upper));
+    REQUIRE(watertight(lower));
+
+    // Volume is conserved: the two halves are the part, with no kerf.
+    const double total = double(its_volume(upper)) + double(its_volume(lower));
+    REQUIRE(total == Approx(double(its_volume(cyl))).epsilon(0.01));
+
+    // THE CORE IS FLAT, AND IT IS WHERE draw_cut_core_face() SAYS. Both halves must
+    // carry a planar patch on it - that is the face they mate on. Note this is the
+    // FACE plane (the fit displaced by the band's travel), not the plane through the
+    // loop itself: the band reaches in by Depth before the core starts.
+    BoundingBoxf3 cyl_bb;
+    for (const Vec3f& v : cyl.vertices)
+        cyl_bb.merge(v.cast<double>());
+    Vec3d n, c;
+    REQUIRE(draw_cut_core_face(stroke, params, cyl_bb, n, c));
+
+    double worst_u = 0.0, worst_l = 0.0;
+    const size_t on_u = vertices_on_plane(upper, n, c, 0.05, &worst_u);
+    const size_t on_l = vertices_on_plane(lower, n, c, 0.05, &worst_l);
+
+    // A real core, not one or two stray vertices that happen to be near the plane.
+    REQUIRE(on_u > 8);
+    REQUIRE(on_l > 8);
+    // And coplanar to within the spec's 0.05 mm.
+    REQUIRE(worst_u <= 0.05);
+    REQUIRE(worst_l <= 0.05);
+}
+
+TEST_CASE("Draw cut: Depth sizes the flat core", "[DrawCut]")
+{
+    const indexed_triangle_set cyl = centred_cylinder(20.0, 60.0);
+
+    DrawCutStroke stroke = wavy_loop_on_cylinder(20.0, 0.0, 5.0);
+    REQUIRE(stroke.finish(1.0, 0.1) == DrawCutError::None);
+
+    // The core polygon is the loop inset by depth * cos(angle). At angle 0 that is
+    // the depth itself, so the core radius goes 20 - 3 = 17 at depth 3 and
+    // 20 - 10 = 10 at depth 10. Measure the core's own extent rather than a
+    // volume, because the extent is the thing the user sees.
+    auto core_radius = [&](double depth) {
+        DrawCutParams params;
+        params.extension   = 3.0;
+        params.through_all = false;
+        params.depth       = depth;
+        params.angle_deg   = 0.0;
+
+        BoundingBoxf3 bb;
+        for (const Vec3f& v : cyl.vertices)
+            bb.merge(v.cast<double>());
+        Vec3d n, c;
+        REQUIRE(draw_cut_core_face(stroke, params, bb, n, c));
+
+        const indexed_triangle_set cutter = draw_cut_cutter_solid(stroke, params, bb, 0.0);
+        REQUIRE_FALSE(cutter.empty());
+
+        // THE CORE RING, and why "widest on the plane" is the wrong way to find it.
+        //
+        // At a lip angle of 0 the band travels entirely in-plane, so the core plane
+        // sits at the loop's own mean height - and the OUTER ring (pushed out by
+        // Extension, radius 23 here) lies on that same plane. Taking the widest
+        // radius on the plane therefore measures the outer ring, not the core, and
+        // reports 23 where the core is 17.
+        //
+        // The core is the INNER ring, so take the smallest radius among the vertices
+        // on the plane, ignoring the cap centres (which sit at radius ~0 and would
+        // win outright). The band's two rings are the only other things there.
+        double r = std::numeric_limits<double>::max();
+        for (const Vec3f& v : cutter.vertices) {
+            const Vec3d q = v.cast<double>();
+            if (std::abs(plane_dist(q, n, c)) > 0.05)
+                continue;
+            const Vec3d rad = (q - c) - plane_dist(q, n, c) * n;
+            const double rr = rad.norm();
+            if (rr < 1.0)
+                continue; // a fan centre, not a ring
+            r = std::min(r, rr);
+        }
+        REQUIRE(r < std::numeric_limits<double>::max());
+        return r;
+    };
+
+    const double r3  = core_radius(3.0);
+    const double r10 = core_radius(10.0);
+
+    REQUIRE(r3  == Approx(17.0).margin(0.6));
+    REQUIRE(r10 == Approx(10.0).margin(0.6));
+    // Deeper means a SMALLER core, which is the semantic the old Depth got backwards.
+    REQUIRE(r10 < r3);
+}
+
+TEST_CASE("Draw cut: the band's inward slope is the angle", "[DrawCut]")
+{
+    // A plain circular loop on a cylinder, so the geometry is exactly analysable:
+    // the band runs from radius 20 inward, dropping in z by depth * sin(angle) and
+    // in radius by depth * cos(angle). The slope of the band off the core plane is
+    // therefore the angle itself.
+    const double R = 20.0;
+
+    for (double angle : { 0.0, 30.0, 45.0, 60.0 }) {
+        DrawCutStroke stroke = wavy_loop_on_cylinder(R, 0.0, 0.0, 96, 1); // amp 0 => planar
+        REQUIRE(stroke.finish(1.0, 0.0) == DrawCutError::None);
+
+        DrawCutParams params;
+        params.extension   = 2.0;
+        params.through_all = false;
+        params.depth       = 4.0;
+        params.angle_deg   = angle;
+
+        Vec3d n, c;
+        REQUIRE(draw_cut_core_plane(stroke, params, n, c));
+
+        // Walk the surface: the point on the stroke (w == 0) and the point at the
+        // end of the band's travel (w == depth). The angle between the chord and
+        // the core plane is the lip angle.
+        const Vec3d p0 = draw_cut_surface_point(stroke, params, 0.0, 0.0);
+        const Vec3d p1 = draw_cut_surface_point(stroke, params, 0.0, params.depth);
+
+        const Vec3d chord = p1 - p0;
+        REQUIRE(chord.norm() > 1e-6);
+        // The component along n against the in-plane component gives the slope.
+        const double along_n  = std::abs(chord.dot(n));
+        const double in_plane = (chord - chord.dot(n) * n).norm();
+        const double slope_deg = std::atan2(along_n, in_plane) * 180.0 / M_PI;
+
+        INFO("angle " << angle << " measured " << slope_deg);
+        REQUIRE(slope_deg == Approx(angle).margin(2.0));
+    }
+}
+
+TEST_CASE("Draw cut: Through all spans the part and leaves no flat core", "[DrawCut]")
+{
+    const indexed_triangle_set cyl = centred_cylinder(20.0, 60.0);
+
+    DrawCutStroke stroke = wavy_loop_on_cylinder(20.0, 0.0, 5.0);
+    REQUIRE(stroke.finish(1.0, 0.1) == DrawCutError::None);
+
+    DrawCutParams params;
+    params.extension   = 3.0;
+    params.through_all = true;
+    params.angle_deg   = 20.0;
+
+    indexed_triangle_set upper, lower;
+    REQUIRE(draw_cut_split(cyl, stroke, params, &upper, &lower, nullptr));
+
+    REQUIRE(watertight(upper));
+    REQUIRE(watertight(lower));
+    REQUIRE(double(its_volume(upper)) + double(its_volume(lower)) ==
+            Approx(double(its_volume(cyl))).epsilon(0.01));
+
+    // NO FLAT CORE. With through-all there is no core plane, so the fitted plane
+    // should carry no planar patch - a handful of vertices may graze it where the
+    // band crosses, but not the dense disc a core produces.
+    BoundingBoxf3 tbb;
+    for (const Vec3f& v : cyl.vertices)
+        tbb.merge(v.cast<double>());
+    Vec3d n, c;
+    // There is no core FACE with through-all - that is the definition of it.
+    REQUIRE_FALSE(draw_cut_core_face(stroke, params, tbb, n, c));
+    // The fitted plane still exists (it is the loop's own), and it is what a stray
+    // grazing vertex would sit on; assert the dense disc is absent from it.
+    REQUIRE(draw_cut_core_plane(stroke, params, n, c));
+    const size_t on_plane = vertices_on_plane(upper, n, c, 0.05);
+    const size_t total_v  = upper.vertices.size();
+    REQUIRE(total_v > 0);
+    // Well under the fraction a capped core would put there.
+    REQUIRE(double(on_plane) / double(total_v) < 0.15);
+
+    // THE BAND SPANS THE FULL HEIGHT: the cut reaches both ends of the part, so
+    // the upper half touches both the top and the bottom of the cylinder.
+    BoundingBoxf3 bb;
+    for (const Vec3f& v : upper.vertices)
+        bb.merge(v.cast<double>());
+    REQUIRE(bb.max.z() == Approx(+30.0).margin(0.5));
+    REQUIRE(bb.min.z() == Approx(-30.0).margin(0.5));
+}
+
+TEST_CASE("Draw cut: a circle on a cube face cuts a plug with a flat bottom at depth", "[DrawCut]")
+{
+    const indexed_triangle_set cube = centred_cube();
+
+    DrawCutStroke stroke = circle_on_top(10.0, 96);
+    REQUIRE(stroke.finish(1.0, 0.0) == DrawCutError::None);
+    REQUIRE(stroke.is_closed());
+
+    DrawCutParams params;
+    params.direction   = DrawCutDirection::SurfaceNormal;
+    params.extension   = 3.0;
+    params.through_all = false;
+    params.depth       = 4.0;
+    params.angle_deg   = 90.0;   // a straight-walled plug: the band runs down -n
+
+    indexed_triangle_set upper, lower;
+    REQUIRE(draw_cut_split(cube, stroke, params, &upper, &lower, nullptr));
+
+    REQUIRE(watertight(upper));
+    REQUIRE(watertight(lower));
+
+    // The plug is the piece the loop went round.
+    BoundingBoxf3 bb;
+    for (const Vec3f& v : upper.vertices)
+        bb.merge(v.cast<double>());
+
+    // It reaches the face it was drawn on, and its FLAT BOTTOM sits `depth` below.
+    REQUIRE(bb.max.z() == Approx(+0.5 * CUBE).margin(1e-3));
+    REQUIRE(bb.min.z() == Approx(+0.5 * CUBE - params.depth).margin(0.2));
+
+    // A straight-walled plug of radius 10 and height 4.
+    REQUIRE(double(its_volume(upper)) == Approx(M_PI * 10.0 * 10.0 * 4.0).epsilon(0.06));
+
+    // And the bottom really is FLAT: the core face carries a planar patch.
+    BoundingBoxf3 cbb;
+    for (const Vec3f& v : cube.vertices)
+        cbb.merge(v.cast<double>());
+    Vec3d n, c;
+    REQUIRE(draw_cut_core_face(stroke, params, cbb, n, c));
+    double worst = 0.0;
+    REQUIRE(vertices_on_plane(upper, n, c, 0.05, &worst) > 8);
+    REQUIRE(worst <= 0.05);
+
+    REQUIRE(double(its_volume(upper)) + double(its_volume(lower)) ==
+            Approx(double(its_volume(cube))).epsilon(1e-3));
+}
+
+TEST_CASE("Draw cut: the angle keeps the core square to the loop and sets its depth", "[DrawCut]")
+{
+    // The core's ORIENTATION is the loop's own fit, so the lip angle must not tilt
+    // the mating face - a user dialling the key angle must not find the face
+    // drifting out of square. Its DEPTH does move with the angle, and must: the band
+    // travels depth * sin(angle) along n before it turns, so a 90 degree lip reaches
+    // a full Depth down and a 0 degree one stays at the surface. Both halves of that
+    // are asserted here, because getting either wrong is a different bug.
+    const indexed_triangle_set cube = centred_cube();
+
+    DrawCutStroke stroke = circle_on_top(12.0, 96);
+    REQUIRE(stroke.finish(1.0, 0.0) == DrawCutError::None);
+
+    BoundingBoxf3 bb;
+    for (const Vec3f& v : cube.vertices)
+        bb.merge(v.cast<double>());
+
+    auto core_face = [&](double angle) {
+        DrawCutParams params;
+        params.extension   = 3.0;
+        params.through_all = false;
+        params.depth       = 4.0;
+        params.angle_deg   = angle;
+        Vec3d n, c;
+        REQUIRE(draw_cut_core_face(stroke, params, bb, n, c));
+        return std::make_pair(n, c);
+    };
+
+    // SQUARE at every angle: the normal is the loop's own, which on a top-face circle
+    // is Z.
+    for (double angle : { 0.0, 30.0, 45.0, 90.0 }) {
+        const Vec3d n = core_face(angle).first;
+        REQUIRE(std::abs(std::abs(n.z()) - 1.0) < 1e-9);
+    }
+
+    // AND ITS DEPTH IS depth * sin(angle) below the drawn line.
+    const double top = 0.5 * CUBE;
+    REQUIRE(core_face(90.0).second.z() == Approx(top - 4.0).margin(0.05));
+    REQUIRE(core_face(30.0).second.z() == Approx(top - 4.0 * 0.5).margin(0.05));
+    REQUIRE(core_face(0.0).second.z()  == Approx(top).margin(0.05));
+
+    // AND THE PLUG SHRINKS AS THE LIP FLATTENS. At the same Depth a 90 degree lip
+    // reaches a full Depth down with a straight wall, while a 45 degree one reaches
+    // only depth * sin(45) down and takes a chamfered bite out of the shoulder on the
+    // way - so it removes LESS material, not more. (The chamfer is what the halves
+    // key on; it is not there to remove volume.)
+    auto plug_volume = [&](double angle) {
+        DrawCutParams params;
+        params.extension   = 3.0;
+        params.through_all = false;
+        params.depth       = 4.0;
+        params.angle_deg   = angle;
+        indexed_triangle_set u, l;
+        REQUIRE(draw_cut_split(cube, stroke, params, &u, &l, nullptr));
+        return double(its_volume(u));
+    };
+    const double v90 = plug_volume(90.0);
+    const double v45 = plug_volume(45.0);
+    REQUIRE(v90 > 0.0);
+    REQUIRE(v45 > 0.0);
+    REQUIRE(v45 < v90);
+    // The straight-walled plug is the cylinder the loop drew, to a few percent.
+    REQUIRE(v90 == Approx(M_PI * 12.0 * 12.0 * 4.0).epsilon(0.06));
+}
+
+TEST_CASE("Draw cut: the cut surface does not depend on which way the loop was drawn", "[DrawCut]")
+{
+    // The phase-1 suite asserts this for the ruled strip; the band and core have to
+    // keep it, because the core normal now comes from a Newell fit whose sign IS
+    // the winding. build_core_band() pins it to the loop's own surface normals,
+    // and this is the case that would catch that pinning being dropped.
+    const indexed_triangle_set cube = centred_cube();
+
+    DrawCutParams params;
+    params.extension   = 3.0;
+    params.through_all = false;
+    params.depth       = 4.0;
+    params.angle_deg   = 30.0;
+
+    auto plug_of = [&](bool cw) {
+        DrawCutStroke s = circle_on_top(10.0, 96, 0.5 * CUBE, cw);
+        REQUIRE(s.finish(1.0, 0.0) == DrawCutError::None);
+        indexed_triangle_set u, l;
+        REQUIRE(draw_cut_split(cube, s, params, &u, &l, nullptr));
+        return double(its_volume(u));
+    };
+
+    REQUIRE(plug_of(false) == Approx(plug_of(true)).epsilon(0.02));
+}
+
+TEST_CASE("Draw cut: connectors stand on the band and on the core", "[DrawCut]")
+{
+    // Phase 4's contract, against the new surface: a point on the band projects
+    // back to the (s, w) it was built from, and the frame there is perpendicular to
+    // the surface the boolean will actually make.
+    DrawCutStroke stroke = wavy_loop_on_cylinder(20.0, 0.0, 3.0);
+    REQUIRE(stroke.finish(1.0, 0.1) == DrawCutError::None);
+
+    DrawCutParams params;
+    params.extension   = 3.0;
+    params.through_all = false;
+    params.depth       = 5.0;
+    params.angle_deg   = 45.0;
+
+    const double s_mid = 0.25 * stroke.length();
+
+    for (double w : { 0.0, 1.5, 3.0 }) {
+        const Vec3d p = draw_cut_surface_point(stroke, params, s_mid, w);
+
+        double s_back = 0.0, w_back = 0.0, dist = 0.0;
+        REQUIRE(draw_cut_surface_project(stroke, params, p, s_back, w_back, &dist));
+        REQUIRE(dist == Approx(0.0).margin(0.2));
+        REQUIRE(w_back == Approx(w).margin(0.2));
+
+        // The frame's Z is the surface normal, and it is a genuine rotation.
+        const Transform3d f = draw_cut_surface_frame(stroke, params, s_mid, w);
+        const Matrix3d    m = f.linear();
+        REQUIRE(std::abs(m.determinant() - 1.0) < 1e-6);
+        const Vec3d fz = m.col(2);
+        REQUIRE(fz.norm() == Approx(1.0).margin(1e-6));
+        // Perpendicular to the direction the band travels, which is what "standing
+        // on the cut surface" means.
+        const Vec3d p_a = draw_cut_surface_point(stroke, params, s_mid, w);
+        const Vec3d p_b = draw_cut_surface_point(stroke, params, s_mid, w + 0.5);
+        REQUIRE(std::abs(fz.dot((p_b - p_a).normalized())) < 0.05);
+    }
+}
+
+TEST_CASE("Draw cut: an open line still uses the ruled strip", "[DrawCut]")
+{
+    // Phase 3 is a CLOSED-loop model: an open line has no interior, so there is no
+    // core plane to put anywhere and the phase-1 strip is still the right surface.
+    // This is the case that would catch the band being applied where it cannot be.
+    const indexed_triangle_set cube = centred_cube();
+
+    DrawCutStroke stroke = line_on_top(30.0, 60);
+    REQUIRE(stroke.finish(1.0, 0.0) == DrawCutError::None);
+    REQUIRE_FALSE(stroke.is_closed());
+
+    DrawCutParams params;
+    params.direction   = DrawCutDirection::SurfaceNormal;
+    params.extension   = 5.0;
+    params.through_all = true;
+
+    Vec3d n, c;
+    REQUIRE_FALSE(draw_cut_core_plane(stroke, params, n, c));
+
+    indexed_triangle_set upper, lower;
+    REQUIRE(draw_cut_split(cube, stroke, params, &upper, &lower, nullptr));
+    REQUIRE(watertight(upper));
+    REQUIRE(watertight(lower));
+    REQUIRE(double(its_volume(upper)) + double(its_volume(lower)) ==
+            Approx(double(its_volume(cube))).epsilon(1e-3));
+}
+
+TEST_CASE("Draw cut: the inside field follows the band and core surface", "[DrawCut]")
+{
+    // The halves colouring, Visible/Ghost/Hidden and the connectors all read this
+    // field, so it has to agree with the surface the boolean used - otherwise the
+    // preview shows one cut and the result is another, which is exactly the
+    // translucent-disc symptom the owner reported.
+    const indexed_triangle_set cube = centred_cube();
+
+    DrawCutStroke stroke = circle_on_top(10.0, 96);
+    REQUIRE(stroke.finish(1.0, 0.0) == DrawCutError::None);
+
+    DrawCutParams params;
+    params.extension   = 3.0;
+    params.through_all = false;
+    params.depth       = 4.0;
+    params.angle_deg   = 90.0;
+
+    BoundingBoxf3 bb;
+    for (const Vec3f& v : cube.vertices)
+        bb.merge(v.cast<double>());
+
+    const indexed_triangle_set cutter = draw_cut_cutter_solid(stroke, params, bb, 0.0);
+    REQUIRE_FALSE(cutter.empty());
+    REQUIRE(watertight(cutter));
+
+    // A point well inside the plug, and one well outside it.
+    REQUIRE(draw_cut_classify_upper(cutter, true, Vec3d(0.0, 0.0, 0.5 * CUBE - 2.0)));
+    REQUIRE_FALSE(draw_cut_classify_upper(cutter, true, Vec3d(0.0, 0.0, 0.5 * CUBE - 10.0)));
+    REQUIRE_FALSE(draw_cut_classify_upper(cutter, true, Vec3d(18.0, 0.0, 0.5 * CUBE - 2.0)));
 }

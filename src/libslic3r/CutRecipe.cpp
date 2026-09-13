@@ -115,6 +115,39 @@ DrawCutParams CutRecipe::draw_params() const
     return p;
 }
 
+void CutRecipe::migrate_draw_v2()
+{
+    if (version >= CutRecipeVersion)
+        return;
+    // Only the drawn cut's meanings changed. A flat or curved recipe carries
+    // forward untouched and just gets the new stamp.
+    if (kind == CutRecipeKind::Drawn) {
+        // THE ANGLE. A v2 draft was signed about zero and meant "tilt the ruling
+        // away from the loop's outside"; the phase-3 lip angle is unsigned and means
+        // "how steeply the band leans in towards the core". They are not the same
+        // quantity, so no formula preserves the old cut - what there is, is a nearest
+        // intent. |draft| is how far the old ruling leaned OFF the surface normal, and
+        // the phase-3 surface closest to that is a lip of 90 - |draft|: a v2 angle of
+        // 0 (the ruling straight down the normal) becomes a 90-degree straight wall,
+        // which is exactly what that cut looked like on a flat face.
+        const double draft = std::abs(draw_angle_deg);
+        draw_angle_deg = std::clamp(90.0 - draft, DrawCutMinLipAngleDeg, DrawCutMaxLipAngleDeg);
+
+        // THE DEPTH. A v2 depth was a reach through the part, meaningless as a band
+        // travel: a stored 10 or 40 would inset the core past the loop's own radius
+        // and leave no flat at all. Take the phase-3 default, which is the number the
+        // panel would offer a new user.
+        draw_depth = 3.0;
+
+        // THROUGH ALL. A v2 recipe almost always had this on, because it was the
+        // default; carrying it forward would reproduce exactly the "projects through
+        // the object at random angles" cut the owner reported. Turn it off so the
+        // migrated cut gets the flat core that is the point of phase 3.
+        draw_through_all = false;
+    }
+    version = CutRecipeVersion;
+}
+
 CurvedCutSheet CutRecipe::curved_sheet() const
 {
     CurvedCutSheet s;

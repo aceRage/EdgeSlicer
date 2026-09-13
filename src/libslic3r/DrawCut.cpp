@@ -633,6 +633,492 @@ bool draw_cut_strip_folds(const DrawCutStroke& stroke, double extension, double*
 }
 
 // ---------------------------------------------------------------------------
+// THE CORE PLANE. Phase 3.
+// ---------------------------------------------------------------------------
+
+bool draw_cut_core_plane(const DrawCutStroke& stroke,
+                         const DrawCutParams& params,
+                         Vec3d&               normal,
+                         Vec3d&               centroid)
+{
+    normal   = Vec3d::UnitZ();
+    centroid = Vec3d::Zero();
+
+    if (!stroke.valid() || !stroke.is_closed())
+        return false;
+
+    const std::vector<DrawCutSample>& p = stroke.path();
+    const size_t n = p.size();
+    if (n < 3)
+        return false;
+
+    for (const DrawCutSample& s : p)
+        centroid += s.pos;
+    centroid /= double(n);
+
+    // AN AXIS DIRECTION REPLACES THE FIT. The user asking for Axis Z is asking for
+    // a mating face square to Z, which is exactly what a fitted normal would NOT
+    // give on a hand-drawn wavy loop. The centroid stays the loop's own, so the
+    // plane still sits in the middle of what was drawn.
+    switch (params.direction) {
+    case DrawCutDirection::AxisX: normal = Vec3d::UnitX(); return true;
+    case DrawCutDirection::AxisY: normal = Vec3d::UnitY(); return true;
+    case DrawCutDirection::AxisZ: normal = Vec3d::UnitZ(); return true;
+    default: break;
+    }
+
+    // NEWELL, not a covariance eigenvector. Newell's method is the area-weighted
+    // normal of the polygon, so a loop that wanders off its own plane (the wavy
+    // loop round a cylinder the spec asks about) still yields the normal of the
+    // plane that best carries its enclosed area, and a nearly-degenerate loop
+    // degrades to a small vector rather than to an arbitrary axis.
+    Vec3d nw = Vec3d::Zero();
+    for (size_t i = 0; i < n; ++ i) {
+        const Vec3d& a = p[i].pos;
+        const Vec3d& b = p[(i + 1) % n].pos;
+        nw.x() += (a.y() - b.y()) * (a.z() + b.z());
+        nw.y() += (a.z() - b.z()) * (a.x() + b.x());
+        nw.z() += (a.x() - b.x()) * (a.y() + b.y());
+    }
+
+    if (nw.norm() < 1e-9) {
+        // A loop with no enclosed area to speak of. Fall back to the average of the
+        // samples' own surface normals, which at least points off the skin.
+        Vec3d avg = Vec3d::Zero();
+        for (const DrawCutSample& s : p)
+            avg += s.normal;
+        normal = safe_normalize(avg, Vec3d::UnitZ());
+        return true;
+    }
+
+    normal = nw.normalized();
+    return true;
+}
+
+Vec3d draw_cut_core_inward(const DrawCutStroke& stroke,
+                           const DrawCutParams& params,
+                           const Vec3d&         normal,
+                           const Vec3d&         centroid,
+                           size_t               i)
+{
+    const std::vector<DrawCutSample>& p = stroke.path();
+    if (i >= p.size())
+        return -Vec3d::UnitZ();
+
+    if (!stroke.is_closed()) {
+        // No loop, no interior: the open stroke keeps the phase-1 ruling.
+        return draw_cut_inward_dir(stroke, params, i);
+    }
+
+    // TOWARDS THE AXIS, which for a loop on a flat face is towards the centroid and
+    // for a loop round a cylinder is the radial direction - the same formula says
+    // both, because removing the component along n turns "towards the centre point"
+    // into "towards the centre LINE".
+    const Vec3d to_c = centroid - p[i].pos;
+    Vec3d       in   = to_c - to_c.dot(normal) * normal;
+
+    if (in.norm() < 1e-9) {
+        // The sample sits on the axis itself (a loop pinched to a point there).
+        // Use the in-plane part of the old inward normal so the band still has a
+        // direction rather than collapsing.
+        const Vec3d d = draw_cut_inward_dir(stroke, params, i);
+        in = d - d.dot(normal) * normal;
+        if (in.norm() < 1e-9)
+            return -normal;
+    }
+    return in.normalized();
+}
+
+Vec3d draw_cut_band_dir(const Vec3d& inward, const Vec3d& normal, double angle_deg)
+{
+    const double a = std::clamp(angle_deg, DrawCutMinLipAngleDeg, DrawCutMaxLipAngleDeg) * M_PI / 180.0;
+    // cos * inward + sin * (-n): at 0 the band is perpendicular to n (a flat
+    // shelf), at 90 it runs straight along -n (a straight wall). inward and n are
+    // perpendicular by construction, so the result is unit without renormalising.
+    const Vec3d d = std::cos(a) * inward - std::sin(a) * normal;
+    return safe_normalize(d, inward);
+}
+
+namespace {
+
+// The band geometry of a closed loop, worked out once so the cutter, the surface
+// queries and the tests cannot disagree about it.
+struct CoreBand
+{
+    bool               ok{ false };
+    Vec3d              normal{ Vec3d::UnitZ() };   // core plane normal n
+    Vec3d              centroid{ Vec3d::Zero() };  // the LOOP's centroid
+    // A point ON the core plane: the loop centroid moved along n to the depth the
+    // band arrives at. This is the plane the core is flattened onto, and it is NOT
+    // the plane through `centroid` - see build_core_band().
+    Vec3d              plane_pt{ Vec3d::Zero() };
+    std::vector<Vec3d> out;    // p + extension * outward   (outside the skin)
+    std::vector<Vec3d> inner;  // the band's inner curve, ON the core plane
+    std::vector<Vec3d> core;   // the core polygon (inner, but that IS the join)
+    double             depth{ 0.0 };
+};
+
+// `depth_along` is the band's travel along d(p); `ext` the outward reach.
+CoreBand build_core_band(const DrawCutStroke& stroke, const DrawCutParams& params,
+                         double ext, double depth_along, double face_offset)
+{
+    CoreBand cb;
+    if (!draw_cut_core_plane(stroke, params, cb.normal, cb.centroid))
+        return cb;
+
+    const std::vector<DrawCutSample>& p = stroke.path();
+    const size_t n = p.size();
+    cb.depth = depth_along;
+
+    // THE NORMAL'S SIGN. Newell gives a normal tied to the winding, which flips
+    // when the user drags the other way round. Everything downstream (which half is
+    // "upper", which way the kerf moves) has to be winding-independent, so pin n to
+    // the loop's own surface normals: the core normal should point the same way the
+    // skin does on average, i.e. OUT of the part on the side the loop was drawn.
+    // THE AVERAGE SKIN NORMAL ONLY DECIDES ANYTHING WHEN IT POINTS SOMEWHERE.
+    //
+    // On a loop drawn on a FLAT FACE every sample normal is the same, so the average
+    // is that normal and "make n agree with it" is exactly right. On a loop round a
+    // CYLINDER the normals are radial and the average cancels to ~zero, so its
+    // direction is pure noise - and pinning to noise flips n arbitrarily, which sends
+    // the band outward on half the runs (a core radius of 23 on a loop of radius 20,
+    // instead of 17).
+    //
+    // So the pinning is applied only when the average is a meaningful fraction of the
+    // samples it came from. When it is not - the barrel case - n's sign does not
+    // matter anyway: the band direction at angle 0 is the in-plane inward direction,
+    // which is winding-independent by construction, and `draw_cut_band_dir` tilts
+    // towards -n symmetrically. The sign is then fixed downstream by the cutter's
+    // its_volume() winding check.
+    Vec3d avg_skin = Vec3d::Zero();
+    for (const DrawCutSample& s : p)
+        avg_skin += s.normal;
+    if (avg_skin.norm() > 0.25 * double(n) && cb.normal.dot(avg_skin) < 0.0)
+        cb.normal = -cb.normal;
+
+    cb.out.reserve(n);
+    cb.inner.reserve(n);
+
+    for (size_t i = 0; i < n; ++ i) {
+        const Vec3d inward = draw_cut_core_inward(stroke, params, cb.normal, cb.centroid, i);
+        const Vec3d d      = draw_cut_band_dir(inward, cb.normal, params.angle_deg);
+
+        // THE KERF. `face_offset` moves the whole surface along its own normal.
+        // For the band that normal is d rotated into the plane the band and n span -
+        // but the direction the two halves actually separate along is n for the core
+        // and the band's own normal for the band. Using n for BOTH keeps the two
+        // offset solids parallel where it matters (the mating faces) and is what
+        // makes the kerf measure the same width on the core as on the lip.
+        const Vec3d shift = face_offset * cb.normal;
+
+        // OUTWARD is along the loop's own surface normal - that is what "reaches out
+        // of the skin" means on a curved part. Falling back to -inward (radially
+        // out) where the sample normal is useless keeps a band on a flat face sane.
+        // OUTWARD, and the guard that has to point the other way to the obvious one.
+        //
+        // "Out of the skin" is the sample's own surface normal, and it is at its most
+        // useful exactly when that normal is PARALLEL TO THE CORE NORMAL - a loop on
+        // a flat top face, where out of the skin is straight up. An earlier version
+        // treated that parallel case as degenerate and fell back to -inward, which
+        // pushed the outer ring radially OUT instead of UP: the cutter stopped being
+        // a plug, the boolean had nothing to intersect, and every closed loop on a
+        // flat face failed with "the lower boolean gave nothing".
+        //
+        // The genuinely degenerate case is the opposite one: a normal lying IN the
+        // core plane (perpendicular to n), which is what a loop round a cylinder's
+        // barrel has. There the normal is the radial direction and is still the right
+        // answer, so there is nothing to guard at all beyond a zero-length normal.
+        Vec3d outward = p[i].normal;
+        if (outward.norm() < 1e-9)
+            outward = -inward;
+        outward = safe_normalize(outward, -inward);
+
+        cb.out.emplace_back(p[i].pos + ext * outward + shift);
+
+        // The band travels `depth_along` along d, and then the surface TURNS ONTO
+        // THE CORE PLANE. The arrival points are collected first; where the plane
+        // actually sits is decided below, once they are all known.
+        cb.inner.emplace_back(p[i].pos + depth_along * d + shift);
+    }
+
+    // WHERE THE CORE PLANE SITS, and the mistake that looks like the obvious answer.
+    //
+    // P has to pass through the points the band ARRIVES at, not through the loop's
+    // own centroid. Projecting the arrivals onto the plane through cb.centroid - the
+    // obvious reading of "project onto P" - UNDOES the band's travel along n: on a
+    // loop drawn round a cube's top face with a 90 degree lip the band goes down by
+    // Depth and is then snapped straight back up to the face, the plug collapses to
+    // zero height, and the boolean reports "the lower boolean gave nothing".
+    //
+    // So the plane's offset is the MEAN arrival height along n, and the arrivals are
+    // then flattened onto it. That mean is what makes the core flat for a loop that
+    // is not planar: a wavy loop's arrivals sit at a spread of heights, and every one
+    // of them is moved onto the single plane at their average - which is precisely
+    // the "the band's inner curve lands on P by construction" the model asks for.
+    {
+        double mean_h = 0.0;
+        for (const Vec3d& v : cb.inner)
+            mean_h += (v - cb.centroid).dot(cb.normal);
+        mean_h /= double(cb.inner.size());
+
+        // The core plane's own point: the loop centroid moved along n to the band's
+        // arrival depth. Everything downstream measures coplanarity against this.
+        cb.plane_pt = cb.centroid + mean_h * cb.normal;
+
+        for (Vec3d& v : cb.inner)
+            v -= (v - cb.plane_pt).dot(cb.normal) * cb.normal;
+    }
+
+    // The core polygon IS the band's inner curve - they join along one closed curve
+    // by construction, which is what keeps the solid watertight. The "inset by the
+    // band's in-plane footprint" the spec describes is exactly what travelling
+    // depth * cos(angle) inward already did.
+    cb.core = cb.inner;
+    cb.ok   = true;
+    return cb;
+}
+
+} // namespace
+
+// ---------------------------------------------------------------------------
+// The band + core cutter solid. Phase 3, closed loops only.
+//
+// The solid is "everything the plug occupies": the band wall from the outer ring
+// down to the inner ring, then either the FLAT CORE capping the inner ring (the
+// normal case) or, for Through all, a straight extrusion of the band all the way
+// out of the part on both sides.
+//
+// The outer ring is capped too - the plug has to be a closed solid, and the cap
+// sits outside the skin where Extension put it, so it never shows in the result.
+// ---------------------------------------------------------------------------
+static indexed_triangle_set draw_cut_band_core_solid(const DrawCutStroke& stroke,
+                                                     const DrawCutParams& params,
+                                                     const BoundingBoxf3& bbox,
+                                                     double               face_offset)
+{
+    indexed_triangle_set its;
+    if (!stroke.valid() || !stroke.is_closed())
+        return its;
+
+    const double ext  = std::max(0.0, params.extension);
+    const double diag = bbox.defined ? bbox.size().norm() : 100.0;
+
+    // THROUGH ALL has no core: the band is extruded along d(p) far enough to leave
+    // the part on BOTH sides, so the boolean always has a complete cut to work
+    // with. The reach is the bbox diagonal with the usual 1.05 slack.
+    const double reach = 1.05 * diag + 1.0;
+    const double depth_along = params.through_all ? reach : std::max(0.01, params.depth);
+
+    const CoreBand cb = build_core_band(stroke, params, ext, depth_along, face_offset);
+    if (!cb.ok || cb.out.size() < 3)
+        return its;
+
+    const size_t m = cb.out.size();
+
+    if (params.through_all) {
+        // A TAPERED PLUG WITH NO FLAT MIDDLE.
+        //
+        // THE AXIS OF THE EXTRUSION IS THE CORE NORMAL, NOT d. Sweeping +-reach along
+        // d(p) is the obvious reading of "extrude the band along d", and it is wrong:
+        // d points mostly INWARD (towards the loop's axis), so at any useful reach
+        // both rings converge past the axis and cross over, and the "solid" is a
+        // self-intersecting bow tie rather than a plug. That is the same class of
+        // mistake as the ruled strip's - a per-sample direction used as if it were a
+        // sweep - and it is what made through-all "project through the object at
+        // random angles".
+        //
+        // The extrusion runs along +-n, far enough to leave the part on both sides.
+        // The ANGLE still does its job, because it tilts the WALL: at travel t along
+        // n the ring is displaced sideways by t * tan(90 - angle) along the in-plane
+        // inward direction, so angle 90 is a straight prism and smaller angles taper
+        // it. tan is clamped so a near-zero angle cannot blow the radius up.
+        // THE ANGLE'S MEANING HERE IS THE TAPER OF THE WALL, and its zero is a
+        // STRAIGHT PRISM - not the flat shelf it is for the band.
+        //
+        // With a core plane, angle 0 means "the band lies in the plane parallel to
+        // P", a flat shelf. With NO core plane there is no shelf to lie in: the cut
+        // simply goes through, and the useful thing for the angle to say is how much
+        // the through-cut tapers. So 0 is a straight prism along n (the plain through
+        // cut every earlier version made, and what the phase-1 suite asserts), and
+        // larger angles lean the wall in by tan(angle) per unit of travel.
+        //
+        // Reading it the other way round - cot(angle), to match the band - would make
+        // angle 0 an infinite taper, which is how a plain through cut on a cube face
+        // turned into a cone.
+        const double a = std::clamp(params.angle_deg, DrawCutMinLipAngleDeg, DrawCutMaxLipAngleDeg)
+                         * M_PI / 180.0;
+        const double tan_a = std::abs(std::tan(a));
+
+        const std::vector<DrawCutSample>& p = stroke.path();
+
+        // THE SIDEWAYS TRAVEL MUST NOT REACH THE AXIS. `reach` is a whole bbox
+        // diagonal, so any appreciable taper sends the inner ring through the centre
+        // and out the other side, inverting it and making the solid self-intersect -
+        // the very failure this branch exists to avoid. Cap the lateral displacement
+        // at 90% of the loop's own smallest in-plane radius: as steep as the angle
+        // asks for, right up to the point where it would eat itself.
+        double min_r = std::numeric_limits<double>::max();
+        for (size_t i = 0; i < m; ++ i) {
+            const Vec3d to_c = cb.centroid - p[i].pos;
+            min_r = std::min(min_r, (to_c - to_c.dot(cb.normal) * cb.normal).norm());
+        }
+        if (!(min_r < std::numeric_limits<double>::max()))
+            min_r = 0.0;
+        const double lateral = std::min(reach * tan_a, 0.9 * min_r);
+
+        std::vector<Vec3d> ring_a, ring_b;
+        ring_a.reserve(m);
+        ring_b.reserve(m);
+        // THE WALL MUST NOT SIT EXACTLY ON THE SKIN, and it must not be moved off it
+        // by anything the user can see either.
+        //
+        // A loop drawn ROUND a box lies ON the box's surface, so a wall built straight
+        // through those points is COINCIDENT with the box's own faces - the degenerate
+        // case Manifold and mcut both give up on ("the upper boolean gave nothing").
+        //
+        // Extension is the wrong tool for that: it is measured in millimetres the user
+        // chose, and any lateral use of it changes the CUT. On a loop round a barrel it
+        // would widen the through cut; on Axis Z through a sloped face it turned a
+        // radius-10 prism into a radius-13 one. What is needed is not a reach but a
+        // NUDGE - enough to break the tie between two coincident planes, small enough
+        // that no dimension moves. A thousandth of a millimetre does it, and it is far
+        // below the tolerance any of these cuts are measured to. It has to be big
+        // enough for the boolean to see two distinct planes rather than one, and
+        // Manifold's own epsilon scales with the model, so it is taken as a tiny
+        // fraction of the part rather than as an absolute: 1e-4 of the bbox diagonal
+        // is 0.008 mm on an 80 mm box, invisible in any dimension and still four
+        // orders of magnitude above float noise.
+        //
+        // (Extension still does its real job on the band path, where it lifts the
+        // outer rim clear of the face the stroke was drawn on.)
+        const double nudge = std::max(1e-3, 1e-4 * diag);
+
+        for (size_t i = 0; i < m; ++ i) {
+            const Vec3d inward = draw_cut_core_inward(stroke, params, cb.normal, cb.centroid, i);
+            const Vec3d shift  = face_offset * cb.normal - nudge * inward;
+            // Going along +n the wall leans OUT of the loop, going along -n it leans
+            // IN - so the section tapers the way a plug's does, and each ring stays on
+            // its own side of the loop.
+            ring_a.emplace_back(p[i].pos + reach * cb.normal - lateral * inward + shift);
+            ring_b.emplace_back(p[i].pos - reach * cb.normal + lateral * inward + shift);
+        }
+        its.vertices.reserve(m * 2 + 2);
+        for (const Vec3d& v : ring_a) its.vertices.emplace_back(v.cast<float>());
+        for (const Vec3d& v : ring_b) its.vertices.emplace_back(v.cast<float>());
+
+        auto A = [](size_t i) { return int(i); };
+        auto B = [m](size_t i) { return int(m + i); };
+        for (size_t i = 0; i < m; ++ i) {
+            const size_t j = (i + 1) % m;
+            its.indices.emplace_back(Vec3i32(A(i), B(i), B(j)));
+            its.indices.emplace_back(Vec3i32(A(i), B(j), A(j)));
+        }
+        Vec3d ca = Vec3d::Zero(), cbc = Vec3d::Zero();
+        for (size_t i = 0; i < m; ++ i) { ca += ring_a[i]; cbc += ring_b[i]; }
+        ca /= double(m);
+        cbc /= double(m);
+        const int c_a = int(its.vertices.size());
+        its.vertices.emplace_back(ca.cast<float>());
+        const int c_b = int(its.vertices.size());
+        its.vertices.emplace_back(cbc.cast<float>());
+        for (size_t i = 0; i < m; ++ i) {
+            const size_t j = (i + 1) % m;
+            its.indices.emplace_back(Vec3i32(c_a, A(i), A(j)));
+            its.indices.emplace_back(Vec3i32(c_b, B(j), B(i)));
+        }
+    }
+    else {
+        // BAND + FLAT CORE. Outer ring, inner ring (already on P), and the core
+        // capped from its own centroid ON THE PLANE - so the cap is exactly planar,
+        // which is what the halves mate on.
+        its.vertices.reserve(m * 2 + 2);
+        for (const Vec3d& v : cb.out)   its.vertices.emplace_back(v.cast<float>());
+        for (const Vec3d& v : cb.inner) its.vertices.emplace_back(v.cast<float>());
+
+        auto O = [](size_t i) { return int(i); };
+        auto I = [m](size_t i) { return int(m + i); };
+
+        // The band wall.
+        for (size_t i = 0; i < m; ++ i) {
+            const size_t j = (i + 1) % m;
+            its.indices.emplace_back(Vec3i32(O(i), I(i), I(j)));
+            its.indices.emplace_back(Vec3i32(O(i), I(j), O(j)));
+        }
+
+        // THE CORE. Its centroid is the mean of the inner ring, which lies on P
+        // because every inner point does - so the fan is planar to floating point,
+        // not just nearly so. That is what the coplanarity test measures.
+        Vec3d core_c = Vec3d::Zero();
+        for (const Vec3d& v : cb.inner)
+            core_c += v;
+        core_c /= double(m);
+        // The fan centre must lie on the plane the INNER RING lies on, which is P
+        // displaced by the band's travel - NOT the plane through the loop's own
+        // centroid. Projecting onto the latter (an earlier version did) drags the cap
+        // back up to the drawn line, so the plug collapses to nothing and the boolean
+        // reports "the lower boolean gave nothing".
+        //
+        // The inner ring is planar by construction, so its mean is already on that
+        // plane; re-projecting it onto the ring's own plane is the belt-and-braces
+        // that cannot move it anywhere wrong.
+        core_c -= (core_c - cb.plane_pt).dot(cb.normal) * cb.normal;
+
+        // The outer cap, from the outer ring's own centroid. It sits outside the
+        // skin, so it never survives the boolean - it only makes the solid closed.
+        Vec3d out_c = Vec3d::Zero();
+        for (const Vec3d& v : cb.out)
+            out_c += v;
+        out_c /= double(m);
+
+        const int c_out  = int(its.vertices.size());
+        its.vertices.emplace_back(out_c.cast<float>());
+        const int c_core = int(its.vertices.size());
+        its.vertices.emplace_back(core_c.cast<float>());
+
+        for (size_t i = 0; i < m; ++ i) {
+            const size_t j = (i + 1) % m;
+            its.indices.emplace_back(Vec3i32(c_out,  O(i), O(j)));
+            its.indices.emplace_back(Vec3i32(c_core, I(j), I(i)));
+        }
+    }
+
+    // Same outward-winding guarantee the ruled strip gives cut_with_solid().
+    if (its_volume(its) < 0.f)
+        for (Vec3i32& t : its.indices)
+            std::swap(t(1), t(2));
+
+    return its;
+}
+
+bool draw_cut_core_face(const DrawCutStroke& stroke,
+                        const DrawCutParams& params,
+                        const BoundingBoxf3& bbox,
+                        Vec3d&               normal,
+                        Vec3d&               point)
+{
+    normal = Vec3d::UnitZ();
+    point  = Vec3d::Zero();
+
+    if (!stroke.valid() || !stroke.is_closed())
+        return false;
+    // Through-all has no core: the band goes straight out of the part on both sides.
+    if (params.through_all)
+        return false;
+
+    const double ext  = std::max(0.0, params.extension);
+    const double dep  = std::max(0.01, params.depth);
+    (void) bbox; // only through-all needs the bbox reach, and that returned above.
+
+    const CoreBand cb = build_core_band(stroke, params, ext, dep, 0.0);
+    if (!cb.ok)
+        return false;
+
+    normal = cb.normal;
+    point  = cb.plane_pt;
+    return true;
+}
+
+// ---------------------------------------------------------------------------
 // The cutter solid
 // ---------------------------------------------------------------------------
 
@@ -654,6 +1140,20 @@ indexed_triangle_set draw_cut_cutter_solid(const DrawCutStroke& stroke,
     // and a cut aimed diagonally through a long part stops inside it.
     const double diag  = bbox.defined ? bbox.size().norm() : 100.0;
     const double depth = params.through_all ? 1.05 * diag + 1.0 : std::max(0.01, params.depth);
+
+    // ----------------------------------------------------------------------
+    // PHASE 3: A CLOSED LOOP IS A BAND PLUS A FLAT CORE.
+    //
+    // See the model at the top of DrawCut.hpp. The ruled strip below is what an
+    // OPEN stroke still uses (no loop, so no interior to put a core plane in) and
+    // what a closed loop falls back to only if the plane fit fails outright.
+    // ----------------------------------------------------------------------
+    if (closed) {
+        indexed_triangle_set band_its = draw_cut_band_core_solid(stroke, params, bbox, face_offset);
+        if (!band_its.empty())
+            return band_its;
+        // Fall through to the ruled strip: better a rough cut than no cut.
+    }
 
     // THE RAILS, and the one thing about them that is easy to get wrong.
     //
@@ -953,6 +1453,17 @@ void locate_arc(const DrawCutStroke& stroke, const std::vector<double>& acc, dou
 // lerped across the span s falls in. The ruling is lerped AS A DIRECTION and
 // renormalised, which is what keeps the surface continuous where the underlying
 // normals turn.
+// THE SURFACE'S TRAVEL DIRECTION AT ARC LENGTH s.
+//
+// Phase 3: for a CLOSED loop this is the BAND direction d(p) - the in-plane
+// inward direction tilted by the lip angle towards the core normal - because that
+// is what the cutter sweeps and so what a connector has to stand on. For an OPEN
+// stroke it stays the phase-1 inward ruling.
+//
+// Keeping this in one place is what makes draw_cut_surface_point() agree with
+// draw_cut_cutter_solid() sample for sample; the test that walks the surface and
+// checks the cutter's own vertices lie on it is the thing that would catch a
+// divergence.
 void surface_frame_pieces(const DrawCutStroke& stroke, const DrawCutParams& params, double s,
                           Vec3d& pos, Vec3d& dir, Vec3d& tan)
 {
@@ -963,9 +1474,47 @@ void surface_frame_pieces(const DrawCutStroke& stroke, const DrawCutParams& para
     tan = Vec3d::UnitX();
     if (n == 0)
         return;
+
+    // The band direction at sample index i, closed loops only.
+    Vec3d core_n, core_c;
+    const bool has_core = stroke.is_closed() &&
+                          draw_cut_core_plane(stroke, params, core_n, core_c);
+    if (has_core) {
+        // Pin the normal the same way build_core_band() does, or the band direction
+        // here would lean the opposite way to the one the cutter used.
+        // The same threshold build_core_band() uses, and for the same reason: on a
+        // barrel loop the average skin normal cancels and its direction is noise.
+        Vec3d avg_skin = Vec3d::Zero();
+        for (const DrawCutSample& s2 : p)
+            avg_skin += s2.normal;
+        if (avg_skin.norm() > 0.25 * double(p.size()) && core_n.dot(avg_skin) < 0.0)
+            core_n = -core_n;
+    }
+    auto dir_at = [&](size_t i) -> Vec3d {
+        if (!has_core)
+            return draw_cut_inward_dir(stroke, params, i);
+        const Vec3d inward = draw_cut_core_inward(stroke, params, core_n, core_c, i);
+        if (params.through_all) {
+            // THROUGH-ALL SWEEPS ALONG -n, NOT ALONG THE BAND DIRECTION - see
+            // draw_cut_band_core_solid(), where using d as a sweep sends the rings
+            // across the axis. The surface queries must follow the SAME ruling the
+            // cutter builds, or a connector placed at w lands where the cut never
+            // went: at angle 0 the band direction is horizontal, so w = 8 put the
+            // connector 8 mm radially INSIDE the plug instead of 8 mm down its wall,
+            // and the hole and the plug stopped matching.
+            //
+            // The wall leans sideways by tan(angle) per unit travelled down, which is
+            // exactly the taper the cutter applies.
+            const double a = std::clamp(params.angle_deg, DrawCutMinLipAngleDeg,
+                                        DrawCutMaxLipAngleDeg) * M_PI / 180.0;
+            return safe_normalize(-core_n + std::tan(a) * inward, -core_n);
+        }
+        return draw_cut_band_dir(inward, core_n, params.angle_deg);
+    };
+
     if (n == 1) {
         pos = p[0].pos;
-        dir = draw_cut_inward_dir(stroke, params, 0);
+        dir = dir_at(0);
         tan = stroke.tangent(0);
         return;
     }
@@ -979,9 +1528,7 @@ void surface_frame_pieces(const DrawCutStroke& stroke, const DrawCutParams& para
     const size_t j = (span + 1) % n;
 
     pos = (1.0 - t) * p[i].pos + t * p[j].pos;
-    dir = safe_normalize((1.0 - t) * draw_cut_inward_dir(stroke, params, i) +
-                         t * draw_cut_inward_dir(stroke, params, j),
-                         draw_cut_inward_dir(stroke, params, i));
+    dir = safe_normalize((1.0 - t) * dir_at(i) + t * dir_at(j), dir_at(i));
     tan = safe_normalize((1.0 - t) * stroke.tangent(i) + t * stroke.tangent(j), stroke.tangent(i));
 }
 
@@ -1132,11 +1679,42 @@ bool draw_cut_surface_project(const DrawCutStroke& stroke, const DrawCutParams& 
     // For each sample the ruling is a line through p_i along d_i; the nearest point
     // on that line is the plain projection, and the distance to it is what picks
     // the winner.
+    // PHASE 3: the ruling this inverts must be the one draw_cut_surface_point()
+    // BUILDS, which for a closed loop is the BAND direction, not the old inward
+    // normal. Projecting against the wrong family of lines would land a connector a
+    // few millimetres off the surface it was clicked on - and worse, the frame
+    // built there would be the frame of a surface that does not exist.
+    Vec3d core_n, core_c;
+    const bool has_core = stroke.is_closed() &&
+                          draw_cut_core_plane(stroke, params, core_n, core_c);
+    if (has_core) {
+        // The same normal pinning build_core_band() applies, for the same reason.
+        // Same threshold as build_core_band(): a barrel loop's average skin normal
+        // cancels, and pinning to its noise would invert the ruling this inverts.
+        Vec3d avg_skin = Vec3d::Zero();
+        for (const DrawCutSample& s2 : path)
+            avg_skin += s2.normal;
+        if (avg_skin.norm() > 0.25 * double(path.size()) && core_n.dot(avg_skin) < 0.0)
+            core_n = -core_n;
+    }
+    auto ruling_at = [&](size_t i) -> Vec3d {
+        if (!has_core)
+            return draw_cut_inward_dir(stroke, params, i);
+        const Vec3d inward = draw_cut_core_inward(stroke, params, core_n, core_c, i);
+        if (params.through_all) {
+            // The same -n sweep surface_frame_pieces() uses; see the note there.
+            const double a = std::clamp(params.angle_deg, DrawCutMinLipAngleDeg,
+                                        DrawCutMaxLipAngleDeg) * M_PI / 180.0;
+            return safe_normalize(-core_n + std::tan(a) * inward, -core_n);
+        }
+        return draw_cut_band_dir(inward, core_n, params.angle_deg);
+    };
+
     double best_d2 = std::numeric_limits<double>::max();
     size_t best_i  = 0;
     double best_w  = 0.0;
     for (size_t i = 0; i < n; ++ i) {
-        const Vec3d d = draw_cut_inward_dir(stroke, params, i);
+        const Vec3d d = ruling_at(i);
         const Vec3d v = p - path[i].pos;
         const double wi = v.dot(d);
         const double d2 = (v - wi * d).squaredNorm();
@@ -1466,11 +2044,39 @@ bool draw_cut_split(const indexed_triangle_set& mesh,
     // and mcut is the fallback, so a fold degrades to "boolean failed ->
     // complement recovery" rather than to a wrong cut. Log it so the reason is
     // recoverable from a log when a cut does come out strange.
+    //
+    // PHASE 3: the fold test is about the RULED STRIP, so it only means anything
+    // for an open stroke now. A closed loop's band travels towards the loop's own
+    // axis and terminates on the core plane, so it cannot fold against a tight
+    // corner the way a ruling could - what it can do is over-inset (see below).
     double kappa = 0.0;
-    if (draw_cut_strip_folds(stroke, params.extension, &kappa))
+    if (!stroke.is_closed() && draw_cut_strip_folds(stroke, params.extension, &kappa))
         BOOST_LOG_TRIVIAL(warning) << "Draw cut: the ruled strip folds near a tight corner (extension "
                                    << params.extension << " mm, curvature " << kappa
                                    << " 1/mm); the cut may be imprecise there";
+
+    // THE BAND CAN EAT THE CORE. The inner curve travels depth * cos(angle) inward
+    // in the plane, so a depth larger than the loop's own in-plane radius insets
+    // the core polygon past the centre and the ring self-intersects. The boolean
+    // still returns something, but the core is inside out, so say so.
+    if (stroke.is_closed() && !params.through_all) {
+        Vec3d cn, cc;
+        if (draw_cut_core_plane(stroke, params, cn, cc)) {
+            double min_r = std::numeric_limits<double>::max();
+            for (const DrawCutSample& s : stroke.path()) {
+                const Vec3d to_c = cc - s.pos;
+                min_r = std::min(min_r, (to_c - to_c.dot(cn) * cn).norm());
+            }
+            const double inset = std::max(0.01, params.depth) *
+                                 std::cos(std::clamp(params.angle_deg, DrawCutMinLipAngleDeg,
+                                                     DrawCutMaxLipAngleDeg) * M_PI / 180.0);
+            if (min_r < std::numeric_limits<double>::max() && inset >= min_r)
+                BOOST_LOG_TRIVIAL(warning)
+                    << "Draw cut: Depth " << params.depth << " mm at angle " << params.angle_deg
+                    << " deg insets the core by " << inset << " mm, past the loop's own radius "
+                    << min_r << " mm; there is no flat core left. Reduce Depth or raise Angle.";
+        }
+    }
 
     // WHICH SIDE IS UPPER. cut_with_solid() produces (inside, outside) as
     // (lower, upper):

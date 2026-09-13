@@ -4583,45 +4583,64 @@ void GLGizmoCut3D::render_draw_surface_inputs()
     // directions are one direction at every sample by definition, which is exactly
     // what a per-sample tilt is not - so the slider greys out for them rather than
     // sitting there doing nothing.
-    const bool angle_usable = DrawCutDirection(m_draw_direction) == DrawCutDirection::SurfaceNormal;
+    // PHASE 3 (2026-09-13): the angle is the LIP ANGLE - how steeply the outer band
+    // leans in towards the flat core - not the old signed draft. It is 0..90 and it
+    // applies to a closed loop whatever the Direction is, because the band's
+    // direction now comes from the core plane rather than from the surface normal.
+    // An OPEN line still has no core, so it keeps the Surface-normal-only rule.
+    const bool angle_usable = m_draw_chain.is_closed() ||
+                              DrawCutDirection(m_draw_direction) == DrawCutDirection::SurfaceNormal;
     m_imgui->disabled_begin(!angle_usable);
     ImGui::AlignTextToFramePadding();
     m_imgui->text(_L("Angle") + ": ");
     ImGui::SameLine(m_label_width);
     ImGui::PushItemWidth(m_control_width * 0.7f);
-    if (ImGui::SliderFloat("##draw_angle", &m_draw_angle, float(-DrawCutMaxAngleDeg), float(DrawCutMaxAngleDeg), "%.0f deg"))
+    const bool angle_changed = ImGui::SliderFloat("##draw_angle", &m_draw_angle,
+                                                  float(DrawCutMinLipAngleDeg),
+                                                  float(DrawCutMaxLipAngleDeg), "%.0f deg");
+    const bool angle_hovered = ImGui::IsItemHovered();
+    if (angle_changed)
         refresh_draw_stroke();
     ImGui::PopItemWidth();
     m_imgui->disabled_end();
-    if (ImGui::IsItemHovered())
-        // THE ONE THING ABOUT THIS FEATURE THAT IS NOT SELF-EVIDENT ON SCREEN, which
-        // is why the research spec asks for it to be said here: which way the sign
-        // goes. Positive flares out, so the piece lifts away; negative undercuts, so
-        // it locks in.
-        m_imgui->tooltip(_u8L("Tilts the cut surface away from the face the line was drawn on. "
-                              "Positive flares the cut outward, so the piece the line goes around gets wider going in and lifts out. "
-                              "Negative undercuts it, so the piece locks in place and cannot be pulled straight out. "
-                              "Only available with Direction = Surface normal.").c_str(),
+    if (angle_hovered)
+        m_imgui->tooltip(_u8L("The angle at which the outer shell projects in towards the flat middle of the cut. "
+                              "0 makes a flat shelf around the core, 45 a chamfered lip the two halves key into, "
+                              "and 90 a straight wall with no lip.").c_str(),
                          ImGui::GetFontSize() * 20.f);
 
-    // Depth: through all by default, which is the reach a cut usually wants.
+    // Depth: how far the band travels in before the surface turns onto the flat
+    // core. Through all drops the core entirely.
     ImGui::AlignTextToFramePadding();
     m_imgui->text(_L("Depth") + ": ");
     ImGui::SameLine(m_label_width);
     bool through = m_draw_params.through_all;
-    if (m_imgui->bbl_checkbox(_L("Through all"), through)) {
+    const bool through_toggled = m_imgui->bbl_checkbox(_L("Through all"), through);
+    const bool through_hovered = ImGui::IsItemHovered();
+    if (through_toggled) {
         m_draw_params.through_all = through;
         refresh_draw_stroke();
     }
+    if (through_hovered)
+        m_imgui->tooltip(_u8L("Cut all the way through the part instead of meeting a flat middle. "
+                              "The band carries on at the same angle and leaves a tapered plug with no flat core - "
+                              "useful for a socket, not for two halves that have to sit flat against each other.").c_str(),
+                         ImGui::GetFontSize() * 20.f);
     if (!m_draw_params.through_all) {
         ImGui::AlignTextToFramePadding();
         m_imgui->text(" ");
         ImGui::SameLine(m_label_width);
         ImGui::PushItemWidth(m_control_width * 0.7f);
         const float max_depth = std::max(10.f, float(m_bounding_box.size().norm()));
-        if (ImGui::SliderFloat("##draw_depth", &m_draw_depth, 0.1f, max_depth, "%.1f mm"))
+        const bool depth_changed = ImGui::SliderFloat("##draw_depth", &m_draw_depth, 0.1f, max_depth, "%.1f mm");
+        const bool depth_hovered = ImGui::IsItemHovered();
+        if (depth_changed)
             refresh_draw_stroke();
         ImGui::PopItemWidth();
+        if (depth_hovered)
+            m_imgui->tooltip(_u8L("How far in the cut travels from the drawn line before it turns onto the flat middle. "
+                                  "The deeper it goes, the smaller the flat core - too deep and there is no flat left at all.").c_str(),
+                             ImGui::GetFontSize() * 20.f);
     }
 
     // Smoothing. A raw stroke picks up every triangle normal it crossed, and an

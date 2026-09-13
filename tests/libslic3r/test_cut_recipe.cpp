@@ -686,6 +686,107 @@ TEST_CASE("Cut recipe: a version 1 stroke loads as a chain of one stroke", "[Cut
     REQUIRE(r.valid());
 }
 
+// ---------------------------------------------------------------------------
+// VERSION 3 (2026-09-13): the drawn cut's surface model changed, and with it the
+// MEANING of two stored numbers. A version 2 recipe still loads, but it cannot
+// re-cut to the same halves, so migrate_draw_v2() maps it onto the nearest
+// phase-3 cut rather than leaving numbers that mean something else.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("Cut recipe: a version 2 drawn recipe migrates to the flat-core model", "[CutRecipe]")
+{
+    CutRecipe r = recipe_make(CutRecipeKind::Drawn);
+    r.version          = 2;
+    r.draw_angle_deg   = 0.0;    // a v2 draft of 0: the ruling straight down the normal
+    r.draw_depth       = 40.0;   // a v2 reach through the part
+    r.draw_through_all = true;   // the v2 default, and the broken case
+
+    REQUIRE(cut_recipe_version_supported(2));
+    r.migrate_draw_v2();
+
+    // Stamped forward, so nothing downstream sees two meanings.
+    REQUIRE(r.version == CutRecipeVersion);
+    REQUIRE(CutRecipeVersion == 3);
+
+    // A v2 draft of 0 was a straight-down ruling, which IS a 90-degree straight wall
+    // in the new model.
+    REQUIRE(r.draw_angle_deg == Approx(90.0));
+    // The old reach is meaningless as a band travel; the phase-3 default replaces it.
+    REQUIRE(r.draw_depth == Approx(3.0));
+    // And through-all is turned off, or the migrated cut would faithfully reproduce
+    // the "projects through the object at random angles" cut this release fixes.
+    REQUIRE_FALSE(r.draw_through_all);
+
+    // The migrated recipe is still re-cuttable.
+    REQUIRE(r.valid());
+
+    // The parameters it hands DrawCut agree with what it stored.
+    const DrawCutParams p = r.draw_params();
+    REQUIRE(p.angle_deg == Approx(90.0));
+    REQUIRE(p.depth == Approx(3.0));
+    REQUIRE_FALSE(p.through_all);
+}
+
+TEST_CASE("Cut recipe: migration maps a v2 draft onto the nearest lip angle", "[CutRecipe]")
+{
+    // |draft| is how far the old ruling leaned OFF the surface normal, so the closest
+    // phase-3 surface is a lip of 90 - |draft|. The sign is dropped because the lip
+    // angle is unsigned - a v2 flare and a v2 undercut of the same size both become
+    // the same lip, which is the best a one-way map can do.
+    auto migrated_angle = [](double v2_angle) {
+        CutRecipe r = recipe_make(CutRecipeKind::Drawn);
+        r.version        = 2;
+        r.draw_angle_deg = v2_angle;
+        r.migrate_draw_v2();
+        return r.draw_angle_deg;
+    };
+
+    REQUIRE(migrated_angle(  0.0) == Approx(90.0));
+    REQUIRE(migrated_angle( 30.0) == Approx(60.0));
+    REQUIRE(migrated_angle(-30.0) == Approx(60.0));
+    REQUIRE(migrated_angle( 60.0) == Approx(30.0));
+    // Clamped into the lip angle's own range whatever the old value was.
+    REQUIRE(migrated_angle(120.0) >= 0.0);
+    REQUIRE(migrated_angle(120.0) <= 90.0);
+}
+
+TEST_CASE("Cut recipe: migration leaves a flat or curved recipe alone", "[CutRecipe]")
+{
+    // Only the DRAWN cut's meanings changed. A flat or curved recipe is carried
+    // forward untouched and just gets the new stamp - migrating its numbers would
+    // corrupt a cut that was perfectly well described.
+    for (CutRecipeKind kind : { CutRecipeKind::Plane, CutRecipeKind::Curved }) {
+        CutRecipe r = recipe_make(kind);
+        r.version          = 2;
+        r.draw_angle_deg   = 12.5;
+        r.draw_depth       = 40.0;
+        r.draw_through_all = true;
+
+        r.migrate_draw_v2();
+
+        REQUIRE(r.version == CutRecipeVersion);
+        REQUIRE(r.draw_angle_deg == Approx(12.5));
+        REQUIRE(r.draw_depth == Approx(40.0));
+        REQUIRE(r.draw_through_all);
+    }
+}
+
+TEST_CASE("Cut recipe: migrating an already-current recipe is a no-op", "[CutRecipe]")
+{
+    CutRecipe r = recipe_make(CutRecipeKind::Drawn);
+    r.version          = CutRecipeVersion;
+    r.draw_angle_deg   = 45.0;
+    r.draw_depth       = 5.0;
+    r.draw_through_all = true;
+
+    r.migrate_draw_v2();
+
+    REQUIRE(r.version == CutRecipeVersion);
+    REQUIRE(r.draw_angle_deg == Approx(45.0));
+    REQUIRE(r.draw_depth == Approx(5.0));
+    REQUIRE(r.draw_through_all);
+}
+
 TEST_CASE("Cut recipe: bounds that do not tile the samples fall back to one stroke", "[CutRecipe]")
 {
     // A chain whose ranges disagree with its samples would corrupt undo in a way the
