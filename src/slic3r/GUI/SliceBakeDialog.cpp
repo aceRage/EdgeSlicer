@@ -53,9 +53,10 @@ SliceBakeSettings SliceBakeDialog::load_from_config(double default_resolution)
         s.options.close_gaps_radius = close_on ? std::clamp(radius, 0., SLICE_BAKE_CLOSE_GAPS_MAX) : 0.;
 
         if (cfg->has(CFG_SECTION, CFG_SOURCE))
-            s.options.contour_source = cfg->get(CFG_SECTION, CFG_SOURCE) == "extrusion"
-                                           ? SliceBakeContourSource::Extrusion
-                                           : SliceBakeContourSource::SliceContours;
+            // Owner (2026-09-13): the slice-contour source is the original model minus fuzzy skin,
+            // so it is of little use; the extrusion path is always used and the choice is hidden.
+            (void) CFG_SOURCE;
+            s.options.contour_source = SliceBakeContourSource::Extrusion;
         if (cfg->has(CFG_SECTION, CFG_RESOLUTION)) {
             try {
                 s.options.resolution = std::clamp(std::stod(cfg->get(CFG_SECTION, CFG_RESOLUTION)),
@@ -131,10 +132,16 @@ SliceBakeDialog::SliceBakeDialog(wxWindow              *parent,
     m_source_choice = new ::ComboBox(this, wxID_ANY, wxEmptyString, wxDefaultPosition, input_size, 0, nullptr, wxCB_READONLY);
     m_source_choice->Append(_L("Slice contours (smooth)"));
     m_source_choice->Append(_L("Extrusion paths (fuzzy skin)"));
-    m_source_choice->SetSelection(m_settings.options.contour_source == SliceBakeContourSource::Extrusion ? 1 : 0);
+    m_source_choice->SetSelection(1); // extrusion paths, always (see the settings loader)
     m_source_choice->SetToolTip(source_tip);
     f_sizer->Add(source_label, 0, wxEXPAND | wxALIGN_CENTER_VERTICAL);
     f_sizer->Add(m_source_choice, 0, wxALIGN_CENTER_VERTICAL);
+    // Hidden rather than removed: the slice-contour source stays available to tests and can be
+    // re-offered later; the row takes no space while hidden.
+    source_label->Hide();
+    m_source_choice->Hide();
+    f_sizer->Hide(source_label);
+    f_sizer->Hide(m_source_choice);
 
     // ---- resolution ------------------------------------------------------------------------------
     const wxString res_tip = _L("How far a straight edge of the baked mesh may depart from the curve it stands in "
@@ -259,9 +266,7 @@ SliceBakeSettings SliceBakeDialog::current_settings() const
     s.options.close_gaps_radius =
         close_on ? std::clamp(read_mm(m_close_input, DEFAULT_CLOSE_RADIUS), 0., SLICE_BAKE_CLOSE_GAPS_MAX) : 0.;
 
-    if (m_source_choice != nullptr)
-        s.options.contour_source = m_source_choice->GetSelection() == 1 ? SliceBakeContourSource::Extrusion
-                                                                       : SliceBakeContourSource::SliceContours;
+    s.options.contour_source = SliceBakeContourSource::Extrusion; // the choice is hidden; extrusion paths always
     s.options.resolution = std::clamp(read_mm(m_res_input, m_default_res),
                                       SLICE_BAKE_RESOLUTION_MIN, SLICE_BAKE_RESOLUTION_MAX);
     s.options.smooth_vertical_steps = m_smooth_cb != nullptr && m_smooth_cb->GetValue();

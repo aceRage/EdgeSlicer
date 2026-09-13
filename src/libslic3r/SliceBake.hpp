@@ -121,7 +121,7 @@ struct SliceBakeOptions
 
     // Where a layer's boundary comes from. SliceContours is the default because the extrusion
     // centreline is the simplified one, and its angularity is what the owner's report is about.
-    SliceBakeContourSource contour_source = SliceBakeContourSource::SliceContours;
+    SliceBakeContourSource contour_source = SliceBakeContourSource::Extrusion; // the GUI only ever uses this one (2026-09-13)
 
     // Loft consecutive layers into a skirt of sloped quads instead of stacking vertical prisms,
     // wherever two neighbouring layers' contours correspond one to one. Off by default: the
