@@ -6336,13 +6336,28 @@ static const PrintObject* baked_print_object_for(int obj_idx)
     if (plater->is_background_process_slicing())
         return nullptr;
 
-    const Print& print = plater->fff_print();
-    for (const PrintObject* po : print.objects())
-        // Print::apply() works on its own copy of the Model, so the PrintObject points at a clone of
-        // the plater object; the ids survive the copy, the pointer never matches.
-        if (po != nullptr && po->model_object() != nullptr && po->model_object()->id() == mo->id() &&
-            po->is_step_done(posPerimeters) && po->layer_count() > 0)
-            return po;
+    // Every plate owns its own Print here (Plater::fff_print() is a placeholder that never holds
+    // objects), so look in the plate this object sits on, then in every other plate. The
+    // PrintObject points at the Print's own copy of the model; the ids survive the copy.
+    PartPlateList& plates = plater->get_partplate_list();
+    auto find_in = [&](const Print* print) -> const PrintObject* {
+        if (print == nullptr)
+            return nullptr;
+        for (const PrintObject* po : print->objects())
+            if (po != nullptr && po->model_object() != nullptr && po->model_object()->id() == mo->id() &&
+                po->is_step_done(posPerimeters) && po->layer_count() > 0)
+                return po;
+        return nullptr;
+    };
+    const int own_plate = plates.find_instance(obj_idx, 0);
+    if (own_plate >= 0)
+        if (const PartPlate* plate = plates.get_plate(own_plate))
+            if (const PrintObject* po = find_in(const_cast<PartPlate*>(plate)->fff_print()))
+                return po;
+    for (int i = 0; i < plates.get_plate_count(); ++i)
+        if (i != own_plate)
+            if (const PrintObject* po = find_in(plates.get_plate(i)->fff_print()))
+                return po;
     return nullptr;
 }
 
