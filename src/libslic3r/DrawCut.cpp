@@ -1548,6 +1548,43 @@ void DrawCutChain::set_samples(const std::vector<DrawCutSample>& samples, bool c
     m_finished_open = !m_closed && finished_open && m_samples.size() >= MinChainSamples;
 }
 
+// 2026-09-13, owner click-test item 1. See the header for why the pick moved from 3D
+// millimetres to screen pixels. Deliberately a free function over the chain rather than
+// a member: it needs a camera, which libslic3r has no notion of, so the projection comes
+// in as a callable - which is also what lets a test build one by hand.
+DrawChainEnd draw_cut_chain_end_at_pixel(const DrawCutChain&                                      chain,
+                                         const Vec2d&                                             mouse_px,
+                                         const std::function<std::optional<Vec2d>(const Vec3d&)>& project,
+                                         double                                                   pick_px)
+{
+    // No free endpoints: an empty chain has none, a closed chain has none. Both are the
+    // caller's cases to handle (an empty chain accepts a stroke anywhere; a closed one
+    // accepts none), and answering them here would be a claim about handles that are not
+    // drawn.
+    if (chain.empty() || chain.is_closed() || !project)
+        return DrawChainEnd::None;
+
+    const double r2 = std::max(1e-6, pick_px) * std::max(1e-6, pick_px);
+
+    auto d2_of = [&](const Vec3d& p) -> double {
+        const std::optional<Vec2d> s = project(p);
+        // A point that does not project (behind the eye, or off any sensible plane) is
+        // not pickable - infinity rather than a guess, so it can never win the tie-break.
+        return s ? (*s - mouse_px).squaredNorm() : std::numeric_limits<double>::infinity();
+    };
+    const double d2_fr = d2_of(chain.front_pos());
+    const double d2_bk = d2_of(chain.back_pos());
+
+    // The NEARER endpoint wins when both are in range - a short chain can have its two
+    // ends within a pick radius of each other on screen. Same tie-break, and the same
+    // Back-first preference, as end_for_start() makes in 3D.
+    if (d2_bk <= r2 && d2_bk <= d2_fr)
+        return DrawChainEnd::Back;
+    if (d2_fr <= r2)
+        return DrawChainEnd::Front;
+    return DrawChainEnd::None;
+}
+
 DrawChainEnd DrawCutChain::end_for_start(const Vec3d& p, double snap_radius) const
 {
     // An empty chain accepts anything: the first stroke has nothing to continue.
@@ -1574,9 +1611,24 @@ DrawChainEnd DrawCutChain::append(const std::vector<DrawCutSample>& stroke, doub
 {
     if (stroke.size() < 2)
         return DrawChainEnd::None;
+    // The end is decided here, from the stroke's own first sample; append_at() does the
+    // rest. Kept as the entry point every existing caller (and every phase 1/2 test)
+    // already uses.
+    return append_at(stroke, end_for_start(stroke.front().pos, snap_radius), snap_radius);
+}
 
-    const DrawChainEnd at = end_for_start(stroke.front().pos, snap_radius);
+DrawChainEnd DrawCutChain::append_at(const std::vector<DrawCutSample>& stroke, DrawChainEnd at,
+                                     double snap_radius)
+{
+    if (stroke.size() < 2)
+        return DrawChainEnd::None;
     if (at == DrawChainEnd::None)
+        return DrawChainEnd::None;
+    // A CLOSED chain refuses every continuation however the end was chosen: it is
+    // finished, and reopening it would have to pick a place to reopen, which no gesture
+    // says. The screen-space pick cannot override that - it only replaces the question
+    // "which of the two free ends did the user aim at".
+    if (m_closed)
         return DrawChainEnd::None;
 
     const double r     = std::max(1e-6, snap_radius);
@@ -1687,6 +1739,43 @@ bool DrawCutChain::force_close()
 {
     if (m_samples.size() < MinChainSamples)
         return false;
+    m_closed        = true;
+    m_finished_open = false;
+    return true;
+}
+
+// 2026-09-13, OWNER CLICK-TEST ITEM 2.
+//
+// The bug force_close() had: it set m_closed and nothing else, so the span that closed
+// the loop was the straight CHORD from the last sample to the first, in the cut plane's
+// frame. DrawCutStroke::finish() then resampled along that chord and
+// draw_cut_cutter_solid() swept the ruling along it - and on a line drawn round the
+// outside of a part, the chord is a line through the middle of the part, so the surface
+// generated over it emerged on the FAR side. That is the owner's "Close loop mirrors the
+// line to the other side of the object": nothing was ever reflected, but a chord through
+// a solid and a reflection look the same from outside.
+//
+// The fix is to close along a path that is ON the surface. The path's points are found
+// by the caller (the gizmo, which has the camera and the raycaster this file has
+// neither of) and appended here as one stroke, so the closing span becomes a sequence of
+// real spans over the model and Ctrl+Z takes the whole closure back in one step.
+bool DrawCutChain::close_along_path(const std::vector<DrawCutSample>& path)
+{
+    if (m_closed)
+        return false;
+    // The result has to be a loop, not a dab - the same floor force_close() enforces,
+    // measured on what the chain will HAVE, since a short chain plus a long path is a
+    // perfectly good loop.
+    if (m_samples.size() + path.size() < MinChainSamples)
+        return false;
+
+    if (!path.empty()) {
+        const size_t begin = m_samples.size();
+        m_samples.insert(m_samples.end(), path.begin(), path.end());
+        // ONE stroke, so undo_last_stroke() takes the closure back whole - and, because
+        // it also clears m_closed, gives back exactly the open line the user had.
+        m_bounds.emplace_back(begin, m_samples.size());
+    }
     m_closed        = true;
     m_finished_open = false;
     return true;

@@ -9,6 +9,8 @@
 #include <vector>
 #include <utility>
 #include <cstdint>
+#include <functional>
+#include <optional>
 
 namespace Slic3r {
 
@@ -643,6 +645,46 @@ public:
     // test runs for the first stroke too (against the chain's own first sample).
     DrawChainEnd append(const std::vector<DrawCutSample>& stroke, double snap_radius);
 
+    // 2026-09-13, owner click-test item 1. APPEND AT A GIVEN END, with the end decided
+    // by the CALLER rather than re-derived from `snap_radius`.
+    //
+    // append() does two jobs with one radius: it decides which end the stroke joins,
+    // and it decides whether the stroke CLOSES the chain. The gizmo now decides the
+    // first in SCREEN space on the press (a pixel radius around the projected endpoint
+    // marker, which is what the user is actually aiming at - see
+    // GLGizmoCut3D::draw_chain_end_at), so re-deciding it here from a 3D radius that
+    // scales with the object would refuse exactly the strokes the screen pick exists to
+    // rescue: a click dead-centre on the marker whose ray hit the mesh 4 mm away.
+    //
+    // The CLOSURE test still uses `snap_radius`, unchanged - that one is a question
+    // about two points on the model, not about what the user can see.
+    //
+    // `at` must be Front or Back. On an EMPTY chain either is accepted and behaves as
+    // the first stroke; None is refused. Everything else - the Front reversal, the
+    // duplicate-join skip, the bounds bookkeeping, the closure - is append()'s, which
+    // now forwards to this.
+    DrawChainEnd append_at(const std::vector<DrawCutSample>& stroke, DrawChainEnd at, double snap_radius);
+
+    // 2026-09-13, OWNER CLICK-TEST ITEM 2: CLOSE THE LOOP ALONG A GIVEN PATH.
+    //
+    // force_close() just sets m_closed, which leaves the closing span as the straight
+    // CHORD between the two endpoints in the cut plane's frame. On a line drawn round
+    // the outside of a part that chord runs straight THROUGH the material, and the
+    // ruled surface swept along it comes out on the far side - which is what the owner
+    // saw as "Close loop mirrors the line to the other side of the object".
+    //
+    // This takes the intermediate points of a path that lies ON the surface (the gizmo
+    // raycasts them; libslic3r has no camera) and appends them to the BACK before
+    // closing, so the closing span is a real path over the model rather than a chord
+    // through it. `path` runs from the chain's BACK endpoint toward its FRONT and must
+    // NOT repeat either endpoint - only what is between them. An empty path is exactly
+    // force_close(), which is the right answer when the two ends are already within a
+    // snap radius of each other: there is nothing between them to walk.
+    //
+    // The whole closure is ONE undo step, so the appended points are recorded as one
+    // stroke and Ctrl+Z takes the chain back to the open line it was.
+    bool close_along_path(const std::vector<DrawCutSample>& path);
+
     // Take back the last appended stroke, whole, including any closure it made.
     // Returns false when there is nothing to take back. A chain that ends up empty
     // is empty, not "one sample long".
@@ -734,6 +776,45 @@ private:
     // The user said "this line is finished and is not a loop". See finish_open().
     bool m_finished_open{ false };
 };
+
+// ---------------------------------------------------------------------------
+// 2026-09-13, OWNER CLICK-TEST ITEM 1: THE ENDPOINT PICK IS IN SCREEN SPACE.
+//
+// The chain's endpoints are marked with handles the user clicks to carry the line on.
+// Deciding which one a click grabbed used to be a 3D test - is the point the ray hit on
+// the model within draw_cut_chain_snap_radius() mm of an endpoint - and that was wrong
+// twice over:
+//
+//   - the radius is in OBJECT mm (a fraction of the bounding-box diagonal), so how
+//     accurately the user has to click depends on the part's size and the camera's
+//     distance. On a 200 mm part at a normal zoom the 4 mm radius is a handful of
+//     pixels, so a click visually dead-centre on the handle misses and the stroke is
+//     refused. That is the owner's "clicking on or near them does not continue the
+//     chain";
+//   - it needs a HIT on the mesh at all, so an endpoint on the FAR side of the part -
+//     which the gizmo deliberately draws visible, through the model, because that is
+//     where the next stroke has to start - could never be picked: the ray stops at the
+//     near wall.
+//
+// A pixel radius around the PROJECTED handle fixes both: what the user can see, the
+// user can hit. This is the pure geometry of that test, so it can be pinned by a unit
+// test against a camera projection built by hand; the gizmo supplies the projection.
+//
+// `project` takes a point in the CHAIN's frame (the cut plane's frame) and returns its
+// pixel position, or std::nullopt when the point does not project at all.
+// `pick_px` is the radius in pixels.
+//
+// Returns Front or Back for the NEARER endpoint within the radius (both can be in range
+// on a chain whose ends are close together on screen - the same tie-break
+// DrawCutChain::end_for_start makes in 3D), and None when neither is.
+//
+// An EMPTY chain has no endpoints and gives None: "the first stroke may start anywhere"
+// is the caller's rule, not this one's, because it is not a question about handles. A
+// CLOSED chain has no free ends and also gives None.
+DrawChainEnd draw_cut_chain_end_at_pixel(const DrawCutChain&                          chain,
+                                         const Vec2d&                                       mouse_px,
+                                         const std::function<std::optional<Vec2d>(const Vec3d&)>& project,
+                                         double                                             pick_px);
 
 // ---------------------------------------------------------------------------
 // THE HALVES CLASSIFICATION. 2026-09-12, owner feedback item 3.

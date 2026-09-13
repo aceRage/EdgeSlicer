@@ -478,7 +478,20 @@ bool GLGizmoCut3D::on_mouse(const wxMouseEvent &mouse_event)
     }
     else if (mouse_event.RightDown()) {
         if (! m_connectors_editing && mouse_event.GetModifiers() == wxMOD_NONE &&
-            CutMode(m_mode) == CutMode::cutPlanar) {
+            CutMode(m_mode) == CutMode::cutPlanar && !is_draw_surface()) {
+            // 2026-09-13, ITEM 3: NOT IN DRAW MODE. process_contours() builds the part
+            // selection by performing a FLAT-PLANE cut (PartSelection's constructor calls
+            // Cut::perform_with_plane), which on a drawn cut is not the cut at all - the
+            // parts it produces are the two halves of a plane the user never asked for.
+            //
+            // Worse for the colouring: once m_part_selection is valid the object's real
+            // volumes are HIDDEN (toggle_model_objects_visibility) and the part loop in
+            // PartSelection::render draws the halves itself with "gouraud_light" and a
+            // flat per-part colour. That shader declares no colour-clip uniforms at all,
+            // so every uniform GLVolumeCollection::render sets - use_color_clip_plane,
+            // the flat plane, the curved sheet AND the drawn field - is silently dropped
+            // (GLShaderProgram::set_uniform is a no-op for an unknown name). Nothing the
+            // classification does could reach those pixels.
             // Check the internal part raycasters.
             if (! m_part_selection.valid())
                 process_contours();
@@ -3175,6 +3188,160 @@ int GLGizmoCut3D::draw_point_at(const Vec2d& mouse_position) const
     return best;
 }
 
+// 2026-09-13, OWNER CLICK-TEST ITEM 1: WHICH ENDPOINT A CLICK GRABS.
+//
+// This replaces a 3D test - `end_for_start(hit_pos, draw_chain_snap_radius())`, i.e.
+// "is the point the ray hit on the model within N mm of the endpoint" - whose radius
+// is `clamp(0.02 * bbox diagonal, 1, 6)` mm. Two things were wrong with that:
+//
+//  - it scales with the OBJECT, not with what the user can see. On a 200 mm part the
+//    radius is 4 mm, which at a normal viewing zoom is a handful of pixels - so a click
+//    that visually lands dead centre on the marker misses, and the press is refused with
+//    "that does not continue the line". That is the owner's "clicking on or near them
+//    does not continue the chain".
+//  - it is measured against a RAYCAST HIT, so an endpoint on the far side of the part
+//    can never be picked at all: the ray stops at the near wall. The markers are drawn
+//    after a depth clear precisely so a far endpoint stays visible - and then could not
+//    be clicked.
+//
+// A screen-space pixel radius around the PROJECTED endpoint fixes both, and it is the
+// same mechanism draw_point_at() uses for the line's edit handles and
+// GLGizmoBase/SceneRaycaster use for the connectors: what you can see, you can hit.
+DrawChainEnd GLGizmoCut3D::draw_chain_end_at(const Vec2d& mouse_position) const
+{
+    // The TEST ITSELF lives in libslic3r (draw_cut_chain_end_at_pixel), so it can be
+    // pinned by a unit test against a projection built by hand - there is no GUI harness
+    // to click a real handle with. All this supplies is the camera.
+    const Camera&     camera         = wxGetApp().plater()->get_camera();
+    const Transform3d plane_to_world = translation_transform(m_plane_center) * m_rotation_m;
+
+    return draw_cut_chain_end_at_pixel(
+        m_draw_chain, mouse_position,
+        [&](const Vec3d& p_plane) -> std::optional<Vec2d> {
+            const Slic3r::Point p = CameraUtils::project(camera, plane_to_world * p_plane);
+            return Vec2d(double(p.x()), double(p.y()));
+        },
+        DrawEndPickPx);
+}
+
+// ---------------------------------------------------------------------------
+// 2026-09-13, OWNER CLICK-TEST ITEM 2: "CLOSE LOOP MIRRORS THE LINE TO THE OTHER SIDE
+// OF THE OBJECT INSTEAD OF CLOSING THE CHAIN".
+//
+// Nothing ever reflected anything. What Close loop did was call
+// DrawCutChain::force_close(), which sets m_closed and adds NO samples - so the span
+// that closes the loop is the straight CHORD from the chain's last sample to its first,
+// in the cut plane's frame. DrawCutStroke::finish() resamples along that chord like any
+// other span and draw_cut_cutter_solid() sweeps the ruling along it.
+//
+// On a line drawn round the OUTSIDE of a part - which is the case Close loop exists for,
+// a line whose two ends cannot comfortably be brought together - that chord goes
+// straight THROUGH the material and comes out the far side, and the ruled surface swept
+// along it is a sheet standing on the far face. From outside, a chord through a solid
+// and a mirrored copy of the line are indistinguishable, which is what the report
+// describes.
+//
+// THE FIX: close along a path that lies ON the surface. The straight segment between the
+// two endpoints is sampled, each sample is raycast onto the mesh FROM THE CURRENT VIEW,
+// and the hits become real samples appended before the closure. That is a geodesic-ish
+// path - not the true geodesic, but a path on the surface, which is the property that
+// matters: the closing span sweeps material that is there.
+//
+// THREE OUTCOMES, and no fourth:
+//   - the ends are already within the snap radius: join them, with no intermediate
+//     points at all (close_along_path({}) is exactly force_close(), and correctly so -
+//     there is nothing between them to walk);
+//   - a path is found: append it and close;
+//   - no path (the segment leaves the model from this view - the endpoints are on
+//     opposite sides, or round a corner the camera cannot see): REFUSE, leave the chain
+//     exactly as it was, and tell the user to draw the rest. Never join through the air,
+//     which is the behaviour being replaced.
+// ---------------------------------------------------------------------------
+bool GLGizmoCut3D::close_draw_chain_on_surface()
+{
+    if (m_draw_chain.is_closed() || m_draw_chain.size() < DrawCutChain::MinChainSamples)
+        return false;
+
+    const Vec3d  a = m_draw_chain.back_pos();   // the path runs BACK -> FRONT, which is
+    const Vec3d  b = m_draw_chain.front_pos();  // the order close_along_path() wants
+    const double gap = (b - a).norm();
+
+    // ALREADY TOUCHING. Within the snap radius the two ends are the same place as far as
+    // the cut is concerned, and the closing span is under the 1 mm resample spacing -
+    // exactly the case the drag-time snap handles. Nothing to walk, so just join them.
+    if (gap <= draw_chain_snap_radius())
+        return m_draw_chain.close_along_path({});
+
+    if (!update_draw_raycaster() || !m_draw_raycaster)
+        return false;
+
+    const Camera&     camera         = wxGetApp().plater()->get_camera();
+    const Transform3d plane_to_world = translation_transform(m_plane_center) * m_rotation_m;
+
+    // SAMPLE IN SCREEN SPACE, not in 3D. The raycast is done from the camera through a
+    // pixel, so stepping along the projected segment is what puts the samples an even
+    // distance apart ON SCREEN - which is what keeps the hit density even on a surface
+    // that is oblique to the view. Stepping in 3D and projecting would bunch the samples
+    // wherever the segment runs away from the camera.
+    const Slic3r::Point pa = CameraUtils::project(camera, plane_to_world * a);
+    const Slic3r::Point pb = CameraUtils::project(camera, plane_to_world * b);
+    const Vec2d sa(double(pa.x()), double(pa.y()));
+    const Vec2d sb(double(pb.x()), double(pb.y()));
+
+    // One sample every 2 px, capped: the path is resampled to 1 mm by finish() anyway, so
+    // more than a few hundred raycasts buys nothing, and a cap keeps a long diagonal on a
+    // 4K display from turning a button press into a visible stall.
+    const double px = (sb - sa).norm();
+    const size_t n  = std::clamp<size_t>(size_t(px / 2.0), 8, 400);
+
+    std::vector<DrawCutSample> path;
+    path.reserve(n);
+    size_t misses = 0;
+    for (size_t k = 1; k < n; ++ k) {
+        const Vec2d s = sa + (double(k) / double(n)) * (sb - sa);
+
+        Vec3f  hit_f, normal_f;
+        size_t facet = 0;
+        if (!m_draw_raycaster->unproject_on_mesh(s, plane_to_world, camera, hit_f, normal_f, nullptr, &facet)) {
+            ++ misses;
+            continue;
+        }
+        DrawCutSample smp;
+        smp.pos    = hit_f.cast<double>();
+        smp.normal = normal_f.cast<double>().normalized();
+        smp.facet  = facet;
+        // Drop a hit that repeats its predecessor: consecutive pixels on a face nearly
+        // edge-on to the view land on the same point, and a zero-length span is what the
+        // tangent maths cannot read.
+        if (!path.empty() && (smp.pos - path.back().pos).squaredNorm() < 1e-12)
+            continue;
+        path.push_back(smp);
+    }
+
+    // REFUSE rather than bridge. A quarter of the segment missing means the straight line
+    // between the ends leaves the model from here - they are round a corner, or on
+    // opposite sides - and the "path" that survived would be two arcs with a jump between
+    // them, which finish() would bridge with a chord: the very thing being fixed. The
+    // panel then tells the user to draw the remaining part, which always works and is
+    // honest about what the button cannot do.
+    if (path.size() < 2 || misses * 4 > n)
+        return false;
+
+    // THE JOIN GAPS. The path's own ends have to meet the chain's endpoints, or the
+    // closure is two jumps instead of one. Each is a straight span in the plane frame -
+    // the same thing force_close() made the WHOLE closure, which is only acceptable
+    // because these are short: a couple of screen pixels' worth of surface, since the
+    // sampling started one step in from each endpoint.
+    if ((path.front().pos - a).norm() > gap || (path.back().pos - b).norm() > gap)
+        // The hits are further from the endpoints than the endpoints are from each
+        // other, so the ray is finding a different part of the model (a near wall in
+        // front of the line). Refuse - this is the far-side case again, seen from a view
+        // where the segment happens to hit something.
+        return false;
+
+    return m_draw_chain.close_along_path(path);
+}
+
 int GLGizmoCut3D::draw_segment_at(const Vec2d& mouse_position) const
 {
     const size_t n = m_draw_points.size();
@@ -3473,6 +3640,10 @@ void GLGizmoCut3D::clear_draw_stroke(bool push_undo)
     m_draw_chain.clear();
     m_draw_capture.clear();
     m_draw_snap_armed = false;
+    // 2026-09-13, item 1: the hover latch says which HANDLE the cursor is over, and a
+    // cleared line has no handles. Left set, the next frame would light a marker that is
+    // no longer drawn - and, worse, the next chain's handle would come up pre-lit.
+    m_draw_hover_end  = DrawChainEnd::None;
     // The refusal message describes ONE GESTURE, not a state of the line, so clearing
     // the line clears it too - otherwise "the line is already closed" would still be on
     // screen next to an empty canvas.
@@ -3684,6 +3855,19 @@ bool GLGizmoCut3D::draw_on_mouse(const wxMouseEvent& mouse_event)
         return false;
     }
 
+    // 2026-09-13, ITEM 1: HOVER over an endpoint marker. Tracked on every motion event
+    // while no stroke is in flight, so the marker can brighten and the user can see it
+    // is grab-able rather than having to discover it with a click. Cheap - two
+    // projections - and it does NOT consume the event: hovering an endpoint must not
+    // stop the rest of the gizmo (or the camera) from seeing the mouse move.
+    if (!m_draw_capturing && (mouse_event.Moving() || mouse_event.Dragging())) {
+        const DrawChainEnd hov = m_draw_editing ? DrawChainEnd::None : draw_chain_end_at(mouse_pos);
+        if (hov != m_draw_hover_end) {
+            m_draw_hover_end = hov;
+            m_parent.set_as_dirty();
+        }
+    }
+
     if (m_draw_capturing) {
         if (mouse_event.Dragging()) {
             draw_interpolate_to(mouse_pos);
@@ -3734,8 +3918,16 @@ bool GLGizmoCut3D::draw_on_mouse(const wxMouseEvent& mouse_event)
             // direction, and a one-sample link would be invisible and unremovable.
             const std::vector<DrawCutSample> captured = m_draw_capture;
             m_draw_capture.clear();
+            // 2026-09-13, ITEM 1: appended AT THE END THE PRESS PICKED. append()'s own
+            // `snap_radius` decides two things - which end the stroke joins, and whether
+            // it CLOSES the chain - and only the second is wanted here: the first was
+            // already decided in screen space on the press (draw_chain_end_at()), and
+            // letting append() re-decide it from a 3D radius would refuse exactly the
+            // strokes the screen pick exists to rescue. append_at() takes the end as
+            // given and keeps the closure test.
             const DrawChainEnd at = captured.size() >= 2
-                                  ? m_draw_chain.append(captured, draw_chain_snap_radius())
+                                  ? m_draw_chain.append_at(captured, m_draw_capture_end,
+                                                           draw_chain_snap_radius())
                                   : DrawChainEnd::None;
             refresh_draw_stroke();
 
@@ -3755,6 +3947,27 @@ bool GLGizmoCut3D::draw_on_mouse(const wxMouseEvent& mouse_event)
         if (!update_draw_raycaster())
             return false;
 
+        // 2026-09-13, OWNER CLICK-TEST ITEM 1. WHICH END THIS STROKE CONTINUES IS
+        // DECIDED IN SCREEN SPACE, BEFORE the mesh is touched.
+        //
+        // It used to be decided from the raycast HIT: sample the mesh, then ask
+        // end_for_start() whether that 3D point is within the snap radius (a few mm,
+        // scaled off the bounding box) of an endpoint. Two failures followed, and both
+        // are what the owner hit - "a new stroke started on an endpoint is not
+        // recognised, so the chain can never be extended or closed":
+        //
+        //  - the radius is in OBJECT mm, so how close you have to click depends on how
+        //    far the camera is and how big the part is. A click visually centred on the
+        //    marker misses on anything but a small part seen close up.
+        //  - a hit is needed at all, so an endpoint drawn OVER the part (the markers are
+        //    rendered after a depth clear, so a far-side endpoint is visible by design)
+        //    could not be clicked: the ray stops at the near wall and the hit is metres
+        //    away from the endpoint in 3D.
+        //
+        // draw_chain_end_at() answers it from the projected marker position and a pixel
+        // radius, so the region you can click is the region you can see.
+        const DrawChainEnd picked = draw_chain_end_at(mouse_pos);
+
         // The painter's guard: a click that MISSES the mesh must not capture the mouse,
         // or the rest of the gizmo (and the plater's own rectangle select) stops working
         // wherever the model is not. Probe FIRST, before anything is touched.
@@ -3768,12 +3981,19 @@ bool GLGizmoCut3D::draw_on_mouse(const wxMouseEvent& mouse_event)
         // on the press, so the refusal costs the user a click rather than a whole
         // stroke they then watch disappear.
         //
-        // A CLOSED chain accepts nothing (end_for_start() says None at both endpoints):
-        // it is finished, and the way to get a different line is Clear line or Ctrl+Z,
-        // which are deliberate gestures rather than a stray drag on the model. That is
-        // the branch of the feedback's "(or, if the chain is closed, replaces it after
-        // confirmation...)" this takes - no implicit replacement at all.
-        const DrawChainEnd at = m_draw_chain.end_for_start(m_draw_capture.front().pos, draw_chain_snap_radius());
+        // A CLOSED chain accepts nothing: it is finished, and the way to get a different
+        // line is Clear line or Ctrl+Z, which are deliberate gestures rather than a
+        // stray drag on the model. That is the branch of the feedback's "(or, if the
+        // chain is closed, replaces it after confirmation...)" this takes - no implicit
+        // replacement at all.
+        //
+        // An EMPTY chain accepts anything (there is nothing to continue), which is what
+        // end_for_start() says and what the screen pick cannot: it has no endpoints to
+        // project. So the two are combined - the screen pick decides for a chain that
+        // HAS ends, and the chain itself decides the empty and closed cases.
+        const DrawChainEnd at = m_draw_chain.empty()      ? DrawChainEnd::Back :
+                                m_draw_chain.is_closed()  ? DrawChainEnd::None
+                                                          : picked;
         if (at == DrawChainEnd::None) {
             m_draw_capture.clear();
             m_draw_last_mouse = Vec2d::Zero();
@@ -3787,6 +4007,27 @@ bool GLGizmoCut3D::draw_on_mouse(const wxMouseEvent& mouse_event)
         }
         m_draw_reject_msg  = DrawRejectReason::None;
         m_draw_capture_end = at;
+
+        // 2026-09-13, ITEM 1, THE FAR-SIDE CLICK, and what is deliberately NOT done
+        // about it.
+        //
+        // The pick is now in screen space, so an endpoint marker drawn THROUGH the part
+        // (they are rendered after a depth clear, deliberately, because a far endpoint
+        // is where the next stroke has to start) can be clicked. The click still
+        // raycasts the mesh and the ray stops at the NEAR wall, so the stroke's first
+        // sample is on the face in front of the marker, not at the marker.
+        //
+        // That is correct, and seeding the endpoint in front of it would not improve it:
+        // append_at() drops a first sample that duplicates the join (a zero-length span
+        // is what the tangent maths cannot read), so the seed would vanish and the chain
+        // would join from its own last sample either way - which is exactly what
+        // happens without it. The span from the endpoint to the first hit is the span
+        // the user actually drew, and the resampler walks it like any other.
+        //
+        // What the screen pick DID fix is the refusal: the press is now accepted, so the
+        // chain can be extended from an endpoint the user can see. Which face the stroke
+        // starts on is then their aim, as it is for every other stroke.
+        m_draw_hover_end   = DrawChainEnd::None;
 
         // ONE UNDO ENTRY PER APPENDED STROKE, pushed here while m_draw_chain still holds
         // the state to come back TO - the same "push before the change" rule
@@ -4062,9 +4303,23 @@ void GLGizmoCut3D::render_draw_chain_endpoints()
     const Camera&     camera          = wxGetApp().plater()->get_camera();
     const Transform3d plane_to_world  = translation_transform(m_plane_center) * m_rotation_m;
 
-    // Same size rule the edit handles and the plane grabbers use, so the three read as
-    // one family.
-    const double r = 0.75 * m_grabber_radius;
+    // 2026-09-13, OWNER CLICK-TEST ITEM 1: THE MARKERS WERE GIANT.
+    //
+    // This was `0.75 * m_grabber_radius`, and m_grabber_radius is
+    // `0.5 * box.radius() * 0.85` (see on_set_state's sizing block) - a fraction of the
+    // OBJECT's bounding sphere, in world mm. On a 40 mm cylinder that is a ball about
+    // 30 mm across, i.e. the size of the part, which is what the owner saw. The name is
+    // the trap: m_grabber_radius is NOT the size the plane grabbers are drawn at. Those
+    // use get_half_size(get_grabber_mean_size(bb)), and with ENABLE_FIXED_GRABBER
+    // get_grabber_mean_size() returns `32 * INV_ZOOM` - a SCREEN-SPACE size that shrinks
+    // as the camera pulls back, which is what makes a grabber the same number of pixels
+    // at every zoom. m_grabber_radius is only the radius of the rotation RING, which is
+    // meant to span the part.
+    //
+    // So: the same screen-space rule, at the connector/control-point factor (0.5), which
+    // puts these markers between the plane's own sphere grabber and the line's smaller
+    // edit handles (0.32) - findable, without covering the line they sit on.
+    const double r = 0.5 * get_half_size(get_grabber_mean_size(m_bounding_box));
 
     // WHICH END A RELEASE WOULD CLOSE ON. While a stroke is in flight that is the end
     // it is NOT continuing; with no stroke in flight neither is armed, so both rings
@@ -4073,6 +4328,14 @@ void GLGizmoCut3D::render_draw_chain_endpoints()
     const bool  arm_front = capturing && m_draw_capture_end == DrawChainEnd::Back;
     const bool  arm_back  = capturing && m_draw_capture_end == DrawChainEnd::Front;
 
+    // 2026-09-13, ITEM 1: HOVER. A marker the cursor is over brightens and grows a
+    // little, so "this is a thing you can grab and carry on from" is visible before
+    // the click rather than discovered by a click that does nothing. Only while no
+    // stroke is in flight - during a stroke the green ARMED state is the one that
+    // matters and two highlights at once would be noise.
+    const bool  hov_front = !capturing && m_draw_hover_end == DrawChainEnd::Front;
+    const bool  hov_back  = !capturing && m_draw_hover_end == DrawChainEnd::Back;
+
     // The depth buffer is cleared first, exactly as render_draw_point_handles() does:
     // an endpoint on the far side of a tall part still has to be findable, because it
     // is where the user has to start their next stroke.
@@ -4080,21 +4343,24 @@ void GLGizmoCut3D::render_draw_chain_endpoints()
     shader->start_using();
     shader->set_uniform("emission_factor", 0.1f);
 
-    auto sphere = [&](const Vec3d& p_plane, bool armed) {
+    auto sphere = [&](const Vec3d& p_plane, bool armed, bool hovered) {
+        const double      s = armed ? 1.4 * r : hovered ? 1.25 * r : r;
         const Transform3d m = camera.get_view_matrix() * plane_to_world *
-                              translation_transform(p_plane) * scale_transform(armed ? 1.4 * r : r);
+                              translation_transform(p_plane) * scale_transform(s);
         shader->set_uniform("view_model_matrix", m);
         shader->set_uniform("projection_matrix", camera.get_projection_matrix());
         shader->set_uniform("view_normal_matrix", (Matrix3d) m.matrix().block(0, 0, 3, 3).inverse().transpose());
-        // ARMED is bright green - "let go here and the loop closes" - and a plain
-        // endpoint is the same orange the line is, so the two read as one object.
-        m_sphere.model.set_color(armed ? ColorRGBA(0.1f, 0.95f, 0.3f, 1.f)
-                                       : ColorRGBA(1.f, 0.65f, 0.f, 1.f));
+        // ARMED is bright green - "let go here and the loop closes". HOVERED is a pale
+        // yellow-orange - "click here and you carry on from this end". A plain endpoint
+        // is the same orange the line is, so the two read as one object.
+        m_sphere.model.set_color(armed   ? ColorRGBA(0.1f, 0.95f, 0.3f, 1.f) :
+                                 hovered ? ColorRGBA(1.f, 0.85f, 0.35f, 1.f)
+                                         : ColorRGBA(1.f, 0.65f, 0.f, 1.f));
         m_sphere.model.render();
     };
 
-    sphere(m_draw_chain.front_pos(), arm_front && m_draw_snap_armed);
-    sphere(m_draw_chain.back_pos(),  arm_back  && m_draw_snap_armed);
+    sphere(m_draw_chain.front_pos(), arm_front && m_draw_snap_armed, hov_front);
+    sphere(m_draw_chain.back_pos(),  arm_back  && m_draw_snap_armed, hov_back);
     shader->stop_using();
 }
 
@@ -4125,13 +4391,32 @@ void GLGizmoCut3D::update_draw_field_texture()
         return;
 
     m_draw_field_bbox = BoundingBoxf3();
+
+    // 2026-09-13, ITEM 3. WHY THE FIELD DID NOT TAKE EFFECT, said out loud.
+    //
+    // Every failure below used to be a silent `return` that left the flat plane's
+    // colours standing, and from the outside all of them look identical to "the
+    // classification is ignored" - which is how item 3 could be reported as one bug
+    // when it is a chain of five places any one of which drops the texture. The GL
+    // uniforms are silent too: GLShaderProgram::set_uniform is a no-op for a name the
+    // linked program does not have, with no log and no assert.
+    //
+    // Logged on the TRANSITION only, so a per-frame path does not flood the log.
+    auto bail = [this](const char* why) {
+        if (m_draw_field_fail != why) {
+            m_draw_field_fail = why;
+            BOOST_LOG_TRIVIAL(info) << "draw cut: halves classification falls back to the flat plane - " << why;
+        }
+        release_draw_field_texture();
+        m_draw_field_dirty = false;
+    };
+
     if (!m_draw_stroke.valid()) {
         // No closed line, no field - and no texture, so apply_draw_color_clip() leaves
         // the plain flat split standing. That is the right thing to show while the user
         // is still drawing: the plane's own colours are at least honest about being the
         // plane's.
-        release_draw_field_texture();
-        m_draw_field_dirty = false;
+        bail("the line is not a closed loop yet, so there is no cut surface to classify");
         return;
     }
 
@@ -4139,8 +4424,7 @@ void GLGizmoCut3D::update_draw_field_texture()
     if (!m_draw_pick_its.empty())
         mesh = m_draw_pick_its;
     else if (!curved_instance_mesh_in_plane(mesh)) {
-        release_draw_field_texture();
-        m_draw_field_dirty = false;
+        bail("the instance mesh could not be built in the cut plane's frame");
         return;
     }
 
@@ -4157,8 +4441,7 @@ void GLGizmoCut3D::update_draw_field_texture()
     const indexed_triangle_set cutter = draw_cut_cutter_solid(m_draw_stroke, m_draw_params, bbox,
                                                              m_draw_stroke.is_closed() ? face_hi : face_lo);
     if (cutter.empty()) {
-        release_draw_field_texture();
-        m_draw_field_dirty = false;
+        bail("the cutter solid came out empty");
         return;
     }
 
@@ -4202,6 +4485,11 @@ void GLGizmoCut3D::update_draw_field_texture()
     glsafe(::glBindTexture(GL_TEXTURE_3D, 0));
     glsafe(::glActiveTexture(GL_TEXTURE0));
 
+    if (m_draw_field_fail != nullptr) {
+        BOOST_LOG_TRIVIAL(info) << "draw cut: halves classification now follows the drawn surface ("
+                                << DrawFieldRes << "^3 field, texture " << m_draw_field_tex << ")";
+        m_draw_field_fail = nullptr;
+    }
     m_draw_field_dirty = false;
 }
 
@@ -4219,7 +4507,12 @@ void GLGizmoCut3D::apply_draw_color_clip()
 {
     // Only a Draw cut with a CLOSED, usable line takes over the split. An open chain
     // keeps the plain plane colours, which is honest: there is no cut surface yet.
-    if (!is_draw_surface() || !m_draw_stroke.valid() || m_connectors_editing || m_hide_cut_plane) {
+    // "Hide cut plane and grabbers" clearing the DRAWN classification is its own trap:
+    // in Draw mode the plane's grabbers are hidden anyway (render() stands the stroke in
+    // for them), so a user who ticks that box because the plane is meaningless here gets
+    // the flat plane's COLOURS back - the one thing the box is not about. Draw mode's
+    // colouring does not come from the plane, so the checkbox does not gate it.
+    if (!is_draw_surface() || !m_draw_stroke.valid() || m_connectors_editing) {
         m_parent.set_draw_color_clip(0, Transform3d::Identity(), Vec3d::Zero(), Vec3d::Ones());
         return;
     }
@@ -4371,12 +4664,23 @@ void GLGizmoCut3D::render_draw_surface_inputs()
     // few millimetres but not within the snap radius. The closing span is then whatever
     // gap is left, which the resampler walks like any other span.
     m_imgui->disabled_begin(m_draw_chain.is_closed() || m_draw_chain.size() < DrawCutChain::MinChainSamples);
-    if (m_imgui->button(_L("Close loop"), _L("Join the two ends of the line, so the cut surface can be made"))) {
+    if (m_imgui->button(_L("Close loop"),
+                        _L("Join the two ends of the line along the surface, so the cut surface can be made"))) {
         Plater::TakeSnapshot snapshot(wxGetApp().plater(), _u8L("Close draw cut loop"), UndoRedo::SnapshotType::GizmoAction);
         push_draw_undo();
-        m_draw_chain.force_close();
-        m_draw_reject_msg = DrawRejectReason::None;
-        refresh_draw_stroke();
+        // 2026-09-13, ITEM 2: ALONG THE SURFACE, never through the part. When no path
+        // can be found from this view the chain is left exactly as it was and the undo
+        // entry is popped again - a refusal must not cost the user a Ctrl+Z that appears
+        // to do nothing.
+        if (close_draw_chain_on_surface()) {
+            m_draw_reject_msg = DrawRejectReason::None;
+            refresh_draw_stroke();
+        }
+        else {
+            if (!m_draw_undo.empty())
+                m_draw_undo.pop_back();
+            m_draw_reject_msg = DrawRejectReason::CloseNoPath;
+        }
     }
     m_imgui->disabled_end();
 
@@ -4436,6 +4740,16 @@ void GLGizmoCut3D::render_draw_surface_inputs()
     else if (m_draw_reject_msg == DrawRejectReason::ChainClosed)
         m_imgui->text_colored(ImGuiWrapper::COL_ORANGE_LIGHT,
                               _L("The line is already closed. Clear it, or press Ctrl+Z, before drawing a different one."));
+    // 2026-09-13, ITEM 2. Close loop joins the two ends ALONG THE SURFACE, and from this
+    // view there is no surface between them - they are round a corner, or on opposite
+    // sides of the part. Joining them anyway would run the closing span straight through
+    // the material and put the cut surface out the far side, which is what this replaced.
+    // So say what will work: draw the rest.
+    else if (m_draw_reject_msg == DrawRejectReason::CloseNoPath)
+        m_imgui->text_colored(ImGuiWrapper::COL_ORANGE_LIGHT,
+                              _L("The two ends cannot be joined across the surface from this view. "
+                                 "Turn the model so the gap between them is visible and try again, "
+                                 "or draw the remaining part of the line by hand."));
 
     if (m_draw_chain.empty())
         m_imgui->text_colored(ImGuiWrapper::COL_ORANGE_LIGHT, _L("Draw a line on the model."));
@@ -7351,6 +7665,30 @@ void GLGizmoCut3D::show_tooltip_information(float x, float y)
 
 bool GLGizmoCut3D::is_outside_of_cut_contour(size_t idx, const CutConnectors& connectors, const Vec3d cur_pos)
 {
+    // 2026-09-13, OWNER CLICK-TEST ITEM 3, the third place the flat plane was still the
+    // authority on a drawn cut.
+    //
+    // Every test below asks the OBJECT CLIPPER whether a point is inside "the cut
+    // contour", and the clipper's contour is the object's cross-section at the flat
+    // plane - a single slice at z == 0 in the plane's frame. On a DRAWN cut the cut
+    // surface is a ruled strip that goes wherever the user drew, and a connector on it
+    // is generally nowhere near z == 0: project_onto_cut_plane() drops it onto the plane
+    // and the clipper then reports a connector that is sitting correctly on the cut
+    // surface as "out of cut contour", greying out the Perform cut button for a reason
+    // that is not true.
+    //
+    // On a drawn cut the question has a different and better answer, and the gizmo
+    // already computes it: a connector is IN the cut iff it is on the drawn surface,
+    // which is what unproject_on_draw_surface() guarantees at placement and what
+    // m_draw_offsurface_connectors counts afterwards (a plane nudge moves the surface
+    // out from under a connector). So the contour test does not apply here, and
+    // pretending it does is worse than not asking.
+    //
+    // The other two conflict tests in is_conflict_for_connector() - the bounding box and
+    // the overlap - are about the connectors themselves and stay.
+    if (is_draw_surface())
+        return false;
+
     // check if connector pos is out of clipping plane
     if (m_c->object_clipper() && m_c->object_clipper()->is_projection_inside_cut(cur_pos) == -1) {
         m_info_stats.outside_cut_contour++;

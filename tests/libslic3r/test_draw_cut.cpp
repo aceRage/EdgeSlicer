@@ -6,9 +6,12 @@
 #include <libslic3r/Geometry.hpp>
 #include <libslic3r/Model.hpp>
 #include <libslic3r/TriangleMesh.hpp>
+#include <libslic3r/AABBMesh.hpp>
 
 #include <algorithm>
 #include <cmath>
+#include <optional>
+#include <limits>
 #include <cstdlib>
 
 using namespace Slic3r;
@@ -2305,4 +2308,339 @@ TEST_CASE("Draw cut chain: an open line is cut with only when the user says so",
     REQUIRE(tiny.append(face_run(Vec3d(0, 0, 0), Vec3d(1, 0, 0), Vec3d::UnitZ(), 3), r) == DrawChainEnd::Back);
     REQUIRE_FALSE(tiny.finish_open());
     REQUIRE_FALSE(tiny.force_close());
+}
+
+// ===========================================================================
+// 2026-09-13, OWNER CLICK-TEST. Three things were broken in practice and none
+// of them could have been caught by the phase-1/2/3 tests, because all three
+// live where the geometry meets the camera and the phase tests never had one.
+//
+// There is no GUI harness, so what is pinned here is the pure logic the gizmo
+// now calls: the SCREEN-SPACE endpoint pick (item 1) against a projection
+// built by hand, and the SURFACE-PATH close (item 2) against a real mesh.
+// ===========================================================================
+
+// A pinhole camera, by hand: eye at `eye` looking at the origin, up +Z, a 60 deg
+// vertical field of view and a 1000x1000 viewport. Enough to project a point to a
+// pixel the way CameraUtils::project does, without any of the GUI.
+//
+// Returns nullopt for a point BEHIND the eye, which is the case the gizmo's own
+// projection has to survive: an endpoint on the far side of a part the camera has
+// orbited past.
+struct TestCamera
+{
+    Vec3d  eye;
+    double px_per_rad;   // 1000 px over a 60 deg fov
+    Vec3d  fwd, right, up;
+
+    explicit TestCamera(const Vec3d& e) : eye(e)
+    {
+        px_per_rad = 500.0 / std::tan(0.5 * 60.0 * M_PI / 180.0);
+        fwd   = (-eye).normalized();
+        right = fwd.cross(Vec3d::UnitZ()).normalized();
+        up    = right.cross(fwd).normalized();
+    }
+
+    std::optional<Vec2d> project(const Vec3d& p) const
+    {
+        const Vec3d v = p - eye;
+        const double z = v.dot(fwd);
+        if (z <= 1e-6)
+            return std::nullopt;          // behind the eye
+        return Vec2d(500.0 + px_per_rad * v.dot(right) / z,
+                     500.0 - px_per_rad * v.dot(up)    / z);
+    }
+};
+
+TEST_CASE("Draw cut chain: the endpoint pick is in SCREEN space, not object mm", "[DrawCut]")
+{
+    // THE BUG THIS PINS. The press used to ask
+    // `end_for_start(raycast_hit, draw_cut_chain_snap_radius(bbox))` - a 3D test in
+    // object millimetres. On a large part that radius is a few pixels at a normal
+    // zoom, so a click visually dead-centre on the endpoint handle was refused and
+    // the chain could never be extended or closed (the owner's item 1).
+
+    // A line up one face of the TALL BOX, so the endpoints are 60 mm apart - far
+    // enough that no 3D snap radius could ever cover the gap between them.
+    DrawCutChain chain;
+    const std::vector<DrawCutSample> s1 =
+        face_run(Vec3d(10, 0, -30), Vec3d(10, 0, 30), Vec3d::UnitX(), 31);
+    REQUIRE(chain.append(s1, 2.0) == DrawChainEnd::Back);
+    REQUIRE(chain.front_pos().isApprox(Vec3d(10, 0, -30)));
+    REQUIRE(chain.back_pos().isApprox(Vec3d(10, 0, 30)));
+
+    const TestCamera cam(Vec3d(300, 0, 0));
+    auto proj = [&](const Vec3d& p) { return cam.project(p); };
+
+    const std::optional<Vec2d> px_front = cam.project(chain.front_pos());
+    const std::optional<Vec2d> px_back  = cam.project(chain.back_pos());
+    REQUIRE(px_front.has_value());
+    REQUIRE(px_back.has_value());
+    // The two handles are far apart ON SCREEN, which is what makes the tie-break
+    // below meaningful rather than accidental.
+    REQUIRE((*px_front - *px_back).norm() > 100.0);
+
+    const double pick = 16.0;
+
+    // DEAD CENTRE on each handle picks that handle.
+    REQUIRE(draw_cut_chain_end_at_pixel(chain, *px_front, proj, pick) == DrawChainEnd::Front);
+    REQUIRE(draw_cut_chain_end_at_pixel(chain, *px_back,  proj, pick) == DrawChainEnd::Back);
+
+    // JUST INSIDE the radius still picks; just OUTSIDE does not. Both sides of the
+    // boundary, because a pick that is generous everywhere is as bad as one that is
+    // generous nowhere - it would swallow clicks meant for the model.
+    const Vec2d off(1.0, 0.0);
+    REQUIRE(draw_cut_chain_end_at_pixel(chain, *px_back + 0.94 * pick * off, proj, pick) == DrawChainEnd::Back);
+    REQUIRE(draw_cut_chain_end_at_pixel(chain, *px_back + 1.06 * pick * off, proj, pick) == DrawChainEnd::None);
+
+    // THE POINT OF THE WHOLE CHANGE: the pick radius is in PIXELS, so it does not
+    // move when the object does. The same click, on a chain ten times the size,
+    // still lands - where the 3D radius (2% of the diagonal, clamped at 6 mm) would
+    // have covered a tenth as much of the screen.
+    DrawCutChain big;
+    REQUIRE(big.append(face_run(Vec3d(100, 0, -300), Vec3d(100, 0, 300), Vec3d::UnitX(), 31), 6.0)
+            == DrawChainEnd::Back);
+    const TestCamera cam_far(Vec3d(3000, 0, 0));
+    auto proj_far = [&](const Vec3d& p) { return cam_far.project(p); };
+    const std::optional<Vec2d> big_back = cam_far.project(big.back_pos());
+    REQUIRE(big_back.has_value());
+    REQUIRE(draw_cut_chain_end_at_pixel(big, *big_back + 0.94 * pick * off, proj_far, pick) == DrawChainEnd::Back);
+    // ... and the 3D test it replaced would have REFUSED that same click: 0.94 * 16 px
+    // at this distance is far more than the 6 mm the snap radius clamps to.
+    {
+        const double px_at_back = cam_far.px_per_rad / (big.back_pos() - cam_far.eye).dot(cam_far.fwd);
+        const double mm_per_px  = 1.0 / px_at_back;
+        REQUIRE(0.94 * pick * mm_per_px > ChainSnapMaxMm);
+    }
+
+    // AN ENDPOINT BEHIND THE CAMERA is not pickable and, crucially, cannot win the
+    // tie-break from the other one. Looking from +X at a chain whose front is at
+    // x = +10: put the eye between them.
+    {
+        const TestCamera behind(Vec3d(0, 0, 0));   // fwd is undefined at the origin...
+        (void) behind;
+        // ... so use a camera whose forward direction puts the FRONT endpoint behind it.
+        TestCamera c2(Vec3d(400, 0, 0));
+        c2.fwd = Vec3d(1, 0, 0); // looking AWAY from the part
+        c2.right = c2.fwd.cross(Vec3d::UnitZ()).normalized();
+        c2.up = c2.right.cross(c2.fwd).normalized();
+        auto p2 = [&](const Vec3d& p) { return c2.project(p); };
+        REQUIRE_FALSE(c2.project(chain.front_pos()).has_value());
+        REQUIRE_FALSE(c2.project(chain.back_pos()).has_value());
+        // Nothing projects, so nothing is picked - and no NaN sneaks into the compare.
+        REQUIRE(draw_cut_chain_end_at_pixel(chain, Vec2d(500, 500), p2, pick) == DrawChainEnd::None);
+    }
+
+    // THE NEARER handle wins when both are in range - the short-chain case, where the
+    // two ends sit within a pick radius of each other on screen.
+    {
+        DrawCutChain shortc;
+        REQUIRE(shortc.append(face_run(Vec3d(10, 0, -0.4), Vec3d(10, 0, 0.4), Vec3d::UnitX(), 8), 0.01)
+                == DrawChainEnd::Back);
+        const std::optional<Vec2d> a = cam.project(shortc.front_pos());
+        const std::optional<Vec2d> b = cam.project(shortc.back_pos());
+        REQUIRE(a.has_value());
+        REQUIRE(b.has_value());
+        REQUIRE((*a - *b).norm() < pick);                 // both in range of one click
+        REQUIRE(draw_cut_chain_end_at_pixel(shortc, *a, proj, pick) == DrawChainEnd::Front);
+        REQUIRE(draw_cut_chain_end_at_pixel(shortc, *b, proj, pick) == DrawChainEnd::Back);
+    }
+
+    // AN EMPTY chain has no handles, and a CLOSED one has no FREE handles. Both give
+    // None: what a click does in those cases is the caller's rule (an empty chain
+    // accepts a stroke anywhere; a closed one accepts none), not a claim about
+    // handles that are not drawn.
+    REQUIRE(draw_cut_chain_end_at_pixel(DrawCutChain(), Vec2d(500, 500), proj, pick) == DrawChainEnd::None);
+    REQUIRE(chain.force_close());
+    REQUIRE(draw_cut_chain_end_at_pixel(chain, *px_back, proj, pick) == DrawChainEnd::None);
+}
+
+TEST_CASE("Draw cut chain: append_at takes the end as given and still tests closure", "[DrawCut]")
+{
+    // The gizmo decides WHICH END in screen space and hands it to append_at(), so
+    // append_at() must not re-derive it from a 3D radius - that would refuse exactly
+    // the strokes the screen pick exists to rescue.
+    const double tiny = 1e-6;
+    DrawCutChain chain;
+    REQUIRE(chain.append_at(face_run(Vec3d(0, 0, 0), Vec3d(10, 0, 0), Vec3d::UnitZ(), 11),
+                            DrawChainEnd::Back, tiny) == DrawChainEnd::Back);
+
+    // A stroke whose first sample is 5 mm from the back endpoint - far outside any
+    // snap radius this chain would use. append() REFUSES it; append_at() takes it,
+    // because the user clicked the handle and the raycast simply landed elsewhere.
+    const std::vector<DrawCutSample> off_join =
+        face_run(Vec3d(15, 0, 0), Vec3d(25, 0, 0), Vec3d::UnitZ(), 11);
+    {
+        DrawCutChain copy = chain;
+        REQUIRE(copy.append(off_join, tiny) == DrawChainEnd::None);   // the old behaviour
+        REQUIRE(copy.size() == 11);                                   // untouched
+    }
+    REQUIRE(chain.append_at(off_join, DrawChainEnd::Back, tiny) == DrawChainEnd::Back);
+    REQUIRE(chain.size() == 22);
+    REQUIRE(chain.stroke_count() == 2);
+
+    // A FRONT append is still reversed, so the sequence stays continuous.
+    REQUIRE(chain.append_at(face_run(Vec3d(0, 0, 0), Vec3d(-10, 0, 0), Vec3d::UnitZ(), 11),
+                            DrawChainEnd::Front, tiny) == DrawChainEnd::Front);
+    REQUIRE(chain.front_pos().isApprox(Vec3d(-10, 0, 0)));
+    for (size_t i = 1; i < chain.samples().size(); ++ i)
+        REQUIRE((chain.samples()[i].pos - chain.samples()[i - 1].pos).norm() < 6.0);
+
+    // THE CLOSURE TEST IS STILL THE RADIUS'S JOB. A stroke ending far from the other
+    // endpoint does not close the chain...
+    REQUIRE_FALSE(chain.is_closed());
+    // ... and one ending on it does.
+    REQUIRE(chain.append_at(face_run(Vec3d(25, 0, 0), Vec3d(-10, 0, 0), Vec3d::UnitZ(), 21),
+                            DrawChainEnd::Back, 1.0) == DrawChainEnd::Back);
+    REQUIRE(chain.is_closed());
+
+    // A CLOSED chain refuses append_at() whatever end is named: the screen pick can
+    // choose between two free ends, never conjure one on a finished loop.
+    REQUIRE(chain.append_at(face_run(Vec3d(-10, 0, 0), Vec3d(-20, 0, 0), Vec3d::UnitZ(), 11),
+                            DrawChainEnd::Front, 1.0) == DrawChainEnd::None);
+    // And None is refused outright rather than defaulting to an end.
+    DrawCutChain fresh;
+    REQUIRE(fresh.append_at(face_run(Vec3d(0, 0, 0), Vec3d(10, 0, 0), Vec3d::UnitZ(), 11),
+                            DrawChainEnd::None, tiny) == DrawChainEnd::None);
+    REQUIRE(fresh.empty());
+}
+
+TEST_CASE("Draw cut chain: Close loop joins along the SURFACE, never through the part", "[DrawCut]")
+{
+    // THE BUG THIS PINS (owner item 2). force_close() set m_closed and added nothing,
+    // so the closing span was the straight CHORD between the two endpoints. On a line
+    // drawn round the outside of a part that chord runs through the material and the
+    // ruled surface swept along it emerges on the FAR side - which is what "Close loop
+    // mirrors the line to the other side of the object" describes. Nothing was ever
+    // reflected; a chord through a solid looks the same from outside.
+
+    const indexed_triangle_set box = tall_box(20.0, 20.0, 80.0);   // x,y in [-10,10], z in [-40,40]
+
+    // A chain along the +X face and round onto the +Y face, leaving a gap on the -X
+    // face that Close loop has to walk. The endpoints are on ADJACENT faces, which is
+    // the brief's case: a straight line between them cuts the corner off through the
+    // solid.
+    // Up the +X face to the corner, then along the -Y face: every sample really is on
+    // the box, which is the baseline the closure has to match.
+    DrawCutChain chain;
+    REQUIRE(chain.append(face_run(Vec3d(10, -8, 0), Vec3d(10, -10, 0), Vec3d::UnitX(), 9), 1.0)
+            == DrawChainEnd::Back);
+    REQUIRE(chain.append(face_run(Vec3d(10, -10, 0), Vec3d(-8, -10, 0), -Vec3d::UnitY(), 17), 1.0)
+            == DrawChainEnd::Back);
+    REQUIRE_FALSE(chain.is_closed());
+
+    const Vec3d a = chain.back_pos();    // (-8, -10, 0), on the -Y face
+    const Vec3d b = chain.front_pos();   // (10,  -8, 0), on the +X face
+
+    // THE CHORD between them passes through the MIDDLE of the box - which is exactly
+    // why force_close()'s closing span was wrong. Pin that, so the test says what the
+    // bug was rather than only what the fix does.
+    {
+        // Sampled along the chord, the interior points are INSIDE the box - the chord
+        // cuts the (10,-10) corner off through solid material. That is exactly the
+        // surface force_close() used to sweep the closing ruling along.
+        const TriangleMesh tm_chord(box);
+        AABBMesh aabb_chord(tm_chord);
+        int off_surface = 0;
+        for (int i = 1; i < 10; ++ i) {
+            const Vec3d p = a + (double(i) / 10.0) * (b - a);
+            if (aabb_chord.squared_distance(p) > 0.25)
+                ++ off_surface;
+        }
+        REQUIRE(off_surface > 0);
+    }
+
+    // THE SURFACE PATH. The gizmo raycasts these from the camera; here they are built
+    // directly - the property under test is that close_along_path() makes the closure
+    // out of points ON the mesh, not how they were found.
+    //
+    // Round the corner at (10, 10): from (-8,10) along +Y face to the corner, then
+    // down the +X face to (10,-8).
+    // The LONG way round: -Y face to the (-10,-10) corner, up the -X face, across the
+    // +Y face and down the +X face back to (10,-8). Every point on a face of the box.
+    std::vector<DrawCutSample> path;
+    auto add = [&path](const std::vector<DrawCutSample>& run) {
+        for (const DrawCutSample& s : run) path.push_back(s);
+    };
+    add(face_run(Vec3d(-8, -10, 0), Vec3d(-10, -10, 0), -Vec3d::UnitY(),  5));
+    add(face_run(Vec3d(-10, -10, 0), Vec3d(-10, 10, 0), -Vec3d::UnitX(), 21));
+    add(face_run(Vec3d(-10, 10, 0), Vec3d(10, 10, 0),    Vec3d::UnitY(), 21));
+    add(face_run(Vec3d(10, 10, 0), Vec3d(10, -8, 0),     Vec3d::UnitX(), 19));
+    // close_along_path() wants only what is BETWEEN the endpoints.
+    path.erase(path.begin());
+    path.pop_back();
+
+    REQUIRE(chain.close_along_path(path));
+    REQUIRE(chain.is_closed());
+
+    // EVERY SAMPLE OF THE CLOSED CHAIN IS ON THE BOX. This is the assertion the brief
+    // asks for: "endpoints on a cube's adjacent faces yield a path on the surface with
+    // no point off the mesh by more than a tolerance". A chord closure fails it at the
+    // first interior point.
+    {
+        const TriangleMesh tm(box);
+        AABBMesh aabb(tm);
+        for (const DrawCutSample& s : chain.samples())
+            REQUIRE(aabb.squared_distance(s.pos) < 1e-6);   // 1 um of the surface
+    }
+
+    // AND IT CUTS. Two watertight halves that partition the box - the point of closing
+    // the loop at all.
+    DrawCutStroke st;
+    REQUIRE(chain.finish(st, 1.0, 0.0) == DrawCutError::None);
+    REQUIRE(st.valid());
+    REQUIRE(st.is_closed());
+
+    DrawCutParams params;
+    params.extension   = 5.0;
+    params.through_all = true;
+    indexed_triangle_set upper, lower;
+    REQUIRE(draw_cut_split(box, st, params, &upper, &lower, nullptr));
+    REQUIRE(watertight(upper));
+    REQUIRE(watertight(lower));
+    REQUIRE(double(its_volume(upper)) + double(its_volume(lower))
+            == Approx(double(its_volume(box))).epsilon(1e-3));
+
+    // UNDO TAKES THE WHOLE CLOSURE BACK IN ONE STEP, and gives back the open line: the
+    // closure is one stroke, so Ctrl+Z after Close loop is not a walk back through
+    // nineteen invisible points.
+    const size_t before = chain.size();
+    REQUIRE(chain.undo_last_stroke());
+    REQUIRE_FALSE(chain.is_closed());
+    REQUIRE(chain.size() < before);
+    REQUIRE(chain.back_pos().isApprox(a));
+    REQUIRE(chain.front_pos().isApprox(b));
+}
+
+TEST_CASE("Draw cut chain: an empty close path is exactly force_close, and a short chain refuses", "[DrawCut]")
+{
+    // ENDS ALREADY TOUCHING. Within the snap radius there is nothing between the two
+    // endpoints to walk, and the closing span is under the resample spacing - so an
+    // empty path is the right answer, not a degenerate one. It has to behave exactly
+    // as force_close() did, because that case was never the bug.
+    DrawCutChain a, b;
+    const std::vector<std::vector<DrawCutSample>> strokes = {
+        face_run(Vec3d(10, -8, 0), Vec3d(10, 8, 0), Vec3d::UnitX(), 17),
+        face_run(Vec3d(10, 8, 0), Vec3d(10, -7.5, 0), Vec3d::UnitX(), 17),
+    };
+    for (const std::vector<DrawCutSample>& s : strokes) {
+        REQUIRE(a.append(s, 0.01) == DrawChainEnd::Back);
+        REQUIRE(b.append(s, 0.01) == DrawChainEnd::Back);
+    }
+    REQUIRE(a.force_close());
+    REQUIRE(b.close_along_path({}));
+    REQUIRE(a == b);
+
+    // A CLOSED chain refuses to be closed again - there is no second closure to make.
+    REQUIRE_FALSE(b.close_along_path({}));
+
+    // TOO SHORT TO BE A LOOP, measured on what the chain will HAVE: a short chain plus
+    // a long path is a perfectly good loop, so the floor is on the sum.
+    DrawCutChain tiny;
+    REQUIRE(tiny.append(face_run(Vec3d(0, 0, 0), Vec3d(1, 0, 0), Vec3d::UnitZ(), 3), 0.01)
+            == DrawChainEnd::Back);
+    REQUIRE_FALSE(tiny.close_along_path({}));
+    REQUIRE_FALSE(tiny.is_closed());
+    REQUIRE(tiny.close_along_path(face_run(Vec3d(1, 0, 0), Vec3d(0, 0, 0), Vec3d::UnitZ(), 4)));
+    REQUIRE(tiny.is_closed());
 }

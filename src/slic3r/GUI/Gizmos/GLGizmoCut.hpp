@@ -376,8 +376,15 @@ class GLGizmoCut3D : public GLGizmoBase
     // Why the last press was refused, so the panel can say so. Cleared on the next
     // press that is accepted, and on Clear line - it describes one gesture, not a
     // state of the line.
-    enum class DrawRejectReason { None = 0, Disjoint, ChainClosed };
+    // CloseNoPath is 2026-09-13 item 2: Close loop could not find a path along the
+    // surface between the two endpoints from the current view, so it refused rather
+    // than joining them through the air.
+    enum class DrawRejectReason { None = 0, Disjoint, ChainClosed, CloseNoPath };
     DrawRejectReason m_draw_reject_msg{ DrawRejectReason::None };
+    // 2026-09-13, owner click-test item 1: which endpoint the cursor is over, so the
+    // marker under it lights up and the user can see it is grab-able. Screen-space
+    // (draw_chain_end_at()), recomputed on every motion event while not capturing.
+    DrawChainEnd    m_draw_hover_end{ DrawChainEnd::None };
     // Snap feedback while capturing: true when the cursor is inside the snap radius
     // of the endpoint this stroke would close on, so the ring under the far endpoint
     // can light up and the user knows a release will close the loop.
@@ -415,6 +422,12 @@ class GLGizmoCut3D : public GLGizmoBase
     // 2.1 fallback path too.
     unsigned int    m_draw_field_tex{ 0 };
     bool            m_draw_field_dirty{ true };
+    // 2026-09-13, item 3: WHY the field is not in effect, or nullptr when it is. A
+    // static string literal, compared by pointer, so the log line is written once per
+    // transition rather than once per frame. Five separate places can drop the texture
+    // and from the outside they all look the same - "the classification is ignored" -
+    // which is how one report covered a chain of them.
+    const char*     m_draw_field_fail{ nullptr };
     // The box the field spans, in the PLANE frame - the part's box grown by a voxel.
     BoundingBoxf3   m_draw_field_bbox;
     void            update_draw_field_texture();
@@ -504,7 +517,25 @@ class GLGizmoCut3D : public GLGizmoBase
     // that closes it. Both used by the renderer (the endpoint handles) and by the
     // mouse handler (which end a press continues).
     double draw_chain_snap_radius() const;
+    // 2026-09-13, owner click-test item 1. WHICH ENDPOINT A CLICK AT `mouse_position`
+    // GRABS, in SCREEN SPACE - a pixel radius around the projected endpoint, exactly
+    // the way draw_point_at() picks an edit handle and the way the connectors are
+    // picked. The 3D distance this replaced scaled with the OBJECT (the snap radius is
+    // a fraction of the bbox diagonal), so on a large part an endpoint was
+    // unclickable from a normal viewing distance and on a small one every click
+    // anywhere grabbed it. Returns None when neither endpoint is within the radius.
+    DrawChainEnd draw_chain_end_at(const Vec2d& mouse_position) const;
+    // The screen-space pick radius, in pixels. Matched to the marker's own drawn
+    // radius so "it looks grab-able" and "it is grab-able" are the same region, plus
+    // a few pixels of slack because the user is aiming at a ball, not a pixel.
+    static constexpr double DrawEndPickPx = 16.0;
     void   render_draw_chain_endpoints();
+    // 2026-09-13, owner click-test item 2: CLOSE LOOP along the SURFACE. Appends the
+    // samples of a path from one endpoint to the other that lies ON the mesh, then
+    // closes the chain. Returns false when no such path could be found from the
+    // current view, in which case the chain is left untouched and the caller tells
+    // the user to draw the rest by hand. NEVER reflects the line.
+    bool   close_draw_chain_on_surface();
     // The inward direction for DrawCutDirection::View, in the plane frame.
     Vec3d  draw_view_dir_in_plane() const;
     // Take the camera's current forward direction as the one a Direction = View cut
