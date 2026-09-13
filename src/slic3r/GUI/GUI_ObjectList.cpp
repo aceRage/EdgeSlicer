@@ -6405,13 +6405,14 @@ void ObjectList::bake_slice_to_mesh()
     const std::string name = mo->name.empty() ? std::string("object") : mo->name;
 
     // The size line the spec asks for: the count is stated BEFORE the run, not after it has eaten
-    // the memory. Both figures come off the sliced object without building anything.
-    SliceBakeOptions probe;
-    const size_t estimate = slice_bake_estimate_triangles(*po, probe);
-
+    // the memory - and it is stated for the settings as they stand, which is why the dialog gets a
+    // counter rather than a number. `po` outlives the modal loop (the plate is sliced and the
+    // background process is idle, which the caller checked above), so capturing it is safe.
     SliceBakeSettings settings;
     {
-        SliceBakeDialog dlg(wxGetApp().mainframe, from_u8(name), po->layer_count(), estimate);
+        SliceBakeDialog dlg(wxGetApp().mainframe, from_u8(name), po->layer_count(),
+                            slice_bake_default_resolution(*po),
+                            [po](const SliceBakeOptions& opts) { return slice_bake_estimate_triangles(*po, opts); });
         if (dlg.ShowModal() != wxID_OK)
             return;
         settings = dlg.settings();

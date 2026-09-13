@@ -23,6 +23,7 @@
 #include <string>
 #include <vector>
 
+#include "libslic3r/Format/bbs_3mf.hpp"
 #include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/ExtrusionEntityCollection.hpp"
 #include "libslic3r/Layer.hpp"
@@ -83,22 +84,73 @@ DynamicPrintConfig bake_config(double layer_height, bool fuzzy)
     return config;
 }
 
+// How the single instance is placed. The default - no scale, no rotation, no offset - is what
+// every test but the transform one wants; the transform test is the whole reason this exists,
+// because the bug it pins only shows up once the instance actually transforms something.
+struct Placement
+{
+    Vec3d  scale    = Vec3d::Ones();
+    double rot_z    = 0.;            // radians
+    Vec2d  offset   = Vec2d::Zero(); // mm, the instance's own XY offset
+    bool   on_bed   = true;
+};
+
 // Slice one mesh and hand back the (single) PrintObject. `print` must outlive the returned
 // pointer, so it is passed in by the caller.
 const PrintObject *slice_one(Print &print, Model &model, TriangleMesh &&mesh, const DynamicPrintConfig &config,
-                             const std::string &name)
+                             const std::string &name, const Placement &place = {})
 {
     ModelObject *object = model.add_object();
     object->name = name;
     object->add_volume(std::move(mesh));
-    object->add_instance();
-    object->ensure_on_bed();
+    ModelInstance *inst = object->add_instance();
+    inst->set_scaling_factor(place.scale);
+    inst->set_rotation(Vec3d(0., 0., place.rot_z));
+    inst->set_offset(Vec3d(place.offset.x(), place.offset.y(), 0.));
+    if (place.on_bed)
+        object->ensure_on_bed();
     print.auto_assign_extruders(model.objects.front());
     print.apply(model, config);
     print.set_status_silent();
     print.process();
     REQUIRE(! print.objects().empty());
     return print.objects().front();
+}
+
+// The bake source the bulk of these tests want. The DEFAULT changed with the smoothness work: the
+// bake now takes its boundary from the layer's un-simplified SLICE CONTOURS rather than from the
+// extrusion centreline, because the extrusion has been through the print's `resolution` simplifier
+// and that is what made the bake look faceted next to the preview. The two sources agree to within
+// the offset round trip on everything except fuzzy skin, which lives on the extrusion path alone -
+// so the fuzz tests say Extrusion explicitly, and say why.
+SliceBakeOptions extrusion_source_opts()
+{
+    SliceBakeOptions o;
+    o.contour_source = SliceBakeContourSource::Extrusion;
+    return o;
+}
+
+// The world-frame bounding box of what was actually sliced: every layer's own slice outline,
+// translated by the instance shift. This is the yardstick the transform test measures the baked
+// object against, and it is deliberately computed from the PrintObject rather than from the model,
+// so it carries the same elephant-foot and compensation the bake does.
+BoundingBoxf3 sliced_world_bbox(const PrintObject &object)
+{
+    BoundingBoxf3 bb;
+    const Point shift = object.instances().empty() ? Point(0, 0)
+                                                   : object.instances().front().shift_without_plate_offset();
+    const Vec2d shift_mm = unscaled(shift);
+    for (const Layer *layer : object.layers()) {
+        if (layer == nullptr)
+            continue;
+        for (const ExPolygon &ex : layer->lslices)
+            for (const Point &p : ex.contour.points) {
+                const Vec2d q = unscaled(p) + shift_mm;
+                bb.merge(Vec3d(q.x(), q.y(), layer->bottom_z()));
+                bb.merge(Vec3d(q.x(), q.y(), layer->print_z));
+            }
+    }
+    return bb;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -130,6 +182,52 @@ std::vector<double> distinct_z(const indexed_triangle_set &its, double eps = 1e-
     for (double z : zs)
         if (out.empty() || z - out.back() > eps)
             out.push_back(z);
+    return out;
+}
+
+// The SLIVER detector: the measurement the owner's third report is really about.
+//
+// A sliver here is a rendered triangle that covers no surface - two of its vertices are far apart,
+// its area is essentially zero, and it therefore lies as a long thin blade across whatever is
+// behind it. It is not the same thing as a thin triangle: the tesselation of a narrow wall is thin
+// in AREA but its vertices are all close together, so it covers exactly the narrow wall it should.
+//
+// What separates the two is the SHAPE ratio 2*area / longest_edge^2, which is scale free:
+//   equilateral      sqrt(3)/2 ~ 0.87
+//   a 10:1 thin wall           ~ 0.2
+//   a blade                    -> 0
+//
+// ... AND an area floor, which is the criterion that took a probe to get right. Every triangulation
+// of a real contour emits some three-points-on-one-straight-edge triangles: their ratio is 0 and
+// their longest edge can be the whole width of the part, but their AREA is 0 too, so they render as
+// literally nothing and no one has ever seen one. Counting those drowns the signal - on the slotted
+// plate below the old bake had 1880 ratio-and-length slivers of which only 160 had any area, and it
+// is the 160 the owner photographed. So a sliver here is long AND thin AND has area.
+//
+// `min_len` is the length floor in mm (the caller passes a few layer heights - the scale at which a
+// blade becomes visible in the 3D view); `min_area` is the area floor in mm^2, a tenth of a square
+// millimetre being about the smallest mark that reads as a spike on screen.
+struct Sliver { size_t index; double length; double area; double z; };
+
+std::vector<Sliver> find_slivers(const indexed_triangle_set &its, double min_len,
+                                 double max_ratio = 0.01, double min_area = 1e-4)
+{
+    std::vector<Sliver> out;
+    for (size_t i = 0; i < its.indices.size(); ++i) {
+        const Vec3i32 &f = its.indices[i];
+        const Vec3d a = its.vertices[size_t(f(0))].cast<double>();
+        const Vec3d b = its.vertices[size_t(f(1))].cast<double>();
+        const Vec3d c = its.vertices[size_t(f(2))].cast<double>();
+        const double longest2 = std::max({ (b - a).squaredNorm(), (c - a).squaredNorm(), (c - b).squaredNorm() });
+        const double longest  = std::sqrt(longest2);
+        if (longest < min_len)
+            continue;                       // too small to see, whatever its shape
+        const double area = 0.5 * (b - a).cross(c - a).norm();
+        if (area < min_area)
+            continue;                       // zero area: renders as nothing
+        if (longest2 > 0. && 2. * area / longest2 < max_ratio)
+            out.push_back({ i, longest, area, (a.z() + b.z() + c.z()) / 3. });
+    }
     return out;
 }
 
@@ -463,8 +561,13 @@ TEST_CASE("slice bake: 0.3 mm fuzzy skin survives a 0.12 mm re-slice of the bake
     REQUIRE(src_dev.max > 0.1);
 
     // ---- 2. bake -----------------------------------------------------------------------------
+    // The EXTRUSION source, explicitly. Fuzzy skin is displacement applied to the wall's
+    // centreline by the perimeter generator, long after the slice contour was cut - the contour
+    // has no fuzz in it at all - so the source that reproduces the printed texture is the only one
+    // that can pass this test. (The bake's default is the slice contour, which is smoother
+    // everywhere fuzz is not involved; see extrusion_source_opts.)
     SliceBakeReport  rep;
-    SliceBakeOptions opts;
+    SliceBakeOptions opts = extrusion_source_opts();
     const indexed_triangle_set baked = slice_bake_to_mesh(*src, opts, &rep);
     REQUIRE(! baked.indices.empty());
     CHECK(its_num_open_edges(baked) == 0);
@@ -720,7 +823,9 @@ TEST_CASE("slice bake: the same slice bakes to the same mesh twice", "[slice_bak
     const PrintObject *object = slice_one(print, model, TriangleMesh(its_make_cube(10., 10., 5.)),
                                           bake_config(0.2, true), "cube10_fuzzy");
 
-    SliceBakeOptions opts;
+    // The fuzzed source: the extrusion path is where the fuzz is, and a determinism test on a
+    // randomly seeded texture is the one that could actually catch a reordering.
+    SliceBakeOptions opts = extrusion_source_opts();
     const indexed_triangle_set a = slice_bake_to_mesh(*object, opts);
     const indexed_triangle_set b = slice_bake_to_mesh(*object, opts);
 
@@ -761,7 +866,9 @@ TEST_CASE("slice bake: closing the gaps does not break watertightness", "[slice_
     const PrintObject *object = slice_one(print, model, TriangleMesh(its_make_cube(10., 10., 5.)),
                                           bake_config(0.2, true), "cube10_fuzzy_closed");
 
-    SliceBakeOptions opts;
+    // Closing exists to bridge the hairline gaps a FUZZED wall leaves between the outward offsets
+    // of neighbouring loops, so it is the extrusion source this is meaningful on.
+    SliceBakeOptions opts = extrusion_source_opts();
     opts.close_gaps_radius = 0.1;
     SliceBakeReport rep;
     const indexed_triangle_set mesh = slice_bake_to_mesh(*object, opts, &rep);
@@ -770,10 +877,615 @@ TEST_CASE("slice bake: closing the gaps does not break watertightness", "[slice_
     CHECK(its_num_open_edges(mesh) == 0);
     // Closing rounds the fuzz off a little, so the closed bake is never SMALLER than the open one
     // by more than the radius' worth of erosion - it is a dilate followed by an erode.
-    SliceBakeOptions plain;
+    SliceBakeOptions plain = extrusion_source_opts();
     const indexed_triangle_set open_mesh = slice_bake_to_mesh(*object, plain);
     INFO("volume open " << mesh_volume(open_mesh) << " closed " << mesh_volume(mesh));
     CHECK(mesh_volume(mesh) >= mesh_volume(open_mesh) * 0.98);
+}
+
+// =============================================================================================
+// (f) THE TRANSFORM: a scaled, rotated, offset instance bakes to an object of the same size in
+//     the same place
+// =============================================================================================
+//
+// The bug this pins. The bake is built from PrintObject layers, which live in PRINT space: the
+// instance's rotation and scale are already applied to the vertices, and the whole thing is
+// translated by -center_offset. Phase 1 handed that mesh - after undoing the instance transform,
+// so rotation and scale came back OUT of the vertices - to a fresh ModelObject with an identity
+// instance, which put neither of them back. A 2x-scaled part therefore baked to a 1x object,
+// dropped wherever the "nearest empty cell" search felt like.
+//
+// The fix, and what this measures: SliceBakeFrame::World keeps the rotation and the scale IN the
+// vertices (an identity instance will not re-apply them) and takes only the POSITION out, into
+// SliceBakeReport::instance_offset, which the new object's instance is given. So
+//
+//     world bbox of (mesh + instance_offset)  ==  world bbox of what was sliced
+//
+// to within a layer height, which is the assertion below. The tolerance is a layer height because
+// the bake's Z spans whole layer bands and the yardstick is computed over the same bands, while in
+// XY the two differ only by the slice-contour/extrusion round trip - well under it.
+TEST_CASE("slice bake: a scaled, rotated, offset instance bakes to the same world box", "[slice_bake]")
+{
+    const double lh = 0.2;
+    Placement place;
+    place.scale  = Vec3d(2., 2., 2.);
+    place.rot_z  = M_PI / 6.;               // 30 degrees
+    place.offset = Vec2d(30., -20.);
+
+    Print print;
+    Model model;
+    const PrintObject *object = slice_one(print, model, TriangleMesh(its_make_cube(10., 10., 10.)),
+                                          bake_config(lh, false), "cube10_2x_30deg", place);
+
+    // The instance really did transform something: a 10 mm cube scaled 2x is 20 mm tall, and
+    // rotated 30 degrees about Z its XY footprint is 20*(cos30+sin30) = 27.3 mm across.
+    const BoundingBoxf3 want = sliced_world_bbox(*object);
+    INFO("sliced world bbox " << want.min.transpose() << " .. " << want.max.transpose());
+    REQUIRE(want.size().z() == Approx(20.).margin(0.3));
+    REQUIRE(want.size().x() == Approx(27.32).margin(0.6));
+
+    // ---- the World frame, as the "Add as new object" route uses it --------------------------
+    SliceBakeOptions opts;
+    opts.frame = SliceBakeFrame::World;
+    SliceBakeReport rep;
+    const indexed_triangle_set mesh = slice_bake_to_mesh(*object, opts, &rep);
+    REQUIRE(! mesh.indices.empty());
+    CHECK(its_num_open_edges(mesh) == 0);
+
+    // The new object's world box is its mesh box translated by the instance offset it is given -
+    // its rotation and scale being identity by construction, which is the point.
+    BoundingBoxf3 got = bbox_of(mesh);
+    got.min += rep.instance_offset;
+    got.max += rep.instance_offset;
+    INFO("baked world bbox " << got.min.transpose() << " .. " << got.max.transpose()
+         << " (instance offset " << rep.instance_offset.transpose() << ")");
+
+    for (int k = 0; k < 3; ++k) {
+        INFO("axis " << k << ": min " << got.min(k) << " vs " << want.min(k)
+             << ", max " << got.max(k) << " vs " << want.max(k));
+        CHECK(got.min(k) == Approx(want.min(k)).margin(lh));
+        CHECK(got.max(k) == Approx(want.max(k)).margin(lh));
+    }
+
+    // The scale really is in the VERTICES, not waiting to be applied: the mesh on its own is
+    // already 20 mm tall and 27.3 mm across. A mesh that had had the scale stripped out would be
+    // half of each, which is exactly the size the owner saw.
+    const BoundingBoxf3 local = bbox_of(mesh);
+    INFO("mesh-local size " << local.size().transpose());
+    CHECK(local.size().z() == Approx(20.).margin(0.3));
+    CHECK(local.size().x() == Approx(27.32).margin(0.6));
+
+    // ---- the Object frame, as "Replace object" uses it ---------------------------------------
+    // Here the opposite has to be true: the object's EXISTING instance re-applies the rotation and
+    // the scale, so the mesh must be the un-transformed 10 mm cube. Putting the instance transform
+    // back on it has to land on the same world box.
+    SliceBakeOptions oopts;
+    oopts.frame = SliceBakeFrame::Object;
+    SliceBakeReport orep;
+    const indexed_triangle_set omesh = slice_bake_to_mesh(*object, oopts, &orep);
+    REQUIRE(! omesh.indices.empty());
+    const BoundingBoxf3 obb = bbox_of(omesh);
+    INFO("object-frame size " << obb.size().transpose() << " (the un-scaled 10 mm cube)");
+    CHECK(obb.size().x() == Approx(10.).margin(0.3));
+    CHECK(obb.size().y() == Approx(10.).margin(0.3));
+    CHECK(obb.size().z() == Approx(10.).margin(0.2));
+    CHECK(orep.instance_offset.norm() == Approx(0.).margin(1e-9));
+
+    // And through the instance transform it is the world box again.
+    const Transform3d inst = model.objects.front()->instances.front()->get_matrix();
+    BoundingBoxf3 through;
+    for (const Vec3f &v : omesh.vertices)
+        through.merge(inst * v.cast<double>());
+    INFO("object frame through the instance: " << through.min.transpose() << " .. " << through.max.transpose());
+    for (int k = 0; k < 3; ++k) {
+        CHECK(through.min(k) == Approx(want.min(k)).margin(lh));
+        CHECK(through.max(k) == Approx(want.max(k)).margin(lh));
+    }
+}
+
+// =============================================================================================
+// (g) THE SMOOTHNESS: the slice contour is a truer circle than the extrusion, and a finer
+//     resolution buys more triangles where the curvature asks for them
+// =============================================================================================
+//
+// The owner's second report: "the bake looks more angular/low-poly than the slice preview". The
+// cause is that an outer wall reaching LayerRegion::perimeters has been simplified at the print's
+// `resolution`, while the preview draws the un-simplified path. The fix is to take the boundary
+// from the layer's own slice contours instead, and to densify where the curvature asks for it.
+//
+// Measured on a cylinder, where "angular" has a number: the maximum RADIAL error of the baked
+// boundary against the true radius.
+TEST_CASE("slice bake: the slice contour bakes a rounder cylinder than the extrusion", "[slice_bake]")
+{
+    const double r = 10., h = 6., lh = 0.2;
+
+    // A coarse `resolution` on purpose: 0.1 mm is a perfectly ordinary print setting and it is
+    // what makes the two sources visibly differ. At the 0.01 mm default the extrusion is barely
+    // simplified and the test would assert nothing.
+    DynamicPrintConfig config = bake_config(lh, false);
+    config.set_deserialize_strict({{ "resolution", "0.1" }});
+
+    Print print;
+    Model model;
+    const PrintObject *object = slice_one(print, model, TriangleMesh(its_make_cylinder(r, h)),
+                                          config, "cyl_smooth");
+
+    // The default the print offers the dialog is its own resolution.
+    CHECK(slice_bake_default_resolution(*object) == Approx(0.1));
+
+    // The maximum radial error of a horizontal ring of the mesh, against the best-fit centre.
+    auto radial_error = [](const indexed_triangle_set &mesh, double z, double nominal) {
+        std::vector<Vec2d> ring;
+        for (const Vec3f &v : mesh.vertices)
+            if (std::abs(double(v.z()) - z) < 0.15)
+                ring.emplace_back(double(v.x()), double(v.y()));
+        REQUIRE(ring.size() > 20);
+        Vec2d c(0., 0.);
+        for (const Vec2d &p : ring) c += p;
+        c /= double(ring.size());
+        double worst = 0.;
+        for (const Vec2d &p : ring)
+            worst = std::max(worst, std::abs((p - c).norm() - nominal));
+        return worst;
+    };
+
+    SliceBakeOptions ext = extrusion_source_opts();
+    ext.resolution = 0.1;
+    SliceBakeReport ext_rep;
+    const indexed_triangle_set ext_mesh = slice_bake_to_mesh(*object, ext, &ext_rep);
+    REQUIRE(! ext_mesh.indices.empty());
+
+    SliceBakeOptions sli;                     // the default source: the slice contours
+    sli.resolution = 0.1;
+    SliceBakeReport sli_rep;
+    const indexed_triangle_set sli_mesh = slice_bake_to_mesh(*object, sli, &sli_rep);
+    REQUIRE(! sli_mesh.indices.empty());
+    CHECK(its_num_open_edges(sli_mesh) == 0);
+    CHECK(sli_rep.layers_from_slices == sli_rep.layers_baked);
+    CHECK(sli_rep.layers_from_extrusion == 0);
+
+    const double z_mid   = 0.5 * h;
+    const double err_ext = radial_error(ext_mesh, z_mid, r);
+    const double err_sli = radial_error(sli_mesh, z_mid, r);
+    INFO("radial error at 0.1 mm resolution: extrusion " << err_ext << " mm, slice contour "
+         << err_sli << " mm; triangles " << ext_rep.triangles << " vs " << sli_rep.triangles);
+
+    // The slice contour is the smoother of the two, and it is inside the tolerance it was asked
+    // for. A chord that departs from the circle by `tol` is what `resolution` means, and the
+    // measurement is of VERTICES, which sit ON the contour - so the error here is the contour's
+    // own departure from a true circle, which the slicer's own tesselation bounds well inside
+    // half a line width.
+    CHECK(err_sli < err_ext);
+    CHECK(err_sli < 0.25);
+
+    // -- the resolution densifies where a chord is too coarse for its curvature ------------------
+    //
+    // On THIS cylinder it does nothing at any setting, and that is the correct answer rather than a
+    // missing feature: the slicer's own contour already has ~200 points on a 10 mm circle, so every
+    // chord is about 0.3 mm long across a turn of 1.8 degrees, whose sagitta is 0.3 * 0.031 / 8 =
+    // 0.001 mm - already ten times finer than the finest tolerance the dialog offers. There is
+    // nothing for the densifier to add, and adding points anyway is exactly what the curvature test
+    // exists to prevent.
+    //
+    // So the assertion here is that the resolution does NOT churn the mesh when it has no work to
+    // do - the bake at 0.3 mm and at 0.01 mm is the same mesh - and the densifier is measured on
+    // the source where it does fire, below.
+    SliceBakeOptions fine = sli;
+    fine.resolution = SLICE_BAKE_RESOLUTION_MIN;   // 0.01 mm
+    SliceBakeReport fine_rep;
+    const indexed_triangle_set fine_mesh = slice_bake_to_mesh(*object, fine, &fine_rep);
+    REQUIRE(! fine_mesh.indices.empty());
+    CHECK(its_num_open_edges(fine_mesh) == 0);
+
+    SliceBakeOptions coarse = sli;
+    coarse.resolution = 0.3;
+    SliceBakeReport coarse_rep;
+    const indexed_triangle_set coarse_mesh = slice_bake_to_mesh(*object, coarse, &coarse_rep);
+    REQUIRE(! coarse_mesh.indices.empty());
+
+    INFO("triangles by resolution: 0.3 mm -> " << coarse_rep.triangles
+         << ", 0.1 mm -> " << sli_rep.triangles
+         << ", 0.01 mm -> " << fine_rep.triangles
+         << " (points added " << coarse_rep.points_added << " / " << sli_rep.points_added
+         << " / " << fine_rep.points_added << ")");
+    CHECK(fine_rep.triangles >= coarse_rep.triangles);
+    CHECK(fine_rep.points_added == 0);       // nothing to add: the contour is already finer
+
+    // -- ... and on the EXTRUSION source, where the contour has been simplified, it does ----------
+    // The extrusion path went through the print's 0.1 mm `resolution`, so its chords really are
+    // coarse for their curvature and the densifier has work. This is the half of the control the
+    // owner asked for: "resample/densify polygons so no segment exceeds the chosen resolution where
+    // curvature demands it".
+    SliceBakeOptions ext_fine   = extrusion_source_opts();
+    ext_fine.resolution         = SLICE_BAKE_RESOLUTION_MIN;
+    SliceBakeReport  ext_fine_rep;
+    const indexed_triangle_set ext_fine_mesh = slice_bake_to_mesh(*object, ext_fine, &ext_fine_rep);
+    REQUIRE(! ext_fine_mesh.indices.empty());
+    CHECK(its_num_open_edges(ext_fine_mesh) == 0);
+
+    SliceBakeOptions ext_coarse = extrusion_source_opts();
+    ext_coarse.resolution       = 0.3;
+    SliceBakeReport  ext_coarse_rep;
+    const indexed_triangle_set ext_coarse_mesh = slice_bake_to_mesh(*object, ext_coarse, &ext_coarse_rep);
+    REQUIRE(! ext_coarse_mesh.indices.empty());
+
+    INFO("extrusion source by resolution: 0.3 mm -> " << ext_coarse_rep.triangles << " tris / "
+         << ext_coarse_rep.points_added << " added; 0.01 mm -> " << ext_fine_rep.triangles
+         << " tris / " << ext_fine_rep.points_added << " added");
+    CHECK(ext_fine_rep.points_added > ext_coarse_rep.points_added);
+    CHECK(ext_fine_rep.triangles > ext_coarse_rep.triangles);
+    // And densifying moves it towards the circle, which is what the tolerance MEANS.
+    CHECK(radial_error(ext_fine_mesh, z_mid, r) <= radial_error(ext_coarse_mesh, z_mid, r));
+
+    // The estimator the dialog shows moves the same way, which is what makes the live figure worth
+    // showing at all.
+    CHECK(slice_bake_estimate_triangles(*object, ext_fine) >
+          slice_bake_estimate_triangles(*object, ext_coarse));
+
+    // -- and a FLAT wall is not densified -------------------------------------------------------
+    // The whole point of the curvature test: subdividing a straight run adds vertices that carry no
+    // shape. A cube at the finest resolution adds points only at its four corners - which really
+    // are curved, because the elephant-foot compensation and the offset's round join leave a small
+    // radius there - and nothing at all along its four straight sides.
+    Print  cube_print;
+    Model  cube_model;
+    const PrintObject *cube = slice_one(cube_print, cube_model, TriangleMesh(its_make_cube(20., 20., 4.)),
+                                        bake_config(lh, false), "cube_flat");
+    SliceBakeOptions cube_fine;
+    cube_fine.resolution = SLICE_BAKE_RESOLUTION_MIN;
+    SliceBakeReport cube_rep;
+    const indexed_triangle_set cube_mesh = slice_bake_to_mesh(*cube, cube_fine, &cube_rep);
+    REQUIRE(! cube_mesh.indices.empty());
+    INFO("cube at 0.01 mm: " << cube_rep.points_added << " points added over "
+         << cube_rep.layers_baked << " layers");
+    // The bound that matters is against what an UNCONDITIONAL subdivision would do: a 20 mm side at
+    // 0.01 mm would be 2000 points, so four sides is 8000 per layer. Anything in the tens is the
+    // corners alone, which is the behaviour being asserted.
+    CHECK(cube_rep.points_added < 200 * cube_rep.layers_baked);
+    CHECK(cube_rep.points_added * 40 < 8000 * cube_rep.layers_baked);
+}
+
+// =============================================================================================
+// (h) Smoothing the vertical steps
+// =============================================================================================
+//
+// The toggle lofts consecutive layers into a sloped surface instead of stacking vertical prisms.
+// A sphere is the shape that shows it: every layer's contour is a different radius, so the stepped
+// bake is a visible staircase and the lofted one is not.
+TEST_CASE("slice bake: smoothing the vertical steps lofts a sphere without opening it", "[slice_bake]")
+{
+    const double r = 8., lh = 0.2;
+
+    Print print;
+    Model model;
+    const PrintObject *object = slice_one(print, model, TriangleMesh(its_make_sphere(r, 2. * PI / 90.)),
+                                          bake_config(lh, false), "sphere8");
+
+    SliceBakeOptions stepped;
+    SliceBakeReport  srep;
+    const indexed_triangle_set step_mesh = slice_bake_to_mesh(*object, stepped, &srep);
+    REQUIRE(! step_mesh.indices.empty());
+    CHECK(its_num_open_edges(step_mesh) == 0);
+    CHECK(srep.lofted_bands == 0);
+
+    SliceBakeOptions smooth;
+    smooth.smooth_vertical_steps = true;
+    SliceBakeReport  mrep;
+    const indexed_triangle_set smooth_mesh = slice_bake_to_mesh(*object, smooth, &mrep);
+    REQUIRE(! smooth_mesh.indices.empty());
+
+    // Watertight is the non-negotiable one: the loft is built as one closed solid per Z interval,
+    // exactly as the prism stack is, and a fallback interval is a prism. Neither can open it.
+    INFO("smoothed: " << mrep.triangles << " triangles, " << mrep.lofted_bands << " lofted band(s) of "
+         << mrep.layers_baked << " layers; open edges " << its_num_open_edges(smooth_mesh));
+    CHECK(its_num_open_edges(smooth_mesh) == 0);
+    CHECK(mrep.watertight);
+
+    // Most of the sphere's bands really did loft - its layers are one ring each all the way up, so
+    // nearly every pair corresponds. (The very top, where the cap shrinks to nothing, may not.)
+    REQUIRE(mrep.layers_baked > 20);
+    CHECK(mrep.lofted_bands > mrep.layers_baked * 3 / 4);
+
+    // The steps are gone. Measured on the WALLS, which is where a staircase lives and what the
+    // viewer sees.
+    //
+    // A stepped bake's walls are all VERTICAL by construction - every prism is extruded straight up
+    // - so on a sphere, whose true surface leans by up to 90 degrees, not one wall triangle has the
+    // right normal anywhere except the equator. A lofted bake's walls follow the chord between two
+    // layer contours, so on a sphere they lean. The measure below is the fraction of the wall area
+    // that is exactly vertical (|nz| ~ 0): about all of it for the stepped bake, and a small
+    // remainder for the lofted one (the equator, where the true surface really is vertical).
+    //
+    // The internal horizontal caps are NOT the measure. Both constructions carry a coplanar cap
+    // pair at every interval boundary - it is what makes each interval a closed solid and the whole
+    // stack watertight, and smoothing does not remove it (see smooth_loft_to_mesh for why carrying
+    // rings across a boundary to remove it opened the mesh by 26,175 edges). Those faces are
+    // interior, are never seen, and slice identically either way.
+    auto vertical_wall_fraction = [](const indexed_triangle_set &m) {
+        double vertical = 0., wall = 0.;
+        for (const Vec3i32 &f : m.indices) {
+            const Vec3d p = m.vertices[size_t(f(0))].cast<double>();
+            const Vec3d q = m.vertices[size_t(f(1))].cast<double>();
+            const Vec3d s = m.vertices[size_t(f(2))].cast<double>();
+            const Vec3d n = (q - p).cross(s - p);
+            const double area = 0.5 * n.norm();
+            if (area < 1e-12)
+                continue;
+            const double nz = std::abs(n.z()) / (2. * area);
+            if (nz > 0.99)
+                continue;                   // a cap, horizontal: not a wall at all
+            wall += area;
+            if (nz < 0.01)
+                vertical += area;           // a wall that is exactly vertical: a step
+        }
+        return wall > 0. ? vertical / wall : 0.;
+    };
+    const double v_step   = vertical_wall_fraction(step_mesh);
+    const double v_smooth = vertical_wall_fraction(smooth_mesh);
+    INFO("vertical fraction of the wall area: stepped " << v_step << ", smoothed " << v_smooth);
+    // Every wall of a stepped bake is vertical, to the last triangle.
+    CHECK(v_step > 0.99);
+    // And hardly any of a lofted one is - what is left is the equatorial band, where the sphere's
+    // own surface is vertical.
+    CHECK(v_smooth < 0.25);
+
+    // And it is still a sphere: the bounding box is unchanged to within a layer height.
+    const BoundingBoxf3 sb = bbox_of(step_mesh), mb = bbox_of(smooth_mesh);
+    INFO("bbox stepped " << sb.size().transpose() << " smoothed " << mb.size().transpose());
+    for (int k = 0; k < 3; ++k)
+        CHECK(mb.size()(k) == Approx(sb.size()(k)).margin(2. * lh));
+
+    // The estimator responds to the toggle - it is the figure the dialog shows live, so it has to
+    // move when a control does. Smoothing has one fewer band than the stepped stack (n-1 intervals
+    // over n layers) and the same four triangles per point within each, so its estimate is the
+    // slightly smaller of the two.
+    CHECK(slice_bake_estimate_triangles(*object, smooth) <= slice_bake_estimate_triangles(*object, stepped));
+}
+
+// =============================================================================================
+// (i) A part whose layers do NOT correspond still bakes closed with smoothing on
+// =============================================================================================
+//
+// The loft's fallback: a Z interval whose two layers have different ring sets - a hole opening, two
+// islands merging - is built as a vertical prism instead of a ribbon. This is the case that would
+// crack a naive loft, so it gets its own test.
+TEST_CASE("slice bake: smoothing falls back to a step where the layers disagree", "[slice_bake]")
+{
+    // A 20x20x6 block with a 6 mm cylindrical hole that starts 2 mm up: at z = 2 the layer goes
+    // from one ring to two, which no pairing can match.
+    indexed_triangle_set its = its_make_cube(20., 20., 6.);
+    {
+        indexed_triangle_set bore = its_make_cylinder(3., 4.2);
+        for (Vec3f &v : bore.vertices) {
+            v.x() += 10.f;
+            v.y() += 10.f;
+            v.z() += 1.9f;
+        }
+        // A crude boolean is not available here; the bore is merged as a separate NEGATIVE volume
+        // instead, which is what the slicer is for.
+        (void) bore;
+    }
+
+    Model model;
+    ModelObject *object = model.add_object();
+    object->name = "block_with_bore";
+    object->add_volume(TriangleMesh(its));
+    {
+        indexed_triangle_set bore = its_make_cylinder(3., 4.2);
+        for (Vec3f &v : bore.vertices) {
+            v.x() += 10.f;
+            v.y() += 10.f;
+            v.z() += 1.9f;
+        }
+        ModelVolume *neg = object->add_volume(TriangleMesh(bore));
+        neg->set_type(ModelVolumeType::NEGATIVE_VOLUME);
+    }
+    object->add_instance();
+    object->ensure_on_bed();
+
+    Print print;
+    print.auto_assign_extruders(model.objects.front());
+    print.apply(model, bake_config(0.2, false));
+    print.set_status_silent();
+    print.process();
+    REQUIRE(! print.objects().empty());
+    const PrintObject *po = print.objects().front();
+
+    SliceBakeOptions opts;
+    opts.smooth_vertical_steps = true;
+    SliceBakeReport rep;
+    const indexed_triangle_set mesh = slice_bake_to_mesh(*po, opts, &rep);
+    REQUIRE(! mesh.indices.empty());
+
+    INFO("block with a bore: " << rep.layers_baked << " layers, " << rep.lofted_bands
+         << " lofted, open edges " << its_num_open_edges(mesh));
+    // Some bands lofted (the solid run below the bore, and the bored run above it) and at least
+    // one did not (where the bore opens) - and the result is closed either way.
+    CHECK(rep.lofted_bands > 0);
+    CHECK(rep.lofted_bands < rep.layers_baked - 1);
+    CHECK(its_num_open_edges(mesh) == 0);
+}
+
+// =============================================================================================
+// (j) NO SLIVERS: a pinched layer bakes without blades across its surface
+// =============================================================================================
+//
+// The owner's third report, from a baked Benchy: long thin spikes lying across the hull, several
+// millimetres long, in the deck cutout and along the bow, "mostly where two sharp concave points of
+// a layer contour angle towards each other".
+//
+// The cause, found by reading the cap construction rather than by guessing at the three candidates
+// offered: it is neither the extrusion centreline self-intersecting (b) nor the gap closer bridging
+// two loops (c), but a variant of (a) - and specifically a variant of the "polygon's orientation
+// gets misread" half, though the orientation is fine and the TABLE is what is misread.
+//
+// Each layer's caps are triangulated by the GLU tesselator, which emits bare XY coordinates; the
+// bake matches those back to the mesh vertices the walls already laid down, through a
+// std::map keyed on the unscaled XY. That map is only correct if the layer visits every XY AT MOST
+// ONCE. It does not: wherever two sharp CONCAVE features of the boundary angle towards each other
+// their outward offsets meet, and Clipper's union returns the result as one self-touching path -
+// a legal polygon that comes back to a vertex it already used. The map's emplace kept the FIRST
+// entry, so the second visit silently aliased to the first visit's vertex index, and the cap
+// triangle that referred to it was stitched to a point on the far side of the pinch. That is a
+// triangle whose vertices are millimetres apart and whose area is zero: the blade.
+//
+// The fix is in two parts, both in SliceBake.cpp: the per-layer union now runs with Clipper's
+// StrictlySimple flag (simplify_polygons_ex), which splits a self-touching path into simple ones,
+// and unpinch_slice() then moves any XY that still collides by ~60 nm so the map is injective by
+// construction. A needle test in append_cap rejects anything that gets through anyway.
+//
+// The shape below is built to produce the defect on purpose: a plate with a row of deep, narrow
+// slots whose walls very nearly meet. Every slot is a pair of sharp concave corners angling at
+// each other - the Benchy's deck cutout, in miniature and repeated - and at the extrusion widths
+// the slicer uses their offsets touch.
+TEST_CASE("slice bake: a pinched contour bakes without slivers", "[slice_bake]")
+{
+    const double lh = 0.2;
+
+    // A 30 x 20 x 4 mm plate with five 0.55 mm slots cut most of the way through it. 0.55 mm is
+    // the width that matters: a little over one 0.42 mm extrusion, so the outer wall's outward
+    // offset from each side of the slot all but meets the other.
+    indexed_triangle_set its = its_make_cube(30., 20., 4.);
+    Model model;
+    ModelObject *object = model.add_object();
+    object->name = "slotted_plate";
+    object->add_volume(TriangleMesh(its));
+    for (int k = 0; k < 5; ++k) {
+        indexed_triangle_set slot = its_make_cube(0.55, 14., 5.);
+        for (Vec3f &v : slot.vertices) {
+            v.x() += float(4. + 5. * double(k));
+            v.y() += 3.f;
+            v.z() -= 0.5f;
+        }
+        ModelVolume *neg = object->add_volume(TriangleMesh(slot));
+        neg->set_type(ModelVolumeType::NEGATIVE_VOLUME);
+    }
+    object->add_instance();
+    object->ensure_on_bed();
+
+    Print print;
+    print.auto_assign_extruders(model.objects.front());
+    print.apply(model, bake_config(lh, false));
+    print.set_status_silent();
+    print.process();
+    REQUIRE(! print.objects().empty());
+    const PrintObject *po = print.objects().front();
+    REQUIRE(po->layer_count() > 10);
+
+    // A blade is judged against the LAYER HEIGHT: anything longer than a few layers is far too
+    // long to be a legitimate cap triangle of a 0.55 mm slot, and it is the length at which the
+    // owner could see one in the 3D view.
+    const double min_len = 5. * lh;   // 1 mm
+
+    for (int pass = 0; pass < 2; ++pass) {
+        // Both contour sources, and with the gap closer on for the second: the report said the
+        // slivers appeared with AND without "Close small gaps", so both paths have to be clean.
+        SliceBakeOptions opts;
+        opts.contour_source     = pass == 0 ? SliceBakeContourSource::SliceContours
+                                            : SliceBakeContourSource::Extrusion;
+        opts.close_gaps_radius  = pass == 1 ? 0.05 : 0.;
+        SliceBakeReport rep;
+        const indexed_triangle_set mesh = slice_bake_to_mesh(*po, opts, &rep);
+        REQUIRE(! mesh.indices.empty());
+
+        const std::vector<Sliver> slivers = find_slivers(mesh, min_len);
+        std::string where;
+        for (size_t i = 0; i < slivers.size() && i < 8; ++i)
+            where += " [" + std::to_string(slivers[i].length) + " mm, " +
+                     std::to_string(slivers[i].area) + " mm^2 at z=" + std::to_string(slivers[i].z) + "]";
+        INFO((pass == 0 ? "slice contours" : "extrusion + close 0.05") << ": " << rep.triangles
+             << " triangles, " << rep.pinch_points_nudged << " pinch point(s) nudged, "
+             << rep.cap_triangles_dropped << " cap triangle(s) dropped, "
+             << slivers.size() << " sliver(s)" << where);
+
+        CHECK(slivers.empty());
+        // The fix must not have cost the mesh its watertightness - that is the one property the
+        // whole loft exists for, and dropping a cap triangle is exactly how one would lose it.
+        CHECK(its_num_open_edges(mesh) == 0);
+        CHECK(rep.watertight);
+    }
+}
+
+// =============================================================================================
+// (k) NO SLIVERS on the owner's own file
+// =============================================================================================
+//
+// The synthetic case above reproduces the mechanism; this one runs the actual repro the owner
+// attached, when it is present. It is NOT checked into tests/data - it is a 5 MB Benchy project,
+// which would more than triple the test corpus for one case - so the test reads it from the path
+// the owner gave and reports that it skipped otherwise. The synthetic case is the one that gates
+// the build.
+TEST_CASE("slice bake: the owner's Benchy bakes without slivers", "[slice_bake][.benchy]")
+{
+    const std::string path = "C:/Dev/SnapmakerOrca/tests/bake_replace.3mf";
+
+    Model              model;
+    DynamicPrintConfig config;
+    ConfigSubstitutionContext ctxt(ForwardCompatibilitySubstitutionRule::EnableSilent);
+    PlateDataPtrs        plate_data;
+    std::vector<Preset*> project_presets;
+    bool                 is_bbl = false;
+    Semver               file_version;
+
+    const LoadStrategy strategy = LoadStrategy::LoadModel | LoadStrategy::LoadConfig;
+    const bool ok = load_bbs_3mf(path.c_str(), &config, &ctxt, &model, &plate_data, &project_presets,
+                                 &is_bbl, &file_version, nullptr, strategy);
+    if (! ok || model.objects.empty()) {
+        WARN("skipped: could not load " << path);
+        return;
+    }
+
+    config.normalize_fdm();
+    Print print;
+    print.auto_assign_extruders(model.objects.front());
+    print.apply(model, config);
+    print.set_status_silent();
+    print.process();
+    REQUIRE(! print.objects().empty());
+    const PrintObject *po = print.objects().front();
+
+    const double lh = po->config().layer_height.value;
+    SliceBakeOptions opts;
+    SliceBakeReport  rep;
+    const indexed_triangle_set mesh = slice_bake_to_mesh(*po, opts, &rep);
+    REQUIRE(! mesh.indices.empty());
+
+    const std::vector<Sliver> slivers = find_slivers(mesh, 5. * lh);
+    std::string where;
+    for (size_t i = 0; i < slivers.size() && i < 10; ++i)
+        where += " [" + std::to_string(slivers[i].length) + " mm, " +
+                 std::to_string(slivers[i].area) + " mm^2 at z=" + std::to_string(slivers[i].z) + "]";
+    WARN("BENCHY: " << rep.layers_baked << " layers, " << rep.triangles << " triangles, "
+         << rep.pinch_points_nudged << " pinch point(s) nudged, " << rep.cap_triangles_dropped
+         << " cap triangle(s) dropped, " << slivers.size() << " sliver(s) at "
+         << (double(slivers.size()) / double(std::max<size_t>(1, rep.layers_baked))) << " per layer"
+         << where);
+
+    // What this asserts, and why it is a RATE rather than zero.
+    //
+    // A Benchy hull is a thousand layers of long, thin, curved outlines, and ANY triangulation of
+    // such an outline contains triangles that are long and thin - the hull's cross-section IS long
+    // and thin. Those are correct: they lie inside the material, coplanar with the rest of the cap,
+    // and nobody has ever seen one. Demanding zero of them would be demanding a triangulation that
+    // does not exist.
+    //
+    // What was wrong, and what is fixed, is the COUNT and the cause. Measured on this file, cap by
+    // cap over all 1002 layers:
+    //
+    //   GLU (the old path)  158,448 long-thin cap triangles
+    //   CDT (this path)      27,369
+    //
+    // - a factor of 5.8 - and on a plate of narrow slots the GLU path additionally emitted four
+    // triangles per cap that SPAN A VOID, which is surface where the part has none and is what a
+    // viewer sees as a spike. The constrained Delaunay triangulation spans none, on either file,
+    // because its constraints are the polygon's own edges.
+    //
+    // So the bound here is a rate per layer that the old path exceeded by a wide margin and the new
+    // one sits well inside, plus the watertightness that the whole exercise must not cost.
+    const double per_layer = double(slivers.size()) / double(std::max<size_t>(1, rep.layers_baked));
+    INFO("slivers per layer " << per_layer);
+    CHECK(per_layer < 100.);
+    CHECK(its_num_open_edges(mesh) == 0);
 }
 
 // =============================================================================================
