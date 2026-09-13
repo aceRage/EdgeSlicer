@@ -21,6 +21,10 @@ namespace Slic3r {
 indexed_triangle_set remesh_by_voxels(const indexed_triangle_set &, double) { return {}; }
 
 indexed_triangle_set round_by_voxels(const indexed_triangle_set &, double, double, bool) { return {}; }
+// The bevel's localized fallback. Empty here too, which is what makes the gizmo
+// fall all the way through to the old refusal message on a build without OpenVDB.
+indexed_triangle_set round_band_by_voxels(const indexed_triangle_set &, const std::vector<Vec3f> &,
+                                          double, double, double) { return {}; }
 
 bool voxel_ops_available() { return false; }
 

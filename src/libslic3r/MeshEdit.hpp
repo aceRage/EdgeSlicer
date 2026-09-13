@@ -350,24 +350,52 @@ struct BevelParams
     // Run the self-intersection guard on the result. Off for a live preview.
     bool         check_self_intersection{false};
 
-    // --- the curved-surface guard -------------------------------------------
+    // --- what counts as one planar side --------------------------------------
     //
     // A "side" is the facet set a strip has to be sewn into, found by flooding
-    // across edges that are neither creases nor bevelled. The whole side-rewrite
-    // treats that set as PLANAR: it projects the side's boundary into the plane
-    // of one of its facets and ear-clips it there. On a box that is exact. On a
-    // triangulated curved surface - the 3DBenchy's hull, whose bottom rim is a
-    // chain of hundreds of short edges around a curved outline - a side is
-    // thousands of tiny facets that share no plane at all, the boundary polygon
-    // is the whole rim, and the result is both slow and geometrically wrong.
+    // across edges that are neither bevelled nor a crease. The whole side-rewrite
+    // treats that set as PLANAR: it projects the side's boundary into the plane of
+    // one of its facets and ear-clips it there.
     //
-    // So it is detected up front and refused with something the panel can say,
-    // instead of being attempted. A side is rejected when it carries more than
-    // max_side_facets facets or its normals spread further than
-    // max_side_normal_deg from the reference facet's.
-    // Set max_side_facets <= 0 to disable the guard (the tests that build their
-    // own known-planar cases do).
-    int          max_side_facets{2000};
+    // THE THRESHOLD THAT DECIDES IT IS ITS OWN, and that separation is the fix for
+    // the curved-rim refusal. It used to be min_dihedral_deg - the "is this edge
+    // worth bevelling" threshold - doing double duty, and the two want opposite
+    // things. min_dihedral_deg wants to be GENEROUS (5 deg: do not add facets for a
+    // fold nobody can see). The side split wants to be STRICT: everything it floods
+    // across is asserted to be coplanar, and a 2.8 deg wall seam is not.
+    //
+    // With one 5 deg threshold doing both, a 128-facet cylinder's wall seams (2.81
+    // deg apart) were flooded across, so all 128 narrow wall facets became a single
+    // "side" spanning the full 360 deg - no plane at all - and the guard below
+    // refused the rim. With a tight one, each narrow facet is its OWN planar side,
+    // which is exactly what it is, and the rim builds: the strip and corner logic
+    // then runs across the many short edges, where every rim vertex has valence 2
+    // and both its bevelled edges lie on the same two sides.
+    //
+    // 1 deg is comfortably below the seam angle of any tessellation coarse enough
+    // to be worth bevelling (a 360-facet cylinder still turns 1 deg per seam) and
+    // comfortably above the normal noise of a genuinely flat face in a float mesh.
+    float        side_coplanar_deg{1.f};
+
+    // --- the curved-surface guard -------------------------------------------
+    //
+    // What is left after the split above is the case that genuinely cannot be
+    // bevelled geometrically: a side that is ONE large non-developable surface -
+    // the 3DBenchy's hull, whose facets vary smoothly with no seam anywhere above
+    // side_coplanar_deg, so they really do flood into one non-planar set.
+    //
+    // A side is rejected when its normals spread further than max_side_normal_deg
+    // from the reference facet's - the facet whose plane the rewrite would project
+    // the boundary into. THE SPREAD IS THE REAL TEST; the facet count is only a
+    // cheap bound on the work, and it is now generous, because with per-facet sides
+    // a legitimately planar face can carry a great many facets (a finely
+    // triangulated flat top) and there is nothing wrong with that.
+    //
+    // A rejection is no longer the end of the road: the caller falls back to a
+    // localized voxel round (see bevel_or_round()). Set max_side_facets <= 0 to
+    // disable the guard entirely (the tests that build their own known-planar
+    // cases do).
+    int          max_side_facets{200000};
     float        max_side_normal_deg{25.f};
 
     // --- cancellation and progress -------------------------------------------
@@ -409,9 +437,26 @@ enum class BevelStatus : unsigned char {
     Cancelled
 };
 
+// Which construction produced the mesh. The panel reports this, because the two
+// differ in ways a user can see: the geometric path inserts exact facets and
+// leaves the rest of the mesh untouched, while the voxel one re-extracts the
+// surface in a band around the chain and loses detail below its voxel size there.
+enum class BevelPath : unsigned char {
+    // No mesh was produced.
+    None,
+    // The geometric construction: rails, strips, corner patches.
+    Geometric,
+    // The localized voxel round, because the geometric one could not build this
+    // chain (BevelStatus::CurvedSurface).
+    VoxelFallback
+};
+
 struct BevelResult
 {
     BevelStatus          status{BevelStatus::EmptyChain};
+    // Which construction ran. Set by bevel_or_round(); bevel_edges() itself only
+    // ever produces Geometric or None.
+    BevelPath            path{BevelPath::None};
     // The bevelled mesh. Empty on any status but Ok and NoOp; NoOp returns the
     // input unchanged.
     indexed_triangle_set mesh;
@@ -463,6 +508,51 @@ BevelResult bevel_chain(const indexed_triangle_set &its,
                         const MeshTopology         &topo,
                         const EdgeChain            &chain,
                         const BevelParams          &params);
+
+// The rounder the fallback path calls, injected for the same reason
+// MeshRound.hpp's VoxelRounder is: libslic3r must build, and these tests must run,
+// whether or not the OpenVDB target exists. In the application this is always
+// round_band_by_voxels() from MeshRepair.hpp.
+//
+// Arguments: (mesh, band_points, band_radius, radius, voxel_size).
+using BandRounder = std::function<indexed_triangle_set(const indexed_triangle_set &,
+                                                       const std::vector<Vec3f> &,
+                                                       double, double, double)>;
+
+// Bevel `edges`, and when the geometric construction cannot build them, round them
+// instead. THIS IS WHAT THE GIZMO CALLS.
+//
+// WHY IT EXISTS. bevel_edges() answers CurvedSurface for a chain whose sides are
+// genuinely one non-planar surface - the 3DBenchy's hull. Refusing there is
+// correct about the geometry and useless to the person holding the mouse, who
+// selected a rim and wants it rounded. So the refusal becomes a fallback: the same
+// width, applied as a rolling-ball fillet confined to a band around the chain (see
+// round_band_by_voxels()). The part outside the band is not reshaped, so this is a
+// local operation like the bevel it stands in for, not "round all edges".
+//
+// The result says which path ran, in BevelResult::path, and the panel shows it -
+// the two are different enough (exact inserted facets versus a re-extracted band)
+// that a user is entitled to know which they got.
+//
+// If the fallback is needed and `rounder` is unset or returns nothing - which is
+// what a build without OpenVDB does - the CurvedSurface status is returned
+// unchanged, and the caller shows the refusal it always did.
+BevelResult bevel_or_round(const indexed_triangle_set &its,
+                           const MeshTopology         &topo,
+                           const std::vector<int>     &edges,
+                           const BevelParams          &params,
+                           const BandRounder          &rounder);
+
+// The band the fallback rounds in: half the width of the feathered region, and the
+// radius `bevel_or_round` passes as band_radius. The brief's "about 2x the bevel
+// width" - wide enough that the fillet itself (a width tall) sits well inside the
+// fully-rounded core, so the feather never cuts into the fillet.
+double bevel_band_radius(double width);
+
+// The voxel size the fallback uses for a given width. The fillet is only as
+// accurate as the lattice, so the two are coupled exactly as MeshRound couples
+// them: width / ROUND_VOXELS_PER_RADIUS, clamped the same way.
+double bevel_band_voxel_size(double width);
 
 // The width solve, exposed so the tests can pin order-independence directly
 // rather than inferring it from the output mesh, and so the gizmo's panel can

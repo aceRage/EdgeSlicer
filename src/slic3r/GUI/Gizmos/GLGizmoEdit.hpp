@@ -93,8 +93,14 @@ private:
     // over EVERY label rather than one of them - picking a single label left
     // "Face tolerance" and "Curvature per step" clipped.
     float compute_label_width() const;
+    // The width the Select combo needs to show its LONGEST entry, not its first.
+    // Cached against the font scaling exactly as the label width is - see
+    // compute_label_width() for why that caching exists.
+    float compute_mode_combo_width() const;
     mutable float m_label_width{ 0.f };
     mutable float m_label_width_scaling{ 0.f };
+    mutable float m_mode_combo_width{ 0.f };
+    mutable float m_mode_combo_scaling{ 0.f };
 
     // What a hover or a click picks.
     enum class PickMode : int {
@@ -278,6 +284,15 @@ private:
     int   m_bevel_profile{0};
     static constexpr float BevelWidthMin = 0.01f;
     static constexpr float BevelWidthMax = 50.f;
+    // The SLIDER's range, which is deliberately narrower than the value's. 0..10 mm
+    // covers every bevel anyone puts on a printed part, and a slider that spanned
+    // the full 0..50 would put all the useful widths in its first fifth. Values
+    // past the slider's top are still reachable by typing into the field beside it,
+    // which is clamped to BevelWidthMax instead.
+    static constexpr float BevelWidthSliderMin = 0.f;
+    static constexpr float BevelWidthSliderMax = 10.f;
+    // The step the numeric field moves in, and the brief's 0.1 mm.
+    static constexpr float BevelWidthStep      = 0.1f;
 
     // The live preview. `m_bevel_preview_mesh` is the bevelled mesh the render
     // volume is currently showing; empty when no preview is up. The key is what
@@ -292,6 +307,10 @@ private:
 
     // What the last solve/preview decided, so the panel can show the clamped
     // width and the corner count before the user commits.
+    // Which construction the last solve used, so the panel can say "geometric" or
+    // "voxel fallback". The two produce visibly different meshes and the user is
+    // entitled to know which they are looking at.
+    MeshEdit::BevelPath   m_bevel_path{MeshEdit::BevelPath::None};
     MeshEdit::BevelStatus m_bevel_status{MeshEdit::BevelStatus::EmptyChain};
     float                 m_bevel_applied_width{0.f};
     bool                  m_bevel_clamped{false};
