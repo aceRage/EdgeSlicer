@@ -2978,13 +2978,27 @@ TEST_CASE("Draw cut: Through all spans the part and leaves no flat core", "[Draw
     // Well under the fraction a capped core would put there.
     REQUIRE(double(on_plane) / double(total_v) < 0.15);
 
-    // THE BAND SPANS THE FULL HEIGHT: the cut reaches both ends of the part, so
-    // the upper half touches both the top and the bottom of the cylinder.
-    BoundingBoxf3 bb;
-    for (const Vec3f& v : upper.vertices)
-        bb.merge(v.cast<double>());
-    REQUIRE(bb.max.z() == Approx(+30.0).margin(0.5));
-    REQUIRE(bb.min.z() == Approx(-30.0).margin(0.5));
+    // THE CUT REACHES BOTH ENDS OF THE PART. This loop goes ROUND the barrel, so it
+    // is a SEPARATION (see draw_cut_loop_separates()) and the two halves are stacked
+    // rather than nested - between them they span the full height, and each one
+    // reaches one end of the cylinder. Asserting that ONE half spans the whole height
+    // would be the plug reading, which is the wrong shape for a wrap-around loop.
+    REQUIRE(draw_cut_loop_separates(cyl, stroke, params));
+
+    BoundingBoxf3 bu, bl;
+    for (const Vec3f& v : upper.vertices) bu.merge(v.cast<double>());
+    for (const Vec3f& v : lower.vertices) bl.merge(v.cast<double>());
+    REQUIRE(std::max(bu.max.z(), bl.max.z()) == Approx(+30.0).margin(0.5));
+    REQUIRE(std::min(bu.min.z(), bl.min.z()) == Approx(-30.0).margin(0.5));
+    // ONE HALF IS THE SLAB BELOW THE LINE. The other is the remainder, whose bounding
+    // box still spans the whole cylinder however it was cut - see the note in
+    // "Through all round a cylinder cuts it in two" for why that makes a bbox
+    // comparison the wrong instrument here.
+    REQUIRE(bu.max.z() < 10.0);          // the slab stops at the wavy line, not the top
+    REQUIRE(bu.min.z() == Approx(-30.0).margin(0.5));
+    // Each half is a real piece, not a sliver.
+    REQUIRE(double(its_volume(upper)) > 0.2 * double(its_volume(cyl)));
+    REQUIRE(double(its_volume(lower)) > 0.2 * double(its_volume(cyl)));
 }
 
 TEST_CASE("Draw cut: a circle on a cube face cuts a plug with a flat bottom at depth", "[DrawCut]")
@@ -3187,6 +3201,124 @@ TEST_CASE("Draw cut: an open line still uses the ruled strip", "[DrawCut]")
     REQUIRE(watertight(lower));
     REQUIRE(double(its_volume(upper)) + double(its_volume(lower)) ==
             Approx(double(its_volume(cube))).epsilon(1e-3));
+}
+
+TEST_CASE("Draw cut: a loop round the part separates it, a loop on a face does not", "[DrawCut]")
+{
+    // THE DISCRIMINATOR behind Through all's two shapes, tested on its own so a
+    // failure here is not confused with a failure of the cut that uses it.
+    //
+    // The bounding box cannot answer this - a cylinder's bbox corners are at
+    // r * sqrt(2), further out than any loop drawn on the barrel - which is why the
+    // test is the SECTION at the core plane against the loop's projection.
+
+    // A loop ROUND a cylinder's barrel: the section at that height is the full disc,
+    // and the loop contains all of it.
+    {
+        const indexed_triangle_set cyl = centred_cylinder(20.0, 60.0);
+        DrawCutStroke round_it = wavy_loop_on_cylinder(20.0, 0.0, 0.0, 96, 1);
+        REQUIRE(round_it.finish(1.0, 0.0) == DrawCutError::None);
+
+        DrawCutParams params;
+        params.through_all = true;
+        REQUIRE(draw_cut_loop_separates(cyl, round_it, params));
+    }
+
+    // A small loop drawn ON the cylinder's flat top: the section at the core plane is
+    // the whole disc and the loop covers only a fraction of it.
+    {
+        const indexed_triangle_set cyl = centred_cylinder(20.0, 60.0);
+        DrawCutStroke on_top = circle_on_top(6.0, 96, 30.0);
+        REQUIRE(on_top.finish(1.0, 0.0) == DrawCutError::None);
+
+        DrawCutParams params;
+        params.through_all = true;
+        REQUIRE_FALSE(draw_cut_loop_separates(cyl, on_top, params));
+    }
+
+    // A loop on a cube's top face - the plug case the phase 1 suite uses.
+    {
+        const indexed_triangle_set cube = centred_cube();
+        DrawCutStroke ring = circle_on_top(10.0, 96);
+        REQUIRE(ring.finish(1.0, 0.0) == DrawCutError::None);
+
+        DrawCutParams params;
+        params.through_all = true;
+        REQUIRE_FALSE(draw_cut_loop_separates(cube, ring, params));
+    }
+
+    // An OPEN line is never a separation in this sense - it has no interior at all.
+    {
+        const indexed_triangle_set cube = centred_cube();
+        DrawCutStroke line = line_on_top(30.0, 60);
+        REQUIRE(line.finish(1.0, 0.0) == DrawCutError::None);
+
+        DrawCutParams params;
+        params.through_all = true;
+        REQUIRE_FALSE(draw_cut_loop_separates(cube, line, params));
+    }
+}
+
+TEST_CASE("Draw cut: Through all round a cylinder cuts it in two", "[DrawCut]")
+{
+    // The wrap-around case, on the article the owner drew on. A loop round the
+    // barrel with Through all is a SEPARATION: two stacked halves, not a plug and a
+    // shell.
+    const indexed_triangle_set cyl = centred_cylinder(20.0, 60.0);
+    const double cyl_volume = double(its_volume(cyl));
+
+    DrawCutStroke loop = wavy_loop_on_cylinder(20.0, 0.0, 0.0, 96, 1);
+    REQUIRE(loop.finish(1.0, 0.0) == DrawCutError::None);
+
+    DrawCutParams params;
+    params.extension   = 3.0;
+    params.through_all = true;
+    // THROUGH ALL'S ANGLE ZERO IS THE STRAIGHT WALL. With no core plane there is no
+    // shelf for 0 to lie in, so the angle means the wall's TAPER and 0 is the plain
+    // straight-through cut - the opposite end from the band, where 0 is the flat
+    // shelf and 90 the straight wall. (draw_cut_band_core_solid() says why: reading
+    // it the band's way would make 0 an infinite taper.)
+    params.angle_deg   = 0.0;
+
+    indexed_triangle_set upper, lower;
+    REQUIRE(draw_cut_split(cyl, loop, params, &upper, &lower, nullptr));
+    REQUIRE(watertight(upper));
+    REQUIRE(watertight(lower));
+
+    const double a = double(its_volume(upper));
+    const double b = double(its_volume(lower));
+    REQUIRE(a > 0.0);
+    REQUIRE(b > 0.0);
+    REQUIRE(a + b == Approx(cyl_volume).epsilon(0.01));
+    // The loop is at mid-height, so the two halves are about equal.
+    REQUIRE(a == Approx(0.5 * cyl_volume).epsilon(0.2));
+
+    // STACKED, not nested. This loop is PLANAR (amplitude 0), so unlike the wavy case
+    // the two halves really do meet on one flat plane and the extremes can be
+    // compared directly.
+    BoundingBoxf3 bu, bl;
+    for (const Vec3f& v : upper.vertices) bu.merge(v.cast<double>());
+    for (const Vec3f& v : lower.vertices) bl.merge(v.cast<double>());
+    INFO("upper z [" << bu.min.z() << ", " << bu.max.z() << "]  lower z ["
+         << bl.min.z() << ", " << bl.max.z() << "]  vol " << a << " / " << b);
+
+    // ONE HALF IS A CLEAN SLAB, and the other's BOUNDING BOX is not the right
+    // instrument for the second.
+    //
+    // The cut is a half-space, so `upper` is the part below the line: a slab from the
+    // cylinder's bottom up to the loop, and its bbox says exactly that. `lower` is the
+    // rest, and a bounding box of "the rest" still spans the whole cylinder whichever
+    // way the part was cut - so comparing the two bboxes cannot distinguish a
+    // separation from anything else, and asserting they do not overlap asks the
+    // complement to be something it never is.
+    //
+    // What the separation actually claims is checked instead: one half is the slab
+    // below the line, and the two volumes are the two sides of one wall.
+    REQUIRE(bu.max.z() == Approx(0.0).margin(1.0));
+    REQUIRE(bu.min.z() == Approx(-30.0).margin(0.5));
+    // Between them they span the whole cylinder.
+    REQUIRE(std::max(bu.max.z(), bl.max.z()) == Approx(+30.0).margin(0.5));
+    REQUIRE(std::min(bu.min.z(), bl.min.z()) == Approx(-30.0).margin(0.5));
 }
 
 TEST_CASE("Draw cut: the inside field follows the band and core surface", "[DrawCut]")

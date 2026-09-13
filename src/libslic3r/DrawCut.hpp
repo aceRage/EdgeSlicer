@@ -447,6 +447,49 @@ static constexpr double DrawCutMinLipAngleDeg = 0.0;
 static constexpr double DrawCutMaxLipAngleDeg = 90.0;
 
 // ---------------------------------------------------------------------------
+// SEPARATION OR PLUG: does the loop go ROUND the part, or sit ON it?
+// ---------------------------------------------------------------------------
+
+// True when the loop WRAPS the part - it encircles the whole object at the core
+// plane rather than enclosing a patch of one face.
+//
+// The two want opposite cuts, and it is under Through all that the difference
+// changes the topology:
+//
+//   PLUG (loop on the skin)      the cut is a prism/socket through the loop, out
+//                                of the part both ways. "Inside the loop" is a
+//                                piece, and that piece is the plug.
+//   WRAP (loop round the part)   there IS no inside-the-loop piece: the prism
+//                                contains the whole object, so the intersection is
+//                                everything and the complement nothing ("the upper
+//                                boolean gave nothing"). What the user drew is a
+//                                SEPARATION, and the halves are the two sides of
+//                                one tapered wall.
+//
+// THE TEST IS THE SECTION, NOT THE BOUNDING BOX. Slice the mesh with the core
+// plane, project the loop onto that plane, and ask how much of the SECTION lies
+// inside the loop:
+//
+//   section area inside the loop > `contain_frac` of the section  -> the loop
+//       contains the part at that height, so it wraps it.
+//   otherwise -> the loop lies within the section, so it is a plug on the skin.
+//
+// A bounding-box test cannot do this job, and was tried first: a cylinder's bbox
+// corners stick out past its own radius, so "the part reaches outside the loop"
+// fires on an ordinary plug loop drawn on the barrel and breaks it. The section is
+// the actual material at that height, so a plug loop projects strictly inside it
+// and a wrap-around loop strictly contains it - there is no case in between to
+// tune, which is what makes this robust where the corner test was not.
+//
+// Returns false for anything that is not a valid closed loop, and for a mesh with
+// no section at the core plane (a loop floating clear of the part), where "plug"
+// is the safer answer because it is the non-destructive one.
+bool draw_cut_loop_separates(const indexed_triangle_set& mesh,
+                             const DrawCutStroke&        stroke,
+                             const DrawCutParams&        params,
+                             double                      contain_frac = 0.9);
+
+// ---------------------------------------------------------------------------
 // The cutter solid.
 // ---------------------------------------------------------------------------
 
@@ -485,10 +528,17 @@ static constexpr double DrawCutMaxLipAngleDeg = 90.0;
 //                  what let the surface reach past the silhouette.
 //
 // Returns an empty set when the stroke is not valid().
+// `mesh`, when given, lets the builder ask draw_cut_loop_separates() whether a
+// Through-all loop goes ROUND the part or sits ON it - the two need different
+// solids (a half-space wall versus a prism), and the answer cannot be had from the
+// stroke alone. Passing nullptr keeps the plug/prism reading, which is the right
+// default for a loop on a face and the harmless one everywhere the distinction
+// does not arise (the band-and-core path never asks).
 indexed_triangle_set draw_cut_cutter_solid(const DrawCutStroke& stroke,
                                            const DrawCutParams& params,
                                            const BoundingBoxf3& bbox,
-                                           double               face_offset = 0.0);
+                                           double               face_offset = 0.0,
+                                           const indexed_triangle_set* mesh = nullptr);
 
 // ---------------------------------------------------------------------------
 // THE DRAWN SURFACE AS A SURFACE. PHASE 2, and what connectors stand on.

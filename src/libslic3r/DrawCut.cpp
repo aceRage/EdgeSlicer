@@ -1,5 +1,8 @@
 #include "DrawCut.hpp"
 #include "CurvedCut.hpp"
+#include "TriangleMeshSlicer.hpp"
+#include "ClipperUtils.hpp"
+#include "Polygon.hpp"
 
 #include <boost/log/trivial.hpp>
 
@@ -894,7 +897,8 @@ CoreBand build_core_band(const DrawCutStroke& stroke, const DrawCutParams& param
 static indexed_triangle_set draw_cut_band_core_solid(const DrawCutStroke& stroke,
                                                      const DrawCutParams& params,
                                                      const BoundingBoxf3& bbox,
-                                                     double               face_offset)
+                                                     double               face_offset,
+                                                     const indexed_triangle_set* mesh)
 {
     indexed_triangle_set its;
     if (!stroke.valid() || !stroke.is_closed())
@@ -993,14 +997,38 @@ static indexed_triangle_set draw_cut_band_core_solid(const DrawCutStroke& stroke
         // outer rim clear of the face the stroke was drawn on.)
         const double nudge = std::max(1e-3, 1e-4 * diag);
 
+        // SEPARATION OR PLUG. A loop drawn ROUND the part has no inside-the-loop
+        // piece: a prism through it contains the whole object, so the intersection
+        // comes back as everything and the complement as nothing. See
+        // draw_cut_loop_separates() for the section-versus-loop test that tells the
+        // two apart, and for why the bounding box cannot.
+        const bool separates = mesh != nullptr &&
+                               draw_cut_loop_separates(*mesh, stroke, params);
+
         for (size_t i = 0; i < m; ++ i) {
             const Vec3d inward = draw_cut_core_inward(stroke, params, cb.normal, cb.centroid, i);
             const Vec3d shift  = face_offset * cb.normal - nudge * inward;
-            // Going along +n the wall leans OUT of the loop, going along -n it leans
-            // IN - so the section tapers the way a plug's does, and each ring stays on
-            // its own side of the loop.
-            ring_a.emplace_back(p[i].pos + reach * cb.normal - lateral * inward + shift);
-            ring_b.emplace_back(p[i].pos - reach * cb.normal + lateral * inward + shift);
+            if (separates) {
+                // THE HALF-SPACE. The tapered wall runs from the drawn line along -n
+                // ONLY, through the part and out the far side, and the cap beyond the
+                // bbox closes it. The solid is therefore "everything below the wall",
+                // so the two halves are the two sides of ONE wall rather than a plug
+                // and a shell - which is what a line drawn all the way round a part
+                // means.
+                //
+                // Ring A is the loop itself; ring B is the loop carried down by `reach`
+                // with the taper applied, so the angle leans the wall exactly as it
+                // does for a plug.
+                ring_a.emplace_back(p[i].pos + shift);
+                ring_b.emplace_back(p[i].pos - reach * cb.normal + lateral * inward + shift);
+            }
+            else {
+                // Going along +n the wall leans OUT of the loop, going along -n it
+                // leans IN - so the section tapers the way a plug's does, and each ring
+                // stays on its own side of the loop.
+                ring_a.emplace_back(p[i].pos + reach * cb.normal - lateral * inward + shift);
+                ring_b.emplace_back(p[i].pos - reach * cb.normal + lateral * inward + shift);
+            }
         }
         its.vertices.reserve(m * 2 + 2);
         for (const Vec3d& v : ring_a) its.vertices.emplace_back(v.cast<float>());
@@ -1090,6 +1118,80 @@ static indexed_triangle_set draw_cut_band_core_solid(const DrawCutStroke& stroke
     return its;
 }
 
+bool draw_cut_loop_separates(const indexed_triangle_set& mesh,
+                             const DrawCutStroke&        stroke,
+                             const DrawCutParams&        params,
+                             double                      contain_frac)
+{
+    if (mesh.empty() || !stroke.valid() || !stroke.is_closed())
+        return false;
+
+    Vec3d n, c;
+    if (!draw_cut_core_plane(stroke, params, n, c))
+        return false;
+
+    // Pin n the way build_core_band() does, so "the core plane" means the same
+    // plane here as it does where the cutter is built.
+    {
+        const std::vector<DrawCutSample>& p = stroke.path();
+        Vec3d avg_skin = Vec3d::Zero();
+        for (const DrawCutSample& s : p)
+            avg_skin += s.normal;
+        if (avg_skin.norm() > 0.25 * double(p.size()) && n.dot(avg_skin) < 0.0)
+            n = -n;
+    }
+
+    // A FRAME WITH n AS +Z. slice_mesh() cuts at a constant z, so the mesh is
+    // rotated into the core plane's own frame and sliced at z == 0. Building the
+    // rotation from n alone leaves the in-plane axes free, which is fine: the test
+    // is an area ratio and does not care how the plane is spun.
+    Vec3d ax = std::abs(n.z()) < 0.9 ? Vec3d::UnitZ() : Vec3d::UnitX();
+    Vec3d ex = ax.cross(n);
+    if (ex.norm() < 1e-9)
+        return false;
+    ex.normalize();
+    const Vec3d ey = n.cross(ex);
+
+    Matrix3d R;
+    R.row(0) = ex;
+    R.row(1) = ey;
+    R.row(2) = n;
+
+    indexed_triangle_set flat = mesh;
+    for (Vec3f& v : flat.vertices)
+        v = (R * (v.cast<double>() - c)).cast<float>();
+
+    // THE SECTION at the core plane. Regular mode keeps holes as reversed contours,
+    // so area() - which sums SIGNED areas - gives the net material at that height,
+    // which is exactly the quantity the ratio below is a fraction of.
+    const Polygons section = slice_mesh(flat, 0.0f, MeshSlicingParams{});
+    const double   section_area = std::abs(area(section));
+    if (section.empty() || section_area < EPSILON)
+        return false; // nothing there: treat it as a plug, the non-destructive answer.
+
+    // THE LOOP, projected onto the same plane and closed into one polygon.
+    Polygon loop;
+    loop.points.reserve(stroke.path().size());
+    for (const DrawCutSample& s : stroke.path()) {
+        const Vec3d q = R * (s.pos - c);
+        loop.points.emplace_back(Point(coord_t(scale_(q.x())), coord_t(scale_(q.y()))));
+    }
+    if (loop.points.size() < 3)
+        return false;
+    // Clipper wants a consistent orientation; the area sign is the winding and the
+    // loop's is whatever the user dragged.
+    if (loop.area() < 0)
+        loop.reverse();
+
+    // HOW MUCH OF THE SECTION IS INSIDE THE LOOP.
+    const Polygons inside = intersection(section, Polygons{ loop });
+    const double   inside_area = std::abs(area(inside));
+
+    // A wrap-around loop contains (nearly) all of the section; a plug loop contains
+    // only the patch it was drawn around, which is a small part of it.
+    return inside_area > contain_frac * section_area;
+}
+
 bool draw_cut_core_face(const DrawCutStroke& stroke,
                         const DrawCutParams& params,
                         const BoundingBoxf3& bbox,
@@ -1125,7 +1227,8 @@ bool draw_cut_core_face(const DrawCutStroke& stroke,
 indexed_triangle_set draw_cut_cutter_solid(const DrawCutStroke& stroke,
                                            const DrawCutParams& params,
                                            const BoundingBoxf3& bbox,
-                                           double               face_offset)
+                                           double               face_offset,
+                                           const indexed_triangle_set* mesh)
 {
     indexed_triangle_set its;
     if (!stroke.valid())
@@ -1149,7 +1252,7 @@ indexed_triangle_set draw_cut_cutter_solid(const DrawCutStroke& stroke,
     // what a closed loop falls back to only if the plane fit fails outright.
     // ----------------------------------------------------------------------
     if (closed) {
-        indexed_triangle_set band_its = draw_cut_band_core_solid(stroke, params, bbox, face_offset);
+        indexed_triangle_set band_its = draw_cut_band_core_solid(stroke, params, bbox, face_offset, mesh);
         if (!band_its.empty())
             return band_its;
         // Fall through to the ruled strip: better a rough cut than no cut.
@@ -1940,10 +2043,10 @@ void draw_cut_empty_sides(const indexed_triangle_set& mesh,
     curved_cut_thickness_faces(std::max(0.0, params.thickness), params.thickness_offset, face_lo, face_hi);
     const bool kerf = params.thickness > 0.0;
 
-    const indexed_triangle_set cutter_lo = draw_cut_cutter_solid(stroke, params, bbox, face_lo);
+    const indexed_triangle_set cutter_lo = draw_cut_cutter_solid(stroke, params, bbox, face_lo, &mesh);
     if (cutter_lo.empty())
         return;
-    const indexed_triangle_set cutter_hi = kerf ? draw_cut_cutter_solid(stroke, params, bbox, face_hi)
+    const indexed_triangle_set cutter_hi = kerf ? draw_cut_cutter_solid(stroke, params, bbox, face_hi, &mesh)
                                                : indexed_triangle_set();
 
     // "Inside the cutter" is the INTERSECTION side, which cut_with_solid() calls
@@ -2032,10 +2135,10 @@ bool draw_cut_split(const indexed_triangle_set& mesh,
     // removed from both. At t == 0 both offsets are zero and ONE solid is built,
     // which is why the no-kerf output is not "close to" what it was without the
     // kerf code, it is the same.
-    const indexed_triangle_set cutter_lo = draw_cut_cutter_solid(stroke, params, bbox, face_lo);
+    const indexed_triangle_set cutter_lo = draw_cut_cutter_solid(stroke, params, bbox, face_lo, &mesh);
     if (cutter_lo.empty())
         return fail(DrawCutError::CutterDegenerate);
-    const indexed_triangle_set cutter_hi = kerf ? draw_cut_cutter_solid(stroke, params, bbox, face_hi)
+    const indexed_triangle_set cutter_hi = kerf ? draw_cut_cutter_solid(stroke, params, bbox, face_hi, &mesh)
                                                : indexed_triangle_set();
     if (kerf && cutter_hi.empty())
         return fail(DrawCutError::CutterDegenerate);

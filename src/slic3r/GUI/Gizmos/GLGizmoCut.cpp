@@ -3477,7 +3477,11 @@ void GLGizmoCut3D::update_draw_surface_raycaster()
         for (const Vec3f& v : src->vertices)
             bbox.merge(v.cast<double>());
 
-    indexed_triangle_set cutter = draw_cut_cutter_solid(m_draw_stroke, m_draw_params, bbox);
+    // `src` is the object's mesh IN THE PLANE FRAME, which is the frame the cutter is
+    // built in - so it is exactly what draw_cut_loop_separates() needs to tell a loop
+    // drawn ROUND the part from one drawn ON it. Passing it keeps the preview's cutter
+    // identical to the one the cut will use.
+    indexed_triangle_set cutter = draw_cut_cutter_solid(m_draw_stroke, m_draw_params, bbox, 0.0, src);
     if (cutter.empty())
         return;
     // To the WORLD, the way update_curved_sheet_raycaster() takes the sheet there,

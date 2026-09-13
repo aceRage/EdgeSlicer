@@ -245,12 +245,11 @@ migration exactly once.
 
 ## Tests
 
-Final state: **`[DrawCut]` 64 / 66**, **`[CutRecipe]` 14 / 14**, **`[CurvedCut]` 50 / 50**.
-The 66 is 53 existing plus 13 new; the 2 failures are the documented wrap-around gap at the
-end of this section. `[CurvedCut]` is untouched by this work and stays fully green, which is
-the check that the shared boolean path was not disturbed.
+Final state: **`[DrawCut]` 68 / 68**, **`[CutRecipe]` 14 / 14**, **`[CurvedCut]` 50 / 50`**.
+The 68 is 53 existing plus 15 new. `[CurvedCut]` is untouched by this work and stays fully
+green, which is the check that the shared boolean path was not disturbed.
 
-13 new `[DrawCut]` cases:
+15 new `[DrawCut]` cases - the 13 below, plus the two separation cases described at the end:
 
 | Case | What it pins |
 |---|---|
@@ -297,31 +296,56 @@ the phase 1 cut`, `the angle only applies to Surface normal`, `the angle rotates
 toward the outward binormal` — are **unchanged and still green**: that function is still the
 open stroke's ruling and still has the old meaning.
 
-### Two cases that do NOT pass, and why they are a known gap rather than a regression
+### Separation versus plug — how a wrap-around loop is told apart
 
-`Draw cut chain: a tall box looped in three strokes cuts two watertight halves` and
-`Draw cut chain: Close loop joins along the SURFACE, never through the part` both draw a
-loop **all the way round** a tall box and cut it with `Axis Z` + `Through all`, expecting the
-box to come apart into a top half and a bottom half of roughly equal volume.
+A loop drawn **all the way round** the part is not a plug: a prism through it contains the
+whole object, so the intersection is everything and the complement nothing ("the upper
+boolean gave nothing"). What the user drew is a **separation**, and the halves are the two
+sides of one tapered wall.
 
-That is a **separation**, not a plug, and phase 3's through-all cannot express it. Its cutter
-is a prism along `n` through the loop; when the loop encloses the whole part, that prism
-contains the entire object, so the intersection is everything and the complement is nothing —
-`draw_cut_split()` reports "the upper boolean gave nothing". The ruled strip could do this by
-accident, because its rulings pointed inward from the loop and swept a horizontal slab.
+`draw_cut_loop_separates()` decides which, **from the section, not the bounding box**:
 
-The honest fix is a **half-space cutter for a wrap-around loop**: when the part reaches
-outside the drawn line, the cut is "everything below the line" rather than "everything inside
-it". A bbox-corner test for that condition was tried and rejected — a cylinder's bbox corners
-are further out than its own radius, so the heuristic fired on ordinary plug loops and broke
-four cases that had been passing. Distinguishing the two properly wants the mesh's own extent
-in the core plane, not the bbox's, and that is a piece of work in its own right.
+1. slice the mesh with the core plane `P` (the mesh is rotated so `n` is `+Z` and sliced at
+   `z == 0`);
+2. project the loop onto `P`;
+3. intersect, and compare areas: if **more than 90% of the section area lies inside the
+   loop**, the loop contains the part and therefore wraps it; otherwise the loop lies within
+   the section and it is a plug on the skin.
 
-Until then: a wrap-around loop wants `Through all` **off**, where the band-and-core path
-handles it correctly (`a wavy loop round a cylinder gives two watertight halves with a flat
-core` is exactly that case, and it passes). The two cases above are left failing rather than
-deleted or weakened, because they describe a cut the feature should support and the next
-piece of work on this is to make them pass.
+A bounding-box test was tried first and **rejected**: a cylinder's bbox corners are at
+`r·√2`, further out than any loop drawn on the barrel, so "the part reaches outside the
+loop" fired on ordinary plug loops and broke four passing cases. The section is the actual
+material at that height, so a plug loop projects strictly *inside* it and a wrap-around loop
+strictly *contains* it — there is no case in between to tune, which is what makes this
+robust where the corner test was not.
 
-Everything else in the 53 stays green: the resampler, smoothing, the chain, the editing,
-the errors, the open-stroke cuts and the connector contract are all unchanged by this.
+Under `Through all` the two then build different solids:
+
+- **wrap** → the tapered wall runs from the drawn line along `-n` only, through the part and
+  out the far side, capped beyond the bbox: the solid is "everything below the wall", so the
+  halves are the two sides of one wall;
+- **plug** → the prism through both sides, as before.
+
+`draw_cut_cutter_solid()` takes an optional `mesh` for this; `draw_cut_split()`,
+`draw_cut_empty_sides()` and the gizmo's preview all pass it, so the preview and the cut
+agree. Without a mesh the plug reading is kept, which is the harmless default.
+
+**Note the angle's zero differs between the two paths**, and deliberately: with a core plane
+`0` is the flat shelf and `90` the straight wall; with `Through all` there is no shelf to lie
+in, so `0` is the straight prism and larger angles taper it. Reading the through-all angle
+the band's way would make `0` an infinite taper, which is how a plain through cut on a cube
+face once turned into a cone.
+
+Tests: `a loop round the part separates it, a loop on a face does not` pins the predicate on
+four cases (barrel loop, small loop on the cylinder's top, cube-face loop, open line), and
+`Through all round a cylinder cuts it in two` pins the cut it produces - a loop round the
+middle of a 20x60 cylinder splits it 37680 / 37688 mm3, which is 50/50 to four significant
+figures.
+
+**A bounding box cannot check a separation, and this cost a round of wrong assertions.** The
+cutter is a half-space, so one half is a clean slab (`z` from the cylinder's bottom up to the
+line) but the *other* is the remainder, and the remainder's bounding box spans the whole part
+however it was cut. Asserting the two bboxes do not overlap asks the complement to be
+something it never is. What the tests check instead is the slab's own extent plus the two
+volumes. The same applies doubly to a wavy loop, where the wall is wavy and the halves
+interleave by the amplitude at their boundary by construction.
