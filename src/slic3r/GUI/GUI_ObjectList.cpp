@@ -6338,7 +6338,9 @@ static const PrintObject* baked_print_object_for(int obj_idx)
 
     const Print& print = plater->fff_print();
     for (const PrintObject* po : print.objects())
-        if (po != nullptr && po->model_object() == mo &&
+        // Print::apply() works on its own copy of the Model, so the PrintObject points at a clone of
+        // the plater object; the ids survive the copy, the pointer never matches.
+        if (po != nullptr && po->model_object() != nullptr && po->model_object()->id() == mo->id() &&
             po->is_step_done(posPerimeters) && po->layer_count() > 0)
             return po;
     return nullptr;
