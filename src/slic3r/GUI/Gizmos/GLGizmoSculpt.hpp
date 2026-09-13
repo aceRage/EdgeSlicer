@@ -53,6 +53,7 @@ public:
 protected:
     bool on_init() override;
     std::string on_get_name() const override;
+    std::string get_dock_key() const override { return "sculpt"; }
     void on_render() override;
     void on_render_input_window(float x, float y, float bottom_limit) override;
     bool on_is_activable() const override;

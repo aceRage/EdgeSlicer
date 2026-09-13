@@ -840,6 +840,7 @@ protected:
     void               on_load(cereal::BinaryInputArchive&ar) override;
     void               on_save(cereal::BinaryOutputArchive&ar) const override;
     std::string        on_get_name() const override;
+    std::string        get_dock_key() const override { return "cut"; }
     void               on_set_state() override;
     CommonGizmosDataID on_get_requirements() const override;
     void               on_set_hover_id() override;
