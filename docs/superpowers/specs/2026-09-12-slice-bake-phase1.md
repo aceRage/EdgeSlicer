@@ -450,6 +450,76 @@ new cases cover the transform (both frames), the contour source and the resoluti
 toggle and its fallback, the synthetic pinch, and the owner's Benchy (tagged `[.benchy]`, reading the
 file from its own path — 5 MB is too much to add to a 2.2 MB test corpus).
 
+## Phase 1b: the extrusion-source leak (2026-09-13)
+
+The owner made the extrusion paths the only source the GUI uses (e995c5cd06 - the slice contour is
+the original model without the fuzzy skin, so it is of little use for baking). With that default the
+hidden Benchy case failed: **5,698 open edges** and 104.9 slivers per layer, while the same file on
+the slice-contour source was clean. Fixed on `fix/slice-bake-extrusion`; `[.benchy]` now runs both
+sources and both come back at **0 open edges**, stable over repeated runs.
+
+### Why only the extrusion source
+
+Every cause below is a near-degeneracy that a fuzzed wall's outward offset produces and a slice
+contour does not. The slice contour's rings are far apart, its points are not densified, and it
+never needed a nudge - which is exactly why it never leaked and why the asymmetry was the clue each
+time.
+
+### Three causes, in the order they were found
+
+**1. `unpinch_slice` gave up.** It tried eight nudges along one direction and then left the
+duplicate XY in place. That is not cosmetic: `Triangulation::triangulate` silently switches path when
+its point list has a duplicate - it COLLAPSES the coincident points and returns indices into the
+collapsed list, with `uint32_t::max()` in every slot its reverse map never reaches - while the wall
+vertex runs were built over the uncollapsed list. Out-of-range indices were dropped (open edges) and
+in-range ones stitched to the wrong vertex (slivers). Only the extrusion source ever needed more
+than eight steps: its loops run within a fraction of a millimetre of each other and the resolution
+densifier then inserts interpolated points on both that round to the same lattice square. Now a
+spiral search that always finds a free point, with `pinch_points_unresolved` reporting any that
+cannot be placed (zero on the Benchy). **4,601 → 130 open edges.**
+
+**2. The cap was triangulated a whole slice at a time.** `Triangulation`'s inside/outside filter
+cannot tell the void BETWEEN two disjoint islands from the material inside one - CGAL triangulates
+the convex hull of everything it is handed and the filter keeps the gaps. Measured on layer 570 (five
+islands): the cap came back with 3,117 mm² of triangles over a polygon of 387 mm², a ratio of
+**eight**. Now one island at a time, with the index base a running sum of each island's own point
+count, and the two-argument overload so the duplicate-collapsing path can never be taken.
+
+**3. The nudge broke island disjointness.** The open edges were never holes - dumping one showed
+edges used **three** times, a non-manifold junction where two islands' caps covered the same ground.
+`unpinch_slice` moves a colliding point ~60 nm, and where two islands already run within that of each
+other the nudge pushes one across the other. Measured: one layer in a thousand had two islands
+intersecting by **9.3e-6 mm²** - a few square microns - and that was enough for ~600 unbalanced
+edges. The layer now iterates `union_ex` (disjointness, exact on the lattice) and `unpinch_slice`
+(uniqueness) to a fixed point, union first so uniqueness is the invariant that survives.
+
+The densifier keeps working on the extrusion source throughout - that is where it has work to do,
+the contours being the simplified ones.
+
+### A dead end worth recording
+
+Two attempts to *recover* in the cap rather than fix the geometry made things worse and were backed
+out. Rejecting needle triangles opened a plain 20 mm cube by 40 edges: a zero-area cap triangle still
+owns three edges of the edge graph, each shared with a neighbour that keeps it. Filling an island's
+holes when its triangulation failed gave **1,894 open edges out of 16 dropped triangles**, because
+the walls had already been built from the unreduced island - a cap and its walls must come from the
+same geometry. And a "sanitiser" that probed each island in advance certified nothing, because
+`CGAL::spatial_sort` shuffles with a random seed: `triangulate()` is not a function of its input, and
+the open-edge count wandered between runs on identical geometry.
+
+### What the Benchy test asserts now
+
+Watertightness on both sources, no dropped cap triangles, and every invariant counter zero - all
+exact, all direct, all failing before this change. The sliver COUNT is reported but no longer
+asserted: the metric does not discriminate. On this file the slice-contour source, which is the clean
+yardstick, scores 43 "blades" per layer against the extrusion source's 25. A Benchy hull is a long
+thin outline at every height, every triangulation of one is full of long thin triangles, and no
+shape-and-size rule separates those from an artefact without also knowing whether the triangle lies
+inside the material - a measurement this test could not make reliably (a nearest-Z match attributed
+triangles to the wrong layer and produced 72 mm triangles on a 60 mm model). The visual artefact is
+addressed by construction instead: a constrained Delaunay whose constraints are the island's own
+edges cannot emit a triangle that crosses one.
+
 ## Not in phase 1
 
 Per the spec: the G-code route (Z contouring, seams), Smooth mode (OpenVDB level set), and
