@@ -15,7 +15,57 @@
 namespace Slic3r {
 
 // ---------------------------------------------------------------------------
-// Draw cut, phase 1: the cut surface is a RULED STRIP swept along a stroke the
+// Draw cut, phase 3 (2026-09-13, owner feedback): the cut surface of a CLOSED
+// loop is a BAND plus a FLAT CORE, not a ruled strip.
+//
+// Phases 1 and 2 lofted a ruled strip: every loop point got a straight ruling
+// along its own inward surface normal, and the "cut" was the tube those rulings
+// swept. On a cylinder that tube is a ring of rays pointing at the axis from all
+// round, so Depth projected OUTWARDS and Through all drove the rulings through
+// the part at whatever angles the normals happened to have - the translucent
+// disc and cyan slivers the owner screenshotted. There was no flat face anywhere,
+// so the two halves had nothing to key against.
+//
+// The model now matches what a model-splitting tool (Split3r and its kin) means
+// by this kind of cut: a drawn line on the skin says WHERE the cut meets the
+// surface, the middle of the cut is a CLEAN FLAT PLANE, and the transition from
+// skin to plane can be angled so the halves key together.
+//
+//   1. CORE PLANE P. The best-fit plane of the loop - Newell/PCA normal n through
+//      the centroid c. With Direction = Axis the chosen axis is n instead (still
+//      through c), so the user can force the core square to an axis. The core is
+//      the region of P inside the loop's projection.
+//
+//   2. SKIN BAND. For each loop point p the surface runs from
+//         p_out = p + extension * outward(p)      (clear of the skin)
+//      inward to
+//         p_in  = p + depth * d(p)                (then projected onto P along n)
+//      where d(p) is the in-plane inward direction (towards the axis through c,
+//      perpendicular to n) tilted by `angle` towards n. See DrawCutParams::angle_deg.
+//      `depth` is how far the band travels before the surface turns onto the core.
+//
+//   3. CORE POLYGON. The loop projected onto P and INSET by the band's in-plane
+//      footprint (depth * cos(angle)), so band and core join along one closed
+//      curve and the result is watertight. Because every p_in is put onto P by
+//      construction, the core is flat even when the drawn loop is not planar -
+//      which is the whole point: a wavy hand-drawn line still yields a flat
+//      mating face.
+//
+//   4. THROUGH ALL. No core plane at all: the band is extruded along d(p) all the
+//      way through the part (reach from the bbox, both sides), giving a tapered
+//      plug/socket with no flat middle.
+//
+// The SAME surface feeds the boolean, the inside field (halves colouring,
+// Visible/Ghost/Hidden) and the connectors, so a connector dropped on the band or
+// on the core stands on the face that will actually exist. Extension only ever
+// changes how far the band reaches OUTSIDE the skin.
+//
+// An OPEN stroke keeps the phase-1/2 ruled strip: there is no loop, so there is
+// no interior to put a core plane in. Everything below that talks about a core is
+// closed-loop only.
+//
+// ---------------------------------------------------------------------------
+// Phase 1 (historical): the cut surface is a RULED STRIP swept along a stroke the
 // user draws on the model's surface.
 //
 // This is a PEER of the curved sheet, not a variant of it. The sheet is a height
@@ -84,30 +134,35 @@ struct DrawCutParams
     // how far past each END the surface reaches along the tangent - which is what
     // lets the cut get past the silhouette so the boolean separates the part.
     double           extension{ 5.0 };
-    // PHASE 2. The DRAFT ANGLE, in DEGREES, signed. It tilts the sweep direction
-    // away from the local surface normal toward the stroke's OUTWARD binormal,
-    // per sample:
+    // THE LIP ANGLE, in DEGREES, 0..90 (see the band/core model above). It is the
+    // tilt of the band's travel direction d(p) TOWARDS the core normal n:
     //
-    //   d_i = cos(theta) * (-n_i) + sin(theta) * b_i
+    //   d(p) = cos(angle) * inward(p) + sin(angle) * (-n)
     //
-    // POSITIVE FLARES OUTWARD - the ruling leans away from the loop's interior as
-    // it goes in, so a closed stroke's plug widens with depth and the surrounding
-    // shell opens out like a moulding draft. NEGATIVE UNDERCUTS - the plug narrows
-    // with depth, so it is a dovetail that cannot be pulled straight out.
+    // where inward(p) is the in-plane inward direction at p (towards the axis /
+    // centroid, perpendicular to n). So:
     //
-    // The sign is tied to the same outward binormal DrawCutStroke::binormal()
-    // defines, which is winding-independent, so a loop drawn clockwise and one
-    // drawn counter-clockwise draft the same way.
+    //   0   - the band runs straight IN, perpendicular to n: it lies in the plane
+    //         through p parallel to the core plane. A flat shelf around the core.
+    //   45  - a 45-degree chamfer lip, the classic keyed joint.
+    //   90  - straight along -n: a straight-walled plug/socket, no lip at all.
     //
-    // Only DrawCutDirection::SurfaceNormal uses it. The constant-direction modes
-    // (View, Axis X/Y/Z) are by definition ONE direction at every sample - that is
-    // what "as-is extrusion" means - and a per-sample tilt is exactly what they are
-    // not, so draw_cut_inward_dir() ignores it there and the panel greys it out.
+    // Unlike the old phase-2 draft angle this is NOT signed and NOT a rotation
+    // towards the binormal; it is the angle at which the outer shell projects
+    // towards the inner flat projection, which is what the owner asked for and
+    // what Split3r-style keyed halves need.
     double           angle_deg{ 0.0 };
-    // How far it reaches IN. `through_all` ignores `depth` and uses a reach
-    // derived from the object's bounding box, large enough to exit any side.
-    bool             through_all{ true };
-    double           depth{ 10.0 };
+    // How far the band travels INWARD along d(p), in mm, before the surface turns
+    // onto the core plane. This is the width of the lip measured along its own
+    // travel, and it is what sets how far the core polygon is inset from the loop.
+    // Larger depth = smaller flat core.
+    //
+    // `through_all` drops the core plane entirely: the band is extruded all the
+    // way through the part along d(p) with the same angle semantics, giving a
+    // tapered plug/socket cut with no flat middle. The extrusion reaches beyond
+    // the mesh on both sides (from the bbox) so the cut is always complete.
+    bool             through_all{ false };
+    double           depth{ 3.0 };
     // Kerf, in mm, and where the removed band sits. Shared with the flat and the
     // curved cut (CurvedCut.hpp).
     double           thickness{ 0.0 };
@@ -326,6 +381,115 @@ Vec3d draw_cut_inward_dir(const DrawCutStroke& stroke, const DrawCutParams& para
 bool draw_cut_frame_holonomy_flips(const DrawCutStroke& stroke);
 
 // ---------------------------------------------------------------------------
+// THE CORE PLANE. Phase 3.
+// ---------------------------------------------------------------------------
+
+// The best-fit plane of a CLOSED stroke's path: `normal` by Newell's method over
+// the loop (which is the area-weighted normal, so it degrades gracefully on a
+// wavy loop instead of picking a random eigenvector), `centroid` the mean of the
+// path points.
+//
+// With DrawCutDirection::Axis{X,Y,Z} the axis REPLACES the fitted normal - the
+// user is saying "make the mating face square to this axis" - but the centroid is
+// still the loop's own, so the plane still passes through the middle of the loop.
+// DrawCutDirection::SurfaceNormal and View both fit.
+//
+// The normal's sign is pinned so it points along the loop's own winding (right
+// hand rule); draw_cut_core_plane() then flips it if needed so it agrees with the
+// direction the band travels, which is what keeps "upper" stable.
+//
+// Returns false for a stroke that is not valid() or not closed.
+bool draw_cut_core_plane(const DrawCutStroke& stroke,
+                         const DrawCutParams& params,
+                         Vec3d&               normal,
+                         Vec3d&               centroid);
+
+// WHERE THE CORE ACTUALLY SITS: the plane the flat middle is built on, which is
+// the fitted plane DISPLACED along `normal` to the depth the band arrives at.
+//
+// draw_cut_core_plane() gives the plane's ORIENTATION and the loop's own centroid;
+// that is the right plane to talk about the loop, but it is not where the mating
+// face ends up - the band travels `depth` first. This is the plane to measure the
+// cut against, and the one a "is this vertex on the core?" test has to use.
+//
+// `point` receives a point on it; `normal` the same normal draw_cut_core_plane()
+// returns, already sign-pinned. Returns false for a stroke that is not a valid
+// closed loop, and for through-all (where there is no core at all).
+bool draw_cut_core_face(const DrawCutStroke& stroke,
+                        const DrawCutParams& params,
+                        const BoundingBoxf3& bbox,
+                        Vec3d&               normal,
+                        Vec3d&               point);
+
+// The in-plane INWARD direction at path sample `i`: the component of (c - p_i)
+// perpendicular to the core normal, normalised. This is "towards the axis" for a
+// loop round a cylinder and "towards the centroid" for a loop on a flat face,
+// which are the same thing expressed once.
+//
+// Falls back to the old inward surface normal for an open stroke (no core).
+Vec3d draw_cut_core_inward(const DrawCutStroke& stroke,
+                           const DrawCutParams& params,
+                           const Vec3d&         normal,
+                           const Vec3d&         centroid,
+                           size_t               i);
+
+// The band's travel direction at sample `i`: `inward` tilted by params.angle_deg
+// towards -normal. Angle 0 gives `inward` exactly (the band lies in the plane
+// through p parallel to P); angle 90 gives -normal (a straight-walled plug).
+//
+// This is the one place the lip angle is applied, so the cutter, the surface
+// queries, the inside field and the tests all bend the same way.
+Vec3d draw_cut_band_dir(const Vec3d& inward, const Vec3d& normal, double angle_deg);
+
+// The panel's limit on the lip angle, in degrees. 0 is a flat shelf, 90 a
+// straight wall; past 90 the band would travel back out of the part.
+static constexpr double DrawCutMinLipAngleDeg = 0.0;
+static constexpr double DrawCutMaxLipAngleDeg = 90.0;
+
+// ---------------------------------------------------------------------------
+// SEPARATION OR PLUG: does the loop go ROUND the part, or sit ON it?
+// ---------------------------------------------------------------------------
+
+// True when the loop WRAPS the part - it encircles the whole object at the core
+// plane rather than enclosing a patch of one face.
+//
+// The two want opposite cuts, and it is under Through all that the difference
+// changes the topology:
+//
+//   PLUG (loop on the skin)      the cut is a prism/socket through the loop, out
+//                                of the part both ways. "Inside the loop" is a
+//                                piece, and that piece is the plug.
+//   WRAP (loop round the part)   there IS no inside-the-loop piece: the prism
+//                                contains the whole object, so the intersection is
+//                                everything and the complement nothing ("the upper
+//                                boolean gave nothing"). What the user drew is a
+//                                SEPARATION, and the halves are the two sides of
+//                                one tapered wall.
+//
+// THE TEST IS THE SECTION, NOT THE BOUNDING BOX. Slice the mesh with the core
+// plane, project the loop onto that plane, and ask how much of the SECTION lies
+// inside the loop:
+//
+//   section area inside the loop > `contain_frac` of the section  -> the loop
+//       contains the part at that height, so it wraps it.
+//   otherwise -> the loop lies within the section, so it is a plug on the skin.
+//
+// A bounding-box test cannot do this job, and was tried first: a cylinder's bbox
+// corners stick out past its own radius, so "the part reaches outside the loop"
+// fires on an ordinary plug loop drawn on the barrel and breaks it. The section is
+// the actual material at that height, so a plug loop projects strictly inside it
+// and a wrap-around loop strictly contains it - there is no case in between to
+// tune, which is what makes this robust where the corner test was not.
+//
+// Returns false for anything that is not a valid closed loop, and for a mesh with
+// no section at the core plane (a loop floating clear of the part), where "plug"
+// is the safer answer because it is the non-destructive one.
+bool draw_cut_loop_separates(const indexed_triangle_set& mesh,
+                             const DrawCutStroke&        stroke,
+                             const DrawCutParams&        params,
+                             double                      contain_frac = 0.9);
+
+// ---------------------------------------------------------------------------
 // The cutter solid.
 // ---------------------------------------------------------------------------
 
@@ -364,10 +528,17 @@ bool draw_cut_frame_holonomy_flips(const DrawCutStroke& stroke);
 //                  what let the surface reach past the silhouette.
 //
 // Returns an empty set when the stroke is not valid().
+// `mesh`, when given, lets the builder ask draw_cut_loop_separates() whether a
+// Through-all loop goes ROUND the part or sits ON it - the two need different
+// solids (a half-space wall versus a prism), and the answer cannot be had from the
+// stroke alone. Passing nullptr keeps the plug/prism reading, which is the right
+// default for a loop on a face and the harmless one everywhere the distinction
+// does not arise (the band-and-core path never asks).
 indexed_triangle_set draw_cut_cutter_solid(const DrawCutStroke& stroke,
                                            const DrawCutParams& params,
                                            const BoundingBoxf3& bbox,
-                                           double               face_offset = 0.0);
+                                           double               face_offset = 0.0,
+                                           const indexed_triangle_set* mesh = nullptr);
 
 // ---------------------------------------------------------------------------
 // THE DRAWN SURFACE AS A SURFACE. PHASE 2, and what connectors stand on.

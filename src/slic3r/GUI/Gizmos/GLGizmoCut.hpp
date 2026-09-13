@@ -356,7 +356,12 @@ class GLGizmoCut3D : public GLGizmoBase
     float           m_draw_smoothing{ 0.2f };
     // Depth in mm, used only when Through all is off. Kept out of m_draw_params
     // so toggling the checkbox does not lose the number the user typed.
-    float           m_draw_depth{ 10.f };
+    //
+    // PHASE 3: this is how far the band travels in from the drawn line before the
+    // surface turns onto the flat core, so a few millimetres is the useful range -
+    // not the old "reach right through the part". Default 3 mm, matching
+    // DrawCutParams::depth.
+    float           m_draw_depth{ 3.f };
     float           m_draw_extension{ 5.f };
     int             m_draw_direction{ int(DrawCutDirection::SurfaceNormal) };
     // Capture: set between LeftDown on the object and LeftUp. The painter base's
@@ -439,10 +444,12 @@ class GLGizmoCut3D : public GLGizmoBase
     // scale a cut surface is inspected at.
     static const int DrawFieldRes = 48;
 
-    // --- DRAW CUT (phase 2) ------------------------------------------------
-    // THE DRAFT ANGLE, in degrees, signed: positive flares the cut outward (the
-    // plug widens going in and lifts out), negative undercuts it. Only Surface
-    // normal uses it - the constant directions are one direction by definition.
+    // --- DRAW CUT (phase 3) ------------------------------------------------
+    // THE LIP ANGLE, in degrees, 0..90 and unsigned: the angle at which the outer
+    // band leans in towards the flat core. 0 is a flat shelf, 45 a chamfered lip
+    // the halves key into, 90 a straight wall. For a CLOSED loop it applies
+    // whatever the Direction is, because the band's direction comes from the core
+    // plane; an open line has no core and keeps the Surface-normal-only rule.
     float           m_draw_angle{ 0.f };
     // Advisory: a closed stroke whose binormal field does not close on itself, so
     // "outward" is not consistent round the loop and a draft angle would flare one

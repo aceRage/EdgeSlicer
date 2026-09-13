@@ -2927,9 +2927,19 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                                        rt.get<double>("<xmlattr>.draw_view_y", 0.),
                                        rt.get<double>("<xmlattr>.draw_view_z", -1.));
             r.draw_extension   = rt.get<double>("<xmlattr>.draw_extension", 5.);
-            r.draw_angle_deg   = rt.get<double>("<xmlattr>.draw_angle", 0.);
-            r.draw_through_all = rt.get<int>("<xmlattr>.draw_through_all", 1) != 0;
-            r.draw_depth       = rt.get<double>("<xmlattr>.draw_depth", 10.);
+            // THE DEFAULTS HERE ARE THE OLD FILE'S MEANINGS, NOT THE NEW ONES. A v1/v2
+            // file that omits an attribute meant the v2 default, so that is what must be
+            // reconstructed; migrate_draw_v2() then converts the whole set to phase-3
+            // meanings in ONE place. Defaulting these straight to the phase-3 values
+            // would let a missing attribute skip the migration and a present one take
+            // it, which is the kind of split that makes an old project open differently
+            // depending on which attributes its writer happened to emit.
+            {
+                const bool legacy_draw = r.version <= 2;
+                r.draw_angle_deg   = rt.get<double>("<xmlattr>.draw_angle", 0.);
+                r.draw_through_all = rt.get<int>("<xmlattr>.draw_through_all", legacy_draw ? 1 : 0) != 0;
+                r.draw_depth       = rt.get<double>("<xmlattr>.draw_depth", legacy_draw ? 10. : 3.);
+            }
 
             // --- the curved sheet ----------------------------------------------------
             if (const auto sheet_tree = rt.get_child_optional("sheet")) {
@@ -3104,6 +3114,12 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                     r.connectors.emplace_back(rc);
                 }
             }
+
+            // PHASE 3 MIGRATION. A v1/v2 drawn recipe describes a ruled strip that no
+            // longer exists, so its angle and depth are reinterpreted here - once, at
+            // the point of load, so everything downstream sees a version-3 recipe and
+            // no other code has to know two meanings. See CutRecipeVersion's history.
+            r.migrate_draw_v2();
 
             CutRecipeInfo info;
             info.mesh_hash = rt.get<std::string>("<xmlattr>.mesh", "");

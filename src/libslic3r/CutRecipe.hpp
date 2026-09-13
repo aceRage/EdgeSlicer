@@ -63,7 +63,25 @@ struct CutConnector;
 // ended and the next began, and cut_recipe_stroke_to_chain() then treats the whole
 // list as one stroke, which is the right answer for a line drawn in one gesture and
 // the harmless answer for any other.
-static constexpr int CutRecipeVersion = 2;
+//
+//  3  the drawn cut's SURFACE MODEL changed (2026-09-13): a closed loop is now a
+//     band plus a FLAT CORE PLANE instead of a ruled strip, and with it the
+//     MEANING of two stored numbers changed - which is why this is a version bump
+//     and not merely new fields:
+//       draw_angle_deg  was a SIGNED draft (-60..+60) rotating the ruling towards
+//                       the outward binormal; it is now the UNSIGNED LIP ANGLE
+//                       (0..90) at which the band leans in towards the core.
+//       draw_depth      was how far the ruling reached in (tens of mm, and usually
+//                       ignored because through_all defaulted on); it is now how
+//                       far the band travels before turning onto the core, so a
+//                       few mm.
+//
+// A version 2 recipe STILL LOADS, but it cannot re-cut to the same halves, because
+// the surface it described no longer exists. cut_recipe_migrate_draw_v2() maps it
+// onto the nearest phase-3 cut so an old project opens with a sensible cut rather
+// than a broken one; the halves themselves are untouched until the user re-cuts,
+// because those come from the stored mesh blob.
+static constexpr int CutRecipeVersion = 3;
 
 // The oldest version a reader accepts. Between this and CutRecipeVersion the fields
 // a recipe does not carry are left at their defaults.
@@ -78,7 +96,8 @@ enum class CutRecipeKind : int {
     Plane = 0,
     // A height field over the plane: Cut::perform_with_curved_sheet().
     Curved = 1,
-    // A ruled strip swept along a painted stroke: Cut::perform_with_draw_stroke().
+    // A drawn line: a band plus a flat core for a closed loop, a ruled strip for an
+    // open one. Cut::perform_with_draw_stroke().
     Drawn = 2,
     // Tongue and groove: Cut::perform_with_groove().
     Groove = 3,
@@ -266,9 +285,12 @@ struct CutRecipe
     int    draw_direction{ int(DrawCutDirection::SurfaceNormal) };
     Vec3d  draw_view_dir{ -Vec3d::UnitZ() };
     double draw_extension{ 5.0 };
+    // PHASE 3: the unsigned lip angle, 0..90. See CutRecipeVersion's history.
     double draw_angle_deg{ 0.0 };
-    bool   draw_through_all{ true };
-    double draw_depth{ 10.0 };
+    // PHASE 3 defaults, matching DrawCutParams: a flat core at 3 mm, not a
+    // through cut. (These were `true` / 10.0 under the ruled-strip model.)
+    bool   draw_through_all{ false };
+    double draw_depth{ 3.0 };
 
     // --- shared parameters ------------------------------------------------
     // Kerf. Applies to Plane, Curved and Drawn alike.
@@ -312,6 +334,11 @@ struct CutRecipe
 
     // The sweep parameters as DrawCut wants them.
     DrawCutParams  draw_params() const;
+    // Rewrite a version <= 2 drawn recipe's parameters into phase-3 meanings, and
+    // stamp it as version 3. A no-op on a recipe that is already 3, or on one that
+    // is not a drawn cut. See CutRecipeVersion's history for what changes and why
+    // the old numbers cannot simply be reused.
+    void           migrate_draw_v2();
     // The sheet as CurvedCut wants it.
     CurvedCutSheet curved_sheet() const;
 
