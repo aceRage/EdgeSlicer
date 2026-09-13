@@ -15489,6 +15489,23 @@ void Plater::priv::set_current_panel(wxPanel* panel, bool no_slice)
             assemble_view->get_canvas3d()->unbind_event_handlers();
 
             GLCanvas3D* assemble_canvas = assemble_view->get_canvas3d();
+            // Leaving the assembly view has to put the 3D canvas back into a pickable state. Both
+            // canvases share the Model but keep their own GLVolumes, hover ids, gizmos and picking
+            // raycasters, and the assembly round trip can leave the 3D side holding stale ones: the
+            // Measure/Assembly gizmo hides everything but the selection while it is open, and a
+            // reload_scene() during that window bakes "inactive" into the volume raycasters. The
+            // objects then still render but no click ever hits one, which is why selection only
+            // recovered once something else forced a full scene refresh (dragging the prime tower,
+            // moving an object on another plate). Do here exactly what the assembly view's own
+            // "Return" button already does: close any gizmo left open on the 3D canvas and rebuild
+            // its scene, so hover state, gizmo raycasters and volume raycasters are all re-derived.
+            GLGizmosManager& view3d_gizmos = view3D->get_canvas3d()->get_gizmos_manager();
+            if (view3d_gizmos.is_running()) {
+                view3d_gizmos.reset_all_states();
+                view3d_gizmos.update_data();
+            }
+            view3D->get_canvas3d()->reload_scene(true);
+
             Selection::IndicesList select_idxs = assemble_canvas->get_selection().get_volume_idxs();
             Selection& view3d_selection = view3D->get_canvas3d()->get_selection();
             view3d_selection.clear();
@@ -15499,6 +15516,12 @@ void Plater::priv::set_current_panel(wxPanel* panel, bool no_slice)
                     view3d_selection.add(real_idx, false);
                 }
             }
+            // The selection was rewritten behind the canvas' back (no click, no reload); tell the
+            // gizmo bar and the object list about it the way the click path does, or the toolbar
+            // keeps the enable state of the assembly view's selection.
+            view3D->get_canvas3d()->get_gizmos_manager().refresh_on_off_state();
+            view3D->get_canvas3d()->get_gizmos_manager().update_data();
+            view3D->get_canvas3d()->post_event(SimpleEvent(EVT_GLCANVAS_OBJECT_SELECT));
         }
 
         view3D->get_canvas3d()->bind_event_handlers();
