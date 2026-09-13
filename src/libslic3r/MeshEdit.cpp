@@ -12,6 +12,7 @@
 #include <set>
 #include <tuple>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 
 namespace Slic3r {
@@ -721,16 +722,26 @@ void triangulate_planar_polygon(indexed_triangle_set &out, const std::vector<int
         return Vec2f(p.dot(ax), p.dot(ay));
     };
 
+    // The projection, computed once per polygon point and carried alongside it.
+    // It used to be recomputed inside the innermost containment test, so a
+    // polygon of n points paid O(n^3) dot products - the reason a long rim
+    // boundary took minutes here.
+    std::vector<Vec2f> pt2(poly.size());
+    for (size_t i = 0; i < poly.size(); ++i)
+        pt2[i] = to2d(poly[i]);
+
     // Make the working order counter-clockwise in that basis, so "convex" below
     // has one meaning rather than two.
     double area2 = 0.;
     for (size_t i = 0; i < poly.size(); ++i) {
-        const Vec2f p = to2d(poly[i]), q = to2d(poly[(i + 1) % poly.size()]);
+        const Vec2f &p = pt2[i], &q = pt2[(i + 1) % poly.size()];
         area2 += double(p.x()) * double(q.y()) - double(q.x()) * double(p.y());
     }
     const bool reversed = area2 < 0.;
-    if (reversed)
+    if (reversed) {
         std::reverse(poly.begin(), poly.end());
+        std::reverse(pt2.begin(), pt2.end());
+    }
 
     auto cross2 = [](const Vec2f &o, const Vec2f &p, const Vec2f &q) {
         return double(p.x() - o.x()) * double(q.y() - o.y()) -
@@ -746,15 +757,18 @@ void triangulate_planar_polygon(indexed_triangle_set &out, const std::vector<int
         else          out.indices.emplace_back(i0, i1, i2);
     };
 
-    // O(n^2) ear clipping. A side polygon has a handful of vertices, so this is
-    // never hot, and the simple version is the one that is obviously right.
+    // Ear clipping over the cached projection. Still the same algorithm and the
+    // same output; what changed is that the containment test reads pt2 instead of
+    // re-projecting, and skips candidates outside the ear's bounding box, which
+    // is what makes a several-hundred-point boundary finish in milliseconds
+    // rather than minutes.
     size_t guard = poly.size() * poly.size() + 8;
     while (poly.size() > 3 && guard-- > 0) {
         bool clipped = false;
         for (size_t i = 0; i < poly.size(); ++i) {
             const size_t h = (i + poly.size() - 1) % poly.size();
             const size_t j = (i + 1) % poly.size();
-            const Vec2f  a = to2d(poly[h]), b = to2d(poly[i]), c = to2d(poly[j]);
+            const Vec2f &a = pt2[h], &b = pt2[i], &c = pt2[j];
             // >= 0, not > 0: a COLLINEAR vertex has to be clippable. The side
             // rewrite deliberately produces them - a rail inserted on a boundary
             // edge is collinear with that edge's endpoints - and they are
@@ -766,17 +780,28 @@ void triangulate_planar_polygon(indexed_triangle_set &out, const std::vector<int
             // its_remove_degenerate_faces() takes that out at the end.
             if (cross2(a, b, c) < 0.)
                 continue;                       // reflex: not an ear
+            // The ear's bounding box: a point outside it cannot be inside the
+            // triangle, and the comparison is four floats against three cross
+            // products.
+            const float minx = std::min(a.x(), std::min(b.x(), c.x()));
+            const float maxx = std::max(a.x(), std::max(b.x(), c.x()));
+            const float miny = std::min(a.y(), std::min(b.y(), c.y()));
+            const float maxy = std::max(a.y(), std::max(b.y(), c.y()));
             bool empty = true;
             for (size_t k = 0; k < poly.size() && empty; ++k) {
                 if (k == h || k == i || k == j)
                     continue;
-                if (inside(a, b, c, to2d(poly[k])))
+                const Vec2f &p = pt2[k];
+                if (p.x() < minx || p.x() > maxx || p.y() < miny || p.y() > maxy)
+                    continue;
+                if (inside(a, b, c, p))
                     empty = false;
             }
             if (!empty)
                 continue;
             emit(poly[h], poly[i], poly[j]);
             poly.erase(poly.begin() + long(i));
+            pt2.erase(pt2.begin() + long(i));
             clipped = true;
             break;
         }
@@ -947,18 +972,28 @@ void fill_open_loops(indexed_triangle_set &out, size_t &patches, const std::set<
 //
 // Deterministic: the facets are visited in index order from facet 0, and the final
 // global flip is decided by the signed volume, so the same input gives the same output.
+// An undirected edge packed into one integer, so the edge maps below can be hash
+// maps rather than red-black trees keyed on a pair. These run over every facet of
+// the assembled mesh - 3 x 200k insertions on a Benchy-sized part - where the
+// tree's per-node allocation dominates.
+static inline uint64_t meshedit_edge_key(int a, int b)
+{
+    const uint32_t lo = uint32_t(a < b ? a : b);
+    const uint32_t hi = uint32_t(a < b ? b : a);
+    return (uint64_t(hi) << 32) | uint64_t(lo);
+}
+
 void orient_consistently(indexed_triangle_set &its)
 {
     if (its.indices.empty())
         return;
     // Undirected edge -> the (up to two) facets on it.
-    std::map<std::pair<int, int>, std::vector<size_t>> faces_of;
+    std::unordered_map<uint64_t, std::vector<size_t>> faces_of;
+    faces_of.reserve(its.indices.size() * 2);
     for (size_t f = 0; f < its.indices.size(); ++f) {
         const Vec3i32 &t = its.indices[f];
-        for (int s = 0; s < 3; ++s) {
-            const int u = t[s], v = t[(s + 1) % 3];
-            faces_of[u < v ? std::make_pair(u, v) : std::make_pair(v, u)].push_back(f);
-        }
+        for (int s = 0; s < 3; ++s)
+            faces_of[meshedit_edge_key(t[s], t[(s + 1) % 3])].push_back(f);
     }
 
     std::vector<uint8_t> done(its.indices.size(), 0);
@@ -974,7 +1009,7 @@ void orient_consistently(indexed_triangle_set &its)
             const Vec3i32 t = its.indices[f];
             for (int s = 0; s < 3; ++s) {
                 const int u = t[s], v = t[(s + 1) % 3];
-                auto      it = faces_of.find(u < v ? std::make_pair(u, v) : std::make_pair(v, u));
+                auto      it = faces_of.find(meshedit_edge_key(u, v));
                 if (it == faces_of.end())
                     continue;
                 for (size_t g : it->second) {
@@ -1136,15 +1171,36 @@ std::vector<float> solve_bevel_widths(const indexed_triangle_set &its,
     // considered first.
     //
     // vertex -> the shortest length of any edge incident to it.
-    std::map<int, float> vertex_min_edge;
+    //
+    // Only the endpoints of the LIVE edges are ever read back, so only those
+    // vertices are computed. This used to scan every edge of the mesh into a
+    // std::map - ~300k iterations and twice that many tree operations on a part
+    // the size of a Benchy - to answer a question about the ~2E vertices the
+    // selection actually touches, and it runs twice per bevel (once from the
+    // caller, once from bevel_edges). The answer is identical: the minimum is
+    // still taken over ALL edges incident to each of those vertices, via the
+    // facets around them.
+    std::unordered_set<int> wanted;
+    for (int e : live) {
+        const Vec2i32 ev = topo.edge_vertices[e];
+        if (ev(0) >= 0) { wanted.insert(ev(0)); wanted.insert(ev(1)); }
+    }
+    std::unordered_map<int, float> vertex_min_edge;
     for (int e = 0; e < topo.num_edges; ++e) {
         if (topo.edge_face_count[e] == 0)
             continue;
         const Vec2i32 ev = topo.edge_vertices[e];
         if (ev(0) < 0)
             continue;
+        // Cheap reject before the length is computed at all.
+        const bool want0 = wanted.count(ev(0)) > 0;
+        const bool want1 = wanted.count(ev(1)) > 0;
+        if (!want0 && !want1)
+            continue;
         const float L = edge_length(its, topo, e);
         for (int k = 0; k < 2; ++k) {
+            if (wanted.count(ev(k)) == 0)
+                continue;
             auto it = vertex_min_edge.find(ev(k));
             if (it == vertex_min_edge.end())
                 vertex_min_edge.emplace(ev(k), L);
@@ -1329,6 +1385,80 @@ BevelResult bevel_edges(const indexed_triangle_set &its,
                 }
             }
         }
+    }
+
+    if (params.cancelled && params.cancelled()) {
+        res.status = BevelStatus::Cancelled;
+        return res;
+    }
+
+    // --- the curved-surface guard ----------------------------------------------
+    //
+    // Everything below treats a side as PLANAR: the rewrite projects the side's
+    // boundary into the plane of one of its facets (topo.face_normals of its first
+    // facet) and ear-clips it there. That is exact on a box and meaningless on a
+    // triangulated curved surface, where a "side" is thousands of tiny facets with
+    // no common plane and the boundary polygon is the whole silhouette.
+    //
+    // The 3DBenchy's bottom rim is exactly that case: the hull below the rim is one
+    // smooth surface, so with a 5 degree crease threshold the entire hull floods
+    // into a single side, and the rewrite would then ear-clip a polygon of the
+    // whole rim in a plane that fits none of it. Attempting it produced a wrong
+    // shape after a very long wait; refusing it up front costs one pass over the
+    // facets of the sides that the selection actually touches.
+    //
+    // Only the sides a bevelled edge is incident to are checked - the rest are
+    // never rewritten, so their shape is irrelevant.
+    if (params.max_side_facets > 0) {
+        std::unordered_map<int, size_t> facet_count;
+        std::unordered_set<int>         touched_sides;
+        for (const auto &we : width_of) {
+            const int e = we.first;
+            for (int k = 0; k < 2; ++k) {
+                const int f = topo.edge_faces[e][k];
+                if (f >= 0)
+                    touched_sides.insert(side_of[size_t(f)]);
+            }
+        }
+        // One pass over the facets: per touched side, its facet count and the
+        // worst angle between any of its normals and its reference facet's - the
+        // very facet whose plane the rewrite would project the boundary into.
+        std::unordered_map<int, int>   ref_facet;
+        std::unordered_map<int, float> worst_deg;
+        for (size_t f = 0; f < its.indices.size(); ++f) {
+            const int s = side_of[f];
+            if (touched_sides.count(s) == 0)
+                continue;
+            ++facet_count[s];
+            auto rit = ref_facet.find(s);
+            if (rit == ref_facet.end()) {
+                ref_facet.emplace(s, int(f));
+                worst_deg.emplace(s, 0.f);
+                continue;
+            }
+            const float dp = std::max(-1.f, std::min(1.f,
+                topo.face_normals[size_t(rit->second)].dot(topo.face_normals[f])));
+            float &w = worst_deg[s];
+            w = std::max(w, float(std::acos(dp) * 180.0 / M_PI));
+        }
+
+        for (int s : touched_sides) {
+            const size_t n = facet_count[s];
+            const float  sp = worst_deg.count(s) > 0 ? worst_deg[s] : 0.f;
+            if (int(n) > params.max_side_facets || sp > params.max_side_normal_deg) {
+                res.status                 = BevelStatus::CurvedSurface;
+                res.curved_side_facets     = n;
+                res.curved_side_spread_deg = sp;
+                return res;
+            }
+        }
+    }
+
+    if (params.progress)
+        params.progress(20);
+    if (params.cancelled && params.cancelled()) {
+        res.status = BevelStatus::Cancelled;
+        return res;
     }
 
     // --- the construction ------------------------------------------------------
@@ -1624,6 +1754,18 @@ BevelResult bevel_edges(const indexed_triangle_set &its,
     for (size_t f = 0; f < its.indices.size(); ++f)
         facets_of_side[side_of[f]].push_back(f);
 
+    // vertex -> the sides that carry a bevelled edge at it. side_bev_at is keyed
+    // (side, vertex), which is the wrong way round for the redundancy test in the
+    // rewrite below; inverting it once here turns that test from a scan of every
+    // entry into a lookup of the handful of sides actually meeting at the vertex.
+    std::unordered_map<int, std::vector<int>> sides_at_vertex;
+    for (const auto &kv : side_bev_at)
+        sides_at_vertex[kv.first.second].push_back(kv.first.first);
+    for (auto &kv : sides_at_vertex) {
+        std::sort(kv.second.begin(), kv.second.end());
+        kv.second.erase(std::unique(kv.second.begin(), kv.second.end()), kv.second.end());
+    }
+
     for (const auto &sv : facets_of_side) {
         const int side = sv.first;
 
@@ -1779,16 +1921,21 @@ BevelResult bevel_edges(const indexed_triangle_set &its,
             // filled lazily, and a test that read it half-built would answer
             // differently for the first side than for the second and break the
             // determinism the whole pass is built around.
+            // The sides that have a bevelled edge at THIS vertex, looked up rather
+            // than found by scanning every (side, vertex) pair there is. The scan
+            // was O(entries) per boundary vertex and so O(E^2) over a long chain -
+            // one of the two terms that made a several-hundred-edge rim hang.
+            // sides_at_vertex is the same data indexed the way this asks for it.
             auto v_is_redundant = [&](int inset_idx) {
                 if (inset_idx < 0)
                     return false;
+                auto sit = sides_at_vertex.find(v);
+                if (sit == sides_at_vertex.end())
+                    return false;
                 int owners = 0;
-                for (const auto &kv : side_bev_at) {
-                    if (kv.first.second != v)
-                        continue;                       // a different vertex
-                    if (inset_of(kv.first.first, v) == inset_idx)
+                for (int other_side : sit->second)
+                    if (inset_of(other_side, v) == inset_idx)
                         ++owners;
-                }
                 return owners > 1;
             };
 
@@ -2152,7 +2299,64 @@ BevelResult bevel_edges(const indexed_triangle_set &its,
     // runs belonged together - a question the edge counts cannot answer - because the
     // strips record, as they are built, which points they left open at which vertex.
     std::set<int> patched_from;      // boundary points already consumed by a patch
+
+    // The undirected edge -> facet count for the WHOLE assembled surface, built
+    // once here and then maintained incrementally as patches append triangles.
+    //
+    // This used to be rebuilt from scratch inside the per-corner pass loop below.
+    // On a shape whose selected chain is a few hundred edges - the 3DBenchy's
+    // bottom rim - that is (corners x passes) full scans of a 200k-facet mesh,
+    // each one building and throwing away a 600k-entry std::map, and it is what
+    // made the bevel appear to hang: the work is quadratic in the mesh, not in
+    // the selection. A single build plus O(1) updates per emitted triangle is
+    // exactly equivalent - every facet that exists is counted either way - and it
+    // is what brings the rim chamfer down from minutes to well under a second.
+    //
+    // The key is packed into a uint64 so this is a hash map rather than a tree:
+    // the counts are looked up far more often than they are inserted.
+    std::unordered_map<uint64_t, int> edge_facets;
+    auto edge_key = [](int a, int b) -> uint64_t {
+        const uint32_t lo = uint32_t(a < b ? a : b);
+        const uint32_t hi = uint32_t(a < b ? b : a);
+        return (uint64_t(hi) << 32) | uint64_t(lo);
+    };
+    edge_facets.reserve(out.indices.size() * 2);
+    for (const Vec3i32 &f : out.indices)
+        for (int s = 0; s < 3; ++s)
+            ++edge_facets[edge_key(f[s], f[(s + 1) % 3])];
+    // Every triangle the corner walk appends must go through this, so the counts
+    // stay in step with out.indices without another full scan.
+    auto emit_tri = [&](int a, int b, int c) {
+        out.indices.emplace_back(a, b, c);
+        ++edge_facets[edge_key(a, b)];
+        ++edge_facets[edge_key(b, c)];
+        ++edge_facets[edge_key(c, a)];
+    };
+    // A corner only ever asks about edges between its OWN points, so the pass
+    // below no longer needs to walk the global map either: it walks the facets
+    // incident to those points. vertex -> incident facets, built once.
+    std::unordered_map<int, std::vector<int>> facets_at_vertex;
+    for (size_t fi = 0; fi < out.indices.size(); ++fi)
+        for (int s = 0; s < 3; ++s)
+            facets_at_vertex[out.indices[fi][s]].push_back(int(fi));
+    auto note_tri_at_vertices = [&](int fi, int a, int b, int c) {
+        facets_at_vertex[a].push_back(fi);
+        facets_at_vertex[b].push_back(fi);
+        facets_at_vertex[c].push_back(fi);
+    };
+
+    size_t corner_tick = 0;
     for (const auto &va : edges_at_vertex) {
+        // Polled per corner: the corner walk is the longest stage, so a Cancel
+        // pressed in the panel has to be able to stop it here.
+        if ((++corner_tick & 0x3F) == 0) {
+            if (params.cancelled && params.cancelled()) {
+                res.status = BevelStatus::Cancelled;
+                return res;
+            }
+            if (params.progress && !edges_at_vertex.empty())
+                params.progress(40 + int(50 * corner_tick / edges_at_vertex.size()));
+        }
         const int               v  = va.first;
         const std::vector<int> &es = va.second;
         if (es.size() < 2)
@@ -2224,23 +2428,38 @@ BevelResult bevel_edges(const indexed_triangle_set &its,
             // Winding is now settled globally by orient_consistently() after the build,
             // so here the only question is whether a facet is MISSING, which is what
             // counting facets per undirected edge answers.
-            std::map<std::pair<int, int>, int> d;
-            for (const Vec3i32 &f : out.indices)
-                for (int s = 0; s < 3; ++s) {
-                    const int u = f[s], w2 = f[(s + 1) % 3];
-                    ++d[u < w2 ? std::make_pair(u, w2) : std::make_pair(w2, u)];
-                }
+            // Only the edges BETWEEN this corner's own points can ever pass the
+            // own.count() test below, and every such edge belongs to a facet
+            // incident to one of those points. So the candidates come from
+            // facets_at_vertex rather than from a scan of the whole mesh, and
+            // their facet counts come from the map maintained above. Same answer,
+            // O(facets at this corner) instead of O(facets in the mesh).
             std::map<int, std::vector<int>> adj;
             std::set<std::pair<int, int>>   border;   // the open edges, sorted, as seeds
-            for (const auto &kv : d) {
-                if (kv.second != 1)
-                    continue;       // already has both its facets
-                const int p = kv.first.first, q = kv.first.second;
-                if (own.count(p) == 0 || own.count(q) == 0)
-                    continue;       // not this corner's edge
-                adj[p].push_back(q);
-                adj[q].push_back(p);
-                border.insert(std::make_pair(p, q));
+            std::set<std::pair<int, int>>   seen;
+            for (int ov : own) {
+                auto fit = facets_at_vertex.find(ov);
+                if (fit == facets_at_vertex.end())
+                    continue;
+                for (int fi : fit->second) {
+                    if (fi < 0 || size_t(fi) >= out.indices.size())
+                        continue;
+                    const Vec3i32 &f = out.indices[fi];
+                    for (int s = 0; s < 3; ++s) {
+                        const int u = f[s], w2 = f[(s + 1) % 3];
+                        if (own.count(u) == 0 || own.count(w2) == 0)
+                            continue;       // not this corner's edge
+                        const std::pair<int, int> e = u < w2 ? std::make_pair(u, w2) : std::make_pair(w2, u);
+                        if (!seen.insert(e).second)
+                            continue;       // this undirected edge already judged
+                        auto cit = edge_facets.find(edge_key(u, w2));
+                        if (cit == edge_facets.end() || cit->second != 1)
+                            continue;       // already has both its facets
+                        adj[e.first].push_back(e.second);
+                        adj[e.second].push_back(e.first);
+                        border.insert(e);
+                    }
+                }
             }
             if (adj.empty())
                 break;              // this corner is closed
@@ -2333,7 +2552,9 @@ BevelResult bevel_edges(const indexed_triangle_set &its,
             // rather than as a centroid plus three slivers, which would put a vertex
             // inside the solid and move the volume the closed form is compared against.
             if (loop.size() == 3) {
-                out.indices.emplace_back(loop[0], loop[1], loop[2]);
+                const int fi = int(out.indices.size());
+                emit_tri(loop[0], loop[1], loop[2]);
+                note_tri_at_vertices(fi, loop[0], loop[1], loop[2]);
                 continue;
             }
             // Four or more: fan from the centroid, which stays valid for the
@@ -2352,7 +2573,9 @@ BevelResult bevel_edges(const indexed_triangle_set &its,
                 const int p = loop[i], q = loop[(i + 1) % loop.size()];
                 if (p == q)
                     continue;
-                out.indices.emplace_back(cv, p, q);
+                const int fi = int(out.indices.size());
+                emit_tri(cv, p, q);
+                note_tri_at_vertices(fi, cv, p, q);
             }
         }
         if (any)
@@ -2523,6 +2746,15 @@ TranslateResult EditSession::apply_translate(const FaceRegion &region, const Tra
             m_topo.face_normals[f] = facet_unit_normal(m_its, f);
     }
     return res;
+}
+
+void EditSession::adopt_mesh(indexed_triangle_set &&its)
+{
+    if (its.indices.empty())
+        return;
+    push_undo();
+    m_its = std::move(its);
+    rebuild_topology();
 }
 
 BevelResult EditSession::apply_bevel(const std::vector<int> &edges, const BevelParams &params)

@@ -1,9 +1,19 @@
 #include <catch2/catch.hpp>
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <limits>
 #include <set>
+#include <thread>
+
+#include <boost/filesystem.hpp>
+
+#include "libslic3r/Model.hpp"
+#include "libslic3r/Format/3mf.hpp"
+#include "libslic3r/PrintConfig.hpp"
 
 #include "libslic3r/MeshEdit.hpp"
 #include "libslic3r/TriangleMesh.hpp"
@@ -1097,3 +1107,248 @@ TEST_CASE("MeshEdit: a concave edge is dropped and named, not silently mangled",
     CHECK(is_closed_manifold(mixed.mesh));
 }
 
+
+// ----------------------------------------------------------------------------
+// The 3DBenchy bottom rim: the defect that hung the application.
+// ----------------------------------------------------------------------------
+//
+// The owner selected the Benchy's bottom rim - a chain of hundreds of short
+// edges around a CURVED outline - asked for a chamfer, and the whole application
+// froze and had to be killed.
+//
+// Two separate faults were behind that, and this exercises both:
+//
+//   COMPLEXITY - the corner-patch pass rebuilt a facet-count map over the WHOLE
+//     mesh once per corner per pass, the side rewrite scanned every (side,
+//     vertex) pair for every boundary vertex, and the ear clipper re-projected
+//     every polygon point inside its innermost loop. On a few-hundred-edge chain
+//     over a 200k-facet mesh those are ~10^9 map operations.
+//
+//   GEOMETRY - the bevel's side rewrite assumes a side is PLANAR (it ear-clips
+//     the side's boundary in the plane of one of its facets). The Benchy's hull
+//     is a smooth triangulated surface, so the whole hull floods into one "side"
+//     of thousands of facets sharing no plane. That is not something to make
+//     faster: it is refused up front, with a message the panel can show.
+//
+// So the contract this test pins is: whatever the rim does, it comes back
+// QUICKLY and with a definite answer. It must never sit there.
+TEST_CASE("MeshEdit: the Benchy bottom rim answers fast instead of hanging", "[MeshEdit]")
+{
+    // TEST_DATA_DIR is <repo>/tests/data, so the shipped models are two levels up.
+    const boost::filesystem::path model_path =
+        boost::filesystem::path(TEST_DATA_DIR).parent_path().parent_path() /
+        "resources" / "handy_models" / "3DBenchy.3mf";
+
+    if (!boost::filesystem::exists(model_path)) {
+        WARN("3DBenchy.3mf not found at " << model_path.string() << " - skipping");
+        return;
+    }
+
+    Model                     model;
+    DynamicPrintConfig        config;
+    ConfigSubstitutionContext ctxt{ForwardCompatibilitySubstitutionRule::Disable};
+    REQUIRE(load_3mf(model_path.string().c_str(), config, ctxt, &model, false));
+    REQUIRE(!model.objects.empty());
+    REQUIRE(!model.objects.front()->volumes.empty());
+
+    const indexed_triangle_set its = model.objects.front()->volumes.front()->mesh().its;
+    REQUIRE(its.indices.size() > 1000);          // this really is the big mesh
+    INFO("Benchy facets: " << its.indices.size());
+
+    const MeshTopology topo = build_topology(its);
+
+    // Find the rim the way the gizmo does: the lowest feature edge, then grow the
+    // chain by dihedral angle from it. The bottom rim is where the flat base meets
+    // the curved hull, so the lowest feature edge is on it.
+    const std::vector<uint8_t> is_feature = feature_edge_mask(topo, 30.f);
+    float lowest_z = std::numeric_limits<float>::max();
+    int   seed     = -1;
+    for (int e = 0; e < topo.num_edges; ++e) {
+        if (!is_feature[size_t(e)])
+            continue;
+        const Vec2i32 ev = topo.edge_vertices[size_t(e)];
+        const float   z  = 0.5f * (its.vertices[size_t(ev[0])].z() + its.vertices[size_t(ev[1])].z());
+        if (z < lowest_z) { lowest_z = z; seed = e; }
+    }
+    REQUIRE(seed >= 0);
+
+    const EdgeChain chain = grow_edge_chain(its, topo, is_feature, seed, 35.f);
+    REQUIRE(!chain.empty());
+    INFO("rim chain edges: " << chain.edges.size());
+
+    BevelParams p;
+    p.width    = 0.4f;
+    p.segments = 1;
+    p.profile  = BevelProfile::Chamfer;
+
+    // A HARD timeout. The defect was an apparent hang, so the test must fail by
+    // timing out rather than by hanging with it: the solve runs on its own thread
+    // and is told to cancel if it outlives the budget.
+    //
+    // 30 s is the budget the brief names; the assertion below is the real bar.
+    const auto        t0 = std::chrono::steady_clock::now();
+    std::atomic<bool> stop{false};
+    std::atomic<bool> done{false};
+    p.cancelled = [&stop]() { return stop.load(std::memory_order_relaxed); };
+
+    BevelResult res;
+    std::thread worker([&]() {
+        res = bevel_edges(its, topo, chain.edges, p);
+        done.store(true, std::memory_order_release);
+    });
+
+    // Poll with a hard deadline rather than joining: a plain join would hang
+    // together with the bug instead of reporting it. On timeout the worker is
+    // asked to cancel, which is also what proves the cancel hook reaches the
+    // stage that was slow.
+    const auto deadline = t0 + std::chrono::seconds(30);
+    while (!done.load(std::memory_order_acquire)) {
+        if (std::chrono::steady_clock::now() >= deadline) {
+            stop.store(true, std::memory_order_relaxed);
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    const bool timed_out = !done.load(std::memory_order_acquire);
+    worker.join();
+    CHECK_FALSE(timed_out);     // it must not need the timeout at all
+    const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    INFO("bevel took " << secs << " s, status " << int(res.status));
+
+    // THE BAR: an answer, and a fast one. Well under the 5 s the brief asks for,
+    // and nowhere near the 30 s timeout.
+    CHECK(secs < 5.0);
+
+    // And it must be a DEFINITE answer. On the Benchy the honest one is the
+    // curved-surface refusal: the rim's faces are a triangulated curved hull, and
+    // the bevel needs planar faces. Ok is accepted too - if a future side-splitter
+    // makes this buildable, this test should not stand in its way - but silence,
+    // a crash or a broken solid are not.
+    CHECK((res.status == BevelStatus::CurvedSurface || res.status == BevelStatus::Ok));
+    if (res.status == BevelStatus::CurvedSurface) {
+        // The refusal has to carry the numbers the panel puts in its message.
+        CHECK(res.curved_side_facets > 0);
+        INFO("refused: " << res.curved_side_facets << " facets, spread "
+                         << res.curved_side_spread_deg << " deg");
+    }
+    if (res.status == BevelStatus::Ok) {
+        CHECK(watertight(res.mesh));
+        CHECK(is_closed_manifold(res.mesh));
+    }
+}
+
+// A bevel must be stoppable, because it runs in a worker behind a Cancel button.
+TEST_CASE("MeshEdit: a bevel stops when the caller cancels it", "[MeshEdit]")
+{
+    const indexed_triangle_set cube = its_make_cube(10., 10., 10.);
+    const MeshTopology         topo = build_topology(cube);
+
+    std::vector<int> all;
+    const std::vector<uint8_t> is_feature = feature_edge_mask(topo, 45.f);
+    for (int e = 0; e < topo.num_edges; ++e)
+        if (is_feature[size_t(e)])
+            all.push_back(e);
+    REQUIRE(all.size() == 12);
+
+    BevelParams p;
+    p.width     = 1.f;
+    p.segments  = 4;
+    p.profile   = BevelProfile::Round;
+    // Cancelled before it starts: the very first poll stops it.
+    p.cancelled = []() { return true; };
+
+    const BevelResult res = bevel_edges(cube, topo, all, p);
+    CHECK(res.status == BevelStatus::Cancelled);
+    CHECK(res.mesh.indices.empty());
+
+    // The same request without the cancel still succeeds, so the hook is not
+    // breaking the normal path.
+    p.cancelled = nullptr;
+    const BevelResult ok = bevel_edges(cube, topo, all, p);
+    CHECK(ok.status == BevelStatus::Ok);
+}
+
+// The same rim with the curved-surface guard TURNED OFF, so the construction
+// itself runs on a 656-edge chain over a 225k-facet mesh.
+//
+// This is the test that actually pins the complexity work. The guard above makes
+// the Benchy fast by refusing it, which is the right product answer but proves
+// nothing about the code paths that were quadratic - so here the guard is
+// disabled and the corner walk, the side rewrite and the ear clipper are made to
+// run for real. Before the fix this did not finish in any time worth waiting for
+// (the corner pass alone rebuilds a 600k-entry map per corner per pass, ~10^9
+// map operations); after it, it completes in seconds.
+//
+// The RESULT is not asserted - with the guard off the geometry is being built on
+// an assumption that does not hold, so the mesh may well be wrong, and that is
+// exactly why the guard exists. What is asserted is that it TERMINATES.
+TEST_CASE("MeshEdit: the Benchy rim construction terminates with the guard off", "[MeshEdit]")
+{
+    const boost::filesystem::path model_path =
+        boost::filesystem::path(TEST_DATA_DIR).parent_path().parent_path() /
+        "resources" / "handy_models" / "3DBenchy.3mf";
+    if (!boost::filesystem::exists(model_path)) {
+        WARN("3DBenchy.3mf not found - skipping");
+        return;
+    }
+
+    Model                     model;
+    DynamicPrintConfig        config;
+    ConfigSubstitutionContext ctxt{ForwardCompatibilitySubstitutionRule::Disable};
+    REQUIRE(load_3mf(model_path.string().c_str(), config, ctxt, &model, false));
+    REQUIRE(!model.objects.empty());
+
+    const indexed_triangle_set its  = model.objects.front()->volumes.front()->mesh().its;
+    const MeshTopology         topo = build_topology(its);
+
+    const std::vector<uint8_t> is_feature = feature_edge_mask(topo, 30.f);
+    float lowest_z = std::numeric_limits<float>::max();
+    int   seed     = -1;
+    for (int e = 0; e < topo.num_edges; ++e) {
+        if (!is_feature[size_t(e)])
+            continue;
+        const Vec2i32 ev = topo.edge_vertices[size_t(e)];
+        const float   z  = 0.5f * (its.vertices[size_t(ev[0])].z() + its.vertices[size_t(ev[1])].z());
+        if (z < lowest_z) { lowest_z = z; seed = e; }
+    }
+    REQUIRE(seed >= 0);
+
+    const EdgeChain chain = grow_edge_chain(its, topo, is_feature, seed, 35.f);
+    REQUIRE(chain.edges.size() > 100);      // the rim really is a long chain
+    INFO("rim chain edges: " << chain.edges.size());
+
+    BevelParams p;
+    p.width           = 0.4f;
+    p.segments        = 1;
+    p.profile         = BevelProfile::Chamfer;
+    p.max_side_facets = 0;                  // guard OFF: build it for real
+
+    const auto        t0 = std::chrono::steady_clock::now();
+    std::atomic<bool> stop{false};
+    std::atomic<bool> done{false};
+    p.cancelled = [&stop]() { return stop.load(std::memory_order_relaxed); };
+
+    BevelResult res;
+    std::thread worker([&]() {
+        res = bevel_edges(its, topo, chain.edges, p);
+        done.store(true, std::memory_order_release);
+    });
+
+    const auto deadline = t0 + std::chrono::seconds(30);
+    while (!done.load(std::memory_order_acquire)) {
+        if (std::chrono::steady_clock::now() >= deadline) {
+            stop.store(true, std::memory_order_relaxed);
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    const bool timed_out = !done.load(std::memory_order_acquire);
+    worker.join();
+    const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    INFO("guard-off construction took " << secs << " s, status " << int(res.status));
+
+    // It must FINISH - not time out, and not need the cancel to escape.
+    CHECK_FALSE(timed_out);
+    CHECK(res.status != BevelStatus::Cancelled);
+    CHECK(secs < 5.0);
+}

@@ -4,6 +4,8 @@
 #include "GLGizmoBase.hpp"
 #include "slic3r/GUI/GLModel.hpp"
 #include "slic3r/GUI/ImGuiWrapper.hpp"
+#include "slic3r/GUI/MeshUtils.hpp"
+#include "slic3r/GUI/SceneRaycaster.hpp"
 
 #include "libslic3r/MeshEdit.hpp"
 #include "libslic3r/ObjectID.hpp"
@@ -72,6 +74,13 @@ protected:
     std::string on_get_name() const override;
     void on_render() override;
     void on_render_input_window(float x, float y, float bottom_limit) override;
+    // The push handle is a real pickable object, not decoration: it is
+    // registered with the scene raycaster the way GLGizmoFlatten registers its
+    // planes and GLGizmoCut its connector cones, so the canvas hit-tests it and
+    // hands back m_hover_id. Without these two the handle could never be
+    // grabbed, which is exactly the defect they fix.
+    void on_register_raycasters_for_picking() override;
+    void on_unregister_raycasters_for_picking() override;
     bool on_is_activable() const override;
     bool on_is_selectable() const override { return true; }
     void on_set_state() override;
@@ -115,6 +124,23 @@ private:
     void clear_selection();
     MeshEdit::RegionParams region_params() const;
 
+    // --- push/pull handle ---
+    // id of the one pickable element this gizmo owns. Any non-negative value
+    // works; 0 keeps the decode in GLCanvas3D trivial.
+    static constexpr int PushHandleId = 0;
+    // Build the stem+cone arrow once. Two PickingModels rather than one so the
+    // stem and the head can be scaled independently (a cone squashed to the
+    // stem's radius is not an arrow head).
+    void  init_handle_models();
+    // World transform of the stem and of the head for the CURRENT selection and
+    // live drag distance. Returns false when there is nothing to draw.
+    bool  handle_transforms(Transform3d &stem, Transform3d &head) const;
+    // Keep the registered raycasters on top of the drawn arrow.
+    void  update_handle_raycasters();
+    // Length of the arrow in world mm, from the mesh size - so it is visible on
+    // a 5 mm part and not a mast on a 300 mm one.
+    double handle_length() const;
+
     // --- push/pull ---
     bool  begin_drag(const Vec2d &mouse_position);
     void  update_drag(const Vec2d &mouse_position);
@@ -146,7 +172,16 @@ private:
     void  update_bevel_preview();
     void  clear_bevel_preview();
     // Apply the bevel for real: session undo entry, commit, rebuild.
+    // The solve itself goes to a BevelJob on the plater's worker - it used to
+    // run here, on the UI thread, which is what let an expensive selection
+    // freeze the whole application - and this only queues it.
     void  apply_bevel();
+    // The worker's result, delivered on the UI thread by BevelJob::finalize().
+    void  on_bevel_done(const MeshEdit::BevelResult &r);
+    // True while a BevelJob queued by this gizmo is still running: the panel
+    // disables Apply and shows progress plus Cancel instead.
+    bool  bevel_running() const { return m_bevel_job_running; }
+    void  cancel_bevel_job();
     // The bevel RENUMBERS every facet, so unlike a push it cannot go through
     // Sculpt::commit_sculpted_mesh() - it takes the clear_before_change_mesh()
     // path Subdivide and Simplify take, and the painted data is dropped.
@@ -209,7 +244,16 @@ private:
     static constexpr float PushStepMin = 0.f;
     static constexpr float PushStepMax = 10.f;
 
-    bool  m_dragging{false};
+    // The arrow: stem (cylinder) + head (cone), each with its own raycaster.
+    PickingModel m_handle_stem;
+    PickingModel m_handle_head;
+    std::vector<std::shared_ptr<SceneRaycasterItem>> m_handle_raycasters;
+
+    // NOTE: the push drag deliberately uses GLGizmoBase::m_dragging rather than a
+    // member of its own. A shadowing bool here would leave GLGizmosManager::
+    // is_dragging() reporting false for the whole drag, so GLCanvas3D would keep
+    // running its picking pass (GLCanvas3D.cpp:7377) and let the camera rotate
+    // under the gesture.
     // The mesh as it stood when the drag began: every tick re-applies the whole
     // displacement to this, so a drag is absolute and exactly reversible.
     indexed_triangle_set m_drag_base_mesh;
@@ -256,6 +300,14 @@ private:
     // all edges" rather than reporting a bare "too flat".
     size_t                m_bevel_dropped_concave{0};
     bool                  m_show_bevel_status{false};
+
+    // --- the bevel worker ---
+    // Set when a BevelJob is queued, cleared by on_bevel_done(). The panel reads
+    // it to disable Apply (one bevel at a time) and to show Cancel.
+    bool  m_bevel_job_running{false};
+    // What a CurvedSurface refusal reported, for the panel's message.
+    size_t m_bevel_curved_facets{0};
+    float  m_bevel_curved_spread{0.f};
 
     // --- render models ---
     // Cached highlight geometry. The key is what the model was built from - the

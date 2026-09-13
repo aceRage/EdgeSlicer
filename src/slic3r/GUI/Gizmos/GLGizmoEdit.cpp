@@ -8,6 +8,8 @@
 #include "slic3r/GUI/ImGuiWrapper.hpp"
 #include "slic3r/GUI/MeshUtils.hpp"
 #include "slic3r/GUI/NotificationManager.hpp"
+#include "slic3r/GUI/Jobs/BevelJob.hpp"
+#include "slic3r/GUI/Jobs/Worker.hpp"
 #include "slic3r/GUI/Plater.hpp"
 #include "slic3r/GUI/format.hpp"
 #include "slic3r/Utils/UndoRedo.hpp"
@@ -95,6 +97,13 @@ bool GLGizmoEdit::on_init()
     m_desc["bevel_err_flat"]    = _L("Those edges are too flat to bevel.");
     m_desc["bevel_err_concave"] = _L("Inside corners are not bevelled yet. Use \"Round all edges\" to fillet them, or select an outside edge.");
     m_desc["bevel_err_failed"]  = _L("The bevel did not produce a valid solid, so nothing was changed. Try a smaller width or fewer segments.");
+    // The curved-surface refusal. This is the case that used to hang: the chain
+    // runs across a triangulated curved surface, whose "faces" are thousands of
+    // tiny facets with no common plane, and the bevel needs planar faces.
+    m_desc["bevel_err_curved"]  = _L("This chain runs across %1% faces of a curved surface; bevel needs planar faces.");
+    m_desc["bevel_working"]     = _L("Bevelling...");
+    m_desc["bevel_cancel"]      = _L("Cancel");
+    m_desc["bevel_busy"]        = _L("Another background task is running. Wait for it to finish, then apply the bevel.");
     m_desc["paint_kept"]        = _L("Pushing a face keeps painted supports, seams, colours and fuzzy skin: it moves points and adds no triangles.");
     m_desc["drag_hint"]         = _L("Drag the arrow to push the face along its normal.");
     m_desc["selected_info"]     = _L("Selected: %1% triangles, %2% mm2");
@@ -715,36 +724,88 @@ void GLGizmoEdit::apply_bevel()
 {
     if (!m_session || !m_has_selection || !m_selection_is_chain || m_selected_chain.empty())
         return;
+    if (m_bevel_job_running)
+        return;                     // one at a time
+
+    Plater *plater = wxGetApp().plater();
+    if (plater == nullptr)
+        return;
+    Worker &worker = plater->get_ui_job_worker();
+    if (!worker.is_idle()) {
+        // Something else (an arrange, a slice) owns the worker. Say so rather
+        // than appearing to ignore the button.
+        m_bevel_status      = MeshEdit::BevelStatus::Failed;
+        m_show_bevel_status = true;
+        wxGetApp().plater()->get_notification_manager()->push_notification(
+            NotificationType::CustomNotification, NotificationManager::NotificationLevel::WarningNotificationLevel,
+            into_u8(m_desc.at("bevel_busy")));
+        return;
+    }
 
     // The preview skipped the self-intersection guard to stay interactive; the
     // real apply pays for it once.
     MeshEdit::BevelParams p = bevel_params();
     p.check_self_intersection = true;
 
-    const MeshEdit::BevelResult r = m_session->apply_bevel(m_selected_chain.edges, p);
+    // THE FIX for the freeze: the solve runs on the worker, against a COPY of the
+    // session's mesh, and comes back through on_bevel_done() on the UI thread.
+    // Nothing here blocks, so the canvas keeps drawing and the panel's Cancel is
+    // reachable for the whole run.
+    m_bevel_job_running = true;
+    m_show_bevel_status = false;
 
-    m_bevel_status         = r.status;
-    m_bevel_applied_width  = float(double(r.min_width) * mesh_scale());
-    m_bevel_clamped        = r.clamped;
-    m_bevel_corner_patches = r.corner_patches;
+    indexed_triangle_set  mesh_copy = m_session->mesh();
+    std::vector<int>      edges     = m_selected_chain.edges;
+
+    replace_job(worker, std::make_unique<BevelJob>(
+        std::move(mesh_copy), std::move(edges), p,
+        [this](const MeshEdit::BevelResult &r) { this->on_bevel_done(r); }));
+}
+
+void GLGizmoEdit::cancel_bevel_job()
+{
+    if (!m_bevel_job_running)
+        return;
+    if (Plater *plater = wxGetApp().plater(); plater != nullptr)
+        plater->get_ui_job_worker().cancel();
+}
+
+void GLGizmoEdit::on_bevel_done(const MeshEdit::BevelResult &r)
+{
+    m_bevel_job_running = false;
+
+    m_bevel_status          = r.status;
+    m_bevel_applied_width   = float(double(r.min_width) * mesh_scale());
+    m_bevel_clamped         = r.clamped;
+    m_bevel_corner_patches  = r.corner_patches;
     m_bevel_dropped_concave = r.dropped_concave;
-    m_show_bevel_status    = true;
+    m_bevel_curved_facets   = r.curved_side_facets;
+    m_bevel_curved_spread   = r.curved_side_spread_deg;
+    m_show_bevel_status     = r.status != MeshEdit::BevelStatus::Cancelled;
 
-    if (r.status != MeshEdit::BevelStatus::Ok) {
+    if (r.status != MeshEdit::BevelStatus::Ok || r.mesh.indices.empty()) {
         // Nothing changed; the panel says why. Put the un-bevelled part back under
         // the renderer in case a preview was up.
         clear_bevel_preview();
+        m_parent.set_as_dirty();
         return;
     }
 
-    // The session now holds the bevelled mesh. Drop the preview bookkeeping
-    // FIRST - the preview is now the real thing - then commit and re-sync.
+    // The worker built the mesh from a copy, so the session has to be told about
+    // the result explicitly - this is the undo entry the inline path used to take
+    // inside apply_bevel().
+    if (!m_session)
+        return;
+    m_session->adopt_mesh(indexed_triangle_set(r.mesh));
+
+    // Drop the preview bookkeeping FIRST - the preview is now the real thing -
+    // then commit and re-sync.
     m_bevel_preview_valid = false;
     m_bevel_preview_mesh.clear();
     m_bevel_preview_width = -1.f;
     m_bevel_preview_seed  = -1;
 
-    indexed_triangle_set committed = m_session->mesh();
+    indexed_triangle_set committed = r.mesh;
     commit_bevelled_mesh(std::move(committed));
 
     // Every index changed, so the old selection means nothing on the new mesh.
@@ -860,7 +921,12 @@ bool GLGizmoEdit::on_mouse(const wxMouseEvent &mouse_event)
         return false;
 
     if (mouse_event.Moving()) {
-        update_hover(mouse_pos);
+        // Over the handle there is nothing to re-pick: keep the selection as it
+        // is so the arrow does not fight the region highlight under it.
+        if (m_hover_id == PushHandleId)
+            m_hover_valid = false;
+        else
+            update_hover(mouse_pos);
         m_parent.set_as_dirty();
         // Hovering must not swallow the event: the canvas still wants it for its
         // own tooltip and hover handling.
@@ -868,15 +934,16 @@ bool GLGizmoEdit::on_mouse(const wxMouseEvent &mouse_event)
     }
 
     if (mouse_event.LeftDown()) {
-        update_hover(mouse_pos);
         // A click on the push arrow starts a drag; a click on the part picks a
-        // new selection. The arrow is tested first so it can be grabbed even
-        // when it stands over the part.
-        if (m_has_selection && !m_selection_is_chain && m_hover_valid &&
-            m_hover_region_key == m_selected_region_key && begin_drag(mouse_pos)) {
+        // new selection. The arrow is tested FIRST, and it is tested against the
+        // scene raycaster's answer (m_hover_id), not against a fresh raycast of
+        // the mesh: the handle stands off the surface, so a mesh raycast never
+        // reports it and the drag could never begin.
+        if (m_hover_id == PushHandleId && begin_drag(mouse_pos)) {
             m_parent.set_as_dirty();
             return true;
         }
+        update_hover(mouse_pos);
         if (m_hover_valid) {
             commit_hover_to_selection();
             m_parent.set_as_dirty();
@@ -1057,55 +1124,160 @@ void GLGizmoEdit::render_highlights()
     shader->stop_using();
 }
 
-void GLGizmoEdit::render_push_axis() const
+// The arrow's proportions, as fractions of its total length. A head that is a
+// quarter of the arrow and three times the stem's radius is the proportion the
+// Move gizmo's stilized_arrow uses, and it is what makes the thing read as a
+// grabbable arrow rather than as the bare stick the first cut drew.
+static constexpr double EditHandleHeadFraction   = 0.28;
+static constexpr double EditHandleStemRadiusFrac = 0.022;
+static constexpr double EditHandleHeadRadiusFrac = 0.072;
+
+double GLGizmoEdit::handle_length() const
+{
+    if (!m_session)
+        return 1.;
+    const indexed_triangle_set &its = m_session->mesh();
+    if (its.vertices.empty())
+        return 1.;
+    Vec3f lo = its.vertices.front(), hi = lo;
+    for (const Vec3f &v : its.vertices) { lo = lo.cwiseMin(v); hi = hi.cwiseMax(v); }
+    // Mesh space -> world, so the arrow keeps its on-screen size on a scaled volume.
+    const double diag = double((hi - lo).norm()) * mesh_scale();
+    return std::max(2.0, diag * 0.25);
+}
+
+void GLGizmoEdit::init_handle_models()
+{
+    if (!m_handle_stem.model.is_initialized()) {
+        indexed_triangle_set its = its_make_cylinder(1.0, 1.0);
+        m_handle_stem.model.init_from(its);
+        m_handle_stem.mesh_raycaster = std::make_unique<MeshRaycaster>(std::make_shared<const TriangleMesh>(std::move(its)));
+    }
+    if (!m_handle_head.model.is_initialized()) {
+        indexed_triangle_set its = its_make_cone(1.0, 1.0, double(PI) / 12.0);
+        m_handle_head.model.init_from(its);
+        m_handle_head.mesh_raycaster = std::make_unique<MeshRaycaster>(std::make_shared<const TriangleMesh>(std::move(its)));
+    }
+}
+
+bool GLGizmoEdit::handle_transforms(Transform3d &stem, Transform3d &head) const
 {
     if (!m_has_selection || m_selection_is_chain || m_selected_region.empty() || !m_session)
+        return false;
+
+    const Transform3d trafo = volume_trafo();
+    // The arrow must follow the face while the face is being dragged, otherwise
+    // the head slides out from under the cursor mid-drag.
+    const MeshEdit::FaceRegion &region = (m_dragging && !m_drag_region.empty()) ? m_drag_region : m_selected_region;
+    const Vec3d axis_world = push_axis_world(trafo, region.normal);
+
+    Vec3d origin_world = trafo * region.center.cast<double>();
+    if (m_dragging)
+        // m_drag_distance is a world-space length along the push axis.
+        origin_world += axis_world * double(m_drag_distance);
+
+    // Rotation taking +Z onto the push axis.
+    Transform3d rot = Transform3d::Identity();
+    const Vec3d z = Vec3d::UnitZ();
+    const Vec3d c = z.cross(axis_world);
+    const double s = c.norm(), dp = z.dot(axis_world);
+    if (s > EPSILON)
+        rot.rotate(Eigen::AngleAxisd(std::atan2(s, dp), c.normalized()));
+    else if (dp < 0.)
+        rot.rotate(Eigen::AngleAxisd(M_PI, Vec3d::UnitX()));
+
+    const double len         = handle_length();
+    const double head_len    = len * EditHandleHeadFraction;
+    const double stem_len    = len - head_len;
+    const double stem_radius = len * EditHandleStemRadiusFrac;
+    const double head_radius = len * EditHandleHeadRadiusFrac;
+
+    const Transform3d base = Geometry::assemble_transform(origin_world) * rot;
+    // its_make_cylinder / its_make_cone are built around the origin growing along
+    // +Z, so each only needs a translation up the axis and a scale.
+    stem = base * Geometry::assemble_transform(Vec3d::Zero(), Vec3d::Zero(),
+                                               Vec3d(stem_radius, stem_radius, stem_len));
+    head = base * Geometry::assemble_transform(stem_len * Vec3d::UnitZ(), Vec3d::Zero(),
+                                               Vec3d(head_radius, head_radius, head_len));
+    return true;
+}
+
+void GLGizmoEdit::update_handle_raycasters()
+{
+    if (m_handle_raycasters.size() < 2)
+        return;
+    Transform3d stem, head;
+    if (!handle_transforms(stem, head)) {
+        // Nothing to pick: park the raycasters at a degenerate scale so a stale
+        // selection cannot leave an invisible grabbable volume behind.
+        const Transform3d nowhere = Geometry::assemble_transform(Vec3d(0., 0., -1.e6), Vec3d::Zero(), Vec3d(1.e-6, 1.e-6, 1.e-6));
+        m_handle_raycasters[0]->set_transform(nowhere);
+        m_handle_raycasters[1]->set_transform(nowhere);
+        return;
+    }
+    m_handle_raycasters[0]->set_transform(stem);
+    m_handle_raycasters[1]->set_transform(head);
+}
+
+void GLGizmoEdit::on_register_raycasters_for_picking()
+{
+    // The arrow is drawn over the part, so the picker must prefer it.
+    m_parent.set_raycaster_gizmos_on_top(true);
+    init_handle_models();
+    if (!m_handle_raycasters.empty())
+        return;
+    // Both pieces answer with the SAME picking id: grabbing the stem and grabbing
+    // the head are the same gesture, and the brief asks for the line itself to be
+    // grab-able too.
+    m_handle_raycasters.emplace_back(m_parent.add_raycaster_for_picking(
+        SceneRaycaster::EType::Gizmo, PushHandleId, *m_handle_stem.mesh_raycaster, Transform3d::Identity()));
+    m_handle_raycasters.emplace_back(m_parent.add_raycaster_for_picking(
+        SceneRaycaster::EType::Gizmo, PushHandleId, *m_handle_head.mesh_raycaster, Transform3d::Identity()));
+    update_handle_raycasters();
+}
+
+void GLGizmoEdit::on_unregister_raycasters_for_picking()
+{
+    m_parent.remove_raycasters_for_picking(SceneRaycaster::EType::Gizmo);
+    m_parent.set_raycaster_gizmos_on_top(false);
+    m_handle_raycasters.clear();
+}
+
+void GLGizmoEdit::render_push_axis() const
+{
+    Transform3d stem, head;
+    if (!handle_transforms(stem, head))
         return;
 
-    GLShaderProgram *shader = wxGetApp().get_shader("flat");
+    GLShaderProgram *shader = wxGetApp().get_shader("gouraud_light");
     if (shader == nullptr)
         return;
 
-    const indexed_triangle_set &its = m_session->mesh();
-    Vec3f lo = its.vertices.empty() ? Vec3f::Zero() : its.vertices.front();
-    Vec3f hi = lo;
-    for (const Vec3f &v : its.vertices) { lo = lo.cwiseMin(v); hi = hi.cwiseMax(v); }
-    const double length = std::max(1.0, double((hi - lo).norm()) * 0.25);
-    const double radius = length * 0.03;
-
-    static std::shared_ptr<GLModel> s_axis;
-    if (s_axis == nullptr) {
-        s_axis = std::make_shared<GLModel>();
-        // A unit-length, unit-radius cylinder; the transform below gives it its
-        // real proportions.
-        s_axis->init_from(its_make_cylinder(1.0, 1.0));
-    }
-
-    const Transform3d trafo = volume_trafo();
-    // Point the cylinder's +Z along the region normal.
-    const Vec3d n = m_selected_region.normal.cast<double>();
-    const Vec3d z = Vec3d::UnitZ();
-    Transform3d rot = Transform3d::Identity();
-    const Vec3d axis = z.cross(n);
-    const double s = axis.norm(), c = z.dot(n);
-    if (s > EPSILON)
-        rot.rotate(Eigen::AngleAxisd(std::atan2(s, c), axis.normalized()));
-    else if (c < 0.)
-        rot.rotate(Eigen::AngleAxisd(M_PI, Vec3d::UnitX()));
-
+    // Lit rather than flat: an unlit cone is a flat silhouette and reads as the
+    // same "stick" the defect reported.
     const Camera &camera = wxGetApp().plater()->get_camera();
-    const Transform3d model = trafo *
-                              Geometry::assemble_transform(m_selected_region.center.cast<double>()) * rot *
-                              Geometry::assemble_transform(Vec3d::Zero(), Vec3d::Zero(), Vec3d(radius, radius, length));
+    const bool hovered = m_hover_id == PushHandleId;
+    const ColorRGBA color = hovered ? ColorRGBA(1.0f, 0.9f, 0.4f, 1.0f)
+                                    : ColorRGBA(1.0f, 0.75f, 0.2f, 1.0f);
 
     shader->start_using();
-    shader->set_uniform("view_model_matrix", camera.get_view_matrix() * model);
     shader->set_uniform("projection_matrix", camera.get_projection_matrix());
-    s_axis->set_color(ColorRGBA(1.0f, 0.75f, 0.2f, 0.85f));
-    glsafe(::glEnable(GL_BLEND));
-    glsafe(::glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA));
-    s_axis->render();
-    glsafe(::glDisable(GL_BLEND));
+    shader->set_uniform("emission_factor", 0.1f);
+
+    GLModel &stem_model = const_cast<GLModel &>(m_handle_stem.model);
+    GLModel &head_model = const_cast<GLModel &>(m_handle_head.model);
+
+    for (int i = 0; i < 2; ++i) {
+        const Transform3d &m = i == 0 ? stem : head;
+        GLModel &gm          = i == 0 ? stem_model : head_model;
+        if (!gm.is_initialized())
+            continue;
+        const Transform3d view_model = camera.get_view_matrix() * m;
+        shader->set_uniform("view_model_matrix", view_model);
+        shader->set_uniform("normal_matrix", (Matrix3d) view_model.matrix().block(0, 0, 3, 3).inverse().transpose());
+        gm.set_color(color);
+        gm.render();
+    }
     shader->stop_using();
 }
 
@@ -1115,6 +1287,11 @@ void GLGizmoEdit::on_render()
         return;
     glsafe(::glEnable(GL_DEPTH_TEST));
     render_highlights();
+    init_handle_models();
+    // The handle follows the selection and the live drag, so its pickable volumes
+    // have to be re-placed every frame - exactly as GLGizmoCut re-places its
+    // connector raycasters.
+    update_handle_raycasters();
     render_push_axis();
 }
 
@@ -1392,14 +1569,29 @@ void GLGizmoEdit::on_render_input_window(float x, float y, float bottom_limit)
             }
             if (err != nullptr)
                 m_imgui->warning_text(*err);
+            // The curved-surface refusal carries a number, so it is formatted
+            // rather than taken from the table as-is.
+            if (m_bevel_status == MeshEdit::BevelStatus::CurvedSurface)
+                m_imgui->warning_text(GUI::format_wxstr(m_desc.at("bevel_err_curved"),
+                                                        m_bevel_curved_facets));
         }
 
-        if (m_imgui->button(m_desc.at("bevel_apply")))
-            apply_bevel();
-        ImGui::SameLine();
-        if (m_imgui->button(m_desc.at("reset_selection"))) {
-            clear_bevel_preview();
-            clear_selection();
+        // While the worker runs, Apply is replaced by a progress line and a Cancel.
+        // The bevel is no longer on the UI thread, so the panel stays live for the
+        // whole solve and this button is actually reachable - which is the point.
+        if (m_bevel_job_running) {
+            m_imgui->text(m_desc.at("bevel_working"));
+            ImGui::SameLine();
+            if (m_imgui->button(m_desc.at("bevel_cancel")))
+                cancel_bevel_job();
+        } else {
+            if (m_imgui->button(m_desc.at("bevel_apply")))
+                apply_bevel();
+            ImGui::SameLine();
+            if (m_imgui->button(m_desc.at("reset_selection"))) {
+                clear_bevel_preview();
+                clear_selection();
+            }
         }
 
         // The painted-data warning, stated where the decision is taken rather than
