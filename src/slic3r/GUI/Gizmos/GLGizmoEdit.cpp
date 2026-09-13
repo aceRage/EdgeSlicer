@@ -101,6 +101,13 @@ bool GLGizmoEdit::on_init()
     // runs across a triangulated curved surface, whose "faces" are thousands of
     // tiny facets with no common plane, and the bevel needs planar faces.
     m_desc["bevel_err_curved"]  = _L("This chain runs across %1% faces of a curved surface; bevel needs planar faces.");
+    // Which construction produced the result. Said plainly rather than in the
+    // module's own words: "geometric" means the exact facets were inserted and the
+    // rest of the part is untouched, "voxel" means the band around the chain was
+    // rebuilt from a distance field and fine detail inside that band is gone.
+    m_desc["bevel_path_geom"]   = _L("Built geometrically: exact facets, the rest of the part untouched.");
+    m_desc["bevel_path_voxel"]  = _L("Built by rounding a band around the chain, because this surface is "
+                                     "too curved to bevel exactly. Detail inside the band is smoothed.");
     m_desc["bevel_working"]     = _L("Bevelling...");
     m_desc["bevel_cancel"]      = _L("Cancel");
     m_desc["bevel_busy"]        = _L("Another background task is running. Wait for it to finish, then apply the bevel.");
@@ -653,10 +660,17 @@ void GLGizmoEdit::update_bevel_preview()
     const MeshEdit::BevelResult r = m_session->preview_bevel(m_selected_chain.edges, bevel_params());
 
     m_bevel_status         = r.status;
+    // The preview runs bevel_edges() only, so this is Geometric or None - it never
+    // reports the voxel path, because the preview never takes it. That is the
+    // honest thing to show while the user is still dragging: the panel says the
+    // chain is too curved to bevel, and Apply is what runs the round instead.
+    m_bevel_path           = r.path;
     m_bevel_applied_width  = float(double(r.min_width) * mesh_scale());
     m_bevel_clamped        = r.clamped;
     m_bevel_corner_patches = r.corner_patches;
     m_bevel_dropped_concave = r.dropped_concave;
+    m_bevel_curved_facets  = r.curved_side_facets;
+    m_bevel_curved_spread  = r.curved_side_spread_deg;
     m_show_bevel_status    = true;
 
     if (r.status != MeshEdit::BevelStatus::Ok || r.mesh.indices.empty()) {
@@ -775,6 +789,7 @@ void GLGizmoEdit::on_bevel_done(const MeshEdit::BevelResult &r)
     m_bevel_job_running = false;
 
     m_bevel_status          = r.status;
+    m_bevel_path            = r.path;
     m_bevel_applied_width   = float(double(r.min_width) * mesh_scale());
     m_bevel_clamped         = r.clamped;
     m_bevel_corner_patches  = r.corner_patches;
@@ -1325,6 +1340,42 @@ float GLGizmoEdit::compute_label_width() const
     return m_label_width;
 }
 
+float GLGizmoEdit::compute_mode_combo_width() const
+{
+    // THE BUG THIS FIXES: the Select combo was sized to whatever the panel had
+    // left over (wrap_width - label_col), and the panel's own width was derived
+    // from the LABEL column alone. So the combo came out about as wide as the word
+    // "Face" - the first entry, and the shortest - and "Curved face" and "Edge
+    // chain" were clipped inside it.
+    //
+    // The fix is the one the Cut gizmo's combos use: measure EVERY entry, take the
+    // widest, and add the room the combo itself needs around the text - the arrow
+    // button on the right plus the frame padding on both sides. Then the panel is
+    // made at least that wide (see on_render_input_window), so the measurement is
+    // not immediately undone by a narrow window.
+    const float scaling = m_imgui->get_style_scaling();
+    if (m_mode_combo_width > 0.f && std::abs(scaling - m_mode_combo_scaling) < 0.001f)
+        return m_mode_combo_width;
+
+    static const char *mode_keys[] = {"mode_face", "mode_smooth_face", "mode_chain"};
+    float              widest = 0.f;
+    for (const char *key : mode_keys) {
+        const auto it = m_desc.find(key);
+        if (it != m_desc.end())
+            widest = std::max(widest, m_imgui->calc_text_size(it->second).x);
+    }
+
+    // The arrow square is one frame height, and the text sits inside the frame
+    // padding on either side. GetFrameHeight() is the arrow, 2x FramePadding.x the
+    // text inset, and a little slack so the longest entry is not flush against the
+    // arrow.
+    const ImGuiStyle &style = ImGui::GetStyle();
+    m_mode_combo_width   = widest + ImGui::GetFrameHeight() + 2.f * style.FramePadding.x +
+                         m_imgui->scaled(0.5f);
+    m_mode_combo_scaling = scaling;
+    return m_mode_combo_width;
+}
+
 void GLGizmoEdit::on_render_input_window(float x, float y, float bottom_limit)
 {
     if (!m_c->selection_info() || !m_c->selection_info()->model_object())
@@ -1339,8 +1390,16 @@ void GLGizmoEdit::on_render_input_window(float x, float y, float bottom_limit)
     // ate the whole row and clipped. Taking the real measurement keeps every row
     // inside the panel at any scale and in any translation.
     const float label_col     = compute_label_width();
-    const float window_width  = std::max(m_imgui->scaled(18.0f),
-                                         label_col + m_imgui->scaled(9.0f));
+    // Wide enough for the label column plus the widest control in it. The mode
+    // combo is the widest - it has to hold "Curved face" - and sizing the window
+    // to the label column alone is what clipped it; scaled(9) was a guess at what
+    // a control needs and the combo needs more than that at several DPI scales and
+    // in most translations.
+    const float mode_combo_w  = compute_mode_combo_width();
+    const float window_width  = std::max({m_imgui->scaled(18.0f),
+                                          label_col + m_imgui->scaled(9.0f),
+                                          label_col + mode_combo_w +
+                                              2.f * ImGui::GetStyle().WindowPadding.x});
     const float approx_height = m_imgui->scaled(20.f);
     y = std::min(y, bottom_limit - approx_height);
 
@@ -1381,8 +1440,13 @@ void GLGizmoEdit::on_render_input_window(float x, float y, float bottom_limit)
                                                       into_u8(m_desc.at("mode_smooth_face")),
                                                       into_u8(m_desc.at("mode_chain"))};
         int mode = int(m_pick_mode);
-        if (render_combo(into_u8(m_desc.at("mode")), mode_labels, mode, label_col,
-                         std::max(m_imgui->scaled(3.0f), wrap_width - label_col)) &&
+        // The measured width, not the leftovers. It is clamped to what the row
+        // actually has so a very long translation cannot push the combo off the
+        // panel edge - but the window above was sized from the same measurement,
+        // so in the normal case this is exactly mode_combo_w.
+        const float combo_w = std::min(std::max(mode_combo_w, m_imgui->scaled(3.0f)),
+                                       std::max(m_imgui->scaled(3.0f), wrap_width - label_col));
+        if (render_combo(into_u8(m_desc.at("mode")), mode_labels, mode, label_col, combo_w) &&
             mode != int(m_pick_mode)) {
             m_pick_mode = PickMode(mode);
             clear_selection();
@@ -1399,7 +1463,16 @@ void GLGizmoEdit::on_render_input_window(float x, float y, float bottom_limit)
     ImGui::Separator();
 
     // --- selection thresholds, whichever mode is live ---
-    auto slider_row = [&](const wxString &label, const char *id, float *value, float lo, float hi, const char *fmt) {
+    // Every slider row: label, slider, and a numeric field at the end.
+    //
+    // The slider draws its own value from `fmt` (BBLSliderFloat renders the format
+    // string onto the track), so these rows were already readable. What was NOT was
+    // the field at the end: it carried a hard-coded "%.1f" and no bounds, so an
+    // angle row showed "30 deg" on the slider and a bare "30.0" in the box, and the
+    // box would accept a value the slider could never reach. It now takes the row's
+    // own format and the row's own range, so the two always agree.
+    auto slider_row = [&](const wxString &label, const char *id, float *value, float lo, float hi,
+                          const char *fmt, float step = 0.1f) {
         ImGui::AlignTextToFramePadding();
         m_imgui->text(label);
         ImGui::SameLine(label_col);
@@ -1407,7 +1480,8 @@ void GLGizmoEdit::on_render_input_window(float x, float y, float bottom_limit)
         const bool changed = m_imgui->bbl_slider_float_style(id, value, lo, hi, fmt, 1.0f, true);
         ImGui::SameLine(drag_left);
         ImGui::PushItemWidth(1.5f * slider_icon_width);
-        const bool typed = ImGui::BBLDragFloat((std::string(id) + "_input").c_str(), value, 0.1f, 0.0f, 0.0f, "%.1f");
+        const bool typed = ImGui::BBLDragFloat((std::string(id) + "_input").c_str(), value, step,
+                                               lo, hi, fmt);
         *value = std::clamp(*value, lo, hi);
         return changed || typed;
     };
@@ -1492,26 +1566,63 @@ void GLGizmoEdit::on_render_input_window(float x, float y, float bottom_limit)
 
         bool bevel_changed = false;
 
-        ImGui::AlignTextToFramePadding();
-        m_imgui->text(m_desc.at("bevel_width"));
-        ImGui::SameLine(label_col);
-        ImGui::PushItemWidth(sliders_width);
-        if (ImGui::BBLDragFloat("##edit_bevel_width", &m_bevel_width, 0.05f, 0.0f, 0.0f, "%.2f mm"))
-            bevel_changed = true;
-        m_bevel_width = std::clamp(m_bevel_width, BevelWidthMin, BevelWidthMax);
-
-        ImGui::AlignTextToFramePadding();
-        m_imgui->text(m_desc.at("bevel_segments"));
-        ImGui::SameLine(label_col);
-        ImGui::PushItemWidth(sliders_width);
+        // WIDTH: a slider over the useful range with the exact field beside it.
+        // It used to be a bare drag field, which meant the only way to find out
+        // what widths this chain would take was to drag and watch - a slider shows
+        // the range at a glance, and the field is still there for "exactly 1.25".
+        //
+        // The two are ONE VALUE (&m_bevel_width), so they cannot disagree: whichever
+        // control moved wrote it, and the other draws from it on the same frame.
+        // The 0..10 mm range is the brief's; a width past 10 mm is possible on a big
+        // part and is what the numeric field is for, so it is clamped to
+        // BevelWidthMax rather than to the slider's top.
         {
+            ImGui::AlignTextToFramePadding();
+            m_imgui->text(m_desc.at("bevel_width"));
+            ImGui::SameLine(label_col);
+            ImGui::PushItemWidth(sliders_width);
+            if (m_imgui->bbl_slider_float_style("##edit_bevel_width", &m_bevel_width,
+                                                BevelWidthSliderMin, BevelWidthSliderMax,
+                                                "%.2f mm", 1.0f, true))
+                bevel_changed = true;
+            ImGui::SameLine(drag_left);
+            ImGui::PushItemWidth(1.5f * slider_icon_width);
+            // Same format as the slider, and the same 0.1 step the brief asks for.
+            // Bounds 0..BevelWidthMax rather than the slider's, so a value the
+            // slider cannot reach can still be typed.
+            if (ImGui::BBLDragFloat("##edit_bevel_width_input", &m_bevel_width, BevelWidthStep,
+                                    BevelWidthMin, BevelWidthMax, "%.2f mm"))
+                bevel_changed = true;
+            m_bevel_width = std::clamp(m_bevel_width, BevelWidthMin, BevelWidthMax);
+        }
+
+        // SEGMENTS: the slider now shows its value ("%d"), and carries a number at
+        // the end like every other row. It was the one unlabelled control in the
+        // panel - a bare track with no way to read the count off it.
+        {
+            ImGui::AlignTextToFramePadding();
+            m_imgui->text(m_desc.at("bevel_segments"));
+            ImGui::SameLine(label_col);
+            ImGui::PushItemWidth(sliders_width);
             static const int seg_min = 1;
             static const int seg_max = MeshEdit::BevelMaxSegments;
             int              n       = m_bevel_segments;
-            if (ImGui::BBLSliderScalar("##edit_bevel_segments", ImGuiDataType_S32, &n, &seg_min, &seg_max, "%d")) {
+            if (ImGui::BBLSliderScalar("##edit_bevel_segments", ImGuiDataType_S32, &n, &seg_min,
+                                       &seg_max, "%d")) {
                 n = std::max(seg_min, std::min(seg_max, n));
                 if (n != m_bevel_segments) {
                     m_bevel_segments = n;
+                    bevel_changed    = true;
+                }
+            }
+            ImGui::SameLine(drag_left);
+            ImGui::PushItemWidth(1.5f * slider_icon_width);
+            int typed = m_bevel_segments;
+            if (ImGui::BBLDragScalar("##edit_bevel_segments_input", ImGuiDataType_S32, &typed, 1.f,
+                                     &seg_min, &seg_max, "%d")) {
+                typed = std::max(seg_min, std::min(seg_max, typed));
+                if (typed != m_bevel_segments) {
+                    m_bevel_segments = typed;
                     bevel_changed    = true;
                 }
             }
@@ -1570,10 +1681,26 @@ void GLGizmoEdit::on_render_input_window(float x, float y, float bottom_limit)
             if (err != nullptr)
                 m_imgui->warning_text(*err);
             // The curved-surface refusal carries a number, so it is formatted
-            // rather than taken from the table as-is.
+            // rather than taken from the table as-is. It is only REACHED now when
+            // the voxel fallback could not run either (no OpenVDB in this build, or
+            // the round itself failed) - a chain the geometry cannot build is
+            // normally rounded rather than refused.
             if (m_bevel_status == MeshEdit::BevelStatus::CurvedSurface)
                 m_imgui->warning_text(GUI::format_wxstr(m_desc.at("bevel_err_curved"),
                                                         m_bevel_curved_facets));
+
+            // WHICH PATH RAN. The two are different operations with different
+            // consequences - the geometric one inserts facets and leaves the rest
+            // of the mesh alone, the voxel one re-extracts the surface in a band
+            // and loses detail below its voxel size there - so the panel says which
+            // one produced what the user is looking at rather than letting them
+            // guess from the shape.
+            if (m_bevel_status == MeshEdit::BevelStatus::Ok) {
+                if (m_bevel_path == MeshEdit::BevelPath::VoxelFallback)
+                    m_imgui->text_wrapped(m_desc.at("bevel_path_voxel"), wrap_width);
+                else if (m_bevel_path == MeshEdit::BevelPath::Geometric)
+                    m_imgui->text_wrapped(m_desc.at("bevel_path_geom"), wrap_width);
+            }
         }
 
         // While the worker runs, Apply is replaced by a progress line and a Cancel.

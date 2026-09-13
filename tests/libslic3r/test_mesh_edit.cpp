@@ -1352,3 +1352,490 @@ TEST_CASE("MeshEdit: the Benchy rim construction terminates with the guard off",
     CHECK(res.status != BevelStatus::Cancelled);
     CHECK(secs < 5.0);
 }
+
+// ----------------------------------------------------------------------------
+// Curved rims: a cylinder top, a cylinder bottom, a cone.
+// ----------------------------------------------------------------------------
+//
+// THE REGRESSION THIS PINS. Yesterday's curved-surface guard stopped the Benchy
+// rim hanging, and in doing so it also refused every FACETED curve - a cylinder
+// top, a cone rim - with "this chain runs across N faces of a curved surface".
+// The owner's 2026-09-13 feedback is that chamfering and rounding a cylinder top
+// is the ordinary case and must work.
+//
+// It does now, and the reason is that the side split no longer shares its
+// threshold with min_dihedral_deg (see BevelParams::side_coplanar_deg). A narrow
+// cylinder wall facet is PLANAR - it is one triangle pair - and at a 1 deg
+// coplanarity threshold each is its own side. The construction then runs per
+// facet: a rail pair per facet, strips across the many short rim edges, and a
+// corner at every rim vertex, each of valence 2 with both its bevelled edges on
+// the same two sides.
+//
+// THE YARDSTICK. Chamfering the top rim of a cylinder of radius r by w removes the
+// solid of revolution of a right triangle with legs w, radially inward from the rim
+// and axially down from the top. By Pappus, whose centroid is at radius r - w/3:
+//
+//     V = 2 * pi * (r - w/3) * (w^2 / 2) = pi * w^2 * (r - w/3)
+//
+// which is the brief's pi*r*w^2 with the centroid correction that makes it exact
+// for a true circle (at r = 10, w = 1 that is 30.37 against the thin-wall 31.42, a
+// 3.4% difference - so the correction matters at the 3% bar and is derived here
+// rather than approximated).
+//
+// A FACETED cylinder removes slightly less than the smooth one, because its top
+// face is an inscribed polygon rather than the disc. The 3% band is comfortably
+// wide enough to hold that at 64 facets and is what the brief asks for.
+static double chamfered_rim_volume_loss(double r, double w)
+{
+    return M_PI * w * w * (r - w / 3.0);
+}
+
+// A cone: `segs` side facets from a base circle of radius r up to a single apex.
+// Its base rim is the case the brief names alongside the cylinder - a curved
+// chain whose two sides are a flat disc and a fan of narrow SLANTED facets, so it
+// exercises the same per-facet side split with a non-right dihedral.
+static indexed_triangle_set make_cone(float r, float h, int segs)
+{
+    indexed_triangle_set its;
+    for (int k = 0; k < segs; ++k) {
+        const float a = 2.f * float(M_PI) * float(k) / float(segs);
+        its.vertices.emplace_back(Vec3f(r * std::cos(a), r * std::sin(a), 0.f));
+    }
+    const int cb = int(its.vertices.size());
+    its.vertices.emplace_back(Vec3f(0.f, 0.f, 0.f));     // base centre
+    const int ap = int(its.vertices.size());
+    its.vertices.emplace_back(Vec3f(0.f, 0.f, h));       // apex
+    for (int k = 0; k < segs; ++k) {
+        const int a0 = k, b0 = (k + 1) % segs;
+        its.indices.emplace_back(stl_triangle_vertex_indices(a0, b0, ap));   // side
+        its.indices.emplace_back(stl_triangle_vertex_indices(cb, b0, a0));   // base
+    }
+    return its;
+}
+
+// The rim chain at the given z of a mesh whose feature edges are its rims.
+static std::vector<int> rim_edges_at_z(const indexed_triangle_set &its,
+                                       const MeshTopology         &topo,
+                                       float                       z,
+                                       float                       eps = 1e-3f)
+{
+    const std::vector<uint8_t> mask = feature_edge_mask(topo, 20.f);
+    std::vector<int>           out;
+    for (int e = 0; e < topo.num_edges; ++e) {
+        if (!mask[size_t(e)])
+            continue;
+        const Vec2i32 ev = topo.edge_vertices[size_t(e)];
+        if (std::abs(its.vertices[size_t(ev(0))].z() - z) < eps &&
+            std::abs(its.vertices[size_t(ev(1))].z() - z) < eps)
+            out.push_back(e);
+    }
+    return out;
+}
+
+TEST_CASE("MeshEdit: a 64-facet cylinder's top rim takes a 1 mm chamfer", "[MeshEdit]")
+{
+    const int   segs = 64;
+    const float r = 10.f, h = 20.f, w = 1.f;
+
+    const indexed_triangle_set its  = make_cylinder(r, h, segs);
+    const MeshTopology         topo = build_topology(its);
+    REQUIRE(topo.valid());
+    REQUIRE(watertight(its));
+
+    const std::vector<int> rim = rim_edges_at_z(its, topo, h);
+    REQUIRE(rim.size() == size_t(segs));       // the whole top rim, one edge per facet
+
+    BevelParams p;
+    p.width    = w;
+    p.segments = 1;
+    p.profile  = BevelProfile::Chamfer;
+
+    const auto        t0  = std::chrono::steady_clock::now();
+    const BevelResult res = bevel_edges(its, topo, rim, p);
+    const double      secs =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    INFO("status " << int(res.status) << " in " << secs << " s");
+
+    // THE HEADLINE: it builds, geometrically. Not refused, and not rounded.
+    REQUIRE(res.status == BevelStatus::Ok);
+    CHECK(res.path == BevelPath::Geometric);
+    CHECK(res.bevelled_edges == size_t(segs));
+
+    // Under 2 s, which is the brief's bar and is where the per-facet path has to
+    // stay: this is 64 sides and 64 corners, and if either pass were quadratic in
+    // the chain it would show here long before the Benchy did.
+    CHECK(secs < 2.0);
+
+    CHECK(watertight(res.mesh));
+    CHECK(is_closed_manifold(res.mesh));
+    CHECK_FALSE(self_intersects(res.mesh));
+
+    // The width must NOT have been clamped. The rim segment of a 64-gon at r = 10 is
+    // 0.98 mm, and the old vertex clamp - frac * shortest incident edge - pinned the
+    // chamfer to 0.49 mm on that alone. Two rim edges meeting at 5.6 deg are not
+    // competing for room (the inset point slides back 0.049 mm, not 1 mm), which is
+    // what the turn-angle relaxation in limit (b) now recognises.
+    INFO("min_width " << res.min_width << " max_width " << res.max_width);
+    CHECK(res.min_width == Approx(w).epsilon(0.02));
+    CHECK_FALSE(res.clamped);
+
+    // And the volume it removed is the closed form for a chamfered circular edge.
+    const double before = mesh_volume(its);
+    const double after  = mesh_volume(res.mesh);
+    const double lost   = before - after;
+    const double want   = chamfered_rim_volume_loss(r, w);
+    INFO("lost " << lost << " want " << want);
+    CHECK(lost == Approx(want).epsilon(0.03));      // within 3%
+}
+
+TEST_CASE("MeshEdit: a 64-facet cylinder's top rim takes a 4-segment round", "[MeshEdit]")
+{
+    const int   segs = 64;
+    const float r = 10.f, h = 20.f, w = 1.f;
+
+    const indexed_triangle_set its  = make_cylinder(r, h, segs);
+    const MeshTopology         topo = build_topology(its);
+    const std::vector<int>     rim  = rim_edges_at_z(its, topo, h);
+    REQUIRE(rim.size() == size_t(segs));
+
+    BevelParams p;
+    p.width    = w;
+    p.segments = 4;
+    p.profile  = BevelProfile::Round;
+
+    const auto        t0  = std::chrono::steady_clock::now();
+    const BevelResult res = bevel_edges(its, topo, rim, p);
+    const double      secs =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    INFO("status " << int(res.status) << " in " << secs << " s");
+
+    REQUIRE(res.status == BevelStatus::Ok);
+    CHECK(res.path == BevelPath::Geometric);
+    CHECK(secs < 2.0);
+    CHECK(watertight(res.mesh));
+    CHECK(is_closed_manifold(res.mesh));
+    CHECK_FALSE(self_intersects(res.mesh));
+
+    // A round of the same width removes LESS than the chamfer - it bulges out to the
+    // arc instead of cutting the corner straight off - and stays the same order of
+    // magnitude. Both halves matter: the first says the profile is actually curved,
+    // the second that it is still the same feature.
+    const double lost    = mesh_volume(its) - mesh_volume(res.mesh);
+    const double chamfer = chamfered_rim_volume_loss(r, w);
+    INFO("round lost " << lost << " chamfer " << chamfer);
+    CHECK(lost < chamfer);
+    CHECK(lost > 0.4 * chamfer);
+}
+
+TEST_CASE("MeshEdit: a cylinder's BOTTOM rim chamfers too", "[MeshEdit]")
+{
+    // The owner named tops and bottoms. The bottom rim differs in winding and in
+    // which side is the fan, so it is worth its own case rather than assumed
+    // symmetric.
+    const int   segs = 64;
+    const float r = 10.f, h = 20.f, w = 1.f;
+
+    const indexed_triangle_set its  = make_cylinder(r, h, segs);
+    const MeshTopology         topo = build_topology(its);
+    const std::vector<int>     rim  = rim_edges_at_z(its, topo, 0.f);
+    REQUIRE(rim.size() == size_t(segs));
+
+    BevelParams p;
+    p.width    = w;
+    p.segments = 1;
+    p.profile  = BevelProfile::Chamfer;
+
+    const BevelResult res = bevel_edges(its, topo, rim, p);
+    REQUIRE(res.status == BevelStatus::Ok);
+    CHECK(res.path == BevelPath::Geometric);
+    CHECK(watertight(res.mesh));
+    CHECK(is_closed_manifold(res.mesh));
+
+    const double lost = mesh_volume(its) - mesh_volume(res.mesh);
+    CHECK(lost == Approx(chamfered_rim_volume_loss(r, w)).epsilon(0.03));
+}
+
+TEST_CASE("MeshEdit: a 128-facet cylinder rim is the case the guard used to refuse", "[MeshEdit]")
+{
+    // 128 facets turn 2.81 deg per wall seam, BELOW the 5 deg min_dihedral_deg the
+    // side split used to share. So every wall facet flooded into one 360 deg
+    // "side", and the guard - correctly, for that side - called it curved and
+    // refused. This is the exact configuration the owner hit; at 64 facets the
+    // seam is 5.6 deg and the old code happened to squeak past the flood but was
+    // still clamped to half width by limit (b).
+    const int   segs = 128;
+    const float r = 10.f, h = 20.f, w = 0.8f;
+
+    const indexed_triangle_set its  = make_cylinder(r, h, segs);
+    const MeshTopology         topo = build_topology(its);
+    const std::vector<int>     rim  = rim_edges_at_z(its, topo, h);
+    REQUIRE(rim.size() == size_t(segs));
+
+    BevelParams p;
+    p.width    = w;
+    p.segments = 1;
+    p.profile  = BevelProfile::Chamfer;
+
+    // The OLD behaviour, reproduced by handing the side split the generous
+    // threshold again: this is what the owner saw.
+    {
+        BevelParams old_p = p;
+        old_p.side_coplanar_deg = 5.f;      // as min_dihedral_deg was
+        const BevelResult old_res = bevel_edges(its, topo, rim, old_p);
+        INFO("with a 5 deg side threshold: status " << int(old_res.status)
+             << ", side of " << old_res.curved_side_facets << " facets, spread "
+             << old_res.curved_side_spread_deg << " deg");
+        CHECK(old_res.status == BevelStatus::CurvedSurface);
+    }
+
+    // The NEW behaviour: each narrow facet is its own planar side, and it builds.
+    const auto        t0  = std::chrono::steady_clock::now();
+    const BevelResult res = bevel_edges(its, topo, rim, p);
+    const double      secs =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    INFO("status " << int(res.status) << " in " << secs << " s");
+
+    REQUIRE(res.status == BevelStatus::Ok);
+    CHECK(res.path == BevelPath::Geometric);
+    CHECK(secs < 2.0);
+    CHECK(watertight(res.mesh));
+    CHECK(is_closed_manifold(res.mesh));
+
+    const double lost = mesh_volume(its) - mesh_volume(res.mesh);
+    CHECK(lost == Approx(chamfered_rim_volume_loss(r, w)).epsilon(0.03));
+}
+
+TEST_CASE("MeshEdit: a cone's base rim chamfers", "[MeshEdit]")
+{
+    const int   segs = 64;
+    const float r = 10.f, h = 15.f, w = 0.8f;
+
+    const indexed_triangle_set its  = make_cone(r, h, segs);
+    const MeshTopology         topo = build_topology(its);
+    REQUIRE(topo.valid());
+    REQUIRE(watertight(its));
+
+    const std::vector<int> rim = rim_edges_at_z(its, topo, 0.f);
+    REQUIRE(rim.size() == size_t(segs));
+
+    BevelParams p;
+    p.width    = w;
+    p.segments = 1;
+    p.profile  = BevelProfile::Chamfer;
+
+    const BevelResult res = bevel_edges(its, topo, rim, p);
+    INFO("cone status " << int(res.status) << " bevelled " << res.bevelled_edges);
+    REQUIRE(res.status == BevelStatus::Ok);
+    CHECK(res.path == BevelPath::Geometric);
+    CHECK(watertight(res.mesh));
+    CHECK(is_closed_manifold(res.mesh));
+    CHECK_FALSE(self_intersects(res.mesh));
+
+    // A cone's base rim is not a right angle, so the closed form above does not
+    // apply. What must hold is that material was REMOVED, that it is the right
+    // order of magnitude (a wedge running the whole circumference), and that the
+    // apex is untouched - a bevel is local to its chain.
+    const double lost = mesh_volume(its) - mesh_volume(res.mesh);
+    INFO("cone lost " << lost);
+    CHECK(lost > 0.0);
+    CHECK(lost < M_PI * w * w * r);          // less than the right-angle case
+
+    float max_z = 0.f;
+    for (const Vec3f &v : res.mesh.vertices)
+        max_z = std::max(max_z, v.z());
+    CHECK(max_z == Approx(h).epsilon(1e-4));
+}
+
+// ----------------------------------------------------------------------------
+// The fallback: what happens when the geometry genuinely cannot be built.
+// ----------------------------------------------------------------------------
+
+TEST_CASE("MeshEdit: a refused chain falls back to the localized voxel round", "[MeshEdit]")
+{
+    // The fallback is driven by an injected rounder, exactly as MeshRound's is, so
+    // this runs with or without OpenVDB. The stand-in here does not have to round
+    // anything convincingly - what is under test is the WIRING: that a
+    // CurvedSurface refusal reaches the rounder, that the band it is handed is the
+    // chain's own vertices, and that the result is reported as the voxel path.
+    const indexed_triangle_set its  = make_cylinder(10.f, 20.f, 64);
+    const MeshTopology         topo = build_topology(its);
+    const std::vector<int>     rim  = rim_edges_at_z(its, topo, 20.f);
+    REQUIRE(!rim.empty());
+
+    BevelParams p;
+    p.width    = 1.f;
+    p.segments = 1;
+    // Force the refusal the fallback exists for, rather than hunting for a mesh
+    // that produces it: a zero spread tolerance makes every side "curved".
+    p.max_side_normal_deg = 0.f;
+
+    // Without a rounder: the old refusal, unchanged. This is the no-OpenVDB build.
+    {
+        const BevelResult res = bevel_or_round(its, topo, rim, p, nullptr);
+        CHECK(res.status == BevelStatus::CurvedSurface);
+        CHECK(res.path == BevelPath::None);
+    }
+
+    // A rounder that fails (which is what the stub does) is the same answer.
+    {
+        const BevelResult res = bevel_or_round(
+            its, topo, rim, p,
+            [](const indexed_triangle_set &, const std::vector<Vec3f> &, double, double, double) {
+                return indexed_triangle_set{};
+            });
+        CHECK(res.status == BevelStatus::CurvedSurface);
+        CHECK(res.path == BevelPath::None);
+    }
+
+    // A rounder that works: the result is Ok, flagged as the voxel path, and the
+    // rounder saw the whole chain and the derived band and voxel sizes.
+    {
+        size_t              saw_points = 0;
+        double              saw_band = 0., saw_radius = 0., saw_voxel = 0.;
+        const BevelResult   res = bevel_or_round(
+            its, topo, rim, p,
+            [&](const indexed_triangle_set &m, const std::vector<Vec3f> &band, double br,
+                double rad, double vx) {
+                saw_points = band.size();
+                saw_band   = br;
+                saw_radius = rad;
+                saw_voxel  = vx;
+                return m;       // a valid closed mesh, which is all this needs to be
+            });
+        REQUIRE(res.status == BevelStatus::Ok);
+        CHECK(res.path == BevelPath::VoxelFallback);
+        // One point per rim vertex, deduplicated: a closed chain of n edges has n.
+        CHECK(saw_points == rim.size());
+        CHECK(saw_radius == Approx(1.0));                   // the width, as the brief asks
+        CHECK(saw_band == Approx(bevel_band_radius(1.0)));  // ~2x the width
+        CHECK(saw_band == Approx(2.0));
+        CHECK(saw_voxel == Approx(bevel_band_voxel_size(1.0)));
+        // The width is reported unclamped: the voxel path is not subject to the
+        // geometric solve's limits.
+        CHECK_FALSE(res.clamped);
+        CHECK(res.min_width == Approx(1.f));
+    }
+}
+
+TEST_CASE("MeshEdit: a chain the geometry CAN build never reaches the rounder", "[MeshEdit]")
+{
+    // The fallback must not be a silent second-guesser: a cylinder rim builds
+    // geometrically, and the rounder must never be called for it.
+    const indexed_triangle_set its  = make_cylinder(10.f, 20.f, 64);
+    const MeshTopology         topo = build_topology(its);
+    const std::vector<int>     rim  = rim_edges_at_z(its, topo, 20.f);
+
+    BevelParams p;
+    p.width    = 1.f;
+    p.segments = 1;
+
+    bool called = false;
+    const BevelResult res = bevel_or_round(
+        its, topo, rim, p,
+        [&](const indexed_triangle_set &m, const std::vector<Vec3f> &, double, double, double) {
+            called = true;
+            return m;
+        });
+    CHECK(res.status == BevelStatus::Ok);
+    CHECK(res.path == BevelPath::Geometric);
+    CHECK_FALSE(called);
+}
+
+// The Benchy rim, THROUGH THE NEW PER-FACET PATH. The 2026-09-12 tests pinned it
+// at 1.4 s with the guard off; the per-facet side split must not undo that.
+//
+// This is the specific risk the split creates. Splitting sides more finely makes
+// MORE of them - on the Benchy's hull, potentially one per facet over a long rim -
+// and the passes that used to be quadratic were quadratic IN THE NUMBER OF SIDES
+// and corners, not in the mesh. So the same 30 s cap the guard-off test uses is
+// applied here to the chain running through the new split, with the geometric
+// guard left ON so this is the path the application actually takes.
+TEST_CASE("MeshEdit: the Benchy rim stays fast through the per-facet side split", "[MeshEdit]")
+{
+    const boost::filesystem::path model_path =
+        boost::filesystem::path(TEST_DATA_DIR).parent_path().parent_path() /
+        "resources" / "handy_models" / "3DBenchy.3mf";
+    if (!boost::filesystem::exists(model_path)) {
+        WARN("3DBenchy.3mf not found - skipping");
+        return;
+    }
+
+    Model                     model;
+    DynamicPrintConfig        config;
+    ConfigSubstitutionContext ctxt{ForwardCompatibilitySubstitutionRule::Disable};
+    REQUIRE(load_3mf(model_path.string().c_str(), config, ctxt, &model, false));
+    REQUIRE(!model.objects.empty());
+
+    const indexed_triangle_set its  = model.objects.front()->volumes.front()->mesh().its;
+    const MeshTopology         topo = build_topology(its);
+
+    const std::vector<uint8_t> is_feature = feature_edge_mask(topo, 30.f);
+    float lowest_z = std::numeric_limits<float>::max();
+    int   seed     = -1;
+    for (int e = 0; e < topo.num_edges; ++e) {
+        if (!is_feature[size_t(e)])
+            continue;
+        const Vec2i32 ev = topo.edge_vertices[size_t(e)];
+        const float   z  = 0.5f * (its.vertices[size_t(ev[0])].z() + its.vertices[size_t(ev[1])].z());
+        if (z < lowest_z) { lowest_z = z; seed = e; }
+    }
+    REQUIRE(seed >= 0);
+
+    const EdgeChain chain = grow_edge_chain(its, topo, is_feature, seed, 35.f);
+    REQUIRE(chain.edges.size() > 100);
+    INFO("rim chain edges: " << chain.edges.size());
+
+    BevelParams p;
+    p.width    = 0.4f;
+    p.segments = 1;
+    p.profile  = BevelProfile::Chamfer;
+
+    const auto        t0 = std::chrono::steady_clock::now();
+    std::atomic<bool> stop{false};
+    std::atomic<bool> done{false};
+    p.cancelled = [&stop]() { return stop.load(std::memory_order_relaxed); };
+
+    // Through bevel_or_round with a rounder that reports what it was asked for but
+    // does not actually round - the OpenVDB round is not what this is timing, and
+    // wiring it in would make the test depend on the voxel target.
+    bool        fell_back = false;
+    size_t      band_pts  = 0;
+    BevelResult res;
+    std::thread worker([&]() {
+        res = bevel_or_round(its, topo, chain.edges, p,
+                             [&](const indexed_triangle_set &m, const std::vector<Vec3f> &band,
+                                 double, double, double) {
+                                 fell_back = true;
+                                 band_pts  = band.size();
+                                 return m;
+                             });
+        done.store(true, std::memory_order_release);
+    });
+
+    const auto deadline = t0 + std::chrono::seconds(30);
+    while (!done.load(std::memory_order_acquire)) {
+        if (std::chrono::steady_clock::now() >= deadline) {
+            stop.store(true, std::memory_order_relaxed);
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    const bool timed_out = !done.load(std::memory_order_acquire);
+    worker.join();
+    const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    INFO("Benchy rim took " << secs << " s, status " << int(res.status)
+         << ", path " << int(res.path) << ", fell back " << fell_back);
+
+    // THE BAR, unchanged from yesterday: a definite answer, well inside the cap.
+    CHECK_FALSE(timed_out);
+    CHECK(res.status != BevelStatus::Cancelled);
+    CHECK(secs < 30.0);
+    CHECK(secs < 5.0);
+
+    // And whichever way it goes, it is a real answer. The Benchy hull has no seam
+    // above 1 deg anywhere, so it should still be the fallback - but if a future
+    // split makes it buildable, that is a better outcome, not a failure.
+    CHECK((res.status == BevelStatus::Ok || res.status == BevelStatus::CurvedSurface));
+    if (fell_back)
+        CHECK(band_pts == chain.edges.size());
+}

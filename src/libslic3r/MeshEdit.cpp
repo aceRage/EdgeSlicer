@@ -1170,6 +1170,23 @@ std::vector<float> solve_bevel_widths(const indexed_triangle_set &its,
     // of the vertex - not of the pair - keeps this independent of which pair is
     // considered first.
     //
+    // EXCEPT WHERE THE CHAIN RUNS STRAIGHT THROUGH, which is the whole of a faceted
+    // rim and was the second thing stopping a cylinder chamfer. What this limit
+    // actually guards against is the inset point sliding so far BACK along the edge
+    // that it passes the far end of it. That slide is w * tan(turn/2), where `turn`
+    // is how sharply the chain turns at the vertex - a right-angle corner slides
+    // back by the full w, which is what `frac * L` is sized for, but two rim edges
+    // meeting at 5.6 deg slide back by 0.049 * w and are competing for nothing at
+    // all. Applying the corner clamp to them pinned a 64-facet cylinder (rim
+    // segment 0.98 mm) to a 0.49 mm chamfer and no wider, however much room the
+    // 10 mm-deep top face plainly had.
+    //
+    // So the limit is divided by tan(turn/2), floored at 1 so it can only ever
+    // RELAX toward the true constraint and never exceed the old bound at a sharp
+    // corner. At 90 deg the factor is 1 and this is exactly the old rule; at 5.6 deg
+    // it is ~20, so limit (a) - the facet's own height over the edge, which is the
+    // honest constraint there - is what decides the width instead.
+    //
     // vertex -> the shortest length of any edge incident to it.
     //
     // Only the endpoints of the LIVE edges are ever read back, so only those
@@ -1218,19 +1235,65 @@ std::vector<float> solve_bevel_widths(const indexed_triangle_set &its,
         ++bevelled_valence[ev(1)];
     }
 
+    // How sharply the bevelled chain turns at each vertex where exactly two
+    // bevelled edges meet, as tan(turn/2) - the factor the slide-back scales with.
+    // Only the valence-2 case gets it: with three or more arriving there is no
+    // single "turn" and the conservative corner rule is the right answer.
+    std::unordered_map<int, float> turn_tan;
+    {
+        std::unordered_map<int, std::vector<int>> bev_at;
+        for (int e : live) {
+            const Vec2i32 ev = topo.edge_vertices[e];
+            bev_at[ev(0)].push_back(e);
+            bev_at[ev(1)].push_back(e);
+        }
+        for (const auto &kv : bev_at) {
+            if (kv.second.size() != 2)
+                continue;
+            const int v = kv.first;
+            // The two edge directions pointing AWAY from v. A straight chain has
+            // them opposed (dot = -1), a right-angle corner perpendicular.
+            Vec3f d[2];
+            bool  ok = true;
+            for (int i = 0; i < 2; ++i) {
+                const Vec2i32 ev = topo.edge_vertices[kv.second[size_t(i)]];
+                const int     u  = ev(0) == v ? ev(1) : ev(0);
+                d[i] = its.vertices[size_t(u)] - its.vertices[size_t(v)];
+                const float l = d[i].norm();
+                if (l < 1e-12f) { ok = false; break; }
+                d[i] /= l;
+            }
+            if (!ok)
+                continue;
+            // turn = pi - angle_between(d0, d1): 0 when the chain runs straight on.
+            const float c    = std::clamp(d[0].dot(d[1]), -1.f, 1.f);
+            const float turn = float(M_PI) - std::acos(c);
+            turn_tan[v] = std::tan(std::clamp(turn, 0.f, float(M_PI) - 1e-3f) * 0.5f);
+        }
+    }
+
     for (int e : live) {
         const Vec2i32 ev = topo.edge_vertices[e];
         float         lim = limit[e];
         for (int k = 0; k < 2; ++k) {
             const int v = ev(k);
             auto      mit = vertex_min_edge.find(v);
-            if (mit != vertex_min_edge.end())
-                lim = std::min(lim, frac * mit->second);
+            if (mit == vertex_min_edge.end())
+                continue;
+            // The slide-back along the edge is w * tan(turn/2), so the room the
+            // vertex offers is worth 1/tan(turn/2) times as much width. Floored at
+            // 1 so this only ever relaxes the old bound, never loosens past it.
+            float relax = 1.f;
+            auto  tit = turn_tan.find(v);
+            if (tit != turn_tan.end() && tit->second > 1e-4f)
+                relax = std::max(1.f, 1.f / tit->second);
+            lim = std::min(lim, frac * mit->second * relax);
             // With n bevelled edges at the vertex the offsets have to share the
             // room around it. n = 2 is the plain chain case and needs no extra
-            // discount; beyond that each gets proportionally less.
+            // discount; beyond that each gets proportionally less - and the relax
+            // above does not apply, because turn_tan only holds the valence-2 case.
             const int n = bevelled_valence[v];
-            if (n > 2 && mit != vertex_min_edge.end())
+            if (n > 2)
                 lim = std::min(lim, frac * mit->second * 2.f / float(n));
         }
         limit[e] = std::max(0.f, lim);
@@ -1283,6 +1346,7 @@ BevelResult bevel_edges(const indexed_triangle_set &its,
     if (params.width <= 0.f || params.segments <= 0) {
         res.status = BevelStatus::NoOp;
         res.mesh   = its;
+        res.path   = BevelPath::Geometric;   // unchanged, but it IS the exact mesh
         return res;
     }
 
@@ -1356,8 +1420,22 @@ BevelResult bevel_edges(const indexed_triangle_set &its,
     // differently-oriented faces, while the coplanar diagonals INSIDE a flat face
     // are still crossed freely, so a face is never split along one.
     //
-    // The crease threshold is the same min_dihedral_deg the solve uses to decide
-    // an edge is too flat to bevel, so the two agree by construction.
+    // THE CREASE THRESHOLD HERE IS side_coplanar_deg, NOT min_dihedral_deg, and
+    // that separation is what makes a curved rim bevellable. See BevelParams: the
+    // two thresholds answer different questions and want opposite tolerances.
+    // min_dihedral_deg (5 deg) is generous on purpose - it decides whether an edge
+    // is worth SPENDING facets on. This one is strict - it decides what the ear
+    // clip is allowed to ASSERT is coplanar. Sharing the generous one flooded a
+    // 128-facet cylinder's 2.81 deg wall seams into one 360 deg "side", which has
+    // no plane, and the guard below then refused the whole rim.
+    //
+    // At 1 deg each narrow cylinder facet is its own side, which is the truth about
+    // it, and the construction proceeds per facet: one rail pair per facet, and the
+    // strip and corner logic running across the many short rim edges. Every rim
+    // vertex has exactly two bevelled edges meeting it, both on the same two sides,
+    // so the rail dedupe and the corner walk see the valence-2 case they already
+    // handle on a chamfered box's rim.
+    const float side_crease_deg = std::max(params.side_coplanar_deg, 1e-3f);
     std::vector<int> side_of(its.indices.size(), -1);
     {
         int                 next_side = 0;
@@ -1378,8 +1456,8 @@ BevelResult bevel_edges(const indexed_triangle_set &its,
                     const int e = topo.face_edge_ids[f][j];
                     if (e >= 0 && width_of.count(e) > 0)
                         continue;   // a bevelled edge parts two sides
-                    if (e >= 0 && edge_dihedral_deg(topo, e) >= params.min_dihedral_deg)
-                        continue;   // so does any other crease
+                    if (e >= 0 && edge_dihedral_deg(topo, e) >= side_crease_deg)
+                        continue;   // so does any departure from coplanarity
                     side_of[size_t(nb)] = side;
                     stack.push_back(size_t(nb));
                 }
@@ -1397,15 +1475,21 @@ BevelResult bevel_edges(const indexed_triangle_set &its,
     // Everything below treats a side as PLANAR: the rewrite projects the side's
     // boundary into the plane of one of its facets (topo.face_normals of its first
     // facet) and ear-clips it there. That is exact on a box and meaningless on a
-    // triangulated curved surface, where a "side" is thousands of tiny facets with
-    // no common plane and the boundary polygon is the whole silhouette.
+    // side that is genuinely one curved surface, where the boundary polygon is the
+    // whole silhouette and no plane fits it.
     //
-    // The 3DBenchy's bottom rim is exactly that case: the hull below the rim is one
-    // smooth surface, so with a 5 degree crease threshold the entire hull floods
-    // into a single side, and the rewrite would then ear-clip a polygon of the
-    // whole rim in a plane that fits none of it. Attempting it produced a wrong
-    // shape after a very long wait; refusing it up front costs one pass over the
-    // facets of the sides that the selection actually touches.
+    // WHAT REACHES HERE NOW is much less than it used to. With the tight
+    // side_coplanar_deg split above, a faceted curve - a cylinder rim, a cone, any
+    // tessellated fillet - is no longer one big side at all: each narrow facet is
+    // its own planar side with a single facet and zero spread, and it sails through
+    // this check. That is the regression this fixes; those rims build geometrically.
+    //
+    // What still trips it is a surface with NO seam to split on: the 3DBenchy's
+    // hull is smoothly varying, so even at 1 deg the facets flood together into one
+    // side spanning tens of degrees. That is not something to make faster and not
+    // something to build wrong - it is reported as CurvedSurface, and the caller
+    // (bevel_or_round(), and the gizmo through it) falls back to a localized voxel
+    // round rather than refusing the user outright.
     //
     // Only the sides a bevelled edge is incident to are checked - the rest are
     // never rewritten, so their shape is irrelevant.
@@ -1579,6 +1663,24 @@ BevelResult bevel_edges(const indexed_triangle_set &its,
         kv.second.erase(std::unique(kv.second.begin(), kv.second.end()), kv.second.end());
     }
 
+    // vertex -> the sides that carry a bevelled edge at it. side_bev_at is keyed
+    // (side, vertex), which is the wrong way round both for the redundancy test in
+    // the rewrite below and for the shared-rail rule in inset_of(); inverting it
+    // once here turns either from a scan of every entry into a lookup of the
+    // handful of sides actually meeting at the vertex.
+    //
+    // Built HERE, immediately after the map it inverts, rather than further down
+    // next to its first textual use: inset_of() reads it, and a reader checking
+    // that lambda should not have to scroll past it to find out whether it is
+    // filled by the time it runs.
+    std::unordered_map<int, std::vector<int>> sides_at_vertex;
+    for (const auto &kv : side_bev_at)
+        sides_at_vertex[kv.first.second].push_back(kv.first.first);
+    for (auto &kv : sides_at_vertex) {
+        std::sort(kv.second.begin(), kv.second.end());
+        kv.second.erase(std::unique(kv.second.begin(), kv.second.end()), kv.second.end());
+    }
+
     // The old per-(edge, side, vertex) rail point, v + w*t. Still the answer when
     // only one bevelled edge of the side meets at v, and still the direction the
     // offset lines are built from.
@@ -1704,6 +1806,76 @@ BevelResult bevel_edges(const indexed_triangle_set &its,
             if (!rail_point(es.front(), side, v, &o))
                 return -1;
             p = its.vertices[v] + o;
+
+            // ...UNLESS THE CHAIN CONTINUES THROUGH v ON A NEIGHBOURING SIDE, which
+            // is what a faceted rim on a SLANTED surface presents at every vertex.
+            //
+            // The case, worked through on a 16-facet cone (r = 10, h = 15, w = 0.8).
+            // Each slanted side facet is its own side, so at rim vertex v the two
+            // adjacent slanted sides EACH see exactly one bevelled edge - the rim
+            // edge on their own side of v - and each takes this branch. Their rails
+            // run up-slope along their own facet, and because the two facets tilt
+            // about different axes those directions differ: the rails come out at
+            // (8.809, 3.741, 0.67) and (8.875, 3.584, 0.67), 0.17 mm apart.
+            //
+            // They ought to be ONE point. The chain runs straight through v, so the
+            // strip arriving and the strip leaving have to terminate on the same
+            // rail or they do not share an edge - and they did not, so the two
+            // strips crossed and the mesh self-intersected. (Watertight and
+            // manifold throughout, which is why only the self-intersection check
+            // caught it: the surface closed, it just folded through itself.)
+            //
+            // On a CYLINDER the same two rails coincide exactly - both wall facets
+            // are vertical, so both rails point straight down - which is why the
+            // position dedupe has always merged them there and why this never
+            // showed up on a cylinder rim. The cone is the general case and the
+            // cylinder the degenerate one.
+            //
+            // The fix is to average the rails of every side that meets v across an
+            // UN-BEVELLED crease and is in the same situation, and to do it from a
+            // canonical set so each of those sides computes the same answer
+            // independently of which is resolved first. Averaging is right rather
+            // than merely convenient: the rails are equidistant from v along their
+            // own faces, the chain is locally straight, and the mean of the two is
+            // the point on the shared crease direction that both strips can reach.
+            // Where the rails already agree (the cylinder) the mean IS that value,
+            // so nothing changes for the cases that worked.
+            const int e_here = es.front();
+            const std::vector<int> *all_at_v = nullptr;
+            {
+                auto ait = edges_at_vertex.find(v);
+                if (ait != edges_at_vertex.end())
+                    all_at_v = &ait->second;
+            }
+            if (all_at_v != nullptr && all_at_v->size() == 2) {
+                // The chain passes through v (exactly two bevelled edges meet), and
+                // this side owns only one of them. Collect the rail every side in
+                // that position computes, over ALL sides at v, and take the mean.
+                //
+                // Deterministic: sides_at_vertex is sorted, the rails depend only on
+                // the mesh, and the set does not depend on which side asked.
+                auto sit = sides_at_vertex.find(v);
+                if (sit != sides_at_vertex.end()) {
+                    Vec3f acc = Vec3f::Zero();
+                    int   got = 0;
+                    for (int other : sit->second) {
+                        auto oit = side_bev_at.find(std::make_pair(other, v));
+                        if (oit == side_bev_at.end() || oit->second.size() != 1)
+                            continue;   // a side with a real corner keeps its own
+                        Vec3f oo;
+                        if (!rail_point(oit->second.front(), other, v, &oo))
+                            continue;
+                        acc += its.vertices[v] + oo;
+                        ++got;
+                    }
+                    // Only when this side is one of a GROUP in that position - a
+                    // lone one has nobody to agree with and keeps its own rail,
+                    // which is the chamfered-box rim case the old code was tuned on.
+                    if (got > 1)
+                        p = acc / float(got);
+                }
+            }
+            (void)e_here;
         } else {
             // Two (the ordinary corner) or, for a pinched boundary, more: the mean
             // of the pairwise intersections. With two that IS the intersection.
@@ -1753,18 +1925,6 @@ BevelResult bevel_edges(const indexed_triangle_set &its,
     std::map<int, std::vector<size_t>> facets_of_side;
     for (size_t f = 0; f < its.indices.size(); ++f)
         facets_of_side[side_of[f]].push_back(f);
-
-    // vertex -> the sides that carry a bevelled edge at it. side_bev_at is keyed
-    // (side, vertex), which is the wrong way round for the redundancy test in the
-    // rewrite below; inverting it once here turns that test from a scan of every
-    // entry into a lookup of the handful of sides actually meeting at the vertex.
-    std::unordered_map<int, std::vector<int>> sides_at_vertex;
-    for (const auto &kv : side_bev_at)
-        sides_at_vertex[kv.first.second].push_back(kv.first.first);
-    for (auto &kv : sides_at_vertex) {
-        std::sort(kv.second.begin(), kv.second.end());
-        kv.second.erase(std::unique(kv.second.begin(), kv.second.end()), kv.second.end());
-    }
 
     for (const auto &sv : facets_of_side) {
         const int side = sv.first;
@@ -2689,6 +2849,99 @@ BevelResult bevel_edges(const indexed_triangle_set &its,
 
     res.mesh   = std::move(out);
     res.status = BevelStatus::Ok;
+    res.path   = BevelPath::Geometric;
+    return res;
+}
+
+// ---------------------------------------------------------------------------
+// The fallback: a localized voxel round for a chain the construction cannot build
+// ---------------------------------------------------------------------------
+
+double bevel_band_radius(double width) { return std::max(2.0 * width, 1e-3); }
+
+double bevel_band_voxel_size(double width)
+{
+    // The same coupling MeshRound uses between a radius and its lattice: six
+    // voxels across the fillet, clamped so a huge width does not ask for a coarse
+    // grid that loses the part and a tiny one does not ask for a grid that will not
+    // fit in memory. The numbers are MeshRound's ROUND_VOXELS_PER_RADIUS and
+    // ROUND_VOXEL_MIN/MAX, repeated rather than included so MeshEdit.cpp does not
+    // depend on MeshRound.hpp for two constants.
+    const double v = width / 6.0;
+    return std::min(std::max(v, 0.02), 5.0);
+}
+
+BevelResult bevel_or_round(const indexed_triangle_set &its,
+                           const MeshTopology         &topo,
+                           const std::vector<int>     &edges,
+                           const BevelParams          &params,
+                           const BandRounder          &rounder)
+{
+    BevelResult res = bevel_edges(its, topo, edges, params);
+    if (res.status != BevelStatus::CurvedSurface)
+        return res;                     // built it, or failed for a reason rounding
+                                        // would not help with either
+
+    // The geometric path refused. Round the chain instead, in a band around it.
+    if (!rounder)
+        return res;                     // no rounder wired up: the old refusal
+
+    // The band's points are the chain's own vertices. Every vertex of every
+    // requested edge, deduplicated - the fillet has to reach the whole chain, and
+    // the band radius (2x the width) is what turns those points into a tube.
+    std::vector<Vec3f>      band_points;
+    std::unordered_set<int> seen;
+    for (int e : edges) {
+        if (e < 0 || e >= topo.num_edges)
+            continue;
+        const Vec2i32 ev = topo.edge_vertices[size_t(e)];
+        for (int k = 0; k < 2; ++k)
+            if (ev(k) >= 0 && seen.insert(ev(k)).second)
+                band_points.push_back(its.vertices[size_t(ev(k))]);
+    }
+    if (band_points.empty())
+        return res;
+
+    if (params.cancelled && params.cancelled()) {
+        res.status = BevelStatus::Cancelled;
+        return res;
+    }
+    if (params.progress)
+        params.progress(30);
+
+    // THE RADIUS IS THE BEVEL WIDTH, as the brief asks. A chamfer of width w and a
+    // fillet of radius w remove comparable amounts from a right-angle edge, and the
+    // width is the number the user set; inventing a different one here would make
+    // the slider mean two things depending on which path ran.
+    const double width  = double(params.width);
+    const double band_r = bevel_band_radius(width);
+    const double voxel  = bevel_band_voxel_size(width);
+
+    indexed_triangle_set rounded = rounder(its, band_points, band_r, width, voxel);
+
+    if (params.cancelled && params.cancelled()) {
+        res.status = BevelStatus::Cancelled;
+        return res;
+    }
+    if (rounded.indices.empty() || !is_closed_manifold(rounded)) {
+        // The rounder is absent (the no-OpenVDB stub returns nothing) or it failed.
+        // Either way the honest answer is the one the geometry already gave, which
+        // the panel knows how to say. res still carries the CurvedSurface counts.
+        return res;
+    }
+    if (params.check_self_intersection && self_intersects(rounded))
+        return res;
+
+    if (params.progress)
+        params.progress(100);
+
+    res.status = BevelStatus::Ok;
+    res.path   = BevelPath::VoxelFallback;
+    res.mesh   = std::move(rounded);
+    // The width is what was asked for, unclamped: the voxel round is not subject to
+    // the geometric solve's limits, so reporting a clamp here would be a lie.
+    res.min_width = res.max_width = float(width);
+    res.clamped   = false;
     return res;
 }
 
