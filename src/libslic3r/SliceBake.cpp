@@ -343,39 +343,82 @@ Polygon densify_polygon(const Polygon &poly, double tol_mm, size_t &points_added
 // 20 mm cube went from 0 open edges to 40 when zero-area cap triangles were rejected). Merging the
 // two rings changes the topology of the layer. Nudging changes the geometry by an amount no
 // measurement in this file can see.
-void unpinch_slice(ExPolygons &slice, size_t &nudged)
+void unpinch_slice(ExPolygons &slice, size_t &nudged, size_t &unresolved)
 {
     // 64 scaled units: see above for why it is not 1. In millimetres this is 6.4e-8.
     const coord_t NUDGE = 64;
 
     std::set<std::pair<coord_t, coord_t>> seen;
 
+    // Move `p` to the nearest free lattice point along `dir`, and if that whole ray is taken, spiral
+    // outwards until something is free.
+    //
+    // TOTALITY MATTERS HERE, and the first version of this function did not have it: it tried eight
+    // steps along one direction and then GAVE UP, leaving the duplicate in place. That is not a
+    // cosmetic shortfall, because everything downstream assumes the invariant holds:
+    // Triangulation::triangulate takes a completely different code path when to_points() contains a
+    // duplicate (collect_duplicates / create_changes), one that COLLAPSES the coincident points and
+    // returns indices into the collapsed set - with uint32_t::max() for the entries its reverse map
+    // never reaches. The cap code maps those indices onto vertex runs built over the UNCOLLAPSED
+    // set, so a single unresolved duplicate on a layer corrupts every cap triangle that references
+    // it: the out-of-range ones are dropped (open edges) and the in-range ones stitch to the wrong
+    // vertex (slivers).
+    //
+    // It went unnoticed because the slice-contour source never triggers it - its contours are far
+    // apart and its points are not densified - while the extrusion source does: a fuzzed wall's
+    // loops run within a fraction of a millimetre of each other, and the resolution densifier then
+    // inserts interpolated points on both, which round to the same lattice XY often enough that
+    // eight steps of 64 nm in one direction is not always enough to separate them.
+    auto place = [&](Point &p, Vec2d dir) {
+        if (seen.emplace(p.x(), p.y()).second)
+            return;                          // already free
+
+        if (dir.norm() < EPSILON)
+            dir = Vec2d(1., 0.);
+        dir.normalize();
+        const Vec2d perp(-dir.y(), dir.x());
+        const Point origin = p;
+
+        // Ring `r` of the spiral is at radius r*NUDGE; within it, try the bisector first (it is the
+        // direction that opens a pinch rather than closing it) and then eight offsets to either
+        // side. A few hundred candidates is already far more than any real layer needs, and the
+        // loop is bounded so a pathological slice cannot hang the bake - but the bound is large
+        // enough that reaching it means something else is very wrong, which is what `unresolved`
+        // records.
+        for (int r = 1; r <= 64; ++r) {
+            for (int s = 0; s <= 8; ++s) {
+                for (int sign = 0; sign < (s == 0 ? 1 : 2); ++sign) {
+                    const double lateral = double(s) * (sign == 0 ? 1. : -1.);
+                    const Vec2d  off = (dir * double(r) + perp * lateral) * double(NUDGE);
+                    const Point  cand(origin.x() + coord_t(std::llround(off.x())),
+                                      origin.y() + coord_t(std::llround(off.y())));
+                    if (seen.emplace(cand.x(), cand.y()).second) {
+                        p = cand;
+                        ++nudged;
+                        return;
+                    }
+                }
+            }
+        }
+        // Nothing free within 64 rings. Record it rather than pretending: the caller surfaces the
+        // count, and the cap code's range check still keeps the read in bounds.
+        ++unresolved;
+    };
+
     auto fix_ring = [&](Polygon &poly) {
         const size_t n = poly.points.size();
         for (size_t i = 0; i < n; ++i) {
-            Point &p = poly.points[i];
-            for (int attempt = 0; attempt < 8; ++attempt) {
-                if (seen.emplace(p.x(), p.y()).second)
-                    break;
-                // Move along the OUTWARD bisector of this point's two edges, so the nudge opens the
-                // pinch rather than closing it further. The bisector of the incoming and outgoing
-                // edge directions points into the material at a convex corner and out of it at a
-                // concave one; a pinch is made of concave corners, which is the direction that
-                // separates them.
-                const Vec2d prev = unscaled(poly.points[(i + n - 1) % n]);
-                const Vec2d next = unscaled(poly.points[(i + 1) % n]);
-                const Vec2d here = unscaled(p);
-                Vec2d       dir  = (here - prev).normalized() + (here - next).normalized();
-                if (dir.norm() < EPSILON)
-                    dir = Vec2d(1., 0.);          // a straight-through point: any direction will do
-                dir.normalize();
-                // Each attempt pushes a little further, so two points that collided on the first
-                // nudge (both bisectors pointing the same way) separate on the second.
-                const coord_t step = NUDGE * coord_t(attempt + 1);
-                p = Point(p.x() + coord_t(std::llround(dir.x() * double(step))),
-                          p.y() + coord_t(std::llround(dir.y() * double(step))));
-                ++nudged;
-            }
+            // The OUTWARD bisector of this point's two edges: it points out of the material at a
+            // concave corner, and a pinch is made of concave corners, so this is the direction that
+            // separates the two sides rather than driving them together.
+            const Vec2d prev = unscaled(poly.points[(i + n - 1) % n]);
+            const Vec2d next = unscaled(poly.points[(i + 1) % n]);
+            const Vec2d here = unscaled(poly.points[i]);
+            Vec2d       dir  = Vec2d::Zero();
+            const Vec2d in   = here - prev, out = here - next;
+            if (in.norm() > EPSILON && out.norm() > EPSILON)
+                dir = in.normalized() + out.normalized();
+            place(poly.points[i], dir);
         }
     };
 
@@ -465,7 +508,15 @@ struct PrismVertices
 {
     std::vector<int> lo;
     std::vector<int> hi;
-    size_t unmatched = 0;   // triangulation indices out of range - impossible, counted anyway
+    size_t unmatched  = 0;  // triangulation indices out of range, or a point list of the wrong size
+    // Points of this cap's slice whose XY was already used by another point of the same slice.
+    // unpinch_slice is supposed to leave none; if any survive, the cap is refused rather than
+    // triangulated, because the CDT's duplicate path returns indices into a COLLAPSED point list
+    // that the wall vertex runs do not mirror.
+    size_t duplicates = 0;
+    // Islands the constrained Delaunay triangulation could not do, which fell back to the GLU
+    // tesselator. See append_cap for why the fallback exists and why it cannot be screened for.
+    size_t fallbacks = 0;
 };
 
 // Append the two vertices (lo, hi) for every point of `poly` and record them in `pv`.
@@ -506,48 +557,204 @@ void append_ring_walls(indexed_triangle_set &mesh, int first_lo, int n)
     }
 }
 
-// One cap over `slice`, as indexed faces over the vertices already appended for it. `top` picks the
-// hi vertex run and the up-facing winding; otherwise the lo run and the down-facing one.
-void append_cap(indexed_triangle_set &mesh, PrismVertices &pv, const ExPolygons &slice, bool top)
+// Triangulate ONE island into indices over its own to_points() order, or report that it cannot be
+// done. Read this before changing anything about the caps: the two triangulators are not
+// interchangeable, the order matters, and the return value is what keeps the mesh closed.
+//
+// PREFERRED: Slic3r::Triangulation - a constrained Delaunay triangulation (CGAL) returning INDICES
+// into the island's own point list. Nothing is matched back by coordinate and no triangle can cross
+// a constraint edge, so a void cannot be covered. On the slice-contour source it is flawless: 1002
+// Benchy layers, zero dropped triangles, zero open edges.
+//
+// WHY IT NEEDS A FALLBACK, which took several rounds of measurement to pin down. CGAL's
+// Exact_predicates_INEXACT_constructions kernel resolves a hole running within a lattice unit of its
+// own contour as a genuine intersection and inserts a vertex at the crossing - a vertex whose
+// info() is never assigned, so it returns as an out-of-range index. The extrusion source hits this
+// and the slice-contour source does not: a fuzzed wall's outward offset pinches slivers of void
+// against their own contours all over a Benchy hull, and those near-contacts are what the inexact
+// kernel cannot resolve. Clipper, exact on the integer lattice, sees nothing wrong with them -
+// measured, every such island returns from its own union_ex unchanged, ring for ring and to the
+// last square micrometre.
+//
+// AND IT CANNOT BE SCREENED FOR IN ADVANCE. CGAL::spatial_sort shuffles with a RANDOM seed, so
+// triangulate() is not a function of its input: probing an island, finding it sound, and then
+// triangulating it for real can still fail. An earlier "sanitiser" built on such a probe certified
+// nothing and the open-edge count wandered between runs on identical geometry.
+//
+// FALLBACK: the GLU tesselator for that island, mapped back by coordinate - safe because
+// unpinch_slice has already guaranteed the island visits no XY twice. GLU is deterministic and
+// always covers the polygon; its own flaw (spanning a void when a polygon has several narrow,
+// closely-spaced holes) is rarer and strictly less bad than a hole in the mesh.
+//
+// LAST RESORT: if GLU also produces a vertex that maps to nothing - a tessCombine vertex, which it
+// only emits on self-intersecting input - the island is reported UNTRIANGULABLE. The caller then
+// drops its holes and asks again, and builds the walls from that same reduced shape. That is the
+// part that matters: an earlier version filled the holes in the cap alone while the walls were
+// already built from the unreduced island, which left every filled hole ringed by wall with nothing
+// to close against - 1,894 open edges out of 16 dropped triangles. A cap and its walls must come
+// from the same geometry or the arithmetic cannot work out.
+bool triangulate_island(const ExPolygon &ex, Triangulation::Indices &out, size_t &fallbacks)
 {
-    const std::vector<int> &run = top ? pv.hi : pv.lo;
-    if (run.empty())
-        return;
+    out.clear();
+    const ExPolygons one { ex };
+    const Points     pts = to_points(one);
+    if (pts.size() < 3)
+        return true;                        // nothing to cap, and nothing broken
 
-    // The constrained Delaunay triangulation of the slice, as indices into to_points(slice) - which
-    // is the order `run` was filled in. Triangulation::triangulate handles a slice with several
-    // ExPolygons and any number of holes, and its constraint edges are the polygon's own, so no
-    // triangle can cross a boundary into a void.
-    const Triangulation::Indices tris = Triangulation::triangulate(slice);
+    // The duplicate-free precondition of the two-argument overload, enforced rather than trusted:
+    // the one-argument form silently switches to a path that COLLAPSES duplicates and returns
+    // indices into the collapsed list, which the caller's vertex run does not mirror.
+    std::map<std::pair<coord_t, coord_t>, size_t> by_xy;
+    for (size_t k = 0; k < pts.size(); ++k)
+        by_xy.emplace(std::make_pair(pts[k].x(), pts[k].y()), k);
+    if (by_xy.size() != pts.size())
+        return false;
 
-    for (const Vec3i32 &t : tris) {
-        if (t(0) < 0 || t(1) < 0 || t(2) < 0 ||
-            size_t(t(0)) >= run.size() || size_t(t(1)) >= run.size() || size_t(t(2)) >= run.size()) {
-            // Cannot happen - the indices are into the point list this run mirrors - but a silent
-            // out-of-range read would be far worse than a counted drop.
-            ++pv.unmatched;
+    auto in_range = [&](const Triangulation::Indices &v) {
+        for (const Vec3i32 &t : v)
+            for (int k = 0; k < 3; ++k)
+                if (t(k) < 0 || size_t(t(k)) >= pts.size())
+                    return false;
+        return true;
+    };
+
+    out = Triangulation::triangulate(one, pts);
+    if (in_range(out))
+        return true;
+
+    // GLU, for this island only.
+    out.clear();
+    const std::vector<Vec3d> soup = triangulate_expolygons_3d(one, 0., NORMALS_UP);
+    for (size_t s = 0; s + 2 < soup.size(); s += 3) {
+        int idx[3];
+        for (int k = 0; k < 3; ++k) {
+            // The tesselator emits unscale<double> of the same Points, so the scaled coordinate is
+            // recoverable exactly.
+            const coord_t qx = coord_t(std::llround(scale_(soup[s + size_t(k)].x())));
+            const coord_t qy = coord_t(std::llround(scale_(soup[s + size_t(k)].y())));
+            auto it = by_xy.find(std::make_pair(qx, qy));
+            if (it == by_xy.end()) {
+                out.clear();
+                return false;               // a tessCombine vertex: nothing to map it to
+            }
+            idx[k] = int(it->second);
+        }
+        out.emplace_back(idx[0], idx[1], idx[2]);
+    }
+    ++fallbacks;
+    return true;
+}
+
+// The shape a layer can actually be built from: every island either triangulable as it stands, or
+// reduced to its bare contour, or - if even that fails - dropped. Returns the reduced slice and the
+// triangulation of each island, so the caller builds walls and caps from ONE decision.
+ExPolygons buildable_slice(const ExPolygons &slice, std::vector<Triangulation::Indices> &out_tris,
+                           size_t &fallbacks, size_t &holes_dropped, size_t &islands_dropped)
+{
+    ExPolygons ok;
+    out_tris.clear();
+    for (const ExPolygon &raw : slice) {
+        // Strip degenerate rings FIRST, so that to_points() (which the triangulation indexes), the
+        // vertex runs (which skip rings under three points, there being no strip to emit for one)
+        // and the cap's base arithmetic all walk the same rings. They did not before: the vertex
+        // loops skipped a two-point ring and the cap's base advanced past it anyway, so every
+        // island after one was capped onto the wrong vertices - every index in range, nothing
+        // dropped, and a hole in the mesh regardless. Such rings come out of a fuzzed wall's
+        // outward offset and essentially never out of a slice contour, which is exactly why only
+        // the extrusion source ever leaked.
+        if (raw.contour.points.size() < 3)
+            continue;
+        ExPolygon ex(raw.contour);
+        for (const Polygon &h : raw.holes)
+            if (h.points.size() >= 3)
+                ex.holes.push_back(h);
+
+        Triangulation::Indices tris;
+        if (triangulate_island(ex, tris, fallbacks)) {
+            ok.emplace_back(ex);
+            out_tris.emplace_back(std::move(tris));
             continue;
         }
-        int a = run[size_t(t(0))], b = run[size_t(t(1))], c = run[size_t(t(2))];
-        if (a == b || b == c || a == c)
-            continue;                       // degenerate
-        // Triangulation emits CCW-in-XY triangles. A cap seen from OUTSIDE the solid is CCW at the
-        // top and CW at the bottom, so the bottom cap is the same triangle reversed.
-        if (! top)
-            std::swap(b, c);
-        mesh.indices.emplace_back(a, b, c);
+        if (! ex.holes.empty()) {
+            // The holes are the usual offender - a sliver of void pinched against its own contour
+            // by a fuzzed wall's outward offset. Filling them in costs a few hundredths of a square
+            // millimetre and keeps the layer closed.
+            ExPolygon solid(ex.contour);
+            if (triangulate_island(solid, tris, fallbacks)) {
+                holes_dropped += ex.holes.size();
+                ok.emplace_back(std::move(solid));
+                out_tris.emplace_back(std::move(tris));
+                continue;
+            }
+        }
+        // Even the bare contour cannot be triangulated: its own boundary crosses itself, so neither
+        // its cap nor its walls could close. Losing it is strictly better than leaving a hole, and
+        // what is lost is by construction a sub-square-millimetre artefact.
+        ++islands_dropped;
+    }
+    return ok;
+}
+
+// One cap over `slice`, as indexed faces over the vertices already appended for it. `top` picks the
+// hi vertex run and the up-facing winding; otherwise the lo run and the down-facing one.
+void append_cap(indexed_triangle_set &mesh, PrismVertices &pv, const ExPolygons &slice,
+                const std::vector<Triangulation::Indices> &per_island, bool top)
+{
+    const std::vector<int> &run = top ? pv.hi : pv.lo;
+    if (run.empty() || per_island.size() != slice.size())
+        return;
+
+    // to_points() lays a slice out as `contour, holes...` per ExPolygon in order, which is exactly
+    // the order append_ring_vertices filled `run` in - so an island's indices land on the right
+    // stretch of the run by adding a base that is the running sum of the islands' point counts.
+    // count_points is the right stride because buildable_slice has already removed every ring the
+    // vertex loops would skip, so the two walk exactly the same rings.
+    size_t base = 0;
+    for (size_t e = 0; e < slice.size(); ++e) {
+        const size_t n = count_points(slice[e]);
+        for (const Vec3i32 &t : per_island[e]) {
+            if (t(0) < 0 || t(1) < 0 || t(2) < 0 ||
+                size_t(t(0)) >= n || size_t(t(1)) >= n || size_t(t(2)) >= n) {
+                ++pv.unmatched;
+                continue;
+            }
+            const size_t ia = base + size_t(t(0)), ib = base + size_t(t(1)), ic = base + size_t(t(2));
+            if (ia >= run.size() || ib >= run.size() || ic >= run.size()) {
+                ++pv.unmatched;
+                continue;
+            }
+            int a = run[ia], b = run[ib], c = run[ic];
+            if (a == b || b == c || a == c)
+                continue;                   // degenerate
+            // Triangulation emits CCW-in-XY triangles. A cap seen from OUTSIDE the solid is CCW at
+            // the top and CW at the bottom, so the bottom cap is the same triangle reversed.
+            if (! top)
+                std::swap(b, c);
+            mesh.indices.emplace_back(a, b, c);
+        }
+        base += n;
     }
 }
 
 // One layer -> one closed prism, appended to `mesh`.
 void append_layer_prism(indexed_triangle_set &mesh, const ExPolygons &slice,
-                        double z_lo, double z_hi, size_t &unmatched)
+                        double z_lo, double z_hi, size_t &unmatched, size_t &fallbacks,
+                        size_t &holes_dropped, size_t &islands_dropped)
 {
     if (slice.empty() || z_hi <= z_lo)
         return;
 
+    // CAP FIRST. buildable_slice decides, per island, what can actually be triangulated - and may
+    // reduce an island to its bare contour or drop it. The walls are then built from THAT shape, so
+    // the two always agree. Building the walls first and reducing the cap afterwards is the bug
+    // this ordering exists to prevent: it leaves a ring of wall with no cap to close against.
+    std::vector<Triangulation::Indices> tris;
+    const ExPolygons shape = buildable_slice(slice, tris, fallbacks, holes_dropped, islands_dropped);
+    if (shape.empty())
+        return;
+
     PrismVertices pv;
-    for (const ExPolygon &ex : slice) {
+    for (const ExPolygon &ex : shape) {
         if (ex.contour.points.size() >= 3) {
             const int first = append_ring_vertices(mesh, pv, ex.contour, z_lo, z_hi);
             append_ring_walls(mesh, first, int(ex.contour.points.size()));
@@ -559,9 +766,9 @@ void append_layer_prism(indexed_triangle_set &mesh, const ExPolygons &slice,
             append_ring_walls(mesh, first, int(hole.points.size()));
         }
     }
-    append_cap(mesh, pv, slice, false);
-    append_cap(mesh, pv, slice, true);
-    unmatched += pv.unmatched;
+    append_cap(mesh, pv, shape, tris, false);
+    append_cap(mesh, pv, shape, tris, true);
+    unmatched += pv.unmatched + pv.duplicates;
 }
 
 // The whole stack. Serial and ordered, so the vertex and face order is a pure function of the
@@ -569,11 +776,14 @@ void append_layer_prism(indexed_triangle_set &mesh, const ExPolygons &slice,
 indexed_triangle_set prisms_to_mesh(const std::vector<ExPolygons> &slices,
                                     const std::vector<double>     &bottom_z,
                                     const std::vector<double>     &top_z,
-                                    size_t                        &unmatched)
+                                    size_t                        &unmatched,
+                                    size_t                        &fallbacks,
+                                    size_t                        &holes_dropped,
+                                    size_t                        &islands_dropped)
 {
     indexed_triangle_set mesh;
     for (size_t i = 0; i < slices.size(); ++i)
-        append_layer_prism(mesh, slices[i], bottom_z[i], top_z[i], unmatched);
+        append_layer_prism(mesh, slices[i], bottom_z[i], top_z[i], unmatched, fallbacks, holes_dropped, islands_dropped);
 
     // Weld only EXACTLY coincident vertices: neighbouring prisms share a Z plane and, wherever
     // their contours share a point, that point's float coordinates are bit-identical (both sides
@@ -772,16 +982,28 @@ void append_skirt(indexed_triangle_set &mesh, const Polygon &lo, const Polygon &
 // `rings` is a flat ring list in slice_rings' order; it is rebuilt into ExPolygons for the
 // tesselator by re-reading the windings, which is what the tesselator's even-odd rule wants anyway.
 void append_flat_cap_rings(indexed_triangle_set &mesh, const ExPolygons &shape,
-                           const std::vector<Polygon> &rings, double z, bool top, size_t &unmatched)
+                           const std::vector<Polygon> &rings, double z, bool top, size_t &unmatched,
+                           size_t &fallbacks, size_t &holes_dropped, size_t &islands_dropped)
 {
     if (rings.empty())
         return;
+    // Same cap-first rule as append_layer_prism: whatever buildable_slice reduces the shape to is
+    // what the vertices are laid down for.
+    std::vector<Triangulation::Indices> tris;
+    const ExPolygons built = buildable_slice(shape, tris, fallbacks, holes_dropped, islands_dropped);
+    if (built.empty())
+        return;
+
     PrismVertices pv;
-    for (const Polygon &r : rings)
-        if (r.points.size() >= 3)
-            append_ring_vertices(mesh, pv, r, z, z);
-    append_cap(mesh, pv, shape, top);
-    unmatched += pv.unmatched;
+    for (const ExPolygon &ex : built) {
+        if (ex.contour.points.size() >= 3)
+            append_ring_vertices(mesh, pv, ex.contour, z, z);
+        for (const Polygon &hole : ex.holes)
+            if (hole.points.size() >= 3)
+                append_ring_vertices(mesh, pv, hole, z, z);
+    }
+    append_cap(mesh, pv, built, tris, top);
+    unmatched += pv.unmatched + pv.duplicates;
 }
 
 // An ExPolygons rebuilt from a flat ring list in slice_rings' order, so the tesselator sees the
@@ -810,7 +1032,10 @@ indexed_triangle_set smooth_loft_to_mesh(const std::vector<ExPolygons> &slices,
                                          const std::vector<double>     &bottom_z,
                                          const std::vector<double>     &top_z,
                                          size_t                        &unmatched,
-                                         size_t                        &lofted_bands)
+                                         size_t                        &lofted_bands,
+                                         size_t                        &fallbacks,
+                                    size_t                        &holes_dropped,
+                                    size_t                        &islands_dropped)
 {
     indexed_triangle_set mesh;
     const size_t n = slices.size();
@@ -818,7 +1043,7 @@ indexed_triangle_set smooth_loft_to_mesh(const std::vector<ExPolygons> &slices,
         return mesh;
     if (n == 1) {
         // Nothing to interpolate between: one layer is one prism, smoothing or not.
-        append_layer_prism(mesh, slices[0], bottom_z[0], top_z[0], unmatched);
+        append_layer_prism(mesh, slices[0], bottom_z[0], top_z[0], unmatched, fallbacks, holes_dropped, islands_dropped);
         its_merge_vertices(mesh);
         its_remove_degenerate_faces(mesh);
         its_compactify_vertices(mesh);
@@ -875,13 +1100,13 @@ indexed_triangle_set smooth_loft_to_mesh(const std::vector<ExPolygons> &slices,
             // pairs contour to contour and hole to hole, so the two ends have the same shape.
             const ExPolygons lo_shape = rings_to_expolygons(slices[i], lo_rings);
             const ExPolygons hi_shape = rings_to_expolygons(slices[i], hi_rings);
-            append_flat_cap_rings(mesh, lo_shape, lo_rings, zs[i],     false, unmatched);
-            append_flat_cap_rings(mesh, hi_shape, hi_rings, zs[i + 1], true,  unmatched);
+            append_flat_cap_rings(mesh, lo_shape, lo_rings, zs[i],     false, unmatched, fallbacks, holes_dropped, islands_dropped);
+            append_flat_cap_rings(mesh, hi_shape, hi_rings, zs[i + 1], true,  unmatched, fallbacks, holes_dropped, islands_dropped);
             ++lofted_bands;
         } else {
             // A PRISM interval: exactly the stepped construction, over this one interval. Closed by
             // its own two caps, so it seals against whatever is above and below it.
-            append_layer_prism(mesh, slices[i], zs[i], zs[i + 1], unmatched);
+            append_layer_prism(mesh, slices[i], zs[i], zs[i + 1], unmatched, fallbacks, holes_dropped, islands_dropped);
         }
     }
 
@@ -1012,7 +1237,8 @@ std::vector<ExPolygons> slice_bake_layer_regions(const PrintObject       &object
     const double close_radius = std::clamp(opts.close_gaps_radius, 0., SLICE_BAKE_CLOSE_GAPS_MAX);
     const double tol          = std::clamp(opts.resolution, SLICE_BAKE_RESOLUTION_MIN, SLICE_BAKE_RESOLUTION_MAX);
     size_t loops_used = 0, empty_layers = 0;
-    size_t from_slices = 0, from_extrusion = 0, points_added = 0, nudged = 0;
+    size_t from_slices = 0, from_extrusion = 0, points_added = 0, nudged = 0, unresolved = 0;
+
 
     // Sequential on purpose. The per-layer work is one Clipper union of a few hundred polygons -
     // small next to the loft that follows - and a serial loop is the cheapest way to guarantee
@@ -1096,10 +1322,53 @@ std::vector<ExPolygons> slice_bake_layer_regions(const PrintObject       &object
         // vertices) or, worse, be handed several times the input they need.
         densify_expolygons(filled, tol, points_added);
 
-        // ... and unpinch LAST OF ALL, because the densifier inserts points and could in principle
-        // land one on an XY that is already used. After this the layer visits every XY at most
-        // once, which is the invariant PrismVertices needs.
-        unpinch_slice(filled, nudged);
+        // ... and unpinch LAST OF ALL, because the densifier inserts points and DOES land them on
+        // XYs that are already used - the extrusion source's loops run within a fraction of a
+        // millimetre of each other on a fuzzed wall, and interpolated points on both round to the
+        // same lattice square. After this the layer visits every XY at most once, which is the
+        // invariant both the cap triangulation and PrismVertices depend on.
+        // The layer's two invariants, established TOGETHER because each can break the other:
+        //
+        //   (1) no XY is visited twice     - or Triangulation::triangulate switches to a path that
+        //                                    collapses the duplicates and returns indices into a
+        //                                    point list the wall vertex runs do not mirror;
+        //   (2) the islands are DISJOINT   - or two caps cover the same ground and the edges they
+        //                                    share carry three faces, which reads as an open mesh.
+        //
+        // unpinch_slice gives (1) by moving a colliding point ~60 nm along its own outward
+        // bisector, which can push one island across another and break (2). union_ex gives (2)
+        // exactly on the integer lattice, but it can split an edge at an intersection and land the
+        // new vertex on a coordinate already in use, breaking (1). So they are iterated to a fixed
+        // point rather than run once each - three passes is already more than any measured layer
+        // needs (the owner's Benchy converges on the first or second), and the loop exits as soon
+        // as a pass changes nothing.
+        //
+        // Why this matters at all, and why only on the extrusion source: a fuzzed wall's outward
+        // offset leaves islands running within nanometres of each other all over a Benchy hull.
+        // Measured before this loop existed, one layer in a thousand had two islands overlapping by
+        // 9.3e-6 mm^2 - a few square microns - and that was enough for several hundred unbalanced
+        // edges. The slice-contour source produced none, which is exactly why it never leaked.
+        // The order within a pass is union THEN unpinch, and the loop runs until unpinch has
+        // nothing left to do. That order matters: whichever of the two runs last is the one whose
+        // invariant survives, and (1) is the one that cannot be re-established afterwards by
+        // anything cheap - a duplicate XY sends the triangulation down a path that returns indices
+        // into a collapsed point list, with no way to tell from the outside. (2), by contrast, is
+        // only broken by a nudge, and a nudge that breaks it moves a point by 60 nm across a
+        // boundary the union had just made disjoint - so the loop simply runs again.
+        //
+        // Convergence: each pass either changes nothing (and exits) or removes at least one
+        // collision. Three passes is far more than any measured layer needs - the owner's Benchy
+        // settles on the first - and the bound keeps a pathological slice from spinning.
+        for (int pass = 0; pass < 3; ++pass) {
+            if (filled.size() > 1)
+                filled = union_ex(to_polygons(filled));
+            if (filled.empty())
+                break;
+            const size_t before = nudged;
+            unpinch_slice(filled, nudged, unresolved);
+            if (nudged == before)
+                break;                      // no duplicate to move: both invariants hold
+        }
 
         slices.emplace_back(std::move(filled));
         if (out_z != nullptr)        out_z->push_back(layer->print_z);
@@ -1114,6 +1383,8 @@ std::vector<ExPolygons> slice_bake_layer_regions(const PrintObject       &object
         report->layers_from_extrusion = from_extrusion;
         report->points_added         = points_added;
         report->pinch_points_nudged  = nudged;
+        report->pinch_points_unresolved = unresolved;
+
     }
     return slices;
 }
@@ -1142,12 +1413,15 @@ indexed_triangle_set slice_bake_to_mesh(const PrintObject       &object,
     // at the bed both come out right without a uniform grid having to be derived. With smoothing
     // on, the same Z range is cut into intervals between the layers' mid-heights instead and each
     // interval is lofted; see smooth_loft_to_mesh for why that is still closed.
-    size_t unmatched = 0, lofted = 0;
+    size_t unmatched = 0, lofted = 0, fallbacks = 0, holes_dropped = 0, islands_dropped = 0;
     indexed_triangle_set mesh = opts.smooth_vertical_steps
-                                    ? smooth_loft_to_mesh(slices, bottom_z, z, unmatched, lofted)
-                                    : prisms_to_mesh(slices, bottom_z, z, unmatched);
+                                    ? smooth_loft_to_mesh(slices, bottom_z, z, unmatched, lofted, fallbacks, holes_dropped, islands_dropped)
+                                    : prisms_to_mesh(slices, bottom_z, z, unmatched, fallbacks, holes_dropped, islands_dropped);
     rep.lofted_bands          = lofted;
     rep.cap_triangles_dropped = unmatched;
+    rep.cap_glu_fallbacks     = fallbacks;
+    rep.cap_holes_dropped     = holes_dropped;
+    rep.islands_dropped       = islands_dropped;
     if (unmatched > 0)
         rep.note = std::to_string(unmatched) + " cap triangle(s) dropped as slivers or unmatched";
 

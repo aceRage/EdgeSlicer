@@ -149,9 +149,22 @@ struct SliceBakeReport
     // break the tie. A pinch is what made the cap triangulation stitch a blade across two
     // unrelated parts of the boundary; see unpinch_slice in SliceBake.cpp.
     size_t pinch_points_nudged   = 0;
+    // Points whose XY collided and for which no free lattice point could be found at all. Must be
+    // zero: a survivor sends the cap triangulation down a path whose indices do not match the wall
+    // vertices, which is how the extrusion-source bake used to leak.
+    size_t pinch_points_unresolved = 0;
     // Cap triangles the tesselation produced and the bake refused: needles (essentially zero area
     // over a long edge - the visible blades) and the rare vertex that matched no contour point.
     size_t cap_triangles_dropped = 0;
+    // Islands whose cap the constrained Delaunay triangulation could not produce - CGAL's inexact
+    // construction kernel inserts a crossing vertex where a hole runs within a lattice unit of its
+    // own contour - and which fell back to the GLU tesselator instead. See append_cap.
+    size_t cap_glu_fallbacks     = 0;
+    // Islands reduced to their bare contour because their holes could not be triangulated, and
+    // islands dropped because even the bare contour could not. Both are sub-square-millimetre fuzz
+    // artefacts; the alternative to losing them is an open mesh. See buildable_slice.
+    size_t cap_holes_dropped     = 0;
+    size_t islands_dropped       = 0;
     double z_min           = 0.;  // in the frame of the returned mesh
     double z_max           = 0.;
     bool   watertight      = false;
