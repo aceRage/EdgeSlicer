@@ -1122,6 +1122,32 @@ void GLGizmoEdit::on_render()
 // panel
 // ----------------------------------------------------------------------------
 
+float GLGizmoEdit::compute_label_width() const
+{
+    // Recomputed when the font scaling moves (a DPI change, or the user changing
+    // the UI scale), otherwise reused - calc_text_size over a dozen labels every
+    // frame would be wasted work.
+    const float scaling = m_imgui->get_style_scaling();
+    if (m_label_width > 0.f && std::abs(scaling - m_label_width_scaling) < 0.001f)
+        return m_label_width;
+
+    // Every label that is drawn in the left column of a row. The mode row's
+    // "Select" is in here too, so the combo lines up with the sliders below it.
+    static const char *label_keys[] = {"mode",     "feature_angle", "planar_tol", "smooth_step",
+                                       "smooth_cap", "distance",    "snap_step",  "bevel_width",
+                                       "bevel_segments", "bevel_profile"};
+    float width = 0.f;
+    for (const char *key : label_keys) {
+        const auto it = m_desc.find(key);
+        if (it != m_desc.end())
+            width = std::max(width, m_imgui->calc_text_size(it->second).x);
+    }
+
+    m_label_width         = width + m_imgui->scaled(1.5f);
+    m_label_width_scaling = scaling;
+    return m_label_width;
+}
+
 void GLGizmoEdit::on_render_input_window(float x, float y, float bottom_limit)
 {
     if (!m_c->selection_info() || !m_c->selection_info()->model_object())
@@ -1129,19 +1155,28 @@ void GLGizmoEdit::on_render_input_window(float x, float y, float bottom_limit)
 
     // A fixed width, as Sculpt learnt to use: an auto-sizing panel resizes out
     // from under the pointer whenever a conditional row appears.
-    const float window_width  = m_imgui->scaled(18.0f);
+    //
+    // The width is derived from the widest label the panel can show rather than
+    // being a flat number: at 150% DPI "Curvature per step" and "Face tolerance"
+    // are wider than the old scaled(18) allowed for, and the label column then
+    // ate the whole row and clipped. Taking the real measurement keeps every row
+    // inside the panel at any scale and in any translation.
+    const float label_col     = compute_label_width();
+    const float window_width  = std::max(m_imgui->scaled(18.0f),
+                                         label_col + m_imgui->scaled(9.0f));
     const float approx_height = m_imgui->scaled(20.f);
     y = std::min(y, bottom_limit - approx_height);
 
-#if BBS_TOOLBAR_ON_TOP
-    GizmoImguiSetNextWIndowPos(x, y, window_width, 0.f, ImGuiCond_Always, 0.0f, 0.0f);
-#else
-    GizmoImguiSetNextWIndowPos(x, y, window_width, 0.f, ImGuiCond_Always, 1.0f, 0.0f);
-#endif
-    ImGui::SetNextWindowSize(ImVec2(window_width, 0.f), ImGuiCond_Always);
+    dock_setup_next_window(x, y, bottom_limit, window_width);
 
     ImGuiWrapper::push_toolbar_style(m_parent.get_scale());
-    GizmoImguiBegin(get_name(), ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoTitleBar);
+    GizmoImguiBegin(get_name(), dock_window_flags(ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoTitleBar));
+
+    if (!dock_render_titlebar(get_name())) {
+        GizmoImguiEnd();
+        ImGuiWrapper::pop_toolbar_style();
+        return;
+    }
 
     const float wrap_width = ImGui::GetContentRegionAvail().x;
 
@@ -1153,22 +1188,25 @@ void GLGizmoEdit::on_render_input_window(float x, float y, float bottom_limit)
     }
 
     const float space_size        = m_imgui->get_style_scaling() * 8;
-    const float label_col         = m_imgui->calc_text_size(m_desc.at("feature_angle")).x + m_imgui->scaled(1.5f);
     const float slider_icon_width = m_imgui->get_slider_icon_size().x;
     const float sliders_width     = std::max(m_imgui->scaled(3.0f),
                                              wrap_width - label_col - 1.5f * slider_icon_width - space_size);
     const float drag_left         = ImGui::GetStyle().WindowPadding.x + label_col + sliders_width - space_size;
 
     // --- pick mode ---
-    ImGui::AlignTextToFramePadding();
-    m_imgui->text(m_desc.at("mode"));
+    // Three radio buttons on one line ran past the panel edge and the last one
+    // ("Edge chain") was clipped; a combo takes one line whatever the labels are.
+    // render_combo() is the base's own label+combo row, so this picks up the
+    // combo styling (and the label column) every other gizmo uses.
     {
+        // Positional - the order must match PickMode.
+        const std::vector<std::string> mode_labels = {into_u8(m_desc.at("mode_face")),
+                                                      into_u8(m_desc.at("mode_smooth_face")),
+                                                      into_u8(m_desc.at("mode_chain"))};
         int mode = int(m_pick_mode);
-        const bool changed =
-            ImGui::RadioButton(into_u8(m_desc.at("mode_face")).c_str(), &mode, int(PickMode::Face)) ||
-            (ImGui::SameLine(), ImGui::RadioButton(into_u8(m_desc.at("mode_smooth_face")).c_str(), &mode, int(PickMode::SmoothFace))) ||
-            (ImGui::SameLine(), ImGui::RadioButton(into_u8(m_desc.at("mode_chain")).c_str(), &mode, int(PickMode::EdgeChain)));
-        if (changed && mode != int(m_pick_mode)) {
+        if (render_combo(into_u8(m_desc.at("mode")), mode_labels, mode, label_col,
+                         std::max(m_imgui->scaled(3.0f), wrap_width - label_col)) &&
+            mode != int(m_pick_mode)) {
             m_pick_mode = PickMode(mode);
             clear_selection();
             update_hover(m_last_mouse);
@@ -1304,6 +1342,10 @@ void GLGizmoEdit::on_render_input_window(float x, float y, float bottom_limit)
 
         ImGui::AlignTextToFramePadding();
         m_imgui->text(m_desc.at("bevel_profile"));
+        // Two short labels, so the radio pair still fits on one line - but put it
+        // in the same label column as every other row rather than starting a new
+        // line, so the panel reads as one grid.
+        ImGui::SameLine(label_col);
         {
             int profile = m_bevel_profile;
             const bool picked =

@@ -76,8 +76,17 @@ protected:
     bool on_is_selectable() const override { return true; }
     void on_set_state() override;
     CommonGizmosDataID on_get_requirements() const override;
+    std::string get_dock_key() const override { return "edit"; }
 
 private:
+    // Width of the panel's label column: the widest label the panel can show,
+    // plus a gap. Measured once per DPI/font change rather than per frame, and
+    // over EVERY label rather than one of them - picking a single label left
+    // "Face tolerance" and "Curvature per step" clipped.
+    float compute_label_width() const;
+    mutable float m_label_width{ 0.f };
+    mutable float m_label_width_scaling{ 0.f };
+
     // What a hover or a click picks.
     enum class PickMode : int {
         // A face region: the coplanar connected set (a CAD face).

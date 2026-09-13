@@ -7284,9 +7284,15 @@ void GLGizmoCut3D::render_input_window_warning() const
 
 void GLGizmoCut3D::on_render_input_window(float x, float y, float bottom_limit)
 {
-    GizmoImguiSetNextWIndowPos(x, y, ImGuiCond_Always, 0.0f, 0.0f);
+    dock_setup_next_window(x, y, bottom_limit);
     ImGuiWrapper::push_toolbar_style(m_parent.get_scale());
-    GizmoImguiBegin(get_name(), ImGuiWindowFlags_NoMove | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoTitleBar);
+    GizmoImguiBegin(get_name(), dock_window_flags(ImGuiWindowFlags_NoMove | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoTitleBar));
+
+    if (!dock_render_titlebar(get_name())) {
+        GizmoImguiEnd();
+        ImGuiWrapper::pop_toolbar_style();
+        return;
+    }
 
     CutConnectors& connectors = m_c->selection_info()->model_object()->cut_connectors;
 

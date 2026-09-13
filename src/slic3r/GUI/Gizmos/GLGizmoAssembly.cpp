@@ -79,7 +79,7 @@ void GLGizmoAssembly::on_render_input_window(float x, float y, float bottom_limi
     // adjust window position to avoid overlap the view toolbar
     const float win_h = ImGui::GetWindowHeight();
     y = std::min(y, bottom_limit - win_h);
-    GizmoImguiSetNextWIndowPos(x, y, ImGuiCond_Always, 0.0f, 0.0f);
+    dock_setup_next_window(x, y, bottom_limit);
     if (last_h != win_h || last_y != y) {
         // ask canvas for another frame to render the window in the correct position
         m_imgui->set_requires_extra_frame();
@@ -90,7 +90,17 @@ void GLGizmoAssembly::on_render_input_window(float x, float y, float bottom_limi
     }
     // Orca
     ImGuiWrapper::push_toolbar_style(m_parent.get_scale());
-    GizmoImguiBegin(get_name(), ImGuiWindowFlags_NoMove | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoTitleBar);
+    GizmoImguiBegin(get_name(), dock_window_flags(ImGuiWindowFlags_NoMove | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoTitleBar));
+
+    if (!dock_render_titlebar(get_name())) {
+        // Collapsed: the body is skipped, but the active-item bookkeeping still
+        // has to advance or the gizmo thinks an edit is in flight forever.
+        m_last_active_item_imgui = m_current_active_imgui_id;
+        GizmoImguiEnd();
+        ImGuiWrapper::pop_toolbar_style();
+        return;
+    }
+
     init_render_input_window();
 
     float moving_size = m_imgui->calc_text_size(_L("(Moving)")).x;

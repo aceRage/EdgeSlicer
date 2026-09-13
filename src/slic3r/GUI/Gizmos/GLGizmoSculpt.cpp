@@ -1204,23 +1204,27 @@ void GLGizmoSculpt::on_render_input_window(float x, float y, float bottom_limit)
 
     // The toolbar hands us the x of the gizmo's own icon, and Sculpt is the LAST
     // icon on the bar, so a panel drawn rightwards from there hangs off the end
-    // of the canvas. GizmoImguiSetNextWIndowPos() already knows how to pull a
-    // window back inside - but it clamps against last_input_window_width, i.e.
-    // the width of the PREVIOUS frame, which under AlwaysAutoResize was whatever
-    // the last frame's contents happened to need. Passing the real width (which
-    // is now fixed) makes that clamp exact: the panel opens toward the centre of
-    // the bar, its right edge flush with the canvas edge, and it never hangs off.
-#if BBS_TOOLBAR_ON_TOP
-    GizmoImguiSetNextWIndowPos(x, y, window_width, 0.f, ImGuiCond_Always, 0.0f, 0.0f);
-#else
-    GizmoImguiSetNextWIndowPos(x, y, window_width, 0.f, ImGuiCond_Always, 1.0f, 0.0f);
-#endif
-    ImGui::SetNextWindowSize(ImVec2(window_width, 0.f), ImGuiCond_Always);
+    // of the canvas. dock_setup_next_window() forwards to
+    // GizmoImguiSetNextWIndowPos(), which already knows how to pull a window back
+    // inside - but it clamps against last_input_window_width, i.e. the width of
+    // the PREVIOUS frame, which under AlwaysAutoResize was whatever the last
+    // frame's contents happened to need. Passing the real width (which is now
+    // fixed) makes that clamp exact: the panel opens toward the centre of the
+    // bar, its right edge flush with the canvas edge, and it never hangs off.
+    // When the panel is docked instead, the same call parks it against the right
+    // edge of the view at full height.
+    dock_setup_next_window(x, y, bottom_limit, window_width);
 
     ImGuiWrapper::push_toolbar_style(m_parent.get_scale());
     // No AlwaysAutoResize: the width is pinned above, and only the height is left
     // to the contents.
-    GizmoImguiBegin(get_name(), ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoTitleBar);
+    GizmoImguiBegin(get_name(), dock_window_flags(ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoTitleBar));
+
+    if (!dock_render_titlebar(get_name())) {
+        GizmoImguiEnd();
+        ImGuiWrapper::pop_toolbar_style();
+        return;
+    }
 
     // Everything the panel wraps to. Inside the window, so the padding is known.
     const float wrap_width = ImGui::GetContentRegionAvail().x;
