@@ -21,6 +21,7 @@
 // mouse, the panel and the undo stack; this owns the mesh.
 
 #include <cstdint>
+#include <functional>
 #include <vector>
 
 #include "Point.hpp"
@@ -348,6 +349,36 @@ struct BevelParams
     float        clamp_fraction{0.5f};
     // Run the self-intersection guard on the result. Off for a live preview.
     bool         check_self_intersection{false};
+
+    // --- the curved-surface guard -------------------------------------------
+    //
+    // A "side" is the facet set a strip has to be sewn into, found by flooding
+    // across edges that are neither creases nor bevelled. The whole side-rewrite
+    // treats that set as PLANAR: it projects the side's boundary into the plane
+    // of one of its facets and ear-clips it there. On a box that is exact. On a
+    // triangulated curved surface - the 3DBenchy's hull, whose bottom rim is a
+    // chain of hundreds of short edges around a curved outline - a side is
+    // thousands of tiny facets that share no plane at all, the boundary polygon
+    // is the whole rim, and the result is both slow and geometrically wrong.
+    //
+    // So it is detected up front and refused with something the panel can say,
+    // instead of being attempted. A side is rejected when it carries more than
+    // max_side_facets facets or its normals spread further than
+    // max_side_normal_deg from the reference facet's.
+    // Set max_side_facets <= 0 to disable the guard (the tests that build their
+    // own known-planar cases do).
+    int          max_side_facets{2000};
+    float        max_side_normal_deg{25.f};
+
+    // --- cancellation and progress -------------------------------------------
+    //
+    // The bevel runs in a worker (see BevelJob), so it must be able to stop. Both
+    // are optional; when unset the solve runs straight through as before.
+    // `cancelled` is polled at each stage boundary and inside the per-edge and
+    // per-corner loops; returning true aborts with BevelStatus::Cancelled and an
+    // empty mesh. `progress` is called with 0..100.
+    std::function<bool()>     cancelled{};
+    std::function<void(int)>  progress{};
 };
 
 static constexpr int BevelMaxSegments = 32;
@@ -368,7 +399,14 @@ enum class BevelStatus : unsigned char {
     // The build produced an open or self-intersecting mesh. This is the "should
     // not happen" bucket; the input mesh is returned unchanged rather than a
     // broken one being handed on.
-    Failed
+    Failed,
+    // The selection runs across a curved surface: at least one of the faces the
+    // strip would have to be sewn into is not planar (too many facets, or its
+    // normals spread too far). Bevel needs planar faces, so this is refused up
+    // front rather than attempted - it is the case that used to hang.
+    CurvedSurface,
+    // The caller's cancelled() returned true. The mesh is unchanged.
+    Cancelled
 };
 
 struct BevelResult
@@ -381,6 +419,10 @@ struct BevelResult
     // --- what the solve decided, for the panel and the tests ---
     // How many edges were actually bevelled.
     size_t bevelled_edges{0};
+    // On CurvedSurface: how many facets the offending face carried and how far
+    // its normals spread, so the panel can say WHICH surface it refused.
+    size_t curved_side_facets{0};
+    float  curved_side_spread_deg{0.f};
     // How many were dropped for being flatter than min_dihedral_deg.
     size_t dropped_flat{0};
     // How many were dropped for being CONCAVE. A known limitation, spelled out at
@@ -510,6 +552,15 @@ public:
     // pre-drag mesh between ticks). Does NOT push undo - a preview is not an
     // operation.
     void set_mesh(indexed_triangle_set &&its);
+
+    // Adopt a mesh some OTHER thread computed, as if apply_bevel() had produced
+    // it here: an undo entry is pushed first and the topology is rebuilt.
+    //
+    // This is what the bevel's worker path needs. BevelJob runs bevel_edges() on
+    // a copy of the mesh, so by the time the result arrives the session has not
+    // been through apply_bevel() at all and set_mesh() would silently lose the
+    // gizmo-local undo entry for the operation.
+    void adopt_mesh(indexed_triangle_set &&its);
 
     // --- gizmo-local undo -----------------------------------------------
     bool can_undo() const { return !m_undo.empty(); }
