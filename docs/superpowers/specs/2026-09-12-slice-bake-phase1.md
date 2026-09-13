@@ -312,6 +312,144 @@ dialog, job, menu item and `ObjectList` changes in it. The five-step check:
    slicer's own.
 5. **Ctrl+Z once** puts the original cube back, with its own fuzzy settings intact.
 
+## Phase 1a: the owner's three click-test defects (2026-09-13)
+
+Three defects came back from the owner's first click-test. All three are fixed on
+`fix/slice-bake-transform`; the library gained an options enum, two controls and a new cap
+construction, and the test set went from 8 cases to 14.
+
+### 1. "Add as new object" came out the wrong size and in the wrong place
+
+**Cause.** The bake is built from `PrintObject` layers, which live in PRINT space: the instance's
+rotation and scale are already applied to the vertices. The old code then undid the instance
+transform (`in_object_frame`) and handed the result to `ObjectList::load_mesh_object`, which
+creates a ModelObject with an IDENTITY instance and drops it in the nearest empty cell. So the
+rotation and scale came out of the vertices and nothing put them back: a 2x-scaled part baked to a
+1x object, standing somewhere else.
+
+**Fix.** `SliceBakeOptions::in_object_frame` (a bool) became `SliceBakeFrame` (an enum) with three
+frames, and the job picks one from the result mode:
+
+| Route | Frame | Vertices carry | Instance carries |
+|---|---|---|---|
+| Replace object | `Object` | neither rotation nor scale | the object's existing instance re-applies both |
+| Add as new object | `World` | rotation and scale | offset only (identity rotation, identity scale) |
+| Export STL | `World` | rotation and scale | nothing — a file has no instance |
+
+The `World` maths, with `P` a point in print space, `S = shift_without_plate_offset()` and `C =
+center_offset()`:
+
+```
+world                    W          = P + S
+instance offset          offset_xy  = unscaled(S - C)          (set_instances adds C into shift)
+mesh, so it sits at 0    P'         = P + (S - offset_xy) = P + unscaled(C)
+```
+
+`SliceBakeReport::instance_offset` returns `offset_xy`, and the job builds the ModelObject by hand
+rather than through `load_mesh_object` — which would recentre and relocate it. No `ensure_on_bed()`:
+the mesh's Z is already the printed Z.
+
+**Gate.** *a scaled, rotated, offset instance bakes to the same world box* — a 10 mm cube at 2x, 30
+degrees, offset (30, -20). The baked object's world bbox matches the sliced object's within one
+layer height on all six faces, in both frames.
+
+### 2. The bake looked more angular than the slice preview
+
+**Cause.** By the time an outer wall reaches `LayerRegion::perimeters` it has been simplified at the
+print's `resolution`. The preview draws the un-simplified path.
+
+**Fix.** Three things:
+
+* **A contour source.** `SliceBakeContourSource::SliceContours` (the new default) takes the boundary
+  from `LayerRegion::slices` — the un-simplified contour the slicer cut from the mesh, which IS the
+  printed outer boundary (the wall centreline sits half an external width inside it, and the bake
+  offsets it back out by the same half width, so the round trip is a no-op and is skipped rather
+  than performed through Clipper, which would round every convex corner). `Extrusion` keeps the old
+  source, and is the only one that carries **fuzzy skin** — displacement applied to the path after
+  the slice, which the contour has no trace of.
+* **A Resolution control** (mm, default = the print's own `resolution`, min 0.01, max 1.0) that
+  densifies a segment when the arc it stands in for departs from it by more than the tolerance.
+  Sagitta `~ L * theta / 8` over the segment's own turn, so a STRAIGHT run is never subdivided
+  however long — that is the difference between adding points that carry shape and adding tens of
+  thousands that carry none.
+* **A live triangle count** in the dialog: the counter is passed in as a callable and re-run on
+  every control change, because the source, the resolution and the smoothing toggle all move it.
+
+**Measured** on a 10 mm cylinder sliced at `resolution = 0.1`: maximum radial error **0.259 mm from
+the extrusion, 0.0396 mm from the slice contour** — 6.5x rounder. On that contour the densifier
+correctly adds nothing (its chords are already ten times finer than the finest tolerance offered);
+on the extrusion source it adds points and the radial error falls further.
+
+**And a "Smooth vertical steps" toggle** (off by default): consecutive layers are joined by a sloped
+quad ribbon instead of stacked vertical prisms, wherever their rings correspond (same count, matched
+by winding and centroid, resampled to a common point count). A pair that does not correspond falls
+back to that interval's own prism. Each interval is a solid closed ON ITS OWN, which is what keeps
+the stack watertight — the same argument the prism stack rests on. Measured on an 8 mm sphere: the
+stepped bake's walls are **>99% exactly vertical**, the lofted bake's **<25%**, with 79 of 80 bands
+lofted and 0 open edges.
+
+*Not done, and why:* letting two consecutive ribbons share their boundary and skip the cap pair
+there would remove the internal horizontal faces. It cannot be done as the ribbons are resampled —
+interval `i`'s upper ring and `i+1`'s lower ring get different point counts whenever the layers
+differ — and forcing a match opened a sphere by 26,175 edges and a bored block by 4,740. The cap
+pairs are interior, coplanar and opposite; nothing downstream minds them.
+
+### 3. Stray straight slivers across the hull of a baked Benchy
+
+**Cause — none of the three that were suspected.** Not the extrusion centreline self-intersecting,
+not the gap closer bridging two loops, and not a misread orientation. It was the cap construction
+itself, in two ways, both traced with a throwaway probe rather than guessed at:
+
+* The caps were triangulated by the **GLU tesselator**, which emits bare XY coordinates, and matched
+  back to the wall vertices through a `std::map` keyed on the unscaled XY. That map is only
+  injective if the layer visits every XY at most once. A self-touching contour — two sharp concave
+  features whose offsets meet, which a Benchy's deck cutout and bow are full of — visits one twice,
+  and `emplace` kept the FIRST entry, so the second visit aliased onto it and the cap triangle was
+  stitched across the pinch.
+* Worse, and independent of any aliasing: on a plate of five 0.55 mm slots, GLU emitted **four
+  triangles per cap that span a slot** — surface covering a void — on input with a CCW contour, five
+  CW holes, no repeated coordinate at all and no vertex off the contour. That is GLU getting a valid
+  polygon-with-holes wrong, and no amount of cleaning the input fixes it.
+
+**Fix.** The cap construction is now `Slic3r::Triangulation::triangulate(const ExPolygons &)`, a
+constrained Delaunay triangulation that returns **indices into the polygon's own point list** rather
+than coordinates. Two consequences: a triangle can never cross a constraint edge, so a void cannot be
+covered; and there is nothing to match back, because `to_points()`' order (contour, then holes, per
+ExPolygon) is exactly the order the vertex runs are laid down in — so an index maps to a vertex by
+adding the run's base. No table, nothing to alias, and GLU's combine vertices cannot arise.
+
+Alongside it: the per-layer union runs with Clipper's **StrictlySimple** flag
+(`simplify_polygons_ex`), which splits a self-touching path into simple ones, and `unpinch_slice()`
+moves any XY that still collides by ~60 nm — `Triangulation`'s own header says it does not handle
+duplicate coordinates, and its fallback path merges them, which would weld the two sides of a pinch
+in the cap while the walls keep them apart.
+
+**Measured**, cap by cap over all 1002 layers of the owner's `bake_replace.3mf`:
+
+| Cap triangulation | long-thin cap triangles | spanning a void |
+|---|---|---|
+| GLU (before) | 158,448 | 0 on this file; **4 per cap** on the slotted plate |
+| CDT (after)  | **27,369** | **0** on both |
+
+— a factor of **5.8** on the Benchy, and the void-spanning class gone entirely. On the synthetic
+slotted plate the final mesh went from **1,880 blades (160 with visible area, worst 17 mm long and
+1.19 mm²)** to **zero**, watertight throughout.
+
+**What was tried and rejected:** rejecting needle triangles in the cap. A zero-area cap triangle
+still carries three edges of the triangulation's edge graph, each shared with a neighbour that keeps
+it, so dropping it leaves those edges with one incident face. A plain 20 mm cube went from 0 open
+edges to 40, and a 100 mm one to 84. The sliver has to be prevented, not deleted.
+
+### Test set
+
+14 cases, all green (11,886 assertions). The 8 original cases are unchanged except where the
+geometry source legitimately moved: the three FUZZ cases (`fuzzy skin survives a re-slice`, `the same
+slice bakes to the same mesh twice`, `closing the gaps`) now pass `SliceBakeContourSource::Extrusion`
+explicitly, because fuzz lives on the extrusion path and the new default is the slice contour. Six
+new cases cover the transform (both frames), the contour source and the resolution, the smoothing
+toggle and its fallback, the synthetic pinch, and the owner's Benchy (tagged `[.benchy]`, reading the
+file from its own path — 5 MB is too much to add to a 2.2 MB test corpus).
+
 ## Not in phase 1
 
 Per the spec: the G-code route (Z contouring, seams), Smooth mode (OpenVDB level set), and

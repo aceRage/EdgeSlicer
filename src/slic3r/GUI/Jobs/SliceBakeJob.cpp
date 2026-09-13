@@ -9,6 +9,7 @@
 #include "slic3r/GUI/PartPlate.hpp"
 #include "slic3r/GUI/Plater.hpp"
 
+#include "libslic3r/Format/bbs_3mf.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Print.hpp"
 
@@ -39,8 +40,26 @@ void SliceBakeJob::process(Ctl &ctl)
     const std::string status = _u8L("Baking the slice to a mesh");
     ctl.update_status(0, status);
 
+    // The frame is a property of what the mesh is FOR, not of the bake, so it is set here rather
+    // than in the dialog:
+    //
+    //   Replace    - the mesh goes into the object's existing first volume with an identity volume
+    //                transform, and the object's EXISTING instance re-applies the rotation and the
+    //                scale. So the vertices must not carry them: Object frame.
+    //   Add as new - the mesh becomes a fresh ModelObject whose instance is identity but for an
+    //                offset. Nothing will re-apply the rotation or the scale, so the vertices have
+    //                to carry them, and only the position comes out: World frame. (Handing the
+    //                Object frame here is the bug this route had - a 2x-scaled part baked to a
+    //                1x-sized object sitting in the wrong place.)
+    //   Export STL - a file has no instance at all, so it wants the part as it stands on the
+    //                plate, rotation and scale included: World frame too, and the report's
+    //                instance_offset is simply not used.
+    SliceBakeOptions opts = m_settings.options;
+    opts.frame = m_settings.result == SliceBakeResultMode::Replace ? SliceBakeFrame::Object
+                                                                   : SliceBakeFrame::World;
+
     try {
-        m_mesh = slice_bake_to_mesh(*m_print_object, m_settings.options, &m_report,
+        m_mesh = slice_bake_to_mesh(*m_print_object, opts, &m_report,
                                     [&ctl, &status](int percent) {
                                         ctl.update_status(percent, status);
                                         return ! ctl.was_canceled();
@@ -99,9 +118,47 @@ void SliceBakeJob::finalize(bool canceled, std::exception_ptr &eptr)
     // The bake is a fresh object, so nothing about the original is disturbed and the plate's slice
     // stays valid for the original - but the new object is unsliced, so the plate is invalidated
     // all the same, exactly as adding any other object does.
+    //
+    // ObjectList::load_mesh_object is deliberately NOT used here, and that is the fix for the
+    // "wrong size and wrong place" report. It recentres the mesh on its own bounding box and then
+    // drops the object into the nearest EMPTY CELL of the plate - sensible for a mesh arriving out
+    // of nowhere, wrong for one that has a place it belongs. The object is built by hand instead,
+    // with:
+    //
+    //   * the World-frame mesh, which carries the instance's rotation and scale in its vertices,
+    //   * an instance whose rotation and scale are IDENTITY (they are in the vertices already -
+    //     re-applying them would square the scale), and
+    //   * that instance's offset set to SliceBakeReport::instance_offset, which is where the
+    //     sliced object stood.
+    //
+    // The result stands exactly on top of the original, at exactly its size.
     if (m_settings.result == SliceBakeResultMode::AddNew) {
         Plater::TakeSnapshot snapshot(m_plater, "Bake slice to mesh");
-        wxGetApp().obj_list()->load_mesh_object(TriangleMesh(m_mesh), from_u8(m_name + " (baked)"));
+
+        Model       &model      = m_plater->model();
+        ModelObject *new_object = model.add_object();
+        new_object->name = m_name + " (baked)";
+        ModelVolume *new_volume = new_object->add_volume(TriangleMesh(m_mesh));
+        new_volume->name = new_object->name;
+        // Same default the load path sets, so the object is not left without one.
+        new_object->config.set_key_value("extruder", new ConfigOptionInt(0));
+
+        ModelInstance *inst = new_object->add_instance();
+        inst->set_offset(m_report.instance_offset);
+        // Left identity on purpose; see above.
+        inst->set_rotation(Vec3d::Zero());
+        inst->set_scaling_factor(Vec3d::Ones());
+        inst->set_mirror(Vec3d::Ones());
+
+        new_object->invalidate_bounding_box();
+        // NOT ensure_on_bed(): the mesh's Z is the printed Z, so it already sits on the bed exactly
+        // where the slice did, and nudging it would move the bake off the original.
+        model.InitializeAssemblyPositions({new_object});
+        Slic3r::save_object_mesh(*new_object);
+
+        wxGetApp().obj_list()->paste_objects_into_list({model.objects.size() - 1});
+        m_plater->get_partplate_list().notify_instance_update(int(model.objects.size()) - 1, 0);
+
         wxGetApp().notification_manager()->push_notification(summary);
         return;
     }
@@ -142,10 +199,11 @@ void SliceBakeJob::finalize(bool canceled, std::exception_ptr &eptr)
         return;
     }
 
-    // The bake came back in the OBJECT's frame (SliceBakeOptions::in_object_frame), i.e. in the
-    // same space the source volume's own mesh lives in once its volume transform is applied. The
-    // source volume's transform is therefore reset to identity and the mesh takes its place
-    // verbatim - which is what keeps the object where it was.
+    // The bake came back in the OBJECT's frame (SliceBakeFrame::Object), i.e. in the same space the
+    // source volume's own mesh lives in once its volume transform is applied. The source volume's
+    // transform is therefore reset to identity and the mesh takes its place verbatim - and the
+    // object's instance, which is not touched at all, re-applies the rotation, the scale and the
+    // position. That is what keeps the object at exactly the size and place it had.
     //
     // Every part after the first is dropped: the bake is ONE solid covering all of them (the
     // per-layer union ran over every region of every layer, whatever volume produced it), so
