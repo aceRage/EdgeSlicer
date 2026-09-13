@@ -1035,7 +1035,8 @@ TEST_CASE("slice bake: the slice contour bakes a rounder cylinder than the extru
     const indexed_triangle_set ext_mesh = slice_bake_to_mesh(*object, ext, &ext_rep);
     REQUIRE(! ext_mesh.indices.empty());
 
-    SliceBakeOptions sli;                     // the default source: the slice contours
+    SliceBakeOptions sli;
+    sli.contour_source = SliceBakeContourSource::SliceContours; // the library default is now the extrusion
     sli.resolution = 0.1;
     SliceBakeReport sli_rep;
     const indexed_triangle_set sli_mesh = slice_bake_to_mesh(*object, sli, &sli_rep);
@@ -1292,6 +1293,7 @@ TEST_CASE("slice bake: smoothing falls back to a step where the layers disagree"
     const PrintObject *po = print.objects().front();
 
     SliceBakeOptions opts;
+    opts.contour_source = SliceBakeContourSource::SliceContours; // this test is about the smooth loft, which the slice contour feeds
     opts.smooth_vertical_steps = true;
     SliceBakeReport rep;
     const indexed_triangle_set mesh = slice_bake_to_mesh(*po, opts, &rep);
