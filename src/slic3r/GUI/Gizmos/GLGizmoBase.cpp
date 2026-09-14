@@ -508,8 +508,12 @@ void GLGizmoBase::dock_setup_next_window(float &x, float &y, float bottom_limit,
 
     m_imgui->set_next_window_pos(x, y, ImGuiCond_Always, 0.0f, 0.0f);
     // Full available height. ImGui adds the scrollbar itself once the contents
-    // exceed it, because dock_window_flags() cleared NoScrollbar.
-    ImGui::SetNextWindowSize(ImVec2(width, std::min(bottom, cnv_h) - top), ImGuiCond_Always);
+    // exceed it, because dock_window_flags() cleared NoScrollbar. Folded, the
+    // panel is just its title row: a full-height empty strip looked like a crash.
+    float height = std::min(bottom, cnv_h) - top;
+    if (m_collapsed)
+        height = std::min(height, ImGui::GetFrameHeight() + 2.0f * ImGui::GetStyle().WindowPadding.y);
+    ImGui::SetNextWindowSize(ImVec2(width, height), ImGuiCond_Always);
 }
 
 bool GLGizmoBase::render_dock_icon_button(const char *id, bool pin, bool active, const wxString &tooltip)
@@ -574,13 +578,13 @@ bool GLGizmoBase::dock_render_titlebar(const std::string &title)
     const float space = ImGui::GetStyle().ItemSpacing.x;
     const float avail = ImGui::GetContentRegionAvail().x;
 
-    // The title fills the row up to the two buttons. It doubles as the collapse
-    // hit area, which is what the owner asked for - clicking the title line
-    // folds the panel.
+    // The title fills the row up to the two buttons. It is NOT a collapse
+    // trigger: a stray click on the title while working on the canvas folded
+    // the whole panel and read as a crash. Only the chevron folds it.
     const float title_w = std::max(1.0f, avail - 2.0f * btn - 2.0f * space);
 
     const ImVec2 title_origin = ImGui::GetCursorScreenPos();
-    const bool   title_hit    = ImGui::InvisibleButton("##gizmo_dock_title", ImVec2(title_w, btn));
+    ImGui::InvisibleButton("##gizmo_dock_title", ImVec2(title_w, btn));
     const bool   title_hover  = ImGui::IsItemHovered();
 
     // Draw the title text over its own hit area, vertically centred in the row.
@@ -596,7 +600,7 @@ bool GLGizmoBase::dock_render_titlebar(const std::string &title)
         dl->PopClipRect();
     }
 
-    bool toggled_collapse = title_hit;
+    bool toggled_collapse = false;
 
     ImGui::SameLine(0.f, space);
     if (render_dock_icon_button("##gizmo_dock_chevron", /*pin=*/false, /*active=*/!m_collapsed,
