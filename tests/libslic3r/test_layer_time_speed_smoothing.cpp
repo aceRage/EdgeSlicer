@@ -1,5 +1,6 @@
 #include <catch2/catch.hpp>
 
+#include "libslic3r/GCode/LayerTimeSpeedSmoothingFilter.hpp"
 #include "libslic3r/LayerTimeSpeedSmoothing.hpp"
 #include "libslic3r/Preset.hpp"
 #include "libslic3r/PrintConfig.hpp"
@@ -296,5 +297,43 @@ TEST_CASE("Layer time speed smoothing keys are process preset options", "[LayerT
     for (const char *key : wanted) {
         const bool found = std::find(keys.begin(), keys.end(), key) != keys.end();
         REQUIRE(found);
+    }
+}
+
+TEST_CASE("Layer time speed smoothing S3 stub: Off is identity", "[LayerTimeSpeedSmoothing][GCode]")
+{
+    PrintConfig cfg;
+    REQUIRE(cfg.layer_time_speed_smoothing.value == ltssmOff);
+
+    LayerTimeSpeedSmoothingFilter filter(cfg);
+    REQUIRE_FALSE(filter.enabled());
+
+    const std::string gcode = "G1 X10 Y10 F3000\nG1 X20 E0.4 F1800\n";
+    REQUIRE(filter.process_layer(std::string(gcode)) == gcode);
+    REQUIRE(filter.process_layer(std::string()) == "");
+}
+
+TEST_CASE("Layer time speed smoothing S3 stub: enabled modes emit factor=1 and do not rewrite F", "[LayerTimeSpeedSmoothing][GCode]")
+{
+    const LayerTimeSpeedSmoothMode modes[] = {ltssmSpeedUpExcludeOuter, ltssmSpeedUpAll, ltssmSlowDown};
+    for (LayerTimeSpeedSmoothMode mode : modes) {
+        DYNAMIC_SECTION("mode " << int(mode))
+        {
+            PrintConfig cfg;
+            cfg.layer_time_speed_smoothing.value = mode;
+
+            LayerTimeSpeedSmoothingFilter filter(cfg);
+            REQUIRE(filter.enabled());
+
+            const std::string gcode = "G1 X10 Y10 F3000\nG1 X20 E0.4 F1800\n";
+            const std::string out   = filter.process_layer(std::string(gcode));
+
+            const std::string comment = LayerTimeSpeedSmoothingFilter::format_comment(1.0, 0.0, 0.0);
+            REQUIRE(comment == "; LAYER_TIME_SPEED_SMOOTH factor=1.000 t_raw=0.00 t_out=0.00\n");
+            REQUIRE(out == comment + gcode);
+            REQUIRE(out.find("F3000") != std::string::npos);
+            REQUIRE(out.find("F1800") != std::string::npos);
+            REQUIRE(filter.process_layer(std::string()) == "");
+        }
     }
 }
