@@ -3351,3 +3351,502 @@ TEST_CASE("Draw cut: the inside field follows the band and core surface", "[Draw
     REQUIRE_FALSE(draw_cut_classify_upper(cutter, true, Vec3d(0.0, 0.0, 0.5 * CUBE - 10.0)));
     REQUIRE_FALSE(draw_cut_classify_upper(cutter, true, Vec3d(18.0, 0.0, 0.5 * CUBE - 2.0)));
 }
+
+// ---------------------------------------------------------------------------
+// THE REAL CYLINDER. 2026-09-13, owner click-test of the flat-core cut.
+//
+// Everything above this line builds its strokes by hand on a mesh built by hand:
+// 96 clean samples, exact radii, no jitter, a symmetric wave that cancels, and
+// a mesh that already sits in the cut plane's frame. The gizmo produces none of
+// those things, which is why the suite could pass 68/68 while the feature was
+// unusable on the owner's screen.
+//
+// This fixture is the gizmo's own article and the gizmo's own pipeline:
+//
+//   - the mesh comes out of tests/data/cylinder_drawcut.3mf via Model::read_from_file
+//     and is transformed the way GLGizmoCut3D::curved_instance_mesh_in_plane() does
+//     (instance matrix * volume matrix, then world -> plane). The 3mf instance
+//     carries a 2.88 UNIFORM SCALE over a r = 13.5 / h = 27 primitive, so the mesh
+//     the gizmo hands to DrawCut is r ~= 38.9 / h ~= 77.8, not the r = 13.5 stored
+//     in the file. A fixture built from the raw volume mesh tests a different part;
+//   - the stroke is hundreds of samples at a fraction of a millimetre spacing, each
+//     PROJECTED ONTO THE MESH (AABBMesh closest point) the way MeshRaycaster does -
+//     so a point lands on a FACET, i.e. slightly inside the true radius on a faceted
+//     barrel - with the facet own normal and a little jitter, wandering in z and
+//     with one inward dent. A hand-drawn line, not a parametric curve.
+// ---------------------------------------------------------------------------
+
+// The cylinder from the 3mf, in the CUT PLANE frame, exactly as the gizmo
+// composes it: world_to_plane * instance * volume, with the plane at the object
+// centre and unrotated (the gizmo default when the user opens the tool).
+static indexed_triangle_set cylinder_3mf_in_plane(Vec3d* plane_centre = nullptr)
+{
+    static indexed_triangle_set cached;
+    static Vec3d                cached_centre = Vec3d::Zero();
+    if (cached.empty()) {
+        Model model;
+        const std::string path = std::string(TEST_DATA_DIR) + "/cylinder_drawcut.3mf";
+        DynamicPrintConfig cfg;
+        ConfigSubstitutionContext ctx(ForwardCompatibilitySubstitutionRule::EnableSilent);
+        bool ok = false;
+        try {
+            // LoadModel is not implied by AddDefaultInstances: without it the 3mf
+            // importer parses the plate map and drops every object ("can not find
+            // object from plate's obj_map"), leaving an empty Model. Silence keeps the
+            // importer's own progress chatter out of the test log.
+            model = Model::read_from_file(path, &cfg, &ctx,
+                                          LoadStrategy::LoadModel | LoadStrategy::AddDefaultInstances |
+                                          LoadStrategy::Silence);
+            ok = !model.objects.empty();
+        } catch (const std::exception&) {
+            ok = false;
+        }
+        REQUIRE(ok);
+
+        const ModelObject* mo = model.objects.front();
+        REQUIRE(!mo->instances.empty());
+        const Transform3d inst = mo->instances.front()->get_transformation().get_matrix();
+
+        indexed_triangle_set merged;
+        for (const ModelVolume* mv : mo->volumes) {
+            if (!mv->is_model_part() || mv->mesh().empty())
+                continue;
+            indexed_triangle_set part = mv->mesh().its;
+            its_transform(part, inst * mv->get_matrix());
+            its_merge(merged, part);
+        }
+        REQUIRE_FALSE(merged.empty());
+
+        // The plane centre: the object bbox centre, which is where the gizmo drops
+        // the plane when the tool opens. The rotation is identity there.
+        BoundingBoxf3 bb;
+        for (const Vec3f& v : merged.vertices)
+            bb.merge(v.cast<double>());
+        cached_centre = bb.center();
+        for (Vec3f& v : merged.vertices)
+            v = (v.cast<double>() - cached_centre).cast<float>();
+        cached = std::move(merged);
+    }
+    if (plane_centre != nullptr)
+        *plane_centre = cached_centre;
+    return cached;
+}
+
+// The mean barrel radius of the 3mf cylinder in the plane frame - taken from the
+// mesh rather than hard-coded, so the fixture follows the file.
+static double cylinder_3mf_radius(const indexed_triangle_set& cyl)
+{
+    double sum = 0.0;
+    size_t n = 0;
+    for (const Vec3f& v : cyl.vertices) {
+        const double r = std::hypot(double(v.x()), double(v.y()));
+        if (r > 1e-6) { sum += r; ++ n; }
+    }
+    return n > 0 ? sum / double(n) : 0.0;
+}
+
+static double cylinder_3mf_half_height(const indexed_triangle_set& cyl)
+{
+    double h = 0.0;
+    for (const Vec3f& v : cyl.vertices)
+        h = std::max(h, std::abs(double(v.z())));
+    return h;
+}
+
+// A deterministic little PRNG, so the hand-drawn jitter is the same every run.
+struct TinyRand
+{
+    uint32_t s{ 0x13572468u };
+    double   next() { s = s * 1664525u + 1013904223u; return double(s >> 8) / double(1 << 24) - 0.5; }
+};
+
+// THE OWNER LINE, as the gizmo would have captured it: 400 raw samples round the
+// barrel, wandering z0 + 2.5*sin(2 theta), one ~4 mm inward dent over 30 degrees,
+// 0.05 mm of jitter, each sample projected onto the mesh with the facet own normal.
+static DrawCutStroke owner_loop_on_3mf_cylinder(const indexed_triangle_set& cyl,
+                                                double r, double z0,
+                                                int n = 400, double jitter = 0.05,
+                                                double dent_mm = 4.0)
+{
+    // AABBMesh keeps a RAW POINTER to the mesh it was built from (m_tm), so it must
+    // outlive the AABBMesh: building one from a TriangleMesh temporary dangles and
+    // segfaults on the first query. Bind the mesh to a named local.
+    const TriangleMesh tm(cyl);
+    AABBMesh aabb{ tm };
+    TinyRand rnd;
+
+    DrawCutStroke stroke;
+    for (int i = 0; i < n; ++ i) {
+        const double th = 2.0 * M_PI * double(i) / double(n);
+        // The dent: ~4 mm in, over 30 degrees centred on theta = 200 deg.
+        const double dent_c = 200.0 * M_PI / 180.0;
+        double dd = th - dent_c;
+        while (dd >  M_PI) dd -= 2.0 * M_PI;
+        while (dd < -M_PI) dd += 2.0 * M_PI;
+        const double half = 15.0 * M_PI / 180.0;
+        const double dent = std::abs(dd) < half ? dent_mm * 0.5 * (1.0 + std::cos(M_PI * dd / half)) : 0.0;
+
+        const double rr = r - dent + jitter * rnd.next();
+        const double z  = z0 + 2.5 * std::sin(2.0 * th) + jitter * rnd.next();
+        const Vec3d  q(rr * std::cos(th), rr * std::sin(th), z);
+
+        // Project onto the mesh the way the gizmo raycaster does.
+        Vec3d hit = q;
+        Vec3d nrm(std::cos(th), std::sin(th), 0.0);
+        {
+            int fi = -1;
+            Vec3d cpt = q;
+            aabb.squared_distance(q, fi, cpt);
+            if (fi >= 0) {
+                hit = cpt;
+                const Vec3i32& f = cyl.indices[size_t(fi)];
+                const Vec3d a = cyl.vertices[size_t(f(0))].cast<double>();
+                const Vec3d b = cyl.vertices[size_t(f(1))].cast<double>();
+                const Vec3d c = cyl.vertices[size_t(f(2))].cast<double>();
+                const Vec3d fn = (b - a).cross(c - a);
+                if (fn.norm() > 1e-12)
+                    nrm = fn.normalized();
+            }
+        }
+        stroke.append(hit, nrm, size_t(i));
+    }
+    // Come back to the start, the way a hand-drawn loop closes.
+    stroke.append(stroke.samples().front().pos, stroke.samples().front().normal, 0);
+    return stroke;
+}
+
+// The stroke the gizmo hands to DrawCut: chain -> finish -> re-project onto the
+// mesh (the gizmo reproject_draw_path_onto_mesh, which runs AFTER finish because
+// smoothing is what moves the samples off the surface).
+static DrawCutStroke finish_like_gizmo(const DrawCutStroke& raw, const indexed_triangle_set& cyl,
+                                       double smoothing = 0.2)
+{
+    DrawCutChain chain;
+    chain.set_samples(raw.samples(), /*closed*/ true);
+
+    DrawCutStroke out;
+    REQUIRE(chain.finish(out, DrawCutStroke::DefaultSpacing, smoothing) == DrawCutError::None);
+    REQUIRE(out.is_closed());
+
+    // The gizmo re-projection, which libslic3r own smoother cannot do.
+    // AABBMesh keeps a RAW POINTER to the mesh it was built from (m_tm), so it must
+    // outlive the AABBMesh: building one from a TriangleMesh temporary dangles and
+    // segfaults on the first query. Bind the mesh to a named local.
+    const TriangleMesh tm(cyl);
+    AABBMesh aabb{ tm };
+    std::vector<DrawCutSample> path = out.path();
+    for (DrawCutSample& s : path) {
+        int fi = -1;
+        Vec3d cpt = s.pos;
+        aabb.squared_distance(s.pos, fi, cpt);
+        if (fi < 0)
+            continue;
+        s.pos = cpt;
+        const Vec3i32& f = cyl.indices[size_t(fi)];
+        const Vec3d a = cyl.vertices[size_t(f(0))].cast<double>();
+        const Vec3d b = cyl.vertices[size_t(f(1))].cast<double>();
+        const Vec3d c = cyl.vertices[size_t(f(2))].cast<double>();
+        const Vec3d fn = (b - a).cross(c - a);
+        if (fn.norm() > 1e-12)
+            s.normal = fn.normalized();
+        s.facet = size_t(fi);
+    }
+    out.set_path(path);
+    return out;
+}
+
+// The owner parameters for screenshots 1-4: Angle 30, Depth 3, Extension on,
+// Through all OFF.
+static DrawCutParams owner_params()
+{
+    DrawCutParams p;
+    p.direction   = DrawCutDirection::SurfaceNormal;
+    p.extension   = 5.0;
+    p.angle_deg   = 30.0;
+    p.depth       = 3.0;
+    p.through_all = false;
+    return p;
+}
+
+TEST_CASE("Draw cut: the 3mf cylinder fixture is the part the gizmo sees", "[DrawCut]")
+{
+    Vec3d centre;
+    const indexed_triangle_set cyl = cylinder_3mf_in_plane(&centre);
+    REQUIRE(watertight(cyl));
+
+    // The 3mf instance carries a 2.88 uniform scale over a r = 13.5 / h = 27
+    // primitive, so the part the gizmo works on is ~78 mm across and ~78 tall.
+    const double r = cylinder_3mf_radius(cyl);
+    const double h = cylinder_3mf_half_height(cyl);
+    INFO("radius " << r << " half height " << h);
+    REQUIRE(r > 30.0);
+    REQUIRE(r < 45.0);
+    REQUIRE(h == Approx(r).epsilon(0.05));
+}
+
+TEST_CASE("Draw cut: a dense hand-drawn loop round the 3mf cylinder does not fold", "[DrawCut]")
+{
+    const indexed_triangle_set cyl = cylinder_3mf_in_plane();
+    const double r = cylinder_3mf_radius(cyl);
+
+    const DrawCutStroke raw = owner_loop_on_3mf_cylinder(cyl, r, 0.0);
+    const DrawCutStroke stroke = finish_like_gizmo(raw, cyl);
+
+    // The line is long (a circumference of ~245 mm at 1 mm spacing), which is where
+    // the hand-built 96-sample fixtures stop resembling it.
+    REQUIRE(stroke.path().size() > 150);
+    REQUIRE_FALSE(draw_cut_self_crossing(stroke));
+
+    const DrawCutParams params = owner_params();
+
+    // SYMPTOM 4: the gizmo fold warning. draw_cut_strip_folds() is a RULED STRIP
+    // test, and the closed-loop path has not used a ruled strip since phase 3 - so
+    // running it on a dense jittery loop scores the jitter own curvature (a fraction
+    // of a millimetre between samples is a curvature of several 1/mm) and the warning
+    // fires on a perfectly gentle line.
+    double kappa = 0.0;
+    const bool folds = draw_cut_band_folds(stroke, params);
+    INFO("worst kappa " << kappa);
+    REQUIRE_FALSE(folds);
+}
+
+TEST_CASE("Draw cut: the core of a real loop is one triangulated plate", "[DrawCut]")
+{
+    // SYMPTOM 1: the preview core had a PIE WEDGE MISSING.
+    const indexed_triangle_set cyl = cylinder_3mf_in_plane();
+    const double r = cylinder_3mf_radius(cyl);
+
+    const DrawCutStroke stroke = finish_like_gizmo(owner_loop_on_3mf_cylinder(cyl, r, 0.0), cyl);
+    const DrawCutParams params = owner_params();
+
+    BoundingBoxf3 bb;
+    for (const Vec3f& v : cyl.vertices)
+        bb.merge(v.cast<double>());
+
+    const indexed_triangle_set cutter = draw_cut_cutter_solid(stroke, params, bb, 0.0, &cyl);
+    REQUIRE_FALSE(cutter.empty());
+    REQUIRE(watertight(cutter));
+
+    Vec3d n, c;
+    REQUIRE(draw_cut_core_face(stroke, params, bb, n, c));
+
+    // THE CORE AREA. The core is the loop inset by depth * cos(angle) in the plane,
+    // so on a barrel of radius r the core is a disc of radius r - depth*cos(angle),
+    // and the triangles that lie ON the core plane must add up to that area. A
+    // missing wedge shows here as a shortfall.
+    const double inset   = params.depth * std::cos(params.angle_deg * M_PI / 180.0);
+    const double expect  = M_PI * (r - inset) * (r - inset);
+
+    double core_area = 0.0;
+    for (const Vec3i32& f : cutter.indices) {
+        const Vec3d a = cutter.vertices[size_t(f(0))].cast<double>();
+        const Vec3d b = cutter.vertices[size_t(f(1))].cast<double>();
+        const Vec3d d = cutter.vertices[size_t(f(2))].cast<double>();
+        if (std::abs((a - c).dot(n)) > 0.05 || std::abs((b - c).dot(n)) > 0.05 ||
+            std::abs((d - c).dot(n)) > 0.05)
+            continue;
+        core_area += 0.5 * (b - a).cross(d - a).norm();
+    }
+    INFO("core area " << core_area << " expected " << expect << " (r " << r << " inset " << inset << ")");
+    REQUIRE(core_area == Approx(expect).epsilon(0.02));
+}
+
+TEST_CASE("Draw cut: the band of a real loop follows the drawn wave", "[DrawCut]")
+{
+    // SYMPTOM 2 and 4: the coloured surface after the cut was a flat horizontal slab
+    // with stair-stepped edges, not the wavy line the user drew - and in side view
+    // the whole surface was one tilted flat plate.
+    const indexed_triangle_set cyl = cylinder_3mf_in_plane();
+    const double r = cylinder_3mf_radius(cyl);
+
+    const DrawCutStroke stroke = finish_like_gizmo(owner_loop_on_3mf_cylinder(cyl, r, 0.0), cyl);
+    const DrawCutParams params = owner_params();
+
+    BoundingBoxf3 bb;
+    for (const Vec3f& v : cyl.vertices)
+        bb.merge(v.cast<double>());
+
+    Vec3d n, c;
+    REQUIRE(draw_cut_core_face(stroke, params, bb, n, c));
+    // The core normal is the barrel axis for a loop round it.
+    REQUIRE(std::abs(std::abs(n.z()) - 1.0) < 0.05);
+
+    // THE BAND STARTS ON THE DRAWN LINE. Every path sample own height must follow
+    // z0 + 2.5*sin(2 theta) to within 0.3 mm - which is what "the surface follows the
+    // wavy line" means at the top of the band.
+    double worst = 0.0;
+    for (const DrawCutSample& s : stroke.path()) {
+        const double th = std::atan2(s.pos.y(), s.pos.x());
+        worst = std::max(worst, std::abs(s.pos.z() - 2.5 * std::sin(2.0 * th)));
+    }
+    INFO("worst wave deviation " << worst);
+    REQUIRE(worst < 0.3);
+
+    // AND THE BAND DESCENDS AT THE LIP ANGLE. From the drawn line to the core plate
+    // the surface drops depth*sin(angle) while travelling depth*cos(angle) inward, so
+    // the core plate sits that far below the line MEAN height.
+    const double drop = params.depth * std::sin(params.angle_deg * M_PI / 180.0);
+    double mean_z = 0.0;
+    for (const DrawCutSample& s : stroke.path())
+        mean_z += s.pos.z();
+    mean_z /= double(stroke.path().size());
+    const double core_h = (c.z() - mean_z);
+    INFO("core sits " << core_h << " from the line mean, expected " << -drop);
+    REQUIRE(core_h == Approx(-drop).margin(0.25));
+
+    // THE BAND IS NOT A SLAB, measured on the CUT rather than on the cutter. The
+    // owner's symptom 2 was that the coloured surface came back as "a thin horizontal
+    // cyan ring", i.e. a flat slab at one height: so take the mating face of the lower
+    // half - the vertices NOT on the flat core - and ask whether the boundary between
+    // the two halves follows the wave.
+    //
+    // The clean way to ask that is by HEIGHT BAND: at every angle round the barrel,
+    // the highest vertex of the lower half that is still on the skin must sit at
+    // z0 + 2.5*sin(2 theta), which for a slab would be one constant height. Binning by
+    // angle and taking the spread of those maxima separates a wavy boundary (spread
+    // ~= 5 mm, the wave peak to peak) from a flat one (spread ~= 0).
+    indexed_triangle_set half_u, half_l;
+    REQUIRE(draw_cut_split(cyl, stroke, params, &half_u, &half_l, nullptr));
+
+    const int    bins = 36;
+    std::vector<double> top(size_t(bins), -1e9);
+    for (const Vec3f& v : half_u.vertices) {
+        const double rad = std::hypot(double(v.x()), double(v.y()));
+        if (rad < r - 1.0)
+            continue;                 // not on the barrel skin
+        double th = std::atan2(double(v.y()), double(v.x()));
+        if (th < 0.0) th += 2.0 * M_PI;
+        const size_t b = std::min(size_t(bins - 1), size_t(th / (2.0 * M_PI) * bins));
+        top[b] = std::max(top[b], double(v.z()));
+    }
+    double tmin = 1e9, tmax = -1e9;
+    size_t filled = 0;
+    for (double t : top)
+        if (t > -1e8) { tmin = std::min(tmin, t); tmax = std::max(tmax, t); ++ filled; }
+    INFO("skin boundary over " << filled << " bins: " << tmin << " .. " << tmax);
+    REQUIRE(filled > 30);
+
+    // HOW MUCH WAVE SURVIVES TO THE SKIN, and why it is not the whole 5 mm.
+    //
+    // The band runs as a straight segment from the OUTER ring - the drawn line pushed
+    // `extension` out along the skin normal, so radius r + E, at the line's own wavy
+    // height - to the INNER ring, which is flat, on the core plane depth*sin(angle)
+    // below the line's mean. The part of it the boolean actually sees is where it
+    // crosses the skin, at radius r, and the wave arrives there LINEARLY INTERPOLATED
+    // towards that flat inner ring:
+    //
+    //   t   = (r + E - r) / ((r + E) - (r - inset))  =  E / (E + inset)
+    //   amp = (1 - t) * the line's own amplitude
+    //
+    // At E = 5, Depth 3, Angle 30 (inset 2.60) that is t = 0.66, so about a third of
+    // the wave survives - ~1.7 mm peak to peak. The owner's symptom was a HORIZONTAL
+    // SLAB, spread zero to the pixel, so what this test must separate is "a third of
+    // the wave" from "none of it"; asserting the full 5 mm would be asserting geometry
+    // the surface does not have and never did.
+    const double inset  = params.depth * std::cos(params.angle_deg * M_PI / 180.0);
+    const double t_skin = params.extension / (params.extension + inset);
+    const double expect = (1.0 - t_skin) * 2.0 * 2.5;   // amplitude 2.5, peak to peak
+    INFO("expected surviving wave " << expect);
+    REQUIRE(tmax - tmin == Approx(expect).epsilon(0.25));
+    // And, plainly: not a slab.
+    REQUIRE(tmax - tmin > 1.0);
+}
+
+TEST_CASE("Draw cut: a real wrap-around loop separates the 3mf cylinder", "[DrawCut]")
+{
+    // SYMPTOM 3: "The stroke does not separate the part". A loop that goes all the
+    // way round the barrel DOES separate it, and both draw_cut_empty_sides() (the
+    // panel cheap pre-check) and draw_cut_split() must say so.
+    const indexed_triangle_set cyl = cylinder_3mf_in_plane();
+    const double r  = cylinder_3mf_radius(cyl);
+    const double hh = cylinder_3mf_half_height(cyl);
+    const double cyl_volume = double(its_volume(cyl));
+
+    const DrawCutStroke stroke = finish_like_gizmo(owner_loop_on_3mf_cylinder(cyl, r, 0.0), cyl);
+    const DrawCutParams params = owner_params();
+
+    bool up_empty = true, lo_empty = true;
+    draw_cut_empty_sides(cyl, stroke, params, up_empty, lo_empty);
+    INFO("upper empty " << up_empty << " lower empty " << lo_empty);
+    REQUIRE_FALSE(up_empty);
+    REQUIRE_FALSE(lo_empty);
+
+    indexed_triangle_set upper, lower;
+    DrawCutError err = DrawCutError::None;
+    REQUIRE(draw_cut_split(cyl, stroke, params, &upper, &lower, &err));
+    REQUIRE(err == DrawCutError::None);
+    REQUIRE(watertight(upper));
+    REQUIRE(watertight(lower));
+
+    const double a = double(its_volume(upper));
+    const double b = double(its_volume(lower));
+    REQUIRE(a > 0.0);
+    REQUIRE(b > 0.0);
+    REQUIRE(a + b == Approx(cyl_volume).epsilon(0.02));
+
+    // THE SPLIT IS WHERE THE LINE IS. The loop sits at the cylinder mid height, so
+    // the two halves are near enough equal - within 55/45.
+    const double frac = std::min(a, b) / (a + b);
+    INFO("volumes " << a << " / " << b << " (min fraction " << frac << ", half height " << hh << ")");
+    REQUIRE(frac > 0.45);
+}
+
+TEST_CASE("Draw cut: Through all on a real loop is a straight prism, not an hourglass", "[DrawCut]")
+{
+    // SYMPTOM 5: the tapered wall converged to a point below the loop and re-expanded
+    // into a second cone. Through all now extrudes the loop STRAIGHT along the core
+    // normal in both directions - no taper, so no convergence and no hourglass.
+    const indexed_triangle_set cyl = cylinder_3mf_in_plane();
+    const double r = cylinder_3mf_radius(cyl);
+    const double cyl_volume = double(its_volume(cyl));
+
+    const DrawCutStroke stroke = finish_like_gizmo(owner_loop_on_3mf_cylinder(cyl, r, 0.0), cyl);
+
+    DrawCutParams params = owner_params();
+    params.through_all = true;   // Angle and Depth are ignored from here on.
+
+    BoundingBoxf3 bb;
+    for (const Vec3f& v : cyl.vertices)
+        bb.merge(v.cast<double>());
+
+    const indexed_triangle_set cutter = draw_cut_cutter_solid(stroke, params, bb, 0.0, &cyl);
+    REQUIRE_FALSE(cutter.empty());
+    REQUIRE(watertight(cutter));
+
+    // NO HOURGLASS: every vertex of the cutter wall is at the radius of the loop
+    // point it came from, whatever its height. A taper would show as a radius that
+    // shrinks with distance from the loop; an hourglass as one that shrinks past zero
+    // and grows again.
+    Vec3d n, c0;
+    REQUIRE(draw_cut_core_plane(stroke, params, n, c0));
+    double r_min = std::numeric_limits<double>::max(), r_max = 0.0;
+    for (const Vec3f& v : cutter.vertices) {
+        const Vec3d q = v.cast<double>() - c0;
+        const double rad = (q - q.dot(n) * n).norm();
+        // The two end caps are fanned from their rings' own centroids, which sit ON
+        // the axis - so they are near zero radius rather than exactly zero, and a
+        // 1e-6 guard lets them through and makes r_min meaningless. The WALL is what
+        // is being measured; anything within half the loop's radius of the axis is
+        // not on it.
+        if (rad < 0.5 * r)
+            continue;
+        r_min = std::min(r_min, rad);
+        r_max = std::max(r_max, rad);
+    }
+    INFO("cutter wall radius " << r_min << " .. " << r_max << " (loop r " << r << ")");
+    REQUIRE(r_min > 0.8 * r);
+    REQUIRE(r_max < 1.2 * r);
+
+    indexed_triangle_set upper, lower;
+    REQUIRE(draw_cut_split(cyl, stroke, params, &upper, &lower, nullptr));
+    REQUIRE(watertight(upper));
+    REQUIRE(watertight(lower));
+    const double a = double(its_volume(upper));
+    const double b = double(its_volume(lower));
+    REQUIRE(a + b == Approx(cyl_volume).epsilon(0.02));
+    const double frac = std::min(a, b) / (a + b);
+    INFO("through-all volumes " << a << " / " << b << " frac " << frac);
+    REQUIRE(frac > 0.48);
+}
+
+

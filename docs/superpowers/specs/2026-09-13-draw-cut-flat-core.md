@@ -349,3 +349,141 @@ however it was cut. Asserting the two bboxes do not overlap asks the complement 
 something it never is. What the tests check instead is the slab's own extent plus the two
 volumes. The same applies doubly to a wavy loop, where the wall is wavy and the halves
 interleave by the amplitude at their boundary by construction.
+
+---
+
+# Phase 3b — what the real cylinder showed
+
+Branch `fix/draw-cut-real-cylinder`, off `feat/ultra-preferences` at 04571b3426. Second
+owner click-test, 2026-09-13, on `tests/data/cylinder_drawcut.3mf`: a wavy loop all the way
+round a ~78 mm barrel, Depth 3, Angle ~30, Extension on, Through all off (and once on).
+
+The `[DrawCut]` suite was 68/68 green throughout. **It was green because none of its
+fixtures resembled what the gizmo makes.** Every closed-loop fixture was 96 clean samples at
+an exact radius, with a symmetric wave that cancels, on a mesh built in the cut plane's own
+frame. The gizmo hands DrawCut a few hundred samples at a millimetre spacing, each landing
+on a facet with raycast noise on it, on a mesh that has been through an instance transform
+(the 3mf instance carries a 2.88 uniform scale, so the part is r 38.9 / h 77.8, not the
+r 13.5 stored in the file), with a dent in the line and a wave that does not cancel.
+
+Five symptoms, five separate causes.
+
+## 1. The core plate with a pie wedge missing
+
+The core was a TRIANGLE FAN from the mean of the inner ring. A fan is a valid triangulation
+only of a polygon that is **star-shaped about the fan centre**. Travelling `depth*cos(angle)`
+inward from a loop with a 4 mm dent pulls the dent past its neighbours and the inner ring
+locally self-touches; the fan triangles over that stretch come out zero-area or wound
+backwards, and the winding repair at the end of the builder then reads that as material
+missing. On the idealised fixtures the inset ring is always a convex near-circle, so a fan is
+always correct there and the bug cannot appear.
+
+`build_core_plate()` replaces it: project the inner ring onto the core plane, make it simple
+with a **non-zero union** (Clipper resolves the self-touch rather than folding over it), keep
+the **largest contour**, and triangulate the interior with the codebase own tesselator. The
+plate hands back both its triangles and the ring they are bounded by, and the band is stitched
+to *that* ring - two closed curves of different lengths walked together by in-plane angle - so
+the join is one shared curve by construction.
+
+Two traps inside that, both of which cost a build:
+
+- `triangulate_expolygon_2d()` returns **unscaled millimetres**, unlike the `Polygon` it is
+  given. Unscaling again put the whole plate within a micron of the origin, and the vertex
+  dedup then collapsed every triangle: 0 plate triangles, 63 open edges;
+- the plate boundary vertices must be the **same indices** the band was stitched to, and its
+  winding must be the **reverse** of the stitch traversal of that ring. The stitch may have
+  reversed the ring to agree with the outer one, so which way the plate faces follows that
+  reversal rather than being fixed.
+
+Measured: core area 4156 mm2 against 4143 expected (0.3%), for a loop of r 38.9 inset 2.60.
+
+## 2 and 3. The thin cyan ring, and "the stroke does not separate the part"
+
+One cause. A band-and-core surface is an open dish, and it was **always** closed into a plug -
+cap the outer ring over the top. For a loop drawn all the way ROUND the part that dish spans
+the whole section at that height, so capping it makes a **plate lying across the part**, not a
+plug in it. The intersection of a plate with a cylinder is a thin slab (the cyan ring, its
+jagged edge being the band own facets), and the complement of a slab out of the middle of a
+cylinder is ONE connected piece - so nothing was separated and the panel said exactly that.
+
+The band-and-core path now asks `draw_cut_loop_separates()` the same question Through all was
+already asking, and closes the dish **downwards** for a wrap: a skirt from the outer ring along
+`-n` past the part, capped. The solid is then "everything below the drawn surface", the
+intersection is the lower half bounded above by the band and the core, and the complement is
+the upper half.
+
+Measured on the fixture: 178136 / 192067 mm3, i.e. 48.1 / 51.9 for a loop at mid height.
+
+Watertightness of a two-ring stitch is entirely a question of edge DIRECTION, not edge count.
+The band stitch walks the outer ring as `O(i+1) -> O(i)`, so the plug cap and the wrap skirt
+must both walk it as `O(i) -> O(i+1)`; getting the skirt backwards left 492 open edges on a
+246-sample loop while `its_num_open_edges()` counted the ring twice and every boolean refused
+the solid.
+
+## 4. "The line turns tighter than the cut surface reaches sideways"
+
+`draw_cut_strip_folds()` is a test about the **ruled strip**, which a closed loop has not used
+since phase 3. `draw_cut_split()` already skipped it for closed strokes; the **gizmo ran it on
+every stroke**, so the preview warned about a fold the cut did not have.
+
+And on a dense stroke it does not measure the line shape at all. Discrete curvature from three
+consecutive samples is `4*area/(|ab||bc||ca|)`, which on samples a millimetre apart with a few
+hundredths of a millimetre of raycast noise reads several 1/mm - the **jitter** curvature.
+Times any Extension over 1 mm and the warning fires on any hand-drawn line whatever its shape.
+
+`draw_cut_band_folds()` asks each kind of stroke the question its own surface can fail. A
+closed loop can only over-inset: the band travels `depth*cos(angle)` toward the loop axis, so
+it folds when that reaches the loop own in-plane radius - measured at the **5th percentile** of
+the sample radii, not the minimum, so one stray sample or the bottom of a deliberate dent does
+not condemn a loop that is 38 mm everywhere else. An open stroke still gets the strip test, on
+a **smoothed** copy of the path for the same jitter reason.
+
+The panel wording splits with it. Telling someone whose core has been eaten to "reduce the
+Angle" sends them the wrong way: the inset is `depth*cos(angle)`, so a **larger** angle insets
+less.
+
+## 5. The hourglass — and the decision about Through all
+
+The through-all wall leaned inward by `reach*tan(angle)` per side with `reach` a whole bbox
+diagonal, so at any angle past a couple of degrees the lateral travel was tens of millimetres
+on a part tens of millimetres across. The inset went through zero, the ring inverted, and the
+result was two cones meeting at a point. The 90%-of-min-radius cap was meant to prevent it,
+but a cap taken from ONE number cannot serve a loop whose radius varies: with a dent the min_r
+is nothing like the radius elsewhere, so the cap either failed to bite or crushed the ring.
+
+**DECISION, made for the owner.** Through all means the loop extruded **straight along the
+core-plane normal** through the whole part in both directions. No taper, so no convergence and
+no hourglass. **Angle and Depth are ignored** and the gizmo greys both out while it is ticked -
+greyed, not hidden, so the panel does not jump a row and the user can still see the values they
+get back on unticking.
+
+What the decision does *not* remove is the wrap/plug question, and that is the easy thing to
+get wrong here. The taper is why the old wrap solid **leaned**; it is not why a wrap needed a
+different solid. A prism through a loop that goes right round the part **contains the whole
+part**, tapered or not, so its intersection is everything and its complement nothing. A wrap
+still gets a half-space: the same straight wall run one way only, capped beyond the part. A
+plug gets the prism, both ways. `draw_cut_loop_separates()` therefore stays, and is now read by
+both surfaces rather than only by Through all.
+
+Measured: wall radius 38.87 .. 38.98 for a loop of r 38.92 (a prism, to a tenth of a
+millimetre), and a split of 185112 / 185092 mm3 - 50.0 / 50.0.
+
+## What the tests are now
+
+Six cases built from the 3mf, running the functions the gizmo runs in the order it runs them:
+`Model::read_from_file` (with `LoadStrategy::LoadModel`, without which the importer drops every
+object and hands back an empty Model), the instance transform, a 400-sample loop with a 4 mm
+dent and 0.05 mm of jitter projected onto the mesh, `DrawCutChain::finish()`, and the gizmo
+re-projection afterwards.
+
+A trap in the fixture itself, worth recording because it is a segfault rather than a wrong
+number: **`AABBMesh` keeps a raw pointer to the mesh it was built from**, so
+`AABBMesh aabb{ TriangleMesh(cyl) }` binds to a temporary that dies immediately, and every
+query after it reads freed memory.
+
+One assertion deliberately measures less than it first looks like it should. The wave that
+survives to the SKIN is not the line full amplitude: the band is a straight segment from the
+outer ring (radius `r + E`, at the line wavy height) to the flat inner ring, so where it
+crosses radius `r` the wave has been interpolated down by `E / (E + inset)` - about a third of
+it at E 5, Depth 3, Angle 30. The test asserts that third, and separately asserts it is not
+zero, because zero is the slab the owner saw.
