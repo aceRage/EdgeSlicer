@@ -1412,6 +1412,9 @@ void MainFrame::init_tabpanel() {
         m_param_panel = new ParamsPanel(m_tabpanel, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxBK_LEFT | wxTAB_TRAVERSAL);
       
     }
+    // The splash is ticked before the heavy constructors (Plater is the last one left
+    // in this function: Monitor/Calibration are deferred to first show). Free after startup.
+    wxGetApp().tick_splash_animation();
     {
         Slic3r::StartupScopedTimer t("MainFrame::init_tabpanel step=Plater");
         m_plater = new Plater(this, this);
@@ -1427,6 +1430,7 @@ void MainFrame::init_tabpanel() {
     }
 
         //BBS add pages
+    wxGetApp().tick_splash_animation();
     {
         // Deferred: MonitorPanel was ~620 ms of this constructor and is rarely the tab a
         // user lands on. The holder keeps tpMonitor's slot; the panel is built on the
@@ -1473,6 +1477,7 @@ void MainFrame::init_tabpanel() {
         m_tabpanel->AddPage(m_project_holder, _L("Project"), std::string("tab_auxiliary_active"), std::string("tab_auxiliary_active"), false);
     }
 
+    wxGetApp().tick_splash_animation();
     {
         // Deferred: CalibrationPanel was ~989 ms of this constructor (it builds the whole
         // wizard stack). CalibrationPanel::Show() pulls the selected machine on first

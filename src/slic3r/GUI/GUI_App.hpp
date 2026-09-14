@@ -366,6 +366,15 @@ private:
 
 public:
     HttpServer       m_page_http_server;
+
+    // Advance the startup splash animation one frame, if a splash is up. Safe (and free) to call
+    // when there is none -- after startup, or when the splash is switched off / hub-managed. Lets
+    // long blocking startup work outside GUI_App.cpp (MainFrame construction, which calls this
+    // around its expensive panel constructors) keep the splash moving without knowing anything
+    // about the splash class itself.
+    static void      tick_splash_animation();
+    // Take the startup splash down once the main frame is up. No-op when there is no splash.
+    static void      close_startup_splash();
     
 private:
     bool             m_show_gcode_window{true};

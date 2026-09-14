@@ -476,6 +476,13 @@ public:
     // Load ini files of the particular type from the provided directory path.
     void            load_presets(const std::string &dir_path, const std::string &subdir, PresetsConfigSubstitutions& substitutions, ForwardCompatibilitySubstitutionRule rule);
 
+    // Optional per-file progress hook, mirroring PresetBundle::set_progress_callback(). Null by
+    // default; PresetBundle sets it on its collections while loading user presets so a splash
+    // animation can keep moving through that (event-loop-free) phase.
+    using ProgressCallback = std::function<void()>;
+    void            set_progress_callback(ProgressCallback cb) { m_progress_callback = std::move(cb); }
+    void            notify_progress() const { if (m_progress_callback) m_progress_callback(); }
+
     //BBS: update user presets directory
     void            update_user_presets_directory(const std::string& dir_path, const std::string& type);
     void            save_user_presets(const std::string& dir_path, const std::string& type, std::vector<std::string>& need_to_delete_list);
@@ -832,6 +839,9 @@ private:
 
     // Path to the directory to store the config files into.
     std::string             m_dir_path;
+
+    // Optional progress hook; see set_progress_callback(). Null unless a GUI set one.
+    ProgressCallback        m_progress_callback;
 
     // to access select_preset_by_name_strict() and the default & copy constructors.
     friend class PresetBundle;

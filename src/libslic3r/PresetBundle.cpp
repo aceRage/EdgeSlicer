@@ -15,6 +15,7 @@
 #include <cctype>
 #include <cstdlib>
 #include <atomic>
+#include <thread>
 #include <exception>
 #include <filesystem>
 #include <memory>
@@ -396,6 +397,16 @@ void PresetBundle::copy_files(const std::string& from)
     for (const boost::filesystem::path& from_dir : from_dirs) {
         copy_dir(from_dir, data_dir /"old"/from_dir.filename());
     }
+}
+
+void PresetBundle::set_progress_callback(ProgressCallback cb)
+{
+    // The user-preset phase does its file walking inside the collections, so they need the hook
+    // as well; the system-preset phase ticks from this class directly.
+    prints.set_progress_callback(cb);
+    filaments.set_progress_callback(cb);
+    printers.set_progress_callback(cb);
+    m_progress_callback = std::move(cb);
 }
 
 PresetsConfigSubstitutions PresetBundle::load_presets(AppConfig &config, ForwardCompatibilitySubstitutionRule substitution_rule,
@@ -1491,6 +1502,7 @@ std::pair<PresetsConfigSubstitutions, std::string> PresetBundle::load_system_pre
     // Stage A: the base vendor, into *this*.
     if (!loaded_vendors.empty()) {
         const auto vendor_start = std::chrono::steady_clock::now();
+        notify_progress();
         auto       result       = load_one_vendor_into(*this, loaded_vendors.front(), nullptr);
         append(substitutions, std::move(result.first));
         errors_cummulative += result.second;
@@ -1537,17 +1549,35 @@ std::pair<PresetsConfigSubstitutions, std::string> PresetBundle::load_system_pre
             for (size_t i = 0; i < parallel_count; ++i)
                 load_index(i);
         } else {
-            tbb::parallel_for(tbb::blocked_range<size_t>(0, parallel_count, 1),
-                              [&](const tbb::blocked_range<size_t> &range) {
-                                  for (size_t i = range.begin(); i != range.end(); ++i)
-                                      load_index(i);
-                              });
+            auto run_all = [&] {
+                tbb::parallel_for(tbb::blocked_range<size_t>(0, parallel_count, 1),
+                                  [&](const tbb::blocked_range<size_t> &range) {
+                                      for (size_t i = range.begin(); i != range.end(); ++i)
+                                          load_index(i);
+                                  });
+            };
+            if (m_progress_callback) {
+                // A GUI is animating a splash from the calling thread. parallel_for would
+                // conscript that thread as a worker and freeze the animation for the whole
+                // stage, so run the workers from a helper thread and keep pumping the hook
+                // here. The workers never call the hook: pending[] bundles have no callback.
+                std::atomic<bool> done{false};
+                std::thread       runner([&] { run_all(); done.store(true); });
+                while (!done.load()) {
+                    notify_progress();
+                    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+                }
+                runner.join();
+            } else {
+                run_all();
+            }
         }
     }
 
     // Stage C: merge in the original vendor order, on the calling thread.
     for (size_t i = 0; i < parallel_count; ++i) {
         const std::string &vendor_name = loaded_vendors[i + 1];
+        notify_progress();
         if (pending_exceptions[i]) {
             // validation_mode only - the sequential loop rethrew here too.
             std::rethrow_exception(pending_exceptions[i]);
@@ -3340,6 +3370,10 @@ std::pair<PresetsConfigSubstitutions, size_t> PresetBundle::load_vendor_configs_
     //2) paste the machine model
     for (auto& machine_model : machine_model_subfiles)
     {
+        // One tick per preset file. This is the finest granularity the loader offers and the
+        // only thing that keeps a splash animation moving through this phase (no event loop runs
+        // here); the callback itself decides how often it actually repaints.
+        notify_progress();
         std::string subfile = path + "/" + vendor_name + "/" + machine_model.second;
         VendorProfile::PrinterModel model;
         model.id = machine_model.first;
@@ -3947,6 +3981,7 @@ std::pair<PresetsConfigSubstitutions, size_t> PresetBundle::load_vendor_configs_
     preparse_section("process", process_subfiles);
     for (size_t idx = 0; idx < process_subfiles.size(); ++idx)
     {
+        notify_progress();
         auto& subfile = process_subfiles[idx];
         std::string reason = parse_subfile(substitution_context, substitutions, flags, subfile, configs, filament_id_maps, presets, presets_loaded, false, doc_for(idx));
         release_doc(idx);
@@ -3973,6 +4008,7 @@ std::pair<PresetsConfigSubstitutions, size_t> PresetBundle::load_vendor_configs_
     preparse_section("filament", filament_subfiles);
     for (size_t idx = 0; idx < filament_subfiles.size(); ++idx)
     {
+        notify_progress();
         auto& subfile = filament_subfiles[idx];
         std::string reason = parse_subfile(substitution_context, substitutions, flags, subfile, configs, filament_id_maps, presets,
                                            presets_loaded, is_orca_lib, doc_for(idx));
@@ -4003,6 +4039,7 @@ std::pair<PresetsConfigSubstitutions, size_t> PresetBundle::load_vendor_configs_
     preparse_section("machine", machine_subfiles);
     for (size_t idx = 0; idx < machine_subfiles.size(); ++idx)
     {
+        notify_progress();
         auto& subfile = machine_subfiles[idx];
         std::string reason = parse_subfile(substitution_context, substitutions, flags, subfile, configs, filament_id_maps, presets, presets_loaded, false, doc_for(idx));
         release_doc(idx);

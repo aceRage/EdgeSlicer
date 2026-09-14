@@ -69,6 +69,8 @@
 #include <wx/dialog.h>
 #include <wx/textctrl.h>
 #include <wx/splash.h>
+#include <wx/graphics.h>
+#include "SplashAnimation.hpp"
 #include <wx/fontutil.h>
 #include <wx/glcanvas.h>
 #include <wx/utils.h>
@@ -382,6 +384,136 @@ bool is_associate_files(std::wstring extend)
 }
 #endif
 
+// The splash's background animation: a small object being sliced, drawn procedurally.
+//
+// Why procedural rather than a pre-rendered PNG frame sequence: the whole picture is a silhouette,
+// a few hairlines and a moving rule, all in one grey on white. Vector drawing stays crisp at any
+// DPI for free -- the splash bitmap is composed at the window's real pixel size, so a 2x display
+// draws at 2x instead of upscaling frames authored for 1x -- it adds no files under resources/ and
+// no dependency, and a frame costs well under a millisecond to render. That last point decides it:
+// frames here are produced synchronously from inside the blocking preset load, not from a timer,
+// so every frame is time stolen from startup. A 60-frame 2x sequence would also have weighed a few
+// hundred KB and still been the wrong size on a 1.25x or 1.5x display.
+//
+// The shape and the timeline live in SplashAnimation.hpp, so the preview script that renders the
+// GIF and the [Splash] test draw from the same numbers as the real thing. Only the rendering --
+// paths, colours, stroke widths -- is here. This file is already inside Slic3r::GUI, so the
+// namespace below reopens the header's SplashAnim and simply adds the renderer to it.
+namespace SplashAnim {
+
+// Draw one frame into gc, scaled from the design space onto w x h.
+// phase is in [0,1): 0 = empty plate, k_build_end = fully built, the tail holds on the result.
+static void draw(wxGraphicsContext* gc, int w, int h, float phase)
+{
+    if (gc == nullptr || w <= 0 || h <= 0)
+        return;
+
+    const float sx = float(w) / float(k_design_w);
+    const float sy = float(h) / float(k_design_h);
+    const float obj_h  = k_obj_bottom - k_obj_top;
+    const float mid_x  = (k_obj_left + k_obj_right) * 0.5f;
+    const int   layers = layer_count();
+
+    const float build  = build_at(phase);
+    const float head_y = k_obj_bottom - obj_h * build;   // slicing head height, design units
+
+    auto X = [sx](float v) { return double(v * sx); };
+    auto Y = [sy](float v) { return double(v * sy); };
+    const double hair = std::max(1.0, double(sx));       // one design unit, at least one pixel
+
+    // 1) The ghost outline of the whole object: where the print is going. Barely there.
+    {
+        wxGraphicsPath ghost = gc->CreatePath();
+        ghost.MoveToPoint(X(mid_x - half_width_at(0.0f)), Y(k_obj_bottom));
+        for (int i = 0; i <= layers; ++i) {
+            const float t = float(i) / float(layers);
+            ghost.AddLineToPoint(X(mid_x - half_width_at(t)), Y(k_obj_bottom - obj_h * t));
+        }
+        for (int i = layers; i >= 0; --i) {
+            const float t = float(i) / float(layers);
+            ghost.AddLineToPoint(X(mid_x + half_width_at(t)), Y(k_obj_bottom - obj_h * t));
+        }
+        ghost.CloseSubpath();
+        gc->SetPen(wxPen(wxColour(0xEF, 0xEF, 0xF1), hair));
+        gc->SetBrush(*wxTRANSPARENT_BRUSH);
+        gc->StrokePath(ghost);
+    }
+
+    // 2) The built part: the silhouette below the head, filled in a very light grey.
+    if (build > 0.001f) {
+        wxGraphicsPath solid = gc->CreatePath();
+        solid.MoveToPoint(X(mid_x - half_width_at(0.0f)), Y(k_obj_bottom));
+        for (int i = 0; i <= layers; ++i) {
+            const float t = float(i) / float(layers);
+            if (t > build)
+                break;
+            solid.AddLineToPoint(X(mid_x - half_width_at(t)), Y(k_obj_bottom - obj_h * t));
+        }
+        solid.AddLineToPoint(X(mid_x - half_width_at(build)), Y(head_y));
+        solid.AddLineToPoint(X(mid_x + half_width_at(build)), Y(head_y));
+        for (int i = layers; i >= 0; --i) {
+            const float t = float(i) / float(layers);
+            if (t > build)
+                continue;
+            solid.AddLineToPoint(X(mid_x + half_width_at(t)), Y(k_obj_bottom - obj_h * t));
+        }
+        solid.CloseSubpath();
+        gc->SetBrush(wxBrush(wxColour(0xF4, 0xF4, 0xF6)));
+        gc->SetPen(wxPen(wxColour(0xDF, 0xDF, 0xE3), hair));
+        gc->DrawPath(solid);
+
+        // 3) Layer lines across the built part: the faint striping of a real print.
+        gc->SetPen(wxPen(wxColour(0xE6, 0xE6, 0xEA), hair));
+        for (int i = 1; i <= layers; ++i) {
+            const float t = float(i) / float(layers);
+            if (t > build)
+                break;
+            const float y  = k_obj_bottom - obj_h * t;
+            const float hw = half_width_at(t);
+            wxGraphicsPath line = gc->CreatePath();
+            line.MoveToPoint(X(mid_x - hw), Y(y));
+            line.AddLineToPoint(X(mid_x + hw), Y(y));
+            gc->StrokePath(line);
+        }
+    }
+
+    // 4) The slicing line: a rule running most of the card's width at the current build height,
+    // with a brighter segment over the object. It stops once the build is done, during the hold.
+    if (build < 1.0f) {
+        wxGraphicsPath rule = gc->CreatePath();
+        rule.MoveToPoint(X(20.0f), Y(head_y));
+        rule.AddLineToPoint(X(float(k_design_w) - 20.0f), Y(head_y));
+        gc->SetPen(wxPen(wxColour(0xE9, 0xE9, 0xED), hair));
+        gc->StrokePath(rule);
+
+        const float hw = half_width_at(build) + 8.0f;
+        wxGraphicsPath hot = gc->CreatePath();
+        hot.MoveToPoint(X(mid_x - hw), Y(head_y));
+        hot.AddLineToPoint(X(mid_x + hw), Y(head_y));
+        gc->SetPen(wxPen(wxColour(0xCF, 0xCF, 0xD6), std::max(1.0, hair * 1.6)));
+        gc->StrokePath(hot);
+    }
+
+    // 5) The plate: one line under the object, always there, a touch darker than the rest.
+    {
+        wxGraphicsPath plate = gc->CreatePath();
+        plate.MoveToPoint(X(std::max(20.0f, k_obj_left - 20.0f)), Y(k_obj_bottom + 2.0f));
+        plate.AddLineToPoint(X(k_obj_right + 20.0f), Y(k_obj_bottom + 2.0f));
+        gc->SetPen(wxPen(wxColour(0xDC, 0xDC, 0xE1), std::max(1.0, hair * 1.4)));
+        gc->StrokePath(plate);
+    }
+}
+
+} // namespace SplashAnim
+
+class SplashScreen;
+namespace {
+// The splash that is currently up during startup, or null. Set when the splash is created and
+// cleared by its destructor, so code elsewhere can ask for a frame -- and the splash itself can
+// notice it has been destroyed under a wxYield() -- without holding the pointer.
+SplashScreen* g_active_splash = nullptr;
+} // namespace
+
 class SplashScreen : public wxSplashScreen
 {
 public:
@@ -416,14 +548,109 @@ public:
         // this font will be used for the action string
         m_action_font = m_constant_text.loadingFont;
 
-        // draw logo and constant info text
-        Decorate(m_main_bitmap);
+        // The animated background is redrawn per frame, so the composition (white plate, then the
+        // slicing animation, then the logo/wordmark/version on top) has to be repeatable. Keep the
+        // frame size and build frame 0 through the same path every later frame uses.
+        m_frame_w = m_main_bitmap.GetWidth();
+        m_frame_h = m_main_bitmap.GetHeight();
+        m_anim_start = std::chrono::steady_clock::now();
+        m_last_frame = m_anim_start;
+        RenderFrame(0.0f);
+
         wxGetApp().UpdateFrameDarkUI(this);
         apply_rounded_shape();
     }
 
+    ~SplashScreen() override;
+
+    // wxSplashScreen closes itself from a wxTimer. That timer only ever fires inside an event
+    // loop, and before this splash was animated startup ran without one, so in practice the
+    // splash stayed up until the main frame appeared. Now that AdvanceFrame() pumps events to
+    // paint each frame, that timer would fire in the middle of preset loading and take the splash
+    // away a second into a seven-second startup. Stop it, and let startup close the splash
+    // explicitly when the main frame is ready (see close_startup_splash()). The timeout style is
+    // left exactly as it was at the call site, so nothing else about the splash changes.
+    void HoldOpenDuringStartup() { m_timer.Stop(); }
+
+    // Compose one frame: white card, the slicing animation behind, then the static foreground.
+    // Falls back to the plain static bitmap when wxGraphicsContext is unavailable (no renderer on
+    // this platform/build), which is exactly the picture the splash showed before it was animated.
+    void RenderFrame(float phase)
+    {
+        if (m_frame_w <= 0 || m_frame_h <= 0)
+            return;
+
+        wxBitmap   frame(m_frame_w, m_frame_h);
+        wxMemoryDC memDC(frame);
+        memDC.SetBackground(wxBrush(wxColour(255, 255, 255)));
+        memDC.Clear();
+
+        if (m_animated) {
+            std::unique_ptr<wxGraphicsContext> gc(wxGraphicsContext::Create(memDC));
+            if (gc) {
+                gc->SetAntialiasMode(wxANTIALIAS_DEFAULT);
+                SplashAnim::draw(gc.get(), m_frame_w, m_frame_h, phase);
+            } else {
+                // No renderer: stop trying, and keep the static bitmap for the rest of startup.
+                m_animated = false;
+            }
+        }
+        memDC.SelectObject(wxNullBitmap);
+
+        m_main_bitmap = frame;
+        Decorate(m_main_bitmap);
+    }
+
+    // Advance the animation and repaint, but only if enough wall time has passed since the last
+    // frame. This is called from deep inside the blocking preset load and from mainframe
+    // construction, where there is no event loop of our own -- so it also has to pump one, via
+    // wxYield, or nothing would ever reach the screen. Both halves are throttled together: at
+    // ~60 ms the redraw plus yield costs a fraction of a percent of startup, and gives >= 16 fps.
+    void AdvanceFrame()
+    {
+        if (!m_animated)
+            return;
+        // wxYield() below dispatches whatever is queued, and that can re-enter startup code that
+        // ticks us again. Painting a frame from inside painting a frame is at best wasted work and
+        // at worst a surprise; drop the nested call instead.
+        if (m_in_frame)
+            return;
+
+        const auto now = std::chrono::steady_clock::now();
+        const auto since_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - m_last_frame).count();
+        if (since_ms < k_min_frame_interval_ms)
+            return;
+        m_last_frame = now;
+
+        const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - m_anim_start).count();
+        const float phase = float(elapsed_ms % SplashAnim::k_loop_ms) / float(SplashAnim::k_loop_ms);
+
+        m_in_frame = true;
+        RenderFrame(phase);
+        // Re-apply the last loading line, so advancing a frame never blanks the text.
+        SetText(m_last_text);
+
+        if (m_startup_profile) {
+            // One line per painted frame; the gap is what says whether the animation actually
+            // moved during a phase, which is the whole point of the exercise.
+            BOOST_LOG_TRIVIAL(warning) << "[StartupProfile] phase=splash step=frame gap_ms=" << since_ms
+                                       << " total_ms=" << elapsed_ms;
+        }
+
+        // wxSplashScreen closes itself on any user input (it is a wxEventFilter), so the yield
+        // below can destroy this object. Watch for that through the active-splash pointer, which
+        // the destructor clears, and touch nothing afterwards if it happened.
+        const bool was_active = (g_active_splash == this);
+        wxYield();
+        if (was_active && g_active_splash != this)
+            return;
+        m_in_frame = false;
+    }
+
     void SetText(const wxString& text)
     {
+        // Remembered so AdvanceFrame() can put the same line back over each new frame.
+        m_last_text = text;
         set_bitmap(m_main_bitmap);
         if (!text.empty()) {
             wxBitmap bitmap(m_main_bitmap);
@@ -463,14 +690,21 @@ public:
         auto scaleX = [width, designW](int value) { return value * width / designW; };
         auto scaleY = [height, designH](int value) { return value * height / designH; };
 
-        // Logo icon: 140x140, centered horizontally, y=80
-        BitmapCache bmpCache;
+        // Logo icon: 140x140, centered horizontally, y=80.
+        // Decorate() now runs once per animation frame rather than once at startup, so the SVG is
+        // rasterised once and kept. It is rendered at the splash's real pixel size (logoSize comes
+        // from the already DPI-scaled bitmap width), so it stays crisp at 2x instead of being an
+        // upscaled 1x image.
         int logoSize = scaleX(120);
         int logoX    = scaleX(150);
         int logoY    = scaleY(36);
-        wxBitmap* logoBmp = bmpCache.load_svg("splash_app_icon", logoSize, logoSize);
-        if (logoBmp != nullptr)
-            memDc.DrawBitmap(*logoBmp, logoX, logoY, true);
+        if (!m_logo_bitmap.IsOk() || m_logo_bitmap.GetWidth() != logoSize) {
+            BitmapCache bmpCache;
+            if (wxBitmap* logoBmp = bmpCache.load_svg("splash_app_icon", logoSize, logoSize))
+                m_logo_bitmap = *logoBmp;
+        }
+        if (m_logo_bitmap.IsOk())
+            memDc.DrawBitmap(m_logo_bitmap, logoX, logoY, true);
 
         // The wordmark, as the branding has it: bold, "Edge" in ink and "Slicer" in the katana
         // red, tight, centred under the icon; the version on its own line beneath (2026-09-06).
@@ -593,6 +827,20 @@ private:
     int         m_action_line_y_position;
     float       m_scale {1.0};
 
+    // Animation state. m_animated goes false for good if wxGraphicsContext cannot be created, and
+    // the splash then behaves exactly as the static one did.
+    bool        m_animated {true};
+    bool        m_in_frame {false};   // guards against wxYield() re-entering AdvanceFrame()
+    wxBitmap    m_logo_bitmap;        // the splash SVG, rasterised once at the real pixel size
+    int         m_frame_w {0};
+    int         m_frame_h {0};
+    wxString    m_last_text;
+    std::chrono::steady_clock::time_point m_anim_start;
+    std::chrono::steady_clock::time_point m_last_frame;
+    const bool  m_startup_profile {startup_profile_enabled()};
+    // A frame every ~60 ms: visible motion (>= 16 fps) for a negligible slice of startup.
+    static const int k_min_frame_interval_ms = 60;
+
     struct ConstantText
     {
         wxString title;
@@ -616,6 +864,33 @@ private:
     }
     m_constant_text;
 };
+
+// The splash is created with wxSPLASH_TIMEOUT and so destroys itself part-way through startup,
+// while the code that drives it is still running. Clearing the pointer here is what keeps
+// tick_splash_animation() and the preset-loading hook from touching a destroyed window.
+SplashScreen::~SplashScreen()
+{
+    if (g_active_splash == this)
+        g_active_splash = nullptr;
+}
+
+void GUI_App::tick_splash_animation()
+{
+    if (g_active_splash != nullptr)
+        g_active_splash->AdvanceFrame();
+}
+
+// Take the startup splash down. Called once the main frame is on screen; before the splash was
+// animated this was the timer's job, but the timer is stopped while startup drives the animation
+// (see HoldOpenDuringStartup). No-op when no splash is up -- switched off in config, or hub-managed.
+void GUI_App::close_startup_splash()
+{
+    if (g_active_splash != nullptr) {
+        SplashScreen* splash = g_active_splash;
+        g_active_splash = nullptr;   // the destructor would clear it too; do not rely on order
+        splash->Destroy();
+    }
+}
 
 #ifdef __linux__
 bool static check_old_linux_datadir(const wxString& app_name) {
@@ -3082,6 +3357,8 @@ bool GUI_App::on_init_inner()
         BOOST_LOG_TRIVIAL(info) << "begin to show the splash screen...";
         //BBS use BBL splashScreen
         scrn = new SplashScreen(bmp, wxSPLASH_CENTRE_ON_SCREEN | wxSPLASH_TIMEOUT, 1500, splashscreen_pos);
+        g_active_splash = scrn;
+        scrn->HoldOpenDuringStartup();
         wxYield();
         wxString loadingText = _L("Loading configuration");
         std::string languageCode = app_config->get_language_code();
@@ -3382,11 +3659,21 @@ bool GUI_App::on_init_inner()
             // Enable all substitutions (in both user and system profiles), but log the substitutions in user profiles only.
             // If there are substitutions in system profiles, then a "reconfigure" event shall be triggered, which will force
             // installation of a compatible system preset, thus nullifying the system preset substitutions.
+            // Preset loading is the longest blocking stretch of startup (seconds, with no event
+            // loop), so hand it a hook that advances the splash animation. AdvanceFrame() throttles
+            // itself, so ticking once per preset file is cheap; the hook is cleared right after.
+            // Through tick_splash_animation() rather than capturing scrn: the splash is created
+            // with a timeout and may destroy itself part-way through this load, and the tick
+            // checks the (destructor-cleared) active-splash pointer every time.
+            if (scrn != nullptr)
+                preset_bundle->set_progress_callback([]() { GUI_App::tick_splash_animation(); });
             init_params->preset_substitutions = preset_bundle->load_presets(*app_config, ForwardCompatibilitySubstitutionRule::EnableSystemSilent);
         }
         catch (const std::exception& ex) {
             show_error(nullptr, ex.what());
         }
+        // Cleared on both paths: the hook captures a splash that is about to be destroyed.
+        preset_bundle->set_progress_callback(nullptr);
     //}
     profiler.mark("preset_bundle->load_presets");
 
@@ -3455,6 +3742,8 @@ bool GUI_App::on_init_inner()
     } else {
         BOOST_LOG_TRIVIAL(info) << "main frame kept hidden (hub-managed instance)";
     }
+    // The splash has animated all the way through startup; the main frame is up, so take it down.
+    close_startup_splash();
     profiler.mark("mainframe->Show");
 
     obj_list()->set_min_height();
