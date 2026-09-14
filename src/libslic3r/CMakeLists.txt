@@ -394,6 +394,8 @@ set(lisbslic3r_sources
     PrintBase.hpp
     PrintConfig.cpp
     PrintConfig.hpp
+    LayerTimeSpeedSmoothing.cpp
+    LayerTimeSpeedSmoothing.hpp
     Print.cpp
     Print.hpp
     PrintObject.cpp
