@@ -14,8 +14,12 @@
 #include <chrono>
 #include <cctype>
 #include <cstdlib>
+#include <exception>
+#include <memory>
 #include <set>
 #include <fstream>
+#include <tbb/parallel_for.h>
+#include <tbb/blocked_range.h>
 #include <unordered_map>
 #include <unordered_set>
 #include <boost/filesystem.hpp>
@@ -1435,49 +1439,128 @@ std::pair<PresetsConfigSubstitutions, std::string> PresetBundle::load_system_pre
         }
     }
 
-    for (auto &vendor_name : vendor_names)
-    {
-        const auto vendor_start = std::chrono::steady_clock::now();
-        if (validation_mode && !vendor_to_validate.empty() && vendor_name != vendor_to_validate && vendor_name != ORCA_FILAMENT_LIBRARY)
-            continue;
-
+    // The vendors are loaded in two stages so the parse work can go wide while the
+    // observable result stays byte-identical to the old sequential loop.
+    //
+    // Stage A - the first vendor (always ORCA_FILAMENT_LIBRARY, swapped to the front
+    // above) is loaded straight into *this*, sequentially. It is the one vendor that
+    // MUST go first: it fills this->m_config_maps / m_filament_id_maps, the shared
+    // base every later vendor resolves its "inherits" against.
+    //
+    // Stage B - every remaining vendor is parsed into its own fresh PresetBundle, which
+    // is exactly what the old loop did per iteration ("PresetBundle other"). Those
+    // parses never touch each other: a worker writes only into its own bundle, and the
+    // only thing it reads from *this* is the already-complete, no-longer-written
+    // m_config_maps of stage A. So they can run in parallel.
+    //
+    // Stage C - the loaded bundles are merged into *this* one at a time, in the original
+    // vendor order, by the same merge_presets call the old loop used. Preset ordering,
+    // duplicate reporting, substitution order and m_errors accumulation are therefore
+    // unchanged; only the parsing overlaps.
+    //
+    // A per-vendor progress callback still has a natural home: stage C runs on the
+    // calling thread, once per vendor, in order - see the commit-time hook below.
+    auto load_one_vendor_into = [&](PresetBundle &target, const std::string &vendor_name,
+                                    PresetBundle *base) -> std::pair<PresetsConfigSubstitutions, std::string> {
+        PresetsConfigSubstitutions vendor_substitutions;
+        std::string                vendor_error;
         try {
-            // Load the config bundle, flatten it.
-            if (first) {
-                // Reset this PresetBundle and load the first vendor config.
-                append(substitutions, this->load_vendor_configs_from_json(dir.string(), vendor_name, PresetBundle::LoadSystem, compatibility_rule).first);
-                first = false;
-            } else {
-                // Load the other vendor configs, merge them with this PresetBundle.
-                // Report duplicate profiles.
-                PresetBundle other;
-                append(substitutions, other.load_vendor_configs_from_json(dir.string(), vendor_name, PresetBundle::LoadSystem, compatibility_rule, this).first);
-                std::vector<std::string> duplicates = this->merge_presets(std::move(other));
-                if (!duplicates.empty()) {
-                    errors_cummulative += "Found duplicated settings in vendor " + vendor_name + "'s json file lists: ";
-                    for (size_t i = 0; i < duplicates.size(); ++i) {
-                        if (i > 0)
-                            errors_cummulative += ", ";
-                        errors_cummulative += duplicates[i];
-                        ++m_errors;
-                        BOOST_LOG_TRIVIAL(error) << "Found duplicated preset: " + duplicates[i] + " in vendor: " + vendor_name + ": ";
-                    }
-                }
-            }
+            append(vendor_substitutions,
+                   target.load_vendor_configs_from_json(dir.string(), vendor_name, PresetBundle::LoadSystem, compatibility_rule, base).first);
         } catch (const std::runtime_error &err) {
             if (validation_mode)
-                throw err;
-            else {
-                errors_cummulative += err.what();
-                errors_cummulative += "\n";
+                throw;
+            vendor_error = std::string(err.what()) + "\n";
+        }
+        return std::make_pair(std::move(vendor_substitutions), std::move(vendor_error));
+    };
+
+    // Vendors this run actually loads, in the original order.
+    std::vector<std::string> loaded_vendors;
+    loaded_vendors.reserve(vendor_names.size());
+    for (const auto &vendor_name : vendor_names) {
+        if (validation_mode && !vendor_to_validate.empty() && vendor_name != vendor_to_validate && vendor_name != ORCA_FILAMENT_LIBRARY)
+            continue;
+        loaded_vendors.push_back(vendor_name);
+    }
+
+    std::vector<long long> vendor_ms(loaded_vendors.size(), 0);
+
+    // Stage A: the base vendor, into *this*.
+    if (!loaded_vendors.empty()) {
+        const auto vendor_start = std::chrono::steady_clock::now();
+        auto       result       = load_one_vendor_into(*this, loaded_vendors.front(), nullptr);
+        append(substitutions, std::move(result.first));
+        errors_cummulative += result.second;
+        first = false;
+        vendor_ms[0] = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - vendor_start).count();
+    }
+
+    // Stage B: the remaining vendors, in parallel, each into its own bundle.
+    const size_t                               parallel_count = loaded_vendors.empty() ? 0 : loaded_vendors.size() - 1;
+    std::vector<std::unique_ptr<PresetBundle>> pending(parallel_count);
+    std::vector<PresetsConfigSubstitutions>    pending_substitutions(parallel_count);
+    std::vector<std::string>                   pending_errors(parallel_count);
+    // A worker may throw in validation_mode; rethrow it on the calling thread, keeping
+    // the earliest vendor's exception so validation still fails on the same file.
+    std::vector<std::exception_ptr>            pending_exceptions(parallel_count);
+
+    if (parallel_count > 0) {
+        auto load_index = [&](size_t i) {
+            const auto vendor_start = std::chrono::steady_clock::now();
+            pending[i] = std::make_unique<PresetBundle>();
+            pending[i]->set_is_validation_mode(validation_mode);
+            pending[i]->set_vendor_to_validate(vendor_to_validate);
+            try {
+                auto result = load_one_vendor_into(*pending[i], loaded_vendors[i + 1], this);
+                pending_substitutions[i] = std::move(result.first);
+                pending_errors[i]        = std::move(result.second);
+            } catch (...) {
+                pending_exceptions[i] = std::current_exception();
+            }
+            vendor_ms[i + 1] = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - vendor_start).count();
+        };
+
+        if (parallel_count == 1) {
+            load_index(0);
+        } else {
+            tbb::parallel_for(tbb::blocked_range<size_t>(0, parallel_count, 1),
+                              [&](const tbb::blocked_range<size_t> &range) {
+                                  for (size_t i = range.begin(); i != range.end(); ++i)
+                                      load_index(i);
+                              });
+        }
+    }
+
+    // Stage C: merge in the original vendor order, on the calling thread.
+    for (size_t i = 0; i < parallel_count; ++i) {
+        const std::string &vendor_name = loaded_vendors[i + 1];
+        if (pending_exceptions[i]) {
+            // validation_mode only - the sequential loop rethrew here too.
+            std::rethrow_exception(pending_exceptions[i]);
+        }
+        append(substitutions, std::move(pending_substitutions[i]));
+        errors_cummulative += pending_errors[i];
+        if (!pending[i])
+            continue;
+        std::vector<std::string> duplicates = this->merge_presets(std::move(*pending[i]));
+        pending[i].reset();
+        if (!duplicates.empty()) {
+            errors_cummulative += "Found duplicated settings in vendor " + vendor_name + "'s json file lists: ";
+            for (size_t d = 0; d < duplicates.size(); ++d) {
+                if (d > 0)
+                    errors_cummulative += ", ";
+                errors_cummulative += duplicates[d];
+                ++m_errors;
+                BOOST_LOG_TRIVIAL(error) << "Found duplicated preset: " + duplicates[d] + " in vendor: " + vendor_name + ": ";
             }
         }
+    }
 
-        if (startup_profile) {
-            const auto vendor_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - vendor_start).count();
-            startup_profile_log("PresetBundle::load_system_presets_from_json vendor=" + vendor_name +
-                                " vendor_ms=" + std::to_string(vendor_ms));
-        }
+    if (startup_profile) {
+        for (size_t i = 0; i < loaded_vendors.size(); ++i)
+            startup_profile_log("PresetBundle::load_system_presets_from_json vendor=" + loaded_vendors[i] +
+                                " vendor_ms=" + std::to_string(vendor_ms[i]));
     }
 
     if (first) {
