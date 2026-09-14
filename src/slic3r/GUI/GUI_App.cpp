@@ -80,6 +80,7 @@
 #include "libslic3r/Model.hpp"
 #include "libslic3r/I18N.hpp"
 #include "libslic3r/PresetBundle.hpp"
+#include "libslic3r/StartupProfile.hpp"
 #include "libslic3r/Thread.hpp"
 #include "libslic3r/miniz_extension.hpp"
 #include "libslic3r/DataDirMigration.hpp"
@@ -230,19 +231,9 @@ class MainFrame;
 
 namespace {
 
-bool startup_profile_enabled()
-{
-    static const bool enabled = [] {
-        const char* value = std::getenv("ORCA_STARTUP_PROFILE");
-        if (value == nullptr)
-            return false;
-
-        std::string normalized(value);
-        std::transform(normalized.begin(), normalized.end(), normalized.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-        return normalized == "1" || normalized == "true" || normalized == "yes" || normalized == "on";
-    }();
-    return enabled;
-}
+// The enable flag now lives in libslic3r/StartupProfile.hpp so libslic3r and the GUI
+// share one cached read of ORCA_STARTUP_PROFILE.
+using Slic3r::startup_profile_enabled;
 
 class StartupProfiler
 {
@@ -3253,8 +3244,18 @@ bool GUI_App::on_init_inner()
     // Suppress the '- default -' presets.
     preset_bundle->set_default_suppressed(true);
 
-    preset_bundle->backup_user_folder();
-    profiler.mark("preset_bundle->backup_user_folder");
+    // backup_user_folder() is a once-per-version recursive copy of the user preset
+    // folder. It reads the folder and writes a sibling snapshot directory; it touches
+    // no in-memory state and nothing later in startup depends on its result. Doing it
+    // here blocked the window for as long as the copy took, so defer it to the idle
+    // loop: CallAfter runs it on the main thread after on_init_inner has returned and
+    // the frame is up, which is still long before the user can edit a preset, so the
+    // snapshot is of the same untouched folder it would have captured here.
+    CallAfter([this] {
+        Slic3r::StartupScopedTimer t("GUI_App deferred step=backup_user_folder");
+        preset_bundle->backup_user_folder();
+    });
+    profiler.mark("preset_bundle->backup_user_folder (deferred)");
 
     Bind(EVT_SHOW_IP_DIALOG, &GUI_App::show_ip_address_enter_dialog_handler, this);
 
