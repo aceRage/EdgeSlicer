@@ -334,8 +334,16 @@ private:
     bool m_docked{ false };
     bool m_collapsed{ false };
     bool m_dock_state_loaded{ false };
-    // Last width an auto-sizing panel needed while expanded. A collapsed panel
-    // measures only its title row, which must not become the docked width.
+    // Set by dock_render_titlebar() when the panel body follows this frame, read
+    // by GizmoImguiEnd() to decide whether the frame's content measurement is a
+    // real one or just the title row.
+    bool m_dock_body_rendered{ false };
+    // Last width an auto-sizing panel's CONTENTS needed while expanded, measured
+    // from ImGuiWindow::ContentSizeIdeal in GizmoImguiEnd(). Deliberately not the
+    // window's own width: a docked window is pinned to the rect dock_setup_next_window()
+    // gives it, so its width only ever reflects the previous frame's guess. A
+    // collapsed panel measures only its title row, which must not become the
+    // docked width.
     float m_dock_expanded_width{ 0.f };
 
     void load_dock_state();
