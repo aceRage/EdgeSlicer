@@ -1301,6 +1301,8 @@ void PresetCollection::load_presets(
         std::string file_name = dir_entry.path().filename().string();
         //if (Slic3r::is_ini_file(dir_entry)) {
         if (Slic3r::is_json_file(file_name)) {
+            // One tick per user preset file, so a splash animation keeps moving here too.
+            notify_progress();
             // Remove the .ini suffix.
             std::string name = file_name.erase(file_name.size() - 5);
             try {

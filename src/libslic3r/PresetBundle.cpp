@@ -411,6 +411,16 @@ void PresetBundle::copy_files(const std::string& from)
     }
 }
 
+void PresetBundle::set_progress_callback(ProgressCallback cb)
+{
+    // The user-preset phase does its file walking inside the collections, so they need the hook
+    // as well; the system-preset phase ticks from this class directly.
+    prints.set_progress_callback(cb);
+    filaments.set_progress_callback(cb);
+    printers.set_progress_callback(cb);
+    m_progress_callback = std::move(cb);
+}
+
 PresetsConfigSubstitutions PresetBundle::load_presets(AppConfig &config, ForwardCompatibilitySubstitutionRule substitution_rule,
                                                       const PresetPreferences& preferred_selection/* = PresetPreferences()*/)
 {
@@ -1442,6 +1452,9 @@ std::pair<PresetsConfigSubstitutions, std::string> PresetBundle::load_system_pre
     for (auto &vendor_name : vendor_names)
     {
         const auto vendor_start = std::chrono::steady_clock::now();
+        // One tick per vendor JSON, before the work starts, so a splash animation gets a frame
+        // even for a vendor that loads too fast to reach the per-file ticks below.
+        notify_progress();
         if (validation_mode && !vendor_to_validate.empty() && vendor_name != vendor_to_validate && vendor_name != ORCA_FILAMENT_LIBRARY)
             continue;
 
@@ -1455,6 +1468,7 @@ std::pair<PresetsConfigSubstitutions, std::string> PresetBundle::load_system_pre
                 // Load the other vendor configs, merge them with this PresetBundle.
                 // Report duplicate profiles.
                 PresetBundle other;
+                other.set_progress_callback(m_progress_callback);
                 append(substitutions, other.load_vendor_configs_from_json(dir.string(), vendor_name, PresetBundle::LoadSystem, compatibility_rule, this).first);
                 std::vector<std::string> duplicates = this->merge_presets(std::move(other));
                 if (!duplicates.empty()) {
@@ -3248,6 +3262,10 @@ std::pair<PresetsConfigSubstitutions, size_t> PresetBundle::load_vendor_configs_
     //2) paste the machine model
     for (auto& machine_model : machine_model_subfiles)
     {
+        // One tick per preset file. This is the finest granularity the loader offers and the
+        // only thing that keeps a splash animation moving through this phase (no event loop runs
+        // here); the callback itself decides how often it actually repaints.
+        notify_progress();
         std::string subfile = path + "/" + vendor_name + "/" + machine_model.second;
         VendorProfile::PrinterModel model;
         model.id = machine_model.first;
@@ -3595,6 +3613,7 @@ std::pair<PresetsConfigSubstitutions, size_t> PresetBundle::load_vendor_configs_
     auto process_start = std::chrono::steady_clock::now();
     for (auto& subfile : process_subfiles)
     {
+        notify_progress();
         std::string reason = parse_subfile(substitution_context, substitutions, flags, subfile, configs, filament_id_maps, presets, presets_loaded);
         if (!reason.empty()) {
             ++m_errors;
@@ -3618,6 +3637,7 @@ std::pair<PresetsConfigSubstitutions, size_t> PresetBundle::load_vendor_configs_
     auto filament_start = std::chrono::steady_clock::now();
     for (auto& subfile : filament_subfiles)
     {
+        notify_progress();
         std::string reason = parse_subfile(substitution_context, substitutions, flags, subfile, configs, filament_id_maps, presets,
                                            presets_loaded, is_orca_lib);
         if (!reason.empty()) {
@@ -3645,6 +3665,7 @@ std::pair<PresetsConfigSubstitutions, size_t> PresetBundle::load_vendor_configs_
     auto machine_start = std::chrono::steady_clock::now();
     for (auto& subfile : machine_subfiles)
     {
+        notify_progress();
         std::string reason = parse_subfile(substitution_context, substitutions, flags, subfile, configs, filament_id_maps, presets, presets_loaded);
         if (!reason.empty()) {
             ++m_errors;

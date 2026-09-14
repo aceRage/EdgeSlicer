@@ -221,6 +221,7 @@ set(SLIC3R_GUI_SOURCES
     GUI/GLToolbar.hpp
     GUI/GUI_App.cpp
     GUI/GUI_App.hpp
+    GUI/SplashAnimation.hpp
     GUI/GUI_AuxiliaryList.cpp
     GUI/GUI_AuxiliaryList.hpp
     GUI/GUI_Colors.cpp

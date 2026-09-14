@@ -1277,6 +1277,13 @@ void MainFrame::init_tabpanel() {
         m_param_panel = new ParamsPanel(m_tabpanel, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxBK_LEFT | wxTAB_TRAVERSAL);
       
     }
+    // Mainframe construction is the second long blocking stretch of startup. Profiling put the
+    // cost in a few individual panel constructors rather than spread evenly, so the splash is
+    // ticked either side of the expensive ones: Plater (~410 ms), MonitorPanel (~440 ms) and
+    // CalibrationPanel (~720 ms). Each of those is one atomic constructor with no seam inside it,
+    // so a ~1 s gap remains across CalibrationPanel; lazy construction of that panel (planned
+    // separately) is what actually removes it. Free after startup, when no splash is up.
+    wxGetApp().tick_splash_animation();
     m_plater = new Plater(this, this);
     m_plater->SetBackgroundColour(*wxWHITE);
     m_plater->Hide();
@@ -1286,6 +1293,7 @@ void MainFrame::init_tabpanel() {
     create_preset_tabs();
 
         //BBS add pages
+    wxGetApp().tick_splash_animation();
     m_monitor = new MonitorPanel(m_tabpanel, wxID_ANY, wxDefaultPosition, wxDefaultSize);
     m_monitor->SetBackgroundColour(*wxWHITE);
     m_tabpanel->AddPage(m_monitor, _L("Device"), std::string("tab_monitor_active"), std::string("tab_monitor_active"), false);
@@ -1315,9 +1323,11 @@ void MainFrame::init_tabpanel() {
     m_project->SetBackgroundColour(*wxWHITE);
     m_tabpanel->AddPage(m_project, _L("Project"), std::string("tab_auxiliary_active"), std::string("tab_auxiliary_active"), false);
 
+    wxGetApp().tick_splash_animation();
     m_calibration = new CalibrationPanel(m_tabpanel, wxID_ANY, wxDefaultPosition, wxDefaultSize);
     m_calibration->SetBackgroundColour(*wxWHITE);
     m_tabpanel->AddPage(m_calibration, _L("Calibration"), std::string("tab_calibration_active"), std::string("tab_calibration_active"), false);
+    wxGetApp().tick_splash_animation();
 
     if (m_plater) {
         // load initial config
