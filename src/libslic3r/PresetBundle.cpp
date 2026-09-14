@@ -16,6 +16,7 @@
 #include <cstdlib>
 #include <atomic>
 #include <exception>
+#include <filesystem>
 #include <memory>
 #include <set>
 #include <fstream>
@@ -3743,13 +3744,14 @@ std::pair<PresetsConfigSubstitutions, size_t> PresetBundle::load_vendor_configs_
     // so the sequential inheritance/validate/store loop runs over cached documents
     // exactly as it runs over freshly parsed ones.
     //
-    // Validity key: a hash over (relative path, content hash) of every json file under
-    // the vendor directory, plus the app version and a cache format version. Content is
-    // hashed rather than stat'd because size+mtime misses a same-size edit made inside
-    // one filesystem-timestamp tick, which is exactly the shape of edit a profile update
-    // produces. Any file added, removed or changed in any way moves the key and the cache
-    // is rebuilt; a version bump invalidates every cache wholesale. The hashing reads go
-    // wide and cost a fraction of parsing. Writes are atomic (temp file + rename), and
+    // Validity key: a hash over (relative path, size, last-write time) of every json file
+    // under the vendor directory, plus the app version and a cache format version. The
+    // timestamp is read through std::filesystem, whose file_time_type is 100 ns on
+    // Windows - boost::filesystem's last_write_time is whole seconds and would miss a
+    // same-size preset rewritten inside one second, which is what a profile update looks
+    // like. Any file added, removed or changed moves the key and the cache is rebuilt; a
+    // version bump invalidates every cache wholesale. Stat only, so the check costs a few
+    // milliseconds and does not re-read the tree. Writes are atomic (temp file + rename),
     // any read or decode failure deletes the cache and falls back to parsing, so a
     // corrupt or truncated cache can never wedge startup.
     static const int  PRESET_CACHE_FORMAT_VERSION = 1;
@@ -3764,23 +3766,28 @@ std::pair<PresetsConfigSubstitutions, size_t> PresetBundle::load_vendor_configs_
     };
 
     auto compute_cache_key = [&]() -> std::string {
-        // (path, size, mtime) alone is NOT enough. Filesystem mtime is whole-second
-        // granularity on Windows, so an edit that keeps a file the same size and lands
-        // in the same second as the previous write is invisible to it - and a profile
-        // updater rewriting a preset does exactly that shape of edit. So each file's
-        // content is hashed too. Reading the bytes is a fraction of the cost of parsing
-        // them, and the reads go wide, so the check stays cheap relative to what the
-        // cache saves.
-        namespace bfs = boost::filesystem;
-        std::vector<bfs::path>    files;
-        boost::system::error_code ec;
-        if (!bfs::exists(vendor_dir_path, ec))
+        // Key over (relative path, size, last-write time) - stat only, no file contents.
+        //
+        // The timestamp comes from std::filesystem, NOT boost::filesystem. That matters:
+        // boost's last_write_time returns a time_t, i.e. whole seconds, and a preset
+        // rewritten in place to the same length inside one second is then completely
+        // invisible to the key - which is exactly the shape of edit a profile update
+        // makes. std::filesystem::file_time_type on Windows is a FILETIME, 100 ns
+        // resolution, so two writes a millisecond apart already differ.
+        //
+        // An earlier revision hashed every file's contents to dodge that. It was correct
+        // but it read the whole preset tree on every launch, which cost more than it
+        // saved on a cache hit. Stat data is a few ms for the same tree.
+        namespace sfs = std::filesystem;
+        std::vector<sfs::path> files;
+        std::error_code        ec;
+        if (!sfs::exists(vendor_dir_path, ec))
             return std::string();
-        for (bfs::recursive_directory_iterator it(vendor_dir_path, ec), end; it != end && !ec; it.increment(ec)) {
+        for (sfs::recursive_directory_iterator it(vendor_dir_path, ec), end; it != end && !ec; it.increment(ec)) {
             if (ec) break;
-            const bfs::path &p = it->path();
-            boost::system::error_code fec;
-            if (!bfs::is_regular_file(p, fec) || fec) continue;
+            const sfs::path &p = it->path();
+            std::error_code  fec;
+            if (!sfs::is_regular_file(p, fec) || fec) continue;
             if (!Slic3r::is_json_file(p.string())) continue;
             files.push_back(p);
         }
@@ -3793,20 +3800,20 @@ std::pair<PresetsConfigSubstitutions, size_t> PresetBundle::load_vendor_configs_
         tbb::parallel_for(tbb::blocked_range<size_t>(0, files.size()),
                           [&](const tbb::blocked_range<size_t> &range) {
                               for (size_t i = range.begin(); i != range.end(); ++i) {
-                                  boost::nowide::ifstream ifs(files[i].string(), std::ios::binary);
-                                  if (!ifs.good()) { failed = true; return; }
-                                  std::uint64_t h = 1469598103934665603ull;
-                                  char          buf[16384];
-                                  while (ifs.read(buf, sizeof(buf)) || ifs.gcount() > 0)
-                                      h = fnv1a(reinterpret_cast<const unsigned char *>(buf),
-                                                static_cast<size_t>(ifs.gcount()), h);
+                                  std::error_code fec;
+                                  const auto sz = sfs::file_size(files[i], fec);
+                                  if (fec) { failed = true; return; }
+                                  const auto mt = sfs::last_write_time(files[i], fec);
+                                  if (fec) { failed = true; return; }
                                   std::ostringstream es;
-                                  es << files[i].lexically_relative(vendor_dir_path).generic_string() << '|' << std::hex << h;
+                                  es << files[i].lexically_relative(vendor_dir_path).generic_string() << '|'
+                                     << static_cast<unsigned long long>(sz) << '|'
+                                     << static_cast<long long>(mt.time_since_epoch().count());
                                   entries[i] = es.str();
                               }
                           });
         if (failed)
-            return std::string(); // could not read something: do not trust a cache for this vendor
+            return std::string(); // could not stat something: do not trust a cache for this vendor
         std::string blob = std::string(Snapmaker_VERSION) + "|v" + std::to_string(PRESET_CACHE_FORMAT_VERSION) + "|";
         for (const std::string &e : entries) { blob += e; blob += ';'; }
         const std::uint64_t h = fnv1a(reinterpret_cast<const unsigned char *>(blob.data()), blob.size());
@@ -3814,7 +3821,11 @@ std::pair<PresetsConfigSubstitutions, size_t> PresetBundle::load_vendor_configs_
         return os.str();
     };
 
+    const auto        key_start = std::chrono::steady_clock::now();
     const std::string cache_key = preset_cache_enabled ? compute_cache_key() : std::string();
+    const auto        key_ms    = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                      std::chrono::steady_clock::now() - key_start).count();
+    long long cbor_decode_ms = 0;
     json              cache_root;                   // the loaded cache, when valid
     bool              cache_hit = false;            // read a usable cache for this vendor
     json              cache_out = json::object();   // sections collected for writing back
@@ -3827,7 +3838,10 @@ std::pair<PresetsConfigSubstitutions, size_t> PresetBundle::load_vendor_configs_
                 std::vector<std::uint8_t> bytes((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
                 ifs.close();
                 if (!bytes.empty()) {
+                    const auto decode_start = std::chrono::steady_clock::now();
                     cache_root = json::from_cbor(bytes);
+                    cbor_decode_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                         std::chrono::steady_clock::now() - decode_start).count();
                     if (cache_root.is_object() && cache_root.value("key", std::string()) == cache_key)
                         cache_hit = true;
                 }
@@ -4008,6 +4022,9 @@ std::pair<PresetsConfigSubstitutions, size_t> PresetBundle::load_vendor_configs_
                             " presets_loaded=" + std::to_string(presets_loaded) +
                             " total_ms=" + std::to_string(total_ms));
         startup_profile_log("PresetBundle::load_vendor_configs_from_json vendor=" + vendor_name +
+                            " cache_key_ms=" + std::to_string(key_ms) +
+                            " cbor_decode_ms=" + std::to_string(cbor_decode_ms) +
+                            " cache_hit=" + (cache_hit ? "1" : "0") +
                             " breakdown json_ms=" + std::to_string(prof_json_ns / 1000000) +
                             " inherit_ms=" + std::to_string(prof_inherit_ns / 1000000) +
                             " validate_ms=" + std::to_string(prof_validate_ns / 1000000) +

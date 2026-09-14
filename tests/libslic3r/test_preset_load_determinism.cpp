@@ -18,6 +18,8 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <chrono>
+#include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -355,9 +357,11 @@ TEST_CASE("The per-vendor parse cache is transparent and self-invalidating", "[P
     SECTION("touching one file invalidates that vendor's cache and the result still matches") {
         const fs::path touched = dd / PRESET_SYSTEM_DIR / "Alpha" / "filament" / "Alpha Standard @A.json";
         REQUIRE(fs::exists(touched));
-        // Move the mtime well clear of the original so a coarse filesystem timestamp
-        // cannot land on the same value.
-        fs::last_write_time(touched, fs::last_write_time(touched) + 120);
+        // Move the mtime well clear of the original. Set and read it through
+        // std::filesystem, the same API the cache key uses.
+        const auto stamp = std::filesystem::last_write_time(touched.string());
+        std::filesystem::last_write_time(touched.string(), stamp + std::chrono::seconds(120));
+        REQUIRE(std::filesystem::last_write_time(touched.string()) != stamp);
 
         LoadResult rebuilt = load_tree(dd);
         REQUIRE(rebuilt.names == cold.names);
@@ -382,12 +386,19 @@ TEST_CASE("The per-vendor parse cache is transparent and self-invalidating", "[P
 
     SECTION("a same-size edit in the same second still invalidates the cache") {
         // The replacement is deliberately byte-for-byte the SAME LENGTH as the original
-        // and is written immediately, so the file's size is unchanged and its mtime very
-        // likely lands in the same whole second. A (path, size, mtime) key cannot see
-        // this edit; the content hash can. This is the shape of edit a profile update
-        // makes, so getting it wrong would serve stale presets after an update.
+        // and is written immediately, so the file's size is unchanged and its mtime lands
+        // in the same whole SECOND as the original write. That is the case a whole-second
+        // timestamp (boost::filesystem's time_t last_write_time) cannot see at all, and
+        // it is the shape of edit a profile update makes - so getting it wrong would
+        // serve stale presets after an update. The key reads the timestamp through
+        // std::filesystem instead, which is 100 ns on Windows, so the two writes differ.
+        //
+        // Guard the premise: if the two writes really did land on the same high-resolution
+        // timestamp, this section would be testing nothing, so assert they differ first.
         const fs::path edited = dd / PRESET_SYSTEM_DIR / "Charlie" / "filament" / "Charlie Only @C.json";
         REQUIRE(fs::exists(edited));
+        const auto before_size  = std::filesystem::file_size(edited.string());
+        const auto before_stamp = std::filesystem::last_write_time(edited.string());
         {
             std::ofstream ofs(edited.string(), std::ios::binary | std::ios::trunc);
             ofs << "{\n  \"type\": \"filament\",\n  \"name\": \"Charlie Only @C\",\n"
@@ -395,6 +406,13 @@ TEST_CASE("The per-vendor parse cache is transparent and self-invalidating", "[P
                    "  \"filament_id\": \"FCharlie Only @C\",\n"
                    "  \"filament_flow_ratio\": [\"0.777\"]\n}\n";
         }
+        const auto after_size  = std::filesystem::file_size(edited.string());
+        const auto after_stamp = std::filesystem::last_write_time(edited.string());
+        // The edit must really be same-size, or this section is not testing what it says.
+        REQUIRE(after_size == before_size);
+        // And the high-resolution stamp must have moved, or the key has nothing to see.
+        REQUIRE(after_stamp != before_stamp);
+
         LoadResult edited_result = load_tree(dd);
         auto it = std::find_if(edited_result.fingerprints.begin(), edited_result.fingerprints.end(),
                                [](const std::string &f) { return f.rfind("Charlie Only @C|", 0) == 0; });
