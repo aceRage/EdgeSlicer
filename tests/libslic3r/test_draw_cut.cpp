@@ -3653,103 +3653,126 @@ TEST_CASE("Draw cut: the core of a real loop is one triangulated plate", "[DrawC
 
 TEST_CASE("Draw cut: the band of a real loop follows the drawn wave", "[DrawCut]")
 {
-    // SYMPTOM 2 and 4: the coloured surface after the cut was a flat horizontal slab
-    // with stair-stepped edges, not the wavy line the user drew - and in side view
-    // the whole surface was one tilted flat plate.
+    // SYMPTOM 2: the coloured surface after the cut was a flat horizontal slab with
+    // stair-stepped edges, not the wavy line the user drew.
+    //
+    // THE CONTRACT THIS PINS: the drawn line is where the cut meets the skin, EXACTLY,
+    // and that must not depend on Extension. The first fix left the drawn line off the
+    // surface - the band was one loft from the skirt tip straight to the flat inner
+    // ring - so the wave arrived at the skin interpolated down by E / (E + inset):
+    // about a third of it at E 5, and less the more Extension was asked for. Running
+    // the whole case at TWO very different Extensions is what makes that a test rather
+    // than a number to be re-tuned: a damped surface cannot pass both.
     const indexed_triangle_set cyl = cylinder_3mf_in_plane();
     const double r = cylinder_3mf_radius(cyl);
 
     const DrawCutStroke stroke = finish_like_gizmo(owner_loop_on_3mf_cylinder(cyl, r, 0.0), cyl);
-    const DrawCutParams params = owner_params();
 
     BoundingBoxf3 bb;
     for (const Vec3f& v : cyl.vertices)
         bb.merge(v.cast<double>());
 
-    Vec3d n, c;
-    REQUIRE(draw_cut_core_face(stroke, params, bb, n, c));
-    // The core normal is the barrel axis for a loop round it.
-    REQUIRE(std::abs(std::abs(n.z()) - 1.0) < 0.05);
-
-    // THE BAND STARTS ON THE DRAWN LINE. Every path sample own height must follow
-    // z0 + 2.5*sin(2 theta) to within 0.3 mm - which is what "the surface follows the
-    // wavy line" means at the top of the band.
-    double worst = 0.0;
-    for (const DrawCutSample& s : stroke.path()) {
-        const double th = std::atan2(s.pos.y(), s.pos.x());
-        worst = std::max(worst, std::abs(s.pos.z() - 2.5 * std::sin(2.0 * th)));
+    // THE DRAWN LINE ITSELF waves as it was drawn - this is the input, and it is
+    // asserted first so a failure below cannot be blamed on the fixture.
+    {
+        double worst = 0.0;
+        for (const DrawCutSample& s : stroke.path()) {
+            const double th = std::atan2(s.pos.y(), s.pos.x());
+            worst = std::max(worst, std::abs(s.pos.z() - 2.5 * std::sin(2.0 * th)));
+        }
+        INFO("worst wave deviation on the drawn line " << worst);
+        REQUIRE(worst < 0.3);
     }
-    INFO("worst wave deviation " << worst);
-    REQUIRE(worst < 0.3);
 
-    // AND THE BAND DESCENDS AT THE LIP ANGLE. From the drawn line to the core plate
-    // the surface drops depth*sin(angle) while travelling depth*cos(angle) inward, so
-    // the core plate sits that far below the line MEAN height.
-    const double drop = params.depth * std::sin(params.angle_deg * M_PI / 180.0);
-    double mean_z = 0.0;
-    for (const DrawCutSample& s : stroke.path())
-        mean_z += s.pos.z();
-    mean_z /= double(stroke.path().size());
-    const double core_h = (c.z() - mean_z);
-    INFO("core sits " << core_h << " from the line mean, expected " << -drop);
-    REQUIRE(core_h == Approx(-drop).margin(0.25));
+    for (const double ext : { 5.0, 15.0 }) {
+        DrawCutParams params = owner_params();
+        params.extension = ext;
 
-    // THE BAND IS NOT A SLAB, measured on the CUT rather than on the cutter. The
-    // owner's symptom 2 was that the coloured surface came back as "a thin horizontal
-    // cyan ring", i.e. a flat slab at one height: so take the mating face of the lower
-    // half - the vertices NOT on the flat core - and ask whether the boundary between
-    // the two halves follows the wave.
-    //
-    // The clean way to ask that is by HEIGHT BAND: at every angle round the barrel,
-    // the highest vertex of the lower half that is still on the skin must sit at
-    // z0 + 2.5*sin(2 theta), which for a slab would be one constant height. Binning by
-    // angle and taking the spread of those maxima separates a wavy boundary (spread
-    // ~= 5 mm, the wave peak to peak) from a flat one (spread ~= 0).
-    indexed_triangle_set half_u, half_l;
-    REQUIRE(draw_cut_split(cyl, stroke, params, &half_u, &half_l, nullptr));
+        INFO("Extension " << ext << " mm");
 
-    const int    bins = 36;
-    std::vector<double> top(size_t(bins), -1e9);
-    for (const Vec3f& v : half_u.vertices) {
-        const double rad = std::hypot(double(v.x()), double(v.y()));
-        if (rad < r - 1.0)
-            continue;                 // not on the barrel skin
-        double th = std::atan2(double(v.y()), double(v.x()));
-        if (th < 0.0) th += 2.0 * M_PI;
-        const size_t b = std::min(size_t(bins - 1), size_t(th / (2.0 * M_PI) * bins));
-        top[b] = std::max(top[b], double(v.z()));
+        Vec3d n, c;
+        REQUIRE(draw_cut_core_face(stroke, params, bb, n, c));
+        // The core normal is the barrel axis for a loop round it.
+        REQUIRE(std::abs(std::abs(n.z()) - 1.0) < 0.05);
+
+        // THE CORE PLATE SITS AT THE LIP ANGLE'S DROP BELOW THE LINE'S MEAN, and that
+        // too is independent of Extension: the band travels Depth from the LINE, not
+        // from the skirt tip, so the inner ring is the inset of the drawn line.
+        const double drop = params.depth * std::sin(params.angle_deg * M_PI / 180.0);
+        double mean_z = 0.0;
+        for (const DrawCutSample& s : stroke.path())
+            mean_z += s.pos.z();
+        mean_z /= double(stroke.path().size());
+        INFO("core sits " << (c.z() - mean_z) << " from the line mean, expected " << -drop);
+        REQUIRE((c.z() - mean_z) == Approx(-drop).margin(0.25));
+
+        // THE CUT MEETS THE SKIN ON THE DRAWN LINE. Split the part and walk the piece
+        // BELOW the line: at every angle round the barrel its highest skin vertex is
+        // where the cut surface crossed the skin, and that must be the drawn wave
+        // itself - z0 + 2.5*sin(2 theta) - to within 0.3 mm, at BOTH Extensions.
+        indexed_triangle_set half_u, half_l;
+        REQUIRE(draw_cut_split(cyl, stroke, params, &half_u, &half_l, nullptr));
+        REQUIRE(watertight(half_u));
+        REQUIRE(watertight(half_l));
+
+        // THE COMPARISON IS PER VERTEX, AT THAT VERTEX'S OWN ANGLE. Binning the skin
+        // vertices and comparing each bin's maximum against the wave at the BIN'S
+        // CENTRE angle - the obvious way to do this - builds in an error of its own:
+        // the maximum within a bin is taken wherever inside it the wave is highest, so
+        // on a rising stretch it is at the bin's far edge, and 2.5*sin(2 theta) moves
+        // 5 * (pi/36) = 0.44 mm over half a 10-degree bin. That is the whole tolerance,
+        // spent on the instrument rather than on the surface.
+        //
+        // Bins are still used, but only to prove COVERAGE - that the boundary was found
+        // all the way round rather than on one arc.
+        const int bins = 36;
+        std::vector<bool> seen(size_t(bins), false);
+
+        // The boundary at an angle is the TOP of the piece below the line. Bin finely,
+        // keep the highest vertex in each bin, and then compare THAT VERTEX against the
+        // wave at ITS OWN theta rather than at the bin's centre - so the bin decides
+        // only which vertex to look at, and contributes no error of its own to the
+        // comparison.
+        struct SkinV { double th, z; bool any; };
+        const int fine = 180;                                   // 2 degrees per bin
+        std::vector<SkinV> best(size_t(fine), SkinV{ 0.0, -1e9, false });
+        size_t n_skin = 0;
+        for (const Vec3f& v : half_u.vertices) {
+            const double rad = std::hypot(double(v.x()), double(v.y()));
+            if (rad < r - 1.0)
+                continue;                 // not on the barrel skin
+            double th = std::atan2(double(v.y()), double(v.x()));
+            if (th < 0.0) th += 2.0 * M_PI;
+            ++ n_skin;
+            const size_t f = std::min(size_t(fine - 1), size_t(th / (2.0 * M_PI) * fine));
+            if (double(v.z()) > best[f].z)
+                best[f] = SkinV{ th, double(v.z()), true };
+        }
+        REQUIRE(n_skin > 100);
+
+        double worst = 0.0, tmin = 1e9, tmax = -1e9;
+        for (const SkinV& a : best) {
+            if (!a.any)
+                continue;
+            seen[std::min(size_t(bins - 1), size_t(a.th / (2.0 * M_PI) * bins))] = true;
+            tmin = std::min(tmin, a.z);
+            tmax = std::max(tmax, a.z);
+            worst = std::max(worst, std::abs(a.z - 2.5 * std::sin(2.0 * a.th)));
+        }
+        size_t filled = 0;
+        for (bool s2 : seen)
+            if (s2) ++ filled;
+        INFO("skin boundary over " << filled << " bins: " << tmin << " .. " << tmax
+             << ", worst deviation from the drawn wave " << worst);
+        REQUIRE(filled > 30);
+        // 100% OF THE DRAWN WAVE, at either Extension. A damped surface shows here as a
+        // deviation of the damped-away fraction: at E 5 the old code lost about 1.7 mm
+        // of the 5 mm, and at E 15 nearly all of it.
+        REQUIRE(worst < 0.3);
+        // And the full amplitude is present, stated the other way round so a surface
+        // that happened to sit low everywhere could not pass on the deviation alone.
+        REQUIRE(tmax - tmin == Approx(5.0).margin(0.4));
     }
-    double tmin = 1e9, tmax = -1e9;
-    size_t filled = 0;
-    for (double t : top)
-        if (t > -1e8) { tmin = std::min(tmin, t); tmax = std::max(tmax, t); ++ filled; }
-    INFO("skin boundary over " << filled << " bins: " << tmin << " .. " << tmax);
-    REQUIRE(filled > 30);
-
-    // HOW MUCH WAVE SURVIVES TO THE SKIN, and why it is not the whole 5 mm.
-    //
-    // The band runs as a straight segment from the OUTER ring - the drawn line pushed
-    // `extension` out along the skin normal, so radius r + E, at the line's own wavy
-    // height - to the INNER ring, which is flat, on the core plane depth*sin(angle)
-    // below the line's mean. The part of it the boolean actually sees is where it
-    // crosses the skin, at radius r, and the wave arrives there LINEARLY INTERPOLATED
-    // towards that flat inner ring:
-    //
-    //   t   = (r + E - r) / ((r + E) - (r - inset))  =  E / (E + inset)
-    //   amp = (1 - t) * the line's own amplitude
-    //
-    // At E = 5, Depth 3, Angle 30 (inset 2.60) that is t = 0.66, so about a third of
-    // the wave survives - ~1.7 mm peak to peak. The owner's symptom was a HORIZONTAL
-    // SLAB, spread zero to the pixel, so what this test must separate is "a third of
-    // the wave" from "none of it"; asserting the full 5 mm would be asserting geometry
-    // the surface does not have and never did.
-    const double inset  = params.depth * std::cos(params.angle_deg * M_PI / 180.0);
-    const double t_skin = params.extension / (params.extension + inset);
-    const double expect = (1.0 - t_skin) * 2.0 * 2.5;   // amplitude 2.5, peak to peak
-    INFO("expected surviving wave " << expect);
-    REQUIRE(tmax - tmin == Approx(expect).epsilon(0.25));
-    // And, plainly: not a slab.
-    REQUIRE(tmax - tmin > 1.0);
 }
 
 TEST_CASE("Draw cut: a real wrap-around loop separates the 3mf cylinder", "[DrawCut]")

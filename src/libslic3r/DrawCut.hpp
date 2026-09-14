@@ -36,13 +36,29 @@ namespace Slic3r {
 //      through c), so the user can force the core square to an axis. The core is
 //      the region of P inside the loop's projection.
 //
-//   2. SKIN BAND. For each loop point p the surface runs from
-//         p_out = p + extension * outward(p)      (clear of the skin)
-//      inward to
+//   2. SKIN BAND, and THE DRAWN LINE IS ON IT. Three rings, not two - for each loop
+//      point p the surface runs
+//         p_out = p - extension * d(p)            the SKIRT, clear of the skin
+//         p                                       the DRAWN LINE, exactly
 //         p_in  = p + depth * d(p)                (then projected onto P along n)
 //      where d(p) is the in-plane inward direction (towards the axis through c,
 //      perpendicular to n) tilted by `angle` towards n. See DrawCutParams::angle_deg.
-//      `depth` is how far the band travels before the surface turns onto the core.
+//      `depth` is how far the band travels before the surface turns onto the core,
+//      and it is measured FROM THE DRAWN LINE, never from the skirt tip.
+//
+//      p being its own ring is the whole point, not a detail of the triangulation:
+//      the drawn line is WHERE THE CUT MEETS THE SKIN, so it has to be on the surface
+//      exactly. Lofting straight from p_out to p_in - which is what this did first -
+//      leaves p merely near the surface, and the skin crossing then lands part-way
+//      along that loft carrying a part-way height: a hand-drawn wave arrived at the
+//      skin damped by extension / (extension + depth * cos(angle)), so the more
+//      Extension the user asked for the flatter their cut came out.
+//
+//      The skirt runs along -d, i.e. it CONTINUES THE BAND'S OWN SLOPE outward rather
+//      than leaving along the skin normal. That keeps the surface C1 across the drawn
+//      line (no crease exactly where the boolean meets the skin) and gives the smaller
+//      lateral reach of the two candidates - E * cos(angle) against a flat skirt's
+//      full E - so it is the harder one to fold on a concave stretch.
 //
 //   3. CORE POLYGON. The loop projected onto P and INSET by the band's in-plane
 //      footprint (depth * cos(angle)), so band and core join along one closed

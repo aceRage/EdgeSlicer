@@ -481,9 +481,84 @@ number: **`AABBMesh` keeps a raw pointer to the mesh it was built from**, so
 `AABBMesh aabb{ TriangleMesh(cyl) }` binds to a temporary that dies immediately, and every
 query after it reads freed memory.
 
-One assertion deliberately measures less than it first looks like it should. The wave that
-survives to the SKIN is not the line full amplitude: the band is a straight segment from the
-outer ring (radius `r + E`, at the line wavy height) to the flat inner ring, so where it
-crosses radius `r` the wave has been interpolated down by `E / (E + inset)` - about a third of
-it at E 5, Depth 3, Angle 30. The test asserts that third, and separately asserts it is not
-zero, because zero is the slab the owner saw.
+One assertion measured less than it should have, and was wrong to: the wave arriving at the
+SKIN came out damped by `E / (E + inset)`, and the first version of this section wrote that up
+as geometry to be asserted rather than as a bug. It is a bug. See **Correction - the drawn
+line has to BE on the surface** below, which is where that is fixed and where the test now
+asserts the full drawn wave at two very different Extensions.
+
+## Correction — the drawn line has to BE on the surface
+
+The first pass at symptom 2 left a damping artefact and the write-up above accepted it as
+geometry. It is not; it is the same bug one layer down, and the owner was right to send it
+back.
+
+**The claim that was wrong:** "the wave that survives to the skin is `(1 - E/(E+inset))` of
+the drawn amplitude, because the band interpolates from the outer ring to the flat inner
+one." That is an accurate description of what the code did and a wrong description of what
+the code should do. The drawn line is *where the cut meets the skin* - that is the entire
+contract of a draw cut - so the fraction is not a number to be predicted and asserted, it is
+1, and any dependence on Extension at all is the bug.
+
+**The cause.** The band was ONE loft, from the skirt tip `p + E*outward` straight to the
+inner ring `project(p + depth*d)`. The drawn line `p` was not a vertex of that surface at
+all - only a point the loft passed near - so the skin crossing landed part-way along it and
+carried a correspondingly part-way height. More Extension, more damping; at E 15 almost the
+whole wave was gone.
+
+**The fix: three rings, not two.**
+
+```
+out  -> line     the SKIRT, outside the skin
+line -> inner    the BAND, skin down to the core at the lip angle
+inner            the CORE PLATE
+```
+
+`line` is the drawn samples themselves (kerf-shifted), so the surface passes through them
+exactly. `out` and `line` share a count and an order, so the skirt is a plain 1:1 quad loft;
+`line` and the plate ring do not, so that join keeps the angle walk. The inner ring is the
+inset of the **line**, never of the extended ring, so Depth means the same thing at every
+Extension.
+
+**Which way the skirt goes**, since the brief allowed either: it CONTINUES THE BAND'S OWN
+SLOPE, i.e. `-d`, not the skin normal and not flat in the core plane. Two reasons pointing
+the same way:
+
+- *No crease.* `-d` is the band ruling run backwards, so skirt and band are one straight line
+  through `p` and the surface is C1 across the drawn line. A skirt meeting the band at an
+  angle puts a crease exactly on the skin, which is the worst place for a boolean to find two
+  nearly tangent faces.
+- *The smaller lateral reach*, which is what folds an outward offset on a concave stretch such
+  as the owner's dent. Out along `-d` moves the rail sideways by `E*cos(angle)`; out flat in
+  the core plane moves it by the whole `E`. `cos(angle) <= 1` always, so this is the strictly
+  safer of the two at every angle and identical to it at 0. (At the dent - turn radius ~25 mm -
+  even E 15 gives `13 * 0.04 = 0.52`, comfortably under the fold threshold of 1.)
+
+**A latent bug this closed on the way past.** `surface_frame_pieces()` and
+`draw_cut_surface_project()` already ruled along `d` from the drawn line with
+`w` in `[-extension, +depth]` - i.e. they already described the three-ring surface. It was the
+*builder* that disagreed with them, so a connector placed at `w = -2` stood on a surface the
+cutter did not build. The two now agree by construction. Both query paths also had Through
+all still leaning by `tan(angle)`, left over from the tapered wall that the hourglass fix
+removed; they now sweep straight `-n` the way the builder does.
+
+**What the test asserts now.** The same case at Extension 5 **and** Extension 15: split the
+part, take the highest skin vertex of the piece below the line in each of 180 fine bins, and
+require it to be within 0.3 mm of `z0 + 2.5*sin(2*theta)` - the drawn wave itself - with a
+peak-to-peak of 5.0 mm and coverage over at least 30 of 36 coarse bins. Running both
+Extensions is what makes this a test rather than a tuned number: a damped surface cannot pass
+both, and the old code passed neither.
+
+**The instrument needs as much care as the surface, and got it wrong first.** Comparing each
+bin's maximum against the wave at the BIN'S CENTRE angle - the obvious way - builds in an
+error of its own: the maximum inside a bin sits wherever the wave is highest within it, so on
+a rising stretch it is at the bin's far edge, and `2.5*sin(2*theta)` moves `5 * (pi/36)` =
+0.44 mm across half a 10-degree bin. That is the entire tolerance, spent on the measurement.
+The comparison is therefore made at each kept vertex's OWN theta, and the bins decide only
+which vertex to look at and whether the boundary was found all the way round. (A first repair
+- scoring only vertices that are the highest within a few degrees - failed the other way: on a
+wave that steep only the four crests qualify, so coverage collapsed to 3 bins of 36.)
+
+Measured after the fix: worst deviation **0.021 mm** at both Extensions, which is the same
+0.021 mm the DRAWN LINE itself deviates from the ideal wave. The surface contributes
+essentially nothing; the cut meets the skin on the drawn line.
