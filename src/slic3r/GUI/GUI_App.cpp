@@ -3420,7 +3420,8 @@ bool GUI_App::on_init_inner()
 
     sidebar().obj_list()->init();
     //sidebar().aux_list()->init_auxiliary();
-    mainframe->m_project->init_auxiliary();
+    // The Project tab is built lazily; its holder calls init_auxiliary() when the panel
+    // is created, so there is nothing to do here until the user opens the tab.
 
 //     update_mode(); // !!! do that later
     SetTopWindow(mainframe);

@@ -16520,6 +16520,8 @@ void Plater::priv::on_action_publish(wxCommandEvent &event)
 static void ultra_pause_device_camera(bool pause)
 {
     auto* mf = wxGetApp().mainframe;
+    // Deliberately does NOT build the Monitor tab: with no panel there is no camera
+    // playing, so there is nothing to pause.
     if (!mf || !mf->m_monitor) return;
     auto* sp = mf->m_monitor->get_status_panel();
     if (!sp) return;
@@ -22990,7 +22992,7 @@ int Plater::export_config_3mf(int plate_idx, Export3mfProgressFn proFn)
 void Plater::send_calibration_job_finished(wxCommandEvent & evt)
 {
     p->main_frame->request_select_tab(MainFrame::TabPosition::tpCalibration);
-    auto calibration_panel = p->main_frame->m_calibration;
+    auto calibration_panel = p->main_frame->calibration();
     if (calibration_panel) {
         auto curr_wizard = static_cast<CalibrationWizard*>(calibration_panel->get_tabpanel()->GetPage(evt.GetInt()));
         wxCommandEvent event(EVT_CALIBRATION_JOB_FINISHED);
@@ -23021,7 +23023,7 @@ void Plater::print_job_finished(wxCommandEvent &evt)
     dev->set_selected_machine(evt.GetString().ToStdString());
     p->main_frame->request_select_tab(MainFrame::TabPosition::tpMonitor);
     //jump to monitor and select device status panel
-    MonitorPanel* curr_monitor = p->main_frame->m_monitor;
+    MonitorPanel* curr_monitor = p->main_frame->monitor();
     if(curr_monitor)
        curr_monitor->get_tabpanel()->ChangeSelection(MonitorPanel::PrinterTab::PT_STATUS);
 }
@@ -24390,6 +24392,8 @@ void Plater::update_print_error_info(int code, std::string msg, std::string extr
     if (p->m_send_to_sdcard_dlg) {
         p->m_send_to_sdcard_dlg->update_print_error_info(code, msg, extra);
     }
+    // Deliberately does NOT build the Calibration tab: this only decorates a wizard page
+    // that is already on screen, and a freshly built panel has no running calibration.
     if (p->main_frame->m_calibration)
         p->main_frame->m_calibration->update_print_error_info(code, msg, extra);
 }
