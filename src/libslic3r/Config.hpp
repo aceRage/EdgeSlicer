@@ -13,6 +13,9 @@
 #include <vector>
 #include "libslic3r.h"
 #include "clonable_ptr.hpp"
+// Forward declaration only - the full nlohmann header is heavy and Config.hpp is
+// included nearly everywhere; the json type is needed here just for two signatures.
+#include <nlohmann/json_fwd.hpp>
 #include "Exception.hpp"
 #include "Point.hpp"
 
@@ -2360,6 +2363,13 @@ public:
     //BBS: add json support
     int load_from_json(const std::string &file, ConfigSubstitutionContext& substitutions, bool load_inherits_in_config, std::map<std::string, std::string>& key_values, std::string& reason);
     ConfigSubstitutions load_from_json(const std::string &file, ForwardCompatibilitySubstitutionRule compatibility_rule, std::map<std::string, std::string>& key_values, std::string& reason);
+    // The two halves of load_from_json, split so a caller can parse many files
+    // concurrently and then deserialize them in order. parse_json_document reads the
+    // file, parses it and resolves "include" templates; it is static-like in effect
+    // (it touches no member state) and is safe to call from several threads at once.
+    // load_from_json_document does the deserialization into *this and must not be.
+    static int parse_json_document(const std::string &file, nlohmann::json &j, std::string &reason);
+    int load_from_json_document(const std::string &file, nlohmann::json &j, ConfigSubstitutionContext& substitutions, bool load_inherits_in_config, std::map<std::string, std::string>& key_values, std::string& reason);
 
     ConfigSubstitutions load_from_ini(const std::string &file, ForwardCompatibilitySubstitutionRule compatibility_rule);
     ConfigSubstitutions load_from_ini_string(const std::string &data, ForwardCompatibilitySubstitutionRule compatibility_rule);

@@ -404,6 +404,8 @@ set(lisbslic3r_sources
     Polyline.hpp
     PresetBundle.cpp
     PresetBundle.hpp
+    StartupProfile.cpp
+    StartupProfile.hpp
     Preset.cpp
     Preset.hpp
     PrincipalComponents2D.cpp

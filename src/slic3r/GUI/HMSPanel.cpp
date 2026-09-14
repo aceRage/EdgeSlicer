@@ -122,7 +122,8 @@ HMSNotifyItem::HMSNotifyItem(const std::string& dev_id, wxWindow *parent, HMSIte
         if (!m_url.empty()) wxLaunchDefaultBrowser(m_url);
             wxCommandEvent evt(EVT_ALREADY_READ_HMS);
             evt.SetString(long_error_code);
-            wxPostEvent(wxGetApp().mainframe->m_monitor, evt);
+            if (MonitorPanel* monitor_panel = wxGetApp().mainframe->monitor())
+                wxPostEvent(monitor_panel, evt);
         });
 #endif
 }

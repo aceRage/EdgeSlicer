@@ -170,7 +170,8 @@ void CalibrationCaliPage::update(MachineObject* obj)
     bool enable_cali = false;
     if (obj) {
         if (obj->print_error > 0) {
-            StatusPanel* status_panel = Slic3r::GUI::wxGetApp().mainframe->m_monitor->get_status_panel();
+            MonitorPanel* monitor_panel = Slic3r::GUI::wxGetApp().mainframe->monitor();
+            StatusPanel* status_panel = monitor_panel ? monitor_panel->get_status_panel() : nullptr;
             status_panel->obj = obj;
             status_panel->update_error_message();
         }

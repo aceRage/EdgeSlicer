@@ -34,6 +34,7 @@
 #include "StreamPanel.hpp"
 #include "calib_dlg.hpp"
 #include "MultiMachinePage.hpp"
+#include "LazyPanelHolder.hpp"
 
 #define ENABEL_PRINT_ALL 0
 
@@ -395,14 +396,40 @@ public:
     PrintHostQueueDialog* printhost_queue_dlg() { return m_printhost_queue_dlg; }
     Plater*               m_plater { nullptr };
     //BBS: GUI refactor
+    // Lazily constructed tabs: the m_*_holder placeholders are the actual Notebook pages
+    // (so the TabPosition indices and select_tab() are unaffected) and build the panel
+    // below on first Show(true). The raw pointers stay null until then - go through the
+    // monitor()/calibration()/multi_machine()/project() getters when you need the object,
+    // and test the raw member only where a null panel genuinely means "nothing to do".
     MonitorPanel*         m_monitor{ nullptr };
+    LazyPanelHolder*      m_monitor_holder{ nullptr };
     StreamPanel*          m_stream{ nullptr };
 
     //AuxiliaryPanel*       m_auxiliary{ nullptr };
     MultiMachinePage*     m_multi_machine{ nullptr };
+    LazyPanelHolder*      m_multi_machine_holder{ nullptr };
     ProjectPanel*         m_project{ nullptr };
+    LazyPanelHolder*      m_project_holder{ nullptr };
 
     CalibrationPanel*     m_calibration{ nullptr };
+    LazyPanelHolder*      m_calibration_holder{ nullptr };
+
+    // On-demand accessors for the deferred tabs. Each builds its panel if it has not been
+    // built yet, and returns nullptr only when the tab is not part of this layout at all
+    // (multi_machine() with multi-device management disabled, or any of them before
+    // init_tabpanel has run).
+    MonitorPanel*     monitor();
+    CalibrationPanel* calibration();
+    MultiMachinePage* multi_machine();
+    ProjectPanel*     project();
+    // Fresh placeholders for the deferred tabs (show_device() re-creates pages).
+    LazyPanelHolder*  make_monitor_holder();
+    LazyPanelHolder*  make_calibration_holder();
+    LazyPanelHolder*  make_multi_machine_holder();
+    LazyPanelHolder*  make_project_holder();
+    // Dark-mode/DPI treatment for a panel built after the startup theme pass.
+    void              apply_theme_to_lazy_panel(wxWindow* panel);
+
     WebViewPanel*         m_webview { nullptr };
     PrinterWebView*       m_printer_view{nullptr};
     ProgressDialog*       m_log_progress_dlg{nullptr}; // Ultra: Flashforge log-export progress
