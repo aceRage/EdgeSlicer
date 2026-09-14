@@ -25,6 +25,7 @@
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/SLAPrint.hpp"
 #include "libslic3r/PresetBundle.hpp"
+#include "libslic3r/StartupProfile.hpp"
 #include "libslic3r/Zipper.hpp"
 
 #include "Tab.hpp"
@@ -330,11 +331,17 @@ DPIFrame(NULL, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, BORDERLESS_FRAME_
 #endif
 
     // initialize tabpanel and menubar
-    init_tabpanel();
-    if (wxGetApp().is_gcode_viewer())
-        init_menubar_as_gcodeviewer();
-    else
-        init_menubar_as_editor();
+    {
+        Slic3r::StartupScopedTimer t("MainFrame ctor step=init_tabpanel");
+        init_tabpanel();
+    }
+    {
+        Slic3r::StartupScopedTimer t("MainFrame ctor step=init_menubar");
+        if (wxGetApp().is_gcode_viewer())
+            init_menubar_as_gcodeviewer();
+        else
+            init_menubar_as_editor();
+    }
 
     // BBS
 #if 0
@@ -1267,35 +1274,54 @@ void MainFrame::init_tabpanel() {
     });
 
     if (wxGetApp().is_editor()) {
-        m_webview         = new WebViewPanel(m_tabpanel);
+        {
+            Slic3r::StartupScopedTimer t("MainFrame::init_tabpanel step=WebViewPanel");
+            m_webview         = new WebViewPanel(m_tabpanel);
+        }
         Bind(EVT_LOAD_URL, [this](wxCommandEvent &evt) {
             wxString url = evt.GetString();
             select_tab(MainFrame::tpHome);
             m_webview->load_url(url);
         });
         m_tabpanel->AddPage(m_webview, "", "tab_home_active", "tab_home_active", false);
+        Slic3r::StartupScopedTimer t("MainFrame::init_tabpanel step=ParamsPanel");
         m_param_panel = new ParamsPanel(m_tabpanel, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxBK_LEFT | wxTAB_TRAVERSAL);
       
     }
-    m_plater = new Plater(this, this);
-    m_plater->SetBackgroundColour(*wxWHITE);
-    m_plater->Hide();
+    {
+        Slic3r::StartupScopedTimer t("MainFrame::init_tabpanel step=Plater");
+        m_plater = new Plater(this, this);
+        m_plater->SetBackgroundColour(*wxWHITE);
+        m_plater->Hide();
+    }
 
     wxGetApp().plater_ = m_plater;
 
-    create_preset_tabs();
+    {
+        Slic3r::StartupScopedTimer t("MainFrame::init_tabpanel step=create_preset_tabs");
+        create_preset_tabs();
+    }
 
         //BBS add pages
-    m_monitor = new MonitorPanel(m_tabpanel, wxID_ANY, wxDefaultPosition, wxDefaultSize);
-    m_monitor->SetBackgroundColour(*wxWHITE);
-    m_tabpanel->AddPage(m_monitor, _L("Device"), std::string("tab_monitor_active"), std::string("tab_monitor_active"), false);
+    {
+        Slic3r::StartupScopedTimer t("MainFrame::init_tabpanel step=MonitorPanel");
+        m_monitor = new MonitorPanel(m_tabpanel, wxID_ANY, wxDefaultPosition, wxDefaultSize);
+        m_monitor->SetBackgroundColour(*wxWHITE);
+        m_tabpanel->AddPage(m_monitor, _L("Device"), std::string("tab_monitor_active"), std::string("tab_monitor_active"), false);
+    }
 
     // Stream tab: grid of LAN camera streams, always right after Device.
-    m_stream = new StreamPanel(m_tabpanel);
-    m_stream->SetBackgroundColour(*wxWHITE);
-    m_tabpanel->AddPage(m_stream, _L("Stream"), std::string("tab_stream_active"), std::string("tab_stream_active"), false);
+    {
+        Slic3r::StartupScopedTimer t("MainFrame::init_tabpanel step=StreamPanel");
+        m_stream = new StreamPanel(m_tabpanel);
+        m_stream->SetBackgroundColour(*wxWHITE);
+        m_tabpanel->AddPage(m_stream, _L("Stream"), std::string("tab_stream_active"), std::string("tab_stream_active"), false);
+    }
 
-    m_printer_view = new PrinterWebView(m_tabpanel);
+    {
+        Slic3r::StartupScopedTimer t("MainFrame::init_tabpanel step=PrinterWebView");
+        m_printer_view = new PrinterWebView(m_tabpanel);
+    }
     Bind(EVT_LOAD_PRINTER_URL, [this](LoadPrinterViewEvent &evt) {
         wxString url = evt.GetString();
         wxString key = evt.GetAPIkey();
@@ -1305,21 +1331,29 @@ void MainFrame::init_tabpanel() {
     m_printer_view->Hide();
 
     if (wxGetApp().is_enable_multi_machine()) {
+        Slic3r::StartupScopedTimer t("MainFrame::init_tabpanel step=MultiMachinePage");
         m_multi_machine = new MultiMachinePage(m_tabpanel, wxID_ANY, wxDefaultPosition, wxDefaultSize);
         m_multi_machine->SetBackgroundColour(*wxWHITE);
         // TODO: change the bitmap
         m_tabpanel->AddPage(m_multi_machine, _L("Multi-device"), std::string("tab_multi_active"), std::string("tab_multi_active"), false);
     }
 
-    m_project = new ProjectPanel(m_tabpanel, wxID_ANY, wxDefaultPosition, wxDefaultSize);
-    m_project->SetBackgroundColour(*wxWHITE);
-    m_tabpanel->AddPage(m_project, _L("Project"), std::string("tab_auxiliary_active"), std::string("tab_auxiliary_active"), false);
+    {
+        Slic3r::StartupScopedTimer t("MainFrame::init_tabpanel step=ProjectPanel");
+        m_project = new ProjectPanel(m_tabpanel, wxID_ANY, wxDefaultPosition, wxDefaultSize);
+        m_project->SetBackgroundColour(*wxWHITE);
+        m_tabpanel->AddPage(m_project, _L("Project"), std::string("tab_auxiliary_active"), std::string("tab_auxiliary_active"), false);
+    }
 
-    m_calibration = new CalibrationPanel(m_tabpanel, wxID_ANY, wxDefaultPosition, wxDefaultSize);
-    m_calibration->SetBackgroundColour(*wxWHITE);
-    m_tabpanel->AddPage(m_calibration, _L("Calibration"), std::string("tab_calibration_active"), std::string("tab_calibration_active"), false);
+    {
+        Slic3r::StartupScopedTimer t("MainFrame::init_tabpanel step=CalibrationPanel");
+        m_calibration = new CalibrationPanel(m_tabpanel, wxID_ANY, wxDefaultPosition, wxDefaultSize);
+        m_calibration->SetBackgroundColour(*wxWHITE);
+        m_tabpanel->AddPage(m_calibration, _L("Calibration"), std::string("tab_calibration_active"), std::string("tab_calibration_active"), false);
+    }
 
     if (m_plater) {
+        Slic3r::StartupScopedTimer t("MainFrame::init_tabpanel step=initial_config");
         // load initial config
         auto full_config = wxGetApp().preset_bundle->full_config();
         m_plater->on_config_change(full_config);
@@ -1534,19 +1568,28 @@ void MainFrame::create_preset_tabs()
     //m_param_panel = new ParamsPanel(m_tabpanel, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxBK_LEFT | wxTAB_TRAVERSAL);
     m_param_dialog = new ParamsDialog(m_plater);
 
-    add_created_tab(new TabPrint(m_param_panel), "cog");
-    add_created_tab(new TabPrintPlate(m_param_panel), "cog");
-    add_created_tab(new TabPrintObject(m_param_panel), "cog");
-    add_created_tab(new TabPrintPart(m_param_panel), "cog");
-    add_created_tab(new TabPrintLayer(m_param_panel), "cog");
-    add_created_tab(new TabFilament(m_param_dialog->panel()), "spool");
+#define ORCA_TIMED_TAB(expr, label)                                              \
+    do {                                                                         \
+        Slic3r::StartupScopedTimer t("MainFrame::create_preset_tabs step=" label); \
+        expr;                                                                    \
+    } while (0)
+    ORCA_TIMED_TAB(add_created_tab(new TabPrint(m_param_panel), "cog"), "TabPrint");
+    ORCA_TIMED_TAB(add_created_tab(new TabPrintPlate(m_param_panel), "cog"), "TabPrintPlate");
+    ORCA_TIMED_TAB(add_created_tab(new TabPrintObject(m_param_panel), "cog"), "TabPrintObject");
+    ORCA_TIMED_TAB(add_created_tab(new TabPrintPart(m_param_panel), "cog"), "TabPrintPart");
+    ORCA_TIMED_TAB(add_created_tab(new TabPrintLayer(m_param_panel), "cog"), "TabPrintLayer");
+    ORCA_TIMED_TAB(add_created_tab(new TabFilament(m_param_dialog->panel()), "spool"), "TabFilament");
     /* BBS work around to avoid appearance bug */
     //add_created_tab(new TabSLAPrint(m_param_panel));
     //add_created_tab(new TabSLAMaterial(m_param_panel));
-    add_created_tab(new TabPrinter(m_param_dialog->panel()), "printer");
+    ORCA_TIMED_TAB(add_created_tab(new TabPrinter(m_param_dialog->panel()), "printer"), "TabPrinter");
+#undef ORCA_TIMED_TAB
 
-    m_param_panel->rebuild_panels();
-    m_param_dialog->panel()->rebuild_panels();
+    {
+        Slic3r::StartupScopedTimer t("MainFrame::create_preset_tabs step=rebuild_panels");
+        m_param_panel->rebuild_panels();
+        m_param_dialog->panel()->rebuild_panels();
+    }
     //m_tabpanel->AddPage(m_param_panel, "Parameters", "notebook_presets_active");
     //m_tabpanel->InsertPage(tpSettings, m_param_panel, _L("Parameters"), std::string("cog"));
 }

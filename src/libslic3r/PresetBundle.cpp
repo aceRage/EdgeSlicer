@@ -1,6 +1,7 @@
 #include <cassert>
 
 #include "PresetBundle.hpp"
+#include "StartupProfile.hpp"
 #include "FilamentColorLibrary.hpp"
 #include "PrintConfig.hpp"
 #include "libslic3r.h"
@@ -37,26 +38,6 @@
 namespace Slic3r {
 
 namespace {
-
-bool startup_profile_enabled()
-{
-    static const bool enabled = [] {
-        const char* value = std::getenv("ORCA_STARTUP_PROFILE");
-        if (value == nullptr)
-            return false;
-
-        std::string normalized(value);
-        std::transform(normalized.begin(), normalized.end(), normalized.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-        return normalized == "1" || normalized == "true" || normalized == "yes" || normalized == "on";
-    }();
-    return enabled;
-}
-
-void startup_profile_log(const std::string& message)
-{
-    if (startup_profile_enabled())
-        BOOST_LOG_TRIVIAL(warning) << "[StartupProfile] " << message;
-}
 
 std::vector<std::string> SplitPrinterSetting(const AppConfig &config, const std::string &printerName, const std::string &key)
 {
@@ -450,10 +431,19 @@ PresetsConfigSubstitutions PresetBundle::load_presets(AppConfig &config, Forward
         phase_start = now;
     }
 
-    this->update_multi_material_filament_presets();
-    this->update_compatible(PresetSelectCompatibleType::Never);
+    {
+        StartupScopedTimer t("PresetBundle::load_presets step=update_multi_material_filament_presets");
+        this->update_multi_material_filament_presets();
+    }
+    {
+        StartupScopedTimer t("PresetBundle::load_presets step=update_compatible");
+        this->update_compatible(PresetSelectCompatibleType::Never);
+    }
 
-    this->load_selections(config, preferred_selection);
+    {
+        StartupScopedTimer t("PresetBundle::load_presets step=load_selections");
+        this->load_selections(config, preferred_selection);
+    }
     if (startup_profile) {
         const auto now = std::chrono::steady_clock::now();
         startup_profile_log("PresetBundle::load_presets step=post_load_selection step_ms=" +
@@ -830,8 +820,14 @@ PresetsConfigSubstitutions PresetBundle::load_user_presets(std::string user, For
         errors_cummulative += err.what();
     }
     if (!errors_cummulative.empty()) throw Slic3r::RuntimeError(errors_cummulative);
-    this->update_multi_material_filament_presets();
-    this->update_compatible(PresetSelectCompatibleType::Never);
+    {
+        StartupScopedTimer t("PresetBundle::load_user_presets step=update_multi_material_filament_presets");
+        this->update_multi_material_filament_presets();
+    }
+    {
+        StartupScopedTimer t("PresetBundle::load_user_presets step=update_compatible");
+        this->update_compatible(PresetSelectCompatibleType::Never);
+    }
 
     set_calibrate_printer("");
 
@@ -3345,7 +3341,16 @@ std::pair<PresetsConfigSubstitutions, size_t> PresetBundle::load_vendor_configs_
     PresetCollection         *presets = nullptr;
     size_t                   presets_loaded = 0;
 
-    auto parse_subfile = [this, path, vendor_name, presets_loaded, current_vendor_profile, base_bundle](
+    // Startup profiling buckets: where the per-preset time actually goes.
+    //   json_ns      - reading + nlohmann parse + set_deserialize of every key (ConfigBase::load_from_json)
+    //   inherit_ns   - resolving "inherits", copying the parent config and applying the delta
+    //   validate_ns  - Preset::normalize + remove_invalid_keys + printer model/variant checks
+    //   store_ns     - load_preset into the collection and the config_maps copy kept for children
+    long long prof_json_ns = 0, prof_inherit_ns = 0, prof_validate_ns = 0, prof_store_ns = 0;
+    const bool prof_on = startup_profile;
+
+    auto parse_subfile = [this, path, vendor_name, presets_loaded, current_vendor_profile, base_bundle,
+                          prof_on, &prof_json_ns, &prof_inherit_ns, &prof_validate_ns, &prof_store_ns](
         ConfigSubstitutionContext& substitution_context,
         PresetsConfigSubstitutions& substitutions,
         LoadConfigBundleAttributes& flags,
@@ -3370,7 +3375,10 @@ std::pair<PresetsConfigSubstitutions, size_t> PresetBundle::load_vendor_configs_
             //parse the json elements
             DynamicPrintConfig config_src;
             std::string _renamed_from_str;
+            const auto prof_t0 = prof_on ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
             config_src.load_from_json(subfile, substitution_context, false, key_values, reason);
+            if (prof_on)
+                prof_json_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - prof_t0).count();
             if (!reason.empty()) {
                 ++m_errors;
                 BOOST_LOG_TRIVIAL(error) << __FUNCTION__<< ": load config file "<<subfile<<" Failed!";
@@ -3447,8 +3455,11 @@ std::pair<PresetsConfigSubstitutions, size_t> PresetBundle::load_vendor_configs_
                 else
                     default_config = &presets_collection->default_preset().config;
             }
+            const auto prof_t1 = prof_on ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
             config = *default_config;
             config.apply(config_src);
+            if (prof_on)
+                prof_inherit_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - prof_t1).count();
             if (instantiation == "false" && "Template" != vendor_name) {
                 config_maps.emplace(preset_name, std::move(config));
                 if ((presets_collection->type() == Preset::TYPE_FILAMENT) && (!filament_id.empty()))
@@ -3464,7 +3475,10 @@ std::pair<PresetsConfigSubstitutions, size_t> PresetBundle::load_vendor_configs_
                                              << "\" contains invalid \"renamed_from\" key, which is being ignored.";
                 }
             }
+            const auto prof_t2 = prof_on ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
             Preset::normalize(config);
+            if (prof_on)
+                prof_validate_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - prof_t2).count();
         }
         catch(nlohmann::detail::parse_error &err) {
             ++m_errors;
@@ -3474,7 +3488,10 @@ std::pair<PresetsConfigSubstitutions, size_t> PresetBundle::load_vendor_configs_
         }
 
         // Report configuration fields, which are misplaced into a wrong group.
+        const auto prof_t3 = prof_on ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
         std::string incorrect_keys = Preset::remove_invalid_keys(config, *default_config);
+        if (prof_on)
+            prof_validate_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - prof_t3).count();
         if (!incorrect_keys.empty()) {
             ++m_errors;
             BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ": The config " << subfile << " contains incorrect keys: " << incorrect_keys
@@ -3579,7 +3596,10 @@ std::pair<PresetsConfigSubstitutions, size_t> PresetBundle::load_vendor_configs_
             substitutions.push_back({
                 preset_name, presets_collection->type(), PresetConfigSubstitutions::Source::ConfigBundle,
                 std::string(), std::move(substitution_context.substitutions) });
+        const auto prof_t4 = prof_on ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
         config_maps.emplace(preset_name, loaded.config);
+        if (prof_on)
+            prof_store_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - prof_t4).count();
         ++count;
         //BBS: add config related logs
         BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << boost::format(", got preset %1%, from %2%")%loaded.name %subfile;
@@ -3661,6 +3681,11 @@ std::pair<PresetsConfigSubstitutions, size_t> PresetBundle::load_vendor_configs_
                             " section=machine section_ms=" + std::to_string(machine_ms) +
                             " presets_loaded=" + std::to_string(presets_loaded) +
                             " total_ms=" + std::to_string(total_ms));
+        startup_profile_log("PresetBundle::load_vendor_configs_from_json vendor=" + vendor_name +
+                            " breakdown json_ms=" + std::to_string(prof_json_ns / 1000000) +
+                            " inherit_ms=" + std::to_string(prof_inherit_ns / 1000000) +
+                            " validate_ms=" + std::to_string(prof_validate_ns / 1000000) +
+                            " store_ms=" + std::to_string(prof_store_ns / 1000000));
     }
 
     //BBS: add config related logs
