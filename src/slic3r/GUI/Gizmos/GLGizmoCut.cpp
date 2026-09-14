@@ -3004,13 +3004,17 @@ void GLGizmoCut3D::refresh_draw_stroke()
     if (m_draw_frame_flips)
         m_draw_params.angle_deg = 0.0;
 
-    // The fold guard now needs the angle AND the depth: a tilted ruling reaches
-    // sideways by depth * sin(angle), and for a through-all cut that is an order of
-    // magnitude more than the Extension ever is.
-    double kappa = 0.0;
+    // THE FOLD GUARD ASKS THE SURFACE THE STROKE ACTUALLY GETS. 2026-09-13, owner
+    // click-test symptom 4: a gentle wavy loop with a 4 mm dent at Depth 3 raised
+    // "The line turns tighter than the cut surface reaches sideways, so the surface
+    // folds there" - which is a claim about a RULED STRIP, and a closed loop has not
+    // been a ruled strip since phase 3. Worse, on a dense hand-drawn stroke the strip
+    // test measures the raycast JITTER's curvature rather than the line's, so it fired
+    // on any long line whatever its shape. draw_cut_band_folds() asks each kind of
+    // stroke the question its own surface can actually fail; see DrawCut.hpp.
+    double tight = 0.0;
     m_draw_folds = m_draw_stroke.valid() &&
-                   draw_cut_strip_folds(m_draw_stroke, m_draw_params.extension, &kappa,
-                                        m_draw_params.angle_deg, draw_cut_depth_reach());
+                   draw_cut_band_folds(m_draw_stroke, m_draw_params, &tight);
 
     sync_draw_points();
     update_draw_empty_sides();
@@ -4592,8 +4596,17 @@ void GLGizmoCut3D::render_draw_surface_inputs()
     // applies to a closed loop whatever the Direction is, because the band's
     // direction now comes from the core plane rather than from the surface normal.
     // An OPEN line still has no core, so it keeps the Surface-normal-only rule.
-    const bool angle_usable = m_draw_chain.is_closed() ||
-                              DrawCutDirection(m_draw_direction) == DrawCutDirection::SurfaceNormal;
+    // PHASE 3b (2026-09-13, owner decision): THROUGH ALL IGNORES ANGLE AND DEPTH.
+    // Through all extrudes the line straight along the core-plane normal through the
+    // whole part in both directions - no taper, which is what stops it converging to
+    // a point below the loop and re-expanding into a second cone (the hourglass the
+    // owner screenshotted). With no taper there is nothing for the Angle to lean and
+    // nothing for the Depth to stop at, so both are greyed out while it is ticked.
+    // The VALUES are kept, not zeroed: unticking Through all has to give the user
+    // back the lip they had set.
+    const bool angle_usable = (!m_draw_params.through_all) &&
+                              (m_draw_chain.is_closed() ||
+                               DrawCutDirection(m_draw_direction) == DrawCutDirection::SurfaceNormal);
     m_imgui->disabled_begin(!angle_usable);
     ImGui::AlignTextToFramePadding();
     m_imgui->text(_L("Angle") + ": ");
@@ -4608,9 +4621,12 @@ void GLGizmoCut3D::render_draw_surface_inputs()
     ImGui::PopItemWidth();
     m_imgui->disabled_end();
     if (angle_hovered)
-        m_imgui->tooltip(_u8L("The angle at which the outer shell projects in towards the flat middle of the cut. "
-                              "0 makes a flat shelf around the core, 45 a chamfered lip the two halves key into, "
-                              "and 90 a straight wall with no lip.").c_str(),
+        m_imgui->tooltip(m_draw_params.through_all
+                         ? _u8L("Through all ignores the Angle: the cut goes straight through the part along the "
+                                "middle plane's own normal, with no lip to lean. Untick Through all to use it again.").c_str()
+                         : _u8L("The angle at which the outer shell projects in towards the flat middle of the cut. "
+                                "0 makes a flat shelf around the core, 45 a chamfered lip the two halves key into, "
+                                "and 90 a straight wall with no lip.").c_str(),
                          ImGui::GetFontSize() * 20.f);
 
     // Depth: how far the band travels in before the surface turns onto the flat
@@ -4627,10 +4643,16 @@ void GLGizmoCut3D::render_draw_surface_inputs()
     }
     if (through_hovered)
         m_imgui->tooltip(_u8L("Cut all the way through the part instead of meeting a flat middle. "
-                              "The band carries on at the same angle and leaves a tapered plug with no flat core - "
-                              "useful for a socket, not for two halves that have to sit flat against each other.").c_str(),
+                              "The line is carried straight through, square to the middle plane, so the Angle and the "
+                              "Depth do not apply - a line all the way round a part separates it, and a line on a face "
+                              "leaves a straight plug.").c_str(),
                          ImGui::GetFontSize() * 20.f);
-    if (!m_draw_params.through_all) {
+    {
+        // THE DEPTH SLIDER IS GREYED, NOT HIDDEN, under Through all. Hiding it made
+        // the panel jump by a row every time the checkbox was clicked, and it hid the
+        // value the user would get back on unticking - so they could not see what they
+        // had set. Greyed out says "this does nothing right now" without either.
+        m_imgui->disabled_begin(m_draw_params.through_all);
         ImGui::AlignTextToFramePadding();
         m_imgui->text(" ");
         ImGui::SameLine(m_label_width);
@@ -4638,12 +4660,16 @@ void GLGizmoCut3D::render_draw_surface_inputs()
         const float max_depth = std::max(10.f, float(m_bounding_box.size().norm()));
         const bool depth_changed = ImGui::SliderFloat("##draw_depth", &m_draw_depth, 0.1f, max_depth, "%.1f mm");
         const bool depth_hovered = ImGui::IsItemHovered();
-        if (depth_changed)
+        if (depth_changed && !m_draw_params.through_all)
             refresh_draw_stroke();
         ImGui::PopItemWidth();
+        m_imgui->disabled_end();
         if (depth_hovered)
-            m_imgui->tooltip(_u8L("How far in the cut travels from the drawn line before it turns onto the flat middle. "
-                                  "The deeper it goes, the smaller the flat core - too deep and there is no flat left at all.").c_str(),
+            m_imgui->tooltip(m_draw_params.through_all
+                             ? _u8L("Through all ignores the Depth: the cut runs the whole way through the part rather "
+                                    "than stopping at a flat middle. Untick Through all to use it again.").c_str()
+                             : _u8L("How far in the cut travels from the drawn line before it turns onto the flat middle. "
+                                    "The deeper it goes, the smaller the flat core - too deep and there is no flat left at all.").c_str(),
                              ImGui::GetFontSize() * 20.f);
     }
 
@@ -4815,13 +4841,20 @@ void GLGizmoCut3D::render_draw_surface_inputs()
             m_imgui->text_colored(ImGuiWrapper::COL_ORANGE_LIGHT,
                                   _L("The stroke does not separate the part - increase Extension or draw the line right across it."));
         if (m_draw_folds)
-            // PHASE 2: the Angle is now a way to cause this too, and at through-all
-            // depth it is much the likelier of the two - the sideways reach is
-            // depth * sin(angle), which dwarfs the Extension. Say both.
+            // TWO DIFFERENT FAULTS, AND THEY NEED DIFFERENT WORDS. A CLOSED loop
+            // cannot fold against a tight corner at all - its band travels toward the
+            // loop's own axis and stops on the core plane - so what it can fail at is
+            // the Depth eating the whole core. An OPEN line is still a ruled strip and
+            // still folds the phase-2 way. Saying "reduce the Angle" to someone whose
+            // core has been eaten sends them the wrong way: a LARGER angle insets less
+            // (the inset is depth * cos(angle)), which is why the closed wording names
+            // raising it.
             m_imgui->text_colored(ImGuiWrapper::COL_ORANGE_LIGHT,
-                                  m_draw_params.angle_deg != 0.0
-                                  ? _L("The line turns tighter than the cut surface reaches sideways, so the surface folds there. Reduce the Angle, the Extension or the Depth.")
-                                  : _L("The line turns tighter than the Extension reaches, so the cut surface folds there. Reduce Extension."));
+                                  m_draw_chain.is_closed()
+                                  ? _L("Depth reaches almost to the middle of the line, so there is no flat left to mate on. Reduce Depth, or raise the Angle.")
+                                  : (m_draw_params.angle_deg != 0.0
+                                     ? _L("The line turns tighter than the cut surface reaches sideways, so the surface folds there. Reduce the Angle, the Extension or the Depth.")
+                                     : _L("The line turns tighter than the Extension reaches, so the cut surface folds there. Reduce Extension.")));
 
         // PHASE 2: the holonomy fallback. Said plainly, because the symptom without
         // it ("the draft went the wrong way round half my loop") is baffling.

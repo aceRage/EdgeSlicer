@@ -36,13 +36,29 @@ namespace Slic3r {
 //      through c), so the user can force the core square to an axis. The core is
 //      the region of P inside the loop's projection.
 //
-//   2. SKIN BAND. For each loop point p the surface runs from
-//         p_out = p + extension * outward(p)      (clear of the skin)
-//      inward to
+//   2. SKIN BAND, and THE DRAWN LINE IS ON IT. Three rings, not two - for each loop
+//      point p the surface runs
+//         p_out = p - extension * d(p)            the SKIRT, clear of the skin
+//         p                                       the DRAWN LINE, exactly
 //         p_in  = p + depth * d(p)                (then projected onto P along n)
 //      where d(p) is the in-plane inward direction (towards the axis through c,
 //      perpendicular to n) tilted by `angle` towards n. See DrawCutParams::angle_deg.
-//      `depth` is how far the band travels before the surface turns onto the core.
+//      `depth` is how far the band travels before the surface turns onto the core,
+//      and it is measured FROM THE DRAWN LINE, never from the skirt tip.
+//
+//      p being its own ring is the whole point, not a detail of the triangulation:
+//      the drawn line is WHERE THE CUT MEETS THE SKIN, so it has to be on the surface
+//      exactly. Lofting straight from p_out to p_in - which is what this did first -
+//      leaves p merely near the surface, and the skin crossing then lands part-way
+//      along that loft carrying a part-way height: a hand-drawn wave arrived at the
+//      skin damped by extension / (extension + depth * cos(angle)), so the more
+//      Extension the user asked for the flatter their cut came out.
+//
+//      The skirt runs along -d, i.e. it CONTINUES THE BAND'S OWN SLOPE outward rather
+//      than leaving along the skin normal. That keeps the surface C1 across the drawn
+//      line (no crease exactly where the boolean meets the skin) and gives the smaller
+//      lateral reach of the two candidates - E * cos(angle) against a flat skirt's
+//      full E - so it is the harder one to fold on a concave stretch.
 //
 //   3. CORE POLYGON. The loop projected onto P and INSET by the band's in-plane
 //      footprint (depth * cos(angle)), so band and core join along one closed
@@ -453,22 +469,28 @@ static constexpr double DrawCutMaxLipAngleDeg = 90.0;
 // True when the loop WRAPS the part - it encircles the whole object at the core
 // plane rather than enclosing a patch of one face.
 //
-// The two want opposite cuts, and it is under Through all that the difference
-// changes the topology:
+// THE TWO NEED DIFFERENT SOLIDS, and 2026-09-13's owner click-test is what made
+// that true of the BAND-AND-CORE path as well as of Through all.
 //
-//   PLUG (loop on the skin)      the cut is a prism/socket through the loop, out
-//                                of the part both ways. "Inside the loop" is a
-//                                piece, and that piece is the plug.
-//   WRAP (loop round the part)   there IS no inside-the-loop piece: the prism
-//                                contains the whole object, so the intersection is
-//                                everything and the complement nothing ("the upper
-//                                boolean gave nothing"). What the user drew is a
-//                                SEPARATION, and the halves are the two sides of
-//                                one tapered wall.
+//   PLUG (loop on the skin)     the cutter is the plug itself - band wall, flat
+//                               core cap, outer cap. Intersect for the plug,
+//                               complement for the rest. Two pieces, both real.
+//   WRAP (loop round the part)  the band and core together span the WHOLE SECTION
+//                               of the part at that height, so the same solid is a
+//                               PLATE lying across the part rather than a plug in
+//                               it. Its intersection with the mesh is a thin slab
+//                               (the owner's "thin horizontal cyan ring with
+//                               stair-stepped edges"), and its complement is one
+//                               connected piece - so the part is NOT separated, and
+//                               the panel said exactly that: "The stroke does not
+//                               separate the part". What a line drawn all the way
+//                               round means is a SEPARATION, so the surface has to
+//                               be closed into a HALF-SPACE: band, core, and then
+//                               straight on out of the part on the core's far side.
 //
-// THE TEST IS THE SECTION, NOT THE BOUNDING BOX. Slice the mesh with the core
-// plane, project the loop onto that plane, and ask how much of the SECTION lies
-// inside the loop:
+// THE TEST IS THE SECTION, NOT THE BOUNDING BOX. Slice the mesh with the core plane,
+// project the loop onto that plane, and ask how much of the SECTION lies inside the
+// loop:
 //
 //   section area inside the loop > `contain_frac` of the section  -> the loop
 //       contains the part at that height, so it wraps it.
@@ -477,13 +499,13 @@ static constexpr double DrawCutMaxLipAngleDeg = 90.0;
 // A bounding-box test cannot do this job, and was tried first: a cylinder's bbox
 // corners stick out past its own radius, so "the part reaches outside the loop"
 // fires on an ordinary plug loop drawn on the barrel and breaks it. The section is
-// the actual material at that height, so a plug loop projects strictly inside it
-// and a wrap-around loop strictly contains it - there is no case in between to
-// tune, which is what makes this robust where the corner test was not.
+// the actual material at that height, so a plug loop projects strictly inside it and
+// a wrap-around loop strictly contains it - there is no case in between to tune,
+// which is what makes this robust where the corner test was not.
 //
-// Returns false for anything that is not a valid closed loop, and for a mesh with
-// no section at the core plane (a loop floating clear of the part), where "plug"
-// is the safer answer because it is the non-destructive one.
+// Returns false for anything that is not a valid closed loop, and for a mesh with no
+// section at the core plane (a loop floating clear of the part), where "plug" is the
+// safer answer because it is the non-destructive one.
 bool draw_cut_loop_separates(const indexed_triangle_set& mesh,
                              const DrawCutStroke&        stroke,
                              const DrawCutParams&        params,
@@ -527,13 +549,20 @@ bool draw_cut_loop_separates(const indexed_triangle_set& mesh,
 //                  close the two end quads and both caps. The extended ends are
 //                  what let the surface reach past the silhouette.
 //
-// Returns an empty set when the stroke is not valid().
-// `mesh`, when given, lets the builder ask draw_cut_loop_separates() whether a
-// Through-all loop goes ROUND the part or sits ON it - the two need different
-// solids (a half-space wall versus a prism), and the answer cannot be had from the
-// stroke alone. Passing nullptr keeps the plug/prism reading, which is the right
-// default for a loop on a face and the harmless one everywhere the distinction
-// does not arise (the band-and-core path never asks).
+// Returns an empty set when the stroke is not valid(), and also when a closed loop's
+// Depth insets the core past its own centre - there is no flat left to build then,
+// and returning nothing is what makes draw_cut_split() say so rather than silently
+// emitting an inside-out core.
+//
+// `mesh`, when given, lets the builder ask draw_cut_loop_separates() whether the loop
+// goes ROUND the part or sits ON it. For the BAND-AND-CORE surface the two need
+// different solids - a plug versus a half-space - and getting it wrong is what made
+// a wrap-around loop cut a thin slab out of the barrel instead of two halves (owner
+// click-test, symptoms 2 and 3). THROUGH ALL no longer asks: a straight prism along
+// the core normal already is the half-space for a wrap and the plug for a face loop.
+//
+// Passing nullptr keeps the PLUG reading, which is the right default for a loop on a
+// face and the non-destructive one when the answer is not available.
 indexed_triangle_set draw_cut_cutter_solid(const DrawCutStroke& stroke,
                                            const DrawCutParams& params,
                                            const BoundingBoxf3& bbox,
@@ -660,6 +689,45 @@ bool draw_cut_strip_folds(const DrawCutStroke& stroke,
                           double*              worst_kappa = nullptr,
                           double               angle_deg = 0.0,
                           double               depth = 0.0);
+
+// WHETHER THE CUT SURFACE FOLDS, asked of whichever surface the stroke actually
+// gets. 2026-09-13, owner click-test symptom 4: on a gentle wavy loop round a
+// cylinder with Depth 3, the panel said
+//
+//   "The line turns tighter than the cut surface reaches sideways, so the surface
+//    folds there. Reduce the Angle, the Extension or the Depth."
+//
+// and it was wrong twice over.
+//
+//   - draw_cut_strip_folds() is a test about the RULED STRIP, which a closed loop
+//     has not used since phase 3. A closed loop's band travels toward the loop's
+//     own axis and stops on the core plane; it cannot fold against a tight corner
+//     the way a ruling leaning along a binormal could. The gizmo nevertheless ran
+//     the strip test on every stroke, closed ones included - draw_cut_split()
+//     already skipped it for them, so the preview and the cut disagreed;
+//   - and on a DENSE stroke the strip test does not measure the line's shape at
+//     all. Discrete curvature from three consecutive samples is 4*area/(|ab||bc||ca|),
+//     which on samples a fraction of a millimetre apart with a few hundredths of a
+//     millimetre of raycast noise on them reads several 1/mm - the JITTER's
+//     curvature, not the line's. Times a 5 mm extension that is comfortably over 1
+//     and the warning fires on any hand-drawn line whatever its shape.
+//
+// So a closed loop is asked the question its own surface can actually fail: does
+// the band's inward travel INVERT the core? The band moves every point
+// `depth * cos(angle)` toward the loop's axis, so it folds when that inset reaches
+// the loop's own in-plane radius - measured against a ROBUST radius (a low
+// percentile rather than the single smallest sample, so one noisy point or the
+// bottom of a 4 mm dent does not condemn a loop whose radius is 38 mm everywhere
+// else). Through all has no inward travel at all and never folds.
+//
+// An OPEN stroke still gets draw_cut_strip_folds(), because it still is a ruled
+// strip - but smoothed over a window, for the same jitter reason.
+//
+// `worst_inset_frac`, when non-null, receives how close the inset came as a
+// fraction of that radius, so the panel can say how tight.
+bool draw_cut_band_folds(const DrawCutStroke& stroke,
+                         const DrawCutParams& params,
+                         double*              worst_inset_frac = nullptr);
 
 // ---------------------------------------------------------------------------
 // The split.
