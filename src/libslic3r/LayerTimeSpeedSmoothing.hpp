@@ -31,7 +31,7 @@ namespace Slic3r {
 //
 // Plan: 09-concept-layer-time-speed-smoothing.md
 // Inspiration only: bambulab/BambuStudio#12224 (slowdown-only). Not a cherry-pick.
-// G-code pipeline stage (S3 stub / S4 apply): GCode/LayerTimeSpeedSmoothingFilter.
+// G-code pipeline stage (S4 apply): GCode/LayerTimeSpeedSmoothingFilter.
 
 struct LayerTimeSpeedSolveResult
 {
