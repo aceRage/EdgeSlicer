@@ -143,12 +143,27 @@ static std::string rewrite_f(const std::string &raw, int f_mm_min)
     return out;
 }
 
-static bool is_speedup_protected(ExtrusionRole role)
+// Modes A/B never speed these up (concept Must-PASS #9): overhang/bridge, ironing,
+// top solid, and support (including interface and transition). Mode C is unchanged.
+static bool is_support_role(ExtrusionRole role)
 {
-    return is_bridge(role) || role == erIroning;
+    return role == erSupportMaterial || role == erSupportMaterialInterface || role == erSupportTransition;
 }
 
-static bool line_eligible(LayerTimeSpeedSmoothMode mode, LayerTimeSlowdownScope scope, const ParsedLine &line)
+static bool is_speedup_protected(ExtrusionRole role)
+{
+    return is_bridge(role) || role == erIroning || is_top_surface(role) || is_support_role(role);
+}
+
+static bool already_at_min_print_speed(const ParsedLine &line, const PrintConfig &config)
+{
+    const double min_mm_s = config.slow_down_min_speed.get_at(line.extruder);
+    if (min_mm_s <= 0.0)
+        return false;
+    return (line.feedrate_mm_min / 60.f) <= float(min_mm_s) + 1e-3f;
+}
+
+static bool line_eligible(LayerTimeSpeedSmoothMode mode, LayerTimeSlowdownScope scope, const ParsedLine &line, const PrintConfig &config)
 {
     if (!line.is_motion || !line.extruding || line.wipe)
         return false;
@@ -156,6 +171,8 @@ static bool line_eligible(LayerTimeSpeedSmoothMode mode, LayerTimeSlowdownScope 
         if (is_speedup_protected(line.role))
             return false;
         if (mode == ltssmSpeedUpExcludeOuter && is_external_perimeter(line.role))
+            return false;
+        if (already_at_min_print_speed(line, config))
             return false;
         return true;
     }
@@ -298,7 +315,7 @@ static std::string apply_factor_to_lines(const std::vector<ParsedLine> &lines,
         if (rewrite && line.is_motion) {
             const float original_f = line.feedrate_mm_min > 0.f ? line.feedrate_mm_min : emitted_f;
             float       new_f      = original_f;
-            if (line_eligible(mode, scope, line)) {
+            if (line_eligible(mode, scope, line, config)) {
                 new_f = float(original_f * factor);
                 const double max_vol = config.filament_max_volumetric_speed.get_at(line.extruder);
                 if (max_vol > 0.0 && line.mm3_per_mm > 0.f) {
@@ -312,13 +329,13 @@ static std::string apply_factor_to_lines(const std::vector<ParsedLine> &lines,
             const int new_i    = std::max(1, int(std::lround(new_f)));
             const int emit_i   = std::max(1, int(std::lround(emitted_f)));
             const int orig_i   = std::max(1, int(std::lround(original_f)));
-            if (line_eligible(mode, scope, line) && new_i != orig_i) {
+            if (line_eligible(mode, scope, line, config) && new_i != orig_i) {
                 raw       = rewrite_f(raw, new_i);
                 emitted_f = float(new_i);
-            } else if (line_eligible(mode, scope, line) && new_i != emit_i) {
+            } else if (line_eligible(mode, scope, line, config) && new_i != emit_i) {
                 raw       = rewrite_f(raw, new_i);
                 emitted_f = float(new_i);
-            } else if (!line_eligible(mode, scope, line) && orig_i != emit_i) {
+            } else if (!line_eligible(mode, scope, line, config) && orig_i != emit_i) {
                 // Restore the unscaled modal F so a following ineligible move does not inherit it.
                 raw       = rewrite_f(raw, orig_i);
                 emitted_f = float(orig_i);
@@ -353,7 +370,7 @@ static double time_after_factor(const std::vector<ParsedLine> &lines,
             continue;
         }
         float f = line.feedrate_mm_min;
-        if (line_eligible(mode, scope, line)) {
+        if (line_eligible(mode, scope, line, config)) {
             f = float(line.feedrate_mm_min * factor);
             const double max_vol = config.filament_max_volumetric_speed.get_at(line.extruder);
             if (max_vol > 0.0 && line.mm3_per_mm > 0.f) {

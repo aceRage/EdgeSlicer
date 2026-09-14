@@ -14,6 +14,7 @@ namespace Slic3r {
 // spiral_mode: pass-through even when the option is on (vase layers are not retimed).
 // Any other enabled mode: buffer every cooled layer, then on the last layer call the S2
 // solvers and rewrite F. Fan commands from CoolingBuffer are left untouched (F-only v1).
+// Modes A/B never speed up overhang/bridge, ironing, top solid, or support (incl. interface).
 //
 // Plan: 09-concept-layer-time-speed-smoothing.md
 class LayerTimeSpeedSmoothingFilter

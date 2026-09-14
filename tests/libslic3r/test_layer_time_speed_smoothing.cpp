@@ -402,6 +402,7 @@ TEST_CASE("Layer time speed smoothing: Mode B speeds up a long layer and leaves 
     cfg.use_relative_e_distances.value       = true;
     cfg.slow_down_for_layer_cooling.values   = { false };
     cfg.slow_down_layer_time.values          = { 0. };
+    cfg.slow_down_min_speed.values           = { 0. };
 
     LayerTimeSpeedSmoothingFilter filter(cfg);
 
@@ -441,6 +442,7 @@ TEST_CASE("Layer time speed smoothing: Mode A does not rewrite outer-wall F", "[
     cfg.use_relative_e_distances.value       = true;
     cfg.slow_down_for_layer_cooling.values   = { false };
     cfg.slow_down_layer_time.values          = { 0. };
+    cfg.slow_down_min_speed.values           = { 0. };
 
     LayerTimeSpeedSmoothingFilter filter(cfg);
 
@@ -464,7 +466,7 @@ TEST_CASE("Layer time speed smoothing: Mode A does not rewrite outer-wall F", "[
     REQUIRE(feedrate_of(last_body, "TYPE:Sparse infill") > 1800);
 }
 
-TEST_CASE("Layer time speed smoothing: never speeds up overhang, bridge or ironing", "[LayerTimeSpeedSmoothing][GCode]")
+TEST_CASE("Layer time speed smoothing: never speeds up overhang, bridge, ironing, top solid or support", "[LayerTimeSpeedSmoothing][GCode]")
 {
     PrintConfig cfg;
     cfg.layer_time_speed_smoothing.value     = ltssmSpeedUpAll;
@@ -474,8 +476,10 @@ TEST_CASE("Layer time speed smoothing: never speeds up overhang, bridge or ironi
     cfg.use_relative_e_distances.value       = true;
     cfg.slow_down_for_layer_cooling.values   = { false };
     cfg.slow_down_layer_time.values          = { 0. };
+    cfg.slow_down_min_speed.values           = { 0. };
 
-    const char *roles[] = {"Overhang wall", "Bridge", "Ironing"};
+    const char *roles[] = {"Overhang wall", "Bridge", "Internal Bridge", "Ironing", "Top surface",
+                           "Support", "Support interface", "Support transition"};
     for (const char *role : roles) {
         DYNAMIC_SECTION(role)
         {
@@ -493,6 +497,32 @@ TEST_CASE("Layer time speed smoothing: never speeds up overhang, bridge or ironi
             REQUIRE(feedrate_of(last_body, "G1 X") == 1800);
         }
     }
+}
+
+TEST_CASE("Layer time speed smoothing: speed-up skips lines already at min print speed", "[LayerTimeSpeedSmoothing][GCode]")
+{
+    PrintConfig cfg;
+    cfg.layer_time_speed_smoothing.value     = ltssmSpeedUpAll;
+    cfg.layer_time_speed_max_variation.value = 25.;
+    cfg.layer_time_speed_max_speedup.value   = 100.;
+    cfg.filament_max_volumetric_speed.values = { 1000. };
+    cfg.use_relative_e_distances.value       = true;
+    cfg.slow_down_for_layer_cooling.values   = { false };
+    cfg.slow_down_layer_time.values          = { 0. };
+    cfg.slow_down_min_speed.values           = { 30. }; // 1800 mm/min
+
+    LayerTimeSpeedSmoothingFilter filter(cfg);
+    auto make_layer = [](int repeats) {
+        std::string g = "G92 X0\n;TYPE:Sparse infill\n";
+        for (int i = 0; i < repeats; ++i)
+            g += g1_x(10. * (i + 1), 0.05, 1800);
+        return g;
+    };
+    REQUIRE(filter.process_layer(make_layer(2), 0, false).empty());
+    REQUIRE(filter.process_layer(make_layer(2), 1, false).empty());
+    const std::string out = filter.process_layer(make_layer(20), 2, true);
+    const std::string last_body = out.substr(out.rfind("LAYER_TIME_SPEED_SMOOTH"));
+    REQUIRE(feedrate_of(last_body, "G1 X") == 1800);
 }
 
 TEST_CASE("Layer time speed smoothing: volumetric clamp caps F_new", "[LayerTimeSpeedSmoothing][GCode]")
