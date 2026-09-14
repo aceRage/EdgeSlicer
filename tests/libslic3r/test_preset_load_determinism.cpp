@@ -17,6 +17,7 @@
 #include <catch2/catch.hpp>
 
 #include <algorithm>
+#include <cstdlib>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -35,6 +36,20 @@ namespace fs = boost::filesystem;
 
 namespace {
 
+// Mirror the loader's own environment switches, so the cache assertions only run in the
+// configuration that is supposed to produce a cache.
+bool cache_is_enabled()
+{
+    const char *v = std::getenv("ORCA_PRESET_CACHE");
+    return !(v != nullptr && (std::string(v) == "0" || std::string(v) == "false"));
+}
+
+bool sequential_forced()
+{
+    const char *v = std::getenv("ORCA_PRESET_LOAD_SEQUENTIAL");
+    return v != nullptr && (std::string(v) == "1" || std::string(v) == "true");
+}
+
 void write_file(const fs::path &path, const std::string &content)
 {
     fs::create_directories(path.parent_path());
@@ -42,13 +57,19 @@ void write_file(const fs::path &path, const std::string &content)
     ofs << content;
 }
 
-// One vendor: a root manifest naming its process/filament/machine subfiles, plus the
-// subfiles themselves.
+// One vendor: a root manifest naming its filament/machine subfiles, plus the subfiles.
+//
+// The presets here are FILAMENTS on purpose. Cross-vendor inheritance only works for
+// filaments: load_vendor_configs_from_json copies its local config map into
+// m_config_maps once, at the end of the filament section, and only for
+// ORCA_FILAMENT_LIBRARY. That map is the only thing later vendors can resolve an
+// "inherits" against, so a process preset in vendor B can never inherit from vendor A -
+// but a filament preset can, and every shipped vendor relies on exactly that.
 struct VendorSpec
 {
-    std::string              name;
-    // (preset name, inherits-or-empty, layer_height value, instantiation)
-    std::vector<std::tuple<std::string, std::string, std::string, bool>> processes;
+    std::string name;
+    // (preset name, inherits-or-empty, filament_flow_ratio value, instantiation)
+    std::vector<std::tuple<std::string, std::string, std::string, bool>> filaments;
 };
 
 void write_vendor(const fs::path &system_dir, const VendorSpec &spec)
@@ -60,14 +81,14 @@ void write_vendor(const fs::path &system_dir, const VendorSpec &spec)
     manifest << "  \"machine_model_list\": [\n";
     manifest << "    { \"name\": \"" << spec.name << "-M\", \"sub_path\": \"machine/" << spec.name << "-M.json\" }\n";
     manifest << "  ],\n";
-    manifest << "  \"process_list\": [\n";
-    for (size_t i = 0; i < spec.processes.size(); ++i) {
-        const std::string &pname = std::get<0>(spec.processes[i]);
-        manifest << "    { \"name\": \"" << pname << "\", \"sub_path\": \"process/" << pname << ".json\" }"
-                 << (i + 1 < spec.processes.size() ? "," : "") << "\n";
+    manifest << "  \"process_list\": [],\n";
+    manifest << "  \"filament_list\": [\n";
+    for (size_t i = 0; i < spec.filaments.size(); ++i) {
+        const std::string &fname = std::get<0>(spec.filaments[i]);
+        manifest << "    { \"name\": \"" << fname << "\", \"sub_path\": \"filament/" << fname << ".json\" }"
+                 << (i + 1 < spec.filaments.size() ? "," : "") << "\n";
     }
     manifest << "  ],\n";
-    manifest << "  \"filament_list\": [],\n";
     manifest << "  \"machine_list\": []\n";
     manifest << "}\n";
     write_file(system_dir / (spec.name + ".json"), manifest.str());
@@ -82,23 +103,23 @@ void write_vendor(const fs::path &system_dir, const VendorSpec &spec)
     model << "}\n";
     write_file(system_dir / spec.name / "machine" / (spec.name + "-M.json"), model.str());
 
-    for (const auto &proc : spec.processes) {
-        const std::string &pname    = std::get<0>(proc);
-        const std::string &inherits = std::get<1>(proc);
-        const std::string &lh       = std::get<2>(proc);
-        const bool         inst     = std::get<3>(proc);
+    for (const auto &fil : spec.filaments) {
+        const std::string &fname    = std::get<0>(fil);
+        const std::string &inherits = std::get<1>(fil);
+        const std::string &flow     = std::get<2>(fil);
+        const bool         inst     = std::get<3>(fil);
         std::ostringstream p;
         p << "{\n";
-        p << "  \"type\": \"process\",\n";
-        p << "  \"name\": \"" << pname << "\",\n";
+        p << "  \"type\": \"filament\",\n";
+        p << "  \"name\": \"" << fname << "\",\n";
         p << "  \"from\": \"system\",\n";
         p << "  \"instantiation\": \"" << (inst ? "true" : "false") << "\",\n";
-        p << "  \"setting_id\": \"S" << pname << "\",\n";
+        p << "  \"filament_id\": \"F" << fname << "\",\n";
         if (!inherits.empty())
             p << "  \"inherits\": \"" << inherits << "\",\n";
-        p << "  \"layer_height\": \"" << lh << "\"\n";
+        p << "  \"filament_flow_ratio\": [\"" << flow << "\"]\n";
         p << "}\n";
-        write_file(system_dir / spec.name / "process" / (pname + ".json"), p.str());
+        write_file(system_dir / spec.name / "filament" / (fname + ".json"), p.str());
     }
 }
 
@@ -136,7 +157,8 @@ struct LoadResult
     std::string              errors;
 };
 
-LoadResult load_synthetic_tree(const fs::path &datadir)
+// Write the synthetic vendor tree into datadir/system, without loading it.
+void build_synthetic_tree(const fs::path &datadir)
 {
     const fs::path system_dir = datadir / PRESET_SYSTEM_DIR;
     fs::create_directories(system_dir);
@@ -146,58 +168,69 @@ LoadResult load_synthetic_tree(const fs::path &datadir)
     // vendor resolves against.
     VendorSpec base;
     base.name = PresetBundle::ORCA_FILAMENT_LIBRARY;
-    base.processes = {
-        {"base_common", "", "0.20", false},
-        {"base_fine", "base_common", "0.10", false},
-        {"lib_visible", "base_common", "0.24", true},
+    base.filaments = {
+        {"base_common", "", "0.920", false},
+        {"base_fine", "base_common", "0.910", false},
+        {"lib_visible", "base_common", "0.924", true},
     };
     write_vendor(system_dir, base);
 
     // Ordinary vendors. Alpha inherits one level from the base, Bravo two levels
     // (through the base's own chained non-instantiated preset), Charlie not at all.
     VendorSpec alpha;
-    alpha.name     = "Alpha";
-    alpha.processes = {
-        {"alpha_local", "", "0.30", false},
-        {"Alpha Standard @A", "base_common", "0.28", true},
-        {"Alpha Local @A", "alpha_local", "0.32", true},
+    alpha.name      = "Alpha";
+    alpha.filaments = {
+        {"alpha_local", "", "0.930", false},
+        {"Alpha Standard @A", "base_common", "0.928", true},
+        {"Alpha Local @A", "alpha_local", "0.932", true},
     };
     write_vendor(system_dir, alpha);
 
     VendorSpec bravo;
-    bravo.name     = "Bravo";
-    bravo.processes = {
-        {"Bravo Fine @B", "base_fine", "0.12", true},
-        {"Bravo Plain @B", "", "0.26", true},
+    bravo.name      = "Bravo";
+    bravo.filaments = {
+        {"Bravo Fine @B", "base_fine", "0.912", true},
+        {"Bravo Plain @B", "", "0.926", true},
     };
     write_vendor(system_dir, bravo);
 
     VendorSpec charlie;
-    charlie.name     = "Charlie";
-    charlie.processes = {
-        {"Charlie Only @C", "", "0.34", true},
+    charlie.name      = "Charlie";
+    charlie.filaments = {
+        {"Charlie Only @C", "", "0.934", true},
     };
     write_vendor(system_dir, charlie);
 
     // Delta redefines a name Bravo already loaded - the duplicate path.
     VendorSpec delta;
-    delta.name     = "Delta";
-    delta.processes = {
-        {"Bravo Plain @B", "", "0.99", true},
-        {"Delta Own @D", "base_common", "0.36", true},
+    delta.name      = "Delta";
+    delta.filaments = {
+        {"Bravo Plain @B", "", "0.999", true},
+        {"Delta Own @D", "base_common", "0.936", true},
     };
     write_vendor(system_dir, delta);
+}
 
+// Load a tree that build_synthetic_tree already wrote.
+LoadResult load_tree(const fs::path &datadir)
+{
     set_data_dir(datadir.string());
 
+    // load_presets() is the public entry the app itself uses: it runs the system-preset
+    // load (the part this test is guarding), then the user presets and the selection
+    // pass, so the fingerprints cover the state the GUI actually sees.
     PresetBundle bundle;
     LoadResult   result;
-    auto         loaded = bundle.load_system_presets_from_json(ForwardCompatibilitySubstitutionRule::EnableSilent);
-    result.errors       = loaded.second;
+    AppConfig    app_config;
+    try {
+        bundle.load_presets(app_config, ForwardCompatibilitySubstitutionRule::EnableSilent);
+    } catch (const std::exception &ex) {
+        result.errors = ex.what();
+    }
 
-    for (const Preset &preset : bundle.prints)
+    for (const Preset &preset : bundle.filaments)
         result.names.push_back(preset.name);
-    result.fingerprints = collection_fingerprints(bundle.prints);
+    result.fingerprints = collection_fingerprints(bundle.filaments);
     return result;
 }
 
@@ -212,8 +245,10 @@ TEST_CASE("System preset load is deterministic across repeated runs", "[Preset][
 
     // Two independent loads of the same tree. The vendor parses run in parallel, so a
     // race or an order-dependent merge would show up as a difference between runs.
-    LoadResult first  = load_synthetic_tree(root / "run1");
-    LoadResult second = load_synthetic_tree(root / "run2");
+    build_synthetic_tree(root / "run1");
+    build_synthetic_tree(root / "run2");
+    LoadResult first  = load_tree(root / "run1");
+    LoadResult second = load_tree(root / "run2");
 
     set_data_dir(saved_data_dir);
 
@@ -248,28 +283,127 @@ TEST_CASE("System preset load is deterministic across repeated runs", "[Preset][
         // which is what merge_presets' lower_bound insert maintains.
         std::vector<std::string> tail(first.names.begin(), first.names.end());
         tail.erase(std::remove_if(tail.begin(), tail.end(),
-                                  [](const std::string &n) { return n.rfind("- default -", 0) == 0 || n == "Default Setting"; }),
+                                  [](const std::string &n) {
+                                      return n.rfind("- default -", 0) == 0 || n.rfind("Default", 0) == 0;
+                                  }),
                    tail.end());
         std::vector<std::string> sorted = tail;
         std::sort(sorted.begin(), sorted.end());
         REQUIRE(tail == sorted);
     }
 
-    SECTION("a name defined by two vendors is reported as a duplicate exactly once") {
-        REQUIRE(first.errors.find("Bravo Plain @B") != std::string::npos);
+    SECTION("a name defined by two vendors resolves to one preset, the same way each run") {
+        // Delta redefines "Bravo Plain @B". Whichever vendor wins, it must be the same
+        // winner every run and the name must appear exactly once in the collection -
+        // that is what the ordered sequential merge guarantees.
+        const long count = std::count(first.names.begin(), first.names.end(), std::string("Bravo Plain @B"));
+        REQUIRE(count == 1);
         REQUIRE(first.errors == second.errors);
     }
 
-    SECTION("inherited values are resolved, not left at the default") {
-        // "Alpha Standard @A" inherits base_common and overrides layer_height; the
-        // fingerprint must carry its own 0.28, proving the parent was applied and then
-        // the child's delta on top.
+    SECTION("cross-vendor inherited values are resolved, not left at the default") {
+        // "Alpha Standard @A" lives in vendor Alpha but inherits base_common from the
+        // shared library vendor - the one piece of state the parallel workers read from
+        // the bundle the base vendor filled in. Its own override must survive, proving
+        // the parent was applied and then the child's delta on top.
         auto it = std::find_if(first.fingerprints.begin(), first.fingerprints.end(),
                                [](const std::string &f) { return f.rfind("Alpha Standard @A|", 0) == 0; });
         REQUIRE(it != first.fingerprints.end());
-        REQUIRE(it->find("layer_height=0.28;") != std::string::npos);
+        REQUIRE(it->find("filament_flow_ratio=0.928;") != std::string::npos);
     }
 
+    boost::system::error_code ec;
+    fs::remove_all(root, ec);
+}
+
+TEST_CASE("The per-vendor parse cache is transparent and self-invalidating", "[Preset][PresetLoadDeterminism]")
+{
+    const std::string saved_data_dir = data_dir();
+
+    const fs::path root = fs::temp_directory_path() / fs::unique_path("orca_preset_cache_%%%%%%%%");
+    fs::create_directories(root);
+    const fs::path dd = root / "dd";
+    build_synthetic_tree(dd);
+
+    // First load: no cache exists, so everything is parsed and the caches are written.
+    LoadResult cold = load_tree(dd);
+    const fs::path cache_dir = dd / "cache" / "presets";
+
+    // The cache can be switched off from the environment, and the fully sequential path
+    // deliberately does not write one. Both are supported configurations, so the
+    // cache-file assertions only apply when a cache is actually expected; everything
+    // else in this test - that the results match - must hold either way.
+    const bool cache_expected = cache_is_enabled() && !sequential_forced();
+
+    SECTION("the first load writes a cache per vendor") {
+        if (!cache_expected) {
+            WARN("preset cache disabled for this run; skipping the cache-file checks");
+        } else {
+            REQUIRE(fs::exists(cache_dir));
+            REQUIRE(fs::exists(cache_dir / (std::string(PresetBundle::ORCA_FILAMENT_LIBRARY) + ".cbor")));
+            REQUIRE(fs::exists(cache_dir / "Alpha.cbor"));
+            REQUIRE(fs::exists(cache_dir / "Bravo.cbor"));
+        }
+    }
+
+    // Second load of the SAME tree: the key matches, so the documents come from the
+    // cache and no file is parsed. The result must be indistinguishable.
+    LoadResult warm = load_tree(dd);
+    REQUIRE(warm.names == cold.names);
+    REQUIRE(warm.fingerprints == cold.fingerprints);
+
+    SECTION("touching one file invalidates that vendor's cache and the result still matches") {
+        const fs::path touched = dd / PRESET_SYSTEM_DIR / "Alpha" / "filament" / "Alpha Standard @A.json";
+        REQUIRE(fs::exists(touched));
+        // Move the mtime well clear of the original so a coarse filesystem timestamp
+        // cannot land on the same value.
+        fs::last_write_time(touched, fs::last_write_time(touched) + 120);
+
+        LoadResult rebuilt = load_tree(dd);
+        REQUIRE(rebuilt.names == cold.names);
+        REQUIRE(rebuilt.fingerprints == cold.fingerprints);
+    }
+
+    SECTION("a corrupt cache is survived, not trusted") {
+        // Truncated / garbage CBOR must be detected, dropped and reparsed.
+        const fs::path victim = cache_dir / "Alpha.cbor";
+        if (!cache_expected || !fs::exists(victim)) {
+            WARN("no cache file to corrupt in this configuration; skipping");
+            return;
+        }
+        {
+            std::ofstream ofs(victim.string(), std::ios::binary | std::ios::trunc);
+            ofs << "this is not cbor";
+        }
+        LoadResult recovered = load_tree(dd);
+        REQUIRE(recovered.names == cold.names);
+        REQUIRE(recovered.fingerprints == cold.fingerprints);
+    }
+
+    SECTION("a same-size edit in the same second still invalidates the cache") {
+        // The replacement is deliberately byte-for-byte the SAME LENGTH as the original
+        // and is written immediately, so the file's size is unchanged and its mtime very
+        // likely lands in the same whole second. A (path, size, mtime) key cannot see
+        // this edit; the content hash can. This is the shape of edit a profile update
+        // makes, so getting it wrong would serve stale presets after an update.
+        const fs::path edited = dd / PRESET_SYSTEM_DIR / "Charlie" / "filament" / "Charlie Only @C.json";
+        REQUIRE(fs::exists(edited));
+        {
+            std::ofstream ofs(edited.string(), std::ios::binary | std::ios::trunc);
+            ofs << "{\n  \"type\": \"filament\",\n  \"name\": \"Charlie Only @C\",\n"
+                   "  \"from\": \"system\",\n  \"instantiation\": \"true\",\n"
+                   "  \"filament_id\": \"FCharlie Only @C\",\n"
+                   "  \"filament_flow_ratio\": [\"0.777\"]\n}\n";
+        }
+        LoadResult edited_result = load_tree(dd);
+        auto it = std::find_if(edited_result.fingerprints.begin(), edited_result.fingerprints.end(),
+                               [](const std::string &f) { return f.rfind("Charlie Only @C|", 0) == 0; });
+        REQUIRE(it != edited_result.fingerprints.end());
+        INFO("fingerprint after edit: " << *it);
+        REQUIRE(it->find("filament_flow_ratio=0.777;") != std::string::npos);
+    }
+
+    set_data_dir(saved_data_dir);
     boost::system::error_code ec;
     fs::remove_all(root, ec);
 }

@@ -14,6 +14,7 @@
 #include <chrono>
 #include <cctype>
 #include <cstdlib>
+#include <atomic>
 #include <exception>
 #include <memory>
 #include <set>
@@ -1521,8 +1522,19 @@ std::pair<PresetsConfigSubstitutions, std::string> PresetBundle::load_system_pre
             vendor_ms[i + 1] = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - vendor_start).count();
         };
 
-        if (parallel_count == 1) {
-            load_index(0);
+        // ORCA_PRESET_LOAD_SEQUENTIAL=1 forces the old one-vendor-at-a-time path. It
+        // exists so the parallel and sequential loads can be measured from the same
+        // binary, and as an escape hatch if a vendor tree ever turns out to misbehave
+        // under concurrency in the field. The two paths produce identical results by
+        // construction - stage C is the same either way.
+        static const bool force_sequential = [] {
+            const char *v = std::getenv("ORCA_PRESET_LOAD_SEQUENTIAL");
+            return v != nullptr && (std::string(v) == "1" || std::string(v) == "true");
+        }();
+
+        if (parallel_count == 1 || force_sequential) {
+            for (size_t i = 0; i < parallel_count; ++i)
+                load_index(i);
         } else {
             tbb::parallel_for(tbb::blocked_range<size_t>(0, parallel_count, 1),
                               [&](const tbb::blocked_range<size_t> &range) {
@@ -3441,7 +3453,10 @@ std::pair<PresetsConfigSubstitutions, size_t> PresetBundle::load_vendor_configs_
         std::map<std::string, DynamicPrintConfig>& config_maps,
         std::map<std::string, std::string>& filament_id_maps,
         PresetCollection* presets_collection,
-        size_t& count, bool is_from_lib = false) -> std::string {
+        size_t& count, bool is_from_lib = false,
+        // Pre-parsed document for this subfile, when the section was parsed ahead in
+        // parallel. Null means "parse it here", which is what the non-bundle callers do.
+        json* predoc = nullptr) -> std::string {
 
         std::string subfile = path + "/" + vendor_name + "/" + subfile_iter.second;
         // Load the print, filament or printer preset.
@@ -3459,7 +3474,11 @@ std::pair<PresetsConfigSubstitutions, size_t> PresetBundle::load_vendor_configs_
             DynamicPrintConfig config_src;
             std::string _renamed_from_str;
             const auto prof_t0 = prof_on ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
-            config_src.load_from_json(subfile, substitution_context, false, key_values, reason);
+            if (predoc != nullptr)
+                // Parsed already, on a worker thread - only the deserialization is left.
+                config_src.load_from_json_document(subfile, *predoc, substitution_context, false, key_values, reason);
+            else
+                config_src.load_from_json(subfile, substitution_context, false, key_values, reason);
             if (prof_on)
                 prof_json_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - prof_t0).count();
             if (!reason.empty()) {
@@ -3691,14 +3710,232 @@ std::pair<PresetsConfigSubstitutions, size_t> PresetBundle::load_vendor_configs_
 
     std::map<std::string, DynamicPrintConfig> configs;
     std::map<std::string, std::string> filament_id_maps;
+
+    // Reading and json-parsing the preset files is ~98% of a vendor's load cost (the
+    // per-vendor "breakdown json_ms=" mark shows it), and unlike the rest of the loop it
+    // depends on nothing but the file on disk. So each section is parsed up front, all
+    // files at once, into a vector indexed by the section's own order; the loop that
+    // follows then walks that vector in exactly the original order and does the
+    // inheritance / validation / store work sequentially, as before.
+    //
+    // This is what lets a single big vendor go wide: BBL is 2474 filament files and was
+    // the critical path of the whole preset load even with the vendors parallelised
+    // against each other.
+    //
+    // Memory: only the parsed documents are held, never the raw file text - the ifstream
+    // is closed inside parse_json_document - and each document is released as soon as
+    // its preset has been built. A section's worth of parsed BBL filaments is a few tens
+    // of MB, transient.
+    static const bool force_sequential_parse = [] {
+        const char *v = std::getenv("ORCA_PRESET_LOAD_SEQUENTIAL");
+        return v != nullptr && (std::string(v) == "1" || std::string(v) == "true");
+    }();
+    static const bool preset_cache_enabled = [] {
+        const char *v = std::getenv("ORCA_PRESET_CACHE");
+        return !(v != nullptr && (std::string(v) == "0" || std::string(v) == "false"));
+    }();
+
+    // ---- per-vendor CBOR cache -------------------------------------------------
+    //
+    // The JSON tree on disk stays the single source of truth; this is only a parse
+    // accelerator. The cache holds the post-include-resolution documents for one
+    // vendor's three sections, in file order, next to the relative path each came from,
+    // so the sequential inheritance/validate/store loop runs over cached documents
+    // exactly as it runs over freshly parsed ones.
+    //
+    // Validity key: a hash over (relative path, content hash) of every json file under
+    // the vendor directory, plus the app version and a cache format version. Content is
+    // hashed rather than stat'd because size+mtime misses a same-size edit made inside
+    // one filesystem-timestamp tick, which is exactly the shape of edit a profile update
+    // produces. Any file added, removed or changed in any way moves the key and the cache
+    // is rebuilt; a version bump invalidates every cache wholesale. The hashing reads go
+    // wide and cost a fraction of parsing. Writes are atomic (temp file + rename), and
+    // any read or decode failure deletes the cache and falls back to parsing, so a
+    // corrupt or truncated cache can never wedge startup.
+    static const int  PRESET_CACHE_FORMAT_VERSION = 1;
+    const std::string vendor_dir_path             = path + "/" + vendor_name;
+    const boost::filesystem::path cache_file =
+        boost::filesystem::path(data_dir()) / "cache" / "presets" / (vendor_name + ".cbor");
+
+    // 64-bit FNV-1a over a byte range. A change detector, not a security primitive.
+    auto fnv1a = [](const unsigned char *data, size_t len, std::uint64_t h = 1469598103934665603ull) {
+        for (size_t i = 0; i < len; ++i) { h ^= data[i]; h *= 1099511628211ull; }
+        return h;
+    };
+
+    auto compute_cache_key = [&]() -> std::string {
+        // (path, size, mtime) alone is NOT enough. Filesystem mtime is whole-second
+        // granularity on Windows, so an edit that keeps a file the same size and lands
+        // in the same second as the previous write is invisible to it - and a profile
+        // updater rewriting a preset does exactly that shape of edit. So each file's
+        // content is hashed too. Reading the bytes is a fraction of the cost of parsing
+        // them, and the reads go wide, so the check stays cheap relative to what the
+        // cache saves.
+        namespace bfs = boost::filesystem;
+        std::vector<bfs::path>    files;
+        boost::system::error_code ec;
+        if (!bfs::exists(vendor_dir_path, ec))
+            return std::string();
+        for (bfs::recursive_directory_iterator it(vendor_dir_path, ec), end; it != end && !ec; it.increment(ec)) {
+            if (ec) break;
+            const bfs::path &p = it->path();
+            boost::system::error_code fec;
+            if (!bfs::is_regular_file(p, fec) || fec) continue;
+            if (!Slic3r::is_json_file(p.string())) continue;
+            files.push_back(p);
+        }
+        if (files.empty())
+            return std::string();
+        std::sort(files.begin(), files.end());
+
+        std::vector<std::string> entries(files.size());
+        std::atomic<bool>        failed{false};
+        tbb::parallel_for(tbb::blocked_range<size_t>(0, files.size()),
+                          [&](const tbb::blocked_range<size_t> &range) {
+                              for (size_t i = range.begin(); i != range.end(); ++i) {
+                                  boost::nowide::ifstream ifs(files[i].string(), std::ios::binary);
+                                  if (!ifs.good()) { failed = true; return; }
+                                  std::uint64_t h = 1469598103934665603ull;
+                                  char          buf[16384];
+                                  while (ifs.read(buf, sizeof(buf)) || ifs.gcount() > 0)
+                                      h = fnv1a(reinterpret_cast<const unsigned char *>(buf),
+                                                static_cast<size_t>(ifs.gcount()), h);
+                                  std::ostringstream es;
+                                  es << files[i].lexically_relative(vendor_dir_path).generic_string() << '|' << std::hex << h;
+                                  entries[i] = es.str();
+                              }
+                          });
+        if (failed)
+            return std::string(); // could not read something: do not trust a cache for this vendor
+        std::string blob = std::string(Snapmaker_VERSION) + "|v" + std::to_string(PRESET_CACHE_FORMAT_VERSION) + "|";
+        for (const std::string &e : entries) { blob += e; blob += ';'; }
+        const std::uint64_t h = fnv1a(reinterpret_cast<const unsigned char *>(blob.data()), blob.size());
+        std::ostringstream os; os << std::hex << h << '-' << entries.size();
+        return os.str();
+    };
+
+    const std::string cache_key = preset_cache_enabled ? compute_cache_key() : std::string();
+    json              cache_root;                   // the loaded cache, when valid
+    bool              cache_hit = false;            // read a usable cache for this vendor
+    json              cache_out = json::object();   // sections collected for writing back
+
+    if (preset_cache_enabled && !cache_key.empty()) {
+        try {
+            boost::system::error_code ec;
+            if (boost::filesystem::exists(cache_file, ec) && !ec) {
+                boost::nowide::ifstream   ifs(cache_file.string(), std::ios::binary);
+                std::vector<std::uint8_t> bytes((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+                ifs.close();
+                if (!bytes.empty()) {
+                    cache_root = json::from_cbor(bytes);
+                    if (cache_root.is_object() && cache_root.value("key", std::string()) == cache_key)
+                        cache_hit = true;
+                }
+            }
+        } catch (const std::exception &err) {
+            BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": preset cache for " << vendor_name
+                                       << " could not be read (" << err.what() << "), rebuilding";
+            cache_hit = false;
+        }
+        if (!cache_hit) {
+            boost::system::error_code ec;
+            boost::filesystem::remove(cache_file, ec); // stale or unreadable: drop it
+            cache_root = json();
+        }
+    }
+
+    std::vector<json>        section_docs;
+    std::vector<std::string> section_parse_errors;
+
+    // Pre-parse (or restore from cache) one section's documents, in file order.
+    auto preparse_section = [&](const std::string &section_name,
+                                const std::vector<std::pair<std::string, std::string>> &subfiles) {
+        section_docs.clear();
+        section_parse_errors.clear();
+        if (subfiles.empty() || force_sequential_parse)
+            return;
+
+        // Cache hit: the stored section must line up with the file list we just built,
+        // in length and in the relative path of every entry. Anything else and we parse
+        // instead - the key should already have caught it; this is belt and braces.
+        if (cache_hit) {
+            auto sec = cache_root.find(section_name);
+            if (sec != cache_root.end() && sec->is_array() && sec->size() == subfiles.size()) {
+                bool aligned = true;
+                for (size_t i = 0; i < subfiles.size() && aligned; ++i) {
+                    const auto &entry = (*sec)[i];
+                    aligned = entry.is_object() && entry.value("path", std::string()) == subfiles[i].second;
+                }
+                if (aligned) {
+                    section_docs.resize(subfiles.size());
+                    section_parse_errors.resize(subfiles.size());
+                    for (size_t i = 0; i < subfiles.size(); ++i)
+                        section_docs[i] = (*sec)[i].at("doc");
+                    if (startup_profile)
+                        startup_profile_log("PresetBundle::load_vendor_configs_from_json vendor=" + vendor_name +
+                                            " section=" + section_name + " cache=hit docs=" + std::to_string(subfiles.size()));
+                    return;
+                }
+            }
+            BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": preset cache for " << vendor_name << "/" << section_name
+                                       << " did not line up with the file list, parsing instead";
+        }
+
+        section_docs.resize(subfiles.size());
+        section_parse_errors.resize(subfiles.size());
+        tbb::parallel_for(tbb::blocked_range<size_t>(0, subfiles.size()),
+                          [&](const tbb::blocked_range<size_t> &range) {
+                              for (size_t i = range.begin(); i != range.end(); ++i) {
+                                  const std::string file = vendor_dir_path + "/" + subfiles[i].second;
+                                  std::string       err;
+                                  if (ConfigBase::parse_json_document(file, section_docs[i], err) != 0)
+                                      section_parse_errors[i] = err;
+                              }
+                          });
+
+        // Collect this section for the cache, but only if every file parsed: a section
+        // holding a broken file is never cached, so its error is re-reported every run.
+        if (preset_cache_enabled && !cache_key.empty()) {
+            bool all_ok = true;
+            for (const std::string &e : section_parse_errors)
+                if (!e.empty()) { all_ok = false; break; }
+            if (all_ok) {
+                json arr = json::array();
+                for (size_t i = 0; i < subfiles.size(); ++i)
+                    arr.push_back(json{{"path", subfiles[i].second}, {"doc", section_docs[i]}});
+                cache_out[section_name] = std::move(arr);
+            } else {
+                cache_out[section_name] = nullptr; // marks the cache as incomplete
+            }
+        }
+    };
+    // Hand the sequential loop the pre-parsed doc for index i, or null when the section
+    // was not pre-parsed (escape hatch) or that file failed to parse - in which case the
+    // loop re-parses it and reports the error exactly as it always did.
+    auto doc_for = [&](size_t i) -> json * {
+        if (i >= section_docs.size() || !section_parse_errors[i].empty())
+            return nullptr;
+        return &section_docs[i];
+    };
+    // Release one parsed document once its preset has been built, so a section's peak
+    // memory is the parsed section, not the parsed section plus everything already
+    // consumed from it.
+    auto release_doc = [&](size_t i) {
+        if (i < section_docs.size())
+            section_docs[i] = json();
+    };
+
     //3.1) paste the process
     presets = &this->prints;
     configs.clear();
     filament_id_maps.clear();
     auto process_start = std::chrono::steady_clock::now();
-    for (auto& subfile : process_subfiles)
+    preparse_section("process", process_subfiles);
+    for (size_t idx = 0; idx < process_subfiles.size(); ++idx)
     {
-        std::string reason = parse_subfile(substitution_context, substitutions, flags, subfile, configs, filament_id_maps, presets, presets_loaded);
+        auto& subfile = process_subfiles[idx];
+        std::string reason = parse_subfile(substitution_context, substitutions, flags, subfile, configs, filament_id_maps, presets, presets_loaded, false, doc_for(idx));
+        release_doc(idx);
         if (!reason.empty()) {
             ++m_errors;
             //parse error
@@ -3719,10 +3956,13 @@ std::pair<PresetsConfigSubstitutions, size_t> PresetBundle::load_vendor_configs_
     filament_id_maps.clear();
     const auto is_orca_lib = vendor_name == ORCA_FILAMENT_LIBRARY;
     auto filament_start = std::chrono::steady_clock::now();
-    for (auto& subfile : filament_subfiles)
+    preparse_section("filament", filament_subfiles);
+    for (size_t idx = 0; idx < filament_subfiles.size(); ++idx)
     {
+        auto& subfile = filament_subfiles[idx];
         std::string reason = parse_subfile(substitution_context, substitutions, flags, subfile, configs, filament_id_maps, presets,
-                                           presets_loaded, is_orca_lib);
+                                           presets_loaded, is_orca_lib, doc_for(idx));
+        release_doc(idx);
         if (!reason.empty()) {
             ++m_errors;
             //parse error
@@ -3746,9 +3986,12 @@ std::pair<PresetsConfigSubstitutions, size_t> PresetBundle::load_vendor_configs_
     configs.clear();
     filament_id_maps.clear();
     auto machine_start = std::chrono::steady_clock::now();
-    for (auto& subfile : machine_subfiles)
+    preparse_section("machine", machine_subfiles);
+    for (size_t idx = 0; idx < machine_subfiles.size(); ++idx)
     {
-        std::string reason = parse_subfile(substitution_context, substitutions, flags, subfile, configs, filament_id_maps, presets, presets_loaded);
+        auto& subfile = machine_subfiles[idx];
+        std::string reason = parse_subfile(substitution_context, substitutions, flags, subfile, configs, filament_id_maps, presets, presets_loaded, false, doc_for(idx));
+        release_doc(idx);
         if (!reason.empty()) {
             ++m_errors;
             //parse error
@@ -3769,6 +4012,55 @@ std::pair<PresetsConfigSubstitutions, size_t> PresetBundle::load_vendor_configs_
                             " inherit_ms=" + std::to_string(prof_inherit_ns / 1000000) +
                             " validate_ms=" + std::to_string(prof_validate_ns / 1000000) +
                             " store_ms=" + std::to_string(prof_store_ns / 1000000));
+    }
+
+    // Write the parse cache back, if this run actually parsed and every section came out
+    // whole. Written atomically - temp file then rename - so a crash or a concurrent
+    // instance can never leave a half-written cache behind for the next start to read.
+    // A failure here is logged and otherwise ignored: the cache is an accelerator, and
+    // startup must not depend on being able to write it.
+    if (preset_cache_enabled && !cache_key.empty() && !cache_hit && !force_sequential_parse) {
+        bool complete = !cache_out.empty();
+        for (auto it = cache_out.begin(); complete && it != cache_out.end(); ++it)
+            if (it->is_null())
+                complete = false;
+        if (complete) {
+            try {
+                namespace bfs = boost::filesystem;
+                bfs::create_directories(cache_file.parent_path());
+                json root      = json::object();
+                root["key"]     = cache_key;
+                root["vendor"]  = vendor_name;
+                root["version"] = PRESET_CACHE_FORMAT_VERSION;
+                for (auto it = cache_out.begin(); it != cache_out.end(); ++it)
+                    root[it.key()] = std::move(it.value());
+
+                const std::vector<std::uint8_t> bytes = json::to_cbor(root);
+                const bfs::path tmp = cache_file.string() + ".tmp";
+                {
+                    boost::nowide::ofstream ofs(tmp.string(), std::ios::binary | std::ios::trunc);
+                    ofs.write(reinterpret_cast<const char *>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+                    ofs.flush();
+                    if (!ofs.good())
+                        throw std::runtime_error("write failed");
+                }
+                boost::system::error_code ec;
+                bfs::remove(cache_file, ec);
+                bfs::rename(tmp, cache_file, ec);
+                if (ec) {
+                    bfs::remove(tmp, ec);
+                    throw std::runtime_error("rename failed: " + ec.message());
+                }
+                if (startup_profile)
+                    startup_profile_log("PresetBundle::load_vendor_configs_from_json vendor=" + vendor_name +
+                                        " cache=written bytes=" + std::to_string(bytes.size()));
+            } catch (const std::exception &err) {
+                BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": could not write the preset cache for "
+                                           << vendor_name << ": " << err.what();
+                boost::system::error_code ec;
+                boost::filesystem::remove(cache_file, ec);
+            }
+        }
     }
 
     //BBS: add config related logs
