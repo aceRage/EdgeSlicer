@@ -3255,7 +3255,7 @@ bool GUI_App::on_init_inner()
         Slic3r::StartupScopedTimer t("GUI_App deferred step=backup_user_folder");
         preset_bundle->backup_user_folder();
     });
-    profiler.mark("preset_bundle->backup_user_folder (deferred)");
+    profiler.mark("hot-bed rules + default suppression (backup_user_folder now deferred)");
 
     Bind(EVT_SHOW_IP_DIALOG, &GUI_App::show_ip_address_enter_dialog_handler, this);
 
