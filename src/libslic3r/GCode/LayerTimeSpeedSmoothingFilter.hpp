@@ -4,17 +4,18 @@
 #include "../PrintConfig.hpp"
 
 #include <string>
+#include <vector>
 
 namespace Slic3r {
 
-// S3 G-code pipeline stage: after CoolingBuffer, before FanMover.
+// G-code pipeline stage after CoolingBuffer, before FanMover.
 //
-// When layer_time_speed_smoothing is Off this object is not constructed and the
-// TBB stage is an identity (no extra layer buffer). When enabled, S3 only prepends
-// a diagnostic comment with factor=1 (t_raw ≈ t_out). No F rewrite — that is S4.
+// Off: this object is not constructed; the TBB stage is identity (streaming, no extra buffer).
+// spiral_mode: pass-through even when the option is on (vase layers are not retimed).
+// Any other enabled mode: buffer every cooled layer, then on the last layer call the S2
+// solvers and rewrite F. Fan commands from CoolingBuffer are left untouched (F-only v1).
 //
 // Plan: 09-concept-layer-time-speed-smoothing.md
-// Solvers live in LayerTimeSpeedSmoothing.{hpp,cpp}; this filter does not call them yet.
 class LayerTimeSpeedSmoothingFilter
 {
 public:
@@ -22,16 +23,35 @@ public:
 
     bool enabled() const { return m_mode != ltssmOff; }
 
-    // Identity when Off or when gcode is empty. Otherwise prepends the diagnostic comment.
+    // Buffer one cooled layer. When last_layer is false the G-code is held and the return
+    // is empty. When last_layer is true, all buffered layers are solved and rewritten.
+    // Empty gcode is not stored; a last_layer flush still drains the buffer.
+    std::string process_layer(std::string &&gcode, size_t layer_id, bool last_layer);
+
+    // Test helper: treat the snippet as a complete (single-layer) print.
     std::string process_layer(std::string &&gcode);
 
-    // S3 is stateless. S4 will clear the collected-layer buffer here.
-    void reset() {}
+    void reset();
 
-    static std::string format_comment(double factor, double t_raw, double t_out);
+    static const char *mode_key(LayerTimeSpeedSmoothMode mode);
+    static std::string format_comment(LayerTimeSpeedSmoothMode mode, double factor, double t_raw, double t_out);
 
 private:
-    LayerTimeSpeedSmoothMode m_mode;
+    struct BufferedLayer
+    {
+        std::string gcode;
+        size_t      layer_id = 0;
+    };
+
+    std::string flush();
+
+    const PrintConfig             &m_config;
+    LayerTimeSpeedSmoothMode       m_mode;
+    LayerTimeSlowdownScope         m_slowdown_scope;
+    bool                           m_spiral_mode;
+    bool                           m_relative_e;
+    int                            m_slow_down_layers;
+    std::vector<BufferedLayer>     m_layers;
 };
 
 } // namespace Slic3r

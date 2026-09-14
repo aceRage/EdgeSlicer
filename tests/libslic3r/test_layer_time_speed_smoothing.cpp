@@ -6,6 +6,8 @@
 #include "libslic3r/PrintConfig.hpp"
 
 #include <algorithm>
+#include <cstdlib>
+#include <sstream>
 #include <vector>
 
 using Catch::Matchers::WithinAbs;
@@ -300,7 +302,23 @@ TEST_CASE("Layer time speed smoothing keys are process preset options", "[LayerT
     }
 }
 
-TEST_CASE("Layer time speed smoothing S3 stub: Off is identity", "[LayerTimeSpeedSmoothing][GCode]")
+static std::string g1_x(double x, double e, int f)
+{
+    std::ostringstream oss;
+    oss << "G1 X" << x << " E" << e << " F" << f << "\n";
+    return oss.str();
+}
+
+static int feedrate_of(const std::string &gcode, const char *needle)
+{
+    const size_t line = gcode.find(needle);
+    REQUIRE(line != std::string::npos);
+    const size_t fpos = gcode.find(" F", line);
+    REQUIRE(fpos != std::string::npos);
+    return std::atoi(gcode.c_str() + fpos + 2);
+}
+
+TEST_CASE("Layer time speed smoothing: Off is identity and does not buffer", "[LayerTimeSpeedSmoothing][GCode]")
 {
     PrintConfig cfg;
     REQUIRE(cfg.layer_time_speed_smoothing.value == ltssmOff);
@@ -310,17 +328,52 @@ TEST_CASE("Layer time speed smoothing S3 stub: Off is identity", "[LayerTimeSpee
 
     const std::string gcode = "G1 X10 Y10 F3000\nG1 X20 E0.4 F1800\n";
     REQUIRE(filter.process_layer(std::string(gcode)) == gcode);
+    REQUIRE(filter.process_layer(std::string(gcode), 0, false) == gcode);
     REQUIRE(filter.process_layer(std::string()) == "");
 }
 
-TEST_CASE("Layer time speed smoothing S3 stub: enabled modes emit factor=1 and do not rewrite F", "[LayerTimeSpeedSmoothing][GCode]")
+TEST_CASE("Layer time speed smoothing: spiral vase is pass-through", "[LayerTimeSpeedSmoothing][GCode]")
+{
+    PrintConfig cfg;
+    cfg.layer_time_speed_smoothing.value = ltssmSpeedUpAll;
+    cfg.spiral_mode.value                = true;
+
+    LayerTimeSpeedSmoothingFilter filter(cfg);
+    REQUIRE(filter.enabled());
+
+    const std::string gcode = "G1 X10 Y10 F3000\nG1 X20 E0.4 F1800\n";
+    REQUIRE(filter.process_layer(std::string(gcode), 2, false) == gcode);
+    REQUIRE(filter.process_layer(std::string(gcode), 3, true) == gcode);
+}
+
+TEST_CASE("Layer time speed smoothing: enabled modes buffer until last layer", "[LayerTimeSpeedSmoothing][GCode]")
+{
+    PrintConfig cfg;
+    cfg.layer_time_speed_smoothing.value = ltssmSpeedUpAll;
+    cfg.filament_max_volumetric_speed.values = { 1000. };
+
+    LayerTimeSpeedSmoothingFilter filter(cfg);
+    REQUIRE(filter.enabled());
+
+    const std::string l0 = ";TYPE:Sparse infill\n" + g1_x(10, 0.4, 1800);
+    REQUIRE(filter.process_layer(std::string(l0), 0, false).empty());
+    REQUIRE(filter.process_layer(std::string(l0), 1, false).empty());
+
+    const std::string out = filter.process_layer(std::string(l0), 2, true);
+    REQUIRE(out.find("LAYER_TIME_SPEED_SMOOTH") != std::string::npos);
+    REQUIRE(out.find("mode=speed_up_all") != std::string::npos);
+    REQUIRE(filter.process_layer(std::string(), 0, true).empty());
+}
+
+TEST_CASE("Layer time speed smoothing: diagnostic includes mode and a single-layer print keeps F", "[LayerTimeSpeedSmoothing][GCode]")
 {
     const LayerTimeSpeedSmoothMode modes[] = {ltssmSpeedUpExcludeOuter, ltssmSpeedUpAll, ltssmSlowDown};
     for (LayerTimeSpeedSmoothMode mode : modes) {
         DYNAMIC_SECTION("mode " << int(mode))
         {
             PrintConfig cfg;
-            cfg.layer_time_speed_smoothing.value = mode;
+            cfg.layer_time_speed_smoothing.value         = mode;
+            cfg.filament_max_volumetric_speed.values     = { 1000. };
 
             LayerTimeSpeedSmoothingFilter filter(cfg);
             REQUIRE(filter.enabled());
@@ -328,12 +381,214 @@ TEST_CASE("Layer time speed smoothing S3 stub: enabled modes emit factor=1 and d
             const std::string gcode = "G1 X10 Y10 F3000\nG1 X20 E0.4 F1800\n";
             const std::string out   = filter.process_layer(std::string(gcode));
 
-            const std::string comment = LayerTimeSpeedSmoothingFilter::format_comment(1.0, 0.0, 0.0);
-            REQUIRE(comment == "; LAYER_TIME_SPEED_SMOOTH factor=1.000 t_raw=0.00 t_out=0.00\n");
-            REQUIRE(out == comment + gcode);
+            REQUIRE(out.find(LayerTimeSpeedSmoothingFilter::mode_key(mode)) != std::string::npos);
+            REQUIRE(out.find("factor=1.000") != std::string::npos);
+            REQUIRE(out.find("t_raw=") != std::string::npos);
+            REQUIRE(out.find("t_out=") != std::string::npos);
             REQUIRE(out.find("F3000") != std::string::npos);
             REQUIRE(out.find("F1800") != std::string::npos);
             REQUIRE(filter.process_layer(std::string()) == "");
         }
     }
+}
+
+TEST_CASE("Layer time speed smoothing: Mode B speeds up a long layer and leaves the first layer", "[LayerTimeSpeedSmoothing][GCode]")
+{
+    PrintConfig cfg;
+    cfg.layer_time_speed_smoothing.value     = ltssmSpeedUpAll;
+    cfg.layer_time_speed_max_variation.value = 25.;
+    cfg.layer_time_speed_max_speedup.value   = 100.;
+    cfg.filament_max_volumetric_speed.values = { 1000. };
+    cfg.use_relative_e_distances.value       = true;
+    cfg.slow_down_for_layer_cooling.values   = { false };
+    cfg.slow_down_layer_time.values          = { 0. };
+
+    LayerTimeSpeedSmoothingFilter filter(cfg);
+
+    // Layer 0 is the first-layer band (untouched). Layers 1 and 2 are 10 mm vs 100 mm
+    // at the same F, so layer 2 is 10x longer and is pulled down by the speed-up solver.
+    auto make_layer = [](int repeats, int f) {
+        std::string g = "G92 X0\n;TYPE:Sparse infill\n";
+        for (int i = 0; i < repeats; ++i)
+            g += g1_x(10. * (i + 1), 0.05, f);
+        return g;
+    };
+
+    REQUIRE(filter.process_layer(make_layer(2, 1800), 0, false).empty());
+    REQUIRE(filter.process_layer(make_layer(2, 1800), 1, false).empty());
+    const std::string out = filter.process_layer(make_layer(20, 1800), 2, true);
+
+    REQUIRE(out.find("mode=speed_up_all") != std::string::npos);
+
+    size_t c0 = out.find("LAYER_TIME_SPEED_SMOOTH");
+    size_t c1 = out.find("LAYER_TIME_SPEED_SMOOTH", c0 + 1);
+    size_t c2 = out.find("LAYER_TIME_SPEED_SMOOTH", c1 + 1);
+    REQUIRE(c2 != std::string::npos);
+    const std::string first_body = out.substr(c0, c1 - c0);
+    const std::string last_body  = out.substr(c2);
+    REQUIRE(first_body.find("factor=1.000") != std::string::npos);
+    REQUIRE(feedrate_of(first_body, "G1 X") == 1800);
+    REQUIRE(feedrate_of(last_body, "G1 X") > 1800);
+}
+
+TEST_CASE("Layer time speed smoothing: Mode A does not rewrite outer-wall F", "[LayerTimeSpeedSmoothing][GCode]")
+{
+    PrintConfig cfg;
+    cfg.layer_time_speed_smoothing.value     = ltssmSpeedUpExcludeOuter;
+    cfg.layer_time_speed_max_variation.value = 25.;
+    cfg.layer_time_speed_max_speedup.value   = 100.;
+    cfg.filament_max_volumetric_speed.values = { 1000. };
+    cfg.use_relative_e_distances.value       = true;
+    cfg.slow_down_for_layer_cooling.values   = { false };
+    cfg.slow_down_layer_time.values          = { 0. };
+
+    LayerTimeSpeedSmoothingFilter filter(cfg);
+
+    auto make_mixed = [](int infill_repeats) {
+        std::string g = "G92 X0\n;TYPE:Sparse infill\n";
+        for (int i = 0; i < infill_repeats; ++i)
+            g += g1_x(10. * (i + 1), 0.05, 1800);
+        g += ";TYPE:Outer wall\n";
+        g += g1_x(10. * (infill_repeats + 1), 0.05, 1800);
+        return g;
+    };
+
+    REQUIRE(filter.process_layer(make_mixed(2), 0, false).empty());
+    REQUIRE(filter.process_layer(make_mixed(2), 1, false).empty());
+    const std::string out = filter.process_layer(make_mixed(20), 2, true);
+
+    const size_t last_comment = out.rfind("LAYER_TIME_SPEED_SMOOTH");
+    const std::string last_body = out.substr(last_comment);
+    REQUIRE(last_body.find("TYPE:Outer wall") != std::string::npos);
+    REQUIRE(feedrate_of(last_body, "TYPE:Outer wall") == 1800);
+    REQUIRE(feedrate_of(last_body, "TYPE:Sparse infill") > 1800);
+}
+
+TEST_CASE("Layer time speed smoothing: never speeds up overhang, bridge or ironing", "[LayerTimeSpeedSmoothing][GCode]")
+{
+    PrintConfig cfg;
+    cfg.layer_time_speed_smoothing.value     = ltssmSpeedUpAll;
+    cfg.layer_time_speed_max_variation.value = 25.;
+    cfg.layer_time_speed_max_speedup.value   = 100.;
+    cfg.filament_max_volumetric_speed.values = { 1000. };
+    cfg.use_relative_e_distances.value       = true;
+    cfg.slow_down_for_layer_cooling.values   = { false };
+    cfg.slow_down_layer_time.values          = { 0. };
+
+    const char *roles[] = {"Overhang wall", "Bridge", "Ironing"};
+    for (const char *role : roles) {
+        DYNAMIC_SECTION(role)
+        {
+            LayerTimeSpeedSmoothingFilter filter(cfg);
+            auto make_layer = [role](int repeats) {
+                std::string g = std::string("G92 X0\n;TYPE:") + role + "\n";
+                for (int i = 0; i < repeats; ++i)
+                    g += g1_x(10. * (i + 1), 0.05, 1800);
+                return g;
+            };
+            REQUIRE(filter.process_layer(make_layer(2), 0, false).empty());
+            REQUIRE(filter.process_layer(make_layer(2), 1, false).empty());
+            const std::string out = filter.process_layer(make_layer(20), 2, true);
+            const std::string last_body = out.substr(out.rfind("LAYER_TIME_SPEED_SMOOTH"));
+            REQUIRE(feedrate_of(last_body, "G1 X") == 1800);
+        }
+    }
+}
+
+TEST_CASE("Layer time speed smoothing: volumetric clamp caps F_new", "[LayerTimeSpeedSmoothing][GCode]")
+{
+    PrintConfig cfg;
+    cfg.layer_time_speed_smoothing.value     = ltssmSpeedUpAll;
+    cfg.layer_time_speed_max_variation.value = 25.;
+    cfg.layer_time_speed_max_speedup.value   = 1000.;
+    cfg.filament_diameter.values             = { 1.75 };
+    cfg.filament_max_volumetric_speed.values = { 2. };
+    cfg.use_relative_e_distances.value       = true;
+    cfg.slow_down_for_layer_cooling.values   = { false };
+    cfg.slow_down_layer_time.values          = { 0. };
+
+    LayerTimeSpeedSmoothingFilter filter(cfg);
+
+    auto make_layer = [](int repeats, int f) {
+        std::string g = "G92 X0\n;TYPE:Sparse infill\n";
+        for (int i = 0; i < repeats; ++i)
+            g += g1_x(10. * (i + 1), 0.4, f);
+        return g;
+    };
+
+    REQUIRE(filter.process_layer(make_layer(2, 6000), 0, false).empty());
+    REQUIRE(filter.process_layer(make_layer(2, 6000), 1, false).empty());
+    const std::string out = filter.process_layer(make_layer(20, 6000), 2, true);
+
+    const std::string last_body = out.substr(out.rfind("LAYER_TIME_SPEED_SMOOTH"));
+    const int f_new = feedrate_of(last_body, "G1 X");
+    // mm3_per_mm = 0.4 * pi*(1.75/2)^2 / 10 ≈ 0.0962; cap = 60*2/0.0962 ≈ 1247 mm/min.
+    REQUIRE(f_new <= 1300);
+    REQUIRE(f_new < 6000);
+}
+
+TEST_CASE("Layer time speed smoothing: cooling floor stops a speed-up", "[LayerTimeSpeedSmoothing][GCode]")
+{
+    PrintConfig cfg;
+    cfg.layer_time_speed_smoothing.value     = ltssmSpeedUpAll;
+    cfg.layer_time_speed_max_variation.value = 25.;
+    cfg.layer_time_speed_max_speedup.value   = 100.;
+    cfg.filament_max_volumetric_speed.values = { 1000. };
+    cfg.use_relative_e_distances.value       = true;
+    cfg.slow_down_for_layer_cooling.values   = { true };
+    cfg.slow_down_layer_time.values          = { 1000. }; // well above any synthetic layer time
+
+    LayerTimeSpeedSmoothingFilter filter(cfg);
+    auto make_layer = [](int repeats) {
+        std::string g = "G92 X0\n;TYPE:Sparse infill\n";
+        for (int i = 0; i < repeats; ++i)
+            g += g1_x(10. * (i + 1), 0.05, 1800);
+        return g;
+    };
+    REQUIRE(filter.process_layer(make_layer(2), 0, false).empty());
+    REQUIRE(filter.process_layer(make_layer(2), 1, false).empty());
+    const std::string out = filter.process_layer(make_layer(20), 2, true);
+    const std::string last_body = out.substr(out.rfind("LAYER_TIME_SPEED_SMOOTH"));
+    REQUIRE(last_body.find("factor=1.000") != std::string::npos);
+    REQUIRE(feedrate_of(last_body, "G1 X") == 1800);
+}
+
+TEST_CASE("Layer time speed smoothing: Mode C slows a short layer", "[LayerTimeSpeedSmoothing][GCode]")
+{
+    PrintConfig cfg;
+    cfg.layer_time_speed_smoothing.value          = ltssmSlowDown;
+    cfg.layer_time_speed_max_variation.value      = 25.;
+    cfg.layer_time_speed_max_slowdown.value       = 200.;
+    cfg.layer_time_speed_max_time_increase.value  = 100.;
+    cfg.layer_time_speed_slowdown_scope.value     = ltssAll;
+    cfg.filament_max_volumetric_speed.values      = { 1000. };
+    cfg.use_relative_e_distances.value            = true;
+    cfg.slow_down_for_layer_cooling.values        = { false };
+    cfg.slow_down_layer_time.values               = { 0. };
+
+    LayerTimeSpeedSmoothingFilter filter(cfg);
+    auto make_layer = [](int repeats) {
+        std::string g = "G92 X0\n;TYPE:Sparse infill\n";
+        for (int i = 0; i < repeats; ++i)
+            g += g1_x(10. * (i + 1), 0.05, 1800);
+        return g;
+    };
+    REQUIRE(filter.process_layer(make_layer(20), 0, false).empty());
+    REQUIRE(filter.process_layer(make_layer(2), 1, false).empty());
+    const std::string out = filter.process_layer(make_layer(20), 2, true);
+
+    REQUIRE(out.find("mode=slow_down") != std::string::npos);
+    // Middle short layer (id 1) is lengthened: F drops below 1800.
+    size_t c0 = out.find("LAYER_TIME_SPEED_SMOOTH");
+    size_t c1 = out.find("LAYER_TIME_SPEED_SMOOTH", c0 + 1);
+    size_t c2 = out.find("LAYER_TIME_SPEED_SMOOTH", c1 + 1);
+    REQUIRE(c2 != std::string::npos);
+    const std::string mid = out.substr(c1, c2 - c1);
+    REQUIRE(feedrate_of(mid, "G1 X") < 1800);
+}
+
+TEST_CASE("Layer time speed smoothing format_comment includes mode", "[LayerTimeSpeedSmoothing][GCode]")
+{
+    const std::string comment = LayerTimeSpeedSmoothingFilter::format_comment(ltssmSpeedUpExcludeOuter, 1.0, 0.0, 0.0);
+    REQUIRE(comment == "; LAYER_TIME_SPEED_SMOOTH mode=speed_up_exclude_outer factor=1.000 t_raw=0.00 t_out=0.00\n");
 }

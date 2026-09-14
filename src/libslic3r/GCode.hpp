@@ -179,8 +179,11 @@ struct LayerResult {
 	// Is indicating if this LayerResult should be processed, or it is just inserted artificial LayerResult.
     // It is used for the pressure equalizer because it needs to buffer one layer back.
     bool        nop_layer_result { false };
+    // True for the last layer of a process_layers() run. Layer-time speed smoothing
+    // uses this to drain its all-layer buffer and rewrite F.
+    bool        last_layer { false };
 
-    static LayerResult make_nop_layer_result() { return {"", std::numeric_limits<coord_t>::max(), false, false, true}; }
+    static LayerResult make_nop_layer_result() { return {"", std::numeric_limits<coord_t>::max(), false, false, true, false}; }
 };
 
 namespace MultiNozzleUtils { class NozzleGroupResultBase; }
@@ -612,7 +615,7 @@ private:
     bool                                m_last_pos_defined;
 
     std::unique_ptr<CoolingBuffer>                 m_cooling_buffer;
-    // S3 stub after CoolingBuffer / before FanMover. Null when mode is Off (no extra buffer).
+    // After CoolingBuffer / before FanMover. Null when mode is Off (streaming, no extra buffer).
     std::unique_ptr<LayerTimeSpeedSmoothingFilter> m_layer_time_speed_smoothing;
     std::unique_ptr<SpiralVase>                    m_spiral_vase;
 
