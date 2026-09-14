@@ -9,6 +9,11 @@
 // The per-gizmo dock preference lives in AppConfig, so the full definition is
 // needed here - GUI_App.hpp only forward-declares it.
 #include "libslic3r/AppConfig.hpp"
+// ContentSizeIdeal (the width a panel's contents actually wanted) lives on the
+// internal ImGuiWindow, not in the public API.
+#include "imgui/imgui_internal.h"
+
+#include <cmath>
 
 // TODO: Display tooltips quicker on Linux
 
@@ -343,6 +348,32 @@ bool GLGizmoBase::GizmoImguiBegin(const std::string &name, int flags)
 void GLGizmoBase::GizmoImguiEnd()
 {
     last_input_window_width = ImGui::GetWindowWidth();
+
+    // A docked panel is pinned to an exact rect, so GetWindowWidth() above only
+    // reports back the width we forced on it - it can never say how wide the
+    // contents actually wanted to be. ContentSizeIdeal is that measurement: the
+    // extent the contents reached, independent of the window's own size, of
+    // clipping and of the scrollbar. Keep it (plus the padding a window puts
+    // around its contents) so the docked path has a real content width to use
+    // rather than the width of its own previous guess.
+    if (ImGuiWindow *win = ImGui::GetCurrentWindow()) {
+        // Padding on both sides, plus the vertical scrollbar when the panel has
+        // one: a docked panel taller than the view gets a scrollbar that takes
+        // its width out of the content region, so a width that ignored it would
+        // squeeze the contents and re-measure narrower every frame.
+        const float ideal = win->ContentSizeIdeal.x + 2.0f * win->WindowPadding.x +
+                            (win->ScrollbarY ? ImGui::GetStyle().ScrollbarSize : 0.f);
+        if (m_dock_body_rendered && ideal > m_imgui->scaled(12.0f) && std::abs(ideal - m_dock_expanded_width) > 0.5f) {
+            m_dock_expanded_width = ideal;
+            // The rect we drew this frame was built from the previous (possibly
+            // absent) measurement, so draw one more with the real one.
+            if (m_docked) {
+                m_imgui->set_requires_extra_frame();
+                m_parent.set_as_dirty();
+            }
+        }
+    }
+
     m_imgui->end();
 }
 
@@ -440,19 +471,25 @@ void GLGizmoBase::dock_setup_next_window(float &x, float &y, float bottom_limit,
     const float cnv_w    = (float) cnv_size.get_width();
     const float cnv_h    = (float) cnv_size.get_height();
 
-    // A panel that has no width of its own (it was AlwaysAutoResize) gets the
-    // width it happened to need last frame, clamped to something sane, so a
-    // docked Cut/Assembly panel does not jump about between frames. While
-    // collapsed that measurement is only the title row, which is far too narrow
-    // to dock to - so the last expanded width is what gets remembered.
+    // A panel that has no width of its own (it was AlwaysAutoResize) is sized
+    // from the width its contents measured, which GizmoImguiEnd() records into
+    // m_dock_expanded_width from ContentSizeIdeal. That measurement must NOT come
+    // from the window's own width: a docked window is pinned to the rect we gave
+    // it, so reading its width back would only return our own previous guess and
+    // latch the panel at whatever it opened with - which is the bug this replaces.
+    // While collapsed the contents are only the title row, far too narrow to dock
+    // to, so the last expanded width is what gets remembered.
     float width = window_width;
-    if (width <= 0.f) {
-        if (!m_collapsed && last_input_window_width > m_imgui->scaled(12.0f))
-            m_dock_expanded_width = last_input_window_width;
+    if (width <= 0.f)
         width = m_dock_expanded_width;
-    }
-    if (width < m_imgui->scaled(12.0f))
+    if (width < m_imgui->scaled(12.0f)) {
+        // First frame of a panel that has never been measured (a fresh session
+        // opening straight into its remembered docked state). Nothing knows the
+        // content width yet, so start from a sane guess; GizmoImguiEnd() measures
+        // the contents this same frame and asks for another, which then lands on
+        // the real width.
         width = m_imgui->scaled(18.0f);
+    }
     width = std::min(width, cnv_w * 0.5f);
 
     // The sidebar collapse button sits at the top of whichever edge the sidebar
@@ -585,6 +622,12 @@ bool GLGizmoBase::dock_render_titlebar(const std::string &title)
 
     if (!m_collapsed)
         ImGui::Separator();
+
+    // Whether the body follows this frame. m_collapsed alone is not enough: the
+    // toggles above flip it mid-frame, so on the frame the panel is expanded it
+    // already reads "not collapsed" while the body is still absent - measuring
+    // then would record the title row as the panel's width.
+    m_dock_body_rendered = !m_collapsed && !toggled_collapse;
 
     return !m_collapsed;
 }
