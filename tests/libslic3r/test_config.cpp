@@ -4,11 +4,15 @@
 #include "libslic3r/LocalesUtils.hpp"
 
 #include <boost/filesystem.hpp>
+#include <boost/nowide/fstream.hpp>
+#include <nlohmann/json.hpp>
 
 #include <cereal/types/polymorphic.hpp>
 #include <cereal/types/string.hpp> 
 #include <cereal/types/vector.hpp> 
 #include <cereal/archives/binary.hpp>
+
+#include <sstream>
 
 using namespace Slic3r;
 
@@ -407,4 +411,65 @@ TEST_CASE("prime_tower_brim_width accepts the -1 auto sentinel shipped by BBL/Qi
     // Anything below the sentinel is still rejected.
     config.set_deserialize_strict("prime_tower_brim_width", "-2");
     CHECK(config.validate(true).count("prime_tower_brim_width") == 1);
+}
+
+TEST_CASE("save_to_json writes the same document to a stream as to a file", "[Config]") {
+    DynamicPrintConfig config;
+    config.set_key_value("layer_height", new ConfigOptionFloat(0.2));
+    config.set_key_value("wall_loops", new ConfigOptionInt(3));
+    config.set_key_value("filament_type", new ConfigOptionStrings({ "PLA", "PETG" }));
+    config.set_key_value("machine_start_gcode", new ConfigOptionString("G28\nG1 Z5"));
+
+    const boost::filesystem::path dir  = boost::filesystem::temp_directory_path() / "snorca_tests";
+    boost::filesystem::create_directories(dir);
+    const boost::filesystem::path path = dir / "save_to_json_stream.json";
+    // Pass is_custom so the Ultra header round-trips on the file path (preset saves).
+    config.save_to_json(path.string(), "test_preset", "User", "1.0.0.0", "1");
+    std::string file_contents;
+    {
+        boost::nowide::ifstream ifs(path.string());
+        file_contents.assign(std::istreambuf_iterator<char>(ifs), std::istreambuf_iterator<char>());
+    }
+    boost::filesystem::remove(path);
+    // The file format: four spaces per nesting level and a trailing newline.
+    REQUIRE_FALSE(file_contents.empty());
+    CHECK(file_contents.rfind("{\n    \"", 0) == 0);
+    CHECK(file_contents.back() == '\n');
+
+    std::ostringstream strict, replaced;
+    config.save_to_json(strict, "test_preset", "User", "1.0.0.0", false, "1");
+    config.save_to_json(replaced, "test_preset", "User", "1.0.0.0", true, "1");
+    CHECK(strict.str() == file_contents);
+    CHECK(replaced.str() == file_contents);
+    CHECK(nlohmann::json::parse(strict.str())["machine_start_gcode"] == "G28\nG1 Z5");
+    CHECK(nlohmann::json::parse(strict.str())["is_custom_defined"] == "1");
+}
+
+TEST_CASE("save_to_json replaces invalid UTF-8 in a stream only when asked", "[Config]") {
+    DynamicPrintConfig config;
+    config.set_key_value("machine_start_gcode", new ConfigOptionString("G28 ; \xff"));
+
+    std::ostringstream strict, replaced;
+    CHECK_THROWS_AS(config.save_to_json(strict, "test_preset", "User", "1.0.0.0"), nlohmann::json::type_error);
+    REQUIRE_NOTHROW(config.save_to_json(replaced, "test_preset", "User", "1.0.0.0", true));
+    CHECK(nlohmann::json::parse(replaced.str())["machine_start_gcode"] == "G28 ; \xEF\xBF\xBD");
+}
+
+TEST_CASE("save_to_json leaves an existing file untouched when the config cannot be serialized", "[Config]") {
+    DynamicPrintConfig config;
+    config.set_key_value("machine_start_gcode", new ConfigOptionString("G28 ; \xff"));
+
+    const boost::filesystem::path dir  = boost::filesystem::temp_directory_path() / "snorca_tests";
+    boost::filesystem::create_directories(dir);
+    const boost::filesystem::path path = dir / "save_to_json_untouched.json";
+    {
+        boost::nowide::ofstream ofs(path.string());
+        ofs << "previous";
+    }
+    CHECK_THROWS_AS(config.save_to_json(path.string(), "test_preset", "User", "1.0.0.0"), nlohmann::json::type_error);
+
+    boost::nowide::ifstream ifs(path.string());
+    const std::string contents((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+    boost::filesystem::remove(path);
+    CHECK(contents == "previous");
 }
