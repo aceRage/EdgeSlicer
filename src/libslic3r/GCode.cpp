@@ -9558,7 +9558,9 @@ std::string GCode::set_extruder(unsigned int extruder_id, double print_z, bool b
                                                                  m_config.nozzle_temperature.get_at(previous_extruder_id);
         // Orca: always calculate wipe volume and hence provide correct flush_length, so that MMU devices with cutter and purge bin (e.g.
         // ERCF_v2 with a filament cutter or Filametrix can take advantage of it)
-        wipe_volume = flush_matrix[previous_extruder_id * number_of_extruders + extruder_id];
+        // Orca #15289: bounds-check flush_volumes_matrix — partial/legacy configs can be shorter than filament count.
+        size_t flush_idx = size_t(previous_extruder_id) * number_of_extruders + extruder_id;
+        wipe_volume      = flush_idx < flush_matrix.size() ? flush_matrix[flush_idx] : 0.f;
         wipe_volume *= m_config.flush_multiplier;
         // Ultra (Phase 7): cross-nozzle change (filament_map differs) is a nozzle switch, not a color purge -> no flush.
         {
