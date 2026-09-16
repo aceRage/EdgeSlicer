@@ -88,6 +88,7 @@ public:
     static std::shared_ptr<MqttClient> create(Args&&... args) {
         std::shared_ptr<MqttClient> p(new MqttClient(std::forward<Args>(args)...));
         p->self_ = p;
+        register_live(p);
         return p;
     }
 
@@ -138,8 +139,41 @@ public:
     // Check if client is currently connected
     bool CheckConnected();
 
+    // Re-establish the session on a worker thread, e.g. after the PC woke from
+    // sleep. A no-op for a client the owner never connected or has since
+    // disconnected, and while an earlier reconnect_now() is still at work.
+    // Otherwise the session is always bounced (disconnect + connect): after a
+    // sleep Paho can still believe the socket is up when it is dead, and its
+    // own reconnect() does nothing while it believes that. Connect attempts
+    // repeat at MqttReconnectPolicy::RESUME_RETRY_MS for GIVE_UP_AFTER_MS; only
+    // when that window closes does the connection-failure callback fire.
+    void reconnect_now(const std::string& reason);
+
+    // reconnect_now() on every client built by create() that is still owned.
+    // Returns how many were asked. Called by the main frame on system resume.
+    static size_t reconnect_all_live(const std::string& reason);
+    static size_t live_client_count();
+
     std::string get_client_id() {return client_id_;}
 private:
+    // The registry of live clients: weak_ptrs populated by create(), pruned by
+    // ~MqttClient, so a system-resume trigger can reach every open session.
+    static void register_live(const std::shared_ptr<MqttClient>& client);
+    static void unregister_live(const MqttClient* client);
+
+    // The bounce half of reconnect_now(): Disconnect() minus the "the owner
+    // wants this session gone" bookkeeping, so a resume never revives a client
+    // its owner had closed on purpose.
+    bool do_disconnect(std::string& msg);
+
+    // Fires connection_failure_callback_ (copied under cb_mtx_, invoked outside
+    // it) at most once per outage; connected() and Connect() re-arm it.
+    void report_connection_failure();
+
+    // Sleeps `ms` in short slices, returning early (false) once the watch says
+    // stop, so a checker thread never outlives the destructor's wait.
+    struct ReconnectWatch;
+    static bool sleep_unless_stopped(const std::shared_ptr<ReconnectWatch>& watch, long long ms);
     std::string server_address_;     // MQTT broker address
     std::string client_id_;          // Unique client identifier
     std::unique_ptr<mqtt::async_client> client_;      // Async MQTT client instance
@@ -159,9 +193,28 @@ private:
     int subscribe_retry_time_;       // Subscription retry counter
     std::function<void()> connection_failure_callback_; 
 
+    // True while a lost-session watcher thread is supervising an outage.
+    // Cleared by connected(), by Disconnect() and by reconnect_now() (which
+    // takes the outage over); the watcher stands down when it sees it clear.
     std::atomic<bool> is_reconnecting;
-    std::atomic<int> pending_reconnect_checks;
+    // The detached checker threads' bookkeeping, shared with them by
+    // shared_ptr so it outlives the client: pending_reconnect_checks counts
+    // the threads still alive (the destructor waits for it to reach zero) and
+    // stop tells them to leave without touching the client again.
+    struct ReconnectWatch {
+        std::atomic<int>  pending_reconnect_checks{0};
+        std::atomic<bool> stop{false};
+    };
+    std::shared_ptr<ReconnectWatch> watch_;
     std::atomic<bool> ever_connected_;
+    // The owner's intent: set by Connect(), cleared by Disconnect(). A resume
+    // only bounces clients whose owner still wants them up.
+    std::atomic<bool> wants_connection_{false};
+    // True while a reconnect_now() worker owns the outage: connection_lost()
+    // starts no watcher and a failed connect attempt fires no failure callback.
+    std::atomic<bool> manual_reconnect_active_{false};
+    // The failure callback has been fired for the current outage.
+    std::atomic<bool> failure_reported_{false};
     // Set as the very first step of ~MqttClient. Paho callbacks (esp.
     // connection_lost) check it before touching any other member.
     std::atomic<bool> tearing_down_{false};

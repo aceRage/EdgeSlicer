@@ -847,6 +847,7 @@ set(SLIC3R_GUI_SOURCES
     Utils/WxFontUtils.hpp
     Utils/MQTT.hpp
     Utils/MQTT.cpp
+    Utils/MqttReconnectPolicy.hpp
     Utils/MoonRaker.cpp
     Utils/MoonRaker.hpp
     Utils/TimeSyncManager.cpp
