@@ -977,7 +977,7 @@ static std::vector<std::string> s_Preset_print_options {
     "sparse_infill_filament", "solid_infill_filament", "support_filament", "support_interface_filament", "support_filament_matching","support_interface_not_for_body",
     "ooze_prevention", "standby_temperature_delta", "preheat_time","delta_temperature","preheat_steps", "interface_shells", "line_width", "initial_layer_line_width", "inner_wall_line_width",
     "outer_wall_line_width", "sparse_infill_line_width", "internal_solid_infill_line_width",
-    "skin_infill_line_width","skeleton_infill_line_width",
+    "skin_infill_line_width","skeleton_infill_line_width", "locked_skin_infill_pattern", "locked_skeleton_infill_pattern", "infill_instead_top_bottom_surfaces",
     "top_surface_line_width", "support_line_width", "infill_wall_overlap","top_bottom_infill_wall_overlap", "bridge_flow", "internal_bridge_flow",
     "elefant_foot_compensation", "elefant_foot_compensation_layers", "xy_contour_compensation", "xy_hole_compensation", "resolution", "enable_prime_tower", "preload_all_filaments",
     "prime_tower_width", "prime_tower_brim_width", "prime_volume", "prime_tower_brim_chamfer", "prime_tower_brim_chamfer_max_width",
@@ -988,6 +988,8 @@ static std::vector<std::string> s_Preset_print_options {
      "detect_narrow_internal_solid_infill",
      "gcode_add_line_number", "enable_arc_fitting", "precise_z_height", "infill_combination","infill_combination_max_layer_height", /*"adaptive_layer_height",*/
      "support_bottom_interface_spacing", "enable_overhang_speed", "slowdown_for_curled_perimeters", "overhang_1_4_speed", "overhang_2_4_speed", "overhang_3_4_speed", "overhang_4_4_speed",
+     "layer_time_speed_smoothing", "layer_time_speed_max_variation", "layer_time_speed_max_speedup",
+     "layer_time_speed_max_slowdown", "layer_time_speed_max_time_increase", "layer_time_speed_slowdown_scope",
      "initial_layer_infill_speed", "only_one_wall_top", 
      "timelapse_type",
      "wall_generator", "wall_transition_length", "wall_transition_filter_deviation", "wall_transition_angle",
@@ -3045,7 +3047,12 @@ inline t_config_option_keys deep_diff(const ConfigBase &config_this, const Confi
 
 static constexpr const std::initializer_list<const char*> optional_keys { "compatible_prints", "compatible_printers" };
 //BBS: skip these keys for dirty check
-static std::set<std::string> skipped_in_dirty = {"printer_settings_id", "print_settings_id", "filament_settings_id", "mixed_filament_definitions"};
+static std::set<std::string> skipped_in_dirty = {"printer_settings_id",
+                                                 "print_settings_id",
+                                                 "filament_settings_id",
+                                                 "mixed_filament_definitions",
+                                                 "mixed_filament_auto_gradient_choice",
+                                                 "mixed_filament_auto_gradient_physical_count"};
 
 bool PresetCollection::is_dirty(const Preset *edited, const Preset *reference)
 {

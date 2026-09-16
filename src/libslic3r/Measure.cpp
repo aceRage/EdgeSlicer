@@ -36,6 +36,9 @@ Vec3d get_one_point_in_plane(const Vec3d &plane_origin, const Vec3d &plane_norma
 }
 
 constexpr double feature_hover_limit = 0.5; // how close to a feature the mouse must be to highlight it
+// Ultra fix: a vertex / edge snap may claim at most this fraction of the hit facet's shortest edge, so a
+// view-scaled snap radius can never swallow the facet it is picking on (see facet_snap_extent).
+constexpr double snap_facet_fraction = 0.25;
 
 static std::tuple<Vec3d, double, double> get_center_and_radius(const std::vector<Vec3d>& points, const Transform3d& trafo, const Transform3d& trafo_inv)
 {
@@ -101,6 +104,7 @@ private:
     void update_planes();
     void extract_features(int plane_idx);
     std::vector<int> grow_curve_patch(size_t seed_facet) const; // Ultra: low-curvature patch for Curve picks
+    double facet_snap_extent(size_t face_idx) const;            // Ultra fix: clamp for the view-scaled snap radius
 
     std::vector<PlaneData> m_planes;
     std::vector<size_t>    m_face_to_plane;
@@ -557,6 +561,24 @@ std::vector<int> MeasuringImpl::grow_curve_patch(size_t seed_facet) const
     return out;
 }
 
+// Ultra fix: the largest snap radius that may be honoured on a given facet. The caller's `snap_radius` is
+// a screen-space distance (~8 px) converted to mesh units, so on a part that is small on screen it can be
+// bigger than the facet -- and then every hover, including one dead in the centre of a flat face, sits
+// inside a corner's or a border edge's snap radius. Capping it at a fraction of the hit facet's SHORTEST
+// edge keeps the zoomed-in benefit of the view-scaled radius (where snap_radius is far below this cap and
+// the cap never binds) while guaranteeing that the middle of a facet is never claimed by its own corners.
+double MeasuringImpl::facet_snap_extent(size_t face_idx) const
+{
+    if (face_idx >= m_its.indices.size())
+        return 0.0;
+    const auto& tri = m_its.indices[face_idx];
+    const Vec3d a = m_its.vertices[tri[0]].cast<double>();
+    const Vec3d b = m_its.vertices[tri[1]].cast<double>();
+    const Vec3d c = m_its.vertices[tri[2]].cast<double>();
+    const double shortest = std::min((b - a).norm(), std::min((c - b).norm(), (a - c).norm()));
+    return snap_facet_fraction * shortest;
+}
+
 std::optional<SurfaceFeature> MeasuringImpl::get_feature(size_t face_idx, const Vec3d &point, const Transform3d &world_tran,bool only_select_plane, double snap_radius, int pick_kind)
 {
     if (face_idx >= m_face_to_plane.size())
@@ -613,14 +635,25 @@ std::optional<SurfaceFeature> MeasuringImpl::get_feature(size_t face_idx, const 
 
     // Ultra: a view-scaled pick radius (mesh units) from the caller replaces the fixed 0.5 mm limits,
     // which were sub-pixel when zoomed out; < 0 keeps the legacy behaviour.
-    const double hover_limit = snap_radius >= 0.0 ? snap_radius : feature_hover_limit;
+    //
+    // ...but it must never grow past the geometry it is picking on. `snap_radius` is ~8 px converted to
+    // mesh units, so once the part is small on screen (the normal state when assembling two parts) it
+    // can exceed the hit facet itself. Unclamped, a hover in the MIDDLE of a flat face was then inside
+    // the vertex radius of that facet's own corners, or inside the edge radius of the plane's border,
+    // and this function returned a Point / Edge instead of the Plane -- which the Face/Face assembly
+    // filter (Plane and Circle only) discards, so no flat face could be hovered or selected at all.
+    // Clamp against the hit facet's own size: a vertex or edge snap may claim at most a fraction of the
+    // facet, so the centre of a face always belongs to the face.
+    const double facet_extent = facet_snap_extent(face_idx);
+    const double eff_snap     = snap_radius >= 0.0 ? std::min(snap_radius, facet_extent) : -1.0;
+    const double hover_limit  = eff_snap >= 0.0 ? eff_snap : feature_hover_limit;
 
-    if (!only_select_plane && snap_radius >= 0.0 && face_idx < m_its.indices.size()) {
+    if (!only_select_plane && eff_snap > 0.0 && face_idx < m_its.indices.size()) {
         // Ultra: direct VERTEX pick from the hit facet's corners. Previously a vertex was reachable only
         // as an endpoint snap after an Edge had already won the contest, so corners were nearly
         // impossible to select.
         const auto& tri = m_its.indices[face_idx];
-        double best = snap_radius * snap_radius; int best_v = -1;
+        double best = eff_snap * eff_snap; int best_v = -1;
         for (int k = 0; k < 3; ++k) {
             const double d2 = (point - m_its.vertices[tri[k]].cast<double>()).squaredNorm();
             if (d2 < best) { best = d2; best_v = tri[k]; }
@@ -655,8 +688,8 @@ std::optional<SurfaceFeature> MeasuringImpl::get_feature(size_t face_idx, const 
                 // the edge, clamped between 0.025 and 0.5 mm (or the caller's view-scaled radius).
                 const auto &[sp, ep] = f.get_edge();
                 double len_sq        = (ep - sp).squaredNorm();
-                double limit_sq      = snap_radius >= 0.0 ? snap_radius * snap_radius
-                                                          : std::max(0.025 * 0.025, std::min(0.5 * 0.5, 0.1 * 0.1 * len_sq));
+                double limit_sq      = eff_snap >= 0.0 ? eff_snap * eff_snap
+                                                       : std::max(0.025 * 0.025, std::min(0.5 * 0.5, 0.1 * 0.1 * len_sq));
                 if ((point - sp).squaredNorm() < limit_sq) {
                     SurfaceFeature local_f(sp);
                     local_f.origin_surface_feature = std::make_shared<SurfaceFeature>(local_f);

@@ -2679,7 +2679,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                                 FlexiJointParams&       fj = connector.flexi;
                                 const int kind = connector_tree.get<int>("<xmlattr>.flexi_kind", int(def.kind));
                                 // Untrusted file content: clamp the enum before casting.
-                                fj.kind = (kind >= int(FlexiJointKind::DoubleRing) && kind <= int(FlexiJointKind::Hinge)) ?
+                                fj.kind = (kind >= int(FlexiJointKind::DoubleRing) && kind <= int(FlexiJointKind::Bayonet)) ?
                                           FlexiJointKind(kind) : def.kind;
                                 fj.outer_radius = connector_tree.get<float>("<xmlattr>.flexi_outer_radius", def.outer_radius);
                                 fj.ring_width   = connector_tree.get<float>("<xmlattr>.flexi_ring_width",   def.ring_width);
@@ -2704,6 +2704,27 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                                 fj.hinge_length      = connector_tree.get<float>("<xmlattr>.flexi_hinge_length",      def.hinge_length);
                                 fj.hinge_edge_offset = connector_tree.get<float>("<xmlattr>.flexi_hinge_edge_offset", def.hinge_edge_offset);
                                 fj.hinge_fold_upper  = connector_tree.get<int>  ("<xmlattr>.flexi_hinge_fold_upper",  int(def.hinge_fold_upper)) != 0;
+                                // Thread and bayonet. A 3MF written before them has none of
+                                // these attributes and falls back to the defaults, which are
+                                // themselves a valid 2-start thread and 3-lug bayonet.
+                                fj.thread_major_dia   = connector_tree.get<float>("<xmlattr>.flexi_thread_major_dia",   def.thread_major_dia);
+                                fj.thread_lid_upper   = connector_tree.get<int>  ("<xmlattr>.flexi_thread_lid_upper",   int(def.thread_lid_upper)) != 0;
+                                fj.thread_pitch       = connector_tree.get<float>("<xmlattr>.flexi_thread_pitch",       def.thread_pitch);
+                                // Untrusted file content: the start count drives a loop, clamp it.
+                                fj.thread_starts      = std::max(1, std::min(4,
+                                                        connector_tree.get<int>("<xmlattr>.flexi_thread_starts", def.thread_starts)));
+                                fj.thread_turns       = connector_tree.get<float>("<xmlattr>.flexi_thread_turns",       def.thread_turns);
+                                fj.thread_left_hand   = connector_tree.get<int>  ("<xmlattr>.flexi_thread_left_hand",   int(def.thread_left_hand)) != 0;
+                                fj.thread_lead_turns  = connector_tree.get<float>("<xmlattr>.flexi_thread_lead_turns",  def.thread_lead_turns);
+                                // Same for the lug count.
+                                fj.bayonet_lugs       = std::max(2, std::min(4,
+                                                        connector_tree.get<int>("<xmlattr>.flexi_bayonet_lugs", def.bayonet_lugs)));
+                                fj.bayonet_lug_height    = connector_tree.get<float>("<xmlattr>.flexi_bayonet_lug_height",    def.bayonet_lug_height);
+                                fj.bayonet_lug_thickness = connector_tree.get<float>("<xmlattr>.flexi_bayonet_lug_thickness", def.bayonet_lug_thickness);
+                                fj.bayonet_lug_arc       = connector_tree.get<float>("<xmlattr>.flexi_bayonet_lug_arc",       def.bayonet_lug_arc);
+                                fj.bayonet_lock_angle    = connector_tree.get<float>("<xmlattr>.flexi_bayonet_lock_angle",    def.bayonet_lock_angle);
+                                fj.bayonet_entry_depth   = connector_tree.get<float>("<xmlattr>.flexi_bayonet_entry_depth",   def.bayonet_entry_depth);
+                                fj.bayonet_detent        = connector_tree.get<float>("<xmlattr>.flexi_bayonet_detent",        def.bayonet_detent);
                                 connector.processed = connector_tree.get<int>("<xmlattr>.processed", 1) != 0;
                                 connector.has_flexi = true;
                             }
@@ -7557,6 +7578,23 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                         connectors_tree.put("<xmlattr>.flexi_hinge_length",      fj.hinge_length);
                         connectors_tree.put("<xmlattr>.flexi_hinge_edge_offset", fj.hinge_edge_offset);
                         connectors_tree.put("<xmlattr>.flexi_hinge_fold_upper",  int(fj.hinge_fold_upper));
+                        // Thread and bayonet, same discipline: every field written, every one
+                        // defaulted on read, so an older file loads unchanged and a newer one
+                        // reloads as the kind it was saved as.
+                        connectors_tree.put("<xmlattr>.flexi_thread_major_dia",  fj.thread_major_dia);
+                        connectors_tree.put("<xmlattr>.flexi_thread_lid_upper",  int(fj.thread_lid_upper));
+                        connectors_tree.put("<xmlattr>.flexi_thread_pitch",      fj.thread_pitch);
+                        connectors_tree.put("<xmlattr>.flexi_thread_starts",     fj.thread_starts);
+                        connectors_tree.put("<xmlattr>.flexi_thread_turns",      fj.thread_turns);
+                        connectors_tree.put("<xmlattr>.flexi_thread_left_hand",  int(fj.thread_left_hand));
+                        connectors_tree.put("<xmlattr>.flexi_thread_lead_turns", fj.thread_lead_turns);
+                        connectors_tree.put("<xmlattr>.flexi_bayonet_lugs",          fj.bayonet_lugs);
+                        connectors_tree.put("<xmlattr>.flexi_bayonet_lug_height",    fj.bayonet_lug_height);
+                        connectors_tree.put("<xmlattr>.flexi_bayonet_lug_thickness", fj.bayonet_lug_thickness);
+                        connectors_tree.put("<xmlattr>.flexi_bayonet_lug_arc",       fj.bayonet_lug_arc);
+                        connectors_tree.put("<xmlattr>.flexi_bayonet_lock_angle",    fj.bayonet_lock_angle);
+                        connectors_tree.put("<xmlattr>.flexi_bayonet_entry_depth",   fj.bayonet_entry_depth);
+                        connectors_tree.put("<xmlattr>.flexi_bayonet_detent",        fj.bayonet_detent);
                     }
                 }
             }

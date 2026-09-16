@@ -49,7 +49,9 @@ SCENARIO("Model construction", "[Model]") {
 				print.set_status_silent();
 				print.apply(model, config);
 				print.process();
-				boost::filesystem::path temp = boost::filesystem::unique_path();
+				// A bare unique_path() made GCode::do_export() call create_directory() on the
+				// empty parent path, which throws on Windows. Export into the harness scratch dir.
+				boost::filesystem::path temp = Slic3r::Test::scratch_path();
                 print.export_gcode(temp.string(), nullptr, nullptr);
                 REQUIRE(boost::filesystem::exists(temp));
 				REQUIRE(boost::filesystem::is_regular_file(temp));

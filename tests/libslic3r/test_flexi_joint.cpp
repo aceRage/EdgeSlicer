@@ -1789,6 +1789,911 @@ TEST_CASE("Export the hinge demo", "[.][HingeDemo]")
     WARN("wrote hinge_demo_upper.stl, hinge_demo_lower.stl and hinge_demo.3mf to " << dir);
 }
 
+// ============================================================ thread and bayonet (phases 1+2)
+//
+// A twist lock is not an articulated joint: the two halves are MEANT to come apart, by turning.
+// So the proofs are shaped differently from the flexi ones. What has to hold is:
+//   * at the REST (screwed-in / locked) pose the two halves do not intersect at all - i.e. the
+//     clearance really is there, all the way round the helix or the track,
+//   * and there is a MOTION that separates them - the helical unscrewing path for the thread,
+//     the axial-then-rotational entry path for the bayonet - along which they also never
+//     intersect, which is what "it actually unscrews" means geometrically.
+
+// The test article for the twist locks: the same 20 mm cylinder, threaded at a diameter that
+// leaves a real bore wall.
+static FlexiJointParams thread_params()
+{
+    FlexiJointParams p;
+    p.kind             = FlexiJointKind::Thread;
+    p.clearance        = 0.25f;
+    p.gap              = 0.4f;
+    p.thread_major_dia = 12.0f;
+    // 2 starts at pitch 6 is a crest spacing of 3 mm - the same thread profile a single-start
+    // 3 mm pitch gives, which is the research's recommended default, done up in half a turn
+    // instead of a whole one. A 2-start thread at pitch 3 has crests only 1.5 mm apart and is
+    // a much shallower thread; see thread_crest_spacing().
+    p.thread_pitch     = 6.0f;
+    p.thread_starts    = 2;
+    p.thread_turns     = 1.25f;
+    p.thread_lead_turns= 0.5f;
+    p.thread_left_hand = false;
+    p.thread_lid_upper = true;
+    return p;
+}
+
+static FlexiJointParams bayonet_params()
+{
+    FlexiJointParams p;
+    p.kind                  = FlexiJointKind::Bayonet;
+    p.clearance             = 0.25f;
+    p.gap                   = 0.4f;
+    p.thread_major_dia      = 12.0f;
+    p.thread_lid_upper      = true;
+    p.bayonet_lugs          = 3;
+    p.bayonet_lug_height    = 1.6f;
+    p.bayonet_lug_thickness = 2.4f;
+    p.bayonet_lug_arc       = 30.0f;
+    p.bayonet_lock_angle    = 75.0f;
+    p.bayonet_entry_depth   = 4.0f;
+    p.bayonet_detent        = 0.35f;
+    return p;
+}
+
+// The lid half moved along the HELIX it unscrews on: turned by `theta` about the axis and
+// lifted by the matching rise. A right-hand thread backs OUT (up, for a lid on top) when it is
+// turned anticlockwise seen from above, and the rise per radian is lead / 2pi with
+// lead = pitch x starts.
+static TriangleMesh unscrewed(const TriangleMesh &m, const FlexiJointParams &p, double theta)
+{
+    // THE LEAD IS thread_pitch. The textbook "lead = pitch x starts" is written where "pitch"
+    // means the crest-to-crest distance; here thread_pitch is the helix's own RISE PER TURN and
+    // the crest spacing is pitch / starts, so one turn of the lid advances it by thread_pitch.
+    // What the start count buys is fewer turns to full engagement, not a longer turn.
+    const double lead = double(p.thread_pitch);
+    const double rise = lead * theta / (2. * M_PI);
+    const double sgn  = p.thread_left_hand ? -1. : 1.;
+    TriangleMesh out(m);
+    const Vec3d  c(0., 0., CUT_Z);
+    out.transform(Geometry::translation_transform(c + Vec3d(0., 0., sgn * rise)) *
+                  Geometry::rotation_transform(Vec3d(0., 0., sgn * theta)) *
+                  Geometry::translation_transform(-c));
+    return out;
+}
+
+static TriangleMesh twisted_lifted(const TriangleMesh &m, double theta, double dz)
+{
+    TriangleMesh out(m);
+    const Vec3d  c(0., 0., CUT_Z);
+    out.transform(Geometry::translation_transform(c + Vec3d(0., 0., dz)) *
+                  Geometry::rotation_transform(Vec3d(0., 0., theta)) *
+                  Geometry::translation_transform(-c));
+    return out;
+}
+
+TEST_CASE("its_make_helical_sweep builds watertight strands", "[FlexiJoint]")
+{
+    const std::vector<Vec2d> prof = { Vec2d(-0.5, -0.6), Vec2d(-0.5, 0.6), Vec2d(0.5, 0.3), Vec2d(0.5, -0.3) };
+    for (int starts : { 1, 2, 4 }) {
+        const std::vector<indexed_triangle_set> strands =
+            its_make_helical_sweep(prof, 5.0, 3.0, starts, 1.25, 120, false, 0., 0.5);
+        REQUIRE(int(strands.size()) == starts);
+        for (const indexed_triangle_set &s : strands) {
+            INFO("starts = " << starts);
+            REQUIRE_FALSE(s.vertices.empty());
+            // WATERTIGHT: the lead-in taper closes both ends by itself, no cap mesh needed.
+            REQUIRE(its_num_open_edges(s) == 0);
+            // ONE CONNECTED COMPONENT per start: the strand is a single continuous ribbon, not
+            // a string of disconnected coils.
+            REQUIRE(component_count(s) == 1);
+            REQUIRE(its_volume(s) > 0.f);
+        }
+        // The strands are copies of each other, so they all enclose the same volume.
+        for (size_t i = 1; i < strands.size(); ++ i)
+            REQUIRE(double(its_volume(strands[i])) == Approx(double(its_volume(strands[0]))).epsilon(0.02));
+    }
+    // Flat-capped ends (no lead-in) are watertight too.
+    const std::vector<indexed_triangle_set> flat =
+        its_make_helical_sweep(prof, 5.0, 3.0, 1, 1.0, 120, false, 0., 0.);
+    REQUIRE(flat.size() == 1);
+    REQUIRE(its_num_open_edges(flat.front()) == 0);
+    // Degenerate inputs give nothing rather than garbage.
+    REQUIRE(its_make_helical_sweep(prof, 5.0, 3.0, 0,  1.0, 120).empty());
+    REQUIRE(its_make_helical_sweep(prof, 0.0, 3.0, 1,  1.0, 120).empty());
+    REQUIRE(its_make_helical_sweep(prof, 5.0, 0.0, 1,  1.0, 120).empty());
+    REQUIRE(its_make_helical_sweep(prof, 5.0, 3.0, 1, -1.0, 120).empty());
+    REQUIRE(its_make_helical_sweep(prof, 5.0, 3.0, 1,  1.0,   2).empty());
+}
+
+TEST_CASE("A right-hand helix rises the right way, a left-hand one the other", "[FlexiJoint]")
+{
+    const std::vector<Vec2d> prof = { Vec2d(-0.4, -0.5), Vec2d(-0.4, 0.5), Vec2d(0.4, 0.25), Vec2d(0.4, -0.25) };
+    // Take a point a quarter turn along each and compare where it landed in the x-y plane: a
+    // right-hand helix turns anticlockwise as it rises, a left-hand one clockwise.
+    auto quarter_turn_point = [&prof](bool left) {
+        const std::vector<indexed_triangle_set> s =
+            its_make_helical_sweep(prof, 5.0, 4.0, 1, 1.0, 120, left, 0., 0.);
+        REQUIRE(s.size() == 1);
+        // The vertex nearest z == 1 mm (a quarter of the 4 mm pitch): a quarter of the way up.
+        Vec3f best = s.front().vertices.front();
+        double bd  = 1e9;
+        for (const Vec3f &v : s.front().vertices) {
+            const double d = std::abs(double(v.z()) - 1.0);
+            if (d < bd) { bd = d; best = v; }
+        }
+        return best;
+    };
+    const Vec3f r = quarter_turn_point(false);
+    const Vec3f l = quarter_turn_point(true);
+    // Right hand: a quarter turn up puts the point near +Y. Left hand: near -Y.
+    REQUIRE(double(r.y()) > 3.0);
+    REQUIRE(double(l.y()) < -3.0);
+}
+
+TEST_CASE("Thread bodies are watertight and the female is the male plus the clearance", "[FlexiJoint]")
+{
+    const FlexiJointParams p = thread_params();
+    REQUIRE(flexi_validate(p).empty());
+
+    // The male thread (on the LID, which is the upper half by default) and the relief the body
+    // half is carved with.
+    const std::vector<indexed_triangle_set> lid  = flexi_upper_bodies(p);
+    const std::vector<indexed_triangle_set> rel  = flexi_lower_reliefs(p);
+    REQUIRE_FALSE(lid.empty());
+    REQUIRE_FALSE(rel.empty());
+    // Core cylinder + one strand per start.
+    REQUIRE(lid.size() == size_t(1 + thread_start_count(p)));
+    for (const indexed_triangle_set &its : lid)
+        REQUIRE(its_num_open_edges(its) == 0);
+    for (const indexed_triangle_set &its : rel)
+        REQUIRE(its_num_open_edges(its) == 0);
+
+    // The GROOVE is a re-sweep of the SAME helix with the profile DILATED by the clearance -
+    // not a Clipper offset of the male mesh, and not a copy slid outward (which would leave the
+    // flanks touching). So it is strictly fatter than the thread it clears, and longer, and
+    // there is one of it per start.
+    REQUIRE(rel.size() == size_t(1 + thread_start_count(p)));
+    REQUIRE(double(its_volume(rel[1])) > double(its_volume(lid[1])));
+    // The dilation really is a dilation: the grown profile is wider than the plain one in BOTH
+    // directions, which is the whole difference from a radial shift.
+    {
+        const std::vector<Vec2d> plain = thread_profile(p);
+        const std::vector<Vec2d> grown = thread_profile_grown(p, 0., double(p.clearance));
+        REQUIRE(plain.size() == grown.size());
+        double plain_dr = 0., grown_dr = 0., plain_dz = 0., grown_dz = 0.;
+        for (size_t i = 0; i < plain.size(); ++ i) {
+            plain_dr = std::max(plain_dr, std::abs(plain[i].x()));
+            grown_dr = std::max(grown_dr, std::abs(grown[i].x()));
+            plain_dz = std::max(plain_dz, std::abs(plain[i].y()));
+            grown_dz = std::max(grown_dz, std::abs(grown[i].y()));
+        }
+        REQUIRE(grown_dr == Approx(plain_dr + double(p.clearance)));
+        REQUIRE(grown_dz > plain_dz + 0.5 * double(p.clearance));
+    }
+
+    // The lid is on top by default, so the male thread is the UPPER half's body - and it
+    // REACHES DOWN through the cut plane into the bore, which is what a plug does. What has to
+    // hold is that it is anchored in its own half (it reaches above the lid face) and that it
+    // reaches down about as far as the plug is long.
+    float zmin = 1e9f, zmax = -1e9f;
+    for (const indexed_triangle_set &its : lid)
+        for (const Vec3f &v : its.vertices) {
+            zmin = std::min(zmin, v.z());
+            zmax = std::max(zmax, v.z());
+        }
+    const double face = 0.5 * double(flexi_effective_gap(p));
+    REQUIRE(double(zmax) > face);                                   // anchored in the lid
+    REQUIRE(double(zmin) < face - double(thread_axial_length(p)));   // and reaching into the bore
+    // The lower half gets no body of its own for a thread - all it gets is the relief.
+    REQUIRE(flexi_lower_bodies(p).empty());
+}
+
+TEST_CASE("Thread cut of a 20 mm cylinder", "[FlexiJoint]")
+{
+    const FlexiJointParams p = thread_params();
+    const CutHalves        h = cut_with_joint(p);
+    REQUIRE(h.objects == 1);
+    REQUIRE(h.volumes == 2);
+    REQUIRE_FALSE(h.upper.empty());
+    REQUIRE_FALSE(h.lower.empty());
+    REQUIRE(its_num_open_edges(h.upper.its) == 0);
+    REQUIRE(its_num_open_edges(h.lower.its) == 0);
+
+    // THE REST POSE. Screwed all the way in, the two halves do not touch: everywhere the male
+    // thread runs, the female groove has the clearance around it.
+    REQUIRE(intersection_volume(h.upper, h.lower) == Approx(0.).margin(1e-3));
+
+    // ... AND THE CLEARANCE IS WHERE IT IS SUPPOSED TO BE. Measuring it as a vertex-to-surface
+    // distance between the two finished halves does not work here and is worth saying why: the
+    // lid's plug was SUBTRACTED from the body half, so the bore's surface and the plug's are the
+    // same surface, and along every seam the boolean re-triangulated they carry coincident
+    // vertices by construction. Such a measurement reports microns and means nothing.
+    //
+    // The clearance is a property of the two PROFILES, and the swept solids inherit it exactly,
+    // because both are swept along the same helix with the same sector count and the same phase
+    // - which is the whole reason the groove is a RE-SWEEP rather than a dilation of the male
+    // mesh. So measure it there: every edge of the male trapezoid against the female one.
+    {
+        const std::vector<Vec2d> male   = thread_profile(p);
+        const std::vector<Vec2d> groove = thread_profile_grown(p, 0., double(p.clearance));
+        REQUIRE(male.size() == 4);
+        REQUIRE(groove.size() == 4);
+        // THE CLEARANCE IS FACE TO FACE, and that is what a thread bears on. For each of the
+        // male trapezoid's four EDGES - crest, root and the two flanks - the perpendicular
+        // distance out to the matching edge of the groove is the clearance on that face. All
+        // four have to be at least C.
+        for (size_t i = 0; i < male.size(); ++ i) {
+            const Vec2d a = male[i], b = male[(i + 1) % male.size()];
+            const Vec2d mid = 0.5 * (a + b);
+            const Vec2d e   = b - a;
+            Vec2d       nrm(e.y(), -e.x());              // outward normal of a CCW polygon
+            nrm.normalize();
+            // How far out along that normal the groove's boundary is: the smallest positive
+            // crossing of the ray from the edge's midpoint with any groove edge.
+            double reach = std::numeric_limits<double>::max();
+            for (size_t j = 0; j < groove.size(); ++ j) {
+                const Vec2d c = groove[j], d = groove[(j + 1) % groove.size()];
+                const Vec2d f = d - c;
+                const double den = nrm.x() * f.y() - nrm.y() * f.x();
+                if (std::abs(den) < 1e-12)
+                    continue;
+                const Vec2d  w = c - mid;
+                const double t = (w.x() * f.y() - w.y() * f.x()) / den;   // along the ray
+                const double s = (w.x() * nrm.y() - w.y() * nrm.x()) / -den;  // along the edge
+                if (t > 1e-9 && s >= -1e-9 && s <= 1. + 1e-9)
+                    reach = std::min(reach, t);
+            }
+            INFO("male edge " << i << " clears by " << reach);
+            REQUIRE(reach >= double(p.clearance) - 1e-6);
+        }
+        // The MITRED CORNERS are the one place the clearance is legitimately less than C, and it
+        // is worth pinning why rather than papering over it: a true offset of a polygon is its
+        // Minkowski sum with a disc, which replaces every convex corner with an ARC of radius C.
+        // A four-point profile cannot carry an arc, so the corners are mitred instead - the two
+        // offset edges extended to meet - and the mitre point sits C / sin(theta/2) from the
+        // original corner along the bisector, which is further out, while the ORIGINAL corner
+        // point is only C x cos(30 deg) from the mitred flank. That is a corner-to-corner
+        // distance, not a face-to-face one; nothing bears there, and the four face clearances
+        // above are what the fit is made of.
+        double corner = std::numeric_limits<double>::max();
+        for (const Vec2d &q : male)
+            for (size_t j = 0; j < groove.size(); ++ j) {
+                const Vec2d c = groove[j], d = groove[(j + 1) % groove.size()];
+                const Vec2d f = d - c;
+                const double L2 = f.squaredNorm();
+                double t = L2 > 0. ? (q - c).dot(f) / L2 : 0.;
+                t = std::max(0., std::min(1., t));
+                corner = std::min(corner, (q - (c + t * f)).norm());
+            }
+        INFO("tightest corner clearance " << corner);
+        // With the root flat's extra extension the corners reach the full clearance too, so this
+        // is the strong form: NOWHERE on the male profile is closer than C to the groove.
+        REQUIRE(corner >= double(p.clearance) - 1e-6);
+    }
+
+    // The two flat faces are a Gap apart, exactly as for every other kind.
+    REQUIRE(face_to_face_distance(h.upper, h.lower) == Approx(double(flexi_effective_gap(p))).margin(0.02));
+}
+
+TEST_CASE("The thread unscrews: no collision anywhere along the helix", "[FlexiJoint]")
+{
+    const FlexiJointParams p = thread_params();
+    const CutHalves        h = cut_with_joint(p);
+    REQUIRE_FALSE(h.upper.empty());
+
+    // Eight poses along the unscrewing motion, from fully seated out to fully clear. The lid
+    // has to rise pitch x turns / starts... no: the ENGAGEMENT is turns full revolutions, and
+    // each revolution lifts the lid by lead = pitch x starts, so backing out takes `turns`
+    // revolutions and lifts by pitch x starts x turns. Sample the whole of it.
+    const double total = 2. * M_PI * double(p.thread_turns);
+    for (int i = 0; i <= 8; ++ i) {
+        const double theta = total * double(i) / 8.;
+        const TriangleMesh moved = unscrewed(h.upper, p, theta);
+        INFO("pose " << i << " theta = " << theta);
+        REQUIRE(intersection_volume(moved, h.lower) == Approx(0.).margin(2e-3));
+    }
+}
+
+TEST_CASE("A thread that is only lifted, not turned, still fouls its own groove", "[FlexiJoint]")
+{
+    // The converse of the test above, and what makes it mean anything: pulling the lid straight
+    // up WITHOUT turning it drives the male crest into the female groove's flank. If this did
+    // not collide, the thread would not be holding anything.
+    const FlexiJointParams p = thread_params();
+    const CutHalves        h = cut_with_joint(p);
+    REQUIRE_FALSE(h.upper.empty());
+    // The lift has to be measured against the LEAD - pitch x starts, the rise of one whole turn
+    // of the lid - not against the pitch: the groove runs helically out of the mouth, so a short
+    // pure lift just slides the crest up its own run-out channel and finds nothing. Half a lead
+    // puts the crest squarely between two coils of the groove, where the female half is solid.
+    // A pure lift of a fraction of the CREST SPACING is what puts the male crest between two
+    // turns of the groove, where the female half is solid. (Lifting by a whole crest spacing
+    // would land it back in the next groove turn and slide free again - which is exactly what a
+    // thread does, and why the sample walks a range instead of picking one height.)
+    const double lead = thread_crest_spacing(p);
+    bool jammed = false;
+    for (double f : { 0.25, 0.4, 0.5, 0.6, 0.75 }) {
+        const TriangleMesh pulled = twisted_lifted(h.upper, 0., f * lead);
+        if (intersection_volume(pulled, h.lower) > 1e-2)
+            jammed = true;
+    }
+    REQUIRE(jammed);
+}
+
+TEST_CASE("The thread start angle follows Rotation", "[FlexiJoint]")
+{
+    // Rotation IS the thread start angle: it turns every strand about the axis at once, so the
+    // lid ends up pointing somewhere else when it is done up. Proof: the strand's own centroid
+    // in the x-y plane turns by exactly that angle.
+    FlexiJointParams a = thread_params();
+    FlexiJointParams b = a;
+    b.rotation = 90.f;
+
+    auto strand_dir = [](const FlexiJointParams &p) {
+        const std::vector<indexed_triangle_set> bodies = flexi_upper_bodies(p);
+        REQUIRE(bodies.size() >= 2);
+        // bodies[0] is the core cylinder (rotationally symmetric, so it says nothing);
+        // bodies[1] is the first strand. Take the centroid of its LOWEST ring of vertices -
+        // the start of the helix, which is what the start angle names.
+        float zmin = 1e9f;
+        for (const Vec3f &v : bodies[1].vertices)
+            zmin = std::min(zmin, v.z());
+        Vec2d acc(0., 0.);
+        int   n = 0;
+        for (const Vec3f &v : bodies[1].vertices)
+            if (double(v.z()) < double(zmin) + 0.3) {
+                acc += Vec2d(double(v.x()), double(v.y()));
+                ++ n;
+            }
+        REQUIRE(n > 0);
+        acc /= double(n);
+        return std::atan2(acc.y(), acc.x()) * 180. / M_PI;
+    };
+
+    const double da = strand_dir(a);
+    const double db = strand_dir(b);
+    double diff = db - da;
+    while (diff < -180.) diff += 360.;
+    while (diff >  180.) diff -= 360.;
+    REQUIRE(diff == Approx(90.).margin(3.));
+
+    // ... and a rotated thread still cuts, and still holds.
+    const CutHalves h = cut_with_joint(b);
+    REQUIRE(h.volumes == 2);
+    REQUIRE(intersection_volume(h.upper, h.lower) == Approx(0.).margin(1e-3));
+}
+
+TEST_CASE("The lid side moves the male thread to the other half", "[FlexiJoint]")
+{
+    FlexiJointParams p = thread_params();
+    p.thread_lid_upper = false;
+    REQUIRE(flexi_validate(p).empty());
+
+    // With the lid below, the male thread is the LOWER half's body and the bore is cut into the
+    // upper one - the mirror image of the default.
+    const std::vector<indexed_triangle_set> male = flexi_lower_bodies(p);
+    REQUIRE(male.size() == size_t(1 + thread_start_count(p)));
+    float zmin = 1e9f, zmax = -1e9f;
+    for (const indexed_triangle_set &its : male)
+        for (const Vec3f &v : its.vertices) {
+            zmin = std::min(zmin, v.z());
+            zmax = std::max(zmax, v.z());
+        }
+    const double face = 0.5 * double(flexi_effective_gap(p));
+    // Mirrored: anchored BELOW its own face and reaching UP into the bore above.
+    REQUIRE(double(zmin) < -face);
+    REQUIRE(double(zmax) > -face + double(thread_axial_length(p)));
+    REQUIRE(flexi_upper_bodies(p).empty());
+
+    const CutHalves h = cut_with_joint(p);
+    REQUIRE(h.volumes == 2);
+    REQUIRE(intersection_volume(h.upper, h.lower) == Approx(0.).margin(1e-3));
+    // The lid still unscrews the right way round: a right-hand thread stays right-handed when
+    // the whole assembly is mirrored, because the hand is flipped back with it.
+    const double total = 2. * M_PI * double(p.thread_turns);
+    for (int i = 0; i <= 4; ++ i) {
+        const double theta = total * double(i) / 4.;
+        // Lid below: unscrewing takes it DOWN, so the rise is negated.
+        const double lead = double(p.thread_pitch);
+        const TriangleMesh moved = twisted_lifted(h.lower, theta, -lead * theta / (2. * M_PI));
+        INFO("pose " << i);
+        REQUIRE(intersection_volume(moved, h.upper) == Approx(0.).margin(2e-3));
+    }
+}
+
+TEST_CASE("Bayonet bodies are watertight and the lugs sit on the plug", "[FlexiJoint]")
+{
+    const FlexiJointParams p = bayonet_params();
+    REQUIRE(flexi_validate(p).empty());
+
+    const std::vector<indexed_triangle_set> lid = flexi_upper_bodies(p);
+    REQUIRE(lid.size() == size_t(1 + bayonet_lug_count(p)));
+    for (const indexed_triangle_set &its : lid)
+        REQUIRE(its_num_open_edges(its) == 0);
+    for (const indexed_triangle_set &its : flexi_lower_reliefs(p))
+        REQUIRE(its_num_open_edges(its) == 0);
+    // The BODY half gets no solid body of its own: the detent is left standing by the track
+    // relief rather than added back afterwards, because the cut pipeline unions bodies in
+    // before it subtracts reliefs and a bump added that way would be carved off again.
+    REQUIRE(flexi_lower_bodies(p).empty());
+
+    // The lugs reach out to the major radius and no further.
+    double rmax = 0.;
+    for (size_t i = 1; i < lid.size(); ++ i)
+        for (const Vec3f &v : lid[i].vertices)
+            rmax = std::max(rmax, std::hypot(double(v.x()), double(v.y())));
+    REQUIRE(rmax == Approx(thread_major_radius(p)).margin(0.05));
+}
+
+TEST_CASE("Bayonet cut of a 20 mm cylinder", "[FlexiJoint]")
+{
+    const FlexiJointParams p = bayonet_params();
+    const CutHalves        h = cut_with_joint(p);
+    REQUIRE(h.objects == 1);
+    REQUIRE(h.volumes == 2);
+    REQUIRE(its_num_open_edges(h.upper.its) == 0);
+    REQUIRE(its_num_open_edges(h.lower.its) == 0);
+    // Locked, the two halves are clear of each other all round.
+    REQUIRE(intersection_volume(h.upper, h.lower) == Approx(0.).margin(1e-3));
+    REQUIRE(face_to_face_distance(h.upper, h.lower) == Approx(double(flexi_effective_gap(p))).margin(0.02));
+}
+
+TEST_CASE("The bayonet lug goes in through its channel and is captured by the turn", "[FlexiJoint]")
+{
+    const FlexiJointParams p = bayonet_params();
+    const CutHalves        h = cut_with_joint(p);
+    REQUIRE_FALSE(h.upper.empty());
+
+    // The REST pose is LOCKED - the lugs are built where they end up when the lid is done up -
+    // so unlocking means turning BACK by the lock angle (that is -sgn), and only then lifting.
+    const double lock = bayonet_effective_lock_angle(p) * M_PI / 180.;
+    const double sgn  = p.thread_left_hand ? 1. : -1.;
+
+    // 1. THE TURN. From locked back round to the entry angle, at the seated depth, the lug runs
+    //    along its track without fouling - except right at the start, where it rides over the
+    //    detent, which is the whole point of the detent. Sample from past the bump onward.
+    // The detent bites near the LOCKED end - the lug has to click over it - so the free run of
+    // the track is the far part of it. Sample there.
+    for (int i = 0; i <= 6; ++ i) {
+        const double th = -sgn * lock * (0.75 + 0.25 * double(i) / 6.);
+        const TriangleMesh moved = twisted_lifted(h.upper, th, 0.);
+        INFO("turn pose " << i << " theta = " << th);
+        REQUIRE(intersection_volume(moved, h.lower) == Approx(0.).margin(4e-3));
+    }
+
+    // 2. THE ENTRY PATH. Turned all the way back to the entry angle, the lugs are lined up with
+    //    the axial channels and the lid lifts straight out: sample the whole lift.
+    for (int i = 0; i <= 6; ++ i) {
+        const double dz = 1.2 * double(p.bayonet_entry_depth) * double(i) / 6.;
+        const TriangleMesh moved = twisted_lifted(h.upper, -sgn * lock, dz);
+        INFO("entry pose " << i << " dz = " << dz);
+        REQUIRE(intersection_volume(moved, h.lower) == Approx(0.).margin(2e-3));
+    }
+
+    // 3. THE LOCK. At the LOCKED angle - the rest pose - pulling straight up drives the lugs
+    //    into the track's roof, which IS the mechanism. If this did not collide the lid would
+    //    lift straight off and there would be no bayonet at all.
+    const TriangleMesh pulled = twisted_lifted(h.upper, 0., 0.6 * double(p.bayonet_entry_depth));
+    REQUIRE(intersection_volume(pulled, h.lower) > 1e-2);
+}
+
+TEST_CASE("The bayonet detent has to be ridden over", "[FlexiJoint]")
+{
+    // With the detent on, the lug's own path is pinched just short of the end of the track, so
+    // turning THROUGH that spot interferes; with the detent off it does not. That difference is
+    // the click.
+    FlexiJointParams with = bayonet_params();
+    FlexiJointParams without = with;
+    without.bayonet_detent = 0.f;
+    REQUIRE(flexi_validate(with).empty());
+    REQUIRE(flexi_validate(without).empty());
+
+    const double lock = bayonet_effective_lock_angle(with) * M_PI / 180.;
+    const double sgn  = with.thread_left_hand ? 1. : -1.;
+
+    const CutHalves a = cut_with_joint(with);
+    const CutHalves b = cut_with_joint(without);
+
+    // Walk the whole track. WITHOUT the detent the lug runs the length of it free; WITH it,
+    // there is a band of angles - the bump - where it does not. That difference is the click.
+    double worst_with = 0., worst_without = 0.;
+    int    biting     = 0;
+    for (int i = 0; i <= 20; ++ i) {
+        const double th = -sgn * lock * double(i) / 20.;
+        const double va = intersection_volume(twisted_lifted(a.upper, th, 0.), a.lower);
+        const double vb = intersection_volume(twisted_lifted(b.upper, th, 0.), b.lower);
+        worst_with    = std::max(worst_with, va);
+        worst_without = std::max(worst_without, vb);
+        if (va > 1e-3)
+            ++ biting;
+    }
+    INFO("worst with = " << worst_with << ", worst without = " << worst_without
+         << ", poses biting = " << biting);
+    // The plain track is clear end to end...
+    REQUIRE(worst_without == Approx(0.).margin(4e-3));
+    // ... and the detented one is not, somewhere along it.
+    REQUIRE(worst_with > 1e-2);
+    // ... but only over a SHORT stretch of it: a detent that fouled half the track would be a
+    // jam, not a click.
+    REQUIRE(biting >= 1);
+    // ... but only over a stretch of the track, not the whole of it: the lug is as wide as its
+    // own arc, so it touches a bump of b degrees over arc + b degrees of travel, and the test
+    // has to allow for that while still catching a bump so wide it brakes the whole turn.
+    REQUIRE(biting <= 14);
+}
+
+TEST_CASE("Twist lock guards", "[FlexiJoint]")
+{
+    // ---- thread
+    {
+        FlexiJointParams p = thread_params();
+        REQUIRE(flexi_validate(p).empty());
+
+        FlexiJointParams q = p; q.thread_major_dia = 3.f;
+        REQUIRE_FALSE(flexi_validate(q).empty());
+
+        q = p; q.thread_starts = 5;
+        REQUIRE_FALSE(flexi_validate(q).empty());
+        q = p; q.thread_starts = 0;
+        REQUIRE_FALSE(flexi_validate(q).empty());
+
+        q = p; q.thread_turns = 0.f;
+        REQUIRE_FALSE(flexi_validate(q).empty());
+
+        // The printability floor on the pitch.
+        q = p; q.thread_pitch = 0.5f;
+        REQUIRE_FALSE(flexi_validate(q).empty());
+
+        // The lead-in cannot be longer than half the thread - it is tapered at both ends.
+        q = p; q.thread_lead_turns = 1.0f;   // turns == 1.25, so half is 0.625
+        REQUIRE_FALSE(flexi_validate(q).empty());
+
+        // THE CREST-SPACING GUARD. The thread AND the groove grown around it have to fit
+        // between one crest and the next; thread_depth() caps itself to keep that true, and
+        // what the guard refuses is the case where even that cap cannot save it.
+        {
+            const double S = thread_crest_spacing(p);
+            const double h = thread_profile_height(p, thread_depth(p)) + thread_groove_growth(p);
+            INFO("crest spacing " << S << ", groove height " << h);
+            REQUIRE(h < S);
+            // ... and the wall left between one groove turn and the next is real, not a sliver.
+            REQUIRE(S - h > 0.15);
+        }
+        // Too many starts for this pitch and clearance: the groove's turns would merge.
+        q = p; q.thread_starts = 4; q.thread_pitch = 2.f; q.clearance = 0.4f;
+        REQUIRE_FALSE(flexi_validate(q).empty());
+        // A thread whose depth would eat the core is refused on the minor-radius rule.
+        q = p; q.thread_major_dia = 4.2f; q.thread_pitch = 12.f;
+        REQUIRE_FALSE(flexi_validate(q).empty());
+
+        // Clearance and gap keep the family-wide rules.
+        q = p; q.clearance = 0.f;
+        REQUIRE_FALSE(flexi_validate(q).empty());
+        q = p; q.gap = 0.1f; q.clearance = 0.25f;
+        REQUIRE_FALSE(flexi_validate(q).empty());
+
+        // The gap-closing guard applies unchanged: it is about the clearance, whatever kind
+        // carries it.
+        REQUIRE(flexi_gap_closing_conflict(p, 0.2));
+        REQUIRE_FALSE(flexi_gap_closing_conflict(p, 0.049));
+        REQUIRE(flexi_max_safe_gap_closing_radius(p) == Approx(0.125));
+    }
+    // ---- bayonet
+    {
+        FlexiJointParams p = bayonet_params();
+        REQUIRE(flexi_validate(p).empty());
+
+        FlexiJointParams q = p; q.bayonet_lugs = 5;
+        REQUIRE_FALSE(flexi_validate(q).empty());
+        q = p; q.bayonet_lugs = 1;
+        REQUIRE_FALSE(flexi_validate(q).empty());
+
+        q = p; q.bayonet_lug_height = 0.2f;    // < 2 x clearance
+        REQUIRE_FALSE(flexi_validate(q).empty());
+        q = p; q.bayonet_lug_thickness = 0.3f;
+        REQUIRE_FALSE(flexi_validate(q).empty());
+
+        // The lugs cannot be taller than the plug is wide.
+        q = p; q.bayonet_lug_height = 7.f;
+        REQUIRE_FALSE(flexi_validate(q).empty());
+
+        // Lug width plus track has to fit in one lug's share of the bore.
+        q = p; q.bayonet_lug_arc = 85.f;
+        REQUIRE_FALSE(flexi_validate(q).empty());
+
+        // The entry has to be at least as deep as the lug is thick.
+        q = p; q.bayonet_entry_depth = 1.f;
+        REQUIRE_FALSE(flexi_validate(q).empty());
+
+        // A detent as tall as the lug would block the track.
+        q = p; q.bayonet_detent = 2.f;
+        REQUIRE_FALSE(flexi_validate(q).empty());
+        q = p; q.bayonet_detent = -0.1f;
+        REQUIRE_FALSE(flexi_validate(q).empty());
+    }
+}
+
+TEST_CASE("The twist axis warning fires only off vertical", "[FlexiJoint]")
+{
+    // Upright is the good case for a thread - the exact mirror image of the hinge, whose pin
+    // wants to lie flat.
+    REQUIRE_FALSE(twist_axis_needs_care(Vec3d(0., 0., 1.)));
+    REQUIRE_FALSE(twist_axis_needs_care(Vec3d(0., 0., -1.)));
+    REQUIRE_FALSE(twist_axis_needs_care(Vec3d(0.05, 0., 1.)));      // ~3 degrees off: fine
+    REQUIRE(twist_axis_needs_care(Vec3d(0.2, 0., 1.)));             // ~11 degrees off: warn
+    REQUIRE(twist_axis_needs_care(Vec3d(1., 0., 0.)));              // flat on its side
+    REQUIRE(twist_axis_needs_care(Vec3d(0., 0., 0.)));              // degenerate: warn
+}
+
+TEST_CASE("Twist lock auto sizing fits the cross-section", "[FlexiJoint]")
+{
+    for (double r_in : { 6.0, 10.0, 25.0 }) {
+        for (FlexiJointKind k : { FlexiJointKind::Thread, FlexiJointKind::Bayonet }) {
+            FlexiJointParams p = k == FlexiJointKind::Thread ? thread_params() : bayonet_params();
+            p = flexi_auto_size(p, r_in);
+            INFO("r_in = " << r_in << " kind = " << int(k));
+            REQUIRE(flexi_validate(p).empty());
+            // The bore AND its wall have to stay inside the cross-section.
+            REQUIRE(double(flexi_outer_extent(p)) <= r_in);
+            // ... and the fastener is not vanishingly small either.
+            REQUIRE(double(p.thread_major_dia) > 0.4 * r_in);
+        }
+    }
+}
+
+TEST_CASE("The twist lock footprint is the bore's outer wall", "[FlexiJoint]")
+{
+    // What has to fit inside the cut contour is not the male thread - it is the FEMALE BORE
+    // plus the wall around it, because that is the widest thing the joint puts on the plane.
+    for (FlexiJointKind k : { FlexiJointKind::Thread, FlexiJointKind::Bayonet }) {
+        FlexiJointParams p = k == FlexiJointKind::Thread ? thread_params() : bayonet_params();
+        const double want = thread_bore_radius(p) + thread_bore_wall();
+        REQUIRE(double(flexi_outer_extent(p)) == Approx(want));
+        const std::vector<Vec2d> fp = flexi_footprint_corners(p);
+        REQUIRE(fp.size() >= 3);
+        double rmin = 1e9, rmax = 0.;
+        for (const Vec2d &v : fp) { rmin = std::min(rmin, v.norm()); rmax = std::max(rmax, v.norm()); }
+        // A circle, not a rectangle: every sample is at the same radius.
+        REQUIRE(rmax == Approx(want).margin(1e-6));
+        REQUIRE(rmin == Approx(want).margin(1e-6));
+        // ... and it does fit the 10 mm cylinder the demo cuts.
+        REQUIRE(footprint_fits_in_disc(p, CYL_R));
+    }
+}
+
+TEST_CASE("Thread and bayonet parameters survive a 3MF round trip", "[FlexiJoint]")
+{
+    // Both kinds, every new field non-default, through the real project writer/reader pair.
+    struct Case { const char *file; FlexiJointParams p; };
+    std::vector<Case> cases;
+    {
+        FlexiJointParams p = thread_params();
+        p.thread_major_dia  = 13.5f;
+        p.thread_pitch      = 4.0f;
+        p.thread_starts     = 3;
+        p.thread_turns      = 1.75f;
+        p.thread_lead_turns = 0.375f;
+        p.thread_left_hand  = true;
+        p.thread_lid_upper  = false;
+        p.rotation          = 42.5f;
+        REQUIRE(flexi_validate(p).empty());
+        cases.push_back({ "edgeslicer_thread_params.3mf", p });
+    }
+    {
+        FlexiJointParams p = bayonet_params();
+        p.thread_major_dia      = 14.5f;
+        p.thread_lid_upper      = false;
+        p.bayonet_lugs          = 4;
+        p.bayonet_lug_height    = 1.25f;
+        p.bayonet_lug_thickness = 3.25f;
+        p.bayonet_lug_arc       = 22.5f;
+        p.bayonet_lock_angle    = 45.f;
+        p.bayonet_entry_depth   = 5.5f;
+        p.bayonet_detent        = 0.45f;
+        p.rotation              = 17.5f;
+        REQUIRE(flexi_validate(p).empty());
+        cases.push_back({ "edgeslicer_bayonet_params.3mf", p });
+    }
+
+    const boost::filesystem::path tmp_root = boost::filesystem::temp_directory_path() / "snorca_tests";
+    boost::filesystem::create_directories(tmp_root);
+    Slic3r::set_temporary_dir(tmp_root.string());
+
+    for (const Case &c : cases) {
+        INFO(c.file);
+        Model model;
+        ModelObject *mo = make_jointed_cylinder(model, c.p);
+        REQUIRE(has_flexi_joint(mo));
+        model.add_default_instances();
+
+        const std::string test_file = (tmp_root / c.file).string();
+        DynamicPrintConfig store_config = DynamicPrintConfig::full_print_config();
+        StoreParams store_params;
+        store_params.path     = test_file.c_str();
+        store_params.model    = &model;
+        store_params.config   = &store_config;
+        store_params.strategy = SaveStrategy::Zip64 | SaveStrategy::Silence | SaveStrategy::SkipAuxiliary;
+        REQUIRE(store_bbs_3mf(store_params));
+
+        Model                     back;
+        DynamicPrintConfig        dst_config;
+        ConfigSubstitutionContext ctxt{ ForwardCompatibilitySubstitutionRule::EnableSilent };
+        PlateDataPtrs             plate_data;
+        std::vector<Preset*>      project_presets;
+        bool                      is_bbl_3mf = false;
+        Semver                    file_version;
+        REQUIRE(load_bbs_3mf(test_file.c_str(), &dst_config, &ctxt, &back, &plate_data, &project_presets,
+                             &is_bbl_3mf, &file_version, nullptr,
+                             LoadStrategy::LoadModel | LoadStrategy::LoadConfig |
+                             LoadStrategy::AddDefaultInstances | LoadStrategy::Silence));
+        release_PlateData_list(plate_data);
+        if (!std::getenv("SNORCA_FLEXI_KEEP"))
+            boost::filesystem::remove(test_file);
+
+        REQUIRE(back.objects.size() == 1);
+        const ModelVolume *joint = nullptr;
+        for (const ModelVolume *v : back.objects.front()->volumes)
+            if (v->cut_info.is_flexi_joint())
+                joint = v;
+        REQUIRE(joint != nullptr);
+        const FlexiJointParams &q = joint->cut_info.flexi;
+        // THE KIND ABOVE ALL: the reader clamps the enum against untrusted file content, and a
+        // clamp that stopped at Hinge would silently turn every saved thread into a ring.
+        REQUIRE(q.kind == c.p.kind);
+        // Every field, one struct comparison, so one added later without a 3MF attribute is
+        // caught here rather than in the field.
+        REQUIRE(q == c.p);
+        REQUIRE(flexi_lower_bodies(q).size() == flexi_lower_bodies(c.p).size());
+        REQUIRE(flexi_upper_bodies(q).size() == flexi_upper_bodies(c.p).size());
+        REQUIRE(flexi_lower_reliefs(q).size() == flexi_lower_reliefs(c.p).size());
+        REQUIRE(flexi_upper_reliefs(q).size() == flexi_upper_reliefs(c.p).size());
+    }
+}
+
+TEST_CASE("The twist locks' parameters survive a serialization round trip", "[FlexiJoint]")
+{
+    // The cereal path, which is what undo/redo and the project's own volume snapshots use.
+    for (FlexiJointKind k : { FlexiJointKind::Thread, FlexiJointKind::Bayonet }) {
+        FlexiJointParams p = k == FlexiJointKind::Thread ? thread_params() : bayonet_params();
+        p.thread_major_dia   = 15.25f;
+        p.thread_lid_upper   = false;
+        p.thread_pitch       = 3.75f;
+        p.thread_starts      = 4;
+        p.thread_turns       = 2.f;
+        p.thread_left_hand   = true;
+        p.thread_lead_turns  = 0.25f;
+        p.bayonet_lugs       = 2;
+        p.bayonet_lug_height = 2.f;
+        p.bayonet_lug_arc    = 35.f;
+        p.bayonet_lock_angle = 55.f;
+        p.bayonet_entry_depth= 6.f;
+        p.bayonet_detent     = 0.5f;
+        p.rotation           = 123.f;
+
+        std::stringstream ss;
+        {
+            cereal::BinaryOutputArchive ar(ss);
+            ar(p);
+        }
+        FlexiJointParams q;
+        {
+            cereal::BinaryInputArchive ar(ss);
+            ar(q);
+        }
+        REQUIRE(q == p);
+        REQUIRE(q.kind == p.kind);
+    }
+}
+
+// --------------------------------------------------------------------------- the demo
+
+// Hidden (Catch2 "[.]"): the pill-bottle demo. A 30 mm diameter, 40 mm tall cylinder cut 10 mm
+// down from the top, with a Thread and, separately, a Bayonet. Run it with the output dir in
+// the environment:
+//   set SNORCA_TWIST_OUT=<dir> && libslic3r_tests.exe "Export the twist lock demo"
+TEST_CASE("Export the twist lock demo", "[.][TwistDemo]")
+{
+    const char *dir = std::getenv("SNORCA_TWIST_OUT");
+    REQUIRE(dir != nullptr);
+    const boost::filesystem::path d(dir);
+    boost::filesystem::create_directories(d);
+
+    const double R = 15.0;    // 30 mm diameter
+    const double H = 40.0;    // 40 mm tall
+    const double Z = H - 10.; // cut 10 mm down from the top: a lid 10 mm deep
+
+    struct Case { const char *name; FlexiJointParams p; };
+    std::vector<Case> cases;
+    const double LID = H - Z;    // how deep the lid is: 10 mm
+    {
+        FlexiJointParams p = thread_params();
+        p = flexi_auto_size(p, R);
+        p.thread_starts = 2;
+        p.thread_turns  = 1.25f;
+        // THE LID'S OWN DEPTH is the constraint auto sizing cannot see: it knows how WIDE the
+        // cut is, not how much material is behind the face. The thread's plug is
+        // pitch x turns + one strand's offset + a collar, and all of that has to fit inside the
+        // 10 mm lid with a wall left on top - so the pitch comes from the lid, not the diameter.
+        // (2 starts at this pitch still gives a 3 mm crest spacing, the recommended profile.)
+        // Walk the pitch down until the whole threaded band fits in 80% of the lid. The band is
+        // pitch x (turns + (starts-1)/starts) plus the profile's own height, and that height is
+        // itself a fraction of the crest spacing, so it is easier to step than to invert.
+        for (double pitch = 12.; pitch >= 2.; pitch -= 0.25) {
+            p.thread_pitch = float(pitch);
+            if (thread_axial_length(p) <= 0.8 * LID)
+                break;
+        }
+        REQUIRE(flexi_validate(p).empty());
+        INFO("thread demo: major " << p.thread_major_dia << " pitch " << p.thread_pitch
+             << " depth " << thread_depth(p) << " plug " << thread_axial_length(p));
+        REQUIRE(thread_axial_length(p) < LID);
+        cases.push_back({ "thread", p });
+    }
+    {
+        FlexiJointParams p = bayonet_params();
+        p = flexi_auto_size(p, R);
+        // Same story for the bayonet, and it is a much smaller ask: the plug is the entry depth
+        // plus the lug's thickness plus a seat, all of which has to live in the lid.
+        REQUIRE(flexi_validate(p).empty());
+        REQUIRE(bayonet_plug_length(p) < LID);
+        cases.push_back({ "bayonet", p });
+    }
+
+    for (const Case &c : cases) {
+        Model model;
+        ModelObject *mo = model.add_object();
+        mo->name        = std::string("pill_bottle_") + c.name;
+        ModelVolume *v  = mo->add_volume(TriangleMesh(its_make_cylinder(R, H, 2. * PI / 180.)));
+        v->set_type(ModelVolumeType::MODEL_PART);
+        v->name = "bottle";
+        mo->add_instance()->set_transformation(Geometry::Transformation());
+
+        CutConnector connector;
+        connector.pos        = Vec3d(0., 0., Z);
+        connector.rotation_m = Transform3d::Identity();
+        connector.z_angle    = 0.f;
+        connector.radius     = flexi_outer_extent(c.p);
+        connector.height     = flexi_protrusion_height(c.p);
+        connector.attribs    = CutConnectorAttributes(CutConnectorType::FlexiJoint, CutConnectorStyle::Prism,
+                                                      CutConnectorShape::Circle);
+        connector.flexi      = c.p;
+        add_flexi_joint_volume(mo, connector, std::string(c.name) + "-1");
+
+        Cut cut(mo, 0, Geometry::translation_transform(Vec3d(0., 0., Z)),
+                ModelObjectCutAttribute::KeepUpper | ModelObjectCutAttribute::KeepLower |
+                ModelObjectCutAttribute::KeepAsParts);
+        const ModelObjectPtrs &res = cut.perform_with_plane();
+        REQUIRE(res.size() == 1);
+        ModelObject *ro = res.front();
+        REQUIRE(ro->volumes.size() == 2);
+
+        TriangleMesh upper, lower;
+        for (const ModelVolume *mv : ro->volumes) {
+            TriangleMesh m(mv->mesh());
+            m.transform(mv->get_matrix());
+            if (mv->is_from_upper())
+                upper = m;
+            else
+                lower = m;
+        }
+        REQUIRE_FALSE(upper.empty());
+        REQUIRE_FALSE(lower.empty());
+        REQUIRE(its_num_open_edges(upper.its) == 0);
+        REQUIRE(its_num_open_edges(lower.its) == 0);
+        REQUIRE(intersection_volume(upper, lower) == Approx(0.).margin(1e-2));
+
+        upper.write_ascii((d / (std::string(c.name) + "_demo_lid.stl")).string().c_str());
+        lower.write_ascii((d / (std::string(c.name) + "_demo_body.stl")).string().c_str());
+
+        Model out;
+        for (ModelObject *o : res)
+            out.add_object(*o);
+        out.add_default_instances();
+        REQUIRE(store_3mf((d / (std::string(c.name) + "_demo.3mf")).string().c_str(), &out, nullptr, false));
+        WARN("wrote " << c.name << "_demo_lid.stl, " << c.name << "_demo_body.stl and "
+                      << c.name << "_demo.3mf to " << dir);
+    }
+}
+
 // --------------------------------------------------------------------- fixture exporter
 
 // Hidden (Catch2 "[.]" tag: it does not run in the default suite). Writes the two jointed

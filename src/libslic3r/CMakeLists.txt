@@ -116,6 +116,8 @@ set(lisbslic3r_sources
     DataDirMigration.hpp
     CutUtils.cpp
     CutUtils.hpp
+    CurvedCut.cpp
+    CurvedCut.hpp
     EdgeGrid.cpp
     EdgeGrid.hpp
     ElephantFootCompensation.cpp
@@ -155,6 +157,8 @@ set(lisbslic3r_sources
     FilamentColorLibrary.hpp
     FilamentHotBedNozzleRules.cpp
     FilamentHotBedNozzleRules.hpp
+    FillBedPack.cpp
+    FillBedPack.hpp
     Fill/Fill3DHoneycomb.cpp
     Fill/Fill3DHoneycomb.hpp
     Fill/FillAdaptive.cpp
@@ -234,6 +238,8 @@ set(lisbslic3r_sources
     GCode/ExtrusionProcessor.hpp
     GCode/FanMover.cpp
     GCode/FanMover.hpp
+    GCode/LayerTimeSpeedSmoothingFilter.cpp
+    GCode/LayerTimeSpeedSmoothingFilter.hpp
     GCode/GCodeProcessor.cpp
     GCode/GCodeProcessor.hpp
     SliceCompare/Snapshot.cpp
@@ -273,6 +279,8 @@ set(lisbslic3r_sources
     GCode/WipeTower2.hpp
     GCode/WipeTower.cpp
     GCode/WipeTower.hpp
+    GCode/WipeTowerEstimate.cpp
+    GCode/WipeTowerEstimate.hpp
     GCodeWriter.cpp
     GCodeWriter.hpp
     Geometry/Bicubic.hpp
@@ -318,6 +326,8 @@ set(lisbslic3r_sources
     MinimumSpanningTree.hpp
     MixedFilament.cpp
     MixedFilament.hpp
+    MixedFilamentCliGates.cpp
+    MixedFilamentCliGates.hpp
     MultiNozzleUtils.cpp
     MultiNozzleUtils.hpp
     FilamentGroup.cpp
@@ -388,6 +398,8 @@ set(lisbslic3r_sources
     PrintBase.hpp
     PrintConfig.cpp
     PrintConfig.hpp
+    LayerTimeSpeedSmoothing.cpp
+    LayerTimeSpeedSmoothing.hpp
     Print.cpp
     Print.hpp
     PrintObject.cpp
@@ -397,6 +409,7 @@ set(lisbslic3r_sources
     ProjectTask.hpp
     QuadricEdgeCollapse.cpp
     QuadricEdgeCollapse.hpp
+    ScaleToVolume.hpp
     Semver.cpp
     Shape/TextShape.cpp
     Shape/TextShape.hpp

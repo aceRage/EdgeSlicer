@@ -315,6 +315,20 @@ static t_config_enum_values s_keys_map_EnableExtraBridgeLayer {
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(EnableExtraBridgeLayer)
 
 // Orca
+static t_config_enum_values s_keys_map_LayerTimeSpeedSmoothMode {
+    { "off",                      ltssmOff },
+    { "speed_up_exclude_outer",   ltssmSpeedUpExcludeOuter },
+    { "speed_up_all",             ltssmSpeedUpAll },
+    { "slow_down",                ltssmSlowDown }
+};
+CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(LayerTimeSpeedSmoothMode)
+
+static t_config_enum_values s_keys_map_LayerTimeSlowdownScope {
+    { "all",                   ltssAll },
+    { "exclude_outer_walls",   ltssExcludeOuterWalls }
+};
+CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(LayerTimeSlowdownScope)
+
 static t_config_enum_values s_keys_map_GapFillTarget {
     { "everywhere",        gftEverywhere },
     { "topbottom",        gftTopBottom },
@@ -728,6 +742,14 @@ PrintConfigDef::PrintConfigDef()
     assign_printer_technology_to_unknown(this->options, ptAny);
     this->init_fff_params();
     this->init_extruder_option_keys();
+    // init_filament_option_keys() populates m_filament_option_keys (and
+    // m_filament_retract_keys) but was never called, so both stayed EMPTY and
+    // DynamicPrintConfig::set_num_filaments() - which iterates filament_option_keys() -
+    // silently resized nothing. Any programmatically built multi-filament config kept a
+    // 1-element filament_diameter, and Print::object_extruders()/support_material_extruders()
+    // then clamped every extruder index >= filament_diameter.size() back to 0, so only
+    // extruder 0 was ever reported as used.
+    this->init_filament_option_keys();
     assign_printer_technology_to_unknown(this->options, ptFFF);
     this->init_sla_params();
     assign_printer_technology_to_unknown(this->options, ptSLA);
@@ -3372,6 +3394,18 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloat(0.5));
 
+    def = this->add("fuzzy_skin_skip_overhangs", coBool);
+    def->label = L("Skip fuzzy skin on overhangs");
+    def->category = L("Others");
+    def->tooltip = L("Do not apply fuzzy skin to the parts of a wall that are not supported by the layer below. "
+                     "Overhanging and bridging wall segments keep their original, unfuzzed path, so the jitter "
+                     "does not push extrusion out into open air where it would curl. The displacement is faded "
+                     "out over a couple of sample points on either side of the boundary, so there is no step "
+                     "between the fuzzed and the clean part of the wall. The first layer is never treated as an "
+                     "overhang.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
     def = this->add("filter_out_gap_fill", coFloat);
     def->label = L("Filter out tiny gaps");
     def->category = L("Layers and Perimeters");
@@ -3954,6 +3988,157 @@ void PrintConfigDef::init_fff_params()
     def->min      = 0;
     def->mode     = comAdvanced;
     def->set_default_value(new ConfigOptionFloatOrPercent(100, true));
+
+    // Locked Zag per-band patterns. Key names match BambuStudio's so a Bambu preset or 3MF that
+    // carries them imports here unchanged (handle_legacy maps Bambu's "zig-zag" spelling of
+    // rectilinear, which this tree does not use). The default is "default" = ipCount = "keep the
+    // sparse infill pattern", which is what Locked Zag did before this feature existed, so an
+    // existing profile slices byte for byte the same until the user changes one of these.
+    // See docs/superpowers/specs/2026-09-10-locked-zag-skin-skeleton.md.
+    def           = this->add("locked_skin_infill_pattern", coEnum);
+    def->label    = L("Skin infill pattern");
+    def->category = L("Strength");
+    def->tooltip  = L("Line pattern drawn in the skin band - the shell of sparse infill within "
+                      "\"Skin infill depth\" of the model surface. \"Same as sparse infill\" uses the "
+                      "sparse infill pattern, so only density and line width tell the two bands apart.");
+    def->mode     = comAdvanced;
+    // Same sub-pattern menu for both bands. It is deliberately NOT the full sparse_infill_pattern
+    // list: a sub-filler is built by Fill::new_from_type() inside FillLockedZag and only inherits
+    // the state FillLockedZag itself carries, so the three patterns that need per-object state
+    // built elsewhere in the pipeline are excluded:
+    //   * adaptivecubic / supportcubic - PrintObject::prepare_adaptive_infill_data() only builds
+    //     an octree when a region's own sparse_infill_pattern asks for one, so with lockedzag
+    //     selected Fill::adapt_fill_octree is null and FillAdaptive::Filler dereferences it.
+    //   * lightning - same story via prepare_lightning_infill_data(); the generator is null.
+    //   * lockedzag itself - it would recurse into a second skin/skeleton split.
+    // Everything else is stateless given layer_id/z/spacing/angle/bounding_box, which
+    // FillLockedZag::copy_fill_data() hands over (concentric additionally gets the print configs).
+    def->enum_keys_map = &ConfigOptionEnum<InfillPattern>::get_enum_values();
+    def->enum_values.push_back("default");
+    def->enum_values.push_back("rectilinear");
+    def->enum_values.push_back("alignedrectilinear");
+    def->enum_values.push_back("zigzag");
+    def->enum_values.push_back("crosszag");
+    def->enum_values.push_back("line");
+    def->enum_values.push_back("grid");
+    def->enum_values.push_back("triangles");
+    def->enum_values.push_back("tri-hexagon");
+    def->enum_values.push_back("cubic");
+    def->enum_values.push_back("quartercubic");
+    def->enum_values.push_back("honeycomb");
+    def->enum_values.push_back("3dhoneycomb");
+    def->enum_values.push_back("lateral-honeycomb");
+    def->enum_values.push_back("lateral-lattice");
+    def->enum_values.push_back("crosshatch");
+    def->enum_values.push_back("tpmsd");
+    def->enum_values.push_back("tpmsfk");
+    def->enum_values.push_back("gyroid");
+    def->enum_values.push_back("concentric");
+    def->enum_values.push_back("hilbertcurve");
+    def->enum_values.push_back("archimedeanchords");
+    def->enum_values.push_back("octagramspiral");
+    def->enum_labels.push_back(L("Same as sparse infill"));
+    def->enum_labels.push_back(L("Rectilinear"));
+    def->enum_labels.push_back(L("Aligned Rectilinear"));
+    def->enum_labels.push_back(L("Zig Zag"));
+    def->enum_labels.push_back(L("Cross Zag"));
+    def->enum_labels.push_back(L("Line"));
+    def->enum_labels.push_back(L("Grid"));
+    def->enum_labels.push_back(L("Triangles"));
+    def->enum_labels.push_back(L("Tri-hexagon"));
+    def->enum_labels.push_back(L("Cubic"));
+    def->enum_labels.push_back(L("Quarter Cubic"));
+    def->enum_labels.push_back(L("Honeycomb"));
+    def->enum_labels.push_back(L("3D Honeycomb"));
+    def->enum_labels.push_back(L("Lateral Honeycomb"));
+    def->enum_labels.push_back(L("Lateral Lattice"));
+    def->enum_labels.push_back(L("Cross Hatch"));
+    def->enum_labels.push_back(L("TPMS-D"));
+    def->enum_labels.push_back(L("TPMS-FK"));
+    def->enum_labels.push_back(L("Gyroid"));
+    def->enum_labels.push_back(L("Concentric"));
+    def->enum_labels.push_back(L("Hilbert Curve"));
+    def->enum_labels.push_back(L("Archimedean Chords"));
+    def->enum_labels.push_back(L("Octagram Spiral"));
+    def->set_default_value(new ConfigOptionEnum<InfillPattern>(ipCount));
+
+    def           = this->add("locked_skeleton_infill_pattern", coEnum);
+    def->label    = L("Skeleton infill pattern");
+    def->category = L("Strength");
+    def->tooltip  = L("Line pattern drawn in the skeleton band - everything deeper inside the model "
+                      "than the skin. \"Same as sparse infill\" uses the sparse infill pattern, so only "
+                      "density and line width tell the two bands apart.");
+    def->mode     = comAdvanced;
+    // Same sub-pattern menu for both bands. It is deliberately NOT the full sparse_infill_pattern
+    // list: a sub-filler is built by Fill::new_from_type() inside FillLockedZag and only inherits
+    // the state FillLockedZag itself carries, so the three patterns that need per-object state
+    // built elsewhere in the pipeline are excluded:
+    //   * adaptivecubic / supportcubic - PrintObject::prepare_adaptive_infill_data() only builds
+    //     an octree when a region's own sparse_infill_pattern asks for one, so with lockedzag
+    //     selected Fill::adapt_fill_octree is null and FillAdaptive::Filler dereferences it.
+    //   * lightning - same story via prepare_lightning_infill_data(); the generator is null.
+    //   * lockedzag itself - it would recurse into a second skin/skeleton split.
+    // Everything else is stateless given layer_id/z/spacing/angle/bounding_box, which
+    // FillLockedZag::copy_fill_data() hands over (concentric additionally gets the print configs).
+    def->enum_keys_map = &ConfigOptionEnum<InfillPattern>::get_enum_values();
+    def->enum_values.push_back("default");
+    def->enum_values.push_back("rectilinear");
+    def->enum_values.push_back("alignedrectilinear");
+    def->enum_values.push_back("zigzag");
+    def->enum_values.push_back("crosszag");
+    def->enum_values.push_back("line");
+    def->enum_values.push_back("grid");
+    def->enum_values.push_back("triangles");
+    def->enum_values.push_back("tri-hexagon");
+    def->enum_values.push_back("cubic");
+    def->enum_values.push_back("quartercubic");
+    def->enum_values.push_back("honeycomb");
+    def->enum_values.push_back("3dhoneycomb");
+    def->enum_values.push_back("lateral-honeycomb");
+    def->enum_values.push_back("lateral-lattice");
+    def->enum_values.push_back("crosshatch");
+    def->enum_values.push_back("tpmsd");
+    def->enum_values.push_back("tpmsfk");
+    def->enum_values.push_back("gyroid");
+    def->enum_values.push_back("concentric");
+    def->enum_values.push_back("hilbertcurve");
+    def->enum_values.push_back("archimedeanchords");
+    def->enum_values.push_back("octagramspiral");
+    def->enum_labels.push_back(L("Same as sparse infill"));
+    def->enum_labels.push_back(L("Rectilinear"));
+    def->enum_labels.push_back(L("Aligned Rectilinear"));
+    def->enum_labels.push_back(L("Zig Zag"));
+    def->enum_labels.push_back(L("Cross Zag"));
+    def->enum_labels.push_back(L("Line"));
+    def->enum_labels.push_back(L("Grid"));
+    def->enum_labels.push_back(L("Triangles"));
+    def->enum_labels.push_back(L("Tri-hexagon"));
+    def->enum_labels.push_back(L("Cubic"));
+    def->enum_labels.push_back(L("Quarter Cubic"));
+    def->enum_labels.push_back(L("Honeycomb"));
+    def->enum_labels.push_back(L("3D Honeycomb"));
+    def->enum_labels.push_back(L("Lateral Honeycomb"));
+    def->enum_labels.push_back(L("Lateral Lattice"));
+    def->enum_labels.push_back(L("Cross Hatch"));
+    def->enum_labels.push_back(L("TPMS-D"));
+    def->enum_labels.push_back(L("TPMS-FK"));
+    def->enum_labels.push_back(L("Gyroid"));
+    def->enum_labels.push_back(L("Concentric"));
+    def->enum_labels.push_back(L("Hilbert Curve"));
+    def->enum_labels.push_back(L("Archimedean Chords"));
+    def->enum_labels.push_back(L("Octagram Spiral"));
+    def->set_default_value(new ConfigOptionEnum<InfillPattern>(ipCount));
+
+    // Ported from BambuStudio (Layer::set_outlook_range, src/libslic3r/Fill/Fill.cpp) - both trees
+    // are AGPL-3.0; re-implemented against this tree's shapes rather than copied.
+    def           = this->add("infill_instead_top_bottom_surfaces", coBool);
+    def->label    = L("Skin follows the surface");
+    def->category = L("Strength");
+    def->tooltip  = L("Locked Zag only. Fills the model's top and bottom surfaces with the skin band "
+                      "instead of solid infill, so the skin hugs the contour of the model rather than "
+                      "sitting in a band of uniform depth below it. Turn off for a plain depth-offset skin.");
+    def->mode     = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
 
     def           = this->add("symmetric_infill_y_axis", coBool);
     def->label    = L("Symmetric infill Y axis");
@@ -4754,6 +4939,97 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionBool(false));
 
+    // Edge: layer-time speed smoothing (process / Speed tab). Keys are layer_time_speed_*, not Bambu's
+    // layer_time_smoothing. Mode A/B speed up long layers; Mode C is optional slowdown.
+    // Plan: 09-concept-layer-time-speed-smoothing.md. Inspiration only: BambuStudio#12224.
+    def = this->add("layer_time_speed_smoothing", coEnum);
+    def->label = L("Layer time speed smoothing");
+    def->full_label = L("Layer time speed smoothing");
+    def->category = L("Speed");
+    def->tooltip = L("Limit how much estimated print time may jump from one layer to the next, which otherwise "
+                     "shows up as banding on glossy and high-shrinkage filaments.\n\n"
+                     "Off leaves speeds unchanged.\n"
+                     "Speed up (exclude outer walls) shortens long layers so they sit inside the neighbour variation "
+                     "band, without touching outer-wall feedrates.\n"
+                     "Speed up (all) does the same for every extrusion.\n"
+                     "Slow down lengthens short layers instead (optional; similar in spirit to Bambu Studio's "
+                     "layer-time smoothing, but a separate Edge option).");
+    def->enum_keys_map = &ConfigOptionEnum<LayerTimeSpeedSmoothMode>::get_enum_values();
+    def->enum_values.push_back("off");
+    def->enum_values.push_back("speed_up_exclude_outer");
+    def->enum_values.push_back("speed_up_all");
+    def->enum_values.push_back("slow_down");
+    def->enum_labels.push_back(L("Off"));
+    def->enum_labels.push_back(L("Speed up (exclude outer walls)"));
+    def->enum_labels.push_back(L("Speed up (all)"));
+    def->enum_labels.push_back(L("Slow down"));
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionEnum<LayerTimeSpeedSmoothMode>(ltssmOff));
+
+    def = this->add("layer_time_speed_max_variation", coPercent);
+    def->label = L("Max layer time variation");
+    def->category = L("Speed");
+    def->tooltip = L("Maximum allowed relative change of estimated print time between adjacent layers. "
+                     "At 25%, a neighbour may be at most 25% shorter than a layer (the longer layer is at most "
+                     "1 / 0.75 times the shorter). Smaller values produce a gentler ramp and cost more time "
+                     "(slow down) or more speed-up of the long layers.");
+    def->sidetext = "%";
+    def->min = 0;
+    def->max = 100;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionPercent(25));
+
+    def = this->add("layer_time_speed_max_speedup", coPercent);
+    def->label = L("Max speed-up");
+    def->category = L("Speed");
+    def->tooltip = L("Cap on how much a single long layer may be sped up (Modes Speed up). "
+                     "100% means the layer may print at most twice as fast (time may be halved). "
+                     "Short layers are never lengthened.");
+    def->sidetext = "%";
+    def->min = 0;
+    def->max = 1000;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionPercent(100));
+
+    def = this->add("layer_time_speed_max_slowdown", coPercent);
+    def->label = L("Max slowdown");
+    def->category = L("Speed");
+    def->tooltip = L("Cap on how much a single short layer may be slowed down (Slow down mode). "
+                     "200% means the layer may take up to three times as long.");
+    def->sidetext = "%";
+    def->min = 0;
+    def->max = 1000;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionPercent(200));
+
+    def = this->add("layer_time_speed_max_time_increase", coPercent);
+    def->label = L("Max print time increase");
+    def->category = L("Speed");
+    def->tooltip = L("Cap on the growth of the summed layer times (Slow down mode). "
+                     "If the variation limit would exceed this budget, the allowed variation is relaxed "
+                     "until the increase fits.");
+    def->sidetext = "%";
+    def->min = 0;
+    def->max = 500;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionPercent(20));
+
+    def = this->add("layer_time_speed_slowdown_scope", coEnum);
+    def->label = L("Slowdown scope");
+    def->category = L("Speed");
+    def->tooltip = L("Which extrusions Slow down mode may stretch. "
+                     "Exclude outer walls keeps outer-wall speed and gloss unchanged and only lengthens "
+                     "inner walls, infill and other internal extrusions. "
+                     "This is an apply-side choice; the time solver itself is extrusion-agnostic.");
+    def->enum_keys_map = &ConfigOptionEnum<LayerTimeSlowdownScope>::get_enum_values();
+    def->enum_values.push_back("all");
+    def->enum_values.push_back("exclude_outer_walls");
+    def->enum_labels.push_back(L("All extrusions"));
+    def->enum_labels.push_back(L("Exclude outer walls"));
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionEnum<LayerTimeSlowdownScope>(ltssExcludeOuterWalls));
+
+
 
     def = this->add("fan_min_speed", coFloats);
     def->label = L("Fan speed");
@@ -5170,6 +5446,24 @@ void PrintConfigDef::init_fff_params()
     def->gui_flags = "serialized";
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionString(""));
+
+    def = this->add("mixed_filament_auto_gradient_choice", coInt);
+    def->label = L("Remembered auto-gradient choice");
+    def->tooltip = L("Project-specific remembered response to the large auto-gradient confirmation.");
+    def->gui_flags = "serialized";
+    def->min = -1;
+    def->max = 1;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionInt(-1));
+
+    def = this->add("mixed_filament_auto_gradient_physical_count", coInt);
+    def->label = L("Remembered auto-gradient physical filament count");
+    def->tooltip = L("Physical filament count for which the project-specific auto-gradient response was remembered.");
+    def->gui_flags = "serialized";
+    def->min = 0;
+    def->max = MAXIMUM_FILAMENT_NUMBER;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionInt(0));
 
     def = this->add("dithering_z_step_size", coFloat);
     def->label = L("Dithering Z step size");
@@ -8252,12 +8546,19 @@ void PrintConfigDef::handle_legacy(t_config_option_key &opt_key, std::string &va
         // "nearest_wall" and "nearest_surface" now mean the same thing: matching ON.
         opt_key = "support_filament_matching";
         value = (value == "nearest_wall" || value == "nearest_surface") ? "1" : "0";
-    } else if ((opt_key == "sparse_infill_pattern"         ||
-                opt_key == "top_surface_pattern"           ||
-                opt_key == "undertop_surface_pattern"      ||
-                opt_key == "bottom_surface_pattern"        ||
-                opt_key == "internal_solid_infill_pattern" ||
-                opt_key == "ironing_pattern"               ||
+    } else if ((opt_key == "sparse_infill_pattern"            ||
+                opt_key == "top_surface_pattern"              ||
+                opt_key == "undertop_surface_pattern"         ||
+                opt_key == "bottom_surface_pattern"           ||
+                opt_key == "internal_solid_infill_pattern"    ||
+                opt_key == "ironing_pattern"                  ||
+                // Bambu spells ipRectilinear "zig-zag" in its own InfillPattern key map
+                // (PrintConfig.cpp s_keys_map_InfillPattern) and uses that spelling in the
+                // locked_sk*_infill_pattern enum value lists; this tree spells it "rectilinear",
+                // so a Bambu preset/3MF carrying these keys needs the same remap the other
+                // pattern keys already get.
+                opt_key == "locked_skin_infill_pattern"       ||
+                opt_key == "locked_skeleton_infill_pattern"   ||
                 opt_key == "support_ironing_pattern") && value == "zig-zag") {
         value = "rectilinear";
     }

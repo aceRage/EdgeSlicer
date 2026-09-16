@@ -112,3 +112,4 @@ TEST_CASE("bed_temperature_initial_layer_single expands to the max", "[BedTemper
     // start gcode already sets the temperature, so no additional M190 is emitted by the slicer.
     REQUIRE(gcode.find("M190 S65") != std::string::npos);
 }
+

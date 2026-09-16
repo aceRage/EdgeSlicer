@@ -334,6 +334,476 @@ std::vector<Vec2d> hinge_footprint_corners(const FlexiJointParams &p, double pad
     return out;
 }
 
+// ------------------------------------------------------------------ thread and bayonet
+//
+// THE FRAME. Everything below is in the cut frame (axis +Z, cut plane z == 0), and both kinds
+// obey THE GAP the same way every other kind does: the lower segment's face is at -gap/2 and
+// the upper one's at +gap/2. What is different is that a twist lock is not symmetric about the
+// plane - one half carries a plug that reaches INTO the other half's bore - so the two halves
+// are named LID (the one with the male fastener) and BODY, and `thread_lid_upper` says which
+// is which. `twist_lid_is_upper()` is the only place that decision is read.
+//
+// THE SIGN. All the geometry below is built for a lid on top: the plug hangs DOWN from the
+// upper face into a bore sunk DOWN from the lower face. When the lid is the lower half the
+// whole assembly is simply mirrored through z == 0, which is what twist_flip() does - a
+// mirror also flips a right-hand thread into a left-hand one, so the hand is flipped back at
+// the same time and "right hand" keeps meaning right hand however the lid is chosen.
+
+static bool twist_lid_is_upper(const FlexiJointParams &p) { return p.thread_lid_upper; }
+
+// Mirror a body through the cut plane, for the lid-is-lower case. Mirroring inverts the
+// winding, so the triangles are flipped back.
+static void twist_mirror_z(indexed_triangle_set &its)
+{
+    for (Vec3f &v : its.vertices)
+        v.z() = -v.z();
+    for (Vec3i32 &f : its.indices)
+        std::swap(f[1], f[2]);
+}
+
+static std::vector<indexed_triangle_set> twist_orient(const FlexiJointParams &p,
+                                                     std::vector<indexed_triangle_set> in)
+{
+    if (!twist_lid_is_upper(p))
+        for (indexed_triangle_set &its : in)
+            twist_mirror_z(its);
+    return in;
+}
+
+int thread_start_count(const FlexiJointParams &p)
+{
+    return std::max(1, std::min(4, p.thread_starts));
+}
+
+double thread_crest_spacing(const FlexiJointParams &p)
+{
+    // ONE CREST TO THE NEXT, along the axis. Strand s sits pitch x s/starts above strand 0, so
+    // an N-start thread puts N crests in every pitch and the spacing is pitch / starts. This is
+    // the single number every other dimension has to fit inside.
+    return std::max(EPSILON, double(p.thread_pitch) / double(thread_start_count(p)));
+}
+
+double thread_profile_height(const FlexiJointParams &p, double depth)
+{
+    return 0.25 * thread_crest_spacing(p) + 2. * depth * std::tan(30. * M_PI / 180.);
+}
+
+double thread_groove_growth(const FlexiJointParams &p)
+{
+    // How much TALLER the groove is than the thread it clears, end to end: the mitred extension
+    // of the crest flat (C / cos(30 deg)) at the crest end, and that plus the root corners' extra
+    // 0.6 x C at the root end - see thread_profile_grown() for why the root end needs more.
+    const double C = double(p.clearance);
+    return 2. * C / std::cos(30. * M_PI / 180.) + 0.6 * C;
+}
+
+double thread_depth(const FlexiJointParams &p)
+{
+    // The ACME convention is a depth of about 0.35 x pitch...
+    double d = 0.35 * std::max(EPSILON, double(p.thread_pitch));
+    // ... capped so the thread and, crucially, the GROOVE CUT FOR IT still fit between one crest
+    // and the next. The groove is the profile grown by the clearance, so it is
+    // 2 x C / cos(30 deg) taller than the thread; if that exceeds the crest spacing the groove's
+    // own coils merge into one annular cavity and the "thread" holds nothing at all - the lid
+    // pulls straight out. Leave a fifth of the spacing as wall between coils.
+    const double S    = thread_crest_spacing(p);
+    const double grow = thread_groove_growth(p);
+    // A tenth of the crest spacing left as wall between one groove turn and the next. Anything
+    // more is paid for out of the thread's DEPTH, which is what makes it hold - and how thick
+    // that wall needs to be to print is a question the PITCH answers (see the guard), not one
+    // the depth cap should keep paying for.
+    const double room = 0.9 * S - grow;      // axial room the trapezoid itself may take
+    if (thread_profile_height(p, d) > room) {
+        // Solve thread_profile_height(d) == room for d, and floor it at something buildable.
+        const double dd = (room - 0.25 * S) / (2. * std::tan(30. * M_PI / 180.));
+        d = std::max(0.05, dd);
+    }
+    // Never eat the whole core: leave the minor radius at least a third of the major one.
+    d = std::min(d, 0.66 * thread_major_radius(p));
+    return std::max(0.05, d);
+}
+
+std::vector<Vec2d> thread_profile(const FlexiJointParams &p, double radial_offset)
+{
+    return thread_profile_grown(p, radial_offset, 0.);
+}
+
+std::vector<Vec2d> thread_profile_grown(const FlexiJointParams &p, double radial_offset, double grow)
+{
+    // THE TRAPEZOID, in (dr, dz) offsets from the helix centreline. 30 degree flanks measured
+    // from the radial direction (the ACME/60-degree-included convention), and a flat at the
+    // crest AND at the root so nothing comes to a knife edge that will not print.
+    //
+    //          <-- flat_crest -->        (outer, dr = +depth/2)
+    //         /                  \
+    //        /                    \      flank, 30 degrees off radial
+    //       <------ flat_root ------>    (inner, dr = -depth/2)
+    //
+    // The axial run of one flank is depth/2 x tan(30 deg) + ... expressed the other way round:
+    // the crest flat is 0.25 x pitch and each flank rises depth x tan(30 deg) axially, so the
+    // root flat comes out to crest + 2 x that. Written this way the profile stays a proper
+    // trapezoid for any depth/pitch the guard allows.
+    const double d  = thread_depth(p);
+    const double hr = 0.5 * d;                       // half the radial extent
+    // The ACME "crest flat = a quarter of the pitch" is written for a single-start thread, where
+    // the pitch IS the distance from one crest to the next. With N starts there are N crests in
+    // every pitch, so the rule is a quarter of the CREST SPACING - which is the same number on a
+    // single start and the only one that leaves room between the turns on a multi-start.
+    const double crest = 0.25 * thread_crest_spacing(p);
+    const double flank = d * std::tan(30. * M_PI / 180.);   // axial run of one flank
+    const double hc = 0.5 * crest;
+    const double hf = hc + flank;                    // half the root flat
+    const double o  = radial_offset;
+    // THE DILATION. `grow` is a uniform offset of the whole trapezoid, i.e. the profile's own
+    // outward normal offset by that much - which is what a real clearance is, and is NOT the
+    // same as sliding the profile radially. Sliding it leaves the two FLANKS lying on the same
+    // pair of parallel lines, so a "clearance" built that way is exactly zero along the flanks,
+    // which is where a thread actually bears. Growing it moves the crest and root out radially
+    // by `grow` and moves each flank out along its own normal, which lengthens both flats by
+    // grow / cos(30 deg) at each end - the standard offset of a convex polygon.
+    const double g   = std::max(0., grow);
+    const double hrg = hr + g;
+    // THE MITRE. Moving the crest/root edge out by g and the flank out by g (measured
+    // perpendicular to itself) puts their intersection g / cos(30 deg) further along the axis -
+    // that is the flat's extension, and it does leave g between the two EDGES. What it does not
+    // leave is g at the corner POINT itself, where the male's own mitred corner sits: a true
+    // offset rounds that corner with an arc of radius g, and a four-point polygon cannot carry
+    // one. The shortfall is small (a couple of microns at the sizes here) but it is a contact,
+    // and a contact is what fuses in print. Half a nozzle-independent hair of extra extension
+    // clears it without measurably changing the fit anywhere else.
+    // The mitre: offsetting the crest/root edge and the flank each by g and taking where they
+    // cross extends the flat by g / cos(30 deg). That is exact along both EDGES.
+    const double ext = g / std::cos(30. * M_PI / 180.);
+    const double hcg = hc + ext;
+    // ... but not at the ROOT CORNERS, which are the sharp ones (60 degrees interior against the
+    // crest's 120). A true offset would round them with an arc of radius g; a four-point polygon
+    // cannot, and the mitre leaves the male's own root corner short of g. Extending the ROOT
+    // flat further reaches it, and costs nothing - that flat sits at the groove's inner radius,
+    // inside the bore, so it only removes material the bore was taking anyway.
+    const double hfg = hf + ext + 0.6 * g;
+    // Counter-clockwise in (dr, dz): root left, root right, crest right, crest left.
+    return { Vec2d(o - hrg, -hfg), Vec2d(o - hrg, hfg), Vec2d(o + hrg, hcg), Vec2d(o + hrg, -hcg) };
+}
+
+double thread_profile_height(const FlexiJointParams &p, double depth);
+
+double thread_axial_length(const FlexiJointParams &p)
+{
+    // The helix itself rises pitch x turns; the last strand starts (starts-1)/starts of a pitch
+    // higher, so the whole threaded band is that much longer. On top of that the band has to
+    // cover the PROFILE, not just its centreline, so half the profile's own height is added at
+    // each end - the profile's height, not half a pitch, which at N starts would be N times too
+    // much and would inflate the plug, the bore and the depth of lid the thread needs with it.
+    const double P = double(p.thread_pitch);
+    const int    N = thread_start_count(p);
+    return P * double(p.thread_turns) + P * double(N - 1) / double(N)
+         + thread_profile_height(p, thread_depth(p));
+}
+
+double thread_helix_angle_deg(const FlexiJointParams &p)
+{
+    // The lead - how far the thread advances per turn of the LID - is pitch x starts. Measured
+    // from vertical, the crest's overhang is atan(lead / circumference).
+    const double R = thread_major_radius(p);
+    if (R <= EPSILON)
+        return 90.;
+    const double lead = double(p.thread_pitch) * double(thread_start_count(p));
+    return std::atan2(lead, 2. * M_PI * R) * 180. / M_PI;
+}
+
+// The male thread's OWN axial extent below the lid face: the threaded band plus a short collar
+// so the core cylinder meets the lid face squarely rather than at a thread crest.
+static double thread_plug_length(const FlexiJointParams &p)
+{
+    return thread_axial_length(p) + 0.6;
+}
+
+// The bore has to be deeper than the plug is long, or the lid bottoms out before the flats
+// seat - the axial analogue of the revolved kinds' tilt allowance.
+static double thread_bore_depth(const FlexiJointParams &p)
+{
+    // Deep enough for the plug, its seating clearance, and the half turn of groove run-out that
+    // is swept below the thread's own bottom coil.
+    return thread_plug_length(p) + double(p.clearance) + 0.4 + 0.5 * double(p.thread_pitch);
+}
+
+// A cylinder of radius r spanning z in [z0, z1] in the cut frame.
+static indexed_triangle_set twist_cylinder(double r, double z0, double z1)
+{
+    indexed_triangle_set its = its_make_cylinder(std::max(EPSILON, r), std::max(EPSILON, z1 - z0),
+                                                 2. * M_PI / double(FLEXI_SECTORS));
+    its_translate(its, Vec3f(0.f, 0.f, float(z0)));
+    return its;
+}
+
+// The male thread's strands, already lifted so the band sits under the lid face. `radius` is
+// the helix centreline radius and `offset` shifts the profile outward (the female groove uses
+// the same call with offset = clearance, which is what makes the fit exactly C).
+// The thread's strands. `offset` shifts the profile outward - the female GROOVE is the same
+// call with offset == clearance, which is what makes the fit exactly C - and `extra_turns` runs
+// the helix on past the male thread's own ends.
+//
+// TWO THINGS HAVE TO LINE UP or the groove does not clear the thread it is cut for.
+//  * THE Z ORIGIN. Both sweeps have to start at the same height, whatever `extra_turns` does to
+//    their length: the extra turns extend the groove PAST the thread at the top, they do not
+//    slide it. So the translation is computed from the MALE band's own length, not from this
+//    call's, and the extra half turn is bought at the start (by beginning half a turn of phase
+//    and pitch earlier) as well as spent at the end.
+//  * THE LEAD-IN. The male thread's depth fades to zero over the lead-in at each end, which is
+//    the chamfer that lets the halves catch. The GROOVE must NOT do that: a groove that fades
+//    out where the thread is still full depth is a groove that pinches the thread. So the
+//    groove is swept at FULL depth end to end (lead == 0) and simply runs longer.
+static std::vector<indexed_triangle_set> thread_strands(const FlexiJointParams &p, double offset,
+                                                        double extra_turns)
+{
+    const double P  = double(p.thread_pitch);
+    const int    N  = thread_start_count(p);
+    const double Rc = thread_major_radius(p) - 0.5 * thread_depth(p);   // the centreline radius
+    const bool   is_groove = extra_turns > 0.;
+    // THE GROOVE RUNS ALL THE WAY OUT OF THE MOUTH. Below the thread it needs only `extra_turns`
+    // of run-out; ABOVE it, it has to cover the whole unscrewing travel, because a lid backing
+    // out lifts its topmost coil by the full engagement - and a groove that stops short leaves a
+    // solid rim between itself and the bore mouth for that coil to jam against. A real tapped
+    // hole has no such rim: the thread runs right out of the mouth, and so does this one.
+    const double run_out = extra_turns;                                    // below
+    const double run_up  = is_groove ? double(p.thread_turns) + extra_turns : 0.;   // above
+    const double turns = std::max(0.05, double(p.thread_turns) + run_out + run_up);
+    // Segments per turn: fine enough that the facet chord at the major radius stays well under
+    // a tenth of a millimetre at the sizes this is used at, and the male and female sweeps use
+    // the SAME count and the SAME phase, so their facets stay parallel and the measured
+    // clearance is exactly C rather than C plus or minus the faceting error.
+    const int seg = FLEXI_SECTORS;
+    // Starting the groove `extra_turns` earlier means starting it that much further round AND
+    // that much lower, which is exactly one point of the same helix - so the phase and the
+    // height move together and the two sweeps stay on one screw.
+    const double sgn   = p.thread_left_hand ? -1. : 1.;
+    const double phase = double(p.rotation) - (is_groove ? sgn * 360. * run_out : 0.);
+    const double lead  = is_groove ? 0. : double(p.thread_lead_turns);
+    // The groove is the male profile GROWN by the clearance on the SAME centreline, not a copy
+    // pushed outward: growing it puts C between the two along the flanks as well as at the
+    // crest, which is where a thread bears and where a radial shift leaves nothing at all.
+    std::vector<indexed_triangle_set> strands =
+        its_make_helical_sweep(thread_profile_grown(p, 0., offset), Rc, P, N, turns, seg,
+                               p.thread_left_hand, phase, lead);
+    // The sweep starts at z == 0 and rises; the thread has to hang DOWN from the lid face, so
+    // the whole band drops to sit just under it. The lid face is at +gap/2 (lid on top), and
+    // the drop is measured from the MALE band's length so the groove lands on the same screw.
+    const double top       = 0.5 * double(flexi_effective_gap(p));
+    const double male_band = P * double(p.thread_turns) + P * double(N - 1) / double(N);
+    const double dz        = top - 0.3 - male_band - (is_groove ? P * run_out : 0.);
+    for (indexed_triangle_set &its : strands)
+        its_translate(its, Vec3f(0.f, 0.f, float(dz)));
+    return strands;
+}
+
+// ------------------------------------------------------------------------------- bayonet
+
+int bayonet_lug_count(const FlexiJointParams &p)
+{
+    return std::max(2, std::min(4, p.bayonet_lugs));
+}
+
+double bayonet_effective_lock_angle(const FlexiJointParams &p)
+{
+    const int    N    = bayonet_lug_count(p);
+    const double span = 360. / double(N);       // the angular pitch of the lug pattern
+    // The track has to turn the lug through the lock angle and stop before it reaches the next
+    // lug's entry channel: entry + lug + track < span, with a little wall left over.
+    const double room = span - double(p.bayonet_lug_arc) - 8.;
+    double a = double(p.bayonet_lock_angle);
+    a = std::max(30., std::min(120., a));
+    return std::max(20., std::min(a, room));
+}
+
+double bayonet_plug_length(const FlexiJointParams &p)
+{
+    // Down from the lid face: the entry run, the lug's own thickness and a seating margin.
+    return double(p.bayonet_entry_depth) + double(p.bayonet_lug_thickness) + 1.0;
+}
+
+double bayonet_lug_angle_deg(const FlexiJointParams &p, int i)
+{
+    const int N = bayonet_lug_count(p);
+    return double(p.rotation) + 360. * double(i) / double(N);
+}
+
+// The axial position of the lug's centre when the lid is fully inserted, i.e. the height of
+// the circumferential track. Measured in the cut frame with the lid on top: the lid face is at
+// +gap/2 and the lug sits `entry_depth` below it.
+static double bayonet_track_z(const FlexiJointParams &p)
+{
+    return 0.5 * double(flexi_effective_gap(p)) - double(p.bayonet_entry_depth);
+}
+
+// ONE LUG, as an annular sector: the wedge between r0 and r1, spanning `arc` degrees centred on
+// `centre_deg`, and `thickness` tall centred on z == cz. Built as a prism over a polygon so a
+// grown copy (the slot) is the same shape with bigger numbers - which is what keeps the
+// measured clearance exactly C, the same way an offset cylinder is still a cylinder.
+static indexed_triangle_set bayonet_sector(double r0, double r1, double centre_deg, double arc_deg,
+                                           double cz, double thickness)
+{
+    indexed_triangle_set its;
+    r0 = std::max(EPSILON, r0);
+    r1 = std::max(r0 + EPSILON, r1);
+    arc_deg = std::max(1., std::min(350., arc_deg));
+    const double a0 = (centre_deg - 0.5 * arc_deg) * M_PI / 180.;
+    const double a1 = (centre_deg + 0.5 * arc_deg) * M_PI / 180.;
+    // One facet per 3 degrees of arc, at least 2 - fine enough that the sector's outer wall is
+    // a good circle and coarse enough not to bloat the boolean.
+    const int    n  = std::max(2, int(std::ceil(arc_deg / 3.)));
+    const double z0 = cz - 0.5 * thickness, z1 = cz + 0.5 * thickness;
+
+    // The (r, theta) rectangle's outline, walked outer-arc then back along the inner arc.
+    std::vector<Vec2d> ring;
+    ring.reserve(2 * (n + 1));
+    for (int i = 0; i <= n; ++ i) {
+        const double a = a0 + (a1 - a0) * double(i) / double(n);
+        ring.emplace_back(r1 * std::cos(a), r1 * std::sin(a));
+    }
+    for (int i = n; i >= 0; -- i) {
+        const double a = a0 + (a1 - a0) * double(i) / double(n);
+        ring.emplace_back(r0 * std::cos(a), r0 * std::sin(a));
+    }
+    const int m = int(ring.size());
+    its.vertices.reserve(2 * m);
+    for (const Vec2d &q : ring)
+        its.vertices.emplace_back(Vec3f(float(q.x()), float(q.y()), float(z0)));
+    for (const Vec2d &q : ring)
+        its.vertices.emplace_back(Vec3f(float(q.x()), float(q.y()), float(z1)));
+    // Side wall.
+    its.indices.reserve(2 * m + 2 * m);
+    for (int i = 0; i < m; ++ i) {
+        const int j = (i + 1) % m;
+        its.indices.emplace_back(Vec3i32(i, j, m + j));
+        its.indices.emplace_back(Vec3i32(i, m + j, m + i));
+    }
+    // Caps: the outline is a simple ring of 2(n+1) points whose two halves are matched arcs, so
+    // the quad strip between point i and point (m-1-i) triangulates it exactly.
+    for (int i = 0; i < n; ++ i) {
+        const int a = i,           b = i + 1;
+        const int c = m - 1 - i,   d = m - 2 - i;
+        its.indices.emplace_back(Vec3i32(a, c, b));
+        its.indices.emplace_back(Vec3i32(b, c, d));
+        its.indices.emplace_back(Vec3i32(m + a, m + b, m + c));
+        its.indices.emplace_back(Vec3i32(m + b, m + d, m + c));
+    }
+    if (its_volume(its) < 0.f)
+        for (Vec3i32 &f : its.indices)
+            std::swap(f[1], f[2]);
+    return its;
+}
+
+// The lugs standing out of the plug wall.
+static std::vector<indexed_triangle_set> bayonet_lugs_bodies(const FlexiJointParams &p, double pad)
+{
+    const int    N  = bayonet_lug_count(p);
+    const double r0 = bayonet_plug_radius(p) - 0.2;              // bite into the plug wall
+    const double r1 = thread_major_radius(p) + pad;
+    const double cz = bayonet_track_z(p);
+    std::vector<indexed_triangle_set> out;
+    for (int i = 0; i < N; ++ i)
+        out.emplace_back(bayonet_sector(r0, r1, bayonet_lug_angle_deg(p, i),
+                                        double(p.bayonet_lug_arc) + 2. * pad / std::max(1., r1) * 180. / M_PI,
+                                        cz, double(p.bayonet_lug_thickness) + 2. * pad));
+    return out;
+}
+
+// Cut the inboard part of the track across the detent's own arc: the bump stands proud only
+// from r1 - det outward, so everything inside that radius is still cut away and the lug's root
+// runs free while its tip clicks over.
+static void sector_between_inner(std::vector<indexed_triangle_set> &out, double r0, double r1_in,
+                                 double from, double to, double cz, double th)
+{
+    const double span = std::abs(to - from);
+    if (span < 0.5 || r1_in <= r0 + EPSILON)
+        return;
+    out.emplace_back(bayonet_sector(r0, r1_in, 0.5 * (from + to), span, cz, th));
+}
+
+// The L-shaped slot for lug i, as a list of solids to subtract from the female half: the AXIAL
+// entry channel from the bore mouth down to the track, then the CIRCUMFERENTIAL track the lug
+// turns along, then (optionally) the room past the detent the lug clicks into.
+static std::vector<indexed_triangle_set> bayonet_slot(const FlexiJointParams &p, int i)
+{
+    const double C    = double(p.clearance);
+    const double r0   = bayonet_plug_radius(p) - 0.3;
+    const double r1   = thread_major_radius(p) + C;
+    const double cz   = bayonet_track_z(p);
+    const double th   = double(p.bayonet_lug_thickness) + 2. * C;
+    const double rad  = std::max(1., r1);
+    // The angular padding that turns a radial clearance into an angular one at this radius.
+    const double apad = (C / rad) * 180. / M_PI;
+    const double arc  = double(p.bayonet_lug_arc) + 2. * apad;
+    const double lock = bayonet_effective_lock_angle(p);
+    // Turning sense: right-hand (clockwise seen from the lid, i.e. -theta) unless left-handed,
+    // so "twist the way you would screw it shut" holds for both kinds.
+    const double sgn  = p.thread_left_hand ? 1. : -1.;
+    const double a0   = bayonet_lug_angle_deg(p, i);
+    // Where the entry channel starts, in z: the bore mouth, which is the body's own face.
+    const double mouth = 0.5 * double(flexi_effective_gap(p)) + C;
+
+    std::vector<indexed_triangle_set> out;
+    // THE REST POSE IS LOCKED. The lugs are built where they sit when the lid is done up - so
+    // the cut comes out of the gizmo as a closed container, not a half-assembled one - which
+    // puts the ENTRY channel a lock angle BACK from them, at a0 - sgn x lock.
+    const double a_entry = a0 - sgn * lock;
+    // 1. ENTRY: a channel of the lug's cross-section running from the bore mouth down past the
+    //    track, so the lug can drop straight in.
+    {
+        const double z0 = cz - 0.5 * th;
+        out.emplace_back(bayonet_sector(r0, r1, a_entry, arc, 0.5 * (z0 + mouth), mouth - z0));
+    }
+    // 2. TRACK: the same cross-section swept from the entry angle round to the locked one. One
+    //    sector spanning arc + lock is exactly that sweep, because the shape does not change as
+    //    it turns.
+    //
+    // 3. DETENT, and why it lives here. The bump the lug clicks over cannot be added as a BODY:
+    //    the cut pipeline unions each half's bodies in first and subtracts its reliefs after, so
+    //    a bump crossed by this very track would be carved away again. It has to be left
+    //    STANDING by the relief instead - so the track is cut as two sectors with an uncut
+    //    sliver between them, at the bump's angle and only over the OUTER part of the lug's
+    //    path. That sliver is the female half's own material; the lug has to squeeze past it.
+    const double det = std::max(0., std::min(double(p.bayonet_detent), 0.8 * double(p.bayonet_lug_height)));
+    if (det <= EPSILON) {
+        const double span = arc + lock;
+        out.emplace_back(bayonet_sector(r0, r1, a_entry + sgn * 0.5 * lock, span, cz, th));
+    } else {
+        // The bump sits just short of the LOCKED end (a0), on the side the lug arrives from,
+        // and is a few degrees wide.
+        // A few degrees, and no more. The lug is `arc` degrees wide, so it is in contact with a
+        // bump of `b` degrees over arc + b degrees of travel: a wide bump is a brake, not a
+        // click. 6 degrees is about one perimeter's width of bump at the diameters this is
+        // used at, which is what makes it click rather than drag.
+        const double bump_arc = std::max(3., std::min(6., 0.12 * lock));
+        const double a_bump   = a0 - sgn * (0.5 * arc + 0.5 * bump_arc);
+        // The track, in full, from the entry angle to the locked one...
+        const double a_lo = a_entry - sgn * 0.5 * arc;      // the far edge of the entry channel
+        const double a_hi = a0      + sgn * 0.5 * arc;      // the far edge of the locked position
+        // ... cut as the run up to the bump, and the run past it.
+        const double b_lo = a_bump - sgn * 0.5 * bump_arc;
+        const double b_hi = a_bump + sgn * 0.5 * bump_arc;
+        auto sector_between = [&](double from, double to) {
+            const double span = std::abs(to - from);
+            if (span < 0.5)
+                return;
+            out.emplace_back(bayonet_sector(r0, r1, 0.5 * (from + to), span, cz, th));
+        };
+        sector_between(a_lo, b_lo);
+        sector_between(b_hi, a_hi);
+        // The bump only stands proud over the OUTER part of the path: inboard of it the track
+        // stays clear, so the lug's root is never pinched and only its tip has to click past.
+        sector_between_inner(out, r0, r1 - det, b_lo, b_hi, cz, th);
+    }
+    return out;
+}
+
+// NOTE ON THE DETENT. It is NOT a body. The cut pipeline unions each half's bodies in first and
+// subtracts its reliefs after, so a bump added as a body and then crossed by the very track
+// relief that runs past it would simply be carved away again - which is exactly what happened
+// the first time round, and the detent never bit at all. It is left STANDING by the track relief
+// instead: bayonet_slot() cuts the track as two sectors with an uncut sliver between them, and
+// that sliver is the female half's own material. See there.
+
 // ---------------------------------------------------------------------------------- defaults
 
 float flexi_default_hub_radius(const FlexiJointParams &p)
@@ -352,6 +822,12 @@ float flexi_default_gap(FlexiJointKind kind)
     // Hinge: the knuckle end faces are `gap` apart along the axis and the two segments' flat
     // faces are `gap` apart across it, and a pin hinge only has to turn, not swing through
     // itself - so it takes the same 0.6 mm the ring and the ball do, not the chain's 1.5.
+    // Thread / bayonet: the two faces are meant to MEET when the lid is done up, not to bridge
+    // a flexing gap - the fastener's clearance is radial, in the thread or the slot, and lives
+    // on its own. The gap here is only the saw kerf: 0.4 mm, two layers, enough that the faces
+    // do not fuse and small enough that a screwed-down lid looks shut.
+    if (flexi_kind_is_twist(kind))
+        return 0.4f;
     return kind == FlexiJointKind::ChainLink ? 1.5f : 0.6f;
 }
 
@@ -402,6 +878,31 @@ FlexiJointParams flexi_auto_size(FlexiJointParams p, double inscribed_radius)
             barrel = pin + 2. * double(p.clearance) + 2. * wall;
         p.hinge_barrel_dia = float(barrel);
         p.hinge_pin_dia    = float(pin);
+    } else if (flexi_kind_is_twist(p.kind) && inscribed_radius > 0.) {
+        // A twist lock is sized by its MAJOR DIAMETER, not by outer_radius: the research's
+        // default is 0.7 x the cut section's inscribed radius, which leaves the bore's own wall
+        // and a perimeter or two of part around it.
+        double major = 1.4 * inscribed_radius;
+        // The bore plus its wall has to stay inside the section.
+        const double room = 2. * (inscribed_radius - double(p.clearance) - thread_bore_wall() - 0.4);
+        major = std::min(major, std::max(3., room));
+        p.thread_major_dia = float(std::max(4., major));
+        if (p.kind == FlexiJointKind::Thread) {
+            // Pitch scales gently with the diameter but never below the printability floor: a
+            // fine pitch on a big cap is exactly the crest-too-thin failure the research warns
+            // about, and a coarse one on a small cap makes a helix that is all overhang.
+            // The pitch has to carry the START COUNT: an N-start thread puts N crests in every
+            // pitch, so the same crest spacing - and therefore the same thread depth and the
+            // same printable crest - needs N times the pitch. Sizing against the spacing rather
+            // than the pitch is what keeps a 2-start auto-sized thread as deep as a 1-start one.
+            const int    N       = thread_start_count(p);
+            const double spacing = std::max(2.0, std::min(0.25 * double(p.thread_major_dia), 6.0));
+            p.thread_pitch = float(spacing * double(N));
+        } else {
+            // The bayonet's lug scales with the diameter and stays printable.
+            p.bayonet_lug_height    = float(std::max(1.0, std::min(0.14 * double(p.thread_major_dia), 3.0)));
+            p.bayonet_lug_thickness = float(std::max(1.6, std::min(0.20 * double(p.thread_major_dia), 4.0)));
+        }
     } else if (p.kind == FlexiJointKind::ChainLink && inscribed_radius > 0.) {
         // The chain link is sized by its own outer extent, not by outer_radius: scale the
         // loops so the whole interlocked assembly fits inside the cross section with a
@@ -435,6 +936,11 @@ FlexiJointParams flexi_auto_size(FlexiJointParams p, double inscribed_radius)
 
 float flexi_protrusion_height(const FlexiJointParams &p)
 {
+    if (flexi_kind_is_twist(p.kind))
+        // How far the male fastener reaches out of its own half: the plug's whole length,
+        // which is what the gizmo scales its preview and its picking radius by.
+        return float((p.kind == FlexiJointKind::Thread ? thread_plug_length(p) : bayonet_plug_length(p)) +
+                     0.5 * double(flexi_effective_gap(p)));
     if (p.kind == FlexiJointKind::Hinge)
         // The barrel straddles the cut plane, so it reaches its own outer radius above it.
         return 0.5f * p.hinge_barrel_dia;
@@ -481,6 +987,12 @@ static double flexi_ball_centre_z(const FlexiJointParams &p)
 
 float flexi_outer_extent(const FlexiJointParams &p)
 {
+    if (flexi_kind_is_twist(p.kind))
+        // The widest thing a twist lock puts on the cut plane is the OUTER WALL of the female
+        // bore: the bore itself is major/2 + clearance, and it needs a wall of its own around
+        // it or the body half prints as a paper tube. That is the circle the footprint test
+        // has to fit inside the cut contour.
+        return float(thread_bore_radius(p) + thread_bore_wall());
     if (p.kind == FlexiJointKind::Hinge) {
         // The farthest corner of the knuckle run's rectangle from the joint origin. The gizmo
         // still uses this for the connector's picking radius and preview scale; the CONTOUR
@@ -502,6 +1014,12 @@ float flexi_outer_extent(const FlexiJointParams &p)
 
 float flexi_mouth_half_width(const FlexiJointParams &p)
 {
+    if (flexi_kind_is_twist(p.kind))
+        // A twist lock is NOT captive in the flexi sense - it is meant to come apart, that is
+        // the whole point of a lid. Report a mouth narrower than the lip so the generic captive
+        // test (which flexi_validate() only applies to the articulated kinds anyway) does not
+        // claim the opposite.
+        return float(thread_minor_radius(p));
     if (p.kind == FlexiJointKind::Hinge)
         // A pin hinge is captive because the bore wraps the pin all the way round: the "mouth"
         // is the bore and the "lip" is the barrel's outer wall, so the generic captive test
@@ -519,6 +1037,8 @@ float flexi_mouth_half_width(const FlexiJointParams &p)
 
 float flexi_lip_half_width(const FlexiJointParams &p)
 {
+    if (flexi_kind_is_twist(p.kind))
+        return float(thread_major_radius(p));
     if (p.kind == FlexiJointKind::Hinge)
         return 0.5f * p.hinge_barrel_dia;
     if (p.kind == FlexiJointKind::ChainLink)
@@ -734,8 +1254,86 @@ std::vector<Vec3d> flexi_chain_upper_centreline(const FlexiJointParams &p)
     return p.kind == FlexiJointKind::ChainLink ? chain_upper_path(p) : std::vector<Vec3d>{};
 }
 
+// The LID half's bodies for a twist lock: the plug, and the thread strands or the lugs on it.
+// Built lid-on-top and mirrored by twist_orient() when the lid is the lower half.
+static std::vector<indexed_triangle_set> twist_lid_bodies(const FlexiJointParams &p)
+{
+    const double top = 0.5 * double(flexi_effective_gap(p));
+    std::vector<indexed_triangle_set> out;
+    if (p.kind == FlexiJointKind::Thread) {
+        // The core cylinder: the minor radius, hanging down from ABOVE the lid face (so the
+        // union with the lid half has real overlap to work with, never a coplanar kiss) to the
+        // bottom of the threaded band.
+        const double len = thread_plug_length(p);
+        out.emplace_back(twist_cylinder(thread_minor_radius(p), top - len, top + 0.6));
+        for (indexed_triangle_set &s : thread_strands(p, 0., 0.))
+            out.emplace_back(std::move(s));
+    } else {
+        const double len = bayonet_plug_length(p);
+        out.emplace_back(twist_cylinder(bayonet_plug_radius(p), top - len, top + 0.6));
+        for (indexed_triangle_set &s : bayonet_lugs_bodies(p, 0.))
+            out.emplace_back(std::move(s));
+    }
+    return twist_orient(p, std::move(out));
+}
+
+// The BODY half's bodies: only the bayonet has any - the detent bumps that stand back into the
+// track after it was cut. The thread's body half is all relief, no added solid.
+static std::vector<indexed_triangle_set> twist_body_bodies(const FlexiJointParams &)
+{
+    // Neither kind puts a solid body on the BODY half. The thread's is all relief, and the
+    // bayonet's detent is left standing by its own track relief rather than added back as a
+    // body - see bayonet_slot() for why a body would not survive.
+    return {};
+}
+
+// What the BODY half has to be relieved by: the bore, and the groove or the slots in its wall.
+static std::vector<indexed_triangle_set> twist_body_reliefs(const FlexiJointParams &p)
+{
+    const double C   = double(p.clearance);
+    const double top = 0.5 * double(flexi_effective_gap(p));
+    std::vector<indexed_triangle_set> out;
+    if (p.kind == FlexiJointKind::Thread) {
+        // THE BORE. It is the MINOR radius plus the clearance, NOT the major one. A bore wide
+        // enough to swallow the male CREST swallows the groove with it - the groove spans from
+        // the minor radius out to the major one, so a major-radius bore contains it entirely
+        // and the female half comes out as a plain tube with no thread in it, which the lid
+        // lifts straight out of. Sunk from a hair above the body's own face (so the mouth is
+        // open, not skinned over) down past the end of the plug.
+        out.emplace_back(twist_cylinder(thread_minor_radius(p) + C, top - thread_bore_depth(p), top + 0.6));
+        // THE GROOVE: the SAME helix re-swept at the clearance-offset radius. Not a dilation of
+        // the male mesh - a thread's meridional section changes with height, so the revolved
+        // shortcut does not hold - but the same profile, pitch, starts, turns and phase, half a
+        // turn longer at each end so the lead-in has somewhere to run out into.
+        for (indexed_triangle_set &s : thread_strands(p, C, 0.5))
+            out.emplace_back(std::move(s));
+    } else {
+        // The bore takes the plug plus its clearance...
+        out.emplace_back(twist_cylinder(bayonet_plug_radius(p) + C, top - bayonet_plug_length(p) - C - 0.4,
+                                        top + 0.6));
+        // ... and each lug gets its L-shaped slot cut into the bore's wall.
+        const int N = bayonet_lug_count(p);
+        for (int i = 0; i < N; ++ i)
+            for (indexed_triangle_set &s : bayonet_slot(p, i))
+                out.emplace_back(std::move(s));
+    }
+    return twist_orient(p, std::move(out));
+}
+
+// What the LID half has to be relieved by: nothing for the thread (the male side is all solid),
+// and for the bayonet the detent bumps grown by the clearance, so the lug's own path past them
+// stays open in the lid's material rather than fusing.
+static std::vector<indexed_triangle_set> twist_lid_reliefs(const FlexiJointParams &)
+{
+    return {};
+}
+
 std::vector<indexed_triangle_set> flexi_male_bodies(const FlexiJointParams &p)
 {
+    if (flexi_kind_is_twist(p.kind))
+        // "Male" is the LOWER half by the family's convention, and for a twist lock the lower
+        // half is the lid only when the lid is not upper.
+        return twist_lid_is_upper(p) ? twist_body_bodies(p) : twist_lid_bodies(p);
     if (p.kind == FlexiJointKind::Hinge) {
         // The hinge's "male" body is whatever the LOWER segment owns: its own knuckles, plus
         // the ONE continuous pin when the fold side leaves the pin down here. They are
@@ -759,6 +1357,8 @@ std::vector<indexed_triangle_set> flexi_male_bodies(const FlexiJointParams &p)
 
 std::vector<indexed_triangle_set> flexi_female_cavities(const FlexiJointParams &p)
 {
+    if (flexi_kind_is_twist(p.kind))
+        return twist_lid_is_upper(p) ? twist_lid_bodies(p) : twist_body_bodies(p);
     if (p.kind == FlexiJointKind::Hinge) {
         // ... and its "female" body is what the UPPER segment owns: the other parity of
         // knuckle, plus the pin if the fold side put it up here. Like the chain link's, these
@@ -789,13 +1389,16 @@ std::vector<indexed_triangle_set> flexi_upper_bodies(const FlexiJointParams &p)
 {
     // Only the chain link puts a solid body on the upper segment; the revolved kinds put a
     // cavity there instead.
-    if (p.kind == FlexiJointKind::ChainLink || p.kind == FlexiJointKind::Hinge)
+    if (p.kind == FlexiJointKind::ChainLink || p.kind == FlexiJointKind::Hinge ||
+        flexi_kind_is_twist(p.kind))
         return flexi_female_cavities(p);
     return {};
 }
 
 std::vector<indexed_triangle_set> flexi_lower_reliefs(const FlexiJointParams &p)
 {
+    if (flexi_kind_is_twist(p.kind))
+        return twist_lid_is_upper(p) ? twist_body_reliefs(p) : twist_lid_reliefs(p);
     // The lower segment has to make room for the OTHER ring (the upper one) wherever its free
     // end dips near the lower body. A tube offset uniformly by C is simply a fatter tube, so the
     // relief is the same centreline swept with radius wire + C - which is why the measured
@@ -819,6 +1422,8 @@ std::vector<indexed_triangle_set> flexi_lower_reliefs(const FlexiJointParams &p)
 
 std::vector<indexed_triangle_set> flexi_upper_reliefs(const FlexiJointParams &p)
 {
+    if (flexi_kind_is_twist(p.kind))
+        return twist_lid_is_upper(p) ? twist_lid_reliefs(p) : twist_body_reliefs(p);
     if (p.kind == FlexiJointKind::Hinge) {
         // The upper segment clears everything the LOWER half owns: that half's knuckles
         // inflated by C, plus - when the pin lives down there - the pin inflated by C along
@@ -840,6 +1445,13 @@ std::vector<indexed_triangle_set> flexi_upper_reliefs(const FlexiJointParams &p)
 indexed_triangle_set flexi_preview_body(const FlexiJointParams &p)
 {
     indexed_triangle_set out;
+    if (flexi_kind_is_twist(p.kind)) {
+        // Show the male fastener - the threaded plug, or the lugged one - because that is the
+        // envelope the user is placing against the cut face.
+        for (const indexed_triangle_set &its : twist_lid_bodies(p))
+            its_merge(out, its);
+        return out;
+    }
     if (p.kind == FlexiJointKind::Hinge) {
         // Show the whole barrel run - every knuckle of both halves, plus the pin - because
         // that is the envelope the user is positioning against the cut face's edge.
@@ -893,6 +1505,9 @@ std::vector<Vec2d> chain_footprint_corners(const FlexiJointParams &p, double pad
 
 std::vector<Vec2d> flexi_footprint_corners(const FlexiJointParams &p, double pad)
 {
+    // A twist lock IS round - and the circle that has to fit is not the male thread's but the
+    // OUTER WALL of the female bore, which flexi_outer_extent() already reports, so it falls
+    // through to the disc case below with the right radius.
     if (p.kind == FlexiJointKind::Hinge)
         return hinge_footprint_corners(p, pad);
     if (p.kind == FlexiJointKind::ChainLink)
@@ -913,12 +1528,88 @@ std::vector<Vec2d> flexi_footprint_corners(const FlexiJointParams &p, double pad
 
 std::string flexi_validate(const FlexiJointParams &p)
 {
-    if (p.kind != FlexiJointKind::ChainLink && p.kind != FlexiJointKind::Hinge && p.outer_radius <= 0.5f)
+    if (p.kind != FlexiJointKind::ChainLink && p.kind != FlexiJointKind::Hinge &&
+        !flexi_kind_is_twist(p.kind) && p.outer_radius <= 0.5f)
         return "Joint radius is too small.";
     if (p.clearance <= 0.f)
         return "Clearance must be greater than zero, otherwise the joint prints as one solid.";
     if (p.gap > 0.f && p.gap < p.clearance)
         return "Gap cannot be smaller than the clearance.";
+    if (flexi_kind_is_twist(p.kind)) {
+        if (p.thread_major_dia < 4.f)
+            return "Major diameter is too small: a twist lock under 4 mm across has no wall "
+                   "left once the clearance is taken out.";
+        if (p.rotation < 0.f || p.rotation > 360.f)
+            return "Rotation must be between 0 and 360 degrees.";
+        if (p.kind == FlexiJointKind::Thread) {
+            if (p.thread_starts < 1 || p.thread_starts > 4)
+                return "A thread needs between 1 and 4 starts.";
+            if (p.thread_turns <= 0.f)
+                return "Turns must be greater than zero.";
+            // THE PRINTABILITY FLOOR. Below about 2 mm of pitch the crest is thinner than two
+            // perimeters on a 0.4 mm nozzle and prints weak or not at all.
+            if (p.thread_pitch < 1.f)
+                return "Pitch is too fine to print: keep it at 1 mm or more (2 mm or more is "
+                       "the recommended floor on a 0.4 mm nozzle).";
+            // THE CREST-SPACING GUARD. One crest sits pitch / starts above the next, and the
+            // groove cut for the thread is the profile grown by the clearance at each end. If
+            // the two together do not fit in that spacing, the groove's coils merge into a
+            // plain annular cavity, the thread holds nothing and the lid pulls straight out -
+            // so refuse it here rather than shipping a lid that falls off. thread_depth() caps
+            // itself to keep this true; what is refused is the case where even the smallest
+            // buildable depth will not fit.
+            const double S     = thread_crest_spacing(p);
+            const double grow  = thread_groove_growth(p);
+            const double flats = 0.25 * S;
+            if (flats + grow >= 0.9 * S)
+                return "This pitch, start count and clearance leave no wall between one thread "
+                       "and the next: the groove's turns would run into each other and the lid "
+                       "would pull straight out. Raise the pitch, reduce the starts, or reduce "
+                       "the clearance.";
+            // The male core has to be left with real wall under the thread root.
+            if (thread_minor_radius(p) < 1.2)
+                return "Major diameter is too small for this pitch: the thread eats the whole "
+                       "core. Raise the diameter, or lower the pitch.";
+            if (p.thread_lead_turns < 0.f || double(p.thread_lead_turns) > 0.5 * double(p.thread_turns))
+                return "The lead-in cannot be longer than half the thread: it is tapered at "
+                       "both ends.";
+            return std::string();
+        }
+        // Bayonet.
+        if (p.bayonet_lugs < 2 || p.bayonet_lugs > 4)
+            return "A bayonet needs between 2 and 4 lugs.";
+        if (p.bayonet_lug_height <= 2.f * p.clearance)
+            return "Lug height is too small for this clearance: the lug would vanish into its "
+                   "own slot.";
+        if (p.bayonet_lug_thickness <= 2.f * p.clearance)
+            return "Lug thickness is too small for this clearance.";
+        if (bayonet_plug_radius(p) <= 1.0)
+            return "The lugs are taller than the plug is wide: reduce the lug height, or raise "
+                   "the major diameter.";
+        // Entry channel, lug and track all live on the same 360/N slice of the bore wall, and
+        // they have to leave wall between them or the female half is a slotted ring.
+        {
+            // The REQUESTED lock angle, not the one bayonet_effective_lock_angle() has already
+            // clamped down to fit: if the clamp is doing work, the user is not getting the lock
+            // they asked for, and that is exactly what this refuses rather than silently
+            // delivering something else.
+            const double span = 360. / double(bayonet_lug_count(p));
+            const double want = std::max(30., std::min(120., double(p.bayonet_lock_angle)));
+            if (double(p.bayonet_lug_arc) + want + 8. > span)
+                return "These lugs are too wide, or the lock angle is too large, for this lug "
+                       "count: each lug's slot and track have to fit in its own share of the "
+                       "bore with wall to spare.";
+        }
+        if (p.bayonet_entry_depth < p.bayonet_lug_thickness)
+            return "The entry channel has to be at least as deep as the lug is thick, or the "
+                   "lug cannot drop in far enough to turn.";
+        if (p.bayonet_detent < 0.f)
+            return "The detent height cannot be negative.";
+        if (double(p.bayonet_detent) >= double(p.bayonet_lug_height))
+            return "The detent is as tall as the lug: it would block the track instead of "
+                   "clicking.";
+        return std::string();
+    }
     if (p.kind == FlexiJointKind::Hinge) {
         if (p.hinge_knuckles < 1 || p.hinge_knuckles > 9)
             return "A hinge needs between 1 and 9 knuckles.";

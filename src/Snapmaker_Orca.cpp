@@ -70,6 +70,8 @@ using namespace nlohmann;
 #include "libslic3r/Thread.hpp"
 #include "libslic3r/BlacklistedLibraryCheck.hpp"
 #include "libslic3r/FlushVolCalc.hpp"
+#include "libslic3r/MixedFilament.hpp"
+#include "libslic3r/MixedFilamentCliGates.hpp"
 
 #include "libslic3r/Orient.hpp"
 #include "libslic3r/PNGReadWrite.hpp"
@@ -84,10 +86,14 @@ using namespace nlohmann;
 #include "slic3r/GUI/BitmapCache.hpp"
 #include "slic3r/GUI/OpenGLManager.hpp"
 #include "libslic3r/PresetBundle.hpp"
+#include <algorithm>
 #include <array>
+#include <cmath>
+#include <cstdlib>
 #include <memory>
 #include <mutex>
 #include <set>
+#include <sstream>
 #include "slic3r/GUI/GLCanvas3D.hpp"
 #include "slic3r/GUI/Camera.hpp"
 #include "slic3r/GUI/Plater.hpp"
@@ -154,9 +160,15 @@ std::map<int, std::string> cli_errors = {
     {CLI_OBJECT_COLLISION_IN_SEQ_PRINT, "Object conflicts were detected when using print-by-object mode. Please verify the slicing of all plates in EdgeSlicer before uploading."},
     {CLI_OBJECT_COLLISION_IN_LAYER_PRINT, "Object conflicts were detected. Please verify the slicing of all plates in EdgeSlicer before uploading."},
     {CLI_SPIRAL_MODE_INVALID_PARAMS, "Some slicing parameters cannot work with Spiral Vase mode. Please solve the issue in EdgeSlicer before uploading."},
+    {CLI_MIXED_FILAMENT_INVALID, "A mixed filament is invalid: its components are different filament types, or it has no filament of its own."},
     {CLI_SLICING_ERROR, "Failed slicing the model. Please verify the slicing of all plates on EdgeSlicer before uploading."},
     {CLI_GCODE_PATH_CONFLICTS, " G-code conflicts detected after slicing. Please make sure the 3mf file can be successfully sliced in the latest EdgeSlicer."}
 };
+
+// CLI mixed-filament wipe/flush/type gate decision logic now lives in
+// libslic3r/MixedFilamentCliGates.hpp/.cpp (pure, GUI-free, unit-tested in
+// tests/libslic3r/test_mixed_filament_cli_gates.cpp) so it can be exercised outside
+// this file, which is the application's main and is not itself unit-testable.
 
 typedef struct  _sliced_plate_info{
     int plate_id{0};
@@ -1820,9 +1832,13 @@ int CLI::run(int argc, char **argv)
                         BOOST_LOG_TRIVIAL(info) << "object "<<o->name <<", id :" << o->id().id << ", from bbl 3mf\n";
                     }*/
 
-                    Semver cli_ver = *Semver::parse(SLIC3R_VERSION);
-                    if (!allow_newer_file && ((cli_ver.maj() != file_version.maj()) || (cli_ver.min() < file_version.min()))){
-                        BOOST_LOG_TRIVIAL(error) << boost::format("Version Check: File Version %1% not supported by current cli version %2%")%file_version.to_string() %SLIC3R_VERSION;
+                    // Snapmaker #839: match upstream OrcaSlicer. SLIC3R_VERSION is a legacy
+                    // BambuStudio constant (01.10.01.50) that does not track Snapmaker_VERSION,
+                    // so every 2.x project file was rejected; the old comparison also rejected
+                    // older files rather than only genuinely newer ones.
+                    Semver cli_ver = *Semver::parse(Snapmaker_VERSION);
+                    if (!allow_newer_file && ((cli_ver.maj() < file_version.maj()) || ((cli_ver.maj() == file_version.maj()) && (cli_ver.min() < file_version.min())))){
+                        BOOST_LOG_TRIVIAL(error) << boost::format("Version Check: File Version %1% not supported by current cli version %2%")%file_version.to_string() %Snapmaker_VERSION;
                         record_exit_reson(outfile_dir, CLI_FILE_VERSION_NOT_SUPPORTED, 0, cli_errors[CLI_FILE_VERSION_NOT_SUPPORTED], sliced_info);
                         flush_and_exit(CLI_FILE_VERSION_NOT_SUPPORTED);
                     }
@@ -3238,6 +3254,16 @@ int CLI::run(int argc, char **argv)
                 BOOST_LOG_TRIVIAL(info) << boost::format("filament_is_support: %1%") % filament_is_support->serialize();
                 BOOST_LOG_TRIVIAL(info) << boost::format("flush_volumes_matrix before computing: %1%") % m_print_config.option<ConfigOptionFloats>("flush_volumes_matrix")->serialize();
             }
+            // A mixed slot never reaches a nozzle, so its row and column stay empty, as in the GUI.
+            // Extra config is not merged into m_print_config yet, so mixed_filament_definitions
+            // on the command line wins here.
+            MixedFilamentManager flush_mixed_mgr;
+            const size_t flush_num_physical = filament_count > 0 ? size_t(filament_count) : project_filament_colors.size();
+            populate_cli_mixed_filament_manager(flush_mixed_mgr, m_print_config, &m_extra_config, project_filament_colors,
+                                                flush_num_physical);
+            auto is_mixed_slot = [&](int idx) {
+                return flush_mixed_mgr.is_mixed(static_cast<unsigned int>(idx + 1), flush_num_physical);
+            };
             for (int from_idx = 0; from_idx < project_filament_count; from_idx++) {
                 const std::string& from_color = project_filament_colors[from_idx];
                 unsigned char from_rgb[4] = {};
@@ -3245,7 +3271,7 @@ int CLI::run(int argc, char **argv)
                 bool is_from_support = filament_is_support->get_at(from_idx);
                 for (int to_idx = 0; to_idx < project_filament_count; to_idx++) {
                     bool is_to_support = filament_is_support->get_at(to_idx);
-                    if (from_idx == to_idx) {
+                    if (from_idx == to_idx || is_mixed_slot(from_idx) || is_mixed_slot(to_idx)) {
                         flush_vol_matrix[project_filament_count*from_idx + to_idx] = 0.f;
                     }
                     else {
@@ -3406,6 +3432,34 @@ int CLI::run(int argc, char **argv)
         m_print_config.apply(sla_print_config, true);*/
     }
 
+    // After 3mf load/normalize: rebuild MixedFilamentManager from the merged project
+    // definitions and physical colours before wipe/flush/type gates.
+    MixedFilamentManager cli_mixed_filament_mgr;
+    size_t               cli_mixed_num_physical = 0;
+    {
+        std::vector<std::string> physical_colors;
+        if (const auto *opt = m_print_config.option<ConfigOptionStrings>("filament_colour"))
+            physical_colors = opt->values;
+        cli_mixed_num_physical = filament_count > 0 ? size_t(filament_count) : physical_colors.size();
+        populate_cli_mixed_filament_manager(cli_mixed_filament_mgr, m_print_config, nullptr, physical_colors,
+                                            cli_mixed_num_physical);
+
+        if (ConfigOptionFloats *flush_opt = m_print_config.option<ConfigOptionFloats>("flush_volumes_matrix")) {
+            const size_t n = size_t(std::sqrt(double(flush_opt->values.size())) + 0.001);
+            zero_mixed_flush_rows_and_cols(flush_opt->values, n, cli_mixed_filament_mgr, cli_mixed_num_physical);
+        }
+
+        const std::string mixed_defs = cli_mixed_filament_definitions(m_print_config, nullptr);
+        const CliMixedFilamentVerdict slots_verdict = cli_check_mixed_filament_slots_have_filament(
+            cli_mixed_filament_mgr, mixed_defs, cli_mixed_num_physical, m_models, m_print_config, filament_count);
+        if (!slots_verdict.ok) {
+            BOOST_LOG_TRIVIAL(error) << slots_verdict.message;
+            record_exit_reson(outfile_dir, CLI_MIXED_FILAMENT_INVALID, 0, cli_errors[CLI_MIXED_FILAMENT_INVALID],
+                              sliced_info);
+            flush_and_exit(CLI_MIXED_FILAMENT_INVALID);
+        }
+    }
+
     std::map<std::string, std::string> validity = m_print_config.validate(true);
     if (!validity.empty()) {
         boost::nowide::cerr << "Param values in 3mf/config error: "<< std::endl;
@@ -3419,6 +3473,14 @@ int CLI::run(int argc, char **argv)
     bool is_smooth_timelapse = false;
     if (enable_timelapse && timelapse_type_opt && (timelapse_type_opt->getInt() == TimelapseType::tlSmooth))
         is_smooth_timelapse = true;
+    // A mixed filament swaps between its components every layer, so it needs the tower even when
+    // every loaded preset is the same.
+    if (disable_wipe_tower_after_mapping) {
+        if (cli_mixed_filament_mgr.enabled_count() > 0) {
+            disable_wipe_tower_after_mapping = false;
+            BOOST_LOG_TRIVIAL(info) << boost::format("%1%, set disable_wipe_tower_after_mapping back to false due to a mixed filament")%__LINE__;
+        }
+    }
     if (disable_wipe_tower_after_mapping) {
         if (is_smooth_timelapse)
         {
@@ -3567,7 +3629,7 @@ int CLI::run(int argc, char **argv)
             return;
         }
 
-        std::vector<int> extruders = plate->get_extruders_under_cli(true, print_config);
+        std::vector<int> extruders = plate->get_extruders_under_cli(true, print_config, false);
         unsigned int filaments_cnt = extruders.size();
         std::ostringstream extruder_list;
         for (size_t i = 0; i < extruders.size(); ++i) {
@@ -3642,12 +3704,17 @@ int CLI::run(int argc, char **argv)
                                  << " brim_chamfer=" << brim_chamfer
                                  << " brim_chamfer_max_width=" << brim_chamfer_max_width;
 
-        Vec3d wipe_tower_size = plate->estimate_wipe_tower_size(print_config, plate_obj_size_info.wipe_width, wipe_volume, filaments_cnt);
-        plate_obj_size_info.wipe_depth = wipe_tower_size(1);
+        // Body and brim from one estimate: resolving an auto (-1) brim against a different
+        // height would size the two halves of the same tower from two different objects.
+        const WipeTowerFootprint footprint = plate->estimate_wipe_tower_footprint(print_config, filaments_cnt);
+        brim_width = float(footprint.brim_width);
+        plate_obj_size_info.wipe_width = footprint.width;
+        plate_obj_size_info.wipe_depth = footprint.depth;
         BOOST_LOG_TRIVIAL(debug) << "check_plate_wipe_tower estimate result"
                                  << " plate=" << (plate_index + 1)
                                  << " wipe_depth=" << plate_obj_size_info.wipe_depth
-                                 << " wipe_height=" << wipe_tower_size(2);
+                                 << " wipe_height=" << footprint.height
+                                 << " resolved_brim_width=" << brim_width;
 
         Vec3d origin = plate->get_origin();
         Vec3d start(origin(0) + plate_obj_size_info.wipe_x - brim_width, origin(1) + plate_obj_size_info.wipe_y, 0.f);
@@ -4350,7 +4417,10 @@ int CLI::run(int argc, char **argv)
                     int plate_count = partplate_list.get_plate_count();
 
                     auto printer_structure_opt = m_print_config.option<ConfigOptionEnum<PrinterStructure>>("printer_structure");
-                    const float tower_brim_width = m_print_config.option<ConfigOptionFloat>("prime_tower_width", true)->value;
+                    // This margin only pre-adjusts the default away from the near edges;
+                    // estimate_wipe_tower_polygon below computes the real clamped position.
+                    float tower_brim_width = m_print_config.option<ConfigOptionFloat>("prime_tower_brim_width", true)->value;
+                    if (tower_brim_width < 0.f) tower_brim_width = 8.f; // auto: object heights unknown here, 8 mm is the auto cap
                     const float tower_margin = WIPE_TOWER_MARGIN + tower_brim_width;
 
                     // set the default position, the same with print config(left top)
@@ -4607,7 +4677,10 @@ int CLI::run(int argc, char **argv)
                         int extruder_size = used_filament_set.size();
 
                         auto printer_structure_opt = m_print_config.option<ConfigOptionEnum<PrinterStructure>>("printer_structure");
-                        const float tower_brim_width      = m_print_config.option<ConfigOptionFloat>("prime_tower_width", true)->value;
+                        // This margin only pre-adjusts the default away from the near edges;
+                        // estimate_wipe_tower_polygon below computes the real clamped position.
+                        float tower_brim_width = m_print_config.option<ConfigOptionFloat>("prime_tower_brim_width", true)->value;
+                        if (tower_brim_width < 0.f) tower_brim_width = 8.f; // auto: object heights unknown here, 8 mm is the auto cap
                         const float tower_margin          = WIPE_TOWER_MARGIN + tower_brim_width;
                         // set the default position, the same with print config(left top)
                         float x = WIPE_TOWER_DEFAULT_X_POS;
@@ -4718,7 +4791,7 @@ int CLI::run(int argc, char **argv)
                         if ((filaments_cnt == 0) || need_skip)
                         {
                             // slice filaments info invalid
-                            std::vector<int> extruders = cur_plate->get_extruders_under_cli(true, m_print_config);
+                            std::vector<int> extruders = cur_plate->get_extruders_under_cli(true, m_print_config, false);
                             filaments_cnt = extruders.size();
                             BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format("arrange: slice filaments info invalid or need_skip, get from partplate: filament_count %1%")%filaments_cnt;
                         }
@@ -4736,17 +4809,14 @@ int CLI::run(int argc, char **argv)
 
                             //float depth = v * (filaments_cnt - 1) / (layer_height * w);
 
-                            Vec3d wipe_tower_size = cur_plate->estimate_wipe_tower_size(m_print_config, w, v, filaments_cnt);
+                            const WipeTowerFootprint footprint = cur_plate->estimate_wipe_tower_footprint(m_print_config, filaments_cnt);
+                            Vec3d wipe_tower_size(footprint.width, footprint.depth, footprint.height);
                             Vec3d plate_origin = cur_plate->get_origin();
                             int plate_width, plate_depth, plate_height;
                             partplate_list.get_plate_size(plate_width, plate_depth, plate_height);
                             float depth = wipe_tower_size(1);
-                            float margin = 15.f, wp_brim_width = 0.f;
-                            ConfigOption *wipe_tower_brim_width_opt = m_print_config.option("prime_tower_brim_width");
-                            if (wipe_tower_brim_width_opt ) {
-                                wp_brim_width = wipe_tower_brim_width_opt->getFloat();
-                                BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format("arrange wipe_tower: wp_brim_width %1%")%wp_brim_width;
-                            }
+                            float margin = 15.f, wp_brim_width = float(footprint.brim_width);
+                            BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format("arrange wipe_tower: wp_brim_width %1%")%wp_brim_width;
 
                             BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format("arrange wipe_tower: x=%1%, y=%2%, width=%3%, depth=%4%, angle=%5%, prime_volume=%6%, filaments_cnt=%7%, layer_height=%8%, plate_width=%9%, plate_depth=%10%")
                                                             %x %y %w %depth %a %v %filaments_cnt %layer_height %plate_width %plate_depth;
@@ -5259,6 +5329,34 @@ int CLI::run(int argc, char **argv)
                 //Print       fff_print;
                 std::vector<size_t> plate_triangle_counts(partplate_list.get_plate_count(), 0);
 
+                // The stored (or default) tower position may not fit the tower these plates
+                // need, and no CLI placement site runs on a plain slice - mirror the GUI's
+                // reload clamp and fit every plate's tower into the printable area first.
+                if (m_print_config.option<ConfigOptionBool>("enable_prime_tower", true)->value) {
+                    for (int index = 0; index < partplate_list.get_plate_count(); index++) {
+                        if ((plate_to_slice != 0) && (plate_to_slice != (index + 1)))
+                            continue;
+                        Slic3r::GUI::PartPlate *plate = partplate_list.get_plate(index);
+                        // Printing by object disables the tower only with more than one instance.
+                        bool is_seq_print = false;
+                        get_print_sequence(plate, m_print_config, is_seq_print);
+                        if (is_seq_print && plate->printable_instance_size() > 1)
+                            continue;
+                        // An empty estimate is a plate that prints no tower (one filament and
+                        // neither smooth timelapse, wrapping detection nor a raft).
+                        Vec3d wt_pos, wt_size;
+                        plate->estimate_wipe_tower_polygon(m_print_config, index, wt_pos, wt_size);
+                        if (wt_size(0) < EPSILON || wt_size(1) < EPSILON)
+                            continue;
+                        ConfigOptionFloat wt_x_opt((float) wt_pos(0));
+                        ConfigOptionFloat wt_y_opt((float) wt_pos(1));
+                        m_print_config.option<ConfigOptionFloats>("wipe_tower_x", true)->set_at(&wt_x_opt, index, 0);
+                        m_print_config.option<ConfigOptionFloats>("wipe_tower_y", true)->set_at(&wt_y_opt, index, 0);
+                        BOOST_LOG_TRIVIAL(info) << boost::format("plate %1%: wipe tower clamped to {%2%, %3%}, size {%4%, %5%}")
+                            % (index + 1) % wt_pos(0) % wt_pos(1) % wt_size(0) % wt_size(1);
+                    }
+                }
+
                 while(!finished)
                 {
                     //BBS: slice every partplate one by one
@@ -5421,6 +5519,23 @@ int CLI::run(int argc, char **argv)
                                 flush_and_exit(CLI_FILAMENTS_DIFFERENT_TEMP);
                             }
                         }
+
+                        // Same type gate as the GUI's Plater::has_incompatible_mixed_filament_in_use:
+                        // refuse a plate that uses a mixed slot whose components are different
+                        // filament types. CLI get_extruders_under_cli already returns mixed slots
+                        // (it does not expand them), matching the GUI scan of used virtual IDs.
+                        {
+                            const std::vector<int> plate_slots = part_plate->get_extruders_under_cli(true, new_print_config, false);
+                            const CliMixedFilamentVerdict type_verdict = cli_check_mixed_filament_type_compatibility(
+                                cli_mixed_filament_mgr, plate_slots, cli_mixed_num_physical, new_print_config, index + 1);
+                            if (!type_verdict.ok) {
+                                BOOST_LOG_TRIVIAL(error) << type_verdict.message;
+                                record_exit_reson(outfile_dir, CLI_MIXED_FILAMENT_INVALID, index + 1,
+                                                  cli_errors[CLI_MIXED_FILAMENT_INVALID], sliced_info);
+                                flush_and_exit(CLI_MIXED_FILAMENT_INVALID);
+                            }
+                        }
+
                         // Ultra: the BBL-vendor flag has to be set BEFORE Print::validate(), because validate()
                         // branches on it (Print.cpp:2040 the Orca "G92 E0 vs. absolute E" rule, Print.cpp:2063 the
                         // bed-temperature rule). The GUI does exactly this: BackgroundSlicingProcess::validate()

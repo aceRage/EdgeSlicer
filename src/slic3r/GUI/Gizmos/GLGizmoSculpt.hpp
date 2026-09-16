@@ -2,6 +2,7 @@
 #define slic3r_GLGizmoSculpt_hpp_
 
 #include "GLGizmoBase.hpp"
+#include "slic3r/GUI/ImGuiWrapper.hpp"
 
 #include "libslic3r/MeshSculpt.hpp"
 #include "libslic3r/ObjectID.hpp"
@@ -59,8 +60,18 @@ protected:
     void on_set_state() override;
     CommonGizmosDataID on_get_requirements() const override;
 
+public:
+    // v3 appends: the numbering is the dropdown's order AND the 1..N keyboard
+    // shortcut order, so nothing here may be renumbered without moving both.
+    // Public only so the file-static table of dropdown rows in the .cpp can be
+    // sized by BrushCount; nothing outside the gizmo has any business with it.
+    enum class Brush : int {
+        Grab = 0, Inflate = 1, Deflate = 2, Smooth = 3, Flatten = 4, Crease = 5,
+        Pinch = 6, Nudge = 7, SnakeHook = 8, ClayStrips = 9, Mask = 10
+    };
+    static constexpr int BrushCount = 11;
+
 private:
-    enum class Brush : int { Grab = 0, Inflate = 1, Deflate = 2, Smooth = 3, Flatten = 4, Crease = 5 };
 
     // --- session / selection ---
     void attach_to_selection();
@@ -70,6 +81,13 @@ private:
     double      mesh_scale() const;
 
     // --- stroke ---
+    // The brushes whose move IS the mouse delta (Grab, Nudge, Snake Hook): they
+    // do nothing on the click itself, they need a drag, and their cursor rides
+    // the dragged patch instead of a fresh raycast onto the stale AABB tree.
+    static bool brush_is_drag_driven(Brush brush)
+    {
+        return brush == Brush::Grab || brush == Brush::Nudge || brush == Brush::SnakeHook;
+    }
     bool raycast(const Vec2d &mouse_position, Vec3f &hit) const;
     bool start_stroke(const Vec2d &mouse_position, bool shift_down, bool ctrl_down);
     void continue_stroke(const Vec2d &mouse_position, bool shift_down, bool ctrl_down);
@@ -88,6 +106,23 @@ private:
     // Push the touched triangles into the volume's vertex buffer, or - if that
     // buffer cannot be patched - rebuild the model at a throttled rate.
     void refresh_render_volumes(const std::vector<uint32_t> &dirty_triangles, bool force);
+
+    // --- brush dropdown ---
+    // The 22 sculpt_brush_*.svg icons (a light and a dark variant each), loaded
+    // once on the first panel frame, when a GL context is guaranteed. A brush
+    // whose texture failed to load falls back to text alone rather than drawing
+    // nothing, so a missing file degrades the panel instead of breaking it.
+    void        ensure_brush_icons();
+    ImTextureID brush_icon(Brush brush) const;
+    const wxString &brush_label(Brush brush) const;
+    void        draw_brush_combo(float wrap_width);
+
+    // --- mask (phase 3b) ---
+    // Re-run the auto detections against the current mesh and push the toggles
+    // into the session. Cheap and idempotent: called on attach and after every
+    // commit or subdivide, so the mask is never stale.
+    void refresh_masks();
+    void render_mask_overlay() const;
 
     // --- modal brush adjust (F / Shift+F) ---
     void begin_adjust(Sculpt::AdjustTarget target);
@@ -139,9 +174,44 @@ private:
     // The plane a Flatten/Crease stroke works against, pinned at stroke start so
     // the brush levels one plane instead of chasing the surface it is levelling.
     Vec3f m_stroke_plane_normal{Vec3f::Zero()};
+    // Clay Strips needs the plane's OFFSET pinned too, not only its direction:
+    // refitting it every tick would measure the target standoff from the
+    // material the previous tick just laid down, and a held stroke would climb
+    // without limit instead of stopping at the plateau that is the brush's whole
+    // point. Flatten and Crease deliberately do refit their offset every tick.
+    Vec3f m_stroke_plane_origin{Vec3f::Zero()};
     // Ctrl state as of the last tick, so the cursor circle can show the inverted
     // colour on hover and not only mid-stroke.
     bool  m_ctrl_inverted{false};
+    // The F/Shift+F modal ends on the left DOWN, so by the time the matching
+    // LeftUp arrives m_adjust is no longer active and the event falls straight
+    // through the gizmo to GLCanvas3D, whose LeftUp handler deselects the object
+    // when the click landed off it - which is exactly where a brush-sizing drag
+    // usually ends. This latches "the up half of the click that ended the modal
+    // is still owed to me" so it can be swallowed too. Same for the right click
+    // that cancels, and for the Esc path (which arms neither, having no up).
+    bool  m_swallow_left_up{false};
+    bool  m_swallow_right_up{false};
+
+    // v3 icons: brush -> texture id, light and dark. Empty until the first panel
+    // frame loads them; a brush missing from the map draws as text.
+    std::map<int, ImTextureID> m_brush_icons;
+    std::map<int, ImTextureID> m_brush_icons_dark;
+    bool                       m_brush_icons_tried{false};
+
+    // v3 mask toggles, session-only (the spec's phase-3b recommendation): the
+    // auto detections are pure functions of the current mesh and are recomputed
+    // on attach, and a hand-painted mask is deliberately not persisted - that
+    // would need a new FacetsAnnotation-style store and a 3MF schema change.
+    bool  m_protect_bed{true};
+    bool  m_protect_sharp{false};
+    float m_sharp_dihedral{60.f};
+    // Mask brush strength is its own knob: painting protection is not a sculpt
+    // stroke and does not want the sculpt strength.
+    float m_mask_strength{0.5f};
+    // Clay Strips' plane offset, as a fraction of the brush radius, so it feels
+    // the same at any brush size the way Inflate's amount does.
+    float m_clay_offset_ratio{0.12f};
 
     // Stroke state.
     bool  m_stroke_active{false};

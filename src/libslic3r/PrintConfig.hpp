@@ -213,6 +213,31 @@ enum GapFillTarget {
      gftEverywhere, gftTopBottom, gftNowhere
  };
 
+// Edge: layer-time speed smoothing (process / Speed tab).
+// Mode A/B speed up long layers; optional Mode C slows short layers down.
+// Plan: 09-concept-layer-time-speed-smoothing.md. BambuStudio#12224 is slowdown-only inspiration.
+enum LayerTimeSpeedSmoothMode {
+    ltssmOff                   = 0,
+    ltssmSpeedUpExcludeOuter   = 1,
+    ltssmSpeedUpAll            = 2,
+    ltssmSlowDown              = 3
+};
+
+inline bool is_layer_time_speed_up(LayerTimeSpeedSmoothMode mode)
+{
+    return mode == ltssmSpeedUpExcludeOuter || mode == ltssmSpeedUpAll;
+}
+
+inline bool is_layer_time_slowdown(LayerTimeSpeedSmoothMode mode)
+{
+    return mode == ltssmSlowDown;
+}
+
+// Apply-side for Mode C (solver is time-only). Default excludes outer walls.
+enum LayerTimeSlowdownScope {
+    ltssAll                 = 0,
+    ltssExcludeOuterWalls   = 1
+};
 
 enum LiftType {
     NormalLift,
@@ -525,6 +550,8 @@ CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(SupportMaterialInterfacePattern)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(SupportType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(SeamPosition)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(SeamScarfType)
+CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(LayerTimeSpeedSmoothMode)
+CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(LayerTimeSlowdownScope)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(SLADisplayOrientation)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(SLAPillarConnectionMode)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(BrimType)
@@ -1167,6 +1194,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloat,                fuzzy_skin_scale))
     ((ConfigOptionInt,                  fuzzy_skin_octaves))
     ((ConfigOptionFloat,                fuzzy_skin_persistence))
+    ((ConfigOptionBool,                 fuzzy_skin_skip_overhangs))
     ((ConfigOptionFloat,                gap_infill_speed))
     ((ConfigOptionInt,                  sparse_infill_filament))
     ((ConfigOptionFloatOrPercent,       sparse_infill_line_width))
@@ -1175,6 +1203,14 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloat,                sparse_infill_speed))
     ((ConfigOptionPercent, skeleton_infill_density))
     ((ConfigOptionPercent, skin_infill_density))
+    // Locked Zag: the fill pattern each band is drawn with. ipCount ("same as the sparse infill
+    // pattern") is the default and reproduces the pre-feature behaviour exactly, so an existing
+    // Locked Zag profile slices byte-identically until the user picks something else.
+    ((ConfigOptionEnum<InfillPattern>, locked_skin_infill_pattern))
+    ((ConfigOptionEnum<InfillPattern>, locked_skeleton_infill_pattern))
+    // Locked Zag skin follows the model's own top/bottom surfaces instead of a uniform
+    // depth-offset band. Ported from BambuStudio (Fill.cpp Layer::set_outlook_range).
+    ((ConfigOptionBool, infill_instead_top_bottom_surfaces))
     ((ConfigOptionFloat, infill_lock_depth))
     ((ConfigOptionFloat, skin_infill_depth))
     ((ConfigOptionFloatOrPercent, skin_infill_line_width))
@@ -1376,6 +1412,14 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloat,               max_volumetric_extrusion_rate_slope))
     ((ConfigOptionFloat,               max_volumetric_extrusion_rate_slope_segment_length))
     ((ConfigOptionBool,               extrusion_rate_smoothing_external_perimeter_only))
+
+    // Edge: layer-time speed smoothing. Process options; G-code export only (Print::steps_gcode).
+    ((ConfigOptionEnum<LayerTimeSpeedSmoothMode>, layer_time_speed_smoothing))
+    ((ConfigOptionPercent,             layer_time_speed_max_variation))
+    ((ConfigOptionPercent,             layer_time_speed_max_speedup))
+    ((ConfigOptionPercent,             layer_time_speed_max_slowdown))
+    ((ConfigOptionPercent,             layer_time_speed_max_time_increase))
+    ((ConfigOptionEnum<LayerTimeSlowdownScope>, layer_time_speed_slowdown_scope))
 
     
     ((ConfigOptionPercents,            retract_before_wipe))
@@ -1592,6 +1636,8 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionFloat,              mixed_filament_surface_indentation))
     ((ConfigOptionBool,               mixed_filament_region_collapse))
     ((ConfigOptionString,             mixed_filament_definitions))
+    ((ConfigOptionInt,                mixed_filament_auto_gradient_choice))
+    ((ConfigOptionInt,                mixed_filament_auto_gradient_physical_count))
     ((ConfigOptionFloat,              dithering_z_step_size))
     ((ConfigOptionBool,               dithering_local_z_mode))
     ((ConfigOptionBool,               dithering_local_z_whole_objects))

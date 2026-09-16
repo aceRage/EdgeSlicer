@@ -1170,6 +1170,128 @@ indexed_triangle_set its_make_swept_loop(const std::vector<Vec3d> &path_in, doub
     return mesh;
 }
 
+std::vector<indexed_triangle_set> its_make_helical_sweep(const std::vector<Vec2d> &profile_rz,
+                                                        double radius, double pitch, int starts,
+                                                        double turns, int segments_per_turn,
+                                                        bool left_hand, double phase_deg, double lead_frac)
+{
+    std::vector<indexed_triangle_set> out;
+    const size_t np = profile_rz.size();
+    if (np < 3 || radius <= 0. || pitch <= 0. || turns <= 0. || segments_per_turn < 3 ||
+        starts < 1 || starts > 8)
+        return out;
+
+    // Normalize the profile's winding so the swept ribbon comes out with outward normals: the
+    // (dr, dz) loop has to run counter-clockwise, exactly as its_make_revolved needs.
+    std::vector<Vec2d> prof = profile_rz;
+    double area2 = 0.;
+    for (size_t i = 0; i < np; ++ i) {
+        const Vec2d &a = prof[i];
+        const Vec2d &b = prof[(i + 1) % np];
+        area2 += a.x() * b.y() - b.x() * a.y();
+    }
+    if (area2 < 0.)
+        std::reverse(prof.begin(), prof.end());
+
+    // Steps along the helix. `turns` need not be a whole number, so round the step count up and
+    // keep the exact end angle; a fractional last step would give a sliver band otherwise.
+    const size_t nsteps = std::max<size_t>(2, size_t(std::ceil(turns * double(segments_per_turn))));
+    const size_t nrings = nsteps + 1;
+    const double dir    = left_hand ? -1. : 1.;
+
+    // THE LEAD-IN. The profile's radial extent is scaled to zero over `lead_frac` of a turn at
+    // each end, which tapers the thread out of existence instead of ending it in a wall. At
+    // scale 0 the whole ring collapses onto the centreline, so the ribbon closes there by
+    // itself; that degenerate ring is the cap. With lead_frac == 0 the ends stay full size and
+    // are capped with a flat fan instead.
+    const double lead_turns = std::max(0., std::min(lead_frac, 0.5 * turns));
+    auto depth_scale = [lead_turns, turns](double t) {
+        // t is the position along the helix in TURNS.
+        if (lead_turns <= 0.)
+            return 1.;
+        const double a = std::min(t, turns - t);
+        return std::max(0., std::min(1., a / lead_turns));
+    };
+    const bool taper = lead_turns > 0.;
+
+    for (int s = 0; s < starts; ++ s) {
+        indexed_triangle_set mesh;
+        // THE MULTI-START OFFSET. Strand s is the SAME helix lifted by pitch x s/starts, and
+        // NOT turned: at any given angle the N strands' crests are then stacked pitch/starts
+        // apart, which is exactly what an N-start thread is. Turning it by 360/starts as well
+        // would undo the lift - the helix rises `pitch` per turn, so a turn of 1/starts drops it
+        // by pitch/starts - and all N strands would land on top of each other.
+        const double phase0 = phase_deg * M_PI / 180.;
+        const double z0     = pitch * double(s) / double(starts);
+
+        mesh.vertices.reserve(nrings * np);
+        std::vector<int> ring_base(nrings, 0);
+        std::vector<char> ring_degenerate(nrings, 0);
+        for (size_t i = 0; i < nrings; ++ i) {
+            const double t   = std::min(turns, turns * double(i) / double(nsteps));
+            const double ang = phase0 + dir * 2. * M_PI * t;
+            const double zc  = z0 + pitch * t;
+            const double sc  = depth_scale(t);
+            const Vec3d  er(std::cos(ang), std::sin(ang), 0.);   // radial outward at this step
+            ring_base[i]       = int(mesh.vertices.size());
+            ring_degenerate[i] = (taper && sc <= 0.) ? 1 : 0;
+            if (ring_degenerate[i]) {
+                // The whole ring has collapsed onto the centreline: one point closes the end.
+                mesh.vertices.emplace_back((radius * er + Vec3d(0., 0., zc)).cast<float>());
+                continue;
+            }
+            for (size_t j = 0; j < np; ++ j) {
+                // The profile lives in (radial, axial): dr rides er, dz rides +Z. Only the
+                // RADIAL extent tapers - an axially tapered lead would pinch the flanks
+                // together and give the boolean a knife edge to chew on.
+                const double dr = sc * prof[j].x();
+                const double dz = prof[j].y();
+                const Vec3d  q  = (radius + dr) * er + Vec3d(0., 0., zc + dz);
+                mesh.vertices.emplace_back(q.cast<float>());
+            }
+        }
+
+        auto vid = [&ring_base, &ring_degenerate, np](size_t i, size_t j) {
+            return ring_degenerate[i] ? ring_base[i] : ring_base[i] + int(j % np);
+        };
+
+        mesh.indices.reserve(2 * nsteps * np + 2 * np);
+        for (size_t i = 0; i + 1 < nrings; ++ i) {
+            if (ring_degenerate[i] && ring_degenerate[i + 1])
+                continue;
+            for (size_t j = 0; j < np; ++ j) {
+                const int a = vid(i,     j);
+                const int b = vid(i,     j + 1);
+                const int c = vid(i + 1, j + 1);
+                const int d = vid(i + 1, j);
+                if (!ring_degenerate[i])
+                    mesh.indices.emplace_back(Vec3i32(a, b, c));
+                if (!ring_degenerate[i + 1])
+                    mesh.indices.emplace_back(Vec3i32(a, c, d));
+            }
+        }
+
+        // Flat caps when there is no taper to close the ends: a triangle fan over the profile,
+        // which is convex-safe for the trapezoid this is built for and still watertight for any
+        // simple profile whose fan from vertex 0 stays inside it.
+        if (!taper) {
+            for (size_t j = 1; j + 1 < np; ++ j) {
+                mesh.indices.emplace_back(Vec3i32(ring_base[0], ring_base[0] + int(j + 1), ring_base[0] + int(j)));
+                const int e = ring_base[nrings - 1];
+                mesh.indices.emplace_back(Vec3i32(e, e + int(j), e + int(j + 1)));
+            }
+        }
+
+        // Orient outward: a correctly wound ribbon encloses positive volume.
+        if (its_volume(mesh) < 0.f)
+            for (Vec3i32 &f : mesh.indices)
+                std::swap(f[1], f[2]);
+
+        out.emplace_back(std::move(mesh));
+    }
+    return out;
+}
+
 indexed_triangle_set its_make_revolved(const std::vector<Vec2d> &profile_rz, int sectors)
 {
     indexed_triangle_set mesh;

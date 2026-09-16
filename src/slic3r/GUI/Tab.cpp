@@ -2424,12 +2424,15 @@ void TabPrint::build()
         optgroup->append_single_option_line("sparse_infill_pattern", "strength_settings_infill#sparse-infill-pattern");
         optgroup->append_single_option_line("infill_direction", "strength_settings_infill#direction");
         optgroup->append_single_option_line("sparse_infill_rotate_template", "strength_settings_infill_rotation_template_metalanguage");
+        optgroup->append_single_option_line("locked_skin_infill_pattern", "strength_settings_patterns#locked-zag");
         optgroup->append_single_option_line("skin_infill_density", "strength_settings_patterns#locked-zag");
+        optgroup->append_single_option_line("locked_skeleton_infill_pattern", "strength_settings_patterns#locked-zag");
         optgroup->append_single_option_line("skeleton_infill_density", "strength_settings_patterns#locked-zag");
         optgroup->append_single_option_line("infill_lock_depth", "strength_settings_patterns#locked-zag");
         optgroup->append_single_option_line("skin_infill_depth", "strength_settings_patterns#locked-zag");
         optgroup->append_single_option_line("skin_infill_line_width", "strength_settings_patterns#locked-zag");
         optgroup->append_single_option_line("skeleton_infill_line_width", "strength_settings_patterns#locked-zag");
+        optgroup->append_single_option_line("infill_instead_top_bottom_surfaces", "strength_settings_patterns#locked-zag");
         optgroup->append_single_option_line("symmetric_infill_y_axis", "strength_settings_patterns#zig-zag");
         optgroup->append_single_option_line("infill_shift_step", "strength_settings_patterns#cross-hatch");
         optgroup->append_single_option_line("lateral_lattice_angle_1", "strength_settings_patterns#lateral-lattice");
@@ -2488,6 +2491,17 @@ void TabPrint::build()
         line.append_option(optgroup->get_option("bridge_speed"));
         line.append_option(optgroup->get_option("internal_bridge_speed"));
         optgroup->append_line(line);
+
+        // Edge: layer-time speed smoothing. S1 UI stub — visibility of A/B vs C fields
+        // is toggled in ConfigManipulation::toggle_print_fff_options.
+        // Plan: 09-concept-layer-time-speed-smoothing.md
+        optgroup = page->new_optgroup(L("Layer time smoothing"), L"param_speed", 15);
+        optgroup->append_single_option_line("layer_time_speed_smoothing");
+        optgroup->append_single_option_line("layer_time_speed_max_variation");
+        optgroup->append_single_option_line("layer_time_speed_max_speedup");
+        optgroup->append_single_option_line("layer_time_speed_max_slowdown");
+        optgroup->append_single_option_line("layer_time_speed_max_time_increase");
+        optgroup->append_single_option_line("layer_time_speed_slowdown_scope");
 
         optgroup = page->new_optgroup(L("Travel speed"), L"param_travel_speed", 15);
         optgroup->append_single_option_line("travel_speed", "speed_settings_travel");
@@ -2736,6 +2750,7 @@ optgroup->append_single_option_line("skirt_loops", "others_settings_skirt#loops"
         optgroup->append_single_option_line("fuzzy_skin_octaves", "others_settings_fuzzy_skin#skin-noise-octaves");
         optgroup->append_single_option_line("fuzzy_skin_persistence", "others_settings_fuzzy_skin#skin-noise-persistence");
         optgroup->append_single_option_line("fuzzy_skin_first_layer", "others_settings_fuzzy_skin#apply-fuzzy-skin-to-first-layer");
+        optgroup->append_single_option_line("fuzzy_skin_skip_overhangs", "others_settings_fuzzy_skin#skip-fuzzy-skin-on-overhangs");
 
         optgroup = page->new_optgroup(L("G-code output"), L"param_gcode");
         optgroup->append_single_option_line("reduce_infill_retraction", "others_settings_g_code_output#reduce-infill-retraction");

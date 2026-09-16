@@ -13,6 +13,8 @@
 #include "slic3r/GUI/MainFrame.hpp"
 #include "slic3r/GUI/FFUtils.hpp"
 #include <slic3r/GUI/BindDialog.hpp>
+#include "slic3r/GUI/FlashForge/FFDiagnosticsDialog.hpp"
+#include "slic3r/GUI/FlashForge/DeviceData.hpp"
 
 namespace Slic3r {
 namespace GUI {
@@ -693,6 +695,11 @@ void DeviceListPanel::build()
     hTopSizer->Add(m_lan_btn, 0, wxALIGN_CENTER_VERTICAL);
     hTopSizer->AddSpacer(FromDIP(30));
     hTopSizer->Add(m_static_btn, 0, wxALIGN_CENTER_VERTICAL);
+    hTopSizer->AddSpacer(FromDIP(20));
+    m_test_btn = new wxButton(this, wxID_ANY, _L("Test connection"));
+    m_test_btn->SetToolTip(_L("Check whether a FlashForge printer answers on the network, and "
+                              "collect diagnostics if it does not. No print job is started."));
+    hTopSizer->Add(m_test_btn, 0, wxALIGN_CENTER_VERTICAL);
 
     wxString homePageUrl = wxGetApp().get_homepage_url();
     if (homePageUrl.EndsWith("/") || homePageUrl.EndsWith("/home")) {
@@ -801,6 +808,7 @@ void DeviceListPanel::connectEvent()
     m_wlan_btn->Bind(wxEVT_TOGGLEBUTTON, &DeviceListPanel::onNetworkTypeToggled, this);
     m_lan_btn->Bind(wxEVT_TOGGLEBUTTON, &DeviceListPanel::onNetworkTypeToggled, this);
     m_static_btn->Bind(wxEVT_TOGGLEBUTTON, &DeviceListPanel::onStaticModeToggled, this);
+    m_test_btn->Bind(wxEVT_BUTTON, &DeviceListPanel::onTestConnection, this);
     MultiComMgr::inst()->Bind(COM_DEV_DETAIL_UPDATE_EVENT, &DeviceListPanel::onComDevDetailUpdate, this);
     MultiComMgr::inst()->Bind(COM_WAN_DEV_INFO_UPDATE_EVENT, &DeviceListPanel::onComWanDeviceInfoUpdate, this);
     wxGetApp().getDeviceObjectOpr()->Bind(EVT_DEVICE_LIST_UPDATED, &DeviceListPanel::onDeviceListUpdated, this);
@@ -1643,6 +1651,27 @@ void DeviceListPanel::updatePriorityId()
         }
     }
     m_last_priority_id = max;
+}
+
+
+// Open the LAN connection test, prefilled from the selected device when there is one.
+//
+// The check code is deliberately NOT prefilled even when we hold one: the point of the test is
+// usually to find out whether the stored code is the problem, and showing it back to the user
+// invites them to accept it unread.
+void DeviceListPanel::onTestConnection(wxCommandEvent &event)
+{
+    std::string serial;
+    std::string ip;
+    if (DeviceObjectOpr *opr = wxGetApp().getDeviceObjectOpr()) {
+        if (DeviceObject *obj = opr->get_selected_machine()) {
+            serial = obj->get_dev_id();
+            ip     = obj->get_dev_ip();
+        }
+    }
+    FFDiagnosticsDialog dlg(this, serial, ip);
+    dlg.ShowModal();
+    event.Skip();
 }
 
 } // GUI

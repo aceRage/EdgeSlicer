@@ -9,6 +9,7 @@
 #include "Camera.hpp"
 #include "Frustum.hpp"
 #include "libslic3r/BuildVolume.hpp"
+#include "libslic3r/CurvedCut.hpp"
 #include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/ExtrusionEntityCollection.hpp"
 #include "libslic3r/Geometry.hpp"
@@ -20,6 +21,9 @@
 #include "libslic3r/AppConfig.hpp"
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/ClipperUtils.hpp"
+#include "libslic3r/GCode/WipeTower.hpp"
+#include "libslic3r/GCode/WipeTower2.hpp"
+#include "libslic3r/GCode/WipeTowerEstimate.hpp"
 #include "libslic3r/Tesselate.hpp"
 #include "libslic3r/PrintConfig.hpp"
 
@@ -789,6 +793,26 @@ int GLVolumeCollection::load_wipe_tower_preview(
     GUI::PartPlateList&    ppl              = GUI::wxGetApp().plater()->get_partplate_list();
     std::vector<int>       plate_extruders  = ppl.get_plate(plate_idx)->get_extruders(true);
     TriangleMesh           wipe_tower_shell = make_cube(width, depth, height);
+    // The brim is part of the printed footprint: draw it and fold it into the shell so the
+    // outside-bed shader and the drag clamp react to the true first-layer extent.
+    const bool   show_brim   = brim_width > 0.f;
+    const float  brim_height = 0.2f; // one first layer, visual only
+    TriangleMesh brim_slab;
+    if (show_brim) {
+        // A Type2 cone-wall tower's base bulges past the body box — follow the real base
+        // outline instead of the rectangle. Type1 ignores the cone option.
+        const DynamicPrintConfig &print_cfg   = GUI::wxGetApp().preset_bundle->prints.get_edited_preset().config;
+        const DynamicPrintConfig &printer_cfg = GUI::wxGetApp().preset_bundle->printers.get_edited_preset().config;
+        const Polygon             outline     = estimate_wipe_tower_first_layer_outline(print_cfg, resolve_wipe_tower_type(printer_cfg), width, depth, height);
+        if (outline.size() > 4) {
+            Polygons brim_outline = offset(outline, scaled(brim_width));
+            brim_slab = WipeTower::its_make_rib_brim(brim_outline.empty() ? outline : brim_outline.front(), brim_height);
+        } else {
+            brim_slab = make_cube(width + 2.f * brim_width, depth + 2.f * brim_width, brim_height);
+            brim_slab.translate({-brim_width, -brim_width, 0.f});
+        }
+        wipe_tower_shell.merge(brim_slab);
+    }
     for (int extruder_id : plate_extruders) {
         if (extruder_id <= extruder_colors.size())
             colors.push_back(extruder_colors[extruder_id - 1]);
@@ -799,14 +823,19 @@ int GLVolumeCollection::load_wipe_tower_preview(
     // Orca: make it transparent
     for (auto& color : colors)
         color.a(0.66f);
+    const size_t slab_count = colors.size(); // per-filament body slabs; the brim part comes after
+    if (show_brim && !colors.empty())
+        colors.push_back(colors.front());
     volumes.emplace_back(new GLWipeTowerVolume(colors));
     GLWipeTowerVolume& v = *dynamic_cast<GLWipeTowerVolume*>(volumes.back());
     v.model_per_colors.resize(colors.size());
-    for (int i = 0; i < colors.size(); i++) {
-        TriangleMesh color_part = make_cube(width, depth / colors.size(), height);
-        color_part.translate({0.f, depth * i / colors.size(), 0.});
+    for (size_t i = 0; i < slab_count; i++) {
+        TriangleMesh color_part = make_cube(width, depth / slab_count, height);
+        color_part.translate({0.f, depth * i / slab_count, 0.});
         v.model_per_colors[i].init_from(color_part);
     }
+    if (show_brim && !colors.empty())
+        v.model_per_colors[slab_count].init_from(brim_slab);
     v.model.init_from(wipe_tower_shell);
     v.mesh_raycaster = std::make_unique<GUI::MeshRaycaster>(std::make_shared<const TriangleMesh>(wipe_tower_shell));
     v.set_convex_hull(wipe_tower_shell);
@@ -910,6 +939,54 @@ void GLVolumeCollection::render(GLVolumeCollection::ERenderType      type,
     if (disable_cullface)
         glsafe(::glDisable(GL_CULL_FACE));
 
+    // Cut gizmo, phase 2 fix: a GHOSTED half (0 < alpha < 1) has to blend, and it
+    // has to stop writing depth - otherwise it would keep occluding the cut sheet
+    // and the far half behind it, which is precisely what ghosting is for.
+    //
+    // THE BUG THIS REPLACES: turning depth writes off once, around the whole
+    // draw, took them away from the SOLID half too. With no depth buffer the
+    // solid half's own back faces blended over its front faces in triangle
+    // order and its silhouette dissolved, so all that stayed legible was the
+    // cut face - for both halves, which is exactly what was reported.
+    //
+    // The fix is TWO PASSES over the same volume list:
+    //   pass 0  every non-ghost side, depth writes ON, no blending (the ghost
+    //           side is suppressed by forcing its alpha negative, which the
+    //           shader already treats as a discard);
+    //   pass 1  only the ghost side, blended, depth writes OFF, drawn after the
+    //           opaque geometry so it composites over what is behind it.
+    // With no ghost side there is one pass and the state is untouched, so every
+    // other caller of the colour clip - and every non-cut draw - is unaffected.
+    std::array<float, 2> side_alphas{ 1.f, 1.f };
+    if (m_use_color_clip_plane)
+        side_alphas = m_color_clip_plane_alphas;
+    const bool ghost_side = m_use_color_clip_plane &&
+                            curved_cut_has_ghost_side(side_alphas[0], side_alphas[1]);
+    const int  n_passes   = ghost_side ? 2 : 1;
+
+    for (int ghost_pass = 0; ghost_pass < n_passes; ++ ghost_pass) {
+
+    // Per-pass side alphas. A side is drawn in exactly one of the two passes, so
+    // nothing is drawn twice and nothing is dropped.
+    std::array<float, 2> pass_alphas = side_alphas;
+    if (ghost_side) {
+        for (int s = 0; s < 2; ++ s) {
+            const bool is_ghost = curved_cut_side_is_ghost(side_alphas[s]);
+            if ((ghost_pass == 1) != is_ghost)
+                pass_alphas[s] = -1.f;   // not this pass: discard in the shader
+        }
+        if (ghost_pass == 1) {
+            glsafe(::glEnable(GL_BLEND));
+            glsafe(::glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA));
+            glsafe(::glDepthMask(GL_FALSE));
+        }
+        else {
+            glsafe(::glDepthMask(GL_TRUE));
+            if (type != ERenderType::Transparent)
+                glsafe(::glDisable(GL_BLEND));
+        }
+    }
+
     for (GLVolumeWithIdAndZ& volume : to_render) {
         //CPU Frustum culling
         auto _worldAABB = volume.first->transformed_bounding_box();
@@ -953,6 +1030,26 @@ void GLVolumeCollection::render(GLVolumeCollection::ERenderType      type,
         shader->set_uniform("color_clip_plane", m_color_clip_plane);
         shader->set_uniform("uniform_color_clip_plane_1", m_color_clip_plane_colors[0]);
         shader->set_uniform("uniform_color_clip_plane_2", m_color_clip_plane_colors[1]);
+        // Per-side visibility (cut gizmo, phase 2). Always set, so the shader
+        // never reads an uninitialised uniform left over from another gizmo:
+        // { 1, 1 } is two solid halves, which is what everything but the cut
+        // gizmo's Visible/Ghost/Hidden control ever asks for.
+        shader->set_uniform("color_clip_side_alpha_1", pass_alphas[0]);
+        shader->set_uniform("color_clip_side_alpha_2", pass_alphas[1]);
+        // Curved cut: split the two halves by the sheet's height field rather
+        // than by the flat plane. Texture unit 3 - 0 is taken by depth_tex in
+        // the outline pass below, 1 and 2 by the environment map.
+        const bool curved_split = m_use_color_clip_plane && m_curved_sheet_tex != 0;
+        shader->set_uniform("curved_sheet_active", curved_split);
+        if (curved_split) {
+            glsafe(::glActiveTexture(GL_TEXTURE3));
+            glsafe(::glBindTexture(GL_TEXTURE_2D, (GLuint) m_curved_sheet_tex));
+            glsafe(::glActiveTexture(GL_TEXTURE0));
+            shader->set_uniform("curved_sheet_tex", 3);
+            shader->set_uniform("curved_sheet_matrix", m_curved_sheet_matrix);
+            shader->set_uniform("curved_sheet_half_size", m_curved_sheet_half_size);
+            shader->set_uniform("curved_sheet_range", m_curved_sheet_range);
+        }
         // BOOST_LOG_TRIVIAL(info) << boost::format("set uniform_color to {%1%, %2%, %3%, %4%}, with_outline=%5%, selected %6%")
         //     %volume.first->render_color[0]%volume.first->render_color[1]%volume.first->render_color[2]%volume.first->render_color[3]
         //     %with_outline%volume.first->selected;
@@ -1015,6 +1112,8 @@ void GLVolumeCollection::render(GLVolumeCollection::ERenderType      type,
         glsafe(::glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0));
     }
 
+    } // ghost_pass
+
     if (m_show_sinking_contours) {
         shader->stop_using();
         if (sink_shader != nullptr) {
@@ -1035,6 +1134,12 @@ void GLVolumeCollection::render(GLVolumeCollection::ERenderType      type,
 
     if (disable_cullface)
         glsafe(::glEnable(GL_CULL_FACE));
+
+    if (ghost_side) {
+        glsafe(::glDepthMask(GL_TRUE));
+        if (type != ERenderType::Transparent)
+            glsafe(::glDisable(GL_BLEND));
+    }
 
     if (type == ERenderType::Transparent)
         glsafe(::glDisable(GL_BLEND));

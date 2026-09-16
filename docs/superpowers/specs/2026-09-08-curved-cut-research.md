@@ -234,3 +234,922 @@ them fitting together (no connectors needed for this click-test, per phase 1 sco
   useful reminder that "curved-looking" results have historically been achieved here by chaining
   flat operations, and this proposal is the first true curved (non-piecewise-flat) cutting surface
   in this cut-family.
+
+---
+
+## Phase 1 implemented
+
+Branch `feat/curved-cut`, cut from `origin/feat/ultra-preferences` with
+`origin/feat/thread-connector` merged in first (that branch adds the Thread and Bayonet Flexi kinds
+in `GLGizmoCut.cpp` / `FlexiJoint.*`; building on it avoids a later conflict — the one conflict
+was in `render_flexi_joint_inputs`' trailing hint text and was resolved in its favour, keeping
+this branch's `ImGui::PopTextWrapPos()`).
+
+### What shipped
+
+**`src/libslic3r/CurvedCut.{hpp,cpp}` — the representation and the cut.**
+
+- `CurvedCutSheet`: a coarse control grid (default 5x5, user 3..9 as the task asked; the research
+  text above said 4..64, which was too wide to be useful — nine handles a side is already 81
+  handles) over the cut plane's own frame, holding one displacement in mm per control point.
+- Interpolation is **Catmull-Rom**, not the bicubic B-spline the research section left open. The
+  reason is the phase-1 invariant: Catmull-Rom *interpolates* its control points, so a control
+  point's displacement IS the surface height there. That makes "drag this handle to 8 mm and the
+  face is 8 mm deep there" literally true, makes the height-sampling proof meaningful, and makes
+  a grid whose nodes are a subset of a finer grid's nodes resample exactly. A B-spline only
+  approximates its control points and would have failed all three.
+- `evaluate(u,v)` short-circuits to exactly `0.0` when every control point is zero, so the flat
+  case is bit-exact rather than merely near-zero.
+- `grab()` / `smooth()`: the editing operations, using `Sculpt::falloff_weight` from
+  `MeshSculpt.hpp` — the actual sculpt-brush falloff, not a reimplementation of it.
+- `sample_sheet()`, `curved_cut_lower_slab()`: the dense sheet, and the closed slab built by
+  offsetting it down to a floor below the object's bbox and stitching a four-sided rim, so the
+  cutter is watertight (the research section flagged this as the thing a naive offset gets wrong).
+  Side walls are vertical in local Z, never along the sheet normal, so a steep sheet cannot fold
+  the slab into itself.
+- `curved_cut_split()`: two booleans, `object ∩ slab` and `object − slab`, through
+  `MeshBoolean::mfd::make_boolean` with the `mcut` fallback — the same chain `flexi_boolean` uses
+  in `CutUtils.cpp`.
+
+**`Cut::perform_with_curved_sheet()` in `CutUtils.{hpp,cpp}`** — the same shape as
+`perform_with_plane()`: same clone/`add_cut_volume`/`post_process`/`reset_instance_transformation`
+path, so the result object and part structure, the undo snapshot, and the after-cut options behave
+as they do for a plane cut. Its first statement is:
+
+```
+if (sheet.is_flat())
+    return perform_with_plane();
+```
+
+so a zero-displacement curved cut is not "a boolean that happens to agree with the plane cut" — it
+is the plane cut, same function, byte for byte.
+
+**`GLGizmoCut3D`** — a `Surface: Flat | Curved` radio pair in the cut-plane window, plus, in
+Curved mode: a control-points slider (3..9), a brush-radius slider, a Falloff checkbox, and
+Smooth / Reset surface buttons. The deformed sheet renders with the same translucent
+`CUT_PLANE_DEF_COLOR` / `CUT_PLANE_ERR_COLOR` material as the flat plane; control points are small
+spheres that highlight on hover. The sheet is built in the base plane's frame and drawn through
+`translation_transform(m_plane_center) * m_rotation_m`, the same matrix the flat plane uses, so
+the existing rotate/translate grabbers move the sheet with the plane, unchanged. A control-point
+drag is one undo step per gesture (snapshot on mouse-down), and is *absolute* — each tick
+re-applies the whole displacement to the grid as it stood at drag start, so a drag returning to
+its origin cancels itself instead of accumulating.
+
+Nothing new is written to the 3MF. The cut is baked, as plane cuts are; the control grid is
+session state and `on_set_state()` resets it whenever the gizmo opens or closes.
+
+### Disabled in Curved mode
+
+- **Connectors.** "Add connectors" / "Edit connectors" is greyed with the note *"Connectors are not
+  available on a curved cut yet."* — phase 1 scope, matching how the flat cut shipped before
+  connectors existed. Phase 2 (per section 3 above) is where per-connector local frames go.
+- **The Surface toggle itself** is disabled once connectors exist on the object, so you cannot
+  strand placed connectors by switching to Curved.
+- **Tongue-and-groove** is a separate `CutMode` and is unaffected; the Surface toggle only appears
+  for `cutPlanar`.
+- Still **available and unchanged**: Keep upper / Keep lower, Place on cut, Flip, Cut to parts.
+  These act on the resulting halves and have nothing to do with how the halves were separated.
+  Place-on-cut on a curved half rotates it so the *base plane* is down — the curved face is not
+  flat, so it will not sit flush; that is inherent, not a bug, and it is why the flat plane
+  remains what the option is defined against.
+
+### Performance: sheet size against boolean time
+
+40 mm cube, 8 mm dome, both booleans (Manifold), Release, measured by the `[.perf]` case in
+`test_curved_cut.cpp`:
+
+| samples | slab triangles | both booleans | result triangles |
+|---|---|---|---|
+| 32x32 | 4 092 | 10 ms | 1 528 |
+| 64x64 | 16 380 | 36 ms | 5 112 |
+| **128x128** | **65 532** | **131 ms** | **18 424** |
+| 192x192 | 147 452 | 300 ms | 39 928 |
+| 256x256 | 262 140 | 530 ms | 69 624 |
+
+Cost is essentially linear in slab triangle count here, because the cube is trivial and the slab
+dominates; on a real print mesh the object side dominates instead, as the research section
+predicted.
+
+**The preview and the cut sample at different rates, deliberately.** The sampled sheet is
+piecewise linear, so it sits below the true surface by a chord sag falling as 1/N²: for this
+8 mm dome over an 80 mm span that is **0.040 mm at 64x64 but 0.0098 mm at 128x128**. The proof bar
+asks the cut face to match `f(u,v)` within 0.02 mm, which 64x64 does *not* meet — so
+`CurvedCutSheet::CutSamples` is 128 and `DefaultSamples` (preview only, rebuilt every drag tick)
+stays 64. This was found by the test failing at 64x64, not assumed.
+
+### Proofs
+
+`tests/libslic3r/test_curved_cut.cpp`, all passing:
+
+1. **Flat sheet = flat cut.** `evaluate()` returns exactly `0.0` at 441 sample points; and the
+   full `Cut` path with a flat sheet produces the same volumes as `perform_with_plane()` — same
+   triangle count, same index arrays, vertices identical to 1e-9.
+2. **Domed sheet on a 40 mm cube.** `volume(upper) + volume(lower)` matches the cube's volume to
+   better than 1e-6 relative (28 245.1 + 35 754.9 = 64 000.0). The cut face, sampled at 25 points
+   across the footprint on *both* halves, matches `f(u,v)` within 0.02 mm.
+3. **Watertight and disjoint.** `its_num_open_edges` is 0 for both halves; intersecting them gives
+   less than 1e-6 of the cube's volume.
+4. **Grid resize preserves the surface.** 3 -> 9 -> 3 is an exact refinement (the 3x3 nodes are
+   9x9 nodes) and round-trips to 1e-9. 5 -> 7 is a *refit*, not a refinement — the 5x5 interior
+   nodes at u = 0.25, 0.75 are not 7x7 nodes — and costs ~0.26 mm on a smooth 8 mm surface, ~3% of
+   amplitude; a one-cell spike, the worst case, costs ~0.76 mm. Both are bounded relative to
+   amplitude as regression guards. This is a property of resampling between coarse grids of
+   different phase, not a defect, and it is written down so a change that makes it worse shows up.
+
+Also covered: Catmull-Rom really interpolates its control points; `grab` gives the centre the full
+delta, neighbours a falloff-weighted fraction, and the rim nothing (and no-falloff moves everything
+inside the radius the whole way); `smooth` pulls a spike down without flattening it; `reset` is
+exactly flat; the slab is closed with positive volume at 8, 32 and 64 samples.
+
+Full `libslic3r_tests`: 767 passed, 2 failed — the two known pre-existing failures in
+`test_mixed_filament.cpp`, unrelated to this work.
+
+**Demo**: `curved_cut_upper.stl`, `curved_cut_lower.stl`, `curved_cut_demo.3mf` (both halves as the
+two parts of one object), produced by the `[.demo]` case from the same code the tests exercise —
+set `EDGESLICER_CURVED_CUT_DEMO_DIR` to regenerate.
+
+## Preview
+
+The owner bent the sheet with a vertical cut plane through a small part and reported "it's just a
+flat cut with the curve as a sort of centre point". The cut itself was right; the *preview* was not.
+
+Two things draw the cut in the gizmo, and both were flat:
+
+- **The coloured halves.** `GLGizmoCut3D::update_clipper()` calls
+  `m_parent.set_color_clip_plane(normal, offset)`, and `gouraud.vs` turned that into a single
+  per-vertex scalar `color_clip_plane_dot = dot(world_pos, color_clip_plane)`, which `gouraud.fs`
+  used to pick cyan or magenta. That is a plane test, so the halves were split by the flat plane no
+  matter how far the sheet was bent — the sheet was drawn curved beside a flat colour split, which
+  is exactly the "curve as a centre point" the owner saw.
+- **The cut face.** `render_clipper_cut()` goes through `ObjectClipper` -> `MeshClipper`, which
+  slices the mesh at one `z` (`slice_mesh(*m_mesh, height_mesh, ...)`) and triangulates the
+  resulting `ExPolygons` in the plane. A single-height slice can only ever produce a flat cap.
+
+### Approach chosen, and why
+
+**The halves: a height-field clip in the fragment shader** (the preferred route in the brief).
+
+The height field goes to the volume shader as a 64x64 single-channel float texture plus the world
+-> cut-plane matrix and the sheet's half extent (`GLVolumeCollection::set_curved_color_clip`, set
+from `GLGizmoCut3D::apply_curved_color_clip()` inside `update_clipper()`). `gouraud.fs` takes the
+fragment's own `world_pos` into the plane frame, samples `f(u,v)` there and compares against the
+fragment's local `z`.
+
+The comparison had to move from the vertex shader to the fragment shader. A per-vertex dot only
+bends as finely as the mesh is tessellated, so on a coarse model the split would still have looked
+like flat facets; per fragment it is exact for any mesh. The sign convention is kept as it was:
+`set_color_clip_plane` stores `-normal`, so negative means "above", and `side = h - local.z` is
+negative exactly when the fragment is above the sheet.
+
+Two details that are not obvious:
+
+- **`GL_CLAMP_TO_EDGE`**, not `GL_REPEAT`. Outside the sheet's square domain the split continues
+  along the border height instead of wrapping to the far side of the sheet.
+- **The GL 2.1 fallback.** `GLShadersManager` picks `140/` at GL >= 3.1 and `110/` below it.
+  `GL_R32F` / `GL_RED` are core from 3.0, so the 110 path uses `GL_LUMINANCE`, which is fixed point
+  on [0,1]; `f` is encoded there as `(f/range + 1)/2` and the shader undoes it when the
+  `curved_sheet_range` uniform is non-zero. Both shader versions carry the same code.
+
+**The cut face: the sheet, restricted to the object's interior.**
+
+Generalising `MeshClipper` to a height field would mean replacing its planar slice with a curved
+one — a real rewrite of code every gizmo depends on. Running the actual slab boolean
+(`curved_cut_split`) for the preview is the other extreme: ~130 ms for a 40 mm cube, which needs the
+debounce the brief describes.
+
+Neither was necessary, because the cap has a much cheaper definition: the cap **is** the sheet,
+wherever the object is. So `update_curved_cap_model()` walks the same 64x64 sheet samples the
+preview is drawn from, and for each one asks whether it is inside the object — one ray along the
+plane normal per sample, parity of the hits ahead of it, through the `AABBMesh` the gizmo's
+`Raycaster` already holds. Cells whose four corners are all inside get triangulated, shaded with the
+height field's own normal `(-df/dx, -df/dy, 1)`, and drawn in the same colour the flat cap used.
+
+`render_clipper_cut()` routes to this instead of the clipper's cap whenever the sheet is bent, so
+there is never a flat disc drawn through the curved one.
+
+### Performance
+
+The halves cost nothing per frame — the split is a texture lookup, and the texture is 64x64 floats
+(16 kB), re-uploaded only when the control grid changes. A drag therefore runs at full frame rate
+with the colours following the sheet live, which is what the brief's shader route was after.
+
+The cap is a few ms for 4096 rays against a `AABBMesh`, keyed on a hash of the control grid, the
+sheet's half size and the plane's own position and rotation, so redraws that changed none of it
+(camera orbit, hover) do not rebuild it. It is still skipped *during* a control-point drag, with a
+"Cut face updating…" note in the panel, so a drag can never be held up by it; the drag's `LeftUp`
+already calls `set_as_dirty()`, so the face catches up on the next frame. This is a cheaper policy
+than the ~150 ms debounce the brief allowed for the boolean route, and it needs no timer.
+
+### The rotated-plane proof
+
+The gizmo lets the base plane be rotated and translated, and the sheet rides on that plane's frame,
+so the failure worth testing is not the sheet maths — it is whether `Cut::perform_with_curved_sheet`
+carries the same frame the flat cut does.
+
+`tests/libslic3r/test_curved_cut.cpp`, *"Curved cut: a rotated, off-centre cut plane keeps its
+frame"*: a 40 mm cube, a domed sheet (8 mm at the centre control point), the cut plane rotated 90
+degrees about X — so its normal is world -Y, a vertical cut plane, the case the owner hit — and
+translated 7 mm off centre along that normal. It asserts:
+
+1. the two halves' volumes sum to the cube within 1e-5 relative, and neither half is degenerate;
+2. `its_num_open_edges` is 0 for both, so both are closed;
+3. every face vertex, taken into the plane's own frame, matches `f(u,v)` within **0.02 mm**;
+4. and the face really is bent — the spread of local `z` across it is more than half the dome
+   height, so a flat cut could not pass.
+
+It passes as written: `perform_with_curved_sheet` was already applying the cut matrix correctly
+(`process_volume_curved_cut` builds the same `invert_cut_matrix` from `get_rotation_matrix()` and
+`get_offset()` that the flat path does). **No frame fix was needed** — the bug was entirely in the
+preview. The test is the guard that keeps it that way.
+
+### Unchanged
+
+"Curved but untouched" is still exactly the flat cut, preview included: `apply_curved_color_clip()`
+clears the height-field clip whenever `m_curved_sheet.is_flat()`, so a flat sheet leaves both the
+colour split and the clipper's cap on the plain plane path. The connector UI is still disabled in
+Curved mode with the same note.
+
+### Unverified
+
+**Nobody has looked at this.** The build is clean and `libslic3r_tests` passes (bar the two known
+pre-existing `test_mixed_filament.cpp` failures), and the app launches with a scratch data dir with
+no shader compile errors in the log — but no human has opened the Cut gizmo, bent the sheet and
+seen the coloured halves and the cut face follow it. Specifically unverified by eye:
+
+- Whether the split reads correctly at the sheet's rim, where `GL_CLAMP_TO_EDGE` continues the
+  border height outwards. On a part narrower than the sheet this region is off the model entirely,
+  but on a part that overhangs the sheet it decides the colouring and has not been looked at.
+- The cap's rim. Cells with any corner outside the object are dropped, so the face can fall up to
+  one sample spacing (the plane's own extent / 63) short of the silhouette. The object's own shaded
+  surface shows through there, so it should read as the edge rather than as a gap, but that is a
+  judgement about how it looks, not a measurement.
+- Whether the cap z-fights the object's surface where the sheet grazes it. The flat path offsets
+  its cap by 0.001-0.002 mm along the normal for exactly this reason; the curved cap does not,
+  because it is drawn with depth test on and the object's own geometry is what it is cutting.
+- The **GL 2.1 / `110/` path has not been exercised at all.** The dev machine reports GL >= 3.1, so
+  every run so far took the `140/` shader and the `GL_R32F` upload. The `GL_LUMINANCE` encode/decode
+  pair is written and compiles, but nothing has run it.
+- Interaction with "Cut to parts", part selection and the tongue-and-groove mode was not
+  re-checked; the height-field clip is gated on `CutMode::cutPlanar` through `is_curved_surface()`,
+  so those should be untouched, but that is by construction rather than by test.
+
+### Unverified
+
+**Nobody has clicked this.** Everything above is proved headless, through `libslic3r`. The GUI
+compiles and the app launches clean with a scratch data dir, but no human has opened the Cut
+gizmo, switched Surface to Curved, dragged a handle and looked at the result. Specifically
+unverified by eye:
+
+- Whether the control-point handles are the right size and whether the ~18 px screen-space pick
+  radius feels right at typical zoom levels.
+- Whether the sheet reads correctly against the model — the preview is a thin two-sided slab, and
+  z-fighting against the object's own surface at grazing angles has not been checked.
+- Whether a drag feels natural. The drag maps mouse motion onto a camera-facing plane and keeps
+  only the component along the cut normal (the Sculpt gizmo's projection), which means a drag is
+  very insensitive when looking straight down the normal. Sculpt has the same property; whether it
+  is acceptable here has not been judged.
+- The interaction between a control-point drag and the plane's own grabbers when a handle sits
+  visually on top of a grabber. Handles get first refusal by design, but which one a user *expects*
+  to win in that overlap has not been tested.
+- `F` / `Shift+F` modal brush sizing was **not** wired up (the task allowed a plain radius slider
+  as the cheap alternative, and that is what shipped) — `GLGizmoSculpt`'s version routes through
+  `GLGizmosManager::on_char`, which would need a second gizmo hooked into that path.
+
+The owner click-test in section 7 above is still the outstanding gate.
+
+## Bug: flat result
+
+**Reported** on the live build (3269fec61b): Surface = Curved, a strongly S-bent sheet across a
+small part on a *vertical* cut plane (rotated 90 deg about X, offset from the object's centre),
+"Perform cut" produced a flat cut at the plane and ignored the sheet entirely — "just a flat cut
+with the curve as a sort of centre point". The flat preview colouring matched the flat result.
+
+### Cause
+
+`GLGizmoCut3D::perform_cut()` calls `m_parent.reset_all_gizmos()` *before* it builds the `Cut`, and
+that closes the Cut gizmo, which runs `on_set_state()`, which deliberately flattens the session-only
+surface (`m_curved_surface = false; m_curved_sheet.reset(...)`). By the time the very next block
+evaluated `is_curved_surface() && !m_curved_sheet.is_flat()`, both were already false, so the cut
+fell through to `perform_with_plane()` — the plain flat plane cut, at exactly the plane the sheet had
+been drawn on. Nothing about the geometry was wrong; the surface simply no longer existed when the
+cut was asked for. A second, latent defect made the same symptom possible even with the state fixed:
+`curved_cut_split()` widened the sheet itself (`s.set_half_size(need)`) to make the cutter reach past
+the object, which drags the control points outwards and *stretches* the surface — on a rotated plane,
+where the object's footprint in the cut frame is far larger than the sheet, that flattens a real bend
+into a shallow ripple.
+
+### Fix
+
+- `perform_cut()` now snapshots the Curved/Flat choice and a copy of the sheet **before**
+  `reset_all_gizmos()`, and performs the cut from that snapshot. One `BOOST_LOG_TRIVIAL(warning)` at
+  the call site prints resolution, half size, max displacement, `is_flat` and the resulting
+  `cut_curved`, so a future report carries its own diagnosis in the log.
+- `curved_cut_lower_slab()` takes an explicit `extent` and samples the top surface through
+  `evaluate_local(x, y)` rather than by `(u, v)`. `curved_cut_split()` now widens the **slab**, never
+  the sheet: over the sheet's own domain the heights are untouched, and outside it the clamped rim
+  value is extruded straight outwards.
+
+"Curved but untouched = flat cut" is unchanged — `perform_with_curved_sheet()` still dispatches a
+flat sheet into `perform_with_plane()`, and the gizmo still gates `cut_curved` on `!is_flat()`.
+
+### Proofs
+
+Three new cases in `tests/libslic3r/test_curved_cut.cpp`, all green:
+
+- **"a rotated, offset plane cuts curved"** — a 40 mm cube through the whole `Cut` path with a cut
+  matrix rotated 90 deg about X and offset 10 mm along its own normal, with a 5 mm dome. Both halves
+  have zero open edges and their volumes sum to the cube within 1e-4 relative; the halves are
+  unequal, so the offset is real. Mapped back into the *cut plane's own frame* (`cut_matrix.inverse()
+  * volume_matrix` — the instance transform is re-seated after the cut and must not be used), the
+  upper half spans local z in [0, 10] as the geometry demands, its cut face's height matches
+  `f(u,v)` within 0.02 mm at 4604 of its 4608 vertices, and it deviates from flat by more than 1 mm,
+  so the face is genuinely not planar. The flat-result guards are the two that would fail loudly on
+  the reported bug: no point of the upper half sits *below* the sheet by more than 0.05 mm (a flat
+  cut at z == 0 puts the dome's 5 mm crown a full 5 mm underneath the face), and the upper half's
+  volume is 13.65 cm3 against the 16.0 cm3 a flat 10x40x40 slice would give — the missing 2.35 cm3
+  is the dome's own.
+- **"the gizmo's fit sequence keeps the displacement"** — the gizmo's own call order
+  `set_half_size(30) → set_resolution(5) → grab(...) → set_half_size(52) → set_resolution(9)`, then
+  a real `curved_cut_split`. The displacement survives every step and the split still conserves
+  volume.
+- **"a wider slab keeps the sheet's own heights"** — a 20 mm sheet with a 5 mm dome, slab built at
+  70 mm: the slab really is 70 mm wide, the dome keeps its 5 mm peak at the sheet's own centre, and
+  every top vertex beyond the sheet's domain is at zero (extruded, not stretched).
+
+Existing curved-cut cases unchanged and still passing: 13 cases, 11191 assertions. Full
+`libslic3r_tests`: 786 cases, 784 passed, 2 failed as expected — the same two known pre-existing
+`test_mixed_filament.cpp` failures, unrelated to this work.
+
+Note that the rotated-plane case caught a *second* wrong assumption while it was being written: the
+first draft reconstructed the cut frame through the part's instance transform and read the face at
+the wrong place. `add_cut_volume()` bakes `cut_matrix` into the stored mesh, `add_volume()` then
+re-centres it into the volume matrix, and `reset_instance_transformation()` zeroes the instance
+rotation afterwards — so `cut_matrix.inverse() * volume_matrix` on the raw volume mesh is the only
+correct way back, and that is worth knowing for any future test on this path.
+
+**Demo**: the rotated-plane cube halves as `rotated_cut_A.stl` / `rotated_cut_B.stl`, written by the
+new `[.demo]` case from the same code the tests exercise.
+
+### Unverified
+
+**Nobody has clicked this either.** The fix is proved headless through `libslic3r` and the GUI
+compiles, but no human has reopened the Cut gizmo, bent a sheet on a vertical plane and pressed
+Perform cut. The specific claim that has only been reasoned about, not observed, is that
+`reset_all_gizmos()` was the *only* consumer of gizmo state that ran between the user's click and
+the cut: `get_cut_matrix()` is still read after the reset (as it always was, which is why the flat
+cut worked), and `on_set_state()` is not the only thing `activate_gizmo(Undefined)` triggers. The
+owner click-test remains the gate.
+
+## Phase 2
+
+Branch `feat/curved-cut-p2`, from `feat/ultra-preferences`. Three things the owner asked for after using phase 1: most control points landed outside the part, he could not see the result from the far side, and he wanted to pull handles onto the model rather than eyeball them.
+
+### 2.1 Sheet fitted to the cross-section
+
+**Was.** `curved_sheet_half_size()` returned `m_cut_plane_radius_koef * m_radius`, i.e. the flat plane model's own extent, which comes from the object's bounding-box **diagonal**. On a cube that is roughly right. On anything else it is not: for a 40 x 20 x 10 box the diagonal is 45.8 mm, so a 5 x 5 grid spread over ±(koef × 22.9) put most handles in empty space and only the middle one or two over material. Rotate the plane and it gets worse — the extent does not know which way the plane faces.
+
+**Now.** `curved_cut_fit_extent()` (libslic3r/CurvedCut.cpp) intersects the instance mesh — already expressed in the cut plane's frame — with `z == 0`, takes the bounding box of the crossings, and adds `max(15% of the extent, 5 mm)` on each side. The sheet is sized to that.
+
+The fit collects **crossing points**, not a polygon: every point of the section lies on an edge that crosses the plane (or on a vertex sitting exactly in it), so the box those points give is the box the outline has, and there is no contour assembly to go wrong on a coplanar edge, an on-plane vertex, or a non-manifold seam. A point counted twice costs nothing — it is still a point on the section.
+
+**Rectangular sheet.** `CurvedCutSheet` now carries `half_size_u` / `half_size_v` instead of one `half_size`. `(u,v)` still run over `[0,1]²`; they map onto a rectangle now. The square API is kept and still means what it did: `half_size()` reports the larger of the two, `set_half_size(hs)` makes the domain square again. Everything downstream that took one extent — `curved_cut_lower_slab`, the shader uniform — grew a second one, and the slab's widening in `curved_cut_split` is now **per axis** (a square widening from the larger side would cover the object correctly but spend the fixed 128-sample budget on empty space along the short axis and coarsen the cut where it actually cuts).
+
+**Re-sampling.** `set_half_size(u, v, resample = true)` re-samples the current surface onto the new rectangle, taking each control point's height from the old surface at the **same local (x,y) in millimetres** — clamped at the old border, the same rule `evaluate()` uses. The surface therefore stays put in the plane while the rectangle around it grows or shrinks. That is the only sensible reading of "the shape survives": a bend drawn over the part must not slide or scale when the plane is nudged. Passing `resample = false` keeps phase 1's behaviour (control values untouched, so the surface stretches onto the new rectangle) for the callers and tests that want it.
+
+**Debouncing.** The fit walks the instance mesh, so it is not free. `on_dragging` only *marks* it pending (`request_curved_fit()`); `on_stop_dragging` pays for it. Switching Flat → Curved forces one immediately — the user has just asked for the sheet, so there is nothing to debounce. A new bounding box (`update_bb`) drops the fit and falls back to the bbox extent until the next fit.
+
+**Knock-ons.** `MaxResolution` is 15 (was 9); the "N x N" label is unchanged because the grid is still N x N — only the rectangle it is drawn over is not square. `default_curved_bend_radius()` is 1.5 spacings of the **smaller** axis: the radius is one number and `grab()` measures a circular distance, so 1.5 of the larger spacing would already reach three neighbours deep along the short axis.
+
+### 2.2 Side visibility
+
+A three-state control per half — **Visible / Ghost / Hidden** — in the cut panel. It is offered for a flat cut as well as a curved one; "let me see the other half" has nothing to do with the sheet.
+
+- **Ghost** draws the half at 25% alpha with **depth writes off**. Depth writes matter: a translucent half that still wrote depth would go on occluding the sheet and the far half, which is the whole point of ghosting.
+- **Hidden** is a `discard` in the fragment shader. Not alpha 0 — a zero-alpha fragment still writes depth and keeps occluding.
+
+Implemented as two new uniforms on the existing colour-clip path (`color_clip_side_alpha_1/2` in `resources/shaders/{110,140}/gouraud.fs`): `1.0` solid, `0 < a < 1` ghosted, **negative** hidden. `GLVolumeCollection` sets them every frame from `m_color_clip_plane_alphas`, default `{1, 1}`, so nothing but the cut gizmo ever sees a change. `GLVolumeCollection::render` turns blending on and depth writes off for the pass when either side is ghosted.
+
+Side 1 is the **upper** half in both paths, which is why one pair of uniforms covers flat and curved:
+- flat — `set_color_clip_plane()` stores `-normal`, so `color_clip_plane_dot` is negative above the plane, and `apply_color_clip_plane_colors()` feeds side 1 with `UPPER_PART_COLOR`;
+- curved — `side = h - local.z`, negative when the fragment is above the sheet.
+
+Both halves reset to Visible whenever the gizmo opens or closes: this is a preview aid, not a preference.
+
+### 2.3 Handle snapping
+
+**Right-click-drag a handle** and it rides the model surface directly under it, live, until the button comes up. **Shift + right-click-drag** carries the neighbours with it, using the Bend radius falloff — the same `grab()` a left drag uses, with `delta = hit - current`. One undo snapshot, taken on the press, exactly as the left drag does. A small orange crosshair marks the hit while the button is held.
+
+"Under it" means **along the plane normal in both directions**, nearest hit wins: a handle floating above the part snaps down onto it, one buried inside snaps out to whichever face is closer. When there is no surface either way — a handle out past the silhouette, which the 15% margin guarantees several of — the point is left exactly where it is.
+
+`curved_cut_snap_distance()` is the pure core, and is what the tests drive: given a mesh and a position, both in the plane frame, it returns the signed local-Z offset to the nearest surface. It is a line/triangle test in the XY projection rather than a ray cast, because "nearest in either direction" wants both sides in one pass. The gizmo derives the instance mesh in the plane frame once per gesture (`curved_instance_mesh_in_plane()`) and caches it for the duration — re-deriving it per motion event would stall the drag on a heavy model.
+
+**This gesture needs 2.2.** The surface it finds is often on the far side of the part from the camera, and you cannot aim at what you cannot see. The panel says so, in as many words.
+
+### 2.4 What did not change
+
+"Curved but untouched = flat cut" is untouched. `CurvedCutSheet::is_flat()` still short-circuits `evaluate()`, `Cut::perform_with_curved_sheet()` still dispatches a flat sheet straight into `perform_with_plane()`, and the fit's re-sampling of a flat sheet is still exactly flat (checked). The existing `[CurvedCut]` tests all pass unchanged.
+
+### Proofs
+
+New `[CurvedCut]` cases in `tests/libslic3r/test_curved_cut.cpp`:
+
+| Case | What it pins |
+| --- | --- |
+| `a rectangular sheet re-samples on an extent change` | the rectangle really is rectangular (control grid, dense sample grid, `half_size()` as the max); growing 30×12 → 45×20 with `resample` keeps the surface within 10% of amplitude over the shared region and the peak at its height and place; without `resample` the control values are untouched and the surface stretches; a flat sheet re-sampled is still exactly flat |
+| `the sheet fits the cut's cross-section` | 40×20×10 box, horizontal plane → 25 × 15 (outline half-extents 20 and 10, plus the 5 mm absolute margin), and that is not the bbox-diagonal figure; the same box rotated 90° about X → 25 × 10; a 200×100 section takes the 15% relative margin instead; a plane that misses, and an empty mesh, both report failure and leave the caller's extents untouched |
+| `the snap helper finds the nearest surface` | on a 40 mm cube: above → −5, below → +5, inside-nearer-the-top → +8, inside-nearer-the-bottom → −8, exactly on a face → 0, off the footprint → no hit. On a domed mesh (analytic dome over a flat base, meshed as a ring grid): over the apex, over the flank, and the base winning when it is nearer; off the disc → no hit |
+| `fit then snap produces a real curved cut` | the three pieces compose — fit a cube (25 × 25), snap the centre handle onto the top face (+20 exactly), rim handles report no hit, the falloff grab makes a dome, and the cut still yields two closed halves whose volumes add to the cube's |
+| `a rectangular sheet's slab still covers a larger part` | phase 1's slab guarantee restated for a rectangle: an 18 × 7 sheet widened to 65 × 40 stays watertight, keeps the dome's height at the sheet's own centre, extrudes the border height (not a stretch) outside the domain, and cuts a 100×60×30 part in two with the volumes adding up |
+| `a 15 x 15 control grid` | the new ceiling: 5 → 15 is a refinement so the surface comes through exactly, `set_resolution(99)` clamps to 15, and a 15×15 sheet cuts |
+
+### Unverified
+
+**Nobody clicked it.** Everything above is proved by the unit tests, a clean build, and a scratch instance that launches without shader errors. None of the three features has been driven by hand in the running gizmo:
+
+- the fit's *feel* — whether 15% / 5 mm puts the handles where the owner wants them on his actual parts, and whether debouncing to drag-end is responsive enough or reads as lag;
+- Ghost's *appearance* — the 25% alpha and the depth-write-off pass are argued from first principles, not looked at; whether the ghosted half reads as "there but see-through" or as mud is a judgement only the eye makes. Ghost interacts with the existing transparent render pass, and that interaction has not been watched;
+- the snap *gesture* — whether right-drag is discoverable, whether the crosshair is visible against a light model, and whether the live re-apply is smooth on a mesh of real size. The mesh is cached per gesture precisely because it might not be, but nobody has held the button down on a 2 M-triangle model;
+- the panel *layout* — three radio buttons on each of two rows inside the existing cut panel width has not been seen; it may wrap.
+
+## Phase 2 fixes
+
+Phase 2 shipped and the owner drove it on build `75cde87eb0`. He reported two things. One of them — Ghost — was straightforwardly broken and is fixed here. The other — "only one half survives" — turned out **not** to be what it looked like, and the honest account of it is below.
+
+### Bug A — "only one half survives" is a *reporting* bug, not a boolean bug
+
+**What was looked for.** The report said that with Upper *Keep* and Lower *Keep* both ticked, Perform cut removed the smaller part, "or maybe based on facing direction like boolean difference". The suspects were an inverted-winding object flipping the boolean's inside test, the phase-2 rectangular fit shrinking the slab so a half fell outside it, the per-axis slab widening, the mcut fallback returning one result, and `want_upper`/`want_lower` not matching the Keep attributes.
+
+**What was actually found.** None of those reproduce. A purpose-built hunt — a 30×20×15 chamfered box on a doubly-rotated off-centre plane, S-shaped and cosine sheets from ±3 to ±15 mm, one-sided bends up and down, tilts, a part four times wider than its fitted sheet, an inverted-winding copy, and twelve compounding re-fits — produced a lost half in exactly **one** family of cases, and in that family losing it is *correct*:
+
+> `curved_cut_lower_slab()` extrudes the sheet's **border** height outwards past the sheet's own domain (that is deliberate — it is what stops a small sheet under a large plane from stretching). So once the border clears the part's top face, the whole object is inside the slab, `object − slab` is empty, and the upper half genuinely does not exist. Measured: a sheet lifted bodily to +9 over a part whose top is +7.5 gives `upper` empty and `lower` = the entire 7425 mm³ part. A sheet that still *crosses* the part keeps both halves however hard it is bent — one-sided bends of 4, 8, 10 and 14 mm all conserve volume to 1e-4.
+
+The inverted-winding hypothesis was tested directly and **disproved**: Manifold normalises winding itself, so a mesh with every triangle reversed splits into two correct halves with or without a pre-flip.
+
+**So the bug is what happened next.** `curved_cut_split()` cleared the empty side and returned, and downstream an empty mesh is indistinguishable from "this half does not exist": `add_cut_volume()` returns early on an empty mesh, the cloned `ModelObject` ends up with no volumes, and `Cut::post_process()` pushes it onto the throwaway list. The user ticked two Keeps, got one part, and nothing on screen or in the log said the sheet had simply missed the part. On a strongly bent sheet over a shallow part — precisely what phase 2 made easy, since the fit now sizes the sheet to the cross-section and the bend controls reach several mm — that is easy to hit by accident and impossible to diagnose.
+
+**Fix** (`src/libslic3r/CurvedCut.cpp`, `curved_cut_split()`):
+
+1. **Both sides are always computed**, whichever the caller asked for, and when exactly one comes back non-empty the other is recovered as `object − kept` — another boolean against a solid the first one already proved workable. This covers a genuine one-sided boolean failure, which the previous code turned into a silently dropped half.
+2. **The failure is reported.** `ok == false` now means "a half is empty and could not be recovered", and it is reported rather than papered over: on the sheet-clear-of-the-part case the recovery correctly returns *nothing* rather than manufacturing a sliver that would print as a stray shell.
+3. **An inward-wound input is flipped** before the boolean, guarded by `its_volume(object.its) < 0`. This is *belt and braces* — the disproof above says Manifold does not need it — but it costs one pass over the triangles per cut and removes the hypothesis from future debugging. It is logged when it fires.
+
+**What is still not fixed:** the gizmo does not yet *tell the user* when the sheet has left the part. `ok == false` reaches `process_volume_curved_cut()`, which logs at error level and carries on. Surfacing it in the panel ("the sheet does not cross the part — one half will be empty") is the change that would actually close the owner's complaint, and it is not made here.
+
+**Proofs** (`tests/libslic3r/test_curved_cut.cpp`):
+
+- *"an asymmetric part on a rotated plane keeps BOTH halves"* — the owner's described case, built as faithfully as a headless test can: chamfered 30×20×15 box, plane rotated 0.35π about X and 0.20π about Y and offset 2.5 mm along its normal, sheet sized by `curved_cut_fit_extent()` exactly as the gizmo sizes it, ±4 mm S-shaped surface. Two objects, each one non-empty closed volume, summing to the whole part within 1e-4. **This test passes on the unfixed code too** — it is a regression guard, not a reproduction.
+- *"a sheet clear of the part reports the empty half"* — the one real mechanism, both ways up: `ok == false`, the surviving half is the whole part, the empty half stays empty (nothing invented), and the crossing-sheet boundary cases keep both halves.
+- *"inverted winding still gives two halves"* — pins the disproof: baseline and reversed-winding meshes both give two closed halves conserving volume.
+- *"keep-one and cut-to-parts on an asymmetric part"* — Keep upper only, Keep lower only and Cut to parts. Upper-only and lower-only each give one object with one volume and sum to the whole part; Cut to parts gives one object holding two volumes.
+
+### Bug A-adjacent — the re-fit contract is not met
+
+Found while hunting the above, and worth recording because `CurvedCut.hpp` currently claims otherwise. `set_half_size(..., resample = true)` is documented to keep the **surface** fixed in the plane while the rectangle around it changes, so a bend drawn over the part does not slide or scale when the plane is nudged. It is not idempotent: each re-sample reads the surface through Catmull-Rom and writes back control values, and shrinking then re-growing does not return the values it started from. A plane *drag* produces a stream of re-fits, so the drift compounds — measured at **+1.2 mm at the border after twelve alternating re-fits** of a 6 mm dome, which moved the upper half's volume from 2900 to 2275 mm³.
+
+The peak is safe (it is a control point, and Catmull-Rom interpolates its control points, so it survives exactly and `max_displacement()` is unchanged). The drift is at the border, and it is bounded rather than divergent. No fix is attempted here — the right one is probably to keep the control values and the extent that *generated* them and re-sample from that original rather than from the last re-sample. *"repeated re-fits drift the surface"* pins the current magnitude so a change that makes it worse is caught and a future fix has a baseline.
+
+### Bug B — Ghost drew only the cut face, for both halves
+
+**Cause.** The per-side alpha reached the fragment shader correctly and `gouraud.fs` (110 and 140) already did the right thing with it, but the draw state around it did not: `GLVolumeCollection::render()` turned `glDepthMask(GL_FALSE)` on **once, around the whole draw**, as soon as *either* side was ghosted. That took depth writes away from the **solid** half too, so with no depth buffer the solid half's own back faces blended over its front faces in triangle order and its silhouette dissolved — leaving only the cut face legible, on both halves, which is exactly what was reported. The cap made it worse independently: `GLGizmoCut3D::render_curved_cap()` drew the cut face fully opaque with a fixed colour and no reference to either side's state, so it kept showing at full strength over a half that was meant to be see-through or gone.
+
+**Fix.**
+
+1. **Two-pass draw** (`src/slic3r/GUI/3DScene.cpp`). The volume loop is wrapped in a pass loop. Pass 0 draws every **non-ghost** side with depth writes **on** and no blending, with the ghost side's alpha forced negative so the shader's existing `side_alpha < 0 → discard` branch suppresses it. Pass 1 draws **only** the ghost side, blended, depth writes off, after the opaque geometry. Each side is drawn in exactly one pass, so nothing is drawn twice and nothing is dropped. With no ghost side there is one pass and the GL state is untouched, so the flat cut and every non-cut draw pay nothing.
+2. **The cap follows its side** (`src/slic3r/GUI/Gizmos/GLGizmoCut.cpp`). The cap is the face of whichever half is towards the camera — the same choice `is_looking_forward()` already made for its colour. It now takes that half's visibility: Visible draws it solid as before, Ghost draws it blended at the side's alpha with depth writes off, Hidden hands the cap to the **far** half instead (its colour, its state), and when both halves are hidden no cap is drawn.
+3. **One source of truth** (`src/libslic3r/CurvedCut.hpp/.cpp`). `curved_cut_side_alpha()`, `curved_cut_side_is_ghost()` and `curved_cut_has_ghost_side()` are pure functions in libslic3r. `GLGizmoCut3D::side_visibility_alpha()` routes through the first, the two-pass draw keys off the other two, and a headless test pins all three — the only kind of proof available here, since nobody can look at a rendered frame.
+
+**Proof.** *"side visibility alpha"* asserts Visible → 1.0, Ghost → 0.25, Hidden → negative; that Ghost's alpha is strictly between 0 and 1 (the predicate the pass split keys off); and the pass split itself — one side ghosted means the extra pass runs, two Visible sides or Visible + Hidden means it does not. Both shader variants (110 and 140) are unchanged and both still compile; the scratch instance launches with no shader errors.
+
+### Still unverified
+
+- **Ghost's appearance.** The two-pass draw is argued from the depth/blend semantics, not looked at. The solid half now keeps its depth buffer, which is the specific failure reported — but whether 25% reads as "there but see-through" against the sheet and the far half is an eye judgement nobody has made. The interaction with the pre-existing `ERenderType::Transparent` pass (a ghosted half *and* a transparent modifier in one scene) is reasoned about, not watched.
+- **The cap's ghost blend.** Two ghosted surfaces at 25% each over the same pixel read darker than either alone; whether that matters has not been seen.
+- **Bug A's complement path in the wild.** The recovery fires only when one boolean fails outright. The tests reach it through the sheet-clear-of-part case, where it correctly returns nothing. A real mesh that defeats both Manifold and mcut on one side but not the other was not found, so the recovery's cost on a large part is unmeasured.
+- **Whether Bug A as the owner experienced it is actually closed.** What is fixed is the silent drop and the missing diagnosis. If his part had the sheet genuinely crossing it and still lost a half, this does not explain it — and the reproduction attempt above, which covers a wide sweep of bends, rotations and shapes, did not find such a case. His actual 3MF would settle it.
+
+
+---
+
+## Phase 3 implemented
+
+Branch `feat/cut-thickness`, cut from `origin/feat/ultra-preferences` at `30dc22d206`.
+
+Three things, in the order the owner asked for them: the sheet now fits the WHOLE part rather
+than the plane's cross-section; an empty half is said out loud before the cut rather than
+discovered after it; and both the flat and the curved cut gained a **cut thickness** ("kerf").
+
+### 1. The sheet fits the whole part, not the cross-section
+
+Phase 2 sized the sheet to the plane's intersection with the object (`curved_cut_fit_extent`).
+That put the handles over the material being cut, which was the point, but it was the wrong
+extent for the *cutter*: outside the sheet's own domain `evaluate_local()` clamps, so
+`curved_cut_lower_slab()` extrudes the sheet's **rim height** straight outwards. Anything of the
+part that hangs outside the domain is therefore cut by that extruded rim rather than by the
+surface the user drew - and on a part that is wider above or below the plane than it is *at* the
+plane, a strongly bent sheet takes the rim clear off the part and one side comes back empty.
+That is the owner's report: *"it removes the smaller part"*.
+
+`curved_cut_fit_projection_extent()` replaces it: the bounding box of every vertex of the
+instance mesh projected onto the plane's own (u,v) axes, plus the same
+`max(0.15 * extent, 5 mm)` margin. The half extent reaches the **further** side of the origin
+(not half the width), because the sheet's frame is centred on the plane's origin and an
+off-centre part would otherwise hang out of the box. No part of the object can now lie outside
+the domain, so the extruded rim never touches material.
+
+Two things had to come with it:
+
+- **Resolution follows extent.** Covering the whole projection makes the domain much larger than
+  the cross-section fit did, so a fixed 5x5 would spread the handles too thin on a big part.
+  `curved_cut_default_resolution()` aims for ~10 mm spacing, clamped into
+  `[DefaultResolution, MaxResolution]` - which for the sizes a real part gives lands the spacing
+  between 5 and 15 mm (pinned by a test). `MaxResolution` stays 15. The user's own slider choice
+  wins once they have made one (`m_curved_res_user_set`).
+- **The extent is snapped to 0.5 mm.** A plane drag re-fits on every move. The projection's
+  extent does not depend on where the plane sits *along* its normal at all, so in the common
+  gesture - sliding the cut position - the snapped extent is simply constant and no re-sample
+  happens.
+
+**`set_half_size(..., resample)` is now idempotent.** This was the phase 2 shortfall the previous
+test pinned rather than fixed. Re-sampling reads the surface through Catmull-Rom and writes
+control values back, and that round trip is lossy whenever the grid phase changes; feeding each
+re-sample its predecessor's output compounded the loss without bound over a drag. The sheet now
+keeps a **reference grid**: the last surface an *edit* produced, with the extent it was edited
+at. Every re-sample reads that reference, never the previously re-sampled values. Consequences:
+
+- N re-fits cost exactly what one costs; returning to an earlier extent reproduces that extent's
+  values bit-for-bit.
+- Every editing entry point (`grab`, `smooth`, `reset`, `set_values`, `set_resolution`, and a
+  non-resampling `set_half_size`) republishes the reference.
+- `at()` hands out a mutable reference and so can change the surface behind the sheet's back.
+  `set_half_size` detects that (the live values differ from the reference at the *current*
+  extent) and republishes first, so a caller that pokes `at()` and then re-fits gets what it
+  drew, not what it drew before. `commit_reference()` is the explicit version for callers that
+  want to say so.
+
+The re-fit test went from asserting the drift (`drift > 0.5`) to asserting the contract
+(`drift < 1e-6` over the proof bar's 12 alternating re-fits, and every control value within
+1e-6).
+
+### 2. The empty-side warning
+
+`curved_cut_split()` already *reported* an empty half - it returns false and leaves that side's
+mesh empty - but only after two booleans, by which point the user has committed. The panel needs
+the same answer before the click, so it asks the cheap question instead:
+
+`curved_cut_empty_sides()` is a sign test over the mesh's vertices against the sheet: any vertex
+strictly above the upper face makes the upper side non-empty, any strictly below the lower face
+makes the lower one non-empty. One pass over the vertices against two booleans. It is
+conservative in the direction that matters - it can only call a side non-empty when a vertex is
+on it, and for a closed mesh the converse (material on a side with no vertex there) cannot
+happen, because that material is bounded by faces and faces have vertices. It takes the kerf
+into account, so a thickness wide enough to eat the part reports both sides empty.
+
+The gizmo refreshes it with the fit and whenever the thickness changes, and the panel says, in
+orange and wrapped:
+
+> The surface does not cross the part on the upper/lower side; that side would be empty.
+
+**Perform cut still proceeds.** An empty half is not a refusal: the cut runs and produces the one
+half that has material. What changes is that it is no longer silent - a `WarningNotificationLevel`
+notification says which side was empty and why one part came back.
+
+### 3. Cut thickness ("kerf")
+
+A `Thickness` slider (mm, default 0, range 0..20) sits next to the cut position in the Cut panel,
+for **both** Flat and Curved. Thickness `t` removes a band of material centred on the cut
+surface: what survives is everything outside `[surface - t/2, surface + t/2]` along the plane
+normal. A `Remove from: Centred / Above / Below` radio appears once `t > 0` and moves the band
+without changing its width (`CutThicknessOffset`, `curved_cut_thickness_faces()`).
+
+**Flat** is two half-space slices instead of one: `cut_mesh(its, -t/2, nullptr, &lower)` and
+`cut_mesh(its, +t/2, &upper, nullptr)`. That is exactly what `perform_with_flexi_joints()` has
+always done to open its gap, so no new geometry code and no boolean.
+
+**Curved** is two slabs instead of one: `curved_cut_lower_slab()` gained an `offset` that raises
+or lowers the slab's top surface (the sheet) without touching the floor or the rim, so the lower
+half is `object INTERSECT slab(-t/2)` and the upper half is `object MINUS slab(+t/2)`. The cap
+logic is untouched - a height field offset along local Z is still a height field.
+
+**`t == 0` is bit-identical to today.** Both paths early-out into the single-surface code, and
+the tests pin it as identical vertex and index arrays, not as "close enough".
+
+**Connectors.** With `t > 0`:
+
+- **Plug / Snap**: the body grows by `t` and its centre moves to `face_lo + height/2`, so it
+  starts at the lower face and still reaches `height` into the upper half. It therefore bridges
+  the gap, and because the pocket is cut from the same lengthened body, the pocket depth is
+  measured from each half's own offset face.
+- **Dowel**: already symmetric about the plane, so it only has to get longer.
+- **Flexi / Hinge / Thread**: the kerf is added to the joint's **own gap**
+  (`params.gap = flexi_effective_gap(params) + kerf`) before any body is generated, rather than
+  applied on top of it. Every flexi body is laid out relative to the two faces through
+  `flexi_frame()`, so widening the gap in the params moves the faces and the bodies together and
+  the joint stays assembled. Applying the kerf separately would have moved the faces out from
+  under the bodies.
+
+**Not supported, and said so in the panel:** a **Thread** whose pitch is at or below the
+thickness. The pitch is an absolute length that does not scale with the gap, so a kerf of one
+pitch or more eats a whole turn and the two halves no longer screw together. Nothing refuses it -
+a deliberately loose thread is a legitimate thing to ask for - but the panel warns.
+
+"Keep as parts" keeps the gap: the two volumes are placed where the cut left them, so the band is
+visibly missing.
+
+**Preview.** The translucent plane (and the curved sheet) is drawn **twice**, at the two face
+offsets, so the removed band is visible as the space between two surfaces. At `t == 0` the two
+offsets are both zero and it is the single draw it always was. The colour clip still splits at
+the mid surface, unchanged.
+
+### 4. Persistence
+
+**Nothing new is written to the 3MF.** A plane cut persists nothing today - the cut is baked,
+`perform_with_plane()` replaces the objects with the results, and only connector data survives via
+`cut_information.xml`. The thickness follows the same rule: it is session state, and
+`on_set_state()` clears it (along with the offset choice and the resolution override) whenever
+the gizmo opens or closes. That is deliberate: a sticky thickness would silently kerf the next
+object the user cuts, which is the sticky-`m_keep_as_parts` bug in a new place.
+
+### Proofs
+
+`tests/libslic3r/test_curved_cut.cpp`, all passing. Full `libslic3r_tests`: **828 test cases, 825
+passed, 3 failed as expected** (the known pre-existing failures, unrelated to this work).
+
+1. **The fit covers the whole projection.** A T-shaped part - a 10 mm stem, a 60 mm flange - with
+   the plane through the stem. The cross-section fit gives a 10 mm half extent; the projection fit
+   gives 35 mm, so the handles span the wide top. And it matters: a sheet levelled at +20 mm on
+   the section-fitted domain extrudes that rim clear above the flange, the upper half comes back
+   **empty**, and the whole part lands in the lower half - the reported bug, reproduced. The same
+   bend on the projection-fitted sheet keeps both halves. A ramp `z = 0.4x` shows the shape
+   difference directly: at the flange's edge the section fit reports its clamped rim (+4) while
+   the projection fit reports the ramp itself (+12.5, Catmull-Rom's own overshoot off its nodes),
+   and over the stem - where both have a domain - they agree to 1e-9, so the fit change moves
+   nothing the user had already drawn over the cut.
+2. **Idempotent re-fit.** 12 alternating re-fits (x0.7, /0.7, ...) return to the starting extent
+   with every control value within **1e-6** and the border within 1e-6, where phase 2 drifted more
+   than 0.5 mm. One re-fit out and back is exact to 1e-12. Re-fitting twice to the same new extent
+   is a no-op the second time. An edit republishes the reference, so a later re-fit preserves what
+   the user just drew rather than an ancestor of it.
+3. **Empty-side detection.** A sheet raised bodily above a part reports `upper_empty`, one pushed
+   below reports `lower_empty`, one through the middle reports neither - and in each case
+   `curved_cut_split()` agrees. A kerf wide enough to eat the part reports both; the same kerf
+   taken from Above leaves the lower half intact.
+4. **Thickness, flat.** A 40 mm cube at `t = 2`: the halves' volumes sum to
+   `64000 - 40*40*2 = 60800` within 1e-4 relative (30400 + 30400 exactly), both halves are closed
+   (`its_num_open_edges == 0`), each is 19 mm tall so the missing band is 2.000 mm. The
+   Above / Below offsets move the band without changing its width (20 mm and 18 mm halves).
+5. **Thickness, curved.** The same cube with an 8 mm domed sheet at `t = 2`: 26645 + 34155 =
+   60800, both closed, the removed band is between 0.98x and 1.15x the flat 3200 mm^3 (the dome's
+   slope adds a little). **The gap measured along the normal at 25 sample points across the
+   footprint is 2 mm within 0.05 mm** - the lower half's top surface and the upper half's bottom
+   surface, sampled by barycentric interpolation on a vertical line.
+6. **`t == 0` is bit-identical**, for both flat and curved: same vertex counts, same index counts,
+   same coordinates as the no-thickness call, compared element by element.
+7. **A Flexi Double ring with `t = 2`.** The existing non-intersection contract still holds -
+   `intersection_volume(upper, lower) == 0` within 1e-3, so the joint is still printable in
+   place - the face-to-face gap grew by exactly 2.000 mm, and the ring bodies **still bridge it**:
+   the lower half's body reaches past the upper half's face by the same amount it did at `t = 0`,
+   because the body is generated relative to the moved faces rather than to the mid plane.
+8. **Face offsets and the resolution rule** are pinned directly:
+   `curved_cut_thickness_faces()` for all three offsets and for a negative thickness (clamps to
+   zero rather than inverting the band); `curved_cut_default_resolution()` at four extents plus
+   the spacing it actually lands on.
+
+**Demo**: `flat_t2_upper.stl` / `flat_t2_lower.stl` and `curved_t2_upper.stl` /
+`curved_t2_lower.stl`, produced by the `[.demo]` case from the same code the tests exercise - set
+`EDGESLICER_CUT_THICKNESS_DEMO_DIR` to regenerate.
+
+### Unverified
+
+**Nobody has clicked this.** Everything above is proved headless through `libslic3r`. The GUI
+compiles and the app launches clean with a scratch data dir, but no human has opened the Cut
+gizmo, set a thickness, and looked at the result. Specifically unverified by eye:
+
+- **The two-surface preview.** The plane and the sheet are drawn twice at the two face offsets.
+  Whether two translucent surfaces read as "a band of material is going away" - rather than as a
+  rendering glitch - is a judgement nobody has made. A genuine thin slab (with side walls) would
+  read better and is the obvious next step if it does not.
+- **Where the Thickness slider sits.** It is above the Surface toggle, next to the cut position,
+  because thickness is a property of the cut rather than of the surface. Whether that is where a
+  user looks for it is untested.
+- **The `Remove from` radio.** It only appears once `t > 0`, so the panel grows as the user drags
+  the slider. That may read as the panel jumping around.
+- **The empty-side warning's timing.** It is refreshed with the fit and on a thickness change,
+  which means during a control-point *drag* it shows the state from before the drag started (the
+  fit is debounced to the end of a plane drag for the same reason the cut face is). A handle
+  dragged clear off the part will not warn until the drag ends.
+- **Connector behaviour with a kerf has not been looked at in the app at all.** The Plug's
+  lengthening and re-centring is derived and compiles, and the flexi path is tested headless, but
+  no Plug or Dowel has been placed on a kerfed cut and inspected.
+- The **resolution auto-scaling** changes the control grid when the fit runs. On a part where the
+  projection is much larger than the cross-section this jumps the handle count on the first fit
+  (e.g. 5x5 to 11x11). Whether that feels like the tool helping or like it moving under the user's
+  hand is unknown.
+
+---
+
+## Phase 4: connectors
+
+Section 3 above asked what a connector on a curved cut would have to become. The answer turned out
+to be smaller than that section expected: **a connector is still a position plus a rotation, and
+the only change is where those two come from.** On a flat cut they come from the plane — one shared
+`m_rotation_m` for every connector, and a position on `z == 0`. On a curved cut they come from the
+**sheet** — the connector's own `(u,v)` gives it a height `f(u,v)` and a local frame from the
+height-field gradient there. Nothing downstream of that had to learn about height fields.
+
+That is why the diff is mostly one function (`connector_rotation_m`) called at the six places that
+used to say `m_rotation_m`, plus one already-existing loop (`process_connector_cut`) admitted into
+the curved cut's volume walk.
+
+### Placement
+
+`Add connectors` is enabled in Curved mode. A click is intersected with the **sheet**, not the
+plane: `unproject_on_curved_sheet()` raycasts the dense 64×64 preview grid — the very mesh the user
+is looking at — taken to world space through the base plane's frame, and hands back the hit in the
+object's frame. A ray that misses the sheet entirely (a click past its rim) falls back to the flat
+`unproject_on_cut_plane()`, so a click just off the bend still lands somewhere sensible rather than
+doing nothing. The pick mesh is rebuilt lazily and invalidated by anything that moves the sheet in
+the world: a handle drag, a resolution change, a re-fit, a plane move or turn.
+
+Dragging a connector **slides it on the sheet** — `dragging_connector()` re-hits the surface on
+every motion and re-derives the frame, so the connector rides the curve instead of sliding on the
+flat plane and popping back.
+
+Nothing new is stored on the connector. Its `(u,v)` is just the in-plane part of the position it
+already carries, and the height and frame are read from `f(u,v)` on every use, right up until
+`apply_connectors_in_model()` bakes them at cut time. **A connector therefore follows later sheet
+edits**: bend the surface under a placed connector and it rises with it.
+
+### The frame
+
+`curved_cut_sheet_frame(sheet, x, y, z_angle)`, in `CurvedCut.{hpp,cpp}`:
+
+- **local Z** = `curved_cut_sheet_normal()` = `normalize(-∂f/∂x, -∂f/∂y, 1)`, by central differences
+  at 1e-3 mm. A height field cannot overhang, so the z component is positive before normalization
+  and stays positive after — the connector's "up" never flips as it slides.
+- **local X** = the plane's own X **projected onto the tangent plane**, then turned by `z_angle`
+  about the normal. The projection is what makes the frame *continuous* over the sheet and equal to
+  `+X` on a flat patch; picking any old perpendicular would spin the connector as it moved. (A
+  near-vertical surface falls back to projecting the plane's Y. A height field cannot actually reach
+  90°, so that branch only guards the numerics.)
+- **local Y** = `Z × X`.
+
+On a flat sheet the function returns `Transform3d::Identity()` **exactly** — not "identity to within
+epsilon" — by an early return rather than through Eigen's quaternion route. That is what makes the
+curved-but-flat equivalence bit-for-bit rather than approximate.
+
+### The footprint check
+
+`is_outside_of_cut_contour()` still samples the connector's footprint (a disc for Plug/Dowel/Snap,
+`flexi_footprint_corners()`'s real outline with 8 samples per edge for a Flexi) — but now it lays
+that footprint out in the connector's **own tilted frame** and then projects each sample **back down
+the plane normal onto the cut plane** before asking the clipper, because the clipper's contour test
+is a 2-D test in the plane's frame and a sample sitting `f(u,v)` off the plane would test against
+the wrong place. Read geometrically: *does the footprint, seen from the cut direction, stay inside
+the object's section here.*
+
+A side effect worth knowing: on a slope the projected footprint is an **ellipse**, narrower than the
+disc, so a tilted connector near a contour edge can be accepted where the flat test would have
+rejected it. That is correct — the material it actually needs is the projected area.
+
+On a flat cut the projection is the identity and this is the original test, unchanged.
+
+### The cut
+
+`perform_with_curved_sheet()` gained the connector branch its volume walk was missing:
+
+```
+if (!volume->is_model_part()) {
+    if (volume->cut_info.is_processed) process_modifier_cut(...);
+    else                               process_connector_cut(...);   // <- phase 4
+}
+```
+
+— i.e. **the same helper the flat cut uses**, unchanged. This works because a connector volume
+reaches `Cut` already carrying `translation_transform(pos) * rotation_m * …`, and phase 4 only
+changed what those two are. The plug/dowel/snap solids and their pockets are built in the
+connector's local frame for free; the tilt rides in through the volume's own transform.
+
+The `Dowel` is the one case worth spelling out. `process_connector_cut()` splits a dowel with the
+flat `cut_mesh()` — and that is the *right* thing here, because the dowel's own frame is already the
+sheet's frame at its `(u,v)`, so "flat, in the dowel's frame" **is** "tangent to the sheet at the
+dowel". Its third object (the printable pin) is produced and reset onto the bed exactly as on a flat
+cut.
+
+**Flexi joints** dispatch out to `perform_with_flexi_joints()` from the curved entry point too, the
+same way a flat cut with a flexi joint does. A flexi cut cannot *also* be a curved one: the joint
+opens its own gap between two flat faces and generates its bodies relative to those faces, so the
+surface between the two segments **is** the joint's face pair. What phase 4 gives it is the frame —
+the joint stands on the sheet's normal at its own point rather than on the plane's.
+
+### Kerf interaction
+
+Phase 3 lengthened a connector by the kerf `t` and moved its centre to `face_lo + height/2` **along
+`m_cut_normal`**. Phase 4 measures that same shift **along the connector's own normal** — the sheet
+normal at its `(u,v)`. So a plug on a tilted patch still bridges the removed band: its lower end
+lands on `face_lo` and its upper end on `face_lo + height + t`, both measured along the direction the
+body actually points. On a flat cut (or a flat sheet) `conn_normal == m_cut_normal` and the phase 3
+behaviour is untouched.
+
+### Limits and warnings
+
+Both **advisory** — orange, wrapped, in the curved panel. Nothing refuses a cut, because a
+deliberately tilted connector (or a hinge on a gentle bend) is a legitimate thing to ask for.
+
+1. **Tilt.** When the local normal is more than `CurvedConnectorTiltWarnDeg` (60°) off the plane
+   normal, the panel says the connector will print at an angle and may need supports.
+2. **Flat patch.** `curved_cut_sheet_curvature_radius()` computes the *smaller* principal radius of
+   curvature from the Monge-patch second derivatives (`H ± √(H²−K)`, larger |curvature| wins).
+   `Hinge` and `Thread` need a locally flat patch — a knuckle run and a pitch line are straight
+   features generated as if for a plane — so the panel warns when that radius is below
+   `CurvedConnectorFlatPatchFactor` (3×) the connector's own extent. A Plug, Dowel, Snap, DoubleRing,
+   BallSocket or ChainLink is a solid of revolution about the local normal and sits fine on a curved
+   patch, so none of them trip it.
+
+`Keep as parts` behaves exactly as on a flat cut (it is the same `post_process` path). Persistence
+is unchanged and needed nothing new — see below.
+
+### Persistence
+
+Worth stating plainly, because section 3 guessed differently: **`ModelObject::cut_connectors` reaches
+no 3MF, on a flat cut or a curved one.** It is pre-cut gizmo session state. What persists is the
+connector **volume** the gizmo bakes out of it (`apply_cut_connectors`), whose transform is
+
+```
+translation_transform(pos) * rotation_m * rotation(-z_angle) * scale(r, r, h)
+```
+
+— the position and the frame, baked into the volume matrix — plus its type and tolerances in
+`Metadata/cut_information.xml`. A curved connector's frame is a plain rotation just like a flat one's,
+and its position simply has a non-zero height in the plane frame. So a project re-opened *without the
+sheet* (which is session state, like the plane) still puts the connector back where it stood,
+standing the way it stood, with **no new 3MF fields at all**.
+
+### Proofs
+
+All in `tests/libslic3r/test_curved_cut.cpp`, tag `[CurvedCut]`.
+
+1. **Curved-but-flat is bit-identical.** `curved_cut_sheet_frame()` on a flat sheet returns the
+   identity matrix by `==`, not by tolerance, at nine sample points; the normal is exactly
+   `(0,0,1)`. A cube with two plug connectors cut by a flat sheet and by the plane produces the
+   **same vertex and index counts and the same coordinates, element by element**, on both halves,
+   and the same volume counts (3 per side: the solid plus two connector volumes).
+2. **The axis follows the sheet.** A domed sheet, a plug at an off-centre point where the surface
+   slopes by more than 5°: the plug's cylinder axis, fitted from its own vertices by the largest
+   principal direction of their covariance, is **within 0.5°** of the analytic gradient normal (and
+   more than 5° off the plane normal, so a flat frame would have failed). Both halves closed
+   (`its_num_open_edges == 0`); `upper + lower + pocket == cube` within 1e-2 relative; the plug spans
+   `0 … height` along the local normal with an off-axis radius equal to its own, so the tilted frame
+   rotated the body without shearing it.
+3. **A DoubleRing Flexi on a dome.** The two segments' **intersection volume is 0** within 1e-3
+   (still print-in-place), and the rings' axis — fitted as the *smallest*-variance direction, a ring
+   being a disc — is within 0.5° of the local normal and more than 4° off the plane's.
+4. **The kerf bridges along the local normal.** `t = 2` on a domed sheet: the body is exactly 2 mm
+   longer, its frame did not turn (`‖ΔM‖ < 1e-12`), its centre moved purely along `n` with no
+   sideways drift, and its two ends land on `face_lo` and `face_lo + height + t` to 1e-9 — so it
+   reaches past both kerf faces. The cut itself runs, both halves closed, and the removed band is
+   really gone.
+5. **The footprint on the sheet.** A connector in the middle is accepted, one near the rim rejected,
+   with the footprint sampled in the tilted tangent plane and projected back onto the cut plane. The
+   projected half width on a slope is measured directly: **less than the disc's radius** (fore­
+   shortened by the tilt) but more than half of it (not collapsed). Plus the advisories: tilt is 0 at
+   the apex, a 3 mm connector passes the flat-patch test on this dome and a 200 mm one fails it,
+   everything passes on a flat sheet at any size, and the dome's apex curvature radius is finite and
+   of the right order (between 5 mm and 2000 mm for an 8 mm rise over a 40 mm half span).
+6. **3MF round trip.** A baked, processed plug connector volume on a cut object, saved with
+   `store_bbs_3mf` and read back with `load_bbs_3mf`: it comes back as a connector of type `Plug`,
+   its normal within **0.1°** of what went in (and still more than 5° off the plane normal), its
+   position within 1e-3 mm, its **whole transform** within 1e-3 by Frobenius norm, and its mesh
+   intact.
+
+**Demo**: `plugs_upper.stl` / `plugs_lower.stl` (a dome-cut cube with two plugs) and
+`ring_upper.stl` / `ring_lower.stl` (the same cube with one DoubleRing), produced by the `[.demo]`
+case from the same code the tests exercise — set `EDGESLICER_CURVED_CONNECTOR_DEMO_DIR` to
+regenerate.
+
+### Unverified
+
+**Nobody has clicked this.** Everything above is proved headless through `libslic3r`. The GUI
+compiles and the app launches clean with a scratch data dir, but no human has opened the Cut gizmo,
+switched to Curved, bent the sheet, placed a connector on it and looked at the result. Specifically
+unverified by eye:
+
+- **Where the click lands.** The raycast is against the 64×64 *preview* sample grid while the cut
+  uses the 128×128 one, so a connector sits on the preview surface, up to the chord sag between the
+  two (~0.03 mm on an 8 mm dome over 80 mm) off the surface the cut actually makes. That is far
+  below any printable tolerance but it has not been looked at.
+- **Whether the glyph reads as tilted.** The connector model is drawn on the local frame, so on a
+  steep patch it leans. Whether that reads as "standing on the surface" or as "broken" is a
+  judgement nobody has made.
+- **Dragging across a steep patch.** The drag re-hits the sheet every motion, so on a surface that
+  turns away from the camera the connector can jump to a different part of the sheet the ray hits
+  first. Not seen.
+- **The two warnings' wording and timing.** They are refreshed with the conflict check, so they
+  follow a connector move immediately but a *sheet handle* drag only when that drag ends (the same
+  debounce the empty-side warning has). A handle dragged to tilt a connector past 60° will not warn
+  until the drag ends.
+- **The flat-patch threshold.** 3× the connector extent is a guess, not a measured printability
+  limit. It has not been checked against a printed hinge on a real bend.
+- **Connectors plus a kerf plus a curve, together.** Each pair is tested; the triple is tested
+  headless (proof 4) but has never been printed or eyeballed.
+- **`Keep as parts` with connectors on a curved cut.** It takes the same `post_process` path as the
+  flat cut and is not separately covered by a test.

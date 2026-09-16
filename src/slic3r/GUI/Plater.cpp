@@ -86,6 +86,7 @@
 #include "libslic3r/Format/bbs_3mf.hpp"
 #include "libslic3r/GCode/ThumbnailData.hpp"
 #include "libslic3r/Model.hpp"
+#include "libslic3r/ModelArrange.hpp"   // get_instance_arrange_poly, for the Fill bed dialog's defaults
 #include "libslic3r/Measure.hpp"
 #include "libslic3r/Geometry.hpp"
 #include "libslic3r/TriangleMesh.hpp"
@@ -136,6 +137,7 @@
 #include "Jobs/OrientJob.hpp"
 #include "Jobs/ArrangeJob.hpp"
 #include "Jobs/FillBedJob.hpp"
+#include "ScaleToVolumeDialog.hpp"
 #include "Jobs/RotoptimizeJob.hpp"
 #include "Jobs/SLAImportJob.hpp"
 #include "Jobs/SLAImportDialog.hpp"
@@ -10416,6 +10418,7 @@ struct Plater::priv
     bool m_is_dark = false;
     size_t m_last_auto_gradient_prompt_physical_count = 0;
     bool   m_last_auto_gradient_prompt_accepted = false;
+    bool   m_auto_gradient_project_choice_changed_during_load = false;
 
     priv(Plater *q, MainFrame *main_frame);
     ~priv();
@@ -13613,10 +13616,33 @@ void Plater::priv::split_volume()
 
 void Plater::priv::scale_selection_to_fit_print_volume()
 {
+    Selection &selection = this->view3D->get_canvas3d()->get_selection();
+    if (selection.is_empty())
+        return;
+
+    const BuildVolume &build_volume = this->bed.build_volume();
+
+    // Everything the dialog needs to warn before the user commits: the volume the gaps eat into,
+    // whether the bed is round (non-uniform then fills the inscribed square rather than the
+    // rectangle the label implies), and whether a non-uniform scale would shear the selection.
+    const bool is_circular = build_volume.type() == BuildVolume_Type::Circle;
+    const Vec3d volume_size = is_circular
+                                  ? Vec3d(2. * unscale<double>(build_volume.circle().radius),
+                                          2. * unscale<double>(build_volume.circle().radius),
+                                          build_volume.printable_height())
+                                  : build_volume.bounding_volume().size();
+
+    ScaleToVolumeDialog dlg(this->q, ScaleToVolumeSettings{}, volume_size, is_circular,
+                            !selection.is_axis_aligned());
+    if (dlg.ShowModal() != wxID_OK)
+        return;
+
+    const ScaleToVolumeSettings &s = dlg.settings();
+
 #if ENABLE_ENHANCED_PRINT_VOLUME_FIT
-    this->view3D->get_canvas3d()->get_selection().scale_to_fit_print_volume(this->bed.build_volume());
+    selection.scale_to_fit_print_volume(build_volume, s);
 #else
-    this->view3D->get_canvas3d()->get_selection().scale_to_fit_print_volume(*config);
+    selection.scale_to_fit_print_volume(*config, s);
 #endif // ENABLE_ENHANCED_PRINT_VOLUME_FIT
 }
 
@@ -16712,15 +16738,33 @@ bool Plater::priv::confirm_auto_generated_gradients(wxWindow *parent, size_t num
     if (app_config == nullptr)
         return MixedFilamentManager::auto_generate_enabled();
 
-    const bool pref_enabled = app_config->get_bool("auto_generate_gradients");
-    if (!pref_enabled) {
+    const bool auto_generate_enabled = app_config->get_bool("auto_generate_gradients");
+    MixedFilamentAutoGradientChoice remembered_choice = MixedFilamentAutoGradientChoice::Ask;
+    size_t remembered_physical_count = 0;
+    PresetBundle *preset_bundle = wxGetApp().preset_bundle;
+    if (preset_bundle != nullptr) {
+        const DynamicPrintConfig &project_config = preset_bundle->project_config;
+        if (const ConfigOptionInt *choice_opt = project_config.option<ConfigOptionInt>("mixed_filament_auto_gradient_choice")) {
+            if (choice_opt->value == int(MixedFilamentAutoGradientChoice::Generate))
+                remembered_choice = MixedFilamentAutoGradientChoice::Generate;
+            else if (choice_opt->value == int(MixedFilamentAutoGradientChoice::DoNotGenerate))
+                remembered_choice = MixedFilamentAutoGradientChoice::DoNotGenerate;
+        }
+        if (const ConfigOptionInt *count_opt = project_config.option<ConfigOptionInt>("mixed_filament_auto_gradient_physical_count");
+            count_opt != nullptr && count_opt->value > 0) {
+            remembered_physical_count = size_t(count_opt->value);
+        }
+    }
+    const MixedFilamentAutoGradientAction action =
+        mixed_filament_auto_gradient_action(auto_generate_enabled, remembered_choice, remembered_physical_count, num_physical);
+    if (action == MixedFilamentAutoGradientAction::Disable) {
         m_last_auto_gradient_prompt_physical_count = 0;
         m_last_auto_gradient_prompt_accepted = false;
         MixedFilamentManager::set_auto_generate_enabled(false);
         return false;
     }
 
-    if (num_physical <= 4) {
+    if (action == MixedFilamentAutoGradientAction::Generate) {
         m_last_auto_gradient_prompt_physical_count = 0;
         m_last_auto_gradient_prompt_accepted = false;
         MixedFilamentManager::set_auto_generate_enabled(true);
@@ -16744,12 +16788,21 @@ bool Plater::priv::confirm_auto_generated_gradients(wxWindow *parent, size_t num
         _L("Using %d physical filaments will create %d auto-generated gradients.\nDo you want to create them now?"),
         int(num_physical),
         int(auto_gradient_count));
-    const int result = MessageDialog(parent,
-                                     message,
-                                     wxString(SLIC3R_APP_FULL_NAME) + " - " + _L("Auto gradients"),
-                                     wxYES_NO | wxYES_DEFAULT | wxCENTRE | wxICON_QUESTION)
-                           .ShowModal();
+    MessageDialog dialog(parent, message, wxString(SLIC3R_APP_FULL_NAME) + " - " + _L("Auto gradients"),
+                         wxYES_NO | wxYES_DEFAULT | wxCENTRE | wxICON_QUESTION);
+    dialog.show_dsa_button(_L("Remember this choice for this project"));
+    const int  result   = dialog.ShowModal();
     const bool accepted = result == wxID_YES;
+    if (dialog.get_checkbox_state() && preset_bundle != nullptr) {
+        DynamicPrintConfig &project_config = preset_bundle->project_config;
+        project_config.option<ConfigOptionInt>("mixed_filament_auto_gradient_choice", true)->value =
+            int(accepted ? MixedFilamentAutoGradientChoice::Generate : MixedFilamentAutoGradientChoice::DoNotGenerate);
+        project_config.option<ConfigOptionInt>("mixed_filament_auto_gradient_physical_count", true)->value = int(num_physical);
+        if (q->is_loading_project())
+            m_auto_gradient_project_choice_changed_during_load = true;
+        else
+            q->update_project_dirty_from_presets();
+    }
     m_last_auto_gradient_prompt_physical_count = num_physical;
     m_last_auto_gradient_prompt_accepted = accepted;
     MixedFilamentManager::set_auto_generate_enabled(accepted);
@@ -16800,6 +16853,12 @@ void Plater::priv::on_filament_color_changed(wxCommandEvent &event)
 
 void Plater::priv::install_network_plugin(wxCommandEvent &event)
 {
+    // Ultra (plug-in guards): the Device tab's "install network plugin" link. Our own plug-in is
+    // already there in that case, and this dialog would download Bambu's package over it.
+    if (wxGetApp().is_ultranet_plugin_installed()) {
+        BOOST_LOG_TRIVIAL(info) << "[UltraNet] UltraNet present, Bambu CDN download disabled (Device-tab install link ignored)";
+        return;
+    }
     wxGetApp().ShowDownNetPluginDlg();
     return;
 }
@@ -16828,6 +16887,12 @@ void Plater::priv::update_plugin_when_launch(wxCommandEvent &event)
 
 void Plater::priv::show_install_plugin_hint(wxCommandEvent &event)
 {
+    // Ultra (plug-in guards): the notification's only action is the Bambu CDN download, so it is
+    // pointless (and would overwrite our plug-in) once UltraNet is installed.
+    if (wxGetApp().is_ultranet_plugin_installed()) {
+        BOOST_LOG_TRIVIAL(info) << "[UltraNet] UltraNet present, Bambu CDN download disabled (install-plugin hint suppressed)";
+        return;
+    }
     notification_manager->bbl_show_plugin_install_notification(into_u8(_L("Network Plug-in is not detected. Network related features are unavailable.")));
 }
 
@@ -18424,6 +18489,7 @@ void Plater::load_project(wxString const& filename2,
     }
     else
         m_loading_project = true;
+    p->m_auto_gradient_project_choice_changed_during_load = false;
 
     m_only_gcode = false;
     m_exported_file = false;
@@ -18453,6 +18519,10 @@ void Plater::load_project(wxString const& filename2,
         }
     }
     bool load_restore = strategy & LoadStrategy::Restore;
+    if (strategy & LoadStrategy::LoadConfig) {
+        p->m_last_auto_gradient_prompt_physical_count = 0;
+        p->m_last_auto_gradient_prompt_accepted = false;
+    }
 
     // Take the Undo / Redo snapshot.
     reset();
@@ -18512,6 +18582,11 @@ void Plater::load_project(wxString const& filename2,
     up_to_date(true, true);
 
     wxGetApp().params_panel()->switch_to_object_if_has_object_configs();
+
+    if (p->m_auto_gradient_project_choice_changed_during_load) {
+        p->m_auto_gradient_project_choice_changed_during_load = false;
+        p->set_plater_dirty(true);
+    }
 
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << __LINE__ << " load project done";
     m_loading_project = false;
@@ -20220,7 +20295,13 @@ ProjectDropDialog::ProjectDropDialog(const std::string &filename)
                 wxDefaultPosition,
                 wxDefaultSize,
                 wxCAPTION | wxCLOSE_BOX)
-    , m_action(2)
+    // Default to the action the user chose last time, which this dialog already records in
+    // "import_project_action" on OK. Falling back to LoadType::OpenProject rather than
+    // LoadGeometry: this dialog is shown for a *project* file, and importing geometry only
+    // silently discards the embedded printer, filament and process settings.
+    , m_action(std::max(1, std::min(2, wxGetApp().app_config->get("import_project_action").empty()
+                                       ? 1
+                                       : std::atoi(wxGetApp().app_config->get("import_project_action").c_str()))))
 {
     // def setting
     SetBackgroundColour(m_def_color);
@@ -20386,7 +20467,7 @@ void ProjectDropDialog::on_dpi_changed(const wxRect& suggested_rect)
 }
 
 //BBS: remove GCodeViewer as seperate APP logic
-bool Plater::load_files(const wxArrayString& filenames)
+bool Plater::load_files(const wxArrayString& filenames, bool from_url)
 {
     const std::regex pattern_drop(".*[.](stp|step|stl|oltp|obj|amf|3mf|svg|zip|glb|gltf)", std::regex::icase);
     const std::regex pattern_gcode_drop(".*[.](gcode|g)", std::regex::icase);
@@ -20495,7 +20576,7 @@ bool Plater::load_files(const wxArrayString& filenames)
 
     switch (loadfiles_type) {
     case LoadFilesType::Single3MF:
-        open_3mf_file(normal_paths[0]);
+        open_3mf_file(normal_paths[0], from_url);
         break;
 
     case LoadFilesType::SingleOther: {
@@ -20578,7 +20659,7 @@ LoadType determine_load_type(std::string filename, std::string override_setting)
     }
 }
 
-bool Plater::open_3mf_file(const fs::path &file_path)
+bool Plater::open_3mf_file(const fs::path &file_path, bool from_url)
 {
     std::string filename = encode_path(file_path.filename().string().c_str());
     if (!boost::algorithm::iends_with(filename, ".3mf")) {
@@ -20587,7 +20668,13 @@ bool Plater::open_3mf_file(const fs::path &file_path)
 
     bool not_empty_plate = !model().objects.empty();
     bool load_setting_ask_when_relevant = wxGetApp().app_config->get(SETTING_PROJECT_LOAD_BEHAVIOUR) == OPTION_PROJECT_LOAD_BEHAVIOUR_ASK_WHEN_RELEVANT;
-    LoadType load_type = determine_load_type(filename, (not_empty_plate && load_setting_ask_when_relevant) ? OPTION_PROJECT_LOAD_BEHAVIOUR_ALWAYS_ASK : "");
+    // A project opened from a snapmaker-orca:// URL is not an ambiguous drop: the user
+    // clicked "Open in Snapmaker Orca" on that specific project, so do not escalate to the
+    // "Open as project / Import geometry only" prompt just because the plate is occupied.
+    // The global Load Behaviour setting is still honoured, and load_project() still asks
+    // about unsaved changes to the current project.
+    LoadType load_type = determine_load_type(filename,
+        (!from_url && not_empty_plate && load_setting_ask_when_relevant) ? OPTION_PROJECT_LOAD_BEHAVIOUR_ALWAYS_ASK : "");
 
     if (load_type == LoadType::Unknown) return false;
 
@@ -21006,10 +21093,88 @@ void Plater::set_number_of_copies(/*size_t num*/)
 void Plater::fill_bed_with_instances()
 {
     auto &w = get_ui_job_worker();
-    if (w.is_idle()) {
-        p->take_snapshot(_u8L("Arrange"));
-        replace_job(w, std::make_unique<FillBedJob>());
+    if (!w.is_idle())
+        return;
+
+    // Both entry points - the object right-click menu item and the Clone dialog's Fill button -
+    // land here, so showing the dialog here gives them one behaviour.
+    FillBedSettings defaults;
+
+    const int obj_idx = get_selected_object_idx();
+    ModelObject *mo   = (obj_idx >= 0 && obj_idx < int(p->model.objects.size())) ? p->model.objects[obj_idx] : nullptr;
+    if (mo == nullptr || mo->instances.empty())
+        return;
+
+    const DynamicPrintConfig &global_config = wxGetApp().preset_bundle->full_config();
+    int inst_idx = std::max(get_selection().get_instance_idx(), 0);
+    if (inst_idx >= int(mo->instances.size()))
+        inst_idx = 0;
+    arrangement::ArrangePolygon template_ap = get_instance_arrange_poly(mo->instances[inst_idx], global_config);
+
+    // Today's gap: the arrange toolbar spacing when it is set, the template's own brim width
+    // otherwise - which is what "auto" resolves to in update_selected_items_inflation. So an
+    // untouched dialog reproduces the current behaviour.
+    arrangement::ArrangeParams def_params = init_arrange_params(this);
+    defaults.gap = def_params.min_obj_distance != 0 ? unscaled<double>(def_params.min_obj_distance)
+                                                    : double(template_ap.brim_width);
+
+    // Today's effective bed margin: bed_shrink_x/y (1 mm, or the sequential-print value) plus the
+    // skirt distance, exactly what get_shrink_bedpts will take off anyway.
+    arrangement::ArrangeParams margin_params = def_params;
+    arrangement::ArrangePolygons one{template_ap};
+    arrangement::update_arrange_params(margin_params, config(), one);
+    defaults.edge_margin = std::max(0.f, std::max(margin_params.bed_shrink_x, margin_params.bed_shrink_y));
+    defaults.front_enabled = false;
+    // A starting point for the front strip when the user first ticks the override: the purge /
+    // flow-calibration band on the printers that have one is a few tens of mm deep.
+    defaults.front_margin  = std::max(defaults.edge_margin, 40.);
+    defaults.allow_rotation = def_params.allow_rotations;
+
+    // Geometry for the live "Estimated copies" label: the bed as the packer will see it, minus
+    // what the other objects on this plate already occupy.
+    const Points  shrunk_bed = arrangement::get_shrink_bedpts(config(), margin_params);
+    const Polygon bed_poly{shrunk_bed};
+    const BoundingBox bed_bb   = bed_poly.bounding_box();
+    const double      sc       = scaled<double>(1.) * scaled(1.);
+    const double      bed_area = std::abs(bed_poly.area()) / sc;
+    const double      bed_w    = unscaled<double>(bed_bb.size().x());
+    const double      bed_h    = unscaled<double>(bed_bb.size().y());
+
+    PartPlate *plate = p->partplate_list.get_curr_plate();
+    double occupied  = 0.;
+    for (size_t oidx = 0; oidx < p->model.objects.size(); ++ oidx) {
+        if (int(oidx) == obj_idx)
+            continue;
+        ModelObject *other = p->model.objects[oidx];
+        for (size_t iidx = 0; iidx < other->instances.size(); ++ iidx) {
+            if (plate != nullptr && !plate->contain_instance(oidx, iidx))
+                continue;
+            occupied += get_instance_arrange_poly(other->instances[iidx], global_config).poly.area() / sc;
+        }
     }
+
+    const BoundingBox tmpl_bb = template_ap.poly.contour.bounding_box();
+
+    FillBedDialog dlg(this,
+                      defaults,
+                      unscaled<double>(tmpl_bb.size().x()),
+                      unscaled<double>(tmpl_bb.size().y()),
+                      bed_area,
+                      occupied,
+                      bed_w,
+                      bed_h,
+                      double(template_ap.brim_width),
+                      def_params.is_seq_print,
+                      // Grid is deterministic, so the label can be exact rather than an
+                      // estimate: build the real grid against the real bed and the real
+                      // obstacles and report how many cells came back. Cheap - it is a tiling
+                      // plus a bounding-box test per cell, no packing.
+                      [this](const FillBedSettings &s) { return FillBedJob::grid_copies_for(this, s); });
+    if (dlg.ShowModal() != wxID_OK)
+        return;
+
+    p->take_snapshot(_u8L("Arrange"));
+    replace_job(w, std::make_unique<FillBedJob>(dlg.settings()));
 }
 
 bool Plater::is_selection_empty() const

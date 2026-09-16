@@ -11,6 +11,7 @@
 #include <boost/log/trivial.hpp>
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/nowide/convert.hpp>
+#include <boost/filesystem.hpp>
 
 #include <wx/settings.h>
 #include <wx/stattext.h>
@@ -49,6 +50,7 @@
 #include "MsgDialog.hpp"
 #include "UnsavedChangesDialog.hpp"
 #include "MainFrame.hpp"
+#include "WizardNetworking.hpp"
 
 #if defined(__linux__) && defined(__WXGTK3__)
 #define wxLinux_gtk3 true
@@ -2645,6 +2647,44 @@ bool ConfigWizard::priv::apply_config(AppConfig *app_config, PresetBundle *prese
     // Update Preset Combobox
     //auto evt = new SimpleEvent(EVT_UPDATE_PRESET_CB);
     //wxQueueEvent(wxGetApp().mainframe, evt);
+
+    // A Bambu Lab printer needs the Bambu network plug-in: Account > Login hands the sign-in ticket
+    // to the plug-in, and without one the loopback callback 404s and Google/Apple sign-in dies. But
+    // the installed_networking preference has no default, so on a first run it reads false, the
+    // plug-in is never loaded, and the only two places that offer the download are the home-page
+    // banner and a Device tab link - neither of which a user who has just picked an X1 visits.
+    //
+    // So: if the wizard is finishing with a BBL printer installed and the preference was never set,
+    // set it, and offer the download if no plug-in is on disk. A key that exists and is false is a
+    // user who turned the plug-in off on purpose and is left alone - see wizard_should_enable_networking().
+    {
+        bool any_bbl_selected = false;
+        if (const auto bbl_vendor = enabled_vendors.find("BBL"); bbl_vendor != enabled_vendors.end()) {
+            for (const auto &model : bbl_vendor->second) {
+                if (! model.second.empty()) { any_bbl_selected = true; break; }
+            }
+        }
+        const bool key_present = app_config->has("installed_networking");
+        if (wizard_should_enable_networking(key_present, key_present && app_config->get_bool("installed_networking"), any_bbl_selected)) {
+            BOOST_LOG_TRIVIAL(info) << "[ConfigWizard] a Bambu Lab printer was installed and installed_networking was unset; enabling it";
+            app_config->set_bool("installed_networking", true);
+
+            // Nothing on disk to load: offer the download once, after the wizard has closed - the
+            // dialog is modal and cannot run while this one still is.
+            bool have_plugin = false;
+            try {
+                namespace fs = boost::filesystem;
+                const fs::path pf = fs::path(data_dir()) / "plugins";
+                have_plugin = fs::exists(pf / "bambu_networking.dll") ||
+                              fs::exists(pf / "libbambu_networking.so") ||
+                              fs::exists(pf / "libbambu_networking.dylib");
+            } catch (...) {}
+            if (! have_plugin) {
+                BOOST_LOG_TRIVIAL(info) << "[ConfigWizard] no network plug-in in data_dir/plugins; scheduling the download dialog";
+                wxGetApp().CallAfter([] { wxGetApp().ShowDownNetPluginDlg(); });
+            }
+        }
+    }
 
     return true;
 }

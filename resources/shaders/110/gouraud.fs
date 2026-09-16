@@ -34,6 +34,31 @@ uniform vec4 uniform_color_clip_plane_1;
 uniform vec4 uniform_color_clip_plane_2;
 uniform SlopeDetection slope;
 
+// Curved cut sheet (cut gizmo, Surface = Curved). When active the two halves are
+// split by a height field z = f(u,v) sampled over the cut plane, not by the flat
+// plane itself: curved_sheet_matrix takes a world point into the cut plane's own
+// frame, (x,y) are mapped onto [0,1]^2 over +-curved_sheet_half_size and the
+// texture holds f in mm along the plane normal. The comparison has to happen per
+// FRAGMENT - a per-vertex dot would only bend as finely as the mesh is
+// tessellated, which is exactly the flat-looking preview this replaces.
+uniform bool  curved_sheet_active;
+uniform sampler2D curved_sheet_tex;
+uniform mat4  curved_sheet_matrix;
+// Phase 2: the sheet's domain is a RECTANGLE fitted to the cut's cross-section,
+// so u and v have their own half extent.
+uniform vec2  curved_sheet_half_size;
+// 0.0: the texture holds f in mm. Otherwise it holds (f/range + 1)/2, which is
+// what the GL 2.1 fallback has to do - GL_LUMINANCE is fixed point on [0,1].
+uniform float curved_sheet_range;
+
+// Phase 2, side visibility. Per-half alpha for the two colour-clip sides, so a
+// half can be shown solid (1.0), ghosted (~0.25) or hidden. A NEGATIVE value
+// means hidden: the fragment is discarded outright, which is the only way to see
+// through a half rather than through it dimly. The C++ side sets 1.0/1.0 by
+// default, so the flat cut and every other colour-clip user is untouched.
+uniform float color_clip_side_alpha_1;
+uniform float color_clip_side_alpha_2;
+
 //BBS: add outline_color
 uniform bool is_outline;
 uniform sampler2D depth_tex;
@@ -132,8 +157,29 @@ void main()
 
     vec4 color;
 	if (use_color_clip_plane) {
-		color.rgb = (color_clip_plane_dot < 0.0) ? uniform_color_clip_plane_1.rgb : uniform_color_clip_plane_2.rgb;
-		color.a = uniform_color.a;
+		float side = color_clip_plane_dot;
+		if (curved_sheet_active) {
+			vec3 local = (curved_sheet_matrix * vec4(world_pos.xyz, 1.0)).xyz;
+			vec2 uv = local.xy / (2.0 * curved_sheet_half_size) + vec2(0.5, 0.5);
+			// Outside the sheet's domain the height field is not defined; clamp
+			// so the split continues along the border value rather than snapping
+			// back to the flat plane at the sheet's edge.
+			float h = texture2D(curved_sheet_tex, clamp(uv, 0.0, 1.0)).r;
+			if (curved_sheet_range > 0.0)
+				h = (2.0 * h - 1.0) * curved_sheet_range;
+			// color_clip_plane points along -normal (see GLVolumeCollection::
+			// set_color_clip_plane), so keep the same sign convention here.
+			side = h - local.z;
+		}
+		bool first = side < 0.0;
+		// Side visibility. Hidden is a discard, not an alpha of zero: a
+		// zero-alpha fragment still writes depth and would keep hiding whatever
+		// is behind it, which is the whole point of hiding the near half.
+		float side_alpha = first ? color_clip_side_alpha_1 : color_clip_side_alpha_2;
+		if (side_alpha < 0.0)
+			discard;
+		color.rgb = first ? uniform_color_clip_plane_1.rgb : uniform_color_clip_plane_2.rgb;
+		color.a = uniform_color.a * side_alpha;
     }
     else
 	    color = uniform_color;

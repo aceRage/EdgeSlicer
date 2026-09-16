@@ -320,11 +320,19 @@ private:
     NetworkAgent* m_agent { nullptr };
     // Ultra: Flashforge device stack (Orca-Flashforge port)
     DeviceObjectOpr* m_device_opr { nullptr };
+    // Ultra: why the FlashForge stack is unusable, so the Device tab can say so instead of
+    // rendering an empty page. Empty m_flashnetwork_error means the library loaded.
+    std::string              m_flashnetwork_error;
+    std::string              m_flashnetwork_path;
+    std::vector<std::string> m_flashnetwork_searched;
+    bool                     m_flashnetwork_loaded { false };
     wxImage          m_usr_pic_image;
     std::vector<std::string> need_delete_presets;   // store setting ids of preset
     std::vector<bool> m_create_preset_blocked { false, false, false, false, false, false }; // excceed limit
     bool m_networking_compatible { false };
     bool m_networking_need_update { false };
+    // Ultra (plug-in guards): cached "data_dir/plugins holds our own plug-in" answer.
+    bool m_ultranet_plugin_installed { false };
     bool m_networking_cancel_update { false };
     std::shared_ptr<UpgradeNetworkJob> m_upgrade_network_job;
 
@@ -548,6 +556,16 @@ private:
     void            ShowUserGuide();
     void            ShowDownNetPluginDlg();
     void            ShowUserLogin(bool show = true);
+    // Ultra (plug-in guards): true when data_dir/plugins holds OUR clean-room plug-in (a
+    // bambu_networking library sitting next to the ultranet marker file). Every Bambu CDN
+    // download and update prompt is gated on this - see PluginGuard.hpp. It is filesystem state,
+    // so it is answered from a value cached at startup and refreshed after an install.
+    bool            is_ultranet_plugin_installed() const { return m_ultranet_plugin_installed; }
+    void            refresh_ultranet_plugin_state();
+    // The one guarded entry point for "the user asked to sign in to a Bambu account": with no
+    // agent loaded it offers the plug-in download (or asks for a restart, when our own plug-in is
+    // already installed) instead of opening a sign-in page whose ticket has nowhere to go.
+    void            ShowUserLoginGuarded();
     void            ShowOnlyFilament();
     //BBS
     void            request_login(bool show_user_info = false);
@@ -558,6 +576,16 @@ private:
     std::string     get_bambu_user_name();
     // Ultra: Flashforge device stack (Orca-Flashforge port) - FF cloud login lands in Phase B, LAN-only until then
     bool            is_flashforge_login() { return false; }
+    // Ultra: FlashForge LAN support needs FlashForge's closed FlashNetwork library, which we
+    // redistribute (there is no public URL to fetch it from). These report whether it came up,
+    // so the Device tab can show a real message and the diagnostics zip can record the facts.
+    bool            flashnetwork_loaded() const { return m_flashnetwork_loaded; }
+    const std::string &flashnetwork_error() const { return m_flashnetwork_error; }
+    const std::string &flashnetwork_path() const { return m_flashnetwork_path; }
+    const std::vector<std::string> &flashnetwork_searched() const { return m_flashnetwork_searched; }
+    // Loads the library from an explicit path the user picked with "Locate", or re-runs the
+    // normal search after a "Download". Returns true when the stack is up afterwards.
+    bool            init_flashnetwork(const std::string &explicit_path = std::string());
     DeviceObjectOpr* getDeviceObjectOpr();
     wxString        get_homepage_url();
     std::string     handle_web_request(std::string cmd, const std::vector<std::string>& limitCmds);
@@ -857,6 +885,25 @@ private:
     std::string     get_plugin_url(std::string name, std::string country_code);
     int             download_plugin(std::string name, std::string package_name, InstallProgressFn pro_fn = nullptr, WasCancelledFn cancel_fn = nullptr);
     int             install_plugin(std::string name, std::string package_name, InstallProgressFn pro_fn = nullptr, WasCancelledFn cancel_fn = nullptr);
+
+    // Ultra (live view): Bambu's camera component (BambuSource), the DirectShow source filter the
+    // Device-tab live view plays through. It is NOT part of UltraNet - we ship only a placeholder
+    // of that name so the agent's LoadLibrary probe succeeds - so this is the one Bambu CDN path
+    // that stays open while UltraNet is installed. It downloads Bambu's network plug-in package
+    // and extracts ONLY BambuSource (and live555 when present) into plugins/ and cameratools/;
+    // bambu_networking and the UltraNet marker are never touched. Returns 0 on success.
+    int             install_bambu_camera_component(InstallProgressFn pro_fn = nullptr, WasCancelledFn cancel_fn = nullptr);
+    // Ask the user whether to fetch the component, then do it with a progress dialog and register
+    // the filter. Returns true when it is installed, so the caller may retry playback.
+    bool            offer_bambu_camera_component(wxWindow *parent);
+    // True when <data_dir>/plugins holds a real BambuSource rather than our placeholder.
+    bool            has_bambu_camera_component() const;
+    // Register the installed BambuSource DirectShow filter: writes the HKCR\bambu source-filter
+    // CLSID and runs regsvr32 on it (two UAC prompts). Windows only; a no-op elsewhere. Refuses
+    // outright when the DLL does not export DllRegisterServer, which is what made the stock path
+    // fail with "the entry-point DllRegisterServer was not found".
+    bool            register_bambu_source_filter();
+
     std::string     get_http_url(std::string country_code, std::string path = {});
     std::string     get_model_http_url(std::string country_code);
     bool            is_compatibility_version();

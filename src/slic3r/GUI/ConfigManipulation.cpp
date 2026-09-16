@@ -621,7 +621,10 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
 
     toggle_line("infill_shift_step", is_cross_zag || is_locked_zig);
     
-    for (auto el : { "skeleton_infill_density", "skin_infill_density", "infill_lock_depth", "skin_infill_depth","skin_infill_line_width", "skeleton_infill_line_width" })
+    for (auto el : { "skeleton_infill_density", "skin_infill_density", "infill_lock_depth", "skin_infill_depth","skin_infill_line_width", "skeleton_infill_line_width",
+                     // Locked Zag per-band patterns and the contour-hugging skin switch: only
+                     // meaningful while the sparse pattern IS Locked Zag.
+                     "locked_skin_infill_pattern", "locked_skeleton_infill_pattern", "infill_instead_top_bottom_surfaces" })
         toggle_line(el, is_locked_zig);
 
     bool is_zig_zag = config->option<ConfigOptionEnum<InfillPattern>>("sparse_infill_pattern")->value == InfillPattern::ipZigZag;
@@ -860,6 +863,19 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
 
     toggle_line("slowdown_for_curled_perimeters", has_overhang_speed);
 
+    // Edge: layer-time speed smoothing. A/B fields when mode is a speed-up; C fields when Slow down.
+    // Max variation is shared by every non-Off mode.
+    if (config->has("layer_time_speed_smoothing")) {
+        const auto ltssm = config->opt_enum<LayerTimeSpeedSmoothMode>("layer_time_speed_smoothing");
+        const bool ltssm_speed_up  = is_layer_time_speed_up(ltssm);
+        const bool ltssm_slow_down = is_layer_time_slowdown(ltssm);
+        toggle_line("layer_time_speed_max_variation", ltssm_speed_up || ltssm_slow_down);
+        toggle_line("layer_time_speed_max_speedup", ltssm_speed_up);
+        toggle_line("layer_time_speed_max_slowdown", ltssm_slow_down);
+        toggle_line("layer_time_speed_max_time_increase", ltssm_slow_down);
+        toggle_line("layer_time_speed_slowdown_scope", ltssm_slow_down);
+    }
+
     toggle_line("flush_into_objects", !is_global_config);
 
     toggle_line("support_interface_not_for_body",config->opt_int("support_interface_filament")&&!config->opt_int("support_filament"));
@@ -868,6 +884,10 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
     toggle_line("fuzzy_skin_scale", fuzzy_skin_noise_type != NoiseType::Classic);
     toggle_line("fuzzy_skin_octaves", fuzzy_skin_noise_type != NoiseType::Classic && fuzzy_skin_noise_type != NoiseType::Voronoi);
     toggle_line("fuzzy_skin_persistence", fuzzy_skin_noise_type == NoiseType::Perlin || fuzzy_skin_noise_type == NoiseType::Billow);
+    // The overhang skip reuses the lower-layer polygons of overhang wall detection; without it
+    // there is nothing to act on. It is NOT gated on the fuzzy_skin type: "None" still gets fuzzy
+    // skin wherever it is painted on, and the other fuzzy rows stay visible for the same reason.
+    toggle_line("fuzzy_skin_skip_overhangs", config->opt_bool("detect_overhang_wall"));
 
     bool have_arachne = config->opt_enum<PerimeterGeneratorType>("wall_generator") == PerimeterGeneratorType::Arachne;
     for (auto el : { "wall_transition_length", "wall_transition_filter_deviation", "wall_transition_angle",

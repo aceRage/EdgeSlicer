@@ -33,6 +33,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cctype>
+#include <cstring>
 #include <iterator>
 #include <exception>
 #include <cstdlib>
@@ -91,6 +92,7 @@
 #include "MainFrame.hpp"
 #include "slic3r/GUI/FlashForge/DeviceData.hpp"
 #include "slic3r/GUI/FlashForge/MultiComMgr.hpp"
+#include "slic3r/GUI/FlashForge/FFDiagnostics.hpp"
 #include "Plater.hpp"
 #include "GLCanvas3D.hpp"
 #include "GeneratedConfig.hpp"
@@ -104,6 +106,7 @@
 #include "../Utils/UndoRedo.hpp"
 #include "slic3r/Config/Snapshot.hpp"
 #include "Preferences.hpp"
+#include "PluginGuard.hpp"
 #include "PresetMirror.hpp"
 #include "Tab.hpp"
 #include "SysInfoDialog.hpp"
@@ -143,6 +146,7 @@
 #ifdef __WXMSW__
 #include <dbt.h>
 #include <shlobj.h>
+#include <shellapi.h> // ShellExecuteEx, for registering the Bambu camera component
 
 #ifdef __WINDOWS__
 #ifdef _MSW_DARK_MODE
@@ -1183,6 +1187,13 @@ void GUI_App::post_init()
         hms_query = new HMSQuery();
 
     m_show_gcode_window = app_config->get_bool("show_gcode_window");
+    // Ultra (plug-in guards): "the plug-in needs updating" means "its version does not match the
+    // Bambu build we were forked from", which is true of our own plug-in by construction. Acting on
+    // it would download Bambu's package over ours, so it is dropped while UltraNet is installed.
+    if (m_networking_need_update && m_ultranet_plugin_installed) {
+        BOOST_LOG_TRIVIAL(info) << "[UltraNet] UltraNet present, Bambu CDN download disabled (network plug-in update prompt skipped)";
+        m_networking_need_update = false;
+    }
     if (m_networking_need_update && m_hub_managed && RemoteAccess::get().hidden()) {
         RemoteAccess::get().raise_attention("the network plug-in needs updating", "manual");
     } else if (m_networking_need_update) {
@@ -1656,6 +1667,14 @@ int GUI_App::install_plugin(std::string name, std::string package_name, InstallP
     std::string target_file_path = (fs::temp_directory_path() / package_name).string();
 
     BOOST_LOG_TRIVIAL(info) << "[install_plugin] enter";
+    // Ultra (plug-in guards): this unzips Bambu's CDN package straight over data_dir/plugins. When
+    // our own clean-room plug-in lives there, that would silently replace it - refuse. The check is
+    // re-read from disk rather than taken from the cache so a late first-run copy is still seen.
+    refresh_ultranet_plugin_state();
+    if (m_ultranet_plugin_installed) {
+        BOOST_LOG_TRIVIAL(info) << "[UltraNet] UltraNet present, Bambu CDN download disabled (install_plugin refused)";
+        return -1;
+    }
     // get plugin folder
     std::string data_dir_str = data_dir();
     boost::filesystem::path data_dir_path(data_dir_str);
@@ -1774,6 +1793,215 @@ int GUI_App::install_plugin(std::string name, std::string package_name, InstallP
         app_config->set_bool("installed_networking", true);
     BOOST_LOG_TRIVIAL(info) << "[install_plugin] success";
     return 0;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Ultra (live view): Bambu's camera component.
+//
+// The Device-tab live view plays through BambuSource, a proprietary DirectShow source filter. It
+// is not something UltraNet replaces - we ship a ~9.7 KB placeholder under that name purely so the
+// agent's LoadLibrary probe of the plug-ins folder succeeds. The filter itself only ever arrives in
+// Bambu's network plug-in package, and every other route to that package is (correctly) shut off
+// while UltraNet is installed. This is the one deliberate exception, and it is surgical: only
+// BambuSource and live555 are taken out of the zip, so bambu_networking.dll and the ultranet.txt
+// marker are never at risk.
+
+bool GUI_App::has_bambu_camera_component() const
+{
+    namespace fs = boost::filesystem;
+    return exports_dll_register_server(fs::path(data_dir()) / "plugins" / bambu_source_library_name());
+}
+
+int GUI_App::install_bambu_camera_component(InstallProgressFn pro_fn, WasCancelledFn cancel_fn)
+{
+    namespace fs = boost::filesystem;
+    bool cancel = false;
+
+    const std::string package_name = "camera_component.zip";
+    // Deliberately NOT install_plugin(): that unzips the whole package over plugins/ and is refused
+    // while UltraNet is installed. download_plugin() only fetches, so it is safe to reuse as is.
+    int result = download_plugin("plugins", package_name, pro_fn, cancel_fn);
+    if (result < 0) {
+        BOOST_LOG_TRIVIAL(error) << "[camera component] download failed";
+        return result;
+    }
+
+    const std::string zip_path = (fs::temp_directory_path() / package_name).string();
+    mz_zip_archive archive;
+    mz_zip_zero_struct(&archive);
+    if (!open_zip_reader(&archive, zip_path)) {
+        BOOST_LOG_TRIVIAL(error) << "[camera component] cannot open package " << zip_path;
+        if (pro_fn) pro_fn(InstallStatusUnzipFailed, 0, cancel);
+        return InstallStatusUnzipFailed;
+    }
+
+    // Matched on the bare filename so a package that nests them in a folder still works. The
+    // network library is never taken: bambu_networking.dll and the ultranet.txt marker stay ours.
+    const std::string want_source = bambu_source_library_name();
+    const fs::path plugins_dir     = fs::path(data_dir()) / "plugins";
+    const fs::path cameratools_dir = fs::path(data_dir()) / "cameratools";
+    boost::system::error_code ec;
+    fs::create_directories(plugins_dir, ec);
+    fs::create_directories(cameratools_dir, ec);
+
+    bool got_source = false;
+    const mz_uint num_entries = mz_zip_reader_get_num_files(&archive);
+    mz_zip_archive_file_stat stat;
+    for (mz_uint i = 0; i < num_entries; ++i) {
+        if (m_networking_cancel_update || (cancel_fn && cancel_fn())) {
+            close_zip_reader(&archive);
+            BOOST_LOG_TRIVIAL(info) << "[camera component] cancelled by user";
+            return -1;
+        }
+        if (!mz_zip_reader_file_stat(&archive, i, &stat) || stat.m_uncomp_size == 0)
+            continue;
+        std::string entry;
+        if (stat.m_is_utf8) {
+            entry = stat.m_filename;
+        } else {
+            std::string extra(1024, 0);
+            size_t n = mz_zip_reader_get_extra(&archive, stat.m_file_index, extra.data(), extra.size());
+            entry = decode(extra.substr(0, n), stat.m_filename);
+        }
+        const std::string leaf = fs::path(entry).filename().string();
+        const bool is_source  = boost::iequals(leaf, want_source);
+        // Bambu's package carries the filter's own dependencies next to it (live555 for LAN RTSP,
+        // the agora_* / libaosl set for cloud streams); the filter fails to load without them, so
+        // every shared library in the package is taken - except the network library, which is ours.
+        const std::string leaf_lower = boost::to_lower_copy(leaf);
+        const bool is_library = boost::ends_with(leaf_lower, ".dll") || boost::ends_with(leaf_lower, ".dylib") || boost::ends_with(leaf_lower, ".so");
+        const bool is_network = boost::starts_with(leaf_lower, "bambu_networking") || boost::starts_with(leaf_lower, "libbambu_networking");
+        if (!is_source && (!is_library || is_network))
+            continue;
+
+        // Extract to a temp file first, so a half-written download can never leave a truncated
+        // filter sitting where a working one used to be.
+        const fs::path staged = fs::temp_directory_path() / (std::string("edgeslicer_cam_") + leaf);
+        std::string staged_enc = encode_path(staged.string().c_str());
+        mz_bool res = mz_zip_reader_extract_to_file(&archive, stat.m_file_index, staged_enc.c_str(), 0);
+#ifdef WIN32
+        if (res == 0) {
+            std::wstring staged_w = boost::locale::conv::utf_to_utf<wchar_t>(staged.generic_string());
+            res = mz_zip_reader_extract_to_file_w(&archive, stat.m_file_index, staged_w.c_str(), 0);
+        }
+#endif
+        if (res == 0) {
+            BOOST_LOG_TRIVIAL(error) << "[camera component] failed to extract " << leaf;
+            continue;
+        }
+        if (is_source && !exports_dll_register_server(staged)) {
+            // Whatever we just pulled out is not a registrable filter; refuse to install it rather
+            // than recreating the very bug we are fixing.
+            BOOST_LOG_TRIVIAL(error) << "[camera component] extracted " << leaf
+                                     << " does not export DllRegisterServer; refusing to install it";
+            fs::remove(staged, ec);
+            continue;
+        }
+        for (const fs::path &dir : {plugins_dir, cameratools_dir}) {
+            fs::copy_file(staged, dir / leaf, fs::copy_option::overwrite_if_exists, ec);
+            if (ec)
+                BOOST_LOG_TRIVIAL(error) << "[camera component] copy to " << dir.string() << " failed: " << ec.message();
+        }
+        fs::remove(staged, ec);
+        if (is_source)
+            got_source = true;
+        BOOST_LOG_TRIVIAL(info) << "[camera component] installed " << leaf;
+    }
+    close_zip_reader(&archive);
+    fs::remove(fs::path(zip_path), ec);
+
+    if (!got_source) {
+        BOOST_LOG_TRIVIAL(error) << "[camera component] package contained no usable " << want_source;
+        if (pro_fn) pro_fn(InstallStatusUnzipFailed, 0, cancel);
+        return InstallStatusUnzipFailed;
+    }
+    if (pro_fn) pro_fn(InstallStatusInstallCompleted, 100, cancel);
+    BOOST_LOG_TRIVIAL(info) << "[camera component] success";
+    return 0;
+}
+
+bool GUI_App::register_bambu_source_filter()
+{
+#ifdef __WIN32__
+    namespace fs = boost::filesystem;
+    const fs::path dll_path = fs::path(data_dir()) / "plugins" / bambu_source_library_name();
+    // The guard that was missing: regsvr32 on a DLL with no DllRegisterServer can only produce the
+    // error the user reported, so never start the UAC dance unless the entry point is really there.
+    if (!exports_dll_register_server(dll_path)) {
+        BOOST_LOG_TRIVIAL(info) << "[camera component] not registering " << dll_path.string()
+                                << ": no DllRegisterServer export";
+        return false;
+    }
+
+    std::string regContent = R"(Windows Registry Editor Version 5.00
+[HKEY_CLASSES_ROOT\bambu]
+"Source Filter"="{233E64FB-2041-4A6C-AFAB-FF9BCF83E7AA}"
+)";
+    auto reg_path = (fs::temp_directory_path() / fs::unique_path()).replace_extension(".reg");
+    {
+        boost::nowide::ofstream temp_reg_file(reg_path.string().c_str());
+        if (!temp_reg_file)
+            return false;
+        temp_reg_file << regContent;
+    }
+    auto sei_params = L"/q /s " + reg_path.wstring();
+    SHELLEXECUTEINFO sei{sizeof(sei), SEE_MASK_NOCLOSEPROCESS, NULL, L"open",
+                         L"regedit", sei_params.c_str(), SW_HIDE, SW_HIDE};
+    ::ShellExecuteEx(&sei);
+
+    std::wstring quoted_dll_path = L"\"" + dll_path.wstring() + L"\"";
+    SHELLEXECUTEINFO info{sizeof(info), 0, NULL, L"runas", L"regsvr32", quoted_dll_path.c_str(), SW_HIDE};
+    ::ShellExecuteEx(&info);
+
+    boost::system::error_code ec;
+    fs::remove(reg_path, ec);
+    BOOST_LOG_TRIVIAL(info) << "[camera component] registered " << dll_path.string();
+    return true;
+#else
+    return false;
+#endif
+}
+
+bool GUI_App::offer_bambu_camera_component(wxWindow *parent)
+{
+#ifdef __WIN32__
+    MessageDialog dlg(parent,
+                      _L("Live view needs Bambu's camera component (BambuSource.dll), which is not part of "
+                         "EdgeSlicer's network plug-in.\n\nDownload it from Bambu Lab now?"),
+                      _L("Camera component required"), wxYES_NO | wxICON_INFORMATION);
+    if (dlg.ShowModal() != wxID_YES)
+        return false;
+
+    // The DownloadProgressDialog job machinery routes through install_plugin(), which must stay
+    // refused while UltraNet is installed, so run the fetch synchronously behind a busy cursor
+    // rather than reusing that dialog.
+    int result = 0;
+    {
+        wxBusyCursor busy;
+        result = install_bambu_camera_component();
+    }
+    if (result != 0) {
+        MessageDialog err(parent,
+                          _L("Could not download Bambu's camera component. Please check your internet connection "
+                             "and try again.") + wxString::Format("\n\n(error %d)", result),
+                          _L("Download failed"), wxOK | wxICON_ERROR);
+        err.ShowModal();
+        return false;
+    }
+    // Register the freshly installed filter (this is the UAC prompt the user expects, and now it
+    // acts on a DLL that really does export DllRegisterServer).
+    register_bambu_source_filter();
+    return true;
+#else
+    // The CDN package is Windows-only for now: on macOS/Linux live view uses the platform media
+    // stack and there is no registrable DirectShow filter to fetch.
+    MessageDialog dlg(parent,
+                      _L("Live view needs Bambu's camera component, which is not part of EdgeSlicer's network "
+                         "plug-in and is not available for this platform."),
+                      _L("Camera component required"), wxOK | wxICON_INFORMATION);
+    dlg.ShowModal();
+    return false;
+#endif
 }
 
 void GUI_App::restart_networking()
@@ -3049,13 +3277,51 @@ bool GUI_App::on_init_inner()
                 boost::system::error_code ec;
                 fs::create_directories(pf, ec);
                 for (const char* name : {"bambu_networking.dll", "BambuSource.dll"}) {
-                    if (fs::exists(bundled / name))
-                        fs::copy_file(bundled / name, pf / name, fs::copy_option::overwrite_if_exists, ec);
+                    if (! fs::exists(bundled / name))
+                        continue;
+                    // Ultra (live view): our sidecar BambuSource is a placeholder. If the user has
+                    // already fetched Bambu's real camera component into plugins/, it must survive
+                    // this upgrade - stamping the stub back over it would break live view again.
+                    if (std::strcmp(name, "BambuSource.dll") == 0 &&
+                        ! may_overwrite_bambusource(fs::exists(pf / name), exports_dll_register_server(pf / name))) {
+                        BOOST_LOG_TRIVIAL(info) << "[UltraNet] keeping the installed Bambu camera component in " << pf.string();
+                        continue;
+                    }
+                    fs::copy_file(bundled / name, pf / name, fs::copy_option::overwrite_if_exists, ec);
+                }
+                // Ultra (plug-in guards): leave a marker beside the DLLs. The library name is
+                // Bambu's, so the file alone cannot say whose plug-in this is; the marker is what
+                // stops install_plugin() and the update prompts from replacing ours with a CDN
+                // download. The sidecar folder may ship its own copy - prefer that one.
+                if (fs::exists(bundled / kUltraNetMarkerName)) {
+                    fs::copy_file(bundled / kUltraNetMarkerName, pf / kUltraNetMarkerName, fs::copy_option::overwrite_if_exists, ec);
+                } else {
+                    boost::nowide::ofstream marker((pf / kUltraNetMarkerName).string().c_str());
+                    marker << "UltraNet: EdgeSlicer's own network plug-in. Do not replace with the Bambu CDN package." << std::endl;
                 }
                 BOOST_LOG_TRIVIAL(info) << "[UltraNet] installed bundled network plugin to " << pf.string();
             }
+        } else if (!fs::exists(pf / kUltraNetMarkerName)) {
+            // The plug-in is already there but carries no marker: an install that predates the
+            // marker (2.3.7.0 shipped the DLLs alone) or a hand copy. If it is byte-identical to
+            // the sidecar we ship, it is ours - mark it so the CDN paths leave it alone.
+            fs::path exe_dir = fs::path(wxStandardPaths::Get().GetExecutablePath().ToUTF8().data()).parent_path();
+            fs::path bundled = exe_dir / "ultranet" / "bambu_networking.dll";
+            boost::system::error_code ec;
+            if (fs::exists(bundled) && fs::file_size(bundled, ec) == fs::file_size(pf / "bambu_networking.dll", ec)) {
+                boost::nowide::ifstream a(bundled.string().c_str(), std::ios::binary), b((pf / "bambu_networking.dll").string().c_str(), std::ios::binary);
+                std::string sa((std::istreambuf_iterator<char>(a)), std::istreambuf_iterator<char>());
+                std::string sb((std::istreambuf_iterator<char>(b)), std::istreambuf_iterator<char>());
+                if (!sa.empty() && sa == sb) {
+                    boost::nowide::ofstream marker((pf / kUltraNetMarkerName).string().c_str());
+                    marker << "UltraNet: EdgeSlicer's own network plug-in. Do not replace with the Bambu CDN package." << std::endl;
+                    BOOST_LOG_TRIVIAL(info) << "[UltraNet] existing plug-in matches the bundled one; marker written";
+                }
+            }
         }
     } catch (...) {}
+
+    refresh_ultranet_plugin_state();
 
     // Ultra Net: the clean-room network plugin is bundled with the app. If it's present in
     // data_dir/plugins, networking is effectively "installed" - force the flag on so a reset
@@ -3544,23 +3810,67 @@ __retry:
 
     profiler.note(std::string("create_network_agent=") + (create_network_agent ? "true" : "false"));
 
-    // Ultra: Flashforge device stack - initialize their network lib when the
-    // user has dropped FlashNetwork.dll (from a Flash Studio install) beside the
-    // executable. Without it the Flashforge Device tab simply lists no devices.
-    {
-        wxFileName appFileName(wxStandardPaths::Get().GetExecutablePath());
-        const wxString dllPathW = appFileName.GetPathWithSep() + "FlashNetwork.dll";
-        const std::string dllPath = std::string(dllPathW.ToUTF8());
-        if (wxFileName::FileExists(dllPathW)) {
-            if (MultiComMgr::inst()->initalize(dllPath, data_dir()))
-                BOOST_LOG_TRIVIAL(info) << "FlashNetwork initialized from " << dllPath;
-            else
-                BOOST_LOG_TRIVIAL(error) << "FlashNetwork found but failed to initialize: " << dllPath;
-        } else {
-            BOOST_LOG_TRIVIAL(info) << "FlashNetwork.dll not present; Flashforge device connectivity disabled";
+    // Ultra: Flashforge device stack. Their closed FlashNetwork library is shipped beside the
+    // executable (FLASHNETWORK_BIN_DIR); a user who has to place it by hand can also drop it in
+    // <data dir>/plugins. Failure is recorded rather than only logged, so the Device tab can show
+    // what went wrong instead of an empty page.
+    init_flashnetwork();
+
+    return true;
+}
+
+// Ultra: bring up FlashForge's FlashNetwork library.
+//
+// The library is FlashForge's, closed, and published nowhere but inside their own installers, so
+// EdgeSlicer redistributes it unmodified rather than downloading it on demand. It is searched for
+// beside the executable first (where the installer puts it) and then in <data dir>/plugins (the
+// only place a user without administrator rights can fill in by hand).
+//
+// Every outcome is recorded on the app object. An empty Device tab tells a user nothing; the tab
+// reads these back and shows the paths that were tried with a Download/Locate action.
+bool GUI_App::init_flashnetwork(const std::string &explicit_path)
+{
+    if (m_flashnetwork_loaded)
+        return true;
+
+    m_flashnetwork_error.clear();
+    m_flashnetwork_path.clear();
+    m_flashnetwork_searched.clear();
+
+    wxFileName appFileName(wxStandardPaths::Get().GetExecutablePath());
+    const std::string exe_dir = std::string(appFileName.GetPath().ToUTF8());
+
+    if (!explicit_path.empty()) {
+        m_flashnetwork_searched.push_back(explicit_path);
+    } else {
+        m_flashnetwork_searched = ff_flashnetwork_search_paths(exe_dir, data_dir());
+    }
+
+    std::string found;
+    for (const std::string &candidate : m_flashnetwork_searched) {
+        if (wxFileName::FileExists(wxString::FromUTF8(candidate.c_str()))) {
+            found = candidate;
+            break;
         }
     }
 
+    if (found.empty()) {
+        m_flashnetwork_error = ff_flashnetwork_missing_text(m_flashnetwork_searched);
+        BOOST_LOG_TRIVIAL(info) << "FlashNetwork.dll not present; Flashforge device connectivity disabled";
+        return false;
+    }
+
+    m_flashnetwork_path = found;
+    if (!MultiComMgr::inst()->initalize(found, data_dir())) {
+        // Found but would not load: wrong architecture, a truncated copy, or a DLL that needs a
+        // runtime this machine lacks. The path is the useful half of the message.
+        m_flashnetwork_error = ff_flashnetwork_load_failed_text(found);
+        BOOST_LOG_TRIVIAL(error) << "FlashNetwork found but failed to initialize: " << found;
+        return false;
+    }
+
+    m_flashnetwork_loaded = true;
+    BOOST_LOG_TRIVIAL(info) << "FlashNetwork initialized from " << found;
     return true;
 }
 
@@ -4046,6 +4356,18 @@ void GUI_App::start_remote_access()
     RemoteAccess::get().set_hidden(m_hub_managed); // before start(): goes into <pid>.json
     RemoteAccess::get().start();
 
+    // Ultra: SNORCA_LOGIN_LOOPBACK=1 starts the Bambu third-party (Google) login loopback
+    // server at startup instead of waiting for the sign-in page's get_localhost_url call.
+    // Test-only knob (test_login_loopback.py): it lets the loopback's routes and its bound
+    // port be gated without any credentials or a live bambulab page. No effect unless set.
+    {
+        wxString loopback_env;
+        if (wxGetEnv("SNORCA_LOGIN_LOOPBACK", &loopback_env) && loopback_env == "1") {
+            BOOST_LOG_TRIVIAL(info) << "SNORCA_LOGIN_LOOPBACK=1: starting the login loopback server at startup";
+            start_http_server();
+        }
+    }
+
     // Phone access left on last time: bring the hub up with the same link. The token here only
     // seeds a data folder that has never had one - the hub remembers its own and keeps it, so a
     // "New link" made from the tray is not undone by a slicer starting with an older copy.
@@ -4200,8 +4522,79 @@ if (res) {
     }
 }
 
+// Ultra (plug-in guards): re-read data_dir/plugins and cache whether the plug-in installed there
+// is ours. Called at startup (right after the first-run copy) and after an install, so the answer
+// never goes stale while the app is running.
+void GUI_App::refresh_ultranet_plugin_state()
+{
+    bool plugin_present = false, marker = false;
+    try {
+        namespace fs = boost::filesystem;
+        fs::path pf = fs::path(data_dir()) / "plugins";
+        plugin_present =
+            fs::exists(pf / "bambu_networking.dll") ||
+            fs::exists(pf / "libbambu_networking.so") ||
+            fs::exists(pf / "libbambu_networking.dylib");
+        marker = fs::exists(pf / kUltraNetMarkerName);
+    } catch (...) {}
+    const bool was = m_ultranet_plugin_installed;
+    m_ultranet_plugin_installed = is_ultranet_plugin(plugin_present, marker);
+    if (m_ultranet_plugin_installed)
+        BOOST_LOG_TRIVIAL(info) << "[UltraNet] UltraNet present, Bambu CDN download disabled";
+    else if (was)
+        BOOST_LOG_TRIVIAL(info) << "[UltraNet] UltraNet no longer present, Bambu CDN download re-enabled";
+    else
+        BOOST_LOG_TRIVIAL(info) << "[UltraNet] no UltraNet plugin (present=" << plugin_present
+                                << ", marker=" << marker << "), Bambu CDN download path available";
+}
+
+// Ultra (plug-in guards): the guarded way in to Account > Login. Bambu cloud sign-in ends with the
+// system browser hitting our loopback on 13650 and the ticket being handed to the network plug-in;
+// with no agent loaded there is nothing to hand it to and the user just watches the sign-in page
+// fail. Offer the plug-in instead - or, when our own plug-in is already installed, ask for the
+// restart that actually loads it (never the CDN download, which would overwrite ours).
+void GUI_App::ShowUserLoginGuarded()
+{
+    const LoginGuardAction action = plugin_guard_decision(
+        /*plugin_present*/ m_ultranet_plugin_installed, // marker+dll already folded together
+        /*ultranet_marker*/ m_ultranet_plugin_installed,
+        app_config ? app_config->get_bool("installed_networking") : false,
+        getAgent() != nullptr);
+
+    if (action == LoginGuardAction::ShowLogin) {
+        ShowUserLogin();
+        return;
+    }
+
+    if (action == LoginGuardAction::RestartRequired) {
+        BOOST_LOG_TRIVIAL(info) << "[UltraNet] login guard armed: no agent but UltraNet is installed, asking for a restart";
+        MessageDialog dlg(nullptr,
+                          _L("The network plug-in is installed but not loaded yet. Please restart EdgeSlicer and sign in again."),
+                          _L("Sign in to Bambu Lab"), wxOK | wxICON_INFORMATION);
+        dlg.ShowModal();
+        return;
+    }
+
+    BOOST_LOG_TRIVIAL(info) << "[UltraNet] login guard armed: no network agent, offering the plug-in download instead of the sign-in page";
+    MessageDialog dlg(nullptr,
+                      _L("Signing in to a Bambu account needs the network plugin. Install it now?"),
+                      _L("Sign in to Bambu Lab"), wxYES_NO | wxICON_QUESTION);
+    if (dlg.ShowModal() != wxID_YES)
+        return;
+    ShowDownNetPluginDlg();
+    // After a successful install the plug-in still needs the restart before an agent exists, so
+    // the retry is the user's: the next Login click either signs in or lands on the branch above.
+    refresh_ultranet_plugin_state();
+}
+
 void GUI_App::ShowDownNetPluginDlg() {
     try {
+        // Ultra (plug-in guards): our own plug-in is installed. This dialog downloads Bambu's
+        // package from their CDN and unzips it over data_dir/plugins, which would replace it.
+        if (m_ultranet_plugin_installed) {
+            BOOST_LOG_TRIVIAL(info) << "[UltraNet] UltraNet present, Bambu CDN download disabled (download dialog suppressed)";
+            return;
+        }
         if (m_hub_managed && RemoteAccess::get().hidden()) { RemoteAccess::get().raise_attention("the network plug-in needs installing", "manual"); return; }
         auto iter = std::find_if(dialogStack.begin(), dialogStack.end(), [](auto dialog) {
             return dynamic_cast<DownloadProgressDialog *>(dialog) != nullptr;
@@ -4545,7 +4938,9 @@ void GUI_App::sm_request_user_logout()
 //BBS
 void GUI_App::request_login(bool show_user_info)
 {
-    ShowUserLogin();
+    // Ultra (plug-in guards): the menu/topbar Login action. Guarded so a fresh install with no
+    // plug-in offers the download instead of a sign-in page that cannot complete.
+    ShowUserLoginGuarded();
 
     if (show_user_info) {
         get_login_info();
@@ -4618,7 +5013,9 @@ bool GUI_App::check_login()
     }
 
     if (!result) {
-        ShowUserLogin();
+        // Ultra (plug-in guards): the single choke point every cloud action on the Device tab goes
+        // through. With no agent this is exactly the case the guard exists for.
+        ShowUserLoginGuarded();
     }
     return result;
 }
@@ -4815,7 +5212,12 @@ std::string GUI_App::handle_web_request(std::string cmd)
                 }
             }
             else if (command_str.compare("begin_network_plugin_download") == 0) {
-                CallAfter([this] { wxGetApp().ShowDownNetPluginDlg(); });
+                // Ultra (plug-in guards): the home-page banner. ShowDownNetPluginDlg() refuses on
+                // its own when our plug-in is installed; logging here says which entry point asked.
+                if (m_ultranet_plugin_installed)
+                    BOOST_LOG_TRIVIAL(info) << "[UltraNet] UltraNet present, Bambu CDN download disabled (home-page banner ignored)";
+                else
+                    CallAfter([this] { wxGetApp().ShowDownNetPluginDlg(); });
             }
             else if (command_str.compare("get_web_shortcut") == 0) {
                 if (root.get_child_optional("key_event") != boost::none) {
@@ -5903,10 +6305,12 @@ void GUI_App::stop_sync_user_preset()
 void GUI_App::start_http_server()
 {
     if (!m_http_server.is_started()) {
-        // Ultra P4: use a DEDICATED OAuth-callback port (not 13618). Bambu Studio and
-        // OrcaSlicer also bind 13618, so whichever grabbed it first would win the OAuth
-        // handoff. We advertise this port via get_localhost_url (get_http_port()), and
-        // bambulab redirects the ticket to whatever localhost port we report.
+        // Ultra P4: a DEDICATED OAuth-callback port (13650), not Bambu Studio's 13618, so a
+        // concurrently running Bambu Studio / OrcaSlicer cannot swallow our callback. bambulab.com
+        // does honour the localhost port we advertise through get_localhost_url: a user's 404
+        // report of 2026-09-08 carried the URL http://localhost:13650/?ticket=...&redirect_url=...,
+        // i.e. Google's redirect reached this port. That 404 was ours - the ticket exchange had no
+        // network plugin to run through - and is now a redirect with result=fail instead.
         m_http_server.setPort(13650);
         m_http_server.start();
     }
@@ -6757,7 +7161,9 @@ void GUI_App::load_current_presets(bool active_preset_combox/*= false*/, bool ch
             "dithering_step_painted_zones_only",
             "mixed_filament_pointillism_pixel_size",
             "mixed_filament_pointillism_line_gap",
-            "mixed_filament_definitions"
+            "mixed_filament_definitions",
+            "mixed_filament_auto_gradient_choice",
+            "mixed_filament_auto_gradient_physical_count"
         };
 
         // Keep the Mixed Filaments sidebar state in sync when presets are reloaded

@@ -43,6 +43,19 @@ struct LockRegionParam
     std::map<float, ExPolygons> skeleton_density_params;
     std::map<Flow, ExPolygons>  skin_flow_params;
     std::map<Flow, ExPolygons>  skeleton_flow_params;
+    // Phase 2b (contour-hugging skin), from BambuStudio's LockRegionParam - both trees AGPL-3.0,
+    // re-implemented against this tree's shapes. `outlook` holds the non-stInternal fill surfaces
+    // of the layer (the model's own top/bottom skin), collected by Layer::set_outlook_range() when
+    // infill_instead_top_bottom_surfaces is on; those areas become skin regardless of depth, so the
+    // skin band follows the contour instead of sitting in a uniform offset band. Empty (the
+    // default) makes get_skin_and_skeleton_area() fall back to the plain depth offset, which is
+    // exactly the pre-feature split.
+    ExPolygons                  outlook;
+    // Per-region skin/lock depths, in scaled coordinates. Two regions on one layer can carry
+    // different depths; keying the areas by depth keeps them apart the way the density and flow
+    // maps already do.
+    std::map<float, ExPolygons> skin_depths_params;
+    std::map<float, ExPolygons> locked_depths_params;
 };
 
 struct FillParams
@@ -172,6 +185,28 @@ public:
     virtual Polylines fill_surface(const Surface *surface, const FillParams &params);
     virtual ThickPolylines fill_surface_arachne(const Surface* surface, const FillParams& params);
     virtual void set_lock_region_param(const LockRegionParam &lock_param){};
+    // Locked Zag: the pattern each band is drawn with. Only FillLockedZag overrides it.
+    virtual void set_skin_and_skeleton_pattern(const InfillPattern &skin_pattern, const InfillPattern &skeleton_pattern){};
+    // Hand a freshly built sub-filler everything Layer::make_fills() set up on this one, so the
+    // skin/skeleton sub-patterns are positioned, angled and clipped exactly like the Locked Zag
+    // filler they stand in for. Deliberately NOT adapt_fill_octree / the lightning generator:
+    // those are null when the region's sparse pattern is lockedzag, which is why the patterns
+    // needing them are excluded from locked_sk*_infill_pattern's enum (see PrintConfig.cpp).
+    virtual void copy_fill_data(const Fill *f) {
+        layer_id                     = f->layer_id;
+        z                            = f->z;
+        spacing                      = f->spacing;
+        overlap                      = f->overlap;
+        angle                        = f->angle;
+        is_using_template_angle      = f->is_using_template_angle;
+        dont_alternate_fill_direction = f->dont_alternate_fill_direction;
+        link_max_length              = f->link_max_length;
+        loop_clipping                = f->loop_clipping;
+        bounding_box                 = f->bounding_box;
+        print_config                 = f->print_config;
+        print_object_config          = f->print_object_config;
+        no_overlap_expolygons        = f->no_overlap_expolygons;
+    }
     // BBS: this method is used to fill the ExtrusionEntityCollection.
     // It call fill_surface by default
     virtual void fill_surface_extrusion(const Surface *surface, const FillParams &params, ExtrusionEntitiesPtr &out);

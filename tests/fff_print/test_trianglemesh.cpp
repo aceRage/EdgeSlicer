@@ -308,7 +308,7 @@ TEST_CASE("Regression test for issue #4486 - files take forever to slice") {
     mesh.ReadSTLFile(std::string(testfile_dir) + "test_trianglemesh/4486/100_000.stl");
 
     config.set("layer_height", 500);
-    config.set("first_layer_height", 250);
+    config.set("initial_layer_print_height", 250);
     config.set("nozzle_diameter", 500);
 
     Slic3r::Print print;
@@ -335,9 +335,9 @@ TEST_CASE("Profile test for issue #4486 - files take forever to slice") {
     mesh.ReadSTLFile(std::string(testfile_dir) + "test_trianglemesh/4486/10_000.stl");
 
     config.set("layer_height", 500);
-    config.set("first_layer_height", 250);
+    config.set("initial_layer_print_height", 250);
     config.set("nozzle_diameter", 500);
-    config.set("fill_density", "5%");
+    config.set("sparse_infill_density", "5%");
 
     Slic3r::Print print;
     Slic3r::Model model;

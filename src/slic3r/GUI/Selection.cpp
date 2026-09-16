@@ -1382,11 +1382,38 @@ void Selection::scale(const Vec3d& scale, TransformationType transformation_type
     scale_and_translate(scale, Vec3d::Zero(), transformation_type);
 }
 
-#if ENABLE_ENHANCED_PRINT_VOLUME_FIT
-void Selection::scale_to_fit_print_volume(const BuildVolume& volume)
+// True when every selected instance's rotation is a multiple of 90 degrees on every Euler axis.
+// A non-uniform scale applied in the world frame composes OUTSIDE the instance matrix (see
+// transform_instance_relative()), and a diagonal scale commutes with a rotation only when the
+// rotation maps the axes onto each other - which is exactly this case. Anything else gets sheared,
+// and the dialog warns about it.
+bool Selection::is_axis_aligned() const
 {
-    auto fit = [this](double s, Vec3d offset) {
-        if (s <= 0.0 || s == 1.0)
+    static const double HALF_PI = 0.5 * M_PI;
+    for (unsigned int i : m_list) {
+        const Vec3d rot = (*m_volumes)[i]->get_instance_rotation();
+        for (int a = 0; a < 3; ++a) {
+            const double turns = rot[a] / HALF_PI;
+            if (std::abs(turns - std::round(turns)) > 1e-6)
+                return false;
+        }
+    }
+    return true;
+}
+
+#if ENABLE_ENHANCED_PRINT_VOLUME_FIT
+void Selection::scale_to_fit_print_volume(const BuildVolume& volume, const scale_to_volume::Settings& settings)
+{
+    // `factors` is per-axis: uniform mode simply hands the same number three times. `offset` is the
+    // XY move to apply after the scale; Z is always recomputed as a drop onto the bed.
+    auto fit = [this](const Vec3d& factors, Vec3d offset) {
+        if (factors.x() <= 0.0 || factors.y() <= 0.0 || factors.z() <= 0.0)
+            return;
+        const bool no_scale = factors.x() == 1.0 && factors.y() == 1.0 && factors.z() == 1.0;
+        const bool no_move  = offset.x() == 0.0 && offset.y() == 0.0;
+        // A pure drop onto the bed is still worth doing, so only bail when the selection is already
+        // sitting on the bed as well.
+        if (no_scale && no_move && get_bounding_box().min.z() == 0.0)
             return;
 
         wxGetApp().plater()->take_snapshot(std::string("Scale To Fit"));
@@ -1397,11 +1424,13 @@ void Selection::scale_to_fit_print_volume(const BuildVolume& volume)
         type.set_joint();
 
         // apply scale
-        setup_cache();
-        scale(s * Vec3d::Ones(), type);
-        wxGetApp().plater()->canvas3D()->do_scale(""); // avoid storing another snapshot
+        if (!no_scale) {
+            setup_cache();
+            scale(factors, type);
+            wxGetApp().plater()->canvas3D()->do_scale(""); // avoid storing another snapshot
+        }
 
-        // center selection on print bed
+        // center selection on print bed (or, with auto-center off, only nudge it back inside)
         setup_cache();
         offset.z() = -get_bounding_box().min.z();
         TransformationType trafo_type;
@@ -1413,24 +1442,44 @@ void Selection::scale_to_fit_print_volume(const BuildVolume& volume)
         //wxGetApp().obj_manipul()->set_dirty();
     };
 
-    auto fit_rectangle = [this, fit](const BuildVolume& volume) {
+    // The XY offset that puts the post-scale box where the settings ask for: centred on the
+    // gap-shrunk volume, or - with auto-center off - moved by the least amount that brings it back
+    // inside the gap-shrunk edges.
+    auto xy_offset = [&settings](const BoundingBoxf3& box, const BoundingBoxf3& target_volume) {
+        if (settings.auto_center) {
+            const Vec3d d = target_volume.center() - box.center();
+            return Vec3d(d.x(), d.y(), 0.0);
+        }
+        const Vec2d d = scale_to_volume::clamp_translation(to_2d(box.min), to_2d(box.max),
+                                                           to_2d(target_volume.min), to_2d(target_volume.max),
+                                                           settings.edge_gap_mm);
+        return Vec3d(d.x(), d.y(), 0.0);
+    };
+
+    auto fit_rectangle = [this, fit, xy_offset, &settings](const BuildVolume& volume) {
         const BoundingBoxf3 print_volume = volume.bounding_volume();
         const Vec3d print_volume_size = print_volume.size();
 
         // adds 1/100th of a mm on all sides to avoid false out of print volume detections due to floating-point roundings
         const Vec3d box_size = get_bounding_box().size() + 0.02 * Vec3d::Ones();
 
-        const double sx = (box_size.x() != 0.0) ? print_volume_size.x() / box_size.x() : 0.0;
-        const double sy = (box_size.y() != 0.0) ? print_volume_size.y() / box_size.y() : 0.0;
-        const double sz = (box_size.z() != 0.0) ? print_volume_size.z() / box_size.z() : 0.0;
+        const Vec3d factors = scale_to_volume::factors(box_size, print_volume_size, settings);
+        if (factors.x() <= 0.0 || factors.y() <= 0.0 || factors.z() <= 0.0)
+            return;
 
-        if (sx != 0.0 && sy != 0.0 && sz != 0.0)
-            fit(std::min(sx, std::min(sy, sz)), print_volume.center() - get_bounding_box().center());
+        // Where the box will be once scaled about the selection's own centre (World|Joint scales
+        // about the selection bbox centre), so the XY move can be computed before the scale runs.
+        const BoundingBoxf3 box = get_bounding_box();
+        const Vec3d         c   = box.center();
+        const Vec3d         half = 0.5 * box.size().cwiseProduct(factors);
+        const BoundingBoxf3 scaled_box(c - half, c + half);
+
+        fit(factors, xy_offset(scaled_box, print_volume));
     };
 
-    auto fit_circle = [this, fit](const BuildVolume& volume) {
+    auto fit_circle = [this, fit, &settings](const BuildVolume& volume) {
         const Geometry::Circled& print_circle = volume.circle();
-        double print_circle_radius = unscale<double>(print_circle.radius);
+        const double print_circle_radius = unscale<double>(print_circle.radius);
 
         if (print_circle_radius == 0.0)
             return;
@@ -1456,11 +1505,63 @@ void Selection::scale_to_fit_print_volume(const BuildVolume& volume)
         if (circle_radius == 0.0 || max_z == 0.0)
             return;
 
-        const double s = std::min(print_circle_radius / circle_radius, volume.printable_height() / max_z);
-        const Vec3d sel_center = get_bounding_box().center();
-        const Vec3d offset = s * (Vec3d(unscale<double>(circle.center.x()), unscale<double>(circle.center.y()), 0.5 * max_z) - sel_center);
-        const Vec3d print_center = { unscale<double>(print_circle.center.x()), unscale<double>(print_circle.center.y()), 0.5 * volume.printable_height() };
-        fit(s, print_center - (sel_center + offset));
+        const Vec2d  bed_center_2d = Vec2d(unscale<double>(print_circle.center.x()), unscale<double>(print_circle.center.y()));
+        const Vec3d  sel_center    = get_bounding_box().center();
+
+        if (settings.mode == scale_to_volume::Mode::NonUniform) {
+            // A circle has no per-axis extent to fill, so the non-uniform target is the largest
+            // axis-aligned box that is guaranteed to stay inside it: the inscribed square of the
+            // gap-shrunk circle, at the gap-shrunk height. From there it is the rectangular path.
+            const Vec3d vol_size = scale_to_volume::inscribed_square_volume_size(print_circle_radius,
+                                                                                volume.printable_height(),
+                                                                                settings.edge_gap_mm);
+            const Vec3d box_size = get_bounding_box().size() + 0.02 * Vec3d::Ones();
+            const Vec3d factors  = scale_to_volume::factors(box_size, vol_size, settings);
+            if (factors.x() <= 0.0 || factors.y() <= 0.0 || factors.z() <= 0.0)
+                return;
+
+            const BoundingBoxf3 box  = get_bounding_box();
+            const Vec3d         c    = box.center();
+            const Vec3d         half = 0.5 * box.size().cwiseProduct(factors);
+            const BoundingBoxf3 scaled_box(c - half, c + half);
+
+            Vec3d offset = Vec3d::Zero();
+            if (settings.auto_center) {
+                offset = Vec3d(bed_center_2d.x() - scaled_box.center().x(),
+                               bed_center_2d.y() - scaled_box.center().y(), 0.0);
+            } else {
+                // The scaled box's own enclosing circle is what has to stay inside the bed circle.
+                const double box_radius = 0.5 * to_2d(scaled_box.size()).norm();
+                const Vec2d  d = scale_to_volume::clamp_translation_circle(to_2d(scaled_box.center()), box_radius,
+                                                                          bed_center_2d, print_circle_radius,
+                                                                          settings.edge_gap_mm);
+                offset = Vec3d(d.x(), d.y(), 0.0);
+            }
+            fit(factors, offset);
+            return;
+        }
+
+        const double s = scale_to_volume::circle_factor(circle_radius, max_z, print_circle_radius,
+                                                        volume.printable_height(),
+                                                        settings.edge_gap_mm, settings.top_gap_mm);
+        if (s <= 0.0)
+            return;
+
+        // The selection's enclosing circle, scaled about the selection bbox centre - so its centre
+        // moves with the scale, which is what the original code's `offset` term accounted for.
+        const Vec2d scaled_circle_center = to_2d(sel_center) + s * (Vec2d(unscale<double>(circle.center.x()), unscale<double>(circle.center.y())) - to_2d(sel_center));
+
+        Vec3d offset = Vec3d::Zero();
+        if (settings.auto_center) {
+            offset = Vec3d(bed_center_2d.x() - scaled_circle_center.x(),
+                           bed_center_2d.y() - scaled_circle_center.y(), 0.0);
+        } else {
+            const Vec2d d = scale_to_volume::clamp_translation_circle(scaled_circle_center, s * circle_radius,
+                                                                     bed_center_2d, print_circle_radius,
+                                                                     settings.edge_gap_mm);
+            offset = Vec3d(d.x(), d.y(), 0.0);
+        }
+        fit(s * Vec3d::Ones(), offset);
     };
 
     if (is_empty() || m_mode == Volume)
@@ -1474,7 +1575,11 @@ void Selection::scale_to_fit_print_volume(const BuildVolume& volume)
     }
 }
 #else
-void Selection::scale_to_fit_print_volume(const DynamicPrintConfig& config)
+// Dead in this build (ENABLE_ENHANCED_PRINT_VOLUME_FIT is always on), kept source-compatible with
+// the live overload so the dialog's settings thread through both. It ignores `settings` - wiring the
+// gaps and the modes into a rectangle-only path with no circle case was not worth it for code no
+// runtime path reaches.
+void Selection::scale_to_fit_print_volume(const DynamicPrintConfig& config, const scale_to_volume::Settings& settings)
 {
     if (is_empty() || m_mode == Volume)
         return;

@@ -21,3 +21,11 @@ nsExec::ExecToLog '"$SYSDIR\netsh.exe" advfirewall firewall delete rule name="Ed
 Pop $0
 nsExec::ExecToLog '"$SYSDIR\netsh.exe" advfirewall firewall add rule name="EdgeSlicer" dir=in action=allow program="$INSTDIR\EdgeSlicer.exe" protocol=TCP localport=13640 profile=private,domain enable=yes'
 Pop $0
+; Bambu LAN discovery: the network plug-in (loaded inside EdgeSlicer.exe) listens for the printers'
+; SSDP announcements on UDP 2021 and for M-SEARCH replies on UDP 1990. Without this rule a fresh
+; install only discovers printers if the user accepted Windows' first-run prompt for the right
+; network profile - the usual reason a P1S/X1/A1 never shows up in the printer list.
+nsExec::ExecToLog '"$SYSDIR\netsh.exe" advfirewall firewall delete rule name="EdgeSlicer LAN discovery"'
+Pop $0
+nsExec::ExecToLog '"$SYSDIR\netsh.exe" advfirewall firewall add rule name="EdgeSlicer LAN discovery" dir=in action=allow program="$INSTDIR\EdgeSlicer.exe" protocol=UDP localport=2021,1990 profile=private,domain enable=yes'
+Pop $0

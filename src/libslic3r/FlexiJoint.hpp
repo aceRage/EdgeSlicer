@@ -66,6 +66,39 @@
 // Phase 1 is horizontal-pin-axis only in the sense that a non-horizontal axis is WARNED about
 // (not blocked) in the gizmo: a vertical pin axis needs a teardrop bore, which is phase 2.
 //
+// THREAD. A helical screw thread about the cut normal, so the two halves screw together.
+//   * The LID half carries the MALE thread: a core cylinder of the minor radius with N
+//     helical strands (an N-start thread) standing proud of it out to the major radius. The
+//     other half carries a BORE of the major radius plus the clearance, with the SAME helix
+//     re-swept at the clearance-offset radius cut into its wall as the groove.
+//   * The profile is a fixed trapezoid - ACME-style, 30 degree flanks, crest and root
+//     flattened - because a 60 degree V comes to a knife edge that either will not print (the
+//     crest) or notches the root.
+//   * The clearance is NOT a Clipper dilation of the male profile here. A thread is not a
+//     solid of revolution - its meridional section changes with the axial position - so the
+//     "offset the 2D profile then revolve" shortcut the double ring relies on does not apply.
+//     Instead the female groove is its own helical sweep: the same profile at radius + C with
+//     the same pitch, starts, turns and phase, so male and female facets stay parallel and the
+//     measured clearance is exactly C - the same discipline reached by a different route.
+//   * `rotation` is the THREAD START ANGLE. It turns every strand about the cut normal at
+//     once, which is what decides where the lid ends up pointing when it is done up.
+//   * The lead-in taper fades each strand's radial depth to zero over the first and last
+//     fraction of a turn, so the halves catch at any relative angle - and it is also what
+//     closes the swept ribbon's ends, so no cap mesh is needed.
+//
+// BAYONET. A quarter-turn lock, and the more print-robust route to the same twist-lock UX:
+//   * The LID half carries a plug cylinder with N radial LUGS (blocks) standing out of it. The
+//     other half carries a bore, and cut into the bore's wall an L-shaped SLOT per lug: an
+//     AXIAL entry channel down from the mouth, then a CIRCUMFERENTIAL track turning by the
+//     lock angle, ending in a small DETENT bump the lug has to ride over.
+//   * Insert straight down the entry channels, turn by the lock angle, and the lug sits under
+//     the track's roof: pulling axially now hits solid material, which is the whole lock.
+//   * Every slot face is the lug's own swept shape grown by the clearance, so the fit is C all
+//     round the same way the hinge's bore is exactly pin + C.
+//   * Nothing here is a helix and nothing overhangs more than a lug's own width, so both
+//     halves print with the axis vertical as plain layer-wise geometry - which is why it is
+//     the more robust choice even though a thread is what "screw top" literally means.
+//
 // The cut splits the object at z == -gap/2 for the male half and at z == +gap/2 for the
 // female half (for the revolved kinds the female face additionally clears the male body by C).
 
@@ -90,7 +123,22 @@ enum class FlexiJointKind : int {
     // A print-in-place pin hinge: N alternating knuckles along an in-plane axis with one
     // continuous pin through them, placed at the edge of the cut face so the halves fold shut.
     Hinge = 3,
+    // A helical screw thread about the cut normal: male thread on the lid half, bore plus
+    // matching groove on the other, so the two halves screw together.
+    Thread = 4,
+    // A quarter-turn bayonet lock: lugs on the lid half's plug, L-shaped slots in the other
+    // half's bore. Insert axially, twist, captured.
+    Bayonet = 5,
 };
+
+// The kinds that are TWIST LOCKS: a lid screwing or twisting onto a body about the cut normal.
+// They share the lid-side convention, the "print with the axis vertical" warning and the
+// bore-wall footprint. Neither is a Flexi joint in the articulated sense - they do not flex,
+// they fasten - but they ride the same cut pipeline, so they live in the same family.
+inline bool flexi_kind_is_twist(FlexiJointKind k)
+{
+    return k == FlexiJointKind::Thread || k == FlexiJointKind::Bayonet;
+}
 
 struct FlexiJointParams
 {
@@ -151,6 +199,55 @@ struct FlexiJointParams
     // lower half, which is the default; true swaps the two parities.
     bool hinge_fold_upper{ false };
 
+    // ------------------------------------------------------------- Thread and Bayonet only
+    // Major diameter of the thread / outer diameter of the bayonet's lug circle. Auto default
+    // = 1.4 x the joint's outer_radius, i.e. 0.7 x the cut section's inscribed radius.
+    float thread_major_dia{ 12.0f };
+    // Which half carries the MALE half of the fastener (the thread, or the lugged plug). The
+    // mental model is "the cap screws onto the body": the cap is the UPPER half by default and
+    // it is the one that comes off, so the male thread lives up there.
+    // true = the upper half is the lid (default); false moves the male side to the lower half.
+    bool thread_lid_upper{ true };
+
+    // ------------------------------------------------------------------------- Thread only
+    // Axial rise per full turn. Note that it is the CREST SPACING - pitch / starts - that has
+    // to be coarse enough to print, not the pitch: an N-start thread puts N crests in every
+    // pitch. The default is 6 mm because the default start count is 2, which makes the crest
+    // spacing 3 mm - the research's recommended profile, done up in half a turn.
+    // See thread_crest_spacing() and flexi_validate().
+    float thread_pitch{ 6.0f };
+    // Intertwined strands. An N-start thread seats in 360/N degrees of turn, which is what
+    // makes a 2-start thread a half-turn lid rather than a fastener. 1..4.
+    int   thread_starts{ 2 };
+    // Total revolutions of engagement. 1.25 is the commercial jar / pill-bottle range.
+    float thread_turns{ 1.25f };
+    // Right-hand (clockwise to tighten, looking down the axis at the lid) unless this is set.
+    bool  thread_left_hand{ false };
+    // How much of a turn, at EACH end of each strand, the thread's radial depth fades to zero
+    // over. This is the lead-in chamfer: it lets the two halves catch at any relative angle,
+    // and it is also what closes the swept ribbon's ends. 0 caps the ends flat instead.
+    float thread_lead_turns{ 0.5f };
+
+    // ------------------------------------------------------------------------ Bayonet only
+    // Number of lugs around the plug, evenly spaced. 2..4.
+    int   bayonet_lugs{ 3 };
+    // How far the lug stands out of the plug wall, radially.
+    float bayonet_lug_height{ 1.6f };
+    // The lug's axial thickness (the height of the block).
+    float bayonet_lug_thickness{ 2.4f };
+    // Angular width of one lug, in degrees. It has to leave room for the track to turn through
+    // without running into the next lug's entry channel: see flexi_validate().
+    float bayonet_lug_arc{ 30.0f };
+    // How far the lug turns along the circumferential track before it stops, in degrees.
+    // 60-90 is the usual quarter-turn range.
+    float bayonet_lock_angle{ 75.0f };
+    // Axial depth of the entry channel from the bore mouth down to the track. The plug's
+    // insertion depth follows it.
+    float bayonet_entry_depth{ 4.0f };
+    // Height of the detent bump at the end of the track, radially into the lug's path. The lug
+    // rides over it and is held past it. 0 disables the detent.
+    float bayonet_detent{ 0.35f };
+
     // ------------------------------------------ kinds that have a direction in the cut plane
     // Rotation of the joint about the cut normal n, in degrees. The reference direction d0 is
     // the cut plane's own +X axis, and the joint is built along d = rotate(d0, n, rotation).
@@ -175,6 +272,16 @@ struct FlexiJointParams
                hinge_knuckles == o.hinge_knuckles && is_approx(hinge_pin_dia, o.hinge_pin_dia) &&
                is_approx(hinge_barrel_dia, o.hinge_barrel_dia) && is_approx(hinge_length, o.hinge_length) &&
                is_approx(hinge_edge_offset, o.hinge_edge_offset) && hinge_fold_upper == o.hinge_fold_upper &&
+               is_approx(thread_major_dia, o.thread_major_dia) && thread_lid_upper == o.thread_lid_upper &&
+               is_approx(thread_pitch, o.thread_pitch) && thread_starts == o.thread_starts &&
+               is_approx(thread_turns, o.thread_turns) && thread_left_hand == o.thread_left_hand &&
+               is_approx(thread_lead_turns, o.thread_lead_turns) && bayonet_lugs == o.bayonet_lugs &&
+               is_approx(bayonet_lug_height, o.bayonet_lug_height) &&
+               is_approx(bayonet_lug_thickness, o.bayonet_lug_thickness) &&
+               is_approx(bayonet_lug_arc, o.bayonet_lug_arc) &&
+               is_approx(bayonet_lock_angle, o.bayonet_lock_angle) &&
+               is_approx(bayonet_entry_depth, o.bayonet_entry_depth) &&
+               is_approx(bayonet_detent, o.bayonet_detent) &&
                is_approx(rotation, o.rotation);
     }
     bool operator!=(const FlexiJointParams &o) const { return !(*this == o); }
@@ -183,7 +290,11 @@ struct FlexiJointParams
     {
         ar(kind, outer_radius, ring_width, ring_height, clearance, hub_radius, tilt, neck_ratio, open_angle,
            gap, link_length, link_width, wire, tilt_angle, stem, rotation,
-           hinge_knuckles, hinge_pin_dia, hinge_barrel_dia, hinge_length, hinge_edge_offset, hinge_fold_upper);
+           hinge_knuckles, hinge_pin_dia, hinge_barrel_dia, hinge_length, hinge_edge_offset, hinge_fold_upper,
+           thread_major_dia, thread_lid_upper, thread_pitch, thread_starts, thread_turns,
+           thread_left_hand, thread_lead_turns, bayonet_lugs, bayonet_lug_height,
+           bayonet_lug_thickness, bayonet_lug_arc, bayonet_lock_angle, bayonet_entry_depth,
+           bayonet_detent);
     }
 };
 
@@ -242,7 +353,8 @@ std::vector<indexed_triangle_set> flexi_female_cavities(const FlexiJointParams &
 // the male one and a cavity on the female one.
 inline bool flexi_is_two_sided(const FlexiJointParams &p)
 {
-    return p.kind == FlexiJointKind::ChainLink || p.kind == FlexiJointKind::Hinge;
+    return p.kind == FlexiJointKind::ChainLink || p.kind == FlexiJointKind::Hinge ||
+           flexi_kind_is_twist(p.kind);
 }
 
 // The bodies to UNION into the lower / upper segment.
@@ -320,6 +432,80 @@ inline bool hinge_axis_needs_care(const Vec3d &axis_world)
 {
     const double n = axis_world.norm();
     return n > EPSILON && std::abs(axis_world.z()) / n > 0.1;
+}
+
+// ------------------------------------------------------------------------ thread / bayonet
+
+// Major radius of the thread (or of the bayonet's lug circle): half thread_major_dia.
+inline double thread_major_radius(const FlexiJointParams &p) { return 0.5 * double(p.thread_major_dia); }
+// Axial distance from one thread crest to the next: pitch / starts, because strand s sits
+// pitch x s/starts above strand 0 and an N-start thread puts N crests in every pitch. Every
+// other dimension of the thread has to fit inside this.
+double thread_crest_spacing(const FlexiJointParams &p);
+// Radial depth of the thread profile: the ACME convention, 0.35 x pitch, capped so that the
+// profile AND the clearance the female groove adds to it still fit between one crest and the
+// next. A groove whose coils merge is a plain annular cavity that holds nothing, so this cap is
+// what makes the thread a thread; flexi_validate() refuses parameters that need it to bite hard.
+double thread_depth(const FlexiJointParams &p);
+// The trapezoid's own AXIAL height at a given depth: the crest flat (a quarter of the crest
+// spacing) plus one flank's axial run at each end. thread_depth() solves this backwards to find
+// the deepest thread that still fits between two crests.
+double thread_profile_height(const FlexiJointParams &p, double depth);
+// How much TALLER the female groove is than the thread it clears: the clearance measured
+// perpendicular to a 30 degree flank, at each end. profile height + this has to fit inside
+// thread_crest_spacing() or the groove's turns merge and the thread holds nothing.
+double thread_groove_growth(const FlexiJointParams &p);
+// Minor radius = major radius - depth. This is the male core cylinder's radius.
+inline double thread_minor_radius(const FlexiJointParams &p) { return thread_major_radius(p) - thread_depth(p); }
+// Strand count actually used: clamped into 1..4.
+int    thread_start_count(const FlexiJointParams &p);
+// Axial length of the threaded region: the helix's own rise plus the last strand's offset.
+double thread_axial_length(const FlexiJointParams &p);
+// The female bore's inner radius: major radius + clearance.
+inline double thread_bore_radius(const FlexiJointParams &p) { return thread_major_radius(p) + double(p.clearance); }
+// The wall left around the bore so the female half is not a paper tube: the research's
+// "1-1.5 mm of core wall" rule, applied to the outside of the bore.
+inline double thread_bore_wall() { return 1.2; }
+// The trapezoidal thread profile in the strand's own (radial, axial) frame, as
+// its_make_helical_sweep() wants it: 30 degree flanks, flats at crest and root, centred on the
+// helix centreline. `radial_offset` shifts the whole profile outward, which is how the female
+// groove is built at the clearance radius.
+std::vector<Vec2d> thread_profile(const FlexiJointParams &p, double radial_offset = 0.);
+// The same profile DILATED by `grow` - each edge moved out along its own normal, which is what
+// a clearance actually is. Sliding the profile radially instead leaves the two flanks on the
+// same pair of parallel lines and gives no clearance at all where the thread bears, which is
+// why the female groove is built with this rather than with a radial offset.
+std::vector<Vec2d> thread_profile_grown(const FlexiJointParams &p, double radial_offset, double grow);
+// Helix angle of the thread at the major radius, measured FROM VERTICAL, in degrees: a steep
+// helix means the crest overhangs badly even with the axis upright.
+double thread_helix_angle_deg(const FlexiJointParams &p);
+
+// Lug count actually used: clamped into 2..4.
+int    bayonet_lug_count(const FlexiJointParams &p);
+// The bayonet plug's radius: the lug circle's radius less the lug height.
+inline double bayonet_plug_radius(const FlexiJointParams &p)
+{
+    return std::max(0.5, thread_major_radius(p) - double(p.bayonet_lug_height));
+}
+// The lock angle actually used: clamped into 30..120 degrees, and never so wide that one lug's
+// track would run into the next lug's entry channel.
+double bayonet_effective_lock_angle(const FlexiJointParams &p);
+// Overall axial length of the bayonet plug: the entry depth plus the lug's own thickness plus
+// a little seating clearance.
+double bayonet_plug_length(const FlexiJointParams &p);
+// The centre angle of lug i, in degrees, INCLUDING the joint's own rotation.
+double bayonet_lug_angle_deg(const FlexiJointParams &p, int i);
+
+// PRINTABILITY OF THE TWIST AXIS. A thread or a bayonet wants its axis VERTICAL in print
+// orientation: with the axis lying down, each turn's upper flank is a horizontal overhang that
+// sags into the mating clearance and the fit is gone. `axis_world` is the cut normal in WORLD
+// coordinates. Returns true when it is more than about 6 degrees off vertical, which the gizmo
+// warns - never blocks - on. Exactly the mirror image of hinge_axis_needs_care(), which wants
+// its axis HORIZONTAL.
+inline bool twist_axis_needs_care(const Vec3d &axis_world)
+{
+    const double n = axis_world.norm();
+    return !(n > EPSILON && std::abs(axis_world.z()) / n > 0.995);
 }
 
 // ------------------------------------------------------------------------------------ guards

@@ -17,6 +17,11 @@
 #define LOCALHOST_PORT      13618
 #define PAGE_HTTP_PORT      13619
 #define LOCALHOST_URL       "http://127.0.0.1:"
+// Ultra: the base URL advertised to bambulab.com/sign-in via get_localhost_url. Bambu
+// Studio reports "http://localhost:" (LOCALHOST_URL upstream); bambulab validates the
+// redirect target against its registered callback and rejects the 127.0.0.1 spelling, so
+// this must stay "localhost" even though our other loopback URLs use 127.0.0.1.
+#define BBL_LOGIN_LOCALHOST_URL "http://localhost:"
 #define WCP_DOWNLOAD_PREFIX "/wcp_download/"
 
 namespace Slic3r { namespace GUI {
@@ -91,6 +96,16 @@ public:
     {
     public:
         ~ResponseNotFound() override = default;
+        void write_response(std::stringstream& ssOut) override;
+    };
+
+    // Ultra: a well-formed third-party login callback that could not be completed. A 200
+    // page, never a 404 - a 404 in the system browser is exactly what users report as
+    // "signing in with Google 404s".
+    class ResponseLoginFailed : public Response
+    {
+    public:
+        ~ResponseLoginFailed() override = default;
         void write_response(std::stringstream& ssOut) override;
     };
 

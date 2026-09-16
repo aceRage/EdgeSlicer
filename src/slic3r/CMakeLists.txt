@@ -78,6 +78,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/CameraUtils.hpp
     GUI/CloneDialog.cpp
     GUI/CloneDialog.hpp
+    GUI/FillBedDialog.cpp
+    GUI/FillBedDialog.hpp
     GUI/ColorSplitDialog.cpp
     GUI/ColorSplitDialog.hpp
     GUI/ImageFillDialog.cpp
@@ -421,6 +423,10 @@ set(SLIC3R_GUI_SOURCES
     GUI/SnapmakerLan.cpp
     GUI/SnapmakerTaskConfig.hpp
     GUI/SnapmakerTaskConfig.cpp
+    GUI/WizardNetworking.hpp
+    GUI/WizardNetworking.cpp
+    GUI/PluginGuard.hpp
+    GUI/PluginGuard.cpp
     GUI/SnapmakerLan.hpp
     GUI/RemoteHub.cpp
     GUI/RemoteHub.hpp
@@ -492,6 +498,10 @@ set(SLIC3R_GUI_SOURCES
     GUI/FlashForge/DeviceListPanel.hpp
     GUI/FlashForge/ExportLogs.cpp
     GUI/FlashForge/ExportLogs.hpp
+    GUI/FlashForge/FFDiagnostics.cpp
+    GUI/FlashForge/FFDiagnostics.hpp
+    GUI/FlashForge/FFDiagnosticsDialog.cpp
+    GUI/FlashForge/FFDiagnosticsDialog.hpp
     GUI/FlashForge/FFDownloadTool.cpp
     GUI/FlashForge/FFDownloadTool.hpp
     GUI/FlashForge/FFTextCtrl.cpp
@@ -562,6 +572,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/RemovableDriveManager.hpp
     GUI/SavePresetDialog.cpp
     GUI/SavePresetDialog.hpp
+    GUI/ScaleToVolumeDialog.cpp
+    GUI/ScaleToVolumeDialog.hpp
     GUI/SceneRaycaster.cpp
     GUI/SceneRaycaster.hpp
     GUI/Search.cpp
@@ -763,6 +775,8 @@ set(SLIC3R_GUI_SOURCES
     Utils/Http.hpp
     Utils/InstanceID.cpp
     Utils/InstanceID.hpp
+    Utils/LoginUserAgent.cpp
+    Utils/LoginUserAgent.hpp
     Utils/json_diff.cpp
     Utils/json_diff.hpp
     Utils/minilzo_extension.cpp

@@ -105,7 +105,12 @@ bool MultiComMgr::initalize(const std::string &dllPath, const std::string &dataD
     wxFileName appFileName(wxStandardPaths::Get().GetExecutablePath());
     wxString appPathWithSep = appFileName.GetPathWithSep();
     std::string logFileDir = dataDir + "/FlashNetwork";
-    bool debug = wxFileName::FileExists(appPathWithSep + "FLASHNETWORK_DEBUG");
+    // The marker file stays supported for anyone who already relies on it; Diagnostics raises the
+    // level through setDebugLogging() instead, which needs no file and no restart.
+    bool debug = m_debugLogging || wxFileName::FileExists(appPathWithSep + "FLASHNETWORK_DEBUG");
+    m_dllPath    = dllPath;
+    m_dataDir    = dataDir;
+    m_logFileDir = logFileDir;
 
     fnet_log_settings_t logSettings;
     logSettings.fileDir = logFileDir.c_str();
@@ -149,6 +154,45 @@ bool MultiComMgr::initalize(const std::string &dllPath, const std::string &dataD
     ComWanConn::inst()->Bind(WAN_CONN_HTTP_UNAUTHORIZED, onWanConnUnauthorized);
     WanDevTokenMgr::inst()->Bind(COM_REFRESH_TOKEN_EVENT, &MultiComMgr::onRefreshToken, this);
     return true;
+}
+
+// Raise or lower FlashNetwork's log level.
+//
+// The library takes its log settings in fnet_initlize and exports no way to change them after,
+// so the only way to get debug logs out of a running session is to drop the interface and build
+// a new one. That disconnects every LAN device, which the caller (Diagnostics) accepts: it
+// re-runs its connection test straight afterwards and the device list repopulates on its own.
+bool MultiComMgr::setDebugLogging(bool debug)
+{
+    if (networkIntfc() == nullptr) {
+        // Nothing is up, so there is nothing to re-initalize. Remember the wish: the next
+        // initalize() will honour it.
+        m_debugLogging = debug;
+        return false;
+    }
+    if (m_debugLogging == debug) {
+        return true;
+    }
+    const std::string dllPath = m_dllPath;
+    const std::string dataDir = m_dataDir;
+
+    uninitalize();
+    m_debugLogging = debug;
+    if (!initalize(dllPath, dataDir)) {
+        BOOST_LOG_TRIVIAL(error) << "setDebugLogging: re-initalize failed, FlashNetwork is down";
+        return false;
+    }
+    return true;
+}
+
+std::string MultiComMgr::libraryVersion()
+{
+    fnet::FlashNetworkIntfc *intfc = networkIntfc();
+    if (intfc == nullptr || intfc->getVersion == nullptr) {
+        return std::string();
+    }
+    const char *version = intfc->getVersion();
+    return version == nullptr ? std::string() : std::string(version);
 }
 
 void MultiComMgr::uninitalize()

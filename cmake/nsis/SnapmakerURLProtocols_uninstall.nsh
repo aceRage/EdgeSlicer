@@ -11,3 +11,5 @@ SetRegView 32
 ; Drop the inbound firewall rule the installer pre-created for us.
 nsExec::ExecToLog '"$SYSDIR\netsh.exe" advfirewall firewall delete rule name="EdgeSlicer"'
 Pop $0
+nsExec::ExecToLog '"$SYSDIR\netsh.exe" advfirewall firewall delete rule name="EdgeSlicer LAN discovery"'
+Pop $0

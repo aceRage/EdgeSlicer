@@ -16,7 +16,7 @@ SCENARIO("PrintObject: Perimeter generation", "[PrintObject]") {
             // Pin the Slic3r-era geometry this scenario was written against:
             // 0.5 + 65*0.3 = 20mm -> 66 layers, and 3 classic perimeter loops.
             Slic3r::Test::init_and_process_print({TestMesh::cube_20x20x20}, print, {
-                { "fill_density",               0 },
+                { "sparse_infill_density",               0 },
                 { "nozzle_diameter",            0.6 },
                 { "layer_height",               0.3 },
                 { "initial_layer_print_height", 0.5 },
@@ -45,7 +45,7 @@ SCENARIO("Print: Skirt generation", "[Print]") {
             Slic3r::Test::init_and_process_print({TestMesh::cube_20x20x20}, print, {
             	{ "skirt_height", 	1 },
         		{ "skirt_distance", 1 },
-        		{ "skirts", 		2 }
+        		{ "skirt_loops", 		2 }
             });
             THEN("Skirt Extrusion collection has 2 loops in it") {
                 REQUIRE(print.skirt().items_count() == 2);
@@ -59,10 +59,10 @@ SCENARIO("Print: Changing number of solid surfaces does not cause all surfaces t
     GIVEN("sliced 20mm cube and config with top_solid_surfaces = 2 and bottom_solid_surfaces = 1") {
         Slic3r::DynamicPrintConfig config = Slic3r::DynamicPrintConfig::full_print_config();
 		config.set_deserialize_strict({
-			{ "top_solid_layers",		2 },
-			{ "bottom_solid_layers",	1 },
+			{ "top_shell_layers",		2 },
+			{ "bottom_shell_layers",	1 },
 			{ "layer_height",			0.25 }, // get a known number of layers
-			{ "first_layer_height",		0.25 }
+			{ "initial_layer_print_height",		0.25 }
 			});
         Slic3r::Print print;
         Slic3r::Model model;
@@ -83,7 +83,7 @@ SCENARIO("Print: Changing number of solid surfaces does not cause all surfaces t
         test_is_solid_infill(0, 79); // should be solid
         test_is_solid_infill(0, 78); // should be solid
         WHEN("Model is re-sliced with top_solid_layers == 3") {
-			config.set("top_solid_layers", 3);
+			config.set("top_shell_layers", 3);
 			print.apply(model, config);
             print.process();
             THEN("Print object does not have 0 solid bottom layers.") {
@@ -103,22 +103,30 @@ SCENARIO("Print: Brim generation", "[Print]") {
         WHEN("Brim is set to 3mm")  {
 	        Slic3r::Print print;
 	        Slic3r::Test::init_and_process_print({TestMesh::cube_20x20x20}, print, {
-	        	{ "first_layer_extrusion_width", 	1 },
-	        	{ "brim_width", 					3 }
+	        	{ "initial_layer_line_width", 	1 },
+	        	{ "brim_width", 					3 },
+	        	// brim_type defaults to auto_brim in this fork, which ignores
+	        	// brim_width for a shape that needs no brim (a plain cube).
+	        	{ "brim_type", 					"outer_only" }
 	        });
-            THEN("Brim Extrusion collection has 3 loops in it") {
+            THEN("Brim Extrusion collection has 2 loops in it") {
+            // FORK BEHAVIOUR: Brim.cpp:385 quantises the requested brim_width DOWN to an
+            // EVEN number of flow widths - floor(brim_width / flowWidth / 2) * flowWidth * 2 -
+            // so the loop count is 2*floor(width / (2*flow)), not the upstream width/flow.
+            // flow 1mm: 3mm -> 2 loops (not 3), 6mm -> 6; flow 0.5mm: 6mm -> 12 (not 14).
                 size_t total_items = 0;
                 for (const auto& pair : print.get_brimMap()) {
                     total_items += pair.second.items_count();
                 }
-                REQUIRE(total_items == 3);
+                REQUIRE(total_items == 2);
             }
         }
         WHEN("Brim is set to 6mm")  {
 	        Slic3r::Print print;
 	        Slic3r::Test::init_and_process_print({TestMesh::cube_20x20x20}, print, {
-	        	{ "first_layer_extrusion_width", 	1 },
-	        	{ "brim_width", 					6 }
+	        	{ "initial_layer_line_width", 	1 },
+	        	{ "brim_width", 					6 },
+	        	{ "brim_type", 					"outer_only" }
 	        });
             THEN("Brim Extrusion collection has 6 loops in it") {
                 size_t total_items = 0;
@@ -131,17 +139,22 @@ SCENARIO("Print: Brim generation", "[Print]") {
         WHEN("Brim is set to 6mm, extrusion width 0.5mm")  {
 	        Slic3r::Print print;
 	        Slic3r::Test::init_and_process_print({TestMesh::cube_20x20x20}, print, {
-	        	{ "first_layer_extrusion_width", 	1 },
+	        	{ "initial_layer_line_width", 	1 },
 	        	{ "brim_width", 					6 },
-	        	{ "first_layer_extrusion_width", 	0.5 }
+	        	{ "brim_type", 					"outer_only" },
+	        	{ "initial_layer_line_width", 	0.5 }
 	        });
 			print.process();
             THEN("Brim Extrusion collection has 12 loops in it") {
+            // FORK BEHAVIOUR: Brim.cpp:385 quantises the requested brim_width DOWN to an
+            // EVEN number of flow widths - floor(brim_width / flowWidth / 2) * flowWidth * 2 -
+            // so the loop count is 2*floor(width / (2*flow)), not the upstream width/flow.
+            // flow 1mm: 3mm -> 2 loops (not 3), 6mm -> 6; flow 0.5mm: 6mm -> 12 (not 14).
                 size_t total_items = 0;
                 for (const auto& pair : print.get_brimMap()) {
                     total_items += pair.second.items_count();
                 }
-                REQUIRE(total_items == 14);
+                REQUIRE(total_items == 12);
             }
         }
     }

@@ -1,6 +1,7 @@
 #include "WebView.hpp"
 #include "slic3r/GUI/GUI_App.hpp"
 #include "slic3r/Utils/MacDarkMode.hpp"
+#include "slic3r/Utils/LoginUserAgent.hpp"
 
 #include <boost/log/trivial.hpp>
 
@@ -271,15 +272,15 @@ wxWebView* WebView::CreateWebView(wxWindow * parent, wxString const & url, wxStr
     if (webView) {
         webView->SetBackgroundColour(StateColor::darkModeColorFor(*wxWHITE));
 #ifdef __WIN32__
-        // Ultra P4: bambulab.com/sign-in version-gates its login flavor on the BBL-Slicer
-        // UA version. Our SLIC3R_VERSION (01.10.x) is below the ticketLogin gate
-        // (02.03.00.01), so the site falls back to its retired legacy /sign-in/callback
-        // (404) instead of the live /sign-in/studio-callback. Report a version >= the gate
-        // for the Bambu login webview ONLY (do not touch SLIC3R_VERSION globally).
-        wxString ua_ver = (brand_tag == "BBL-Slicer") ? wxString("02.03.00.01") : wxString(SLIC3R_VERSION);
-        webView->SetUserAgent(wxString::Format("%s/v%s (%s) Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/107.0.0.0 Safari/537.36 Edg/107.0.1418.52", brand_tag, ua_ver,
-            Slic3r::GUI::wxGetApp().dark_mode() ? "dark" : "light"));
+        // Ultra: bambulab.com/sign-in version-gates its login flavour on the BBL-Slicer UA
+        // token. Build the UA with Bambu Studio's exact layout (browser prefix first, then
+        // BBL-Slicer and BBL-Language) via the shared, wx-free builder - the fork's old
+        // "BBL-Slicer/v.. Mozilla/5.0 .." order with no BBL-Language token is not what the
+        // site parses, and its spoofed 02.03.00.01 is below the current gate.
+        webView->SetUserAgent(wxString::FromUTF8(Slic3r::bbl_login_user_agent(
+            Slic3r::LoginUAPlatform::Windows, Slic3r::GUI::wxGetApp().dark_mode(),
+            Slic3r::GUI::wxGetApp().current_language_code().ToStdString(),
+            brand_tag.ToStdString(), SLIC3R_VERSION)));
         webView->Create(parent, wxID_ANY, url2, wxDefaultPosition, wxDefaultSize, wxBORDER_NONE);
         // We register the wxfs:// protocol for testing purposes
         webView->RegisterHandler(wxSharedPtr<wxWebViewHandler>(new wxWebViewArchiveHandler("bbl")));
@@ -299,8 +300,16 @@ wxWebView* WebView::CreateWebView(wxWindow * parent, wxString const & url, wxStr
         webView->RegisterHandler(wxSharedPtr<wxWebViewHandler>(new wxWebViewFSHandler("memory")));
 #endif
         webView->Create(parent, wxID_ANY, url2, wxDefaultPosition, wxDefaultSize, wxBORDER_NONE);
-        webView->SetUserAgent(wxString::Format("SM-Slicer/v%s (%s) Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko)", SLIC3R_VERSION,
-                                               Slic3r::GUI::wxGetApp().dark_mode() ? "dark" : "light"));
+        // Same UA layout as the Windows branch above; macOS/Linux WebKit prefix.
+        webView->SetUserAgent(wxString::FromUTF8(Slic3r::bbl_login_user_agent(
+#if defined(__linux__)
+            Slic3r::LoginUAPlatform::Linux,
+#else
+            Slic3r::LoginUAPlatform::MacOS,
+#endif
+            Slic3r::GUI::wxGetApp().dark_mode(),
+            Slic3r::GUI::wxGetApp().current_language_code().ToStdString(),
+            brand_tag.ToStdString(), SLIC3R_VERSION)));
 #endif
 #ifdef __WXMAC__
         WKWebView * wkWebView = (WKWebView *) webView->GetNativeBackend();
@@ -404,8 +413,13 @@ void WebView::RecreateAll()
 {
     auto dark = Slic3r::GUI::wxGetApp().dark_mode();
     for (auto webView : g_webviews) {
-        webView->SetUserAgent(wxString::Format("SM-Slicer/v%s (%s) Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko)", SLIC3R_VERSION,
-                                               dark ? "dark" : "light"));
+        // RecreateAll only refreshes the theme token; it cannot know each view's brand tag,
+        // so keep the fork's default SM-Slicer here (the login dialog is modal and is not
+        // alive across a theme switch).
+        webView->SetUserAgent(wxString::FromUTF8(Slic3r::bbl_login_user_agent(
+            Slic3r::LoginUAPlatform::MacOS, dark,
+            Slic3r::GUI::wxGetApp().current_language_code().ToStdString(),
+            "SM-Slicer", SLIC3R_VERSION)));
         webView->Reload();
     }
 }

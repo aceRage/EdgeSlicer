@@ -2,6 +2,7 @@
 #include "libslic3r/Time.hpp"
 #include "I18N.hpp"
 #include "GUI_App.hpp"
+#include "PluginGuard.hpp"
 #include <boost/filesystem/operations.hpp>
 #ifdef __WIN32__
 #include <winuser.h>
@@ -92,38 +93,35 @@ void wxMediaCtrl2::Load(wxURI url)
         boost::filesystem::path data_dir_path(data_dir_str);
         auto                    dll_path = data_dir_path / "plugins" / "BambuSource.dll";
         if (path.empty() || !wxFile::Exists(path) || clsid != CLSID_BAMBU_SOURCE) {
-            if (boost::filesystem::exists(dll_path)) {
-                CallAfter(
-                    [dll_path] {
-                    int res = wxMessageBox(_L("BambuSource has not correctly been registered for media playing! Press Yes to re-register it. You will be promoted twice"), _L("Error"), wxYES_NO);
-                    if (res == wxYES) {
-                        std::string regContent = R"(Windows Registry Editor Version 5.00
-                                                    [HKEY_CLASSES_ROOT\bambu]
-                                                    "Source Filter"="{233E64FB-2041-4A6C-AFAB-FF9BCF83E7AA}"
-                                                    )";
-
-                        auto reg_path = (fs::temp_directory_path() / fs::unique_path()).replace_extension(".reg");
-                        std::ofstream temp_reg_file(reg_path.c_str());
-                        if (!temp_reg_file) {
-                            return false;
-                        }
-                        temp_reg_file << regContent;
-                        temp_reg_file.close();
-                        auto sei_params = L"/q /s " + reg_path.wstring();
-                        SHELLEXECUTEINFO sei{sizeof(sei), SEE_MASK_NOCLOSEPROCESS, NULL,   L"open",
-                                             L"regedit",  sei_params.c_str(),SW_HIDE,SW_HIDE};
-                        ::ShellExecuteEx(&sei);
-
-                        wstring quoted_dll_path = L"\"" + dll_path.wstring() + L"\"";
-                        SHELLEXECUTEINFO info{sizeof(info), 0, NULL, L"runas", L"regsvr32", quoted_dll_path.c_str(), SW_HIDE };
-                        ::ShellExecuteEx(&info);
-                        fs::remove(reg_path);
+            // Ultra (live view): what sits at <plugins>\BambuSource.dll may be the ~9.7 KB
+            // placeholder EdgeSlicer ships so the agent's LoadLibrary probe succeeds. It exports no
+            // DllRegisterServer, so offering to regsvr32 it - the stock behaviour - can only end in
+            // "the entry-point DllRegisterServer was not found" plus two pointless UAC prompts.
+            // Offer Bambu's real camera component instead.
+            if (Slic3r::GUI::is_ultranet_bambusource_stub(dll_path)) {
+                BOOST_LOG_TRIVIAL(info) << "[camera component] plug-ins BambuSource is our stub; offering the real component";
+                CallAfter([this] {
+                    if (Slic3r::GUI::wxGetApp().offer_bambu_camera_component(this)) {
+                        // Installed and registered: let the user hit Play again on a working filter.
+                        wxMediaEvent event(wxEVT_MEDIA_STATECHANGED);
+                        event.SetId(GetId());
+                        event.SetEventObject(this);
+                        wxPostEvent(this, event);
                     }
+                });
+            } else if (boost::filesystem::exists(dll_path)) {
+                CallAfter([] {
+                    int res = wxMessageBox(_L("BambuSource has not correctly been registered for media playing! Press Yes to re-register it. You will be promoted twice"), _L("Error"), wxYES_NO);
+                    if (res == wxYES)
+                        Slic3r::GUI::wxGetApp().register_bambu_source_filter();
                     return true;
                 });
             } else {
-                CallAfter([] {
-                    wxMessageBox(_L("Missing BambuSource component registered for media playing! Please re-install BambuStudio or seek after-sales help."), _L("Error"), wxOK);
+                CallAfter([this] {
+                    // No BambuSource at all. On a fresh EdgeSlicer install this is the same story as
+                    // the stub - the component simply is not part of our network plug-in - so make
+                    // the same offer rather than telling the user to reinstall BambuStudio.
+                    Slic3r::GUI::wxGetApp().offer_bambu_camera_component(this);
                 });
             }
             m_error = clsid != CLSID_BAMBU_SOURCE ? 101 : path.empty() ? 102 : 103;

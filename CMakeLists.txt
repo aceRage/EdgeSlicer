@@ -933,6 +933,47 @@ endif()
 # Resources install target, configure fhs.hpp on UNIX
 if (WIN32)
     install(DIRECTORY "${SLIC3R_RESOURCES_DIR}/" DESTINATION "./resources")
+    # EdgeSlicer: the bundled network plugin (UltraNet, a private clean-room component built in
+    # the same toolchain). The host copies <exe dir>/ultranet/*.dll into <data dir>/plugins on
+    # first run (GUI_App). Point ULTRANET_BIN_DIR at a folder holding bambu_networking.dll and
+    # BambuSource.dll to ship it; without it the packages carry no plugin and Bambu cloud
+    # sign-in falls back to the Bambu CDN download.
+    if (ULTRANET_BIN_DIR AND EXISTS "${ULTRANET_BIN_DIR}/bambu_networking.dll")
+        install(DIRECTORY "${ULTRANET_BIN_DIR}/" DESTINATION "./ultranet" FILES_MATCHING PATTERN "*.dll")
+        # The marker that tells our plugin apart from Bambu's (the library name is the same). The
+        # first-run copier carries it into <data dir>/plugins, where every Bambu CDN download and
+        # update prompt is gated on it - see src/slic3r/GUI/PluginGuard.hpp. Ship the sidecar's own
+        # copy when it has one, otherwise generate it.
+        if (EXISTS "${ULTRANET_BIN_DIR}/ultranet.txt")
+            install(FILES "${ULTRANET_BIN_DIR}/ultranet.txt" DESTINATION "./ultranet")
+        else()
+            file(WRITE "${CMAKE_BINARY_DIR}/ultranet.txt"
+                 "UltraNet: EdgeSlicer's own network plug-in. Do not replace with the Bambu CDN package.
+")
+            install(FILES "${CMAKE_BINARY_DIR}/ultranet.txt" DESTINATION "./ultranet")
+        endif()
+        message(STATUS "EdgeSlicer: shipping the network plugin from ${ULTRANET_BIN_DIR}")
+    endif()
+
+    # EdgeSlicer: FlashForge's FlashNetwork library. The FlashForge device tab drives Creator 5 and
+    # friends entirely through this closed, pre-built DLL - without it the tab cannot initialise and
+    # no LAN send is possible. FlashForge publishes it nowhere: it exists only inside their Flash
+    # Studio Desktop installers, so there is no URL to download it from on first need and it has to
+    # be shipped. Point FLASHNETWORK_BIN_DIR at a folder holding FlashNetwork.dll to include it:
+    #
+    #   -DFLASHNETWORK_BIN_DIR=C:/path/to/flashnetwork_out/ship
+    #
+    # The library is redistributed unmodified; see docs/superpowers/specs/2026-09-11-flashforge-lan-ship.md
+    # for its provenance (Flash Studio Desktop 1.7.13) and the sha256 it is pinned to. It is x64 and
+    # needs only the MSVC runtime we already ship, so no companion DLLs travel with it.
+    if (FLASHNETWORK_BIN_DIR AND EXISTS "${FLASHNETWORK_BIN_DIR}/FlashNetwork.dll")
+        install(FILES "${FLASHNETWORK_BIN_DIR}/FlashNetwork.dll" DESTINATION ".")
+        # Any companion DLLs a future build of the library may need.
+        install(DIRECTORY "${FLASHNETWORK_BIN_DIR}/" DESTINATION "." FILES_MATCHING PATTERN "*.dll")
+        message(STATUS "EdgeSlicer: shipping FlashForge's FlashNetwork library from ${FLASHNETWORK_BIN_DIR}")
+    else()
+        message(STATUS "EdgeSlicer: no FLASHNETWORK_BIN_DIR - FlashForge LAN printing will be unavailable in this package")
+    endif()
     set(CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS_SKIP TRUE)
     include(InstallRequiredSystemLibraries)
     install (PROGRAMS ${CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS} DESTINATION ".")

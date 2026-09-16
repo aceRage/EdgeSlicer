@@ -212,14 +212,32 @@ public:
     Fill *clone() const override { return new FillLockedZag(*this); }
     ~FillLockedZag() override = default;
     LockRegionParam lock_param;
+    // ipCount means "keep the sparse infill pattern", i.e. draw the band with FillLockedZag's own
+    // FillRectilinear-derived fill_surface() - the behaviour this class had before the per-band
+    // patterns existed, and the default of locked_sk*_infill_pattern.
+    InfillPattern   skin_pattern     = ipCount;
+    InfillPattern   skeleton_pattern = ipCount;
 
     void fill_surface_extrusion(const Surface *surface, const FillParams &params, ExtrusionEntitiesPtr &out) override;
 
     bool has_consistent_pattern() const override { return true; }
     void set_lock_region_param(const LockRegionParam &lock_param) override { this->lock_param = lock_param;};
+    void set_skin_and_skeleton_pattern(const InfillPattern &skin_pattern, const InfillPattern &skeleton_pattern) override {
+        this->skin_pattern     = skin_pattern;
+        this->skeleton_pattern = skeleton_pattern;
+    };
     void fill_surface_locked_zag(const Surface *                          surface,
                                   const FillParams &                       params,
                                   std::vector<std::pair<Polylines, Flow>> &multi_width_polyline);
+    // Split the surface into the skin band and the skeleton band.
+    void      get_skin_and_skeleton_area(ExPolygons &skin, ExPolygons &skeleton, const Surface &surface, const FillParams &params);
+    Polylines generate_skeleton_pattern(FillParams params, Surface surface, const ExPolygons &skeleton, const ExPolygon &origin);
+    Polylines generate_skin_pattern(FillParams params, Surface surface, const ExPolygons &skin);
+
+private:
+    // Build the sub-filler for one band, or return null when the band keeps this filler's own
+    // pattern (`pattern == ipCount`, the default).
+    std::unique_ptr<Fill> make_band_filler(InfillPattern pattern) const;
 };
 
 Points sample_grid_pattern(const ExPolygon &expolygon, coord_t spacing, const BoundingBox &global_bounding_box);

@@ -4,6 +4,7 @@
 #include "libslic3r.h"
 #include "Model.hpp"
 #include "FlexiJoint.hpp"
+#include "CurvedCut.hpp"
 #include "MeshBoolean.hpp"
 #include "TriangleMeshSlicer.hpp"
 #include "TriangleSelector.hpp"
@@ -65,8 +66,17 @@ static void add_cut_volume(TriangleMesh& mesh, ModelObject* object, const ModelV
     vol->cut_info = src_volume->cut_info;
 }
 
+// PHASE 3: `thickness` is the kerf. A flat cut with a kerf is TWO half-space
+// slices at +/- t/2 instead of one at zero, each keeping only its own outer half
+// - the band between them is what the saw took away. That reuses cut_mesh() as
+// it stands (the flexi joint's gap already does exactly this at CutUtils.cpp's
+// perform_with_flexi_joints), so no new geometry code and no boolean is needed.
+//
+// t == 0 takes the single-slice branch, which is the original call verbatim, so
+// the no-kerf output is not "equivalent to" today's - it IS today's.
 static void process_volume_cut( ModelVolume* volume, const Transform3d& instance_matrix, const Transform3d& cut_matrix,
-                                ModelObjectCutAttributes attributes, TriangleMesh& upper_mesh, TriangleMesh& lower_mesh)
+                                ModelObjectCutAttributes attributes, TriangleMesh& upper_mesh, TriangleMesh& lower_mesh,
+                                double thickness = 0.0, CutThicknessOffset offset = CutThicknessOffset::Centred)
 {
     const auto volume_matrix = volume->get_matrix();
 
@@ -79,7 +89,14 @@ static void process_volume_cut( ModelVolume* volume, const Transform3d& instance
     mesh.transform(invert_cut_matrix * instance_matrix * volume_matrix, true);
 
     indexed_triangle_set upper_its, lower_its;
-    cut_mesh(mesh.its, 0.0f, &upper_its, &lower_its);
+    if (thickness > 0.0) {
+        double face_lo = 0.0, face_hi = 0.0;
+        curved_cut_thickness_faces(thickness, offset, face_lo, face_hi);
+        cut_mesh(mesh.its, float(face_lo), nullptr, &lower_its);
+        cut_mesh(mesh.its, float(face_hi), &upper_its, nullptr);
+    }
+    else
+        cut_mesh(mesh.its, 0.0f, &upper_its, &lower_its);
     if (attributes.has(ModelObjectCutAttribute::KeepUpper))
         upper_mesh = TriangleMesh(upper_its);
     if (attributes.has(ModelObjectCutAttribute::KeepLower))
@@ -181,11 +198,12 @@ static void process_modifier_cut(ModelVolume* volume, const Transform3d& instanc
 }
 
 static void process_solid_part_cut(ModelVolume* volume, const Transform3d& instance_matrix, const Transform3d& cut_matrix,
-                            ModelObjectCutAttributes attributes, ModelObject* upper, ModelObject* lower)
+                            ModelObjectCutAttributes attributes, ModelObject* upper, ModelObject* lower,
+                            double thickness = 0.0, CutThicknessOffset offset = CutThicknessOffset::Centred)
 {
     // Perform cut
     TriangleMesh upper_mesh, lower_mesh;
-    process_volume_cut(volume, instance_matrix, cut_matrix, attributes, upper_mesh, lower_mesh);
+    process_volume_cut(volume, instance_matrix, cut_matrix, attributes, upper_mesh, lower_mesh, thickness, offset);
 
     // Add required cut parts to the objects
 
@@ -395,6 +413,22 @@ const ModelObjectPtrs& Cut::perform_with_flexi_joints()
     }
     if (joints > 1)
         BOOST_LOG_TRIVIAL(warning) << "Flexi joint: " << joints << " joints placed, only the first is applied (phase 1)";
+
+    // PHASE 3: the kerf ADDS to the joint's own gap, in the params, BEFORE anything
+    // is generated. flexi_effective_gap() sets where the two flat faces go, and
+    // every flexi body (ring, ball, thread, chain link) is laid out relative to
+    // those faces through flexi_frame() - so widening the gap in the params moves
+    // the faces and the bodies together and the joint stays assembled, which is
+    // what "the ring bodies bridge the gap" has to mean. Applying the kerf on top
+    // of the gap instead would move the faces out from under the bodies.
+    //
+    // NOT supported, and why: a Thread's pitch is an absolute length that does not
+    // scale with the gap, so a kerf at or above one pitch eats a whole turn and
+    // the two halves no longer screw together. The gizmo warns; nothing here
+    // refuses it, because a thread with a deliberately loose fit is a legitimate
+    // thing to ask for.
+    if (m_kerf > 0.0)
+        params.gap = float(double(flexi_effective_gap(params)) + m_kerf);
     if (first_solid == nullptr) {
         m_model = Model();
         m_model.objects.push_back(out);
@@ -492,13 +526,196 @@ const ModelObjectPtrs& Cut::perform_with_flexi_joints()
     return m_model.objects;
 }
 
-const ModelObjectPtrs& Cut::perform_with_plane()
+// ---------------------------------------------------------------------------- curved cut
+
+// The curved counterpart of process_volume_cut(): same frame, same output shape,
+// but the flat cut_mesh() half-space slice is replaced with two booleans against
+// the sheet's slab (Manifold, mcut fallback). See CurvedCut.hpp.
+static void process_volume_curved_cut(ModelVolume* volume, const Transform3d& instance_matrix, const Transform3d& cut_matrix,
+                                      ModelObjectCutAttributes attributes, const CurvedCutSheet& sheet,
+                                      TriangleMesh& upper_mesh, TriangleMesh& lower_mesh, double thickness = 0.0,
+                                      CutThicknessOffset offset = CutThicknessOffset::Centred)
+{
+    const auto volume_matrix = volume->get_matrix();
+
+    const Transformation cut_transformation = Transformation(cut_matrix);
+    const Transform3d invert_cut_matrix = cut_transformation.get_rotation_matrix().inverse() * translation_transform(-1 * cut_transformation.get_offset());
+
+    TriangleMesh mesh(volume->mesh());
+    mesh.transform(invert_cut_matrix * instance_matrix * volume_matrix, true);
+
+    indexed_triangle_set upper_its, lower_its;
+    const bool want_upper = attributes.has(ModelObjectCutAttribute::KeepUpper);
+    const bool want_lower = attributes.has(ModelObjectCutAttribute::KeepLower);
+    if (!curved_cut_split(mesh.its, sheet, want_upper ? &upper_its : nullptr, want_lower ? &lower_its : nullptr,
+                          CurvedCutSheet::CutSamples, thickness, offset))
+        BOOST_LOG_TRIVIAL(error) << "Curved cut: boolean failed for volume " << volume->name;
+
+    if (want_upper)
+        upper_mesh = TriangleMesh(upper_its);
+    if (want_lower)
+        lower_mesh = TriangleMesh(lower_its);
+}
+
+static void process_solid_part_curved_cut(ModelVolume* volume, const Transform3d& instance_matrix, const Transform3d& cut_matrix,
+                                          ModelObjectCutAttributes attributes, const CurvedCutSheet& sheet,
+                                          ModelObject* upper, ModelObject* lower, double thickness = 0.0,
+                                          CutThicknessOffset offset = CutThicknessOffset::Centred)
+{
+    TriangleMesh upper_mesh, lower_mesh;
+    process_volume_curved_cut(volume, instance_matrix, cut_matrix, attributes, sheet, upper_mesh, lower_mesh, thickness, offset);
+
+    if (attributes.has(ModelObjectCutAttribute::KeepAsParts)) {
+        add_cut_volume(upper_mesh, upper, volume, cut_matrix, "_A");
+        if (!lower_mesh.empty()) {
+            add_cut_volume(lower_mesh, upper, volume, cut_matrix, "_B");
+            upper->volumes.back()->cut_info.is_from_upper = false;
+        }
+        return;
+    }
+
+    if (attributes.has(ModelObjectCutAttribute::KeepUpper))
+        add_cut_volume(upper_mesh, upper, volume, cut_matrix);
+
+    if (attributes.has(ModelObjectCutAttribute::KeepLower) && !lower_mesh.empty())
+        add_cut_volume(lower_mesh, lower, volume, cut_matrix);
+}
+
+const ModelObjectPtrs& Cut::perform_with_curved_sheet(const CurvedCutSheet& sheet, double thickness, CutThicknessOffset offset)
+{
+    // THE PHASE 1 INVARIANT: no displacement means no curve, and no curve means
+    // the plain plane cut - the same function, not a boolean that happens to
+    // give the same answer. Output is therefore bit-identical to a flat cut.
+    // The kerf rides along: a flat sheet with a thickness is a flat cut with the
+    // same thickness, which is two half-space slices rather than two booleans.
+    if (sheet.is_flat())
+        return perform_with_plane(thickness, offset);
+
+    if (!m_attributes.has(ModelObjectCutAttribute::KeepUpper) && !m_attributes.has(ModelObjectCutAttribute::KeepLower)) {
+        m_model.clear_objects();
+        return m_model.objects;
+    }
+
+    // PHASE 4: a flexi joint on a curved cut. The joint's two segments are
+    // separated by its OWN gap - two flat faces `gap` apart - and the bodies are
+    // generated relative to those faces, so a flexi cut cannot also be a curved
+    // one: the surface between the segments IS the joint's face pair. A flexi
+    // joint therefore takes the flexi path (with the joint standing on the
+    // sheet's frame, which the gizmo has already baked into the connector's
+    // rotation_m), the same way a flat cut with a flexi joint does.
+    m_kerf = std::max(0.0, thickness);
+    if (!m_model.objects.empty() && has_flexi_joint(m_model.objects.front()))
+        return perform_with_flexi_joints();
+
+    ModelObject* mo = m_model.objects.front();
+
+    BOOST_LOG_TRIVIAL(trace) << "Cut::perform_with_curved_sheet - start";
+
+    ModelObject* upper{ nullptr };
+    if (m_attributes.has(ModelObjectCutAttribute::KeepUpper))
+        mo->clone_for_cut(&upper);
+
+    ModelObject* lower{ nullptr };
+    if (m_attributes.has(ModelObjectCutAttribute::KeepLower) && !m_attributes.has(ModelObjectCutAttribute::KeepAsParts))
+        mo->clone_for_cut(&lower);
+
+    std::vector<ModelObject*> dowels;
+
+    const auto           instance_matrix    = mo->instances[m_instance]->get_transformation().get_matrix_no_offset();
+    const Transformation cut_transformation = Transformation(m_cut_matrix);
+    const Transform3d    inverse_cut_matrix = cut_transformation.get_rotation_matrix().inverse() * translation_transform(-1. * cut_transformation.get_offset());
+
+    // PHASE 4: connectors. A connector volume reaches here already carrying its
+    // own frame - translation_transform(pos) * rotation_m * ... - because the
+    // gizmo builds it that way, and on a curved cut rotation_m is the SHEET's
+    // frame at the connector's (u,v) rather than the plane's. So nothing in the
+    // connector path itself has to know about the sheet: the plug/dowel/snap
+    // solids and their pockets are built by exactly the same helper the flat cut
+    // uses, and the tilt rides in through the volume's transform.
+    //
+    // The one place the sheet does matter is the DOWEL, which is cut in half so
+    // that each half goes to its own object. process_connector_cut() slices it
+    // with the flat cut_mesh(), which is the RIGHT thing here: the dowel's own
+    // frame is already the sheet's frame, so "flat, in the dowel's frame" IS
+    // "tangent to the sheet at the dowel". See process_connector_curved_cut().
+    for (ModelVolume* volume : mo->volumes) {
+        volume->reset_extra_facets();
+
+        if (!volume->is_model_part()) {
+            if (volume->cut_info.is_processed)
+                process_modifier_cut(volume, instance_matrix, inverse_cut_matrix, m_attributes, upper, lower);
+            else
+                process_connector_cut(volume, instance_matrix, m_cut_matrix, m_attributes, upper, lower, dowels);
+        }
+        else if (!volume->mesh().empty())
+            process_solid_part_curved_cut(volume, instance_matrix, m_cut_matrix, m_attributes, sheet, upper, lower, thickness, offset);
+    }
+
+    if (m_attributes.has(ModelObjectCutAttribute::KeepAsParts) && upper->volumes.empty()) {
+        m_model = Model();
+        m_model.objects.push_back(upper);
+        return m_model.objects;
+    }
+
+    ModelObjectPtrs cut_object_ptrs;
+
+    if (m_attributes.has(ModelObjectCutAttribute::KeepAsParts) && !upper->volumes.empty()) {
+        reset_instance_transformation(upper, m_instance, m_cut_matrix);
+        cut_object_ptrs.push_back(upper);
+    }
+    else {
+        auto delete_extra_modifiers = [this](ModelObject* mo) {
+            if (!mo) return;
+            const BoundingBoxf3 obj_bb = mo->instance_bounding_box(m_instance);
+            const Transform3d inst_matrix = mo->instances[m_instance]->get_transformation().get_matrix();
+
+            for (int i = int(mo->volumes.size()) - 1; i >= 0; --i)
+                if (const ModelVolume* vol = mo->volumes[i];
+                    !vol->is_model_part() && !vol->is_cut_connector()) {
+                    auto bb = vol->mesh().transformed_bounding_box(inst_matrix * vol->get_matrix());
+                    if (!obj_bb.intersects(bb))
+                        mo->delete_volume(i);
+                }
+        };
+
+        post_process(upper, lower, cut_object_ptrs);
+        delete_extra_modifiers(upper);
+        delete_extra_modifiers(lower);
+
+        // PHASE 4: a Dowel asks for a third object carrying the pin itself, the
+        // same as on a flat cut. The pin is already generated in the sheet's own
+        // frame, so it comes out standing along the surface normal at its (u,v),
+        // and reset_instance_transformation() puts it flat on the bed for
+        // printing exactly the way the flat path does.
+        if (m_attributes.has(ModelObjectCutAttribute::CreateDowels) && !dowels.empty()) {
+            for (auto dowel : dowels) {
+                reset_instance_transformation(dowel, m_instance);
+                dowel->name += "-Dowel-" + dowel->volumes[0]->name;
+                cut_object_ptrs.push_back(dowel);
+            }
+        }
+    }
+
+    BOOST_LOG_TRIVIAL(trace) << "Cut::perform_with_curved_sheet - end";
+
+    finalize(cut_object_ptrs);
+
+    return m_model.objects;
+}
+
+const ModelObjectPtrs& Cut::perform_with_plane(double thickness, CutThicknessOffset offset)
 {
     if (!m_attributes.has(ModelObjectCutAttribute::KeepUpper) && !m_attributes.has(ModelObjectCutAttribute::KeepLower)) {
         m_model.clear_objects();
         return m_model.objects;
     }
 
+    // A flexi joint opens its OWN gap between the two faces (flexi_effective_gap),
+    // and the joint bodies are generated relative to those faces, so a kerf on top
+    // of it would move the faces out from under the bodies. The kerf is therefore
+    // added to the joint's gap rather than applied separately - see
+    // perform_with_flexi_joints(m_kerf).
+    m_kerf = std::max(0.0, thickness);
     if (!m_model.objects.empty() && has_flexi_joint(m_model.objects.front()))
         return perform_with_flexi_joints();
 
@@ -536,7 +753,7 @@ const ModelObjectPtrs& Cut::perform_with_plane()
                 process_connector_cut(volume, instance_matrix, m_cut_matrix, m_attributes, upper, lower, dowels);
         }
         else if (!volume->mesh().empty())
-            process_solid_part_cut(volume, instance_matrix, m_cut_matrix, m_attributes, upper, lower);
+            process_solid_part_cut(volume, instance_matrix, m_cut_matrix, m_attributes, upper, lower, std::max(0.0, thickness), offset);
     }
 
     // Post-process cut parts

@@ -7,6 +7,7 @@
 #include "slic3r/GUI/GLCanvas3D.hpp"
 #include "slic3r/GUI/GUI_ObjectList.hpp"
 #include "libnest2d/common.hpp"
+#include "libslic3r/FillBedPack.hpp"
 
 #include <numeric>
 
@@ -24,6 +25,13 @@ void FillBedJob::prepare()
     m_bedpts.clear();
 
     params = init_arrange_params(m_plater);
+    // The dialog gap goes in AFTER init_arrange_params, which sets min_obj_distance from the
+    // arrange toolbar spacing (and zeroes it when the plate's print sequence differs from the
+    // global one). It still goes through params.min_obj_distance, so update_selected_items_inflation
+    // can raise it for sequential-print clearance. 0 keeps today's "auto" behaviour.
+    if (m_settings.gap > 0.)
+        params.min_obj_distance = scaled(m_settings.gap);
+    params.allow_rotations = m_settings.allow_rotation;
 
     m_object_idx = m_plater->get_selected_object_idx();
     if (m_object_idx == -1)
@@ -33,8 +41,13 @@ void FillBedJob::prepare()
     int sel_id = m_plater->get_selection().get_instance_idx();
     sel_id = std::max(sel_id, 0);
 
-    int sel_ret = plate_list.select_plate_by_obj(m_object_idx, sel_id);
-    BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << boost::format(":select plate obj_id %1%, ins_id %2%, ret %3%}") % m_object_idx % sel_id % sel_ret;
+    // The live-estimate probe must not move the user's plate selection out from under the open
+    // dialog - it runs on every keystroke. The plate is already the right one by then: the
+    // dialog was opened on this object, and the real run re-selects it a moment later anyway.
+    if (!m_estimate_only) {
+        int sel_ret = plate_list.select_plate_by_obj(m_object_idx, sel_id);
+        BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << boost::format(":select plate obj_id %1%, ins_id %2%, ret %3%}") % m_object_idx % sel_id % sel_ret;
+    }
 
     PartPlate* plate = plate_list.get_curr_plate();
     Model& model = m_plater->model();
@@ -145,28 +158,92 @@ void FillBedJob::prepare()
 
     double sc = scaled<double>(1.) * scaled(1.);
 
-    auto polys = offset_ex(m_selected.front().poly, params.min_obj_distance / 2);
-    ExPolygon poly = polys.empty() ? m_selected.front().poly : polys.front();
-    double poly_area = poly.area() / sc;
     double unsel_area = std::accumulate(m_unselected.begin(),
                                         m_unselected.end(), 0.,
                                         [cur_plate_index](double s, const auto &ap) {
                                             //BBS: m_unselected instance is in the same partplate
                                             return s + (ap.bed_idx == cur_plate_index) * ap.poly.area();
-                                            //return s + (ap.bed_idx == 0) * ap.poly.area();
                                         }) / sc;
 
-    double fixed_area = unsel_area + m_selected.size() * poly_area;
-    double bed_area   = Polygon{m_bedpts}.area() / sc;
+    // The bed the packer will really get: arrange's own shrink, then the user's edge margins.
+    // update_arrange_params() +=s the skirt distance into bed_shrink_x/y, so it must not run on
+    // the member `params` here - process() runs it there. A copy keeps this idempotent without
+    // touching Arrange.cpp.
+    arrangement::ArrangeParams est_params = params;
+    update_arrange_params(est_params, m_plater->config(), m_selected);
+    // Sequential print raises min_obj_distance to the extruder clearance; that happens inside
+    // update_selected_items_inflation, so run it on throwaway copies of the items to learn the
+    // real gap without disturbing the ones process() will pack.
+    {
+        ArrangePolygons probe = m_selected;
+        update_selected_items_inflation(probe, m_plater->config(), est_params);
+    }
+    const Points est_bedpts = apply_user_bed_margins(get_shrink_bedpts(m_plater->config(), est_params), est_params);
+    const double bed_area   = std::abs(Polygon{est_bedpts}.area()) / sc;
 
-    // This is the maximum number of items, the real number will always be close but less.
-    int needed_items = (bed_area - fixed_area) / poly_area;
+    // The area already taken by the objects staying put, plus the copies of the template that
+    // are already on the plate.
+    const double sel_area   = m_selected.front().poly.area() / sc;
+    const double free_area  = std::max(0., bed_area - unsel_area - double(m_selected.size()) * sel_area);
+
+    // The gap the packer will really use. update_selected_items_inflation() takes the
+    // min_obj_distance/2 branch once a distance is set, dropping the brim entirely, so the fill
+    // path widens the gap to the brim where the brim is wider - a 1 mm gap on a tree-support
+    // object would otherwise mean colliding brims.
+    double brim_max = 0.;
+    for (const ArrangePolygon &ap : m_selected) brim_max = std::max(brim_max, double(ap.brim_width));
+    const double eff_gap = std::max(unscaled<double>(est_params.min_obj_distance), brim_max);
+    if (m_settings.gap > 0.)
+        params.min_obj_distance = scaled(eff_gap);
+
+    const BoundingBox tmpl_bb = m_selected.front().poly.contour.bounding_box();
+    const double tmpl_w = unscaled<double>(tmpl_bb.size().x());
+    const double tmpl_h = unscaled<double>(tmpl_bb.size().y());
+
+    // A tiling estimate, not an area ratio: the gap is SHARED between neighbours, so a copy
+    // occupies (w+gap)*(h+gap) rather than the area of its fully inflated outline. The overshoot
+    // means a slightly optimistic pack is never starved of items; whatever lands on a virtual bed
+    // is dropped by finalize().
+    int needed_items = 0;
+    if (m_settings.layout == fill_bed::Layout::Grid) {
+        // Grid is deterministic and O(cells), so there is nothing to estimate and no cap to
+        // respect: build the real grid now and ask for exactly that many clones.
+        m_grid_cells = fill_bed::grid_pack(m_selected.front().poly,
+                                           est_bedpts,
+                                           scaled(eff_gap),
+                                           m_settings.allow_rotation,
+                                           grid_obstacles(est_params));
+        // The copies already on the plate occupy cells of their own; the rest is what to clone.
+        needed_items = std::max(0, int(m_grid_cells.size()) - int(m_selected.size()));
+    } else {
+        needed_items = fill_bed::estimate_count_with_overshoot(tmpl_w, tmpl_h, eff_gap, free_area);
+        // The NFP packer is roughly O(n^2), so Compact is capped. Above the cap the fill falls
+        // back to Grid - which the dialog warns about before the user presses Fill - rather than
+        // taking minutes or, as the old code did, dropping onto a bounding-box branch that knew
+        // nothing about the gap or the other objects.
+        const int raw = fill_bed::estimate_count(tmpl_w, tmpl_h, eff_gap, free_area);
+        if (raw > fill_bed::COUNT_CAP) {
+            m_fallback_to_grid = true;
+            m_grid_cells       = fill_bed::grid_pack(m_selected.front().poly,
+                                                     est_bedpts,
+                                                     scaled(eff_gap),
+                                                     m_settings.allow_rotation,
+                                                     grid_obstacles(est_params));
+            needed_items = std::max(0, int(m_grid_cells.size()) - int(m_selected.size()));
+        } else {
+            needed_items = std::max(0, std::min(needed_items, fill_bed::COUNT_CAP - int(m_selected.size())));
+        }
+    }
 
     //int sel_id = m_plater->get_selection().get_instance_idx();
     // if the selection is not a single instance, choose the first as template
     //sel_id = std::max(sel_id, 0);
     ModelInstance *mi = model_object->instances[sel_id];
     ArrangePolygon template_ap = get_instance_arrange_poly(mi, global_config);
+
+    // The probe only wants m_grid_cells; the clones it would build are thrown away with it.
+    if (m_estimate_only)
+        needed_items = 0;
 
     for (int i = 0; i < needed_items; ++i) {
         ArrangePolygon ap = template_ap;
@@ -204,7 +281,8 @@ void FillBedJob::process(Ctl &ctl)
     if (m_object_idx == -1 || m_selected.empty()) return;
 
     update_arrange_params(params, m_plater->config(), m_selected);
-    m_bedpts = get_shrink_bedpts(m_plater->config(), params);
+    // arrange's own shrink first, then the user's fill-only edge / front margins on top.
+    m_bedpts = apply_user_bed_margins(get_shrink_bedpts(m_plater->config(), params), params);
 
     auto &partplate_list               = m_plater->get_partplate_list();
     auto &print                        = wxGetApp().plater()->get_partplate_list().get_current_fff_print();
@@ -217,35 +295,28 @@ void FillBedJob::process(Ctl &ctl)
     update_selected_items_inflation(m_selected, m_plater->config(), params);
     update_unselected_items_inflation(m_unselected, m_plater->config(), params);
 
-    bool do_stop = false;
-    params.stopcondition = [&ctl, &do_stop]() {
-        return ctl.was_canceled() || do_stop;
-    };
+    // NO early stop. The old on_packed/do_stop pair aborted the whole pack the moment one
+    // clone landed on plate 1 - with a greedy TOP_RIGHT start that usually happened while
+    // space remained at the far corner, leaving a whole strip of the bed empty. The surplus
+    // clones are simply discarded: finalize() skips every item with bed_idx != 0, and the
+    // cloning setter only fires inside the bed_idx == 0 branch.
+    params.stopcondition = [&ctl]() { return ctl.was_canceled(); };
 
     params.progressind = [this, &ctl, &statustxt](unsigned st,std::string str="") {
          if (st > 0)
              ctl.update_status(st * 100 / status_range(), statustxt + " " + str);
     };
 
-    params.on_packed = [&do_stop] (const ArrangePolygon &ap) {
-        do_stop = ap.bed_idx > 0 && ap.priority == 0;
-    };
     // final align用的是凸包，在有fixed item的情况下可能找到的参考点位置是错的，这里就不做了。见STUDIO-3265
     params.do_final_align = !is_bbl;
 
-    if (m_selected.size() > 100){
-        // too many items, just find grid empty cells to put them
-        Vec2f step = unscaled<float>(get_extents(m_selected.front().poly).size()) + Vec2f(m_selected.front().brim_width, m_selected.front().brim_width);
-        std::vector<Vec2f> empty_cells = Plater::get_empty_cells(step);
-        size_t n=std::min(m_selected.size(), empty_cells.size());
-        for (size_t i = 0; i < n; i++) {
-            m_selected[i].translation = scaled<coord_t>(empty_cells[i]);
-            m_selected[i].bed_idx= 0;
-        }
-        for (size_t i = n; i < m_selected.size(); i++) {
-            m_selected[i].bed_idx = -1;
-        }
-    }
+    // One grid implementation. The old "more than 100 items" branch tiled the bounding box with
+    // Plater::get_empty_cells(), which used brim rather than the gap, never rotated, and checked
+    // cells only against the plate's exclusion areas - not against the wipe tower or any other
+    // object. run_grid_layout() does the job properly, and it is now reached by an explicit
+    // user choice or by the Compact cap, not by an item count nobody set.
+    if (m_settings.layout == fill_bed::Layout::Grid || m_fallback_to_grid)
+        run_grid_layout();
     else
         arrangement::arrange(m_selected, m_unselected, m_bedpts, params);
 
@@ -256,6 +327,69 @@ void FillBedJob::process(Ctl &ctl)
 }
 
 FillBedJob::FillBedJob() : m_plater{wxGetApp().plater()} {}
+
+FillBedJob::FillBedJob(const FillBedSettings &settings) : m_settings(settings), m_plater{wxGetApp().plater()} {}
+
+std::vector<fill_bed::GridObstacle> FillBedJob::grid_obstacles(const arrangement::ArrangeParams &p) const
+{
+    // The clearance each obstacle needs is what update_unselected_items_inflation() would give
+    // it: the exclusion gap for a virtual region, half the copy gap for a real object. That runs
+    // in process(), long after prepare() builds the grid, so run it here on a copy - the items
+    // process() will pack are left exactly as they are.
+    ArrangePolygons probe = m_unselected;
+    arrangement::ArrangeParams pp = p;
+    update_unselected_items_inflation(probe, m_plater->config(), pp);
+
+    std::vector<fill_bed::GridObstacle> out;
+    out.reserve(probe.size());
+    for (const ArrangePolygon &ap : probe) {
+        // Only what is actually on this plate. Everything the plate does not hold was pushed to
+        // m_locked in prepare(), and virtual objects carry bed_idx 0 like the rest.
+        if (ap.bed_idx != 0)
+            continue;
+        fill_bed::GridObstacle ob;
+        ob.outline = ap.transformed_poly().contour;
+        // Its own clearance, never the copy-to-copy gap - section 4 of the spec: an exclusion
+        // region keeps the exclusion rule, an extrusion-cali region keeps 0.
+        ob.inflation = ap.inflation;
+        out.emplace_back(std::move(ob));
+    }
+    return out;
+}
+
+size_t FillBedJob::run_grid_layout()
+{
+    // Nothing to place is a legal outcome - the user may have asked for a gap no copy fits at.
+    size_t placed = 0;
+    for (ArrangePolygon &ap : m_selected) {
+        if (placed < m_grid_cells.size()) {
+            const fill_bed::GridCell &cell = m_grid_cells[placed];
+            ap.translation = Vec2crd(cell.translation.x(), cell.translation.y());
+            ap.rotation    = cell.rotation;
+            ap.bed_idx     = 0;
+            ++placed;
+        } else {
+            // finalize() skips anything not on bed 0, and the cloning setter only fires inside
+            // the bed_idx == 0 branch, so a surplus clone simply never comes into existence.
+            ap.bed_idx = arrangement::UNARRANGED;
+        }
+    }
+    return placed;
+}
+
+// The user's edge margin on all four sides and the front override on the min-Y edge, applied
+// to a bed outline that get_shrink_bedpts has already shrunk. Each side only moves by what
+// arrange has not already taken off, so margins of 0 are bit-identical to the old behaviour
+// and the dialog can never place a copy CLOSER to the edge than arrange would.
+Points FillBedJob::apply_user_bed_margins(const Points &bedpts, const arrangement::ArrangeParams &p) const
+{
+    return fill_bed::shrink_bed_per_side(bedpts,
+                                         m_settings.edge_margin,
+                                         m_settings.front_margin,
+                                         m_settings.front_enabled,
+                                         p.bed_shrink_x,
+                                         p.bed_shrink_y);
+}
 
 void FillBedJob::finalize(bool canceled, std::exception_ptr &eptr)
 {
@@ -294,12 +428,16 @@ void FillBedJob::finalize(bool canceled, std::exception_ptr &eptr)
             else
                 ap.bed_idx = cur_plate;
 
-            if (m_selected.size() <= 100) {
-                ap.row = ap.bed_idx / plate_cols;
-                ap.col = ap.bed_idx % plate_cols;
-                ap.translation(X) += bed_stride_x(m_plater) * ap.col;
-                ap.translation(Y) -= bed_stride_y(m_plater) * ap.row;
-            }
+            // The stride back onto the real plate, always. This used to be skipped above 100
+            // items, because the ad-hoc branch that caught those took its cells from
+            // Plater::get_empty_cells(), whose coordinates are already absolute. Both the NFP
+            // packer and the Grid layout work in plate-local coordinates - the shrunk bed
+            // outline - so both need it, and the item count has nothing to do with it. Without
+            // this, filling plate 2 or later dropped every copy onto plate 1.
+            ap.row = ap.bed_idx / plate_cols;
+            ap.col = ap.bed_idx % plate_cols;
+            ap.translation(X) += bed_stride_x(m_plater) * ap.col;
+            ap.translation(Y) -= bed_stride_y(m_plater) * ap.row;
 
             ap.apply();
 
@@ -331,6 +469,22 @@ void FillBedJob::finalize(bool canceled, std::exception_ptr &eptr)
 
         m_plater->update();
     }
+}
+
+int FillBedJob::grid_copies_for(Plater *plater, const FillBedSettings &settings)
+{
+    if (plater == nullptr)
+        return 0;
+    // prepare() is what knows how to collect the template, the obstacles and the bed; run it on a
+    // throwaway job so the live label and the fill itself can never disagree. It touches only the
+    // job's own members - no model change, no snapshot - and the clone list it builds is
+    // discarded with the job.
+    FillBedJob probe(settings);
+    probe.m_estimate_only = true;
+    probe.prepare();
+    if (probe.m_object_idx == -1 || probe.m_selected.empty())
+        return 0;
+    return int(probe.m_grid_cells.size());
 }
 
 }} // namespace Slic3r::GUI

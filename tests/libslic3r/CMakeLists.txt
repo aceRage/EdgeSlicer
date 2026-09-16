@@ -4,6 +4,7 @@ add_executable(${_TEST_NAME}_tests
 	${_TEST_NAME}_tests.cpp
 	test_3mf.cpp
 	test_aabbindirect.cpp
+	test_assembly_face_pick.cpp
 	test_chameleon_brim.cpp
 	test_paint_depth.cpp
 	test_paint_depth_clamp.cpp
@@ -16,19 +17,26 @@ add_executable(${_TEST_NAME}_tests
 	test_clipper_utils.cpp
 	test_config.cpp
 	test_contour_z.cpp
+	test_curved_cut.cpp
 	test_config_include.cpp
 	test_custom_gcode.cpp
 	test_default_bed_type.cpp
 	test_dual_nozzle_group.cpp
 	test_elephant_foot_compensation.cpp
+	test_fill_bed_pack.cpp
 	test_flexi_joint.cpp
+	test_fuzzy_skin.cpp
 	test_geometry.cpp
 	test_h2c_rack_nozzle_change.cpp
 	test_h2_preload_filaments.cpp
 	test_mixed_filament.cpp
+	test_mixed_filament_cli_gates.cpp
 	test_mixed_nozzle.cpp
 	test_mixed_filament_color_golden.cpp
 	test_triangle_selector.cpp
+	test_locked_zag_patterns.cpp
+	test_locked_zag_identity_probe.cpp
+	test_layer_time_speed_smoothing.cpp
 	test_local_z_order_optimizer.cpp
 	test_placeholder_parser.cpp
 	test_polygon.cpp
@@ -38,6 +46,7 @@ add_executable(${_TEST_NAME}_tests
 	test_mutable_priority_queue.cpp
 	test_gltf.cpp
 	test_obj_color_match.cpp
+	test_scale_to_volume.cpp
 	test_slice_compare.cpp
 	test_stl.cpp
 	test_support_set.cpp
@@ -47,6 +56,8 @@ add_executable(${_TEST_NAME}_tests
 	test_timeutils.cpp
 	test_voronoi.cpp
     test_optimizers.cpp
+    test_wipe_tower.cpp
+    test_wipe_tower_estimate.cpp
     # test_png_io.cpp
     test_indexed_triangle_set.cpp
     ../libnest2d/printer_parts.cpp

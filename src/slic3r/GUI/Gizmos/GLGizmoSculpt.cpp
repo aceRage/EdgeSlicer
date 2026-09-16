@@ -19,8 +19,11 @@
 
 #include <glad/gl.h>
 
+#include "libslic3r/Utils.hpp"
+
 #include <algorithm>
 #include <array>
+#include <cfloat>
 #include <cmath>
 
 namespace Slic3r::GUI {
@@ -56,6 +59,11 @@ bool GLGizmoSculpt::on_init()
     m_desc["smooth"]             = _L("Smooth");
     m_desc["flatten"]            = _L("Flatten");
     m_desc["crease"]             = _L("Crease");
+    m_desc["pinch"]              = _L("Pinch");
+    m_desc["nudge"]              = _L("Nudge");
+    m_desc["snakehook"]          = _L("Snake Hook");
+    m_desc["claystrips"]         = _L("Clay Strips");
+    m_desc["mask"]               = _L("Mask");
     m_desc["radius"]             = _L("Brush size");
     m_desc["radius_caption"]     = ctrl + _L("Mouse wheel");
     m_desc["strength"]           = _L("Strength");
@@ -76,6 +84,16 @@ bool GLGizmoSculpt::on_init()
     m_desc["subdivide_fine"]     = _L("Mesh is fine enough for this brush.");
     m_desc["no_part"]            = _L("Select a single part to sculpt it.");
     m_desc["paint_kept"]         = _L("Sculpting keeps painted supports, seams, colours and fuzzy skin.");
+    m_desc["protect_bed"]        = _L("Protect bed contact");
+    m_desc["protect_bed_none"]   = _L("This part has no flat area resting on the bed, so there is nothing to protect.");
+    m_desc["protect_bed_hint"]   = _L("Protects the flat area touching the bed: those vertices never move, and Subdivide keeps them at the same height. A filleted or rounded bottom edge is not flat, so it is not protected.");
+    m_desc["protect_sharp"]      = _L("Protect sharp edges");
+    m_desc["sharp_angle"]        = _L("Edge angle");
+    m_desc["mask_strength"]      = _L("Mask strength");
+    m_desc["clay_offset"]        = _L("Clay height");
+    m_desc["clear_mask"]         = _L("Clear mask");
+    m_desc["mask_hint"]          = _L("Paint over the part to protect it from every brush. Ctrl paints the protection off again. The mask lasts for this gizmo session only.");
+    m_desc["brush_keys"]         = _L("Keys 1-9, 0 and - pick a brush while this gizmo is open.");
 
     return true;
 }
@@ -157,6 +175,10 @@ void GLGizmoSculpt::attach_to_selection()
     m_session    = std::make_unique<Sculpt::SculptSession>(mv->mesh().its);
     m_pending_commit = false;
     m_stroke_dirty_triangles.clear();
+    // The auto masks are pure functions of this mesh, so they are computed here
+    // and again after anything that could move the bottom. Session-only: they go
+    // when the session does, and so does any hand-painted mask.
+    refresh_masks();
 }
 
 void GLGizmoSculpt::detach()
@@ -257,8 +279,13 @@ bool GLGizmoSculpt::brush_inverted(bool ctrl_down) const
     case Brush::Deflate: return Sculpt::brush_inverts_with_ctrl(Sculpt::BrushType::Inflate);
     case Brush::Flatten: return Sculpt::brush_inverts_with_ctrl(Sculpt::BrushType::Flatten);
     case Brush::Crease:  return Sculpt::brush_inverts_with_ctrl(Sculpt::BrushType::Crease);
+    case Brush::Pinch:      return Sculpt::brush_inverts_with_ctrl(Sculpt::BrushType::Pinch);
+    case Brush::ClayStrips: return Sculpt::brush_inverts_with_ctrl(Sculpt::BrushType::ClayStrips);
+    case Brush::Mask:       return Sculpt::brush_inverts_with_ctrl(Sculpt::BrushType::Mask);
     case Brush::Grab:
     case Brush::Smooth:
+    case Brush::Nudge:
+    case Brush::SnakeHook:
     default:             return false;
     }
 }
@@ -312,6 +339,40 @@ Sculpt::BrushParams GLGizmoSculpt::make_brush(const Vec3f &center_mesh, const Ve
         p.ridge     = invert;
         p.crease_normal_ratio = 1.f;
         break;
+    case Brush::Pinch:
+        p.type         = Sculpt::BrushType::Pinch;
+        // Same pinned-axis discipline as Crease: refitting every tick would let
+        // the axis wander as the surface it is pinching moves.
+        p.plane_normal = m_stroke_plane_normal;
+        // Inverted, the pinch pushes out instead of in - Blender's Magnify.
+        p.magnify      = invert;
+        break;
+    case Brush::Nudge:
+        p.type         = Sculpt::BrushType::Nudge;
+        // Nudge rides Grab's displacement field; the kernel flattens it into
+        // each vertex's own tangent plane, so the surface slides rather than
+        // being lifted.
+        p.displacement = displacement_mesh;
+        break;
+    case Brush::SnakeHook:
+        p.type         = Sculpt::BrushType::SnakeHook;
+        p.displacement = displacement_mesh;
+        break;
+    case Brush::ClayStrips:
+        p.type         = Sculpt::BrushType::ClayStrips;
+        p.plane_normal = m_stroke_plane_normal;
+        // Both halves of the plane are pinned for the stroke, not just the
+        // direction - see BrushParams::plane_origin.
+        p.plane_origin = m_stroke_plane_origin;
+        // A fraction of the brush radius, so it feels the same at any size.
+        p.clay_offset  = (invert ? -1.f : 1.f) * m_clay_offset_ratio * p.radius;
+        break;
+    case Brush::Mask:
+        p.type        = Sculpt::BrushType::Mask;
+        p.strength    = m_mask_strength;
+        // Ctrl erases the mask instead of painting it.
+        p.mask_amount = invert ? -1.f : 1.f;
+        break;
     }
     return p;
 }
@@ -336,18 +397,23 @@ bool GLGizmoSculpt::start_stroke(const Vec2d &mouse_position, bool shift_down, b
     // it for the whole stroke: refitting every tick makes Flatten chase the
     // surface it has already levelled and never converge.
     m_stroke_plane_normal = Vec3f::Zero();
-    if (m_brush == Brush::Flatten || m_brush == Brush::Crease) {
+    m_stroke_plane_origin = Vec3f::Zero();
+    if (m_brush == Brush::Flatten || m_brush == Brush::Crease ||
+        m_brush == Brush::Pinch   || m_brush == Brush::ClayStrips) {
         const float radius_mesh = float(double(m_cursor_radius) / mesh_scale());
         std::vector<uint32_t> verts;
         m_session->collect_vertices_in_radius(hit, radius_mesh, verts);
         Vec3f origin = Vec3f::Zero(), normal = Vec3f::Zero();
-        if (Sculpt::fit_plane(m_session->mesh(), m_session->vertex_normals(), verts, hit, radius_mesh, m_falloff, origin, normal))
+        if (Sculpt::fit_plane(m_session->mesh(), m_session->vertex_normals(), verts, hit, radius_mesh, m_falloff, origin, normal)) {
             m_stroke_plane_normal = normal;
+            m_stroke_plane_origin = origin;
+        }
     }
 
-    // Grab needs a drag before it does anything; the other brushes act on the
-    // click itself.
-    if (m_brush != Brush::Grab)
+    // Grab and its drag-driven relatives (Nudge, Snake Hook) need a drag before
+    // they do anything - their displacement is the mouse delta, which is zero on
+    // the click. Every other brush acts on the click itself.
+    if (! brush_is_drag_driven(m_brush))
         continue_stroke(mouse_position, shift_down, ctrl_down);
     return true;
 }
@@ -360,7 +426,7 @@ void GLGizmoSculpt::continue_stroke(const Vec2d &mouse_position, bool shift_down
     Vec3f center_mesh = m_stroke_center_mesh;
     Vec3f displacement_mesh = Vec3f::Zero();
 
-    if (m_brush == Brush::Grab) {
+    if (brush_is_drag_driven(m_brush)) {
         Vec3d world = Vec3d::Zero();
         if (!project_on_drag_plane(mouse_position, world))
             return;
@@ -368,14 +434,21 @@ void GLGizmoSculpt::continue_stroke(const Vec2d &mouse_position, bool shift_down
         m_drag_prev_world = world;
         if (delta_world.squaredNorm() < 1e-12)
             return;
-        // World delta -> volume space. The brush centre follows the drag too,
-        // so a long pull keeps hold of the same patch.
+        // World delta -> volume space.
         const Transform3d trafo = volume_trafo();
         displacement_mesh = (trafo.linear().inverse() * delta_world).cast<float>();
+        // Grab and Nudge hold the anchor they started on and translate one
+        // patch; Snake Hook's whole point is that its anchor rides the cursor,
+        // so the touched set travels with the drag and pulls a horn out behind
+        // it. Both feed SculptSession::apply() whatever centre they want this
+        // tick, so the kernel needs no idea which is which.
         center_mesh = m_stroke_center_mesh;
         m_stroke_center_mesh += displacement_mesh;
+        if (m_brush == Brush::SnakeHook)
+            center_mesh = m_stroke_center_mesh;
     } else {
-        // Inflate / Smooth re-pick the surface under the cursor each tick.
+        // Inflate / Smooth / Flatten / Crease / Pinch / Clay / Mask re-pick the
+        // surface under the cursor each tick.
         Vec3f hit = Vec3f::Zero();
         if (raycast(mouse_position, hit))
             center_mesh = hit;
@@ -385,6 +458,14 @@ void GLGizmoSculpt::continue_stroke(const Vec2d &mouse_position, bool shift_down
     m_session->apply(make_brush(center_mesh, displacement_mesh, shift_down, ctrl_down), m_stroke_step);
     if (m_stroke_step.empty())
         return;
+
+    // The Mask brush writes the per-vertex mask and moves nothing, so there is
+    // no mesh edit to commit and no vertex buffer to patch - only a redraw, so
+    // the tinted overlay follows the cursor.
+    if (m_brush == Brush::Mask) {
+        m_parent.set_as_dirty();
+        return;
+    }
 
     m_pending_commit = true;
     refresh_render_volumes(m_stroke_step.dirty_triangles, false);
@@ -419,6 +500,11 @@ void GLGizmoSculpt::end_stroke()
 
     // The AABB tree and the shared raycaster are both stale now.
     m_session->rebuild_tree();
+    // A stroke can have moved the part's lowest vertices, and ensure_on_bed()
+    // above may have shifted the whole thing - so z_min and the bed-contact set
+    // are both potentially stale. Vertex ids are unchanged (that is the whole
+    // point of the commit path), so a hand-painted mask stays valid across this.
+    refresh_masks();
     if (m_c != nullptr)
         m_c->update(on_get_requirements());
     // set_new_unique_id() bumped the volume id; keep the cache in step instead of
@@ -452,7 +538,7 @@ void GLGizmoSculpt::update_cursor(const Vec2d &mouse_position)
     in.hit_valid = m_hit_valid;
     in.hit       = hit;
     if (m_stroke_active)
-        in.mode = (m_brush == Brush::Grab) ? Sculpt::CursorMode::StrokeGrab : Sculpt::CursorMode::StrokeHit;
+        in.mode = brush_is_drag_driven(m_brush) ? Sculpt::CursorMode::StrokeGrab : Sculpt::CursorMode::StrokeHit;
     // For Grab the stroke centre has already been advanced by the drag, so it is
     // exactly "the anchor moved by the accumulated drag" the cursor should ride.
     in.grab_anchor = m_stroke_center_mesh;
@@ -475,18 +561,53 @@ bool GLGizmoSculpt::on_mouse(const wxMouseEvent &mouse_event)
             return true;
         }
         if (mouse_event.LeftDown() || mouse_event.LeftUp()) {
-            if (mouse_event.LeftDown())
+            if (mouse_event.LeftDown()) {
                 end_adjust(/* confirm */ true);
+                // The modal is over as of THIS event, so the matching LeftUp a
+                // moment from now would find m_adjust inactive, fall through the
+                // whole gizmo, and reach GLCanvas3D's LeftUp handler - which
+                // calls deselect_all() when the click landed on no volume. A
+                // brush-sizing drag almost always ends off the part, so the
+                // confirming click was deselecting the object the user was
+                // sculpting and they had to re-pick it. Owe ourselves that up.
+                m_swallow_left_up = true;
+            }
             m_parent.set_as_dirty();
             return true;
         }
         if (mouse_event.RightDown() || mouse_event.RightUp()) {
-            if (mouse_event.RightDown())
+            if (mouse_event.RightDown()) {
                 end_adjust(/* confirm */ false);
+                // Same for the cancelling right click: a RightUp that reaches
+                // the canvas opens the context menu over the plate.
+                m_swallow_right_up = true;
+            }
             m_parent.set_as_dirty();
             return true;
         }
         return true;
+    }
+
+    // The other half of the click that ended the modal. Consumed here, before
+    // any stroke or selection handling, and before hover/selection state is
+    // touched at all - so it changes nothing and starts nothing.
+    if (m_swallow_left_up && (mouse_event.LeftUp() || mouse_event.LeftDClick())) {
+        m_swallow_left_up = false;
+        m_parent.set_as_dirty();
+        return true;
+    }
+    if (m_swallow_right_up && (mouse_event.RightUp() || mouse_event.RightDClick())) {
+        m_swallow_right_up = false;
+        m_parent.set_as_dirty();
+        return true;
+    }
+    // A fresh press, or the pointer leaving the canvas, means the owed up is
+    // never coming (wx dropped it, focus moved, ...): drop the debt rather than
+    // swallowing an unrelated click much later. A plain Moving() does NOT clear
+    // it - wx interleaves motion between the down and the up of one click.
+    if (mouse_event.LeftDown() || mouse_event.RightDown() || mouse_event.MiddleDown() || mouse_event.Leaving()) {
+        m_swallow_left_up  = false;
+        m_swallow_right_up = false;
     }
 
     if (mouse_event.Moving()) {
@@ -502,11 +623,20 @@ bool GLGizmoSculpt::on_mouse(const wxMouseEvent &mouse_event)
         if (get_hover_id() != -1)
             return false;
         m_ctrl_inverted = brush_inverted(control_down);
-        // Ctrl is the brush-invert modifier for Inflate/Flatten/Crease, so it
-        // must NOT fall through to the canvas (which reads Ctrl+click as an
-        // additive selection) for those brushes. For Grab and Smooth, where Ctrl
-        // means nothing to the brush, the old behaviour stands and the canvas
-        // keeps the click.
+        // Ctrl is the brush-invert modifier for Inflate/Flatten/Crease/Pinch/
+        // Clay/Mask, so it must NOT fall through to the canvas (which reads
+        // Ctrl+click as an additive selection) for those brushes. For Grab,
+        // Smooth, Nudge and Snake Hook, where Ctrl means nothing to the brush,
+        // the old behaviour stands and the canvas keeps the click.
+        //
+        // Note, same path as the adjust-mode swallow above: a Ctrl-held click on
+        // an INVERTING brush is fully ours - this LeftDown returns true and the
+        // matching LeftUp is taken by the m_stroke_active branch below, so the
+        // canvas sees neither half and the selection is untouched. For a
+        // NON-inverting brush the click is deliberately handed to the canvas
+        // whole (both halves), which is what makes Ctrl+click still add to the
+        // selection while Grab is the active brush. The two cases are exclusive;
+        // there is no path where only one half of a Ctrl click escapes.
         if (control_down && ! m_ctrl_inverted)
             return false;
         if (start_stroke(mouse_pos, mouse_event.ShiftDown(), control_down)) {
@@ -598,7 +728,7 @@ void GLGizmoSculpt::end_adjust(bool confirm)
 // face on bed" gizmo instead of sizing the brush. Returns true when the key was
 // consumed. ImGui gets first refusal upstream, so a typed F in the numeric input
 // boxes never reaches here.
-bool GLGizmoSculpt::on_sculpt_char(int key_code, bool shift_down, bool /* ctrl_down */)
+bool GLGizmoSculpt::on_sculpt_char(int key_code, bool shift_down, bool ctrl_down)
 {
     if (m_state != On || m_volume == nullptr)
         return false;
@@ -619,6 +749,28 @@ bool GLGizmoSculpt::on_sculpt_char(int key_code, bool shift_down, bool /* ctrl_d
     if (key_code == 'f' || key_code == 'F') {
         begin_adjust(shift_down ? Sculpt::AdjustTarget::Strength : Sculpt::AdjustTarget::Radius);
         return true;
+    }
+
+    // Number keys pick a brush, in the dropdown's own order. Bare 1-7 are the
+    // canvas's camera-view shortcuts (GLCanvas3D::on_char), so taking them here
+    // overrides those while this gizmo is open - the same deliberate override
+    // bare F already makes against "place face on bed", and the same one Blender
+    // makes (a number in sculpt mode is a brush, not a view). Ctrl+1..7 keeps
+    // the camera views, so nothing is lost; only the unmodified key is claimed,
+    // and only while Sculpt is the current gizmo.
+    if (! shift_down && ! ctrl_down) {
+        int index = -1;
+        if (key_code >= '1' && key_code <= '9')
+            index = key_code - '1';           // 1..9 -> brushes 0..8
+        else if (key_code == '0')
+            index = 9;                        // 0 -> the tenth
+        else if (key_code == '-')
+            index = 10;                       // - -> the eleventh (Mask)
+        if (index >= 0 && index < BrushCount) {
+            m_brush = Brush(index);
+            m_parent.set_as_dirty();
+            return true;
+        }
     }
     return false;
 }
@@ -749,11 +901,88 @@ void GLGizmoSculpt::render_cursor_sphere() const
     shader->stop_using();
 }
 
+// The mask, tinted onto the mesh the way the paint gizmos tint enforcers and
+// blockers: a GLModel of just the masked triangles, offset a hair along their
+// normals so it does not z-fight with the part underneath, drawn with the same
+// "gouraud" shader the paint overlay uses.
+//
+// The mask is per-VERTEX, so "a masked triangle" is one all three of whose
+// vertices are masked. That draws the interior of a masked region and leaves its
+// boundary triangles untinted, which reads as a soft edge rather than a hard
+// facet-aligned one - honest, since the mask itself is a continuous weight.
+void GLGizmoSculpt::render_mask_overlay() const
+{
+    if (!m_session || m_volume == nullptr || !m_session->any_mask())
+        return;
+
+    // Rebuilt whenever the mask or the mesh may have changed. A stroke can move
+    // vertices under the mask, so this is not cacheable across ticks without a
+    // dirty flag; the masked set is small (a bed face, a few sharp rings) so
+    // rebuilding it is cheaper than the bookkeeping would be.
+    const indexed_triangle_set &its = m_session->mesh();
+    GLModel::Geometry data;
+    data.format = {GLModel::Geometry::EPrimitiveType::Triangles, GLModel::Geometry::EVertexLayout::P3N3};
+    static const float offset = 0.02f;
+    unsigned int cnt = 0;
+    for (const Vec3i32 &f : its.indices) {
+        const uint32_t a = uint32_t(f(0)), b = uint32_t(f(1)), c = uint32_t(f(2));
+        if (m_session->effective_mask(a) > 0.f || m_session->effective_mask(b) > 0.f || m_session->effective_mask(c) > 0.f)
+            continue;
+        const Vec3f &v0 = its.vertices[a];
+        const Vec3f &v1 = its.vertices[b];
+        const Vec3f &v2 = its.vertices[c];
+        const Vec3f  n  = (v1 - v0).cross(v2 - v1).normalized();
+        const Vec3f  on = offset * n;
+        data.add_vertex(Vec3f(v0 + on), n);
+        data.add_vertex(Vec3f(v1 + on), n);
+        data.add_vertex(Vec3f(v2 + on), n);
+        data.add_triangle(cnt, cnt + 1, cnt + 2);
+        cnt += 3;
+    }
+    if (data.is_empty())
+        return;
+
+    GLShaderProgram *shader = wxGetApp().get_shader("gouraud");
+    if (shader == nullptr)
+        return;
+    shader->start_using();
+
+    const Camera      &camera = wxGetApp().plater()->get_camera();
+    const Transform3d  trafo  = volume_trafo();
+    const Transform3d  view   = camera.get_view_matrix();
+    shader->set_uniform("view_model_matrix", view * trafo);
+    shader->set_uniform("projection_matrix", camera.get_projection_matrix());
+    shader->set_uniform("view_normal_matrix",
+                        (Matrix3d) (view.matrix().block(0, 0, 3, 3) * trafo.matrix().block(0, 0, 3, 3).inverse().transpose()));
+    // The paint gizmos' clipping-plane uniforms still have to be fed even though
+    // Sculpt asks for no ObjectClipper: the shader reads them unconditionally.
+    shader->set_uniform("clipping_plane", std::array<float, 4>{0.f, 0.f, 0.f, 0.f});
+    shader->set_uniform("z_range", std::array<float, 2>{-FLT_MAX, FLT_MAX});
+    shader->set_uniform("slope.actived", false);
+    shader->set_uniform("volume_world_matrix", trafo);
+    shader->set_uniform("volume_mirrored", false);
+
+    GLModel model;
+    model.init_from(std::move(data));
+    // A cool blue-grey, distinct from the paint gizmos' orange/blue and from the
+    // brush cursor's own blue, so "protected" never reads as "painted support".
+    model.set_color(ColorRGBA(0.35f, 0.55f, 0.80f, 0.55f));
+    glsafe(::glEnable(GL_BLEND));
+    glsafe(::glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA));
+    glsafe(::glDisable(GL_CULL_FACE));
+    model.render();
+    glsafe(::glEnable(GL_CULL_FACE));
+    glsafe(::glDisable(GL_BLEND));
+
+    shader->stop_using();
+}
+
 void GLGizmoSculpt::on_render()
 {
     if (m_volume == nullptr)
         return;
     glsafe(::glEnable(GL_DEPTH_TEST));
+    render_mask_overlay();
     render_cursor_sphere();
 }
 
@@ -799,7 +1028,17 @@ void GLGizmoSculpt::do_subdivide()
     // exactly the way the Simplify gizmo and "Repair by remeshing" handle it.
     plater->clear_before_change_mesh(m_object_idx);
 
-    indexed_triangle_set subdivided = Sculpt::its_subdivide_midpoint(m_session->mesh());
+    // Pin the bed face through the subdivision: every new vertex that is the
+    // midpoint of two bed-contact vertices is snapped back to z_min exactly, so
+    // the flat bottom stays flat and stays at the same height. Existing vertices
+    // are never moved by midpoint subdivision, so they need nothing. A boundary
+    // midpoint (one bed endpoint, one not) is on the old edge by construction,
+    // so the footprint outline gains a collinear vertex and its area and
+    // perimeter are unchanged - see the note in MeshSculpt.hpp.
+    const bool pin_bed = m_protect_bed && m_session->bed_contact_count() > 0;
+    indexed_triangle_set subdivided =
+        pin_bed ? Sculpt::its_subdivide_midpoint(m_session->mesh(), m_session->bed_contact_vertices(), m_session->bed_z_min())
+                : Sculpt::its_subdivide_midpoint(m_session->mesh());
     m_volume->set_mesh(std::move(subdivided));
     m_volume->calculate_convex_hull();
     m_volume->invalidate_convex_hull_2d();
@@ -814,6 +1053,132 @@ void GLGizmoSculpt::do_subdivide()
         m_c->update(on_get_requirements());
     m_session.reset();
     attach_to_selection();
+}
+
+// ----------------------------------------------------------------------------
+// v3: brush icons and the dropdown
+// ----------------------------------------------------------------------------
+
+// The dropdown's order, which is also the 1..N key order and the Brush enum's.
+static const std::array<std::pair<int, const char *>, GLGizmoSculpt::BrushCount> s_brush_rows = {
+    std::make_pair(0,  "grab"),
+    std::make_pair(1,  "inflate"),
+    std::make_pair(2,  "deflate"),
+    std::make_pair(3,  "smooth"),
+    std::make_pair(4,  "flatten"),
+    std::make_pair(5,  "crease"),
+    std::make_pair(6,  "pinch"),
+    std::make_pair(7,  "nudge"),
+    std::make_pair(8,  "snakehook"),
+    std::make_pair(9,  "claystrips"),
+    std::make_pair(10, "mask")};
+
+void GLGizmoSculpt::ensure_brush_icons()
+{
+    // Once per gizmo, on the first panel frame - by then a GL context exists,
+    // which IMTexture::load_from_svg_file needs and on_init() does not have.
+    if (m_brush_icons_tried)
+        return;
+    m_brush_icons_tried = true;
+
+    // 48 px for a ~24 px slot: the panel is drawn at the user's DPI scale, and a
+    // texture rasterised at the nominal size goes soft on a HiDPI display.
+    const unsigned px = 48;
+    const std::string dir = Slic3r::resources_dir() + "/images/sculpt_brush_";
+    for (const auto &row : s_brush_rows) {
+        ImTextureID id = nullptr;
+        if (IMTexture::load_from_svg_file(dir + row.second + ".svg", px, px, id))
+            m_brush_icons[row.first] = id;
+        ImTextureID id_dark = nullptr;
+        if (IMTexture::load_from_svg_file(dir + row.second + "_dark.svg", px, px, id_dark))
+            m_brush_icons_dark[row.first] = id_dark;
+    }
+}
+
+ImTextureID GLGizmoSculpt::brush_icon(Brush brush) const
+{
+    // Follow the app theme the way the align icons do: a separate file per
+    // theme, since the SVGs are rasterised once and cannot be recoloured after.
+    const auto &map = wxGetApp().dark_mode() ? m_brush_icons_dark : m_brush_icons;
+    const auto  it  = map.find(int(brush));
+    return it == map.end() ? nullptr : it->second;
+}
+
+const wxString &GLGizmoSculpt::brush_label(Brush brush) const
+{
+    const int i = int(brush);
+    return m_desc.at(s_brush_rows[size_t(i >= 0 && i < BrushCount ? i : 0)].second);
+}
+
+void GLGizmoSculpt::draw_brush_combo(float wrap_width)
+{
+    ensure_brush_icons();
+
+    const float icon = ImGui::GetFrameHeight();
+    const float gap  = ImGui::GetStyle().ItemInnerSpacing.x;
+
+    ImGui::PushItemWidth(wrap_width);
+    // BeginCombo's preview is text only, so the icon is drawn over the closed
+    // combo afterwards and the label is padded across to leave room for it -
+    // ImGui has no "combo with an image in the preview" of its own.
+    const wxString  current = brush_label(m_brush);
+    const ImTextureID cur_id = brush_icon(m_brush);
+    std::string preview = into_u8(current);
+    if (cur_id != nullptr)
+        // Enough leading spaces to clear the icon; measured, not guessed, so it
+        // holds at every DPI scale and font size.
+        preview = std::string(size_t(std::ceil(double(icon + gap) / double(std::max(1.f, ImGui::CalcTextSize(" ").x)))), ' ') + preview;
+
+    const ImVec2 combo_pos = ImGui::GetCursorScreenPos();
+    if (ImGui::BBLBeginCombo("##sculpt_brush", preview.c_str(), 0)) {
+        for (const auto &row : s_brush_rows) {
+            const Brush       b  = Brush(row.first);
+            const ImTextureID id = brush_icon(b);
+            ImGui::PushID(row.first);
+            const ImVec2 row_pos = ImGui::GetCursorScreenPos();
+            std::string  label   = into_u8(m_desc.at(row.second));
+            if (id != nullptr)
+                label = std::string(size_t(std::ceil(double(icon + gap) / double(std::max(1.f, ImGui::CalcTextSize(" ").x)))), ' ') + label;
+            if (ImGui::Selectable(label.c_str(), m_brush == b))
+                m_brush = b;
+            // A brush whose texture failed to load simply has no icon and its
+            // text sits where every other row's does - the panel degrades, it
+            // does not break.
+            if (id != nullptr)
+                ImGui::GetWindowDrawList()->AddImage(id, ImVec2(row_pos.x, row_pos.y),
+                                                     ImVec2(row_pos.x + icon, row_pos.y + icon));
+            ImGui::PopID();
+        }
+        ImGui::EndCombo();
+    }
+    ImGui::PopItemWidth();
+
+    if (cur_id != nullptr) {
+        const float pad = ImGui::GetStyle().FramePadding.x;
+        ImGui::GetWindowDrawList()->AddImage(cur_id, ImVec2(combo_pos.x + pad, combo_pos.y),
+                                             ImVec2(combo_pos.x + pad + icon, combo_pos.y + icon));
+    }
+}
+
+// ----------------------------------------------------------------------------
+// v3: the mask
+// ----------------------------------------------------------------------------
+
+void GLGizmoSculpt::refresh_masks()
+{
+    if (!m_session)
+        return;
+    // Both detections are pure functions of the current mesh, so re-running them
+    // whenever the mesh may have changed is both correct and cheap - there is no
+    // staleness to reason about. A hand-painted mask is NOT recomputed and is
+    // deliberately kept across a commit (the vertex numbering is unchanged); a
+    // Subdivide throws the session away and takes the painted mask with it,
+    // which is the honest thing to do since the vertex ids are gone.
+    m_session->detect_bed_contact();
+    if (m_protect_sharp)
+        m_session->detect_sharp_edges(m_sharp_dihedral);
+    m_session->set_bed_contact_enabled(m_protect_bed && m_session->bed_contact_count() > 0);
+    m_session->set_sharp_edge_enabled(m_protect_sharp);
 }
 
 // ----------------------------------------------------------------------------
@@ -886,32 +1251,12 @@ void GLGizmoSculpt::on_render_input_window(float x, float y, float bottom_limit)
     ImGui::AlignTextToFramePadding();
     m_imgui->text(m_desc.at("brush"));
 
-    // Six brushes no longer fit on one line inside a fixed-width panel, so they
-    // wrap: a radio goes on the current line while it fits and starts a new line
-    // when it does not. The order is the one the spec fixes - Grab, Inflate,
-    // Deflate, Smooth, Flatten, Crease.
-    const std::array<std::pair<Brush, const char *>, 6> brushes = {
-        std::make_pair(Brush::Grab, "grab"),
-        std::make_pair(Brush::Inflate, "inflate"),
-        std::make_pair(Brush::Deflate, "deflate"),
-        std::make_pair(Brush::Smooth, "smooth"),
-        std::make_pair(Brush::Flatten, "flatten"),
-        std::make_pair(Brush::Crease, "crease")};
-    const float radio_extra = ImGui::GetFrameHeight() + ImGui::GetStyle().ItemInnerSpacing.x + ImGui::GetStyle().ItemSpacing.x;
-    float line_used = 0.f;
-    for (size_t i = 0; i < brushes.size(); ++i) {
-        const float item_width = m_imgui->calc_text_size(m_desc.at(brushes[i].second)).x + radio_extra;
-        if (i != 0) {
-            if (line_used + item_width <= wrap_width) {
-                ImGui::SameLine();
-            } else {
-                line_used = 0.f;
-            }
-        }
-        line_used += item_width;
-        if (m_imgui->radio_button(m_desc.at(brushes[i].second), m_brush == brushes[i].first))
-            m_brush = brushes[i].first;
-    }
+    // v1.1's wrapping radio row held six brushes and only just fitted the
+    // fixed-width panel; v3 has eleven, which would take four lines and push the
+    // sliders off the bottom. A combo takes one line whatever the count, and its
+    // entries carry an icon each - a sphere with the deformation drawn on it, so
+    // the shape of the brush is readable before its name is.
+    draw_brush_combo(wrap_width);
 
     ImGui::Separator();
 
@@ -947,6 +1292,77 @@ void GLGizmoSculpt::on_render_input_window(float x, float y, float bottom_limit)
     m_imgui->bbl_checkbox(m_desc.at("falloff"), m_falloff);
     if (m_brush == Brush::Smooth)
         m_imgui->bbl_checkbox(m_desc.at("taubin"), m_taubin);
+
+    // Per-brush extras, on the same slider metrics as the two above so the rows
+    // line up whichever brush is selected.
+    if (m_brush == Brush::ClayStrips) {
+        // As a fraction of the brush radius, so a Clay stroke builds the same
+        // relative amount of material at any brush size - Inflate's `amount`
+        // trick, exposed because the plateau height is the brush's whole point.
+        ImGui::AlignTextToFramePadding();
+        m_imgui->text(m_desc.at("clay_offset"));
+        ImGui::SameLine(sliders_left);
+        ImGui::PushItemWidth(sliders_width);
+        float clay_pct = m_clay_offset_ratio * 100.f;
+        if (m_imgui->bbl_slider_float_style("##sculpt_clay", &clay_pct, 1.f, 50.f, "%.0f%%", 1.0f, true))
+            m_clay_offset_ratio = clay_pct / 100.f;
+        m_clay_offset_ratio = std::clamp(m_clay_offset_ratio, 0.01f, 0.5f);
+    }
+    if (m_brush == Brush::Mask) {
+        ImGui::AlignTextToFramePadding();
+        m_imgui->text(m_desc.at("mask_strength"));
+        ImGui::SameLine(sliders_left);
+        ImGui::PushItemWidth(sliders_width);
+        float mask_pct = m_mask_strength * 100.f;
+        if (m_imgui->bbl_slider_float_style("##sculpt_mask_strength", &mask_pct, 5.f, 100.f, "%.0f%%", 1.0f, true))
+            m_mask_strength = mask_pct / 100.f;
+        m_mask_strength = std::clamp(m_mask_strength, 0.05f, 1.f);
+        m_imgui->text_wrapped(m_desc.at("mask_hint"), wrap_width);
+    }
+
+    ImGui::Separator();
+
+    // --- the mask (v3, phase 3b) ---
+    //
+    // Session-only by design: the two auto sources are recomputed from the mesh
+    // every time the gizmo attaches, so they can never go stale, and a
+    // hand-painted mask deliberately does not survive the gizmo closing -
+    // persisting it would mean a new FacetsAnnotation-style store on
+    // ModelVolume, a 3MF schema change and a migration, which is real scope.
+    const bool has_bed = m_session->bed_contact_count() > 0;
+    m_imgui->disabled_begin(! has_bed);
+    bool protect_bed = m_protect_bed;
+    if (m_imgui->bbl_checkbox(m_desc.at("protect_bed"), protect_bed)) {
+        m_protect_bed = protect_bed;
+        refresh_masks();
+    }
+    m_imgui->disabled_end();
+    // The copy says "the flat area touching the bed", not "the footprint": on a
+    // filleted or chamfered bottom edge the sloped ring of triangles is not
+    // bed-normal, so it is not protected, and those two are different things.
+    m_imgui->text_wrapped(has_bed ? m_desc.at("protect_bed_hint") : m_desc.at("protect_bed_none"), wrap_width);
+
+    bool protect_sharp = m_protect_sharp;
+    if (m_imgui->bbl_checkbox(m_desc.at("protect_sharp"), protect_sharp)) {
+        m_protect_sharp = protect_sharp;
+        refresh_masks();
+    }
+    if (m_protect_sharp) {
+        ImGui::AlignTextToFramePadding();
+        m_imgui->text(m_desc.at("sharp_angle"));
+        ImGui::SameLine(sliders_left);
+        ImGui::PushItemWidth(sliders_width);
+        float dihedral = m_sharp_dihedral;
+        if (m_imgui->bbl_slider_float_style("##sculpt_sharp", &dihedral, 10.f, 170.f, "%.0f deg", 1.0f, true)) {
+            m_sharp_dihedral = std::clamp(dihedral, 10.f, 170.f);
+            refresh_masks();
+        }
+    }
+
+    if (m_session->has_painted_mask() && m_imgui->button(m_desc.at("clear_mask"))) {
+        m_session->clear_painted_mask();
+        m_parent.set_as_dirty();
+    }
 
     ImGui::Separator();
 

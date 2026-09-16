@@ -551,6 +551,223 @@ than in the gizmo. Specifically **unverified**:
 * Everything still unverified from v1 and v1.1: the brush on a non-uniformly scaled part, the
   gizmo on a multi-part object, and the assemble view.
 
+## v3 - four more brushes, a per-vertex mask, an icon dropdown (branch `feat/sculpt-v3`)
+
+Phases 3a and 3b of `docs/superpowers/specs/2026-09-08-sculpt-brushes-research.md`, plus two UI
+items the owner asked for alongside them. Branched from `feat/ultra-preferences` (`8e83e95981`).
+
+### 3a - the brushes
+
+Five new `BrushType`s, all vertex-only, all riding the shared `weights[i] = strength *
+falloff_weight(d, r)` preamble in `SculptSession::apply()` verbatim, so each is one `case` in that
+switch and nothing else. No new session state, no new per-stroke snapshot, no change to the
+paint-preserving commit path.
+
+| Brush | Kernel | Ctrl |
+|---|---|---|
+| **Pinch** | `v -= w * tangential_offset(v, centre, axis)` - Crease's tangential pull with the normal push removed | **Magnify**: the same, sign flipped (`magnify` bool, exactly as `deflate` rides on Inflate) |
+| **Nudge** | `v += w * (drag - drag.dot(n_v) * n_v)` - the drag flattened into each vertex's own tangent plane | none (a drag has no opposite, the same call Grab makes) |
+| **Snake Hook** | `v += w * drag` - Grab's kernel unchanged; what makes it Snake Hook is that the **gizmo** feeds the live cursor position as `params.center` each tick instead of pinning the stroke anchor, so the touched set travels with the drag | none |
+| **Clay Strips** | Flatten against a plane offset `clay_offset` **above** the fitted one, one-sided: `if ((target - d) * dir > 0) v += w * (target - d) * n`. The one-sidedness is what makes repeated ticks converge on a plateau instead of drifting the way repeated Inflate does | **carve**: a negative offset, target below the surface, and the clamp flips with it |
+| **Mask** | writes `m_painted_mask[v] -= w * mask_amount`, clamped to [0,1]; moves nothing at all | **erase**: `mask_amount` goes negative |
+
+Pinch and Crease now share two helpers rather than duplicating the projection: `tangential_offset()`
+(free, static) and `SculptSession::brush_axis()` (the caller's pinned direction if it gave one, else
+the fitted normal). Pinch and Clay Strips join Flatten and Crease in pinning their axis/plane at
+`start_stroke()`, so a long stroke works against one plane instead of chasing the surface it has just
+moved. Nudge and Snake Hook join Grab as "drag-driven": they do nothing on the click itself, and
+their cursor rides the dragged patch rather than a fresh raycast onto the deliberately stale AABB
+tree (`GLGizmoSculpt::brush_is_drag_driven()` is the single place that list lives).
+
+Deliberately **not** shipped, per the research spec's own recommendation: Draw Sharp, Thumb and Blob
+(falloff-curve variants of brushes already here, blocked on falloff curves being pluggable);
+standalone Scrape/Fill (v2 already ships both via Flatten+Ctrl); Layer (needs a new per-stroke
+snapshot cache - the first brush needing new session state); Relax (cheapest of all, but its value
+proposition sharpens once a quality-sensitive remesh consumer exists); Rotate/Twist and
+Elastic/Kelvinlets (real new math, real self-intersection risk).
+
+### 3b - the mask
+
+One `float` in [0,1] per vertex, multiplied into the shared weight loop, so **one line covers every
+present and future brush**. The line is in the preamble every brush already goes through:
+
+```
+weights[i] = params.strength * w * (mask_gates ? effective_mask(verts[i]) : 1.f);
+```
+
+...preceded by a filter that drops fully-masked vertices from the touched set outright rather than
+moving them with weight zero. That distinction is deliberate and is what the unit test asserts: a
+masked vertex never appears in `StrokeStep::moved_vertices` or `dirty_triangles` at all, and its
+position is **bit-identical** afterwards, with no tolerance.
+
+Three sources, combined by taking the **minimum** (the strictest protection wins), each stored
+separately so a toggle can be switched off again without losing what the others found:
+
+* **Protect bed contact** (default ON, greyed out when there is nothing to protect). A facet is
+  bed-contact when all three of its vertices are within `1e-4 * bbox_diagonal` of the mesh's `z_min`
+  **and** its face normal is within 10 degrees of -Z. The bed-contact vertex set is the union of
+  those facets' vertices. The normal test is what excludes a thin fin that merely grazes `z_min` with
+  a near-vertical wall. It is a per-facet predicate, not a flood fill, so **multiple disjoint bottom
+  islands** (a part with two feet) both join the set with no extra code - and
+  `bed_footprint_loops()` returns a `vector<vector<uint32_t>>`, one loop per island, so no
+  single-loop assumption is baked in anywhere. A part with no flat bottom (a sphere) detects nothing
+  and the checkbox greys itself out.
+* **Protect sharp edges** (default OFF, dihedral threshold slider, default 60 degrees). A vertex is
+  sharp when any two of its incident facets differ by more than the threshold. This walks the
+  `m_vertex_faces` CSR adjacency `SculptSession` already builds - no new topology query.
+* **The Mask brush**, painted by hand, Ctrl erases. Because the mask is a float and not a bool, half
+  a stroke's worth of paint halves the brush rather than stopping it, which is what lets a painted
+  region have a soft boundary.
+
+**Through Subdivide.** `its_subdivide_midpoint()` gained an optional `(bed_vertices, pin_z)` pair.
+Every new vertex that is the midpoint of two bed-contact vertices is snapped to `pin_z` exactly
+rather than trusting the float average to land there. Existing vertices are never moved by midpoint
+subdivision (it only appends), so their z is already bit-identical and needs nothing. A **boundary**
+midpoint - one bed endpoint, one not - needs no correction either: the midpoint of a straight segment
+lies on that segment by construction, so the footprint polygon gains a collinear vertex and its area
+and perimeter are unchanged. That stops being true only for a remesh that can place a new boundary
+vertex somewhere other than an edge's midpoint, which uniform subdivision never does. This is written
+down in `MeshSculpt.hpp` at the function so nobody re-derives it a third time. The one-argument
+overload is byte-for-byte the pre-v3 behaviour, and a test asserts that.
+
+**Panel copy.** It says "protects the flat area touching the bed", not "protects the footprint",
+because for a filleted or chamfered bottom edge those are different things: the sloped ring of
+triangles at the very bottom is not bed-normal, so it is not protected, and the protected pad's
+outline is the inner edge of the flat area rather than the true silhouette at `z_min`. Conservative
+and correct, but worth saying out loud in the UI.
+
+**Overlay.** A tinted GLModel of the masked triangles, offset 0.02 mm along their normals against
+z-fighting, drawn with the same `gouraud` shader the paint gizmos' enforcer/blocker overlay uses. The
+mask is per-vertex, so "a masked triangle" is one all three of whose vertices are masked - that draws
+the interior of a masked region and leaves its boundary triangles untinted, reading as a soft edge
+rather than a hard facet-aligned one, which is the honest picture for a continuous weight. A cool
+blue-grey, distinct from the paint gizmos' orange/blue and from the brush cursor's own blue.
+
+**Persistence: session-only**, as the research spec recommends. The two auto sources are pure
+functions of the current mesh and are recomputed on attach and after every commit, so there is no
+staleness to reason about. A hand-painted mask survives a commit (vertex ids are unchanged - that is
+the whole point of the commit path) but not a Subdivide (which renumbers) and not the gizmo closing.
+Making it persistent would need a new `FacetsAnnotation`-style store on `ModelVolume`, a 3MF schema
+change and a migration story - real scope, not an afterthought.
+
+### The brush dropdown with icons
+
+v1.1's wrapping radio row held six brushes and only just fitted the fixed-width panel. Eleven would
+take four lines and push the sliders off the bottom, so the row is now an ImGui combo:
+`GLGizmoSculpt::draw_brush_combo()`. Each entry is a ~24 px icon plus the brush name; ImGui has no
+"combo with an image in the preview", so the label is padded with a **measured** number of leading
+spaces (not a guessed constant, so it holds at any DPI scale and font size) and the icon is drawn
+over it with `ImGui::GetWindowDrawList()->AddImage()`.
+
+The 22 icons are new original SVGs in `resources/images/sculpt_brush_*.svg` - a light and a dark
+variant each, the same light/dark convention the align/distribute icons use, since the SVGs are
+rasterised once at load and cannot be recoloured afterwards. Each is a sphere (outline circle plus a
+faint terminator arc) with the deformation drawn on it, in the spirit of Blender's sculpt brush
+icons; nothing was copied - they are simple strokes generated from a small script. 24x24 viewBox,
+monochrome (`#4A4A4F` light / `#E9E9E9` dark).
+
+They load through `IMTexture::load_from_svg_file()`, the same mechanism
+`GLGizmosManager::init_icon_textures()` uses for the toolbar and align icons, rasterised at 48 px for
+a ~24 px slot so they stay crisp on a HiDPI display. Loading happens lazily on the first panel frame,
+not in `on_init()`, because `IMTexture` needs a GL context. **A brush whose texture fails to load
+simply has no icon and its text sits where every other row's does** - the panel degrades rather than
+breaking, which is why a missing or malformed SVG cannot take the gizmo down.
+
+**Keyboard.** Number keys pick a brush while the gizmo is open, in the dropdown's order: `1`-`9` for
+the first nine, `0` for the tenth, `-` for Mask. This is routed through the existing
+`GLGizmoSculpt::on_sculpt_char()` hook, which `GLGizmosManager::on_char()` already gives first
+refusal ahead of everything including its `handle_shortcut()` fallthrough. **It does clash**: bare
+`1`-`7` are `GLCanvas3D::on_char()`'s camera-view shortcuts (top/bottom/front/rear/left/right/plate).
+Taking them here is a deliberate override, the same one bare `F` already makes against "place face on
+bed", and the same one Blender makes (a number in sculpt mode is a brush, not a view). Only the
+unmodified key is claimed and only while Sculpt is the current gizmo; `Ctrl+1..7` still selects the
+camera views (a separate branch in `on_char`), so nothing is actually lost.
+
+### The bug: the confirming click of F / Shift+F deselected the object
+
+**Symptom.** Press `F`, drag sideways to size the brush, left click to keep the new size - and the
+object is deselected, so it has to be re-picked before sculpting can continue.
+
+**Cause.** `GLGizmoSculpt::on_mouse()`'s adjust-mode branch ends the modal on the **LeftDown**
+(`end_adjust(true)`) and returns true, so that half of the click is correctly swallowed. But by the
+time the matching **LeftUp** arrives a moment later, `m_adjust.active()` is already false: the event
+falls straight past the adjust branch, past the stroke branches (no stroke is active), out of
+`GLGizmoSculpt::on_mouse()` returning false, out of `GLGizmosManager::on_mouse()` returning false,
+and lands in `GLCanvas3D::on_mouse()` at the
+`evt.LeftUp() && !ignore_left_up && !dragging && m_hover_volume_idxs.empty()` branch
+(`GLCanvas3D.cpp:4722`), which calls `deselect_all()`. A brush-sizing drag almost always ends with
+the pointer off the part, so `m_hover_volume_idxs` is empty and the deselect fires every time. Half a
+click escaped the gizmo.
+
+**Fix.** Latch the debt. Ending the modal on a LeftDown sets `m_swallow_left_up`; ending it on the
+cancelling RightDown sets `m_swallow_right_up` (a RightUp reaching the canvas opens the plate context
+menu). Both are consumed at the very top of `on_mouse()`, **before** any stroke, hover or selection
+handling, and return true - so no selection changes and no stroke starts. A fresh press of any button,
+or the pointer leaving the canvas, drops the debt rather than swallowing an unrelated click much
+later; a plain `Moving()` deliberately does **not** clear it, since wx interleaves motion between the
+down and the up of one click. The Esc path (`on_sculpt_char`, `gizmo_event(Escape)`) arms neither
+flag, correctly - a key press has no owed mouse-up.
+
+**Note on the same path, for the Ctrl-invert modifier.** A Ctrl-held click on a brush Ctrl *inverts*
+(Inflate, Flatten, Crease, Pinch, Clay, Mask) is fully the gizmo's: the LeftDown returns true and the
+matching LeftUp is taken by the `m_stroke_active` branch, so the canvas sees neither half and the
+selection is untouched. On a brush Ctrl does **not** invert (Grab, Smooth, Nudge, Snake Hook) the
+click is deliberately handed to the canvas *whole* - both halves - which is what keeps Ctrl+click
+adding to the selection while Grab is active. The two cases are exclusive; there is no path where
+only one half of a Ctrl click escapes, which is exactly the failure the F-modal bug was. This is
+written as a comment at the `LeftDown` branch so it stays true.
+
+### What was proved
+
+* `BUILD_EXIT=0` on a full Release build of `Snapmaker_Orca`, `Snapmaker_Orca_app_gui` and
+  `libslic3r_tests` in an isolated worktree build tree, configured the same way as the main one
+  (`-DBUILD_TESTS=ON`, deps from `C:/Dev/SnapmakerOrca/deps/build/OrcaSlicer_dep`).
+* `libslic3r_tests` passes, the two known pre-existing failures aside. Thirteen new `[Sculpt]` cases:
+  Pinch's radial pull and zero normal component (the plane distance is asserted unchanged rather than
+  the projection reimplemented); Magnify equal-and-opposite to Pinch vertex for vertex; Nudge's move
+  orthogonal to each vertex's *own* normal on a sphere, and differing from Grab's; Snake Hook
+  accumulating a horn over ten moving-centre ticks and staying watertight; Clay Strips landing
+  exactly on the target at weight 1, not moving on a second tick, leaving an already-high vertex
+  alone, and carving symmetrically with a negative offset; the v3 Ctrl-inversion table; bed-contact
+  detection on a cube, on a two-footed part (two islands, two footprint loops) and on a sphere
+  (nothing to protect); masked vertices bit-identical and absent from `moved_vertices` under **every**
+  brush at strength 1 with falloff off; bed vertices bit-identical in z after Subdivide + a
+  whole-part Smooth, with footprint area and perimeter unchanged within 1e-6; sharp-edge protection
+  keeping a cube's corners bit-identical under a Smooth that would otherwise round them; the Mask
+  brush painting on, erasing with Ctrl, moving nothing, and gating a subsequent Inflate; a partially
+  painted vertex damped rather than pinned; and the one-argument `its_subdivide_midpoint()` overload
+  byte-for-byte identical to its pre-v3 self.
+* A hidden scratch instance of the build started clean against a scratch data dir with the new SVGs
+  present, and its log carries no "Could not load bitmap" line.
+* CRLF preserved on every touched source.
+
+### What nobody checked
+
+**Nobody clicked any of it.** There is no GUI test harness in this tree, so everything below is
+reasoned from the code and unverified by hand:
+
+* The dropdown itself - that the icons land where the measured padding says they do, that the combo
+  fits the fixed-width panel at every DPI scale, that the icons read as distinguishable brushes at
+  24 px rather than as eleven variations on a grey circle, and that they look right in **both**
+  themes. The SVGs were never rendered by a human eye at any size.
+* The click-bug fix. The state machine is a two-bool latch on a path no unit test can reach (it needs
+  wx events, a canvas and a selection), so `MeshSculpt`'s `AdjustState` - which *is* pure and *is*
+  tested - is untouched by this fix: the bug was never in the arithmetic, only in which of the two
+  halves of a click the gizmo returned true for. **Manual check:** open Sculpt on a part, press `F`,
+  move the mouse well off the part, left click. The brush keeps the new size and the part stays
+  selected. Repeat with `Shift+F` and with a right click to cancel; and confirm Esc still cancels
+  with the part still selected.
+* Snake Hook's feel. The moving-anchor logic is asserted numerically, but whether it *reads* as
+  pulling a horn - rather than as a Grab that keeps slipping - is a hands-on question.
+* The mask overlay's appearance: colour, alpha, and whether the 0.02 mm normal offset is enough to
+  clear z-fighting on a large part at a shallow camera angle without visibly floating on a small one.
+* Number-key brush selection actually reaching the gizmo rather than being eaten by ImGui when the
+  panel has focus, and whether losing bare `1`-`6` for camera views while the gizmo is open annoys
+  anyone in practice.
+* Any of it on macOS or Linux. Windows only.
+* Whether "Protect bed contact" defaulting ON is the right call for a user who *wants* to sculpt the
+  bottom face - they have to find and clear the checkbox first, and nobody has watched anyone try.
+
 ## What v2 and v3 need
 
 **v2** - the interaction polish, none of which changes the topology story:

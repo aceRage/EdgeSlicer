@@ -8,6 +8,8 @@
 #include "libslic3r/Print.hpp"
 #include "libslic3r/TriangleMesh.hpp"
 
+#include <boost/filesystem/path.hpp>
+
 #include <unordered_map>
 
 namespace Slic3r { namespace Test {
@@ -72,6 +74,14 @@ void init_and_process_print(std::initializer_list<TestMesh> 	meshes, Slic3r::Pri
 void init_and_process_print(std::initializer_list<TriangleMesh> meshes, Slic3r::Print &print, const DynamicPrintConfig& config, bool comments = false);
 void init_and_process_print(std::initializer_list<TestMesh> 	meshes, Slic3r::Print &print, std::initializer_list<Slic3r::ConfigBase::SetDeserializeItem> config_items, bool comments = false);
 void init_and_process_print(std::initializer_list<TriangleMesh> meshes, Slic3r::Print &print, std::initializer_list<Slic3r::ConfigBase::SetDeserializeItem> config_items, bool comments = false);
+
+// A per-run scratch directory, created under the system temp directory and removed
+// when the test binary exits. Use it for any file a test wants to write: exporting
+// to a BARE filename makes GCode::do_export() call
+// fs::create_directory(fs::path(path).parent_path()) on the EMPTY path, which throws.
+const boost::filesystem::path& scratch_dir();
+// A unique, not-yet-existing file path inside scratch_dir().
+boost::filesystem::path scratch_path(const std::string &extension = ".gcode");
 
 std::string gcode(Print& print);
 

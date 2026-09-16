@@ -734,6 +734,10 @@ static bool run_capture(const std::vector<std::string>& args, std::string& out, 
 // tailnet with `tailscale serve`; the phone runs the Tailscale app signed in to the same account.
 static std::string tailscale_exe()
 {
+    // SNORCA_TAILSCALE_EXE lets a gate point the hub at a stand-in CLI (test_hub_persist.py) so
+    // that the remote-access paths can be exercised without a tailnet - and without this PC's
+    // real Serve configuration being touched. Unset or empty falls through to the real locations.
+    if (const char* over = std::getenv("SNORCA_TAILSCALE_EXE"); over && *over) return over;
 #ifdef _WIN32
     const char*       pf = std::getenv("ProgramFiles");
     const std::string p  = std::string(pf ? pf : "C:\\Program Files") + "\\Tailscale\\tailscale.exe";
@@ -1576,7 +1580,10 @@ bool HubServer::bind(bool lan)
         if (!ec) break;
     }
     if (ec) {
-        BOOST_LOG_TRIVIAL(error) << "RemoteHub: no free port from " << HUB_PORT << ": " << ec.message();
+        // With SO_EXCLUSIVEADDRUSE this is what a second hub sees when the first one already owns
+        // the range - the shadowing bind now fails loudly instead of silently stealing loopback.
+        BOOST_LOG_TRIVIAL(error) << "RemoteHub: no free port in " << HUB_PORT << "-" << (HUB_PORT + 19)
+                                 << " (another hub is probably already running): " << ec.message();
         return false;
     }
     acceptor->listen(64, ec);
@@ -1604,6 +1611,11 @@ bool HubServer::bind_admin()
     boost::system::error_code ec;
     acceptor->open(tcp::v4(), ec);
     if (ec) return false;
+#ifdef _WIN32
+    // Same reason as the main listener: an ephemeral port is still a port another process could
+    // bind underneath us, and this one carries the control plane.
+    acceptor->set_option(asio::detail::socket_option::boolean<SOL_SOCKET, SO_EXCLUSIVEADDRUSE>(true), ec);
+#endif
     acceptor->bind(tcp::endpoint(asio::ip::address_v4::loopback(), 0), ec);
     if (ec) { BOOST_LOG_TRIVIAL(error) << "RemoteHub: no loopback port for the control plane: " << ec.message(); return false; }
     acceptor->listen(32, ec);
@@ -2840,6 +2852,19 @@ bool HubServer::start()
     // is how instances find a live hub), which used to lose remote_on and the allow-list and
     // left Tailscale Serve answering 403 until remote access was switched on again.
     json notify_saved = json::object(), webpush_saved = json::object(), apppush_saved = json::object();
+    // Migration: before settings.json existed these two lived in hub.json. A data dir whose last
+    // hub was killed rather than quit still has that file, so import them once - settings.json,
+    // written below by write_hub_json(), wins from then on.
+    if (!fs::exists(settings_json_path())) {
+        try {
+            json j = json::parse(read_file(hub_json_path()));
+            if (j.contains("remote_on") || j.contains("allowed_logins")) {
+                m_remote_on = j.value("remote_on", false);
+                for (const auto& l : j.value("allowed_logins", json::array())) m_allowed_logins.push_back(lower(l.get<std::string>()));
+                BOOST_LOG_TRIVIAL(info) << "RemoteHub: imported remote access settings from an old hub.json";
+            }
+        } catch (...) {}
+    }
     try {
         json j      = json::parse(read_file(settings_json_path()));
         m_remote_on = j.value("remote_on", false);
