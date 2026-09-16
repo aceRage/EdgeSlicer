@@ -679,6 +679,36 @@ indexed_triangle_set draw_cut_cutter_solid(const DrawCutStroke& stroke,
                                            const indexed_triangle_set* mesh = nullptr);
 
 // ---------------------------------------------------------------------------
+// THE PREVIEW SURFACE: what the GIZMO SHOWS, as opposed to what the boolean
+// needs. 2026-09-16, owner report with a screenshot: after drawing a belt round
+// the bunny the cut itself came out "exactly as expected", but the preview showed
+// "a giant translucent curved wall/cylinder sweeping far outside the part" - the
+// FLANGE-AND-WALL closure draw_cut_cutter_solid() adds to a wrap so the shape is a
+// watertight half-space (see the "HALF-SPACE" comment above build_core_band's
+// caller), rendered at 25% alpha over a part it dwarfs. The same is true of a
+// plug's lid where it strays outside the loop, and would be true of an open
+// stroke's sweep-to-a-far-boundary rim if that surface were ever shown edge-on.
+//
+// None of that closure is part of the surface the user asked to see: they drew a
+// band round (or across, or over) the part and expect the preview to show exactly
+// that band, plus the Extension/skirt that lifts its rim clear of the skin -
+// nothing that only exists to give a boolean a watertight solid to intersect.
+//
+// This returns THAT surface - band + skirt (+ core plate for a closed loop,
+// which is itself part of what the user drew, not a closure) - and nothing else:
+// no plug lid past the loop's own footprint beyond what the band already covers,
+// no wrap flange, no wrap wall, no bottom cap, and no open-stroke sweep rim. It is
+// built by the SAME rails/rings draw_cut_cutter_solid() uses (so it is never a
+// second, independently-tuned surface that could drift from the real cut), just
+// stopped before the closure geometry is appended. Same arguments and the same
+// empty-set contract as draw_cut_cutter_solid().
+indexed_triangle_set draw_cut_preview_surface(const DrawCutStroke& stroke,
+                                              const DrawCutParams& params,
+                                              const BoundingBoxf3& bbox,
+                                              double               face_offset = 0.0,
+                                              const indexed_triangle_set* mesh = nullptr);
+
+// ---------------------------------------------------------------------------
 // THE DRAWN SURFACE AS A SURFACE. PHASE 2, and what connectors stand on.
 //
 // The curved cut's connectors ride on curved_cut_sheet_frame(): a rotation built

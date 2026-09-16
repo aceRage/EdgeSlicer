@@ -3497,11 +3497,13 @@ void GLGizmoCut3D::update_draw_surface_raycaster()
     if (!m_draw_stroke.valid())
         return;
 
-    // THE CUTTER SHELL IS THE PICK TARGET, because it is what the user can see: the
-    // translucent surface render_draw_stroke() puts up is this same solid, so a
-    // click lands where the eye says it will. Built at the cut's own reach (not the
-    // preview's clamped one) so a connector can be placed anywhere on the surface
-    // the cut will use, including well inside the part.
+    // THE CUTTER SOLID IS THE PICK TARGET, so a connector can be placed anywhere on
+    // the surface the cut will use, including on the closure geometry (a plug's lid,
+    // a wrap's flange) that render_draw_stroke()'s preview no longer shows - the
+    // preview and the pick target intentionally part ways here, the preview trimmed
+    // to what the user drew (draw_cut_preview_surface(), see its declaration) and
+    // this kept at the cut's own full reach (not the preview's clamped one) so
+    // nothing the boolean can use is off limits to a connector.
     BoundingBoxf3 bbox;
     indexed_triangle_set mesh;
     const indexed_triangle_set* src = nullptr;
@@ -4221,7 +4223,16 @@ void GLGizmoCut3D::update_draw_preview_models()
             shown.depth       = std::max(1.0, need);
         }
 
-        const indexed_triangle_set cutter = draw_cut_cutter_solid(shell_stroke, shown, bbox, 0.0, src);
+        // draw_cut_preview_surface(), not draw_cut_cutter_solid(): the shell shows
+        // the surface the user drew - band, skirt, core plate - not the closure
+        // geometry (a plug's lid past the loop, or a wrap's flange/wall/cap) that
+        // only exists so the boolean has a watertight solid. 2026-09-16 owner
+        // report: a belt round the bunny previewed as "a giant translucent curved
+        // wall/cylinder sweeping far outside the part" - the wrap's flange, which
+        // reaches out to `reach` (past the object's bounding box) before turning
+        // down - even though the cut itself was exactly right. See that function's
+        // declaration in DrawCut.hpp.
+        const indexed_triangle_set cutter = draw_cut_preview_surface(shell_stroke, shown, bbox, 0.0, src);
         if (!cutter.empty())
             m_draw_cutter_model.init_from(cutter);
     }

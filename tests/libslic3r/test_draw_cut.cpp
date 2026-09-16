@@ -9,6 +9,7 @@
 #include <libslic3r/AABBMesh.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <optional>
 #include <limits>
@@ -5031,4 +5032,208 @@ TEST_CASE("Draw cut: the distance to a polyline measures to its segments", "[Dra
     // Degenerate inputs.
     REQUIRE(draw_cut_distance_to_polyline({ Vec2d(1, 1) }, false, Vec2d(4, 5)) == Approx(5.0));
     REQUIRE(draw_cut_distance_to_polyline({}, false, Vec2d(0, 0)) > 1e300);
+}
+
+TEST_CASE("Draw cut: the preview surface drops the wrap's flange and stays within band + extension", "[DrawCut]")
+{
+    // 2026-09-16 owner report, with a screenshot: after drawing a belt round the
+    // bunny the CUT was "exactly as expected", but the PREVIEW showed "a giant
+    // translucent curved wall/cylinder sweeping far outside the part" - the wrap's
+    // flange-and-wall closure (draw_cut_band_core_solid, the `wraps` branch), which
+    // carries the tip ring out to `reach` (past the object's own bounding box)
+    // before turning down. draw_cut_preview_surface() is the fix: same rails and
+    // rings as draw_cut_cutter_solid(), just returned before that closure is
+    // appended, so the belt case here is the article that broke.
+    const double R = 20.0, H = 60.0;
+    const indexed_triangle_set cyl = centred_cylinder(R, H);
+    BoundingBoxf3 bb;
+    for (const Vec3f& v : cyl.vertices) bb.merge(v.cast<double>());
+
+    for (double ext : { 0.0, 5.0 }) {
+        DrawCutStroke belt = wavy_loop_on_cylinder(R, 0.0, 3.0);
+        REQUIRE(belt.finish(1.0, 0.0) == DrawCutError::None);
+        REQUIRE(belt.is_closed());
+
+        DrawCutParams params;
+        params.extension   = ext;
+        params.angle_deg   = 20.0;
+        params.depth       = 4.0;
+        params.through_all = false;
+        INFO("extension " << ext);
+
+        // It really is read as a wrap, or this test is not exercising the fault.
+        REQUIRE(draw_cut_loop_separates(cyl, belt, params));
+
+        const indexed_triangle_set full = draw_cut_cutter_solid(belt, params, bb, 0.0, &cyl);
+        REQUIRE(!full.empty());
+        REQUIRE(watertight(full));
+
+        const indexed_triangle_set preview = draw_cut_preview_surface(belt, params, bb, 0.0, &cyl);
+        REQUIRE(!preview.empty());
+
+        // THE BOUND: every preview vertex lies within (band reach + Extension) of
+        // the drawn line's own centroid-radius, measured radially in the cylinder's
+        // XY plane - the flange this replaces reached out to `reach`, a whole bbox
+        // diagonal past that, so this is the number that would have caught it.
+        Vec3d centroid = Vec3d::Zero();
+        for (const DrawCutSample& s : belt.path()) centroid += s.pos;
+        centroid /= double(belt.path().size());
+        double max_r_line = 0.0;
+        for (const DrawCutSample& s : belt.path())
+            max_r_line = std::max(max_r_line, (s.pos.head<2>() - centroid.head<2>()).norm());
+
+        // Depth * sin(angle) is the band's own inward lateral travel; a couple of mm
+        // of slack covers the tessellation and the lift/nudge terms.
+        const double lateral_budget = max_r_line + ext + params.depth + 2.0;
+        double worst_r = 0.0;
+        for (const Vec3f& v : preview.vertices)
+            worst_r = std::max(worst_r, (v.cast<double>().head<2>() - centroid.head<2>()).norm());
+        INFO("worst radial reach " << worst_r << ", budget " << lateral_budget);
+        REQUIRE(worst_r <= lateral_budget);
+
+        // And vertically: nothing in the preview should reach anywhere near the
+        // bbox's own extent the way the flange-and-wall's bottom cap used to (it
+        // ran the wall all the way past the part along -n before capping).
+        BoundingBoxf3 pbb;
+        for (const Vec3f& v : preview.vertices) pbb.merge(v.cast<double>());
+        INFO("preview z range [" << pbb.min.z() << ", " << pbb.max.z() << "], bbox ["
+             << bb.min.z() << ", " << bb.max.z() << "]");
+        REQUIRE(pbb.min.z() > bb.min.z() - 1.0);
+        REQUIRE(pbb.max.z() < bb.max.z() + 1.0);
+
+        // The full cutter solid, by contrast, DOES reach past the part along -n (the
+        // wrap's wall + bottom cap) - so this is also a check that the two builders
+        // are actually returning different things, not that the bound is trivially
+        // loose.
+        BoundingBoxf3 fbb;
+        for (const Vec3f& v : full.vertices) fbb.merge(v.cast<double>());
+        REQUIRE(fbb.min.z() < bb.min.z() - 1.0);
+    }
+}
+
+TEST_CASE("Draw cut: the preview surface on a cone belt stays clear of the flange, unlike the full cutter", "[DrawCut]")
+{
+    // The same fault on the other article the 2026-09-16 fix (commit d63873ecad)
+    // covers: a belt round a part that WIDENS below it, where the flange used to
+    // fan out radially from the loop's own centroid before turning down - visibly
+    // huge next to a part whose base is not much bigger than the belt itself.
+    const double R = 15.0, H = 90.0, Z = 60.0;
+    const indexed_triangle_set cone = its_make_cone(R, H);
+    BoundingBoxf3 bb;
+    for (const Vec3f& v : cone.vertices) bb.merge(v.cast<double>());
+    const double r_line = R * (1.0 - Z / H);
+    const double alpha  = std::atan2(R, H);
+
+    DrawCutStroke stroke;
+    const int n = 96;
+    for (int i = 0; i < n; ++ i) {
+        const double th = 2.0 * M_PI * double(i) / double(n);
+        stroke.append(Vec3d(r_line * std::cos(th), r_line * std::sin(th), Z),
+                      Vec3d(std::cos(alpha) * std::cos(th), std::cos(alpha) * std::sin(th), std::sin(alpha)),
+                      size_t(i));
+    }
+    stroke.append(stroke.samples().front().pos, stroke.samples().front().normal, 0);
+    REQUIRE(stroke.finish(1.0, 0.0) == DrawCutError::None);
+    REQUIRE(stroke.is_closed());
+
+    DrawCutParams params;
+    params.extension   = 5.0;
+    params.angle_deg   = 30.0;
+    params.depth       = 3.0;
+    params.through_all = false;
+    REQUIRE(draw_cut_loop_separates(cone, stroke, params));
+
+    const indexed_triangle_set preview = draw_cut_preview_surface(stroke, params, bb, 0.0, &cone);
+    REQUIRE(!preview.empty());
+
+    // The flange this replaces carried the tip ring out by `reach` (1.05x the bbox
+    // diagonal + 1) in the plane, so its radius would have been enormous next to
+    // the cone's own R of 15. The preview must stay within a small multiple of the
+    // drawn line's own radius plus Extension and Depth.
+    const double budget = r_line + params.extension + params.depth + 2.0;
+    double worst_r = 0.0;
+    for (const Vec3f& v : preview.vertices)
+        worst_r = std::max(worst_r, std::hypot(double(v.x()), double(v.y())));
+    INFO("worst radial reach " << worst_r << ", budget " << budget << ", bbox diag "
+         << bb.size().norm());
+    REQUIRE(worst_r <= budget);
+    REQUIRE(worst_r < 0.25 * bb.size().norm());   // the old flange would have failed this outright
+
+    // No vertex sits far below the part along -n either (the wall + bottom cap this
+    // replaces went there).
+    double zmin = std::numeric_limits<double>::max();
+    for (const Vec3f& v : preview.vertices) zmin = std::min(zmin, double(v.z()));
+    INFO("preview zmin " << zmin);
+    REQUIRE(zmin > -5.0);
+}
+
+TEST_CASE("Draw cut: the preview surface for an open line is exactly the old drawn face", "[DrawCut]")
+{
+    // For an open stroke draw_cut_cutter_solid() already builds nothing but the
+    // band-plus-extension for its "drawn face" (A, B below) before sweeping a
+    // second copy sideways to close the solid - so draw_cut_preview_surface() has
+    // no closure to drop here, and the two must agree vertex-for-vertex and
+    // triangle-for-triangle on that face. This is the "for an open line the
+    // preview equals the old surface" contract.
+    BoundingBoxf3 bbox;
+    bbox.merge(Vec3d(-20, -20, -20));
+    bbox.merge(Vec3d(20, 20, 20));
+
+    DrawCutStroke line = line_on_top(0.5 * CUBE);
+    REQUIRE(line.finish(1.0, 0.0) == DrawCutError::None);
+    REQUIRE(!line.is_closed());
+
+    DrawCutParams params;
+    params.extension   = 4.0;
+    params.through_all = false;
+    params.depth        = 6.0;
+
+    const indexed_triangle_set full    = draw_cut_cutter_solid(line, params, bbox, 0.0);
+    const indexed_triangle_set preview = draw_cut_preview_surface(line, params, bbox, 0.0);
+    REQUIRE(!full.empty());
+    REQUIRE(!preview.empty());
+    REQUIRE_FALSE(watertight(preview));   // an open strip, deliberately not closed into a solid
+
+    // The drawn face is the FIRST 2m vertices of the full cutter (out, then in - see
+    // "Two copies of the strip" in draw_cut_cutter_solid()), and the preview should
+    // be exactly that prefix, unchanged.
+    const size_t m = line.path().size() + 2;   // the two tangent-extended end rails
+    REQUIRE(preview.vertices.size() == 2 * m);
+    REQUIRE(full.vertices.size() == 4 * m);
+    for (size_t i = 0; i < preview.vertices.size(); ++ i) {
+        INFO("vertex " << i);
+        REQUIRE((preview.vertices[i] - full.vertices[i]).norm() < 1e-6f);
+    }
+    // Same two triangles per span as the full cutter's drawn face - as VERTEX SETS,
+    // not necessarily in the same order or the same winding:
+    //  - ORDER, because the full cutter interleaves the drawn face's two triangles
+    //    with the SWEPT face's two triangles per span ("A(i),B(i),B(j) / A(i),B(j),A(j)"
+    //    immediately followed by "A2(i),B2(j),B2(i) / A2(i),A2(j),B2(j)"), so the drawn
+    //    face is not a contiguous prefix of full.indices - it is every triangle whose
+    //    three vertices are all < 2m (i.e. reference rail 0/1, the drawn face, and
+    //    never rail 2/3, the swept copy).
+    //  - WINDING, because the full cutter runs a whole-solid winding fixup at the very
+    //    end (its_volume() < 0 flips every triangle so the closed solid is outward-wound
+    //    for cut_with_solid()), which surface_only deliberately skips because the
+    //    preview is an open, non-manifold strip that render_draw_stroke() draws with
+    //    GL_CULL_FACE disabled - so which way a triangle winds is not observable and
+    //    not part of the contract, only which triangles exist is.
+    auto as_set = [](const Vec3i32& t) {
+        std::array<int, 3> a{ t(0), t(1), t(2) };
+        std::sort(a.begin(), a.end());
+        return a;
+    };
+    std::vector<std::array<int, 3>> full_drawn_face;
+    for (const Vec3i32& t : full.indices)
+        if (t(0) < int(2 * m) && t(1) < int(2 * m) && t(2) < int(2 * m))
+            full_drawn_face.push_back(as_set(t));
+    std::sort(full_drawn_face.begin(), full_drawn_face.end());
+
+    REQUIRE(preview.indices.size() == 2 * (m - 1));
+    REQUIRE(full_drawn_face.size() == preview.indices.size());
+    std::vector<std::array<int, 3>> preview_tris;
+    for (const Vec3i32& t : preview.indices)
+        preview_tris.push_back(as_set(t));
+    std::sort(preview_tris.begin(), preview_tris.end());
+    REQUIRE(preview_tris == full_drawn_face);
 }
