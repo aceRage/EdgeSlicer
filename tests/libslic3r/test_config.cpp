@@ -468,8 +468,11 @@ TEST_CASE("save_to_json leaves an existing file untouched when the config cannot
     }
     CHECK_THROWS_AS(config.save_to_json(path.string(), "test_preset", "User", "1.0.0.0"), nlohmann::json::type_error);
 
-    boost::nowide::ifstream ifs(path.string());
-    const std::string contents((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+    std::string contents;
+    {
+        boost::nowide::ifstream ifs(path.string());
+        contents.assign(std::istreambuf_iterator<char>(ifs), std::istreambuf_iterator<char>());
+    }
     boost::filesystem::remove(path);
     CHECK(contents == "previous");
 }

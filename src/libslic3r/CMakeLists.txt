@@ -238,6 +238,8 @@ set(lisbslic3r_sources
     GCode/ExtrusionProcessor.hpp
     GCode/FanMover.cpp
     GCode/FanMover.hpp
+    GCode/LayerTimeSpeedSmoothingFilter.cpp
+    GCode/LayerTimeSpeedSmoothingFilter.hpp
     GCode/GCodeProcessor.cpp
     GCode/GCodeProcessor.hpp
     SliceCompare/Snapshot.cpp
@@ -326,6 +328,8 @@ set(lisbslic3r_sources
     MinimumSpanningTree.hpp
     MixedFilament.cpp
     MixedFilament.hpp
+    MixedFilamentCliGates.cpp
+    MixedFilamentCliGates.hpp
     MultiNozzleUtils.cpp
     MultiNozzleUtils.hpp
     FilamentGroup.cpp
@@ -396,6 +400,8 @@ set(lisbslic3r_sources
     PrintBase.hpp
     PrintConfig.cpp
     PrintConfig.hpp
+    LayerTimeSpeedSmoothing.cpp
+    LayerTimeSpeedSmoothing.hpp
     Print.cpp
     Print.hpp
     PrintObject.cpp

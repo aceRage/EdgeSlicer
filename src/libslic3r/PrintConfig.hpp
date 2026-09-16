@@ -213,6 +213,31 @@ enum GapFillTarget {
      gftEverywhere, gftTopBottom, gftNowhere
  };
 
+// Edge: layer-time speed smoothing (process / Speed tab).
+// Mode A/B speed up long layers; optional Mode C slows short layers down.
+// Plan: 09-concept-layer-time-speed-smoothing.md. BambuStudio#12224 is slowdown-only inspiration.
+enum LayerTimeSpeedSmoothMode {
+    ltssmOff                   = 0,
+    ltssmSpeedUpExcludeOuter   = 1,
+    ltssmSpeedUpAll            = 2,
+    ltssmSlowDown              = 3
+};
+
+inline bool is_layer_time_speed_up(LayerTimeSpeedSmoothMode mode)
+{
+    return mode == ltssmSpeedUpExcludeOuter || mode == ltssmSpeedUpAll;
+}
+
+inline bool is_layer_time_slowdown(LayerTimeSpeedSmoothMode mode)
+{
+    return mode == ltssmSlowDown;
+}
+
+// Apply-side for Mode C (solver is time-only). Default excludes outer walls.
+enum LayerTimeSlowdownScope {
+    ltssAll                 = 0,
+    ltssExcludeOuterWalls   = 1
+};
 
 enum LiftType {
     NormalLift,
@@ -525,6 +550,8 @@ CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(SupportMaterialInterfacePattern)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(SupportType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(SeamPosition)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(SeamScarfType)
+CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(LayerTimeSpeedSmoothMode)
+CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(LayerTimeSlowdownScope)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(SLADisplayOrientation)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(SLAPillarConnectionMode)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(BrimType)
@@ -1385,6 +1412,14 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloat,               max_volumetric_extrusion_rate_slope))
     ((ConfigOptionFloat,               max_volumetric_extrusion_rate_slope_segment_length))
     ((ConfigOptionBool,               extrusion_rate_smoothing_external_perimeter_only))
+
+    // Edge: layer-time speed smoothing. Process options; G-code export only (Print::steps_gcode).
+    ((ConfigOptionEnum<LayerTimeSpeedSmoothMode>, layer_time_speed_smoothing))
+    ((ConfigOptionPercent,             layer_time_speed_max_variation))
+    ((ConfigOptionPercent,             layer_time_speed_max_speedup))
+    ((ConfigOptionPercent,             layer_time_speed_max_slowdown))
+    ((ConfigOptionPercent,             layer_time_speed_max_time_increase))
+    ((ConfigOptionEnum<LayerTimeSlowdownScope>, layer_time_speed_slowdown_scope))
 
     
     ((ConfigOptionPercents,            retract_before_wipe))
