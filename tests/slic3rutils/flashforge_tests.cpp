@@ -29,7 +29,7 @@
 #include <string>
 #include <vector>
 
-#include "slic3r/Utils/Flashforge.hpp"
+#include "slic3r/Utils/FlashforgeLocalApi.hpp"
 
 using Slic3r::FlashforgeMaterialSlot;
 namespace ff = Slic3r::FlashforgeLocalApi;
