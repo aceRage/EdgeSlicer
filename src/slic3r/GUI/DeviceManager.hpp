@@ -15,6 +15,7 @@
 #include "slic3r/Utils/NetworkAgent.hpp"
 #include "boost/bimap/bimap.hpp"
 #include "CameraPopup.hpp"
+#include "LanReconnectLadder.hpp"
 #include "libslic3r/calib.hpp"
 #include "libslic3r/Utils.hpp"
 #define USE_LOCAL_SOCKET_BIND 0
@@ -1125,6 +1126,60 @@ public:
 
     void keep_alive();
     void check_pushing();
+
+    // Ultra: the LAN reconnect tick. A LAN-mode printer's MQTT session is the slicer's only link to
+    // it, and when it drops nothing re-established it: MonitorPanel::update only retried inside
+    // `if (is_user_login())`, so with no Bambu cloud account a dropped LAN session stayed dropped
+    // until the user left the Device tab and came back (which re-runs set_selected_machine and its
+    // reconnect branch). The Monitor panel is also lazily constructed now, and the hidden
+    // hub-managed instance never opens it at all, so a retry that lives there reaches nobody.
+    //
+    // So the retry lives here and runs off the one-second GUI heartbeat (RemoteAccess's
+    // GuiHeartbeat -> RemoteEvents::heartbeat), independent of both the cloud login and the panel.
+    // Call it on the GUI thread only: it touches MachineObject and the network agent.
+    void lan_reconnect_tick();
+
+    // The backoff ladder, in milliseconds: how long a LAN printer must have looked disconnected
+    // before the first retry, and how long between retries after that. The numbers and the formula
+    // live in LanReconnectLadder.hpp, which is wx-free, so a unit test can check the
+    // cadence a log is meant to show without linking the GUI. Named here for readability.
+    static constexpr long long LAN_RECONNECT_GRACE_MS = LanReconnectLadder::GRACE_MS;
+    static constexpr long long LAN_RECONNECT_MAX_MS   = LanReconnectLadder::MAX_MS;
+
+    static constexpr long long lan_backoff_ms(int attempts) { return LanReconnectLadder::backoff_ms(attempts); }
+
+private:
+    // Per-printer reconnect bookkeeping. Keyed by dev_id so a printer that comes and goes does not
+    // inherit another's backoff.
+    struct LanReconnect
+    {
+        long long down_since { 0 };  // first tick at which this printer looked disconnected
+        long long last_try { 0 };    // when the last reconnect was attempted
+        int       attempts { 0 };    // consecutive attempts without a push since
+    };
+    std::map<std::string, LanReconnect> m_lan_reconnect;
+    // One reconnect attempt against one LAN machine: the same three steps the Device tab's
+    // set_selected_machine runs (disconnect, reset, connect, mark LAN-connected).
+    void lan_reconnect_now(MachineObject* obj, const char* why);
+
+    // The hidden hub-managed instance's round robin over its LAN printers (see the .cpp): which
+    // printer currently holds the agent's single LAN session, and since when.
+    std::string m_lan_watch_id;
+    long long   m_lan_watch_since { 0 };
+    MachineObject* lan_watch_rotate();
+    // When something other than the rotation last chose a printer (set_selected_machine: a send,
+    // a hub control call). The rotation leaves that choice alone for LAN_WATCH_PIN_MS so an upload
+    // or a command in flight is not cut off by the session moving on.
+    long long   m_lan_watch_pinned_at { 0 };
+
+public:
+    // How long the hidden instance leaves one LAN printer selected before moving to the next.
+    // The networking SDK gives an agent one LAN MQTT session at a time
+    // (bambu_network_connect_printer / bambu_network_disconnect_printer are agent-scoped and the
+    // disconnect takes no dev_id), so watching several Bambu printers is a rotation, not a fan-out.
+    static constexpr long long LAN_WATCH_DWELL_MS = 45000;
+    // How long a deliberate set_selected_machine holds the session against the rotation.
+    static constexpr long long LAN_WATCH_PIN_MS   = 300000;
 
     static float nozzle_diameter_conver(int diame);
     static int nozzle_diameter_conver(float diame);
