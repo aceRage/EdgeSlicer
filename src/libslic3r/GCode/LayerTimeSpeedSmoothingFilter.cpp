@@ -466,48 +466,46 @@ std::string LayerTimeSpeedSmoothingFilter::process_layer(std::string &&gcode, si
     return flush();
 }
 
+// The solve needs every layer of the print before any layer can be written, so the stage
+// holds the whole print. Two passes keep the footprint near one copy of the text: pass 1
+// parses each layer only for its time (the per-line records are dropped layer by layer),
+// the solver runs on the times, and pass 2 re-parses one layer at a time, rewrites it,
+// appends it to the output and frees that layer's buffered text. Both passes start from
+// the same fresh ParseState, so they see identical modal state (position, F, role, tool)
+// and pass 2 reproduces pass 1's lines exactly.
 std::string LayerTimeSpeedSmoothingFilter::flush()
 {
     if (m_layers.empty())
         return {};
 
-    ParseState state;
-    state.reader.f()     = float(m_config.travel_speed.value) * 60.f;
-    state.relative_e     = m_relative_e;
-
-    struct LayerParse
-    {
-        std::vector<ParsedLine> lines;
-        double                  time = 0.0;
-        size_t                  layer_id = 0;
-        bool                    cooling_slowed_down = false;
+    auto init_parse_state = [this](ParseState &state) {
+        state.reader.f() = float(m_config.travel_speed.value) * 60.f;
+        state.relative_e = m_relative_e;
     };
-    std::vector<LayerParse> parsed;
-    parsed.reserve(m_layers.size());
 
-    for (const BufferedLayer &layer : m_layers) {
-        LayerParse rec;
-        rec.layer_id            = layer.layer_id;
-        rec.cooling_slowed_down = layer.cooling_slowed_down;
-        rec.lines               = parse_layer_lines(state, layer.gcode, m_config);
-        for (const ParsedLine &line : rec.lines)
-            rec.time += line.time;
-        parsed.emplace_back(std::move(rec));
-    }
-
+    // Pass 1: layer times only.
     std::vector<double> times;
     std::vector<bool>   frozen;
-    times.reserve(parsed.size());
-    frozen.reserve(parsed.size());
-    for (const LayerParse &rec : parsed) {
-        times.push_back(rec.time);
-        frozen.push_back(rec.cooling_slowed_down);
+    times.reserve(m_layers.size());
+    frozen.reserve(m_layers.size());
+    size_t buffered_bytes = 0;
+    {
+        ParseState state;
+        init_parse_state(state);
+        for (const BufferedLayer &layer : m_layers) {
+            double time = 0.0;
+            for (const ParsedLine &line : parse_layer_lines(state, layer.gcode, m_config))
+                time += line.time;
+            times.push_back(time);
+            frozen.push_back(layer.cooling_slowed_down);
+            buffered_bytes += layer.gcode.size();
+        }
     }
 
     const size_t skip_until = std::max<size_t>(1, size_t(std::max(0, m_slow_down_layers)));
-    size_t       first_layer = parsed.size();
-    for (size_t i = 0; i < parsed.size(); ++i) {
-        if (parsed[i].layer_id >= skip_until) {
+    size_t       first_layer = m_layers.size();
+    for (size_t i = 0; i < m_layers.size(); ++i) {
+        if (m_layers[i].layer_id >= skip_until) {
             first_layer = i;
             break;
         }
@@ -535,18 +533,26 @@ std::string LayerTimeSpeedSmoothingFilter::flush()
     const double floor_s  = cooling_floor_s(m_config);
     const bool   speed_up = is_layer_time_speed_up(m_mode);
 
+    // Pass 2: rewrite. The output grows by roughly what the buffer releases, so reserving the
+    // buffered size up front keeps the peak at about two copies of the text with no regrowth.
     std::string out;
-    float       emitted_f = float(m_config.travel_speed.value) * 60.f;
-    for (size_t i = 0; i < parsed.size(); ++i) {
+    out.reserve(buffered_bytes + m_layers.size() * 96);
+    float      emitted_f = float(m_config.travel_speed.value) * 60.f;
+    ParseState state;
+    init_parse_state(state);
+    for (size_t i = 0; i < m_layers.size(); ++i) {
+        BufferedLayer &layer = m_layers[i];
+        const std::vector<ParsedLine> lines = parse_layer_lines(state, layer.gcode, m_config);
+        std::string().swap(layer.gcode);
+
         double factor = (i < solved.speed_factors.size()) ? solved.speed_factors[i] : 1.0;
         if (i < first_layer)
             factor = 1.0;
-        factor = apply_cooling_floor(factor, parsed[i].time, floor_s, speed_up, parsed[i].cooling_slowed_down);
+        factor = apply_cooling_floor(factor, times[i], floor_s, speed_up, layer.cooling_slowed_down);
 
-        const std::string body = apply_factor_to_lines(parsed[i].lines, factor, m_mode, m_slowdown_scope, m_config, emitted_f);
-        const double      t_out = time_after_factor(parsed[i].lines, factor, m_mode, m_slowdown_scope, m_config);
-        out += format_comment(m_mode, factor, parsed[i].time, t_out);
-        out += body;
+        const double t_out = time_after_factor(lines, factor, m_mode, m_slowdown_scope, m_config);
+        out += format_comment(m_mode, factor, times[i], t_out);
+        out += apply_factor_to_lines(lines, factor, m_mode, m_slowdown_scope, m_config, emitted_f);
     }
 
     m_layers.clear();
