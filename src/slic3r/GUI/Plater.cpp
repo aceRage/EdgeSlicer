@@ -22834,10 +22834,15 @@ void Plater::send_gcode_legacy(int plate_idx, Export3mfProgressFn proFn, bool us
     if (upload_job.empty())
         return;
 
-    const auto  host_type_opt = physical_printer_config->option<ConfigOptionEnum<PrintHostType>>("host_type");
+    // Read from ph_config, not the preset: the serial and check code that decide whether this is
+    // the Flashforge HTTP local API (a 3mf upload) may belong to the preselected device alone
+    // (PrintHostDevices::Device::serial). The answer is fixed here, before the send dialog, so a
+    // device picked in the dialog inherits it - a list mixing one HTTP and one legacy Flashforge
+    // under a single preset is the case this does not cover.
+    const auto  host_type_opt = ph_config.option<ConfigOptionEnum<PrintHostType>>("host_type");
     const auto  host_type     = host_type_opt != nullptr ? host_type_opt->value : htElegooLink;
-    const auto* ff_serial_opt = physical_printer_config->option<ConfigOptionString>("flashforge_serial_number");
-    const auto* ff_code_opt   = physical_printer_config->option<ConfigOptionString>("printhost_apikey");
+    const auto* ff_serial_opt = ph_config.option<ConfigOptionString>("flashforge_serial_number");
+    const auto* ff_code_opt   = ph_config.option<ConfigOptionString>("printhost_apikey");
     const bool  flashforge_local_api =
         host_type == htFlashforge &&
         ff_serial_opt != nullptr && !ff_serial_opt->value.empty() &&
