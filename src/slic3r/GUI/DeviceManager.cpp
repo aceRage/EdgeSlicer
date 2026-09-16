@@ -12,6 +12,8 @@
 #include <thread>
 #include <mutex>
 #include <codecvt>
+#include <algorithm>
+#include <iterator>
 #include <boost/foreach.hpp>
 #include <boost/typeof/typeof.hpp>
 #include <boost/uuid/uuid.hpp>
@@ -6225,7 +6227,153 @@ void DeviceManager::check_pushing()
     }
 }
 
+// --------------------------------------------------- the LAN reconnect tick ----
+//
+// One reconnect attempt, the same four steps the Device tab runs when it re-selects a LAN printer
+// (set_selected_machine's LAN branch): drop whatever session the agent holds, clear the stale
+// MachineObject state, dial the printer's own broker at <ip>:8883 with its access code, and mark
+// the object LAN-connected so the UI stops showing "connecting".
+void DeviceManager::lan_reconnect_now(MachineObject* obj, const char* why)
+{
+    if (!obj || !m_agent) return;
+    LanReconnect& r = m_lan_reconnect[obj->dev_id];
+    BOOST_LOG_TRIVIAL(info) << "lan_reconnect: " << why << " dev_id=" << obj->dev_id << " ip=" << obj->dev_ip
+                            << " attempt=" << (r.attempts + 1) << " next_backoff_ms=" << lan_backoff_ms(r.attempts + 1);
+    try {
+        m_agent->disconnect_printer();
+        obj->reset();
+#if !BBL_RELEASE_TO_PUBLIC
+        obj->connect(false, Slic3r::GUI::wxGetApp().app_config->get("enable_ssl_for_mqtt") == "true" ? true : false);
+#else
+        obj->connect(false, obj->local_use_ssl_for_mqtt);
+#endif
+        obj->set_lan_mode_connection_state(true);
+    } catch (...) {
+        BOOST_LOG_TRIVIAL(warning) << "lan_reconnect: attempt threw for dev_id=" << obj->dev_id;
+    }
+}
 
+// GUI thread, once a second (RemoteAccess's GuiHeartbeat). Cheap: in the normal case it is one
+// map lookup and one is_connected() per selected LAN printer.
+//
+// The rule: a LAN-mode printer that has looked !is_connected() for longer than the grace window
+// gets a reconnect, then another after 15 s, 30 s, 60 s, 60 s... A push that lands resets the
+// ladder. Cloud-mode printers are left alone - the agent's own refresh_connection owns those, and
+// it only makes sense with a login.
+void DeviceManager::lan_reconnect_tick()
+{
+    if (!m_agent) return;
+
+    // Which printer this instance is meant to hold a session to.
+    //
+    // The hidden hub-managed instance owns the choice itself: nobody is there to pick one on the
+    // Device tab, so with no selection it held no LAN session and every Bambu printer went into
+    // the watcher's snapshot unwatched - which is exactly why a Bambu error reached nobody until
+    // the owner opened the visible slicer and went to the Device page. The networking SDK gives an
+    // agent one LAN session at a time (bambu_network_disconnect_printer takes no dev_id and
+    // bambu_network_connect_printer replaces whatever the agent had), so it is a round robin, not
+    // a fan-out: each candidate holds the session for LAN_WATCH_DWELL_MS in turn.
+    //
+    // The visible slicer is untouched: whatever the user selected is what is kept alive.
+    std::vector<MachineObject*> want;
+    const bool hidden = Slic3r::GUI::wxGetApp().is_hub_managed();
+    if (hidden) {
+        if (MachineObject* pick = lan_watch_rotate(); pick) want.push_back(pick);
+    } else if (MachineObject* sel = get_selected_machine(); sel && sel->is_lan_mode_printer()) {
+        want.push_back(sel);
+    }
+
+    const long long now = (long long) std::chrono::duration_cast<std::chrono::milliseconds>(
+                              std::chrono::system_clock::now().time_since_epoch()).count();
+
+    // Drop bookkeeping for printers that are no longer candidates, so a printer that comes back
+    // starts from a clean ladder rather than an hour-old backoff.
+    for (auto it = m_lan_reconnect.begin(); it != m_lan_reconnect.end();) {
+        bool still = false;
+        for (MachineObject* o : want)
+            if (o->dev_id == it->first) still = true;
+        it = still ? std::next(it) : m_lan_reconnect.erase(it);
+    }
+
+    for (MachineObject* obj : want) {
+        if (!obj->has_access_right() || obj->dev_ip.empty()) continue;
+        LanReconnect& r = m_lan_reconnect[obj->dev_id];
+        if (obj->is_connected()) {
+            // A push landed inside DISCONNECT_TIMEOUT: the session is alive, so the ladder resets.
+            if (r.attempts != 0 || r.down_since != 0)
+                BOOST_LOG_TRIVIAL(info) << "lan_reconnect: dev_id=" << obj->dev_id << " is back (after "
+                                        << r.attempts << " attempt(s))";
+            r = LanReconnect();
+            continue;
+        }
+        if (r.down_since == 0) {
+            r.down_since = now;
+            BOOST_LOG_TRIVIAL(info) << "lan_reconnect: dev_id=" << obj->dev_id
+                                    << " looks disconnected; grace " << LAN_RECONNECT_GRACE_MS << " ms";
+            continue;
+        }
+        if (now - r.down_since < LAN_RECONNECT_GRACE_MS) continue;
+        if (r.last_try != 0 && now - r.last_try < lan_backoff_ms(r.attempts)) continue;
+        r.last_try = now;
+        ++r.attempts;
+        lan_reconnect_now(obj, r.attempts == 1 ? "first retry" : "backoff retry");
+    }
+}
+
+// The round robin the hidden instance runs over its LAN printers, because the SDK gives it one
+// session to spend. Each candidate holds the session for LAN_WATCH_DWELL_MS; the tick above then
+// keeps that one alive. A dwell long enough to see a state change (a print starting, finishing,
+// erroring) and short enough that a three-printer shop is round in a couple of minutes.
+//
+// Candidates: every Bambu machine this instance knows with a saved access code and an address -
+// the same test the Device tab applies before it offers to connect. Cloud-bound machines are not
+// here: with a login the agent's own server session already reports all of them at once.
+MachineObject* DeviceManager::lan_watch_rotate()
+{
+    std::vector<MachineObject*> cands;
+    for (const auto& kv : get_my_machine_list()) {
+        MachineObject* m = kv.second;
+        if (!m || !m->is_lan_mode_printer()) continue;
+        if (!m->has_access_right() || m->dev_ip.empty()) continue;
+        cands.push_back(m);
+    }
+    if (cands.empty()) {
+        m_lan_watch_id.clear();
+        return nullptr;
+    }
+    std::sort(cands.begin(), cands.end(), [](MachineObject* a, MachineObject* b) { return a->dev_id < b->dev_id; });
+
+    const long long now = (long long) std::chrono::duration_cast<std::chrono::milliseconds>(
+                              std::chrono::system_clock::now().time_since_epoch()).count();
+
+    // The one currently holding the session, if it is still a candidate and its dwell has not run
+    // out. A single printer never rotates away from itself.
+    auto held = std::find_if(cands.begin(), cands.end(), [this](MachineObject* m) { return m->dev_id == m_lan_watch_id; });
+    const bool pinned = m_lan_watch_pinned_at != 0 && now - m_lan_watch_pinned_at < LAN_WATCH_PIN_MS;
+    if (held != cands.end() && (cands.size() == 1 || pinned || now - m_lan_watch_since < LAN_WATCH_DWELL_MS))
+        return *held;
+
+    size_t next = 0;
+    if (held != cands.end()) next = (size_t)(std::distance(cands.begin(), held) + 1) % cands.size();
+    MachineObject* pick = cands[next];
+    if (pick->dev_id != m_lan_watch_id) {
+        BOOST_LOG_TRIVIAL(info) << "lan_watch: hidden instance now watching dev_id=" << pick->dev_id
+                                << " (" << (next + 1) << "/" << cands.size() << ", dwell " << LAN_WATCH_DWELL_MS << " ms)";
+        m_lan_watch_id        = pick->dev_id;
+        m_lan_watch_since     = now;
+        m_lan_watch_pinned_at = 0; // the rotation's own choice is never pinned
+        m_lan_reconnect.erase(pick->dev_id);
+        // Take the session now rather than waiting out the grace window: the previous holder's
+        // pushes have stopped either way, and the tick's grace is for a session that dropped on
+        // its own, not one we deliberately moved.
+        lan_reconnect_now(pick, "watch rotation");
+        m_lan_reconnect[pick->dev_id].last_try = now;
+        m_lan_reconnect[pick->dev_id].attempts = 1;
+        m_lan_reconnect[pick->dev_id].down_since = now;
+        selected_machine = pick->dev_id; // so RemoteEvents / get_selected_machine see it
+    }
+    return pick;
+}
 
 void DeviceManager::on_machine_alive(std::string json_str)
 {
@@ -6573,6 +6721,16 @@ bool DeviceManager::set_selected_machine(std::string dev_id, bool need_disconnec
         }
     }
     selected_machine = dev_id;
+    // Somebody chose this printer deliberately - the Device tab, or the hub's send / control path
+    // in the hidden instance. The hidden instance's LAN watch rotation leaves that choice alone
+    // for a while (LAN_WATCH_PIN_MS) so an upload or a command in flight is not cut off by the
+    // session being handed to the next printer in the ring.
+    if (!dev_id.empty()) {
+        m_lan_watch_id    = dev_id;
+        m_lan_watch_since = (long long) std::chrono::duration_cast<std::chrono::milliseconds>(
+                                std::chrono::system_clock::now().time_since_epoch()).count();
+        m_lan_watch_pinned_at = m_lan_watch_since;
+    }
     return true;
 }
 

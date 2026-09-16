@@ -276,6 +276,16 @@ public:
     void Notify() override
     {
         RemoteAccess::get().heartbeat_review(g_modal_depth);
+        // The LAN reconnect tick rides here too. A LAN-mode Bambu printer's MQTT session used to be
+        // re-established only by MonitorPanel::update, and only with a Bambu cloud login - so with
+        // no account a dropped session stayed dropped until the user left the Device tab and came
+        // back. The panel is lazily built now and the hidden instance never opens it, so the retry
+        // belongs on a tick that always runs. Cheap: a map lookup per selected LAN printer.
+        if (DeviceManager* dm = wxGetApp().getDeviceManager()) {
+            try {
+                dm->lan_reconnect_tick();
+            } catch (...) {}
+        }
         // The printer event watcher rides on this tick: it needs the GUI thread for the Bambu
         // MachineObjects anyway, and it polls at its own, slower rate (RemoteEvents.cpp).
         RemoteEvents::heartbeat();
