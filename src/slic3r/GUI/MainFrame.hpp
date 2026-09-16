@@ -95,6 +95,9 @@ class MainFrame : public DPIFrame
     bool        m_loaded {false};
     wxTimer* m_reset_title_text_colour_timer{ nullptr };
     wxTimer* m_autosave_timer{ nullptr };
+    // One-shot, armed by on_system_resume(): coalesces the wake messages and
+    // gives the network a moment before the MQTT sessions are bounced.
+    wxTimer* m_resume_reconnect_timer{ nullptr };
 
     wxString    m_qs_last_input_file = wxEmptyString;
     wxString    m_qs_last_output_file = wxEmptyString;
@@ -203,6 +206,11 @@ protected:
 #ifdef __WIN32__
     WXLRESULT MSWWindowProc(WXUINT nMsg, WXWPARAM wParam, WXLPARAM lParam) override;
 #endif
+
+    // The PC woke from sleep (WM_POWERBROADCAST resume on Windows): after a
+    // short settle, ask every live MQTT client to re-establish its session,
+    // so the Device page's Snapmaker comes back without a restart.
+    void on_system_resume();
 
 public:
     MainFrame();

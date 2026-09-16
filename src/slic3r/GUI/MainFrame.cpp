@@ -82,6 +82,8 @@
 #include <shlobj.h>
 #include <shellapi.h>
 #endif // _WIN32
+#include "../Utils/MQTT.hpp"
+#include "../Utils/MqttReconnectPolicy.hpp"
 #include <slic3r/GUI/CreatePresetsDialog.hpp>
 #include "sentry_wrapper/SentryWrapper.hpp"
 #include "GenericDownloadDialog.hpp"
@@ -902,11 +904,37 @@ WXLRESULT MainFrame::MSWWindowProc(WXUINT nMsg, WXWPARAM wParam, WXLPARAM lParam
         AdjustWorkingAreaForAutoHide(hWnd, mmi);
         return 0;
     }
+
+    /* The PC woke up. Handled here rather than through wxEVT_POWER_RESUME because Windows only sends
+     * PBT_APMRESUMESUSPEND (the one wx maps) when a person woke the machine; PBT_APMRESUMEAUTOMATIC is
+     * the one that always arrives. Both may arrive for one wake; on_system_resume() coalesces them.
+     * The message still falls through to wx so its own power events keep working. */
+    case WM_POWERBROADCAST:
+        if (wParam == PBT_APMRESUMEAUTOMATIC || wParam == PBT_APMRESUMESUSPEND)
+            on_system_resume();
+        break;
     }
     return wxFrame::MSWWindowProc(nMsg, wParam, lParam);
 }
 
 #endif
+
+void MainFrame::on_system_resume()
+{
+    // Not straight away: the wake message arrives before Wi-Fi / Ethernet is back, and a connect
+    // attempt made now would only burn one retry. The one-shot timer also folds the two resume
+    // messages of a single wake into one bounce.
+    if (m_resume_reconnect_timer == nullptr) {
+        m_resume_reconnect_timer = new wxTimer(this);
+        Bind(wxEVT_TIMER, [](wxTimerEvent&) {
+            const size_t asked = MqttClient::reconnect_all_live("system resume");
+            BOOST_LOG_TRIVIAL(info) << "[MainFrame] system resume: " << asked << " MQTT client(s) asked to reconnect";
+        }, m_resume_reconnect_timer->GetId());
+    }
+    BOOST_LOG_TRIVIAL(info) << "[MainFrame] system resume; MQTT sessions will be bounced in "
+                            << MqttReconnectPolicy::RESUME_SETTLE_MS << " ms";
+    m_resume_reconnect_timer->StartOnce(int(MqttReconnectPolicy::RESUME_SETTLE_MS));
+}
 
 void  MainFrame::show_log_window()
 {
