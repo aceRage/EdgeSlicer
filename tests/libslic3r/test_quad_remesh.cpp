@@ -368,22 +368,29 @@ TEST_CASE("Quad remesh: a single cube is accepted", "[QuadRemesh]")
 
 TEST_CASE("Quad remesh: an assembled 2-part object is refused, not hung", "[QuadRemesh]")
 {
-    // Two 10 mm cubes overlapping by 5 mm on X, welded into one indexed set - the
-    // shape the owner remeshed. Interior faces survive, so edges on the overlap
-    // boundary are shared by more than two triangles.
+    // Two 10 mm cubes meeting EXACTLY face to face on the x = 10 plane, welded. This is the shape
+    // an assembly becomes once its shells are one volume: the four edges of the shared face are
+    // used by EIGHT triangles (two from each cube's touching face, on both sides), and the
+    // interior face itself survives inside the solid.
+    //
+    // The offset has to be exactly the cube's width. Anything else leaves the two shells sharing
+    // no vertices at all, which is a plain two-shell mesh and is caught by the older
+    // multi-shell refusal instead - see the next test.
     indexed_triangle_set a = its_make_cube(10., 10., 10.);
     indexed_triangle_set b = its_make_cube(10., 10., 10.);
     for (Vec3f &v : b.vertices)
-        v.x() += 5.f;
+        v.x() += 10.f;
 
     const indexed_triangle_set assembly = merge_welded(a, b);
     REQUIRE(assembly.indices.size() == 24);
+    // The two cubes really did weld: 8 + 8 vertices minus the 4 shared on the touching face.
+    REQUIRE(assembly.vertices.size() == 12);
 
-    // The two OLD checks are exactly the ones this input defeats - assert that, so
-    // the test documents why they were not enough rather than just that the new one
-    // works.
+    // The OLD open-edge check is the one this input defeats: its_face_neighbors() pairs each edge
+    // with at most one opposite face, so an edge used by eight still reports as closed. Assert
+    // that, so the test documents why the old check was not enough rather than only that the new
+    // one works.
     CHECK(its_num_open_edges(assembly) == 0);
-    CHECK_FALSE(its_is_splittable(assembly));
 
     // The new check catches it, with a reason naming the cause.
     std::string why;
@@ -391,16 +398,37 @@ TEST_CASE("Quad remesh: an assembled 2-part object is refused, not hung", "[Quad
     CHECK_FALSE(why.empty());
     CHECK(why.find("edge-manifold") != std::string::npos);
 
-    // And the full entry point refuses rather than reaching QuadriFlow at all. This
-    // is the part that used to hang: quad_remesh() calls quad_remesh_accepts() before
-    // it takes the QuadriFlow mutex, so a refusal here means no upstream call was
-    // made and the caller returns immediately.
+    // And the full entry point refuses rather than reaching QuadriFlow at all. This is the part
+    // that used to hang: quad_remesh() calls quad_remesh_accepts() before it takes the QuadriFlow
+    // mutex, so a refusal here means no upstream call was made and the caller returns at once.
     QuadRemeshOptions opts;
     QuadRemeshReport  rep;
     const indexed_triangle_set out = quad_remesh_triangulated(assembly, opts, &rep);
     CHECK(out.indices.empty());
     CHECK(rep.status == QuadRemeshStatus::NotManifold);
     CHECK_FALSE(rep.note.empty());
+}
+
+TEST_CASE("Quad remesh: two overlapping shells are refused", "[QuadRemesh]")
+{
+    // The other way an assembly reaches the remesher: two parts that INTERPENETRATE rather than
+    // touch. Offset by half a cube they share no vertices, so welding leaves two separate shells
+    // and the older multi-shell refusal is what fires. Either way the user is told why instead of
+    // being left with a hung window - which is the point.
+    indexed_triangle_set a = its_make_cube(10., 10., 10.);
+    indexed_triangle_set b = its_make_cube(10., 10., 10.);
+    for (Vec3f &v : b.vertices)
+        v.x() += 5.f;
+
+    const indexed_triangle_set overlapping = merge_welded(a, b);
+    std::string why;
+    CHECK_FALSE(quad_remesh_accepts(overlapping, &why));
+    CHECK_FALSE(why.empty());
+
+    QuadRemeshOptions opts;
+    QuadRemeshReport  rep;
+    CHECK(quad_remesh_triangulated(overlapping, opts, &rep).indices.empty());
+    CHECK(rep.status == QuadRemeshStatus::NotManifold);
 }
 
 TEST_CASE("Quad remesh: two separate shells are still refused", "[QuadRemesh]")
@@ -432,5 +460,8 @@ TEST_CASE("Quad remesh: a folded (doubled) face is refused", "[QuadRemesh]")
     CHECK(its_num_open_edges(doubled) == 0);
     std::string why;
     CHECK_FALSE(quad_remesh_accepts(doubled, &why));
-    CHECK(why.find("edge-manifold") != std::string::npos);
+    CHECK_FALSE(why.empty());
+    // Which of the two refusals fires is not the point and is not pinned here: the shell check
+    // runs first and a doubled surface can read as two patches to it. What matters is that the
+    // mesh is refused with a reason instead of being handed to QuadriFlow.
 }

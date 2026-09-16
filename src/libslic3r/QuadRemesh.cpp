@@ -63,14 +63,9 @@ bool quad_remesh_accepts(const indexed_triangle_set &mesh, std::string *why)
         return false;
     }
 
-    // Several disconnected shells are individually manifold but QuadriFlow treats the
-    // input as one surface: it normalises and scales for a single connected component
-    // and its singularity placement is global. Two shells come back fused or
-    // mangled, so this is a refusal too.
-    if (its_is_splittable(mesh))
-        return refuse("the mesh has more than one separate shell; split it into parts first");
-
-    // NON-MANIFOLD EDGES - the check the two above cannot make.
+    // NON-MANIFOLD EDGES - the check neither the open-edge test above nor the shell test below
+    // can make. It runs BEFORE the shell test on purpose: a welded assembly trips both, and
+    // "not edge-manifold" is the diagnosis that actually explains the hang.
     //
     // its_num_open_edges() and its_is_splittable() both read its_face_neighbors(),
     // which pairs each edge with AT MOST ONE opposite face and then stops looking
@@ -109,6 +104,13 @@ bool quad_remesh_accepts(const indexed_triangle_set &mesh, std::string *why)
             return false;
         }
     }
+
+    // Several disconnected shells are individually manifold but QuadriFlow treats the
+    // input as one surface: it normalises and scales for a single connected component
+    // and its singularity placement is global. Two shells come back fused or
+    // mangled, so this is a refusal too.
+    if (its_is_splittable(mesh))
+        return refuse("the mesh has more than one separate shell; split it into parts first");
 
     return true;
 }
