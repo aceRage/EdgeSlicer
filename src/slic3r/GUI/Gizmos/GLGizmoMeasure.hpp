@@ -320,6 +320,17 @@ protected:
     void ultra_show_adjust_ui();                                // the two sliders
     bool ultra_w2p(GLVolume* v, const Measure::SurfaceFeature& f, Transform3d& out); // view -> print world
     void ultra_apply_attachment_print_pose(const Transform3d& new_print);            // print + mirrored assembly pose
+    // Ultra (Curve mode): the region-grow parameters for the next Curve pick, from the two persisted
+    // settings below. Returns the library default (8 / 20 / 20000) when the slider is at 20 and the
+    // Smooth-shell toggle is off, so a default Curve pick is bit-for-bit the legacy one.
+    Measure::CurvePickParams ultra_curve_pick_params() const;
+    // Ultra (Curve mode): fit the picked patch analytically (cylinder axis+radius vs sphere centre+radius,
+    // chosen by residual) and express the result in PRINT world. Returns a Plane fit -- i.e. "use the
+    // legacy (mean normal, centroid) mate" -- for any feature that is not a Curve pick.
+    Measure::PatchFit ultra_curve_fit_print(GLVolume* v, const Measure::SurfaceFeature& f);
+    // Ultra (Curve mode): the "Curve angle" slider + "Smooth shell" toggle. Both persist in app config.
+    void ultra_show_curve_pick_ui();
+    void ultra_load_curve_pick_settings();
 
     bool is_pick_meet_assembly_mode(const SelectedFeatures::Item& item);
  protected:
@@ -337,6 +348,11 @@ protected:
     bool                     m_only_select_plane{false};
     float                    m_ultra_adjust_rot{0.f}; // Ultra: cumulative slider spin (deg) since the last mate / pick
     float                    m_ultra_adjust_off{0.f}; // Ultra: cumulative slider offset (mm) since the last mate / pick
+    // Ultra (Curve mode): total normal spread a Curve pick may grow across, and the "no total cap, stop
+    // only at sharp edges" mode. Loaded from app config on first use, saved on every change.
+    float                    m_ultra_curve_angle{20.f};
+    bool                     m_ultra_curve_smooth_shell{false};
+    bool                     m_ultra_curve_settings_loaded{false};
     std::string              m_units;
     mutable bool             m_same_model_object;
     mutable unsigned int     m_current_active_imgui_id;
