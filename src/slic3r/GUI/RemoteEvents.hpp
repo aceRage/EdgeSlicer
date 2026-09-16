@@ -182,6 +182,24 @@ inline std::string test_kind(const std::vector<std::string>& filter)
     return "finished";
 }
 
+// What the watcher remembers about one printer's current job, across polls and across the gaps
+// where it could not see the printer at all.
+//
+// The cooldown alone was not enough. It is keyed on time (three minutes) and on the job name, so a
+// printer that flapped - idle/unknown/offline and back, which a Klipper raw state, a Snapmaker
+// login timeout or a brief Bambu re-seed all produce - re-announced the same print hours later,
+// and a printer whose job name alternates between two spellings of the same file announced each
+// spelling. What actually decides whether a start is new is the job, not the clock: the same job
+// is announced once and not again until something ended it.
+struct JobMemory
+{
+    std::string job;            // the job whose "started" was announced (may be empty: an unnamed print)
+    bool        announced { false }; // a "started" has gone out for it
+    long long   started_at { 0 };    // when that went out (snapshot time)
+    std::string terminal;       // finished | cancelled | failed, once one has been seen for it
+    long long   terminal_at { 0 };
+};
+
 // Everything the watcher carries from one poll to the next.
 struct Memory
 {
@@ -192,6 +210,23 @@ struct Memory
     // later poll has run, nothing it does can produce an event - the first sight only seeds.
     // A printer that goes offline or unwatched loses its entry and is seeded again on its return.
     std::map<std::string, long long> seen_at;
+    // Per-printer job memory, keyed by printer id. Unlike `seen_at` this deliberately SURVIVES a
+    // printer going offline or unwatched: "I cannot see it" is not "it stopped printing", and
+    // throwing the memory away on every flap is exactly what let the repeat "started" through.
+    std::map<std::string, JobMemory> jobs;
+    // The last raw state each printer reported, so a change in the printer's own words can be
+    // logged even where it maps to the same normalised state. This is what names a flap source.
+    std::map<std::string, std::string> last_raw;
+};
+
+// One line per raw-state change, for the hub log. `step` fills this so the caller can log it
+// without the rule touching a logger (it stays pure and testable).
+struct RawChange
+{
+    std::string printer_id, from, to;
+    bool        was_visible { false }; // the watcher could see the printer before this change
+    bool        visible { false };     // it can see it now
+    long long   at { 0 };
 };
 
 // The transition rule, and the only place an event is decided: the previous memory plus the
@@ -200,6 +235,10 @@ struct Memory
 // can drive a whole print through it without a printer. `cooldown_ms` suppresses a repeat of the
 // same printer + kind + code (a flapping error, a reconnect that re-announces a start).
 std::vector<Event> step(Memory& mem, const Snapshot& now, long long cooldown_ms = 180000);
+
+// Same rule, and additionally reports every raw-state change it saw, so the caller can put the
+// flap sources in the log with a timestamp. `step` above is this with the changes discarded.
+std::vector<Event> step(Memory& mem, const Snapshot& now, long long cooldown_ms, std::vector<RawChange>* raw_changes);
 
 // ---- the live watcher ----
 // Called from RemoteAccess's one-second GUI heartbeat; polls at its own slower rate.
