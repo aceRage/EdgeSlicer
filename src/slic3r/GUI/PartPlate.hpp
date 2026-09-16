@@ -317,6 +317,7 @@ public:
     std::vector<int> get_extruders_under_cli(bool conside_custom_gcode, DynamicPrintConfig& full_config) const;
     std::vector<int> get_extruders_without_support(bool conside_custom_gcode = false) const;
     std::vector<int> get_used_extruders();
+    const std::vector<FilamentInfo>& get_slice_filaments_info() const { return slice_filaments_info; }
 
     /* instance related operations*/
     //judge whether instance is bound in plate or not

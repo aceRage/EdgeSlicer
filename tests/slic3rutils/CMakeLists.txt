@@ -11,6 +11,7 @@ add_executable(${_TEST_NAME}_tests
     elegoo_canvas_tests.cpp
     splash_animation_tests.cpp
     remote_events_tests.cpp
+    flashforge_tests.cpp
     )
 
 # The watcher's transition rule lives in libslic3r_gui, and reaching it pulls GUI_App and the

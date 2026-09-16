@@ -1,6 +1,7 @@
 {
     "type": "machine",
     "name": "Flashforge Adventurer 5M Pro 0.25 Nozzle",
+    "host_type": "flashforge",
     "inherits": "fdm_adventurer5m_common",
     "from": "system",
     "setting_id": "GM010",
