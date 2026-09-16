@@ -22,6 +22,7 @@ static const char *CFG_EDGE_MARGIN   = "edge_margin";
 static const char *CFG_FRONT_ENABLED = "front_margin_enabled";
 static const char *CFG_FRONT_MARGIN  = "front_margin";
 static const char *CFG_LAYOUT        = "layout";
+static const char *CFG_IGNORE_CLEAR  = "ignore_support_clearance";
 
 static const double MARGIN_MAX = 50.;
 
@@ -51,6 +52,8 @@ FillBedSettings FillBedDialog::load_from_config(const FillBedSettings &defaults)
         s.allow_rotation = cfg->get(CFG_SECTION, CFG_ALLOW_ROT) == "true";
     if (cfg->has(CFG_SECTION, CFG_FRONT_ENABLED))
         s.front_enabled = cfg->get(CFG_SECTION, CFG_FRONT_ENABLED) == "true";
+    if (cfg->has(CFG_SECTION, CFG_IGNORE_CLEAR))
+        s.ignore_support_clearance = cfg->get(CFG_SECTION, CFG_IGNORE_CLEAR) == "true";
     if (cfg->has(CFG_SECTION, CFG_LAYOUT))
         s.layout = cfg->get(CFG_SECTION, CFG_LAYOUT) == "grid" ? fill_bed::Layout::Grid
                                                                : fill_bed::Layout::Compact;
@@ -69,6 +72,7 @@ FillBedDialog::FillBedDialog(wxWindow              *parent,
                              double                 occupied_area,
                              double                 bed_w,
                              double                 bed_h,
+                             double                 clearance,
                              double                 brim_width,
                              bool                   is_seq_print,
                              std::function<int(const FillBedSettings &)> grid_counter)
@@ -84,6 +88,7 @@ FillBedDialog::FillBedDialog(wxWindow              *parent,
     , m_occupied(occupied_area)
     , m_bed_w(bed_w)
     , m_bed_h(bed_h)
+    , m_clearance(clearance)
     , m_brim_width(brim_width)
     , m_is_seq_print(is_seq_print)
 {
@@ -160,6 +165,31 @@ FillBedDialog::FillBedDialog(wxWindow              *parent,
     });
     f_sizer->Add(layout_label, 0, wxEXPAND | wxALIGN_CENTER_VERTICAL);
     f_sizer->Add(m_layout_combo, 0, wxALIGN_CENTER_VERTICAL);
+
+    // ---- ignore the support clearance ---------------------------------------------------------
+    // ArrangePolygon::brim_width, which the fill floors the gap at, is the ARRANGE CLEARANCE and
+    // not a brim: ModelArrange.cpp sets it to 1 mm flat, 6 mm for normal support and 24 mm for
+    // tree support, and never reads brim_type or brim_width. With supports off it is 1 mm, which
+    // is invisible; with them on it silently becomes a 6 or 24 mm floor under whatever gap the
+    // user typed. This lets them say no.
+    const wxString ignore_tip = _L("The fill keeps copies at least a support clearance apart - 6 mm "
+                                   "for normal supports, 24 mm for tree supports - so neighbouring "
+                                   "supports cannot collide. Tick this to pack at exactly the gap "
+                                   "above instead. Only safe when the copies will not actually grow "
+                                   "supports that wide.");
+
+    auto ignore_label = new ::Label(this, Label::Body_14, _L("Ignore support clearance") + ":");
+    ignore_label->Wrap(FromDIP(300));
+    ignore_label->SetToolTip(ignore_tip);
+    m_ignore_clear_cb = new ::CheckBox(this);
+    m_ignore_clear_cb->SetValue(m_settings.ignore_support_clearance);
+    m_ignore_clear_cb->SetToolTip(ignore_tip);
+    m_ignore_clear_cb->Bind(wxEVT_TOGGLEBUTTON, [this](wxCommandEvent &e) {
+        e.Skip();
+        update_estimate();
+    });
+    f_sizer->Add(ignore_label, 0, wxEXPAND | wxALIGN_CENTER_VERTICAL);
+    f_sizer->Add(m_ignore_clear_cb, 0, wxALIGN_CENTER_VERTICAL | wxTOP | wxBOTTOM, FromDIP(5));
 
     // ---- minimum distance from the bed edge ---------------------------------------------------
     auto edge_label = new ::Label(this, Label::Body_14, _L("Minimum distance from bed edge") + ":");
@@ -264,6 +294,8 @@ FillBedSettings FillBedDialog::current_settings() const
     s.layout         = (m_layout_combo != nullptr && m_layout_combo->GetSelection() == 1)
                            ? fill_bed::Layout::Grid
                            : fill_bed::Layout::Compact;
+    s.ignore_support_clearance = m_ignore_clear_cb != nullptr ? m_ignore_clear_cb->GetValue()
+                                                              : m_settings.ignore_support_clearance;
     return s;
 }
 
@@ -295,9 +327,11 @@ void FillBedDialog::update_estimate()
     // Free area, honouring both the shrink and the objects already on the plate.
     const double free = std::max(0., std::min(m_bed_area, w * h) - m_occupied);
 
-    // The gap the packer will really use, so the label does not promise copies the brim rule
-    // will not allow.
-    const double eff_gap = std::max(gap, m_brim_width);
+    // The gap the packer will really use, so the label does not promise copies the floor rule
+    // will not allow. Ticking "Ignore support clearance" drops the floor entirely - FillBedJob
+    // reads the same flag, so the label and the job stay in step.
+    const double floor_mm = cur.ignore_support_clearance ? 0. : m_clearance;
+    const double eff_gap  = std::max(gap, floor_mm);
 
     // Grid is deterministic, so the count is exact: the job builds the real grid against the
     // real bed outline and the real obstacles and just reports how many cells came back.
@@ -320,10 +354,21 @@ void FillBedDialog::update_estimate()
         if (m_is_seq_print)
             warn = _L("Printing by object: the gap will be raised to the extruder clearance where "
                       "it is smaller.");
-        else if (gap < m_brim_width)
-            warn = wxString::Format(_L("The template's brim is %.1f mm wide, so the gap used will "
-                                       "be at least that much."),
-                                    m_brim_width);
+        else if (gap < floor_mm) {
+            // Say what is ACTUALLY raising the gap. The floor is ArrangePolygon::brim_width,
+            // which is a support clearance and not a brim - the old wording blamed the brim for
+            // it, so an object with supports on and no brim at all reported a 6 mm brim. Name the
+            // brim only when the template really has one AND it is what sets the floor.
+            const bool brim_is_cause = m_brim_width > 0. && m_brim_width >= m_clearance;
+            warn = brim_is_cause
+                       ? wxString::Format(_L("The template's brim is %.1f mm wide, so the gap used "
+                                             "will be at least that much."),
+                                          m_brim_width)
+                       : wxString::Format(_L("The template's support clearance is %.1f mm, so the "
+                                             "gap used will be at least that much. Tick \"Ignore "
+                                             "support clearance\" to pack at the gap above."),
+                                          floor_mm);
+        }
         // Compact is O(n^2), so above the cap the fill switches to Grid by itself rather than
         // leaving most of the bed empty. Say so before the user presses Fill, not after.
         if (!grid && tiled > fill_bed::COUNT_CAP) {
@@ -351,6 +396,7 @@ void FillBedDialog::save_to_config() const
     cfg->set(CFG_SECTION, CFG_FRONT_ENABLED, m_settings.front_enabled);
     cfg->set(CFG_SECTION, CFG_FRONT_MARGIN, mm_str(m_settings.front_margin).ToStdString());
     cfg->set(CFG_SECTION, CFG_LAYOUT, m_settings.layout == fill_bed::Layout::Grid ? "grid" : "compact");
+    cfg->set(CFG_SECTION, CFG_IGNORE_CLEAR, m_settings.ignore_support_clearance);
 }
 
 void FillBedDialog::on_dpi_changed(const wxRect &suggested_rect)

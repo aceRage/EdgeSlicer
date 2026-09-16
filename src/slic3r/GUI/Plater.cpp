@@ -21168,6 +21168,23 @@ void Plater::fill_bed_with_instances()
 
     const BoundingBox tmpl_bb = template_ap.poly.contour.bounding_box();
 
+    // The template's REAL brim, so the dialog can tell a brim from a support clearance.
+    //
+    // template_ap.brim_width is not it: ModelArrange.cpp sets that field to 1 mm flat, 6 mm when
+    // the object has normal support and 24 mm for tree support, and never reads brim_type or
+    // brim_width. It is the arrange clearance under a misleading name, which is why the dialog
+    // used to report "the template's brim is 6.0 mm wide" for an object with supports on and the
+    // brim switched off. Read the brim from the object's own effective config - get_config_value
+    // prefers the per-object override and falls back to the global preset, the same lookup the
+    // clearance uses - and pass the two separately.
+    double tmpl_brim = 0.;
+    {
+        const auto *bt = mo->get_config_value<ConfigOptionEnum<BrimType>>(global_config, "brim_type");
+        const auto *bw = mo->get_config_value<ConfigOptionFloat>(global_config, "brim_width");
+        if (bt != nullptr && bw != nullptr && bt->value != btNoBrim)
+            tmpl_brim = std::max(0., bw->value);
+    }
+
     FillBedDialog dlg(this,
                       defaults,
                       unscaled<double>(tmpl_bb.size().x()),
@@ -21177,6 +21194,7 @@ void Plater::fill_bed_with_instances()
                       bed_w,
                       bed_h,
                       double(template_ap.brim_width),
+                      tmpl_brim,
                       def_params.is_seq_print,
                       // Grid is deterministic, so the label can be exact rather than an
                       // estimate: build the real grid against the real bed and the real
