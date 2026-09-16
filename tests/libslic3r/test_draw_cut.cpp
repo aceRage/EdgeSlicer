@@ -13,6 +13,8 @@
 #include <optional>
 #include <limits>
 #include <cstdlib>
+#include <set>
+#include <tuple>
 
 using namespace Slic3r;
 
@@ -3873,3 +3875,306 @@ TEST_CASE("Draw cut: Through all on a real loop is a straight prism, not an hour
 }
 
 
+
+// ---------------------------------------------------------------------------
+// THE STANFORD BUNNY. 2026-09-14/15 owner click-test, item 3: "a normal draw cut
+// cuts beyond the Extension - the band that angles from the drawn line to the flat
+// core keeps going and a plate far outside the loop split the whole bunny body in
+// two."
+//
+// Every fixture above this point is CONVEX at the core plane: a cube, a cylinder.
+// On a convex part "inward" (towards the loop's own axis) stays inside the loop's
+// own footprint all the way to the core, so a band that travels inward can never
+// emerge somewhere else on the part. The bunny is not convex, and a loop on its
+// HEAD has the neck, the body and the ears in the same core-plane section - which
+// is exactly the configuration that broke.
+// ---------------------------------------------------------------------------
+
+// The bunny, in the CUT PLANE frame, composed the way cylinder_3mf_in_plane() does:
+// instance matrix * volume matrix, then recentred on the object bbox centre (which
+// is where the gizmo drops the plane when the tool opens).
+static indexed_triangle_set bunny_in_plane(Vec3d* plane_centre = nullptr)
+{
+    static indexed_triangle_set cached;
+    static Vec3d                cached_centre = Vec3d::Zero();
+    if (cached.empty()) {
+        Model model;
+        const std::string path = std::string(TEST_DATA_DIR) +
+                                 "/../../resources/handy_models/Stanford_Bunny.3mf";
+        DynamicPrintConfig cfg;
+        ConfigSubstitutionContext ctx(ForwardCompatibilitySubstitutionRule::EnableSilent);
+        bool ok = false;
+        try {
+            model = Model::read_from_file(path, &cfg, &ctx,
+                                          LoadStrategy::LoadModel | LoadStrategy::AddDefaultInstances |
+                                          LoadStrategy::Silence);
+            ok = !model.objects.empty();
+        } catch (const std::exception&) {
+            ok = false;
+        }
+        REQUIRE(ok);
+
+        const ModelObject* mo = model.objects.front();
+        REQUIRE(!mo->instances.empty());
+        const Transform3d inst = mo->instances.front()->get_transformation().get_matrix();
+
+        indexed_triangle_set merged;
+        for (const ModelVolume* mv : mo->volumes) {
+            if (!mv->is_model_part() || mv->mesh().empty())
+                continue;
+            indexed_triangle_set part = mv->mesh().its;
+            its_transform(part, inst * mv->get_matrix());
+            its_merge(merged, part);
+        }
+        REQUIRE_FALSE(merged.empty());
+
+        BoundingBoxf3 bb;
+        for (const Vec3f& v : merged.vertices)
+            bb.merge(v.cast<double>());
+        cached_centre = bb.center();
+        for (Vec3f& v : merged.vertices)
+            v = (v.cast<double>() - cached_centre).cast<float>();
+        cached = std::move(merged);
+    }
+    if (plane_centre != nullptr)
+        *plane_centre = cached_centre;
+    return cached;
+}
+
+// A LOOP ON A SURFACE, captured EXACTLY the way the gizmo captures one: a ray per
+// sample, fired from outside the part along the view direction, keeping the FIRST
+// hit with its facet's own normal. That is MeshRaycaster's job, and it is why a
+// sample always lands on real front-facing material.
+//
+// A closest-point projection was tried first and is not the same thing at all: a
+// ring of plane points pushed onto a bunny by nearest-surface snaps to whatever is
+// nearest, which on a concave stretch is a facet round the far side of an ear - and
+// the stroke then "jumps across empty space" and gets truncated by finish(). The
+// user's mouse cannot do that, so neither should the fixture.
+//
+// `centre` is a point on (or just inside) the surface to draw around, `axis` the
+// direction the user is looking ALONG (so the eye is at centre - axis * far).
+static DrawCutStroke loop_on_surface(const indexed_triangle_set& mesh,
+                                     const Vec3d& centre, const Vec3d& axis,
+                                     double radius, int n = 160)
+{
+    const TriangleMesh tm(mesh);
+    AABBMesh aabb{ tm };
+
+    BoundingBoxf3 bb;
+    for (const Vec3f& v : mesh.vertices)
+        bb.merge(v.cast<double>());
+    const double far = 2.0 * bb.size().norm() + 10.0;
+
+    const Vec3d a  = axis.normalized();
+    const Vec3d e1 = (std::abs(a.z()) < 0.9 ? Vec3d::UnitZ() : Vec3d::UnitX()).cross(a).normalized();
+    const Vec3d e2 = a.cross(e1);
+
+    DrawCutStroke stroke;
+    for (int i = 0; i < n; ++ i) {
+        const double th = 2.0 * M_PI * double(i) / double(n);
+        // The eye ray for this pixel: parallel projection along `a`, offset by the
+        // ring's own radius in the view plane.
+        const Vec3d src = centre + radius * (std::cos(th) * e1 + std::sin(th) * e2) - far * a;
+
+        const AABBMesh::hit_result hit = aabb.query_ray_hit(src, a);
+        if (!(hit.distance() < std::numeric_limits<double>::infinity()) || hit.face() < 0)
+            continue;
+        const size_t fi = size_t(hit.face());
+        const Vec3i32& f = mesh.indices[fi];
+        const Vec3d v0 = mesh.vertices[size_t(f(0))].cast<double>();
+        const Vec3d v1 = mesh.vertices[size_t(f(1))].cast<double>();
+        const Vec3d v2 = mesh.vertices[size_t(f(2))].cast<double>();
+        Vec3d nrm = (v1 - v0).cross(v2 - v0);
+        nrm = nrm.norm() > 1e-12 ? nrm.normalized() : -a;
+        // Front-facing: the gizmo only ever draws on skin that faces the user.
+        if (nrm.dot(a) > 0.0)
+            nrm = -nrm;
+        stroke.append(hit.position(), nrm, fi);
+    }
+    if (!stroke.samples().empty())
+        stroke.append(stroke.samples().front().pos, stroke.samples().front().normal,
+                      stroke.samples().front().facet);
+    return stroke;
+}
+
+// The shortest distance from `p` to the closed stroke polyline - the quantity
+// "farther than Extension from the drawn line" is measured with.
+static double dist_to_stroke(const DrawCutStroke& stroke, const Vec3d& p)
+{
+    const std::vector<DrawCutSample>& path = stroke.path();
+    double best = std::numeric_limits<double>::max();
+    const size_t n = path.size();
+    for (size_t i = 0; i < n; ++ i) {
+        const Vec3d& a  = path[i].pos;
+        const Vec3d& b  = path[(i + 1) % n].pos;
+        const Vec3d  ab = b - a;
+        const double L2 = ab.squaredNorm();
+        const double t  = L2 > 1e-18 ? std::clamp((p - a).dot(ab) / L2, 0.0, 1.0) : 0.0;
+        best = std::min(best, (a + t * ab - p).norm());
+    }
+    return best;
+}
+
+// The bunny's skull: the centroid of the vertices in the 55th..72nd percentile of
+// height, which is the head proper - below the ear tips, above the shoulders.
+// Taken from the mesh rather than hard-coded, so the fixture follows the file.
+static Vec3d bunny_head_point(const indexed_triangle_set& bunny)
+{
+    std::vector<double> zs;
+    zs.reserve(bunny.vertices.size());
+    for (const Vec3f& v : bunny.vertices)
+        zs.push_back(double(v.z()));
+    std::sort(zs.begin(), zs.end());
+    const double z_lo = zs[size_t(0.55 * double(zs.size()))];
+    const double z_hi = zs[size_t(0.72 * double(zs.size()))];
+
+    Vec3d  c = Vec3d::Zero();
+    size_t k = 0;
+    for (const Vec3f& v : bunny.vertices) {
+        const double z = double(v.z());
+        if (z >= z_lo && z <= z_hi) { c += v.cast<double>(); ++ k; }
+    }
+    REQUIRE(k > 0);
+    return c / double(k);
+}
+
+TEST_CASE("Draw cut: the bunny fixture loads and is the part the gizmo sees", "[DrawCut]")
+{
+    const indexed_triangle_set bunny = bunny_in_plane();
+    REQUIRE_FALSE(bunny.empty());
+    REQUIRE(bunny.vertices.size() > 1000);
+
+    BoundingBoxf3 bb;
+    for (const Vec3f& v : bunny.vertices)
+        bb.merge(v.cast<double>());
+    INFO("bunny bbox " << bb.size().x() << " x " << bb.size().y() << " x " << bb.size().z());
+    REQUIRE(bb.size().norm() > 10.0);
+    REQUIRE(bb.center().norm() < 1e-6);
+}
+
+TEST_CASE("Draw cut: a loop on the bunny's head cuts nothing beyond the Extension", "[DrawCut]")
+{
+    // OWNER ITEM 3. The band angled from the drawn line towards the LOOP'S OWN AXIS,
+    // and on the bunny that axis is somewhere inside the skull rather than under the
+    // patch - so the band ran on past the core, emerged out of the neck, and the
+    // plate it capped split the whole body. Nothing outside (loop + Extension) may
+    // be touched.
+    const indexed_triangle_set bunny = bunny_in_plane();
+    BoundingBoxf3 bb;
+    for (const Vec3f& v : bunny.vertices)
+        bb.merge(v.cast<double>());
+
+    const Vec3d  head   = bunny_head_point(bunny);
+    const double radius = 0.10 * bb.size().norm();
+    const DrawCutStroke stroke =
+        finish_like_gizmo(loop_on_surface(bunny, head, Vec3d::UnitX(), radius), bunny);
+    REQUIRE(stroke.is_closed());
+    REQUIRE(stroke.path().size() > 40);
+
+    DrawCutParams params = owner_params();   // Angle 30, Depth 3, Extension 5.
+
+    // THE LOOP IS A PATCH, NOT A BELT: it encloses a piece of the head, it does not
+    // go round the bunny. The wrap-around half-space path must not fire.
+    REQUIRE_FALSE(draw_cut_loop_separates(bunny, stroke, params));
+
+    const indexed_triangle_set cutter = draw_cut_cutter_solid(stroke, params, bb, 0.0, &bunny);
+    REQUIRE_FALSE(cutter.empty());
+    REQUIRE(watertight(cutter));
+
+    // THE CUTTER IS LOCAL. Extension reaches out along the band's own ruling and
+    // Depth in along it, so the two together bound the reach from the drawn line;
+    // 1 mm of slack absorbs the core plate's own inset.
+    const double reach = params.extension + params.depth + 1.0;
+    double worst = 0.0;
+    for (const Vec3f& v : cutter.vertices)
+        worst = std::max(worst, dist_to_stroke(stroke, v.cast<double>()));
+    INFO("cutter reaches " << worst << " mm from the line, budget " << reach);
+    REQUIRE(worst <= reach);
+
+    indexed_triangle_set upper, lower;
+    DrawCutError err = DrawCutError::None;
+    REQUIRE(draw_cut_split(bunny, stroke, params, &upper, &lower, &err));
+    REQUIRE(err == DrawCutError::None);
+    REQUIRE(watertight(upper));
+    REQUIRE(watertight(lower));
+
+    // THE PLUG IS SMALL: a patch cut out of the head, not half the bunny. The bug
+    // made this ~0.5 - the body cut clean in two.
+    const double vol_in = double(its_volume(bunny));
+    const double a = double(its_volume(upper));
+    const double b = double(its_volume(lower));
+    REQUIRE(a > 0.0);
+    REQUIRE(b > 0.0);
+    REQUIRE(a + b == Approx(vol_in).epsilon(0.02));
+    const double small = std::min(a, b) / (a + b);
+    INFO("volumes " << a << " / " << b << " (small fraction " << small << ")");
+    REQUIRE(small < 0.2);
+
+    // THE FAR GEOMETRY IS UNTOUCHED, triangle for triangle: every input triangle
+    // whose centroid is farther than Extension + 1 mm from the line must still be
+    // present, unchanged, in one of the two halves. The boolean re-tessellates
+    // nothing it does not touch, so a far triangle survives bit for bit.
+    auto centroids_far = [&](const indexed_triangle_set& its) {
+        std::vector<Vec3d> out;
+        for (const Vec3i32& f : its.indices) {
+            const Vec3d c = (its.vertices[size_t(f(0))].cast<double>() +
+                             its.vertices[size_t(f(1))].cast<double>() +
+                             its.vertices[size_t(f(2))].cast<double>()) / 3.0;
+            if (dist_to_stroke(stroke, c) > params.extension + 1.0)
+                out.push_back(c);
+        }
+        return out;
+    };
+    const std::vector<Vec3d> want = centroids_far(bunny);
+    REQUIRE(want.size() > 100);
+
+    std::vector<Vec3d>       have    = centroids_far(upper);
+    const std::vector<Vec3d> have_lo = centroids_far(lower);
+    have.insert(have.end(), have_lo.begin(), have_lo.end());
+
+    auto key = [](const Vec3d& c) {
+        return std::make_tuple(int64_t(std::llround(c.x() * 1000.0)),
+                               int64_t(std::llround(c.y() * 1000.0)),
+                               int64_t(std::llround(c.z() * 1000.0)));
+    };
+    std::set<std::tuple<int64_t, int64_t, int64_t>> have_set;
+    for (const Vec3d& c : have)
+        have_set.insert(key(c));
+
+    size_t missing = 0;
+    for (const Vec3d& c : want)
+        if (have_set.find(key(c)) == have_set.end())
+            ++ missing;
+    INFO("far triangles: " << want.size() << " in, " << missing << " missing from the halves");
+    REQUIRE(double(missing) < 0.01 * double(want.size()));
+}
+
+TEST_CASE("ZZ probe bunny geometry", "[ZZProbe]")
+{
+    const indexed_triangle_set bunny = bunny_in_plane();
+    BoundingBoxf3 bb;
+    for (const Vec3f& v : bunny.vertices)
+        bb.merge(v.cast<double>());
+    WARN("bbox size " << bb.size().x() << " " << bb.size().y() << " " << bb.size().z()
+         << " diag " << bb.size().norm());
+    const Vec3d head = bunny_head_point(bunny);
+    WARN("head point " << head.x() << " " << head.y() << " " << head.z());
+
+    for (double frac : { 0.03, 0.05, 0.07, 0.10 }) {
+        const double radius = frac * bb.size().norm();
+        for (int axis = 0; axis < 3; ++ axis) {
+            const Vec3d a = axis == 0 ? Vec3d::UnitX() : (axis == 1 ? Vec3d::UnitY() : Vec3d::UnitZ());
+            DrawCutStroke raw = loop_on_surface(bunny, head, a, radius);
+            const size_t nraw = raw.samples().size();
+            DrawCutChain chain;
+            chain.set_samples(raw.samples(), true);
+            DrawCutStroke out;
+            const DrawCutError e = chain.finish(out, DrawCutStroke::DefaultSpacing, 0.2);
+            WARN("frac " << frac << " r " << radius << " axis " << axis
+                 << " raw " << nraw << " err " << int(e)
+                 << " path " << (e == DrawCutError::None ? out.path().size() : 0)
+                 << " closed " << (e == DrawCutError::None ? out.is_closed() : false));
+        }
+    }
+}
