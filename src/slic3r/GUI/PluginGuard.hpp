@@ -59,6 +59,32 @@ bool is_ultranet_plugin(bool plugin_present, bool ultranet_marker);
 // so an empty plug-in folder or a Bambu-original plug-in keeps working untouched.
 bool bambu_cdn_download_allowed(bool plugin_present, bool ultranet_marker);
 
+// What the start-up copier does with <data_dir>/plugins, given the sidecar folder ("ultranet"
+// beside the exe) that a released build ships. Decided from four facts so it is testable.
+//
+// The old rule was "copy only if absent - never clobber a user/CDN-updated copy". That left two
+// holes a user actually fell into: (1) after an EdgeSlicer upgrade the older UltraNet stayed in
+// place and, since it no longer matched the sidecar byte for byte, got no marker - so every Bambu
+// CDN entry point came back to life and the "plug-in needs updating" prompt unzipped Bambu's
+// package over ours; (2) a data dir migrated from Snapmaker Orca arrived with Bambu's plug-in
+// already in plugins/, which our host cannot use on Windows, and ours was never installed at all.
+// There is no supported way to run a Bambu-original plug-in in EdgeSlicer, so the sidecar copy is
+// authoritative: anything else in that slot is replaced, unless the user sets the escape hatch
+// (app config `ultranet_keep_foreign_plugin`, for developers testing another build of the DLL).
+enum class PluginSync {
+    Nothing,         // no sidecar, or an identical copy already marked, or the escape hatch is set
+    InstallFresh,    // plugins/ holds no network library: copy ours in and write the marker
+    ReplaceForeign,  // plugins/ holds a different library (older UltraNet, Bambu's, or a hand copy):
+                     // replace it with ours and (re)write the marker
+    WriteMarkerOnly, // byte-identical to ours but unmarked (a 2.3.7.0 install): just mark it
+};
+
+PluginSync plugin_sync_decision(bool sidecar_present,
+                                bool installed_present,
+                                bool installed_identical,
+                                bool marker_present,
+                                bool keep_foreign);
+
 
 // ---------------------------------------------------------------------------------------------
 // The camera component (BambuSource), which is a different thing from the network plug-in.
