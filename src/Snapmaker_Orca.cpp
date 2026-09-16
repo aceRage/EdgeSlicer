@@ -321,7 +321,7 @@ std::vector<unsigned int> mixed_physical_component_ids(const MixedFilament &mf, 
     return ids;
 }
 
-bool mixed_components_differ_in_filament_type(const MixedFilament &mf, const DynamicPrintConfig &cfg, size_t num_physical)
+bool mixed_components_differ_in_filament_type(const MixedFilament &mf, DynamicPrintConfig &cfg, size_t num_physical)
 {
     const std::vector<unsigned int> ids = mixed_physical_component_ids(mf, num_physical);
     std::string                     first_type;
