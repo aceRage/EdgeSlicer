@@ -4,6 +4,9 @@
 #include <cmath>
 #include <map>
 #include <set>
+#include <string>
+#include <tuple>
+#include <vector>
 
 #include "libslic3r/QuadRemesh.hpp"
 #include "libslic3r/TriangleMesh.hpp"
@@ -301,3 +304,133 @@ TEST_CASE("Quad remesh: triangulate() preserves the surface", "[QuadRemesh]")
 }
 
 #endif // SLIC3R_QUAD_REMESH
+
+// ----------------------------------------------------------------------------
+// Ultra: Quad remesh hung forever on an ASSEMBLED 2-part object and had to be
+// force-closed.
+//
+// quad_remesh_accepts() already refused open meshes and multi-shell meshes, and the
+// assembly passed BOTH - which is the whole bug. its_num_open_edges() and
+// its_is_splittable() read its_face_neighbors(), and create_face_neighbors_index()
+// pairs every edge with AT MOST ONE opposite face and then breaks. An edge used by
+// four faces (two shells welded on a shared face - what an assembly is) gets a
+// neighbour on each side, so it reports zero open edges and traverses as one
+// connected patch. QuadriFlow's hierarchy stage then spins on it forever.
+//
+// quad_remesh_accepts() now counts real edge multiplicity, so the refusal happens
+// before any QuadriFlow call. These tests are OUTSIDE the SLIC3R_QUAD_REMESH guard
+// on purpose: the precheck is what protects users and it must hold in every build,
+// including one without the dependency.
+// ----------------------------------------------------------------------------
+
+// Merge two triangle sets into ONE indexed set, welding vertices that coincide. This
+// is what an assembled 2-part object looks like by the time it is a single volume:
+// the shared face's edges end up used by four triangles.
+static indexed_triangle_set merge_welded(const indexed_triangle_set &a, const indexed_triangle_set &b)
+{
+    indexed_triangle_set out = a;
+    std::map<std::tuple<int, int, int>, int> lookup;
+    auto key = [](const Vec3f &v) {
+        // 1e-4 mm quantisation: coincident faces of two parts snapped together are
+        // exactly equal in practice, this only guards float noise.
+        return std::make_tuple(int(std::lround(v.x() * 10000.f)),
+                               int(std::lround(v.y() * 10000.f)),
+                               int(std::lround(v.z() * 10000.f)));
+    };
+    for (size_t i = 0; i < out.vertices.size(); ++i)
+        lookup.emplace(key(out.vertices[i]), int(i));
+
+    std::vector<int> remap(b.vertices.size());
+    for (size_t i = 0; i < b.vertices.size(); ++i) {
+        auto k  = key(b.vertices[i]);
+        auto it = lookup.find(k);
+        if (it != lookup.end()) {
+            remap[i] = it->second;
+        } else {
+            remap[i] = int(out.vertices.size());
+            lookup.emplace(k, remap[i]);
+            out.vertices.push_back(b.vertices[i]);
+        }
+    }
+    for (const Vec3i32 &f : b.indices)
+        out.indices.emplace_back(remap[f(0)], remap[f(1)], remap[f(2)]);
+    return out;
+}
+
+TEST_CASE("Quad remesh: a single cube is accepted", "[QuadRemesh]")
+{
+    // The control: the new edge-multiplicity check must not start refusing good
+    // meshes. A lone cube is closed, one shell, every edge used twice.
+    std::string why;
+    CHECK(quad_remesh_accepts(its_make_cube(10., 10., 10.), &why));
+    CHECK(why.empty());
+}
+
+TEST_CASE("Quad remesh: an assembled 2-part object is refused, not hung", "[QuadRemesh]")
+{
+    // Two 10 mm cubes overlapping by 5 mm on X, welded into one indexed set - the
+    // shape the owner remeshed. Interior faces survive, so edges on the overlap
+    // boundary are shared by more than two triangles.
+    indexed_triangle_set a = its_make_cube(10., 10., 10.);
+    indexed_triangle_set b = its_make_cube(10., 10., 10.);
+    for (Vec3f &v : b.vertices)
+        v.x() += 5.f;
+
+    const indexed_triangle_set assembly = merge_welded(a, b);
+    REQUIRE(assembly.indices.size() == 24);
+
+    // The two OLD checks are exactly the ones this input defeats - assert that, so
+    // the test documents why they were not enough rather than just that the new one
+    // works.
+    CHECK(its_num_open_edges(assembly) == 0);
+    CHECK_FALSE(its_is_splittable(assembly));
+
+    // The new check catches it, with a reason naming the cause.
+    std::string why;
+    CHECK_FALSE(quad_remesh_accepts(assembly, &why));
+    CHECK_FALSE(why.empty());
+    CHECK(why.find("edge-manifold") != std::string::npos);
+
+    // And the full entry point refuses rather than reaching QuadriFlow at all. This
+    // is the part that used to hang: quad_remesh() calls quad_remesh_accepts() before
+    // it takes the QuadriFlow mutex, so a refusal here means no upstream call was
+    // made and the caller returns immediately.
+    QuadRemeshOptions opts;
+    QuadRemeshReport  rep;
+    const indexed_triangle_set out = quad_remesh_triangulated(assembly, opts, &rep);
+    CHECK(out.indices.empty());
+    CHECK(rep.status == QuadRemeshStatus::NotManifold);
+    CHECK_FALSE(rep.note.empty());
+}
+
+TEST_CASE("Quad remesh: two separate shells are still refused", "[QuadRemesh]")
+{
+    // The pre-existing multi-shell refusal must survive the new check: two cubes far
+    // enough apart to share nothing are edge-manifold, so only its_is_splittable()
+    // catches them.
+    indexed_triangle_set a = its_make_cube(10., 10., 10.);
+    indexed_triangle_set b = its_make_cube(10., 10., 10.);
+    for (Vec3f &v : b.vertices)
+        v.x() += 100.f;
+
+    const indexed_triangle_set two = merge_welded(a, b);
+    std::string why;
+    CHECK_FALSE(quad_remesh_accepts(two, &why));
+    CHECK(why.find("shell") != std::string::npos);
+}
+
+TEST_CASE("Quad remesh: a folded (doubled) face is refused", "[QuadRemesh]")
+{
+    // A degenerate the old open-edge check also missed: the same cube twice, welded.
+    // Every edge is then used by four coincident triangles - zero open edges, one
+    // patch, and fatal to a half-edge walk.
+    const indexed_triangle_set cube = its_make_cube(10., 10., 10.);
+    const indexed_triangle_set doubled = merge_welded(cube, cube);
+    REQUIRE(doubled.vertices.size() == cube.vertices.size());   // fully welded
+    REQUIRE(doubled.indices.size() == cube.indices.size() * 2);
+
+    CHECK(its_num_open_edges(doubled) == 0);
+    std::string why;
+    CHECK_FALSE(quad_remesh_accepts(doubled, &why));
+    CHECK(why.find("edge-manifold") != std::string::npos);
+}
