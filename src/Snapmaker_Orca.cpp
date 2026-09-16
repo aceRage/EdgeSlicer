@@ -24,12 +24,11 @@
 #include <math.h>
 
 #include "nlohmann/json.hpp"
+using namespace nlohmann;
 #if defined(__linux__) || defined(__LINUX__)
 #include <condition_variable>
 #include <mutex>
 #include <boost/thread.hpp>
-
-using namespace nlohmann;
 #endif
 
 
@@ -648,7 +647,7 @@ void record_exit_reson(std::string outputdir, int code, int plate_id, std::strin
         result_file = "result.json";
 
     try {
-        json j;
+        nlohmann::json j;
         //record the headers
         if (sliced_info.downward_machines.size() > 0)
             j["downward_compatible_machine"] = sliced_info.downward_machines;
@@ -661,7 +660,7 @@ void record_exit_reson(std::string outputdir, int code, int plate_id, std::strin
         j["export_time"] = sliced_info.export_time;
         for (size_t index = 0; index < sliced_info.sliced_plates.size(); index++)
         {
-            json plate_json;
+            nlohmann::json plate_json;
             plate_json["id"] = sliced_info.sliced_plates[index].plate_id;
             plate_json["sliced_time"] = sliced_info.sliced_plates[index].sliced_time;
             plate_json["sliced_time_with_cache"] = sliced_info.sliced_plates[index].sliced_time_with_cache;
