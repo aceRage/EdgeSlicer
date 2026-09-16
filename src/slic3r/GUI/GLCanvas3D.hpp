@@ -339,7 +339,6 @@ class GLCanvas3D
 
         bool dragging;
         Vec2d position;
-        Vec3d scene_position;
         Drag drag;
         bool ignore_left_up;
         bool ignore_right_up;

@@ -1513,13 +1513,13 @@ FilamentGroupContext build_filament_group_context(
 
     auto machine_filament_info = build_machine_filaments(print->get_extruder_filament_info(), extruder_ams_counts, ignore_ext_filament);
 
-    std::vector<std::string> filament_types = print_config.filament_type.values;
-    std::vector<std::string> filament_colours = print_config.filament_colour.values;
-    std::vector<unsigned char> filament_is_support = print_config.filament_is_support.values;
+    // The grouping code walks filament_ids and indexes filament_info by the same position.
+    // filament_ids is not normalized per-filament in this fork (see PrintConfig/Preset notes);
+    // size it to the filament count so downstream indexing is safe. Empty ids just mean no
+    // identity hint for grouping. Truncate if longer so we don't pair past the end.
     std::vector<std::string> filament_ids = print_config.filament_ids.values;
-    // filament_ids is not normalized per-filament in this fork (see PrintConfig/Preset notes); size it to the
-    // filament count so downstream indexing is safe. Empty ids just mean no identity hint for grouping.
-    if (filament_ids.size() < filament_nums) filament_ids.resize(filament_nums);
+    if (filament_ids.size() != filament_nums)
+        filament_ids.resize(filament_nums);
     std::vector<FilamentUsageType> filament_usage_types = print->get_filament_usage_type();
 
     FGMode fg_mode = mode == FilamentMapMode::fmmAutoForMatch ? FGMode::MatchMode : FGMode::FlushMode;
@@ -1529,12 +1529,20 @@ FilamentGroupContext build_filament_group_context(
     context.model_info.filament_ids = filament_ids;
     context.model_info.unprintable_volumes = unprintable_volumes;
 
-    for (size_t idx = 0; idx < filament_types.size(); ++idx) {
+    // Consumers index filament_info by filament id, so it must span the filament count: a partial
+    // or legacy config can leave any of these arrays short, and get_at clamps.
+    context.model_info.filament_info.reserve(filament_nums);
+    for (size_t idx = 0; idx < filament_nums; ++idx) {
         FilamentGroupUtils::FilamentInfo info;
-        info.color = filament_colours[idx];
-        info.type = filament_types[idx];
-        info.is_support = filament_is_support[idx];
-        info.usage_type = filament_usage_types[idx];
+        info.color      = print_config.filament_colour.get_at(idx);
+        info.type       = print_config.filament_type.get_at(idx);
+        info.is_support = print_config.filament_is_support.get_at(idx);
+        // Ultra: usage_type is derived from object/support assignments and is sized by filament_type,
+        // which can be shorter than filament_colour. Clamp or fall back rather than index past the end.
+        if (idx < filament_usage_types.size())
+            info.usage_type = filament_usage_types[idx];
+        else
+            info.usage_type = filament_usage_types.empty() ? FilamentUsageType::ModelOnly : filament_usage_types.front();
         context.model_info.filament_info.emplace_back(std::move(info));
     }
 

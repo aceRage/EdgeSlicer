@@ -41,6 +41,7 @@ add_executable(${_TEST_NAME}_tests
 	test_triangle_selector.cpp
 	test_locked_zag_patterns.cpp
 	test_locked_zag_identity_probe.cpp
+	test_layer_time_speed_smoothing.cpp
 	test_local_z_order_optimizer.cpp
 	test_placeholder_parser.cpp
 	test_polygon.cpp
