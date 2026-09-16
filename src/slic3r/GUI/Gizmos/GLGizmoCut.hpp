@@ -561,6 +561,16 @@ class GLGizmoCut3D : public GLGizmoBase
     // radius so "it looks grab-able" and "it is grab-able" are the same region, plus
     // a few pixels of slack because the user is aiming at a ball, not a pixel.
     static constexpr double DrawEndPickPx = 16.0;
+    // 2026-09-16, owner: the plane grab that moves the whole drawn line "extends into
+    // infinity similar to the regular cut and makes it hard to rotate around the
+    // part". In Draw mode the cut surface AS DRAWN is the line, so the grab - and the
+    // hover highlight and tooltip that announce it - fire only within this many
+    // pixels of the line: the same radius the line's own segment pick uses.
+    static constexpr double DrawLineGrabPx = 12.0;
+    // True when the mouse is within DrawLineGrabPx of the drawn line on screen. The
+    // Draw-mode answer to mouse_on_cut_surface(). An empty chain has no line, so
+    // nothing is near it and nothing stops the orbit.
+    bool   mouse_near_draw_line(const Vec2d& mouse_position) const;
     // 2026-09-16, owner: "hide the through all feature for now too. it's still very
     // unclear what it is supposed to accomplish and what it is doing is completely
     // useless." Through all is hidden until it has a defined purpose - see draw-cut

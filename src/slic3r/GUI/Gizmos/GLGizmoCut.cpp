@@ -3393,6 +3393,26 @@ int GLGizmoCut3D::draw_segment_at(const Vec2d& mouse_position) const
     return best;
 }
 
+bool GLGizmoCut3D::mouse_near_draw_line(const Vec2d& mouse_position) const
+{
+    // The CHAIN's samples rather than the finished stroke's path: the chain is the
+    // line the user sees from the first stroke on, closed or not, and it is what the
+    // plane drag moves.
+    const std::vector<DrawCutSample>& pts = m_draw_chain.samples();
+    if (pts.empty())
+        return false;
+
+    const Camera&     camera         = wxGetApp().plater()->get_camera();
+    const Transform3d plane_to_world = translation_transform(m_plane_center) * m_rotation_m;
+    std::vector<Vec2d> px;
+    px.reserve(pts.size());
+    for (const DrawCutSample& smp : pts) {
+        const Slic3r::Point p = CameraUtils::project(camera, plane_to_world * smp.pos);
+        px.emplace_back(double(p.x()), double(p.y()));
+    }
+    return draw_cut_distance_to_polyline(px, m_draw_chain.is_closed(), mouse_position) <= DrawLineGrabPx;
+}
+
 bool GLGizmoCut3D::draw_point_reproject(int i, const Vec2d& mouse_position)
 {
     if (i < 0 || size_t(i) >= m_draw_points.size())
@@ -8970,6 +8990,14 @@ bool GLGizmoCut3D::mouse_on_cut_surface(const Vec2d& mouse_position) const
     // Nothing is drawn, so nothing can be hit.
     if (m_hide_cut_plane || m_connectors_editing || cut_line_processing())
         return false;
+
+    // DRAW: the surface as drawn is the LINE. 2026-09-16, owner: Draw mode fell into
+    // the flat-quad branch below, so the grab that moves the whole line fired anywhere
+    // on the oversized picking quad and an attempt to orbit round the part moved the
+    // line instead. Only a press within a few pixels of the line grabs it now; the
+    // hover highlight and the tooltip go through here too, so they agree.
+    if (is_draw_surface())
+        return mouse_near_draw_line(mouse_position);
 
     const Camera& camera = wxGetApp().plater()->get_camera();
     Vec3d         ray_o, ray_dir;

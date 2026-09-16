@@ -5015,3 +5015,20 @@ TEST_CASE("Draw cut: a loop on one side of a part is a plug however much of the 
     REQUIRE(belt.finish(1.0, 0.0) == DrawCutError::None);
     REQUIRE(draw_cut_loop_separates(cyl, belt, params));
 }
+
+TEST_CASE("Draw cut: the distance to a polyline measures to its segments", "[DrawCut]")
+{
+    // The pure half of the Draw-mode plane grab (2026-09-16): the gizmo projects the
+    // chain to pixels and grabs only within a few of the line.
+    const std::vector<Vec2d> sq = { Vec2d(0, 0), Vec2d(10, 0), Vec2d(10, 10), Vec2d(0, 10) };
+    // Beside the middle of the first segment: 3 from the segment, 5.8 from any vertex.
+    REQUIRE(draw_cut_distance_to_polyline(sq, false, Vec2d(5, -3)) == Approx(3.0));
+    // Beside the CLOSING segment (x == 0): only a closed polyline has it.
+    REQUIRE(draw_cut_distance_to_polyline(sq, true,  Vec2d(-2, 5)) == Approx(2.0));
+    REQUIRE(draw_cut_distance_to_polyline(sq, false, Vec2d(-2, 5)) == Approx(std::sqrt(29.0)));
+    // Past an end: clamped to the endpoint, not the infinite line.
+    REQUIRE(draw_cut_distance_to_polyline(sq, false, Vec2d(-4, 0)) == Approx(4.0));
+    // Degenerate inputs.
+    REQUIRE(draw_cut_distance_to_polyline({ Vec2d(1, 1) }, false, Vec2d(4, 5)) == Approx(5.0));
+    REQUIRE(draw_cut_distance_to_polyline({}, false, Vec2d(0, 0)) > 1e300);
+}

@@ -3215,6 +3215,28 @@ DrawChainEnd draw_cut_chain_end_at_pixel(const DrawCutChain&                    
     return DrawChainEnd::None;
 }
 
+double draw_cut_distance_to_polyline(const std::vector<Vec2d>& pts, bool closed, const Vec2d& p)
+{
+    double best = std::numeric_limits<double>::infinity();
+    const size_t n = pts.size();
+    if (n == 0)
+        return best;
+    if (n == 1)
+        return (pts.front() - p).norm();
+    const size_t segs = closed ? n : n - 1;
+    for (size_t i = 0; i < segs; ++ i) {
+        const Vec2d& a  = pts[i];
+        const Vec2d& b  = pts[(i + 1) % n];
+        const Vec2d  ab = b - a;
+        const double L2 = ab.squaredNorm();
+        // The nearest point on the SEGMENT, clamped - not on the infinite line, or a
+        // point well past the end of a short segment would claim it.
+        const double t = L2 > 1e-18 ? std::clamp((p - a).dot(ab) / L2, 0.0, 1.0) : 0.0;
+        best = std::min(best, (a + t * ab - p).norm());
+    }
+    return best;
+}
+
 DrawChainEnd DrawCutChain::end_for_start(const Vec3d& p, double snap_radius) const
 {
     // An empty chain accepts anything: the first stroke has nothing to continue.

@@ -1164,6 +1164,17 @@ DrawChainEnd draw_cut_chain_end_at_pixel(const DrawCutChain&                    
                                          const std::function<std::optional<Vec2d>(const Vec3d&)>& project,
                                          double                                             pick_px);
 
+// The distance from `p` to the polyline `pts`, in the points' own units - to its
+// SEGMENTS, not only its vertices, and to the closing segment too when `closed`. A
+// single point measures to that point; no points at all is infinity.
+//
+// 2026-09-16, owner: in Draw mode the plane grab that moves the whole drawn line
+// "extends into infinity ... and makes it hard to rotate around the part". The gizmo
+// now grabs only within a few pixels of the line, and this is the pure half of that
+// test - the gizmo projects the chain's samples to pixels and asks this - so it can be
+// pinned by a unit test without a camera.
+double draw_cut_distance_to_polyline(const std::vector<Vec2d>& pts, bool closed, const Vec2d& p);
+
 // ---------------------------------------------------------------------------
 // THE HALVES CLASSIFICATION. 2026-09-12, owner feedback item 3.
 //
