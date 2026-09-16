@@ -80,6 +80,8 @@ public:
         m_apikey   = new wxTextCtrl(this, wxID_ANY, from_u8(d.apikey));
         m_user     = new wxTextCtrl(this, wxID_ANY, from_u8(d.user));
         m_password = new wxTextCtrl(this, wxID_ANY, from_u8(d.password), wxDefaultPosition, wxDefaultSize, wxTE_PASSWORD);
+        m_serial   = new wxTextCtrl(this, wxID_ANY, from_u8(d.serial));
+        m_serial->SetToolTip(_L("The printer's serial number. Flashforge printers need it, with the check code in API Key, to speak their local API. Other host types ignore it."));
 
         int sel = 0;
         for (size_t i = 0; i < m_type_keys.size(); ++i)
@@ -96,6 +98,7 @@ public:
         row(_L("API Key / Password"), m_apikey);
         row(_L("User"), m_user);
         row(_L("Password"), m_password);
+        row(_L("Serial Number"), m_serial);
 
         auto* top = new wxBoxSizer(wxVERTICAL);
         top->Add(grid, 1, wxEXPAND | wxALL, FromDIP(12));
@@ -138,6 +141,7 @@ public:
         d.apikey    = into_u8(m_apikey->GetValue());
         d.user      = into_u8(m_user->GetValue());
         d.password  = into_u8(m_password->GetValue());
+        d.serial    = into_u8(m_serial->GetValue());
         return d;
     }
 
@@ -164,6 +168,7 @@ private:
     wxTextCtrl*              m_apikey { nullptr };
     wxTextCtrl*              m_user { nullptr };
     wxTextCtrl*              m_password { nullptr };
+    wxTextCtrl*              m_serial { nullptr };
 };
 
 // ----------------------------------------------------------------- the list ----

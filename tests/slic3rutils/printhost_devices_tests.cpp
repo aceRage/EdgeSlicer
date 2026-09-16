@@ -62,6 +62,7 @@ TEST_CASE("PrintHostDevices: a device survives save and load", "[PrintHostDevice
     const std::string key = "Elegoo Centauri Carbon";
 
     Device      d = make_device("Left bay", "192.168.1.41", "elegoolink");
+    d.serial      = "SNADVA1234567";
     std::string error;
     REQUIRE(add(key, d, error));
     REQUIRE(error.empty());
@@ -76,6 +77,7 @@ TEST_CASE("PrintHostDevices: a device survives save and load", "[PrintHostDevice
     CHECK(back[0].host_type == "elegoolink");
     CHECK(back[0].auth_type == "key");
     CHECK(back[0].apikey == "k-Left bay");
+    CHECK(back[0].serial == "SNADVA1234567");
     CHECK(back[0].printer_model == "Elegoo Centauri Carbon");
     CHECK(back[0].created == d.created);
 
@@ -518,6 +520,51 @@ TEST_CASE("PrintHostDevices: the preset bridge writes the fields the send path r
 
     CHECK(normalize_address(" 192.168.1.41/ ") == "192.168.1.41");
     CHECK(normalize_address("HTTP://Printer.local/") == "http://printer.local");
+}
+
+TEST_CASE("PrintHostDevices: a device's serial reaches the Flashforge send, an empty one keeps the preset's", "[PrintHostDevices]")
+{
+    // The Flashforge HTTP local API is spoken with flashforge_serial_number + printhost_apikey (the
+    // check code), both read from the per-device config the send builds. Two Creator 5s under one
+    // preset must each send their own serial.
+    DynamicPrintConfig preset;
+    preset.opt_string("flashforge_serial_number", true) = "SNPRESET000001";
+
+    Device left    = make_device("Left", "192.168.1.51", "flashforge");
+    left.apikey    = "12345678";
+    left.serial    = "SNLEFT00000001";
+    Device right   = make_device("Right", "192.168.1.52", "flashforge");
+    right.apikey   = "87654321";
+    right.serial   = "SNRIGHT0000001";
+
+    const DynamicPrintConfig l = config_for(left, preset);
+    const DynamicPrintConfig r = config_for(right, preset);
+    CHECK(l.opt_string("flashforge_serial_number") == "SNLEFT00000001");
+    CHECK(l.opt_string("printhost_apikey") == "12345678");
+    CHECK(l.option<ConfigOptionEnum<PrintHostType>>("host_type")->value == htFlashforge);
+    CHECK(r.opt_string("flashforge_serial_number") == "SNRIGHT0000001");
+    CHECK(r.opt_string("printhost_apikey") == "87654321");
+    CHECK(from_config(l).serial == "SNLEFT00000001");
+
+    // A device that was never given a serial (every non-Flashforge printer, and a Flashforge added
+    // before this field existed) falls back to whatever the preset holds.
+    Device bare = make_device("Bare", "192.168.1.53", "flashforge");
+    CHECK(config_for(bare, preset).opt_string("flashforge_serial_number") == "SNPRESET000001");
+
+    // And the migration carries the preset's serial into device 1.
+    ScopedStore store("serial_migration");
+    PresetHost  p;
+    p.model_key     = "Flashforge Creator 5";
+    p.preset_name   = "Creator 5";
+    p.address       = "192.168.1.60";
+    p.host_type     = "flashforge";
+    p.apikey        = "11112222";
+    p.serial        = "SNMIGRATED0001";
+    p.printer_model = "Flashforge Creator 5";
+    REQUIRE(migrate_from_presets(std::vector<PresetHost>{ p }) == 1);
+    const std::vector<Device> back = devices(p.model_key);
+    REQUIRE(back.size() == 1);
+    CHECK(back[0].serial == "SNMIGRATED0001");
 }
 
 TEST_CASE("PrusaLinkStatus: what a PrusaLink printer says it is doing", "[PrintHostDevices]")
