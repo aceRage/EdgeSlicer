@@ -1532,6 +1532,34 @@ int CLI::run(int argc, char **argv)
     else
         downward_check = false;
 
+    // --export-settings - writes its JSON to stdout, so reject every action or transform that may write there
+    // too (--info, --help, --orient, slicing and exporting). The allowed ones do nothing when nothing is
+    // sliced or exported.
+    if (std::find(m_actions.begin(), m_actions.end(), "export_settings") != m_actions.end() && m_config.opt_string("export_settings") == "-") {
+        // --progress-json is a CLIMiscConfigDef option, not an action/transform, so it never shows up in
+        // m_actions/m_transforms below. emit_progress()/record_exit_reson() still write "event":"progress"/
+        // "result" JSON lines straight to stdout whenever g_progress_json is set (see above), which would
+        // interleave with and corrupt the single settings-JSON document -export-settings - is meant to produce.
+        if (g_progress_json) {
+            boost::nowide::cerr << "--export-settings - cannot be combined with --progress-json" << std::endl;
+            record_exit_reson(outfile_dir, CLI_INVALID_PARAMS, 0, cli_errors[CLI_INVALID_PARAMS], sliced_info);
+            flush_and_exit(CLI_INVALID_PARAMS);
+        }
+        static const std::set<std::string> stdout_compatible = { "export_settings", "uptodate", "load_defaultfila", "min_save",
+                                                                 "mtcpp", "mstpp", "no_check", "normative_check", "pipe" };
+        for (const std::vector<std::string> *opt_keys : { &m_actions, &m_transforms }) {
+            for (const std::string &opt_key : *opt_keys) {
+                if (stdout_compatible.count(opt_key) == 0) {
+                    std::string flag = opt_key;
+                    std::replace(flag.begin(), flag.end(), '_', '-');
+                    boost::nowide::cerr << "--export-settings - cannot be combined with --" << flag << std::endl;
+                    record_exit_reson(outfile_dir, CLI_INVALID_PARAMS, 0, cli_errors[CLI_INVALID_PARAMS], sliced_info);
+                    flush_and_exit(CLI_INVALID_PARAMS);
+                }
+            }
+        }
+    }
+
     bool start_gui = m_actions.empty() && !downward_check;
     if (start_gui) {
         BOOST_LOG_TRIVIAL(info) << "no action, start gui directly" << std::endl;
@@ -4657,7 +4685,7 @@ int CLI::run(int argc, char **argv)
                                 //skip this object due to be locked in plate
                                 ap.itemid = locked_aps.size();
                                 locked_aps.emplace_back(ap);
-                                boost::nowide::cout <<__FUNCTION__ << boost::format(": skip locked instance, obj_id %1%, instance_id %2%") % oidx % inst_idx;
+                                BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(": skip locked instance, obj_id %1%, instance_id %2%") % oidx % inst_idx;
                             }
                         }
                     }
@@ -5232,7 +5260,11 @@ int CLI::run(int argc, char **argv)
             //FIXME check for mixing the FFF / SLA parameters.
             // or better save fff_print_config vs. sla_print_config
             //m_print_config.save(m_config.opt_string("save"));
-            m_print_config.save_to_json(m_config.opt_string(opt_key), std::string("project_settings"), std::string("project"), std::string(Snapmaker_VERSION));
+            const std::string &settings_file = m_config.opt_string(opt_key);
+            if (settings_file == "-")
+                m_print_config.save_to_json(boost::nowide::cout, "project_settings", "project", Snapmaker_VERSION, /*replace_invalid_utf8=*/true);
+            else
+                m_print_config.save_to_json(settings_file, std::string("project_settings"), std::string("project"), std::string(Snapmaker_VERSION));
         } else if (opt_key == "info") {
             // --info works on unrepaired model
             for (Model &model : m_models) {

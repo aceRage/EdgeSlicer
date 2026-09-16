@@ -27,6 +27,11 @@ public:
     void        reset(const Vec3d &position);
     void        set_current_extruder(unsigned int extruder_id) { m_current_extruder = extruder_id; }
     std::string process_layer(std::string &&gcode, size_t layer_id, bool flush);
+    // True when the layer flushed by the last process_layer() call had at least one extrusion
+    // slowed down to reach slow_down_layer_time, i.e. the F words in the returned G-code carry
+    // the cooling speeds rather than the profile speeds. A downstream stage that retunes
+    // speeds (layer-time speed smoothing) reads this to leave such a layer alone.
+    bool        last_layer_slowed_down() const { return m_last_layer_slowed_down; }
 
 private:
 	CoolingBuffer& operator=(const CoolingBuffer&) = delete;
@@ -57,6 +62,8 @@ private:
     unsigned int                m_current_extruder;
     //BBS: current fan speed
     int                         m_current_fan_speed;
+    // See last_layer_slowed_down().
+    bool                        m_last_layer_slowed_down { false };
 };
 
 }
