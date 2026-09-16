@@ -561,6 +561,14 @@ class GLGizmoCut3D : public GLGizmoBase
     // radius so "it looks grab-able" and "it is grab-able" are the same region, plus
     // a few pixels of slack because the user is aiming at a ball, not a pixel.
     static constexpr double DrawEndPickPx = 16.0;
+    // 2026-09-16, owner: "hide the through all feature for now too. it's still very
+    // unclear what it is supposed to accomplish and what it is doing is completely
+    // useless." Through all is hidden until it has a defined purpose - see draw-cut
+    // follow-ups 2026-09-16. The libslic3r implementation and its tests stay; only
+    // the control is gone, and the mode is forced OFF for every cut this gizmo makes -
+    // including a reopened recipe that had it on, which then re-cuts as band + core
+    // at its stored Angle and Depth.
+    static constexpr bool   DrawThroughAllHidden = true;
     void   render_draw_chain_endpoints();
     // 2026-09-13, owner click-test item 2: CLOSE LOOP along the SURFACE. Appends the
     // samples of a path from one endpoint to the other that lies ON the mesh, then

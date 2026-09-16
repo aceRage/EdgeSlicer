@@ -2978,6 +2978,10 @@ void GLGizmoCut3D::refresh_draw_stroke()
     m_draw_params.thickness   = double(m_cut_thickness);
     m_draw_params.thickness_offset = cut_thickness_offset();
     m_draw_params.angle_deg   = double(m_draw_angle);
+    // Through all is hidden (DrawThroughAllHidden): OFF for every cut, a reopened
+    // recipe that had it on included.
+    if (DrawThroughAllHidden)
+        m_draw_params.through_all = false;
     // 2026-09-15, owner item 4. OFF is an EMPTY optional, not a number: "continue the
     // band" has to keep tracking Angle as the user moves it, which a latched number
     // would not. The value is kept in m_draw_ext_angle either way, so unticking and
@@ -4694,20 +4698,24 @@ void GLGizmoCut3D::render_draw_surface_inputs()
     ImGui::AlignTextToFramePadding();
     m_imgui->text(_L("Depth") + ": ");
     ImGui::SameLine(m_label_width);
-    bool through = m_draw_params.through_all;
-    const bool through_toggled = m_imgui->bbl_checkbox(_L("Through all"), through);
-    const bool through_hovered = ImGui::IsItemHovered();
-    if (through_toggled) {
-        m_draw_params.through_all = through;
-        refresh_draw_stroke();
+    if (!DrawThroughAllHidden) {
+        // THE CONTROL IS HIDDEN - see DrawThroughAllHidden in the header. Kept rather
+        // than deleted so the mode can come back once it has a defined purpose.
+        bool through = m_draw_params.through_all;
+        const bool through_toggled = m_imgui->bbl_checkbox(_L("Through all"), through);
+        const bool through_hovered = ImGui::IsItemHovered();
+        if (through_toggled) {
+            m_draw_params.through_all = through;
+            refresh_draw_stroke();
+        }
+        if (through_hovered)
+            m_imgui->tooltip(_u8L("Cut all the way through the part instead of meeting a flat middle. "
+                                  "The line is carried straight INWARD from the surface you drew on - square to the "
+                                  "middle plane, away from you - through everything behind it. Nothing in front of the "
+                                  "line is touched. The Angle and the Depth do not apply: a line all the way round a "
+                                  "part separates it, and a line on a face leaves a straight plug.").c_str(),
+                             ImGui::GetFontSize() * 20.f);
     }
-    if (through_hovered)
-        m_imgui->tooltip(_u8L("Cut all the way through the part instead of meeting a flat middle. "
-                              "The line is carried straight INWARD from the surface you drew on - square to the "
-                              "middle plane, away from you - through everything behind it. Nothing in front of the "
-                              "line is touched. The Angle and the Depth do not apply: a line all the way round a "
-                              "part separates it, and a line on a face leaves a straight plug.").c_str(),
-                         ImGui::GetFontSize() * 20.f);
     {
         // THE DEPTH SLIDER IS GREYED, NOT HIDDEN, under Through all. Hiding it made
         // the panel jump by a row every time the checkbox was clicked, and it hid the
@@ -4726,9 +4734,13 @@ void GLGizmoCut3D::render_draw_surface_inputs()
         // The two are ONE VALUE (&m_draw_depth), so they cannot disagree: whichever
         // control moved wrote it, and the other draws from it on the same frame.
         m_imgui->disabled_begin(m_draw_params.through_all);
-        ImGui::AlignTextToFramePadding();
-        m_imgui->text(" ");
-        ImGui::SameLine(m_label_width);
+        if (!DrawThroughAllHidden) {
+            // The checkbox took the label's row, so the slider goes on the next one.
+            // With the checkbox hidden the slider sits beside the label itself.
+            ImGui::AlignTextToFramePadding();
+            m_imgui->text(" ");
+            ImGui::SameLine(m_label_width);
+        }
         const float slider_icon_width = m_imgui->get_slider_icon_size().x;
         ImGui::PushItemWidth(m_control_width * 0.7f - 1.5f * slider_icon_width);
         bool depth_changed = ImGui::SliderFloat("##draw_depth", &m_draw_depth,
