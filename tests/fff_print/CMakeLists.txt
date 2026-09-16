@@ -22,6 +22,7 @@ add_executable(${_TEST_NAME}_tests
 	test_tree_support_determinism.cpp
 	test_bed_temperature.cpp
 	test_trianglemesh.cpp
+	test_wipe.cpp
 	)
 # libslic3r_cgal links CGAL privately, so the GMP/MPFR libraries are needed at link time.
 # They are not propagated to this test target; find them under the deps prefix or the

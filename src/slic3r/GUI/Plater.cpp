@@ -18990,7 +18990,9 @@ void Plater::calib_pa(const Calib_Params& params)
         default: break;
     }
     auto printer_config = &wxGetApp().preset_bundle->printers.get_edited_preset().config;
+    auto print_config = &wxGetApp().preset_bundle->prints.get_edited_preset().config;
     printer_config->set_key_value("resonance_avoidance", new ConfigOptionBool{false});
+    print_config->set_key_value("wipe_inward", new ConfigOptionBool(false));
     p->background_process.fff_print()->set_calib_params(params);
 }
 
@@ -19618,6 +19620,8 @@ void Plater::calib_retraction(const Calib_Params& params)
     auto filament_config = &wxGetApp().preset_bundle->filaments.get_edited_preset().config;
     auto printer_config = &wxGetApp().preset_bundle->printers.get_edited_preset().config;
     auto obj = model().objects[0];
+
+    print_config->set_key_value("wipe_inward", new ConfigOptionBool(false));
 
     double layer_height = 0.2;
 

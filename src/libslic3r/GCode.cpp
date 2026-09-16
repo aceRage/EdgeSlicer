@@ -1,5 +1,6 @@
 #include "BoundingBox.hpp"
 #include "Config.hpp"
+#include "GCode/WipePathHelpers.hpp"
 #include "Polygon.hpp"
 #include "PrintConfig.hpp"
 #include "libslic3r.h"
@@ -32,6 +33,7 @@
 #include <iostream>
 #include <numeric>
 #include <math.h>
+#include <optional>
 #include <stdlib.h>
 #include <string>
 #include <utility>
@@ -475,6 +477,16 @@ Wipe::RetractionValues Wipe::calculateWipeRetractionLengths(GCode& gcodegen, boo
     // and return the maximum allowed wipe amount to be retracted during the wipe move
     retractionBeforeWipe += retraction_length_remaining - retractionDuringWipe;
     return {retractionBeforeWipe, retractionDuringWipe};
+}
+
+// Orca: rebuild the stored wipe path while preserving Polyline's boundary deduplication.
+void Wipe::update_path(const ExtrusionPaths &paths, bool reverse)
+{
+    reset_path();
+    for (const ExtrusionPath& extrusion_path : paths)
+        path.append(extrusion_path.polyline);
+    if (reverse)
+        path.reverse();
 }
 
 std::string Wipe::wipe(GCode& gcodegen, double length, bool toolchange, bool is_last)
@@ -2408,6 +2420,18 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
     DoExport::init_gcode_processor(print.config(), m_processor, m_silent_time_estimator_enabled);
     const bool is_bbl_printers = print.is_BBL_printer();
     m_calib_config.clear();
+    // Orca: Calibration overrides are reapplied after object/region settings in _extrude().
+    // Keep inward wiping from masking retraction and pressure advance artifacts.
+    switch (print.calib_mode()) {
+    case CalibMode::Calib_PA_Line:
+    case CalibMode::Calib_PA_Pattern:
+    case CalibMode::Calib_PA_Tower:
+    case CalibMode::Calib_Retraction_tower:
+        m_calib_config.set_key_value("wipe_inward", new ConfigOptionBool(false));
+        break;
+    default:
+        break;
+    }
     // resets analyzer's tracking data
     m_last_height  = 0.f;
     m_last_layer_z = 0.f;
@@ -7575,7 +7599,8 @@ static std::unique_ptr<EdgeGrid::Grid> calculate_layer_edge_grid(const Layer& la
 }
 
 std::string GCode::extrude_loop(
-    ExtrusionLoop loop, std::string description, double speed, const ExtrusionEntitiesPtr& region_perimeters, const Point* start_point)
+    ExtrusionLoop loop, std::string description, double speed, const ExtrusionEntitiesPtr& region_perimeters, const Point* start_point,
+    const WipeInwardSupport* wipe_support)
 {
     // get a copy; don't modify the orientation of the original loop object otherwise
     // next copies (if any) would not detect the correct orientation
@@ -7793,60 +7818,79 @@ std::string GCode::extrude_loop(
         }
     }
 
-    // BBS
+    // Orca: share the post-extrusion nozzle position between wipe_inward and wipe_on_loops.
+    const bool is_ccw = loop.is_counter_clockwise();
+
+    std::optional<Point> wipe_on_loops_dest;
+    if (m_config.wipe_on_loops.value && paths.back().role() == erExternalPerimeter &&
+        m_layer != nullptr && m_config.wall_loops.value > 1 && paths.front().size() >= 2 &&
+        paths.back().polyline.points.size() >= 2)
+        wipe_on_loops_dest = wipe_on_loops_destination(paths, scale_(nozzle_diameter), is_ccw, is_hole);
+
+    bool wipe_inward_applied = false;
+    // Orca: store loop paths in print order because inward offsets use this orientation.
     if (m_wipe.enable) {
-        m_wipe.path = Polyline();
-        for (ExtrusionPath& path : paths) {
-            // BBS: Don't need to save duplicated point into wipe path
-            if (!m_wipe.path.empty() && !path.empty() && m_wipe.path.last_point() == path.first_point())
-                m_wipe.path.append(path.polyline.points.begin() + 1, path.polyline.points.end());
-            else
-                m_wipe.path.append(path.polyline); // TODO: don't limit wipe to last path
+        m_wipe.update_path(paths);
+
+        // Orca: loop wipe paths retain print direction. Their material side is
+        // therefore left for CCW contours and right for CW contours, with the
+        // result inverted for holes. Only external perimeters are eligible.
+        // Calibration overrides are applied during extrusion, after the region
+        // context was created. Check the effective setting again at execution.
+        if (m_config.wipe_inward && m_config.wipe_inward_distance.value > 0. &&
+            wipe_support != nullptr && !wipe_support->inner_lines.empty() &&
+            // A loop's role is its first path's role. An overhanging start must
+            // not hide ordinary external-wall segments elsewhere in the loop.
+            std::any_of(paths.begin(), paths.end(),
+                [](const ExtrusionPath &path) { return is_external_perimeter(path.role()); }) &&
+            m_wipe.path.points.size() >= 2) {
+            // Orca: use the actual extrusion width from the path, not the config
+            // value — outer_wall_line_width=0 (Auto) would make get_abs_value
+            // return 0 and silently disable the feature, and Arachne may produce
+            // a different width than the config default.
+            const double outer_wall_line_width = paths.front().width;
+            const double requested_offset = m_config.wipe_inward_distance.get_abs_value(outer_wall_line_width);
+            const double offset_dist = scale_(std::min(requested_offset, outer_wall_line_width));
+            if (offset_dist > SCALED_EPSILON) {
+                const Point seam_start = paths.front().first_point();
+                const Point seam_end   = paths.back().last_point();
+                const Point wipe_start = wipe_on_loops_dest.value_or(seam_end);
+                const double max_wipe_length = scale_(EXTRUDER_CONFIG(wipe_distance));
+                // Orca: Wipe::wipe() replaces points[0] with last_pos and executes
+                // from points[1]. The helper preserves that sentinel and atomically
+                // replaces the remaining points, or leaves the path untouched.
+                // Orca: a configured wall count does not guarantee that Arachne
+                // generated an adjacent wall for this particular loop. Only
+                // earlier entities are considered because later walls have
+                // not been printed yet (for example with Outer/Inner order).
+                // Inner walls determine the material side; every earlier wall
+                // remains available to validate the executable wipe path.
+                const double support_distance = scale_(std::max(nozzle_diameter, outer_wall_line_width));
+                Polyline inward_path = m_wipe.path;
+                if (offset_wipe_path_toward_support(
+                        inward_path, seam_start, seam_end, wipe_start,
+                        wipe_offset_direction(is_ccw, is_hole), offset_dist, max_wipe_length,
+                        wipe_support->inner_lines, wipe_support->printed_lines,
+                        m_wipe.path.lines(), support_distance)) {
+                    m_wipe.path = std::move(inward_path);
+                    wipe_inward_applied = true;
+                }
+            }
         }
     }
 
-    // make a little move inwards before leaving loop
-    if (m_config.wipe_on_loops.value && paths.back().role() == erExternalPerimeter && m_layer != NULL && m_config.wall_loops.value > 1 &&
-        paths.front().size() >= 2 && paths.back().polyline.points.size() >= 3) {
-        // detect angle between last and first segment
-        // the side depends on the original winding order of the polygon (inwards for contours, outwards for holes)
-        // FIXME improve the algorithm in case the loop is tiny.
-        // FIXME improve the algorithm in case the loop is split into segments with a low number of points (see the Point b query).
-        Point a = paths.front().polyline.points[1];          // second point
-        Point b = *(paths.back().polyline.points.end() - 3); // second to last point
-        if (is_hole == loop.is_counter_clockwise()) {
-            // swap points
-            Point c = a;
-            a       = b;
-            b       = c;
-        }
-
-        double angle = paths.front().first_point().ccw_angle(a, b) / 3;
-
-        // turn inwards if contour, turn outwards if hole
-        if (is_hole == loop.is_counter_clockwise())
-            angle *= -1;
-
-        // create the destination point along the first segment and rotate it
-        // we make sure we don't exceed the segment length because we don't know
-        // the rotation of the second segment so we might cross the object boundary
-        Vec2d  p1 = paths.front().polyline.points.front().cast<double>();
-        Vec2d  p2 = paths.front().polyline.points[1].cast<double>();
-        Vec2d  v  = p2 - p1;
-        double nd = scale_(EXTRUDER_CONFIG(nozzle_diameter));
-        double l2 = v.squaredNorm();
-        // Shift by no more than a nozzle diameter.
-        // FIXME Hiding the seams will not work nicely for very densely discretized contours!
-        // BBS. shorten the travel distant before the wipe path
-        double threshold = 0.2;
-        Point  pt        = (p1 + v * threshold).cast<coord_t>();
-        if (nd * nd < l2)
-            pt = (p1 + threshold * v * (nd / sqrt(l2))).cast<coord_t>();
-        // Point pt = ((nd * nd >= l2) ? (p1+v*0.4): (p1 + 0.2 * v * (nd / sqrt(l2)))).cast<coord_t>();
-        pt.rotate(angle, paths.front().polyline.points.front());
-        // generate the travel move
-        gcode += m_writer.extrude_to_xy(this->point_to_gcode(pt), 0, "move inwards before travel", true);
+    // Orca: make the configured inward move before leaving the loop.
+    if (wipe_on_loops_dest) {
+        gcode += m_writer.extrude_to_xy(
+            this->point_to_gcode(*wipe_on_loops_dest), 0, "move inwards before travel", true);
+        this->set_last_pos(*wipe_on_loops_dest);
     }
+
+    // Execute the accepted path before another extrusion replaces it. Wiping
+    // must not force retraction or Z-hop across a short travel to the next wall.
+    // Ordinary travel planning decides whether to retract from the new position.
+    if (wipe_inward_applied)
+        gcode += m_wipe.wipe(*this, 0.);
 
     return gcode;
 }
@@ -7883,15 +7927,7 @@ std::string GCode::extrude_multi_path(ExtrusionMultiPath multipath, std::string 
 
     // BBS
     if (m_wipe.enable) {
-        m_wipe.path = Polyline();
-        for (ExtrusionPath& path : multipath.paths) {
-            // BBS: Don't need to save duplicated point into wipe path
-            if (!m_wipe.path.empty() && !path.empty() && m_wipe.path.last_point() == path.first_point())
-                m_wipe.path.append(path.polyline.points.begin() + 1, path.polyline.points.end());
-            else
-                m_wipe.path.append(path.polyline); // TODO: don't limit wipe to last path
-        }
-        m_wipe.path.reverse();
+        m_wipe.update_path(multipath.paths, true);
     }
 
     return gcode;
@@ -7900,14 +7936,15 @@ std::string GCode::extrude_multi_path(ExtrusionMultiPath multipath, std::string 
 std::string GCode::extrude_entity(const ExtrusionEntity&      entity,
                                   std::string                 description,
                                   double                      speed,
-                                  const ExtrusionEntitiesPtr& region_perimeters)
+                                  const ExtrusionEntitiesPtr& region_perimeters,
+                                  const WipeInwardSupport*    wipe_support)
 {
     if (const ExtrusionPath* path = dynamic_cast<const ExtrusionPath*>(&entity))
         return this->extrude_path(*path, description, speed);
     else if (const ExtrusionMultiPath* multipath = dynamic_cast<const ExtrusionMultiPath*>(&entity))
         return this->extrude_multi_path(*multipath, description, speed);
     else if (const ExtrusionLoop* loop = dynamic_cast<const ExtrusionLoop*>(&entity))
-        return this->extrude_loop(*loop, description, speed, region_perimeters);
+        return this->extrude_loop(*loop, description, speed, region_perimeters, nullptr, wipe_support);
     else
         throw Slic3r::InvalidArgument("Invalid argument supplied to extrude()");
     return "";
@@ -7921,6 +7958,7 @@ std::string GCode::extrude_path(ExtrusionPath path, std::string description, dou
     //    description += ExtrusionEntity::role_to_string(path.role());
     std::string gcode = this->_extrude(path, description, speed);
     if (m_wipe.enable) {
+        m_wipe.reset_path();
         m_wipe.path = std::move(path.polyline);
         m_wipe.path.reverse();
     }
@@ -7952,10 +7990,19 @@ std::string GCode::extrude_perimeters(const Print&                              
                 return ee->is_loop() && static_cast<const ExtrusionLoop *>(ee)->print_after_infill;
             };
 
+            // Build the printed prefix once in emission order, scoped to this
+            // region. Disabled or zero-length wipes need no support geometry.
+            std::optional<WipeInwardSupport> wipe_support;
+            if (m_wipe.enable && m_config.wipe_inward && m_config.wipe_inward_distance.value > 0. &&
+                scale_(EXTRUDER_CONFIG(wipe_distance)) > SCALED_EPSILON)
+                wipe_support.emplace();
             for (const ExtrusionEntity* ee : region.perimeters) {
                 if (defer_unsupported && waits_for_infill(ee) != unsupported_loops_only)
                     continue;
-                gcode += this->extrude_entity(*ee, "perimeter", -1., region.perimeters);
+                gcode += this->extrude_entity(*ee, "perimeter", -1., region.perimeters,
+                                             wipe_support ? &*wipe_support : nullptr);
+                if (wipe_support)
+                    wipe_support->append(*ee);
             }
         }
     return gcode;

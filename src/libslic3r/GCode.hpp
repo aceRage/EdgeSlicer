@@ -37,6 +37,7 @@ namespace Slic3r {
 
 // Forward declarations.
 class GCode;
+struct WipeInwardSupport;
 
 namespace { struct Item; }
 struct PrintInstance;
@@ -68,6 +69,8 @@ public:
     void reset_path() { this->path = Polyline(); }
     std::string wipe(GCode &gcodegen, double length, bool toolchange = false, bool is_last = false);
     RetractionValues calculateWipeRetractionLengths(GCode& gcodegen, bool toolchange);
+    // Orca: rebuild the stored path while deduplicating shared path boundaries.
+    void update_path(const ExtrusionPaths &paths, bool reverse = false);
 };
 
 class WipeTowerIntegration {
@@ -404,10 +407,14 @@ private:
     std::string     change_layer(coordf_t print_z);
     // Orca: pass the complete collection of region perimeters to the extrude loop to check whether the wipe before external loop
     // should be executed
-    std::string     extrude_entity(const ExtrusionEntity &entity, std::string description = "", double speed = -1., const ExtrusionEntitiesPtr& region_perimeters = ExtrusionEntitiesPtr());
+    std::string     extrude_entity(const ExtrusionEntity &entity, std::string description = "", double speed = -1.,
+                                   const ExtrusionEntitiesPtr& region_perimeters = ExtrusionEntitiesPtr(),
+                                   const WipeInwardSupport* wipe_support = nullptr);
     // Orca: pass the complete collection of region perimeters to the extrude loop to check whether the wipe before external loop
     // should be executed
-    std::string     extrude_loop(ExtrusionLoop loop, std::string description, double speed = -1., const ExtrusionEntitiesPtr& region_perimeters = ExtrusionEntitiesPtr(), const Point* start_point = nullptr);
+    std::string     extrude_loop(ExtrusionLoop loop, std::string description, double speed = -1.,
+                                 const ExtrusionEntitiesPtr& region_perimeters = ExtrusionEntitiesPtr(),
+                                 const Point* start_point = nullptr, const WipeInwardSupport* wipe_support = nullptr);
     std::string     extrude_multi_path(ExtrusionMultiPath multipath, std::string description = "", double speed = -1.);
     std::string     extrude_path(ExtrusionPath path, std::string description = "", double speed = -1.);
     
