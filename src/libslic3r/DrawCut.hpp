@@ -200,8 +200,14 @@ struct DrawCutParams
     // same as Angle", which stays true when the user then moves Angle.
     //
     // A value makes the skirt independent: 0 lays it flat in the plane through p
-    // parallel to the core, 90 sends it straight out along +n, -45 tucks it under.
-    // The C1-ness across the drawn line is then the user's to spend.
+    // parallel to the core, +90 sends it straight out along +n, -45 tucks it under.
+    //
+    // THE SIGN READS THE SAME WAY ROUND AS THE BAND'S, which is what makes the
+    // default the identity rather than a flip: the skirt is the REVERSE of a ruling,
+    // so it carries the opposite component along n to a band at the same angle, and
+    // a band at +A (leaning along -n) is continued by a skirt leaving along +n.
+    // Larger lifts the tip; negative tucks it under. The C1-ness across the drawn
+    // line is then the user's to spend.
     std::optional<double> extension_angle_deg{};
     // How far the band travels INWARD along d(p), in mm, before the surface turns
     // onto the core plane. This is the width of the lip measured along its own

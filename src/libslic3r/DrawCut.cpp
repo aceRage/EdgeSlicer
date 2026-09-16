@@ -1315,14 +1315,23 @@ static indexed_triangle_set draw_cut_band_core_solid(const DrawCutStroke& stroke
         // give up on - and the old code avoided it only by accident, by starting a
         // whole bbox diagonal away.
         //
-        // So ring A is lifted CLEAR of the skin, by the Extension the user has
-        // already set (that is exactly what Extension means everywhere else in
+        // So a PLUG's ring A is lifted CLEAR of the skin, by the Extension the user
+        // has already set (that is exactly what Extension means everywhere else in
         // this file: how far the surface reaches out past the line) with a floor
         // under it so an Extension of 0 still clears. The lifted part is outside
         // the material on the side the user drew on, so it removes nothing: the
         // cut still begins at the skin. What it buys is a wall that meets the face
         // transversally instead of lying in it.
-        const double lift = std::max(ext, std::max(1e-2, 1e-3 * diag));
+        //
+        // A WRAP GETS ONLY THE TIE-BREAKING NUDGE, and that difference is not a
+        // detail. A belt's wall runs along -n, TRANSVERSE to the barrel it was drawn
+        // on rather than lying in it, so there is no coplanarity to break - and
+        // lifting its start ring would move the split itself, because for a belt
+        // ring A is the mating surface. Lifting it by the Extension put the cut 5 mm
+        // above where the user drew, which the cylinder suite caught as a 44/56
+        // split of a part that should halve.
+        const double lift = wraps ? std::max(1e-3, 1e-4 * diag)
+                                  : std::max(ext, std::max(1e-2, 1e-3 * diag));
         std::vector<Vec3d> ring_a, ring_b;
         ring_a.reserve(m);
         ring_b.reserve(m);

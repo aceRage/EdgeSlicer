@@ -2782,9 +2782,27 @@ TEST_CASE("Draw cut: the band direction is the angle between inward and the norm
     REQUIRE(d45.dot(inward) == Approx(std::sqrt(0.5)).margin(1e-9));
     REQUIRE(d45.dot(n) == Approx(-std::sqrt(0.5)).margin(1e-9));
 
-    // Out of range is clamped rather than allowed to travel back out of the part.
-    REQUIRE(draw_cut_band_dir(inward, n, -30.0).dot(n) == Approx(0.0).margin(1e-9));
-    REQUIRE(draw_cut_band_dir(inward, n, 130.0).dot(n) == Approx(-1.0).margin(1e-9));
+    // 2026-09-15, owner item 5: THE ANGLE IS SIGNED NOW, so -30 is a real lip leaning
+    // the OTHER way rather than a value to clamp at zero. It is the mirror of +30 in
+    // the plane through the point parallel to the core: same reach inward, opposite
+    // along n.
+    {
+        const Vec3d dp = draw_cut_band_dir(inward, n,  30.0);
+        const Vec3d dn = draw_cut_band_dir(inward, n, -30.0);
+        REQUIRE(dn.norm() == Approx(1.0).margin(1e-9));
+        REQUIRE(dn.dot(inward) == Approx(dp.dot(inward)).margin(1e-9));
+        REQUIRE(dn.dot(n) == Approx(-dp.dot(n)).margin(1e-9));
+        REQUIRE(dn.dot(n) == Approx(0.5).margin(1e-9));    // up, towards the drawn side
+        REQUIRE(dp.dot(n) == Approx(-0.5).margin(1e-9));   // down, away from it
+    }
+
+    // -90 is the mirror of +90: a straight wall UP rather than down.
+    REQUIRE(draw_cut_band_dir(inward, n, -90.0).dot(n) == Approx(1.0).margin(1e-9));
+
+    // Out of range is still clamped rather than allowed to travel back out of the
+    // part - at both ends now.
+    REQUIRE(draw_cut_band_dir(inward, n,  130.0).dot(n) == Approx(-1.0).margin(1e-9));
+    REQUIRE(draw_cut_band_dir(inward, n, -130.0).dot(n) == Approx( 1.0).margin(1e-9));
 }
 
 // ---------------------------------------------------------------------------
@@ -4084,15 +4102,42 @@ TEST_CASE("Draw cut: a loop on the bunny's head cuts nothing beyond the Extensio
     REQUIRE_FALSE(cutter.empty());
     REQUIRE(watertight(cutter));
 
-    // THE CUTTER IS LOCAL. Extension reaches out along the band's own ruling and
-    // Depth in along it, so the two together bound the reach from the drawn line;
-    // 1 mm of slack absorbs the core plate's own inset.
-    const double reach = params.extension + params.depth + 1.0;
-    double worst = 0.0;
-    for (const Vec3f& v : cutter.vertices)
-        worst = std::max(worst, dist_to_stroke(stroke, v.cast<double>()));
-    INFO("cutter reaches " << worst << " mm from the line, budget " << reach);
-    REQUIRE(worst <= reach);
+    // THE CUTTER IS LOCAL, and the measurement has to be the right one.
+    //
+    // "Distance from the drawn line" is NOT the quantity: the core plate is the
+    // loop's filled INTERIOR, so its middle is one loop-radius from the line by
+    // construction - 19 mm here - and always will be. A plug cut is a disc; that is
+    // what it is for.
+    //
+    // What the owner's item 3 is about is material OUTSIDE the loop: "nothing outside
+    // (drawn loop + Extension) is affected". So the reach is measured against the
+    // loop's own footprint - the distance from the loop's axis, in the core plane -
+    // and only points FURTHER OUT than the loop count. The band goes inward and the
+    // skirt outward by Extension, so the budget outside is Extension plus a
+    // millimetre of slack.
+    Vec3d cn, cc;
+    REQUIRE(draw_cut_core_plane(stroke, params, cn, cc));
+    double loop_r = 0.0;
+    for (const DrawCutSample& s : stroke.path()) {
+        const Vec3d q = s.pos - cc;
+        loop_r = std::max(loop_r, (q - q.dot(cn) * cn).norm());
+    }
+    double worst_out = 0.0;   // how far past the loop's own rim the cutter reaches
+    double worst_ax  = 0.0;   // and how far along the axis, which Depth bounds
+    for (const Vec3f& v : cutter.vertices) {
+        const Vec3d q = v.cast<double>() - cc;
+        const double along = q.dot(cn);
+        const double rad   = (q - along * cn).norm();
+        worst_out = std::max(worst_out, rad - loop_r);
+        worst_ax  = std::max(worst_ax, std::abs(along));
+    }
+    INFO("loop radius " << loop_r << ", cutter reaches " << worst_out
+         << " mm outside it (budget " << (params.extension + 1.0) << ")");
+    REQUIRE(worst_out <= params.extension + 1.0);
+    // And nothing runs off along the axis either: the band travels Depth in, the
+    // skirt Extension out, so the whole solid lives within that of the loop's plane.
+    INFO("cutter spans " << worst_ax << " mm along the core normal");
+    REQUIRE(worst_ax <= params.extension + params.depth + loop_r);
 
     indexed_triangle_set upper, lower;
     DrawCutError err = DrawCutError::None;
@@ -4237,18 +4282,22 @@ TEST_CASE("Draw cut: the Extension angle aims the skirt on a real loop", "[DrawC
     DrawCutParams base = owner_params();   // angle 30, so the default skirt leaves at 30
     const double h_default = mean_tip_height(base);
 
+    // THE SIGN, stated once here because it is the thing to get wrong: the skirt is
+    // the REVERSE of a band ruling built at this angle, so it carries the OPPOSITE
+    // sign along n to the band. A band at +A leans along -n; the skirt that
+    // continues it therefore leaves along +n. So a LARGER extension angle lifts the
+    // tip, and a negative one tucks it under - the same way round as the Angle
+    // itself reads on the band, which is what makes "continue the band" the
+    // identity rather than a flip.
     DrawCutParams up = base;
-    up.extension_angle_deg = -80.0;        // aimed steeply along +n
+    up.extension_angle_deg = 80.0;         // the skirt carried up and out
     const double h_up = mean_tip_height(up);
 
     DrawCutParams down = base;
-    down.extension_angle_deg = 80.0;       // aimed steeply along -n
+    down.extension_angle_deg = -80.0;      // tucked under
     const double h_down = mean_tip_height(down);
 
     INFO("skirt tip height: up " << h_up << " default " << h_default << " down " << h_down);
-    // Aiming the skirt along +n lifts the tip; aiming it along -n drops it. The
-    // default sits between the two, which is what "continues the band" means when the
-    // band is leaning at 30 degrees.
     REQUIRE(h_up > h_default);
     REQUIRE(h_down < h_default);
 }

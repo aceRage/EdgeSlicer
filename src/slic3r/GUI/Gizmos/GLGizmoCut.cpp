@@ -4640,8 +4640,8 @@ void GLGizmoCut3D::render_draw_surface_inputs()
         m_imgui->disabled_end();
         if (ext_angle_hovered)
             m_imgui->tooltip(_u8L("Which way the skirt outside the drawn line leaves it. 0 lays it flat, level with "
-                                  "the middle of the cut; positive tilts it the way the lip leans; negative lifts it "
-                                  "back towards the face you drew on. With this off it follows the Angle.").c_str(),
+                                  "the middle of the cut; higher lifts it away from the part; negative tucks it back "
+                                  "under. With this off it continues the band, which is what the Angle sets.").c_str(),
                              ImGui::GetFontSize() * 20.f);
     }
 
