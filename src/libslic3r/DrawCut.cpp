@@ -1221,7 +1221,8 @@ static indexed_triangle_set draw_cut_band_core_solid(const DrawCutStroke& stroke
                                                      const DrawCutParams& params,
                                                      const BoundingBoxf3& bbox,
                                                      double               face_offset,
-                                                     const indexed_triangle_set* mesh)
+                                                     const indexed_triangle_set* mesh,
+                                                     bool                 surface_only = false)
 {
     indexed_triangle_set its;
     if (!stroke.valid() || !stroke.is_closed())
@@ -1586,6 +1587,19 @@ static indexed_triangle_set draw_cut_band_core_solid(const DrawCutStroke& stroke
                 its.indices.emplace_back(flip_plate ? Vec3i32(a0, a2, a1) : Vec3i32(a0, a1, a2));
             }
         }
+
+        // SURFACE-ONLY STOPS HERE. `its` is already exactly the skirt (outer to tip),
+        // the band (outer to the core plate's ring) and the core plate itself - the
+        // whole surface the user drew, with the Extension that lifts its rim clear of
+        // the skin. Everything from here down (the plug's lid past the loop, or the
+        // wrap's flange-and-wall-and-cap) exists only so a BOOLEAN has a watertight
+        // solid to intersect; none of it is part of what the user asked to see, so the
+        // preview (draw_cut_preview_surface()) returns before it is built. See the
+        // 2026-09-16 owner report at draw_cut_preview_surface()'s declaration: the
+        // wrap flange in particular reached well past the part, which is what read on
+        // screen as a giant translucent wall.
+        if (surface_only)
+            return its;
 
         // HOW THE SURFACE IS CLOSED, and the case that made the cut refuse.
         //
@@ -2150,11 +2164,17 @@ bool draw_cut_band_folds(const DrawCutStroke& stroke,
 // The cutter solid
 // ---------------------------------------------------------------------------
 
-indexed_triangle_set draw_cut_cutter_solid(const DrawCutStroke& stroke,
+// Shared by draw_cut_cutter_solid() (surface_only == false: the closed, watertight
+// cutter a boolean needs) and draw_cut_preview_surface() (surface_only == true: just
+// the band/skirt/core-plate the user actually drew, with no closure geometry). Both
+// walk the SAME rails and rings, so the preview can never drift from the real cut -
+// it is a prefix of the same construction, not a second implementation of it.
+static indexed_triangle_set draw_cut_cutter_solid_impl(const DrawCutStroke& stroke,
                                            const DrawCutParams& params,
                                            const BoundingBoxf3& bbox,
                                            double               face_offset,
-                                           const indexed_triangle_set* mesh)
+                                           const indexed_triangle_set* mesh,
+                                           bool                 surface_only)
 {
     indexed_triangle_set its;
     if (!stroke.valid())
@@ -2184,7 +2204,7 @@ indexed_triangle_set draw_cut_cutter_solid(const DrawCutStroke& stroke,
         // tube of rulings along the surface normals, which is precisely the phase-1
         // surface the owner called useless. An empty cutter makes draw_cut_split()
         // report CutterDegenerate, which is the truth and which the panel can word.
-        return draw_cut_band_core_solid(stroke, params, bbox, face_offset, mesh);
+        return draw_cut_band_core_solid(stroke, params, bbox, face_offset, mesh, surface_only);
     }
 
     // THE RAILS, and the one thing about them that is easy to get wrong.
@@ -2354,6 +2374,29 @@ indexed_triangle_set draw_cut_cutter_solid(const DrawCutStroke& stroke,
         }
     }
     else {
+        auto A = [](size_t i) { return int(i); };            // out, drawn face
+        auto B = [m](size_t i) { return int(m + i); };       // in,  drawn face
+
+        // SURFACE-ONLY STOPS HERE. `out`/`in` (the rails) already ARE the band plus
+        // the Extension - out_i = p_i - E * d_i, in_i = p_i + D * d_i, per the rail
+        // comment above - so the drawn face built just below is the whole surface an
+        // open stroke's preview should show. What follows (the swept copy and the rim
+        // between them) exists only to turn that open strip into a watertight
+        // half-space for the boolean; the preview drops it, which is also why an open
+        // stroke's preview does not change shape here - it was already exactly this
+        // face, just wrapped in a solid the eye never needed.
+        if (surface_only) {
+            its.vertices.reserve(m * 2);
+            for (const Rail& r : rails) its.vertices.emplace_back(r.out.cast<float>());
+            for (const Rail& r : rails) its.vertices.emplace_back(r.in.cast<float>());
+            for (size_t i = 0; i + 1 < m; ++ i) {
+                const size_t j = i + 1;
+                its.indices.emplace_back(Vec3i32(A(i), B(i), B(j)));
+                its.indices.emplace_back(Vec3i32(A(i), B(j), A(j)));
+            }
+            return its;
+        }
+
         // The sweep distance: far enough to leave the part on the swept side, so the
         // solid really is a half-space as far as this object is concerned.
         const double reach = 1.05 * diag + 1.0;
@@ -2370,8 +2413,6 @@ indexed_triangle_set draw_cut_cutter_solid(const DrawCutStroke& stroke,
         for (const Rail& r : rails) its.vertices.emplace_back(Vec3f((r.out + shift).cast<float>()));
         for (const Rail& r : rails) its.vertices.emplace_back(Vec3f((r.in  + shift).cast<float>()));
 
-        auto A = [](size_t i) { return int(i); };            // out, drawn face
-        auto B = [m](size_t i) { return int(m + i); };       // in,  drawn face
         auto A2 = [m](size_t i) { return int(2 * m + i); };  // out, swept face
         auto B2 = [m](size_t i) { return int(3 * m + i); };  // in,  swept face
 
@@ -2413,6 +2454,24 @@ indexed_triangle_set draw_cut_cutter_solid(const DrawCutStroke& stroke,
             std::swap(t(1), t(2));
 
     return its;
+}
+
+indexed_triangle_set draw_cut_cutter_solid(const DrawCutStroke& stroke,
+                                           const DrawCutParams& params,
+                                           const BoundingBoxf3& bbox,
+                                           double               face_offset,
+                                           const indexed_triangle_set* mesh)
+{
+    return draw_cut_cutter_solid_impl(stroke, params, bbox, face_offset, mesh, /*surface_only=*/false);
+}
+
+indexed_triangle_set draw_cut_preview_surface(const DrawCutStroke& stroke,
+                                              const DrawCutParams& params,
+                                              const BoundingBoxf3& bbox,
+                                              double               face_offset,
+                                              const indexed_triangle_set* mesh)
+{
+    return draw_cut_cutter_solid_impl(stroke, params, bbox, face_offset, mesh, /*surface_only=*/true);
 }
 
 // ---------------------------------------------------------------------------
