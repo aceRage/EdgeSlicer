@@ -174,6 +174,11 @@ private:
     // stop, so a checker thread never outlives the destructor's wait.
     struct ReconnectWatch;
     static bool sleep_unless_stopped(const std::shared_ptr<ReconnectWatch>& watch, long long ms);
+    // True once teardown has begun (tearing_down_ or the watch's stop flag):
+    // re-checked by the loops immediately before Disconnect() and
+    // report_connection_failure(), so a give-up that lands during teardown
+    // does nothing.
+    static bool stopping(const MqttClient& self, const ReconnectWatch& watch);
     std::string server_address_;     // MQTT broker address
     std::string client_id_;          // Unique client identifier
     std::unique_ptr<mqtt::async_client> client_;      // Async MQTT client instance

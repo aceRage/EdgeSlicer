@@ -507,6 +507,7 @@ void MqttClient::connection_lost(const std::string& cause)
     // come back, and until now that one look inside the outage was final.
     std::shared_ptr<ReconnectWatch> watch = watch_;
     watch->pending_reconnect_checks.fetch_add(1, std::memory_order_acq_rel);
+    try {
     std::thread([weak_self, watch]() {
         using namespace Slic3r::MqttReconnectPolicy;
         const auto t0 = std::chrono::steady_clock::now();
@@ -539,15 +540,30 @@ void MqttClient::connection_lost(const std::string& cause)
                 continue;
             }
 
+            if (stopping(*self, *watch))
+                break;
             BOOST_LOG_TRIVIAL(error) << "[MQTT_INFO] MQTT connection not restored after " << elapsed / 1000
                                      << " s, giving up, address: " << self->server_address_;
             std::string dc_msg;
             self->Disconnect(dc_msg); // also clears is_reconnecting
+            if (stopping(*self, *watch))
+                break;
             self->report_connection_failure();
             break;
         }
         watch->pending_reconnect_checks.fetch_sub(1, std::memory_order_acq_rel);
     }).detach();
+    } catch (const std::exception& e) {
+        // No thread, no watcher: leave nothing counted or claimed.
+        BOOST_LOG_TRIVIAL(error) << "[MQTT_INFO] could not start the lost-session watcher: " << e.what();
+        watch->pending_reconnect_checks.fetch_sub(1, std::memory_order_acq_rel);
+        is_reconnecting.store(false, std::memory_order_release);
+    }
+}
+
+bool MqttClient::stopping(const MqttClient& self, const ReconnectWatch& watch)
+{
+    return self.tearing_down_.load(std::memory_order_acquire) || watch.stop.load(std::memory_order_acquire);
 }
 
 bool MqttClient::sleep_unless_stopped(const std::shared_ptr<ReconnectWatch>& watch, long long ms)
@@ -587,7 +603,11 @@ void MqttClient::reconnect_now(const std::string& reason)
         BOOST_LOG_TRIVIAL(debug) << "[MQTT_INFO] " << reason << ": " << client_id_ << " has no session to restore; skipped";
         return;
     }
-    if (manual_reconnect_active_.exchange(true, std::memory_order_acq_rel)) {
+    // The gate: exactly one caller flips false -> true and owns the bounce
+    // until its worker clears the flag; every other caller (a second resume,
+    // the same resume seen twice) is turned away here.
+    bool not_active = false;
+    if (!manual_reconnect_active_.compare_exchange_strong(not_active, true, std::memory_order_acq_rel, std::memory_order_acquire)) {
         BOOST_LOG_TRIVIAL(info) << "[MQTT_INFO] " << reason << ": " << client_id_ << " is already reconnecting; skipped";
         return;
     }
@@ -605,6 +625,7 @@ void MqttClient::reconnect_now(const std::string& reason)
 
     std::shared_ptr<ReconnectWatch> watch = watch_;
     watch->pending_reconnect_checks.fetch_add(1, std::memory_order_acq_rel);
+    try {
     std::thread([weak_self, watch, reason]() {
         using namespace Slic3r::MqttReconnectPolicy;
         const auto t0      = std::chrono::steady_clock::now();
@@ -636,25 +657,37 @@ void MqttClient::reconnect_now(const std::string& reason)
                 msg = e.what();
             }
             if (up) {
-                // Cleared before the resubscribe so a drop from here on gets
-                // the ordinary watcher.
-                self->manual_reconnect_active_.store(false, std::memory_order_release);
                 BOOST_LOG_TRIVIAL(info) << "[MQTT_INFO] " << reason << ": session of " << self->client_id_ << " restored after "
                                         << steady_ms_since(t0) / 1000 << " s";
                 // Sessions are persistent (clean_session=false) so the broker
                 // usually still holds the subscriptions; this covers the one
-                // that does not.
+                // that does not. Still under the gate: a second bounce must
+                // not tear the socket down under these subscribes.
                 self->resubscribe_topics();
+                self->manual_reconnect_active_.store(false, std::memory_order_release);
+                // A drop that arrived while the gate was held started no
+                // watcher (connection_lost() defers to the bounce). If the new
+                // session is already gone, hand the outage to the ordinary
+                // watcher now; Paho's own retrying is armed either way.
+                if (!self->connected_.load(std::memory_order_acquire) && !stopping(*self, *watch)) {
+                    BOOST_LOG_TRIVIAL(warning) << "[MQTT_INFO] " << reason << ": session of " << self->client_id_
+                                               << " dropped again during the bounce; watching it";
+                    self->connection_lost("dropped during the resume bounce");
+                }
                 break;
             }
 
             const long long elapsed = steady_ms_since(t0);
             if (decide(elapsed, false) == Verdict::GiveUp) {
+                if (stopping(*self, *watch))
+                    break;
                 BOOST_LOG_TRIVIAL(error) << "[MQTT_INFO] " << reason << ": session of " << self->client_id_ << " not restored after "
                                          << elapsed / 1000 << " s (" << msg << "), giving up";
                 std::string dc_msg;
                 self->Disconnect(dc_msg);
                 self->manual_reconnect_active_.store(false, std::memory_order_release);
+                if (stopping(*self, *watch))
+                    break;
                 self->report_connection_failure();
                 break;
             }
@@ -667,6 +700,13 @@ void MqttClient::reconnect_now(const std::string& reason)
         }
         watch->pending_reconnect_checks.fetch_sub(1, std::memory_order_acq_rel);
     }).detach();
+    } catch (const std::exception& e) {
+        // No thread, no bounce: release the gate and the count, or the next
+        // resume would be turned away for ever.
+        BOOST_LOG_TRIVIAL(error) << "[MQTT_INFO] " << reason << ": could not start the reconnect worker: " << e.what();
+        watch->pending_reconnect_checks.fetch_sub(1, std::memory_order_acq_rel);
+        manual_reconnect_active_.store(false, std::memory_order_release);
+    }
 }
 
 // Callback when a message arrives
@@ -770,7 +810,11 @@ void MqttClient::resubscribe_topics() {
     }
 
     for (const auto& topic_pair : topics) {
-        {
+        // subscribe() throws (MQTTASYNC_DISCONNECTED) if the session dropped
+        // again between the connect and this call; on the detached reconnect
+        // worker an escaping exception would be terminate(), so it is a log
+        // line here and the next topic is tried (it will throw too, cheaply).
+        try {
             auto tok = client_->subscribe(topic_pair.first, topic_pair.second, nullptr,  subListener_);
             if (!tok->wait_for(std::chrono::seconds(5))) {
                 BOOST_LOG_TRIVIAL(info) << "[MQTT_INFO] Subscribe timeout for topic: " << topic_pair.first;
@@ -779,6 +823,9 @@ void MqttClient::resubscribe_topics() {
             if (!tok->is_complete() || tok->get_return_code() != 0) {
                 BOOST_LOG_TRIVIAL(info) << "[MQTT_INFO] Failed to resubscribe to topic: " << topic_pair.first;
             }
+        } catch (const mqtt::exception& e) {
+            BOOST_LOG_TRIVIAL(warning) << "[MQTT_INFO] Could not resubscribe to topic " << topic_pair.first << ": " << e.what()
+                                       << ", rc=" << e.get_return_code();
         }
     }
 }
