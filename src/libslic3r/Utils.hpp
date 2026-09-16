@@ -286,6 +286,9 @@ std::string header_gcodeviewer_generated();
 
 // getpid platform wrapper
 extern unsigned get_current_pid();
+// Completes a relative command line input path against the current working directory. Absolute
+// paths and custom open protocol URLs are returned unchanged.
+std::string resolve_cli_input_path(const std::string &path);
 // BBS: backup & restore
 std::string get_process_name(int pid);
 
