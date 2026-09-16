@@ -11,6 +11,7 @@
 #include "GCode/AvoidCrossingPerimeters.hpp"
 #include "GCode/CoolingBuffer.hpp"
 #include "GCode/FanMover.hpp"
+#include "GCode/LayerTimeSpeedSmoothingFilter.hpp"
 #include "GCode/RetractWhenCrossingPerimeters.hpp"
 #include "GCode/SpiralVase.hpp"
 #include "GCode/ToolOrdering.hpp"
@@ -178,8 +179,15 @@ struct LayerResult {
 	// Is indicating if this LayerResult should be processed, or it is just inserted artificial LayerResult.
     // It is used for the pressure equalizer because it needs to buffer one layer back.
     bool        nop_layer_result { false };
+    // True for the last layer of a process_layers() run. Layer-time speed smoothing
+    // uses this to drain its all-layer buffer and rewrite F.
+    bool        last_layer { false };
+    // Set by the cooling stage: CoolingBuffer slowed this layer down to slow_down_layer_time,
+    // so its F words already carry the cooling speeds. Layer-time speed smoothing then never
+    // slows it further (see LayerTimeSpeedSmoothingFilter).
+    bool        cooling_slowed_down { false };
 
-    static LayerResult make_nop_layer_result() { return {"", std::numeric_limits<coord_t>::max(), false, false, true}; }
+    static LayerResult make_nop_layer_result() { return {"", std::numeric_limits<coord_t>::max(), false, false, true, false, false}; }
 };
 
 namespace MultiNozzleUtils { class NozzleGroupResultBase; }
@@ -610,8 +618,10 @@ private:
     Point                               m_last_pos;
     bool                                m_last_pos_defined;
 
-    std::unique_ptr<CoolingBuffer>      m_cooling_buffer;
-    std::unique_ptr<SpiralVase>         m_spiral_vase;
+    std::unique_ptr<CoolingBuffer>                 m_cooling_buffer;
+    // After CoolingBuffer / before FanMover. Null when mode is Off (streaming, no extra buffer).
+    std::unique_ptr<LayerTimeSpeedSmoothingFilter> m_layer_time_speed_smoothing;
+    std::unique_ptr<SpiralVase>                    m_spiral_vase;
 
     std::unique_ptr<PressureEqualizer>  m_pressure_equalizer;
     
