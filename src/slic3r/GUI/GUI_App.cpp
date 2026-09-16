@@ -3540,62 +3540,95 @@ bool GUI_App::on_init_inner()
     std::map<std::string, std::string> extra_headers = get_extra_header();
     Slic3r::Http::set_extra_headers(extra_headers);
 
-    // Ultra Net: first-run install of the bundled clean-room network plugin. The host loads
-    // the plugin from data_dir/plugins, not from the app folder, so a released build ships the
-    // DLLs in an "ultranet" subfolder beside the exe and we copy them in on first run (only if
-    // absent - never clobber a user/CDN-updated copy). BambuSource is kept in that subfolder so
-    // the host doesn't LoadLibrary it as the media filter from the exe dir.
+    // Ultra Net: keep <data_dir>/plugins in step with the clean-room network plug-in we ship. The
+    // host loads the plug-in from data_dir/plugins, not from the app folder, so a released build
+    // carries the DLLs in an "ultranet" subfolder beside the exe. The sidecar is authoritative
+    // (see plugin_sync_decision): a fresh data dir gets it copied in, an upgrade gets the new DLL,
+    // and a Bambu-original plug-in - which our host cannot run on Windows - is replaced, unless the
+    // escape hatch `ultranet_keep_foreign_plugin` is set. BambuSource stays in the sidecar so the
+    // host does not LoadLibrary it as the media filter from the exe dir.
     try {
         namespace fs = boost::filesystem;
-        fs::path pf = fs::path(data_dir()) / "plugins";
-        if (!fs::exists(pf / "bambu_networking.dll")) {
-            fs::path exe_dir = fs::path(wxStandardPaths::Get().GetExecutablePath().ToUTF8().data()).parent_path();
-            fs::path bundled = exe_dir / "ultranet";
-            if (fs::exists(bundled / "bambu_networking.dll")) {
-                boost::system::error_code ec;
-                fs::create_directories(pf, ec);
-                for (const char* name : {"bambu_networking.dll", "BambuSource.dll"}) {
-                    if (! fs::exists(bundled / name))
-                        continue;
-                    // Ultra (live view): our sidecar BambuSource is a placeholder. If the user has
-                    // already fetched Bambu's real camera component into plugins/, it must survive
-                    // this upgrade - stamping the stub back over it would break live view again.
-                    if (std::strcmp(name, "BambuSource.dll") == 0 &&
-                        ! may_overwrite_bambusource(fs::exists(pf / name), exports_dll_register_server(pf / name))) {
+        boost::system::error_code ec;
+        const fs::path pf      = fs::path(data_dir()) / "plugins";
+        const fs::path exe_dir = fs::path(wxStandardPaths::Get().GetExecutablePath().ToUTF8().data()).parent_path();
+        const fs::path bundled = exe_dir / "ultranet";
+        const fs::path ours    = bundled / "bambu_networking.dll";
+        const fs::path theirs  = pf / "bambu_networking.dll";
+
+        const bool sidecar_present   = fs::exists(ours, ec);
+        const bool installed_present = fs::exists(theirs, ec);
+        bool       identical         = false;
+        if (sidecar_present && installed_present && fs::file_size(ours, ec) == fs::file_size(theirs, ec)) {
+            boost::nowide::ifstream a(ours.string().c_str(), std::ios::binary), b(theirs.string().c_str(), std::ios::binary);
+            std::string sa((std::istreambuf_iterator<char>(a)), std::istreambuf_iterator<char>());
+            std::string sb((std::istreambuf_iterator<char>(b)), std::istreambuf_iterator<char>());
+            identical = ! sa.empty() && sa == sb;
+        }
+        const bool marker_present = fs::exists(pf / kUltraNetMarkerName, ec);
+        const bool keep_foreign   = app_config->get_bool("ultranet_keep_foreign_plugin");
+        const PluginSync action   = plugin_sync_decision(sidecar_present, installed_present, identical, marker_present, keep_foreign);
+
+        auto write_marker = [&]() {
+            // The library name is Bambu's, so the file alone cannot say whose plug-in this is; the
+            // marker is what stops install_plugin() and the update prompts from replacing ours with
+            // a CDN download. The sidecar folder may ship its own copy - prefer that one.
+            if (fs::exists(bundled / kUltraNetMarkerName, ec)) {
+                fs::copy_file(bundled / kUltraNetMarkerName, pf / kUltraNetMarkerName, fs::copy_option::overwrite_if_exists, ec);
+            } else {
+                boost::nowide::ofstream marker((pf / kUltraNetMarkerName).string().c_str());
+                marker << "UltraNet: EdgeSlicer's own network plug-in. Do not replace with the Bambu CDN package." << std::endl;
+            }
+        };
+
+        // A previous replacement leaves the old DLL renamed beside ours (a loaded image can be
+        // renamed on Windows but not deleted); clear it now that nothing should hold it.
+        const fs::path replaced = pf / "bambu_networking.dll.replaced";
+        if (fs::exists(replaced, ec))
+            fs::remove(replaced, ec);
+
+        if (action == PluginSync::InstallFresh || action == PluginSync::ReplaceForeign) {
+            fs::create_directories(pf, ec);
+            if (action == PluginSync::ReplaceForeign) {
+                BOOST_LOG_TRIVIAL(warning) << "[UltraNet] the network plug-in in " << pf.string()
+                                           << " is not the one this build ships (marker=" << marker_present
+                                           << "); replacing it with the bundled copy";
+                // Another EdgeSlicer instance (the hub) may still have the old file mapped, which
+                // blocks an in-place overwrite but not a rename. Move it aside first.
+                fs::rename(theirs, replaced, ec);
+                if (ec)
+                    BOOST_LOG_TRIVIAL(warning) << "[UltraNet] could not move the old plug-in aside: " << ec.message();
+                ec.clear();
+            }
+            fs::copy_file(ours, theirs, fs::copy_option::overwrite_if_exists, ec);
+            if (ec) {
+                BOOST_LOG_TRIVIAL(error) << "[UltraNet] copying the bundled network plug-in failed: " << ec.message()
+                                         << " (will retry on the next start)";
+                // Put the old one back if we moved it, so the app is not left with no plug-in.
+                if (action == PluginSync::ReplaceForeign && ! fs::exists(theirs, ec) && fs::exists(replaced, ec))
+                    fs::rename(replaced, theirs, ec);
+            } else {
+                // Ultra (live view): our sidecar BambuSource is a placeholder. If the user has
+                // already fetched Bambu's real camera component into plugins/, it must survive
+                // this upgrade - stamping the stub back over it would break live view again.
+                const char *bs = "BambuSource.dll";
+                if (fs::exists(bundled / bs, ec)) {
+                    if (may_overwrite_bambusource(fs::exists(pf / bs, ec), exports_dll_register_server(pf / bs)))
+                        fs::copy_file(bundled / bs, pf / bs, fs::copy_option::overwrite_if_exists, ec);
+                    else
                         BOOST_LOG_TRIVIAL(info) << "[UltraNet] keeping the installed Bambu camera component in " << pf.string();
-                        continue;
-                    }
-                    fs::copy_file(bundled / name, pf / name, fs::copy_option::overwrite_if_exists, ec);
                 }
-                // Ultra (plug-in guards): leave a marker beside the DLLs. The library name is
-                // Bambu's, so the file alone cannot say whose plug-in this is; the marker is what
-                // stops install_plugin() and the update prompts from replacing ours with a CDN
-                // download. The sidecar folder may ship its own copy - prefer that one.
-                if (fs::exists(bundled / kUltraNetMarkerName)) {
-                    fs::copy_file(bundled / kUltraNetMarkerName, pf / kUltraNetMarkerName, fs::copy_option::overwrite_if_exists, ec);
-                } else {
-                    boost::nowide::ofstream marker((pf / kUltraNetMarkerName).string().c_str());
-                    marker << "UltraNet: EdgeSlicer's own network plug-in. Do not replace with the Bambu CDN package." << std::endl;
-                }
-                BOOST_LOG_TRIVIAL(info) << "[UltraNet] installed bundled network plugin to " << pf.string();
+                write_marker();
+                BOOST_LOG_TRIVIAL(info) << "[UltraNet] " << (action == PluginSync::InstallFresh ? "installed" : "updated")
+                                        << " the bundled network plug-in in " << pf.string();
             }
-        } else if (!fs::exists(pf / kUltraNetMarkerName)) {
-            // The plug-in is already there but carries no marker: an install that predates the
-            // marker (2.3.7.0 shipped the DLLs alone) or a hand copy. If it is byte-identical to
-            // the sidecar we ship, it is ours - mark it so the CDN paths leave it alone.
-            fs::path exe_dir = fs::path(wxStandardPaths::Get().GetExecutablePath().ToUTF8().data()).parent_path();
-            fs::path bundled = exe_dir / "ultranet" / "bambu_networking.dll";
-            boost::system::error_code ec;
-            if (fs::exists(bundled) && fs::file_size(bundled, ec) == fs::file_size(pf / "bambu_networking.dll", ec)) {
-                boost::nowide::ifstream a(bundled.string().c_str(), std::ios::binary), b((pf / "bambu_networking.dll").string().c_str(), std::ios::binary);
-                std::string sa((std::istreambuf_iterator<char>(a)), std::istreambuf_iterator<char>());
-                std::string sb((std::istreambuf_iterator<char>(b)), std::istreambuf_iterator<char>());
-                if (!sa.empty() && sa == sb) {
-                    boost::nowide::ofstream marker((pf / kUltraNetMarkerName).string().c_str());
-                    marker << "UltraNet: EdgeSlicer's own network plug-in. Do not replace with the Bambu CDN package." << std::endl;
-                    BOOST_LOG_TRIVIAL(info) << "[UltraNet] existing plug-in matches the bundled one; marker written";
-                }
-            }
+        } else if (action == PluginSync::WriteMarkerOnly) {
+            // An install that predates the marker (2.3.7.0 shipped the DLLs alone) or a hand copy
+            // that is byte-identical to ours: it is ours, mark it so the CDN paths leave it alone.
+            write_marker();
+            BOOST_LOG_TRIVIAL(info) << "[UltraNet] existing plug-in matches the bundled one; marker written";
+        } else if (keep_foreign && sidecar_present && installed_present && ! identical) {
+            BOOST_LOG_TRIVIAL(warning) << "[UltraNet] ultranet_keep_foreign_plugin is set; leaving a foreign network plug-in in " << pf.string();
         }
     } catch (...) {}
 

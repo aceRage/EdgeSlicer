@@ -24,6 +24,26 @@ bool bambu_cdn_download_allowed(bool plugin_present, bool ultranet_marker)
     return ! is_ultranet_plugin(plugin_present, ultranet_marker);
 }
 
+PluginSync plugin_sync_decision(bool sidecar_present,
+                                bool installed_present,
+                                bool installed_identical,
+                                bool marker_present,
+                                bool keep_foreign)
+{
+    // A build without the sidecar (a developer tree, or a platform we do not ship it for yet) has
+    // nothing to install and no opinion about what is there.
+    if (! sidecar_present)
+        return PluginSync::Nothing;
+    if (! installed_present)
+        return PluginSync::InstallFresh;
+    if (installed_identical)
+        return marker_present ? PluginSync::Nothing : PluginSync::WriteMarkerOnly;
+    // Different bytes. An older UltraNet after an upgrade, Bambu's package after a CDN download,
+    // or a migrated data dir - none of them is what this build was tested with. The marker does
+    // not change the answer: an old marker beside an old DLL still means "update it".
+    return keep_foreign ? PluginSync::Nothing : PluginSync::ReplaceForeign;
+}
+
 LoginGuardAction plugin_guard_decision(bool plugin_present,
                                        bool ultranet_marker,
                                        bool installed_networking,
