@@ -9,7 +9,24 @@ add_executable(${_TEST_NAME}_tests
     ff_diagnostics_tests.cpp
     elegoo_canvas_tests.cpp
     splash_animation_tests.cpp
+    remote_events_tests.cpp
     )
+
+# The watcher's transition rule lives in libslic3r_gui, and reaching it pulls GUI_App and the
+# handful of translation units next to it that call the crash-reporter and version wrappers. Those
+# wrappers are compiled straight into the app targets rather than into a library (src/CMakeLists.txt
+# does the same), so the test executable has to carry the same four files or it cannot link.
+if (WIN32)
+    target_sources(${_TEST_NAME}_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/../../src/sentry_wrapper/SentryWrapper.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/../../src/bury_cfg/bury_point.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/../../src/common_func/common_func.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/../../src/dev-utils/BaseException.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/../../src/dev-utils/StackWalker.cpp
+        )
+    target_compile_definitions(${_TEST_NAME}_tests PRIVATE BURY_EXPORTS)
+    target_include_directories(${_TEST_NAME}_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src)
+endif ()
 
 target_link_libraries(${_TEST_NAME}_tests test_common libslic3r_gui libslic3r)
 if (MSVC)
