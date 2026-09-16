@@ -63,6 +63,48 @@ bool quad_remesh_accepts(const indexed_triangle_set &mesh, std::string *why)
         return false;
     }
 
+    // NON-MANIFOLD EDGES - the check neither the open-edge test above nor the shell test below
+    // can make. It runs BEFORE the shell test on purpose: a welded assembly trips both, and
+    // "not edge-manifold" is the diagnosis that actually explains the hang.
+    //
+    // its_num_open_edges() and its_is_splittable() both read its_face_neighbors(),
+    // which pairs each edge with AT MOST ONE opposite face and then stops looking
+    // (see create_face_neighbors_index in MeshSplitImpl.hpp: it assigns the first
+    // match and breaks). An edge used by four faces - which is exactly what an
+    // ASSEMBLY of two parts meeting on a shared face produces once the shells are
+    // welded into one volume - therefore gets a neighbour on both sides, reports zero
+    // open edges, and traverses as a single connected patch. The mesh sails through
+    // both checks and QuadriFlow's hierarchy stage then spins forever on it: this is
+    // the "Quad remesh hangs on an assembled 2-part object" hang, and no wall-clock
+    // cap in the GUI can turn it back into a good remesh, only into a cancelled one.
+    //
+    // So count the real edge multiplicity here. Undirected, because an edge shared by
+    // two faces wound the SAME way (a fold) is just as fatal to the half-edge walk as
+    // one shared by four.
+    {
+        std::unordered_map<uint64_t, uint32_t> edge_uses;
+        edge_uses.reserve(mesh.indices.size() * 3);
+        for (const Vec3i32 &f : mesh.indices)
+            for (int e = 0; e < 3; ++e) {
+                const uint32_t a = uint32_t(f(e));
+                const uint32_t b = uint32_t(f((e + 1) % 3));
+                const uint64_t key = (uint64_t(std::min(a, b)) << 32) | uint64_t(std::max(a, b));
+                ++edge_uses[key];
+            }
+        size_t bad = 0;
+        for (const auto &kv : edge_uses)
+            if (kv.second != 2)
+                ++bad;
+        if (bad > 0) {
+            if (why != nullptr)
+                *why = "the mesh is not edge-manifold (" + std::to_string(bad) +
+                       " edge(s) shared by something other than two faces) - this is what an "
+                       "assembled multi-part object looks like once its shells touch; split it "
+                       "into parts and remesh each, or repair it first with Repair by remeshing";
+            return false;
+        }
+    }
+
     // Several disconnected shells are individually manifold but QuadriFlow treats the
     // input as one surface: it normalises and scales for a single connected component
     // and its singularity placement is global. Two shells come back fused or
