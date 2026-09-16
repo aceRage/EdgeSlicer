@@ -70,6 +70,8 @@ using namespace nlohmann;
 #include "libslic3r/Thread.hpp"
 #include "libslic3r/BlacklistedLibraryCheck.hpp"
 #include "libslic3r/FlushVolCalc.hpp"
+#include "libslic3r/MixedFilament.hpp"
+#include "libslic3r/MixedFilamentCliGates.hpp"
 
 #include "libslic3r/Orient.hpp"
 #include "libslic3r/PNGReadWrite.hpp"
@@ -84,10 +86,14 @@ using namespace nlohmann;
 #include "slic3r/GUI/BitmapCache.hpp"
 #include "slic3r/GUI/OpenGLManager.hpp"
 #include "libslic3r/PresetBundle.hpp"
+#include <algorithm>
 #include <array>
+#include <cmath>
+#include <cstdlib>
 #include <memory>
 #include <mutex>
 #include <set>
+#include <sstream>
 #include "slic3r/GUI/GLCanvas3D.hpp"
 #include "slic3r/GUI/Camera.hpp"
 #include "slic3r/GUI/Plater.hpp"
@@ -154,9 +160,15 @@ std::map<int, std::string> cli_errors = {
     {CLI_OBJECT_COLLISION_IN_SEQ_PRINT, "Object conflicts were detected when using print-by-object mode. Please verify the slicing of all plates in EdgeSlicer before uploading."},
     {CLI_OBJECT_COLLISION_IN_LAYER_PRINT, "Object conflicts were detected. Please verify the slicing of all plates in EdgeSlicer before uploading."},
     {CLI_SPIRAL_MODE_INVALID_PARAMS, "Some slicing parameters cannot work with Spiral Vase mode. Please solve the issue in EdgeSlicer before uploading."},
+    {CLI_MIXED_FILAMENT_INVALID, "A mixed filament is invalid: its components are different filament types, or it has no filament of its own."},
     {CLI_SLICING_ERROR, "Failed slicing the model. Please verify the slicing of all plates on EdgeSlicer before uploading."},
     {CLI_GCODE_PATH_CONFLICTS, " G-code conflicts detected after slicing. Please make sure the 3mf file can be successfully sliced in the latest EdgeSlicer."}
 };
+
+// CLI mixed-filament wipe/flush/type gate decision logic now lives in
+// libslic3r/MixedFilamentCliGates.hpp/.cpp (pure, GUI-free, unit-tested in
+// tests/libslic3r/test_mixed_filament_cli_gates.cpp) so it can be exercised outside
+// this file, which is the application's main and is not itself unit-testable.
 
 typedef struct  _sliced_plate_info{
     int plate_id{0};
@@ -3242,6 +3254,16 @@ int CLI::run(int argc, char **argv)
                 BOOST_LOG_TRIVIAL(info) << boost::format("filament_is_support: %1%") % filament_is_support->serialize();
                 BOOST_LOG_TRIVIAL(info) << boost::format("flush_volumes_matrix before computing: %1%") % m_print_config.option<ConfigOptionFloats>("flush_volumes_matrix")->serialize();
             }
+            // A mixed slot never reaches a nozzle, so its row and column stay empty, as in the GUI.
+            // Extra config is not merged into m_print_config yet, so mixed_filament_definitions
+            // on the command line wins here.
+            MixedFilamentManager flush_mixed_mgr;
+            const size_t flush_num_physical = filament_count > 0 ? size_t(filament_count) : project_filament_colors.size();
+            populate_cli_mixed_filament_manager(flush_mixed_mgr, m_print_config, &m_extra_config, project_filament_colors,
+                                                flush_num_physical);
+            auto is_mixed_slot = [&](int idx) {
+                return flush_mixed_mgr.is_mixed(static_cast<unsigned int>(idx + 1), flush_num_physical);
+            };
             for (int from_idx = 0; from_idx < project_filament_count; from_idx++) {
                 const std::string& from_color = project_filament_colors[from_idx];
                 unsigned char from_rgb[4] = {};
@@ -3249,7 +3271,7 @@ int CLI::run(int argc, char **argv)
                 bool is_from_support = filament_is_support->get_at(from_idx);
                 for (int to_idx = 0; to_idx < project_filament_count; to_idx++) {
                     bool is_to_support = filament_is_support->get_at(to_idx);
-                    if (from_idx == to_idx) {
+                    if (from_idx == to_idx || is_mixed_slot(from_idx) || is_mixed_slot(to_idx)) {
                         flush_vol_matrix[project_filament_count*from_idx + to_idx] = 0.f;
                     }
                     else {
@@ -3410,6 +3432,34 @@ int CLI::run(int argc, char **argv)
         m_print_config.apply(sla_print_config, true);*/
     }
 
+    // After 3mf load/normalize: rebuild MixedFilamentManager from the merged project
+    // definitions and physical colours before wipe/flush/type gates.
+    MixedFilamentManager cli_mixed_filament_mgr;
+    size_t               cli_mixed_num_physical = 0;
+    {
+        std::vector<std::string> physical_colors;
+        if (const auto *opt = m_print_config.option<ConfigOptionStrings>("filament_colour"))
+            physical_colors = opt->values;
+        cli_mixed_num_physical = filament_count > 0 ? size_t(filament_count) : physical_colors.size();
+        populate_cli_mixed_filament_manager(cli_mixed_filament_mgr, m_print_config, nullptr, physical_colors,
+                                            cli_mixed_num_physical);
+
+        if (ConfigOptionFloats *flush_opt = m_print_config.option<ConfigOptionFloats>("flush_volumes_matrix")) {
+            const size_t n = size_t(std::sqrt(double(flush_opt->values.size())) + 0.001);
+            zero_mixed_flush_rows_and_cols(flush_opt->values, n, cli_mixed_filament_mgr, cli_mixed_num_physical);
+        }
+
+        const std::string mixed_defs = cli_mixed_filament_definitions(m_print_config, nullptr);
+        const CliMixedFilamentVerdict slots_verdict = cli_check_mixed_filament_slots_have_filament(
+            cli_mixed_filament_mgr, mixed_defs, cli_mixed_num_physical, m_models, m_print_config, filament_count);
+        if (!slots_verdict.ok) {
+            BOOST_LOG_TRIVIAL(error) << slots_verdict.message;
+            record_exit_reson(outfile_dir, CLI_MIXED_FILAMENT_INVALID, 0, cli_errors[CLI_MIXED_FILAMENT_INVALID],
+                              sliced_info);
+            flush_and_exit(CLI_MIXED_FILAMENT_INVALID);
+        }
+    }
+
     std::map<std::string, std::string> validity = m_print_config.validate(true);
     if (!validity.empty()) {
         boost::nowide::cerr << "Param values in 3mf/config error: "<< std::endl;
@@ -3423,6 +3473,14 @@ int CLI::run(int argc, char **argv)
     bool is_smooth_timelapse = false;
     if (enable_timelapse && timelapse_type_opt && (timelapse_type_opt->getInt() == TimelapseType::tlSmooth))
         is_smooth_timelapse = true;
+    // A mixed filament swaps between its components every layer, so it needs the tower even when
+    // every loaded preset is the same.
+    if (disable_wipe_tower_after_mapping) {
+        if (cli_mixed_filament_mgr.enabled_count() > 0) {
+            disable_wipe_tower_after_mapping = false;
+            BOOST_LOG_TRIVIAL(info) << boost::format("%1%, set disable_wipe_tower_after_mapping back to false due to a mixed filament")%__LINE__;
+        }
+    }
     if (disable_wipe_tower_after_mapping) {
         if (is_smooth_timelapse)
         {
@@ -3571,7 +3629,7 @@ int CLI::run(int argc, char **argv)
             return;
         }
 
-        std::vector<int> extruders = plate->get_extruders_under_cli(true, print_config);
+        std::vector<int> extruders = plate->get_extruders_under_cli(true, print_config, false);
         unsigned int filaments_cnt = extruders.size();
         std::ostringstream extruder_list;
         for (size_t i = 0; i < extruders.size(); ++i) {
@@ -4733,7 +4791,7 @@ int CLI::run(int argc, char **argv)
                         if ((filaments_cnt == 0) || need_skip)
                         {
                             // slice filaments info invalid
-                            std::vector<int> extruders = cur_plate->get_extruders_under_cli(true, m_print_config);
+                            std::vector<int> extruders = cur_plate->get_extruders_under_cli(true, m_print_config, false);
                             filaments_cnt = extruders.size();
                             BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format("arrange: slice filaments info invalid or need_skip, get from partplate: filament_count %1%")%filaments_cnt;
                         }
@@ -5461,6 +5519,23 @@ int CLI::run(int argc, char **argv)
                                 flush_and_exit(CLI_FILAMENTS_DIFFERENT_TEMP);
                             }
                         }
+
+                        // Same type gate as the GUI's Plater::has_incompatible_mixed_filament_in_use:
+                        // refuse a plate that uses a mixed slot whose components are different
+                        // filament types. CLI get_extruders_under_cli already returns mixed slots
+                        // (it does not expand them), matching the GUI scan of used virtual IDs.
+                        {
+                            const std::vector<int> plate_slots = part_plate->get_extruders_under_cli(true, new_print_config, false);
+                            const CliMixedFilamentVerdict type_verdict = cli_check_mixed_filament_type_compatibility(
+                                cli_mixed_filament_mgr, plate_slots, cli_mixed_num_physical, new_print_config, index + 1);
+                            if (!type_verdict.ok) {
+                                BOOST_LOG_TRIVIAL(error) << type_verdict.message;
+                                record_exit_reson(outfile_dir, CLI_MIXED_FILAMENT_INVALID, index + 1,
+                                                  cli_errors[CLI_MIXED_FILAMENT_INVALID], sliced_info);
+                                flush_and_exit(CLI_MIXED_FILAMENT_INVALID);
+                            }
+                        }
+
                         // Ultra: the BBL-vendor flag has to be set BEFORE Print::validate(), because validate()
                         // branches on it (Print.cpp:2040 the Orca "G92 E0 vs. absolute E" rule, Print.cpp:2063 the
                         // bed-temperature rule). The GUI does exactly this: BackgroundSlicingProcess::validate()
