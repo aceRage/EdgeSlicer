@@ -4163,16 +4163,21 @@ void GLGizmoCut3D::update_draw_preview_models()
         shell_stroke.set_path(m_draw_points);
 
     if (shell_stroke.valid()) {
+        // THE MESH GOES TO THE BUILDER TOO. 2026-09-16: a plug's lid is now measured
+        // off the part (draw_cut_band_core_solid: the height field over the loop), and
+        // wrap-or-plug is decided against the part's own section. Without the mesh the
+        // builder falls back to a flat lid at the bounding box's far side, so the shell
+        // would not be the surface the cut makes.
         BoundingBoxf3 bbox;
+        indexed_triangle_set        mesh;
+        const indexed_triangle_set* src = nullptr;
         if (!m_draw_pick_its.empty())
-            for (const Vec3f& v : m_draw_pick_its.vertices)
+            src = &m_draw_pick_its;
+        else if (curved_instance_mesh_in_plane(mesh))
+            src = &mesh;
+        if (src != nullptr)
+            for (const Vec3f& v : src->vertices)
                 bbox.merge(v.cast<double>());
-        else {
-            indexed_triangle_set mesh;
-            if (curved_instance_mesh_in_plane(mesh))
-                for (const Vec3f& v : mesh.vertices)
-                    bbox.merge(v.cast<double>());
-        }
         // THE PREVIEW'S REACH IS NOT THE CUT'S REACH. Through-all deliberately runs
         // 1.05 * the bbox diagonal so the cutter exits any side of any part, which is
         // right for the boolean and wrong for the eye: a translucent tube stretching
@@ -4196,7 +4201,7 @@ void GLGizmoCut3D::update_draw_preview_models()
             shown.depth       = std::max(1.0, need);
         }
 
-        const indexed_triangle_set cutter = draw_cut_cutter_solid(shell_stroke, shown, bbox);
+        const indexed_triangle_set cutter = draw_cut_cutter_solid(shell_stroke, shown, bbox, 0.0, src);
         if (!cutter.empty())
             m_draw_cutter_model.init_from(cutter);
     }

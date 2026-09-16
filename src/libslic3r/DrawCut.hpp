@@ -564,8 +564,11 @@ double draw_cut_extension_angle(const DrawCutParams& params);
 // that true of the BAND-AND-CORE path as well as of Through all.
 //
 //   PLUG (loop on the skin)     the cutter is the plug itself - band wall, flat
-//                               core cap, outer cap. Intersect for the plug,
-//                               complement for the rest. Two pieces, both real.
+//                               core cap, and the outer ring carried OUT of the
+//                               part and capped beyond it (2026-09-16; a lid across
+//                               the ring ran through any skin that bulged inside the
+//                               loop). Intersect for the plug, complement for the
+//                               rest. Two pieces, both real.
 //   WRAP (loop round the part)  the band and core together span the WHOLE SECTION
 //                               of the part at that height, so the same solid is a
 //                               PLATE lying across the part rather than a plug in
@@ -579,13 +582,28 @@ double draw_cut_extension_angle(const DrawCutParams& params);
 //                               be closed into a HALF-SPACE: band, core, and then
 //                               straight on out of the part on the core's far side.
 //
-// THE TEST IS THE SECTION, NOT THE BOUNDING BOX. Slice the mesh with the core plane,
-// project the loop onto that plane, and ask how much of the SECTION lies inside the
-// loop:
+// THE SKIN DECIDES FIRST (2026-09-16): a loop that goes round a part is drawn on
+// skin facing every way, so its sample normals CANCEL; a loop on one side of a part
+// has normals that agree, and is a PLUG whatever the section says (a 19 mm loop on the
+// side of the bunny's 20 mm head covers most of the head's own slice, and is still a
+// patch). Only a loop whose normals cancel - mean under a quarter of a unit, the same
+// guard build_core_band() pins the core's sign with - goes on to the section.
 //
-//   section area inside the loop > `contain_frac` of the section  -> the loop
-//       contains the part at that height, so it wraps it.
-//   otherwise -> the loop lies within the section, so it is a plug on the skin.
+// THE TEST IS THEN THE SECTION, NOT THE BOUNDING BOX. Slice the mesh with the loop's
+// plane, project the loop onto that plane, and ask, for each connected SLICE of the
+// section, how much of it lies inside the loop:
+//
+//   some slice (at least a quarter of the loop's own area) has more than
+//   `contain_frac` of its area inside the loop -> the loop goes round that slice of
+//       the part, so it wraps it.
+//   otherwise -> the loop lies within a slice, so it is a plug on the skin.
+//
+// PER SLICE and HALF, since 2026-09-16 (owner report: a belt round the bunny's neck
+// was cut as a plug). The whole section is the wrong denominator - the loop's plane
+// also slices whatever else it passes through, and none of that is inside a belt
+// round the neck - and 90% is the ratio for a barrel, whose skin is square to the
+// plane; a neck flares and a sphere widens, so a loop drawn on that skin projects
+// INSIDE its slice (the neck belt covered 87% of its own slice).
 //
 // A bounding-box test cannot do this job, and was tried first: a cylinder's bbox
 // corners stick out past its own radius, so "the part reaches outside the loop"
@@ -600,7 +618,7 @@ double draw_cut_extension_angle(const DrawCutParams& params);
 bool draw_cut_loop_separates(const indexed_triangle_set& mesh,
                              const DrawCutStroke&        stroke,
                              const DrawCutParams&        params,
-                             double                      contain_frac = 0.9);
+                             double                      contain_frac = 0.5);
 
 // ---------------------------------------------------------------------------
 // The cutter solid.
