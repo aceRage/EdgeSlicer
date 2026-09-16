@@ -1708,6 +1708,15 @@ int CLI::run(int argc, char **argv)
     // too (--info, --help, --orient, slicing and exporting). The allowed ones do nothing when nothing is
     // sliced or exported.
     if (std::find(m_actions.begin(), m_actions.end(), "export_settings") != m_actions.end() && m_config.opt_string("export_settings") == "-") {
+        // --progress-json is a CLIMiscConfigDef option, not an action/transform, so it never shows up in
+        // m_actions/m_transforms below. emit_progress()/record_exit_reson() still write "event":"progress"/
+        // "result" JSON lines straight to stdout whenever g_progress_json is set (see above), which would
+        // interleave with and corrupt the single settings-JSON document -export-settings - is meant to produce.
+        if (g_progress_json) {
+            boost::nowide::cerr << "--export-settings - cannot be combined with --progress-json" << std::endl;
+            record_exit_reson(outfile_dir, CLI_INVALID_PARAMS, 0, cli_errors[CLI_INVALID_PARAMS], sliced_info);
+            flush_and_exit(CLI_INVALID_PARAMS);
+        }
         static const std::set<std::string> stdout_compatible = { "export_settings", "uptodate", "load_defaultfila", "min_save",
                                                                  "mtcpp", "mstpp", "no_check", "normative_check", "pipe" };
         for (const std::vector<std::string> *opt_keys : { &m_actions, &m_transforms }) {
