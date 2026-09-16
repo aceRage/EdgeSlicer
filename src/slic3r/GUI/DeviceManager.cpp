@@ -1,5 +1,6 @@
 #include "libslic3r/libslic3r.h"
 #include "DeviceManager.hpp"
+#include "DeviceModelCode.hpp"
 #include "libslic3r/Time.hpp"
 #include "libslic3r/Thread.hpp"
 #include "slic3r/Utils/ColorSpaceConvert.hpp"
@@ -6739,8 +6740,14 @@ void DeviceManager::parse_user_print_info(std::string body)
                     obj->dev_name = elem["dev_name"].get<std::string>();
                 if (!elem["dev_online"].is_null())
                     obj->m_is_online = elem["dev_online"].get<bool>();
-                if (elem.contains("dev_model_name") && !elem["dev_model_name"].is_null())
-                    obj->printer_type = elem["dev_model_name"].get<std::string>();
+                if (elem.contains("dev_model_name") && !elem["dev_model_name"].is_null()) {
+                    // The cloud list reports the same model codes as SSDP, sub-series included, so
+                    // it goes through the same resolution; an unknown code keeps the raw value so
+                    // the "no printer definition" message can still name it.
+                    const std::string code = elem["dev_model_name"].get<std::string>();
+                    const std::string resolved = MachineObject::parse_printer_type(code);
+                    obj->printer_type = resolved.empty() ? code : resolved;
+                }
                 if (!elem["task_status"].is_null())
                     obj->iot_print_status = elem["task_status"].get<std::string>();
                 if (elem.contains("dev_product_name") && !elem["dev_product_name"].is_null())
@@ -6821,7 +6828,34 @@ json DeviceManager::filaments_blacklist = json::object();
 
 std::string DeviceManager::parse_printer_type(std::string type_str)
 {
-    return get_value_from_config<std::string>(type_str, "printer_type");
+    // The straight case: resources/printers/<code>.json exists.
+    std::string type = get_value_from_config<std::string>(type_str, "printer_type");
+    if (! type.empty() || type_str.empty())
+        return type;
+
+    // A later hardware revision reports a sub-series code ("O1C2-V2" for an H2C) that has no file
+    // of its own; the parent definition lists it under "subseries". Without this an H2C from a
+    // newer batch showed as an unknown model and Send refused with "incompatible model". The
+    // table is read once per run - the folder does not change while the app is running.
+    static const std::map<std::string, std::vector<std::string>> subseries =
+        load_model_subseries(Slic3r::resources_dir() + "/printers");
+    std::string parent = resolve_model_subseries(type_str, subseries);
+    if (parent.empty()) {
+        // A revision newer than the table we ship: "-V<n>" is Bambu's revision suffix, so try the
+        // bare code before giving up.
+        const std::string bare = strip_model_revision(type_str);
+        if (bare != type_str)
+            parent = bare;
+    }
+    if (! parent.empty()) {
+        type = get_value_from_config<std::string>(parent, "printer_type");
+        if (! type.empty()) {
+            BOOST_LOG_TRIVIAL(info) << "parse_printer_type: model code " << type_str << " resolved to " << type;
+            return type;
+        }
+    }
+    BOOST_LOG_TRIVIAL(warning) << "parse_printer_type: no printer definition for model code " << type_str;
+    return "";
 }
 std::string DeviceManager::get_printer_display_name(std::string type_str)
 {
