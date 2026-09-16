@@ -3673,6 +3673,8 @@ void GCode::process_layers(const Print&                                         
                                                                         in.gcode = cooling_buffer.process_layer(std::move(in.gcode),
                                                                                                                         in.layer_id,
                                                                                                                         in.cooling_buffer_flush);
+                                                                        // Only a flushed layer carries G-code; the flag describes that flush.
+                                                                        in.cooling_slowed_down = in.cooling_buffer_flush && cooling_buffer.last_layer_slowed_down();
                                                                         return in;
                                                                     });
     // After CoolingBuffer, before FanMover. Null pointer => identity, no extra layer buffer.
@@ -3682,7 +3684,7 @@ void GCode::process_layers(const Print&                                         
         [&ltss = this->m_layer_time_speed_smoothing](LayerResult in) -> std::string {
             if (!ltss)
                 return std::move(in.gcode);
-            return ltss->process_layer(std::move(in.gcode), in.layer_id, in.last_layer);
+            return ltss->process_layer(std::move(in.gcode), in.layer_id, in.last_layer, in.cooling_slowed_down);
         });
     const auto pa_processor_filter = tbb::make_filter<std::string, std::string>(slic3r_tbb_filtermode::serial_in_order,
                                                                                 [&pa_processor = *this->m_pa_processor](
@@ -3792,6 +3794,8 @@ void GCode::process_layers(const Print&              print,
                                                                         in.gcode = cooling_buffer.process_layer(std::move(in.gcode),
                                                                                                                         in.layer_id,
                                                                                                                         in.cooling_buffer_flush);
+                                                                        // Only a flushed layer carries G-code; the flag describes that flush.
+                                                                        in.cooling_slowed_down = in.cooling_buffer_flush && cooling_buffer.last_layer_slowed_down();
                                                                         return in;
                                                                     });
     // After CoolingBuffer, before FanMover. Null pointer => identity, no extra layer buffer.
@@ -3801,7 +3805,7 @@ void GCode::process_layers(const Print&              print,
         [&ltss = this->m_layer_time_speed_smoothing](LayerResult in) -> std::string {
             if (!ltss)
                 return std::move(in.gcode);
-            return ltss->process_layer(std::move(in.gcode), in.layer_id, in.last_layer);
+            return ltss->process_layer(std::move(in.gcode), in.layer_id, in.last_layer, in.cooling_slowed_down);
         });
     const auto pa_processor_filter = tbb::make_filter<std::string, std::string>(slic3r_tbb_filtermode::serial_in_order,
                                                                                 [&pa_processor = *this->m_pa_processor](

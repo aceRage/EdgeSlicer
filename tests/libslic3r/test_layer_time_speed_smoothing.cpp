@@ -216,6 +216,33 @@ TEST_CASE("Layer time slowdown: total time budget relaxes the variation", "[Laye
     require_variation_band(limited.times, limited.effective_max_variation, 0);
 }
 
+TEST_CASE("Layer time slowdown: frozen layers keep their time and still bound their neighbours", "[LayerTimeSpeedSmoothing]")
+{
+    // 30, 8, 3 s at 25% variation. Layer 1 is the one CoolingBuffer already stretched to an
+    // 8 s cooling floor, so the apply stage hands it in as frozen.
+    // Free:   layer 1 rises to 0.75 * 30 = 22.5 s, layer 2 to 0.75 * 22.5 = 16.875 s.
+    // Frozen: layer 1 stays 8 s (its cap is its own time), layer 2 rises only to 0.75 * 8 = 6 s,
+    //         so its speed factor is 3 / 6 = 0.5.
+    const std::vector<double> times = {30.0, 8.0, 3.0};
+    LayerTimeSlowdownParams   params;
+    params.max_variation     = 0.25;
+    params.max_slowdown      = 100.0;
+    params.max_time_increase = 100.0;
+
+    const auto free = solve_layer_time_slowdown(times, params, /*first_layer=*/0);
+    REQUIRE_THAT(free.times[1], WithinAbs(22.5, 1e-6));
+    REQUIRE_THAT(free.times[2], WithinAbs(16.875, 1e-6));
+
+    const auto frozen = solve_layer_time_slowdown(times, params, /*first_layer=*/0, {false, true, false});
+    require_not_shortened(times, frozen.times);
+    require_speed_factors(frozen, times);
+    REQUIRE_THAT(frozen.times[0], WithinAbs(30.0, 1e-9));
+    REQUIRE_THAT(frozen.times[1], WithinAbs(8.0, 1e-9));
+    REQUIRE_THAT(frozen.times[2], WithinAbs(6.0, 1e-6));
+    REQUIRE_THAT(frozen.speed_factors[1], WithinAbs(1.0, 1e-9));
+    REQUIRE_THAT(frozen.speed_factors[2], WithinAbs(0.5, 1e-6));
+}
+
 TEST_CASE("Layer time slowdown: layers before first_layer are untouched and do not constrain", "[LayerTimeSpeedSmoothing]")
 {
     const std::vector<double> times = {300.0, 10.0, 10.0, 10.0};
@@ -316,6 +343,36 @@ static int feedrate_of(const std::string &gcode, const char *needle)
     const size_t fpos = gcode.find(" F", line);
     REQUIRE(fpos != std::string::npos);
     return std::atoi(gcode.c_str() + fpos + 2);
+}
+
+static size_t count_of(const std::string &haystack, const std::string &needle)
+{
+    size_t n = 0;
+    for (size_t pos = haystack.find(needle); pos != std::string::npos; pos = haystack.find(needle, pos + needle.size()))
+        ++n;
+    return n;
+}
+
+// The flushed output, split at each per-layer diagnostic comment (one body per buffered layer).
+static std::vector<std::string> smoothed_layer_bodies(const std::string &out)
+{
+    static const char *marker = "; LAYER_TIME_SPEED_SMOOTH";
+    std::vector<std::string> bodies;
+    for (size_t pos = out.find(marker); pos != std::string::npos;) {
+        const size_t next = out.find(marker, pos + 1);
+        bodies.push_back(out.substr(pos, next == std::string::npos ? std::string::npos : next - pos));
+        pos = next;
+    }
+    return bodies;
+}
+
+// repeats moves of 10 mm each at feedrate f (mm/min): the layer takes repeats * 10 / (f / 60) s.
+static std::string infill_layer(int repeats, int f)
+{
+    std::string g = "G92 X0\n;TYPE:Sparse infill\n";
+    for (int i = 0; i < repeats; ++i)
+        g += g1_x(10. * (i + 1), 0.05, f);
+    return g;
 }
 
 TEST_CASE("Layer time speed smoothing: Off is identity and does not buffer", "[LayerTimeSpeedSmoothing][GCode]")
@@ -615,6 +672,96 @@ TEST_CASE("Layer time speed smoothing: Mode C slows a short layer", "[LayerTimeS
     REQUIRE(c2 != std::string::npos);
     const std::string mid = out.substr(c1, c2 - c1);
     REQUIRE(feedrate_of(mid, "G1 X") < 1800);
+}
+
+TEST_CASE("Layer time speed smoothing: Mode C keeps a layer CoolingBuffer already slowed to the cooling floor", "[LayerTimeSpeedSmoothing][GCode]")
+{
+    PrintConfig cfg;
+    cfg.layer_time_speed_smoothing.value          = ltssmSlowDown;
+    cfg.layer_time_speed_max_variation.value      = 25.;
+    cfg.layer_time_speed_max_slowdown.value       = 200.;
+    cfg.layer_time_speed_max_time_increase.value  = 100.;
+    cfg.layer_time_speed_slowdown_scope.value     = ltssAll;
+    cfg.filament_max_volumetric_speed.values      = { 1000. };
+    cfg.use_relative_e_distances.value            = true;
+    cfg.slow_down_for_layer_cooling.values        = { true };
+    cfg.slow_down_layer_time.values               = { 8. };
+    cfg.slow_down_min_speed.values                = { 20. }; // 1200 mm/min
+
+    // Layer 0 is the first-layer band. Layers 1 and 3: 100 x 10 mm at 2000 mm/min = 33.33 mm/s
+    // -> 30 s each. Layer 2: 20 x 10 mm at 1500 mm/min = 25 mm/s -> 8.0 s, exactly the cooling
+    // floor, and it is flagged as the layer CoolingBuffer slowed to get there.
+    //
+    // Frozen (cooling_slowed_down = true): layer 2 keeps factor 1, F1500, t_out 8.00.
+    // Control (flag off): the 25% band lifts it to min(3 x 8, 0.75 x 30) = 22.5 s, factor
+    // 8 / 22.5 = 0.356, F = 1500 x 0.356 = 533 -> floored at slow_down_min_speed 1200,
+    // so t_out = 200 mm / 20 mm/s = 10.00 s. The control proves the freeze is what holds F.
+    for (const bool slowed_by_cooling : {true, false}) {
+        DYNAMIC_SECTION((slowed_by_cooling ? "flagged by CoolingBuffer" : "control: not flagged"))
+        {
+            LayerTimeSpeedSmoothingFilter filter(cfg);
+            REQUIRE(filter.process_layer(infill_layer(2, 2000), 0, false).empty());
+            REQUIRE(filter.process_layer(infill_layer(100, 2000), 1, false).empty());
+            REQUIRE(filter.process_layer(infill_layer(20, 1500), 2, false, slowed_by_cooling).empty());
+            const std::string out = filter.process_layer(infill_layer(100, 2000), 3, true);
+
+            const std::vector<std::string> bodies = smoothed_layer_bodies(out);
+            REQUIRE(bodies.size() == 4);
+            REQUIRE(bodies[2].find("t_raw=8.00") != std::string::npos);
+            if (slowed_by_cooling) {
+                REQUIRE(bodies[2].find("factor=1.000") != std::string::npos);
+                REQUIRE(bodies[2].find("t_out=8.00") != std::string::npos);
+                REQUIRE(feedrate_of(bodies[2], "G1 X") == 1500);
+                REQUIRE(count_of(bodies[2], "F1500") == 20);
+            } else {
+                REQUIRE(bodies[2].find("factor=0.356") != std::string::npos);
+                REQUIRE(bodies[2].find("t_out=10.00") != std::string::npos);
+                REQUIRE(feedrate_of(bodies[2], "G1 X") == 1200);
+                REQUIRE(count_of(bodies[2], "F1200") == 20);
+            }
+            // The 30 s neighbours are long layers: Mode C never shortens them.
+            REQUIRE(bodies[1].find("factor=1.000") != std::string::npos);
+            REQUIRE(bodies[3].find("factor=1.000") != std::string::npos);
+            REQUIRE(feedrate_of(bodies[1], "G1 X") == 2000);
+            REQUIRE(feedrate_of(bodies[3], "G1 X") == 2000);
+        }
+    }
+}
+
+TEST_CASE("Layer time speed smoothing: a slowdown never pushes a line below slow_down_min_speed", "[LayerTimeSpeedSmoothing][GCode]")
+{
+    PrintConfig cfg;
+    cfg.layer_time_speed_smoothing.value          = ltssmSlowDown;
+    cfg.layer_time_speed_max_variation.value      = 25.;
+    cfg.layer_time_speed_max_slowdown.value       = 200.; // a layer may take up to 3x its time
+    cfg.layer_time_speed_max_time_increase.value  = 100.;
+    cfg.layer_time_speed_slowdown_scope.value     = ltssAll;
+    cfg.filament_max_volumetric_speed.values      = { 1000. };
+    cfg.use_relative_e_distances.value            = true;
+    cfg.slow_down_for_layer_cooling.values        = { false };
+    cfg.slow_down_layer_time.values               = { 0. };
+    cfg.slow_down_min_speed.values                = { 20. }; // 1200 mm/min
+
+    // Layers 1 and 3: 30 s (100 x 10 mm at 33.33 mm/s). Layer 2: 10 x 10 mm at 3000 mm/min
+    // = 50 mm/s -> 2.0 s, plus one 10 mm move at 900 mm/min = 15 mm/s -> 0.667 s, so 2.667 s.
+    // The band would lift it to 0.75 x 30 = 22.5 s but max_slowdown caps it at 3 x 2.667 = 8.0 s:
+    // factor = 2.667 / 8 = 0.333. The 3000 lines would become 1000 mm/min, below the 1200 floor,
+    // so they are written as F1200; the 900 line is already below the floor and is left alone.
+    // t_out = 100 mm / 20 mm/s + 0.667 s = 5.67 s.
+    LayerTimeSpeedSmoothingFilter filter(cfg);
+    REQUIRE(filter.process_layer(infill_layer(2, 3000), 0, false).empty());
+    REQUIRE(filter.process_layer(infill_layer(100, 2000), 1, false).empty());
+    REQUIRE(filter.process_layer(infill_layer(10, 3000) + g1_x(110, 0.05, 900), 2, false).empty());
+    const std::string out = filter.process_layer(infill_layer(100, 2000), 3, true);
+
+    const std::vector<std::string> bodies = smoothed_layer_bodies(out);
+    REQUIRE(bodies.size() == 4);
+    REQUIRE(bodies[2].find("factor=0.333") != std::string::npos);
+    REQUIRE(bodies[2].find("t_out=5.67") != std::string::npos);
+    REQUIRE(feedrate_of(bodies[2], "G1 X") == 1200);
+    REQUIRE(count_of(bodies[2], "F1200") == 10);
+    REQUIRE(count_of(bodies[2], "F900") == 1);
+    REQUIRE(count_of(bodies[2], "F1000") == 0);
 }
 
 TEST_CASE("Layer time speed smoothing format_comment includes mode", "[LayerTimeSpeedSmoothing][GCode]")

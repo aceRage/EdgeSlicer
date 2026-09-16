@@ -155,6 +155,16 @@ static bool is_speedup_protected(ExtrusionRole role)
     return is_bridge(role) || role == erIroning || is_top_surface(role) || is_support_role(role);
 }
 
+// The speed floor CoolingBuffer itself observes when it stretches a layer: slow_down_min_speed
+// of the line's filament, in mm/min. 0 = no floor.
+static float min_print_feedrate_mm_min(const ParsedLine &line, const PrintConfig &config)
+{
+    const double min_mm_s = config.slow_down_min_speed.get_at(line.extruder);
+    return min_mm_s > 0.0 ? float(min_mm_s * 60.0) : 0.f;
+}
+
+// A line CoolingBuffer (or the profile) already put at or below slow_down_min_speed is left
+// alone in every mode: not sped up (it is there for a reason) and not slowed further.
 static bool already_at_min_print_speed(const ParsedLine &line, const PrintConfig &config)
 {
     const double min_mm_s = config.slow_down_min_speed.get_at(line.extruder);
@@ -167,12 +177,12 @@ static bool line_eligible(LayerTimeSpeedSmoothMode mode, LayerTimeSlowdownScope 
 {
     if (!line.is_motion || !line.extruding || line.wipe)
         return false;
+    if (already_at_min_print_speed(line, config))
+        return false;
     if (is_layer_time_speed_up(mode)) {
         if (is_speedup_protected(line.role))
             return false;
         if (mode == ltssmSpeedUpExcludeOuter && is_external_perimeter(line.role))
-            return false;
-        if (already_at_min_print_speed(line, config))
             return false;
         return true;
     }
@@ -182,6 +192,28 @@ static bool line_eligible(LayerTimeSpeedSmoothMode mode, LayerTimeSlowdownScope 
         return true;
     }
     return false;
+}
+
+// F (mm/min) of an eligible line after the layer factor, clamped the same way wherever the
+// line is retimed (apply_factor_to_lines and time_after_factor must agree):
+//  - the filament's max volumetric speed caps it (F_new = min(F_old * f, 60 * max_vol / mm3_per_mm));
+//  - a slowdown (factor < 1) is floored at slow_down_min_speed. CoolingBuffer never writes a
+//    speed below that floor, and neither does this stage.
+static float scaled_feedrate(const ParsedLine &line, double factor, const PrintConfig &config)
+{
+    float f = float(line.feedrate_mm_min * factor);
+    const double max_vol = config.filament_max_volumetric_speed.get_at(line.extruder);
+    if (max_vol > 0.0 && line.mm3_per_mm > 0.f) {
+        const float cap = float(60.0 * max_vol / line.mm3_per_mm);
+        if (cap > 0.f)
+            f = std::min(f, cap);
+    }
+    if (factor < 1.0) {
+        const float floor_f = min_print_feedrate_mm_min(line, config);
+        if (floor_f > 0.f)
+            f = std::max(f, floor_f);
+    }
+    return std::max(f, 1.f);
 }
 
 struct ParseState
@@ -287,9 +319,18 @@ static double cooling_floor_s(const PrintConfig &config)
     return floor_s;
 }
 
-static double apply_cooling_floor(double factor, double t_raw, double floor_s, bool speed_up)
+// Layer-level guard against fighting CoolingBuffer, in both directions.
+//  - Speed-up: the layer's output time never drops below slow_down_layer_time (floor_s). t_raw
+//    is the post-CoolingBuffer time, so a layer CoolingBuffer stretched to the floor stays there.
+//  - Slowdown: a layer CoolingBuffer already stretched (cooling_slowed_down) keeps factor 1.
+//    The solver was handed the same layer as frozen, so normally this changes nothing; it is
+//    the guarantee that no other source of a factor slows such a layer a second time.
+// The per-line floor at slow_down_min_speed lives in scaled_feedrate().
+static double apply_cooling_floor(double factor, double t_raw, double floor_s, bool speed_up, bool cooling_slowed_down)
 {
-    if (!speed_up || factor <= 1.0 + LTSS_FACTOR_EPS || t_raw <= 0.0 || floor_s <= 0.0)
+    if (!speed_up)
+        return cooling_slowed_down ? 1.0 : factor;
+    if (factor <= 1.0 + LTSS_FACTOR_EPS || t_raw <= 0.0 || floor_s <= 0.0)
         return factor;
     const double t_out = t_raw / factor;
     if (t_out + LTSS_FACTOR_EPS >= floor_s)
@@ -314,28 +355,18 @@ static std::string apply_factor_to_lines(const std::vector<ParsedLine> &lines,
         std::string raw = line.raw;
         if (rewrite && line.is_motion) {
             const float original_f = line.feedrate_mm_min > 0.f ? line.feedrate_mm_min : emitted_f;
-            float       new_f      = original_f;
-            if (line_eligible(mode, scope, line, config)) {
-                new_f = float(original_f * factor);
-                const double max_vol = config.filament_max_volumetric_speed.get_at(line.extruder);
-                if (max_vol > 0.0 && line.mm3_per_mm > 0.f) {
-                    const float cap = float(60.0 * max_vol / line.mm3_per_mm);
-                    if (cap > 0.f)
-                        new_f = std::min(new_f, cap);
-                }
-                if (new_f < 1.f)
-                    new_f = 1.f;
-            }
+            const bool  eligible   = line_eligible(mode, scope, line, config);
+            const float new_f      = eligible ? scaled_feedrate(line, factor, config) : original_f;
             const int new_i    = std::max(1, int(std::lround(new_f)));
             const int emit_i   = std::max(1, int(std::lround(emitted_f)));
             const int orig_i   = std::max(1, int(std::lround(original_f)));
-            if (line_eligible(mode, scope, line, config) && new_i != orig_i) {
+            if (eligible && new_i != orig_i) {
                 raw       = rewrite_f(raw, new_i);
                 emitted_f = float(new_i);
-            } else if (line_eligible(mode, scope, line, config) && new_i != emit_i) {
+            } else if (eligible && new_i != emit_i) {
                 raw       = rewrite_f(raw, new_i);
                 emitted_f = float(new_i);
-            } else if (!line_eligible(mode, scope, line, config) && orig_i != emit_i) {
+            } else if (!eligible && orig_i != emit_i) {
                 // Restore the unscaled modal F so a following ineligible move does not inherit it.
                 raw       = rewrite_f(raw, orig_i);
                 emitted_f = float(orig_i);
@@ -369,18 +400,7 @@ static double time_after_factor(const std::vector<ParsedLine> &lines,
             t += line.time;
             continue;
         }
-        float f = line.feedrate_mm_min;
-        if (line_eligible(mode, scope, line, config)) {
-            f = float(line.feedrate_mm_min * factor);
-            const double max_vol = config.filament_max_volumetric_speed.get_at(line.extruder);
-            if (max_vol > 0.0 && line.mm3_per_mm > 0.f) {
-                const float cap = float(60.0 * max_vol / line.mm3_per_mm);
-                if (cap > 0.f)
-                    f = std::min(f, cap);
-            }
-            if (f < 1.f)
-                f = 1.f;
-        }
+        const float f = line_eligible(mode, scope, line, config) ? scaled_feedrate(line, factor, config) : line.feedrate_mm_min;
         t += line.length / (f / 60.f);
     }
     return t;
@@ -423,13 +443,13 @@ std::string LayerTimeSpeedSmoothingFilter::process_layer(std::string &&gcode)
     return process_layer(std::move(gcode), 0, true);
 }
 
-std::string LayerTimeSpeedSmoothingFilter::process_layer(std::string &&gcode, size_t layer_id, bool last_layer)
+std::string LayerTimeSpeedSmoothingFilter::process_layer(std::string &&gcode, size_t layer_id, bool last_layer, bool cooling_slowed_down)
 {
     if (m_mode == ltssmOff || m_spiral_mode)
         return std::move(gcode);
 
     if (!gcode.empty())
-        m_layers.push_back(BufferedLayer{std::move(gcode), layer_id});
+        m_layers.push_back(BufferedLayer{std::move(gcode), layer_id, cooling_slowed_down});
 
     if (!last_layer)
         return {};
@@ -451,23 +471,29 @@ std::string LayerTimeSpeedSmoothingFilter::flush()
         std::vector<ParsedLine> lines;
         double                  time = 0.0;
         size_t                  layer_id = 0;
+        bool                    cooling_slowed_down = false;
     };
     std::vector<LayerParse> parsed;
     parsed.reserve(m_layers.size());
 
     for (const BufferedLayer &layer : m_layers) {
         LayerParse rec;
-        rec.layer_id = layer.layer_id;
-        rec.lines    = parse_layer_lines(state, layer.gcode, m_config);
+        rec.layer_id            = layer.layer_id;
+        rec.cooling_slowed_down = layer.cooling_slowed_down;
+        rec.lines               = parse_layer_lines(state, layer.gcode, m_config);
         for (const ParsedLine &line : rec.lines)
             rec.time += line.time;
         parsed.emplace_back(std::move(rec));
     }
 
     std::vector<double> times;
+    std::vector<bool>   frozen;
     times.reserve(parsed.size());
-    for (const LayerParse &rec : parsed)
+    frozen.reserve(parsed.size());
+    for (const LayerParse &rec : parsed) {
         times.push_back(rec.time);
+        frozen.push_back(rec.cooling_slowed_down);
+    }
 
     const size_t skip_until = std::max<size_t>(1, size_t(std::max(0, m_slow_down_layers)));
     size_t       first_layer = parsed.size();
@@ -493,7 +519,8 @@ std::string LayerTimeSpeedSmoothingFilter::flush()
         params.max_variation     = m_config.layer_time_speed_max_variation.value / 100.0;
         params.max_slowdown      = m_config.layer_time_speed_max_slowdown.value / 100.0;
         params.max_time_increase = m_config.layer_time_speed_max_time_increase.value / 100.0;
-        solved                   = solve_layer_time_slowdown(times, params, first_layer);
+        // Layers CoolingBuffer already stretched keep their time and only bound their neighbours.
+        solved                   = solve_layer_time_slowdown(times, params, first_layer, frozen);
     }
 
     const double floor_s  = cooling_floor_s(m_config);
@@ -505,7 +532,7 @@ std::string LayerTimeSpeedSmoothingFilter::flush()
         double factor = (i < solved.speed_factors.size()) ? solved.speed_factors[i] : 1.0;
         if (i < first_layer)
             factor = 1.0;
-        factor = apply_cooling_floor(factor, parsed[i].time, floor_s, speed_up);
+        factor = apply_cooling_floor(factor, parsed[i].time, floor_s, speed_up, parsed[i].cooling_slowed_down);
 
         const std::string body = apply_factor_to_lines(parsed[i].lines, factor, m_mode, m_slowdown_scope, m_config, emitted_f);
         const double      t_out = time_after_factor(parsed[i].lines, factor, m_mode, m_slowdown_scope, m_config);

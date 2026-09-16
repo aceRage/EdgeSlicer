@@ -29,6 +29,11 @@ namespace Slic3r {
 // Layers before first_layer stay at their original times and do not constrain
 // their neighbours (the first printed layer typically has its own speed).
 //
+// Mode C additionally takes a `frozen` mask: a frozen layer keeps its time (its cap is
+// its own time) but still bounds its neighbours. The apply stage freezes every layer
+// CoolingBuffer already stretched to slow_down_layer_time, so the two slowdowns never
+// compound (CoolingBuffer's is a thermal floor, this one is a consistency band).
+//
 // Plan: 09-concept-layer-time-speed-smoothing.md
 // Inspiration only: bambulab/BambuStudio#12224 (slowdown-only). Not a cherry-pick.
 // G-code pipeline stage (S4 apply): GCode/LayerTimeSpeedSmoothingFilter.
@@ -67,10 +72,12 @@ LayerTimeSpeedSolveResult solve_layer_time_speed_up(
     size_t first_layer = 1);
 
 // Increase short-layer times toward the neighbour variation band. Never shortens a layer.
+// frozen[i] == true keeps layer i at times[i] (shorter than times.size() means "none").
 LayerTimeSpeedSolveResult solve_layer_time_slowdown(
     const std::vector<double> &times,
     const LayerTimeSlowdownParams &params,
-    size_t first_layer = 1);
+    size_t first_layer = 1,
+    const std::vector<bool> &frozen = {});
 
 } // namespace Slic3r
 

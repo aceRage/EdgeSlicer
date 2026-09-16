@@ -182,8 +182,12 @@ struct LayerResult {
     // True for the last layer of a process_layers() run. Layer-time speed smoothing
     // uses this to drain its all-layer buffer and rewrite F.
     bool        last_layer { false };
+    // Set by the cooling stage: CoolingBuffer slowed this layer down to slow_down_layer_time,
+    // so its F words already carry the cooling speeds. Layer-time speed smoothing then never
+    // slows it further (see LayerTimeSpeedSmoothingFilter).
+    bool        cooling_slowed_down { false };
 
-    static LayerResult make_nop_layer_result() { return {"", std::numeric_limits<coord_t>::max(), false, false, true, false}; }
+    static LayerResult make_nop_layer_result() { return {"", std::numeric_limits<coord_t>::max(), false, false, true, false, false}; }
 };
 
 namespace MultiNozzleUtils { class NozzleGroupResultBase; }

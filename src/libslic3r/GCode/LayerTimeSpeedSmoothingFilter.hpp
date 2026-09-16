@@ -16,6 +16,14 @@ namespace Slic3r {
 // solvers and rewrite F. Fan commands from CoolingBuffer are left untouched (F-only v1).
 // Modes A/B never speed up overhang/bridge, ironing, top solid, or support (incl. interface).
 //
+// It never fights CoolingBuffer, which runs just upstream and owns the thermal floor:
+//  - a line at or below slow_down_min_speed is never touched, in any mode, and a slowdown
+//    is floored at that speed (the same floor CoolingBuffer observes);
+//  - speed-up never takes a layer's time below slow_down_layer_time;
+//  - a layer CoolingBuffer already stretched to slow_down_layer_time (cooling_slowed_down)
+//    is frozen for Mode C: its speeds are what CoolingBuffer set, and it only bounds its
+//    neighbours.
+//
 // Plan: 09-concept-layer-time-speed-smoothing.md
 class LayerTimeSpeedSmoothingFilter
 {
@@ -27,7 +35,9 @@ public:
     // Buffer one cooled layer. When last_layer is false the G-code is held and the return
     // is empty. When last_layer is true, all buffered layers are solved and rewritten.
     // Empty gcode is not stored; a last_layer flush still drains the buffer.
-    std::string process_layer(std::string &&gcode, size_t layer_id, bool last_layer);
+    // cooling_slowed_down: CoolingBuffer rewrote F on this layer to reach slow_down_layer_time
+    // (LayerResult::cooling_slowed_down); Mode C then leaves the layer at those speeds.
+    std::string process_layer(std::string &&gcode, size_t layer_id, bool last_layer, bool cooling_slowed_down = false);
 
     // Test helper: treat the snippet as a complete (single-layer) print.
     std::string process_layer(std::string &&gcode);
@@ -41,7 +51,8 @@ private:
     struct BufferedLayer
     {
         std::string gcode;
-        size_t      layer_id = 0;
+        size_t      layer_id            = 0;
+        bool        cooling_slowed_down = false;
     };
 
     std::string flush();
