@@ -4442,3 +4442,52 @@ TEST_CASE("Draw cut: the outward side comes from the mesh when the samples cance
     REQUIRE(z_max < 12.0);
     REQUIRE(z_min < -20.0);
 }
+
+TEST_CASE("ZZ diag bunny cutter", "[ZZDiag]")
+{
+    const indexed_triangle_set bunny = bunny_in_plane();
+    BoundingBoxf3 bb;
+    for (const Vec3f& v : bunny.vertices)
+        bb.merge(v.cast<double>());
+
+    const Vec3d  head   = bunny_head_point(bunny);
+    const double radius = 0.10 * bb.size().norm();
+    const DrawCutStroke raw = loop_on_surface(bunny, head, Vec3d::UnitX(), radius);
+    WARN("raw samples " << raw.samples().size());
+
+    const DrawCutStroke stroke = finish_like_gizmo(raw, bunny);
+    WARN("path " << stroke.path().size() << " closed " << stroke.is_closed());
+
+    DrawCutParams params = owner_params();
+    WARN("separates " << draw_cut_loop_separates(bunny, stroke, params));
+
+    Vec3d n, c;
+    REQUIRE(draw_cut_core_plane(stroke, params, n, c));
+    WARN("core n " << n.x() << " " << n.y() << " " << n.z()
+         << "  centroid " << c.x() << " " << c.y() << " " << c.z());
+    const Vec3d ow = draw_cut_outward_side(stroke, n, &bunny);
+    WARN("outward " << ow.x() << " " << ow.y() << " " << ow.z());
+
+    // How far the loop samples are from the centroid axis - the in-plane radius
+    // spread. A patch whose samples wrap round a lot has a small min.
+    double rmin = 1e9, rmax = 0.0;
+    for (const DrawCutSample& s : stroke.path()) {
+        const Vec3d q = s.pos - c;
+        const double rr = (q - q.dot(n) * n).norm();
+        rmin = std::min(rmin, rr);
+        rmax = std::max(rmax, rr);
+    }
+    WARN("in-plane radius " << rmin << " .. " << rmax << " (loop drawn at " << radius << ")");
+
+    const indexed_triangle_set cutter = draw_cut_cutter_solid(stroke, params, bb, 0.0, &bunny);
+    WARN("cutter verts " << cutter.vertices.size() << " tris " << cutter.indices.size()
+         << " open edges " << (cutter.empty() ? -1 : int(its_num_open_edges(cutter))));
+
+    if (!cutter.empty()) {
+        double worst = 0.0;
+        for (const Vec3f& v : cutter.vertices)
+            worst = std::max(worst, dist_to_stroke(stroke, v.cast<double>()));
+        WARN("cutter worst reach from line " << worst
+             << " (budget " << (params.extension + params.depth + 1.0) << ")");
+    }
+}
