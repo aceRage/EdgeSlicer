@@ -55,7 +55,11 @@ class MqttClient : public mqtt::callback,
                   public virtual mqtt::iaction_listener,
                   public std::enable_shared_from_this<MqttClient>
 {
-public:
+private:
+    // The constructors are private on purpose: MqttClient::create() below is the
+    // only way to build a client, so every instance has its self_ populated.
+    // connection_lost() arms auto-reconnect from self_; a client built with a
+    // raw `new MqttClient(...)` (or make_shared) would silently never reconnect.
     // normal MQTT connect 
     MqttClient(const std::string& server_address,
                const std::string& client_id,
@@ -73,6 +77,7 @@ public:
                const std::string& password = "",
                bool clean_session = false);
 
+public:
     // Factory: the supported way to create a MqttClient. It caches the
     // client's own weak reference (self_) exactly when shared ownership is
     // established, so Paho callbacks can arm the reconnect checker from the
