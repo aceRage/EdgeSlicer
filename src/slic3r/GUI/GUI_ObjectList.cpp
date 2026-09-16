@@ -32,6 +32,7 @@
 #include "RemeshDialog.hpp"
 #include "RoundDialog.hpp"
 #include "SliceBakeDialog.hpp"
+#include "Jobs/QuadRemeshJob.hpp"
 #include "Jobs/SliceBakeJob.hpp"
 #include "Jobs/Worker.hpp"
 #include <wx/filedlg.h>
@@ -6225,92 +6226,58 @@ void ObjectList::quad_remesh(bool close_gizmos)
     }
 
     Plater* plater = wxGetApp().plater();
-    Plater::TakeSnapshot snapshot(plater, "Quad remesh");
-    wxBusyCursor wait;
 
-    size_t total_before = 0, total_after = 0, total_quads = 0;
-    std::string first_refusal;
-    auto remesh_volume = [&](ModelVolume& mv) -> bool {
-        QuadRemeshOptions o = opts;
-        // An untouched target field means "this part's own default", so a multi-part
-        // selection keeps each part near its own density rather than forcing them all
-        // to the first part's count.
-        if (o.target_faces == default_target)
-            o.target_faces = quad_remesh_default_target(mv.mesh().its);
+    // The remesh used to run right here, synchronously on the UI thread under a wxBusyCursor,
+    // with no cancel and no time limit. QuadriFlow can take a very long time, and on the UI
+    // thread that is indistinguishable from a crash - the window stops painting and the only way
+    // out is to force-close the app, which is what the owner had to do on an assembled 2-part
+    // object. So collect the work here and hand it to QuadRemeshJob: the app stays live, the
+    // progress notification carries a Cancel, and each part has a wall-clock cap.
+    Worker& worker = plater->get_ui_job_worker();
+    if (!worker.is_idle())
+        return;
 
-        QuadRemeshReport rep;
-        indexed_triangle_set its = quad_remesh_triangulated(mv.mesh().its, o, &rep);
-        BOOST_LOG_TRIVIAL(info) << "quad_remesh: '" << mv.name << "' " << rep.triangles_before
-                                << " triangles -> " << rep.quads_after << " quads / "
-                                << rep.triangles_after << " triangles"
-                                << (rep.status == QuadRemeshStatus::Ok ? "" : ", refused: " + rep.note);
-        if (its.indices.empty()) {
-            if (first_refusal.empty())
-                first_refusal = rep.note;
-            return false;
-        }
-        total_before += rep.triangles_before;
-        total_after  += rep.triangles_after;
-        total_quads  += rep.quads_after;
-        mv.set_mesh(std::move(its));
-        mv.set_new_unique_id();
-        mv.calculate_convex_hull();
-        return true;
-    };
-
-    int remeshed = 0, failed = 0;
-    auto process_object = [&](int obj_idx, const std::vector<int>& vols) {
+    std::vector<QuadRemeshJob::Target> targets;
+    auto collect_object = [&](int obj_idx, const std::vector<int>& vols) {
         ModelObject* mo = object(obj_idx);
         if (mo == nullptr)
             return;
-        // Facet indices are meaningless after any remesh, so the painted data goes -
-        // this also fires the existing "custom supports removed" notification.
-        plater->clear_before_change_mesh(obj_idx);
-        bool any = false;
         for (size_t i = 0; i < mo->volumes.size(); ++i) {
             if (!vols.empty() && std::find(vols.begin(), vols.end(), int(i)) == vols.end())
                 continue;
-            if (!mo->volumes[i]->is_model_part())
+            ModelVolume* mv = mo->volumes[i];
+            if (!mv->is_model_part())
                 continue;
-            if (remesh_volume(*mo->volumes[i])) { ++remeshed; any = true; }
-            else ++failed;
-        }
-        if (any) {
-            mo->invalidate_bounding_box();
-            mo->ensure_on_bed();
-            plater->changed_mesh(obj_idx);
-            plater->get_partplate_list().notify_instance_update(obj_idx, 0);
-            update_item_error_icon(obj_idx, -1);
-            update_info_items(obj_idx);
+
+            QuadRemeshJob::Target t;
+            t.object_id = mo->id();
+            t.volume_id = mv->id();
+            t.name      = mv->name;
+            // Everything the worker reads is a copy taken here, on the main thread.
+            t.mesh          = mv->mesh().its;
+            t.mesh_vertices = t.mesh.vertices.size();
+            t.mesh_indices  = t.mesh.indices.size();
+            t.opts          = opts;
+            // An untouched target field means "this part's own default", so a multi-part
+            // selection keeps each part near its own density rather than forcing them all to the
+            // first part's count.
+            if (t.opts.target_faces == default_target)
+                t.opts.target_faces = quad_remesh_default_target(t.mesh);
+            targets.push_back(std::move(t));
         }
     };
 
     if (vol_idxs.empty()) {
         for (int obj_idx : obj_idxs)
-            process_object(obj_idx, {});
+            collect_object(obj_idx, {});
     } else if (!obj_idxs.empty()) {
-        process_object(obj_idxs.front(), vol_idxs);
+        collect_object(obj_idxs.front(), vol_idxs);
     }
-    plater->sidebar().obj_list()->update_plate_values_for_items();
 
-    NotificationManager* notify = plater->get_notification_manager();
-    if (notify != nullptr) {
-        wxString msg;
-        if (remeshed > 0) {
-            msg = GUI::format(_L("Quad remeshed %1% part(s)."), remeshed) + " " +
-                  GUI::format(_L("Triangles: %1% -> %2% (%3% quads)."), total_before, total_after, total_quads);
-        } else {
-            msg = _L("Nothing was quad remeshed.");
-        }
-        // A refusal is the common failure and it always has an actionable reason
-        // (holes, or several shells), so carry the first one into the notification
-        // rather than making the user open the log.
-        if (failed > 0 && !first_refusal.empty())
-            msg += " " + GUI::format(_L("%1% part(s) were skipped: %2%"), failed, from_u8(first_refusal));
-        else if (failed > 0)
-            msg += " " + GUI::format(_L("%1% part(s) failed."), failed);
-        notify->push_notification(into_u8(msg));
-    }
+    if (targets.empty())
+        return;
+
+    replace_job(worker, std::make_unique<QuadRemeshJob>(plater, std::move(targets)));
 }
 
 // Ultra: slice baking (phase 1) - turn the object's SLICED outer wall, fuzzy skin and all,
