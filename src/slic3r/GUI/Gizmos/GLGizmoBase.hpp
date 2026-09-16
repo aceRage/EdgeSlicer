@@ -9,6 +9,7 @@
 #include "slic3r/GUI/MeshUtils.hpp"
 #include "slic3r/GUI/SceneRaycaster.hpp"
 #include "slic3r/GUI/3DScene.hpp"
+#include "slic3r/GUI/Gizmos/DockWidthSettle.hpp"
 
 #include <cereal/archives/binary.hpp>
 
@@ -167,7 +168,19 @@ public:
     std::string get_name(bool include_shortcut = true) const;
 
     EState get_state() const { return m_state; }
-    void set_state(EState state) { m_state = state; on_set_state(); }
+    void set_state(EState state)
+    {
+        m_state = state;
+        // A candidate width mid-confirmation from the panel's last open (or
+        // from just before it closed) describes a layout that no longer
+        // applies once the panel opens again - most visibly when it reopens
+        // already docked, which is exactly when a stray confirmation would
+        // otherwise show up as one frame of the wrong width. The committed
+        // width itself is left alone: that is the deliberately remembered
+        // "last expanded width" a freshly reopened docked panel starts from.
+        m_dock_width.reset_pending();
+        on_set_state();
+    }
 
     int get_shortcut_key() const { return m_shortcut_key; }
 
@@ -344,7 +357,14 @@ private:
     // gives it, so its width only ever reflects the previous frame's guess. A
     // collapsed panel measures only its title row, which must not become the
     // docked width.
-    float m_dock_expanded_width{ 0.f };
+    //
+    // Wrapped in DockWidthSettle rather than a bare float: a measurement is
+    // only adopted once it has been seen on two consecutive frames, so a
+    // single transient reading (sub-pixel rounding, a hover/tooltip that
+    // briefly touched the content bounds, the first post-reopen measurement)
+    // cannot make the docked width flip back and forth every frame. See
+    // DockWidthSettle.hpp for the rationale.
+    DockWidthSettle m_dock_width;
 
     void load_dock_state();
     void store_dock_state();

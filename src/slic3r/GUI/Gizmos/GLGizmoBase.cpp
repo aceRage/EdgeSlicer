@@ -363,14 +363,30 @@ void GLGizmoBase::GizmoImguiEnd()
         // squeeze the contents and re-measure narrower every frame.
         const float ideal = win->ContentSizeIdeal.x + 2.0f * win->WindowPadding.x +
                             (win->ScrollbarY ? ImGui::GetStyle().ScrollbarSize : 0.f);
-        if (m_dock_body_rendered && ideal > m_imgui->scaled(12.0f) && std::abs(ideal - m_dock_expanded_width) > 0.5f) {
-            m_dock_expanded_width = ideal;
-            // The rect we drew this frame was built from the previous (possibly
-            // absent) measurement, so draw one more with the real one.
-            if (m_docked) {
+        if (m_dock_body_rendered && ideal > m_imgui->scaled(12.0f)) {
+            // DockWidthSettle only commits a new width once the SAME candidate
+            // has been measured on two consecutive frames - see
+            // DockWidthSettle.hpp. That is what stops a one-frame transient
+            // (sub-pixel window-position rounding, a hover/tooltip that
+            // briefly touched the content bounds, the first measurement right
+            // after the panel reopens docked) from being adopted and then
+            // immediately contradicted by the next, ordinary frame - which is
+            // what a bare "differs by more than 0.5px" check let happen: two
+            // close-but-different widths kept taking turns being "the" width,
+            // every frame, for as long as the panel stayed open.
+            if (m_dock_width.update(ideal, 0.5f) && m_docked) {
+                // The rect we drew this frame was built from the previous
+                // (possibly absent) measurement, so draw one more with the
+                // real one.
                 m_imgui->set_requires_extra_frame();
                 m_parent.set_as_dirty();
             }
+        } else if (!m_dock_body_rendered) {
+            // Title-row-only frame (collapsed, or the toggle-collapse frame):
+            // nothing was measured, so any candidate that was mid-confirmation
+            // must not survive to be compared against a later, unrelated
+            // frame's measurement.
+            m_dock_width.reset_pending();
         }
     }
 
@@ -473,15 +489,15 @@ void GLGizmoBase::dock_setup_next_window(float &x, float &y, float bottom_limit,
 
     // A panel that has no width of its own (it was AlwaysAutoResize) is sized
     // from the width its contents measured, which GizmoImguiEnd() records into
-    // m_dock_expanded_width from ContentSizeIdeal. That measurement must NOT come
+    // m_dock_width from ContentSizeIdeal. That measurement must NOT come
     // from the window's own width: a docked window is pinned to the rect we gave
     // it, so reading its width back would only return our own previous guess and
     // latch the panel at whatever it opened with - which is the bug this replaces.
     // While collapsed the contents are only the title row, far too narrow to dock
-    // to, so the last expanded width is what gets remembered.
+    // to, so the last expanded (committed) width is what gets remembered.
     float width = window_width;
     if (width <= 0.f)
-        width = m_dock_expanded_width;
+        width = m_dock_width.committed_width;
     if (width < m_imgui->scaled(12.0f)) {
         // First frame of a panel that has never been measured (a fresh session
         // opening straight into its remembered docked state). Nothing knows the
@@ -612,6 +628,10 @@ bool GLGizmoBase::dock_render_titlebar(const std::string &title)
                                 m_docked ? _L("Undock panel") : _L("Dock panel to the right"))) {
         m_docked = !m_docked;
         store_dock_state();
+        // A candidate measured under the dock state we are leaving must not
+        // get confirmed against the first measurement taken under the new one
+        // - the two are not the same layout.
+        m_dock_width.reset_pending();
         // The window's rect changes this frame; ask for one more so it is drawn
         // in its new place without waiting for the next mouse move.
         m_imgui->set_requires_extra_frame();
