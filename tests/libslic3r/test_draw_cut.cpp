@@ -13,6 +13,8 @@
 #include <optional>
 #include <limits>
 #include <cstdlib>
+#include <set>
+#include <tuple>
 
 using namespace Slic3r;
 
@@ -2780,9 +2782,27 @@ TEST_CASE("Draw cut: the band direction is the angle between inward and the norm
     REQUIRE(d45.dot(inward) == Approx(std::sqrt(0.5)).margin(1e-9));
     REQUIRE(d45.dot(n) == Approx(-std::sqrt(0.5)).margin(1e-9));
 
-    // Out of range is clamped rather than allowed to travel back out of the part.
-    REQUIRE(draw_cut_band_dir(inward, n, -30.0).dot(n) == Approx(0.0).margin(1e-9));
-    REQUIRE(draw_cut_band_dir(inward, n, 130.0).dot(n) == Approx(-1.0).margin(1e-9));
+    // 2026-09-15, owner item 5: THE ANGLE IS SIGNED NOW, so -30 is a real lip leaning
+    // the OTHER way rather than a value to clamp at zero. It is the mirror of +30 in
+    // the plane through the point parallel to the core: same reach inward, opposite
+    // along n.
+    {
+        const Vec3d dp = draw_cut_band_dir(inward, n,  30.0);
+        const Vec3d dn = draw_cut_band_dir(inward, n, -30.0);
+        REQUIRE(dn.norm() == Approx(1.0).margin(1e-9));
+        REQUIRE(dn.dot(inward) == Approx(dp.dot(inward)).margin(1e-9));
+        REQUIRE(dn.dot(n) == Approx(-dp.dot(n)).margin(1e-9));
+        REQUIRE(dn.dot(n) == Approx(0.5).margin(1e-9));    // up, towards the drawn side
+        REQUIRE(dp.dot(n) == Approx(-0.5).margin(1e-9));   // down, away from it
+    }
+
+    // -90 is the mirror of +90: a straight wall UP rather than down.
+    REQUIRE(draw_cut_band_dir(inward, n, -90.0).dot(n) == Approx(1.0).margin(1e-9));
+
+    // Out of range is still clamped rather than allowed to travel back out of the
+    // part - at both ends now.
+    REQUIRE(draw_cut_band_dir(inward, n,  130.0).dot(n) == Approx(-1.0).margin(1e-9));
+    REQUIRE(draw_cut_band_dir(inward, n, -130.0).dot(n) == Approx( 1.0).margin(1e-9));
 }
 
 // ---------------------------------------------------------------------------
@@ -3873,3 +3893,611 @@ TEST_CASE("Draw cut: Through all on a real loop is a straight prism, not an hour
 }
 
 
+
+// ---------------------------------------------------------------------------
+// THE STANFORD BUNNY. 2026-09-14/15 owner click-test, item 3: "a normal draw cut
+// cuts beyond the Extension - the band that angles from the drawn line to the flat
+// core keeps going and a plate far outside the loop split the whole bunny body in
+// two."
+//
+// Every fixture above this point is CONVEX at the core plane: a cube, a cylinder.
+// On a convex part "inward" (towards the loop's own axis) stays inside the loop's
+// own footprint all the way to the core, so a band that travels inward can never
+// emerge somewhere else on the part. The bunny is not convex, and a loop on its
+// HEAD has the neck, the body and the ears in the same core-plane section - which
+// is exactly the configuration that broke.
+// ---------------------------------------------------------------------------
+
+// The bunny, in the CUT PLANE frame, composed the way cylinder_3mf_in_plane() does:
+// instance matrix * volume matrix, then recentred on the object bbox centre (which
+// is where the gizmo drops the plane when the tool opens).
+static indexed_triangle_set bunny_in_plane(Vec3d* plane_centre = nullptr)
+{
+    static indexed_triangle_set cached;
+    static Vec3d                cached_centre = Vec3d::Zero();
+    if (cached.empty()) {
+        Model model;
+        const std::string path = std::string(TEST_DATA_DIR) +
+                                 "/../../resources/handy_models/Stanford_Bunny.3mf";
+        DynamicPrintConfig cfg;
+        ConfigSubstitutionContext ctx(ForwardCompatibilitySubstitutionRule::EnableSilent);
+        bool ok = false;
+        try {
+            model = Model::read_from_file(path, &cfg, &ctx,
+                                          LoadStrategy::LoadModel | LoadStrategy::AddDefaultInstances |
+                                          LoadStrategy::Silence);
+            ok = !model.objects.empty();
+        } catch (const std::exception&) {
+            ok = false;
+        }
+        REQUIRE(ok);
+
+        const ModelObject* mo = model.objects.front();
+        REQUIRE(!mo->instances.empty());
+        const Transform3d inst = mo->instances.front()->get_transformation().get_matrix();
+
+        indexed_triangle_set merged;
+        for (const ModelVolume* mv : mo->volumes) {
+            if (!mv->is_model_part() || mv->mesh().empty())
+                continue;
+            indexed_triangle_set part = mv->mesh().its;
+            its_transform(part, inst * mv->get_matrix());
+            its_merge(merged, part);
+        }
+        REQUIRE_FALSE(merged.empty());
+
+        BoundingBoxf3 bb;
+        for (const Vec3f& v : merged.vertices)
+            bb.merge(v.cast<double>());
+        cached_centre = bb.center();
+        for (Vec3f& v : merged.vertices)
+            v = (v.cast<double>() - cached_centre).cast<float>();
+        cached = std::move(merged);
+    }
+    if (plane_centre != nullptr)
+        *plane_centre = cached_centre;
+    return cached;
+}
+
+// A LOOP ON A SURFACE, captured EXACTLY the way the gizmo captures one: a ray per
+// sample, fired from outside the part along the view direction, keeping the FIRST
+// hit with its facet's own normal. That is MeshRaycaster's job, and it is why a
+// sample always lands on real front-facing material.
+//
+// A closest-point projection was tried first and is not the same thing at all: a
+// ring of plane points pushed onto a bunny by nearest-surface snaps to whatever is
+// nearest, which on a concave stretch is a facet round the far side of an ear - and
+// the stroke then "jumps across empty space" and gets truncated by finish(). The
+// user's mouse cannot do that, so neither should the fixture.
+//
+// `centre` is a point on (or just inside) the surface to draw around, `axis` the
+// direction the user is looking ALONG (so the eye is at centre - axis * far).
+static DrawCutStroke loop_on_surface(const indexed_triangle_set& mesh,
+                                     const Vec3d& centre, const Vec3d& axis,
+                                     double radius, int n = 160)
+{
+    const TriangleMesh tm(mesh);
+    AABBMesh aabb{ tm };
+
+    BoundingBoxf3 bb;
+    for (const Vec3f& v : mesh.vertices)
+        bb.merge(v.cast<double>());
+    // NOT `far`: that is still a reserved memory-model keyword under MSVC and the
+    // declaration silently becomes "const double = ..." with no variable at all.
+    const double away = 2.0 * bb.size().norm() + 10.0;
+
+    const Vec3d a  = axis.normalized();
+    const Vec3d e1 = (std::abs(a.z()) < 0.9 ? Vec3d::UnitZ() : Vec3d::UnitX()).cross(a).normalized();
+    const Vec3d e2 = a.cross(e1);
+
+    DrawCutStroke stroke;
+    for (int i = 0; i < n; ++ i) {
+        const double th = 2.0 * M_PI * double(i) / double(n);
+        // The eye ray for this pixel: parallel projection along `a`, offset by the
+        // ring's own radius in the view plane.
+        const Vec3d src = centre + radius * (std::cos(th) * e1 + std::sin(th) * e2) - away * a;
+
+        const AABBMesh::hit_result hit = aabb.query_ray_hit(src, a);
+        if (!(hit.distance() < std::numeric_limits<double>::infinity()) || hit.face() < 0)
+            continue;
+        const size_t fi = size_t(hit.face());
+        const Vec3i32& f = mesh.indices[fi];
+        const Vec3d v0 = mesh.vertices[size_t(f(0))].cast<double>();
+        const Vec3d v1 = mesh.vertices[size_t(f(1))].cast<double>();
+        const Vec3d v2 = mesh.vertices[size_t(f(2))].cast<double>();
+        Vec3d nrm = (v1 - v0).cross(v2 - v0);
+        nrm = nrm.norm() > 1e-12 ? nrm.normalized() : -a;
+        // Front-facing: the gizmo only ever draws on skin that faces the user.
+        if (nrm.dot(a) > 0.0)
+            nrm = -nrm;
+        stroke.append(hit.position(), nrm, fi);
+    }
+    if (!stroke.samples().empty())
+        stroke.append(stroke.samples().front().pos, stroke.samples().front().normal,
+                      stroke.samples().front().facet);
+    return stroke;
+}
+
+// The shortest distance from `p` to the closed stroke polyline - the quantity
+// "farther than Extension from the drawn line" is measured with.
+static double dist_to_stroke(const DrawCutStroke& stroke, const Vec3d& p)
+{
+    const std::vector<DrawCutSample>& path = stroke.path();
+    double best = std::numeric_limits<double>::max();
+    const size_t n = path.size();
+    for (size_t i = 0; i < n; ++ i) {
+        const Vec3d& a  = path[i].pos;
+        const Vec3d& b  = path[(i + 1) % n].pos;
+        const Vec3d  ab = b - a;
+        const double L2 = ab.squaredNorm();
+        const double t  = L2 > 1e-18 ? std::clamp((p - a).dot(ab) / L2, 0.0, 1.0) : 0.0;
+        best = std::min(best, (a + t * ab - p).norm());
+    }
+    return best;
+}
+
+// The bunny's skull: the centroid of the vertices in the 55th..72nd percentile of
+// height, which is the head proper - below the ear tips, above the shoulders.
+// Taken from the mesh rather than hard-coded, so the fixture follows the file.
+static Vec3d bunny_head_point(const indexed_triangle_set& bunny)
+{
+    std::vector<double> zs;
+    zs.reserve(bunny.vertices.size());
+    for (const Vec3f& v : bunny.vertices)
+        zs.push_back(double(v.z()));
+    std::sort(zs.begin(), zs.end());
+    const double z_lo = zs[size_t(0.55 * double(zs.size()))];
+    const double z_hi = zs[size_t(0.72 * double(zs.size()))];
+
+    Vec3d  c = Vec3d::Zero();
+    size_t k = 0;
+    for (const Vec3f& v : bunny.vertices) {
+        const double z = double(v.z());
+        if (z >= z_lo && z <= z_hi) { c += v.cast<double>(); ++ k; }
+    }
+    REQUIRE(k > 0);
+    return c / double(k);
+}
+
+TEST_CASE("Draw cut: the bunny fixture loads and is the part the gizmo sees", "[DrawCut]")
+{
+    const indexed_triangle_set bunny = bunny_in_plane();
+    REQUIRE_FALSE(bunny.empty());
+    REQUIRE(bunny.vertices.size() > 1000);
+
+    BoundingBoxf3 bb;
+    for (const Vec3f& v : bunny.vertices)
+        bb.merge(v.cast<double>());
+    INFO("bunny bbox " << bb.size().x() << " x " << bb.size().y() << " x " << bb.size().z());
+    REQUIRE(bb.size().norm() > 10.0);
+    REQUIRE(bb.center().norm() < 1e-6);
+}
+
+TEST_CASE("Draw cut: a loop on the bunny's head cuts nothing beyond the Extension", "[DrawCut]")
+{
+    // OWNER ITEM 3. The band angled from the drawn line towards the LOOP'S OWN AXIS,
+    // and on the bunny that axis is somewhere inside the skull rather than under the
+    // patch - so the band ran on past the core, emerged out of the neck, and the
+    // plate it capped split the whole body. Nothing outside (loop + Extension) may
+    // be touched.
+    const indexed_triangle_set bunny = bunny_in_plane();
+    BoundingBoxf3 bb;
+    for (const Vec3f& v : bunny.vertices)
+        bb.merge(v.cast<double>());
+
+    const Vec3d  head   = bunny_head_point(bunny);
+    const double radius = 0.10 * bb.size().norm();
+    const DrawCutStroke stroke =
+        finish_like_gizmo(loop_on_surface(bunny, head, Vec3d::UnitX(), radius), bunny);
+    REQUIRE(stroke.is_closed());
+    REQUIRE(stroke.path().size() > 40);
+
+    DrawCutParams params = owner_params();   // Angle 30, Depth 3, Extension 5.
+
+    // THE LOOP IS A PATCH, NOT A BELT: it encloses a piece of the head, it does not
+    // go round the bunny. The wrap-around half-space path must not fire.
+    REQUIRE_FALSE(draw_cut_loop_separates(bunny, stroke, params));
+
+    const indexed_triangle_set cutter = draw_cut_cutter_solid(stroke, params, bb, 0.0, &bunny);
+    REQUIRE_FALSE(cutter.empty());
+    REQUIRE(watertight(cutter));
+
+    // THE CUTTER IS LOCAL, and the measurement has to be the right one.
+    //
+    // "Distance from the drawn line" is NOT the quantity: the core plate is the
+    // loop's filled INTERIOR, so its middle is one loop-radius from the line by
+    // construction - 19 mm here - and always will be. A plug cut is a disc; that is
+    // what it is for.
+    //
+    // What the owner's item 3 is about is material OUTSIDE the loop: "nothing outside
+    // (drawn loop + Extension) is affected". So the reach is measured against the
+    // loop's own footprint - the distance from the loop's axis, in the core plane -
+    // and only points FURTHER OUT than the loop count. The band goes inward and the
+    // skirt outward by Extension, so the budget outside is Extension plus a
+    // millimetre of slack.
+    Vec3d cn, cc;
+    REQUIRE(draw_cut_core_plane(stroke, params, cn, cc));
+    double loop_r = 0.0;
+    for (const DrawCutSample& s : stroke.path()) {
+        const Vec3d q = s.pos - cc;
+        loop_r = std::max(loop_r, (q - q.dot(cn) * cn).norm());
+    }
+    double worst_out = 0.0;   // how far past the loop's own rim the cutter reaches
+    double worst_ax  = 0.0;   // and how far along the axis, which Depth bounds
+    for (const Vec3f& v : cutter.vertices) {
+        const Vec3d q = v.cast<double>() - cc;
+        const double along = q.dot(cn);
+        const double rad   = (q - along * cn).norm();
+        worst_out = std::max(worst_out, rad - loop_r);
+        worst_ax  = std::max(worst_ax, std::abs(along));
+    }
+    INFO("loop radius " << loop_r << ", cutter reaches " << worst_out
+         << " mm outside it (budget " << (params.extension + 1.0) << ")");
+    REQUIRE(worst_out <= params.extension + 1.0);
+    // And nothing runs off along the axis either: the band travels Depth in, the
+    // skirt Extension out, so the whole solid lives within that of the loop's plane.
+    INFO("cutter spans " << worst_ax << " mm along the core normal");
+    REQUIRE(worst_ax <= params.extension + params.depth + loop_r);
+
+    indexed_triangle_set upper, lower;
+    DrawCutError err = DrawCutError::None;
+    REQUIRE(draw_cut_split(bunny, stroke, params, &upper, &lower, &err));
+    REQUIRE(err == DrawCutError::None);
+    REQUIRE(watertight(upper));
+    REQUIRE(watertight(lower));
+
+    // THE PLUG IS SMALL: a patch cut out of the head, not half the bunny. The bug
+    // made this ~0.5 - the body cut clean in two.
+    const double vol_in = double(its_volume(bunny));
+    const double a = double(its_volume(upper));
+    const double b = double(its_volume(lower));
+    REQUIRE(a > 0.0);
+    REQUIRE(b > 0.0);
+    REQUIRE(a + b == Approx(vol_in).epsilon(0.02));
+    const double small = std::min(a, b) / (a + b);
+    INFO("volumes " << a << " / " << b << " (small fraction " << small << ")");
+    REQUIRE(small < 0.2);
+
+    // THE FAR GEOMETRY IS UNTOUCHED, triangle for triangle: every input triangle
+    // whose centroid is farther than Extension + 1 mm from the line must still be
+    // present, unchanged, in one of the two halves. The boolean re-tessellates
+    // nothing it does not touch, so a far triangle survives bit for bit.
+    auto centroids_far = [&](const indexed_triangle_set& its) {
+        std::vector<Vec3d> out;
+        for (const Vec3i32& f : its.indices) {
+            const Vec3d c = (its.vertices[size_t(f(0))].cast<double>() +
+                             its.vertices[size_t(f(1))].cast<double>() +
+                             its.vertices[size_t(f(2))].cast<double>()) / 3.0;
+            if (dist_to_stroke(stroke, c) > params.extension + 1.0)
+                out.push_back(c);
+        }
+        return out;
+    };
+    const std::vector<Vec3d> want = centroids_far(bunny);
+    REQUIRE(want.size() > 100);
+
+    std::vector<Vec3d>       have    = centroids_far(upper);
+    const std::vector<Vec3d> have_lo = centroids_far(lower);
+    have.insert(have.end(), have_lo.begin(), have_lo.end());
+
+    auto key = [](const Vec3d& c) {
+        return std::make_tuple(int64_t(std::llround(c.x() * 1000.0)),
+                               int64_t(std::llround(c.y() * 1000.0)),
+                               int64_t(std::llround(c.z() * 1000.0)));
+    };
+    std::set<std::tuple<int64_t, int64_t, int64_t>> have_set;
+    for (const Vec3d& c : have)
+        have_set.insert(key(c));
+
+    size_t missing = 0;
+    for (const Vec3d& c : want)
+        if (have_set.find(key(c)) == have_set.end())
+            ++ missing;
+    INFO("far triangles: " << want.size() << " in, " << missing << " missing from the halves");
+    REQUIRE(double(missing) < 0.01 * double(want.size()));
+}
+
+// ---------------------------------------------------------------------------
+// OWNER ITEMS 4 AND 5, 2026-09-15: the Extension angle, and the reversible band.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("Draw cut: the Extension angle defaults to continuing the band", "[DrawCut]")
+{
+    // ITEM 4's contract, and the half of it that matters most: an untouched cut does
+    // not move. `extension_angle_deg` unset means "continue the band", which is -d
+    // exactly - the skirt the band has always had.
+    const Vec3d inward = Vec3d::UnitX();
+    const Vec3d n      = Vec3d::UnitZ();
+
+    for (double angle : { -60.0, -30.0, 0.0, 30.0, 60.0 }) {
+        DrawCutParams p;
+        p.angle_deg = angle;
+        REQUIRE_FALSE(p.extension_angle_deg.has_value());
+        REQUIRE(draw_cut_extension_angle(p) == Approx(angle));
+
+        const Vec3d band  = draw_cut_band_dir(inward, n, angle);
+        const Vec3d skirt = draw_cut_skirt_dir(inward, n, p);
+        INFO("angle " << angle);
+        // -d, to floating point: one straight line through the drawn point.
+        REQUIRE(skirt.x() == Approx(-band.x()).margin(1e-12));
+        REQUIRE(skirt.y() == Approx(-band.y()).margin(1e-12));
+        REQUIRE(skirt.z() == Approx(-band.z()).margin(1e-12));
+    }
+
+    // And a value makes it independent: the skirt leaves at ITS angle, whatever the
+    // band's is.
+    {
+        DrawCutParams p;
+        p.angle_deg           = 60.0;
+        p.extension_angle_deg = 0.0;   // a flat skirt, in the plane parallel to the core
+        REQUIRE(draw_cut_extension_angle(p) == Approx(0.0));
+        const Vec3d skirt = draw_cut_skirt_dir(inward, n, p);
+        // Flat: no component along n at all, and pointing OUT (away from inward).
+        REQUIRE(skirt.dot(n) == Approx(0.0).margin(1e-12));
+        REQUIRE(skirt.dot(inward) == Approx(-1.0).margin(1e-12));
+    }
+    {
+        DrawCutParams p;
+        p.angle_deg           = 0.0;
+        p.extension_angle_deg = 90.0;  // straight out along +n
+        const Vec3d skirt = draw_cut_skirt_dir(inward, n, p);
+        REQUIRE(skirt.dot(n) == Approx(1.0).margin(1e-12));
+    }
+}
+
+TEST_CASE("Draw cut: the Extension angle aims the skirt on a real loop", "[DrawCut]")
+{
+    // The same loop cut three ways: the default skirt, a flat one and one aimed out
+    // along +n. The skirt tip ring has to move where the angle says, and the cut has
+    // to stay watertight in each case.
+    const indexed_triangle_set cyl = cylinder_3mf_in_plane();
+    const double r = cylinder_3mf_radius(cyl);
+    const DrawCutStroke stroke = finish_like_gizmo(owner_loop_on_3mf_cylinder(cyl, r, 0.0), cyl);
+
+    BoundingBoxf3 bb;
+    for (const Vec3f& v : cyl.vertices)
+        bb.merge(v.cast<double>());
+
+    Vec3d n, c;
+    REQUIRE(draw_cut_core_plane(stroke, owner_params(), n, c));
+
+    // The mean height of the skirt tip above the core plane, which is what the angle
+    // moves. The tip ring is the OUTERMOST ring of the cutter, so it is picked out by
+    // its in-plane radius rather than by index.
+    auto mean_tip_height = [&](const DrawCutParams& p) {
+        const indexed_triangle_set cutter = draw_cut_cutter_solid(stroke, p, bb, 0.0, &cyl);
+        REQUIRE_FALSE(cutter.empty());
+        REQUIRE(watertight(cutter));
+        double sum = 0.0;
+        size_t k = 0;
+        for (const Vec3f& v : cutter.vertices) {
+            const Vec3d q = v.cast<double>() - c;
+            const double rad = (q - q.dot(n) * n).norm();
+            if (rad > r) { sum += q.dot(n); ++ k; }   // outside the barrel: the skirt
+        }
+        REQUIRE(k > 0);
+        return sum / double(k);
+    };
+
+    DrawCutParams base = owner_params();   // angle 30, so the default skirt leaves at 30
+    const double h_default = mean_tip_height(base);
+
+    // THE SIGN, stated once here because it is the thing to get wrong: the skirt is
+    // the REVERSE of a band ruling built at this angle, so it carries the OPPOSITE
+    // sign along n to the band. A band at +A leans along -n; the skirt that
+    // continues it therefore leaves along +n. So a LARGER extension angle lifts the
+    // tip, and a negative one tucks it under - the same way round as the Angle
+    // itself reads on the band, which is what makes "continue the band" the
+    // identity rather than a flip.
+    DrawCutParams up = base;
+    up.extension_angle_deg = 80.0;         // the skirt carried up and out
+    const double h_up = mean_tip_height(up);
+
+    DrawCutParams down = base;
+    down.extension_angle_deg = -80.0;      // tucked under
+    const double h_down = mean_tip_height(down);
+
+    INFO("skirt tip height: up " << h_up << " default " << h_default << " down " << h_down);
+    REQUIRE(h_up > h_default);
+    REQUIRE(h_down < h_default);
+}
+
+TEST_CASE("Draw cut: a negative Angle mirrors the band across the core plane", "[DrawCut]")
+{
+    // ITEM 5. The same stroke at +A and at -A must give bands that are mirror images
+    // in the plane through the drawn line parallel to the core: the inner ring ends
+    // up on the OTHER side of the core plane, and the in-plane inset is identical
+    // (cos is even), so the two cores are the same size.
+    const indexed_triangle_set cyl = cylinder_3mf_in_plane();
+    const double r = cylinder_3mf_radius(cyl);
+    const DrawCutStroke stroke = finish_like_gizmo(owner_loop_on_3mf_cylinder(cyl, r, 0.0), cyl);
+
+    Vec3d n, c;
+    {
+        DrawCutParams probe = owner_params();
+        REQUIRE(draw_cut_core_plane(stroke, probe, n, c));
+    }
+
+    // The band direction, sample by sample, is where the mirroring lives.
+    for (size_t i = 0; i < stroke.path().size(); i += 17) {
+        DrawCutParams pos = owner_params(); pos.angle_deg =  40.0;
+        DrawCutParams neg = owner_params(); neg.angle_deg = -40.0;
+        const Vec3d inward = draw_cut_core_inward(stroke, pos, n, c, i);
+        const Vec3d dp = draw_cut_band_dir(inward, n, pos.angle_deg);
+        const Vec3d dn = draw_cut_band_dir(inward, n, neg.angle_deg);
+        INFO("sample " << i);
+        // Same in-plane part, opposite along-n part: a reflection in the plane
+        // through the point parallel to the core.
+        REQUIRE(dp.dot(inward) == Approx(dn.dot(inward)).margin(1e-12));
+        REQUIRE(dp.dot(n) == Approx(-dn.dot(n)).margin(1e-12));
+        // And the lip really does lean: at 40 degrees it is not a flat shelf.
+        REQUIRE(std::abs(dp.dot(n)) > 0.5);
+    }
+
+    // The CORE PLANE the band arrives at moves to the other side too, which is the
+    // visible half of the change: the flat mating face is above the drawn line
+    // instead of below it.
+    BoundingBoxf3 bb;
+    for (const Vec3f& v : cyl.vertices)
+        bb.merge(v.cast<double>());
+
+    auto core_height = [&](double angle) {
+        DrawCutParams p = owner_params();
+        p.angle_deg = angle;
+        Vec3d cn, cp;
+        REQUIRE(draw_cut_core_face(stroke, p, bb, cn, cp));
+        // Signed height of the core plane above the loop's own centroid, along the
+        // core normal - with cn's sign folded in so the two runs are comparable.
+        return (cp - c).dot(n) * (cn.dot(n) >= 0.0 ? 1.0 : -1.0);
+    };
+
+    const double h_pos = core_height( 40.0);
+    const double h_neg = core_height(-40.0);
+    INFO("core height at +40 " << h_pos << ", at -40 " << h_neg);
+    // Opposite sides, and by the same distance.
+    REQUIRE(h_pos * h_neg < 0.0);
+    REQUIRE(std::abs(h_pos) == Approx(std::abs(h_neg)).epsilon(0.05));
+
+    // Both directions still cut the part in two, watertight.
+    for (double angle : { 40.0, -40.0 }) {
+        DrawCutParams p = owner_params();
+        p.angle_deg = angle;
+        indexed_triangle_set upper, lower;
+        DrawCutError err = DrawCutError::None;
+        INFO("angle " << angle);
+        REQUIRE(draw_cut_split(cyl, stroke, p, &upper, &lower, &err));
+        REQUIRE(err == DrawCutError::None);
+        REQUIRE(watertight(upper));
+        REQUIRE(watertight(lower));
+        const double a = double(its_volume(upper));
+        const double b = double(its_volume(lower));
+        REQUIRE(a > 0.0);
+        REQUIRE(b > 0.0);
+        REQUIRE(a + b == Approx(double(its_volume(cyl))).epsilon(0.02));
+    }
+}
+
+TEST_CASE("Draw cut: Through all projects inward from the drawn line", "[DrawCut]")
+{
+    // ITEM 1. Through all is a prism from the drawn line's own surface INWARD - the
+    // side opposite the stroked facets' outward normal - through everything. Nothing
+    // on the OUTWARD side of the stroke is touched.
+    //
+    // On a cube's top face that is easy to state exactly: a loop on the top face has
+    // every normal at +Z, so the prism must occupy z <= 20 and leave z > 20 alone.
+    const indexed_triangle_set cube = centred_cube();
+    DrawCutStroke ring = circle_on_top(10.0, 96);
+    REQUIRE(ring.finish(1.0, 0.0) == DrawCutError::None);
+
+    BoundingBoxf3 bb;
+    for (const Vec3f& v : cube.vertices)
+        bb.merge(v.cast<double>());
+
+    DrawCutParams params;
+    params.through_all = true;
+
+    // THE OUTWARD SIDE is +Z here, and the mesh agrees with the samples.
+    Vec3d n, c;
+    REQUIRE(draw_cut_core_plane(ring, params, n, c));
+    const Vec3d outward = draw_cut_outward_side(ring, n, &cube);
+    INFO("outward " << outward.x() << " " << outward.y() << " " << outward.z());
+    REQUIRE(outward.z() == Approx(1.0).margin(1e-9));
+
+    const indexed_triangle_set cutter = draw_cut_cutter_solid(ring, params, bb, 0.0, &cube);
+    REQUIRE_FALSE(cutter.empty());
+    REQUIRE(watertight(cutter));
+
+    // NOTHING BEHIND THE DRAWN LINE. The top face is at z == +20 and the loop is on
+    // it, so the prism may reach ABOVE it only by the lift that keeps the wall from
+    // lying in the face (the Extension, floored) - not by the bounding-box diagonal
+    // the old both-ways prism used, which is the bug. The lifted part is outside the
+    // material anyway, so it removes nothing.
+    double z_max = -1e9;
+    for (const Vec3f& v : cutter.vertices)
+        z_max = std::max(z_max, double(v.z()));
+    const double lift_budget = std::max(params.extension, 0.04) + 0.1;
+    INFO("cutter reaches z " << z_max << " (the face is at 20, lift budget " << lift_budget << ")");
+    REQUIRE(z_max < 20.0 + lift_budget);
+    // And the OLD behaviour - a full reach above the face - is gone. The cube's
+    // diagonal is ~69 mm, so the old prism's top ring sat at z ~= 92.
+    REQUIRE(z_max < 30.0);
+
+    // And it goes clean out of the bottom: through ALL.
+    double z_min = 1e9;
+    for (const Vec3f& v : cutter.vertices)
+        z_min = std::min(z_min, double(v.z()));
+    REQUIRE(z_min < -20.0);
+
+    // The cut itself: a straight plug, and the rest of the cube intact.
+    indexed_triangle_set upper, lower;
+    DrawCutError err = DrawCutError::None;
+    REQUIRE(draw_cut_split(cube, ring, params, &upper, &lower, &err));
+    REQUIRE(err == DrawCutError::None);
+    REQUIRE(watertight(upper));
+    REQUIRE(watertight(lower));
+    const double a = double(its_volume(upper));   // the plug
+    const double b = double(its_volume(lower));
+    REQUIRE(a + b == Approx(double(its_volume(cube))).epsilon(0.02));
+    // A 10 mm-radius plug through a 40 mm cube: pi r^2 h = 3.14 * 100 * 40.
+    INFO("plug volume " << a << " expected ~" << (M_PI * 100.0 * 40.0));
+    REQUIRE(a == Approx(M_PI * 100.0 * 40.0).epsilon(0.1));
+}
+
+TEST_CASE("Draw cut: the outward side comes from the mesh when the samples cancel",
+          "[DrawCut]")
+{
+    // ITEM 1's robustness half. On a loop whose sample normals nearly cancel - a belt
+    // round a barrel, or a patch spread over a hemisphere - the averaged skin normal
+    // is noise, and that is exactly the case where the old code let Newell's winding
+    // decide which way Through all ran. draw_cut_outward_side() falls through to a
+    // parity test against the mesh there.
+    //
+    // A loop on a SPHERE spanning most of a hemisphere is the clean article: its
+    // normals fan out over the whole cap, so their mean along n is small, and yet
+    // "which way is out" has an obvious right answer.
+    indexed_triangle_set sphere = its_make_sphere(20.0, 0.6);
+    BoundingBoxf3 bb;
+    for (const Vec3f& v : sphere.vertices)
+        bb.merge(v.cast<double>());
+
+    // A loop at 60 degrees of latitude: a wide cap, normals spread over 120 degrees.
+    DrawCutStroke stroke;
+    const double lat = 60.0 * M_PI / 180.0;
+    const int n = 96;
+    for (int i = 0; i < n; ++ i) {
+        const double th = 2.0 * M_PI * double(i) / double(n);
+        const Vec3d dir(std::sin(lat) * std::cos(th), std::sin(lat) * std::sin(th), std::cos(lat));
+        stroke.append(20.0 * dir, dir, size_t(i));
+    }
+    stroke.append(stroke.samples().front().pos, stroke.samples().front().normal, 0);
+    REQUIRE(stroke.finish(1.0, 0.0) == DrawCutError::None);
+    REQUIRE(stroke.is_closed());
+
+    DrawCutParams params;
+    params.through_all = true;
+    Vec3d nn, cc;
+    REQUIRE(draw_cut_core_plane(stroke, params, nn, cc));
+
+    // Whichever way Newell wound it, the outward side is the one that points AWAY
+    // from the sphere's centre - here +Z, because the cap is the north one.
+    const Vec3d outward = draw_cut_outward_side(stroke, nn, &sphere);
+    INFO("core normal z " << nn.z() << ", outward z " << outward.z());
+    REQUIRE(outward.z() > 0.0);
+
+    // And the prism it drives goes DOWN, into the sphere.
+    const indexed_triangle_set cutter = draw_cut_cutter_solid(stroke, params, bb, 0.0, &sphere);
+    REQUIRE_FALSE(cutter.empty());
+    double z_max = -1e9, z_min = 1e9;
+    for (const Vec3f& v : cutter.vertices) {
+        z_max = std::max(z_max, double(v.z()));
+        z_min = std::min(z_min, double(v.z()));
+    }
+    // The cap is at z == 20 cos 60 == 10; the prism starts there, lifted clear of
+    // the skin by the Extension, and runs out of the bottom of the sphere. What it
+    // must NOT do is reach the far side the way a both-ways prism did: the sphere's
+    // own diagonal is ~69 mm, so the old top ring sat at z ~= 80.
+    INFO("cutter z " << z_min << " .. " << z_max << " (extension " << params.extension << ")");
+    REQUIRE(z_max < 10.0 + params.extension + 1.0);
+    REQUIRE(z_max < 30.0);
+    REQUIRE(z_min < -20.0);
+}

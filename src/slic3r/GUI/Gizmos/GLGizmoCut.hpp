@@ -361,6 +361,12 @@ class GLGizmoCut3D : public GLGizmoBase
     // surface turns onto the flat core, so a few millimetres is the useful range -
     // not the old "reach right through the part". Default 3 mm, matching
     // DrawCutParams::depth.
+    //
+    // 2026-09-15, owner item 2: the SLIDER runs 0..20 mm with a numeric field beside
+    // it, the pattern the Edit gizmo's bevel width uses. The slider used to run to
+    // the bounding box diagonal, which on a big part put every useful value in the
+    // first few pixels of the track. A value past 20 is still reachable by typing,
+    // which is what DrawDepthMax is for.
     float           m_draw_depth{ 3.f };
     float           m_draw_extension{ 5.f };
     int             m_draw_direction{ int(DrawCutDirection::SurfaceNormal) };
@@ -445,12 +451,31 @@ class GLGizmoCut3D : public GLGizmoBase
     static const int DrawFieldRes = 48;
 
     // --- DRAW CUT (phase 3) ------------------------------------------------
-    // THE LIP ANGLE, in degrees, 0..90 and unsigned: the angle at which the outer
-    // band leans in towards the flat core. 0 is a flat shelf, 45 a chamfered lip
-    // the halves key into, 90 a straight wall. For a CLOSED loop it applies
-    // whatever the Direction is, because the band's direction comes from the core
-    // plane; an open line has no core and keeps the Surface-normal-only rule.
+    // THE LIP ANGLE, in degrees, SIGNED, -90..90: the angle at which the outer band
+    // leans in towards the flat core, and which SIDE of the core plane it leans
+    // towards. 0 is a flat shelf, +45 a chamfered lip the halves key into, +90 a
+    // straight wall down, and the negative half of the range is the same family
+    // mirrored - the lip projecting UP rather than down (2026-09-15, owner item 5).
+    // For a CLOSED loop it applies whatever the Direction is, because the band's
+    // direction comes from the core plane; an open line has no core and keeps the
+    // Surface-normal-only rule.
     float           m_draw_angle{ 0.f };
+    // THE EXTENSION ANGLE, 2026-09-15 owner item 4: which way the outward skirt
+    // leaves the drawn line. Off by default, and off means "continue the band" -
+    // the skirt leaves along the band's own ruling run backwards, which is what it
+    // has always done. The VALUE is kept while the checkbox is off so unticking and
+    // re-ticking gives the user back the angle they had set.
+    bool            m_draw_ext_angle_on{ false };
+    float           m_draw_ext_angle{ 0.f };
+
+    // THE DEPTH SLIDER'S RANGE, 2026-09-15 owner item 2. The slider covers the useful
+    // band travel; the numeric field beside it accepts anything up to DrawDepthMax,
+    // which is what "values typed above 20 are allowed" means.
+    static constexpr float DrawDepthSliderMin = 0.f;
+    static constexpr float DrawDepthSliderMax = 20.f;
+    static constexpr float DrawDepthMin       = 0.01f;
+    static constexpr float DrawDepthMax       = 1000.f;
+    static constexpr float DrawDepthStep      = 0.1f;
     // Advisory: a closed stroke whose binormal field does not close on itself, so
     // "outward" is not consistent round the loop and a draft angle would flare one
     // way on one part of it. The angle is forced to 0 and the panel says why.

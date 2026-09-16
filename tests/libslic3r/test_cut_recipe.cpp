@@ -172,6 +172,11 @@ static CutRecipe recipe_make(CutRecipeKind kind)
         r.draw_angle_deg   = 4.25;
         r.draw_through_all = false;
         r.draw_depth       = 12.75;
+        // VERSION 4. Populated, so the round trip has a value to lose here too; the
+        // UNSET state is covered on its own below, where it matters more (it is what
+        // every version <= 3 file decays to).
+        r.draw_ext_angle_set = true;
+        r.draw_ext_angle_deg = -22.5;
     }
     if (kind == CutRecipeKind::Groove) {
         r.groove.depth            = 3.5f;
@@ -428,6 +433,11 @@ TEST_CASE("Deft: a cut recipe survives a 3MF round trip for every surface kind",
                 }
                 REQUIRE(out.draw_extension == in.draw_extension);
                 REQUIRE(out.draw_angle_deg == in.draw_angle_deg);
+                // VERSION 4: the extension angle survives, and its "unset" state is a
+                // state in its own right rather than a zero.
+                REQUIRE(out.draw_ext_angle_set == in.draw_ext_angle_set);
+                if (in.draw_ext_angle_set)
+                    REQUIRE(out.draw_ext_angle_deg == in.draw_ext_angle_deg);
                 REQUIRE(out.draw_through_all == in.draw_through_all);
                 REQUIRE(out.draw_depth == in.draw_depth);
             }
@@ -706,7 +716,11 @@ TEST_CASE("Cut recipe: a version 2 drawn recipe migrates to the flat-core model"
 
     // Stamped forward, so nothing downstream sees two meanings.
     REQUIRE(r.version == CutRecipeVersion);
-    REQUIRE(CutRecipeVersion == 3);
+    // The migration is a version <= 2 story and stamps whatever the current version
+    // is; it does not pin that number. (It was pinned to 3 while 3 was current, and
+    // the version-4 bump - the extension angle - is a pure ADDITION that no v2 recipe
+    // needs migrating for, which is exactly why this assertion had to go.)
+    REQUIRE(CutRecipeVersion >= 3);
 
     // A v2 draft of 0 was a straight-down ruling, which IS a 90-degree straight wall
     // in the new model.
@@ -785,6 +799,89 @@ TEST_CASE("Cut recipe: migrating an already-current recipe is a no-op", "[CutRec
     REQUIRE(r.draw_angle_deg == Approx(45.0));
     REQUIRE(r.draw_depth == Approx(5.0));
     REQUIRE(r.draw_through_all);
+}
+
+// ---------------------------------------------------------------------------
+// VERSION 4 (2026-09-15): the extension angle. A pure ADDITION - no stored number
+// changed meaning - so a version <= 3 recipe re-cuts to exactly the same halves,
+// and the only thing to prove is that "unset" survives as unset rather than
+// decaying to a zero that would aim the skirt somewhere the old cut never did.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("Cut recipe: an old recipe's extension angle is unset, not zero", "[CutRecipe]")
+{
+    // ZERO IS A REAL EXTENSION ANGLE - it lays the skirt flat, level with the middle
+    // of the cut - so "the user never set one" cannot be spelt as zero. A version 3
+    // recipe loaded by this build has to come back with the flag OFF, which
+    // draw_params() then turns into an EMPTY optional, which DrawCut reads as
+    // "continue the band": the skirt the cut was actually made with.
+    CutRecipe r = recipe_make(CutRecipeKind::Drawn);
+    r.version            = 3;
+    r.draw_angle_deg     = 35.0;
+    r.draw_ext_angle_set = false;
+    r.draw_ext_angle_deg = 0.0;
+
+    REQUIRE(cut_recipe_version_supported(3));
+
+    const DrawCutParams p = r.draw_params();
+    REQUIRE_FALSE(p.extension_angle_deg.has_value());
+    // And "continue the band" resolves to the band's own angle, so moving Angle moves
+    // the skirt with it - which a latched number would not do.
+    REQUIRE(draw_cut_extension_angle(p) == Approx(35.0));
+
+    // Setting one makes it independent.
+    r.draw_ext_angle_set = true;
+    r.draw_ext_angle_deg = 0.0;
+    const DrawCutParams q = r.draw_params();
+    REQUIRE(q.extension_angle_deg.has_value());
+    REQUIRE(draw_cut_extension_angle(q) == Approx(0.0));
+
+    // The two are DIFFERENT recipes, which operator== has to see - otherwise an
+    // undo step could swap one for the other silently.
+    CutRecipe unset = r;
+    unset.draw_ext_angle_set = false;
+    REQUIRE(r != unset);
+}
+
+TEST_CASE("Cut recipe: version 4 is current and a version 3 recipe still loads", "[CutRecipe]")
+{
+    REQUIRE(CutRecipeVersion == 4);
+    REQUIRE(cut_recipe_version_supported(3));
+    REQUIRE(cut_recipe_version_supported(4));
+    REQUIRE_FALSE(cut_recipe_version_supported(5));
+
+    // migrate_draw_v2() stamps a version 3 recipe forward WITHOUT touching its
+    // numbers: version 4 changed no meanings, only added a field, so the angle, the
+    // depth and through-all all survive a migration that only bumps the stamp.
+    CutRecipe r = recipe_make(CutRecipeKind::Drawn);
+    r.version          = 3;
+    r.draw_angle_deg   = 35.0;
+    r.draw_depth       = 4.5;
+    r.draw_through_all = true;
+    r.migrate_draw_v2();
+    REQUIRE(r.version == 4);
+    REQUIRE(r.draw_angle_deg == Approx(35.0));
+    REQUIRE(r.draw_depth == Approx(4.5));
+    REQUIRE(r.draw_through_all);
+}
+
+TEST_CASE("Cut recipe: a negative lip angle is storable and survives", "[CutRecipe]")
+{
+    // OWNER ITEM 5: the lip angle is signed now, so a recipe has to be able to carry
+    // the mirrored band. The old range was 0..90 and a clamp anywhere in the chain
+    // would quietly turn the user's -40 into 0.
+    CutRecipe r = recipe_make(CutRecipeKind::Drawn);
+    r.draw_angle_deg = -40.0;
+
+    const DrawCutParams p = r.draw_params();
+    REQUIRE(p.angle_deg == Approx(-40.0));
+
+    // And the band really leans the other way at that value.
+    const Vec3d inward = Vec3d::UnitX();
+    const Vec3d n      = Vec3d::UnitZ();
+    const Vec3d d      = draw_cut_band_dir(inward, n, p.angle_deg);
+    REQUIRE(d.dot(n) > 0.0);   // UP, towards the side the loop was drawn on
+    REQUIRE(draw_cut_band_dir(inward, n, 40.0).dot(n) < 0.0);   // and DOWN at +40
 }
 
 TEST_CASE("Cut recipe: bounds that do not tile the samples fall back to one stroke", "[CutRecipe]")

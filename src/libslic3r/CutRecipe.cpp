@@ -63,7 +63,9 @@ bool CutRecipe::operator==(const CutRecipe& o) const
         return false;
     if (draw_direction != o.draw_direction || draw_view_dir != o.draw_view_dir ||
         draw_extension != o.draw_extension || draw_angle_deg != o.draw_angle_deg ||
-        draw_through_all != o.draw_through_all || draw_depth != o.draw_depth)
+        draw_through_all != o.draw_through_all || draw_depth != o.draw_depth ||
+        draw_ext_angle_set != o.draw_ext_angle_set ||
+        (draw_ext_angle_set && draw_ext_angle_deg != o.draw_ext_angle_deg))
         return false;
     if (thickness != o.thickness || thickness_offset != o.thickness_offset)
         return false;
@@ -110,6 +112,12 @@ DrawCutParams CutRecipe::draw_params() const
     p.angle_deg        = draw_angle_deg;
     p.through_all      = draw_through_all;
     p.depth            = draw_depth;
+    // "Continue the band" is an EMPTY optional, not a number: it has to keep tracking
+    // Angle after the recipe is loaded and the user moves Angle.
+    if (draw_ext_angle_set)
+        p.extension_angle_deg = draw_ext_angle_deg;
+    else
+        p.extension_angle_deg.reset();
     p.thickness        = thickness;
     p.thickness_offset = thickness_offset;
     return p;
@@ -119,9 +127,16 @@ void CutRecipe::migrate_draw_v2()
 {
     if (version >= CutRecipeVersion)
         return;
-    // Only the drawn cut's meanings changed. A flat or curved recipe carries
-    // forward untouched and just gets the new stamp.
-    if (kind == CutRecipeKind::Drawn) {
+    // ONLY A VERSION <= 2 RECIPE HAS ANYTHING TO REWRITE, and saying so explicitly
+    // is what version 4 made necessary. This used to be guarded only by "not already
+    // current", which was the same thing while 3 was current - and stopped being it
+    // the moment 4 arrived: a version 3 recipe is not current any more, so it fell
+    // into the v2 rewrite below and had its lip angle mapped through 90 - |a|. A
+    // stored 35 came back as 55, silently changing a cut the user had made.
+    //
+    // Version 3 -> 4 added a field and changed no meanings, so the whole migration
+    // for it is the stamp at the bottom.
+    if (version <= 2 && kind == CutRecipeKind::Drawn) {
         // THE ANGLE. A v2 draft was signed about zero and meant "tilt the ruling
         // away from the loop's outside"; the phase-3 lip angle is unsigned and means
         // "how steeply the band leans in towards the core". They are not the same
@@ -130,8 +145,17 @@ void CutRecipe::migrate_draw_v2()
         // the phase-3 surface closest to that is a lip of 90 - |draft|: a v2 angle of
         // 0 (the ruling straight down the normal) becomes a 90-degree straight wall,
         // which is exactly what that cut looked like on a flat face.
+        //
+        // CLAMPED INTO THE POSITIVE HALF, not into the whole signed range. The lip
+        // angle became signed in version 4 (the sign is which side the band leans),
+        // and a v2 draft carries no such information - it was unsigned in this
+        // direction by construction, |draft| being how far the ruling leaned OFF the
+        // normal. 90 - |draft| can go negative for a draft past 90, and letting it
+        // would migrate an old cut into a MIRRORED one, which is a different surface
+        // rather than a nearest intent. 0 is the floor, as it was before the range
+        // widened.
         const double draft = std::abs(draw_angle_deg);
-        draw_angle_deg = std::clamp(90.0 - draft, DrawCutMinLipAngleDeg, DrawCutMaxLipAngleDeg);
+        draw_angle_deg = std::clamp(90.0 - draft, 0.0, DrawCutMaxLipAngleDeg);
 
         // THE DEPTH. A v2 depth was a reach through the part, meaningless as a band
         // travel: a stored 10 or 40 would inset the core past the loop's own radius
