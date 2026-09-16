@@ -11,6 +11,7 @@ using namespace Slic3r;
 // "Enable support" is on in most global presets, so before this a flat print - one that generates no
 // support at all - was still spaced 6 mm (24 mm with tree support) from its neighbours, and Fill bed's
 // gap floor blamed a brim for it. The clearance now follows whether support would actually attach.
+// get_instance_arrange_poly is the entry point Arrange, Fill bed and the Fill bed dialog all use.
 
 namespace {
 
@@ -51,9 +52,9 @@ TEST_CASE("Arrange clearance: a flat print with support enabled gets no support 
     // The cube's only down-facing facets are its base on the bed: nothing for support to attach to.
     CHECK_FALSE(instance_may_get_support(*inst, stNormalAuto, 30));
     CHECK_FALSE(instance_may_get_support(*inst, stTreeAuto, 30));
-    CHECK(get_arrange_poly(inst, config_with_support(stNormalAuto)).brim_width == Approx(1.0));
-    CHECK(get_arrange_poly(inst, config_with_support(stTreeAuto)).brim_width == Approx(1.0));
-    CHECK_FALSE(get_arrange_poly(inst, config_with_support(stTreeAuto)).has_tree_support);
+    CHECK(get_instance_arrange_poly(inst, config_with_support(stNormalAuto)).brim_width == Approx(1.0));
+    CHECK(get_instance_arrange_poly(inst, config_with_support(stTreeAuto)).brim_width == Approx(1.0));
+    CHECK_FALSE(get_instance_arrange_poly(inst, config_with_support(stTreeAuto)).has_tree_support);
 }
 
 TEST_CASE("Arrange clearance: an overhang keeps the normal and tree support clearances", "[ArrangeClearance]")
@@ -62,8 +63,8 @@ TEST_CASE("Arrange clearance: an overhang keeps the normal and tree support clea
     ModelInstance *inst = single_instance(model, make_table());
     CHECK(instance_may_get_support(*inst, stNormalAuto, 30));
     CHECK(instance_may_get_support(*inst, stTreeAuto, 30));
-    CHECK(get_arrange_poly(inst, config_with_support(stNormalAuto)).brim_width == Approx(6.0));
-    const auto tree = get_arrange_poly(inst, config_with_support(stTreeAuto));
+    CHECK(get_instance_arrange_poly(inst, config_with_support(stNormalAuto)).brim_width == Approx(6.0));
+    const auto tree = get_instance_arrange_poly(inst, config_with_support(stTreeAuto));
     CHECK(tree.brim_width == Approx(24.0));
     CHECK(tree.has_tree_support);
 }
@@ -77,8 +78,8 @@ TEST_CASE("Arrange clearance: the threshold angle decides, in world space", "[Ar
     inst->set_rotation(Vec3d(M_PI / 4.0, 0., 0.));
     CHECK_FALSE(instance_may_get_support(*inst, stNormalAuto, 30));
     CHECK(instance_may_get_support(*inst, stNormalAuto, 60));
-    CHECK(get_arrange_poly(inst, config_with_support(stNormalAuto, 30)).brim_width == Approx(1.0));
-    CHECK(get_arrange_poly(inst, config_with_support(stNormalAuto, 60)).brim_width == Approx(6.0));
+    CHECK(get_instance_arrange_poly(inst, config_with_support(stNormalAuto, 30)).brim_width == Approx(1.0));
+    CHECK(get_instance_arrange_poly(inst, config_with_support(stNormalAuto, 60)).brim_width == Approx(6.0));
     // Threshold 0 is "auto" in the UI and stands in for the slicer's 30 deg default.
     CHECK_FALSE(instance_may_get_support(*inst, stNormalAuto, 0));
 }
@@ -90,8 +91,8 @@ TEST_CASE("Arrange clearance: manual support kinds need a painted enforcer", "[A
     // Same overhang as above, but the manual kinds only support what the user painted - nothing yet.
     CHECK_FALSE(instance_may_get_support(*inst, stNormal, 30));
     CHECK_FALSE(instance_may_get_support(*inst, stTree, 30));
-    CHECK(get_arrange_poly(inst, config_with_support(stNormal)).brim_width == Approx(1.0));
-    CHECK(get_arrange_poly(inst, config_with_support(stTree)).brim_width == Approx(1.0));
+    CHECK(get_instance_arrange_poly(inst, config_with_support(stNormal)).brim_width == Approx(1.0));
+    CHECK(get_instance_arrange_poly(inst, config_with_support(stTree)).brim_width == Approx(1.0));
 }
 
 TEST_CASE("Arrange clearance: support disabled stays at the flat clearance", "[ArrangeClearance]")
@@ -100,5 +101,5 @@ TEST_CASE("Arrange clearance: support disabled stays at the flat clearance", "[A
     ModelInstance *inst = single_instance(model, make_table());
     DynamicPrintConfig cfg = config_with_support(stNormalAuto);
     cfg.set_key_value("enable_support", new ConfigOptionBool(false));
-    CHECK(get_arrange_poly(inst, cfg).brim_width == Approx(1.0));
+    CHECK(get_instance_arrange_poly(inst, cfg).brim_width == Approx(1.0));
 }
