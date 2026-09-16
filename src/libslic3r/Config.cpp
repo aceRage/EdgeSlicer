@@ -6,6 +6,7 @@
 
 #include <assert.h>
 #include <fstream>
+#include <sstream>
 #include <iostream>
 #include <iomanip>
 #include <regex>
@@ -1654,6 +1655,19 @@ ConfigSubstitutions ConfigBase::load_from_gcode_file(const std::string &file, Fo
 //BBS: add json support
 void ConfigBase::save_to_json(const std::string &file, const std::string &name, const std::string &from, const std::string &version, const std::string is_custom) const
 {
+    // Serialize first: if that throws (invalid UTF-8), the existing file stays untouched.
+    std::ostringstream ss;
+    this->save_to_json(ss, name, from, version, false, is_custom);
+    boost::nowide::ofstream c;
+    c.open(file, std::ios::out | std::ios::trunc);
+    c << ss.str();
+    c.close();
+
+    BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ":" <<__LINE__ << boost::format(", saved config to %1%\n")%file;
+}
+
+void ConfigBase::save_to_json(std::ostream &os, const std::string &name, const std::string &from, const std::string &version, bool replace_invalid_utf8, const std::string is_custom) const
+{
     json j;
     //record the headers
     j[BBL_JSON_KEY_VERSION] = version;
@@ -1689,12 +1703,8 @@ void ConfigBase::save_to_json(const std::string &file, const std::string &name, 
         }
     }
 
-    boost::nowide::ofstream c;
-    c.open(file, std::ios::out | std::ios::trunc);
-    c << std::setw(4) << j << std::endl;
-    c.close();
-
-    BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ":" <<__LINE__ << boost::format(", saved config to %1%\n")%file;
+    // 4-space indent matches the previous std::setw(4) << j file format.
+    os << j.dump(4, ' ', false, replace_invalid_utf8 ? json::error_handler_t::replace : json::error_handler_t::strict) << std::endl;
 }
 
 void ConfigBase::save(const std::string &file) const

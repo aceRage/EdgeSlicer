@@ -9500,7 +9500,7 @@ CLIActionsConfigDef::CLIActionsConfigDef()
 
     def = this->add("export_settings", coString);
     def->label = L("Export Settings");
-    def->tooltip = L("Export settings to a file.");
+    def->tooltip = L("This exports settings to a file. Use - to write them to stdout.");
     def->cli_params = "settings.json";
     def->set_default_value(new ConfigOptionString("output.json"));
 

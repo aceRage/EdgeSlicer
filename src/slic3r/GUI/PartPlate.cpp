@@ -28,6 +28,7 @@
 #include "libslic3r/GCode/WipeTowerEstimate.hpp"
 #include "libslic3r/LocalesUtils.hpp"
 #include "libslic3r/Utils.hpp"
+#include "libslic3r/MixedFilament.hpp"
 
 #include "I18N.hpp"
 #include "GUI_App.hpp"
@@ -1525,7 +1526,7 @@ std::vector<int> PartPlate::get_extruders(bool conside_custom_gcode, const Dynam
 	return plate_extruders;
 }
 
-std::vector<int> PartPlate::get_extruders_under_cli(bool conside_custom_gcode, DynamicPrintConfig& full_config) const
+std::vector<int> PartPlate::get_extruders_under_cli(bool conside_custom_gcode, DynamicPrintConfig& full_config, bool expand_mixed_slots) const
 {
     std::vector<int> plate_extruders;
     BOOST_LOG_TRIVIAL(debug) << "PartPlate::get_extruders_under_cli begin"
@@ -1654,6 +1655,25 @@ std::vector<int> PartPlate::get_extruders_under_cli(bool conside_custom_gcode, D
     plate_extruders.resize(std::distance(plate_extruders.begin(), it_end));
     // Do not call expand_plate_extruders() from the CLI path. It depends on
     // wxGetApp().preset_bundle, which is GUI state and may be unavailable here.
+    // Optional wx-free expansion from mixed_filament_definitions: AMS-style
+    // callers keep the default (true); CLI wipe/type gates pass false so mixed
+    // virtual IDs remain slots.
+    if (expand_mixed_slots) {
+        std::vector<std::string> physical_colors;
+        if (const auto *color_opt = full_config.option<ConfigOptionStrings>("filament_colour"))
+            physical_colors = color_opt->values;
+        const size_t num_physical = physical_colors.size();
+        if (num_physical > 0) {
+            MixedFilamentManager mixed_mgr;
+            mixed_mgr.auto_generate(physical_colors);
+            if (const auto *defs_opt = full_config.option<ConfigOptionString>("mixed_filament_definitions"))
+                mixed_mgr.load_custom_entries(defs_opt->value, physical_colors);
+            mixed_mgr.expand_virtual_extruder_ids(plate_extruders, num_physical);
+            std::sort(plate_extruders.begin(), plate_extruders.end());
+            it_end = std::unique(plate_extruders.begin(), plate_extruders.end());
+            plate_extruders.resize(std::distance(plate_extruders.begin(), it_end));
+        }
+    }
     std::ostringstream extruders_list;
     for (size_t i = 0; i < plate_extruders.size(); ++i) {
         if (i != 0)

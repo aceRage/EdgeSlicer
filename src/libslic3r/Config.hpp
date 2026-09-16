@@ -2382,6 +2382,10 @@ public:
 
     //BBS: add json support
     void save_to_json(const std::string &file, const std::string &name, const std::string &from, const std::string &version, const std::string is_custom = "") const;
+    // Same document, written to a stream. Invalid UTF-8 in a string value throws nlohmann's type_error unless
+    // replace_invalid_utf8 is set, which writes U+FFFD instead (for callers such as stdout with no handler).
+    // is_custom is the Ultra is_custom_defined header; the file overload passes it through so preset files stay unchanged.
+    void save_to_json(std::ostream &os, const std::string &name, const std::string &from, const std::string &version, bool replace_invalid_utf8 = false, const std::string is_custom = "") const;
 
 	// Set all the nullable values to nils.
     void null_nullables();

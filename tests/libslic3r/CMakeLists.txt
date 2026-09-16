@@ -36,6 +36,7 @@ add_executable(${_TEST_NAME}_tests
 	test_h2c_rack_nozzle_change.cpp
 	test_h2_preload_filaments.cpp
 	test_mixed_filament.cpp
+	test_mixed_filament_cli_gates.cpp
 	test_mixed_nozzle.cpp
 	test_mixed_filament_color_golden.cpp
 	test_triangle_selector.cpp
@@ -64,6 +65,7 @@ add_executable(${_TEST_NAME}_tests
 	test_meshboolean.cpp
 	# test_marchingsquares.cpp
 	test_timeutils.cpp
+	test_utils.cpp
 	test_voronoi.cpp
     test_optimizers.cpp
     test_wipe_tower.cpp
