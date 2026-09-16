@@ -132,12 +132,26 @@ QuadMesh quad_remesh(const indexed_triangle_set &mesh,
                      const QuadRemeshOptions & /*opts*/,
                      QuadRemeshReport *report)
 {
-    if (report != nullptr) {
-        *report = QuadRemeshReport{};
-        report->status           = QuadRemeshStatus::Unavailable;
-        report->triangles_before = mesh.indices.size();
-        report->note             = "this build does not include the quad remesher";
+    QuadRemeshReport local;
+    QuadRemeshReport &rep = report != nullptr ? *report : local;
+    rep = QuadRemeshReport{};
+    rep.triangles_before = mesh.indices.size();
+    // The input checks come first, as in the real build: a mesh that would be refused is refused
+    // here too, with the same status and reason, so a caller (and the tests) see one contract
+    // whether or not QuadriFlow was compiled in.
+    if (mesh.indices.empty() || mesh.vertices.empty()) {
+        rep.status = QuadRemeshStatus::EmptyInput;
+        rep.note   = "the mesh is empty";
+        return {};
     }
+    std::string why;
+    if (!quad_remesh_accepts(mesh, &why)) {
+        rep.status = QuadRemeshStatus::NotManifold;
+        rep.note   = std::move(why);
+        return {};
+    }
+    rep.status = QuadRemeshStatus::Unavailable;
+    rep.note   = "this build does not include the quad remesher";
     return {};
 }
 

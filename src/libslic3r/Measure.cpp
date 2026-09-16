@@ -7,6 +7,8 @@
 
 
 #include <numeric>
+#include <algorithm>
+#include <cmath>
 #include <limits>
 #include <Eigen/Eigenvalues>
 #include <tbb/parallel_for.h>
@@ -678,17 +680,94 @@ PatchFit fit_cylinder_to_patch(const indexed_triangle_set &its, const std::vecto
     return fit;
 }
 
+namespace {
+
+// The facets of a patch as (centroid, unit normal). The vertices alone cannot tell a cylinder from a
+// sphere: a cylinder mesh has vertices only on its two rims, and the sphere through both rims passes
+// through every one of them exactly, so the two point fits tie and floating-point noise picks. The
+// normals do not tie - on a cylinder they are radial from the axis, on a sphere radial from the centre.
+struct PatchFacet { Vec3d centroid; Vec3d normal; };
+std::vector<PatchFacet> patch_facets(const indexed_triangle_set &its, const std::vector<int> &facets)
+{
+    std::vector<PatchFacet> out;
+    out.reserve(facets.size());
+    for (int t : facets) {
+        if (t < 0 || t >= int(its.indices.size())) continue;
+        const auto &tri = its.indices[t];
+        const Vec3d a = its.vertices[tri[0]].cast<double>(), b = its.vertices[tri[1]].cast<double>(),
+                    c = its.vertices[tri[2]].cast<double>();
+        const Vec3d cr = (b - a).cross(c - a);
+        const double l = cr.norm();
+        if (l <= 1e-12) continue;
+        out.push_back({ (a + b + c) / 3.0, cr / l });
+    }
+    return out;
+}
+
+// Mean (1 - |cos|) between each facet normal and the direction the fit predicts at that facet.
+// Sign-insensitive so an inside-out mesh scores the same as an outward one.
+double sphere_normal_residual(const std::vector<PatchFacet> &fs, const Vec3d &centre)
+{
+    if (fs.empty()) return std::numeric_limits<double>::infinity();
+    double sum = 0.0;
+    for (const PatchFacet &f : fs) {
+        const Vec3d r = f.centroid - centre; const double l = r.norm();
+        sum += l > 1e-12 ? 1.0 - std::abs(f.normal.dot(r) / l) : 1.0;
+    }
+    return sum / double(fs.size());
+}
+double cylinder_normal_residual(const std::vector<PatchFacet> &fs, const Vec3d &axis_pt, const Vec3d &axis)
+{
+    if (fs.empty()) return std::numeric_limits<double>::infinity();
+    double sum = 0.0;
+    for (const PatchFacet &f : fs) {
+        Vec3d r = f.centroid - axis_pt; r -= axis * r.dot(axis); const double l = r.norm();
+        sum += l > 1e-12 ? 1.0 - std::abs(f.normal.dot(r) / l) : 1.0;
+    }
+    return sum / double(fs.size());
+}
+
+// Largest turn of any facet normal away from the patch's mean normal, as 1 - cos. A flat pick (a cube
+// face, a chamfer) is described by neither curved fit, however small their point residuals come out.
+double normal_spread(const std::vector<PatchFacet> &fs)
+{
+    Vec3d mean = Vec3d::Zero();
+    for (const PatchFacet &f : fs) mean += f.normal;
+    const double l = mean.norm();
+    if (l <= 1e-12) return 1.0;
+    mean /= l;
+    double worst = 0.0;
+    for (const PatchFacet &f : fs) worst = std::max(worst, 1.0 - f.normal.dot(mean));
+    return worst;
+}
+
+// Normals may lean this far (as 1 - cos) from what the fit predicts and still count as that shape:
+// 0.03 is about 14 deg, generous against faceting yet far below the ~35 deg a sphere forced through a
+// cylinder's rims implies at the wall's facet centroids.
+constexpr double kMaxNormalResidual = 0.03;
+// Below this spread (about 0.8 deg) the patch is flat.
+constexpr double kPlanarSpread = 1e-4;
+
+} // namespace
+
 PatchFit fit_patch(const indexed_triangle_set &its, const std::vector<int> &facets, double max_rel_residual)
 {
-    const PatchFit cyl = fit_cylinder_to_patch(its, facets);
-    const PatchFit sph = fit_sphere_to_patch(its, facets);
-    const bool cyl_ok = cyl.ok && cyl.rel_residual <= max_rel_residual;
-    const bool sph_ok = sph.ok && sph.rel_residual <= max_rel_residual;
-    if (cyl_ok && sph_ok) return cyl.rel_residual <= sph.rel_residual ? cyl : sph;
-    if (cyl_ok) return cyl;
-    if (sph_ok) return sph;
     PatchFit plane;                 // neither describes it -- caller keeps the (mean normal, centroid) mate
     plane.shape = PatchShape::Plane;
+
+    const std::vector<PatchFacet> fs = patch_facets(its, facets);
+    if (fs.empty() || normal_spread(fs) < kPlanarSpread)
+        return plane;
+
+    const PatchFit cyl = fit_cylinder_to_patch(its, facets);
+    const PatchFit sph = fit_sphere_to_patch(its, facets);
+    const double cyl_n = cyl.ok ? cylinder_normal_residual(fs, cyl.centre, cyl.axis.normalized()) : std::numeric_limits<double>::infinity();
+    const double sph_n = sph.ok ? sphere_normal_residual(fs, sph.centre) : std::numeric_limits<double>::infinity();
+    const bool cyl_ok = cyl.ok && cyl.rel_residual <= max_rel_residual && cyl_n <= kMaxNormalResidual;
+    const bool sph_ok = sph.ok && sph.rel_residual <= max_rel_residual && sph_n <= kMaxNormalResidual;
+    if (cyl_ok && sph_ok) return (cyl.rel_residual + cyl_n) <= (sph.rel_residual + sph_n) ? cyl : sph;
+    if (cyl_ok) return cyl;
+    if (sph_ok) return sph;
     return plane;
 }
 
@@ -741,8 +820,12 @@ std::optional<SurfaceFeature> MeasuringImpl::get_feature(size_t face_idx, const 
             if (ta <= 0.0) continue;
             nsum += cr.normalized() * ta; csum += (a + b + c) / 3.0 * ta; area += ta;
         }
-        if (!patch.empty() && area > 0.0 && nsum.norm() > 1e-9) {
-            SurfaceFeature f(SurfaceFeatureType::Curve, nsum.normalized(), csum / area, std::nullopt, double(face_idx));
+        if (!patch.empty() && area > 0.0) {
+            // A smooth-shell grow that swallows a closed shell (a whole sphere) has normals that cancel to
+            // nothing; the pick is still a Curve, so the seed facet's normal stands in for the mean and the
+            // analytic fit (fit_patch) gives the mate its real centre.
+            const Vec3d n = nsum.norm() > 1e-9 ? Vec3d(nsum.normalized()) : m_face_normals[face_idx].cast<double>();
+            SurfaceFeature f(SurfaceFeatureType::Curve, n, csum / area, std::nullopt, double(face_idx));
             f.owned_indices = std::make_shared<std::vector<int>>(std::move(patch));
             f.plane_indices = f.owned_indices.get();
             f.origin_surface_feature = std::make_shared<SurfaceFeature>(f);
