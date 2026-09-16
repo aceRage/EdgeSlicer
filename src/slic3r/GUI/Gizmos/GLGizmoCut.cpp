@@ -2978,6 +2978,10 @@ void GLGizmoCut3D::refresh_draw_stroke()
     m_draw_params.thickness   = double(m_cut_thickness);
     m_draw_params.thickness_offset = cut_thickness_offset();
     m_draw_params.angle_deg   = double(m_draw_angle);
+    // Through all is hidden (DrawThroughAllHidden): OFF for every cut, a reopened
+    // recipe that had it on included.
+    if (DrawThroughAllHidden)
+        m_draw_params.through_all = false;
     // 2026-09-15, owner item 4. OFF is an EMPTY optional, not a number: "continue the
     // band" has to keep tracking Angle as the user moves it, which a latched number
     // would not. The value is kept in m_draw_ext_angle either way, so unticking and
@@ -3387,6 +3391,26 @@ int GLGizmoCut3D::draw_segment_at(const Vec2d& mouse_position) const
         }
     }
     return best;
+}
+
+bool GLGizmoCut3D::mouse_near_draw_line(const Vec2d& mouse_position) const
+{
+    // The CHAIN's samples rather than the finished stroke's path: the chain is the
+    // line the user sees from the first stroke on, closed or not, and it is what the
+    // plane drag moves.
+    const std::vector<DrawCutSample>& pts = m_draw_chain.samples();
+    if (pts.empty())
+        return false;
+
+    const Camera&     camera         = wxGetApp().plater()->get_camera();
+    const Transform3d plane_to_world = translation_transform(m_plane_center) * m_rotation_m;
+    std::vector<Vec2d> px;
+    px.reserve(pts.size());
+    for (const DrawCutSample& smp : pts) {
+        const Slic3r::Point p = CameraUtils::project(camera, plane_to_world * smp.pos);
+        px.emplace_back(double(p.x()), double(p.y()));
+    }
+    return draw_cut_distance_to_polyline(px, m_draw_chain.is_closed(), mouse_position) <= DrawLineGrabPx;
 }
 
 bool GLGizmoCut3D::draw_point_reproject(int i, const Vec2d& mouse_position)
@@ -4159,16 +4183,21 @@ void GLGizmoCut3D::update_draw_preview_models()
         shell_stroke.set_path(m_draw_points);
 
     if (shell_stroke.valid()) {
+        // THE MESH GOES TO THE BUILDER TOO. 2026-09-16: a plug's lid is now measured
+        // off the part (draw_cut_band_core_solid: the height field over the loop), and
+        // wrap-or-plug is decided against the part's own section. Without the mesh the
+        // builder falls back to a flat lid at the bounding box's far side, so the shell
+        // would not be the surface the cut makes.
         BoundingBoxf3 bbox;
+        indexed_triangle_set        mesh;
+        const indexed_triangle_set* src = nullptr;
         if (!m_draw_pick_its.empty())
-            for (const Vec3f& v : m_draw_pick_its.vertices)
+            src = &m_draw_pick_its;
+        else if (curved_instance_mesh_in_plane(mesh))
+            src = &mesh;
+        if (src != nullptr)
+            for (const Vec3f& v : src->vertices)
                 bbox.merge(v.cast<double>());
-        else {
-            indexed_triangle_set mesh;
-            if (curved_instance_mesh_in_plane(mesh))
-                for (const Vec3f& v : mesh.vertices)
-                    bbox.merge(v.cast<double>());
-        }
         // THE PREVIEW'S REACH IS NOT THE CUT'S REACH. Through-all deliberately runs
         // 1.05 * the bbox diagonal so the cutter exits any side of any part, which is
         // right for the boolean and wrong for the eye: a translucent tube stretching
@@ -4192,7 +4221,7 @@ void GLGizmoCut3D::update_draw_preview_models()
             shown.depth       = std::max(1.0, need);
         }
 
-        const indexed_triangle_set cutter = draw_cut_cutter_solid(shell_stroke, shown, bbox);
+        const indexed_triangle_set cutter = draw_cut_cutter_solid(shell_stroke, shown, bbox, 0.0, src);
         if (!cutter.empty())
             m_draw_cutter_model.init_from(cutter);
     }
@@ -4694,20 +4723,24 @@ void GLGizmoCut3D::render_draw_surface_inputs()
     ImGui::AlignTextToFramePadding();
     m_imgui->text(_L("Depth") + ": ");
     ImGui::SameLine(m_label_width);
-    bool through = m_draw_params.through_all;
-    const bool through_toggled = m_imgui->bbl_checkbox(_L("Through all"), through);
-    const bool through_hovered = ImGui::IsItemHovered();
-    if (through_toggled) {
-        m_draw_params.through_all = through;
-        refresh_draw_stroke();
+    if (!DrawThroughAllHidden) {
+        // THE CONTROL IS HIDDEN - see DrawThroughAllHidden in the header. Kept rather
+        // than deleted so the mode can come back once it has a defined purpose.
+        bool through = m_draw_params.through_all;
+        const bool through_toggled = m_imgui->bbl_checkbox(_L("Through all"), through);
+        const bool through_hovered = ImGui::IsItemHovered();
+        if (through_toggled) {
+            m_draw_params.through_all = through;
+            refresh_draw_stroke();
+        }
+        if (through_hovered)
+            m_imgui->tooltip(_u8L("Cut all the way through the part instead of meeting a flat middle. "
+                                  "The line is carried straight INWARD from the surface you drew on - square to the "
+                                  "middle plane, away from you - through everything behind it. Nothing in front of the "
+                                  "line is touched. The Angle and the Depth do not apply: a line all the way round a "
+                                  "part separates it, and a line on a face leaves a straight plug.").c_str(),
+                             ImGui::GetFontSize() * 20.f);
     }
-    if (through_hovered)
-        m_imgui->tooltip(_u8L("Cut all the way through the part instead of meeting a flat middle. "
-                              "The line is carried straight INWARD from the surface you drew on - square to the "
-                              "middle plane, away from you - through everything behind it. Nothing in front of the "
-                              "line is touched. The Angle and the Depth do not apply: a line all the way round a "
-                              "part separates it, and a line on a face leaves a straight plug.").c_str(),
-                         ImGui::GetFontSize() * 20.f);
     {
         // THE DEPTH SLIDER IS GREYED, NOT HIDDEN, under Through all. Hiding it made
         // the panel jump by a row every time the checkbox was clicked, and it hid the
@@ -4726,9 +4759,13 @@ void GLGizmoCut3D::render_draw_surface_inputs()
         // The two are ONE VALUE (&m_draw_depth), so they cannot disagree: whichever
         // control moved wrote it, and the other draws from it on the same frame.
         m_imgui->disabled_begin(m_draw_params.through_all);
-        ImGui::AlignTextToFramePadding();
-        m_imgui->text(" ");
-        ImGui::SameLine(m_label_width);
+        if (!DrawThroughAllHidden) {
+            // The checkbox took the label's row, so the slider goes on the next one.
+            // With the checkbox hidden the slider sits beside the label itself.
+            ImGui::AlignTextToFramePadding();
+            m_imgui->text(" ");
+            ImGui::SameLine(m_label_width);
+        }
         const float slider_icon_width = m_imgui->get_slider_icon_size().x;
         ImGui::PushItemWidth(m_control_width * 0.7f - 1.5f * slider_icon_width);
         bool depth_changed = ImGui::SliderFloat("##draw_depth", &m_draw_depth,
@@ -8953,6 +8990,14 @@ bool GLGizmoCut3D::mouse_on_cut_surface(const Vec2d& mouse_position) const
     // Nothing is drawn, so nothing can be hit.
     if (m_hide_cut_plane || m_connectors_editing || cut_line_processing())
         return false;
+
+    // DRAW: the surface as drawn is the LINE. 2026-09-16, owner: Draw mode fell into
+    // the flat-quad branch below, so the grab that moves the whole line fired anywhere
+    // on the oversized picking quad and an attempt to orbit round the part moved the
+    // line instead. Only a press within a few pixels of the line grabs it now; the
+    // hover highlight and the tooltip go through here too, so they agree.
+    if (is_draw_surface())
+        return mouse_near_draw_line(mouse_position);
 
     const Camera& camera = wxGetApp().plater()->get_camera();
     Vec3d         ray_o, ray_dir;

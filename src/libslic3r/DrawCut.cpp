@@ -5,6 +5,7 @@
 #include "Polygon.hpp"
 #include "ExPolygon.hpp"
 #include "Tesselate.hpp"
+#include "AABBTreeIndirect.hpp"
 
 #include <boost/log/trivial.hpp>
 
@@ -1010,8 +1011,15 @@ static CorePlate build_core_plate(const std::vector<Vec3d>& inner, const Vec3d& 
 }
 
 // `depth_along` is the band's travel along d(p); `ext` the outward reach.
+//
+// `pin_mesh`, when given, is asked which side of the loop is OUT OF THE PART
+// whenever the samples' own normals cannot say (see the sign paragraph below). The
+// cutter passes it for a PLUG loop only; a wrap-around loop keeps the old answer,
+// because for a belt "outward" is not a side at all and which half is which is
+// pinned by the winding the belt was drawn with.
 CoreBand build_core_band(const DrawCutStroke& stroke, const DrawCutParams& params,
-                         double ext, double depth_along, double face_offset)
+                         double ext, double depth_along, double face_offset,
+                         const indexed_triangle_set* pin_mesh = nullptr)
 {
     CoreBand cb;
     if (!draw_cut_core_plane(stroke, params, cb.normal, cb.centroid))
@@ -1044,8 +1052,24 @@ CoreBand build_core_band(const DrawCutStroke& stroke, const DrawCutParams& param
     Vec3d avg_skin = Vec3d::Zero();
     for (const DrawCutSample& s : p)
         avg_skin += s.normal;
-    if (avg_skin.norm() > 0.25 * double(n) && cb.normal.dot(avg_skin) < 0.0)
-        cb.normal = -cb.normal;
+    if (avg_skin.norm() > 0.25 * double(n)) {
+        if (cb.normal.dot(avg_skin) < 0.0)
+            cb.normal = -cb.normal;
+    }
+    else if (pin_mesh != nullptr && !pin_mesh->empty()) {
+        // THE SAMPLES CANCEL, AND THIS IS A PLUG. 2026-09-16: a loop drawn over a
+        // strongly curved patch - most of a hemisphere, the bunny's flank - has
+        // normals spread so wide that their mean is under the guard, and the sign
+        // was then Newell's winding: the way the user happened to drag. For a plug
+        // that sign is not cosmetic. The band leans along -n INTO the part and the
+        // lid (see the PLUG closure in draw_cut_band_core_solid) carries the ring
+        // along +n OUT of it, so a wrong n puts the lip outside the skin and the
+        // lid through the middle of the part. Ask the mesh instead, the way
+        // Through all already does.
+        const Vec3d outward = draw_cut_outward_side(stroke, cb.normal, pin_mesh);
+        if (outward.dot(cb.normal) < 0.0)
+            cb.normal = -cb.normal;
+    }
 
     cb.out.reserve(n);
     cb.line.reserve(n);
@@ -1188,8 +1212,10 @@ CoreBand build_core_band(const DrawCutStroke& stroke, const DrawCutParams& param
 // normal case) or, for Through all, a straight extrusion of the band all the way
 // out of the part on both sides.
 //
-// The outer ring is capped too - the plug has to be a closed solid, and the cap
-// sits outside the skin where Extension put it, so it never shows in the result.
+// The outer ring is closed too - the plug has to be a closed solid - and HOW it is
+// closed is the 2026-09-16 owner report, see the PLUG paragraph at the end of the
+// band-and-core branch: a lid across the ring runs through any part that bulges
+// inside the loop, so the ring is carried OUT of the part and capped beyond it.
 // ---------------------------------------------------------------------------
 static indexed_triangle_set draw_cut_band_core_solid(const DrawCutStroke& stroke,
                                                      const DrawCutParams& params,
@@ -1210,7 +1236,13 @@ static indexed_triangle_set draw_cut_band_core_solid(const DrawCutStroke& stroke
     const double reach = 1.05 * diag + 1.0;
     const double depth_along = params.through_all ? reach : std::max(0.01, params.depth);
 
-    const CoreBand cb = build_core_band(stroke, params, ext, depth_along, face_offset);
+    // PLUG OR WRAP is a question about the loop and the mesh, not about the band,
+    // so it is asked first: the band-and-core PLUG below pins the sign of its
+    // normal against the mesh, which a wrap must not do (see build_core_band).
+    const bool wraps = mesh != nullptr && draw_cut_loop_separates(*mesh, stroke, params);
+
+    const CoreBand cb = build_core_band(stroke, params, ext, depth_along, face_offset,
+                                        (!params.through_all && !wraps) ? mesh : nullptr);
     if (!cb.ok || cb.out.size() < 3)
         return its;
 
@@ -1268,7 +1300,6 @@ static indexed_triangle_set draw_cut_band_core_solid(const DrawCutStroke& stroke
         // OUTWARD side of the stroke is touched. That is what a user means by drawing
         // a shape on a face and asking to cut it out: the prism starts where they drew
         // and goes in, not out the back of their model as well.
-        const bool wraps = mesh != nullptr && draw_cut_loop_separates(*mesh, stroke, params);
         const std::vector<DrawCutSample>& p = stroke.path();
 
         // OUT of the part on the side the loop was drawn on, as +cb.normal or
@@ -1584,58 +1615,308 @@ static indexed_triangle_set draw_cut_band_core_solid(const DrawCutStroke& stroke
         //     by the band and the core, i.e. by the wavy surface the user drew - and
         //     the complement is the upper half. Two pieces, and the mating face is
         //     the flat core.
-        const bool wraps = mesh != nullptr && draw_cut_loop_separates(*mesh, stroke, params);
+        //
+        // (`wraps` was decided above, before the band was built.)
 
         if (!wraps) {
-            // The tip cap, from the skirt tip ring's own centroid. It sits outside the
-            // skin, so it never survives the boolean - it only makes the solid closed.
-            // The tip ring is the drawn line carried out along the band's own ruling,
-            // which is star-shaped about its own mean for any loop that is not
-            // self-crossing, and a self-crossing one is refused long before here.
+            // THE PLUG'S LID FOLLOWS THE SKIN INSIDE THE LOOP, AS THE USER SAW IT.
             //
-            // The skirt walks the tip as T(i+1) -> T(i), so the cap walks it forwards.
-            Vec3d out_c = Vec3d::Zero();
+            // 2026-09-16, owner report: a loop drawn on the Stanford bunny came back
+            // as a thin curved sliver - a fan of long triangles converging on a point
+            // deep inside the body, over a correct band and flat core. The tip ring
+            // used to be closed with a FAN from its own centroid, on the argument that
+            // the ring "sits outside the skin where Extension put it, so it never
+            // shows in the result". That is true of a loop on a FLAT face and false of
+            // a loop on anything that bulges: the skin inside a loop drawn over a
+            // curved back rises above the ring's chord, so the fan ran straight through
+            // the material and became a second cut surface. The intersection was the
+            // lens between that fan and the core, the bulge above the fan stayed with
+            // the body, and the piece the user saw was the lens.
+            //
+            // The plug the user drew round is the material under the SKIN PATCH the
+            // loop encloses, so the lid has to lie just outside that patch - and
+            // nowhere else. Three simpler closures were tried and all fail on a patch
+            // drawn on a SLOPE, where the loop's plane is tilted against the skin
+            // around it: a prism straight along n from the ring runs into the flank
+            // rising beyond the loop on the uphill side; a wall flared along the skin
+            // normals does the same a little further out (and reaches far outside the
+            // loop); and a height field along n measures the wrong skin, because on a
+            // steep flank the columns inside the loop's footprint run through the hill
+            // for tens of millimetres before they leave it - the patch is not a graph
+            // over the loop's own plane.
+            //
+            // IT IS A GRAPH OVER THE VIEW. The loop was captured by raycasting from the
+            // camera, so the patch it encloses is exactly what the camera saw inside
+            // it: single-valued along the view direction by construction, with nothing
+            // in front of it. The gizmo latches that direction on every stroke
+            // (params.view_dir, pointing INTO the part, and the recipe stores it), and
+            // a headless caller's default is straight down. So the lid is a HEIGHT
+            // FIELD OVER THE LOOP ALONG THE VIEW: spokes from every tip toward the
+            // ring's centre in the view plane, K rings of them, and at each point the
+            // depth is the skin's own - the first hit of a ray from the camera side -
+            // pulled a hair towards the camera. It hugs the bulge, dips into a dent,
+            // has nothing between it and the camera, and never leaves the loop's
+            // footprint. Where a column misses the part (the loop encloses a hole) the
+            // lid sits just in front of the nearest tips.
+            //
+            // The first ring off the tips leaves at least as steeply as the skin does
+            // there (from the sample's own normal), so the chord from a tip lying ON
+            // the skin (Extension 0) does not duck under it before the field takes over.
+            //
+            // Without a mesh - the shell preview's bounding box has no facets - the
+            // field is flat at the box's near extent towards the camera, which is never
+            // too close; the preview passes the mesh so it shows the lid the cut uses.
+            const Vec3d vd = safe_normalize(params.view_dir, -Vec3d::UnitZ());   // into the part
+            const Vec3d w  = -vd;                                                // towards the camera
+            const Vec3d ev1 = safe_normalize((std::abs(w.z()) < 0.9 ? Vec3d::UnitZ() : Vec3d::UnitX()).cross(w), Vec3d::UnitX());
+            const Vec3d ev2 = w.cross(ev1);
+            const std::vector<DrawCutSample>& path = stroke.path();
+
+            Vec3d o = Vec3d::Zero();
             for (const Vec3d& v : tip)
-                out_c += v;
-            out_c /= double(m);
-            const int c_out = int(its.vertices.size());
-            its.vertices.emplace_back(out_c.cast<float>());
+                o += v;
+            o /= double(m);
+            auto to2 = [&](const Vec3d& v) {
+                const Vec3d q = v - o;
+                return Vec2d(q.dot(ev1), q.dot(ev2));
+            };
+            auto to3 = [&](const Vec2d& uv, double d) {
+                return Vec3d(o + uv.x() * ev1 + uv.y() * ev2 + d * w);
+            };
+
+            std::vector<double> tip_w(m);
+            std::vector<Vec2d>  tip2(m);
+            Vec2d  c2 = Vec2d::Zero();
+            double w_near = -std::numeric_limits<double>::max();
+            for (size_t i = 0; i < m; ++ i) {
+                tip_w[i] = (tip[i] - o).dot(w);
+                tip2[i]  = to2(tip[i]);
+                c2 += tip2[i];
+                w_near = std::max(w_near, tip_w[i]);
+            }
+            c2 /= double(m);
+            double r_mean = 0.0;
+            for (const Vec2d& t2 : tip2)
+                r_mean += (t2 - c2).norm();
+            r_mean /= double(m);
+            // Rings about 1.5 mm apart along a spoke, and at least a few.
+            const int K = std::clamp(int(std::lround(r_mean / 1.5)), 4, 24);
+
+            // THE LIFT OFF THE SKIN, and which way. Everything between the skin the
+            // camera sees and the camera is AIR, so the lift can be generous - and it
+            // has to be, and it has to be along the SKIN'S NORMAL, where the skin is
+            // steep to the view: a fixed lift along the view is nothing on an
+            // 80-degree flank and NOTHING AT ALL on a cliff seen edge-on, where the
+            // lid steps from the top surface to the bottom right through the cliff
+            // face - the bunny's back test caught a hundred-odd near-vertical facets
+            // of exactly that. So each lid point is the hit moved `lift` along its
+            // facet's own normal (which is sideways on a cliff, and out of the material
+            // by definition), plus a chord-sag allowance along the view that grows with
+            // the spacing the samples have ALONG the slope - ring spacing over the
+            // cosine of the tilt, floored so an edge-on facet does not send the lid to
+            // infinity.
+            const double lift    = std::max(0.5, 0.005 * diag);
+            const double ring_sp = r_mean / double(K);
+
+            const bool have_mesh = mesh != nullptr && !mesh->empty();
+            AABBTreeIndirect::Tree3f tree;
+            if (have_mesh)
+                tree = AABBTreeIndirect::build_aabb_tree_over_indexed_triangle_set(mesh->vertices, mesh->indices);
+            double w_flat = w_near + reach;
+            if (bbox.defined) {
+                w_flat = w_near;
+                for (int cx = 0; cx < 2; ++ cx)
+                    for (int cy = 0; cy < 2; ++ cy)
+                        for (int cz = 0; cz < 2; ++ cz) {
+                            const Vec3d corner(cx ? bbox.max.x() : bbox.min.x(),
+                                               cy ? bbox.max.y() : bbox.min.y(),
+                                               cz ? bbox.max.z() : bbox.min.z());
+                            w_flat = std::max(w_flat, (corner - o).dot(w));
+                        }
+                w_flat += std::max(1.0, 0.01 * diag);
+            }
+            // The lid point over a view-plane point: the skin the camera sees there,
+            // lifted as above.
+            auto lid_pt = [&](const Vec2d& uv) {
+                if (!have_mesh)
+                    return to3(uv, w_flat);
+                igl::Hit hit;
+                if (AABBTreeIndirect::intersect_ray_first_hit(mesh->vertices, mesh->indices, tree,
+                                                              to3(uv, reach), vd, hit)) {
+                    const Vec3i32& f = mesh->indices[size_t(hit.id)];
+                    const Vec3d a = mesh->vertices[size_t(f(0))].cast<double>();
+                    const Vec3d b = mesh->vertices[size_t(f(1))].cast<double>();
+                    const Vec3d c = mesh->vertices[size_t(f(2))].cast<double>();
+                    const Vec3d fn = safe_normalize((b - a).cross(c - a), w);
+                    const double cos_t = std::max(0.15, std::abs(fn.dot(w)));
+                    return Vec3d(to3(uv, reach - double(hit.t) + 0.25 * ring_sp / cos_t) + lift * fn);
+                }
+                return to3(uv, w_near + lift);
+            };
+
+            // The skin's depth towards the camera at a view-plane point, if any.
+            auto skin_w = [&](const Vec2d& uv, double& out) {
+                if (!have_mesh)
+                    return false;
+                igl::Hit hit;
+                if (!AABBTreeIndirect::intersect_ray_first_hit(mesh->vertices, mesh->indices, tree,
+                                                               to3(uv, reach), vd, hit))
+                    return false;
+                out = reach - double(hit.t);
+                return true;
+            };
+
+            // THE CHORDS ARE PROBED. A lid point is above the skin at its own column,
+            // and the chord to the next point along the spoke can still run UNDER the
+            // skin between them wherever the skin rises faster than the chord - the
+            // loop on the bunny's back runs down a steep part of the flank, and the
+            // first strip off the tips there sat 4 mm inside the material. No sampling
+            // density is safe against a cliff, so every chord is probed at a few points
+            // and its INNER end raised until the chord clears the skin by the lift
+            // (raising a lid point only adds air, so it is always safe). Done outward
+            // to inward along each spoke, so a raised point is what the next chord
+            // starts from; the centre is raised by the worst spoke.
+            auto clear_chord = [&](const Vec2d& uv_a, double w_a, const Vec2d& uv_b, double w_b) {
+                double raise = 0.0;
+                for (double x : { 0.2, 0.4, 0.6, 0.8 }) {
+                    double sw = 0.0;
+                    if (!skin_w(uv_a + x * (uv_b - uv_a), sw))
+                        continue;
+                    const double chord = w_a + x * (w_b - w_a);
+                    if (sw + lift > chord)
+                        raise = std::max(raise, (sw + lift - chord) / x);
+                }
+                return raise;
+            };
+
+            // Rings 1 .. K-1 along the spokes, then the centre.
+            std::vector<Vec3d> ring_pts(size_t(K - 1) * m);
+            Vec3d  centre_pt = lid_pt(c2);
+            double centre_raise = 0.0;
+            for (size_t i = 0; i < m; ++ i) {
+                Vec2d  prev_uv = tip2[i];
+                double prev_w  = tip_w[i];
+                for (int k = 1; k < K; ++ k) {
+                    const double f  = double(k) / double(K);
+                    const Vec2d  uv = tip2[i] * (1.0 - f) + c2 * f;
+                    Vec3d pt = lid_pt(uv);
+                    if (k == 1) {
+                        // Leave the tip at least as steeply as the skin does there,
+                        // a little more, and never flatter than a bit in front of it.
+                        const double cos_t = std::clamp(safe_normalize(path[i].normal, w).dot(w), -1.0, 1.0);
+                        const double theta = std::min(std::acos(std::abs(cos_t)) + 10.0 * M_PI / 180.0,
+                                                      75.0 * M_PI / 180.0);
+                        const double floor_w = std::max(tip_w[i] + (uv - tip2[i]).norm() * std::tan(theta),
+                                                        tip_w[i] + lift);
+                        const double pt_w = (pt - o).dot(w);
+                        if (pt_w < floor_w)
+                            pt += (floor_w - pt_w) * w;
+                    }
+                    const Vec2d  pt_uv = to2(pt);
+                    double       pt_w  = (pt - o).dot(w);
+                    const double raise = clear_chord(prev_uv, prev_w, pt_uv, pt_w);
+                    if (raise > 0.0) {
+                        pt   += raise * w;
+                        pt_w += raise;
+                    }
+                    ring_pts[size_t(k - 1) * m + i] = pt;
+                    prev_uv = pt_uv;
+                    prev_w  = pt_w;
+                }
+                centre_raise = std::max(centre_raise,
+                                        clear_chord(prev_uv, prev_w, to2(centre_pt), (centre_pt - o).dot(w)));
+            }
+            centre_pt += centre_raise * w;
+
+            const int base = int(its.vertices.size());
+            for (const Vec3d& pt : ring_pts)
+                its.vertices.emplace_back(pt.cast<float>());
+            const int c_top = int(its.vertices.size());
+            its.vertices.emplace_back(centre_pt.cast<float>());
+
+            auto L = [base, m](int k, size_t i) { return base + (k - 1) * int(m) + int(i); };   // ring k >= 1
+            // THE FIRST STRIP'S INNER EDGE MUST OPPOSE THE SKIRT'S: the skirt walks the
+            // tip ring as T(i+1) -> T(i), so the strip walks it as T(i) -> T(i+1); each
+            // strip then hands the next its ring walked the other way, and the centre
+            // fan takes the last ring the same way.
+            for (int k = 0; k + 1 < K; ++ k) {
+                for (size_t i = 0; i < m; ++ i) {
+                    const size_t j  = (i + 1) % m;
+                    const int    ai = k == 0 ? T(i) : L(k, i);
+                    const int    aj = k == 0 ? T(j) : L(k, j);
+                    its.indices.emplace_back(Vec3i32(ai, aj, L(k + 1, i)));
+                    its.indices.emplace_back(Vec3i32(aj, L(k + 1, j), L(k + 1, i)));
+                }
+            }
             for (size_t i = 0; i < m; ++ i)
-                its.indices.emplace_back(Vec3i32(c_out, T(i), T((i + 1) % m)));
+                its.indices.emplace_back(Vec3i32(L(K - 1, i), L(K - 1, (i + 1) % m), c_top));
         }
         else {
-            // THE HALF-SPACE. A wall from the SKIRT TIP straight down along -n, past
-            // the part, and a cap across the bottom. From the tip rather than from the
-            // drawn line, because the Extension skirt is now a piece of the surface in
-            // its own right and the drawn line's outward side already belongs to it -
-            // hanging this off the line as well would traverse that ring twice.
+            // THE HALF-SPACE: A FLANGE OUT TO BEYOND THE PART, THEN DOWN, THEN A CAP.
             //
-            // Straight down, not along the band direction: this wall is not part of the
-            // cut surface, it is only what closes it, and anything that leans could
-            // cross the band.
-            const int base = int(its.vertices.size());
+            // The dish has to be closed into "everything below the drawn surface", and
+            // until 2026-09-16 that was a wall from the SKIRT TIP straight down along
+            // -n past the part, capped at the bottom. Right for a barrel, whose sides do
+            // not widen below the line, and wrong for everything that does: the owner
+            // drew a belt round the bunny's neck and the body below the neck is wider
+            // than the neck ring, so the wall carved a COLUMN down through the chest -
+            // the "lower half" was a plug under the neck, and the bunny was not in two.
+            // A loop round a sphere at any latitude fails the same way, because the
+            // sphere widens below every cap.
+            //
+            // What a line drawn ROUND a part means is what a planar cut means: the
+            // surface the user drew, EXTENDED until it leaves the part. So the tip ring
+            // is first carried straight OUT in the core plane - along the in-plane
+            // outward direction from the loop's own axis, each tip keeping its own
+            // height along n - by `reach`, which is past the part in every direction.
+            // That FLANGE is the extension: where the extended surface meets material
+            // it cuts it, exactly as the flat plane it continues would. Only from the
+            // flange's far edge, well clear of the part, does the wall go down along -n
+            // and the bottom get capped.
+            //
+            // The flange's rulings are radial from one centre (draw_cut_core_inward
+            // measures from the loop's centroid), so they cannot cross one another and
+            // the flange is a simple surface for any loop that is star-shaped about its
+            // centroid - which a loop with a dent still is.
+            const int fbase = int(its.vertices.size());
+            std::vector<Vec3d> far_ring;
+            far_ring.reserve(m);
+            for (size_t i = 0; i < m; ++ i) {
+                const Vec3d inward = draw_cut_core_inward(stroke, params, cb.normal, cb.centroid, i);
+                far_ring.emplace_back(tip[i] - reach * inward);
+                its.vertices.emplace_back(far_ring.back().cast<float>());
+            }
+            const int sbase = int(its.vertices.size());
             for (size_t i = 0; i < m; ++ i)
-                its.vertices.emplace_back(Vec3f((tip[i] - reach * cb.normal).cast<float>()));
-            auto S = [base](size_t i) { return base + int(i); };
-            // THE WALL'S TOP EDGE MUST OPPOSE THE SKIRT'S. The skirt loft walks the tip
-            // ring as T(i+1) -> T(i) (its triangles are O(j), T(j), T(i)), so the wall
-            // has to walk it as T(i) -> T(i+1) or the ring is traversed the same way
-            // twice: 2m edges with balanced counts and unusable orientation, which is
-            // what left 492 open edges on a 246-sample loop when this was got wrong the
-            // first time.
+                its.vertices.emplace_back(Vec3f((far_ring[i] - reach * cb.normal).cast<float>()));
+            auto F = [fbase](size_t i) { return fbase + int(i); };
+            auto S = [sbase](size_t i) { return sbase + int(i); };
+            // THE FLANGE'S INNER EDGE MUST OPPOSE THE SKIRT'S. The skirt loft walks the
+            // tip ring as T(i+1) -> T(i) (its triangles are O(j), T(j), T(i)), so the
+            // flange has to walk it as T(i) -> T(i+1) or the ring is traversed the same
+            // way twice: 2m edges with balanced counts and unusable orientation, which
+            // is what left 492 open edges on a 246-sample loop when this was got wrong
+            // the first time.
             for (size_t i = 0; i < m; ++ i) {
                 const size_t j = (i + 1) % m;
-                its.indices.emplace_back(Vec3i32(T(i), T(j), S(i)));
-                its.indices.emplace_back(Vec3i32(T(j), S(j), S(i)));
+                its.indices.emplace_back(Vec3i32(T(i), T(j), F(i)));
+                its.indices.emplace_back(Vec3i32(T(j), F(j), F(i)));
             }
-            Vec3d skirt_c = Vec3d::Zero();
-            for (const Vec3d& v : tip)
-                skirt_c += v - reach * cb.normal;
-            skirt_c /= double(m);
+            // The flange walks the far ring as F(i+1) -> F(i), so the wall walks it the
+            // other way; the wall then walks the bottom ring as S(i+1) -> S(i).
+            for (size_t i = 0; i < m; ++ i) {
+                const size_t j = (i + 1) % m;
+                its.indices.emplace_back(Vec3i32(F(i), F(j), S(i)));
+                its.indices.emplace_back(Vec3i32(F(j), S(j), S(i)));
+            }
+            Vec3d bot_c = Vec3d::Zero();
+            for (size_t i = 0; i < m; ++ i)
+                bot_c += far_ring[i] - reach * cb.normal;
+            bot_c /= double(m);
             const int c_bot = int(its.vertices.size());
-            its.vertices.emplace_back(skirt_c.cast<float>());
-            // The skirt walks the bottom ring as S(i+1) -> S(i), so the cap walks it
-            // the other way.
+            its.vertices.emplace_back(bot_c.cast<float>());
+            // The wall walks the bottom ring as S(i+1) -> S(i), so the cap walks it the
+            // other way.
             for (size_t i = 0; i < m; ++ i)
                 its.indices.emplace_back(Vec3i32(c_bot, S(i), S((i + 1) % m)));
         }
@@ -1662,16 +1943,27 @@ bool draw_cut_loop_separates(const indexed_triangle_set& mesh,
     if (!draw_cut_core_plane(stroke, params, n, c))
         return false;
 
-    // Pin n the way build_core_band() does, so "the core plane" means the same
-    // plane here as it does where the cutter is built.
-    {
-        const std::vector<DrawCutSample>& p = stroke.path();
-        Vec3d avg_skin = Vec3d::Zero();
-        for (const DrawCutSample& s : p)
-            avg_skin += s.normal;
-        if (avg_skin.norm() > 0.25 * double(p.size()) && n.dot(avg_skin) < 0.0)
-            n = -n;
-    }
+    // THE SKIN'S OWN ANSWER FIRST. 2026-09-16: a loop that goes ROUND a part is drawn
+    // on skin that faces every way round - a barrel's radial normals, a neck's, a
+    // square bar's four faces - so its sample normals CANCEL. A loop drawn on one
+    // side of a part, however much of the slice it happens to cover, has normals that
+    // agree: a patch on a face, on the flank of a body, on the side of the bunny's
+    // head (which the section test alone would call a belt - a 19 mm loop on a 20 mm
+    // head covers most of the head's own slice). Coherent normals therefore mean a
+    // PLUG whatever the section says, and the section is consulted only for a loop
+    // whose normals do cancel. The threshold is the same quarter that
+    // build_core_band() uses to decide whether the mean normal can pin the core's
+    // sign - it is the same question: do these samples agree on a side at all.
+    //
+    // (A belt round a strongly flared neck - normals tilted more than about 15
+    // degrees towards one side - reads as a patch under this guard. The plug it then
+    // gets is closed outward along the side the normals lean to, which is the right
+    // shape when that side is the narrower one, as it is for a cone.)
+    Vec3d avg_skin = Vec3d::Zero();
+    for (const DrawCutSample& s : stroke.path())
+        avg_skin += s.normal;
+    if (avg_skin.norm() > 0.25 * double(stroke.path().size()))
+        return false;
 
     // A FRAME WITH n AS +Z. slice_mesh() cuts at a constant z, so the mesh is
     // rotated into the core plane's own frame and sliced at z == 0. Building the
@@ -1693,12 +1985,10 @@ bool draw_cut_loop_separates(const indexed_triangle_set& mesh,
     for (Vec3f& v : flat.vertices)
         v = (R * (v.cast<double>() - c)).cast<float>();
 
-    // THE SECTION at the core plane. Regular mode keeps holes as reversed contours,
-    // so area() - which sums SIGNED areas - gives the net material at that height,
-    // which is exactly the quantity the ratio below is a fraction of.
-    const Polygons section = slice_mesh(flat, 0.0f, MeshSlicingParams{});
-    const double   section_area = std::abs(area(section));
-    if (section.empty() || section_area < EPSILON)
+    // THE SECTION at the loop's plane. Regular mode keeps holes as reversed contours,
+    // so each ExPolygon's area() is the net material of that connected slice.
+    const ExPolygons section = union_ex(slice_mesh(flat, 0.0f, MeshSlicingParams{}));
+    if (section.empty())
         return false; // nothing there: treat it as a plug, the non-destructive answer.
 
     // THE LOOP, projected onto the same plane and closed into one polygon.
@@ -1714,14 +2004,39 @@ bool draw_cut_loop_separates(const indexed_triangle_set& mesh,
     // loop's is whatever the user dragged.
     if (loop.area() < 0)
         loop.reverse();
+    const double loop_area = std::abs(loop.area());
+    if (loop_area < EPSILON)
+        return false;
 
-    // HOW MUCH OF THE SECTION IS INSIDE THE LOOP.
-    const Polygons inside = intersection(section, Polygons{ loop });
-    const double   inside_area = std::abs(area(inside));
-
-    // A wrap-around loop contains (nearly) all of the section; a plug loop contains
-    // only the patch it was drawn around, which is a small part of it.
-    return inside_area > contain_frac * section_area;
+    // DOES THE LOOP GO ROUND ONE OF THE SLICES? 2026-09-16, owner report: a belt drawn
+    // round the bunny's NECK was read as a plug, and cut as one - a lid across the
+    // neck and a sliver for a result. Two things were wrong with the old test, which
+    // asked whether 90% of the WHOLE section lay inside the loop:
+    //
+    //   - the whole section is the wrong denominator. The loop's plane through the
+    //     neck also slices whatever else it passes through - a shoulder, the back of
+    //     the head, an ear - and none of that is inside a loop round the neck, so the
+    //     neck belt could never reach 90% of it. The question is asked PER SLICE: a
+    //     loop that contains one connected slice of the part goes round the part;
+    //
+    //   - 90% is the ratio for a BARREL, whose skin is square to the plane so the
+    //     loop projects onto the slice's own outline. A neck flares, a sphere widens,
+    //     and the loop drawn on that skin projects INSIDE the slice - the owner's
+    //     neck belt covered 87% of its slice. Half is the threshold that still tells
+    //     a belt (most of a slice) from a patch (a small part of a large slice - a
+    //     loop on a face, or on the flank of a body many times its size).
+    //
+    // A slice smaller than a quarter of the loop is not the thing the loop is round
+    // - a paw tip the plane happens to graze - and does not count.
+    for (const ExPolygon& slice : section) {
+        const double slice_area = std::abs(slice.area());
+        if (slice_area < EPSILON || slice_area < 0.25 * loop_area)
+            continue;
+        const double inside_area = std::abs(area(intersection_ex(ExPolygons{ slice }, ExPolygons{ ExPolygon(loop) })));
+        if (inside_area > contain_frac * slice_area)
+            return true;
+    }
+    return false;
 }
 
 bool draw_cut_core_face(const DrawCutStroke& stroke,
@@ -2898,6 +3213,28 @@ DrawChainEnd draw_cut_chain_end_at_pixel(const DrawCutChain&                    
     if (d2_fr <= r2)
         return DrawChainEnd::Front;
     return DrawChainEnd::None;
+}
+
+double draw_cut_distance_to_polyline(const std::vector<Vec2d>& pts, bool closed, const Vec2d& p)
+{
+    double best = std::numeric_limits<double>::infinity();
+    const size_t n = pts.size();
+    if (n == 0)
+        return best;
+    if (n == 1)
+        return (pts.front() - p).norm();
+    const size_t segs = closed ? n : n - 1;
+    for (size_t i = 0; i < segs; ++ i) {
+        const Vec2d& a  = pts[i];
+        const Vec2d& b  = pts[(i + 1) % n];
+        const Vec2d  ab = b - a;
+        const double L2 = ab.squaredNorm();
+        // The nearest point on the SEGMENT, clamped - not on the infinite line, or a
+        // point well past the end of a short segment would claim it.
+        const double t = L2 > 1e-18 ? std::clamp((p - a).dot(ab) / L2, 0.0, 1.0) : 0.0;
+        best = std::min(best, (a + t * ab - p).norm());
+    }
+    return best;
 }
 
 DrawChainEnd DrawCutChain::end_for_start(const Vec3d& p, double snap_radius) const

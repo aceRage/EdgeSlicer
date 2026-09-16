@@ -4086,13 +4086,22 @@ TEST_CASE("Draw cut: a loop on the bunny's head cuts nothing beyond the Extensio
         bb.merge(v.cast<double>());
 
     const Vec3d  head   = bunny_head_point(bunny);
-    const double radius = 0.10 * bb.size().norm();
+    // 0.08 of the diagonal, not 0.10 (2026-09-16): at 0.10 a dozen of the loop's rays
+    // ran off the head, the fixture truncated the stroke and closed it with a chord
+    // THROUGH the head, and the fan lid of the day did not care. The plug's lid now
+    // follows the skin the loop was drawn on, and a tip inside the material cannot
+    // be cleared by any lid - nor is such a loop one a user can draw.
+    const double radius = 0.08 * bb.size().norm();
     const DrawCutStroke stroke =
         finish_like_gizmo(loop_on_surface(bunny, head, Vec3d::UnitX(), radius), bunny);
     REQUIRE(stroke.is_closed());
     REQUIRE(stroke.path().size() > 40);
 
     DrawCutParams params = owner_params();   // Angle 30, Depth 3, Extension 5.
+    // The loop was captured looking along +X (loop_on_surface's `axis`), and the
+    // gizmo latches that on every stroke: it is the direction the plug's lid is a
+    // height field along (2026-09-16).
+    params.view_dir = Vec3d::UnitX();
 
     // THE LOOP IS A PATCH, NOT A BELT: it encloses a piece of the head, it does not
     // go round the bunny. The wrap-around half-space path must not fire.
@@ -4115,29 +4124,44 @@ TEST_CASE("Draw cut: a loop on the bunny's head cuts nothing beyond the Extensio
     // and only points FURTHER OUT than the loop count. The band goes inward and the
     // skirt outward by Extension, so the budget outside is Extension plus a
     // millimetre of slack.
+    // 2026-09-16: the LATERAL reach is measured about the VIEW, not the core normal.
+    // The plug's lid now follows the skin the camera saw inside the loop, so it
+    // reaches as far towards the camera as the head's own bulge does - and a loop on
+    // a round head is not planar (this one spans 30 mm along the view), so its fitted
+    // normal is tilted against the view and that bulge would leak into a "lateral"
+    // reach measured about the fitted normal. The loop's silhouette is what "outside
+    // the loop" means to the user anyway. The reach ALONG the core normal is still
+    // the band's and the plate's, so that one stays in the core plane's frame.
     Vec3d cn, cc;
     REQUIRE(draw_cut_core_plane(stroke, params, cn, cc));
+    const Vec3d ax = params.view_dir.normalized();
     double loop_r = 0.0;
     for (const DrawCutSample& s : stroke.path()) {
         const Vec3d q = s.pos - cc;
-        loop_r = std::max(loop_r, (q - q.dot(cn) * cn).norm());
+        loop_r = std::max(loop_r, (q - q.dot(ax) * ax).norm());
     }
-    double worst_out = 0.0;   // how far past the loop's own rim the cutter reaches
-    double worst_ax  = 0.0;   // and how far along the axis, which Depth bounds
+    double loop_r_n = 0.0;
+    for (const DrawCutSample& s : stroke.path()) {
+        const Vec3d q = s.pos - cc;
+        loop_r_n = std::max(loop_r_n, (q - q.dot(cn) * cn).norm());
+    }
+    double worst_out = 0.0;   // how far past the loop's own silhouette the cutter reaches
+    double worst_ax  = 0.0;   // and how far along the core normal, which Depth bounds
     for (const Vec3f& v : cutter.vertices) {
         const Vec3d q = v.cast<double>() - cc;
-        const double along = q.dot(cn);
-        const double rad   = (q - along * cn).norm();
+        const double along = q.dot(ax);
+        const double rad   = (q - along * ax).norm();
         worst_out = std::max(worst_out, rad - loop_r);
-        worst_ax  = std::max(worst_ax, std::abs(along));
+        worst_ax  = std::max(worst_ax, std::abs(q.dot(cn)));
     }
     INFO("loop radius " << loop_r << ", cutter reaches " << worst_out
          << " mm outside it (budget " << (params.extension + 1.0) << ")");
     REQUIRE(worst_out <= params.extension + 1.0);
     // And nothing runs off along the axis either: the band travels Depth in, the
-    // skirt Extension out, so the whole solid lives within that of the loop's plane.
+    // skirt Extension out, the lid at most the head's own bulge, so the whole solid
+    // lives within that of the loop's plane.
     INFO("cutter spans " << worst_ax << " mm along the core normal");
-    REQUIRE(worst_ax <= params.extension + params.depth + loop_r);
+    REQUIRE(worst_ax <= params.extension + params.depth + loop_r_n);
 
     indexed_triangle_set upper, lower;
     DrawCutError err = DrawCutError::None;
@@ -4500,4 +4524,511 @@ TEST_CASE("Draw cut: the outward side comes from the mesh when the samples cance
     REQUIRE(z_max < 10.0 + params.extension + 1.0);
     REQUIRE(z_max < 30.0);
     REQUIRE(z_min < -20.0);
+}
+
+// ---------------------------------------------------------------------------
+// 2026-09-16, OWNER REPORT: "the surface from the cut line goes down at an angle to
+// a flat bottom (right), but ALSO projects towards the middle of the object - a fan
+// of long thin triangles converging on the interior - and the bunny is not
+// separated: the piece is a thin curved sliver."
+//
+// The owner's line was a BELT ROUND THE BUNNY'S NECK. Three things were wrong, and
+// each has a test below:
+//
+//   1. draw_cut_loop_separates() read the belt as a PLUG. It asked whether 90% of the
+//      whole section lay inside the loop, and a neck belt covers 87% of its own
+//      slice (the skin flares, so the loop projects inside the slice) and less of
+//      the section as a whole. So the plug closure ran: a FAN across the loop from
+//      its centroid - the fan of long triangles, through the middle of the neck.
+//   2. The WRAP closure would not have separated the bunny either: it closed the
+//      dish with a wall straight down from the tip ring, which is right for a barrel
+//      and carves a column through anything wider below the line - a body under a
+//      neck, a sphere under a cap, a cone under a belt.
+//   3. The PLUG closure's fan is wrong for any real plug too: a loop on a bulging
+//      flank has skin rising inside it, and a lid across the ring runs through that.
+// ---------------------------------------------------------------------------
+
+// Every facet of a cut half has to be one of: the original skin, the flat core, the
+// band or skirt (within Depth / Extension of the drawn line), or - for a belt - the
+// extended surface's flange (at the tips' heights, outside the loop's own footprint).
+// Anything else is a surface the cut invented INSIDE the part: the fan lid, or a
+// closure wall run through material. Returns how many such facets there are.
+static size_t facets_off_cut_surface(const indexed_triangle_set& half,
+                                     const AABBMesh&             skin,
+                                     const DrawCutStroke&        stroke,
+                                     const DrawCutParams&        params,
+                                     const Vec3d&                n,
+                                     const Vec3d&                plane_pt,
+                                     bool                        wraps)
+{
+    double h_lo = std::numeric_limits<double>::max(), h_hi = -h_lo, r_min = h_lo;
+    for (const DrawCutSample& s : stroke.path()) {
+        const Vec3d  q = s.pos - plane_pt;
+        const double h = q.dot(n);
+        h_lo  = std::min(h_lo, h);
+        h_hi  = std::max(h_hi, h);
+        r_min = std::min(r_min, (q - h * n).norm());
+    }
+    const double ext  = std::max(0.0, params.extension);
+    // The band runs from the drawn line down to the FLATTENED core ring, so on a
+    // non-planar loop a band facet can be as far from the line as the line is above
+    // the core, plus its in-plane travel - not just Depth.
+    const double zone = std::max(params.depth, ext) + std::max(0.0, h_hi) + 0.5;
+
+    size_t bad = 0;
+    for (const Vec3i32& f : half.indices) {
+        const Vec3d c = (half.vertices[size_t(f(0))].cast<double>() +
+                         half.vertices[size_t(f(1))].cast<double>() +
+                         half.vertices[size_t(f(2))].cast<double>()) / 3.0;
+        if (std::sqrt(skin.squared_distance(c)) < 0.05)
+            continue;                                   // the original skin
+        const Vec3d  q = c - plane_pt;
+        const double h = q.dot(n);
+        if (std::abs(h) < 0.05)
+            continue;                                   // the flat core
+        if (dist_to_stroke(stroke, c) <= zone)
+            continue;                                   // the band, or the skirt
+        if (wraps) {
+            const double rad = (q - h * n).norm();
+            if (h >= h_lo - ext - 0.05 && h <= h_hi + ext + 0.05 && rad >= 0.9 * r_min)
+                continue;                               // the flange, through the shoulders
+        }
+        ++ bad;
+    }
+    return bad;
+}
+
+TEST_CASE("Draw cut: a belt round a part that widens below it cuts the part in two", "[DrawCut]")
+{
+    // Fault 2, on the cleanest article: a cone. A belt two thirds of the way up is
+    // drawn on skin whose normals cancel (radial, tilted 9 degrees), so it is a
+    // separation - and the cone is wider below the belt everywhere. The old wall
+    // straight down from the tip ring carved a 5 mm column out of the base and
+    // called that the lower half.
+    const double R = 15.0, H = 90.0, Z = 60.0;
+    const indexed_triangle_set cone = its_make_cone(R, H);
+    const double cone_volume = double(its_volume(cone));
+    const double r_line   = R * (1.0 - Z / H);            // 5 mm
+    const double tip_cone = M_PI * r_line * r_line * (H - Z) / 3.0;
+    const double alpha    = std::atan2(R, H);
+
+    DrawCutStroke stroke;
+    const int n = 96;
+    for (int i = 0; i < n; ++ i) {
+        const double th = 2.0 * M_PI * double(i) / double(n);
+        stroke.append(Vec3d(r_line * std::cos(th), r_line * std::sin(th), Z),
+                      Vec3d(std::cos(alpha) * std::cos(th), std::cos(alpha) * std::sin(th), std::sin(alpha)),
+                      size_t(i));
+    }
+    stroke.append(stroke.samples().front().pos, stroke.samples().front().normal, 0);
+    REQUIRE(stroke.finish(1.0, 0.0) == DrawCutError::None);
+    REQUIRE(stroke.is_closed());
+
+    for (double ext : { 0.0, 5.0 }) {
+        DrawCutParams params;
+        params.extension   = ext;
+        params.angle_deg   = 30.0;
+        params.depth       = 3.0;
+        params.through_all = false;
+        INFO("extension " << ext);
+
+        REQUIRE(draw_cut_loop_separates(cone, stroke, params));
+
+        indexed_triangle_set upper, lower;
+        DrawCutError err = DrawCutError::None;
+        REQUIRE(draw_cut_split(cone, stroke, params, &upper, &lower, &err));
+        REQUIRE(err == DrawCutError::None);
+        REQUIRE(watertight(upper));
+        REQUIRE(watertight(lower));
+
+        const double a = double(its_volume(upper));
+        const double b = double(its_volume(lower));
+        REQUIRE(a + b == Approx(cone_volume).epsilon(0.01));
+
+        // TWO REAL PIECES: the tip above the belt and the whole base below it. The
+        // column the old closure cut was a fifth of the base.
+        const double big = std::max(a, b), small = std::min(a, b);
+        INFO("pieces " << big << " / " << small << ", cone " << cone_volume << ", tip " << tip_cone);
+        REQUIRE(big > 0.95 * (cone_volume - tip_cone));
+        REQUIRE(small < 0.1 * cone_volume);
+        REQUIRE(small > 0.5 * tip_cone);
+
+        // The small piece IS the tip - it reaches the apex and stops at the flat
+        // core, Depth * sin(Angle) below the line. The big piece reaches the base
+        // and stops at the line.
+        const indexed_triangle_set& tip  = a < b ? upper : lower;
+        const indexed_triangle_set& base = a < b ? lower : upper;
+        BoundingBoxf3 bt, bb;
+        for (const Vec3f& v : tip.vertices)  bt.merge(v.cast<double>());
+        for (const Vec3f& v : base.vertices) bb.merge(v.cast<double>());
+        REQUIRE(bt.max.z() == Approx(H).margin(0.5));
+        REQUIRE(bt.min.z() == Approx(Z - params.depth * std::sin(30.0 * M_PI / 180.0)).margin(0.5));
+        REQUIRE(bb.min.z() == Approx(0.0).margin(0.5));
+        REQUIRE(bb.max.z() <= Z + 0.5);
+    }
+}
+
+// THE OWNER'S LINE, as it came back from the cut: the belt round the bunny's neck,
+// every fourth vertex of the 436-point ring the fan was hung on, each with the
+// facet normal of the bunny where it sits. In the bunny_in_plane() frame (the
+// handy model recentred on its bounding box).
+static const double OwnerNeckBelt[][6] = {
+    {  -51.722,  -23.004,    0.112,  -0.5893, -0.3287, -0.7380 },
+    {  -52.930,  -22.187,    0.856,  -0.6395, -0.1411, -0.7557 },
+    {  -53.543,  -21.357,    1.181,  -0.6293, -0.1831, -0.7553 },
+    {  -54.229,  -19.980,    1.358,  -0.6391, -0.2537, -0.7261 },
+    {  -54.958,  -18.311,    1.342,  -0.5320, -0.2884, -0.7961 },
+    {  -55.310,  -17.438,    1.269,  -0.5405, -0.2450, -0.8049 },
+    {  -55.595,  -16.195,    1.072,  -0.5405, -0.2450, -0.8049 },
+    {  -55.754,  -14.646,    0.873,  -0.5814, -0.1247, -0.8040 },
+    {  -55.659,  -12.754,    0.700,  -0.5828,  0.0216, -0.8123 },
+    {  -55.442,  -11.589,    0.665,  -0.5496,  0.1798, -0.8158 },
+    {  -55.284,  -10.339,    0.681,  -0.6473,  0.1213, -0.7526 },
+    {  -55.035,   -9.035,    0.745,  -0.6315,  0.2000, -0.7492 },
+    {  -54.836,   -8.172,    0.858,  -0.6383,  0.2793, -0.7173 },
+    {  -54.570,   -7.234,    1.040,  -0.6654,  0.3474, -0.6607 },
+    {  -54.336,   -6.407,    1.214,  -0.7540,  0.3351, -0.5649 },
+    {  -54.045,   -5.609,    1.393,  -0.7301,  0.4316, -0.5297 },
+    {  -53.497,   -4.293,    1.739,  -0.7314,  0.4895, -0.4748 },
+    {  -52.777,   -3.369,    1.961,  -0.6345,  0.6418, -0.4307 },
+    {  -52.347,   -2.874,    2.035,  -0.5973,  0.5810, -0.5529 },
+    {  -51.557,   -1.694,    2.282,  -0.6506,  0.5039, -0.5682 },
+    {  -50.110,    0.022,    2.832,  -0.4955,  0.7703, -0.4015 },
+    {  -49.458,    0.473,    2.992,  -0.3832,  0.8417, -0.3805 },
+    {  -48.278,    1.421,    3.256,  -0.5336,  0.7027, -0.4707 },
+    {  -47.301,    2.188,    3.572,  -0.2938,  0.8616, -0.4139 },
+    {  -46.482,    2.647,    3.833,  -0.3788,  0.8002, -0.4650 },
+    {  -45.177,    3.471,    4.249,  -0.4388,  0.8078, -0.3935 },
+    {  -44.084,    4.053,    4.565,  -0.2749,  0.9449, -0.1779 },
+    {  -43.344,    4.319,    4.762,  -0.3304,  0.9027, -0.2755 },
+    {  -42.121,    4.782,    5.105,  -0.2468,  0.9470, -0.2056 },
+    {  -41.072,    5.004,    5.475,  -0.1349,  0.9895, -0.0523 },
+    {  -40.270,    5.164,    5.791,  -0.1664,  0.9858,  0.0214 },
+    {  -39.526,    5.342,    6.147,  -0.1682,  0.9854, -0.0281 },
+    {  -38.526,    5.481,    6.633,  -0.0043,  0.9878,  0.1556 },
+    {  -37.806,    5.428,    6.955,   0.0294,  0.9996, -0.0037 },
+    {  -36.798,    5.457,    7.550,   0.0725,  0.9882,  0.1346 },
+    {  -35.647,    5.437,    8.047,  -0.1553,  0.9599,  0.2333 },
+    {  -34.877,    5.507,    8.510,  -0.0838,  0.9897,  0.1161 },
+    {  -33.969,    5.473,    8.923,   0.1054,  0.9458,  0.3070 },
+    {  -32.726,    5.185,    9.338,   0.0892,  0.9030,  0.4203 },
+    {  -31.686,    4.807,    9.712,   0.2105,  0.8347,  0.5089 },
+    {  -31.071,    4.653,    9.978,   0.0516,  0.9180,  0.3931 },
+    {  -30.012,    4.459,   10.240,   0.0369,  0.8089,  0.5868 },
+    {  -28.860,    4.264,   10.618,  -0.1945,  0.7260,  0.6596 },
+    {  -27.806,    4.197,   10.971,  -0.2313,  0.6308,  0.7407 },
+    {  -26.498,    3.843,   11.609,  -0.1737,  0.6259,  0.7603 },
+    {  -24.894,    3.206,   12.355,  -0.1670,  0.5062,  0.8461 },
+    {  -23.961,    2.547,   12.720,  -0.1023,  0.4422,  0.8911 },
+    {  -23.882,    2.502,   12.751,  -0.1023,  0.4422,  0.8911 },
+    {  -23.315,    2.127,   12.992,  -0.0979,  0.3849,  0.9177 },
+    {  -22.571,    1.137,   13.284,   0.3142,  0.2541,  0.9147 },
+    {  -22.096,   -0.098,   13.451,   0.2218,  0.2517,  0.9420 },
+    {  -21.309,   -1.064,   13.571,   0.1552,  0.2273,  0.9614 },
+    {  -20.708,   -1.738,   13.633,   0.1552,  0.2273,  0.9614 },
+    {  -20.528,   -2.638,   13.777,   0.2086,  0.1582,  0.9651 },
+    {  -20.315,   -3.219,   13.824,   0.2136,  0.1606,  0.9636 },
+    {  -19.895,   -3.711,   13.809,   0.1446,  0.1432,  0.9791 },
+    {  -19.748,   -5.010,   13.949,   0.2275,  0.0919,  0.9694 },
+    {  -19.131,   -6.095,   13.854,   0.2588,  0.0031,  0.9659 },
+    {  -18.757,   -7.189,   13.914,   0.2367, -0.0073,  0.9716 },
+    {  -19.397,   -8.667,   14.078,   0.3015,  0.0262,  0.9531 },
+    {  -19.728,   -8.730,   14.192,   0.3015,  0.0262,  0.9531 },
+    {  -19.701,   -9.817,   14.193,   0.4036, -0.0765,  0.9117 },
+    {  -19.684,  -11.074,   13.955,   0.3405, -0.2161,  0.9151 },
+    {  -19.582,  -12.598,   13.467,   0.2207, -0.2596,  0.9402 },
+    {  -19.822,  -13.652,   13.248,   0.4604, -0.2070,  0.8632 },
+    {  -19.355,  -13.872,   12.943,   0.1479, -0.3845,  0.9112 },
+    {  -19.482,  -15.225,   12.447,   0.2770, -0.3299,  0.9024 },
+    {  -20.012,  -16.129,   11.995,   0.3825, -0.6285,  0.6773 },
+    {  -20.831,  -17.551,   11.379,   0.7572, -0.4714,  0.4522 },
+    {  -21.104,  -18.099,   11.438,   0.8597, -0.2315,  0.4553 },
+    {  -21.245,  -18.782,   11.120,   0.8689, -0.3443,  0.3557 },
+    {  -21.533,  -19.908,   10.452,   0.8078, -0.5082,  0.2986 },
+    {  -21.971,  -20.625,   10.243,   0.7775, -0.5812,  0.2400 },
+    {  -22.333,  -21.244,    9.879,   0.7701, -0.5911,  0.2398 },
+    {  -22.732,  -22.183,    9.306,   0.8424, -0.5140,  0.1622 },
+    {  -23.292,  -22.973,    8.840,   0.8568, -0.5057, -0.1011 },
+    {  -23.663,  -23.531,    8.528,   0.8554, -0.5050, -0.1150 },
+    {  -24.073,  -24.179,    8.118,   0.8478, -0.5265, -0.0638 },
+    {  -24.363,  -24.902,    7.735,   0.9533, -0.2882,  0.0903 },
+    {  -24.645,  -25.568,    7.362,   0.9246, -0.3683, -0.0976 },
+    {  -25.475,  -26.551,    6.541,   0.6873, -0.6596, -0.3044 },
+    {  -26.237,  -26.950,    6.006,   0.6694, -0.6467, -0.3657 },
+    {  -26.829,  -27.326,    5.583,   0.7129, -0.6825, -0.1608 },
+    {  -27.998,  -28.098,    4.813,   0.5937, -0.7613, -0.2609 },
+    {  -28.730,  -28.633,    4.378,   0.6802, -0.6488, -0.3412 },
+    {  -29.778,  -29.262,    3.863,   0.5556, -0.6955, -0.4557 },
+    {  -30.588,  -29.629,    3.549,   0.4045, -0.7115, -0.5745 },
+    {  -31.434,  -29.794,    3.252,   0.3141, -0.8427, -0.4374 },
+    {  -32.375,  -29.896,    3.000,   0.3088, -0.7605, -0.5712 },
+    {  -33.433,  -30.006,    2.711,   0.2144, -0.7665, -0.6054 },
+    {  -34.653,  -30.363,    2.283,   0.5599, -0.5974, -0.5742 },
+    {  -35.375,  -30.817,    1.934,   0.6493, -0.4820, -0.5882 },
+    {  -36.653,  -31.328,    1.208,   0.5198, -0.5008, -0.6921 },
+    {  -37.347,  -31.440,    0.835,   0.5701, -0.2332, -0.7878 },
+    {  -38.791,  -31.756,   -0.023,   0.3676, -0.2562, -0.8940 },
+    {  -39.813,  -31.579,   -0.556,   0.3062, -0.4388, -0.8448 },
+    {  -41.323,  -31.545,   -1.016,   0.3640, -0.1697, -0.9158 },
+    {  -42.295,  -31.460,   -1.303,   0.1719, -0.2484, -0.9533 },
+    {  -43.473,  -31.495,   -1.611,   0.0281, -0.4322, -0.9014 },
+    {  -44.584,  -31.206,   -1.751,   0.0741, -0.3651, -0.9280 },
+    {  -45.519,  -30.762,   -1.851,  -0.1932, -0.2159, -0.9571 },
+    {  -46.233,  -29.933,   -1.992,  -0.2189, -0.4181, -0.8816 },
+    {  -46.974,  -28.967,   -2.021,  -0.4049, -0.5276, -0.7468 },
+    {  -47.564,  -28.210,   -2.024,  -0.4419, -0.2984, -0.8460 },
+    {  -48.030,  -27.150,   -1.763,  -0.7001, -0.4077, -0.5862 },
+    {  -48.797,  -25.939,   -1.591,  -0.6784, -0.3462, -0.6480 },
+    {  -49.267,  -25.220,   -1.299,  -0.7444, -0.1993, -0.6373 },
+    {  -49.967,  -24.213,   -0.945,  -0.7608, -0.4277, -0.4882 },
+    {  -50.703,  -23.436,   -0.394,  -0.6363, -0.2867, -0.7162 },
+};
+
+static DrawCutStroke owner_neck_belt_raw()
+{
+    DrawCutStroke raw;
+    for (const double* r : OwnerNeckBelt)
+        raw.append(Vec3d(r[0], r[1], r[2]), Vec3d(r[3], r[4], r[5]).normalized(), 0);
+    return raw;
+}
+
+TEST_CASE("Draw cut: the owner's belt round the bunny's neck separates head from body", "[DrawCut]")
+{
+    // Faults 1 and 2 together, on the owner's own line. The belt's skin normals
+    // cancel (their mean is 0.08 of a unit) and it contains 87% of the neck's slice,
+    // so it is a SEPARATION; and the body below the neck is wider than the neck, so
+    // the extended surface - the flange - is what makes the cut reach out of the
+    // part, exactly as the plane of a flat cut would.
+    const indexed_triangle_set bunny = bunny_in_plane();
+    const TriangleMesh tm(bunny);
+    const AABBMesh     skin{ tm };
+
+    const DrawCutStroke stroke = finish_like_gizmo(owner_neck_belt_raw(), bunny);
+    REQUIRE(stroke.is_closed());
+    REQUIRE(stroke.path().size() > 80);
+
+    DrawCutParams params = owner_params();   // Angle 30, Depth 3, Extension 5.
+    for (double ext : { 0.0, params.extension }) {
+        params.extension = ext;
+        INFO("extension " << ext);
+
+        // A BELT, not a patch.
+        REQUIRE(draw_cut_loop_separates(bunny, stroke, params));
+
+        indexed_triangle_set upper, lower;
+        DrawCutError err = DrawCutError::None;
+        REQUIRE(draw_cut_split(bunny, stroke, params, &upper, &lower, &err));
+        REQUIRE(err == DrawCutError::None);
+        REQUIRE(watertight(upper));
+        REQUIRE(watertight(lower));
+
+        const double vol_in = double(its_volume(bunny));
+        const double a = double(its_volume(upper));
+        const double b = double(its_volume(lower));
+        REQUIRE(a + b == Approx(vol_in).epsilon(0.02));
+
+        // HEAD AND BODY, not a sliver and the rest. The owner's sliver was 0.85% of
+        // the bunny.
+        const double small = std::min(a, b) / (a + b);
+        INFO("volumes " << a << " / " << b << " (small fraction " << small << ")");
+        REQUIRE(small > 0.08);
+        REQUIRE(small < 0.5);
+
+        // NO SURFACE INSIDE THE PART. The fan converging on the neck's interior is
+        // exactly a facet that is on no skin, no core, no band and no flange.
+        BoundingBoxf3 bb;
+        for (const Vec3f& v : bunny.vertices)
+            bb.merge(v.cast<double>());
+        Vec3d n, pt;
+        REQUIRE(draw_cut_core_face(stroke, params, bb, n, pt));
+        const size_t bad_up = facets_off_cut_surface(upper, skin, stroke, params, n, pt, true);
+        const size_t bad_lo = facets_off_cut_surface(lower, skin, stroke, params, n, pt, true);
+        INFO("facets off the cut surface: " << bad_up << " in upper, " << bad_lo << " in lower");
+        REQUIRE(bad_up == 0);
+        REQUIRE(bad_lo == 0);
+    }
+}
+
+TEST_CASE("Draw cut: a plug loop on a sphere keeps the cap, with no lid through it", "[DrawCut]")
+{
+    // Fault 3 on the cleanest article. A loop at 40 degrees from the pole of a
+    // sphere, captured looking straight down: its normals agree (mean 0.77 of a
+    // unit), so it is a PLUG, and the cap rises 4.7 mm inside it. The old fan lid
+    // across the ring cut that cap off and left it with the body.
+    const double R = 20.0, lat = 40.0 * M_PI / 180.0;
+    const indexed_triangle_set sphere = its_make_sphere(R, 0.1);
+    const TriangleMesh tm(sphere);
+    const AABBMesh     skin{ tm };
+    const double sphere_volume = double(its_volume(sphere));
+    const double z_loop = R * std::cos(lat);
+    const double h_cap  = R - z_loop;
+    const double cap_volume = M_PI * h_cap * h_cap * (3.0 * R - h_cap) / 3.0;
+
+    DrawCutStroke stroke;
+    const int n = 128;
+    for (int i = 0; i < n; ++ i) {
+        const double th = 2.0 * M_PI * double(i) / double(n);
+        const Vec3d dir(std::sin(lat) * std::cos(th), std::sin(lat) * std::sin(th), std::cos(lat));
+        stroke.append(R * dir, dir, size_t(i));
+    }
+    stroke.append(stroke.samples().front().pos, stroke.samples().front().normal, 0);
+    REQUIRE(stroke.finish(1.0, 0.0) == DrawCutError::None);
+    REQUIRE(stroke.is_closed());
+
+    BoundingBoxf3 bb;
+    for (const Vec3f& v : sphere.vertices)
+        bb.merge(v.cast<double>());
+
+    DrawCutParams params = owner_params();   // Angle 30, Depth 3, Extension 5; view straight down.
+    for (double ext : { 0.0, params.extension }) {
+        params.extension = ext;
+        INFO("extension " << ext);
+
+        REQUIRE_FALSE(draw_cut_loop_separates(sphere, stroke, params));
+
+        indexed_triangle_set upper, lower;
+        DrawCutError err = DrawCutError::None;
+        REQUIRE(draw_cut_split(sphere, stroke, params, &upper, &lower, &err));
+        REQUIRE(err == DrawCutError::None);
+        REQUIRE(watertight(upper));
+        REQUIRE(watertight(lower));
+
+        const double a = double(its_volume(upper));
+        const double b = double(its_volume(lower));
+        REQUIRE(a + b == Approx(sphere_volume).epsilon(0.01));
+
+        // THE CAP IS IN THE PLUG: the plug holds the whole cap above the loop plus the
+        // band's lip below it, and no more than that neighbourhood; the body stops at
+        // the loop.
+        INFO("plug " << a << ", cap " << cap_volume);
+        REQUIRE(a > cap_volume);
+        REQUIRE(a < cap_volume + M_PI * R * R * (params.depth + 1.0));
+        BoundingBoxf3 bu, bl;
+        for (const Vec3f& v : upper.vertices) bu.merge(v.cast<double>());
+        for (const Vec3f& v : lower.vertices) bl.merge(v.cast<double>());
+        REQUIRE(bu.max.z() == Approx(R).margin(0.3));
+        REQUIRE(bl.max.z() < z_loop + 0.5);
+
+        // NO SURFACE INSIDE THE PART, in either half.
+        Vec3d nn, pt;
+        REQUIRE(draw_cut_core_face(stroke, params, bb, nn, pt));
+        const size_t bad_up = facets_off_cut_surface(upper, skin, stroke, params, nn, pt, false);
+        const size_t bad_lo = facets_off_cut_surface(lower, skin, stroke, params, nn, pt, false);
+        INFO("facets off the cut surface: " << bad_up << " in upper, " << bad_lo << " in lower");
+        REQUIRE(bad_up == 0);
+        REQUIRE(bad_lo == 0);
+    }
+}
+
+TEST_CASE("Draw cut: a plug loop on a bulging flank keeps the bulge, with no lid through it", "[DrawCut]")
+{
+    // Fault 3. A patch on the bunny's back, captured from above. Its normals agree
+    // (it is on one side of the body), so it is a PLUG - and the back rises inside
+    // the loop, so a lid across the ring would run through the material. The plug
+    // has to be closed OUT of the part, and the bulge belongs to it.
+    const indexed_triangle_set bunny = bunny_in_plane();
+    const TriangleMesh tm(bunny);
+    const AABBMesh     skin{ tm };
+
+    BoundingBoxf3 bb;
+    for (const Vec3f& v : bunny.vertices)
+        bb.merge(v.cast<double>());
+
+    // Looking straight down at the middle of the back: a point inside the body,
+    // under the skin, at a quarter of the bunny's height from the top. The radius is
+    // the one that keeps every ray on the back - a wider loop runs off the flank and
+    // the raycast jumps to the far side, which the fixture then truncates and closes
+    // with a chord through the part, and no lid can clear a tip that is inside the
+    // material. (The bunny's back is bumpy: the bulge inside this loop is under a
+    // millimetre above the loop's own plane, and the loop itself wanders 11 mm.)
+    const Vec3d centre(-0.3 * bb.size().x(), -0.14 * bb.size().y(), 0.5 * bb.max.z());
+    const DrawCutStroke stroke =
+        finish_like_gizmo(loop_on_surface(bunny, centre, -Vec3d::UnitZ(), 0.05 * bb.size().norm()), bunny);
+    REQUIRE(stroke.is_closed());
+    REQUIRE(stroke.path().size() > 40);
+
+    DrawCutParams params = owner_params();
+    for (double ext : { 0.0, params.extension }) {
+        params.extension = ext;
+        INFO("extension " << ext);
+
+        // A PATCH, not a belt.
+        REQUIRE_FALSE(draw_cut_loop_separates(bunny, stroke, params));
+
+        indexed_triangle_set upper, lower;
+        DrawCutError err = DrawCutError::None;
+        REQUIRE(draw_cut_split(bunny, stroke, params, &upper, &lower, &err));
+        REQUIRE(err == DrawCutError::None);
+        REQUIRE(watertight(upper));
+        REQUIRE(watertight(lower));
+
+        const double vol_in = double(its_volume(bunny));
+        const double a = double(its_volume(upper));
+        const double b = double(its_volume(lower));
+        REQUIRE(a + b == Approx(vol_in).epsilon(0.02));
+        // The plug is the UPPER half of a closed loop, and it is a patch, not a body.
+        INFO("plug " << a << " of " << vol_in);
+        REQUIRE(a < 0.1 * vol_in);
+        REQUIRE(a > 0.0);
+
+        Vec3d n, pt;
+        REQUIRE(draw_cut_core_face(stroke, params, bb, n, pt));
+
+        // THE BULGE IS IN THE PLUG: the skin at the middle of the loop - the top of
+        // the back, seen from where the loop was drawn - is a face of the plug. A lid
+        // across the ring left it with the body, a couple of millimetres above the lid.
+        const AABBMesh::hit_result top =
+            skin.query_ray_hit(Vec3d(centre.x(), centre.y(), bb.max.z() + 10.0), -Vec3d::UnitZ());
+        REQUIRE(top.face() >= 0);
+        const Vec3d dome = top.position();
+        const TriangleMesh plug_tm(upper);
+        const AABBMesh     plug{ plug_tm };
+        const double dome_to_plug = std::sqrt(plug.squared_distance(dome));
+        INFO("the top of the bulge is " << dome_to_plug << " mm from the plug's surface");
+        REQUIRE(dome_to_plug < 0.05);
+
+        // NO SURFACE INSIDE THE PART, in either half.
+        const size_t bad_up = facets_off_cut_surface(upper, skin, stroke, params, n, pt, false);
+        const size_t bad_lo = facets_off_cut_surface(lower, skin, stroke, params, n, pt, false);
+        INFO("facets off the cut surface: " << bad_up << " in upper, " << bad_lo << " in lower");
+        REQUIRE(bad_up == 0);
+        REQUIRE(bad_lo == 0);
+    }
+}
+
+TEST_CASE("Draw cut: a loop on one side of a part is a plug however much of the slice it covers", "[DrawCut]")
+{
+    // The guard in front of the section test. A loop on a cube's top face that
+    // covers 80% of the face's slice has normals that all agree, so it is a PLUG -
+    // the section ratio alone (over half) would call it a belt and extend the
+    // surface out through the whole cube.
+    const indexed_triangle_set cube = centred_cube();
+    DrawCutStroke ring = circle_on_top(0.5 * CUBE * 0.9, 128);   // 18 of a 20 half-side
+    REQUIRE(ring.finish(1.0, 0.0) == DrawCutError::None);
+    DrawCutParams params;
+    REQUIRE_FALSE(draw_cut_loop_separates(cube, ring, params));
+
+    // And a belt round a cylinder still is one: its normals cancel and it contains
+    // the whole slice.
+    const indexed_triangle_set cyl = centred_cylinder(20.0, 60.0);
+    DrawCutStroke belt = wavy_loop_on_cylinder(20.0, 0.0, 3.0);
+    REQUIRE(belt.finish(1.0, 0.0) == DrawCutError::None);
+    REQUIRE(draw_cut_loop_separates(cyl, belt, params));
+}
+
+TEST_CASE("Draw cut: the distance to a polyline measures to its segments", "[DrawCut]")
+{
+    // The pure half of the Draw-mode plane grab (2026-09-16): the gizmo projects the
+    // chain to pixels and grabs only within a few of the line.
+    const std::vector<Vec2d> sq = { Vec2d(0, 0), Vec2d(10, 0), Vec2d(10, 10), Vec2d(0, 10) };
+    // Beside the middle of the first segment: 3 from the segment, 5.8 from any vertex.
+    REQUIRE(draw_cut_distance_to_polyline(sq, false, Vec2d(5, -3)) == Approx(3.0));
+    // Beside the CLOSING segment (x == 0): only a closed polyline has it.
+    REQUIRE(draw_cut_distance_to_polyline(sq, true,  Vec2d(-2, 5)) == Approx(2.0));
+    REQUIRE(draw_cut_distance_to_polyline(sq, false, Vec2d(-2, 5)) == Approx(std::sqrt(29.0)));
+    // Past an end: clamped to the endpoint, not the infinite line.
+    REQUIRE(draw_cut_distance_to_polyline(sq, false, Vec2d(-4, 0)) == Approx(4.0));
+    // Degenerate inputs.
+    REQUIRE(draw_cut_distance_to_polyline({ Vec2d(1, 1) }, false, Vec2d(4, 5)) == Approx(5.0));
+    REQUIRE(draw_cut_distance_to_polyline({}, false, Vec2d(0, 0)) > 1e300);
 }
