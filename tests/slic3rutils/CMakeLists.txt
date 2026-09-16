@@ -9,6 +9,7 @@ add_executable(${_TEST_NAME}_tests
     ff_diagnostics_tests.cpp
     elegoo_canvas_tests.cpp
     splash_animation_tests.cpp
+    flashforge_tests.cpp
     )
 
 target_link_libraries(${_TEST_NAME}_tests test_common libslic3r_gui libslic3r)
