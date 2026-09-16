@@ -143,8 +143,12 @@ static std::string rewrite_f(const std::string &raw, int f_mm_min)
     return out;
 }
 
-// Modes A/B never speed these up (concept Must-PASS #9): overhang/bridge, ironing,
-// top solid, and support (including interface and transition). Mode C is unchanged.
+// Modes A/B never speed these up (concept Must-PASS #9): overhang wall, bridge, internal
+// bridge, ironing, top solid, and support (including interface and transition). Mode C is
+// unchanged. Every role is named here rather than borrowed from is_bridge()/is_top_surface():
+// those helpers answer other questions (flow, fan, seam placement) and this fork edits them
+// (erOverSupportPerimeter is deliberately outside is_bridge()), so the speed-up guarantee
+// must not move when they do.
 static bool is_support_role(ExtrusionRole role)
 {
     return role == erSupportMaterial || role == erSupportMaterialInterface || role == erSupportTransition;
@@ -152,7 +156,12 @@ static bool is_support_role(ExtrusionRole role)
 
 static bool is_speedup_protected(ExtrusionRole role)
 {
-    return is_bridge(role) || role == erIroning || is_top_surface(role) || is_support_role(role);
+    return role == erOverhangPerimeter
+        || role == erBridgeInfill
+        || role == erInternalBridgeInfill
+        || role == erIroning
+        || role == erTopSolidInfill
+        || is_support_role(role);
 }
 
 // The speed floor CoolingBuffer itself observes when it stretches a layer: slow_down_min_speed

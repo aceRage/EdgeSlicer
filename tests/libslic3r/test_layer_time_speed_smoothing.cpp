@@ -535,6 +535,13 @@ TEST_CASE("Layer time speed smoothing: never speeds up overhang, bridge, ironing
     cfg.slow_down_layer_time.values          = { 0. };
     cfg.slow_down_min_speed.values           = { 0. };
 
+    // Layers 0 and 1: 2 x 10 mm at 1800 mm/min = 30 mm/s -> 0.667 s. Layer 2: one sparse-infill
+    // control move plus 20 moves of the protected role, all 10 mm at 30 mm/s -> 21 x 0.333 = 7.0 s.
+    // The 25% band would pull layer 2 to 0.667 / 0.75 = 0.889 s, but max_speedup 100% floors it
+    // at 7.0 / 2 = 3.5 s, so the layer factor is exactly 2.000. The control move is eligible and
+    // must be written as F3600; the protected moves, in the same layer under the same factor,
+    // must stay F1800. Without the control the test could not tell "protected" from "the layer
+    // was never sped up at all".
     const char *roles[] = {"Overhang wall", "Bridge", "Internal Bridge", "Ironing", "Top surface",
                            "Support", "Support interface", "Support transition"};
     for (const char *role : roles) {
@@ -542,16 +549,23 @@ TEST_CASE("Layer time speed smoothing: never speeds up overhang, bridge, ironing
         {
             LayerTimeSpeedSmoothingFilter filter(cfg);
             auto make_layer = [role](int repeats) {
-                std::string g = std::string("G92 X0\n;TYPE:") + role + "\n";
+                std::string g = "G92 X0\n;TYPE:Sparse infill\n" + g1_x(10, 0.05, 1800);
+                g += std::string(";TYPE:") + role + "\n";
                 for (int i = 0; i < repeats; ++i)
-                    g += g1_x(10. * (i + 1), 0.05, 1800);
+                    g += g1_x(10. * (i + 2), 0.05, 1800);
                 return g;
             };
-            REQUIRE(filter.process_layer(make_layer(2), 0, false).empty());
-            REQUIRE(filter.process_layer(make_layer(2), 1, false).empty());
+            REQUIRE(filter.process_layer(infill_layer(2, 1800), 0, false).empty());
+            REQUIRE(filter.process_layer(infill_layer(2, 1800), 1, false).empty());
             const std::string out = filter.process_layer(make_layer(20), 2, true);
-            const std::string last_body = out.substr(out.rfind("LAYER_TIME_SPEED_SMOOTH"));
-            REQUIRE(feedrate_of(last_body, "G1 X") == 1800);
+
+            const std::vector<std::string> bodies = smoothed_layer_bodies(out);
+            REQUIRE(bodies.size() == 3);
+            REQUIRE(bodies[2].find("factor=2.000") != std::string::npos);
+            REQUIRE(feedrate_of(bodies[2], "TYPE:Sparse infill") == 3600);
+            REQUIRE(feedrate_of(bodies[2], std::string(";TYPE:" + std::string(role)).c_str()) == 1800);
+            REQUIRE(count_of(bodies[2], "F3600") == 1);
+            REQUIRE(count_of(bodies[2], "F1800") == 20);
         }
     }
 }
