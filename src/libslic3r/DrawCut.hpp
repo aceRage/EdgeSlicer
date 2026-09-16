@@ -167,7 +167,42 @@ struct DrawCutParams
     // towards the binormal; it is the angle at which the outer shell projects
     // towards the inner flat projection, which is what the owner asked for and
     // what Split3r-style keyed halves need.
+    // THE SIGN, 2026-09-15 owner item 5. The angle is now -90..90, and the SIGN is
+    // which side of the core plane the band leans towards:
+    //
+    //   +  the band leans along -n as it travels in: the lip goes DOWN, away from
+    //      the side the loop was drawn on. This is what 0..90 always did, so every
+    //      stored recipe and every existing cut keeps its meaning exactly.
+    //   -  the band leans along +n: the lip goes UP, back towards the viewer. On a
+    //      cylinder that is the mirrored band the owner asked for - the inner ring
+    //      on the other side of the core plane from where the old one put it.
+    //
+    // A signed angle rather than a separate "Flip" toggle: the two controls would
+    // have to be read together to know what the cut does (a flipped 30 and a plain
+    // -30 are the same surface), and a slider that runs through zero shows the whole
+    // family in one gesture. Zero is still the flat shelf, and it is still the
+    // boundary between the two directions rather than a third case.
     double           angle_deg{ 0.0 };
+    // THE EXTENSION ANGLE, in DEGREES. 2026-09-15, owner item 4. The direction the
+    // outward SKIRT leaves the drawn line along, as a tilt about the same in-plane
+    // inward direction the band uses:
+    //
+    //   skirt_dir(p) = -draw_cut_band_dir(inward(p), n, extension_angle_deg)
+    //
+    // i.e. the skirt runs OUT along the reverse of a band ruling built at THIS angle
+    // instead of at `angle_deg`.
+    //
+    // THE DEFAULT IS "CONTINUE THE BAND", which is what the skirt has always done -
+    // it leaves along -d, the band's own ruling run backwards, so the surface is C1
+    // across the drawn line. That is extension_angle_deg == angle_deg, and because
+    // the useful default has to track a parameter rather than be a constant, it is
+    // spelt as an EMPTY OPTIONAL rather than as a number: `std::nullopt` means "the
+    // same as Angle", which stays true when the user then moves Angle.
+    //
+    // A value makes the skirt independent: 0 lays it flat in the plane through p
+    // parallel to the core, 90 sends it straight out along +n, -45 tucks it under.
+    // The C1-ness across the drawn line is then the user's to spend.
+    std::optional<double> extension_angle_deg{};
     // How far the band travels INWARD along d(p), in mm, before the surface turns
     // onto the core plane. This is the width of the lip measured along its own
     // travel, and it is what sets how far the core polygon is inset from the loop.
@@ -457,10 +492,60 @@ Vec3d draw_cut_core_inward(const DrawCutStroke& stroke,
 // queries, the inside field and the tests all bend the same way.
 Vec3d draw_cut_band_dir(const Vec3d& inward, const Vec3d& normal, double angle_deg);
 
-// The panel's limit on the lip angle, in degrees. 0 is a flat shelf, 90 a
-// straight wall; past 90 the band would travel back out of the part.
-static constexpr double DrawCutMinLipAngleDeg = 0.0;
+// ---------------------------------------------------------------------------
+// THE STROKE'S OUTWARD SIDE. 2026-09-15, owner click-test item 1.
+// ---------------------------------------------------------------------------
+
+// The direction that points OUT OF THE MESH on the side the loop was drawn on:
+// the average of the stroked facets' own outward normals, taken along the core
+// normal `n` and returned as +n or -n.
+//
+// WHY THIS IS NOT draw_cut_core_plane()'s SIGN. That sign is pinned only when the
+// average skin normal is a meaningful fraction of the samples it came from
+// (norm > 0.25 n), because on a loop round a cylinder's barrel the radial normals
+// cancel and the average is pure noise. That guard is right for the BAND, whose
+// travel direction is winding-independent anyway - but Through all has nothing
+// else to go on: it is a prism, and which way it runs is entirely this sign. A
+// loop on the bunny's head has normals spread over most of a hemisphere, so the
+// average is weak, the guard declines to pin, and the prism ran whichever way
+// Newell's winding happened to fall - the ears came off as separate slabs and the
+// face as a jagged fragment.
+//
+// So this asks the MESH rather than only the samples. The average skin normal
+// gives the candidate; a parity test just inside the candidate's opposite
+// direction confirms it (a point a short way along -outward from the drawn line
+// must be INSIDE the part, and one along +outward must not be). Where the samples
+// agree strongly the parity test merely confirms them; where they cancel, the mesh
+// decides, which is the whole point.
+//
+// `mesh` may be null, in which case only the samples are used and the answer
+// degrades to the old guard's - still deterministic, just unconfirmed.
+//
+// Returns a unit vector parallel to `n`. `n` must be the sign-pinned core normal.
+Vec3d draw_cut_outward_side(const DrawCutStroke&        stroke,
+                            const Vec3d&                n,
+                            const indexed_triangle_set* mesh);
+
+// The panel's limit on the lip angle, in degrees. 0 is a flat shelf, +90 a
+// straight wall down, -90 a straight wall up; past either the band would travel
+// back out of the part. Signed since 2026-09-15 (owner item 5) - see
+// DrawCutParams::angle_deg for what the sign means and why it is not a toggle.
+static constexpr double DrawCutMinLipAngleDeg = -90.0;
 static constexpr double DrawCutMaxLipAngleDeg = 90.0;
+
+// The skirt's own angle has the same range: it is the same tilt about the same
+// axis, only applied to the outward piece.
+static constexpr double DrawCutMinExtAngleDeg = -90.0;
+static constexpr double DrawCutMaxExtAngleDeg = 90.0;
+
+// The skirt's travel direction at a sample: the reverse of a band ruling built at
+// the EXTENSION angle. With `params.extension_angle_deg` unset this is exactly
+// -draw_cut_band_dir(inward, n, params.angle_deg), i.e. the band's own ruling run
+// backwards, which is what the skirt has always been.
+Vec3d draw_cut_skirt_dir(const Vec3d& inward, const Vec3d& normal, const DrawCutParams& params);
+
+// The angle the skirt actually leaves at, resolving the "same as Angle" default.
+double draw_cut_extension_angle(const DrawCutParams& params);
 
 // ---------------------------------------------------------------------------
 // SEPARATION OR PLUG: does the loop go ROUND the part, or sit ON it?

@@ -2978,6 +2978,14 @@ void GLGizmoCut3D::refresh_draw_stroke()
     m_draw_params.thickness   = double(m_cut_thickness);
     m_draw_params.thickness_offset = cut_thickness_offset();
     m_draw_params.angle_deg   = double(m_draw_angle);
+    // 2026-09-15, owner item 4. OFF is an EMPTY optional, not a number: "continue the
+    // band" has to keep tracking Angle as the user moves it, which a latched number
+    // would not. The value is kept in m_draw_ext_angle either way, so unticking and
+    // re-ticking gives back what was set.
+    if (m_draw_ext_angle_on)
+        m_draw_params.extension_angle_deg = double(m_draw_ext_angle);
+    else
+        m_draw_params.extension_angle_deg.reset();
 
     // 2026-09-12: THE STROKE COMES FROM THE CHAIN, and only from a CLOSED one.
     //
@@ -4587,6 +4595,56 @@ void GLGizmoCut3D::render_draw_surface_inputs()
         m_imgui->tooltip(_u8L("How far the cut surface reaches past the line. An open line needs enough of this to reach across the part, or the cut will not separate it.").c_str(),
                          ImGui::GetFontSize() * 20.f);
 
+    // EXTENSION ANGLE. 2026-09-15, owner item 4: which way the outward skirt leaves
+    // the drawn line. Off by default, and OFF MEANS "CONTINUE THE BAND" - the skirt
+    // leaves along the band's own ruling run backwards, which is what it has always
+    // done and which keeps the surface C1 across the drawn line.
+    //
+    // A CHECKBOX plus a slider rather than a bare slider with a magic default value,
+    // because the default is not a NUMBER: it tracks Angle. A slider alone would have
+    // to be parked at some value, and that value would then stop following Angle the
+    // moment the user moved it - which is the behaviour the checkbox makes explicit
+    // instead of hiding.
+    {
+        ImGui::AlignTextToFramePadding();
+        m_imgui->text(_L("Extension angle") + ": ");
+        ImGui::SameLine(m_label_width);
+        bool ext_on = m_draw_ext_angle_on;
+        if (m_imgui->bbl_checkbox(_L("Set"), ext_on)) {
+            m_draw_ext_angle_on = ext_on;
+            // Taking it on for the first time starts where the band is, so ticking the
+            // box does not move the cut - it only makes the angle editable.
+            if (m_draw_ext_angle_on && m_draw_ext_angle == 0.f)
+                m_draw_ext_angle = m_draw_angle;
+            refresh_draw_stroke();
+        }
+        const bool ext_box_hovered = ImGui::IsItemHovered();
+        if (ext_box_hovered)
+            m_imgui->tooltip(_u8L("Off, the skirt outside the line continues the band's own slope, which is the "
+                                  "default and keeps the cut surface smooth where it crosses the skin. Tick this "
+                                  "to aim the skirt somewhere else instead.").c_str(),
+                             ImGui::GetFontSize() * 20.f);
+
+        m_imgui->disabled_begin(!m_draw_ext_angle_on);
+        ImGui::AlignTextToFramePadding();
+        m_imgui->text(" ");
+        ImGui::SameLine(m_label_width);
+        ImGui::PushItemWidth(m_control_width * 0.7f);
+        const bool ext_angle_changed = ImGui::SliderFloat("##draw_ext_angle", &m_draw_ext_angle,
+                                                          float(DrawCutMinExtAngleDeg),
+                                                          float(DrawCutMaxExtAngleDeg), "%.0f deg");
+        const bool ext_angle_hovered = ImGui::IsItemHovered();
+        if (ext_angle_changed && m_draw_ext_angle_on)
+            refresh_draw_stroke();
+        ImGui::PopItemWidth();
+        m_imgui->disabled_end();
+        if (ext_angle_hovered)
+            m_imgui->tooltip(_u8L("Which way the skirt outside the drawn line leaves it. 0 lays it flat, level with "
+                                  "the middle of the cut; positive tilts it the way the lip leans; negative lifts it "
+                                  "back towards the face you drew on. With this off it follows the Angle.").c_str(),
+                             ImGui::GetFontSize() * 20.f);
+    }
+
     // PHASE 2: THE DRAFT ANGLE. Only Surface normal can use it - the constant
     // directions are one direction at every sample by definition, which is exactly
     // what a per-sample tilt is not - so the slider greys out for them rather than
@@ -4626,7 +4684,9 @@ void GLGizmoCut3D::render_draw_surface_inputs()
                                 "middle plane's own normal, with no lip to lean. Untick Through all to use it again.").c_str()
                          : _u8L("The angle at which the outer shell projects in towards the flat middle of the cut. "
                                 "0 makes a flat shelf around the core, 45 a chamfered lip the two halves key into, "
-                                "and 90 a straight wall with no lip.").c_str(),
+                                "and 90 a straight wall with no lip. The SIGN is which way the lip leans: positive "
+                                "projects it away from the face you drew on, negative back towards you, so the same "
+                                "line can be given a lip on either side.").c_str(),
                          ImGui::GetFontSize() * 20.f);
 
     // Depth: how far the band travels in before the surface turns onto the flat
@@ -4643,26 +4703,50 @@ void GLGizmoCut3D::render_draw_surface_inputs()
     }
     if (through_hovered)
         m_imgui->tooltip(_u8L("Cut all the way through the part instead of meeting a flat middle. "
-                              "The line is carried straight through, square to the middle plane, so the Angle and the "
-                              "Depth do not apply - a line all the way round a part separates it, and a line on a face "
-                              "leaves a straight plug.").c_str(),
+                              "The line is carried straight INWARD from the surface you drew on - square to the "
+                              "middle plane, away from you - through everything behind it. Nothing in front of the "
+                              "line is touched. The Angle and the Depth do not apply: a line all the way round a "
+                              "part separates it, and a line on a face leaves a straight plug.").c_str(),
                          ImGui::GetFontSize() * 20.f);
     {
         // THE DEPTH SLIDER IS GREYED, NOT HIDDEN, under Through all. Hiding it made
         // the panel jump by a row every time the checkbox was clicked, and it hid the
         // value the user would get back on unticking - so they could not see what they
         // had set. Greyed out says "this does nothing right now" without either.
+        // 2026-09-15, owner item 2: A SLIDER OVER THE USEFUL RANGE WITH THE EXACT
+        // FIELD BESIDE IT - the same pattern the Edit gizmo's bevel width uses.
+        //
+        // The slider used to run 0.1 .. the bounding box DIAGONAL, which is the range
+        // the old ruled-strip Depth needed ("reach right through the part") and is
+        // nonsense for a band travel: on a 200 mm part every useful value - 1 to 5 mm -
+        // sat inside the first two pixels of the track, so the control could not be
+        // set by dragging at all. 0..20 mm is the band's own range, and a value past
+        // it is typed rather than dragged, which is what the field is for.
+        //
+        // The two are ONE VALUE (&m_draw_depth), so they cannot disagree: whichever
+        // control moved wrote it, and the other draws from it on the same frame.
         m_imgui->disabled_begin(m_draw_params.through_all);
         ImGui::AlignTextToFramePadding();
         m_imgui->text(" ");
         ImGui::SameLine(m_label_width);
-        ImGui::PushItemWidth(m_control_width * 0.7f);
-        const float max_depth = std::max(10.f, float(m_bounding_box.size().norm()));
-        const bool depth_changed = ImGui::SliderFloat("##draw_depth", &m_draw_depth, 0.1f, max_depth, "%.1f mm");
+        const float slider_icon_width = m_imgui->get_slider_icon_size().x;
+        ImGui::PushItemWidth(m_control_width * 0.7f - 1.5f * slider_icon_width);
+        bool depth_changed = ImGui::SliderFloat("##draw_depth", &m_draw_depth,
+                                                DrawDepthSliderMin, DrawDepthSliderMax, "%.1f mm");
         const bool depth_hovered = ImGui::IsItemHovered();
+        ImGui::PopItemWidth();
+        ImGui::SameLine();
+        ImGui::PushItemWidth(1.5f * slider_icon_width);
+        // Bounds 0..DrawDepthMax rather than the slider's, so a value the slider
+        // cannot reach can still be typed - which is the owner's "values typed above
+        // 20 are allowed via the text box".
+        if (ImGui::BBLDragFloat("##draw_depth_input", &m_draw_depth, DrawDepthStep,
+                                DrawDepthMin, DrawDepthMax, "%.1f mm"))
+            depth_changed = true;
+        ImGui::PopItemWidth();
+        m_draw_depth = std::clamp(m_draw_depth, DrawDepthMin, DrawDepthMax);
         if (depth_changed && !m_draw_params.through_all)
             refresh_draw_stroke();
-        ImGui::PopItemWidth();
         m_imgui->disabled_end();
         if (depth_hovered)
             m_imgui->tooltip(m_draw_params.through_all
@@ -8277,6 +8361,8 @@ CutRecipe GLGizmoCut3D::build_recipe_from_gizmo(const ModelObject* mo, const Tri
         r.draw_angle_deg   = double(m_draw_angle);
         r.draw_through_all = m_draw_params.through_all;
         r.draw_depth       = double(m_draw_depth);
+        r.draw_ext_angle_set = m_draw_ext_angle_on;
+        r.draw_ext_angle_deg = double(m_draw_ext_angle);
     }
     else if (r.kind == CutRecipeKind::Groove) {
         r.groove.depth            = m_groove.depth;
@@ -8384,6 +8470,10 @@ void GLGizmoCut3D::apply_recipe_to_gizmo(const CutRecipe& recipe)
         m_draw_extension  = float(recipe.draw_extension);
         m_draw_angle      = float(recipe.draw_angle_deg);
         m_draw_depth      = float(recipe.draw_depth);
+        // A version <= 3 recipe has the flag false, which is "continue the band" -
+        // the skirt it was cut with - so an old cut reopens as exactly itself.
+        m_draw_ext_angle_on = recipe.draw_ext_angle_set;
+        m_draw_ext_angle    = float(recipe.draw_ext_angle_deg);
         m_draw_direction  = recipe.draw_direction;
         m_draw_params     = recipe.draw_params();
         // Rebuild the stroke from the RAW samples, exactly as capture would have

@@ -63,7 +63,9 @@ bool CutRecipe::operator==(const CutRecipe& o) const
         return false;
     if (draw_direction != o.draw_direction || draw_view_dir != o.draw_view_dir ||
         draw_extension != o.draw_extension || draw_angle_deg != o.draw_angle_deg ||
-        draw_through_all != o.draw_through_all || draw_depth != o.draw_depth)
+        draw_through_all != o.draw_through_all || draw_depth != o.draw_depth ||
+        draw_ext_angle_set != o.draw_ext_angle_set ||
+        (draw_ext_angle_set && draw_ext_angle_deg != o.draw_ext_angle_deg))
         return false;
     if (thickness != o.thickness || thickness_offset != o.thickness_offset)
         return false;
@@ -110,6 +112,12 @@ DrawCutParams CutRecipe::draw_params() const
     p.angle_deg        = draw_angle_deg;
     p.through_all      = draw_through_all;
     p.depth            = draw_depth;
+    // "Continue the band" is an EMPTY optional, not a number: it has to keep tracking
+    // Angle after the recipe is loaded and the user moves Angle.
+    if (draw_ext_angle_set)
+        p.extension_angle_deg = draw_ext_angle_deg;
+    else
+        p.extension_angle_deg.reset();
     p.thickness        = thickness;
     p.thickness_offset = thickness_offset;
     return p;

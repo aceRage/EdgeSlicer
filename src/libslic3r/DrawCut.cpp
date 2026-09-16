@@ -739,10 +739,118 @@ Vec3d draw_cut_band_dir(const Vec3d& inward, const Vec3d& normal, double angle_d
 {
     const double a = std::clamp(angle_deg, DrawCutMinLipAngleDeg, DrawCutMaxLipAngleDeg) * M_PI / 180.0;
     // cos * inward + sin * (-n): at 0 the band is perpendicular to n (a flat
-    // shelf), at 90 it runs straight along -n (a straight wall). inward and n are
-    // perpendicular by construction, so the result is unit without renormalising.
+    // shelf), at +90 it runs straight along -n (a straight wall down), at -90 along
+    // +n (a straight wall up). inward and n are perpendicular by construction, so
+    // the result is unit without renormalising.
+    //
+    // THE SIGN FALLS OUT OF sin BEING ODD, which is the reason item 5 is a signed
+    // angle and not a flag: nothing here had to learn about a direction. cos is
+    // even, so the in-plane reach is |cos a| either way and the band travels the
+    // same distance sideways whichever side it leans; sin carries the side. A
+    // mirrored band is therefore the same surface reflected in the plane through p
+    // parallel to the core, which is exactly what "project upward as well as
+    // downward" asks for.
     const Vec3d d = std::cos(a) * inward - std::sin(a) * normal;
     return safe_normalize(d, inward);
+}
+
+double draw_cut_extension_angle(const DrawCutParams& params)
+{
+    // Unset means "continue the band", so the skirt tracks Angle as the user moves
+    // it rather than freezing at whatever Angle was when the cut was made.
+    const double a = params.extension_angle_deg.has_value() ? *params.extension_angle_deg
+                                                            : params.angle_deg;
+    return std::clamp(a, DrawCutMinExtAngleDeg, DrawCutMaxExtAngleDeg);
+}
+
+Vec3d draw_cut_skirt_dir(const Vec3d& inward, const Vec3d& normal, const DrawCutParams& params)
+{
+    // The reverse of a band ruling built at the EXTENSION angle. At the default
+    // (unset, i.e. equal to Angle) this is -d exactly - bit for bit the skirt the
+    // band has always had, so an untouched cut does not move.
+    return -draw_cut_band_dir(inward, normal, draw_cut_extension_angle(params));
+}
+
+// Parity against a closed solid, defined further down (it is what the cheap
+// empty-side pre-check uses). Named here so the outward-side test can borrow the
+// SAME inside/outside answer the rest of the file trusts.
+static bool point_in_solid(const indexed_triangle_set& solid, const Vec3d& pt);
+
+Vec3d draw_cut_outward_side(const DrawCutStroke&        stroke,
+                            const Vec3d&                n,
+                            const indexed_triangle_set* mesh)
+{
+    const Vec3d nn = safe_normalize(n, Vec3d::UnitZ());
+    if (!stroke.valid())
+        return nn;
+
+    const std::vector<DrawCutSample>& p = stroke.path();
+    if (p.empty())
+        return nn;
+
+    // THE CANDIDATE, from the samples. The component of the mean skin normal along
+    // n is what "which side of the core plane does the skin face" means, and its
+    // sign is the answer whenever the samples agree at all.
+    Vec3d avg = Vec3d::Zero();
+    for (const DrawCutSample& s : p)
+        avg += s.normal;
+    const double along = avg.dot(nn) / double(p.size());
+
+    // Strongly-agreeing samples: a loop on a flat face, or on any patch whose
+    // normals all lean the same way. Believe them and skip the mesh work.
+    if (std::abs(along) > 0.5)
+        return along > 0.0 ? nn : Vec3d(-nn);
+
+    Vec3d cand = along >= 0.0 ? nn : Vec3d(-nn);
+    if (mesh == nullptr || mesh->empty())
+        return cand;
+
+    // THE MESH DECIDES. Step off the drawn line a short way each side along the
+    // candidate and count how many of those probes are inside the part. The side
+    // with FEWER inside points is the outward one. A short step, because the skin
+    // curves: a tenth of the loop's own in-plane radius, floored at a fraction of a
+    // millimetre so a tiny loop still steps off its own facets.
+    double r = 0.0;
+    Vec3d  c = Vec3d::Zero();
+    for (const DrawCutSample& s : p)
+        c += s.pos;
+    c /= double(p.size());
+    for (const DrawCutSample& s : p) {
+        const Vec3d q = s.pos - c;
+        r = std::max(r, (q - q.dot(nn) * nn).norm());
+    }
+    const double step = std::max(0.05, 0.1 * r);
+
+    // A handful of probes spread round the loop, not one: a single probe lands
+    // wherever it lands, and on a concave stretch that can be the wrong answer for
+    // the loop as a whole.
+    //
+    // COST, and why the count is small. Each probe is one parity ray against every
+    // face of the mesh, and this runs inside the cutter builder - which is rebuilt on
+    // every slider drag. On a 70k-triangle bunny, 8 probes a side is 1.1M triangle
+    // tests, which is a few milliseconds and invisible; 64 would not be. Eight is
+    // enough for a majority vote to be stable, because the question is a SIDE, not a
+    // shape: the probes only disagree where the skin doubles back within `step` of
+    // the line, and a couple of those cannot outvote the rest.
+    //
+    // The vote also SHORT-CIRCUITS once one side is out of the other's reach, which
+    // is the common case on the first two probes.
+    const size_t probes = std::min<size_t>(8, p.size());
+    int in_pos = 0, in_neg = 0;
+    for (size_t k = 0; k < probes; ++ k) {
+        const Vec3d& q = p[(k * p.size()) / probes].pos;
+        if (point_in_solid(*mesh, q + step * cand)) ++ in_pos;
+        if (point_in_solid(*mesh, q - step * cand)) ++ in_neg;
+        const int left = int(probes - k - 1);
+        if (std::abs(in_pos - in_neg) > left)
+            break;   // the rest cannot change the answer
+    }
+    // More material on the +cand side than on -cand means the candidate points INTO
+    // the part, so the outward side is the other one. A tie leaves the candidate
+    // alone, which is the sample's own answer.
+    if (in_pos > in_neg)
+        cand = -cand;
+    return cand;
 }
 
 namespace {
@@ -1001,7 +1109,14 @@ CoreBand build_core_band(const DrawCutStroke& stroke, const DrawCutParams& param
         //
         // (The skin normal, the old `outward`, is now used only as the fallback
         // direction when the ruling itself is degenerate.)
-        Vec3d skirt = -d;
+        //
+        // 2026-09-15, owner item 4: the skirt's angle is now its OWN parameter, and
+        // -d is what it resolves to by default. draw_cut_skirt_dir() is the reverse
+        // of a band ruling built at the EXTENSION angle, so with that unset (the
+        // default) it returns -d bit for bit and this line is unchanged; with it set
+        // the user has aimed the skirt somewhere else and the C1-ness argued for
+        // above is theirs to spend.
+        Vec3d skirt = draw_cut_skirt_dir(inward, cb.normal, params);
         if (skirt.norm() < 1e-9)
             skirt = outward;
         cb.out.emplace_back(p[i].pos + ext * safe_normalize(skirt, outward) + shift);
@@ -1133,10 +1248,33 @@ static indexed_triangle_set draw_cut_band_core_solid(const DrawCutStroke& stroke
         // CONTAINS THE WHOLE PART, so its intersection is everything and its complement
         // nothing - "the upper boolean gave nothing" - whether it tapers or not. A
         // wrap-around loop therefore still gets a HALF-SPACE: the same straight wall,
-        // but run one way only (along -n) and capped beyond the part, so the solid is
-        // "everything below the drawn line". A plug loop gets the prism, both ways.
+        // but run one way only and capped beyond the part, so the solid is "everything
+        // below the drawn line". A plug loop gets the prism - but INWARD ONLY, which
+        // is 2026-09-15 owner item 1 and the next paragraph.
+        //
+        // WHICH WAY IS "THROUGH". 2026-09-15, owner click-test item 1: a loop drawn on
+        // the bunny's HEAD took the ears off as separate slabs and the face as a jagged
+        // fragment. The prism ran `reach` BOTH WAYS along the core normal, so it
+        // swallowed everything in a full bbox diagonal on the far side of the drawn
+        // line as well - and worse, which way "up" was came from Newell's winding
+        // whenever the sample normals were too spread to pin it, which on a head-sized
+        // patch of a bunny they are.
+        //
+        // THE SEMANTICS, decided here and stated in the panel's tooltip: THROUGH ALL
+        // PROJECTS INWARD. The loop is carried from the drawn line's own surface along
+        // the INWARD direction - the opposite of the stroked facets' averaged outward
+        // normal, with the sign confirmed against the mesh by draw_cut_outward_side() -
+        // through everything, clipped to the model's bounding box. Nothing on the
+        // OUTWARD side of the stroke is touched. That is what a user means by drawing
+        // a shape on a face and asking to cut it out: the prism starts where they drew
+        // and goes in, not out the back of their model as well.
         const bool wraps = mesh != nullptr && draw_cut_loop_separates(*mesh, stroke, params);
         const std::vector<DrawCutSample>& p = stroke.path();
+
+        // OUT of the part on the side the loop was drawn on, as +cb.normal or
+        // -cb.normal. `into` is the way the prism travels.
+        const Vec3d outward_n = draw_cut_outward_side(stroke, cb.normal, mesh);
+        const Vec3d into      = -outward_n;
 
         // THE WALL MUST NOT SIT EXACTLY ON THE SKIN. A loop drawn round a box lies ON
         // the box's faces, so a wall built straight through those points is coincident
@@ -1146,17 +1284,36 @@ static indexed_triangle_set draw_cut_band_core_solid(const DrawCutStroke& stroke
         // scales with the model. 1e-4 of the diagonal is 0.008 mm on an 80 mm box.
         const double nudge = std::max(1e-3, 1e-4 * diag);
 
+        // RING A IS THE DRAWN LINE and RING B is `reach` along the travel direction -
+        // through everything, beyond the bbox, so the boolean always has a complete
+        // cut whatever the part's depth.
+        //
+        // THE TRAVEL DIRECTION IS THE ONE THING THE WRAP AND THE PLUG STILL DISAGREE
+        // ABOUT, and it is worth saying why, because item 1 otherwise reads as "always
+        // go inward".
+        //
+        //   PLUG (a loop on a face). `into` - the opposite of the stroked facets'
+        //     averaged outward normal, confirmed against the mesh. The user drew a
+        //     shape on skin they can see and asked to cut it out; the prism starts at
+        //     that skin and goes in. Nothing on the outward side is touched.
+        //
+        //   WRAP (a belt right round the part). There is no outward side to speak of:
+        //     the loop's normals are radial and cancel, so "into the model from the
+        //     drawn line" is not a direction at all - every way is into the model. A
+        //     belt means SEPARATE THE PART, and the half-space along -n (one way only,
+        //     capped beyond the part) is what does that. This is the case the cylinder
+        //     suite covers and it is unchanged.
+        const Vec3d travel = wraps ? Vec3d(-cb.normal) : into;
+        const Vec3d lift_n = wraps ? cb.normal : outward_n;
+        const double lift  = std::max(1e-3, 1e-4 * diag);
         std::vector<Vec3d> ring_a, ring_b;
         ring_a.reserve(m);
         ring_b.reserve(m);
         for (size_t i = 0; i < m; ++ i) {
             const Vec3d inward = draw_cut_core_inward(stroke, params, cb.normal, cb.centroid, i);
             const Vec3d shift  = face_offset * cb.normal - nudge * inward;
-            // WRAP: ring A is the drawn line itself, so the wall starts AT the line and
-            // the solid below it is one half of the part. PLUG: ring A is `reach` above
-            // the line, so the prism goes clean through both ways.
-            ring_a.emplace_back(p[i].pos + (wraps ? 0.0 : reach) * cb.normal + shift);
-            ring_b.emplace_back(p[i].pos - reach * cb.normal + shift);
+            ring_a.emplace_back(p[i].pos + lift * lift_n + shift);
+            ring_b.emplace_back(p[i].pos + reach * travel + shift);
         }
 
         its.vertices.reserve(m * 2 + 2);
@@ -1632,9 +1789,13 @@ bool draw_cut_band_folds(const DrawCutStroke& stroke,
     if (radius <= 1e-9)
         return false;
 
+    // cos is EVEN, so a signed angle (item 5) insets by the same amount whichever
+    // side it leans - the mirrored band is the same shape reflected, and it eats the
+    // core exactly as fast. std::abs is belt and braces for a clamp that now admits
+    // negatives.
     const double inset = std::max(0.01, params.depth) *
-                         std::cos(std::clamp(params.angle_deg, DrawCutMinLipAngleDeg,
-                                             DrawCutMaxLipAngleDeg) * M_PI / 180.0);
+                         std::abs(std::cos(std::clamp(params.angle_deg, DrawCutMinLipAngleDeg,
+                                                      DrawCutMaxLipAngleDeg) * M_PI / 180.0));
     const double frac = inset / radius;
     if (worst_inset_frac != nullptr)
         *worst_inset_frac = frac;

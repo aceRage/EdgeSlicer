@@ -2940,6 +2940,16 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 r.draw_through_all = rt.get<int>("<xmlattr>.draw_through_all", legacy_draw ? 1 : 0) != 0;
                 r.draw_depth       = rt.get<double>("<xmlattr>.draw_depth", legacy_draw ? 10. : 3.);
             }
+            // VERSION 4: the extension angle. A MISSING attribute is "unset", i.e.
+            // "continue the band", which is what every version <= 3 file meant and what
+            // makes such a file re-cut to exactly the same halves. Zero is a real value
+            // (a flat skirt), so absence cannot be spelt as zero - hence the companion
+            // flag rather than a sentinel number.
+            {
+                const auto ext_angle = rt.get_optional<double>("<xmlattr>.draw_ext_angle");
+                r.draw_ext_angle_set = ext_angle.has_value();
+                r.draw_ext_angle_deg = ext_angle.value_or(0.);
+            }
 
             // --- the curved sheet ----------------------------------------------------
             if (const auto sheet_tree = rt.get_child_optional("sheet")) {
@@ -8779,6 +8789,12 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             rt.put("<xmlattr>.draw_angle",       r.draw_angle_deg);
             rt.put("<xmlattr>.draw_through_all", r.draw_through_all ? 1 : 0);
             rt.put("<xmlattr>.draw_depth",       r.draw_depth);
+            // Written ONLY when the user set one, so a recipe that never touched the
+            // control produces a file byte-identical to a version 3 writer's on this
+            // attribute - and an older reader, which ignores what it does not know,
+            // sees exactly the recipe it would have seen before.
+            if (r.draw_ext_angle_set)
+                rt.put("<xmlattr>.draw_ext_angle", r.draw_ext_angle_deg);
 
             if (r.kind == CutRecipeKind::Curved && r.sheet.valid()) {
                 pt::ptree &sh = rt.add("sheet", "");

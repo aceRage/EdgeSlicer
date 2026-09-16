@@ -81,7 +81,23 @@ struct CutConnector;
 // onto the nearest phase-3 cut so an old project opens with a sensible cut rather
 // than a broken one; the halves themselves are untouched until the user re-cuts,
 // because those come from the stored mesh blob.
-static constexpr int CutRecipeVersion = 3;
+//  4  the drawn cut grew two controls (2026-09-15, owner click-test items 4 and 5):
+//       draw_ext_angle_deg / draw_ext_angle_set
+//                       the EXTENSION ANGLE - which way the outward skirt leaves
+//                       the drawn line. Unset (the flag false) means "continue the
+//                       band", which is what the skirt has always done, so a
+//                       version <= 3 recipe loads with the flag false and re-cuts
+//                       to EXACTLY the same halves. This is a new field, not a
+//                       changed meaning.
+//       draw_angle_deg  became SIGNED, -90..90, the sign saying which side of the
+//                       core plane the band leans towards. Every stored value was
+//                       0..90 and those keep their meaning bit for bit - positive
+//                       is the direction the lip always went - so again nothing
+//                       needs rewriting, only admitting.
+//
+// A version <= 3 recipe therefore loads and re-cuts identically; no migration is
+// needed for 4 and cut_recipe_migrate_draw_v2() is untouched by it.
+static constexpr int CutRecipeVersion = 4;
 
 // The oldest version a reader accepts. Between this and CutRecipeVersion the fields
 // a recipe does not carry are left at their defaults.
@@ -285,8 +301,18 @@ struct CutRecipe
     int    draw_direction{ int(DrawCutDirection::SurfaceNormal) };
     Vec3d  draw_view_dir{ -Vec3d::UnitZ() };
     double draw_extension{ 5.0 };
-    // PHASE 3: the unsigned lip angle, 0..90. See CutRecipeVersion's history.
+    // The lip angle. SIGNED since version 4 (-90..90): the sign is which side of the
+    // core plane the band leans towards. See CutRecipeVersion's history.
     double draw_angle_deg{ 0.0 };
+    // VERSION 4: the EXTENSION ANGLE, and whether the user set one at all.
+    //
+    // Two fields rather than an optional, because the 3MF schema is attributes and a
+    // missing attribute has to mean "unset" rather than "zero" - zero is a perfectly
+    // good extension angle (a flat skirt) and must not be what an old file decays to.
+    // `draw_ext_angle_set` false is "continue the band", the default and what every
+    // version <= 3 recipe gets.
+    bool   draw_ext_angle_set{ false };
+    double draw_ext_angle_deg{ 0.0 };
     // PHASE 3 defaults, matching DrawCutParams: a flat core at 3 mm, not a
     // through cut. (These were `true` / 10.0 under the ruled-strip model.)
     bool   draw_through_all{ false };
@@ -360,6 +386,10 @@ struct CutRecipe
         ar(plane_center, rotation_m);
         ar(sheet, stroke, groove);
         ar(draw_direction, draw_view_dir, draw_extension, draw_angle_deg, draw_through_all, draw_depth);
+        // VERSION 4. Cereal is the undo stack and the project backup, never a file
+        // written by another build, so appending here is safe in the way appending
+        // to the 3MF schema is not.
+        ar(draw_ext_angle_set, draw_ext_angle_deg);
         ar(thickness);
         ar(keep_upper, keep_lower, keep_as_parts, place_on_cut_upper, place_on_cut_lower,
            rotate_upper, rotate_lower);
