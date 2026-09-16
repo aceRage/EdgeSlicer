@@ -6838,12 +6838,12 @@ std::string DeviceManager::parse_printer_type(std::string type_str)
     // newer batch showed as an unknown model and Send refused with "incompatible model". The
     // table is read once per run - the folder does not change while the app is running.
     static const std::map<std::string, std::vector<std::string>> subseries =
-        load_model_subseries(Slic3r::resources_dir() + "/printers");
-    std::string parent = resolve_model_subseries(type_str, subseries);
+        GUI::load_model_subseries(Slic3r::resources_dir() + "/printers");
+    std::string parent = GUI::resolve_model_subseries(type_str, subseries);
     if (parent.empty()) {
         // A revision newer than the table we ship: "-V<n>" is Bambu's revision suffix, so try the
         // bare code before giving up.
-        const std::string bare = strip_model_revision(type_str);
+        const std::string bare = GUI::strip_model_revision(type_str);
         if (bare != type_str)
             parent = bare;
     }
