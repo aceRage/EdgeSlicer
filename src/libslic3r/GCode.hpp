@@ -11,6 +11,7 @@
 #include "GCode/AvoidCrossingPerimeters.hpp"
 #include "GCode/CoolingBuffer.hpp"
 #include "GCode/FanMover.hpp"
+#include "GCode/LayerTimeSpeedSmoothingFilter.hpp"
 #include "GCode/RetractWhenCrossingPerimeters.hpp"
 #include "GCode/SpiralVase.hpp"
 #include "GCode/ToolOrdering.hpp"
@@ -610,8 +611,10 @@ private:
     Point                               m_last_pos;
     bool                                m_last_pos_defined;
 
-    std::unique_ptr<CoolingBuffer>      m_cooling_buffer;
-    std::unique_ptr<SpiralVase>         m_spiral_vase;
+    std::unique_ptr<CoolingBuffer>                 m_cooling_buffer;
+    // S3 stub after CoolingBuffer / before FanMover. Null when mode is Off (no extra buffer).
+    std::unique_ptr<LayerTimeSpeedSmoothingFilter> m_layer_time_speed_smoothing;
+    std::unique_ptr<SpiralVase>                    m_spiral_vase;
 
     std::unique_ptr<PressureEqualizer>  m_pressure_equalizer;
     

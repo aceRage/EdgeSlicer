@@ -315,6 +315,20 @@ static t_config_enum_values s_keys_map_EnableExtraBridgeLayer {
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(EnableExtraBridgeLayer)
 
 // Orca
+static t_config_enum_values s_keys_map_LayerTimeSpeedSmoothMode {
+    { "off",                      ltssmOff },
+    { "speed_up_exclude_outer",   ltssmSpeedUpExcludeOuter },
+    { "speed_up_all",             ltssmSpeedUpAll },
+    { "slow_down",                ltssmSlowDown }
+};
+CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(LayerTimeSpeedSmoothMode)
+
+static t_config_enum_values s_keys_map_LayerTimeSlowdownScope {
+    { "all",                   ltssAll },
+    { "exclude_outer_walls",   ltssExcludeOuterWalls }
+};
+CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(LayerTimeSlowdownScope)
+
 static t_config_enum_values s_keys_map_GapFillTarget {
     { "everywhere",        gftEverywhere },
     { "topbottom",        gftTopBottom },
@@ -4924,6 +4938,97 @@ void PrintConfigDef::init_fff_params()
                      "overhangs without impacting the print speed of features that will not be visible to the user.");
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionBool(false));
+
+    // Edge: layer-time speed smoothing (process / Speed tab). Keys are layer_time_speed_*, not Bambu's
+    // layer_time_smoothing. Mode A/B speed up long layers; Mode C is optional slowdown.
+    // Plan: 09-concept-layer-time-speed-smoothing.md. Inspiration only: BambuStudio#12224.
+    def = this->add("layer_time_speed_smoothing", coEnum);
+    def->label = L("Layer time speed smoothing");
+    def->full_label = L("Layer time speed smoothing");
+    def->category = L("Speed");
+    def->tooltip = L("Limit how much estimated print time may jump from one layer to the next, which otherwise "
+                     "shows up as banding on glossy and high-shrinkage filaments.\n\n"
+                     "Off leaves speeds unchanged.\n"
+                     "Speed up (exclude outer walls) shortens long layers so they sit inside the neighbour variation "
+                     "band, without touching outer-wall feedrates.\n"
+                     "Speed up (all) does the same for every extrusion.\n"
+                     "Slow down lengthens short layers instead (optional; similar in spirit to Bambu Studio's "
+                     "layer-time smoothing, but a separate Edge option).");
+    def->enum_keys_map = &ConfigOptionEnum<LayerTimeSpeedSmoothMode>::get_enum_values();
+    def->enum_values.push_back("off");
+    def->enum_values.push_back("speed_up_exclude_outer");
+    def->enum_values.push_back("speed_up_all");
+    def->enum_values.push_back("slow_down");
+    def->enum_labels.push_back(L("Off"));
+    def->enum_labels.push_back(L("Speed up (exclude outer walls)"));
+    def->enum_labels.push_back(L("Speed up (all)"));
+    def->enum_labels.push_back(L("Slow down"));
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionEnum<LayerTimeSpeedSmoothMode>(ltssmOff));
+
+    def = this->add("layer_time_speed_max_variation", coPercent);
+    def->label = L("Max layer time variation");
+    def->category = L("Speed");
+    def->tooltip = L("Maximum allowed relative change of estimated print time between adjacent layers. "
+                     "At 25%, a neighbour may be at most 25% shorter than a layer (the longer layer is at most "
+                     "1 / 0.75 times the shorter). Smaller values produce a gentler ramp and cost more time "
+                     "(slow down) or more speed-up of the long layers.");
+    def->sidetext = "%";
+    def->min = 0;
+    def->max = 100;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionPercent(25));
+
+    def = this->add("layer_time_speed_max_speedup", coPercent);
+    def->label = L("Max speed-up");
+    def->category = L("Speed");
+    def->tooltip = L("Cap on how much a single long layer may be sped up (Modes Speed up). "
+                     "100% means the layer may print at most twice as fast (time may be halved). "
+                     "Short layers are never lengthened.");
+    def->sidetext = "%";
+    def->min = 0;
+    def->max = 1000;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionPercent(100));
+
+    def = this->add("layer_time_speed_max_slowdown", coPercent);
+    def->label = L("Max slowdown");
+    def->category = L("Speed");
+    def->tooltip = L("Cap on how much a single short layer may be slowed down (Slow down mode). "
+                     "200% means the layer may take up to three times as long.");
+    def->sidetext = "%";
+    def->min = 0;
+    def->max = 1000;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionPercent(200));
+
+    def = this->add("layer_time_speed_max_time_increase", coPercent);
+    def->label = L("Max print time increase");
+    def->category = L("Speed");
+    def->tooltip = L("Cap on the growth of the summed layer times (Slow down mode). "
+                     "If the variation limit would exceed this budget, the allowed variation is relaxed "
+                     "until the increase fits.");
+    def->sidetext = "%";
+    def->min = 0;
+    def->max = 500;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionPercent(20));
+
+    def = this->add("layer_time_speed_slowdown_scope", coEnum);
+    def->label = L("Slowdown scope");
+    def->category = L("Speed");
+    def->tooltip = L("Which extrusions Slow down mode may stretch. "
+                     "Exclude outer walls keeps outer-wall speed and gloss unchanged and only lengthens "
+                     "inner walls, infill and other internal extrusions. "
+                     "This is an apply-side choice; the time solver itself is extrusion-agnostic.");
+    def->enum_keys_map = &ConfigOptionEnum<LayerTimeSlowdownScope>::get_enum_values();
+    def->enum_values.push_back("all");
+    def->enum_values.push_back("exclude_outer_walls");
+    def->enum_labels.push_back(L("All extrusions"));
+    def->enum_labels.push_back(L("Exclude outer walls"));
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionEnum<LayerTimeSlowdownScope>(ltssExcludeOuterWalls));
+
 
 
     def = this->add("fan_min_speed", coFloats);

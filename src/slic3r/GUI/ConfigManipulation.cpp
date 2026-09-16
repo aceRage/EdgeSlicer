@@ -863,6 +863,19 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
 
     toggle_line("slowdown_for_curled_perimeters", has_overhang_speed);
 
+    // Edge: layer-time speed smoothing. A/B fields when mode is a speed-up; C fields when Slow down.
+    // Max variation is shared by every non-Off mode.
+    if (config->has("layer_time_speed_smoothing")) {
+        const auto ltssm = config->opt_enum<LayerTimeSpeedSmoothMode>("layer_time_speed_smoothing");
+        const bool ltssm_speed_up  = is_layer_time_speed_up(ltssm);
+        const bool ltssm_slow_down = is_layer_time_slowdown(ltssm);
+        toggle_line("layer_time_speed_max_variation", ltssm_speed_up || ltssm_slow_down);
+        toggle_line("layer_time_speed_max_speedup", ltssm_speed_up);
+        toggle_line("layer_time_speed_max_slowdown", ltssm_slow_down);
+        toggle_line("layer_time_speed_max_time_increase", ltssm_slow_down);
+        toggle_line("layer_time_speed_slowdown_scope", ltssm_slow_down);
+    }
+
     toggle_line("flush_into_objects", !is_global_config);
 
     toggle_line("support_interface_not_for_body",config->opt_int("support_interface_filament")&&!config->opt_int("support_filament"));
