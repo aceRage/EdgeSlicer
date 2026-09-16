@@ -821,6 +821,49 @@ void make_boolean(const TriangleMesh &src_mesh, const TriangleMesh &cut_mesh, st
 
 namespace mfd {
 
+// Signed volume of a closed triangle soup, in model units^3. Positive means the
+// triangles wind counter-clockwise seen from outside, i.e. the normals point out -
+// which is the orientation every consumer in this tree (rendering, slicing, export)
+// assumes. Duplicated from its_volume() rather than reused so the boolean backend
+// does not depend on TriangleMesh's float accumulation: a large part built in
+// millimetres overflows float precision long before it overflows double, and a sign
+// that flips on rounding would be worse than no check at all.
+static double its_signed_volume_d(const indexed_triangle_set &its)
+{
+    double vol = 0.;
+    for (const Vec3i32 &f : its.indices) {
+        const Vec3d a = its.vertices[f(0)].cast<double>();
+        const Vec3d b = its.vertices[f(1)].cast<double>();
+        const Vec3d c = its.vertices[f(2)].cast<double>();
+        vol += a.dot(b.cross(c));
+    }
+    return vol / 6.;
+}
+
+// Manifold validates TOPOLOGY, not ORIENTATION: a closed mesh whose triangles all
+// wind the wrong way is a perfectly good 2-manifold as far as Manifold::Status() is
+// concerned, so it is accepted, carried through the boolean unchanged, and handed
+// back inside-out. That is how the gizmo's Union produced correct geometry with
+// inverted normals while the right-click path (which calls
+// TriangleMesh::transform(m, /*fix_left_handed=*/true) and so never feeds an
+// inverted mesh in) was fine.
+//
+// Two independent ways an inverted mesh reaches here:
+//   * a MIRRORED volume. GLGizmoMeshBoolean transforms by the volume matrix with
+//     fix_left_handed defaulting to false, so a negative-determinant matrix inverts
+//     the winding without flipping the triangles back.
+//   * an already inside-out source file, which nothing upstream of the gizmo repairs.
+//
+// Normalising on the way in fixes both at the source and keeps the two backends'
+// contracts identical, so the gizmo and the right-click menu agree.
+static void orient_outward(indexed_triangle_set &its)
+{
+    if (its.indices.empty() || its.vertices.empty())
+        return;
+    if (its_signed_volume_d(its) < 0.)
+        its_flip_triangles(its);
+}
+
 static manifold::Manifold to_manifold(const indexed_triangle_set &its)
 {
     manifold::MeshGL m;
@@ -856,8 +899,16 @@ bool make_boolean(const TriangleMesh &src_mesh, const TriangleMesh &cut_mesh, st
         return false;
 
     try {
-        manifold::Manifold a = to_manifold(src_mesh.its);
-        manifold::Manifold b = to_manifold(cut_mesh.its);
+        // Normalise both inputs to outward-facing before Manifold sees them - see
+        // orient_outward() for why Manifold itself will not do this for us. Copies,
+        // so the caller's meshes are untouched.
+        indexed_triangle_set src_its = src_mesh.its;
+        indexed_triangle_set cut_its = cut_mesh.its;
+        orient_outward(src_its);
+        orient_outward(cut_its);
+
+        manifold::Manifold a = to_manifold(src_its);
+        manifold::Manifold b = to_manifold(cut_its);
         if (a.Status() != manifold::Manifold::Error::NoError || b.Status() != manifold::Manifold::Error::NoError) {
             BOOST_LOG_TRIVIAL(info) << "MeshBoolean::mfd: input not manifold, falling back (src="
                                     << int(a.Status()) << " tool=" << int(b.Status()) << ")";
@@ -876,6 +927,11 @@ bool make_boolean(const TriangleMesh &src_mesh, const TriangleMesh &cut_mesh, st
         its.indices.reserve(out.triVerts.size() / 3);
         for (size_t i = 0; i + 2 < out.triVerts.size(); i += 3)
             its.indices.emplace_back(int(out.triVerts[i]), int(out.triVerts[i + 1]), int(out.triVerts[i + 2]));
+        // Belt and braces: the inputs are outward-facing above, so Manifold's result
+        // should be too. Assert it cheaply rather than trusting it - a future upstream
+        // bump that changes the convention would otherwise reintroduce the inside-out
+        // bug silently, and one more O(triangles) pass is nothing next to the boolean.
+        orient_outward(its);
         dst_mesh.emplace_back(std::move(its));
         return true;
     } catch (const std::exception &e) {
