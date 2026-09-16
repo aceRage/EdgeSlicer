@@ -707,7 +707,14 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
         "long_retractions_when_cut",
         "retraction_distances_when_cut",
         "filament_long_retractions_when_cut",
-        "filament_retraction_distances_when_cut"
+        "filament_retraction_distances_when_cut",
+        // Edge: layer-time speed smoothing (G-code export only; no reslice).
+        "layer_time_speed_smoothing",
+        "layer_time_speed_max_variation",
+        "layer_time_speed_max_speedup",
+        "layer_time_speed_max_slowdown",
+        "layer_time_speed_max_time_increase",
+        "layer_time_speed_slowdown_scope"
     };
 
     static std::unordered_set<std::string> steps_ignore;
