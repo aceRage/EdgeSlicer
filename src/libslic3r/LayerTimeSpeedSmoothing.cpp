@@ -138,7 +138,8 @@ LayerTimeSpeedSolveResult solve_layer_time_speed_up(
 LayerTimeSpeedSolveResult solve_layer_time_slowdown(
     const std::vector<double> &times,
     const LayerTimeSlowdownParams &params,
-    size_t first_layer)
+    size_t first_layer,
+    const std::vector<bool> &frozen)
 {
     LayerTimeSpeedSolveResult out;
     out.times                   = times;
@@ -150,7 +151,9 @@ LayerTimeSpeedSolveResult solve_layer_time_slowdown(
     const double max_stretch = 1.0 + std::max(0.0, params.max_slowdown);
     std::vector<double> cap_time(times.size());
     for (size_t i = 0; i < times.size(); ++i) {
-        if (i < first_layer)
+        // A frozen layer's cap is its own time: try_lengthen() then never moves it, while
+        // its (unchanged) time still bounds the neighbours through neighbour_lower().
+        if (i < first_layer || (i < frozen.size() && frozen[i]))
             cap_time[i] = times[i];
         else
             cap_time[i] = times[i] * max_stretch;

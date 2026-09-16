@@ -70,6 +70,8 @@ using namespace nlohmann;
 #include "libslic3r/Thread.hpp"
 #include "libslic3r/BlacklistedLibraryCheck.hpp"
 #include "libslic3r/FlushVolCalc.hpp"
+#include "libslic3r/MixedFilament.hpp"
+#include "libslic3r/MixedFilamentCliGates.hpp"
 
 #include "libslic3r/Orient.hpp"
 #include "libslic3r/PNGReadWrite.hpp"
@@ -84,10 +86,14 @@ using namespace nlohmann;
 #include "slic3r/GUI/BitmapCache.hpp"
 #include "slic3r/GUI/OpenGLManager.hpp"
 #include "libslic3r/PresetBundle.hpp"
+#include <algorithm>
 #include <array>
+#include <cmath>
+#include <cstdlib>
 #include <memory>
 #include <mutex>
 #include <set>
+#include <sstream>
 #include "slic3r/GUI/GLCanvas3D.hpp"
 #include "slic3r/GUI/Camera.hpp"
 #include "slic3r/GUI/Plater.hpp"
@@ -154,9 +160,15 @@ std::map<int, std::string> cli_errors = {
     {CLI_OBJECT_COLLISION_IN_SEQ_PRINT, "Object conflicts were detected when using print-by-object mode. Please verify the slicing of all plates in EdgeSlicer before uploading."},
     {CLI_OBJECT_COLLISION_IN_LAYER_PRINT, "Object conflicts were detected. Please verify the slicing of all plates in EdgeSlicer before uploading."},
     {CLI_SPIRAL_MODE_INVALID_PARAMS, "Some slicing parameters cannot work with Spiral Vase mode. Please solve the issue in EdgeSlicer before uploading."},
+    {CLI_MIXED_FILAMENT_INVALID, "A mixed filament is invalid: its components are different filament types, or it has no filament of its own."},
     {CLI_SLICING_ERROR, "Failed slicing the model. Please verify the slicing of all plates on EdgeSlicer before uploading."},
     {CLI_GCODE_PATH_CONFLICTS, " G-code conflicts detected after slicing. Please make sure the 3mf file can be successfully sliced in the latest EdgeSlicer."}
 };
+
+// CLI mixed-filament wipe/flush/type gate decision logic now lives in
+// libslic3r/MixedFilamentCliGates.hpp/.cpp (pure, GUI-free, unit-tested in
+// tests/libslic3r/test_mixed_filament_cli_gates.cpp) so it can be exercised outside
+// this file, which is the application's main and is not itself unit-testable.
 
 typedef struct  _sliced_plate_info{
     int plate_id{0};
@@ -1519,6 +1531,34 @@ int CLI::run(int argc, char **argv)
         downward_check = downward_check_option->value;
     else
         downward_check = false;
+
+    // --export-settings - writes its JSON to stdout, so reject every action or transform that may write there
+    // too (--info, --help, --orient, slicing and exporting). The allowed ones do nothing when nothing is
+    // sliced or exported.
+    if (std::find(m_actions.begin(), m_actions.end(), "export_settings") != m_actions.end() && m_config.opt_string("export_settings") == "-") {
+        // --progress-json is a CLIMiscConfigDef option, not an action/transform, so it never shows up in
+        // m_actions/m_transforms below. emit_progress()/record_exit_reson() still write "event":"progress"/
+        // "result" JSON lines straight to stdout whenever g_progress_json is set (see above), which would
+        // interleave with and corrupt the single settings-JSON document -export-settings - is meant to produce.
+        if (g_progress_json) {
+            boost::nowide::cerr << "--export-settings - cannot be combined with --progress-json" << std::endl;
+            record_exit_reson(outfile_dir, CLI_INVALID_PARAMS, 0, cli_errors[CLI_INVALID_PARAMS], sliced_info);
+            flush_and_exit(CLI_INVALID_PARAMS);
+        }
+        static const std::set<std::string> stdout_compatible = { "export_settings", "uptodate", "load_defaultfila", "min_save",
+                                                                 "mtcpp", "mstpp", "no_check", "normative_check", "pipe" };
+        for (const std::vector<std::string> *opt_keys : { &m_actions, &m_transforms }) {
+            for (const std::string &opt_key : *opt_keys) {
+                if (stdout_compatible.count(opt_key) == 0) {
+                    std::string flag = opt_key;
+                    std::replace(flag.begin(), flag.end(), '_', '-');
+                    boost::nowide::cerr << "--export-settings - cannot be combined with --" << flag << std::endl;
+                    record_exit_reson(outfile_dir, CLI_INVALID_PARAMS, 0, cli_errors[CLI_INVALID_PARAMS], sliced_info);
+                    flush_and_exit(CLI_INVALID_PARAMS);
+                }
+            }
+        }
+    }
 
     bool start_gui = m_actions.empty() && !downward_check;
     if (start_gui) {
@@ -3242,6 +3282,16 @@ int CLI::run(int argc, char **argv)
                 BOOST_LOG_TRIVIAL(info) << boost::format("filament_is_support: %1%") % filament_is_support->serialize();
                 BOOST_LOG_TRIVIAL(info) << boost::format("flush_volumes_matrix before computing: %1%") % m_print_config.option<ConfigOptionFloats>("flush_volumes_matrix")->serialize();
             }
+            // A mixed slot never reaches a nozzle, so its row and column stay empty, as in the GUI.
+            // Extra config is not merged into m_print_config yet, so mixed_filament_definitions
+            // on the command line wins here.
+            MixedFilamentManager flush_mixed_mgr;
+            const size_t flush_num_physical = filament_count > 0 ? size_t(filament_count) : project_filament_colors.size();
+            populate_cli_mixed_filament_manager(flush_mixed_mgr, m_print_config, &m_extra_config, project_filament_colors,
+                                                flush_num_physical);
+            auto is_mixed_slot = [&](int idx) {
+                return flush_mixed_mgr.is_mixed(static_cast<unsigned int>(idx + 1), flush_num_physical);
+            };
             for (int from_idx = 0; from_idx < project_filament_count; from_idx++) {
                 const std::string& from_color = project_filament_colors[from_idx];
                 unsigned char from_rgb[4] = {};
@@ -3249,7 +3299,7 @@ int CLI::run(int argc, char **argv)
                 bool is_from_support = filament_is_support->get_at(from_idx);
                 for (int to_idx = 0; to_idx < project_filament_count; to_idx++) {
                     bool is_to_support = filament_is_support->get_at(to_idx);
-                    if (from_idx == to_idx) {
+                    if (from_idx == to_idx || is_mixed_slot(from_idx) || is_mixed_slot(to_idx)) {
                         flush_vol_matrix[project_filament_count*from_idx + to_idx] = 0.f;
                     }
                     else {
@@ -3410,6 +3460,34 @@ int CLI::run(int argc, char **argv)
         m_print_config.apply(sla_print_config, true);*/
     }
 
+    // After 3mf load/normalize: rebuild MixedFilamentManager from the merged project
+    // definitions and physical colours before wipe/flush/type gates.
+    MixedFilamentManager cli_mixed_filament_mgr;
+    size_t               cli_mixed_num_physical = 0;
+    {
+        std::vector<std::string> physical_colors;
+        if (const auto *opt = m_print_config.option<ConfigOptionStrings>("filament_colour"))
+            physical_colors = opt->values;
+        cli_mixed_num_physical = filament_count > 0 ? size_t(filament_count) : physical_colors.size();
+        populate_cli_mixed_filament_manager(cli_mixed_filament_mgr, m_print_config, nullptr, physical_colors,
+                                            cli_mixed_num_physical);
+
+        if (ConfigOptionFloats *flush_opt = m_print_config.option<ConfigOptionFloats>("flush_volumes_matrix")) {
+            const size_t n = size_t(std::sqrt(double(flush_opt->values.size())) + 0.001);
+            zero_mixed_flush_rows_and_cols(flush_opt->values, n, cli_mixed_filament_mgr, cli_mixed_num_physical);
+        }
+
+        const std::string mixed_defs = cli_mixed_filament_definitions(m_print_config, nullptr);
+        const CliMixedFilamentVerdict slots_verdict = cli_check_mixed_filament_slots_have_filament(
+            cli_mixed_filament_mgr, mixed_defs, cli_mixed_num_physical, m_models, m_print_config, filament_count);
+        if (!slots_verdict.ok) {
+            BOOST_LOG_TRIVIAL(error) << slots_verdict.message;
+            record_exit_reson(outfile_dir, CLI_MIXED_FILAMENT_INVALID, 0, cli_errors[CLI_MIXED_FILAMENT_INVALID],
+                              sliced_info);
+            flush_and_exit(CLI_MIXED_FILAMENT_INVALID);
+        }
+    }
+
     std::map<std::string, std::string> validity = m_print_config.validate(true);
     if (!validity.empty()) {
         boost::nowide::cerr << "Param values in 3mf/config error: "<< std::endl;
@@ -3423,6 +3501,14 @@ int CLI::run(int argc, char **argv)
     bool is_smooth_timelapse = false;
     if (enable_timelapse && timelapse_type_opt && (timelapse_type_opt->getInt() == TimelapseType::tlSmooth))
         is_smooth_timelapse = true;
+    // A mixed filament swaps between its components every layer, so it needs the tower even when
+    // every loaded preset is the same.
+    if (disable_wipe_tower_after_mapping) {
+        if (cli_mixed_filament_mgr.enabled_count() > 0) {
+            disable_wipe_tower_after_mapping = false;
+            BOOST_LOG_TRIVIAL(info) << boost::format("%1%, set disable_wipe_tower_after_mapping back to false due to a mixed filament")%__LINE__;
+        }
+    }
     if (disable_wipe_tower_after_mapping) {
         if (is_smooth_timelapse)
         {
@@ -3571,7 +3657,7 @@ int CLI::run(int argc, char **argv)
             return;
         }
 
-        std::vector<int> extruders = plate->get_extruders_under_cli(true, print_config);
+        std::vector<int> extruders = plate->get_extruders_under_cli(true, print_config, false);
         unsigned int filaments_cnt = extruders.size();
         std::ostringstream extruder_list;
         for (size_t i = 0; i < extruders.size(); ++i) {
@@ -4599,7 +4685,7 @@ int CLI::run(int argc, char **argv)
                                 //skip this object due to be locked in plate
                                 ap.itemid = locked_aps.size();
                                 locked_aps.emplace_back(ap);
-                                boost::nowide::cout <<__FUNCTION__ << boost::format(": skip locked instance, obj_id %1%, instance_id %2%") % oidx % inst_idx;
+                                BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(": skip locked instance, obj_id %1%, instance_id %2%") % oidx % inst_idx;
                             }
                         }
                     }
@@ -4733,7 +4819,7 @@ int CLI::run(int argc, char **argv)
                         if ((filaments_cnt == 0) || need_skip)
                         {
                             // slice filaments info invalid
-                            std::vector<int> extruders = cur_plate->get_extruders_under_cli(true, m_print_config);
+                            std::vector<int> extruders = cur_plate->get_extruders_under_cli(true, m_print_config, false);
                             filaments_cnt = extruders.size();
                             BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format("arrange: slice filaments info invalid or need_skip, get from partplate: filament_count %1%")%filaments_cnt;
                         }
@@ -5174,7 +5260,11 @@ int CLI::run(int argc, char **argv)
             //FIXME check for mixing the FFF / SLA parameters.
             // or better save fff_print_config vs. sla_print_config
             //m_print_config.save(m_config.opt_string("save"));
-            m_print_config.save_to_json(m_config.opt_string(opt_key), std::string("project_settings"), std::string("project"), std::string(Snapmaker_VERSION));
+            const std::string &settings_file = m_config.opt_string(opt_key);
+            if (settings_file == "-")
+                m_print_config.save_to_json(boost::nowide::cout, "project_settings", "project", Snapmaker_VERSION, /*replace_invalid_utf8=*/true);
+            else
+                m_print_config.save_to_json(settings_file, std::string("project_settings"), std::string("project"), std::string(Snapmaker_VERSION));
         } else if (opt_key == "info") {
             // --info works on unrepaired model
             for (Model &model : m_models) {
@@ -5461,6 +5551,23 @@ int CLI::run(int argc, char **argv)
                                 flush_and_exit(CLI_FILAMENTS_DIFFERENT_TEMP);
                             }
                         }
+
+                        // Same type gate as the GUI's Plater::has_incompatible_mixed_filament_in_use:
+                        // refuse a plate that uses a mixed slot whose components are different
+                        // filament types. CLI get_extruders_under_cli already returns mixed slots
+                        // (it does not expand them), matching the GUI scan of used virtual IDs.
+                        {
+                            const std::vector<int> plate_slots = part_plate->get_extruders_under_cli(true, new_print_config, false);
+                            const CliMixedFilamentVerdict type_verdict = cli_check_mixed_filament_type_compatibility(
+                                cli_mixed_filament_mgr, plate_slots, cli_mixed_num_physical, new_print_config, index + 1);
+                            if (!type_verdict.ok) {
+                                BOOST_LOG_TRIVIAL(error) << type_verdict.message;
+                                record_exit_reson(outfile_dir, CLI_MIXED_FILAMENT_INVALID, index + 1,
+                                                  cli_errors[CLI_MIXED_FILAMENT_INVALID], sliced_info);
+                                flush_and_exit(CLI_MIXED_FILAMENT_INVALID);
+                            }
+                        }
+
                         // Ultra: the BBL-vendor flag has to be set BEFORE Print::validate(), because validate()
                         // branches on it (Print.cpp:2040 the Orca "G92 E0 vs. absolute E" rule, Print.cpp:2063 the
                         // bed-temperature rule). The GUI does exactly this: BackgroundSlicingProcess::validate()
@@ -6604,6 +6711,13 @@ bool CLI::setup(int argc, char **argv)
         this->print_help();
         return false;
     }
+
+    // Orca: resolve here, while the process is still in the directory the user invoked it from.
+    // GUI_App's constructor moves the working directory to <data_dir>/log, long before the GUI
+    // opens these files in post_init(), and a relative path would then resolve against that.
+    for (std::string &input_file : m_input_files)
+        input_file = resolve_cli_input_path(input_file);
+
     // Parse actions and transform options.
     for (auto const &opt_key : opt_order) {
         if (cli_actions_config_def.has(opt_key))
