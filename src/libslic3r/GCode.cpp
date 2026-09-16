@@ -2779,9 +2779,10 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
     m_cooling_buffer = make_unique<CoolingBuffer>(*this);
     m_cooling_buffer->set_current_extruder(initial_extruder_id);
 
-    // S3: construct the layer-time speed smoothing stage only when enabled so Off
+    // Construct the layer-time speed smoothing stage only when enabled so Off
     // keeps today's streaming path (no extra layer buffer). The TBB filter is still
-    // present as a no-op identity when this pointer is null.
+    // present as a no-op identity when this pointer is null. spiral_mode is identity
+    // inside the filter (no buffer / no F rewrite).
     if (m_config.layer_time_speed_smoothing.value != ltssmOff)
         m_layer_time_speed_smoothing = make_unique<LayerTimeSpeedSmoothingFilter>(m_config);
 
@@ -3655,29 +3656,35 @@ void GCode::process_layers(const Print&                                         
 
         spiral_mode.enable(in.spiral_vase_enable);
         bool last_layer = in.layer_id == layers_to_print.size() - 1;
-        return {spiral_mode.process_layer(std::move(in.gcode), last_layer), in.layer_id, in.spiral_vase_enable, in.cooling_buffer_flush};
+        LayerResult out{spiral_mode.process_layer(std::move(in.gcode), last_layer), in.layer_id, in.spiral_vase_enable, in.cooling_buffer_flush};
+        out.last_layer = in.last_layer;
+        return out;
     });
     const auto pressure_equalizer  = tbb::make_filter<LayerResult, LayerResult>(slic3r_tbb_filtermode::serial_in_order,
                                                                                [pressure_equalizer = this->m_pressure_equalizer.get()](
                                                                                    LayerResult in) -> LayerResult {
                                                                                    return pressure_equalizer->process_layer(std::move(in));
                                                                                });
-    const auto cooling             = tbb::make_filter<LayerResult, std::string>(slic3r_tbb_filtermode::serial_in_order,
+    const auto cooling             = tbb::make_filter<LayerResult, LayerResult>(slic3r_tbb_filtermode::serial_in_order,
                                                                     [&cooling_buffer = *this->m_cooling_buffer.get()](
-                                                                        LayerResult in) -> std::string {
+                                                                        LayerResult in) -> LayerResult {
                                                                         if (in.nop_layer_result)
-                                                                            return in.gcode;
-                                                                        return cooling_buffer.process_layer(std::move(in.gcode),
+                                                                            return in;
+                                                                        in.gcode = cooling_buffer.process_layer(std::move(in.gcode),
                                                                                                                         in.layer_id,
                                                                                                                         in.cooling_buffer_flush);
+                                                                        // Only a flushed layer carries G-code; the flag describes that flush.
+                                                                        in.cooling_slowed_down = in.cooling_buffer_flush && cooling_buffer.last_layer_slowed_down();
+                                                                        return in;
                                                                     });
-    // S3: after CoolingBuffer, before FanMover. Null pointer => identity, no extra layer buffer.
-    const auto layer_time_speed_smoothing = tbb::make_filter<std::string, std::string>(
+    // After CoolingBuffer, before FanMover. Null pointer => identity, no extra layer buffer.
+    // Enabled modes buffer every cooled layer and rewrite F on last_layer.
+    const auto layer_time_speed_smoothing = tbb::make_filter<LayerResult, std::string>(
         slic3r_tbb_filtermode::serial_in_order,
-        [&ltss = this->m_layer_time_speed_smoothing](std::string in) -> std::string {
+        [&ltss = this->m_layer_time_speed_smoothing](LayerResult in) -> std::string {
             if (!ltss)
-                return in;
-            return ltss->process_layer(std::move(in));
+                return std::move(in.gcode);
+            return ltss->process_layer(std::move(in.gcode), in.layer_id, in.last_layer, in.cooling_slowed_down);
         });
     const auto pa_processor_filter = tbb::make_filter<std::string, std::string>(slic3r_tbb_filtermode::serial_in_order,
                                                                                 [&pa_processor = *this->m_pa_processor](
@@ -3705,7 +3712,7 @@ void GCode::process_layers(const Print&                                         
         });
 
     // The pipeline elements are joined using const references, thus no copying is performed.
-    // S3 filter sits after CoolingBuffer and before FanMover in every variant.
+    // Layer-time speed smoothing sits after CoolingBuffer and before FanMover in every variant.
     if (m_spiral_vase && m_pressure_equalizer)
         tbb::parallel_pipeline(12, generator & spiral_mode & pressure_equalizer & cooling & layer_time_speed_smoothing & fan_mover &
                                        output);
@@ -3770,29 +3777,35 @@ void GCode::process_layers(const Print&              print,
             return in;
         spiral_mode.enable(in.spiral_vase_enable);
         bool last_layer = in.layer_id == layers_to_print.size() - 1;
-        return {spiral_mode.process_layer(std::move(in.gcode), last_layer), in.layer_id, in.spiral_vase_enable, in.cooling_buffer_flush};
+        LayerResult out{spiral_mode.process_layer(std::move(in.gcode), last_layer), in.layer_id, in.spiral_vase_enable, in.cooling_buffer_flush};
+        out.last_layer = in.last_layer;
+        return out;
     });
     const auto pressure_equalizer  = tbb::make_filter<LayerResult, LayerResult>(slic3r_tbb_filtermode::serial_in_order,
                                                                                [pressure_equalizer = this->m_pressure_equalizer.get()](
                                                                                    LayerResult in) -> LayerResult {
                                                                                    return pressure_equalizer->process_layer(std::move(in));
                                                                                });
-    const auto cooling             = tbb::make_filter<LayerResult, std::string>(slic3r_tbb_filtermode::serial_in_order,
+    const auto cooling             = tbb::make_filter<LayerResult, LayerResult>(slic3r_tbb_filtermode::serial_in_order,
                                                                     [&cooling_buffer = *this->m_cooling_buffer.get()](
-                                                                        LayerResult in) -> std::string {
+                                                                        LayerResult in) -> LayerResult {
                                                                         if (in.nop_layer_result)
-                                                                            return in.gcode;
-                                                                        return cooling_buffer.process_layer(std::move(in.gcode),
+                                                                            return in;
+                                                                        in.gcode = cooling_buffer.process_layer(std::move(in.gcode),
                                                                                                                         in.layer_id,
                                                                                                                         in.cooling_buffer_flush);
+                                                                        // Only a flushed layer carries G-code; the flag describes that flush.
+                                                                        in.cooling_slowed_down = in.cooling_buffer_flush && cooling_buffer.last_layer_slowed_down();
+                                                                        return in;
                                                                     });
-    // S3: after CoolingBuffer, before FanMover. Null pointer => identity, no extra layer buffer.
-    const auto layer_time_speed_smoothing = tbb::make_filter<std::string, std::string>(
+    // After CoolingBuffer, before FanMover. Null pointer => identity, no extra layer buffer.
+    // Enabled modes buffer every cooled layer and rewrite F on last_layer.
+    const auto layer_time_speed_smoothing = tbb::make_filter<LayerResult, std::string>(
         slic3r_tbb_filtermode::serial_in_order,
-        [&ltss = this->m_layer_time_speed_smoothing](std::string in) -> std::string {
+        [&ltss = this->m_layer_time_speed_smoothing](LayerResult in) -> std::string {
             if (!ltss)
-                return in;
-            return ltss->process_layer(std::move(in));
+                return std::move(in.gcode);
+            return ltss->process_layer(std::move(in.gcode), in.layer_id, in.last_layer, in.cooling_slowed_down);
         });
     const auto pa_processor_filter = tbb::make_filter<std::string, std::string>(slic3r_tbb_filtermode::serial_in_order,
                                                                                 [&pa_processor = *this->m_pa_processor](
@@ -3818,7 +3831,7 @@ void GCode::process_layers(const Print&              print,
         });
 
     // The pipeline elements are joined using const references, thus no copying is performed.
-    // S3 filter sits after CoolingBuffer and before FanMover in every variant.
+    // Layer-time speed smoothing sits after CoolingBuffer and before FanMover in every variant.
     if (m_spiral_vase && m_pressure_equalizer)
         tbb::parallel_pipeline(12, generator & spiral_mode & pressure_equalizer & cooling & layer_time_speed_smoothing & fan_mover &
                                        output);
@@ -5223,6 +5236,7 @@ LayerResult GCode::process_layer(const Print& print,
         layer_ptr = support_layer;
     const Layer& layer = *layer_ptr;
     LayerResult  result{{}, layer.id(), false, last_layer};
+    result.last_layer = last_layer;
     if (layer_tools.extruders.empty())
         // Nothing to extrude.
         return result;

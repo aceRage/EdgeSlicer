@@ -4,6 +4,7 @@
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/algorithm/string/replace.hpp>
 #include <boost/log/trivial.hpp>
+#include <algorithm>
 #include <iostream>
 #include <float.h>
 #include <system_error>
@@ -42,6 +43,7 @@ void CoolingBuffer::reset(const Vec3d &position)
     m_fan_speed = -1;
     m_additional_fan_speed = -1;
     m_current_fan_speed = -1;
+    m_last_layer_slowed_down = false;
 }
 
 struct CoolingLine
@@ -383,6 +385,13 @@ std::string CoolingBuffer::process_layer(std::string &&gcode, size_t layer_id, b
         // and one object layer.
         std::vector<PerExtruderAdjustments> per_extruder_adjustments = this->parse_layer_gcode(m_gcode, m_current_pos);
         float layer_time_stretched = this->calculate_layer_slowdown(per_extruder_adjustments);
+        // Record whether any line's F is about to be rewritten with a cooling speed
+        // (CoolingLine::slowdown is the flag apply_layer_cooldown() keys the rewrite on).
+        m_last_layer_slowed_down = std::any_of(per_extruder_adjustments.begin(), per_extruder_adjustments.end(),
+                                               [](const PerExtruderAdjustments &adj) {
+                                                   return std::any_of(adj.lines.begin(), adj.lines.end(),
+                                                                      [](const CoolingLine &line) { return line.slowdown; });
+                                               });
         out = this->apply_layer_cooldown(m_gcode, layer_id, layer_time_stretched, per_extruder_adjustments);
         m_gcode.clear();
     }
