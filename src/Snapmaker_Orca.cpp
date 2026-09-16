@@ -1720,8 +1720,11 @@ int CLI::run(int argc, char **argv)
     // own (slicing, exporting) would be skipped without notice. Reject those up front;
     // only options that merely tune how the input is loaded may come along.
     if (std::find(m_actions.begin(), m_actions.end(), "inspect_mesh") != m_actions.end()) {
+        // "strict" is a CLI action from --strict (PR #39 / Orca #14601). It does not write
+        // stdout and does no work of its own during --inspect-mesh, so keep it allowed once
+        // that tip is stacked under this one. --slice / --export-settings stay rejected.
         static const std::set<std::string> inspect_compatible = { "inspect_mesh", "uptodate", "load_defaultfila", "min_save",
-                                                                  "mtcpp", "mstpp", "no_check", "normative_check", "pipe" };
+                                                                  "mtcpp", "mstpp", "no_check", "strict", "normative_check", "pipe" };
         for (const std::string &action : m_actions) {
             if (inspect_compatible.count(action) == 0) {
                 std::string flag = action;
