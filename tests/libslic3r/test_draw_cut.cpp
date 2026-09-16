@@ -4358,13 +4358,20 @@ TEST_CASE("Draw cut: Through all projects inward from the drawn line", "[DrawCut
     REQUIRE_FALSE(cutter.empty());
     REQUIRE(watertight(cutter));
 
-    // NOTHING ABOVE THE DRAWN LINE. The top face is at z == +20 and the loop is on
-    // it, so the prism may not reach past it by more than the tie-breaking lift.
+    // NOTHING BEHIND THE DRAWN LINE. The top face is at z == +20 and the loop is on
+    // it, so the prism may reach ABOVE it only by the lift that keeps the wall from
+    // lying in the face (the Extension, floored) - not by the bounding-box diagonal
+    // the old both-ways prism used, which is the bug. The lifted part is outside the
+    // material anyway, so it removes nothing.
     double z_max = -1e9;
     for (const Vec3f& v : cutter.vertices)
         z_max = std::max(z_max, double(v.z()));
-    INFO("cutter reaches z " << z_max << " (the face is at 20)");
-    REQUIRE(z_max < 20.0 + 0.5);
+    const double lift_budget = std::max(params.extension, 0.04) + 0.1;
+    INFO("cutter reaches z " << z_max << " (the face is at 20, lift budget " << lift_budget << ")");
+    REQUIRE(z_max < 20.0 + lift_budget);
+    // And the OLD behaviour - a full reach above the face - is gone. The cube's
+    // diagonal is ~69 mm, so the old prism's top ring sat at z ~= 92.
+    REQUIRE(z_max < 30.0);
 
     // And it goes clean out of the bottom: through ALL.
     double z_min = 1e9;
@@ -4436,10 +4443,13 @@ TEST_CASE("Draw cut: the outward side comes from the mesh when the samples cance
         z_max = std::max(z_max, double(v.z()));
         z_min = std::min(z_min, double(v.z()));
     }
-    // The cap is at z == 20 cos 60 == 10; the prism starts there and runs out of the
-    // bottom of the sphere.
-    INFO("cutter z " << z_min << " .. " << z_max);
-    REQUIRE(z_max < 12.0);
+    // The cap is at z == 20 cos 60 == 10; the prism starts there, lifted clear of
+    // the skin by the Extension, and runs out of the bottom of the sphere. What it
+    // must NOT do is reach the far side the way a both-ways prism did: the sphere's
+    // own diagonal is ~69 mm, so the old top ring sat at z ~= 80.
+    INFO("cutter z " << z_min << " .. " << z_max << " (extension " << params.extension << ")");
+    REQUIRE(z_max < 10.0 + params.extension + 1.0);
+    REQUIRE(z_max < 30.0);
     REQUIRE(z_min < -20.0);
 }
 

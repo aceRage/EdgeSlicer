@@ -1305,7 +1305,24 @@ static indexed_triangle_set draw_cut_band_core_solid(const DrawCutStroke& stroke
         //     suite covers and it is unchanged.
         const Vec3d travel = wraps ? Vec3d(-cb.normal) : into;
         const Vec3d lift_n = wraps ? cb.normal : outward_n;
-        const double lift  = std::max(1e-3, 1e-4 * diag);
+
+        // HOW FAR RING A IS LIFTED OFF THE SKIN, and why it is not a hair.
+        //
+        // "The prism starts at the drawn line" is the SEMANTICS; it is not a
+        // recipe for where to put the vertices. A ring sitting a few microns
+        // above a flat face it was drawn on is COPLANAR with that face as far as
+        // any boolean is concerned - the degenerate case Manifold and mcut both
+        // give up on - and the old code avoided it only by accident, by starting a
+        // whole bbox diagonal away.
+        //
+        // So ring A is lifted CLEAR of the skin, by the Extension the user has
+        // already set (that is exactly what Extension means everywhere else in
+        // this file: how far the surface reaches out past the line) with a floor
+        // under it so an Extension of 0 still clears. The lifted part is outside
+        // the material on the side the user drew on, so it removes nothing: the
+        // cut still begins at the skin. What it buys is a wall that meets the face
+        // transversally instead of lying in it.
+        const double lift = std::max(ext, std::max(1e-2, 1e-3 * diag));
         std::vector<Vec3d> ring_a, ring_b;
         ring_a.reserve(m);
         ring_b.reserve(m);
