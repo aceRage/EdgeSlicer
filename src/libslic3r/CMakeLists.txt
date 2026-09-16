@@ -324,6 +324,8 @@ set(lisbslic3r_sources
     MinimumSpanningTree.hpp
     MixedFilament.cpp
     MixedFilament.hpp
+    MixedFilamentCliGates.cpp
+    MixedFilamentCliGates.hpp
     MultiNozzleUtils.cpp
     MultiNozzleUtils.hpp
     FilamentGroup.cpp
