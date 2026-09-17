@@ -2,6 +2,7 @@
 
 #include <vector>
 #include <cstddef>
+#include <cstdlib>
 #include <string>
 #include <boost/algorithm/string.hpp>
 #include <boost/optional.hpp>
@@ -47,7 +48,7 @@ static char marker_by_type(Preset::Type type, PrinterTechnology pt)
     }
 }
 
-std::string Option::opt_key() const { return into_u8(key).substr(2); }
+std::string Option::opt_key() const { return key.size() < 2 ? std::string() : into_u8(key).substr(2); }
 
 void FoundOption::get_marked_label_and_tooltip(const char **label_, const char **tooltip_) const
 {
@@ -101,11 +102,17 @@ void OptionsSearcher::append_options(DynamicPrintConfig *config, Preset::Type ty
             case coFloats: change_opt_key<ConfigOptionFloats>(opt_key, config, cnt); break;
             case coStrings: change_opt_key<ConfigOptionStrings>(opt_key, config, cnt); break;
             case coPercents: change_opt_key<ConfigOptionPercents>(opt_key, config, cnt); break;
+            case coFloatsOrPercents: change_opt_key<ConfigOptionVector<FloatOrPercent>>(opt_key, config, cnt); break;
             case coPoints: change_opt_key<ConfigOptionPoints>(opt_key, config, cnt); break;
             // BBS
             case coEnums: change_opt_key<ConfigOptionInts>(opt_key, config, cnt); break;
             default: break;
             }
+
+        // Orca #15472: index print-level coFloatsOrPercents (e.g. per-variant speeds) without
+        // expanding Edge's search index to every print vector type (Orca does that via #13712).
+        if (type == Preset::TYPE_PRINT && config->option(opt_key)->type() == coFloatsOrPercents)
+            change_opt_key<ConfigOptionVector<FloatOrPercent>>(opt_key, config, cnt);
 
         wxString label = opt.full_label.empty() ? opt.label : opt.full_label;
 
@@ -307,6 +314,48 @@ const Option &OptionsSearcher::get_option(const std::string &opt_key, Preset::Ty
     // BBS: return the 0th option when not found in searcher caused by mode difference
     // assert(it != options.end());
     if (it == options.end()) return options[0];
+
+    return options[it - options.begin()];
+}
+
+const Option &OptionsSearcher::get_option(const std::string &opt_key, Preset::Type type, int &variant_index) const
+{
+    auto not_found = [&variant_index]() -> const Option & {
+        static const Option empty_option;
+        variant_index = -2;
+        return empty_option;
+    };
+
+    variant_index        = -1;
+    std::string opt_key2 = opt_key;
+    if (auto n = opt_key.find('#'); n != std::string::npos) {
+        variant_index = std::atoi(opt_key.c_str() + n + 1);
+        opt_key2      = opt_key.substr(0, n);
+    }
+
+    const std::wstring key = boost::nowide::widen(get_key(opt_key2, type));
+    auto               it  = std::lower_bound(options.begin(), options.end(), Option({key}));
+    if (it == options.end())
+        return not_found();
+
+    if (it->key == key) {
+        variant_index = -1;
+    } else {
+        const std::wstring prefix = key + L"#";
+        it = std::lower_bound(it, options.end(), Option({prefix}));
+        if (it == options.end() || it->key.compare(0, prefix.length(), prefix) != 0)
+            return not_found();
+        // Orca: Copy-parameters / unsaved-changes may request the base key without a vector index.
+        if (variant_index < 0)
+            return *it;
+
+        // Edge has no print/printer/filament *_options_with_variant sets (Orca #13712).
+        // Look up the exact indexed key and keep variant_index for extruder labelling.
+        const std::wstring indexed_key = boost::nowide::widen(get_key(opt_key, type));
+        it = std::lower_bound(it, options.end(), Option({indexed_key}));
+        if (it == options.end() || it->key != indexed_key)
+            return not_found();
+    }
 
     return options[it - options.begin()];
 }

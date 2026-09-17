@@ -5,6 +5,7 @@
 #include "Preset.hpp"
 
 #include <assert.h>
+#include <cstdlib>
 #include <fstream>
 #include <sstream>
 #include <iostream>
@@ -457,6 +458,24 @@ void ConfigBase::apply_only(const ConfigBase &other, const t_config_option_keys 
         if (my_opt == nullptr) {
             // opt_key does not exist in this ConfigBase and it cannot be created, because it is not defined by this->def().
             // This is only possible if other is of DynamicConfig type.
+            // Orca #15472 / #13712: dirty_options may name a single vector slot as "key#index".
+            if (auto n = opt_key.find('#'); n != std::string::npos) {
+                auto opt_key2 = opt_key.substr(0, n);
+                auto my_opt2 = dynamic_cast<ConfigOptionVectorBase*>(this->option(opt_key2));
+                auto other_opt = other.option(opt_key2);
+                if (my_opt2 == nullptr && other_opt) {
+                    my_opt2 = dynamic_cast<ConfigOptionVectorBase *>(this->option(opt_key2, true));
+                    if (my_opt2 && my_opt2->empty()) {
+                        my_opt2->resize(1, other_opt);
+                    }
+                }
+                if (my_opt2) {
+                    int index = std::atoi(opt_key.c_str() + n + 1);
+                    if (other_opt)
+                        my_opt2->set_at(other_opt, index, index);
+                    continue;
+                }
+            }
             if (ignore_nonexistent)
                 continue;
             throw UnknownOptionException(opt_key);
