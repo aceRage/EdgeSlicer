@@ -5686,9 +5686,20 @@ int PartPlateList::store_to_3mf_structure(PlateDataPtrs& plate_data_list, bool w
 							if (const auto *nvt = print->config().option<ConfigOptionEnumsGeneric>("nozzle_volume_type"))
 								if (!nvt->values.empty())
 									volume_type = get_nozzle_volume_type_string(NozzleVolumeType(nvt->values.front()));
+							// On a machine with several identical independent toolheads (Snapmaker U1,
+							// Flashforge Creator 5) filament i prints from toolhead i, so claiming group 0
+							// for all of them told the printer every filament lived in the first nozzle
+							// while the G-code drove T0..T3. Report the real toolhead. Metadata only - the
+							// live config and the emitted G-code are untouched.
+							const std::vector<int> identity_map =
+								identity_filament_map(print->full_print_config(), plate_data_item->slice_filaments_info.size());
 							for (auto &info : plate_data_item->slice_filaments_info) {
-								info.group_id = { 0 };
-								info.nozzle_diameter = nd.empty() ? 0. : nd.front();
+								int group = 0;
+								if (info.id >= 0 && size_t(info.id) < identity_map.size())
+									group = identity_map[info.id] - 1; // identity_filament_map is 1-based
+								info.group_id = { group };
+								const size_t nozzle_idx = size_t(group);
+								info.nozzle_diameter = nd.empty() ? 0. : (nozzle_idx < nd.size() ? nd[nozzle_idx] : nd.front());
 								info.nozzle_volume_type = volume_type;
 							}
 						}

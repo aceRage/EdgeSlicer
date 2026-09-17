@@ -2139,7 +2139,38 @@ wxBoxSizer* MainFrame::create_side_tools()
                 p->Dismiss();
             });
 
+            // A plate-sliced file ("<name>.gcode.3mf") is not a Bambu-only artefact: it is what
+            // the Flashforge Creator 5 and other third-party hosts consume, and File > Export
+            // already offers it to every vendor via can_export_gcode() (Ctrl+G). Only this
+            // dropdown withheld it, so a C5 owner had no way to reach it from the Print button.
+            // Both selections are vendor-neutral downstream: get_enable_print_status() gates
+            // them on is_slice_result_ready_for_export() alone and the events land on
+            // Plater::export_gcode_3mf(), which names the file ".gcode.3mf".
+            SideButton* export_sliced_file_btn = new SideButton(p, _L("Export plate sliced file"), "");
+            export_sliced_file_btn->SetCornerRadius(0);
+            export_sliced_file_btn->Bind(wxEVT_BUTTON, [this, p](wxCommandEvent&) {
+                m_print_btn->SetLabel(_L("Export plate sliced file"));
+                m_print_select = eExportSlicedFile;
+                m_print_enable = get_enable_print_status();
+                m_print_btn->Enable(m_print_enable);
+                this->Layout();
+                p->Dismiss();
+            });
+
+            SideButton* export_all_sliced_file_btn = new SideButton(p, _L("Export all sliced file"), "");
+            export_all_sliced_file_btn->SetCornerRadius(0);
+            export_all_sliced_file_btn->Bind(wxEVT_BUTTON, [this, p](wxCommandEvent&) {
+                m_print_btn->SetLabel(_L("Export all sliced file"));
+                m_print_select = eExportAllSlicedFile;
+                m_print_enable = get_enable_print_status();
+                m_print_btn->Enable(m_print_enable);
+                this->Layout();
+                p->Dismiss();
+            });
+
             p->append_button(send_gcode_btn);
+            p->append_button(export_sliced_file_btn);
+            p->append_button(export_all_sliced_file_btn);
             p->append_button(export_gcode_btn);
         } else {
             SideButton* print_plate_btn = new SideButton(p, _L("Print"), "");

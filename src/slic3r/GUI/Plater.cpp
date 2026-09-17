@@ -22672,13 +22672,23 @@ static std::vector<SendPlateFilament> plate_filaments_for_send(int plate_idx)
 
 void Plater::send_gcode_legacy(int plate_idx, Export3mfProgressFn proFn, bool use_3mf)
 {
+    // Decided below from the print host type; the naming lambda captures it. Only the
+    // Flashforge local HTTP API is known to require "<name>.gcode.3mf" so far.
+    bool gcode_3mf_suffix = false;
     // if physical_printer is selected, send gcode for this printer
     // DynamicPrintConfig* physical_printer_config = wxGetApp().preset_bundle->physical_printers.get_selected_printer_config();
 
-    auto prepare_upload_filename_for_dialog = [this, use_3mf](fs::path output_file) {
+    auto prepare_upload_filename_for_dialog = [this, &use_3mf, &gcode_3mf_suffix](fs::path output_file) {
         output_file = fs::path(Slic3r::fold_utf8_to_ascii(output_file.string()));
-        if (use_3mf)
-            output_file.replace_extension("3mf");
+        if (use_3mf) {
+            // A plate-sliced 3mf is named "<name>.gcode.3mf" everywhere else in this program
+            // (Plater::export_gcode_3mf, the FT_GCODE_3MF wildcard) and by every other slicer
+            // that writes one. The Flashforge Creator 5 firmware uses that double extension to
+            // tell a sliced plate from a plain project 3mf: given a bare "<name>.3mf" it lists
+            // the file without a thumbnail and hangs its touchscreen when the file is opened.
+            // Hosts that do not want the double extension keep the plain ".3mf".
+            output_file.replace_extension(gcode_3mf_suffix ? ".gcode.3mf" : ".3mf");
+        }
 
         PartPlate *current_plate = this->get_partplate_list().get_curr_plate();
         if (current_plate != nullptr) {
@@ -22892,8 +22902,10 @@ void Plater::send_gcode_legacy(int plate_idx, Export3mfProgressFn proFn, bool us
         ff_serial_opt != nullptr && !ff_serial_opt->value.empty() &&
         ff_code_opt != nullptr && !ff_code_opt->value.empty();
 
-    if (flashforge_local_api)
-        use_3mf = true;
+    if (flashforge_local_api) {
+        use_3mf          = true;
+        gcode_3mf_suffix = true;
+    }
 
     upload_job.upload_data.use_3mf = use_3mf;
 

@@ -96,6 +96,56 @@ TEST_CASE("Flashforge upload names drop characters the printer rejects", "[Flash
     CHECK(ff::sanitize_filename("") == "print");
 }
 
+// ------------------------------------------------- the name a sliced plate must be sent under ----
+
+TEST_CASE("Flashforge sliced 3mf uploads carry the .gcode.3mf double extension", "[Flashforge]")
+{
+    // The bug this exists for: the send path named the upload "<model>.3mf", and the Creator 5
+    // listed it with no thumbnail and froze its touchscreen when the file was selected. Flash
+    // Studio, upstream OrcaSlicer and this program's own File > Export plate sliced file all
+    // write "<model>.gcode.3mf", and a file copied to the printer under that name opens.
+    CHECK(ff::sliced_3mf_name("dragon.3mf") == "dragon.gcode.3mf");
+
+    // The default the send dialog now offers is already right and must survive untouched -
+    // it must not become "dragon.gcode.gcode.3mf".
+    CHECK(ff::sliced_3mf_name("dragon.gcode.3mf") == "dragon.gcode.3mf");
+    CHECK(ff::sliced_3mf_name("dragon.GCODE.3MF") == "dragon.GCODE.3MF");
+
+    // A name the user typed over in the dialog: no extension, or the raw G-code one.
+    CHECK(ff::sliced_3mf_name("dragon") == "dragon.gcode.3mf");
+    CHECK(ff::sliced_3mf_name("dragon.gcode") == "dragon.gcode.3mf");
+
+    // Only the last extension is replaced; dots inside the name are part of it.
+    CHECK(ff::sliced_3mf_name("my.model.v2.3mf") == "my.model.v2.gcode.3mf");
+
+    CHECK(ff::sliced_3mf_name("") == "print.gcode.3mf");
+}
+
+TEST_CASE("Flashforge upload names keep the double extension through sanitising", "[Flashforge]")
+{
+    // The two run back to back in Flashforge::upload_local_api(): the name is given the double
+    // extension and then stripped of characters the printer refuses. The stripping must not eat
+    // either dot, or the fix above is undone on the way out.
+    const auto sent = [](const std::string& name) {
+        return ff::sanitize_filename(ff::sliced_3mf_name(name), ".3mf");
+    };
+
+    CHECK(sent("dragon.3mf") == "dragon.gcode.3mf");
+    CHECK(sent("my model v2.3mf") == "my_model_v2.gcode.3mf");
+    CHECK(sent("plate=1.3mf") == "plate_1.gcode.3mf");
+
+    // The upload_path can arrive with directories on it; only the basename is posted, and it
+    // still ends in the double extension.
+    CHECK(sent("C:/tmp/sub dir/part.3mf") == "part.gcode.3mf");
+
+    // Every name the printer is offered ends in ".gcode.3mf" - the property the firmware keys on.
+    for (const char* name : {"dragon.3mf", "dragon", "dragon.gcode", "a=b c.3mf", ""}) {
+        const std::string out = sent(name);
+        CHECK(out.size() > 10);
+        CHECK(out.substr(out.size() - 10) == ".gcode.3mf");
+    }
+}
+
 // ------------------------------------------------------------- the result code in every reply ----
 
 TEST_CASE("Flashforge replies are accepted or refused by their own result code", "[Flashforge]")

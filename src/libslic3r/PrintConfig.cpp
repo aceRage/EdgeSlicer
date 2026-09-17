@@ -10439,6 +10439,54 @@ bool is_snapmaker_toolchanger(const ConfigBase &cfg)
     const ConfigOptionBool *semm = cfg.option<ConfigOptionBool>("single_extruder_multi_material");
     return semm == nullptr || !semm->value;
 }
+
+bool is_identical_multi_extruder_printer(const ConfigBase &cfg)
+{
+    // More than one physical toolhead...
+    const auto *nozzles = dynamic_cast<const ConfigOptionVectorBase *>(cfg.option("nozzle_diameter"));
+    if (nozzles == nullptr || nozzles->size() < 2)
+        return false;
+
+    // ...each holding its own filament (an AMS machine has one head and many spools)...
+    const ConfigOptionBool *semm = cfg.option<ConfigOptionBool>("single_extruder_multi_material");
+    if (semm != nullptr && semm->value)
+        return false;
+
+    // ...and all of the same kind. A machine with two different extruder variants is a grouping
+    // machine (H2D/H2C/X2D): its filament->nozzle assignment is computed by ToolOrdering, and
+    // this identity map must not pre-empt it. Mirrors
+    // DynamicPrintConfig::support_different_extruders(), which is that path's own gate.
+    if (const auto *variants = cfg.option<ConfigOptionStrings>("extruder_variant_list")) {
+        std::set<std::string> variant_set;
+        const int             n = std::min<int>((int) nozzles->size(), (int) variants->values.size());
+        for (int i = 0; i < n; ++i) {
+            std::vector<std::string> list;
+            boost::split(list, variants->get_at(i), boost::is_any_of(","), boost::token_compress_on);
+            variant_set.insert(list.begin(), list.end());
+        }
+        if (variant_set.size() > 1)
+            return false;
+    }
+
+    return true;
+}
+
+std::vector<int> identity_filament_map(const ConfigBase &cfg, size_t filament_count)
+{
+    std::vector<int> map;
+    if (filament_count == 0 || !is_identical_multi_extruder_printer(cfg))
+        return map;
+
+    const auto *nozzles = dynamic_cast<const ConfigOptionVectorBase *>(cfg.option("nozzle_diameter"));
+    const size_t extruders = nozzles != nullptr ? nozzles->size() : 0;
+    if (extruders < 2)
+        return map;
+
+    map.reserve(filament_count);
+    for (size_t i = 0; i < filament_count; ++i)
+        map.push_back(int(i % extruders) + 1); // 1-based, wrapping past the last toolhead
+    return map;
+}
 } // namespace Slic3r
 
 #include <cereal/types/polymorphic.hpp>
