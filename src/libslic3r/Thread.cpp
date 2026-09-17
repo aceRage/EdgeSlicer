@@ -8,12 +8,15 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <mutex>
 #include <thread>
 #include <tbb/global_control.h>
 #include <tbb/parallel_for.h>
 #include <tbb/task_arena.h>
+
+#include <boost/log/trivial.hpp>
 
 #include "Thread.hpp"
 #include "Utils.hpp"
@@ -249,8 +252,18 @@ void name_tbb_thread_pool_threads_set_locale()
         		// Wake them up.
     			cv.notify_all();
         	} else {
-        		// Wait for the last thread to wake the others.
-			    cv.wait(lk, [&nthreads_running, nthreads]{return nthreads_running == nthreads;});
+        		// Wait for the last thread to wake the others - but not forever. TBB's parallel_for
+        		// does not guarantee that all `nthreads` unit tasks are ever live at the same time:
+        		// its scheduler is free to run several leaf tasks depth-first on one worker before a
+        		// thief steals the rest, and how much stealable parallelism actually materializes can
+        		// depend on arena occupancy and OS scheduling, not just on max_allowed_parallelism.
+        		// When that happens nthreads_running never reaches nthreads and an unconditional wait
+        		// never returns. Bound it: after a few seconds, give up on the rendezvous and let this
+        		// task proceed unnamed/default-locale rather than hang the whole slice forever.
+        		if (! cv.wait_for(lk, std::chrono::seconds(5), [&nthreads_running, nthreads]{ return nthreads_running == nthreads; }))
+        		    BOOST_LOG_TRIVIAL(warning) << "name_tbb_thread_pool_threads_set_locale: only "
+        		        << nthreads_running << " of " << nthreads << " expected tasks joined the rendezvous "
+        		        << "within 5s - proceeding without waiting for the rest to avoid a hang.";
         	}
         	auto thread_id = std::this_thread::get_id();
 			if (thread_id == master_thread_id) {
