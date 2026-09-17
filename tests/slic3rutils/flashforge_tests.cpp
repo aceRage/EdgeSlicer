@@ -22,10 +22,16 @@
 //  4. sanitize_filename() / url_for(). The printer rejects '=' and friends in an upload name, and
 //     the URL is assembled from whatever the user typed in Hostname (bare IP, or a full URL).
 //
+//  5. upload_header_flag(). The send dialog's checkboxes travel to /uploadGcode as an extended-info
+//     map of "1"/"0" and leave as "true"/"false" headers. flowCalibration and firstLayerInspection
+//     were hardcoded "false" before the dialog exposed them, so the conversion - and what an
+//     absent key means - is worth pinning: a missing option is off, never on.
+//
 // Nothing here touches a printer, a socket, wx or the filesystem.
 
 #include <catch2/catch.hpp>
 
+#include <map>
 #include <string>
 #include <vector>
 
@@ -261,5 +267,75 @@ TEST_CASE("Flashforge /detail yields the material station slots", "[Flashforge]"
     {
         CHECK_FALSE(ff::parse_detail_material_slots("not json at all", slots, has_station));
         CHECK(slots.empty());
+    }
+}
+
+// ---------------------------------------------------- the job's boolean options as headers ----
+
+TEST_CASE("Flashforge upload options become true/false headers", "[Flashforge]")
+{
+    SECTION("a checked option is \"true\", an unchecked one \"false\"")
+    {
+        // What FlashforgePrintHostSendDialog::extendedInfo() hands to Flashforge::upload_local_api()
+        // with every box ticked.
+        const std::map<std::string, std::string> all_on{
+            {"levelingBeforePrint", "1"},
+            {"flowCalibration", "1"},
+            {"firstLayerInspection", "1"},
+            {"timeLapseVideo", "1"},
+            {"useMatlStation", "1"},
+        };
+
+        CHECK(std::string(ff::upload_header_flag(all_on, "levelingBeforePrint")) == "true");
+        CHECK(std::string(ff::upload_header_flag(all_on, "flowCalibration")) == "true");
+        CHECK(std::string(ff::upload_header_flag(all_on, "firstLayerInspection")) == "true");
+        CHECK(std::string(ff::upload_header_flag(all_on, "timeLapseVideo")) == "true");
+        CHECK(std::string(ff::upload_header_flag(all_on, "useMatlStation")) == "true");
+
+        const std::map<std::string, std::string> all_off{
+            {"levelingBeforePrint", "0"},
+            {"flowCalibration", "0"},
+            {"firstLayerInspection", "0"},
+            {"timeLapseVideo", "0"},
+            {"useMatlStation", "0"},
+        };
+
+        CHECK(std::string(ff::upload_header_flag(all_off, "levelingBeforePrint")) == "false");
+        CHECK(std::string(ff::upload_header_flag(all_off, "flowCalibration")) == "false");
+        CHECK(std::string(ff::upload_header_flag(all_off, "firstLayerInspection")) == "false");
+        CHECK(std::string(ff::upload_header_flag(all_off, "timeLapseVideo")) == "false");
+        CHECK(std::string(ff::upload_header_flag(all_off, "useMatlStation")) == "false");
+    }
+
+    SECTION("an option nobody wrote is off, not on")
+    {
+        // A config written before the two new checkboxes existed, or any other print host path that
+        // fills the map itself: the printer must not be told to burn filament on a calibration the
+        // user never asked for.
+        const std::map<std::string, std::string> legacy{
+            {"levelingBeforePrint", "1"},
+            {"timeLapseVideo", "0"},
+        };
+
+        CHECK(std::string(ff::upload_header_flag(legacy, "flowCalibration")) == "false");
+        CHECK(std::string(ff::upload_header_flag(legacy, "firstLayerInspection")) == "false");
+        CHECK(std::string(ff::upload_header_flag({}, "flowCalibration")) == "false");
+    }
+
+    SECTION("only \"1\" is on - nothing else is coaxed into a true")
+    {
+        // The dialog only ever writes "1"/"0", so anything else is a config the user edited by hand
+        // or a value from somewhere unexpected; none of it turns an option on behind their back.
+        const std::map<std::string, std::string> odd{
+            {"flowCalibration", "true"},
+            {"firstLayerInspection", "yes"},
+            {"timeLapseVideo", ""},
+            {"useMatlStation", "01"},
+        };
+
+        CHECK(std::string(ff::upload_header_flag(odd, "flowCalibration")) == "false");
+        CHECK(std::string(ff::upload_header_flag(odd, "firstLayerInspection")) == "false");
+        CHECK(std::string(ff::upload_header_flag(odd, "timeLapseVideo")) == "false");
+        CHECK(std::string(ff::upload_header_flag(odd, "useMatlStation")) == "false");
     }
 }

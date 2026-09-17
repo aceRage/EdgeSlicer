@@ -6,6 +6,7 @@
 // which cannot include Flashforge.hpp itself because that header carries wxString and the test
 // executable is built without the wxWidgets include path.
 
+#include <map>
 #include <string>
 #include <vector>
 
@@ -44,6 +45,13 @@ std::string url_for(const std::string& host, const std::string& path);
 // The printer rejects '=' and friends in an upload name; everything outside [A-Za-z0-9._-] becomes
 // '_', and an empty name becomes "print" plus the fallback extension.
 std::string sanitize_filename(const std::string& filename, const std::string& fallback_extension = {});
+
+// A /uploadGcode boolean header out of the send dialog's extended-info map. The dialog speaks the
+// app_config dialect ("1"/"0"), the printer wants JSON-ish "true"/"false", and an option the dialog
+// never set at all (an older config, or a print host that filled the map itself) must read as off.
+// One place makes that conversion so levelingBeforePrint, flowCalibration, firstLayerInspection,
+// timeLapseVideo and useMatlStation cannot drift apart - see tests/slic3rutils/flashforge_tests.cpp.
+const char* upload_header_flag(const std::map<std::string, std::string>& extended_info, const std::string& key);
 
 // `code`/`err` != 0 in a /detail or /uploadGcode reply is a printer-side refusal and the message it
 // carries is what the user must see. Returns false and fills error_text then, and also on a body
