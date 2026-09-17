@@ -9157,11 +9157,22 @@ void GLGizmoCut3D::perform_cut(const Selection& selection)
         // before the objects reach the model, so the very first save carries it.
         //
         // Dowel objects (CreateDowels) are results of the cut too, but they are not
-        // halves: re-editing from one makes no sense, so they are left alone.
+        // halves: re-editing from one makes no sense, so they are left alone. They
+        // are told apart by their content - a dowel is one connector volume - and
+        // NOT by is_cut(): a plain cut (no connectors, no groove) carries the
+        // InvalidateCutInfo attribute above, so its halves come back with an
+        // invalid cut_id and is_cut() false. Filtering on is_cut() here dropped
+        // the recipe from every plain cut, which is why "Edit cut..." and
+        // "Copy cut to..." never appeared on the halves of an ordinary cut.
         if (write_recipe) {
-            for (ModelObject* o : new_objects)
-                if (o && o->is_cut())
+            for (ModelObject* o : new_objects) {
+                if (o == nullptr || o->volumes.empty())
+                    continue;
+                const bool is_dowel = o->volumes.size() == 1 && o->volumes.front()->is_cut_connector() &&
+                                      o->volumes.front()->cut_info.connector_type == CutConnectorType::Dowel;
+                if (!is_dowel)
                     o->cut_recipe = new_recipe;
+            }
         }
 
         // update cut results on plater and in the model
