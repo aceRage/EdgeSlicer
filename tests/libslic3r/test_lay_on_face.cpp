@@ -82,7 +82,10 @@ TEST_CASE("A box lying on one of its equally large faces is not flipped", "[LayO
 {
     // A half turn about X puts the other large face down, so the two cases expect different faces
     // and neither can pass on the order in which the hull lists them.
-    const double rotation_x = GENERATE(0., PI);
+    // values<double>({ ... }) rather than GENERATE(0., PI): handing this Catch2 2.13 header a const lvalue such as
+    // the constexpr PI selects the template populate(U&&) overload, which MSVC compiles into an infinite
+    // tail-call loop (the test spun at 100% CPU forever, in CI and locally). Literals and enums are unaffected.
+    const double rotation_x = GENERATE(values<double>({ 0., PI }));
     Model        model;
     ModelObject &box = add_box_object(model, { 40, 20, 10 }); // the bottom and top are both 40 x 20
     box.instances.front()->set_rotation({ rotation_x, 0, 0 });
