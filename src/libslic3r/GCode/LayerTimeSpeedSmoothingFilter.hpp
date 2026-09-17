@@ -15,6 +15,9 @@ namespace Slic3r {
 // Any other enabled mode: buffer every cooled layer, then on the last layer call the S2
 // solvers and rewrite F. Fan commands from CoolingBuffer are left untouched (F-only v1).
 // Modes A/B never speed up overhang/bridge, ironing, top solid, or support (incl. interface).
+// The prime/wipe tower (erWipeTower) is never retimed in ANY mode, including Mode C: its
+// speed is set for purge adhesion between materials, not for the layer-time band, and a
+// factor in either direction risks a failed tower.
 //
 // Why the whole print is buffered, not a window of layers: the solvers are global. The
 // neighbour band chains, t[i] <= t[i-1] / (1 - v) in both directions, so one short layer

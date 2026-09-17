@@ -164,6 +164,14 @@ static bool is_speedup_protected(ExtrusionRole role)
         || is_support_role(role);
 }
 
+// The prime/wipe tower (;TYPE:Prime tower -> erWipeTower, ExtrusionEntity::role_to_string /
+// string_to_role) is protected in every mode, not only speed-up: its speed is tuned for purge
+// adhesion between materials, and a factor in either direction risks a failed tower (a fast
+// tower can shear or under-purge, a slowed one can over-ooze/blob). Unlike is_speedup_protected,
+// which only gates modes A/B, this is checked unconditionally in line_eligible so Mode C leaves
+// it alone as well.
+static bool is_tower_role(ExtrusionRole role) { return role == erWipeTower; }
+
 // The speed floor CoolingBuffer itself observes when it stretches a layer: slow_down_min_speed
 // of the line's filament, in mm/min. 0 = no floor.
 static float min_print_feedrate_mm_min(const ParsedLine &line, const PrintConfig &config)
@@ -185,6 +193,8 @@ static bool already_at_min_print_speed(const ParsedLine &line, const PrintConfig
 static bool line_eligible(LayerTimeSpeedSmoothMode mode, LayerTimeSlowdownScope scope, const ParsedLine &line, const PrintConfig &config)
 {
     if (!line.is_motion || !line.extruding || line.wipe)
+        return false;
+    if (is_tower_role(line.role))
         return false;
     if (already_at_min_print_speed(line, config))
         return false;
