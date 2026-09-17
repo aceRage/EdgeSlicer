@@ -420,7 +420,24 @@ bool GLGizmoEdit::drag_distance(const Vec2d &mouse_position, float &out) const
     const double denom = a * c - b * b;
     if (std::abs(denom) < 1e-12)
         return false;
-    const double t = (d * c - b * e) / denom;   // distance along the axis, world mm
+    // Root cause of the reversed push/pull direction: this is the standard
+    // closest-point-between-two-lines solve (line 1 = the mouse ray, from
+    // ray.a along rd; line 2 = the drag axis, from m_drag_anchor_world along
+    // ad), solved for t in Q(t) = m_drag_anchor_world + t*ad. Cramer's rule on
+    // the 2x2 system built from a,b,c,d,e above gives t = (b*e - c*d) / denom.
+    // The previous (d*c - b*e)/denom is exactly the negation of that - it
+    // reports how far BACK along the axis the ray's closest approach is,
+    // rather than how far forward - so every drag produced a distance with
+    // the opposite sign of the true one: dragging along the arrow's drawn
+    // direction (which points along +m_drag_axis_world, the outward normal)
+    // measured as a NEGATIVE t, which read as "push inward" instead of "pull
+    // outward". Since MeshEdit::translate_region moves the region by
+    // `region.normal * params.d` (positive d = outward, confirmed by
+    // reading translate_region directly), the fix belongs here in the
+    // projection, not in the mesh translate or the arrow's drawn direction -
+    // both of those already agree with each other and with the intended
+    // convention.
+    const double t = (b * e - c * d) / denom;   // distance along the axis, world mm
     out = float(t);
     return true;
 }
@@ -508,7 +525,24 @@ void GLGizmoEdit::apply_push(float distance, bool final_apply)
 
     MeshEdit::TranslateParams tp;
     tp.d = d_mesh;
-    tp.check_self_intersection = final_apply;
+    // A push/pull is allowed to intersect: MeshEdit::self_intersects() only
+    // tests the moved mesh against ITSELF (MeshBoolean::cgal::does_self_
+    // intersect on the single indexed_triangle_set - see MeshEdit.cpp,
+    // translate_region()). It never sees the other volumes/objects in the
+    // Model, so it was never a "does this collide with another part" guard -
+    // it was flagging a face that, once moved, passes through other geometry
+    // of the SAME part. Unlike a bevel's self-intersection check (which
+    // guards the validity of geometry translate_region just constructed -
+    // a folded chamfer/fillet band IS a broken, non-manifold-in-effect
+    // result), a translated region is still a perfectly well-formed
+    // indexed_triangle_set: no facets or indices changed, only vertex
+    // positions, so a self-crossing surface here is a legitimate (if
+    // unusual) shape rather than corrupt output. The owner wants a part
+    // allowed to intersect itself or another part, so the push is never
+    // refused for it; CGAL's does_self_intersect is also an expensive
+    // whole-mesh test to pay for on every apply just to show an informational
+    // notice, so it is skipped entirely rather than run-but-ignored.
+    tp.check_self_intersection = false;
 
     if (!final_apply) {
         // Preview: translate the PRE-DRAG mesh and show the result without
@@ -1381,6 +1415,23 @@ void GLGizmoEdit::on_render_input_window(float x, float y, float bottom_limit)
     if (!m_c->selection_info() || !m_c->selection_info()->model_object())
         return;
 
+    // ROOT CAUSE of the combo staying "Face"-width even after compute_mode_
+    // combo_width() was added: this window-width math reads
+    // ImGui::GetStyle().WindowPadding, but push_toolbar_style() - which
+    // overrides WindowPadding to (20,10)*scale, versus ImGui's own default of
+    // (8,8) - was not pushed yet. So window_width was budgeted with an ~8px
+    // padding assumption while the panel that actually opened used ~20px
+    // *scale* of padding per side. The resulting wrap_width (measured after
+    // push_toolbar_style, inside the real window) came out narrower than
+    // window_width assumed by exactly that padding gap, so the row's
+    // `wrap_width - label_col` clamp in the combo below silently cut the
+    // combo back down under mode_combo_w - undoing the fix compute_mode_
+    // combo_width() was supposed to provide. Pushing the toolbar style
+    // BEFORE doing the width math (instead of after, right before
+    // GizmoImguiBegin) makes GetStyle() report the padding that will really
+    // be in effect, so window_width and wrap_width agree.
+    ImGuiWrapper::push_toolbar_style(m_parent.get_scale());
+
     // A fixed width, as Sculpt learnt to use: an auto-sizing panel resizes out
     // from under the pointer whenever a conditional row appears.
     //
@@ -1405,7 +1456,6 @@ void GLGizmoEdit::on_render_input_window(float x, float y, float bottom_limit)
 
     dock_setup_next_window(x, y, bottom_limit, window_width);
 
-    ImGuiWrapper::push_toolbar_style(m_parent.get_scale());
     GizmoImguiBegin(get_name(), dock_window_flags(ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoTitleBar));
 
     if (!dock_render_titlebar(get_name())) {

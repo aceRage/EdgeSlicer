@@ -389,6 +389,45 @@ TEST_CASE("MeshEdit: pushing a cube face by 5 mm adds area x 5 to the volume", "
     CHECK(res.dirty_facets.size() == 10);
 }
 
+TEST_CASE("MeshEdit: pushing a cube's +X face by +1 moves it to x + 1 (push/pull direction contract)", "[MeshEdit][MeshEditPush]")
+{
+    // This pins down the sign convention the gizmo's drag math (GLGizmoEdit::
+    // drag_distance) has to agree with: translate_region() moves the region
+    // by region.normal * params.d, so a positive distance on the OUTWARD-
+    // facing +X face must move that face further in +X, never back toward
+    // the cube. Bug: the gizmo's drag-to-distance projection had a sign
+    // error (see GLGizmoEdit.cpp, drag_distance()) that flipped this at the
+    // UI layer even though translate_region() itself was always correct -
+    // this test documents the contract that fix relies on.
+    const indexed_triangle_set its  = its_make_cube(10., 10., 10.);
+    const MeshTopology         topo = build_topology(its);
+    const int                  seed = facet_on_face(its, Vec3f::UnitX());
+    REQUIRE(seed >= 0);
+
+    RegionParams rp;
+    rp.mode = RegionMode::Planar;
+    const FaceRegion region = grow_face_region(its, topo, size_t(seed), rp);
+    REQUIRE(region.facets.size() == 2);
+    // The face selected is the one whose outward normal is +X.
+    CHECK(region.normal.x() == Approx(1.f).margin(1e-4));
+
+    TranslateParams tp;
+    tp.d = 1.f;   // direction defaults to the region normal
+    const TranslateResult res = translate_region(its, topo, region, tp);
+    REQUIRE(res.status == TranslateStatus::Ok);
+
+    // its_make_cube() puts the min corner at the origin, so the +X face
+    // starts at x == 10 and a push of +1 must land it at x == 11 - not 9.
+    REQUIRE(!res.moved_vertices.empty());
+    for (uint32_t v : res.moved_vertices) {
+        CHECK(res.mesh.vertices[v].x() == Approx(11.f).margin(1e-4));
+        CHECK(its.vertices[v].x() == Approx(10.f).margin(1e-4));
+    }
+
+    // Volume increases (the face moved outward, away from the cube's interior).
+    CHECK(double(its_volume(res.mesh)) > double(its_volume(its)));
+}
+
 TEST_CASE("MeshEdit: pulling a cube face in removes the same volume, and d = 0 is the identity", "[MeshEdit]")
 {
     const indexed_triangle_set its  = its_make_cube(10., 10., 10.);
