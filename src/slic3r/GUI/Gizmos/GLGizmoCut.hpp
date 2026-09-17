@@ -948,6 +948,13 @@ protected:
     void process_contours();
     void reset_cut_by_contours();
     void render_flip_plane_button(bool disable_pred = false);
+    // "Copy cut to..." + Mirror buttons, step 2. Mirror the WHOLE live cut -
+    // plane, surface, groove and connectors - about the object's bounding-box
+    // centre on a WORLD axis, by round-tripping through the recipe: see
+    // mirror_cut() in the .cpp for why that round trip rather than moving the six
+    // live representations by hand, and CutRecipe.hpp for the handedness rule.
+    void mirror_cut(CutMirrorAxis axis);
+    void render_mirror_buttons();
     void add_vertical_scaled_interval(float interval);
     void add_horizontal_scaled_interval(float interval);
     void add_horizontal_shift(float shift);
