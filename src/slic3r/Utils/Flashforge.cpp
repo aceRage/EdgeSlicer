@@ -172,6 +172,12 @@ bool uses_local_api(const std::string& serial_number, const std::string& check_c
     return !serial_number.empty() && !check_code.empty();
 }
 
+const char* upload_header_flag(const std::map<std::string, std::string>& extended_info, const std::string& key)
+{
+    const auto it = extended_info.find(key);
+    return (it != extended_info.end() && it->second == "1") ? "true" : "false";
+}
+
 std::string host_name_of(const std::string& host_in)
 {
     std::string host = host_in;
@@ -635,9 +641,13 @@ bool Flashforge::upload_local_api(PrintHostUpload upload_data, ProgressFn progre
     bool        res            = true;
     std::string material_map_b64;
     std::string material_map_json = "[]";
-    auto        leveling_before_print = upload_data.extended_info["levelingBeforePrint"] == "1";
-    auto        time_lapse_video      = upload_data.extended_info["timeLapseVideo"] == "1";
-    auto        use_material_station  = upload_data.extended_info["useMatlStation"] == "1";
+    // Every boolean the printer is told about the job is read the same way, so an option the send
+    // dialog never wrote (an older config) is off rather than undefined - see upload_header_flag().
+    const char* leveling_before_print  = FlashforgeLocalApi::upload_header_flag(upload_data.extended_info, "levelingBeforePrint");
+    const char* flow_calibration       = FlashforgeLocalApi::upload_header_flag(upload_data.extended_info, "flowCalibration");
+    const char* first_layer_inspection = FlashforgeLocalApi::upload_header_flag(upload_data.extended_info, "firstLayerInspection");
+    const char* time_lapse_video       = FlashforgeLocalApi::upload_header_flag(upload_data.extended_info, "timeLapseVideo");
+    const char* use_material_station   = FlashforgeLocalApi::upload_header_flag(upload_data.extended_info, "useMatlStation");
 
     if (auto it = upload_data.extended_info.find("materialMappings"); it != upload_data.extended_info.end())
         material_map_json = it->second;
@@ -660,11 +670,11 @@ bool Flashforge::upload_local_api(PrintHostUpload upload_data, ProgressFn progre
         .header("checkCode", m_check_code)
         .header("fileSize", file_size)
         .header("printNow", upload_data.post_action == PrintHostPostUploadAction::StartPrint ? "true" : "false")
-        .header("levelingBeforePrint", leveling_before_print ? "true" : "false")
-        .header("flowCalibration", "false")
-        .header("firstLayerInspection", "false")
-        .header("timeLapseVideo", time_lapse_video ? "true" : "false")
-        .header("useMatlStation", use_material_station ? "true" : "false")
+        .header("levelingBeforePrint", leveling_before_print)
+        .header("flowCalibration", flow_calibration)
+        .header("firstLayerInspection", first_layer_inspection)
+        .header("timeLapseVideo", time_lapse_video)
+        .header("useMatlStation", use_material_station)
         .header("gcodeToolCnt", upload_data.extended_info["gcodeToolCnt"])
         .header("materialMappings", material_map_b64)
         .form_add_file("gcodeFile", upload_data.source_path.string(), filename)

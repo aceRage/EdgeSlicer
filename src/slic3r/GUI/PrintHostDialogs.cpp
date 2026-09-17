@@ -918,6 +918,16 @@ void FlashforgePrintHostSendDialog::init()
     if (!timelapse.empty())
         m_time_lapse_video = timelapse == "1";
 
+    // Both of these cost the user print time at the start of every job, so they stay off until
+    // asked for and are then remembered like the rest of the send options.
+    std::string flow_calibration = app_config->get("recent", CONFIG_KEY_FLOW_CALIBRATION);
+    if (!flow_calibration.empty())
+        m_flow_calibration = flow_calibration == "1";
+
+    std::string first_layer_inspection = app_config->get("recent", CONFIG_KEY_FIRST_LAYER_INSPECTION);
+    if (!first_layer_inspection.empty())
+        m_first_layer_inspection = first_layer_inspection == "1";
+
     // Flashforge local printing should default to IFS enabled when supported.
     // We don't revive an old stale "0" here.
     m_use_material_station = m_supports_material_station;
@@ -992,6 +1002,15 @@ void FlashforgePrintHostSendDialog::init()
                         [this](bool checked) { m_leveling_before_print = checked; }, &m_checkbox_leveling);
     add_option_checkbox(m_flashforge_options_sizer, _L("Time-lapse"), m_time_lapse_video,
                         [this](bool checked) { m_time_lapse_video = checked; }, &m_checkbox_timelapse);
+    add_option_checkbox(m_flashforge_options_sizer, _L("Flow dynamic control"), m_flow_calibration,
+                        [this](bool checked) { m_flow_calibration = checked; }, &m_checkbox_flow_calibration);
+    add_option_checkbox(m_flashforge_options_sizer, _L("First layer inspection"), m_first_layer_inspection,
+                        [this](bool checked) { m_first_layer_inspection = checked; }, &m_checkbox_first_layer_inspection);
+
+    if (m_checkbox_flow_calibration != nullptr)
+        m_checkbox_flow_calibration->SetToolTip(_L("Run the printer's flow calibration before the print starts (FlashForge flowCalibration)."));
+    if (m_checkbox_first_layer_inspection != nullptr)
+        m_checkbox_first_layer_inspection->SetToolTip(_L("Let the printer check the first layer with its camera before carrying on (FlashForge firstLayerInspection)."));
     add_option_checkbox(m_flashforge_options_sizer, _L("Enable IFS"), m_use_material_station,
                         [this](bool checked) {
                             m_use_material_station = checked;
@@ -1080,6 +1099,8 @@ void FlashforgePrintHostSendDialog::EndModal(int ret)
         AppConfig* app_config = wxGetApp().app_config;
         app_config->set("recent", CONFIG_KEY_LEVELING, m_leveling_before_print ? "1" : "0");
         app_config->set("recent", CONFIG_KEY_TIMELAPSE, m_time_lapse_video ? "1" : "0");
+        app_config->set("recent", CONFIG_KEY_FLOW_CALIBRATION, m_flow_calibration ? "1" : "0");
+        app_config->set("recent", CONFIG_KEY_FIRST_LAYER_INSPECTION, m_first_layer_inspection ? "1" : "0");
         app_config->set("recent", CONFIG_KEY_IFS, m_use_material_station ? "1" : "0");
     }
 
@@ -1119,6 +1140,8 @@ std::map<std::string, std::string> FlashforgePrintHostSendDialog::extendedInfo()
 
     return {
         {"levelingBeforePrint", m_leveling_before_print ? "1" : "0"},
+        {"flowCalibration", m_flow_calibration ? "1" : "0"},
+        {"firstLayerInspection", m_first_layer_inspection ? "1" : "0"},
         {"timeLapseVideo", m_time_lapse_video ? "1" : "0"},
         {"useMatlStation", m_use_material_station ? "1" : "0"},
         {"gcodeToolCnt", std::to_string(mapped_count)},
