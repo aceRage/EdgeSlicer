@@ -3254,12 +3254,15 @@ Sidebar::Sidebar(Plater *parent)
     ScalableButton* add_btn = new ScalableButton(p->m_panel_physical_filaments_title, wxID_ANY, "add_filament");
     add_btn->SetToolTip(_L("Add one filament"));
     add_btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent& e){
-        if (p->combos_filament.size() >= MAXIMUM_EXTRUDER_NUMBER)
-            return;
         PresetBundle* pb = wxGetApp().preset_bundle;
-        if (!pb || pb->mixed_filaments.total_filaments(p->combos_filament.size()) >= MAXIMUM_FILAMENT_NUMBER)
+        // Colour slots are the physical count; combos can lag the extruder-count spinner
+        // and mixed_filament_definitions must not invent extra slots (Orca #15728 adapt).
+        const size_t physical_count = pb ? pb->num_physical_filaments() : p->combos_filament.size();
+        if (physical_count >= MAXIMUM_EXTRUDER_NUMBER)
             return;
-        int filament_count = p->combos_filament.size() + 1;
+        if (!pb || pb->mixed_filaments.total_filaments(physical_count) >= MAXIMUM_FILAMENT_NUMBER)
+            return;
+        int filament_count = int(physical_count) + 1;
         wxGetApp().plater()->confirm_auto_generated_gradients(filament_count);
         wxColour new_col = Plater::get_next_color_for_filament();
         std::string new_color = new_col.GetAsString(wxC2S_HTML_SYNTAX).ToStdString();
@@ -8426,9 +8429,10 @@ PlaterPresetComboBox* Sidebar::combo_printer() { return p->combo_printer; }
 PlaterPresetComboBox* Sidebar::combo_print() { return p->combo_print; }
 
 void Sidebar::add_filament() {
-    if (p->combos_filament.size() >= MAXIMUM_EXTRUDER_NUMBER) return;
     PresetBundle* pb = wxGetApp().preset_bundle;
-    if (!pb || pb->mixed_filaments.total_filaments(p->combos_filament.size()) >= MAXIMUM_FILAMENT_NUMBER) return;
+    const size_t physical_count = pb ? pb->num_physical_filaments() : p->combos_filament.size();
+    if (physical_count >= MAXIMUM_EXTRUDER_NUMBER) return;
+    if (!pb || pb->mixed_filaments.total_filaments(physical_count) >= MAXIMUM_FILAMENT_NUMBER) return;
     wxColour    new_col        = Plater::get_next_color_for_filament();
     add_custom_filament(new_col);
     // Reveal the just-added filament: it is appended at the end of the (height-capped,
@@ -9319,11 +9323,14 @@ void Sidebar::cleanup_unused_filaments_after_batch_match(const BatchMatchResult 
 }
 
 void Sidebar::add_custom_filament(wxColour new_col) {
-    if (p->combos_filament.size() >= MAXIMUM_EXTRUDER_NUMBER) return;
     PresetBundle* pb = wxGetApp().preset_bundle;
-    if (!pb || pb->mixed_filaments.total_filaments(p->combos_filament.size()) >= MAXIMUM_FILAMENT_NUMBER) return;
+    // Count configured colour slots, not the combo widgets or mixed definitions:
+    // the extruder-count spinner can reach this before the sidebar has rebuilt.
+    const size_t physical_count = pb ? pb->num_physical_filaments() : p->combos_filament.size();
+    if (physical_count >= MAXIMUM_EXTRUDER_NUMBER) return;
+    if (!pb || pb->mixed_filaments.total_filaments(physical_count) >= MAXIMUM_FILAMENT_NUMBER) return;
 
-    int         filament_count = p->combos_filament.size() + 1;
+    int         filament_count = int(physical_count) + 1;
     wxGetApp().plater()->confirm_auto_generated_gradients(filament_count);
     std::string new_color      = new_col.GetAsString(wxC2S_HTML_SYNTAX).ToStdString();
     pb->set_num_filaments(filament_count, new_color);

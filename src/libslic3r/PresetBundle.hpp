@@ -136,6 +136,9 @@ public:
     void            set_num_filaments(unsigned int n, std::string new_col = "");
     void            set_num_filaments(unsigned int n, std::vector<std::string> new_colors);
     void            update_num_filaments(unsigned int to_del_filament_id);
+    // Physical slot count. filament_colour is the source of truth; mixed_filament_definitions
+    // and a topped-up filament_presets list must not invent extra slots (Orca #15728 adapt).
+    size_t          num_physical_filaments() const;
     unsigned int sync_ams_list(unsigned int & unknowns);
     //BBS: check whether this is the only edited filament
     bool is_the_only_edited_filament(unsigned int filament_index);

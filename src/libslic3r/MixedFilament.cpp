@@ -2646,6 +2646,68 @@ void MixedFilamentManager::load_custom_entries(const std::string &serialized, co
                             << ", mixed_total=" << m_mixed.size();
 }
 
+std::string MixedFilamentManager::clamp_serialized_entries_to_physical_count(const std::string &serialized, size_t num_physical)
+{
+    if (serialized.empty() || num_physical < 2)
+        return {};
+
+    std::ostringstream out;
+    bool first = true;
+    size_t kept = 0;
+    size_t dropped = 0;
+    std::stringstream all(serialized);
+    std::string row;
+    while (std::getline(all, row, ';')) {
+        if (row.empty())
+            continue;
+
+        unsigned int a = 0;
+        unsigned int b = 0;
+        uint64_t stable_id = 0;
+        bool enabled = true;
+        bool custom = true;
+        bool origin_auto = false;
+        int mix = 50;
+        bool pointillism_all_filaments = false;
+        std::string gradient_component_ids;
+        std::string gradient_component_weights;
+        std::string manual_pattern;
+        int distribution_mode = int(MixedFilament::Simple);
+        int local_z_max_sublayers = 0;
+        float component_a_surface_offset = 0.f;
+        float component_b_surface_offset = 0.f;
+        bool deleted = false;
+        bool gradient_enabled = false;
+        float gradient_start = 0.8f;
+        float gradient_end   = 0.2f;
+        int   cm_mode = -1;
+        std::string image_fill_ref;
+        if (!parse_row_definition(row, a, b, stable_id, enabled, custom, origin_auto, mix, pointillism_all_filaments,
+                                  gradient_component_ids, gradient_component_weights, manual_pattern, distribution_mode,
+                                  local_z_max_sublayers, component_a_surface_offset, component_b_surface_offset, deleted,
+                                  gradient_enabled, gradient_start, gradient_end, cm_mode, image_fill_ref) ||
+            a == 0 || b == 0 || a > num_physical || b > num_physical || a == b ||
+            mixed_filament_references_exceed_physical(gradient_component_ids, manual_pattern, num_physical)) {
+            ++dropped;
+            continue;
+        }
+
+        if (!first)
+            out << ';';
+        first = false;
+        out << row;
+        ++kept;
+    }
+
+    if (dropped > 0)
+        BOOST_LOG_TRIVIAL(info) << "MixedFilamentManager::clamp_serialized_entries_to_physical_count"
+                                << ", physical_count=" << num_physical
+                                << ", kept_rows=" << kept
+                                << ", dropped_rows=" << dropped;
+
+    return out.str();
+}
+
 unsigned int MixedFilamentManager::resolve(unsigned int filament_id,
                                            size_t       num_physical,
                                            int          layer_index,
