@@ -125,7 +125,7 @@ const std::vector<std::pair<EnforcerBlockerType, std::string>> &mmu_states()
 
 } // namespace
 
-void inspect_to_json(const Model &model, const std::vector<std::string> &source_paths, std::ostream &out)
+void inspect_to_json(const std::vector<Model> &models, const std::vector<std::string> &source_paths, std::ostream &out)
 {
     json root;
     root["sources"] = source_paths;
@@ -137,49 +137,52 @@ void inspect_to_json(const Model &model, const std::vector<std::string> &source_
     size_t total_volumes = 0;
     size_t total_painted = 0;
     size_t total_facets  = 0;
+    size_t object_index  = 0;
 
-    for (size_t oi = 0; oi < model.objects.size(); ++oi) {
-        const ModelObject *mo = model.objects[oi];
-        if (!mo)
-            continue;
-        ++total_objects;
-
-        json obj;
-        obj["index"] = oi;
-        obj["name"]  = mo->name;
-
-        json volumes = json::array();
-        for (size_t vi = 0; vi < mo->volumes.size(); ++vi) {
-            const ModelVolume *mv = mo->volumes[vi];
-            if (!mv)
+    for (const Model &model : models) {
+        for (size_t oi = 0; oi < model.objects.size(); ++oi) {
+            const ModelObject *mo = model.objects[oi];
+            if (!mo)
                 continue;
-            ++total_volumes;
+            ++total_objects;
 
-            const indexed_triangle_set &its = mv->mesh().its;
-            json                        vol;
-            vol["index"]           = vi;
-            vol["name"]            = mv->name;
-            vol["n_facets"]        = its.indices.size();
-            vol["is_model_part"]   = mv->is_model_part();
-            vol["bbox_mesh_local"] = bbox_to_json(bounding_box(its));
+            json obj;
+            obj["index"] = object_index++;
+            obj["name"]  = mo->name;
 
-            size_t vol_painted = 0;
-            json   paints;
-            paints["supports"]         = inspect_layer(*mv, mv->supported_facets, supports_states(), vol_painted);
-            paints["seam"]             = inspect_layer(*mv, mv->seam_facets, supports_states(), vol_painted);
-            paints["mmu_segmentation"] = inspect_layer(*mv, mv->mmu_segmentation_facets, mmu_states(), vol_painted);
-            paints["fuzzy_skin"]       = inspect_layer(*mv, mv->fuzzy_skin_facets, fuzzy_states(), vol_painted);
-            vol["paints"]               = std::move(paints);
-            vol["painted_facets_total"] = vol_painted;
+            json volumes = json::array();
+            for (size_t vi = 0; vi < mo->volumes.size(); ++vi) {
+                const ModelVolume *mv = mo->volumes[vi];
+                if (!mv)
+                    continue;
+                ++total_volumes;
 
-            if (vol_painted > 0)
-                ++total_painted;
-            total_facets += vol_painted;
+                const indexed_triangle_set &its = mv->mesh().its;
+                json                        vol;
+                vol["index"]           = vi;
+                vol["name"]            = mv->name;
+                vol["n_facets"]        = its.indices.size();
+                vol["is_model_part"]   = mv->is_model_part();
+                vol["bbox_mesh_local"] = bbox_to_json(bounding_box(its));
 
-            volumes.push_back(std::move(vol));
+                size_t vol_painted = 0;
+                json   paints;
+                paints["supports"]         = inspect_layer(*mv, mv->supported_facets, supports_states(), vol_painted);
+                paints["seam"]             = inspect_layer(*mv, mv->seam_facets, supports_states(), vol_painted);
+                paints["mmu_segmentation"] = inspect_layer(*mv, mv->mmu_segmentation_facets, mmu_states(), vol_painted);
+                paints["fuzzy_skin"]       = inspect_layer(*mv, mv->fuzzy_skin_facets, fuzzy_states(), vol_painted);
+                vol["paints"]               = std::move(paints);
+                vol["painted_facets_total"] = vol_painted;
+
+                if (vol_painted > 0)
+                    ++total_painted;
+                total_facets += vol_painted;
+
+                volumes.push_back(std::move(vol));
+            }
+            obj["volumes"] = std::move(volumes);
+            objects.push_back(std::move(obj));
         }
-        obj["volumes"] = std::move(volumes);
-        objects.push_back(std::move(obj));
     }
     root["objects"] = std::move(objects);
     root["summary"] = {

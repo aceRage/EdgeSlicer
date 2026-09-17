@@ -1397,6 +1397,10 @@ int CLI::run(int argc, char **argv)
     // Development and test only - see DataDirMigration.hpp and test_rebrand_migration.py.
     if (const ConfigOptionString* mig_root = m_config.opt<ConfigOptionString>("migrate_datadir_test");
         mig_root && !mig_root->value.empty()) {
+        if (std::find(m_actions.begin(), m_actions.end(), "inspect_paint") != m_actions.end()) {
+            boost::nowide::cerr << "--inspect-paint cannot be combined with --migrate-datadir-test" << std::endl;
+            return CLI_INVALID_PARAMS;
+        }
         const std::string parent = mig_root->value;
         const auto        r      = Slic3r::migrate_data_dir(parent,
                                        (boost::filesystem::path(parent) / SLIC3R_APP_KEY).string());
@@ -1662,6 +1666,14 @@ int CLI::run(int argc, char **argv)
         }
         if (!m_config.opt_string("hms_lookup").empty()) {
             boost::nowide::cerr << "--inspect-paint cannot be combined with --hms-lookup" << std::endl;
+            record_exit_reson(outfile_dir, CLI_INVALID_PARAMS, 0, cli_errors[CLI_INVALID_PARAMS], sliced_info);
+            flush_and_exit(CLI_INVALID_PARAMS);
+        }
+        // --migrate-datadir-test is CLIMiscConfigDef (not an action), so it never shows up in
+        // m_actions. It is an early stdout exit like --hub / --hms-lookup and is also
+        // rejected at its handler before this gate.
+        if (!m_config.opt_string("migrate_datadir_test").empty()) {
+            boost::nowide::cerr << "--inspect-paint cannot be combined with --migrate-datadir-test" << std::endl;
             record_exit_reson(outfile_dir, CLI_INVALID_PARAMS, 0, cli_errors[CLI_INVALID_PARAMS], sliced_info);
             flush_and_exit(CLI_INVALID_PARAMS);
         }
@@ -5499,10 +5511,12 @@ int CLI::run(int argc, char **argv)
             // Machine-readable alternative to opening the paint gizmos.
             // m_input_files were already absolute-ized by resolve_cli_input_path()
             // in setup(), matching --inspect-mesh.
-            for (Model &model : m_models) {
+            // One dump for every loaded model: Orca #14608 merges inputs into one Model
+            // before actions, but looping inspect_to_json per Model concatenated JSON
+            // documents on stdout. Fold leftover models into the same objects/summary.
+            for (Model &model : m_models)
                 model.add_default_instances();
-                Slic3r::PaintCLI::inspect_to_json(model, m_input_files, boost::nowide::cout);
-            }
+            Slic3r::PaintCLI::inspect_to_json(m_models, m_input_files, boost::nowide::cout);
             boost::nowide::cout.flush();
             // Conflicting actions were rejected before loading. Finish like the end of run().
             // flush_and_exit() is not usable here: it prints "found error ..." to stdout,
