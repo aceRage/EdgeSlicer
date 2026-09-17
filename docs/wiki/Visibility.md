@@ -5,51 +5,38 @@
 **Visibility** controls how each **object** or **part** appears in the Prepare view:
 
 - **Normal** — fully shown  
-- **Ghost** — X-ray / see-through, so you can work around or inside assemblies without losing context  
-- **Hidden** — not drawn (still in the project)
+- **Ghost (X-ray)** — see-through; clicks pass through so you can work on what is behind  
+- **Hidden** — not drawn in the 3D view (**still slices and prints**)  
+- **Show all objects** — reset every object to Normal (object menu)
 
-An **eye** column in the object list shows and changes visibility without hunting through menus.
-
-Use Ghost when aligning or inspecting nested / overlapping parts; use Hidden to clear clutter while you edit something else.
+An **eye** column in the object list cycles Normal → Ghost → Hidden without opening the menu.
 
 ## Where to find it
 
-- Object list → **eye** column (per object or part)
-- Object / part context menus that set visibility to Normal, Ghost, or Hidden (Prepare view)
+- Object list → **eye** column  
+- Object / part / multi-selection context menu → **Visibility** submenu  
 
-Visibility is a Prepare-view / modeling aid. It does not by itself change which geometry is sliced unless you leave parts hidden in a way your workflow treats as excluded — treat Hidden as “out of the way for editing,” and confirm selection / slice scope before you print.
+Assemble-view menus do **not** include Visibility.
 
 ## How to use it
 
-1. Open the object list so objects and parts are visible.
-2. Click the **eye** (or use the visibility menu) on an object or part.
-3. Choose:
-   - **Normal** — restore full display  
-   - **Ghost** — X-ray so neighbours stay visible underneath  
-   - **Hidden** — remove it from the view temporarily  
-4. Combine with multi-part assemblies: Ghost the shell while you edit an insert; Hidden for plates or helpers you do not need on screen.
-5. Switch back to **Normal** before final layout checks if you want the true on-bed appearance.
-
-Related Prepare helpers that often go with visibility:
-
-- Move panel **align & distribute**
-- **Bottom-referenced Z** / **keep imported Z** (drop-to-bed toggle)
-- Double-click to select a part
-
-See also [Preferences → Extras](Preferences-Extras) for drop-to-bed and bottom-referenced Z toggles.
+1. Select an object or part (or use the eye column on that row).
+2. Choose **Normal**, **Ghost (X-ray)**, or **Hidden**.
+3. Use **Show all objects** when many items were hidden and you want a full reset.
+4. Ghost a shell while editing an insert; hide helpers you do not need on screen — remember Hidden parts still go to the printer unless you remove or disable them another way.
 
 ## Limits / notes
 
 | Situation | What happens |
 |---|---|
-| Ghost | Display only (X-ray) — geometry is still there for editing and, when selected appropriately, for slicing. |
-| Hidden | Cleared from the view; confirm you still intend that part in the slice / export. |
-| Per object vs per part | You can set visibility on a whole object or on individual parts inside it. |
-| Cut tool halves | The Cut tool can also set halves to Visible / Ghost / Hidden while placing a curved cut — see [Flexi joints](Flexi-joints). |
+| Hidden | Cleared from the view only — **still included in slice/print**. |
+| Ghost | Display aid; geometry remains. |
+| Per object vs per part | Set on a whole object or on individual parts. |
+| Cut tool | Cut halves can also be Visible / Ghost / Hidden while placing a curved cut — see [Flexi joints](Flexi-joints). |
 
 ## Related
 
-- [Assemble tool and Auto-fit](Assemble-tool)  
-- [Flexi joints and Cut tool](Flexi-joints)  
-- [Preferences → Extras](Preferences-Extras)  
+- [Object menu](Object-menu)  
+- [Assemble tool](Assemble-tool)  
+- [Flexi joints](Flexi-joints)  
 - [Home](Home)  

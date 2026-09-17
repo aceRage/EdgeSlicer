@@ -51,7 +51,18 @@ These areas are custom to EdgeSlicer (or heavily extended here). Each page follo
 | [Image Fill](Image-Fill) | Project an image onto a part; optional dithering |
 | [Fill bed with copies](Fill-bed-with-copies) | Compact / grid packing dialog |
 | [Scale to build volume](Scale-to-build-volume) | Fit an object to the bed with gaps |
-| [Visibility (Normal / Ghost / Hidden)](Visibility) | Eye column; X-ray Ghost and Hidden per object or part |
+| [Visibility (Normal / Ghost / Hidden)](Visibility) | Eye column; Ghost X-ray; Hidden still slices |
+
+
+### Object / part context menu
+
+| Page | What it covers |
+|---|---|
+| [Object and part context menus](Object-menu) | Edge right-click map (object, part, multi-select) |
+| [Fill bed with copies](Fill-bed-with-copies) | Compact/Grid pack dialog; also Clone → Fill |
+| [Scale to build volume](Scale-to-build-volume) | Fit to bed with gaps and centre |
+| [Repair/Remesh](Repair-Remesh) | OpenVDB watertight remesh (not quad remesh) |
+| [Split by painted colour](Split-by-painted-colour) | Paint regions → separate parts |
 
 ### Print quality
 
