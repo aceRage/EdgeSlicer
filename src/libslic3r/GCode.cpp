@@ -2545,9 +2545,15 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
         // Ultra (H2C nozzle rack): ported from BambuStudio GCode.cpp:2461-2476. The printer reads
         // both lines out of a stored job: "filament" is the 1-based list of filament slots the job
         // needs (the AMS offering on the machine's own screen), "support_material_on_wipe_tower"
-        // tells it whether the prime tower carries support material. Only for BBL printers, so
-        // non-Bambu output is unchanged.
-        if (is_bbl_printers) {
+        // tells it whether the prime tower carries support material.
+        //
+        // This was originally gated on is_bbl_printers, which is false for any non-Bambu vendor
+        // profile. That made us the outlier: BambuStudio writes both lines unconditionally
+        // (GCode.cpp:2461-2476) and so does upstream OrcaSlicer - its Flashforge Creator 5 export
+        // carries "; filament: 2,3,4,1", as does Flash Studio's. The C5 runs Bambu-derived
+        // firmware that reads this header out of a stored job, and our export was the only one
+        // of the three missing it. Match upstream and always write it.
+        {
             // Upstream feeds this from Print::get_slice_used_filaments(false), which is set from
             // ToolOrdering::all_extruders() (Print.cpp:2298,2312). This fork keeps the tool ordering
             // on the wipe-tower data, so it is only populated for a multi-filament plate; fall back

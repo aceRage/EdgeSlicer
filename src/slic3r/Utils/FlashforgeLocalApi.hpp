@@ -46,6 +46,14 @@ std::string url_for(const std::string& host, const std::string& path);
 // '_', and an empty name becomes "print" plus the fallback extension.
 std::string sanitize_filename(const std::string& filename, const std::string& fallback_extension = {});
 
+// The name a plate-sliced 3mf must carry on the way to the printer. The Creator 5 tells a sliced
+// plate from a plain project 3mf by the double extension: given "<name>.3mf" it lists the file
+// without a thumbnail and hangs its touchscreen when the file is opened, while "<name>.gcode.3mf"
+// - what Flash Studio, upstream OrcaSlicer and this program's own File > Export plate sliced file
+// all write - opens normally. Replaces whatever extension the name arrives with, and leaves a
+// name that already ends in ".gcode.3mf" alone. See tests/slic3rutils/flashforge_tests.cpp.
+std::string sliced_3mf_name(const std::string& filename);
+
 // A /uploadGcode boolean header out of the send dialog's extended-info map. The dialog speaks the
 // app_config dialect ("1"/"0"), the printer wants JSON-ish "true"/"false", and an option the dialog
 // never set at all (an older config, or a print host that filled the map itself) must read as off.

@@ -9068,6 +9068,25 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                     size_t filaments_count = 0;
                     if (auto* colours = dynamic_cast<const ConfigOptionStrings*>(config.option("filament_colour")))
                         filaments_count = colours->values.size();
+
+                    // A machine with several identical independent toolheads (Snapmaker U1,
+                    // Flashforge Creator 5) never goes through ToolOrdering's grouping engine -
+                    // that path is gated on distinct extruder variants - so filament_map is left
+                    // at its preset default of all-1s and this file used to claim every filament
+                    // sat in toolhead 1 while the G-code drove T0..T3. Bambu-derived firmware
+                    // reads this map to resolve a filament to a physical nozzle, so report the
+                    // assignment the machine actually prints with. Reported metadata only: the
+                    // live config is untouched, so routing, flush volumes and the emitted G-code
+                    // are unchanged (see identity_filament_map's comment).
+                    const std::vector<int> identity = identity_filament_map(config, filaments_count);
+                    if (!identity.empty()) {
+                        const bool map_is_trivial = filament_maps.empty() ||
+                                                    std::all_of(filament_maps.begin(), filament_maps.end(),
+                                                                [](int v) { return v <= 1; });
+                        if (map_is_trivial)
+                            filament_maps = identity;
+                    }
+
                     if (filament_maps.size() < filaments_count)
                         filament_maps.resize(filaments_count, 1);
                     for (int& v : filament_maps)
@@ -9156,12 +9175,48 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 // The logical nozzles this plate actually used. On the H2C the extruder alone does
                 // not identify the nozzle (extruder 2 holds up to six), so this is what lets the
                 // printer resolve a filament's <filament group_id="..."> to a physical nozzle.
+                bool wrote_nozzles = false;
                 if (plate_data->nozzle_group_result) {
                     auto used_nozzle_list = plate_data->nozzle_group_result->get_used_nozzles_in_extruder();
                     if (!used_nozzle_list.empty()) {
                         for (auto& used_nozzle : used_nozzle_list) {
                             stream << "    <" << NOZZLE_TAG << " " << used_nozzle.serialize() << "/>\n";
                         }
+                        wrote_nozzles = true;
+                    }
+                }
+
+                // A machine with several identical independent toolheads has no grouping result -
+                // that engine is for the dual-nozzle machines - so it used to emit no <nozzle>
+                // entries at all, leaving the firmware nothing to resolve a filament's toolhead
+                // against. Both files that print on a Creator 5 (Flash Studio's and upstream
+                // OrcaSlicer's) list one entry per toolhead the plate uses. Build the same list
+                // from the reported map; still metadata only, the live config is untouched.
+                if (!wrote_nozzles && !filament_maps.empty() && is_identical_multi_extruder_printer(config)) {
+                    std::set<int> used_extruders; // 1-based, as filament_maps is
+                    for (int e : filament_maps)
+                        if (e >= 1)
+                            used_extruders.insert(e);
+
+                    const auto* nd  = dynamic_cast<const ConfigOptionFloats*>(config.option("nozzle_diameter"));
+                    const auto* nvt = config.option<ConfigOptionEnumsGeneric>("nozzle_volume_type");
+                    for (int extruder : used_extruders) {
+                        const size_t idx = size_t(extruder - 1);
+                        double diameter = 0.;
+                        if (nd != nullptr && !nd->values.empty())
+                            diameter = idx < nd->values.size() ? nd->values[idx] : nd->values.front();
+                        NozzleVolumeType volume_type = NozzleVolumeType::nvtStandard;
+                        if (nvt != nullptr && !nvt->values.empty())
+                            volume_type = NozzleVolumeType(idx < nvt->values.size() ? nvt->values[idx] : nvt->values.front());
+
+                        // id is the 0-based logical nozzle, extruder_id the 1-based toolhead -
+                        // the spelling NozzleInfo::serialize() produces, matching both samples.
+                        std::ostringstream nozzle_diameter_str;
+                        nozzle_diameter_str << std::fixed << std::setprecision(1) << diameter;
+                        stream << "    <" << NOZZLE_TAG << " id=\"" << (extruder - 1) << "\" "
+                               << "extruder_id=\"" << extruder << "\" "
+                               << "nozzle_diameter=\"" << nozzle_diameter_str.str() << "\" "
+                               << "volume_type=\"" << get_nozzle_volume_type_string(volume_type) << "\"/>\n";
                     }
                 }
                 stream << "  </" << PLATE_TAG << ">\n";

@@ -2159,6 +2159,27 @@ bool is_XL_printer(const PrintConfig &cfg);
 // what to do with the end-of-print unload flag, so it is the only place the option is offered.
 bool is_snapmaker_toolchanger(const ConfigBase &cfg);
 
+// A machine with several INDEPENDENT, IDENTICAL toolheads - one filament per head, tool index ==
+// filament index (the Snapmaker U1 family, the Flashforge Creator 5). Distinct from the
+// dual-nozzle grouping machines (H2D/H2C/X2D), which carry more than one extruder variant and go
+// through ToolOrdering's grouping engine instead - see
+// DynamicPrintConfig::support_different_extruders().
+bool is_identical_multi_extruder_printer(const ConfigBase &cfg);
+
+// The filament -> extruder map such a machine actually prints with: filament i lives in toolhead
+// i, wrapping when there are more filaments than toolheads (what Flash Studio writes for five
+// filaments on a four-head Creator 5: "1 2 3 4 1"). 1-based, one entry per filament.
+//
+// REPORTED METADATA ONLY. This is deliberately NOT written into the live PrintConfig: in this
+// fork filament_map doubles as the dual-nozzle routing signal, and a differing map zeroes the
+// purge volume on every filament change (GCode.cpp "Phase 7" cross-nozzle shims, ~line 709 and
+// ~9773). Those shims are right for an H2D, where a second nozzle already holds the next
+// filament, and wrong for a toolchanger, which still needs its prime tower - upstream OrcaSlicer
+// reports filament_map = 1,2,3,4 for the Creator 5 AND keeps a full flush matrix. So the map is
+// only ever reported (G-code CONFIG_BLOCK, slice_info.config), never used to route or to decide
+// a flush, which leaves the executable G-code byte-identical.
+std::vector<int> identity_filament_map(const ConfigBase &cfg, size_t filament_count);
+
 Points get_bed_shape(const DynamicPrintConfig &cfg);
 Points get_bed_shape(const PrintConfig &cfg);
 Points get_bed_shape(const SLAPrinterConfig &cfg);

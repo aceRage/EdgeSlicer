@@ -230,6 +230,27 @@ std::string sanitize_filename(const std::string& filename, const std::string& fa
     return basename;
 }
 
+std::string sliced_3mf_name(const std::string& filename)
+{
+    static const std::string suffix = ".gcode.3mf";
+    if (filename.empty())
+        return "print" + suffix;
+
+    // Already the right shape - a name the caller built, or one the user typed into the send
+    // dialog. Compared case-insensitively because the dialog does not police the case.
+    if (filename.size() > suffix.size()) {
+        const std::string tail = filename.substr(filename.size() - suffix.size());
+        if (boost::iequals(tail, suffix))
+            return filename;
+    }
+
+    // Otherwise drop the single extension the name carries (".3mf", ".gcode", or none) and put
+    // the double one on. fs::path::replace_extension() is what Plater uses for the same job.
+    fs::path p(filename);
+    p.replace_extension(suffix);
+    return p.string();
+}
+
 bool validate_response(const std::string& response_body, std::string& error_text)
 {
     error_text.clear();
@@ -657,7 +678,15 @@ bool Flashforge::upload_local_api(PrintHostUpload upload_data, ProgressFn progre
 
     auto        url      = make_http_url("uploadGcode");
     const std::string fallback_extension = upload_data.source_path.extension().string().empty() ? (upload_data.use_3mf ? ".3mf" : ".gcode") : upload_data.source_path.extension().string();
-    auto        filename = sanitize_flashforge_filename(upload_data.upload_path.string(), fallback_extension);
+    // A 3mf upload is always a plate-sliced file here (Plater::send_gcode_legacy forces use_3mf
+    // for this API and exports the plate's gcode 3mf). The printer identifies one by the
+    // ".gcode.3mf" double extension - a bare ".3mf" is listed without a thumbnail and freezes
+    // the touchscreen when opened - so the name is normalised here as well as in the send
+    // dialog's default, which the user is free to edit.
+    std::string upload_name = upload_data.upload_path.string();
+    if (upload_data.use_3mf)
+        upload_name = FlashforgeLocalApi::sliced_3mf_name(upload_name);
+    auto        filename = sanitize_flashforge_filename(upload_name, fallback_extension);
     std::string file_size;
     try {
         file_size = std::to_string(fs::file_size(upload_data.source_path));
