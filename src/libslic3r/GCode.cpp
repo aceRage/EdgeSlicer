@@ -601,11 +601,21 @@ std::string WipeTowerIntegration::append_tcr(GCode& gcodegen, const WipeTower::T
     double current_z = gcodegen.writer().get_position().z();
     if (z == -1.) // in case no specific z was provided, print at current_z pos
         z = current_z;
-    if (!is_approx(z, current_z)) {
+    // Orca: wipe_tower_no_sparse_layers crash guard. With sparse layers skipped the tower is
+    // compacted far below the object, so descending to it is only safe once the nozzle is parked
+    // over the tower - which is what the is_finish_first travel above does. Otherwise the nozzle
+    // is still over the model and this descent would drive it into the print, so defer it to the
+    // re-descents below, which run after the travel to the tower.
+    const bool defer_compacted_descend = m_sparse_layers_skipped
+        && !tcr.priming && !tcr.is_finish_first && (current_z - z) > EPSILON;
+    if (!is_approx(z, current_z) && !defer_compacted_descend) {
         gcode += gcodegen.writer().retract();
         gcode += gcodegen.writer().travel_to_z(z, "Travel down to the last wipe tower layer.");
         gcode += gcodegen.writer().unretract();
     }
+    // Tower compacted below the object, so any extrusion emitted without an explicit z has to be
+    // pulled back down to it first.
+    const bool compacted_below_object = m_sparse_layers_skipped && z >= 0. && (tcr.print_z - z) > EPSILON;
 
     // Process the end filament gcode.
     std::string end_filament_gcode_str;
@@ -841,6 +851,15 @@ std::string WipeTowerIntegration::append_tcr(GCode& gcodegen, const WipeTower::T
         start_filament_gcode_str = gcodegen.placeholder_parser_process("filament_start_gcode", filament_start_gcode, new_extruder_id,
                                                                        &config);
         check_add_eol(start_filament_gcode_str);
+    }
+
+    // Orca: the custom change_filament_gcode lifts to the object layer height and the unretract
+    // de-hops back to it, so every tower extrusion emitted after it (purge moves, and the wall
+    // when it prints after the toolchange) would float above the compacted tower. Descend first.
+    if (compacted_below_object) {
+        std::string z_descend = gcodegen.writer().travel_to_z(z, "Descend to compacted wipe tower z (no sparse layers)");
+        check_add_eol(z_descend);
+        start_filament_gcode_str += z_descend;
     }
 
     // Insert the end filament, toolchange, and start filament gcode into the generated gcode.
@@ -1417,11 +1436,9 @@ std::string WipeTowerIntegration::tool_change(GCode& gcodegen, int extruder_id, 
                 // resulting in a wipe tower with sparse layers.
                 double wipe_tower_z  = -1;
                 bool   ignore_sparse = false;
-                if (gcodegen.config().wipe_tower_no_sparse_layers.value) {
+                if (m_sparse_layers_skipped) {
                     wipe_tower_z  = m_last_wipe_tower_print_z;
-                    ignore_sparse = (m_tool_changes[m_layer_idx].size() == 1 &&
-                                     m_tool_changes[m_layer_idx].front().initial_tool == m_tool_changes[m_layer_idx].front().new_tool &&
-                                     m_layer_idx != 0);
+                    ignore_sparse = wipe_tower_layer_is_sparse(m_tool_changes[m_layer_idx]) && m_layer_idx != 0;
                     if (m_tool_change_idx == 0 && !ignore_sparse)
                         wipe_tower_z = m_last_wipe_tower_print_z + m_tool_changes[m_layer_idx].front().layer_height;
                 }
@@ -1438,12 +1455,10 @@ std::string WipeTowerIntegration::tool_change(GCode& gcodegen, int extruder_id, 
         // resulting in a wipe tower with sparse layers.
         double wipe_tower_z  = -1;
         bool   ignore_sparse = false;
-        if (gcodegen.config().wipe_tower_no_sparse_layers.value) {
-            wipe_tower_z  = m_last_wipe_tower_print_z;
-            ignore_sparse = (m_tool_changes[m_layer_idx].size() == 1 &&
-                             m_tool_changes[m_layer_idx].front().initial_tool == m_tool_changes[m_layer_idx].front().new_tool);
-            if (m_tool_change_idx == 0 && !ignore_sparse)
-                wipe_tower_z = m_last_wipe_tower_print_z + m_tool_changes[m_layer_idx].front().layer_height;
+        if (m_sparse_layers_skipped) {
+            ignore_sparse = wipe_tower_layer_is_sparse(m_tool_changes[m_layer_idx]);
+            if (size_t(m_layer_idx) < m_compacted_tower_z.size())
+                wipe_tower_z = m_compacted_tower_z[m_layer_idx];
         }
 
         if (m_enable_timelapse_print && m_is_first_print) {
@@ -1459,7 +1474,6 @@ std::string WipeTowerIntegration::tool_change(GCode& gcodegen, int extruder_id, 
             if (!ignore_sparse) {
                 realign_nominal_toolchange_idx(extruder_id);
                 gcode += append_tcr(gcodegen, m_tool_changes[m_layer_idx][m_tool_change_idx++], extruder_id, wipe_tower_z);
-                m_last_wipe_tower_print_z = wipe_tower_z;
             }
         }
     }
@@ -1476,10 +1490,8 @@ bool WipeTowerIntegration::is_empty_wipe_tower_gcode(GCode& gcodegen, int extrud
         return true;
 
     bool ignore_sparse = false;
-    if (gcodegen.config().wipe_tower_no_sparse_layers.value) {
-        ignore_sparse = (m_tool_changes[m_layer_idx].size() == 1 &&
-                         m_tool_changes[m_layer_idx].front().initial_tool == m_tool_changes[m_layer_idx].front().new_tool);
-    }
+    if (m_sparse_layers_skipped)
+        ignore_sparse = wipe_tower_layer_is_sparse(m_tool_changes[m_layer_idx]);
 
     if (m_enable_timelapse_print && m_is_first_print) {
         return false;
