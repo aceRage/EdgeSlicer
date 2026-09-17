@@ -430,7 +430,7 @@ jobs:
         shell: cmd
         working-directory: build
         run: |
-          "%SEVENZIP%" a -tzip "Snapmaker_Orca_Windows_%ver%_portable.zip" "%GITHUB_WORKSPACE%\build\Snapmaker_Orca" || exit /b 1
+          "%SEVENZIP%" a -tzip "EdgeSlicer_Windows_%ver%_portable.zip" "%GITHUB_WORKSPACE%\build\Snapmaker_Orca" || exit /b 1
 
       - name: Collect artifacts and checksums
         id: pack
@@ -442,13 +442,13 @@ jobs:
           New-Item -ItemType Directory -Path $out -Force | Out-Null
 
           # CPack names the installer from CPACK_PACKAGE_FILE_NAME
-          # (EdgeSlicer_Windows_Installer_V<ver>.exe). Rename to the Snapmaker_Orca_* naming
-          # build_orca.yml's Windows job publishes, so downstream tooling sees one shape.
+          # (EdgeSlicer_Windows_Installer_V<ver>.exe). Keep that name: every published asset
+          # is EdgeSlicer_* since the rebrand (release_2380.sh and build_orca.yml agree).
           $installerName = ''
           $installer = Get-ChildItem -LiteralPath $build -Filter '*.exe' -File |
                        Where-Object { $_.Name -match 'Installer' } | Select-Object -First 1
           if ($installer) {
-            $installerName = "Snapmaker_Orca_Windows_Installer_$($env:ver).exe"
+            $installerName = "EdgeSlicer_Windows_Installer_$($env:ver).exe"
             Copy-Item -LiteralPath $installer.FullName -Destination (Join-Path $out $installerName) -Force
           } elseif ([string]::IsNullOrEmpty($env:NSIS_DIR)) {
             Write-Host "::warning::no NSIS on the runner, so no installer was built"
@@ -456,7 +456,7 @@ jobs:
             throw "NSIS is present but cpack produced no installer .exe in $build"
           }
 
-          $zip = Join-Path $build "Snapmaker_Orca_Windows_$($env:ver)_portable.zip"
+          $zip = Join-Path $build "EdgeSlicer_Windows_$($env:ver)_portable.zip"
           if (-not (Test-Path -LiteralPath $zip)) { throw "portable zip missing: $zip" }
           Copy-Item -LiteralPath $zip -Destination $out -Force
 
@@ -479,15 +479,15 @@ jobs:
         if: steps.pack.outputs.installer_name != ''
         uses: actions/upload-artifact@v4
         with:
-          name: Snapmaker_Orca_Windows_${{ env.ver }}
+          name: EdgeSlicer_Windows_${{ env.ver }}
           path: artifacts/${{ steps.pack.outputs.installer_name }}
           if-no-files-found: error
 
       - name: Upload portable zip
         uses: actions/upload-artifact@v4
         with:
-          name: Snapmaker_Orca_Windows_${{ env.ver }}_portable
-          path: artifacts/Snapmaker_Orca_Windows_${{ env.ver }}_portable.zip
+          name: EdgeSlicer_Windows_${{ env.ver }}_portable
+          path: artifacts/EdgeSlicer_Windows_${{ env.ver }}_portable.zip
           if-no-files-found: error
 
       - name: Upload SHA256SUMS
