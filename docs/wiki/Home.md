@@ -51,6 +51,7 @@ These areas are custom to EdgeSlicer (or heavily extended here). Each page follo
 | [Image Fill](Image-Fill) | Project an image onto a part; optional dithering |
 | [Fill bed with copies](Fill-bed-with-copies) | Compact / grid packing dialog |
 | [Scale to build volume](Scale-to-build-volume) | Fit an object to the bed with gaps |
+| [Visibility (Normal / Ghost / Hidden)](Visibility) | Eye column; X-ray Ghost and Hidden per object or part |
 
 ### Print quality
 
