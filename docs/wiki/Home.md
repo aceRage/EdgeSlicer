@@ -57,6 +57,7 @@ These areas are custom to EdgeSlicer (or heavily extended here). Each page follo
 
 | Page | What it covers |
 |---|---|
+| [Process settings (Edge overview)](Process-settings) | Map of Edge process tweaks vs upstream Orca |
 | [Offset layers](Offset-layers) | Interlocking odd walls (experimental) |
 | [Z contouring](Z-contouring) | Smooth shallow top staircasing (Edge notes) |
 | [Locked Zag infill](Locked-Zag-infill) | Separate skin/skeleton patterns; skin follows surface |
