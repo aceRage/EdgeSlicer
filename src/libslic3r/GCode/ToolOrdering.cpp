@@ -92,6 +92,33 @@ void append_unique_preserve_order(std::vector<unsigned int> &dst, unsigned int v
         dst.emplace_back(value);
 }
 
+// Orca #13582: Default starts each layer with the previous layer's last extruder (fewer toolchanges).
+// Cyclic (and any non-Default mode) leaves the collected order so get_custom_seq can apply a fixed
+// sequence. Null config keeps Default, matching Orca's handle_dontcare_extruder.
+const PrintConfig *toolordering_print_config(const PrintConfig *ptr, const PrintObject *object)
+{
+    if (ptr)
+        return ptr;
+    if (object)
+        return &object->print()->config();
+    return nullptr;
+}
+
+bool use_default_toolchange_ordering(const PrintConfig *print_config)
+{
+    return print_config == nullptr || print_config->toolchange_ordering == ToolChangeOrderingType::Default;
+}
+
+void rotate_last_extruder_to_front(std::vector<unsigned int> &extruders, unsigned int last_extruder_id)
+{
+    for (size_t i = 1; i < extruders.size(); ++i) {
+        if (extruders[i] == last_extruder_id) {
+            std::rotate(extruders.begin(), extruders.begin() + i, extruders.begin() + i + 1);
+            break;
+        }
+    }
+}
+
 bool internal_solid_infill_uses_sparse_filament(const PrintRegion &region, ExtrusionRole role)
 {
     return role == erSolidInfill && std::abs(region.config().sparse_infill_density.value - 100.) < EPSILON;
@@ -986,14 +1013,10 @@ void ToolOrdering::reorder_extruders(unsigned int last_extruder_id)
                 last_extruder_id = lt.extruders.back();
                 continue;
             }
-            // Reorder the extruders to start with the last one.
-            for (size_t i = 1; i < lt.extruders.size(); ++ i)
-                if (lt.extruders[i] == last_extruder_id) {
-                    // Move the last extruder to the front.
-                    memmove(lt.extruders.data() + 1, lt.extruders.data(), i * sizeof(unsigned int));
-                    lt.extruders.front() = last_extruder_id;
-                    break;
-                }
+            // Default: start with the last used extruder to minimize tool changes. Cyclic skips this
+            // so each layer keeps a fixed sequence (applied later in get_custom_seq).
+            if (use_default_toolchange_ordering(toolordering_print_config(m_print_config_ptr, m_print_object_ptr)))
+                rotate_last_extruder_to_front(lt.extruders, last_extruder_id);
 
             if (lt == m_layer_tools[0]) {
                 // On first layer with wipe tower, prefer a soluble extruder
@@ -1078,14 +1101,10 @@ void ToolOrdering::reorder_extruders(std::vector<unsigned int> tool_order_layer0
                 last_extruder_id = lt.extruders.back();
                 continue;
             }
-            // Reorder the extruders to start with the last one.
-            for (size_t i = 1; i < lt.extruders.size(); ++i)
-                if (lt.extruders[i] == last_extruder_id) {
-                    // Move the last extruder to the front.
-                    memmove(lt.extruders.data() + 1, lt.extruders.data(), i * sizeof(unsigned int));
-                    lt.extruders.front() = last_extruder_id;
-                    break;
-                }
+            // Default: start with the last used extruder to minimize tool changes. Cyclic skips this
+            // so each layer keeps a fixed sequence (applied later in get_custom_seq).
+            if (use_default_toolchange_ordering(toolordering_print_config(m_print_config_ptr, m_print_object_ptr)))
+                rotate_last_extruder_to_front(lt.extruders, last_extruder_id);
         }
         last_extruder_id = lt.extruders.back();
     }
@@ -1769,8 +1788,18 @@ void ToolOrdering::reorder_extruders_for_minimum_flush_volume()
         other_layers_seqs = get_other_layers_print_sequence(sequence_nums, print_sequence);
     }
 
+    // Snapshot per-layer filament sets before this pass mutates order. Ultra grouping above only
+    // writes filament_map / nozzle grouping; it does not reorder lt.extruders.
+    std::vector<std::vector<unsigned int>> layer_filaments;
+    layer_filaments.reserve(m_layer_tools.size());
+    for (const auto &lt : m_layer_tools)
+        layer_filaments.emplace_back(lt.extruders);
+
+    const bool use_cyclic_ordering =
+        (print_config->toolchange_ordering == ToolChangeOrderingType::Cyclic);
+
     // other_layers_seq: the layer_idx and extruder_idx are base on 1
-    auto get_custom_seq = [&other_layers_seqs](int layer_idx, std::vector<int>& out_seq) -> bool {
+    auto get_custom_seq = [&other_layers_seqs, &layer_filaments, use_cyclic_ordering](int layer_idx, std::vector<int>& out_seq) -> bool {
         for (size_t idx = other_layers_seqs.size() - 1; idx != size_t(-1); --idx) {
             const auto &other_layers_seq = other_layers_seqs[idx];
             if (layer_idx + 1 >= other_layers_seq.first.first && layer_idx + 1 <= other_layers_seq.first.second) {
@@ -1778,6 +1807,17 @@ void ToolOrdering::reorder_extruders_for_minimum_flush_volume()
                 return true;
             }
         }
+
+        // First layer keeps adhesion / custom first-layer sequence (Edge already skips flush TSP
+        // on i==0). Cyclic applies a fixed ascending order to later layers.
+        if (use_cyclic_ordering && layer_idx > 0 && size_t(layer_idx) < layer_filaments.size()) {
+            std::vector<unsigned int> ordered = layer_filaments[size_t(layer_idx)];
+            std::sort(ordered.begin(), ordered.end());
+            out_seq.resize(ordered.size());
+            std::transform(ordered.begin(), ordered.end(), out_seq.begin(), [](auto item) { return int(item) + 1; });
+            return true;
+        }
+
         return false;
     };
 
