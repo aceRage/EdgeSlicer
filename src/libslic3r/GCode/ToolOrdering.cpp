@@ -23,6 +23,9 @@
 #include <limits>
 #include <algorithm>
 #include <cmath>
+#include <sstream>
+#include <string>
+#include <exception>
 
 #include <libslic3r.h>
 
@@ -1689,6 +1692,42 @@ ToolOrdering::LayerData ToolOrdering::collect_layer_and_unprintable_data()
     return data;
 }
 
+// Declared in ToolOrdering.hpp (exposed for unit testing).
+std::vector<unsigned int> parse_cyclic_order(const std::string& str, unsigned int number_of_extruders)
+{
+    std::vector<unsigned int> order;
+    std::stringstream ss(str);
+    std::string token;
+    while (std::getline(ss, token, ',')) {
+        try {
+            size_t pos      = 0;
+            int    filament = std::stoi(token, &pos); // stoi skips leading whitespace by itself
+            // stoi stops at the first non-digit, so "2x" would parse as 2. Require the whole token to be
+            // consumed (bar trailing whitespace) to drop it like any other garbage.
+            if (token.find_first_not_of(" \t\r\n", pos) != std::string::npos)
+                continue;
+            if (filament >= 1 && (unsigned int)filament <= number_of_extruders
+                && std::find(order.begin(), order.end(), (unsigned int)(filament - 1)) == order.end())
+                order.emplace_back((unsigned int)(filament - 1));
+        } catch (const std::exception&) {
+            // Not a number, ignore it.
+        }
+    }
+    return order;
+}
+
+void apply_cyclic_order(std::vector<unsigned int>& filaments, const std::vector<unsigned int>& cyclic_order)
+{
+    std::sort(filaments.begin(), filaments.end());
+    if (!cyclic_order.empty())
+        std::stable_sort(filaments.begin(), filaments.end(), [&cyclic_order](unsigned int lhs, unsigned int rhs) {
+            auto rank = [&cyclic_order](unsigned int filament) {
+                return size_t(std::find(cyclic_order.begin(), cyclic_order.end(), filament) - cyclic_order.begin());
+            };
+            return rank(lhs) < rank(rhs);
+        });
+}
+
 void ToolOrdering::reorder_extruders_for_minimum_flush_volume()
 {
     const PrintConfig *print_config = m_print_config_ptr;
@@ -1798,8 +1837,26 @@ void ToolOrdering::reorder_extruders_for_minimum_flush_volume()
     const bool use_cyclic_ordering =
         (print_config->toolchange_ordering == ToolChangeOrderingType::Cyclic);
 
+    // By default the first layer keeps its adhesion-optimized order (and any custom first layer
+    // sequence); the cyclic sequence is only forced onto it when the user opts in.
+    const bool cyclic_first_layer = use_cyclic_ordering && print_config->toolchange_cyclic_first_layer.value;
+
+    // Optional user defined cyclic sequence, given as 1-based filament numbers ("3,2,1,4"). Filaments
+    // missing from it keep their ascending order after the listed ones, so a partial or bogus entry
+    // still yields the default cyclic order. Count is physical + enabled mixed (the indices ToolOrdering
+    // already uses), not flush-matrix sqrt, so a short flush_volumes_matrix cannot shrink the valid range.
+    unsigned int cyclic_filament_count = (unsigned int) m_num_physical;
+    if (m_mixed_mgr)
+        cyclic_filament_count = (unsigned int) m_mixed_mgr->total_filaments(m_num_physical);
+    if (cyclic_filament_count == 0)
+        cyclic_filament_count = number_of_extruders;
+
+    const std::vector<unsigned int> cyclic_order =
+        use_cyclic_ordering ? parse_cyclic_order(print_config->toolchange_cyclic_order.value, cyclic_filament_count)
+                            : std::vector<unsigned int>();
+
     // other_layers_seq: the layer_idx and extruder_idx are base on 1
-    auto get_custom_seq = [&other_layers_seqs, &layer_filaments, use_cyclic_ordering](int layer_idx, std::vector<int>& out_seq) -> bool {
+    auto get_custom_seq = [&other_layers_seqs, &layer_filaments, use_cyclic_ordering, cyclic_first_layer, &cyclic_order](int layer_idx, std::vector<int>& out_seq) -> bool {
         for (size_t idx = other_layers_seqs.size() - 1; idx != size_t(-1); --idx) {
             const auto &other_layers_seq = other_layers_seqs[idx];
             if (layer_idx + 1 >= other_layers_seq.first.first && layer_idx + 1 <= other_layers_seq.first.second) {
@@ -1808,11 +1865,12 @@ void ToolOrdering::reorder_extruders_for_minimum_flush_volume()
             }
         }
 
-        // First layer keeps adhesion / custom first-layer sequence (Edge already skips flush TSP
-        // on i==0). Cyclic applies a fixed ascending order to later layers.
-        if (use_cyclic_ordering && layer_idx > 0 && size_t(layer_idx) < layer_filaments.size()) {
+        // Skip the first layer unless the user asked for cyclic order on it, so it keeps the
+        // adhesion-optimized / custom first-layer sequence.
+        if (use_cyclic_ordering && layer_idx >= 0 && (layer_idx != 0 || cyclic_first_layer)
+            && size_t(layer_idx) < layer_filaments.size()) {
             std::vector<unsigned int> ordered = layer_filaments[size_t(layer_idx)];
-            std::sort(ordered.begin(), ordered.end());
+            apply_cyclic_order(ordered, cyclic_order);
             out_seq.resize(ordered.size());
             std::transform(ordered.begin(), ordered.end(), out_seq.begin(), [](auto item) { return int(item) + 1; });
             return true;
