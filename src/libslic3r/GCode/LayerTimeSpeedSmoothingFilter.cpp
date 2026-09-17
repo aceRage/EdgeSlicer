@@ -20,6 +20,15 @@ namespace Slic3r {
 namespace {
 
 constexpr double LTSS_FACTOR_EPS = 1e-4;
+// Tolerance (seconds) for "did this candidate factor reach the target time" in the apply-stage
+// bisection (solve_line_factor_for_target). Layer times are seconds, not the [0,1] factor
+// domain LTSS_FACTOR_EPS is sized for, so this gets its own constant - kept tight (not just
+// "loose enough for display precision") because the bisection's "meets" test converges to the
+// SMALLEST (speed-up) / LARGEST (slowdown) feasible f at this tolerance: a loose value here
+// visibly undershoots the true root and rounds F down/up by whole mm/min at typical feedrates
+// (e.g. 1e-3 s of slack on a few-second layer shifted a converged F by a full mm/min in
+// testing). 1e-7 keeps that shift far under 1 mm/min even for long layers.
+constexpr double LTSS_EPS_TIME = 1e-7;
 
 struct ParsedLine
 {
@@ -338,25 +347,25 @@ static double cooling_floor_s(const PrintConfig &config)
     return floor_s;
 }
 
-// Layer-level guard against fighting CoolingBuffer, in both directions.
-//  - Speed-up: the layer's output time never drops below slow_down_layer_time (floor_s). t_raw
+// Layer-level guard against fighting CoolingBuffer, in both directions. Expressed as a target
+// TIME (not a factor) so it composes with solve_line_factor_for_target's bisection below:
+//  - Speed-up: the layer's target time never drops below slow_down_layer_time (floor_s). t_raw
 //    is the post-CoolingBuffer time, so a layer CoolingBuffer stretched to the floor stays there.
-//  - Slowdown: a layer CoolingBuffer already stretched (cooling_slowed_down) keeps factor 1.
-//    The solver was handed the same layer as frozen, so normally this changes nothing; it is
-//    the guarantee that no other source of a factor slows such a layer a second time.
+//    If the solver's target is still above the floor, it is unaffected. If the solver's target
+//    would drop the layer below the floor, the target is clamped up to floor_s - unless t_raw
+//    itself is already at or below the floor, in which case there is no room to speed up at
+//    all and the target is t_raw (factor 1, no rewrite).
+//  - Slowdown: a layer CoolingBuffer already stretched (cooling_slowed_down) keeps its own time
+//    as its target. The solver was handed the same layer as frozen, so normally this changes
+//    nothing; it is the guarantee that no other source retargets such a layer a second time.
 // The per-line floor at slow_down_min_speed lives in scaled_feedrate().
-static double apply_cooling_floor(double factor, double t_raw, double floor_s, bool speed_up, bool cooling_slowed_down)
+static double apply_cooling_floor_to_target(double target, double t_raw, double floor_s, bool speed_up, bool cooling_slowed_down)
 {
     if (!speed_up)
-        return cooling_slowed_down ? 1.0 : factor;
-    if (factor <= 1.0 + LTSS_FACTOR_EPS || t_raw <= 0.0 || floor_s <= 0.0)
-        return factor;
-    const double t_out = t_raw / factor;
-    if (t_out + LTSS_FACTOR_EPS >= floor_s)
-        return factor;
-    if (t_raw <= floor_s)
-        return 1.0;
-    return t_raw / floor_s;
+        return cooling_slowed_down ? t_raw : target;
+    if (floor_s <= 0.0 || target >= floor_s - LTSS_EPS_TIME)
+        return target;
+    return (t_raw <= floor_s) ? t_raw : floor_s;
 }
 
 static std::string apply_factor_to_lines(const std::vector<ParsedLine> &lines,
@@ -425,6 +434,69 @@ static double time_after_factor(const std::vector<ParsedLine> &lines,
     return t;
 }
 
+// Defect 2 (band not reached): the per-layer factor the S2 solvers hand back assumes the whole
+// layer's time scales by it, but only eligible lines are ever rewritten, and scaled_feedrate()
+// then caps them again (filament volumetric cap, slow_down_min_speed floor). So
+// t_out(f) = t_ineligible + sum over eligible lines of length / min(F * f, F_cap), which
+// time_after_factor() already evaluates for a candidate f. t_out is monotone non-increasing in
+// f when f >= 1 (speed-up: raising f can only move an eligible line's feedrate up, never down;
+// capped lines simply stop responding) and monotone non-decreasing in f when f <= 1 (slowdown,
+// dual reasoning with the slow_down_min_speed floor in place of the volumetric cap). That
+// monotonicity is what makes the bisection below well-defined.
+//
+// speed_up true: search f in [1, f_cap] for the smallest f with t_out(f) <= target (the
+// solver's per-layer target time). If even f_cap cannot reach it (every eligible line is
+// capped, or ineligible lines already account for more than the target), the target is
+// unreachable by design: return f_cap and let the caller report the true (higher) t_out. The
+// header comment on the filter documents this as an accepted, deliberate band violation.
+//
+// speed_up false (Mode C): dual search for the largest f in [f_cap, 1] with t_out(f) >= target;
+// f_cap < 1 here. If f_cap cannot lengthen the layer enough (protected/frozen lines and the
+// slow_down_min_speed floor keep too much time fixed), return f_cap and let the true t_out (too
+// short) be reported.
+static double solve_line_factor_for_target(const std::vector<ParsedLine> &lines,
+                                           double                         target,
+                                           double                         f_cap,
+                                           bool                           speed_up,
+                                           LayerTimeSpeedSmoothMode       mode,
+                                           LayerTimeSlowdownScope         scope,
+                                           const PrintConfig             &config)
+{
+    // f = 1 is always a feasible (no-op) bound; f_cap is the mode's most aggressive outer limit
+    // - the largest factor for speed-up, the smallest (< 1) for slowdown.
+    const double no_op_f = 1.0;
+    double lo = speed_up ? no_op_f : f_cap;
+    double hi = speed_up ? f_cap : no_op_f;
+    if (hi <= lo + LTSS_FACTOR_EPS)
+        return hi;
+
+    // If the cap itself cannot reach the target, stop there: the target is unreachable by
+    // design (protected lines / caps hold too much time fixed). Otherwise bisect for the
+    // smallest (speed-up) / largest (slowdown) factor that reaches it. f_cap is `hi` for
+    // speed-up but `lo` for slowdown, so check reachability at f_cap itself, not at whichever
+    // bound `hi` happens to be.
+    const double t_at_cap = time_after_factor(lines, f_cap, mode, scope, config);
+    const bool   reachable = speed_up ? (t_at_cap <= target + LTSS_EPS_TIME) : (t_at_cap >= target - LTSS_EPS_TIME);
+    if (!reachable)
+        return f_cap;
+
+    for (int iter = 0; iter < 40 && (hi - lo) > 1e-7; ++iter) {
+        const double mid  = 0.5 * (lo + hi);
+        const double t_mid = time_after_factor(lines, mid, mode, scope, config);
+        const bool   meets = speed_up ? (t_mid <= target + LTSS_EPS_TIME) : (t_mid >= target - LTSS_EPS_TIME);
+        if (speed_up) {
+            // t_out is non-increasing in f: meets (t_mid <= target) means f=mid already reaches
+            // the target, so the smallest feasible f is <= mid.
+            if (meets) hi = mid; else lo = mid;
+        } else {
+            // t_out is non-decreasing in f (f <= 1 here): meets (t_mid >= target) means f=mid
+            // still reaches the target, so the largest feasible f is >= mid.
+            if (meets) lo = mid; else hi = mid;
+        }
+    }
+    return speed_up ? hi : lo;
+}
+
 } // namespace
 
 LayerTimeSpeedSmoothingFilter::LayerTimeSpeedSmoothingFilter(const PrintConfig &config)
@@ -449,11 +521,12 @@ const char *LayerTimeSpeedSmoothingFilter::mode_key(LayerTimeSpeedSmoothMode mod
     return "off";
 }
 
-std::string LayerTimeSpeedSmoothingFilter::format_comment(LayerTimeSpeedSmoothMode mode, double factor, double t_raw, double t_out)
+std::string LayerTimeSpeedSmoothingFilter::format_comment(LayerTimeSpeedSmoothMode mode, double factor, double t_raw, double t_out,
+                                                           double t_target)
 {
-    char buf[192];
-    std::snprintf(buf, sizeof(buf), "; LAYER_TIME_SPEED_SMOOTH mode=%s factor=%.3f t_raw=%.2f t_out=%.2f\n", mode_key(mode), factor, t_raw,
-                  t_out);
+    char buf[224];
+    std::snprintf(buf, sizeof(buf), "; LAYER_TIME_SPEED_SMOOTH mode=%s factor=%.3f t_raw=%.2f t_out=%.2f t_target=%.2f\n",
+                  mode_key(mode), factor, t_raw, t_out, t_target);
     return std::string(buf);
 }
 
@@ -543,6 +616,13 @@ std::string LayerTimeSpeedSmoothingFilter::flush()
     const double floor_s  = cooling_floor_s(m_config);
     const bool   speed_up = is_layer_time_speed_up(m_mode);
 
+    // Mode's absolute per-line factor cap: the bisection below (Defect 2) may need to push
+    // eligible lines harder than the solver's per-layer factor to compensate for protected
+    // lines that keep their own time, but it must never exceed what the mode configuration
+    // allows. Mirrors the floors the S2 solvers themselves use (LayerTimeSpeedSmoothing.cpp).
+    const double f_cap_speed_up  = 1.0 + std::max(0.0, m_config.layer_time_speed_max_speedup.value / 100.0);
+    const double f_cap_slowdown  = 1.0 / (1.0 + std::max(0.0, m_config.layer_time_speed_max_slowdown.value / 100.0));
+
     // Pass 2: rewrite. The output grows by roughly what the buffer releases, so reserving the
     // buffered size up front keeps the peak at about two copies of the text with no regrowth.
     std::string out;
@@ -555,13 +635,25 @@ std::string LayerTimeSpeedSmoothingFilter::flush()
         const std::vector<ParsedLine> lines = parse_layer_lines(state, layer.gcode, m_config);
         std::string().swap(layer.gcode);
 
-        double factor = (i < solved.speed_factors.size()) ? solved.speed_factors[i] : 1.0;
+        // The solver's per-layer target time, assuming (wrongly, in general) that the whole
+        // layer scales uniformly. i < first_layer stays at the raw time (no target change).
+        double target = (i < solved.times.size()) ? solved.times[i] : times[i];
         if (i < first_layer)
-            factor = 1.0;
-        factor = apply_cooling_floor(factor, times[i], floor_s, speed_up, layer.cooling_slowed_down);
+            target = times[i];
+        target = apply_cooling_floor_to_target(target, times[i], floor_s, speed_up, layer.cooling_slowed_down);
+
+        // Defect 2 fix: bisect the per-line factor so eligible lines alone reach `target`,
+        // accounting for protected/ineligible lines (which keep their own time) and the caps
+        // scaled_feedrate() applies. See solve_line_factor_for_target for the monotonicity
+        // argument and what happens when the target is unreachable.
+        double factor = 1.0;
+        if (std::abs(target - times[i]) > LTSS_EPS_TIME) {
+            const double f_cap = speed_up ? f_cap_speed_up : f_cap_slowdown;
+            factor = solve_line_factor_for_target(lines, target, f_cap, speed_up, m_mode, m_slowdown_scope, m_config);
+        }
 
         const double t_out = time_after_factor(lines, factor, m_mode, m_slowdown_scope, m_config);
-        out += format_comment(m_mode, factor, times[i], t_out);
+        out += format_comment(m_mode, factor, times[i], t_out, target);
         out += apply_factor_to_lines(lines, factor, m_mode, m_slowdown_scope, m_config, emitted_f);
     }
 

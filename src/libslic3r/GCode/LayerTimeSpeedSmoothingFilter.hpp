@@ -40,6 +40,23 @@ namespace Slic3r {
 //    is frozen for Mode C: its speeds are what CoolingBuffer set, and it only bounds its
 //    neighbours.
 //
+// The S2 solvers (LayerTimeSpeedSmoothing.hpp) are time-only: they treat a layer's whole time
+// as freely rescalable and hand back a per-layer target time. In reality only eligible lines
+// are ever rewritten - protected roles (see is_speedup_protected, is_tower_role) and lines
+// already at slow_down_min_speed keep their own time - and scaled_feedrate() caps whatever IS
+// rewritten (filament max volumetric speed, and the slow_down_min_speed floor on a slowdown).
+// So flush() does not apply the solver's per-layer factor directly: it bisects a per-LINE
+// factor (solve_line_factor_for_target, in the .cpp) so that eligible lines alone reach the
+// solver's target, given what the protected lines and the caps hold fixed. This can require a
+// higher factor than the solver computed (to compensate for the time protected lines keep), up
+// to the mode's own cap (1 + max_speedup, or 1 / (1 + max_slowdown)) - never past it. When even
+// the cap cannot reach the target - enough protected time, or the volumetric/min-speed caps
+// leave no room - the target is unreachable BY DESIGN: the bisection stops at the cap, the
+// LAYER_TIME_SPEED_SMOOTH comment reports the true (higher, for speed-up) t_out next to
+// t_target so the gap is visible in the G-code, and the neighbour-variation band stays
+// violated for that layer. This is preferred over silently exceeding the mode's speed cap or
+// touching a protected line to force the band closed.
+//
 // Plan: 09-concept-layer-time-speed-smoothing.md
 class LayerTimeSpeedSmoothingFilter
 {
@@ -61,7 +78,10 @@ public:
     void reset();
 
     static const char *mode_key(LayerTimeSpeedSmoothMode mode);
-    static std::string format_comment(LayerTimeSpeedSmoothMode mode, double factor, double t_raw, double t_out);
+    // t_target: the S2 solver's target time for this layer (before the apply-stage bisection
+    // that reaches it against protected lines and caps; see LayerTimeSpeedSmoothingFilter.cpp
+    // flush() and solve_line_factor_for_target). Same as t_out when the target was reachable.
+    static std::string format_comment(LayerTimeSpeedSmoothMode mode, double factor, double t_raw, double t_out, double t_target);
 
 private:
     struct BufferedLayer
