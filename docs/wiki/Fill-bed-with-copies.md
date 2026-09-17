@@ -23,6 +23,7 @@ Entry also sits under Clone in the object menu family described in [Object menu]
    - **Layout**: Compact or Grid
    - **Minimum distance from bed edge**
    - Optional **Keep the front edge clear** / **Distance from the front edge** (calibration-line margin)
+   - **Ignore support clearance** (staging on `feat/ultra-preferences` — not on `main` yet)
 4. Confirm with **Fill**.
 5. Check the live count / arrangement on the plate, then slice.
 
@@ -32,6 +33,7 @@ Entry also sits under Clone in the object menu family described in [Object menu]
 |---|---|
 | Objects already on the plate | Fill packs around them. |
 | Grid layout | Exact regular block; hardware validation of Grid is still listed as unchecked by the maintainer — verify the first print. |
+| Ignore support clearance | Staging only — packing can ignore support clearance; warnings may mention support clearance instead of always blaming brim. |
 | Compact layout | Improved vs early bail-out that left empty strips. |
 | Plate 2+ | Copies go on the active / chosen later plate. |
 

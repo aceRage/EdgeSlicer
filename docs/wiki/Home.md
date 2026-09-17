@@ -2,6 +2,8 @@
 
 EdgeSlicer is an OrcaSlicer-based slicer (via Snapmaker Orca) with bleeding-edge features aimed at supporting many printers in one app.
 
+Some Prepare-menu features (Bake slice to mesh, Quad remesh, Round all edges, Edit/Copy cut) are documented from staging branch `feat/ultra-preferences` and may not be on `main` yet.
+
 This wiki explains **EdgeSlicer-specific** features: what each one is, where to find it, and how to use it. For settings that come from upstream OrcaSlicer unchanged, use the [OrcaSlicer Wiki](https://www.orcaslicer.com/wiki/).
 
 **Current release:** [v2.3.8.0-edge](https://github.com/aceRage/EdgeSlicer/releases/tag/v2.3.8.0-edge) · [GitHub](https://github.com/aceRage/EdgeSlicer) · [Releases](https://github.com/aceRage/EdgeSlicer/releases)
@@ -61,7 +63,11 @@ These areas are custom to EdgeSlicer (or heavily extended here). Each page follo
 | [Object and part context menus](Object-menu) | Edge right-click map (object, part, multi-select) |
 | [Fill bed with copies](Fill-bed-with-copies) | Compact/Grid pack dialog; also Clone → Fill |
 | [Scale to build volume](Scale-to-build-volume) | Fit to bed with gaps and centre |
-| [Repair/Remesh](Repair-Remesh) | OpenVDB watertight remesh (not quad remesh) |
+| [Repair/Remesh](Repair-Remesh) | OpenVDB watertight remesh; staging dialog |
+| [Bake slice to mesh](Bake-slice-to-mesh) | Staging — bake sliced outer wall to mesh |
+| [Quad remesh](Quad-remesh) | Staging — QuadriFlow quad remesh |
+| [Round all edges](Round-all-edges) | Staging — fillet all edges |
+| [Edit cut and Copy cut](Edit-cut) | Staging — edit/copy stored cut recipe |
 | [Split by painted colour](Split-by-painted-colour) | Paint regions → separate parts |
 
 ### Print quality

@@ -72,8 +72,7 @@ Assemble-view menus stay stock-like — they do **not** get Visibility, Support 
 
 | Situation | What happens |
 |---|---|
-| **Bake to mesh / slice bake to mesh** | **Not** on Prepare object/part menus on current `main`. SVG/text gizmo still has stock **Bake** (“Bake into model as uneditable part”) — that is not a slice→mesh bake. |
-| **Quad remesh** | **Not** present. Closest is **Repair/Remesh** (triangle voxel remesh). SoftFever Orca’s Smooth Mesh subdivision is not in Edge. |
+| **Bake slice to mesh / Quad remesh / Round all edges / Edit cut** | On **`feat/ultra-preferences` (staging)** — see dedicated pages. Not on `main` yet. SVG/text gizmo **Bake** is still a different feature. |
 | Hidden objects/parts | Hidden in the 3D view but **still slice/print**. |
 | Clone | There is no Clone *submenu* — one **Clone** item opens a dialog; **Fill** inside that dialog is fill-bed. |
 

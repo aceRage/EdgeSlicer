@@ -2,39 +2,55 @@
 
 ## What it is
 
-**Repair/Remesh** rebuilds a part (or object) as a **watertight** mesh using an OpenVDB **voxel** remesh (triangle output). Fine detail below about **0.1 mm** may be lost.
+**Repair/Remesh** rebuilds a part (or object) as a **watertight** mesh using an OpenVDB **voxel** remesh (triangle output). Fine detail may be lost depending on voxel size.
 
 It is Edge’s cross-platform repair path. Stock Snapmaker/Orca on Windows also keeps **Fix model** (Netfabb); Remesh is shown on all platforms.
 
-This is **not** “quad remesh” — there is no quad-remesh command on current `main`. SoftFever Orca’s Smooth Mesh subdivision is not in Edge.
+On **`feat/ultra-preferences` (staging)**, Remesh opens a **Repair by remeshing** dialog instead of running immediately (as on `main`).
+
+This is **not** [Quad remesh](Quad-remesh).
 
 ## Where to find it
 
 - Object menu → **Repair/Remesh**  
 - Part menu → **Repair/Remesh**  
-- Multi-selection menus (several objects or several parts) → **Repair/Remesh**  
+- Multi-selection menus → **Repair/Remesh**  
 
-Windows also shows **Fix model** (Netfabb) below Remesh when available.
+On staging, the same helper also offers **[Round all edges...](Round-all-edges)** and **[Quad remesh...](Quad-remesh)** when those backends are available.
+
+Windows also shows **Fix model** (Netfabb) when available.
 
 ## How to use it
 
+### Staging (`feat/ultra-preferences`)
+
 1. Select the broken or non-manifold object/part(s).
 2. Right-click → **Repair/Remesh**.
-3. Wait for the remesh to finish.
-4. Inspect the result; re-apply paint/seams if detail was lost.
-5. Prefer **Simplify Model** (stock) when you only need decimation, not a full SDF rebuild.
+3. In **Repair by remeshing** set:
+   - **Voxel size**
+   - **Keep the bottom flat** / **Bottom slab height**
+   - **Preserve sharp edges** / **Feature angle**
+4. Confirm and inspect the result; re-apply paint/seams if needed.
+
+### `main` (until staging merges)
+
+1. Select the part(s).
+2. Right-click → **Repair/Remesh** — remesh runs immediately (no dialog).
+
+Prefer **Simplify Model** (stock) when you only need decimation, not an SDF rebuild.
 
 ## Limits / notes
 
 | Situation | What happens |
 |---|---|
-| Fine detail | Features smaller than ~0.1 mm may disappear. |
+| Fine detail | Smaller features can disappear depending on voxel size. |
 | Repair/Remesh vs Simplify Model | Remesh = SDF rebuild, watertight. Simplify = stock decimation. |
 | Repair/Remesh vs Fix model | Remesh always available. Fix model = Windows Netfabb only. |
-| Quad remesh | Not implemented on current `main`. |
+| vs Quad remesh | Quad remesh builds a quad grid (staging); Remesh is triangle voxels. |
 
 ## Related
 
+- [Quad remesh](Quad-remesh)  
+- [Round all edges](Round-all-edges)  
 - [Object menu](Object-menu)  
-- [Mesh boolean](https://www.orcaslicer.com/wiki/) (stock; Manifold backend in Edge)  
 - [Home](Home)  
