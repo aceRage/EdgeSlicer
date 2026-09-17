@@ -52,6 +52,7 @@ add_executable(${_TEST_NAME}_tests
 	test_support_set.cpp
 	test_mesh_sculpt.cpp
 	test_meshboolean.cpp
+	test_lay_on_face.cpp
 	# test_marchingsquares.cpp
 	test_timeutils.cpp
 	test_utils.cpp
