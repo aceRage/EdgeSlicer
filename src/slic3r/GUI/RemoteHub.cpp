@@ -802,22 +802,32 @@ static TailscaleState tailscale_query()
         return t;
     }
     if (run_capture({ tailscale_exe(), "serve", "status", "--json" }, out, code, 15000) && code == 0) {
-        try {
-            const json s   = json::parse(out);
-            const json web_all = s.value("Web", json::object());
-            for (const auto& web : web_all) {
-                const json handlers = web.value("Handlers", json::object());
-                for (const auto& [path, h] : handlers.items()) {
-                    const std::string proxy = h.value("Proxy", ""), want = "http://127.0.0.1:";
-                    if (path == "/" && proxy.compare(0, want.size(), want) == 0) {
-                        t.serving      = true;
-                        t.serving_port = std::atoi(proxy.c_str() + want.size());
-                    }
-                }
-            }
-        } catch (...) {}
+        t.serving_port = Testing::serve_status_target_port(out);
+        t.serving      = t.serving_port > 0;
     }
     return t;
+}
+
+// Pulled out of tailscale_query() so the parsing rule can be driven from a test with captured
+// `tailscale serve status --json` text and no real tailnet (RemoteHub::Testing, remote_hub_tests.cpp).
+// `tailscale serve status --json` nests the forwarded port under Web -> "<domain>:443" ->
+// Handlers -> "/" -> Proxy = "http://127.0.0.1:<port>". Only the root path ("/") is ours - the
+// hub never registers anything else with Serve - and only a loopback proxy counts as "serving".
+int Testing::serve_status_target_port(const std::string& serve_status_json_text)
+{
+    try {
+        const json s        = json::parse(serve_status_json_text);
+        const json web_all  = s.value("Web", json::object());
+        for (const auto& web : web_all) {
+            const json handlers = web.value("Handlers", json::object());
+            for (const auto& [path, h] : handlers.items()) {
+                const std::string proxy = h.value("Proxy", ""), want = "http://127.0.0.1:";
+                if (path == "/" && proxy.compare(0, want.size(), want) == 0)
+                    return std::atoi(proxy.c_str() + want.size());
+            }
+        }
+    } catch (...) {}
+    return 0;
 }
 
 // Per-run secrets (std::random_device is the OS CSPRNG on every platform we build).
@@ -1010,6 +1020,76 @@ static int free_webrtc_port()
     return 0;
 }
 
+// ---- who holds HUB_PORT when bind() had to step past it ---------------------------------
+// bind() below tries 13640..13659 in order and takes the first free one; when that is not 13640
+// the phone link the hub prints carries whatever port it landed on, and unless the firewall rule
+// covers the whole range (cmake/nsis/SnapmakerURLProtocols_install.nsh) or the user is told what
+// happened, "No hub answered on that link" is all they see. This answers "what is on 13640" by
+// shelling out to the same two tools a person would reach for themselves: `netstat -ano` for the
+// pid listening on the port, then `tasklist` for that pid's image name. Both run through
+// run_capture(), same as the tailscale and firewall queries above.
+
+// Pulled out for testing (RemoteHub::Testing, remote_hub_tests.cpp): given `netstat -ano` text,
+// the pid of whatever is LISTENING on `port`, or 0. netstat's columns are whitespace-separated
+// and its local-address column is "<addr>:<port>", so this looks for a line whose Proto is TCP,
+// whose State is LISTENING, and whose local address ends in ":<port>" (a raw suffix match would
+// also hit port 1364 0 style false positives, so the match requires ':' immediately before it and
+// nothing but the line's own whitespace after).
+long Testing::netstat_holder_pid(const std::string& netstat_text, int port)
+{
+    const std::string suffix = ":" + std::to_string(port);
+    std::istringstream is(netstat_text);
+    std::string        line;
+    while (std::getline(is, line)) {
+        while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
+        std::istringstream ls(line);
+        std::string        proto, local, remote, state, pid_s;
+        if (!(ls >> proto >> local >> remote >> state >> pid_s)) continue;
+        if (proto != "TCP" || state != "LISTENING") continue;
+        if (local.size() < suffix.size() || local.compare(local.size() - suffix.size(), suffix.size(), suffix) != 0) continue;
+        try {
+            return std::stol(pid_s);
+        } catch (...) { continue; }
+    }
+    return 0;
+}
+
+// Pulled out for testing, same reasons: `tasklist /fi "PID eq <n>" /fo csv /nh` prints one CSV
+// row, `"image.exe","1234","Console","1","12,345 K"`, or the literal
+// "INFO: No tasks are running which match the specified criteria." when the pid is gone. The
+// image name is the first quoted field.
+std::string Testing::tasklist_image_name(const std::string& tasklist_csv_text)
+{
+    const size_t open = tasklist_csv_text.find('"');
+    if (open == std::string::npos) return "";
+    const size_t close = tasklist_csv_text.find('"', open + 1);
+    if (close == std::string::npos || close <= open + 1) return "";
+    return tasklist_csv_text.substr(open + 1, close - open - 1);
+}
+
+// What (if anything) is listening on `port` right now, as a short "<exe> (pid N)" string for the
+// log and the status JSON, or "" if nothing answers (the port freed up between the failed bind
+// and this call - reported as such rather than guessed at).
+static std::string port_holder_description(int port)
+{
+#ifdef _WIN32
+    std::string out;
+    int         code = 0;
+    if (!run_capture({ "netstat", "-ano", "-p", "TCP" }, out, code, 8000)) return "";
+    const long pid = Testing::netstat_holder_pid(out, port);
+    if (pid <= 0) return "";
+    std::string tout;
+    if (run_capture({ "tasklist", "/fi", "PID eq " + std::to_string(pid), "/fo", "csv", "/nh" }, tout, code, 8000)) {
+        const std::string image = Testing::tasklist_image_name(tout);
+        if (!image.empty()) return image + " (pid " + std::to_string(pid) + ")";
+    }
+    return "pid " + std::to_string(pid);
+#else
+    (void) port;
+    return "";
+#endif
+}
+
 // What Windows Firewall thinks of go2rtc.exe. WebRTC media arrives inbound on the port above, so
 // without an allow rule for the profile the phone's network is on, the peer connection never
 // completes and the page silently stays on MSE through the hub. We only *look*: adding a rule
@@ -1041,7 +1121,11 @@ static std::string join_words(const std::vector<std::string>& v, const char* sep
 // Windows Firewall through PowerShell rather than netsh: Get-NetFirewallRule answers with
 // property values (Allow/Inbound/Private) that are the same in every Windows display language,
 // while netsh's verbose output is localised and would have to be parsed by label.
-static FirewallState firewall_query(const std::string& exe, int port)
+//
+// `label` is the program name used in the sentences shown to the user ("go2rtc.exe", "EdgeSlicer.exe");
+// `netsh_hint` is the exact command they can paste into an elevated prompt to fix a "missing" or
+// "partial" state themselves - we only ever *look*, never run netsh add ourselves.
+static FirewallState firewall_query(const std::string& exe, int port, const std::string& label, const std::string& netsh_hint)
 {
     FirewallState fw;
     fw.checked_at = (long long) std::time(nullptr);
@@ -1062,8 +1146,8 @@ static FirewallState firewall_query(const std::string& exe, int port)
     int         code = 0;
     if (!run_capture({ "powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script }, out, code, 30000) ||
         out.find("DONE") == std::string::npos) {
-        fw.note = "Windows Firewall could not be checked. If remote video does not start, allow "
-                  "go2rtc.exe (inbound, UDP and TCP port " + std::to_string(port) + ").";
+        fw.note = "Windows Firewall could not be checked. If the phone cannot connect, allow " +
+                  label + " (inbound, TCP port " + std::to_string(port) + "), or run: " + netsh_hint;
         return fw;
     }
     std::vector<std::string> rules, blocks, nets;
@@ -1088,32 +1172,38 @@ static FirewallState firewall_query(const std::string& exe, int port)
         else if (!covers(rules, n) && std::find(uncovered.begin(), uncovered.end(), n) == uncovered.end()) uncovered.push_back(n);
     }
     fw.networks = join_words(nets, ", ");
-    const std::string allow = "In Windows Defender Firewall allow go2rtc.exe (inbound, UDP and TCP), or open port " +
-                              std::to_string(port) + " for UDP and TCP.";
+    const std::string allow = "In Windows Defender Firewall allow " + label + " (inbound), or as Administrator run: " + netsh_hint;
     if (!denied.empty()) {
         // Windows writes one of these when the user dismisses its "allow access?" prompt, and a
         // block rule wins over any allow rule, so this has to be reported ahead of them.
         fw.state = "blocked";
-        fw.note  = "Windows Firewall has a rule that blocks go2rtc.exe on " + join_words(denied, " and ") +
-                   " networks (it is written when the firewall prompt is dismissed), so direct video cannot reach the phone; "
-                   "it falls back to relayed video through this hub. Delete that rule in Windows Defender Firewall > Inbound Rules. " + allow;
+        fw.note  = "Windows Firewall has a rule that blocks " + label + " on " + join_words(denied, " and ") +
+                   " networks (it is written when the firewall prompt is dismissed). Delete that rule in Windows Defender Firewall > Inbound Rules. " + allow;
     } else if (rules.empty()) {
         fw.state = "missing";
-        fw.note  = "Windows Firewall has no inbound rule for go2rtc.exe, so direct video will not reach the phone; "
-                   "it falls back to relayed video through this hub. " + allow;
+        fw.note  = "Windows Firewall has no inbound rule for " + label + ". " + allow;
     } else if (!uncovered.empty()) {
         fw.state = "partial";
-        fw.note  = "Windows Firewall allows go2rtc.exe on " + join_words(rules, " / ") + " networks, but this PC is on a " +
+        fw.note  = "Windows Firewall allows " + label + " on " + join_words(rules, " / ") + " networks, but this PC is on a " +
                    join_words(uncovered, " and ") + " network. " + allow;
     } else {
         fw.state = "allowed";
         fw.note  = "";
     }
 #else
-    (void) exe; (void) port;
-    fw.note = "Direct video needs inbound UDP and TCP port " + std::to_string(port) + " open for go2rtc.";
+    (void) exe; (void) port; (void) netsh_hint;
+    fw.note = "Direct connections need inbound TCP port " + std::to_string(port) + " open for " + label + ".";
 #endif
     return fw;
+}
+
+// go2rtc's call site: the hub page appends its own "video still works without it" sentence
+// (resources/web/orca/hub.html, videoLine()), so the note here stays generic.
+static FirewallState firewall_query_go2rtc(const std::string& exe, int port)
+{
+    return firewall_query(exe, port, "go2rtc.exe",
+        "netsh advfirewall firewall add rule name=\"go2rtc\" dir=in action=allow program=\"" + exe +
+        "\" protocol=TCP localport=" + std::to_string(port) + " profile=private,domain");
 }
 
 // The Host header must name this PC's loopback (a DNS-rebound name is not accepted).
@@ -1567,6 +1657,7 @@ private:
     bool  lookup_host(const std::string& id, std::string& ip, std::string& code);
     std::string relay_h264_url(const std::string& id); // the U1 raw stream behind /relay/h264?id=, or ""
     FirewallState  firewall_state(bool refresh);       // cached; the query runs on a detached thread
+    FirewallState  lan_firewall_state(bool refresh);   // same, but for the phone/LAN listener port
     TailscaleState remote_state(bool refresh);         // cached ~15 s; runs the tailscale CLI off the lock
     bool  set_remote(bool on, std::string& error);     // tailscale serve on/off for this hub
     void  remote_logins(const std::string& add, const std::string& remove);
@@ -1603,8 +1694,14 @@ private:
     long long                      m_last_login_at { 0 };
     int                            m_go2rtc_port { 0 };
     int                            m_webrtc_port { 0 };          // go2rtc's WebRTC media port (0 = WebRTC off)
-    FirewallState                  m_fw;                         // last firewall_query()
+    FirewallState                  m_fw;                         // last firewall_query() (go2rtc/WebRTC)
     std::atomic<bool>              m_fw_busy { false };
+    FirewallState                  m_lan_fw;                     // last lan_firewall_state() (the phone/LAN listener port)
+    std::atomic<bool>              m_lan_fw_busy { false };
+    // Set by bind() when it had to step past HUB_PORT: what (if anything) was found holding it,
+    // for the status JSON's "port_note" and the hub page's warning. Empty once the hub is on
+    // HUB_PORT itself.
+    std::string                    m_port_note_holder;    // "<exe> (pid N)" or "" (nothing found / not applicable)
     long                           m_go2rtc_pid { 0 };
     void*                          m_job { nullptr };
     std::atomic<bool>              m_quit { false };
@@ -1655,7 +1752,8 @@ static BalloonFn balloon_fn()
 
 json HubServer::info_json()
 {
-    const FirewallState fw = firewall_state(false); // takes m_mutex itself: before the lock below
+    const FirewallState fw     = firewall_state(false);     // takes m_mutex itself: before the lock below
+    const FirewallState lan_fw = lan_firewall_state(false); // ditto
     json j;
     std::lock_guard<std::mutex> lock(m_mutex);
     json v;
@@ -1686,6 +1784,25 @@ json HubServer::info_json()
     // tray read it); lan_url is the same string, remote_url is the Tailscale one or empty.
     j["lan_url"]    = j["url"];
     j["remote_url"] = j["remote"].is_object() ? j["remote"].value("url", std::string()) : std::string();
+    // Set only when bind() had to step past HUB_PORT, so a hub sitting on 13640 as usual sends no
+    // port_note at all. `held_by` is "" when the probe could not tell what has it (gone by the
+    // time we looked, or a non-Windows build).
+    if (m_port != HUB_PORT) {
+        json note;
+        note["default_port"] = HUB_PORT;
+        note["port"]         = m_port;
+        note["held_by"]      = m_port_note_holder;
+        j["port_note"] = note;
+    }
+    // The phone/LAN listener's own firewall reachability, same shape as video.firewall/note above
+    // (state values: allowed | partial | missing | blocked | unknown), plus the exact netsh command
+    // an administrator can run - the hub only ever looks, never runs `netsh ... add` itself.
+    json lv;
+    lv["port"]     = m_port;
+    lv["firewall"] = (m_phone && m_lan) ? lan_fw.state : std::string("off");
+    lv["note"]     = (m_phone && m_lan) ? lan_fw.note : std::string();
+    lv["networks"] = lan_fw.networks;
+    j["lan_firewall"] = lv;
     return j;
 }
 
@@ -2302,12 +2419,17 @@ void HubServer::load_events()
     } catch (...) {}
 }
 
-bool HubServer::bind(bool lan)
+// Opens, sets SO_EXCLUSIVEADDRUSE (Windows) / SO_REUSEADDR (elsewhere), and tries HUB_PORT..
+// HUB_PORT+19 on `addr`, taking the first that binds. Pulled out of bind() so the fallback path
+// below can retry with the previous mode's address after a failed rebind, without duplicating the
+// loop. Returns the bound acceptor (listening) or nullptr, and always sets *out_port to whichever
+// port the last attempt used (for the caller's log line on total failure).
+static std::shared_ptr<tcp::acceptor> try_bind_range(asio::io_context& ioc, const asio::ip::address_v4& addr, int* out_port)
 {
-    auto acceptor = std::make_shared<tcp::acceptor>(m_ioc);
+    auto acceptor = std::make_shared<tcp::acceptor>(ioc);
     boost::system::error_code ec;
     acceptor->open(tcp::v4(), ec);
-    if (ec) return false;
+    if (ec) return nullptr;
 #ifndef _WIN32
     acceptor->set_option(tcp::acceptor::reuse_address(true), ec); // on Windows this would let two hubs share the port
 #else
@@ -2317,29 +2439,118 @@ bool HubServer::bind(bool lan)
 #endif
     int port = HUB_PORT;
     for (; port < HUB_PORT + 20; ++port) {
-        acceptor->bind(tcp::endpoint(lan ? asio::ip::address_v4::any() : asio::ip::address_v4::loopback(), (unsigned short) port), ec);
+        acceptor->bind(tcp::endpoint(addr, (unsigned short) port), ec);
         if (!ec) break;
     }
-    if (ec) {
-        // With SO_EXCLUSIVEADDRUSE this is what a second hub sees when the first one already owns
-        // the range - the shadowing bind now fails loudly instead of silently stealing loopback.
-        BOOST_LOG_TRIVIAL(error) << "RemoteHub: no free port in " << HUB_PORT << "-" << (HUB_PORT + 19)
-                                 << " (another hub is probably already running): " << ec.message();
-        return false;
-    }
+    if (out_port) *out_port = port;
+    if (ec) return nullptr;
     acceptor->listen(64, ec);
-    if (ec) return false;
+    if (ec) return nullptr;
+    return acceptor;
+}
+
+bool HubServer::bind(bool lan)
+{
+    // Close the OLD acceptor before trying to bind the new one. This used to run the other way
+    // round (bind first, close on success) and that was the actual bug behind "the phone link
+    // came back on 13641 for no reason": on a fresh start the hub binds 127.0.0.1:13640
+    // (phone off); switching phone access on calls bind(true), which - with the old ordering -
+    // tried a NEW SO_EXCLUSIVEADDRUSE 0.0.0.0:13640 while the OLD 127.0.0.1:13640 acceptor was
+    // still open in this same process. Windows treats that as a conflict (exclusive access can't
+    // be granted over an existing bind, even a narrower one, even in the same process), so the
+    // loop below stepped to 13641 every single time home mode was turned on - nothing else on the
+    // PC needed to be running at all. Freeing the port first removes that self-conflict; the
+    // holder diagnostics further down remain for when something genuinely external holds
+    // HUB_PORT.
+    //
+    // A few hundred ms with no listener while the rebind happens is acceptable (nothing else in
+    // the hub depends on this socket being continuously open); if the rebind then fails, the old
+    // acceptor's mode and port are restored below rather than leaving the hub deaf.
     std::shared_ptr<tcp::acceptor> old;
+    bool                           had_old = false;
+    bool                           old_lan = false;
+    int                            old_port = 0;
     {
         std::lock_guard<std::mutex> lock(m_mutex);
-        old        = m_acceptor;
-        m_acceptor = acceptor;
-        m_lan      = lan;
-        m_port     = port;
+        old      = m_acceptor;
+        had_old  = (bool) old;
+        old_lan  = m_lan;
+        old_port = m_port;
     }
-    if (old) { boost::system::error_code ig; old->close(ig); } // its accept loop exits
+    if (old) { boost::system::error_code ig; old->close(ig); } // releases the port; its accept loop exits
+
+    int  port = HUB_PORT;
+    auto acceptor = try_bind_range(m_ioc, lan ? asio::ip::address_v4::any() : asio::ip::address_v4::loopback(), &port);
+    if (!acceptor) {
+        BOOST_LOG_TRIVIAL(error) << "RemoteHub: no free port in " << HUB_PORT << "-" << (HUB_PORT + 19)
+                                 << " for " << (lan ? "0.0.0.0" : "127.0.0.1") << " (another hub is probably already running)";
+        // Never leave the hub with no listener at all: put back what was working before, on its
+        // own address and port, if there was one.
+        if (had_old) {
+            int fallback_port = old_port;
+            auto fallback = try_bind_range(m_ioc, old_lan ? asio::ip::address_v4::any() : asio::ip::address_v4::loopback(), &fallback_port);
+            if (fallback) {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                m_acceptor = fallback;
+                m_lan      = old_lan;
+                m_port     = fallback_port;
+                std::thread([this, fallback]() { accept_loop(fallback, false); }).detach();
+                BOOST_LOG_TRIVIAL(warning) << "RemoteHub: could not switch listener mode; restored "
+                                           << (old_lan ? "0.0.0.0" : "127.0.0.1") << ":" << fallback_port;
+            } else {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                m_acceptor = nullptr;
+                BOOST_LOG_TRIVIAL(error) << "RemoteHub: lost the listener entirely trying to rebind";
+            }
+        }
+        return false;
+    }
+
+    // Something else on the PC already holds HUB_PORT - find out what, so the log and the status
+    // JSON can say so instead of just handing out a link on a port nothing is allowed to reach yet
+    // (a tester's report, 2026-09-17: their phone link came back on 13641 with no explanation).
+    // With the old acceptor now closed above, this only fires for a genuine external holder -
+    // this hub's own previous-mode acceptor can no longer be mistaken for one.
+    std::string holder;
+    if (port != HUB_PORT) {
+        holder = port_holder_description(HUB_PORT);
+        BOOST_LOG_TRIVIAL(warning) << "RemoteHub: port " << HUB_PORT << " is in use"
+                                   << (holder.empty() ? std::string() : " by " + holder)
+                                   << "; the phone link uses " << port << " instead";
+    }
+    bool was_remote_on;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_acceptor         = acceptor;
+        m_lan              = lan;
+        m_port             = port;
+        m_port_note_holder = holder;
+        was_remote_on      = m_remote_on;
+    }
     std::thread([this, acceptor]() { accept_loop(acceptor, false); }).detach();
     BOOST_LOG_TRIVIAL(info) << "RemoteHub: listening on " << (lan ? "0.0.0.0" : "127.0.0.1") << ":" << port;
+    // Tailscale Serve's forwarding target is Tailscale's own persisted config, not ours: if remote
+    // access was already on and the listener just moved port (this bind, or the very first one),
+    // Serve is still pointed at wherever it was told last and has to be re-pointed here too, or the
+    // tailnet URL keeps forwarding to a dead port. set_remote(true, ...) below re-runs the same
+    // `tailscale serve` command with the port current right now, which is exactly what re-pointing
+    // it means; it is a no-op for the tailnet config itself when the target already matches.
+    if (was_remote_on) {
+        std::thread([this]() {
+            TailscaleState t = remote_state(true);
+            int            p;
+            {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                p = m_port;
+            }
+            if (t.installed && t.backend == "Running" && (!t.serving || t.serving_port != p)) {
+                std::string err;
+                set_remote(true, err);
+                if (!err.empty()) BOOST_LOG_TRIVIAL(warning) << "RemoteHub: could not re-point Tailscale Serve at the new port: " << err;
+                else BOOST_LOG_TRIVIAL(info) << "RemoteHub: re-pointed Tailscale Serve at 127.0.0.1:" << p;
+            }
+        }).detach();
+    }
     return true;
 }
 
@@ -2514,7 +2725,7 @@ FirewallState HubServer::firewall_state(bool refresh)
     }
     if (port > 0 && !m_fw_busy.exchange(true)) {
         std::thread([this, port]() {
-            FirewallState fw = firewall_query(go2rtc_exe_path(), port);
+            FirewallState fw = firewall_query_go2rtc(go2rtc_exe_path(), port);
             {
                 std::lock_guard<std::mutex> lock(m_mutex);
                 m_fw = fw;
@@ -2526,6 +2737,40 @@ FirewallState HubServer::firewall_state(bool refresh)
     }
     std::lock_guard<std::mutex> lock(m_mutex);
     return m_fw;
+}
+
+// Same idea as firewall_state() above, but for the LAN listener itself: does Windows Firewall let
+// a phone reach this PC's own port, not just go2rtc's WebRTC one? Checked only while phone access
+// is actually on and bound to a LAN address - point is moot on loopback-only or before the first
+// bind. current_exe() rather than go2rtc_exe_path(): the phone talks to this process directly.
+FirewallState HubServer::lan_firewall_state(bool refresh)
+{
+    bool on = false;
+    int  port = 0;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        on   = m_phone && m_lan && m_port > 0;
+        port = m_port;
+        if (!refresh && m_lan_fw.checked_at && (long long) std::time(nullptr) - m_lan_fw.checked_at < 300) return m_lan_fw;
+    }
+    if (on && !m_lan_fw_busy.exchange(true)) {
+        std::thread([this, port]() {
+            const std::string exe = current_exe();
+            FirewallState      fw = firewall_query(exe, port, "EdgeSlicer.exe",
+                "netsh advfirewall firewall add rule name=\"EdgeSlicer\" dir=in action=allow program=\"" + exe +
+                "\" protocol=TCP localport=" + std::to_string(HUB_PORT) + "-" + std::to_string(HUB_PORT + 19) +
+                " profile=private,domain");
+            {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                m_lan_fw = fw;
+            }
+            if (fw.state != "allowed")
+                BOOST_LOG_TRIVIAL(info) << "RemoteHub: Windows Firewall for the phone/LAN port " << port << ": " << fw.state << " (" << fw.note << ")";
+            m_lan_fw_busy = false;
+        }).detach();
+    }
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return m_lan_fw;
 }
 
 void HubServer::register_streams()
@@ -3842,18 +4087,14 @@ bool HubServer::start()
     BambuCamRelay::get().port();
     // The control plane first: register_streams() points go2rtc at /relay/h264 on the admin port.
     if (!bind_admin()) return false;
+    // bind() itself reconciles Tailscale Serve's forwarding target against m_port whenever
+    // m_remote_on is already true (Serve's config outlives us - it is Tailscale's own - so a hub
+    // that starts on a different port than last time, or moved because HUB_PORT was taken, must
+    // re-point it or the tailnet URL keeps forwarding to a dead port). That covers both this
+    // start-up bind and every later rebind from set_phone(), so there is nothing more to do here.
     if (!bind(m_phone)) return false;
     write_hub_json();
     register_streams();
-    if (m_remote_on) {
-        // Serve's config outlives us (it is Tailscale's); make sure it still points at our port.
-        TailscaleState t = remote_state(true);
-        if (t.installed && t.backend == "Running" && (!t.serving || t.serving_port != m_port)) {
-            std::string err;
-            set_remote(true, err);
-            if (!err.empty()) BOOST_LOG_TRIVIAL(warning) << "RemoteHub: remote access could not be restored: " << err;
-        }
-    }
     return true;
 }
 

@@ -11,6 +11,7 @@ add_executable(${_TEST_NAME}_tests
     elegoo_canvas_tests.cpp
     splash_animation_tests.cpp
     remote_events_tests.cpp
+    remote_hub_tests.cpp
     flashforge_tests.cpp
     mqtt_reconnect_tests.cpp
     dock_width_settle_tests.cpp

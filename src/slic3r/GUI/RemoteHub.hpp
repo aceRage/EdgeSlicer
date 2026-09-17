@@ -69,6 +69,27 @@ std::string instances_dir();
 std::string uploads_dir();
 std::string saves_dir();
 
+// ---- pure parsing helpers, exposed for tests (slic3rutils remote_hub_tests.cpp) ----
+// Each of these takes captured text rather than running the command itself, so the parsing rule
+// can be exercised with no process, no socket and no real netstat/tailscale on the test machine.
+namespace Testing {
+
+// One row of `netstat -ano` for a TCP port in LISTENING state: the PID that holds it, or 0 if the
+// port does not appear as LISTENING in `text`. Local address column may be "0.0.0.0:<port>",
+// "127.0.0.1:<port>" or "[::]:<port>" depending on what bound it.
+long netstat_holder_pid(const std::string& netstat_text, int port);
+
+// The image name (no path, no ".exe" stripped) `tasklist /fi "PID eq <n>" /fo csv /nh` printed
+// for that pid, or "" if the row is not there (process exited between the two calls, or the
+// filter matched nothing).
+std::string tasklist_image_name(const std::string& tasklist_csv_text);
+
+// `tailscale serve status --json`'s "Web" -> "<domain>:443" -> Handlers -> "/" -> Proxy field is
+// "http://127.0.0.1:<port>"; this pulls that port back out, or 0 if nothing is being served.
+int serve_status_target_port(const std::string& serve_status_json_text);
+
+} // namespace Testing
+
 } // namespace RemoteHub
 } // namespace GUI
 } // namespace Slic3r

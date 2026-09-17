@@ -102,16 +102,40 @@ select { background: #222; color: #ddd; border: 1px solid #555; border-radius: 6
         for (var r = 0; r < n; r++) for (var c = 0; c < n; c++) if (qr.isDark(r, c)) ctx.fillRect(margin + c * scale, margin + r * scale, scale, scale);
         return true;
     }
+    // A one-line reason the phone might not be able to reach this PC, built from port_note (the
+    // hub landed on a port other than 13640 because something else already held it) and
+    // lan_firewall (Windows Firewall's view of that port), same idea as videoLine() below but for
+    // the LAN listener itself rather than go2rtc's WebRTC one.
+    function portWarning(body) {
+        var pn = info.port_note, lf = info.lan_firewall;
+        if (pn) {
+            var heldBy = pn.held_by || 'another program';
+            var msg = 'Port ' + pn.default_port + ' is in use by ' + heldBy + '; the phone link uses ' + pn.port + '.';
+            // A common holder is an older EdgeSlicer/Snapmaker_Orca hub from a previous install
+            // (a leftover data dir the user never fully removed) rather than something unrelated.
+            var lower = heldBy.toLowerCase();
+            if (lower.indexOf('edgeslicer') !== -1 || lower.indexOf('snapmaker_orca') !== -1)
+                msg += ' That looks like another EdgeSlicer install (an older data dir) still running.';
+            msg += ' If a phone cannot connect, allow EdgeSlicer.exe through Windows Firewall for TCP ' +
+                   pn.default_port + '-' + (pn.default_port + 19) + ', or stop the other program and restart EdgeSlicer.';
+            body.appendChild(el('div', 'err', msg));
+        }
+        if (lf && lf.firewall && lf.firewall !== 'off' && lf.firewall !== 'allowed' && lf.firewall !== 'unknown') {
+            body.appendChild(el('div', 'err', lf.note));
+        }
+    }
     function renderPhone() {
         var body = document.getElementById('phonebody');
         if (!info) return;
-        if (info.url === lastUrl && body.dataset.done) return; // keep the canvas
-        lastUrl = info.url; body.dataset.done = '1';
+        var key = info.url + '|' + JSON.stringify(info.port_note || null) + '|' + (info.lan_firewall ? info.lan_firewall.firewall : '');
+        if (key === lastUrl && body.dataset.done) return; // keep the canvas
+        lastUrl = key; body.dataset.done = '1';
         body.innerHTML = '';
         if (info.phone && info.url) {
             var canvas = el('canvas', 'qr'); body.appendChild(canvas); drawQr(canvas, info.url);
             body.appendChild(el('div', 'url', info.url));
             body.appendChild(el('div', 'note', 'The fast path: straight to this PC, no internet in the middle. The phone page\'s Connection control switches between this and the Away link, and remembers which one you chose.'));
+            portWarning(body);
             var off = el('span', 'btn warn', 'Disable'); off.onclick = function() { post('/hub/phone?on=0').then(refresh); }; body.appendChild(off);
             var relink = el('span', 'btn dim', 'New link');
             relink.onclick = function() {
@@ -121,6 +145,7 @@ select { background: #222; color: #ddd; border: 1px solid #555; border-radius: 6
             body.appendChild(relink);
         } else if (info.phone) {
             body.appendChild(el('div', 'err', 'On, but no network address was found on this PC.'));
+            portWarning(body);
             var off2 = el('span', 'btn warn', 'Disable'); off2.onclick = function() { post('/hub/phone?on=0').then(refresh); }; body.appendChild(off2);
         } else {
             body.appendChild(el('div', 'note', 'Anyone with the link can watch the cameras and drive the slicers while it is on.'));

@@ -17,9 +17,19 @@ SetRegView 32
 ; otherwise leave the old rule dead and pop a consent dialog on the first LAN listen.
 ; Pre-create it (idempotent: delete any rule of the same name first) so the phone/LAN
 ; service on TCP 13640 answers straight away. nsExec so nothing flashes a console.
+;
+; The range, not just 13640: RemoteHub.cpp's bind() steps to 13641, 13642, ... when something
+; else on the PC already holds 13640 (HUB_PORT..HUB_PORT+19, see the loop there), and a rule
+; covering only 13640 left the phone with no answer at all once the hub landed on a later port
+; ("No hub answered on that link" - a real tester hit this, 2026-09-17). profile=private,domain
+; only, same as before: a Public network is deliberately left out (that is the network class
+; Windows assigns to a coffee-shop Wi-Fi, an untrusted LAN, etc.), so this rule never opens the
+; port to a network the user has not vouched for. The hub page now tells the user how to allow it
+; there themselves (RemoteHub.cpp's firewall_query/port_note) if their own Wi-Fi happens to be
+; classed Public.
 nsExec::ExecToLog '"$SYSDIR\netsh.exe" advfirewall firewall delete rule name="EdgeSlicer"'
 Pop $0
-nsExec::ExecToLog '"$SYSDIR\netsh.exe" advfirewall firewall add rule name="EdgeSlicer" dir=in action=allow program="$INSTDIR\EdgeSlicer.exe" protocol=TCP localport=13640 profile=private,domain enable=yes'
+nsExec::ExecToLog '"$SYSDIR\netsh.exe" advfirewall firewall add rule name="EdgeSlicer" dir=in action=allow program="$INSTDIR\EdgeSlicer.exe" protocol=TCP localport=13640-13659 profile=private,domain enable=yes'
 Pop $0
 ; Bambu LAN discovery: the network plug-in (loaded inside EdgeSlicer.exe) listens for the printers'
 ; SSDP announcements on UDP 2021 and for M-SEARCH replies on UDP 1990. Without this rule a fresh
