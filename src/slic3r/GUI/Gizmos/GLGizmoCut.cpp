@@ -5412,6 +5412,13 @@ void GLGizmoCut3D::on_set_state()
         // a recipe applied before the reset would have been wiped by it.
         if (m_reedit_pending)
             begin_reedit();
+        // ... and a parked "Copy cut to...", which is the same problem: the reset
+        // above would wipe a recipe applied any earlier. Mutually exclusive with a
+        // re-edit by construction (each menu path arms exactly one), but the order
+        // is fixed rather than left to chance: a re-edit's stand-in has to be on the
+        // bed before anything reads the selection's mesh.
+        if (m_copy_pending)
+            begin_copy();
 
         m_parent.request_extra_frame();
     }
@@ -5422,6 +5429,10 @@ void GLGizmoCut3D::on_set_state()
         if (m_reedit_active)
             cancel_reedit();
         m_reedit_pending = false;
+        // A parked copy that never got consumed (the gizmo closed again before it
+        // opened) must not survive to ambush the NEXT time Cut is opened.
+        m_copy_pending = false;
+        m_copy_pending_recipe = CutRecipe();
         if (auto oc = m_c->object_clipper()) {
             oc->set_behavior(true, true, 0.);
             oc->release();
@@ -8690,6 +8701,101 @@ bool GLGizmoCut3D::arm_reedit(const CutRecipe& recipe, const std::vector<ObjectI
     return true;
 }
 
+
+// ---------------------------------------------------------------------------
+// "COPY CUT TO..." - the third way to arm the gizmo.
+//
+// Beside "a fresh cut" (nothing armed) and "Edit cut..." (arm_reedit), this is
+// "start a fresh cut on THIS object, with THAT object's cut already set up".
+//
+// WHAT IT IS NOT: it is not a re-edit. A re-edit takes the halves out of the
+// model and puts the pre-cut stand-in back in their place, because it is going
+// to REPLACE those halves. A copy has no halves to replace - the target is being
+// cut, for the first time as far as this session is concerned - so it must run
+// on the TARGET'S OWN MESH, in place, with the ordinary gizmo session the
+// ordinary Cut button gives. m_reedit_active therefore stays false, no stand-in
+// is created, and perform_cut() writes a fresh recipe on the target's halves
+// under the usual "Keep cut editable" rule, referencing the TARGET's own pre-cut
+// mesh hash. No cross-object blob aliasing, no re-edit bookkeeping.
+//
+// THE TARGET MAY ALREADY HAVE A RECIPE, and that changes nothing here. A copy
+// onto an object that was itself cut before simply REPLACES the gizmo state -
+// the plane, the surface, the settings and the connectors the panel is showing -
+// and the cut then proceeds as an ordinary cut of whatever that object is now.
+// It deliberately does NOT route into arm_reedit() to un-cut the target first:
+// "copy this cut onto that" means "make that cut here", not "undo what that
+// object is and remake it". The user who wants the latter has "Edit cut..." on
+// the target, which is exactly that operation. The target's own old recipe is
+// left alone until the cut commits, at which point the fresh one written by
+// perform_cut() supersedes it the way any re-cut's does.
+//
+// THE FRAME. The recipe's plane_center and connector positions are in the SOURCE
+// object's own frame, and they are used in the TARGET's object frame unchanged -
+// design section 2's "object-local as-is". For the case this feature is for, two
+// halves cut from one mesh, that is exactly right: they share the frame they were
+// cut in, so the source's plane already IS the target's plane, position for
+// position. For two unrelated objects sitting at different poses on the plate it
+// is a starting point the user then drags, which is why the submenu says so.
+// (Design section 4's "match world position instead" option is deliberately out
+// of scope for v1.)
+//
+// Like arm_reedit, this only PARKS the request: the gizmo's own opening path
+// flattens the session state, so the recipe is applied after that rather than
+// before, or the reset would wipe it.
+bool GLGizmoCut3D::arm_copy(const CutRecipe& recipe)
+{
+    // Unlike a re-edit, no pre-cut mesh is needed - the target's own mesh is what
+    // gets cut - so recipe.valid() is deliberately NOT required here. What is
+    // required is that the surface it describes can actually be set up.
+    if (!cut_recipe_kind_valid(int(recipe.kind)))
+        return false;
+    if (recipe.kind == CutRecipeKind::Curved && !recipe.sheet.valid())
+        return false;
+    if (recipe.kind == CutRecipeKind::Drawn && recipe.stroke.samples.size() < size_t(DrawCutStroke::MinSamples))
+        return false;
+
+    m_copy_pending        = true;
+    m_copy_pending_recipe = recipe;
+    // The mesh is the SOURCE's pre-cut shape and has no business on the target.
+    // Dropping it here rather than at the call site is what guarantees nothing
+    // downstream can accidentally cut the target with the source's geometry.
+    m_copy_pending_recipe.mesh = TriangleMesh();
+    m_copy_pending_recipe.mesh_hash.clear();
+    return true;
+}
+
+// Consume a parked copy. Called from on_set_state() at the same point a parked
+// re-edit is consumed, and for the same reason.
+void GLGizmoCut3D::begin_copy()
+{
+    if (!m_copy_pending)
+        return;
+    m_copy_pending = false;
+
+    // The ordinary session, with every control pre-populated. That is the whole
+    // of it: apply_recipe_to_gizmo() reads the CURRENT selection's instance offset
+    // when it puts the plane back, so pointing it at the target object is all the
+    // frame mapping there is.
+    apply_recipe_to_gizmo(m_copy_pending_recipe);
+    m_copy_pending_recipe = CutRecipe();
+
+    // The same caches mirror_cut() refreshes, for the same reason: the plane frame
+    // just moved to somewhere the cached meshes in it know nothing about.
+    if (m_surface_mode == CutSurfaceMode::Draw) {
+        invalidate_draw_pick_mesh();
+        refresh_draw_stroke();
+    }
+    if (m_surface_mode == CutSurfaceMode::Curved) {
+        update_curved_connector_warnings();
+        m_curved_hover_ctl = m_curved_drag_ctl = -1;
+    }
+    if (CutMode(m_mode) == CutMode::cutTongueAndGroove)
+        reset_cut_by_contours();
+
+    check_and_update_connectors_state();
+    update_raycasters_for_picking();
+    m_parent.set_as_dirty();
+}
 // Become a re-edit session.
 //
 // The halves are REMOVED from the model and a stand-in carrying the pre-cut mesh

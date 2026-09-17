@@ -324,6 +324,15 @@ public:
     bool                has_selected_editable_cut() const;
     // Reopen the Cut gizmo on that cut, with its original mesh and settings.
     void                edit_cut();
+    // "COPY CUT TO...": is the selection a recipe that can be copied onto ANOTHER
+    // object? has_selected_editable_cut() plus somewhere to copy it to.
+    bool                has_selected_copyable_cut() const;
+    // The selected object carrying the recipe, or -1. The submenu needs it to
+    // exclude the source from its own target list.
+    int                 selected_cut_recipe_source() const;
+    // Open the Cut gizmo on `target_idx` with that recipe set up on it - an
+    // ORDINARY cut of the target's own mesh, not a re-edit. See the .cpp.
+    void                copy_cut_to(int target_idx);
     void                invalidate_cut_info_for_selection();
     void                invalidate_cut_info_for_object(int obj_idx);
     void                delete_all_connectors_for_selection();
