@@ -432,6 +432,87 @@ void cut_recipe_connectors_to_model(const std::vector<CutRecipeConnector>& in, s
 void            cut_recipe_stroke_to_chain(const CutRecipeStroke& in, DrawCutChain& out);
 CutRecipeStroke cut_recipe_stroke_from_chain(const DrawCutChain& chain, double smoothing);
 
+// ---------------------------------------------------------------------------
+// MIRRORING A RECIPE.
+//
+// "Mirror on X / Y / Z" in the cut panel, and the reason "Copy cut to..." is
+// worth having at all: the owner's case is a cut authored on one half of a
+// symmetric part that has to land exactly - not by hand - on the other half.
+//
+// THE ONE FRAME. Everything a recipe stores that has a position lives in the
+// OBJECT frame (see plane_center above): plane_center itself, and every
+// connector's pos, which the gizmo writes as world-minus-instance-offset - the
+// same subtraction. So one reflection, about one pivot, in that one frame, is
+// the whole of the position half of the job. `pivot` is in that frame too.
+//
+// THE HANDEDNESS TRAP, and why rotation_m is never reflected. A reflection has
+// determinant -1. rotation_m is consumed all over the gizmo and the cut as a
+// PROPER rotation - Transformation(...).get_matrix(), its_transform(), the
+// connector frame composition - and handing any of those a mirror matrix
+// corrupts them silently (inside-out volumes, flipped connector pockets). So
+// the reflected frame is never stored. Instead:
+//
+//   let R  = rotation_m.linear(), with columns e1 e2 e3 (e3 is the plane normal)
+//   let M  = the pure reflection for the chosen axis
+//   store  R' = [ M*e1, -(M*e2), M*e3 ]
+//
+// R' is orthonormal and det(R') = +1 by construction: M flips the sign of the
+// determinant, and negating exactly one column flips it back. Every axis of the
+// frame is still the mirror image of the one it replaces up to that one sign,
+// and - the point - the plane NORMAL e3 maps to M*e3 exactly, so the mirrored
+// plane really is the mirror of the original plane and which side is "upper"
+// does not change. That is why no upper/lower swap is needed here, and why the
+// keep_/place_on_cut_/rotate_/visibility pairs are copied straight through.
+//
+// THE (u,v) RE-INDEXING, resolved by that same choice. The sheet's control grid
+// and the drawn stroke's samples are stored in the PLANE's own frame, not the
+// object's, so they do not see M at all - they see the residual
+//
+//     Q = R'^T * M * R
+//
+// and with R' built by negating the SECOND column, Q is diag(1, -1, 1) for
+// every axis and every starting rotation. Always. So the plane-local job is
+// always the same fixed map - negate local y, leave local x and local z alone -
+// and never a case analysis over which in-plane axis the mirror happened to
+// flip. Concretely:
+//
+//   sheet   f'(u, -v) = f(u, v): mirror the grid ROWS (the v index, running over
+//           ny, stride nx) and leave the VALUES alone. Note this is NOT
+//           CurvedCutSheet::flip_about_u(), which is the 180-degree frame TURN
+//           and therefore also negates every value; a mirror does not.
+//   stroke  every sample's pos and normal: (x, y, z) -> (x, -y, z). Same for
+//           draw_view_dir, so a "View"-direction drawn cut still reaches the way
+//           it did.
+//   groove  nothing. Every CutRecipeGroove field is a scalar magnitude; none of
+//           them encodes an in-plane direction.
+//
+// CONNECTORS. pos reflects in the object frame with everything else; rotation_m
+// goes through the identical R' construction, so a connector's own frame stays a
+// proper rotation too. z_angle is negated for a non-Circle shape - a mirrored
+// triangle presents the same polygon turned the other way - and left alone for a
+// Circle, where it means nothing. type (Plug / Dowel / Snap / FlexiJoint) is a
+// mating ROLE, not a chirality, and is NEVER touched: a mirrored assembly still
+// needs one plug and one dowel to mate, which is the entire reason the owner
+// wants a mirrored connector layout in the first place.
+//
+// Mirroring twice on the same axis about the same pivot is the identity, for
+// every kind. tests/libslic3r/test_cut_recipe.cpp [CutMirror] pins that, along
+// with det(+1), orthonormality and the type invariance.
+// ---------------------------------------------------------------------------
+enum class CutMirrorAxis : int { X = 0, Y = 1, Z = 2 };
+
+CutRecipe cut_recipe_mirrored(const CutRecipe& src, CutMirrorAxis axis, const Vec3d& pivot);
+
+// The pieces, exposed so the gizmo can mirror a live frame without building a
+// whole recipe, and so the tests can pin them one at a time.
+//
+// cut_mirror_vector(): the diagonal of the pure reflection M.
+// cut_mirror_point():  pivot + M * (p - pivot).
+// cut_mirror_rotation(): the R' above. Always orthonormal with determinant +1.
+Vec3d       cut_mirror_vector(CutMirrorAxis axis);
+Vec3d       cut_mirror_point(const Vec3d& p, CutMirrorAxis axis, const Vec3d& pivot);
+Transform3d cut_mirror_rotation(const Transform3d& rotation_m, CutMirrorAxis axis);
+
 } // namespace Slic3r
 
 #endif // slic3r_CutRecipe_hpp_

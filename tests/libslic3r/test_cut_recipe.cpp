@@ -964,3 +964,336 @@ TEST_CASE("Cut recipe: the open-line verdict round-trips, and version 1 keeps it
     REQUIRE(c2.is_closed());
     REQUIRE_FALSE(c2.is_finished_open());
 }
+
+// ===========================================================================
+// MIRRORING A RECIPE.
+//
+// Step 1 of the "Copy cut to..." + Mirror-buttons feature: the pure function the
+// panel's Mirror on X / Y / Z buttons and the copy-cut arm path both go through.
+// The contract it has to hold, and what each of these pins:
+//
+//   * mirroring twice on the same axis about the same pivot is the IDENTITY, for
+//     every CutRecipeKind - which is what makes the buttons as freely reversible
+//     as "Flip cut plane" is;
+//   * rotation_m stays a PROPER rotation (orthonormal, determinant +1) - the
+//     handedness trap, and the reason the reflected frame is never stored;
+//   * the plane NORMAL is genuinely reflected, so the mirrored plane is the
+//     mirror of the original and upper/lower does not secretly swap;
+//   * a connector on +X lands on -X, and its type NEVER changes;
+//   * the sheet grid and the stroke samples take the one fixed plane-local
+//     re-indexing, on a NON-SQUARE grid where getting nx and ny the wrong way
+//     round would read off the end.
+// ===========================================================================
+
+using Catch::Matchers::WithinAbs;
+
+static const Vec3d MPIVOT = Vec3d(10.0, -5.0, 2.5);
+
+static bool mirror_rot_is_proper(const Transform3d& t)
+{
+    const Matrix3d R = t.linear();
+    if (std::abs(R.determinant() - 1.0) > 1e-9)
+        return false;
+    const Matrix3d I = R * R.transpose();
+    return (I - Matrix3d::Identity()).cwiseAbs().maxCoeff() < 1e-9;
+}
+
+// An oblique frame: not axis aligned on any axis, so the orthonormality and
+// determinant checks have something real to fail on.
+static Transform3d mirror_oblique_rotation()
+{
+    Transform3d rot = Transform3d::Identity();
+    rot.rotate(Eigen::AngleAxisd(0.7, Vec3d(0.3, -0.8, 0.5).normalized()));
+    rot.rotate(Eigen::AngleAxisd(-0.4, Vec3d::UnitX()));
+    return rot;
+}
+
+// A 7 x 3 grid, deliberately NOT square and deliberately not symmetric in v, so
+// the row mirroring is observable and an nx/ny mix-up is out of bounds rather
+// than invisible. Value at (i, j) encodes both indices.
+static CutRecipeSheet mirror_rect_sheet()
+{
+    CutRecipeSheet s;
+    s.nx = 7;
+    s.ny = 3;
+    s.half_size_u = 30.0;
+    s.half_size_v = 12.0;
+    s.values.assign(size_t(s.nx) * size_t(s.ny), 0.0);
+    for (int j = 0; j < s.ny; ++ j)
+        for (int i = 0; i < s.nx; ++ i)
+            s.values[size_t(j) * size_t(s.nx) + size_t(i)] = double(i) + 100.0 * double(j);
+    return s;
+}
+
+TEST_CASE("Cut recipe: the mirror is its own inverse, for every kind", "[CutRecipe][CutMirror]")
+{
+    const CutMirrorAxis axes[3] = { CutMirrorAxis::X, CutMirrorAxis::Y, CutMirrorAxis::Z };
+    const char*         names[3] = { "X", "Y", "Z" };
+    const CutRecipeKind kinds[4] = { CutRecipeKind::Plane, CutRecipeKind::Curved,
+                                     CutRecipeKind::Drawn, CutRecipeKind::Groove };
+    const char*         kind_names[4] = { "Plane", "Curved", "Drawn", "Groove" };
+
+    for (int k = 0; k < 4; ++ k) {
+        for (int a = 0; a < 3; ++ a) {
+            DYNAMIC_SECTION("kind " << kind_names[k] << " axis " << names[a]) {
+                CutRecipe src = recipe_make(kinds[k]);
+                // The oblique frame, so this is not merely the axis-aligned case.
+                src.rotation_m = mirror_oblique_rotation();
+                if (kinds[k] == CutRecipeKind::Curved)
+                    src.sheet = mirror_rect_sheet();
+
+                const CutRecipe once  = cut_recipe_mirrored(src,  axes[a], MPIVOT);
+                const CutRecipe twice = cut_recipe_mirrored(once, axes[a], MPIVOT);
+
+                // The frame comes back to where it started. Not bit-exact - the
+                // rotation goes through a Gram-Schmidt each way - so a tolerance,
+                // but a tight one.
+                REQUIRE_THAT((twice.plane_center - src.plane_center).norm(), WithinAbs(0.0, 1e-9));
+                REQUIRE_THAT((twice.rotation_m.linear() - src.rotation_m.linear()).cwiseAbs().maxCoeff(),
+                             WithinAbs(0.0, 1e-9));
+
+                // The surface comes back exactly: the sheet re-indexing and the
+                // sample sign flips are both exact arithmetic, no evaluation.
+                REQUIRE(twice.sheet.values == src.sheet.values);
+                REQUIRE(twice.sheet.nx == src.sheet.nx);
+                REQUIRE(twice.sheet.ny == src.sheet.ny);
+                REQUIRE(twice.stroke == src.stroke);
+                REQUIRE(twice.groove == src.groove);
+                REQUIRE(twice.draw_view_dir == src.draw_view_dir);
+
+                // The connectors, including the z_angle double negation.
+                REQUIRE(twice.connectors.size() == src.connectors.size());
+                for (size_t i = 0; i < src.connectors.size(); ++ i) {
+                    REQUIRE_THAT((twice.connectors[i].pos - src.connectors[i].pos).norm(),
+                                 WithinAbs(0.0, 1e-9));
+                    REQUIRE(twice.connectors[i].z_angle == src.connectors[i].z_angle);
+                    REQUIRE(twice.connectors[i].type  == src.connectors[i].type);
+                    REQUIRE(twice.connectors[i].shape == src.connectors[i].shape);
+                }
+
+                // The after-cut attributes are never touched by a mirror at all.
+                REQUIRE(twice.keep_upper == src.keep_upper);
+                REQUIRE(twice.keep_lower == src.keep_lower);
+                REQUIRE(twice.upper_visibility == src.upper_visibility);
+                REQUIRE(twice.lower_visibility == src.lower_visibility);
+            }
+        }
+    }
+}
+
+TEST_CASE("Cut recipe: a mirrored rotation is still a rotation", "[CutRecipe][CutMirror]")
+{
+    // THE HANDEDNESS TRAP. Naively reflecting the 3x3 would give determinant -1,
+    // and every its_transform() and Transformation() downstream would silently
+    // produce inside-out geometry. Pinned on an oblique frame, because the
+    // axis-aligned case can pass by accident.
+    const CutMirrorAxis axes[3] = { CutMirrorAxis::X, CutMirrorAxis::Y, CutMirrorAxis::Z };
+    const char*         names[3] = { "X", "Y", "Z" };
+
+    for (int a = 0; a < 3; ++ a) {
+        DYNAMIC_SECTION("axis " << names[a]) {
+            const Transform3d src = mirror_oblique_rotation();
+            REQUIRE(mirror_rot_is_proper(src));
+
+            const Transform3d out = cut_mirror_rotation(src, axes[a]);
+            REQUIRE(mirror_rot_is_proper(out));
+
+            // THE NORMAL IS GENUINELY REFLECTED. This is what says the mirrored
+            // plane is the mirror of the original plane rather than merely some
+            // other plane through the mirrored centre - and it is also why no
+            // upper/lower swap is needed: the side that was upper still is.
+            const Vec3d n_src = src.linear() * Vec3d::UnitZ();
+            const Vec3d n_out = out.linear() * Vec3d::UnitZ();
+            const Vec3d want  = n_src.cwiseProduct(cut_mirror_vector(axes[a]));
+            REQUIRE_THAT((n_out - want).norm(), WithinAbs(0.0, 1e-9));
+
+            // THE PLANE-LOCAL RESIDUAL IS diag(1, -1, 1). The whole (u,v)
+            // re-indexing question turns on this: because the residual is always
+            // this one map, the sheet always mirrors its ROWS and the stroke always
+            // negates local y, for every axis and every starting rotation. If this
+            // ever fails, the sheet and stroke handling in cut_recipe_mirrored()
+            // is wrong and needs the case analysis this construction avoids.
+            Matrix3d M = Matrix3d::Identity();
+            M.diagonal() = cut_mirror_vector(axes[a]);
+            const Matrix3d Q = out.linear().transpose() * M * src.linear();
+            Matrix3d want_Q = Matrix3d::Identity();
+            want_Q(1, 1) = -1.0;
+            REQUIRE_THAT((Q - want_Q).cwiseAbs().maxCoeff(), WithinAbs(0.0, 1e-9));
+        }
+    }
+
+    // A degenerate frame must not come back non-orthonormal. The gizmo should
+    // never hand one over, but "should never" is not "cannot".
+    Transform3d degenerate = Transform3d::Identity();
+    degenerate.matrix().block(0, 0, 3, 3) = Matrix3d::Zero();
+    REQUIRE(mirror_rot_is_proper(cut_mirror_rotation(degenerate, CutMirrorAxis::X)));
+}
+
+TEST_CASE("Cut recipe: a connector on +X lands on -X and keeps its type", "[CutRecipe][CutMirror]")
+{
+    CutRecipe src = recipe_make(CutRecipeKind::Plane);
+    src.connectors.clear();
+
+    // Mirroring about the ORIGIN here, so the arithmetic is readable: +X goes to
+    // -X and nothing else moves.
+    CutRecipeConnector plug;
+    plug.pos     = Vec3d(12.0, 3.0, -1.0);
+    plug.z_angle = 0.4f;
+    plug.type    = int(CutConnectorType::Plug);
+    plug.shape   = int(CutConnectorShape::Triangle);
+    src.connectors.push_back(plug);
+
+    CutRecipeConnector dowel = plug;
+    dowel.pos   = Vec3d(-8.0, 1.0, 2.0);
+    dowel.type  = int(CutConnectorType::Dowel);
+    dowel.shape = int(CutConnectorShape::Circle);
+    src.connectors.push_back(dowel);
+
+    CutRecipeConnector flexi = plug;
+    flexi.pos   = Vec3d(0.0, 6.0, 0.0);
+    flexi.type  = int(CutConnectorType::FlexiJoint);
+    flexi.shape = int(CutConnectorShape::Circle);
+    src.connectors.push_back(flexi);
+
+    const CutRecipe out = cut_recipe_mirrored(src, CutMirrorAxis::X, Vec3d::Zero());
+
+    REQUIRE_THAT(out.connectors[0].pos.x(), WithinAbs(-12.0, 1e-12));
+    REQUIRE_THAT(out.connectors[0].pos.y(), WithinAbs(  3.0, 1e-12));
+    REQUIRE_THAT(out.connectors[0].pos.z(), WithinAbs( -1.0, 1e-12));
+    REQUIRE_THAT(out.connectors[1].pos.x(), WithinAbs(  8.0, 1e-12));
+
+    // TYPE IS A MATING ROLE, NEVER A CHIRALITY. A mirrored assembly still needs
+    // one plug and one dowel to mate - which is precisely the use case the owner
+    // wants a mirrored connector layout for - so a mirror must never toggle it.
+    REQUIRE(out.connectors[0].type == int(CutConnectorType::Plug));
+    REQUIRE(out.connectors[1].type == int(CutConnectorType::Dowel));
+    REQUIRE(out.connectors[2].type == int(CutConnectorType::FlexiJoint));
+    // Nor the style, the shape, the radii or the tolerances.
+    REQUIRE(out.connectors[0].shape  == int(CutConnectorShape::Triangle));
+    REQUIRE(out.connectors[0].radius == src.connectors[0].radius);
+    REQUIRE(out.connectors[0].height == src.connectors[0].height);
+
+    // z_angle: negated for a shape that HAS an orientation, untouched for a
+    // Circle, where it means nothing.
+    REQUIRE_THAT(double(out.connectors[0].z_angle), WithinAbs(-0.4, 1e-7));
+    REQUIRE_THAT(double(out.connectors[1].z_angle), WithinAbs( 0.4, 1e-7));
+
+    // Mirroring about a non-zero pivot moves the point the other way about it.
+    const CutRecipe off = cut_recipe_mirrored(src, CutMirrorAxis::X, Vec3d(10.0, 0.0, 0.0));
+    REQUIRE_THAT(off.connectors[0].pos.x(), WithinAbs(8.0, 1e-12));   // 10 - (12 - 10)
+}
+
+TEST_CASE("Cut recipe: the sheet grid mirrors its rows, not its values", "[CutRecipe][CutMirror]")
+{
+    CutRecipe src = recipe_make(CutRecipeKind::Curved);
+    src.sheet = mirror_rect_sheet();   // 7 x 3, value(i,j) = i + 100*j
+
+    const CutRecipe out = cut_recipe_mirrored(src, CutMirrorAxis::Y, MPIVOT);
+
+    REQUIRE(out.sheet.nx == 7);
+    REQUIRE(out.sheet.ny == 3);
+    // The extent does not move: the grid is symmetric in v about its own centre,
+    // so mirrored indices land exactly on grid points.
+    REQUIRE(out.sheet.half_size_u == src.sheet.half_size_u);
+    REQUIRE(out.sheet.half_size_v == src.sheet.half_size_v);
+
+    // Row j came from row (ny - 1 - j), and the VALUES ARE NOT NEGATED. That last
+    // point is the one that separates this from CurvedCutSheet::flip_about_u(),
+    // which is the 180-degree frame TURN and does negate them: local z is untouched
+    // by a mirror's plane-local residual, so the heights are unchanged.
+    for (int j = 0; j < 3; ++ j)
+        for (int i = 0; i < 7; ++ i)
+            REQUIRE_THAT(out.sheet.values[size_t(j) * 7 + size_t(i)],
+                         WithinAbs(double(i) + 100.0 * double(2 - j), 1e-12));
+
+    // Not a value negation anywhere: every entry is still non-negative, as every
+    // source entry was.
+    for (double v : out.sheet.values)
+        REQUIRE(v >= 0.0);
+
+    // The same 7 x 3 sheet through the OTHER two axes gives the same answer - the
+    // residual does not depend on the axis, which is the whole point of the fixed
+    // column choice. An nx/ny mix-up would be out of bounds on this grid.
+    for (CutMirrorAxis a : { CutMirrorAxis::X, CutMirrorAxis::Z }) {
+        const CutRecipe o = cut_recipe_mirrored(src, a, MPIVOT);
+        REQUIRE(o.sheet.values == out.sheet.values);
+    }
+}
+
+TEST_CASE("Cut recipe: stroke samples reflect in the plane frame", "[CutRecipe][CutMirror]")
+{
+    CutRecipe src = recipe_make(CutRecipeKind::Drawn);
+    src.draw_view_dir = Vec3d(0.2, 0.6, -0.8);
+
+    const CutRecipe out = cut_recipe_mirrored(src, CutMirrorAxis::Z, MPIVOT);
+
+    REQUIRE(out.stroke.samples.size() == src.stroke.samples.size());
+    for (size_t i = 0; i < src.stroke.samples.size(); ++ i) {
+        const DrawCutSample& a = src.stroke.samples[i];
+        const DrawCutSample& b = out.stroke.samples[i];
+        // Local y negates; local x and local z do not. The samples are stored in
+        // the CUT PLANE's frame (draw_view_dir_in_plane() takes even the camera
+        // direction into that frame before storing it), so they see the residual
+        // and never the world reflection.
+        REQUIRE_THAT(b.pos.x(), WithinAbs( a.pos.x(), 1e-12));
+        REQUIRE_THAT(b.pos.y(), WithinAbs(-a.pos.y(), 1e-12));
+        REQUIRE_THAT(b.pos.z(), WithinAbs( a.pos.z(), 1e-12));
+        REQUIRE_THAT(b.normal.y(), WithinAbs(-a.normal.y(), 1e-12));
+        // The sample ORDER is untouched, so the stored stroke ranges stay valid.
+        REQUIRE(b.facet == a.facet);
+    }
+    REQUIRE(out.stroke.stroke_bounds == src.stroke.stroke_bounds);
+    REQUIRE(out.stroke.closed == src.stroke.closed);
+    REQUIRE(out.stroke.smoothing == src.stroke.smoothing);
+
+    // The view direction is a direction in that same frame.
+    REQUIRE_THAT(out.draw_view_dir.x(), WithinAbs( 0.2, 1e-12));
+    REQUIRE_THAT(out.draw_view_dir.y(), WithinAbs(-0.6, 1e-12));
+    REQUIRE_THAT(out.draw_view_dir.z(), WithinAbs(-0.8, 1e-12));
+
+    // The sweep parameters are scalars and pass through.
+    REQUIRE(out.draw_extension == src.draw_extension);
+    REQUIRE(out.draw_angle_deg == src.draw_angle_deg);
+    REQUIRE(out.draw_depth == src.draw_depth);
+    REQUIRE(out.draw_ext_angle_set == src.draw_ext_angle_set);
+    REQUIRE(out.draw_direction == src.draw_direction);
+}
+
+TEST_CASE("Cut recipe: groove parameters are scalars and survive a mirror", "[CutRecipe][CutMirror]")
+{
+    const CutRecipe src = recipe_make(CutRecipeKind::Groove);
+
+    for (CutMirrorAxis a : { CutMirrorAxis::X, CutMirrorAxis::Y, CutMirrorAxis::Z }) {
+        const CutRecipe out = cut_recipe_mirrored(src, a, MPIVOT);
+        // Not one field of CutRecipeGroove encodes a direction in the plane, so a
+        // mirror moves the frame the groove sits on and nothing else.
+        REQUIRE(out.groove == src.groove);
+        REQUIRE(out.kind == CutRecipeKind::Groove);
+        // ... and the frame really did move.
+        REQUIRE(out.plane_center != src.plane_center);
+    }
+}
+
+TEST_CASE("Cut recipe: the mirrored plane really is the mirror of the plane", "[CutRecipe][CutMirror]")
+{
+    // A point on the source plane, reflected, must lie on the mirrored plane. This
+    // is the geometric statement the whole construction exists to make true, tested
+    // independently of how rotation_m is built.
+    CutRecipe src = recipe_make(CutRecipeKind::Plane);
+    src.rotation_m   = mirror_oblique_rotation();
+    src.plane_center = Vec3d(3.0, 7.0, -2.0);
+
+    for (CutMirrorAxis a : { CutMirrorAxis::X, CutMirrorAxis::Y, CutMirrorAxis::Z }) {
+        const CutRecipe out = cut_recipe_mirrored(src, a, MPIVOT);
+        const Vec3d     n   = out.rotation_m.linear() * Vec3d::UnitZ();
+
+        // Several points spread over the source plane, not just its centre.
+        for (double u : { -20.0, 0.0, 13.5 })
+            for (double v : { -9.0, 4.0 }) {
+                const Vec3d on_src = src.plane_center + src.rotation_m.linear() * Vec3d(u, v, 0.0);
+                const Vec3d want   = cut_mirror_point(on_src, a, MPIVOT);
+                // Distance from the mirrored plane.
+                REQUIRE_THAT(n.dot(want - out.plane_center), WithinAbs(0.0, 1e-9));
+            }
+    }
+}
