@@ -707,9 +707,14 @@ TEST_CASE("Layer time speed smoothing: Mode C keeps a layer CoolingBuffer alread
     // floor, and it is flagged as the layer CoolingBuffer slowed to get there.
     //
     // Frozen (cooling_slowed_down = true): layer 2 keeps factor 1, F1500, t_out 8.00.
-    // Control (flag off): the 25% band lifts it to min(3 x 8, 0.75 x 30) = 22.5 s, factor
-    // 8 / 22.5 = 0.356, F = 1500 x 0.356 = 533 -> floored at slow_down_min_speed 1200,
-    // so t_out = 200 mm / 20 mm/s = 10.00 s. The control proves the freeze is what holds F.
+    // Control (flag off): the 25% band targets min(3 x 8, 0.75 x 30) = 22.5 s. Every line in
+    // this layer is eligible and floors at slow_down_min_speed (1200) for any factor <=
+    // 1200/1500 = 0.8, so t_out(f) is flat at 200mm/(1200/60) = 10.00 s for every f in the
+    // slowdown search range [f_cap, 1] with f_cap = 1/(1+max_slowdown) = 1/3. 10.00 s never
+    // reaches the 22.5 s target, so the bisection reports the target unreachable and returns
+    // f_cap itself: factor = 1/3 = 0.333, t_out = 10.00 (same G-code as the old direct-factor
+    // 0.356 would have produced, since both floor at F1200 - only the *reported* factor number
+    // changes). The control proves the freeze is what holds F.
     for (const bool slowed_by_cooling : {true, false}) {
         DYNAMIC_SECTION((slowed_by_cooling ? "flagged by CoolingBuffer" : "control: not flagged"))
         {
@@ -728,7 +733,7 @@ TEST_CASE("Layer time speed smoothing: Mode C keeps a layer CoolingBuffer alread
                 REQUIRE(feedrate_of(bodies[2], "G1 X") == 1500);
                 REQUIRE(count_of(bodies[2], "F1500") == 20);
             } else {
-                REQUIRE(bodies[2].find("factor=0.356") != std::string::npos);
+                REQUIRE(bodies[2].find("factor=0.333") != std::string::npos);
                 REQUIRE(bodies[2].find("t_out=10.00") != std::string::npos);
                 REQUIRE(feedrate_of(bodies[2], "G1 X") == 1200);
                 REQUIRE(count_of(bodies[2], "F1200") == 20);
@@ -780,6 +785,313 @@ TEST_CASE("Layer time speed smoothing: a slowdown never pushes a line below slow
 
 TEST_CASE("Layer time speed smoothing format_comment includes mode", "[LayerTimeSpeedSmoothing][GCode]")
 {
-    const std::string comment = LayerTimeSpeedSmoothingFilter::format_comment(ltssmSpeedUpExcludeOuter, 1.0, 0.0, 0.0);
-    REQUIRE(comment == "; LAYER_TIME_SPEED_SMOOTH mode=speed_up_exclude_outer factor=1.000 t_raw=0.00 t_out=0.00\n");
+    const std::string comment = LayerTimeSpeedSmoothingFilter::format_comment(ltssmSpeedUpExcludeOuter, 1.0, 0.0, 0.0, 0.0);
+    REQUIRE(comment == "; LAYER_TIME_SPEED_SMOOTH mode=speed_up_exclude_outer factor=1.000 t_raw=0.00 t_out=0.00 t_target=0.00\n");
+}
+
+// ---------------------------------------------------------------------------------------------
+// Defect 1: the prime/wipe tower (;TYPE:Prime tower -> erWipeTower) must never be retimed, in
+// any mode. Before the fix, is_speedup_protected() did not name erWipeTower, so Mode A/B would
+// speed the tower up along with everything else (the owner's real print: layer 2, factor 2.392,
+// tower F9600 -> F22960); Mode C had no protection for it at all.
+// ---------------------------------------------------------------------------------------------
+
+TEST_CASE("Layer time speed smoothing: the prime tower is never sped up (Mode B)", "[LayerTimeSpeedSmoothing][GCode][Tower]")
+{
+    PrintConfig cfg;
+    cfg.layer_time_speed_smoothing.value     = ltssmSpeedUpAll;
+    cfg.layer_time_speed_max_variation.value = 25.;
+    cfg.layer_time_speed_max_speedup.value   = 100.; // f_cap = 2.0
+    cfg.filament_max_volumetric_speed.values = { 1000. };
+    cfg.use_relative_e_distances.value       = true;
+    cfg.slow_down_for_layer_cooling.values   = { false };
+    cfg.slow_down_layer_time.values          = { 0. };
+    cfg.slow_down_min_speed.values           = { 0. };
+
+    // Layers 0 (first-layer band, id 0) and 1 (id 1, the constraining neighbour): 12 x 10 mm at
+    // 1800 mm/min = 30 mm/s -> 12 x 0.33333 = 4.0 s each. Layer 2 (id 2): 24 x 10 mm at
+    // 1800 mm/min sparse infill (eligible, 24 x 0.33333 = 8.0 s) plus 2 x 10 mm tower moves at
+    // 600 mm/min = 10 mm/s -> 1.0 s each, 2.0 s total (ineligible: erWipeTower). Raw = 10.0 s.
+    //
+    // The pure S2 solver sees only layer times [4.0, 4.0, 10.0] and knows nothing of roles: at
+    // 25% variation the band pulls layer 2 to neighbour_upper(4.0, 0.75) = 4.0 / 0.75 = 5.3333 s
+    // (the max_speedup floor of 10.0 / 2.0 = 5.0 s does not bind, since 5.3333 > 5.0), so
+    // target = 16/3 s.
+    //
+    // Defect 2's bisection then finds the per-line factor f on the eligible 8.0 s alone so that
+    // t_out(f) = t_tower + t_infill/f = 2.0 + 8.0/f hits that target exactly:
+    //   2.0 + 8.0/f = 16/3  =>  8.0/f = 10/3  =>  f = 2.4
+    // NOTE: f_cap here is 2.0 (max_speedup 100%), and 2.4 > 2.0, so the target is in fact
+    // unreachable at the cap; solve_line_factor_for_target returns f_cap = 2.0 and the true
+    // (higher) t_out is reported. See the arithmetic asserted below.
+    auto make_layer = []() {
+        std::string g = "G92 X0\n;TYPE:Sparse infill\n";
+        for (int i = 0; i < 12; ++i)
+            g += g1_x(10. * (i + 1), 0.05, 1800);
+        return g;
+    };
+    auto make_mixed_layer = []() {
+        std::string g = "G92 X0\n;TYPE:Sparse infill\n";
+        for (int i = 0; i < 24; ++i)
+            g += g1_x(10. * (i + 1), 0.05, 1800);
+        g += ";TYPE:Prime tower\n";
+        g += g1_x(250, 0.05, 600);
+        g += g1_x(260, 0.05, 600);
+        return g;
+    };
+
+    LayerTimeSpeedSmoothingFilter filter(cfg);
+    REQUIRE(filter.process_layer(make_layer(), 0, false).empty());
+    REQUIRE(filter.process_layer(make_layer(), 1, false).empty());
+    const std::string out = filter.process_layer(make_mixed_layer(), 2, true);
+
+    const std::vector<std::string> bodies = smoothed_layer_bodies(out);
+    REQUIRE(bodies.size() == 3);
+    // f_cap (2.0) cannot reach the naive 16/3 s target (2.0 + 8.0/2.0 = 6.0 s > 5.3333 s), so the
+    // bisection reports the cap itself and the true (higher) t_out.
+    REQUIRE(bodies[2].find("factor=2.000") != std::string::npos);
+    REQUIRE(bodies[2].find("t_raw=10.00") != std::string::npos);
+    REQUIRE(bodies[2].find("t_out=6.00") != std::string::npos);
+    // The tower keeps its own F, no matter the layer factor.
+    REQUIRE(feedrate_of(bodies[2], "TYPE:Prime tower") == 600);
+    REQUIRE(count_of(bodies[2], "F600") == 2);
+    // The infill doubled: 1800 * 2.0 = 3600.
+    REQUIRE(feedrate_of(bodies[2], "TYPE:Sparse infill") == 3600);
+    REQUIRE(count_of(bodies[2], "F3600") == 24);
+}
+
+TEST_CASE("Layer time speed smoothing: the prime tower is never slowed down (Mode C)", "[LayerTimeSpeedSmoothing][GCode][Tower]")
+{
+    PrintConfig cfg;
+    cfg.layer_time_speed_smoothing.value         = ltssmSlowDown;
+    cfg.layer_time_speed_max_variation.value     = 25.;
+    cfg.layer_time_speed_max_slowdown.value      = 200.; // f_cap = 1/3
+    cfg.layer_time_speed_max_time_increase.value = 100.;
+    cfg.layer_time_speed_slowdown_scope.value    = ltssAll;
+    cfg.filament_max_volumetric_speed.values     = { 1000. };
+    cfg.use_relative_e_distances.value           = true;
+    cfg.slow_down_for_layer_cooling.values       = { false };
+    cfg.slow_down_layer_time.values              = { 0. };
+    cfg.slow_down_min_speed.values                = { 0. };
+
+    // Layers 1 and 3 (ids 1, 3): 30 x 10 mm at 1800 mm/min -> 30 x 0.33333 = 10.0 s each, the
+    // long neighbours. Layer 2 (id 2, short): 9 x 10 mm sparse infill at 1800 mm/min (eligible,
+    // 9 x 0.33333 = 3.0 s) plus 1 x 10 mm tower move at 400 mm/min = 6.6667 mm/s -> 1.5 s
+    // (ineligible: erWipeTower). Raw = 4.5 s.
+    //
+    // The pure solver sees layer times [_, 10.0, 4.5, 10.0] (layer 0 is the first-layer band)
+    // and targets neighbour_lower(10.0, 0.75) = 7.5 s for layer 2.
+    //
+    // Defect 2's bisection finds f on the eligible 3.0 s so t_out(f) = 1.5 + 3.0/f = 7.5:
+    //   3.0/f = 6.0  =>  f = 0.5 (inside f_cap = 1/3 .. 1, so reachable).
+    auto make_long_layer = []() {
+        std::string g = "G92 X0\n;TYPE:Sparse infill\n";
+        for (int i = 0; i < 30; ++i)
+            g += g1_x(10. * (i + 1), 0.05, 1800);
+        return g;
+    };
+    auto make_short_mixed_layer = []() {
+        // g1_x takes an ABSOLUTE X target, so each move must advance by only 10 mm from the
+        // previous one: 9 infill moves reach X=90, so the tower move targets X=100 (a 10 mm
+        // move), not some far-off absolute X (which would silently make it a much longer move).
+        std::string g = "G92 X0\n;TYPE:Sparse infill\n";
+        for (int i = 0; i < 9; ++i)
+            g += g1_x(10. * (i + 1), 0.05, 1800);
+        g += ";TYPE:Prime tower\n";
+        g += g1_x(100, 0.05, 400);
+        return g;
+    };
+
+    LayerTimeSpeedSmoothingFilter filter(cfg);
+    REQUIRE(filter.process_layer(make_long_layer(), 0, false).empty());
+    REQUIRE(filter.process_layer(make_long_layer(), 1, false).empty());
+    REQUIRE(filter.process_layer(make_short_mixed_layer(), 2, false).empty());
+    const std::string out = filter.process_layer(make_long_layer(), 3, true);
+
+    const std::vector<std::string> bodies = smoothed_layer_bodies(out);
+    REQUIRE(bodies.size() == 4);
+    REQUIRE(bodies[2].find("t_raw=4.50") != std::string::npos);
+    REQUIRE(bodies[2].find("factor=0.500") != std::string::npos);
+    REQUIRE(bodies[2].find("t_out=7.50") != std::string::npos);
+    REQUIRE(bodies[2].find("t_target=7.50") != std::string::npos);
+    // The tower keeps its own F even though the layer as a whole is lengthened.
+    REQUIRE(feedrate_of(bodies[2], "TYPE:Prime tower") == 400);
+    REQUIRE(count_of(bodies[2], "F400") == 1);
+    // The infill is halved: 1800 * 0.5 = 900.
+    REQUIRE(feedrate_of(bodies[2], "TYPE:Sparse infill") == 900);
+    REQUIRE(count_of(bodies[2], "F900") == 9);
+}
+
+TEST_CASE("Layer time speed smoothing: the prime tower is never touched in Mode A either", "[LayerTimeSpeedSmoothing][GCode][Tower]")
+{
+    // Mode A (exclude outer walls) shares is_speedup_protected() / is_tower_role() with Mode B;
+    // this only confirms the tower guard is not accidentally specific to ltssmSpeedUpAll.
+    PrintConfig cfg;
+    cfg.layer_time_speed_smoothing.value     = ltssmSpeedUpExcludeOuter;
+    cfg.layer_time_speed_max_variation.value = 25.;
+    cfg.layer_time_speed_max_speedup.value   = 100.;
+    cfg.filament_max_volumetric_speed.values = { 1000. };
+    cfg.use_relative_e_distances.value       = true;
+    cfg.slow_down_for_layer_cooling.values   = { false };
+    cfg.slow_down_layer_time.values          = { 0. };
+    cfg.slow_down_min_speed.values           = { 0. };
+
+    auto make_layer = []() {
+        std::string g = "G92 X0\n;TYPE:Sparse infill\n";
+        for (int i = 0; i < 12; ++i)
+            g += g1_x(10. * (i + 1), 0.05, 1800);
+        return g;
+    };
+    auto make_mixed_layer = []() {
+        std::string g = "G92 X0\n;TYPE:Sparse infill\n";
+        for (int i = 0; i < 24; ++i)
+            g += g1_x(10. * (i + 1), 0.05, 1800);
+        g += ";TYPE:Prime tower\n";
+        g += g1_x(250, 0.05, 600);
+        g += g1_x(260, 0.05, 600);
+        return g;
+    };
+
+    LayerTimeSpeedSmoothingFilter filter(cfg);
+    REQUIRE(filter.process_layer(make_layer(), 0, false).empty());
+    REQUIRE(filter.process_layer(make_layer(), 1, false).empty());
+    const std::string out = filter.process_layer(make_mixed_layer(), 2, true);
+
+    const std::vector<std::string> bodies = smoothed_layer_bodies(out);
+    REQUIRE(bodies.size() == 3);
+    REQUIRE(feedrate_of(bodies[2], "TYPE:Prime tower") == 600);
+    REQUIRE(count_of(bodies[2], "F600") == 2);
+    REQUIRE(feedrate_of(bodies[2], "TYPE:Sparse infill") > 1800);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Defect 2: the layer factor the S2 solvers compute assumes the whole layer scales uniformly,
+// but only eligible lines are ever rewritten and scaled_feedrate() caps them further. The apply
+// stage must bisect a per-line factor that reaches the solver's target on the eligible lines
+// alone, accounting for what the ineligible lines and the caps hold fixed.
+// ---------------------------------------------------------------------------------------------
+
+TEST_CASE("Layer time speed smoothing: eligible-only bisection reaches the target when half the layer is protected",
+          "[LayerTimeSpeedSmoothing][GCode][BisectTarget]")
+{
+    // Hand-checkable arithmetic (spec item a/b combined): normalize the layer to 1.0 s with
+    // exactly half its time protected. Halving the whole layer (target = 0.5) with a factor of
+    // 3 applied to only the eligible half gives t = 0.5 + 0.5/3 = 0.6667, i.e. 66.7% of the
+    // original remains even though the naive per-layer factor implied by "halve the layer" is
+    // 2 - because half the time cannot be touched. Scaled by 8x to real seconds:
+    //   protected (Support role, ineligible) = 4.0 s, eligible (Sparse infill) = 4.0 s, raw = 8.0 s.
+    // Neighbour layer 1 is 3.0 s, so at 25% variation the band asks for
+    // neighbour_upper(3.0, 0.75) = 3.0 / 0.75 = 4.0 s for layer 2 (the max_speedup floor of
+    // 8.0 / 3.0 = 2.6667 s does not bind, since 4.0 > 2.6667), i.e. target = raw / 2 = 4.0 s -
+    // "halve the layer".
+    //
+    // solve_line_factor_for_target must search up to f_cap = 1 + max_speedup = 3.0 for the
+    // smallest f with t_out(f) = 4.0 (protected) + 4.0/f <= 4.0 s. That equation has no finite
+    // solution (t_out(f) -> 4.0 only as f -> infinity), so f_cap itself is the answer:
+    //   t_out(3.0) = 4.0 + 4.0/3.0 = 16/3 = 5.3333 s (the target is unreachable by design; the
+    // header comment on the filter documents that the cap can leave the band violated).
+    PrintConfig cfg;
+    cfg.layer_time_speed_smoothing.value     = ltssmSpeedUpAll;
+    cfg.layer_time_speed_max_variation.value = 25.;
+    cfg.layer_time_speed_max_speedup.value   = 200.; // f_cap = 3.0
+    cfg.filament_max_volumetric_speed.values = { 1000. };
+    cfg.use_relative_e_distances.value       = true;
+    cfg.slow_down_for_layer_cooling.values   = { false };
+    cfg.slow_down_layer_time.values          = { 0. };
+    cfg.slow_down_min_speed.values           = { 0. };
+
+    auto make_neighbour = []() {
+        std::string g = "G92 X0\n;TYPE:Sparse infill\n";
+        for (int i = 0; i < 9; ++i)
+            g += g1_x(10. * (i + 1), 0.05, 1800);
+        return g;
+    };
+    auto make_half_protected_layer = []() {
+        std::string g = "G92 X0\n;TYPE:Sparse infill\n";
+        for (int i = 0; i < 12; ++i)
+            g += g1_x(10. * (i + 1), 0.05, 1800);
+        g += ";TYPE:Support\n";
+        for (int i = 0; i < 12; ++i)
+            g += g1_x(10. * (i + 13), 0.05, 1800);
+        return g;
+    };
+
+    LayerTimeSpeedSmoothingFilter filter(cfg);
+    REQUIRE(filter.process_layer(make_neighbour(), 0, false).empty());
+    REQUIRE(filter.process_layer(make_neighbour(), 1, false).empty());
+    const std::string out = filter.process_layer(make_half_protected_layer(), 2, true);
+
+    const std::vector<std::string> bodies = smoothed_layer_bodies(out);
+    REQUIRE(bodies.size() == 3);
+    REQUIRE(bodies[2].find("t_raw=8.00") != std::string::npos);
+    REQUIRE(bodies[2].find("t_target=4.00") != std::string::npos);
+    // Bisection stops at the cap: it cannot reach the 4.0 s target (protected lines alone hold
+    // 4.0 s fixed), so it reports f_cap = 3.0 and the true, higher t_out.
+    REQUIRE(bodies[2].find("factor=3.000") != std::string::npos);
+    REQUIRE(bodies[2].find("t_out=5.33") != std::string::npos);
+    // Support (protected) keeps F1800; sparse infill (eligible) is tripled to F5400.
+    REQUIRE(feedrate_of(bodies[2], "TYPE:Support") == 1800);
+    REQUIRE(count_of(bodies[2], "F1800") == 12);
+    REQUIRE(feedrate_of(bodies[2], "TYPE:Sparse infill") == 5400);
+    REQUIRE(count_of(bodies[2], "F5400") == 12);
+}
+
+TEST_CASE("Layer time speed smoothing: eligible-only bisection reaches an in-range target exactly",
+          "[LayerTimeSpeedSmoothing][GCode][BisectTarget]")
+{
+    // Same shape as the previous test but with headroom (max_speedup 900% => f_cap = 10.0) so
+    // the target IS reachable: this is the "band actually gets reached" half of Defect 2, not
+    // just the "cap makes it unreachable" half.
+    //
+    // Layer 2: protected (Support) 4.0 s, eligible (Sparse infill) 4.0 s, raw 8.0 s. Neighbour
+    // (layer 1) 3.0 s => target = neighbour_upper(3.0, 0.75) = 4.0 s (same as above; the floor
+    // 8.0 / 10.0 = 0.8 s does not bind). Solve 4.0 + 4.0/f = 4.0 is still not exactly reachable
+    // at finite f (see previous test) UNLESS the protected share is smaller. Use a lighter
+    // protected share instead: protected = 1.0 s, eligible = 7.0 s, raw = 8.0 s, same target
+    // 4.0 s: 1.0 + 7.0/f = 4.0 => 7.0/f = 3.0 => f = 7/3 = 2.33333, comfortably under f_cap 10.0.
+    PrintConfig cfg;
+    cfg.layer_time_speed_smoothing.value     = ltssmSpeedUpAll;
+    cfg.layer_time_speed_max_variation.value = 25.;
+    cfg.layer_time_speed_max_speedup.value   = 900.; // f_cap = 10.0, well above what is needed
+    cfg.filament_max_volumetric_speed.values = { 1000. };
+    cfg.use_relative_e_distances.value       = true;
+    cfg.slow_down_for_layer_cooling.values   = { false };
+    cfg.slow_down_layer_time.values          = { 0. };
+    cfg.slow_down_min_speed.values           = { 0. };
+
+    auto make_neighbour = []() {
+        std::string g = "G92 X0\n;TYPE:Sparse infill\n";
+        for (int i = 0; i < 9; ++i)
+            g += g1_x(10. * (i + 1), 0.05, 1800);
+        return g;
+    };
+    auto make_light_protected_layer = []() {
+        // 3 x 10 mm Support (protected) at 1800 mm/min = 3 x 0.33333 = 1.0 s.
+        std::string g = "G92 X0\n;TYPE:Support\n";
+        for (int i = 0; i < 3; ++i)
+            g += g1_x(10. * (i + 1), 0.05, 1800);
+        // 21 x 10 mm Sparse infill (eligible) at 1800 mm/min = 21 x 0.33333 = 7.0 s.
+        g += ";TYPE:Sparse infill\n";
+        for (int i = 0; i < 21; ++i)
+            g += g1_x(10. * (i + 4), 0.05, 1800);
+        return g;
+    };
+
+    LayerTimeSpeedSmoothingFilter filter(cfg);
+    REQUIRE(filter.process_layer(make_neighbour(), 0, false).empty());
+    REQUIRE(filter.process_layer(make_neighbour(), 1, false).empty());
+    const std::string out = filter.process_layer(make_light_protected_layer(), 2, true);
+
+    const std::vector<std::string> bodies = smoothed_layer_bodies(out);
+    REQUIRE(bodies.size() == 3);
+    REQUIRE(bodies[2].find("t_raw=8.00") != std::string::npos);
+    REQUIRE(bodies[2].find("t_target=4.00") != std::string::npos);
+    REQUIRE(bodies[2].find("factor=2.333") != std::string::npos);
+    // Reached exactly: t_out == t_target (within the .2f comment precision).
+    REQUIRE(bodies[2].find("t_out=4.00") != std::string::npos);
+    REQUIRE(feedrate_of(bodies[2], "TYPE:Support") == 1800);
+    REQUIRE(count_of(bodies[2], "F1800") == 3);
+    // 1800 * 7/3 = 4200.
+    REQUIRE(feedrate_of(bodies[2], "TYPE:Sparse infill") == 4200);
+    REQUIRE(count_of(bodies[2], "F4200") == 21);
 }
