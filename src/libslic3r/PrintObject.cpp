@@ -1402,6 +1402,8 @@ bool PrintObject::invalidate_state_by_config_options(
             || opt_key == "scarf_overhang_threshold"
             || opt_key == "scarf_joint_speed"
             || opt_key == "scarf_joint_flow_ratio"
+            || opt_key == "wipe_inward"
+            || opt_key == "wipe_inward_distance"
             || opt_key == "seam_slope_start_height"
             || opt_key == "seam_slope_entire_loop"
             || opt_key == "seam_slope_min_length"
