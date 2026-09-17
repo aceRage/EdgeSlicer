@@ -1771,6 +1771,72 @@ void MenuFactory::append_menu_item_edit_cut(wxMenu *menu)
             [](wxCommandEvent &) { obj_list()->edit_cut(); },
             "", menu, []() { return true; }, m_parent);
 }
+
+// "COPY CUT TO...": take the selected object's cut and set it up on ANOTHER
+// object, so a cut authored on one half of a symmetric part lands exactly - not
+// hand-matched - on the other. Together with the cut panel's Mirror on X / Y / Z
+// buttons this is the owner's ask: "currently it's hard to duplicate a cut
+// exactly on both halves of an object."
+//
+// A SUBMENU of the other objects, rather than a clipboard pair ("Copy cut" then
+// "Paste cut") or a picker on the target. One gesture from where the intent
+// forms - the user has just finished cutting half A and is looking at A when
+// they want the same cut on B - and no stale clipboard that can paste onto the
+// wrong object three actions later.
+//
+// Dynamic, like "Edit cut..." above it and "Invalidate cut info" beside it: the
+// object list changes under this menu, so it is destroyed and rebuilt on every
+// open rather than greyed out forever.
+void MenuFactory::append_menu_item_copy_cut(wxMenu *menu)
+{
+    const wxString menu_name = _L("Copy cut to...");
+
+    auto menu_item_id = menu->FindItem(menu_name);
+    if (menu_item_id != wxNOT_FOUND)
+        menu->Destroy(menu_item_id);
+
+    if (!obj_list()->has_selected_copyable_cut())
+        return;
+
+    const int src_idx = obj_list()->selected_cut_recipe_source();
+    if (src_idx < 0)
+        return;
+
+    const ModelObjectPtrs &objects = obj_list()->objects() ? *obj_list()->objects() : ModelObjectPtrs();
+
+    wxMenu *sub = new wxMenu();
+    int     targets = 0;
+    for (int i = 0; i < int(objects.size()); ++ i) {
+        if (i == src_idx)
+            continue;
+        // Name AND index: two imports of the same STL carry the same name, and the
+        // user has to be able to tell which row of the object list they are aiming
+        // at. The index is 1-based, matching what the list shows.
+        const wxString label = format_wxstr("%1%. %2%", i + 1, from_u8(objects[i]->name));
+        append_menu_item(sub, wxID_ANY, label,
+            // The frame caveat, said out loud rather than left as a surprise: the
+            // cut is placed in the TARGET's own model space, which is exactly right
+            // for two halves of one cut (they share that space) and a starting
+            // point for two unrelated objects posed differently on the plate.
+            _L("Open the Cut gizmo on this object with the selected object's cut - plane, surface and connectors - "
+               "applied in this object's own model space"),
+            [i](wxCommandEvent &) { obj_list()->copy_cut_to(i); },
+            "", nullptr, []() { return true; }, m_parent);
+        ++ targets;
+    }
+
+    if (targets == 0) {
+        // has_selected_copyable_cut() already guarantees a second object exists, so
+        // this is belt and braces - but an empty submenu is a dead end, and deleting
+        // the menu we just built is cheaper than showing one.
+        delete sub;
+        return;
+    }
+
+    append_submenu(menu, sub, wxID_ANY, menu_name,
+                   _L("Set this cut up on another object, ready to cut it the same way"), "",
+                   []() { return true; }, m_parent);
+}
 void MenuFactory::append_menu_item_invalidate_cut_info(wxMenu *menu)
 {
     const wxString menu_name = _L("Invalidate cut info");
@@ -2346,6 +2412,7 @@ wxMenu* MenuFactory::object_menu()
     append_menu_items_convert_unit(&m_object_menu);
     append_menu_items_flush_options(&m_object_menu);
     append_menu_item_edit_cut(&m_object_menu);
+    append_menu_item_copy_cut(&m_object_menu);
     append_menu_item_invalidate_cut_info(&m_object_menu);
     append_menu_item_edit_text(&m_object_menu);
     append_menu_item_edit_svg(&m_object_menu);

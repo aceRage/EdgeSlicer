@@ -3483,6 +3483,121 @@ void ObjectList::edit_cut()
     gizmos_mgr.open_gizmo(GLGizmosManager::EType::Cut);
 }
 
+
+// "COPY CUT TO...": is any selected object a cut that can be copied ONTO another
+// object? The enable condition for the submenu.
+//
+// Two things have to hold. The selection has to carry a recipe - which is the
+// same test "Edit cut..." makes, and deliberately the same one: a recipe is a
+// recipe whether it came from the object's own cut or from a copy. And there has
+// to be SOMEWHERE to copy it to, i.e. at least one other object in the model;
+// offering a submenu that opens onto nothing is worse than no submenu.
+//
+// Note it does NOT require the source and the target to be halves of the same
+// cut. They usually will be - that is the owner's case - but the submenu has no
+// need to know: has_cut_recipe() on the source and a different index on the
+// target is the whole condition.
+bool ObjectList::has_selected_copyable_cut() const
+{
+    if (!has_selected_editable_cut())
+        return false;
+    return m_objects != nullptr && m_objects->size() >= 2;
+}
+
+// The index of the selected object carrying a recipe, or -1. Shared by the
+// submenu (which needs to exclude it from the target list) and by copy_cut_to().
+int ObjectList::selected_cut_recipe_source() const
+{
+    wxDataViewItemArray sels;
+    GetSelections(sels);
+    for (wxDataViewItem item : sels) {
+        const int obj_idx = m_objects_model->GetObjectIdByItem(item);
+        // The same index guard has_selected_cut_object() carries: a deleted item
+        // can still be in sels.
+        if (obj_idx >= 0 && obj_idx < int(m_objects->size()) && object(obj_idx)->has_cut_recipe())
+            return obj_idx;
+    }
+    return -1;
+}
+
+// "COPY CUT TO...": open the Cut gizmo on `target_idx` with the selected
+// object's cut already set up on it.
+//
+// This is NOT a re-edit, and the difference matters. "Edit cut..." reopens the
+// cut that MADE the selection: it takes the halves out of the model, puts the
+// stored pre-cut mesh back in their place, and the commit replaces those halves.
+// A copy does none of that. The target keeps its own geometry and is cut, for the
+// first time as far as this gesture is concerned, with the source's plane,
+// surface, settings and connectors as the starting point. GLGizmoCut3D::arm_copy()
+// drops the source's stored mesh for exactly that reason, and the recipe the
+// commit writes on the target's halves is built fresh from the TARGET's own
+// pre-cut mesh under the usual "Keep cut editable" rule - so nothing is shared
+// between the two objects' recipes and the 3MF's content-addressed blobs stay
+// honest.
+//
+// IF THE TARGET ALREADY HAS ITS OWN RECIPE, this still just replaces the gizmo
+// state. It does not route into the re-edit path to un-cut the target first:
+// "copy this cut onto that" means "make that cut here", not "undo what that
+// object is". A user who wants the latter has "Edit cut..." on the target, which
+// is precisely that operation. No warning dialog either - nothing is destroyed
+// by arming the gizmo, and the cut itself is as reversible as any other.
+//
+// THE FRAME is object-local as-is: the recipe's plane_center and connector
+// positions are used in the target's own object frame unchanged. For the case
+// this exists for - the two halves of one cut, which share the frame they were
+// cut in - the source's plane already IS the target's plane, position for
+// position. The submenu's tooltip says so, because for two unrelated objects at
+// different poses on the plate it is a starting point rather than an answer.
+void ObjectList::copy_cut_to(int target_idx)
+{
+    auto plater = wxGetApp().plater();
+    if (!plater)
+        return;
+    if (target_idx < 0 || target_idx >= int(m_objects->size()))
+        return;
+
+    GLGizmosManager &gizmos_mgr = plater->get_view3D_canvas3D()->get_gizmos_manager();
+    // Do not arm from inside another gizmo: the snapshot below would refer to that
+    // gizmo's internal stack. The rule edit_cut() and simplify() both follow.
+    if (!gizmos_mgr.check_gizmos_closed_except(GLGizmosManager::EType::Cut))
+        return;
+
+    const int src_idx = selected_cut_recipe_source();
+    if (src_idx < 0 || src_idx == target_idx)
+        return;
+
+    const CutRecipe recipe = *object(src_idx)->cut_recipe;
+
+    GLGizmoCut3D *cut = dynamic_cast<GLGizmoCut3D *>(gizmos_mgr.get_gizmo(GLGizmosManager::EType::Cut));
+    if (!cut)
+        return;
+
+    // ONE snapshot brackets the whole arming - the selection change and the gizmo
+    // opening - so a single Ctrl+Z puts the user back where they were, the same
+    // granularity edit_cut() gives.
+    Plater::TakeSnapshot snapshot(plater, _u8L("Copy cut"));
+
+    // The gizmo works on the SELECTION, so the target has to become it before the
+    // gizmo opens - apply_recipe_to_gizmo() reads the selected object's instance
+    // offset to put the plane back in the world, and writes the connectors onto
+    // the selected object.
+    select_item(m_objects_model->GetItemById(target_idx));
+
+    if (!cut->arm_copy(recipe)) {
+        // The recipe describes a surface that cannot be set up - a curved cut with
+        // an invalid grid, or a drawn one with too few samples to make a path. Say
+        // so rather than opening a gizmo that would silently show the flat plane.
+        MessageDialog(plater, _L("This cut cannot be copied: the surface it describes is incomplete."),
+                      _L("Copy cut"), wxOK | wxICON_INFORMATION).ShowModal();
+        return;
+    }
+
+    // open_gizmo() toggles when the type is already current, so close first - the
+    // same two-step edit_cut() and the Emboss / SVG menu items use.
+    if (gizmos_mgr.get_current_type() == GLGizmosManager::Cut)
+        gizmos_mgr.open_gizmo(GLGizmosManager::EType::Cut);
+    gizmos_mgr.open_gizmo(GLGizmosManager::EType::Cut);
+}
 void ObjectList::invalidate_cut_info_for_selection()
 {
     const wxDataViewItem item = GetSelection();

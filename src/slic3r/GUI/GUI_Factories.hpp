@@ -189,6 +189,9 @@ private:
     void        append_menu_items_mirror(wxMenu *menu);
     // RE-EDITABLE CUTS: reopen the Cut gizmo on an existing cut.
     void        append_menu_item_edit_cut(wxMenu *menu);
+    // "Copy cut to...": a submenu of the other objects, setting the selected
+    // object's cut up on whichever one is chosen. See the .cpp.
+    void        append_menu_item_copy_cut(wxMenu *menu);
     void        append_menu_item_invalidate_cut_info(wxMenu *menu);
     void        append_menu_item_edit_text(wxMenu *menu);
     void        append_menu_item_edit_svg(wxMenu *menu);

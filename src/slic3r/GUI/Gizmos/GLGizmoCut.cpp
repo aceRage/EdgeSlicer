@@ -5412,6 +5412,13 @@ void GLGizmoCut3D::on_set_state()
         // a recipe applied before the reset would have been wiped by it.
         if (m_reedit_pending)
             begin_reedit();
+        // ... and a parked "Copy cut to...", which is the same problem: the reset
+        // above would wipe a recipe applied any earlier. Mutually exclusive with a
+        // re-edit by construction (each menu path arms exactly one), but the order
+        // is fixed rather than left to chance: a re-edit's stand-in has to be on the
+        // bed before anything reads the selection's mesh.
+        if (m_copy_pending)
+            begin_copy();
 
         m_parent.request_extra_frame();
     }
@@ -5422,6 +5429,10 @@ void GLGizmoCut3D::on_set_state()
         if (m_reedit_active)
             cancel_reedit();
         m_reedit_pending = false;
+        // A parked copy that never got consumed (the gizmo closed again before it
+        // opened) must not survive to ambush the NEXT time Cut is opened.
+        m_copy_pending = false;
+        m_copy_pending_recipe = CutRecipe();
         if (auto oc = m_c->object_clipper()) {
             oc->set_behavior(true, true, 0.);
             oc->release();
@@ -7283,6 +7294,105 @@ void GLGizmoCut3D::render_flip_plane_button(bool disable_pred /*=false*/)
         ImGui::PopStyleColor();
 }
 
+
+// ---------------------------------------------------------------------------
+// MIRROR ON X / Y / Z.
+//
+// The owner's ask: "currently it's hard to duplicate a cut exactly on both
+// halves of an object". These three buttons are the authoring half of the
+// answer (Copy cut to... is the other half), and they are ALWAYS AVAILABLE -
+// not gated to a copy-cut session - because mirroring a cut onto the opposite
+// face of the SAME part is just as useful as mirroring it onto another object,
+// and is as freely reversible as Flip cut plane already is.
+//
+// ONE CODE PATH, not six. The live state a mirror has to move is spread over
+// m_plane_center, m_rotation_m, m_curved_sheet, m_draw_chain, m_groove and the
+// object's cut_connectors - six different representations, in three different
+// frames. Rather than mirroring each of them here, the gizmo round-trips through
+// the recipe it already builds and applies: build_recipe_from_gizmo() gathers
+// all six into one object in one frame, cut_recipe_mirrored() is the pure,
+// unit-tested function that moves it, and apply_recipe_to_gizmo() puts every
+// control back. That reuses machinery the re-edit path exercises on every
+// project open rather than inventing a second, parallel one that can drift.
+//
+// THE FRAME. The recipe holds positions in the OBJECT frame (world minus the
+// instance offset - see build_recipe_from_gizmo), and so does every connector.
+// m_bb_center is in the WORLD, so the pivot has to have the same offset taken
+// off it before it goes in. Mirroring about the BOUNDING-BOX CENTRE, not the
+// world origin: the two halves of a cut sit symmetrically about that centre
+// after the first cut, and an object that is not centred on the bed origin
+// would otherwise have its mirrored cut fly off to the far side of the plate.
+//
+// THE MESH. build_recipe_from_gizmo() wants one for the content hash, and
+// hashing the real part mesh on every button press would stall the panel on a
+// heavy model for nothing: the mirror never looks at the mesh and
+// apply_recipe_to_gizmo() never reads it. An empty one it is.
+//
+// NO UPPER/LOWER SWAP. cut_recipe_mirrored() reflects the plane normal exactly
+// (see the handedness note in CutRecipe.hpp), so the side that was upper still
+// is, and the keep_/place_on_cut_/rotate_/visibility pairs stay where the user
+// put them. This is deliberately NOT the 180-degree flip, which does turn the
+// plane over and does call m_part_selection.turn_over_selection().
+void GLGizmoCut3D::mirror_cut(CutMirrorAxis axis)
+{
+    const ModelObject* mo = m_c->selection_info() ? m_c->selection_info()->model_object() : nullptr;
+
+    Vec3d instance_offset = Vec3d::Zero();
+    if (mo && !mo->instances.empty())
+        instance_offset = mo->instances.front()->get_offset();
+
+    const std::string act_name = axis == CutMirrorAxis::X ? _u8L("Mirror cut on X") :
+                                 axis == CutMirrorAxis::Y ? _u8L("Mirror cut on Y") :
+                                                            _u8L("Mirror cut on Z");
+    // Its own snapshot, exactly as flip_cut_plane() takes one: a mirror is a
+    // single, independently undoable gesture, not part of whatever came before.
+    Plater::TakeSnapshot snapshot(wxGetApp().plater(), act_name, UndoRedo::SnapshotType::GizmoAction);
+
+    const CutRecipe live     = build_recipe_from_gizmo(mo, TriangleMesh());
+    const CutRecipe mirrored = cut_recipe_mirrored(live, axis, m_bb_center - instance_offset);
+    apply_recipe_to_gizmo(mirrored);
+
+    // The caches apply_recipe_to_gizmo() does not own, because they are about the
+    // WORLD the frame sits in rather than about the frame: the instance mesh cached
+    // in the plane frame, and the groove's contour tessellation.
+    if (m_surface_mode == CutSurfaceMode::Draw) {
+        invalidate_draw_pick_mesh();
+        refresh_draw_stroke();
+    }
+    if (m_surface_mode == CutSurfaceMode::Curved) {
+        update_curved_connector_warnings();
+        m_curved_hover_ctl = m_curved_drag_ctl = -1;
+    }
+    if (CutMode(m_mode) == CutMode::cutTongueAndGroove)
+        reset_cut_by_contours();
+
+    check_and_update_connectors_state();
+    update_raycasters_for_picking();
+    m_parent.set_as_dirty();
+}
+
+// The three buttons, on their own row under "Cut position". Same style and the
+// same row idiom as Flip cut plane / Reset cut beside them - m_imgui->button
+// with SameLine between, no icons, so they read as one group.
+void GLGizmoCut3D::render_mirror_buttons()
+{
+    ImGui::AlignTextToFramePadding();
+    m_imgui->text(_L("Mirror cut") + ": ");
+    ImGui::SameLine();
+
+    // Always enabled (design point 4). There is no state in which mirroring is
+    // meaningless: a plane with no surface mirrors to the plane on the other
+    // side, which is exactly what a user asking for "the same cut on the other
+    // half" means.
+    if (m_imgui->button(_L("X"), _L("Mirror the whole cut - plane, surface and connectors - about the object's centre on the world X axis")))
+        mirror_cut(CutMirrorAxis::X);
+    ImGui::SameLine();
+    if (m_imgui->button(_L("Y"), _L("Mirror the whole cut - plane, surface and connectors - about the object's centre on the world Y axis")))
+        mirror_cut(CutMirrorAxis::Y);
+    ImGui::SameLine();
+    if (m_imgui->button(_L("Z"), _L("Mirror the whole cut - plane, surface and connectors - about the object's centre on the world Z axis")))
+        mirror_cut(CutMirrorAxis::Z);
+}
 void GLGizmoCut3D::add_vertical_scaled_interval(float interval)
 {
     ImGui::GetCurrentWindow()->DC.CursorPos.y += m_imgui->scaled(interval);
@@ -7497,6 +7607,11 @@ void GLGizmoCut3D::render_cut_plane_input_window(CutConnectors &connectors, floa
         m_imgui->disabled_end();
 
 //        render_flip_plane_button();
+
+        // "Mirror on X / Y / Z", on their own row under Cut position. Always
+        // available, on every surface kind and in both cut modes - see mirror_cut().
+        add_vertical_scaled_interval(0.75f);
+        render_mirror_buttons();
 
         if (mode == CutMode::cutPlanar) {
             // Cut thickness ("kerf"), next to the cut position - it is a property
@@ -8586,6 +8701,101 @@ bool GLGizmoCut3D::arm_reedit(const CutRecipe& recipe, const std::vector<ObjectI
     return true;
 }
 
+
+// ---------------------------------------------------------------------------
+// "COPY CUT TO..." - the third way to arm the gizmo.
+//
+// Beside "a fresh cut" (nothing armed) and "Edit cut..." (arm_reedit), this is
+// "start a fresh cut on THIS object, with THAT object's cut already set up".
+//
+// WHAT IT IS NOT: it is not a re-edit. A re-edit takes the halves out of the
+// model and puts the pre-cut stand-in back in their place, because it is going
+// to REPLACE those halves. A copy has no halves to replace - the target is being
+// cut, for the first time as far as this session is concerned - so it must run
+// on the TARGET'S OWN MESH, in place, with the ordinary gizmo session the
+// ordinary Cut button gives. m_reedit_active therefore stays false, no stand-in
+// is created, and perform_cut() writes a fresh recipe on the target's halves
+// under the usual "Keep cut editable" rule, referencing the TARGET's own pre-cut
+// mesh hash. No cross-object blob aliasing, no re-edit bookkeeping.
+//
+// THE TARGET MAY ALREADY HAVE A RECIPE, and that changes nothing here. A copy
+// onto an object that was itself cut before simply REPLACES the gizmo state -
+// the plane, the surface, the settings and the connectors the panel is showing -
+// and the cut then proceeds as an ordinary cut of whatever that object is now.
+// It deliberately does NOT route into arm_reedit() to un-cut the target first:
+// "copy this cut onto that" means "make that cut here", not "undo what that
+// object is and remake it". The user who wants the latter has "Edit cut..." on
+// the target, which is exactly that operation. The target's own old recipe is
+// left alone until the cut commits, at which point the fresh one written by
+// perform_cut() supersedes it the way any re-cut's does.
+//
+// THE FRAME. The recipe's plane_center and connector positions are in the SOURCE
+// object's own frame, and they are used in the TARGET's object frame unchanged -
+// design section 2's "object-local as-is". For the case this feature is for, two
+// halves cut from one mesh, that is exactly right: they share the frame they were
+// cut in, so the source's plane already IS the target's plane, position for
+// position. For two unrelated objects sitting at different poses on the plate it
+// is a starting point the user then drags, which is why the submenu says so.
+// (Design section 4's "match world position instead" option is deliberately out
+// of scope for v1.)
+//
+// Like arm_reedit, this only PARKS the request: the gizmo's own opening path
+// flattens the session state, so the recipe is applied after that rather than
+// before, or the reset would wipe it.
+bool GLGizmoCut3D::arm_copy(const CutRecipe& recipe)
+{
+    // Unlike a re-edit, no pre-cut mesh is needed - the target's own mesh is what
+    // gets cut - so recipe.valid() is deliberately NOT required here. What is
+    // required is that the surface it describes can actually be set up.
+    if (!cut_recipe_kind_valid(int(recipe.kind)))
+        return false;
+    if (recipe.kind == CutRecipeKind::Curved && !recipe.sheet.valid())
+        return false;
+    if (recipe.kind == CutRecipeKind::Drawn && recipe.stroke.samples.size() < size_t(DrawCutStroke::MinSamples))
+        return false;
+
+    m_copy_pending        = true;
+    m_copy_pending_recipe = recipe;
+    // The mesh is the SOURCE's pre-cut shape and has no business on the target.
+    // Dropping it here rather than at the call site is what guarantees nothing
+    // downstream can accidentally cut the target with the source's geometry.
+    m_copy_pending_recipe.mesh = TriangleMesh();
+    m_copy_pending_recipe.mesh_hash.clear();
+    return true;
+}
+
+// Consume a parked copy. Called from on_set_state() at the same point a parked
+// re-edit is consumed, and for the same reason.
+void GLGizmoCut3D::begin_copy()
+{
+    if (!m_copy_pending)
+        return;
+    m_copy_pending = false;
+
+    // The ordinary session, with every control pre-populated. That is the whole
+    // of it: apply_recipe_to_gizmo() reads the CURRENT selection's instance offset
+    // when it puts the plane back, so pointing it at the target object is all the
+    // frame mapping there is.
+    apply_recipe_to_gizmo(m_copy_pending_recipe);
+    m_copy_pending_recipe = CutRecipe();
+
+    // The same caches mirror_cut() refreshes, for the same reason: the plane frame
+    // just moved to somewhere the cached meshes in it know nothing about.
+    if (m_surface_mode == CutSurfaceMode::Draw) {
+        invalidate_draw_pick_mesh();
+        refresh_draw_stroke();
+    }
+    if (m_surface_mode == CutSurfaceMode::Curved) {
+        update_curved_connector_warnings();
+        m_curved_hover_ctl = m_curved_drag_ctl = -1;
+    }
+    if (CutMode(m_mode) == CutMode::cutTongueAndGroove)
+        reset_cut_by_contours();
+
+    check_and_update_connectors_state();
+    update_raycasters_for_picking();
+    m_parent.set_as_dirty();
+}
 // Become a re-edit session.
 //
 // The halves are REMOVED from the model and a stand-in carrying the pre-cut mesh

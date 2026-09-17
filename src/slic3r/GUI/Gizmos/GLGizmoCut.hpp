@@ -714,10 +714,22 @@ class GLGizmoCut3D : public GLGizmoBase
     CutRecipe             m_reedit_pending_recipe;
     std::vector<ObjectID> m_reedit_pending_object_ids;
 
+    // "Copy cut to...": the same parking, for the third way to arm the gizmo.
+    // Separate from the re-edit slot on purpose - a copy is NOT a re-edit (no
+    // stand-in, no halves replaced, m_reedit_active stays false), and sharing one
+    // flag would make it far too easy for a later change to route one down the
+    // other's path. See arm_copy() in the .cpp.
+    bool      m_copy_pending{ false };
+    CutRecipe m_copy_pending_recipe;
+
     // Take the parked recipe and become a re-edit session: hide the halves, put
     // the pre-cut mesh on the bed in their place, and populate every control from
     // the recipe. Called at the end of on_set_state()'s On branch.
     void begin_reedit();
+    // Take the parked COPY and set every control from it, in an ordinary (not
+    // re-edit) session on the target's own mesh. Called from the same point in
+    // on_set_state() begin_reedit() is.
+    void begin_copy();
     // Undo begin_reedit(): remove the stand-in, bring the halves back. Called
     // when the gizmo closes without a cut.
     void cancel_reedit();
@@ -857,6 +869,14 @@ public:
     bool arm_reedit(const CutRecipe& recipe, const std::vector<ObjectID>& object_ids);
     bool is_reedit_active() const { return m_reedit_active; }
 
+    // "Copy cut to...": arm an ORDINARY cut session on the currently-selected
+    // object with this recipe's plane, surface, settings and connectors already
+    // set up - the source's recipe used as-is in the target's own object frame.
+    // The recipe's mesh is dropped: the target is cut with its OWN geometry, and
+    // the fresh recipe the commit writes references the target's own mesh hash.
+    // False when the recipe describes a surface that cannot be set up at all.
+    bool arm_copy(const CutRecipe& recipe);
+
     std::string get_tooltip() const override;
     bool unproject_on_cut_plane(const Vec2d& mouse_pos, Vec3d& pos, Vec3d& pos_world, bool respect_contours = true);
     bool gizmo_event(SLAGizmoEventType action, const Vec2d& mouse_position, bool shift_down, bool alt_down, bool control_down);
@@ -948,6 +968,13 @@ protected:
     void process_contours();
     void reset_cut_by_contours();
     void render_flip_plane_button(bool disable_pred = false);
+    // "Copy cut to..." + Mirror buttons, step 2. Mirror the WHOLE live cut -
+    // plane, surface, groove and connectors - about the object's bounding-box
+    // centre on a WORLD axis, by round-tripping through the recipe: see
+    // mirror_cut() in the .cpp for why that round trip rather than moving the six
+    // live representations by hand, and CutRecipe.hpp for the handedness rule.
+    void mirror_cut(CutMirrorAxis axis);
+    void render_mirror_buttons();
     void add_vertical_scaled_interval(float interval);
     void add_horizontal_scaled_interval(float interval);
     void add_horizontal_shift(float shift);

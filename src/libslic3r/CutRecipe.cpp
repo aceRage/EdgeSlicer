@@ -451,4 +451,174 @@ CutRecipeStroke cut_recipe_stroke_from_chain(const DrawCutChain& chain, double s
     return out;
 }
 
+
+// ---------------------------------------------------------------------------
+// MIRRORING.
+//
+// The contract, the frames and the handedness argument are all in CutRecipe.hpp
+// above cut_recipe_mirrored(); this is only the arithmetic.
+// ---------------------------------------------------------------------------
+
+Vec3d cut_mirror_vector(CutMirrorAxis axis)
+{
+    switch (axis) {
+    case CutMirrorAxis::X: return Vec3d(-1.0,  1.0,  1.0);
+    case CutMirrorAxis::Y: return Vec3d( 1.0, -1.0,  1.0);
+    case CutMirrorAxis::Z: return Vec3d( 1.0,  1.0, -1.0);
+    }
+    return Vec3d::Ones();
+}
+
+Vec3d cut_mirror_point(const Vec3d& p, CutMirrorAxis axis, const Vec3d& pivot)
+{
+    const Vec3d m = cut_mirror_vector(axis);
+    return pivot + (p - pivot).cwiseProduct(m);
+}
+
+Transform3d cut_mirror_rotation(const Transform3d& rotation_m, CutMirrorAxis axis)
+{
+    const Vec3d    m = cut_mirror_vector(axis);
+    const Matrix3d R = rotation_m.linear();
+
+    // M * R, column by column. M is diagonal, so this is a row scaling.
+    Matrix3d out;
+    for (int c = 0; c < 3; ++ c)
+        out.col(c) = R.col(c).cwiseProduct(m);
+
+    // The one negated column, which is what turns the det -1 reflected frame back
+    // into a det +1 rotation. IT MUST BE THE SECOND (the frame's Y / the sheet's v)
+    // and not "whichever looks convenient": the whole point of fixing it is that
+    // the plane-LOCAL residual R'^T * M * R then comes out as diag(1, -1, 1) for
+    // every axis and every starting rotation, so the sheet grid and the stroke
+    // samples always take the same one fixed re-indexing. Negating column 1 or 3
+    // would work just as well for the determinant and would make that residual a
+    // u-mirror or a z-mirror instead - i.e. it would move the plane normal or swap
+    // which in-plane axis is re-indexed, and the (u,v) bookkeeping would become a
+    // case analysis. Column 3 in particular is the plane NORMAL; negating it would
+    // flip which half counts as upper, and then the keep_/place_on_cut_/rotate_
+    // pairs really would have to be swapped.
+    out.col(1) = -out.col(1);
+
+    // Re-orthonormalize. M * R is exactly orthonormal in theory and the column
+    // negation does not change that, but rotation_m has been through a long chain
+    // of products by the time it reaches here and may have drifted; a frame that
+    // is only nearly orthonormal is the kind of thing that shows up much later as
+    // a connector pocket that does not quite line up. Gram-Schmidt off the NORMAL
+    // (column 3), because that is the axis that must be exact - it is the cut.
+    Vec3d z = out.col(2);
+    if (z.norm() < 1e-12)
+        z = Vec3d::UnitZ();
+    z.normalize();
+    Vec3d x = out.col(0) - z * z.dot(out.col(0));
+    if (x.norm() < 1e-12) {
+        // Degenerate input frame: pick any axis perpendicular to z rather than
+        // returning something non-orthogonal.
+        x = std::abs(z.x()) < 0.9 ? Vec3d::UnitX() : Vec3d::UnitY();
+        x = x - z * z.dot(x);
+    }
+    x.normalize();
+    const Vec3d y = z.cross(x);   // right-handed by construction, so det == +1
+
+    Transform3d t = Transform3d::Identity();
+    t.matrix().block(0, 0, 3, 3) << x, y, z;
+    return t;
+}
+
+// The plane-LOCAL residual of the mirror: negate local y. See the header - this
+// is diag(1, -1, 1) for every axis, by the column choice in cut_mirror_rotation().
+static inline Vec3d cut_mirror_local(const Vec3d& v) { return Vec3d(v.x(), -v.y(), v.z()); }
+
+CutRecipe cut_recipe_mirrored(const CutRecipe& src, CutMirrorAxis axis, const Vec3d& pivot)
+{
+    CutRecipe r = src;
+
+    // --- the cut frame ----------------------------------------------------
+    r.plane_center = cut_mirror_point(src.plane_center, axis, pivot);
+    r.rotation_m   = cut_mirror_rotation(src.rotation_m, axis);
+
+    // --- the surface ------------------------------------------------------
+    // The sheet: mirror the ROWS (the v index, which runs over ny with stride nx)
+    // and leave the values alone. f'(u, -v) = f(u, v) is the whole change, because
+    // local z is untouched by the residual.
+    //
+    // THE AXIS TRAP CurvedCutSheet::flip_about_u() documents applies here word for
+    // word: the v index runs over NY and the stride is NX. On a square grid getting
+    // those the wrong way round is invisible; on a 10 x 2 sheet it reads off the
+    // end. The [CutMirror] tests use a non-square grid for exactly that reason.
+    if (r.kind == CutRecipeKind::Curved && src.sheet.valid()) {
+        const int nx = src.sheet.nx, ny = src.sheet.ny;
+        std::vector<double> nz(src.sheet.values.size(), 0.0);
+        for (int j = 0; j < ny; ++ j)
+            for (int i = 0; i < nx; ++ i)
+                nz[size_t(j) * size_t(nx) + size_t(i)] =
+                    src.sheet.values[size_t(ny - 1 - j) * size_t(nx) + size_t(i)];
+        r.sheet.values = std::move(nz);
+        // nx / ny / half_size_u / half_size_v are unchanged: the grid is symmetric
+        // in v about its own centre, so mirroring the indices lands exactly on grid
+        // points and the extent does not move. No evaluation, no re-sampling,
+        // nothing lost - and the operation is its own inverse.
+    }
+
+    // The stroke: the samples and their normals are directions and points in the
+    // plane frame, so both take the residual. `facet` is an index into the pre-cut
+    // mesh and means nothing after a mirror of the FRAME - but it means nothing to
+    // the cut either (finish() uses pos and normal), and the flip-plane path leaves
+    // it alone for the same reason, so it rides through untouched.
+    if (r.kind == CutRecipeKind::Drawn) {
+        for (DrawCutSample& s : r.stroke.samples) {
+            s.pos    = cut_mirror_local(s.pos);
+            s.normal = cut_mirror_local(s.normal);
+        }
+        // The sample ORDER is untouched, so stroke_bounds stays valid as it stands -
+        // the same reason flip_cut_plane() rebuilds the chain from its own ranges
+        // rather than calling set_samples(). A mirror reverses the winding of a
+        // closed loop, which DrawCut's own finish() handles (it derives binormals
+        // from the path either way); reversing the list here would instead invalidate
+        // every stored range.
+    }
+    // draw_view_dir is a direction in the plane frame too, and it is stored on every
+    // recipe rather than only on a drawn one, so it is mirrored unconditionally - a
+    // recipe that later becomes a drawn cut should not carry a stale view direction.
+    r.draw_view_dir = cut_mirror_local(src.draw_view_dir);
+
+    // The groove: every field is a scalar magnitude (depth, width, the two angles
+    // and their _init / _tolerance partners). None of them encodes a direction in
+    // the plane, so a mirror passes through them unchanged and only the frame they
+    // sit on moves. Nothing to do - r.groove is already the copy.
+
+    // --- connectors -------------------------------------------------------
+    for (size_t i = 0; i < r.connectors.size(); ++ i) {
+        const CutRecipeConnector& c = src.connectors[i];
+        CutRecipeConnector&       o = r.connectors[i];
+        // pos is in the OBJECT frame, the same frame plane_center is in, so it takes
+        // the same reflection about the same pivot.
+        o.pos        = cut_mirror_point(c.pos, axis, pivot);
+        o.rotation_m = cut_mirror_rotation(c.rotation_m, axis);
+        // z_angle turns the connector's own polygon about its own axis. A mirror
+        // presents that polygon the other way round, so for a shape that HAS an
+        // orientation the angle negates; for a Circle it means nothing and negating
+        // it would only make "mirror twice" fail to be a bit-exact identity for no
+        // benefit.
+        if (o.shape != int(CutConnectorShape::Circle))
+            o.z_angle = -c.z_angle;
+        // type, style, shape, the radii, the tolerances and the flexi parameters are
+        // all untouched. type especially: Plug / Dowel / Snap / FlexiJoint is a
+        // mating ROLE, not a chirality. A mirrored half still needs the mating
+        // partner it had, and silently turning a plug into a dowel would break the
+        // one use case this feature exists for.
+    }
+
+    // The after-cut attributes (keep_upper / keep_lower, place_on_cut_*, rotate_*,
+    // the visibilities) are copied straight through and NOT swapped. They would have
+    // to be swapped if the mirror inverted the plane normal - but it does not: the
+    // column choice in cut_mirror_rotation() maps the normal e3 to M*e3 exactly, so
+    // the side that was upper is still upper. See the header.
+
+    // The mesh and its hash ride through untouched. The recipe's mesh is the PRE-CUT
+    // shape, and mirroring a cut does not change the object it is being made in -
+    // whether it is the same object (the panel's Mirror buttons) or a different one
+    // (Copy cut to..., which re-derives the mesh from the target at commit time).
+
+    return r;
+}
 } // namespace Slic3r
