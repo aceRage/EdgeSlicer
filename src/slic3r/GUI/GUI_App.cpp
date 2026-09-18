@@ -4699,11 +4699,9 @@ void GUI_App::start_remote_access()
     wxString    env_token;
     std::string token;
     bool        phone = false;
-    bool        force = false; // the env var means "on, whatever the hub remembers" (gates, agents)
     if (wxGetEnv("SNORCA_PHONE_ACCESS", &env_token) && !env_token.empty()) {
         token = env_token.ToStdString();
         phone = true;
-        force = true;
     } else if (app_config->get("stream_phone_access") == "1") {
         token = app_config->get("stream_phone_token");
         phone = true;
@@ -4714,18 +4712,12 @@ void GUI_App::start_remote_access()
     // `phone` is only a hint: the hub keeps its own copy of the switch in settings.json and
     // that copy wins, because this app config only learns of a change made from the hub page
     // while the Stream panel is polling - which is how "home mode off" used to come back on
-    // at the next slicer start. The env var is the one caller that really means "on".
-    //
-    // The forced switch-on goes back to the GUI thread (CallAfter is thread-safe) rather than
-    // running on this worker: batch 65 crashed every hidden gate instance with an access
-    // violation about a second after it registered, and the only difference from the working
-    // build was this POST made from the detached thread. The Stream panel has always made the
-    // same call from the GUI thread without trouble, so that is the path it takes.
-    std::thread([token, phone, force]() {
-        RemoteHub::ensure_running(token, phone);
-        if (force)
-            wxGetApp().CallAfter([token]() { RemoteHub::set_phone(true, token); });
-    }).detach();
+    // at the next slicer start. The hint decides only for a data dir that has never saved the
+    // switch (a gate's scratch dir, a first run). A hub that is already running is left as it
+    // is: an extra POST /hub/phone from here (batches 65 and 66) made every hidden gate
+    // instance crash a second after it registered, from either thread, and the gates that
+    // need phone access start their own hub with --hub-phone anyway.
+    std::thread([token, phone]() { RemoteHub::ensure_running(token, phone); }).detach();
 }
 
 void GUI_App::recreate_GUI(const wxString &msg_name)
