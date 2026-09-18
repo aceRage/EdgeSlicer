@@ -105,6 +105,20 @@ select { background: #222; color: #ddd; border: 1px solid #555; border-radius: 6
         for (var r = 0; r < n; r++) for (var c = 0; c < n; c++) if (qr.isDark(r, c)) ctx.fillRect(margin + c * scale, margin + r * scale, scale, scale);
         return true;
     }
+    // A firewall/port warning, one short sentence plus an optional "Show command" toggle that
+    // reveals the exact netsh line - same styling as funnelNote's .adv/.cmd below. `command` is
+    // omitted (no toggle drawn) when there is nothing to run, e.g. the "could not be checked" note.
+    function warningLine(body, text, command) {
+        body.appendChild(el('div', 'err', text));
+        if (!command) return;
+        var d = document.createElement('details'); d.className = 'adv';
+        var sum = document.createElement('summary'); sum.textContent = 'Show command';
+        d.appendChild(sum);
+        var cmd = el('div', 'cmd', command);
+        d.appendChild(cmd);
+        d.appendChild(copyButton(command));
+        body.appendChild(d);
+    }
     // A one-line reason the phone might not be able to reach this PC, built from port_note (the
     // hub landed on a port other than 13640 because something else already held it) and
     // lan_firewall (Windows Firewall's view of that port), same idea as videoLine() below but for
@@ -119,12 +133,12 @@ select { background: #222; color: #ddd; border: 1px solid #555; border-radius: 6
             var lower = heldBy.toLowerCase();
             if (lower.indexOf('edgeslicer') !== -1 || lower.indexOf('snapmaker_orca') !== -1)
                 msg += ' That looks like another EdgeSlicer install (an older data dir) still running.';
-            msg += ' If a phone cannot connect, allow EdgeSlicer.exe through Windows Firewall for TCP ' +
-                   pn.default_port + '-' + (pn.default_port + 19) + ', or stop the other program and restart EdgeSlicer.';
-            body.appendChild(el('div', 'err', msg));
+            else
+                msg += ' Allow EdgeSlicer.exe through Windows Firewall for this range, or stop the other program.';
+            warningLine(body, msg, pn.command);
         }
         if (lf && lf.firewall && lf.firewall !== 'off' && lf.firewall !== 'allowed' && lf.firewall !== 'unknown') {
-            body.appendChild(el('div', 'err', lf.note));
+            warningLine(body, lf.note, lf.command);
         }
     }
     function renderPhone() {
@@ -166,7 +180,11 @@ select { background: #222; color: #ddd; border: 1px solid #555; border-radius: 6
             body.appendChild(el('div', 'note', 'Direct video (WebRTC) on UDP/TCP port ' + v.webrtc_port + '; Windows Firewall already allows go2rtc.'));
             return;
         }
-        body.appendChild(el('div', v.firewall === 'unknown' || v.firewall === 'off' ? 'note' : 'err', v.note));
+        if (v.firewall === 'unknown' || v.firewall === 'off') {
+            body.appendChild(el('div', 'note', v.note));
+        } else {
+            warningLine(body, v.note, v.command);
+        }
         if (v.go2rtc_exe) body.appendChild(el('div', 'note', v.go2rtc_exe));
         body.appendChild(el('div', 'note', 'Video still works without it - the phone falls back to the relayed stream through this hub.'));
     }

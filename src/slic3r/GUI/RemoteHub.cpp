@@ -1327,7 +1327,8 @@ static std::string port_holder_description(int port)
 struct FirewallState
 {
     std::string state { "unknown" }; // allowed | partial | missing | blocked | unknown
-    std::string note;                // one sentence, shown on the hub page (and on the phone)
+    std::string note;                // one short sentence, shown on the hub page (and on the phone)
+    std::string command;             // the exact netsh line, shown only behind "Show command"
     std::string networks;            // profiles the PC's live networks are in ("Public, Private")
     long long   checked_at { 0 };
 };
@@ -1375,8 +1376,8 @@ static FirewallState firewall_query(const std::string& exe, int port, const std:
     int         code = 0;
     if (!run_capture({ "powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script }, out, code, 30000) ||
         out.find("DONE") == std::string::npos) {
-        fw.note = "Windows Firewall could not be checked. If the phone cannot connect, allow " +
-                  label + " (inbound, TCP port " + std::to_string(port) + "), or run: " + netsh_hint;
+        fw.note    = "Windows Firewall could not be checked for " + label + ".";
+        fw.command = netsh_hint;
         return fw;
     }
     std::vector<std::string> rules, blocks, nets;
@@ -1401,27 +1402,33 @@ static FirewallState firewall_query(const std::string& exe, int port, const std:
         else if (!covers(rules, n) && std::find(uncovered.begin(), uncovered.end(), n) == uncovered.end()) uncovered.push_back(n);
     }
     fw.networks = join_words(nets, ", ");
-    const std::string allow = "In Windows Defender Firewall allow " + label + " (inbound), or as Administrator run: " + netsh_hint;
+    // One short sentence for the page; the exact netsh line goes in `command`, shown only behind
+    // "Show command" (hub.html). `note` used to carry both - callers that still want the full
+    // wording (older readers, logging) can concatenate note + " " + command themselves.
     if (!denied.empty()) {
         // Windows writes one of these when the user dismisses its "allow access?" prompt, and a
         // block rule wins over any allow rule, so this has to be reported ahead of them.
-        fw.state = "blocked";
-        fw.note  = "Windows Firewall has a rule that blocks " + label + " on " + join_words(denied, " and ") +
-                   " networks (it is written when the firewall prompt is dismissed). Delete that rule in Windows Defender Firewall > Inbound Rules. " + allow;
+        fw.state   = "blocked";
+        fw.note    = "Windows Firewall has a rule that blocks " + label + " on this " +
+                     join_words(denied, " and ") + " network.";
+        fw.command = netsh_hint;
     } else if (rules.empty()) {
-        fw.state = "missing";
-        fw.note  = "Windows Firewall has no inbound rule for " + label + ". " + allow;
+        fw.state   = "missing";
+        fw.note    = "Windows Firewall has no rule for " + label + " on this network.";
+        fw.command = netsh_hint;
     } else if (!uncovered.empty()) {
-        fw.state = "partial";
-        fw.note  = "Windows Firewall allows " + label + " on " + join_words(rules, " / ") + " networks, but this PC is on a " +
-                   join_words(uncovered, " and ") + " network. " + allow;
+        fw.state   = "partial";
+        fw.note    = "Windows Firewall allows " + label + " on " + join_words(rules, " / ") +
+                     " networks, but this PC is on " + join_words(uncovered, " and ") + ".";
+        fw.command = netsh_hint;
     } else {
         fw.state = "allowed";
         fw.note  = "";
     }
 #else
     (void) exe; (void) port; (void) netsh_hint;
-    fw.note = "Direct connections need inbound TCP port " + std::to_string(port) + " open for " + label + ".";
+    fw.note    = "Direct connections need an inbound port open for " + label + ".";
+    fw.command = netsh_hint;
 #endif
     return fw;
 }
@@ -1999,6 +2006,7 @@ json HubServer::info_json()
     v["webrtc_port"]  = m_webrtc_port;
     v["firewall"]     = m_webrtc_port ? fw.state : std::string("off");
     v["note"]         = m_webrtc_port ? fw.note : std::string("No free port for WebRTC video; the phone uses relayed video.");
+    v["command"]      = m_webrtc_port ? fw.command : std::string();
     v["networks"]     = fw.networks;
     v["go2rtc_exe"]   = go2rtc_exe_path();
     j["video"]       = v;
@@ -2036,6 +2044,12 @@ json HubServer::info_json()
         note["default_port"] = HUB_PORT;
         note["port"]         = m_port;
         note["held_by"]      = m_port_note_holder;
+        // The netsh line hub.html shows behind "Show command" if the user wants to allow this
+        // build through the firewall rather than stop the other program - same port-range
+        // convention as lan_firewall_state()'s hint below.
+        note["command"] = "netsh advfirewall firewall add rule name=\"EdgeSlicer\" dir=in action=allow program=\"" +
+                           current_exe() + "\" protocol=TCP localport=" + std::to_string(HUB_PORT) + "-" +
+                           std::to_string(HUB_PORT + 19) + " profile=private,domain";
         j["port_note"] = note;
     }
     // The phone/LAN listener's own firewall reachability, same shape as video.firewall/note above
@@ -2045,6 +2059,7 @@ json HubServer::info_json()
     lv["port"]     = m_port;
     lv["firewall"] = (m_phone && m_lan) ? lan_fw.state : std::string("off");
     lv["note"]     = (m_phone && m_lan) ? lan_fw.note : std::string();
+    lv["command"]  = (m_phone && m_lan) ? lan_fw.command : std::string();
     lv["networks"] = lan_fw.networks;
     j["lan_firewall"] = lv;
     return j;
@@ -3014,7 +3029,8 @@ FirewallState HubServer::firewall_state(bool refresh)
                 m_fw = fw;
             }
             if (fw.state != "allowed")
-                BOOST_LOG_TRIVIAL(info) << "RemoteHub: Windows Firewall for go2rtc.exe: " << fw.state << " (" << fw.note << ")";
+                BOOST_LOG_TRIVIAL(info) << "RemoteHub: Windows Firewall for go2rtc.exe: " << fw.state << " (" << fw.note
+                                         << (fw.command.empty() ? "" : " " + fw.command) << ")";
             m_fw_busy = false;
         }).detach();
     }
@@ -3048,7 +3064,8 @@ FirewallState HubServer::lan_firewall_state(bool refresh)
                 m_lan_fw = fw;
             }
             if (fw.state != "allowed")
-                BOOST_LOG_TRIVIAL(info) << "RemoteHub: Windows Firewall for the phone/LAN port " << port << ": " << fw.state << " (" << fw.note << ")";
+                BOOST_LOG_TRIVIAL(info) << "RemoteHub: Windows Firewall for the phone/LAN port " << port << ": " << fw.state << " (" << fw.note
+                                         << (fw.command.empty() ? "" : " " + fw.command) << ")";
             m_lan_fw_busy = false;
         }).detach();
     }
