@@ -25,6 +25,9 @@ h1 { font-size: 18px; color: #fff; margin-bottom: 16px; }
 .note { color: #999; font-size: 12px; margin-top: 8px; }
 .note.strong { color: #ccc; font-weight: 600; }
 .err { color: #e88; }
+.adv { margin-top: 10px; }
+.adv > summary { color: #999; font-size: 12px; cursor: pointer; user-select: none; }
+.adv .cmd { font-family: Consolas, monospace; font-size: 12px; color: #d9b; background: #2a2a2a; border-radius: 4px; padding: 6px 8px; margin: 6px 0; word-break: break-all; user-select: all; }
 .login { display: flex; justify-content: space-between; align-items: center; background: #2f2f2f; border-radius: 6px; padding: 4px 8px; margin: 3px 0; font-size: 13px; }
 .btn.small { padding: 2px 8px; font-size: 12px; margin: 0; }
 .addrow { display: flex; gap: 6px; align-items: center; margin: 6px 0; }
@@ -167,6 +170,31 @@ select { background: #222; color: #ddd; border: 1px solid #555; border-radius: 6
         if (v.go2rtc_exe) body.appendChild(el('div', 'note', v.go2rtc_exe));
         body.appendChild(el('div', 'note', 'Video still works without it - the phone falls back to the relayed stream through this hub.'));
     }
+    // The one place a link is offered for copying. execCommand is the fallback: the hub page is
+    // served over plain http on loopback, and navigator.clipboard is only defined in a secure
+    // context, so on some browsers it is simply not there.
+    function copyButton(text) {
+        var b = el('span', 'btn dim small', 'Copy link');
+        b.onclick = function() {
+            var done = function() { b.textContent = 'Copied'; setTimeout(function() { b.textContent = 'Copy link'; }, 1500); };
+            if (navigator.clipboard && navigator.clipboard.writeText) { navigator.clipboard.writeText(text).then(done, function() {}); return; }
+            var ta = document.createElement('textarea'); ta.value = text; document.body.appendChild(ta);
+            ta.select(); try { document.execCommand('copy'); done(); } catch (e) {} document.body.removeChild(ta);
+        };
+        return b;
+    }
+    // Funnel is documented and never automated. It publishes this hub to the entire public
+    // internet with nothing but the path token in front of it - a deliberate trade for somebody
+    // who cannot put Tailscale on the phone, and not something that should have a button.
+    function funnelNote(body, rm) {
+        var d = document.createElement('details'); d.className = 'adv';
+        var sum = document.createElement('summary'); sum.textContent = 'Advanced: no Tailscale app on the phone (Funnel)';
+        d.appendChild(sum);
+        d.appendChild(el('div', 'note', 'Tailscale Funnel publishes this hub on the public internet under your tailnet\'s name, so any phone or browser can open it with no Tailscale app at all. The only thing guarding it is then the secret token in the link - there is no tailnet sign-in in front of it any more, and the allow-list below stops applying.'));
+        d.appendChild(el('div', 'cmd', rm.funnel_command || 'tailscale funnel --bg --https=443 http://127.0.0.1:13640'));
+        d.appendChild(el('div', 'note', 'Not recommended, and EdgeSlicer never runs it for you: run it yourself in a terminal if you accept that trade, and `tailscale funnel --https=443 off` to undo it. Turning remote access off here does not turn Funnel off.'));
+        body.appendChild(d);
+    }
     function renderRemote() {
         var body = document.getElementById('remotebody');
         if (!info || !info.remote) return;
@@ -174,28 +202,53 @@ select { background: #222; color: #ddd; border: 1px solid #555; border-radius: 6
         if (key === lastRemote && body.dataset.done) return; // keep the canvas
         lastRemote = key; body.dataset.done = '1';
         body.innerHTML = '';
-        if (!rm.installed) {
+        // One state, one sentence, one link: the hub classifies (RemoteHub.cpp,
+        // Testing::classify_remote_access) and this only draws. `access` is always present; the
+        // older flat fields are still read below for the parts that are not about the state.
+        var ac = rm.access || { state: rm.installed ? 'error' : 'not_installed', message: rm.error || '', action: '', action_url: '' };
+        var st = ac.state;
+        function retry() { lastRemote = null; post('/hub/remote?refresh=1').then(function(j) { info = j; renderRemote(); }).catch(refresh); }
+        function actionButton() {
+            if (!ac.action) return;
+            if (ac.action_url) {
+                var a = document.createElement('a'); a.className = 'btn'; a.textContent = ac.action;
+                a.href = ac.action_url; a.target = '_blank'; a.rel = 'noopener noreferrer';
+                body.appendChild(a);
+            } else {
+                var b = el('span', 'btn dim', ac.action); b.onclick = retry; body.appendChild(b);
+            }
+        }
+        if (st === 'not_installed' || st === 'not_signed_in' || st === 'not_running') {
             body.appendChild(el('div', '', 'Tailscale gives your phone a private, encrypted path to this hub from anywhere - no port forwarding, no hosting fees, and the phone\'s Tailscale sign-in is the second factor.'));
-            body.appendChild(el('div', 'note', 'It is not installed on this PC. Install it from tailscale.com/download and sign in, put the Tailscale app on the phone signed in to the same account, then reload this page.'));
+            body.appendChild(el('div', st === 'not_installed' ? 'note' : 'err', ac.message));
+            if (st === 'not_installed')
+                body.appendChild(el('div', 'note', 'Install it on the phone as well, signed in to the same account, then come back here and turn remote access on.'));
+            actionButton();
+            funnelNote(body, rm);
             videoLine(body);
             return;
         }
-        if (rm.state !== 'Running') {
-            body.appendChild(el('div', 'err', rm.error || ('Tailscale is ' + rm.state)));
-            body.appendChild(el('div', 'note', 'Open Tailscale from the system tray and sign in, then reload this page.'));
+        if (st === 'https_off') {
+            // The one failure nobody can fix from this PC: it is a tailnet-wide setting, so the
+            // button opens the exact admin-console page that has the switch.
+            body.appendChild(el('div', 'err', ac.message));
+            actionButton();
+            var again = el('span', 'btn dim', 'Try again'); again.onclick = retry; body.appendChild(again);
+            funnelNote(body, rm);
             videoLine(body);
             return;
         }
-        if (rm.on && rm.url) {
+        if (st === 'serving' && rm.url) {
             body.appendChild(el('div', 'note', 'Tailscale required on this machine and remote device.'));
             var canvas = el('canvas', 'qr'); body.appendChild(canvas); drawQr(canvas, rm.url);
             body.appendChild(el('div', 'url', rm.url));
+            body.appendChild(copyButton(rm.url));
             body.appendChild(el('div', 'note', 'Works from anywhere. Scan the Home code as well: the phone page\'s Connection control hops back to it whenever you are on the home network.'));
         } else {
             body.appendChild(el('div', 'note', 'Tailscale required on this machine and remote device.'));
-            if (!rm.https) body.appendChild(el('div', 'err', 'HTTPS certificates are not enabled for your tailnet yet: Tailscale admin console > DNS > HTTPS Certificates > Enable.'));
+            body.appendChild(el('div', st === 'error' ? 'err' : 'note', ac.message));
+            if (st === 'error') { var r2 = el('span', 'btn dim', 'Try again'); r2.onclick = retry; body.appendChild(r2); }
         }
-        if (rm.error) body.appendChild(el('div', 'err', rm.error));
         body.appendChild(el('div', 'note', 'Allowed Tailscale Users'));
         (rm.allowed_logins || []).forEach(function(l) {
             var row = el('div', 'login');
@@ -212,6 +265,7 @@ select { background: #222; color: #ddd; border: 1px solid #555; border-radius: 6
         addrow.appendChild(add);
         body.appendChild(addrow);
         if (rm.last_login) body.appendChild(el('div', 'note', 'Last remote visit: ' + rm.last_login));
+        funnelNote(body, rm);
         videoLine(body);
         var tog = el('span', 'btn' + (rm.on ? ' warn' : ''), rm.on ? 'Disable' : 'Enable');
         tog.onclick = function() {
