@@ -288,6 +288,14 @@ modules:
         dest: external-packages/libnoise
         sha256: 96ffd6cc47898dd8147aab53d7d1b1911b507d9dbaecd5613ca2649468afd8b6
 
+      # Manifold - the Mesh Boolean backend. Added to deps/ without being listed here,
+      # so the sandbox (which has no network) hit "Could not resolve host: github.com"
+      # and orca_deps died. url/sha256 must stay in step with deps/Manifold/Manifold.cmake.
+      - type: file
+        url: https://github.com/elalish/manifold/releases/download/v3.5.2/manifold-3.5.2.tar.gz
+        dest: external-packages/Manifold
+        sha256: ce5f4d87877daca99a910d0af73c028f2a36b9288dd2bf3cd1cecf8faff9f7c8
+
   - name: Snapmaker_Orca 
     buildsystem: simple
     build-commands:
