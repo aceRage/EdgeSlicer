@@ -23,11 +23,11 @@
     </recommends>
     <screenshots>
 	    <screenshot type="default">
-		    <image>https://raw.githubusercontent.com/powpingdone/com.github.softfever.orcaslicer/master/images/1.png</image>
+		    <image>https://raw.githubusercontent.com/aceRage/EdgeSlicer/main/scripts/flatpak/images/1.png</image>
 		    <caption>A model ready to be sliced on a buildplate.</caption>
 	    </screenshot>
 	    <screenshot>
-		<image>https://raw.githubusercontent.com/powpingdone/com.github.softfever.orcaslicer/master/images/2.png</image>
+		<image>https://raw.githubusercontent.com/aceRage/EdgeSlicer/main/scripts/flatpak/images/2.png</image>
 		<caption>A calibration test ready to be printed out.</caption>
 	    </screenshot>
     </screenshots>
@@ -38,7 +38,12 @@
 	  <color type="primary" scheme_preference="light">#009688</color>
 	</branding>
     <releases>
-	    <release version="2.3.6" date="2026-8-13">
+	    <release version="2.3.8.5" date="2026-09-18">
+            <description>
+                <p>Version 2.3.8.5 release with improvements and bug fixes.</p>
+            </description>
+        </release>
+	    <release version="2.3.6" date="2026-08-13">
             <description>
                 <p>Version 2.3.6 release with improvements and bug fixes.</p>
             </description>
