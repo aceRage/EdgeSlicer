@@ -49,6 +49,32 @@ when the primary fails. The sha256 is unchanged and still enforced, so a mirror 
 substitute different content. If a new source starts flaking, add a `mirror-urls:` list to
 it rather than retrying the job.
 
+### Adding a dependency (the easy one to get wrong)
+
+Module builds run in a sandbox with **no network**. Anything `deps/` downloads must also be
+listed as a `type: file` source on the `orca_deps` module with `dest: external-packages/<X>`,
+where `<X>` is the project name passed to `Snapmaker_Orca_add_cmake_project` — that is the
+`DOWNLOAD_DIR` CMake looks in. Miss it and the build runs for ~20-60 minutes and then dies
+with `Could not resolve host: github.com`, which reads like a network blip but is not.
+
+Under `FLATPAK=ON`, `deps/CMakeLists.txt` `find_package()`s ZLIB, PNG, EXPAT, CURL, JPEG,
+Freetype and OpenSSL from the SDK, so only those may be left out. Every other dep needs an
+entry whose url and sha256 match its `deps/<X>/<X>.cmake`. To check them all:
+
+```sh
+python - <<'PY'
+import re,yaml,glob
+man=yaml.safe_load(open('scripts/flatpak/io.github.acerage.EdgeSlicer.yml',encoding='utf-8'))
+dests={s['dest'].split('/',1)[1].lower() for m in man['modules'] for s in m.get('sources',[])
+       if str(s.get('dest','')).startswith('external-packages/')}
+sdk={'zlib','png','expat','curl','jpeg','freetype','openssl'}
+proj=[re.search(r'add_cmake_project\(\s*(\w+)',open(f,encoding='utf-8',errors='ignore').read())
+      for f in glob.glob('deps/*/*.cmake')]
+miss=[m.group(1) for m in proj if m and m.group(1).lower() not in dests|sdk]
+print("UNRESOLVED:", miss or "none")
+PY
+```
+
 ## Attaching bundles to a release
 
 The Flatpak jobs take 60-90 minutes, far longer than the other builds, so they are a second

@@ -296,6 +296,18 @@ modules:
         dest: external-packages/Manifold
         sha256: ce5f4d87877daca99a910d0af73c028f2a36b9288dd2bf3cd1cecf8faff9f7c8
 
+      # QuadriFlow and NanoSVG are the other two deps that FLATPAK=ON does *not* satisfy
+      # from the SDK. deps/CMakeLists.txt only find_package()s ZLIB, PNG, EXPAT, CURL,
+      # JPEG, Freetype and OpenSSL, so everything else has to be staged here.
+      - type: file
+        url: https://github.com/hjwdzh/QuadriFlow/archive/810b7a0967c35b0dc85b4464e3835e26a756c967.zip
+        dest: external-packages/QuadriFlow
+        sha256: 0e530a1374dd7edd68d8bd9777395dc0be80e4cbca96485cc9a82cfacb8942ce
+      - type: file
+        url: https://github.com/SoftFever/nanosvg/archive/863f6aa97ef62028126fa2c19bd4350394c2e15e.zip
+        dest: external-packages/NanoSVG
+        sha256: 8d9c1624ad6518dd6dfa31e4f8dc7da9ec243d88bae595c7a037450617fec851
+
   - name: Snapmaker_Orca 
     buildsystem: simple
     build-commands:
