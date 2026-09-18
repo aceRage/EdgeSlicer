@@ -16,7 +16,6 @@
 - **Windows portable** — the `EdgeSlicer_Windows_V*_portable.zip` on the [releases page](https://github.com/aceRage/EdgeSlicer/releases/latest). Unzip and run `EdgeSlicer.exe`; it needs the Edge WebView2 runtime and the VC++ redistributable, usually already present.
 - **macOS (Apple silicon)** — the `.dmg` on the [releases page](https://github.com/aceRage/EdgeSlicer/releases/latest). It is **unsigned**, so macOS refuses it the first time: right-click the app → *Open* → *Open*, or run `xattr -dr com.apple.quarantine "/Applications/EdgeSlicer.app"` once.
 - **Linux (x86_64)** — the `.AppImage` on the [releases page](https://github.com/aceRage/EdgeSlicer/releases/latest). `chmod +x` it and run it; the host must provide WebKitGTK 4.1 and libOpenGL.
-- **Companion app (iOS / Android)** — the EdgeSlicer app is in testing, on TestFlight for iOS and Firebase App Distribution for Android. Testers are added by invitation; ask on [Discussions](https://github.com/aceRage/EdgeSlicer/discussions) or [Issues](https://github.com/aceRage/EdgeSlicer/issues) for one. It is not on the app stores.
 
 Every release also carries a standalone network plug-in zip and a `SHA256SUMS.txt` covering each file. See [Download and install](#download-and-install) for firewall rules and the data-directory migration.
 
@@ -232,7 +231,6 @@ Known limits and work in progress, stated plainly:
 - **Bambu Lab** — slicing is verified; hardware validation covers the H2C, not yet the other models.
 - **Previews** — draw cut, slice bake, quad remesh, the Edit gizmo's bevel and push/pull, curved cut, Flexi joints (thread and bayonet included), Sculpt, Image Fill dithering and the fill-bed Grid layout are verified against test fixtures but have not yet been printed on hardware by the maintainer; check the first print.
 - **Layer time speed smoothing** — new; verify against a known-good print before using it on a long job.
-- **EdgeSlicer app** — in testing only (TestFlight / Firebase App Distribution, testers by invitation); no store listing. Push notifications currently go out through the developer's own hub credentials; a hosted push service is planned.
 - **Reprints** — Snapmaker-LAN and print-host printers; Bambu and the PC's own connection are not yet reprintable from the phone.
 - **Linux and macOS builds** — automated, unsigned, and not yet tried on hardware.
 - **Support groups** — the support *base* is never per group, and classic tree supports take interface layer count object-wide.
