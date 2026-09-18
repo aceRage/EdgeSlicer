@@ -303,10 +303,16 @@ modules:
         url: https://github.com/hjwdzh/QuadriFlow/archive/810b7a0967c35b0dc85b4464e3835e26a756c967.zip
         dest: external-packages/QuadriFlow
         sha256: 0e530a1374dd7edd68d8bd9777395dc0be80e4cbca96485cc9a82cfacb8942ce
+      # NOTE: deps/NanoSVG/NanoSVG.cmake still carries the pre-rename sha256
+      # (8d9c1624...). The repo is now SoftFever/Orca-deps-nanosvg, so GitHub's generated
+      # zip has a different root folder and therefore a different hash. The archive below
+      # was downloaded and checked: same commit, contains src/nanosvg.h and
+      # src/nanosvgrast.h under Orca-deps-nanosvg-863f6aa9/. CMake only sees the extracted
+      # tree, so it never noticed; flatpak-builder hashes the zip itself and did.
       - type: file
         url: https://github.com/SoftFever/nanosvg/archive/863f6aa97ef62028126fa2c19bd4350394c2e15e.zip
         dest: external-packages/NanoSVG
-        sha256: 8d9c1624ad6518dd6dfa31e4f8dc7da9ec243d88bae595c7a037450617fec851
+        sha256: 1e3f94a052dd2abb139993ed3496c90ed4458d6f907027bf03cbaed889fe2567
 
   - name: Snapmaker_Orca 
     buildsystem: simple
