@@ -129,39 +129,134 @@ jobs:
         run: |
           ./build_release_macos.sh -s -n -x -a universal -t 10.15 -1
 
- # Thanks to RaySajuuk, it's working now
-      - name: Sign app and notary
-        if: (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/') || github.ref == 'refs/heads/2.3.0-final') && inputs.os == 'macos-14'
-        working-directory: ${{ github.workspace }}
+      # Signing and notarization are opt-in by secrets, not by branch: a fork, a pull request or a
+      # checkout of this repository without the Developer ID secrets builds the same unsigned dmg
+      # as before, and never fails for a missing secret. Once the secrets exist (docs/RELEASING_MACOS.md)
+      # every run signs - the nightly on main, release CI on ci/<version>, release/* branches, tags.
+      - name: Check for macOS signing secrets
+        id: signing
+        if: inputs.os == 'macos-14'
+        shell: bash
+        env:
+          BUILD_CERTIFICATE_BASE64: ${{ secrets.BUILD_CERTIFICATE_BASE64 }}
+          P12_PASSWORD: ${{ secrets.P12_PASSWORD }}
+          MACOS_CERTIFICATE_ID: ${{ secrets.MACOS_CERTIFICATE_ID }}
+          APP_STORE_CONNECT_KEY_P8: ${{ secrets.APP_STORE_CONNECT_KEY_P8 }}
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          APPLE_DEV_ACCOUNT: ${{ secrets.APPLE_DEV_ACCOUNT }}
+          TEAM_ID: ${{ secrets.TEAM_ID }}
+          APP_PWD: ${{ secrets.APP_PWD }}
+        run: |
+          sign=false
+          notarize=none
+          if [ -n "$BUILD_CERTIFICATE_BASE64" ] && [ -n "$P12_PASSWORD" ] && [ -n "$MACOS_CERTIFICATE_ID" ]; then
+            sign=true
+            if [ -n "$APP_STORE_CONNECT_KEY_P8" ] && [ -n "$APP_STORE_CONNECT_KEY_ID" ] && [ -n "$APP_STORE_CONNECT_ISSUER_ID" ]; then
+              notarize=api-key
+            elif [ -n "$APPLE_DEV_ACCOUNT" ] && [ -n "$TEAM_ID" ] && [ -n "$APP_PWD" ]; then
+              notarize=apple-id
+            else
+              echo "::warning::Developer ID secrets are set but no notarization credentials (APP_STORE_CONNECT_KEY_ID / APP_STORE_CONNECT_ISSUER_ID / APP_STORE_CONNECT_KEY_P8): the dmg will be signed but not notarized, and Gatekeeper will still refuse it."
+            fi
+          else
+            echo "::notice::No macOS signing secrets (BUILD_CERTIFICATE_BASE64, P12_PASSWORD, MACOS_CERTIFICATE_ID) - building an unsigned dmg. See docs/RELEASING_MACOS.md."
+          fi
+          echo "sign=$sign" >> "$GITHUB_OUTPUT"
+          echo "notarize=$notarize" >> "$GITHUB_OUTPUT"
+          echo "sign=$sign notarize=$notarize"
+
+      - name: Import Developer ID certificate
+        if: inputs.os == 'macos-14' && steps.signing.outputs.sign == 'true'
+        shell: bash
         env:
           BUILD_CERTIFICATE_BASE64: ${{ secrets.BUILD_CERTIFICATE_BASE64 }}
           P12_PASSWORD: ${{ secrets.P12_PASSWORD }}
           KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
-          CERTIFICATE_ID: ${{ secrets.MACOS_CERTIFICATE_ID }}
+          MACOS_CERTIFICATE_ID: ${{ secrets.MACOS_CERTIFICATE_ID }}
         run: |
-          CERTIFICATE_PATH=$RUNNER_TEMP/build_certificate.p12
-          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
-          echo -n "$BUILD_CERTIFICATE_BASE64" | base64 --decode --output $CERTIFICATE_PATH
-          security create-keychain -p $KEYCHAIN_PASSWORD $KEYCHAIN_PATH
-          security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
-          security unlock-keychain -p $KEYCHAIN_PASSWORD $KEYCHAIN_PATH
-          security import $CERTIFICATE_PATH -P $P12_PASSWORD -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
-          security list-keychain -d user -s $KEYCHAIN_PATH
-          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k $P12_PASSWORD $KEYCHAIN_PATH
-          codesign --deep --force --verbose --options runtime --timestamp --entitlements ${{ github.workspace }}/scripts/disable_validation.entitlements --sign "$CERTIFICATE_ID" "${{ github.workspace }}/build/universal/Snapmaker_Orca/EdgeSlicer.app"
-          # Sign Snapmaker_Orca_profile_validator.app if it exists
-          if [ -f "${{ github.workspace }}/build/universal/Snapmaker_Orca/Snapmaker_Orca_profile_validator.app/Contents/MacOS/Snapmaker_Orca_profile_validator" ]; then
-            codesign --deep --force --verbose --options runtime --timestamp --entitlements ${{ github.workspace }}/scripts/disable_validation.entitlements --sign "$CERTIFICATE_ID" ${{ github.workspace }}/build/universal/Snapmaker_Orca/Snapmaker_Orca_profile_validator.app
+          CERTIFICATE_PATH="$RUNNER_TEMP/build_certificate.p12"
+          KEYCHAIN_PATH="$RUNNER_TEMP/app-signing.keychain-db"
+          # The keychain is created and thrown away inside this job, so its password only has to
+          # exist; generate one when the optional secret is not set.
+          KEYCHAIN_PASSWORD="${KEYCHAIN_PASSWORD:-$(openssl rand -hex 24)}"
+          # Whitespace-tolerant decode: the owner pastes the base64 from PowerShell, which wraps it.
+          printf '%s' "$BUILD_CERTIFICATE_BASE64" | tr -d ' \t\r\n' | base64 --decode > "$CERTIFICATE_PATH"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERTIFICATE_PATH" -P "$P12_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          rm -f "$CERTIFICATE_PATH"
+          # Apple's Developer ID intermediates, in case the .p12 was exported without its chain
+          # (codesign then fails with "unable to build chain to self-signed root"). Best effort.
+          for ca in DeveloperIDG2CA DeveloperIDCA; do
+            if curl -fsSL -o "$RUNNER_TEMP/$ca.cer" "https://www.apple.com/certificateauthority/$ca.cer"; then
+              security import "$RUNNER_TEMP/$ca.cer" -k "$KEYCHAIN_PATH" -T /usr/bin/codesign || true
+              rm -f "$RUNNER_TEMP/$ca.cer"
+            fi
+          done
+          security list-keychain -d user -s "$KEYCHAIN_PATH" login.keychain || security list-keychain -d user -s "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH" > /dev/null
+          echo "Code-signing identities in the build keychain:"
+          security find-identity -v -p codesigning "$KEYCHAIN_PATH"
+          if ! security find-identity -v -p codesigning "$KEYCHAIN_PATH" | grep -qF "$MACOS_CERTIFICATE_ID"; then
+            echo "::error::MACOS_CERTIFICATE_ID does not match any identity in the imported .p12 - it must be the full string, e.g. 'Developer ID Application: Name (TEAMID)', from 'security find-identity -v -p codesigning'."
+            exit 1
           fi
-          
-          # Create main Snapmaker Orca DMG without the profile validator helper
+
+      - name: Sign app bundles (Developer ID, hardened runtime)
+        if: inputs.os == 'macos-14' && steps.signing.outputs.sign == 'true'
+        working-directory: ${{ github.workspace }}
+        shell: bash
+        env:
+          MACOS_CERTIFICATE_ID: ${{ secrets.MACOS_CERTIFICATE_ID }}
+        run: |
+          APP_DIR="${{ github.workspace }}/build/universal/Snapmaker_Orca"
+          # Inside out: every nested Mach-O (crashpad_handler, libsentry.dylib, anything a later build
+          # adds) with the hardened runtime and a secure timestamp, then the bundle with the entitlements.
+          scripts/macos_sign_app.sh "$APP_DIR/EdgeSlicer.app" "$MACOS_CERTIFICATE_ID" scripts/disable_validation.entitlements
+          if [ -f "$APP_DIR/Snapmaker_Orca_profile_validator.app/Contents/MacOS/Snapmaker_Orca_profile_validator" ]; then
+            scripts/macos_sign_app.sh "$APP_DIR/Snapmaker_Orca_profile_validator.app" "$MACOS_CERTIFICATE_ID" scripts/disable_validation.entitlements
+          fi
+
+      # The app is notarized and stapled on its own before it goes into the dmg, so the copy a user
+      # drags to /Applications carries its ticket too and opens offline; the dmg gets its own below.
+      - name: Notarize app bundles
+        if: inputs.os == 'macos-14' && steps.signing.outputs.sign == 'true' && steps.signing.outputs.notarize != 'none'
+        working-directory: ${{ github.workspace }}
+        shell: bash
+        env:
+          APP_STORE_CONNECT_KEY_P8: ${{ secrets.APP_STORE_CONNECT_KEY_P8 }}
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          APPLE_DEV_ACCOUNT: ${{ secrets.APPLE_DEV_ACCOUNT }}
+          TEAM_ID: ${{ secrets.TEAM_ID }}
+          APP_PWD: ${{ secrets.APP_PWD }}
+        run: |
+          APP_DIR="${{ github.workspace }}/build/universal/Snapmaker_Orca"
+          ditto -c -k --keepParent "$APP_DIR/EdgeSlicer.app" "$RUNNER_TEMP/EdgeSlicer.zip"
+          scripts/macos_notarize.sh "$RUNNER_TEMP/EdgeSlicer.zip" "$APP_DIR/EdgeSlicer.app"
+          rm -f "$RUNNER_TEMP/EdgeSlicer.zip"
+          if [ -f "$APP_DIR/Snapmaker_Orca_profile_validator.app/Contents/MacOS/Snapmaker_Orca_profile_validator" ]; then
+            ditto -c -k --keepParent "$APP_DIR/Snapmaker_Orca_profile_validator.app" "$RUNNER_TEMP/profile_validator.zip"
+            scripts/macos_notarize.sh "$RUNNER_TEMP/profile_validator.zip" "$APP_DIR/Snapmaker_Orca_profile_validator.app"
+            rm -f "$RUNNER_TEMP/profile_validator.zip"
+          fi
+          spctl -a -vv -t exec "$APP_DIR/EdgeSlicer.app" || echo "::warning::spctl did not accept EdgeSlicer.app on the runner (informational; the stapled dmg is verified below)"
+
+      # One dmg step for both cases: it packs whatever the steps above left in the build tree -
+      # the signed and stapled app when the secrets exist, the plain build otherwise.
+      - name: Create DMG
+        if: inputs.os == 'macos-14'
+        working-directory: ${{ github.workspace }}
+        shell: bash
+        run: |
           mkdir -p ${{ github.workspace }}/build/universal/Snapmaker_Orca_dmg
           rm -rf ${{ github.workspace }}/build/universal/Snapmaker_Orca_dmg/*
           cp -R "${{ github.workspace }}/build/universal/Snapmaker_Orca/EdgeSlicer.app" "${{ github.workspace }}/build/universal/Snapmaker_Orca_dmg/"
           ln -sfn /Applications ${{ github.workspace }}/build/universal/Snapmaker_Orca_dmg/Applications
           hdiutil create -volname "EdgeSlicer" -srcfolder ${{ github.workspace }}/build/universal/Snapmaker_Orca_dmg -ov -format UDZO "${{ github.workspace }}/EdgeSlicer_Mac_universal_${{ env.ver }}.dmg"
-          codesign --deep --force --verbose --options runtime --timestamp --entitlements ${{ github.workspace }}/scripts/disable_validation.entitlements --sign "$CERTIFICATE_ID" "${{ github.workspace }}/EdgeSlicer_Mac_universal_${{ env.ver }}.dmg"
-          
+
           # Create separate Snapmaker_Orca_profile_validator DMG if the app exists
           if [ -f "${{ github.workspace }}/build/universal/Snapmaker_Orca/Snapmaker_Orca_profile_validator.app/Contents/MacOS/Snapmaker_Orca_profile_validator" ]; then
             mkdir -p ${{ github.workspace }}/build/universal/Snapmaker_Orca_profile_validator_dmg
@@ -169,38 +264,40 @@ jobs:
             cp -R ${{ github.workspace }}/build/universal/Snapmaker_Orca/Snapmaker_Orca_profile_validator.app ${{ github.workspace }}/build/universal/Snapmaker_Orca_profile_validator_dmg/
             ln -sfn /Applications ${{ github.workspace }}/build/universal/Snapmaker_Orca_profile_validator_dmg/Applications
             hdiutil create -volname "EdgeSlicer Profile Validator" -srcfolder ${{ github.workspace }}/build/universal/Snapmaker_Orca_profile_validator_dmg -ov -format UDZO "${{ github.workspace }}/EdgeSlicer_profile_validator_Mac_universal_${{ env.ver }}.dmg"
-            codesign --deep --force --verbose --options runtime --timestamp --entitlements ${{ github.workspace }}/scripts/disable_validation.entitlements --sign "$CERTIFICATE_ID" "${{ github.workspace }}/EdgeSlicer_profile_validator_Mac_universal_${{ env.ver }}.dmg"
-          fi
-          
-          # Notarize main DMG
-          xcrun notarytool store-credentials "notarytool-profile" --apple-id "${{ secrets.APPLE_DEV_ACCOUNT }}" --team-id "${{ secrets.TEAM_ID }}" --password "${{ secrets.APP_PWD }}"
-          xcrun notarytool submit "${{ github.workspace }}/EdgeSlicer_Mac_universal_${{ env.ver }}.dmg" --keychain-profile "notarytool-profile" --wait
-          xcrun stapler staple "${{ github.workspace }}/EdgeSlicer_Mac_universal_${{ env.ver }}.dmg"
-          
-          # Notarize profile validator DMG if it exists
-          if [ -f "${{ github.workspace }}/EdgeSlicer_profile_validator_Mac_universal_${{ env.ver }}.dmg" ]; then
-            xcrun notarytool submit "${{ github.workspace }}/EdgeSlicer_profile_validator_Mac_universal_${{ env.ver }}.dmg" --keychain-profile "notarytool-profile" --wait
-            xcrun stapler staple "${{ github.workspace }}/EdgeSlicer_profile_validator_Mac_universal_${{ env.ver }}.dmg"
           fi
 
-      - name: Create DMG without notary
-        if: github.ref != 'refs/heads/main' && inputs.os == 'macos-14' && github.ref != 'refs/heads/2.3.0-final'
+      # The dmg is signed and stapled in place, so the artifact uploaded below is the notarized file.
+      - name: Sign and notarize DMG
+        if: inputs.os == 'macos-14' && steps.signing.outputs.sign == 'true'
         working-directory: ${{ github.workspace }}
+        shell: bash
+        env:
+          MACOS_CERTIFICATE_ID: ${{ secrets.MACOS_CERTIFICATE_ID }}
+          NOTARIZE: ${{ steps.signing.outputs.notarize }}
+          APP_STORE_CONNECT_KEY_P8: ${{ secrets.APP_STORE_CONNECT_KEY_P8 }}
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          APPLE_DEV_ACCOUNT: ${{ secrets.APPLE_DEV_ACCOUNT }}
+          TEAM_ID: ${{ secrets.TEAM_ID }}
+          APP_PWD: ${{ secrets.APP_PWD }}
         run: |
-          mkdir -p ${{ github.workspace }}/build/universal/Snapmaker_Orca_dmg
-          rm -rf ${{ github.workspace }}/build/universal/Snapmaker_Orca_dmg/*
-          cp -R "${{ github.workspace }}/build/universal/Snapmaker_Orca/EdgeSlicer.app" "${{ github.workspace }}/build/universal/Snapmaker_Orca_dmg/"
-          ln -sfn /Applications ${{ github.workspace }}/build/universal/Snapmaker_Orca_dmg/Applications
-          hdiutil create -volname "EdgeSlicer" -srcfolder ${{ github.workspace }}/build/universal/Snapmaker_Orca_dmg -ov -format UDZO EdgeSlicer_Mac_universal_${{ env.ver }}.dmg
-          
-          # Create separate Snapmaker_Orca_profile_validator DMG if the app exists
-          if [ -f "${{ github.workspace }}/build/universal/Snapmaker_Orca/Snapmaker_Orca_profile_validator.app/Contents/MacOS/Snapmaker_Orca_profile_validator" ]; then
-            mkdir -p ${{ github.workspace }}/build/universal/Snapmaker_Orca_profile_validator_dmg
-            rm -rf ${{ github.workspace }}/build/universal/Snapmaker_Orca_profile_validator_dmg/*
-            cp -R ${{ github.workspace }}/build/universal/Snapmaker_Orca/Snapmaker_Orca_profile_validator.app ${{ github.workspace }}/build/universal/Snapmaker_Orca_profile_validator_dmg/
-            ln -sfn /Applications ${{ github.workspace }}/build/universal/Snapmaker_Orca_profile_validator_dmg/Applications
-            hdiutil create -volname "EdgeSlicer Profile Validator" -srcfolder ${{ github.workspace }}/build/universal/Snapmaker_Orca_profile_validator_dmg -ov -format UDZO "${{ github.workspace }}/EdgeSlicer_profile_validator_Mac_universal_${{ env.ver }}.dmg"
-          fi
+          for dmg in "${{ github.workspace }}/EdgeSlicer_Mac_universal_${{ env.ver }}.dmg" \
+                     "${{ github.workspace }}/EdgeSlicer_profile_validator_Mac_universal_${{ env.ver }}.dmg"; do
+            [ -f "$dmg" ] || continue
+            codesign --force --timestamp --sign "$MACOS_CERTIFICATE_ID" "$dmg"
+            codesign --verify --verbose=2 "$dmg"
+            if [ "$NOTARIZE" != "none" ]; then
+              scripts/macos_notarize.sh "$dmg"
+              spctl -a -vv -t open --context context:primary-signature "$dmg" || echo "::warning::spctl did not accept $(basename "$dmg") on the runner (informational; stapler validate above passed)"
+            fi
+          done
+
+      - name: Remove signing keychain
+        if: always() && inputs.os == 'macos-14' && steps.signing.outputs.sign == 'true'
+        shell: bash
+        run: |
+          security delete-keychain "$RUNNER_TEMP/app-signing.keychain-db" 2>/dev/null || true
+          rm -f "$RUNNER_TEMP/build_certificate.p12" "$RUNNER_TEMP"/AuthKey_*.p8 "$RUNNER_TEMP"/notary_*.json "$RUNNER_TEMP"/*.zip
 
       - name: Upload artifacts mac
         if: inputs.os == 'macos-14'
