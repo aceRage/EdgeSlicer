@@ -156,9 +156,12 @@ TEST_CASE("port_note JSON shape matches the spec when the hub fell back to anoth
     note["default_port"] = 13640;
     note["held_by"]      = "EdgeSlicer.exe (pid 5678)";
     note["port"]         = 13641;
+    note["command"]      = "netsh advfirewall firewall add rule name=\"EdgeSlicer\" dir=in action=allow "
+                            "program=\"C:\\EdgeSlicer.exe\" protocol=TCP localport=13640-13659 profile=private,domain";
     REQUIRE(note["default_port"].get<int>() == 13640);
     REQUIRE(note["port"].get<int>() == 13641);
     REQUIRE(note["held_by"].get<std::string>() == "EdgeSlicer.exe (pid 5678)");
+    REQUIRE_THAT(note["command"].get<std::string>(), Catch::Matchers::Contains("netsh"));
 }
 
 TEST_CASE("lan_firewall JSON uses the same state vocabulary as video.firewall", "[RemoteHub]")
@@ -166,6 +169,45 @@ TEST_CASE("lan_firewall JSON uses the same state vocabulary as video.firewall", 
     const std::vector<std::string> valid = { "allowed", "partial", "missing", "blocked", "unknown", "off" };
     for (const std::string& s : { std::string("allowed"), std::string("missing"), std::string("off") })
         REQUIRE(std::find(valid.begin(), valid.end(), s) != valid.end());
+}
+
+// ---- the note/command split (owner, 2026-09-18: the hub page's firewall warnings were too long -
+// one short sentence now, with the exact netsh line moved out to its own field so hub.html can put
+// it behind a "Show command" toggle instead of running it into the sentence). Both `firewall_query`
+// itself and the two call sites (go2rtc's WebRTC port, the phone/LAN listener) are private to
+// RemoteHub.cpp, so this pins the JSON shape info_json() builds - the same approach the port_note
+// and lan_firewall-vocabulary tests above already take.
+TEST_CASE("a firewall note is one short sentence with no netsh text run into it", "[RemoteHub]")
+{
+    // What used to ship as a single string, e.g.: "Windows Firewall allows go2rtc.exe on Public
+    // networks, but this PC is on a Private network. In Windows Defender Firewall allow go2rtc.exe
+    // (inbound), or as Administrator run: netsh advfirewall ...". The note now stops at the
+    // sentence; the netsh line lives in `command` instead.
+    const std::string note    = "Windows Firewall allows go2rtc.exe on Public networks, but this PC is on Private.";
+    const std::string command = "netsh advfirewall firewall add rule name=\"go2rtc\" dir=in action=allow "
+                                 "program=\"C:\\go2rtc.exe\" protocol=TCP localport=8556 profile=private,domain";
+    REQUIRE_THAT(note, !Catch::Matchers::Contains("netsh"));
+    REQUIRE_THAT(command, Catch::Matchers::StartsWith("netsh advfirewall firewall add rule"));
+
+    nlohmann::json v;
+    v["firewall"] = "partial";
+    v["note"]     = note;
+    v["command"]  = command;
+    REQUIRE(v["note"].get<std::string>() == note);
+    REQUIRE(v["command"].get<std::string>() == command);
+}
+
+TEST_CASE("an allowed firewall state carries an empty note and an empty command", "[RemoteHub]")
+{
+    // firewall_query()'s "allowed" branch sets note to "" and leaves command unset (default ""):
+    // nothing to warn about, so hub.html's warningLine()/videoLine() never draw a "Show command"
+    // toggle for it.
+    nlohmann::json lv;
+    lv["firewall"] = "allowed";
+    lv["note"]     = std::string();
+    lv["command"]  = std::string();
+    REQUIRE(lv["note"].get<std::string>().empty());
+    REQUIRE(lv["command"].get<std::string>().empty());
 }
 
 // ---- the actual root cause of the 13641 fallback --------------------------------------------
