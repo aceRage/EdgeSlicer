@@ -2,6 +2,8 @@
 #define slic3r_FillBedPack_hpp_
 
 #include "Point.hpp"
+#include "Polygon.hpp"
+#include "ExPolygon.hpp"
 
 namespace Slic3r {
 
