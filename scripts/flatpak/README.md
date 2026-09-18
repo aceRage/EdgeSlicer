@@ -75,6 +75,22 @@ print("UNRESOLVED:", miss or "none")
 PY
 ```
 
+### Known blockers (2026-09-18)
+
+The Flatpak layer itself is fixed — sources all resolve, all 23 deps are accounted for, and
+both arches build for an hour before failing. What remains are pre-existing source bugs
+that are not Flatpak-specific and are owned elsewhere:
+
+- **QuadriFlow does not compile on GCC 13** (`loader.cpp`, missing `<cstdint>`, which
+  cascades into `'it' was not declared` and `VertexMap {aka 'int'}`). Being fixed on
+  `fix/quadriflow-gcc13-cstdint`. This is what x86_64 hits, ~35 min in.
+- **`src/libslic3r/FillBedPack.hpp` is not self-contained**: it uses `Polygon`,
+  `ExPolygon` and `BoundingBox` but only includes `Point.hpp`. aarch64 gets *past*
+  `orca_deps` entirely and dies here, ~62 min in, while compiling the slicer.
+
+Both need to land before a Flatpak bundle can be produced. Run 35358030365 is the reference:
+x86_64 = QuadriFlow, aarch64 = FillBedPack.
+
 ## Attaching bundles to a release
 
 The Flatpak jobs take 60-90 minutes, far longer than the other builds, so they are a second
