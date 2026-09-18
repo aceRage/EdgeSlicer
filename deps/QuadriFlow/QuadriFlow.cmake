@@ -19,15 +19,36 @@
 # Upstream ships no library target and no install rules (it builds a CLI executable
 # only), so the PATCH_COMMAND swaps in our own CMakeLists, the way deps/OpenCSG does.
 #
+# The PATCH_COMMAND then applies 0001-include-cstdint.patch. Five of the sources we
+# compile use uint8_t/uint32_t/uint64_t without including anything that declares them,
+# and have only ever got away with it: MSVC and Apple clang drag <cstdint> in through
+# other standard headers. libstdc++ stopped doing that in GCC 13, so the ubuntu-24.04
+# CI deps build fails with "'uint32_t' does not name a type" at loader.cpp:31, and the
+# Flatpak runtime's GCC 15 prunes more of those transitive includes still. The patch
+# adds the include upstream should have had. A `-include cstdint` compile option would
+# also work, but it hides the same latent bug in any file added later and does not
+# follow the headers (dset.hpp is one of the five) into a consumer's translation unit.
+#
+# git apply matches every other patched dep here - CGAL, GMP, OCCT and OpenCV all use
+# it, so it is already a hard requirement of any deps build. The --directory flag is
+# the same workaround those carry: when the build tree sits inside a git work tree,
+# git apply resolves the patch's paths against the repo root rather than the source
+# dir, then silently skips every hunk while still exiting 0.
+#
 # EIGEN3_INCLUDE_DIR points at the tree's own bundled Eigen (deps_src/eigen), the same
 # copy libslic3r compiles against - QuadriFlow's types cross the ABI boundary in our
 # wrapper, so the two must agree on Eigen.
+
+if (IN_GIT_REPO)
+    set(QuadriFlow_DIRECTORY_FLAG --directory ${BINARY_DIR_REL}/dep_QuadriFlow-prefix/src/dep_QuadriFlow)
+endif ()
 
 Snapmaker_Orca_add_cmake_project(QuadriFlow
     URL https://github.com/hjwdzh/QuadriFlow/archive/810b7a0967c35b0dc85b4464e3835e26a756c967.zip
         URL_HASH SHA256=0e530a1374dd7edd68d8bd9777395dc0be80e4cbca96485cc9a82cfacb8942ce
     DEPENDS dep_Boost
     PATCH_COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_CURRENT_LIST_DIR}/CMakeLists.txt.in ./CMakeLists.txt
+          COMMAND git apply ${QuadriFlow_DIRECTORY_FLAG} --verbose ${CMAKE_CURRENT_LIST_DIR}/0001-include-cstdint.patch
     CMAKE_ARGS
         -DBUILD_FREE_LICENSE:BOOL=ON
         -DEIGEN3_INCLUDE_DIR:PATH=${PROJECT_SOURCE_DIR}/../deps_src/eigen

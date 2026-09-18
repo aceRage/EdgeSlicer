@@ -1,0 +1,5 @@
+# The QuadriFlow patch is fed to `git apply` verbatim during the deps build, on
+# Windows too. The repo-wide `* text=auto` would hand a Windows checkout a CRLF
+# copy, whose context lines then no longer match the LF sources in the upstream
+# zip and the patch fails to apply. Keep it LF on every platform.
+0001-include-cstdint.patch -text
