@@ -117,6 +117,11 @@ struct Http::priv
 	// Using a deque here because unlike vector it doesn't ivalidate pointers on insertion
 	std::deque<form_file> form_files;
 	std::string postfields;
+	// Whether a body was set at all, as opposed to merely being empty. An empty body still
+	// has to reach curl as CURLOPT_POSTFIELDS: a POST with neither POSTFIELDS nor a form
+	// makes curl read the body from CURLOPT_READFUNCTION instead, and that callback here is
+	// form_file_read_cb, whose CURLOPT_READDATA is only ever set for a PUT.
+	bool postfields_set { false };
 	std::string error_buffer;    // Used for CURLOPT_ERRORBUFFER
     std::string headers;
 	size_t limit;
@@ -287,7 +292,13 @@ int Http::priv::xfercb_legacy(void *userp, double dltotal, double dlnow, double 
 
 size_t Http::priv::form_file_read_cb(char *buffer, size_t size, size_t nitems, void *userp)
 {
+    // This callback is installed on every request, but CURLOPT_READDATA is only set for a
+    // PUT. Anything else that makes curl ask for a body (a POST with no CURLOPT_POSTFIELDS
+    // and no form) arrives here with curl's own default read-data, which is not a form_file:
+    // reading it faulted. Refuse the read rather than reinterpret whatever curl passed.
     auto f = reinterpret_cast<form_file*>(userp);
+    if (f == nullptr)
+        return CURL_READFUNC_ABORT;
 
 	try {
 	    size_t max_read_size = size * nitems;
@@ -395,11 +406,13 @@ void Http::priv::set_post_body(const fs::path &path)
 	std::ifstream file(path.string());
 	std::string file_content { std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>() };
 	postfields = std::move(file_content);
+	postfields_set = true;
 }
 
 void Http::priv::set_post_body(const std::string &body)
 {
 	postfields = body;
+	postfields_set = true;
 }
 
 void Http::priv::set_put_body(const fs::path &path)
@@ -417,6 +430,7 @@ void Http::priv::set_put_body(const fs::path &path)
 void Http::priv::set_del_body(const std::string& body)
 {
 	postfields = body;
+	postfields_set = true;
 }
 
 void Http::priv::set_range(const std::string& range)
@@ -475,7 +489,11 @@ void Http::priv::http_perform()
 		::curl_easy_setopt(curl, CURLOPT_MIMEPOST, mime);
 	}
 
-	if (!postfields.empty()) {
+	// postfields_set, not !postfields.empty(): an explicitly set empty body is still a body.
+	// Without this a POST of "" left curl with no body source but CURLOPT_POST, so it read
+	// from form_file_read_cb with unset read-data and crashed (RemoteHub's /hub/phone,
+	// /hub/newlink and /hub/quit are all empty-bodied POSTs).
+	if (postfields_set && form == nullptr && mime == nullptr) {
 		::curl_easy_setopt(curl, CURLOPT_POSTFIELDS, postfields.c_str());
 		::curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE_LARGE, postfields.size());
 	}
