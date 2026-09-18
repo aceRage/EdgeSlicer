@@ -4715,9 +4715,16 @@ void GUI_App::start_remote_access()
     // that copy wins, because this app config only learns of a change made from the hub page
     // while the Stream panel is polling - which is how "home mode off" used to come back on
     // at the next slicer start. The env var is the one caller that really means "on".
+    //
+    // The forced switch-on goes back to the GUI thread (CallAfter is thread-safe) rather than
+    // running on this worker: batch 65 crashed every hidden gate instance with an access
+    // violation about a second after it registered, and the only difference from the working
+    // build was this POST made from the detached thread. The Stream panel has always made the
+    // same call from the GUI thread without trouble, so that is the path it takes.
     std::thread([token, phone, force]() {
         RemoteHub::ensure_running(token, phone);
-        if (force) RemoteHub::set_phone(true, token);
+        if (force)
+            wxGetApp().CallAfter([token]() { RemoteHub::set_phone(true, token); });
     }).detach();
 }
 
