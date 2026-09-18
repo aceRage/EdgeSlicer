@@ -8885,7 +8885,7 @@ void GLGizmoCut3D::begin_reedit()
     selection.clear();
     for (size_t i = 0; i < model.objects.size(); ++i)
         if (model.objects[i]->id() == m_reedit_proxy_id) {
-            selection.add_object(unsigned int(i), true);
+            selection.add_object(static_cast<unsigned int>(i), true);
             break;
         }
 
