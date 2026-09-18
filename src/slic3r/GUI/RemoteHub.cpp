@@ -2785,23 +2785,32 @@ bool HubServer::bind(bool lan)
     // (a tester's report, 2026-09-17: their phone link came back on 13641 with no explanation).
     // With the old acceptor now closed above, this only fires for a genuine external holder -
     // this hub's own previous-mode acceptor can no longer be mistaken for one.
-    std::string holder;
-    if (port != HUB_PORT) {
-        holder = port_holder_description(HUB_PORT);
-        BOOST_LOG_TRIVIAL(warning) << "RemoteHub: port " << HUB_PORT << " is in use"
-                                   << (holder.empty() ? std::string() : " by " + holder)
-                                   << "; the phone link uses " << port << " instead";
-    }
+    // The holder lookup (netstat + tasklist) takes several seconds on a busy PC. It used to run
+    // right here, before the listener was published and hub.json written, and that delay was
+    // enough for a slicer that had just spawned this hub to give up waiting for it
+    // (ensure_running polls for ~6 s), so its phone-access request never arrived and the
+    // hub stayed loopback-only. The lookup is only a diagnostic, so it now runs on its own
+    // thread after the listener is up and fills in the note when it is done.
+    const bool fell_back = port != HUB_PORT;
+    if (fell_back)
+        BOOST_LOG_TRIVIAL(warning) << "RemoteHub: port " << HUB_PORT << " is in use; the phone link uses " << port << " instead";
     bool was_remote_on;
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         m_acceptor         = acceptor;
         m_lan              = lan;
         m_port             = port;
-        m_port_note_holder = holder;
+        m_port_note_holder.clear();
         was_remote_on      = m_remote_on;
     }
     std::thread([this, acceptor]() { accept_loop(acceptor, false); }).detach();
+    if (fell_back)
+        std::thread([this]() {
+            const std::string holder = port_holder_description(HUB_PORT);
+            if (!holder.empty()) BOOST_LOG_TRIVIAL(warning) << "RemoteHub: port " << HUB_PORT << " is held by " << holder;
+            std::lock_guard<std::mutex> lock(m_mutex);
+            if (m_port != HUB_PORT) m_port_note_holder = holder;
+        }).detach();
     BOOST_LOG_TRIVIAL(info) << "RemoteHub: listening on " << (lan ? "0.0.0.0" : "127.0.0.1") << ":" << port;
     // Tailscale Serve's forwarding target is Tailscale's own persisted config, not ours: if remote
     // access was already on and the listener just moved port (this bind, or the very first one),
