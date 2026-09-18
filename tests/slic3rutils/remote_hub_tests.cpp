@@ -226,3 +226,225 @@ TEST_CASE("SO_EXCLUSIVEADDRUSE: a wildcard bind conflicts with an existing loopb
     REQUIRE(bind_exclusive(ioc, wildcard_after_close, RHTAsio::ip::address_v4::any(), port));
 }
 #endif // _WIN32
+// ==============================================================================================
+// Phase 0 of the hosted remote-access plan (tests/design_hosted_relay.md section 7): the remote
+// state classifier the hub page draws from, the hub identity a relay will later know this hub by,
+// and the one rule that decides whether Tailscale Serve's headers may be believed. All pure.
+// ==============================================================================================
+
+
+// ---- classify_remote_access --------------------------------------------------------------
+
+// The whole table in one place, exactly as the card shows it. Each row is (installed, backend,
+// https, serving, on) -> state. The wording is checked separately below; what matters here is
+// that no input lands in two buckets and none falls through to Error by accident.
+TEST_CASE("classify_remote_access maps every Tailscale situation to one state", "[RemoteHub]")
+{
+    struct Row { bool installed; const char* backend; bool https, serving, on; RemoteAccessState want; };
+    const Row rows[] = {
+        // Nothing installed: whatever else is claimed, the answer is "install it".
+        { false, "",           false, false, false, RemoteAccessState::NotInstalled },
+        { false, "Running",    true,  true,  true,  RemoteAccessState::NotInstalled },
+        // Installed but the backend has no account yet.
+        { true,  "NeedsLogin", false, false, false, RemoteAccessState::NotSignedIn },
+        { true,  "Starting",   false, false, false, RemoteAccessState::NotSignedIn },
+        // Signed in but the service is down.
+        { true,  "Stopped",    true,  false, false, RemoteAccessState::NotRunning },
+        { true,  "NoState",    true,  false, false, RemoteAccessState::NotRunning },
+        { true,  "",           true,  false, false, RemoteAccessState::NotRunning },
+        // Running, but the tailnet issues no certificates: the one thing that cannot be fixed here.
+        { true,  "Running",    false, false, false, RemoteAccessState::HttpsOff },
+        { true,  "Running",    false, true,  true,  RemoteAccessState::HttpsOff },
+        // Ready to be switched on, and switched on and working.
+        { true,  "Running",    true,  false, false, RemoteAccessState::Ready },
+        { true,  "Running",    true,  true,  false, RemoteAccessState::Ready }, // Serve left over from before
+        { true,  "Running",    true,  true,  true,  RemoteAccessState::Serving },
+        // Switched on but Serve is not pointed here any more - the port-drift case the reconcile
+        // in bind() exists for. Reported, with a retry, never as "ready".
+        { true,  "Running",    true,  false, true,  RemoteAccessState::Error },
+    };
+    for (const Row& r : rows) {
+        DYNAMIC_SECTION("installed=" << r.installed << " backend=" << r.backend << " https=" << r.https
+                                     << " serving=" << r.serving << " on=" << r.on) {
+            const auto info = classify_remote_access(r.installed, r.backend, r.https, r.serving, r.on, "");
+            REQUIRE(info.state == r.want);
+            REQUIRE_FALSE(info.message.empty()); // every state says something; the card draws it verbatim
+        }
+    }
+}
+
+TEST_CASE("classify_remote_access offers the install link when Tailscale is missing", "[RemoteHub]")
+{
+    const auto info = classify_remote_access(false, "", false, false, false, "");
+    REQUIRE(std::string(remote_access_state_name(info.state)) == "not_installed");
+    // The explanation the design asks for: what Tailscale is, and that it goes on both devices.
+    REQUIRE_THAT(info.message, Catch::Matchers::Contains("Tailscale"));
+    REQUIRE_THAT(info.message, Catch::Matchers::Contains("free private network"));
+    REQUIRE_THAT(info.message, Catch::Matchers::Contains("same account"));
+    REQUIRE(info.action_url == "https://tailscale.com/download/windows");
+    REQUIRE_FALSE(info.action.empty());
+}
+
+TEST_CASE("classify_remote_access sends the HTTPS-certificates error to the admin console", "[RemoteHub]")
+{
+    // The one error nobody can fix from this PC: it is a tailnet-wide setting, so the card links
+    // straight at the page with the switch and offers a retry rather than a dead end.
+    const auto info = classify_remote_access(true, "Running", false, false, false, "");
+    REQUIRE(info.state == RemoteAccessState::HttpsOff);
+    REQUIRE(std::string(remote_access_state_name(info.state)) == "https_off");
+    REQUIRE(info.action_url == "https://login.tailscale.com/admin/dns");
+    // The meaning of the old string is kept: admin console > DNS > HTTPS Certificates > Enable.
+    REQUIRE_THAT(info.message, Catch::Matchers::Contains("HTTPS Certificates"));
+    REQUIRE_THAT(info.message, Catch::Matchers::Contains("admin console"));
+}
+
+TEST_CASE("classify_remote_access keeps the sign-in hint actionable", "[RemoteHub]")
+{
+    const auto info = classify_remote_access(true, "NeedsLogin", false, false, false, "");
+    REQUIRE(info.state == RemoteAccessState::NotSignedIn);
+    REQUIRE_THAT(info.message, Catch::Matchers::Contains("tailscale login"));
+    REQUIRE(info.action_url.empty()); // nothing to open: it is a local sign-in
+    REQUIRE_FALSE(info.action.empty());
+}
+
+TEST_CASE("classify_remote_access reports the CLI's own words when it has nothing better", "[RemoteHub]")
+{
+    const auto info = classify_remote_access(true, "Running", true, false, false, "tailscaled said no");
+    REQUIRE(info.state == RemoteAccessState::Error);
+    REQUIRE(info.message == "tailscaled said no");
+}
+
+TEST_CASE("remote_access_state_name is the wire spelling of every state", "[RemoteHub]")
+{
+        REQUIRE(std::string(remote_access_state_name(RemoteAccessState::NotInstalled)) == "not_installed");
+    REQUIRE(std::string(remote_access_state_name(RemoteAccessState::NotSignedIn))  == "not_signed_in");
+    REQUIRE(std::string(remote_access_state_name(RemoteAccessState::NotRunning))   == "not_running");
+    REQUIRE(std::string(remote_access_state_name(RemoteAccessState::HttpsOff))     == "https_off");
+    REQUIRE(std::string(remote_access_state_name(RemoteAccessState::Serving))      == "serving");
+    REQUIRE(std::string(remote_access_state_name(RemoteAccessState::Ready))        == "ready");
+    REQUIRE(std::string(remote_access_state_name(RemoteAccessState::Error))        == "error");
+}
+
+// ---- hubid derivation ---------------------------------------------------------------------
+
+TEST_CASE("hubid is the first 16 hex characters of SHA-256 over the public key", "[RemoteHub]")
+{
+    // A fixed key with a fixed answer, so a change to the derivation cannot slip through: a relay
+    // registration is keyed on this value and every hub that re-derived differently would lose it.
+    std::vector<unsigned char> key(32);
+    for (int i = 0; i < 32; ++i) key[i] = (unsigned char) i;
+    REQUIRE(hubid_from_public_key(key) == "630dcd2966c43366");
+    REQUIRE(hubid_from_public_key_hex("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f") == "630dcd2966c43366");
+    REQUIRE(hubid_from_public_key_hex("ABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABAB") == "9a2db2e23f1504cd");
+    // Two different keys never share a hubid, and the derivation is stable across calls.
+    REQUIRE(hubid_from_public_key_hex("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f") !=
+            hubid_from_public_key_hex("abababababababababababababababababababababababababababababababab"));
+}
+
+TEST_CASE("hubid refuses anything that is not a 32-byte key", "[RemoteHub]")
+{
+    REQUIRE(hubid_from_public_key(std::vector<unsigned char>()).empty());
+    REQUIRE(hubid_from_public_key(std::vector<unsigned char>(31, 0)).empty());
+    REQUIRE(hubid_from_public_key(std::vector<unsigned char>(33, 0)).empty());
+    REQUIRE(hubid_from_public_key_hex("").empty());
+    REQUIRE(hubid_from_public_key_hex("00010203").empty());
+    REQUIRE(hubid_from_public_key_hex(std::string(64, 'z')).empty()); // right length, not hex
+}
+
+// ---- the identity's settings.json round trip ----------------------------------------------
+
+TEST_CASE("the hub identity survives a settings.json round trip", "[RemoteHub]")
+{
+
+    HubIdentity id;
+    id.public_hex  = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+    id.private_hex = std::string(64, '7');
+    id.hubid       = "630dcd2966c43366";
+    REQUIRE(id.valid());
+
+    // What write_hub_json() puts under "identity", wrapped the way the real settings file wraps it.
+    nlohmann::json settings;
+    settings["token"]    = "abc";
+    settings["identity"] = nlohmann::json::parse(identity_settings_dump(id));
+
+    const HubIdentity back = identity_from_settings(settings.dump());
+    REQUIRE(back.valid());
+    REQUIRE(back.public_hex  == id.public_hex);
+    REQUIRE(back.private_hex == id.private_hex);
+    REQUIRE(back.hubid       == id.hubid);
+    // The bare identity object parses too, so a caller that already dug the member out is fine.
+    REQUIRE(identity_from_settings(identity_settings_dump(id)).hubid == id.hubid);
+}
+
+TEST_CASE("a settings file with no identity yields an invalid one, which is the signal to mint", "[RemoteHub]")
+{
+    REQUIRE_FALSE(identity_from_settings(R"({"token":"abc"})").valid());
+    REQUIRE_FALSE(identity_from_settings("{}").valid());
+    REQUIRE_FALSE(identity_from_settings("not json").valid());
+    REQUIRE_FALSE(identity_from_settings("").valid());
+    // A truncated or otherwise unusable public key is the same case: mint a new pair.
+    REQUIRE_FALSE(identity_from_settings(R"({"identity":{"public":"0001","private":"ff","hubid":"x"}})").valid());
+}
+
+TEST_CASE("the stored hubid is only a cache: the public key always wins", "[RemoteHub]")
+{
+    // A hand-edited settings file claiming somebody else's hubid must not make this hub answer to
+    // it - the name is a function of the key, and it is re-derived on every read.
+    const std::string j = R"({"identity":{
+        "public":"000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        "private":"7777777777777777777777777777777777777777777777777777777777777777",
+        "hubid":"deadbeefdeadbeef"}})";
+    REQUIRE(identity_from_settings(j).hubid == "630dcd2966c43366");
+}
+
+// ---- the pairing document (what every app reads) -------------------------------------------
+
+TEST_CASE("the pairing document carries the hubid, the public key and three named origins", "[RemoteHub]")
+{
+    const std::string pub = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+    const nlohmann::json j = nlohmann::json::parse(
+        pair_identity_json("http://192.168.1.20:13640/r/tok/", "https://pc.tailnet.ts.net/r/tok/", "", "630dcd2966c43366", pub));
+
+    REQUIRE(j["hubid"] == "630dcd2966c43366");
+    REQUIRE(j["public_key"] == pub);
+    // Three keys, always present. `relay` is empty in phase 0 and the apps skip an empty origin,
+    // so phase 1 fills a slot that every client already knows about rather than adding one.
+    REQUIRE(j["urls"].contains("lan"));
+    REQUIRE(j["urls"].contains("remote"));
+    REQUIRE(j["urls"].contains("relay"));
+    REQUIRE(j["urls"]["relay"] == "");
+    REQUIRE(j["urls"]["lan"] == "http://192.168.1.20:13640/r/tok/");
+    REQUIRE(j["urls"]["remote"] == "https://pc.tailnet.ts.net/r/tok/");
+    // The private key is never a part of this document, whatever was passed in.
+    REQUIRE_FALSE(j.contains("private"));
+    REQUIRE_FALSE(j.contains("private_key"));
+}
+
+TEST_CASE("the pairing document still has all three origins when only the LAN one exists", "[RemoteHub]")
+{
+    const nlohmann::json j = nlohmann::json::parse(
+        pair_identity_json("http://192.168.1.20:13640/r/tok/", "", "", "630dcd2966c43366", std::string(64, '0')));
+    REQUIRE(j["urls"]["remote"] == "");
+    REQUIRE(j["urls"]["relay"] == "");
+    REQUIRE(j["hubid"] == "630dcd2966c43366");
+}
+
+// ---- the loopback trust of Tailscale Serve's headers (design section 6.6) ------------------
+
+TEST_CASE("a non-loopback peer never gets Tailscale-User-Login trusted", "[RemoteHub]")
+{
+    // This is the rule the MAIN listener applies: the LAN listener answers real network peers, and
+    // a client on the LAN can put any header it likes in its request. Tailscale Serve's headers
+    // are believed only because Serve terminates on loopback and overwrites them, so anything that
+    // did not arrive on loopback has ts_login and fwd_proto cleared before login_allowed() is
+    // reached. Without this, a phone on the Wi-Fi could send Tailscale-User-Login: <an allow-listed
+    // address> and be treated as an authenticated tailnet visitor.
+    REQUIRE_FALSE(trusted_proxy_headers(/*peer_is_loopback*/ false, /*via_relay*/ false));
+    REQUIRE_FALSE(trusted_proxy_headers(false, true));
+    // Genuine Serve: loopback, not relayed.
+    REQUIRE(trusted_proxy_headers(true, false));
+    // And the trap design section 3 names: a phase-1 relayed stream is re-injected AS a loopback
+    // peer (so is_private_v4 need not be loosened) and therefore looks exactly like Serve. Nothing
+    // upstream of it strips these headers, so it must never inherit the trust.
+    REQUIRE_FALSE(trusted_proxy_headers(true, true));
+}
