@@ -13,7 +13,7 @@
 📥 **[Download the Latest Stable Release](https://github.com/aceRage/EdgeSlicer/releases/latest)**
 
 - **Windows installer** — the `EdgeSlicer_Windows_Installer_*.exe` on the [releases page](https://github.com/aceRage/EdgeSlicer/releases/latest). Installs side by side with a stock Snapmaker Orca, with its own folder, icon and data directory, and upgrades a previous EdgeSlicer in place.
-- **Windows portable** — the `EdgeSlicer_Windows_Portable_*.zip` on the [releases page](https://github.com/aceRage/EdgeSlicer/releases/latest). Unzip and run `EdgeSlicer.exe`; it needs the Edge WebView2 runtime and the VC++ redistributable, usually already present.
+- **Windows portable** — the `EdgeSlicer_Windows_V*_portable.zip` on the [releases page](https://github.com/aceRage/EdgeSlicer/releases/latest). Unzip and run `EdgeSlicer.exe`; it needs the Edge WebView2 runtime and the VC++ redistributable, usually already present.
 - **macOS (Apple silicon)** — the `.dmg` on the [releases page](https://github.com/aceRage/EdgeSlicer/releases/latest). It is **unsigned**, so macOS refuses it the first time: right-click the app → *Open* → *Open*, or run `xattr -dr com.apple.quarantine "/Applications/EdgeSlicer.app"` once.
 - **Linux (x86_64)** — the `.AppImage` on the [releases page](https://github.com/aceRage/EdgeSlicer/releases/latest). `chmod +x` it and run it; the host must provide WebKitGTK 4.1 and libOpenGL.
 - **Companion app (iOS / Android)** — the EdgeSlicer app is in testing, on TestFlight for iOS and Firebase App Distribution for Android. Testers are added by invitation; ask on [Discussions](https://github.com/aceRage/EdgeSlicer/discussions) or [Issues](https://github.com/aceRage/EdgeSlicer/issues) for one. It is not on the app stores.
