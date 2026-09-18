@@ -199,8 +199,13 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH" > /dev/null
           echo "Code-signing identities in the build keychain:"
           security find-identity -v -p codesigning "$KEYCHAIN_PATH"
-          if ! security find-identity -v -p codesigning "$KEYCHAIN_PATH" | grep -qF "$MACOS_CERTIFICATE_ID"; then
-            echo "::error::MACOS_CERTIFICATE_ID does not match any identity in the imported .p12 - it must be the full string, e.g. 'Developer ID Application: Name (TEAMID)', from 'security find-identity -v -p codesigning'."
+          identities=$(security find-identity -v -p codesigning "$KEYCHAIN_PATH")
+          if ! echo "$identities" | grep -qF "$MACOS_CERTIFICATE_ID"; then
+            if echo "$identities" | grep -qE "Apple Distribution|Apple Development|iPhone Distribution|iPhone Developer|Mac Developer|3rd Party Mac Developer"; then
+              echo "::error::The imported .p12 holds an App Store / development certificate ($(echo "$identities" | grep -oE '"[^"]+"' | head -1)), not a 'Developer ID Application' one. Gatekeeper and the notary service only accept Developer ID: create that certificate in the developer portal (docs/RELEASING_MACOS.md, step 1), export it as .p12 and replace BUILD_CERTIFICATE_BASE64 / P12_PASSWORD."
+            else
+              echo "::error::MACOS_CERTIFICATE_ID does not match any identity in the imported .p12 - it must be the full string, e.g. 'Developer ID Application: Name (TEAMID)', from 'security find-identity -v -p codesigning'."
+            fi
             exit 1
           fi
 
