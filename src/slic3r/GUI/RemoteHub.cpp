@@ -18,6 +18,12 @@
 #include <boost/nowide/fstream.hpp>
 #include <nlohmann/json.hpp>
 
+// The hub identity (design_hosted_relay.md section 2) is an Ed25519 key pair, minted and kept by
+// the same OpenSSL that WebPush's VAPID keys and AppPush's APNs signing already use - no new
+// dependency, and EVP_PKEY_ED25519 has been in every OpenSSL we build against since 1.1.1.
+#include <openssl/evp.h>
+#include <openssl/sha.h>
+
 #include <algorithm>
 #include <atomic>
 #include <cctype>
@@ -83,6 +89,10 @@ static const char* const GO2RTC_WS   = "/api/ws";
 static const size_t      MAX_API_BODY       = 64 * 1024;
 static const uint64_t    MAX_UPLOAD         = 2ull * 1024 * 1024 * 1024;
 static const int         IDLE_EXIT_SECONDS  = 60;
+// Where the remote-access card sends people who have no Tailscale yet, and where the one error
+// nobody can fix from this PC (tailnet-wide HTTPS certificates) is actually switched on.
+static const char* const TAILSCALE_DOWNLOAD_URL  = "https://tailscale.com/download/windows";
+static const char* const TAILSCALE_DNS_ADMIN_URL = "https://login.tailscale.com/admin/dns";
 // Request hygiene. The head cap is generous for a browser (cookies + a long referer) and small
 // enough that a dribbling client cannot grow the buffer. The connection caps leave room for a
 // phone with six live camera WebSockets plus its polling, several times over; the admin listener
@@ -278,6 +288,24 @@ static std::string lower(std::string s)
     std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return (char) std::tolower(c); });
     return s;
 }
+
+static int hex_nibble(char c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+static std::string to_hex(const unsigned char* p, size_t n)
+{
+    static const char* hx = "0123456789abcdef";
+    std::string        s;
+    s.reserve(n * 2);
+    for (size_t i = 0; i < n; ++i) { s += hx[p[i] >> 4]; s += hx[p[i] & 15]; }
+    return s;
+}
+
 
 static std::string json_error(const std::string& msg)
 {
@@ -564,6 +592,10 @@ struct Request
     std::string method, target, path, query, head, pending, cookies, file_name;
     std::string host, secret, sec_fetch_site, content_type; // Host, X-Hub-Secret, Sec-Fetch-Site, Content-Type (lower-cased where compared)
     std::string ts_login, fwd_proto; // Tailscale-User-Login, X-Forwarded-Proto: set by Tailscale Serve, trusted from loopback only
+    // Set by phase 1's relay for a stream it re-injected on loopback, so that the trust rule above
+    // can tell it apart from a genuine Serve connection. Always false today; the rule is already
+    // written to honour it (Testing::trusted_proxy_headers).
+    bool        via_relay { false };
     size_t      content_length { 0 };
 };
 
@@ -813,6 +845,173 @@ static TailscaleState tailscale_query()
 // `tailscale serve status --json` nests the forwarded port under Web -> "<domain>:443" ->
 // Handlers -> "/" -> Proxy = "http://127.0.0.1:<port>". Only the root path ("/") is ours - the
 // hub never registers anything else with Serve - and only a loopback proxy counts as "serving".
+// ---- remote access, as one state the page can draw --------------------------------------------
+// Six strings and one link, in one place. Before this the hub page re-derived "installed but not
+// signed in" from three separate booleans and carried its own copy of every sentence, so the two
+// could (and did) drift. classify_remote_access() is pure, so the whole table is a unit test.
+const char* Testing::remote_access_state_name(Testing::RemoteAccessState st)
+{
+    switch (st) {
+    case RemoteAccessState::NotInstalled: return "not_installed";
+    case RemoteAccessState::NotSignedIn:  return "not_signed_in";
+    case RemoteAccessState::NotRunning:   return "not_running";
+    case RemoteAccessState::HttpsOff:     return "https_off";
+    case RemoteAccessState::Serving:      return "serving";
+    case RemoteAccessState::Ready:        return "ready";
+    default:                              return "error";
+    }
+}
+
+Testing::RemoteAccessInfo Testing::classify_remote_access(bool installed, const std::string& backend, bool https,
+                                                          bool serving, bool on, const std::string& error)
+{
+    RemoteAccessInfo r;
+    if (!installed) {
+        r.state      = RemoteAccessState::NotInstalled;
+        r.message    = "Remote access uses Tailscale, a free private network between your PC and your phone. "
+                       "Install it on both and sign in with the same account.";
+        r.action     = "Install Tailscale";
+        r.action_url = TAILSCALE_DOWNLOAD_URL;
+        return r;
+    }
+    if (backend == "NeedsLogin" || backend == "Starting") {
+        r.state   = RemoteAccessState::NotSignedIn;
+        r.message = "Tailscale is installed but not signed in on this PC. Open Tailscale from the system tray "
+                    "(or run `tailscale login`) and sign in with the same account as your phone, then try again.";
+        r.action  = "Try again";
+        return r;
+    }
+    if (backend != "Running") {
+        r.state   = RemoteAccessState::NotRunning;
+        r.message = backend.empty() ? "Tailscale is not running on this PC." : "Tailscale is not running (" + backend + ").";
+        r.action  = "Try again";
+        return r;
+    }
+    if (!https) {
+        // The one error that cannot be fixed from this PC at all: it is a tailnet-wide setting in
+        // the admin console, so the card links straight at the page that has the switch.
+        r.state      = RemoteAccessState::HttpsOff;
+        r.message    = "HTTPS certificates are not enabled for your tailnet: Tailscale admin console > DNS > "
+                       "HTTPS Certificates > Enable, then try again.";
+        r.action     = "Open DNS settings";
+        r.action_url = TAILSCALE_DNS_ADMIN_URL;
+        return r;
+    }
+    if (on && serving) {
+        r.state   = RemoteAccessState::Serving;
+        r.message = "Remote access is on. Your phone can reach this hub from anywhere through your tailnet.";
+        return r;
+    }
+    if (on && !serving) {
+        // remote_on is set but Serve is not pointed here: the reconcile in bind() is the usual cure
+        // and it runs by itself, so the button repeats it rather than reporting a dead end.
+        r.state   = RemoteAccessState::Error;
+        r.message = error.empty() ? "Tailscale is no longer serving this hub; turn remote access off and on again." : error;
+        r.action  = "Try again";
+        return r;
+    }
+    if (!error.empty()) {
+        r.state   = RemoteAccessState::Error;
+        r.message = error;
+        r.action  = "Try again";
+        return r;
+    }
+    r.state   = RemoteAccessState::Ready;
+    r.message = "Tailscale is ready. Turn remote access on to publish this hub inside your tailnet.";
+    return r;
+}
+
+// ---- hub identity (design_hosted_relay.md section 2) ------------------------------------------
+// hubid = the first 16 hex characters of SHA-256 over the 32 raw bytes of the Ed25519 public key.
+// A hash rather than the key itself so that the durable name a relay knows this hub by is short
+// enough for a URL label and reveals nothing but the key it was derived from.
+std::string Testing::hubid_from_public_key(const std::vector<unsigned char>& public_key)
+{
+    if (public_key.size() != 32) return std::string();
+    unsigned char digest[SHA256_DIGEST_LENGTH];
+    SHA256(public_key.data(), public_key.size(), digest);
+    static const char* HEX = "0123456789abcdef";
+    std::string        out;
+    for (int i = 0; i < 8; ++i) { // 8 bytes = 16 hex characters
+        out.push_back(HEX[digest[i] >> 4]);
+        out.push_back(HEX[digest[i] & 0x0f]);
+    }
+    return out;
+}
+
+std::string Testing::hubid_from_public_key_hex(const std::string& public_key_hex)
+{
+    if (public_key_hex.size() != 64) return std::string();
+    std::vector<unsigned char> raw;
+    raw.reserve(32);
+    for (size_t i = 0; i < 64; i += 2) {
+        const int hi = hex_nibble(public_key_hex[i]), lo = hex_nibble(public_key_hex[i + 1]);
+        if (hi < 0 || lo < 0) return std::string();
+        raw.push_back((unsigned char) ((hi << 4) | lo));
+    }
+    return hubid_from_public_key(raw);
+}
+
+// What settings.json carries under "identity". The private half is in here and nowhere else - not
+// hub.json (which the phone-facing code reads), not /pair, not /hub/info, never a log line.
+std::string Testing::identity_settings_dump(const Testing::HubIdentity& id)
+{
+    json j;
+    j["hubid"]   = id.hubid;
+    j["public"]  = id.public_hex;
+    j["private"] = id.private_hex;
+    return j.dump();
+}
+
+Testing::HubIdentity Testing::identity_from_settings(const std::string& settings_json_text)
+{
+    HubIdentity id;
+    try {
+        json j = json::parse(settings_json_text);
+        // Accept either the whole settings file or just the identity object, so a caller that
+        // already dug the member out does not have to re-wrap it.
+        const json o = j.contains("identity") ? j["identity"] : j;
+        if (!o.is_object()) return HubIdentity();
+        id.public_hex  = lower(o.value("public", std::string()));
+        id.private_hex = lower(o.value("private", std::string()));
+        id.hubid       = lower(o.value("hubid", std::string()));
+    } catch (...) { return HubIdentity(); }
+    // The stored hubid is only ever a cache of the derivation; the key wins if the two disagree,
+    // so a hand-edited or truncated settings file cannot make this hub answer to the wrong name.
+    const std::string derived = hubid_from_public_key_hex(id.public_hex);
+    if (derived.empty()) return HubIdentity();
+    id.hubid = derived;
+    return id;
+}
+
+// ---- the loopback trust of Tailscale Serve's headers (design section 6.6) ---------------------
+// Tailscale Serve terminates on loopback and sets Tailscale-User-Login / X-Forwarded-Proto,
+// stripping whatever a client tried to send. That is the whole basis for trusting them - so they
+// are trusted from a loopback peer and from nowhere else. A request that walked in on the LAN
+// listener carrying a Tailscale-User-Login header is a client lying about who it is, and clearing
+// the field here is what stops it ever reaching login_allowed().
+//
+// The `via_relay` argument is the hook phase 1 needs: a relayed stream is re-injected as a loopback
+// peer (so is_private_v4 is satisfied without being loosened) and would therefore *look* exactly
+// like Serve. It is not - nothing upstream of it strips these headers - so it never gets the trust.
+bool Testing::trusted_proxy_headers(bool peer_is_loopback, bool via_relay)
+{
+    return peer_is_loopback && !via_relay;
+}
+
+// The pairing document's origins and identity, pure so the shape can be tested without a hub.
+// Three named origins, one of them always empty today, and the public half of the hub identity.
+std::string Testing::pair_identity_json(const std::string& lan_url, const std::string& remote_url,
+                                        const std::string& relay_url, const std::string& hubid,
+                                        const std::string& public_key_hex)
+{
+    json j;
+    j["urls"]       = json{ { "lan", lan_url }, { "remote", remote_url }, { "relay", relay_url } };
+    j["hubid"]      = hubid;
+    j["public_key"] = public_key_hex; // the public half only, always
+    return j.dump();
+}
+
 int Testing::serve_status_target_port(const std::string& serve_status_json_text)
 {
     try {
@@ -828,6 +1027,36 @@ int Testing::serve_status_target_port(const std::string& serve_status_json_text)
         }
     } catch (...) {}
     return 0;
+}
+
+// The hub's durable identity: one Ed25519 key pair per data dir, minted the first time
+// settings.json is written and never again (design_hosted_relay.md section 2 - a relay will know
+// this hub by the hubid derived from the public half, and a hub that re-minted would lose its
+// registration on every start). OpenSSL's EVP_PKEY_ED25519, the same library WebPush's VAPID keys
+// and AppPush's APNs signing already use, so nothing new is linked.
+//
+// `private_hex` is the 32-byte Ed25519 seed - the whole secret. It is written to settings.json and
+// to nothing else: not hub.json, not /pair, not /hub/info, and never a log line.
+static Testing::HubIdentity mint_hub_identity()
+{
+    Testing::HubIdentity id;
+    EVP_PKEY*            pkey = nullptr;
+    EVP_PKEY_CTX*        ctx  = EVP_PKEY_CTX_new_id(EVP_PKEY_ED25519, nullptr);
+    if (!ctx) return id;
+    if (EVP_PKEY_keygen_init(ctx) == 1) EVP_PKEY_keygen(ctx, &pkey);
+    EVP_PKEY_CTX_free(ctx);
+    if (!pkey) return id;
+    unsigned char pub[32] = {}, priv[32] = {};
+    size_t        publen = sizeof(pub), privlen = sizeof(priv);
+    if (EVP_PKEY_get_raw_public_key(pkey, pub, &publen) == 1 && publen == sizeof(pub) &&
+        EVP_PKEY_get_raw_private_key(pkey, priv, &privlen) == 1 && privlen == sizeof(priv)) {
+        id.public_hex  = to_hex(pub, publen);
+        id.private_hex = to_hex(priv, privlen);
+        id.hubid       = Testing::hubid_from_public_key(std::vector<unsigned char>(pub, pub + publen));
+    }
+    OPENSSL_cleanse(priv, sizeof(priv));
+    EVP_PKEY_free(pkey);
+    return id;
 }
 
 // Per-run secrets (std::random_device is the OS CSPRNG on every platform we build).
@@ -1586,6 +1815,11 @@ public:
     {
         std::string lan;                 // http://<lan ip>:<port>/r/<token>/  ("" while phone access is off)
         std::string remote;              // https://<machine>.<tailnet>.ts.net/r/<token>/  ("" while remote is off)
+        // The hosted relay from design_hosted_relay.md: a third origin, on the same footing as the
+        // other two, that a phone can be handed when neither the LAN nor the tailnet reaches this
+        // PC. Nothing hosts it yet - phase 0 only wires the slot so the page, /pair, the app and
+        // update_notify_link() below already carry it and phase 1 is purely additive. Always "".
+        std::string relay;
         std::vector<std::string> ips;    // the LAN addresses the lan link was picked from
     };
     PhoneLinks phone_links();
@@ -1686,6 +1920,11 @@ private:
     std::vector<std::pair<long, long long>> m_recent_spawns;
     std::string                    m_state; // full Stream-tab state JSON (with credentials)
     std::string                    m_secret;      // per run; in hub.json and the hub page, required as X-Hub-Secret on /hub/*
+    // This data dir's durable relay identity (design_hosted_relay.md section 2): an Ed25519 key
+    // pair minted once and kept in settings.json, plus the hubid derived from the public half.
+    // m_identity.private_hex is the only secret in this process that must never be serialised
+    // anywhere a phone, a page or a log can see - write_hub_json() is the single writer.
+    Testing::HubIdentity           m_identity;
     std::string                    m_go2rtc_user, m_go2rtc_pass, m_go2rtc_auth; // go2rtc credentials, this process only
     bool                           m_remote_on { false };        // publish through Tailscale Serve (persisted)
     std::vector<std::string>       m_allowed_logins;             // tailnet logins that may connect (lower-case, persisted)
@@ -1784,6 +2023,11 @@ json HubServer::info_json()
     // tray read it); lan_url is the same string, remote_url is the Tailscale one or empty.
     j["lan_url"]    = j["url"];
     j["remote_url"] = j["remote"].is_object() ? j["remote"].value("url", std::string()) : std::string();
+    // The third origin and this hub's durable name for it. Empty and inert in phase 0; here now so
+    // the hub page, the tray and the app all learn the shape before anything fills it in.
+    j["relay_url"]  = std::string();
+    j["hubid"]      = m_identity.hubid;
+    j["public_key"] = m_identity.public_hex; // the public half only - see write_hub_json()
     // Set only when bind() had to step past HUB_PORT, so a hub sitting on 13640 as usual sends no
     // port_note at all. `held_by` is "" when the probe could not tell what has it (gone by the
     // time we looked, or a non-Windows build).
@@ -1839,6 +2083,12 @@ void HubServer::write_hub_json()
         st["old_tokens"] = m_old_tokens;
         st["hub_instance"] = m_hub_instance; // written once, then carried forward unchanged
         st["token_version"] = m_token_version;
+        // The relay identity, private half included. settings.json is this hub's own file on its
+        // own data dir, and it already holds the phone token and the VAPID private key for exactly
+        // the same reason: losing it would silently break every client that ever trusted this hub.
+        // hub.json deliberately does NOT get a copy - that file is the one instances and the page
+        // read, and the private key has no business being anywhere they can see it.
+        if (m_identity.valid()) st["identity"] = json::parse(Testing::identity_settings_dump(m_identity));
     }
     // The notification destinations live here too, and for the same reason: a hub restart must
     // not lose the relay somebody set up. RemoteNotify owns them; this is the only writer of the
@@ -1869,13 +2119,20 @@ HubServer::PhoneLinks HubServer::phone_links()
     std::lock_guard<std::mutex> lock(m_mutex);
     if (phone && !l.ips.empty()) l.lan = "http://" + l.ips.front() + ":" + std::to_string(m_port) + "/r/" + m_token + "/";
     if (m_remote_on && m_ts.serving && !m_ts.dns_name.empty()) l.remote = "https://" + m_ts.dns_name + "/r/" + m_token + "/";
+    // l.relay stays empty in phase 0: there is no relay to name one against yet. Everything
+    // downstream already treats an empty link as "this path does not exist", so nothing shows.
     return l;
 }
 
 // The link a notification should open on the phone. The Tailscale one first, because it works
 // from anywhere; the Wi-Fi one otherwise; nothing at all while phone access is off, and then the
-// relay simply gets no link rather than one that cannot resolve. Both are handed over now: a
+// notifier simply gets no link rather than one that cannot resolve. Both are handed over now: a
 // notification carries the pair, and the phone opens whichever one its owner prefers.
+//
+// The order design_hosted_relay.md section 2 settles on is tailnet -> relay -> LAN: the tailnet
+// wins on merit (free, and WireGuard-encrypted end to end), the relay is the paid fallback, the
+// LAN is only reachable from the house. l.relay is empty in phase 0, so the middle rung is a
+// no-op today and slotting it in later changes nothing else.
 void HubServer::update_notify_link()
 {
     const PhoneLinks l = phone_links();
@@ -2306,7 +2563,7 @@ json HubServer::summary_json()
     out["hub_instance"] = hub_instance();
     out["lan_url"]      = links.lan;
     out["remote_url"]   = links.remote;
-    out["urls"]         = json{ { "lan", links.lan }, { "remote", links.remote } };
+    out["urls"]         = json{ { "lan", links.lan }, { "remote", links.remote }, { "relay", links.relay } };
     out["printers"]     = json::array();
     std::string token;
     {
@@ -2389,7 +2646,20 @@ json HubServer::pair_json()
     j["host"]    = pc_host_name();
     j["version"] = std::string(SLIC3R_VERSION);
     j["hub_instance"] = hub_instance();
-    j["urls"]    = json{ { "lan", links.lan }, { "remote", links.remote } };
+    // Three named origins, one of which is always empty in phase 0. The apps read this object
+    // generically (HubUrl accepts any https origin with a /r/<token>/ path), so the relay needs no
+    // app change to become usable the day something fills it in.
+    {
+        std::string hubid, pubkey;
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            hubid  = m_identity.hubid;
+            pubkey = m_identity.public_hex;
+        }
+        // One helper builds `urls`, `hubid` and `public_key` so the document the apps read and the
+        // shape the tests pin can never drift apart.
+        j.update(json::parse(Testing::pair_identity_json(links.lan, links.remote, links.relay, hubid, pubkey)));
+    }
     j["ips"]     = links.ips;
     // What this build and this configuration can actually push with, so the app does not register
     // for a provider that will never deliver (APNs needs the .p8 AND HTTP/2 in our libcurl).
@@ -2405,7 +2675,7 @@ json HubServer::pair_json()
         std::lock_guard<std::mutex> lock(m_mutex);
         j["token_version"] = m_token_version;
     }
-    j["features"] = json::array({ "events", "control", "send", "summary", "thumbnail", "webrtc", "quality", "apppush" });
+    j["features"] = json::array({ "events", "control", "send", "summary", "thumbnail", "webrtc", "quality", "apppush", "hubid" });
     j["capabilities"] = j["features"];
     return j;
 }
@@ -2929,6 +3199,7 @@ std::string HubServer::state_for_phone()
     const PhoneLinks links = phone_links();
     out["lan_url"]    = links.lan;
     out["remote_url"] = links.remote;
+    out["relay_url"]  = links.relay; // always "" in phase 0; the control ignores an empty origin
     out["ips"]        = links.ips;
     // Added for the native app (phase 3 follow-ups 2 and 6), and additive on purpose: every field
     // the page already reads is untouched.
@@ -3160,6 +3431,10 @@ TailscaleState HubServer::remote_state(bool refresh)
     return m_ts;
 }
 
+// The remote-access card's whole content, in the shape the page draws it. The six states and
+// their wording come from Testing::classify_remote_access() so that nothing here and nothing in
+// hub.html carries a second copy of a sentence; the older flat booleans stay alongside because the
+// tray and the phone page read them.
 json HubServer::remote_json_locked() const
 {
     json r;
@@ -3177,6 +3452,16 @@ json HubServer::remote_json_locked() const
     std::string err = m_ts.error;
     if (err.empty() && m_remote_on && m_ts.installed && !m_ts.serving) err = "Tailscale is no longer serving this hub; turn remote access off and on again";
     r["error"] = err;
+    const Testing::RemoteAccessInfo st = Testing::classify_remote_access(m_ts.installed, m_ts.backend, m_ts.https,
+                                                                        m_ts.serving, m_remote_on, m_ts.error);
+    r["access"] = json{ { "state", Testing::remote_access_state_name(st.state) },
+                        { "message", st.message },
+                        { "action", st.action },
+                        { "action_url", st.action_url } };
+    // The `tailscale funnel` line the card's advanced note shows verbatim. Documented, never run:
+    // Funnel publishes the hub to the whole internet with only the path token in front of it, which
+    // is a deliberate choice nobody should make by clicking a button (design section 3).
+    r["funnel_command"] = "tailscale funnel --bg --https=443 http://127.0.0.1:" + std::to_string(m_port);
     return r;
 }
 
@@ -3191,8 +3476,13 @@ bool HubServer::set_remote(bool on, std::string& error)
     int         code = 0;
     if (on) {
         TailscaleState t = remote_state(true);
-        if (!t.installed || t.backend != "Running") { error = t.error.empty() ? "Tailscale is not ready" : t.error; return false; }
-        if (!t.https) { error = "HTTPS certificates are not enabled for your tailnet: Tailscale admin console > DNS > HTTPS Certificates > Enable, then try again"; return false; }
+        // The refusal the caller shows is the classifier's sentence, so the message a failed
+        // toggle produces and the message the card was already showing are one and the same
+        // string - "not installed", "not signed in" and "HTTPS certificates are off" included.
+        if (!t.installed || t.backend != "Running" || !t.https) {
+            error = Testing::classify_remote_access(t.installed, t.backend, t.https, t.serving, false, t.error).message;
+            return false;
+        }
         // The first run also fetches the certificate, which can take half a minute.
         if (!run_capture({ tailscale_exe(), "serve", "--bg", "--https=443", "http://127.0.0.1:" + std::to_string(port) }, out, code, 90000) || code != 0) {
             error = out.empty() ? "tailscale serve failed" : out.substr(0, 300);
@@ -3297,7 +3587,15 @@ void HubServer::handle_hub(tcp::socket& client, Request& r)
         else write_hub_json();
         remote_state(true);
         json j = info_json();
-        if (!error.empty()) j["remote"]["error"] = error;
+        // A refused toggle reports the classifier's own sentence (set_remote uses it too), so the
+        // card shows the same wording whether it got there by failing a toggle or by simply
+        // looking. `access.message` is what hub.html draws; `error` stays for older readers.
+        if (!error.empty()) {
+            j["remote"]["error"]             = error;
+            j["remote"]["access"]["message"] = error;
+            if (j["remote"]["access"].value("state", std::string()) == "ready") j["remote"]["access"]["state"] = "error";
+            if (j["remote"]["access"].value("action", std::string()).empty()) j["remote"]["access"]["action"] = "Try again";
+        }
         respond_json(client, error.empty() ? 200 : 409, j.dump());
     } else if ((r.path == "/hub/" || r.path == "/hub/index.html") && r.method == "GET") {
         // The page gets the per-run secret and sends it back as X-Hub-Secret on every call.
@@ -3880,6 +4178,20 @@ void HubServer::serve(std::unique_ptr<tcp::socket> owner, bool admin)
 
         // Through Tailscale Serve (a loopback peer carrying Tailscale-User-Login, which Serve sets
         // and strips from clients) only allow-listed tailnet logins get anything at all.
+        //
+        // Whether those two headers may be believed at all is decided in exactly one place, and
+        // this is the call site: Testing::trusted_proxy_headers(). Serve terminates on loopback and
+        // overwrites them, which is the entire basis for trusting them, so a request that reached
+        // the LAN listener from a real network carrying its own Tailscale-User-Login has them
+        // cleared here and can never reach login_allowed() with it. Phase 1's relayed streams are
+        // re-injected as loopback peers and will pass `via_relay = true` for the same reason: they
+        // look like Serve and are not. `r` is this session's own Request, so clearing is local.
+        if (!Testing::trusted_proxy_headers(peer.is_loopback(), r.via_relay)) {
+            if (!r.ts_login.empty())
+                BOOST_LOG_TRIVIAL(warning) << "RemoteHub: ignoring a Tailscale-User-Login header from a non-loopback peer";
+            r.ts_login.clear();
+            r.fwd_proto.clear();
+        }
         const bool via_serve = peer.is_loopback() && !r.ts_login.empty();
         if (via_serve && !login_allowed(r.ts_login)) {
             BOOST_LOG_TRIVIAL(warning) << "RemoteHub: tailnet login not allowed: " << r.ts_login;
@@ -4063,6 +4375,10 @@ bool HubServer::start()
         // never again, so a client can tell a fresh data dir (whose event ids restart at 1) from
         // this one carrying on. See hub_instance().
         m_hub_instance = j.value("hub_instance", std::string());
+        // ... and this data dir's relay identity, if it already has one. A settings file written
+        // before this existed, or one whose identity object is malformed, simply yields an invalid
+        // one and a fresh pair is minted below.
+        m_identity = Testing::identity_from_settings(j.dump());
         // A data dir written before this existed gets its version from what it can still see: the
         // links it remembers replacing, plus this one. Only ever a floor, and it only ever grows.
         m_token_version = std::max(1, j.value("token_version", 0));
@@ -4081,6 +4397,13 @@ bool HubServer::start()
     if (m_hub_instance.empty()) {
         m_hub_instance = random_hex(16);
         BOOST_LOG_TRIVIAL(info) << "RemoteHub: this data dir's hub instance is " << m_hub_instance;
+    }
+    // The durable relay identity, minted once per data dir. Only the hubid is ever logged: the
+    // public key is long and uninteresting in a log, and the private key must never appear in one.
+    if (!m_identity.valid()) {
+        m_identity = mint_hub_identity();
+        if (m_identity.valid()) BOOST_LOG_TRIVIAL(info) << "RemoteHub: this data dir's hub id is " << m_identity.hubid;
+        else BOOST_LOG_TRIVIAL(warning) << "RemoteHub: could not generate the hub identity (Ed25519 unavailable); remote registration will not be possible";
     }
     m_secret = random_hex(16);
     m_state  = read_file(streams_json_path());
@@ -4401,6 +4724,8 @@ std::string Info::json() const
     j["ips"]   = ips;
     j["url"]   = url();
     j["remote_url"] = remote_url;
+    j["relay_url"]  = relay_url;
+    j["hubid"]      = hubid;
     return j.dump();
 }
 
@@ -4418,6 +4743,8 @@ static Info parse_info(const std::string& body)
         i.go2rtc_port = j.value("go2rtc_port", 0);
         i.relay_port  = j.value("relay_port", 0);
         if (j.contains("remote") && j["remote"].is_object()) i.remote_url = j["remote"].value("url", "");
+        i.relay_url   = j.value("relay_url", "");   // "" until a relay exists (phase 1)
+        i.hubid       = j.value("hubid", "");       // this data dir's durable relay identity
         i.version     = j.value("version", "");
         for (const auto& ip : j.value("ips", json::array())) i.ips.push_back(ip.get<std::string>());
     } catch (...) {}
