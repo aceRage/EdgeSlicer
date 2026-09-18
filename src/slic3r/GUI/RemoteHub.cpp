@@ -1827,6 +1827,10 @@ void HubServer::write_hub_json()
     json st;
     st["remote_on"]      = j["remote_on"];
     st["allowed_logins"] = j["allowed_logins"];
+    // The phone switch too. It used to live only in hub.json, which a clean quit deletes, so
+    // the next slicer start re-spawned the hub from ITS remembered copy of the switch - stale
+    // whenever the last change was made from the hub page - and "home mode off" never stuck.
+    st["phone"]          = j["phone"];
     {
         // hub.json is deleted on a clean quit; the phones' link has to outlive it, or every hub
         // restart would hand out a new one and kill every saved link and home-screen icon.
@@ -4039,6 +4043,12 @@ bool HubServer::start()
     try {
         json j      = json::parse(read_file(settings_json_path()));
         m_remote_on = j.value("remote_on", false);
+        // The phone switch as it was last set, from the tray, the hub page or the slicer. This
+        // beats the --hub-phone hint the slicer passes (its app config only learns of a change
+        // made from the hub page while its Stream panel happens to be polling), exactly as the
+        // remembered token beats --hub-token below; the hint only seeds a data dir with no
+        // saved switch yet.
+        if (j.contains("phone")) m_phone = j.value("phone", false);
         // ... and so do the notification destinations: an ntfy topic or a Pushover key set up
         // once must survive every hub restart.
         notify_saved = j.value("notify", json::object());

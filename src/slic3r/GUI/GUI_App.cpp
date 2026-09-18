@@ -4699,16 +4699,26 @@ void GUI_App::start_remote_access()
     wxString    env_token;
     std::string token;
     bool        phone = false;
+    bool        force = false; // the env var means "on, whatever the hub remembers" (gates, agents)
     if (wxGetEnv("SNORCA_PHONE_ACCESS", &env_token) && !env_token.empty()) {
         token = env_token.ToStdString();
         phone = true;
+        force = true;
     } else if (app_config->get("stream_phone_access") == "1") {
         token = app_config->get("stream_phone_token");
         phone = true;
     }
     // The hub (tray icon, camera relays, phone access) starts with the first slicer and stays
     // until quit from its tray menu. Off the GUI thread: spawning it takes a moment.
-    std::thread([token, phone]() { RemoteHub::ensure_running(token, phone); }).detach();
+    //
+    // `phone` is only a hint: the hub keeps its own copy of the switch in settings.json and
+    // that copy wins, because this app config only learns of a change made from the hub page
+    // while the Stream panel is polling - which is how "home mode off" used to come back on
+    // at the next slicer start. The env var is the one caller that really means "on".
+    std::thread([token, phone, force]() {
+        RemoteHub::ensure_running(token, phone);
+        if (force) RemoteHub::set_phone(true, token);
+    }).detach();
 }
 
 void GUI_App::recreate_GUI(const wxString &msg_name)
