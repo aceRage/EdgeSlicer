@@ -102,8 +102,44 @@ message(STATUS "Snapmaker_Orca deps debug build: ${DEP_DEBUG}")
 
 find_package(Git REQUIRED)
 
-# The default command line for patching. Only works for newer 
+# The default command line for patching. Only works for newer
 set(PATCH_CMD ${GIT_EXECUTABLE} apply --verbose --ignore-space-change --whitespace=fix)
+
+# Ultra: IN_GIT_REPO / BINARY_DIR_REL must be defined BEFORE the first dep include().
+#
+# `git apply` run inside a git work tree resolves a git-format patch ("diff --git a/x
+# b/x") against the REPO ROOT rather than the cwd. The deps build tree lives inside the
+# checkout on CI and on every developer machine, so those paths do not exist, git prints
+# "Skipped patch 'x'." for every file - and exits 0. The two recipes whose patches are
+# git-format (OCCT, OpenCV) work around that with `--directory ${BINARY_DIR_REL}/...`.
+#
+# This block used to sit further down, just above include(OCCT)/include(OpenCV), while
+# CGAL, GMP, OpenVDB and QuadriFlow were included ~60 lines earlier - i.e. four recipes
+# read IN_GIT_REPO before anything set it. QuadriFlow's git-format patch was silently
+# skipped on every platform until 2026-09-18 (CI run 35365103460). Keep this above the
+# includes so no recipe depends on that accident again.
+#
+# Those other four turned out not to want the flag at all: their patches are traditional
+# diffs, which git resolves against the cwd (already the dep source dir), so --directory
+# would prepend the build path twice and break them. deps/apply_patch.cmake documents
+# that format rule and now enforces it in both directions.
+#
+# The ordering is no longer load-bearing on its own: patch steps go through
+# deps/apply_patch.cmake, which turns a skipped patch into a hard error instead of
+# letting the build carry on with an unpatched tree.
+execute_process(
+    COMMAND ${GIT_EXECUTABLE} rev-parse --is-inside-work-tree
+    RESULT_VARIABLE REV_PARSE_RESULT
+    OUTPUT_VARIABLE REV_PARSE_OUTPUT
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+)
+
+# Will output "true" and have a 0 return code if within a git repo
+if((REV_PARSE_RESULT EQUAL 0) AND (REV_PARSE_OUTPUT STREQUAL "true"))
+    set(IN_GIT_REPO TRUE)
+    # Find relative path from root to source used for adjusting patch command
+    file(RELATIVE_PATH BINARY_DIR_REL  ${CMAKE_SOURCE_DIR}/.. ${CMAKE_BINARY_DIR})
+endif ()
 
 if (NOT _is_multi AND NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
@@ -358,20 +394,8 @@ if(NOT FREETYPE_FOUND)
     set(FREETYPE_PKG "dep_FREETYPE") 
 endif()
 
-execute_process(
-    COMMAND ${GIT_EXECUTABLE} rev-parse --is-inside-work-tree
-    RESULT_VARIABLE REV_PARSE_RESULT
-    OUTPUT_VARIABLE REV_PARSE_OUTPUT
-    OUTPUT_STRIP_TRAILING_WHITESPACE
-)
-
-# Will output "true" and have a 0 return code if within a git repo
-if((REV_PARSE_RESULT EQUAL 0) AND (REV_PARSE_OUTPUT STREQUAL "true"))
-    set(IN_GIT_REPO TRUE)
-    # Find relative path from root to source used for adjusting patch command
-    file(RELATIVE_PATH BINARY_DIR_REL  ${CMAKE_SOURCE_DIR}/.. ${CMAKE_BINARY_DIR})
-endif ()
-
+# IN_GIT_REPO / BINARY_DIR_REL are defined near the top of this file, above the first
+# dep include() - see the comment there for why the placement matters.
 include(OCCT/OCCT.cmake)
 include(OpenCV/OpenCV.cmake)
 
