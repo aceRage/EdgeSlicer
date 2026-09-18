@@ -220,11 +220,29 @@ std::string sanitize_filename(const std::string& filename, const std::string& fa
             basename += fallback_extension;
     }
 
+    // Only the characters a name genuinely cannot carry are replaced. The whitelist this used to
+    // be ([A-Za-z0-9._-]) folded every space, parenthesis and accented letter into '_', so a plate
+    // the user called "Kyogre x10" reached the touchscreen as an unreadable run of underscores.
+    // Flash Studio's own uploads keep both - "stylized dragon toy 3d model(1)_PLA_3h37m.gcode.3mf"
+    // is a name a Creator 5 accepts and displays - so the rule here is the path-separator and
+    // shell-metacharacter set the send dialog already warns about, plus '=' (the one the printer
+    // is known to refuse) and control characters.
+    //
+    // Bytes >= 0x80 are left alone: they are the continuation bytes of a UTF-8 name, and rewriting
+    // them one at a time is what mangles a non-ASCII title into per-byte garbage. The name travels
+    // to the printer as UTF-8, whole.
+    static const std::string illegal = "#*;\\/:\"<>|?=";
     for (char& ch : basename) {
-        const bool is_ascii_alnum = (ch >= '0' && ch <= '9') || (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z');
-        if (!is_ascii_alnum && ch != '.' && ch != '_' && ch != '-') {
+        const auto byte = static_cast<unsigned char>(ch);
+        if (byte < 0x20 || byte == 0x7F || illegal.find(ch) != std::string::npos)
             ch = '_';
-        }
+    }
+
+    // A name that was nothing but separators still has to be something the printer can list.
+    if (basename.find_first_not_of('_') == std::string::npos) {
+        basename = "print";
+        if (!fallback_extension.empty())
+            basename += fallback_extension;
     }
 
     return basename;

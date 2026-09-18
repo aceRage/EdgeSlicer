@@ -79,11 +79,14 @@ TEST_CASE("Flashforge local API URLs are built on port 8898", "[Flashforge]")
 
 // ------------------------------------------------------------------------- the upload filename ----
 
-TEST_CASE("Flashforge upload names drop characters the printer rejects", "[Flashforge]")
+TEST_CASE("Flashforge upload names drop only characters the printer rejects", "[Flashforge]")
 {
-    // '=' is the one the printer is known to refuse; spaces and the rest go the same way.
+    // '=' is the one the printer is known to refuse, along with the path separators and shell
+    // metacharacters the send dialog already warns about.
     CHECK(ff::sanitize_filename("plate=1.gcode.3mf") == "plate_1.gcode.3mf");
-    CHECK(ff::sanitize_filename("my model v2.3mf") == "my_model_v2.3mf");
+    // No drive-letter shape here: fs::path would read a leading "x:" as a Windows drive and drop
+    // it before the replacing below ever runs.
+    CHECK(ff::sanitize_filename("plate*1?v2.3mf") == "plate_1_v2.3mf");
 
     // Dots, underscores and hyphens survive - they are how the extension and most names are spelled.
     CHECK(ff::sanitize_filename("Benchy_v1-2.gcode") == "Benchy_v1-2.gcode");
@@ -94,6 +97,42 @@ TEST_CASE("Flashforge upload names drop characters the printer rejects", "[Flash
     // An empty name still has to be something, and the fallback extension rides along.
     CHECK(ff::sanitize_filename("", ".3mf") == "print.3mf");
     CHECK(ff::sanitize_filename("") == "print");
+
+    // A name that was nothing but illegal characters cannot become a bare run of underscores.
+    CHECK(ff::sanitize_filename("///", ".3mf") == "print.3mf");
+}
+
+TEST_CASE("Flashforge upload names keep the characters Flash Studio keeps", "[Flashforge]")
+{
+    // The reported bug: a plate the user called "Kyogre x10" arrived on the Creator 5's touchscreen
+    // as an unreadable row of underscores, because the sanitiser whitelisted [A-Za-z0-9._-] and
+    // folded everything else - the space included - into '_'. Flash Studio's own uploads keep
+    // spaces and parentheses ("stylized dragon toy 3d model(1)_PLA_3h37m.gcode.3mf" is a real one,
+    // sampled from the printer), so the name the user reads has to survive.
+    SECTION("a space is not a character the printer refuses")
+    {
+        CHECK(ff::sanitize_filename("Kyogre x10_PLA_3h37m.gcode.3mf") == "Kyogre x10_PLA_3h37m.gcode.3mf");
+        CHECK(ff::sanitize_filename("my model v2.3mf") == "my model v2.3mf");
+    }
+
+    SECTION("parentheses survive, exactly as in Flash Studio's own upload")
+    {
+        CHECK(ff::sanitize_filename("stylized dragon toy 3d model(1)_PLA_3h37m.gcode.3mf") ==
+              "stylized dragon toy 3d model(1)_PLA_3h37m.gcode.3mf");
+    }
+
+    SECTION("a non-ASCII name travels as whole UTF-8, never mangled per byte")
+    {
+        // Every byte of these is >= 0x80 apart from the ASCII run; rewriting them one at a time is
+        // what turned a title into per-byte garbage. The name must come back byte-for-byte.
+        const std::string jp = "\xE3\x83\x9D\xE3\x82\xB1\xE3\x83\xA2\xE3\x83\xB3 x2_PLA_1h02m.gcode.3mf";
+        CHECK(ff::sanitize_filename(jp) == jp);
+
+        // "Pokemon" with an e-acute, spelled as its UTF-8 bytes so the test does not depend on
+        // how the compiler reads this source file's own encoding.
+        const std::string accented = "Pok\xC3\xA9mon Kyogre x10.gcode.3mf";
+        CHECK(ff::sanitize_filename(accented) == accented);
+    }
 }
 
 // ------------------------------------------------- the name a sliced plate must be sent under ----
@@ -131,8 +170,13 @@ TEST_CASE("Flashforge upload names keep the double extension through sanitising"
     };
 
     CHECK(sent("dragon.3mf") == "dragon.gcode.3mf");
-    CHECK(sent("my model v2.3mf") == "my_model_v2.gcode.3mf");
+    CHECK(sent("my model v2.3mf") == "my model v2.gcode.3mf");
     CHECK(sent("plate=1.3mf") == "plate_1.gcode.3mf");
+
+    // The whole point of the fix, end to end: what the send dialog offers for a project called
+    // "Kyogre x10" is what the touchscreen shows.
+    CHECK(sent("Kyogre x10_PLA_3h37m.gcode.3mf") == "Kyogre x10_PLA_3h37m.gcode.3mf");
+    CHECK(sent("Kyogre x10") == "Kyogre x10.gcode.3mf");
 
     // The upload_path can arrive with directories on it; only the basename is posted, and it
     // still ends in the double extension.

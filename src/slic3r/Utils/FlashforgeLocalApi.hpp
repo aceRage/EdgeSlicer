@@ -42,8 +42,12 @@ bool uses_local_api(const std::string& serial_number, const std::string& check_c
 std::string host_name_of(const std::string& host);
 std::string url_for(const std::string& host, const std::string& path);
 
-// The printer rejects '=' and friends in an upload name; everything outside [A-Za-z0-9._-] becomes
-// '_', and an empty name becomes "print" plus the fallback extension.
+// Replaces only what a filename genuinely cannot carry - path separators, the shell
+// metacharacters the send dialog warns about, '=' and control characters - with '_'. Spaces,
+// parentheses and non-ASCII (UTF-8) letters survive, because Flash Studio's own uploads carry them
+// and the Creator 5 displays them; folding those was what turned a plate named "Kyogre x10" into a
+// row of underscores on the touchscreen. An empty name becomes "print" plus the fallback
+// extension.
 std::string sanitize_filename(const std::string& filename, const std::string& fallback_extension = {});
 
 // The name a plate-sliced 3mf must carry on the way to the printer. The Creator 5 tells a sliced
