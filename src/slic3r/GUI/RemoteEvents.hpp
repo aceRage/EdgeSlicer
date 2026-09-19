@@ -27,6 +27,18 @@ namespace RemoteEvents {
 // What one printer looked like at one moment, in one vocabulary. Bambu's print_status and
 // Klipper's print_stats.state are both normalised into `state` so the transition rule below has
 // only one set of words to know about.
+// One button on a printer-error event, flattened for the payload. A copy of
+// PrintErrorCommands' PrintErrorRemoteAction rather than the type itself: this header is included
+// by the wx-free hub-side modules (RemoteNotify, WebPush, AppPush) and must not drag the GUI's
+// error-command translation unit in behind it.
+struct PrintErrorEventAction
+{
+    int         id { 0 };
+    std::string verb, label;
+    bool        needs_job_id { false };
+    bool        remote_safe { false };
+};
+
 struct PrinterState
 {
     std::string id, name, kind; // kind: bambu | snapmaker | printhost | connect
@@ -41,6 +53,12 @@ struct PrinterState
     std::string stage;     // the printer's own words for what it is doing (Bambu get_curr_stage())
     int         stage_curr { -1 }; // Bambu stage index; 6 is "Paused due to filament runout"
     std::string error_code, error_text;
+    // A Bambu print error's buttons, as PrintErrorCommands describes them for the wire: the same
+    // set the desktop's dialog draws and the same set GET /api/printers carries, so the app can
+    // put the buttons on the notification's card instead of only the sentence. Empty for every
+    // other source of an error_code (HMS items, a Klipper message, a relayed hub's event).
+    std::vector<PrintErrorEventAction> error_actions;
+    std::string                        job_id; // the printer's job, for the actions that need one
 };
 
 struct Snapshot
@@ -56,6 +74,11 @@ struct Event
     std::string kind;     // started | finished | failed | cancelled | paused | resumed | runout | error
     std::string severity; // info | warning | error
     std::string title, text, code, job;
+    // Only an "error" event carries these, and only from a Bambu printer: what the person can do
+    // about it, so the app's notification can offer the buttons rather than sending them to the
+    // printer to read the same sentence again. The text above is unchanged by their presence.
+    std::vector<PrintErrorEventAction> actions;
+    std::string                        job_id; // the printer's job, for the actions that need one
     nlohmann::json to_json(long instance_pid) const;
 };
 
