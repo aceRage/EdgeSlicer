@@ -1297,3 +1297,235 @@ TEST_CASE("Cut recipe: the mirrored plane really is the mirror of the plane", "[
             }
     }
 }
+
+// ---------------------------------------------------------------------------
+// "COPY CUT TO..." - how a target object is NAMED in the submenu.
+//
+// The owner cut two notches off a part of an assembled object and opened "Copy
+// cut to...". The submenu listed "1. non clicker core.stl, 2. button non
+// clicker.stl, 3-17. Assembly, 18. R Ring, 19-23. Assembly ..." - a dozen and a
+// half entries all called "Assembly", because that is the name the assemble
+// action gives everything it makes, and nothing in the list identified anything.
+//
+// cut_target_label() is the fix: the object's name, plus the names of the PARTS
+// it is made of, which is what actually tells two assemblies apart. The target is
+// still the whole object (the Cut gizmo works on a full instance), so the parts
+// are a legend rather than a set of targets - which is why this returns one
+// string per object.
+// ---------------------------------------------------------------------------
+namespace {
+// An object with the given name and one model-part volume per part name.
+ModelObject* cut_label_object(Model& model, const std::string& name, const std::vector<std::string>& parts)
+{
+    ModelObject* mo = model.add_object();
+    mo->name        = name;
+    for (const std::string& p : parts)
+        mo->add_volume(TriangleMesh(recipe_centred_cube(10.0)))->name = p;
+    return mo;
+}
+} // namespace
+
+TEST_CASE("Copy cut: an assembly is named by its parts, not just \"Assembly\"", "[CutRecipe][CutCopyTarget]")
+{
+    Model model;
+
+    // The owner's own case: several objects the assemble action called "Assembly",
+    // which the old label made indistinguishable.
+    ModelObject* a = cut_label_object(model, "Assembly", { "left ear", "right ear", "body" });
+    ModelObject* b = cut_label_object(model, "Assembly", { "left foot", "right foot" });
+
+    const std::string la = cut_target_label(a);
+    const std::string lb = cut_target_label(b);
+
+    // The whole point: two objects with the SAME name get different labels.
+    REQUIRE(la != lb);
+    // The object's own name is still there - it is what the object list shows.
+    REQUIRE(la.find("Assembly") != std::string::npos);
+    // ... and so are the parts that identify it.
+    REQUIRE(la.find("left ear") != std::string::npos);
+    REQUIRE(la.find("right ear") != std::string::npos);
+    REQUIRE(la.find("body") != std::string::npos);
+    REQUIRE(lb.find("left foot") != std::string::npos);
+}
+
+TEST_CASE("Copy cut: a single-part object is named by itself", "[CutRecipe][CutCopyTarget]")
+{
+    Model model;
+    // "18. R Ring" in the owner's list - already unambiguous, and repeating the one
+    // part's name after the object's would only add noise.
+    ModelObject* mo = cut_label_object(model, "R Ring", { "R Ring" });
+    REQUIRE(cut_target_label(mo) == "R Ring");
+
+    // An object with no volumes at all is still pickable rather than blank.
+    ModelObject* empty = cut_label_object(model, "lonely", {});
+    REQUIRE(cut_target_label(empty) == "lonely");
+}
+
+TEST_CASE("Copy cut: a long part list is truncated rather than unreadable", "[CutRecipe][CutCopyTarget]")
+{
+    Model model;
+    ModelObject* mo = cut_label_object(model, "Assembly",
+                                       { "p1", "p2", "p3", "p4", "p5", "p6", "p7" });
+
+    const std::string label = cut_target_label(mo, 3);
+    // The first three are named ...
+    REQUIRE(label.find("p1") != std::string::npos);
+    REQUIRE(label.find("p3") != std::string::npos);
+    // ... the rest are counted, not listed.
+    REQUIRE(label.find("p4") == std::string::npos);
+    REQUIRE(label.find("+4 more") != std::string::npos);
+}
+
+TEST_CASE("Copy cut: only model parts name an object", "[CutRecipe][CutCopyTarget]")
+{
+    Model        model;
+    ModelObject* mo = model.add_object();
+    mo->name        = "Assembly";
+    mo->add_volume(TriangleMesh(recipe_centred_cube(10.0)))->name = "shell";
+    mo->add_volume(TriangleMesh(recipe_centred_cube(5.0)))->name  = "pocket";
+    // A negative volume is not what identifies an object to the eye, and listing it
+    // would crowd out the names that do.
+    mo->volumes.back()->set_type(ModelVolumeType::NEGATIVE_VOLUME);
+
+    const std::string label = cut_target_label(mo);
+    REQUIRE(label.find("pocket") == std::string::npos);
+    // One model part left, so the object is named by itself.
+    REQUIRE(label == "Assembly");
+}
+
+TEST_CASE("Copy cut: an unnamed object is still pickable", "[CutRecipe][CutCopyTarget]")
+{
+    Model        model;
+    ModelObject* mo = cut_label_object(model, "", { "a", "b" });
+    const std::string label = cut_target_label(mo);
+    REQUIRE(!label.empty());
+    REQUIRE(label.find("a") != std::string::npos);
+}
+
+TEST_CASE("Copy cut: a null object yields an empty label rather than a crash", "[CutRecipe][CutCopyTarget]")
+{
+    REQUIRE(cut_target_label(nullptr).empty());
+}
+
+// ---------------------------------------------------------------------------
+// "EDIT CUT..." - the index alignment the re-edit's stand-in has to preserve.
+//
+// THE CRASH. GLGizmoCut3D::begin_reedit() swaps the cut halves for a stand-in
+// carrying the pre-cut mesh. It used to ADD the stand-in to the model first and
+// only then delete the halves, removing each from the model by index and from the
+// object LIST by the same index. But Model::add_object() adds to the model alone -
+// the list knows nothing about it - so between the two the model was one object
+// LONGER than the list, and every delete_object_from_list(i) then took out the
+// wrong row. On an object that was not the last on the plate the list and the
+// model ended up disagreeing about what every later index meant, and the next
+// thing to resolve a selection against them (ObjectList::part_selection_changed(),
+// which indexes (*m_objects)[obj_idx] unguarded) took the slicer down.
+//
+// The fix is an ordering: delete the halves from model and list together FIRST,
+// while the two still agree, then append the stand-in to BOTH.
+//
+// The object list is GUI and cannot be built here, but what the ordering has to
+// guarantee is a statement about the MODEL alone: performing the deletions before
+// the append leaves the surviving objects at the indices a parallel list would
+// have reached by applying the same deletions, and the stand-in last. That is
+// what this pins - the invariant the crash broke, in the form that can be tested
+// without a gizmo.
+// ---------------------------------------------------------------------------
+TEST_CASE("Edit cut: the stand-in is appended after the halves are removed", "[CutRecipe][CutReedit]")
+{
+    Model model;
+    // A plate where the cut object is NOT last - the arrangement that crashed. The
+    // owner's project had the cut assembly at index 23 of 24, with objects after it
+    // in the list order the halves were removed from.
+    for (int i = 0; i < 5; ++ i) {
+        ModelObject* mo = model.add_object();
+        mo->name        = std::string("obj_") + std::to_string(i);
+        mo->add_volume(TriangleMesh(recipe_centred_cube(10.0)))->name = "part";
+    }
+    // The halves of the cut being re-edited: indices 1 and 2.
+    const ObjectID keep0 = model.objects[0]->id();
+    const ObjectID keep3 = model.objects[3]->id();
+    const ObjectID keep4 = model.objects[4]->id();
+
+    std::vector<int> idxs{ 1, 2 };
+
+    // What a parallel object list would do, given the same deletions: the same
+    // indices, removed descending.
+    std::vector<std::string> list_names;
+    for (const ModelObject* o : model.objects)
+        list_names.push_back(o->name);
+
+    // THE ORDER THE FIX ESTABLISHES: delete first ...
+    std::sort(idxs.begin(), idxs.end(), std::greater<int>());
+    for (int i : idxs) {
+        model.delete_object(size_t(i));
+        list_names.erase(list_names.begin() + i);
+    }
+    // ... then append the stand-in.
+    ModelObject* proxy = model.add_object();
+    proxy->name        = "proxy";
+    proxy->add_volume(TriangleMesh(recipe_centred_cube(20.0)))->name = "part";
+    list_names.push_back(proxy->name);
+
+    // Model and the parallel list agree, index for index - the whole invariant.
+    // Under the OLD order the stand-in went into the model BEFORE the deletions and
+    // never into the list at all, so the two were already a different length when
+    // the deletions ran and the list ended up permanently one short, with every
+    // index past the deletions naming a different object in each.
+    REQUIRE(model.objects.size() == list_names.size());
+    for (size_t i = 0; i < model.objects.size(); ++ i)
+        REQUIRE(model.objects[i]->name == list_names[i]);
+
+    // The survivors are the ones that should have survived, by identity and not
+    // merely by count.
+    REQUIRE(model.objects[0]->id() == keep0);
+    REQUIRE(model.objects[1]->id() == keep3);
+    REQUIRE(model.objects[2]->id() == keep4);
+    // ... and the stand-in is last, which is the index begin_reedit() selects it at.
+    REQUIRE(model.objects.back() == proxy);
+    REQUIRE(model.objects.size() == 4);
+}
+
+TEST_CASE("Edit cut: a stashed half is a CLONE with new ids, so the transform is copied out", "[CutRecipe][CutReedit]")
+{
+    // begin_reedit() places the stand-in at the first half's instance transform, and
+    // the half does not survive the deletion that precedes the stand-in. The obvious
+    // repair - look the half up in m_reedit_stash afterwards, by ObjectID - DOES NOT
+    // WORK, and this pins why: Model::add_object(const ModelObject&) goes through
+    // new_clone(), whose assign_clone() calls assign_new_unique_ids_recursive() and
+    // asserts the result's id DIFFERS from the original's. A stashed half therefore
+    // shares no id with the object it was taken from, and an id lookup would silently
+    // find nothing and place the stand-in at the wrong transform (or the origin).
+    //
+    // So begin_reedit() copies the TRANSFORMATION out as plain data before deleting,
+    // which is what this asserts is both necessary and sufficient.
+    Model source;
+    ModelObject* half = source.add_object();
+    half->name        = "half_0";
+    half->add_volume(TriangleMesh(recipe_centred_cube(10.0)))->name = "part";
+    half->add_instance();
+    half->instances.front()->set_offset(Vec3d(11.0, -4.0, 2.5));
+    const ObjectID half_id = half->id();
+
+    // The data begin_reedit() captures BEFORE the deletion.
+    const Geometry::Transformation trafo = half->instances.front()->get_transformation();
+
+    Model stash;
+    ModelObject* copy = stash.add_object(*half);
+
+    // NOT the same id - the trap the id lookup would have fallen into.
+    REQUIRE(copy->id() != half_id);
+    // The geometry does survive the clone, which is what makes the stash a valid
+    // thing for Cancel to put back.
+    REQUIRE(!copy->instances.empty());
+    REQUIRE(copy->instances.front()->get_offset().isApprox(Vec3d(11.0, -4.0, 2.5)));
+
+    // And the captured transformation reproduces the placement on a fresh instance,
+    // which is exactly what the stand-in is given.
+    Model        rebuilt;
+    ModelObject* proxy = rebuilt.add_object();
+    proxy->add_volume(TriangleMesh(recipe_centred_cube(20.0)))->name = "part";
+    ModelInstance* inst = proxy->add_instance();
+    inst->set_transformation(trafo);
+    REQUIRE(inst->get_offset().isApprox(Vec3d(11.0, -4.0, 2.5)));
+}

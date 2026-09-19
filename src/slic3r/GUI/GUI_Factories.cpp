@@ -2,6 +2,8 @@
 #include "libslic3r/libslic3r.h"
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/Model.hpp"
+// cut_target_label() - how "Copy cut to..." names an object in its submenu.
+#include "libslic3r/CutRecipe.hpp"
 #include "libslic3r/QuadRemesh.hpp"
 // Ultra: voxel_ops_available() gates the "Round all edges" entry below.
 #include "libslic3r/MeshRepair.hpp"
@@ -1778,11 +1780,30 @@ void MenuFactory::append_menu_item_edit_cut(wxMenu *menu)
 // buttons this is the owner's ask: "currently it's hard to duplicate a cut
 // exactly on both halves of an object."
 //
-// A SUBMENU of the other objects, rather than a clipboard pair ("Copy cut" then
+// A SUBMENU of the objects, rather than a clipboard pair ("Copy cut" then
 // "Paste cut") or a picker on the target. One gesture from where the intent
 // forms - the user has just finished cutting half A and is looking at A when
 // they want the same cut on B - and no stale clipboard that can paste onto the
 // wrong object three actions later.
+//
+// THE SOURCE OBJECT IS LISTED TOO, and that is a deliberate departure from the
+// design doc's "every OTHER object". The doc assumed a cut always produces two
+// separate objects, so "the other half" was always another entry; it is not.
+// A cut made with "Cut to parts" leaves both halves as PARTS OF ONE OBJECT, and
+// the owner's case is exactly that - notches cut off an assembly, wanting the
+// same cut on the other side of the SAME assembly. Filtering the source out
+// removed the only entry that case ever wanted. It is marked rather than hidden,
+// because re-cutting the object a cut came from is a different thing from cutting
+// a neighbour and the menu should not pretend otherwise.
+//
+// THE LABELS NAME THE PARTS. An object made by the assemble action is called
+// "Assembly", and a plate full of them gave a submenu of a dozen identical
+// "Assembly" entries - the list the owner was shown, in which nothing could be
+// told apart. An object's parts are what actually identify it, so multi-part
+// objects carry them in the label. The target is still the OBJECT: the Cut gizmo
+// works on a whole instance (GLGizmoCut3D::on_is_activable requires
+// is_single_full_instance), so a cut applies to every part of the object it opens
+// on, and a per-part target would be a promise the gizmo cannot keep.
 //
 // Dynamic, like "Edit cut..." above it and "Invalidate cut info" beside it: the
 // object list changes under this menu, so it is destroyed and rebuilt on every
@@ -1807,12 +1828,16 @@ void MenuFactory::append_menu_item_copy_cut(wxMenu *menu)
     wxMenu *sub = new wxMenu();
     int     targets = 0;
     for (int i = 0; i < int(objects.size()); ++ i) {
-        if (i == src_idx)
-            continue;
-        // Name AND index: two imports of the same STL carry the same name, and the
+        // Index AND name: two imports of the same STL carry the same name, and the
         // user has to be able to tell which row of the object list they are aiming
         // at. The index is 1-based, matching what the list shows.
-        const wxString label = format_wxstr("%1%. %2%", i + 1, from_u8(objects[i]->name));
+        wxString label = format_wxstr("%1%. %2%", i + 1, from_u8(cut_target_label(objects[i])));
+        if (i == src_idx)
+            // The source of the cut, marked. Its OTHER parts are the owner's main
+            // case ("the same notch on the other side"), so it must be reachable -
+            // but re-cutting the object the cut came from should be a conscious
+            // click, not one indistinguishable from cutting a neighbour.
+            label += _L(" (this object)");
         append_menu_item(sub, wxID_ANY, label,
             // The frame caveat, said out loud rather than left as a surprise: the
             // cut is placed in the TARGET's own model space, which is exactly right
@@ -1826,15 +1851,18 @@ void MenuFactory::append_menu_item_copy_cut(wxMenu *menu)
     }
 
     if (targets == 0) {
-        // has_selected_copyable_cut() already guarantees a second object exists, so
-        // this is belt and braces - but an empty submenu is a dead end, and deleting
-        // the menu we just built is cheaper than showing one.
+        // has_selected_copyable_cut() already guarantees an object exists, so this
+        // is belt and braces - but an empty submenu is a dead end, and deleting the
+        // menu we just built is cheaper than showing one.
         delete sub;
         return;
     }
 
     append_submenu(menu, sub, wxID_ANY, menu_name,
-                   _L("Set this cut up on another object, ready to cut it the same way"), "",
+                   // "an object", not "another object": the source is listed too, because
+                   // a "Cut to parts" cut leaves both halves inside ONE object and the
+                   // other side of that same object is the target the user usually wants.
+                   _L("Set this cut up on an object, ready to cut it the same way"), "",
                    []() { return true; }, m_parent);
 }
 void MenuFactory::append_menu_item_invalidate_cut_info(wxMenu *menu)

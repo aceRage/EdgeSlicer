@@ -47,6 +47,10 @@
 namespace Slic3r {
 
 struct CutConnector;
+// cut_target_label() takes one by pointer. Model.hpp INCLUDES this header, so the
+// class cannot be named here any more than CutConnector can - a declaration is all
+// a pointer parameter needs, and all this header may have.
+class ModelObject;
 
 // The schema version written into Metadata/cut_recipe.xml. A reader refuses a
 // version it does not know rather than guessing at fields: a recipe it cannot
@@ -512,6 +516,36 @@ CutRecipe cut_recipe_mirrored(const CutRecipe& src, CutMirrorAxis axis, const Ve
 Vec3d       cut_mirror_vector(CutMirrorAxis axis);
 Vec3d       cut_mirror_point(const Vec3d& p, CutMirrorAxis axis, const Vec3d& pivot);
 Transform3d cut_mirror_rotation(const Transform3d& rotation_m, CutMirrorAxis axis);
+
+// ---------------------------------------------------------------------------
+// NAMING A COPY-CUT TARGET.
+//
+// "Copy cut to..." lists the objects on the plate, and a list is only useful if
+// its entries can be told apart. ModelObject::name often cannot do that on its
+// own: the assemble action names everything it makes "Assembly", so a plate of
+// assembled parts produced a submenu of a dozen identical "Assembly" entries -
+// the list the owner was shown, in which no entry identified anything.
+//
+// What actually distinguishes such an object is the PARTS it is made of, so a
+// multi-part object is labelled with its name followed by its part names:
+//
+//     Assembly (left ear, right ear, body)
+//
+// The parts are a LEGEND, not targets. The target of a copy is always the whole
+// OBJECT - the Cut gizmo works on a full instance (GLGizmoCut3D::on_is_activable
+// requires is_single_full_instance), so a cut applies to every part of the object
+// it opens on - which is why this returns one string per object rather than an
+// entry per part.
+//
+// At most `max_parts` names are listed and the remainder becomes "+N more": a
+// forty-part assembly's full part list is as unreadable as no list at all. Only
+// model parts are counted; negative volumes, modifiers and support blockers are
+// not what identifies an object to the eye. An object with a single part is named
+// by itself, because repeating one part's name after the object's adds nothing
+// (and for a one-part object the two are usually the same string).
+//
+// In libslic3r rather than beside the menu so it can be tested without a GUI.
+std::string cut_target_label(const ModelObject* object, size_t max_parts = 3);
 
 } // namespace Slic3r
 
