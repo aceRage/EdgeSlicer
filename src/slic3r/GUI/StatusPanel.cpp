@@ -2192,11 +2192,27 @@ void StatusPanel::show_error_message(MachineObject *obj, bool is_exist, wxString
                 m_print_error_dlg = new PrintErrorDialog(this->GetParent(), wxID_ANY, _L("Error"));
             }
 
+            // Which error and job the buttons are speaking for. This is set before the buttons
+            // are laid out, because update_title_style greys out the ones whose command needs a
+            // job_id when the printer has not given us one.
+            m_print_error_dlg->set_error_context(obj, obj ? obj->print_error : 0,
+                                                 obj ? obj->job_id_ : std::string());
+            m_print_error_dlg->set_suppress_handler([this, obj](int code) {
+                if (!obj) return;
+                BOOST_LOG_TRIVIAL(info) << "print error " << HMSQuery::print_error_code(code)
+                                        << " suppressed by the user for dev " << obj->dev_id;
+                m_ignored_errors.insert(error_ignore_key(obj->dev_id, code));
+            });
             m_print_error_dlg->update_title_style(_L("Error"), used_button, this);
             m_print_error_dlg->update_text_image(msg, print_error_str, image_url);
             m_print_error_dlg->Bind(EVT_SECONDARY_CHECK_CONFIRM, [this, obj](wxCommandEvent& e) {
                 if (obj) {
                     obj->command_clean_print_error(obj->subtask_id_, obj->print_error);
+                    // Upstream also acks the dialog close itself, so the printer stops counting
+                    // the popup as open. Without it some firmware re-raises the same error on the
+                    // next status push.
+                    obj->command_clean_print_error_uiop(obj->print_error);
+                    m_ignored_errors.insert(error_ignore_key(obj->dev_id, obj->print_error));
                 }
                 });
 
@@ -2267,29 +2283,53 @@ void StatusPanel::update_error_message()
     } else if (before_error_code != obj->print_error && obj->print_error != skip_print_error) {
         before_error_code = obj->print_error;
 
+        // Already dismissed on this printer during this session. The status push keeps repeating
+        // the code for as long as the condition holds, so without this the dialog reopens on
+        // every poll and the "don't remind me" button means nothing.
+        if (m_ignored_errors.count(error_ignore_key(obj->dev_id, obj->print_error))) {
+            BOOST_LOG_TRIVIAL(info) << "print error " << HMSQuery::print_error_code(obj->print_error)
+                                    << " ignored for this printer, not re-showing the dialog";
+            return;
+        }
+
         if (wxGetApp().get_hms_query()) {
             char buf[32];
             ::sprintf(buf, "%08X", obj->print_error);
             std::string print_error_str = std::string(buf);
             if (print_error_str.size() > 4) { print_error_str.insert(4, " "); }
 
-            wxString error_msg;
-            bool is_errocode_exist = wxGetApp().get_hms_query()->query_print_error_msg(obj->dev_id, obj->print_error, error_msg);
-            // This dialog prints the code itself, on its own line ("[0300 8003 142719]" below and
-            // PrintErrorDialog::update_text_image), so the code is not repeated in the message -
-            // only the missing sentence is supplied. Without this the body was a blank line and
-            // the owner was left with nothing but the hex.
-            if (error_msg.IsEmpty())
-                error_msg = _L("No description is available for this error code. Look it up in Bambu's error list, or contact Bambu support if it keeps happening.");
-            std::vector<int> used_button;
-            wxString error_image_url = wxGetApp().get_hms_query()->query_print_error_url_action(obj->dev_id, obj->print_error, used_button);
+            // One resolver for every surface, so the dialog cannot disagree with the hub, the
+            // push notification or --hms-lookup about what a code means - and cannot show a blank
+            // line above the hex, which is what it did when the table carried an empty intro.
+            wxString error_msg = wxGetApp().get_hms_query()->describe_print_error(obj->dev_id, obj->print_error);
+            const bool is_errocode_exist = !error_msg.IsEmpty();
+
+            std::vector<int> table_actions;
+            wxString error_image_url = wxGetApp().get_hms_query()->query_print_error_url_action(obj->dev_id, obj->print_error, table_actions);
             // special case
             if (print_error_str == "0300 8003" || print_error_str == "0300 8002" || print_error_str == "0300 800A") {
-                used_button.emplace_back(PrintErrorDialog::PrintErrorButton::JUMP_TO_LIVEVIEW);
+                table_actions.emplace_back(PrintErrorDialog::PrintErrorButton::JUMP_TO_LIVEVIEW);
             }
+
+            // The table's list, minus ids no dialog can draw, plus a generic Stop/Resume/OK set
+            // when nothing survives. A code with no entry at all used to fall through to the
+            // legacy string-matched dialog and, for anything not in those three hardcoded lists,
+            // to a bare OK - which is how a stuck printer ended up with no way to resume.
+            bool used_fallback = false;
+            std::vector<int> used_button = resolve_print_error_actions(table_actions, used_fallback);
+            BOOST_LOG_TRIVIAL(info) << "print error " << print_error_str << ": table actions ["
+                                    << format_action_ids(table_actions) << "] -> buttons ["
+                                    << format_action_ids(used_button) << "]"
+                                    << (used_fallback ? " (generic fallback)" : "");
+
             show_error_message(obj, is_errocode_exist, error_msg, print_error_str, error_image_url, used_button);
         }
     }
+}
+
+std::string StatusPanel::error_ignore_key(const std::string& dev_id, int print_error)
+{
+    return dev_id + "/" + HMSQuery::print_error_code(print_error);
 }
 
 void StatusPanel::show_printing_status(bool ctrl_area, bool temp_area)

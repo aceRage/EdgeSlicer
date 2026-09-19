@@ -1,5 +1,6 @@
 #include "libslic3r/libslic3r.h"
 #include "DeviceManager.hpp"
+#include "PrintErrorCommands.hpp"
 #include "DeviceModelCode.hpp"
 #include "libslic3r/Time.hpp"
 #include "libslic3r/Thread.hpp"
@@ -1774,6 +1775,103 @@ int MachineObject::command_clean_print_error(std::string subtask_id, int print_e
     return this->publish_json(j.dump());
 }
 
+// ---- printer-error actions ----
+//
+// One shape per method: build the payload with the pure builder, log what is going out with the
+// code in it, publish. The logging is not decoration - these are the commands that can restart or
+// abandon a print, and when the owner reports "I pressed Resume and nothing happened" the log is
+// the only way to tell a command that was never sent from one the printer declined.
+//
+// Every one of these is reached from a button. Nothing on the status-poll or notification path
+// calls them.
+
+int MachineObject::command_clean_print_error_uiop(int print_error)
+{
+    const json j = GUI::build_clean_print_error_uiop(print_error, std::to_string(MachineObject::m_sequence_id++));
+    BOOST_LOG_TRIVIAL(info) << "command_clean_print_error_uiop: err = " << j["system"]["err"].get<std::string>();
+    return this->publish_json(j.dump());
+}
+
+int MachineObject::command_hms_resume(const std::string& error_str, const std::string& job_id)
+{
+    const json j = GUI::build_hms_resume(error_str, job_id, std::to_string(MachineObject::m_sequence_id++));
+    BOOST_LOG_TRIVIAL(info) << "command_hms_resume: err = " << error_str << ", job_id = " << job_id;
+    return this->publish_json(j.dump(), 1);
+}
+
+int MachineObject::command_hms_stop(const std::string& error_str, const std::string& job_id)
+{
+    const json j = GUI::build_hms_stop(error_str, job_id, std::to_string(MachineObject::m_sequence_id++));
+    BOOST_LOG_TRIVIAL(info) << "command_hms_stop: err = " << error_str << ", job_id = " << job_id;
+    return this->publish_json(j.dump(), 1);
+}
+
+int MachineObject::command_hms_ignore(const std::string& error_str, const std::string& job_id)
+{
+    const json j = GUI::build_hms_ignore(error_str, job_id, std::to_string(MachineObject::m_sequence_id++));
+    BOOST_LOG_TRIVIAL(info) << "command_hms_ignore: err = " << error_str << ", job_id = " << job_id;
+    return this->publish_json(j.dump(), 1);
+}
+
+int MachineObject::command_hms_idle_ignore(const std::string& error_str, int type)
+{
+    const json j = GUI::build_hms_idle_ignore(error_str, type, std::to_string(MachineObject::m_sequence_id++));
+    BOOST_LOG_TRIVIAL(info) << "command_hms_idle_ignore: err = " << error_str << ", type = " << type;
+    return this->publish_json(j.dump(), 1);
+}
+
+int MachineObject::command_refresh_nozzle()
+{
+    const json j = GUI::build_refresh_nozzle(std::to_string(MachineObject::m_sequence_id++));
+    BOOST_LOG_TRIVIAL(info) << "command_refresh_nozzle";
+    return this->publish_json(j.dump(), 1);
+}
+
+int MachineObject::command_stop_buzzer()
+{
+    const json j = GUI::build_stop_buzzer(std::to_string(MachineObject::m_sequence_id++));
+    BOOST_LOG_TRIVIAL(info) << "command_stop_buzzer";
+    return this->publish_json(j.dump(), 1);
+}
+
+int MachineObject::command_purification_disable()
+{
+    const json j = GUI::build_purification_disable(std::to_string(MachineObject::m_sequence_id++));
+    BOOST_LOG_TRIVIAL(info) << "command_purification_disable";
+    return this->publish_json(j.dump(), 1);
+}
+
+int MachineObject::command_ams_drying_stop()
+{
+    const json j = GUI::build_ams_drying_stop(std::to_string(MachineObject::m_sequence_id++));
+    BOOST_LOG_TRIVIAL(info) << "command_ams_drying_stop";
+    return this->publish_json(j.dump());
+}
+
+int MachineObject::command_ack_proceed(const nlohmann::json& action_json)
+{
+    json        payload;
+    std::string why;
+    if (!GUI::build_ack_proceed(action_json, std::to_string(MachineObject::m_sequence_id++), payload, why)) {
+        BOOST_LOG_TRIVIAL(error) << "command_ack_proceed: " << why;
+        return -1;
+    }
+    BOOST_LOG_TRIVIAL(info) << "command_ack_proceed: " << payload.dump();
+    return this->publish_json(payload.dump());
+}
+
+int MachineObject::command_dont_remind_next_time(const nlohmann::json& action_json)
+{
+    json        payload;
+    std::string why;
+    if (!GUI::build_dont_remind_next_time(action_json, std::to_string(MachineObject::m_sequence_id++), payload, why)) {
+        BOOST_LOG_TRIVIAL(error) << "command_dont_remind_next_time: " << why;
+        return -1;
+    }
+    BOOST_LOG_TRIVIAL(info) << "command_dont_remind_next_time: " << payload.dump();
+    return this->publish_json(payload.dump(), 1);
+}
+
 int MachineObject::command_upgrade_confirm()
 {
     BOOST_LOG_TRIVIAL(info) << "command_upgrade_confirm";
@@ -2070,7 +2168,9 @@ int MachineObject::command_ams_select_tray(std::string tray_id)
 int MachineObject::command_ams_control(std::string action)
 {
     //valid actions
-    if (action == "resume" || action == "reset" || action == "pause" || action == "done") {
+    // "abort" is what the ABORT action id on the print-error dialog sends; the fork's copy of
+    // this method predates that button and dropped it on the floor.
+    if (action == "resume" || action == "reset" || action == "pause" || action == "done" || action == "abort") {
         json j;
         j["print"]["command"] = "ams_control";
         j["print"]["sequence_id"] = std::to_string(MachineObject::m_sequence_id++);
