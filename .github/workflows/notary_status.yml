@@ -1,0 +1,46 @@
+name: Notary status
+
+# Ask Apple's notary service about past submissions without rebuilding anything: the
+# history of the account (default) or one submission's status and log. Two minutes on a
+# macos runner; the App Store Connect API key secrets are the ones build_orca.yml uses.
+# Useful when a build's notarization timed out: the submission keeps processing at Apple,
+# and once it is Accepted the ticket is served online, so the signed dmg already uploaded
+# passes Gatekeeper on a machine with internet even though it was never stapled.
+
+on:
+  workflow_dispatch:
+    inputs:
+      submission_id:
+        description: 'Submission UUID to inspect (leave empty for the account history)'
+        required: false
+        default: ''
+
+jobs:
+  status:
+    name: notarytool ${{ inputs.submission_id && 'info + log' || 'history' }}
+    runs-on: macos-14
+    steps:
+      - name: Query the notary service
+        env:
+          APP_STORE_CONNECT_KEY_P8: ${{ secrets.APP_STORE_CONNECT_KEY_P8 }}
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          SUBMISSION_ID: ${{ inputs.submission_id }}
+        run: |
+          set -u
+          KEY="$RUNNER_TEMP/AuthKey_$APP_STORE_CONNECT_KEY_ID.p8"
+          if printf '%s' "$APP_STORE_CONNECT_KEY_P8" | grep -q "BEGIN PRIVATE KEY"; then
+            printf '%s\n' "$APP_STORE_CONNECT_KEY_P8" > "$KEY"
+          else
+            printf '%s' "$APP_STORE_CONNECT_KEY_P8" | tr -d '\r\n \t' | base64 --decode > "$KEY"
+          fi
+          chmod 600 "$KEY"
+          auth=(--key "$KEY" --key-id "$APP_STORE_CONNECT_KEY_ID" --issuer "$APP_STORE_CONNECT_ISSUER_ID")
+          if [ -n "$SUBMISSION_ID" ]; then
+            xcrun notarytool info "$SUBMISSION_ID" "${auth[@]}"
+            echo "--- log"
+            xcrun notarytool log "$SUBMISSION_ID" "${auth[@]}" || echo "(no log yet - still processing)"
+          else
+            xcrun notarytool history "${auth[@]}"
+          fi
+          rm -f "$KEY"

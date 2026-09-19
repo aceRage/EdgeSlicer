@@ -286,8 +286,18 @@ jobs:
             # dmg took the run past its time budget on 2026-09-19. The profile validator dmg
             # is a developer tool and is signed but not notarized.
             if [ "$NOTARIZE" != "none" ] && [[ "$(basename "$dmg")" == EdgeSlicer_Mac_universal_* ]]; then
-              scripts/macos_notarize.sh "$dmg"
-              spctl -a -vv -t open --context context:primary-signature "$dmg" || echo "::warning::spctl did not accept $(basename "$dmg") on the runner (informational; stapler validate above passed)"
+              rc=0; scripts/macos_notarize.sh "$dmg" || rc=$?
+              if [ "$rc" = 2 ]; then
+                # Still in Apple's queue after the wait: ship the SIGNED dmg anyway. It is not
+                # stapled, but the ticket is served online once Apple accepts the submission
+                # (id printed above; check with the "Notary status" workflow), so the file
+                # becomes Gatekeeper-clean retroactively without a rebuild.
+                echo "::warning::$(basename "$dmg") is signed but its notarization is still pending - uploaded unstapled"
+              elif [ "$rc" != 0 ]; then
+                exit "$rc"
+              else
+                spctl -a -vv -t open --context context:primary-signature "$dmg" || echo "::warning::spctl did not accept $(basename "$dmg") on the runner (informational; stapler validate above passed)"
+              fi
             fi
           done
 
