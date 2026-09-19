@@ -4239,6 +4239,21 @@ void PrintConfigDef::init_fff_params()
     def->set_default_value(new ConfigOptionStrings());
     def->cli = ConfigOptionDef::nocli;
 
+    // Ported from BambuStudio (dba0b39d7 + d0d0fab7f). Off by default so the carve order stays
+    // byte-identical to what this fork has always produced; on, an overlapping pair of normal
+    // parts is resolved by bounding-box volume instead of by position in ModelObject::volumes.
+    def = this->add("enable_order_independent_overlap_carving", coBool);
+    def->label = L("Order-independent overlap carving");
+    def->tooltip = L("When two normal parts of the same object overlap, the smaller part carves the "
+                     "larger one, no matter which order the parts appear in the object list. With this "
+                     "off the part listed later always carves the one listed earlier, so a small part "
+                     "sitting inside a bigger one is erased outright when it happens to be listed first. "
+                     "Useful for multi-body STEP imports, where the exporting CAD program decides the "
+                     "body order.");
+    def->category = L("Quality");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
     def = this->add("interface_shells", coBool);
     def->label = L("Interface shells");
     def->tooltip = L("Force the generation of solid shells between adjacent materials/volumes. "
