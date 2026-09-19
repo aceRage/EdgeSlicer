@@ -208,6 +208,20 @@ jobs:
             fi
             exit 1
           fi
+          # codesign wants the identity NAME (or its SHA-1) exactly; the secret only has to
+          # select it. Pasting the whole find-identity line (hash + quoted name) into
+          # MACOS_CERTIFICATE_ID passes the substring check above but codesign then reports
+          # "no identity found" (run 35411024201). Resolve the name from the keychain instead.
+          SIGN_IDENTITY=$(echo "$identities" | grep -F "$MACOS_CERTIFICATE_ID" | grep -oE '"Developer ID Application: [^"]+"' | head -1 | tr -d '"')
+          if [ -z "$SIGN_IDENTITY" ]; then
+            SIGN_IDENTITY=$(echo "$identities" | grep -oE '"Developer ID Application: [^"]+"' | head -1 | tr -d '"')
+          fi
+          if [ -z "$SIGN_IDENTITY" ]; then
+            echo "::error::No 'Developer ID Application' identity in the imported .p12"
+            exit 1
+          fi
+          echo "signing identity: $SIGN_IDENTITY"
+          echo "SIGN_IDENTITY=$SIGN_IDENTITY" >> "$GITHUB_ENV"
 
       - name: Sign app bundles (Developer ID, hardened runtime)
         if: inputs.os == 'macos-14' && steps.signing.outputs.sign == 'true'
@@ -219,9 +233,9 @@ jobs:
           APP_DIR="${{ github.workspace }}/build/universal/Snapmaker_Orca"
           # Inside out: every nested Mach-O (crashpad_handler, libsentry.dylib, anything a later build
           # adds) with the hardened runtime and a secure timestamp, then the bundle with the entitlements.
-          scripts/macos_sign_app.sh "$APP_DIR/EdgeSlicer.app" "$MACOS_CERTIFICATE_ID" scripts/disable_validation.entitlements
+          scripts/macos_sign_app.sh "$APP_DIR/EdgeSlicer.app" "$SIGN_IDENTITY" scripts/disable_validation.entitlements
           if [ -f "$APP_DIR/Snapmaker_Orca_profile_validator.app/Contents/MacOS/Snapmaker_Orca_profile_validator" ]; then
-            scripts/macos_sign_app.sh "$APP_DIR/Snapmaker_Orca_profile_validator.app" "$MACOS_CERTIFICATE_ID" scripts/disable_validation.entitlements
+            scripts/macos_sign_app.sh "$APP_DIR/Snapmaker_Orca_profile_validator.app" "$SIGN_IDENTITY" scripts/disable_validation.entitlements
           fi
 
       # The app is notarized and stapled on its own before it goes into the dmg, so the copy a user
@@ -289,7 +303,7 @@ jobs:
           for dmg in "${{ github.workspace }}/EdgeSlicer_Mac_universal_${{ env.ver }}.dmg" \
                      "${{ github.workspace }}/EdgeSlicer_profile_validator_Mac_universal_${{ env.ver }}.dmg"; do
             [ -f "$dmg" ] || continue
-            codesign --force --timestamp --sign "$MACOS_CERTIFICATE_ID" "$dmg"
+            codesign --force --timestamp --sign "$SIGN_IDENTITY" "$dmg"
             codesign --verify --verbose=2 "$dmg"
             if [ "$NOTARIZE" != "none" ]; then
               scripts/macos_notarize.sh "$dmg"
