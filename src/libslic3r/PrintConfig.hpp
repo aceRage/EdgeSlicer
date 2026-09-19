@@ -1673,6 +1673,9 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionFloat,              min_skirt_length))
     ((ConfigOptionFloats,             slow_down_layer_time))
     ((ConfigOptionBool,               spiral_mode))
+    // Resolve an overlap between two normal parts by bounding-box volume rather than by
+    // their order in ModelObject::volumes (see PrintObjectSlice.cpp).
+    ((ConfigOptionBool,               enable_order_independent_overlap_carving))
     ((ConfigOptionBool,               spiral_mode_smooth))
     ((ConfigOptionFloatOrPercent,     spiral_mode_max_xy_smoothing))
     ((ConfigOptionFloat,              spiral_finishing_flow_ratio))

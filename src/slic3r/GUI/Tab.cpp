@@ -2653,6 +2653,7 @@ void TabPrint::build()
         optgroup->append_single_option_line("toolchange_cyclic_order", "multimaterial_settings_advanced#toolchange-order");
         optgroup->append_single_option_line("toolchange_cyclic_first_layer", "multimaterial_settings_advanced#toolchange-order");
         optgroup->append_single_option_line("interface_shells", "multimaterial_settings_advanced#interface-shells");
+        optgroup->append_single_option_line("enable_order_independent_overlap_carving", "multimaterial_settings_advanced#order-independent-overlap-carving");
         // Paint Depth Stage 1: paint_depth_mode/walls/mm supersede the old
         // mmu_segmented_region_max_width single-float control on this page (that key
         // stays defined - see PrintConfig.cpp - only for legacy project/preset parsing).
