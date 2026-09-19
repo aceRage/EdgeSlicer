@@ -12,6 +12,7 @@
 #include <map>
 #include <vector>
 #include <functional>
+#include <string>
 
 #include <boost/container/small_vector.hpp>
 
@@ -308,6 +309,16 @@ private:
     float                       m_mixed_layer_height_b    = 0.f;
     float                       m_mixed_base_layer_height = 0.2f;
 };
+
+// Parse the user defined cyclic toolchange sequence ("3,2 , 1 , 4") into 0-based filament indices.
+// Out-of-range entries, duplicates and non-numeric tokens are dropped, so a partially valid string
+// still orders the filaments it does name. Exposed for unit testing.
+std::vector<unsigned int> parse_cyclic_order(const std::string& str, unsigned int number_of_extruders);
+
+// Reorder a layer's 0-based filaments for cyclic ordering: ascending by default, or following
+// cyclic_order when non-empty. Filaments absent from the sequence keep ascending order after
+// the listed ones. Exposed for unit testing.
+void apply_cyclic_order(std::vector<unsigned int>& filaments, const std::vector<unsigned int>& cyclic_order);
 
 } // namespace SLic3r
 

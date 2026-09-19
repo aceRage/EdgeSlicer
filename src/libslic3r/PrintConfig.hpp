@@ -309,6 +309,16 @@ enum class PerimeterGeneratorType
     Arachne
 };
 
+// Orca #13582: per-layer toolchange sequence. Default keeps last-used-first (then flush-volume
+// reorder). Cyclic uses a fixed ascending filament sequence each layer so extra toolchanges give
+// the previous colour more time to cool. There is no third "Minimum flush" enum value in Orca;
+// that behaviour is the Default path's existing flush-volume reorder.
+enum class ToolChangeOrderingType
+{
+    Default,
+    Cyclic,
+};
+
 // BBS
 enum OverhangFanThreshold {
     Overhang_threshold_none = 0,
@@ -568,6 +578,7 @@ CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(PrintHostType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(AuthorizationType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(WipeTowerWallType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(PerimeterGeneratorType)
+CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(ToolChangeOrderingType)
 // Ultra: nozzle flow variant declared to Bambu printers (metadata only in this fork).
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(NozzleVolumeType)
 
@@ -1444,6 +1455,9 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionBool,                single_extruder_multi_material))
     ((ConfigOptionBool,                manual_filament_change))
     ((ConfigOptionBool,                single_extruder_multi_material_priming))
+    ((ConfigOptionEnum<ToolChangeOrderingType>, toolchange_ordering))
+    ((ConfigOptionString,              toolchange_cyclic_order))
+    ((ConfigOptionBool,                toolchange_cyclic_first_layer))
     ((ConfigOptionBool,                wipe_tower_no_sparse_layers))
     ((ConfigOptionString,              change_filament_gcode))
     ((ConfigOptionString,              change_extrusion_role_gcode))
