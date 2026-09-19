@@ -733,6 +733,15 @@ class GLGizmoCut3D : public GLGizmoBase
     // Undo begin_reedit(): remove the stand-in, bring the halves back. Called
     // when the gizmo closes without a cut.
     void cancel_reedit();
+    // Re-read the common gizmo data pool (SelectionInfo and friends) against the
+    // CURRENT canvas selection.
+    //
+    // begin_reedit() and begin_copy() run from on_set_state(On), which
+    // GLGizmosManager::activate_gizmo() calls BEFORE open_gizmo() gets to its own
+    // update_data(). Anything they change about the selection is therefore
+    // invisible to m_c->selection_info() until after they have returned - and
+    // applying a recipe reads it. This is the refresh that closes that window.
+    void refresh_common_data();
     // Put every gizmo control back from a recipe - the plane, the surface, the
     // parameters, the connectors, and the gizmo-local undo stacks (seeded with
     // the recipe's own surface, so the first Ctrl+Z in a re-edit returns to what
