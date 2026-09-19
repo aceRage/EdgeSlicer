@@ -1752,6 +1752,53 @@ void apply_cyclic_order(std::vector<unsigned int>& filaments, const std::vector<
         });
 }
 
+unsigned int cyclic_filament_count(size_t num_physical, const MixedFilamentManager *mixed_mgr, unsigned int number_of_extruders)
+{
+    // Physical + enabled mixed: the indices ToolOrdering already uses. Deliberately NOT the
+    // flush-matrix sqrt, so a short flush_volumes_matrix cannot shrink the valid range and
+    // silently drop the tail of a user sequence. Falls back to the extruder count only when
+    // there is no physical count to go on at all.
+    unsigned int count = (unsigned int) num_physical;
+    if (mixed_mgr)
+        count = (unsigned int) mixed_mgr->total_filaments(num_physical);
+    if (count == 0)
+        count = number_of_extruders;
+    return count;
+}
+
+std::function<bool(int, std::vector<int>&)> make_cyclic_custom_seq(
+    const std::vector<LayerPrintSequence>         &other_layers_seqs,
+    const std::vector<std::vector<unsigned int>>  &layer_filaments,
+    bool                                           use_cyclic_ordering,
+    bool                                           cyclic_first_layer,
+    const std::vector<unsigned int>               &cyclic_order)
+{
+    // other_layers_seq: the layer_idx and extruder_idx are base on 1.
+    return [other_layers_seqs, layer_filaments, use_cyclic_ordering, cyclic_first_layer, cyclic_order]
+           (int layer_idx, std::vector<int>& out_seq) -> bool {
+        for (size_t idx = other_layers_seqs.size() - 1; idx != size_t(-1); --idx) {
+            const auto &other_layers_seq = other_layers_seqs[idx];
+            if (layer_idx + 1 >= other_layers_seq.first.first && layer_idx + 1 <= other_layers_seq.first.second) {
+                out_seq = other_layers_seq.second;
+                return true;
+            }
+        }
+
+        // Skip the first layer unless the user asked for cyclic order on it, so it keeps the
+        // adhesion-optimized / custom first-layer sequence.
+        if (use_cyclic_ordering && layer_idx >= 0 && (layer_idx != 0 || cyclic_first_layer)
+            && size_t(layer_idx) < layer_filaments.size()) {
+            std::vector<unsigned int> ordered = layer_filaments[size_t(layer_idx)];
+            apply_cyclic_order(ordered, cyclic_order);
+            out_seq.resize(ordered.size());
+            std::transform(ordered.begin(), ordered.end(), out_seq.begin(), [](auto item) { return int(item) + 1; });
+            return true;
+        }
+
+        return false;
+    };
+}
+
 void ToolOrdering::reorder_extruders_for_minimum_flush_volume()
 {
     const PrintConfig *print_config = m_print_config_ptr;
@@ -1869,39 +1916,14 @@ void ToolOrdering::reorder_extruders_for_minimum_flush_volume()
     // missing from it keep their ascending order after the listed ones, so a partial or bogus entry
     // still yields the default cyclic order. Count is physical + enabled mixed (the indices ToolOrdering
     // already uses), not flush-matrix sqrt, so a short flush_volumes_matrix cannot shrink the valid range.
-    unsigned int cyclic_filament_count = (unsigned int) m_num_physical;
-    if (m_mixed_mgr)
-        cyclic_filament_count = (unsigned int) m_mixed_mgr->total_filaments(m_num_physical);
-    if (cyclic_filament_count == 0)
-        cyclic_filament_count = number_of_extruders;
+    const unsigned int filament_count = cyclic_filament_count(m_num_physical, m_mixed_mgr, number_of_extruders);
 
     const std::vector<unsigned int> cyclic_order =
-        use_cyclic_ordering ? parse_cyclic_order(print_config->toolchange_cyclic_order.value, cyclic_filament_count)
+        use_cyclic_ordering ? parse_cyclic_order(print_config->toolchange_cyclic_order.value, filament_count)
                             : std::vector<unsigned int>();
 
-    // other_layers_seq: the layer_idx and extruder_idx are base on 1
-    auto get_custom_seq = [&other_layers_seqs, &layer_filaments, use_cyclic_ordering, cyclic_first_layer, &cyclic_order](int layer_idx, std::vector<int>& out_seq) -> bool {
-        for (size_t idx = other_layers_seqs.size() - 1; idx != size_t(-1); --idx) {
-            const auto &other_layers_seq = other_layers_seqs[idx];
-            if (layer_idx + 1 >= other_layers_seq.first.first && layer_idx + 1 <= other_layers_seq.first.second) {
-                out_seq = other_layers_seq.second;
-                return true;
-            }
-        }
-
-        // Skip the first layer unless the user asked for cyclic order on it, so it keeps the
-        // adhesion-optimized / custom first-layer sequence.
-        if (use_cyclic_ordering && layer_idx >= 0 && (layer_idx != 0 || cyclic_first_layer)
-            && size_t(layer_idx) < layer_filaments.size()) {
-            std::vector<unsigned int> ordered = layer_filaments[size_t(layer_idx)];
-            apply_cyclic_order(ordered, cyclic_order);
-            out_seq.resize(ordered.size());
-            std::transform(ordered.begin(), ordered.end(), out_seq.begin(), [](auto item) { return int(item) + 1; });
-            return true;
-        }
-
-        return false;
-    };
+    auto get_custom_seq = make_cyclic_custom_seq(other_layers_seqs, layer_filaments,
+                                                 use_cyclic_ordering, cyclic_first_layer, cyclic_order);
 
     std::optional<unsigned int> current_extruder_id;
     for (int i = 0; i < m_layer_tools.size(); ++i) {

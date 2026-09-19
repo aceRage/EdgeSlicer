@@ -5,6 +5,7 @@
 
 #include "../libslic3r.h"
 #include "../MixedFilament.hpp"
+#include "../ParameterUtils.hpp" // LayerPrintSequence, used by make_cyclic_custom_seq
 #include "../MultiNozzleUtils.hpp" // Ultra (dual-nozzle): grouping result types
 
 #include <utility>
@@ -319,6 +320,26 @@ std::vector<unsigned int> parse_cyclic_order(const std::string& str, unsigned in
 // cyclic_order when non-empty. Filaments absent from the sequence keep ascending order after
 // the listed ones. Exposed for unit testing.
 void apply_cyclic_order(std::vector<unsigned int>& filaments, const std::vector<unsigned int>& cyclic_order);
+
+// The filament-index range a cyclic sequence is validated against: physical filaments plus the
+// enabled mixed ones, i.e. exactly the indices ToolOrdering itself uses. Deliberately not the
+// sqrt of the flush matrix, so a short flush_volumes_matrix cannot silently truncate a user
+// sequence. number_of_extruders is only the fallback when there is no physical count at all.
+// Exposed for unit testing.
+unsigned int cyclic_filament_count(size_t num_physical, const MixedFilamentManager *mixed_mgr, unsigned int number_of_extruders);
+
+// Build the per-layer custom-sequence callback used by reorder_extruders_for_minimum_flush_volume.
+// An explicit other_layers_print_sequence always wins; otherwise, under cyclic ordering, the layer
+// is reordered by cyclic_order - except layer 0, which keeps its adhesion-optimized order unless
+// cyclic_first_layer is set. Returns false when the layer should keep the order it already has.
+// Exposed for unit testing.
+std::function<bool(int, std::vector<int>&)> make_cyclic_custom_seq(
+    const std::vector<LayerPrintSequence>        &other_layers_seqs,
+    const std::vector<std::vector<unsigned int>> &layer_filaments,
+    bool                                          use_cyclic_ordering,
+    bool                                          cyclic_first_layer,
+    const std::vector<unsigned int>              &cyclic_order);
+
 
 } // namespace SLic3r
 
