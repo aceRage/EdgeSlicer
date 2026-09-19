@@ -37,8 +37,18 @@
 #include "Widgets/ScrolledWindow.hpp"
 #include <wx/hashmap.h>
 #include <wx/webview.h>
+#include "nlohmann/json.hpp"
+#include <functional>
+#include <string>
 
-namespace Slic3r { namespace GUI {
+namespace Slic3r {
+
+// PrintErrorDialog speaks to one of these to send the error-aware commands behind its buttons.
+// Only the pointer is needed here; DeviceManager.hpp is a heavy include and ReleaseNote.hpp is
+// pulled in by a lot of places that have no business seeing it.
+class MachineObject;
+
+namespace GUI {
 
 wxDECLARE_EVENT(EVT_SECONDARY_CHECK_CONFIRM, wxCommandEvent);
 wxDECLARE_EVENT(EVT_SECONDARY_CHECK_CANCEL, wxCommandEvent);
@@ -173,6 +183,18 @@ class PrintErrorDialog : public DPIFrame
 private:
     wxWindow* event_parent{ nullptr };
 public:
+    // The action vocabulary the shipped resources/hms/hms_action_<devtype>.json tables speak.
+    // Each entry there carries an "actions": [int, ...] list naming ids from this enum, and a
+    // button the enum does not have is dropped without a word by update_title_style - which is
+    // how a printer stuck on an error whose table says [27, 5] ("Ignore this and Resume", "Stop
+    // Printing") ended up showing an empty dialog.
+    //
+    // Ids >= 23 were added to Bambu Studio after this fork branched, and account for well over
+    // five hundred entries across the seven shipped tables. The values are the wire contract with
+    // those tables, so they are written out rather than left to run on.
+    //
+    // Kept numerically identical to Slic3r::GUI::PrintErrorAction in PrintErrorCommands.hpp,
+    // which is where the payloads and the job_id rule live.
     enum PrintErrorButton {
         RESUME_PRINTING = 2,
         RESUME_PRINTING_DEFECTS = 3,
@@ -184,9 +206,25 @@ public:
         CONTINUE = 9,
         LOAD_VIRTUAL_TRAY = 10,
         OK_BUTTON = 11,
-        FILAMENT_LOAD_RESUME,
-        JUMP_TO_LIVEVIEW,
-        ERROR_BUTTON_COUNT
+        FILAMENT_LOAD_RESUME = 12,
+        JUMP_TO_LIVEVIEW = 13,
+
+        NO_REMINDER_NEXT_TIME = 23,
+        REFRESH_NOZZLE = 24,
+        IGNORE_NO_REMINDER_NEXT_TIME = 25,
+        IGNORE_RESUME = 27,
+        PROBLEM_SOLVED_RESUME = 28,
+        TURN_OFF_FIRE_ALARM = 29,
+
+        RETRY_PROBLEM_SOLVED = 34,
+        STOP_DRYING = 35,
+        CANCEL_ACTION = 37,
+        REMOVE_CLOSE_BTN = 39, // not a button: suppresses the window's close box
+        PROCEED = 41,
+        OK_JUMP_RACK = 49,
+        ABORT = 51,
+        DISABLE_PURIFICATION = 54,
+        DONT_REMIND_NEXT_TIME = 57,
     };
     PrintErrorDialog(
         wxWindow* parent,
@@ -209,6 +247,45 @@ public:
     void init_button_list();
     void on_webrequest_state(wxWebRequestEvent& evt);
 
+    // Which error this dialog is currently showing, and the job it belongs to.
+    //
+    // The buttons need both: command_hms_resume/stop/ignore carry "err" and "job_id" so the
+    // printer can check the command is for the error and job it is actually holding. Passing them
+    // per-show rather than looking them up at click time matters - by the time the user presses a
+    // button the polled MachineObject may have moved on, and resuming "whatever the error is now"
+    // is exactly the sort of surprise this dialog must not produce.
+    //
+    // An empty job_id disables every button whose command needs one, rather than sending a
+    // command the firmware will reject.
+    void set_error_context(MachineObject* obj, int print_error, const std::string& job_id);
+
+    // The blob that came with a "proceed" / "don't remind" style error, naming the command to
+    // re-send and the index to suppress. Null when the error did not carry one, in which case
+    // those two buttons do nothing rather than throwing.
+    void set_action_json(const nlohmann::json& action_json) { m_action_json = action_json; }
+
+    // The action ids this dialog can actually render, for callers that want to know before
+    // showing it.
+    bool has_button(int action_id) const { return m_button_list.count(action_id) > 0; }
+
+    // Wire one button to a command. Nothing fires from a disabled button, every press is logged
+    // with its code, and the dialog closes afterwards so the command cannot be sent twice.
+    void bind_command(PrintErrorButton style, std::function<void()> fn);
+    void bind_hms_resume(PrintErrorButton style);
+
+    // The error code in the spelling these commands use (decimal, matching upstream).
+    std::string error_command_arg() const;
+
+    // Called when the user picks an action that means "stop telling me about this one".
+    //
+    // The printer keeps repeating a code in its status push for as long as the condition holds,
+    // and the ignore commands are advisory - firmware that does not honour err_ignored will go on
+    // reporting it. Without a note on our side the dialog reopens on the next poll and the button
+    // the user just pressed appears to have done nothing. The owner of that note is StatusPanel,
+    // which is what decides whether to show the dialog at all.
+    void set_suppress_handler(std::function<void(int)> fn) { m_on_suppress = std::move(fn); }
+    void suppress_this_error();
+
     StateColor btn_bg_white;
     wxWebRequest web_request;
     wxStaticBitmap* m_error_prompt_pic_static;
@@ -219,6 +296,12 @@ public:
     wxScrolledWindow* m_vebview_release_note{ nullptr };
     std::map<int, Button*> m_button_list;
     std::vector<int> m_used_button;
+
+    MachineObject*            m_obj{ nullptr };
+    int                       m_print_error{ 0 };
+    std::string               m_job_id;
+    nlohmann::json            m_action_json;
+    std::function<void(int)>  m_on_suppress;
 };
 
 struct ConfirmBeforeSendInfo

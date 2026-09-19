@@ -252,6 +252,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/HintNotification.hpp
     GUI/HMS.cpp
     GUI/HMS.hpp
+    GUI/PrintErrorCommands.cpp
+    GUI/PrintErrorCommands.hpp
     GUI/HMSPanel.cpp
     GUI/HMSPanel.hpp
     GUI/HttpServer.cpp

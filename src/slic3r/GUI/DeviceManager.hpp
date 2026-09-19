@@ -938,6 +938,32 @@ public:
     int command_request_push_all(bool request_now = false);
     int command_pushing(std::string cmd);
     int command_clean_print_error(std::string task_id, int print_error);
+
+    /* printer-error actions
+     *
+     * The commands behind the buttons on the print-error dialog. They are not the generic
+     * task controls: the resume/stop/ignore family carries "err", "job_id" and
+     * "param":"reserve" so firmware can check the command is for the error and job it is
+     * currently holding, and firmware that wants those fields ignores a bare
+     * {"command":"resume","param":""} without complaining. The dialog used to send the bare
+     * form, which is why a resume from a stuck printer looked like it worked and did not.
+     *
+     * The payloads themselves live in PrintErrorCommands.hpp as pure builders, so the exact
+     * JSON is pinned by a test rather than by hope. Everything here is user-initiated: nothing
+     * on the polling or notification path may call any of these.
+     */
+    int command_clean_print_error_uiop(int print_error);
+    int command_hms_resume(const std::string& error_str, const std::string& job_id);
+    int command_hms_stop(const std::string& error_str, const std::string& job_id);
+    int command_hms_ignore(const std::string& error_str, const std::string& job_id);
+    int command_hms_idle_ignore(const std::string& error_str, int type);
+    int command_refresh_nozzle();
+    int command_stop_buzzer();
+    int command_purification_disable();
+    int command_ams_drying_stop();
+    /* both take the blob the dialog was handed with the error; see PrintErrorCommands.hpp */
+    int command_ack_proceed(const nlohmann::json& action_json);
+    int command_dont_remind_next_time(const nlohmann::json& action_json);
     int command_set_printer_nozzle(std::string nozzle_type, float diameter);
     int command_get_access_code();
 
