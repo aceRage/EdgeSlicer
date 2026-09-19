@@ -47,6 +47,7 @@ add_executable(${_TEST_NAME}_tests
 	test_local_z_order_optimizer.cpp
 	test_placeholder_parser.cpp
 	test_polygon.cpp
+	test_preset_diff.cpp
 	test_preset_load_determinism.cpp
 	test_profile_load_util.cpp
 	test_project_preset_switch.cpp
