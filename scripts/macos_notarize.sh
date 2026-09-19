@@ -53,13 +53,6 @@ fi
 
 result="$work/notary_$(basename "$SUBMIT").json"
 echo "submitting $(basename "$SUBMIT") ($(du -h "$SUBMIT" | cut -f1)) ..."
-# Do not trust the exit code alone: read the verdict back from the JSON.
-# Apple's queue is unpredictable: a 241 MB universal app sat unanswered for 45 minutes on
-# 2026-09-19 (submission e48d9c7c). Wait long by default; the job has a 6 h ceiling and the
-# build before this step takes ~3.6 h, so 2 h is the most that fits. NOTARY_TIMEOUT overrides.
-xcrun notarytool submit "$SUBMIT" "${auth[@]}" --wait --timeout "${NOTARY_TIMEOUT:-120m}" --output-format json > "$result" || true
-cat "$result"
-echo
 json_field() {
     python3 -c 'import json, sys
 try:
@@ -67,8 +60,40 @@ try:
 except Exception:
     print("")' "$result" "$1"
 }
+# Submit WITHOUT --wait, then poll. `submit --wait` is one long HTTP session that dies on any
+# network hiccup and takes the whole verdict with it: on 2026-09-19 the 296 MB dmg was
+# uploaded (submission 5f34f3a6) and the wait then failed with "The Internet connection
+# appears to be offline" 53 minutes in, so the run failed although Apple was still working
+# on a perfectly good submission. Polling `notarytool info` tolerates that: a failed poll is
+# just retried. Apple's queue is also unpredictable (a 241 MB app sat unanswered for 45 min,
+# submission e48d9c7c), so wait long: the job has a 6 h ceiling and the build before this
+# step takes ~3.6 h, so ~2 h is the most that fits. NOTARY_TIMEOUT (minutes) overrides.
+tries=0
+until xcrun notarytool submit "$SUBMIT" "${auth[@]}" --output-format json > "$result" 2> "$result.err"; do
+    tries=$((tries+1))
+    cat "$result.err"
+    [ $tries -ge 3 ] && { echo "::error::notarytool submit failed 3 times" >&2; exit 1; }
+    echo "submit failed, retrying in 60 s ($tries/3)"; sleep 60
+done
+cat "$result"; echo
 id=$(json_field id)
+[ -n "$id" ] || { echo "::error::notarytool submit returned no submission id" >&2; exit 1; }
+deadline=$(( $(date +%s) + ${NOTARY_TIMEOUT:-120} * 60 ))
 status=$(json_field status)
+while [ "$status" = "In Progress" ] || [ -z "$status" ]; do
+    if [ "$(date +%s)" -ge "$deadline" ]; then
+        echo "::error::Notarization of $(basename "$SUBMIT") still '$status' after ${NOTARY_TIMEOUT:-120} min (submission $id) - re-run later; Apple keeps the submission" >&2
+        exit 1
+    fi
+    sleep 60
+    if xcrun notarytool info "$id" "${auth[@]}" --output-format json > "$result.poll" 2> "$result.err"; then
+        mv -f "$result.poll" "$result"
+        status=$(json_field status)
+        echo "$(date -u +%H:%M) submission $id: ${status:-?}"
+    else
+        echo "$(date -u +%H:%M) poll failed (network?), retrying: $(head -c 200 "$result.err")"
+    fi
+done
 
 if [ -n "$id" ]; then
     echo "notary log for submission $id:"
