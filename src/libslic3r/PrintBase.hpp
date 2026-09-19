@@ -85,7 +85,21 @@ public:
         // interface, so its interface is extruded at a different width (plan R3.4).
         SlicingSupportGroupInterfaceNozzle,
         // A group asks for an interface filament slot this printer does not have.
-        SlicingSupportGroupInterfaceFilament
+        SlicingSupportGroupInterfaceFilament,
+        // A PARAMETER_MODIFIER volume that cannot change anything about the slice. The two
+        // failure modes get two ids: active_step_add_warning de-duplicates by message id, so
+        // sharing one would make the second notice silently overwrite the first's text. Both
+        // appended, so no existing value moves.
+        // The modifier resolves to exactly its parent's PrintRegionConfig - it overrides nothing,
+        // so PrintApply stores it as an alias of the parent's own region and it cannot print any
+        // differently. An extruder override that actually differs does NOT land here: it folds
+        // into wall_filament/sparse_infill_filament/solid_infill_filament (see
+        // apply_to_print_region_config), which the config comparison sees.
+        SlicingModifierNoOverrides,
+        // The modifier found no parent part at all - no MODEL_PART's extruded bounding box
+        // intersects it in any layer range it spans - so no region was ever built for it and its
+        // geometry never reaches the slice.
+        SlicingModifierNoParent
     };
 
     typedef size_t TimeStamp;

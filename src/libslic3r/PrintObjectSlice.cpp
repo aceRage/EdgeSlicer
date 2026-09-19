@@ -890,6 +890,35 @@ void PrintObject::slice()
     }
     this->slice_volumes();
     m_print->throw_if_canceled();
+
+    // A modifier the user can see in the object list, that is nonetheless unable to change
+    // anything about this slice, is otherwise completely silent - the two failure modes below cost
+    // nothing at slice time and used to leave the user staring at an unchanged preview. Raised
+    // here, once per object per slice (not per layer), while posSlice is the active step.
+    {
+        const std::string object_name = this->model_object() ? this->model_object()->name : std::string();
+        auto join_names = [](const std::vector<std::string> &names) {
+            std::string out;
+            for (const std::string &n : names)
+                out += (out.empty() ? "" : ", ") + std::string("\"") + n + "\"";
+            return out;
+        };
+        // 1. Overrides nothing relative to its parent region, so it is an alias of the parent's own
+        //    PrintRegion and literally cannot print differently. An extruder override that really
+        //    differs is an effect and does not land here - see modifiers_without_overrides().
+        if (const std::vector<std::string> inert = this->modifiers_without_overrides(); ! inert.empty())
+            this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL,
+                Slic3r::format(_u8L("Modifier %1% on \"%2%\" changes no settings and has no effect."),
+                               join_names(inert), object_name),
+                PrintStateBase::SlicingModifierNoOverrides);
+        // 2. Never attached to any part, so its geometry is dropped entirely.
+        if (const std::vector<std::string> orphan = this->modifiers_without_parent(); ! orphan.empty())
+            this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL,
+                Slic3r::format(_u8L("Modifier %1% does not overlap any part of \"%2%\" and has no effect."),
+                               join_names(orphan), object_name),
+                PrintStateBase::SlicingModifierNoParent);
+    }
+
     int firstLayerReplacedBy = 0;
 
 #if 0

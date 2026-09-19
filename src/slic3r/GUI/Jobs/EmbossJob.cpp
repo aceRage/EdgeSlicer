@@ -1151,6 +1151,12 @@ void create_volume(TriangleMesh                    &&mesh,
 
     obj_list->selection_changed();
 
+    // A modifier that overrides nothing has no effect on the slice at all (the slicer now says so
+    // outright, as a slicing warning). Nudge the user towards the settings the way "Add modifier >
+    // Box" does, by bringing up the per-object settings panel for the freshly selected volume.
+    if (type == ModelVolumeType::PARAMETER_MODIFIER)
+        obj_list->switch_to_object_process();
+
     // Now is valid text volume selected open emboss gizmo
     GLGizmosManager &manager = canvas->get_gizmos_manager();
     if (manager.get_current_type() != gizmo)

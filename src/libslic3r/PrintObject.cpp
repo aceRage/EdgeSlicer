@@ -3956,6 +3956,56 @@ static void apply_to_print_region_config(PrintRegionConfig &out, const DynamicPr
             }
 }
 
+// A modifier is only able to change the slice if PrintApply gave it a PrintRegion distinct from
+// its parent's. That is exactly the test the region builder itself applies
+// (generate_print_object_regions(), PrintApply.cpp): it creates a new region for a modifier only
+// when `region_config_from_model_volume(parent_config, ...) != parent_config`, and otherwise
+// stores the modifier as an alias pointing at the parent's own region. So rather than re-deriving
+// "does this modifier do anything", both collectors below just read the built regions back.
+std::vector<std::string> PrintObject::modifiers_without_overrides() const
+{
+    std::vector<std::string> out;
+    if (m_shared_regions == nullptr || this->model_object() == nullptr)
+        return out;
+    for (const ModelVolume *volume : this->model_object()->volumes) {
+        if (volume == nullptr || ! volume->is_modifier())
+            continue;
+        bool seen = false;     // got a region somewhere
+        bool effective = false; // ... and at least one of them differs from its parent's
+        for (const PrintObjectRegions::LayerRangeRegions &layer_range : m_shared_regions->layer_ranges)
+            for (const PrintObjectRegions::VolumeRegion &region : layer_range.volume_regions)
+                if (region.model_volume == volume) {
+                    seen = true;
+                    // An alias region shares the parent's PrintRegion pointer outright; a real
+                    // override gets its own. Compare the pointers, which is what the builder set.
+                    if (region.parent >= 0 && region.region != layer_range.volume_regions[region.parent].region)
+                        effective = true;
+                }
+        if (seen && ! effective)
+            out.emplace_back(volume->name);
+    }
+    return out;
+}
+
+std::vector<std::string> PrintObject::modifiers_without_parent() const
+{
+    std::vector<std::string> out;
+    if (m_shared_regions == nullptr || this->model_object() == nullptr)
+        return out;
+    for (const ModelVolume *volume : this->model_object()->volumes) {
+        if (volume == nullptr || ! volume->is_modifier())
+            continue;
+        bool seen = false;
+        for (const PrintObjectRegions::LayerRangeRegions &layer_range : m_shared_regions->layer_ranges)
+            for (const PrintObjectRegions::VolumeRegion &region : layer_range.volume_regions)
+                if (region.model_volume == volume)
+                    seen = true;
+        if (! seen)
+            out.emplace_back(volume->name);
+    }
+    return out;
+}
+
 PrintRegionConfig region_config_from_model_volume(const PrintRegionConfig &default_or_parent_region_config, const DynamicPrintConfig *layer_range_config, const ModelVolume &volume, size_t num_extruders)
 {
     PrintRegionConfig config = default_or_parent_region_config;
