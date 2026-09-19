@@ -24220,6 +24220,14 @@ void Plater::check_seq_print_caution()
     if (by_object) {
         get_notification_manager()->close_plater_error_notification(caution_text.ToStdString());
         get_notification_manager()->push_plater_error_notification(caution_text.ToStdString());
+        // The generic "Print By Object: suggest auto-arrange" notice
+        // (config_change_notification -> BBLSeqPrintInfo) is pushed when the user
+        // selects by-object and lives for BBL_NOTICE_MAX_INTERVAL (10 days), so it
+        // is still on screen at pre-slice. On a U1 the two would stack and say the
+        // same thing, with the red caution carrying the collision risk the info
+        // notice only hints at. Drop the weaker one for U1; every other printer
+        // keeps it, because only a U1 by-object plate reaches this branch.
+        get_notification_manager()->bbl_close_seqprintinfo_notification();
     } else {
         get_notification_manager()->close_plater_error_notification(caution_text.ToStdString());
     }
