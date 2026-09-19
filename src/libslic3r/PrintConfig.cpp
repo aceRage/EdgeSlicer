@@ -10009,6 +10009,33 @@ CLIMiscConfigDef::CLIMiscConfigDef()
     def->cli_params = "serial:code[:lang]";
     def->set_default_value(new ConfigOptionString());
 
+    // Record our own description for an error code, for the codes Bambu publishes with an empty
+    // one. Written to <datadir>/hms/overrides.json; see docs/hms-overrides.md.
+    // --hms-add 0C00010000020015 "Nozzle Camera is malfunctioning." [--hms-add-lang en] [--hms-add-model 31B]
+    def = this->add("hms_add", coStrings);
+    def->label = L("Record an HMS error description");
+    def->tooltip = L("<code> <description> - record your own text for an error code and exit. Use it for codes the printer reports but Bambu publishes no description for.");
+    def->cli_params = "code description";
+    def->set_default_value(new ConfigOptionStrings());
+
+    def = this->add("hms_add_lang", coString);
+    def->label = L("Language of the recorded description");
+    def->tooltip = L("With --hms-add: the language the description is written in (default en).");
+    def->cli_params = "lang";
+    def->set_default_value(new ConfigOptionString());
+
+    def = this->add("hms_add_model", coString);
+    def->label = L("Printer series the description applies to");
+    def->tooltip = L("With --hms-add: the first three characters of the serial (31B is the H2C, 094 the H2D). Default * for every printer.");
+    def->cli_params = "series";
+    def->set_default_value(new ConfigOptionString());
+
+    def = this->add("hms_add_force", coBool);
+    def->label = L("Replace an existing recorded description");
+    def->tooltip = L("With --hms-add: replace the description already recorded for this code instead of refusing.");
+    def->cli_params = "option";
+    def->set_default_value(new ConfigOptionBool(false));
+
     def = this->add("hub_phone", coBool);
     def->label = L("Hub phone access on");
     def->tooltip = L("With --hub: start with phone access (the LAN listener) enabled.");

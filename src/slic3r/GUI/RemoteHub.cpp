@@ -7,6 +7,7 @@
 #include "RemoteNotify.hpp"
 #include "WebPush.hpp"
 #include "AppPush.hpp"
+#include "HMS.hpp"
 #include "libslic3r/Utils.hpp"
 #include "slic3r/Utils/Http.hpp"
 
@@ -3709,6 +3710,47 @@ void HubServer::handle_hub(tcp::socket& client, Request& r)
         update_notify_link();
         const auto res = RemoteNotify::test(query_param(r.query, "id"), "");
         respond_json(client, res.first, res.second);
+    } else if (r.path == "/hub/hms/override" && r.method == "POST") {
+        // Record our own description for an error code. This is the capture path behind the
+        // eventual "describe this error" button: the phone sees a code with no sentence, the
+        // owner types what the printer's screen said, and every surface shows it from then on.
+        // Same shape as --hms-add, and it writes the same user overlay.
+        // {"code":"0C00010000020015","text":"...","lang":"en","model":"31B","note":"...","force":false}
+        if (r.content_type.compare(0, 16, "application/json") != 0) { respond_json(client, 415, json_error("Content-Type must be application/json")); return; }
+        std::string body;
+        if (!read_small_body(client, r, body, 64 * 1024)) { respond_json(client, 413, json_error("that is too large for a description")); return; }
+        json in;
+        try {
+            in = json::parse(body.empty() ? "{}" : body);
+        } catch (const std::exception&) {
+            respond_json(client, 400, json_error("that is not json"));
+            return;
+        }
+        if (!in.is_object()) { respond_json(client, 400, json_error("expected a json object")); return; }
+        HMSQuery* q = wxGetApp().get_hms_query();
+        if (!q) { respond_json(client, 503, json_error("the error-code lookup is not ready yet")); return; }
+        std::string err;
+        const bool  ok = q->add_override(in.value("code", std::string()), in.value("text", std::string()),
+                                         in.value("lang", std::string("en")), in.value("model", std::string("*")),
+                                         in.value("source", std::string("recorded from the hub")),
+                                         in.value("note", std::string()), in.value("force", false), err);
+        if (!ok) { respond_json(client, 400, json_error(err)); return; }
+        std::string normalized;
+        HMSQuery::is_valid_code(in.value("code", std::string()), normalized);
+        json out;
+        out["ok"]   = true;
+        out["code"] = normalized;
+        // What the surfaces will show for it now, so the caller can confirm the capture landed.
+        out["description"] = std::string(q->describe_error(in.value("model", std::string()), normalized).ToUTF8().data());
+        out["file"]        = HMSQuery::user_override_path();
+        respond_json(client, 200, out);
+    } else if (r.path == "/hub/hms/reload" && r.method == "POST") {
+        // Re-read both overlay files now, for an edit made outside the app. The lookup also
+        // notices an mtime change by itself, so this is a convenience rather than a requirement.
+        if (HMSQuery* q = wxGetApp().get_hms_query()) q->reload_overrides();
+        json out;
+        out["ok"] = true;
+        respond_json(client, 200, out);
     } else if (r.path == "/hub/push" && r.method == "GET") {
         // The phones that subscribed to Web Push, each one masked to the push service it uses and
         // the tail of its endpoint. The VAPID public key is here because it is public by design;

@@ -59,6 +59,17 @@ static std::string hex8(int code)
     return buf;
 }
 
+std::string notification_body(const std::string& text, const std::string& code)
+{
+    std::string body = text;
+    if (code.empty()) return body;
+    // Either spelling counts as already named: the text carries the grouped form when it came
+    // from HMSQuery::format_error, and a relayed body may carry the raw one.
+    const std::string pretty = HMSQuery::pretty_code(code);
+    if (body.find(code) != std::string::npos || (!pretty.empty() && body.find(pretty) != std::string::npos)) return body;
+    return body + " (" + pretty + ")";
+}
+
 // ------------------------------------------------------------ the rule ----
 
 json Event::to_json(long instance_pid) const
@@ -221,8 +232,11 @@ std::vector<Event> step(Memory& mem, const Snapshot& now, long long cooldown_ms,
         // A printer error, whatever the print state is doing: a new code, or a code where there was
         // none. Bambu's HMS text and Klipper's own message both arrive here as error_text.
         if (!cur.error_code.empty() && cur.error_code != prev.error_code) {
+            // error_text already carries the code when the text is unknown (describe_error), so the
+            // bare-code spelling is only reached by a source that supplies neither - a relayed hub
+            // or a Klipper printer that named a code and said nothing about it.
             Event e   = make_event(cur, "error", "error", name + " reported an error",
-                                   cur.error_text.empty() ? (name + " reported error " + cur.error_code + ".")
+                                   cur.error_text.empty() ? (name + " reported error " + HMSQuery::pretty_code(cur.error_code) + ".")
                                                           : (name + ": " + cur.error_text));
             e.code    = cur.error_code;
             out.push_back(e);
@@ -247,9 +261,13 @@ std::vector<Event> step(Memory& mem, const Snapshot& now, long long cooldown_ms,
             } else if (cur.state == "finished" && busy_state(prev.state)) {
                 out.push_back(make_event(cur, "finished", "info", name + " finished", name + " finished the print" + job_phrase(prev) + "."));
             } else if (cur.state == "failed") {
+                // A failure with a code and no text used to read "X stopped with a failure." and
+                // give the owner nothing to act on, so the code is named when that is all there is.
+                const std::string why = !cur.error_text.empty() ? ": " + cur.error_text
+                                        : !cur.error_code.empty() ? " (error " + HMSQuery::pretty_code(cur.error_code) + ")."
+                                                                  : ".";
                 Event e = make_event(cur, "failed", "error", name + " failed",
-                                     name + " stopped with a failure" + job_phrase(prev) +
-                                         (cur.error_text.empty() ? "." : ": " + cur.error_text));
+                                     name + " stopped with a failure" + job_phrase(prev) + why);
                 e.code  = cur.error_code;
                 out.push_back(e);
             } else if (cur.state == "cancelled" && busy_state(prev.state)) {
@@ -343,15 +361,7 @@ static PrinterState state_of_json(const json& j)
     // transition rule - POST a 31B printer with 05004046 and the event text is the H2C's own
     // sentence, with no printer anywhere near it.
     if (p.error_text.empty() && !p.error_code.empty() && p.kind == "bambu") {
-        if (HMSQuery* q = wxGetApp().get_hms_query()) {
-            if (p.error_code.size() == 8) {
-                wxString msg;
-                unsigned long code = std::strtoul(p.error_code.c_str(), nullptr, 16);
-                if (q->query_print_error_msg(p.id, (int) code, msg)) p.error_text = msg.ToUTF8().data();
-            } else {
-                p.error_text = q->query_hms_msg(p.id, p.error_code).ToUTF8().data();
-            }
-        }
+        if (HMSQuery* q = wxGetApp().get_hms_query()) p.error_text = q->describe_error(p.id, p.error_code).ToUTF8().data();
     }
     return p;
 }
@@ -420,10 +430,11 @@ static std::string klipper_state(const std::string& s)
 // The serial picks the table: hms_<lang>_31B.json for an H2C, hms_<lang>_094.json for an H2D,
 // the legacy one for an X1 or a P1. Without it the newer machines had no sentence at all and the
 // notification was left with the bare code.
+// Always a sentence: HMSQuery::describe_print_error spells the code out when the table has no
+// text for it, so error_text is never empty and no consumer downstream has to invent a fallback.
 static std::string print_error_message(const std::string& dev_id, int code)
 {
-    wxString msg;
-    if (HMSQuery* q = wxGetApp().get_hms_query(); q && q->query_print_error_msg(dev_id, code, msg)) return msg.ToUTF8().data();
+    if (HMSQuery* q = wxGetApp().get_hms_query()) return q->describe_print_error(dev_id, code).ToUTF8().data();
     return std::string();
 }
 
@@ -471,7 +482,7 @@ static void snapshot_bambu(Snapshot& s)
                 if (item.msg_level != HMS_FATAL && item.msg_level != HMS_SERIOUS) continue;
                 p.error_code = item.get_long_error_code();
                 if (HMSQuery* q = wxGetApp().get_hms_query())
-                    p.error_text = q->query_hms_msg(m->dev_id, p.error_code).ToUTF8().data();
+                    p.error_text = q->describe_error(m->dev_id, p.error_code).ToUTF8().data();
                 break;
             }
         }

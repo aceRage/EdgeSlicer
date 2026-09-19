@@ -1088,8 +1088,7 @@ static void run_bambu(std::shared_ptr<Prepared> p, Sink& sink)
             if (obj->print_error != 0 && obj->print_error != p->print_error_before) {
                 w->err   = obj->print_error;
                 w->state = "error";
-                wxString msg;
-                if (HMSQuery* q = wxGetApp().get_hms_query(); q && q->query_print_error_msg(obj->dev_id, w->err, msg)) w->err_text = msg.ToUTF8().data();
+                if (HMSQuery* q = wxGetApp().get_hms_query()) w->err_text = q->describe_print_error(obj->dev_id, w->err).ToUTF8().data();
             } else if (obj->is_in_printing()) {
                 w->state = "printing";
             }
@@ -1103,7 +1102,11 @@ static void run_bambu(std::shared_ptr<Prepared> p, Sink& sink)
         char code[16];
         std::snprintf(code, sizeof code, "%08X", (unsigned) w->err);
         result["printer_error"] = { { "code", code }, { "message", w->err_text } };
-        sink.done(false, "the printer refused the print (error " + std::string(code) + (w->err_text.empty() ? "" : ": " + w->err_text) + ")", result);
+        // err_text already names the code (HMSQuery::format_error), so it is not repeated here.
+        sink.done(false,
+                  w->err_text.empty() ? "the printer refused the print (error " + HMSQuery::pretty_code(code) + ")"
+                                      : "the printer refused the print - " + w->err_text,
+                  result);
         return;
     }
     sink.done(true, "", result);

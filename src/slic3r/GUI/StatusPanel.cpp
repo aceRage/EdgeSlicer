@@ -2275,6 +2275,12 @@ void StatusPanel::update_error_message()
 
             wxString error_msg;
             bool is_errocode_exist = wxGetApp().get_hms_query()->query_print_error_msg(obj->dev_id, obj->print_error, error_msg);
+            // This dialog prints the code itself, on its own line ("[0300 8003 142719]" below and
+            // PrintErrorDialog::update_text_image), so the code is not repeated in the message -
+            // only the missing sentence is supplied. Without this the body was a blank line and
+            // the owner was left with nothing but the hex.
+            if (error_msg.IsEmpty())
+                error_msg = _L("No description is available for this error code. Look it up in Bambu's error list, or contact Bambu support if it keeps happening.");
             std::vector<int> used_button;
             wxString error_image_url = wxGetApp().get_hms_query()->query_print_error_url_action(obj->dev_id, obj->print_error, used_button);
             // special case

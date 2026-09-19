@@ -46,6 +46,14 @@ protected:
     std::unordered_map<std::string, bool>   m_cloud_hms_refreshing; // a refresh thread is already out for this series
     mutable std::mutex m_hms_mutex;
 
+    // The two override overlays, and the mtime each was read at so an edit is noticed.
+    json               m_user_overrides;
+    json               m_shipped_overrides;
+    std::time_t        m_user_overrides_mtime    = 0;
+    std::time_t        m_shipped_overrides_mtime = 0;
+    bool               m_overrides_loaded        = false;
+    mutable std::mutex m_overrides_mutex;
+
 public:
     HMSQuery() { }
     ~HMSQuery() { clear_hms_info(); };
@@ -64,6 +72,61 @@ public:
     // calls them.
     wxString  query_hms_msg_local(const std::string& dev_id, const std::string& long_error_code, const std::string& lang_code);
     bool      query_print_error_msg_local(const std::string& dev_id, int print_error, const std::string& lang_code, wxString& error_msg);
+
+    // The one sentence every user-facing surface shows for a printer error. The device tab, the
+    // hub's events and web page, the app push payload and --hms-lookup all go through here, so
+    // they cannot disagree about what a code means, and none of them can leak a bare code again.
+    //
+    // `code` is spelled the way the printer reported it: eight hex digits for a print_error,
+    // sixteen for an HMS attr/code pair. Both tables are tried - device_error for the short form,
+    // device_hms for the long one - because a caller usually knows only that it holds "a code".
+    // `local_only` keeps the lookup off the network for the callers that must not block.
+    wxString  describe_error(const std::string& dev_id, const std::string& code, bool local_only = false);
+    wxString  describe_print_error(const std::string& dev_id, int print_error, bool local_only = false);
+
+    // Formatting, split from the lookup so it is testable with no tables, no window, no AppConfig.
+    //   known:   "<text> (<code>)"
+    //   unknown: "<code> - no description available; look the code up in Bambu's error list"
+    // The code stays in both, because it is the only thing the owner can search for or quote to
+    // support, and it is what the wiki URL is keyed by.
+    static wxString format_error(const wxString& text, const std::string& code);
+
+    // "0C00010000020015" -> "0C00 0100 0002 0015"; "05004046" -> "0500 4046". Bambu groups a code
+    // in fours wherever it shows one, and an ungrouped 16-digit run is unreadable.
+    static std::string pretty_code(const std::string& code);
+
+    // The eight-hex spelling of a print_error, the form the tables are keyed by.
+    static std::string print_error_code(int print_error);
+
+    // ---- overrides: EdgeSlicer's own descriptions, ahead of Bambu's tables ----
+    //
+    // Bambu publishes an empty `intro` for some codes that their own slicer still shows a
+    // sentence for (0C00010000020015 is the one that started this), so refreshing the snapshot
+    // cannot supply them. These two overlays can:
+    //
+    //   <datadir>/hms/overrides.json                this user's own captures  (highest priority)
+    //   <resources>/hms/edgeslicer_overrides.json   shipped with the app
+    //
+    // and only then Bambu's tables, and only then the generic fallback. Both files are re-read
+    // when their mtime changes, so a capture goes live without restarting the app.
+    // Schema and workflow: docs/hms-overrides.md.
+    wxString    query_override(const std::string& dev_id, const std::string& code, const std::string& lang_code);
+
+    // Record one description in the user overlay. Returns false with `error` set when the code is
+    // malformed, or when an entry already exists for this (code, model, lang) and force is false.
+    bool        add_override(const std::string& code, const std::string& text, const std::string& lang,
+                             const std::string& model, const std::string& source, const std::string& note,
+                             bool force, std::string& error);
+
+    // Drop what is cached so the next lookup re-reads both overlay files. The mtime check does
+    // this by itself; this is for a caller that has just written one and wants it live at once.
+    void        reload_overrides();
+
+    // A code we can look up at all: 8 or 16 hex digits, spaces ignored, upper-cased on the way out.
+    static bool is_valid_code(const std::string& code, std::string& normalized);
+
+    static std::string user_override_path();
+    static std::string shipped_override_path();
 
 public:
     static std::string hms_language_code();

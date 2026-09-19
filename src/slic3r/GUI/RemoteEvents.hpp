@@ -255,6 +255,12 @@ nlohmann::json recent(int since);
 // report what each one produced. This is how the transition rule is covered without hardware.
 nlohmann::json replay(const nlohmann::json& in);
 
+// The notification body for an event, shared by ntfy, Web Push and the native-app push plane so
+// that the three cannot drift. The event's code is appended only when the text does not already
+// name it - the error text now carries its own code (HMSQuery::format_error), and appending it a
+// second time produced "... (0C00 0100 0002 0015). (0C00010000020015)" on the lock screen.
+std::string notification_body(const std::string& text, const std::string& code);
+
 } // namespace RemoteEvents
 } // namespace GUI
 } // namespace Slic3r

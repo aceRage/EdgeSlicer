@@ -17,6 +17,7 @@ add_executable(${_TEST_NAME}_tests
     dock_width_settle_tests.cpp
     http_empty_post_tests.cpp
     paint_cli_tests.cpp
+    hms_lookup_tests.cpp
     )
 
 # The watcher's transition rule lives in libslic3r_gui, and reaching it pulls GUI_App and the
@@ -38,6 +39,20 @@ endif ()
 target_link_libraries(${_TEST_NAME}_tests test_common libslic3r_gui libslic3r)
 if (MSVC)
     target_link_libraries(${_TEST_NAME}_tests Setupapi.lib)
+endif ()
+
+# hms_lookup_tests.cpp includes slic3r/GUI/HMS.hpp, which pulls GUI_App.hpp and so the wxWidgets
+# headers. Every other test in this suite uses a header that does not, which is why this suite
+# never needed the wx include path before. wx/platform.h reaches for wx/setup.h, which on MSVC
+# lives in <prefix>/include/msvc rather than <prefix>/include, and only wxWidgets_USE_FILE adds it.
+# find_package(wxWidgets) runs in src/, whose variables do not reach this sibling directory, so it
+# is repeated here - it is cached, so this costs nothing.
+find_package(wxWidgets 3.1 QUIET COMPONENTS html adv gl core base webview aui net media)
+if (wxWidgets_FOUND)
+    # Set on the target, not through wxWidgets_USE_FILE: that one calls include_directories(),
+    # which only affects targets created after it, and this target already exists above.
+    target_include_directories(${_TEST_NAME}_tests PRIVATE ${wxWidgets_INCLUDE_DIRS})
+    target_compile_definitions(${_TEST_NAME}_tests PRIVATE ${wxWidgets_DEFINITIONS})
 endif ()
 set_property(TARGET ${_TEST_NAME}_tests PROPERTY FOLDER "tests")
 
