@@ -6335,7 +6335,7 @@ void PrintConfigDef::init_fff_params()
         "Each layer prints its filaments following this sequence; filaments not listed are printed last, in ascending order.\n"
         "Leave empty to cycle through the filaments in ascending order."
     );
-    def->mode = comExpert;
+    def->mode = comAdvanced;   // upstream uses comExpert; this fork has no such tier
     def->set_default_value(new ConfigOptionString(""));
 
     def = this->add("toolchange_cyclic_first_layer", coBool);
@@ -6352,7 +6352,7 @@ void PrintConfigDef::init_fff_params()
         "Enable this only if you need the exact same tool sequence on every layer, including the first, at "
         "the cost of that adhesion optimization."
     );
-    def->mode = comExpert;
+    def->mode = comAdvanced;   // upstream uses comExpert; this fork has no such tier
     def->set_default_value(new ConfigOptionBool(false));
 
     def = this->add("slice_closing_radius", coFloat);
