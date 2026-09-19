@@ -1529,3 +1529,72 @@ TEST_CASE("Edit cut: a stashed half is a CLONE with new ids, so the transform is
     inst->set_transformation(trafo);
     REQUIRE(inst->get_offset().isApprox(Vec3d(11.0, -4.0, 2.5)));
 }
+
+// ---------------------------------------------------------------------------
+// THE CUT PLANE'S PUSH/PULL CLAMP.
+//
+// After "Copy cut to...", the owner found the plane's push/pull handle hitting an
+// invisible stop part-way through the object, which one Ctrl+Z cleared. The rule
+// deciding that is cut_plane_center_allowed(): the plane centre is allowed while
+// the object's bounding box - taken in the PLANE's frame, relative to that centre
+// - still reaches across z == 0.
+//
+// The rule was never wrong. What was wrong was the BOX it was asked about:
+// apply_recipe_to_gizmo() replaced m_rotation_m and then called
+// set_center(..., update_tbb = true), which only TRANSLATES the box it already
+// holds - correct when neither the object nor the rotation changed, and wrong
+// here, where both just had. The box kept describing the source object in the old
+// frame, so the clamp refused centres that are perfectly inside the target.
+//
+// These pin the rule and, with it, the range a correctly-built box must allow.
+// ---------------------------------------------------------------------------
+TEST_CASE("Cut plane: the clamp allows a centre the object still straddles", "[CutRecipe][CutClamp]")
+{
+    // A 40 mm cube centred on the plane: the box spans [-20, +20] about the centre.
+    REQUIRE(cut_plane_center_allowed(-20.0, 20.0));
+    // Pushed nearly to either face, still straddling.
+    REQUIRE(cut_plane_center_allowed(-39.0, 1.0));
+    REQUIRE(cut_plane_center_allowed(-1.0, 39.0));
+    // Exactly at a face: the 0.5 tolerance keeps it legal, which is what lets the
+    // plane reach the extreme rather than stopping just short of it.
+    REQUIRE(cut_plane_center_allowed(-40.0, 0.4));
+    REQUIRE(cut_plane_center_allowed(-0.4, 40.0));
+}
+
+TEST_CASE("Cut plane: the clamp refuses a centre clear of the object", "[CutRecipe][CutClamp]")
+{
+    // Wholly above the plane, and wholly below it: nothing to cut either way.
+    REQUIRE(!cut_plane_center_allowed(1.0, 41.0));
+    REQUIRE(!cut_plane_center_allowed(-41.0, -1.0));
+}
+
+TEST_CASE("Cut plane: the admissible range spans the whole object", "[CutRecipe][CutClamp]")
+{
+    // The owner's symptom stated as a range. For a 40 mm cube the plane must be
+    // pushable from one face to the other - a span of the object's full depth (plus
+    // the two tolerances) - and a box built for the WRONG object or frame yields a
+    // different span, which is exactly how the stop appeared early.
+    const auto r = cut_plane_center_range(-20.0, 20.0);
+    REQUIRE(r.first  == Approx(-20.5));
+    REQUIRE(r.second == Approx(20.5));
+    REQUIRE(r.second - r.first == Approx(41.0));
+
+    // Every offset strictly inside the range leaves the object straddling the
+    // plane; stepping outside it does not. (Moving the centre by d shifts the box
+    // by -d.)
+    for (double d : { -20.4, -10.0, 0.0, 10.0, 20.4 })
+        REQUIRE(cut_plane_center_allowed(-20.0 - d, 20.0 - d));
+    for (double d : { -21.0, 21.0 })
+        REQUIRE(!cut_plane_center_allowed(-20.0 - d, 20.0 - d));
+}
+
+TEST_CASE("Cut plane: an off-centre plane still reaches both faces", "[CutRecipe][CutClamp]")
+{
+    // A recipe's plane is rarely at the object's centre. Starting 15 mm above the
+    // middle of the same cube, the box relative to the plane is [-35, +5] - and the
+    // reachable range must still cover the whole cube, not just what is left above.
+    const auto r = cut_plane_center_range(-35.0, 5.0);
+    REQUIRE(r.first  == Approx(-35.5));
+    REQUIRE(r.second == Approx(5.5));
+    REQUIRE(r.second - r.first == Approx(41.0));
+}

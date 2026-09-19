@@ -35,6 +35,7 @@
 #include <string>
 #include <vector>
 #include <optional>
+#include <utility>
 
 #include <libslic3r/Point.hpp>
 #include <libslic3r/TriangleMesh.hpp>
@@ -546,6 +547,36 @@ Transform3d cut_mirror_rotation(const Transform3d& rotation_m, CutMirrorAxis axi
 //
 // In libslic3r rather than beside the menu so it can be tested without a GUI.
 std::string cut_target_label(const ModelObject* object, size_t max_parts = 3);
+
+// ---------------------------------------------------------------------------
+// HOW FAR THE CUT PLANE MAY BE PUSHED.
+//
+// The Cut gizmo refuses to move its plane once the object no longer straddles it.
+// The test is made in the PLANE's own frame, on the object's bounding box taken
+// relative to the plane centre (GLGizmoCut3D::m_transformed_bounding_box): the
+// centre is allowed while that box still reaches across z == 0, give or take
+// `limit`.
+//
+// Factored out here so it can be tested without a GUI - and because getting the
+// box it is asked about WRONG is what made the plane stop half-way through the
+// target after "Copy cut to...": the box was still the source object's, in the
+// frame from before the recipe replaced the rotation.
+//
+// `tbb_min_z` / `tbb_max_z` are that box's z extent for the centre being tested.
+inline bool cut_plane_center_allowed(double tbb_min_z, double tbb_max_z, double limit = 0.5)
+{
+    return tbb_max_z > -limit && tbb_min_z < limit;
+}
+
+// The z range, in the plane's frame, over which the plane may be pushed for an
+// object whose box (relative to the CURRENT centre) spans [tbb_min_z, tbb_max_z].
+// Moving the centre by `d` shifts the box by -d, so the admissible d runs from
+// tbb_min_z - limit to tbb_max_z + limit. Returned as {lo, hi} offsets from the
+// current centre; the span is always positive for a non-empty box.
+inline std::pair<double, double> cut_plane_center_range(double tbb_min_z, double tbb_max_z, double limit = 0.5)
+{
+    return { tbb_min_z - limit, tbb_max_z + limit };
+}
 
 } // namespace Slic3r
 

@@ -5894,7 +5894,9 @@ void GLGizmoCut3D::set_center_pos(const Vec3d& center_pos, bool update_tbb /*=fa
     bool can_set_center_pos = false;
     {
         double limit_val = /*CutMode(m_mode) == CutMode::cutTongueAndGroove ? 0.5 * double(m_groove.depth) : */0.5;
-        if (tbb.max.z() > -limit_val && tbb.min.z() < limit_val)
+        // The rule itself lives in libslic3r so it can be tested without a GUI -
+        // see cut_plane_center_allowed(). Same arithmetic as before.
+        if (cut_plane_center_allowed(tbb.min.z(), tbb.max.z(), limit_val))
             can_set_center_pos = true;
         else {
             const double old_dist = (m_bb_center - m_plane_center).norm();
@@ -8634,7 +8636,35 @@ void GLGizmoCut3D::apply_recipe_to_gizmo(const CutRecipe& recipe)
 
     m_rotation_m       = recipe.rotation_m;
     m_start_dragging_m = m_rotation_m;
-    set_center(recipe.plane_center + instance_offset, true);
+
+    // THE CLAMP BOX IS REBUILT, NOT NUDGED.
+    //
+    // m_transformed_bounding_box is the selected object's bounding box expressed in
+    // the PLANE's frame, relative to the plane centre, and set_center_pos() uses it
+    // to decide whether a new centre is allowed: a push/pull is refused once the box
+    // no longer straddles z == 0 (only a move back towards m_bb_center is let
+    // through). So it has to describe THIS object under THIS rotation.
+    //
+    // set_center(..., update_tbb = true) does not do that. It TRANSLATES the box it
+    // already holds along the current plane normal - an increment that is only valid
+    // when neither the object nor the rotation changed. Here both just did:
+    // m_rotation_m was replaced on the line above, and the selection is the copy's
+    // target (or the re-edit's stand-in), not whatever the gizmo was last open on.
+    // The box kept was the one update_bb() had built about the object's own centre,
+    // in the old frame, so the plane hit an invisible stop part-way through the
+    // target - the owner's "push/pull refuses to go any further after Copy cut
+    // to...". Ctrl+Z cleared it precisely because the undo restore recomputes the
+    // box (see the m_ar_plane_center path, which does this same pair).
+    //
+    // Recomputing from the live selection is what every other frame change here
+    // does, so do the same.
+    const Vec3d wanted_center  = recipe.plane_center + instance_offset;
+    m_transformed_bounding_box = transformed_bounding_box(wanted_center, m_rotation_m);
+    set_center_pos(wanted_center);
+    // ... and the rest of what set_center() would have done, now the centre is in
+    // place: the connector validity and the clipper both read it.
+    check_and_update_connectors_state();
+    update_clipper();
     m_ar_plane_center  = m_plane_center;
 
     // The surface.
