@@ -5598,3 +5598,130 @@ TEST_CASE("Loading incomplete mixed metadata normalizes slots before adding a fi
     CHECK(bundle.num_physical_filaments() == colors.size() + 1);
     CHECK_FALSE(has_custom_mixed_pair(bundle.mixed_filaments, 1, 4));
 }
+
+// ============================================================================
+// PR 49 follow-up — the remap_old branch in PresetBundle::set_num_filaments.
+//
+// set_num_filaments derives the "old" count it hands to
+// update_multi_material_filament_presets from two different sources:
+//
+//   remap_old = (old_slot_count > old_filament_count && old_filament_count != 0)
+//                   ? old_filament_count    // palette already grown
+//                   : old_slot_count;       // normal case
+//
+// The first arm is the batch-match case (#866-style): a batch match writes the
+// palette/colour slots first, so filament_colour has already grown while
+// filament_presets still holds the pre-grow count. Remap must then be driven by
+// the PRESET count, because that is what the multi-material arrays are still
+// sized against - using the already-grown colour count would remap against
+// slots that never existed as presets and shift the flush matrix.
+//
+// The tests above all keep filament_presets.size() == filament_colour.size(),
+// so they only ever exercise the second arm. These cover the first.
+// ============================================================================
+
+TEST_CASE("set_num_filaments remaps on the preset count when the palette grew first",
+          "[MixedFilament][PresetBundle][IncompleteMetadata][RemapOld]")
+{
+    MixedAutoGenerateGuard guard(true);
+
+    // Batch match already grew the palette to 4 colour slots, but the filament
+    // presets still hold the 3 that existed before the match ran.
+    const std::vector<std::string> grown_colors = {"#000000", "#FFFFFF", "#5E5C64", "#FF0000"};
+    const std::vector<std::string> old_presets  = {"Test PETG", "Test PLA", "Test TPU"};
+
+    PresetBundle bundle;
+    bundle.filament_presets = old_presets;
+    bundle.project_config.option<ConfigOptionStrings>("filament_colour")->values = grown_colors;
+
+    // num_physical_filaments() is filament_colour, so the slot count is already 4
+    // while the preset count is still 3 - exactly the remap_old precondition.
+    REQUIRE(bundle.num_physical_filaments() == grown_colors.size());
+    REQUIRE(bundle.filament_presets.size() == old_presets.size());
+    REQUIRE(bundle.num_physical_filaments() > bundle.filament_presets.size());
+
+    // A custom mixed row naming slot 4 is legitimate here: the palette really
+    // does have 4 slots. It must survive the grow rather than being clamped as
+    // an orphan tail, because the clamp limit on grow is the OLD physical count
+    // and the row is within it.
+    auto *defs = bundle.project_config.option<ConfigOptionString>("mixed_filament_definitions", true);
+    defs->value = "1,2,1,1,50;3,4,1,1,50";
+
+    // Now the presets catch up to the palette.
+    bundle.set_num_filaments(unsigned(grown_colors.size()), std::string("#00FF00"));
+
+    // Presets grew to the palette size; the palette itself did not grow again.
+    CHECK(bundle.filament_presets.size() == grown_colors.size());
+    const auto &colors_after = bundle.project_config.option<ConfigOptionStrings>("filament_colour")->values;
+    REQUIRE(colors_after.size() == grown_colors.size());
+
+    // The already-present colours are untouched. In particular slot 4 keeps the
+    // colour the batch match wrote and is NOT overwritten with the new_color
+    // argument: old_slot_count (4) is not < n (4), so the fill loop must not run.
+    for (size_t i = 0; i < grown_colors.size(); ++i) {
+        INFO("colour slot " << i);
+        CHECK(colors_after[i] == grown_colors[i]);
+    }
+
+    // Both mixed rows are within the 4 real slots, so neither is dropped.
+    CHECK(has_custom_mixed_pair(bundle.mixed_filaments, 1, 2));
+    CHECK(has_custom_mixed_pair(bundle.mixed_filaments, 3, 4));
+}
+
+TEST_CASE("set_num_filaments keeps the slot-count remap when presets and palette agree",
+          "[MixedFilament][PresetBundle][IncompleteMetadata][RemapOld]")
+{
+    MixedAutoGenerateGuard guard(true);
+
+    // The other arm of the same branch, asserted side by side so a change to the
+    // condition cannot silently collapse the two cases into one.
+    const std::vector<std::string> colors  = {"#000000", "#FFFFFF", "#5E5C64"};
+    const std::vector<std::string> presets = {"Test PETG", "Test PLA", "Test TPU"};
+
+    PresetBundle bundle;
+    bundle.filament_presets = presets;
+    bundle.project_config.option<ConfigOptionStrings>("filament_colour")->values = colors;
+
+    REQUIRE(bundle.num_physical_filaments() == bundle.filament_presets.size());
+
+    auto *defs = bundle.project_config.option<ConfigOptionString>("mixed_filament_definitions", true);
+    defs->value = "1,2,1,1,50;1,4,1,1,25"; // 1,4 is an orphan tail: there is no slot 4 yet
+
+    bundle.set_num_filaments(unsigned(colors.size() + 1), std::string("#FF0000"));
+
+    CHECK(bundle.filament_presets.size() == presets.size() + 1);
+    const auto &colors_after = bundle.project_config.option<ConfigOptionStrings>("filament_colour")->values;
+    REQUIRE(colors_after.size() == colors.size() + 1);
+    // Here the palette really did grow, so the new slot takes the new colour.
+    CHECK(colors_after.back() == "#FF0000");
+
+    // The orphan tail named a slot that did not exist at the old physical count,
+    // so the grow clamp drops it instead of resurrecting it as a custom row.
+    CHECK(has_custom_mixed_pair(bundle.mixed_filaments, 1, 2));
+    CHECK_FALSE(has_custom_mixed_pair(bundle.mixed_filaments, 1, 4));
+}
+
+TEST_CASE("set_num_filaments with a zero preset count falls back to the slot count",
+          "[MixedFilament][PresetBundle][IncompleteMetadata][RemapOld]")
+{
+    MixedAutoGenerateGuard guard(true);
+
+    // old_filament_count == 0 is the guard on the first arm: with no presets at
+    // all there is nothing to remap against, so remap_old must stay on
+    // old_slot_count rather than collapsing to 0.
+    PresetBundle bundle;
+    bundle.filament_presets.clear();
+    bundle.project_config.option<ConfigOptionStrings>("filament_colour")->values = {"#000000", "#FFFFFF"};
+
+    REQUIRE(bundle.filament_presets.empty());
+    REQUIRE(bundle.num_physical_filaments() == 2);
+
+    REQUIRE_NOTHROW(bundle.set_num_filaments(3u, std::string("#FF0000")));
+
+    CHECK(bundle.filament_presets.size() == 3);
+    const auto &colors_after = bundle.project_config.option<ConfigOptionStrings>("filament_colour")->values;
+    REQUIRE(colors_after.size() == 3);
+    CHECK(colors_after[0] == "#000000");
+    CHECK(colors_after[1] == "#FFFFFF");
+    CHECK(colors_after.back() == "#FF0000");
+}
