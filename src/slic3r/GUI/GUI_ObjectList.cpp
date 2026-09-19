@@ -3476,6 +3476,26 @@ void ObjectList::edit_cut()
         return;
     }
 
+    // THE MODEL SURGERY RUNS FIRST, BEFORE THE GIZMO IS OPENED.
+    //
+    // It used to run from on_set_state(On), i.e. from inside activate_gizmo(). But
+    // the surgery calls plater->update(), whose reload_scene() drops the deleted
+    // halves from the Selection, finds it empty and calls reset_all_states() -
+    // which turns this very gizmo Off again, re-entrantly. activate_gizmo() then
+    // saw get_state() != On, set m_current = Undefined and returned false: the
+    // halves were gone, the stand-in was on the bed, and no Cut gizmo ever
+    // appeared. That is exactly the "the object just disappears off the screen and
+    // nothing else happens" this fixes.
+    //
+    // Doing it here means the stand-in is already the selection when open_gizmo()
+    // runs, so the reload that would have reset everything has already happened and
+    // the gizmo opens on a stable, single-full-instance selection.
+    if (!cut->begin_reedit_now()) {
+        // Nothing was parked, or the halves could not be found - do not open a Cut
+        // gizmo that would be editing the wrong thing.
+        return;
+    }
+
     // open_gizmo() toggles when the type is already current, so close first - the
     // same two-step the Emboss and SVG menu items use.
     if (gizmos_mgr.get_current_type() == GLGizmosManager::Cut)

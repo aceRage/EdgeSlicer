@@ -5418,8 +5418,17 @@ void GLGizmoCut3D::on_set_state()
         // RE-EDITABLE CUTS. Everything above has just flattened the session state,
         // which is exactly why a parked re-edit is consumed HERE and not earlier:
         // a recipe applied before the reset would have been wiped by it.
+        //
+        // The MODEL SURGERY normally already happened, in begin_reedit_now() called
+        // by ObjectList::edit_cut() before it opened this gizmo (see the note there:
+        // doing it from inside set_state(On) made reload_scene() reset the gizmo and
+        // the panel never appeared). What is left to do here is re-apply the recipe
+        // on top of the reset above - and this is also the fallback for any caller
+        // that armed a re-edit without running the surgery first.
         if (m_reedit_pending)
             begin_reedit();
+        else if (m_reedit_active)
+            apply_recipe_to_gizmo(m_reedit_recipe);
         // ... and a parked "Copy cut to...", which is the same problem: the reset
         // above would wipe a recipe applied any earlier. Mutually exclusive with a
         // re-edit by construction (each menu path arms exactly one), but the order
@@ -8848,6 +8857,16 @@ void GLGizmoCut3D::refresh_common_data()
         m_c->update(get_requirements());
 }
 
+// Run the parked re-edit's model surgery now, before the gizmo is opened. See the
+// declaration for why the ordering matters.
+bool GLGizmoCut3D::begin_reedit_now()
+{
+    if (!m_reedit_pending)
+        return false;
+    begin_reedit();
+    return m_reedit_active;
+}
+
 // Become a re-edit session.
 //
 // The halves are REMOVED from the model and a stand-in carrying the pre-cut mesh
@@ -8965,39 +8984,59 @@ void GLGizmoCut3D::begin_reedit()
 
     m_reedit_active = true;
 
-    // Show the stand-in and select it, so the gizmo is editing it.
+    // SHOW THE STAND-IN, THEN SELECT IT - and in that order, because the canvas
+    // has no GLVolumes for an object the model has only just gained.
+    //
+    // plater->update() runs GLCanvas3D::reload_scene(), which rebuilds the
+    // GLVolume vector. Two things in there matter here. It calls
+    // Selection::volumes_changed(), which DROPS every selected volume that no
+    // longer exists - and the halves were deleted above, so the selection empties.
+    // And with the selection empty it then runs reset_all_states() (GLCanvas3D.cpp
+    // ~3087, "If no object is selected, deactivate the active gizmo") plus
+    // refresh_on_off_state(), which turns this gizmo back OFF while our
+    // on_set_state(On) is still on the stack.
+    //
+    // That is the "the object disappears and nothing else happens" the owner saw:
+    // the halves went, the stand-in arrived, and the Cut gizmo was switched off
+    // again before it ever rendered. Selecting BEFORE the reload cannot help
+    // either - Selection::add_object() resolves GLVolumes by object index, and
+    // there are none for the stand-in until the reload has run.
+    //
+    // So: reload first (the stand-in gets its volumes), select it second (now
+    // there is something to select), and re-assert the gizmo's own state last,
+    // since the reload may have cleared it.
     plater->update();
+
     Selection& selection = m_parent.get_selection();
     selection.clear();
+    int proxy_idx = -1;
     for (size_t i = 0; i < model.objects.size(); ++i)
         if (model.objects[i]->id() == m_reedit_proxy_id) {
-            selection.add_object(static_cast<unsigned int>(i), true);
+            proxy_idx = int(i);
             break;
         }
+    if (proxy_idx >= 0) {
+        selection.add_object(static_cast<unsigned int>(proxy_idx), true);
+        // The object list's own row, so the sidebar agrees with the canvas and a
+        // later refresh_on_off_state() sees a consistent selection.
+        if (auto* ol = wxGetApp().obj_list())
+            ol->select_item(ol->GetModel()->GetItemById(proxy_idx));
+    }
 
-    // THE COMMON DATA POOL HAS TO BE TOLD. Setting the Selection above is not
-    // enough: SelectionInfo (and with it everything that reads
-    // m_c->selection_info()->model_object()) only re-reads the canvas selection
-    // when the pool is updated, and the pool's update for THIS gizmo opening runs
-    // in GLGizmosManager::open_gizmo() AFTER activate_gizmo() - which is what
-    // called set_state(On), and so this function - has returned.
-    //
-    // So during begin_reedit() the pool still describes the selection as it was
-    // before the halves were removed. The halves are gone by now, so
-    // SelectionInfo::on_update() had left m_model_object null, and the first thing
-    // apply_recipe_to_gizmo() does that touches the object - set_center(), which
-    // calls check_and_update_connectors_state() - dereferenced it and took the
-    // slicer down (0xC0000005 at null + 0x18).
-    //
-    // Refreshing here, with the gizmo's own requirements, is what makes
-    // selection_info()->model_object() the stand-in before any of that runs. The
-    // later update_data() in open_gizmo() is then a harmless second update.
+    // The common data pool is refreshed so SelectionInfo is the stand-in rather than
+    // the halves that have just gone.
     refresh_common_data();
 
     // Now that the selection is the pre-cut mesh, the gizmo's own bookkeeping can
-    // be rebuilt against it and the recipe's controls restored on top.
+    // be rebuilt against it.
     update_bb();
-    apply_recipe_to_gizmo(m_reedit_recipe);
+
+    // THE RECIPE IS DELIBERATELY NOT APPLIED HERE. This surgery runs BEFORE the
+    // gizmo is opened (begin_reedit_now(), called from ObjectList::edit_cut()), so
+    // the gizmo's common data pool is not populated yet: m_c->object_clipper() is
+    // still null, and apply_recipe_to_gizmo() reaches it through update_clipper()
+    // (0xC0000005 at null + 0x48). on_set_state(On) applies the recipe instead,
+    // once the manager has really opened this gizmo and the pool is live.
 }
 
 // Undo begin_reedit(): the stand-in goes, the halves come back.
@@ -9015,6 +9054,15 @@ void GLGizmoCut3D::cancel_reedit()
         return;
     m_reedit_active = false;
 
+    // THE MODEL WORK IS DEFERRED OUT OF THIS CALL STACK. cancel_reedit() runs from
+    // on_set_state(Off), i.e. from inside GLGizmosManager::activate_gizmo(), and
+    // the restoration below calls plater->update(). Its reload_scene() reaches
+    // refresh_on_off_state() -> activate_gizmo() -> Plater::take_snapshot() while
+    // the manager is still mid-transition, and taking an undo snapshot re-entrantly
+    // corrupts the stack (observed as 0xC0000005 in
+    // UndoRedo::Stack::reduce_noisy_snapshots). Running it after this stack has
+    // unwound is both correct and enough: the gizmo is already closing.
+    auto restore = [this]() {
     Plater* plater = wxGetApp().plater();
     if (plater) {
         Model& model = plater->model();
@@ -9046,12 +9094,16 @@ void GLGizmoCut3D::cancel_reedit()
             plater->update();
         }
     }
-
+    // The bookkeeping is cleared HERE, inside the deferred work, because the stash
+    // and the proxy id are what the restoration above reads - clearing them before
+    // it ran would leave the halves nowhere to come back from.
     m_reedit_one_half_missing = false;
     m_reedit_object_ids.clear();
     m_reedit_proxy_id         = ObjectID();
     m_reedit_recipe           = CutRecipe();
     m_reedit_stash.clear_objects();
+    };
+    wxGetApp().CallAfter(restore);
 }
 
 void GLGizmoCut3D::render_reedit_notice()

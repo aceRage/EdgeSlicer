@@ -877,6 +877,20 @@ public:
     // unknown schema); nothing is armed then and the caller says why.
     bool arm_reedit(const CutRecipe& recipe, const std::vector<ObjectID>& object_ids);
     bool is_reedit_active() const { return m_reedit_active; }
+    // Perform the parked re-edit's MODEL SURGERY - take the halves out, put the
+    // stand-in in their place, select it - WITHOUT opening the gizmo.
+    //
+    // This has to happen before the gizmo is opened, not from inside
+    // on_set_state(On): the surgery calls plater->update(), whose reload_scene()
+    // empties the selection (the halves are gone) and then calls
+    // reset_all_states(), which turns this gizmo Off re-entrantly. The outer
+    // activate_gizmo() then sees get_state() != On and reverts to Undefined - the
+    // gizmo silently never opened, which is the "object disappears and nothing
+    // else happens" the owner reported. Doing the surgery first means the
+    // selection is already the stand-in when open_gizmo() runs, so nothing resets.
+    //
+    // Returns false if there was nothing parked or the halves could not be found.
+    bool begin_reedit_now();
 
     // "Copy cut to...": arm an ORDINARY cut session on the currently-selected
     // object with this recipe's plane, surface, settings and connectors already
