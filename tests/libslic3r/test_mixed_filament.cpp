@@ -5374,15 +5374,29 @@ TEST_CASE("build_mixed_deletion_painting_remap: duplicate ids in delete list ded
 //   flip this test green, and [!shouldfail] would never fire its "unexpectedly
 //   succeeded" signal. It is documentation, not a regression sentinel.
 //
+//   TAGGING: deliberately NOT tagged [MixedFilament]. Catch2 ignores the [.]
+//   hidden flag as soon as ANY filter is supplied — a test runs if
+//   (!testSpec.hasFilters() && !isHidden()) || (testSpec.hasFilters() &&
+//   matchTest(...)), and that second arm never consults isHidden(). So a bare
+//   `ctest` / `libslic3r_tests` run correctly skips this case, but running the
+//   suite tag `libslic3r_tests "[MixedFilament]"` would drag it back in and
+//   report a red `1 failed` that is really this always-failing documentation
+//   case. Reaching it on purpose still works through its own tag:
+//   `libslic3r_tests "[config_extruder_remap]"`. Same convention as the [.]
+//   demo exporters in test_flexi_joint.cpp, which also pair [.] with a private
+//   tag only.
+//
 //   PRE-EXISTING: the naive per-deletion config decrement (GUI_ObjectList.cpp:
 //   857-969) predates this PR; the cascade-aware config remap is tracked as a
 //   follow-up (see Plater.cpp remap_config_extruder — it currently skips
 //   out-of-range config references silently). When the follow-up lands, rewrite
-//   the `actual` side to assert the production result == 4 and remove the [.]
-//   tag.
+//   the `actual` side to assert the production result == 4; only then does this
+//   become a real sentinel that can be un-hidden (drop [.] and add
+//   [MixedFilament] back). Until the `actual` side calls production, keep both
+//   the [.] tag and the [MixedFilament] omission.
 // ============================================================================
 TEST_CASE("config_extruder cascade: per-deletion decrement under-counts cascade rows (CURRENT BUG)",
-          "[MixedFilament][config_extruder_remap][.]")
+          "[config_extruder_remap][.]")
 {
     // --- Correct side: real libslic3r cascade + production kept-aware remap ---
     MixedAutoGenerateGuard guard(false); // keep add_custom_filament from auto-generating gradient rows
