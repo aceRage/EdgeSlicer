@@ -320,6 +320,8 @@ TEST_CASE("[RemoteEvents] a push body names the error code exactly once", "[Remo
 
     // Not named at all - the code is added, grouped, so the owner has something to look up.
     CHECK(notification_body("X1C: the bed is too cold", "05004046") == "X1C: the bed is too cold (0500 4046)");
+    // A non-Bambu code is appended as it is; the notify gate looks for it verbatim.
+    CHECK(notification_body("Printer error", "HMS_0300") == "Printer error (HMS_0300)");
 
     // No code: nothing is appended, and an empty body stays empty rather than becoming " ()".
     CHECK(notification_body("X1C finished the print", "") == "X1C finished the print");

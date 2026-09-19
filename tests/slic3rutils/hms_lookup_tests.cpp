@@ -96,6 +96,9 @@ TEST_CASE("pretty_code groups a code in fours", "[HmsLookup]")
     // Anything else is left exactly as it came rather than chopped up on a guess.
     CHECK(HMSQuery::pretty_code("") == "");
     CHECK(HMSQuery::pretty_code("123") == "123");
+    // Eight characters that are not all hex digits are not a Bambu code: left alone.
+    CHECK(HMSQuery::pretty_code("HMS_0300") == "HMS_0300");
+    CHECK(HMSQuery::pretty_code("klipper_") == "klipper_");
     CHECK(HMSQuery::pretty_code("0C000100000200150000") == "0C000100000200150000");
 }
 

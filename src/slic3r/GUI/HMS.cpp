@@ -1,6 +1,7 @@
 #include "HMS.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <boost/algorithm/string.hpp>
 #include <boost/log/trivial.hpp>
 
@@ -511,9 +512,11 @@ std::string HMSQuery::print_error_code(int print_error)
 
 std::string HMSQuery::pretty_code(const std::string& code)
 {
-    // Only the two shapes the printer actually reports are grouped. Anything else is passed
-    // through untouched rather than chopped into fours on a guess.
+    // Only the two shapes the printer actually reports are grouped: 8 or 16 HEX digits. Anything
+    // else - a relayed "HMS_0300", a Moonraker text code - is passed through untouched rather than
+    // chopped into fours on a guess (the notify gate caught "HMS_0300" becoming "HMS_ 0300").
     if (code.size() != 8 && code.size() != 16) return code;
+    if (!std::all_of(code.begin(), code.end(), [](unsigned char c) { return std::isxdigit(c) != 0; })) return code;
     std::string out;
     out.reserve(code.size() + code.size() / 4);
     for (size_t i = 0; i < code.size(); ++i) {
