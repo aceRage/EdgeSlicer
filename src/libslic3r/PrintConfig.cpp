@@ -690,6 +690,12 @@ static t_config_enum_values s_keys_map_PerimeterGeneratorType{
 };
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(PerimeterGeneratorType)
 
+static t_config_enum_values s_keys_map_ToolChangeOrderingType {
+    { "default", int(ToolChangeOrderingType::Default) },
+    { "cyclic",  int(ToolChangeOrderingType::Cyclic) }
+};
+CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(ToolChangeOrderingType)
+
 static const t_config_enum_values s_keys_map_ZHopType = {
     { "Auto Lift",          zhtAuto },
     { "Normal Lift",        zhtNormal },
@@ -6305,6 +6311,50 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionBool(false));
 
+    def = this->add("toolchange_ordering", coEnum);
+    def->label = L("Toolchange ordering");
+    def->category = L("Advanced");
+    def->tooltip = L(
+        "Determines the order of tool changes on each layer.\n"
+        "- Default: Starts with the last used extruder to minimize tool changes.\n"
+        "- Cyclic: Uses a fixed tool sequence each layer. This sacrifices speed for better surface quality, as the extra toolchanges allow layers more time to cool."
+    );
+    def->mode = comAdvanced;
+    def->enum_keys_map = &ConfigOptionEnum<ToolChangeOrderingType>::get_enum_values();
+    def->enum_values.emplace_back("default");
+    def->enum_values.emplace_back("cyclic");
+    def->enum_labels.emplace_back(L("Default"));
+    def->enum_labels.emplace_back(L("Cyclic"));
+    def->set_default_value(new ConfigOptionEnum<ToolChangeOrderingType>(ToolChangeOrderingType::Default));
+
+    def = this->add("toolchange_cyclic_order", coString);
+    def->label = L("Cyclic order");
+    def->category = L("Advanced");
+    def->tooltip = L(
+        "Custom filament sequence used by the cyclic toolchange ordering, as filament numbers separated by commas (e.g. \"3,2,1,4\").\n"
+        "Each layer prints its filaments following this sequence; filaments not listed are printed last, in ascending order.\n"
+        "Leave empty to cycle through the filaments in ascending order."
+    );
+    def->mode = comAdvanced;   // upstream uses comExpert; this fork has no such tier
+    def->set_default_value(new ConfigOptionString(""));
+
+    def = this->add("toolchange_cyclic_first_layer", coBool);
+    def->label = L("Apply cyclic order to first layer");
+    def->category = L("Advanced");
+    def->tooltip = L(
+        "Applies the cyclic toolchange order to the first layer as well.\n"
+        "By default this is disabled, because the first layer is instead ordered for the best bed "
+        "adhesion: filaments that print small, fragile first-layer features are printed last, so the "
+        "following tool changes and travel moves are less likely to knock those weakly anchored parts "
+        "loose. This first-layer order also honors a custom first layer filament sequence when one is set. "
+        "The cyclic order's benefit (extra tool changes give each layer more time to cool) does not apply "
+        "to the first layer, which is printed slowly and hot for adhesion.\n"
+        "Enable this only if you need the exact same tool sequence on every layer, including the first, at "
+        "the cost of that adhesion optimization."
+    );
+    def->mode = comAdvanced;   // upstream uses comExpert; this fork has no such tier
+    def->set_default_value(new ConfigOptionBool(false));
+
     def = this->add("slice_closing_radius", coFloat);
     def->label = L("Slice gap closing radius");
     def->category = L("Quality");
@@ -9516,6 +9566,19 @@ CLIActionsConfigDef::CLIActionsConfigDef()
     def->tooltip = L("Print a JSON summary of each loaded object to stdout, then exit: its bounding boxes and the "
                      "convex hull faces it can be laid on, with their normals, areas and centers. These are the faces "
                      "the --ground-* options choose from. Machine-readable alternative to --info.");
+    def->set_default_value(new ConfigOptionBool(false));
+
+    // --inspect-paint dumps the per-facet enforcer/blocker/extruder/fuzzy
+    // paint state stored on the loaded model (supports, seam, MMU color,
+    // fuzzy-skin) as JSON. Read-only; lets CI / scripted / AI tooling
+    // reason about existing paint on a .3mf without loading the GUI.
+    def = this->add("inspect_paint", coBool);
+    def->label = L("Inspect paint (JSON to stdout)");
+    def->tooltip = L("Print a structured JSON summary of every painted layer "
+                     "(supports, seam, MMU color, fuzzy-skin) already stored on "
+                     "the loaded model — per-state facet count, surface area, "
+                     "and mesh-local bounding box — then exit. Machine-readable "
+                     "alternative to opening the paint gizmos in the GUI.");
     def->set_default_value(new ConfigOptionBool(false));
 
     def = this->add("export_settings", coString);

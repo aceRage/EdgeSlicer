@@ -47,6 +47,7 @@ add_executable(${_TEST_NAME}_tests
 	test_local_z_order_optimizer.cpp
 	test_placeholder_parser.cpp
 	test_polygon.cpp
+	test_preset_diff.cpp
 	test_preset_load_determinism.cpp
 	test_profile_load_util.cpp
 	test_project_preset_switch.cpp
@@ -72,6 +73,7 @@ add_executable(${_TEST_NAME}_tests
     test_optimizers.cpp
     test_wipe_tower.cpp
     test_wipe_tower_estimate.cpp
+    test_toolordering_cyclic.cpp
     # test_png_io.cpp
     test_indexed_triangle_set.cpp
     ../libnest2d/printer_parts.cpp

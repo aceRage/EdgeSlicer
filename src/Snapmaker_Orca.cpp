@@ -82,6 +82,7 @@ using namespace nlohmann;
 #include "dev-utils/BaseException.h"
 #endif
 #include "slic3r/Utils/MeshInspect.hpp"
+#include "slic3r/Utils/PaintCLI.hpp"
 #include "slic3r/GUI/PartPlate.hpp"
 #include "slic3r/GUI/BitmapCache.hpp"
 #include "slic3r/GUI/OpenGLManager.hpp"
@@ -1396,6 +1397,10 @@ int CLI::run(int argc, char **argv)
     // Development and test only - see DataDirMigration.hpp and test_rebrand_migration.py.
     if (const ConfigOptionString* mig_root = m_config.opt<ConfigOptionString>("migrate_datadir_test");
         mig_root && !mig_root->value.empty()) {
+        if (std::find(m_actions.begin(), m_actions.end(), "inspect_paint") != m_actions.end()) {
+            boost::nowide::cerr << "--inspect-paint cannot be combined with --migrate-datadir-test" << std::endl;
+            return CLI_INVALID_PARAMS;
+        }
         const std::string parent = mig_root->value;
         const auto        r      = Slic3r::migrate_data_dir(parent,
                                        (boost::filesystem::path(parent) / SLIC3R_APP_KEY).string());
@@ -1421,6 +1426,10 @@ int CLI::run(int argc, char **argv)
         look && !look->value.empty()) {
         if (std::find(m_actions.begin(), m_actions.end(), "inspect_mesh") != m_actions.end()) {
             boost::nowide::cerr << "--inspect-mesh cannot be combined with --hms-lookup" << std::endl;
+            return CLI_INVALID_PARAMS;
+        }
+        if (std::find(m_actions.begin(), m_actions.end(), "inspect_paint") != m_actions.end()) {
+            boost::nowide::cerr << "--inspect-paint cannot be combined with --hms-lookup" << std::endl;
             return CLI_INVALID_PARAMS;
         }
         std::vector<std::string> parts;
@@ -1460,6 +1469,10 @@ int CLI::run(int argc, char **argv)
     if (const ConfigOptionBool* hub = m_config.opt<ConfigOptionBool>("hub"); hub && hub->value) {
         if (std::find(m_actions.begin(), m_actions.end(), "inspect_mesh") != m_actions.end()) {
             boost::nowide::cerr << "--inspect-mesh cannot be combined with --hub" << std::endl;
+            return CLI_INVALID_PARAMS;
+        }
+        if (std::find(m_actions.begin(), m_actions.end(), "inspect_paint") != m_actions.end()) {
+            boost::nowide::cerr << "--inspect-paint cannot be combined with --hub" << std::endl;
             return CLI_INVALID_PARAMS;
         }
         return Slic3r::GUI::RemoteHub::run_server(m_config.opt_string("hub_token"), m_config.opt_bool("hub_phone"));
@@ -1578,7 +1591,7 @@ int CLI::run(int argc, char **argv)
     if (std::find(m_actions.begin(), m_actions.end(), "inspect_mesh") != m_actions.end()) {
         // "strict" is a CLI action from --strict (PR #39 / Orca #14601). It does not write
         // stdout and does no work of its own during --inspect-mesh, so keep it allowed once
-        // that tip is stacked under this one. --slice / --export-settings stay rejected.
+        // that tip is stacked under this one. --slice / --export-settings / --inspect-paint stay rejected.
         static const std::set<std::string> inspect_compatible = { "inspect_mesh", "uptodate", "load_defaultfila", "min_save",
                                                                   "mtcpp", "mstpp", "no_check", "strict", "normative_check", "pipe" };
         for (const std::string &action : m_actions) {
@@ -1613,6 +1626,60 @@ int CLI::run(int argc, char **argv)
         // Without input there is nothing to inspect; fail rather than print nothing and exit 0.
         if (m_input_files.empty() && m_config.opt_string("load_assemble_list").empty()) {
             boost::nowide::cerr << "--inspect-mesh needs an input file or --load-assemble-list" << std::endl;
+            record_exit_reson(outfile_dir, CLI_INVALID_PARAMS, 0, cli_errors[CLI_INVALID_PARAMS], sliced_info);
+            flush_and_exit(CLI_INVALID_PARAMS);
+        }
+    }
+
+    // --inspect-paint prints its JSON and exits, so any action that does work of its
+    // own (slicing, exporting, other inspects) would be skipped without notice. Reject
+    // those up front; only options that merely tune how the input is loaded may come along.
+    if (std::find(m_actions.begin(), m_actions.end(), "inspect_paint") != m_actions.end()) {
+        // Unlike --inspect-mesh, --strict is rejected here: this action never slices, so
+        // --strict cannot escalate warnings (Orca #14608). --inspect-mesh is also rejected;
+        // if both flags are present the inspect_mesh gate above fires first.
+        static const std::set<std::string> inspect_compatible = { "inspect_paint", "uptodate", "load_defaultfila", "min_save",
+                                                                  "mtcpp", "mstpp", "no_check", "normative_check", "pipe" };
+        for (const std::string &action : m_actions) {
+            if (inspect_compatible.count(action) == 0) {
+                std::string flag = action;
+                std::replace(flag.begin(), flag.end(), '_', '-');
+                boost::nowide::cerr << "--inspect-paint cannot be combined with --" << flag << std::endl;
+                record_exit_reson(outfile_dir, CLI_INVALID_PARAMS, 0, cli_errors[CLI_INVALID_PARAMS], sliced_info);
+                flush_and_exit(CLI_INVALID_PARAMS);
+            }
+        }
+        // --progress-json is a CLIMiscConfigDef option, not an action, and would interleave
+        // "event":"progress"/"result" JSON lines with the inspect-paint document on stdout.
+        if (g_progress_json) {
+            boost::nowide::cerr << "--inspect-paint cannot be combined with --progress-json" << std::endl;
+            record_exit_reson(outfile_dir, CLI_INVALID_PARAMS, 0, cli_errors[CLI_INVALID_PARAMS], sliced_info);
+            flush_and_exit(CLI_INVALID_PARAMS);
+        }
+        // --export-settings - is already rejected via the action loop above (export_settings is
+        // not inspect-compatible). Hub/HMS are CLIMiscConfigDef early exits that write stdout
+        // or take over the process; they are also checked at their handlers before this gate.
+        if (m_config.opt_bool("hub")) {
+            boost::nowide::cerr << "--inspect-paint cannot be combined with --hub" << std::endl;
+            record_exit_reson(outfile_dir, CLI_INVALID_PARAMS, 0, cli_errors[CLI_INVALID_PARAMS], sliced_info);
+            flush_and_exit(CLI_INVALID_PARAMS);
+        }
+        if (!m_config.opt_string("hms_lookup").empty()) {
+            boost::nowide::cerr << "--inspect-paint cannot be combined with --hms-lookup" << std::endl;
+            record_exit_reson(outfile_dir, CLI_INVALID_PARAMS, 0, cli_errors[CLI_INVALID_PARAMS], sliced_info);
+            flush_and_exit(CLI_INVALID_PARAMS);
+        }
+        // --migrate-datadir-test is CLIMiscConfigDef (not an action), so it never shows up in
+        // m_actions. It is an early stdout exit like --hub / --hms-lookup and is also
+        // rejected at its handler before this gate.
+        if (!m_config.opt_string("migrate_datadir_test").empty()) {
+            boost::nowide::cerr << "--inspect-paint cannot be combined with --migrate-datadir-test" << std::endl;
+            record_exit_reson(outfile_dir, CLI_INVALID_PARAMS, 0, cli_errors[CLI_INVALID_PARAMS], sliced_info);
+            flush_and_exit(CLI_INVALID_PARAMS);
+        }
+        // Without input there is nothing to inspect; fail rather than print nothing and exit 0.
+        if (m_input_files.empty() && m_config.opt_string("load_assemble_list").empty()) {
+            boost::nowide::cerr << "--inspect-paint needs an input file or --load-assemble-list" << std::endl;
             record_exit_reson(outfile_dir, CLI_INVALID_PARAMS, 0, cli_errors[CLI_INVALID_PARAMS], sliced_info);
             flush_and_exit(CLI_INVALID_PARAMS);
         }
@@ -5422,6 +5489,34 @@ int CLI::run(int argc, char **argv)
                 model.add_default_instances();
                 Slic3r::MeshInspect::inspect_to_json(model, m_input_files, boost::nowide::cout);
             }
+            boost::nowide::cout.flush();
+            // Conflicting actions were rejected before loading. Finish like the end of run().
+            // flush_and_exit() is not usable here: it prints "found error ..." to stdout,
+            // which would corrupt the JSON.
+#if defined(__linux__) || defined(__LINUX__)
+            if (g_cli_callback_mgr.is_started()) {
+                PrintBase::SlicingStatus slicing_status{100, "All done, Success"};
+                cli_status_callback(slicing_status);
+            }
+            g_cli_callback_mgr.stop();
+#endif
+            for (Model &m : m_models)
+                m.remove_backup_path_if_exist();
+            record_exit_reson(outfile_dir, CLI_SUCCESS, plate_to_slice, cli_errors[CLI_SUCCESS], sliced_info);
+            boost::nowide::cerr.flush();
+            return CLI_SUCCESS;
+        } else if (opt_key == "inspect_paint") {
+            // --inspect-paint — read the per-facet enforcer/blocker/extruder/
+            // fuzzy state from the loaded model and emit a JSON summary.
+            // Machine-readable alternative to opening the paint gizmos.
+            // m_input_files were already absolute-ized by resolve_cli_input_path()
+            // in setup(), matching --inspect-mesh.
+            // One dump for every loaded model: Orca #14608 merges inputs into one Model
+            // before actions, but looping inspect_to_json per Model concatenated JSON
+            // documents on stdout. Fold leftover models into the same objects/summary.
+            for (Model &model : m_models)
+                model.add_default_instances();
+            Slic3r::PaintCLI::inspect_to_json(m_models, m_input_files, boost::nowide::cout);
             boost::nowide::cout.flush();
             // Conflicting actions were rejected before loading. Finish like the end of run().
             // flush_and_exit() is not usable here: it prints "found error ..." to stdout,

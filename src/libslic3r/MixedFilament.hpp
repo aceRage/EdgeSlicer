@@ -291,6 +291,14 @@ public:
     std::string serialize_custom_entries();
     void load_custom_entries(const std::string &serialized, const std::vector<std::string> &filament_colours);
 
+    // Drop serialized mixed rows whose components (or gradient/pattern tokens)
+    // reference physical IDs beyond num_physical. Valid custom rows that still
+    // fit are kept verbatim. Empty input, or fewer than two physical slots,
+    // yields an empty string — mixed pairs cannot exist in that state.
+    // Edge analog of Orca #15728 resize_mixed_filament_metadata (truncate stale
+    // tails before grow); this project does not use filament_is_mixed arrays.
+    static std::string clamp_serialized_entries_to_physical_count(const std::string &serialized, size_t num_physical);
+
     // ---- Pattern string functions -------------------------------------------
     // Normalize a manual mixed-pattern string into canonical form.
     // Format: digits 1-9 for IDs 1-9, [N] for IDs >= 10, comma for group separator.

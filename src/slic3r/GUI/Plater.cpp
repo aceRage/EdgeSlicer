@@ -3254,12 +3254,15 @@ Sidebar::Sidebar(Plater *parent)
     ScalableButton* add_btn = new ScalableButton(p->m_panel_physical_filaments_title, wxID_ANY, "add_filament");
     add_btn->SetToolTip(_L("Add one filament"));
     add_btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent& e){
-        if (p->combos_filament.size() >= MAXIMUM_EXTRUDER_NUMBER)
-            return;
         PresetBundle* pb = wxGetApp().preset_bundle;
-        if (!pb || pb->mixed_filaments.total_filaments(p->combos_filament.size()) >= MAXIMUM_FILAMENT_NUMBER)
+        // Colour slots are the physical count; combos can lag the extruder-count spinner
+        // and mixed_filament_definitions must not invent extra slots (Orca #15728 adapt).
+        const size_t physical_count = pb ? pb->num_physical_filaments() : p->combos_filament.size();
+        if (physical_count >= MAXIMUM_EXTRUDER_NUMBER)
             return;
-        int filament_count = p->combos_filament.size() + 1;
+        if (!pb || pb->mixed_filaments.total_filaments(physical_count) >= MAXIMUM_FILAMENT_NUMBER)
+            return;
+        int filament_count = int(physical_count) + 1;
         wxGetApp().plater()->confirm_auto_generated_gradients(filament_count);
         wxColour new_col = Plater::get_next_color_for_filament();
         std::string new_color = new_col.GetAsString(wxC2S_HTML_SYNTAX).ToStdString();
@@ -8426,9 +8429,10 @@ PlaterPresetComboBox* Sidebar::combo_printer() { return p->combo_printer; }
 PlaterPresetComboBox* Sidebar::combo_print() { return p->combo_print; }
 
 void Sidebar::add_filament() {
-    if (p->combos_filament.size() >= MAXIMUM_EXTRUDER_NUMBER) return;
     PresetBundle* pb = wxGetApp().preset_bundle;
-    if (!pb || pb->mixed_filaments.total_filaments(p->combos_filament.size()) >= MAXIMUM_FILAMENT_NUMBER) return;
+    const size_t physical_count = pb ? pb->num_physical_filaments() : p->combos_filament.size();
+    if (physical_count >= MAXIMUM_EXTRUDER_NUMBER) return;
+    if (!pb || pb->mixed_filaments.total_filaments(physical_count) >= MAXIMUM_FILAMENT_NUMBER) return;
     wxColour    new_col        = Plater::get_next_color_for_filament();
     add_custom_filament(new_col);
     // Reveal the just-added filament: it is appended at the end of the (height-capped,
@@ -9319,11 +9323,14 @@ void Sidebar::cleanup_unused_filaments_after_batch_match(const BatchMatchResult 
 }
 
 void Sidebar::add_custom_filament(wxColour new_col) {
-    if (p->combos_filament.size() >= MAXIMUM_EXTRUDER_NUMBER) return;
     PresetBundle* pb = wxGetApp().preset_bundle;
-    if (!pb || pb->mixed_filaments.total_filaments(p->combos_filament.size()) >= MAXIMUM_FILAMENT_NUMBER) return;
+    // Count configured colour slots, not the combo widgets or mixed definitions:
+    // the extruder-count spinner can reach this before the sidebar has rebuilt.
+    const size_t physical_count = pb ? pb->num_physical_filaments() : p->combos_filament.size();
+    if (physical_count >= MAXIMUM_EXTRUDER_NUMBER) return;
+    if (!pb || pb->mixed_filaments.total_filaments(physical_count) >= MAXIMUM_FILAMENT_NUMBER) return;
 
-    int         filament_count = p->combos_filament.size() + 1;
+    int         filament_count = int(physical_count) + 1;
     wxGetApp().plater()->confirm_auto_generated_gradients(filament_count);
     std::string new_color      = new_col.GetAsString(wxC2S_HTML_SYNTAX).ToStdString();
     pb->set_num_filaments(filament_count, new_color);
@@ -12460,30 +12467,6 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                         }
                     }
                     if (!silence) wxGetApp().app_config->update_config_dir(path.parent_path().string());
-
-                    // BBS: Check for Snapmaker U1 + Print by Object warning after loading 3mf config
-                    if (load_config && is_project_file) {
-                        auto print_config = wxGetApp().preset_bundle->prints.get_edited_preset().config;
-                        auto printer_config = wxGetApp().preset_bundle->printers.get_edited_preset().config;
-
-                        auto print_seq_opt = print_config.option<ConfigOptionEnum<PrintSequence>>("print_sequence");
-                        auto printer_model_opt = printer_config.option<ConfigOptionString>("printer_model");
-
-                        if (print_seq_opt && printer_model_opt &&
-                            print_seq_opt->value == PrintSequence::ByObject &&
-                            !printer_model_opt->value.empty()) {
-                            std::string printer_model = printer_model_opt->value;
-                            bool is_snapmaker_u1 = boost::icontains(printer_model, "Snapmaker") &&
-                                                   boost::icontains(printer_model, "U1");
-
-                            if (is_snapmaker_u1) {
-                                if (q->get_notification_manager()) {
-                                    wxString warning_text = _L("Printing by object with caution. This function may cause the print head to collide with printed parts during switching.");
-                                    q->get_notification_manager()->push_plater_error_notification(warning_text.ToStdString());
-                                }
-                            }
-                        }
-                    }
                 }
             } else {
                 // BBS: add plate data related logic
@@ -24225,17 +24208,51 @@ bool Plater::sync_cold_plate_notification()
     return slicing_allowed;
 }
 
+void Plater::check_seq_print_caution()
+{
+    const wxString caution_text = _L("Printing by object with caution. This function may cause the print head to collide with printed parts during switching.");
+
+    const auto printer_model_opt = wxGetApp().preset_bundle->printers.get_edited_preset().config
+                                      .option<ConfigOptionString>("printer_model");
+    const bool is_snapmaker_u1 = printer_model_opt &&
+        boost::icontains(printer_model_opt->value, "Snapmaker") &&
+        boost::icontains(printer_model_opt->value, "U1");
+
+    PartPlate* curr_plate = get_partplate_list().get_curr_plate();
+    const bool by_object = is_snapmaker_u1 && curr_plate &&
+        curr_plate->get_real_print_seq() == PrintSequence::ByObject;
+
+    // Close-then-push keeps a single notification even when slicing is
+    // retriggered; close on the non-caution path clears the stale one.
+    if (by_object) {
+        get_notification_manager()->close_plater_error_notification(caution_text.ToStdString());
+        get_notification_manager()->push_plater_error_notification(caution_text.ToStdString());
+        // The generic "Print By Object: suggest auto-arrange" notice
+        // (config_change_notification -> BBLSeqPrintInfo) is pushed when the user
+        // selects by-object and lives for BBL_NOTICE_MAX_INTERVAL (10 days), so it
+        // is still on screen at pre-slice. On a U1 the two would stack and say the
+        // same thing, with the red caution carrying the collision risk the info
+        // notice only hints at. Drop the weaker one for U1; every other printer
+        // keeps it, because only a U1 by-object plate reaches this branch.
+        get_notification_manager()->bbl_close_seqprintinfo_notification();
+    } else {
+        get_notification_manager()->close_plater_error_notification(caution_text.ToStdString());
+    }
+}
+
 bool Plater::guard_before_slice_plate()
 {
     sync_filament_temp_mixing_notification();
     sync_flow_ratio_zero_notification();
     sync_cold_plate_notification();
+    check_seq_print_caution();
     return confirm_filament_temp_mixing_before_slice();
 }
 
 bool Plater::guard_before_slice_all()
 {
     sync_flow_ratio_zero_notification();
+    check_seq_print_caution();
     return confirm_filament_temp_mixing_before_slice_all();
 }
 
@@ -24490,7 +24507,7 @@ void Plater::on_activate()
 // Get vector of extruder colors considering filament color, if extruder color is undefined.
 std::vector<std::string> Plater::get_extruder_colors_from_plater_config(const GCodeProcessorResult* const result, bool include_mixed) const
 {
-    if (wxGetApp().is_gcode_viewer() && result != nullptr)
+    if (result != nullptr && (wxGetApp().is_gcode_viewer() || m_only_gcode))
         return result->extruder_colors;
     else {
         if (wxGetApp().preset_bundle == nullptr)
@@ -24523,7 +24540,7 @@ std::vector<std::string> Plater::get_colors_for_color_print(const GCodeProcessor
 {
     std::vector<std::string> colors = get_extruder_colors_from_plater_config(result);
 
-    if (wxGetApp().is_gcode_viewer() && result != nullptr) {
+    if (result != nullptr && (wxGetApp().is_gcode_viewer() || m_only_gcode)) {
         for (const CustomGCode::Item& code : result->custom_gcode_per_print_z) {
             if (code.type == CustomGCode::ColorChange)
                 colors.emplace_back(code.color);
