@@ -621,4 +621,43 @@ CutRecipe cut_recipe_mirrored(const CutRecipe& src, CutMirrorAxis axis, const Ve
 
     return r;
 }
+
+// The label "Copy cut to..." lists an object under. See the header for why the
+// parts appear in it and why the target is still the whole object.
+std::string cut_target_label(const ModelObject* object, size_t max_parts)
+{
+    if (object == nullptr)
+        return std::string();
+
+    // An object with no name of its own still needs to be pickable. "Object" is
+    // what the rest of the UI calls one.
+    std::string label = object->name.empty() ? std::string("Object") : object->name;
+
+    // Only MODEL PARTS. A negative volume, a modifier or a support blocker is not
+    // what identifies an object to the eye, and listing them would crowd out the
+    // names that do.
+    std::vector<std::string> parts;
+    for (const ModelVolume* v : object->volumes) {
+        if (v == nullptr || !v->is_model_part())
+            continue;
+        parts.push_back(v->name.empty() ? std::string("part") : v->name);
+    }
+
+    // One part identifies nothing the object's own name does not already say, and
+    // for a single-part object the two names are usually the same string.
+    if (parts.size() < 2)
+        return label;
+
+    label += " (";
+    const size_t shown = std::min(parts.size(), max_parts == 0 ? parts.size() : max_parts);
+    for (size_t i = 0; i < shown; ++ i) {
+        if (i > 0)
+            label += ", ";
+        label += parts[i];
+    }
+    if (shown < parts.size())
+        label += ", +" + std::to_string(parts.size() - shown) + " more";
+    label += ")";
+    return label;
+}
 } // namespace Slic3r

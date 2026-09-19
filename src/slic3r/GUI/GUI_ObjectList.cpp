@@ -3484,24 +3484,28 @@ void ObjectList::edit_cut()
 }
 
 
-// "COPY CUT TO...": is any selected object a cut that can be copied ONTO another
+// "COPY CUT TO...": is any selected object a cut that can be copied onto an
 // object? The enable condition for the submenu.
 //
-// Two things have to hold. The selection has to carry a recipe - which is the
-// same test "Edit cut..." makes, and deliberately the same one: a recipe is a
-// recipe whether it came from the object's own cut or from a copy. And there has
-// to be SOMEWHERE to copy it to, i.e. at least one other object in the model;
-// offering a submenu that opens onto nothing is worse than no submenu.
+// The selection has to carry a recipe - which is the same test "Edit cut..."
+// makes, and deliberately the same one: a recipe is a recipe whether it came from
+// the object's own cut or from a copy - and there has to be somewhere to copy it
+// to, which is now any object at all rather than any OTHER object.
+//
+// ONE OBJECT IS ENOUGH, because the source object is itself a target. A cut made
+// with "Cut to parts" leaves both halves as parts of ONE object, so on a plate
+// holding only that object the sole useful target - "the same cut on the other
+// side of this assembly" - is the source. Requiring a second object hid the
+// submenu exactly when the owner's case was the only case.
 //
 // Note it does NOT require the source and the target to be halves of the same
 // cut. They usually will be - that is the owner's case - but the submenu has no
-// need to know: has_cut_recipe() on the source and a different index on the
-// target is the whole condition.
+// need to know: has_cut_recipe() on the source is the whole condition.
 bool ObjectList::has_selected_copyable_cut() const
 {
     if (!has_selected_editable_cut())
         return false;
-    return m_objects != nullptr && m_objects->size() >= 2;
+    return m_objects != nullptr && !m_objects->empty();
 }
 
 // The index of the selected object carrying a recipe, or -1. Shared by the
@@ -3563,9 +3567,15 @@ void ObjectList::copy_cut_to(int target_idx)
         return;
 
     const int src_idx = selected_cut_recipe_source();
-    if (src_idx < 0 || src_idx == target_idx)
+    if (src_idx < 0)
         return;
 
+    // src_idx == target_idx IS ALLOWED, and is the owner's own case: a cut made
+    // with "Cut to parts" leaves both halves as parts of ONE object, so "the same
+    // cut on the other side" targets the object the recipe came from. The recipe
+    // is COPIED out before anything else happens, so the object owning it can be
+    // the one the gizmo then re-arms on without the copy referring into an object
+    // whose state is being rewritten underneath it.
     const CutRecipe recipe = *object(src_idx)->cut_recipe;
 
     GLGizmoCut3D *cut = dynamic_cast<GLGizmoCut3D *>(gizmos_mgr.get_gizmo(GLGizmosManager::EType::Cut));

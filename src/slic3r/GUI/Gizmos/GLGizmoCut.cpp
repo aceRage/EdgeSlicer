@@ -8838,7 +8838,46 @@ void GLGizmoCut3D::begin_reedit()
     const ModelObject* first      = model.objects[size_t(idxs.front())];
     const std::string  proxy_name = first->name;
 
-    // The stand-in.
+    // The transform the stand-in is placed with, taken as plain DATA before the
+    // halves are deleted. `first` does not survive that deletion, and the stashed
+    // copy cannot be found by id either: Model::add_object(const ModelObject&)
+    // clones rather than copies, and a clone is given fresh ObjectIDs by
+    // assign_clone() (which asserts the new id DIFFERS from the old). Copying the
+    // transformation out now sidesteps both problems.
+    const bool             first_has_instance = !first->instances.empty();
+    const Geometry::Transformation first_instance_trafo =
+        first_has_instance ? first->instances.front()->get_transformation() : Geometry::Transformation();
+    const bool             first_printable    = first_has_instance ? first->instances.front()->printable : true;
+
+    m_reedit_recipe = m_reedit_pending_recipe;
+    m_reedit_object_ids.clear();
+    for (int i : idxs)
+        m_reedit_object_ids.push_back(model.objects[size_t(i)]->id());
+
+    // THE HALVES GO FIRST, and the stand-in is added afterwards. The order is the
+    // whole of the fix for the "Edit cut..." crash: the object LIST and the model
+    // are addressed by the same index, and the only moment they agree is before
+    // either is touched. Adding the stand-in to the model first (as this did) made
+    // the model one longer than the list, so every delete_object_from_list(i)
+    // below removed the WRONG ROW - and on an object that is not the last on the
+    // plate the list and the model then disagreed about what every later index
+    // meant, which is what took the slicer down as soon as anything resolved a
+    // selection against it (ObjectList::part_selection_changed() indexes
+    // (*m_objects)[obj_idx] unguarded).
+    //
+    // Deleting first keeps the two in lockstep: descending indices, each removed
+    // from the model and the list together, and only then is the stand-in appended
+    // to BOTH. The copies stashed here are what Cancel puts back - see
+    // m_reedit_stash for why this does not go through the plater's undo.
+    m_reedit_stash.clear_objects();
+    std::sort(idxs.begin(), idxs.end(), std::greater<int>());
+    for (int i : idxs) {
+        m_reedit_stash.add_object(*model.objects[size_t(i)]);
+        model.delete_object(size_t(i));
+        wxGetApp().obj_list()->delete_object_from_list(size_t(i));
+    }
+
+    // The stand-in, now that the indices it will be appended at agree.
     ModelObject* proxy = model.add_object();
     proxy->name        = proxy_name;
     // An explicit COPY, moved in: the three-argument overload takes a
@@ -8848,10 +8887,12 @@ void GLGizmoCut3D::begin_reedit()
     // object frame; letting add_volume re-centre it would shift the cut plane
     // out from under the recipe's own coordinates.
     proxy->add_volume(TriangleMesh(m_reedit_pending_recipe.mesh), ModelVolumeType::MODEL_PART, false);
-    if (first->instances.empty())
-        proxy->add_instance();
-    else {
-        proxy->add_instance(*first->instances.front());
+    // The instance, rebuilt from the transformation captured above rather than
+    // from a ModelInstance that no longer exists.
+    ModelInstance* proxy_instance = proxy->add_instance();
+    if (first_has_instance) {
+        proxy_instance->set_transformation(first_instance_trafo);
+        proxy_instance->printable = first_printable;
     }
     // The recipe's connector definitions travel with it, so the gizmo shows the
     // connectors the cut was made with.
@@ -8861,21 +8902,14 @@ void GLGizmoCut3D::begin_reedit()
     proxy->cut_recipe = m_reedit_pending_recipe;
 
     m_reedit_proxy_id = proxy->id();
-    m_reedit_recipe   = m_reedit_pending_recipe;
-    m_reedit_object_ids.clear();
-    for (int i : idxs)
-        m_reedit_object_ids.push_back(model.objects[size_t(i)]->id());
 
-    // Keep the halves aside, then remove them. Descending, so the earlier indices
-    // stay valid. The copies are what Cancel puts back - see m_reedit_stash for
-    // why this does not go through the plater's undo.
-    m_reedit_stash.clear_objects();
-    std::sort(idxs.begin(), idxs.end(), std::greater<int>());
-    for (int i : idxs) {
-        m_reedit_stash.add_object(*model.objects[size_t(i)]);
-        model.delete_object(size_t(i));
-        wxGetApp().obj_list()->delete_object_from_list(size_t(i));
-    }
+    // ... and into the LIST, which model.add_object() knows nothing about. Without
+    // this the stand-in has no row at all, so the list is one SHORT of the model
+    // and every index past it means a different object in each - the same
+    // desynchronisation the delete order above avoids, arrived at from the other
+    // side. call_selection_changed is false because the selection is set
+    // deliberately below.
+    wxGetApp().obj_list()->add_object_to_list(model.objects.size() - 1, false);
 
     m_reedit_active = true;
 
@@ -8922,11 +8956,17 @@ void GLGizmoCut3D::cancel_reedit()
                 break;
             }
 
-        // ... and the halves come back, in the order they were taken.
+        // ... and the halves come back, in the order they were taken - into the
+        // model AND the list together. model.add_object() only does the former, and
+        // a half with no row leaves the list short of the model, which is the same
+        // index desynchronisation begin_reedit() is careful to avoid: every later
+        // index would then mean a different object in each, and the first thing to
+        // resolve a selection against them takes the slicer down.
         if (!m_reedit_stash.objects.empty()) {
-            ModelObjectPtrs restored;
-            for (ModelObject* o : m_reedit_stash.objects)
-                restored.push_back(model.add_object(*o));
+            for (ModelObject* o : m_reedit_stash.objects) {
+                model.add_object(*o);
+                wxGetApp().obj_list()->add_object_to_list(model.objects.size() - 1, false);
+            }
             plater->update();
             for (size_t i = 0; i < model.objects.size(); ++i)
                 wxGetApp().obj_list()->update_info_items(i);
