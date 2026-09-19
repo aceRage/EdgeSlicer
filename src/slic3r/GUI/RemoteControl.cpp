@@ -3,6 +3,7 @@
 #include "DeviceManager.hpp"
 #include "GUI_App.hpp"
 #include "HMS.hpp"
+#include "PrintErrorCommands.hpp"
 #include "SnapmakerLan.hpp"
 #include "libslic3r/PresetBundle.hpp"
 #include "slic3r/Utils/Http.hpp"
@@ -11,7 +12,9 @@
 
 #include <boost/log/trivial.hpp>
 
+#include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cstdio>
 #include <future>
@@ -71,6 +74,49 @@ static std::string print_error_message(const std::string& dev_id, int code)
 {
     if (HMSQuery* q = wxGetApp().get_hms_query()) return q->describe_print_error(dev_id, code).ToUTF8().data();
     return std::string();
+}
+
+// The button set the desktop's error dialog would draw for this code, as data. Same lookup
+// (HMSQuery::query_print_error_url_action against the shipped hms_action_<devtype>.json), same
+// resolver (resolve_print_error_actions, generic fallback included), same 0300-800x liveview
+// special case StatusPanel applies - so a surface that reads this JSON cannot end up offering a
+// different set from the dialog on the PC standing next to the printer.
+//
+// GUI thread only: the HMS tables are read under the query's own lock and the MachineObject is
+// the GUI's.
+std::vector<int> resolved_print_error_actions(const std::string& dev_id, int print_error)
+{
+    HMSQuery* q = wxGetApp().get_hms_query();
+    if (!q) return std::vector<int>();
+    std::vector<int> table_actions;
+    q->query_print_error_url_action(dev_id, print_error, table_actions);
+    const std::string code = HMSQuery::print_error_code(print_error);
+    if (code == "03008003" || code == "03008002" || code == "0300800A")
+        table_actions.push_back(PrintErrorAction::JUMP_TO_LIVEVIEW);
+    bool used_fallback = false;
+    return resolve_print_error_actions(table_actions, used_fallback);
+}
+
+// {code, message, job_id, actions[]} - the one shape the status JSON, the event payload and the
+// control route all agree on. `job_id` is named because an action that needs one is only offered
+// when the printer has one, and a client that wants to say why a button is off needs to see it.
+static json print_error_json(MachineObject* m)
+{
+    json e;
+    e["code"]    = error_code_text(m->print_error);
+    e["message"] = print_error_message(m->dev_id, m->print_error);
+    e["job_id"]  = m->job_id_;
+    json actions = json::array();
+    for (const PrintErrorRemoteAction& a : describe_print_error_actions(resolved_print_error_actions(m->dev_id, m->print_error),
+                                                                       !m->job_id_.empty())) {
+        actions.push_back({ { "id", a.id },
+                            { "verb", a.verb },
+                            { "label", a.label },
+                            { "needs_job_id", a.needs_job_id },
+                            { "remote_safe", a.remote_safe } });
+    }
+    e["actions"] = actions;
+    return e;
 }
 
 // A print host address turned into the base URL of its Moonraker HTTP API. This is
@@ -303,10 +349,100 @@ static std::pair<int, std::string> prepare_snapmaker_lan(const Request& req, con
     return { 200, "" };
 }
 
+// The MachineObject method behind each error verb, for the log line and the job result: the phone
+// gets told which command was sent, exactly as the generic controls report command_task_*.
+static const char* error_action_call(const std::string& verb)
+{
+    if (verb == "resume_error")      return "command_hms_resume";
+    if (verb == "stop_error")        return "command_hms_stop";
+    if (verb == "ignore_error")      return "command_hms_ignore";
+    if (verb == "idle_ignore_error") return "command_hms_idle_ignore";
+    if (verb == "ack_proceed")       return "command_ack_proceed";
+    if (verb == "dont_remind")       return "command_dont_remind_next_time";
+    if (verb == "ack_close")         return "command_clean_print_error_uiop";
+    return "";
+}
+
+// ------------------------------------------------- the printer-error actions ----
+//
+// One error code, one action, one command - and three guards that all have to pass before anything
+// is published, because every one of them is a way to have a command land on the wrong thing:
+//
+//   * the printer must still be reporting the code the request names. Status pages are left open;
+//     a resume composed against a filament runout must not reach the nozzle crash that replaced
+//     it, and a resume for an error that has already cleared must not reach a healthy print.
+//   * the commands that carry "job_id" need one. Firmware drops them silently without it, which
+//     is indistinguishable from the printer ignoring the person.
+//   * the verb must be one this phase offers remotely. The AMS controls, the drying stop, the
+//     nozzle recheck, the buzzer and the purification switch are described in the status JSON so
+//     a client can show them greyed with a reason, and refused here.
+static std::pair<int, std::string> prepare_error_action(const Request& req, std::shared_ptr<Prepared> p,
+                                                        std::shared_ptr<Prepared>& out)
+{
+    DeviceManager* dm = wxGetApp().getDeviceManager();
+    if (!dm) return { 503, "no device manager" };
+    MachineObject* obj = find_machine(dm, req.printer);
+    if (!obj) return { 404, "no such printer: " + req.printer };
+    if (!obj->is_online()) return { 409, obj->dev_name + " is offline" };
+    if (obj->is_lan_mode_printer() && !obj->has_access_right())
+        return { 409, obj->dev_name + " needs its access code entered on the PC first" };
+    if (!obj->is_connected())
+        return { 409, obj->dev_name + " is not connected; open it on the PC's Device tab once, or pick it in a send" };
+
+    // Everything else is the pure check (PrintErrorCommands.hpp), against what the printer is
+    // reporting at this instant - not against anything the request says about it.
+    PrintErrorActionRequest c;
+    c.verb         = req.action;
+    c.asked_err    = req.err;
+    c.confirm      = req.confirm;
+    c.current_err  = obj->print_error == 0 ? std::string() : error_code_text(obj->print_error);
+    c.job_id       = obj->job_id_;
+    c.printer_name = obj->dev_name;
+    if (obj->print_error != 0) c.offered = resolved_print_error_actions(obj->dev_id, obj->print_error);
+    std::string why;
+    const int   status = check_print_error_action(c, why);
+    if (status != 0) {
+        BOOST_LOG_TRIVIAL(info) << "RemoteControl: " << req.action << " refused for " << obj->dev_name
+                                << " (" << status << "): " << why;
+        return { status, why };
+    }
+
+    p->kind               = "bambu";
+    p->printer_name       = obj->dev_name;
+    p->is_error_action    = true;
+    p->err_code           = c.current_err;
+    // The decimal spelling, which is what these commands carry - see PrintErrorCommands.hpp.
+    p->err_arg            = std::to_string(obj->print_error);
+    p->job_id             = obj->job_id_;
+    p->call               = error_action_call(req.action);
+    p->command            = req.action;
+    p->status_before      = obj->print_status;
+    p->print_error_before = obj->print_error;
+    out                   = p;
+    BOOST_LOG_TRIVIAL(info) << "RemoteControl: " << req.action << " (" << p->call << ") prepared for "
+                            << obj->dev_name << ", error " << p->err_code << ", job_id "
+                            << (p->job_id.empty() ? std::string("<none>") : p->job_id);
+    return { 200, "" };
+}
+
 std::pair<int, std::string> prepare(const Request& req, std::shared_ptr<Prepared>& out)
 {
+    if (is_print_error_verb(req.action)) {
+        if (req.printer.empty()) return { 400, "printer is required" };
+        // Only a Bambu printer has printer errors in this sense; "host", "connect" and sm:<id> are
+        // Moonraker printers whose faults come through a different channel entirely.
+        if (req.printer == "host" || req.printer == "connect" || req.printer.compare(0, 3, "sm:") == 0)
+            return { 409, "printer-error actions are for Bambu printers; this one reports faults another way" };
+        auto p        = std::make_shared<Prepared>();
+        p->action     = req.action;
+        p->dry_run    = req.dry_run || env_flag("SNORCA_SEND_DRYRUN");
+        p->printer_id = req.printer;
+        return prepare_error_action(req, p, out);
+    }
+
     const ActionNames* a = action_names(req.action);
-    if (!a) return { 400, "action must be pause, resume or stop" };
+    if (!a) return { 400, "action must be pause, resume or stop, or one of the printer-error actions "
+                          "/api/printers lists for the error it is reporting" };
     // Stopping a print throws the print away; pause and resume are reversible and the desktop does
     // not confirm them either (StatusPanel::on_subtask_pause_resume).
     if (req.action == "stop" && !req.confirm) return { 400, "stopping a print needs confirm=1" };
@@ -323,9 +459,19 @@ std::pair<int, std::string> prepare(const Request& req, std::shared_ptr<Prepared
 
 // -------------------------------------------------------------------- run ----
 
+// What the phone is told while the command is in flight.
+static std::string error_wait_text(const std::shared_ptr<Prepared>& p)
+{
+    if (p->is_error_action) return "waiting for the printer to answer";
+    if (p->action == "pause")  return "waiting for the printer to pause";
+    if (p->action == "resume") return "waiting for the printer to resume";
+    return "waiting for the printer to stop";
+}
+
 // What the printer reports after a control command, watched for a few seconds so the phone learns
 // whether it took (an H2-series printer without LAN-only mode + Developer Mode refuses third-party
-// commands with "command verification failed", exactly as it does for a print).
+// commands with "command verification failed", exactly as it does for a print). For an error
+// action the thing watched is the error code going away, not a print-state transition.
 static void watch_bambu(std::shared_ptr<Prepared> p, json& result)
 {
     struct Watch { std::mutex m; std::string state { "unknown" }, status, err_text; int err { 0 }; };
@@ -344,6 +490,13 @@ static void watch_bambu(std::shared_ptr<Prepared> p, json& result)
                 w->err      = obj->print_error;
                 w->state    = "error";
                 w->err_text = print_error_message(obj->dev_id, w->err);
+            } else if (p->is_error_action) {
+                // What an error action is waiting for is the code going away. Whether the print
+                // then runs, stops or stays paused is the action's own business - an ignore that
+                // leaves it paused has still worked - so the print state is reported and not
+                // judged. A code that is simply still there after ten seconds is not a failure
+                // either: the printer may need longer, and the status is the answer.
+                if (obj->print_error == 0) w->state = "error_cleared";
             } else if (p->action == "pause" && obj->print_status == "PAUSE") {
                 w->state = "paused";
             } else if (p->action == "resume" && obj->print_status == "RUNNING") {
@@ -371,6 +524,12 @@ static void run_bambu(std::shared_ptr<Prepared> p, Sink& sink)
     result["call"]          = p->call;
     result["command"]       = p->command;
     result["status_before"] = p->status_before;
+    if (p->is_error_action) {
+        result["error_action"] = true;
+        result["err"]          = p->err_code;
+        result["err_arg"]      = p->err_arg;
+        result["job_id"]       = p->job_id;
+    }
     if (p->dry_run) {
         result["dry_run"] = true;
         sink.progress(99, "dry run: nothing was sent");
@@ -385,15 +544,39 @@ static void run_bambu(std::shared_ptr<Prepared> p, Sink& sink)
         if (!dm) return;
         MachineObject* obj = find_machine(dm, p->printer_id);
         if (!obj) return;
+        if (p->is_error_action) {
+            // The same last-moment check prepare() made, repeated on the GUI thread the instant
+            // before the publish: between the two the printer may have cleared the error or hit
+            // another one, and this is the only place where "the code is still this one" and "the
+            // command goes out" are not separated by a thread hop.
+            if (obj->print_error == 0 || error_code_text(obj->print_error) != p->err_code) {
+                *rc = -2;
+                return;
+            }
+            if (p->action == "resume_error")           *rc = obj->command_hms_resume(p->err_arg, p->job_id);
+            else if (p->action == "stop_error")        *rc = obj->command_hms_stop(p->err_arg, p->job_id);
+            else if (p->action == "ignore_error")      *rc = obj->command_hms_ignore(p->err_arg, p->job_id);
+            else if (p->action == "idle_ignore_error") *rc = obj->command_hms_idle_ignore(p->err_arg, 0);
+            else if (p->action == "ack_close")         *rc = obj->command_clean_print_error_uiop(obj->print_error);
+            else                                       *rc = -3; // no path here builds one of the rest
+            return;
+        }
         if (p->action == "pause")       *rc = obj->command_task_pause();
         else if (p->action == "resume") *rc = obj->command_task_resume();
         else                            *rc = obj->command_task_abort();
     }, 10000);
     result["result_code"] = *rc;
     if (!ran) { sink.done(false, "the PC did not send the command in time", result); return; }
+    if (*rc == -2) {
+        sink.done(false, p->printer_name + " is no longer reporting error " + HMSQuery::pretty_code(p->err_code) +
+                             ", so nothing was sent", result);
+        return;
+    }
     if (*rc != 0) { sink.done(false, p->printer_name + " did not accept the command (code " + std::to_string(*rc) + ")", result); return; }
 
-    sink.progress(60, p->action == "pause" ? "waiting for the printer to pause" : p->action == "resume" ? "waiting for the printer to resume" : "waiting for the printer to stop");
+    BOOST_LOG_TRIVIAL(info) << "RemoteControl: " << p->call << " sent to " << p->printer_name
+                            << (p->is_error_action ? " for error " + p->err_code : std::string());
+    sink.progress(60, error_wait_text(p));
     watch_bambu(p, result);
     if (result["printer_state"] == "error") {
         const std::string code = result["printer_error"]["code"];
@@ -401,6 +584,13 @@ static void run_bambu(std::shared_ptr<Prepared> p, Sink& sink)
         sink.done(false, "the printer refused the command (error " + code + (msg.empty() ? "" : ": " + msg) + ")", result);
         return;
     }
+    // An error action that did not clear its code in the ten seconds watched: the command went
+    // out and the printer has not let go of the fault. Reported as a success with the fact in the
+    // text, not as a failure - the fault may simply still be there (an ignore does not fix it,
+    // and a resume on a condition that persists comes straight back), and calling that "the
+    // command failed" would send the person looking in the wrong place.
+    if (p->is_error_action && result["printer_state"] == "unknown")
+        result["note"] = "the printer is still reporting error " + HMSQuery::pretty_code(p->err_code);
     sink.done(true, "", result);
 }
 
@@ -481,7 +671,7 @@ void describe_bambu(MachineObject* m, json& p)
     p["print_status"] = m->print_status;
     p["stage"]        = std::string(m->get_curr_stage().ToUTF8().data());
     if (m->print_error != 0)
-        p["print_error"] = { { "code", error_code_text(m->print_error) }, { "message", print_error_message(m->dev_id, m->print_error) } };
+        p["print_error"] = print_error_json(m);
     else
         p["print_error"] = nullptr;
     // The HMS summary: how many the printer is reporting and what the first one says, so a card can

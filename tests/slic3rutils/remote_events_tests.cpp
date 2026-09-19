@@ -13,11 +13,13 @@
 #include <catch2/catch.hpp>
 
 #include "slic3r/GUI/LanReconnectLadder.hpp"
+#include "slic3r/GUI/PrintErrorCommands.hpp"
 #include "slic3r/GUI/RemoteEvents.hpp"
 
 #include <string>
 #include <vector>
 
+using namespace Slic3r::GUI;
 using namespace Slic3r::GUI::RemoteEvents;
 
 namespace {
@@ -322,4 +324,95 @@ TEST_CASE("[RemoteEvents] a push body names the error code exactly once", "[Remo
     // No code: nothing is appended, and an empty body stays empty rather than becoming " ()".
     CHECK(notification_body("X1C finished the print", "") == "X1C finished the print");
     CHECK(notification_body("", "") == "");
+}
+
+
+// ---- the printer-error event's action buttons (phase 2) ----
+//
+// The app's notification used to carry a sentence and nothing else: "X1C: the toolhead camera is
+// not working properly". Tapping it opened the app, which opened the page, which is where the
+// buttons were. These cases pin the payload that lets the app draw them on the card itself - and,
+// more importantly, pin that adding them changed nothing about the text, the title or the
+// severity, because every existing consumer reads those.
+TEST_CASE("[RemoteEvents] an error event carries the actions the app can offer", "[RemoteEvents]")
+{
+    PrinterState p = pr("printing");
+    p.error_code   = "05008051";
+    p.error_text   = "the filament is tangled (0500 8051)";
+    p.job_id       = "42";
+    // What RemoteEvents fills in from the printer: the same resolved set the status JSON carries.
+    bool fallback = false;
+    for (const PrintErrorRemoteAction& a :
+         describe_print_error_actions(resolve_print_error_actions({23, 3}, fallback), true)) {
+        PrintErrorEventAction e;
+        e.id           = a.id;
+        e.verb         = a.verb;
+        e.label        = a.label;
+        e.needs_job_id = a.needs_job_id;
+        e.remote_safe  = a.remote_safe;
+        p.error_actions.push_back(e);
+    }
+
+    Driver d;
+    REQUIRE(d.poll(pr("printing")).empty()); // seeding poll, no error yet
+    std::vector<Event> ev = d.poll(p);
+
+    REQUIRE(count_of(ev, "error") == 1);
+    const Event* e = nullptr;
+    for (const Event& x : ev)
+        if (x.kind == "error") e = &x;
+    REQUIRE(e);
+
+    SECTION("the actions reach the event, and the text is untouched by them")
+    {
+        REQUIRE(e->actions.size() == 2);
+        REQUIRE(e->actions[0].verb == "idle_ignore_error");
+        REQUIRE(e->actions[1].verb == "resume_error");
+        REQUIRE(e->job_id == "42");
+        // Unchanged: this is what every channel already renders.
+        // The rule's own wording, unchanged: "<printer>: <what the printer said>".
+        REQUIRE(e->text == "X1C: the filament is tangled (0500 8051)");
+        REQUIRE(e->severity == "error");
+        REQUIRE(e->code == "05008051");
+    }
+
+    SECTION("the JSON carries them as ids, verbs and labels")
+    {
+        const nlohmann::json j = e->to_json(0);
+        REQUIRE(j["actions"].is_array());
+        REQUIRE(j["actions"].size() == 2);
+        REQUIRE(j["actions"][1]["id"] == PrintErrorAction::RESUME_PRINTING_DEFECTS);
+        REQUIRE(j["actions"][1]["verb"] == "resume_error");
+        REQUIRE(j["actions"][1]["needs_job_id"] == true);
+        REQUIRE(j["actions"][1]["remote_safe"] == true);
+        REQUIRE_FALSE(j["actions"][1]["label"].get<std::string>().empty());
+        REQUIRE(j["job_id"] == "42");
+        // And the fields that were there before are exactly as they were.
+        REQUIRE(j["kind"] == "error");
+        REQUIRE(j["code"] == "05008051");
+        REQUIRE(j["text"] == "X1C: the filament is tangled (0500 8051)");
+    }
+}
+
+TEST_CASE("[RemoteEvents] an error with no actions carries no actions field at all", "[RemoteEvents]")
+{
+    // A Klipper printer's error, an HMS item, a relayed hub's event: none of them has a button
+    // set. The payload must then be byte-for-byte what a consumer written before this field saw,
+    // rather than an empty array it has to learn to ignore.
+    PrinterState p = pr("printing");
+    p.error_code   = "05008051";
+    p.error_text   = "something went wrong";
+
+    Driver d;
+    REQUIRE(d.poll(pr("printing")).empty());
+    std::vector<Event> ev = d.poll(p);
+    REQUIRE(count_of(ev, "error") == 1);
+
+    for (const Event& e : ev) {
+        if (e.kind != "error") continue;
+        const nlohmann::json j = e.to_json(0);
+        REQUIRE_FALSE(j.contains("actions"));
+        REQUIRE_FALSE(j.contains("job_id"));
+        REQUIRE(j["code"] == "05008051");
+    }
 }

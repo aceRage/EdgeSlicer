@@ -3,6 +3,7 @@
 #include "DeviceManager.hpp"
 #include "GUI_App.hpp"
 #include "HMS.hpp"
+#include "PrintErrorCommands.hpp"
 #include "RemoteControl.hpp"
 #include "RemoteHub.hpp"
 #include "SnapmakerLan.hpp"
@@ -83,6 +84,20 @@ json Event::to_json(long instance_pid) const
     j["text"]     = text;
     if (!code.empty()) j["code"] = code;
     if (!job.empty()) j["job"] = job;
+    // The buttons, when there are any. Left off entirely otherwise, so every consumer that was
+    // written before this field keeps seeing exactly the payload it saw - the text, title and
+    // severity are untouched by it.
+    if (!actions.empty()) {
+        json arr = json::array();
+        for (const PrintErrorEventAction& a : actions)
+            arr.push_back({ { "id", a.id },
+                            { "verb", a.verb },
+                            { "label", a.label },
+                            { "needs_job_id", a.needs_job_id },
+                            { "remote_safe", a.remote_safe } });
+        j["actions"] = arr;
+        if (!job_id.empty()) j["job_id"] = job_id;
+    }
     return j;
 }
 
@@ -239,6 +254,8 @@ std::vector<Event> step(Memory& mem, const Snapshot& now, long long cooldown_ms,
                                    cur.error_text.empty() ? (name + " reported error " + HMSQuery::pretty_code(cur.error_code) + ".")
                                                           : (name + ": " + cur.error_text));
             e.code    = cur.error_code;
+            e.actions = cur.error_actions;
+            e.job_id  = cur.job_id;
             out.push_back(e);
         }
 
@@ -438,6 +455,26 @@ static std::string print_error_message(const std::string& dev_id, int code)
     return std::string();
 }
 
+// The buttons that go with that sentence, in the payload's own flat shape. The lookup, the
+// resolver and the remote-safe rule are all shared with the status JSON and the control route -
+// this only copies the result into the struct this header can carry.
+static std::vector<PrintErrorEventAction> print_error_event_actions(const std::string& dev_id, int print_error,
+                                                                    const std::string& job_id)
+{
+    std::vector<PrintErrorEventAction> out;
+    for (const PrintErrorRemoteAction& a :
+         describe_print_error_actions(RemoteControl::resolved_print_error_actions(dev_id, print_error), !job_id.empty())) {
+        PrintErrorEventAction e;
+        e.id           = a.id;
+        e.verb         = a.verb;
+        e.label        = a.label;
+        e.needs_job_id = a.needs_job_id;
+        e.remote_safe  = a.remote_safe;
+        out.push_back(e);
+    }
+    return out;
+}
+
 // GUI thread: reading a MachineObject is field access, no network and no locks - which is why the
 // Bambu half of the snapshot is taken on the heartbeat itself.
 static void snapshot_bambu(Snapshot& s)
@@ -475,6 +512,12 @@ static void snapshot_bambu(Snapshot& s)
         if (m->print_error != 0) {
             p.error_code = hex8(m->print_error);
             p.error_text = print_error_message(m->dev_id, m->print_error);
+            // The buttons for this code. Same lookup and same resolver as the desktop dialog and
+            // the status JSON (RemoteControl::describe_bambu), reached through the one function
+            // that knows how, so a notification cannot offer a different set from the page the
+            // tap-through lands on.
+            p.job_id        = m->job_id_;
+            p.error_actions = print_error_event_actions(m->dev_id, m->print_error, m->job_id_);
         } else {
             // No print error: the worst thing HMS is reporting, if it is serious enough to be worth
             // a notification. HMS_COMMON and HMS_INFO are the printer's chatter and stay off.

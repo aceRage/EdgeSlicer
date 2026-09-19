@@ -1,6 +1,7 @@
 #include "PrintErrorCommands.hpp"
 
 #include <algorithm>
+#include <cctype>
 
 namespace Slic3r {
 namespace GUI {
@@ -109,6 +110,245 @@ std::string format_action_ids(const std::vector<int>& ids)
         out += std::to_string(ids[i]);
     }
     return out;
+}
+
+// ---- the remote surface ----
+
+namespace {
+
+// One row per action id: the verb the control route takes, the label, and whether a person out of
+// the room can judge the press. The labels are the dialog's own (ReleaseNote.cpp's
+// init_button_list) so the hub page, the app and the desktop all say the same words - with one
+// deliberate difference: "Ignore this and Resume" gains the consequence in the label, because on
+// the desktop the dialog's body text is right above the button and on a phone card it is not.
+struct Row
+{
+    int         id;
+    const char* verb;   // "" - no remote meaning at all
+    const char* label;
+    bool        remote_safe;
+};
+
+const Row ROWS[] = {
+    // The resume family: all one command_hms_resume, three labels, all remote-safe. This is the
+    // whole point of the feature - a printer stopped on a recoverable fault, resumed from a phone.
+    { PrintErrorAction::RESUME_PRINTING,                "resume_error",      "Resume printing",                          true },
+    { PrintErrorAction::RESUME_PRINTING_DEFECTS,        "resume_error",      "Resume printing (defects acceptable)",     true },
+    { PrintErrorAction::RESUME_PRINTING_PROBELM_SOLVED, "resume_error",      "Problem solved, resume printing",          true },
+    { PrintErrorAction::FILAMENT_LOAD_RESUME,           "resume_error",      "Filament loaded, resume printing",         true },
+    { PrintErrorAction::PROBLEM_SOLVED_RESUME,          "resume_error",      "Problem solved and resume",                true },
+
+    { PrintErrorAction::STOP_PRINTING,                  "stop_error",        "Stop the print",                           true },
+
+    // Ignore never reads as a fix. The print continues and the fault is still there; a label that
+    // said only "Ignore" next to "Resume printing" would look like the same thing with fewer words.
+    { PrintErrorAction::IGNORE_RESUME,                  "ignore_error",      "Ignore this error and continue (the fault is not fixed)", true },
+    { PrintErrorAction::IGNORE_NO_REMINDER_NEXT_TIME,   "ignore_error",      "Ignore and continue, don't ask again (the fault is not fixed)", true },
+
+    // Silences the popup, touches nothing on the printer.
+    { PrintErrorAction::NO_REMINDER_NEXT_TIME,          "idle_ignore_error", "Don't remind me next time (the fault is not fixed)", true },
+
+    // Proceed / Don't remind carry a JSON blob the printer handed out with the error (the command
+    // to re-send and the index to suppress). This fork never receives that blob - nothing calls
+    // PrintErrorDialog::set_action_json, so even the desktop button sends nothing - so the verbs
+    // exist and the route knows them, but they are not offered until a source for the blob does.
+    { PrintErrorAction::PROCEED,                        "ack_proceed",       "Proceed",                                  false },
+    { PrintErrorAction::DONT_REMIND_NEXT_TIME,          "dont_remind",       "Don't remind me (the fault is not fixed)", false },
+
+    // Acknowledge and close: the printer is told the dialog went away. OK_JUMP_RACK is upstream's
+    // rack-page variant of the same acknowledge; this fork has no rack page, so it is the plain one.
+    { PrintErrorAction::OK_BUTTON,                      "ack_close",         "OK",                                       true },
+    { PrintErrorAction::OK_JUMP_RACK,                   "ack_close",         "OK",                                       true },
+
+    // ---- described, never offered remotely in this phase ----
+    //
+    // Every one of these moves or silences hardware whose state a remote tap cannot see. "Filament
+    // Extruded, Continue" is the clearest: it tells the printer the filament is clear of the path,
+    // and answering that from another room is how a purge gets crushed into a print.
+    { PrintErrorAction::FILAMENT_EXTRUDED,              "",                  "Filament extruded, continue",              false },
+    { PrintErrorAction::RETRY_FILAMENT_EXTRUDED,        "",                  "Not extruded yet, retry",                  false },
+    { PrintErrorAction::CONTINUE,                       "",                  "Finished, continue",                       false },
+    { PrintErrorAction::RETRY_PROBLEM_SOLVED,           "",                  "Retry (problem solved)",                   false },
+    { PrintErrorAction::ABORT,                          "",                  "Abort",                                    false },
+    { PrintErrorAction::STOP_DRYING,                    "",                  "Stop drying",                              false },
+    { PrintErrorAction::REFRESH_NOZZLE,                 "",                  "Recheck the nozzle",                       false },
+    { PrintErrorAction::TURN_OFF_FIRE_ALARM,            "",                  "Turn off the fire alarm",                  false },
+    { PrintErrorAction::DISABLE_PURIFICATION,           "",                  "Disable purification for this print",      false },
+
+    // ---- no remote meaning at all: desktop navigation, or not a button ----
+    { PrintErrorAction::CHECK_ASSISTANT,                "",                  "Check the assistant",                      false },
+    { PrintErrorAction::JUMP_TO_LIVEVIEW,               "",                  "View the camera",                          false },
+    { PrintErrorAction::LOAD_VIRTUAL_TRAY,              "",                  "Load filament",                            false },
+    { PrintErrorAction::CANCEL_ACTION,                  "",                  "Cancel",                                   false },
+    { PrintErrorAction::REMOVE_CLOSE_BTN,               "",                  "",                                         false },
+};
+
+const Row* find_row(int action_id)
+{
+    for (const Row& r : ROWS)
+        if (r.id == action_id) return &r;
+    return nullptr;
+}
+
+// The verb -> job_id rule, kept on the verb rather than on the id: several ids share one verb and
+// the command behind the verb is what decides, not the label on the button.
+struct VerbRow
+{
+    const char* verb;
+    bool        needs_job_id;
+    bool        remote_safe;
+};
+
+const VerbRow VERBS[] = {
+    { "resume_error",      true,  true },
+    { "stop_error",        true,  true },
+    { "ignore_error",      true,  true },
+    { "idle_ignore_error", false, true },
+    // Not remote-safe: no source for the action_json blob these need (see ROWS above).
+    { "ack_proceed",       false, false },
+    { "dont_remind",       false, false },
+    { "ack_close",         false, true },
+};
+
+const VerbRow* find_verb(const std::string& verb)
+{
+    for (const VerbRow& v : VERBS)
+        if (verb == v.verb) return &v;
+    return nullptr;
+}
+
+} // namespace
+
+bool is_print_error_verb(const std::string& verb) { return find_verb(verb) != nullptr; }
+
+bool is_remote_safe_verb(const std::string& verb)
+{
+    const VerbRow* v = find_verb(verb);
+    return v && v->remote_safe;
+}
+
+bool print_error_verb_needs_job_id(const std::string& verb)
+{
+    const VerbRow* v = find_verb(verb);
+    return v && v->needs_job_id;
+}
+
+PrintErrorRemoteAction describe_print_error_action(int action_id)
+{
+    PrintErrorRemoteAction out;
+    out.id = action_id;
+    const Row* r = find_row(action_id);
+    if (!r) return out; // an id no dialog draws: no verb, no label, not safe
+    out.verb         = r->verb;
+    out.label        = r->label;
+    out.remote_safe  = r->remote_safe && r->verb[0] != '\0';
+    out.needs_job_id = print_error_verb_needs_job_id(out.verb);
+    return out;
+}
+
+std::vector<PrintErrorRemoteAction> describe_print_error_actions(const std::vector<int>& resolved_actions,
+                                                                 bool has_job_id)
+{
+    std::vector<PrintErrorRemoteAction> out;
+    out.reserve(resolved_actions.size());
+    for (int id : resolved_actions) {
+        // Not a button on any surface: the close-box flag and the ids nothing can draw.
+        if (id == PrintErrorAction::REMOVE_CLOSE_BTN) continue;
+        PrintErrorRemoteAction a = describe_print_error_action(id);
+        if (a.label.empty()) continue;
+        // A resume the printer has no job for would be dropped by firmware, so it is described and
+        // not offered rather than offered and refused.
+        if (a.needs_job_id && !has_job_id) a.remote_safe = false;
+        out.push_back(a);
+    }
+    return out;
+}
+
+// ---- the control route's guards ----
+
+std::string normalize_error_code(const std::string& code)
+{
+    std::string out;
+    out.reserve(code.size());
+    for (char c : code) {
+        if (c == ' ' || c == '-' || c == '_') continue;
+        out.push_back((char) std::toupper((unsigned char) c));
+    }
+    return out;
+}
+
+namespace {
+
+// "0C00402D" -> "0C00 402D". HMSQuery::pretty_code does the same for the GUI; this is the
+// wx-free copy, because a header that pulls GUI_App in cannot be unit tested.
+std::string group4(const std::string& code)
+{
+    if (code.size() != 8 && code.size() != 16) return code;
+    std::string out;
+    out.reserve(code.size() + code.size() / 4);
+    for (size_t i = 0; i < code.size(); ++i) {
+        if (i && i % 4 == 0) out.push_back(' ');
+        out.push_back(code[i]);
+    }
+    return out;
+}
+
+std::string named(const std::string& printer_name)
+{
+    return printer_name.empty() ? std::string("The printer") : printer_name;
+}
+
+} // namespace
+
+int check_print_error_action(const PrintErrorActionRequest& req, std::string& why)
+{
+    why.clear();
+    if (!is_print_error_verb(req.verb)) {
+        why = "\"" + req.verb + "\" is not a printer-error action";
+        return 400;
+    }
+    if (!is_remote_safe_verb(req.verb)) {
+        why = "\"" + req.verb + "\" has to be done at the printer: it moves or silences hardware "
+              "whose state cannot be checked from here";
+        return 403;
+    }
+    if (req.asked_err.empty()) {
+        why = "this action needs err=<the error code it is answering>";
+        return 400;
+    }
+    // Stopping throws the print away, whichever button asked for it.
+    if (req.verb == "stop_error" && !req.confirm) {
+        why = "stopping a print needs confirm=1";
+        return 400;
+    }
+    if (req.current_err.empty()) {
+        why = named(req.printer_name) + " is not reporting an error any more, so there is nothing to answer";
+        return 409;
+    }
+    // The stale-error guard. The client's spelling is normalised; the printer's is taken as it is,
+    // because it was made by the same formatter that produced the status JSON.
+    const std::string asked = normalize_error_code(req.asked_err);
+    if (asked != req.current_err) {
+        why = named(req.printer_name) + " is reporting error " + group4(req.current_err) + " now, not " +
+              group4(asked) + "; reload the printer's status and try again";
+        return 409;
+    }
+    if (print_error_verb_needs_job_id(req.verb) && req.job_id.empty()) {
+        why = named(req.printer_name) + " is not reporting a job for this error, and " + req.verb +
+              " has to name one - the printer would ignore it";
+        return 409;
+    }
+    // And the verb has to be one this error actually offers. Without this a client could resume an
+    // error whose only action is OK, which is the one thing the desktop dialog cannot do either.
+    bool offered = false;
+    for (const PrintErrorRemoteAction& a : describe_print_error_actions(req.offered, !req.job_id.empty())) {
+        if (a.remote_safe && a.verb == req.verb) { offered = true; break; }
+    }
+    if (!offered) {
+        why = named(req.printer_name) + " does not offer \"" + req.verb + "\" for error " + group4(req.current_err);
+        return 409;
+    }
+    return 0;
 }
 
 // ---- payload builders ----

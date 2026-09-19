@@ -3480,6 +3480,7 @@ body.dragging .cell iframe, body.dragging .cell img { pointer-events: none; }
         }).catch(function() { s.timer = setTimeout(function() { ctlPoll(id); }, 2000); });
     }
     function ctlAskStop(p) {
+        errAsk = null; // one sheet, one question
         ctlAsk = p;
         document.getElementById('ctlsheet').style.display = 'flex';
         ctlAskRender();
@@ -3508,6 +3509,136 @@ body.dragging .cell iframe, body.dragging .cell img { pointer-events: none; }
         var no = el('span', 'btn alt', 'Keep printing'); no.onclick = ctlAskClose; acts.appendChild(no);
         c.appendChild(acts);
         body.appendChild(c);
+    }
+    // ---- What to do about a printer error (POST /api/printers/{id}/control with the error's own
+    // verb). The buttons are not invented here: print_error.actions is the set the printer's own
+    // error table asks for, already resolved by the slicer through the same code the desktop
+    // dialog uses, each entry carrying the verb, the label and whether it may be pressed from
+    // here. This renders what it is given and nothing else - an action the slicer marked
+    // remote_safe=false is shown greyed with the reason, never as a working button, and a code the
+    // table has no actions for gets no row at all.
+    //
+    // Nothing is ever sent without a tap. Resume and Ignore are two different commands with two
+    // different meanings and the wording has to keep them apart: resuming says the fault is
+    // handled, ignoring says carry on with the fault still there. ----
+    var errJobs = {}; // printer id -> { verb, phase: running|done|error, text, error, job, timer }
+    var errAsk  = null; // { p, a } while a confirmation is open
+
+    // Why a button the slicer sent but marked unsafe is off.
+    function errWhyNot(p, a) {
+        if (a.needs_job_id && !(p.print_error && p.print_error.job_id))
+            return 'The printer is not reporting a job for this error, so it would ignore this command.';
+        return 'This has to be done at the printer: it moves or silences hardware whose state cannot be checked from here.';
+    }
+    // The ones that need a second tap: stopping throws the print away, and the ignore family
+    // continues a print with the fault still present. Everything else acts on the first tap, as
+    // the desktop's dialog does.
+    function errNeedsAsk(verb) {
+        return verb === 'stop_error' || verb === 'ignore_error' || verb === 'idle_ignore_error';
+    }
+    function errAskText(p, a) {
+        if (a.verb === 'stop_error')
+            return 'Stop the print on ' + p.name + '? It cannot be resumed: the printer throws the job away and the plate has to be started again.';
+        if (a.verb === 'idle_ignore_error')
+            return 'Stop reminding you about this error on ' + p.name + '? The print is not touched and the fault is not fixed - only the message goes away.';
+        return 'Continue the print on ' + p.name + ' with this error unresolved? This does not fix anything: the printer carries on as it is, and whatever caused the error is still there.';
+    }
+    function errRun(p, a) {
+        var cur = errJobs[p.id];
+        if (cur && cur.phase === 'running') return;
+        if (cur && cur.timer) clearTimeout(cur.timer);
+        var s = errJobs[p.id] = { verb: a.verb, phase: 'running', text: a.label + '…', error: '', job: null, timer: null };
+        refreshDevices();
+        api('/printers/' + encodeURIComponent(p.id) + '/control', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            // The code the button was drawn for travels with the request: the slicer refuses it if
+            // the printer has moved on to another error, which is the whole point of sending it.
+            body: 'action=' + encodeURIComponent(a.verb) + '&err=' + encodeURIComponent((p.print_error && p.print_error.code) || '') +
+                  (a.verb === 'stop_error' ? '&confirm=1' : '')
+        }).then(function(j) {
+            if (errJobs[p.id] !== s) return;
+            s.job = j.job; s.dry_run = !!j.dry_run;
+            errPoll(p.id);
+        }).catch(function(e) {
+            if (errJobs[p.id] !== s) return;
+            s.phase = 'error'; s.error = e.message;
+            refreshDevices();
+        });
+    }
+    function errPoll(id) {
+        var s = errJobs[id];
+        if (!s || s.job === null) return;
+        api('/jobs/' + s.job).then(function(j) {
+            if (errJobs[id] !== s) return;
+            s.text = j.text || s.text;
+            if (j.state === 'running') { s.timer = setTimeout(function() { errPoll(id); }, 1000); return; }
+            if (j.state === 'done') {
+                s.phase = 'done';
+                // The slicer says so when the printer kept the error after the command; without
+                // that the card would clear itself and say "Sent." over a printer still stuck.
+                var note = j.result && j.result.note;
+                s.text = s.dry_run ? 'Dry run: nothing was sent.' : (note ? note : 'Sent. The printer answered.');
+            } else {
+                s.phase = 'error'; s.error = j.error || ('The command ' + j.state);
+            }
+            // The card follows the printer: when the error has cleared the next refresh drops the
+            // whole block, which is the only honest signal that it worked.
+            refreshDevices();
+        }).catch(function() { s.timer = setTimeout(function() { errPoll(id); }, 2000); });
+    }
+    function errAskOpen(p, a) {
+        ctlAsk = null; // one sheet, one question
+        errAsk = { p: p, a: a };
+        document.getElementById('ctlsheet').style.display = 'flex';
+        errAskRender();
+    }
+    function errAskClose() {
+        errAsk = null;
+        document.getElementById('ctlsheet').style.display = 'none';
+    }
+    function errAskRender() {
+        if (!errAsk) return;
+        var p = errAsk.p, a = errAsk.a;
+        var sh = document.getElementById('ctlsheet'), head = sh.querySelector('.head'), body = sh.querySelector('.body');
+        head.innerHTML = ''; body.innerHTML = '';
+        head.appendChild(el('div', 'name', a.label));
+        var close = el('span', 'btn alt', 'Close'); close.onclick = errAskClose; head.appendChild(close);
+        var pl = el('div', 'plate', p.name + (p.model ? '  ·  ' + p.model : ''));
+        pl.appendChild(el('span', 'sub', (p.print_error && (p.print_error.message || p.print_error.code)) || ''));
+        body.appendChild(pl);
+        var c = el('div', 'confirm');
+        c.appendChild(el('div', '', errAskText(p, a)));
+        var acts = el('div', 'actions');
+        var go = el('span', 'btn' + (a.verb === 'stop_error' ? ' stop' : ''), a.label);
+        go.onclick = function() { var t = p, b = a; errAskClose(); errRun(t, b); };
+        acts.appendChild(go);
+        var no = el('span', 'btn alt', 'Cancel'); no.onclick = errAskClose; acts.appendChild(no);
+        c.appendChild(acts);
+        body.appendChild(c);
+    }
+    // The block under a printer error: its buttons, and whatever the last one said.
+    function errCard(p) {
+        var actions = (p.print_error && p.print_error.actions) || [];
+        var st = errJobs[p.id];
+        if (!actions.length && !st) return null;
+        var wrap = el('div');
+        if (actions.length) {
+            var row = el('div', 'acts');
+            var busy = !!(st && st.phase === 'running');
+            actions.forEach(function(a) {
+                if (!a.label) return;
+                var on = a.remote_safe === true && !busy;
+                var b = el('span', 'btn small' + (a.verb === 'stop_error' ? ' stop' : '') + (on ? '' : ' dim'), a.label);
+                b.title = on ? a.label : (busy ? 'A command is already running' : errWhyNot(p, a));
+                if (on) b.onclick = function() { if (errNeedsAsk(a.verb)) errAskOpen(p, a); else errRun(p, a); };
+                row.appendChild(b);
+            });
+            if (row.childNodes.length) wrap.appendChild(row);
+        }
+        if (st) wrap.appendChild(el('div', 'ctlline' + (st.phase === 'error' ? ' err' : st.phase === 'done' ? ' ok' : ''),
+                                    st.phase === 'error' ? st.error : st.text));
+        return wrap.childNodes.length ? wrap : null;
     }
     // One temperature cell of a printer card: "now° / target°" over its label. Only a number is
     // a temperature; an entry without one (a print host that did not answer as a Moonraker
@@ -4019,9 +4150,13 @@ body.dragging .cell iframe, body.dragging .cell img { pointer-events: none; }
                         card.appendChild(heads);
                     }
                 }
-                // Why the printer stopped, in its own words (HMS for a Bambu one).
-                if (p.print_error && (p.print_error.message || p.print_error.code))
+                // Why the printer stopped, in its own words (HMS for a Bambu one), and what can
+                // be done about it from here (errCard).
+                if (p.print_error && (p.print_error.message || p.print_error.code)) {
                     card.appendChild(el('div', 'ctlline err', p.print_error.message || ('Printer error ' + p.print_error.code)));
+                    var ec = errCard(p);
+                    if (ec) card.appendChild(ec);
+                }
                 // Pause / Resume / Stop. A button the printer's own predicate says no to stays in
                 // place, dimmed, with the reason in its tooltip.
                 var st = ctlJobs[p.id];

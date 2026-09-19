@@ -19,6 +19,7 @@ add_executable(${_TEST_NAME}_tests
     paint_cli_tests.cpp
     hms_lookup_tests.cpp
     hms_actions_tests.cpp
+    remote_error_actions_tests.cpp
     )
 
 # The watcher's transition rule lives in libslic3r_gui, and reaching it pulls GUI_App and the
