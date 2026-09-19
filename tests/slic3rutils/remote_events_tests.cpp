@@ -299,3 +299,27 @@ TEST_CASE("[RemoteEvents] the LAN reconnect backoff is 15s, 30s, 60s and then ca
     CHECK(L::GRACE_MS == 15000);
     CHECK(L::MAX_MS == 60000);
 }
+
+// The notification body, shared by ntfy, Web Push and the native-app push plane.
+//
+// The error text now carries its own code (HMSQuery::format_error), so the old unconditional
+// `body += " (" + code + ")"` printed it twice: "... (0C00 0100 0002 0015). (0C00010000020015)"
+// on the lock screen. The code is still appended when the text does not name it, because an event
+// from a relayed hub or a Klipper printer may carry a code and a sentence that never mentions it.
+TEST_CASE("[RemoteEvents] a push body names the error code exactly once", "[RemoteEvents]")
+{
+    // Already named in the grouped spelling the text was built with: not repeated.
+    CHECK(notification_body("X1C: Nozzle Camera is malfunctioning. (0C00 0100 0002 0015)", "0C00010000020015") ==
+          "X1C: Nozzle Camera is malfunctioning. (0C00 0100 0002 0015)");
+
+    // Already named in the raw spelling, as a relayed body may carry it: also not repeated.
+    CHECK(notification_body("X1C reported error 0C00010000020015.", "0C00010000020015") ==
+          "X1C reported error 0C00010000020015.");
+
+    // Not named at all - the code is added, grouped, so the owner has something to look up.
+    CHECK(notification_body("X1C: the bed is too cold", "05004046") == "X1C: the bed is too cold (0500 4046)");
+
+    // No code: nothing is appended, and an empty body stays empty rather than becoming " ()".
+    CHECK(notification_body("X1C finished the print", "") == "X1C finished the print");
+    CHECK(notification_body("", "") == "");
+}

@@ -348,8 +348,7 @@ static std::string plaintext_for(const json& e)
     if (e.is_object() && e.contains("printer") && e["printer"].is_object()) who = ev_str(e["printer"], "name");
     if (body.empty()) body = title;
     if (!who.empty() && body.find(who) == std::string::npos) body = who + ": " + body;
-    const std::string code = ev_str(e, "code");
-    if (!code.empty()) body += " (" + code + ")";
+    body = RemoteEvents::notification_body(body, ev_str(e, "code"));
     p["title"]    = title;
     p["body"]     = body;
     p["kind"]     = ev_str(e, "kind");

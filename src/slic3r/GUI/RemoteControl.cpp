@@ -69,8 +69,7 @@ static std::string error_code_text(int code)
 // same code says something else on each of them.
 static std::string print_error_message(const std::string& dev_id, int code)
 {
-    wxString msg;
-    if (HMSQuery* q = wxGetApp().get_hms_query(); q && q->query_print_error_msg(dev_id, code, msg)) return msg.ToUTF8().data();
+    if (HMSQuery* q = wxGetApp().get_hms_query()) return q->describe_print_error(dev_id, code).ToUTF8().data();
     return std::string();
 }
 
@@ -494,7 +493,7 @@ void describe_bambu(MachineObject* m, json& p)
         const std::string code  = first.get_long_error_code();
         hms["code"]             = code;
         if (HMSQuery* q = wxGetApp().get_hms_query())
-            hms["message"] = std::string(q->query_hms_msg(m->dev_id, code).ToUTF8().data());
+            hms["message"] = std::string(q->describe_error(m->dev_id, code).ToUTF8().data());
     }
     p["hms"] = hms;
 }

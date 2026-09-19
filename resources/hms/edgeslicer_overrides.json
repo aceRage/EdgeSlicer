@@ -1,0 +1,39 @@
+{
+  "_comment": [
+    "EdgeSlicer's own error-code descriptions, consulted BEFORE Bambu's tables.",
+    "",
+    "This exists because Bambu's published tables carry an empty `intro` for some codes that their",
+    "own slicer nevertheless shows a sentence for. Refreshing the snapshot cannot fix those; the",
+    "text has to be captured and recorded here.",
+    "",
+    "Lookup order: <datadir>/hms/overrides.json (this user's own), then this file, then Bambu's",
+    "hms_<lang>_<model>.json tables, then the generic 'see the printer screen' fallback.",
+    "Within a file: exact language, then 'en', then any language present.",
+    "",
+    "Fields, per entry in `overrides`:",
+    "  code   (required) the error code, 8 hex digits for a print_error or 16 for an HMS code.",
+    "                    Spaces are ignored, case is ignored.",
+    "  model  (optional) the first three characters of the serial - 31B is the H2C, 094 the H2D,",
+    "                    20P the P1 line. '*' or omitted means every model.",
+    "  lang   (optional) language code as the tables spell it ('en', 'de', 'zh-cn'). Default 'en'.",
+    "  text   (required) what the user is shown.",
+    "  source (optional) where the text came from, so a later reader can judge it.",
+    "  date   (optional) when it was captured, ISO 8601.",
+    "  note   (optional) anything uncertain about the entry. Recorded, never shown.",
+    "",
+    "Add entries with `--hms-add`, through the hub's POST /hub/hms/override, or by hand; see",
+    "docs/hms-overrides.md. Contributions to this shipped file are welcome by PR."
+  ],
+  "version": 1,
+  "overrides": [
+    {
+      "code": "0C00010000020015",
+      "model": "*",
+      "lang": "en",
+      "text": "Nozzle Camera is malfunctioning. If this issue occurs multiple times during printing, please contact customer support.",
+      "source": "Bambu Studio UI, observed for this same event",
+      "date": "2026-09-19",
+      "note": "Bambu's tables publish this text under 0C00010000020014 and carry an empty entry for ...0015, in every shipped language and in the live cloud table. Bambu Studio showed this sentence for a printer reporting ...0015, so the two codes appear to share a description upstream. Showing it is far more useful than showing the bare code, but the mapping is inferred, not published."
+    }
+  ]
+}

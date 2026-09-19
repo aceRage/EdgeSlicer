@@ -1418,6 +1418,39 @@ int CLI::run(int argc, char **argv)
     }
 
 #ifdef SLIC3R_GUI
+    // Record our own description for an error code, for the ones Bambu publishes with an empty
+    // description (0C00010000020015 is the case that prompted this). Writes the user overlay at
+    // <datadir>/hms/overrides.json, which every surface consults ahead of Bambu's tables.
+    // --hms-add <code> "<description>" [--hms-add-lang de] [--hms-add-model 31B] [--hms-add-force]
+    if (const ConfigOptionStrings* add = m_config.opt<ConfigOptionStrings>("hms_add");
+        add && !add->values.empty()) {
+        if (add->values.size() < 2 || add->values[1].empty()) {
+            boost::nowide::cerr << "--hms-add needs a code and a description, e.g. "
+                                   "--hms-add 0C00010000020015 \"Nozzle Camera is malfunctioning.\""
+                                << std::endl;
+            return CLI_INVALID_PARAMS;
+        }
+        // Everything after the code is the description, so an unquoted sentence still works.
+        std::string text = add->values[1];
+        for (size_t i = 2; i < add->values.size(); ++i) text += " " + add->values[i];
+
+        Slic3r::GUI::HMSQuery q;
+        std::string           err;
+        const bool ok = q.add_override(add->values[0], text, m_config.opt_string("hms_add_lang"),
+                                       m_config.opt_string("hms_add_model"), "recorded with --hms-add", std::string(),
+                                       m_config.opt_bool("hms_add_force"), err);
+        if (!ok) {
+            boost::nowide::cerr << "hms-add: " << err << std::endl;
+            return CLI_INVALID_PARAMS;
+        }
+        std::string normalized;
+        Slic3r::GUI::HMSQuery::is_valid_code(add->values[0], normalized);
+        boost::nowide::cout << "HMS_ADD_OK=1" << std::endl
+                            << "HMS_ADD_CODE=" << normalized << std::endl
+                            << "HMS_ADD_FILE=" << Slic3r::GUI::HMSQuery::user_override_path() << std::endl;
+        return 0;
+    }
+
     // The per-device HMS lookup, with no printer and no window: which table a serial picks, and
     // what that table says about one code. The tables come from <datadir>/hms and, failing that,
     // <resources>/hms; the cloud refresh is not reachable from here.
@@ -1456,12 +1489,20 @@ int CLI::run(int argc, char **argv)
             boost::nowide::cerr << "hms-lookup: `" << look->value << "` is not <serial>:<code>[:<lang>]" << std::endl;
             return CLI_INVALID_PARAMS;
         }
+        // HMS_TEXT stays the raw table answer, empty when the table has nothing - that is what
+        // makes this a diagnostic. HMS_OVERRIDE is our own description if one is recorded, and
+        // HMS_DESCRIPTION is what the device tab, the hub and the phone actually show for this
+        // code, so the CLI can be used to check a user-facing surface.
+        const wxString overridden = q.query_override(dev_id, code, lang);
+        const wxString described  = Slic3r::GUI::HMSQuery::format_error(overridden.IsEmpty() ? text : overridden, code);
         boost::nowide::cout << "HMS_DEV_ID_TYPE=" << Slic3r::GUI::HMSQuery::get_dev_id_type(dev_id) << std::endl
                             << "HMS_FILE=" << Slic3r::GUI::HMSQuery::get_hms_file(QUERY_HMS_INFO, lang, Slic3r::GUI::HMSQuery::get_dev_id_type(dev_id)) << std::endl
                             << "HMS_CODE=" << code << std::endl
                             << "HMS_LANG=" << lang << std::endl
                             << "HMS_FOUND=" << (found ? 1 : 0) << std::endl
-                            << "HMS_TEXT=" << text.ToUTF8().data() << std::endl;
+                            << "HMS_TEXT=" << text.ToUTF8().data() << std::endl
+                            << "HMS_OVERRIDE=" << overridden.ToUTF8().data() << std::endl
+                            << "HMS_DESCRIPTION=" << described.ToUTF8().data() << std::endl;
         return 0;
     }
 

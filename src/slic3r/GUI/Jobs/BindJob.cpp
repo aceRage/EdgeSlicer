@@ -3,6 +3,7 @@
 #include "slic3r/GUI/Plater.hpp"
 #include "slic3r/GUI/GUI.hpp"
 #include "slic3r/GUI/GUI_App.hpp"
+#include "slic3r/GUI/HMS.hpp"
 
 namespace Slic3r {
 namespace GUI {
@@ -105,9 +106,13 @@ void BindJob::process(Ctl &ctl)
             try
             {
                 error_code = stoi(result_info);
-                wxString error_msg;
-                wxGetApp().get_hms_query()->query_print_error_msg(m_dev_id, error_code, error_msg);
-                result_info = error_msg.ToStdString();
+                // Only replace the server's own string when there is something better to say:
+                // the lookup's miss used to overwrite result_info with "" and the bind failure
+                // was then reported with no reason at all.
+                if (HMSQuery* q = wxGetApp().get_hms_query()) {
+                    const wxString described = q->describe_print_error(m_dev_id, error_code);
+                    if (!described.IsEmpty()) result_info = described.ToStdString();
+                }
             }
             catch (...) {
                 ;

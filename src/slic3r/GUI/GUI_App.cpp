@@ -1458,8 +1458,12 @@ void GUI_App::post_init()
     }
 #endif
 
-    if (!app_config->get_stealth_mode())
-        hms_query = new HMSQuery();
+    // Always: the tables shipped under <resources>/hms and cached under <datadir>/hms answer
+    // offline, and an owner who has not finished the setup wizard is exactly the owner most
+    // likely to be staring at their first error code. Stealth mode is about not talking to
+    // Bambu's cloud, which HMSQuery::init_hms_info enforces on the fetch itself; withholding the
+    // object withheld the cached answer too, and every surface fell back to the bare code.
+    hms_query = new HMSQuery();
 
     m_show_gcode_window = app_config->get_bool("show_gcode_window");
     // Ultra (plug-in guards): "the plug-in needs updating" means "its version does not match the

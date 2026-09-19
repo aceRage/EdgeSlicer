@@ -41,7 +41,7 @@ HMSNotifyItem::HMSNotifyItem(const std::string& dev_id, wxWindow *parent, HMSIte
     m_hms_content->SetForegroundColour(*wxBLACK);
     m_hms_content->SetSize(HMS_NOTIFY_ITEM_TEXT_SIZE);
     m_hms_content->SetMinSize(HMS_NOTIFY_ITEM_TEXT_SIZE);
-    m_hms_content->SetLabelText(wxGetApp().get_hms_query()->query_hms_msg(dev_id, m_hms_item.get_long_error_code()));
+    m_hms_content->SetLabelText(wxGetApp().get_hms_query()->describe_error(dev_id, m_hms_item.get_long_error_code()));
     m_hms_content->Wrap(HMS_NOTIFY_ITEM_TEXT_SIZE.GetX());
 
     m_bitmap_arrow = new wxStaticBitmap(m_panel_hms, wxID_ANY, wxNullBitmap, wxDefaultPosition, wxDefaultSize, 0);
@@ -189,14 +189,11 @@ HMSPanel::~HMSPanel() {
 
 void HMSPanel::append_hms_panel(const std::string& dev_id, HMSItem& item) {
     m_notify_item = new HMSNotifyItem(dev_id, m_scrolledWindow, item);
-    wxString msg = wxGetApp().get_hms_query()->query_hms_msg(dev_id, item.get_long_error_code());
-    if (!msg.empty())
-        m_top_sizer->Add(m_notify_item, 0, wxALIGN_CENTER_HORIZONTAL);
-    else {
-        // debug for hms display error info
-        // m_top_sizer->Add(m_notify_item, 0, wxALIGN_CENTER_HORIZONTAL);
-        BOOST_LOG_TRIVIAL(info) << "hms: do not display empty_item";
-    }
+    // Every item the printer is reporting is shown. It used to be dropped when the table had no
+    // sentence for it, so a printer complaining about a code Bambu ships with an empty `intro`
+    // showed an empty HMS page and the owner had nothing to look up; describe_error always
+    // returns at least the code, and the row carries the wiki link.
+    m_top_sizer->Add(m_notify_item, 0, wxALIGN_CENTER_HORIZONTAL);
 }
 
 void HMSPanel::delete_hms_panels() {
