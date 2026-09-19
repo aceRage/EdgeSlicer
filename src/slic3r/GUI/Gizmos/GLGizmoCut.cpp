@@ -544,10 +544,18 @@ void GLGizmoCut3D::put_connectors_on_cut_plane(const Vec3d& cp_normal, double cp
     // connector's own (s, w) - describing the place the connector actually is.
     if (is_draw_surface())
         return;
-    ModelObject* mo = m_c->selection_info()->model_object();
+    // Null and range guarded for the same reason check_and_update_connectors_state()
+    // is: a recipe can be applied while the common data pool still describes a
+    // selection that is gone, and "no object" has to mean "nothing to move".
+    ModelObject* mo = m_c && m_c->selection_info() ? m_c->selection_info()->model_object() : nullptr;
+    if (mo == nullptr)
+        return;
+    const int active_inst = m_c->selection_info()->get_active_instance();
+    if (active_inst < 0 || size_t(active_inst) >= mo->instances.size())
+        return;
     if (CutConnectors& connectors = mo->cut_connectors; !connectors.empty()) {
         const float sla_shift        = m_c->selection_info()->get_sla_shift();
-        const Vec3d& instance_offset = mo->instances[m_c->selection_info()->get_active_instance()]->get_offset();
+        const Vec3d& instance_offset = mo->instances[active_inst]->get_offset();
 
         for (auto& connector : connectors) {
             // convert connetor pos to the world coordinates
@@ -8115,14 +8123,27 @@ void GLGizmoCut3D::check_and_update_connectors_state()
     m_invalid_connectors_idxs.clear();
     if (CutMode(m_mode) != CutMode::cutPlanar)
         return;
-    const ModelObject* mo = m_c->selection_info()->model_object();
-    auto inst_id = m_c->selection_info()->get_active_instance();
-    if (inst_id < 0)
+    // THE SELECTION MAY NOT BE RESOLVED YET, and that has to degrade to "nothing
+    // to check" rather than to a null dereference. The re-edit and copy paths run
+    // inside GLGizmosManager::activate_gizmo(), which calls set_state(On) - and so
+    // begin_reedit() / begin_copy() and the recipe they apply - BEFORE open_gizmo()
+    // reaches its update_data(). While a recipe is being applied, SelectionInfo can
+    // therefore still be the stale one from before the halves were taken out of the
+    // model, whose model_object() is null. That is what took the slicer down here,
+    // at `mo->cut_connectors`: 0xC0000005 reading null + 0x18.
+    const CommonGizmosDataObjects::SelectionInfo* sel = m_c ? m_c->selection_info() : nullptr;
+    const ModelObject*                            mo  = sel ? sel->model_object() : nullptr;
+    if (mo == nullptr)
+        return;
+    auto inst_id = sel->get_active_instance();
+    // Bounds-checked against THIS object, not merely non-negative: an active
+    // instance index outliving a selection change would index past instances.
+    if (inst_id < 0 || size_t(inst_id) >= mo->instances.size())
         return;
     const CutConnectors& connectors = mo->cut_connectors;
     const ModelInstance* mi = mo->instances[inst_id];
     const Vec3d& instance_offset = mi->get_offset();
-    const double sla_shift       = double(m_c->selection_info()->get_sla_shift());
+    const double sla_shift       = double(sel->get_sla_shift());
 
      for (size_t i = 0; i < connectors.size(); ++i) {
         const CutConnector& connector = connectors[i];
@@ -8165,9 +8186,14 @@ void GLGizmoCut3D::render_connectors()
         m_connector_mode == CutConnectorMode::Auto || !m_c->selection_info())
         return;
 
+    // Same guard as check_and_update_connectors_state(): the pool can be showing a
+    // selection that no longer exists (see the note there), and a frame drawn in
+    // that window must render nothing rather than dereference null.
     const ModelObject* mo = m_c->selection_info()->model_object();
+    if (mo == nullptr)
+        return;
     auto inst_id = m_c->selection_info()->get_active_instance();
-    if (inst_id < 0)
+    if (inst_id < 0 || size_t(inst_id) >= mo->instances.size())
         return;
     const CutConnectors& connectors = mo->cut_connectors;
     if (connectors.size() != m_selected.size()) {
@@ -8772,6 +8798,17 @@ void GLGizmoCut3D::begin_copy()
         return;
     m_copy_pending = false;
 
+    // The pool first, for the same reason begin_reedit() refreshes it: this runs
+    // from on_set_state(On), before open_gizmo()'s update_data(), so
+    // m_c->selection_info() still describes whatever was selected when the gizmo
+    // was last open rather than the target ObjectList::copy_cut_to() just selected.
+    // apply_recipe_to_gizmo() reads exactly that to place the plane and to write
+    // the connectors, and its set_center() reaches
+    // check_and_update_connectors_state(), which is where a null model_object()
+    // crashed - the "Copy cut to... (this object)" report, same fault as
+    // "Edit cut...".
+    refresh_common_data();
+
     // The ordinary session, with every control pre-populated. That is the whole
     // of it: apply_recipe_to_gizmo() reads the CURRENT selection's instance offset
     // when it puts the plane back, so pointing it at the target object is all the
@@ -8796,6 +8833,21 @@ void GLGizmoCut3D::begin_copy()
     update_raycasters_for_picking();
     m_parent.set_as_dirty();
 }
+// Re-read the common gizmo data pool against the CURRENT canvas selection.
+//
+// See the declaration for why this is needed at all: begin_reedit() and
+// begin_copy() run from on_set_state(On), which activate_gizmo() calls before
+// open_gizmo() reaches its own update_data(), so a selection they set is not yet
+// visible through m_c->selection_info(). Updating with the gizmo's own
+// requirements is exactly what GLGizmosManager::update_data() would do for this
+// gizmo; doing it early is idempotent, and the manager's later call is then a
+// harmless second update.
+void GLGizmoCut3D::refresh_common_data()
+{
+    if (m_c)
+        m_c->update(get_requirements());
+}
+
 // Become a re-edit session.
 //
 // The halves are REMOVED from the model and a stand-in carrying the pre-cut mesh
@@ -8922,6 +8974,25 @@ void GLGizmoCut3D::begin_reedit()
             selection.add_object(static_cast<unsigned int>(i), true);
             break;
         }
+
+    // THE COMMON DATA POOL HAS TO BE TOLD. Setting the Selection above is not
+    // enough: SelectionInfo (and with it everything that reads
+    // m_c->selection_info()->model_object()) only re-reads the canvas selection
+    // when the pool is updated, and the pool's update for THIS gizmo opening runs
+    // in GLGizmosManager::open_gizmo() AFTER activate_gizmo() - which is what
+    // called set_state(On), and so this function - has returned.
+    //
+    // So during begin_reedit() the pool still describes the selection as it was
+    // before the halves were removed. The halves are gone by now, so
+    // SelectionInfo::on_update() had left m_model_object null, and the first thing
+    // apply_recipe_to_gizmo() does that touches the object - set_center(), which
+    // calls check_and_update_connectors_state() - dereferenced it and took the
+    // slicer down (0xC0000005 at null + 0x18).
+    //
+    // Refreshing here, with the gizmo's own requirements, is what makes
+    // selection_info()->model_object() the stand-in before any of that runs. The
+    // later update_data() in open_gizmo() is then a harmless second update.
+    refresh_common_data();
 
     // Now that the selection is the pre-cut mesh, the gizmo's own bookkeeping can
     // be rebuilt against it and the recipe's controls restored on top.
@@ -9361,10 +9432,20 @@ bool GLGizmoCut3D::mouse_on_cut_surface(const Vec2d& mouse_position) const
 // Return false if no intersection was found, true otherwise.
 bool GLGizmoCut3D::unproject_on_cut_plane(const Vec2d& mouse_position, Vec3d& pos, Vec3d& pos_world, bool respect_contours/* = true*/)
 {
-    const float sla_shift = m_c->selection_info()->get_sla_shift();
+    // No selection resolved yet means no surface to unproject onto - "no hit"
+    // rather than a null dereference. Same window as
+    // check_and_update_connectors_state(); see the note there.
+    const CommonGizmosDataObjects::SelectionInfo* sel = m_c ? m_c->selection_info() : nullptr;
+    const ModelObject*                            mo  = sel ? sel->model_object() : nullptr;
+    if (mo == nullptr)
+        return false;
+    const int active_inst = sel->get_active_instance();
+    if (active_inst < 0 || size_t(active_inst) >= mo->instances.size())
+        return false;
 
-    const ModelObject* mo = m_c->selection_info()->model_object();
-    const ModelInstance* mi = mo->instances[m_c->selection_info()->get_active_instance()];
+    const float sla_shift = sel->get_sla_shift();
+
+    const ModelInstance* mi = mo->instances[active_inst];
     const Camera& camera = wxGetApp().plater()->get_camera();
 
     // Calculate intersection with the clipping plane.
