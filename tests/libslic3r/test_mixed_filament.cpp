@@ -5640,10 +5640,9 @@ TEST_CASE("set_num_filaments remaps on the preset count when the palette grew fi
     REQUIRE(bundle.filament_presets.size() == old_presets.size());
     REQUIRE(bundle.num_physical_filaments() > bundle.filament_presets.size());
 
-    // A custom mixed row naming slot 4 is legitimate here: the palette really
-    // does have 4 slots. It must survive the grow rather than being clamped as
-    // an orphan tail, because the clamp limit on grow is the OLD physical count
-    // and the row is within it.
+    // Two custom mixed rows. 1,2 is within the old preset count; 3,4 names the
+    // slot the batch match has just added to the palette but which the filament
+    // presets do not cover yet.
     auto *defs = bundle.project_config.option<ConfigOptionString>("mixed_filament_definitions", true);
     defs->value = "1,2,1,1,50;3,4,1,1,50";
 
@@ -5663,9 +5662,19 @@ TEST_CASE("set_num_filaments remaps on the preset count when the palette grew fi
         CHECK(colors_after[i] == grown_colors[i]);
     }
 
-    // Both mixed rows are within the 4 real slots, so neither is dropped.
+    // The row within the old preset count survives.
     CHECK(has_custom_mixed_pair(bundle.mixed_filaments, 1, 2));
-    CHECK(has_custom_mixed_pair(bundle.mixed_filaments, 3, 4));
+
+    // 3,4 does NOT survive, and that is the point of driving remap off the preset
+    // count. update_multi_material_filament_presets clamps mixed defs on grow to
+    // old_num_filaments - which is remap_old, i.e. 3 here, not the already-grown
+    // palette count of 4 - so a row naming slot 4 is still a not-yet-valid tail at
+    // this moment, and is dropped rather than admitted as a custom row on the
+    // strength of a palette entry whose filament preset does not exist yet. Were
+    // remap driven off old_slot_count (4), this row would be accepted here and a
+    // stale tail could come back as a phantom mixed row - exactly the Orca #15728
+    // failure this PR exists to prevent.
+    CHECK_FALSE(has_custom_mixed_pair(bundle.mixed_filaments, 3, 4));
 }
 
 TEST_CASE("set_num_filaments keeps the slot-count remap when presets and palette agree",
