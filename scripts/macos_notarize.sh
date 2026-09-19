@@ -82,8 +82,13 @@ deadline=$(( $(date +%s) + ${NOTARY_TIMEOUT:-120} * 60 ))
 status=$(json_field status)
 while [ "$status" = "In Progress" ] || [ -z "$status" ]; do
     if [ "$(date +%s)" -ge "$deadline" ]; then
-        echo "::error::Notarization of $(basename "$SUBMIT") still '$status' after ${NOTARY_TIMEOUT:-120} min (submission $id) - re-run later; Apple keeps the submission" >&2
-        exit 1
+        # Exit 2 = PENDING, not rejected. Apple keeps processing; once the submission is
+        # Accepted the ticket is served online and the signed file passes Gatekeeper on any
+        # machine with internet even though it was never stapled. The caller may therefore
+        # still ship the signed file and check later (workflow "Notary status").
+        echo "::warning::Notarization of $(basename "$SUBMIT") still '$status' after ${NOTARY_TIMEOUT:-120} min (submission $id). Not stapled. Check later with the 'Notary status' workflow; the ticket is served online once Apple accepts." >&2
+        echo "$id" > "$work/notary_pending_id"
+        exit 2
     fi
     sleep 60
     if xcrun notarytool info "$id" "${auth[@]}" --output-format json > "$result.poll" 2> "$result.err"; then
