@@ -54,7 +54,10 @@ fi
 result="$work/notary_$(basename "$SUBMIT").json"
 echo "submitting $(basename "$SUBMIT") ($(du -h "$SUBMIT" | cut -f1)) ..."
 # Do not trust the exit code alone: read the verdict back from the JSON.
-xcrun notarytool submit "$SUBMIT" "${auth[@]}" --wait --timeout 45m --output-format json > "$result" || true
+# Apple's queue is unpredictable: a 241 MB universal app sat unanswered for 45 minutes on
+# 2026-09-19 (submission e48d9c7c). Wait long by default; the job has a 6 h ceiling and the
+# build before this step takes ~3.6 h, so 2 h is the most that fits. NOTARY_TIMEOUT overrides.
+xcrun notarytool submit "$SUBMIT" "${auth[@]}" --wait --timeout "${NOTARY_TIMEOUT:-120m}" --output-format json > "$result" || true
 cat "$result"
 echo
 json_field() {

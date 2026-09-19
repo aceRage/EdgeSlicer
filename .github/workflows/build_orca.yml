@@ -240,31 +240,6 @@ jobs:
 
       # The app is notarized and stapled on its own before it goes into the dmg, so the copy a user
       # drags to /Applications carries its ticket too and opens offline; the dmg gets its own below.
-      - name: Notarize app bundles
-        if: inputs.os == 'macos-14' && steps.signing.outputs.sign == 'true' && steps.signing.outputs.notarize != 'none'
-        working-directory: ${{ github.workspace }}
-        shell: bash
-        env:
-          APP_STORE_CONNECT_KEY_P8: ${{ secrets.APP_STORE_CONNECT_KEY_P8 }}
-          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
-          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
-          APPLE_DEV_ACCOUNT: ${{ secrets.APPLE_DEV_ACCOUNT }}
-          TEAM_ID: ${{ secrets.TEAM_ID }}
-          APP_PWD: ${{ secrets.APP_PWD }}
-        run: |
-          APP_DIR="${{ github.workspace }}/build/universal/Snapmaker_Orca"
-          ditto -c -k --keepParent "$APP_DIR/EdgeSlicer.app" "$RUNNER_TEMP/EdgeSlicer.zip"
-          scripts/macos_notarize.sh "$RUNNER_TEMP/EdgeSlicer.zip" "$APP_DIR/EdgeSlicer.app"
-          rm -f "$RUNNER_TEMP/EdgeSlicer.zip"
-          if [ -f "$APP_DIR/Snapmaker_Orca_profile_validator.app/Contents/MacOS/Snapmaker_Orca_profile_validator" ]; then
-            ditto -c -k --keepParent "$APP_DIR/Snapmaker_Orca_profile_validator.app" "$RUNNER_TEMP/profile_validator.zip"
-            scripts/macos_notarize.sh "$RUNNER_TEMP/profile_validator.zip" "$APP_DIR/Snapmaker_Orca_profile_validator.app"
-            rm -f "$RUNNER_TEMP/profile_validator.zip"
-          fi
-          spctl -a -vv -t exec "$APP_DIR/EdgeSlicer.app" || echo "::warning::spctl did not accept EdgeSlicer.app on the runner (informational; the stapled dmg is verified below)"
-
-      # One dmg step for both cases: it packs whatever the steps above left in the build tree -
-      # the signed and stapled app when the secrets exist, the plain build otherwise.
       - name: Create DMG
         if: inputs.os == 'macos-14'
         working-directory: ${{ github.workspace }}
@@ -305,7 +280,12 @@ jobs:
             [ -f "$dmg" ] || continue
             codesign --force --timestamp --sign "$SIGN_IDENTITY" "$dmg"
             codesign --verify --verbose=2 "$dmg"
-            if [ "$NOTARIZE" != "none" ]; then
+            # ONE notarization submission per run: the dmg. Its ticket covers the app inside
+            # (Apple records every nested code hash), and each submission waits on Apple's
+            # queue in turn - notarizing the app zip first, then the dmg, then the validator
+            # dmg took the run past its time budget on 2026-09-19. The profile validator dmg
+            # is a developer tool and is signed but not notarized.
+            if [ "$NOTARIZE" != "none" ] && [[ "$(basename "$dmg")" == EdgeSlicer_Mac_universal_* ]]; then
               scripts/macos_notarize.sh "$dmg"
               spctl -a -vv -t open --context context:primary-signature "$dmg" || echo "::warning::spctl did not accept $(basename "$dmg") on the runner (informational; stapler validate above passed)"
             fi
