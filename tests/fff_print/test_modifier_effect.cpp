@@ -191,6 +191,32 @@ TEST_CASE("modifier listed before its part still attaches to it", "[ModifierEffe
     CHECK(distinct_layer_regions(*object) > 1);
 }
 
+// The owner's question: does this affect TEXT embossing (GLGizmoEmboss -> Modifier) as well as
+// SVG? It does, and for the same reason. Both gizmos funnel into the one create_volume() in
+// EmbossJob.cpp, which sets only `extruder` (0 = "default", which apply_to_print_region_config
+// explicitly ignores), and DataBase::write() then sets only name / emboss_shape / a transform -
+// no config on either path. So a text modifier reaches the slicer with exactly the config modelled
+// here and by the first case above, and a modifier volume is just a modifier volume to the slicer:
+// nothing downstream distinguishes text from SVG. This case states that rather than leaving it
+// implied, so it fails if either creation path ever starts seeding config of its own.
+TEST_CASE("text-emboss modifier with the creation-path config warns like an SVG one", "[ModifierEffect]")
+{
+    Print print;
+    Model model;
+    ModifierSpec spec;
+    spec.overrides = [](ModelVolume &v) {
+        // Exactly what the text path leaves behind: the name it was given, and nothing else. The
+        // "extruder" key is already set by the shared helper, as create_volume() does.
+        v.name = "text_modifier";
+    };
+    const PrintObject *object = slice_with_modifier(print, model, spec);
+
+    CHECK(has_slice_warning(*object, PrintStateBase::SlicingModifierNoOverrides));
+    CHECK_THAT(slice_warning_text(*object, PrintStateBase::SlicingModifierNoOverrides),
+               Catch::Matchers::Contains("text_modifier"));
+    CHECK(distinct_layer_regions(*object) == 1);
+}
+
 TEST_CASE("modifier outside the part's bounding box warns that it overlaps nothing", "[ModifierEffect]")
 {
     Print print;

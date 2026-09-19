@@ -5664,6 +5664,12 @@ void ObjectList::change_part_type()
     wxDataViewItemArray sel = reorder_volumes_and_get_selection(obj_idx, [volume](const ModelVolume* vol) { return vol == volume; });
     if (!sel.IsEmpty())
         select_item(sel.front());
+
+    // A volume converted to a Modifier carries no overrides of its own, so it is just as able to
+    // have no effect on the slice as a newly created one - the slicer warns about both. Point the
+    // user at the settings, the way "Add modifier > Box" and the Emboss/SVG creation paths do.
+    if (new_type == ModelVolumeType::PARAMETER_MODIFIER)
+        switch_to_object_process();
 }
 
 void ObjectList::last_volume_is_deleted(const int obj_idx)
