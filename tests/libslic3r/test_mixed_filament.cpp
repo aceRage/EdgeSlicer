@@ -5448,3 +5448,153 @@ TEST_CASE("Dual-color primary drops invalid tokens and falls back on empty", "[M
     CHECK(FilamentColor::FromColors(parts, FilamentColorMode::Segment).PrimaryColor() == "#AABBCC");
     CHECK(FilamentColor::FromColors({}, FilamentColorMode::Segment).PrimaryColor("#26A69A") == "#26A69A");
 }
+
+// ============================================================================
+// Orca #15728 adapt — incomplete mixed_filament_definitions vs physical slots.
+// Edge stores mixed rows in MixedFilamentManager, not filament_is_mixed arrays.
+// Slot count is filament_colour; orphan tails that name IDs beyond that count
+// must be dropped on load/grow so add-filament cannot resurrect them.
+// ============================================================================
+
+static bool has_custom_mixed_pair(const MixedFilamentManager &mgr, unsigned int a, unsigned int b)
+{
+    for (const MixedFilament &mf : mgr.mixed_filaments()) {
+        if (mf.custom && !mf.deleted && mf.component_a == a && mf.component_b == b)
+            return true;
+    }
+    return false;
+}
+
+TEST_CASE("clamp_serialized_entries_to_physical_count drops incomplete and oversized mixed tails",
+          "[MixedFilament][IncompleteMetadata]")
+{
+    const std::string valid_12 = "1,2,1,1,50";
+    const std::string valid_13 = "1,3,1,1,50";
+    const std::string valid_23 = "2,3,1,1,50";
+    const std::string stale_14 = "1,4,1,1,25";
+    const std::string oversized = valid_12 + ";" + valid_13 + ";" + valid_23 + ";" + stale_14;
+
+    const size_t physical = GENERATE(0u, 1u, 3u, 4u);
+    const std::string clamped =
+        MixedFilamentManager::clamp_serialized_entries_to_physical_count(oversized, physical);
+
+    if (physical < 2) {
+        CHECK(clamped.empty());
+    } else if (physical == 3) {
+        CHECK(clamped.find(stale_14) == std::string::npos);
+        CHECK(clamped.find(valid_12) != std::string::npos);
+        CHECK(clamped.find(valid_13) != std::string::npos);
+        CHECK(clamped.find(valid_23) != std::string::npos);
+    } else {
+        CHECK(clamped.find(stale_14) != std::string::npos);
+        CHECK(clamped.find(valid_12) != std::string::npos);
+    }
+
+    CHECK(MixedFilamentManager::clamp_serialized_entries_to_physical_count(std::string(), physical).empty());
+    CHECK(MixedFilamentManager::clamp_serialized_entries_to_physical_count("stale", 3).empty());
+}
+
+TEST_CASE("Adding a filament preserves slots with incomplete mixed metadata", "[MixedFilament][PresetBundle][IncompleteMetadata]")
+{
+    MixedAutoGenerateGuard guard(true);
+    const std::vector<std::string> colors = {"#000000", "#FFFFFF", "#5E5C64"};
+    const std::vector<std::string> presets = {"Test PETG", "Test PLA", "Test TPU"};
+
+    PresetBundle bundle;
+    bundle.filament_presets = presets;
+    bundle.project_config.option<ConfigOptionStrings>("filament_colour")->values = colors;
+
+    const size_t metadata_size = GENERATE(0u, 1u, 4u);
+    auto *defs = bundle.project_config.option<ConfigOptionString>("mixed_filament_definitions", true);
+    if (metadata_size == 0)
+        defs->value.clear();
+    else if (metadata_size == 1)
+        defs->value = "1,2,1,1,50";
+    else
+        defs->value = "1,2,1,1,50;1,3,1,1,50;2,3,1,1,50;1,4,1,1,25";
+
+    REQUIRE(bundle.num_physical_filaments() == colors.size());
+    bundle.set_num_filaments(unsigned(bundle.num_physical_filaments() + 1), "#FF0000");
+
+    REQUIRE(bundle.filament_presets.size() == presets.size() + 1);
+    const auto &actual_colors = bundle.project_config.option<ConfigOptionStrings>("filament_colour")->values;
+    REQUIRE(actual_colors.size() == colors.size() + 1);
+    for (size_t i = 0; i < presets.size(); ++i) {
+        CHECK(bundle.filament_presets[i] == presets[i]);
+        CHECK(actual_colors[i] == colors[i]);
+    }
+    CHECK(actual_colors.back() == "#FF0000");
+    CHECK(bundle.num_physical_filaments() == colors.size() + 1);
+    CHECK_FALSE(has_custom_mixed_pair(bundle.mixed_filaments, 1, 4));
+    CHECK_FALSE(has_custom_mixed_pair(bundle.mixed_filaments, 4, 1));
+    if (metadata_size != 0)
+        CHECK(has_custom_mixed_pair(bundle.mixed_filaments, 1, 2));
+}
+
+TEST_CASE("Loading a project preserves existing mixed filament definitions", "[MixedFilament][PresetBundle][IncompleteMetadata]")
+{
+    MixedAutoGenerateGuard guard(true);
+    const std::vector<std::string> colors = {"#000000", "#FFFFFF", "#808080"};
+    const std::string custom_row = single_custom_mixed_definition(1, 2, 4242);
+
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.option<ConfigOptionStrings>("filament_colour")->values = colors;
+    config.option<ConfigOptionFloats>("filament_diameter")->values = {1.75, 1.75, 1.75};
+    config.option<ConfigOptionStrings>("filament_settings_id", true)->values = {"Test PETG", "Test PLA", "Test TPU"};
+    config.option<ConfigOptionString>("mixed_filament_definitions", true)->value = custom_row;
+    config.option<ConfigOptionBool>("single_extruder_multi_material", true)->value = true;
+    Preset::normalize(config);
+
+    PresetBundle bundle;
+    bundle.load_config_model("test.3mf", std::move(config));
+
+    REQUIRE(bundle.num_physical_filaments() == colors.size());
+    const auto *defs = bundle.project_config.option<ConfigOptionString>("mixed_filament_definitions");
+    REQUIRE(defs != nullptr);
+    CHECK(defs->value.find("1,2,") != std::string::npos);
+    CHECK(defs->value.find("u4242") != std::string::npos);
+}
+
+TEST_CASE("Loading incomplete mixed metadata normalizes slots before adding a filament",
+          "[MixedFilament][PresetBundle][IncompleteMetadata]")
+{
+    MixedAutoGenerateGuard guard(true);
+    const std::vector<std::string> colors = {"#000000", "#FFFFFF", "#5E5C64"};
+    const std::vector<std::string> presets = {"Test PETG", "Test PLA", "Test TPU"};
+    const size_t metadata_size = GENERATE(0u, 1u, 4u);
+
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.option<ConfigOptionStrings>("filament_colour")->values = colors;
+    config.option<ConfigOptionFloats>("filament_diameter")->values = {1.75, 1.75, 1.75};
+    config.option<ConfigOptionStrings>("filament_settings_id", true)->values = presets;
+    config.option<ConfigOptionBool>("single_extruder_multi_material", true)->value = true;
+    auto *defs = config.option<ConfigOptionString>("mixed_filament_definitions", true);
+    if (metadata_size == 0)
+        defs->value.clear();
+    else if (metadata_size == 1)
+        defs->value = "1,2,1,1,50";
+    else
+        defs->value = "1,2,1,1,50;1,3,1,1,50;2,3,1,1,50;1,4,1,1,25";
+    Preset::normalize(config);
+
+    PresetBundle bundle;
+    bundle.load_config_model("test.3mf", std::move(config));
+
+    REQUIRE(bundle.num_physical_filaments() == colors.size());
+    const auto *loaded_defs = bundle.project_config.option<ConfigOptionString>("mixed_filament_definitions");
+    REQUIRE(loaded_defs != nullptr);
+    CHECK(loaded_defs->value.find("1,4") == std::string::npos);
+
+    const auto loaded_presets = bundle.filament_presets;
+    REQUIRE(loaded_presets.size() == colors.size());
+    bundle.set_num_filaments(unsigned(bundle.num_physical_filaments() + 1), "#FF0000");
+
+    REQUIRE(bundle.filament_presets.size() == loaded_presets.size() + 1);
+    const auto &actual_colors = bundle.project_config.option<ConfigOptionStrings>("filament_colour")->values;
+    REQUIRE(actual_colors.size() == colors.size() + 1);
+    for (size_t i = 0; i < colors.size(); ++i)
+        CHECK(actual_colors[i] == colors[i]);
+    CHECK(actual_colors.back() == "#FF0000");
+    CHECK(bundle.num_physical_filaments() == colors.size() + 1);
+    CHECK_FALSE(has_custom_mixed_pair(bundle.mixed_filaments, 1, 4));
+}

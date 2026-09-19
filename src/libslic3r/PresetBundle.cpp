@@ -166,6 +166,26 @@ void EraseFilamentColorFields(DynamicPrintConfig &config, size_t index)
     EnsureFilamentColorFieldsAligned(config);
 }
 
+// Clamp mixed_filament_definitions in project (and optional print) config to the
+// current physical slot count. Orphan tails that reference IDs beyond that count
+// are discarded so a later grow cannot resurrect them as phantom mixed rows.
+void normalize_mixed_filament_definitions(DynamicPrintConfig &project_config,
+                                          DynamicPrintConfig *print_cfg,
+                                          size_t              physical_count)
+{
+    auto clamp_opt = [physical_count](DynamicPrintConfig &cfg) {
+        if (ConfigOptionString *opt = cfg.option<ConfigOptionString>("mixed_filament_definitions")) {
+            const std::string clamped =
+                MixedFilamentManager::clamp_serialized_entries_to_physical_count(opt->value, physical_count);
+            if (clamped != opt->value)
+                opt->value = clamped;
+        }
+    };
+    clamp_opt(project_config);
+    if (print_cfg != nullptr)
+        clamp_opt(*print_cfg);
+}
+
 } // namespace
 
 static std::vector<std::string> s_project_options {
@@ -2300,8 +2320,18 @@ void PresetBundle::update_num_filaments(unsigned int to_del_filament_id)
     update_multi_material_filament_presets(to_del_filament_id, old_filament_count);
 }
 
+size_t PresetBundle::num_physical_filaments() const
+{
+    if (const auto *colors = project_config.option<ConfigOptionStrings>("filament_colour")) {
+        if (!colors->values.empty())
+            return colors->values.size();
+    }
+    return filament_presets.size();
+}
+
 void PresetBundle::set_num_filaments(unsigned int n, std::vector<std::string> new_colors) {
-    int old_filament_count = this->filament_presets.size();
+    const unsigned old_filament_count = unsigned(this->filament_presets.size());
+    const size_t   old_slot_count     = this->num_physical_filaments();
     if (n > old_filament_count && old_filament_count != 0)
         filament_presets.resize(n, filament_presets.back());
     else {
@@ -2312,21 +2342,27 @@ void PresetBundle::set_num_filaments(unsigned int n, std::vector<std::string> ne
     ams_multi_color_filment.resize(n);
     EnsureFilamentColorFieldsAligned(project_config);
     // BBS set new filament color to new_color
-    if (old_filament_count < n) {
+    if (old_slot_count < n) {
         if (!new_colors.empty()) {
             ConfigOptionStrings *multi_colors = project_config.option<ConfigOptionStrings>("filament_multi_colors", true);
-            for (int i = old_filament_count; i < n; i++) {
-                filament_color->values[i] = new_colors[i - old_filament_count];
-                multi_colors->values[i] = new_colors[i - old_filament_count];
+            for (size_t i = old_slot_count; i < n; i++) {
+                filament_color->values[i] = new_colors[i - old_slot_count];
+                multi_colors->values[i] = new_colors[i - old_slot_count];
             }
             EnsureFilamentColorFieldsAligned(project_config);
         }
     }
-    update_multi_material_filament_presets(size_t(-1), size_t(old_filament_count));
+    // Palette may already have been written (batch-match / #866); presets still hold the old
+    // physical count and must drive remap. Otherwise colours are the configured slot count.
+    const size_t remap_old = (old_slot_count > old_filament_count && old_filament_count != 0)
+        ? size_t(old_filament_count)
+        : old_slot_count;
+    update_multi_material_filament_presets(size_t(-1), remap_old);
 }
 void PresetBundle::set_num_filaments(unsigned int n, std::string new_color)
 {
-    int old_filament_count = this->filament_presets.size();
+    const unsigned old_filament_count = unsigned(this->filament_presets.size());
+    const size_t   old_slot_count     = this->num_physical_filaments();
     if (n > old_filament_count && old_filament_count != 0)
         filament_presets.resize(n, filament_presets.back());
     else {
@@ -2339,10 +2375,10 @@ void PresetBundle::set_num_filaments(unsigned int n, std::string new_color)
     EnsureFilamentColorFieldsAligned(project_config);
 
     //BBS set new filament color to new_color
-    if (old_filament_count < n) {
+    if (old_slot_count < n) {
         if (!new_color.empty()) {
             ConfigOptionStrings *multi_colors = project_config.option<ConfigOptionStrings>("filament_multi_colors", true);
-            for (int i = old_filament_count; i < n; i++) {
+            for (size_t i = old_slot_count; i < n; i++) {
                 filament_color->values[i] = new_color;
                 multi_colors->values[i] = new_color;
             }
@@ -2350,7 +2386,10 @@ void PresetBundle::set_num_filaments(unsigned int n, std::string new_color)
         }
     }
 
-    update_multi_material_filament_presets(size_t(-1), size_t(old_filament_count));
+    const size_t remap_old = (old_slot_count > old_filament_count && old_filament_count != 0)
+        ? size_t(old_filament_count)
+        : old_slot_count;
+    update_multi_material_filament_presets(size_t(-1), remap_old);
 }
 
 unsigned int PresetBundle::sync_ams_list(unsigned int &unknowns)
@@ -3147,6 +3186,12 @@ void PresetBundle::load_config_file_config(const std::string &name_or_path, bool
         // 4) Load the project config values (the per extruder wipe matrix etc).
         this->project_config.apply_only(config, s_project_options);
         EnsureFilamentColorFieldsAligned(this->project_config);
+        // Older projects can carry mixed_filament_definitions that no longer match the
+        // physical colour slots (short, missing, or a stale tail from a larger slot count).
+        // Clamp now so a later add-filament grow cannot resurrect orphan mixed rows.
+        normalize_mixed_filament_definitions(this->project_config,
+                                             &this->prints.get_edited_preset().config,
+                                             num_filaments);
 
         break;
     }
@@ -4249,6 +4294,16 @@ void PresetBundle::update_multi_material_filament_presets(size_t to_delete_filam
             gradient_mode = std::clamp(gradient_mode, 0, 1);
             lower_bound = std::max(0.01f, lower_bound);
             upper_bound = std::max(lower_bound, upper_bound);
+
+            // Grow must clamp mixed defs to the *old* physical count first: a stale tail
+            // that named the not-yet-added slot would otherwise be accepted as a custom row.
+            // Shrink/same clamp to the current count so orphan IDs are dropped.
+            if (!deleting_filament) {
+                const size_t mixed_defs_limit = (num_filaments > old_num_filaments)
+                    ? old_num_filaments
+                    : num_filaments;
+                normalize_mixed_filament_definitions(this->project_config, &print_cfg, mixed_defs_limit);
+            }
 
             this->mixed_filaments.clear_custom_entries();
             this->mixed_filaments.load_custom_entries(
