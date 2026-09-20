@@ -94,9 +94,30 @@ Tools and their render paths:
 Any tool in the list that turns out to render no input window is skipped.
 Flatten is not in scope unless it has a window (verify during implementation).
 
+## Panel opacity (approved option A: one global setting)
+
+Problem: docked panels (or any panel left open over the plate) can hide the model
+behind them. A global opacity control lets users keep panels in place while the
+3D view stays visible.
+
+- **Control**: a slider in Preferences → GUI, "Gizmo panel opacity",
+  range clamped to roughly 30–100% (floor keeps title/button text readable over a
+  busy plate), default 100% (current appearance).
+- **Storage**: AppConfig key (e.g. `gizmo_panel_opacity`), read once and applied
+  wherever gizmo panel backgrounds are styled.
+- **Application point**: the shared toolbar-style hook used by all dockable
+  panels (`ImGuiWrapper::push_toolbar_style` / the dock window setup in
+  `GLGizmoBase`), so the setting covers every opted-in panel uniformly —
+  the four existing panels included — without per-panel code.
+  Implementation detail for the plan: prefer `ImGui::SetNextWindowBgAlpha`-style
+  per-window alpha over mutating the global style table, so non-panel ImGui
+  windows are unaffected.
+- Applies docked *and* undocked; the titlebar chrome follows the same alpha.
+
 ## Non-goals
 
-- No change to Cut/Assembly/Sculpt/Edit panels.
+- No per-panel opacity override in this iteration (possible follow-up).
+- No change to Cut/Assembly/Sculpt/Edit panel behavior beyond the shared opacity.
 - No change to undocked panel behavior (position, dragging, styling).
 - No new persistence keys beyond the existing `gizmo_dock_<key>` scheme.
 - No translation-string changes (title/chevron/pin chrome is already translated
@@ -115,6 +136,9 @@ There is no automated harness for ImGui gizmo panels; verification is:
    - undock → panel returns under its toolbar icon / previous floating behavior;
    - restart app → pinned tools stay pinned, unpinned stay unpinned;
    - paint-tool palettes remain draggable when unpinned;
-   - Cut/Assembly/Sculpt/Edit unchanged.
+   - Cut/Assembly/Sculpt/Edit unchanged (except following the global opacity).
+4. Opacity smoke: set Preferences slider to ~50% → all gizmo panels (docked and
+   floating, old and newly converted) render translucent with readable text;
+   restart app → value persists; 100% restores current appearance.
 3. Code-level checklist: every converted panel keeps its extra-frame and
    active-id bookkeeping intact on the collapsed early-return path.
