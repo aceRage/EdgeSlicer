@@ -5682,6 +5682,29 @@ void PrintConfigDef::init_fff_params()
     def->max = 18;
     def->set_default_value(new ConfigOptionFloats {18});
 
+    // BBS: per-filament long retraction performed by the firmware when the active extruder changes
+    // on a dual-nozzle machine (H2D and friends). Feeds the long_retraction_when_ec /
+    // retraction_distance_when_ec placeholders consumed by change_filament_gcode's M620.11 K/R line.
+    // Nullable so that a filament preset which does not mention the key stays nil (= feature off)
+    // instead of silently inheriting another filament's value.
+    def = this->add("long_retractions_when_ec", coBools);
+    def->label = L("Long retraction when extruder change");
+    def->tooltip = L("Experimental feature: perform a long retraction when the printer switches to the "
+                     "other extruder, so the idle filament is parked instead of being fully unloaded.");
+    def->mode = comAdvanced;
+    def->nullable = true;
+    def->set_default_value(new ConfigOptionBoolsNullable {false});
+
+    def = this->add("retraction_distances_when_ec", coFloats);
+    def->label = L("Retraction distance when extruder change");
+    def->tooltip = L("Experimental feature: retraction length used when the printer switches to the other extruder.");
+    def->mode = comAdvanced;
+    def->nullable = true;
+    def->min = 0;
+    def->max = 10;
+    def->sidetext = "mm";	// milimeters, don't need translation
+    def->set_default_value(new ConfigOptionFloatsNullable {10});
+
     def = this->add("retract_length_toolchange", coFloats);
     def->label = L("Retraction Length (Toolchange)");
     //def->full_label = L("Retraction Length (Toolchange)");
@@ -7815,7 +7838,10 @@ void PrintConfigDef::init_filament_option_keys()
         "retract_before_wipe", "retract_restart_extra", "retraction_minimum_travel", "wipe", "wipe_distance",
         "retract_when_changing_layer", "retract_length_toolchange", "retract_restart_extra_toolchange", "filament_colour",
         "filament_multi_colors", "filament_colour_mode",
-        "default_filament_profile","retraction_distances_when_cut","long_retractions_when_cut"/*,"filament_seam_gap"*/
+        "default_filament_profile","retraction_distances_when_cut","long_retractions_when_cut",
+        // BBS: per-filament extruder-change long retraction. Listed here so set_num_filaments()
+        // resizes the vectors to the filament count (defaults fill any filament that has no value).
+        "long_retractions_when_ec","retraction_distances_when_ec"/*,"filament_seam_gap"*/
     };
 
     m_filament_retract_keys = {
