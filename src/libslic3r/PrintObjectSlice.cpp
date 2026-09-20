@@ -304,6 +304,9 @@ static std::vector<std::vector<ExPolygons>> slices_to_regions(
 
     std::vector<std::vector<ExPolygons>> slices_by_region(print_object_regions.all_regions.size(), std::vector<ExPolygons>(zs.size(), ExPolygons()));
 
+    // Decides which of two overlapping normal parts carves the other - see the carve loop below.
+    const bool order_independent_overlap_carving = print_config.enable_order_independent_overlap_carving.value;
+
     // First shuffle slices into regions if there is no overlap with another region possible, collect zs of the complex cases.
     std::vector<std::pair<size_t, float>> zs_complex;
     {
@@ -373,7 +376,7 @@ static std::vector<std::vector<ExPolygons>> slices_to_regions(
         }
         tbb::parallel_for(
             tbb::blocked_range<size_t>(0, zs_complex.size()),
-            [&slices_by_region, &print_object_regions, &zs_complex, &layer_ranges_regions_to_slices, clip_multipart_objects, &throw_on_cancel_callback]
+            [&slices_by_region, &print_object_regions, &zs_complex, &layer_ranges_regions_to_slices, clip_multipart_objects, order_independent_overlap_carving, &throw_on_cancel_callback]
                 (const tbb::blocked_range<size_t> &range) {
                 float z              = zs_complex[range.begin()].second;
                 auto  it_layer_range = layer_range_first(print_object_regions.layer_ranges, z);
@@ -455,13 +458,37 @@ static std::vector<std::vector<ExPolygons>> slices_to_regions(
                                     temp_slices[idx_region + 1].expolygons = std::move(source);
                             } else if ((region.model_volume->is_model_part() && clip_multipart_objects) || region.model_volume->is_negative_volume()) {
                                 // Clip every non-zero region preceding it.
+                                // With order_independent_overlap_carving, an overlapping pair of normal
+                                // parts is resolved by bounding-box volume instead: the smaller part
+                                // always carves the larger one, wherever the two sit in
+                                // ModelObject::volumes. Without it, the later part carves the earlier
+                                // one unconditionally, so a contained body (embossed text in a plate,
+                                // say) listed before its container is erased by the container's later
+                                // carve pass and silently drops out of the slice - the classic
+                                // multi-body STEP import failure, since OCCT's traversal order is not
+                                // under the user's control. A negative volume always carves, and an
+                                // equal-bbox tie keeps the old later-wins path. With the option off
+                                // this is exactly the previous unconditional diff_ex.
+                                auto bbox_volume = [](const PrintObjectRegions::BoundingBox &b) {
+                                    const auto sz = b.sizes();
+                                    return double(sz.x()) * double(sz.y()) * double(sz.z());
+                                };
+                                const bool   current_is_negative = region.model_volume->is_negative_volume();
+                                const double current_vol         = (! order_independent_overlap_carving || current_is_negative) ?
+                                                                       0. : bbox_volume(*region.bbox);
                                 for (int idx_region2 = 0; idx_region2 < idx_region; ++ idx_region2)
                                     if (! temp_slices[idx_region2].expolygons.empty()) {
                                         // Skip trim_overlap for now, because it slow down the performace so much for some special cases
 #if 1
                                         if (const PrintObjectRegions::VolumeRegion& region2 = layer_range.volume_regions[idx_region2];
-                                            !region2.model_volume->is_negative_volume() && overlap_in_xy(*region.bbox, *region2.bbox))
-                                            temp_slices[idx_region2].expolygons = diff_ex(temp_slices[idx_region2].expolygons, temp_slices[idx_region].expolygons);
+                                            !region2.model_volume->is_negative_volume() && overlap_in_xy(*region.bbox, *region2.bbox)) {
+                                            const bool current_carves = ! order_independent_overlap_carving || current_is_negative ||
+                                                                        current_vol <= bbox_volume(*region2.bbox);
+                                            if (current_carves)
+                                                temp_slices[idx_region2].expolygons = diff_ex(temp_slices[idx_region2].expolygons, temp_slices[idx_region].expolygons);
+                                            else
+                                                temp_slices[idx_region].expolygons = diff_ex(temp_slices[idx_region].expolygons, temp_slices[idx_region2].expolygons);
+                                        }
 #else
                                         const PrintObjectRegions::VolumeRegion& region2 = layer_range.volume_regions[idx_region2];
                                         if (!region2.model_volume->is_negative_volume() && overlap_in_xy(*region.bbox, *region2.bbox))
@@ -863,6 +890,35 @@ void PrintObject::slice()
     }
     this->slice_volumes();
     m_print->throw_if_canceled();
+
+    // A modifier the user can see in the object list, that is nonetheless unable to change
+    // anything about this slice, is otherwise completely silent - the two failure modes below cost
+    // nothing at slice time and used to leave the user staring at an unchanged preview. Raised
+    // here, once per object per slice (not per layer), while posSlice is the active step.
+    {
+        const std::string object_name = this->model_object() ? this->model_object()->name : std::string();
+        auto join_names = [](const std::vector<std::string> &names) {
+            std::string out;
+            for (const std::string &n : names)
+                out += (out.empty() ? "" : ", ") + std::string("\"") + n + "\"";
+            return out;
+        };
+        // 1. Overrides nothing relative to its parent region, so it is an alias of the parent's own
+        //    PrintRegion and literally cannot print differently. An extruder override that really
+        //    differs is an effect and does not land here - see modifiers_without_overrides().
+        if (const std::vector<std::string> inert = this->modifiers_without_overrides(); ! inert.empty())
+            this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL,
+                Slic3r::format(_u8L("Modifier %1% on \"%2%\" changes no settings and has no effect."),
+                               join_names(inert), object_name),
+                PrintStateBase::SlicingModifierNoOverrides);
+        // 2. Never attached to any part, so its geometry is dropped entirely.
+        if (const std::vector<std::string> orphan = this->modifiers_without_parent(); ! orphan.empty())
+            this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL,
+                Slic3r::format(_u8L("Modifier %1% does not overlap any part of \"%2%\" and has no effect."),
+                               join_names(orphan), object_name),
+                PrintStateBase::SlicingModifierNoParent);
+    }
+
     int firstLayerReplacedBy = 0;
 
 #if 0

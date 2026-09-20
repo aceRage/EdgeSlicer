@@ -1,0 +1,86 @@
+name: Check macOS signing secrets
+
+# A two-minute check of the macOS signing secrets, so a wrong certificate is caught here
+# instead of after the 3.5-hour universal build in build_all.yml. It imports the .p12 into
+# a throwaway keychain, lists the code-signing identities it holds, checks that
+# MACOS_CERTIFICATE_ID names one of them and that it is a "Developer ID Application"
+# identity, and decodes the App Store Connect API key to make sure it is a private key.
+# Nothing is signed and no secret value is printed.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  check:
+    name: Import certificate and list identities
+    runs-on: macos-14
+    steps:
+      - name: Import the .p12 and list identities
+        env:
+          BUILD_CERTIFICATE_BASE64: ${{ secrets.BUILD_CERTIFICATE_BASE64 }}
+          P12_PASSWORD: ${{ secrets.P12_PASSWORD }}
+          MACOS_CERTIFICATE_ID: ${{ secrets.MACOS_CERTIFICATE_ID }}
+        run: |
+          set -u
+          if [ -z "$BUILD_CERTIFICATE_BASE64" ] || [ -z "$P12_PASSWORD" ] || [ -z "$MACOS_CERTIFICATE_ID" ]; then
+            echo "::error::BUILD_CERTIFICATE_BASE64, P12_PASSWORD and MACOS_CERTIFICATE_ID must all be set"
+            exit 1
+          fi
+          CERT="$RUNNER_TEMP/check.p12"
+          KEYCHAIN="$RUNNER_TEMP/check.keychain-db"
+          PW=$(openssl rand -hex 24)
+          # Whitespace and CRs creep in when the base64 text is pasted from a clipboard.
+          printf '%s' "$BUILD_CERTIFICATE_BASE64" | tr -d '\r\n \t' | base64 --decode > "$CERT" || {
+            echo "::error::BUILD_CERTIFICATE_BASE64 is not valid base64"; exit 1; }
+          echo "p12 size: $(stat -f %z "$CERT") bytes"
+          security create-keychain -p "$PW" "$KEYCHAIN"
+          security unlock-keychain -p "$PW" "$KEYCHAIN"
+          if ! security import "$CERT" -P "$P12_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN"; then
+            echo "::error::security import failed - wrong P12_PASSWORD, or the file is not a .p12"
+            exit 1
+          fi
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$PW" "$KEYCHAIN" > /dev/null
+          echo "Identities in the .p12:"
+          ids=$(security find-identity -v -p codesigning "$KEYCHAIN")
+          echo "$ids"
+          echo "Certificates in the .p12 (subject lines):"
+          security find-certificate -a -p "$KEYCHAIN" | openssl x509 -noout -subject 2>/dev/null || true
+          rc=0
+          if ! echo "$ids" | grep -qF "$MACOS_CERTIFICATE_ID"; then
+            echo "::error::MACOS_CERTIFICATE_ID ('$MACOS_CERTIFICATE_ID') is not among the identities above"
+            rc=1
+          fi
+          if ! echo "$ids" | grep -q "Developer ID Application:"; then
+            echo "::error::No 'Developer ID Application' identity in the .p12. On the Mac: Keychain Access > My Certificates - the entry to export must be named 'Developer ID Application: <name> (<team>)'. 'Apple Distribution' is the App Store certificate and cannot sign a dmg."
+            rc=1
+          fi
+          security delete-keychain "$KEYCHAIN" || true
+          rm -f "$CERT"
+          [ $rc -eq 0 ] && echo "certificate OK"
+          exit $rc
+
+      - name: Check the App Store Connect API key
+        if: always()
+        env:
+          APP_STORE_CONNECT_KEY_P8: ${{ secrets.APP_STORE_CONNECT_KEY_P8 }}
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+        run: |
+          set -u
+          if [ -z "$APP_STORE_CONNECT_KEY_P8" ] || [ -z "$APP_STORE_CONNECT_KEY_ID" ] || [ -z "$APP_STORE_CONNECT_ISSUER_ID" ]; then
+            echo "::warning::App Store Connect API key secrets are not all set; notarization would fall back or be skipped"
+            exit 0
+          fi
+          KEY="$RUNNER_TEMP/AuthKey_check.p8"
+          if printf '%s' "$APP_STORE_CONNECT_KEY_P8" | grep -q "BEGIN PRIVATE KEY"; then
+            printf '%s\n' "$APP_STORE_CONNECT_KEY_P8" > "$KEY"
+          else
+            printf '%s' "$APP_STORE_CONNECT_KEY_P8" | tr -d '\r\n \t' | base64 --decode > "$KEY" 2>/dev/null || true
+          fi
+          if openssl pkey -in "$KEY" -noout 2>/dev/null; then
+            echo "API key parses as a private key (key id $APP_STORE_CONNECT_KEY_ID)"
+          else
+            echo "::error::APP_STORE_CONNECT_KEY_P8 does not decode to a private key (paste the .p8 file base64-encoded, or its PEM text)"
+            rm -f "$KEY"; exit 1
+          fi
+          rm -f "$KEY"

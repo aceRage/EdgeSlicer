@@ -190,8 +190,14 @@ void FillBedJob::prepare()
     // min_obj_distance/2 branch once a distance is set, dropping the brim entirely, so the fill
     // path widens the gap to the brim where the brim is wider - a 1 mm gap on a tree-support
     // object would otherwise mean colliding brims.
+    // ArrangePolygon::brim_width is the ARRANGE CLEARANCE, not a brim: ModelArrange.cpp sets it
+    // to 1 mm flat, 6 mm for normal support, 24 mm for tree support, and never reads brim_type or
+    // brim_width. "Ignore support clearance" in the dialog drops this floor entirely so the user
+    // gets exactly the gap they typed. The dialog's live estimate applies the same rule, so the
+    // number on the label is the number the pack uses.
     double brim_max = 0.;
-    for (const ArrangePolygon &ap : m_selected) brim_max = std::max(brim_max, double(ap.brim_width));
+    if (!m_settings.ignore_support_clearance)
+        for (const ArrangePolygon &ap : m_selected) brim_max = std::max(brim_max, double(ap.brim_width));
     const double eff_gap = std::max(unscaled<double>(est_params.min_obj_distance), brim_max);
     if (m_settings.gap > 0.)
         params.min_obj_distance = scaled(eff_gap);
@@ -293,6 +299,16 @@ void FillBedJob::process(Ctl &ctl)
         partplate_list.preprocess_nonprefered_areas(m_unselected, MAX_NUM_PLATES);
     
     update_selected_items_inflation(m_selected, m_plater->config(), params);
+    // update_selected_items_inflation() only honours params.min_obj_distance when it is non-zero;
+    // at zero it falls back to each item's own ap.brim_width - the support clearance - which is
+    // precisely the floor "Ignore support clearance" exists to remove. So with the flag set and
+    // no explicit gap, clear the inflation the fallback just wrote. Sequential print is the one
+    // case that must keep its clearance: it raises min_obj_distance above, so it takes the
+    // min_obj_distance branch and never reaches the fallback.
+    if (m_settings.ignore_support_clearance && params.min_obj_distance == 0)
+        for (ArrangePolygon &ap : m_selected)
+            if (!ap.is_virt_object)
+                ap.inflation = 0;
     update_unselected_items_inflation(m_unselected, m_plater->config(), params);
 
     // NO early stop. The old on_packed/do_stop pair aborted the whole pack the moment one

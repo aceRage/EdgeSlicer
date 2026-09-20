@@ -1,0 +1,583 @@
+#ifndef slic3r_CutRecipe_hpp_
+#define slic3r_CutRecipe_hpp_
+
+// ---------------------------------------------------------------------------
+// RE-EDITABLE CUTS: the recipe.
+//
+// A cut has always been DESTRUCTIVE. The plane, the curved sheet and the drawn
+// stroke were session state in the gizmo; the cut baked them into two new
+// meshes and everything that described the cut was gone. Only the connector
+// VOLUMES survived, through Metadata/cut_information.xml, and only as baked
+// geometry.
+//
+// A CutRecipe is the description that was missing: everything needed to perform
+// the same cut again, plus the mesh it was performed ON. Both halves of a cut
+// carry the same recipe (they share its cut_id), so selecting either one is
+// enough to reopen the gizmo, move the plane and re-cut.
+//
+// WHERE IT LIVES. In the Model it hangs off ModelObject (::cut_recipe, an
+// optional). In the 3MF it is Metadata/cut_recipe.xml plus one binary mesh blob
+// per recipe under Metadata/cut_recipe/<sha256>.stlb - deliberately NOT in the
+// main <resources> model mesh list, so an upstream slicer that knows nothing
+// about any of this still loads the file and simply sees the two halves. The
+// same discipline Metadata/cut_information.xml and Metadata/image_fill/ follow.
+//
+// SHARING. Both halves reference the same pre-cut mesh, which is stored ONCE,
+// content-addressed by the SHA-256 of its serialized bytes. Two halves of one
+// cut therefore cost one mesh, not two, and re-cutting the same object over and
+// over does not grow the file.
+//
+// OPT-OUT. The Cut panel's "Keep cut editable" writes recipes; with it off
+// nothing here is produced and the cut behaves exactly as it did before this
+// feature existed.
+// ---------------------------------------------------------------------------
+
+#include <string>
+#include <vector>
+#include <optional>
+#include <utility>
+
+#include <libslic3r/Point.hpp>
+#include <libslic3r/TriangleMesh.hpp>
+#include <libslic3r/CurvedCut.hpp>
+#include <libslic3r/DrawCut.hpp>
+// FlexiJointParams, carried per connector. Neither CurvedCut.hpp nor DrawCut.hpp
+// pulls it in, so it has to be named here.
+#include <libslic3r/FlexiJoint.hpp>
+
+namespace Slic3r {
+
+struct CutConnector;
+// cut_target_label() takes one by pointer. Model.hpp INCLUDES this header, so the
+// class cannot be named here any more than CutConnector can - a declaration is all
+// a pointer parameter needs, and all this header may have.
+class ModelObject;
+
+// The schema version written into Metadata/cut_recipe.xml. A reader refuses a
+// version it does not know rather than guessing at fields: a recipe it cannot
+// reproduce exactly is worse than no recipe, because "Edit cut" would silently
+// produce a DIFFERENT cut from the one the halves were made with.
+//
+//  1  initial: flat / curved / drawn, thickness, visibility, connectors, mesh blob.
+//  2  the drawn line became a CHAIN of strokes (2026-09-12): CutRecipeStroke grew
+//     `stroke_bounds`, the per-stroke ranges the chain's undo works off.
+//
+// A version 1 recipe STILL LOADS. Its samples ARE the chain - the samples and the
+// closed flag were always the whole description of the line - so a version 1 file
+// re-cuts to exactly the same halves; what it does not carry is where one stroke
+// ended and the next began, and cut_recipe_stroke_to_chain() then treats the whole
+// list as one stroke, which is the right answer for a line drawn in one gesture and
+// the harmless answer for any other.
+//
+//  3  the drawn cut's SURFACE MODEL changed (2026-09-13): a closed loop is now a
+//     band plus a FLAT CORE PLANE instead of a ruled strip, and with it the
+//     MEANING of two stored numbers changed - which is why this is a version bump
+//     and not merely new fields:
+//       draw_angle_deg  was a SIGNED draft (-60..+60) rotating the ruling towards
+//                       the outward binormal; it is now the UNSIGNED LIP ANGLE
+//                       (0..90) at which the band leans in towards the core.
+//       draw_depth      was how far the ruling reached in (tens of mm, and usually
+//                       ignored because through_all defaulted on); it is now how
+//                       far the band travels before turning onto the core, so a
+//                       few mm.
+//
+// A version 2 recipe STILL LOADS, but it cannot re-cut to the same halves, because
+// the surface it described no longer exists. cut_recipe_migrate_draw_v2() maps it
+// onto the nearest phase-3 cut so an old project opens with a sensible cut rather
+// than a broken one; the halves themselves are untouched until the user re-cuts,
+// because those come from the stored mesh blob.
+//  4  the drawn cut grew two controls (2026-09-15, owner click-test items 4 and 5):
+//       draw_ext_angle_deg / draw_ext_angle_set
+//                       the EXTENSION ANGLE - which way the outward skirt leaves
+//                       the drawn line. Unset (the flag false) means "continue the
+//                       band", which is what the skirt has always done, so a
+//                       version <= 3 recipe loads with the flag false and re-cuts
+//                       to EXACTLY the same halves. This is a new field, not a
+//                       changed meaning.
+//       draw_angle_deg  became SIGNED, -90..90, the sign saying which side of the
+//                       core plane the band leans towards. Every stored value was
+//                       0..90 and those keep their meaning bit for bit - positive
+//                       is the direction the lip always went - so again nothing
+//                       needs rewriting, only admitting.
+//
+// A version <= 3 recipe therefore loads and re-cuts identically; no migration is
+// needed for 4 and cut_recipe_migrate_draw_v2() is untouched by it.
+static constexpr int CutRecipeVersion = 4;
+
+// The oldest version a reader accepts. Between this and CutRecipeVersion the fields
+// a recipe does not carry are left at their defaults.
+static constexpr int CutRecipeMinVersion = 1;
+inline bool cut_recipe_version_supported(int v) { return v >= CutRecipeMinVersion && v <= CutRecipeVersion; }
+
+// Which surface the cut was made with. Mirrors the gizmo's CutSurfaceMode
+// crossed with its CutMode, flattened into the one choice that actually decides
+// which Cut::perform_* runs.
+enum class CutRecipeKind : int {
+    // A flat plane: Cut::perform_with_plane().
+    Plane = 0,
+    // A height field over the plane: Cut::perform_with_curved_sheet().
+    Curved = 1,
+    // A drawn line: a band plus a flat core for a closed loop, a ruled strip for an
+    // open one. Cut::perform_with_draw_stroke().
+    Drawn = 2,
+    // Tongue and groove: Cut::perform_with_groove().
+    Groove = 3,
+};
+
+inline bool cut_recipe_kind_valid(int k) { return k >= int(CutRecipeKind::Plane) && k <= int(CutRecipeKind::Groove); }
+
+// The tongue-and-groove parameters, mirrored from Cut::Groove so the recipe does
+// not have to include CutUtils.hpp (which includes the Model, which includes
+// this). Converted at the call site.
+struct CutRecipeGroove
+{
+    float depth{ 0.f };
+    float width{ 0.f };
+    float flaps_angle{ 0.f };
+    float angle{ 0.f };
+    float depth_init{ 0.f };
+    float width_init{ 0.f };
+    float flaps_angle_init{ 0.f };
+    float angle_init{ 0.f };
+    float depth_tolerance{ 0.1f };
+    float width_tolerance{ 0.1f };
+
+    bool operator==(const CutRecipeGroove& o) const;
+    bool operator!=(const CutRecipeGroove& o) const { return !(*this == o); }
+
+    template<class Archive> void serialize(Archive& ar) {
+        ar(depth, width, flaps_angle, angle, depth_init, width_init, flaps_angle_init, angle_init,
+           depth_tolerance, width_tolerance);
+    }
+};
+
+// One connector, as the recipe remembers it. This is the DEFINITION the gizmo
+// works with (ModelObject::cut_connectors), not the baked volume: re-cutting
+// regenerates the volumes from these.
+//
+// Deliberately a struct of its own rather than a CutConnector: CutConnector
+// lives in Model.hpp, which includes this header, so the recipe cannot name it.
+// The two convert in CutRecipe.cpp.
+struct CutRecipeConnector
+{
+    Vec3d       pos{ Vec3d::Zero() };
+    Transform3d rotation_m{ Transform3d::Identity() };
+    float       radius{ 5.f };
+    float       height{ 10.f };
+    float       radius_tolerance{ 0.f };
+    float       height_tolerance{ 0.1f };
+    float       z_angle{ 0.f };
+    int         type{ 0 };   // CutConnectorType
+    int         style{ 0 };  // CutConnectorStyle
+    int         shape{ 0 };  // CutConnectorShape
+    // Only meaningful for CutConnectorType::FlexiJoint.
+    FlexiJointParams flexi;
+
+    bool operator==(const CutRecipeConnector& o) const;
+    bool operator!=(const CutRecipeConnector& o) const { return !(*this == o); }
+
+    template<class Archive> void serialize(Archive& ar) {
+        ar(pos, rotation_m, radius, height, radius_tolerance, height_tolerance, z_angle,
+           type, style, shape, flexi);
+    }
+};
+
+// The stroke, flattened for storage. DrawCutStroke keeps raw samples, a
+// resampled path and derived binormals; only the RAW samples plus the open /
+// closed decision are stored, because finish() regenerates the rest
+// deterministically from them and the parameters - which is exactly the
+// contract DrawCutStroke::finish() documents ("always starts from the RAW
+// samples"). Storing the path too would let the two disagree.
+struct CutRecipeStroke
+{
+    std::vector<DrawCutSample> samples;
+    bool                       closed{ false };
+    // The panel's 0..1 smoothing, which is an INPUT to finish(), so it belongs
+    // with the samples rather than with the sweep parameters.
+    double                     smoothing{ 0.2 };
+    // VERSION 2 (2026-09-12). The line is a CHAIN of strokes, and the chain's undo
+    // works off the range each appended stroke occupies in `samples`. Storing the
+    // ranges is what lets a reopened cut's Ctrl+Z take back one stroke rather than
+    // the whole line.
+    //
+    // Empty for a version 1 recipe. cut_recipe_stroke_to_chain() then treats the
+    // whole sample list as one stroke.
+    std::vector<std::pair<uint32_t, uint32_t>> stroke_bounds;
+    // VERSION 2. The user's explicit "this line is finished and is not a loop" - the
+    // panel's "Cut along the line". Distinct from `closed == false`, which on its own
+    // means only "not a loop", and which for a chain still being drawn means "not
+    // finished". See DrawCutChain::finish_open().
+    //
+    // A version 1 recipe was always one of the two: its line was cut with, so it was
+    // finished. cut_recipe_stroke_to_chain() therefore treats an unclosed version 1
+    // stroke as finished-open, which is what it was.
+    bool                       finished_open{ false };
+
+    bool operator==(const CutRecipeStroke& o) const;
+    bool operator!=(const CutRecipeStroke& o) const { return !(*this == o); }
+
+    // DrawCutSample has no serializer of its own (it is a plain capture record in
+    // DrawCut.hpp, which knows nothing about cereal), so its fields go through
+    // one by one rather than pulling cereal into that header.
+    // Cereal is for the UNDO STACK and the project backup, never across versions -
+    // a blob is written and read by the same binary - so both sides always carry
+    // stroke_bounds. The 3MF path is the one that has to read a version 1 stream,
+    // and it has its own explicit schema in bbs_3mf.cpp.
+    template<class Archive> void save(Archive& ar) const {
+        ar(finished_open);
+        ar(closed, smoothing);
+        ar(uint64_t(samples.size()));
+        for (const DrawCutSample& s : samples)
+            ar(s.pos, s.normal, uint64_t(s.facet));
+        ar(uint64_t(stroke_bounds.size()));
+        for (const std::pair<uint32_t, uint32_t>& b : stroke_bounds)
+            ar(b.first, b.second);
+    }
+    template<class Archive> void load(Archive& ar) {
+        uint64_t n = 0, nb = 0;
+        ar(finished_open);
+        ar(closed, smoothing);
+        ar(n);
+        samples.clear();
+        samples.resize(size_t(n));
+        for (DrawCutSample& s : samples) {
+            uint64_t facet = 0;
+            ar(s.pos, s.normal, facet);
+            s.facet = size_t(facet);
+        }
+        ar(nb);
+        stroke_bounds.clear();
+        stroke_bounds.reserve(size_t(nb));
+        for (uint64_t i = 0; i < nb; ++ i) {
+            uint32_t a = 0, b = 0;
+            ar(a, b);
+            stroke_bounds.emplace_back(a, b);
+        }
+    }
+};
+
+// The sheet, flattened for storage: the control grid and the extent it is
+// defined over. CurvedCutSheet derives everything else from these.
+struct CutRecipeSheet
+{
+    int                 nx{ 0 };
+    int                 ny{ 0 };
+    double              half_size_u{ 0.0 };
+    double              half_size_v{ 0.0 };
+    std::vector<double> values;
+
+    bool valid() const { return nx >= 2 && ny >= 2 && values.size() == size_t(nx) * size_t(ny); }
+    bool operator==(const CutRecipeSheet& o) const;
+    bool operator!=(const CutRecipeSheet& o) const { return !(*this == o); }
+
+    template<class Archive> void serialize(Archive& ar) {
+        ar(nx, ny, half_size_u, half_size_v, values);
+    }
+};
+
+// ---------------------------------------------------------------------------
+// The recipe.
+// ---------------------------------------------------------------------------
+struct CutRecipe
+{
+    int           version{ CutRecipeVersion };
+    CutRecipeKind kind{ CutRecipeKind::Plane };
+
+    // --- the cut frame ----------------------------------------------------
+    // The cut plane, in the OBJECT's coordinate system (the frame
+    // ModelObject::volumes live in), not the world: the halves can be moved,
+    // rotated and re-laid-out on the bed after the cut, and a world-frame plane
+    // would then describe a cut through empty space. The gizmo converts to and
+    // from the world with the instance transform it is editing.
+    //
+    // Together these are the gizmo's m_plane_center and m_rotation_m, taken into
+    // the object frame.
+    Vec3d       plane_center{ Vec3d::Zero() };
+    Transform3d rotation_m{ Transform3d::Identity() };
+
+    // --- the surface ------------------------------------------------------
+    CutRecipeSheet  sheet;   // kind == Curved
+    CutRecipeStroke stroke;  // kind == Drawn
+    CutRecipeGroove groove;  // kind == Groove
+
+    // Drawn-cut sweep parameters. Held as the scalar fields rather than as a
+    // DrawCutParams so the stored form is explicit about what is persisted;
+    // draw_params() composes one.
+    int    draw_direction{ int(DrawCutDirection::SurfaceNormal) };
+    Vec3d  draw_view_dir{ -Vec3d::UnitZ() };
+    double draw_extension{ 5.0 };
+    // The lip angle. SIGNED since version 4 (-90..90): the sign is which side of the
+    // core plane the band leans towards. See CutRecipeVersion's history.
+    double draw_angle_deg{ 0.0 };
+    // VERSION 4: the EXTENSION ANGLE, and whether the user set one at all.
+    //
+    // Two fields rather than an optional, because the 3MF schema is attributes and a
+    // missing attribute has to mean "unset" rather than "zero" - zero is a perfectly
+    // good extension angle (a flat skirt) and must not be what an old file decays to.
+    // `draw_ext_angle_set` false is "continue the band", the default and what every
+    // version <= 3 recipe gets.
+    bool   draw_ext_angle_set{ false };
+    double draw_ext_angle_deg{ 0.0 };
+    // PHASE 3 defaults, matching DrawCutParams: a flat core at 3 mm, not a
+    // through cut. (These were `true` / 10.0 under the ruled-strip model.)
+    bool   draw_through_all{ false };
+    double draw_depth{ 3.0 };
+
+    // --- shared parameters ------------------------------------------------
+    // Kerf. Applies to Plane, Curved and Drawn alike.
+    double             thickness{ 0.0 };
+    CutThicknessOffset thickness_offset{ CutThicknessOffset::Centred };
+
+    // The after-cut attributes, exactly as the gizmo's checkboxes set them.
+    bool keep_upper{ true };
+    bool keep_lower{ true };
+    bool keep_as_parts{ false };
+    bool place_on_cut_upper{ true };
+    bool place_on_cut_lower{ false };
+    bool rotate_upper{ false };
+    bool rotate_lower{ false };
+
+    // Preview-only side visibility (0 Visible, 1 Ghost, 2 Hidden). Not part of
+    // the geometry, but the spec asks for it: reopening a cut should look the
+    // way the user left it.
+    int upper_visibility{ 0 };
+    int lower_visibility{ 0 };
+
+    // --- connectors -------------------------------------------------------
+    std::vector<CutRecipeConnector> connectors;
+
+    // --- the pre-cut mesh -------------------------------------------------
+    // The object as it stood BEFORE the cut, in the object frame, as ONE mesh
+    // (the volumes' meshes merged, each already transformed into the object
+    // frame - which is what Cut operates on anyway). Content-addressed: the
+    // hash names the blob in the 3MF, and is what lets the two halves share one
+    // copy.
+    //
+    // Empty when the recipe came from a 3MF whose blob was missing or corrupt;
+    // has_mesh() is then false and "Edit cut" refuses with a clear reason
+    // rather than re-cutting the wrong thing.
+    TriangleMesh mesh;
+    std::string  mesh_hash;
+
+    bool has_mesh() const { return !mesh.empty(); }
+    // A recipe that can actually be re-cut.
+    bool valid() const;
+
+    // The sweep parameters as DrawCut wants them.
+    DrawCutParams  draw_params() const;
+    // Rewrite a version <= 2 drawn recipe's parameters into phase-3 meanings, and
+    // stamp it as version 3. A no-op on a recipe that is already 3, or on one that
+    // is not a drawn cut. See CutRecipeVersion's history for what changes and why
+    // the old numbers cannot simply be reused.
+    void           migrate_draw_v2();
+    // The sheet as CurvedCut wants it.
+    CurvedCutSheet curved_sheet() const;
+
+    // Field-by-field equality, EXCLUDING the mesh (compared by hash instead).
+    // This is what the round-trip test asserts.
+    bool operator==(const CutRecipe& o) const;
+    bool operator!=(const CutRecipe& o) const { return !(*this == o); }
+
+    // Cereal, for the undo/redo stack and the project backup - NOT for the 3MF,
+    // which has its own explicit schema in bbs_3mf.cpp. The mesh rides along:
+    // dropping it would make an undo step silently lose the ability to re-edit,
+    // which is exactly the kind of half-state this feature exists to avoid.
+    template<class Archive> void serialize(Archive& ar) {
+        int kind_i = int(kind);
+        int toff_i = int(thickness_offset);
+        ar(version, kind_i, toff_i);
+        kind             = cut_recipe_kind_valid(kind_i) ? CutRecipeKind(kind_i) : CutRecipeKind::Plane;
+        thickness_offset = CutThicknessOffset(toff_i);
+        ar(plane_center, rotation_m);
+        ar(sheet, stroke, groove);
+        ar(draw_direction, draw_view_dir, draw_extension, draw_angle_deg, draw_through_all, draw_depth);
+        // VERSION 4. Cereal is the undo stack and the project backup, never a file
+        // written by another build, so appending here is safe in the way appending
+        // to the 3MF schema is not.
+        ar(draw_ext_angle_set, draw_ext_angle_deg);
+        ar(thickness);
+        ar(keep_upper, keep_lower, keep_as_parts, place_on_cut_upper, place_on_cut_lower,
+           rotate_upper, rotate_lower);
+        ar(upper_visibility, lower_visibility);
+        ar(connectors);
+        ar(mesh, mesh_hash);
+    }
+};
+
+// Serialize a mesh to the recipe's own compact binary form, and back. Not STL:
+// this keeps full double-free float precision and the exact vertex indexing, so
+// a round trip is bit-identical rather than merely close - which is what lets
+// the re-cut reproduce the same halves.
+//
+// Layout, all little-endian, no padding:
+//   magic "ESCUTMSH", uint32 version(1), uint32 n_vertices, uint32 n_facets,
+//   then n_vertices * 3 float32, then n_facets * 3 uint32.
+std::vector<uint8_t> cut_recipe_mesh_to_blob(const TriangleMesh& mesh);
+bool                 cut_recipe_mesh_from_blob(const std::vector<uint8_t>& blob, TriangleMesh& out);
+
+// SHA-256 of the blob, lowercase hex. Names the file in the 3MF.
+std::string cut_recipe_mesh_hash(const std::vector<uint8_t>& blob);
+
+// Convert between the recipe's connector form and the Model's. Defined in
+// CutRecipe.cpp, which may include Model.hpp.
+void cut_recipe_connectors_from_model(const std::vector<CutConnector>& in, std::vector<CutRecipeConnector>& out);
+void cut_recipe_connectors_to_model(const std::vector<CutRecipeConnector>& in, std::vector<CutConnector>& out);
+
+// Convert between the recipe's stored stroke and the DrawCutChain the gizmo edits.
+//
+// A recipe whose `stroke_bounds` is empty - every version 1 recipe, and any version 2
+// one written from a line drawn in a single gesture - becomes a chain of ONE stroke
+// covering every sample. That is right twice over: it is what a single-gesture line
+// was, and a reopened cut's first Ctrl+Z should take back "the line", not unpick
+// strokes from a session the user does not remember.
+//
+// Bounds that do not tile [0, samples.size()) exactly are DISCARDED rather than
+// half-applied, and the one-stroke fallback is used: a chain whose ranges do not
+// match its samples would corrupt undo in a way the user cannot see coming.
+void            cut_recipe_stroke_to_chain(const CutRecipeStroke& in, DrawCutChain& out);
+CutRecipeStroke cut_recipe_stroke_from_chain(const DrawCutChain& chain, double smoothing);
+
+// ---------------------------------------------------------------------------
+// MIRRORING A RECIPE.
+//
+// "Mirror on X / Y / Z" in the cut panel, and the reason "Copy cut to..." is
+// worth having at all: the owner's case is a cut authored on one half of a
+// symmetric part that has to land exactly - not by hand - on the other half.
+//
+// THE ONE FRAME. Everything a recipe stores that has a position lives in the
+// OBJECT frame (see plane_center above): plane_center itself, and every
+// connector's pos, which the gizmo writes as world-minus-instance-offset - the
+// same subtraction. So one reflection, about one pivot, in that one frame, is
+// the whole of the position half of the job. `pivot` is in that frame too.
+//
+// THE HANDEDNESS TRAP, and why rotation_m is never reflected. A reflection has
+// determinant -1. rotation_m is consumed all over the gizmo and the cut as a
+// PROPER rotation - Transformation(...).get_matrix(), its_transform(), the
+// connector frame composition - and handing any of those a mirror matrix
+// corrupts them silently (inside-out volumes, flipped connector pockets). So
+// the reflected frame is never stored. Instead:
+//
+//   let R  = rotation_m.linear(), with columns e1 e2 e3 (e3 is the plane normal)
+//   let M  = the pure reflection for the chosen axis
+//   store  R' = [ M*e1, -(M*e2), M*e3 ]
+//
+// R' is orthonormal and det(R') = +1 by construction: M flips the sign of the
+// determinant, and negating exactly one column flips it back. Every axis of the
+// frame is still the mirror image of the one it replaces up to that one sign,
+// and - the point - the plane NORMAL e3 maps to M*e3 exactly, so the mirrored
+// plane really is the mirror of the original plane and which side is "upper"
+// does not change. That is why no upper/lower swap is needed here, and why the
+// keep_/place_on_cut_/rotate_/visibility pairs are copied straight through.
+//
+// THE (u,v) RE-INDEXING, resolved by that same choice. The sheet's control grid
+// and the drawn stroke's samples are stored in the PLANE's own frame, not the
+// object's, so they do not see M at all - they see the residual
+//
+//     Q = R'^T * M * R
+//
+// and with R' built by negating the SECOND column, Q is diag(1, -1, 1) for
+// every axis and every starting rotation. Always. So the plane-local job is
+// always the same fixed map - negate local y, leave local x and local z alone -
+// and never a case analysis over which in-plane axis the mirror happened to
+// flip. Concretely:
+//
+//   sheet   f'(u, -v) = f(u, v): mirror the grid ROWS (the v index, running over
+//           ny, stride nx) and leave the VALUES alone. Note this is NOT
+//           CurvedCutSheet::flip_about_u(), which is the 180-degree frame TURN
+//           and therefore also negates every value; a mirror does not.
+//   stroke  every sample's pos and normal: (x, y, z) -> (x, -y, z). Same for
+//           draw_view_dir, so a "View"-direction drawn cut still reaches the way
+//           it did.
+//   groove  nothing. Every CutRecipeGroove field is a scalar magnitude; none of
+//           them encodes an in-plane direction.
+//
+// CONNECTORS. pos reflects in the object frame with everything else; rotation_m
+// goes through the identical R' construction, so a connector's own frame stays a
+// proper rotation too. z_angle is negated for a non-Circle shape - a mirrored
+// triangle presents the same polygon turned the other way - and left alone for a
+// Circle, where it means nothing. type (Plug / Dowel / Snap / FlexiJoint) is a
+// mating ROLE, not a chirality, and is NEVER touched: a mirrored assembly still
+// needs one plug and one dowel to mate, which is the entire reason the owner
+// wants a mirrored connector layout in the first place.
+//
+// Mirroring twice on the same axis about the same pivot is the identity, for
+// every kind. tests/libslic3r/test_cut_recipe.cpp [CutMirror] pins that, along
+// with det(+1), orthonormality and the type invariance.
+// ---------------------------------------------------------------------------
+enum class CutMirrorAxis : int { X = 0, Y = 1, Z = 2 };
+
+CutRecipe cut_recipe_mirrored(const CutRecipe& src, CutMirrorAxis axis, const Vec3d& pivot);
+
+// The pieces, exposed so the gizmo can mirror a live frame without building a
+// whole recipe, and so the tests can pin them one at a time.
+//
+// cut_mirror_vector(): the diagonal of the pure reflection M.
+// cut_mirror_point():  pivot + M * (p - pivot).
+// cut_mirror_rotation(): the R' above. Always orthonormal with determinant +1.
+Vec3d       cut_mirror_vector(CutMirrorAxis axis);
+Vec3d       cut_mirror_point(const Vec3d& p, CutMirrorAxis axis, const Vec3d& pivot);
+Transform3d cut_mirror_rotation(const Transform3d& rotation_m, CutMirrorAxis axis);
+
+// ---------------------------------------------------------------------------
+// NAMING A COPY-CUT TARGET.
+//
+// "Copy cut to..." lists the objects on the plate, and a list is only useful if
+// its entries can be told apart. ModelObject::name often cannot do that on its
+// own: the assemble action names everything it makes "Assembly", so a plate of
+// assembled parts produced a submenu of a dozen identical "Assembly" entries -
+// the list the owner was shown, in which no entry identified anything.
+//
+// What actually distinguishes such an object is the PARTS it is made of, so a
+// multi-part object is labelled with its name followed by its part names:
+//
+//     Assembly (left ear, right ear, body)
+//
+// The parts are a LEGEND, not targets. The target of a copy is always the whole
+// OBJECT - the Cut gizmo works on a full instance (GLGizmoCut3D::on_is_activable
+// requires is_single_full_instance), so a cut applies to every part of the object
+// it opens on - which is why this returns one string per object rather than an
+// entry per part.
+//
+// At most `max_parts` names are listed and the remainder becomes "+N more": a
+// forty-part assembly's full part list is as unreadable as no list at all. Only
+// model parts are counted; negative volumes, modifiers and support blockers are
+// not what identifies an object to the eye. An object with a single part is named
+// by itself, because repeating one part's name after the object's adds nothing
+// (and for a one-part object the two are usually the same string).
+//
+// In libslic3r rather than beside the menu so it can be tested without a GUI.
+std::string cut_target_label(const ModelObject* object, size_t max_parts = 3);
+
+// ---------------------------------------------------------------------------
+// HOW FAR THE CUT PLANE MAY BE PUSHED.
+//
+// The Cut gizmo refuses to move its plane once the object no longer straddles it.
+// The test is made in the PLANE's own frame, on the object's bounding box taken
+// relative to the plane centre (GLGizmoCut3D::m_transformed_bounding_box): the
+// centre is allowed while that box still reaches across z == 0, give or take
+// `limit`.
+//
+// Factored out here so it can be tested without a GUI - and because getting the
+// box it is asked about WRONG is what made the plane stop half-way through the
+// target after "Copy cut to...": the box was still the source object's, in the
+// frame from before the recipe replaced the rotation.
+//
+// `tbb_min_z` / `tbb_max_z` are that box's z extent for the centre being tested.
+inline bool cut_plane_center_allowed(double tbb_min_z, double tbb_max_z, double limit = 0.5)
+{
+    return tbb_max_z > -limit && tbb_min_z < limit;
+}
+
+// The z range, in the plane's frame, over which the plane may be pushed for an
+// object whose box (relative to the CURRENT centre) spans [tbb_min_z, tbb_max_z].
+// Moving the centre by `d` shifts the box by -d, so the admissible d runs from
+// tbb_min_z - limit to tbb_max_z + limit. Returned as {lo, hi} offsets from the
+// current centre; the span is always positive for a non-empty box.
+inline std::pair<double, double> cut_plane_center_range(double tbb_min_z, double tbb_max_z, double limit = 0.5)
+{
+    return { tbb_min_z - limit, tbb_max_z + limit };
+}
+
+} // namespace Slic3r
+
+#endif // slic3r_CutRecipe_hpp_

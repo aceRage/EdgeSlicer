@@ -137,6 +137,10 @@ Enable to apply fuzzy skin to the first layer.
 > [!CAUTION]
 > Can impact bed adhesion and surface contact.
 
+## Skip fuzzy skin on overhangs
+
+Do not apply fuzzy skin to the parts of a wall that are not supported by the layer below. Overhanging and bridging wall segments keep their original, unfuzzed path, so the jitter does not push extrusion out into open air where it would curl. The displacement is faded out over a couple of sample points on either side of the boundary, so there is no step between the fuzzed and the clean part of the wall. The first layer is never treated as an overhang.
+
 ## Credits
 
 - **Generator Mode author:** [@pi-squared-studio](https://github.com/pi-squared-studio).

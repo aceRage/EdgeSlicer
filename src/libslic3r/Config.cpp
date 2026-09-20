@@ -5,6 +5,7 @@
 #include "Preset.hpp"
 
 #include <assert.h>
+#include <cstdlib>
 #include <fstream>
 #include <sstream>
 #include <iostream>
@@ -457,6 +458,24 @@ void ConfigBase::apply_only(const ConfigBase &other, const t_config_option_keys 
         if (my_opt == nullptr) {
             // opt_key does not exist in this ConfigBase and it cannot be created, because it is not defined by this->def().
             // This is only possible if other is of DynamicConfig type.
+            // Orca #15472 / #13712: dirty_options may name a single vector slot as "key#index".
+            if (auto n = opt_key.find('#'); n != std::string::npos) {
+                auto opt_key2 = opt_key.substr(0, n);
+                auto my_opt2 = dynamic_cast<ConfigOptionVectorBase*>(this->option(opt_key2));
+                auto other_opt = other.option(opt_key2);
+                if (my_opt2 == nullptr && other_opt) {
+                    my_opt2 = dynamic_cast<ConfigOptionVectorBase *>(this->option(opt_key2, true));
+                    if (my_opt2 && my_opt2->empty()) {
+                        my_opt2->resize(1, other_opt);
+                    }
+                }
+                if (my_opt2) {
+                    int index = std::atoi(opt_key.c_str() + n + 1);
+                    if (other_opt)
+                        my_opt2->set_at(other_opt, index, index);
+                    continue;
+                }
+            }
             if (ignore_nonexistent)
                 continue;
             throw UnknownOptionException(opt_key);
@@ -802,15 +821,17 @@ ConfigSubstitutions ConfigBase::load_from_json(const std::string &file, ForwardC
     return std::move(substitutions_ctxt.substitutions);
 }
 
-int ConfigBase::load_from_json(const std::string &file, ConfigSubstitutionContext& substitution_context, bool load_inherits_to_config, std::map<std::string, std::string>& key_values, std::string& reason)
+// Read one preset file and turn it into a json document, resolving any "include"
+// templates. This is the expensive half of load_from_json - on the shipped profiles it
+// is ~98% of the cost - and it is pure: it touches no ConfigBase state, so it can run
+// on a worker thread. The deserialization half (load_from_json_document below) is the
+// part that writes into *this and stays on the owning thread.
+//
+// CNumericLocalesSetter is per-thread on every platform we build for
+// (_configthreadlocale on Windows, uselocale elsewhere), so the parse is safe to run
+// concurrently; it is set here as well because number parsing happens inside nlohmann.
+int ConfigBase::parse_json_document(const std::string &file, json &j, std::string &reason)
 {
-    json j;
-    std::list<std::string> different_settings_append;
-    std::string new_support_style;
-    std::string is_infill_first;
-    std::string get_wall_sequence;
-    bool is_project_settings = false;
-
     CNumericLocalesSetter locales_setter;
 
     try {
@@ -927,7 +948,28 @@ int ConfigBase::load_from_json(const std::string &file, ConfigSubstitutionContex
                 j.erase("include");
             }
         }
+    }
+    catch (const std::exception &err) {
+        BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ": parse " << file << " failed, reason = " << err.what();
+        reason = std::string("json parse error: ") + err.what();
+        return -1;
+    }
+    return 0;
+}
 
+// Deserialize an already-parsed document into *this. Everything here writes into the
+// config, so it runs on the thread that owns it.
+int ConfigBase::load_from_json_document(const std::string &file, json &j, ConfigSubstitutionContext& substitution_context, bool load_inherits_to_config, std::map<std::string, std::string>& key_values, std::string& reason)
+{
+    std::list<std::string> different_settings_append;
+    std::string new_support_style;
+    std::string is_infill_first;
+    std::string get_wall_sequence;
+    bool is_project_settings = false;
+
+    CNumericLocalesSetter locales_setter;
+
+    try {
         const ConfigDef* config_def = this->def();
         if (config_def == nullptr) {
             BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ": no config defs!";
@@ -1212,6 +1254,17 @@ int ConfigBase::load_from_json(const std::string &file, ConfigSubstitutionContex
         reason = std::string("std::exception: ") + err.what();
     }
     return -1;
+}
+
+// The original one-shot entry point: parse the file, then deserialize it. Kept so every
+// existing caller is unchanged; the two halves are only used separately by the preset
+// loader, which parses a whole vendor's files in parallel before deserializing them.
+int ConfigBase::load_from_json(const std::string &file, ConfigSubstitutionContext& substitution_context, bool load_inherits_to_config, std::map<std::string, std::string>& key_values, std::string& reason)
+{
+    json j;
+    if (parse_json_document(file, j, reason) != 0)
+        return -1;
+    return load_from_json_document(file, j, substitution_context, load_inherits_to_config, key_values, reason);
 }
 
 ConfigSubstitutions ConfigBase::load_from_ini(const std::string &file, ForwardCompatibilitySubstitutionRule compatibility_rule)

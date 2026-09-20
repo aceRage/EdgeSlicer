@@ -13,3 +13,7 @@ To reduce the waiting time after tool change, Orca can preheat the next tool whi
 ## Preheat steps
 
 Insert multiple preheat commands (e.g. M104.1). Only useful for Prusa XL. For other printers, please set it to 1.
+
+## Delta temperature
+
+Temperature difference to be applied when an extruder is not active. The value is not used when 'idle_temperature' in filament settings is set to a non-zero value.

@@ -239,8 +239,7 @@ static std::string message_text(const json& e)
     const std::string who = printer_name(e);
     if (body.empty()) body = ev_str(e, "title", "Printer event");
     if (!who.empty() && body.find(who) == std::string::npos) body = who + ": " + body;
-    const std::string code = ev_str(e, "code");
-    if (!code.empty()) body += " (" + code + ")";
+    body = RemoteEvents::notification_body(body, ev_str(e, "code"));
     if (body.size() > MAX_BODY) body.resize(MAX_BODY);
     return body;
 }

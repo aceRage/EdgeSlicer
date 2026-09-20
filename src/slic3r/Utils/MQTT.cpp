@@ -1,4 +1,5 @@
 #include "MQTT.hpp"
+#include "MqttReconnectPolicy.hpp"
 #include <thread>
 #include <boost/log/trivial.hpp>
 #include <boost/filesystem.hpp>
@@ -6,6 +7,8 @@
 #include <future>
 #include <fstream>
 #include <chrono>
+#include <algorithm>
+#include <vector>
 
 namespace {
 
@@ -16,7 +19,73 @@ bool is_soft_disconnect_error(const mqtt::exception& e)
     return rc == MQTTASYNC_DISCONNECTED || rc == MQTTASYNC_FAILURE;
 }
 
+// Every client create() built and ~MqttClient has not yet pruned. Leaked on
+// purpose: Moonraker_Mqtt keeps its clients in statics, and the order in which
+// static objects die at exit is not one to lean on.
+struct LiveRegistry {
+    std::mutex                             mtx;
+    std::vector<std::weak_ptr<MqttClient>> clients;
+};
+LiveRegistry& live_registry()
+{
+    static LiveRegistry* r = new LiveRegistry;
+    return *r;
+}
+
+long long steady_ms_since(const std::chrono::steady_clock::time_point& t0)
+{
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+}
+
 } // namespace
+
+void MqttClient::register_live(const std::shared_ptr<MqttClient>& client)
+{
+    auto& reg = live_registry();
+    std::lock_guard<std::mutex> lock(reg.mtx);
+    reg.clients.erase(std::remove_if(reg.clients.begin(), reg.clients.end(),
+                                     [](const std::weak_ptr<MqttClient>& w) { return w.expired(); }),
+                      reg.clients.end());
+    reg.clients.push_back(client);
+}
+
+void MqttClient::unregister_live(const MqttClient* client)
+{
+    // Called from ~MqttClient, where our own entry is already expired; every
+    // expired entry goes, whichever client it belonged to.
+    (void)client;
+    auto& reg = live_registry();
+    std::lock_guard<std::mutex> lock(reg.mtx);
+    reg.clients.erase(std::remove_if(reg.clients.begin(), reg.clients.end(),
+                                     [](const std::weak_ptr<MqttClient>& w) { return w.expired(); }),
+                      reg.clients.end());
+}
+
+size_t MqttClient::live_client_count()
+{
+    auto& reg = live_registry();
+    std::lock_guard<std::mutex> lock(reg.mtx);
+    return size_t(std::count_if(reg.clients.begin(), reg.clients.end(),
+                                [](const std::weak_ptr<MqttClient>& w) { return !w.expired(); }));
+}
+
+size_t MqttClient::reconnect_all_live(const std::string& reason)
+{
+    // Pin the live ones under the lock, act outside it: reconnect_now() spawns
+    // a thread and logs, neither of which belongs under the registry mutex.
+    std::vector<std::shared_ptr<MqttClient>> live;
+    {
+        auto& reg = live_registry();
+        std::lock_guard<std::mutex> lock(reg.mtx);
+        for (const auto& w : reg.clients)
+            if (auto p = w.lock())
+                live.push_back(std::move(p));
+    }
+    BOOST_LOG_TRIVIAL(info) << "[MQTT_INFO] " << reason << ": asking " << live.size() << " live MQTT client(s) to reconnect";
+    for (const auto& p : live)
+        p->reconnect_now(reason);
+    return live.size();
+}
 
 // Constructor: Initialize MQTT client with server address and client ID
 // @param server_address: Address of the MQTT broker
@@ -31,8 +100,8 @@ MqttClient::MqttClient(const std::string& server_address, const std::string& cli
     , connected_(false)            
     , is_reconnecting(false)
     , connection_failure_callback_(nullptr)
-    , pending_reconnect_checks{0}  
-    , ever_connected_(false)  
+    , watch_(std::make_shared<ReconnectWatch>())
+    , ever_connected_(false)
 {
     BOOST_LOG_TRIVIAL(info) << "[MQTT_INFO] initializing MQTT connection, server_address: " << server_address << ", client_id: " << client_id;
 
@@ -135,6 +204,11 @@ MqttClient::MqttClient(const std::string& server_address,
 // @return: true if connection successful, false otherwise
 bool MqttClient::Connect(std::string& msg)
 {
+    // The owner wants this session up: from here a system resume may bounce
+    // it, and a fresh outage may be reported once more.
+    wants_connection_.store(true, std::memory_order_release);
+    failure_reported_.store(false, std::memory_order_release);
+
     if (connected_.load(std::memory_order_acquire)) {
         BOOST_LOG_TRIVIAL(info) << "[MQTT_INFO] " << client_id_ 
                                    << " Already connected to MQTT server " << server_address_;
@@ -200,6 +274,15 @@ bool MqttClient::Connect(std::string& msg)
 // Disconnect from the MQTT broker
 // @return: true if disconnection successful, false otherwise
 bool MqttClient::Disconnect(std::string& msg)
+{
+    // The owner (or a give-up) wants this session gone: no resume bounce, and
+    // any lost-session watcher stands down.
+    wants_connection_.store(false, std::memory_order_release);
+    is_reconnecting.store(false, std::memory_order_release);
+    return do_disconnect(msg);
+}
+
+bool MqttClient::do_disconnect(std::string& msg)
 {
     connected_.store(false, std::memory_order_release);
 
@@ -387,69 +470,242 @@ void MqttClient::connection_lost(const std::string& cause)
 
     if (!ever_connected_.load(std::memory_order_acquire)) {
         BOOST_LOG_TRIVIAL(error) << "The first connection failed. Since no successful connection has been made before, automatic reconnection remains disabled";
-        std::function<void()> failure_cb;
-        {
-            std::lock_guard<std::mutex> lock(cb_mtx_);
-            failure_cb = connection_failure_callback_;
-        }
-        if (failure_cb) {
-            failure_cb();
-        }
+        report_connection_failure();
         return;
     }
-    
-    if (!is_reconnecting.load(std::memory_order_acquire)) {
-        // self_ is cached by create() while the client is owned, so reading it
-        // can never throw (unlike shared_from_this(), which throws
-        // bad_weak_ptr once the last owner has started destruction). An
-        // expired/empty weak_ptr means no owner: auto-reconnect is impossible
-        // for this client.
-        std::weak_ptr<MqttClient> weak_self = self_;
-        if (weak_self.expired()) {
-            BOOST_LOG_TRIVIAL(error) << "[MQTT_INFO] MQTT client has no shared_ptr owner (or is being destroyed); automatic reconnection skipped";
-            return;
+
+    if (manual_reconnect_active_.load(std::memory_order_acquire)) {
+        BOOST_LOG_TRIVIAL(info) << "[MQTT_INFO] a reconnect_now() worker owns this outage; no watcher started";
+        return;
+    }
+
+    if (is_reconnecting.exchange(true, std::memory_order_acq_rel)) {
+        // A watcher is already supervising this outage; it keeps looking at
+        // connected_ and needs no second thread.
+        BOOST_LOG_TRIVIAL(info) << "[MQTT_INFO] lost-session watcher already running";
+        return;
+    }
+
+    // self_ is cached by create() while the client is owned, so reading it
+    // can never throw (unlike shared_from_this(), which throws
+    // bad_weak_ptr once the last owner has started destruction). An
+    // expired/empty weak_ptr means no owner: auto-reconnect is impossible
+    // for this client.
+    std::weak_ptr<MqttClient> weak_self = self_;
+    if (weak_self.expired()) {
+        BOOST_LOG_TRIVIAL(error) << "[MQTT_INFO] MQTT client has no shared_ptr owner (or is being destroyed); automatic reconnection skipped";
+        is_reconnecting.store(false, std::memory_order_release);
+        return;
+    }
+
+    // Paho's own automatic reconnect (armed by connected()) keeps retrying the
+    // socket at 2..30 s. This watcher only decides how long to let it: it
+    // looks every CHECK_INTERVAL_MS and gives the session up - Disconnect()
+    // (which stops Paho's retrying) plus the failure callback - once
+    // GIVE_UP_AFTER_MS have passed without connected() firing. A PC waking
+    // from sleep needs well over the old single 20 s look for its network to
+    // come back, and until now that one look inside the outage was final.
+    std::shared_ptr<ReconnectWatch> watch = watch_;
+    watch->pending_reconnect_checks.fetch_add(1, std::memory_order_acq_rel);
+    try {
+    std::thread([weak_self, watch]() {
+        using namespace Slic3r::MqttReconnectPolicy;
+        const auto t0 = std::chrono::steady_clock::now();
+        for (;;) {
+            if (!sleep_unless_stopped(watch, next_wait_ms(steady_ms_since(t0))))
+                break;
+
+            auto self = weak_self.lock();
+            if (!self || self->tearing_down_.load(std::memory_order_acquire) || watch->stop.load(std::memory_order_acquire)) {
+                BOOST_LOG_TRIVIAL(debug) << "[MQTT_INFO] MQTT client is gone; lost-session watcher leaving";
+                break;
+            }
+            if (!self->is_reconnecting.load(std::memory_order_acquire)) {
+                // connected() fired, the owner disconnected, or reconnect_now()
+                // took the outage over: nothing left to supervise.
+                BOOST_LOG_TRIVIAL(info) << "[MQTT_INFO] lost-session watcher stood down for " << self->client_id_;
+                break;
+            }
+
+            const long long elapsed = steady_ms_since(t0);
+            const Verdict   verdict = decide(elapsed, self->connected_.load(std::memory_order_acquire));
+            if (verdict == Verdict::Restored) {
+                BOOST_LOG_TRIVIAL(info) << "[MQTT_INFO] MQTT connection restored after " << elapsed / 1000 << " s, address: " << self->server_address_;
+                self->is_reconnecting.store(false, std::memory_order_release);
+                break;
+            }
+            if (verdict == Verdict::KeepWaiting) {
+                BOOST_LOG_TRIVIAL(info) << "[MQTT_INFO] MQTT connection still down after " << elapsed / 1000
+                                        << " s; waiting up to " << GIVE_UP_AFTER_MS / 1000 << " s, address: " << self->server_address_;
+                continue;
+            }
+
+            if (stopping(*self, *watch))
+                break;
+            BOOST_LOG_TRIVIAL(error) << "[MQTT_INFO] MQTT connection not restored after " << elapsed / 1000
+                                     << " s, giving up, address: " << self->server_address_;
+            std::string dc_msg;
+            self->Disconnect(dc_msg); // also clears is_reconnecting
+            if (stopping(*self, *watch))
+                break;
+            self->report_connection_failure();
+            break;
         }
+        watch->pending_reconnect_checks.fetch_sub(1, std::memory_order_acq_rel);
+    }).detach();
+    } catch (const std::exception& e) {
+        // No thread, no watcher: leave nothing counted or claimed.
+        BOOST_LOG_TRIVIAL(error) << "[MQTT_INFO] could not start the lost-session watcher: " << e.what();
+        watch->pending_reconnect_checks.fetch_sub(1, std::memory_order_acq_rel);
+        is_reconnecting.store(false, std::memory_order_release);
+    }
+}
 
-        is_reconnecting.store(true, std::memory_order_release);
-        pending_reconnect_checks.fetch_add(1, std::memory_order_release);
+bool MqttClient::stopping(const MqttClient& self, const ReconnectWatch& watch)
+{
+    return self.tearing_down_.load(std::memory_order_acquire) || watch.stop.load(std::memory_order_acquire);
+}
 
-        {
-            std::thread([weak_self]() {
-                
-                std::this_thread::sleep_for(std::chrono::seconds(20));
+bool MqttClient::sleep_unless_stopped(const std::shared_ptr<ReconnectWatch>& watch, long long ms)
+{
+    // 250 ms slices: ~MqttClient waits at most 2 s for the checkers, and a
+    // checker asleep for a whole interval would blow through that.
+    constexpr long long SLICE_MS = 250;
+    while (ms > 0) {
+        if (watch->stop.load(std::memory_order_acquire))
+            return false;
+        const long long step = ms < SLICE_MS ? ms : SLICE_MS;
+        std::this_thread::sleep_for(std::chrono::milliseconds(step));
+        ms -= step;
+    }
+    return !watch->stop.load(std::memory_order_acquire);
+}
 
-                if (auto self = weak_self.lock()) {
+void MqttClient::report_connection_failure()
+{
+    if (failure_reported_.exchange(true, std::memory_order_acq_rel))
+        return;
+    std::function<void()> failure_cb;
+    {
+        std::lock_guard<std::mutex> lock(cb_mtx_);
+        failure_cb = connection_failure_callback_;
+    }
+    if (failure_cb) {
+        failure_cb();
+    }
+}
 
-                    if (self->client_ && self->is_reconnecting.load(std::memory_order_acquire)) {
-                        int remaining = self->pending_reconnect_checks.fetch_sub(1, std::memory_order_acq_rel);
-                        
-                        if (remaining == 0){
-                            self->is_reconnecting.store(false, std::memory_order_release);
-                        } else if (remaining <= 1) {
-                            if (!self->connected_.load(std::memory_order_acquire)) {
-                                BOOST_LOG_TRIVIAL(error) << "[MQTT_INFO] MQTT connection not restored after 20 seconds";
-                                std::string dc_msg = "";
-                                self->Disconnect(dc_msg);
-                                std::function<void()> failure_cb;
-                                {
-                                    std::lock_guard<std::mutex> lock(self->cb_mtx_);
-                                    failure_cb = self->connection_failure_callback_;
-                                }
-                                if (failure_cb) {
-                                    failure_cb();
-                                }
-                            }
-                            
-                            self->is_reconnecting.store(false, std::memory_order_release);
-                        }
-                    } else {                        
-                        BOOST_LOG_TRIVIAL(debug) << "[MQTT_INFO] MQTT Client has been destructed";
-                    }
+void MqttClient::reconnect_now(const std::string& reason)
+{
+    if (tearing_down_.load(std::memory_order_acquire))
+        return;
+    if (!wants_connection_.load(std::memory_order_acquire) || !ever_connected_.load(std::memory_order_acquire)) {
+        BOOST_LOG_TRIVIAL(debug) << "[MQTT_INFO] " << reason << ": " << client_id_ << " has no session to restore; skipped";
+        return;
+    }
+    // The gate: exactly one caller flips false -> true and owns the bounce
+    // until its worker clears the flag; every other caller (a second resume,
+    // the same resume seen twice) is turned away here.
+    bool not_active = false;
+    if (!manual_reconnect_active_.compare_exchange_strong(not_active, true, std::memory_order_acq_rel, std::memory_order_acquire)) {
+        BOOST_LOG_TRIVIAL(info) << "[MQTT_INFO] " << reason << ": " << client_id_ << " is already reconnecting; skipped";
+        return;
+    }
+    std::weak_ptr<MqttClient> weak_self = self_;
+    if (weak_self.expired()) {
+        manual_reconnect_active_.store(false, std::memory_order_release);
+        return;
+    }
+
+    // From here this worker owns the outage: the lost-session watcher (if one
+    // is running) stands down, and Paho's own retrying is cancelled by the
+    // bounce below.
+    is_reconnecting.store(false, std::memory_order_release);
+    BOOST_LOG_TRIVIAL(info) << "[MQTT_INFO] " << reason << ": bouncing the session of " << client_id_ << " to " << server_address_;
+
+    std::shared_ptr<ReconnectWatch> watch = watch_;
+    watch->pending_reconnect_checks.fetch_add(1, std::memory_order_acq_rel);
+    try {
+    std::thread([weak_self, watch, reason]() {
+        using namespace Slic3r::MqttReconnectPolicy;
+        const auto t0      = std::chrono::steady_clock::now();
+        bool       bounced = false;
+        for (;;) {
+            auto self = weak_self.lock();
+            if (!self || self->tearing_down_.load(std::memory_order_acquire) || watch->stop.load(std::memory_order_acquire))
+                break;
+            if (!self->wants_connection_.load(std::memory_order_acquire)) {
+                // The owner closed the session while we were retrying.
+                self->manual_reconnect_active_.store(false, std::memory_order_release);
+                break;
+            }
+
+            if (!bounced) {
+                // Always: after a sleep Paho may still hold a socket that is
+                // dead on the wire, and it reconnects nothing while it
+                // believes the socket is up.
+                std::string dc_msg;
+                self->do_disconnect(dc_msg);
+                bounced = true;
+            }
+
+            std::string msg;
+            bool        up = false;
+            try {
+                up = self->Connect(msg);
+            } catch (const std::exception& e) {
+                msg = e.what();
+            }
+            if (up) {
+                BOOST_LOG_TRIVIAL(info) << "[MQTT_INFO] " << reason << ": session of " << self->client_id_ << " restored after "
+                                        << steady_ms_since(t0) / 1000 << " s";
+                // Sessions are persistent (clean_session=false) so the broker
+                // usually still holds the subscriptions; this covers the one
+                // that does not. Still under the gate: a second bounce must
+                // not tear the socket down under these subscribes.
+                self->resubscribe_topics();
+                self->manual_reconnect_active_.store(false, std::memory_order_release);
+                // A drop that arrived while the gate was held started no
+                // watcher (connection_lost() defers to the bounce). If the new
+                // session is already gone, hand the outage to the ordinary
+                // watcher now; Paho's own retrying is armed either way.
+                if (!self->connected_.load(std::memory_order_acquire) && !stopping(*self, *watch)) {
+                    BOOST_LOG_TRIVIAL(warning) << "[MQTT_INFO] " << reason << ": session of " << self->client_id_
+                                               << " dropped again during the bounce; watching it";
+                    self->connection_lost("dropped during the resume bounce");
                 }
-            }).detach();            
-        }       
-    } else {        
-        pending_reconnect_checks.fetch_add(1, std::memory_order_release);
+                break;
+            }
+
+            const long long elapsed = steady_ms_since(t0);
+            if (decide(elapsed, false) == Verdict::GiveUp) {
+                if (stopping(*self, *watch))
+                    break;
+                BOOST_LOG_TRIVIAL(error) << "[MQTT_INFO] " << reason << ": session of " << self->client_id_ << " not restored after "
+                                         << elapsed / 1000 << " s (" << msg << "), giving up";
+                std::string dc_msg;
+                self->Disconnect(dc_msg);
+                self->manual_reconnect_active_.store(false, std::memory_order_release);
+                if (stopping(*self, *watch))
+                    break;
+                self->report_connection_failure();
+                break;
+            }
+            BOOST_LOG_TRIVIAL(warning) << "[MQTT_INFO] " << reason << ": connect to " << self->server_address_ << " failed (" << msg
+                                       << ") after " << elapsed / 1000 << " s; retrying";
+            const long long wait = next_wait_ms(elapsed, RESUME_RETRY_MS);
+            self.reset(); // never pin the client while asleep
+            if (!sleep_unless_stopped(watch, wait))
+                break;
+        }
+        watch->pending_reconnect_checks.fetch_sub(1, std::memory_order_acq_rel);
+    }).detach();
+    } catch (const std::exception& e) {
+        // No thread, no bounce: release the gate and the count, or the next
+        // resume would be turned away for ever.
+        BOOST_LOG_TRIVIAL(error) << "[MQTT_INFO] " << reason << ": could not start the reconnect worker: " << e.what();
+        watch->pending_reconnect_checks.fetch_sub(1, std::memory_order_acq_rel);
+        manual_reconnect_active_.store(false, std::memory_order_release);
     }
 }
 
@@ -494,18 +750,17 @@ void MqttClient::on_failure(const mqtt::token& tok)
             BOOST_LOG_TRIVIAL(error) << "[MQTT_INFO] Reason code: " << tok.get_reason_code();
         }
  
-        BOOST_LOG_TRIVIAL(error) << "The first connection failed. Since no successful connection has been made before, automatic reconnection remains disabled";
-        
         connected_.store(false, std::memory_order_release);
 
-        std::function<void()> failure_cb;
-        {
-            std::lock_guard<std::mutex> lock(cb_mtx_);
-            failure_cb = connection_failure_callback_;
+        if (manual_reconnect_active_.load(std::memory_order_acquire)) {
+            // One attempt of a reconnect_now() loop failed; the loop retries
+            // and reports only when its whole window has closed.
+            BOOST_LOG_TRIVIAL(warning) << "[MQTT_INFO] connect attempt failed during a reconnect_now() window; not reported";
+            return;
         }
-        if (failure_cb) {
-            failure_cb();
-        }
+
+        BOOST_LOG_TRIVIAL(error) << "The first connection failed. Since no successful connection has been made before, automatic reconnection remains disabled";
+        report_connection_failure();
     } else {
         BOOST_LOG_TRIVIAL(error) << "[MQTT_INFO] Operation failed for token: " << tok.get_message_id();
         if (tok.get_reason_code() != 0) {
@@ -530,9 +785,10 @@ void MqttClient::connected(const std::string& cause)
 
     connected_.store(true, std::memory_order_release);
     is_reconnecting.store(false, std::memory_order_release);
-    
+    failure_reported_.store(false, std::memory_order_release);
+
     ever_connected_.store(true, std::memory_order_release);
-        
+
     connOpts_.set_automatic_reconnect(std::chrono::seconds(2), std::chrono::seconds(30));
     BOOST_LOG_TRIVIAL(info) << "[MQTT_INFO] auto-reconnect enabled after successful connection";
 }
@@ -554,7 +810,11 @@ void MqttClient::resubscribe_topics() {
     }
 
     for (const auto& topic_pair : topics) {
-        {
+        // subscribe() throws (MQTTASYNC_DISCONNECTED) if the session dropped
+        // again between the connect and this call; on the detached reconnect
+        // worker an escaping exception would be terminate(), so it is a log
+        // line here and the next topic is tried (it will throw too, cheaply).
+        try {
             auto tok = client_->subscribe(topic_pair.first, topic_pair.second, nullptr,  subListener_);
             if (!tok->wait_for(std::chrono::seconds(5))) {
                 BOOST_LOG_TRIVIAL(info) << "[MQTT_INFO] Subscribe timeout for topic: " << topic_pair.first;
@@ -563,6 +823,9 @@ void MqttClient::resubscribe_topics() {
             if (!tok->is_complete() || tok->get_return_code() != 0) {
                 BOOST_LOG_TRIVIAL(info) << "[MQTT_INFO] Failed to resubscribe to topic: " << topic_pair.first;
             }
+        } catch (const mqtt::exception& e) {
+            BOOST_LOG_TRIVIAL(warning) << "[MQTT_INFO] Could not resubscribe to topic " << topic_pair.first << ": " << e.what()
+                                       << ", rc=" << e.get_return_code();
         }
     }
 }
@@ -604,12 +867,18 @@ MqttClient::~MqttClient()
 
     connected_.store(false, std::memory_order_release);
     is_reconnecting.store(false, std::memory_order_release);
+    wants_connection_.store(false, std::memory_order_release);
+    unregister_live(this);
 
     // 2. Wait briefly for the detached reconnect-check threads to finish so
-    //    they do not call Disconnect() on a client being destroyed.
+    //    they do not call Disconnect() on a client being destroyed. They hold
+    //    watch_ by shared_ptr (not the client), poll its stop flag every
+    //    250 ms and count themselves out of pending_reconnect_checks on the
+    //    way out, so this normally returns within one slice.
+    watch_->stop.store(true, std::memory_order_release);
     int timeout_count = 0;
     const int max_timeout = 20; // max 2s (20 * 100ms)
-    while (pending_reconnect_checks.load(std::memory_order_acquire) > 0 && timeout_count < max_timeout) {
+    while (watch_->pending_reconnect_checks.load(std::memory_order_acquire) > 0 && timeout_count < max_timeout) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
         timeout_count++;
     }

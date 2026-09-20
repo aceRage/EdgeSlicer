@@ -1703,38 +1703,6 @@ void Tab::on_value_change(const std::string& opt_key, const boost::any& value)
         }
     }
 
-    // BBS: Add warning notification for Snapmaker U1 + Print by Object
-    if (opt_key == "print_sequence") {
-        PrintSequence print_seq = m_config->opt_enum<PrintSequence>("print_sequence");
-
-        if (print_seq == PrintSequence::ByObject) {
-            // Get current printer model
-            auto printer_model_opt = wxGetApp().preset_bundle->printers.get_edited_preset().config.option<ConfigOptionString>("printer_model");
-
-            if (printer_model_opt && !printer_model_opt->value.empty()) {
-                std::string printer_model = printer_model_opt->value;
-
-                // Check if this is Snapmaker U1 printer
-                bool is_snapmaker_u1 = boost::icontains(printer_model, "Snapmaker") &&
-                                       boost::icontains(printer_model, "U1");
-
-                if (is_snapmaker_u1) {
-                    // Show red warning notification
-                    if (wxGetApp().plater() && wxGetApp().plater()->get_notification_manager()) {
-                        wxString warning_text = _L("Printing by object with caution. This function may cause the print head to collide with printed parts during switching.");
-                        wxGetApp().plater()->get_notification_manager()->push_plater_error_notification(warning_text.ToStdString());
-                    }
-                }
-            }
-        } else {
-            // Clear warning when switching away from ByObject
-            if (wxGetApp().plater() && wxGetApp().plater()->get_notification_manager()) {
-                wxString warning_text = _L("Printing by object with caution. This function may cause the print head to collide with printed parts during switching.");
-                wxGetApp().plater()->get_notification_manager()->close_plater_error_notification(warning_text.ToStdString());
-            }
-        }
-    }
-
     // BBS set support style to default when support type changes
     // Orca: do this only in simple mode
     if (opt_key == "support_type" && m_mode == comSimple) {
@@ -2712,7 +2680,11 @@ void TabPrint::build()
         optgroup->append_single_option_line("flush_into_support", "multimaterial_settings_flush_options#flush-into-objects-support");
         optgroup = page->new_optgroup(L("Advanced"), L"advanced");
         optgroup->append_single_option_line("interlocking_beam", "multimaterial_settings_advanced#interlocking-beam");
+        optgroup->append_single_option_line("toolchange_ordering", "multimaterial_settings_advanced#toolchange-ordering");
+        optgroup->append_single_option_line("toolchange_cyclic_order", "multimaterial_settings_advanced#toolchange-order");
+        optgroup->append_single_option_line("toolchange_cyclic_first_layer", "multimaterial_settings_advanced#toolchange-order");
         optgroup->append_single_option_line("interface_shells", "multimaterial_settings_advanced#interface-shells");
+        optgroup->append_single_option_line("enable_order_independent_overlap_carving", "multimaterial_settings_advanced#order-independent-overlap-carving");
         // Paint Depth Stage 1: paint_depth_mode/walls/mm supersede the old
         // mmu_segmented_region_max_width single-float control on this page (that key
         // stays defined - see PrintConfig.cpp - only for legacy project/preset parsing).
@@ -4463,6 +4435,10 @@ void TabFilament::build()
         optgroup->append_single_option_line("filament_multitool_ramming");
         optgroup->append_single_option_line("filament_multitool_ramming_volume");
         optgroup->append_single_option_line("filament_multitool_ramming_flow");
+        // BBS: extruder-change long retraction (dual-nozzle machines such as H2D). Upstream shows these
+        // on its own "Multi Filament" page; this group is the fork's nearest equivalent.
+        optgroup->append_single_option_line("long_retractions_when_ec", "", 0);
+        optgroup->append_single_option_line("retraction_distances_when_ec", "", 0);
 
     page = add_options_page(L("Dependencies"), "advanced");
         optgroup = page->new_optgroup(L("Compatible printers"), "param_dependencies_printers");

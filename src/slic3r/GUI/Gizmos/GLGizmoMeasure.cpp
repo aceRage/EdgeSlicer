@@ -698,7 +698,8 @@ void GLGizmoMeasure::on_render()
                     // Ultra: Triangle / Curve assembly modes pick the raw facet / a curved patch directly.
                     const int pick_kind = (m_measure_mode == EMeasureMode::ONLY_ASSEMBLY && m_assembly_mode == AssemblyMode::TRIANGLE_TRIANGLE) ? 1 :
                                           (m_measure_mode == EMeasureMode::ONLY_ASSEMBLY && m_assembly_mode == AssemblyMode::CURVE_CURVE)       ? 2 : 0;
-                    curr_feature = m_curr_measuring->get_feature(model_facet_idx, position_on_model, hit_tran, m_only_select_plane, snap_radius, pick_kind);
+                    curr_feature = m_curr_measuring->get_feature(model_facet_idx, position_on_model, hit_tran, m_only_select_plane, snap_radius, pick_kind,
+                                                                 ultra_curve_pick_params());
                 }
             }
             if (m_measure_mode == EMeasureMode::ONLY_ASSEMBLY) {
@@ -2854,6 +2855,33 @@ void GLGizmoMeasure::ultra_fit_for_print_and_merge()
     p1 = W1 * p1; d1 = (W1.linear() * d1).normalized(); for (auto& P : b1) P = W1 * P;
     p2 = W2 * p2; d2 = (W2.linear() * d2).normalized(); for (auto& P : b2) P = W2 * P;
 
+    // Ultra (Curve mode): a Curve pick is not necessarily a cylinder. Fit both analytic shapes and let the
+    // residual decide. When BOTH picks come back as spheres the mate is centre-to-centre -- two hemispheres
+    // nest by making their centres coincide, and a normal-based mate would instead butt them nose to nose.
+    const Measure::PatchFit fit1 = ultra_curve_fit_print(vt, *m_selected_features.first.feature);
+    const Measure::PatchFit fit2 = ultra_curve_fit_print(va, *m_selected_features.second.feature);
+    if (fit1.ok && fit2.ok && fit1.shape == Measure::PatchShape::Sphere && fit2.shape == Measure::PatchShape::Sphere) {
+        const Transform3d Msph = Transform3d(Eigen::Translation3d(fit1.centre - fit2.centre));
+        const double dr = fit2.radius - fit1.radius;
+        BOOST_LOG_TRIVIAL(warning) << "[UltraFit] sphere mate: r1=" << fit1.radius << " (res " << fit1.residual
+                                   << ") r2=" << fit2.radius << " (res " << fit2.residual << ") dr=" << dr;
+        ModelObject* amo_sph = model.objects[va->object_idx()];
+        if (amo_sph->instances.empty()) return;
+        wxGetApp().plater()->take_snapshot("Auto-fit");
+        ultra_apply_attachment_print_pose(Msph * amo_sph->instances[0]->get_transformation().get_matrix());
+        m_ultra_adjust_rot = 0.f; m_ultra_adjust_off = 0.f;
+        notify((boost::format(_u8L("Auto-fit (sphere): centres aligned, moved %.1fmm. Radii %.2f / %.2f mm (mismatch %.2f mm)."))
+                % Msph.translation().norm() % fit1.radius % fit2.radius % std::abs(dr)).str());
+        return;
+    }
+    // A cylinder fit does not change the mate -- the axis it reports IS the picked patch's mean normal
+    // direction's orthogonal, and the legacy (normal, centroid) mate plus the collision roll below already
+    // handles it. It is logged so a bad pick is diagnosable.
+    if (fit1.ok || fit2.ok)
+        BOOST_LOG_TRIVIAL(warning) << "[UltraFit] curve fits: 1 shape=" << int(fit1.shape) << " r=" << fit1.radius
+                                   << " rel=" << fit1.rel_residual << " | 2 shape=" << int(fit2.shape)
+                                   << " r=" << fit2.radius << " rel=" << fit2.rel_residual;
+
     // Normal alignment: rotate the attachment so its face normal is anti-parallel to the target's.
     Vec3d axis; double phi; Matrix3d R;
     Geometry::rotation_from_two_vectors(d2, -d1, axis, phi, &R);
@@ -3037,6 +3065,104 @@ void GLGizmoMeasure::ultra_adjust_offset(double mm_delta, bool take_shot)
     if (take_shot) wxGetApp().plater()->take_snapshot("Adjust offset", UndoRedo::SnapshotType::GizmoAction);
     const Transform3d delta = Transform3d(Eigen::Translation3d(dp * mm_delta));
     ultra_apply_attachment_print_pose(delta * amo->instances[0]->get_transformation().get_matrix());
+}
+
+// Ultra (Curve mode): fit the picked patch, then carry the fit into PRINT world. A Curve pick is the only
+// kind whose facet list describes a curved surface, so every other feature returns a Plane fit and the
+// caller keeps the legacy (mean normal, centroid) mate untouched.
+Measure::PatchFit GLGizmoMeasure::ultra_curve_fit_print(GLVolume* v, const Measure::SurfaceFeature& f)
+{
+    Measure::PatchFit fit; // shape == Plane, ok == false
+    if (!v || f.get_type() != Measure::SurfaceFeatureType::Curve || !f.plane_indices) return fit;
+    auto it = m_mesh_measure_map.find(v);
+    if (it == m_mesh_measure_map.end() || !it->second) return fit;
+    fit = Measure::fit_patch(it->second->get_its(), *f.plane_indices);
+    if (!fit.ok) return fit;
+    // mesh -> print == (view -> print) * (mesh -> view == world_tran)
+    Transform3d w2p;
+    if (!ultra_w2p(v, f, w2p)) { fit.ok = false; fit.shape = Measure::PatchShape::Plane; return fit; }
+    const Transform3d M = w2p * f.world_tran;
+    fit.centre = M * fit.centre;
+    fit.axis   = (M.linear() * fit.axis).normalized();
+    // Uniform-scale the radius with the transform (a non-uniform instance scale would make "radius"
+    // meaningless anyway, and the residual check below is what guards against a bad fit).
+    const double s = (M.linear() * Vec3d::UnitX()).norm();
+    fit.radius   *= s;
+    fit.residual *= s;
+    return fit;
+}
+
+// Ultra (Curve mode): app-config keys for the two Curve-pick settings.
+static const char* ULTRA_CURVE_ANGLE_KEY  = "assembly_curve_angle";
+static const char* ULTRA_CURVE_SHELL_KEY  = "assembly_curve_smooth_shell";
+// Ultra (Curve mode): the per-step crease limit. A Curve pick always stops at an edge sharper than this,
+// which is what makes a smooth-shell pick stop at a cut face's rim. Not exposed: the owner's ask was the
+// TOTAL spread; this one is the "what counts as a sharp edge" constant and 8 deg matches the tessellation
+// of every model we have tried.
+static constexpr float ULTRA_CURVE_STEP_DEG = 8.0f;
+// Ultra (Curve mode): with no total cap a pick can run over the whole mesh, so the facet bound is lifted
+// from the hover-time 20000 to "no bound" -- a smooth-shell pick is a deliberate click, not a hover.
+static constexpr size_t ULTRA_CURVE_SHELL_MAX_FACETS = size_t(-1);
+static constexpr float  ULTRA_CURVE_TOOLTIP_WIDTH = 400.0f;
+
+void GLGizmoMeasure::ultra_load_curve_pick_settings()
+{
+    if (m_ultra_curve_settings_loaded) return;
+    m_ultra_curve_settings_loaded = true;
+    AppConfig* cfg = wxGetApp().app_config;
+    if (!cfg) return;
+    const std::string a = cfg->get(ULTRA_CURVE_ANGLE_KEY);
+    if (!a.empty()) {
+        try { m_ultra_curve_angle = std::min(90.0f, std::max(5.0f, float(std::stod(a)))); } catch (...) {}
+    }
+    const std::string s = cfg->get(ULTRA_CURVE_SHELL_KEY);
+    if (!s.empty()) m_ultra_curve_smooth_shell = (s == "1" || s == "true");
+}
+
+Measure::CurvePickParams GLGizmoMeasure::ultra_curve_pick_params() const
+{
+    Measure::CurvePickParams p; // library default == the legacy 8 / 20 / 20000 grow
+    if (m_measure_mode != EMeasureMode::ONLY_ASSEMBLY || m_assembly_mode != AssemblyMode::CURVE_CURVE)
+        return p;
+    p.step_deg = ULTRA_CURVE_STEP_DEG;
+    if (m_ultra_curve_smooth_shell) {
+        p.cap_deg    = -1.0f;                        // no total cap: stop only at sharp edges
+        p.max_facets = ULTRA_CURVE_SHELL_MAX_FACETS;
+    } else {
+        p.cap_deg = m_ultra_curve_angle;
+    }
+    return p;
+}
+
+// Ultra (Curve mode): the "Curve angle" slider and the "Smooth shell" toggle. Changing either invalidates
+// the picks made with the old setting, so both reset the selection -- a half-grown patch mated against a
+// whole-shell one is not something the user asked for.
+void GLGizmoMeasure::ultra_show_curve_pick_ui()
+{
+    if (m_measure_mode != EMeasureMode::ONLY_ASSEMBLY || m_assembly_mode != AssemblyMode::CURVE_CURVE) return;
+    ultra_load_curve_pick_settings();
+    AppConfig* cfg = wxGetApp().app_config;
+    ImGui::Separator();
+    m_imgui->disabled_begin(m_ultra_curve_smooth_shell);
+    float ang = m_ultra_curve_angle;
+    ImGui::PushItemWidth(std::max(180.0f, ImGui::CalcTextSize("Curve angle 00 deg").x * 2.0f));
+    if (ImGui::SliderFloat("##ultra_curve_angle", &ang, 5.0f, 90.0f, "Curve angle %.0f deg")) {
+        m_ultra_curve_angle = std::min(90.0f, std::max(5.0f, ang));
+        if (cfg) cfg->set("app", ULTRA_CURVE_ANGLE_KEY, std::to_string(int(m_ultra_curve_angle + 0.5f)));
+        reset_all_feature();
+    }
+    ImGui::PopItemWidth();
+    m_imgui->disabled_end();
+    if (ImGui::IsItemHovered() || ImGui::IsItemActive())
+        m_imgui->tooltip(_L("How far a curve pick may bend away from the facet under the cursor before it stops growing."), ULTRA_CURVE_TOOLTIP_WIDTH);
+    bool shell = m_ultra_curve_smooth_shell;
+    if (m_imgui->checkbox(_L("Smooth shell"), shell)) {
+        m_ultra_curve_smooth_shell = shell;
+        if (cfg) cfg->set("app", ULTRA_CURVE_SHELL_KEY, shell ? "1" : "0");
+        reset_all_feature();
+    }
+    if (ImGui::IsItemHovered())
+        m_imgui->tooltip(_L("Ignore the angle limit and grow until a sharp edge stops it, so one click takes a whole smooth surface (the outer shell of a half sphere, for instance)."), ULTRA_CURVE_TOOLTIP_WIDTH);
 }
 
 // Ultra: live Adjust sliders (all modes). Values are cumulative since the last mate / pick; each change is

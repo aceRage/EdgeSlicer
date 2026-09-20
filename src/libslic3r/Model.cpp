@@ -1308,6 +1308,9 @@ ModelObject& ModelObject::assign_copy(const ModelObject &rhs)
     this->printable                   = rhs.printable;
     this->origin_translation          = rhs.origin_translation;
     this->cut_id.copy(rhs.cut_id);
+    // RE-EDITABLE CUTS: the recipe describes the cut this object came out of, so a
+    // copy of the object is a copy of that history too.
+    this->cut_recipe                  = rhs.cut_recipe;
     this->copy_transformation_caches(rhs);
 
     this->clear_volumes();
@@ -1716,6 +1719,24 @@ TriangleMesh ModelObject::raw_mesh() const
     return mesh;
 }
 
+// One single volume of this object in world coordinates: instance matrix * volume matrix.
+// Unlike raw_mesh() this keeps modifiers, negative volumes and support blockers/enforcers -
+// they are all meshes and the user may want any of them exported. Passing fix_left_handed
+// to TriangleMesh::transform flips the triangle winding when the combined transform mirrors,
+// exactly as the whole-object export path does, so normals still point outwards.
+TriangleMesh ModelObject::volume_mesh_in_world(int instance_idx, int volume_idx) const
+{
+    if (volume_idx < 0 || volume_idx >= int(this->volumes.size()))
+        return TriangleMesh();
+
+    TriangleMesh mesh(this->volumes[volume_idx]->mesh());
+    Transform3d  trafo = this->volumes[volume_idx]->get_matrix();
+    if (instance_idx >= 0 && instance_idx < int(this->instances.size()))
+        trafo = this->instances[instance_idx]->get_matrix() * trafo;
+    mesh.transform(trafo, true);
+    return mesh;
+}
+
 // Non-transformed (non-rotated, non-scaled, non-translated) sum of non-modifier object volumes.
 // Currently used by ModelObject::mesh(), to calculate the 2D envelope for 2D plater
 // and to display the object statistics at ModelObject::print_info().
@@ -2098,6 +2119,10 @@ bool ModelObject::has_connectors() const
 void ModelObject::invalidate_cut()
 {
     this->cut_id.invalidate();
+    // "Invalidate cut info" means this object is no longer half of a cut, so the
+    // recipe goes with it - leaving it would offer "Edit cut" on an object whose
+    // other half the model no longer relates to.
+    this->cut_recipe.reset();
     for (ModelVolume *volume : this->volumes)
         volume->invalidate_cut_info();
 }

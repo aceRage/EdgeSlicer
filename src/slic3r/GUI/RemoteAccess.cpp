@@ -276,6 +276,16 @@ public:
     void Notify() override
     {
         RemoteAccess::get().heartbeat_review(g_modal_depth);
+        // The LAN reconnect tick rides here too. A LAN-mode Bambu printer's MQTT session used to be
+        // re-established only by MonitorPanel::update, and only with a Bambu cloud login - so with
+        // no account a dropped session stayed dropped until the user left the Device tab and came
+        // back. The panel is lazily built now and the hidden instance never opens it, so the retry
+        // belongs on a tick that always runs. Cheap: a map lookup per selected LAN printer.
+        if (DeviceManager* dm = wxGetApp().getDeviceManager()) {
+            try {
+                dm->lan_reconnect_tick();
+            } catch (...) {}
+        }
         // The printer event watcher rides on this tick: it needs the GUI thread for the Bambu
         // MachineObjects anyway, and it polls at its own, slower rate (RemoteEvents.cpp).
         RemoteEvents::heartbeat();
@@ -1352,6 +1362,13 @@ RemoteAccess::ApiResponse RemoteAccess::api_send(int plate, const std::string& f
 // the confirmation because it throws the print away. Returns a job id; the command and the few
 // seconds of watching what the printer then reports run on their own thread, so the phone's
 // request comes straight back. Nothing here can start a print.
+//
+// The same route carries the printer-error actions - the buttons the desktop's error dialog draws
+// for one specific code, the subset of them a person can judge without standing at the printer:
+// action=resume_error|stop_error|ignore_error|idle_ignore_error|ack_close&err=<code>. Those need
+// `err` and are refused (409) unless it is still the code the printer is reporting; the verbs this
+// phase keeps desktop-only are refused 403. Which are offered for a given error is in that
+// printer's print_error.actions on GET /api/printers.
 RemoteAccess::ApiResponse RemoteAccess::api_printer_control(const std::string& printer, const std::string& form_body)
 {
     ApiResponse r;
@@ -1361,6 +1378,10 @@ RemoteAccess::ApiResponse RemoteAccess::api_printer_control(const std::string& p
     req.action  = get("action");
     req.confirm = get("confirm") == "1";
     req.dry_run = get("dry_run") == "1";
+    // The error code a printer-error action is answering. Required by those verbs and checked
+    // against what the printer is reporting right now (RemoteControl::prepare), so a status page
+    // left open cannot resume an error that has since been replaced by another one.
+    req.err     = get("err");
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         if (m_control_running) { r.status = 409; r.body = json_error("another pause / resume / stop is still running"); return r; }
@@ -1972,6 +1993,11 @@ RemoteAccess::ApiResponse RemoteAccess::api_info()
     j["slicing"] = m_slicing;
     j["hidden"]  = m_hidden;
     j["version"] = std::string(SLIC3R_VERSION);
+    // Where this PC keeps the G-code archive. The hub reads it so that a running job's
+    // thumbnail still resolves once every slicer window is closed (GET /r/<token>/printers/
+    // <id>/thumbnail.png): the sidecars are plain files, but only an instance knows which
+    // folder the preference points at. A path on this PC, and this API is loopback-only.
+    j["archive_dir"] = GcodeArchive::dir();
     j["needs_attention"]  = m_needs_attention;
     j["attention_reason"] = m_attention_reason;
     j["attention_kind"]   = m_attention_kind;
@@ -2234,7 +2260,7 @@ RemoteAccess::ApiResponse RemoteAccess::handle_api(const std::string& method, co
         j["version"] = 2;
         j["routes"]  = nlohmann::json::array({
             { {"method", "GET"},  {"path", "/api"},                        {"description", "this manifest"} },
-            { {"method", "GET"},  {"path", "/api/info"},                   {"description", "this instance: pid, project title and path, slicing flag, hidden flag"} },
+            { {"method", "GET"},  {"path", "/api/info"},                   {"description", "this instance: pid, project title and path, slicing flag, hidden flag, archive_dir (where the G-code archive keeps its sidecars)"} },
             { {"method", "GET"},  {"path", "/api/window"},                 {"description", "is this instance's window shown? {hidden, iconized}"} },
             { {"method", "POST"}, {"path", "/api/window?show=1|0"},        {"description", "show (and raise) or hide this instance's window"} },
             { {"method", "POST"}, {"path", "/api/quit[?discard=1]"},       {"description", "close this instance; without discard the unsaved project is saved first (an unnamed one under <datadir>/hub/saves)"} },
@@ -2247,8 +2273,8 @@ RemoteAccess::ApiResponse RemoteAccess::handle_api(const std::string& method, co
             { {"method", "GET"},  {"path", "/api/plates/{index}/preview.png?view=front|rear|left|right&layer={index}&w=&h=[&zoom=&cx=&cy=]"}, {"description", "orthographic render of the toolpaths up to that layer (the PC's layer slider follows); zoom over the fit and the fitted-image fraction shown at the centre; X-Preview-Zoom = zoom really used"} },
             { {"method", "GET"},  {"path", "/api/plates/{index}/preview/status"}, {"description", "sliced / slicing / slicing_percent / result_id for that plate, without changing what the PC shows"} },
             { {"method", "POST"}, {"path", "/api/objects/transform"},       {"description", "form obj=&inst=[&x=&y=][&rz=][&scale=][&center=1]: move / rotate / scale one instance like the sidebar (undoable)"} },
-            { {"method", "GET"},  {"path", "/api/printers[?plate={index}]"}, {"description", "known printers with live status and what a send needs: kind bambu|printhost|connect|snapmaker, online, lan_mode, access_code_set, sdcard, has_ams, model_matches, can_upload, can_print, options (the desktop's remembered defaults), upload_name (the file name the desktop's export would give plate {index}, the current plate without it - print hosts, the connected Snapmaker and a Snapmaker over the LAN); a Snapmaker over the LAN adds ip, port, added_by, toolheads, layer, total_layers and left_time_s, so one card can show everything /api/snapmaker/devices reports; and what a control needs: can_pause, can_resume, can_stop, print_status, stage, print_error {code, message} and the hms summary; a print host or connected Snapmaker that answers as a Moonraker printer adds bed_temp, bed_target and nozzles too (absent when it does not)"} },
-            { {"method", "POST"}, {"path", "/api/printers/{id}/control"},  {"description", "form action=pause|resume|stop[&confirm=1][&dry_run=1]: pause, resume or stop the print on that printer, exactly as the desktop's own buttons do (stop = cancel the print and needs confirm=1; pause and resume do not). Returns a job id; the job's result says what the printer then reported. 409 when the printer's own state does not allow it (see can_pause / can_resume / can_stop). {id} is any id /api/printers lists, sm:{id} for a Snapmaker over the LAN included"} },
+            { {"method", "GET"},  {"path", "/api/printers[?plate={index}]"}, {"description", "known printers with live status and what a send needs: kind bambu|printhost|connect|snapmaker, online, lan_mode, access_code_set, sdcard, has_ams, model_matches, can_upload, can_print, options (the desktop's remembered defaults), upload_name (the file name the desktop's export would give plate {index}, the current plate without it - print hosts, the connected Snapmaker and a Snapmaker over the LAN); a Snapmaker over the LAN adds ip, port, added_by, toolheads, layer, total_layers and left_time_s, so one card can show everything /api/snapmaker/devices reports; and what a control needs: can_pause, can_resume, can_stop, print_status, stage, print_error {code, message, job_id, actions[]} (null when there is none; each action is {id, verb, label, needs_job_id, remote_safe} - the same buttons the desktop error dialog draws for that code) and the hms summary; a print host or connected Snapmaker that answers as a Moonraker printer adds bed_temp, bed_target and nozzles too (absent when it does not)"} },
+            { {"method", "POST"}, {"path", "/api/printers/{id}/control"},  {"description", "form action=pause|resume|stop[&confirm=1][&dry_run=1]: pause, resume or stop the print on that printer, exactly as the desktop's own buttons do (stop = cancel the print and needs confirm=1; pause and resume do not). Returns a job id; the job's result says what the printer then reported. 409 when the printer's own state does not allow it (see can_pause / can_resume / can_stop). {id} is any id /api/printers lists, sm:{id} for a Snapmaker over the LAN included. The same route answers a Bambu printer error with the buttons its own dialog would draw: action=resume_error|stop_error|ignore_error|idle_ignore_error|ack_close&err={code} (stop_error needs confirm=1). Which of them a given error offers is print_error.actions on GET /api/printers, where each entry is {id, verb, label, needs_job_id, remote_safe}; a verb the error does not offer, one whose code is no longer the one the printer reports, or one that needs a job_id the printer has not got, is 409, and a verb this phase keeps desktop-only (the AMS controls, drying, nozzle recheck, buzzer, purification) is 403"} },
             { {"method", "POST"}, {"path", "/api/slice?plate={index}|all"}, {"description", "start slicing one plate (selects it) or all; returns a job id; 409 while slicing"} },
             { {"method", "POST"}, {"path", "/api/plates/{index}/send"},    {"description", "form printer={id}&mode=upload|print[&confirm=1][&force=1][&dry_run=1][&bed_leveling=0|1&flow_cali=0|1&timelapse=0|1&vibration_cali=0|1&use_ams=0|1][&name=][&mapping=0:1,1:2]: send the sliced plate to a printer exactly like the desktop's Send / Print dialogs (upload = to the printer's storage, print = start it; print needs confirm=1). A Snapmaker over the LAN (printer sm:{id}) takes `mapping` = which toolhead prints each of the file's filaments, defaulting to the colour match its own app makes; returns a job id; 409 unless the plate is sliced and no other send is running"} },
             { {"method", "GET"},  {"path", "/api/events?since={id}"},      {"description", "what this instance's printer watcher has seen, newest last: {events, last_id, watcher}. Each event is {local_id, time, instance, printer {id, name, kind}, kind started|finished|failed|cancelled|paused|resumed|runout|error, severity info|warning|error, title, text, code?, job?}. The hub keeps the merged history of every instance at /events on the phone link. `watcher` says what the live poll has seen: {poll_ms, last_poll, last_poll_ms, printers[{id, kind, online, watched, state, seen_at?}]}, where seen_at is the poll that seeded that printer - until it has one, and until last_poll has moved past it, a change on that printer seeds the watcher instead of making an event"} },

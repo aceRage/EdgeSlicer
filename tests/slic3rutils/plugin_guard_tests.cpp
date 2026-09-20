@@ -26,6 +26,8 @@ using Slic3r::GUI::camera_tools_copy_decision;
 using Slic3r::GUI::is_ultranet_plugin;
 using Slic3r::GUI::may_overwrite_bambusource;
 using Slic3r::GUI::plugin_guard_decision;
+using Slic3r::GUI::PluginSync;
+using Slic3r::GUI::plugin_sync_decision;
 
 TEST_CASE("UltraNet is a library AND a marker, never one alone", "[PluginGuard]")
 {
@@ -130,4 +132,35 @@ TEST_CASE("An upgrade keeps a camera component the user downloaded", "[PluginGua
     // ...while our own older placeholder may be refreshed, and an absent file simply written.
     CHECK(may_overwrite_bambusource(true, false));
     CHECK(may_overwrite_bambusource(false, false));
+}
+
+TEST_CASE("The sidecar plug-in is authoritative over whatever sits in plugins/", "[PluginGuard]")
+{
+    // Fresh data dir: install and mark.
+    CHECK(plugin_sync_decision(/*sidecar*/ true, /*installed*/ false, /*identical*/ false, /*marker*/ false, /*keep*/ false) == PluginSync::InstallFresh);
+    // The reported bug: after an upgrade the older UltraNet stayed (different bytes, so no marker was
+    // ever written), the CDN paths came back and Bambu's package replaced it. Now it is updated.
+    CHECK(plugin_sync_decision(true, true, false, false, false) == PluginSync::ReplaceForeign);
+    // Same with an old marker beside an old DLL: the marker does not make it current.
+    CHECK(plugin_sync_decision(true, true, false, true, false) == PluginSync::ReplaceForeign);
+    // Bambu's plug-in already replaced ours (or came in with a migrated data dir): take it back.
+    CHECK(plugin_sync_decision(true, true, false, false, false) == PluginSync::ReplaceForeign);
+    // Already ours and marked: nothing to do on every later start.
+    CHECK(plugin_sync_decision(true, true, true, true, false) == PluginSync::Nothing);
+    // A 2.3.7.0 install shipped the DLLs without a marker: mark, do not copy.
+    CHECK(plugin_sync_decision(true, true, true, false, false) == PluginSync::WriteMarkerOnly);
+}
+
+TEST_CASE("No sidecar means no opinion, and the escape hatch keeps a foreign plug-in", "[PluginGuard]")
+{
+    // A developer tree or a platform without the sidecar must not touch plugins/ at all.
+    CHECK(plugin_sync_decision(false, false, false, false, false) == PluginSync::Nothing);
+    CHECK(plugin_sync_decision(false, true, false, false, false) == PluginSync::Nothing);
+    CHECK(plugin_sync_decision(false, true, false, true, false) == PluginSync::Nothing);
+    // ultranet_keep_foreign_plugin: a developer testing another build of the DLL keeps it.
+    CHECK(plugin_sync_decision(true, true, false, false, true) == PluginSync::Nothing);
+    CHECK(plugin_sync_decision(true, true, false, true, true) == PluginSync::Nothing);
+    // The hatch never blocks a fresh install or the marker on an identical copy.
+    CHECK(plugin_sync_decision(true, false, false, false, true) == PluginSync::InstallFresh);
+    CHECK(plugin_sync_decision(true, true, true, false, true) == PluginSync::WriteMarkerOnly);
 }

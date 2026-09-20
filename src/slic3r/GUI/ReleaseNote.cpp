@@ -1,5 +1,7 @@
 #include "ReleaseNote.hpp"
 #include "RemoteAccess.hpp"
+#include "DeviceManager.hpp"
+#include "PrintErrorCommands.hpp"
 #include "I18N.hpp"
 
 #include "libslic3r/Utils.hpp"
@@ -1080,15 +1082,56 @@ void PrintErrorDialog::update_title_style(wxString title, std::vector<int> butto
     }
     m_sizer_button->Clear();
     m_used_button = button_style;
+
+    // A command that carries "job_id" is rejected by the printer when the id is empty or stale,
+    // so those buttons are shown greyed rather than armed with something that cannot work. The
+    // user can still see what the printer would have offered, which is the point of showing them
+    // at all instead of hiding them.
+    const bool have_job_id = !m_job_id.empty();
+
     for (int button_id : button_style) {
-        if (m_button_list.find(button_id) != m_button_list.end()) {
-            m_sizer_button->Add(m_button_list[button_id], 0, wxALL, FromDIP(5));
-            m_button_list[button_id]->Show();
+        // Not a button: the table asking for it means "this error must not be dismissed by
+        // closing the window", so the close box goes away and the user has to pick an action.
+        if (button_id == REMOVE_CLOSE_BTN) continue;
+
+        auto it = m_button_list.find(button_id);
+        if (it == m_button_list.end()) {
+            // Every id the shipped tables use that this dialog cannot draw. Logged rather than
+            // dropped in silence: this is the failure that left a stuck printer with a blank
+            // dialog, and it should be visible in the log if a new id ever appears.
+            BOOST_LOG_TRIVIAL(warning) << "PrintErrorDialog: no button for action id " << button_id;
+            continue;
         }
+        const bool enabled = have_job_id || !print_error_action_needs_job_id(button_id);
+        it->second->Enable(enabled);
+        if (!enabled) {
+            BOOST_LOG_TRIVIAL(info) << "PrintErrorDialog: action id " << button_id
+                                    << " disabled, no job_id for this error";
+        }
+        m_sizer_button->Add(it->second, 0, wxALL, FromDIP(5));
+        it->second->Show();
     }
     Layout();
     Fit();
 
+}
+
+void PrintErrorDialog::set_error_context(MachineObject* obj, int print_error, const std::string& job_id)
+{
+    m_obj         = obj;
+    m_print_error = print_error;
+    m_job_id      = job_id;
+    m_action_json = nlohmann::json();
+}
+
+// The error code as these commands name it.
+//
+// Note this is the decimal spelling of print_error, not the eight-hex form the hms_action tables
+// are keyed by - Bambu Studio passes std::to_string(error_code) and firmware matches on what it
+// is sent, so the mismatch with the lookup key is reproduced deliberately rather than corrected.
+std::string PrintErrorDialog::error_command_arg() const
+{
+    return std::to_string(m_print_error);
 }
 
 void PrintErrorDialog::init_button(PrintErrorButton style,wxString buton_text)
@@ -1108,29 +1151,25 @@ void PrintErrorDialog::init_button(PrintErrorButton style,wxString buton_text)
 
 void PrintErrorDialog::init_button_list()
 {
+    // The resume family. These used to post EVT_SECONDARY_CHECK_RESUME, which StatusPanel turned
+    // into the generic command_task_resume() - a bare {"command":"resume","param":""} with no
+    // "err" and no "job_id". Firmware that gates an error-triggered resume on those fields
+    // ignores it, so the button looked like it worked and the printer stayed stuck. They now send
+    // the error-aware command directly, the way Bambu Studio's own dialog does.
     init_button(RESUME_PRINTING, _L("Resume Printing"));
-    m_button_list[RESUME_PRINTING]->Bind(wxEVT_LEFT_DOWN, [this](wxMouseEvent& e) {
-        post_event(wxCommandEvent(EVT_SECONDARY_CHECK_RESUME));
-        e.Skip();
-    });
+    bind_hms_resume(RESUME_PRINTING);
 
     init_button(RESUME_PRINTING_DEFECTS, _L("Resume Printing (defects acceptable)"));
-    m_button_list[RESUME_PRINTING_DEFECTS]->Bind(wxEVT_LEFT_DOWN, [this](wxMouseEvent& e) {
-        post_event(wxCommandEvent(EVT_SECONDARY_CHECK_RESUME));
-        e.Skip();
-    });
-
+    bind_hms_resume(RESUME_PRINTING_DEFECTS);
 
     init_button(RESUME_PRINTING_PROBELM_SOLVED, _L("Resume Printing (problem solved)"));
-    m_button_list[RESUME_PRINTING_PROBELM_SOLVED]->Bind(wxEVT_LEFT_DOWN, [this](wxMouseEvent& e) {
-        post_event(wxCommandEvent(EVT_SECONDARY_CHECK_RESUME));
-        e.Skip();
-    });
+    bind_hms_resume(RESUME_PRINTING_PROBELM_SOLVED);
 
+    // Likewise: this sent command_task_abort(), the plain stop. The error-aware stop carries the
+    // err and job_id so the printer knows which failure it is abandoning.
     init_button(STOP_PRINTING, _L("Stop Printing"));
-    m_button_list[STOP_PRINTING]->Bind(wxEVT_LEFT_DOWN, [this](wxMouseEvent& e) {
-        post_event(wxCommandEvent(EVT_PRINT_ERROR_STOP));
-        e.Skip();
+    bind_command(STOP_PRINTING, [this] {
+        if (m_obj) m_obj->command_hms_stop(error_command_arg(), m_job_id);
     });
 
     init_button(CHECK_ASSISTANT, _L("Check Assistant"));
@@ -1167,6 +1206,7 @@ void PrintErrorDialog::init_button_list()
 
     init_button(OK_BUTTON, _L("OK"));
     m_button_list[OK_BUTTON]->Bind(wxEVT_LEFT_DOWN, [this](wxMouseEvent& e) {
+        BOOST_LOG_TRIVIAL(info) << "PrintErrorDialog: OK pressed for error " << error_command_arg();
         wxCommandEvent evt(EVT_SECONDARY_CHECK_CONFIRM, GetId());
         e.SetEventObject(this);
         GetEventHandler()->ProcessEvent(evt);
@@ -1174,15 +1214,122 @@ void PrintErrorDialog::init_button_list()
     });
 
     init_button(FILAMENT_LOAD_RESUME, _L("Filament Loaded, Resume"));
-    m_button_list[FILAMENT_LOAD_RESUME]->Bind(wxEVT_LEFT_DOWN, [this](wxMouseEvent& e) {
-        post_event(wxCommandEvent(EVT_SECONDARY_CHECK_RESUME));
-        e.Skip();
-    });
+    bind_hms_resume(FILAMENT_LOAD_RESUME);
 
     init_button(JUMP_TO_LIVEVIEW, _L("View Liveview"));
     m_button_list[JUMP_TO_LIVEVIEW]->Bind(wxEVT_LEFT_DOWN, [this](wxMouseEvent& e) {
         post_event(wxCommandEvent(EVT_JUMP_TO_LIVEVIEW));
         e.Skip();
+    });
+
+    // ---- the ids added to Bambu Studio after this fork branched ----
+    //
+    // Every one of these appears in the shipped hms_action tables and was, until now, dropped on
+    // the floor by update_title_style. Labels follow upstream's wording so a user comparing the
+    // two slicers sees the same button.
+
+    init_button(NO_REMINDER_NEXT_TIME, _L("No Reminder Next Time"));
+    bind_command(NO_REMINDER_NEXT_TIME, [this] {
+        // Silences the popup only. The condition itself is untouched - see IGNORE_RESUME for the
+        // one that actually lets the print continue.
+        if (m_obj) m_obj->command_hms_idle_ignore(error_command_arg(), 0);
+        suppress_this_error();
+    });
+
+    init_button(REFRESH_NOZZLE, _L("Recheck"));
+    bind_command(REFRESH_NOZZLE, [this] {
+        if (m_obj) m_obj->command_refresh_nozzle();
+    });
+
+    init_button(IGNORE_NO_REMINDER_NEXT_TIME, _L("Ignore. Don't Remind Next Time"));
+    bind_command(IGNORE_NO_REMINDER_NEXT_TIME, [this] {
+        if (m_obj) m_obj->command_hms_ignore(error_command_arg(), m_job_id);
+        suppress_this_error();
+    });
+
+    init_button(IGNORE_RESUME, _L("Ignore this and Resume"));
+    bind_command(IGNORE_RESUME, [this] {
+        if (m_obj) m_obj->command_hms_ignore(error_command_arg(), m_job_id);
+    });
+
+    init_button(PROBLEM_SOLVED_RESUME, _L("Problem Solved and Resume"));
+    bind_hms_resume(PROBLEM_SOLVED_RESUME);
+
+    init_button(TURN_OFF_FIRE_ALARM, _L("Got it, Turn off the Fire Alarm."));
+    bind_command(TURN_OFF_FIRE_ALARM, [this] {
+        if (m_obj) m_obj->command_stop_buzzer();
+    });
+
+    init_button(RETRY_PROBLEM_SOLVED, _L("Retry (problem solved)"));
+    bind_command(RETRY_PROBLEM_SOLVED, [this] {
+        if (m_obj) m_obj->command_ams_control("resume");
+    });
+
+    init_button(STOP_DRYING, _L("Stop Drying"));
+    bind_command(STOP_DRYING, [this] {
+        if (m_obj) m_obj->command_ams_drying_stop();
+    });
+
+    init_button(CANCEL_ACTION, _L("Cancel"));
+    bind_command(CANCEL_ACTION, [this] { /* dismiss only, upstream sends nothing */ });
+
+    init_button(PROCEED, _L("Proceed"));
+    bind_command(PROCEED, [this] {
+        if (m_obj && !m_action_json.is_null()) m_obj->command_ack_proceed(m_action_json);
+    });
+
+    // Upstream's version of this also jumps to the Rack page, which this fork's Monitor does not
+    // have (the H2-series rack UI was never ported). It stays a plain acknowledge rather than a
+    // button that navigates nowhere; the printer still gets the clean_print_error it expects.
+    init_button(OK_JUMP_RACK, _L("OK"));
+    bind_command(OK_JUMP_RACK, [this] {
+        if (m_obj) m_obj->command_clean_print_error(m_obj->subtask_id_, m_print_error);
+    });
+
+    init_button(ABORT, _L("Abort"));
+    bind_command(ABORT, [this] {
+        if (m_obj) m_obj->command_ams_control("abort");
+    });
+
+    init_button(DISABLE_PURIFICATION, _L("Disable Purification for This Print"));
+    bind_command(DISABLE_PURIFICATION, [this] {
+        if (m_obj) m_obj->command_purification_disable();
+    });
+
+    init_button(DONT_REMIND_NEXT_TIME, _L("Don't Remind Me"));
+    bind_command(DONT_REMIND_NEXT_TIME, [this] {
+        if (m_obj && !m_action_json.is_null()) m_obj->command_dont_remind_next_time(m_action_json);
+        suppress_this_error();
+    });
+}
+
+void PrintErrorDialog::suppress_this_error()
+{
+    if (m_on_suppress) m_on_suppress(m_print_error);
+}
+
+// Wire one button to a command, with the two rules that apply to all of them: never fire when the
+// button is disabled (a disabled Button still receives wxEVT_LEFT_DOWN on some platforms), and
+// always close afterwards so a second press cannot send the command twice.
+void PrintErrorDialog::bind_command(PrintErrorButton style, std::function<void()> fn)
+{
+    auto it = m_button_list.find(style);
+    if (it == m_button_list.end()) return;
+    Button* btn = it->second;
+    btn->Bind(wxEVT_LEFT_DOWN, [this, style, btn, fn](wxMouseEvent& e) {
+        if (!btn->IsEnabled()) { e.Skip(); return; }
+        BOOST_LOG_TRIVIAL(info) << "PrintErrorDialog: action id " << static_cast<int>(style)
+                                << " pressed for error " << error_command_arg()
+                                << " (job_id = " << (m_job_id.empty() ? std::string("<none>") : m_job_id) << ")";
+        fn();
+        this->on_hide();
+    });
+}
+
+void PrintErrorDialog::bind_hms_resume(PrintErrorButton style)
+{
+    bind_command(style, [this] {
+        if (m_obj) m_obj->command_hms_resume(error_command_arg(), m_job_id);
     });
 }
 
@@ -1203,8 +1350,14 @@ void PrintErrorDialog::msw_rescale() {
 
 void PrintErrorDialog::rescale()
 {
-    for(auto used_button:m_used_button)
-        m_button_list[used_button]->Rescale();
+    // find, not operator[]: m_used_button is whatever the error table asked for, which now
+    // legitimately includes ids with no button - REMOVE_CLOSE_BTN, and any id a newer table
+    // names that this dialog cannot draw. operator[] would default-construct a null Button* for
+    // those and dereference it, turning a DPI change into a crash.
+    for (int used_button : m_used_button) {
+        auto it = m_button_list.find(used_button);
+        if (it != m_button_list.end() && it->second) it->second->Rescale();
+    }
 }
 
 ConfirmBeforeSendDialog::ConfirmBeforeSendDialog(wxWindow* parent, wxWindowID id, const wxString& title, enum ButtonStyle btn_style, const wxPoint& pos, const wxSize& size, long style, bool not_show_again_check)

@@ -582,6 +582,20 @@ public:
     // that this printer does not have. Sorted and unique; empty on every well-formed project.
     std::vector<int>            support_group_unresolvable_interface_filaments() const;
 
+    // Modifier volumes that cannot affect this slice, by name, in ModelObject::volumes order.
+    // Both are read off m_shared_regions after the regions are built, so they say what the region
+    // builder ACTUALLY did rather than re-deriving it, and both are empty for a healthy object.
+    //
+    // Modifiers that got a region, but one identical to their parent's - they override no setting,
+    // so PrintApply stored them as an alias of the parent's own PrintRegion and they cannot print
+    // any differently. An extruder override is NOT counted as "no overrides": a differing extruder
+    // folds into wall_filament/sparse_infill_filament/solid_infill_filament, which makes the
+    // region config differ and gives the modifier a region of its own.
+    std::vector<std::string>    modifiers_without_overrides() const;
+    // Modifiers that got no region in ANY layer range - no part's extruded bounding box intersects
+    // them - so their geometry never reaches the slice at all.
+    std::vector<std::string>    modifiers_without_parent() const;
+
     // Ultra (support groups, plan Stage 3 3.1): slice an explicit set of volumes at this object's
     // layer Zs and union them per layer. This is the body slice_support_volumes() always had; that
     // function is now a two-liner over it, so enforcer / blocker behaviour is unchanged by

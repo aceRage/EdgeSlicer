@@ -6292,7 +6292,17 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_connect()
             }
             auto self = std::dynamic_pointer_cast<SSWCP_MqttAgent_Instance>(weak_ptr.lock());
 
-            engine->SetConnectionFailureCallback([engine]() {
+            // Capture the engine WEAKLY: this callback is stored inside the
+            // engine itself (MqttClient::connection_failure_callback_), so a
+            // shared_ptr capture would keep its refcount >= 1 forever and
+            // ~MqttClient — the only place the callback gets cleared — would
+            // never run, leaking the client and its Paho handles.
+            std::weak_ptr<MqttClient> weak_engine = engine;
+            engine->SetConnectionFailureCallback([weak_engine]() {
+                auto engine = weak_engine.lock();
+                if (!engine) {
+                    return;
+                }
                 std::string msg = "";
                 engine->Disconnect(msg);
             });

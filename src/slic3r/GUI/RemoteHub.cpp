@@ -7,6 +7,7 @@
 #include "RemoteNotify.hpp"
 #include "WebPush.hpp"
 #include "AppPush.hpp"
+#include "HMS.hpp"
 #include "libslic3r/Utils.hpp"
 #include "slic3r/Utils/Http.hpp"
 
@@ -18,6 +19,12 @@
 #include <boost/nowide/fstream.hpp>
 #include <nlohmann/json.hpp>
 
+// The hub identity (design_hosted_relay.md section 2) is an Ed25519 key pair, minted and kept by
+// the same OpenSSL that WebPush's VAPID keys and AppPush's APNs signing already use - no new
+// dependency, and EVP_PKEY_ED25519 has been in every OpenSSL we build against since 1.1.1.
+#include <openssl/evp.h>
+#include <openssl/sha.h>
+
 #include <algorithm>
 #include <atomic>
 #include <cctype>
@@ -27,6 +34,7 @@
 #include <deque>
 #include <functional>
 #include <initializer_list>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <random>
@@ -82,6 +90,10 @@ static const char* const GO2RTC_WS   = "/api/ws";
 static const size_t      MAX_API_BODY       = 64 * 1024;
 static const uint64_t    MAX_UPLOAD         = 2ull * 1024 * 1024 * 1024;
 static const int         IDLE_EXIT_SECONDS  = 60;
+// Where the remote-access card sends people who have no Tailscale yet, and where the one error
+// nobody can fix from this PC (tailnet-wide HTTPS certificates) is actually switched on.
+static const char* const TAILSCALE_DOWNLOAD_URL  = "https://tailscale.com/download/windows";
+static const char* const TAILSCALE_DNS_ADMIN_URL = "https://login.tailscale.com/admin/dns";
 // Request hygiene. The head cap is generous for a browser (cookies + a long referer) and small
 // enough that a dribbling client cannot grow the buffer. The connection caps leave room for a
 // phone with six live camera WebSockets plus its polling, several times over; the admin listener
@@ -103,6 +115,15 @@ static const int         MAX_INSTANCES      = 6;
 // Printer events (RemoteEvents.hpp): how many the hub keeps, and how many of those it writes back
 // to disk so a hub restart does not lose the last hour of a print.
 static const size_t      MAX_EVENTS         = 200;
+// The last-known printer status the hub keeps for itself, so /summary and /state can answer with
+// no slicer window open at all (the app's follow-up 2). The hub polls each live instance's own
+// /api/printers on this cadence, merges the rows by printer id and remembers them in
+// <datadir>/hub/printers.json; a row nobody has refreshed since is served with its age, marked
+// stale, rather than withheld. STALE_AFTER_MS only decides the `stale` flag - the row is served
+// either way, because a status from an hour ago is still what the printer was last seen doing.
+static const int         PRINTERS_POLL_MS   = 10000;
+static const long long   PRINTERS_STALE_MS  = 30000;
+static const size_t      MAX_CACHED_PRINTERS = 64;
 
 // ------------------------------------------------------------------ paths ----
 
@@ -114,6 +135,7 @@ static std::string hub_json_path()     { return (fs::path(hub_dir()) / "hub.json
 static std::string streams_json_path() { return (fs::path(hub_dir()) / "streams.json").string(); }
 static std::string settings_json_path() { return (fs::path(hub_dir()) / "settings.json").string(); } // survives a hub quit (hub.json does not)
 static std::string events_json_path()   { return (fs::path(hub_dir()) / "events.json").string(); }   // the printer-event ring, likewise
+static std::string printers_json_path() { return (fs::path(hub_dir()) / "printers.json").string(); } // the last-known printer status, likewise
 
 static void ensure_dirs()
 {
@@ -267,6 +289,24 @@ static std::string lower(std::string s)
     std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return (char) std::tolower(c); });
     return s;
 }
+
+static int hex_nibble(char c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+static std::string to_hex(const unsigned char* p, size_t n)
+{
+    static const char* hx = "0123456789abcdef";
+    std::string        s;
+    s.reserve(n * 2);
+    for (size_t i = 0; i < n; ++i) { s += hx[p[i] >> 4]; s += hx[p[i] & 15]; }
+    return s;
+}
+
 
 static std::string json_error(const std::string& msg)
 {
@@ -553,6 +593,10 @@ struct Request
     std::string method, target, path, query, head, pending, cookies, file_name;
     std::string host, secret, sec_fetch_site, content_type; // Host, X-Hub-Secret, Sec-Fetch-Site, Content-Type (lower-cased where compared)
     std::string ts_login, fwd_proto; // Tailscale-User-Login, X-Forwarded-Proto: set by Tailscale Serve, trusted from loopback only
+    // Set by phase 1's relay for a stream it re-injected on loopback, so that the trust rule above
+    // can tell it apart from a genuine Serve connection. Always false today; the rule is already
+    // written to honour it (Testing::trusted_proxy_headers).
+    bool        via_relay { false };
     size_t      content_length { 0 };
 };
 
@@ -791,22 +835,229 @@ static TailscaleState tailscale_query()
         return t;
     }
     if (run_capture({ tailscale_exe(), "serve", "status", "--json" }, out, code, 15000) && code == 0) {
-        try {
-            const json s   = json::parse(out);
-            const json web_all = s.value("Web", json::object());
-            for (const auto& web : web_all) {
-                const json handlers = web.value("Handlers", json::object());
-                for (const auto& [path, h] : handlers.items()) {
-                    const std::string proxy = h.value("Proxy", ""), want = "http://127.0.0.1:";
-                    if (path == "/" && proxy.compare(0, want.size(), want) == 0) {
-                        t.serving      = true;
-                        t.serving_port = std::atoi(proxy.c_str() + want.size());
-                    }
-                }
-            }
-        } catch (...) {}
+        t.serving_port = Testing::serve_status_target_port(out);
+        t.serving      = t.serving_port > 0;
     }
     return t;
+}
+
+// Pulled out of tailscale_query() so the parsing rule can be driven from a test with captured
+// `tailscale serve status --json` text and no real tailnet (RemoteHub::Testing, remote_hub_tests.cpp).
+// `tailscale serve status --json` nests the forwarded port under Web -> "<domain>:443" ->
+// Handlers -> "/" -> Proxy = "http://127.0.0.1:<port>". Only the root path ("/") is ours - the
+// hub never registers anything else with Serve - and only a loopback proxy counts as "serving".
+// ---- remote access, as one state the page can draw --------------------------------------------
+// Six strings and one link, in one place. Before this the hub page re-derived "installed but not
+// signed in" from three separate booleans and carried its own copy of every sentence, so the two
+// could (and did) drift. classify_remote_access() is pure, so the whole table is a unit test.
+const char* Testing::remote_access_state_name(Testing::RemoteAccessState st)
+{
+    switch (st) {
+    case RemoteAccessState::NotInstalled: return "not_installed";
+    case RemoteAccessState::NotSignedIn:  return "not_signed_in";
+    case RemoteAccessState::NotRunning:   return "not_running";
+    case RemoteAccessState::HttpsOff:     return "https_off";
+    case RemoteAccessState::Serving:      return "serving";
+    case RemoteAccessState::Ready:        return "ready";
+    default:                              return "error";
+    }
+}
+
+Testing::RemoteAccessInfo Testing::classify_remote_access(bool installed, const std::string& backend, bool https,
+                                                          bool serving, bool on, const std::string& error)
+{
+    RemoteAccessInfo r;
+    if (!installed) {
+        r.state      = RemoteAccessState::NotInstalled;
+        r.message    = "Remote access uses Tailscale, a free private network between your PC and your phone. "
+                       "Install it on both and sign in with the same account.";
+        r.action     = "Install Tailscale";
+        r.action_url = TAILSCALE_DOWNLOAD_URL;
+        return r;
+    }
+    if (backend == "NeedsLogin" || backend == "Starting") {
+        r.state   = RemoteAccessState::NotSignedIn;
+        r.message = "Tailscale is installed but not signed in on this PC. Open Tailscale from the system tray "
+                    "(or run `tailscale login`) and sign in with the same account as your phone, then try again.";
+        r.action  = "Try again";
+        return r;
+    }
+    if (backend != "Running") {
+        r.state   = RemoteAccessState::NotRunning;
+        r.message = backend.empty() ? "Tailscale is not running on this PC." : "Tailscale is not running (" + backend + ").";
+        r.action  = "Try again";
+        return r;
+    }
+    if (!https) {
+        // The one error that cannot be fixed from this PC at all: it is a tailnet-wide setting in
+        // the admin console, so the card links straight at the page that has the switch.
+        r.state      = RemoteAccessState::HttpsOff;
+        r.message    = "HTTPS certificates are not enabled for your tailnet: Tailscale admin console > DNS > "
+                       "HTTPS Certificates > Enable, then try again.";
+        r.action     = "Open DNS settings";
+        r.action_url = TAILSCALE_DNS_ADMIN_URL;
+        return r;
+    }
+    if (on && serving) {
+        r.state   = RemoteAccessState::Serving;
+        r.message = "Remote access is on. Your phone can reach this hub from anywhere through your tailnet.";
+        return r;
+    }
+    if (on && !serving) {
+        // remote_on is set but Serve is not pointed here: the reconcile in bind() is the usual cure
+        // and it runs by itself, so the button repeats it rather than reporting a dead end.
+        r.state   = RemoteAccessState::Error;
+        r.message = error.empty() ? "Tailscale is no longer serving this hub; turn remote access off and on again." : error;
+        r.action  = "Try again";
+        return r;
+    }
+    if (!error.empty()) {
+        r.state   = RemoteAccessState::Error;
+        r.message = error;
+        r.action  = "Try again";
+        return r;
+    }
+    r.state   = RemoteAccessState::Ready;
+    r.message = "Tailscale is ready. Turn remote access on to publish this hub inside your tailnet.";
+    return r;
+}
+
+// ---- hub identity (design_hosted_relay.md section 2) ------------------------------------------
+// hubid = the first 16 hex characters of SHA-256 over the 32 raw bytes of the Ed25519 public key.
+// A hash rather than the key itself so that the durable name a relay knows this hub by is short
+// enough for a URL label and reveals nothing but the key it was derived from.
+std::string Testing::hubid_from_public_key(const std::vector<unsigned char>& public_key)
+{
+    if (public_key.size() != 32) return std::string();
+    unsigned char digest[SHA256_DIGEST_LENGTH];
+    SHA256(public_key.data(), public_key.size(), digest);
+    static const char* HEX = "0123456789abcdef";
+    std::string        out;
+    for (int i = 0; i < 8; ++i) { // 8 bytes = 16 hex characters
+        out.push_back(HEX[digest[i] >> 4]);
+        out.push_back(HEX[digest[i] & 0x0f]);
+    }
+    return out;
+}
+
+std::string Testing::hubid_from_public_key_hex(const std::string& public_key_hex)
+{
+    if (public_key_hex.size() != 64) return std::string();
+    std::vector<unsigned char> raw;
+    raw.reserve(32);
+    for (size_t i = 0; i < 64; i += 2) {
+        const int hi = hex_nibble(public_key_hex[i]), lo = hex_nibble(public_key_hex[i + 1]);
+        if (hi < 0 || lo < 0) return std::string();
+        raw.push_back((unsigned char) ((hi << 4) | lo));
+    }
+    return hubid_from_public_key(raw);
+}
+
+// What settings.json carries under "identity". The private half is in here and nowhere else - not
+// hub.json (which the phone-facing code reads), not /pair, not /hub/info, never a log line.
+std::string Testing::identity_settings_dump(const Testing::HubIdentity& id)
+{
+    json j;
+    j["hubid"]   = id.hubid;
+    j["public"]  = id.public_hex;
+    j["private"] = id.private_hex;
+    return j.dump();
+}
+
+Testing::HubIdentity Testing::identity_from_settings(const std::string& settings_json_text)
+{
+    HubIdentity id;
+    try {
+        json j = json::parse(settings_json_text);
+        // Accept either the whole settings file or just the identity object, so a caller that
+        // already dug the member out does not have to re-wrap it.
+        const json o = j.contains("identity") ? j["identity"] : j;
+        if (!o.is_object()) return HubIdentity();
+        id.public_hex  = lower(o.value("public", std::string()));
+        id.private_hex = lower(o.value("private", std::string()));
+        id.hubid       = lower(o.value("hubid", std::string()));
+    } catch (...) { return HubIdentity(); }
+    // The stored hubid is only ever a cache of the derivation; the key wins if the two disagree,
+    // so a hand-edited or truncated settings file cannot make this hub answer to the wrong name.
+    const std::string derived = hubid_from_public_key_hex(id.public_hex);
+    if (derived.empty()) return HubIdentity();
+    id.hubid = derived;
+    return id;
+}
+
+// ---- the loopback trust of Tailscale Serve's headers (design section 6.6) ---------------------
+// Tailscale Serve terminates on loopback and sets Tailscale-User-Login / X-Forwarded-Proto,
+// stripping whatever a client tried to send. That is the whole basis for trusting them - so they
+// are trusted from a loopback peer and from nowhere else. A request that walked in on the LAN
+// listener carrying a Tailscale-User-Login header is a client lying about who it is, and clearing
+// the field here is what stops it ever reaching login_allowed().
+//
+// The `via_relay` argument is the hook phase 1 needs: a relayed stream is re-injected as a loopback
+// peer (so is_private_v4 is satisfied without being loosened) and would therefore *look* exactly
+// like Serve. It is not - nothing upstream of it strips these headers - so it never gets the trust.
+bool Testing::trusted_proxy_headers(bool peer_is_loopback, bool via_relay)
+{
+    return peer_is_loopback && !via_relay;
+}
+
+// The pairing document's origins and identity, pure so the shape can be tested without a hub.
+// Three named origins, one of them always empty today, and the public half of the hub identity.
+std::string Testing::pair_identity_json(const std::string& lan_url, const std::string& remote_url,
+                                        const std::string& relay_url, const std::string& hubid,
+                                        const std::string& public_key_hex)
+{
+    json j;
+    j["urls"]       = json{ { "lan", lan_url }, { "remote", remote_url }, { "relay", relay_url } };
+    j["hubid"]      = hubid;
+    j["public_key"] = public_key_hex; // the public half only, always
+    return j.dump();
+}
+
+int Testing::serve_status_target_port(const std::string& serve_status_json_text)
+{
+    try {
+        const json s        = json::parse(serve_status_json_text);
+        const json web_all  = s.value("Web", json::object());
+        for (const auto& web : web_all) {
+            const json handlers = web.value("Handlers", json::object());
+            for (const auto& [path, h] : handlers.items()) {
+                const std::string proxy = h.value("Proxy", ""), want = "http://127.0.0.1:";
+                if (path == "/" && proxy.compare(0, want.size(), want) == 0)
+                    return std::atoi(proxy.c_str() + want.size());
+            }
+        }
+    } catch (...) {}
+    return 0;
+}
+
+// The hub's durable identity: one Ed25519 key pair per data dir, minted the first time
+// settings.json is written and never again (design_hosted_relay.md section 2 - a relay will know
+// this hub by the hubid derived from the public half, and a hub that re-minted would lose its
+// registration on every start). OpenSSL's EVP_PKEY_ED25519, the same library WebPush's VAPID keys
+// and AppPush's APNs signing already use, so nothing new is linked.
+//
+// `private_hex` is the 32-byte Ed25519 seed - the whole secret. It is written to settings.json and
+// to nothing else: not hub.json, not /pair, not /hub/info, and never a log line.
+static Testing::HubIdentity mint_hub_identity()
+{
+    Testing::HubIdentity id;
+    EVP_PKEY*            pkey = nullptr;
+    EVP_PKEY_CTX*        ctx  = EVP_PKEY_CTX_new_id(EVP_PKEY_ED25519, nullptr);
+    if (!ctx) return id;
+    if (EVP_PKEY_keygen_init(ctx) == 1) EVP_PKEY_keygen(ctx, &pkey);
+    EVP_PKEY_CTX_free(ctx);
+    if (!pkey) return id;
+    unsigned char pub[32] = {}, priv[32] = {};
+    size_t        publen = sizeof(pub), privlen = sizeof(priv);
+    if (EVP_PKEY_get_raw_public_key(pkey, pub, &publen) == 1 && publen == sizeof(pub) &&
+        EVP_PKEY_get_raw_private_key(pkey, priv, &privlen) == 1 && privlen == sizeof(priv)) {
+        id.public_hex  = to_hex(pub, publen);
+        id.private_hex = to_hex(priv, privlen);
+        id.hubid       = Testing::hubid_from_public_key(std::vector<unsigned char>(pub, pub + publen));
+    }
+    OPENSSL_cleanse(priv, sizeof(priv));
+    EVP_PKEY_free(pkey);
+    return id;
 }
 
 // Per-run secrets (std::random_device is the OS CSPRNG on every platform we build).
@@ -838,6 +1089,358 @@ static int free_loopback_port()
         a.bind(tcp::endpoint(asio::ip::make_address_v4("127.0.0.1"), 0));
         return (int) a.local_endpoint().port();
     } catch (...) { return 0; }
+}
+
+// Native separators: this path is shown to the user to paste into the firewall dialog.
+static std::string go2rtc_exe_path()
+{
+    return fs::path(resources_dir() + "/tools/go2rtc/go2rtc.exe").make_preferred().string();
+}
+
+// ---- Stream quality variants -------------------------------------------------------------
+// The phone's Quality setting picks a *stream name*: "<name>" as the camera sends it, or a
+// "<name>_med" / "<name>_low" variant registered beside it. Registering those variants means
+// re-encoding, and go2rtc re-encodes by shelling out to an ffmpeg binary (its `ffmpeg:` source
+// scheme) - it does not carry a codec of its own. We now **bundle** one: an LGPL-3.0 ffmpeg build
+// installs beside go2rtc.exe (CMake's FFMPEG_BIN_DIR, see docs/superpowers/specs/2026-09-12-bundled-ffmpeg.md),
+// so the transcoded variants are available in a stock install rather than only on a PC where the
+// user happened to put an ffmpeg on PATH.
+//
+// The bundled build is LGPL, which means it carries **no libx264** (that is GPL): its software
+// H.264 encoder is libopenh264. That matters here because go2rtc's built-in `h264` template is
+// `-codec:v libx264 ... -preset:v superfast -tune:v zerolatency`, which this ffmpeg would reject
+// outright - so start_go2rtc() writes its own `ffmpeg: h264:` template in the config. See
+// ffmpeg_h264_template() below for the encoder settings and why each one is what it is.
+//
+// Quality still degrades gracefully: a PC whose install lost the bundled exe (or a platform we do
+// not ship one for) falls back to PATH, and with neither the variants are simply not registered -
+// a stream go2rtc cannot start is worse than an absent one, because the tile goes black instead of
+// falling back to the source. Independently of any of this, the Bambu MJPEG relay's frame-rate
+// knob (BambuCamRelay, ?fps=) needs no decoder at all and honours Medium/Low on its own.
+static std::string ffmpeg_path()
+{
+    // The bundled build first (installed by CMake beside go2rtc.exe), then PATH as the fallback
+    // for a tree or platform that has none.
+    const std::string beside = fs::path(resources_dir() + "/tools/go2rtc/ffmpeg.exe").make_preferred().string();
+    boost::system::error_code ec;
+    if (fs::exists(beside, ec)) return beside;
+#ifdef _WIN32
+    std::string out; int code = 0;
+    if (run_capture({ "where", "ffmpeg" }, out, code, 8000) && code == 0) {
+        std::istringstream is(out); std::string line;
+        if (std::getline(is, line)) {
+            while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
+            if (!line.empty()) return line;
+        }
+    }
+#endif
+    return "";
+}
+// The variant suffixes the hub can actually register, in descending quality. Empty without an
+// ffmpeg: a stream go2rtc cannot start is worse than an absent one, because the tile would go
+// black instead of falling back. Computed once - an ffmpeg appearing mid-run is not worth a
+// PATH lookup per request - and the hub logs which case it is at startup.
+static const std::vector<std::string>& quality_variants()
+{
+    static const std::vector<std::string> v = [] {
+        std::vector<std::string> out;
+        if (!ffmpeg_path().empty()) out = { "med", "low" };
+        return out;
+    }();
+    return v;
+}
+
+// The `h264` encoder template go2rtc uses for our variants, replacing its built-in one.
+//
+// go2rtc 1.9.14 ships `-codec:v libx264 -g:v 30 -preset:v superfast -tune:v zerolatency
+// -profile:v main -level:v 4.1`. Every one of those three x264-only flags is fatal with the
+// bundled LGPL build, which has no libx264 at all, so the template is ours:
+//
+//   libopenh264            the LGPL build's software H.264 encoder (Cisco, BSD-2-Clause). It has
+//                          no -preset/-tune knobs; the equivalents are spelled out below.
+//   constrained_baseline   no B-frames by construction, which is what "zerolatency" buys with
+//                          x264: a frame is emitted as soon as it is encoded, nothing is held to
+//                          reorder. Also the profile every phone decoder handles, and what
+//                          WebRTC/MSE want.
+//   -bf 0                  belt and braces on the same point.
+//   -rc_mode bitrate       track -b:v. The default ("quality") lets the bitrate wander, which is
+//                          the opposite of what a Quality step is for.
+//   -g:v                   keyframe interval. Set per variant to ~2 s of that variant's frame
+//                          rate (30 @15 fps, 20 @10 fps) so a joining viewer waits at most 2 s
+//                          for its first picture without spending the bitrate on more IDRs.
+//
+// -b:v and -g:v are appended per variant by variant_src()'s #raw, so one template serves both.
+static std::string ffmpeg_h264_template()
+{
+    return "-codec:v libopenh264 -profile:v constrained_baseline -rc_mode bitrate -bf 0";
+}
+
+// go2rtc's `ffmpeg:` source, pointed back at the stream the hub already registered, so a variant
+// is a re-encode of our own stream rather than a second connection to the printer - the camera
+// still sees exactly one consumer. go2rtc starts the ffmpeg process lazily - only when a viewer
+// actually opens the variant - and kills it when the last consumer goes, so an unwatched
+// _med/_low costs nothing at all. The gate asserts both halves of that.
+//
+//   Medium  1280x720 @ 15 fps, 1.5 Mbps, keyframe every 2 s
+//   Low      854x480 @ 10 fps, 0.6 Mbps, keyframe every 2 s
+//
+// 854 rather than 640 so Low is a real 16:9 480p: the phone's Low step is meant to be watchable,
+// and at 0.6 Mbps the extra width costs little. #width alone keeps the aspect ratio.
+//
+// Hardware encoding is **off by default**. go2rtc's #hardware would pick a GPU encoder, and on a
+// PC with a working one that is cheaper - but it fails in ways software encoding does not (a
+// headless/RDP session with no GPU, a driver that refuses a second session, an encoder that is
+// already busy with a game), and it fails as a black tile rather than an error the user sees.
+// Software libopenh264 costs ~5% of one core for a 720p Medium on this PC (see the spec), which is
+// not worth that risk by default. To turn it on, add `#hardware` to the strings below and
+// rebuild; go2rtc then tries dxva2/cuda/qsv and falls back to software by itself.
+// Each extra ffmpeg argument is its own #raw= segment, one token per segment and never a space
+// inside one. That is not a style choice: go2rtc rejects a registration whose source contains a
+// space outright, with `400 streams: source with spaces may be insecure`, so the natural
+// `#raw=-r 10 -b:v 600k` form registers as nothing at all and the variant silently does not
+// exist. (Found by gating it - see the spec. The hub's PUT is fire-and-forget on a detached
+// thread, so the 400 would never have surfaced anywhere a user or a log would show it.)
+static std::string variant_raw(std::initializer_list<const char*> toks)
+{
+    std::string s;
+    for (const char* t : toks) s += "#raw=" + std::string(t);
+    return s;
+}
+
+static std::string variant_src(const std::string& base_name, const std::string& q)
+{
+    const bool low = (q == "low");
+    // -r caps the frame rate, -b:v/-maxrate the bitrate, -g:v the keyframe interval (~2 s at
+    // that rate). #width alone scales and keeps the aspect ratio.
+    if (low)
+        return "ffmpeg:" + base_name + "#video=h264#width=854" +
+               variant_raw({ "-r", "10", "-b:v", "600k", "-maxrate", "600k", "-g:v", "20" });
+    return "ffmpeg:" + base_name + "#video=h264#width=1280" +
+           variant_raw({ "-r", "15", "-b:v", "1500k", "-maxrate", "1500k", "-g:v", "30" });
+}
+// ---- WebRTC (Phase 2): go2rtc's media port ------------------------------------------------
+// Everything else the hub runs is loopback-only, but WebRTC media goes straight from go2rtc to
+// the phone, so this one port has to be reachable on the LAN and on the tailnet. A predictable
+// port keeps a Windows Firewall rule the user allows once valid across restarts; 8555 is
+// go2rtc's own documented default, and if something else on the PC already holds it (another
+// go2rtc, say) we take the next free one and say which on the hub page.
+static const int WEBRTC_PORT_FIRST = 8555;
+static const int WEBRTC_PORT_LAST  = 8574;
+
+// Free for both protocols on every interface. A dual-stack listener elsewhere on the PC makes
+// the v4 bind fail too, which is what we want: go2rtc would not get the port either.
+static bool port_free_any(int port)
+{
+    try {
+        asio::io_context ioc;
+        tcp::acceptor    a(ioc);
+        a.open(tcp::v4());
+        a.bind(tcp::endpoint(tcp::v4(), (unsigned short) port));
+        asio::ip::udp::socket u(ioc);
+        u.open(asio::ip::udp::v4());
+        u.bind(asio::ip::udp::endpoint(asio::ip::udp::v4(), (unsigned short) port));
+        return true;
+    } catch (...) { return false; }
+}
+
+static int free_webrtc_port()
+{
+    for (int p = WEBRTC_PORT_FIRST; p <= WEBRTC_PORT_LAST; ++p)
+        if (port_free_any(p)) return p;
+    return 0;
+}
+
+// ---- who holds HUB_PORT when bind() had to step past it ---------------------------------
+// bind() below tries 13640..13659 in order and takes the first free one; when that is not 13640
+// the phone link the hub prints carries whatever port it landed on, and unless the firewall rule
+// covers the whole range (cmake/nsis/SnapmakerURLProtocols_install.nsh) or the user is told what
+// happened, "No hub answered on that link" is all they see. This answers "what is on 13640" by
+// shelling out to the same two tools a person would reach for themselves: `netstat -ano` for the
+// pid listening on the port, then `tasklist` for that pid's image name. Both run through
+// run_capture(), same as the tailscale and firewall queries above.
+
+// Pulled out for testing (RemoteHub::Testing, remote_hub_tests.cpp): given `netstat -ano` text,
+// the pid of whatever is LISTENING on `port`, or 0. netstat's columns are whitespace-separated
+// and its local-address column is "<addr>:<port>", so this looks for a line whose Proto is TCP,
+// whose State is LISTENING, and whose local address ends in ":<port>" (a raw suffix match would
+// also hit port 1364 0 style false positives, so the match requires ':' immediately before it and
+// nothing but the line's own whitespace after).
+long Testing::netstat_holder_pid(const std::string& netstat_text, int port)
+{
+    const std::string suffix = ":" + std::to_string(port);
+    std::istringstream is(netstat_text);
+    std::string        line;
+    while (std::getline(is, line)) {
+        while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
+        std::istringstream ls(line);
+        std::string        proto, local, remote, state, pid_s;
+        if (!(ls >> proto >> local >> remote >> state >> pid_s)) continue;
+        if (proto != "TCP" || state != "LISTENING") continue;
+        if (local.size() < suffix.size() || local.compare(local.size() - suffix.size(), suffix.size(), suffix) != 0) continue;
+        try {
+            return std::stol(pid_s);
+        } catch (...) { continue; }
+    }
+    return 0;
+}
+
+// Pulled out for testing, same reasons: `tasklist /fi "PID eq <n>" /fo csv /nh` prints one CSV
+// row, `"image.exe","1234","Console","1","12,345 K"`, or the literal
+// "INFO: No tasks are running which match the specified criteria." when the pid is gone. The
+// image name is the first quoted field.
+std::string Testing::tasklist_image_name(const std::string& tasklist_csv_text)
+{
+    const size_t open = tasklist_csv_text.find('"');
+    if (open == std::string::npos) return "";
+    const size_t close = tasklist_csv_text.find('"', open + 1);
+    if (close == std::string::npos || close <= open + 1) return "";
+    return tasklist_csv_text.substr(open + 1, close - open - 1);
+}
+
+// What (if anything) is listening on `port` right now, as a short "<exe> (pid N)" string for the
+// log and the status JSON, or "" if nothing answers (the port freed up between the failed bind
+// and this call - reported as such rather than guessed at).
+static std::string port_holder_description(int port)
+{
+#ifdef _WIN32
+    std::string out;
+    int         code = 0;
+    if (!run_capture({ "netstat", "-ano", "-p", "TCP" }, out, code, 8000)) return "";
+    const long pid = Testing::netstat_holder_pid(out, port);
+    if (pid <= 0) return "";
+    std::string tout;
+    if (run_capture({ "tasklist", "/fi", "PID eq " + std::to_string(pid), "/fo", "csv", "/nh" }, tout, code, 8000)) {
+        const std::string image = Testing::tasklist_image_name(tout);
+        if (!image.empty()) return image + " (pid " + std::to_string(pid) + ")";
+    }
+    return "pid " + std::to_string(pid);
+#else
+    (void) port;
+    return "";
+#endif
+}
+
+// What Windows Firewall thinks of go2rtc.exe. WebRTC media arrives inbound on the port above, so
+// without an allow rule for the profile the phone's network is on, the peer connection never
+// completes and the page silently stays on MSE through the hub. We only *look*: adding a rule
+// needs administrator rights and doing it silently would be wrong, so the answer is shown to the
+// user as a note with the two things they can allow.
+struct FirewallState
+{
+    std::string state { "unknown" }; // allowed | partial | missing | blocked | unknown
+    std::string note;                // one short sentence, shown on the hub page (and on the phone)
+    std::string command;             // the exact netsh line, shown only behind "Show command"
+    std::string networks;            // profiles the PC's live networks are in ("Public, Private")
+    long long   checked_at { 0 };
+};
+
+// Joined for a sentence, each value once (two rules for the same profile, two networks in the
+// same profile - the user only wants to read "Private" once).
+static std::string join_words(const std::vector<std::string>& v, const char* sep)
+{
+    std::string              out;
+    std::vector<std::string> seen;
+    for (const std::string& s : v) {
+        if (std::find(seen.begin(), seen.end(), s) != seen.end()) continue;
+        seen.push_back(s);
+        if (!out.empty()) out += sep;
+        out += s;
+    }
+    return out;
+}
+
+// Windows Firewall through PowerShell rather than netsh: Get-NetFirewallRule answers with
+// property values (Allow/Inbound/Private) that are the same in every Windows display language,
+// while netsh's verbose output is localised and would have to be parsed by label.
+//
+// `label` is the program name used in the sentences shown to the user ("go2rtc.exe", "EdgeSlicer.exe");
+// `netsh_hint` is the exact command they can paste into an elevated prompt to fix a "missing" or
+// "partial" state themselves - we only ever *look*, never run netsh add ourselves.
+static FirewallState firewall_query(const std::string& exe, int port, const std::string& label, const std::string& netsh_hint)
+{
+    FirewallState fw;
+    fw.checked_at = (long long) std::time(nullptr);
+#ifdef _WIN32
+    std::string quoted = exe; // '' escapes a quote inside a PowerShell single-quoted string
+    for (size_t i = 0; i < quoted.size(); ++i)
+        if (quoted[i] == '\'') quoted.insert(i++, 1, '\'');
+    const std::string script =
+        "$p='" + quoted + "';$f=[IO.Path]::GetFullPath($p);"
+        "$r=@(Get-NetFirewallApplicationFilter -ErrorAction SilentlyContinue |"
+        " Where-Object { try { [IO.Path]::GetFullPath($_.Program) -ieq $f } catch { $false } } |"
+        " Get-NetFirewallRule -ErrorAction SilentlyContinue | Where-Object { $_.Enabled -eq 'True' -and"
+        " $_.Direction -eq 'Inbound' });"
+        "foreach ($x in $r) { $(if ($x.Action -eq 'Block') { 'BLOCK=' } else { 'RULE=' }) + $x.Profile };"
+        "foreach ($n in @(Get-NetConnectionProfile -ErrorAction SilentlyContinue)) { 'NET=' + $n.NetworkCategory };"
+        "'DONE'";
+    std::string out;
+    int         code = 0;
+    if (!run_capture({ "powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script }, out, code, 30000) ||
+        out.find("DONE") == std::string::npos) {
+        fw.note    = "Windows Firewall could not be checked for " + label + ".";
+        fw.command = netsh_hint;
+        return fw;
+    }
+    std::vector<std::string> rules, blocks, nets;
+    std::istringstream       is(out);
+    std::string              line;
+    while (std::getline(is, line)) {
+        while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
+        if (line.compare(0, 5, "RULE=") == 0) rules.push_back(line.substr(5));
+        else if (line.compare(0, 6, "BLOCK=") == 0) blocks.push_back(line.substr(6));
+        else if (line.compare(0, 4, "NET=") == 0) nets.push_back(line.substr(4) == "DomainAuthenticated" ? "Domain" : line.substr(4));
+    }
+    // Only the profiles the PC's live networks are in matter: a rule that covers Public does
+    // nothing for a phone on a network Windows filed as Private.
+    auto covers = [](const std::vector<std::string>& rs, const std::string& n) {
+        for (const std::string& r : rs)
+            if (r == "Any" || lower(r).find(lower(n)) != std::string::npos) return true;
+        return false;
+    };
+    std::vector<std::string> uncovered, denied;
+    for (const std::string& n : nets) {
+        if (covers(blocks, n) && std::find(denied.begin(), denied.end(), n) == denied.end()) denied.push_back(n);
+        else if (!covers(rules, n) && std::find(uncovered.begin(), uncovered.end(), n) == uncovered.end()) uncovered.push_back(n);
+    }
+    fw.networks = join_words(nets, ", ");
+    // One short sentence for the page; the exact netsh line goes in `command`, shown only behind
+    // "Show command" (hub.html). `note` used to carry both - callers that still want the full
+    // wording (older readers, logging) can concatenate note + " " + command themselves.
+    if (!denied.empty()) {
+        // Windows writes one of these when the user dismisses its "allow access?" prompt, and a
+        // block rule wins over any allow rule, so this has to be reported ahead of them.
+        fw.state   = "blocked";
+        fw.note    = "Windows Firewall has a rule that blocks " + label + " on this " +
+                     join_words(denied, " and ") + " network.";
+        fw.command = netsh_hint;
+    } else if (rules.empty()) {
+        fw.state   = "missing";
+        fw.note    = "Windows Firewall has no rule for " + label + " on this network.";
+        fw.command = netsh_hint;
+    } else if (!uncovered.empty()) {
+        fw.state   = "partial";
+        fw.note    = "Windows Firewall allows " + label + " on " + join_words(rules, " / ") +
+                     " networks, but this PC is on " + join_words(uncovered, " and ") + ".";
+        fw.command = netsh_hint;
+    } else {
+        fw.state = "allowed";
+        fw.note  = "";
+    }
+#else
+    (void) exe; (void) port; (void) netsh_hint;
+    fw.note    = "Direct connections need an inbound port open for " + label + ".";
+    fw.command = netsh_hint;
+#endif
+    return fw;
+}
+
+// go2rtc's call site: the hub page appends its own "video still works without it" sentence
+// (resources/web/orca/hub.html, videoLine()), so the note here stays generic.
+static FirewallState firewall_query_go2rtc(const std::string& exe, int port)
+{
+    return firewall_query(exe, port, "go2rtc.exe",
+        "netsh advfirewall firewall add rule name=\"go2rtc\" dir=in action=allow program=\"" + exe +
+        "\" protocol=TCP localport=" + std::to_string(port) + " profile=private,domain");
 }
 
 // The Host header must name this PC's loopback (a DNS-rebound name is not accepted).
@@ -1220,6 +1823,11 @@ public:
     {
         std::string lan;                 // http://<lan ip>:<port>/r/<token>/  ("" while phone access is off)
         std::string remote;              // https://<machine>.<tailnet>.ts.net/r/<token>/  ("" while remote is off)
+        // The hosted relay from design_hosted_relay.md: a third origin, on the same footing as the
+        // other two, that a phone can be handed when neither the LAN nor the tailnet reaches this
+        // PC. Nothing hosts it yet - phase 0 only wires the slot so the page, /pair, the app and
+        // update_notify_link() below already carry it and phase 1 is purely additive. Always "".
+        std::string relay;
         std::vector<std::string> ips;    // the LAN addresses the lan link was picked from
     };
     PhoneLinks phone_links();
@@ -1243,9 +1851,36 @@ public:
     void accept_event(nlohmann::json& event);
     json events_json(int since); // {events: [...], last_id: n} for /hub/events and /r/<token>/events
 
+    // ---- what the native app asks for (EdgeSlicer app phase 3 follow-ups) ----
+    // One answer with everything the app's Devices screen draws, built from what THIS process
+    // knows: the printer rows it polled off the instances and remembered, the camera wall, the
+    // event high-water mark and this hub's own identity. It never needs an open slicer window -
+    // that was the whole complaint: with the slicer closed the app could say nothing at all.
+    json summary_json();
+    json pair_json();                       // the pairing document: names, both URLs, capabilities
+    // The last-known status of every printer any instance has reported, newest value per id, each
+    // row carrying `age_s` and `stale`. `instance` is the pid that last reported it, or 0 when no
+    // window is open any more.
+    json printers_json();
+    // The running job's picture per printer, from the G-code archive's sidecars. The map form is
+    // what /summary uses: the archive is one folder of small JSON files, so it is read ONCE for
+    // every printer rather than once per printer. `jobs` says which job each printer is running,
+    // so the record whose name matches wins over the merely newest one.
+    std::map<std::string, std::string> printer_thumbnail_paths(const std::map<std::string, std::string>& jobs);
+    std::string printer_thumbnail_path(const std::string& printer_id); // one printer, same rules
+    std::string printer_thumbnail(const std::string& printer_id);      // ... and its bytes
+    // This hub's identity: a uuid minted once, when this data dir's hub settings are created, and
+    // never again. A client that sees it change knows the event ids restarted - which it otherwise
+    // has to infer from an id going backwards (the app's follow-up 6).
+    std::string hub_instance();
+    void poll_printers();                   // one round: ask every live instance, merge, remember
+
 private:
     void load_events();          // start(): the ring from the last run
     void save_events_locked();   // m_mutex held
+    void load_printers();        // start(): the last-known printer status from the last run
+    void save_printers_locked(); // m_mutex held
+    std::string archive_dir();   // where the G-code archive keeps its sidecars (see m_archive_dir)
     json  info_json();
     json  instances_json();
     void  write_hub_json();
@@ -1263,6 +1898,8 @@ private:
     std::string state_for_phone();
     bool  lookup_host(const std::string& id, std::string& ip, std::string& code);
     std::string relay_h264_url(const std::string& id); // the U1 raw stream behind /relay/h264?id=, or ""
+    FirewallState  firewall_state(bool refresh);       // cached; the query runs on a detached thread
+    FirewallState  lan_firewall_state(bool refresh);   // same, but for the phone/LAN listener port
     TailscaleState remote_state(bool refresh);         // cached ~15 s; runs the tailscale CLI off the lock
     bool  set_remote(bool on, std::string& error);     // tailscale serve on/off for this hub
     void  remote_logins(const std::string& add, const std::string& remove);
@@ -1291,6 +1928,11 @@ private:
     std::vector<std::pair<long, long long>> m_recent_spawns;
     std::string                    m_state; // full Stream-tab state JSON (with credentials)
     std::string                    m_secret;      // per run; in hub.json and the hub page, required as X-Hub-Secret on /hub/*
+    // This data dir's durable relay identity (design_hosted_relay.md section 2): an Ed25519 key
+    // pair minted once and kept in settings.json, plus the hubid derived from the public half.
+    // m_identity.private_hex is the only secret in this process that must never be serialised
+    // anywhere a phone, a page or a log can see - write_hub_json() is the single writer.
+    Testing::HubIdentity           m_identity;
     std::string                    m_go2rtc_user, m_go2rtc_pass, m_go2rtc_auth; // go2rtc credentials, this process only
     bool                           m_remote_on { false };        // publish through Tailscale Serve (persisted)
     std::vector<std::string>       m_allowed_logins;             // tailnet logins that may connect (lower-case, persisted)
@@ -1298,6 +1940,15 @@ private:
     std::string                    m_last_login;                 // most recent remote visitor
     long long                      m_last_login_at { 0 };
     int                            m_go2rtc_port { 0 };
+    int                            m_webrtc_port { 0 };          // go2rtc's WebRTC media port (0 = WebRTC off)
+    FirewallState                  m_fw;                         // last firewall_query() (go2rtc/WebRTC)
+    std::atomic<bool>              m_fw_busy { false };
+    FirewallState                  m_lan_fw;                     // last lan_firewall_state() (the phone/LAN listener port)
+    std::atomic<bool>              m_lan_fw_busy { false };
+    // Set by bind() when it had to step past HUB_PORT: what (if anything) was found holding it,
+    // for the status JSON's "port_note" and the hub page's warning. Empty once the hub is on
+    // HUB_PORT itself.
+    std::string                    m_port_note_holder;    // "<exe> (pid N)" or "" (nothing found / not applicable)
     long                           m_go2rtc_pid { 0 };
     void*                          m_job { nullptr };
     std::atomic<bool>              m_quit { false };
@@ -1305,6 +1956,25 @@ private:
     // instance that reports and across a restart of the hub itself.
     std::deque<json>               m_events;
     int                            m_next_event_id { 0 };
+    // The printers, as the instances last reported them: printer id -> the row plus when it
+    // arrived and which window sent it. This is what makes the phone app's Devices screen work
+    // with the slicer closed; it is refreshed by poll_printers() and persisted to printers.json.
+    struct CachedPrinter
+    {
+        json      row;             // the instance's own /api/printers row, as it sent it
+        long long at { 0 };        // unix ms when this value was read
+        long      instance { 0 };  // the pid that reported it; 0 once that window is gone
+    };
+    std::map<std::string, CachedPrinter> m_printers;
+    // Where the archive's sidecars are, as an instance reported it (GET /api/info). Remembered so
+    // a thumbnail still resolves after the window that told us closed; empty falls back to
+    // <datadir>/gcode_archive, which is the archive's own default.
+    std::string                    m_archive_dir;
+    std::string                    m_hub_instance; // this data dir's hub uuid (settings.json)
+    // How many phone links this data dir has ever had, 1 for the first. It has to be its own
+    // counter rather than the number of remembered old tokens, because that list is capped at
+    // three: a client comparing versions must see a number that only ever goes up.
+    int                            m_token_version { 1 };
 };
 
 // The tray balloon, set by HubApp once the icon exists (the server itself is wx-free and runs on
@@ -1329,8 +1999,18 @@ static BalloonFn balloon_fn()
 
 json HubServer::info_json()
 {
+    const FirewallState fw     = firewall_state(false);     // takes m_mutex itself: before the lock below
+    const FirewallState lan_fw = lan_firewall_state(false); // ditto
     json j;
     std::lock_guard<std::mutex> lock(m_mutex);
+    json v;
+    v["webrtc_port"]  = m_webrtc_port;
+    v["firewall"]     = m_webrtc_port ? fw.state : std::string("off");
+    v["note"]         = m_webrtc_port ? fw.note : std::string("No free port for WebRTC video; the phone uses relayed video.");
+    v["command"]      = m_webrtc_port ? fw.command : std::string();
+    v["networks"]     = fw.networks;
+    v["go2rtc_exe"]   = go2rtc_exe_path();
+    j["video"]       = v;
     j["alive"]       = true;
     j["pid"]         = current_pid();
     j["port"]        = m_port;
@@ -1352,6 +2032,37 @@ json HubServer::info_json()
     // tray read it); lan_url is the same string, remote_url is the Tailscale one or empty.
     j["lan_url"]    = j["url"];
     j["remote_url"] = j["remote"].is_object() ? j["remote"].value("url", std::string()) : std::string();
+    // The third origin and this hub's durable name for it. Empty and inert in phase 0; here now so
+    // the hub page, the tray and the app all learn the shape before anything fills it in.
+    j["relay_url"]  = std::string();
+    j["hubid"]      = m_identity.hubid;
+    j["public_key"] = m_identity.public_hex; // the public half only - see write_hub_json()
+    // Set only when bind() had to step past HUB_PORT, so a hub sitting on 13640 as usual sends no
+    // port_note at all. `held_by` is "" when the probe could not tell what has it (gone by the
+    // time we looked, or a non-Windows build).
+    if (m_port != HUB_PORT) {
+        json note;
+        note["default_port"] = HUB_PORT;
+        note["port"]         = m_port;
+        note["held_by"]      = m_port_note_holder;
+        // The netsh line hub.html shows behind "Show command" if the user wants to allow this
+        // build through the firewall rather than stop the other program - same port-range
+        // convention as lan_firewall_state()'s hint below.
+        note["command"] = "netsh advfirewall firewall add rule name=\"EdgeSlicer\" dir=in action=allow program=\"" +
+                           current_exe() + "\" protocol=TCP localport=" + std::to_string(HUB_PORT) + "-" +
+                           std::to_string(HUB_PORT + 19) + " profile=private,domain";
+        j["port_note"] = note;
+    }
+    // The phone/LAN listener's own firewall reachability, same shape as video.firewall/note above
+    // (state values: allowed | partial | missing | blocked | unknown), plus the exact netsh command
+    // an administrator can run - the hub only ever looks, never runs `netsh ... add` itself.
+    json lv;
+    lv["port"]     = m_port;
+    lv["firewall"] = (m_phone && m_lan) ? lan_fw.state : std::string("off");
+    lv["note"]     = (m_phone && m_lan) ? lan_fw.note : std::string();
+    lv["command"]  = (m_phone && m_lan) ? lan_fw.command : std::string();
+    lv["networks"] = lan_fw.networks;
+    j["lan_firewall"] = lv;
     return j;
 }
 
@@ -1367,6 +2078,7 @@ void HubServer::write_hub_json()
         j["token"]       = m_token;
         j["secret"]      = m_secret;
         j["go2rtc_port"] = m_go2rtc_port;
+        j["webrtc_port"] = m_webrtc_port;
         j["version"]     = std::string(SLIC3R_VERSION);
         j["remote_on"]      = m_remote_on;
         j["allowed_logins"] = m_allowed_logins;
@@ -1375,12 +2087,24 @@ void HubServer::write_hub_json()
     json st;
     st["remote_on"]      = j["remote_on"];
     st["allowed_logins"] = j["allowed_logins"];
+    // The phone switch too. It used to live only in hub.json, which a clean quit deletes, so
+    // the next slicer start re-spawned the hub from ITS remembered copy of the switch - stale
+    // whenever the last change was made from the hub page - and "home mode off" never stuck.
+    st["phone"]          = j["phone"];
     {
         // hub.json is deleted on a clean quit; the phones' link has to outlive it, or every hub
         // restart would hand out a new one and kill every saved link and home-screen icon.
         std::lock_guard<std::mutex> lock(m_mutex);
         st["token"]      = m_token;
         st["old_tokens"] = m_old_tokens;
+        st["hub_instance"] = m_hub_instance; // written once, then carried forward unchanged
+        st["token_version"] = m_token_version;
+        // The relay identity, private half included. settings.json is this hub's own file on its
+        // own data dir, and it already holds the phone token and the VAPID private key for exactly
+        // the same reason: losing it would silently break every client that ever trusted this hub.
+        // hub.json deliberately does NOT get a copy - that file is the one instances and the page
+        // read, and the private key has no business being anywhere they can see it.
+        if (m_identity.valid()) st["identity"] = json::parse(Testing::identity_settings_dump(m_identity));
     }
     // The notification destinations live here too, and for the same reason: a hub restart must
     // not lose the relay somebody set up. RemoteNotify owns them; this is the only writer of the
@@ -1411,13 +2135,20 @@ HubServer::PhoneLinks HubServer::phone_links()
     std::lock_guard<std::mutex> lock(m_mutex);
     if (phone && !l.ips.empty()) l.lan = "http://" + l.ips.front() + ":" + std::to_string(m_port) + "/r/" + m_token + "/";
     if (m_remote_on && m_ts.serving && !m_ts.dns_name.empty()) l.remote = "https://" + m_ts.dns_name + "/r/" + m_token + "/";
+    // l.relay stays empty in phase 0: there is no relay to name one against yet. Everything
+    // downstream already treats an empty link as "this path does not exist", so nothing shows.
     return l;
 }
 
 // The link a notification should open on the phone. The Tailscale one first, because it works
 // from anywhere; the Wi-Fi one otherwise; nothing at all while phone access is off, and then the
-// relay simply gets no link rather than one that cannot resolve. Both are handed over now: a
+// notifier simply gets no link rather than one that cannot resolve. Both are handed over now: a
 // notification carries the pair, and the phone opens whichever one its owner prefers.
+//
+// The order design_hosted_relay.md section 2 settles on is tailnet -> relay -> LAN: the tailnet
+// wins on merit (free, and WireGuard-encrypted end to end), the relay is the paid fallback, the
+// LAN is only reachable from the house. l.relay is empty in phase 0, so the middle rung is a
+// no-op today and slotting it in later changes nothing else.
 void HubServer::update_notify_link()
 {
     const PhoneLinks l = phone_links();
@@ -1536,6 +2267,9 @@ json HubServer::events_json(int since)
     for (const json& e : m_events)
         if (e.value("id", 0) > since) out["events"].push_back(e);
     out["last_id"] = m_next_event_id;
+    // Which hub these ids belong to. A data dir's hub keeps this for ever; a fresh one mints a new
+    // value, and that - not an id that went backwards - is how a client detects the reset.
+    out["hub_instance"] = m_hub_instance;
     return out;
 }
 
@@ -1546,6 +2280,420 @@ void HubServer::save_events_locked()
     j["events"]  = json::array();
     for (const json& e : m_events) j["events"].push_back(e);
     write_file(events_json_path(), j.dump());
+}
+
+// ------------------------------------------------ the printers the hub remembers ----
+//
+// Everything below exists for one reason: with no slicer window open the phone app could say
+// nothing about the printers at all, because /i/<pid>/api/printers needs a live instance. The hub
+// already hears about the printers (it is where the instances' events land), so it now also keeps
+// what they last reported: one row per printer id, the time it arrived and the window that sent
+// it. /summary and /state serve those rows whether or not a window is open, and a row nobody has
+// refreshed lately is handed over with its age and a `stale` flag rather than withheld - "this is
+// what it was last doing, 40 minutes ago" is exactly the answer a person wants.
+
+// The PC's own name, as a person recognises it in a list of hubs. Cached: the resolver call is
+// not free and this never changes while we run.
+static std::string pc_host_name()
+{
+    static std::string cached;
+    static std::once_flag once;
+    std::call_once(once, []() {
+        try { cached = asio::ip::host_name(); } catch (...) {}
+#ifdef _WIN32
+        if (cached.empty()) { const char* c = std::getenv("COMPUTERNAME"); if (c) cached = c; }
+#endif
+        if (cached.empty()) cached = "this PC";
+    });
+    return cached;
+}
+
+// What this hub goes by on the phone. The product name plus the PC, which is what distinguishes
+// two hubs in the app's list; the hub has no name a person can set (yet), so it is derived.
+static std::string hub_name()
+{
+    return std::string(SLIC3R_APP_NAME) + " on " + pc_host_name();
+}
+
+// The job a printer row says it is running. Which field that is depends on the printer: a Bambu
+// row has `task` (MachineObject::subtask_name), while a print host - Klipper, Moonraker, PrusaLink -
+// has it in `stage`, where fill_from_print_stats puts print_stats.filename. A summary that only
+// looked at `task` would show no job for every print host, which is most of them.
+static std::string row_job(const nlohmann::json& row)
+{
+    if (!row.is_object()) return "";
+    std::string job = row.value("task", std::string());
+    if (job.empty()) job = row.value("subtask_name", std::string());
+    if (job.empty()) job = row.value("stage", std::string());
+    return job;
+}
+
+static long long now_millis()
+{
+    return (long long) std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::system_clock::now().time_since_epoch()).count();
+}
+
+// One round of the poll: ask each live instance for its printers, merge what comes back into the
+// cache and write it down. Runs on the hub's own loop thread, never on a request; an instance that
+// is slicing may take a moment to answer and nothing here may hold m_mutex across that.
+void HubServer::poll_printers()
+{
+    const std::vector<Instance> live = instances(false);
+    for (const Instance& inst : live) {
+        if (inst.port <= 0) continue;
+        std::string body;
+        int         status = 0;
+        Http::get("http://127.0.0.1:" + std::to_string(inst.port) + "/api/printers")
+            .timeout_connect(1).timeout_max(10)
+            .on_complete([&](std::string b, unsigned s) { status = (int) s; body = b; })
+            .on_error([&](std::string, std::string, unsigned) {})
+            .perform_sync();
+        if (status != 200) continue;
+        json rows;
+        try { rows = json::parse(body); } catch (...) { continue; }
+        if (!rows.is_object() || !rows.contains("printers") || !rows["printers"].is_array()) continue;
+        const long long at = now_millis();
+        std::lock_guard<std::mutex> lock(m_mutex);
+        for (const json& row : rows["printers"]) {
+            if (!row.is_object()) continue;
+            const std::string id = row.value("id", std::string());
+            if (id.empty() || id.size() > 200) continue;
+            CachedPrinter& c = m_printers[id];
+            c.row      = row;
+            c.at       = at;
+            c.instance = inst.pid;
+        }
+        // A hub that ran for weeks with a changing fleet must not grow without bound: keep the
+        // most recently seen rows and drop the oldest.
+        while (m_printers.size() > MAX_CACHED_PRINTERS) {
+            auto oldest = m_printers.begin();
+            for (auto it = m_printers.begin(); it != m_printers.end(); ++it)
+                if (it->second.at < oldest->second.at) oldest = it;
+            m_printers.erase(oldest);
+        }
+        save_printers_locked();
+    }
+    // Where the archive keeps its sidecars, so a thumbnail still resolves once every window is
+    // closed. Asked once per round off the same instances, and only while we do not have it.
+    bool need_dir;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        need_dir = m_archive_dir.empty();
+    }
+    if (need_dir) {
+        for (const Instance& inst : live) {
+            if (inst.port <= 0) continue;
+            std::string body;
+            Http::get("http://127.0.0.1:" + std::to_string(inst.port) + "/api/info")
+                .timeout_connect(1).timeout_max(5)
+                .on_complete([&](std::string b, unsigned s) { if (s == 200) body = b; })
+                .on_error([&](std::string, std::string, unsigned) {})
+                .perform_sync();
+            std::string dir;
+            try { dir = json::parse(body).value("archive_dir", std::string()); } catch (...) {}
+            if (dir.empty()) continue;
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_archive_dir = dir;
+            save_printers_locked();
+            break;
+        }
+    }
+}
+
+// The rows, as the phone and the app get them. `age_s` is how long ago the value was read and
+// `stale` says whether that is longer than the poll can explain; `instance` is the window that can
+// still be asked to act on this printer (0 = none open, and then the app knows not to offer the
+// control buttons rather than offering ones that would 404).
+json HubServer::printers_json()
+{
+    const std::vector<Instance> live = instances(false);
+    const long long             now  = now_millis();
+    std::lock_guard<std::mutex> lock(m_mutex);
+    json out = json::array();
+    for (const auto& kv : m_printers) {
+        json row = kv.second.row;
+        row["id"] = kv.first;
+        const long long age_ms = now > kv.second.at ? now - kv.second.at : 0;
+        row["age_s"]  = (long long) (age_ms / 1000);
+        row["stale"]  = age_ms > PRINTERS_STALE_MS;
+        row["seen_at"] = kv.second.at;
+        // The pid only stays in the row while that window is still there: the app addresses the
+        // control route as /i/<pid>/..., so a pid that has gone would be worse than none.
+        long pid = 0;
+        for (const Instance& i : live)
+            if (i.pid == kv.second.instance) pid = i.pid;
+        row["instance"] = pid;
+        out.push_back(row);
+    }
+    return out;
+}
+
+void HubServer::save_printers_locked()
+{
+    json j;
+    j["printers"] = json::array();
+    for (const auto& kv : m_printers) {
+        json e;
+        e["id"]       = kv.first;
+        e["row"]      = kv.second.row;
+        e["at"]       = kv.second.at;
+        e["instance"] = (long long) kv.second.instance;
+        j["printers"].push_back(e);
+    }
+    if (!m_archive_dir.empty()) j["archive_dir"] = m_archive_dir;
+    write_file(printers_json_path(), j.dump());
+}
+
+// What the printers were doing when this hub last ran. Served straight away (with an age that says
+// how old it is), so the app's first refresh after a PC reboot is not blank.
+void HubServer::load_printers()
+{
+    try {
+        json j = json::parse(read_file(printers_json_path()));
+        for (const auto& e : j.value("printers", json::array())) {
+            if (!e.is_object()) continue;
+            const std::string id = e.value("id", std::string());
+            if (id.empty() || !e.contains("row") || !e["row"].is_object()) continue;
+            CachedPrinter c;
+            c.row      = e["row"];
+            c.at       = e.value("at", (long long) 0);
+            c.instance = 0; // whatever window reported it last time is certainly gone
+            m_printers[id] = c;
+        }
+        m_archive_dir = j.value("archive_dir", std::string());
+    } catch (...) {}
+}
+
+std::string HubServer::archive_dir()
+{
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (!m_archive_dir.empty()) return m_archive_dir;
+    }
+    return (fs::path(data_dir()) / "gcode_archive").string();
+}
+
+// The running job's picture, from the G-code archive: the hub reads the sidecars itself (they are
+// plain JSON next to a <id>.png), so this works with every slicer window closed - which is the
+// case the app asked about. Preference goes to the record whose sent name is the job the printer
+// says it is running; failing that, the newest record for that printer, which is what a person
+// looking at a card would expect. "" when there is nothing to show, and the caller answers 404.
+std::map<std::string, std::string> HubServer::printer_thumbnail_paths(const std::map<std::string, std::string>& jobs)
+{
+    struct Pick { std::string best, named; long long best_t { -1 }, named_t { -1 }; };
+    std::map<std::string, Pick>        picks;
+    std::map<std::string, std::string> out;
+
+    const fs::path            root(archive_dir());
+    boost::system::error_code ec;
+    if (!fs::is_directory(root, ec)) return out;
+    for (fs::directory_iterator it(root, ec), end; !ec && it != end; it.increment(ec)) {
+        boost::system::error_code ig;
+        if (!fs::is_regular_file(it->path(), ig) || it->path().extension() != ".json") continue;
+        json j;
+        try { j = json::parse(read_file(it->path().string())); } catch (...) { continue; }
+        if (!j.is_object() || !j.contains("printer") || !j["printer"].is_object()) continue;
+        const std::string printer = j["printer"].value("id", std::string());
+        const std::string id      = j.value("id", std::string());
+        if (printer.empty() || id.empty()) continue;
+        // The picture is a sibling of the sidecar, named after the record. Nothing from a request
+        // is involved in building this path.
+        const fs::path png = root / (id + ".png");
+        if (!fs::is_regular_file(png, ig)) continue;
+        const long long t = j.value("time", (long long) 0);
+        Pick& p = picks[printer];
+        if (t > p.best_t) { p.best_t = t; p.best = png.string(); }
+        // The job the printer says it is running, matched against the name the printer was really
+        // given and against the archived file name: either can be what it reports.
+        const auto job = jobs.find(printer);
+        if (job != jobs.end() && !job->second.empty() &&
+            (j.value("sent_name", std::string()) == job->second || j.value("file", std::string()) == job->second))
+            if (t > p.named_t) { p.named_t = t; p.named = png.string(); }
+    }
+    for (const auto& kv : picks)
+        out[kv.first] = kv.second.named.empty() ? kv.second.best : kv.second.named;
+    return out;
+}
+
+std::string HubServer::printer_thumbnail_path(const std::string& printer_id)
+{
+    if (printer_id.empty()) return "";
+    std::map<std::string, std::string> jobs;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        auto it = m_printers.find(printer_id);
+        if (it != m_printers.end()) jobs[printer_id] = row_job(it->second.row);
+    }
+    const std::map<std::string, std::string> all = printer_thumbnail_paths(jobs);
+    const auto hit = all.find(printer_id);
+    return hit == all.end() ? std::string() : hit->second;
+}
+
+// The bytes, for the route. "" both when there is no such picture and when the file went away
+// between the two calls, and the route answers 404 either way.
+std::string HubServer::printer_thumbnail(const std::string& printer_id)
+{
+    const std::string path = printer_thumbnail_path(printer_id);
+    return path.empty() ? std::string() : read_file(path);
+}
+
+// This hub's identity, minted when this data dir's hub settings are created and never again.
+// Everything a client can use to spot an event-id reset in one step hangs off this value, so it
+// must not change for any other reason - not a hub restart, not a new phone link, not an upgrade.
+std::string HubServer::hub_instance()
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return m_hub_instance;
+}
+
+// One JSON with everything the app's Devices screen draws. Deliberately built here rather than
+// proxied: the point is that it answers with no slicer window open.
+json HubServer::summary_json()
+{
+    const PhoneLinks links = phone_links();   // opens sockets: never under m_mutex
+    const json       rows  = printers_json(); // takes m_mutex itself
+    json cams = json::array();
+    std::string state;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        state = m_state;
+    }
+    // The camera wall, so a printer row can name the camera that watches it. Joined by id and, for
+    // a LAN printer, by the address the camera sits on - which is the join the app was doing by
+    // hand out of /state, and the one that is easy to get wrong.
+    try {
+        json j = json::parse(state);
+        for (const auto& h : j.value("hosts", json::array()))
+            cams.push_back(json{ { "id", h.value("id", "") }, { "alias", h.value("alias", "") }, { "ip", h.value("ip", "") } });
+    } catch (...) {}
+
+    json out;
+    // `name` is the PC, because that is what a person picks a hub by in the app's list (and what
+    // the app labels its card with); `hub` is this hub's own longer label. Both are sent so a
+    // client can show either without inventing one out of the URL.
+    out["name"]         = pc_host_name();
+    out["hub"]          = hub_name();
+    out["host"]         = pc_host_name();
+    out["version"]      = std::string(SLIC3R_VERSION);
+    out["hub_instance"] = hub_instance();
+    out["lan_url"]      = links.lan;
+    out["remote_url"]   = links.remote;
+    out["urls"]         = json{ { "lan", links.lan }, { "remote", links.remote }, { "relay", links.relay } };
+    out["printers"]     = json::array();
+    std::string token;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        out["last_id"] = m_next_event_id; // the same high-water mark /events reports
+        token          = m_token;         // for the thumbnail URLs built below
+    }
+    // One pass over the archive for every row, rather than one per printer: which job each is
+    // running first, then the pictures.
+    std::map<std::string, std::string> jobs;
+    for (const json& row : rows)
+        jobs[row.value("id", std::string())] = row_job(row);
+    const std::map<std::string, std::string> thumbs = printer_thumbnail_paths(jobs);
+
+    for (const json& row : rows) {
+        const std::string id = row.value("id", std::string());
+        json p;
+        p["id"]       = id;
+        p["name"]     = row.value("name", std::string());
+        p["model"]    = row.value("model", std::string());
+        p["vendor"]   = row.value("kind", std::string()); // bambu | snapmaker | printhost | connect
+        p["kind"]     = row.value("kind", std::string());
+        // A row here is deliberately ALSO a valid /api/printers row: the app's existing mapper
+        // reads print_status first and falls back to status, so both are carried under their own
+        // names, and `state` is the plain-language name /summary documents.
+        p["state"]        = row.contains("print_status") ? row.value("print_status", std::string()) : row.value("status", std::string());
+        p["status"]       = p["state"];
+        p["print_status"] = p["state"];
+        p["online"]   = row.value("online", false);
+        p["printing"] = row.value("printing", false);
+        p["percent"]     = row.value("percent", 0);
+        p["left_time_s"] = row.value("left_time_s", 0);
+        // `job` is the plain-language name; `task` is kept as well, because that is the name the
+        // app's existing mapper reads off an /api/printers row.
+        p["job"]      = row_job(row);
+        p["task"]     = p["job"];
+        p["layer"]        = row.value("layer", 0);
+        p["total_layers"] = row.value("total_layers", 0);
+        // Temperatures only when the printer really reported them: a card that shows 0 C where
+        // nothing is known reads as "cold", which is a different statement from "not known".
+        if (row.contains("bed_temp"))   p["bed_temp"]   = row["bed_temp"];
+        if (row.contains("bed_target")) p["bed_target"] = row["bed_target"];
+        if (row.contains("nozzles"))    p["nozzles"]    = row["nozzles"];
+        // What the app's buttons need, carried through unchanged.
+        for (const char* k : { "can_pause", "can_resume", "can_stop", "can_print", "can_upload" })
+            if (row.contains(k)) p[k] = row[k];
+        // The address, for a client that joins a camera to a printer by it (and for a card that
+        // shows where a LAN printer is), and why the printer stopped, in its own words.
+        if (row.contains("ip"))          p["ip"]          = row["ip"];
+        if (row.contains("print_error")) p["print_error"] = row["print_error"];
+        if (row.contains("stage"))       p["stage"]       = row["stage"];
+        p["stale"]    = row.value("stale", false);
+        p["age_s"]    = row.value("age_s", 0);
+        p["instance"] = row.value("instance", 0);
+        // The camera that watches this printer, if any: its own id first, then a LAN camera on the
+        // same address.
+        std::string cam;
+        const std::string ip = row.value("ip", std::string());
+        for (const json& c : cams) {
+            if (c.value("id", std::string()) == id) { cam = id; break; }
+            if (!ip.empty() && (c.value("id", std::string()) == ip || c.value("ip", std::string()) == ip)) cam = c.value("id", std::string());
+        }
+        if (!cam.empty()) p["camera"] = cam;
+        // The thumbnail URL is offered whenever there is a picture to serve, so the app can draw
+        // it without a probe that would 404 most of the time.
+        if (thumbs.find(id) != thumbs.end())
+            p["thumbnail"] = "/r/" + token + "/printers/" + percent_encode(id) + "/thumbnail.png";
+        out["printers"].push_back(p);
+    }
+    return out;
+}
+
+// The pairing document, in the shape the app already reads (tools/mock_hub.py --with-pair).
+json HubServer::pair_json()
+{
+    const PhoneLinks links = phone_links();
+    json j;
+    j["name"]    = pc_host_name();  // the PC, which is what the app labels the card with
+    j["hub"]     = hub_name();      // the name this hub goes by
+    j["host"]    = pc_host_name();
+    j["version"] = std::string(SLIC3R_VERSION);
+    j["hub_instance"] = hub_instance();
+    // Three named origins, one of which is always empty in phase 0. The apps read this object
+    // generically (HubUrl accepts any https origin with a /r/<token>/ path), so the relay needs no
+    // app change to become usable the day something fills it in.
+    {
+        std::string hubid, pubkey;
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            hubid  = m_identity.hubid;
+            pubkey = m_identity.public_hex;
+        }
+        // One helper builds `urls`, `hubid` and `public_key` so the document the apps read and the
+        // shape the tests pin can never drift apart.
+        j.update(json::parse(Testing::pair_identity_json(links.lan, links.remote, links.relay, hubid, pubkey)));
+    }
+    j["ips"]     = links.ips;
+    // What this build and this configuration can actually push with, so the app does not register
+    // for a provider that will never deliver (APNs needs the .p8 AND HTTP/2 in our libcurl).
+    const json prov = AppPush::providers_json();
+    j["push"]    = json{ { "webpush", true },
+                         { "apns", prov.value("apns", false) },
+                         { "fcm", prov.value("fcm", false) },
+                         { "unified", false } };
+    // The token's generation, so a client can tell "the link was replaced" from "the same link
+    // again" without comparing the tokens themselves. 1 for a data dir's first link, +1 for every
+    // "New link" since; persisted, because it must never go backwards.
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        j["token_version"] = m_token_version;
+    }
+    j["features"] = json::array({ "events", "control", "send", "summary", "thumbnail", "webrtc", "quality", "apppush", "hubid" });
+    j["capabilities"] = j["features"];
+    return j;
 }
 
 void HubServer::load_events()
@@ -1561,12 +2709,17 @@ void HubServer::load_events()
     } catch (...) {}
 }
 
-bool HubServer::bind(bool lan)
+// Opens, sets SO_EXCLUSIVEADDRUSE (Windows) / SO_REUSEADDR (elsewhere), and tries HUB_PORT..
+// HUB_PORT+19 on `addr`, taking the first that binds. Pulled out of bind() so the fallback path
+// below can retry with the previous mode's address after a failed rebind, without duplicating the
+// loop. Returns the bound acceptor (listening) or nullptr, and always sets *out_port to whichever
+// port the last attempt used (for the caller's log line on total failure).
+static std::shared_ptr<tcp::acceptor> try_bind_range(asio::io_context& ioc, const asio::ip::address_v4& addr, int* out_port)
 {
-    auto acceptor = std::make_shared<tcp::acceptor>(m_ioc);
+    auto acceptor = std::make_shared<tcp::acceptor>(ioc);
     boost::system::error_code ec;
     acceptor->open(tcp::v4(), ec);
-    if (ec) return false;
+    if (ec) return nullptr;
 #ifndef _WIN32
     acceptor->set_option(tcp::acceptor::reuse_address(true), ec); // on Windows this would let two hubs share the port
 #else
@@ -1576,29 +2729,127 @@ bool HubServer::bind(bool lan)
 #endif
     int port = HUB_PORT;
     for (; port < HUB_PORT + 20; ++port) {
-        acceptor->bind(tcp::endpoint(lan ? asio::ip::address_v4::any() : asio::ip::address_v4::loopback(), (unsigned short) port), ec);
+        acceptor->bind(tcp::endpoint(addr, (unsigned short) port), ec);
         if (!ec) break;
     }
-    if (ec) {
-        // With SO_EXCLUSIVEADDRUSE this is what a second hub sees when the first one already owns
-        // the range - the shadowing bind now fails loudly instead of silently stealing loopback.
-        BOOST_LOG_TRIVIAL(error) << "RemoteHub: no free port in " << HUB_PORT << "-" << (HUB_PORT + 19)
-                                 << " (another hub is probably already running): " << ec.message();
-        return false;
-    }
+    if (out_port) *out_port = port;
+    if (ec) return nullptr;
     acceptor->listen(64, ec);
-    if (ec) return false;
+    if (ec) return nullptr;
+    return acceptor;
+}
+
+bool HubServer::bind(bool lan)
+{
+    // Close the OLD acceptor before trying to bind the new one. This used to run the other way
+    // round (bind first, close on success) and that was the actual bug behind "the phone link
+    // came back on 13641 for no reason": on a fresh start the hub binds 127.0.0.1:13640
+    // (phone off); switching phone access on calls bind(true), which - with the old ordering -
+    // tried a NEW SO_EXCLUSIVEADDRUSE 0.0.0.0:13640 while the OLD 127.0.0.1:13640 acceptor was
+    // still open in this same process. Windows treats that as a conflict (exclusive access can't
+    // be granted over an existing bind, even a narrower one, even in the same process), so the
+    // loop below stepped to 13641 every single time home mode was turned on - nothing else on the
+    // PC needed to be running at all. Freeing the port first removes that self-conflict; the
+    // holder diagnostics further down remain for when something genuinely external holds
+    // HUB_PORT.
+    //
+    // A few hundred ms with no listener while the rebind happens is acceptable (nothing else in
+    // the hub depends on this socket being continuously open); if the rebind then fails, the old
+    // acceptor's mode and port are restored below rather than leaving the hub deaf.
     std::shared_ptr<tcp::acceptor> old;
+    bool                           had_old = false;
+    bool                           old_lan = false;
+    int                            old_port = 0;
     {
         std::lock_guard<std::mutex> lock(m_mutex);
-        old        = m_acceptor;
-        m_acceptor = acceptor;
-        m_lan      = lan;
-        m_port     = port;
+        old      = m_acceptor;
+        had_old  = (bool) old;
+        old_lan  = m_lan;
+        old_port = m_port;
     }
-    if (old) { boost::system::error_code ig; old->close(ig); } // its accept loop exits
+    if (old) { boost::system::error_code ig; old->close(ig); } // releases the port; its accept loop exits
+
+    int  port = HUB_PORT;
+    auto acceptor = try_bind_range(m_ioc, lan ? asio::ip::address_v4::any() : asio::ip::address_v4::loopback(), &port);
+    if (!acceptor) {
+        BOOST_LOG_TRIVIAL(error) << "RemoteHub: no free port in " << HUB_PORT << "-" << (HUB_PORT + 19)
+                                 << " for " << (lan ? "0.0.0.0" : "127.0.0.1") << " (another hub is probably already running)";
+        // Never leave the hub with no listener at all: put back what was working before, on its
+        // own address and port, if there was one.
+        if (had_old) {
+            int fallback_port = old_port;
+            auto fallback = try_bind_range(m_ioc, old_lan ? asio::ip::address_v4::any() : asio::ip::address_v4::loopback(), &fallback_port);
+            if (fallback) {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                m_acceptor = fallback;
+                m_lan      = old_lan;
+                m_port     = fallback_port;
+                std::thread([this, fallback]() { accept_loop(fallback, false); }).detach();
+                BOOST_LOG_TRIVIAL(warning) << "RemoteHub: could not switch listener mode; restored "
+                                           << (old_lan ? "0.0.0.0" : "127.0.0.1") << ":" << fallback_port;
+            } else {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                m_acceptor = nullptr;
+                BOOST_LOG_TRIVIAL(error) << "RemoteHub: lost the listener entirely trying to rebind";
+            }
+        }
+        return false;
+    }
+
+    // Something else on the PC already holds HUB_PORT - find out what, so the log and the status
+    // JSON can say so instead of just handing out a link on a port nothing is allowed to reach yet
+    // (a tester's report, 2026-09-17: their phone link came back on 13641 with no explanation).
+    // With the old acceptor now closed above, this only fires for a genuine external holder -
+    // this hub's own previous-mode acceptor can no longer be mistaken for one.
+    // The holder lookup (netstat + tasklist) takes several seconds on a busy PC. It used to run
+    // right here, before the listener was published and hub.json written, and that delay was
+    // enough for a slicer that had just spawned this hub to give up waiting for it
+    // (ensure_running polls for ~6 s), so its phone-access request never arrived and the
+    // hub stayed loopback-only. The lookup is only a diagnostic, so it now runs on its own
+    // thread after the listener is up and fills in the note when it is done.
+    const bool fell_back = port != HUB_PORT;
+    if (fell_back)
+        BOOST_LOG_TRIVIAL(warning) << "RemoteHub: port " << HUB_PORT << " is in use; the phone link uses " << port << " instead";
+    bool was_remote_on;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_acceptor         = acceptor;
+        m_lan              = lan;
+        m_port             = port;
+        m_port_note_holder.clear();
+        was_remote_on      = m_remote_on;
+    }
     std::thread([this, acceptor]() { accept_loop(acceptor, false); }).detach();
+    if (fell_back)
+        std::thread([this]() {
+            const std::string holder = port_holder_description(HUB_PORT);
+            if (!holder.empty()) BOOST_LOG_TRIVIAL(warning) << "RemoteHub: port " << HUB_PORT << " is held by " << holder;
+            std::lock_guard<std::mutex> lock(m_mutex);
+            if (m_port != HUB_PORT) m_port_note_holder = holder;
+        }).detach();
     BOOST_LOG_TRIVIAL(info) << "RemoteHub: listening on " << (lan ? "0.0.0.0" : "127.0.0.1") << ":" << port;
+    // Tailscale Serve's forwarding target is Tailscale's own persisted config, not ours: if remote
+    // access was already on and the listener just moved port (this bind, or the very first one),
+    // Serve is still pointed at wherever it was told last and has to be re-pointed here too, or the
+    // tailnet URL keeps forwarding to a dead port. set_remote(true, ...) below re-runs the same
+    // `tailscale serve` command with the port current right now, which is exactly what re-pointing
+    // it means; it is a no-op for the tailnet config itself when the target already matches.
+    if (was_remote_on) {
+        std::thread([this]() {
+            TailscaleState t = remote_state(true);
+            int            p;
+            {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                p = m_port;
+            }
+            if (t.installed && t.backend == "Running" && (!t.serving || t.serving_port != p)) {
+                std::string err;
+                set_remote(true, err);
+                if (!err.empty()) BOOST_LOG_TRIVIAL(warning) << "RemoteHub: could not re-point Tailscale Serve at the new port: " << err;
+                else BOOST_LOG_TRIVIAL(info) << "RemoteHub: re-pointed Tailscale Serve at 127.0.0.1:" << p;
+            }
+        }).detach();
+    }
     return true;
 }
 
@@ -1645,7 +2896,7 @@ void HubServer::accept_loop(std::shared_ptr<tcp::acceptor> acceptor, bool admin)
 void HubServer::start_go2rtc()
 {
 #ifdef _WIN32
-    const std::string exe = resources_dir() + "/tools/go2rtc/go2rtc.exe";
+    const std::string exe = go2rtc_exe_path();
     if (!fs::exists(exe)) {
         BOOST_LOG_TRIVIAL(error) << "RemoteHub: missing " << exe;
         return;
@@ -1664,26 +2915,72 @@ void HubServer::start_go2rtc()
     m_go2rtc_user = random_hex(8);
     m_go2rtc_pass = random_hex(16);
     m_go2rtc_auth = basic_auth(m_go2rtc_user, m_go2rtc_pass);
+    // WebRTC media goes straight from go2rtc to the phone (Phase 2). The signalling still rides
+    // the hub's /api/ws tunnel - go2rtc 1.9.14 answers webrtc/offer on the WebSocket, so
+    // allow_paths does not need go2rtc's /api/webrtc (WHEP) route and stays as it is. The public
+    // STUN server only matters off the tailnet: it lets go2rtc learn its own public address so a
+    // phone on mobile data can try a direct path. On the tailnet and on the LAN the host
+    // candidates (100.x, 192.168.x/10.x) are what actually connect.
+    const int webrtc_port = free_webrtc_port();
+    if (webrtc_port == 0) BOOST_LOG_TRIVIAL(warning) << "RemoteHub: no free WebRTC port; video stays on MSE";
     const std::string cfg_path = (fs::path(hub_dir()) / "go2rtc.yaml").string();
     {
         boost::nowide::ofstream cfg(cfg_path);
         cfg << "api:\n  listen: \"127.0.0.1:" << port << "\"\n"
             << "  username: \"" << m_go2rtc_user << "\"\n  password: \"" << m_go2rtc_pass << "\"\n"
             << "  local_auth: true\n"
-            << "  allow_paths: [\"/api/ws\", \"/api/streams\", \"/api/onvif\"]\n"
-            << "rtsp:\n  listen: \"\"\n"
-            // No WebRTC and no SRTP listener, deliberately. go2rtc would need a UDP port bound on
-            // a LAN interface to offer a host candidate, which is a second way into this PC that
-            // nothing here needs; and it would still not carry video over the remote path, because
-            // Tailscale Serve is an HTTPS reverse proxy - it forwards TCP to 127.0.0.1 and cannot
-            // forward the UDP media WebRTC wants. The phone therefore never gets a usable answer
-            // to a WebRTC offer today; stream_center.html knows that (WEBRTC_RELAY, and the spec
-            // note docs/superpowers/specs/2026-09-06-phone-lan-fallback.md) and picks a mode that
-            // rides the /api/ws tunnel instead. Enabling it means: a webrtc listen port here, a
-            // firewall hole, and - for the remote path - the phone on the tailnet itself rather
-            // than behind Serve.
-            << "webrtc:\n  listen: \"\"\n"
-            << "srtp:\n  listen: \"\"\n";
+            << "  allow_paths: [\"/api/ws\", \"/api/streams\", \"/api/onvif\"]\n";
+        // RTSP. This listener used to be off unconditionally, and it has to stay off when we have
+        // no ffmpeg - nothing the hub does needs it and an open RTSP port is surface we do not
+        // want. But go2rtc's `ffmpeg:` sources are **piped back through go2rtc's own RTSP
+        // listener**: with `rtsp: listen: ""` every variant fails at the moment a viewer opens it
+        // with `streams: exec: rtsp module disabled`, which reaches the phone as a black tile.
+        // (Found exactly that way while gating this branch - the config looked right and the
+        // variants registered fine; only requesting one showed it.)
+        //
+        // So: a loopback-only port, and only when there is an ffmpeg to need it. 127.0.0.1 means
+        // it is not reachable from the LAN or the tailnet, and it is a random free port rather
+        // than 8554 so two hubs on one PC cannot collide.
+        const bool want_ffmpeg = !ffmpeg_path().empty();
+        int rtsp_port = want_ffmpeg ? free_loopback_port() : 0;
+        if (want_ffmpeg && rtsp_port == 0)
+            BOOST_LOG_TRIVIAL(warning) << "RemoteHub: no free loopback port for go2rtc's RTSP; quality variants will not start";
+        if (rtsp_port > 0) cfg << "rtsp:\n  listen: \"127.0.0.1:" << rtsp_port << "\"\n";
+        else               cfg << "rtsp:\n  listen: \"\"\n";
+        // WebRTC media (Phase 2). Everything else the hub runs is loopback-only; this is the one
+        // port that has to be reachable from the phone, because the media goes straight from
+        // go2rtc to the phone rather than through the hub. The earlier note here said "no WebRTC
+        // listener, deliberately" - that was true while nothing opened the port or asked the
+        // firewall about it. Both now exist (free_webrtc_port() above, firewall_query()), so the
+        // listener goes on and the page decides per tile whether to use it. What has not changed:
+        // Tailscale Serve is an HTTPS reverse proxy and cannot forward UDP, so a phone arriving
+        // through a Serve origin still cannot use WebRTC - stream_center.html detects that origin
+        // and stays on MSE (see docs/superpowers/specs/2026-09-12-webrtc-video.md). The public
+        // STUN server only matters off the tailnet; on the tailnet and the LAN the host
+        // candidates (100.x, 192.168.x/10.x) are what actually connect.
+        if (webrtc_port > 0)
+            cfg << "webrtc:\n  listen: \":" << webrtc_port << "\"\n"
+                << "  ice_servers:\n    - urls: [\"stun:stun.cloudflare.com:3478\"]\n";
+        else
+            cfg << "webrtc:\n  listen: \"\"\n";
+        cfg << "srtp:\n  listen: \"\"\n";
+        // ffmpeg for the Quality variants. Two things have to be said explicitly.
+        //
+        // `bin:` - go2rtc otherwise looks for "ffmpeg" on PATH, and the whole point of bundling
+        // one is not to depend on what happens to be installed on the user's PC. An ffmpeg on
+        // PATH could also be any build at all, including one whose flags differ; naming our own
+        // exe makes the template below a statement about a known binary.
+        //
+        // `h264:` - go2rtc's built-in template is libx264, which the bundled LGPL build does not
+        // have (see ffmpeg_h264_template()). Without this override every variant would die at
+        // startup with "Unknown encoder 'libx264'" and the tile would go black.
+        const std::string ff = ffmpeg_path();
+        if (!ff.empty()) {
+            std::string ffy = ff;
+            for (auto& c : ffy) if (c == '\\') c = '/'; // YAML-safe, and ffmpeg accepts forward slashes
+            cfg << "ffmpeg:\n  bin: \"" << ffy << "\"\n"
+                << "  h264: \"" << ffmpeg_h264_template() << "\"\n";
+        }
     }
     if (!m_job) {
         HANDLE job = ::CreateJobObjectW(nullptr, nullptr);
@@ -1700,8 +2997,81 @@ void HubServer::start_go2rtc()
         return;
     }
     m_go2rtc_port = port;
-    BOOST_LOG_TRIVIAL(info) << "RemoteHub: go2rtc pid " << m_go2rtc_pid << " on 127.0.0.1:" << port << " (credential-only)";
+    m_webrtc_port = webrtc_port;
+    BOOST_LOG_TRIVIAL(info) << "RemoteHub: go2rtc pid " << m_go2rtc_pid << " on 127.0.0.1:" << port
+                            << " (credential-only), WebRTC media on " << (webrtc_port ? std::to_string(webrtc_port) : std::string("off"));
+    {
+        const std::string ff = ffmpeg_path();
+        BOOST_LOG_TRIVIAL(info) << "RemoteHub: quality variants "
+                                << (ff.empty() ? "off (no ffmpeg found; MJPEG fps knob only)"
+                                               : "on via " + ff);
+    }
+    if (webrtc_port > 0) firewall_state(true); // one PowerShell run on a detached thread; result cached
 #endif
+}
+
+// Cached; a refresh runs the (slow) PowerShell query on a detached thread and never blocks a
+// request, so the hub page's 3 s poll always gets the last answer straight away.
+FirewallState HubServer::firewall_state(bool refresh)
+{
+    int port = 0;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        port = m_webrtc_port;
+        // Re-checked every few minutes so the hub page notices by itself once the user has
+        // allowed go2rtc in the firewall (or removed the rule again).
+        if (!refresh && m_fw.checked_at && (long long) std::time(nullptr) - m_fw.checked_at < 300) return m_fw;
+    }
+    if (port > 0 && !m_fw_busy.exchange(true)) {
+        std::thread([this, port]() {
+            FirewallState fw = firewall_query_go2rtc(go2rtc_exe_path(), port);
+            {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                m_fw = fw;
+            }
+            if (fw.state != "allowed")
+                BOOST_LOG_TRIVIAL(info) << "RemoteHub: Windows Firewall for go2rtc.exe: " << fw.state << " (" << fw.note
+                                         << (fw.command.empty() ? "" : " " + fw.command) << ")";
+            m_fw_busy = false;
+        }).detach();
+    }
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return m_fw;
+}
+
+// Same idea as firewall_state() above, but for the LAN listener itself: does Windows Firewall let
+// a phone reach this PC's own port, not just go2rtc's WebRTC one? Checked only while phone access
+// is actually on and bound to a LAN address - point is moot on loopback-only or before the first
+// bind. current_exe() rather than go2rtc_exe_path(): the phone talks to this process directly.
+FirewallState HubServer::lan_firewall_state(bool refresh)
+{
+    bool on = false;
+    int  port = 0;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        on   = m_phone && m_lan && m_port > 0;
+        port = m_port;
+        if (!refresh && m_lan_fw.checked_at && (long long) std::time(nullptr) - m_lan_fw.checked_at < 300) return m_lan_fw;
+    }
+    if (on && !m_lan_fw_busy.exchange(true)) {
+        std::thread([this, port]() {
+            const std::string exe = current_exe();
+            FirewallState      fw = firewall_query(exe, port, "EdgeSlicer.exe",
+                "netsh advfirewall firewall add rule name=\"EdgeSlicer\" dir=in action=allow program=\"" + exe +
+                "\" protocol=TCP localport=" + std::to_string(HUB_PORT) + "-" + std::to_string(HUB_PORT + 19) +
+                " profile=private,domain");
+            {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                m_lan_fw = fw;
+            }
+            if (fw.state != "allowed")
+                BOOST_LOG_TRIVIAL(info) << "RemoteHub: Windows Firewall for the phone/LAN port " << port << ": " << fw.state << " (" << fw.note
+                                         << (fw.command.empty() ? "" : " " + fw.command) << ")";
+            m_lan_fw_busy = false;
+        }).detach();
+    }
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return m_lan_fw;
 }
 
 void HubServer::register_streams()
@@ -1737,6 +3107,37 @@ void HubServer::register_streams()
                     std::this_thread::sleep_for(std::chrono::milliseconds(1500)); // go2rtc may still be starting
                 }
             }).detach();
+            // Quality variants beside the source stream, when an ffmpeg exists to make them (see
+            // quality_variants()). Each is a re-encode of the stream just registered, not a second
+            // connection to the printer, so the camera still sees one consumer. Registered lazily
+            // by go2rtc - the ffmpeg process only starts when a viewer actually opens the variant,
+            // so an unused _med/_low costs nothing.
+            for (const std::string& q : quality_variants()) {
+                const std::string vurl = base + "/api/streams?name=" + name + "_" + q +
+                                         "&src=" + percent_encode(variant_src(name, q));
+                std::thread([vurl]() {
+                    // A freshly started go2rtc answers its API before it will accept an *exec*
+                    // source: for the first ~5 s a PUT of an `ffmpeg:` (or `echo:`) stream comes
+                    // back `400 streams: source not supported`, while `rtsp:` is taken at once.
+                    // The source stream above therefore registers immediately and the variants
+                    // did not, which is exactly the window the hub registers in - so on a normal
+                    // start the variants were silently absent and every _med/_low tile went black.
+                    //
+                    // Twelve attempts at 1.5 s covers ~18 s, comfortably past that window (the
+                    // old three attempts covered 4.5 s and always fell inside it). A 400 lands in
+                    // on_error, not on_complete, so `ok` stays false and the loop does retry -
+                    // it simply ran out of attempts. Logged on final failure rather than failing
+                    // silently, because a missing variant is otherwise invisible until a viewer
+                    // opens the tile.
+                    for (int attempt = 0; attempt < 12; ++attempt) {
+                        bool ok = false;
+                        Http::put2(vurl).timeout_connect(2).timeout_max(5).on_complete([&ok](std::string, unsigned) { ok = true; }).perform_sync();
+                        if (ok) return;
+                        std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+                    }
+                    BOOST_LOG_TRIVIAL(warning) << "RemoteHub: go2rtc kept refusing a quality variant; it will fall back to the source stream";
+                }).detach();
+            }
         }
     } catch (...) {}
 }
@@ -1771,14 +3172,28 @@ std::pair<int, std::string> HubServer::onvif_discover()
 // printer-page URLs. Addresses, access codes and camera credentials stay here.
 std::string HubServer::state_for_phone()
 {
+    const FirewallState fw = firewall_state(false); // takes m_mutex itself
     std::string state;
+    int         webrtc_port = 0;
     {
         std::lock_guard<std::mutex> lock(m_mutex);
-        state = m_state;
+        state       = m_state;
+        webrtc_port = m_webrtc_port;
     }
     json out;
     out["hosts"]  = json::array();
     out["active"] = json::array();
+    // Whether the phone should try WebRTC at all, and - when the PC's firewall would very likely
+    // block it - one sentence the viewer can act on. The player falls back to MSE either way.
+    out["webrtc"]     = webrtc_port > 0;
+    out["video_note"] = (webrtc_port > 0 && fw.state != "allowed") ? fw.note : "";
+    // Quality: which downscaled variants the hub was able to register. Empty means "source only",
+    // and the page then shows Quality as High-only rather than offering settings that do nothing.
+    // See ffmpeg_path(): transcoded variants need an ffmpeg we do not bundle. The Bambu MJPEG
+    // relay's frame-drop knob needs no encoder, so it is reported separately and is always on.
+    out["quality"]      = json::array();
+    for (const std::string& q : quality_variants()) out["quality"].push_back(q);
+    out["quality_mjpeg"] = true; // ?fps= on the Bambu relay, decoder-free
     try {
         json j = json::parse(state);
         for (const auto& h : j.value("hosts", json::array())) {
@@ -1792,6 +3207,14 @@ std::string HubServer::state_for_phone()
                 p["rname"] = u1_stream_name(h.value("id", "")); // the go2rtc stream fed by /relay/h264
                 p["relay"] = true;                               // rurl still works on the LAN
             }
+            // The variant stream names this host actually has, so the page asks for a name that
+            // exists rather than guessing "<name>_low" and getting a 404 from go2rtc.
+            if (!p["rname"].get<std::string>().empty()) {
+                json qn = json::object();
+                for (const std::string& q : quality_variants())
+                    qn[q] = p["rname"].get<std::string>() + "_" + q;
+                p["qnames"] = qn;
+            }
             out["hosts"].push_back(p);
         }
         out["active"] = j.value("active", json::array());
@@ -1803,7 +3226,15 @@ std::string HubServer::state_for_phone()
     const PhoneLinks links = phone_links();
     out["lan_url"]    = links.lan;
     out["remote_url"] = links.remote;
+    out["relay_url"]  = links.relay; // always "" in phase 0; the control ignores an empty origin
     out["ips"]        = links.ips;
+    // Added for the native app (phase 3 follow-ups 2 and 6), and additive on purpose: every field
+    // the page already reads is untouched.
+    //   printers      the last-known status of every printer, each row with age_s / stale /
+    //                 instance - so the Devices screen works with no slicer window open;
+    //   hub_instance  this hub's identity, the same value /events and /summary carry.
+    out["printers"]     = printers_json();
+    out["hub_instance"] = hub_instance();
     return out.dump();
 }
 
@@ -2007,6 +3438,7 @@ std::string HubServer::new_link()
         std::lock_guard<std::mutex> lock(m_mutex);
         remember_old_token_locked(m_token);
         m_token = random_token();
+        ++m_token_version; // this data dir is on its next link; /pair says which
         token   = m_token;
     }
     write_hub_json();
@@ -2026,6 +3458,10 @@ TailscaleState HubServer::remote_state(bool refresh)
     return m_ts;
 }
 
+// The remote-access card's whole content, in the shape the page draws it. The six states and
+// their wording come from Testing::classify_remote_access() so that nothing here and nothing in
+// hub.html carries a second copy of a sentence; the older flat booleans stay alongside because the
+// tray and the phone page read them.
 json HubServer::remote_json_locked() const
 {
     json r;
@@ -2043,6 +3479,16 @@ json HubServer::remote_json_locked() const
     std::string err = m_ts.error;
     if (err.empty() && m_remote_on && m_ts.installed && !m_ts.serving) err = "Tailscale is no longer serving this hub; turn remote access off and on again";
     r["error"] = err;
+    const Testing::RemoteAccessInfo st = Testing::classify_remote_access(m_ts.installed, m_ts.backend, m_ts.https,
+                                                                        m_ts.serving, m_remote_on, m_ts.error);
+    r["access"] = json{ { "state", Testing::remote_access_state_name(st.state) },
+                        { "message", st.message },
+                        { "action", st.action },
+                        { "action_url", st.action_url } };
+    // The `tailscale funnel` line the card's advanced note shows verbatim. Documented, never run:
+    // Funnel publishes the hub to the whole internet with only the path token in front of it, which
+    // is a deliberate choice nobody should make by clicking a button (design section 3).
+    r["funnel_command"] = "tailscale funnel --bg --https=443 http://127.0.0.1:" + std::to_string(m_port);
     return r;
 }
 
@@ -2057,8 +3503,13 @@ bool HubServer::set_remote(bool on, std::string& error)
     int         code = 0;
     if (on) {
         TailscaleState t = remote_state(true);
-        if (!t.installed || t.backend != "Running") { error = t.error.empty() ? "Tailscale is not ready" : t.error; return false; }
-        if (!t.https) { error = "HTTPS certificates are not enabled for your tailnet: Tailscale admin console > DNS > HTTPS Certificates > Enable, then try again"; return false; }
+        // The refusal the caller shows is the classifier's sentence, so the message a failed
+        // toggle produces and the message the card was already showing are one and the same
+        // string - "not installed", "not signed in" and "HTTPS certificates are off" included.
+        if (!t.installed || t.backend != "Running" || !t.https) {
+            error = Testing::classify_remote_access(t.installed, t.backend, t.https, t.serving, false, t.error).message;
+            return false;
+        }
         // The first run also fetches the certificate, which can take half a minute.
         if (!run_capture({ tailscale_exe(), "serve", "--bg", "--https=443", "http://127.0.0.1:" + std::to_string(port) }, out, code, 90000) || code != 0) {
             error = out.empty() ? "tailscale serve failed" : out.substr(0, 300);
@@ -2163,7 +3614,15 @@ void HubServer::handle_hub(tcp::socket& client, Request& r)
         else write_hub_json();
         remote_state(true);
         json j = info_json();
-        if (!error.empty()) j["remote"]["error"] = error;
+        // A refused toggle reports the classifier's own sentence (set_remote uses it too), so the
+        // card shows the same wording whether it got there by failing a toggle or by simply
+        // looking. `access.message` is what hub.html draws; `error` stays for older readers.
+        if (!error.empty()) {
+            j["remote"]["error"]             = error;
+            j["remote"]["access"]["message"] = error;
+            if (j["remote"]["access"].value("state", std::string()) == "ready") j["remote"]["access"]["state"] = "error";
+            if (j["remote"]["access"].value("action", std::string()).empty()) j["remote"]["access"]["action"] = "Try again";
+        }
         respond_json(client, error.empty() ? 200 : 409, j.dump());
     } else if ((r.path == "/hub/" || r.path == "/hub/index.html") && r.method == "GET") {
         // The page gets the per-run secret and sends it back as X-Hub-Secret on every call.
@@ -2251,6 +3710,47 @@ void HubServer::handle_hub(tcp::socket& client, Request& r)
         update_notify_link();
         const auto res = RemoteNotify::test(query_param(r.query, "id"), "");
         respond_json(client, res.first, res.second);
+    } else if (r.path == "/hub/hms/override" && r.method == "POST") {
+        // Record our own description for an error code. This is the capture path behind the
+        // eventual "describe this error" button: the phone sees a code with no sentence, the
+        // owner types what the printer's screen said, and every surface shows it from then on.
+        // Same shape as --hms-add, and it writes the same user overlay.
+        // {"code":"0C00010000020015","text":"...","lang":"en","model":"31B","note":"...","force":false}
+        if (r.content_type.compare(0, 16, "application/json") != 0) { respond_json(client, 415, json_error("Content-Type must be application/json")); return; }
+        std::string body;
+        if (!read_small_body(client, r, body, 64 * 1024)) { respond_json(client, 413, json_error("that is too large for a description")); return; }
+        json in;
+        try {
+            in = json::parse(body.empty() ? "{}" : body);
+        } catch (const std::exception&) {
+            respond_json(client, 400, json_error("that is not json"));
+            return;
+        }
+        if (!in.is_object()) { respond_json(client, 400, json_error("expected a json object")); return; }
+        HMSQuery* q = wxGetApp().get_hms_query();
+        if (!q) { respond_json(client, 503, json_error("the error-code lookup is not ready yet")); return; }
+        std::string err;
+        const bool  ok = q->add_override(in.value("code", std::string()), in.value("text", std::string()),
+                                         in.value("lang", std::string("en")), in.value("model", std::string("*")),
+                                         in.value("source", std::string("recorded from the hub")),
+                                         in.value("note", std::string()), in.value("force", false), err);
+        if (!ok) { respond_json(client, 400, json_error(err)); return; }
+        std::string normalized;
+        HMSQuery::is_valid_code(in.value("code", std::string()), normalized);
+        json out;
+        out["ok"]   = true;
+        out["code"] = normalized;
+        // What the surfaces will show for it now, so the caller can confirm the capture landed.
+        out["description"] = std::string(q->describe_error(in.value("model", std::string()), normalized).ToUTF8().data());
+        out["file"]        = HMSQuery::user_override_path();
+        respond_json(client, 200, out);
+    } else if (r.path == "/hub/hms/reload" && r.method == "POST") {
+        // Re-read both overlay files now, for an edit made outside the app. The lookup also
+        // notices an mtime change by itself, so this is a convenience rather than a requirement.
+        if (HMSQuery* q = wxGetApp().get_hms_query()) q->reload_overrides();
+        json out;
+        out["ok"] = true;
+        respond_json(client, 200, out);
     } else if (r.path == "/hub/push" && r.method == "GET") {
         // The phones that subscribed to Web Push, each one masked to the push service it uses and
         // the tail of its endpoint. The VAPID public key is here because it is public by design;
@@ -2428,6 +3928,37 @@ static bool instance_api_allowed(const std::string& method, const std::string& s
 
 void HubServer::handle_phone(tcp::socket& client, Request& r, const std::string& rest)
 {
+    // ---- what the native app asks for (EdgeSlicer app phase 3 follow-ups 1-4 and 6) ----
+    // All three answer from what this process knows, with no live slicer instance involved. That is
+    // the requirement: the app's Devices screen used to be able to say nothing at all with the
+    // slicer closed, because the printers were only reachable through /i/<pid>/api/printers.
+    if (r.method == "GET" && (rest == "/summary" || rest == "/summary/")) {
+        respond_json(client, 200, summary_json().dump());
+        return;
+    }
+    if (r.method == "GET" && (rest == "/pair" || rest == "/pair/")) {
+        respond_json(client, 200, pair_json().dump());
+        return;
+    }
+    // GET /printers/<id>/thumbnail.png - the running job's picture for one printer, out of the
+    // G-code archive's sidecars. The id is whatever /api/printers calls the printer, so it is
+    // percent-decoded and then only ever compared against what a sidecar says; nothing from the
+    // request reaches a file name (printer_thumbnail() builds the path from the sidecar's own id).
+    if (r.method == "GET" && rest.compare(0, 10, "/printers/") == 0 && rest.size() > 10) {
+        const std::string tail = rest.substr(10);
+        const size_t      slash = tail.rfind('/');
+        if (slash == std::string::npos || tail.substr(slash) != "/thumbnail.png") {
+            respond_json(client, 404, json_error("no such route; see /api"));
+            return;
+        }
+        const std::string id = percent_decode(tail.substr(0, slash));
+        if (id.empty() || id.size() > 200) { respond_json(client, 404, json_error("no such printer")); return; }
+        const std::string png = printer_thumbnail(id);
+        if (png.empty()) { respond_json(client, 404, json_error("no thumbnail for this printer")); return; }
+        // Never cached: the next job on the same printer has a different picture at the same URL.
+        respond(client, 200, "image/png", png, "Pragma: no-cache\r\nExpires: 0\r\n");
+        return;
+    }
     // ---- the installable web app: manifest, icons, service worker (P2/P7) ----
     // Everything here is under /r/<token>/, which means three things at once: the token gate the
     // caller already passed is the only gate these need, the manifest's relative start_url and
@@ -2567,9 +4098,12 @@ void HubServer::handle_phone(tcp::socket& client, Request& r, const std::string&
             { {"method", "POST"}, {"path", "/api/instances/open"},  {"description", "body = a .3mf/.stl/.obj/.step/.glb file, header X-File-Name = its name; starts a new (hidden) slicer instance with it; ?visible=1 opens a window"} },
             { {"method", "POST"}, {"path", "/i/{id}/open?mode=load|import"}, {"description", "same upload, opened in instance {id}: load = save the current project, then open this project (default for .3mf); import = add the model to the current plate (default otherwise)"} },
             { {"method", "*"},    {"path", "/i/{id}/api/..."},      {"description", "the instance's own API (see GET /i/{id}/api)"} },
-            { {"method", "GET"},  {"path", "/state"},               {"description", "camera list for the stream wall, plus lan_url / remote_url / ips: the two origins this hub answers on"} },
+            { {"method", "GET"},  {"path", "/state"},               {"description", "camera list for the stream wall, plus lan_url / remote_url / ips (the two origins this hub answers on), the last-known printer rows and hub_instance"} },
+            { {"method", "GET"},  {"path", "/summary"},             {"description", "one answer for a phone's device list: hub / host / version / hub_instance, both URLs, last_id, and the printers (id, name, model, vendor, state, percent, left_time_s, job, temps when known, camera, thumbnail, instance pid, plus age_s and stale). Answers with no slicer window open: these are the rows the hub last read off the open windows"} },
+            { {"method", "GET"},  {"path", "/pair"},                {"description", "the pairing document: name (this PC), hub, version, hub_instance, urls {lan, remote}, ips, push {webpush, apns, fcm, unified}, token_version and features"} },
+            { {"method", "GET"},  {"path", "/printers/{id}/thumbnail.png"}, {"description", "the running job's picture for that printer, from the G-code archive; 404 when there is none"} },
             { {"method", "GET"},  {"path", "/ping.gif"},            {"description", "a 43-byte never-cached GIF; the phone page's beacon for \"is the home network reachable from here\""} },
-            { {"method", "GET"},  {"path", "/events?since={id}"},   {"description", "printer events the slicer instances reported (started / finished / failed / cancelled / paused / resumed / runout / error), newest last: {events, last_id}"} },
+            { {"method", "GET"},  {"path", "/events?since={id}"},   {"description", "printer events the slicer instances reported (started / finished / failed / cancelled / paused / resumed / runout / error), newest last: {events, last_id, hub_instance}. hub_instance changes only when a data dir's hub settings are created, so a client can tell an id reset from an id it has already seen"} },
             { {"method", "GET"},  {"path", "/push/key"},            {"description", "the hub's VAPID public key, for PushManager.subscribe()"} },
             { {"method", "POST"}, {"path", "/push/subscription"},   {"description", "this browser's PushSubscription JSON; re-post it on every launch"} },
             { {"method", "DELETE"}, {"path", "/push/subscription"}, {"description", "body {endpoint} - this browser unsubscribed"} },
@@ -2712,6 +4246,20 @@ void HubServer::serve(std::unique_ptr<tcp::socket> owner, bool admin)
 
         // Through Tailscale Serve (a loopback peer carrying Tailscale-User-Login, which Serve sets
         // and strips from clients) only allow-listed tailnet logins get anything at all.
+        //
+        // Whether those two headers may be believed at all is decided in exactly one place, and
+        // this is the call site: Testing::trusted_proxy_headers(). Serve terminates on loopback and
+        // overwrites them, which is the entire basis for trusting them, so a request that reached
+        // the LAN listener from a real network carrying its own Tailscale-User-Login has them
+        // cleared here and can never reach login_allowed() with it. Phase 1's relayed streams are
+        // re-injected as loopback peers and will pass `via_relay = true` for the same reason: they
+        // look like Serve and are not. `r` is this session's own Request, so clearing is local.
+        if (!Testing::trusted_proxy_headers(peer.is_loopback(), r.via_relay)) {
+            if (!r.ts_login.empty())
+                BOOST_LOG_TRIVIAL(warning) << "RemoteHub: ignoring a Tailscale-User-Login header from a non-loopback peer";
+            r.ts_login.clear();
+            r.fwd_proto.clear();
+        }
         const bool via_serve = peer.is_loopback() && !r.ts_login.empty();
         if (via_serve && !login_allowed(r.ts_login)) {
             BOOST_LOG_TRIVIAL(warning) << "RemoteHub: tailnet login not allowed: " << r.ts_login;
@@ -2812,7 +4360,14 @@ void HubServer::serve(std::unique_ptr<tcp::socket> owner, bool admin)
             if (!lookup_host(query_param(r.query, "id"), ip, code) || code.empty()) { respond(client, 404, "text/plain", "unknown camera"); return; }
             const int relay = BambuCamRelay::get().port();
             if (relay == 0) { respond(client, 503, "text/plain", "camera relay is not running"); return; }
-            const std::string new_head = "GET /bambu?ip=" + percent_encode(ip) + "&code=" + percent_encode(code) + " HTTP/1.1\r\n" +
+            // Quality for the MJPEG path: the phone passes ?fps= and the relay drops frames to
+            // match (BambuCamRelay). Clamped here as well as there - this is the tunnelled
+            // listener, so the value arrives from the phone and must reach the relay as nothing
+            // but a small integer.
+            int fps = std::atoi(query_param(r.query, "fps").c_str());
+            if (fps < 0 || fps > 60) fps = 0;
+            const std::string new_head = "GET /bambu?ip=" + percent_encode(ip) + "&code=" + percent_encode(code) +
+                                         (fps > 0 ? "&fps=" + std::to_string(fps) : "") + " HTTP/1.1\r\n" +
                                          r.head.substr(r.head.find("\r\n") + 2);
             tunnel(client, relay, force_close(new_head), "");
         } else if (rest == "/ff") {
@@ -2868,6 +4423,12 @@ bool HubServer::start()
     try {
         json j      = json::parse(read_file(settings_json_path()));
         m_remote_on = j.value("remote_on", false);
+        // The phone switch as it was last set, from the tray, the hub page or the slicer. This
+        // beats the --hub-phone hint the slicer passes (its app config only learns of a change
+        // made from the hub page while its Stream panel happens to be polling), exactly as the
+        // remembered token beats --hub-token below; the hint only seeds a data dir with no
+        // saved switch yet.
+        if (j.contains("phone")) m_phone = j.value("phone", false);
         // ... and so do the notification destinations: an ntfy topic or a Pushover key set up
         // once must survive every hub restart.
         notify_saved = j.value("notify", json::object());
@@ -2878,6 +4439,17 @@ bool HubServer::start()
         // quit, and a hub that came back with a new token would break every saved link. The
         // remembered one beats a --hub-token from the slicer, whose copy can be older than the
         // last "New link" somebody made from the tray; a hint only seeds a data dir with none.
+        // This hub's identity, for the phone app: minted when these settings are first written and
+        // never again, so a client can tell a fresh data dir (whose event ids restart at 1) from
+        // this one carrying on. See hub_instance().
+        m_hub_instance = j.value("hub_instance", std::string());
+        // ... and this data dir's relay identity, if it already has one. A settings file written
+        // before this existed, or one whose identity object is malformed, simply yields an invalid
+        // one and a fresh pair is minted below.
+        m_identity = Testing::identity_from_settings(j.dump());
+        // A data dir written before this existed gets its version from what it can still see: the
+        // links it remembers replacing, plus this one. Only ever a floor, and it only ever grows.
+        m_token_version = std::max(1, j.value("token_version", 0));
         const std::string saved = j.value("token", "");
         for (const auto& t : j.value("old_tokens", json::array())) remember_old_token_locked(t.get<std::string>());
         if (valid_token(saved)) {
@@ -2887,9 +4459,24 @@ bool HubServer::start()
         }
     } catch (...) {} // nothing else runs yet: start() is single-threaded, the _locked helper is safe here
     if (!valid_token(m_token)) m_token = random_token();
+    // A data dir with no settings.json yet (or one written before this existed) gets its uuid here,
+    // once. write_hub_json() below persists it, and nothing ever replaces it.
+    if ((int) m_old_tokens.size() + 1 > m_token_version) m_token_version = (int) m_old_tokens.size() + 1;
+    if (m_hub_instance.empty()) {
+        m_hub_instance = random_hex(16);
+        BOOST_LOG_TRIVIAL(info) << "RemoteHub: this data dir's hub instance is " << m_hub_instance;
+    }
+    // The durable relay identity, minted once per data dir. Only the hubid is ever logged: the
+    // public key is long and uninteresting in a log, and the private key must never appear in one.
+    if (!m_identity.valid()) {
+        m_identity = mint_hub_identity();
+        if (m_identity.valid()) BOOST_LOG_TRIVIAL(info) << "RemoteHub: this data dir's hub id is " << m_identity.hubid;
+        else BOOST_LOG_TRIVIAL(warning) << "RemoteHub: could not generate the hub identity (Ed25519 unavailable); remote registration will not be possible";
+    }
     m_secret = random_hex(16);
     m_state  = read_file(streams_json_path());
     load_events(); // what the printers did before this hub was restarted, and where the ids got to
+    load_printers(); // ... and what they were doing, so the app's first refresh is not blank
     // Web Push before the relay worker: RemoteNotify::deliver() asks it whether any phone is
     // subscribed before deciding there is nothing to queue.
     WebPush::start(webpush_saved); // mints the VAPID key pair the first time this data dir runs
@@ -2901,27 +4488,31 @@ bool HubServer::start()
     BambuCamRelay::get().port();
     // The control plane first: register_streams() points go2rtc at /relay/h264 on the admin port.
     if (!bind_admin()) return false;
+    // bind() itself reconciles Tailscale Serve's forwarding target against m_port whenever
+    // m_remote_on is already true (Serve's config outlives us - it is Tailscale's own - so a hub
+    // that starts on a different port than last time, or moved because HUB_PORT was taken, must
+    // re-point it or the tailnet URL keeps forwarding to a dead port). That covers both this
+    // start-up bind and every later rebind from set_phone(), so there is nothing more to do here.
     if (!bind(m_phone)) return false;
     write_hub_json();
     register_streams();
-    if (m_remote_on) {
-        // Serve's config outlives us (it is Tailscale's); make sure it still points at our port.
-        TailscaleState t = remote_state(true);
-        if (t.installed && t.backend == "Running" && (!t.serving || t.serving_port != m_port)) {
-            std::string err;
-            set_remote(true, err);
-            if (!err.empty()) BOOST_LOG_TRIVIAL(warning) << "RemoteHub: remote access could not be restored: " << err;
-        }
-    }
     return true;
 }
 
 void HubServer::loop(bool idle_exit)
 {
     auto idle_since = std::chrono::steady_clock::now();
+    auto printers_at = std::chrono::steady_clock::now() - std::chrono::milliseconds(PRINTERS_POLL_MS);
     while (!m_quit) {
         std::this_thread::sleep_for(std::chrono::seconds(2));
         flush_logs(); // the file sink buffers; keep hub.log readable while we run
+        // The printers every open window can see, remembered here so /summary and /state can
+        // answer once every window is closed. One round costs one loopback GET per instance and
+        // runs on this thread, never on a request.
+        if (std::chrono::steady_clock::now() - printers_at >= std::chrono::milliseconds(PRINTERS_POLL_MS)) {
+            printers_at = std::chrono::steady_clock::now();
+            try { poll_printers(); } catch (...) {}
+        }
         // A phone subscribed, or the sender pruned one the push service said was gone. Saving
         // from here means the sender thread never has to reach back into HubServer.
         if (WebPush::consume_dirty() || AppPush::consume_dirty()) write_hub_json();
@@ -3201,6 +4792,8 @@ std::string Info::json() const
     j["ips"]   = ips;
     j["url"]   = url();
     j["remote_url"] = remote_url;
+    j["relay_url"]  = relay_url;
+    j["hubid"]      = hubid;
     return j.dump();
 }
 
@@ -3218,6 +4811,8 @@ static Info parse_info(const std::string& body)
         i.go2rtc_port = j.value("go2rtc_port", 0);
         i.relay_port  = j.value("relay_port", 0);
         if (j.contains("remote") && j["remote"].is_object()) i.remote_url = j["remote"].value("url", "");
+        i.relay_url   = j.value("relay_url", "");   // "" until a relay exists (phase 1)
+        i.hubid       = j.value("hubid", "");       // this data dir's durable relay identity
         i.version     = j.value("version", "");
         for (const auto& ip : j.value("ips", json::array())) i.ips.push_back(ip.get<std::string>());
     } catch (...) {}

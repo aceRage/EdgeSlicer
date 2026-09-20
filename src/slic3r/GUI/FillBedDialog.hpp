@@ -35,6 +35,14 @@ struct FillBedSettings
     double front_margin   = 0.;
     // Compact packs with the NFP packer (today's path); Grid tiles the template's bounding box.
     fill_bed::Layout layout = fill_bed::Layout::Compact;
+    // Drop the support-clearance floor on the gap entirely.
+    //
+    // ArrangePolygon::brim_width is NOT a brim width despite the name: ModelArrange.cpp sets it
+    // to 1 mm flat, 6 mm when the object has normal support, 24 mm for tree support, and never
+    // looks at brim_type or the brim_width setting at all. It is the arrange clearance. The fill
+    // path raises the gap to it so neighbouring supports cannot collide - correct by default,
+    // but there is no way to say "I know, pack them tighter anyway". This is that way.
+    bool ignore_support_clearance = false;
 };
 
 // The dialog shown before a bed fill. Both entry points - the object right-click menu item and
@@ -53,6 +61,12 @@ public:
                   double                 occupied_area,
                   double                 bed_w,
                   double                 bed_h,
+                  // The arrange clearance the fill will floor the gap at (ArrangePolygon::
+                  // brim_width - see the note on ignore_support_clearance; it is a support
+                  // clearance, not a brim).
+                  double                 clearance,
+                  // The template's real brim, from brim_type/brim_width, so the warning can say
+                  // "brim" only when a brim is genuinely what raises the gap. 0 = no brim.
                   double                 brim_width,
                   bool                   is_seq_print,
                   // Returns the EXACT number of copies the Grid layout would place for the
@@ -82,6 +96,7 @@ private:
     ::CheckBox *m_front_cb        = nullptr;
     TextInput  *m_front_input     = nullptr;
     ::ComboBox *m_layout_combo    = nullptr;
+    ::CheckBox *m_ignore_clear_cb = nullptr;
     ::Label    *m_estimate_text   = nullptr;
     ::Label    *m_warning_text    = nullptr;
 
@@ -97,6 +112,7 @@ private:
     double m_occupied     = 0.;
     double m_bed_w        = 0.;
     double m_bed_h        = 0.;
+    double m_clearance    = 0.;
     double m_brim_width   = 0.;
     bool   m_is_seq_print = false;
 };

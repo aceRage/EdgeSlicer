@@ -213,6 +213,7 @@ GLVolume::GLVolume(float r, float g, float b, float a)
     , printable(true)
     , visible(true)
     , is_active(true)
+    , plate_focus_hidden(false)
     , zoom_to_volumes(true)
     , shader_outside_printer_detection_enabled(false)
     , is_outside(false)
@@ -874,6 +875,10 @@ GLVolumeWithIdAndZList volumes_to_render(const GLVolumePtrs&                  vo
 
     for (unsigned int i = 0; i < (unsigned int) volumes.size(); ++i) {
         GLVolume* volume                = volumes[i];
+        // Ultra: "Hide other plates while moving" - a per-frame render filter, so it is applied
+        // here rather than by flipping is_active (which callers own and would not restore).
+        if (volume->plate_focus_hidden)
+            continue;
         bool      is_transparent        = volume->render_color.is_transparent();
         auto      tempGlwipeTowerVolume = dynamic_cast<GLWipeTowerVolume*>(volume);
         if (tempGlwipeTowerVolume) {
@@ -1049,6 +1054,19 @@ void GLVolumeCollection::render(GLVolumeCollection::ERenderType      type,
             shader->set_uniform("curved_sheet_matrix", m_curved_sheet_matrix);
             shader->set_uniform("curved_sheet_half_size", m_curved_sheet_half_size);
             shader->set_uniform("curved_sheet_range", m_curved_sheet_range);
+        }
+        // Drawn cut: the 3D sign field takes over instead. Texture unit 4 - 0 is
+        // depth_tex in the outline pass, 1 and 2 the environment map, 3 the sheet.
+        const bool draw_split = m_use_color_clip_plane && m_draw_field_tex != 0;
+        shader->set_uniform("draw_field_active", draw_split);
+        if (draw_split) {
+            glsafe(::glActiveTexture(GL_TEXTURE4));
+            glsafe(::glBindTexture(GL_TEXTURE_3D, (GLuint) m_draw_field_tex));
+            glsafe(::glActiveTexture(GL_TEXTURE0));
+            shader->set_uniform("draw_field_tex", 4);
+            shader->set_uniform("draw_field_matrix", m_draw_field_matrix);
+            shader->set_uniform("draw_field_origin", m_draw_field_origin);
+            shader->set_uniform("draw_field_size", m_draw_field_size);
         }
         // BOOST_LOG_TRIVIAL(info) << boost::format("set uniform_color to {%1%, %2%, %3%, %4%}, with_outline=%5%, selected %6%")
         //     %volume.first->render_color[0]%volume.first->render_color[1]%volume.first->render_color[2]%volume.first->render_color[3]

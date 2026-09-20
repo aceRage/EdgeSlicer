@@ -8,6 +8,8 @@ add_executable(${_TEST_NAME}_tests
 	test_flow.cpp
 	test_gcode.cpp
 	test_gcodewriter.cpp
+	test_image_row_preview.cpp
+	test_image_row_walls.cpp
 	test_model.cpp
 	test_print.cpp
 	test_printgcode.cpp
@@ -18,7 +20,10 @@ add_executable(${_TEST_NAME}_tests
 	test_over_support_surfaces.cpp
 	test_fuzzy_skin_overhangs.cpp
 	test_offset_layers.cpp
+	test_overlap_carving.cpp
 	test_seam_position.cpp
+	test_slice_bake.cpp
+	test_modifier_effect.cpp
 	test_tree_support_determinism.cpp
 	test_bed_temperature.cpp
 	test_trianglemesh.cpp

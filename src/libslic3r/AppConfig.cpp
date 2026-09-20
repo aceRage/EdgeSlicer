@@ -440,6 +440,10 @@ void AppConfig::set_defaults()
         set_bool("bottom_referenced_z", false);
     }
 
+    if (get("hide_other_plates_on_move").empty()) {
+        set_bool("hide_other_plates_on_move", false);
+    }
+
     if (get("auto_shadow_system_presets").empty()) {
         set_bool("auto_shadow_system_presets", true);
     }

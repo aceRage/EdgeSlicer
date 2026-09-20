@@ -22,6 +22,11 @@ using VirtualBedFn = std::function<void(arrangement::ArrangePolygon&)>;
     throw Slic3r::RuntimeError("Objects could not fit on the bed");
 }
 
+// Ultra: whether support material would be generated for the instance at all - the automatic kinds
+// need an overhang steeper than the threshold that is not the base on the bed, the manual kinds a
+// painted enforcer. Drives the arrange/fill-bed support clearance; a flat print gets none.
+bool instance_may_get_support(const ModelInstance &instance, SupportType support_type, int threshold_deg);
+
 ArrangePolygons get_arrange_polys(const Model &model, ModelInstancePtrs &instances);
 ArrangePolygon  get_arrange_poly(const Model &model);
 bool apply_arrange_polys(ArrangePolygons &polys, ModelInstancePtrs &instances, VirtualBedFn);

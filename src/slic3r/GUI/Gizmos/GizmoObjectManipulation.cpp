@@ -1096,6 +1096,22 @@ void GizmoObjectManipulation::do_render_move_window(ImGuiWrapper *imgui_wrapper,
             m_align_type = GLGizmoAlignment::AlignType::NONE;
     }
 
+    // Ultra: "Hide other plates while moving". do_render_move_window is shared by Move/Rotate/
+    // Scale, so the row is drawn only while the Move gizmo is the current one. The value is kept
+    // straight in AppConfig (no gizmo-local copy) so this row and the Ultra preferences page are
+    // always showing the same single value.
+    if (m_glcanvas.get_gizmos_manager().get_current_type() == GLGizmosManager::Move) {
+        ImGui::Separator();
+        bool hide_other_plates = wxGetApp().app_config->get_bool("hide_other_plates_on_move");
+        if (imgui_wrapper->checkbox(_L("Hide other plates while moving"), hide_other_plates))
+            wxGetApp().app_config->set_bool("hide_other_plates_on_move", hide_other_plates);
+        if (ImGui::IsItemHovered())
+            imgui_wrapper->tooltip(_L("Show only the plate you are working on while the Move tool is open. "
+                                      "The other plates and their objects come back when the Move tool closes, "
+                                      "and a plate you drag an object onto reappears as soon as you release it."),
+                                   ImGui::GetFontSize() * 20.0f);
+    }
+
     float get_cur_y      = ImGui::GetContentRegionMax().y + ImGui::GetFrameHeight() + y;
     float tip_caption_max    = 0.f;
     float total_text_max = 0.f;

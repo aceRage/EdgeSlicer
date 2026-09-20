@@ -155,6 +155,7 @@ static Device device_of(const json& j)
     d.apikey        = str_of(j, "apikey");
     d.user          = str_of(j, "user");
     d.password      = str_of(j, "password");
+    d.serial        = str_of(j, "serial");
     d.printer_model = str_of(j, "printer_model");
     d.created       = num_of(j, "created");
     d.last_used     = num_of(j, "last_used");
@@ -172,6 +173,7 @@ static json json_of(const Device& d)
     j["apikey"]        = d.apikey;
     j["user"]          = d.user;
     j["password"]      = d.password;
+    j["serial"]        = d.serial;
     j["printer_model"] = d.printer_model;
     j["created"]       = d.created;
     j["last_used"]     = d.last_used;
@@ -486,6 +488,7 @@ Device from_config(const DynamicPrintConfig& config)
     d.apikey        = cfg_str(config, "printhost_apikey");
     d.user          = cfg_str(config, "printhost_user");
     d.password      = cfg_str(config, "printhost_password");
+    d.serial        = cfg_str(config, "flashforge_serial_number");
     d.printer_model = cfg_str(config, "printer_model");
     if (const auto* opt = config.option<ConfigOptionEnum<PrintHostType>>("host_type"))
         d.host_type = host_type_key(opt->value);
@@ -513,6 +516,9 @@ void apply_to_config(const Device& d, DynamicPrintConfig& config)
     config.opt_string("printhost_apikey", true)   = d.apikey;
     config.opt_string("printhost_user", true)     = d.user;
     config.opt_string("printhost_password", true) = d.password;
+    // Only the Flashforge HTTP local API reads this; a device without one keeps the preset's.
+    if (!d.serial.empty())
+        config.opt_string("flashforge_serial_number", true) = d.serial;
     if (auto* opt = config.option<ConfigOptionEnum<PrintHostType>>("host_type", true))
         opt->value = host_type_enum(d.host_type);
     if (auto* opt = config.option<ConfigOptionEnum<AuthorizationType>>("printhost_authorization_type", true))
@@ -560,6 +566,7 @@ int migrate_from_presets(const std::vector<PresetHost>& presets)
             d.apikey        = p.apikey;
             d.user          = p.user;
             d.password      = p.password;
+            d.serial        = p.serial;
             d.printer_model = p.printer_model;
             d.created       = now_s();
             node["devices"].push_back(json_of(d));
@@ -594,6 +601,7 @@ int migrate_from_presets(const PresetBundle& bundle)
         p.apikey        = d.apikey;
         p.user          = d.user;
         p.password      = d.password;
+        p.serial        = d.serial;
         p.printer_model = d.printer_model;
         list.push_back(std::move(p));
     }
@@ -610,6 +618,7 @@ int migrate_from_presets(const PresetBundle& bundle)
         p.apikey        = d.apikey;
         p.user          = d.user;
         p.password      = d.password;
+        p.serial        = d.serial;
         p.printer_model = d.printer_model;
         list.push_back(std::move(p));
     }

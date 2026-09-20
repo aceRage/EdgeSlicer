@@ -160,6 +160,12 @@ endif ()
 
 # Proposal for C++ unit tests and sandboxes
 option(SLIC3R_BUILD_SANDBOXES   "Build development sandboxes" OFF)
+# Ultra: the QuadriFlow-backed quad remesher ("Quad remesh...", Phase 2 of the remesh
+# spec). Optional because QuadriFlow is a new native dependency and CI on macOS/Linux
+# has not been through a deps build with it yet; when the package is missing the whole
+# feature - libslic3r entry points, dialog and menu items - compiles out and the menu
+# entry is not shown. See deps/QuadriFlow/QuadriFlow.cmake.
+option(SLIC3R_QUAD_REMESH       "Build the QuadriFlow-backed quad remesher" ON)
 option(BUILD_TESTS       "Build unit tests" OFF)
 option(ORCA_TOOLS       "Build Orca tools" OFF)
 
@@ -205,7 +211,14 @@ if (MSVC)
     # /bigobj (Increase Number of Sections in .Obj file)
     # error C3859: virtual memory range for PCH exceeded; please recompile with a command line option of '-Zm90' or greater
     # Generate symbols at every build target, even for the release.
-    add_compile_options(-bigobj -Zm520 /Zi)
+    # /Z7 embeds the debug info in each object instead of a shared per-target PDB (/Zi), which lets a
+    # compiler cache (sccache) capture the outputs and removes the mspdbsrv contention between parallel builds.
+    option(SLIC3R_MSVC_Z7 "Embed debug info in objects (/Z7) instead of a shared PDB (/Zi)" OFF)
+    if (SLIC3R_MSVC_Z7)
+        add_compile_options(-bigobj -Zm520 /Z7)
+    else ()
+        add_compile_options(-bigobj -Zm520 /Zi)
+    endif ()
     # Disable STL4007: Many result_type typedefs and all argument_type, first_argument_type, and second_argument_type typedefs are deprecated in C++17.
     #FIXME Remove this line after eigen library adapts to the new C++17 adaptor rules.
     add_compile_options(-D_SILENCE_CXX17_ADAPTOR_TYPEDEFS_DEPRECATION_WARNING)
@@ -773,6 +786,20 @@ else ()
                    "OpenVDB installation with the OPENVDB_FIND_MODULE_PATH cache variable.")
 endif ()
 
+# Ultra: QuadriFlow, for the quad remesher. Optional on purpose - unlike OpenVDB above,
+# a missing package is a warning and a disabled feature, not a fatal error, so a tree
+# whose deps predate deps/QuadriFlow still builds. SLIC3R_QUAD_REMESH stays off unless
+# the package was actually found, and everything downstream keys off that one variable.
+if (SLIC3R_QUAD_REMESH)
+    find_package(QuadriFlow QUIET)
+    if (NOT QuadriFlow_FOUND)
+        set(SLIC3R_QUAD_REMESH OFF)
+        message(STATUS "QuadriFlow not found - the quad remesher will be omitted. Build it with the deps project (deps/QuadriFlow) to enable it.")
+    else ()
+        message(STATUS "QuadriFlow found - building the quad remesher")
+    endif ()
+endif ()
+
 find_path(SPNAV_INCLUDE_DIR spnav.h)
 if (SPNAV_INCLUDE_DIR)
     find_library(SPNAV_LIB NAMES libspnav.a) # Force linking libspnav statically
@@ -974,6 +1001,40 @@ if (WIN32)
     else()
         message(STATUS "EdgeSlicer: no FLASHNETWORK_BIN_DIR - FlashForge LAN printing will be unavailable in this package")
     endif()
+
+    # EdgeSlicer: the bundled ffmpeg for the remote hub's camera Quality steps. go2rtc re-encodes
+    # by shelling out to an ffmpeg binary and carries no codec of its own, so without one the
+    # per-phone Quality setting is reduced to the Bambu MJPEG frame-rate knob. It installs beside
+    # go2rtc.exe, which is where RemoteHub.cpp's ffmpeg_path() looks first and what start_go2rtc()
+    # names in go2rtc's `ffmpeg: bin:` - so it is found by path, never by PATH.
+    #
+    #   -DFFMPEG_BIN_DIR=C:/path/to/ffmpeg_out/ship
+    #
+    # The build is **LGPL-3.0** (BtbN/FFmpeg-Builds, --disable-libx264 --disable-libx265), chosen
+    # over a GPL one so the tool carries no copyleft stronger than the app's own AGPL-3.0. It is
+    # redistributed unmodified as a separate executable that the hub invokes as a subprocess; its
+    # LICENSE.txt ships beside it and it is listed in CopyrightsDialog::fill_entries(). See
+    # docs/superpowers/specs/2026-09-12-bundled-ffmpeg.md for the pinned release tag, the sha256,
+    # and why the H.264 encoder is libopenh264 rather than libx264.
+    #
+    # Both packages get it from this one rule: the portable zip is the install tree, and the NSIS
+    # installer is built from the same tree.
+    if (FFMPEG_BIN_DIR AND EXISTS "${FFMPEG_BIN_DIR}/ffmpeg.exe")
+        install(PROGRAMS "${FFMPEG_BIN_DIR}/ffmpeg.exe" DESTINATION "./resources/tools/go2rtc")
+        # The licence text has to travel with the binary - it is the LGPL's condition for shipping
+        # it at all, and a user who finds an ffmpeg.exe in our tree should be able to see whose it
+        # is without leaving the folder.
+        if (EXISTS "${FFMPEG_BIN_DIR}/FFMPEG-LICENSE.txt")
+            install(FILES "${FFMPEG_BIN_DIR}/FFMPEG-LICENSE.txt" DESTINATION "./resources/tools/go2rtc")
+        endif()
+        # Any companion DLLs a shared build would need. A static build (what we ship) has none, so
+        # this is a no-op there and the package stays one extra file.
+        install(DIRECTORY "${FFMPEG_BIN_DIR}/" DESTINATION "./resources/tools/go2rtc" FILES_MATCHING PATTERN "*.dll")
+        message(STATUS "EdgeSlicer: shipping ffmpeg for camera quality variants from ${FFMPEG_BIN_DIR}")
+    else()
+        message(STATUS "EdgeSlicer: no FFMPEG_BIN_DIR - camera Quality falls back to the MJPEG frame-rate knob")
+    endif()
+
     set(CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS_SKIP TRUE)
     include(InstallRequiredSystemLibraries)
     install (PROGRAMS ${CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS} DESTINATION ".")

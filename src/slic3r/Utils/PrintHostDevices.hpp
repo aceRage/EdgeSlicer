@@ -53,6 +53,10 @@ struct Device
     std::string apikey;        // printhost_apikey    (auth_type == key)
     std::string user;          // printhost_user      (auth_type == user)
     std::string password;      // printhost_password  (auth_type == user)
+    // flashforge_serial_number. Kept per device for every host type: only the Flashforge HTTP
+    // local API reads it (serial + check code in "apikey"), elsewhere it is inert. Two Creator 5s
+    // under one preset each need their own, so it cannot live in the preset alone.
+    std::string serial;
     std::string printer_model; // the preset's printer_model, kept for display and provenance
     long long   created { 0 };   // unix seconds
     long long   last_used { 0 }; // unix seconds, 0 = never
@@ -163,7 +167,7 @@ SendFlow send_flow_for(const std::string& printer_model, bool connect_flow_activ
 // Reads the host fields of a printer preset's config into a device (id and alias left empty).
 Device from_config(const DynamicPrintConfig& config);
 // Puts a device's address and credentials into a config - the fields PrintHost::get_print_host
-// reads. It is meant for a *copy* of the preset's config: the send builds one per device and hands
+// reads. An empty device serial leaves the preset's own flashforge_serial_number in place. It is meant for a *copy* of the preset's config: the send builds one per device and hands
 // it to PrintHostJob, and the dialog's Test builds one to probe with. The preset itself is never
 // written to by this feature (phase 1's "Use this device" did, and no longer exists).
 void   apply_to_config(const Device& d, DynamicPrintConfig& config);
@@ -190,6 +194,7 @@ struct PresetHost
     std::string apikey;
     std::string user;
     std::string password;
+    std::string serial;
     std::string printer_model;
 };
 

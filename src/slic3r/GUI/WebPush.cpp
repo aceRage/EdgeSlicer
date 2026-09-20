@@ -675,8 +675,7 @@ static std::string payload_for(const json& e, const std::string& link, const std
     if (e.is_object() && e.contains("printer") && e["printer"].is_object()) who = ev_str(e["printer"], "name");
     if (body.empty()) body = title;
     if (!who.empty() && body.find(who) == std::string::npos) body = who + ": " + body;
-    const std::string code = ev_str(e, "code");
-    if (!code.empty()) body += " (" + code + ")";
+    body = RemoteEvents::notification_body(body, ev_str(e, "code"));
     p["title"]    = title;
     p["body"]     = body;
     p["kind"]     = ev_str(e, "kind");
@@ -687,6 +686,14 @@ static std::string payload_for(const json& e, const std::string& link, const std
     p["tag"] = (e.is_object() && e.contains("printer") && e["printer"].is_object() ? ev_str(e["printer"], "id") : std::string()) +
                ":" + ev_str(e, "kind");
     if (!link.empty()) p["url"] = link;
+    // The error code, when there is one. Small, and it is the key the app needs: a notification
+    // that says "the toolhead camera is not working" is a sentence, and the buttons that go with
+    // it are fetched from /api/printers or /summary by this code. Carried here rather than the
+    // whole actions array, which would not survive the plaintext cap.
+    {
+        const std::string code = ev_str(e, "code");
+        if (!code.empty()) p["code"] = code;
+    }
     // Both origins, so the service worker can open the one this phone prefers without a request
     // back to a PC that may be asleep or on a network the phone is not on.
     if (!lan.empty()) p["lan_url"] = lan;

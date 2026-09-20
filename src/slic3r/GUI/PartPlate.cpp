@@ -5134,7 +5134,7 @@ void PartPlateList::postprocess_arrange_polygon(arrangement::ArrangePolygon& arr
 
 /*rendering related functions*/
 //render
-void PartPlateList::render(const Transform3d& view_matrix, const Transform3d& projection_matrix, bool bottom, bool only_current, bool only_body, int hover_id, bool render_cali, bool show_grid)
+void PartPlateList::render(const Transform3d& view_matrix, const Transform3d& projection_matrix, bool bottom, bool only_current, bool only_body, int hover_id, bool render_cali, bool show_grid, const std::set<int>& visible_plates)
 {
 	const std::lock_guard<std::mutex> local_lock(m_plates_mutex);
 	std::vector<PartPlate*>::iterator it = m_plate_list.begin();
@@ -5154,7 +5154,13 @@ void PartPlateList::render(const Transform3d& view_matrix, const Transform3d& pr
 		generate_icon_textures();
 	for (it = m_plate_list.begin(); it != m_plate_list.end(); it++) {
 		int current_index = (*it)->get_index();
-		if (only_current && (current_index != m_current_plate))
+		// An explicit visible set wins over the plain "current plate only" rule: it is the same
+		// suppression, just with more than one plate exempt.
+		if (!visible_plates.empty()) {
+			if (visible_plates.find(current_index) == visible_plates.end())
+				continue;
+		}
+		else if (only_current && (current_index != m_current_plate))
 			continue;
 		if (current_index == m_current_plate) {
 			PartPlate::HeightLimitMode height_mode = (only_current)?PartPlate::HEIGHT_LIMIT_NONE:m_height_limit_mode;
@@ -5692,9 +5698,20 @@ int PartPlateList::store_to_3mf_structure(PlateDataPtrs& plate_data_list, bool w
 							if (const auto *nvt = print->config().option<ConfigOptionEnumsGeneric>("nozzle_volume_type"))
 								if (!nvt->values.empty())
 									volume_type = get_nozzle_volume_type_string(NozzleVolumeType(nvt->values.front()));
+							// On a machine with several identical independent toolheads (Snapmaker U1,
+							// Flashforge Creator 5) filament i prints from toolhead i, so claiming group 0
+							// for all of them told the printer every filament lived in the first nozzle
+							// while the G-code drove T0..T3. Report the real toolhead. Metadata only - the
+							// live config and the emitted G-code are untouched.
+							const std::vector<int> identity_map =
+								identity_filament_map(print->full_print_config(), plate_data_item->slice_filaments_info.size());
 							for (auto &info : plate_data_item->slice_filaments_info) {
-								info.group_id = { 0 };
-								info.nozzle_diameter = nd.empty() ? 0. : nd.front();
+								int group = 0;
+								if (info.id >= 0 && size_t(info.id) < identity_map.size())
+									group = identity_map[info.id] - 1; // identity_filament_map is 1-based
+								info.group_id = { group };
+								const size_t nozzle_idx = size_t(group);
+								info.nozzle_diameter = nd.empty() ? 0. : (nozzle_idx < nd.size() ? nd[nozzle_idx] : nd.front());
 								info.nozzle_volume_type = volume_type;
 							}
 						}

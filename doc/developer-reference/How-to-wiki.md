@@ -44,7 +44,7 @@ The Home page currently organizes content in these top-level entries:
 - ![filament](https://github.com/SoftFever/OrcaSlicer/blob/main/resources/images/filament.svg?raw=true) [Material Settings](home#material-settings)
 - ![process](https://github.com/SoftFever/OrcaSlicer/blob/main/resources/images/process.svg?raw=true) [Process Settings](home#process-settings)
 - ![tab_3d_active](https://github.com/SoftFever/OrcaSlicer/blob/main/resources/images/tab_3d_active.svg?raw=true) [Prepare](home#prepare)
-- ![tab_calibration_active](https://github.com/SoftFever/OrcaSlicer/blob/main/resources/images/tab_calibration_active.svg?raw=true) [Calibrations](home#calibrations)
+- ![tab_calibration_active](https://github.com/SoftFever/OrcaSlicer/blob/main/resources/images/tab_calibration_active.svg?raw=true) [Calibrations](home#printer-calibration)
 - ![im_code](https://github.com/SoftFever/OrcaSlicer/blob/main/resources/images/im_code.svg?raw=true) [Developer Section](home#developer-section)
 
 Each section can have multiple pages covering specific topics. For example, the [Process Settings](home#process-settings) section includes pages on [quality](home#quality-settings), [support](home#support-settings), and [others](home#others-settings).

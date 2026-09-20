@@ -12,6 +12,7 @@
 #include "Geometry/ConvexHull.hpp"
 #include "GCode/PrintExtents.hpp"
 #include "GCode/Thumbnails.hpp"
+#include "ImageRowWalls.hpp"
 #include "GCode/WipeTower.hpp"
 #include "GCode/WipeTower2.hpp"
 #include "ShortestPath.hpp"
@@ -347,6 +348,36 @@ static inline void check_add_eol(std::string& gcode)
 {
     if (!gcode.empty() && gcode.back() != '\n')
         gcode += '\n';
+}
+
+// BBS: publish the extruder-change long-retraction placeholders for one filament.
+// long_retractions_when_ec / retraction_distances_when_ec are per-filament and NULLABLE: a filament
+// whose preset does not mention the key carries nil, and nil must read as "feature off" rather than
+// as the raw sentinel (a nil bool is 0xFF, which would test as true; a nil float is NaN). Guarding
+// here keeps an old project or preset that predates these keys producing exactly today's K0 R0.
+static void set_ec_retraction_placeholders(PlaceholderParser& pp, const PrintConfig& config, size_t filament_idx)
+{
+    const ConfigOptionBoolsNullable&  long_opt = config.long_retractions_when_ec;
+    const ConfigOptionFloatsNullable& dist_opt = config.retraction_distances_when_ec;
+
+    bool   long_retraction = false;
+    double distance        = 0.;
+    if (!long_opt.values.empty()) {
+        const size_t i = std::min(filament_idx, long_opt.values.size() - 1);
+        if (!long_opt.is_nil(i))
+            long_retraction = long_opt.values[i] != 0;
+    }
+    if (!dist_opt.values.empty()) {
+        const size_t i = std::min(filament_idx, dist_opt.values.size() - 1);
+        if (!dist_opt.is_nil(i) && !std::isnan(dist_opt.values[i]))
+            distance = dist_opt.values[i];
+    }
+    // The distance is meaningless with the feature off; keep the pair consistent (K0 always pairs with R0).
+    if (!long_retraction)
+        distance = 0.;
+
+    pp.set("long_retraction_when_ec",     new ConfigOptionBool(long_retraction));
+    pp.set("retraction_distance_when_ec", new ConfigOptionFloat(distance));
 }
 
 // Return true if tch_prefix is found in custom_gcode
@@ -815,6 +846,10 @@ std::string WipeTowerIntegration::append_tcr(GCode& gcodegen, const WipeTower::T
             config.set_key_value("flush_volumetric_speeds", new ConfigOptionFloats(vss));
             config.set_key_value("flush_temperatures", new ConfigOptionInts(fts));
         }
+        // BBS: the extruder-change retraction pair must be published BEFORE the template is
+        // expanded - change_filament_gcode is what reads it ({if long_retraction_when_ec} ...
+        // R{retraction_distance_when_ec}) - and it is keyed by the filament being switched TO.
+        set_ec_retraction_placeholders(gcodegen.placeholder_parser(), gcodegen.m_config, size_t(new_extruder_id));
         toolchange_gcode_str = gcodegen.placeholder_parser_process("change_filament_gcode", change_filament_gcode, new_extruder_id, &config);
         check_add_eol(toolchange_gcode_str);
 
@@ -871,6 +906,7 @@ std::string WipeTowerIntegration::append_tcr(GCode& gcodegen, const WipeTower::T
     gcodegen.placeholder_parser().set("retraction_distance_when_cut",
                                       gcodegen.m_config.retraction_distances_when_cut.get_at(new_extruder_id));
     gcodegen.placeholder_parser().set("long_retraction_when_cut", gcodegen.m_config.long_retractions_when_cut.get_at(new_extruder_id));
+    // (the _ec pair was published above, before change_filament_gcode was expanded)
 
     // Process the start filament gcode.
     std::string        start_filament_gcode_str;
@@ -2604,9 +2640,15 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
         // Ultra (H2C nozzle rack): ported from BambuStudio GCode.cpp:2461-2476. The printer reads
         // both lines out of a stored job: "filament" is the 1-based list of filament slots the job
         // needs (the AMS offering on the machine's own screen), "support_material_on_wipe_tower"
-        // tells it whether the prime tower carries support material. Only for BBL printers, so
-        // non-Bambu output is unchanged.
-        if (is_bbl_printers) {
+        // tells it whether the prime tower carries support material.
+        //
+        // This was originally gated on is_bbl_printers, which is false for any non-Bambu vendor
+        // profile. That made us the outlier: BambuStudio writes both lines unconditionally
+        // (GCode.cpp:2461-2476) and so does upstream OrcaSlicer - its Flashforge Creator 5 export
+        // carries "; filament: 2,3,4,1", as does Flash Studio's. The C5 runs Bambu-derived
+        // firmware that reads this header out of a stored job, and our export was the only one
+        // of the three missing it. Match upstream and always write it.
+        {
             // Upstream feeds this from Print::get_slice_used_filaments(false), which is set from
             // ToolOrdering::all_extruders() (Print.cpp:2298,2312). This fork keeps the tool ordering
             // on the wipe-tower data, so it is only populated for a multi-filament plate; fall back
@@ -2875,6 +2917,10 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
 
     this->placeholder_parser().set("retraction_distances_when_cut", new ConfigOptionFloats(m_config.retraction_distances_when_cut));
     this->placeholder_parser().set("long_retractions_when_cut", new ConfigOptionBools(m_config.long_retractions_when_cut));
+    // BBS: initial extruder-change retraction values, plus the whole arrays (upstream publishes both).
+    set_ec_retraction_placeholders(this->placeholder_parser(), m_config, size_t(initial_extruder_id));
+    this->placeholder_parser().set("retraction_distances_when_ec", new ConfigOptionFloatsNullable(m_config.retraction_distances_when_ec));
+    this->placeholder_parser().set("long_retractions_when_ec", new ConfigOptionBoolsNullable(m_config.long_retractions_when_ec));
     // Set variable for total layer count so it can be used in custom gcode.
     this->placeholder_parser().set("total_layer_count", m_layer_count);
     // Useful for sequential prints.
@@ -3206,10 +3252,10 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
             this->placeholder_parser().set("next_hotend",                     new ConfigOptionInt(-1));
 
             // Ultra: remaining single-mapped shims for dual-machine templates. Extruder-change (_ec)
-            // retraction feature off; timelapse position-picker (BBS computes per-layer) disabled;
+            // retraction is no longer shimmed here - long_retractions_when_ec / retraction_distances_when_ec
+            // are real per-filament options now and are published per toolchange (see
+            // set_ec_retraction_placeholders). Timelapse position-picker (BBS computes per-layer) disabled;
             // first_filaments = the initial filament on every physical extruder (single-mapped).
-            this->placeholder_parser().set("long_retraction_when_ec",          new ConfigOptionBool(false));
-            this->placeholder_parser().set("retraction_distance_when_ec",      new ConfigOptionFloat(0.));
             this->placeholder_parser().set("farthest_point_timelapse_enabled", new ConfigOptionBool(false));
             this->placeholder_parser().set("has_timelapse_safe_pos",           new ConfigOptionBool(false));
             this->placeholder_parser().set("timelapse_inline_photo",           new ConfigOptionBool(false));
@@ -5621,6 +5667,14 @@ LayerResult GCode::process_layer(const Print& print,
     auto configured_filament_id_1based = [&layer_tools](const GCode::ObjectByExtruder::Island::Region::Type entity_type,
                                                         const ExtrusionEntityCollection&                    entities,
                                                         const PrintRegion&                                  region) -> unsigned int {
+        // Phase 4 (image row on WALLS): the per-run tag is now produced for perimeters too, not
+        // only for fills, so the check is hoisted above the INFILL gate. It stays exact for every
+        // other print because image_row_extruder_1based is 0 on every collection the image row
+        // did not create - see ExtrusionEntityCollection::image_row_extruder_1based. A per-layer
+        // extruder_override still wins, exactly as it does inside the INFILL branch below.
+        if (entity_type != GCode::ObjectByExtruder::Island::Region::INFILL &&
+            entities.image_row_extruder_1based != 0 && layer_tools.extruder_override == 0)
+            return entities.image_row_extruder_1based;
         if (entity_type == GCode::ObjectByExtruder::Island::Region::INFILL) {
             if (layer_tools.extruder_override != 0)
                 return layer_tools.extruder_override;
@@ -5647,6 +5701,11 @@ LayerResult GCode::process_layer(const Print& print,
     auto configured_extruder_id = [&layer_tools](const GCode::ObjectByExtruder::Island::Region::Type entity_type,
                                                  const ExtrusionEntityCollection&                    entities,
                                                  const PrintRegion&                                  region) -> int {
+        // Phase 4 (image row on WALLS): same hoist as configured_filament_id_1based's just above,
+        // for the same reason and with the same "0 unless the feature is in use" guarantee.
+        if (entity_type != GCode::ObjectByExtruder::Island::Region::INFILL &&
+            entities.image_row_extruder_1based != 0 && layer_tools.extruder_override == 0)
+            return int(entities.image_row_extruder_1based) - 1;
         if (entity_type == GCode::ObjectByExtruder::Island::Region::INFILL) {
             // Phase 3 (image row): see configured_filament_id_1based's own comment just above -
             // same field, same "0 unless the feature is in use" guarantee, and the same
@@ -6183,6 +6242,46 @@ LayerResult GCode::process_layer(const Print& print,
                     return true;
                 };
 
+            // Phase 4 (image row on WALLS): one ImageRowWallContext per PrintRegion per layer,
+            // built lazily and memoised - building it decodes the row's image reference and walks
+            // the owning volume's vertices for a bounding box, which must not happen once per
+            // loop. A region that is not an image-row wall memoises a null and is never retried.
+            // The whole cache stays empty for every print that does not use the feature.
+            std::vector<std::pair<const PrintRegion*, std::unique_ptr<ImageRowWallContext>>> image_row_wall_ctx_cache;
+            const PrintObject* image_row_wall_object =
+                layer_to_print.original_object != nullptr ? layer_to_print.original_object : layer_to_print.object();
+            // A stand-in for an object with no Model behind it (never happens in a real slice;
+            // the split simply finds no image and leaves the wall alone).
+            static const ImageAssetStore image_row_wall_no_assets;
+            const ImageAssetStore& image_row_wall_assets =
+                (image_row_wall_object != nullptr && image_row_wall_object->model_object() != nullptr &&
+                 image_row_wall_object->model_object()->get_model() != nullptr)
+                    ? image_row_wall_object->model_object()->get_model()->image_assets
+                    : image_row_wall_no_assets;
+            auto image_row_wall_ctx_for = [&](const PrintRegion& region) -> const ImageRowWallContext* {
+                if (image_row_wall_object == nullptr)
+                    return nullptr;
+                for (const auto& entry : image_row_wall_ctx_cache)
+                    if (entry.first == &region)
+                        return entry.second.get();
+                std::unique_ptr<ImageRowWallContext> built;
+                if (image_row_wall_configured_virtual_id(*image_row_wall_object, region) != 0) {
+                    auto ctx = std::make_unique<ImageRowWallContext>();
+                    // The external perimeter's own extrusion width sets the sampling resolution,
+                    // so a wall dithers at exactly the granularity a top surface does.
+                    float ext_width = 0.f;
+                    for (const LayerRegion* lr : layer.regions())
+                        if (lr != nullptr && &lr->region() == &region) {
+                            ext_width = float(lr->flow(frExternalPerimeter).width());
+                            break;
+                        }
+                    if (image_row_wall_context_for_region(*image_row_wall_object, region, ext_width, *ctx))
+                        built = std::move(ctx);
+                }
+                image_row_wall_ctx_cache.emplace_back(&region, std::move(built));
+                return image_row_wall_ctx_cache.back().second.get();
+            };
+
             for (size_t region_id = 0; region_id < layer.regions().size(); ++region_id) {
                 const LayerRegion* layerm = layer.regions()[region_id];
                 if (layerm == nullptr)
@@ -6346,6 +6445,109 @@ LayerResult GCode::process_layer(const Print& print,
 
                         // This extrusion is part of certain Region, which tells us which extruder should be used for it:
                         int correct_extruder_id = configured_extruder_id(entity_type, *filtered_extrusions, region);
+
+                        // Phase 4 (image row on WALLS): an ImageWeighted row bound to this
+                        // region's wall filament dithers the OUTER perimeter (and, when the
+                        // region has more than one wall loop, the first inner one) into short
+                        // per-filament runs - the same sampling, the same dither and the same
+                        // per-run override phase 3 applies to a top surface's fill lines.
+                        //
+                        // This runs HERE, at G-code time, rather than in PerimeterGenerator,
+                        // because a wall's seam is chosen at G-code time by SeamPlacer and the
+                        // brief requires the seam to survive: local_z_loop_seam_placer (declared
+                        // just above this loop) rotates the loop to its seam FIRST, and only the
+                        // already-rotated geometry is then cut at the image's colour boundaries.
+                        // A run boundary is therefore a colour boundary and nothing more - the
+                        // nozzle still starts the wall exactly where SeamPlacer put it. Running
+                        // here also means sampling AFTER fuzzy skin (applied inside
+                        // PerimeterGenerator), so run boundaries land on the jittered geometry
+                        // the nozzle really follows. See src/libslic3r/ImageRowWalls.hpp.
+                        if (!is_anything_overridden &&
+                            entity_type == ObjectByExtruder::Island::Region::PERIMETERS &&
+                            layer_tools.extruder_override == 0) {
+                            const ImageRowWallContext* wall_ctx = image_row_wall_ctx_for(region);
+                            if (wall_ctx != nullptr) {
+                                std::vector<std::unique_ptr<ExtrusionEntityCollection>> run_colls;
+                                auto untouched = std::make_unique<ExtrusionEntityCollection>();
+                                untouched->no_sort = filtered_extrusions->no_sort;
+                                for (const ExtrusionEntity* e : filtered_extrusions->entities) {
+                                    std::vector<std::unique_ptr<ExtrusionEntityCollection>> split;
+                                    if (e != nullptr && image_row_wall_entity_is_claimed(*e, wall_ctx->split_first_inner)) {
+                                        const ExtrusionEntity* to_split = e;
+                                        ExtrusionLoop          seam_loop;
+                                        if (const auto* loop = dynamic_cast<const ExtrusionLoop*>(e)) {
+                                            Point seam_anchor = loop->first_point();
+                                            if (local_z_loop_seam_placer(*loop, seam_loop, seam_anchor))
+                                                to_split = &seam_loop;
+                                        }
+                                        split = image_row_split_wall_entity(image_row_wall_assets, *wall_ctx, *to_split, print_z);
+                                    }
+                                    if (split.empty()) {
+                                        if (e != nullptr)
+                                            untouched->append(*e);
+                                    } else {
+                                        for (auto& c : split)
+                                            run_colls.push_back(std::move(c));
+                                    }
+                                }
+                                if (!run_colls.empty()) {
+                                    // One island bucket per run, dispatched exactly the way the
+                                    // outer/inner wall splitter just below dispatches its two
+                                    // buckets, plus one for everything that stayed unsplit.
+                                    auto dispatch = [&](const ExtrusionEntityCollection* coll, unsigned int extruder) {
+                                        if (coll == nullptr || coll->entities.empty())
+                                            return;
+                                        if (!layer_tools.has_extruder(extruder))
+                                            extruder = layer_tools.extruders.back();
+                                        std::vector<ObjectByExtruder::Island>& islands =
+                                            object_islands_by_extruder(by_extruder, extruder, layer_to_print_idx, layers.size(), n_slices + 1);
+                                        for (size_t i = 0; i <= n_slices; ++i) {
+                                            const bool   last       = i == n_slices;
+                                            const size_t island_idx = last ? n_slices : slices_test_order[i];
+                                            if (last || entity_matches_surface(island_idx, *coll)) {
+                                                if (islands[island_idx].by_region.empty())
+                                                    islands[island_idx].by_region.assign(print.num_print_regions(), ObjectByExtruder::Island::Region());
+                                                islands[island_idx].by_region[region.print_region_id()].append(entity_type, coll, nullptr);
+                                                break;
+                                            }
+                                        }
+                                    };
+                                    for (auto& c : run_colls) {
+                                        // image_row_extruder_1based is 1-BASED; the island
+                                        // bucket key is 0-BASED - the canonical dispatch
+                                        // further down this function keys it on
+                                        // correct_extruder_id, i.e. on
+                                        // LayerTools::wall_filament(), which returns a
+                                        // zero-based extruder. Convert once, here.
+                                        //
+                                        // NOTE, found while writing this and deliberately
+                                        // NOT 'fixed' here: layer_tools.extruders is
+                                        // 1-based (ToolOrdering.cpp:938 and :941 register
+                                        // solid_infill_filament()/sparse_infill_filament()
+                                        // + 1), so every has_extruder() call on this path -
+                                        // the canonical one included - tests a 0-based id
+                                        // against a 1-based list and usually misses,
+                                        // falling back to extruders.back(). That is a
+                                        // pre-existing, file-wide off-by-one, not something
+                                        // this feature introduces; matching the canonical
+                                        // path's convention is what keeps image-row runs
+                                        // behaving exactly like every other entity here,
+                                        // and correcting it belongs in its own change with
+                                        // its own Bar A.
+                                        dispatch(c.get(), c->image_row_extruder_1based - 1);
+                                        local_z_clipped_collections.emplace_back(std::move(c));
+                                    }
+                                    if (!untouched->entities.empty()) {
+                                        // correct_extruder_id is already 0-based
+                                        // (configured_extruder_id returns
+                                        // layer_tools.wall_filament(region)).
+                                        dispatch(untouched.get(), unsigned(std::max(0, correct_extruder_id)));
+                                        local_z_clipped_collections.emplace_back(std::move(untouched));
+                                    }
+                                    continue;
+                                }
+                            }
+                        }
 
                         // Ultra: outer walls may print with their own filament - split the island's
                         // perimeter collection into outer/inner sub-collections, one per extruder.
@@ -9567,6 +9769,8 @@ std::string GCode::set_extruder(unsigned int extruder_id, double print_z, bool b
     // if we are running a single-extruder setup, just set the extruder and return nothing
     if (!m_writer.multiple_extruders) {
         this->placeholder_parser().set("current_extruder", extruder_id);
+        // BBS: keep the extruder-change retraction placeholders in step with the active filament.
+        set_ec_retraction_placeholders(this->placeholder_parser(), m_config, size_t(extruder_id));
 
         std::string gcode;
         // Append the filament start G-code.
@@ -9781,6 +9985,8 @@ std::string GCode::set_extruder(unsigned int extruder_id, double print_z, bool b
             dyn_config.set_key_value("flush_temperatures", new ConfigOptionInts(fts));
         }
 
+        // BBS: as above - the _ec pair has to be in the parser before the template reads it.
+        set_ec_retraction_placeholders(this->placeholder_parser(), m_config, size_t(extruder_id));
         toolchange_gcode_parsed = placeholder_parser_process("change_filament_gcode", change_filament_gcode, extruder_id, &dyn_config);
         check_add_eol(toolchange_gcode_parsed);
         gcode += toolchange_gcode_parsed;
@@ -9826,6 +10032,9 @@ std::string GCode::set_extruder(unsigned int extruder_id, double print_z, bool b
     this->placeholder_parser().set("current_extruder", extruder_id);
     this->placeholder_parser().set("retraction_distance_when_cut", m_config.retraction_distances_when_cut.get_at(extruder_id));
     this->placeholder_parser().set("long_retraction_when_cut", m_config.long_retractions_when_cut.get_at(extruder_id));
+    // BBS: re-publish for everything that runs AFTER the toolchange (filament_start_gcode and the
+    // rest of the layer). change_filament_gcode itself already saw these values above.
+    set_ec_retraction_placeholders(this->placeholder_parser(), m_config, size_t(extruder_id));
 
     // Append the filament start G-code.
     const std::string& filament_start_gcode = m_config.filament_start_gcode.get_at(extruder_id);

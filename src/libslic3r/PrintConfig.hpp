@@ -309,6 +309,16 @@ enum class PerimeterGeneratorType
     Arachne
 };
 
+// Orca #13582: per-layer toolchange sequence. Default keeps last-used-first (then flush-volume
+// reorder). Cyclic uses a fixed ascending filament sequence each layer so extra toolchanges give
+// the previous colour more time to cool. There is no third "Minimum flush" enum value in Orca;
+// that behaviour is the Default path's existing flush-volume reorder.
+enum class ToolChangeOrderingType
+{
+    Default,
+    Cyclic,
+};
+
 // BBS
 enum OverhangFanThreshold {
     Overhang_threshold_none = 0,
@@ -568,6 +578,7 @@ CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(PrintHostType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(AuthorizationType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(WipeTowerWallType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(PerimeterGeneratorType)
+CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(ToolChangeOrderingType)
 // Ultra: nozzle flow variant declared to Bambu printers (metadata only in this fork).
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(NozzleVolumeType)
 
@@ -1428,6 +1439,10 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionInt,                 enable_long_retraction_when_cut))
     ((ConfigOptionFloats,              retraction_distances_when_cut))
     ((ConfigOptionBools,               long_retractions_when_cut))
+    // BBS: per-filament long retraction on extruder change (dual-nozzle machines, e.g. H2D).
+    // Nullable, mirroring BambuStudio PrintConfig.hpp so an absent value stays nil rather than 0.
+    ((ConfigOptionFloatsNullable,      retraction_distances_when_ec))
+    ((ConfigOptionBoolsNullable,       long_retractions_when_ec))
     ((ConfigOptionFloats,              z_hop))
     // BBS
     ((ConfigOptionBools,               z_hop_when_prime))
@@ -1444,6 +1459,9 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionBool,                single_extruder_multi_material))
     ((ConfigOptionBool,                manual_filament_change))
     ((ConfigOptionBool,                single_extruder_multi_material_priming))
+    ((ConfigOptionEnum<ToolChangeOrderingType>, toolchange_ordering))
+    ((ConfigOptionString,              toolchange_cyclic_order))
+    ((ConfigOptionBool,                toolchange_cyclic_first_layer))
     ((ConfigOptionBool,                wipe_tower_no_sparse_layers))
     ((ConfigOptionString,              change_filament_gcode))
     ((ConfigOptionString,              change_extrusion_role_gcode))
@@ -1660,6 +1678,9 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionFloat,              min_skirt_length))
     ((ConfigOptionFloats,             slow_down_layer_time))
     ((ConfigOptionBool,               spiral_mode))
+    // Resolve an overlap between two normal parts by bounding-box volume rather than by
+    // their order in ModelObject::volumes (see PrintObjectSlice.cpp).
+    ((ConfigOptionBool,               enable_order_independent_overlap_carving))
     ((ConfigOptionBool,               spiral_mode_smooth))
     ((ConfigOptionFloatOrPercent,     spiral_mode_max_xy_smoothing))
     ((ConfigOptionFloat,              spiral_finishing_flow_ratio))
@@ -2159,6 +2180,27 @@ bool is_XL_printer(const PrintConfig &cfg);
 // own nozzle - not an AMS-style single-extruder multi-material machine. Only this firmware knows
 // what to do with the end-of-print unload flag, so it is the only place the option is offered.
 bool is_snapmaker_toolchanger(const ConfigBase &cfg);
+
+// A machine with several INDEPENDENT, IDENTICAL toolheads - one filament per head, tool index ==
+// filament index (the Snapmaker U1 family, the Flashforge Creator 5). Distinct from the
+// dual-nozzle grouping machines (H2D/H2C/X2D), which carry more than one extruder variant and go
+// through ToolOrdering's grouping engine instead - see
+// DynamicPrintConfig::support_different_extruders().
+bool is_identical_multi_extruder_printer(const ConfigBase &cfg);
+
+// The filament -> extruder map such a machine actually prints with: filament i lives in toolhead
+// i, wrapping when there are more filaments than toolheads (what Flash Studio writes for five
+// filaments on a four-head Creator 5: "1 2 3 4 1"). 1-based, one entry per filament.
+//
+// REPORTED METADATA ONLY. This is deliberately NOT written into the live PrintConfig: in this
+// fork filament_map doubles as the dual-nozzle routing signal, and a differing map zeroes the
+// purge volume on every filament change (GCode.cpp "Phase 7" cross-nozzle shims, ~line 709 and
+// ~9773). Those shims are right for an H2D, where a second nozzle already holds the next
+// filament, and wrong for a toolchanger, which still needs its prime tower - upstream OrcaSlicer
+// reports filament_map = 1,2,3,4 for the Creator 5 AND keeps a full flush matrix. So the map is
+// only ever reported (G-code CONFIG_BLOCK, slice_info.config), never used to route or to decide
+// a flush, which leaves the executable G-code byte-identical.
+std::vector<int> identity_filament_map(const ConfigBase &cfg, size_t filament_count);
 
 Points get_bed_shape(const DynamicPrintConfig &cfg);
 Points get_bed_shape(const PrintConfig &cfg);

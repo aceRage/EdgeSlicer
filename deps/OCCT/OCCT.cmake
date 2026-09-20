@@ -4,15 +4,18 @@ else()
     set(library_build_type "Static")
 endif()
 
+# 0001-OCCT-fix.patch is a GIT-FORMAT diff, so --directory is load-bearing here: without
+# it git apply resolves the paths against the repo root, skips every hunk and exits 0.
 if (IN_GIT_REPO)
-    set(OCCT_DIRECTORY_FLAG --directory ${BINARY_DIR_REL}/dep_OCCT-prefix/src/dep_OCCT)
+    set(OCCT_DIRECTORY_FLAG -DDIRECTORY=${BINARY_DIR_REL}/dep_OCCT-prefix/src/dep_OCCT)
 endif ()
 
 Snapmaker_Orca_add_cmake_project(OCCT
     URL https://github.com/Open-Cascade-SAS/OCCT/archive/refs/tags/V7_6_0.zip
     URL_HASH SHA256=28334f0e98f1b1629799783e9b4d21e05349d89e695809d7e6dfa45ea43e1dbc
-    #PATCH_COMMAND ${PATCH_CMD} ${CMAKE_CURRENT_LIST_DIR}/0001-OCCT-fix.patch
-    PATCH_COMMAND git apply ${OCCT_DIRECTORY_FLAG} --verbose --ignore-space-change --whitespace=fix ${CMAKE_CURRENT_LIST_DIR}/0001-OCCT-fix.patch
+    PATCH_COMMAND ${CMAKE_COMMAND} -DGIT=${GIT_EXECUTABLE} ${OCCT_DIRECTORY_FLAG} -DLOOSE_WS=ON
+                  -DP1=${CMAKE_CURRENT_LIST_DIR}/0001-OCCT-fix.patch
+                  -P ${CMAKE_CURRENT_LIST_DIR}/../apply_patch.cmake
     #DEPENDS dep_Boost
     DEPENDS ${FREETYPE_PKG}
     CMAKE_ARGS

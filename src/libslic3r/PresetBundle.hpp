@@ -8,6 +8,7 @@
 #include "MixedFilament.hpp"
 
 #include <memory>
+#include <functional>
 #include <unordered_map>
 #include <array>
 #include <vector>
@@ -64,6 +65,17 @@ public:
         std::string filament;        // name of a preferred filament preset
         std::string sla_material;    // name of a preferred sla_material preset
     };
+
+    // Progress hook for the long, blocking preset load. Preset loading is one uninterrupted
+    // stretch of work (seconds, on a full profile set) with no event loop in sight, so the GUI
+    // hands us a callback here and the loaders call it often enough that the caller can keep a
+    // splash animation moving. Optional: null by default, and every call site checks before
+    // invoking, so the non-GUI users of PresetBundle (tests, CLI, the profile validator) are
+    // unaffected. Called once per preset file / per vendor JSON, on the loading thread; the
+    // callback must be cheap and must not touch the bundle.
+    using ProgressCallback = std::function<void()>;
+    void set_progress_callback(ProgressCallback cb);
+    void notify_progress() const { if (m_progress_callback) m_progress_callback(); }
 
     // Load ini files of all types (print, filament, printer) from Slic3r::data_dir() / presets.
     // Load selections (current print, current filaments, current printer) from config.ini
@@ -136,6 +148,9 @@ public:
     void            set_num_filaments(unsigned int n, std::string new_col = "");
     void            set_num_filaments(unsigned int n, std::vector<std::string> new_colors);
     void            update_num_filaments(unsigned int to_del_filament_id);
+    // Physical slot count. filament_colour is the source of truth; mixed_filament_definitions
+    // and a topped-up filament_presets list must not invent extra slots (Orca #15728 adapt).
+    size_t          num_physical_filaments() const;
     unsigned int sync_ams_list(unsigned int & unknowns);
     //BBS: check whether this is the only edited filament
     bool is_the_only_edited_filament(unsigned int filament_index);
@@ -466,6 +481,9 @@ private:
     std::string vendor_to_validate = ""; 
     int m_errors = 0;
     std::vector<unsigned int> m_last_filament_id_remap;
+
+    // Optional progress hook; see set_progress_callback(). Null unless a GUI set one.
+    ProgressCallback m_progress_callback;
 
 };
 

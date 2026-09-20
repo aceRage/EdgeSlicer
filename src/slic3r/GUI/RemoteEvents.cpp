@@ -3,6 +3,7 @@
 #include "DeviceManager.hpp"
 #include "GUI_App.hpp"
 #include "HMS.hpp"
+#include "PrintErrorCommands.hpp"
 #include "RemoteControl.hpp"
 #include "RemoteHub.hpp"
 #include "SnapmakerLan.hpp"
@@ -13,9 +14,12 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <deque>
+#include <iterator>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -56,6 +60,17 @@ static std::string hex8(int code)
     return buf;
 }
 
+std::string notification_body(const std::string& text, const std::string& code)
+{
+    std::string body = text;
+    if (code.empty()) return body;
+    // Either spelling counts as already named: the text carries the grouped form when it came
+    // from HMSQuery::format_error, and a relayed body may carry the raw one.
+    const std::string pretty = HMSQuery::pretty_code(code);
+    if (body.find(code) != std::string::npos || (!pretty.empty() && body.find(pretty) != std::string::npos)) return body;
+    return body + " (" + pretty + ")";
+}
+
 // ------------------------------------------------------------ the rule ----
 
 json Event::to_json(long instance_pid) const
@@ -69,6 +84,21 @@ json Event::to_json(long instance_pid) const
     j["text"]     = text;
     if (!code.empty()) j["code"] = code;
     if (!job.empty()) j["job"] = job;
+    // The buttons, when there are any. Left off entirely otherwise, so every consumer that was
+    // written before this field keeps seeing exactly the payload it saw - the text, title and
+    // severity are untouched by it.
+    if (!actions.empty()) {
+        json arr = json::array();
+        for (const PrintErrorEventAction& a : actions)
+            arr.push_back({ { "id", a.id },
+                            { "verb", a.verb },
+                            { "label", a.label },
+                            { "needs_job_id", a.needs_job_id },
+                            { "needs_details", a.needs_action_json },
+                            { "remote_safe", a.remote_safe } });
+        j["actions"] = arr;
+        if (!job_id.empty()) j["job_id"] = job_id;
+    }
     return j;
 }
 
@@ -103,11 +133,95 @@ static std::string cooldown_key(const Event& e)
     return e.printer_id + "|" + e.kind + "|" + (e.code.empty() ? e.job : e.code);
 }
 
+// Whether two job names are the same print. A printer that reports the same file with a different
+// spelling between polls - a leading "/", a cache prefix, the extension dropped, or the Windows
+// separators a print host hands back - was announcing a second start for the same job. Compared on
+// the basename, case-folded, with the usual G-code extensions off.
+static std::string job_key(const std::string& job)
+{
+    std::string s = job;
+    // Whitespace first: a name that picked up a trailing space still has to have its extension
+    // recognised, or " bench.3mf " and "bench" would be told apart by the space alone.
+    while (!s.empty() && (s.front() == ' ' || s.front() == '	')) s.erase(s.begin());
+    while (!s.empty() && (s.back() == ' ' || s.back() == '	')) s.pop_back();
+    const size_t cut = s.find_last_of("/\\");
+    if (cut != std::string::npos) s = s.substr(cut + 1);
+    auto ends_with_ci = [](const std::string& str, const char* suffix) {
+        const size_t n = std::strlen(suffix);
+        if (str.size() <= n) return false;
+        for (size_t i = 0; i < n; ++i)
+            if (std::tolower((unsigned char) str[str.size() - n + i]) != std::tolower((unsigned char) suffix[i])) return false;
+        return true;
+    };
+    static const char* const exts[] = { ".gcode.3mf", ".gcode.gz", ".3mf", ".gcode", ".gco", ".bgcode" };
+    for (const char* e : exts)
+        if (ends_with_ci(s, e)) { s.resize(s.size() - std::strlen(e)); break; }
+    for (char& c : s) c = (char) std::tolower((unsigned char) c);
+    // Whatever the extension left behind.
+    while (!s.empty() && (s.back() == ' ' || s.back() == '	' || s.back() == '.')) s.pop_back();
+    return s;
+}
+
+static bool terminal_state(const std::string& s) { return s == "finished" || s == "failed" || s == "cancelled"; }
+
+// "No information": the watcher cannot see this printer's print state at all. Not a state change,
+// and never a reason to forget what it was doing - a Bambu that was re-seeded, a Snapmaker that
+// wanted a login, a print host that stopped answering all land here.
+static bool no_information(const PrinterState& p) { return !p.watched || !p.online || p.state.empty(); }
+
+// The one question a "started" has to answer: is this a print nobody has been told about?
+//
+// Yes when the printer has no job memory at all, when the job is a different file, or when the job
+// it remembers has ended (a finished / cancelled / failed came in between). No when the same job is
+// already announced and nothing ended it - which is every repeat the flaps produced: an idle blip,
+// an offline blink and re-seed, a reconnect, a second spelling of the same file name.
+//
+// Updates the memory as a side effect, so a caller that asks is the caller that announces.
+static bool start_is_new(JobMemory& jm, const std::string& job, long long at)
+{
+    const std::string key = job_key(job);
+    const bool        same_job = jm.announced && job_key(jm.job) == key;
+    if (same_job && jm.terminal.empty()) return false;
+    jm.job         = job;
+    jm.announced   = true;
+    jm.started_at  = at;
+    jm.terminal.clear();
+    jm.terminal_at = 0;
+    return true;
+}
+
 std::vector<Event> step(Memory& mem, const Snapshot& now, long long cooldown_ms)
+{
+    return step(mem, now, cooldown_ms, nullptr);
+}
+
+std::vector<Event> step(Memory& mem, const Snapshot& now, long long cooldown_ms, std::vector<RawChange>* raw_changes)
 {
     std::vector<Event> out;
     for (const auto& kv : now.printers) {
         const PrinterState& cur = kv.second;
+        // Every change in the printer's own words, whether or not it maps to a new normalised
+        // state and whether or not the watcher can act on it. This is the log line that names
+        // which printer is flapping and how fast.
+        {
+            auto              rit  = mem.last_raw.find(kv.first);
+            const std::string prev_raw = rit == mem.last_raw.end() ? std::string("<none>") : rit->second;
+            const std::string this_raw = cur.raw_state.empty() ? std::string("<none>") : cur.raw_state;
+            if (rit == mem.last_raw.end() || rit->second != cur.raw_state) {
+                if (raw_changes && rit != mem.last_raw.end()) {
+                    auto prev_p = mem.last.printers.find(kv.first);
+                    RawChange rc;
+                    rc.printer_id  = kv.first;
+                    rc.from        = prev_raw;
+                    rc.to          = this_raw;
+                    rc.was_visible = prev_p != mem.last.printers.end() && !no_information(prev_p->second);
+                    rc.visible     = !no_information(cur);
+                    rc.at          = now.at;
+                    raw_changes->push_back(rc);
+                }
+                mem.last_raw[kv.first] = cur.raw_state;
+            }
+        }
         // The seeding poll, remembered: the first snapshot in which this printer's state could be
         // read at all. It says nothing about events - it is what a caller reads to know that the
         // watcher has this printer in hand, so the next thing it does will be reported.
@@ -120,19 +234,29 @@ std::vector<Event> step(Memory& mem, const Snapshot& now, long long cooldown_ms)
         // appeared, or that was offline / unwatched last time: the first watched snapshot seeds the
         // memory and nothing more, so starting the slicer next to a printer that is already halfway
         // through a job does not announce a start, and a reconnect does not replay one.
-        if (!cur.watched || !cur.online || prev_it == mem.last.printers.end()) continue;
+        //
+        // The job memory is deliberately NOT touched here: "I cannot see it" must leave what the
+        // printer was last known to be doing exactly as it was, or a printer that blinks offline
+        // and comes back mid-print announces its start a second time.
+        if (no_information(cur) || prev_it == mem.last.printers.end()) continue;
         const PrinterState& prev = prev_it->second;
-        if (!prev.watched || !prev.online) continue;
+        if (no_information(prev)) continue;
 
         const std::string name = cur.name.empty() ? cur.id : cur.name;
+        JobMemory&        jm   = mem.jobs[kv.first];
 
         // A printer error, whatever the print state is doing: a new code, or a code where there was
         // none. Bambu's HMS text and Klipper's own message both arrive here as error_text.
         if (!cur.error_code.empty() && cur.error_code != prev.error_code) {
+            // error_text already carries the code when the text is unknown (describe_error), so the
+            // bare-code spelling is only reached by a source that supplies neither - a relayed hub
+            // or a Klipper printer that named a code and said nothing about it.
             Event e   = make_event(cur, "error", "error", name + " reported an error",
-                                   cur.error_text.empty() ? (name + " reported error " + cur.error_code + ".")
+                                   cur.error_text.empty() ? (name + " reported error " + HMSQuery::pretty_code(cur.error_code) + ".")
                                                           : (name + ": " + cur.error_text));
             e.code    = cur.error_code;
+            e.actions = cur.error_actions;
+            e.job_id  = cur.job_id;
             out.push_back(e);
         }
 
@@ -140,8 +264,9 @@ std::vector<Event> step(Memory& mem, const Snapshot& now, long long cooldown_ms)
             if (cur.state == "printing" && prev.state == "paused") {
                 out.push_back(make_event(cur, "resumed", "info", name + " resumed", name + " picked the print up again" + job_phrase(cur) + "."));
             } else if (cur.state == "printing") {
-                out.push_back(make_event(cur, "started", "info", name + " started printing",
-                                         name + " started a print" + job_phrase(cur) + "."));
+                if (start_is_new(jm, cur.job, now.at))
+                    out.push_back(make_event(cur, "started", "info", name + " started printing",
+                                             name + " started a print" + job_phrase(cur) + "."));
             } else if (cur.state == "paused") {
                 // Stage 6 is the printer's own "Paused due to filament runout"; it is the one pause
                 // worth waking somebody for, so it gets its own kind.
@@ -154,18 +279,34 @@ std::vector<Event> step(Memory& mem, const Snapshot& now, long long cooldown_ms)
             } else if (cur.state == "finished" && busy_state(prev.state)) {
                 out.push_back(make_event(cur, "finished", "info", name + " finished", name + " finished the print" + job_phrase(prev) + "."));
             } else if (cur.state == "failed") {
+                // A failure with a code and no text used to read "X stopped with a failure." and
+                // give the owner nothing to act on, so the code is named when that is all there is.
+                const std::string why = !cur.error_text.empty() ? ": " + cur.error_text
+                                        : !cur.error_code.empty() ? " (error " + HMSQuery::pretty_code(cur.error_code) + ")."
+                                                                  : ".";
                 Event e = make_event(cur, "failed", "error", name + " failed",
-                                     name + " stopped with a failure" + job_phrase(prev) +
-                                         (cur.error_text.empty() ? "." : ": " + cur.error_text));
+                                     name + " stopped with a failure" + job_phrase(prev) + why);
                 e.code  = cur.error_code;
                 out.push_back(e);
             } else if (cur.state == "cancelled" && busy_state(prev.state)) {
                 out.push_back(make_event(cur, "cancelled", "warning", name + " was stopped", "The print on " + name + " was cancelled" + job_phrase(prev) + "."));
             }
         } else if (cur.state == "printing" && !cur.job.empty() && cur.job != prev.job) {
-            // Straight from one job into the next without passing through an idle state.
-            out.push_back(make_event(cur, "started", "info", name + " started printing",
-                                     name + " started a print" + job_phrase(cur) + "."));
+            // Straight from one job into the next without passing through an idle state. Only when
+            // it really is another job: two spellings of the same file are one print (job_key), and
+            // a job already announced and not ended is not announced again.
+            if (start_is_new(jm, cur.job, now.at))
+                out.push_back(make_event(cur, "started", "info", name + " started printing",
+                                         name + " started a print" + job_phrase(cur) + "."));
+        }
+
+        // A terminal state closes the current job: the next "printing" for the same name is a new
+        // print and gets its own start. Recorded from the state, not from whether the event above
+        // survived the cooldown - the memory is about what the printer did, not what was sent.
+        if (terminal_state(cur.state) && cur.state != prev.state) {
+            jm.terminal    = cur.state;
+            jm.terminal_at = now.at;
+            jm.announced   = false;
         }
     }
 
@@ -202,6 +343,13 @@ std::vector<Event> step(Memory& mem, const Snapshot& now, long long cooldown_ms)
             ++it;
         else
             it = mem.seen_at.erase(it);
+    // A printer that has left the snapshot entirely (removed from the Device tab, gone from
+    // discovery for good) is the one case where the job memory is dropped - a printer that is
+    // merely offline keeps its entry, which is the whole point of it.
+    for (auto it = mem.jobs.begin(); it != mem.jobs.end();)
+        it = now.printers.count(it->first) ? std::next(it) : mem.jobs.erase(it);
+    for (auto it = mem.last_raw.begin(); it != mem.last_raw.end();)
+        it = now.printers.count(it->first) ? std::next(it) : mem.last_raw.erase(it);
     mem.last = now;
     return kept;
 }
@@ -231,15 +379,7 @@ static PrinterState state_of_json(const json& j)
     // transition rule - POST a 31B printer with 05004046 and the event text is the H2C's own
     // sentence, with no printer anywhere near it.
     if (p.error_text.empty() && !p.error_code.empty() && p.kind == "bambu") {
-        if (HMSQuery* q = wxGetApp().get_hms_query()) {
-            if (p.error_code.size() == 8) {
-                wxString msg;
-                unsigned long code = std::strtoul(p.error_code.c_str(), nullptr, 16);
-                if (q->query_print_error_msg(p.id, (int) code, msg)) p.error_text = msg.ToUTF8().data();
-            } else {
-                p.error_text = q->query_hms_msg(p.id, p.error_code).ToUTF8().data();
-            }
-        }
+        if (HMSQuery* q = wxGetApp().get_hms_query()) p.error_text = q->describe_error(p.id, p.error_code).ToUTF8().data();
     }
     return p;
 }
@@ -264,7 +404,15 @@ json replay(const json& in)
         json step_out;
         step_out["at"]     = snap.at;
         step_out["events"] = json::array();
-        for (const Event& e : step(mem, snap, cooldown)) step_out["events"].push_back(e.to_json(0));
+        std::vector<RawChange> raw;
+        for (const Event& e : step(mem, snap, cooldown, &raw)) step_out["events"].push_back(e.to_json(0));
+        step_out["raw_changes"] = json::array();
+        for (const RawChange& rc : raw)
+            step_out["raw_changes"].push_back(json { { "printer", rc.printer_id },
+                                                     { "from", rc.from },
+                                                     { "to", rc.to },
+                                                     { "was_visible", rc.was_visible },
+                                                     { "visible", rc.visible } });
         out["steps"].push_back(step_out);
     }
     return out;
@@ -300,11 +448,34 @@ static std::string klipper_state(const std::string& s)
 // The serial picks the table: hms_<lang>_31B.json for an H2C, hms_<lang>_094.json for an H2D,
 // the legacy one for an X1 or a P1. Without it the newer machines had no sentence at all and the
 // notification was left with the bare code.
+// Always a sentence: HMSQuery::describe_print_error spells the code out when the table has no
+// text for it, so error_text is never empty and no consumer downstream has to invent a fallback.
 static std::string print_error_message(const std::string& dev_id, int code)
 {
-    wxString msg;
-    if (HMSQuery* q = wxGetApp().get_hms_query(); q && q->query_print_error_msg(dev_id, code, msg)) return msg.ToUTF8().data();
+    if (HMSQuery* q = wxGetApp().get_hms_query()) return q->describe_print_error(dev_id, code).ToUTF8().data();
     return std::string();
+}
+
+// The buttons that go with that sentence, in the payload's own flat shape. The lookup, the
+// resolver and the remote-safe rule are all shared with the status JSON and the control route -
+// this only copies the result into the struct this header can carry.
+static std::vector<PrintErrorEventAction> print_error_event_actions(const std::string& dev_id, int print_error,
+                                                                    const std::string& job_id, bool has_action_json)
+{
+    std::vector<PrintErrorEventAction> out;
+    for (const PrintErrorRemoteAction& a :
+         describe_print_error_actions(RemoteControl::resolved_print_error_actions(dev_id, print_error), !job_id.empty(),
+                                      has_action_json)) {
+        PrintErrorEventAction e;
+        e.id                = a.id;
+        e.verb              = a.verb;
+        e.label             = a.label;
+        e.needs_job_id      = a.needs_job_id;
+        e.needs_action_json = a.needs_action_json;
+        e.remote_safe       = a.remote_safe;
+        out.push_back(e);
+    }
+    return out;
 }
 
 // GUI thread: reading a MachineObject is field access, no network and no locks - which is why the
@@ -322,9 +493,16 @@ static void snapshot_bambu(Snapshot& s)
         p.id   = m->dev_id;
         p.name = m->dev_name;
         p.kind = "bambu";
-        // In LAN mode exactly one printer is connected at a time (DeviceManager::set_selected_machine
-        // disconnects the previous one). The others are a discovery entry and nothing else: their
-        // print_status is stale or empty, so they are listed here but never watched.
+        // In LAN mode exactly one printer is connected at a time, and that is the SDK's limit, not
+        // a choice: bambu_network_connect_printer and bambu_network_disconnect_printer are scoped
+        // to the agent (the disconnect takes no dev_id at all), so one agent holds one LAN session.
+        // The others are a discovery entry and nothing else: their print_status is stale or empty,
+        // so they are listed here but never watched.
+        //
+        // That is why a Bambu printer used to report nothing until the owner opened the slicer and
+        // went to the Device page: the hidden hub-managed instance selected no machine, so it held
+        // no session and every Bambu printer was listed unwatched. It now rotates the one session
+        // over its LAN printers (DeviceManager::lan_watch_rotate), so each is watched in turn.
         p.watched   = m->is_connected();
         p.online    = m->is_online();
         p.raw_state = m->print_status;
@@ -337,6 +515,13 @@ static void snapshot_bambu(Snapshot& s)
         if (m->print_error != 0) {
             p.error_code = hex8(m->print_error);
             p.error_text = print_error_message(m->dev_id, m->print_error);
+            // The buttons for this code. Same lookup and same resolver as the desktop dialog and
+            // the status JSON (RemoteControl::describe_bambu), reached through the one function
+            // that knows how, so a notification cannot offer a different set from the page the
+            // tap-through lands on.
+            p.job_id        = m->job_id_;
+            p.error_actions = print_error_event_actions(m->dev_id, m->print_error, m->job_id_,
+                                                        m->has_remote_command_error_action_json());
         } else {
             // No print error: the worst thing HMS is reporting, if it is serious enough to be worth
             // a notification. HMS_COMMON and HMS_INFO are the printer's chatter and stay off.
@@ -344,7 +529,7 @@ static void snapshot_bambu(Snapshot& s)
                 if (item.msg_level != HMS_FATAL && item.msg_level != HMS_SERIOUS) continue;
                 p.error_code = item.get_long_error_code();
                 if (HMSQuery* q = wxGetApp().get_hms_query())
-                    p.error_text = q->query_hms_msg(m->dev_id, p.error_code).ToUTF8().data();
+                    p.error_text = q->describe_error(m->dev_id, p.error_code).ToUTF8().data();
                 break;
             }
         }
@@ -591,12 +776,23 @@ void heartbeat()
             lan_ms            = b - a;
             hosts_ms          = c - b;
             std::vector<Event> events;
+            std::vector<RawChange> raw;
             {
                 std::lock_guard<std::mutex> lock(s_mutex);
-                events      = step(s_memory, *snap);
+                events      = step(s_memory, *snap, 180000, &raw);
                 s_last_done = snap->at;
                 s_last_took = now_ms() - began;
             }
+            // Every raw-state change, with the poll's own timestamp. This is the line that names a
+            // flap source: a printer that walks RUNNING -> <none> -> RUNNING every few polls, or a
+            // Klipper that reports "standby" between layers, shows up here as a run of changes with
+            // nothing between them, and the "not visible" marks say whether the watcher lost sight
+            // of it (a dropped LAN session, a login timeout) or the printer really said something
+            // different.
+            for (const RawChange& rc : raw)
+                BOOST_LOG_TRIVIAL(info) << "RemoteEvents: raw-state at=" << rc.at << " " << rc.printer_id << ": " << rc.from
+                                        << " -> " << rc.to << (rc.was_visible ? "" : " (was not visible)")
+                                        << (rc.visible ? "" : " (not visible)");
             const long pid = (long) wxGetProcessId();
             for (const Event& e : events) {
                 // What goes to the hub is the event without id and time: the hub assigns both, so

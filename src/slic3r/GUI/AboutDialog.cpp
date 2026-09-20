@@ -96,12 +96,18 @@ void CopyrightsDialog::fill_entries()
         { "Eigen3",                                         "",      "http://eigen.tuxfamily.org" },
         { "Expat",                                          "",      "http://www.libexpat.org" },
         { "fast_float",                                     "",      "https://github.com/fastfloat/fast_float" },
+        // Bundled as separate executables under resources/tools/go2rtc and run by the remote hub
+        // as subprocesses: go2rtc (MIT) relays the printer camera, and an LGPL-3.0 FFmpeg build
+        // re-encodes it for the phone's Quality steps. Their licence texts ship beside them.
+        { "FFmpeg (LGPL build)",                            "",      "https://ffmpeg.org" },
         { "glad (Multi-Language GL Loader-Generator)",      "",      "https://github.com/Dav1dde/glad" },
         { "GLFW",                                           "",      "https://www.glfw.org" },
         { "GNU gettext",                                    "",      "https://www.gnu.org/software/gettext" },
+        { "go2rtc",                                         "",      "https://github.com/AlexxIT/go2rtc" },
         { "ImGUI",                                          "",      "https://github.com/ocornut/imgui" },
         { "ImGuizmo",                                       "",      "https://github.com/CedricGuillemet/ImGuizmo" },
         { "Libigl",                                         "",      "https://libigl.github.io" },
+        { "LEMON",                                          "",      "https://lemon.cs.elte.hu" },
         { "libnest2d",                                      "",      "https://github.com/tamasmeszaros/libnest2d" },
         { "lib_fts",                                        "",      "https://www.forrestthewoods.com" },
         { "Mesa 3D",                                        "",      "https://mesa3d.org" },
@@ -109,6 +115,7 @@ void CopyrightsDialog::fill_entries()
         { "Nanosvg",                                        "",      "https://github.com/memononen/nanosvg" },
         { "nlohmann/json",                                  "",      "https://json.nlohmann.me" },
         { "Qhull",                                          "",      "http://qhull.org" },
+        { "QuadriFlow",                                     "",      "https://github.com/hjwdzh/QuadriFlow" },
         { "Open Cascade",                                   "",      "https://www.opencascade.com" },
         { "OpenGL",                                         "",      "https://www.opengl.org" },
         { "PoEdit",                                         "",      "https://poedit.net" },
