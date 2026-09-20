@@ -78,6 +78,7 @@ add_executable(${_TEST_NAME}_tests
     test_optimizers.cpp
     test_wipe_tower.cpp
     test_wipe_tower_estimate.cpp
+    test_wipe_path.cpp
     test_toolordering_cyclic.cpp
     # test_png_io.cpp
     test_indexed_triangle_set.cpp
