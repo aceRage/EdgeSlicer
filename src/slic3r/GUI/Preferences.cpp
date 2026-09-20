@@ -815,6 +815,54 @@ wxBoxSizer *PreferencesDialog::create_item_gcode_archive_max(wxWindow *parent, w
     return sizer;
 }
 
+// Tool panels on the 3D view (Move/Rotate/Scale, paint palettes, Text, ...): background
+// opacity, 30-100 %. Stored in AppConfig as "gizmo_panel_opacity" (0.3-1.0); read every
+// frame by GLGizmoBase::gizmo_panel_opacity(), so no restart is needed.
+wxBoxSizer *PreferencesDialog::create_item_gizmo_panel_opacity(wxWindow *parent, wxString tooltip)
+{
+    const std::string param = "gizmo_panel_opacity";
+    wxBoxSizer *sizer = new wxBoxSizer(wxHORIZONTAL);
+    auto        title = new wxStaticText(parent, wxID_ANY, _L("Gizmo panel opacity"));
+    title->SetForegroundColour(DESIGN_GRAY900_COLOR);
+    title->SetFont(::Label::Body_13);
+    title->SetToolTip(tooltip);
+    title->Wrap(-1);
+
+    float opacity = 1.0f;
+    try {
+        opacity = std::clamp(std::stof(app_config->get(param)), 0.3f, 1.0f);
+    } catch (...) {
+        opacity = 1.0f;
+    }
+
+    auto slider = new wxSlider(parent, wxID_ANY, int(opacity * 100.0f + 0.5f), 30, 100,
+                               wxDefaultPosition, FromDIP(wxSize(180, -1)), wxSL_HORIZONTAL);
+    slider->SetToolTip(tooltip);
+
+    auto value_label = new wxStaticText(parent, wxID_ANY, wxString::Format("%d%%", slider->GetValue()),
+                                        wxDefaultPosition, DESIGN_TITLE_SIZE, 0);
+    value_label->SetForegroundColour(DESIGN_GRAY900_COLOR);
+    value_label->SetFont(::Label::Body_13);
+    value_label->SetToolTip(tooltip);
+
+    sizer->Add(0, 0, 0, wxEXPAND | wxLEFT, 23);
+    sizer->Add(title, 0, wxALIGN_CENTER_VERTICAL | wxALL, 3);
+    sizer->Add(slider, 0, wxALIGN_CENTER_VERTICAL | wxLEFT | wxRIGHT, FromDIP(8));
+    sizer->Add(value_label, 0, wxALIGN_CENTER_VERTICAL | wxALL, 3);
+
+    slider->Bind(wxEVT_SLIDER, [this, param, slider, value_label](wxCommandEvent &e) {
+        const int percent = slider->GetValue();
+        value_label->SetLabel(wxString::Format("%d%%", percent));
+        app_config->set(param, wxString::Format("%.2f", percent / 100.0).ToStdString());
+        app_config->save();
+        if (wxGetApp().plater() != nullptr)
+            wxGetApp().plater()->get_current_canvas3D()->set_as_dirty();
+        e.Skip();
+    });
+
+    return sizer;
+}
+
 
 wxBoxSizer *PreferencesDialog::create_item_switch(wxString title, wxWindow *parent, wxString tooltip ,std::string param)
 {
@@ -1792,9 +1840,15 @@ void PreferencesDialog::create_gui_page()
     auto item_home_page      = create_item_checkbox(_L("Show home page on startup"), page, _L("Show home page on startup"), 50, "show_home_page");
     //auto item_daily_tip      = create_item_checkbox(_L("Show daily tip on startup"), page, _L("Show daily tip on startup"), 50, "show_daily_tips");
 
+    auto title_tool_panels = create_item_title(_L("3D view tool panels"), page, _L("3D view tool panels"));
+    auto item_panel_opacity = create_item_gizmo_panel_opacity(page,
+        _L("Background opacity of the tool panels on the 3D view. Lower values let you see the model behind a docked panel. Applies immediately."));
+
     sizer_page->Add(title_index_and_tip, 0, wxTOP, 26);
     sizer_page->Add(item_home_page, 0, wxTOP, 6);
     //sizer_page->Add(item_daily_tip, 0, wxTOP, 6);
+    sizer_page->Add(title_tool_panels, 0, wxTOP | wxEXPAND, FromDIP(20));
+    sizer_page->Add(item_panel_opacity, 0, wxTOP, 6);
 
     page->SetSizer(sizer_page);
     page->Layout();
