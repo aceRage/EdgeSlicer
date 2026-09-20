@@ -71,3 +71,15 @@ The wall of prime tower will fillet.
 ## No sparse layers
 
 If enabled, the wipe tower will not be printed on layers with no tool changes. On layers with a tool change, extruder will travel downward to print the wipe tower. User is responsible for ensuring there is no collision with the print.
+
+## Brim chamfer
+
+Enable gradual layer-by-layer reduction of the brim around the prime tower. This creates a chamfered/tapered effect, reducing material usage while maintaining first layer adhesion.
+
+## Brim chamfer max width
+
+Maximum width of the chamfer zone measured from the tower perimeter. The brim will reduce within this distance. Larger values create a more gradual taper but take more layers to complete.
+
+## Wall gap
+
+Create small gaps in the wipe tower outer wall at tool change entry points. The first extrusion path after a filament change will enter through the gap, leaving the filament blob on the gap edge instead of on the outer wall surface.
