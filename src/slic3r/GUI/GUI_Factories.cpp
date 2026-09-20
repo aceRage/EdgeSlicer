@@ -1045,6 +1045,21 @@ void MenuFactory::append_menu_item_export_stl(wxMenu* menu, bool is_mulity_menu)
         }, m_parent);
 }
 
+// Ultra: export the ONE selected part. The object menu's "Export as one STL" only ever
+// handled whole objects/instances, so a single selected ModelVolume had no export at all.
+// Enabled for exactly one volume - modifiers, negative volumes and support blockers or
+// enforcers included, they are all meshes the user may want out.
+void MenuFactory::append_menu_item_export_stl_part(wxMenu* menu)
+{
+    append_menu_item(menu, wxID_ANY, _L("Export part as STL") + dots,
+        _L("Export only the selected part as an STL file, positioned as it sits on the plate"),
+        [](wxCommandEvent&) { plater()->export_stl_part(); }, "", nullptr,
+        []() {
+            const Selection& selection = plater()->canvas3D()->get_selection();
+            return selection.is_single_volume_or_modifier();
+        }, m_parent);
+}
+
 void MenuFactory::append_menu_item_reload_from_disk(wxMenu* menu)
 {
     append_menu_item(menu, wxID_ANY, _L("Reload from disk"), _L("Reload the selected parts from disk"),
@@ -2074,6 +2089,7 @@ void MenuFactory::create_part_menu()
     append_menu_item_delete(menu);
     append_menu_item_reload_from_disk(menu);
     append_menu_item_export_stl(menu);
+    append_menu_item_export_stl_part(menu);
     append_menu_item_fix_through_netfabb(menu);
     append_menu_items_mirror(menu);
     // Ultra: per-part visibility inside assemblies
@@ -2112,6 +2128,7 @@ void MenuFactory::create_text_part_menu()
     append_menu_item_fix_through_netfabb(menu);
     append_menu_item_simplify(menu);
     append_menu_items_mirror(menu);
+    append_menu_item_export_stl_part(menu);
     menu->AppendSeparator();
     append_menu_item_per_object_settings(menu);
     append_menu_item_change_type(menu);
@@ -2126,6 +2143,7 @@ void MenuFactory::create_svg_part_menu()
     append_menu_item_fix_through_netfabb(menu);
     append_menu_item_simplify(menu);
     append_menu_items_mirror(menu);
+    append_menu_item_export_stl_part(menu);
     menu->AppendSeparator();
     append_menu_item_per_object_settings(menu);
     append_menu_item_change_type(menu);
@@ -2171,6 +2189,7 @@ void MenuFactory::create_bbl_part_menu()
     append_menu_item_change_type(menu);
     append_menu_item_reload_from_disk(menu);
     append_menu_item_replace_with_stl(menu);
+    append_menu_item_export_stl_part(menu);
 }
 
 void MenuFactory::create_bbl_assemble_part_menu()

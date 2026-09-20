@@ -21823,6 +21823,97 @@ void Plater::export_stl(bool extended, bool selection_only, bool multi_stls)
     Slic3r::store_stl(path_u8.c_str(), &mesh, true);
 }
 
+// Strip the characters no filesystem we ship on will take, so an object or part named
+// e.g. "bracket / v2" still produces a usable default filename.
+static std::string sanitize_stl_filename(const std::string &name)
+{
+    static const std::string invalid = "\\/:*?\"<>|\r\n\t";
+    std::string out;
+    out.reserve(name.size());
+    for (char c : name)
+        out += (invalid.find(c) != std::string::npos || (unsigned char) c < 0x20) ? '_' : c;
+    boost::trim(out);
+    if (out.empty())
+        out = "part";
+    return out;
+}
+
+// "Export part as STL": writes ONLY the selected ModelVolume, transformed into world
+// coordinates (instance matrix * volume matrix) by ModelObject::volume_mesh_in_world,
+// which also flips the winding for mirrored transforms. Binary STL, like the object path.
+// The object export offers STL only (FT_STL), so this offers STL only too.
+void Plater::export_stl_part()
+{
+    if (p->model.objects.empty())
+        return;
+
+    const Selection &selection = p->get_selection();
+    if (!selection.is_single_volume_or_modifier())
+        return;
+
+    const GLVolume *gl_volume = selection.get_first_volume();
+    if (gl_volume == nullptr)
+        return;
+
+    const int obj_idx = gl_volume->object_idx();
+    const int vol_idx = gl_volume->volume_idx();
+    if (obj_idx < 0 || obj_idx >= int(p->model.objects.size()))
+        return;
+
+    const ModelObject *model_object = p->model.objects[obj_idx];
+    if (vol_idx < 0 || vol_idx >= int(model_object->volumes.size()))
+        return;
+
+    const ModelVolume *model_volume = model_object->volumes[vol_idx];
+
+    // Default name "<object name> - <part name>.stl"; fall back to the other one when
+    // either is blank, so we never propose a filename starting or ending with " - ".
+    const std::string obj_name  = sanitize_stl_filename(model_object->name);
+    const std::string part_name = sanitize_stl_filename(model_volume->name);
+    std::string       stem      = (obj_name == "part") ? part_name :
+                                  (part_name == "part") ? obj_name :
+                                                          obj_name + " - " + part_name;
+
+    // Same last-directory logic as Plater::priv::get_export_file(FT_STL).
+    boost::filesystem::path output_file = p->get_export_file_path(FT_STL);
+    output_file.replace_extension("stl");
+    const std::string out_dir = output_file.parent_path().string();
+
+    wxFileDialog dlg(this, _L("Export STL file:"),
+        is_shapes_dir(out_dir) ? from_u8(wxGetApp().app_config->get_last_dir()) : from_path(output_file.parent_path()),
+        from_u8(stem + ".stl"),
+        file_wildcards(FT_STL), wxFD_SAVE | wxFD_OVERWRITE_PROMPT | wxPD_APP_MODAL);
+
+    if (dlg.ShowModal() != wxID_OK)
+        return;
+
+    wxString              out_path = dlg.GetPath();
+    boost::filesystem::path path(into_path(out_path));
+#ifdef __WXMSW__
+    if (!boost::iequals(path.extension().string(), ".stl")) {
+        out_path += ".stl";
+        boost::system::error_code ec;
+        if (boost::filesystem::exists(into_u8(out_path), ec)) {
+            auto result = MessageBox(this->GetHandle(),
+                wxString::Format(_L("The file %s already exists\nDo you want to replace it?"), out_path),
+                _L("Confirm Save As"), MB_YESNO | MB_ICONWARNING);
+            if (result != IDYES)
+                return;
+        }
+        path = into_path(out_path);
+    }
+#endif
+    wxGetApp().app_config->update_last_output_dir(path.parent_path().string());
+
+    wxBusyCursor wait;
+    const int    instance_idx = selection.get_instance_idx();
+    TriangleMesh mesh         = model_object->volume_mesh_in_world(instance_idx, vol_idx);
+    if (mesh.empty())
+        return;
+
+    Slic3r::store_stl(into_u8(out_path).c_str(), &mesh, true);
+}
+
 //BBS: remove amf export
 /*void Plater::export_amf()
 {

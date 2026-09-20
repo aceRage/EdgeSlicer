@@ -495,6 +495,11 @@ public:
     TriangleMesh raw_mesh() const;
     // The same as above, but producing a lightweight indexed_triangle_set.
     indexed_triangle_set raw_indexed_triangle_set() const;
+    // One single volume of this object, transformed into world coordinates by
+    // instance matrix * volume matrix. Mirroring transforms (negative determinant)
+    // have the triangle winding flipped, so the exported normals still point outwards.
+    // Used by the "Export part as STL" path; kept here (GUI-free) so it can be unit tested.
+    TriangleMesh volume_mesh_in_world(int instance_idx, int volume_idx) const;
     // A transformed snug bounding box around the non-modifier object volumes, without the translation applied.
     // This bounding box is only used for the actual slicing.
     const BoundingBoxf3& raw_bounding_box() const;
