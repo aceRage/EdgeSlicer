@@ -127,20 +127,17 @@ void GLGizmoFuzzySkin::on_render_input_window(float x, float y, float bottom_lim
     if (!m_c->selection_info()->model_object())
         return;
 
-    const float approx_height = m_imgui->scaled(22.f);
-    y = std::min(y, bottom_limit - approx_height);
-    //BBS: GUI refactor: move gizmo to the right
-#if BBS_TOOLBAR_ON_TOP
-    GizmoImguiSetNextWIndowPos(x, y, ImGuiCond_Always, 0.0f, 0.0f);
-#else
-    GizmoImguiSetNextWIndowPos(x, y, ImGuiCond_Always, 1.0f, 0.0f);
-#endif
-    //m_imgui->set_next_window_pos(x, y, ImGuiCond_Always);
+    dock_setup_next_window(x, y, bottom_limit, 0.f, /*size_to_content=*/true);
 
     // BBS
     ImGuiWrapper::push_toolbar_style(m_parent.get_scale());
 
-    GizmoImguiBegin(get_name(), ImGuiWindowFlags_NoMove | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoTitleBar);
+    GizmoImguiBegin(get_name(), dock_window_flags(ImGuiWindowFlags_NoMove | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoTitleBar));
+    if (!dock_render_titlebar(get_name())) {
+        GizmoImguiEnd();
+        ImGuiWrapper::pop_toolbar_style();
+        return;
+    }
 
     // First calculate width of all the texts that are could possibly be shown. We will decide set the dialog width based on that:
     const float space_size = m_imgui->get_style_scaling() * 8;

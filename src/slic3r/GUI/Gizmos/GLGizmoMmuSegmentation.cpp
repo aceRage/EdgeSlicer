@@ -430,15 +430,18 @@ void GLGizmoMmuSegmentation::on_render_input_window(float x, float y, float bott
 {
     if (!m_c->selection_info()->model_object()) return;
 
-    const float approx_height = m_imgui->scaled(22.0f);
-    y = std::min(y, bottom_limit - approx_height);
-    GizmoImguiSetNextWIndowPos(x, y, ImGuiCond_Always);
+    dock_setup_next_window(x, y, bottom_limit, 0.f, /*size_to_content=*/true);
 
     wchar_t old_tool = m_current_tool;
 
     // BBS
     ImGuiWrapper::push_toolbar_style(m_parent.get_scale());
-    GizmoImguiBegin(get_name(), ImGuiWindowFlags_NoMove | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoTitleBar);
+    GizmoImguiBegin(get_name(), dock_window_flags(ImGuiWindowFlags_NoMove | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoTitleBar));
+    if (!dock_render_titlebar(get_name())) {
+        GizmoImguiEnd();
+        ImGuiWrapper::pop_toolbar_style();
+        return;
+    }
 
     // First calculate width of all the texts that are could possibly be shown. We will decide set the dialog width based on that:
     const float space_size = m_imgui->get_style_scaling() * 8;
