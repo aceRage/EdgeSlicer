@@ -1687,6 +1687,8 @@ wxWindow* PreferencesDialog::create_ultra_page()
         _L("When off, imported models keep the Z position stored in the file instead of being dropped onto the build plate."), 50, "auto_drop_on_import");
     auto item_bottom_z = create_item_checkbox(_L("Bottom-referenced Z position"), page,
         _L("Show and edit the Move panel's Z as the height of the object's bottom above the bed (world coordinates), instead of the object center."), 50, "bottom_referenced_z");
+    auto item_hide_other_plates = create_item_checkbox(_L("Hide other plates while moving"), page,
+        _L("While the Move tool is open, show only the plate you are working on. The other plates and their objects come back when the Move tool closes, and a plate you drag onto reappears when you release."), 50, "hide_other_plates_on_move");
 
     auto title_presets = create_item_title(_L("Presets"), page, _L("Presets"));
     auto item_prefer_last_print = create_item_checkbox(_L("Prefer Last Used Print Profile"), page,
@@ -1747,6 +1749,7 @@ wxWindow* PreferencesDialog::create_ultra_page()
     sizer_page->Add(item_skip_mapping_warnings, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_auto_drop, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_bottom_z, 0, wxTOP, FromDIP(3));
+    sizer_page->Add(item_hide_other_plates, 0, wxTOP, FromDIP(3));
     sizer_page->Add(title_presets, 0, wxTOP | wxEXPAND, FromDIP(20));
     sizer_page->Add(item_prefer_last_print, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_auto_shadow, 0, wxTOP, FromDIP(3));

@@ -213,6 +213,7 @@ GLVolume::GLVolume(float r, float g, float b, float a)
     , printable(true)
     , visible(true)
     , is_active(true)
+    , plate_focus_hidden(false)
     , zoom_to_volumes(true)
     , shader_outside_printer_detection_enabled(false)
     , is_outside(false)
@@ -874,6 +875,10 @@ GLVolumeWithIdAndZList volumes_to_render(const GLVolumePtrs&                  vo
 
     for (unsigned int i = 0; i < (unsigned int) volumes.size(); ++i) {
         GLVolume* volume                = volumes[i];
+        // Ultra: "Hide other plates while moving" - a per-frame render filter, so it is applied
+        // here rather than by flipping is_active (which callers own and would not restore).
+        if (volume->plate_focus_hidden)
+            continue;
         bool      is_transparent        = volume->render_color.is_transparent();
         auto      tempGlwipeTowerVolume = dynamic_cast<GLWipeTowerVolume*>(volume);
         if (tempGlwipeTowerVolume) {

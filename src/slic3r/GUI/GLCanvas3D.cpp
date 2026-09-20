@@ -34,6 +34,7 @@
 #include "NotificationManager.hpp"
 #include "format.hpp"
 #include "DailyTips.hpp"
+#include "PlateFocusHide.hpp"
 
 #include "slic3r/GUI/Gizmos/GLGizmoPainterBase.hpp"
 #include "slic3r/Utils/UndoRedo.hpp"
@@ -1459,7 +1460,9 @@ void GLCanvas3D::sync_volume_raycasters_state()
         auto it = std::find_if(raycasters->begin(), raycasters->end(),
                                [vol](std::shared_ptr<SceneRaycasterItem> item) { return item->get_raycaster() == vol->mesh_raycaster.get(); });
         if (it != raycasters->end())
-            (*it)->set_active(vol->is_active);
+            // Ultra: a volume hidden by "Hide other plates while moving" must not be pickable
+            // either, or a click would reach an object through the empty space left behind.
+            (*it)->set_active(vol->is_active && !vol->plate_focus_hidden);
     }
 }
 
@@ -1576,6 +1579,105 @@ void GLCanvas3D::apply_object_view_modes()
     // Hidden flips is_active, so the picking raycasters have to follow it.
     sync_volume_raycasters_state();
     m_dirty = true;
+}
+
+bool GLCanvas3D::apply_plate_focus_hide()
+{
+    // Ultra: "Hide other plates while moving" (design section 3.2/3.4).
+    //
+    // Pure render state, recomputed from scratch every frame: nothing is written to the model,
+    // no printable flags are touched, the object list is untouched, and nothing lands on the undo
+    // stack. Because it is recomputed per frame, switching the active plate while the gizmo is
+    // open re-targets the hide by itself (3.6), and a drag that lands an object on another plate
+    // shows that plate on the very next frame after do_move() has run notify_instance_update() -
+    // mid-drag the hidden plates stay hidden, which is the accepted 3.1 limitation.
+    if (m_canvas_type != ECanvasType::CanvasView3D)
+        return false;
+    if (m_gizmos.get_current_type() != GLGizmosManager::Move)
+        return false;
+    if (wxGetApp().app_config == nullptr || !wxGetApp().app_config->get_bool("hide_other_plates_on_move"))
+        return false;
+    if (m_model == nullptr)
+        return false;
+
+    Plater *plater = wxGetApp().plater();
+    if (plater == nullptr)
+        return false;
+    PartPlateList &plate_list = plater->get_partplate_list();
+    const int plate_count = plate_list.get_plate_count();
+    if (plate_count <= 1)
+        return false;
+    const int current_plate = plate_list.get_curr_plate_index();
+
+    // Which (object, instance) pair does each plate own? Ask the plate itself rather than testing
+    // bounding boxes: an instance mid-drag can overlap a neighbouring plate's box while still
+    // belonging to its own plate.
+    auto owner_plate_of = [&plate_list, plate_count](int object_idx, int instance_idx) {
+        for (int i = 0; i < plate_count; ++i) {
+            PartPlate *plate = plate_list.get_plate(i);
+            if (plate != nullptr && plate->contain_instance(object_idx, instance_idx))
+                return i;
+        }
+        return -1;
+    };
+
+    // 3.4: a selection spanning more than one plate is never hidden - every plate holding a
+    // selected instance stays visible, not just the current one.
+    std::set<int> selected_plates;
+    for (unsigned int vol_idx : m_selection.get_volume_idxs()) {
+        const GLVolume *v = m_volumes.volumes[vol_idx];
+        if (v == nullptr || v->is_wipe_tower)
+            continue;
+        const int owner = owner_plate_of(v->object_idx(), v->instance_idx());
+        if (owner >= 0)
+            selected_plates.insert(owner);
+    }
+
+    // The flag is written for every volume, not just the hidden ones, so the previous frame's
+    // decision never lingers: clear_plate_focus_hide() below handles the gizmo-closed case, and
+    // here each volume is re-decided from scratch.
+    bool any_changed = false;
+    for (GLVolume *v : m_volumes.volumes) {
+        if (v == nullptr)
+            continue;
+        // The wipe tower carries a synthetic per-plate object id rather than a model object, so
+        // resolve its plate from that id instead of from the instance sets.
+        int owner = -1;
+        if (v->composite_id.object_id >= 1000 && v->composite_id.object_id < 1000 + plate_count)
+            owner = v->composite_id.object_id - 1000;
+        else
+            owner = owner_plate_of(v->object_idx(), v->instance_idx());
+        const bool hide = plate_focus_should_hide_instance(owner, current_plate, selected_plates);
+        if (v->plate_focus_hidden != hide) {
+            v->plate_focus_hidden = hide;
+            any_changed = true;
+        }
+    }
+
+    // Hidden volumes must stop being pickable too - otherwise a click into the empty space where
+    // a hidden plate used to be would still select the objects standing there.
+    if (any_changed)
+        sync_volume_raycasters_state();
+
+    // Published for _render_platelist so the beds/logos/names follow the same exemption rule.
+    m_plate_focus_visible_plates = plate_focus_exempt_plates(current_plate, selected_plates);
+    return true;
+}
+
+void GLCanvas3D::clear_plate_focus_hide()
+{
+    m_plate_focus_visible_plates.clear();
+    // Counterpart of apply_plate_focus_hide(): everything comes back the moment the Move gizmo
+    // closes, the option is switched off, or the view changes.
+    bool any_changed = false;
+    for (GLVolume *v : m_volumes.volumes) {
+        if (v != nullptr && v->plate_focus_hidden) {
+            v->plate_focus_hidden = false;
+            any_changed = true;
+        }
+    }
+    if (any_changed)
+        sync_volume_raycasters_state();
 }
 
 void GLCanvas3D::toggle_model_objects_visibility(bool visible, const ModelObject* mo, int instance_idx, const ModelVolume* mv)
@@ -2146,6 +2248,15 @@ void GLCanvas3D::render(bool only_init)
     else if (gizmo_type == GLGizmosManager::BrimEars && !camera.is_looking_downward())
         show_grid = false;
 
+    // Ultra: "Hide other plates while moving" (design option A). Recomputed from scratch every
+    // frame - it is render state only, so switching the active plate or finishing a drag onto
+    // another plate re-targets the hide on the next frame with no extra call sites. It ORs into
+    // the existing only_current trigger rather than replacing it.
+    if (apply_plate_focus_hide())
+        only_current = true;
+    else
+        clear_plate_focus_hide();
+
     /* view3D render*/
     int hover_id = (m_hover_plate_idxs.size() > 0)?m_hover_plate_idxs.front():-1;
     if (m_canvas_type == ECanvasType::CanvasView3D) {
@@ -2156,7 +2267,7 @@ void GLCanvas3D::render(bool only_init)
         if (!no_partplate)
             _render_bed(camera.get_view_matrix(), camera.get_projection_matrix(), !camera.is_looking_downward(), show_axes);
         if (!no_partplate) //BBS: add outline logic
-            _render_platelist(camera.get_view_matrix(), camera.get_projection_matrix(), !camera.is_looking_downward(), only_current, only_body, hover_id, true, show_grid);
+            _render_platelist(camera.get_view_matrix(), camera.get_projection_matrix(), !camera.is_looking_downward(), only_current, only_body, hover_id, true, show_grid, m_plate_focus_visible_plates);
         _render_objects(GLVolumeCollection::ERenderType::Transparent, !m_gizmos.is_running());
     }
     /* preview render */
@@ -7802,9 +7913,9 @@ void GLCanvas3D::_render_bed(const Transform3d& view_matrix, const Transform3d& 
     m_bed.render(*this, view_matrix, projection_matrix, bottom, scale_factor, show_axes);
 }
 
-void GLCanvas3D::_render_platelist(const Transform3d& view_matrix, const Transform3d& projection_matrix, bool bottom, bool only_current, bool only_body, int hover_id, bool render_cali, bool show_grid)
+void GLCanvas3D::_render_platelist(const Transform3d& view_matrix, const Transform3d& projection_matrix, bool bottom, bool only_current, bool only_body, int hover_id, bool render_cali, bool show_grid, const std::set<int>& visible_plates)
 {
-    wxGetApp().plater()->get_partplate_list().render(view_matrix, projection_matrix, bottom, only_current, only_body, hover_id, render_cali, show_grid);
+    wxGetApp().plater()->get_partplate_list().render(view_matrix, projection_matrix, bottom, only_current, only_body, hover_id, render_cali, show_grid, visible_plates);
 }
 
 void GLCanvas3D::_render_plane() const

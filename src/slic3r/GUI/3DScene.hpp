@@ -179,6 +179,10 @@ public:
 	    bool                visible : 1;
 	    // Whether or not this volume is active for rendering
 	    bool                is_active : 1;
+        // Ultra: hidden this frame by "Hide other plates while moving" - the volume sits on a
+        // plate other than the one being worked on. Purely a render-time flag, recomputed for
+        // every volume each frame (so it restores itself), never serialized, never undone.
+        bool                plate_focus_hidden : 1;
 	    // Whether or not to use this volume when applying zoom_to_volumes()
 	    bool                zoom_to_volumes : 1;
 	    // Wheter or not this volume is enabled for outside print volume detection in shader.

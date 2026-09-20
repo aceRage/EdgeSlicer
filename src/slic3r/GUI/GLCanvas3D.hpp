@@ -5,6 +5,7 @@
 #include <memory>
 #include <chrono>
 #include <cstdint>
+#include <set>
 
 #include "GLToolbar.hpp"
 #include "Event.hpp"
@@ -581,6 +582,8 @@ private:
     //BBS:add plate related logic
     mutable std::vector<int> m_hover_volume_idxs;
     std::vector<int> m_hover_plate_idxs;
+    // Ultra: this frame's "Hide other plates while moving" exemption set (render state only).
+    std::set<int> m_plate_focus_visible_plates;
     //BBS if explosion_ratio is changed, need to update volume bounding box
     mutable float m_explosion_ratio = 1.0;
     mutable Vec3d m_rotation_center{ 0.0, 0.0, 0.0};
@@ -778,6 +781,14 @@ public:
     bool has_object_view_modes() const { return !m_object_view_modes.empty(); }
     void clear_object_view_modes();
     void apply_object_view_modes();
+    // Ultra: "Hide other plates while moving". Recomputed from scratch every frame in render():
+    // it is pure render state, never stored on the model, never pushed onto the undo stack.
+    // Returns true when the plate list should draw only the plate being worked on.
+    bool apply_plate_focus_hide();
+    void clear_plate_focus_hide();
+    // Plates exempt from this frame's "Hide other plates while moving": the plate being worked
+    // on plus any plate holding part of the selection. Empty when the feature is not active.
+    const std::set<int>& get_plate_focus_visible_plates() const { return m_plate_focus_visible_plates; }
     ModelInstanceEPrintVolumeState check_volumes_outside_state() const;
     bool is_all_plates_selected() { return m_sel_plate_toolbar.m_all_plates_stats_item && m_sel_plate_toolbar.m_all_plates_stats_item->selected; }
     const float get_scale() const;
@@ -1230,7 +1241,7 @@ private:
     void _render_background();
     void _render_bed(const Transform3d& view_matrix, const Transform3d& projection_matrix, bool bottom, bool show_axes);
     //BBS: add part plate related logic
-    void _render_platelist(const Transform3d& view_matrix, const Transform3d& projection_matrix, bool bottom, bool only_current, bool only_body = false, int hover_id = -1, bool render_cali = false, bool show_grid = true);
+    void _render_platelist(const Transform3d& view_matrix, const Transform3d& projection_matrix, bool bottom, bool only_current, bool only_body = false, int hover_id = -1, bool render_cali = false, bool show_grid = true, const std::set<int>& visible_plates = std::set<int>());
     //BBS: add outline drawing logic
     void _render_objects(GLVolumeCollection::ERenderType type, bool with_outline = true);
     //BBS: GUI refactor: add canvas size as parameters
