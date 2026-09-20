@@ -626,6 +626,8 @@ MachineObject::MachineObject(NetworkAgent* agent, std::string name, std::string 
     mc_print_stage = 0;
     mc_print_error_code = 0;
     print_error = 0;
+    // The blob belongs to one error code; with the code gone there is nothing it could answer.
+    clear_command_error_action_json();
     mc_print_line_number = 0;
     mc_print_percent = 0;
     mc_print_sub_stage = 0;
@@ -1870,6 +1872,93 @@ int MachineObject::command_dont_remind_next_time(const nlohmann::json& action_js
     }
     BOOST_LOG_TRIVIAL(info) << "command_dont_remind_next_time: " << payload.dump();
     return this->publish_json(payload.dump(), 1);
+}
+
+std::string MachineObject::command_error_ignore_key(const std::string& dev_id, int print_error)
+{
+    // Same spelling as StatusPanel::error_ignore_key, deliberately: the two sets are different
+    // objects only because the windows are, and a key that drifted would make a code look
+    // dismissed on one path and not the other.
+    return dev_id + "/" + GUI::HMSQuery::print_error_code(print_error);
+}
+
+// The printer refused a command this slicer sent. Upstream's add_command_error_code_dlg, with the
+// fork's own resolvers underneath: the sentence comes from HMSQuery::describe_print_error (so this
+// window says what the Device tab and the hub say for the same code, never a bare number) and the
+// buttons from resolve_print_error_actions against the shipped hms_action_<devtype>.json.
+//
+// Everything happens on the GUI thread through CallAfter, because parse_json runs on the MQTT
+// thread and a wxWindow may not be made there. The weak token is what makes that safe: a
+// MachineObject destroyed between the reply and the callback (the printer went away, the user
+// switched devices) drops the token, and the callback returns without touching `this`.
+void MachineObject::add_command_error_code_dlg(int command_err, const nlohmann::json& action_json)
+{
+    if (command_err <= 0) return;
+
+    BOOST_LOG_TRIVIAL(error) << "add_command_error_code_dlg: dev " << dev_id << " refused a command, err_code "
+                             << GUI::HMSQuery::print_error_code(command_err)
+                             << (action_json.is_null() ? " (no action json)" : " (with action json)");
+
+    // Dismissed on this printer already in this session. The same refusal repeats for as long as
+    // the condition holds, so without this every retry stacks another window.
+    if (m_command_error_ignored.count(command_error_ignore_key(dev_id, command_err))) {
+        BOOST_LOG_TRIVIAL(info) << "add_command_error_code_dlg: " << GUI::HMSQuery::print_error_code(command_err)
+                                << " already dismissed for this printer, not showing it again";
+        return;
+    }
+
+    // Kept before the window exists, so the hub and the app can offer Proceed / Don't remind for
+    // this code whether or not anyone is looking at the desktop.
+    m_command_error_code        = command_err;
+    m_command_error_action_json = action_json;
+
+    GUI::wxGetApp().CallAfter([this, command_err, action_json, token = std::weak_ptr<int>(m_token)] {
+        if (token.expired()) return;
+
+        GUI::HMSQuery* q = GUI::wxGetApp().get_hms_query();
+        if (!q) return;
+
+        const std::string code = GUI::HMSQuery::print_error_code(command_err);
+
+        // The same resolver chain StatusPanel::update_error_message uses, so a command error and a
+        // status error with the same code draw the same dialog.
+        std::vector<int> table_actions;
+        const wxString   image_url = q->query_print_error_url_action(dev_id, command_err, table_actions);
+        bool             used_fallback = false;
+        const std::vector<int> used_button = GUI::resolve_print_error_actions(table_actions, used_fallback);
+        BOOST_LOG_TRIVIAL(info) << "command error " << code << ": table actions ["
+                                << GUI::format_action_ids(table_actions) << "] -> buttons ["
+                                << GUI::format_action_ids(used_button) << "]"
+                                << (used_fallback ? " (generic fallback)" : "");
+
+        // Parentless on purpose. Upstream parents this on its main frame, but MainFrame is only
+        // forward-declared here and DeviceManager.cpp must not start including it for one cast;
+        // PrintErrorDialog is a DPIFrame (a top-level window), so a null parent is well-formed and
+        // the window still shows, rescales and closes the same way. The status-push dialog keeps
+        // its StatusPanel parent, which is what makes it sit over the Device tab.
+        //
+        // Made once and re-dressed afterwards. update_title_style hides the previous refusal's
+        // buttons before laying out the new set, so a second refusal cannot leave the first one's
+        // buttons on screen.
+        if (!m_command_error_dlg)
+            m_command_error_dlg = new GUI::PrintErrorDialog(nullptr, wxID_ANY, _L("Error"));
+        GUI::PrintErrorDialog* dlg = m_command_error_dlg;
+
+        // A refused command has no job to resume, so no job_id is passed: the dialog greys the
+        // buttons that carry one rather than sending something firmware would drop.
+        dlg->set_error_context(this, command_err, std::string());
+        // ...and set_error_context clears any previous blob, so the new one goes on after it.
+        if (!action_json.is_null()) dlg->set_action_json(action_json);
+        dlg->set_suppress_handler([this, token = std::weak_ptr<int>(m_token)](int c) {
+            if (token.expired()) return;
+            BOOST_LOG_TRIVIAL(info) << "command error " << GUI::HMSQuery::print_error_code(c)
+                                    << " suppressed by the user for dev " << dev_id;
+            m_command_error_ignored.insert(command_error_ignore_key(dev_id, c));
+        });
+        dlg->update_title_style(_L("Error"), used_button, nullptr);
+        dlg->update_text_image(q->describe_print_error(dev_id, command_err), GUI::HMSQuery::pretty_code(code), image_url);
+        dlg->on_show();
+    });
 }
 
 int MachineObject::command_upgrade_confirm()
@@ -3454,6 +3543,27 @@ int MachineObject::parse_json(std::string payload, bool key_field_only)
                         }
                     }
                 }
+
+                // ---- a command the slicer sent came back refused ----
+                //
+                // Any reply on the "print" topic that carries our own sequence id together with an
+                // "err_code" is the printer saying no to something this slicer asked for, and
+                // until now the fork dropped it on the floor: the command simply appeared to do
+                // nothing. The dialog is the same PrintErrorDialog the status-push errors use, so
+                // the text and the button set come from the shipped hms_action tables either way.
+                //
+                // "err_index" is what makes the error answerable. When it is there the whole reply
+                // is the action_json blob - it names the command to re-send and the index to
+                // suppress - and Proceed / Don't remind next time are built from it. When it is
+                // absent the dialog still shows, with those two buttons greyed: there is nothing
+                // to build them from. Upstream passes an empty json in exactly that case.
+                if (!key_field_only) {
+                    int  command_err = 0;
+                    json action_json;
+                    if (GUI::parse_command_error_reply(jj, is_studio_cmd(sequence_id), command_err, action_json))
+                        add_command_error_code_dlg(command_err, action_json);
+                }
+
                 if (jj["command"].get<std::string>() == "push_status") {
                     m_push_count++;
                     last_push_time = last_update_time;
@@ -3490,8 +3600,16 @@ int MachineObject::parse_json(std::string payload, bool key_field_only)
                             mc_left_time = j["print"]["mc_remaining_time"].get<int>() * 60;
                     }
                     if (jj.contains("print_error")) {
-                        if (jj["print_error"].is_number())
+                        if (jj["print_error"].is_number()) {
                             print_error = jj["print_error"].get<int>();
+                            // A stored action_json answers exactly one error code. The status push
+                            // is where a code clears or is replaced, so this is where a blob that
+                            // no longer belongs to what the printer reports is dropped - otherwise
+                            // a "Proceed" composed for a refused command could be sent against the
+                            // unrelated fault that replaced it.
+                            if (m_command_error_code != 0 && m_command_error_code != print_error)
+                                clear_command_error_action_json();
+                        }
                     }
 
                     if (jj.contains("sdcard")) {
