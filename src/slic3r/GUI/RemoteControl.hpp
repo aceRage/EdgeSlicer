@@ -64,6 +64,10 @@ struct Prepared
     std::string err_code;           // the eight-hex code this action targets, as verified
     std::string err_arg;            // what the command carries: std::to_string(print_error)
     std::string job_id;             // the printer's job_id, for the commands that need one
+    // The blob ack_proceed / dont_remind build their payloads out of, copied off the printer while
+    // prepare() held the GUI thread, for the same reason err_code is: by the time run() publishes,
+    // the object may have been handed a blob for a different error. Null for every other verb.
+    nlohmann::json action_json;
     // Moonraker (a Snapmaker over the LAN, or any Moonraker print host): one POST.
     std::string url;                // http://<printer>/printer/print/{pause,resume,cancel}
     std::string moonraker_method;   // printer.print.pause | .resume | .cancel (the MQTT name)
@@ -87,11 +91,15 @@ void run(std::shared_ptr<Prepared> p, Sink sink);
 // GUI thread. What GET /api/printers adds for the control buttons of one Bambu printer:
 // can_pause / can_resume / can_stop, print_status, the current stage and the print error.
 //
-// print_error is {code, message, job_id, actions[]} while one is reported and null otherwise.
-// `actions` is the dialog's own button set for that code, resolved through the same
+// print_error is {code, message, job_id, has_details, actions[]} while one is reported and null
+// otherwise. `actions` is the dialog's own button set for that code, resolved through the same
 // hms_action table and the same resolver the desktop uses, each entry
-// {id, verb, label, needs_job_id, remote_safe} - so the hub page and the app draw what the
-// desktop would draw, and know which of them they are allowed to press.
+// {id, verb, label, needs_job_id, needs_details, remote_safe} - so the hub page and the app draw
+// what the desktop would draw, and know which of them they are allowed to press.
+//
+// `has_details` is true only while the printer's latest refused command left an action_json blob
+// for this very code; the two actions with needs_details=true are remote_safe only then, which is
+// the same rule needs_job_id follows.
 void describe_bambu(MachineObject* m, nlohmann::json& p);
 
 // GUI thread. The action ids the desktop's error dialog would draw for this printer and this

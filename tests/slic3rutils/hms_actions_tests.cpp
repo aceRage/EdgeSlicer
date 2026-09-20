@@ -328,3 +328,121 @@ TEST_CASE("Proceed and don't-remind build the ignore lists upstream sends", "[Hm
         REQUIRE_FALSE(build_dont_remind_next_time(json(), "77", out, why));
     }
 }
+
+TEST_CASE("A refused command is recognised from its reply, blob and all", "[HmsActions]")
+{
+    // The gap this closes: the printer answers a command it will not do on the "print" topic,
+    // carrying the sequence id the slicer sent and an err_code. The fork read that reply and did
+    // nothing with it, so a refused command was indistinguishable from a command that vanished -
+    // no dialog, no log line, and the two commands built from the reply's own blob unreachable.
+
+    int  err = 0;
+    json blob;
+
+    SECTION("with an err_index the whole reply is the blob")
+    {
+        // This is the answerable case: the printer named the error index its answer would
+        // suppress, so Proceed and Don't remind next time have something to be built from.
+        const json reply = json::parse(R"({"command": "resume", "err_code": 83935248, "err_index": 3,
+                                           "sequence_id": "20031"})");
+        REQUIRE(parse_command_error_reply(reply, true, err, blob));
+        REQUIRE(err == 83935248);
+        REQUIRE_FALSE(blob.is_null());
+        // Not a copy of some fields: the blob IS the reply, because build_ack_proceed re-sends it
+        // whole and any field the printer added has to survive.
+        REQUIRE(blob == reply);
+    }
+
+    SECTION("without an err_index the dialog still shows, but with no blob")
+    {
+        // The commoner half. There is an error to tell the person about and nothing to answer it
+        // with, so the blob is null and the two buttons that need one stay greyed.
+        const json reply = json::parse(R"({"command": "resume", "err_code": 83935248, "sequence_id": "20031"})");
+        REQUIRE(parse_command_error_reply(reply, true, err, blob));
+        REQUIRE(err == 83935248);
+        REQUIRE(blob.is_null());
+    }
+
+    SECTION("a reply to somebody else's command is not ours to report")
+    {
+        // The printer's own screen and other clients use sequence ids outside the slicer's range.
+        // Showing their refusals here would blame this user for something they did not do.
+        const json reply = json::parse(R"({"command": "resume", "err_code": 83935248, "err_index": 3})");
+        REQUIRE_FALSE(parse_command_error_reply(reply, false, err, blob));
+        REQUIRE(err == 0);
+        REQUIRE(blob.is_null());
+    }
+
+    SECTION("err_code 0 is the printer saying yes")
+    {
+        // Every accepted command answers too. A dialog on a success would be worse than the
+        // silence this replaces.
+        REQUIRE_FALSE(parse_command_error_reply(
+            json::parse(R"({"command": "resume", "err_code": 0, "sequence_id": "20031"})"), true, err, blob));
+        REQUIRE(err == 0);
+    }
+
+    SECTION("the replies that are not command answers at all")
+    {
+        // A status push has no err_code; a malformed one has a non-numeric one. Neither is a
+        // refusal, and neither may open a window.
+        REQUIRE_FALSE(parse_command_error_reply(json::parse(R"({"command": "push_status", "print_error": 83935248})"),
+                                                true, err, blob));
+        REQUIRE_FALSE(parse_command_error_reply(json::parse(R"({"command": "resume", "err_code": "83935248"})"),
+                                                true, err, blob));
+        REQUIRE_FALSE(parse_command_error_reply(json::parse(R"({"err_code": 83935248})"), true, err, blob));
+        REQUIRE_FALSE(parse_command_error_reply(json(), true, err, blob));
+    }
+}
+
+TEST_CASE("The captured blob builds the payloads the buttons send", "[HmsActions]")
+{
+    // End to end over the pure half: the reply the printer sent, through the parse, into the two
+    // builders. The point is that the blob handed to the builder is the reply itself - if the
+    // parse ever started copying out a subset, the re-sent command would lose whatever the
+    // printer put alongside err_index and the printer would refuse it again.
+    const json reply = json::parse(R"({"command": "resume", "err_code": 83935248, "err_index": 3,
+                                       "err_ignored": [1], "sequence_id": "20031"})");
+    int  err = 0;
+    json blob;
+    REQUIRE(parse_command_error_reply(reply, true, err, blob));
+
+    json        out;
+    std::string why;
+
+    SECTION("proceed re-sends the command named in the blob, with mode 0")
+    {
+        REQUIRE(build_ack_proceed(blob, "91", out, why));
+        REQUIRE(out["print"]["command"] == "resume");
+        REQUIRE(out["print"]["err_code"] == 0);
+        // The list the printer already had, grown by this error's index - not replaced.
+        REQUIRE(out["print"]["err_ignored"] == json::array({1, 3}));
+        REQUIRE(out["print"]["rm_idx"] == json::parse(R"([{"idx":1,"mode":0},{"idx":3,"mode":0}])"));
+        REQUIRE(out["print"]["sequence_id"] == "91");
+    }
+
+    SECTION("don't-remind sends the same list under mode 1")
+    {
+        REQUIRE(build_dont_remind_next_time(blob, "91", out, why));
+        REQUIRE(out["print"]["command"] == "resume");
+        REQUIRE(out["print"]["err_ignored"] == json::array({1, 3}));
+        REQUIRE(out["print"]["rm_idx"] == json::parse(R"([{"idx":1,"mode":1},{"idx":3,"mode":1}])"));
+        REQUIRE(out["print"]["sequence_id"] == "91");
+    }
+
+    SECTION("the reply that brought no blob builds neither")
+    {
+        // The other half of the parse, carried through to the consequence: a null blob is refused
+        // by both builders with a reason, rather than publishing a half-built payload.
+        json no_blob;
+        int  e = 0;
+        REQUIRE(parse_command_error_reply(
+            json::parse(R"({"command": "resume", "err_code": 83935248})"), true, e, no_blob));
+        REQUIRE(no_blob.is_null());
+
+        REQUIRE_FALSE(build_ack_proceed(no_blob, "91", out, why));
+        REQUIRE_FALSE(why.empty());
+        REQUIRE_FALSE(build_dont_remind_next_time(no_blob, "91", out, why));
+        REQUIRE_FALSE(why.empty());
+    }
+}

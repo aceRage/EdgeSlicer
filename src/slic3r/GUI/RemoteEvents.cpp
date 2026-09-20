@@ -94,6 +94,7 @@ json Event::to_json(long instance_pid) const
                             { "verb", a.verb },
                             { "label", a.label },
                             { "needs_job_id", a.needs_job_id },
+                            { "needs_details", a.needs_action_json },
                             { "remote_safe", a.remote_safe } });
         j["actions"] = arr;
         if (!job_id.empty()) j["job_id"] = job_id;
@@ -459,17 +460,19 @@ static std::string print_error_message(const std::string& dev_id, int code)
 // resolver and the remote-safe rule are all shared with the status JSON and the control route -
 // this only copies the result into the struct this header can carry.
 static std::vector<PrintErrorEventAction> print_error_event_actions(const std::string& dev_id, int print_error,
-                                                                    const std::string& job_id)
+                                                                    const std::string& job_id, bool has_action_json)
 {
     std::vector<PrintErrorEventAction> out;
     for (const PrintErrorRemoteAction& a :
-         describe_print_error_actions(RemoteControl::resolved_print_error_actions(dev_id, print_error), !job_id.empty())) {
+         describe_print_error_actions(RemoteControl::resolved_print_error_actions(dev_id, print_error), !job_id.empty(),
+                                      has_action_json)) {
         PrintErrorEventAction e;
-        e.id           = a.id;
-        e.verb         = a.verb;
-        e.label        = a.label;
-        e.needs_job_id = a.needs_job_id;
-        e.remote_safe  = a.remote_safe;
+        e.id                = a.id;
+        e.verb              = a.verb;
+        e.label             = a.label;
+        e.needs_job_id      = a.needs_job_id;
+        e.needs_action_json = a.needs_action_json;
+        e.remote_safe       = a.remote_safe;
         out.push_back(e);
     }
     return out;
@@ -517,7 +520,8 @@ static void snapshot_bambu(Snapshot& s)
             // that knows how, so a notification cannot offer a different set from the page the
             // tap-through lands on.
             p.job_id        = m->job_id_;
-            p.error_actions = print_error_event_actions(m->dev_id, m->print_error, m->job_id_);
+            p.error_actions = print_error_event_actions(m->dev_id, m->print_error, m->job_id_,
+                                                        m->has_remote_command_error_action_json());
         } else {
             // No print error: the worst thing HMS is reporting, if it is serious enough to be worth
             // a notification. HMS_COMMON and HMS_INFO are the printer's chatter and stay off.

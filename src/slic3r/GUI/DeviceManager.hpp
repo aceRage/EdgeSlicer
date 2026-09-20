@@ -3,6 +3,7 @@
 
 #include <map>
 #include <mutex>
+#include <set>
 #include <vector>
 #include <string>
 #include <memory>
@@ -60,6 +61,9 @@ namespace Slic3r {
 
 struct BBLocalMachine;
 class SecondaryCheckDialog;
+// The window MachineObject opens for a command the printer refused. Only the pointer is needed
+// here; ReleaseNote.hpp includes this header, so naming the type is all that can be done.
+namespace GUI { class PrintErrorDialog; }
 enum PrinterArch {
     ARCH_CORE_XY,
     ARCH_I3,
@@ -711,6 +715,67 @@ public:
     int     hw_switch_state;
     bool    is_system_printing();
     int     print_error;
+
+    // ---- the command-error path ----
+    //
+    // A printer that refuses a command the slicer sent answers on the "print" topic with the
+    // command's own sequence id plus an "err_code", and - when the error is one the person can
+    // answer - an "err_index" and the fields that name the command to re-send. That whole object
+    // is the "action_json" blob: PrintErrorCommands' build_ack_proceed / build_dont_remind_next_time
+    // are built out of it, and without it neither command exists to send.
+    //
+    // It is stored here rather than only handed to the dialog because the dialog is a desktop
+    // window and the hub and app need the same two buttons. Kept with the code it arrived with, so
+    // a blob can never be answered against a different error than the one that produced it.
+    //
+    // A command error's code is its own: the printer refusing a command does not have to be
+    // reporting it as `print_error` as well, and upstream's dialog tracks the two separately for
+    // exactly that reason. That is why the code is stored beside the blob rather than inferred.
+    int              m_command_error_code { 0 };      // the err_code the blob belongs to, 0 when none
+    nlohmann::json   m_command_error_action_json;      // null unless the reply carried an err_index
+
+    // The blob, whatever error it came for, for the desktop dialog that is showing that very code.
+    const nlohmann::json& get_command_error_action_json() const { return m_command_error_action_json; }
+    bool has_command_error_action_json() const { return !m_command_error_action_json.is_null(); }
+
+    // The blob as the REMOTE surfaces may use it: only when it belongs to the code the printer is
+    // reporting as print_error right now, because that is the code those surfaces draw buttons for
+    // and name in their requests. A refused command that left print_error alone is answerable at
+    // the desktop dialog it opened and nowhere else - the hub has no way to name it, and arming
+    // Proceed there would answer the wrong error.
+    bool has_remote_command_error_action_json() const
+    {
+        return has_command_error_action_json() && m_command_error_code != 0 &&
+               m_command_error_code == print_error;
+    }
+    // Drop a blob whose error is gone. Called wherever print_error is refreshed: a "Proceed" built
+    // for a refused command must never be answerable against whatever the printer reports next.
+    void clear_command_error_action_json()
+    {
+        m_command_error_code = 0;
+        m_command_error_action_json = nlohmann::json();
+    }
+
+    // The printer refused a command with `command_err`. Shows the error dialog for it (on the GUI
+    // thread, guarded by the object's weak token) and keeps `action_json` for the Proceed /
+    // Don't-remind buttons on every surface. Mirrors Bambu Studio's method of the same name.
+    void add_command_error_code_dlg(int command_err, const nlohmann::json& action_json = nlohmann::json());
+
+    // The window this printer's refused commands are shown in.
+    //
+    // Upstream keeps a set and makes a fresh window per refusal, relying on wxEVT_DESTROY to take
+    // each one back out. This fork's PrintErrorDialog::on_hide only hides the window - it is
+    // reused, never destroyed, which is why StatusPanel keeps a single m_print_error_dlg - so a
+    // set here would only ever grow. One window per printer, re-dressed for each refusal, matches
+    // how the Device tab's error dialog already behaves.
+    GUI::PrintErrorDialog*           m_command_error_dlg { nullptr };
+
+    // Codes the person has dismissed on this printer during this session, keyed "<dev_id>/<8hex>"
+    // exactly as StatusPanel keys its own set. A refused command that keeps being refused would
+    // otherwise reopen its window on every retry, which is the thing "don't remind me" is for.
+    std::set<std::string>            m_command_error_ignored;
+    static std::string command_error_ignore_key(const std::string& dev_id, int print_error);
+
     int     curr_layer = 0;
     int     total_layers = 0;
     bool    is_support_layer_num { false };

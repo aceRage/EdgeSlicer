@@ -149,11 +149,13 @@ const Row ROWS[] = {
     { PrintErrorAction::NO_REMINDER_NEXT_TIME,          "idle_ignore_error", "Don't remind me next time (the fault is not fixed)", true },
 
     // Proceed / Don't remind carry a JSON blob the printer handed out with the error (the command
-    // to re-send and the index to suppress). This fork never receives that blob - nothing calls
-    // PrintErrorDialog::set_action_json, so even the desktop button sends nothing - so the verbs
-    // exist and the route knows them, but they are not offered until a source for the blob does.
-    { PrintErrorAction::PROCEED,                        "ack_proceed",       "Proceed",                                  false },
-    { PrintErrorAction::DONT_REMIND_NEXT_TIME,          "dont_remind",       "Don't remind me (the fault is not fixed)", false },
+    // to re-send and the index to suppress). MachineObject::add_command_error_code_dlg stores that
+    // blob alongside the error it arrived with, so these are remote-safe in principle - but only
+    // while a blob is actually in hand. Every error that is not a refused-command reply has none,
+    // and describe_print_error_actions downgrades them there, the same way a missing job_id
+    // downgrades a resume.
+    { PrintErrorAction::PROCEED,                        "ack_proceed",       "Proceed",                                  true },
+    { PrintErrorAction::DONT_REMIND_NEXT_TIME,          "dont_remind",       "Don't remind me (the fault is not fixed)", true },
 
     // Acknowledge and close: the printer is told the dialog went away. OK_JUMP_RACK is upstream's
     // rack-page variant of the same acknowledge; this fork has no rack page, so it is the plain one.
@@ -196,18 +198,20 @@ struct VerbRow
 {
     const char* verb;
     bool        needs_job_id;
+    bool        needs_action_json;
     bool        remote_safe;
 };
 
 const VerbRow VERBS[] = {
-    { "resume_error",      true,  true },
-    { "stop_error",        true,  true },
-    { "ignore_error",      true,  true },
-    { "idle_ignore_error", false, true },
-    // Not remote-safe: no source for the action_json blob these need (see ROWS above).
-    { "ack_proceed",       false, false },
-    { "dont_remind",       false, false },
-    { "ack_close",         false, true },
+    { "resume_error",      true,  false, true },
+    { "stop_error",        true,  false, true },
+    { "ignore_error",      true,  false, true },
+    { "idle_ignore_error", false, false, true },
+    // Remote-safe as verbs, but only ever offered with the printer's blob in hand: their payloads
+    // are built out of it (see build_ack_proceed / build_dont_remind_next_time below).
+    { "ack_proceed",       false, true,  true },
+    { "dont_remind",       false, true,  true },
+    { "ack_close",         false, false, true },
 };
 
 const VerbRow* find_verb(const std::string& verb)
@@ -233,21 +237,29 @@ bool print_error_verb_needs_job_id(const std::string& verb)
     return v && v->needs_job_id;
 }
 
+bool print_error_verb_needs_action_json(const std::string& verb)
+{
+    const VerbRow* v = find_verb(verb);
+    return v && v->needs_action_json;
+}
+
 PrintErrorRemoteAction describe_print_error_action(int action_id)
 {
     PrintErrorRemoteAction out;
     out.id = action_id;
     const Row* r = find_row(action_id);
     if (!r) return out; // an id no dialog draws: no verb, no label, not safe
-    out.verb         = r->verb;
-    out.label        = r->label;
-    out.remote_safe  = r->remote_safe && r->verb[0] != '\0';
-    out.needs_job_id = print_error_verb_needs_job_id(out.verb);
+    out.verb              = r->verb;
+    out.label             = r->label;
+    out.remote_safe       = r->remote_safe && r->verb[0] != '\0';
+    out.needs_job_id      = print_error_verb_needs_job_id(out.verb);
+    out.needs_action_json = print_error_verb_needs_action_json(out.verb);
     return out;
 }
 
 std::vector<PrintErrorRemoteAction> describe_print_error_actions(const std::vector<int>& resolved_actions,
-                                                                 bool has_job_id)
+                                                                 bool has_job_id,
+                                                                 bool has_action_json)
 {
     std::vector<PrintErrorRemoteAction> out;
     out.reserve(resolved_actions.size());
@@ -259,6 +271,9 @@ std::vector<PrintErrorRemoteAction> describe_print_error_actions(const std::vect
         // A resume the printer has no job for would be dropped by firmware, so it is described and
         // not offered rather than offered and refused.
         if (a.needs_job_id && !has_job_id) a.remote_safe = false;
+        // The same for the two whose payload is built out of the printer's blob: with no blob
+        // there is no payload to build, so the button is shown greyed rather than armed.
+        if (a.needs_action_json && !has_action_json) a.remote_safe = false;
         out.push_back(a);
     }
     return out;
@@ -338,10 +353,19 @@ int check_print_error_action(const PrintErrorActionRequest& req, std::string& wh
               " has to name one - the printer would ignore it";
         return 409;
     }
+    // The blob guard, in the same shape as the job_id one. Only a refused-command reply carries an
+    // action_json; without it neither payload can be built at all, so the request is refused here
+    // rather than failing inside the builder with nothing to tell the person.
+    if (print_error_verb_needs_action_json(req.verb) && !req.has_action_json) {
+        why = named(req.printer_name) + " did not send the details \"" + req.verb +
+              "\" is built from with this error, so there is nothing to answer it with";
+        return 409;
+    }
     // And the verb has to be one this error actually offers. Without this a client could resume an
     // error whose only action is OK, which is the one thing the desktop dialog cannot do either.
     bool offered = false;
-    for (const PrintErrorRemoteAction& a : describe_print_error_actions(req.offered, !req.job_id.empty())) {
+    for (const PrintErrorRemoteAction& a : describe_print_error_actions(req.offered, !req.job_id.empty(),
+                                                                        req.has_action_json)) {
         if (a.remote_safe && a.verb == req.verb) { offered = true; break; }
     }
     if (!offered) {
@@ -349,6 +373,36 @@ int check_print_error_action(const PrintErrorActionRequest& req, std::string& wh
         return 409;
     }
     return 0;
+}
+
+// ---- the refused-command reply ----
+
+bool parse_command_error_reply(const json& print_block, bool is_studio_seq, int& err_code, json& action_json)
+{
+    err_code    = 0;
+    action_json = json();
+
+    // Not our command. A reply to somebody else's sequence id (the printer's own screen, another
+    // client) is none of this slicer's business, and popping a dialog for it would blame the user
+    // for something they did not do.
+    if (!is_studio_seq) return false;
+    if (!print_block.is_object()) return false;
+    // "command" is what identifies the reply as a command's answer at all; upstream reads this
+    // block only inside the jj.contains("command") branch.
+    if (!print_block.contains("command")) return false;
+    if (!print_block.contains("err_code") || !print_block["err_code"].is_number()) return false;
+
+    err_code = print_block["err_code"].get<int>();
+    // An err_code of 0 is the success answer - the command was accepted and there is nothing to
+    // show. Only a real code opens a dialog.
+    if (err_code <= 0) {
+        err_code = 0;
+        return false;
+    }
+    // The blob is the whole reply, and only exists when the printer said which error index the
+    // answer would suppress. Without it Proceed and Don't remind have no payload.
+    if (print_block.contains("err_index")) action_json = print_block;
+    return true;
 }
 
 // ---- payload builders ----

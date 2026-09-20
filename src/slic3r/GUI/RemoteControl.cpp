@@ -97,22 +97,28 @@ std::vector<int> resolved_print_error_actions(const std::string& dev_id, int pri
     return resolve_print_error_actions(table_actions, used_fallback);
 }
 
-// {code, message, job_id, actions[]} - the one shape the status JSON, the event payload and the
-// control route all agree on. `job_id` is named because an action that needs one is only offered
-// when the printer has one, and a client that wants to say why a button is off needs to see it.
+// {code, message, job_id, has_details, actions[]} - the one shape the status JSON, the event
+// payload and the control route all agree on. `job_id` is named because an action that needs one
+// is only offered when the printer has one, and a client that wants to say why a button is off
+// needs to see it; `has_details` is the same fact for the action_json blob behind Proceed and
+// Don't remind, which only a refused command supplies.
 static json print_error_json(MachineObject* m)
 {
+    const bool has_blob = m->has_remote_command_error_action_json();
+
     json e;
-    e["code"]    = error_code_text(m->print_error);
-    e["message"] = print_error_message(m->dev_id, m->print_error);
-    e["job_id"]  = m->job_id_;
+    e["code"]        = error_code_text(m->print_error);
+    e["message"]     = print_error_message(m->dev_id, m->print_error);
+    e["job_id"]      = m->job_id_;
+    e["has_details"] = has_blob;
     json actions = json::array();
     for (const PrintErrorRemoteAction& a : describe_print_error_actions(resolved_print_error_actions(m->dev_id, m->print_error),
-                                                                       !m->job_id_.empty())) {
+                                                                       !m->job_id_.empty(), has_blob)) {
         actions.push_back({ { "id", a.id },
                             { "verb", a.verb },
                             { "label", a.label },
                             { "needs_job_id", a.needs_job_id },
+                            { "needs_details", a.needs_action_json },
                             { "remote_safe", a.remote_safe } });
     }
     e["actions"] = actions;
@@ -398,6 +404,10 @@ static std::pair<int, std::string> prepare_error_action(const Request& req, std:
     c.current_err  = obj->print_error == 0 ? std::string() : error_code_text(obj->print_error);
     c.job_id       = obj->job_id_;
     c.printer_name = obj->dev_name;
+    // Only a refused command leaves a blob, and only for as long as its own code is the one being
+    // reported - so this is false for the ordinary status-push error, and the two verbs built from
+    // the blob are refused 409 there rather than reaching a builder with nothing to build from.
+    c.has_action_json = obj->has_remote_command_error_action_json();
     if (obj->print_error != 0) c.offered = resolved_print_error_actions(obj->dev_id, obj->print_error);
     std::string why;
     const int   status = check_print_error_action(c, why);
@@ -414,6 +424,7 @@ static std::pair<int, std::string> prepare_error_action(const Request& req, std:
     // The decimal spelling, which is what these commands carry - see PrintErrorCommands.hpp.
     p->err_arg            = std::to_string(obj->print_error);
     p->job_id             = obj->job_id_;
+    if (c.has_action_json) p->action_json = obj->get_command_error_action_json();
     p->call               = error_action_call(req.action);
     p->command            = req.action;
     p->status_before      = obj->print_status;
@@ -558,6 +569,15 @@ static void run_bambu(std::shared_ptr<Prepared> p, Sink& sink)
             else if (p->action == "ignore_error")      *rc = obj->command_hms_ignore(p->err_arg, p->job_id);
             else if (p->action == "idle_ignore_error") *rc = obj->command_hms_idle_ignore(p->err_arg, 0);
             else if (p->action == "ack_close")         *rc = obj->command_clean_print_error_uiop(obj->print_error);
+            // Both of these are built from the blob captured in prepare(), not from whatever the
+            // object holds now: between the two the printer may have been refused another command
+            // and replaced it. A blob that went away in the meantime is the same -2 case as a code
+            // that moved on, because answering with a stale one is exactly what must not happen.
+            else if (p->action == "ack_proceed" || p->action == "dont_remind") {
+                if (p->action_json.is_null() || !obj->has_remote_command_error_action_json()) { *rc = -2; return; }
+                *rc = p->action == "ack_proceed" ? obj->command_ack_proceed(p->action_json)
+                                                 : obj->command_dont_remind_next_time(p->action_json);
+            }
             else                                       *rc = -3; // no path here builds one of the rest
             return;
         }
@@ -568,6 +588,9 @@ static void run_bambu(std::shared_ptr<Prepared> p, Sink& sink)
     result["result_code"] = *rc;
     if (!ran) { sink.done(false, "the PC did not send the command in time", result); return; }
     if (*rc == -2) {
+        // Either the code moved on or, for the two verbs built from it, the printer's details for
+        // this error went with it - which only happens when the error itself is gone, since the
+        // blob is dropped the moment its code stops being the one reported.
         sink.done(false, p->printer_name + " is no longer reporting error " + HMSQuery::pretty_code(p->err_code) +
                              ", so nothing was sent", result);
         return;

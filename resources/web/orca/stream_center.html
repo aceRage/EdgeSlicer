@@ -3528,18 +3528,24 @@ body.dragging .cell iframe, body.dragging .cell img { pointer-events: none; }
     function errWhyNot(p, a) {
         if (a.needs_job_id && !(p.print_error && p.print_error.job_id))
             return 'The printer is not reporting a job for this error, so it would ignore this command.';
+        // Proceed and Don't remind are built out of the details a refused command sends with its
+        // error. An error that arrived any other way carries none, and then there is nothing to
+        // build the command from - which is a different reason from the hardware one below.
+        if (a.needs_details && !(p.print_error && p.print_error.has_details))
+            return 'The printer did not send the details this button is built from with this error, so there is nothing to answer it with.';
         return 'This has to be done at the printer: it moves or silences hardware whose state cannot be checked from here.';
     }
     // The ones that need a second tap: stopping throws the print away, and the ignore family
     // continues a print with the fault still present. Everything else acts on the first tap, as
     // the desktop's dialog does.
     function errNeedsAsk(verb) {
-        return verb === 'stop_error' || verb === 'ignore_error' || verb === 'idle_ignore_error';
+        return verb === 'stop_error' || verb === 'ignore_error' || verb === 'idle_ignore_error' ||
+               verb === 'dont_remind';
     }
     function errAskText(p, a) {
         if (a.verb === 'stop_error')
             return 'Stop the print on ' + p.name + '? It cannot be resumed: the printer throws the job away and the plate has to be started again.';
-        if (a.verb === 'idle_ignore_error')
+        if (a.verb === 'idle_ignore_error' || a.verb === 'dont_remind')
             return 'Stop reminding you about this error on ' + p.name + '? The print is not touched and the fault is not fixed - only the message goes away.';
         return 'Continue the print on ' + p.name + ' with this error unresolved? This does not fix anything: the printer carries on as it is, and whatever caused the error is still there.';
     }

@@ -155,6 +155,48 @@ TEST_CASE("The actions array carries the buttons a code's table asks for", "[Rem
         REQUIRE(idle->remote_safe);
     }
 
+    SECTION("without the printer's details, proceed and don't-remind are described, not offered")
+    {
+        // The same rule as the job_id one above, for the other thing a command can be missing.
+        // Only a refused command hands over an action_json; an error that arrived any other way
+        // has none, and the payloads for these two cannot be built without it.
+        bool                   fallback = false;
+        const std::vector<int> both     = resolve_print_error_actions({PrintErrorAction::PROCEED,
+                                                                       PrintErrorAction::DONT_REMIND_NEXT_TIME,
+                                                                       PrintErrorAction::OK_BUTTON},
+                                                                      fallback);
+        REQUIRE_FALSE(fallback);
+
+        // has_action_json defaults to false, which is what every caller that has no blob passes.
+        const std::vector<PrintErrorRemoteAction> without = describe_print_error_actions(both, true);
+        for (const char* v : { "ack_proceed", "dont_remind" }) {
+            INFO("verb " << v);
+            const PrintErrorRemoteAction* x = find_verb(without, v);
+            REQUIRE(x);
+            REQUIRE(x->needs_action_json);
+            REQUIRE_FALSE(x->remote_safe); // greyed with a reason, exactly like a jobless resume
+        }
+        // The button next to them, which needs nothing, stays pressable.
+        REQUIRE(find_verb(without, "ack_close"));
+        REQUIRE(find_verb(without, "ack_close")->remote_safe);
+
+        // And with the blob in hand both are armed.
+        const std::vector<PrintErrorRemoteAction> with = describe_print_error_actions(both, true, true);
+        for (const char* v : { "ack_proceed", "dont_remind" }) {
+            INFO("verb " << v);
+            const PrintErrorRemoteAction* x = find_verb(with, v);
+            REQUIRE(x);
+            REQUIRE(x->remote_safe);
+        }
+
+        // The blob does nothing for the actions that do not need it: a resume with no job is
+        // still refused, whatever details came with the error.
+        const std::vector<PrintErrorRemoteAction> resume_no_job =
+            describe_print_error_actions(actions_23_3(), false, true);
+        REQUIRE(find_verb(resume_no_job, "resume_error"));
+        REQUIRE_FALSE(find_verb(resume_no_job, "resume_error")->remote_safe);
+    }
+
     SECTION("the AMS family and its neighbours come across described and not remote-safe")
     {
         for (int id : { PrintErrorAction::FILAMENT_EXTRUDED,
@@ -212,15 +254,27 @@ TEST_CASE("The control route's verbs map to one command each", "[RemoteControl]"
         REQUIRE_FALSE(print_error_verb_needs_job_id("ack_close"));
     }
 
-    SECTION("proceed and don't-remind are known verbs but not offered")
+    SECTION("proceed and don't-remind are offerable verbs, gated on the printer's blob")
     {
-        // Both need the JSON blob the printer hands out with the error, and nothing in this fork
-        // ever receives one - set_action_json has no caller, so even the desktop button sends
-        // nothing. Offering them remotely would be a button that can only fail.
+        // CHANGED from "known verbs but not offered". When this was written nothing in the fork
+        // ever received the printer's action_json - set_action_json had no caller - so the two
+        // verbs were pinned unsafe at the verb level, which was the only honest answer available.
+        // MachineObject::add_command_error_code_dlg now stores that blob when a refused command
+        // brings one, so the ceiling moves: the verbs are remote-safe, and whether a given error
+        // may use them is decided per-error by describe_print_error_actions and
+        // check_print_error_action, exactly as needs_job_id already worked.
         REQUIRE(is_print_error_verb("ack_proceed"));
         REQUIRE(is_print_error_verb("dont_remind"));
-        REQUIRE_FALSE(is_remote_safe_verb("ack_proceed"));
-        REQUIRE_FALSE(is_remote_safe_verb("dont_remind"));
+        REQUIRE(is_remote_safe_verb("ack_proceed"));
+        REQUIRE(is_remote_safe_verb("dont_remind"));
+
+        // And they are the only two whose command is built from the blob.
+        REQUIRE(print_error_verb_needs_action_json("ack_proceed"));
+        REQUIRE(print_error_verb_needs_action_json("dont_remind"));
+        for (const char* v : { "resume_error", "stop_error", "ignore_error", "idle_ignore_error", "ack_close" }) {
+            INFO("verb " << v);
+            REQUIRE_FALSE(print_error_verb_needs_action_json(v));
+        }
     }
 
     SECTION("the generic controls are not error verbs, and nonsense is not either")
@@ -288,16 +342,50 @@ TEST_CASE("The control route refuses an error action that cannot be right", "[Re
         REQUIRE(check_print_error_action(ok, why) == 0);
     }
 
-    SECTION("a desktop-only verb is refused 403, separately from an unknown one")
+    SECTION("an unknown verb is refused 400, separately from every other refusal")
     {
-        // The distinction matters to a client: 403 means "this exists, go to the printer", 400
-        // means "you sent something that is not an action at all".
-        PrintErrorActionRequest r = req("ack_proceed");
-        REQUIRE(check_print_error_action(r, why) == 403);
-        REQUIRE(why.find("at the printer") != std::string::npos);
-
+        // CHANGED: this used ack_proceed as its 403 example, which it no longer is - that verb is
+        // now offerable and refused 409 when the printer sent no blob (the section below). The
+        // distinction the case was written for still holds: 400 means "you sent something that is
+        // not an action at all", and every other status means the verb exists.
         PrintErrorActionRequest bad = req("eject_the_filament");
         REQUIRE(check_print_error_action(bad, why) == 400);
+        REQUIRE(why.find("not a printer-error action") != std::string::npos);
+
+        // There is no desktop-only verb left to demonstrate 403 with: every id that has to be
+        // pressed at the printer (the AMS family, the drying stop, the buzzer, the purification
+        // switch) carries no verb at all, so it is refused as an unknown word. The 403 branch of
+        // check_print_error_action stays for the next verb that needs it.
+        for (int id : { PrintErrorAction::FILAMENT_EXTRUDED, PrintErrorAction::ABORT,
+                        PrintErrorAction::TURN_OFF_FIRE_ALARM }) {
+            INFO("action id " << id);
+            REQUIRE(describe_print_error_action(id).verb.empty());
+        }
+    }
+
+    SECTION("proceed is refused 409 when the error brought no details to answer it with")
+    {
+        // The new gate, and the one that keeps the two verbs honest. The error is current, the
+        // job is there, the table offers the button - but the printer sent no action_json, so
+        // there is no payload to build and the request is refused before a builder can fail.
+        bool                    fallback = false;
+        PrintErrorActionRequest r        = req("ack_proceed");
+        r.offered        = resolve_print_error_actions({PrintErrorAction::PROCEED}, fallback);
+        r.has_action_json = false;
+        REQUIRE(check_print_error_action(r, why) == 409);
+        REQUIRE(why.find("details") != std::string::npos);
+
+        // With the blob in hand the very same request goes through.
+        r.has_action_json = true;
+        REQUIRE(check_print_error_action(r, why) == 0);
+
+        // And so does don't-remind, which is gated on the same thing.
+        PrintErrorActionRequest d = req("dont_remind");
+        d.offered                 = resolve_print_error_actions({PrintErrorAction::DONT_REMIND_NEXT_TIME}, fallback);
+        d.has_action_json         = false;
+        REQUIRE(check_print_error_action(d, why) == 409);
+        d.has_action_json = true;
+        REQUIRE(check_print_error_action(d, why) == 0);
     }
 
     SECTION("a verb this error does not offer is refused")

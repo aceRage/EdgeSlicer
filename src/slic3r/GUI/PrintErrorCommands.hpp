@@ -111,6 +111,11 @@ struct PrintErrorRemoteAction
     std::string verb;          // the control route's action word, "" when the id has no remote verb
     std::string label;         // what the button says
     bool        needs_job_id { false };
+    // True when the command behind the verb is built out of the JSON blob the printer hands out
+    // with a command error (ack_proceed / dont_remind). Like needs_job_id this is a property of
+    // the verb and a reason the action may be described but not offered: with no blob there is
+    // nothing to build the payload from, so pressing it could only fail.
+    bool        needs_action_json { false };
     bool        remote_safe { false };
 };
 
@@ -124,20 +129,30 @@ struct PrintErrorRemoteAction
 //   dont_remind       command_dont_remind_next_time  the next-time-ignore list
 //   ack_close         command_clean_print_error_uiop the dismiss-without-acting ack
 //
-// ack_proceed and dont_remind are known verbs but not remote-safe: both need the JSON blob the
-// printer hands out with the error, and nothing in this fork ever receives one (set_action_json
-// has no caller), so sending them could only fail.
+// ack_proceed and dont_remind are remote-safe only while the printer's blob is in hand. Neither
+// command can be built without it - it names the command to re-send and the index to suppress -
+// so an error that arrived without one (every error that is not a refused-command reply) carries
+// those two described and greyed, exactly the way a missing job_id greys a resume.
 //
 // A verb not in this list is not an error action; the route answers 400 for it.
 bool is_print_error_verb(const std::string& verb);
 
-// True when the verb is one the hub and app may send. Kept separate from is_print_error_verb so
-// the route can tell "not a verb at all" (400) from "a verb, deliberately desktop-only" (403).
+// True when the verb is one the hub and app may send at all. Kept separate from
+// is_print_error_verb so the route can tell "not a verb at all" (400) from "a verb, deliberately
+// desktop-only" (403).
+//
+// This is the verb's own ceiling and says nothing about the printer's current state: a verb that
+// needs a job_id or an action_json is still remote-safe here, and it is describe_print_error_actions
+// and check_print_error_action that refuse it when what it needs is missing.
 bool is_remote_safe_verb(const std::string& verb);
 
 // Whether the verb's command needs the printer's job_id. The route refuses without one rather
 // than sending a command firmware will drop.
 bool print_error_verb_needs_job_id(const std::string& verb);
+
+// Whether the verb's command is built from the error's action_json blob (ack_proceed,
+// dont_remind). The route refuses without one rather than sending a payload it cannot build.
+bool print_error_verb_needs_action_json(const std::string& verb);
 
 // One action id described for the wire. An id with no remote meaning at all (CHECK_ASSISTANT,
 // JUMP_TO_LIVEVIEW, LOAD_VIRTUAL_TRAY, REMOVE_CLOSE_BTN, CANCEL_ACTION) gets an empty verb and
@@ -146,11 +161,16 @@ PrintErrorRemoteAction describe_print_error_action(int action_id);
 
 // The whole button set of one error, as the status JSON and the event payload carry it: the ids
 // resolve_print_error_actions kept, minus the ones with no verb at all, each with its verb, label,
-// needs_job_id and remote_safe. `has_job_id` says whether the printer is currently reporting one -
-// an action that needs a job_id while the printer has none comes across remote_safe=false, because
-// pressing it could only fail.
+// needs_job_id, needs_action_json and remote_safe.
+//
+// The two booleans say what the printer is holding right now, and each downgrades the actions that
+// depend on it. `has_job_id` - an action that needs a job_id while the printer reports none comes
+// across remote_safe=false, because firmware would drop the command. `has_action_json` - the same
+// rule for the blob behind ack_proceed / dont_remind, which only a refused-command reply supplies;
+// it defaults to false so every caller that has no blob keeps the old, safe answer.
 std::vector<PrintErrorRemoteAction> describe_print_error_actions(const std::vector<int>& resolved_actions,
-                                                                 bool has_job_id);
+                                                                 bool has_job_id,
+                                                                 bool has_action_json = false);
 
 // ---- the control route's guards, as one pure decision ----
 //
@@ -164,7 +184,8 @@ std::vector<PrintErrorRemoteAction> describe_print_error_actions(const std::vect
 // Returns 0 when the action may go out, or the HTTP status the route should answer with:
 //   400 - not a verb, or an empty err, or a stop without confirm
 //   403 - a real verb this phase keeps at the printer (the AMS controls and their neighbours)
-//   409 - the error cleared, the code moved on, no job_id, or this error does not offer this verb
+//   409 - the error cleared, the code moved on, no job_id, no action_json for a verb that needs
+//         one, or this error does not offer this verb
 // `why` is the sentence the person reads; it names both codes when they differ, because "try
 // again" is useless advice without knowing what changed.
 struct PrintErrorActionRequest
@@ -176,12 +197,35 @@ struct PrintErrorActionRequest
     std::string job_id;       // the printer's job right now, "" when none
     std::string printer_name; // for the sentence
     std::vector<int> offered;  // resolve_print_error_actions' output for current_err
+    // Whether the printer's latest command error handed over an action_json blob, which is what
+    // ack_proceed and dont_remind are built from. False for every error that is not a refused
+    // command, which is the ordinary case.
+    bool        has_action_json { false };
 };
 int check_print_error_action(const PrintErrorActionRequest& req, std::string& why);
 
 // "0C00402D" from "0c00 402d" - upper-cased, spaces removed. What the check compares, exposed
 // because the caller logs the normalised form.
 std::string normalize_error_code(const std::string& code);
+
+// ---- the refused-command reply ----
+//
+// A printer that will not do what the slicer asked answers on the "print" topic with the command's
+// own sequence id and an "err_code". That reply is what opens the command-error dialog, and when
+// it also carries an "err_index" the whole object is the action_json blob Proceed and Don't remind
+// are built from.
+//
+// Pulled out of MachineObject::parse_json as a pure function for the usual reason: the interesting
+// part is which replies count and what comes out of them, and that is decided by the JSON alone -
+// no printer, no broker, no window. `is_studio_seq` is the caller's own is_studio_cmd verdict on
+// the reply's sequence id, because the range that makes a sequence id ours is the MachineObject's.
+//
+// Returns false when this reply is not a refused command. Otherwise `err_code` is the code it
+// names, and `action_json` is the whole reply when it carried an err_index and null when it did
+// not - null being the case where the dialog shows with Proceed and Don't remind greyed, since
+// there is nothing to build them from.
+bool parse_command_error_reply(const nlohmann::json& print_block, bool is_studio_seq,
+                               int& err_code, nlohmann::json& action_json);
 
 // ---- payload builders ----
 //

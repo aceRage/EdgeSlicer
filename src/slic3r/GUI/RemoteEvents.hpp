@@ -36,6 +36,9 @@ struct PrintErrorEventAction
     int         id { 0 };
     std::string verb, label;
     bool        needs_job_id { false };
+    // The action's payload is built from the blob a refused command brought with it; without one
+    // the action is described and greyed, the same way a resume is when there is no job_id.
+    bool        needs_action_json { false };
     bool        remote_safe { false };
 };
 
