@@ -650,6 +650,14 @@ MachineObject::MachineObject(NetworkAgent* agent, std::string name, std::string 
 
 MachineObject::~MachineObject()
 {
+    // The command-error window holds `this` as its printer (set_error_context); upstream deletes its
+    // dialogs here for the same reason. Destroy() hides now and frees at idle, so a click can no
+    // longer reach a dead MachineObject.
+    if (m_command_error_dlg) {
+        m_command_error_dlg->Destroy();
+        m_command_error_dlg = nullptr;
+    }
+
     if (subtask_) {
         delete subtask_;
         subtask_ = nullptr;
