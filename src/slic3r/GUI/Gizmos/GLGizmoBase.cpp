@@ -342,7 +342,23 @@ bool GLGizmoBase::update_items_state()
 
 bool GLGizmoBase::GizmoImguiBegin(const std::string &name, int flags)
 {
+    m_imgui->set_next_window_bg_alpha(gizmo_panel_opacity());
     return m_imgui->begin(name, flags);
+}
+
+float GLGizmoBase::gizmo_panel_opacity()
+{
+    AppConfig *cfg = wxGetApp().app_config;
+    if (cfg == nullptr)
+        return 1.f;
+    const std::string v = cfg->get("gizmo_panel_opacity");
+    if (v.empty())
+        return 1.f;
+    try {
+        return std::clamp(std::stof(v), 0.3f, 1.f);
+    } catch (...) {
+        return 1.f;
+    }
 }
 
 void GLGizmoBase::GizmoImguiEnd()
@@ -455,16 +471,21 @@ int GLGizmoBase::dock_window_flags(int flags) const
 
     // A docked panel is pinned to an exact rect, so whatever the panel asked for
     // in the way of auto-sizing has to go, and it needs a vertical scrollbar for
-    // the case where its contents are taller than the view.
-    flags &= ~(ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoScrollbar);
+    // the case where its contents are taller than the view. A size-to-content
+    // panel instead keeps AlwaysAutoResize: it only takes the height its
+    // contents need, anchored at the top of the dock zone.
+    flags &= ~ImGuiWindowFlags_NoScrollbar;
+    if (!m_dock_size_to_content)
+        flags &= ~ImGuiWindowFlags_AlwaysAutoResize;
     flags |= ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse |
              ImGuiWindowFlags_NoTitleBar;
     return flags;
 }
 
-void GLGizmoBase::dock_setup_next_window(float &x, float &y, float bottom_limit, float window_width)
+void GLGizmoBase::dock_setup_next_window(float &x, float &y, float bottom_limit, float window_width, bool size_to_content)
 {
     load_dock_state();
+    m_dock_size_to_content = size_to_content;
 
     if (!m_docked) {
         // Unchanged behaviour: the panel opens under its toolbar icon. A panel
@@ -480,6 +501,19 @@ void GLGizmoBase::dock_setup_next_window(float &x, float &y, float bottom_limit,
         } else {
             GizmoImguiSetNextWIndowPos(x, y, ImGuiCond_Always, 0.0f, 0.0f);
         }
+        return;
+    }
+
+    if (size_to_content) {
+        // Small panel: keep AlwaysAutoResize (dock_window_flags() keeps the flag
+        // when m_dock_size_to_content is set) and anchor the window's right edge
+        // to the canvas right edge at the top of the dock zone. Collapsed, the
+        // window is just the title row and auto-resize shrinks to it by itself.
+        const Size  cnv_size   = m_parent.get_canvas_size();
+        const float collapse_h = m_parent.is_collapse_toolbar_on_left() ? 0.f
+                                                                        : m_parent.get_collapse_toolbar_height();
+        const float top = std::max(y, collapse_h + m_imgui->scaled(0.3f));
+        m_imgui->set_next_window_pos((float) cnv_size.get_width(), top, ImGuiCond_Always, 1.0f, 0.0f);
         return;
     }
 

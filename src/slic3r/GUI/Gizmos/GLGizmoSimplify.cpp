@@ -233,9 +233,16 @@ void GLGizmoSimplify::on_render_input_window(float x, float y, float bottom_limi
     float slider_width = m_imgui->scaled(5.0f);
 
     m_imgui->push_common_window_style(m_parent.get_scale());
-    int flag = ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoResize |
-               ImGuiWindowFlags_NoCollapse;
+    dock_setup_next_window(x, y, bottom_limit, 0.f, /*size_to_content=*/true);
+    m_imgui->set_next_window_bg_alpha(GLGizmoBase::gizmo_panel_opacity());
+    int flag = dock_window_flags(ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoResize |
+               ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoMove);
     m_imgui->begin(on_get_name(), flag);
+    if (!dock_render_titlebar(on_get_name())) {
+        m_imgui->end();
+        m_imgui->pop_common_window_style();
+        return;
+    }
 
     m_imgui->text(tr_mesh_name + ":");
     // BBS: somehow the calculated utf8 width is too narrow, have to add 35 here

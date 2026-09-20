@@ -634,15 +634,20 @@ void GLGizmoBrimEars::on_render_input_window(float x, float y, float bottom_limi
     const DynamicPrintConfig& obj_cfg = mo->config.get();
     const DynamicPrintConfig& glb_cfg = wxGetApp().preset_bundle->prints.get_edited_preset().config;
     const float win_h = ImGui::GetWindowHeight();
-    y                 = std::min(y, bottom_limit - win_h);
-    GizmoImguiSetNextWIndowPos(x, y, ImGuiCond_Always, 0.0f, 0.0f);
+    dock_setup_next_window(x, y, bottom_limit, 0.f, /*size_to_content=*/true);
 
     const float currt_scale = m_parent.get_scale();
     ImGuiWrapper::push_toolbar_style(currt_scale);
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(4.0 * currt_scale, 5.0 * currt_scale));
     ImGui::PushStyleVar(ImGuiStyleVar_ScrollbarSize, 4.0f * currt_scale);
     GizmoImguiBegin(get_name(),
-                    ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoTitleBar);
+                    dock_window_flags(ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoTitleBar));
+    if (!dock_render_titlebar(get_name())) {
+        GizmoImguiEnd();
+        ImGui::PopStyleVar(2);
+        ImGuiWrapper::pop_toolbar_style();
+        return;
+    }
 
     float                 space_size      = m_imgui->get_style_scaling() * 8;
     std::vector<wxString> text_list       = {m_desc["head_diameter"], m_desc["max_angle"], m_desc["detection_radius"], m_desc["clipping_of_view"]};

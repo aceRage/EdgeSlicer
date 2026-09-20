@@ -190,15 +190,18 @@ CommonGizmosDataID GLGizmoMeshBoolean::on_get_requirements() const
 
 void GLGizmoMeshBoolean::on_render_input_window(float x, float y, float bottom_limit)
 {
-    y = std::min(y, bottom_limit - ImGui::GetWindowHeight());
-
     static float last_y = 0.0f;
     static float last_w = 0.0f;
 
     const float currt_scale = m_parent.get_scale();
     ImGuiWrapper::push_toolbar_style(currt_scale);
-    GizmoImguiSetNextWIndowPos(x, y, ImGuiCond_Always, 0.0f, 0.0f);
-    GizmoImguiBegin("MeshBoolean", ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoTitleBar);
+    dock_setup_next_window(x, y, bottom_limit, 0.f, /*size_to_content=*/true);
+    GizmoImguiBegin("MeshBoolean", dock_window_flags(ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoTitleBar));
+    if (!dock_render_titlebar("MeshBoolean")) {
+        GizmoImguiEnd();
+        ImGuiWrapper::pop_toolbar_style();
+        return;
+    }
 
     const int max_tab_length = 2 * ImGui::GetStyle().FramePadding.x + std::max(ImGui::CalcTextSize(_u8L("Union").c_str()).x,
         std::max(ImGui::CalcTextSize(_u8L("Difference").c_str()).x, ImGui::CalcTextSize(_u8L("Intersection").c_str()).x));
