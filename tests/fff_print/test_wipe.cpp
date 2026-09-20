@@ -284,8 +284,14 @@ TEST_CASE("Changing inward wipe settings preserves the sliced geometry", "[Wipe]
 
 TEST_CASE("Retraction and pressure advance calibration suppress inward wipe overrides", "[Wipe][Regression]")
 {
+    // Upstream tests Calib_Auto_PA_Line here (upstream value 4), which draws PA lines
+    // on top of the printed object. Edge has no Auto_PA_Line: its legacy Calib_PA_Line
+    // calibration REPLACES the print with the pure test pattern (writer-direct output
+    // in calib.cpp, no object extrusions, no wipe moves), so there is nothing to
+    // suppress and REQUIRE_FALSE(empty) cannot hold. Calib_PA_Tower and
+    // Calib_Retraction_tower do print the object and cover the suppression path.
     const auto mode = GENERATE(CalibMode::Calib_None, CalibMode::Calib_PA_Tower,
-                              CalibMode::Calib_PA_Line, CalibMode::Calib_Retraction_tower,
+                              CalibMode::Calib_Retraction_tower,
                               CalibMode::Calib_Flow_Rate);
     const char *wall_generator = GENERATE("classic", "arachne");
     const bool per_object = GENERATE(false, true);
