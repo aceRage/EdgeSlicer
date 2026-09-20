@@ -1439,6 +1439,10 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionInt,                 enable_long_retraction_when_cut))
     ((ConfigOptionFloats,              retraction_distances_when_cut))
     ((ConfigOptionBools,               long_retractions_when_cut))
+    // BBS: per-filament long retraction on extruder change (dual-nozzle machines, e.g. H2D).
+    // Nullable, mirroring BambuStudio PrintConfig.hpp so an absent value stays nil rather than 0.
+    ((ConfigOptionFloatsNullable,      retraction_distances_when_ec))
+    ((ConfigOptionBoolsNullable,       long_retractions_when_ec))
     ((ConfigOptionFloats,              z_hop))
     // BBS
     ((ConfigOptionBools,               z_hop_when_prime))

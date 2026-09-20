@@ -4404,6 +4404,10 @@ void TabFilament::build()
         optgroup->append_single_option_line("filament_multitool_ramming");
         optgroup->append_single_option_line("filament_multitool_ramming_volume");
         optgroup->append_single_option_line("filament_multitool_ramming_flow");
+        // BBS: extruder-change long retraction (dual-nozzle machines such as H2D). Upstream shows these
+        // on its own "Multi Filament" page; this group is the fork's nearest equivalent.
+        optgroup->append_single_option_line("long_retractions_when_ec", "", 0);
+        optgroup->append_single_option_line("retraction_distances_when_ec", "", 0);
 
     page = add_options_page(L("Dependencies"), "advanced");
         optgroup = page->new_optgroup(L("Compatible printers"), "param_dependencies_printers");
