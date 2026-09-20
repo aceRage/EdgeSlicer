@@ -239,7 +239,12 @@ static bool store_wipe_path(Polyline &destination, Point seam_start,
     stored_path.points.reserve(actual_path.points.size());
     stored_path.points.push_back(seam_start);
     stored_path.points.insert(stored_path.points.end(), actual_path.points.begin() + 1, actual_path.points.end());
-    stored_path.reset_to_linear_move();
+    // Edge has no public reset_to_linear_move() (Polyline keeps it private for
+    // the BBS arc-fitting state); fitting_result itself is public, so reset the
+    // same way: one linear-move span covering the whole path.
+    stored_path.fitting_result.clear();
+    stored_path.fitting_result.emplace_back(PathFittingData{ 0, stored_path.points.size() - 1, EMovePathType::Linear_move, ArcSegment() });
+    stored_path.fitting_result.shrink_to_fit();
     destination = std::move(stored_path);
     return true;
 }

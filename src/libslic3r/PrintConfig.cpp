@@ -6012,7 +6012,7 @@ void PrintConfigDef::init_fff_params()
                      "Uses the regular wipe if no adjacent inner wall is already printed (single-wall areas or "
                      "Outer/Inner wall order), or if no supported inward path can be found, for example at tight "
                      "corners or seam gaps.");
-    def->mode = comExpert;
+    def->mode = comAdvanced;   // upstream uses comExpert; this fork has no such tier
     def->set_default_value(new ConfigOptionBool(false));
 
     def = this->add("wipe_inward_distance", coFloatOrPercent);
@@ -6029,7 +6029,7 @@ void PrintConfigDef::init_fff_params()
     def->min = 0;
     def->max = 100;
     def->max_literal = 2; // Orca: G-code generation also clamps literal values to the actual outer-wall width.
-    def->mode = comExpert;
+    def->mode = comAdvanced;   // upstream uses comExpert; this fork has no such tier
     def->set_default_value(new ConfigOptionFloatOrPercent(50, true));
 
     def = this->add("wipe_before_external_loop", coBool);
