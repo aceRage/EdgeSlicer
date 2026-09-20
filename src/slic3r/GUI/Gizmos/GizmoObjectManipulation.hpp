@@ -9,6 +9,7 @@
 
 #include "slic3r/GUI/GUI_Geometry.hpp"
 #include "slic3r/GUI/Gizmos/GLGizmoAlignment.hpp"
+#include "slic3r/GUI/Gizmos/GLGizmoBase.hpp"
 
 //#include "slic3r/GUI/GLCanvas3D.hpp"
 
@@ -156,9 +157,9 @@ public:
     void limit_scaling_ratio(Vec3d &scaling_factor) const;
     void on_change(const std::string& opt_key, int axis, double new_value);
     bool render_combo(ImGuiWrapper *imgui_wrapper, const std::string &label, const std::vector<std::string> &lines, size_t &selection_idx, float label_width, float item_width);
-    void do_render_move_window(ImGuiWrapper *imgui_wrapper, std::string window_name, float x, float y, float bottom_limit);
-    void do_render_rotate_window(ImGuiWrapper *imgui_wrapper, std::string window_name, float x, float y, float bottom_limit);
-    void do_render_scale_input_window(ImGuiWrapper* imgui_wrapper, std::string window_name, float x, float y, float bottom_limit);
+    void do_render_move_window(ImGuiWrapper *imgui_wrapper, std::string window_name, float x, float y, float bottom_limit, GLGizmoBase *dock_owner = nullptr);
+    void do_render_rotate_window(ImGuiWrapper *imgui_wrapper, std::string window_name, float x, float y, float bottom_limit, GLGizmoBase *dock_owner = nullptr);
+    void do_render_scale_input_window(ImGuiWrapper* imgui_wrapper, std::string window_name, float x, float y, float bottom_limit, GLGizmoBase *dock_owner = nullptr);
     float max_unit_size(int number, Vec3d &vec1, Vec3d &vec2,std::string str);
     bool reset_button(ImGuiWrapper *imgui_wrapper, float caption_max, float unit_size, float space_size, float end_text_size);
     bool reset_zero_button(ImGuiWrapper *imgui_wrapper, float caption_max, float unit_size, float space_size, float end_text_size);

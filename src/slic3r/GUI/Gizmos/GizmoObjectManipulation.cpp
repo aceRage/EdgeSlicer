@@ -798,29 +798,44 @@ void GizmoObjectManipulation::set_init_rotation(const Geometry::Transformation &
     m_init_rotation      = value.get_rotation();
 }
 
-void GizmoObjectManipulation::do_render_move_window(ImGuiWrapper *imgui_wrapper, std::string window_name, float x, float y, float bottom_limit)
+void GizmoObjectManipulation::do_render_move_window(ImGuiWrapper *imgui_wrapper, std::string window_name, float x, float y, float bottom_limit, GLGizmoBase *dock_owner)
 {
-    // BBS: GUI refactor: move gizmo to the right
-    if (abs(last_move_input_window_width) > 0.01f) {
-        if (x + last_move_input_window_width > m_glcanvas.get_canvas_size().get_width()) {
-            if (last_move_input_window_width > m_glcanvas.get_canvas_size().get_width())
-                x = 0;
-            else
-                x = m_glcanvas.get_canvas_size().get_width() - last_move_input_window_width;
+    if (dock_owner) {
+        dock_owner->dock_setup_next_window(x, y, bottom_limit, 0.f, /*size_to_content=*/true);
+    } else {
+        // BBS: GUI refactor: move gizmo to the right
+        if (abs(last_move_input_window_width) > 0.01f) {
+            if (x + last_move_input_window_width > m_glcanvas.get_canvas_size().get_width()) {
+                if (last_move_input_window_width > m_glcanvas.get_canvas_size().get_width())
+                    x = 0;
+                else
+                    x = m_glcanvas.get_canvas_size().get_width() - last_move_input_window_width;
+            }
         }
-    }
 #if BBS_TOOLBAR_ON_TOP
-    imgui_wrapper->set_next_window_pos(x, y, ImGuiCond_Always, 0.f, 0.0f);
+        imgui_wrapper->set_next_window_pos(x, y, ImGuiCond_Always, 0.f, 0.0f);
 #else
-    imgui_wrapper->set_next_window_pos(x, y, ImGuiCond_Always, 1.0f, 0.0f);
+        imgui_wrapper->set_next_window_pos(x, y, ImGuiCond_Always, 1.0f, 0.0f);
 #endif
+    }
 
     // BBS
     ImGuiWrapper::push_toolbar_style(m_glcanvas.get_scale());
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(0.0, 6.0));
 
     std::string name = this->m_new_title_string + "##" + window_name;
-    imgui_wrapper->begin(_L(name), ImGuiWrapper::TOOLBAR_WINDOW_FLAGS);
+    if (dock_owner) {
+        imgui_wrapper->set_next_window_bg_alpha(GLGizmoBase::gizmo_panel_opacity());
+        imgui_wrapper->begin(_L(name), dock_owner->dock_window_flags(ImGuiWrapper::TOOLBAR_WINDOW_FLAGS | ImGuiWindowFlags_NoTitleBar));
+        if (!dock_owner->dock_render_titlebar(this->m_new_title_string)) {
+            imgui_wrapper->end();
+            ImGui::PopStyleVar(1);
+            ImGuiWrapper::pop_toolbar_style();
+            return;
+        }
+    } else {
+        imgui_wrapper->begin(_L(name), ImGuiWrapper::TOOLBAR_WINDOW_FLAGS);
+    }
 
     auto update = [this](unsigned int active_id, std::string opt_key, Vec3d original_value, Vec3d new_value) -> int {
         for (int i = 0; i < 3; i++) {
@@ -1191,29 +1206,44 @@ void GizmoObjectManipulation::show_align_icon(ImGuiWrapper *              imgui_
     }
 }
 
-void GizmoObjectManipulation::do_render_rotate_window(ImGuiWrapper *imgui_wrapper, std::string window_name, float x, float y, float bottom_limit)
+void GizmoObjectManipulation::do_render_rotate_window(ImGuiWrapper *imgui_wrapper, std::string window_name, float x, float y, float bottom_limit, GLGizmoBase *dock_owner)
 {
-    // BBS: GUI refactor: move gizmo to the right
-    if (abs(last_rotate_input_window_width) > 0.01f) {
-        if (x + last_rotate_input_window_width > m_glcanvas.get_canvas_size().get_width()) {
-            if (last_rotate_input_window_width > m_glcanvas.get_canvas_size().get_width())
-                x = 0;
-            else
-                x = m_glcanvas.get_canvas_size().get_width() - last_rotate_input_window_width;
+    if (dock_owner) {
+        dock_owner->dock_setup_next_window(x, y, bottom_limit, 0.f, /*size_to_content=*/true);
+    } else {
+        // BBS: GUI refactor: move gizmo to the right
+        if (abs(last_rotate_input_window_width) > 0.01f) {
+            if (x + last_rotate_input_window_width > m_glcanvas.get_canvas_size().get_width()) {
+                if (last_rotate_input_window_width > m_glcanvas.get_canvas_size().get_width())
+                    x = 0;
+                else
+                    x = m_glcanvas.get_canvas_size().get_width() - last_rotate_input_window_width;
+            }
         }
-    }
 #if BBS_TOOLBAR_ON_TOP
-    imgui_wrapper->set_next_window_pos(x, y, ImGuiCond_Always, 0.f, 0.0f);
+        imgui_wrapper->set_next_window_pos(x, y, ImGuiCond_Always, 0.f, 0.0f);
 #else
-    imgui_wrapper->set_next_window_pos(x, y, ImGuiCond_Always, 1.0f, 0.0f);
+        imgui_wrapper->set_next_window_pos(x, y, ImGuiCond_Always, 1.0f, 0.0f);
 #endif
+    }
 
     // BBS
     ImGuiWrapper::push_toolbar_style(m_glcanvas.get_scale());
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(0.0, 6.0));
 
     std::string name = this->m_new_title_string + "##" + window_name;
-    imgui_wrapper->begin(_L(name), ImGuiWrapper::TOOLBAR_WINDOW_FLAGS);
+    if (dock_owner) {
+        imgui_wrapper->set_next_window_bg_alpha(GLGizmoBase::gizmo_panel_opacity());
+        imgui_wrapper->begin(_L(name), dock_owner->dock_window_flags(ImGuiWrapper::TOOLBAR_WINDOW_FLAGS | ImGuiWindowFlags_NoTitleBar));
+        if (!dock_owner->dock_render_titlebar(this->m_new_title_string)) {
+            imgui_wrapper->end();
+            ImGui::PopStyleVar(1);
+            ImGuiWrapper::pop_toolbar_style();
+            return;
+        }
+    } else {
+        imgui_wrapper->begin(_L(name), ImGuiWrapper::TOOLBAR_WINDOW_FLAGS);
+    }
 
     auto update = [this](unsigned int active_id, std::string opt_key, Vec3d original_value, Vec3d new_value) -> int {
         for (int i = 0; i < 3; i++) {
@@ -1390,29 +1420,44 @@ void GizmoObjectManipulation::do_render_rotate_window(ImGuiWrapper *imgui_wrappe
     ImGuiWrapper::pop_toolbar_style();
 }
 
-void GizmoObjectManipulation::do_render_scale_input_window(ImGuiWrapper* imgui_wrapper, std::string window_name, float x, float y, float bottom_limit)
+void GizmoObjectManipulation::do_render_scale_input_window(ImGuiWrapper* imgui_wrapper, std::string window_name, float x, float y, float bottom_limit, GLGizmoBase *dock_owner)
 {
-    //BBS: GUI refactor: move gizmo to the right
-    if (abs(last_scale_input_window_width) > 0.01f) {
-        if (x + last_scale_input_window_width > m_glcanvas.get_canvas_size().get_width()) {
-            if (last_scale_input_window_width > m_glcanvas.get_canvas_size().get_width())
-                x = 0;
-            else
-                x = m_glcanvas.get_canvas_size().get_width() - last_scale_input_window_width;
+    if (dock_owner) {
+        dock_owner->dock_setup_next_window(x, y, bottom_limit, 0.f, /*size_to_content=*/true);
+    } else {
+        //BBS: GUI refactor: move gizmo to the right
+        if (abs(last_scale_input_window_width) > 0.01f) {
+            if (x + last_scale_input_window_width > m_glcanvas.get_canvas_size().get_width()) {
+                if (last_scale_input_window_width > m_glcanvas.get_canvas_size().get_width())
+                    x = 0;
+                else
+                    x = m_glcanvas.get_canvas_size().get_width() - last_scale_input_window_width;
+            }
         }
-    }
 #if BBS_TOOLBAR_ON_TOP
-    imgui_wrapper->set_next_window_pos(x, y, ImGuiCond_Always, 0.f, 0.0f);
+        imgui_wrapper->set_next_window_pos(x, y, ImGuiCond_Always, 0.f, 0.0f);
 #else
-    imgui_wrapper->set_next_window_pos(x, y, ImGuiCond_Always, 1.0f, 0.0f);
+        imgui_wrapper->set_next_window_pos(x, y, ImGuiCond_Always, 1.0f, 0.0f);
 #endif
+    }
 
     //BBS
     ImGuiWrapper::push_toolbar_style(m_glcanvas.get_scale());
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(0.0, 6.0));
 
     std::string name = this->m_new_title_string + "##" + window_name;
-    imgui_wrapper->begin(_L(name), ImGuiWrapper::TOOLBAR_WINDOW_FLAGS);
+    if (dock_owner) {
+        imgui_wrapper->set_next_window_bg_alpha(GLGizmoBase::gizmo_panel_opacity());
+        imgui_wrapper->begin(_L(name), dock_owner->dock_window_flags(ImGuiWrapper::TOOLBAR_WINDOW_FLAGS | ImGuiWindowFlags_NoTitleBar));
+        if (!dock_owner->dock_render_titlebar(this->m_new_title_string)) {
+            imgui_wrapper->end();
+            ImGui::PopStyleVar(1);
+            ImGuiWrapper::pop_toolbar_style();
+            return;
+        }
+    } else {
+        imgui_wrapper->begin(_L(name), ImGuiWrapper::TOOLBAR_WINDOW_FLAGS);
+    }
 
     auto update = [this](unsigned int active_id, std::string opt_key, Vec3d original_value, Vec3d new_value)->int {
         for (int i = 0; i < 3; i++)

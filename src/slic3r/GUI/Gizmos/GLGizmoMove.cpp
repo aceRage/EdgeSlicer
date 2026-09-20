@@ -247,7 +247,7 @@ void GLGizmoMove3D::on_unregister_raycasters_for_picking()
 void GLGizmoMove3D::on_render_input_window(float x, float y, float bottom_limit)
 {
     if (m_object_manipulation)
-        m_object_manipulation->do_render_move_window(m_imgui, "Move", x, y, bottom_limit);
+        m_object_manipulation->do_render_move_window(m_imgui, "Move", x, y, bottom_limit, this);
 }
 
 
