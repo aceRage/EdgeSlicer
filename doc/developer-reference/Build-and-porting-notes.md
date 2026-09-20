@@ -51,3 +51,18 @@ General porting workflow that worked well:
 2. Build `libslic3r` first to shake out type/mode differences, then the test targets — upstream tests often use identifiers that do not exist here.
 3. Run the touched Catch2 suites (`ctest -R` or the test exe with a tag filter) before asking for print validation.
 4. If the PR adds `Tab.cpp` option lines with doc references, add the doc anchors in the same branch so "Check Documentation" stays green.
+
+## Install gotchas (live-testing folder)
+
+- `cmake --build . --target install --config Release` refreshes profiles/resources but does **not** copy the main binaries into `build\Snapmaker_Orca\` — after an install, `EdgeSlicer.exe` / `EdgeSlicer.dll` there may still be stale (check timestamps against `build\src\Release\`). Copy them manually:
+
+  ```powershell
+  Copy-Item build\src\Release\EdgeSlicer.exe,build\src\Release\EdgeSlicer.dll build\Snapmaker_Orca\ -Force
+  ```
+
+- The copy fails with "being used by another process" while EdgeSlicer is running from that folder (typical: the test instance left open overnight). Close it first; do not just delete the locked files.
+- Sanity check after any install/copy: `Get-ChildItem build\Snapmaker_Orca\EdgeSlicer.* | Select Name,LastWriteTime` must show a fresh timestamp, otherwise you are testing the old build.
+
+## G-code flavor quirk relevant to wipe/move tests
+
+`GCodeProcessor::s_IsBBLPrinter` is a **static, process-wide** flag: `WipeTower.cpp` sets it when generating the tower and `GCode.cpp` re-sets it per printer when emitting moves. Within one sliced file, wipe tags can therefore mix flavors (`;WIPE_START` vs `; WIPE_START`) depending on which component wrote them last. Tests that parse a whole G-code file see only the final flavor. When porting upstream wipe/move changes, match the tag flavor at the exact call site instead of assuming one style per file.
