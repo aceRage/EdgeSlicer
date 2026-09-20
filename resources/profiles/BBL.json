@@ -1,7 +1,7 @@
 {
     "name": "Bambulab",
     "url": "http://www.bambulab.com/Parameters/vendor/BBL.json",
-    "version": "02.00.00.75",
+    "version": "02.00.00.76",
     "force_update": "0",
     "description": "the initial version of BBL configurations",
     "machine_model_list": [
@@ -9940,6 +9940,66 @@
         {
             "name": "Panchroma PLA UV Shift @BBL H2C",
             "sub_path": "filament/Panchroma PLA UV Shift @BBL H2C.json"
+        },
+        {
+            "name": "Panchroma CoPE @BBL H2D",
+            "sub_path": "filament/Panchroma CoPE @BBL H2D.json"
+        },
+        {
+            "name": "Panchroma PLA @BBL H2D",
+            "sub_path": "filament/Panchroma PLA @BBL H2D.json"
+        },
+        {
+            "name": "Panchroma PLA Celestial @BBL H2D",
+            "sub_path": "filament/Panchroma PLA Celestial @BBL H2D.json"
+        },
+        {
+            "name": "Panchroma PLA Galaxy @BBL H2D",
+            "sub_path": "filament/Panchroma PLA Galaxy @BBL H2D.json"
+        },
+        {
+            "name": "Panchroma PLA Glow @BBL H2D",
+            "sub_path": "filament/Panchroma PLA Glow @BBL H2D.json"
+        },
+        {
+            "name": "Panchroma PLA Luminous @BBL H2D",
+            "sub_path": "filament/Panchroma PLA Luminous @BBL H2D.json"
+        },
+        {
+            "name": "Panchroma PLA Marble @BBL H2D",
+            "sub_path": "filament/Panchroma PLA Marble @BBL H2D.json"
+        },
+        {
+            "name": "Panchroma PLA Matte @BBL H2D",
+            "sub_path": "filament/Panchroma PLA Matte @BBL H2D.json"
+        },
+        {
+            "name": "Panchroma PLA Metallic @BBL H2D",
+            "sub_path": "filament/Panchroma PLA Metallic @BBL H2D.json"
+        },
+        {
+            "name": "Panchroma PLA Neon @BBL H2D",
+            "sub_path": "filament/Panchroma PLA Neon @BBL H2D.json"
+        },
+        {
+            "name": "Panchroma PLA Satin @BBL H2D",
+            "sub_path": "filament/Panchroma PLA Satin @BBL H2D.json"
+        },
+        {
+            "name": "Panchroma PLA Silk @BBL H2D",
+            "sub_path": "filament/Panchroma PLA Silk @BBL H2D.json"
+        },
+        {
+            "name": "Panchroma PLA Starlight @BBL H2D",
+            "sub_path": "filament/Panchroma PLA Starlight @BBL H2D.json"
+        },
+        {
+            "name": "Panchroma PLA Translucent @BBL H2D",
+            "sub_path": "filament/Panchroma PLA Translucent @BBL H2D.json"
+        },
+        {
+            "name": "Panchroma PLA UV Shift @BBL H2D",
+            "sub_path": "filament/Panchroma PLA UV Shift @BBL H2D.json"
         },
         {
             "name": "PolyCast @BBL H2C",

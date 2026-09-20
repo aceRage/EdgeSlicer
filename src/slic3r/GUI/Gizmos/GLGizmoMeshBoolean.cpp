@@ -371,9 +371,13 @@ void GLGizmoMeshBoolean::on_render_input_window(float x, float y, float bottom_l
     {
         if (operate_button(_L("Union") + "##btn", enable_button)) {
             TriangleMesh temp_src_mesh = m_src.mv->mesh();
-            temp_src_mesh.transform(m_src.trafo);
+            // fix_left_handed: a MIRRORED volume has a negative-determinant matrix, and
+            // transforming by it without flipping the triangles back leaves the mesh
+            // inside-out. The right-click Mesh boolean path has always passed true here;
+            // the gizmo did not, which is why only the gizmo produced inverted normals.
+            temp_src_mesh.transform(m_src.trafo, true);
             TriangleMesh temp_tool_mesh = m_tool.mv->mesh();
-            temp_tool_mesh.transform(m_tool.trafo);
+            temp_tool_mesh.transform(m_tool.trafo, true);
             std::vector<TriangleMesh> temp_mesh_resuls;
             if (!Slic3r::MeshBoolean::mfd::make_boolean(temp_src_mesh, temp_tool_mesh, temp_mesh_resuls, "UNION"))
                 Slic3r::MeshBoolean::mcut::make_boolean(temp_src_mesh, temp_tool_mesh, temp_mesh_resuls, "UNION");
@@ -390,9 +394,13 @@ void GLGizmoMeshBoolean::on_render_input_window(float x, float y, float bottom_l
         m_imgui->bbl_checkbox(_L("Delete input"), m_diff_delete_input);
         if (operate_button(_L("Difference") + "##btn", enable_button)) {
             TriangleMesh temp_src_mesh = m_src.mv->mesh();
-            temp_src_mesh.transform(m_src.trafo);
+            // fix_left_handed: a MIRRORED volume has a negative-determinant matrix, and
+            // transforming by it without flipping the triangles back leaves the mesh
+            // inside-out. The right-click Mesh boolean path has always passed true here;
+            // the gizmo did not, which is why only the gizmo produced inverted normals.
+            temp_src_mesh.transform(m_src.trafo, true);
             TriangleMesh temp_tool_mesh = m_tool.mv->mesh();
-            temp_tool_mesh.transform(m_tool.trafo);
+            temp_tool_mesh.transform(m_tool.trafo, true);
             std::vector<TriangleMesh> temp_mesh_resuls;
             if (!Slic3r::MeshBoolean::mfd::make_boolean(temp_src_mesh, temp_tool_mesh, temp_mesh_resuls, "A_NOT_B"))
                 Slic3r::MeshBoolean::mcut::make_boolean(temp_src_mesh, temp_tool_mesh, temp_mesh_resuls, "A_NOT_B");
@@ -409,9 +417,13 @@ void GLGizmoMeshBoolean::on_render_input_window(float x, float y, float bottom_l
         m_imgui->bbl_checkbox(_L("Delete input"), m_inter_delete_input);
         if (operate_button(_L("Intersection") + "##btn", enable_button)) {
             TriangleMesh temp_src_mesh = m_src.mv->mesh();
-            temp_src_mesh.transform(m_src.trafo);
+            // fix_left_handed: a MIRRORED volume has a negative-determinant matrix, and
+            // transforming by it without flipping the triangles back leaves the mesh
+            // inside-out. The right-click Mesh boolean path has always passed true here;
+            // the gizmo did not, which is why only the gizmo produced inverted normals.
+            temp_src_mesh.transform(m_src.trafo, true);
             TriangleMesh temp_tool_mesh = m_tool.mv->mesh();
-            temp_tool_mesh.transform(m_tool.trafo);
+            temp_tool_mesh.transform(m_tool.trafo, true);
             std::vector<TriangleMesh> temp_mesh_resuls;
             if (!Slic3r::MeshBoolean::mfd::make_boolean(temp_src_mesh, temp_tool_mesh, temp_mesh_resuls, "INTERSECTION"))
                 Slic3r::MeshBoolean::mcut::make_boolean(temp_src_mesh, temp_tool_mesh, temp_mesh_resuls, "INTERSECTION");

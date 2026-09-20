@@ -28,6 +28,7 @@
 #include "libslic3r/GCode/WipeTowerEstimate.hpp"
 #include "libslic3r/LocalesUtils.hpp"
 #include "libslic3r/Utils.hpp"
+#include "libslic3r/MixedFilament.hpp"
 
 #include "I18N.hpp"
 #include "GUI_App.hpp"
@@ -1525,7 +1526,7 @@ std::vector<int> PartPlate::get_extruders(bool conside_custom_gcode, const Dynam
 	return plate_extruders;
 }
 
-std::vector<int> PartPlate::get_extruders_under_cli(bool conside_custom_gcode, DynamicPrintConfig& full_config) const
+std::vector<int> PartPlate::get_extruders_under_cli(bool conside_custom_gcode, DynamicPrintConfig& full_config, bool expand_mixed_slots) const
 {
     std::vector<int> plate_extruders;
     BOOST_LOG_TRIVIAL(debug) << "PartPlate::get_extruders_under_cli begin"
@@ -1654,6 +1655,25 @@ std::vector<int> PartPlate::get_extruders_under_cli(bool conside_custom_gcode, D
     plate_extruders.resize(std::distance(plate_extruders.begin(), it_end));
     // Do not call expand_plate_extruders() from the CLI path. It depends on
     // wxGetApp().preset_bundle, which is GUI state and may be unavailable here.
+    // Optional wx-free expansion from mixed_filament_definitions: AMS-style
+    // callers keep the default (true); CLI wipe/type gates pass false so mixed
+    // virtual IDs remain slots.
+    if (expand_mixed_slots) {
+        std::vector<std::string> physical_colors;
+        if (const auto *color_opt = full_config.option<ConfigOptionStrings>("filament_colour"))
+            physical_colors = color_opt->values;
+        const size_t num_physical = physical_colors.size();
+        if (num_physical > 0) {
+            MixedFilamentManager mixed_mgr;
+            mixed_mgr.auto_generate(physical_colors);
+            if (const auto *defs_opt = full_config.option<ConfigOptionString>("mixed_filament_definitions"))
+                mixed_mgr.load_custom_entries(defs_opt->value, physical_colors);
+            mixed_mgr.expand_virtual_extruder_ids(plate_extruders, num_physical);
+            std::sort(plate_extruders.begin(), plate_extruders.end());
+            it_end = std::unique(plate_extruders.begin(), plate_extruders.end());
+            plate_extruders.resize(std::distance(plate_extruders.begin(), it_end));
+        }
+    }
     std::ostringstream extruders_list;
     for (size_t i = 0; i < plate_extruders.size(); ++i) {
         if (i != 0)
@@ -5108,7 +5128,7 @@ void PartPlateList::postprocess_arrange_polygon(arrangement::ArrangePolygon& arr
 
 /*rendering related functions*/
 //render
-void PartPlateList::render(const Transform3d& view_matrix, const Transform3d& projection_matrix, bool bottom, bool only_current, bool only_body, int hover_id, bool render_cali, bool show_grid)
+void PartPlateList::render(const Transform3d& view_matrix, const Transform3d& projection_matrix, bool bottom, bool only_current, bool only_body, int hover_id, bool render_cali, bool show_grid, const std::set<int>& visible_plates)
 {
 	const std::lock_guard<std::mutex> local_lock(m_plates_mutex);
 	std::vector<PartPlate*>::iterator it = m_plate_list.begin();
@@ -5128,7 +5148,13 @@ void PartPlateList::render(const Transform3d& view_matrix, const Transform3d& pr
 		generate_icon_textures();
 	for (it = m_plate_list.begin(); it != m_plate_list.end(); it++) {
 		int current_index = (*it)->get_index();
-		if (only_current && (current_index != m_current_plate))
+		// An explicit visible set wins over the plain "current plate only" rule: it is the same
+		// suppression, just with more than one plate exempt.
+		if (!visible_plates.empty()) {
+			if (visible_plates.find(current_index) == visible_plates.end())
+				continue;
+		}
+		else if (only_current && (current_index != m_current_plate))
 			continue;
 		if (current_index == m_current_plate) {
 			PartPlate::HeightLimitMode height_mode = (only_current)?PartPlate::HEIGHT_LIMIT_NONE:m_height_limit_mode;
@@ -5666,9 +5692,20 @@ int PartPlateList::store_to_3mf_structure(PlateDataPtrs& plate_data_list, bool w
 							if (const auto *nvt = print->config().option<ConfigOptionEnumsGeneric>("nozzle_volume_type"))
 								if (!nvt->values.empty())
 									volume_type = get_nozzle_volume_type_string(NozzleVolumeType(nvt->values.front()));
+							// On a machine with several identical independent toolheads (Snapmaker U1,
+							// Flashforge Creator 5) filament i prints from toolhead i, so claiming group 0
+							// for all of them told the printer every filament lived in the first nozzle
+							// while the G-code drove T0..T3. Report the real toolhead. Metadata only - the
+							// live config and the emitted G-code are untouched.
+							const std::vector<int> identity_map =
+								identity_filament_map(print->full_print_config(), plate_data_item->slice_filaments_info.size());
 							for (auto &info : plate_data_item->slice_filaments_info) {
-								info.group_id = { 0 };
-								info.nozzle_diameter = nd.empty() ? 0. : nd.front();
+								int group = 0;
+								if (info.id >= 0 && size_t(info.id) < identity_map.size())
+									group = identity_map[info.id] - 1; // identity_filament_map is 1-based
+								info.group_id = { group };
+								const size_t nozzle_idx = size_t(group);
+								info.nozzle_diameter = nd.empty() ? 0. : (nozzle_idx < nd.size() ? nd[nozzle_idx] : nd.front());
 								info.nozzle_volume_type = volume_type;
 							}
 						}

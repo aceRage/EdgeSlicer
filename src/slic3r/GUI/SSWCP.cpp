@@ -4013,6 +4013,10 @@ void SSWCP_MachineConnect_Instance::process() {
     }
 }
 
+// Static holder for the one-shot pin-code client (declared in SSWCP.hpp).
+// Released on the UI thread after the response — never from a Paho callback.
+std::shared_ptr<MqttClient> SSWCP_MachineConnect_Instance::m_pin_client;
+
 void SSWCP_MachineConnect_Instance::sw_get_pin_code()
 {
     {
@@ -4024,24 +4028,38 @@ void SSWCP_MachineConnect_Instance::sw_get_pin_code()
 
             auto        weak_self = std::weak_ptr<SSWCP_Instance>(shared_from_this());
             wxGetApp().CallAfter([=]() {
-                MqttClient* mqtt_client = new MqttClient("mqtt://" + ip + ":" + std::to_string(port), "Snapmaker Orca");
+                // Create the one-shot client through the factory so it has a
+                // shared_ptr owner (a raw `new`-ed client can never arm the
+                // auto-reconnect checker and its lifetime is unsafe). The
+                // static holder keeps it alive until the response arrives and
+                // is released on the UI thread (see the callback below).
+                std::shared_ptr<MqttClient> mqtt_client = MqttClient::create("mqtt://" + ip + ":" + std::to_string(port), "Snapmaker Orca");
+                m_pin_client                           = mqtt_client;
+                std::weak_ptr<MqttClient> weak_client  = mqtt_client;
                 std::string connect_msg = "";
                 if (mqtt_client->Connect(connect_msg)) {
                     std::string sub_msg = "success";
                     if (mqtt_client->Subscribe("cloud/config/response", 1, sub_msg)) {
-                        mqtt_client->SetMessageCallback([weak_self, mqtt_client](const std::string& topic, const std::string& message) {
-                            auto self = weak_self.lock();
-                            if (self) {
+                        mqtt_client->SetMessageCallback([weak_self, weak_client](const std::string& topic, const std::string& message) {
+                            auto self        = weak_self.lock();
+                            auto mqtt_client = weak_client.lock();
+                            if (self && mqtt_client) {
                                 if (topic == "cloud/config/response") {
-                                    json response = json::parse(message);
-                                    if (response.count("result")) {
+                                    // Non-throwing parse (allow_exceptions=false):
+                                    // a parse error must not escape into Paho's
+                                    // C callback stack (uncaught = terminate).
+                                    json response = json::parse(message, nullptr, false);
+                                    if (!response.is_discarded() && response.count("result")) {
                                         self->m_res_data = response["result"];
                                         self->send_to_js();
                                         self->finish_job();
 
                                         std::string dc_msg = "success";
                                         bool flag = mqtt_client->Disconnect(dc_msg);
-                                        wxGetApp().CallAfter([mqtt_client]() { delete mqtt_client; });
+                                        // Drop the holder on the UI thread: destroying
+                                        // the client from inside message_arrived (a
+                                        // Paho thread) is not allowed by Paho.
+                                        wxGetApp().CallAfter([]() { SSWCP_MachineConnect_Instance::release_pin_client(); });
                                         return;
                                     }
                                     self->handle_general_fail();
@@ -4069,6 +4087,9 @@ void SSWCP_MachineConnect_Instance::sw_get_pin_code()
                 if (self) {
                     self->handle_general_fail();
                 }
+                // Connection failed: nothing to wait for, drop the client here
+                // (UI thread — safe to destroy).
+                m_pin_client.reset();
             });
         } else {
             handle_general_fail();
@@ -6205,9 +6226,9 @@ void SSWCP_MqttAgent_Instance::sw_create_mqtt_client()
         std::string type = "mqtt";
         if (ca != "" && cert != "" && key != "") {
             type = "mqtts";
-            client.reset(new MqttClient(server_address, clientId, ca, cert, key, username, password, clean_session));
+            client = MqttClient::create(server_address, clientId, ca, cert, key, username, password, clean_session);
         }else{
-            client.reset(new MqttClient(server_address, clientId, username, password, clean_session));
+            client = MqttClient::create(server_address, clientId, username, password, clean_session);
         }
 
         if (client == nullptr) {            
@@ -6271,7 +6292,17 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_connect()
             }
             auto self = std::dynamic_pointer_cast<SSWCP_MqttAgent_Instance>(weak_ptr.lock());
 
-            engine->SetConnectionFailureCallback([engine]() {
+            // Capture the engine WEAKLY: this callback is stored inside the
+            // engine itself (MqttClient::connection_failure_callback_), so a
+            // shared_ptr capture would keep its refcount >= 1 forever and
+            // ~MqttClient — the only place the callback gets cleared — would
+            // never run, leaking the client and its Paho handles.
+            std::weak_ptr<MqttClient> weak_engine = engine;
+            engine->SetConnectionFailureCallback([weak_engine]() {
+                auto engine = weak_engine.lock();
+                if (!engine) {
+                    return;
+                }
                 std::string msg = "";
                 engine->Disconnect(msg);
             });
@@ -7024,29 +7055,51 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_set_engine()
                                     wxGetApp().app_config->clear_filament_extruder_map();
 
                                     if (self->m_wcp_cache.count("deviceFilamentInfo")) {
-                                        std::string value_str = m_wcp_cache["deviceFilamentInfo"].get<std::string>();
-                                        json value                 = json::parse(value_str);
-                                        json value_item            = value["value"];
-                                        auto machines     = wxGetApp().app_config->get_devices();
-                                        bool find                  = false;
-                                        for (auto& [key, value] : value_item.items()) {
-                                            if (find) {
-                                                break;
+                                        try {
+                                            // Flutter writers encode this cache value inconsistently:
+                                            // one path jsonEncodes the payload once, another encodes it
+                                            // twice. Unwrap the extra string layer instead of assuming
+                                            // an object with a "value" key (operator[] would throw).
+                                            json value;
+                                            std::string value_str;
+                                            if (self->m_wcp_cache["deviceFilamentInfo"].is_string()) {
+                                                value_str = self->m_wcp_cache["deviceFilamentInfo"].get<std::string>();
+                                                value     = json::parse(value_str);
+                                                if (value.is_string())
+                                                    value = json::parse(value.get<std::string>());
+                                            } else {
+                                                value = self->m_wcp_cache["deviceFilamentInfo"];
                                             }
 
-                                            for (const auto& machine : machines) {
-                                                if (machine.sn == key && machine.connected) {
-                                                    find = true;
-                                                    json target = json::array();
-                                                    json object = json::object();
-                                                    object["key"] = key;
-                                                    object["value"]    = value.dump();
-                                                    target.push_back(object);
-                                                    self->update_filament_info(target, false);
-                                                    break;
+                                            if (value.is_object() && value.contains("value") && value["value"].is_object()) {
+                                                json value_item            = value["value"];
+                                                auto machines     = wxGetApp().app_config->get_devices();
+                                                bool find                  = false;
+                                                for (auto& [key, value] : value_item.items()) {
+                                                    if (find) {
+                                                        break;
+                                                    }
+
+                                                    for (const auto& machine : machines) {
+                                                        if (machine.sn == key && machine.connected) {
+                                                            find = true;
+                                                            json target = json::array();
+                                                            json object = json::object();
+                                                            object["key"] = key;
+                                                            object["value"]    = value.dump();
+                                                            target.push_back(object);
+                                                            self->update_filament_info(target, false);
+                                                            break;
+                                                        }
+                                                    }
+
                                                 }
+                                            } else {
+                                                BOOST_LOG_TRIVIAL(warning) << "[WCP] deviceFilamentInfo cache has unexpected format, skip. type=" << value.type_name()
+                                                                           << " raw=" << (value_str.empty() ? self->m_wcp_cache["deviceFilamentInfo"].dump() : value_str);
                                             }
-
+                                        } catch (const std::exception& e) {
+                                            BOOST_LOG_TRIVIAL(error) << "[WCP] deviceFilamentInfo cache parse failed: " << e.what();
                                         }
                                     }
 

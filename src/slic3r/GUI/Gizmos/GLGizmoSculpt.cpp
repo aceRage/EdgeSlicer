@@ -4,6 +4,7 @@
 #include "slic3r/GUI/GLCanvas3D.hpp"
 #include "slic3r/GUI/GUI_App.hpp"
 #include "slic3r/GUI/GUI_ObjectList.hpp"
+#include "libslic3r/QuadRemesh.hpp"
 #include "slic3r/GUI/Gizmos/GLGizmosCommon.hpp"
 #include "slic3r/GUI/ImGuiWrapper.hpp"
 #include "slic3r/GUI/MeshUtils.hpp"
@@ -1203,23 +1204,27 @@ void GLGizmoSculpt::on_render_input_window(float x, float y, float bottom_limit)
 
     // The toolbar hands us the x of the gizmo's own icon, and Sculpt is the LAST
     // icon on the bar, so a panel drawn rightwards from there hangs off the end
-    // of the canvas. GizmoImguiSetNextWIndowPos() already knows how to pull a
-    // window back inside - but it clamps against last_input_window_width, i.e.
-    // the width of the PREVIOUS frame, which under AlwaysAutoResize was whatever
-    // the last frame's contents happened to need. Passing the real width (which
-    // is now fixed) makes that clamp exact: the panel opens toward the centre of
-    // the bar, its right edge flush with the canvas edge, and it never hangs off.
-#if BBS_TOOLBAR_ON_TOP
-    GizmoImguiSetNextWIndowPos(x, y, window_width, 0.f, ImGuiCond_Always, 0.0f, 0.0f);
-#else
-    GizmoImguiSetNextWIndowPos(x, y, window_width, 0.f, ImGuiCond_Always, 1.0f, 0.0f);
-#endif
-    ImGui::SetNextWindowSize(ImVec2(window_width, 0.f), ImGuiCond_Always);
+    // of the canvas. dock_setup_next_window() forwards to
+    // GizmoImguiSetNextWIndowPos(), which already knows how to pull a window back
+    // inside - but it clamps against last_input_window_width, i.e. the width of
+    // the PREVIOUS frame, which under AlwaysAutoResize was whatever the last
+    // frame's contents happened to need. Passing the real width (which is now
+    // fixed) makes that clamp exact: the panel opens toward the centre of the
+    // bar, its right edge flush with the canvas edge, and it never hangs off.
+    // When the panel is docked instead, the same call parks it against the right
+    // edge of the view at full height.
+    dock_setup_next_window(x, y, bottom_limit, window_width);
 
     ImGuiWrapper::push_toolbar_style(m_parent.get_scale());
     // No AlwaysAutoResize: the width is pinned above, and only the height is left
     // to the contents.
-    GizmoImguiBegin(get_name(), ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoTitleBar);
+    GizmoImguiBegin(get_name(), dock_window_flags(ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoTitleBar));
+
+    if (!dock_render_titlebar(get_name())) {
+        GizmoImguiEnd();
+        ImGuiWrapper::pop_toolbar_style();
+        return;
+    }
 
     // Everything the panel wraps to. Inside the window, so the padding is known.
     const float wrap_width = ImGui::GetContentRegionAvail().x;
@@ -1404,6 +1409,31 @@ void GLGizmoSculpt::on_render_input_window(float x, float y, float bottom_limit)
     if (m_imgui->button(GUI::format_wxstr(_L("Subdivide to %1% triangles"), after)) && ! too_big)
         wxGetApp().CallAfter([this]() { do_subdivide(); });
     m_imgui->disabled_end();
+
+    // Ultra: Phase 2 - the second entry point into the quad remesher, as the spec
+    // asks. It belongs next to Subdivide because that is what it is FOR: Subdivide
+    // splits whatever triangles the part happens to have, so an uneven mesh stays
+    // uneven and the brush bites differently in different places. Quad remeshing
+    // first gives it an even grid to work on.
+    //
+    // It hands over to the object-list action rather than remeshing in place: the mesh
+    // swap invalidates every mask and cache the open session holds, and
+    // ObjectList::quad_remesh already does the snapshot, the painted-data clearing and
+    // the notification properly.
+    //
+    // Sculpt has to be closed first, since quad_remesh() declines while a gizmo is
+    // open - and closing it is the manager's job. A gizmo .cpp in this tree
+    // deliberately does not include GLGizmosManager.hpp (only the manager itself and
+    // GizmoObjectManipulation do), so the close happens on the other side, inside
+    // quad_remesh(), which already holds a reference to the manager. Deferred, so it
+    // does not run inside this ImGui frame.
+    if (quad_remesh_available()) {
+        ImGui::Separator();
+        m_imgui->text_wrapped(_L("Rebuild the part as an even grid of quads first, so the brush and "
+                                 "Subdivide behave the same everywhere. Closes Sculpt."), wrap_width);
+        if (m_imgui->button(_L("Quad remesh...")))
+            wxGetApp().CallAfter([]() { wxGetApp().obj_list()->quad_remesh(/*close_gizmos*/ true); });
+    }
 
     GizmoImguiEnd();
     ImGuiWrapper::pop_toolbar_style();

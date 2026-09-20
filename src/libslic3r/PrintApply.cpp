@@ -1073,6 +1073,8 @@ static PrintObjectRegions* generate_print_object_regions(
         region_set.emplace(it, region);
         return region;
     };
+    // Modifiers whose backward parent search came up empty - see the second pass after this loop.
+    std::vector<const ModelVolume*> modifiers_without_parent;
     // Chain the regions in the order they are stored in the volumes list.
     for (int volume_id = 0; volume_id < int(model_volumes.size()); ++ volume_id) {
         const ModelVolume &volume = *model_volumes[volume_id];
@@ -1112,10 +1114,62 @@ static PrintObjectRegions* generate_print_object_regions(
                             // This modifier does not override any printable volume's configuration, however it may in the future.
                             // Store it so that verify_update_print_object_regions() will handle this modifier correctly if its configuration changes.
                             layer_range.volume_regions.push_back({ &volume, parent_model_part_id, layer_range.volume_regions[parent_model_part_id].region, bbox });
+                        else if (! added && parent_model_part_id == -1 &&
+                                 std::find(modifiers_without_parent.begin(), modifiers_without_parent.end(), &volume) == modifiers_without_parent.end())
+                            // No parent at all: every part this modifier overlaps is listed AFTER it in
+                            // ModelObject::volumes, so the backward search above saw nothing. Retry below,
+                            // once the whole layer range has its regions. See the comment on that pass.
+                            // Recorded once, though the miss can repeat across layer ranges.
+                            modifiers_without_parent.push_back(&volume);
                     }
                 }
             }
     }
+
+    // Second chance for modifiers that found no parent above. The search above only walks BACKWARDS
+    // through the volume_regions built so far, so a modifier listed before every part it overlaps -
+    // which is easy to end up with, e.g. an SVG/Emboss modifier on an object whose part was added
+    // later, or any reordering in the object list - attaches to nothing and is silently dropped.
+    // Users expect a modifier to modify the part it visibly overlaps, whatever the list order.
+    //
+    // This runs as a separate pass, not as a forward search inside the loop above, to preserve the
+    // invariant both verify_update_print_object_regions() and slices_to_regions() depend on: a
+    // parent VolumeRegion always precedes its children in volume_regions. Appending here keeps that
+    // true. A modifier that DID find an earlier overlapping parent above is untouched, so existing
+    // behaviour is unchanged wherever it already worked.
+    if (! modifiers_without_parent.empty())
+        for (PrintObjectRegions::LayerRangeRegions &layer_range : layer_ranges_regions)
+            for (const ModelVolume *modifier : modifiers_without_parent) {
+                const PrintObjectRegions::BoundingBox *bbox = find_volume_extents(layer_range, *modifier);
+                if (! bbox)
+                    continue;
+                // Was it already attached in this layer range by the pass above? (A modifier can find a
+                // parent in one layer range and none in another.)
+                if (std::any_of(layer_range.volume_regions.begin(), layer_range.volume_regions.end(),
+                                [modifier](const PrintObjectRegions::VolumeRegion &r) { return r.model_volume == modifier; }))
+                    continue;
+                // Attach to the LAST overlapping model part, matching the "later volumes win" convention
+                // the rest of this code follows for overlapping volumes.
+                int  parent_model_part_id = -1;
+                bool added                = false;
+                for (int parent_region_id = int(layer_range.volume_regions.size()) - 1; parent_region_id >= 0; -- parent_region_id) {
+                    const PrintObjectRegions::VolumeRegion &parent_region = layer_range.volume_regions[parent_region_id];
+                    if (! parent_region.model_volume->is_model_part() || parent_region.region == nullptr)
+                        continue;
+                    if (PrintObjectRegions::BoundingBox parent_bbox = find_modifier_volume_extents(layer_range, parent_region_id); parent_bbox.intersects(*bbox)) {
+                        if (PrintRegionConfig config = region_config_from_model_volume(parent_region.region->config(), nullptr, *modifier, num_extruders);
+                            config != parent_region.region->config()) {
+                            added = true;
+                            layer_range.volume_regions.push_back({ modifier, parent_region_id, get_create_region(std::move(config)), bbox });
+                        } else if (parent_model_part_id == -1)
+                            parent_model_part_id = parent_region_id;
+                    }
+                }
+                if (! added && parent_model_part_id >= 0)
+                    // Overlaps a part but overrides nothing (yet). Store the alias, exactly as the pass
+                    // above does, so verify_update_print_object_regions() reslices if that changes.
+                    layer_range.volume_regions.push_back({ modifier, parent_model_part_id, layer_range.volume_regions[parent_model_part_id].region, bbox });
+            }
 
     // Finally add painting regions.
     for (PrintObjectRegions::LayerRangeRegions &layer_range : layer_ranges_regions) {

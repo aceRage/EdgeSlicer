@@ -374,7 +374,7 @@ static std::pair<int, std::string> connect_impl(const std::string& dev_id)
     auto forget_host = []() { on_main([]() { wxGetApp().set_connect_host(nullptr); }); };
     std::shared_ptr<MqttClient> engine;
     try {
-        engine.reset(new MqttClient(url, client, dev->ca, dev->cert, dev->key, dev->user, dev->password, false));
+        engine = MqttClient::create(url, client, dev->ca, dev->cert, dev->key, dev->user, dev->password, false);
     } catch (const std::exception& e) {
         forget_host();
         return { 500, std::string("could not create the MQTT client: ") + e.what() };

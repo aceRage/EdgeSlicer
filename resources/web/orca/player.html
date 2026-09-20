@@ -13,8 +13,9 @@ html, body { height: 100%; width: 100%; margin: 0; padding: 0; background: #000;
      credential-only and never reachable from a browser). video-stream.js and video-rtc.js next to
      this file are verbatim copies from go2rtc 1.9.14 (MIT, see resources/tools/go2rtc/LICENSE-NOTE.txt)
      and must be refreshed together with go2rtc.exe.
-     ?src=<stream name>&mode=<mse|webrtc|mp4|mjpeg>[&lt=<hub secret; the PC's own Stream tab only>]
-     The WebSocket goes to api/ws on the hub, which attaches go2rtc's credentials. -->
+     ?src=<stream name>&mode=<mse|webrtc|webrtc,mse|mp4|mjpeg>[&lt=<hub secret; the PC's own Stream tab only>]
+     The WebSocket goes to api/ws on the hub, which attaches go2rtc's credentials; WebRTC signalling
+     (offer / answer / candidate) rides that same WebSocket, so nothing else has to be opened. -->
 <script type="module" src="./video-stream.js"></script>
 <script type="module">
     const params = new URLSearchParams(location.search);
@@ -25,6 +26,120 @@ html, body { height: 100%; width: 100%; margin: 0; padding: 0; background: #000;
     video.style.flex = '1 0 ' + (params.get('width') || '320px');
     video.src = new URL('api/ws?src=' + encodeURIComponent(params.get('src') || '') + (lt ? '&lt=' + encodeURIComponent(lt) : ''), location.href);
     document.body.appendChild(video);
+
+    // Tell the embedding page (stream_center.html) the stream's real aspect ratio, so it can give
+    // this tile a matching shape instead of assuming 16:9 and letterboxing a 4:3 camera (the
+    // Snapmaker U1's is 4:3). We are same-origin with the parent - the hub serves both pages - so
+    // the message is posted to location.origin and the parent checks e.origin the same way.
+    // <video-stream> builds its one <video> in oninit() (from connectedCallback), and every mode it
+    // can settle on - mse / webrtc / mp4 / mjpeg - paints into that same element, so watching it
+    // covers all of them. This module runs after ./video-stream.js (both are modules, in document
+    // order), so the element is already defined and the append above has upgraded it; the poll is
+    // only a belt-and-braces for a browser that upgrades late.
+    const bind = () => {
+        const inner = video.video || video.querySelector('video');
+        if (!inner) return false;
+        let last = 0;
+        const post = (w, h) => {
+            if (!w || !h) return;
+            const ar = w / h;
+            if (Math.abs(ar - last) < 0.001) return; // the same number, over and over, on 'resize'
+            last = ar;
+            try {
+                parent.postMessage({ snorcaAspect: ar, src: params.get('src') || '' }, location.origin);
+            } catch (e) {}
+        };
+        const report = () => post(inner.videoWidth, inner.videoHeight);
+        // 'resize' fires whenever the decoded frame size changes (a camera switching profile, or
+        // the first frame after a reconnect); 'loadedmetadata' is the first report of the two.
+        inner.addEventListener('loadedmetadata', report);
+        inner.addEventListener('resize', report);
+        report(); // metadata may already be in (a warm element)
+        // mjpeg is the one mode that paints into video.poster instead of decoding into the element,
+        // so videoWidth stays 0 there and neither event above ever fires. The poster is replaced
+        // frame by frame and its intrinsic size is the frame size, so look at it a few times after
+        // the stream starts and stop as soon as one reports (or the modes that do decode do).
+        let posterTries = 0;
+        const pt = setInterval(() => {
+            if (last || ++posterTries > 20) { clearInterval(pt); return; }
+            if (inner.videoWidth) { report(); return; }
+            if (!inner.poster) return;
+            const probe = new Image();
+            probe.onload = () => post(probe.naturalWidth, probe.naturalHeight);
+            probe.src = inner.poster;
+        }, 500);
+        return true;
+    };
+    if (!bind()) {
+        let tries = 0;
+        const t = setInterval(() => { if (bind() || ++tries > 40) clearInterval(t); }, 250);
+    }
+    // With a mode list like 'webrtc,mp4,mjpeg' the player runs the first two at once and swaps to
+    // WebRTC as soon as it has a picture, so the relayed stream is already playing while the peer
+    // connection is negotiated - there is never a black tile waiting on ICE. If WebRTC has not
+    // taken over by the deadline (the PC's firewall blocks go2rtc's media port, the network drops
+    // UDP, or the origin is a Tailscale Serve proxy that cannot carry it), stop it: the browser
+    // would otherwise keep an ICE agent and a second decode alive behind a stream the viewer can
+    // already see. The relayed stream is untouched and keeps playing.
+    //
+    // 2.5 s, not the 8 s this started at: the fallback has to be bounded tightly enough that a
+    // viewer does not sit watching a tile decide. On the LAN a working peer connection is up in
+    // well under a second (measured ~0.4 s slower to first picture than MSE), so 2.5 s only ever
+    // expires on a path that was never going to work.
+    const others = video.mode.split(',').filter(m => m && m !== 'webrtc');
+    const both   = video.mode.includes('webrtc') && others.length > 0;
+    const giveUp = parseInt(params.get('rtctimeout') || '2500', 10);
+    // Tell the embedding page which path this tile actually ended on, so its badge can read
+    // "Auto · WebRTC" or "Auto · MP4" truthfully rather than naming what was asked for.
+    // Same-origin, same convention as snorcaAspect above.
+    let reported = '';
+    const reportMode = (m) => {
+        if (!m || m === reported) return;
+        reported = m;
+        try { parent.postMessage({ snorcaMode: m, src: params.get('src') || '' }, location.origin); } catch (e) {}
+    };
+    // <video-stream> records what it settled on in video.mode once a source plays; for a single
+    // mode there is nothing to decide, so report it straight away.
+    if (!both) reportMode(video.mode.split(',')[0]);
+    else {
+        // WebRTC has taken over exactly when its peer connection is open. Poll briefly rather
+        // than patching the vendored player (video-rtc.js is a verbatim go2rtc copy and must stay
+        // refreshable), and stop as soon as the answer is known or the deadline has passed.
+        const t0 = Date.now();
+        const mt = setInterval(() => {
+            const won = video.pcState === WebSocket.OPEN && video.pc;
+            if (won) { reportMode('webrtc'); clearInterval(mt); return; }
+            if (Date.now() - t0 >= giveUp + 500) { reportMode(others[0]); clearInterval(mt); }
+        }, 250);
+    }
+    // Quality's Auto half needs to know when a tile cannot keep up. 'waiting' fires whenever the
+    // element runs out of buffered data, and on a link that simply cannot carry this stream it
+    // fires repeatedly in the first seconds. Two of them inside the first 8 s is the signal; one
+    // is normal at start-up while the first keyframe arrives, so it is deliberately not enough.
+    // Reported once - the page steps down and rebuilds the tile, which restarts this player.
+    {
+        const inner0 = () => video.video || video.querySelector('video');
+        let waits = 0, told = false;
+        const startedAt = Date.now();
+        const onWait = () => {
+            if (told || ++waits < 2 || Date.now() - startedAt > 8000) return;
+            told = true;
+            try { parent.postMessage({ snorcaStall: true, src: params.get('src') || '' }, location.origin); } catch (e) {}
+        };
+        const hook = () => {
+            const iv = inner0();
+            if (!iv) return false;
+            iv.addEventListener('waiting', onWait);
+            return true;
+        };
+        if (!hook()) { let n = 0; const h = setInterval(() => { if (hook() || ++n > 40) clearInterval(h); }, 250); }
+    }
+    if (both && giveUp > 0) setTimeout(() => {
+        if (video.pcState === WebSocket.OPEN || !video.pc) return; // WebRTC won, or was never started
+        video.pcState = WebSocket.CLOSED;
+        video.pc.close();
+        video.pc = null;
+    }, giveUp);
 </script>
 </body>
 </html>

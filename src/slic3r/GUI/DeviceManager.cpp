@@ -1,5 +1,7 @@
 #include "libslic3r/libslic3r.h"
 #include "DeviceManager.hpp"
+#include "PrintErrorCommands.hpp"
+#include "DeviceModelCode.hpp"
 #include "libslic3r/Time.hpp"
 #include "libslic3r/Thread.hpp"
 #include "slic3r/Utils/ColorSpaceConvert.hpp"
@@ -12,6 +14,8 @@
 #include <thread>
 #include <mutex>
 #include <codecvt>
+#include <algorithm>
+#include <iterator>
 #include <boost/foreach.hpp>
 #include <boost/typeof/typeof.hpp>
 #include <boost/uuid/uuid.hpp>
@@ -622,6 +626,8 @@ MachineObject::MachineObject(NetworkAgent* agent, std::string name, std::string 
     mc_print_stage = 0;
     mc_print_error_code = 0;
     print_error = 0;
+    // The blob belongs to one error code; with the code gone there is nothing it could answer.
+    clear_command_error_action_json();
     mc_print_line_number = 0;
     mc_print_percent = 0;
     mc_print_sub_stage = 0;
@@ -644,6 +650,14 @@ MachineObject::MachineObject(NetworkAgent* agent, std::string name, std::string 
 
 MachineObject::~MachineObject()
 {
+    // The command-error window holds `this` as its printer (set_error_context); upstream deletes its
+    // dialogs here for the same reason. Destroy() hides now and frees at idle, so a click can no
+    // longer reach a dead MachineObject.
+    if (m_command_error_dlg) {
+        m_command_error_dlg->Destroy();
+        m_command_error_dlg = nullptr;
+    }
+
     if (subtask_) {
         delete subtask_;
         subtask_ = nullptr;
@@ -1771,6 +1785,190 @@ int MachineObject::command_clean_print_error(std::string subtask_id, int print_e
     return this->publish_json(j.dump());
 }
 
+// ---- printer-error actions ----
+//
+// One shape per method: build the payload with the pure builder, log what is going out with the
+// code in it, publish. The logging is not decoration - these are the commands that can restart or
+// abandon a print, and when the owner reports "I pressed Resume and nothing happened" the log is
+// the only way to tell a command that was never sent from one the printer declined.
+//
+// Every one of these is reached from a button. Nothing on the status-poll or notification path
+// calls them.
+
+int MachineObject::command_clean_print_error_uiop(int print_error)
+{
+    const json j = GUI::build_clean_print_error_uiop(print_error, std::to_string(MachineObject::m_sequence_id++));
+    BOOST_LOG_TRIVIAL(info) << "command_clean_print_error_uiop: err = " << j["system"]["err"].get<std::string>();
+    return this->publish_json(j.dump());
+}
+
+int MachineObject::command_hms_resume(const std::string& error_str, const std::string& job_id)
+{
+    const json j = GUI::build_hms_resume(error_str, job_id, std::to_string(MachineObject::m_sequence_id++));
+    BOOST_LOG_TRIVIAL(info) << "command_hms_resume: err = " << error_str << ", job_id = " << job_id;
+    return this->publish_json(j.dump(), 1);
+}
+
+int MachineObject::command_hms_stop(const std::string& error_str, const std::string& job_id)
+{
+    const json j = GUI::build_hms_stop(error_str, job_id, std::to_string(MachineObject::m_sequence_id++));
+    BOOST_LOG_TRIVIAL(info) << "command_hms_stop: err = " << error_str << ", job_id = " << job_id;
+    return this->publish_json(j.dump(), 1);
+}
+
+int MachineObject::command_hms_ignore(const std::string& error_str, const std::string& job_id)
+{
+    const json j = GUI::build_hms_ignore(error_str, job_id, std::to_string(MachineObject::m_sequence_id++));
+    BOOST_LOG_TRIVIAL(info) << "command_hms_ignore: err = " << error_str << ", job_id = " << job_id;
+    return this->publish_json(j.dump(), 1);
+}
+
+int MachineObject::command_hms_idle_ignore(const std::string& error_str, int type)
+{
+    const json j = GUI::build_hms_idle_ignore(error_str, type, std::to_string(MachineObject::m_sequence_id++));
+    BOOST_LOG_TRIVIAL(info) << "command_hms_idle_ignore: err = " << error_str << ", type = " << type;
+    return this->publish_json(j.dump(), 1);
+}
+
+int MachineObject::command_refresh_nozzle()
+{
+    const json j = GUI::build_refresh_nozzle(std::to_string(MachineObject::m_sequence_id++));
+    BOOST_LOG_TRIVIAL(info) << "command_refresh_nozzle";
+    return this->publish_json(j.dump(), 1);
+}
+
+int MachineObject::command_stop_buzzer()
+{
+    const json j = GUI::build_stop_buzzer(std::to_string(MachineObject::m_sequence_id++));
+    BOOST_LOG_TRIVIAL(info) << "command_stop_buzzer";
+    return this->publish_json(j.dump(), 1);
+}
+
+int MachineObject::command_purification_disable()
+{
+    const json j = GUI::build_purification_disable(std::to_string(MachineObject::m_sequence_id++));
+    BOOST_LOG_TRIVIAL(info) << "command_purification_disable";
+    return this->publish_json(j.dump(), 1);
+}
+
+int MachineObject::command_ams_drying_stop()
+{
+    const json j = GUI::build_ams_drying_stop(std::to_string(MachineObject::m_sequence_id++));
+    BOOST_LOG_TRIVIAL(info) << "command_ams_drying_stop";
+    return this->publish_json(j.dump());
+}
+
+int MachineObject::command_ack_proceed(const nlohmann::json& action_json)
+{
+    json        payload;
+    std::string why;
+    if (!GUI::build_ack_proceed(action_json, std::to_string(MachineObject::m_sequence_id++), payload, why)) {
+        BOOST_LOG_TRIVIAL(error) << "command_ack_proceed: " << why;
+        return -1;
+    }
+    BOOST_LOG_TRIVIAL(info) << "command_ack_proceed: " << payload.dump();
+    return this->publish_json(payload.dump());
+}
+
+int MachineObject::command_dont_remind_next_time(const nlohmann::json& action_json)
+{
+    json        payload;
+    std::string why;
+    if (!GUI::build_dont_remind_next_time(action_json, std::to_string(MachineObject::m_sequence_id++), payload, why)) {
+        BOOST_LOG_TRIVIAL(error) << "command_dont_remind_next_time: " << why;
+        return -1;
+    }
+    BOOST_LOG_TRIVIAL(info) << "command_dont_remind_next_time: " << payload.dump();
+    return this->publish_json(payload.dump(), 1);
+}
+
+std::string MachineObject::command_error_ignore_key(const std::string& dev_id, int print_error)
+{
+    // Same spelling as StatusPanel::error_ignore_key, deliberately: the two sets are different
+    // objects only because the windows are, and a key that drifted would make a code look
+    // dismissed on one path and not the other.
+    return dev_id + "/" + GUI::HMSQuery::print_error_code(print_error);
+}
+
+// The printer refused a command this slicer sent. Upstream's add_command_error_code_dlg, with the
+// fork's own resolvers underneath: the sentence comes from HMSQuery::describe_print_error (so this
+// window says what the Device tab and the hub say for the same code, never a bare number) and the
+// buttons from resolve_print_error_actions against the shipped hms_action_<devtype>.json.
+//
+// Everything happens on the GUI thread through CallAfter, because parse_json runs on the MQTT
+// thread and a wxWindow may not be made there. The weak token is what makes that safe: a
+// MachineObject destroyed between the reply and the callback (the printer went away, the user
+// switched devices) drops the token, and the callback returns without touching `this`.
+void MachineObject::add_command_error_code_dlg(int command_err, const nlohmann::json& action_json)
+{
+    if (command_err <= 0) return;
+
+    BOOST_LOG_TRIVIAL(error) << "add_command_error_code_dlg: dev " << dev_id << " refused a command, err_code "
+                             << GUI::HMSQuery::print_error_code(command_err)
+                             << (action_json.is_null() ? " (no action json)" : " (with action json)");
+
+    // Dismissed on this printer already in this session. The same refusal repeats for as long as
+    // the condition holds, so without this every retry stacks another window.
+    if (m_command_error_ignored.count(command_error_ignore_key(dev_id, command_err))) {
+        BOOST_LOG_TRIVIAL(info) << "add_command_error_code_dlg: " << GUI::HMSQuery::print_error_code(command_err)
+                                << " already dismissed for this printer, not showing it again";
+        return;
+    }
+
+    // Kept before the window exists, so the hub and the app can offer Proceed / Don't remind for
+    // this code whether or not anyone is looking at the desktop.
+    m_command_error_code        = command_err;
+    m_command_error_action_json = action_json;
+
+    GUI::wxGetApp().CallAfter([this, command_err, action_json, token = std::weak_ptr<int>(m_token)] {
+        if (token.expired()) return;
+
+        GUI::HMSQuery* q = GUI::wxGetApp().get_hms_query();
+        if (!q) return;
+
+        const std::string code = GUI::HMSQuery::print_error_code(command_err);
+
+        // The same resolver chain StatusPanel::update_error_message uses, so a command error and a
+        // status error with the same code draw the same dialog.
+        std::vector<int> table_actions;
+        const wxString   image_url = q->query_print_error_url_action(dev_id, command_err, table_actions);
+        bool             used_fallback = false;
+        const std::vector<int> used_button = GUI::resolve_print_error_actions(table_actions, used_fallback);
+        BOOST_LOG_TRIVIAL(info) << "command error " << code << ": table actions ["
+                                << GUI::format_action_ids(table_actions) << "] -> buttons ["
+                                << GUI::format_action_ids(used_button) << "]"
+                                << (used_fallback ? " (generic fallback)" : "");
+
+        // Parentless on purpose. Upstream parents this on its main frame, but MainFrame is only
+        // forward-declared here and DeviceManager.cpp must not start including it for one cast;
+        // PrintErrorDialog is a DPIFrame (a top-level window), so a null parent is well-formed and
+        // the window still shows, rescales and closes the same way. The status-push dialog keeps
+        // its StatusPanel parent, which is what makes it sit over the Device tab.
+        //
+        // Made once and re-dressed afterwards. update_title_style hides the previous refusal's
+        // buttons before laying out the new set, so a second refusal cannot leave the first one's
+        // buttons on screen.
+        if (!m_command_error_dlg)
+            m_command_error_dlg = new GUI::PrintErrorDialog(nullptr, wxID_ANY, _L("Error"));
+        GUI::PrintErrorDialog* dlg = m_command_error_dlg;
+
+        // A refused command has no job to resume, so no job_id is passed: the dialog greys the
+        // buttons that carry one rather than sending something firmware would drop.
+        dlg->set_error_context(this, command_err, std::string());
+        // ...and set_error_context clears any previous blob, so the new one goes on after it.
+        if (!action_json.is_null()) dlg->set_action_json(action_json);
+        dlg->set_suppress_handler([this, token = std::weak_ptr<int>(m_token)](int c) {
+            if (token.expired()) return;
+            BOOST_LOG_TRIVIAL(info) << "command error " << GUI::HMSQuery::print_error_code(c)
+                                    << " suppressed by the user for dev " << dev_id;
+            m_command_error_ignored.insert(command_error_ignore_key(dev_id, c));
+        });
+        dlg->update_title_style(_L("Error"), used_button, nullptr);
+        dlg->update_text_image(q->describe_print_error(dev_id, command_err), GUI::HMSQuery::pretty_code(code), image_url);
+        dlg->on_show();
+    });
+}
+
 int MachineObject::command_upgrade_confirm()
 {
     BOOST_LOG_TRIVIAL(info) << "command_upgrade_confirm";
@@ -2067,7 +2265,9 @@ int MachineObject::command_ams_select_tray(std::string tray_id)
 int MachineObject::command_ams_control(std::string action)
 {
     //valid actions
-    if (action == "resume" || action == "reset" || action == "pause" || action == "done") {
+    // "abort" is what the ABORT action id on the print-error dialog sends; the fork's copy of
+    // this method predates that button and dropped it on the floor.
+    if (action == "resume" || action == "reset" || action == "pause" || action == "done" || action == "abort") {
         json j;
         j["print"]["command"] = "ams_control";
         j["print"]["sequence_id"] = std::to_string(MachineObject::m_sequence_id++);
@@ -3351,6 +3551,27 @@ int MachineObject::parse_json(std::string payload, bool key_field_only)
                         }
                     }
                 }
+
+                // ---- a command the slicer sent came back refused ----
+                //
+                // Any reply on the "print" topic that carries our own sequence id together with an
+                // "err_code" is the printer saying no to something this slicer asked for, and
+                // until now the fork dropped it on the floor: the command simply appeared to do
+                // nothing. The dialog is the same PrintErrorDialog the status-push errors use, so
+                // the text and the button set come from the shipped hms_action tables either way.
+                //
+                // "err_index" is what makes the error answerable. When it is there the whole reply
+                // is the action_json blob - it names the command to re-send and the index to
+                // suppress - and Proceed / Don't remind next time are built from it. When it is
+                // absent the dialog still shows, with those two buttons greyed: there is nothing
+                // to build them from. Upstream passes an empty json in exactly that case.
+                if (!key_field_only) {
+                    int  command_err = 0;
+                    json action_json;
+                    if (GUI::parse_command_error_reply(jj, is_studio_cmd(sequence_id), command_err, action_json))
+                        add_command_error_code_dlg(command_err, action_json);
+                }
+
                 if (jj["command"].get<std::string>() == "push_status") {
                     m_push_count++;
                     last_push_time = last_update_time;
@@ -3387,8 +3608,16 @@ int MachineObject::parse_json(std::string payload, bool key_field_only)
                             mc_left_time = j["print"]["mc_remaining_time"].get<int>() * 60;
                     }
                     if (jj.contains("print_error")) {
-                        if (jj["print_error"].is_number())
+                        if (jj["print_error"].is_number()) {
                             print_error = jj["print_error"].get<int>();
+                            // A stored action_json answers exactly one error code. The status push
+                            // is where a code clears or is replaced, so this is where a blob that
+                            // no longer belongs to what the printer reports is dropped - otherwise
+                            // a "Proceed" composed for a refused command could be sent against the
+                            // unrelated fault that replaced it.
+                            if (m_command_error_code != 0 && m_command_error_code != print_error)
+                                clear_command_error_action_json();
+                        }
                     }
 
                     if (jj.contains("sdcard")) {
@@ -6225,7 +6454,153 @@ void DeviceManager::check_pushing()
     }
 }
 
+// --------------------------------------------------- the LAN reconnect tick ----
+//
+// One reconnect attempt, the same four steps the Device tab runs when it re-selects a LAN printer
+// (set_selected_machine's LAN branch): drop whatever session the agent holds, clear the stale
+// MachineObject state, dial the printer's own broker at <ip>:8883 with its access code, and mark
+// the object LAN-connected so the UI stops showing "connecting".
+void DeviceManager::lan_reconnect_now(MachineObject* obj, const char* why)
+{
+    if (!obj || !m_agent) return;
+    LanReconnect& r = m_lan_reconnect[obj->dev_id];
+    BOOST_LOG_TRIVIAL(info) << "lan_reconnect: " << why << " dev_id=" << obj->dev_id << " ip=" << obj->dev_ip
+                            << " attempt=" << (r.attempts + 1) << " next_backoff_ms=" << lan_backoff_ms(r.attempts + 1);
+    try {
+        m_agent->disconnect_printer();
+        obj->reset();
+#if !BBL_RELEASE_TO_PUBLIC
+        obj->connect(false, Slic3r::GUI::wxGetApp().app_config->get("enable_ssl_for_mqtt") == "true" ? true : false);
+#else
+        obj->connect(false, obj->local_use_ssl_for_mqtt);
+#endif
+        obj->set_lan_mode_connection_state(true);
+    } catch (...) {
+        BOOST_LOG_TRIVIAL(warning) << "lan_reconnect: attempt threw for dev_id=" << obj->dev_id;
+    }
+}
 
+// GUI thread, once a second (RemoteAccess's GuiHeartbeat). Cheap: in the normal case it is one
+// map lookup and one is_connected() per selected LAN printer.
+//
+// The rule: a LAN-mode printer that has looked !is_connected() for longer than the grace window
+// gets a reconnect, then another after 15 s, 30 s, 60 s, 60 s... A push that lands resets the
+// ladder. Cloud-mode printers are left alone - the agent's own refresh_connection owns those, and
+// it only makes sense with a login.
+void DeviceManager::lan_reconnect_tick()
+{
+    if (!m_agent) return;
+
+    // Which printer this instance is meant to hold a session to.
+    //
+    // The hidden hub-managed instance owns the choice itself: nobody is there to pick one on the
+    // Device tab, so with no selection it held no LAN session and every Bambu printer went into
+    // the watcher's snapshot unwatched - which is exactly why a Bambu error reached nobody until
+    // the owner opened the visible slicer and went to the Device page. The networking SDK gives an
+    // agent one LAN session at a time (bambu_network_disconnect_printer takes no dev_id and
+    // bambu_network_connect_printer replaces whatever the agent had), so it is a round robin, not
+    // a fan-out: each candidate holds the session for LAN_WATCH_DWELL_MS in turn.
+    //
+    // The visible slicer is untouched: whatever the user selected is what is kept alive.
+    std::vector<MachineObject*> want;
+    const bool hidden = Slic3r::GUI::wxGetApp().is_hub_managed();
+    if (hidden) {
+        if (MachineObject* pick = lan_watch_rotate(); pick) want.push_back(pick);
+    } else if (MachineObject* sel = get_selected_machine(); sel && sel->is_lan_mode_printer()) {
+        want.push_back(sel);
+    }
+
+    const long long now = (long long) std::chrono::duration_cast<std::chrono::milliseconds>(
+                              std::chrono::system_clock::now().time_since_epoch()).count();
+
+    // Drop bookkeeping for printers that are no longer candidates, so a printer that comes back
+    // starts from a clean ladder rather than an hour-old backoff.
+    for (auto it = m_lan_reconnect.begin(); it != m_lan_reconnect.end();) {
+        bool still = false;
+        for (MachineObject* o : want)
+            if (o->dev_id == it->first) still = true;
+        it = still ? std::next(it) : m_lan_reconnect.erase(it);
+    }
+
+    for (MachineObject* obj : want) {
+        if (!obj->has_access_right() || obj->dev_ip.empty()) continue;
+        LanReconnect& r = m_lan_reconnect[obj->dev_id];
+        if (obj->is_connected()) {
+            // A push landed inside DISCONNECT_TIMEOUT: the session is alive, so the ladder resets.
+            if (r.attempts != 0 || r.down_since != 0)
+                BOOST_LOG_TRIVIAL(info) << "lan_reconnect: dev_id=" << obj->dev_id << " is back (after "
+                                        << r.attempts << " attempt(s))";
+            r = LanReconnect();
+            continue;
+        }
+        if (r.down_since == 0) {
+            r.down_since = now;
+            BOOST_LOG_TRIVIAL(info) << "lan_reconnect: dev_id=" << obj->dev_id
+                                    << " looks disconnected; grace " << LAN_RECONNECT_GRACE_MS << " ms";
+            continue;
+        }
+        if (now - r.down_since < LAN_RECONNECT_GRACE_MS) continue;
+        if (r.last_try != 0 && now - r.last_try < lan_backoff_ms(r.attempts)) continue;
+        r.last_try = now;
+        ++r.attempts;
+        lan_reconnect_now(obj, r.attempts == 1 ? "first retry" : "backoff retry");
+    }
+}
+
+// The round robin the hidden instance runs over its LAN printers, because the SDK gives it one
+// session to spend. Each candidate holds the session for LAN_WATCH_DWELL_MS; the tick above then
+// keeps that one alive. A dwell long enough to see a state change (a print starting, finishing,
+// erroring) and short enough that a three-printer shop is round in a couple of minutes.
+//
+// Candidates: every Bambu machine this instance knows with a saved access code and an address -
+// the same test the Device tab applies before it offers to connect. Cloud-bound machines are not
+// here: with a login the agent's own server session already reports all of them at once.
+MachineObject* DeviceManager::lan_watch_rotate()
+{
+    std::vector<MachineObject*> cands;
+    for (const auto& kv : get_my_machine_list()) {
+        MachineObject* m = kv.second;
+        if (!m || !m->is_lan_mode_printer()) continue;
+        if (!m->has_access_right() || m->dev_ip.empty()) continue;
+        cands.push_back(m);
+    }
+    if (cands.empty()) {
+        m_lan_watch_id.clear();
+        return nullptr;
+    }
+    std::sort(cands.begin(), cands.end(), [](MachineObject* a, MachineObject* b) { return a->dev_id < b->dev_id; });
+
+    const long long now = (long long) std::chrono::duration_cast<std::chrono::milliseconds>(
+                              std::chrono::system_clock::now().time_since_epoch()).count();
+
+    // The one currently holding the session, if it is still a candidate and its dwell has not run
+    // out. A single printer never rotates away from itself.
+    auto held = std::find_if(cands.begin(), cands.end(), [this](MachineObject* m) { return m->dev_id == m_lan_watch_id; });
+    const bool pinned = m_lan_watch_pinned_at != 0 && now - m_lan_watch_pinned_at < LAN_WATCH_PIN_MS;
+    if (held != cands.end() && (cands.size() == 1 || pinned || now - m_lan_watch_since < LAN_WATCH_DWELL_MS))
+        return *held;
+
+    size_t next = 0;
+    if (held != cands.end()) next = (size_t)(std::distance(cands.begin(), held) + 1) % cands.size();
+    MachineObject* pick = cands[next];
+    if (pick->dev_id != m_lan_watch_id) {
+        BOOST_LOG_TRIVIAL(info) << "lan_watch: hidden instance now watching dev_id=" << pick->dev_id
+                                << " (" << (next + 1) << "/" << cands.size() << ", dwell " << LAN_WATCH_DWELL_MS << " ms)";
+        m_lan_watch_id        = pick->dev_id;
+        m_lan_watch_since     = now;
+        m_lan_watch_pinned_at = 0; // the rotation's own choice is never pinned
+        m_lan_reconnect.erase(pick->dev_id);
+        // Take the session now rather than waiting out the grace window: the previous holder's
+        // pushes have stopped either way, and the tick's grace is for a session that dropped on
+        // its own, not one we deliberately moved.
+        lan_reconnect_now(pick, "watch rotation");
+        m_lan_reconnect[pick->dev_id].last_try = now;
+        m_lan_reconnect[pick->dev_id].attempts = 1;
+        m_lan_reconnect[pick->dev_id].down_since = now;
+        selected_machine = pick->dev_id; // so RemoteEvents / get_selected_machine see it
+    }
+    return pick;
+}
 
 void DeviceManager::on_machine_alive(std::string json_str)
 {
@@ -6573,6 +6948,16 @@ bool DeviceManager::set_selected_machine(std::string dev_id, bool need_disconnec
         }
     }
     selected_machine = dev_id;
+    // Somebody chose this printer deliberately - the Device tab, or the hub's send / control path
+    // in the hidden instance. The hidden instance's LAN watch rotation leaves that choice alone
+    // for a while (LAN_WATCH_PIN_MS) so an upload or a command in flight is not cut off by the
+    // session being handed to the next printer in the ring.
+    if (!dev_id.empty()) {
+        m_lan_watch_id    = dev_id;
+        m_lan_watch_since = (long long) std::chrono::duration_cast<std::chrono::milliseconds>(
+                                std::chrono::system_clock::now().time_since_epoch()).count();
+        m_lan_watch_pinned_at = m_lan_watch_since;
+    }
     return true;
 }
 
@@ -6739,8 +7124,14 @@ void DeviceManager::parse_user_print_info(std::string body)
                     obj->dev_name = elem["dev_name"].get<std::string>();
                 if (!elem["dev_online"].is_null())
                     obj->m_is_online = elem["dev_online"].get<bool>();
-                if (elem.contains("dev_model_name") && !elem["dev_model_name"].is_null())
-                    obj->printer_type = elem["dev_model_name"].get<std::string>();
+                if (elem.contains("dev_model_name") && !elem["dev_model_name"].is_null()) {
+                    // The cloud list reports the same model codes as SSDP, sub-series included, so
+                    // it goes through the same resolution; an unknown code keeps the raw value so
+                    // the "no printer definition" message can still name it.
+                    const std::string code = elem["dev_model_name"].get<std::string>();
+                    const std::string resolved = MachineObject::parse_printer_type(code);
+                    obj->printer_type = resolved.empty() ? code : resolved;
+                }
                 if (!elem["task_status"].is_null())
                     obj->iot_print_status = elem["task_status"].get<std::string>();
                 if (elem.contains("dev_product_name") && !elem["dev_product_name"].is_null())
@@ -6821,7 +7212,34 @@ json DeviceManager::filaments_blacklist = json::object();
 
 std::string DeviceManager::parse_printer_type(std::string type_str)
 {
-    return get_value_from_config<std::string>(type_str, "printer_type");
+    // The straight case: resources/printers/<code>.json exists.
+    std::string type = get_value_from_config<std::string>(type_str, "printer_type");
+    if (! type.empty() || type_str.empty())
+        return type;
+
+    // A later hardware revision reports a sub-series code ("O1C2-V2" for an H2C) that has no file
+    // of its own; the parent definition lists it under "subseries". Without this an H2C from a
+    // newer batch showed as an unknown model and Send refused with "incompatible model". The
+    // table is read once per run - the folder does not change while the app is running.
+    static const std::map<std::string, std::vector<std::string>> subseries =
+        GUI::load_model_subseries(Slic3r::resources_dir() + "/printers");
+    std::string parent = GUI::resolve_model_subseries(type_str, subseries);
+    if (parent.empty()) {
+        // A revision newer than the table we ship: "-V<n>" is Bambu's revision suffix, so try the
+        // bare code before giving up.
+        const std::string bare = GUI::strip_model_revision(type_str);
+        if (bare != type_str)
+            parent = bare;
+    }
+    if (! parent.empty()) {
+        type = get_value_from_config<std::string>(parent, "printer_type");
+        if (! type.empty()) {
+            BOOST_LOG_TRIVIAL(info) << "parse_printer_type: model code " << type_str << " resolved to " << type;
+            return type;
+        }
+    }
+    BOOST_LOG_TRIVIAL(warning) << "parse_printer_type: no printer definition for model code " << type_str;
+    return "";
 }
 std::string DeviceManager::get_printer_display_name(std::string type_str)
 {

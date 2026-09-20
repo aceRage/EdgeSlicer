@@ -41,6 +41,8 @@ struct Info
     std::string              version;
     std::vector<std::string> ips; // LAN IPv4 addresses, default-route one first (phone on only)
     std::string              remote_url; // https://<machine>.<tailnet>.ts.net/r/<token>/ while Tailscale remote access is on
+    std::string              relay_url;  // the hosted-relay link; always "" in phase 0 (nothing hosts it yet)
+    std::string              hubid;      // this data dir's durable relay identity (16 hex chars); see RemoteHub::Testing::hubid_from_public_key
     std::string url() const;      // http://<ip>:<port>/r/<token>/ or ""
     std::string json() const;     // what the Stream tab's phone modal shows: {on, port, token, ips, url}
 };
@@ -68,6 +70,103 @@ std::string hub_dir();
 std::string instances_dir();
 std::string uploads_dir();
 std::string saves_dir();
+
+// ---- pure parsing helpers, exposed for tests (slic3rutils remote_hub_tests.cpp) ----
+// Each of these takes captured text rather than running the command itself, so the parsing rule
+// can be exercised with no process, no socket and no real netstat/tailscale on the test machine.
+namespace Testing {
+
+// One row of `netstat -ano` for a TCP port in LISTENING state: the PID that holds it, or 0 if the
+// port does not appear as LISTENING in `text`. Local address column may be "0.0.0.0:<port>",
+// "127.0.0.1:<port>" or "[::]:<port>" depending on what bound it.
+long netstat_holder_pid(const std::string& netstat_text, int port);
+
+// The image name (no path, no ".exe" stripped) `tasklist /fi "PID eq <n>" /fo csv /nh` printed
+// for that pid, or "" if the row is not there (process exited between the two calls, or the
+// filter matched nothing).
+std::string tasklist_image_name(const std::string& tasklist_csv_text);
+
+// `tailscale serve status --json`'s "Web" -> "<domain>:443" -> Handlers -> "/" -> Proxy field is
+// "http://127.0.0.1:<port>"; this pulls that port back out, or 0 if nothing is being served.
+int serve_status_target_port(const std::string& serve_status_json_text);
+
+// ---- remote access (Tailscale) as one state ----
+// Everything the hub page needs to draw the remote-access card, and the only place the wording
+// lives. The classifier below turns what `tailscale status --json` / `tailscale serve status
+// --json` said into exactly one of these, so the page never has to re-derive "installed but not
+// signed in" out of three separate booleans.
+enum class RemoteAccessState {
+    NotInstalled,  // no tailscale CLI on this PC -> offer the download
+    NotSignedIn,   // installed, BackendState=NeedsLogin -> `tailscale login`
+    NotRunning,    // installed and signed in, backend is Stopped/NoState/... -> start it
+    HttpsOff,      // running, but the tailnet issues no certificates -> admin console > DNS
+    Serving,       // running, certificates on, Serve is pointed at this hub: the URL works
+    Ready,         // running, certificates on, remote access simply switched off
+    Error          // anything else the CLI said
+};
+
+// What the classifier produced: the state, the one sentence the card shows, and the link the card's
+// button opens (empty when there is nothing to open).
+struct RemoteAccessInfo
+{
+    RemoteAccessState state { RemoteAccessState::NotInstalled };
+    std::string       message;
+    std::string       action_url;
+    std::string       action;   // the button's label ("Install Tailscale", "Try again", ...) or ""
+};
+
+const char* remote_access_state_name(RemoteAccessState s); // "not_installed", "not_signed_in", ...
+
+// The classifier itself: pure, no CLI, no socket. `installed` is "the tailscale CLI ran at all",
+// `backend` is BackendState, `https` is "CertDomains is non-empty", `serving` is "Serve forwards
+// the root to our loopback port", `on` is the hub's own remote_on switch, `error` is whatever the
+// CLI printed (only used for RemoteAccessState::Error).
+RemoteAccessInfo classify_remote_access(bool installed, const std::string& backend, bool https,
+                                        bool serving, bool on, const std::string& error);
+
+// ---- hub identity (design_hosted_relay.md section 2) ----
+// `hubid` = the first 16 hex characters of SHA-256 over the 32 raw bytes of the Ed25519 public key.
+// Durable: minted once per data dir, kept in settings.json, and what a relay will later know this
+// hub by. Returns "" if the key is not 32 bytes.
+std::string hubid_from_public_key(const std::vector<unsigned char>& public_key);
+std::string hubid_from_public_key_hex(const std::string& public_key_hex);
+
+// The identity as it is stored and read back. The private half never leaves settings.json: it is
+// not in hub.json, not in /pair, not in the hub info JSON and never logged.
+struct HubIdentity
+{
+    std::string public_hex;   // 32 bytes, hex
+    std::string private_hex;  // 32 bytes (the Ed25519 seed), hex - secret
+    std::string hubid;        // derived, 16 hex chars
+    bool        valid() const { return public_hex.size() == 64 && private_hex.size() == 64 && hubid.size() == 16; }
+};
+
+// settings.json round trip for the identity: what gets written under "identity", and what a later
+// start reads back out of it. parse returns an invalid HubIdentity when the object is missing or
+// malformed, which is the signal to mint a fresh pair.
+std::string  identity_settings_dump(const HubIdentity& id);              // the JSON object, as text
+HubIdentity  identity_from_settings(const std::string& settings_json_text);
+
+// ---- the loopback trust of Tailscale Serve's headers (design section 6.6) ----
+// Tailscale Serve terminates on loopback and sets Tailscale-User-Login / X-Forwarded-Proto,
+// stripping whatever the client sent. Those two headers are therefore trusted from a loopback peer
+// and from nowhere else - and phase 1's relayed streams will also arrive on loopback, so this is
+// the single place that decides it and the single place a relay stream will have to say "no" in.
+// true = the request may keep ts_login / fwd_proto; false = both must be cleared before anything
+// looks at them.
+bool trusted_proxy_headers(bool peer_is_loopback, bool via_relay);
+
+// ---- the pairing document's identity and origins ----
+// The part of pair_json() that is pure: the three named origins and this hub's identity. Pulled
+// out so the shape the apps read generically can be exercised without a running hub. `relay` is
+// always present and always "" in phase 0 - a client that handles an empty origin correctly today
+// needs no change when phase 1 fills it in. The private key is not an argument here and never
+// appears in the result.
+std::string pair_identity_json(const std::string& lan_url, const std::string& remote_url,
+                               const std::string& relay_url, const std::string& hubid,
+                               const std::string& public_key_hex);
+
+} // namespace Testing
 
 } // namespace RemoteHub
 } // namespace GUI

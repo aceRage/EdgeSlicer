@@ -348,8 +348,7 @@ static std::string plaintext_for(const json& e)
     if (e.is_object() && e.contains("printer") && e["printer"].is_object()) who = ev_str(e["printer"], "name");
     if (body.empty()) body = title;
     if (!who.empty() && body.find(who) == std::string::npos) body = who + ": " + body;
-    const std::string code = ev_str(e, "code");
-    if (!code.empty()) body += " (" + code + ")";
+    body = RemoteEvents::notification_body(body, ev_str(e, "code"));
     p["title"]    = title;
     p["body"]     = body;
     p["kind"]     = ev_str(e, "kind");
@@ -359,6 +358,14 @@ static std::string plaintext_for(const json& e)
                                 ? ev_str(e["printer"], "id") : std::string();
     if (!pid.empty()) p["printer_id"] = pid;
     p["tag"] = pid + ":" + ev_str(e, "kind");
+    // The error code, when there is one. Small, and it is the key the app needs: a notification
+    // that says "the toolhead camera is not working" is a sentence, and the buttons that go with
+    // it are fetched from /api/printers or /summary by this code. Carried here rather than the
+    // whole actions array, which would not survive the plaintext cap.
+    {
+        const std::string code = ev_str(e, "code");
+        if (!code.empty()) p["code"] = code;
+    }
     if (e.is_object() && e.contains("id") && e["id"].is_number_integer()) p["id"] = e["id"];
     if (e.is_object() && e.contains("time") && e["time"].is_number_integer()) p["time"] = e["time"];
     std::string out = p.dump();

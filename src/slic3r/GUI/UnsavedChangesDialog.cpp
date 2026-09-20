@@ -1347,6 +1347,19 @@ static wxString get_string_value(std::string opt_key, const DynamicPrintConfig& 
             out = double_to_string(opt->value) + (opt->percent ? "%" : "");
         return out;
     }
+    case coFloatsOrPercents: {
+        const auto *values = config.opt<ConfigOptionFloatsOrPercents>(opt_key);
+        // Orca #15472: Preset comparison may request the entire vector instead of an indexed entry.
+        if (!values)
+            return _L("Undef");
+        if (orig_opt_idx < 0)
+            return from_u8(values->serialize());
+        if (opt_idx < (int) values->size()) {
+            const FloatOrPercent &value = values->get_at(opt_idx);
+            return double_to_string(value.value) + (value.percent ? "%" : "");
+        }
+        return _L("Undef");
+    }
     case coEnum: {
         return get_string_from_enum(opt_key, config,
             opt_key == "top_surface_pattern" ||
@@ -1672,6 +1685,9 @@ void UnsavedChangesDialog::update_tree(Preset::Type type, PresetCollection* pres
     else
         presets_list.emplace_back(presets_);
 
+    const auto *nozzle_diameter = wxGetApp().preset_bundle->printers.get_edited_preset().config.option<ConfigOptionFloats>("nozzle_diameter");
+    const bool  multiple_extruders = nozzle_diameter && nozzle_diameter->values.size() > 1;
+
     // Display a dialog showing the dirty options in a human readable form.
     for (PresetCollection* presets : presets_list)
     {
@@ -1705,32 +1721,57 @@ void UnsavedChangesDialog::update_tree(Preset::Type type, PresetCollection* pres
             }
         }
 
+        auto variant_key      = Preset::get_iot_type_string(type) + "_extruder_variant";
+        auto id_key           = Preset::get_iot_type_string(type) + "_extruder_id";
+        // Orca: Dirty indices belong to the edited config, which may contain newly added variants.
+        auto extruder_variant = dynamic_cast<ConfigOptionStrings const *>(new_config.option(variant_key));
+        auto extruder_id      = dynamic_cast<ConfigOptionInts const *>(new_config.option(id_key));
+
         for (const std::string& opt_key : dirty_options) {
-            const Search::Option& option = searcher.get_option(opt_key, type);
-            if (option.opt_key() != opt_key) {
-                // Only show the fallback for user-facing option types
-                // (bool/float/int/enum). Internal keys like IDs and
-                // serialized blobs are coString — skip those silently.
-                const ConfigOption* o = old_config.option(opt_key);
+            int            variant_index = -2;
+            Search::Option option        = searcher.get_option(opt_key, type, variant_index);
+            if (variant_index == -2) {
+                // Edge #21 / Orca #15472: keep user-facing settings visible when they are
+                // absent from the search index. Do not fall back to options[0].
+                const std::string   pure_key = get_pure_opt_key(opt_key);
+                const ConfigOption *o        = old_config.option(pure_key);
+                if (!o) o = new_config.option(pure_key);
+                if (!o) o = old_config.option(opt_key);
                 if (!o) o = new_config.option(opt_key);
                 if (!o || o->type() == coString || o->type() == coStrings)
                     continue;
-                wxString label = from_u8(opt_key);
-                if (old_config.def()) {
-                    const ConfigOptionDef* def = old_config.def()->get(opt_key);
-                    if (def && !def->label.empty())
-                        label = def->label;
-                }
-                PresetItem pi = {type, opt_key,
-                    _L("Other"), wxEmptyString,
-                    label,
-                    get_string_value(opt_key, old_config),
-                    get_string_value(opt_key, new_config)};
-                m_presetitems.push_back(pi);
-                continue;
+                const ConfigOptionDef *def = print_config_def.get(pure_key);
+                if (!def && old_config.def())
+                    def = old_config.def()->get(pure_key);
+                const std::string def_label = def ? (def->full_label.empty() ? def->label : def->full_label) : std::string();
+                option.label_local = (def_label.empty() ? from_u8(opt_key) : _L(def_label)).ToStdWstring();
+                option.category_local = (def && !def->category.empty() ?
+                    Tab::translate_category(from_u8(def->category), type) : _L("Other")).ToStdWstring();
             }
 
-            PresetItem pi = {type, opt_key, option.category_local, option.group_local, option.label_local, get_string_value(opt_key, old_config), get_string_value(opt_key, new_config)};
+            wxString category = option.category_local;
+            wxString label    = option.label_local;
+            if (type == Preset::TYPE_PRINTER && variant_index >= 0 && option.category == L"Machine limits") {
+                // Orca: silent_mode is obsolete on import, but its option and two-column UI still exist.
+                // Keep mode labels for configs that explicitly enable it; omit them in the default single-mode UI.
+                if (new_config.option("silent_mode") && new_config.opt_bool("silent_mode"))
+                    label += " (" + (variant_index % 2 == 0 ? _L("Normal") : _L("Silent")) + ")";
+            }
+            if (variant_index >= 0 && extruder_variant && variant_index < (int) extruder_variant->size()) {
+                // Orca: Match the untranslated category and use the same extruder names as the printer tabs.
+                if (option.category.compare(0, 9, L"Extruder ") == 0)
+                    category = _L("Extruder");
+                wxString variant_label = from_u8(extruder_variant->values[variant_index]);
+                // Orca: An extruder name only disambiguates variants on printers with multiple extruders.
+                if (multiple_extruders && extruder_id && variant_index < (int) extruder_id->size() && extruder_id->values[variant_index] > 0) {
+                    const wxString extruder_name = Tab::translate_category(
+                        wxString::Format("Extruder %d", extruder_id->values[variant_index]), Preset::TYPE_PRINTER);
+                    variant_label = extruder_name + " (" + variant_label + ")";
+                }
+                category = variant_label + ": " + category;
+            }
+
+            PresetItem pi = {type, opt_key, category, option.group_local, label, get_string_value(opt_key, old_config), get_string_value(opt_key, new_config)};
             m_presetitems.push_back(pi);
 
         }

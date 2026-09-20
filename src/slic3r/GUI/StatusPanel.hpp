@@ -32,6 +32,9 @@
 #include "Widgets/AMSControl.hpp"
 #include "Widgets/FanControl.hpp"
 #include "HMS.hpp"
+#include "PrintErrorCommands.hpp"
+#include <set>
+#include <string>
 
 class StepIndicator;
 
@@ -450,6 +453,7 @@ public:
     void reset_temp_misc_control();
     int before_error_code = 0;
     int skip_print_error = 0;
+
     wxBoxSizer *create_ams_group(wxWindow *parent);
     wxBoxSizer *create_settings_group(wxWindow *parent);
 
@@ -475,6 +479,21 @@ protected:
     AMSMaterialsSetting *m_filament_setting_dlg{nullptr};
 
     PrintErrorDialog* m_print_error_dlg = nullptr;
+
+    // Errors the user has told this dialog not to raise again, keyed by "<dev_id>/<8hex code>".
+    //
+    // Two reasons this is not just `skip_print_error`. It is per printer, so silencing a code on
+    // one machine does not silence it on the one next to it; and it is a set, so a second error
+    // arriving does not un-silence the first. Bambu Studio has no equivalent - upstream leans on
+    // the firmware's own err_ignored/rm_idx lists to stop re-raising the code, which works when
+    // the printer honours them and leaves the popup reappearing every poll when it does not.
+    //
+    // Deliberately not persisted: "don't remind me" means for this session. A power cycle or a
+    // new print is exactly when the user should be told about a hardware fault again.
+    std::set<std::string> m_ignored_errors;
+
+    // "<dev_id>/<8hex>" for the (printer, code) pair this key identifies.
+    static std::string error_ignore_key(const std::string& dev_id, int print_error);
     SecondaryCheckDialog* m_print_error_dlg_no_action = nullptr;
     SecondaryCheckDialog* abort_dlg = nullptr;
     SecondaryCheckDialog* con_load_dlg = nullptr;

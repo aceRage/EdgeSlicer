@@ -5374,15 +5374,29 @@ TEST_CASE("build_mixed_deletion_painting_remap: duplicate ids in delete list ded
 //   flip this test green, and [!shouldfail] would never fire its "unexpectedly
 //   succeeded" signal. It is documentation, not a regression sentinel.
 //
+//   TAGGING: deliberately NOT tagged [MixedFilament]. Catch2 ignores the [.]
+//   hidden flag as soon as ANY filter is supplied — a test runs if
+//   (!testSpec.hasFilters() && !isHidden()) || (testSpec.hasFilters() &&
+//   matchTest(...)), and that second arm never consults isHidden(). So a bare
+//   `ctest` / `libslic3r_tests` run correctly skips this case, but running the
+//   suite tag `libslic3r_tests "[MixedFilament]"` would drag it back in and
+//   report a red `1 failed` that is really this always-failing documentation
+//   case. Reaching it on purpose still works through its own tag:
+//   `libslic3r_tests "[config_extruder_remap]"`. Same convention as the [.]
+//   demo exporters in test_flexi_joint.cpp, which also pair [.] with a private
+//   tag only.
+//
 //   PRE-EXISTING: the naive per-deletion config decrement (GUI_ObjectList.cpp:
 //   857-969) predates this PR; the cascade-aware config remap is tracked as a
 //   follow-up (see Plater.cpp remap_config_extruder — it currently skips
 //   out-of-range config references silently). When the follow-up lands, rewrite
-//   the `actual` side to assert the production result == 4 and remove the [.]
-//   tag.
+//   the `actual` side to assert the production result == 4; only then does this
+//   become a real sentinel that can be un-hidden (drop [.] and add
+//   [MixedFilament] back). Until the `actual` side calls production, keep both
+//   the [.] tag and the [MixedFilament] omission.
 // ============================================================================
 TEST_CASE("config_extruder cascade: per-deletion decrement under-counts cascade rows (CURRENT BUG)",
-          "[MixedFilament][config_extruder_remap][.]")
+          "[config_extruder_remap][.]")
 {
     // --- Correct side: real libslic3r cascade + production kept-aware remap ---
     MixedAutoGenerateGuard guard(false); // keep add_custom_filament from auto-generating gradient rows
@@ -5447,4 +5461,290 @@ TEST_CASE("Dual-color primary drops invalid tokens and falls back on empty", "[M
     REQUIRE(parts.size() == 2); // invalid token whitelisted away
     CHECK(FilamentColor::FromColors(parts, FilamentColorMode::Segment).PrimaryColor() == "#AABBCC");
     CHECK(FilamentColor::FromColors({}, FilamentColorMode::Segment).PrimaryColor("#26A69A") == "#26A69A");
+}
+
+// ============================================================================
+// Orca #15728 adapt — incomplete mixed_filament_definitions vs physical slots.
+// Edge stores mixed rows in MixedFilamentManager, not filament_is_mixed arrays.
+// Slot count is filament_colour; orphan tails that name IDs beyond that count
+// must be dropped on load/grow so add-filament cannot resurrect them.
+// ============================================================================
+
+static bool has_custom_mixed_pair(const MixedFilamentManager &mgr, unsigned int a, unsigned int b)
+{
+    for (const MixedFilament &mf : mgr.mixed_filaments()) {
+        if (mf.custom && !mf.deleted && mf.component_a == a && mf.component_b == b)
+            return true;
+    }
+    return false;
+}
+
+TEST_CASE("clamp_serialized_entries_to_physical_count drops incomplete and oversized mixed tails",
+          "[MixedFilament][IncompleteMetadata]")
+{
+    const std::string valid_12 = "1,2,1,1,50";
+    const std::string valid_13 = "1,3,1,1,50";
+    const std::string valid_23 = "2,3,1,1,50";
+    const std::string stale_14 = "1,4,1,1,25";
+    const std::string oversized = valid_12 + ";" + valid_13 + ";" + valid_23 + ";" + stale_14;
+
+    const size_t physical = GENERATE(0u, 1u, 3u, 4u);
+    const std::string clamped =
+        MixedFilamentManager::clamp_serialized_entries_to_physical_count(oversized, physical);
+
+    if (physical < 2) {
+        CHECK(clamped.empty());
+    } else if (physical == 3) {
+        CHECK(clamped.find(stale_14) == std::string::npos);
+        CHECK(clamped.find(valid_12) != std::string::npos);
+        CHECK(clamped.find(valid_13) != std::string::npos);
+        CHECK(clamped.find(valid_23) != std::string::npos);
+    } else {
+        CHECK(clamped.find(stale_14) != std::string::npos);
+        CHECK(clamped.find(valid_12) != std::string::npos);
+    }
+
+    CHECK(MixedFilamentManager::clamp_serialized_entries_to_physical_count(std::string(), physical).empty());
+    CHECK(MixedFilamentManager::clamp_serialized_entries_to_physical_count("stale", 3).empty());
+}
+
+TEST_CASE("Adding a filament preserves slots with incomplete mixed metadata", "[MixedFilament][PresetBundle][IncompleteMetadata]")
+{
+    MixedAutoGenerateGuard guard(true);
+    const std::vector<std::string> colors = {"#000000", "#FFFFFF", "#5E5C64"};
+    const std::vector<std::string> presets = {"Test PETG", "Test PLA", "Test TPU"};
+
+    PresetBundle bundle;
+    bundle.filament_presets = presets;
+    bundle.project_config.option<ConfigOptionStrings>("filament_colour")->values = colors;
+
+    const size_t metadata_size = GENERATE(0u, 1u, 4u);
+    auto *defs = bundle.project_config.option<ConfigOptionString>("mixed_filament_definitions", true);
+    if (metadata_size == 0)
+        defs->value.clear();
+    else if (metadata_size == 1)
+        defs->value = "1,2,1,1,50";
+    else
+        defs->value = "1,2,1,1,50;1,3,1,1,50;2,3,1,1,50;1,4,1,1,25";
+
+    REQUIRE(bundle.num_physical_filaments() == colors.size());
+    bundle.set_num_filaments(unsigned(bundle.num_physical_filaments() + 1), "#FF0000");
+
+    REQUIRE(bundle.filament_presets.size() == presets.size() + 1);
+    const auto &actual_colors = bundle.project_config.option<ConfigOptionStrings>("filament_colour")->values;
+    REQUIRE(actual_colors.size() == colors.size() + 1);
+    for (size_t i = 0; i < presets.size(); ++i) {
+        CHECK(bundle.filament_presets[i] == presets[i]);
+        CHECK(actual_colors[i] == colors[i]);
+    }
+    CHECK(actual_colors.back() == "#FF0000");
+    CHECK(bundle.num_physical_filaments() == colors.size() + 1);
+    CHECK_FALSE(has_custom_mixed_pair(bundle.mixed_filaments, 1, 4));
+    CHECK_FALSE(has_custom_mixed_pair(bundle.mixed_filaments, 4, 1));
+    if (metadata_size != 0)
+        CHECK(has_custom_mixed_pair(bundle.mixed_filaments, 1, 2));
+}
+
+TEST_CASE("Loading a project preserves existing mixed filament definitions", "[MixedFilament][PresetBundle][IncompleteMetadata]")
+{
+    MixedAutoGenerateGuard guard(true);
+    const std::vector<std::string> colors = {"#000000", "#FFFFFF", "#808080"};
+    const std::string custom_row = single_custom_mixed_definition(1, 2, 4242);
+
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.option<ConfigOptionStrings>("filament_colour")->values = colors;
+    config.option<ConfigOptionFloats>("filament_diameter")->values = {1.75, 1.75, 1.75};
+    config.option<ConfigOptionStrings>("filament_settings_id", true)->values = {"Test PETG", "Test PLA", "Test TPU"};
+    config.option<ConfigOptionString>("mixed_filament_definitions", true)->value = custom_row;
+    config.option<ConfigOptionBool>("single_extruder_multi_material", true)->value = true;
+    Preset::normalize(config);
+
+    PresetBundle bundle;
+    bundle.load_config_model("test.3mf", std::move(config));
+
+    REQUIRE(bundle.num_physical_filaments() == colors.size());
+    const auto *defs = bundle.project_config.option<ConfigOptionString>("mixed_filament_definitions");
+    REQUIRE(defs != nullptr);
+    CHECK(defs->value.find("1,2,") != std::string::npos);
+    CHECK(defs->value.find("u4242") != std::string::npos);
+}
+
+TEST_CASE("Loading incomplete mixed metadata normalizes slots before adding a filament",
+          "[MixedFilament][PresetBundle][IncompleteMetadata]")
+{
+    MixedAutoGenerateGuard guard(true);
+    const std::vector<std::string> colors = {"#000000", "#FFFFFF", "#5E5C64"};
+    const std::vector<std::string> presets = {"Test PETG", "Test PLA", "Test TPU"};
+    const size_t metadata_size = GENERATE(0u, 1u, 4u);
+
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.option<ConfigOptionStrings>("filament_colour")->values = colors;
+    config.option<ConfigOptionFloats>("filament_diameter")->values = {1.75, 1.75, 1.75};
+    config.option<ConfigOptionStrings>("filament_settings_id", true)->values = presets;
+    config.option<ConfigOptionBool>("single_extruder_multi_material", true)->value = true;
+    auto *defs = config.option<ConfigOptionString>("mixed_filament_definitions", true);
+    if (metadata_size == 0)
+        defs->value.clear();
+    else if (metadata_size == 1)
+        defs->value = "1,2,1,1,50";
+    else
+        defs->value = "1,2,1,1,50;1,3,1,1,50;2,3,1,1,50;1,4,1,1,25";
+    Preset::normalize(config);
+
+    PresetBundle bundle;
+    bundle.load_config_model("test.3mf", std::move(config));
+
+    REQUIRE(bundle.num_physical_filaments() == colors.size());
+    const auto *loaded_defs = bundle.project_config.option<ConfigOptionString>("mixed_filament_definitions");
+    REQUIRE(loaded_defs != nullptr);
+    CHECK(loaded_defs->value.find("1,4") == std::string::npos);
+
+    const auto loaded_presets = bundle.filament_presets;
+    REQUIRE(loaded_presets.size() == colors.size());
+    bundle.set_num_filaments(unsigned(bundle.num_physical_filaments() + 1), "#FF0000");
+
+    REQUIRE(bundle.filament_presets.size() == loaded_presets.size() + 1);
+    const auto &actual_colors = bundle.project_config.option<ConfigOptionStrings>("filament_colour")->values;
+    REQUIRE(actual_colors.size() == colors.size() + 1);
+    for (size_t i = 0; i < colors.size(); ++i)
+        CHECK(actual_colors[i] == colors[i]);
+    CHECK(actual_colors.back() == "#FF0000");
+    CHECK(bundle.num_physical_filaments() == colors.size() + 1);
+    CHECK_FALSE(has_custom_mixed_pair(bundle.mixed_filaments, 1, 4));
+}
+
+// ============================================================================
+// PR 49 follow-up — the remap_old branch in PresetBundle::set_num_filaments.
+//
+// set_num_filaments derives the "old" count it hands to
+// update_multi_material_filament_presets from two different sources:
+//
+//   remap_old = (old_slot_count > old_filament_count && old_filament_count != 0)
+//                   ? old_filament_count    // palette already grown
+//                   : old_slot_count;       // normal case
+//
+// The first arm is the batch-match case (#866-style): a batch match writes the
+// palette/colour slots first, so filament_colour has already grown while
+// filament_presets still holds the pre-grow count. Remap must then be driven by
+// the PRESET count, because that is what the multi-material arrays are still
+// sized against - using the already-grown colour count would remap against
+// slots that never existed as presets and shift the flush matrix.
+//
+// The tests above all keep filament_presets.size() == filament_colour.size(),
+// so they only ever exercise the second arm. These cover the first.
+// ============================================================================
+
+TEST_CASE("set_num_filaments remaps on the preset count when the palette grew first",
+          "[MixedFilament][PresetBundle][IncompleteMetadata][RemapOld]")
+{
+    MixedAutoGenerateGuard guard(true);
+
+    // Batch match already grew the palette to 4 colour slots, but the filament
+    // presets still hold the 3 that existed before the match ran.
+    const std::vector<std::string> grown_colors = {"#000000", "#FFFFFF", "#5E5C64", "#FF0000"};
+    const std::vector<std::string> old_presets  = {"Test PETG", "Test PLA", "Test TPU"};
+
+    PresetBundle bundle;
+    bundle.filament_presets = old_presets;
+    bundle.project_config.option<ConfigOptionStrings>("filament_colour")->values = grown_colors;
+
+    // num_physical_filaments() is filament_colour, so the slot count is already 4
+    // while the preset count is still 3 - exactly the remap_old precondition.
+    REQUIRE(bundle.num_physical_filaments() == grown_colors.size());
+    REQUIRE(bundle.filament_presets.size() == old_presets.size());
+    REQUIRE(bundle.num_physical_filaments() > bundle.filament_presets.size());
+
+    // Two custom mixed rows. 1,2 is within the old preset count; 3,4 names the
+    // slot the batch match has just added to the palette but which the filament
+    // presets do not cover yet.
+    auto *defs = bundle.project_config.option<ConfigOptionString>("mixed_filament_definitions", true);
+    defs->value = "1,2,1,1,50;3,4,1,1,50";
+
+    // Now the presets catch up to the palette.
+    bundle.set_num_filaments(unsigned(grown_colors.size()), std::string("#00FF00"));
+
+    // Presets grew to the palette size; the palette itself did not grow again.
+    CHECK(bundle.filament_presets.size() == grown_colors.size());
+    const auto &colors_after = bundle.project_config.option<ConfigOptionStrings>("filament_colour")->values;
+    REQUIRE(colors_after.size() == grown_colors.size());
+
+    // The already-present colours are untouched. In particular slot 4 keeps the
+    // colour the batch match wrote and is NOT overwritten with the new_color
+    // argument: old_slot_count (4) is not < n (4), so the fill loop must not run.
+    for (size_t i = 0; i < grown_colors.size(); ++i) {
+        INFO("colour slot " << i);
+        CHECK(colors_after[i] == grown_colors[i]);
+    }
+
+    // The row within the old preset count survives.
+    CHECK(has_custom_mixed_pair(bundle.mixed_filaments, 1, 2));
+
+    // 3,4 does NOT survive, and that is the point of driving remap off the preset
+    // count. update_multi_material_filament_presets clamps mixed defs on grow to
+    // old_num_filaments - which is remap_old, i.e. 3 here, not the already-grown
+    // palette count of 4 - so a row naming slot 4 is still a not-yet-valid tail at
+    // this moment, and is dropped rather than admitted as a custom row on the
+    // strength of a palette entry whose filament preset does not exist yet. Were
+    // remap driven off old_slot_count (4), this row would be accepted here and a
+    // stale tail could come back as a phantom mixed row - exactly the Orca #15728
+    // failure this PR exists to prevent.
+    CHECK_FALSE(has_custom_mixed_pair(bundle.mixed_filaments, 3, 4));
+}
+
+TEST_CASE("set_num_filaments keeps the slot-count remap when presets and palette agree",
+          "[MixedFilament][PresetBundle][IncompleteMetadata][RemapOld]")
+{
+    MixedAutoGenerateGuard guard(true);
+
+    // The other arm of the same branch, asserted side by side so a change to the
+    // condition cannot silently collapse the two cases into one.
+    const std::vector<std::string> colors  = {"#000000", "#FFFFFF", "#5E5C64"};
+    const std::vector<std::string> presets = {"Test PETG", "Test PLA", "Test TPU"};
+
+    PresetBundle bundle;
+    bundle.filament_presets = presets;
+    bundle.project_config.option<ConfigOptionStrings>("filament_colour")->values = colors;
+
+    REQUIRE(bundle.num_physical_filaments() == bundle.filament_presets.size());
+
+    auto *defs = bundle.project_config.option<ConfigOptionString>("mixed_filament_definitions", true);
+    defs->value = "1,2,1,1,50;1,4,1,1,25"; // 1,4 is an orphan tail: there is no slot 4 yet
+
+    bundle.set_num_filaments(unsigned(colors.size() + 1), std::string("#FF0000"));
+
+    CHECK(bundle.filament_presets.size() == presets.size() + 1);
+    const auto &colors_after = bundle.project_config.option<ConfigOptionStrings>("filament_colour")->values;
+    REQUIRE(colors_after.size() == colors.size() + 1);
+    // Here the palette really did grow, so the new slot takes the new colour.
+    CHECK(colors_after.back() == "#FF0000");
+
+    // The orphan tail named a slot that did not exist at the old physical count,
+    // so the grow clamp drops it instead of resurrecting it as a custom row.
+    CHECK(has_custom_mixed_pair(bundle.mixed_filaments, 1, 2));
+    CHECK_FALSE(has_custom_mixed_pair(bundle.mixed_filaments, 1, 4));
+}
+
+TEST_CASE("set_num_filaments with a zero preset count falls back to the slot count",
+          "[MixedFilament][PresetBundle][IncompleteMetadata][RemapOld]")
+{
+    MixedAutoGenerateGuard guard(true);
+
+    // old_filament_count == 0 is the guard on the first arm: with no presets at
+    // all there is nothing to remap against, so remap_old must stay on
+    // old_slot_count rather than collapsing to 0.
+    PresetBundle bundle;
+    bundle.filament_presets.clear();
+    bundle.project_config.option<ConfigOptionStrings>("filament_colour")->values = {"#000000", "#FFFFFF"};
+
+    REQUIRE(bundle.filament_presets.empty());
+    REQUIRE(bundle.num_physical_filaments() == 2);
+
+    REQUIRE_NOTHROW(bundle.set_num_filaments(3u, std::string("#FF0000")));
+
+    CHECK(bundle.filament_presets.size() == 3);
+    const auto &colors_after = bundle.project_config.option<ConfigOptionStrings>("filament_colour")->values;
+    REQUIRE(colors_after.size() == 3);
+    CHECK(colors_after[0] == "#000000");
+    CHECK(colors_after[1] == "#FFFFFF");
+    CHECK(colors_after.back() == "#FF0000");
 }

@@ -314,9 +314,12 @@ public:
     arrangement::ArrangePolygon estimate_wipe_tower_polygon(const DynamicPrintConfig & config, int plate_index, Vec3d& wt_pos, Vec3d& wt_size, int plate_extruder_size = 0, bool use_global_objects = false) const;
     std::vector<int> get_extruders(bool conside_custom_gcode = false) const;
     std::vector<int> get_extruders(bool conside_custom_gcode, const DynamicPrintConfig& glb_config, const DynamicPrintConfig& project_config) const;
-    std::vector<int> get_extruders_under_cli(bool conside_custom_gcode, DynamicPrintConfig& full_config) const;
+    // expand_mixed_slots = false keeps mixed filament slots as slots instead of their components.
+    // CLI callers pass false (no wx expand). Default true matches AMS/filament-check callers.
+    std::vector<int> get_extruders_under_cli(bool conside_custom_gcode, DynamicPrintConfig& full_config, bool expand_mixed_slots = true) const;
     std::vector<int> get_extruders_without_support(bool conside_custom_gcode = false) const;
     std::vector<int> get_used_extruders();
+    const std::vector<FilamentInfo>& get_slice_filaments_info() const { return slice_filaments_info; }
 
     /* instance related operations*/
     //judge whether instance is bound in plate or not
@@ -808,7 +811,10 @@ public:
 
     /*rendering related functions*/
     void on_change_color_mode(bool is_dark) { m_is_dark = is_dark; }
-    void render(const Transform3d& view_matrix, const Transform3d& projection_matrix, bool bottom, bool only_current = false, bool only_body = false, int hover_id = -1, bool render_cali = false, bool show_grid = true);
+    // `visible_plates`, when non-empty, narrows rendering to exactly those plate indices. It is
+    // how Ultra's "Hide other plates while moving" keeps every plate holding a selected object
+    // visible, not just the current one (a Ctrl-click selection can span two plates).
+    void render(const Transform3d& view_matrix, const Transform3d& projection_matrix, bool bottom, bool only_current = false, bool only_body = false, int hover_id = -1, bool render_cali = false, bool show_grid = true, const std::set<int>& visible_plates = std::set<int>());
     void set_render_option(bool bedtype_texture, bool plate_settings);
     void set_render_cali(bool value = true) { render_cali_logo = value; }
     void register_raycasters_for_picking(GLCanvas3D& canvas)

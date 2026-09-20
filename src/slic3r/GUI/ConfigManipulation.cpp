@@ -849,6 +849,11 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
 
     toggle_line("single_extruder_multi_material_priming", !bSEMM && have_prime_tower && !is_BBL_Printer);
 
+    bool use_cyclic_ordering = config->has("toolchange_ordering") &&
+        config->opt_enum<ToolChangeOrderingType>("toolchange_ordering") == ToolChangeOrderingType::Cyclic;
+    toggle_line("toolchange_cyclic_order", use_cyclic_ordering);
+    toggle_line("toolchange_cyclic_first_layer", use_cyclic_ordering);
+
     toggle_line("prime_volume",have_prime_tower && (!purge_in_primetower || !bSEMM));
 
     for (auto el : {"flush_into_infill", "flush_into_support", "flush_into_objects"})
@@ -862,6 +867,19 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
         toggle_line(el, has_overhang_speed);
 
     toggle_line("slowdown_for_curled_perimeters", has_overhang_speed);
+
+    // Edge: layer-time speed smoothing. A/B fields when mode is a speed-up; C fields when Slow down.
+    // Max variation is shared by every non-Off mode.
+    if (config->has("layer_time_speed_smoothing")) {
+        const auto ltssm = config->opt_enum<LayerTimeSpeedSmoothMode>("layer_time_speed_smoothing");
+        const bool ltssm_speed_up  = is_layer_time_speed_up(ltssm);
+        const bool ltssm_slow_down = is_layer_time_slowdown(ltssm);
+        toggle_line("layer_time_speed_max_variation", ltssm_speed_up || ltssm_slow_down);
+        toggle_line("layer_time_speed_max_speedup", ltssm_speed_up);
+        toggle_line("layer_time_speed_max_slowdown", ltssm_slow_down);
+        toggle_line("layer_time_speed_max_time_increase", ltssm_slow_down);
+        toggle_line("layer_time_speed_slowdown_scope", ltssm_slow_down);
+    }
 
     toggle_line("flush_into_objects", !is_global_config);
 

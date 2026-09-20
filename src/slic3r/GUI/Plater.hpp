@@ -343,7 +343,7 @@ public:
     // BBS: check snapshot
     bool up_to_date(bool saved, bool backup);
 
-    bool open_3mf_file(const fs::path &file_path);
+    bool open_3mf_file(const fs::path &file_path, bool from_url = false);
     int  get_3mf_file_count(std::vector<fs::path> paths);
     void add_file();
     void add_model(bool imperial_units = false, std::string fname = "");
@@ -395,8 +395,10 @@ public:
     std::vector<size_t> load_files(const std::vector<boost::filesystem::path>& input_files, LoadStrategy strategy = LoadStrategy::LoadModel | LoadStrategy::LoadConfig,  bool ask_multi = false);
     // To be called when providing a list of files to the GUI slic3r on command line.
     std::vector<size_t> load_files(const std::vector<std::string>& input_files, LoadStrategy strategy = LoadStrategy::LoadModel | LoadStrategy::LoadConfig,  bool ask_multi = false);
-    // to be called on drag and drop
-    bool load_files(const wxArrayString& filenames);
+    // to be called on drag and drop, or for a project downloaded from a
+    // snapmaker-orca:// URL, in which case from_url is true: the user has already
+    // said which project to open, so do not ask them again.
+    bool load_files(const wxArrayString& filenames, bool from_url = false);
 
     const wxString& get_last_loaded_gcode() const { return m_last_loaded_gcode; }
 
@@ -505,6 +507,8 @@ public:
     void export_core_3mf();
     static TriangleMesh combine_mesh_fff(const ModelObject& mo, int instance_id, std::function<void(const std::string&)> notify_func = {});
     void export_stl(bool extended = false, bool selection_only = false, bool multi_stls = false);
+    // Export just the one selected part (ModelVolume) as a binary STL, in world coordinates.
+    void export_stl_part();
     //BBS: remove amf
     //void export_amf();
     //BBS add extra param for exporting 3mf silence
@@ -656,6 +660,10 @@ public:
     bool sync_cold_plate_notification();
     /// Check and guard filament temp mixing before slicing current plate.
     bool guard_before_slice_plate();
+    /// Single pre-slice check point: show a red, non-blocking error
+    /// notification when the effective print sequence is by-object on a
+    /// Snapmaker U1 (print head collision risk during tool switches).
+    void check_seq_print_caution();
     /// Check and guard filament temp mixing before slicing all plates.
     bool guard_before_slice_all();
     /// @brief Show confirmation dialog for allowed high/low temperature mixing before slice.

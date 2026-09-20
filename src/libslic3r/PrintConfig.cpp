@@ -315,6 +315,20 @@ static t_config_enum_values s_keys_map_EnableExtraBridgeLayer {
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(EnableExtraBridgeLayer)
 
 // Orca
+static t_config_enum_values s_keys_map_LayerTimeSpeedSmoothMode {
+    { "off",                      ltssmOff },
+    { "speed_up_exclude_outer",   ltssmSpeedUpExcludeOuter },
+    { "speed_up_all",             ltssmSpeedUpAll },
+    { "slow_down",                ltssmSlowDown }
+};
+CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(LayerTimeSpeedSmoothMode)
+
+static t_config_enum_values s_keys_map_LayerTimeSlowdownScope {
+    { "all",                   ltssAll },
+    { "exclude_outer_walls",   ltssExcludeOuterWalls }
+};
+CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(LayerTimeSlowdownScope)
+
 static t_config_enum_values s_keys_map_GapFillTarget {
     { "everywhere",        gftEverywhere },
     { "topbottom",        gftTopBottom },
@@ -676,6 +690,12 @@ static t_config_enum_values s_keys_map_PerimeterGeneratorType{
 };
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(PerimeterGeneratorType)
 
+static t_config_enum_values s_keys_map_ToolChangeOrderingType {
+    { "default", int(ToolChangeOrderingType::Default) },
+    { "cyclic",  int(ToolChangeOrderingType::Cyclic) }
+};
+CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(ToolChangeOrderingType)
+
 static const t_config_enum_values s_keys_map_ZHopType = {
     { "Auto Lift",          zhtAuto },
     { "Normal Lift",        zhtNormal },
@@ -862,6 +882,13 @@ void PrintConfigDef::init_common_params()
     def->label = L("API Key / Password");
     def->tooltip = L("EdgeSlicer can upload G-code files to a printer host. This field should contain "
         "the API Key or the password required for authentication.");
+    def->mode = comAdvanced;
+    def->cli = ConfigOptionDef::nocli;
+    def->set_default_value(new ConfigOptionString());
+
+    def = this->add("flashforge_serial_number", coString);
+    def->label = L("Serial Number");
+    def->tooltip = L("Flashforge local API requires the printer serial number.");
     def->mode = comAdvanced;
     def->cli = ConfigOptionDef::nocli;
     def->set_default_value(new ConfigOptionString());
@@ -4218,6 +4245,21 @@ void PrintConfigDef::init_fff_params()
     def->set_default_value(new ConfigOptionStrings());
     def->cli = ConfigOptionDef::nocli;
 
+    // Ported from BambuStudio (dba0b39d7 + d0d0fab7f). Off by default so the carve order stays
+    // byte-identical to what this fork has always produced; on, an overlapping pair of normal
+    // parts is resolved by bounding-box volume instead of by position in ModelObject::volumes.
+    def = this->add("enable_order_independent_overlap_carving", coBool);
+    def->label = L("Order-independent overlap carving");
+    def->tooltip = L("When two normal parts of the same object overlap, the smaller part carves the "
+                     "larger one, no matter which order the parts appear in the object list. With this "
+                     "off the part listed later always carves the one listed earlier, so a small part "
+                     "sitting inside a bigger one is erased outright when it happens to be listed first. "
+                     "Useful for multi-body STEP imports, where the exporting CAD program decides the "
+                     "body order.");
+    def->category = L("Quality");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
     def = this->add("interface_shells", coBool);
     def->label = L("Interface shells");
     def->tooltip = L("Force the generation of solid shells between adjacent materials/volumes. "
@@ -4925,6 +4967,97 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionBool(false));
 
+    // Edge: layer-time speed smoothing (process / Speed tab). Keys are layer_time_speed_*, not Bambu's
+    // layer_time_smoothing. Mode A/B speed up long layers; Mode C is optional slowdown.
+    // Plan: 09-concept-layer-time-speed-smoothing.md. Inspiration only: BambuStudio#12224.
+    def = this->add("layer_time_speed_smoothing", coEnum);
+    def->label = L("Layer time speed smoothing");
+    def->full_label = L("Layer time speed smoothing");
+    def->category = L("Speed");
+    def->tooltip = L("Limit how much estimated print time may jump from one layer to the next, which otherwise "
+                     "shows up as banding on glossy and high-shrinkage filaments.\n\n"
+                     "Off leaves speeds unchanged.\n"
+                     "Speed up (exclude outer walls) shortens long layers so they sit inside the neighbour variation "
+                     "band, without touching outer-wall feedrates.\n"
+                     "Speed up (all) does the same for every extrusion.\n"
+                     "Slow down lengthens short layers instead (optional; similar in spirit to Bambu Studio's "
+                     "layer-time smoothing, but a separate Edge option).");
+    def->enum_keys_map = &ConfigOptionEnum<LayerTimeSpeedSmoothMode>::get_enum_values();
+    def->enum_values.push_back("off");
+    def->enum_values.push_back("speed_up_exclude_outer");
+    def->enum_values.push_back("speed_up_all");
+    def->enum_values.push_back("slow_down");
+    def->enum_labels.push_back(L("Off"));
+    def->enum_labels.push_back(L("Speed up (exclude outer walls)"));
+    def->enum_labels.push_back(L("Speed up (all)"));
+    def->enum_labels.push_back(L("Slow down"));
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionEnum<LayerTimeSpeedSmoothMode>(ltssmOff));
+
+    def = this->add("layer_time_speed_max_variation", coPercent);
+    def->label = L("Max layer time variation");
+    def->category = L("Speed");
+    def->tooltip = L("Maximum allowed relative change of estimated print time between adjacent layers. "
+                     "At 25%, a neighbour may be at most 25% shorter than a layer (the longer layer is at most "
+                     "1 / 0.75 times the shorter). Smaller values produce a gentler ramp and cost more time "
+                     "(slow down) or more speed-up of the long layers.");
+    def->sidetext = "%";
+    def->min = 0;
+    def->max = 100;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionPercent(25));
+
+    def = this->add("layer_time_speed_max_speedup", coPercent);
+    def->label = L("Max speed-up");
+    def->category = L("Speed");
+    def->tooltip = L("Cap on how much a single long layer may be sped up (Modes Speed up). "
+                     "100% means the layer may print at most twice as fast (time may be halved). "
+                     "Short layers are never lengthened.");
+    def->sidetext = "%";
+    def->min = 0;
+    def->max = 1000;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionPercent(100));
+
+    def = this->add("layer_time_speed_max_slowdown", coPercent);
+    def->label = L("Max slowdown");
+    def->category = L("Speed");
+    def->tooltip = L("Cap on how much a single short layer may be slowed down (Slow down mode). "
+                     "200% means the layer may take up to three times as long.");
+    def->sidetext = "%";
+    def->min = 0;
+    def->max = 1000;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionPercent(200));
+
+    def = this->add("layer_time_speed_max_time_increase", coPercent);
+    def->label = L("Max print time increase");
+    def->category = L("Speed");
+    def->tooltip = L("Cap on the growth of the summed layer times (Slow down mode). "
+                     "If the variation limit would exceed this budget, the allowed variation is relaxed "
+                     "until the increase fits.");
+    def->sidetext = "%";
+    def->min = 0;
+    def->max = 500;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionPercent(20));
+
+    def = this->add("layer_time_speed_slowdown_scope", coEnum);
+    def->label = L("Slowdown scope");
+    def->category = L("Speed");
+    def->tooltip = L("Which extrusions Slow down mode may stretch. "
+                     "Exclude outer walls keeps outer-wall speed and gloss unchanged and only lengthens "
+                     "inner walls, infill and other internal extrusions. "
+                     "This is an apply-side choice; the time solver itself is extrusion-agnostic.");
+    def->enum_keys_map = &ConfigOptionEnum<LayerTimeSlowdownScope>::get_enum_values();
+    def->enum_values.push_back("all");
+    def->enum_values.push_back("exclude_outer_walls");
+    def->enum_labels.push_back(L("All extrusions"));
+    def->enum_labels.push_back(L("Exclude outer walls"));
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionEnum<LayerTimeSlowdownScope>(ltssExcludeOuterWalls));
+
+
 
     def = this->add("fan_min_speed", coFloats);
     def->label = L("Fan speed");
@@ -5548,6 +5681,29 @@ void PrintConfigDef::init_fff_params()
     def->min = 10;
     def->max = 18;
     def->set_default_value(new ConfigOptionFloats {18});
+
+    // BBS: per-filament long retraction performed by the firmware when the active extruder changes
+    // on a dual-nozzle machine (H2D and friends). Feeds the long_retraction_when_ec /
+    // retraction_distance_when_ec placeholders consumed by change_filament_gcode's M620.11 K/R line.
+    // Nullable so that a filament preset which does not mention the key stays nil (= feature off)
+    // instead of silently inheriting another filament's value.
+    def = this->add("long_retractions_when_ec", coBools);
+    def->label = L("Long retraction when extruder change");
+    def->tooltip = L("Experimental feature: perform a long retraction when the printer switches to the "
+                     "other extruder, so the idle filament is parked instead of being fully unloaded.");
+    def->mode = comAdvanced;
+    def->nullable = true;
+    def->set_default_value(new ConfigOptionBoolsNullable {false});
+
+    def = this->add("retraction_distances_when_ec", coFloats);
+    def->label = L("Retraction distance when extruder change");
+    def->tooltip = L("Experimental feature: retraction length used when the printer switches to the other extruder.");
+    def->mode = comAdvanced;
+    def->nullable = true;
+    def->min = 0;
+    def->max = 10;
+    def->sidetext = "mm";	// milimeters, don't need translation
+    def->set_default_value(new ConfigOptionFloatsNullable {10});
 
     def = this->add("retract_length_toolchange", coFloats);
     def->label = L("Retraction Length (Toolchange)");
@@ -6220,6 +6376,50 @@ void PrintConfigDef::init_fff_params()
     def->label = L("Prime all printing extruders");
     def->tooltip = L("If enabled, all printing extruders will be primed at the front edge of the print bed at the start of the print.");
     def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("toolchange_ordering", coEnum);
+    def->label = L("Toolchange ordering");
+    def->category = L("Advanced");
+    def->tooltip = L(
+        "Determines the order of tool changes on each layer.\n"
+        "- Default: Starts with the last used extruder to minimize tool changes.\n"
+        "- Cyclic: Uses a fixed tool sequence each layer. This sacrifices speed for better surface quality, as the extra toolchanges allow layers more time to cool."
+    );
+    def->mode = comAdvanced;
+    def->enum_keys_map = &ConfigOptionEnum<ToolChangeOrderingType>::get_enum_values();
+    def->enum_values.emplace_back("default");
+    def->enum_values.emplace_back("cyclic");
+    def->enum_labels.emplace_back(L("Default"));
+    def->enum_labels.emplace_back(L("Cyclic"));
+    def->set_default_value(new ConfigOptionEnum<ToolChangeOrderingType>(ToolChangeOrderingType::Default));
+
+    def = this->add("toolchange_cyclic_order", coString);
+    def->label = L("Cyclic order");
+    def->category = L("Advanced");
+    def->tooltip = L(
+        "Custom filament sequence used by the cyclic toolchange ordering, as filament numbers separated by commas (e.g. \"3,2,1,4\").\n"
+        "Each layer prints its filaments following this sequence; filaments not listed are printed last, in ascending order.\n"
+        "Leave empty to cycle through the filaments in ascending order."
+    );
+    def->mode = comAdvanced;   // upstream uses comExpert; this fork has no such tier
+    def->set_default_value(new ConfigOptionString(""));
+
+    def = this->add("toolchange_cyclic_first_layer", coBool);
+    def->label = L("Apply cyclic order to first layer");
+    def->category = L("Advanced");
+    def->tooltip = L(
+        "Applies the cyclic toolchange order to the first layer as well.\n"
+        "By default this is disabled, because the first layer is instead ordered for the best bed "
+        "adhesion: filaments that print small, fragile first-layer features are printed last, so the "
+        "following tool changes and travel moves are less likely to knock those weakly anchored parts "
+        "loose. This first-layer order also honors a custom first layer filament sequence when one is set. "
+        "The cyclic order's benefit (extra tool changes give each layer more time to cool) does not apply "
+        "to the first layer, which is printed slowly and hot for adhesion.\n"
+        "Enable this only if you need the exact same tool sequence on every layer, including the first, at "
+        "the cost of that adhesion optimization."
+    );
+    def->mode = comAdvanced;   // upstream uses comExpert; this fork has no such tier
     def->set_default_value(new ConfigOptionBool(false));
 
     def = this->add("slice_closing_radius", coFloat);
@@ -7667,7 +7867,10 @@ void PrintConfigDef::init_filament_option_keys()
         "retract_before_wipe", "retract_restart_extra", "retraction_minimum_travel", "wipe", "wipe_distance",
         "retract_when_changing_layer", "retract_length_toolchange", "retract_restart_extra_toolchange", "filament_colour",
         "filament_multi_colors", "filament_colour_mode",
-        "default_filament_profile","retraction_distances_when_cut","long_retractions_when_cut"/*,"filament_seam_gap"*/
+        "default_filament_profile","retraction_distances_when_cut","long_retractions_when_cut",
+        // BBS: per-filament extruder-change long retraction. Listed here so set_num_filaments()
+        // resizes the vectors to the filament count (defaults fill any filament that has no value).
+        "long_retractions_when_ec","retraction_distances_when_ec"/*,"filament_seam_gap"*/
     };
 
     m_filament_retract_keys = {
@@ -9394,6 +9597,19 @@ CLIActionsConfigDef::CLIActionsConfigDef()
     def->tooltip = L("Do not run any validity checks, such as G-code path conflicts check.");
     def->set_default_value(new ConfigOptionBool(false));
 
+    // --strict turns the non-critical slicing warnings the CLI otherwise only logs into a
+    // failed run, and records strict_mode in result.json so consumers can tell the modes apart.
+    def = this->add("strict", coBool);
+    def->label = L("Strict mode");
+    def->tooltip = L("Exit non-zero when slicing raises a non-critical warning that is "
+                     "otherwise only logged, such as a model that needs support while "
+                     "support is disabled. Use this in CI or scripted pipelines that should "
+                     "never ship a subtly broken slice. Each such warning is also listed "
+                     "with a stable class in the `warnings` array of result.json, and in the "
+                     "--progress-json result echo. Cannot be combined with --no-check, which "
+                     "skips the support check.");
+    def->set_default_value(new ConfigOptionBool(false));
+
     def = this->add("normative_check", coBool);
     def->label = L("Normative check");
     def->tooltip = L("Check the normative items.");
@@ -9415,9 +9631,29 @@ CLIActionsConfigDef::CLIActionsConfigDef()
     def->tooltip = L("Output the model's information.");
     def->set_default_value(new ConfigOptionBool(false));
 
+    def = this->add("inspect_mesh", coBool);
+    def->label = L("Inspect mesh (JSON to stdout)");
+    def->tooltip = L("Print a JSON summary of each loaded object to stdout, then exit: its bounding boxes and the "
+                     "convex hull faces it can be laid on, with their normals, areas and centers. These are the faces "
+                     "the --ground-* options choose from. Machine-readable alternative to --info.");
+    def->set_default_value(new ConfigOptionBool(false));
+
+    // --inspect-paint dumps the per-facet enforcer/blocker/extruder/fuzzy
+    // paint state stored on the loaded model (supports, seam, MMU color,
+    // fuzzy-skin) as JSON. Read-only; lets CI / scripted / AI tooling
+    // reason about existing paint on a .3mf without loading the GUI.
+    def = this->add("inspect_paint", coBool);
+    def->label = L("Inspect paint (JSON to stdout)");
+    def->tooltip = L("Print a structured JSON summary of every painted layer "
+                     "(supports, seam, MMU color, fuzzy-skin) already stored on "
+                     "the loaded model — per-state facet count, surface area, "
+                     "and mesh-local bounding box — then exit. Machine-readable "
+                     "alternative to opening the paint gizmos in the GUI.");
+    def->set_default_value(new ConfigOptionBool(false));
+
     def = this->add("export_settings", coString);
     def->label = L("Export Settings");
-    def->tooltip = L("Export settings to a file.");
+    def->tooltip = L("This exports settings to a file. Use - to write them to stdout.");
     def->cli_params = "settings.json";
     def->set_default_value(new ConfigOptionString("output.json"));
 
@@ -9533,6 +9769,34 @@ CLITransformConfigDef::CLITransformConfigDef()
     def->tooltip = L("Rotation angle around the Y axis in degrees.");
     def->sidetext = "°";	// degrees, don't need translation
     def->set_default_value(new ConfigOptionFloat(0));
+
+    // The --ground-* options choose from the faces the "Lay on Face" gizmo offers. Like the other
+    // transforms they run in command-line order, so they see the rotations given before them.
+    def = this->add("ground_largest_face", coBool);
+    def->label = L("Ground largest face");
+    def->tooltip = L("Lay each object on the largest face of its convex hull and drop it onto the bed. Of equally large "
+                     "faces, the one already facing down is kept. Objects without a face large enough to rest on are left "
+                     "as they are. Transforms run in command-line order, so rotations given before this option are respected. "
+                     "--orient 1 runs after all transforms and replaces the orientation.");
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("ground_face_normal", coString);
+    def->label = L("Ground face by normal");
+    def->tooltip = L("Lay each object on the convex hull face whose outward normal is closest to the direction NX,NY,NZ "
+                     "and drop it onto the bed. The direction is in object coordinates, which include the rotations given "
+                     "before this option and match the plate axes unless the input file rotates the object. For example, "
+                     "1,0,0 stands the object on its +X side. --orient 1 runs after all transforms and replaces the orientation.");
+    def->cli_params = "NX,NY,NZ";
+    def->set_default_value(new ConfigOptionString(""));
+
+    def = this->add("ground_face_point", coString);
+    def->label = L("Ground face at point");
+    def->tooltip = L("Lay each object on the convex hull face that contains the point X,Y,Z and drop it onto the bed. "
+                     "The point is in object coordinates, which include the rotations given before this option; "
+                     "--inspect-mesh reports face centers in them. Objects without such a face are left as they are, and "
+                     "the run fails if no object has one. --orient 1 runs after all transforms and replaces the orientation.");
+    def->cli_params = "X,Y,Z";
+    def->set_default_value(new ConfigOptionString(""));
 
     def = this->add("scale", coFloat);
     def->label = L("Scale");
@@ -9799,6 +10063,33 @@ CLIMiscConfigDef::CLIMiscConfigDef()
     def->tooltip = L("Development and test only: <serial>:<code>[:<language>] - print the printer's own text for that error code and exit.");
     def->cli_params = "serial:code[:lang]";
     def->set_default_value(new ConfigOptionString());
+
+    // Record our own description for an error code, for the codes Bambu publishes with an empty
+    // one. Written to <datadir>/hms/overrides.json; see docs/hms-overrides.md.
+    // --hms-add 0C00010000020015 "Nozzle Camera is malfunctioning." [--hms-add-lang en] [--hms-add-model 31B]
+    def = this->add("hms_add", coStrings);
+    def->label = L("Record an HMS error description");
+    def->tooltip = L("<code> <description> - record your own text for an error code and exit. Use it for codes the printer reports but Bambu publishes no description for.");
+    def->cli_params = "code description";
+    def->set_default_value(new ConfigOptionStrings());
+
+    def = this->add("hms_add_lang", coString);
+    def->label = L("Language of the recorded description");
+    def->tooltip = L("With --hms-add: the language the description is written in (default en).");
+    def->cli_params = "lang";
+    def->set_default_value(new ConfigOptionString());
+
+    def = this->add("hms_add_model", coString);
+    def->label = L("Printer series the description applies to");
+    def->tooltip = L("With --hms-add: the first three characters of the serial (31B is the H2C, 094 the H2D). Default * for every printer.");
+    def->cli_params = "series";
+    def->set_default_value(new ConfigOptionString());
+
+    def = this->add("hms_add_force", coBool);
+    def->label = L("Replace an existing recorded description");
+    def->tooltip = L("With --hms-add: replace the description already recorded for this code instead of refusing.");
+    def->cli_params = "option";
+    def->set_default_value(new ConfigOptionBool(false));
 
     def = this->add("hub_phone", coBool);
     def->label = L("Hub phone access on");
@@ -10307,6 +10598,54 @@ bool is_snapmaker_toolchanger(const ConfigBase &cfg)
     // per-toolhead to unload.
     const ConfigOptionBool *semm = cfg.option<ConfigOptionBool>("single_extruder_multi_material");
     return semm == nullptr || !semm->value;
+}
+
+bool is_identical_multi_extruder_printer(const ConfigBase &cfg)
+{
+    // More than one physical toolhead...
+    const auto *nozzles = dynamic_cast<const ConfigOptionVectorBase *>(cfg.option("nozzle_diameter"));
+    if (nozzles == nullptr || nozzles->size() < 2)
+        return false;
+
+    // ...each holding its own filament (an AMS machine has one head and many spools)...
+    const ConfigOptionBool *semm = cfg.option<ConfigOptionBool>("single_extruder_multi_material");
+    if (semm != nullptr && semm->value)
+        return false;
+
+    // ...and all of the same kind. A machine with two different extruder variants is a grouping
+    // machine (H2D/H2C/X2D): its filament->nozzle assignment is computed by ToolOrdering, and
+    // this identity map must not pre-empt it. Mirrors
+    // DynamicPrintConfig::support_different_extruders(), which is that path's own gate.
+    if (const auto *variants = cfg.option<ConfigOptionStrings>("extruder_variant_list")) {
+        std::set<std::string> variant_set;
+        const int             n = std::min<int>((int) nozzles->size(), (int) variants->values.size());
+        for (int i = 0; i < n; ++i) {
+            std::vector<std::string> list;
+            boost::split(list, variants->get_at(i), boost::is_any_of(","), boost::token_compress_on);
+            variant_set.insert(list.begin(), list.end());
+        }
+        if (variant_set.size() > 1)
+            return false;
+    }
+
+    return true;
+}
+
+std::vector<int> identity_filament_map(const ConfigBase &cfg, size_t filament_count)
+{
+    std::vector<int> map;
+    if (filament_count == 0 || !is_identical_multi_extruder_printer(cfg))
+        return map;
+
+    const auto *nozzles = dynamic_cast<const ConfigOptionVectorBase *>(cfg.option("nozzle_diameter"));
+    const size_t extruders = nozzles != nullptr ? nozzles->size() : 0;
+    if (extruders < 2)
+        return map;
+
+    map.reserve(filament_count);
+    for (size_t i = 0; i < filament_count; ++i)
+        map.push_back(int(i % extruders) + 1); // 1-based, wrapping past the last toolhead
+    return map;
 }
 } // namespace Slic3r
 

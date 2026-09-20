@@ -7,6 +7,10 @@
 
 
 #include <numeric>
+#include <algorithm>
+#include <cmath>
+#include <limits>
+#include <Eigen/Eigenvalues>
 #include <tbb/parallel_for.h>
 
 #define DEBUG_EXTRACT_ALL_FEATURES_AT_ONCE 0
@@ -92,7 +96,7 @@ public:
         bool features_extracted = false;
     };
 
-    std::optional<SurfaceFeature>      get_feature(size_t face_idx, const Vec3d &point, const Transform3d &world_tran,bool only_select_plane, double snap_radius, int pick_kind);
+    std::optional<SurfaceFeature>      get_feature(size_t face_idx, const Vec3d &point, const Transform3d &world_tran,bool only_select_plane, double snap_radius, int pick_kind, const CurvePickParams &curve_params);
     int get_num_of_planes() const;
     const std::vector<int>& get_plane_triangle_indices(int idx) const;
     std::vector<int>* get_plane_tri_indices(int idx);
@@ -103,7 +107,7 @@ public:
 private:
     void update_planes();
     void extract_features(int plane_idx);
-    std::vector<int> grow_curve_patch(size_t seed_facet) const; // Ultra: low-curvature patch for Curve picks
+    std::vector<int> grow_curve_patch(size_t seed_facet, const CurvePickParams &params) const; // Ultra: low-curvature patch for Curve picks
     double facet_snap_extent(size_t face_idx) const;            // Ultra fix: clamp for the view-scaled snap radius
 
     std::vector<PlaneData> m_planes;
@@ -531,19 +535,23 @@ void MeasuringImpl::extract_features(int plane_idx)
     plane.features_extracted = true;
 }
 
-// Ultra (Curve picks): region-grow a low-curvature patch from the hit facet -- 8 deg per step so a gently
-// curved face grows across its curvature (Measure's exact 0.001 seed test shatters it into one-triangle
-// planes), CAPPED at 20 deg total spread vs the seed so a full cylinder is not swallowed. Bounded for
-// hover-time use.
-std::vector<int> MeasuringImpl::grow_curve_patch(size_t seed_facet) const
+// Ultra (Curve picks): region-grow a low-curvature patch from the hit facet. `params.step_deg` is the
+// largest normal turn tolerated across ONE shared edge, so a gently curved face grows across its curvature
+// (Measure's exact 0.001 seed test shatters it into one-triangle planes) while a sharp crease always stops
+// the growth. `params.cap_deg` additionally caps the TOTAL spread vs the seed facet, so a full cylinder is
+// not swallowed by a default pick; cap_deg <= 0 removes that cap entirely (the "smooth shell" pick: the
+// whole outer shell of a half-cut sphere grows as one curve, stopping only at the cut face's rim).
+// Bounded by params.max_facets so hover-time picking stays cheap.
+std::vector<int> MeasuringImpl::grow_curve_patch(size_t seed_facet, const CurvePickParams &params) const
 {
     std::vector<int> out;
     const size_t F = m_its.indices.size();
     if (seed_facet >= F || m_face_normals.size() != F || m_face_neighbors.size() != F) return out;
-    const Vec3f nseed    = m_face_normals[seed_facet];
-    const float cos_step = std::cos(8.0f  * float(M_PI) / 180.0f);
-    const float cos_cap  = std::cos(20.0f * float(M_PI) / 180.0f);
-    const size_t max_facets = 20000;
+    const Vec3f  nseed      = m_face_normals[seed_facet];
+    const float  cos_step   = std::cos(std::max(0.0f, params.step_deg) * float(M_PI) / 180.0f);
+    const bool   capped     = params.capped();
+    const float  cos_cap    = capped ? std::cos(std::min(180.0f, params.cap_deg) * float(M_PI) / 180.0f) : -2.0f;
+    const size_t max_facets = std::min(params.max_facets, F);
     std::vector<char> seen(F, 0);
     std::vector<int>  stack{ int(seed_facet) };
     seen[seed_facet] = 1;
@@ -555,10 +563,212 @@ std::vector<int> MeasuringImpl::grow_curve_patch(size_t seed_facet) const
             const int u = m_face_neighbors[t][k];
             if (u < 0 || seen[u]) continue;
             const Vec3f& nu = m_face_normals[u];
-            if (nu.dot(nt) > cos_step && nu.dot(nseed) > cos_cap) { seen[u] = 1; stack.push_back(u); }
+            if (nu.dot(nt) > cos_step && (!capped || nu.dot(nseed) > cos_cap)) { seen[u] = 1; stack.push_back(u); }
         }
     }
     return out;
+}
+
+// ---------------------------------------------------------------------------------------------------
+// Ultra (Curve mates): analytic fits of a picked patch.
+// ---------------------------------------------------------------------------------------------------
+namespace {
+
+// Unique vertex ids of `facets`, so a vertex shared by many triangles is not weighted by its valence.
+static std::vector<Vec3d> patch_points(const indexed_triangle_set &its, const std::vector<int> &facets)
+{
+    std::vector<char> seen(its.vertices.size(), 0);
+    std::vector<Vec3d> pts;
+    pts.reserve(facets.size());
+    for (int t : facets) {
+        if (t < 0 || t >= int(its.indices.size())) continue;
+        for (int k = 0; k < 3; ++k) {
+            const int vi = its.indices[t][k];
+            if (vi < 0 || vi >= int(its.vertices.size()) || seen[vi]) continue;
+            seen[vi] = 1;
+            pts.push_back(its.vertices[vi].cast<double>());
+        }
+    }
+    return pts;
+}
+
+} // namespace
+
+PatchFit fit_sphere_to_patch(const indexed_triangle_set &its, const std::vector<int> &facets)
+{
+    PatchFit fit;
+    fit.shape = PatchShape::Sphere;
+    const std::vector<Vec3d> pts = patch_points(its, facets);
+    if (pts.size() < 4) return fit;
+    // Linear least squares for |p - c|^2 = r^2  ->  2 c.p + (r^2 - |c|^2) = |p|^2, unknowns (c, k).
+    Eigen::Matrix4d A = Eigen::Matrix4d::Zero();
+    Eigen::Vector4d b = Eigen::Vector4d::Zero();
+    for (const Vec3d &p : pts) {
+        Eigen::Vector4d row(2.0 * p.x(), 2.0 * p.y(), 2.0 * p.z(), 1.0);
+        A += row * row.transpose();
+        b += row * p.squaredNorm();
+    }
+    Eigen::Vector4d x = A.colPivHouseholderQr().solve(b);
+    if (!x.allFinite()) return fit;
+    const Vec3d  c  = x.head<3>();
+    const double r2 = x(3) + c.squaredNorm();
+    if (!(r2 > 0.0)) return fit;
+    fit.centre = c;
+    fit.radius = std::sqrt(r2);
+    double ss = 0.0;
+    for (const Vec3d &p : pts) { const double d = (p - c).norm() - fit.radius; ss += d * d; }
+    fit.residual     = std::sqrt(ss / double(pts.size()));
+    fit.rel_residual = fit.radius > 1e-9 ? fit.residual / fit.radius : std::numeric_limits<double>::infinity();
+    fit.ok           = true;
+    return fit;
+}
+
+PatchFit fit_cylinder_to_patch(const indexed_triangle_set &its, const std::vector<int> &facets)
+{
+    PatchFit fit;
+    fit.shape = PatchShape::Cylinder;
+    const std::vector<Vec3d> pts = patch_points(its, facets);
+    if (pts.size() < 4) return fit;
+    // The axis: on a cylinder every facet normal is perpendicular to the axis, so the facet normals span a
+    // plane and its own normal (= the covariance's SMALLEST eigenvector) is the axis. On a sphere the
+    // normals span all of R^3, so the "axis" is arbitrary and the circle fit below then reports a large
+    // residual -- which is exactly how fit_patch tells the two apart.
+    Matrix3d NC = Matrix3d::Zero();
+    for (int t : facets) {
+        if (t < 0 || t >= int(its.indices.size())) continue;
+        const auto &tri = its.indices[t];
+        const Vec3d a = its.vertices[tri[0]].cast<double>(), bb = its.vertices[tri[1]].cast<double>(),
+                    cc = its.vertices[tri[2]].cast<double>();
+        const Vec3d cr = (bb - a).cross(cc - a);
+        const double l = cr.norm();
+        if (l < 1e-18) continue;
+        const Vec3d n = cr / l;
+        NC += l * n * n.transpose(); // area-weighted
+    }
+    Eigen::SelfAdjointEigenSolver<Matrix3d> es(NC);
+    if (es.info() != Eigen::Success) return fit;
+    const Vec3d axis = es.eigenvectors().col(0).normalized(); // smallest eigenvalue
+    // Circle fit in the plane across the axis: 2 c.q + k = |q|^2 with q the projected points.
+    const Vec3d u = axis.unitOrthogonal(), v = axis.cross(u).normalized();
+    Matrix3d A = Matrix3d::Zero();
+    Vec3d    b = Vec3d::Zero();
+    for (const Vec3d &p : pts) {
+        const Eigen::Vector2d q(p.dot(u), p.dot(v));
+        const Vec3d row(2.0 * q.x(), 2.0 * q.y(), 1.0);
+        A += row * row.transpose();
+        b += row * q.squaredNorm();
+    }
+    const Vec3d x = A.colPivHouseholderQr().solve(b);
+    if (!x.allFinite()) return fit;
+    const Eigen::Vector2d c2(x(0), x(1));
+    const double r2 = x(2) + c2.squaredNorm();
+    if (!(r2 > 0.0)) return fit;
+    fit.axis   = axis;
+    fit.radius = std::sqrt(r2);
+    fit.centre = u * c2.x() + v * c2.y(); // a point on the axis (its own axial coordinate is 0)
+    double ss = 0.0, axial_sum = 0.0;
+    for (const Vec3d &p : pts) {
+        const Eigen::Vector2d q(p.dot(u), p.dot(v));
+        const double d = (q - c2).norm() - fit.radius;
+        ss += d * d;
+        axial_sum += p.dot(axis);
+    }
+    fit.centre += axis * (axial_sum / double(pts.size())); // slide it to the patch's axial midpoint
+    fit.residual     = std::sqrt(ss / double(pts.size()));
+    fit.rel_residual = fit.radius > 1e-9 ? fit.residual / fit.radius : std::numeric_limits<double>::infinity();
+    fit.ok           = true;
+    return fit;
+}
+
+namespace {
+
+// The facets of a patch as (centroid, unit normal). The vertices alone cannot tell a cylinder from a
+// sphere: a cylinder mesh has vertices only on its two rims, and the sphere through both rims passes
+// through every one of them exactly, so the two point fits tie and floating-point noise picks. The
+// normals do not tie - on a cylinder they are radial from the axis, on a sphere radial from the centre.
+struct PatchFacet { Vec3d centroid; Vec3d normal; };
+std::vector<PatchFacet> patch_facets(const indexed_triangle_set &its, const std::vector<int> &facets)
+{
+    std::vector<PatchFacet> out;
+    out.reserve(facets.size());
+    for (int t : facets) {
+        if (t < 0 || t >= int(its.indices.size())) continue;
+        const auto &tri = its.indices[t];
+        const Vec3d a = its.vertices[tri[0]].cast<double>(), b = its.vertices[tri[1]].cast<double>(),
+                    c = its.vertices[tri[2]].cast<double>();
+        const Vec3d cr = (b - a).cross(c - a);
+        const double l = cr.norm();
+        if (l <= 1e-12) continue;
+        out.push_back({ (a + b + c) / 3.0, cr / l });
+    }
+    return out;
+}
+
+// Mean (1 - |cos|) between each facet normal and the direction the fit predicts at that facet.
+// Sign-insensitive so an inside-out mesh scores the same as an outward one.
+double sphere_normal_residual(const std::vector<PatchFacet> &fs, const Vec3d &centre)
+{
+    if (fs.empty()) return std::numeric_limits<double>::infinity();
+    double sum = 0.0;
+    for (const PatchFacet &f : fs) {
+        const Vec3d r = f.centroid - centre; const double l = r.norm();
+        sum += l > 1e-12 ? 1.0 - std::abs(f.normal.dot(r) / l) : 1.0;
+    }
+    return sum / double(fs.size());
+}
+double cylinder_normal_residual(const std::vector<PatchFacet> &fs, const Vec3d &axis_pt, const Vec3d &axis)
+{
+    if (fs.empty()) return std::numeric_limits<double>::infinity();
+    double sum = 0.0;
+    for (const PatchFacet &f : fs) {
+        Vec3d r = f.centroid - axis_pt; r -= axis * r.dot(axis); const double l = r.norm();
+        sum += l > 1e-12 ? 1.0 - std::abs(f.normal.dot(r) / l) : 1.0;
+    }
+    return sum / double(fs.size());
+}
+
+// Largest turn of any facet normal away from the patch's mean normal, as 1 - cos. A flat pick (a cube
+// face, a chamfer) is described by neither curved fit, however small their point residuals come out.
+double normal_spread(const std::vector<PatchFacet> &fs)
+{
+    Vec3d mean = Vec3d::Zero();
+    for (const PatchFacet &f : fs) mean += f.normal;
+    const double l = mean.norm();
+    if (l <= 1e-12) return 1.0;
+    mean /= l;
+    double worst = 0.0;
+    for (const PatchFacet &f : fs) worst = std::max(worst, 1.0 - f.normal.dot(mean));
+    return worst;
+}
+
+// Normals may lean this far (as 1 - cos) from what the fit predicts and still count as that shape:
+// 0.03 is about 14 deg, generous against faceting yet far below the ~35 deg a sphere forced through a
+// cylinder's rims implies at the wall's facet centroids.
+constexpr double kMaxNormalResidual = 0.03;
+// Below this spread (about 0.8 deg) the patch is flat.
+constexpr double kPlanarSpread = 1e-4;
+
+} // namespace
+
+PatchFit fit_patch(const indexed_triangle_set &its, const std::vector<int> &facets, double max_rel_residual)
+{
+    PatchFit plane;                 // neither describes it -- caller keeps the (mean normal, centroid) mate
+    plane.shape = PatchShape::Plane;
+
+    const std::vector<PatchFacet> fs = patch_facets(its, facets);
+    if (fs.empty() || normal_spread(fs) < kPlanarSpread)
+        return plane;
+
+    const PatchFit cyl = fit_cylinder_to_patch(its, facets);
+    const PatchFit sph = fit_sphere_to_patch(its, facets);
+    const double cyl_n = cyl.ok ? cylinder_normal_residual(fs, cyl.centre, cyl.axis.normalized()) : std::numeric_limits<double>::infinity();
+    const double sph_n = sph.ok ? sphere_normal_residual(fs, sph.centre) : std::numeric_limits<double>::infinity();
+    const bool cyl_ok = cyl.ok && cyl.rel_residual <= max_rel_residual && cyl_n <= kMaxNormalResidual;
+    const bool sph_ok = sph.ok && sph.rel_residual <= max_rel_residual && sph_n <= kMaxNormalResidual;
+    if (cyl_ok && sph_ok) return (cyl.rel_residual + cyl_n) <= (sph.rel_residual + sph_n) ? cyl : sph;
+    if (cyl_ok) return cyl;
+    if (sph_ok) return sph;
+    return plane;
 }
 
 // Ultra fix: the largest snap radius that may be honoured on a given facet. The caller's `snap_radius` is
@@ -579,7 +789,7 @@ double MeasuringImpl::facet_snap_extent(size_t face_idx) const
     return snap_facet_fraction * shortest;
 }
 
-std::optional<SurfaceFeature> MeasuringImpl::get_feature(size_t face_idx, const Vec3d &point, const Transform3d &world_tran,bool only_select_plane, double snap_radius, int pick_kind)
+std::optional<SurfaceFeature> MeasuringImpl::get_feature(size_t face_idx, const Vec3d &point, const Transform3d &world_tran,bool only_select_plane, double snap_radius, int pick_kind, const CurvePickParams &curve_params)
 {
     if (face_idx >= m_face_to_plane.size())
         return std::optional<SurfaceFeature>();
@@ -601,7 +811,7 @@ std::optional<SurfaceFeature> MeasuringImpl::get_feature(size_t face_idx, const 
     // Ultra: Curve pick -- a low-curvature patch grown from the hit facet (area-weighted mean normal,
     // area-weighted centroid), owning its facet list. Mates through the same (normal, point) machinery.
     if (pick_kind == 2 && face_idx < m_its.indices.size()) {
-        std::vector<int> patch = grow_curve_patch(face_idx);
+        std::vector<int> patch = grow_curve_patch(face_idx, curve_params);
         Vec3d nsum = Vec3d::Zero(), csum = Vec3d::Zero(); double area = 0.0;
         for (int t : patch) {
             const auto& tri = m_its.indices[t];
@@ -610,8 +820,12 @@ std::optional<SurfaceFeature> MeasuringImpl::get_feature(size_t face_idx, const 
             if (ta <= 0.0) continue;
             nsum += cr.normalized() * ta; csum += (a + b + c) / 3.0 * ta; area += ta;
         }
-        if (!patch.empty() && area > 0.0 && nsum.norm() > 1e-9) {
-            SurfaceFeature f(SurfaceFeatureType::Curve, nsum.normalized(), csum / area, std::nullopt, double(face_idx));
+        if (!patch.empty() && area > 0.0) {
+            // A smooth-shell grow that swallows a closed shell (a whole sphere) has normals that cancel to
+            // nothing; the pick is still a Curve, so the seed facet's normal stands in for the mean and the
+            // analytic fit (fit_patch) gives the mate its real centre.
+            const Vec3d n = nsum.norm() > 1e-9 ? Vec3d(nsum.normalized()) : m_face_normals[face_idx].cast<double>();
+            SurfaceFeature f(SurfaceFeatureType::Curve, n, csum / area, std::nullopt, double(face_idx));
             f.owned_indices = std::make_shared<std::vector<int>>(std::move(patch));
             f.plane_indices = f.owned_indices.get();
             f.origin_surface_feature = std::make_shared<SurfaceFeature>(f);
@@ -771,9 +985,9 @@ Measuring::~Measuring() {}
 
 
 
-std::optional<SurfaceFeature> Measuring::get_feature(size_t face_idx, const Vec3d &point, const Transform3d &world_tran, bool only_select_plane, double snap_radius, int pick_kind) const
+std::optional<SurfaceFeature> Measuring::get_feature(size_t face_idx, const Vec3d &point, const Transform3d &world_tran, bool only_select_plane, double snap_radius, int pick_kind, const CurvePickParams &curve_params) const
 {
-    return priv->get_feature(face_idx, point, world_tran, only_select_plane, snap_radius, pick_kind);
+    return priv->get_feature(face_idx, point, world_tran, only_select_plane, snap_radius, pick_kind, curve_params);
 }
 
 

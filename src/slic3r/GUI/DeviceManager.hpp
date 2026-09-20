@@ -3,6 +3,7 @@
 
 #include <map>
 #include <mutex>
+#include <set>
 #include <vector>
 #include <string>
 #include <memory>
@@ -15,6 +16,7 @@
 #include "slic3r/Utils/NetworkAgent.hpp"
 #include "boost/bimap/bimap.hpp"
 #include "CameraPopup.hpp"
+#include "LanReconnectLadder.hpp"
 #include "libslic3r/calib.hpp"
 #include "libslic3r/Utils.hpp"
 #define USE_LOCAL_SOCKET_BIND 0
@@ -59,6 +61,9 @@ namespace Slic3r {
 
 struct BBLocalMachine;
 class SecondaryCheckDialog;
+// The window MachineObject opens for a command the printer refused. Only the pointer is needed
+// here; ReleaseNote.hpp includes this header, so naming the type is all that can be done.
+namespace GUI { class PrintErrorDialog; }
 enum PrinterArch {
     ARCH_CORE_XY,
     ARCH_I3,
@@ -710,6 +715,67 @@ public:
     int     hw_switch_state;
     bool    is_system_printing();
     int     print_error;
+
+    // ---- the command-error path ----
+    //
+    // A printer that refuses a command the slicer sent answers on the "print" topic with the
+    // command's own sequence id plus an "err_code", and - when the error is one the person can
+    // answer - an "err_index" and the fields that name the command to re-send. That whole object
+    // is the "action_json" blob: PrintErrorCommands' build_ack_proceed / build_dont_remind_next_time
+    // are built out of it, and without it neither command exists to send.
+    //
+    // It is stored here rather than only handed to the dialog because the dialog is a desktop
+    // window and the hub and app need the same two buttons. Kept with the code it arrived with, so
+    // a blob can never be answered against a different error than the one that produced it.
+    //
+    // A command error's code is its own: the printer refusing a command does not have to be
+    // reporting it as `print_error` as well, and upstream's dialog tracks the two separately for
+    // exactly that reason. That is why the code is stored beside the blob rather than inferred.
+    int              m_command_error_code { 0 };      // the err_code the blob belongs to, 0 when none
+    nlohmann::json   m_command_error_action_json;      // null unless the reply carried an err_index
+
+    // The blob, whatever error it came for, for the desktop dialog that is showing that very code.
+    const nlohmann::json& get_command_error_action_json() const { return m_command_error_action_json; }
+    bool has_command_error_action_json() const { return !m_command_error_action_json.is_null(); }
+
+    // The blob as the REMOTE surfaces may use it: only when it belongs to the code the printer is
+    // reporting as print_error right now, because that is the code those surfaces draw buttons for
+    // and name in their requests. A refused command that left print_error alone is answerable at
+    // the desktop dialog it opened and nowhere else - the hub has no way to name it, and arming
+    // Proceed there would answer the wrong error.
+    bool has_remote_command_error_action_json() const
+    {
+        return has_command_error_action_json() && m_command_error_code != 0 &&
+               m_command_error_code == print_error;
+    }
+    // Drop a blob whose error is gone. Called wherever print_error is refreshed: a "Proceed" built
+    // for a refused command must never be answerable against whatever the printer reports next.
+    void clear_command_error_action_json()
+    {
+        m_command_error_code = 0;
+        m_command_error_action_json = nlohmann::json();
+    }
+
+    // The printer refused a command with `command_err`. Shows the error dialog for it (on the GUI
+    // thread, guarded by the object's weak token) and keeps `action_json` for the Proceed /
+    // Don't-remind buttons on every surface. Mirrors Bambu Studio's method of the same name.
+    void add_command_error_code_dlg(int command_err, const nlohmann::json& action_json = nlohmann::json());
+
+    // The window this printer's refused commands are shown in.
+    //
+    // Upstream keeps a set and makes a fresh window per refusal, relying on wxEVT_DESTROY to take
+    // each one back out. This fork's PrintErrorDialog::on_hide only hides the window - it is
+    // reused, never destroyed, which is why StatusPanel keeps a single m_print_error_dlg - so a
+    // set here would only ever grow. One window per printer, re-dressed for each refusal, matches
+    // how the Device tab's error dialog already behaves.
+    GUI::PrintErrorDialog*           m_command_error_dlg { nullptr };
+
+    // Codes the person has dismissed on this printer during this session, keyed "<dev_id>/<8hex>"
+    // exactly as StatusPanel keys its own set. A refused command that keeps being refused would
+    // otherwise reopen its window on every retry, which is the thing "don't remind me" is for.
+    std::set<std::string>            m_command_error_ignored;
+    static std::string command_error_ignore_key(const std::string& dev_id, int print_error);
+
     int     curr_layer = 0;
     int     total_layers = 0;
     bool    is_support_layer_num { false };
@@ -937,6 +1003,32 @@ public:
     int command_request_push_all(bool request_now = false);
     int command_pushing(std::string cmd);
     int command_clean_print_error(std::string task_id, int print_error);
+
+    /* printer-error actions
+     *
+     * The commands behind the buttons on the print-error dialog. They are not the generic
+     * task controls: the resume/stop/ignore family carries "err", "job_id" and
+     * "param":"reserve" so firmware can check the command is for the error and job it is
+     * currently holding, and firmware that wants those fields ignores a bare
+     * {"command":"resume","param":""} without complaining. The dialog used to send the bare
+     * form, which is why a resume from a stuck printer looked like it worked and did not.
+     *
+     * The payloads themselves live in PrintErrorCommands.hpp as pure builders, so the exact
+     * JSON is pinned by a test rather than by hope. Everything here is user-initiated: nothing
+     * on the polling or notification path may call any of these.
+     */
+    int command_clean_print_error_uiop(int print_error);
+    int command_hms_resume(const std::string& error_str, const std::string& job_id);
+    int command_hms_stop(const std::string& error_str, const std::string& job_id);
+    int command_hms_ignore(const std::string& error_str, const std::string& job_id);
+    int command_hms_idle_ignore(const std::string& error_str, int type);
+    int command_refresh_nozzle();
+    int command_stop_buzzer();
+    int command_purification_disable();
+    int command_ams_drying_stop();
+    /* both take the blob the dialog was handed with the error; see PrintErrorCommands.hpp */
+    int command_ack_proceed(const nlohmann::json& action_json);
+    int command_dont_remind_next_time(const nlohmann::json& action_json);
     int command_set_printer_nozzle(std::string nozzle_type, float diameter);
     int command_get_access_code();
 
@@ -1125,6 +1217,60 @@ public:
 
     void keep_alive();
     void check_pushing();
+
+    // Ultra: the LAN reconnect tick. A LAN-mode printer's MQTT session is the slicer's only link to
+    // it, and when it drops nothing re-established it: MonitorPanel::update only retried inside
+    // `if (is_user_login())`, so with no Bambu cloud account a dropped LAN session stayed dropped
+    // until the user left the Device tab and came back (which re-runs set_selected_machine and its
+    // reconnect branch). The Monitor panel is also lazily constructed now, and the hidden
+    // hub-managed instance never opens it at all, so a retry that lives there reaches nobody.
+    //
+    // So the retry lives here and runs off the one-second GUI heartbeat (RemoteAccess's
+    // GuiHeartbeat -> RemoteEvents::heartbeat), independent of both the cloud login and the panel.
+    // Call it on the GUI thread only: it touches MachineObject and the network agent.
+    void lan_reconnect_tick();
+
+    // The backoff ladder, in milliseconds: how long a LAN printer must have looked disconnected
+    // before the first retry, and how long between retries after that. The numbers and the formula
+    // live in LanReconnectLadder.hpp, which is wx-free, so a unit test can check the
+    // cadence a log is meant to show without linking the GUI. Named here for readability.
+    static constexpr long long LAN_RECONNECT_GRACE_MS = LanReconnectLadder::GRACE_MS;
+    static constexpr long long LAN_RECONNECT_MAX_MS   = LanReconnectLadder::MAX_MS;
+
+    static constexpr long long lan_backoff_ms(int attempts) { return LanReconnectLadder::backoff_ms(attempts); }
+
+private:
+    // Per-printer reconnect bookkeeping. Keyed by dev_id so a printer that comes and goes does not
+    // inherit another's backoff.
+    struct LanReconnect
+    {
+        long long down_since { 0 };  // first tick at which this printer looked disconnected
+        long long last_try { 0 };    // when the last reconnect was attempted
+        int       attempts { 0 };    // consecutive attempts without a push since
+    };
+    std::map<std::string, LanReconnect> m_lan_reconnect;
+    // One reconnect attempt against one LAN machine: the same three steps the Device tab's
+    // set_selected_machine runs (disconnect, reset, connect, mark LAN-connected).
+    void lan_reconnect_now(MachineObject* obj, const char* why);
+
+    // The hidden hub-managed instance's round robin over its LAN printers (see the .cpp): which
+    // printer currently holds the agent's single LAN session, and since when.
+    std::string m_lan_watch_id;
+    long long   m_lan_watch_since { 0 };
+    MachineObject* lan_watch_rotate();
+    // When something other than the rotation last chose a printer (set_selected_machine: a send,
+    // a hub control call). The rotation leaves that choice alone for LAN_WATCH_PIN_MS so an upload
+    // or a command in flight is not cut off by the session moving on.
+    long long   m_lan_watch_pinned_at { 0 };
+
+public:
+    // How long the hidden instance leaves one LAN printer selected before moving to the next.
+    // The networking SDK gives an agent one LAN MQTT session at a time
+    // (bambu_network_connect_printer / bambu_network_disconnect_printer are agent-scoped and the
+    // disconnect takes no dev_id), so watching several Bambu printers is a rotation, not a fan-out.
+    static constexpr long long LAN_WATCH_DWELL_MS = 45000;
+    // How long a deliberate set_selected_machine holds the session against the rotation.
+    static constexpr long long LAN_WATCH_PIN_MS   = 300000;
 
     static float nozzle_diameter_conver(int diame);
     static int nozzle_diameter_conver(float diame);

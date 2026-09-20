@@ -948,7 +948,7 @@ bool Preset::has_cali_lines(PresetBundle* preset_bundle)
 
 static std::vector<std::string> s_Preset_print_options {
     "print_extruder_id", "print_extruder_variant", // Ultra (dual-nozzle)
-    "layer_height", "initial_layer_print_height", "wall_loops", "alternate_extra_wall", "slice_closing_radius", "spiral_mode", "spiral_mode_smooth", "spiral_mode_max_xy_smoothing", "spiral_starting_flow_ratio", "spiral_finishing_flow_ratio", "slicing_mode",
+    "layer_height", "initial_layer_print_height", "wall_loops", "alternate_extra_wall", "slice_closing_radius", "spiral_mode", "enable_order_independent_overlap_carving", "spiral_mode_smooth", "spiral_mode_max_xy_smoothing", "spiral_starting_flow_ratio", "spiral_finishing_flow_ratio", "slicing_mode",
     "top_shell_layers", "top_shell_thickness", "top_surface_density", "bottom_surface_density", "bottom_shell_layers", "bottom_shell_thickness",
     "extra_perimeters_on_overhangs", "ensure_vertical_shell_thickness", "reduce_crossing_wall", "detect_thin_wall", "offset_layers", "detect_overhang_wall", "unsupported_wall_last", "overhang_reverse", "overhang_reverse_threshold","overhang_reverse_internal_only", "wall_direction",
     "seam_position", "staggered_inner_seams", "wall_sequence", "is_infill_first", "sparse_infill_density","fill_multiline", "sparse_infill_pattern", "lateral_lattice_angle_1", "lateral_lattice_angle_2", "infill_overhang_angle", "top_surface_pattern", "undertop_surface_pattern", "bottom_surface_pattern",
@@ -988,6 +988,8 @@ static std::vector<std::string> s_Preset_print_options {
      "detect_narrow_internal_solid_infill",
      "gcode_add_line_number", "enable_arc_fitting", "precise_z_height", "infill_combination","infill_combination_max_layer_height", /*"adaptive_layer_height",*/
      "support_bottom_interface_spacing", "enable_overhang_speed", "slowdown_for_curled_perimeters", "overhang_1_4_speed", "overhang_2_4_speed", "overhang_3_4_speed", "overhang_4_4_speed",
+     "layer_time_speed_smoothing", "layer_time_speed_max_variation", "layer_time_speed_max_speedup",
+     "layer_time_speed_max_slowdown", "layer_time_speed_max_time_increase", "layer_time_speed_slowdown_scope",
      "initial_layer_infill_speed", "only_one_wall_top", 
      "timelapse_type",
      "wall_generator", "wall_transition_length", "wall_transition_filter_deviation", "wall_transition_angle",
@@ -1004,6 +1006,9 @@ static std::vector<std::string> s_Preset_print_options {
      "wipe_tower_cone_angle", "wipe_tower_extra_spacing","wipe_tower_max_purge_speed", "local_z_wipe_tower_purge_lines",
      "wipe_tower_wall_type", "wipe_tower_extra_rib_length", "wipe_tower_rib_width", "wipe_tower_fillet_wall",
      "wipe_tower_filament", "wiping_volumes_extruders","wipe_tower_bridging", "wipe_tower_extra_flow","single_extruder_multi_material_priming",
+     "toolchange_ordering",
+     "toolchange_cyclic_order",
+     "toolchange_cyclic_first_layer",
      "wipe_tower_rotation_angle", "wipe_tower_wall_gap", "tree_support_branch_distance_organic", "tree_support_branch_diameter_organic", "tree_support_branch_angle_organic",
      "hole_to_polyhole", "hole_to_polyhole_threshold", "hole_to_polyhole_twisted", "mmu_segmented_region_max_width", "mmu_segmented_region_interlocking_depth",
      "paint_depth_mode", "paint_depth_walls", "paint_depth_mm", "paint_infill_override", "paint_depth_solid_interfaces",
@@ -1051,6 +1056,9 @@ static std::vector<std::string> s_Preset_filament_options {
     "filament_cooling_initial_speed", "filament_cooling_final_speed", "filament_ramming_parameters",
     "filament_multitool_ramming", "filament_multitool_ramming_volume", "filament_multitool_ramming_flow", "activate_chamber_temp_control",
     "filament_long_retractions_when_cut","filament_retraction_distances_when_cut", "idle_temperature",
+    // BBS: per-filament extruder-change long retraction (dual-nozzle machines). Mirrors upstream
+    // s_Preset_filament_options; without these the keys are dropped when a filament preset loads.
+    "long_retractions_when_ec", "retraction_distances_when_ec",
     "filament_tower_ironing_area",
     // Ultra (H2C rack): the nozzle-change pre-cool target. The BBL H2C filament profiles in
     // this tree already carry it; without it here the loader drops it off the preset.
@@ -1086,7 +1094,7 @@ static std::vector<std::string> s_Preset_printer_options {
     "scan_first_layer", "machine_load_filament_time", "machine_unload_filament_time", "machine_tool_change_time", "machine_prepare_time", "tool_change_temprature_wait", "time_cost", "machine_pause_gcode", "template_custom_gcode",
     "nozzle_type", "nozzle_hrc","auxiliary_fan", "nozzle_volume","upward_compatible_machine", "z_hop_types", "z_hop_when_prime", "travel_slope", "retract_lift_enforce","support_chamber_temp_control","support_air_filtration","printer_structure",
     "best_object_pos","head_wrap_detect_zone",
-    "host_type", "print_host", "printhost_apikey", "bbl_use_printhost",
+    "host_type", "print_host", "printhost_apikey", "flashforge_serial_number", "bbl_use_printhost",
     "print_host_webui",
     "printhost_cafile","printhost_port","printhost_authorization_type",
     "printhost_user", "printhost_password", "printhost_ssl_ignore_revoke", "thumbnails", "thumbnails_format",
@@ -1301,6 +1309,8 @@ void PresetCollection::load_presets(
         std::string file_name = dir_entry.path().filename().string();
         //if (Slic3r::is_ini_file(dir_entry)) {
         if (Slic3r::is_json_file(file_name)) {
+            // One tick per user preset file, so a splash animation keeps moving here too.
+            notify_progress();
             // Remove the .ini suffix.
             std::string name = file_name.erase(file_name.size() - 5);
             try {
@@ -3029,6 +3039,7 @@ inline t_config_option_keys deep_diff(const ConfigBase &config_this, const Confi
                 case coFloats:  add_correct_opts_to_diff<ConfigOptionFloats     >(opt_key, diff, config_other, config_this);  break;
                 case coStrings: add_correct_opts_to_diff<ConfigOptionStrings    >(opt_key, diff, config_other, config_this);  break;
                 case coPercents:add_correct_opts_to_diff<ConfigOptionPercents   >(opt_key, diff, config_other, config_this);  break;
+                case coFloatsOrPercents: add_correct_opts_to_diff<ConfigOptionFloatsOrPercents>(opt_key, diff, config_other, config_this); break;
                 case coPoints:  add_correct_opts_to_diff<ConfigOptionPoints     >(opt_key, diff, config_other, config_this);  break;
                 // BBS
                 case coEnums:   add_correct_opts_to_diff<ConfigOptionInts       >(opt_key, diff, config_other, config_this);  break;
@@ -3485,6 +3496,7 @@ static std::vector<std::string> s_PhysicalPrinter_opts {
     "print_host",
     "print_host_webui",
     "printhost_apikey",
+    "flashforge_serial_number",
     "printhost_cafile",
     "printhost_port",
     "printhost_authorization_type",

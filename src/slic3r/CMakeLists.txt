@@ -80,6 +80,14 @@ set(SLIC3R_GUI_SOURCES
     GUI/CloneDialog.hpp
     GUI/FillBedDialog.cpp
     GUI/FillBedDialog.hpp
+    GUI/RemeshDialog.cpp
+    GUI/RemeshDialog.hpp
+    GUI/RoundDialog.cpp
+    GUI/RoundDialog.hpp
+    GUI/QuadRemeshDialog.cpp
+    GUI/QuadRemeshDialog.hpp
+    GUI/SliceBakeDialog.cpp
+    GUI/SliceBakeDialog.hpp
     GUI/ColorSplitDialog.cpp
     GUI/ColorSplitDialog.hpp
     GUI/ImageFillDialog.cpp
@@ -183,6 +191,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/Gizmos/FacetPicker.hpp
     GUI/Gizmos/GLGizmoSeam.cpp
     GUI/Gizmos/GLGizmoSeam.hpp
+    GUI/Gizmos/GLGizmoEdit.cpp
+    GUI/Gizmos/GLGizmoEdit.hpp
     GUI/Gizmos/GLGizmoSculpt.cpp
     GUI/Gizmos/GLGizmoSculpt.hpp
     GUI/Gizmos/GLGizmoSimplify.cpp
@@ -211,6 +221,7 @@ set(SLIC3R_GUI_SOURCES
     GUI/GLToolbar.hpp
     GUI/GUI_App.cpp
     GUI/GUI_App.hpp
+    GUI/SplashAnimation.hpp
     GUI/GUI_AuxiliaryList.cpp
     GUI/GUI_AuxiliaryList.hpp
     GUI/GUI_Colors.cpp
@@ -241,6 +252,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/HintNotification.hpp
     GUI/HMS.cpp
     GUI/HMS.hpp
+    GUI/PrintErrorCommands.cpp
+    GUI/PrintErrorCommands.hpp
     GUI/HMSPanel.cpp
     GUI/HMSPanel.hpp
     GUI/HttpServer.cpp
@@ -261,6 +274,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/InstanceCheck.hpp
     GUI/Jobs/ArrangeJob.cpp
     GUI/Jobs/ArrangeJob.hpp
+    GUI/Jobs/BevelJob.cpp
+    GUI/Jobs/BevelJob.hpp
     GUI/Jobs/BindJob.cpp
     GUI/Jobs/BindJob.hpp
     GUI/Jobs/BoostThreadWorker.cpp
@@ -268,6 +283,10 @@ set(SLIC3R_GUI_SOURCES
     GUI/Jobs/BusyCursorJob.hpp
     GUI/Jobs/ColorSplitJob.cpp
     GUI/Jobs/ColorSplitJob.hpp
+    GUI/Jobs/SliceBakeJob.cpp
+    GUI/Jobs/SliceBakeJob.hpp
+    GUI/Jobs/QuadRemeshJob.cpp
+    GUI/Jobs/QuadRemeshJob.hpp
     GUI/Jobs/CreateFontNameImageJob.cpp
     GUI/Jobs/CreateFontNameImageJob.hpp
     GUI/Jobs/CreateFontStyleImagesJob.cpp
@@ -302,6 +321,7 @@ set(SLIC3R_GUI_SOURCES
     GUI/KBShortcutsDialog.hpp
     GUI/MainFrame.cpp
     GUI/MainFrame.hpp
+    GUI/LazyPanelHolder.hpp
     GUI/MarkdownTip.cpp
     GUI/MarkdownTip.hpp
     GUI/MediaFilePanel.cpp
@@ -412,6 +432,7 @@ set(SLIC3R_GUI_SOURCES
     GUI/RemoteAccess.hpp
     GUI/RemoteControl.cpp
     GUI/RemoteControl.hpp
+    GUI/LanReconnectLadder.hpp
     GUI/RemoteEvents.cpp
     GUI/RemoteEvents.hpp
     GUI/RemoteSend.cpp
@@ -427,6 +448,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/WizardNetworking.cpp
     GUI/PluginGuard.hpp
     GUI/PluginGuard.cpp
+    GUI/DeviceModelCode.hpp
+    GUI/DeviceModelCode.cpp
     GUI/SnapmakerLan.hpp
     GUI/RemoteHub.cpp
     GUI/RemoteHub.hpp
@@ -739,6 +762,10 @@ set(SLIC3R_GUI_SOURCES
     Utils/bambu_networking.hpp
     Utils/Bonjour.cpp
     Utils/Bonjour.hpp
+    Utils/MeshInspect.cpp
+    Utils/MeshInspect.hpp
+    Utils/PaintCLI.cpp
+    Utils/PaintCLI.hpp
     Utils/CalibUtils.cpp
     Utils/CalibUtils.hpp
     Utils/ColorSpaceConvert.cpp
@@ -747,6 +774,9 @@ set(SLIC3R_GUI_SOURCES
     Utils/CrealityPrint.hpp
     Utils/Duet.cpp
     Utils/Duet.hpp
+    Utils/ElegooCanvas.cpp
+    Utils/ElegooCanvas.hpp
+    Utils/ElegooCanvasQuery.cpp
     Utils/ElegooLink.cpp
     Utils/ElegooLink.hpp
     Utils/EmbossStyleManager.cpp
@@ -763,6 +793,7 @@ set(SLIC3R_GUI_SOURCES
     Utils/FlashAir.hpp
     Utils/Flashforge.cpp
     Utils/Flashforge.hpp
+    Utils/FlashforgeLocalApi.hpp
     Utils/FontConfigHelp.cpp
     Utils/FontConfigHelp.hpp
     Utils/Frustum.cpp
@@ -797,6 +828,8 @@ set(SLIC3R_GUI_SOURCES
     Utils/PrintHostDevices.hpp
     Utils/PrintHostDeviceStatus.cpp
     Utils/PrintHostDeviceStatus.hpp
+    Utils/PrusaLinkStatus.cpp
+    Utils/PrusaLinkStatus.hpp
     Utils/Process.cpp
     Utils/Process.hpp
     Utils/ProfileDescription.hpp
@@ -820,6 +853,7 @@ set(SLIC3R_GUI_SOURCES
     Utils/WxFontUtils.hpp
     Utils/MQTT.hpp
     Utils/MQTT.cpp
+    Utils/MqttReconnectPolicy.hpp
     Utils/MoonRaker.cpp
     Utils/MoonRaker.hpp
     Utils/TimeSyncManager.cpp
@@ -883,6 +917,14 @@ configure_file(${CMAKE_CURRENT_SOURCE_DIR}/GeneratedConfig.hpp.in
                @ONLY)
 
 add_library(libslic3r_gui STATIC ${SLIC3R_GUI_SOURCES})
+if (MSVC AND SLIC3R_MSVC_Z7)
+    # With /Z7 the debug info embedded in this library pushes it past the 4 GB static-library limit
+    # (LNK1248), so this one target keeps /Zi and the real compiler (bypassing any CLToolExe cache wrapper).
+    target_compile_options(libslic3r_gui PRIVATE /Zi)
+    get_filename_component(_slic3r_gui_cl_dir "${CMAKE_CXX_COMPILER}" DIRECTORY)
+    set_property(TARGET libslic3r_gui PROPERTY VS_GLOBAL_CLToolExe "cl.exe")
+    set_property(TARGET libslic3r_gui PROPERTY VS_GLOBAL_CLToolPath "${_slic3r_gui_cl_dir}")
+endif ()
 target_include_directories(libslic3r_gui PRIVATE Utils ${CMAKE_CURRENT_BINARY_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/..)
 target_link_libraries(libslic3r_gui paho-mqttpp3-static)
 

@@ -23,14 +23,12 @@
 #include <iostream>
 #include <math.h>
 
+#include "nlohmann/json.hpp"
+using namespace nlohmann;
 #if defined(__linux__) || defined(__LINUX__)
 #include <condition_variable>
 #include <mutex>
 #include <boost/thread.hpp>
-//add json logic
-#include "nlohmann/json.hpp"
-
-using namespace nlohmann;
 #endif
 
 
@@ -70,6 +68,9 @@ using namespace nlohmann;
 #include "libslic3r/Thread.hpp"
 #include "libslic3r/BlacklistedLibraryCheck.hpp"
 #include "libslic3r/FlushVolCalc.hpp"
+#include "libslic3r/LayOnFace.hpp"
+#include "libslic3r/MixedFilament.hpp"
+#include "libslic3r/MixedFilamentCliGates.hpp"
 
 #include "libslic3r/Orient.hpp"
 #include "libslic3r/PNGReadWrite.hpp"
@@ -80,14 +81,21 @@ using namespace nlohmann;
 #ifdef WIN32
 #include "dev-utils/BaseException.h"
 #endif
+#include "slic3r/Utils/MeshInspect.hpp"
+#include "slic3r/Utils/PaintCLI.hpp"
 #include "slic3r/GUI/PartPlate.hpp"
 #include "slic3r/GUI/BitmapCache.hpp"
 #include "slic3r/GUI/OpenGLManager.hpp"
 #include "libslic3r/PresetBundle.hpp"
+#include <algorithm>
 #include <array>
+#include <cmath>
+#include <cstdlib>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <set>
+#include <sstream>
 #include "slic3r/GUI/GLCanvas3D.hpp"
 #include "slic3r/GUI/Camera.hpp"
 #include "slic3r/GUI/Plater.hpp"
@@ -154,9 +162,15 @@ std::map<int, std::string> cli_errors = {
     {CLI_OBJECT_COLLISION_IN_SEQ_PRINT, "Object conflicts were detected when using print-by-object mode. Please verify the slicing of all plates in EdgeSlicer before uploading."},
     {CLI_OBJECT_COLLISION_IN_LAYER_PRINT, "Object conflicts were detected. Please verify the slicing of all plates in EdgeSlicer before uploading."},
     {CLI_SPIRAL_MODE_INVALID_PARAMS, "Some slicing parameters cannot work with Spiral Vase mode. Please solve the issue in EdgeSlicer before uploading."},
+    {CLI_MIXED_FILAMENT_INVALID, "A mixed filament is invalid: its components are different filament types, or it has no filament of its own."},
     {CLI_SLICING_ERROR, "Failed slicing the model. Please verify the slicing of all plates on EdgeSlicer before uploading."},
     {CLI_GCODE_PATH_CONFLICTS, " G-code conflicts detected after slicing. Please make sure the 3mf file can be successfully sliced in the latest EdgeSlicer."}
 };
+
+// CLI mixed-filament wipe/flush/type gate decision logic now lives in
+// libslic3r/MixedFilamentCliGates.hpp/.cpp (pure, GUI-free, unit-tested in
+// tests/libslic3r/test_mixed_filament_cli_gates.cpp) so it can be exercised outside
+// this file, which is the application's main and is not itself unit-testable.
 
 typedef struct  _sliced_plate_info{
     int plate_id{0};
@@ -200,6 +214,10 @@ typedef struct _sliced_info {
     size_t export_time;
     std::vector<std::string> upward_machines;
     std::vector<std::string> downward_machines;
+    // Structured slicing warnings for result.json / --progress-json, and whether --strict was on.
+    // Distinct from Ultra's per-plate warnings[] strings on sliced_plate_info_t.
+    nlohmann::json      warnings = nlohmann::json::array();
+    bool                strict_mode {false};
 }sliced_info_t;
 std::vector<PrintBase::SlicingStatus> g_slicing_warnings;
 
@@ -436,6 +454,19 @@ static PrinterTechnology get_printer_technology(const DynamicConfig &config)
     return(ret);}
 #endif
 
+// Records a structured slicing warning so a CI or scripted consumer can branch on
+// a stable `class` string instead of matching stderr. Warnings are kept on the
+// run's sliced_info and emitted as the top-level "warnings" array of result.json
+// (and the --progress-json result echo); a non-empty array does not by itself
+// mean the run failed. Under --strict a NON_CRITICAL warning additionally ends
+// the run non-zero. Ultra also writes result.json on every platform.
+static void cli_record_warning(sliced_info_t &sliced_info, const std::string &cls,
+                               nlohmann::json details = nlohmann::json::object())
+{
+    details["class"] = cls;
+    sliced_info.warnings.push_back(std::move(details));
+}
+
 void record_exit_reson(std::string outputdir, int code, int plate_id, std::string error_message, sliced_info_t& sliced_info, std::map<std::string, std::string> key_values = std::map<std::string, std::string>())
 {
     // Ultra: written on every platform (was Linux-only), with per-plate estimates and warnings,
@@ -448,7 +479,7 @@ void record_exit_reson(std::string outputdir, int code, int plate_id, std::strin
         result_file = "result.json";
 
     try {
-        json j;
+        nlohmann::json j;
         //record the headers
         if (sliced_info.downward_machines.size() > 0)
             j["downward_compatible_machine"] = sliced_info.downward_machines;
@@ -461,7 +492,7 @@ void record_exit_reson(std::string outputdir, int code, int plate_id, std::strin
         j["export_time"] = sliced_info.export_time;
         for (size_t index = 0; index < sliced_info.sliced_plates.size(); index++)
         {
-            json plate_json;
+            nlohmann::json plate_json;
             plate_json["id"] = sliced_info.sliced_plates[index].plate_id;
             plate_json["sliced_time"] = sliced_info.sliced_plates[index].sliced_time;
             plate_json["sliced_time_with_cache"] = sliced_info.sliced_plates[index].sliced_time_with_cache;
@@ -476,6 +507,9 @@ void record_exit_reson(std::string outputdir, int code, int plate_id, std::strin
         }
         for (auto& iter: key_values)
             j[iter.first] = iter.second;
+
+        j["warnings"]    = sliced_info.warnings;
+        j["strict_mode"] = sliced_info.strict_mode;
 
         boost::nowide::ofstream c;
         c.open(result_file, std::ios::out | std::ios::trunc);
@@ -1363,6 +1397,10 @@ int CLI::run(int argc, char **argv)
     // Development and test only - see DataDirMigration.hpp and test_rebrand_migration.py.
     if (const ConfigOptionString* mig_root = m_config.opt<ConfigOptionString>("migrate_datadir_test");
         mig_root && !mig_root->value.empty()) {
+        if (std::find(m_actions.begin(), m_actions.end(), "inspect_paint") != m_actions.end()) {
+            boost::nowide::cerr << "--inspect-paint cannot be combined with --migrate-datadir-test" << std::endl;
+            return CLI_INVALID_PARAMS;
+        }
         const std::string parent = mig_root->value;
         const auto        r      = Slic3r::migrate_data_dir(parent,
                                        (boost::filesystem::path(parent) / SLIC3R_APP_KEY).string());
@@ -1380,12 +1418,53 @@ int CLI::run(int argc, char **argv)
     }
 
 #ifdef SLIC3R_GUI
+    // Record our own description for an error code, for the ones Bambu publishes with an empty
+    // description (0C00010000020015 is the case that prompted this). Writes the user overlay at
+    // <datadir>/hms/overrides.json, which every surface consults ahead of Bambu's tables.
+    // --hms-add <code> "<description>" [--hms-add-lang de] [--hms-add-model 31B] [--hms-add-force]
+    if (const ConfigOptionStrings* add = m_config.opt<ConfigOptionStrings>("hms_add");
+        add && !add->values.empty()) {
+        if (add->values.size() < 2 || add->values[1].empty()) {
+            boost::nowide::cerr << "--hms-add needs a code and a description, e.g. "
+                                   "--hms-add 0C00010000020015 \"Nozzle Camera is malfunctioning.\""
+                                << std::endl;
+            return CLI_INVALID_PARAMS;
+        }
+        // Everything after the code is the description, so an unquoted sentence still works.
+        std::string text = add->values[1];
+        for (size_t i = 2; i < add->values.size(); ++i) text += " " + add->values[i];
+
+        Slic3r::GUI::HMSQuery q;
+        std::string           err;
+        const bool ok = q.add_override(add->values[0], text, m_config.opt_string("hms_add_lang"),
+                                       m_config.opt_string("hms_add_model"), "recorded with --hms-add", std::string(),
+                                       m_config.opt_bool("hms_add_force"), err);
+        if (!ok) {
+            boost::nowide::cerr << "hms-add: " << err << std::endl;
+            return CLI_INVALID_PARAMS;
+        }
+        std::string normalized;
+        Slic3r::GUI::HMSQuery::is_valid_code(add->values[0], normalized);
+        boost::nowide::cout << "HMS_ADD_OK=1" << std::endl
+                            << "HMS_ADD_CODE=" << normalized << std::endl
+                            << "HMS_ADD_FILE=" << Slic3r::GUI::HMSQuery::user_override_path() << std::endl;
+        return 0;
+    }
+
     // The per-device HMS lookup, with no printer and no window: which table a serial picks, and
     // what that table says about one code. The tables come from <datadir>/hms and, failing that,
     // <resources>/hms; the cloud refresh is not reachable from here.
     // --hms-lookup <serial>:<code>[:<lang>]   e.g. 31BA0123456789:05004046:en
     if (const ConfigOptionString* look = m_config.opt<ConfigOptionString>("hms_lookup");
         look && !look->value.empty()) {
+        if (std::find(m_actions.begin(), m_actions.end(), "inspect_mesh") != m_actions.end()) {
+            boost::nowide::cerr << "--inspect-mesh cannot be combined with --hms-lookup" << std::endl;
+            return CLI_INVALID_PARAMS;
+        }
+        if (std::find(m_actions.begin(), m_actions.end(), "inspect_paint") != m_actions.end()) {
+            boost::nowide::cerr << "--inspect-paint cannot be combined with --hms-lookup" << std::endl;
+            return CLI_INVALID_PARAMS;
+        }
         std::vector<std::string> parts;
         for (size_t at = 0; at != std::string::npos;) {
             const size_t sep = look->value.find(':', at);
@@ -1410,18 +1489,35 @@ int CLI::run(int argc, char **argv)
             boost::nowide::cerr << "hms-lookup: `" << look->value << "` is not <serial>:<code>[:<lang>]" << std::endl;
             return CLI_INVALID_PARAMS;
         }
+        // HMS_TEXT stays the raw table answer, empty when the table has nothing - that is what
+        // makes this a diagnostic. HMS_OVERRIDE is our own description if one is recorded, and
+        // HMS_DESCRIPTION is what the device tab, the hub and the phone actually show for this
+        // code, so the CLI can be used to check a user-facing surface.
+        const wxString overridden = q.query_override(dev_id, code, lang);
+        const wxString described  = Slic3r::GUI::HMSQuery::format_error(overridden.IsEmpty() ? text : overridden, code);
         boost::nowide::cout << "HMS_DEV_ID_TYPE=" << Slic3r::GUI::HMSQuery::get_dev_id_type(dev_id) << std::endl
                             << "HMS_FILE=" << Slic3r::GUI::HMSQuery::get_hms_file(QUERY_HMS_INFO, lang, Slic3r::GUI::HMSQuery::get_dev_id_type(dev_id)) << std::endl
                             << "HMS_CODE=" << code << std::endl
                             << "HMS_LANG=" << lang << std::endl
                             << "HMS_FOUND=" << (found ? 1 : 0) << std::endl
-                            << "HMS_TEXT=" << text.ToUTF8().data() << std::endl;
+                            << "HMS_TEXT=" << text.ToUTF8().data() << std::endl
+                            << "HMS_OVERRIDE=" << overridden.ToUTF8().data() << std::endl
+                            << "HMS_DESCRIPTION=" << described.ToUTF8().data() << std::endl;
         return 0;
     }
 
     // Ultra: `--hub` runs the phone-access / camera-relay helper instead of the slicer.
-    if (const ConfigOptionBool* hub = m_config.opt<ConfigOptionBool>("hub"); hub && hub->value)
+    if (const ConfigOptionBool* hub = m_config.opt<ConfigOptionBool>("hub"); hub && hub->value) {
+        if (std::find(m_actions.begin(), m_actions.end(), "inspect_mesh") != m_actions.end()) {
+            boost::nowide::cerr << "--inspect-mesh cannot be combined with --hub" << std::endl;
+            return CLI_INVALID_PARAMS;
+        }
+        if (std::find(m_actions.begin(), m_actions.end(), "inspect_paint") != m_actions.end()) {
+            boost::nowide::cerr << "--inspect-paint cannot be combined with --hub" << std::endl;
+            return CLI_INVALID_PARAMS;
+        }
         return Slic3r::GUI::RemoteHub::run_server(m_config.opt_string("hub_token"), m_config.opt_bool("hub_phone"));
+    }
 #endif
 
     m_extra_config.apply(m_config, true);
@@ -1465,6 +1561,16 @@ int CLI::run(int argc, char **argv)
     // Ultra: agent-friendly options.
     if (auto* opt = m_config.option<ConfigOptionBool>("progress_json"))
         g_progress_json = opt->value;
+    // Read up front so result.json / --progress-json report it for early failures too.
+    sliced_info.strict_mode = m_config.opt_bool("strict");
+    // --no-check skips the check behind the only NON_CRITICAL warning --strict acts on
+    // (support needed but disabled), from the point it appears among the actions. The pair
+    // would make --strict a no-op or depend on argument order, so refuse it.
+    if (sliced_info.strict_mode && m_config.opt_bool("no_check")) {
+        boost::nowide::cerr << "--strict cannot be combined with --no-check" << std::endl;
+        record_exit_reson(outfile_dir, CLI_INVALID_PARAMS, 0, cli_errors[CLI_INVALID_PARAMS], sliced_info);
+        flush_and_exit(CLI_INVALID_PARAMS);
+    }
     bool no_thumbnails = false;
     if (auto* opt = m_config.option<ConfigOptionBool>("no_thumbnails"))
         no_thumbnails = opt->value;
@@ -1519,6 +1625,134 @@ int CLI::run(int argc, char **argv)
         downward_check = downward_check_option->value;
     else
         downward_check = false;
+
+    // --inspect-mesh prints its JSON and exits, so any action that does work of its
+    // own (slicing, exporting) would be skipped without notice. Reject those up front;
+    // only options that merely tune how the input is loaded may come along.
+    if (std::find(m_actions.begin(), m_actions.end(), "inspect_mesh") != m_actions.end()) {
+        // "strict" is a CLI action from --strict (PR #39 / Orca #14601). It does not write
+        // stdout and does no work of its own during --inspect-mesh, so keep it allowed once
+        // that tip is stacked under this one. --slice / --export-settings / --inspect-paint stay rejected.
+        static const std::set<std::string> inspect_compatible = { "inspect_mesh", "uptodate", "load_defaultfila", "min_save",
+                                                                  "mtcpp", "mstpp", "no_check", "strict", "normative_check", "pipe" };
+        for (const std::string &action : m_actions) {
+            if (inspect_compatible.count(action) == 0) {
+                std::string flag = action;
+                std::replace(flag.begin(), flag.end(), '_', '-');
+                boost::nowide::cerr << "--inspect-mesh cannot be combined with --" << flag << std::endl;
+                record_exit_reson(outfile_dir, CLI_INVALID_PARAMS, 0, cli_errors[CLI_INVALID_PARAMS], sliced_info);
+                flush_and_exit(CLI_INVALID_PARAMS);
+            }
+        }
+        // --progress-json is a CLIMiscConfigDef option, not an action, and would interleave
+        // "event":"progress"/"result" JSON lines with the inspect-mesh document on stdout.
+        if (g_progress_json) {
+            boost::nowide::cerr << "--inspect-mesh cannot be combined with --progress-json" << std::endl;
+            record_exit_reson(outfile_dir, CLI_INVALID_PARAMS, 0, cli_errors[CLI_INVALID_PARAMS], sliced_info);
+            flush_and_exit(CLI_INVALID_PARAMS);
+        }
+        // --export-settings - is already rejected via the action loop above (export_settings is
+        // not inspect-compatible). Hub/HMS are CLIMiscConfigDef early exits that write stdout
+        // or take over the process; they are also checked at their handlers before this gate.
+        if (m_config.opt_bool("hub")) {
+            boost::nowide::cerr << "--inspect-mesh cannot be combined with --hub" << std::endl;
+            record_exit_reson(outfile_dir, CLI_INVALID_PARAMS, 0, cli_errors[CLI_INVALID_PARAMS], sliced_info);
+            flush_and_exit(CLI_INVALID_PARAMS);
+        }
+        if (!m_config.opt_string("hms_lookup").empty()) {
+            boost::nowide::cerr << "--inspect-mesh cannot be combined with --hms-lookup" << std::endl;
+            record_exit_reson(outfile_dir, CLI_INVALID_PARAMS, 0, cli_errors[CLI_INVALID_PARAMS], sliced_info);
+            flush_and_exit(CLI_INVALID_PARAMS);
+        }
+        // Without input there is nothing to inspect; fail rather than print nothing and exit 0.
+        if (m_input_files.empty() && m_config.opt_string("load_assemble_list").empty()) {
+            boost::nowide::cerr << "--inspect-mesh needs an input file or --load-assemble-list" << std::endl;
+            record_exit_reson(outfile_dir, CLI_INVALID_PARAMS, 0, cli_errors[CLI_INVALID_PARAMS], sliced_info);
+            flush_and_exit(CLI_INVALID_PARAMS);
+        }
+    }
+
+    // --inspect-paint prints its JSON and exits, so any action that does work of its
+    // own (slicing, exporting, other inspects) would be skipped without notice. Reject
+    // those up front; only options that merely tune how the input is loaded may come along.
+    if (std::find(m_actions.begin(), m_actions.end(), "inspect_paint") != m_actions.end()) {
+        // Unlike --inspect-mesh, --strict is rejected here: this action never slices, so
+        // --strict cannot escalate warnings (Orca #14608). --inspect-mesh is also rejected;
+        // if both flags are present the inspect_mesh gate above fires first.
+        static const std::set<std::string> inspect_compatible = { "inspect_paint", "uptodate", "load_defaultfila", "min_save",
+                                                                  "mtcpp", "mstpp", "no_check", "normative_check", "pipe" };
+        for (const std::string &action : m_actions) {
+            if (inspect_compatible.count(action) == 0) {
+                std::string flag = action;
+                std::replace(flag.begin(), flag.end(), '_', '-');
+                boost::nowide::cerr << "--inspect-paint cannot be combined with --" << flag << std::endl;
+                record_exit_reson(outfile_dir, CLI_INVALID_PARAMS, 0, cli_errors[CLI_INVALID_PARAMS], sliced_info);
+                flush_and_exit(CLI_INVALID_PARAMS);
+            }
+        }
+        // --progress-json is a CLIMiscConfigDef option, not an action, and would interleave
+        // "event":"progress"/"result" JSON lines with the inspect-paint document on stdout.
+        if (g_progress_json) {
+            boost::nowide::cerr << "--inspect-paint cannot be combined with --progress-json" << std::endl;
+            record_exit_reson(outfile_dir, CLI_INVALID_PARAMS, 0, cli_errors[CLI_INVALID_PARAMS], sliced_info);
+            flush_and_exit(CLI_INVALID_PARAMS);
+        }
+        // --export-settings - is already rejected via the action loop above (export_settings is
+        // not inspect-compatible). Hub/HMS are CLIMiscConfigDef early exits that write stdout
+        // or take over the process; they are also checked at their handlers before this gate.
+        if (m_config.opt_bool("hub")) {
+            boost::nowide::cerr << "--inspect-paint cannot be combined with --hub" << std::endl;
+            record_exit_reson(outfile_dir, CLI_INVALID_PARAMS, 0, cli_errors[CLI_INVALID_PARAMS], sliced_info);
+            flush_and_exit(CLI_INVALID_PARAMS);
+        }
+        if (!m_config.opt_string("hms_lookup").empty()) {
+            boost::nowide::cerr << "--inspect-paint cannot be combined with --hms-lookup" << std::endl;
+            record_exit_reson(outfile_dir, CLI_INVALID_PARAMS, 0, cli_errors[CLI_INVALID_PARAMS], sliced_info);
+            flush_and_exit(CLI_INVALID_PARAMS);
+        }
+        // --migrate-datadir-test is CLIMiscConfigDef (not an action), so it never shows up in
+        // m_actions. It is an early stdout exit like --hub / --hms-lookup and is also
+        // rejected at its handler before this gate.
+        if (!m_config.opt_string("migrate_datadir_test").empty()) {
+            boost::nowide::cerr << "--inspect-paint cannot be combined with --migrate-datadir-test" << std::endl;
+            record_exit_reson(outfile_dir, CLI_INVALID_PARAMS, 0, cli_errors[CLI_INVALID_PARAMS], sliced_info);
+            flush_and_exit(CLI_INVALID_PARAMS);
+        }
+        // Without input there is nothing to inspect; fail rather than print nothing and exit 0.
+        if (m_input_files.empty() && m_config.opt_string("load_assemble_list").empty()) {
+            boost::nowide::cerr << "--inspect-paint needs an input file or --load-assemble-list" << std::endl;
+            record_exit_reson(outfile_dir, CLI_INVALID_PARAMS, 0, cli_errors[CLI_INVALID_PARAMS], sliced_info);
+            flush_and_exit(CLI_INVALID_PARAMS);
+        }
+    }
+
+    // --export-settings - writes its JSON to stdout, so reject every action or transform that may write there
+    // too (--info, --help, --orient, slicing and exporting). The allowed ones do nothing when nothing is
+    // sliced or exported.
+    if (std::find(m_actions.begin(), m_actions.end(), "export_settings") != m_actions.end() && m_config.opt_string("export_settings") == "-") {
+        // --progress-json is a CLIMiscConfigDef option, not an action/transform, so it never shows up in
+        // m_actions/m_transforms below. emit_progress()/record_exit_reson() still write "event":"progress"/
+        // "result" JSON lines straight to stdout whenever g_progress_json is set (see above), which would
+        // interleave with and corrupt the single settings-JSON document -export-settings - is meant to produce.
+        if (g_progress_json) {
+            boost::nowide::cerr << "--export-settings - cannot be combined with --progress-json" << std::endl;
+            record_exit_reson(outfile_dir, CLI_INVALID_PARAMS, 0, cli_errors[CLI_INVALID_PARAMS], sliced_info);
+            flush_and_exit(CLI_INVALID_PARAMS);
+        }
+        static const std::set<std::string> stdout_compatible = { "export_settings", "uptodate", "load_defaultfila", "min_save",
+                                                                 "mtcpp", "mstpp", "no_check", "strict", "normative_check", "pipe" };
+        for (const std::vector<std::string> *opt_keys : { &m_actions, &m_transforms }) {
+            for (const std::string &opt_key : *opt_keys) {
+                if (stdout_compatible.count(opt_key) == 0) {
+                    std::string flag = opt_key;
+                    std::replace(flag.begin(), flag.end(), '_', '-');
+                    boost::nowide::cerr << "--export-settings - cannot be combined with --" << flag << std::endl;
+                    record_exit_reson(outfile_dir, CLI_INVALID_PARAMS, 0, cli_errors[CLI_INVALID_PARAMS], sliced_info);
+                    flush_and_exit(CLI_INVALID_PARAMS);
+                }
+            }
+        }
+    }
 
     bool start_gui = m_actions.empty() && !downward_check;
     if (start_gui) {
@@ -3242,6 +3476,16 @@ int CLI::run(int argc, char **argv)
                 BOOST_LOG_TRIVIAL(info) << boost::format("filament_is_support: %1%") % filament_is_support->serialize();
                 BOOST_LOG_TRIVIAL(info) << boost::format("flush_volumes_matrix before computing: %1%") % m_print_config.option<ConfigOptionFloats>("flush_volumes_matrix")->serialize();
             }
+            // A mixed slot never reaches a nozzle, so its row and column stay empty, as in the GUI.
+            // Extra config is not merged into m_print_config yet, so mixed_filament_definitions
+            // on the command line wins here.
+            MixedFilamentManager flush_mixed_mgr;
+            const size_t flush_num_physical = filament_count > 0 ? size_t(filament_count) : project_filament_colors.size();
+            populate_cli_mixed_filament_manager(flush_mixed_mgr, m_print_config, &m_extra_config, project_filament_colors,
+                                                flush_num_physical);
+            auto is_mixed_slot = [&](int idx) {
+                return flush_mixed_mgr.is_mixed(static_cast<unsigned int>(idx + 1), flush_num_physical);
+            };
             for (int from_idx = 0; from_idx < project_filament_count; from_idx++) {
                 const std::string& from_color = project_filament_colors[from_idx];
                 unsigned char from_rgb[4] = {};
@@ -3249,7 +3493,7 @@ int CLI::run(int argc, char **argv)
                 bool is_from_support = filament_is_support->get_at(from_idx);
                 for (int to_idx = 0; to_idx < project_filament_count; to_idx++) {
                     bool is_to_support = filament_is_support->get_at(to_idx);
-                    if (from_idx == to_idx) {
+                    if (from_idx == to_idx || is_mixed_slot(from_idx) || is_mixed_slot(to_idx)) {
                         flush_vol_matrix[project_filament_count*from_idx + to_idx] = 0.f;
                     }
                     else {
@@ -3410,6 +3654,34 @@ int CLI::run(int argc, char **argv)
         m_print_config.apply(sla_print_config, true);*/
     }
 
+    // After 3mf load/normalize: rebuild MixedFilamentManager from the merged project
+    // definitions and physical colours before wipe/flush/type gates.
+    MixedFilamentManager cli_mixed_filament_mgr;
+    size_t               cli_mixed_num_physical = 0;
+    {
+        std::vector<std::string> physical_colors;
+        if (const auto *opt = m_print_config.option<ConfigOptionStrings>("filament_colour"))
+            physical_colors = opt->values;
+        cli_mixed_num_physical = filament_count > 0 ? size_t(filament_count) : physical_colors.size();
+        populate_cli_mixed_filament_manager(cli_mixed_filament_mgr, m_print_config, nullptr, physical_colors,
+                                            cli_mixed_num_physical);
+
+        if (ConfigOptionFloats *flush_opt = m_print_config.option<ConfigOptionFloats>("flush_volumes_matrix")) {
+            const size_t n = size_t(std::sqrt(double(flush_opt->values.size())) + 0.001);
+            zero_mixed_flush_rows_and_cols(flush_opt->values, n, cli_mixed_filament_mgr, cli_mixed_num_physical);
+        }
+
+        const std::string mixed_defs = cli_mixed_filament_definitions(m_print_config, nullptr);
+        const CliMixedFilamentVerdict slots_verdict = cli_check_mixed_filament_slots_have_filament(
+            cli_mixed_filament_mgr, mixed_defs, cli_mixed_num_physical, m_models, m_print_config, filament_count);
+        if (!slots_verdict.ok) {
+            BOOST_LOG_TRIVIAL(error) << slots_verdict.message;
+            record_exit_reson(outfile_dir, CLI_MIXED_FILAMENT_INVALID, 0, cli_errors[CLI_MIXED_FILAMENT_INVALID],
+                              sliced_info);
+            flush_and_exit(CLI_MIXED_FILAMENT_INVALID);
+        }
+    }
+
     std::map<std::string, std::string> validity = m_print_config.validate(true);
     if (!validity.empty()) {
         boost::nowide::cerr << "Param values in 3mf/config error: "<< std::endl;
@@ -3423,6 +3695,14 @@ int CLI::run(int argc, char **argv)
     bool is_smooth_timelapse = false;
     if (enable_timelapse && timelapse_type_opt && (timelapse_type_opt->getInt() == TimelapseType::tlSmooth))
         is_smooth_timelapse = true;
+    // A mixed filament swaps between its components every layer, so it needs the tower even when
+    // every loaded preset is the same.
+    if (disable_wipe_tower_after_mapping) {
+        if (cli_mixed_filament_mgr.enabled_count() > 0) {
+            disable_wipe_tower_after_mapping = false;
+            BOOST_LOG_TRIVIAL(info) << boost::format("%1%, set disable_wipe_tower_after_mapping back to false due to a mixed filament")%__LINE__;
+        }
+    }
     if (disable_wipe_tower_after_mapping) {
         if (is_smooth_timelapse)
         {
@@ -3571,7 +3851,7 @@ int CLI::run(int argc, char **argv)
             return;
         }
 
-        std::vector<int> extruders = plate->get_extruders_under_cli(true, print_config);
+        std::vector<int> extruders = plate->get_extruders_under_cli(true, print_config, false);
         unsigned int filaments_cnt = extruders.size();
         std::ostringstream extruder_list;
         for (size_t i = 0; i < extruders.size(); ++i) {
@@ -4080,6 +4360,64 @@ int CLI::run(int argc, char **argv)
                 for (auto &o : model.objects)
                     // this affects volumes:
                     o->rotate(Geometry::deg2rad(m_config.opt_float(opt_key)), Y);
+        } else if (opt_key == "ground_largest_face" || opt_key == "ground_face_normal" || opt_key == "ground_face_point") {
+            // Each instance is laid on one of its lay-on-face planes, which are computed from the current part
+            // transformations, so the rotations given before this option are respected. A direction or point is in
+            // object coordinates, so it names the same face for every instance of an object.
+            std::function<int(const std::vector<LayOnFacePlane>&, const Transform3d&)> pick;
+            if (opt_key == "ground_largest_face") {
+                if (m_config.opt_bool(opt_key))
+                    pick = [](const std::vector<LayOnFacePlane>& planes, const Transform3d&) { return find_largest_plane(planes); };
+            } else {
+                // Only options given on the command line reach this loop, so an empty value is malformed input too.
+                const std::string& value = m_config.opt_string(opt_key);
+                Vec3d v;
+                int   consumed = 0;
+                if (sscanf(value.c_str(), "%lf,%lf,%lf%n", &v.x(), &v.y(), &v.z(), &consumed) != 3 || consumed != int(value.size()) ||
+                    !v.allFinite() || (opt_key == "ground_face_normal" && v.norm() < EPSILON)) {
+                    BOOST_LOG_TRIVIAL(error) << boost::format("Invalid params: %1% expects three comma-separated numbers, got \"%2%\"") % opt_key % value;
+                    record_exit_reson(outfile_dir, CLI_INVALID_PARAMS, 0, cli_errors[CLI_INVALID_PARAMS], sliced_info);
+                    flush_and_exit(CLI_INVALID_PARAMS);
+                }
+                if (opt_key == "ground_face_normal")
+                    pick = [v](const std::vector<LayOnFacePlane>& planes, const Transform3d&) { return find_plane_by_normal(planes, v); };
+                else
+                    pick = [v](const std::vector<LayOnFacePlane>& planes, const Transform3d& inst_matrix) {
+                        return find_plane_at_point(planes, inst_matrix, v, 0.01);
+                    };
+            }
+            if (pick) {
+                size_t laid = 0, missed = 0;
+                for (auto& model : m_models) {
+                    model.add_default_instances();
+                    for (ModelObject* o : model.objects)
+                        for (size_t i = 0; i < o->instances.size(); ++i) {
+                            const Transform3d                 inst_matrix = o->instances[i]->get_matrix_no_offset();
+                            const std::vector<LayOnFacePlane> planes      = lay_on_face_planes(*o, inst_matrix);
+                            if (planes.empty()) {
+                                // Small or smooth parts (e.g. a sphere) have no face to rest on; the gizmo offers none either.
+                                BOOST_LOG_TRIVIAL(warning) << boost::format("%1%: object %2% has no face large enough to lay on, left as it is") % opt_key % o->name;
+                                continue;
+                            }
+                            const int idx = pick(planes, inst_matrix);
+                            if (idx < 0) {
+                                // Only a point can miss: with several objects it usually belongs to one of them.
+                                BOOST_LOG_TRIVIAL(warning) << boost::format("%1%: no face of object %2% contains the point, left as it is") % opt_key % o->name;
+                                ++missed;
+                                continue;
+                            }
+                            BOOST_LOG_TRIVIAL(info) << boost::format("%1%: object %2% instance %3% laid on the %4% mm2 face with normal %5%")
+                                                        % opt_key % o->name % i % planes[idx].area % planes[idx].normal.transpose();
+                            lay_on_face(*o, i, planes[idx].normal);
+                            ++laid;
+                        }
+                }
+                if (laid == 0 && missed > 0) {
+                    BOOST_LOG_TRIVIAL(error) << boost::format("Invalid params: %1%: no face of any object contains the point") % opt_key;
+                    record_exit_reson(outfile_dir, CLI_INVALID_PARAMS, 0, cli_errors[CLI_INVALID_PARAMS], sliced_info);
+                    flush_and_exit(CLI_INVALID_PARAMS);
+                }
+            }
         } else if (opt_key == "scale") {
             float ratio = m_config.opt_float(opt_key);
             if (ratio <= 0.f) {
@@ -4599,7 +4937,7 @@ int CLI::run(int argc, char **argv)
                                 //skip this object due to be locked in plate
                                 ap.itemid = locked_aps.size();
                                 locked_aps.emplace_back(ap);
-                                boost::nowide::cout <<__FUNCTION__ << boost::format(": skip locked instance, obj_id %1%, instance_id %2%") % oidx % inst_idx;
+                                BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(": skip locked instance, obj_id %1%, instance_id %2%") % oidx % inst_idx;
                             }
                         }
                     }
@@ -4733,7 +5071,7 @@ int CLI::run(int argc, char **argv)
                         if ((filaments_cnt == 0) || need_skip)
                         {
                             // slice filaments info invalid
-                            std::vector<int> extruders = cur_plate->get_extruders_under_cli(true, m_print_config);
+                            std::vector<int> extruders = cur_plate->get_extruders_under_cli(true, m_print_config, false);
                             filaments_cnt = extruders.size();
                             BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format("arrange: slice filaments info invalid or need_skip, get from partplate: filament_count %1%")%filaments_cnt;
                         }
@@ -5174,13 +5512,68 @@ int CLI::run(int argc, char **argv)
             //FIXME check for mixing the FFF / SLA parameters.
             // or better save fff_print_config vs. sla_print_config
             //m_print_config.save(m_config.opt_string("save"));
-            m_print_config.save_to_json(m_config.opt_string(opt_key), std::string("project_settings"), std::string("project"), std::string(Snapmaker_VERSION));
+            const std::string &settings_file = m_config.opt_string(opt_key);
+            if (settings_file == "-")
+                m_print_config.save_to_json(boost::nowide::cout, "project_settings", "project", Snapmaker_VERSION, /*replace_invalid_utf8=*/true);
+            else
+                m_print_config.save_to_json(settings_file, std::string("project_settings"), std::string("project"), std::string(Snapmaker_VERSION));
         } else if (opt_key == "info") {
             // --info works on unrepaired model
             for (Model &model : m_models) {
                 model.add_default_instances();
                 model.print_info();
             }
+        } else if (opt_key == "inspect_mesh") {
+            // Machine-readable alternative to --info. Registered as an action so it satisfies the
+            // "needs an action" check and bypasses the GUI fallback, then exits once the JSON is out.
+            for (Model &model : m_models) {
+                model.add_default_instances();
+                Slic3r::MeshInspect::inspect_to_json(model, m_input_files, boost::nowide::cout);
+            }
+            boost::nowide::cout.flush();
+            // Conflicting actions were rejected before loading. Finish like the end of run().
+            // flush_and_exit() is not usable here: it prints "found error ..." to stdout,
+            // which would corrupt the JSON.
+#if defined(__linux__) || defined(__LINUX__)
+            if (g_cli_callback_mgr.is_started()) {
+                PrintBase::SlicingStatus slicing_status{100, "All done, Success"};
+                cli_status_callback(slicing_status);
+            }
+            g_cli_callback_mgr.stop();
+#endif
+            for (Model &m : m_models)
+                m.remove_backup_path_if_exist();
+            record_exit_reson(outfile_dir, CLI_SUCCESS, plate_to_slice, cli_errors[CLI_SUCCESS], sliced_info);
+            boost::nowide::cerr.flush();
+            return CLI_SUCCESS;
+        } else if (opt_key == "inspect_paint") {
+            // --inspect-paint — read the per-facet enforcer/blocker/extruder/
+            // fuzzy state from the loaded model and emit a JSON summary.
+            // Machine-readable alternative to opening the paint gizmos.
+            // m_input_files were already absolute-ized by resolve_cli_input_path()
+            // in setup(), matching --inspect-mesh.
+            // One dump for every loaded model: Orca #14608 merges inputs into one Model
+            // before actions, but looping inspect_to_json per Model concatenated JSON
+            // documents on stdout. Fold leftover models into the same objects/summary.
+            for (Model &model : m_models)
+                model.add_default_instances();
+            Slic3r::PaintCLI::inspect_to_json(m_models, m_input_files, boost::nowide::cout);
+            boost::nowide::cout.flush();
+            // Conflicting actions were rejected before loading. Finish like the end of run().
+            // flush_and_exit() is not usable here: it prints "found error ..." to stdout,
+            // which would corrupt the JSON.
+#if defined(__linux__) || defined(__LINUX__)
+            if (g_cli_callback_mgr.is_started()) {
+                PrintBase::SlicingStatus slicing_status{100, "All done, Success"};
+                cli_status_callback(slicing_status);
+            }
+            g_cli_callback_mgr.stop();
+#endif
+            for (Model &m : m_models)
+                m.remove_backup_path_if_exist();
+            record_exit_reson(outfile_dir, CLI_SUCCESS, plate_to_slice, cli_errors[CLI_SUCCESS], sliced_info);
+            boost::nowide::cerr.flush();
+            return CLI_SUCCESS;
         } else if (opt_key == "uptodate") {
             //already processed before
         } else if (opt_key == "min_save") {
@@ -5221,6 +5614,8 @@ int CLI::run(int argc, char **argv)
             export_3mf_file = m_config.opt_string(opt_key);
         }else if(opt_key=="no_check"){
             no_check = m_config.opt_bool(opt_key);
+        }else if(opt_key=="strict"){
+            //already read into sliced_info at the start of run()
         //} else if (opt_key == "export_gcode" || opt_key == "export_sla" || opt_key == "slice") {
         } else if (opt_key == "normative_check") {
             //already processed before
@@ -5461,6 +5856,23 @@ int CLI::run(int argc, char **argv)
                                 flush_and_exit(CLI_FILAMENTS_DIFFERENT_TEMP);
                             }
                         }
+
+                        // Same type gate as the GUI's Plater::has_incompatible_mixed_filament_in_use:
+                        // refuse a plate that uses a mixed slot whose components are different
+                        // filament types. CLI get_extruders_under_cli already returns mixed slots
+                        // (it does not expand them), matching the GUI scan of used virtual IDs.
+                        {
+                            const std::vector<int> plate_slots = part_plate->get_extruders_under_cli(true, new_print_config, false);
+                            const CliMixedFilamentVerdict type_verdict = cli_check_mixed_filament_type_compatibility(
+                                cli_mixed_filament_mgr, plate_slots, cli_mixed_num_physical, new_print_config, index + 1);
+                            if (!type_verdict.ok) {
+                                BOOST_LOG_TRIVIAL(error) << type_verdict.message;
+                                record_exit_reson(outfile_dir, CLI_MIXED_FILAMENT_INVALID, index + 1,
+                                                  cli_errors[CLI_MIXED_FILAMENT_INVALID], sliced_info);
+                                flush_and_exit(CLI_MIXED_FILAMENT_INVALID);
+                            }
+                        }
+
                         // Ultra: the BBL-vendor flag has to be set BEFORE Print::validate(), because validate()
                         // branches on it (Print.cpp:2040 the Orca "G92 E0 vs. absolute E" rule, Print.cpp:2063 the
                         // bed-temperature rule). The GUI does exactly this: BackgroundSlicingProcess::validate()
@@ -5613,6 +6025,15 @@ int CLI::run(int argc, char **argv)
 
                                                 if (status.warning_level == PrintStateBase::WarningLevel::NON_CRITICAL) {
                                                     BOOST_LOG_TRIVIAL(warning) << "plate "<< index+1<< ": found NON_CRITICAL slicing warnings: "<<status.text <<std::endl;
+                                                    // Always record for AI/CI consumers; under --strict, elevate to a
+                                                    // non-zero exit so scripted pipelines don't ship a "warning OK" slice.
+                                                    cli_record_warning(sliced_info, "slicing_warning_non_critical",
+                                                                       nlohmann::json{{"plate_id", index+1}, {"text", status.text}});
+                                                    if (sliced_info.strict_mode) {
+                                                        sliced_info.sliced_plates.push_back(sliced_plate_info);
+                                                        record_exit_reson(outfile_dir, CLI_SLICING_ERROR, index+1, cli_errors[CLI_SLICING_ERROR], sliced_info);
+                                                        flush_and_exit(CLI_SLICING_ERROR);
+                                                    }
                                                 }
                                                 else {
                                                     BOOST_LOG_TRIVIAL(warning) << boost::format("plate %1%: found slicing warnings: %2%, no_check=%3%")%(index+1) %status.text %no_check;
@@ -6604,6 +7025,13 @@ bool CLI::setup(int argc, char **argv)
         this->print_help();
         return false;
     }
+
+    // Orca: resolve here, while the process is still in the directory the user invoked it from.
+    // GUI_App's constructor moves the working directory to <data_dir>/log, long before the GUI
+    // opens these files in post_init(), and a relative path would then resolve against that.
+    for (std::string &input_file : m_input_files)
+        input_file = resolve_cli_input_path(input_file);
+
     // Parse actions and transform options.
     for (auto const &opt_key : opt_order) {
         if (cli_actions_config_def.has(opt_key))

@@ -6,6 +6,14 @@
 #include "slic3r/GUI/GUI_App.hpp"
 #include "slic3r/GUI/Plater.hpp"
 #include "slic3r/GUI/GUI_Colors.hpp"
+// The per-gizmo dock preference lives in AppConfig, so the full definition is
+// needed here - GUI_App.hpp only forward-declares it.
+#include "libslic3r/AppConfig.hpp"
+// ContentSizeIdeal (the width a panel's contents actually wanted) lives on the
+// internal ImGuiWindow, not in the public API.
+#include "imgui/imgui_internal.h"
+
+#include <cmath>
 
 // TODO: Display tooltips quicker on Linux
 
@@ -340,6 +348,48 @@ bool GLGizmoBase::GizmoImguiBegin(const std::string &name, int flags)
 void GLGizmoBase::GizmoImguiEnd()
 {
     last_input_window_width = ImGui::GetWindowWidth();
+
+    // A docked panel is pinned to an exact rect, so GetWindowWidth() above only
+    // reports back the width we forced on it - it can never say how wide the
+    // contents actually wanted to be. ContentSizeIdeal is that measurement: the
+    // extent the contents reached, independent of the window's own size, of
+    // clipping and of the scrollbar. Keep it (plus the padding a window puts
+    // around its contents) so the docked path has a real content width to use
+    // rather than the width of its own previous guess.
+    if (ImGuiWindow *win = ImGui::GetCurrentWindow()) {
+        // Padding on both sides, plus the vertical scrollbar when the panel has
+        // one: a docked panel taller than the view gets a scrollbar that takes
+        // its width out of the content region, so a width that ignored it would
+        // squeeze the contents and re-measure narrower every frame.
+        const float ideal = win->ContentSizeIdeal.x + 2.0f * win->WindowPadding.x +
+                            (win->ScrollbarY ? ImGui::GetStyle().ScrollbarSize : 0.f);
+        if (m_dock_body_rendered && ideal > m_imgui->scaled(12.0f)) {
+            // DockWidthSettle only commits a new width once the SAME candidate
+            // has been measured on two consecutive frames - see
+            // DockWidthSettle.hpp. That is what stops a one-frame transient
+            // (sub-pixel window-position rounding, a hover/tooltip that
+            // briefly touched the content bounds, the first measurement right
+            // after the panel reopens docked) from being adopted and then
+            // immediately contradicted by the next, ordinary frame - which is
+            // what a bare "differs by more than 0.5px" check let happen: two
+            // close-but-different widths kept taking turns being "the" width,
+            // every frame, for as long as the panel stayed open.
+            if (m_dock_width.update(ideal, 0.5f) && m_docked) {
+                // The rect we drew this frame was built from the previous
+                // (possibly absent) measurement, so draw one more with the
+                // real one.
+                m_imgui->set_requires_extra_frame();
+                m_parent.set_as_dirty();
+            }
+        } else if (!m_dock_body_rendered) {
+            // Title-row-only frame (collapsed, or the toggle-collapse frame):
+            // nothing was measured, so any candidate that was mid-confirmation
+            // must not survive to be compared against a later, unrelated
+            // frame's measurement.
+            m_dock_width.reset_pending();
+        }
+    }
+
     m_imgui->end();
 }
 
@@ -361,6 +411,249 @@ void GLGizmoBase::GizmoImguiSetNextWIndowPos(float &x, float y, float w, float h
     }
 
     m_imgui->set_next_window_pos(x, y, flag, pivot_x, pivot_y);
+}
+
+// ----------------------------------------------------------------------------
+// Panel docking / collapsing (shared by every tall gizmo panel)
+// ----------------------------------------------------------------------------
+
+std::string GLGizmoBase::get_dock_key() const
+{
+    // m_sprite_id IS the GLGizmosManager::EType value, so it is unique per gizmo
+    // and, unlike on_get_name(), does not move with the UI language. A gizmo that
+    // wants a readable key overrides this.
+    return std::to_string(m_sprite_id);
+}
+
+void GLGizmoBase::load_dock_state()
+{
+    if (m_dock_state_loaded)
+        return;
+    m_dock_state_loaded = true;
+
+    // Default undocked: a missing key reads as false, which is what we want, but
+    // ask explicitly so a future default flip is a one-line change here.
+    const std::string key = "gizmo_dock_" + get_dock_key();
+    AppConfig *cfg = wxGetApp().app_config;
+    if (cfg != nullptr && cfg->has(key))
+        m_docked = cfg->get_bool(key);
+    else
+        m_docked = false;
+}
+
+void GLGizmoBase::store_dock_state()
+{
+    AppConfig *cfg = wxGetApp().app_config;
+    if (cfg != nullptr)
+        cfg->set_bool("gizmo_dock_" + get_dock_key(), m_docked);
+}
+
+int GLGizmoBase::dock_window_flags(int flags) const
+{
+    if (!m_docked)
+        return flags;
+
+    // A docked panel is pinned to an exact rect, so whatever the panel asked for
+    // in the way of auto-sizing has to go, and it needs a vertical scrollbar for
+    // the case where its contents are taller than the view.
+    flags &= ~(ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoScrollbar);
+    flags |= ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse |
+             ImGuiWindowFlags_NoTitleBar;
+    return flags;
+}
+
+void GLGizmoBase::dock_setup_next_window(float &x, float &y, float bottom_limit, float window_width)
+{
+    load_dock_state();
+
+    if (!m_docked) {
+        // Unchanged behaviour: the panel opens under its toolbar icon. A panel
+        // that named a fixed width keeps it pinned (auto height); one that did
+        // not is left to AlwaysAutoResize as before.
+        if (window_width > 0.f) {
+#if BBS_TOOLBAR_ON_TOP
+            GizmoImguiSetNextWIndowPos(x, y, window_width, 0.f, ImGuiCond_Always, 0.0f, 0.0f);
+#else
+            GizmoImguiSetNextWIndowPos(x, y, window_width, 0.f, ImGuiCond_Always, 1.0f, 0.0f);
+#endif
+            ImGui::SetNextWindowSize(ImVec2(window_width, 0.f), ImGuiCond_Always);
+        } else {
+            GizmoImguiSetNextWIndowPos(x, y, ImGuiCond_Always, 0.0f, 0.0f);
+        }
+        return;
+    }
+
+    const Size  cnv_size = m_parent.get_canvas_size();
+    const float cnv_w    = (float) cnv_size.get_width();
+    const float cnv_h    = (float) cnv_size.get_height();
+
+    // A panel that has no width of its own (it was AlwaysAutoResize) is sized
+    // from the width its contents measured, which GizmoImguiEnd() records into
+    // m_dock_width from ContentSizeIdeal. That measurement must NOT come
+    // from the window's own width: a docked window is pinned to the rect we gave
+    // it, so reading its width back would only return our own previous guess and
+    // latch the panel at whatever it opened with - which is the bug this replaces.
+    // While collapsed the contents are only the title row, far too narrow to dock
+    // to, so the last expanded (committed) width is what gets remembered.
+    float width = window_width;
+    if (width <= 0.f)
+        width = m_dock_width.committed_width;
+    if (width < m_imgui->scaled(12.0f)) {
+        // First frame of a panel that has never been measured (a fresh session
+        // opening straight into its remembered docked state). Nothing knows the
+        // content width yet, so start from a sane guess; GizmoImguiEnd() measures
+        // the contents this same frame and asks for another, which then lands on
+        // the real width.
+        width = m_imgui->scaled(18.0f);
+    }
+    width = std::min(width, cnv_w * 0.5f);
+
+    // The sidebar collapse button sits at the top of whichever edge the sidebar
+    // docks to. When that is the right edge, the docked panel starts below it
+    // rather than under it; when the sidebar is on the left, the right edge is
+    // clear and the panel can start at the top.
+    const float collapse_h = m_parent.is_collapse_toolbar_on_left() ? 0.f
+                                                                    : m_parent.get_collapse_toolbar_height();
+    // `y` as handed in is already below the (top) main toolbar, so the panel
+    // clears the view toolbar; take whichever of the two is lower.
+    const float top    = std::max(y, collapse_h + m_imgui->scaled(0.3f));
+    const float bottom = std::max(top + m_imgui->scaled(6.0f), bottom_limit);
+
+    x = cnv_w - width;
+    y = top;
+
+    m_imgui->set_next_window_pos(x, y, ImGuiCond_Always, 0.0f, 0.0f);
+    // Full available height. ImGui adds the scrollbar itself once the contents
+    // exceed it, because dock_window_flags() cleared NoScrollbar. Folded, the
+    // panel is just its title row: a full-height empty strip looked like a crash.
+    float height = std::min(bottom, cnv_h) - top;
+    if (m_collapsed)
+        height = std::min(height, ImGui::GetFrameHeight() + 2.0f * ImGui::GetStyle().WindowPadding.y);
+    ImGui::SetNextWindowSize(ImVec2(width, height), ImGuiCond_Always);
+}
+
+bool GLGizmoBase::render_dock_icon_button(const char *id, bool pin, bool active, const wxString &tooltip)
+{
+    // Drawn rather than blitted: the imgui font atlas has no pin glyph, and
+    // adding one would mean touching the shared icon font for two 16px marks.
+    const float  sz     = ImGui::GetFrameHeight();
+    const ImVec2 origin = ImGui::GetCursorScreenPos();
+
+    const bool clicked = ImGui::InvisibleButton(id, ImVec2(sz, sz));
+    const bool hovered = ImGui::IsItemHovered();
+    if (hovered && !tooltip.IsEmpty())
+        m_imgui->tooltip(tooltip, ImGui::GetFontSize() * 20.0f);
+
+    ImDrawList *dl = ImGui::GetWindowDrawList();
+    if (hovered)
+        dl->AddRectFilled(origin, ImVec2(origin.x + sz, origin.y + sz),
+                          ImGui::GetColorU32(ImGuiCol_ButtonHovered), ImGui::GetStyle().FrameRounding);
+
+    // Follows the theme: the same colour the panel's own text uses, dimmed while
+    // the button is off so an engaged pin reads as engaged in both themes.
+    ImVec4 col = ImGui::GetStyleColorVec4(ImGuiCol_Text);
+    if (!active && !hovered)
+        col.w *= 0.55f;
+    const ImU32 c = ImGui::GetColorU32(col);
+
+    const float cx = origin.x + 0.5f * sz;
+    const float cy = origin.y + 0.5f * sz;
+    const float r  = 0.30f * sz;
+    const float th = std::max(1.0f, sz * 0.08f);
+
+    if (pin) {
+        // A push-pin: round head, tapered body, needle. When engaged it is drawn
+        // filled and upright; when not, outlined and tilted, the usual
+        // "pinned / not pinned" pair.
+        if (active) {
+            dl->AddCircleFilled(ImVec2(cx, cy - r * 0.55f), r * 0.62f, c, 12);
+            dl->AddLine(ImVec2(cx, cy), ImVec2(cx, cy + r * 1.15f), c, th * 1.4f);
+            dl->AddLine(ImVec2(cx - r * 0.75f, cy), ImVec2(cx + r * 0.75f, cy), c, th * 1.4f);
+        } else {
+            dl->AddCircle(ImVec2(cx + r * 0.35f, cy - r * 0.5f), r * 0.60f, c, 12, th);
+            dl->AddLine(ImVec2(cx + r * 0.05f, cy + r * 0.05f), ImVec2(cx - r * 0.85f, cy + r * 0.95f), c, th);
+            dl->AddLine(ImVec2(cx - r * 0.55f, cy - r * 0.25f), ImVec2(cx + r * 0.45f, cy + r * 0.75f), c, th);
+        }
+    } else {
+        // Chevron: pointing down while expanded (click to fold), right while
+        // collapsed (click to unfold).
+        if (active) {
+            dl->AddLine(ImVec2(cx - r, cy - r * 0.45f), ImVec2(cx, cy + r * 0.5f), c, th * 1.4f);
+            dl->AddLine(ImVec2(cx, cy + r * 0.5f), ImVec2(cx + r, cy - r * 0.45f), c, th * 1.4f);
+        } else {
+            dl->AddLine(ImVec2(cx - r * 0.45f, cy - r), ImVec2(cx + r * 0.5f, cy), c, th * 1.4f);
+            dl->AddLine(ImVec2(cx + r * 0.5f, cy), ImVec2(cx - r * 0.45f, cy + r), c, th * 1.4f);
+        }
+    }
+    return clicked;
+}
+
+bool GLGizmoBase::dock_render_titlebar(const std::string &title)
+{
+    const float btn   = ImGui::GetFrameHeight();
+    const float space = ImGui::GetStyle().ItemSpacing.x;
+    const float avail = ImGui::GetContentRegionAvail().x;
+
+    // The title fills the row up to the two buttons. It is NOT a collapse
+    // trigger: a stray click on the title while working on the canvas folded
+    // the whole panel and read as a crash. Only the chevron folds it.
+    const float title_w = std::max(1.0f, avail - 2.0f * btn - 2.0f * space);
+
+    const ImVec2 title_origin = ImGui::GetCursorScreenPos();
+    ImGui::InvisibleButton("##gizmo_dock_title", ImVec2(title_w, btn));
+    const bool   title_hover  = ImGui::IsItemHovered();
+
+    // Draw the title text over its own hit area, vertically centred in the row.
+    {
+        ImDrawList *dl   = ImGui::GetWindowDrawList();
+        ImVec4      col  = ImGui::GetStyleColorVec4(ImGuiCol_Text);
+        if (title_hover)
+            col.w = std::min(1.0f, col.w * 1.2f);
+        const ImVec2 ts = ImGui::CalcTextSize(title.c_str());
+        dl->PushClipRect(title_origin, ImVec2(title_origin.x + title_w, title_origin.y + btn), true);
+        dl->AddText(ImVec2(title_origin.x, title_origin.y + 0.5f * (btn - ts.y)), ImGui::GetColorU32(col),
+                    title.c_str());
+        dl->PopClipRect();
+    }
+
+    bool toggled_collapse = false;
+
+    ImGui::SameLine(0.f, space);
+    if (render_dock_icon_button("##gizmo_dock_chevron", /*pin=*/false, /*active=*/!m_collapsed,
+                                m_collapsed ? _L("Expand panel") : _L("Collapse panel")))
+        toggled_collapse = true;
+
+    ImGui::SameLine(0.f, space);
+    if (render_dock_icon_button("##gizmo_dock_pin", /*pin=*/true, /*active=*/m_docked,
+                                m_docked ? _L("Undock panel") : _L("Dock panel to the right"))) {
+        m_docked = !m_docked;
+        store_dock_state();
+        // A candidate measured under the dock state we are leaving must not
+        // get confirmed against the first measurement taken under the new one
+        // - the two are not the same layout.
+        m_dock_width.reset_pending();
+        // The window's rect changes this frame; ask for one more so it is drawn
+        // in its new place without waiting for the next mouse move.
+        m_imgui->set_requires_extra_frame();
+        m_parent.set_as_dirty();
+    }
+
+    if (toggled_collapse) {
+        m_collapsed = !m_collapsed;
+        m_imgui->set_requires_extra_frame();
+        m_parent.set_as_dirty();
+    }
+
+    if (!m_collapsed)
+        ImGui::Separator();
+
+    // Whether the body follows this frame. m_collapsed alone is not enough: the
+    // toggles above flip it mid-frame, so on the frame the panel is expanded it
+    // already reads "not collapsed" while the body is still absent - measuring
+    // then would record the title row as the panel's width.
+    m_dock_body_rendered = !m_collapsed && !toggled_collapse;
+
+    return !m_collapsed;
 }
 
 void GLGizmoBase::register_grabbers_for_picking()

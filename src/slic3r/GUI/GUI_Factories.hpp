@@ -171,6 +171,9 @@ private:
     wxMenuItem* append_menu_item_fix_through_netfabb(wxMenu* menu);
     //wxMenuItem* append_menu_item_simplify(wxMenu* menu);
     void        append_menu_item_export_stl(wxMenu* menu, bool is_mulity_menu = false);
+    // Ultra: "Export part as STL" for a single selected ModelVolume (part, modifier,
+    // negative volume or support blocker/enforcer - they are all meshes).
+    void        append_menu_item_export_stl_part(wxMenu* menu);
     void        append_menu_item_reload_from_disk(wxMenu* menu);
     void        append_menu_item_replace_with_stl(wxMenu* menu);
     void        append_menu_item_change_extruder(wxMenu* menu);
@@ -187,6 +190,11 @@ private:
     void        append_menu_item_merge_parts_to_single_part(wxMenu *menu);
     void        append_menu_item_merge_some_parts_to_single_part(wxMenu *menu);
     void        append_menu_items_mirror(wxMenu *menu);
+    // RE-EDITABLE CUTS: reopen the Cut gizmo on an existing cut.
+    void        append_menu_item_edit_cut(wxMenu *menu);
+    // "Copy cut to...": a submenu of the other objects, setting the selected
+    // object's cut up on whichever one is chosen. See the .cpp.
+    void        append_menu_item_copy_cut(wxMenu *menu);
     void        append_menu_item_invalidate_cut_info(wxMenu *menu);
     void        append_menu_item_edit_text(wxMenu *menu);
     void        append_menu_item_edit_svg(wxMenu *menu);

@@ -5,6 +5,68 @@
 #include <libslic3r/Print.hpp>
 #include "MTUtils.hpp"
 
+#include <cmath>
+#include <limits>
+
+namespace Slic3r {
+
+// Ultra: would support material be generated for this instance at all? The automatic kinds attach to
+// facets that face down more steeply than the threshold (measured from the horizontal, as the setting
+// is) and are not the object's own base on the bed; the manual kinds attach only where the user painted
+// an enforcer. A flat print says no on both counts, and arrange then owes it no support clearance.
+// Facet-level and in world space, so a rotated instance is judged as it will print.
+bool instance_may_get_support(const ModelInstance &instance, SupportType support_type, int threshold_deg)
+{
+    const ModelObject *object = instance.get_object();
+    if (object == nullptr)
+        return false;
+    const bool automatic = support_type == stNormalAuto || support_type == stTreeAuto;
+    if (! automatic) {
+        for (const ModelVolume *mv : object->volumes)
+            if (mv->is_model_part() && ! mv->supported_facets.empty())
+                return true;
+        return false;
+    }
+    // A downward-facing facet whose slope from the horizontal is below the threshold is an overhang:
+    // slope = acos(-nz), so overhang <=> -nz > cos(threshold). Threshold 0 means "auto" in the UI;
+    // the slicer's own default of 30 deg stands in for it here.
+    const double thr     = threshold_deg > 0 ? double(threshold_deg) : 30.0;
+    const double cos_thr = std::cos(thr * M_PI / 180.0);
+    const Transform3d inst_tr = instance.get_matrix();
+    // The object's lowest point in world space: a facet lying on the bed is the base, not an overhang.
+    double z_min = std::numeric_limits<double>::max();
+    std::vector<std::pair<const ModelVolume *, Transform3d>> parts;
+    for (const ModelVolume *mv : object->volumes) {
+        if (! mv->is_model_part())
+            continue;
+        const Transform3d tr = inst_tr * mv->get_matrix();
+        for (const Vec3f &v : mv->mesh().its.vertices)
+            z_min = std::min(z_min, (tr * v.cast<double>()).z());
+        parts.emplace_back(mv, tr);
+    }
+    const double bed_eps = 0.05;
+    for (const auto &[mv, tr] : parts) {
+        const indexed_triangle_set &its = mv->mesh().its;
+        for (const Vec3i32 &f : its.indices) {
+            const Vec3d a = tr * its.vertices[f(0)].cast<double>();
+            const Vec3d b = tr * its.vertices[f(1)].cast<double>();
+            const Vec3d c = tr * its.vertices[f(2)].cast<double>();
+            const Vec3d n = (b - a).cross(c - a);
+            const double l = n.norm();
+            if (l <= 1e-12)
+                continue;
+            if (-n.z() / l <= cos_thr)
+                continue; // not facing down steeply enough to need support
+            if (std::max({a.z(), b.z(), c.z()}) <= z_min + bed_eps)
+                continue; // the base on the bed
+            return true;
+        }
+    }
+    return false;
+}
+
+} // namespace Slic3r
+
 namespace Slic3r {
 
 arrangement::ArrangePolygons get_arrange_polys(const Model &model, ModelInstancePtrs &instances)
@@ -168,6 +230,16 @@ ArrangePolygon get_instance_arrange_poly(ModelInstance* instance, const Slic3r::
     auto support_type = support_type_ptr->value;
     auto enable_support = supp_type_ptr->getBool();
     int support_int = support_type_ptr->getInt();
+
+    // Ultra: the clearance is for support material that will actually be printed. "Enable support"
+    // is on in most people's global presets, and a flat print (nothing under the threshold angle,
+    // nothing painted) generates none - yet every such object was still spaced 6 mm (24 mm with tree
+    // support) apart, and Fill bed's gap floor blamed a brim for it (owner, 2026-09-16). So the
+    // instance is scanned for what support would attach to first; with nothing to attach to it keeps
+    // the flat 1 mm.
+    const int threshold_deg = obj->get_config_value<ConfigOptionInt>(config, "support_threshold_angle")->getInt();
+    if (enable_support && !instance_may_get_support(*instance, support_type, threshold_deg))
+        enable_support = false;
 
     if (enable_support && (support_type == stNormalAuto || support_type == stNormal))
         ap.brim_width = 6.0;

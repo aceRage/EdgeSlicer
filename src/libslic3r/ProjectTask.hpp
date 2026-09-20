@@ -66,6 +66,20 @@ struct FilamentInfo
     bool   used_for_object{false};
     double total_load_time{0.0};
     double total_unload_time{0.0};
+
+    /* Upstream (OrcaSlicer f118b6b337): the type as the printer's UI names it. Copied from
+       AmsTray::get_display_filament_type(); the Flashforge send dialog labels its material cards
+       with it. */
+    std::string get_display_filament_type() const
+    {
+        if (type == "PLA-S")
+            return "Sup.PLA";
+        if (type == "PA-S")
+            return "Sup.PA";
+        if (type == "ABS-S")
+            return "Sup.ABS";
+        return type;
+    }
 };
 
 class BBLSliceInfo {

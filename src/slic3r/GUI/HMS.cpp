@@ -1,5 +1,8 @@
 #include "HMS.hpp"
 
+#include <algorithm>
+#include <cctype>
+#include <boost/algorithm/string.hpp>
 #include <boost/log/trivial.hpp>
 
 static const char* HMS_PATH = "hms";
@@ -335,44 +338,41 @@ wxString HMSQuery::_find_hms_msg(const json& m_hms_info_json, const std::string&
         return wxEmptyString;
     }
 
-    const json& device_hms_msg_json = device_hms_json.value(lang_code, json());
-    if (device_hms_msg_json.is_null())
-    {
-        BOOST_LOG_TRIVIAL(error) << "hms: query_hms_msg, do not contains lang_code = " << lang_code;
-        // whatever language the table does carry is better than nothing
-        for (const auto& lang_item : device_hms_json)
-        {
-            if (!lang_item.is_array()) continue;
-            for (const auto& msg_item : lang_item)
-            {
-                if (msg_item.is_object())
-                {
-                    const std::string& error_code = msg_item.value("ecode", std::string());
-                    if (boost::to_upper_copy(error_code) == long_error_code && msg_item.contains("intro"))
-                    {
-                        BOOST_LOG_TRIVIAL(info) << "retry without lang_code successed.";
-                        return wxString::FromUTF8(msg_item["intro"].get<std::string>());
-                    }
-                }
-            }
-        }
-
-        return wxEmptyString;
-    }
-
-    for (const auto& item : device_hms_msg_json)
-    {
-        if (item.is_object())
-        {
+    // One language's list. Empty when that language has no entry for the code, or has one with an
+    // empty `intro` - which Bambu does publish, so "found" is not the same as "has something to say".
+    auto in_language = [&](const std::string& lang) -> wxString {
+        const json& list = device_hms_json.value(lang, json());
+        if (!list.is_array()) return wxEmptyString;
+        for (const auto& item : list) {
+            if (!item.is_object()) continue;
             const std::string& error_code = item.value("ecode", std::string());
-            if (boost::to_upper_copy(error_code) == long_error_code && item.contains("intro"))
-            {
-                return wxString::FromUTF8(item["intro"].get<std::string>());
-            }
+            if (boost::to_upper_copy(error_code) != long_error_code) continue;
+            const std::string intro = item.value("intro", std::string());
+            if (!intro.empty()) return wxString::FromUTF8(intro);
+        }
+        return wxEmptyString;
+    };
+
+    // The app's language, then English, then any language that has the code. The fallback used to
+    // run only when the language key was missing entirely, so a table that carried `de` but had
+    // this particular code only under `en` showed the owner nothing at all.
+    wxString text = in_language(lang_code);
+    if (!text.IsEmpty()) return text;
+    if (lang_code != "en") {
+        text = in_language("en");
+        if (!text.IsEmpty()) return text;
+    }
+    for (auto it = device_hms_json.begin(); it != device_hms_json.end(); ++it) {
+        if (it.key() == lang_code || it.key() == "en") continue;
+        text = in_language(it.key());
+        if (!text.IsEmpty()) {
+            BOOST_LOG_TRIVIAL(info) << "hms: " << long_error_code << " answered from lang_code = " << it.key();
+            return text;
         }
     }
 
-    BOOST_LOG_TRIVIAL(error) << "hms: query_hms_msg, do not contains valid message, lang_code = " << lang_code << " long_error_code = " << long_error_code;
+    BOOST_LOG_TRIVIAL(info) << "hms: query_hms_msg, no description for lang_code = " << lang_code
+                            << " long_error_code = " << long_error_code;
     return wxEmptyString;
 }
 
@@ -394,38 +394,45 @@ wxString HMSQuery::_query_error_msg(const std::string& dev_id_type, const std::s
 wxString HMSQuery::_find_error_msg(const json& m_hms_info_json, const std::string& error_code, const std::string& lang_code)
 {
     if (!m_hms_info_json.is_object()) return wxEmptyString;
-    if (m_hms_info_json.contains("device_error")) {
-        if (m_hms_info_json["device_error"].contains(lang_code)) {
-            for (auto item = m_hms_info_json["device_error"][lang_code].begin(); item != m_hms_info_json["device_error"][lang_code].end(); item++) {
-                if (item->contains("ecode") && boost::to_upper_copy((*item)["ecode"].get<std::string>()) == error_code) {
-                    if (item->contains("intro")) {
-                        return wxString::FromUTF8((*item)["intro"].get<std::string>());
-                    }
-                }
-            }
-            BOOST_LOG_TRIVIAL(info) << "hms: query_error_msg, not found error_code = " << error_code;
-        } else {
-            BOOST_LOG_TRIVIAL(error) << "hms: query_error_msg, do not contains lang_code = " << lang_code;
-            // return first language
-            if (!m_hms_info_json["device_error"].empty()) {
-                for (auto lang : m_hms_info_json["device_error"]) {
-                    if (!lang.is_array()) continue;
-                    for (auto item = lang.begin(); item != lang.end(); item++) {
-                        if (item->contains("ecode") && boost::to_upper_copy((*item)["ecode"].get<std::string>()) == error_code) {
-                            if (item->contains("intro")) {
-                                return wxString::FromUTF8((*item)["intro"].get<std::string>());
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    else {
+    if (!m_hms_info_json.contains("device_error")) {
         BOOST_LOG_TRIVIAL(info) << "device_error is not exists";
         return wxEmptyString;
     }
+    const json& device_error = m_hms_info_json["device_error"];
+    if (!device_error.is_object()) return wxEmptyString;
 
+    // Same rule as _find_hms_msg: a code the requested language has nothing for is still answered
+    // from English, or from any language that does carry it. An entry with an empty `intro`
+    // counts as nothing - Bambu publishes those.
+    auto in_language = [&](const std::string& lang) -> wxString {
+        const json& list = device_error.value(lang, json());
+        if (!list.is_array()) return wxEmptyString;
+        for (const auto& item : list) {
+            if (!item.is_object()) continue;
+            const std::string& ecode = item.value("ecode", std::string());
+            if (boost::to_upper_copy(ecode) != error_code) continue;
+            const std::string intro = item.value("intro", std::string());
+            if (!intro.empty()) return wxString::FromUTF8(intro);
+        }
+        return wxEmptyString;
+    };
+
+    wxString text = in_language(lang_code);
+    if (!text.IsEmpty()) return text;
+    if (lang_code != "en") {
+        text = in_language("en");
+        if (!text.IsEmpty()) return text;
+    }
+    for (auto it = device_error.begin(); it != device_error.end(); ++it) {
+        if (it.key() == lang_code || it.key() == "en") continue;
+        text = in_language(it.key());
+        if (!text.IsEmpty()) {
+            BOOST_LOG_TRIVIAL(info) << "hms: " << error_code << " answered from lang_code = " << it.key();
+            return text;
+        }
+    }
+
+    BOOST_LOG_TRIVIAL(info) << "hms: query_error_msg, no description for error_code = " << error_code;
     return wxEmptyString;
 }
 
@@ -496,6 +503,288 @@ wxString HMSQuery::query_print_error_url_action(const std::string& dev_id, int p
     return _query_error_url_action(get_dev_id_type(dev_id), std::string(buf), button_action);
 }
 
+std::string HMSQuery::print_error_code(int print_error)
+{
+    char buf[32];
+    ::sprintf(buf, "%08X", print_error);
+    return std::string(buf);
+}
+
+std::string HMSQuery::pretty_code(const std::string& code)
+{
+    // Only the two shapes the printer actually reports are grouped: 8 or 16 HEX digits. Anything
+    // else - a relayed "HMS_0300", a Moonraker text code - is passed through untouched rather than
+    // chopped into fours on a guess (the notify gate caught "HMS_0300" becoming "HMS_ 0300").
+    if (code.size() != 8 && code.size() != 16) return code;
+    if (!std::all_of(code.begin(), code.end(), [](unsigned char c) { return std::isxdigit(c) != 0; })) return code;
+    std::string out;
+    out.reserve(code.size() + code.size() / 4);
+    for (size_t i = 0; i < code.size(); ++i) {
+        if (i && i % 4 == 0) out.push_back(' ');
+        out.push_back(code[i]);
+    }
+    return out;
+}
+
+wxString HMSQuery::format_error(const wxString& text, const std::string& code)
+{
+    const std::string pretty = pretty_code(code);
+    if (pretty.empty()) return text;
+    if (text.IsEmpty()) {
+        // Unknown: the code leads, because it is the only thing the owner can quote to support or
+        // search the wiki for, and it points at the two places that do know. Bambu's own tables
+        // ship empty `intro` strings for some codes (0C00010000020015 is one, in every shipped
+        // language and in the live cloud table), so this is reached with every table present and
+        // current - it is not only a "the table is missing" path.
+        return wxString::Format(_L("Printer error %s - see the printer screen or Bambu's error-code page"),
+                                wxString::FromUTF8(pretty));
+    }
+    return wxString::Format("%s (%s)", text, wxString::FromUTF8(pretty));
+}
+
+// ---------------------------------------------------------------- overrides ----
+
+std::string HMSQuery::user_override_path()
+{
+    if (data_dir().empty()) return std::string();
+    return (fs::path(data_dir()) / HMS_PATH / "overrides.json").make_preferred().string();
+}
+
+std::string HMSQuery::shipped_override_path()
+{
+    if (resources_dir().empty()) return std::string();
+    return (fs::path(resources_dir()) / HMS_PATH / "edgeslicer_overrides.json").make_preferred().string();
+}
+
+bool HMSQuery::is_valid_code(const std::string& code, std::string& normalized)
+{
+    normalized.clear();
+    for (char c : code) {
+        if (c == ' ' || c == '-' || c == '_') continue;
+        if (!std::isxdigit((unsigned char) c)) return false;
+        normalized.push_back((char) std::toupper((unsigned char) c));
+    }
+    // The two shapes a printer reports: a print_error, or an HMS attr/code pair.
+    return normalized.size() == 8 || normalized.size() == 16;
+}
+
+static std::time_t file_mtime_or_zero(const std::string& path)
+{
+    if (path.empty()) return 0;
+    boost::system::error_code ec;
+    const std::time_t         t = fs::last_write_time(fs::path(path), ec);
+    return ec ? 0 : t;
+}
+
+static json read_override_file(const std::string& path)
+{
+    if (path.empty()) return json();
+    std::ifstream f(encode_path(path.c_str()));
+    if (!f.is_open()) return json();
+    try {
+        return json::parse(f);
+    } catch (const std::exception& e) {
+        BOOST_LOG_TRIVIAL(error) << "HMS: overrides: " << path << " is not valid json (" << e.what() << ")";
+        return json();
+    }
+}
+
+void HMSQuery::reload_overrides()
+{
+    std::unique_lock<std::mutex> lock(m_overrides_mutex);
+    m_overrides_loaded = false;
+}
+
+// One overlay's answer for a code, or empty. `overrides` is the parsed file.
+//
+// Language: the exact one, then English, then whatever the entry was written in - a description
+// somebody captured in German is still better than no description at all.
+static wxString find_override(const json& doc, const std::string& code, const std::string& model, const std::string& lang)
+{
+    if (!doc.is_object() || !doc.contains("overrides") || !doc["overrides"].is_array()) return wxEmptyString;
+
+    wxString exact, english, any;
+    for (const auto& item : doc["overrides"]) {
+        if (!item.is_object()) continue;
+        std::string entry_code;
+        if (!HMSQuery::is_valid_code(item.value("code", std::string()), entry_code)) continue;
+        if (entry_code != code) continue;
+
+        const std::string entry_model = item.value("model", std::string("*"));
+        if (entry_model != "*" && !entry_model.empty() && boost::to_upper_copy(entry_model) != boost::to_upper_copy(model))
+            continue;
+
+        const std::string text = item.value("text", std::string());
+        if (text.empty()) continue;
+
+        const std::string entry_lang = item.value("lang", std::string("en"));
+        if (entry_lang == lang && exact.IsEmpty())
+            exact = wxString::FromUTF8(text);
+        else if (entry_lang == "en" && english.IsEmpty())
+            english = wxString::FromUTF8(text);
+        else if (any.IsEmpty())
+            any = wxString::FromUTF8(text);
+    }
+    if (!exact.IsEmpty()) return exact;
+    if (!english.IsEmpty()) return english;
+    return any;
+}
+
+wxString HMSQuery::query_override(const std::string& dev_id, const std::string& code, const std::string& lang_code)
+{
+    std::string normalized;
+    if (!is_valid_code(code, normalized)) return wxEmptyString;
+    const std::string model = get_dev_id_type(dev_id);
+
+    std::unique_lock<std::mutex> lock(m_overrides_mutex);
+
+    // Re-read when either file has been touched since it was last loaded, so an entry added by
+    // --hms-add or by the hub route is live on the next lookup with no restart.
+    const std::string user_path    = user_override_path();
+    const std::string shipped_path = shipped_override_path();
+    const std::time_t user_mtime   = file_mtime_or_zero(user_path);
+    const std::time_t ship_mtime   = file_mtime_or_zero(shipped_path);
+    if (!m_overrides_loaded || user_mtime != m_user_overrides_mtime || ship_mtime != m_shipped_overrides_mtime) {
+        m_user_overrides          = read_override_file(user_path);
+        m_shipped_overrides       = read_override_file(shipped_path);
+        m_user_overrides_mtime    = user_mtime;
+        m_shipped_overrides_mtime = ship_mtime;
+        m_overrides_loaded        = true;
+    }
+
+    // This user's own capture wins over the one we ship.
+    const wxString mine = find_override(m_user_overrides, normalized, model, lang_code);
+    if (!mine.IsEmpty()) return mine;
+    return find_override(m_shipped_overrides, normalized, model, lang_code);
+}
+
+bool HMSQuery::add_override(const std::string& code, const std::string& text, const std::string& lang,
+                            const std::string& model, const std::string& source, const std::string& note,
+                            bool force, std::string& error)
+{
+    error.clear();
+    std::string normalized;
+    if (!is_valid_code(code, normalized)) {
+        error = "`" + code + "` is not an error code: expected 8 hex digits (a print error) or 16 (an HMS code)";
+        return false;
+    }
+    if (text.empty()) {
+        error = "the description is empty";
+        return false;
+    }
+    const std::string path = user_override_path();
+    if (path.empty()) {
+        error = "no data directory to write to";
+        return false;
+    }
+
+    const std::string use_lang  = lang.empty() ? std::string("en") : lang;
+    const std::string use_model = model.empty() ? std::string("*") : model;
+
+    std::unique_lock<std::mutex> lock(m_overrides_mutex);
+
+    json doc = read_override_file(path);
+    if (!doc.is_object()) doc = json::object();
+    if (!doc.contains("version")) doc["version"] = 1;
+    if (!doc.contains("overrides") || !doc["overrides"].is_array()) doc["overrides"] = json::array();
+
+    // A plain date stamp; the file is read by people as much as by the app.
+    std::string today;
+    {
+        char         buf[32] = {0};
+        const time_t now     = time(nullptr);
+        if (std::strftime(buf, sizeof buf, "%Y-%m-%d", std::localtime(&now))) today = buf;
+    }
+
+    bool replaced = false;
+    for (json& item : doc["overrides"]) {
+        if (!item.is_object()) continue;
+        std::string existing;
+        if (!is_valid_code(item.value("code", std::string()), existing)) continue;
+        if (existing != normalized) continue;
+        if (item.value("lang", std::string("en")) != use_lang) continue;
+        if (item.value("model", std::string("*")) != use_model) continue;
+        if (!force) {
+            error = "an override already exists for " + pretty_code(normalized) + " (" + use_model + "/" + use_lang +
+                    "); pass force to replace it";
+            return false;
+        }
+        item["text"] = text;
+        if (!source.empty()) item["source"] = source;
+        if (!note.empty()) item["note"] = note;
+        if (!today.empty()) item["date"] = today;
+        replaced = true;
+        break;
+    }
+
+    if (!replaced) {
+        json entry;
+        entry["code"]  = normalized;
+        entry["model"] = use_model;
+        entry["lang"]  = use_lang;
+        entry["text"]  = text;
+        if (!source.empty()) entry["source"] = source;
+        if (!note.empty()) entry["note"] = note;
+        if (!today.empty()) entry["date"] = today;
+        doc["overrides"].push_back(entry);
+    }
+
+    try {
+        const fs::path dir = fs::path(path).parent_path();
+        if (!dir.empty() && !fs::exists(dir)) fs::create_directories(dir);
+        std::ofstream out(encode_path(path.c_str()));
+        if (!out.is_open()) {
+            error = "cannot write " + path;
+            return false;
+        }
+        out << std::setw(2) << doc << std::endl;
+    } catch (const std::exception& e) {
+        error = std::string("cannot write ") + path + ": " + e.what();
+        return false;
+    }
+
+    // Live on the next lookup without waiting for the mtime check.
+    m_overrides_loaded = false;
+    BOOST_LOG_TRIVIAL(info) << "HMS: override recorded for " << normalized << " (" << use_model << "/" << use_lang << ")";
+    return true;
+}
+
+wxString HMSQuery::describe_error(const std::string& dev_id, const std::string& code, bool local_only)
+{
+    if (code.empty()) return wxEmptyString;
+
+    std::string upper = boost::to_upper_copy(code);
+    // A spelling that arrived already grouped ("0500 4046") still has to match a table key.
+    upper.erase(std::remove(upper.begin(), upper.end(), ' '), upper.end());
+
+    const std::string lang_code = HMSQuery::hms_language_code();
+
+    // Our own descriptions first: this is the only way a code Bambu publishes with an empty
+    // `intro` ever gets a sentence, and it lets the owner correct one that reads badly.
+    const wxString overridden = query_override(dev_id, upper, lang_code);
+    if (!overridden.IsEmpty()) return format_error(overridden, upper);
+
+    wxString text;
+    if (upper.size() > 8) {
+        text = local_only ? query_hms_msg_local(dev_id, upper, lang_code) : _query_hms_msg(get_dev_id_type(dev_id), upper, lang_code);
+    } else if (local_only) {
+        // The int round-trip is exact: the code is eight hex digits or fewer by the branch above.
+        try {
+            query_print_error_msg_local(dev_id, (int) std::stoul(upper, nullptr, 16), lang_code, text);
+        } catch (...) {
+            text = wxEmptyString; // not hex at all; it is still named in the answer below
+        }
+    } else {
+        text = _query_error_msg(get_dev_id_type(dev_id), upper, lang_code);
+    }
+    return format_error(text, upper);
+}
+
+wxString HMSQuery::describe_print_error(const std::string& dev_id, int print_error, bool local_only)
+{
+    return describe_error(dev_id, print_error_code(print_error), local_only);
+}
+
 void HMSQuery::clear_hms_info()
 {
     std::unique_lock<std::mutex> lock(m_hms_mutex);
@@ -525,10 +814,18 @@ void HMSQuery::init_hms_info(const std::string& dev_id_type, const std::string& 
 {
     if (dev_id_type.empty()) return;
 
+    // Stealth mode stops the cloud fetch and nothing else: the shipped and cached tables below
+    // are read exactly as they would be otherwise. This is the whole of "offline still answers" -
+    // the object now always exists (GUI_App.cpp), and only the network half is withheld.
+    AppConfig* config = wxApp::GetInstance() ? wxGetApp().app_config : nullptr;
+    const bool offline_only = !config || config->get_stealth_mode();
+
     bool want_refresh = false;
     {
         std::unique_lock<std::mutex> lock(m_hms_mutex);
         load_local_tables(dev_id_type, lang_code);
+
+        if (offline_only) return;
 
         /*download from cloud*/
         const time_t info_last_update_time = m_cloud_hms_last_update_time[dev_id_type];

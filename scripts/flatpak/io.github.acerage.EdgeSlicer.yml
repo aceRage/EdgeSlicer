@@ -42,6 +42,8 @@ modules:
     sources:
       - type: archive
         url: https://gstreamer.freedesktop.org/src/gst-plugins-good/gst-plugins-good-1.22.8.tar.xz
+        mirror-urls:
+          - https://github.com/GStreamer/gstreamer/releases/download/1.22.8/gst-plugins-good-1.22.8.tar.xz
         sha256: e305b9f07f52743ca481da0a4e0c76c35efd60adaf1b0694eb3bb021e2137e39
 
   - name: glu
@@ -50,6 +52,9 @@ modules:
     sources:
       - type: archive
         url: https://ftp.osuosl.org/pub/blfs/conglomeration/glu/glu-9.0.2.tar.xz
+        # Single mirror host; fall back to the upstream mesa archive.
+        mirror-urls:
+          - https://archive.mesa3d.org/glu/glu-9.0.2.tar.xz
         sha256: 6e7280ff585c6a1d9dfcdf2fca489251634b3377bfc33c29e4002466a38d02d4
     cleanup:
       - /include
@@ -72,6 +77,11 @@ modules:
     sources:
       - type: archive
         url: https://github.com/FreeSpacenav/libspnav/releases/download/v1.2/libspnav-1.2.tar.gz
+        # The GitHub release CDN returned 504 here on 2026-09-18 (run 35347096397) and the
+        # whole build died on that one download. flatpak-builder tries mirror-urls in order
+        # when the primary fails; same tarball, same sha256, so a mirror is safe.
+        mirror-urls:
+          - https://sourceforge.net/projects/spacenav/files/spacenav%20library%20%28SDK%29/libspnav%201.2/libspnav-1.2.tar.gz/download
         sha256: 093747e7e03b232e08ff77f1ad7f48552c06ac5236316a5012db4269951c39db
 
   - name: orca_wxwidgets
@@ -277,6 +287,32 @@ modules:
         url: https://github.com/SoftFever/Orca-deps-libnoise/archive/refs/tags/1.0.zip
         dest: external-packages/libnoise
         sha256: 96ffd6cc47898dd8147aab53d7d1b1911b507d9dbaecd5613ca2649468afd8b6
+
+      # Manifold - the Mesh Boolean backend. Added to deps/ without being listed here,
+      # so the sandbox (which has no network) hit "Could not resolve host: github.com"
+      # and orca_deps died. url/sha256 must stay in step with deps/Manifold/Manifold.cmake.
+      - type: file
+        url: https://github.com/elalish/manifold/releases/download/v3.5.2/manifold-3.5.2.tar.gz
+        dest: external-packages/Manifold
+        sha256: ce5f4d87877daca99a910d0af73c028f2a36b9288dd2bf3cd1cecf8faff9f7c8
+
+      # QuadriFlow and NanoSVG are the other two deps that FLATPAK=ON does *not* satisfy
+      # from the SDK. deps/CMakeLists.txt only find_package()s ZLIB, PNG, EXPAT, CURL,
+      # JPEG, Freetype and OpenSSL, so everything else has to be staged here.
+      - type: file
+        url: https://github.com/hjwdzh/QuadriFlow/archive/810b7a0967c35b0dc85b4464e3835e26a756c967.zip
+        dest: external-packages/QuadriFlow
+        sha256: 0e530a1374dd7edd68d8bd9777395dc0be80e4cbca96485cc9a82cfacb8942ce
+      # NOTE: deps/NanoSVG/NanoSVG.cmake still carries the pre-rename sha256
+      # (8d9c1624...). The repo is now SoftFever/Orca-deps-nanosvg, so GitHub's generated
+      # zip has a different root folder and therefore a different hash. The archive below
+      # was downloaded and checked: same commit, contains src/nanosvg.h and
+      # src/nanosvgrast.h under Orca-deps-nanosvg-863f6aa9/. CMake only sees the extracted
+      # tree, so it never noticed; flatpak-builder hashes the zip itself and did.
+      - type: file
+        url: https://github.com/SoftFever/nanosvg/archive/863f6aa97ef62028126fa2c19bd4350394c2e15e.zip
+        dest: external-packages/NanoSVG
+        sha256: 1e3f94a052dd2abb139993ed3496c90ed4458d6f907027bf03cbaed889fe2567
 
   - name: Snapmaker_Orca 
     buildsystem: simple

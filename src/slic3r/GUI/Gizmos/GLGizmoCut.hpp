@@ -10,6 +10,7 @@
 #include "libslic3r/Model.hpp"
 #include "libslic3r/CutUtils.hpp"
 #include "libslic3r/CurvedCut.hpp"
+#include "libslic3r/DrawCut.hpp"
 #include "imgui/imgui.h"
 
 namespace Slic3r {
@@ -148,14 +149,28 @@ class GLGizmoCut3D : public GLGizmoBase
     std::vector<std::string> m_flexi_kinds;
 
     // --- Curved cut (phase 1) ---------------------------------------------
-    // Surface: Flat | Curved. Curved replaces the flat cut plane with a height
-    // field z = f(u,v) defined over it by a coarse control grid, upsampled to a
-    // dense sheet for the preview and for the cut. Nothing here is persisted:
-    // the cut is baked, exactly as a plane cut is, and the grid lives only for
-    // the gizmo session.
-    bool           m_curved_surface{ false };
+    // Surface: Flat | Curved | Draw. Curved replaces the flat cut plane with a
+    // height field z = f(u,v) defined over it by a coarse control grid, upsampled
+    // to a dense sheet for the preview and for the cut. Draw replaces it with a
+    // RULED STRIP swept along a stroke the user paints on the model. Nothing here
+    // is persisted: the cut is baked, exactly as a plane cut is, and the surface
+    // lives only for the gizmo session.
+    //
+    // DRAW IS A THIRD SURFACE MODE, a peer of the other two, not a CutMode value:
+    // adding it to CutMode would drag the groove/connector branching in
+    // everywhere, and Curved is already a sub-mode of Planar driven by what used
+    // to be a bool. This enum is that bool widened, and is_curved_surface() keeps
+    // its exact old meaning for Curved so every curved behaviour is bit-identical.
+    enum class CutSurfaceMode { Flat, Curved, Draw };
+    CutSurfaceMode m_surface_mode{ CutSurfaceMode::Flat };
     CurvedCutSheet m_curved_sheet;
-    int            m_curved_resolution{ CurvedCutSheet::DefaultResolution };
+    // The control grid is nx COLUMNS by ny ROWS, kept apart so a RULED bend
+    // (10 x 2: every column one straight line, grabbable from either end) is
+    // expressible. m_curved_square locks the two together and is ON by default,
+    // so the panel behaves exactly as the single "Control points" slider did.
+    int            m_curved_nx{ CurvedCutSheet::DefaultResolution };
+    int            m_curved_ny{ CurvedCutSheet::DefaultResolution };
+    bool           m_curved_square{ true };
     // Brush radius for the control-point grab, in world mm, and whether the
     // Sculpt gizmo's falloff applies. F / Shift+F adjust it the way Sculpt does.
     float          m_curved_brush_radius{ 0.f }; // 0 = take default_curved_bend_radius() on first use
@@ -189,12 +204,15 @@ class GLGizmoCut3D : public GLGizmoBase
     // gizmos behave the same way and the canvas's own Ctrl+Z is only reached
     // when this stack has nothing to give.
     //
-    // An entry carries the extent and resolution as well as the values: a
-    // resolution change or a re-fit alters those, and restoring values against
-    // the wrong grid would be meaningless.
+    // An entry carries the extent and BOTH grid counts as well as the values: a
+    // grid change or a re-fit alters those, and restoring values against the
+    // wrong grid would be meaningless. Both counts, not one: a 10 x 2 and a
+    // 2 x 10 hold the same number of values and nothing else would tell them
+    // apart, so restoring one onto the other would transpose the surface.
     struct CurvedSheetState {
         std::vector<double> values;
-        int                 resolution{ 0 };
+        int                 nx{ 0 };
+        int                 ny{ 0 };
         double              half_size_u{ 0.0 };
         double              half_size_v{ 0.0 };
     };
@@ -314,6 +332,316 @@ class GLGizmoCut3D : public GLGizmoBase
     // The flat cut has the same failure mode (a plane clear of the part), and
     // has_valid_contour() already covers it, so this is only computed in Curved.
 
+    // --- DRAW CUT (phase 1) ------------------------------------------------
+    // The stroke the user paints on the model, in the CUT PLANE's frame (the
+    // frame the sheet lives in and the frame the cut runs in), so it survives a
+    // plane nudge the way the sheet does. Session state, like the sheet: the cut
+    // is baked and nothing about it reaches the 3MF.
+    // THE CHAIN (2026-09-12, owner click-testing). The line is now a chain of
+    // strokes rather than one stroke: after a stroke ends the user picks either
+    // endpoint and carries on, from any view direction, and the chain closes when a
+    // stroke comes within the snap radius of the far endpoint.
+    //
+    // m_draw_chain is THE SOURCE OF TRUTH for the line. m_draw_stroke below is the
+    // FINISHED, CLOSED stroke derived from it - and it is left EMPTY while the chain
+    // is open, which is what makes items 1 and 2 of the feedback hold everywhere at
+    // once: every "is there a cut surface" gate in this file already asks
+    // m_draw_stroke.valid(), so an open chain lofts nothing, previews nothing,
+    // classifies nothing and cannot be cut with, without any of those sites changing.
+    DrawCutChain    m_draw_chain;
+    DrawCutStroke   m_draw_stroke;
+    DrawCutParams   m_draw_params;
+    // The panel's smoothing, 0..1, which draw_cut_smooth_passes() turns into
+    // windowed-average passes.
+    float           m_draw_smoothing{ 0.2f };
+    // Depth in mm, used only when Through all is off. Kept out of m_draw_params
+    // so toggling the checkbox does not lose the number the user typed.
+    //
+    // PHASE 3: this is how far the band travels in from the drawn line before the
+    // surface turns onto the flat core, so a few millimetres is the useful range -
+    // not the old "reach right through the part". Default 3 mm, matching
+    // DrawCutParams::depth.
+    //
+    // 2026-09-15, owner item 2: the SLIDER runs 0..20 mm with a numeric field beside
+    // it, the pattern the Edit gizmo's bevel width uses. The slider used to run to
+    // the bounding box diagonal, which on a big part put every useful value in the
+    // first few pixels of the track. A value past 20 is still reachable by typing,
+    // which is what DrawDepthMax is for.
+    float           m_draw_depth{ 3.f };
+    float           m_draw_extension{ 5.f };
+    int             m_draw_direction{ int(DrawCutDirection::SurfaceNormal) };
+    // Capture: set between LeftDown on the object and LeftUp. The painter base's
+    // interpolation needs the previous mouse position to know how big a gap to
+    // fill; this is that, in the painter's own sense (re-set only on an actual
+    // HIT, which is what makes a miss non-fatal).
+    bool            m_draw_capturing{ false };
+    Vec2d           m_draw_last_mouse{ Vec2d::Zero() };
+    // The stroke being captured right now, separate from the chain: it is only
+    // appended on LeftUp, so an abandoned gesture (Esc, a stroke that turns out to
+    // start nowhere near an endpoint) leaves the chain exactly as it was.
+    std::vector<DrawCutSample> m_draw_capture;
+    // Which end the in-progress stroke is continuing, decided on the PRESS. Latched
+    // rather than re-derived, because the chain's endpoints do not move during the
+    // gesture and re-asking as the cursor travels would flip the answer.
+    DrawChainEnd    m_draw_capture_end{ DrawChainEnd::Back };
+    // Why the last press was refused, so the panel can say so. Cleared on the next
+    // press that is accepted, and on Clear line - it describes one gesture, not a
+    // state of the line.
+    // CloseNoPath is 2026-09-13 item 2: Close loop could not find a path along the
+    // surface between the two endpoints from the current view, so it refused rather
+    // than joining them through the air.
+    enum class DrawRejectReason { None = 0, Disjoint, ChainClosed, CloseNoPath };
+    DrawRejectReason m_draw_reject_msg{ DrawRejectReason::None };
+    // 2026-09-13, owner click-test item 1: which endpoint the cursor is over, so the
+    // marker under it lights up and the user can see it is grab-able. Screen-space
+    // (draw_chain_end_at()), recomputed on every motion event while not capturing.
+    DrawChainEnd    m_draw_hover_end{ DrawChainEnd::None };
+    // Snap feedback while capturing: true when the cursor is inside the snap radius
+    // of the endpoint this stroke would close on, so the ring under the far endpoint
+    // can light up and the user knows a release will close the loop.
+    bool            m_draw_snap_armed{ false };
+    // The instance mesh in the PLANE frame plus a raycaster over it, cached for
+    // the duration of one stroke: it does not change while the button is down,
+    // and re-deriving it per motion event would stall the drag on a heavy model.
+    // The same cache-per-gesture rule m_curved_snap_mesh follows.
+    indexed_triangle_set           m_draw_pick_its;
+    TriangleMesh                   m_draw_pick_mesh;
+    std::unique_ptr<MeshRaycaster> m_draw_raycaster;
+    // The ribbon drawn along the stroke, and the translucent cutter shell that is
+    // the PREVIEW of the cut surface. Both rebuilt from the finished stroke.
+    GLModel         m_draw_ribbon_model;
+    GLModel         m_draw_cutter_model;
+    bool            m_draw_preview_dirty{ true };
+    // The empty-side warning, the analogue of m_curved_*_empty: recomputed when
+    // the stroke or a parameter changes, so the panel can say "this line does not
+    // separate the part" before the user commits.
+    bool            m_draw_upper_empty{ false };
+    bool            m_draw_lower_empty{ false };
+    // Advisory: the ruled strip folds near a corner tighter than the Extension.
+    bool            m_draw_folds{ false };
+
+    // THE HALVES CLASSIFICATION (2026-09-12, owner feedback item 3). The cyan/magenta
+    // colouring, the Visible/Ghost/Hidden side display and the connectors all used to
+    // ask the FLAT PLANE which side a point was on, so in Draw mode the colours ran
+    // straight through the drawn surface. They now ask the CUTTER SOLID instead - the
+    // same solid the boolean uses - baked into a voxel field the volume shader
+    // samples per fragment.
+    //
+    // A 3D texture, not the sheet's 2D one: a ruled strip is not a height field over
+    // the plane (that is the whole point of the mode), so there is no (u,v) -> z to
+    // put in a 2D texture. sampler3D is core GL 1.2 / GLSL 110, so this works on the
+    // 2.1 fallback path too.
+    unsigned int    m_draw_field_tex{ 0 };
+    bool            m_draw_field_dirty{ true };
+    // 2026-09-13, item 3: WHY the field is not in effect, or nullptr when it is. A
+    // static string literal, compared by pointer, so the log line is written once per
+    // transition rather than once per frame. Five separate places can drop the texture
+    // and from the outside they all look the same - "the classification is ignored" -
+    // which is how one report covered a chain of them.
+    const char*     m_draw_field_fail{ nullptr };
+    // The box the field spans, in the PLANE frame - the part's box grown by a voxel.
+    BoundingBoxf3   m_draw_field_bbox;
+    void            update_draw_field_texture();
+    void            release_draw_field_texture();
+    void            apply_draw_color_clip();
+    // The field's resolution. 48^3 is 110k voxels and one parity ray per column
+    // (2304 rays) against a cutter of a few thousand faces - tens of milliseconds on
+    // a mouse-up, which is where it runs. Finer buys nothing the eye can see at the
+    // scale a cut surface is inspected at.
+    static const int DrawFieldRes = 48;
+
+    // --- DRAW CUT (phase 3) ------------------------------------------------
+    // THE LIP ANGLE, in degrees, SIGNED, -90..90: the angle at which the outer band
+    // leans in towards the flat core, and which SIDE of the core plane it leans
+    // towards. 0 is a flat shelf, +45 a chamfered lip the halves key into, +90 a
+    // straight wall down, and the negative half of the range is the same family
+    // mirrored - the lip projecting UP rather than down (2026-09-15, owner item 5).
+    // For a CLOSED loop it applies whatever the Direction is, because the band's
+    // direction comes from the core plane; an open line has no core and keeps the
+    // Surface-normal-only rule.
+    float           m_draw_angle{ 0.f };
+    // THE EXTENSION ANGLE, 2026-09-15 owner item 4: which way the outward skirt
+    // leaves the drawn line. Off by default, and off means "continue the band" -
+    // the skirt leaves along the band's own ruling run backwards, which is what it
+    // has always done. The VALUE is kept while the checkbox is off so unticking and
+    // re-ticking gives the user back the angle they had set.
+    bool            m_draw_ext_angle_on{ false };
+    float           m_draw_ext_angle{ 0.f };
+
+    // THE DEPTH SLIDER'S RANGE, 2026-09-15 owner item 2. The slider covers the useful
+    // band travel; the numeric field beside it accepts anything up to DrawDepthMax,
+    // which is what "values typed above 20 are allowed" means.
+    static constexpr float DrawDepthSliderMin = 0.f;
+    static constexpr float DrawDepthSliderMax = 20.f;
+    static constexpr float DrawDepthMin       = 0.01f;
+    static constexpr float DrawDepthMax       = 1000.f;
+    static constexpr float DrawDepthStep      = 0.1f;
+    // Advisory: a closed stroke whose binormal field does not close on itself, so
+    // "outward" is not consistent round the loop and a draft angle would flare one
+    // way on one part of it. The angle is forced to 0 and the panel says why.
+    bool            m_draw_frame_flips{ false };
+
+    // LINE EDITING. When on, the finished stroke's resampled points become
+    // draggable handles: hover, drag along the surface (re-raycast every motion, so
+    // the point rides the model rather than sliding on a plane), right-click to
+    // delete, Shift+click on a segment to insert. The same gesture vocabulary the
+    // curved sheet's control points use, against the stroke instead of the grid.
+    bool            m_draw_editing{ false };
+    int             m_draw_hover_pt{ -1 };
+    int             m_draw_drag_pt{ -1 };
+    // The stroke's points as EDITABLE points: the resampled path, which is what the
+    // handles show and what an edit rewrites. finish() re-runs over these (they
+    // become the raw samples), so an edited stroke stays resampled and stays closed.
+    // Kept separate from m_draw_stroke's own raw samples so an edit does not have to
+    // re-derive them from a path that smoothing has already moved.
+    // The handles are drawn with the gizmo's shared m_sphere, so there is no model of
+    // their own to keep - and no dirty flag either: sync_draw_points() is a vector
+    // copy, cheap enough to do on every refresh rather than track.
+    std::vector<DrawCutSample> m_draw_points;
+
+    // The gizmo-local undo stack carries strokes as well as sheets. One entry per
+    // completed stroke, per Clear, and before a lossy parameter change - the same
+    // granularity the sheet uses, and consumed by the same on_cut_char() hook.
+    struct DrawStrokeState {
+        DrawCutChain chain; // the whole chain, so finish() can re-run and undo is per stroke
+    };
+    // 2026-09-12: the entry carries the WHOLE CHAIN, because undo is per stroke and a
+    // stroke is a range of the chain rather than a line of its own. Restoring the
+    // chain and re-deriving the stroke from it is what makes Ctrl+Z after a
+    // continuation put back the chain as it stood before that stroke - including its
+    // open/closed state, which a stroke-only entry could not express.
+    std::vector<DrawStrokeState> m_draw_undo;
+    std::vector<DrawStrokeState> m_draw_redo;
+
+    DrawStrokeState draw_stroke_state() const;
+    void            apply_draw_stroke_state(const DrawStrokeState& st);
+    void            push_draw_undo();
+    bool            draw_undo();
+    bool            draw_redo();
+    void            clear_draw_undo() { m_draw_undo.clear(); m_draw_redo.clear(); }
+
+    // Invalidate everything keyed on the stroke, the way invalidate_curved_sheet()
+    // does for the sheet.
+    void   invalidate_draw_stroke();
+    // Drop the cached instance mesh and its raycaster. They live in the CUT PLANE's
+    // frame, so a plane move or turn makes them stale.
+    void   invalidate_draw_pick_mesh();
+    // Re-run finish() with the current panel settings and refresh the warnings.
+    void   refresh_draw_stroke();
+    void   update_draw_empty_sides();
+    // The instance mesh in the plane frame plus its raycaster, built once per
+    // stroke gesture.
+    bool   update_draw_raycaster();
+    void   render_draw_stroke();
+    void   render_draw_surface_inputs();
+    bool   draw_on_mouse(const wxMouseEvent& mouse_event);
+    // One raycast against the cached instance mesh, appending a sample when it
+    // hits. Returns true on a hit.
+    bool   draw_sample_at(const Vec2d& mouse_position);
+    // The painter base's gap-filling interpolation (GLGizmoPainterBase.cpp
+    // 403-417), reimplemented over the cut gizmo's own raycaster: seeds between
+    // the last HIT position and the current one so a quick flick does not leave a
+    // metre-long chord. Deliberately NOT the plane-fit tail at :442-516 - those
+    // points are never re-projected onto the mesh.
+    void   draw_interpolate_to(const Vec2d& mouse_position);
+    void   clear_draw_stroke(bool push_undo);
+    // Where the chain's two endpoints are, in the plane frame, and the snap radius
+    // that closes it. Both used by the renderer (the endpoint handles) and by the
+    // mouse handler (which end a press continues).
+    double draw_chain_snap_radius() const;
+    // 2026-09-13, owner click-test item 1. WHICH ENDPOINT A CLICK AT `mouse_position`
+    // GRABS, in SCREEN SPACE - a pixel radius around the projected endpoint, exactly
+    // the way draw_point_at() picks an edit handle and the way the connectors are
+    // picked. The 3D distance this replaced scaled with the OBJECT (the snap radius is
+    // a fraction of the bbox diagonal), so on a large part an endpoint was
+    // unclickable from a normal viewing distance and on a small one every click
+    // anywhere grabbed it. Returns None when neither endpoint is within the radius.
+    DrawChainEnd draw_chain_end_at(const Vec2d& mouse_position) const;
+    // The screen-space pick radius, in pixels. Matched to the marker's own drawn
+    // radius so "it looks grab-able" and "it is grab-able" are the same region, plus
+    // a few pixels of slack because the user is aiming at a ball, not a pixel.
+    static constexpr double DrawEndPickPx = 16.0;
+    // 2026-09-16, owner: the plane grab that moves the whole drawn line "extends into
+    // infinity similar to the regular cut and makes it hard to rotate around the
+    // part". In Draw mode the cut surface AS DRAWN is the line, so the grab - and the
+    // hover highlight and tooltip that announce it - fire only within this many
+    // pixels of the line: the same radius the line's own segment pick uses.
+    static constexpr double DrawLineGrabPx = 12.0;
+    // True when the mouse is within DrawLineGrabPx of the drawn line on screen. The
+    // Draw-mode answer to mouse_on_cut_surface(). An empty chain has no line, so
+    // nothing is near it and nothing stops the orbit.
+    bool   mouse_near_draw_line(const Vec2d& mouse_position) const;
+    // 2026-09-16, owner: "hide the through all feature for now too. it's still very
+    // unclear what it is supposed to accomplish and what it is doing is completely
+    // useless." Through all is hidden until it has a defined purpose - see draw-cut
+    // follow-ups 2026-09-16. The libslic3r implementation and its tests stay; only
+    // the control is gone, and the mode is forced OFF for every cut this gizmo makes -
+    // including a reopened recipe that had it on, which then re-cuts as band + core
+    // at its stored Angle and Depth.
+    static constexpr bool   DrawThroughAllHidden = true;
+    void   render_draw_chain_endpoints();
+    // 2026-09-13, owner click-test item 2: CLOSE LOOP along the SURFACE. Appends the
+    // samples of a path from one endpoint to the other that lies ON the mesh, then
+    // closes the chain. Returns false when no such path could be found from the
+    // current view, in which case the chain is left untouched and the caller tells
+    // the user to draw the rest by hand. NEVER reflects the line.
+    bool   close_draw_chain_on_surface();
+    // The inward direction for DrawCutDirection::View, in the plane frame.
+    Vec3d  draw_view_dir_in_plane() const;
+    // Take the camera's current forward direction as the one a Direction = View cut
+    // means. LATCHED rather than re-read, so a later parameter change does not
+    // silently re-aim the cut to wherever the camera has since been orbited.
+    void   latch_draw_view_dir();
+    void   update_draw_preview_models();
+
+    // --- phase 2: line editing ---------------------------------------------
+    // Rebuild m_draw_points from the finished stroke (the resampled path), which is
+    // what the handles are drawn from and what an edit rewrites.
+    void   sync_draw_points();
+    // Push m_draw_points back into the stroke and re-finish it, so an edited line
+    // stays resampled, stays smoothed and keeps its open/closed decision.
+    void   commit_draw_points();
+    // The world position of editable point i (the plane frame taken out to the
+    // world), for rendering and for picking.
+    Vec3d  draw_point_world(int i) const;
+    // The point under the mouse, or -1. Screen-space, the same
+    // project-and-compare-in-pixels test the sheet's control points use.
+    int    draw_point_at(const Vec2d& mouse_position) const;
+    // The SEGMENT under the mouse, or -1: the index of the point the new point
+    // would be inserted AFTER. Shift+click uses this.
+    int    draw_segment_at(const Vec2d& mouse_position) const;
+    // Re-project a dragged point onto the model with a raycast, so it rides the
+    // surface. False when the ray missed, in which case the point does not move.
+    bool   draw_point_reproject(int i, const Vec2d& mouse_position);
+    void   render_draw_point_handles();
+    // Push the smoothed path back onto the mesh with the GUI's raycaster - the
+    // phase-1 deviation (#7) this closes. Headless there is no raycaster, so
+    // draw_cut_smooth() leaves the samples where the average put them; here there
+    // is one, so the ribbon really lies on the surface after smoothing.
+    void   reproject_draw_stroke_on_mesh();
+
+    // --- phase 2: connectors on the drawn surface --------------------------
+    // True when a connector click / drag should land on the DRAWN surface rather
+    // than on the plane: Draw mode, a usable stroke, connectors being edited.
+    bool   draw_connectors_live() const;
+    // The (s, w) of a connector position (in OBJECT coordinates, the frame
+    // CutConnector::pos uses), and whether it projected at all.
+    bool   draw_connector_sw(const Vec3d& pos_object, double& s, double& w) const;
+    // The reach the cut will use for the current params - through-all's derived
+    // reach, or the Depth slider. The (s,w) domain test needs it.
+    double draw_cut_depth_reach() const;
+    // The raycaster over the CUTTER SHELL, so a connector click hits the surface
+    // the user can see. Rebuilt whenever the shell is.
+    void   update_draw_surface_raycaster();
+    bool   unproject_on_draw_surface(const Vec2d& mouse_position, Vec3d& pos, Vec3d& pos_world);
+    void   update_draw_connector_warnings();
+    TriangleMesh                   m_draw_surface_mesh;
+    std::unique_ptr<MeshRaycaster> m_draw_surface_raycaster;
+    bool                           m_draw_surface_pick_dirty{ true };
+    int                            m_draw_tilted_connectors{ 0 };
+    int                            m_draw_unflat_connectors{ 0 };
+    int                            m_draw_offsurface_connectors{ 0 };
+
     // (3) CUT THICKNESS ("kerf"), for BOTH Flat and Curved: a band of material
     // centred on the cut surface is removed, so the two halves come apart with a
     // real gap between them. Session state like everything else in this gizmo -
@@ -326,6 +654,109 @@ class GLGizmoCut3D : public GLGizmoBase
     // normal: lo <= 0 <= hi, hi - lo == thickness.
     void           cut_thickness_faces(double& lo, double& hi) const;
     void           render_cut_thickness_input();
+    // Refresh whichever surface mode is live, after a change (the thickness) that
+    // applies to all of them.
+    void           invalidate_cut_surfaces();
+
+    // --- RE-EDITABLE CUTS ---------------------------------------------------
+    // A cut used to be destructive: the plane, the sheet and the stroke were
+    // session state, the two halves were baked, and nothing described how they
+    // had been made. With "Keep cut editable" on, perform_cut() now also writes
+    // a CutRecipe onto both halves - the surface, its parameters, the connector
+    // definitions and the object's own PRE-CUT mesh - so the cut can be reopened
+    // and made again.
+    //
+    // The option itself. Default ON, as the spec asks; the tooltip states the
+    // cost, because the stored mesh roughly doubles the 3MF size of a cut object.
+    // With it OFF nothing is recorded and the cut behaves exactly as before.
+    bool m_keep_cut_editable{ true };
+
+    // THE RE-EDIT SESSION.
+    //
+    // While this is set, the gizmo is not cutting a fresh object: it is editing a
+    // cut that already happened. The two halves are hidden, the ORIGINAL mesh is
+    // shown in their place, and "Perform cut" replaces the halves rather than
+    // splitting the selection.
+    bool m_reedit_active{ false };
+    // The recipe being edited. Held by value: the objects it came from are
+    // deleted and rebuilt by the re-cut, so a reference into the model would
+    // dangle exactly when it is needed.
+    CutRecipe m_reedit_recipe;
+    // The objects the re-edit will REPLACE, by ObjectID rather than by index:
+    // apply_cut_object_to_model() deletes and re-adds objects, and any index
+    // taken before that is meaningless after it.
+    std::vector<ObjectID> m_reedit_object_ids;
+    // The stand-in object that shows the pre-cut mesh while the re-edit is open,
+    // so Cancel can remove it and the re-cut can replace it. Again an ObjectID.
+    ObjectID m_reedit_proxy_id;
+    // The halves themselves, kept aside while the re-edit is open so Cancel can
+    // put them back EXACTLY as they were.
+    //
+    // The obvious alternative - let the plater's undo restore them - does not
+    // work: Plater::TakeSnapshot suppresses snapshots only for its own scope, so
+    // by the time the user cancels, the stack's top is no longer the snapshot the
+    // menu item took and a single undo() would land somewhere else entirely.
+    // Holding the objects is exact, and does not depend on what else has been
+    // snapshotted in between.
+    //
+    // A Model of their own rather than loose pointers: a ModelObject's lifetime
+    // is owned by its Model, and this gives them one for the duration.
+    Model m_reedit_stash;
+    // Only one half of the cut is still in the model: the other was deleted. The
+    // re-cut still works and produces both halves again, but the panel says so
+    // first - re-cutting would otherwise silently resurrect a part the user had
+    // deliberately thrown away.
+    bool m_reedit_one_half_missing{ false };
+    // Set between the menu item and the gizmo actually opening. on_set_state()
+    // flattens every piece of session state when the gizmo opens, so a recipe
+    // applied BEFORE that would be wiped; this parks it until after the reset.
+    bool                  m_reedit_pending{ false };
+    CutRecipe             m_reedit_pending_recipe;
+    std::vector<ObjectID> m_reedit_pending_object_ids;
+
+    // "Copy cut to...": the same parking, for the third way to arm the gizmo.
+    // Separate from the re-edit slot on purpose - a copy is NOT a re-edit (no
+    // stand-in, no halves replaced, m_reedit_active stays false), and sharing one
+    // flag would make it far too easy for a later change to route one down the
+    // other's path. See arm_copy() in the .cpp.
+    bool      m_copy_pending{ false };
+    CutRecipe m_copy_pending_recipe;
+
+    // Take the parked recipe and become a re-edit session: hide the halves, put
+    // the pre-cut mesh on the bed in their place, and populate every control from
+    // the recipe. Called at the end of on_set_state()'s On branch.
+    void begin_reedit();
+    // Take the parked COPY and set every control from it, in an ordinary (not
+    // re-edit) session on the target's own mesh. Called from the same point in
+    // on_set_state() begin_reedit() is.
+    void begin_copy();
+    // Undo begin_reedit(): remove the stand-in, bring the halves back. Called
+    // when the gizmo closes without a cut.
+    void cancel_reedit();
+    // Re-read the common gizmo data pool (SelectionInfo and friends) against the
+    // CURRENT canvas selection.
+    //
+    // begin_reedit() and begin_copy() run from on_set_state(On), which
+    // GLGizmosManager::activate_gizmo() calls BEFORE open_gizmo() gets to its own
+    // update_data(). Anything they change about the selection is therefore
+    // invisible to m_c->selection_info() until after they have returned - and
+    // applying a recipe reads it. This is the refresh that closes that window.
+    void refresh_common_data();
+    // Put every gizmo control back from a recipe - the plane, the surface, the
+    // parameters, the connectors, and the gizmo-local undo stacks (seeded with
+    // the recipe's own surface, so the first Ctrl+Z in a re-edit returns to what
+    // was loaded rather than to a flat sheet).
+    void apply_recipe_to_gizmo(const CutRecipe& recipe);
+    // The reverse: everything the gizmo currently holds, as a recipe. `mesh` is
+    // the pre-cut mesh to record; the caller supplies it because in a fresh cut
+    // it is the object being cut and in a re-edit it is the recipe's own mesh.
+    CutRecipe build_recipe_from_gizmo(const ModelObject* mo, const TriangleMesh& mesh) const;
+    // The merged, object-frame mesh of a ModelObject's MODEL_PART volumes that
+    // are not cut connectors - i.e. what a cut actually operates on, and so what
+    // a recipe has to remember.
+    static TriangleMesh object_part_mesh(const ModelObject* mo);
+    // The panel's re-edit banner.
+    void render_reedit_notice();
 
     bool m_hide_cut_plane{ false };
     bool m_connectors_editing{ false };
@@ -439,6 +870,36 @@ class GLGizmoCut3D : public GLGizmoBase
 public:
     GLGizmoCut3D(GLCanvas3D& parent, const std::string& icon_filename, unsigned int sprite_id);
 
+    // RE-EDITABLE CUTS. Arm a re-edit: called from the "Edit cut..." menu item
+    // BEFORE the gizmo is opened, because open_gizmo() runs on_set_state(), which
+    // resets the session state - so the recipe is parked and consumed on the way
+    // out of that reset. False when the recipe cannot be re-cut (no pre-cut mesh,
+    // unknown schema); nothing is armed then and the caller says why.
+    bool arm_reedit(const CutRecipe& recipe, const std::vector<ObjectID>& object_ids);
+    bool is_reedit_active() const { return m_reedit_active; }
+    // Perform the parked re-edit's MODEL SURGERY - take the halves out, put the
+    // stand-in in their place, select it - WITHOUT opening the gizmo.
+    //
+    // This has to happen before the gizmo is opened, not from inside
+    // on_set_state(On): the surgery calls plater->update(), whose reload_scene()
+    // empties the selection (the halves are gone) and then calls
+    // reset_all_states(), which turns this gizmo Off re-entrantly. The outer
+    // activate_gizmo() then sees get_state() != On and reverts to Undefined - the
+    // gizmo silently never opened, which is the "object disappears and nothing
+    // else happens" the owner reported. Doing the surgery first means the
+    // selection is already the stand-in when open_gizmo() runs, so nothing resets.
+    //
+    // Returns false if there was nothing parked or the halves could not be found.
+    bool begin_reedit_now();
+
+    // "Copy cut to...": arm an ORDINARY cut session on the currently-selected
+    // object with this recipe's plane, surface, settings and connectors already
+    // set up - the source's recipe used as-is in the target's own object frame.
+    // The recipe's mesh is dropped: the target is cut with its OWN geometry, and
+    // the fresh recipe the commit writes references the target's own mesh hash.
+    // False when the recipe describes a surface that cannot be set up at all.
+    bool arm_copy(const CutRecipe& recipe);
+
     std::string get_tooltip() const override;
     bool unproject_on_cut_plane(const Vec2d& mouse_pos, Vec3d& pos, Vec3d& pos_world, bool respect_contours = true);
     bool gizmo_event(SLAGizmoEventType action, const Vec2d& mouse_position, bool shift_down, bool alt_down, bool control_down);
@@ -503,6 +964,7 @@ protected:
     void               on_load(cereal::BinaryInputArchive&ar) override;
     void               on_save(cereal::BinaryOutputArchive&ar) const override;
     std::string        on_get_name() const override;
+    std::string        get_dock_key() const override { return "cut"; }
     void               on_set_state() override;
     CommonGizmosDataID on_get_requirements() const override;
     void               on_set_hover_id() override;
@@ -529,6 +991,13 @@ protected:
     void process_contours();
     void reset_cut_by_contours();
     void render_flip_plane_button(bool disable_pred = false);
+    // "Copy cut to..." + Mirror buttons, step 2. Mirror the WHOLE live cut -
+    // plane, surface, groove and connectors - about the object's bounding-box
+    // centre on a WORLD axis, by round-tripping through the recipe: see
+    // mirror_cut() in the .cpp for why that round trip rather than moving the six
+    // live representations by hand, and CutRecipe.hpp for the handedness rule.
+    void mirror_cut(CutMirrorAxis axis);
+    void render_mirror_buttons();
     void add_vertical_scaled_interval(float interval);
     void add_horizontal_scaled_interval(float interval);
     void add_horizontal_shift(float shift);
@@ -594,7 +1063,11 @@ private:
     void render_connectors();
 
     // --- Curved cut (phase 1) ---------------------------------------------
-    bool   is_curved_surface() const { return m_curved_surface && CutMode(m_mode) == CutMode::cutPlanar; }
+    bool   is_curved_surface() const { return m_surface_mode == CutSurfaceMode::Curved && CutMode(m_mode) == CutMode::cutPlanar; }
+    bool   is_draw_surface() const { return m_surface_mode == CutSurfaceMode::Draw && CutMode(m_mode) == CutMode::cutPlanar; }
+    // "Not the flat plane", i.e. either of the two shaped surfaces. Most of the
+    // sites that used to read m_curved_surface meant exactly this.
+    bool   is_shaped_surface() const { return m_surface_mode != CutSurfaceMode::Flat && CutMode(m_mode) == CutMode::cutPlanar; }
     // Half extent the sheet needs so it covers the object under the cut plane.
     // The FALLBACK extent, used before the first successful cross-section fit
     // (and when the plane misses the object): the bounding-box based size phase

@@ -20,7 +20,7 @@ on:
 
 jobs:
   build_orca:
-    name: Build Snapmaker_Orca
+    name: Build EdgeSlicer
     runs-on: ${{ inputs.os }}
     outputs:
       release: ${{ steps.set_release.outputs.release || steps.set_release_win.outputs.release }}
@@ -129,92 +129,198 @@ jobs:
         run: |
           ./build_release_macos.sh -s -n -x -a universal -t 10.15 -1
 
- # Thanks to RaySajuuk, it's working now
-      - name: Sign app and notary
-        if: (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/') || github.ref == 'refs/heads/2.3.0-final') && inputs.os == 'macos-14'
-        working-directory: ${{ github.workspace }}
+      # Signing and notarization are opt-in by secrets, not by branch: a fork, a pull request or a
+      # checkout of this repository without the Developer ID secrets builds the same unsigned dmg
+      # as before, and never fails for a missing secret. Once the secrets exist (docs/RELEASING_MACOS.md)
+      # every run signs - the nightly on main, release CI on ci/<version>, release/* branches, tags.
+      - name: Check for macOS signing secrets
+        id: signing
+        if: inputs.os == 'macos-14'
+        shell: bash
+        env:
+          BUILD_CERTIFICATE_BASE64: ${{ secrets.BUILD_CERTIFICATE_BASE64 }}
+          P12_PASSWORD: ${{ secrets.P12_PASSWORD }}
+          MACOS_CERTIFICATE_ID: ${{ secrets.MACOS_CERTIFICATE_ID }}
+          APP_STORE_CONNECT_KEY_P8: ${{ secrets.APP_STORE_CONNECT_KEY_P8 }}
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          APPLE_DEV_ACCOUNT: ${{ secrets.APPLE_DEV_ACCOUNT }}
+          TEAM_ID: ${{ secrets.TEAM_ID }}
+          APP_PWD: ${{ secrets.APP_PWD }}
+        run: |
+          sign=false
+          notarize=none
+          if [ -n "$BUILD_CERTIFICATE_BASE64" ] && [ -n "$P12_PASSWORD" ] && [ -n "$MACOS_CERTIFICATE_ID" ]; then
+            sign=true
+            if [ -n "$APP_STORE_CONNECT_KEY_P8" ] && [ -n "$APP_STORE_CONNECT_KEY_ID" ] && [ -n "$APP_STORE_CONNECT_ISSUER_ID" ]; then
+              notarize=api-key
+            elif [ -n "$APPLE_DEV_ACCOUNT" ] && [ -n "$TEAM_ID" ] && [ -n "$APP_PWD" ]; then
+              notarize=apple-id
+            else
+              echo "::warning::Developer ID secrets are set but no notarization credentials (APP_STORE_CONNECT_KEY_ID / APP_STORE_CONNECT_ISSUER_ID / APP_STORE_CONNECT_KEY_P8): the dmg will be signed but not notarized, and Gatekeeper will still refuse it."
+            fi
+          else
+            echo "::notice::No macOS signing secrets (BUILD_CERTIFICATE_BASE64, P12_PASSWORD, MACOS_CERTIFICATE_ID) - building an unsigned dmg. See docs/RELEASING_MACOS.md."
+          fi
+          echo "sign=$sign" >> "$GITHUB_OUTPUT"
+          echo "notarize=$notarize" >> "$GITHUB_OUTPUT"
+          echo "sign=$sign notarize=$notarize"
+
+      - name: Import Developer ID certificate
+        if: inputs.os == 'macos-14' && steps.signing.outputs.sign == 'true'
+        shell: bash
         env:
           BUILD_CERTIFICATE_BASE64: ${{ secrets.BUILD_CERTIFICATE_BASE64 }}
           P12_PASSWORD: ${{ secrets.P12_PASSWORD }}
           KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
-          CERTIFICATE_ID: ${{ secrets.MACOS_CERTIFICATE_ID }}
+          MACOS_CERTIFICATE_ID: ${{ secrets.MACOS_CERTIFICATE_ID }}
         run: |
-          CERTIFICATE_PATH=$RUNNER_TEMP/build_certificate.p12
-          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
-          echo -n "$BUILD_CERTIFICATE_BASE64" | base64 --decode --output $CERTIFICATE_PATH
-          security create-keychain -p $KEYCHAIN_PASSWORD $KEYCHAIN_PATH
-          security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
-          security unlock-keychain -p $KEYCHAIN_PASSWORD $KEYCHAIN_PATH
-          security import $CERTIFICATE_PATH -P $P12_PASSWORD -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
-          security list-keychain -d user -s $KEYCHAIN_PATH
-          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k $P12_PASSWORD $KEYCHAIN_PATH
-          codesign --deep --force --verbose --options runtime --timestamp --entitlements ${{ github.workspace }}/scripts/disable_validation.entitlements --sign "$CERTIFICATE_ID" "${{ github.workspace }}/build/universal/Snapmaker_Orca/EdgeSlicer.app"
-          # Sign Snapmaker_Orca_profile_validator.app if it exists
-          if [ -f "${{ github.workspace }}/build/universal/Snapmaker_Orca/Snapmaker_Orca_profile_validator.app/Contents/MacOS/Snapmaker_Orca_profile_validator" ]; then
-            codesign --deep --force --verbose --options runtime --timestamp --entitlements ${{ github.workspace }}/scripts/disable_validation.entitlements --sign "$CERTIFICATE_ID" ${{ github.workspace }}/build/universal/Snapmaker_Orca/Snapmaker_Orca_profile_validator.app
+          CERTIFICATE_PATH="$RUNNER_TEMP/build_certificate.p12"
+          KEYCHAIN_PATH="$RUNNER_TEMP/app-signing.keychain-db"
+          # The keychain is created and thrown away inside this job, so its password only has to
+          # exist; generate one when the optional secret is not set.
+          KEYCHAIN_PASSWORD="${KEYCHAIN_PASSWORD:-$(openssl rand -hex 24)}"
+          # Whitespace-tolerant decode: the owner pastes the base64 from PowerShell, which wraps it.
+          printf '%s' "$BUILD_CERTIFICATE_BASE64" | tr -d ' \t\r\n' | base64 --decode > "$CERTIFICATE_PATH"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERTIFICATE_PATH" -P "$P12_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          rm -f "$CERTIFICATE_PATH"
+          # Apple's Developer ID intermediates, in case the .p12 was exported without its chain
+          # (codesign then fails with "unable to build chain to self-signed root"). Best effort.
+          for ca in DeveloperIDG2CA DeveloperIDCA; do
+            if curl -fsSL -o "$RUNNER_TEMP/$ca.cer" "https://www.apple.com/certificateauthority/$ca.cer"; then
+              security import "$RUNNER_TEMP/$ca.cer" -k "$KEYCHAIN_PATH" -T /usr/bin/codesign || true
+              rm -f "$RUNNER_TEMP/$ca.cer"
+            fi
+          done
+          security list-keychain -d user -s "$KEYCHAIN_PATH" login.keychain || security list-keychain -d user -s "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH" > /dev/null
+          echo "Code-signing identities in the build keychain:"
+          security find-identity -v -p codesigning "$KEYCHAIN_PATH"
+          identities=$(security find-identity -v -p codesigning "$KEYCHAIN_PATH")
+          if ! echo "$identities" | grep -qF "$MACOS_CERTIFICATE_ID"; then
+            if echo "$identities" | grep -qE "Apple Distribution|Apple Development|iPhone Distribution|iPhone Developer|Mac Developer|3rd Party Mac Developer"; then
+              echo "::error::The imported .p12 holds an App Store / development certificate ($(echo "$identities" | grep -oE '"[^"]+"' | head -1)), not a 'Developer ID Application' one. Gatekeeper and the notary service only accept Developer ID: create that certificate in the developer portal (docs/RELEASING_MACOS.md, step 1), export it as .p12 and replace BUILD_CERTIFICATE_BASE64 / P12_PASSWORD."
+            else
+              echo "::error::MACOS_CERTIFICATE_ID does not match any identity in the imported .p12 - it must be the full string, e.g. 'Developer ID Application: Name (TEAMID)', from 'security find-identity -v -p codesigning'."
+            fi
+            exit 1
           fi
-          
-          # Create main Snapmaker Orca DMG without the profile validator helper
-          mkdir -p ${{ github.workspace }}/build/universal/Snapmaker_Orca_dmg
-          rm -rf ${{ github.workspace }}/build/universal/Snapmaker_Orca_dmg/*
-          cp -R "${{ github.workspace }}/build/universal/Snapmaker_Orca/EdgeSlicer.app" "${{ github.workspace }}/build/universal/Snapmaker_Orca_dmg/"
-          ln -sfn /Applications ${{ github.workspace }}/build/universal/Snapmaker_Orca_dmg/Applications
-          hdiutil create -volname "Snapmaker_Orca" -srcfolder ${{ github.workspace }}/build/universal/Snapmaker_Orca_dmg -ov -format UDZO "${{ github.workspace }}/Snapmaker_Orca_Mac_universal_${{ env.ver }}.dmg"
-          codesign --deep --force --verbose --options runtime --timestamp --entitlements ${{ github.workspace }}/scripts/disable_validation.entitlements --sign "$CERTIFICATE_ID" "${{ github.workspace }}/Snapmaker_Orca_Mac_universal_${{ env.ver }}.dmg"
-          
-          # Create separate Snapmaker_Orca_profile_validator DMG if the app exists
-          if [ -f "${{ github.workspace }}/build/universal/Snapmaker_Orca/Snapmaker_Orca_profile_validator.app/Contents/MacOS/Snapmaker_Orca_profile_validator" ]; then
-            mkdir -p ${{ github.workspace }}/build/universal/Snapmaker_Orca_profile_validator_dmg
-            rm -rf ${{ github.workspace }}/build/universal/Snapmaker_Orca_profile_validator_dmg/*
-            cp -R ${{ github.workspace }}/build/universal/Snapmaker_Orca/Snapmaker_Orca_profile_validator.app ${{ github.workspace }}/build/universal/Snapmaker_Orca_profile_validator_dmg/
-            ln -sfn /Applications ${{ github.workspace }}/build/universal/Snapmaker_Orca_profile_validator_dmg/Applications
-            hdiutil create -volname "Snapmaker_Orca Profile Validator" -srcfolder ${{ github.workspace }}/build/universal/Snapmaker_Orca_profile_validator_dmg -ov -format UDZO "${{ github.workspace }}/Snapmaker_Orca_profile_validator_Mac_universal_${{ env.ver }}.dmg"
-            codesign --deep --force --verbose --options runtime --timestamp --entitlements ${{ github.workspace }}/scripts/disable_validation.entitlements --sign "$CERTIFICATE_ID" "${{ github.workspace }}/Snapmaker_Orca_profile_validator_Mac_universal_${{ env.ver }}.dmg"
+          # codesign wants the identity NAME (or its SHA-1) exactly; the secret only has to
+          # select it. Pasting the whole find-identity line (hash + quoted name) into
+          # MACOS_CERTIFICATE_ID passes the substring check above but codesign then reports
+          # "no identity found" (run 35411024201). Resolve the name from the keychain instead.
+          SIGN_IDENTITY=$(echo "$identities" | grep -F "$MACOS_CERTIFICATE_ID" | grep -oE '"Developer ID Application: [^"]+"' | head -1 | tr -d '"')
+          if [ -z "$SIGN_IDENTITY" ]; then
+            SIGN_IDENTITY=$(echo "$identities" | grep -oE '"Developer ID Application: [^"]+"' | head -1 | tr -d '"')
           fi
-          
-          # Notarize main DMG
-          xcrun notarytool store-credentials "notarytool-profile" --apple-id "${{ secrets.APPLE_DEV_ACCOUNT }}" --team-id "${{ secrets.TEAM_ID }}" --password "${{ secrets.APP_PWD }}"
-          xcrun notarytool submit "${{ github.workspace }}/Snapmaker_Orca_Mac_universal_${{ env.ver }}.dmg" --keychain-profile "notarytool-profile" --wait
-          xcrun stapler staple "${{ github.workspace }}/Snapmaker_Orca_Mac_universal_${{ env.ver }}.dmg"
-          
-          # Notarize profile validator DMG if it exists
-          if [ -f "${{ github.workspace }}/Snapmaker_Orca_profile_validator_Mac_universal_${{ env.ver }}.dmg" ]; then
-            xcrun notarytool submit "${{ github.workspace }}/Snapmaker_Orca_profile_validator_Mac_universal_${{ env.ver }}.dmg" --keychain-profile "notarytool-profile" --wait
-            xcrun stapler staple "${{ github.workspace }}/Snapmaker_Orca_profile_validator_Mac_universal_${{ env.ver }}.dmg"
+          if [ -z "$SIGN_IDENTITY" ]; then
+            echo "::error::No 'Developer ID Application' identity in the imported .p12"
+            exit 1
+          fi
+          echo "signing identity: $SIGN_IDENTITY"
+          echo "SIGN_IDENTITY=$SIGN_IDENTITY" >> "$GITHUB_ENV"
+
+      - name: Sign app bundles (Developer ID, hardened runtime)
+        if: inputs.os == 'macos-14' && steps.signing.outputs.sign == 'true'
+        working-directory: ${{ github.workspace }}
+        shell: bash
+        env:
+          MACOS_CERTIFICATE_ID: ${{ secrets.MACOS_CERTIFICATE_ID }}
+        run: |
+          APP_DIR="${{ github.workspace }}/build/universal/Snapmaker_Orca"
+          # Inside out: every nested Mach-O (crashpad_handler, libsentry.dylib, anything a later build
+          # adds) with the hardened runtime and a secure timestamp, then the bundle with the entitlements.
+          scripts/macos_sign_app.sh "$APP_DIR/EdgeSlicer.app" "$SIGN_IDENTITY" scripts/disable_validation.entitlements
+          if [ -f "$APP_DIR/Snapmaker_Orca_profile_validator.app/Contents/MacOS/Snapmaker_Orca_profile_validator" ]; then
+            scripts/macos_sign_app.sh "$APP_DIR/Snapmaker_Orca_profile_validator.app" "$SIGN_IDENTITY" scripts/disable_validation.entitlements
           fi
 
-      - name: Create DMG without notary
-        if: github.ref != 'refs/heads/main' && inputs.os == 'macos-14' && github.ref != 'refs/heads/2.3.0-final'
+      # The app is notarized and stapled on its own before it goes into the dmg, so the copy a user
+      # drags to /Applications carries its ticket too and opens offline; the dmg gets its own below.
+      - name: Create DMG
+        if: inputs.os == 'macos-14'
         working-directory: ${{ github.workspace }}
+        shell: bash
         run: |
           mkdir -p ${{ github.workspace }}/build/universal/Snapmaker_Orca_dmg
           rm -rf ${{ github.workspace }}/build/universal/Snapmaker_Orca_dmg/*
           cp -R "${{ github.workspace }}/build/universal/Snapmaker_Orca/EdgeSlicer.app" "${{ github.workspace }}/build/universal/Snapmaker_Orca_dmg/"
           ln -sfn /Applications ${{ github.workspace }}/build/universal/Snapmaker_Orca_dmg/Applications
-          hdiutil create -volname "Snapmaker_Orca" -srcfolder ${{ github.workspace }}/build/universal/Snapmaker_Orca_dmg -ov -format UDZO Snapmaker_Orca_Mac_universal_${{ env.ver }}.dmg
-          
+          hdiutil create -volname "EdgeSlicer" -srcfolder ${{ github.workspace }}/build/universal/Snapmaker_Orca_dmg -ov -format UDZO "${{ github.workspace }}/EdgeSlicer_Mac_universal_${{ env.ver }}.dmg"
+
           # Create separate Snapmaker_Orca_profile_validator DMG if the app exists
           if [ -f "${{ github.workspace }}/build/universal/Snapmaker_Orca/Snapmaker_Orca_profile_validator.app/Contents/MacOS/Snapmaker_Orca_profile_validator" ]; then
             mkdir -p ${{ github.workspace }}/build/universal/Snapmaker_Orca_profile_validator_dmg
             rm -rf ${{ github.workspace }}/build/universal/Snapmaker_Orca_profile_validator_dmg/*
             cp -R ${{ github.workspace }}/build/universal/Snapmaker_Orca/Snapmaker_Orca_profile_validator.app ${{ github.workspace }}/build/universal/Snapmaker_Orca_profile_validator_dmg/
             ln -sfn /Applications ${{ github.workspace }}/build/universal/Snapmaker_Orca_profile_validator_dmg/Applications
-            hdiutil create -volname "Snapmaker_Orca Profile Validator" -srcfolder ${{ github.workspace }}/build/universal/Snapmaker_Orca_profile_validator_dmg -ov -format UDZO "${{ github.workspace }}/Snapmaker_Orca_profile_validator_Mac_universal_${{ env.ver }}.dmg"
+            hdiutil create -volname "EdgeSlicer Profile Validator" -srcfolder ${{ github.workspace }}/build/universal/Snapmaker_Orca_profile_validator_dmg -ov -format UDZO "${{ github.workspace }}/EdgeSlicer_profile_validator_Mac_universal_${{ env.ver }}.dmg"
           fi
+
+      # The dmg is signed and stapled in place, so the artifact uploaded below is the notarized file.
+      - name: Sign and notarize DMG
+        if: inputs.os == 'macos-14' && steps.signing.outputs.sign == 'true'
+        working-directory: ${{ github.workspace }}
+        shell: bash
+        env:
+          MACOS_CERTIFICATE_ID: ${{ secrets.MACOS_CERTIFICATE_ID }}
+          NOTARIZE: ${{ steps.signing.outputs.notarize }}
+          APP_STORE_CONNECT_KEY_P8: ${{ secrets.APP_STORE_CONNECT_KEY_P8 }}
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          APPLE_DEV_ACCOUNT: ${{ secrets.APPLE_DEV_ACCOUNT }}
+          TEAM_ID: ${{ secrets.TEAM_ID }}
+          APP_PWD: ${{ secrets.APP_PWD }}
+        run: |
+          for dmg in "${{ github.workspace }}/EdgeSlicer_Mac_universal_${{ env.ver }}.dmg" \
+                     "${{ github.workspace }}/EdgeSlicer_profile_validator_Mac_universal_${{ env.ver }}.dmg"; do
+            [ -f "$dmg" ] || continue
+            codesign --force --timestamp --sign "$SIGN_IDENTITY" "$dmg"
+            codesign --verify --verbose=2 "$dmg"
+            # ONE notarization submission per run: the dmg. Its ticket covers the app inside
+            # (Apple records every nested code hash), and each submission waits on Apple's
+            # queue in turn - notarizing the app zip first, then the dmg, then the validator
+            # dmg took the run past its time budget on 2026-09-19. The profile validator dmg
+            # is a developer tool and is signed but not notarized.
+            if [ "$NOTARIZE" != "none" ] && [[ "$(basename "$dmg")" == EdgeSlicer_Mac_universal_* ]]; then
+              rc=0; scripts/macos_notarize.sh "$dmg" || rc=$?
+              if [ "$rc" = 2 ]; then
+                # Still in Apple's queue after the wait: ship the SIGNED dmg anyway. It is not
+                # stapled, but the ticket is served online once Apple accepts the submission
+                # (id printed above; check with the "Notary status" workflow), so the file
+                # becomes Gatekeeper-clean retroactively without a rebuild.
+                echo "::warning::$(basename "$dmg") is signed but its notarization is still pending - uploaded unstapled"
+              elif [ "$rc" != 0 ]; then
+                exit "$rc"
+              else
+                spctl -a -vv -t open --context context:primary-signature "$dmg" || echo "::warning::spctl did not accept $(basename "$dmg") on the runner (informational; stapler validate above passed)"
+              fi
+            fi
+          done
+
+      - name: Remove signing keychain
+        if: always() && inputs.os == 'macos-14' && steps.signing.outputs.sign == 'true'
+        shell: bash
+        run: |
+          security delete-keychain "$RUNNER_TEMP/app-signing.keychain-db" 2>/dev/null || true
+          rm -f "$RUNNER_TEMP/build_certificate.p12" "$RUNNER_TEMP"/AuthKey_*.p8 "$RUNNER_TEMP"/notary_*.json "$RUNNER_TEMP"/*.zip
 
       - name: Upload artifacts mac
         if: inputs.os == 'macos-14'
         uses: actions/upload-artifact@v4
         with:
-          name: Snapmaker_Orca_Mac_universal_${{ env.ver }}
-          path: ${{ github.workspace }}/Snapmaker_Orca_Mac_universal_${{ env.ver }}.dmg
+          name: EdgeSlicer_Mac_universal_${{ env.ver }}
+          path: ${{ github.workspace }}/EdgeSlicer_Mac_universal_${{ env.ver }}.dmg
 
       - name: Upload Snapmaker_Orca_profile_validator DMG mac
         if: inputs.os == 'macos-14'
         uses: actions/upload-artifact@v4
         with:
-          name: Snapmaker_Orca_profile_validator_Mac_universal_DMG_${{ env.ver }}
-          path: ${{ github.workspace }}/Snapmaker_Orca_profile_validator_Mac_universal_${{ env.ver }}.dmg
+          name: EdgeSlicer_profile_validator_Mac_universal_DMG_${{ env.ver }}
+          path: ${{ github.workspace }}/EdgeSlicer_profile_validator_Mac_universal_${{ env.ver }}.dmg
           if-no-files-found: ignore
 
       - name: Upload dSYM artifacts mac
@@ -231,8 +337,8 @@ jobs:
         with:
           upload_url: https://uploads.github.com/repos/Snapmaker/OrcaSlicer/releases/169912305/assets{?name,label}
           release_id: 169912305
-          asset_path: ${{ github.workspace }}/Snapmaker_Orca_Mac_universal_${{ env.ver }}.dmg
-          asset_name: Snapmaker_Orca_Mac_universal_${{ env.ver }}.dmg
+          asset_path: ${{ github.workspace }}/EdgeSlicer_Mac_universal_${{ env.ver }}.dmg
+          asset_name: EdgeSlicer_Mac_universal_${{ env.ver }}.dmg
           asset_content_type: application/octet-stream
           max_releases: 1 # optional, if there are more releases than this matching the asset_name, the oldest ones are going to be deleted
 
@@ -241,7 +347,7 @@ jobs:
         id: check_dmg
         working-directory: ${{ github.workspace }}
         run: |
-          if [ -f "Snapmaker_Orca_profile_validator_Mac_universal_${{ env.ver }}.dmg" ]; then
+          if [ -f "EdgeSlicer_profile_validator_Mac_universal_${{ env.ver }}.dmg" ]; then
             echo "exists=true" >> $GITHUB_OUTPUT
             echo "DMG file found, will deploy"
           else
@@ -256,8 +362,8 @@ jobs:
         with:
           upload_url: https://uploads.github.com/repos/Snapmaker/OrcaSlicer/releases/169912305/assets{?name,label}
           release_id: 169912305
-          asset_path: ${{ github.workspace }}/Snapmaker_Orca_profile_validator_Mac_universal_${{ env.ver }}.dmg
-          asset_name: Snapmaker_Orca_profile_validator_Mac_universal_nightly.dmg
+          asset_path: ${{ github.workspace }}/EdgeSlicer_profile_validator_Mac_universal_${{ env.ver }}.dmg
+          asset_name: EdgeSlicer_profile_validator_Mac_universal_nightly.dmg
           asset_content_type: application/octet-stream
           max_releases: 1
 
@@ -290,7 +396,7 @@ jobs:
         if: inputs.os == 'windows-2022'
         working-directory: ${{ github.workspace }}/build
         shell: cmd
-        run: '"C:/Program Files/7-Zip/7z.exe" a -tzip Snapmaker_Orca_Windows_${{ env.ver }}_portable.zip ${{ github.workspace }}/build/Snapmaker_Orca'
+        run: '"C:/Program Files/7-Zip/7z.exe" a -tzip EdgeSlicer_Windows_${{ env.ver }}_portable.zip ${{ github.workspace }}/build/Snapmaker_Orca'
 
       - name: Pack PDB
         if: inputs.os == 'windows-2022'
@@ -302,15 +408,15 @@ jobs:
         if: inputs.os == 'windows-2022'
         uses: actions/upload-artifact@v4
         with:
-          name: Snapmaker_Orca_Windows_${{ env.ver }}_portable
+          name: EdgeSlicer_Windows_${{ env.ver }}_portable
           path: ${{ github.workspace }}/build/Snapmaker_Orca
 
       - name: Upload artifacts Win installer
         if: inputs.os == 'windows-2022'
         uses: actions/upload-artifact@v4
         with:
-          name: Snapmaker_Orca_Windows_${{ env.ver }}
-          path: ${{ github.workspace }}/build/Snapmaker_Orca*.exe
+          name: EdgeSlicer_Windows_${{ env.ver }}
+          path: ${{ github.workspace }}/build/EdgeSlicer_Windows_Installer_*.exe
 
       - name: Upload artifacts Win PDB
         if: inputs.os == 'windows-2022'
@@ -323,7 +429,7 @@ jobs:
         if: inputs.os == 'windows-2022'
         uses: actions/upload-artifact@v4
         with:
-          name: Snapmaker_Orca_profile_validator_Windows_${{ env.ver }}
+          name: EdgeSlicer_profile_validator_Windows_${{ env.ver }}
           path: ${{ github.workspace }}/build/src/Release/Snapmaker_Orca_profile_validator.exe
 
       - name: Deploy Windows release portable
@@ -332,8 +438,8 @@ jobs:
         with:
           upload_url: https://uploads.github.com/repos/Snapmaker/OrcaSlicer/releases/169912305/assets{?name,label}
           release_id: 169912305
-          asset_path: ${{ github.workspace }}/build/Snapmaker_Orca_Windows_${{ env.ver }}_portable.zip
-          asset_name: Snapmaker_Orca_Windows_${{ env.ver }}_portable.zip
+          asset_path: ${{ github.workspace }}/build/EdgeSlicer_Windows_${{ env.ver }}_portable.zip
+          asset_name: EdgeSlicer_Windows_${{ env.ver }}_portable.zip
           asset_content_type: application/x-zip-compressed
           max_releases: 1
 
@@ -343,8 +449,8 @@ jobs:
         with:
           upload_url: https://uploads.github.com/repos/Snapmaker/OrcaSlicer/releases/169912305/assets{?name,label}
           release_id: 169912305
-          asset_path: ${{ github.workspace }}/build/Snapmaker_Orca_Windows_Installer_${{ env.ver }}.exe
-          asset_name: Snapmaker_Orca_Windows_Installer_${{ env.ver }}.exe
+          asset_path: ${{ github.workspace }}/build/EdgeSlicer_Windows_Installer_${{ env.ver }}.exe
+          asset_name: EdgeSlicer_Windows_Installer_${{ env.ver }}.exe
           asset_content_type: application/x-msdownload
           max_releases: 1
 
@@ -355,7 +461,7 @@ jobs:
           upload_url: https://uploads.github.com/repos/Snapmaker/OrcaSlicer/releases/169912305/assets{?name,label}
           release_id: 169912305
           asset_path: ${{ github.workspace }}/build/src/Release/Snapmaker_Orca_profile_validator.exe
-          asset_name: Snapmaker_Orca_profile_validator_Windows_nightly.exe
+          asset_name: EdgeSlicer_profile_validator_Windows_nightly.exe
           asset_content_type: application/x-msdownload
           max_releases: 1
 
@@ -393,8 +499,8 @@ jobs:
           ./build_linux.sh -isr
           # The AppImage is named for SLIC3R_APP_KEY (src/dev-utils/platform/unix/build_appimage.sh.in),
           # which the rebrand changed from Snapmaker_Orca to EdgeSlicer.
-          mv -n ./build/EdgeSlicer_Linux_V${{ env.ver_pure }}.AppImage ./build/Snapmaker_Orca_Linux_AppImage${{ env.ubuntu-ver-str }}_${{ env.ver }}.AppImage
-          chmod +x ./build/Snapmaker_Orca_Linux_AppImage${{ env.ubuntu-ver-str }}_${{ env.ver }}.AppImage
+          mv -n ./build/EdgeSlicer_Linux_V${{ env.ver_pure }}.AppImage ./build/EdgeSlicer_Linux_AppImage${{ env.ubuntu-ver-str }}_${{ env.ver }}.AppImage
+          chmod +x ./build/EdgeSlicer_Linux_AppImage${{ env.ubuntu-ver-str }}_${{ env.ver }}.AppImage
 
       - name: Upload artifacts Ubuntu
         if: ${{ ! env.ACT && inputs.os == 'ubuntu-20.04' || inputs.os == 'ubuntu-24.04' }}
@@ -403,8 +509,8 @@ jobs:
           ubuntu-ver-str: ${{ (inputs.os == 'ubuntu-24.04' && '_Ubuntu2404') || '' }}
         uses: actions/upload-artifact@v4
         with:
-          name: Snapmaker_Orca_Linux_ubuntu_${{ env.ubuntu-ver }}_${{ env.ver }}
-          path: './build/Snapmaker_Orca_Linux_AppImage${{ env.ubuntu-ver-str }}_${{ env.ver }}.AppImage'
+          name: EdgeSlicer_Linux_ubuntu_${{ env.ubuntu-ver }}_${{ env.ver }}
+          path: './build/EdgeSlicer_Linux_AppImage${{ env.ubuntu-ver-str }}_${{ env.ver }}.AppImage'
 
       - name: Upload Snapmaker_Orca_profile_validator Ubuntu
         if: ${{ ! env.ACT && inputs.os == 'ubuntu-20.04' || inputs.os == 'ubuntu-24.04' }}
@@ -412,7 +518,7 @@ jobs:
           ubuntu-ver: ${{ (inputs.os == 'ubuntu-20.04' && '2004') || (inputs.os == 'ubuntu-24.04' && '2404') || '' }}
         uses: actions/upload-artifact@v4
         with:
-          name: Snapmaker_Orca_profile_validator_Linux_ubuntu_${{ env.ubuntu-ver }}_${{ env.ver }}
+          name: EdgeSlicer_profile_validator_Linux_ubuntu_${{ env.ubuntu-ver }}_${{ env.ver }}
           path: './build/src/Release/Snapmaker_Orca_profile_validator'
 
       - name: Deploy Ubuntu release
@@ -423,8 +529,8 @@ jobs:
         with:
           upload_url: https://uploads.github.com/repos/Snapmaker/OrcaSlicer/releases/169912305/assets{?name,label}
           release_id: 169912305
-          asset_path: ./build/Snapmaker_Orca_Linux_AppImage${{ env.ubuntu-ver-str }}_${{ env.ver }}.AppImage
-          asset_name: Snapmaker_Orca_Linux_AppImage${{ env.ubuntu-ver-str }}_${{ env.ver }}_Beta.AppImage
+          asset_path: ./build/EdgeSlicer_Linux_AppImage${{ env.ubuntu-ver-str }}_${{ env.ver }}.AppImage
+          asset_name: EdgeSlicer_Linux_AppImage${{ env.ubuntu-ver-str }}_${{ env.ver }}_Beta.AppImage
           asset_content_type: application/octet-stream
           max_releases: 1 # optional, if there are more releases than this matching the asset_name, the oldest ones are going to be deleted
       - name: Deploy Ubuntu release
@@ -445,7 +551,7 @@ jobs:
           upload_url: https://uploads.github.com/repos/Snapmaker/OrcaSlicer/releases/169912305/assets{?name,label}
           release_id: 169912305
           asset_path: ./build/src/Release/Snapmaker_Orca_profile_validator
-          asset_name: Snapmaker_Orca_profile_validator_Linux${{ env.ubuntu-ver-str }}_nightly
+          asset_name: EdgeSlicer_profile_validator_Linux${{ env.ubuntu-ver-str }}_nightly
           asset_content_type: application/octet-stream
           max_releases: 1
 

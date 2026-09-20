@@ -29,6 +29,51 @@ enum class SurfaceFeatureType : int {
 bool get_point_projection_to_plane(const Vec3d &pt, const Vec3d &plane_origin, const Vec3d &plane_normal, Vec3d &intersection_pt);
 Vec3d get_one_point_in_plane(const Vec3d &plane_origin, const Vec3d &plane_normal);
 
+// Ultra (Curve picks): how far a Curve pick's region-grow is allowed to spread from the seed facet.
+//  * step_deg   -- the largest normal turn tolerated across ONE shared edge. Growth always stops at a
+//                  sharper crease than this, so it is what makes a pick stop at a cut face's rim.
+//  * cap_deg    -- the largest total normal spread vs the SEED facet. <= 0 means "no total cap", i.e. the
+//                  smooth-shell pick: keep growing until a sharp edge stops it (the whole outer shell of a
+//                  half-cut sphere is one curve).
+//  * max_facets -- hard bound so hover-time picking stays cheap.
+// The defaults reproduce the pre-2026-09 hard-coded behaviour exactly (8 deg / 20 deg / 20000 facets).
+struct CurvePickParams
+{
+    float  step_deg{8.0f};
+    float  cap_deg{20.0f};
+    size_t max_facets{20000};
+
+    bool   capped() const { return cap_deg > 0.0f; }
+    static CurvePickParams smooth_shell(float step_deg_ = 8.0f, size_t max_facets_ = size_t(-1))
+        { CurvePickParams p; p.step_deg = step_deg_; p.cap_deg = -1.0f; p.max_facets = max_facets_; return p; }
+};
+
+// Ultra (Curve mates): the analytic surface a picked patch is best described by. `Plane` keeps the
+// legacy (mean normal, centroid) mate; `Cylinder` reports axis + radius; `Sphere` reports centre + radius
+// (so curve-to-curve on two hemispheres can align centres and report a radii mismatch).
+enum class PatchShape : int { Plane = 0, Cylinder = 1, Sphere = 2 };
+
+struct PatchFit
+{
+    PatchShape shape{PatchShape::Plane};
+    bool   ok{false};
+    Vec3d  centre{Vec3d::Zero()};   // sphere centre, or a point on the cylinder axis
+    Vec3d  axis{Vec3d::UnitZ()};    // cylinder axis (unit); unused for a sphere
+    double radius{0.0};
+    double residual{0.0};           // RMS distance of the sampled points from the fitted surface, mm
+    double rel_residual{0.0};       // residual / radius -- the scale-free quality used to choose the shape
+};
+
+// Least-squares fit of a cylinder (axis + radius) to the vertices of `facets`. The axis is taken from the
+// patch's normal covariance (for a cylinder the normals span a plane whose own normal IS the axis), then
+// centre and radius come from a linear circle fit of the points projected across that axis.
+PatchFit fit_cylinder_to_patch(const indexed_triangle_set& its, const std::vector<int>& facets);
+// Least-squares sphere fit (the standard linear system for centre + radius) over the same vertices.
+PatchFit fit_sphere_to_patch(const indexed_triangle_set& its, const std::vector<int>& facets);
+// Both of the above; returns whichever has the smaller relative residual, or a Plane fit when neither
+// describes the patch (rel_residual above `max_rel_residual`, e.g. a genuinely flat pick).
+PatchFit fit_patch(const indexed_triangle_set& its, const std::vector<int>& facets, double max_rel_residual = 0.05);
+
 class SurfaceFeature
 {
 public:
@@ -141,7 +186,8 @@ public:
     // Ultra: `snap_radius` (mesh units, view-scaled by the caller) overrides the fixed 0.5 mm hover limit
     // and enables direct VERTEX picking from the hit facet; < 0 keeps the legacy fixed-radius behaviour.
     // `pick_kind`: 0 = legacy features, 1 = the hit facet as a Triangle, 2 = a low-curvature patch as a Curve.
-    std::optional<SurfaceFeature> get_feature(size_t face_idx, const Vec3d& point, const Transform3d & world_tran,bool only_select_plane, double snap_radius = -1.0, int pick_kind = 0) const;
+    // `curve_params` tunes the pick_kind == 2 region-grow only; its default reproduces the legacy 8/20 grow.
+    std::optional<SurfaceFeature> get_feature(size_t face_idx, const Vec3d& point, const Transform3d & world_tran,bool only_select_plane, double snap_radius = -1.0, int pick_kind = 0, const CurvePickParams& curve_params = CurvePickParams()) const;
 
     // Return total number of planes.
     int get_num_of_planes() const;

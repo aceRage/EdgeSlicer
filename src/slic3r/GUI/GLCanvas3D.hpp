@@ -5,6 +5,7 @@
 #include <memory>
 #include <chrono>
 #include <cstdint>
+#include <set>
 
 #include "GLToolbar.hpp"
 #include "Event.hpp"
@@ -339,7 +340,6 @@ class GLCanvas3D
 
         bool dragging;
         Vec2d position;
-        Vec3d scene_position;
         Drag drag;
         bool ignore_left_up;
         bool ignore_right_up;
@@ -582,6 +582,8 @@ private:
     //BBS:add plate related logic
     mutable std::vector<int> m_hover_volume_idxs;
     std::vector<int> m_hover_plate_idxs;
+    // Ultra: this frame's "Hide other plates while moving" exemption set (render state only).
+    std::set<int> m_plate_focus_visible_plates;
     //BBS if explosion_ratio is changed, need to update volume bounding box
     mutable float m_explosion_ratio = 1.0;
     mutable Vec3d m_rotation_center{ 0.0, 0.0, 0.0};
@@ -779,6 +781,14 @@ public:
     bool has_object_view_modes() const { return !m_object_view_modes.empty(); }
     void clear_object_view_modes();
     void apply_object_view_modes();
+    // Ultra: "Hide other plates while moving". Recomputed from scratch every frame in render():
+    // it is pure render state, never stored on the model, never pushed onto the undo stack.
+    // Returns true when the plate list should draw only the plate being worked on.
+    bool apply_plate_focus_hide();
+    void clear_plate_focus_hide();
+    // Plates exempt from this frame's "Hide other plates while moving": the plate being worked
+    // on plus any plate holding part of the selection. Empty when the feature is not active.
+    const std::set<int>& get_plate_focus_visible_plates() const { return m_plate_focus_visible_plates; }
     ModelInstanceEPrintVolumeState check_volumes_outside_state() const;
     bool is_all_plates_selected() { return m_sel_plate_toolbar.m_all_plates_stats_item && m_sel_plate_toolbar.m_all_plates_stats_item->selected; }
     const float get_scale() const;
@@ -791,6 +801,9 @@ public:
     void update_gcode_sequential_view_current(unsigned int first, unsigned int last) { m_gcode_viewer.update_sequential_view_current(first, last); }
 
     void toggle_selected_volume_visibility(bool selected_visible);
+    // Re-apply GLVolume::is_active onto the Volume picking raycasters (they are registered once per
+    // reload_scene() and go stale whenever is_active is flipped on its own).
+    void sync_volume_raycasters_state();
     void toggle_sla_auxiliaries_visibility(bool visible, const ModelObject* mo = nullptr, int instance_idx = -1);
     void toggle_model_objects_visibility(bool visible, const ModelObject* mo = nullptr, int instance_idx = -1, const ModelVolume* mv = nullptr);
     void update_instance_printable_state_for_object(size_t obj_idx);
@@ -834,6 +847,7 @@ public:
     void set_color_clip_plane_colors(const std::array<ColorRGBA, 2>& colors) { m_volumes.set_color_clip_plane_colors(colors); }
     void set_color_clip_plane_alphas(float side_1, float side_2) { m_volumes.set_color_clip_plane_alphas(side_1, side_2); }
     void set_curved_color_clip(unsigned int tex, const Transform3d& world_to_plane, double half_size_u, double half_size_v, double range = 0.) { m_volumes.set_curved_color_clip(tex, world_to_plane, half_size_u, half_size_v, range); }
+    void set_draw_color_clip(unsigned int tex, const Transform3d& world_to_plane, const Vec3d& origin, const Vec3d& size) { m_volumes.set_draw_color_clip(tex, world_to_plane, origin, size); }
 
     void set_show_world_axes(bool flag) { m_show_world_axes = flag; }
     void refresh_camera_scene_box();
@@ -1227,7 +1241,7 @@ private:
     void _render_background();
     void _render_bed(const Transform3d& view_matrix, const Transform3d& projection_matrix, bool bottom, bool show_axes);
     //BBS: add part plate related logic
-    void _render_platelist(const Transform3d& view_matrix, const Transform3d& projection_matrix, bool bottom, bool only_current, bool only_body = false, int hover_id = -1, bool render_cali = false, bool show_grid = true);
+    void _render_platelist(const Transform3d& view_matrix, const Transform3d& projection_matrix, bool bottom, bool only_current, bool only_body = false, int hover_id = -1, bool render_cali = false, bool show_grid = true, const std::set<int>& visible_plates = std::set<int>());
     //BBS: add outline drawing logic
     void _render_objects(GLVolumeCollection::ERenderType type, bool with_outline = true);
     //BBS: GUI refactor: add canvas size as parameters

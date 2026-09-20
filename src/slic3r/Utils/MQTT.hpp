@@ -8,6 +8,9 @@
 #include <boost/log/trivial.hpp>
 #include <memory>
 #include <atomic>
+#include <cstddef>
+#include <mutex>
+#include <utility>
 #include <boost/filesystem.hpp>
 
 // Number of retries for connection and subscription attempts
@@ -52,7 +55,11 @@ class MqttClient : public mqtt::callback,
                   public virtual mqtt::iaction_listener,
                   public std::enable_shared_from_this<MqttClient>
 {
-public:
+private:
+    // The constructors are private on purpose: MqttClient::create() below is the
+    // only way to build a client, so every instance has its self_ populated.
+    // connection_lost() arms auto-reconnect from self_; a client built with a
+    // raw `new MqttClient(...)` (or make_shared) would silently never reconnect.
     // normal MQTT connect 
     MqttClient(const std::string& server_address,
                const std::string& client_id,
@@ -69,6 +76,21 @@ public:
                const std::string& username = "",
                const std::string& password = "",
                bool clean_session = false);
+
+public:
+    // Factory: the supported way to create a MqttClient. It caches the
+    // client's own weak reference (self_) exactly when shared ownership is
+    // established, so Paho callbacks can arm the reconnect checker from the
+    // cached weak_ptr instead of calling shared_from_this() — which throws
+    // bad_weak_ptr once the last owner has started destruction (and always
+    // threw for raw `new`-ed clients).
+    template<typename... Args>
+    static std::shared_ptr<MqttClient> create(Args&&... args) {
+        std::shared_ptr<MqttClient> p(new MqttClient(std::forward<Args>(args)...));
+        p->self_ = p;
+        register_live(p);
+        return p;
+    }
 
     // Destructor
     ~MqttClient();
@@ -91,9 +113,16 @@ public:
     // Set callback for handling incoming messages
     void SetMessageCallback(std::function<void(const std::string& topic, const std::string& payload)> callback);
     void SetMessageCallback(std::function<void(const std::string& topic, const std::string& payload, void* this_)> callback);
+    // Resolves ambiguity of SetMessageCallback(nullptr) between the two overloads above
+    void SetMessageCallback(std::nullptr_t) {
+        std::lock_guard<std::mutex> lock(cb_mtx_);
+        message_callback_  = nullptr;
+        message_callback1_ = nullptr;
+    }
 
     //  add set connect callback
     void SetConnectionFailureCallback(std::function<void()> callback) {
+        std::lock_guard<std::mutex> lock(cb_mtx_);
         connection_failure_callback_ = callback;
     }
 
@@ -110,25 +139,94 @@ public:
     // Check if client is currently connected
     bool CheckConnected();
 
+    // Re-establish the session on a worker thread, e.g. after the PC woke from
+    // sleep. A no-op for a client the owner never connected or has since
+    // disconnected, and while an earlier reconnect_now() is still at work.
+    // Otherwise the session is always bounced (disconnect + connect): after a
+    // sleep Paho can still believe the socket is up when it is dead, and its
+    // own reconnect() does nothing while it believes that. Connect attempts
+    // repeat at MqttReconnectPolicy::RESUME_RETRY_MS for GIVE_UP_AFTER_MS; only
+    // when that window closes does the connection-failure callback fire.
+    void reconnect_now(const std::string& reason);
+
+    // reconnect_now() on every client built by create() that is still owned.
+    // Returns how many were asked. Called by the main frame on system resume.
+    static size_t reconnect_all_live(const std::string& reason);
+    static size_t live_client_count();
+
     std::string get_client_id() {return client_id_;}
 private:
+    // The registry of live clients: weak_ptrs populated by create(), pruned by
+    // ~MqttClient, so a system-resume trigger can reach every open session.
+    static void register_live(const std::shared_ptr<MqttClient>& client);
+    static void unregister_live(const MqttClient* client);
+
+    // The bounce half of reconnect_now(): Disconnect() minus the "the owner
+    // wants this session gone" bookkeeping, so a resume never revives a client
+    // its owner had closed on purpose.
+    bool do_disconnect(std::string& msg);
+
+    // Fires connection_failure_callback_ (copied under cb_mtx_, invoked outside
+    // it) at most once per outage; connected() and Connect() re-arm it.
+    void report_connection_failure();
+
+    // Sleeps `ms` in short slices, returning early (false) once the watch says
+    // stop, so a checker thread never outlives the destructor's wait.
+    struct ReconnectWatch;
+    static bool sleep_unless_stopped(const std::shared_ptr<ReconnectWatch>& watch, long long ms);
+    // True once teardown has begun (tearing_down_ or the watch's stop flag):
+    // re-checked by the loops immediately before Disconnect() and
+    // report_connection_failure(), so a give-up that lands during teardown
+    // does nothing.
+    static bool stopping(const MqttClient& self, const ReconnectWatch& watch);
     std::string server_address_;     // MQTT broker address
     std::string client_id_;          // Unique client identifier
     std::unique_ptr<mqtt::async_client> client_;      // Async MQTT client instance
+    // Guards message_callback_ / message_callback1_ / connection_failure_callback_,
+    // which are read on the Paho callback threads and written from owner threads
+    // (including being nulled at the start of ~MqttClient).
+    mutable std::mutex cb_mtx_;
     std::function<void(const std::string& topic, const std::string& payload)> message_callback_;  // Message handler
     std::function<void(const std::string& topic, const std::string& payload, void* this_)> message_callback1_;  // Message handler
 
     mqtt::connect_options connOpts_; // Connection options
     std::atomic<bool> connected_;    // Connection status flag
+    mutable std::mutex topics_mtx_;  // Guards topics_to_resubscribe_
     std::map<std::string, int> topics_to_resubscribe_;  // Topics to resubscribe after reconnection
     action_listener subListener_;    // Subscription listener
     int connect_retry_time_;         // Connection retry counter
     int subscribe_retry_time_;       // Subscription retry counter
     std::function<void()> connection_failure_callback_; 
 
-    std::atomic<bool> is_reconnecting; 
-    std::atomic<int> pending_reconnect_checks;  
-    std::atomic<bool> ever_connected_;  
+    // True while a lost-session watcher thread is supervising an outage.
+    // Cleared by connected(), by Disconnect() and by reconnect_now() (which
+    // takes the outage over); the watcher stands down when it sees it clear.
+    std::atomic<bool> is_reconnecting;
+    // The detached checker threads' bookkeeping, shared with them by
+    // shared_ptr so it outlives the client: pending_reconnect_checks counts
+    // the threads still alive (the destructor waits for it to reach zero) and
+    // stop tells them to leave without touching the client again.
+    struct ReconnectWatch {
+        std::atomic<int>  pending_reconnect_checks{0};
+        std::atomic<bool> stop{false};
+    };
+    std::shared_ptr<ReconnectWatch> watch_;
+    std::atomic<bool> ever_connected_;
+    // The owner's intent: set by Connect(), cleared by Disconnect(). A resume
+    // only bounces clients whose owner still wants them up.
+    std::atomic<bool> wants_connection_{false};
+    // True while a reconnect_now() worker owns the outage: connection_lost()
+    // starts no watcher and a failed connect attempt fires no failure callback.
+    std::atomic<bool> manual_reconnect_active_{false};
+    // The failure callback has been fired for the current outage.
+    std::atomic<bool> failure_reported_{false};
+    // Set as the very first step of ~MqttClient. Paho callbacks (esp.
+    // connection_lost) check it before touching any other member.
+    std::atomic<bool> tearing_down_{false};
+    // Cached by create() while the client is owned; connection_lost() reads
+    // this instead of calling shared_from_this() (which throws bad_weak_ptr
+    // once the last owner has started destruction).
+    std::weak_ptr<MqttClient> self_;
 
     // tmp path
     boost::filesystem::path temp_ca_path_;

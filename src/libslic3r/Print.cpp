@@ -709,7 +709,14 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
         "long_retractions_when_cut",
         "retraction_distances_when_cut",
         "filament_long_retractions_when_cut",
-        "filament_retraction_distances_when_cut"
+        "filament_retraction_distances_when_cut",
+        // Edge: layer-time speed smoothing (G-code export only; no reslice).
+        "layer_time_speed_smoothing",
+        "layer_time_speed_max_variation",
+        "layer_time_speed_max_speedup",
+        "layer_time_speed_max_slowdown",
+        "layer_time_speed_max_time_increase",
+        "layer_time_speed_slowdown_scope"
     };
 
     static std::unordered_set<std::string> steps_ignore;
@@ -763,7 +770,10 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
             // Spiral Vase forces different kind of slicing than the normal model:
             // In Spiral Vase mode, holes are closed and only the largest area contour is kept at each layer.
             // Therefore toggling the Spiral Vase on / off requires complete reslicing.
-            || opt_key == "spiral_mode") {
+            || opt_key == "spiral_mode"
+            // Which of two overlapping parts carves the other is decided inside
+            // slices_to_regions(), so toggling it has to re-slice the object.
+            || opt_key == "enable_order_independent_overlap_carving") {
             osteps.emplace_back(posSlice);
         } else if (
                opt_key == "print_sequence"
@@ -805,6 +815,9 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
             || opt_key == "first_layer_print_sequence"
             || opt_key == "other_layers_print_sequence"
             || opt_key == "other_layers_print_sequence_nums" 
+            || opt_key == "toolchange_ordering"
+            || opt_key == "toolchange_cyclic_order"
+            || opt_key == "toolchange_cyclic_first_layer" 
             || opt_key == "wipe_tower_bridging"
             || opt_key == "wipe_tower_extra_flow"
             || opt_key == "wipe_tower_no_sparse_layers"

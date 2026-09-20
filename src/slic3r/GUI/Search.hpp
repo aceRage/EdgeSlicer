@@ -133,6 +133,9 @@ public:
     const FoundOption &operator[](const size_t pos) const noexcept { return found[pos]; }
     const Option &     get_option(size_t pos_in_filter) const;
     const Option &     get_option(const std::string &opt_key, Preset::Type type) const;
+    // Orca #15472: variant_index is -1 for a scalar, >=0 for an indexed vector entry,
+    // and -2 when the key is absent from the search index (empty Option, no options[0] fallback).
+    const Option &     get_option(const std::string &opt_key, Preset::Type type, int &variant_index) const;
     Option             get_option(const std::string &opt_key, const wxString &label, Preset::Type type) const;
 
     const std::vector<FoundOption> &found_options() { return found; }

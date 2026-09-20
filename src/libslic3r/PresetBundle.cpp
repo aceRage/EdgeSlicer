@@ -1,6 +1,7 @@
 #include <cassert>
 
 #include "PresetBundle.hpp"
+#include "StartupProfile.hpp"
 #include "FilamentColorLibrary.hpp"
 #include "PrintConfig.hpp"
 #include "libslic3r.h"
@@ -13,8 +14,15 @@
 #include <chrono>
 #include <cctype>
 #include <cstdlib>
+#include <atomic>
+#include <thread>
+#include <exception>
+#include <filesystem>
+#include <memory>
 #include <set>
 #include <fstream>
+#include <tbb/parallel_for.h>
+#include <tbb/blocked_range.h>
 #include <unordered_map>
 #include <unordered_set>
 #include <boost/filesystem.hpp>
@@ -37,26 +45,6 @@
 namespace Slic3r {
 
 namespace {
-
-bool startup_profile_enabled()
-{
-    static const bool enabled = [] {
-        const char* value = std::getenv("ORCA_STARTUP_PROFILE");
-        if (value == nullptr)
-            return false;
-
-        std::string normalized(value);
-        std::transform(normalized.begin(), normalized.end(), normalized.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-        return normalized == "1" || normalized == "true" || normalized == "yes" || normalized == "on";
-    }();
-    return enabled;
-}
-
-void startup_profile_log(const std::string& message)
-{
-    if (startup_profile_enabled())
-        BOOST_LOG_TRIVIAL(warning) << "[StartupProfile] " << message;
-}
 
 std::vector<std::string> SplitPrinterSetting(const AppConfig &config, const std::string &printerName, const std::string &key)
 {
@@ -176,6 +164,26 @@ void EraseFilamentColorFields(DynamicPrintConfig &config, size_t index)
     EraseStringOptionAt(config, "filament_multi_colors", index);
     EraseIntOptionAt(config, "filament_colour_mode", index);
     EnsureFilamentColorFieldsAligned(config);
+}
+
+// Clamp mixed_filament_definitions in project (and optional print) config to the
+// current physical slot count. Orphan tails that reference IDs beyond that count
+// are discarded so a later grow cannot resurrect them as phantom mixed rows.
+void normalize_mixed_filament_definitions(DynamicPrintConfig &project_config,
+                                          DynamicPrintConfig *print_cfg,
+                                          size_t              physical_count)
+{
+    auto clamp_opt = [physical_count](DynamicPrintConfig &cfg) {
+        if (ConfigOptionString *opt = cfg.option<ConfigOptionString>("mixed_filament_definitions")) {
+            const std::string clamped =
+                MixedFilamentManager::clamp_serialized_entries_to_physical_count(opt->value, physical_count);
+            if (clamped != opt->value)
+                opt->value = clamped;
+        }
+    };
+    clamp_opt(project_config);
+    if (print_cfg != nullptr)
+        clamp_opt(*print_cfg);
 }
 
 } // namespace
@@ -411,6 +419,16 @@ void PresetBundle::copy_files(const std::string& from)
     }
 }
 
+void PresetBundle::set_progress_callback(ProgressCallback cb)
+{
+    // The user-preset phase does its file walking inside the collections, so they need the hook
+    // as well; the system-preset phase ticks from this class directly.
+    prints.set_progress_callback(cb);
+    filaments.set_progress_callback(cb);
+    printers.set_progress_callback(cb);
+    m_progress_callback = std::move(cb);
+}
+
 PresetsConfigSubstitutions PresetBundle::load_presets(AppConfig &config, ForwardCompatibilitySubstitutionRule substitution_rule,
                                                       const PresetPreferences& preferred_selection/* = PresetPreferences()*/)
 {
@@ -450,10 +468,19 @@ PresetsConfigSubstitutions PresetBundle::load_presets(AppConfig &config, Forward
         phase_start = now;
     }
 
-    this->update_multi_material_filament_presets();
-    this->update_compatible(PresetSelectCompatibleType::Never);
+    {
+        StartupScopedTimer t("PresetBundle::load_presets step=update_multi_material_filament_presets");
+        this->update_multi_material_filament_presets();
+    }
+    {
+        StartupScopedTimer t("PresetBundle::load_presets step=update_compatible");
+        this->update_compatible(PresetSelectCompatibleType::Never);
+    }
 
-    this->load_selections(config, preferred_selection);
+    {
+        StartupScopedTimer t("PresetBundle::load_presets step=load_selections");
+        this->load_selections(config, preferred_selection);
+    }
     if (startup_profile) {
         const auto now = std::chrono::steady_clock::now();
         startup_profile_log("PresetBundle::load_presets step=post_load_selection step_ms=" +
@@ -830,8 +857,14 @@ PresetsConfigSubstitutions PresetBundle::load_user_presets(std::string user, For
         errors_cummulative += err.what();
     }
     if (!errors_cummulative.empty()) throw Slic3r::RuntimeError(errors_cummulative);
-    this->update_multi_material_filament_presets();
-    this->update_compatible(PresetSelectCompatibleType::Never);
+    {
+        StartupScopedTimer t("PresetBundle::load_user_presets step=update_multi_material_filament_presets");
+        this->update_multi_material_filament_presets();
+    }
+    {
+        StartupScopedTimer t("PresetBundle::load_user_presets step=update_compatible");
+        this->update_compatible(PresetSelectCompatibleType::Never);
+    }
 
     set_calibrate_printer("");
 
@@ -1439,49 +1472,158 @@ std::pair<PresetsConfigSubstitutions, std::string> PresetBundle::load_system_pre
         }
     }
 
-    for (auto &vendor_name : vendor_names)
-    {
-        const auto vendor_start = std::chrono::steady_clock::now();
-        if (validation_mode && !vendor_to_validate.empty() && vendor_name != vendor_to_validate && vendor_name != ORCA_FILAMENT_LIBRARY)
-            continue;
-
+    // The vendors are loaded in two stages so the parse work can go wide while the
+    // observable result stays byte-identical to the old sequential loop.
+    //
+    // Stage A - the first vendor (always ORCA_FILAMENT_LIBRARY, swapped to the front
+    // above) is loaded straight into *this*, sequentially. It is the one vendor that
+    // MUST go first: it fills this->m_config_maps / m_filament_id_maps, the shared
+    // base every later vendor resolves its "inherits" against.
+    //
+    // Stage B - every remaining vendor is parsed into its own fresh PresetBundle, which
+    // is exactly what the old loop did per iteration ("PresetBundle other"). Those
+    // parses never touch each other: a worker writes only into its own bundle, and the
+    // only thing it reads from *this* is the already-complete, no-longer-written
+    // m_config_maps of stage A. So they can run in parallel.
+    //
+    // Stage C - the loaded bundles are merged into *this* one at a time, in the original
+    // vendor order, by the same merge_presets call the old loop used. Preset ordering,
+    // duplicate reporting, substitution order and m_errors accumulation are therefore
+    // unchanged; only the parsing overlaps.
+    //
+    // A per-vendor progress callback still has a natural home: stage C runs on the
+    // calling thread, once per vendor, in order - see the commit-time hook below.
+    auto load_one_vendor_into = [&](PresetBundle &target, const std::string &vendor_name,
+                                    PresetBundle *base) -> std::pair<PresetsConfigSubstitutions, std::string> {
+        PresetsConfigSubstitutions vendor_substitutions;
+        std::string                vendor_error;
         try {
-            // Load the config bundle, flatten it.
-            if (first) {
-                // Reset this PresetBundle and load the first vendor config.
-                append(substitutions, this->load_vendor_configs_from_json(dir.string(), vendor_name, PresetBundle::LoadSystem, compatibility_rule).first);
-                first = false;
-            } else {
-                // Load the other vendor configs, merge them with this PresetBundle.
-                // Report duplicate profiles.
-                PresetBundle other;
-                append(substitutions, other.load_vendor_configs_from_json(dir.string(), vendor_name, PresetBundle::LoadSystem, compatibility_rule, this).first);
-                std::vector<std::string> duplicates = this->merge_presets(std::move(other));
-                if (!duplicates.empty()) {
-                    errors_cummulative += "Found duplicated settings in vendor " + vendor_name + "'s json file lists: ";
-                    for (size_t i = 0; i < duplicates.size(); ++i) {
-                        if (i > 0)
-                            errors_cummulative += ", ";
-                        errors_cummulative += duplicates[i];
-                        ++m_errors;
-                        BOOST_LOG_TRIVIAL(error) << "Found duplicated preset: " + duplicates[i] + " in vendor: " + vendor_name + ": ";
-                    }
-                }
-            }
+            append(vendor_substitutions,
+                   target.load_vendor_configs_from_json(dir.string(), vendor_name, PresetBundle::LoadSystem, compatibility_rule, base).first);
         } catch (const std::runtime_error &err) {
             if (validation_mode)
-                throw err;
-            else {
-                errors_cummulative += err.what();
-                errors_cummulative += "\n";
+                throw;
+            vendor_error = std::string(err.what()) + "\n";
+        }
+        return std::make_pair(std::move(vendor_substitutions), std::move(vendor_error));
+    };
+
+    // Vendors this run actually loads, in the original order.
+    std::vector<std::string> loaded_vendors;
+    loaded_vendors.reserve(vendor_names.size());
+    for (const auto &vendor_name : vendor_names) {
+        if (validation_mode && !vendor_to_validate.empty() && vendor_name != vendor_to_validate && vendor_name != ORCA_FILAMENT_LIBRARY)
+            continue;
+        loaded_vendors.push_back(vendor_name);
+    }
+
+    std::vector<long long> vendor_ms(loaded_vendors.size(), 0);
+
+    // Stage A: the base vendor, into *this*.
+    if (!loaded_vendors.empty()) {
+        const auto vendor_start = std::chrono::steady_clock::now();
+        notify_progress();
+        auto       result       = load_one_vendor_into(*this, loaded_vendors.front(), nullptr);
+        append(substitutions, std::move(result.first));
+        errors_cummulative += result.second;
+        first = false;
+        vendor_ms[0] = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - vendor_start).count();
+    }
+
+    // Stage B: the remaining vendors, in parallel, each into its own bundle.
+    const size_t                               parallel_count = loaded_vendors.empty() ? 0 : loaded_vendors.size() - 1;
+    std::vector<std::unique_ptr<PresetBundle>> pending(parallel_count);
+    std::vector<PresetsConfigSubstitutions>    pending_substitutions(parallel_count);
+    std::vector<std::string>                   pending_errors(parallel_count);
+    // A worker may throw in validation_mode; rethrow it on the calling thread, keeping
+    // the earliest vendor's exception so validation still fails on the same file.
+    std::vector<std::exception_ptr>            pending_exceptions(parallel_count);
+
+    if (parallel_count > 0) {
+        auto load_index = [&](size_t i) {
+            const auto vendor_start = std::chrono::steady_clock::now();
+            pending[i] = std::make_unique<PresetBundle>();
+            pending[i]->set_is_validation_mode(validation_mode);
+            pending[i]->set_vendor_to_validate(vendor_to_validate);
+            try {
+                auto result = load_one_vendor_into(*pending[i], loaded_vendors[i + 1], this);
+                pending_substitutions[i] = std::move(result.first);
+                pending_errors[i]        = std::move(result.second);
+            } catch (...) {
+                pending_exceptions[i] = std::current_exception();
+            }
+            vendor_ms[i + 1] = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - vendor_start).count();
+        };
+
+        // ORCA_PRESET_LOAD_SEQUENTIAL=1 forces the old one-vendor-at-a-time path. It
+        // exists so the parallel and sequential loads can be measured from the same
+        // binary, and as an escape hatch if a vendor tree ever turns out to misbehave
+        // under concurrency in the field. The two paths produce identical results by
+        // construction - stage C is the same either way.
+        static const bool force_sequential = [] {
+            const char *v = std::getenv("ORCA_PRESET_LOAD_SEQUENTIAL");
+            return v != nullptr && (std::string(v) == "1" || std::string(v) == "true");
+        }();
+
+        if (parallel_count == 1 || force_sequential) {
+            for (size_t i = 0; i < parallel_count; ++i)
+                load_index(i);
+        } else {
+            auto run_all = [&] {
+                tbb::parallel_for(tbb::blocked_range<size_t>(0, parallel_count, 1),
+                                  [&](const tbb::blocked_range<size_t> &range) {
+                                      for (size_t i = range.begin(); i != range.end(); ++i)
+                                          load_index(i);
+                                  });
+            };
+            if (m_progress_callback) {
+                // A GUI is animating a splash from the calling thread. parallel_for would
+                // conscript that thread as a worker and freeze the animation for the whole
+                // stage, so run the workers from a helper thread and keep pumping the hook
+                // here. The workers never call the hook: pending[] bundles have no callback.
+                std::atomic<bool> done{false};
+                std::thread       runner([&] { run_all(); done.store(true); });
+                while (!done.load()) {
+                    notify_progress();
+                    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+                }
+                runner.join();
+            } else {
+                run_all();
             }
         }
+    }
 
-        if (startup_profile) {
-            const auto vendor_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - vendor_start).count();
-            startup_profile_log("PresetBundle::load_system_presets_from_json vendor=" + vendor_name +
-                                " vendor_ms=" + std::to_string(vendor_ms));
+    // Stage C: merge in the original vendor order, on the calling thread.
+    for (size_t i = 0; i < parallel_count; ++i) {
+        const std::string &vendor_name = loaded_vendors[i + 1];
+        notify_progress();
+        if (pending_exceptions[i]) {
+            // validation_mode only - the sequential loop rethrew here too.
+            std::rethrow_exception(pending_exceptions[i]);
         }
+        append(substitutions, std::move(pending_substitutions[i]));
+        errors_cummulative += pending_errors[i];
+        if (!pending[i])
+            continue;
+        std::vector<std::string> duplicates = this->merge_presets(std::move(*pending[i]));
+        pending[i].reset();
+        if (!duplicates.empty()) {
+            errors_cummulative += "Found duplicated settings in vendor " + vendor_name + "'s json file lists: ";
+            for (size_t d = 0; d < duplicates.size(); ++d) {
+                if (d > 0)
+                    errors_cummulative += ", ";
+                errors_cummulative += duplicates[d];
+                ++m_errors;
+                BOOST_LOG_TRIVIAL(error) << "Found duplicated preset: " + duplicates[d] + " in vendor: " + vendor_name + ": ";
+            }
+        }
+    }
+
+    if (startup_profile) {
+        for (size_t i = 0; i < loaded_vendors.size(); ++i)
+            startup_profile_log("PresetBundle::load_system_presets_from_json vendor=" + loaded_vendors[i] +
+                                " vendor_ms=" + std::to_string(vendor_ms[i]));
     }
 
     if (first) {
@@ -2178,8 +2320,18 @@ void PresetBundle::update_num_filaments(unsigned int to_del_filament_id)
     update_multi_material_filament_presets(to_del_filament_id, old_filament_count);
 }
 
+size_t PresetBundle::num_physical_filaments() const
+{
+    if (const auto *colors = project_config.option<ConfigOptionStrings>("filament_colour")) {
+        if (!colors->values.empty())
+            return colors->values.size();
+    }
+    return filament_presets.size();
+}
+
 void PresetBundle::set_num_filaments(unsigned int n, std::vector<std::string> new_colors) {
-    int old_filament_count = this->filament_presets.size();
+    const unsigned old_filament_count = unsigned(this->filament_presets.size());
+    const size_t   old_slot_count     = this->num_physical_filaments();
     if (n > old_filament_count && old_filament_count != 0)
         filament_presets.resize(n, filament_presets.back());
     else {
@@ -2190,21 +2342,27 @@ void PresetBundle::set_num_filaments(unsigned int n, std::vector<std::string> ne
     ams_multi_color_filment.resize(n);
     EnsureFilamentColorFieldsAligned(project_config);
     // BBS set new filament color to new_color
-    if (old_filament_count < n) {
+    if (old_slot_count < n) {
         if (!new_colors.empty()) {
             ConfigOptionStrings *multi_colors = project_config.option<ConfigOptionStrings>("filament_multi_colors", true);
-            for (int i = old_filament_count; i < n; i++) {
-                filament_color->values[i] = new_colors[i - old_filament_count];
-                multi_colors->values[i] = new_colors[i - old_filament_count];
+            for (size_t i = old_slot_count; i < n; i++) {
+                filament_color->values[i] = new_colors[i - old_slot_count];
+                multi_colors->values[i] = new_colors[i - old_slot_count];
             }
             EnsureFilamentColorFieldsAligned(project_config);
         }
     }
-    update_multi_material_filament_presets(size_t(-1), size_t(old_filament_count));
+    // Palette may already have been written (batch-match / #866); presets still hold the old
+    // physical count and must drive remap. Otherwise colours are the configured slot count.
+    const size_t remap_old = (old_slot_count > old_filament_count && old_filament_count != 0)
+        ? size_t(old_filament_count)
+        : old_slot_count;
+    update_multi_material_filament_presets(size_t(-1), remap_old);
 }
 void PresetBundle::set_num_filaments(unsigned int n, std::string new_color)
 {
-    int old_filament_count = this->filament_presets.size();
+    const unsigned old_filament_count = unsigned(this->filament_presets.size());
+    const size_t   old_slot_count     = this->num_physical_filaments();
     if (n > old_filament_count && old_filament_count != 0)
         filament_presets.resize(n, filament_presets.back());
     else {
@@ -2217,10 +2375,10 @@ void PresetBundle::set_num_filaments(unsigned int n, std::string new_color)
     EnsureFilamentColorFieldsAligned(project_config);
 
     //BBS set new filament color to new_color
-    if (old_filament_count < n) {
+    if (old_slot_count < n) {
         if (!new_color.empty()) {
             ConfigOptionStrings *multi_colors = project_config.option<ConfigOptionStrings>("filament_multi_colors", true);
-            for (int i = old_filament_count; i < n; i++) {
+            for (size_t i = old_slot_count; i < n; i++) {
                 filament_color->values[i] = new_color;
                 multi_colors->values[i] = new_color;
             }
@@ -2228,7 +2386,10 @@ void PresetBundle::set_num_filaments(unsigned int n, std::string new_color)
         }
     }
 
-    update_multi_material_filament_presets(size_t(-1), size_t(old_filament_count));
+    const size_t remap_old = (old_slot_count > old_filament_count && old_filament_count != 0)
+        ? size_t(old_filament_count)
+        : old_slot_count;
+    update_multi_material_filament_presets(size_t(-1), remap_old);
 }
 
 unsigned int PresetBundle::sync_ams_list(unsigned int &unknowns)
@@ -3025,6 +3186,12 @@ void PresetBundle::load_config_file_config(const std::string &name_or_path, bool
         // 4) Load the project config values (the per extruder wipe matrix etc).
         this->project_config.apply_only(config, s_project_options);
         EnsureFilamentColorFieldsAligned(this->project_config);
+        // Older projects can carry mixed_filament_definitions that no longer match the
+        // physical colour slots (short, missing, or a stale tail from a larger slot count).
+        // Clamp now so a later add-filament grow cannot resurrect orphan mixed rows.
+        normalize_mixed_filament_definitions(this->project_config,
+                                             &this->prints.get_edited_preset().config,
+                                             num_filaments);
 
         break;
     }
@@ -3248,6 +3415,10 @@ std::pair<PresetsConfigSubstitutions, size_t> PresetBundle::load_vendor_configs_
     //2) paste the machine model
     for (auto& machine_model : machine_model_subfiles)
     {
+        // One tick per preset file. This is the finest granularity the loader offers and the
+        // only thing that keeps a splash animation moving through this phase (no event loop runs
+        // here); the callback itself decides how often it actually repaints.
+        notify_progress();
         std::string subfile = path + "/" + vendor_name + "/" + machine_model.second;
         VendorProfile::PrinterModel model;
         model.id = machine_model.first;
@@ -3345,7 +3516,16 @@ std::pair<PresetsConfigSubstitutions, size_t> PresetBundle::load_vendor_configs_
     PresetCollection         *presets = nullptr;
     size_t                   presets_loaded = 0;
 
-    auto parse_subfile = [this, path, vendor_name, presets_loaded, current_vendor_profile, base_bundle](
+    // Startup profiling buckets: where the per-preset time actually goes.
+    //   json_ns      - reading + nlohmann parse + set_deserialize of every key (ConfigBase::load_from_json)
+    //   inherit_ns   - resolving "inherits", copying the parent config and applying the delta
+    //   validate_ns  - Preset::normalize + remove_invalid_keys + printer model/variant checks
+    //   store_ns     - load_preset into the collection and the config_maps copy kept for children
+    long long prof_json_ns = 0, prof_inherit_ns = 0, prof_validate_ns = 0, prof_store_ns = 0;
+    const bool prof_on = startup_profile;
+
+    auto parse_subfile = [this, path, vendor_name, presets_loaded, current_vendor_profile, base_bundle,
+                          prof_on, &prof_json_ns, &prof_inherit_ns, &prof_validate_ns, &prof_store_ns](
         ConfigSubstitutionContext& substitution_context,
         PresetsConfigSubstitutions& substitutions,
         LoadConfigBundleAttributes& flags,
@@ -3353,7 +3533,10 @@ std::pair<PresetsConfigSubstitutions, size_t> PresetBundle::load_vendor_configs_
         std::map<std::string, DynamicPrintConfig>& config_maps,
         std::map<std::string, std::string>& filament_id_maps,
         PresetCollection* presets_collection,
-        size_t& count, bool is_from_lib = false) -> std::string {
+        size_t& count, bool is_from_lib = false,
+        // Pre-parsed document for this subfile, when the section was parsed ahead in
+        // parallel. Null means "parse it here", which is what the non-bundle callers do.
+        json* predoc = nullptr) -> std::string {
 
         std::string subfile = path + "/" + vendor_name + "/" + subfile_iter.second;
         // Load the print, filament or printer preset.
@@ -3370,7 +3553,14 @@ std::pair<PresetsConfigSubstitutions, size_t> PresetBundle::load_vendor_configs_
             //parse the json elements
             DynamicPrintConfig config_src;
             std::string _renamed_from_str;
-            config_src.load_from_json(subfile, substitution_context, false, key_values, reason);
+            const auto prof_t0 = prof_on ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+            if (predoc != nullptr)
+                // Parsed already, on a worker thread - only the deserialization is left.
+                config_src.load_from_json_document(subfile, *predoc, substitution_context, false, key_values, reason);
+            else
+                config_src.load_from_json(subfile, substitution_context, false, key_values, reason);
+            if (prof_on)
+                prof_json_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - prof_t0).count();
             if (!reason.empty()) {
                 ++m_errors;
                 BOOST_LOG_TRIVIAL(error) << __FUNCTION__<< ": load config file "<<subfile<<" Failed!";
@@ -3447,8 +3637,11 @@ std::pair<PresetsConfigSubstitutions, size_t> PresetBundle::load_vendor_configs_
                 else
                     default_config = &presets_collection->default_preset().config;
             }
+            const auto prof_t1 = prof_on ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
             config = *default_config;
             config.apply(config_src);
+            if (prof_on)
+                prof_inherit_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - prof_t1).count();
             if (instantiation == "false" && "Template" != vendor_name) {
                 config_maps.emplace(preset_name, std::move(config));
                 if ((presets_collection->type() == Preset::TYPE_FILAMENT) && (!filament_id.empty()))
@@ -3464,7 +3657,10 @@ std::pair<PresetsConfigSubstitutions, size_t> PresetBundle::load_vendor_configs_
                                              << "\" contains invalid \"renamed_from\" key, which is being ignored.";
                 }
             }
+            const auto prof_t2 = prof_on ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
             Preset::normalize(config);
+            if (prof_on)
+                prof_validate_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - prof_t2).count();
         }
         catch(nlohmann::detail::parse_error &err) {
             ++m_errors;
@@ -3474,7 +3670,10 @@ std::pair<PresetsConfigSubstitutions, size_t> PresetBundle::load_vendor_configs_
         }
 
         // Report configuration fields, which are misplaced into a wrong group.
+        const auto prof_t3 = prof_on ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
         std::string incorrect_keys = Preset::remove_invalid_keys(config, *default_config);
+        if (prof_on)
+            prof_validate_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - prof_t3).count();
         if (!incorrect_keys.empty()) {
             ++m_errors;
             BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ": The config " << subfile << " contains incorrect keys: " << incorrect_keys
@@ -3579,7 +3778,10 @@ std::pair<PresetsConfigSubstitutions, size_t> PresetBundle::load_vendor_configs_
             substitutions.push_back({
                 preset_name, presets_collection->type(), PresetConfigSubstitutions::Source::ConfigBundle,
                 std::string(), std::move(substitution_context.substitutions) });
+        const auto prof_t4 = prof_on ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
         config_maps.emplace(preset_name, loaded.config);
+        if (prof_on)
+            prof_store_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - prof_t4).count();
         ++count;
         //BBS: add config related logs
         BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << boost::format(", got preset %1%, from %2%")%loaded.name %subfile;
@@ -3588,14 +3790,246 @@ std::pair<PresetsConfigSubstitutions, size_t> PresetBundle::load_vendor_configs_
 
     std::map<std::string, DynamicPrintConfig> configs;
     std::map<std::string, std::string> filament_id_maps;
+
+    // Reading and json-parsing the preset files is ~98% of a vendor's load cost (the
+    // per-vendor "breakdown json_ms=" mark shows it), and unlike the rest of the loop it
+    // depends on nothing but the file on disk. So each section is parsed up front, all
+    // files at once, into a vector indexed by the section's own order; the loop that
+    // follows then walks that vector in exactly the original order and does the
+    // inheritance / validation / store work sequentially, as before.
+    //
+    // This is what lets a single big vendor go wide: BBL is 2474 filament files and was
+    // the critical path of the whole preset load even with the vendors parallelised
+    // against each other.
+    //
+    // Memory: only the parsed documents are held, never the raw file text - the ifstream
+    // is closed inside parse_json_document - and each document is released as soon as
+    // its preset has been built. A section's worth of parsed BBL filaments is a few tens
+    // of MB, transient.
+    static const bool force_sequential_parse = [] {
+        const char *v = std::getenv("ORCA_PRESET_LOAD_SEQUENTIAL");
+        return v != nullptr && (std::string(v) == "1" || std::string(v) == "true");
+    }();
+    static const bool preset_cache_enabled = [] {
+        const char *v = std::getenv("ORCA_PRESET_CACHE");
+        return !(v != nullptr && (std::string(v) == "0" || std::string(v) == "false"));
+    }();
+
+    // ---- per-vendor CBOR cache -------------------------------------------------
+    //
+    // The JSON tree on disk stays the single source of truth; this is only a parse
+    // accelerator. The cache holds the post-include-resolution documents for one
+    // vendor's three sections, in file order, next to the relative path each came from,
+    // so the sequential inheritance/validate/store loop runs over cached documents
+    // exactly as it runs over freshly parsed ones.
+    //
+    // Validity key: a hash over (relative path, size, last-write time) of every json file
+    // under the vendor directory, plus the app version and a cache format version. The
+    // timestamp is read through std::filesystem, whose file_time_type is 100 ns on
+    // Windows - boost::filesystem's last_write_time is whole seconds and would miss a
+    // same-size preset rewritten inside one second, which is what a profile update looks
+    // like. Any file added, removed or changed moves the key and the cache is rebuilt; a
+    // version bump invalidates every cache wholesale. Stat only, so the check costs a few
+    // milliseconds and does not re-read the tree. Writes are atomic (temp file + rename),
+    // any read or decode failure deletes the cache and falls back to parsing, so a
+    // corrupt or truncated cache can never wedge startup.
+    static const int  PRESET_CACHE_FORMAT_VERSION = 1;
+    const std::string vendor_dir_path             = path + "/" + vendor_name;
+    const boost::filesystem::path cache_file =
+        boost::filesystem::path(data_dir()) / "cache" / "presets" / (vendor_name + ".cbor");
+
+    // 64-bit FNV-1a over a byte range. A change detector, not a security primitive.
+    auto fnv1a = [](const unsigned char *data, size_t len, std::uint64_t h = 1469598103934665603ull) {
+        for (size_t i = 0; i < len; ++i) { h ^= data[i]; h *= 1099511628211ull; }
+        return h;
+    };
+
+    auto compute_cache_key = [&]() -> std::string {
+        // Key over (relative path, size, last-write time) - stat only, no file contents.
+        //
+        // The timestamp comes from std::filesystem, NOT boost::filesystem. That matters:
+        // boost's last_write_time returns a time_t, i.e. whole seconds, and a preset
+        // rewritten in place to the same length inside one second is then completely
+        // invisible to the key - which is exactly the shape of edit a profile update
+        // makes. std::filesystem::file_time_type on Windows is a FILETIME, 100 ns
+        // resolution, so two writes a millisecond apart already differ.
+        //
+        // An earlier revision hashed every file's contents to dodge that. It was correct
+        // but it read the whole preset tree on every launch, which cost more than it
+        // saved on a cache hit. Stat data is a few ms for the same tree.
+        namespace sfs = std::filesystem;
+        std::vector<sfs::path> files;
+        std::error_code        ec;
+        if (!sfs::exists(vendor_dir_path, ec))
+            return std::string();
+        for (sfs::recursive_directory_iterator it(vendor_dir_path, ec), end; it != end && !ec; it.increment(ec)) {
+            if (ec) break;
+            const sfs::path &p = it->path();
+            std::error_code  fec;
+            if (!sfs::is_regular_file(p, fec) || fec) continue;
+            if (!Slic3r::is_json_file(p.string())) continue;
+            files.push_back(p);
+        }
+        if (files.empty())
+            return std::string();
+        std::sort(files.begin(), files.end());
+
+        std::vector<std::string> entries(files.size());
+        std::atomic<bool>        failed{false};
+        tbb::parallel_for(tbb::blocked_range<size_t>(0, files.size()),
+                          [&](const tbb::blocked_range<size_t> &range) {
+                              for (size_t i = range.begin(); i != range.end(); ++i) {
+                                  std::error_code fec;
+                                  const auto sz = sfs::file_size(files[i], fec);
+                                  if (fec) { failed = true; return; }
+                                  const auto mt = sfs::last_write_time(files[i], fec);
+                                  if (fec) { failed = true; return; }
+                                  std::ostringstream es;
+                                  es << files[i].lexically_relative(vendor_dir_path).generic_string() << '|'
+                                     << static_cast<unsigned long long>(sz) << '|'
+                                     << static_cast<long long>(mt.time_since_epoch().count());
+                                  entries[i] = es.str();
+                              }
+                          });
+        if (failed)
+            return std::string(); // could not stat something: do not trust a cache for this vendor
+        std::string blob = std::string(Snapmaker_VERSION) + "|v" + std::to_string(PRESET_CACHE_FORMAT_VERSION) + "|";
+        for (const std::string &e : entries) { blob += e; blob += ';'; }
+        const std::uint64_t h = fnv1a(reinterpret_cast<const unsigned char *>(blob.data()), blob.size());
+        std::ostringstream os; os << std::hex << h << '-' << entries.size();
+        return os.str();
+    };
+
+    const auto        key_start = std::chrono::steady_clock::now();
+    const std::string cache_key = preset_cache_enabled ? compute_cache_key() : std::string();
+    const auto        key_ms    = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                      std::chrono::steady_clock::now() - key_start).count();
+    long long cbor_decode_ms = 0;
+    json              cache_root;                   // the loaded cache, when valid
+    bool              cache_hit = false;            // read a usable cache for this vendor
+    json              cache_out = json::object();   // sections collected for writing back
+
+    if (preset_cache_enabled && !cache_key.empty()) {
+        try {
+            boost::system::error_code ec;
+            if (boost::filesystem::exists(cache_file, ec) && !ec) {
+                boost::nowide::ifstream   ifs(cache_file.string(), std::ios::binary);
+                std::vector<std::uint8_t> bytes((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+                ifs.close();
+                if (!bytes.empty()) {
+                    const auto decode_start = std::chrono::steady_clock::now();
+                    cache_root = json::from_cbor(bytes);
+                    cbor_decode_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                         std::chrono::steady_clock::now() - decode_start).count();
+                    if (cache_root.is_object() && cache_root.value("key", std::string()) == cache_key)
+                        cache_hit = true;
+                }
+            }
+        } catch (const std::exception &err) {
+            BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": preset cache for " << vendor_name
+                                       << " could not be read (" << err.what() << "), rebuilding";
+            cache_hit = false;
+        }
+        if (!cache_hit) {
+            boost::system::error_code ec;
+            boost::filesystem::remove(cache_file, ec); // stale or unreadable: drop it
+            cache_root = json();
+        }
+    }
+
+    std::vector<json>        section_docs;
+    std::vector<std::string> section_parse_errors;
+
+    // Pre-parse (or restore from cache) one section's documents, in file order.
+    auto preparse_section = [&](const std::string &section_name,
+                                const std::vector<std::pair<std::string, std::string>> &subfiles) {
+        section_docs.clear();
+        section_parse_errors.clear();
+        if (subfiles.empty() || force_sequential_parse)
+            return;
+
+        // Cache hit: the stored section must line up with the file list we just built,
+        // in length and in the relative path of every entry. Anything else and we parse
+        // instead - the key should already have caught it; this is belt and braces.
+        if (cache_hit) {
+            auto sec = cache_root.find(section_name);
+            if (sec != cache_root.end() && sec->is_array() && sec->size() == subfiles.size()) {
+                bool aligned = true;
+                for (size_t i = 0; i < subfiles.size() && aligned; ++i) {
+                    const auto &entry = (*sec)[i];
+                    aligned = entry.is_object() && entry.value("path", std::string()) == subfiles[i].second;
+                }
+                if (aligned) {
+                    section_docs.resize(subfiles.size());
+                    section_parse_errors.resize(subfiles.size());
+                    for (size_t i = 0; i < subfiles.size(); ++i)
+                        section_docs[i] = (*sec)[i].at("doc");
+                    if (startup_profile)
+                        startup_profile_log("PresetBundle::load_vendor_configs_from_json vendor=" + vendor_name +
+                                            " section=" + section_name + " cache=hit docs=" + std::to_string(subfiles.size()));
+                    return;
+                }
+            }
+            BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": preset cache for " << vendor_name << "/" << section_name
+                                       << " did not line up with the file list, parsing instead";
+        }
+
+        section_docs.resize(subfiles.size());
+        section_parse_errors.resize(subfiles.size());
+        tbb::parallel_for(tbb::blocked_range<size_t>(0, subfiles.size()),
+                          [&](const tbb::blocked_range<size_t> &range) {
+                              for (size_t i = range.begin(); i != range.end(); ++i) {
+                                  const std::string file = vendor_dir_path + "/" + subfiles[i].second;
+                                  std::string       err;
+                                  if (ConfigBase::parse_json_document(file, section_docs[i], err) != 0)
+                                      section_parse_errors[i] = err;
+                              }
+                          });
+
+        // Collect this section for the cache, but only if every file parsed: a section
+        // holding a broken file is never cached, so its error is re-reported every run.
+        if (preset_cache_enabled && !cache_key.empty()) {
+            bool all_ok = true;
+            for (const std::string &e : section_parse_errors)
+                if (!e.empty()) { all_ok = false; break; }
+            if (all_ok) {
+                json arr = json::array();
+                for (size_t i = 0; i < subfiles.size(); ++i)
+                    arr.push_back(json{{"path", subfiles[i].second}, {"doc", section_docs[i]}});
+                cache_out[section_name] = std::move(arr);
+            } else {
+                cache_out[section_name] = nullptr; // marks the cache as incomplete
+            }
+        }
+    };
+    // Hand the sequential loop the pre-parsed doc for index i, or null when the section
+    // was not pre-parsed (escape hatch) or that file failed to parse - in which case the
+    // loop re-parses it and reports the error exactly as it always did.
+    auto doc_for = [&](size_t i) -> json * {
+        if (i >= section_docs.size() || !section_parse_errors[i].empty())
+            return nullptr;
+        return &section_docs[i];
+    };
+    // Release one parsed document once its preset has been built, so a section's peak
+    // memory is the parsed section, not the parsed section plus everything already
+    // consumed from it.
+    auto release_doc = [&](size_t i) {
+        if (i < section_docs.size())
+            section_docs[i] = json();
+    };
+
     //3.1) paste the process
     presets = &this->prints;
     configs.clear();
     filament_id_maps.clear();
     auto process_start = std::chrono::steady_clock::now();
-    for (auto& subfile : process_subfiles)
+    preparse_section("process", process_subfiles);
+    for (size_t idx = 0; idx < process_subfiles.size(); ++idx)
     {
-        std::string reason = parse_subfile(substitution_context, substitutions, flags, subfile, configs, filament_id_maps, presets, presets_loaded);
+        notify_progress();
+        auto& subfile = process_subfiles[idx];
+        std::string reason = parse_subfile(substitution_context, substitutions, flags, subfile, configs, filament_id_maps, presets, presets_loaded, false, doc_for(idx));
+        release_doc(idx);
         if (!reason.empty()) {
             ++m_errors;
             //parse error
@@ -3616,10 +4050,14 @@ std::pair<PresetsConfigSubstitutions, size_t> PresetBundle::load_vendor_configs_
     filament_id_maps.clear();
     const auto is_orca_lib = vendor_name == ORCA_FILAMENT_LIBRARY;
     auto filament_start = std::chrono::steady_clock::now();
-    for (auto& subfile : filament_subfiles)
+    preparse_section("filament", filament_subfiles);
+    for (size_t idx = 0; idx < filament_subfiles.size(); ++idx)
     {
+        notify_progress();
+        auto& subfile = filament_subfiles[idx];
         std::string reason = parse_subfile(substitution_context, substitutions, flags, subfile, configs, filament_id_maps, presets,
-                                           presets_loaded, is_orca_lib);
+                                           presets_loaded, is_orca_lib, doc_for(idx));
+        release_doc(idx);
         if (!reason.empty()) {
             ++m_errors;
             //parse error
@@ -3643,9 +4081,13 @@ std::pair<PresetsConfigSubstitutions, size_t> PresetBundle::load_vendor_configs_
     configs.clear();
     filament_id_maps.clear();
     auto machine_start = std::chrono::steady_clock::now();
-    for (auto& subfile : machine_subfiles)
+    preparse_section("machine", machine_subfiles);
+    for (size_t idx = 0; idx < machine_subfiles.size(); ++idx)
     {
-        std::string reason = parse_subfile(substitution_context, substitutions, flags, subfile, configs, filament_id_maps, presets, presets_loaded);
+        notify_progress();
+        auto& subfile = machine_subfiles[idx];
+        std::string reason = parse_subfile(substitution_context, substitutions, flags, subfile, configs, filament_id_maps, presets, presets_loaded, false, doc_for(idx));
+        release_doc(idx);
         if (!reason.empty()) {
             ++m_errors;
             //parse error
@@ -3661,6 +4103,63 @@ std::pair<PresetsConfigSubstitutions, size_t> PresetBundle::load_vendor_configs_
                             " section=machine section_ms=" + std::to_string(machine_ms) +
                             " presets_loaded=" + std::to_string(presets_loaded) +
                             " total_ms=" + std::to_string(total_ms));
+        startup_profile_log("PresetBundle::load_vendor_configs_from_json vendor=" + vendor_name +
+                            " cache_key_ms=" + std::to_string(key_ms) +
+                            " cbor_decode_ms=" + std::to_string(cbor_decode_ms) +
+                            " cache_hit=" + (cache_hit ? "1" : "0") +
+                            " breakdown json_ms=" + std::to_string(prof_json_ns / 1000000) +
+                            " inherit_ms=" + std::to_string(prof_inherit_ns / 1000000) +
+                            " validate_ms=" + std::to_string(prof_validate_ns / 1000000) +
+                            " store_ms=" + std::to_string(prof_store_ns / 1000000));
+    }
+
+    // Write the parse cache back, if this run actually parsed and every section came out
+    // whole. Written atomically - temp file then rename - so a crash or a concurrent
+    // instance can never leave a half-written cache behind for the next start to read.
+    // A failure here is logged and otherwise ignored: the cache is an accelerator, and
+    // startup must not depend on being able to write it.
+    if (preset_cache_enabled && !cache_key.empty() && !cache_hit && !force_sequential_parse) {
+        bool complete = !cache_out.empty();
+        for (auto it = cache_out.begin(); complete && it != cache_out.end(); ++it)
+            if (it->is_null())
+                complete = false;
+        if (complete) {
+            try {
+                namespace bfs = boost::filesystem;
+                bfs::create_directories(cache_file.parent_path());
+                json root      = json::object();
+                root["key"]     = cache_key;
+                root["vendor"]  = vendor_name;
+                root["version"] = PRESET_CACHE_FORMAT_VERSION;
+                for (auto it = cache_out.begin(); it != cache_out.end(); ++it)
+                    root[it.key()] = std::move(it.value());
+
+                const std::vector<std::uint8_t> bytes = json::to_cbor(root);
+                const bfs::path tmp = cache_file.string() + ".tmp";
+                {
+                    boost::nowide::ofstream ofs(tmp.string(), std::ios::binary | std::ios::trunc);
+                    ofs.write(reinterpret_cast<const char *>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+                    ofs.flush();
+                    if (!ofs.good())
+                        throw std::runtime_error("write failed");
+                }
+                boost::system::error_code ec;
+                bfs::remove(cache_file, ec);
+                bfs::rename(tmp, cache_file, ec);
+                if (ec) {
+                    bfs::remove(tmp, ec);
+                    throw std::runtime_error("rename failed: " + ec.message());
+                }
+                if (startup_profile)
+                    startup_profile_log("PresetBundle::load_vendor_configs_from_json vendor=" + vendor_name +
+                                        " cache=written bytes=" + std::to_string(bytes.size()));
+            } catch (const std::exception &err) {
+                BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": could not write the preset cache for "
+                                           << vendor_name << ": " << err.what();
+                boost::system::error_code ec;
+                boost::filesystem::remove(cache_file, ec);
+            }
+        }
     }
 
     //BBS: add config related logs
@@ -3795,6 +4294,16 @@ void PresetBundle::update_multi_material_filament_presets(size_t to_delete_filam
             gradient_mode = std::clamp(gradient_mode, 0, 1);
             lower_bound = std::max(0.01f, lower_bound);
             upper_bound = std::max(lower_bound, upper_bound);
+
+            // Grow must clamp mixed defs to the *old* physical count first: a stale tail
+            // that named the not-yet-added slot would otherwise be accepted as a custom row.
+            // Shrink/same clamp to the current count so orphan IDs are dropped.
+            if (!deleting_filament) {
+                const size_t mixed_defs_limit = (num_filaments > old_num_filaments)
+                    ? old_num_filaments
+                    : num_filaments;
+                normalize_mixed_filament_definitions(this->project_config, &print_cfg, mixed_defs_limit);
+            }
 
             this->mixed_filaments.clear_custom_entries();
             this->mixed_filaments.load_custom_entries(

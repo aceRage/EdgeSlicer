@@ -65,6 +65,7 @@
 #define CLI_OBJECT_COLLISION_IN_SEQ_PRINT   -63
 #define CLI_OBJECT_COLLISION_IN_LAYER_PRINT -64
 #define CLI_SPIRAL_MODE_INVALID_PARAMS      -65
+#define CLI_MIXED_FILAMENT_INVALID          -69
 
 #define CLI_SLICING_ERROR                  -100
 #define CLI_GCODE_PATH_CONFLICTS           -101
@@ -285,6 +286,9 @@ std::string header_gcodeviewer_generated();
 
 // getpid platform wrapper
 extern unsigned get_current_pid();
+// Completes a relative command line input path against the current working directory. Absolute
+// paths and custom open protocol URLs are returned unchanged.
+std::string resolve_cli_input_path(const std::string &path);
 // BBS: backup & restore
 std::string get_process_name(int pid);
 

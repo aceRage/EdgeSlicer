@@ -16,6 +16,10 @@
 #include "wxExtensions.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/MeshRepair.hpp"
+#include "libslic3r/MeshRemesh.hpp"
+#include "libslic3r/MeshRound.hpp"
+#include "libslic3r/SliceBake.hpp"
+#include "libslic3r/Print.hpp"
 #include "GLCanvas3D.hpp"
 #include "Selection.hpp"
 #include "PartPlate.hpp"
@@ -25,6 +29,16 @@
 #include "Widgets/ProgressDialog.hpp"
 #include "SingleChoiceDialog.hpp"
 #include "StepMeshDialog.hpp"
+#include "RemeshDialog.hpp"
+#include "RoundDialog.hpp"
+#include "SliceBakeDialog.hpp"
+#include "Jobs/QuadRemeshJob.hpp"
+#include "Jobs/SliceBakeJob.hpp"
+#include "Jobs/Worker.hpp"
+#include <wx/filedlg.h>
+#include "QuadRemeshDialog.hpp"
+// RE-EDITABLE CUTS: edit_cut() arms the Cut gizmo with a stored recipe.
+#include "Gizmos/GLGizmoCut.hpp"
 
 #include <boost/algorithm/string.hpp>
 #include <wx/progdlg.h>
@@ -3369,6 +3383,251 @@ bool ObjectList::has_selected_cut_object() const
     return false;
 }
 
+// RE-EDITABLE CUTS: is any selected object a cut half that remembers the cut that
+// made it? This is the enable condition for the "Edit cut..." menu item.
+bool ObjectList::has_selected_editable_cut() const
+{
+    wxDataViewItemArray sels;
+    GetSelections(sels);
+    if (sels.IsEmpty())
+        return false;
+
+    for (wxDataViewItem item : sels) {
+        const int obj_idx = m_objects_model->GetObjectIdByItem(item);
+        // Same index guard has_selected_cut_object() carries, and for the same
+        // reason: a deleted item can still be in sels.
+        if (obj_idx >= 0 && obj_idx < int(m_objects->size()) && object(obj_idx)->has_cut_recipe())
+            return true;
+    }
+
+    return false;
+}
+
+// RE-EDITABLE CUTS: reopen the Cut gizmo on the cut that produced the selection.
+//
+// The recipe is carried by BOTH halves, so any one of them is enough to find it;
+// what the re-edit needs beyond that is every object that came out of the SAME
+// cut, because those are the objects it will replace. They are found by cut_id,
+// the link the cut machinery already maintains between the halves - and not by
+// the recipe, which is deliberately equal on both and so cannot tell two
+// different cuts apart.
+void ObjectList::edit_cut()
+{
+    auto plater = wxGetApp().plater();
+    if (!plater)
+        return;
+    GLGizmosManager &gizmos_mgr = plater->get_view3D_canvas3D()->get_gizmos_manager();
+
+    // Do not re-edit from inside another gizmo: the snapshot below would refer to
+    // that gizmo's internal stack. The rule ObjectList::simplify() follows.
+    if (!gizmos_mgr.check_gizmos_closed_except(GLGizmosManager::EType::Cut))
+        return;
+
+    // Find the selected half that carries a recipe.
+    int src_idx = -1;
+    {
+        wxDataViewItemArray sels;
+        GetSelections(sels);
+        for (wxDataViewItem item : sels) {
+            const int obj_idx = m_objects_model->GetObjectIdByItem(item);
+            if (obj_idx >= 0 && obj_idx < int(m_objects->size()) && object(obj_idx)->has_cut_recipe()) {
+                src_idx = obj_idx;
+                break;
+            }
+        }
+    }
+    if (src_idx < 0)
+        return;
+
+    const ModelObject *src    = object(src_idx);
+    const CutRecipe    recipe = *src->cut_recipe;
+
+    // Every object of the same cut. When only one is left the re-edit still runs;
+    // the gizmo notices and warns that cutting again brings back both halves.
+    std::vector<ObjectID> ids;
+    for (size_t i = 0; i < m_objects->size(); ++i) {
+        const ModelObject *o = (*m_objects)[i];
+        // CutObjectBase::has_same_id() is not const-qualified, and these are const
+        // ModelObjects, so compare the ids directly - which is exactly what it does.
+        if (o == src || (o->is_cut() && src->is_cut() && o->cut_id.id() == src->cut_id.id()))
+            ids.push_back(o->id());
+    }
+    if (ids.empty())
+        ids.push_back(src->id());
+
+    GLGizmoCut3D *cut = dynamic_cast<GLGizmoCut3D *>(gizmos_mgr.get_gizmo(GLGizmosManager::EType::Cut));
+    if (!cut)
+        return;
+
+    // ONE snapshot brackets the whole re-edit: opening it (which removes the
+    // halves and puts the original in their place), the edits, and the re-cut.
+    // That is what makes a single Ctrl+Z - and Cancel, which uses the same undo -
+    // put the two halves back in one step.
+    Plater::TakeSnapshot snapshot(plater, _u8L("Edit cut"));
+
+    if (!cut->arm_reedit(recipe, ids)) {
+        // The recipe cannot reproduce the cut - no stored mesh, or a schema this
+        // build does not know. Say why rather than opening a gizmo that would
+        // then cut the wrong thing.
+        MessageDialog(plater, _L("This cut cannot be edited: the project does not contain the original, "
+                                 "uncut shape. It was cut with \"Keep cut editable\" turned off, or the "
+                                 "project was written by a different version."),
+                      _L("Edit cut"), wxOK | wxICON_INFORMATION).ShowModal();
+        return;
+    }
+
+    // THE MODEL SURGERY RUNS FIRST, BEFORE THE GIZMO IS OPENED.
+    //
+    // It used to run from on_set_state(On), i.e. from inside activate_gizmo(). But
+    // the surgery calls plater->update(), whose reload_scene() drops the deleted
+    // halves from the Selection, finds it empty and calls reset_all_states() -
+    // which turns this very gizmo Off again, re-entrantly. activate_gizmo() then
+    // saw get_state() != On, set m_current = Undefined and returned false: the
+    // halves were gone, the stand-in was on the bed, and no Cut gizmo ever
+    // appeared. That is exactly the "the object just disappears off the screen and
+    // nothing else happens" this fixes.
+    //
+    // Doing it here means the stand-in is already the selection when open_gizmo()
+    // runs, so the reload that would have reset everything has already happened and
+    // the gizmo opens on a stable, single-full-instance selection.
+    if (!cut->begin_reedit_now()) {
+        // Nothing was parked, or the halves could not be found - do not open a Cut
+        // gizmo that would be editing the wrong thing.
+        return;
+    }
+
+    // open_gizmo() toggles when the type is already current, so close first - the
+    // same two-step the Emboss and SVG menu items use.
+    if (gizmos_mgr.get_current_type() == GLGizmosManager::Cut)
+        gizmos_mgr.open_gizmo(GLGizmosManager::EType::Cut);
+    gizmos_mgr.open_gizmo(GLGizmosManager::EType::Cut);
+}
+
+
+// "COPY CUT TO...": is any selected object a cut that can be copied onto an
+// object? The enable condition for the submenu.
+//
+// The selection has to carry a recipe - which is the same test "Edit cut..."
+// makes, and deliberately the same one: a recipe is a recipe whether it came from
+// the object's own cut or from a copy - and there has to be somewhere to copy it
+// to, which is now any object at all rather than any OTHER object.
+//
+// ONE OBJECT IS ENOUGH, because the source object is itself a target. A cut made
+// with "Cut to parts" leaves both halves as parts of ONE object, so on a plate
+// holding only that object the sole useful target - "the same cut on the other
+// side of this assembly" - is the source. Requiring a second object hid the
+// submenu exactly when the owner's case was the only case.
+//
+// Note it does NOT require the source and the target to be halves of the same
+// cut. They usually will be - that is the owner's case - but the submenu has no
+// need to know: has_cut_recipe() on the source is the whole condition.
+bool ObjectList::has_selected_copyable_cut() const
+{
+    if (!has_selected_editable_cut())
+        return false;
+    return m_objects != nullptr && !m_objects->empty();
+}
+
+// The index of the selected object carrying a recipe, or -1. Shared by the
+// submenu (which needs to exclude it from the target list) and by copy_cut_to().
+int ObjectList::selected_cut_recipe_source() const
+{
+    wxDataViewItemArray sels;
+    GetSelections(sels);
+    for (wxDataViewItem item : sels) {
+        const int obj_idx = m_objects_model->GetObjectIdByItem(item);
+        // The same index guard has_selected_cut_object() carries: a deleted item
+        // can still be in sels.
+        if (obj_idx >= 0 && obj_idx < int(m_objects->size()) && object(obj_idx)->has_cut_recipe())
+            return obj_idx;
+    }
+    return -1;
+}
+
+// "COPY CUT TO...": open the Cut gizmo on `target_idx` with the selected
+// object's cut already set up on it.
+//
+// This is NOT a re-edit, and the difference matters. "Edit cut..." reopens the
+// cut that MADE the selection: it takes the halves out of the model, puts the
+// stored pre-cut mesh back in their place, and the commit replaces those halves.
+// A copy does none of that. The target keeps its own geometry and is cut, for the
+// first time as far as this gesture is concerned, with the source's plane,
+// surface, settings and connectors as the starting point. GLGizmoCut3D::arm_copy()
+// drops the source's stored mesh for exactly that reason, and the recipe the
+// commit writes on the target's halves is built fresh from the TARGET's own
+// pre-cut mesh under the usual "Keep cut editable" rule - so nothing is shared
+// between the two objects' recipes and the 3MF's content-addressed blobs stay
+// honest.
+//
+// IF THE TARGET ALREADY HAS ITS OWN RECIPE, this still just replaces the gizmo
+// state. It does not route into the re-edit path to un-cut the target first:
+// "copy this cut onto that" means "make that cut here", not "undo what that
+// object is". A user who wants the latter has "Edit cut..." on the target, which
+// is precisely that operation. No warning dialog either - nothing is destroyed
+// by arming the gizmo, and the cut itself is as reversible as any other.
+//
+// THE FRAME is object-local as-is: the recipe's plane_center and connector
+// positions are used in the target's own object frame unchanged. For the case
+// this exists for - the two halves of one cut, which share the frame they were
+// cut in - the source's plane already IS the target's plane, position for
+// position. The submenu's tooltip says so, because for two unrelated objects at
+// different poses on the plate it is a starting point rather than an answer.
+void ObjectList::copy_cut_to(int target_idx)
+{
+    auto plater = wxGetApp().plater();
+    if (!plater)
+        return;
+    if (target_idx < 0 || target_idx >= int(m_objects->size()))
+        return;
+
+    GLGizmosManager &gizmos_mgr = plater->get_view3D_canvas3D()->get_gizmos_manager();
+    // Do not arm from inside another gizmo: the snapshot below would refer to that
+    // gizmo's internal stack. The rule edit_cut() and simplify() both follow.
+    if (!gizmos_mgr.check_gizmos_closed_except(GLGizmosManager::EType::Cut))
+        return;
+
+    const int src_idx = selected_cut_recipe_source();
+    if (src_idx < 0)
+        return;
+
+    // src_idx == target_idx IS ALLOWED, and is the owner's own case: a cut made
+    // with "Cut to parts" leaves both halves as parts of ONE object, so "the same
+    // cut on the other side" targets the object the recipe came from. The recipe
+    // is COPIED out before anything else happens, so the object owning it can be
+    // the one the gizmo then re-arms on without the copy referring into an object
+    // whose state is being rewritten underneath it.
+    const CutRecipe recipe = *object(src_idx)->cut_recipe;
+
+    GLGizmoCut3D *cut = dynamic_cast<GLGizmoCut3D *>(gizmos_mgr.get_gizmo(GLGizmosManager::EType::Cut));
+    if (!cut)
+        return;
+
+    // ONE snapshot brackets the whole arming - the selection change and the gizmo
+    // opening - so a single Ctrl+Z puts the user back where they were, the same
+    // granularity edit_cut() gives.
+    Plater::TakeSnapshot snapshot(plater, _u8L("Copy cut"));
+
+    // The gizmo works on the SELECTION, so the target has to become it before the
+    // gizmo opens - apply_recipe_to_gizmo() reads the selected object's instance
+    // offset to put the plane back in the world, and writes the connectors onto
+    // the selected object.
+    select_item(m_objects_model->GetItemById(target_idx));
+
+    if (!cut->arm_copy(recipe)) {
+        // The recipe describes a surface that cannot be set up - a curved cut with
+        // an invalid grid, or a drawn one with too few samples to make a path. Say
+        // so rather than opening a gizmo that would silently show the flat plane.
+        MessageDialog(plater, _L("This cut cannot be copied: the surface it describes is incomplete."),
+                      _L("Copy cut"), wxOK | wxICON_INFORMATION).ShowModal();
+        return;
+    }
+
+    // open_gizmo() toggles when the type is already current, so close first - the
+    // same two-step edit_cut() and the Emboss / SVG menu items use.
+    if (gizmos_mgr.get_current_type() == GLGizmosManager::Cut)
+        gizmos_mgr.open_gizmo(GLGizmosManager::EType::Cut);
+    gizmos_mgr.open_gizmo(GLGizmosManager::EType::Cut);
+}
 void ObjectList::invalidate_cut_info_for_selection()
 {
     const wxDataViewItem item = GetSelection();
@@ -5405,6 +5664,12 @@ void ObjectList::change_part_type()
     wxDataViewItemArray sel = reorder_volumes_and_get_selection(obj_idx, [volume](const ModelVolume* vol) { return vol == volume; });
     if (!sel.IsEmpty())
         select_item(sel.front());
+
+    // A volume converted to a Modifier carries no overrides of its own, so it is just as able to
+    // have no effect on the slice as a newly created one - the slicer warns about both. Point the
+    // user at the settings, the way "Add modifier > Box" and the Emboss/SVG creation paths do.
+    if (new_type == ModelVolumeType::PARAMETER_MODIFIER)
+        switch_to_object_process();
 }
 
 void ObjectList::last_volume_is_deleted(const int obj_idx)
@@ -5725,9 +5990,37 @@ void ObjectList::update_support_group_badges()
     }
 }
 
+// The world -Z (the print bed side) expressed in the volume's OWN frame, which is the
+// frame mv.mesh().its lives in and therefore the frame the flat-bottom cut has to work
+// in. Rotation only - the translation is irrelevant to a direction - and no-offset
+// matrices so a non-uniform scale still maps the direction correctly. Falls back to
+// straight down if the matrix is singular.
+static Vec3d volume_bed_direction(const ModelObject& mo, const ModelVolume& mv)
+{
+    const Vec3d down(0., 0., -1.);
+    Transform3d world = mv.get_matrix();
+    if (!mo.instances.empty() && mo.instances.front() != nullptr)
+        world = mo.instances.front()->get_matrix_no_offset() * mv.get_matrix_no_offset();
+    else
+        world = mv.get_matrix_no_offset();
+
+    const Eigen::Matrix3d m = world.matrix().block<3, 3>(0, 0);
+    if (std::abs(m.determinant()) < 1e-12)
+        return down;
+    // A direction pulls back through the inverse, and the result has to be
+    // renormalised because a scaled matrix does not preserve length.
+    const Vec3d d = m.inverse() * down;
+    if (!d.allFinite() || d.norm() < 1e-12)
+        return down;
+    return d.normalized();
+}
+
 // Ultra: robust local repair - rebuild each selected part from its signed distance
 // field (OpenVDB voxel remesh). Always produces a watertight manifold mesh; detail
 // below the voxel size is lost. Complements the Windows-only "Fix model".
+//
+// The Remesh dialog collects the options first (voxel size, keep the bottom flat,
+// preserve sharp edges); the geometry itself is all in libslic3r/MeshRemesh.
 void ObjectList::repair_by_remesh()
 {
     if (!wxGetApp().plater()->get_view3D_canvas3D()->get_gizmos_manager().check_gizmos_closed_except(GLGizmosManager::Undefined))
@@ -5738,16 +6031,72 @@ void ObjectList::repair_by_remesh()
     if (obj_idxs.empty() && vol_idxs.empty())
         return;
 
+    // Which volumes the run will touch - needed before the dialog, because the
+    // prefilled voxel size and the triangle count are per-selection. The dialog shows
+    // the figures for the first part it will remesh; a multi-part selection still gets
+    // one auto value per part at remesh time when the field is left at the auto value.
+    auto first_target = [&]() -> const ModelVolume* {
+        const std::vector<int>& vols = vol_idxs;
+        const int obj_idx = obj_idxs.empty() ? -1 : obj_idxs.front();
+        if (obj_idx < 0)
+            return nullptr;
+        const ModelObject* mo = object(obj_idx);
+        if (mo == nullptr)
+            return nullptr;
+        for (size_t i = 0; i < mo->volumes.size(); ++i) {
+            if (!vols.empty() && std::find(vols.begin(), vols.end(), int(i)) == vols.end())
+                continue;
+            if (mo->volumes[i]->is_model_part())
+                return mo->volumes[i];
+        }
+        return nullptr;
+    }();
+
+    double auto_voxel = 0.1, area = 0.;
+    size_t tris = 0;
+    if (first_target != nullptr) {
+        const indexed_triangle_set& its = first_target->mesh().its;
+        auto_voxel = remesh_auto_voxel_size(its);
+        tris       = its.indices.size();
+        // Surface area drives the dialog's triangle estimate; cheap enough to do here
+        // (one pass, no allocation) and it saves the dialog a second remesh.
+        for (const Vec3i32& f : its.indices)
+            area += 0.5 * (its.vertices[f(1)] - its.vertices[f(0)]).cross(its.vertices[f(2)] - its.vertices[f(0)]).norm();
+    }
+
+    RemeshOptions opts;
+    {
+        RemeshDialog dlg(wxGetApp().mainframe, auto_voxel, tris, area);
+        if (dlg.ShowModal() != wxID_OK)
+            return;
+        opts = dlg.options();
+    }
+
     Plater* plater = wxGetApp().plater();
     Plater::TakeSnapshot snapshot(plater, "Repair by remeshing");
     wxBusyCursor wait;
 
-    auto remesh_volume = [](ModelVolume& mv) -> bool {
-        const BoundingBoxf3 bb = mv.mesh().bounding_box();
-        const double voxel = std::clamp(bb.size().norm() / 300., 0.05, 0.3);
-        indexed_triangle_set its = remesh_by_voxels(mv.mesh().its, voxel);
+    size_t total_before = 0, total_after = 0, flat_kept = 0, flat_declined = 0;
+    auto remesh_volume = [&](const ModelObject& mo, ModelVolume& mv) -> bool {
+        RemeshOptions o = opts;
+        // An untouched voxel field means "auto", and auto is per part - so a
+        // multi-part selection still gets each part's own scale-appropriate value
+        // rather than the first part's.
+        if (std::abs(o.voxel_size - auto_voxel) < 1e-9)
+            o.voxel_size = 0.;
+        RemeshReport rep;
+        indexed_triangle_set its = remesh_with_options(mv.mesh().its, o, &remesh_by_voxels,
+                                                       volume_bed_direction(mo, mv), &rep);
         if (its.indices.empty())
             return false;
+        total_before += rep.triangles_before;
+        total_after  += rep.triangles_after;
+        if (rep.kept_bottom_flat) ++flat_kept;
+        if (rep.fell_back)        ++flat_declined;
+        BOOST_LOG_TRIVIAL(info) << "repair_by_remesh: '" << mv.name << "' " << rep.triangles_before
+                                << " -> " << rep.triangles_after << " triangles, flat bottom "
+                                << (rep.kept_bottom_flat ? "kept" : (rep.fell_back ? "declined: " + rep.note : "off"))
+                                << ", sharp vertices snapped " << rep.sharp_snapped;
         mv.set_mesh(std::move(its));
         mv.set_new_unique_id();
         mv.calculate_convex_hull();
@@ -5766,7 +6115,7 @@ void ObjectList::repair_by_remesh()
                 continue;
             if (!mo->volumes[i]->is_model_part())
                 continue;
-            if (remesh_volume(*mo->volumes[i])) { ++repaired; any = true; }
+            if (remesh_volume(*mo, *mo->volumes[i])) { ++repaired; any = true; }
             else ++failed;
         }
         if (any) {
@@ -5789,11 +6138,423 @@ void ObjectList::repair_by_remesh()
 
     NotificationManager* notify = plater->get_notification_manager();
     if (notify != nullptr) {
-        if (failed == 0)
-            notify->push_notification(GUI::format(_L("Repaired %1% part(s) by remeshing."), repaired));
-        else
-            notify->push_notification(GUI::format(_L("Repaired %1% part(s), %2% failed."), repaired, failed));
+        std::string msg = failed == 0
+            ? GUI::format(_L("Repaired %1% part(s) by remeshing."), repaired)
+            : GUI::format(_L("Repaired %1% part(s), %2% failed."), repaired, failed);
+        if (repaired > 0)
+            msg += " " + GUI::format(_L("Triangles: %1% -> %2%."), total_before, total_after);
+        // Say when the flat-bottom option was asked for but could not be applied, so
+        // "the base is still rounded" has an answer without opening the log.
+        BOOST_LOG_TRIVIAL(info) << "repair_by_remesh: " << repaired << " repaired, " << failed
+                                << " failed, flat bottom kept on " << flat_kept << " and declined on "
+                                << flat_declined << " part(s)";
+        if (opts.keep_bottom_flat && flat_declined > 0)
+            msg += " " + GUI::format(_L("%1% part(s) had no flat bottom to protect."), flat_declined);
+        notify->push_notification(msg);
     }
+}
+
+// Ultra: "Round all edges" - the Edit gizmo's interim, whole-mesh fillet.
+//
+// The real bevel works on a SELECTED edge chain and inserts exact geometry (the Edit
+// gizmo, phase 2). This is the blunt instrument that ships alongside it: it rounds
+// every edge of the part at once, by the morphological open/close round trip on the
+// signed distance field. See libslic3r/MeshRound.hpp for the algorithm.
+//
+// Structurally this is repair_by_remesh's twin - same selection walk, same dialog
+// shape, same per-part loop - because it IS the same round trip with a different
+// filter in the middle. It clears painted data the same way, through
+// clear_before_change_mesh(), because the mesh is re-extracted from a lattice and
+// every index changes.
+void ObjectList::round_all_edges(bool close_gizmos)
+{
+    if (!voxel_ops_available())
+        return;
+    GLGizmosManager& gizmos = wxGetApp().plater()->get_view3D_canvas3D()->get_gizmos_manager();
+    // The Edit gizmo's own button asks for this: it is itself a gizmo, so it would
+    // always trip the check below. Closing is the manager's job and a gizmo .cpp
+    // cannot reach it, so the request comes here instead - same as quad_remesh().
+    if (close_gizmos)
+        gizmos.reset_all_states();
+    if (!gizmos.check_gizmos_closed_except(GLGizmosManager::Undefined))
+        return;
+
+    std::vector<int> obj_idxs, vol_idxs;
+    get_selection_indexes(obj_idxs, vol_idxs);
+    if (obj_idxs.empty() && vol_idxs.empty())
+        return;
+
+    // The dialog's "that radius does not fit" warning and its triangle estimate are
+    // per-selection, so they come from the first part the run would touch - the same
+    // approach repair_by_remesh takes.
+    auto first_target = [&]() -> const ModelVolume* {
+        const int obj_idx = obj_idxs.empty() ? -1 : obj_idxs.front();
+        if (obj_idx < 0)
+            return nullptr;
+        const ModelObject* mo = object(obj_idx);
+        if (mo == nullptr)
+            return nullptr;
+        for (size_t i = 0; i < mo->volumes.size(); ++i) {
+            if (!vol_idxs.empty() && std::find(vol_idxs.begin(), vol_idxs.end(), int(i)) == vol_idxs.end())
+                continue;
+            if (mo->volumes[i]->is_model_part())
+                return mo->volumes[i];
+        }
+        return nullptr;
+    }();
+
+    double min_extent = 0., area = 0.;
+    size_t tris = 0;
+    if (first_target != nullptr) {
+        const indexed_triangle_set& its = first_target->mesh().its;
+        tris = its.indices.size();
+        BoundingBoxf3 bb;
+        for (const Vec3f& v : its.vertices)
+            bb.merge(v.cast<double>());
+        if (bb.defined)
+            min_extent = bb.size().minCoeff();
+        for (const Vec3i32& f : its.indices)
+            area += 0.5 * (its.vertices[f(1)] - its.vertices[f(0)]).cross(its.vertices[f(2)] - its.vertices[f(0)]).norm();
+    }
+
+    RoundOptions opts;
+    {
+        RoundDialog dlg(wxGetApp().mainframe, min_extent, tris, area);
+        if (dlg.ShowModal() != wxID_OK)
+            return;
+        opts = dlg.options();
+    }
+
+    Plater* plater = wxGetApp().plater();
+    Plater::TakeSnapshot snapshot(plater, "Round all edges");
+    wxBusyCursor wait;
+
+    size_t total_before = 0, total_after = 0, flat_kept = 0, flat_declined = 0;
+    auto round_volume = [&](const ModelObject& mo, ModelVolume& mv) -> bool {
+        RoundReport rep;
+        indexed_triangle_set its = round_with_options(mv.mesh().its, opts, &round_by_voxels,
+                                                     volume_bed_direction(mo, mv), &rep);
+        if (its.indices.empty())
+            return false;
+        total_before += rep.triangles_before;
+        total_after  += rep.triangles_after;
+        if (rep.kept_bottom_flat) ++flat_kept;
+        if (rep.fell_back)        ++flat_declined;
+        BOOST_LOG_TRIVIAL(info) << "round_all_edges: '" << mv.name << "' r=" << rep.radius_used
+                                << " voxel=" << rep.voxel_used << " " << rep.triangles_before
+                                << " -> " << rep.triangles_after << " triangles, flat bottom "
+                                << (rep.kept_bottom_flat
+                                        ? (rep.mirrored_base
+                                               ? std::string("kept (mirrored base, no slab)")
+                                               : "kept (slab " + std::to_string(rep.bottom_margin_used) + " mm)")
+                                        : (rep.fell_back ? "declined: " + rep.note : std::string("off")));
+        mv.set_mesh(std::move(its));
+        mv.set_new_unique_id();
+        mv.calculate_convex_hull();
+        return true;
+    };
+
+    int rounded = 0, failed = 0;
+    auto process_object = [&](int obj_idx, const std::vector<int>& vols) {
+        ModelObject* mo = object(obj_idx);
+        if (mo == nullptr)
+            return;
+        // The mesh is rebuilt from a lattice, so every facet index changes and the
+        // painted data cannot follow. Same call Remesh makes, for the same reason.
+        plater->clear_before_change_mesh(obj_idx);
+        bool any = false;
+        for (size_t i = 0; i < mo->volumes.size(); ++i) {
+            if (!vols.empty() && std::find(vols.begin(), vols.end(), int(i)) == vols.end())
+                continue;
+            if (!mo->volumes[i]->is_model_part())
+                continue;
+            if (round_volume(*mo, *mo->volumes[i])) { ++rounded; any = true; }
+            else ++failed;
+        }
+        if (any) {
+            mo->invalidate_bounding_box();
+            mo->ensure_on_bed();
+            plater->changed_mesh(obj_idx);
+            plater->get_partplate_list().notify_instance_update(obj_idx, 0);
+            update_item_error_icon(obj_idx, -1);
+            update_info_items(obj_idx);
+        }
+    };
+
+    if (vol_idxs.empty()) {
+        for (int obj_idx : obj_idxs)
+            process_object(obj_idx, {});
+    } else if (!obj_idxs.empty()) {
+        process_object(obj_idxs.front(), vol_idxs);
+    }
+    plater->sidebar().obj_list()->update_plate_values_for_items();
+
+    NotificationManager* notify = plater->get_notification_manager();
+    if (notify != nullptr) {
+        std::string msg = failed == 0
+            ? GUI::format(_L("Rounded the edges of %1% part(s)."), rounded)
+            : GUI::format(_L("Rounded %1% part(s), %2% failed."), rounded, failed);
+        if (rounded > 0)
+            msg += " " + GUI::format(_L("Triangles: %1% -> %2%."), total_before, total_after);
+        // A failure here is almost always "the radius does not fit", which is worth
+        // saying outright - the alternative is a silent no-op.
+        if (failed > 0)
+            msg += " " + _L("A part smaller than twice the radius cannot be rounded.").ToStdString();
+        BOOST_LOG_TRIVIAL(info) << "round_all_edges: " << rounded << " rounded, " << failed
+                                << " failed, flat bottom kept on " << flat_kept << " and declined on "
+                                << flat_declined << " part(s)";
+        if (opts.keep_bottom_flat && flat_declined > 0)
+            msg += " " + GUI::format(_L("%1% part(s) had no flat bottom to protect."), flat_declined);
+        notify->push_notification(msg);
+    }
+}
+
+// Ultra: Phase 2 - quad remesh (QuadriFlow). Rebuilds a part as an even, field-aligned
+// grid of quads at a target face count. Unlike "Repair/Remesh" above this REPAIRS
+// NOTHING - it needs a closed, single-shell mesh and refuses otherwise - but the faces
+// it produces are evenly sized and follow the surface, which is what Sculpt's
+// Subdivide workflow wants.
+//
+// The volume stores the triangulated result (two triangles per quad), exactly as
+// repair_by_remesh does, so slicing and every other consumer are unaffected. The quad
+// topology is deliberately NOT stored: the spec keeps it for the Subdivide workflow to
+// recompute, rather than adding a second mesh representation to ModelVolume.
+void ObjectList::quad_remesh(bool close_gizmos)
+{
+    if (!quad_remesh_available())
+        return;
+    GLGizmosManager& gizmos = wxGetApp().plater()->get_view3D_canvas3D()->get_gizmos_manager();
+    // The Sculpt entry point asks for this: it is itself a gizmo, so it would always
+    // trip the check below. Closing is the manager's job and a gizmo .cpp cannot
+    // reach it, so the request comes here instead.
+    if (close_gizmos)
+        gizmos.reset_all_states();
+    if (!gizmos.check_gizmos_closed_except(GLGizmosManager::Undefined))
+        return;
+
+    std::vector<int> obj_idxs, vol_idxs;
+    get_selection_indexes(obj_idxs, vol_idxs);
+    if (obj_idxs.empty() && vol_idxs.empty())
+        return;
+
+    // The dialog's prefilled target and its refusal notice are per-selection, so they
+    // come from the first part the run would touch - same approach as repair_by_remesh.
+    auto first_target = [&]() -> const ModelVolume* {
+        const int obj_idx = obj_idxs.empty() ? -1 : obj_idxs.front();
+        if (obj_idx < 0)
+            return nullptr;
+        const ModelObject* mo = object(obj_idx);
+        if (mo == nullptr)
+            return nullptr;
+        for (size_t i = 0; i < mo->volumes.size(); ++i) {
+            if (!vol_idxs.empty() && std::find(vol_idxs.begin(), vol_idxs.end(), int(i)) == vol_idxs.end())
+                continue;
+            if (mo->volumes[i]->is_model_part())
+                return mo->volumes[i];
+        }
+        return nullptr;
+    }();
+
+    int    default_target = 0;
+    size_t tris           = 0;
+    std::string refusal;
+    if (first_target != nullptr) {
+        const indexed_triangle_set& its = first_target->mesh().its;
+        default_target = quad_remesh_default_target(its);
+        tris           = its.indices.size();
+        // Ask BEFORE opening the dialog whether this part can be remeshed at all, so
+        // an open mesh gets an explanation with the reason in it rather than a dialog
+        // that does nothing when pressed.
+        quad_remesh_accepts(its, &refusal);
+    }
+
+    QuadRemeshOptions opts;
+    {
+        QuadRemeshDialog dlg(wxGetApp().mainframe, default_target, tris, refusal);
+        if (dlg.ShowModal() != wxID_OK)
+            return;
+        opts = dlg.options();
+    }
+
+    Plater* plater = wxGetApp().plater();
+
+    // The remesh used to run right here, synchronously on the UI thread under a wxBusyCursor,
+    // with no cancel and no time limit. QuadriFlow can take a very long time, and on the UI
+    // thread that is indistinguishable from a crash - the window stops painting and the only way
+    // out is to force-close the app, which is what the owner had to do on an assembled 2-part
+    // object. So collect the work here and hand it to QuadRemeshJob: the app stays live, the
+    // progress notification carries a Cancel, and each part has a wall-clock cap.
+    Worker& worker = plater->get_ui_job_worker();
+    if (!worker.is_idle())
+        return;
+
+    std::vector<QuadRemeshJob::Target> targets;
+    auto collect_object = [&](int obj_idx, const std::vector<int>& vols) {
+        ModelObject* mo = object(obj_idx);
+        if (mo == nullptr)
+            return;
+        for (size_t i = 0; i < mo->volumes.size(); ++i) {
+            if (!vols.empty() && std::find(vols.begin(), vols.end(), int(i)) == vols.end())
+                continue;
+            ModelVolume* mv = mo->volumes[i];
+            if (!mv->is_model_part())
+                continue;
+
+            QuadRemeshJob::Target t;
+            t.object_id = mo->id();
+            t.volume_id = mv->id();
+            t.name      = mv->name;
+            // Everything the worker reads is a copy taken here, on the main thread.
+            t.mesh          = mv->mesh().its;
+            t.mesh_vertices = t.mesh.vertices.size();
+            t.mesh_indices  = t.mesh.indices.size();
+            t.opts          = opts;
+            // An untouched target field means "this part's own default", so a multi-part
+            // selection keeps each part near its own density rather than forcing them all to the
+            // first part's count.
+            if (t.opts.target_faces == default_target)
+                t.opts.target_faces = quad_remesh_default_target(t.mesh);
+            targets.push_back(std::move(t));
+        }
+    };
+
+    if (vol_idxs.empty()) {
+        for (int obj_idx : obj_idxs)
+            collect_object(obj_idx, {});
+    } else if (!obj_idxs.empty()) {
+        collect_object(obj_idxs.front(), vol_idxs);
+    }
+
+    if (targets.empty())
+        return;
+
+    replace_job(worker, std::make_unique<QuadRemeshJob>(plater, std::move(targets)));
+}
+
+// Ultra: slice baking (phase 1) - turn the object's SLICED outer wall, fuzzy skin and all,
+// into a watertight mesh that can be re-sliced. The geometry is all in libslic3r/SliceBake;
+// the dialog collects the options and SliceBakeJob does the work off the UI thread.
+//
+// docs/superpowers/specs/2026-09-12-slice-bake-research.md
+
+// The sliced PrintObject behind the object at obj_idx, or nullptr when the plate has not been
+// sliced far enough for a bake (the bake reads LayerRegion::perimeters, so posPerimeters is the
+// step that has to be done - not the whole G-code export).
+static const PrintObject* baked_print_object_for(int obj_idx)
+{
+    Plater* plater = wxGetApp().plater();
+    if (plater == nullptr || obj_idx < 0)
+        return nullptr;
+    const Model& model = plater->model();
+    if (size_t(obj_idx) >= model.objects.size())
+        return nullptr;
+    const ModelObject* mo = model.objects[size_t(obj_idx)];
+
+    // A slice that is still running owns the layers the bake would read.
+    if (plater->is_background_process_slicing())
+        return nullptr;
+
+    // Every plate owns its own Print here (Plater::fff_print() is a placeholder that never holds
+    // objects), so look in the plate this object sits on, then in every other plate. The
+    // PrintObject points at the Print's own copy of the model; the ids survive the copy.
+    PartPlateList& plates = plater->get_partplate_list();
+    auto find_in = [&](const Print* print) -> const PrintObject* {
+        if (print == nullptr)
+            return nullptr;
+        for (const PrintObject* po : print->objects())
+            if (po != nullptr && po->model_object() != nullptr && po->model_object()->id() == mo->id() &&
+                po->is_step_done(posPerimeters) && po->layer_count() > 0)
+                return po;
+        return nullptr;
+    };
+    const int own_plate = plates.find_instance(obj_idx, 0);
+    if (own_plate >= 0)
+        if (const PartPlate* plate = plates.get_plate(own_plate))
+            if (const PrintObject* po = find_in(const_cast<PartPlate*>(plate)->fff_print()))
+                return po;
+    for (int i = 0; i < plates.get_plate_count(); ++i)
+        if (i != own_plate)
+            if (const PrintObject* po = find_in(plates.get_plate(i)->fff_print()))
+                return po;
+    return nullptr;
+}
+
+bool ObjectList::can_bake_slice_to_mesh()
+{
+    ObjectList* list = wxGetApp().obj_list();
+    if (list == nullptr)
+        return false;
+    std::vector<int> obj_idxs, vol_idxs;
+    list->get_selection_indexes(obj_idxs, vol_idxs);
+    if (obj_idxs.empty())
+        return false;
+    // The bake covers a whole object (the per-layer union runs over every region of every layer),
+    // so exactly one object at a time and no per-volume selection.
+    if (obj_idxs.size() != 1)
+        return false;
+    const PrintObject* po = baked_print_object_for(obj_idxs.front());
+    return po != nullptr && slice_bake_available(*po);
+}
+
+void ObjectList::bake_slice_to_mesh()
+{
+    if (!wxGetApp().plater()->get_view3D_canvas3D()->get_gizmos_manager().check_gizmos_closed_except(GLGizmosManager::Undefined))
+        return;
+
+    std::vector<int> obj_idxs, vol_idxs;
+    get_selection_indexes(obj_idxs, vol_idxs);
+    if (obj_idxs.size() != 1)
+        return;
+    const int obj_idx = obj_idxs.front();
+
+    const PrintObject* po = baked_print_object_for(obj_idx);
+    if (po == nullptr || !slice_bake_available(*po)) {
+        // The menu gate should have caught this; say why rather than doing nothing, since the
+        // plate can go stale between the menu opening and the click.
+        wxGetApp().notification_manager()->push_plater_warning_notification(
+            _u8L("Slice the plate before baking its slice to a mesh."));
+        return;
+    }
+
+    Plater* plater = wxGetApp().plater();
+    ModelObject* mo = object(obj_idx);
+    if (mo == nullptr)
+        return;
+    const std::string name = mo->name.empty() ? std::string("object") : mo->name;
+
+    // The size line the spec asks for: the count is stated BEFORE the run, not after it has eaten
+    // the memory - and it is stated for the settings as they stand, which is why the dialog gets a
+    // counter rather than a number. `po` outlives the modal loop (the plate is sliced and the
+    // background process is idle, which the caller checked above), so capturing it is safe.
+    SliceBakeSettings settings;
+    {
+        SliceBakeDialog dlg(wxGetApp().mainframe, from_u8(name), po->layer_count(),
+                            slice_bake_default_resolution(*po),
+                            [po](const SliceBakeOptions& opts) { return slice_bake_estimate_triangles(*po, opts); });
+        if (dlg.ShowModal() != wxID_OK)
+            return;
+        settings = dlg.settings();
+    }
+
+    // The export path is asked for on the main thread, before the job starts: a file dialog from
+    // finalize() would pop up long after the user moved on.
+    std::string export_path;
+    if (settings.result == SliceBakeResultMode::ExportSTL) {
+        wxFileDialog dlg(this, _L("Export baked mesh"), from_u8(wxGetApp().app_config->get_last_output_dir("")),
+                         from_u8(name) + "_baked.stl", file_wildcards(FT_STL),
+                         wxFD_SAVE | wxFD_OVERWRITE_PROMPT);
+        if (dlg.ShowModal() != wxID_OK)
+            return;
+        export_path = into_u8(dlg.GetPath());
+        if (export_path.empty())
+            return;
+        wxGetApp().app_config->update_last_output_dir(into_u8(wxFileName(dlg.GetPath()).GetPath()));
+    }
+
+    Worker& worker = plater->get_ui_job_worker();
+    if (!worker.is_idle())
+        return;
+    replace_job(worker, std::make_unique<SliceBakeJob>(plater, po, mo->id(), settings, name, export_path));
 }
 
 void ObjectList::fix_through_netfabb()

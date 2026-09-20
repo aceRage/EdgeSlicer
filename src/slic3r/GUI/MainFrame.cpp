@@ -25,6 +25,7 @@
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/SLAPrint.hpp"
 #include "libslic3r/PresetBundle.hpp"
+#include "libslic3r/StartupProfile.hpp"
 #include "libslic3r/Zipper.hpp"
 
 #include "Tab.hpp"
@@ -57,6 +58,9 @@
 #include <string_view>
 #include <iomanip>
 #include <sstream>
+#include <cstdlib>
+#include <string>
+#include <vector>
 #include <ctime>
 
 #include "GUI_App.hpp"
@@ -78,6 +82,8 @@
 #include <shlobj.h>
 #include <shellapi.h>
 #endif // _WIN32
+#include "../Utils/MQTT.hpp"
+#include "../Utils/MqttReconnectPolicy.hpp"
 #include <slic3r/GUI/CreatePresetsDialog.hpp>
 #include "sentry_wrapper/SentryWrapper.hpp"
 #include "GenericDownloadDialog.hpp"
@@ -330,11 +336,17 @@ DPIFrame(NULL, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, BORDERLESS_FRAME_
 #endif
 
     // initialize tabpanel and menubar
-    init_tabpanel();
-    if (wxGetApp().is_gcode_viewer())
-        init_menubar_as_gcodeviewer();
-    else
-        init_menubar_as_editor();
+    {
+        Slic3r::StartupScopedTimer t("MainFrame ctor step=init_tabpanel");
+        init_tabpanel();
+    }
+    {
+        Slic3r::StartupScopedTimer t("MainFrame ctor step=init_menubar");
+        if (wxGetApp().is_gcode_viewer())
+            init_menubar_as_gcodeviewer();
+        else
+            init_menubar_as_editor();
+    }
 
     // BBS
 #if 0
@@ -415,6 +427,33 @@ DPIFrame(NULL, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, BORDERLESS_FRAME_
         TabPosition pos = (TabPosition)evt.GetInt();
         m_tabpanel->SetSelection(pos);
     });
+
+    // Profiling aid for the lazily built tabs: with ORCA_STARTUP_PROFILE_OPEN_TABS set to
+    // a comma-separated list of TabPosition indices, select each of them once the frame is
+    // up. The deferred construction then shows up in the same "[StartupProfile] ... lazy="
+    // marks as the rest of the startup, which is how the win from deferring them is
+    // measured. Inert unless the variable is set.
+    if (const char* tabs = std::getenv("ORCA_STARTUP_PROFILE_OPEN_TABS"); tabs && *tabs) {
+        std::vector<int>  positions;
+        std::stringstream ss{std::string(tabs)};
+        std::string       piece;
+        while (std::getline(ss, piece, ',')) {
+            try { positions.push_back(std::stoi(piece)); } catch (...) {}
+        }
+        // Run once the app has settled, so the marks measure the tab build and not the
+        // tail of startup still running around it.
+        wxTimer* open_tabs_timer = new wxTimer(this);
+        Bind(wxEVT_TIMER, [this, positions](wxTimerEvent& e) {
+            for (int pos : positions) {
+                if (pos < 0 || pos >= (int) m_tabpanel->GetPageCount())
+                    continue;
+                Slic3r::startup_profile_log("open_tab begin index=" + std::to_string(pos));
+                m_tabpanel->SetSelection(pos);
+                Slic3r::startup_profile_log("open_tab end index=" + std::to_string(pos));
+            }
+        }, open_tabs_timer->GetId());
+        open_tabs_timer->StartOnce(8000);
+    }
 
     Bind(EVT_SYNC_CLOUD_PRESET, &MainFrame::on_select_default_preset, this);
     Bind(EVT_NETWORK_TEST_LOG_UPDATE, [](wxCommandEvent& evt) {
@@ -865,11 +904,37 @@ WXLRESULT MainFrame::MSWWindowProc(WXUINT nMsg, WXWPARAM wParam, WXLPARAM lParam
         AdjustWorkingAreaForAutoHide(hWnd, mmi);
         return 0;
     }
+
+    /* The PC woke up. Handled here rather than through wxEVT_POWER_RESUME because Windows only sends
+     * PBT_APMRESUMESUSPEND (the one wx maps) when a person woke the machine; PBT_APMRESUMEAUTOMATIC is
+     * the one that always arrives. Both may arrive for one wake; on_system_resume() coalesces them.
+     * The message still falls through to wx so its own power events keep working. */
+    case WM_POWERBROADCAST:
+        if (wParam == PBT_APMRESUMEAUTOMATIC || wParam == PBT_APMRESUMESUSPEND)
+            on_system_resume();
+        break;
     }
     return wxFrame::MSWWindowProc(nMsg, wParam, lParam);
 }
 
 #endif
+
+void MainFrame::on_system_resume()
+{
+    // Not straight away: the wake message arrives before Wi-Fi / Ethernet is back, and a connect
+    // attempt made now would only burn one retry. The one-shot timer also folds the two resume
+    // messages of a single wake into one bounce.
+    if (m_resume_reconnect_timer == nullptr) {
+        m_resume_reconnect_timer = new wxTimer(this);
+        Bind(wxEVT_TIMER, [](wxTimerEvent&) {
+            const size_t asked = MqttClient::reconnect_all_live("system resume");
+            BOOST_LOG_TRIVIAL(info) << "[MainFrame] system resume: " << asked << " MQTT client(s) asked to reconnect";
+        }, m_resume_reconnect_timer->GetId());
+    }
+    BOOST_LOG_TRIVIAL(info) << "[MainFrame] system resume; MQTT sessions will be bounced in "
+                            << MqttReconnectPolicy::RESUME_SETTLE_MS << " ms";
+    m_resume_reconnect_timer->StartOnce(int(MqttReconnectPolicy::RESUME_SETTLE_MS));
+}
 
 void  MainFrame::show_log_window()
 {
@@ -1153,6 +1218,100 @@ void MainFrame::show_option(bool show)
     }
 }
 
+// Lazy tab construction -------------------------------------------------------------
+//
+// MainFrame::init_tabpanel used to build MonitorPanel, CalibrationPanel, MultiMachinePage
+// and ProjectPanel eagerly; together they were the majority of its cost for tabs the user
+// usually never opens in a session. Each now gets a LazyPanelHolder placeholder page at
+// its TabPosition slot; the real panel is constructed the first time that page is shown,
+// or when one of the getters below is called.
+//
+// Creating the panel late is safe because none of them subscribes to device/network events
+// at construction: they poll a wxTimer and, in their own Show(true), (re)start it and pull
+// the currently selected machine. The getters below force construction for callers that
+// need the object without the tab being visible.
+
+LazyPanelHolder* MainFrame::make_monitor_holder()
+{
+    return new LazyPanelHolder(m_tabpanel, "MainFrame lazy=MonitorPanel", [this](wxWindow* parent) -> wxWindow* {
+        m_monitor = new MonitorPanel(parent, wxID_ANY, wxDefaultPosition, wxDefaultSize);
+        m_monitor->SetBackgroundColour(*wxWHITE);
+        apply_theme_to_lazy_panel(m_monitor);
+        return m_monitor;
+    });
+}
+
+LazyPanelHolder* MainFrame::make_calibration_holder()
+{
+    return new LazyPanelHolder(m_tabpanel, "MainFrame lazy=CalibrationPanel", [this](wxWindow* parent) -> wxWindow* {
+        m_calibration = new CalibrationPanel(parent, wxID_ANY, wxDefaultPosition, wxDefaultSize);
+        m_calibration->SetBackgroundColour(*wxWHITE);
+        apply_theme_to_lazy_panel(m_calibration);
+        return m_calibration;
+    });
+}
+
+LazyPanelHolder* MainFrame::make_multi_machine_holder()
+{
+    return new LazyPanelHolder(m_tabpanel, "MainFrame lazy=MultiMachinePage", [this](wxWindow* parent) -> wxWindow* {
+        m_multi_machine = new MultiMachinePage(parent, wxID_ANY, wxDefaultPosition, wxDefaultSize);
+        m_multi_machine->SetBackgroundColour(*wxWHITE);
+        apply_theme_to_lazy_panel(m_multi_machine);
+        return m_multi_machine;
+    });
+}
+
+LazyPanelHolder* MainFrame::make_project_holder()
+{
+    return new LazyPanelHolder(m_tabpanel, "MainFrame lazy=ProjectPanel", [this](wxWindow* parent) -> wxWindow* {
+        m_project = new ProjectPanel(parent, wxID_ANY, wxDefaultPosition, wxDefaultSize);
+        m_project->SetBackgroundColour(*wxWHITE);
+        apply_theme_to_lazy_panel(m_project);
+        // The eager build had GUI_App call this right after the frame was constructed.
+        m_project->init_auxiliary();
+        return m_project;
+    });
+}
+
+// A panel built after startup missed the dark-mode pass and the DPI rescale the others
+// got, so give it the same treatment at creation time.
+void MainFrame::apply_theme_to_lazy_panel(wxWindow* panel)
+{
+    if (panel == nullptr)
+        return;
+#ifdef _MSW_DARK_MODE
+    wxGetApp().UpdateDarkUIWin(panel);
+#endif
+}
+
+MonitorPanel* MainFrame::monitor()
+{
+    if (m_monitor == nullptr && m_monitor_holder != nullptr)
+        m_monitor_holder->realize();
+    return m_monitor;
+}
+
+CalibrationPanel* MainFrame::calibration()
+{
+    if (m_calibration == nullptr && m_calibration_holder != nullptr)
+        m_calibration_holder->realize();
+    return m_calibration;
+}
+
+MultiMachinePage* MainFrame::multi_machine()
+{
+    if (m_multi_machine == nullptr && m_multi_machine_holder != nullptr)
+        m_multi_machine_holder->realize();
+    return m_multi_machine;
+}
+
+ProjectPanel* MainFrame::project()
+{
+    if (m_project == nullptr && m_project_holder != nullptr)
+        m_project_holder->realize();
+    return m_project;
+}
+
 void MainFrame::init_tabpanel() {
     // wxNB_NOPAGETHEME: Disable Windows Vista theme for the Notebook background. The theme performance is terrible on
     // Windows 10 with multiple high resolution displays connected.
@@ -1192,7 +1351,7 @@ void MainFrame::init_tabpanel() {
         }
         //else if (panel == m_param_panel)
         //    m_param_panel->OnActivate();
-        else if (panel == m_monitor) {
+        else if (panel == m_monitor_holder) {
             //monitor
         }
 #ifndef __APPLE__
@@ -1267,35 +1426,61 @@ void MainFrame::init_tabpanel() {
     });
 
     if (wxGetApp().is_editor()) {
-        m_webview         = new WebViewPanel(m_tabpanel);
+        {
+            Slic3r::StartupScopedTimer t("MainFrame::init_tabpanel step=WebViewPanel");
+            m_webview         = new WebViewPanel(m_tabpanel);
+        }
         Bind(EVT_LOAD_URL, [this](wxCommandEvent &evt) {
             wxString url = evt.GetString();
             select_tab(MainFrame::tpHome);
             m_webview->load_url(url);
         });
         m_tabpanel->AddPage(m_webview, "", "tab_home_active", "tab_home_active", false);
+        Slic3r::StartupScopedTimer t("MainFrame::init_tabpanel step=ParamsPanel");
         m_param_panel = new ParamsPanel(m_tabpanel, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxBK_LEFT | wxTAB_TRAVERSAL);
       
     }
-    m_plater = new Plater(this, this);
-    m_plater->SetBackgroundColour(*wxWHITE);
-    m_plater->Hide();
+    // The splash is ticked before the heavy constructors (Plater is the last one left
+    // in this function: Monitor/Calibration are deferred to first show). Free after startup.
+    wxGetApp().tick_splash_animation();
+    {
+        Slic3r::StartupScopedTimer t("MainFrame::init_tabpanel step=Plater");
+        m_plater = new Plater(this, this);
+        m_plater->SetBackgroundColour(*wxWHITE);
+        m_plater->Hide();
+    }
 
     wxGetApp().plater_ = m_plater;
 
-    create_preset_tabs();
+    {
+        Slic3r::StartupScopedTimer t("MainFrame::init_tabpanel step=create_preset_tabs");
+        create_preset_tabs();
+    }
 
         //BBS add pages
-    m_monitor = new MonitorPanel(m_tabpanel, wxID_ANY, wxDefaultPosition, wxDefaultSize);
-    m_monitor->SetBackgroundColour(*wxWHITE);
-    m_tabpanel->AddPage(m_monitor, _L("Device"), std::string("tab_monitor_active"), std::string("tab_monitor_active"), false);
+    wxGetApp().tick_splash_animation();
+    {
+        // Deferred: MonitorPanel was ~620 ms of this constructor and is rarely the tab a
+        // user lands on. The holder keeps tpMonitor's slot; the panel is built on the
+        // first Show(true), where MonitorPanel::Show() already pulls the current device
+        // state (it polls a timer, it is not an event subscriber, so nothing is missed).
+        Slic3r::StartupScopedTimer t("MainFrame::init_tabpanel step=MonitorPanel(deferred)");
+        m_monitor_holder = make_monitor_holder();
+        m_tabpanel->AddPage(m_monitor_holder, _L("Device"), std::string("tab_monitor_active"), std::string("tab_monitor_active"), false);
+    }
 
     // Stream tab: grid of LAN camera streams, always right after Device.
-    m_stream = new StreamPanel(m_tabpanel);
-    m_stream->SetBackgroundColour(*wxWHITE);
-    m_tabpanel->AddPage(m_stream, _L("Stream"), std::string("tab_stream_active"), std::string("tab_stream_active"), false);
+    {
+        Slic3r::StartupScopedTimer t("MainFrame::init_tabpanel step=StreamPanel");
+        m_stream = new StreamPanel(m_tabpanel);
+        m_stream->SetBackgroundColour(*wxWHITE);
+        m_tabpanel->AddPage(m_stream, _L("Stream"), std::string("tab_stream_active"), std::string("tab_stream_active"), false);
+    }
 
-    m_printer_view = new PrinterWebView(m_tabpanel);
+    {
+        Slic3r::StartupScopedTimer t("MainFrame::init_tabpanel step=PrinterWebView");
+        m_printer_view = new PrinterWebView(m_tabpanel);
+    }
     Bind(EVT_LOAD_PRINTER_URL, [this](LoadPrinterViewEvent &evt) {
         wxString url = evt.GetString();
         wxString key = evt.GetAPIkey();
@@ -1305,21 +1490,33 @@ void MainFrame::init_tabpanel() {
     m_printer_view->Hide();
 
     if (wxGetApp().is_enable_multi_machine()) {
-        m_multi_machine = new MultiMachinePage(m_tabpanel, wxID_ANY, wxDefaultPosition, wxDefaultSize);
-        m_multi_machine->SetBackgroundColour(*wxWHITE);
+        Slic3r::StartupScopedTimer t("MainFrame::init_tabpanel step=MultiMachinePage(deferred)");
+        m_multi_machine_holder = make_multi_machine_holder();
         // TODO: change the bitmap
-        m_tabpanel->AddPage(m_multi_machine, _L("Multi-device"), std::string("tab_multi_active"), std::string("tab_multi_active"), false);
+        m_tabpanel->AddPage(m_multi_machine_holder, _L("Multi-device"), std::string("tab_multi_active"), std::string("tab_multi_active"), false);
     }
 
-    m_project = new ProjectPanel(m_tabpanel, wxID_ANY, wxDefaultPosition, wxDefaultSize);
-    m_project->SetBackgroundColour(*wxWHITE);
-    m_tabpanel->AddPage(m_project, _L("Project"), std::string("tab_auxiliary_active"), std::string("tab_auxiliary_active"), false);
+    {
+        // Deferred: ProjectPanel builds a webview. Its only startup caller was
+        // GUI_App's mainframe->m_project->init_auxiliary(), which is now a no-op until
+        // the tab is opened (ProjectPanel::Show() reloads the model data anyway).
+        Slic3r::StartupScopedTimer t("MainFrame::init_tabpanel step=ProjectPanel(deferred)");
+        m_project_holder = make_project_holder();
+        m_tabpanel->AddPage(m_project_holder, _L("Project"), std::string("tab_auxiliary_active"), std::string("tab_auxiliary_active"), false);
+    }
 
-    m_calibration = new CalibrationPanel(m_tabpanel, wxID_ANY, wxDefaultPosition, wxDefaultSize);
-    m_calibration->SetBackgroundColour(*wxWHITE);
-    m_tabpanel->AddPage(m_calibration, _L("Calibration"), std::string("tab_calibration_active"), std::string("tab_calibration_active"), false);
+    wxGetApp().tick_splash_animation();
+    {
+        // Deferred: CalibrationPanel was ~989 ms of this constructor (it builds the whole
+        // wizard stack). CalibrationPanel::Show() pulls the selected machine on first
+        // show, so creating it late loses nothing.
+        Slic3r::StartupScopedTimer t("MainFrame::init_tabpanel step=CalibrationPanel(deferred)");
+        m_calibration_holder = make_calibration_holder();
+        m_tabpanel->AddPage(m_calibration_holder, _L("Calibration"), std::string("tab_calibration_active"), std::string("tab_calibration_active"), false);
+    }
 
     if (m_plater) {
+        Slic3r::StartupScopedTimer t("MainFrame::init_tabpanel step=initial_config");
         // load initial config
         auto full_config = wxGetApp().preset_bundle->full_config();
         m_plater->on_config_change(full_config);
@@ -1342,7 +1539,7 @@ void MainFrame::show_device(bool bBBLPrinter) {
         m_tabpanel->RemovePage(idx);
     }
     if (bBBLPrinter) {
-        if (m_tabpanel->FindPage(m_monitor) != wxNOT_FOUND)
+        if (m_monitor_holder && m_tabpanel->FindPage(m_monitor_holder) != wxNOT_FOUND)
             return;
         // Remove printer view
         if ((idx = m_tabpanel->FindPage(m_printer_view)) != wxNOT_FOUND) {
@@ -1350,32 +1547,28 @@ void MainFrame::show_device(bool bBBLPrinter) {
             m_tabpanel->RemovePage(idx);
         }
 
-        // Create/insert monitor page
-        if (!m_monitor) {
-            m_monitor = new MonitorPanel(m_tabpanel, wxID_ANY, wxDefaultPosition, wxDefaultSize);
-            m_monitor->SetBackgroundColour(*wxWHITE);
-        }
-        m_monitor->Show(false);
-        m_tabpanel->InsertPage(tpMonitor, m_monitor, _L("Device"), std::string("tab_monitor_active"), std::string("tab_monitor_active"));
+        // Create/insert monitor page. The page is the lazy holder, so an already-built
+        // MonitorPanel keeps its state across an unmount/remount, and one that was never
+        // opened still costs nothing here.
+        if (!m_monitor_holder)
+            m_monitor_holder = make_monitor_holder();
+        m_monitor_holder->Show(false);
+        m_tabpanel->InsertPage(tpMonitor, m_monitor_holder, _L("Device"), std::string("tab_monitor_active"), std::string("tab_monitor_active"));
 
         if (wxGetApp().is_enable_multi_machine()) {
-            if (!m_multi_machine) {
-                m_multi_machine = new MultiMachinePage(m_tabpanel, wxID_ANY, wxDefaultPosition, wxDefaultSize);
-                m_multi_machine->SetBackgroundColour(*wxWHITE);
-            }
+            if (!m_multi_machine_holder)
+                m_multi_machine_holder = make_multi_machine_holder();
             // TODO: change the bitmap
-            m_multi_machine->Show(false);
-            m_tabpanel->InsertPage(tpMultiDevice, m_multi_machine, _L("Multi-device"), std::string("tab_multi_active"),
+            m_multi_machine_holder->Show(false);
+            m_tabpanel->InsertPage(tpMultiDevice, m_multi_machine_holder, _L("Multi-device"), std::string("tab_multi_active"),
                                    std::string("tab_multi_active"), false);
         }
-        if (!m_calibration) {
-            m_calibration = new CalibrationPanel(m_tabpanel, wxID_ANY, wxDefaultPosition, wxDefaultSize);
-            m_calibration->SetBackgroundColour(*wxWHITE);
-        }
-        m_calibration->Show(false);
+        if (!m_calibration_holder)
+            m_calibration_holder = make_calibration_holder();
+        m_calibration_holder->Show(false);
         // Calibration is always the last page, so don't use InsertPage here. Otherwise, if multi_machine page is not enabled,
         // the calibration tab won't be properly added as well, due to the TabPosition::tpCalibration no longer matches the real tab position.
-        m_tabpanel->AddPage(m_calibration, _L("Calibration"), std::string("tab_calibration_active"),
+        m_tabpanel->AddPage(m_calibration_holder, _L("Calibration"), std::string("tab_calibration_active"),
                                std::string("tab_calibration_active"), false);
 
 #ifdef _MSW_DARK_MODE
@@ -1386,16 +1579,16 @@ void MainFrame::show_device(bool bBBLPrinter) {
         if (m_tabpanel->FindPage(m_printer_view) != wxNOT_FOUND)
             return;
 
-        if ((idx = m_tabpanel->FindPage(m_calibration)) != wxNOT_FOUND) {
-            m_calibration->Show(false);
+        if (m_calibration_holder && (idx = m_tabpanel->FindPage(m_calibration_holder)) != wxNOT_FOUND) {
+            m_calibration_holder->Show(false);
             m_tabpanel->RemovePage(idx);
         }
-        if ((idx = m_tabpanel->FindPage(m_multi_machine)) != wxNOT_FOUND) {
-            m_multi_machine->Show(false);
+        if (m_multi_machine_holder && (idx = m_tabpanel->FindPage(m_multi_machine_holder)) != wxNOT_FOUND) {
+            m_multi_machine_holder->Show(false);
             m_tabpanel->RemovePage(idx);
         }
-        if ((idx = m_tabpanel->FindPage(m_monitor)) != wxNOT_FOUND) {
-            m_monitor->Show(false);
+        if (m_monitor_holder && (idx = m_tabpanel->FindPage(m_monitor_holder)) != wxNOT_FOUND) {
+            m_monitor_holder->Show(false);
             m_tabpanel->RemovePage(idx);
         }
         if (m_printer_view == nullptr) {
@@ -1418,16 +1611,16 @@ void MainFrame::show_flashforge_device()
     if (m_ff_device != nullptr && m_tabpanel->FindPage(m_ff_device) != wxNOT_FOUND)
         return;
     int idx;
-    if (m_calibration && (idx = m_tabpanel->FindPage(m_calibration)) != wxNOT_FOUND) {
-        m_calibration->Show(false);
+    if (m_calibration_holder && (idx = m_tabpanel->FindPage(m_calibration_holder)) != wxNOT_FOUND) {
+        m_calibration_holder->Show(false);
         m_tabpanel->RemovePage(idx);
     }
-    if (m_multi_machine && (idx = m_tabpanel->FindPage(m_multi_machine)) != wxNOT_FOUND) {
-        m_multi_machine->Show(false);
+    if (m_multi_machine_holder && (idx = m_tabpanel->FindPage(m_multi_machine_holder)) != wxNOT_FOUND) {
+        m_multi_machine_holder->Show(false);
         m_tabpanel->RemovePage(idx);
     }
-    if (m_monitor && (idx = m_tabpanel->FindPage(m_monitor)) != wxNOT_FOUND) {
-        m_monitor->Show(false);
+    if (m_monitor_holder && (idx = m_tabpanel->FindPage(m_monitor_holder)) != wxNOT_FOUND) {
+        m_monitor_holder->Show(false);
         m_tabpanel->RemovePage(idx);
     }
     if (m_printer_view && (idx = m_tabpanel->FindPage(m_printer_view)) != wxNOT_FOUND) {
@@ -1534,19 +1727,28 @@ void MainFrame::create_preset_tabs()
     //m_param_panel = new ParamsPanel(m_tabpanel, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxBK_LEFT | wxTAB_TRAVERSAL);
     m_param_dialog = new ParamsDialog(m_plater);
 
-    add_created_tab(new TabPrint(m_param_panel), "cog");
-    add_created_tab(new TabPrintPlate(m_param_panel), "cog");
-    add_created_tab(new TabPrintObject(m_param_panel), "cog");
-    add_created_tab(new TabPrintPart(m_param_panel), "cog");
-    add_created_tab(new TabPrintLayer(m_param_panel), "cog");
-    add_created_tab(new TabFilament(m_param_dialog->panel()), "spool");
+#define ORCA_TIMED_TAB(expr, label)                                              \
+    do {                                                                         \
+        Slic3r::StartupScopedTimer t("MainFrame::create_preset_tabs step=" label); \
+        expr;                                                                    \
+    } while (0)
+    ORCA_TIMED_TAB(add_created_tab(new TabPrint(m_param_panel), "cog"), "TabPrint");
+    ORCA_TIMED_TAB(add_created_tab(new TabPrintPlate(m_param_panel), "cog"), "TabPrintPlate");
+    ORCA_TIMED_TAB(add_created_tab(new TabPrintObject(m_param_panel), "cog"), "TabPrintObject");
+    ORCA_TIMED_TAB(add_created_tab(new TabPrintPart(m_param_panel), "cog"), "TabPrintPart");
+    ORCA_TIMED_TAB(add_created_tab(new TabPrintLayer(m_param_panel), "cog"), "TabPrintLayer");
+    ORCA_TIMED_TAB(add_created_tab(new TabFilament(m_param_dialog->panel()), "spool"), "TabFilament");
     /* BBS work around to avoid appearance bug */
     //add_created_tab(new TabSLAPrint(m_param_panel));
     //add_created_tab(new TabSLAMaterial(m_param_panel));
-    add_created_tab(new TabPrinter(m_param_dialog->panel()), "printer");
+    ORCA_TIMED_TAB(add_created_tab(new TabPrinter(m_param_dialog->panel()), "printer"), "TabPrinter");
+#undef ORCA_TIMED_TAB
 
-    m_param_panel->rebuild_panels();
-    m_param_dialog->panel()->rebuild_panels();
+    {
+        Slic3r::StartupScopedTimer t("MainFrame::create_preset_tabs step=rebuild_panels");
+        m_param_panel->rebuild_panels();
+        m_param_dialog->panel()->rebuild_panels();
+    }
     //m_tabpanel->AddPage(m_param_panel, "Parameters", "notebook_presets_active");
     //m_tabpanel->InsertPage(tpSettings, m_param_panel, _L("Parameters"), std::string("cog"));
 }
@@ -1937,7 +2139,38 @@ wxBoxSizer* MainFrame::create_side_tools()
                 p->Dismiss();
             });
 
+            // A plate-sliced file ("<name>.gcode.3mf") is not a Bambu-only artefact: it is what
+            // the Flashforge Creator 5 and other third-party hosts consume, and File > Export
+            // already offers it to every vendor via can_export_gcode() (Ctrl+G). Only this
+            // dropdown withheld it, so a C5 owner had no way to reach it from the Print button.
+            // Both selections are vendor-neutral downstream: get_enable_print_status() gates
+            // them on is_slice_result_ready_for_export() alone and the events land on
+            // Plater::export_gcode_3mf(), which names the file ".gcode.3mf".
+            SideButton* export_sliced_file_btn = new SideButton(p, _L("Export plate sliced file"), "");
+            export_sliced_file_btn->SetCornerRadius(0);
+            export_sliced_file_btn->Bind(wxEVT_BUTTON, [this, p](wxCommandEvent&) {
+                m_print_btn->SetLabel(_L("Export plate sliced file"));
+                m_print_select = eExportSlicedFile;
+                m_print_enable = get_enable_print_status();
+                m_print_btn->Enable(m_print_enable);
+                this->Layout();
+                p->Dismiss();
+            });
+
+            SideButton* export_all_sliced_file_btn = new SideButton(p, _L("Export all sliced file"), "");
+            export_all_sliced_file_btn->SetCornerRadius(0);
+            export_all_sliced_file_btn->Bind(wxEVT_BUTTON, [this, p](wxCommandEvent&) {
+                m_print_btn->SetLabel(_L("Export all sliced file"));
+                m_print_select = eExportAllSlicedFile;
+                m_print_enable = get_enable_print_status();
+                m_print_btn->Enable(m_print_enable);
+                this->Layout();
+                p->Dismiss();
+            });
+
             p->append_button(send_gcode_btn);
+            p->append_button(export_sliced_file_btn);
+            p->append_button(export_all_sliced_file_btn);
             p->append_button(export_gcode_btn);
         } else {
             SideButton* print_plate_btn = new SideButton(p, _L("Print"), "");
@@ -2310,7 +2543,8 @@ void MainFrame::on_dpi_changed(const wxRect& suggested_rect)
     //BBS GUI refactor: remove unused layout new/dlg
     //if (m_layout != ESettingsLayout::Dlg) // Do not update tabs if the Settings are in the separated dialog
     m_param_panel->msw_rescale();
-    m_project->msw_rescale();
+    if(m_project)
+        m_project->msw_rescale();
     if(m_monitor)
         m_monitor->msw_rescale();
     if(m_multi_machine)
@@ -3764,10 +3998,13 @@ void MainFrame::select_tab(wxPanel* panel)
 //BBS
 void MainFrame::jump_to_monitor(std::string dev_id)
 {
-    if(!m_monitor)
-        return;
+    // Selecting the tab shows the holder, which builds the panel; go through the getter
+    // so the pointer below is valid even if the notebook refuses the selection.
     m_tabpanel->SetSelection(tpMonitor);
-    ((MonitorPanel*)m_monitor)->select_machine(dev_id);
+    MonitorPanel* mon = monitor();
+    if (!mon)
+        return;
+    mon->select_machine(dev_id);
 }
 
 // Ultra: Flashforge device stack (Orca-Flashforge port)
@@ -3775,7 +4012,7 @@ void MainFrame::jump_to_monitor(int evt_type, int conn_id)
 {
     // Routed to the Flashforge device tab once it is mounted (FFDeviceTab);
     // until then fall back to selecting the Device tab.
-    wxWindow* target = m_ff_device != nullptr ? (wxWindow*) m_ff_device : (wxWindow*) m_monitor;
+    wxWindow* target = m_ff_device != nullptr ? (wxWindow*) m_ff_device : (wxWindow*) monitor();
     if (target == nullptr)
         return;
     m_tabpanel->SetSelection(tpMonitor);
@@ -3787,10 +4024,11 @@ void MainFrame::jump_to_monitor(int evt_type, int conn_id)
 
 void MainFrame::jump_to_monitor_exit(const std::string& /*dev_id*/)
 {
-    if (!m_monitor)
-        return;
     m_tabpanel->SetSelection(tpMonitor);
-    ((MonitorPanel*)m_monitor)->update_all();
+    MonitorPanel* mon = monitor();
+    if (!mon)
+        return;
+    mon->update_all();
 }
 
 ProgressDialog* MainFrame::createLogProgress()
@@ -3805,10 +4043,11 @@ ProgressDialog* MainFrame::createLogProgress()
 
 void MainFrame::jump_to_multipage()
 {
-    if(!m_multi_machine)
-        return;
     m_tabpanel->SetSelection(tpMultiDevice);
-    ((MultiMachinePage*)m_multi_machine)->jump_to_send_page();
+    MultiMachinePage* mm = multi_machine();
+    if (!mm)
+        return;
+    mm->jump_to_send_page();
 }
 
 

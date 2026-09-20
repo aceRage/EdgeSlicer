@@ -9,6 +9,7 @@
 #include "slic3r/GUI/MeshUtils.hpp"
 #include "slic3r/GUI/SceneRaycaster.hpp"
 #include "slic3r/GUI/3DScene.hpp"
+#include "slic3r/GUI/Gizmos/DockWidthSettle.hpp"
 
 #include <cereal/archives/binary.hpp>
 
@@ -167,7 +168,19 @@ public:
     std::string get_name(bool include_shortcut = true) const;
 
     EState get_state() const { return m_state; }
-    void set_state(EState state) { m_state = state; on_set_state(); }
+    void set_state(EState state)
+    {
+        m_state = state;
+        // A candidate width mid-confirmation from the panel's last open (or
+        // from just before it closed) describes a layout that no longer
+        // applies once the panel opens again - most visibly when it reopens
+        // already docked, which is exactly when a stray confirmation would
+        // otherwise show up as one frame of the wrong width. The committed
+        // width itself is left alone: that is the deliberately remembered
+        // "last expanded width" a freshly reopened docked panel starts from.
+        m_dock_width.reset_pending();
+        on_set_state();
+    }
 
     int get_shortcut_key() const { return m_shortcut_key; }
 
@@ -254,6 +267,48 @@ protected:
     void GizmoImguiSetNextWIndowPos(float &x, float y, int flag, float pivot_x = 0.0f, float pivot_y = 0.0f);
     void GizmoImguiSetNextWIndowPos(float &x, float y, float w, float h, int flag, float pivot_x = 0.0f, float pivot_y = 0.0f);
 
+    // ---- docking / collapsing of a tall input panel -------------------------
+    //
+    // The tall gizmo panels (Cut, Assembly, Sculpt, Edit) open under their own
+    // toolbar icon and cover most of the viewport. A panel that opts in here
+    // gains a pin button that parks it against the right edge of the 3D view at
+    // full available height, and a chevron that folds the body away to the title
+    // line. Both live in the shared base so the four panels (and any later one)
+    // share one implementation rather than a copy each.
+    //
+    // How a panel opts in - replace the SetNextWindowPos/Begin pair with:
+    //
+    //     dock_setup_next_window(x, y, bottom_limit, window_width);
+    //     ImGuiWrapper::push_toolbar_style(m_parent.get_scale());
+    //     GizmoImguiBegin(get_name(), dock_window_flags(base_flags));
+    //     if (!dock_render_titlebar(get_name())) { /* collapsed */
+    //         GizmoImguiEnd(); ImGuiWrapper::pop_toolbar_style(); return; }
+    //     ... body ...
+    //
+    // dock_render_titlebar() draws the title, the pin and the chevron and
+    // returns false when the body must be skipped this frame.
+
+    // Stable, translation-independent config-key suffix for this gizmo. The
+    // default keys off the sprite id, which IS the GLGizmosManager::EType value
+    // and unique per gizmo; a gizmo may override it for a readable key.
+    virtual std::string get_dock_key() const;
+
+    bool is_docked() const { return m_docked; }
+
+    // Place the window for this frame: either against the right edge of the
+    // canvas (docked) or under the toolbar icon at `x`, `y` (undocked, the
+    // original behaviour). `window_width` is the panel's own fixed width, or 0
+    // for an AlwaysAutoResize panel that lets its contents decide.
+    void dock_setup_next_window(float &x, float &y, float bottom_limit, float window_width = 0.f);
+
+    // The flags to pass to GizmoImguiBegin(): the panel's own flags while
+    // undocked, plus the resize/scroll flags a docked panel needs.
+    int dock_window_flags(int flags) const;
+
+    // Draws the panel's title row (title, chevron, pin). Returns false when the
+    // panel is collapsed and the caller must skip the body.
+    bool dock_render_titlebar(const std::string &title);
+
     void register_grabbers_for_picking();
     void unregister_grabbers_for_picking();
     virtual void on_register_raycasters_for_picking() {}
@@ -284,6 +339,38 @@ private:
     // When True then need new rendering
     bool m_dirty{ false };
     int count = 0;
+
+    // Docking state. m_docked is persisted per gizmo in AppConfig under
+    // "gizmo_dock_<key>"; m_collapsed is deliberately session-only, as the owner
+    // asked. m_dock_state_loaded makes the AppConfig read happen once, on the
+    // first frame the panel renders, rather than every frame.
+    bool m_docked{ false };
+    bool m_collapsed{ false };
+    bool m_dock_state_loaded{ false };
+    // Set by dock_render_titlebar() when the panel body follows this frame, read
+    // by GizmoImguiEnd() to decide whether the frame's content measurement is a
+    // real one or just the title row.
+    bool m_dock_body_rendered{ false };
+    // Last width an auto-sizing panel's CONTENTS needed while expanded, measured
+    // from ImGuiWindow::ContentSizeIdeal in GizmoImguiEnd(). Deliberately not the
+    // window's own width: a docked window is pinned to the rect dock_setup_next_window()
+    // gives it, so its width only ever reflects the previous frame's guess. A
+    // collapsed panel measures only its title row, which must not become the
+    // docked width.
+    //
+    // Wrapped in DockWidthSettle rather than a bare float: a measurement is
+    // only adopted once it has been seen on two consecutive frames, so a
+    // single transient reading (sub-pixel rounding, a hover/tooltip that
+    // briefly touched the content bounds, the first post-reopen measurement)
+    // cannot make the docked width flip back and forth every frame. See
+    // DockWidthSettle.hpp for the rationale.
+    DockWidthSettle m_dock_width;
+
+    void load_dock_state();
+    void store_dock_state();
+    // The small square pin / chevron buttons, drawn with the draw list so they
+    // need no new glyph in the imgui font atlas and follow the theme colours.
+    bool render_dock_icon_button(const char *id, bool pin, bool active, const wxString &tooltip);
 };
 
 } // namespace GUI

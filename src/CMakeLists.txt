@@ -213,6 +213,10 @@ if (WIN32)
     target_compile_definitions(Snapmaker_Orca_app_gui PRIVATE -DSLIC3R_WRAPPER_NOCONSOLE)
     add_dependencies(Snapmaker_Orca_app_gui Snapmaker_Orca)
     set_target_properties(Snapmaker_Orca_app_gui PROPERTIES OUTPUT_NAME "EdgeSlicer")
+    # The DLL (target Snapmaker_Orca) is also named EdgeSlicer, so without this both links wrote
+    # EdgeSlicer.pdb and the exe's (linked last) silently replaced the DLL's: every crash stack
+    # inside EdgeSlicer.dll symbolised to nonsense. The exe's PDB gets its own name.
+    set_target_properties(Snapmaker_Orca_app_gui PROPERTIES PDB_NAME "EdgeSlicer_app")
     # The shared library above already produces EdgeSlicer.lib as its import library, and
     # MSVC derives an executable's default /IMPLIB from the output name too -- so an
     # EdgeSlicer.exe that links EdgeSlicer.lib fails with LNK1149 (output filename matches

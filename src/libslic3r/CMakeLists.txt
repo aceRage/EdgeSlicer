@@ -14,6 +14,11 @@ endif ()
 set(OpenVDBUtils_SOURCES "")
 if (TARGET OpenVDB::openvdb)
     set(OpenVDBUtils_SOURCES OpenVDBUtils.cpp OpenVDBUtils.hpp MeshRepair.hpp)
+else()
+    # Ultra: without OpenVDB the voxel operations still have to LINK, so the GUI can
+    # ask voxel_ops_available() and hide "Round all edges" instead of offering an
+    # entry that can only ever fail. See MeshRepairStub.cpp.
+    set(OpenVDBUtils_SOURCES MeshRepairStub.cpp MeshRepair.hpp)
 endif()
 
 option(BUILD_SHARED_LIBS "Build shared libs" OFF)
@@ -92,6 +97,8 @@ set(lisbslic3r_sources
     FlexiJoint.cpp
     FlexiJoint.hpp
     ImageFill.hpp
+    ImageRowWalls.cpp
+    ImageRowWalls.hpp
     ColorSplitInternal.hpp
     ColorSplitPartition.cpp
     ColorSplitShell.cpp
@@ -118,6 +125,10 @@ set(lisbslic3r_sources
     CutUtils.hpp
     CurvedCut.cpp
     CurvedCut.hpp
+    DrawCut.cpp
+    DrawCut.hpp
+    CutRecipe.cpp
+    CutRecipe.hpp
     EdgeGrid.cpp
     EdgeGrid.hpp
     ElephantFootCompensation.cpp
@@ -238,6 +249,8 @@ set(lisbslic3r_sources
     GCode/ExtrusionProcessor.hpp
     GCode/FanMover.cpp
     GCode/FanMover.hpp
+    GCode/LayerTimeSpeedSmoothingFilter.cpp
+    GCode/LayerTimeSpeedSmoothingFilter.hpp
     GCode/GCodeProcessor.cpp
     GCode/GCodeProcessor.hpp
     SliceCompare/Snapshot.cpp
@@ -307,6 +320,8 @@ set(lisbslic3r_sources
     Layer.cpp
     Layer.hpp
     LayerRegion.cpp
+    LayOnFace.cpp
+    LayOnFace.hpp
     libslic3r.cpp
     libslic3r.h
     Line.cpp
@@ -317,8 +332,16 @@ set(lisbslic3r_sources
     Measure.cpp
     Measure.hpp
     MeasureUtils.hpp
+    MeshEdit.cpp
+    MeshEdit.hpp
     MeshSculpt.cpp
     MeshSculpt.hpp
+    MeshRemesh.cpp
+    MeshRemesh.hpp
+    MeshRound.cpp
+    MeshRound.hpp
+    QuadRemesh.cpp
+    QuadRemesh.hpp
     MeshSplitImpl.hpp
     MinAreaBoundingBox.cpp
     MinAreaBoundingBox.hpp
@@ -326,6 +349,8 @@ set(lisbslic3r_sources
     MinimumSpanningTree.hpp
     MixedFilament.cpp
     MixedFilament.hpp
+    MixedFilamentCliGates.cpp
+    MixedFilamentCliGates.hpp
     MultiNozzleUtils.cpp
     MultiNozzleUtils.hpp
     FilamentGroup.cpp
@@ -387,6 +412,8 @@ set(lisbslic3r_sources
     Polyline.hpp
     PresetBundle.cpp
     PresetBundle.hpp
+    StartupProfile.cpp
+    StartupProfile.hpp
     Preset.cpp
     Preset.hpp
     PrincipalComponents2D.cpp
@@ -396,6 +423,8 @@ set(lisbslic3r_sources
     PrintBase.hpp
     PrintConfig.cpp
     PrintConfig.hpp
+    LayerTimeSpeedSmoothing.cpp
+    LayerTimeSpeedSmoothing.hpp
     Print.cpp
     Print.hpp
     PrintObject.cpp
@@ -452,6 +481,8 @@ set(lisbslic3r_sources
     #SLA/SupportTreeIGL.cpp
     SLA/SupportTreeMesher.cpp
     SLA/SupportTreeMesher.hpp
+    SliceBake.cpp
+    SliceBake.hpp
     SlicesToTriangleMesh.cpp
     SlicesToTriangleMesh.hpp
     SlicingAdaptive.cpp
@@ -661,6 +692,15 @@ endif ()
 if (TARGET OpenVDB::openvdb)
     target_link_libraries(libslic3r PRIVATE OpenVDB::openvdb)
 endif()
+
+# Ultra: QuadriFlow backs the quad remesher. QuadRemesh.cpp is compiled either way -
+# without the define it provides refusing stubs, so GUI code needs no #ifdef - and
+# SLIC3R_QUAD_REMESH is PUBLIC so the GUI and the tests see the same answer from
+# quad_remesh_available() that libslic3r was built with.
+if (SLIC3R_QUAD_REMESH AND TARGET QuadriFlow::quadriflow)
+    target_link_libraries(libslic3r PRIVATE QuadriFlow::quadriflow)
+    target_compile_definitions(libslic3r PUBLIC SLIC3R_QUAD_REMESH)
+endif ()
 
 if(WIN32)
     target_link_libraries(libslic3r PRIVATE Psapi.lib)

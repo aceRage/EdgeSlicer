@@ -41,6 +41,10 @@ jobs:
     secrets: inherit
   flatpak:
     name: "Flatpak"
+    # A Flatpak failure must never cost us the mac/Linux/Windows artifacts. The job is
+    # already independent of build_all (no `needs:`), so this only stops a red Flatpak
+    # from marking the whole workflow run failed.
+    continue-on-error: true
     concurrency:
       group: flatpak-${{ matrix.variant.arch }}-${{ github.ref }}
       cancel-in-progress: false
@@ -53,6 +57,11 @@ jobs:
         - /opt/ghc:/opt/ghc1
         - /usr/local/share/boost:/usr/local/share/boost1
     strategy:
+      # On 2026-09-18 x86_64 died on a flaky 504 and fail-fast killed aarch64 mid-build,
+      # even though aarch64 had fetched every source and was already compiling wxWidgets.
+      # The per-arch concurrency group below never had a chance to matter. Let each arch
+      # finish on its own.
+      fail-fast: false
       matrix:
         variant:
           - arch: x86_64
@@ -85,7 +94,7 @@ jobs:
       shell: bash
     - uses: flathub-infra/flatpak-github-actions/flatpak-builder@master
       with:
-        bundle: Snapmaker_Orca-Linux-flatpak_${{ env.ver }}_${{ matrix.variant.arch }}.flatpak
+        bundle: EdgeSlicer_Linux_flatpak_${{ env.ver }}_${{ matrix.variant.arch }}.flatpak
         manifest-path: scripts/flatpak/io.github.acerage.EdgeSlicer.yml
         cache: true
         arch: ${{ matrix.variant.arch }}
@@ -94,12 +103,12 @@ jobs:
       id: find_bundle
       working-directory: ${{ github.workspace }}
       run: |
-        BUNDLE_NAME="Snapmaker_Orca-Linux-flatpak_${{ env.ver }}_${{ matrix.variant.arch }}.flatpak"
+        BUNDLE_NAME="EdgeSlicer_Linux_flatpak_${{ env.ver }}_${{ matrix.variant.arch }}.flatpak"
         # Try multiple possible locations
         if [ -f "$BUNDLE_NAME" ]; then
           BUNDLE_PATH="$(pwd)/$BUNDLE_NAME"
-        elif [ -f "/__w/Snapmaker_Orca/Snapmaker_Orca/$BUNDLE_NAME" ]; then
-          BUNDLE_PATH="/__w/Snapmaker_Orca/Snapmaker_Orca/$BUNDLE_NAME"
+        elif [ -f "/__w/EdgeSlicer/EdgeSlicer/$BUNDLE_NAME" ]; then
+          BUNDLE_PATH="/__w/EdgeSlicer/EdgeSlicer/$BUNDLE_NAME"
         else
           # Search in current directory and subdirectories
           FOUND=$(find . -name "$BUNDLE_NAME" -type f | head -1)
@@ -120,7 +129,7 @@ jobs:
     - name: Upload artifacts Flatpak
       uses: actions/upload-artifact@v4
       with:
-        name: Snapmaker_Orca-Linux-flatpak_${{ env.ver }}_${{ matrix.variant.arch }}.flatpak
+        name: EdgeSlicer_Linux_flatpak_${{ env.ver }}_${{ matrix.variant.arch }}.flatpak
         path: ${{ steps.find_bundle.outputs.path }}
         if-no-files-found: error
 
@@ -131,6 +140,6 @@ jobs:
         upload_url: https://uploads.github.com/repos/Snapmaker/OrcaSlicer/releases/169912305/assets{?name,label}
         release_id: 169912305
         asset_path: ${{ steps.find_bundle.outputs.path }}
-        asset_name: Snapmaker_Orca-Linux-flatpak_${{ env.ver }}_${{ matrix.variant.arch }}_Beta.flatpak
+        asset_name: EdgeSlicer_Linux_flatpak_${{ env.ver }}_${{ matrix.variant.arch }}_Beta.flatpak
         asset_content_type: application/octet-stream
         max_releases: 1 # optional, if there are more releases than this matching the asset_name, the oldest ones are going to be deleted

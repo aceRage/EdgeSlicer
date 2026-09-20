@@ -35,6 +35,8 @@ html, body { width: 100%; height: 100%; background: #2b2b2b; font-family: 'Segoe
 #spacer { flex: 1; }
 select { background: #3a3a3a; color: #fff; border: 1px solid #555; border-radius: 6px; padding: 5px 8px; font-size: 13px; }
 #layoutbox { display: inline-flex; align-items: center; gap: 4px; color: #aaa; font-size: 12px; }
+#videobox { display: none; align-items: center; gap: 4px; margin-right: 8px; }
+#videowarn { display: none; color: #e0a33c; font-size: 15px; cursor: pointer; padding: 0 2px; }
 #grid { position: absolute; top: var(--bar-h, 52px); left: 0; right: 0; bottom: 0; display: grid; gap: 4px; padding: 4px; padding-bottom: calc(4px + env(safe-area-inset-bottom)); padding-left: calc(4px + env(safe-area-inset-left)); padding-right: calc(4px + env(safe-area-inset-right)); background: #2b2b2b; overflow-y: auto; overflow-x: hidden; align-content: start; -webkit-overflow-scrolling: touch; }
 #grid::-webkit-scrollbar { width: 10px; }
 #grid::-webkit-scrollbar-track { background: #222; }
@@ -42,6 +44,15 @@ select { background: #3a3a3a; color: #fff; border: 1px solid #555; border-radius
 #grid::-webkit-scrollbar-thumb:hover { background: #777; }
 .cell { position: relative; background: #000; border-radius: 4px; overflow: hidden; }
 .cell iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; }
+/* Phone only (body.remote, set next to the other REMOTE-mode setup): each tile takes the shape of
+   its own camera instead of one row height for all of them, so a 4:3 stream (the Snapmaker U1's)
+   is not letterboxed inside a 16:9 box - which is also what pushed the name label and the expand
+   button out beside the picture rather than over it. --cell-ar is set per cell by render() and by
+   the player's snorcaAspect message; --cell-max is the landscape cap (a tile is never taller than
+   the visible grid). The PC keeps grid-auto-rows and never sees either of these rules. */
+body.remote .cell { aspect-ratio: var(--cell-ar, 16 / 9); max-height: var(--cell-max, none); }
+/* An expanded tile fills the screen: neither the aspect nor the cap applies to it. */
+body.remote .cell.expanded { aspect-ratio: auto; max-height: none; }
 .cell .label { -webkit-touch-callout: none; }
 @media (min-width: 641px) and (max-width: 1100px) and (pointer: coarse) { /* tablets */
     .chip { font-size: 14px; padding: 8px 12px; }
@@ -131,6 +142,13 @@ body.dragging .cell iframe, body.dragging .cell img { pointer-events: none; }
 .card .bar div { height: 100%; background: #0a9e50; width: 0; transition: width .3s; }
 .printer { background: #2f2f2f; border-left: 4px solid #555; border-radius: 6px; padding: 10px 12px; color: #ddd; margin-bottom: 8px; }
 .printer.online { border-left-color: #0a9e50; }
+/* The card a notification was tapped through on: the app writes its printer id to localStorage
+   (edgeslicer_pending_printer) and the page scrolls here and says so for a moment. Deliberately a
+   fading outline rather than a lasting state - it answers "which one was that?" and then gets out
+   of the way. */
+.printer.pointed { box-shadow: 0 0 0 2px #3d8fd6; animation: pointed 6s ease-out forwards; }
+@keyframes pointed { 0%, 60% { box-shadow: 0 0 0 2px #3d8fd6; } 100% { box-shadow: 0 0 0 2px rgba(61,143,214,0); } }
+@media (prefers-reduced-motion: reduce) { .printer.pointed { animation: none; } }
 .printer .name { font-weight: 600; margin-bottom: 4px; }
 .printer .meta { color: #aaa; font-size: 12px; line-height: 1.5; }
 .printer .temps { display: flex; gap: 14px; margin-top: 6px; }
@@ -349,6 +367,20 @@ body.dragging .cell iframe, body.dragging .cell img { pointer-events: none; }
     <span class="chip" id="phonechip" title="Open this camera wall on your phone">&#128241; Phone</span>
     <span id="spacer"></span>
     <span id="note"></span>
+    <span id="videobox">
+      <span id="videowarn" title="">&#9888;</span>
+      <select id="videomode" title="How camera video reaches this phone.">
+        <option value="auto">Video: auto</option>
+        <option value="webrtc">Video: WebRTC</option>
+        <option value="mse">Video: relay</option>
+      </select>
+      <select id="videoquality" title="How much picture to send. Lower settings cost less bandwidth on a slow link.">
+        <option value="auto">Quality: auto</option>
+        <option value="high">Quality: high</option>
+        <option value="med">Quality: medium</option>
+        <option value="low">Quality: low</option>
+      </select>
+    </span>
     <span id="layoutbox" title="Grid layout: columns x rows (drag a name to reorder)">
       <select id="cols"></select><span>&times;</span><select id="rows"></select>
     </span>
@@ -386,6 +418,9 @@ body.dragging .cell iframe, body.dragging .cell img { pointer-events: none; }
     var REMOTE_KEY = 'snorca_remote_v1';
     if (REMOTE) {
         try { document.cookie = 'rt=' + REMOTE.split('/')[2] + '; path=/; SameSite=Lax'; } catch (e) {}
+        // The phone's per-tile aspect rules hang off this class (see .cell in the stylesheet), so
+        // the PC's layout stays byte-identical.
+        document.body.classList.add('remote');
         document.getElementById('addchip').style.display = 'none';
         document.getElementById('phonechip').style.display = 'none';
     }
@@ -561,13 +596,135 @@ body.dragging .cell iframe, body.dragging .cell img { pointer-events: none; }
         });
         postToSlicer('stream_state:' + JSON.stringify({ hosts: hosts, active: state.active }));
     }
+    // How video reaches this phone, kept per phone (not on the PC). This is the *default* for
+    // every camera tile; a single tile can still be overridden with its own mode picker (the
+    // badge in its corner), which is what the per-tile modePrefs below are for.
+    //
+    // 'auto' asks the player for 'webrtc,mse': the bundled go2rtc player starts both, plays the
+    // relayed MSE stream at once and swaps to the direct WebRTC one the moment it produces a
+    // picture, so there is no gap and no wait if WebRTC cannot get through (a blocked firewall
+    // port, a network that drops UDP).
+    var VIDEO_KEY = 'snorca_remote_video';
+    var videoPref = 'auto', remoteWebrtc = false, videoNote = '';
+    try { var vp = localStorage.getItem(VIDEO_KEY); if (vp === 'webrtc' || vp === 'mse' || vp === 'auto') videoPref = vp; } catch (e) {}
+    // Tailscale Serve is an HTTPS reverse proxy: it forwards TCP to 127.0.0.1 and cannot forward
+    // the UDP media WebRTC needs, so a phone arriving through a Serve origin (https on a .ts.net
+    // name) can never complete a peer connection however healthy the hub's listener is. Auto
+    // therefore does not even try there - it would cost the fallback timeout on every tile for a
+    // path that cannot work. Forcing 'Video: WebRTC' by hand still tries, because a phone *on*
+    // the tailnet (rather than behind Serve) reaches the media port directly and does work.
+    function serveOrigin() {
+        return location.protocol === 'https:' && /\.ts\.net$/i.test(location.hostname);
+    }
+    // Whether a WebRTC attempt is worth making at all, for Auto. The hub half of this is
+    // remoteWebrtc (see webrtcOffered below); this adds the origin the page was loaded from.
+    function webrtcUsable() { return remoteWebrtc && !serveOrigin(); }
+    // ---- Quality -------------------------------------------------------------------------
+    // What the hub can actually offer, from /state: quality[] is the variant suffixes it managed
+    // to register ('med','low' - empty when the PC has no ffmpeg for go2rtc to re-encode with),
+    // and qnames maps them per host to the go2rtc stream name to ask for. quality_mjpeg says the
+    // Bambu relay's frame-drop knob is available, which needs no encoder and so is always true.
+    var QUALITY_KEY = 'snorca_remote_quality';
+    var qualityPref = 'auto', hubQuality = [], hubQualityMjpeg = false, hostQNames = {};
+    try { var qp = localStorage.getItem(QUALITY_KEY); if (qp === 'high' || qp === 'med' || qp === 'low' || qp === 'auto') qualityPref = qp; } catch (e) {}
+    // Auto: the link decides. A Serve origin or a DERP-relayed tailnet hop is the slow case this
+    // setting exists for, so it starts low there; on the LAN it stays at the source. A tile that
+    // stalls in its first seconds drops one step by itself (see noteTileStall).
+    var qualityStalled = {};   // cell id -> true once its first seconds buffered
+    function autoQuality(id) {
+        if (serveOrigin()) return 'low';
+        if (qualityStalled[id]) return 'low';
+        return connHere === 'home' ? 'high' : 'med';
+    }
+    // The step this tile is on. Deliberately NOT clamped to hubQuality here: the two delivery
+    // paths can honour a step independently, and clamping centrally would break the common one.
+    // A go2rtc tile needs a registered '<name>_med' variant (ffmpeg) and falls back to the source
+    // name without one - that clamp lives in qualityName(). A Bambu MJPEG tile needs no variant at
+    // all, only ?fps=, so it can honour Medium and Low on a PC with no ffmpeg whatsoever - which
+    // is the stock install. Clamping here returned 'high' for everything in that case and turned
+    // the whole setting off.
+    function qualityFor(id) {
+        return qualityPref === 'auto' ? autoQuality(id) : qualityPref;
+    }
+    // The go2rtc stream name for a tile at its chosen step; the source name at 'high' or when the
+    // hub has no variant for it.
+    function qualityName(id, rname) {
+        var q = qualityFor(id);
+        if (q === 'high') return rname;
+        var m = hostQNames[id];
+        return (m && m[q]) ? m[q] : rname;
+    }
+    // The MJPEG (Bambu relay) half: a frame rate rather than a stream name, because that path has
+    // no encoder to re-scale with - see BambuCamRelay. 0 means every frame.
+    function qualityFps(id) {
+        if (!hubQualityMjpeg) return 0;
+        var q = qualityFor(id);
+        return q === 'low' ? 5 : q === 'med' ? 10 : 0;
+    }
+    var QUALITY_LABEL = { high: 'High', med: 'Medium', low: 'Low' };
+    // A tile that buffered in its first seconds steps down once and rebuilds, but only under
+    // Auto - an explicit choice is the user's and is never overridden.
+    function noteTileStall(id) {
+        if (qualityPref !== 'auto' || qualityStalled[id]) return;
+        qualityStalled[id] = true;
+        document.querySelectorAll('#grid .cell').forEach(function(c) { if (c.dataset.id === id) c.remove(); });
+        render();
+    }
+    function renderQualityBox() {
+        if (!REMOTE) return;
+        var sel = document.getElementById('videoquality');
+        if (!sel) return;
+        sel.value = qualityPref;
+        // Steps the hub cannot deliver are hidden rather than offered and silently ignored.
+        ['med', 'low'].forEach(function(q) {
+            var o = sel.querySelector('option[value="' + q + '"]');
+            if (o) o.hidden = hubQuality.indexOf(q) === -1 && !hubQualityMjpeg;
+        });
+        sel.title = 'How much picture to send. Lower settings cost less bandwidth on a slow link.' +
+                    (hubQuality.length === 0
+                     ? ' This PC has no ffmpeg, so go2rtc cannot make downscaled copies of a camera stream: only the Bambu MJPEG relay can be turned down (fewer frames per second).'
+                     : '') +
+                    (qualityPref === 'auto' ? ' Auto starts low over a remote link and at the source quality on your home network.' : '');
+    }
+    function renderVideoBox() {
+        if (!REMOTE) return;
+        var box = document.getElementById('videobox'), sel = document.getElementById('videomode'), warn = document.getElementById('videowarn');
+        box.style.display = document.getElementById('layoutbox').style.display === 'none' ? 'none' : 'inline-flex'; // follows the layout picker
+        sel.value = videoPref;
+        // The WebRTC entry is only offered when the hub has a listener to answer with; without
+        // one it would silently never play. Same rule as streamModes(), one source of truth.
+        var wopt = sel.querySelector('option[value="webrtc"]');
+        if (wopt) wopt.hidden = !remoteWebrtc;
+        if (!remoteWebrtc && videoPref === 'webrtc') { videoPref = 'auto'; sel.value = 'auto'; }
+        // The help text says what Auto will actually do from *this* origin, so the Serve case is
+        // explained where the user meets it rather than only in the docs.
+        sel.title = 'How camera video reaches this phone. Auto tries a direct WebRTC connection and keeps the relayed stream playing until it takes over.' +
+                    (!remoteWebrtc ? ' This hub has no WebRTC listener, so Auto uses the relay.'
+                     : serveOrigin() ? ' You are connected through Tailscale Serve, an HTTPS proxy that cannot carry WebRTC’s UDP media, so Auto uses the relay here. Choosing WebRTC forces an attempt anyway (it works from a phone on the tailnet itself).'
+                     : '');
+        var show = !!videoNote && videoPref !== 'mse' && !serveOrigin();
+        warn.style.display = show ? 'inline' : 'none'; // the stylesheet hides it, so name a value
+        warn.title = videoNote;
+        // The Quality select lives in the same #videobox, so its visibility is already handled;
+        // this keeps its labels and its hidden options in step with the same render.
+        renderQualityBox();
+    }
     // Phone mode: pull the list from the PC now and every 15 s.
     function fetchRemoteState() {
         fetch(REMOTE + 'state').then(function(r) { return r.json(); }).then(function(s) {
             var hosts = (s && s.hosts) || [];
             var known = {};
             hosts.forEach(function(h) { known[h.id] = true; });
-            var changed = JSON.stringify(hosts) !== JSON.stringify(state.hosts);
+            var wasMode = autoStreamMode();
+            remoteWebrtc = !!(s && s.webrtc);
+            videoNote = (s && s.video_note) || '';
+            hubQuality      = (s && s.quality) || [];
+            hubQualityMjpeg = !!(s && s.quality_mjpeg);
+            hostQNames = {};
+            hosts.forEach(function(h) { if (h.qnames) hostQNames[h.id] = h.qnames; });
+            renderQualityBox();
+            var changed = JSON.stringify(hosts) !== JSON.stringify(state.hosts) || autoStreamMode() !== wasMode;
+            renderVideoBox();
             state.hosts = hosts;
             var before = state.active.join(',');
             state.active = state.active.filter(function(id) { return known[id]; });
@@ -804,13 +961,23 @@ body.dragging .cell iframe, body.dragging .cell img { pointer-events: none; }
     // generated go2rtc.yaml. mp4 and mjpeg ride the /api/ws tunnel that already exists, so 'hls'
     // is deliberately never in the string.
     //
-    // Why not WebRTC by default: the hub's generated go2rtc.yaml sets `webrtc: listen: ""` and
-    // `srtp: listen: ""` (RemoteHub.cpp, start_go2rtc), so go2rtc has no candidate to offer and an
-    // offer is never answered - not even on the LAN; and Tailscale Serve is an HTTPS reverse proxy
-    // that could not carry the UDP media anyway. It stays in the manual list for whoever turns it
-    // on, and WEBRTC_RELAY is the one line to flip when they do.
-    var WEBRTC_RELAY = false;
-    var STREAM_MODES = ['auto', 'webrtc', 'mp4', 'mjpeg', 'mse'];
+    // WebRTC: the hub's generated go2rtc.yaml used to set `webrtc: listen: ""`, so go2rtc had no
+    // candidate to offer and an offer was never answered - not even on the LAN. That is no longer
+    // true: RemoteHub.cpp (start_go2rtc) binds a media port in 8555-8574 and reports it, so the
+    // page asks the hub rather than carrying a hand-flipped constant. A hub built or configured
+    // without the listener reports false and the WebRTC entry stays hidden exactly as before,
+    // which is the point of reading it instead of hard-coding true.
+    //
+    // remoteWebrtc is set from /state (see fetchRemoteState); on the PC's own Stream tab there is
+    // no hub to ask and no WebRTC either, so it stays false and the list is unchanged there.
+    function webrtcOffered() { return REMOTE ? remoteWebrtc : false; }
+    // The mode list is rebuilt whenever that answer changes, so the entry appears the moment the
+    // hub's first /state arrives rather than only on a reload.
+    function streamModes() {
+        // MP4 (go2rtc's keyframe stills) and MJPEG (needs an MJPEG producer our H.264 sources lack)
+        // stay in the Auto fallback chain but are no longer offered by hand (owner, 2026-09-12).
+        return webrtcOffered() ? ['auto', 'webrtc', 'mse'] : ['auto', 'mse'];
+    }
     var MODE_LABEL   = { auto: 'Auto', webrtc: 'WebRTC', mp4: 'MP4', mjpeg: 'MJPEG', mse: 'MSE' };
     var MODE_KEY     = 'snorca_stream_mode';
     var modePrefs = {};
@@ -822,14 +989,30 @@ body.dragging .cell iframe, body.dragging .cell img { pointer-events: none; }
                (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
     }
     function autoStreamMode() {
-        // A desktop browser on the home network keeps exactly what it had: 'mse', byte for byte.
-        if (connHere === 'home' && !iosWebKit()) return 'mse';
-        return WEBRTC_RELAY ? 'webrtc,mp4,mjpeg' : 'mp4,mjpeg';
+        // The PC's own Stream tab (not REMOTE) on the home network keeps exactly what it had:
+        // 'mse', byte for byte. It is same-origin loopback, there is no hub to ask about a
+        // WebRTC listener, and nothing about that path needed improving.
+        //
+        // A *phone* on the home network is a different case, and used to fall in here too: it
+        // loads this page from http://<pc>:13640/r/<token>/, so connHere is 'home', and an
+        // Android phone is not iosWebKit() - which meant the LAN phone, the case WebRTC helps
+        // most and the one the firewall rule exists for, would never have tried it.
+        if (!REMOTE && connHere === 'home' && !iosWebKit()) return 'mse';
+        // The per-phone Video setting is the default for Auto tiles. 'mse' means the relay only;
+        // 'webrtc' forces an attempt even from a Serve origin (the user asked for it); 'auto'
+        // tries WebRTC only where it can actually work - webrtcUsable() is the hub's listener
+        // AND an origin that can carry UDP.
+        if (videoPref === 'mse') return 'mse,mp4,mjpeg';
+        if (videoPref === 'webrtc' && webrtcOffered()) return 'webrtc,mse,mp4,mjpeg';
+        return webrtcUsable() ? 'webrtc,mse,mp4,mjpeg' : 'mse,mp4,mjpeg';
     }
     function streamMode(id) {
         var p = modePrefs[id];
-        if (p === 'webrtc') return 'webrtc,mp4,mjpeg';  // with a fallback: a dead offer is not a black square
-        if (p === 'mp4' || p === 'mjpeg' || p === 'mse') return p;
+        // A dead offer is not a black square: WebRTC always carries its fallbacks behind it, and
+        // player.html drops the peer connection after rtctimeout if it has not produced a picture.
+        if (p === 'webrtc') return 'webrtc,mse,mp4,mjpeg';
+        if (p === 'mse') return p;
+        // A pick saved while MP4/MJPEG were still on the menu is treated as Auto rather than honoured.
         return autoStreamMode();
     }
     function setStreamMode(id, v) {
@@ -838,17 +1021,27 @@ body.dragging .cell iframe, body.dragging .cell img { pointer-events: none; }
         document.querySelectorAll('#grid .cell').forEach(function(c) { if (c.dataset.id === id) c.remove(); });
         render();
     }
-    // The badge and the override in one control: it reads "Auto \u00b7 MP4" (what is playing) and
-    // opens as a picker. The player inside the iframe shows the mode it actually settled on in its
-    // own corner, which is the check on this one.
+    // Which mode a tile actually ended on, as the player reported it (player.html posts
+    // snorcaMode once it has a picture). Until that arrives the badge shows the first mode we
+    // asked for, which is a guess; afterwards it is the truth, and for 'webrtc,mp4,mjpeg' those
+    // two differ exactly when the fallback happened - which is the thing worth seeing.
+    var tileMode = {};   // cell id -> mode the player settled on, this page load only
+    // The badge and the override in one control: it reads "Auto · WebRTC" (what is playing)
+    // and opens as a picker.
     function modePicker(cell, id) {
-        var active = streamMode(id).split(',')[0];
+        var asked  = streamMode(id).split(',')[0];
+        var active = tileMode[id] || asked;
         var sel = el('select', 'modepick');
-        sel.title = 'Stream mode for this camera (mode=' + streamMode(id) + ')';
+        sel.title = 'Stream mode for this camera (asked for mode=' + streamMode(id) + ')' +
+                    (tileMode[id] && tileMode[id] !== asked ? ', playing ' + MODE_LABEL[tileMode[id]] : '');
         sel.setAttribute('aria-label', 'Stream mode');
         sel.setAttribute('data-active', active);
-        STREAM_MODES.forEach(function(m) {
-            var o = el('option', '', m === 'auto' ? 'Auto \u00b7 ' + MODE_LABEL[active] : MODE_LABEL[m]);
+        streamModes().forEach(function(m) {
+            // "Auto · WebRTC · Low": the path it settled on, then the quality step, but only
+            // when that step is not the source (High is the unremarkable case and stays unsaid).
+            var qs = qualityFor(id);
+            var lbl = 'Auto · ' + (MODE_LABEL[active] || active) + (qs !== 'high' ? ' · ' + QUALITY_LABEL[qs] : '');
+            var o = el('option', '', m === 'auto' ? lbl : MODE_LABEL[m]);
             o.value = m;
             if ((modePrefs[id] || 'auto') === m) o.selected = true;
             sel.appendChild(o);
@@ -858,20 +1051,115 @@ body.dragging .cell iframe, body.dragging .cell img { pointer-events: none; }
         cell.appendChild(sel);
     }
 
+    // ---- per-tile aspect (phone only) ----------------------------------------------------
+    // A tile is shaped like the picture inside it, so nothing is letterboxed and the label and the
+    // expand button overlay the video. Two sources, best first:
+    //   * the relay player (our own /stream.html, same origin) posts the decoded videoWidth /
+    //     videoHeight once it has metadata - see player.html - and that is exact;
+    //   * a printer's own page is a cross-origin iframe we can learn nothing from, so it gets a
+    //     per-kind guess: a Snapmaker U1's camera page (/webcam/...) is 4:3, everything else -
+    //     Bambu and the general case - 16:9.
+    // Nothing is persisted: a wrong guess costs one render and the real value replaces it as soon
+    // as the relay player reports, so there is nothing to go stale in localStorage.
+    var CELL_AR_DEFAULT = 16 / 9;
+    var cellAspect = {};     // stream name (rname) -> measured aspect, this page load only
+    var phoneTileW = 0; // the column width render() laid the phone grid out with
+    function setCellAspect(cell, ar) {
+        if (!REMOTE || !cell || !(ar > 0.2 && ar < 6)) return; // ignore nonsense (a 0x0 frame, say)
+        cell.style.setProperty('--cell-ar', ar);
+        // An explicit height as well as the aspect-ratio: Android's WebView (Chromium 130-era)
+        // sizes an auto grid row from the cell's content, not from its aspect-ratio, so the
+        // 4:3 cells were 296px tall in 181px rows and each tile painted over the bottom of the
+        // one above - the picture looked cropped. Measured on the emulator, 2026-09-11.
+        if (phoneTileW > 0 && !cell.classList.contains('expanded')) {
+            var g = document.getElementById('grid');
+            var cap = g.clientHeight > 68 ? g.clientHeight - 8 : Infinity;
+            cell.style.height = Math.max(60, Math.min(Math.floor(phoneTileW / ar), cap)) + 'px';
+        }
+    }
+    // The guess a tile starts with, before (or instead of) a measurement.
+    function guessAspect(h) {
+        if (h && h.rname && cellAspect[h.rname]) return cellAspect[h.rname];
+        // A U1 serves its camera at http://<printer>/webcam/webrtc; its sensor is 4:3.
+        if (h && h.rkind === 'url' && h.rurl && h.rurl.indexOf('/webcam/') !== -1) return 4 / 3;
+        return CELL_AR_DEFAULT;
+    }
+    // Our own player, same origin, telling us what it actually decoded.
+    window.addEventListener('message', function(e) {
+        if (e.origin !== location.origin) return;
+        var d = e.data;
+        if (!d || typeof d !== 'object') return;
+        // Which path the tile settled on, for its badge. The cell is found the same way as the
+        // aspect below: e.source is the reporting frame's window.
+        if (typeof d.snorcaMode === 'string' && d.snorcaMode) {
+            document.querySelectorAll('#grid .cell').forEach(function(cell) {
+                var fr = cell.querySelector('iframe');
+                if (!fr || fr.contentWindow !== e.source) return;
+                var id = cell.dataset.id;
+                if (!id || tileMode[id] === d.snorcaMode) return;
+                tileMode[id] = d.snorcaMode;
+                // Relabel in place: rebuilding the cell would restart the stream it just settled.
+                var sel = cell.querySelector('select.modepick');
+                if (!sel) return;
+                sel.setAttribute('data-active', d.snorcaMode);
+                var opt = sel.querySelector('option[value="auto"]');
+                var qs2 = qualityFor(id);
+                if (opt) opt.textContent = 'Auto · ' + (MODE_LABEL[d.snorcaMode] || d.snorcaMode) +
+                                           (qs2 !== 'high' ? ' · ' + QUALITY_LABEL[qs2] : '');
+            });
+        }
+        // A tile that could not keep up in its first seconds: under Auto, step its quality down
+        // once. Same cell lookup as above.
+        if (d.snorcaStall === true) {
+            document.querySelectorAll('#grid .cell').forEach(function(cell) {
+                var fr = cell.querySelector('iframe');
+                if (fr && fr.contentWindow === e.source && cell.dataset.id) noteTileStall(cell.dataset.id);
+            });
+        }
+        if (typeof d.snorcaAspect !== 'number') return;
+        var ar = d.snorcaAspect;
+        if (!(ar > 0.2 && ar < 6)) return;
+        if (d.src) cellAspect[d.src] = ar;
+        // Find the cell whose iframe sent this - e.source is the frame's window.
+        document.querySelectorAll('#grid .cell').forEach(function(cell) {
+            var f = cell.querySelector('iframe');
+            if (f && f.contentWindow === e.source) setCellAspect(cell, ar);
+        });
+    });
+
     // Phone mode cells: everything comes through the slicer's token-gated listener.
     function remoteCell(h, cell) {
         var msg = null;
-        if (h.rkind === 'go2rtc' || (h.rkind === 'url' && h.relay && h.rname && relayPreferred())) {
+        setCellAspect(cell, guessAspect(h));
+        if (h.rkind === 'go2rtc' || (h.rkind === 'url' && h.relay && h.rname)) {
+            // The relay whenever the hub has one, on the LAN too (2026-09-12). The U1's own
+            // /webcam/webrtc page serves a 640x480 crop of its camera, while the raw H.264 the
+            // relay carries is the full 1920x1080 frame the PC shows - so the phone page looked
+            // "zoomed in" next to the desktop. And the printer accepts one camera consumer at a
+            // time: with every viewer on go2rtc it sees exactly one, and a second phone or the
+            // desktop no longer knocks the first off to a black tile.
             var f = document.createElement('iframe');
             f.allow = 'autoplay';
             f.setAttribute('scrolling', 'no'); // iOS otherwise grows the frame to its content
-            f.src = '/stream.html?src=' + encodeURIComponent(h.rname) + '&mode=' + encodeURIComponent(streamMode(h.id));
+            // The stream name carries the quality step (a '<name>_med' / '_low' variant the hub
+            // registered, or the source name), so a slow link asks go2rtc for less picture rather
+            // than throttling a full one.
+            f.src = '/stream.html?src=' + encodeURIComponent(qualityName(h.id, h.rname)) + '&mode=' + encodeURIComponent(streamMode(h.id));
             cell.appendChild(f);
             modePicker(cell, h.id);
         } else if (h.rkind === 'p1') {
             var im = document.createElement('img');
             im.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;object-fit:contain;';
-            im.src = REMOTE + 'bambu?id=' + encodeURIComponent(h.id);
+            // Same document, so the frame's own size is readable - no guess needed. (A Bambu's is
+            // 16:9, which is the default anyway; this just makes it exact and survives a change.)
+            im.addEventListener('load', function() {
+                if (im.naturalWidth && im.naturalHeight) setCellAspect(cell, im.naturalWidth / im.naturalHeight);
+            });
+            // The MJPEG relay has no encoder to downscale with, so its quality knob is a frame
+            // rate (BambuCamRelay drops whole JPEGs). 0 = every frame, and the parameter is left
+            // off entirely then so nothing changes for the High case.
+            var fps = qualityFps(h.id);
+            im.src = REMOTE + 'bambu?id=' + encodeURIComponent(h.id) + (fps ? '&fps=' + fps : '');
             cell.appendChild(im);
         } else if (h.rkind === 'url' && h.rurl) {
             var f2 = document.createElement('iframe');
@@ -1247,8 +1535,10 @@ body.dragging .cell iframe, body.dragging .cell img { pointer-events: none; }
         document.querySelectorAll('#grid .cell.expanded').forEach(function(c) {
             c.classList.remove('expanded');
             var b = c.querySelector('.expand'); if (b) { b.textContent = '\u2922'; b.title = 'Expand'; }
+            if (c.dataset.tileH) { c.style.height = c.dataset.tileH; delete c.dataset.tileH; } // phone: the tile height set by setCellAspect
         });
         if (on) {
+            if (cell.style.height) { cell.dataset.tileH = cell.style.height; cell.style.height = ''; } // inset:0 must win while expanded
             cell.classList.add('expanded');
             var b2 = cell.querySelector('.expand'); if (b2) { b2.textContent = '\u2715'; b2.title = 'Close'; }
         }
@@ -1341,19 +1631,22 @@ body.dragging .cell iframe, body.dragging .cell img { pointer-events: none; }
         grid.style.gridTemplateColumns = 'repeat(' + lay.cols + ', 1fr)';
         // The layout sets the columns and how many rows fit on screen; every selected
         // stream is rendered and extra rows scroll.
-        var rowH;
         if (REMOTE) {
-            // Phone: tiles keep a 16:9 shape at the column width and scroll, instead of being
-            // stretched to fill the rows on screen (which letterboxes the stream). The layout's
-            // row count only decides when the "more below" note shows.
-            var tileW = (grid.clientWidth - 8 - (lay.cols - 1) * 4) / lay.cols;
-            rowH = Math.max(60, Math.floor(tileW * 9 / 16));
-            // ... but never taller than the screen (a one-column layout in landscape).
-            if (grid.clientHeight > 68) rowH = Math.min(rowH, grid.clientHeight - 8);
+            // Phone: each tile takes its own camera's shape (CSS aspect-ratio on the cell, see
+            // body.remote .cell) and the rows size themselves, instead of one 16:9 row height for
+            // every tile - a 4:3 U1 stream in a 16:9 box is letterboxed with wide black bars, and
+            // the label / expand button then sit beside the picture rather than over it. The
+            // layout's row count still only decides when the "more below" note shows.
+            grid.style.gridAutoRows = 'auto';
+            phoneTileW = (grid.clientWidth - 8 - (lay.cols - 1) * 4) / lay.cols;
+            // The landscape cap that the old row height carried: a tile is never taller than the
+            // visible grid (a one-column layout turned sideways). Published as a custom property
+            // so the cap follows a cell whatever aspect it ends up with.
+            grid.style.setProperty('--cell-max', grid.clientHeight > 68 ? (grid.clientHeight - 8) + 'px' : 'none');
         } else {
-            rowH = Math.max(60, Math.floor((grid.clientHeight - 8 - (lay.rows - 1) * 4) / lay.rows));
+            var rowH = Math.max(60, Math.floor((grid.clientHeight - 8 - (lay.rows - 1) * 4) / lay.rows));
+            if (grid.clientWidth > 0) grid.style.gridAutoRows = rowH + 'px'; // hidden (another view): keep the last size
         }
-        if (grid.clientWidth > 0) grid.style.gridAutoRows = rowH + 'px'; // hidden (another view): keep the last size
         var count = Math.ceil(Math.max(state.active.length, lay.n) / lay.cols) * lay.cols;
 
         var shown = state.active;
@@ -1468,6 +1761,32 @@ body.dragging .cell iframe, body.dragging .cell img { pointer-events: none; }
             save(); render();
         };
     });
+    if (REMOTE) {
+        var vsel = document.getElementById('videomode');
+        vsel.value = videoPref;
+        vsel.onchange = function() {
+            videoPref = vsel.value;
+            try { localStorage.setItem(VIDEO_KEY, videoPref); } catch (e) {}
+            // Every camera tile is an iframe with the mode in its URL: drop them and rebuild.
+            // What each tile had settled on goes with them - it described the old mode.
+            tileMode = {};
+            document.querySelectorAll('#grid .cell').forEach(function(cell) { cell.remove(); });
+            renderVideoBox(); render();
+        };
+        var qsel = document.getElementById('videoquality');
+        qsel.value = qualityPref;
+        qsel.onchange = function() {
+            qualityPref = qsel.value;
+            try { localStorage.setItem(QUALITY_KEY, qualityPref); } catch (e) {}
+            // A step the user chose clears what Auto had learned, so going back to Auto starts
+            // from the link again rather than from an old stall.
+            qualityStalled = {};
+            // The step is in every tile's URL (a stream name, or ?fps=): drop them and rebuild.
+            document.querySelectorAll('#grid .cell').forEach(function(cell) { cell.remove(); });
+            renderQualityBox(); render();
+        };
+        document.getElementById('videowarn').onclick = function() { if (videoNote) alert(videoNote); };
+    }
     window.addEventListener('resize', function() {
         if (REMOTE && remoteAutoLayout && state.layout !== remoteDefaultLayout()) { state.layout = remoteDefaultLayout(); save(); }
         render();
@@ -1639,6 +1958,7 @@ body.dragging .cell iframe, body.dragging .cell img { pointer-events: none; }
         document.getElementById('reprints').style.display = v === 'reprints' ? 'block' : 'none';
         document.getElementById('chips').style.display = v === 'streams' ? '' : 'none';
         document.getElementById('layoutbox').style.display = v === 'streams' ? '' : 'none';
+        renderVideoBox();
         if (v === 'streams') render(); // tile sizes come from the grid's on-screen size
         // Hiding/showing the camera chips row just changed #topbar's height (fewer rows outside
         // Streams); every .view reads --bar-h to know where it starts, so it has to be recomputed
@@ -3160,6 +3480,7 @@ body.dragging .cell iframe, body.dragging .cell img { pointer-events: none; }
         }).catch(function() { s.timer = setTimeout(function() { ctlPoll(id); }, 2000); });
     }
     function ctlAskStop(p) {
+        errAsk = null; // one sheet, one question
         ctlAsk = p;
         document.getElementById('ctlsheet').style.display = 'flex';
         ctlAskRender();
@@ -3188,6 +3509,142 @@ body.dragging .cell iframe, body.dragging .cell img { pointer-events: none; }
         var no = el('span', 'btn alt', 'Keep printing'); no.onclick = ctlAskClose; acts.appendChild(no);
         c.appendChild(acts);
         body.appendChild(c);
+    }
+    // ---- What to do about a printer error (POST /api/printers/{id}/control with the error's own
+    // verb). The buttons are not invented here: print_error.actions is the set the printer's own
+    // error table asks for, already resolved by the slicer through the same code the desktop
+    // dialog uses, each entry carrying the verb, the label and whether it may be pressed from
+    // here. This renders what it is given and nothing else - an action the slicer marked
+    // remote_safe=false is shown greyed with the reason, never as a working button, and a code the
+    // table has no actions for gets no row at all.
+    //
+    // Nothing is ever sent without a tap. Resume and Ignore are two different commands with two
+    // different meanings and the wording has to keep them apart: resuming says the fault is
+    // handled, ignoring says carry on with the fault still there. ----
+    var errJobs = {}; // printer id -> { verb, phase: running|done|error, text, error, job, timer }
+    var errAsk  = null; // { p, a } while a confirmation is open
+
+    // Why a button the slicer sent but marked unsafe is off.
+    function errWhyNot(p, a) {
+        if (a.needs_job_id && !(p.print_error && p.print_error.job_id))
+            return 'The printer is not reporting a job for this error, so it would ignore this command.';
+        // Proceed and Don't remind are built out of the details a refused command sends with its
+        // error. An error that arrived any other way carries none, and then there is nothing to
+        // build the command from - which is a different reason from the hardware one below.
+        if (a.needs_details && !(p.print_error && p.print_error.has_details))
+            return 'The printer did not send the details this button is built from with this error, so there is nothing to answer it with.';
+        return 'This has to be done at the printer: it moves or silences hardware whose state cannot be checked from here.';
+    }
+    // The ones that need a second tap: stopping throws the print away, and the ignore family
+    // continues a print with the fault still present. Everything else acts on the first tap, as
+    // the desktop's dialog does.
+    function errNeedsAsk(verb) {
+        return verb === 'stop_error' || verb === 'ignore_error' || verb === 'idle_ignore_error' ||
+               verb === 'dont_remind';
+    }
+    function errAskText(p, a) {
+        if (a.verb === 'stop_error')
+            return 'Stop the print on ' + p.name + '? It cannot be resumed: the printer throws the job away and the plate has to be started again.';
+        if (a.verb === 'idle_ignore_error' || a.verb === 'dont_remind')
+            return 'Stop reminding you about this error on ' + p.name + '? The print is not touched and the fault is not fixed - only the message goes away.';
+        return 'Continue the print on ' + p.name + ' with this error unresolved? This does not fix anything: the printer carries on as it is, and whatever caused the error is still there.';
+    }
+    function errRun(p, a) {
+        var cur = errJobs[p.id];
+        if (cur && cur.phase === 'running') return;
+        if (cur && cur.timer) clearTimeout(cur.timer);
+        var s = errJobs[p.id] = { verb: a.verb, phase: 'running', text: a.label + '…', error: '', job: null, timer: null };
+        refreshDevices();
+        api('/printers/' + encodeURIComponent(p.id) + '/control', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            // The code the button was drawn for travels with the request: the slicer refuses it if
+            // the printer has moved on to another error, which is the whole point of sending it.
+            body: 'action=' + encodeURIComponent(a.verb) + '&err=' + encodeURIComponent((p.print_error && p.print_error.code) || '') +
+                  (a.verb === 'stop_error' ? '&confirm=1' : '')
+        }).then(function(j) {
+            if (errJobs[p.id] !== s) return;
+            s.job = j.job; s.dry_run = !!j.dry_run;
+            errPoll(p.id);
+        }).catch(function(e) {
+            if (errJobs[p.id] !== s) return;
+            s.phase = 'error'; s.error = e.message;
+            refreshDevices();
+        });
+    }
+    function errPoll(id) {
+        var s = errJobs[id];
+        if (!s || s.job === null) return;
+        api('/jobs/' + s.job).then(function(j) {
+            if (errJobs[id] !== s) return;
+            s.text = j.text || s.text;
+            if (j.state === 'running') { s.timer = setTimeout(function() { errPoll(id); }, 1000); return; }
+            if (j.state === 'done') {
+                s.phase = 'done';
+                // The slicer says so when the printer kept the error after the command; without
+                // that the card would clear itself and say "Sent." over a printer still stuck.
+                var note = j.result && j.result.note;
+                s.text = s.dry_run ? 'Dry run: nothing was sent.' : (note ? note : 'Sent. The printer answered.');
+            } else {
+                s.phase = 'error'; s.error = j.error || ('The command ' + j.state);
+            }
+            // The card follows the printer: when the error has cleared the next refresh drops the
+            // whole block, which is the only honest signal that it worked.
+            refreshDevices();
+        }).catch(function() { s.timer = setTimeout(function() { errPoll(id); }, 2000); });
+    }
+    function errAskOpen(p, a) {
+        ctlAsk = null; // one sheet, one question
+        errAsk = { p: p, a: a };
+        document.getElementById('ctlsheet').style.display = 'flex';
+        errAskRender();
+    }
+    function errAskClose() {
+        errAsk = null;
+        document.getElementById('ctlsheet').style.display = 'none';
+    }
+    function errAskRender() {
+        if (!errAsk) return;
+        var p = errAsk.p, a = errAsk.a;
+        var sh = document.getElementById('ctlsheet'), head = sh.querySelector('.head'), body = sh.querySelector('.body');
+        head.innerHTML = ''; body.innerHTML = '';
+        head.appendChild(el('div', 'name', a.label));
+        var close = el('span', 'btn alt', 'Close'); close.onclick = errAskClose; head.appendChild(close);
+        var pl = el('div', 'plate', p.name + (p.model ? '  ·  ' + p.model : ''));
+        pl.appendChild(el('span', 'sub', (p.print_error && (p.print_error.message || p.print_error.code)) || ''));
+        body.appendChild(pl);
+        var c = el('div', 'confirm');
+        c.appendChild(el('div', '', errAskText(p, a)));
+        var acts = el('div', 'actions');
+        var go = el('span', 'btn' + (a.verb === 'stop_error' ? ' stop' : ''), a.label);
+        go.onclick = function() { var t = p, b = a; errAskClose(); errRun(t, b); };
+        acts.appendChild(go);
+        var no = el('span', 'btn alt', 'Cancel'); no.onclick = errAskClose; acts.appendChild(no);
+        c.appendChild(acts);
+        body.appendChild(c);
+    }
+    // The block under a printer error: its buttons, and whatever the last one said.
+    function errCard(p) {
+        var actions = (p.print_error && p.print_error.actions) || [];
+        var st = errJobs[p.id];
+        if (!actions.length && !st) return null;
+        var wrap = el('div');
+        if (actions.length) {
+            var row = el('div', 'acts');
+            var busy = !!(st && st.phase === 'running');
+            actions.forEach(function(a) {
+                if (!a.label) return;
+                var on = a.remote_safe === true && !busy;
+                var b = el('span', 'btn small' + (a.verb === 'stop_error' ? ' stop' : '') + (on ? '' : ' dim'), a.label);
+                b.title = on ? a.label : (busy ? 'A command is already running' : errWhyNot(p, a));
+                if (on) b.onclick = function() { if (errNeedsAsk(a.verb)) errAskOpen(p, a); else errRun(p, a); };
+                row.appendChild(b);
+            });
+            if (row.childNodes.length) wrap.appendChild(row);
+        }
+        if (st) wrap.appendChild(el('div', 'ctlline' + (st.phase === 'error' ? ' err' : st.phase === 'done' ? ' ok' : ''),
+                                    st.phase === 'error' ? st.error : st.text));
+        return wrap.childNodes.length ? wrap : null;
     }
     // One temperature cell of a printer card: "now° / target°" over its label. Only a number is
     // a temperature; an entry without one (a print host that did not answer as a Moonraker
@@ -3592,13 +4049,59 @@ body.dragging .cell iframe, body.dragging .cell img { pointer-events: none; }
             .catch(function(e) { rpJson = ''; refreshReprints(); done(e.message || 'The delete failed.'); });
     }
 
+    // ---- the printer a native-app notification was tapped through on ----
+    // The app writes the printer id into localStorage before the page loads (its NotificationRouter
+    // does it with evaluateJavascript, alongside the tab it wants), because a URL fragment would
+    // reach a page that chooses its own tab from storage anyway. We read it once per load, hold it
+    // until the card with that id is actually drawn, then scroll to it and clear it - so a redraw a
+    // second later does not yank the view back, and a printer that is not listed yet (the slicer is
+    // still starting) still gets its scroll when it appears.
+    var PENDING_KEY = 'edgeslicer_pending_printer';
+    var pendingPrinter = '';
+    try { pendingPrinter = localStorage.getItem(PENDING_KEY) || ''; } catch (e) {}
+    // A stale value must not hijack a later visit, so it is consumed either when its card is found
+    // or after a few Devices renders - whichever comes first. The budget exists because the printer
+    // may not be listed on the very first pass (a slicer window that is still starting has no
+    // printers yet, and the Devices view redraws every 5 s).
+    var pendingLeft = 4;
+    function pendingClear() {
+        pendingPrinter = '';
+        try { localStorage.removeItem(PENDING_KEY); } catch (e) {}
+    }
+    // Called at the end of every Devices render with the list element the cards were drawn into
+    // (null when there are no cards at all, e.g. no slicer window is open).
+    function pendingApply(list) {
+        if (!pendingPrinter) return;
+        var card = list && list.querySelector('.printer[data-printer-id="' + cssEsc(pendingPrinter) + '"]');
+        if (!card) {
+            if (--pendingLeft <= 0) pendingClear(); // stop waiting; never carry it to a later visit
+            return;
+        }
+        card.classList.add('pointed');
+        try { card.scrollIntoView({ behavior: 'smooth', block: 'center' }); }
+        catch (e) { card.scrollIntoView(); } // older WebViews take no options object
+        pendingClear();
+    }
+    // The value goes inside a double-quoted attribute selector, [data-printer-id="..."], where the
+    // only two characters that can end or escape the string are the quote and the backslash. NOT
+    // CSS.escape, which escapes for an *identifier* and would over-escape here: a printer id like
+    // "sm:U1-0042" carries a colon, which is fine inside the quotes and has to stay as it is or the
+    // selector stops matching the attribute we set.
+    function cssEsc(s) { return String(s).replace(/[\\"]/g, '\\$&'); }
+
     function refreshDevices() {
         var root = document.getElementById('devices');
         pushRender(); // the Enable-notifications control survives every redraw of the tab
         srcRender();  // and so does the licence/source line below it
         // No slicer, no printer cards - but the hub keeps the events after every instance is
         // closed, so they stay on the tab.
-        if (!instSel) { root.innerHTML = ''; root.appendChild(el('div', 'empty', 'No slicer is open on the PC. Printers are listed by the slicer.')); evRender(); pushRender(); srcRender(); return; }
+        if (!instSel) {
+            root.innerHTML = '';
+            root.appendChild(el('div', 'empty', 'No slicer is open on the PC. Printers are listed by the slicer.'));
+            evRender(); pushRender(); srcRender();
+            pendingApply(null); // no cards at all; the value ages out rather than sticking for ever
+            return;
+        }
         // One request per card source: the printers (every card) and the Snapmaker devices call for
         // the optional PC-side connect. A failing devices call only costs the connect button.
         Promise.all([api('/printers'), api('/snapmaker/devices').catch(function() { return {}; })]).then(function(res) {
@@ -3623,6 +4126,8 @@ body.dragging .cell iframe, body.dragging .cell img { pointer-events: none; }
                 // card: one card, and that card's Disconnect covers the connection.
                 if (p.kind === 'connect' && lanHosts[smHost(p.url)]) return;
                 var card = el('div', 'printer' + (p.online ? ' online' : ''));
+                // The id the app names in a notification, so the tap-through can find this card.
+                card.setAttribute('data-printer-id', p.id || '');
                 card.appendChild(el('div', 'name', p.name + (p.selected ? ' ★' : '') + (p.model ? '  ·  ' + p.model : '')));
                 var meta = p.online ? (p.print_status || p.status || 'idle') : 'offline';
                 if (p.printing) meta += ' · ' + p.percent + '% · ' + fmtTime(p.left_time_s) + ' left' + (p.total_layers ? ' · layer ' + p.layer + '/' + p.total_layers : '');
@@ -3651,9 +4156,13 @@ body.dragging .cell iframe, body.dragging .cell img { pointer-events: none; }
                         card.appendChild(heads);
                     }
                 }
-                // Why the printer stopped, in its own words (HMS for a Bambu one).
-                if (p.print_error && (p.print_error.message || p.print_error.code))
+                // Why the printer stopped, in its own words (HMS for a Bambu one), and what can
+                // be done about it from here (errCard).
+                if (p.print_error && (p.print_error.message || p.print_error.code)) {
                     card.appendChild(el('div', 'ctlline err', p.print_error.message || ('Printer error ' + p.print_error.code)));
+                    var ec = errCard(p);
+                    if (ec) card.appendChild(ec);
+                }
                 // Pause / Resume / Stop. A button the printer's own predicate says no to stays in
                 // place, dimmed, with the reason in its tooltip.
                 var st = ctlJobs[p.id];
@@ -3698,6 +4207,7 @@ body.dragging .cell iframe, body.dragging .cell img { pointer-events: none; }
                 if (!anySm) root.appendChild(el('div', 'empty', 'No Snapmaker found yet. Add one by its address below - the PC does not have to be connected to it.'));
                 smAddRow(page, typing);
             }
+            pendingApply(root); // a tap-through from the app: scroll to that printer's card
         }).catch(function(e) {
             var list = root.querySelector('.plist');
             if (!list) { list = el('div', 'plist'); root.appendChild(list); }

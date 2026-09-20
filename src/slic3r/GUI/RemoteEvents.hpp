@@ -27,6 +27,21 @@ namespace RemoteEvents {
 // What one printer looked like at one moment, in one vocabulary. Bambu's print_status and
 // Klipper's print_stats.state are both normalised into `state` so the transition rule below has
 // only one set of words to know about.
+// One button on a printer-error event, flattened for the payload. A copy of
+// PrintErrorCommands' PrintErrorRemoteAction rather than the type itself: this header is included
+// by the wx-free hub-side modules (RemoteNotify, WebPush, AppPush) and must not drag the GUI's
+// error-command translation unit in behind it.
+struct PrintErrorEventAction
+{
+    int         id { 0 };
+    std::string verb, label;
+    bool        needs_job_id { false };
+    // The action's payload is built from the blob a refused command brought with it; without one
+    // the action is described and greyed, the same way a resume is when there is no job_id.
+    bool        needs_action_json { false };
+    bool        remote_safe { false };
+};
+
 struct PrinterState
 {
     std::string id, name, kind; // kind: bambu | snapmaker | printhost | connect
@@ -41,6 +56,12 @@ struct PrinterState
     std::string stage;     // the printer's own words for what it is doing (Bambu get_curr_stage())
     int         stage_curr { -1 }; // Bambu stage index; 6 is "Paused due to filament runout"
     std::string error_code, error_text;
+    // A Bambu print error's buttons, as PrintErrorCommands describes them for the wire: the same
+    // set the desktop's dialog draws and the same set GET /api/printers carries, so the app can
+    // put the buttons on the notification's card instead of only the sentence. Empty for every
+    // other source of an error_code (HMS items, a Klipper message, a relayed hub's event).
+    std::vector<PrintErrorEventAction> error_actions;
+    std::string                        job_id; // the printer's job, for the actions that need one
 };
 
 struct Snapshot
@@ -56,6 +77,11 @@ struct Event
     std::string kind;     // started | finished | failed | cancelled | paused | resumed | runout | error
     std::string severity; // info | warning | error
     std::string title, text, code, job;
+    // Only an "error" event carries these, and only from a Bambu printer: what the person can do
+    // about it, so the app's notification can offer the buttons rather than sending them to the
+    // printer to read the same sentence again. The text above is unchanged by their presence.
+    std::vector<PrintErrorEventAction> actions;
+    std::string                        job_id; // the printer's job, for the actions that need one
     nlohmann::json to_json(long instance_pid) const;
 };
 
@@ -182,6 +208,24 @@ inline std::string test_kind(const std::vector<std::string>& filter)
     return "finished";
 }
 
+// What the watcher remembers about one printer's current job, across polls and across the gaps
+// where it could not see the printer at all.
+//
+// The cooldown alone was not enough. It is keyed on time (three minutes) and on the job name, so a
+// printer that flapped - idle/unknown/offline and back, which a Klipper raw state, a Snapmaker
+// login timeout or a brief Bambu re-seed all produce - re-announced the same print hours later,
+// and a printer whose job name alternates between two spellings of the same file announced each
+// spelling. What actually decides whether a start is new is the job, not the clock: the same job
+// is announced once and not again until something ended it.
+struct JobMemory
+{
+    std::string job;            // the job whose "started" was announced (may be empty: an unnamed print)
+    bool        announced { false }; // a "started" has gone out for it
+    long long   started_at { 0 };    // when that went out (snapshot time)
+    std::string terminal;       // finished | cancelled | failed, once one has been seen for it
+    long long   terminal_at { 0 };
+};
+
 // Everything the watcher carries from one poll to the next.
 struct Memory
 {
@@ -192,6 +236,23 @@ struct Memory
     // later poll has run, nothing it does can produce an event - the first sight only seeds.
     // A printer that goes offline or unwatched loses its entry and is seeded again on its return.
     std::map<std::string, long long> seen_at;
+    // Per-printer job memory, keyed by printer id. Unlike `seen_at` this deliberately SURVIVES a
+    // printer going offline or unwatched: "I cannot see it" is not "it stopped printing", and
+    // throwing the memory away on every flap is exactly what let the repeat "started" through.
+    std::map<std::string, JobMemory> jobs;
+    // The last raw state each printer reported, so a change in the printer's own words can be
+    // logged even where it maps to the same normalised state. This is what names a flap source.
+    std::map<std::string, std::string> last_raw;
+};
+
+// One line per raw-state change, for the hub log. `step` fills this so the caller can log it
+// without the rule touching a logger (it stays pure and testable).
+struct RawChange
+{
+    std::string printer_id, from, to;
+    bool        was_visible { false }; // the watcher could see the printer before this change
+    bool        visible { false };     // it can see it now
+    long long   at { 0 };
 };
 
 // The transition rule, and the only place an event is decided: the previous memory plus the
@@ -200,6 +261,10 @@ struct Memory
 // can drive a whole print through it without a printer. `cooldown_ms` suppresses a repeat of the
 // same printer + kind + code (a flapping error, a reconnect that re-announces a start).
 std::vector<Event> step(Memory& mem, const Snapshot& now, long long cooldown_ms = 180000);
+
+// Same rule, and additionally reports every raw-state change it saw, so the caller can put the
+// flap sources in the log with a timestamp. `step` above is this with the changes discarded.
+std::vector<Event> step(Memory& mem, const Snapshot& now, long long cooldown_ms, std::vector<RawChange>* raw_changes);
 
 // ---- the live watcher ----
 // Called from RemoteAccess's one-second GUI heartbeat; polls at its own slower rate.
@@ -215,6 +280,12 @@ nlohmann::json recent(int since);
 // Test hook (the SNORCA_DEBUG_ROUTES back door): run `step` over snapshots handed in as JSON and
 // report what each one produced. This is how the transition rule is covered without hardware.
 nlohmann::json replay(const nlohmann::json& in);
+
+// The notification body for an event, shared by ntfy, Web Push and the native-app push plane so
+// that the three cannot drift. The event's code is appended only when the text does not already
+// name it - the error text now carries its own code (HMSQuery::format_error), and appending it a
+// second time produced "... (0C00 0100 0002 0015). (0C00010000020015)" on the lock screen.
+std::string notification_body(const std::string& text, const std::string& code);
 
 } // namespace RemoteEvents
 } // namespace GUI

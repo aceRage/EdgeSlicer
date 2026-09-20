@@ -319,6 +319,20 @@ public:
     bool                can_mesh_boolean() const;
 
     bool                has_selected_cut_object() const;
+    // RE-EDITABLE CUTS: is any selected object a cut half that remembers how it was
+    // cut? The enable condition for "Edit cut...".
+    bool                has_selected_editable_cut() const;
+    // Reopen the Cut gizmo on that cut, with its original mesh and settings.
+    void                edit_cut();
+    // "COPY CUT TO...": is the selection a recipe that can be copied onto ANOTHER
+    // object? has_selected_editable_cut() plus somewhere to copy it to.
+    bool                has_selected_copyable_cut() const;
+    // The selected object carrying the recipe, or -1. The submenu needs it to
+    // exclude the source from its own target list.
+    int                 selected_cut_recipe_source() const;
+    // Open the Cut gizmo on `target_idx` with that recipe set up on it - an
+    // ORDINARY cut of the target's own mesh, not a re-edit. See the .cpp.
+    void                copy_cut_to(int target_idx);
     void                invalidate_cut_info_for_selection();
     void                invalidate_cut_info_for_object(int obj_idx);
     void                delete_all_connectors_for_selection();
@@ -426,6 +440,23 @@ public:
     void rename_item();
     void fix_through_netfabb();
     void repair_by_remesh();
+    // Ultra: Phase 2 - QuadriFlow quad remesh. Hidden when the build has no
+    // QuadriFlow (quad_remesh_available()).
+    // close_gizmos: shut an open gizmo first, for the Sculpt panel entry point -
+    // a gizmo .cpp cannot reach GLGizmosManager, so it asks for the close here.
+    void quad_remesh(bool close_gizmos = false);
+    // Ultra: the Edit gizmo's interim "Round all edges" - a whole-mesh fillet by the
+    // OpenVDB morphological round trip (libslic3r/MeshRound.hpp). Hidden when the
+    // build has no OpenVDB (voxel_ops_available()).
+    // close_gizmos: shut an open gizmo first, for the Edit panel's button - a gizmo
+    // .cpp cannot reach GLGizmosManager, so it asks for the close here.
+    void round_all_edges(bool close_gizmos = false);
+    // Ultra: slice baking (phase 1) - turn the SLICED outer wall into a mesh that can be
+    // re-sliced. Enabled only when this object has been sliced and has perimeters.
+    // docs/superpowers/specs/2026-09-12-slice-bake-research.md
+    void bake_slice_to_mesh();
+    // Whether the menu item should be enabled for the current selection.
+    static bool can_bake_slice_to_mesh();
     void toggle_visibility_state(const wxDataViewItem& item);
     void update_visibility_icons();
     // Ultra (support groups): resync every part row's group badge with ModelVolume::config.
