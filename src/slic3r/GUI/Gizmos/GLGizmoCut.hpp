@@ -419,6 +419,11 @@ class GLGizmoCut3D : public GLGizmoBase
     bool            m_draw_lower_empty{ false };
     // Advisory: the ruled strip folds near a corner tighter than the Extension.
     bool            m_draw_folds{ false };
+    // 2026-09-20: advisory - the outward Extension was clipped because, unclipped,
+    // the extended surface would have run into other geometry of the same instance
+    // (another wall, a neighbouring branch). Computed with the stroke; see
+    // compute_draw_extension_clearance().
+    bool            m_draw_ext_clipped{ false };
 
     // THE HALVES CLASSIFICATION (2026-09-12, owner feedback item 3). The cyan/magenta
     // colouring, the Visible/Ghost/Hidden side display and the connectors all used to
@@ -532,6 +537,11 @@ class GLGizmoCut3D : public GLGizmoBase
     // The instance mesh in the plane frame plus its raycaster, built once per
     // stroke gesture.
     bool   update_draw_raycaster();
+    // 2026-09-20: per-rail clamp for the outward Extension, in the cutter's rail
+    // order ([front tangent end, path samples, back tangent end]). One AABB query
+    // per sample against the plane-frame instance mesh; empty for closed strokes
+    // and whenever there is nothing to clamp with.
+    std::vector<double> compute_draw_extension_clearance();
     void   render_draw_stroke();
     void   render_draw_surface_inputs();
     bool   draw_on_mouse(const wxMouseEvent& mouse_event);

@@ -150,6 +150,17 @@ struct DrawCutParams
     // how far past each END the surface reaches along the tangent - which is what
     // lets the cut get past the silhouette so the boolean separates the part.
     double           extension{ 5.0 };
+    // 2026-09-20: per-rail clamp on the outward extension, in mm - how far along
+    // -d the out rail may travel before it would run into OTHER geometry of the
+    // same instance (another wall across a narrow gap, a neighbouring branch),
+    // and how far past each end of an OPEN stroke the tangent continuation may
+    // run. Layout is the cutter's rail order: [front tangent end, path samples
+    // 0..n-1, back tangent end]. Computed once per stroke by the gizmo against
+    // the plane-frame instance mesh. EMPTY means no clamp - the pre-fix
+    // blind-extrusion behaviour, which cut a slot into whatever the extension
+    // reached. Closed strokes do not read it (the band/skirt is a different
+    // mechanism).
+    std::vector<double> extension_clearance;
     // THE LIP ANGLE, in DEGREES, 0..90 (see the band/core model above). It is the
     // tilt of the band's travel direction d(p) TOWARDS the core normal n:
     //

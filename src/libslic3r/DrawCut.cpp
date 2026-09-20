@@ -2282,30 +2282,45 @@ static indexed_triangle_set draw_cut_cutter_solid_impl(const DrawCutStroke& stro
     }
     sweep = safe_normalize(sweep, Vec3d::UnitY());
 
-    auto push_rail = [&](const Vec3d& pos, const Vec3d& t, const Vec3d& d, const Vec3d& b) {
+    auto push_rail = [&](const Vec3d& pos, double out_ext, const Vec3d& t, const Vec3d& d, const Vec3d& b) {
         // Away from the cutter's interior, so a POSITIVE offset always grows the
         // cutter and a negative one always shrinks it - see above.
         const Vec3d out_of_cutter = closed ? Vec3d(-b) : Vec3d(-sweep);
         const Vec3d shift = face_offset * out_of_cutter;
         Rail r;
-        r.out = pos - ext * d + shift;
+        r.out = pos - out_ext * d + shift;
         r.in  = pos + depth * d + shift;
         rails.push_back(r);
+    };
+
+    // 2026-09-20: THE EXTENSION CLAMP. Where the unclamped extension would reach
+    // into other geometry of the same instance - the wall across a narrow gap, a
+    // branch just past the stroke's end - the blind extrusion buried the rim in
+    // material and the boolean cut a slot into the neighbour. The gizmo hands a
+    // per-rail clearance in RAIL ORDER ([front tangent end, samples 0..n-1, back
+    // tangent end]); entry 0 also clamps the front tangent continuation, the last
+    // entry the back one, and each end rail takes its outward clamp from the
+    // nearest path sample. An absent or wrong-sized vector means "no clamp",
+    // which is the legacy behaviour.
+    const std::vector<double>& clr = params.extension_clearance;
+    const bool                 clamp_ext = !closed && clr.size() == n + 2;
+    auto clamped = [&](size_t k) {
+        return clamp_ext ? std::min(ext, std::max(0.0, clr[k])) : ext;
     };
 
     if (!closed) {
         // Leading end, extended BACKWARDS along the tangent so the surface reaches
         // past the silhouette on that side.
         const Vec3d t0 = stroke.tangent(0);
-        push_rail(p.front().pos - ext * t0, t0, draw_cut_inward_dir(stroke, params, 0), stroke.binormal(0));
+        push_rail(p.front().pos - clamped(0) * t0, clamped(1), t0, draw_cut_inward_dir(stroke, params, 0), stroke.binormal(0));
     }
 
     for (size_t i = 0; i < n; ++ i)
-        push_rail(p[i].pos, stroke.tangent(i), draw_cut_inward_dir(stroke, params, i), stroke.binormal(i));
+        push_rail(p[i].pos, clamped(i + 1), stroke.tangent(i), draw_cut_inward_dir(stroke, params, i), stroke.binormal(i));
 
     if (!closed) {
         const Vec3d tN = stroke.tangent(n - 1);
-        push_rail(p.back().pos + ext * tN, tN, draw_cut_inward_dir(stroke, params, n - 1), stroke.binormal(n - 1));
+        push_rail(p.back().pos + clamped(n + 1) * tN, clamped(n), tN, draw_cut_inward_dir(stroke, params, n - 1), stroke.binormal(n - 1));
     }
 
     const size_t m = rails.size();
@@ -2872,7 +2887,13 @@ bool draw_cut_surface_contains(const DrawCutStroke& stroke, const DrawCutParams&
     // The ruled span the cutter actually builds: out at -extension, in at +depth.
     // A connector has to sit `margin` clear of both rims, or its body hangs off the
     // surface and the split leaves it half-made.
-    const double lo = -std::max(0.0, params.extension) + m;
+    // The clamped extension can only SHRINK the band (extension_clearance floors
+    // at 0), so the connector domain's far edge is the least-clamped out rail -
+    // anywhere w < -ext_eff + m has no real surface under it once clipping bites.
+    double ext_eff = std::max(0.0, params.extension);
+    for (double c : params.extension_clearance)
+        ext_eff = std::min(ext_eff, std::max(0.0, c));
+    const double lo = -ext_eff + m;
     const double hi = std::max(0.0, depth_reach) - m;
     if (lo > hi || w < lo || w > hi)
         return false;
