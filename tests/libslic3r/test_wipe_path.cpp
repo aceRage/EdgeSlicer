@@ -139,7 +139,7 @@ static ExtrusionPath make_path(const std::vector<Point> &pts, ExtrusionRole role
 {
     ExtrusionPath p(role, 0.5, width, height);
     for (const Point &pt : pts)
-        p.polyline.append(Point3(pt.x(), pt.y(), coord_t(0)));
+        p.polyline.append(Vec3crd(pt.x(), pt.y(), coord_t(0)));
     return p;
 }
 
@@ -203,11 +203,11 @@ static ExtrusionPaths make_loop_paths(const std::vector<Point> &contour_pts, flo
     size_t mid = contour_pts.size() / 2;
     ExtrusionPath first(erExternalPerimeter, 0.5, width, 0.2f);
     for (size_t i = 0; i <= mid; ++i)
-        first.polyline.append(Point3(contour_pts[i].x(), contour_pts[i].y(), coord_t(0)));
+        first.polyline.append(Vec3crd(contour_pts[i].x(), contour_pts[i].y(), coord_t(0)));
     ExtrusionPath second(erExternalPerimeter, 0.5, width, 0.2f);
     for (size_t i = mid; i < contour_pts.size(); ++i)
-        second.polyline.append(Point3(contour_pts[i].x(), contour_pts[i].y(), coord_t(0)));
-    second.polyline.append(Point3(contour_pts[0].x(), contour_pts[0].y(), coord_t(0)));
+        second.polyline.append(Vec3crd(contour_pts[i].x(), contour_pts[i].y(), coord_t(0)));
+    second.polyline.append(Vec3crd(contour_pts[0].x(), contour_pts[0].y(), coord_t(0)));
     paths.push_back(std::move(first));
     paths.push_back(std::move(second));
     return paths;
@@ -988,7 +988,7 @@ TEST_CASE("wipe_on_loops destination is on the material side for every orientati
     REQUIRE(destination.has_value());
 
     const Point seam_start = paths.front().first_point();
-    const Vec2d first_edge = (paths.front().polyline.points[1].to_point() - seam_start).cast<double>();
+    const Vec2d first_edge = (paths.front().polyline.points[1] - seam_start).cast<double>();
     Vec2d material_normal(-first_edge.y(), first_edge.x());
     if (is_ccw == is_hole)
         material_normal = -material_normal;
