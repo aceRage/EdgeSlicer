@@ -139,7 +139,7 @@ static ExtrusionPath make_path(const std::vector<Point> &pts, ExtrusionRole role
 {
     ExtrusionPath p(role, 0.5, width, height);
     for (const Point &pt : pts)
-        p.polyline.append(Vec3crd(pt.x(), pt.y(), coord_t(0)));
+        p.polyline.append(Point(pt.x(), pt.y()));
     return p;
 }
 
@@ -203,11 +203,11 @@ static ExtrusionPaths make_loop_paths(const std::vector<Point> &contour_pts, flo
     size_t mid = contour_pts.size() / 2;
     ExtrusionPath first(erExternalPerimeter, 0.5, width, 0.2f);
     for (size_t i = 0; i <= mid; ++i)
-        first.polyline.append(Vec3crd(contour_pts[i].x(), contour_pts[i].y(), coord_t(0)));
+        first.polyline.append(Point(contour_pts[i].x(), contour_pts[i].y()));
     ExtrusionPath second(erExternalPerimeter, 0.5, width, 0.2f);
     for (size_t i = mid; i < contour_pts.size(); ++i)
-        second.polyline.append(Vec3crd(contour_pts[i].x(), contour_pts[i].y(), coord_t(0)));
-    second.polyline.append(Vec3crd(contour_pts[0].x(), contour_pts[0].y(), coord_t(0)));
+        second.polyline.append(Point(contour_pts[i].x(), contour_pts[i].y()));
+    second.polyline.append(Point(contour_pts[0].x(), contour_pts[0].y()));
     paths.push_back(std::move(first));
     paths.push_back(std::move(second));
     return paths;
