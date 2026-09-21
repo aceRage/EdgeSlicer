@@ -112,6 +112,22 @@ bool flow_variant_slots_differ(const DynamicPrintConfig &config,
     return false;
 }
 
+bool ensure_flow_support_mode(DynamicPrintConfig &config,
+                              ConfigFlowDomain    domain,
+                              const std::string  &mode)
+{
+    std::vector<std::string> modes;
+    if (const auto *support = config.option<ConfigOptionStrings>(flow_support_key(domain)))
+        modes = support->values;
+    if (modes.empty())
+        modes.emplace_back(FLOW_MODE_STANDARD);
+    if (std::find(modes.begin(), modes.end(), mode) != modes.end())
+        return false;
+    modes.emplace_back(mode);
+    config.set_key_value(flow_support_key(domain), new ConfigOptionStrings(modes));
+    return true;
+}
+
 bool replicate_flow_variant_value(DynamicPrintConfig             &config,
                                   const std::string              &opt_key,
                                   size_t                          source_index,

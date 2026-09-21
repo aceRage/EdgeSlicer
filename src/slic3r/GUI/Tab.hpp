@@ -294,6 +294,12 @@ protected:
         std::vector<std::string> modes;
         std::string selected_mode;
         EditScope edit_scope { EditScope::ActiveMode };
+        // Filament tab only: the selector offers High flow because the active
+        // machine supports it, but the preset's filament_flow_support does not
+        // carry it yet. Display stays on the Standard slot until the user
+        // switches to High flow, which persists the key first; Both and the
+        // copy button stay hidden while this is set.
+        bool offers_unpersisted_high_flow { false };
         std::function<const std::vector<std::string>&()> options;
         std::function<bool(const std::string&)> is_option;
     };

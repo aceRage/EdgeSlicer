@@ -117,6 +117,51 @@ TEST_CASE("replicate_flow_variant_value is a no-op for a single mode", "[FlowVar
     REQUIRE(config.option<ConfigOptionFloats>("filament_max_volumetric_speed")->values == std::vector<double>{12.0, 24.0});
 }
 
+TEST_CASE("ensure_flow_support_mode appends High flow and preserves existing modes", "[FlowVariantEdit]")
+{
+    // The full-config default is standard-only, like a filament preset that
+    // never carried the key: the switch to High flow persists both modes.
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    REQUIRE(ensure_flow_support_mode(config, ConfigFlowDomain::Filament, FLOW_MODE_HIGH_FLOW));
+    REQUIRE(config.option<ConfigOptionStrings>("filament_flow_support")->values ==
+            std::vector<std::string>{FLOW_MODE_STANDARD, FLOW_MODE_HIGH_FLOW});
+
+    // A repeated call must not duplicate the mode.
+    REQUIRE_FALSE(ensure_flow_support_mode(config, ConfigFlowDomain::Filament, FLOW_MODE_HIGH_FLOW));
+    REQUIRE(config.option<ConfigOptionStrings>("filament_flow_support")->values ==
+            std::vector<std::string>{FLOW_MODE_STANDARD, FLOW_MODE_HIGH_FLOW});
+
+    // Other existing modes are preserved; standard is only appended when missing.
+    config.set_key_value("filament_flow_support", new ConfigOptionStrings{"custom_mode"});
+    REQUIRE(ensure_flow_support_mode(config, ConfigFlowDomain::Filament, FLOW_MODE_STANDARD));
+    REQUIRE(config.option<ConfigOptionStrings>("filament_flow_support")->values ==
+            std::vector<std::string>{"custom_mode", FLOW_MODE_STANDARD});
+    REQUIRE_FALSE(ensure_flow_support_mode(config, ConfigFlowDomain::Filament, FLOW_MODE_STANDARD));
+
+    // An explicitly emptied key falls back to ["standard"] before appending.
+    config.set_key_value("filament_flow_support", new ConfigOptionStrings{});
+    REQUIRE(ensure_flow_support_mode(config, ConfigFlowDomain::Filament, FLOW_MODE_HIGH_FLOW));
+    REQUIRE(config.option<ConfigOptionStrings>("filament_flow_support")->values ==
+            std::vector<std::string>{FLOW_MODE_STANDARD, FLOW_MODE_HIGH_FLOW});
+}
+
+TEST_CASE("ensure_flow_support_mode maps domains to their support keys", "[FlowVariantEdit]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+
+    REQUIRE(ensure_flow_support_mode(config, ConfigFlowDomain::Process, FLOW_MODE_HIGH_FLOW));
+    REQUIRE(config.option<ConfigOptionStrings>("process_flow_support")->values ==
+            std::vector<std::string>{FLOW_MODE_STANDARD, FLOW_MODE_HIGH_FLOW});
+
+    REQUIRE(ensure_flow_support_mode(config, ConfigFlowDomain::Printer, FLOW_MODE_HIGH_FLOW));
+    REQUIRE(config.option<ConfigOptionStrings>("printer_flow_support")->values ==
+            std::vector<std::string>{FLOW_MODE_STANDARD, FLOW_MODE_HIGH_FLOW});
+
+    // Only the addressed domain's key changes.
+    REQUIRE(config.option<ConfigOptionStrings>("filament_flow_support")->values ==
+            std::vector<std::string>{FLOW_MODE_STANDARD});
+}
+
 TEST_CASE("copy_flow_variant_slot visits every filament_flow_variant_options key", "[FlowVariantEdit]")
 {
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();

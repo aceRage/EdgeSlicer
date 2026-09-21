@@ -67,6 +67,7 @@
 #include "Widgets/Button.hpp"
 #include "Widgets/SegmentedToggle.hpp"
 #include "FlowVariantEdit.hpp"
+#include "FlowTypeHelper.hpp"
 #include <wx/textdlg.h>
 #ifdef WIN32
 	#include <commctrl.h>
@@ -957,6 +958,7 @@ bool Tab::flow_variant_both_allowed() const
 {
     return m_flow_variant_view
         && m_flow_variant_view->domain != ConfigFlowDomain::Printer
+        && !m_flow_variant_view->offers_unpersisted_high_flow
         && m_flow_variant_view->modes.size() > 1;
 }
 
@@ -986,6 +988,13 @@ void Tab::on_flow_variant_segment_selected(int index)
     } else if (size_t(index) < m_flow_variant_view->modes.size()) {
         m_flow_variant_view->edit_scope    = FlowVariantView::EditScope::ActiveMode;
         m_flow_variant_view->selected_mode = m_flow_variant_view->modes[size_t(index)];
+
+        // Filament tab: switching to High flow must persist filament_flow_support
+        // first, otherwise the mode would not survive saving the preset.
+        if (m_config && m_flow_variant_view->domain == ConfigFlowDomain::Filament &&
+            m_flow_variant_view->selected_mode == FLOW_MODE_HIGH_FLOW &&
+            ensure_flow_support_mode(*m_config, m_flow_variant_view->domain, FLOW_MODE_HIGH_FLOW))
+            update_dirty();
     } else {
         return;
     }
@@ -1092,7 +1101,21 @@ void Tab::refresh_flow_variant_view()
     if (modes.empty())
         modes.emplace_back(FLOW_MODE_STANDARD);
 
-    if (std::find(modes.begin(), modes.end(), m_flow_variant_view->selected_mode) == modes.end())
+    // Filament tab on a high-flow-capable machine: always offer the High flow
+    // segment, even when the filament key doesn't carry it yet. The key is
+    // persisted when the user switches to High flow (see
+    // on_flow_variant_segment_selected); until then the page keeps showing the
+    // Standard slot, exactly like a filament without the key does today.
+    m_flow_variant_view->offers_unpersisted_high_flow = false;
+    if (m_flow_variant_view->domain == ConfigFlowDomain::Filament &&
+        std::find(modes.begin(), modes.end(), FLOW_MODE_HIGH_FLOW) == modes.end() &&
+        FlowType::printer_supports_high_flow()) {
+        modes.emplace_back(FLOW_MODE_HIGH_FLOW);
+        m_flow_variant_view->offers_unpersisted_high_flow = true;
+    }
+
+    if (std::find(modes.begin(), modes.end(), m_flow_variant_view->selected_mode) == modes.end() ||
+        (m_flow_variant_view->offers_unpersisted_high_flow && m_flow_variant_view->selected_mode == FLOW_MODE_HIGH_FLOW))
     {
         const auto standard = std::find(modes.begin(), modes.end(), FLOW_MODE_STANDARD);
         m_flow_variant_view->selected_mode = (standard == modes.end()) ? modes.front() : *standard;

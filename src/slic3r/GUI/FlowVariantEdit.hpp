@@ -30,6 +30,15 @@ bool flow_variant_slots_differ(const DynamicPrintConfig &config,
                                const std::string        &mode_a,
                                const std::string        &mode_b);
 
+// Ensure the domain's *_flow_support key contains `mode`, appending it when
+// missing. An absent or empty key is treated as ["standard"] first, so a
+// filament-tab switch to High flow persists as ["standard","high_flow"].
+// Existing modes are preserved, nothing is duplicated. Returns true when the
+// option object changed (callers then mark the preset dirty).
+bool ensure_flow_support_mode(DynamicPrintConfig       &config,
+                              ConfigFlowDomain          domain,
+                              const std::string        &mode);
+
 // Copy source_index onto every other index in modes for a single key.
 // Replaces the whole option object so undo/dirty see one vector write.
 bool replicate_flow_variant_value(DynamicPrintConfig          &config,
