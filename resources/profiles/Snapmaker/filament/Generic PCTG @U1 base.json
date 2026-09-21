@@ -3,5 +3,6 @@
     "from": "system",
     "instantiation": "false",
     "name": "Generic PCTG @U1 base",
+    "renamed_from": "Generic PCTG @base",
     "inherits": "fdm_filament_pctg_category"
 }

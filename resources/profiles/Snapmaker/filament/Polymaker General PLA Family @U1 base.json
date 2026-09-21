@@ -3,5 +3,6 @@
     "from": "system",
     "instantiation": "false",
     "name": "Polymaker General PLA Family @U1 base",
+    "renamed_from": "Polymaker PLA @U1 base;PolyLite PLA @U1 base;PolyTerra PLA @U1 base;PolyLite PLA @base;PolyTerra PLA @base",
     "inherits": "fdm_filament_pla_category"
 }

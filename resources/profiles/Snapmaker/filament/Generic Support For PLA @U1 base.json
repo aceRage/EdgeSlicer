@@ -3,5 +3,6 @@
     "from": "system",
     "instantiation": "false",
     "name": "Generic Support For PLA @U1 base",
+    "renamed_from": "Generic Support For PLA @base",
     "inherits": "fdm_filament_support_pla_category"
 }

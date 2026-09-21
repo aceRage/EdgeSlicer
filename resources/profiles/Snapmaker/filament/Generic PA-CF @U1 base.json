@@ -3,5 +3,6 @@
     "from": "system",
     "instantiation": "false",
     "name": "Generic PA-CF @U1 base",
+    "renamed_from": "Snapmaker PA-CF @U1 base;Snapmaker PA-CF @base",
     "inherits": "fdm_filament_pa_cf_category"
 }

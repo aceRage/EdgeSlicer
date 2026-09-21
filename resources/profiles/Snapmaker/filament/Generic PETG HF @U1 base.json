@@ -3,5 +3,6 @@
     "from": "system",
     "instantiation": "false",
     "name": "Generic PETG HF @U1 base",
+    "renamed_from": "Generic PETG HF @base;Generic PETG HF @base2",
     "inherits": "fdm_filament_petg_hf_category"
 }

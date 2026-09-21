@@ -3,5 +3,6 @@
     "from": "system",
     "instantiation": "false",
     "name": "Generic PLA Silk @U1 base",
+    "renamed_from": "Generic PLA Silk @base;Generic PLA Silk @base2",
     "inherits": "fdm_filament_pla_silk_category"
 }

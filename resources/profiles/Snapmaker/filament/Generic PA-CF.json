@@ -3,7 +3,7 @@
     "from": "system",
     "instantiation": "true",
     "name": "Generic PA-CF",
-    "renamed_from": "Generic PA-CF @U1 0.4 nozzle",
+    "renamed_from": "Generic PA-CF @U1 0.4 nozzle;Snapmaker PA-CF @U1",
     "setting_id": "GFSN99",
     "filament_id": "GFN98",
     "inherits": "Generic PA-CF @U1 base",
