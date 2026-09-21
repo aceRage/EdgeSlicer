@@ -641,6 +641,18 @@ void GLGizmoCut3D::set_center(const Vec3d& center, bool update_tbb /*=false*/)
     update_clipper();
 }
 
+// 2026-09-20, OWNER REPORT (connectors on a drawn cut): on a DRAWN cut the plane
+// is not the cut, so connector editing must not hand the clipper the plane either.
+// set_behavior(hide_clipped=true) makes the canvas clip the model render at the
+// flat plane - which hollowed the part ("no top") and drew the flat section cap
+// as a ghost disc while connectors were being placed on a cut that does not go
+// there. The draw field colours the halves and the cutter shell shows the surface;
+// the plane clip is wanted only for the flat (and curved-sheet) cut.
+static bool clip_by_plane_during_connector_editing(bool connectors_editing, bool draw_surface, bool draw_stroke_valid)
+{
+    return connectors_editing && !(draw_surface && draw_stroke_valid);
+}
+
 void GLGizmoCut3D::switch_to_mode(size_t new_mode)
 {
     m_mode = new_mode;
@@ -649,7 +661,8 @@ void GLGizmoCut3D::switch_to_mode(size_t new_mode)
     apply_color_clip_plane_colors();
     if (auto oc = m_c->object_clipper()) {
         m_contour_width = CutMode(m_mode) == CutMode::cutTongueAndGroove ? 0.f : 0.4f;
-        oc->set_behavior(m_connectors_editing, m_connectors_editing, double(m_contour_width));
+        const bool clip = clip_by_plane_during_connector_editing(m_connectors_editing, is_draw_surface(), m_draw_stroke.valid());
+        oc->set_behavior(clip, clip, double(m_contour_width));
     }
 
     update_plane_model();
@@ -7225,7 +7238,8 @@ void GLGizmoCut3D::set_connectors_editing(bool connectors_editing)
         m_facet_picker.set_active(false); // pick-face is a planar-cut interaction only
     update_raycasters_for_picking();
 
-    m_c->object_clipper()->set_behavior(m_connectors_editing, m_connectors_editing, double(m_contour_width));
+    const bool clip = clip_by_plane_during_connector_editing(m_connectors_editing, is_draw_surface(), m_draw_stroke.valid());
+    m_c->object_clipper()->set_behavior(clip, clip, double(m_contour_width));
 
     m_parent.request_extra_frame();
 }
