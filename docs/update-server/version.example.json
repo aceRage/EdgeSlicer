@@ -1,0 +1,33 @@
+{
+  "code": 200,
+  "data": {
+    "version": "1.1.0",
+    "release_type": "stable",
+    "is_full_upgrade": true,
+    "is_force_upgrade": false,
+    "platform_type": "win",
+    "full": {
+      "file_describe": "EdgeSlicer 1.1.0\n\n- What changed\n- What else changed\n\nPlain text; it is shown verbatim in the update dialog.",
+      "default": {
+        "file_url": "https://downloads.example.com/edgeslicer/EdgeSlicer-1.1.0-win64.exe",
+        "file_size": 0,
+        "file_md5": "",
+        "file_sha256": "",
+        "reserved_1": "",
+        "reserved_2": ""
+      },
+      "arm": {
+        "file_url": "https://downloads.example.com/edgeslicer/EdgeSlicer-1.1.0-mac-arm64.dmg",
+        "file_size": 0,
+        "file_md5": "",
+        "file_sha256": ""
+      },
+      "intel": {
+        "file_url": "https://downloads.example.com/edgeslicer/EdgeSlicer-1.1.0-mac-x64.dmg",
+        "file_size": 0,
+        "file_md5": "",
+        "file_sha256": ""
+      }
+    }
+  }
+}

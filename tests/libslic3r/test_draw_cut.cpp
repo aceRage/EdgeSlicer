@@ -5377,3 +5377,81 @@ TEST_CASE("Draw cut: capture filtering removes short skims onto a neighbouring s
         REQUIRE(draw_cut_filter_capture_skims(s).size() == 3);
     }
 }
+
+
+TEST_CASE("Draw cut: outward-side probes do not cross gaps into neighbouring material",
+          "[DrawCut]")
+{
+    // REVIEW ITEM 3. draw_cut_outward_side() steps off the drawn line by a tenth
+    // of the loop's in-plane radius (2.36 mm here) and parity-tests each side.
+    // The regression: a loop on a sphere's shoulder with a plate hovering in the
+    // air above it. The +Z probe's first real surface hit is the PLATE'S face,
+    // inside the step; the old full-step probe landed inside the plate and voted
+    // it as material on the +Z side. That tied the vote and kept the candidate,
+    // which here is deterministically -Z (normals tilted down so the sample
+    // answer is ignored) - so "outward" pointed into the solid sphere. The probe
+    // now lands half way to the nearest surface inside the step: mid-gap, in the
+    // air, and the neighbour cannot vote.
+    //
+    // The loop sits at 65 degrees of latitude on a radius-26 sphere, tessellated
+    // finely (its_make_sphere's second argument is an ANGLE in radians - one
+    // degree here; the 0.6 default leaves 34-degree facets the samples would
+    // float above). At this latitude the surface falls away above the loop, so
+    // a +Z ray from a sample is in air immediately (its w == 0 entry crossing
+    // is filtered as noise) and the plate is genuinely the first hit. The -Z
+    // ray runs through the sphere's interior and lands well inside it at the
+    // full step.
+    auto make_loop = [] {
+        DrawCutStroke stroke;
+        const int    n   = 96;
+        const double lat = 65.0 * M_PI / 180.0;
+        for (int i = 0; i < n; ++ i) {
+            const double th = 2.0 * M_PI * double(i) / double(n);
+            const Vec3d  dir(std::sin(lat) * std::cos(th), std::sin(lat) * std::sin(th),
+                             std::cos(lat));
+            // Tilted DOWN so the sample vote falls through to the mesh with a
+            // deterministic -Z candidate (|along| ~ 0.29 < 0.5).
+            const Vec3d normal = (dir - 0.8 * Vec3d::UnitZ()).normalized();
+            stroke.append(26.0 * dir, normal, size_t(i));
+        }
+        stroke.append(stroke.samples().front().pos, stroke.samples().front().normal, 0);
+        REQUIRE(stroke.finish(1.0, 0.0) == DrawCutError::None);
+        return stroke;
+    };
+
+    const Vec3d n = Vec3d::UnitZ();
+
+    // (a) Sphere alone: -Z probes land inside the sphere, +Z probes land in the
+    // air above the shoulder. Material is on the candidate's own side, so the
+    // vote flips the answer to +Z. This section validates the loop, the tilted
+    // candidate and the probe plumbing; both old and new code pass it.
+    SECTION("sphere alone: the vote flips the tilted candidate to the open side")
+    {
+        const indexed_triangle_set sphere = its_make_sphere(26.0, M_PI / 180.0);
+        const DrawCutStroke        ring   = make_loop();
+        const Vec3d outward = draw_cut_outward_side(ring, n, &sphere);
+        INFO("outward " << outward.x() << " " << outward.y() << " " << outward.z());
+        REQUIRE(outward.z() > 0.0);
+    }
+
+    // (b) A plate across the air gap above the loop. Its bottom face is 1.5 mm
+    // above the samples - inside the 2.36 mm probe step - and it is the FIRST
+    // surface hit along +Z, so the clamped probe lands mid-gap and the plate
+    // cannot vote. The OLD probe landed inside the plate, tied the vote, and
+    // kept -Z - into the solid sphere.
+    SECTION("plate across the gap: the neighbour cannot vote")
+    {
+        indexed_triangle_set sphere = its_make_sphere(26.0, M_PI / 180.0);
+        indexed_triangle_set plate  = its_make_cube(80.0, 80.0, 3.0);
+        // its_make_cube is corner-origin. The loop is at z ~= 11.0; put the
+        // plate's bottom face 1.5 mm above it, its top beyond the probe step.
+        its_transform(plate,
+                      Geometry::translation_transform(Vec3d(-40.0, -40.0, 12.5)));
+        its_merge(sphere, plate);
+
+        const DrawCutStroke ring = make_loop();
+        const Vec3d outward = draw_cut_outward_side(ring, n, &sphere);
+        INFO("outward " << outward.x() << " " << outward.y() << " " << outward.z());
+        REQUIRE(outward.z() > 0.0);
+    }
+}

@@ -476,3 +476,17 @@ TEST_CASE("save_to_json leaves an existing file untouched when the config cannot
     boost::filesystem::remove(path);
     CHECK(contents == "previous");
 }
+
+// Snapmaker #810: enabling small-area flow compensation must fall back to the
+// PrintConfig default model (not an empty per-preset override). The toggle
+// itself stays off until the user turns it on.
+TEST_CASE("Small-area flow compensation default model is populated", "[Config][SAFC]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    REQUIRE_FALSE(config.opt_bool("small_area_infill_flow_compensation"));
+    const auto *model = config.opt<ConfigOptionStrings>("small_area_infill_flow_compensation_model");
+    REQUIRE(model != nullptr);
+    REQUIRE_FALSE(model->values.empty());
+    CHECK(model->values.front() == "0,0");
+    CHECK(model->values.back() == "\n10,1");
+}
