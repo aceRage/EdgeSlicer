@@ -5322,13 +5322,18 @@ TEST_CASE("Draw cut: capture filtering removes short skims onto a neighbouring s
         REQUIRE(out.back().normal.dot(x)  == Approx(1.0));
     }
 
-    SECTION("a wandering run of mixed normals is kept")
+    SECTION("a wander whose off-face run exceeds the skim limit is kept")
     {
-        std::vector<DrawCutSample> s = sample_run({ 0, 0, 0 }, { 10, 0, 0 }, 11, z);
-        s[4].normal = x;
-        s[5].normal = Vec3d::UnitY(); // disagrees with sample 4: not one surface
-        s[6].normal = x;
-        REQUIRE(draw_cut_filter_capture_skims(s).size() == 11);
+        // Four +X samples then one +Y between +Z flanks. The +X run alone is longer
+        // than kMaxSkimRun, so it reads as travel; the lone +Y sits between
+        // disagreeing flanks (+X before, +Z after), so it is travel too. Nothing
+        // is removed.
+        std::vector<DrawCutSample> s = sample_run({ 0, 0, 0 }, { 15, 0, 0 }, 16, z);
+        for (size_t i = 6; i <= 9; ++ i)
+            s[i].normal = x;
+        s[10].normal = Vec3d::UnitY();
+        const auto out = draw_cut_filter_capture_skims(s);
+        REQUIRE(out.size() == 16);
     }
 
     SECTION("a skim against disagreeing flanks is kept")

@@ -972,18 +972,21 @@ double draw_cut_chain_snap_radius(const BoundingBoxf3& bbox);
 // zigzag - the line leaps off the face the user is drawing on and comes straight
 // back).
 //
-// The filter removes a SHORT run of interior samples (at most
-// kMaxSkimRun long) that sits on ONE other, disoriented surface (each sample's
-// normal disagrees with both flanking samples' normals by more than 45 deg, the
-// two flanking samples agree with each other, and the run's own samples agree with
-// each other) - i.e. an excursion off the face and back. A longer excursion, a
-// wandering one (mixed normals inside the run), or one whose flanks disagree is
-// indistinguishable from a deliberate detour and is KEPT.
+// The filter removes a SHORT run of interior samples (at most kMaxSkimRun long)
+// that sits on a surface disoriented from the face being drawn on (each sample's
+// normal disagrees with both flanking samples' normals by more than 45 deg and
+// the two flanking samples agree with each other) - i.e. an excursion off the
+// face and back. The FIRST and LAST sample are never removed: the join span to
+// the chain and the closing span are user intent, judged by append_at(), not by
+// this filter. The filter is pure (no mesh, no camera) so it is unit-testable;
+// it only reads normals.
 //
-// The FIRST and LAST sample are never removed: the join span to the chain and the
-// closing span are user intent, judged by append_at(), not by this filter. The
-// filter is pure (no mesh, no camera) so it is unit-testable; it only reads
-// normals.
+// The pass REPEATS until nothing more is removed, and a run of mixed normals is
+// decomposed into its single-orientation stretches - so an excursion survives
+// only if its longest single-orientation stretch exceeds kMaxSkimRun, and a
+// stretch that ends at a corner (flanks disagreeing with each other) is travel,
+// not a skim. Short of that, an excursion off the face and back IS a zigzag
+// regardless of how the skimmed surface was oriented.
 std::vector<DrawCutSample> draw_cut_filter_capture_skims(const std::vector<DrawCutSample>& stroke);
 
 // Which end of the chain a new stroke starting at `p` continues, if either.
