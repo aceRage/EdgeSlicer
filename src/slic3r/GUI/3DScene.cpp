@@ -425,96 +425,6 @@ void GLVolume::render()
     simple_render(shader, model_objects, colors);
 }
 
-// BBS: add outline related logic
-void GLVolume::render_with_outline(const GUI::Size& cnv_size)
-{
-    if (!is_active)
-        return;
-
-    GLShaderProgram* shader = GUI::wxGetApp().get_current_shader();
-    if (shader == nullptr)
-        return;
-
-    ModelObjectPtrs&       model_objects = GUI::wxGetApp().model().objects;
-    std::vector<ColorRGBA> colors        = get_extruders_colors();
-
-    const GUI::OpenGLManager::EFramebufferType framebuffers_type = GUI::OpenGLManager::get_framebuffers_type();
-    if (framebuffers_type == GUI::OpenGLManager::EFramebufferType::Unknown) {
-        // No supported, degrade to normal rendering
-        simple_render(shader, model_objects, colors);
-        return;
-    }
-
-    // 1st. render pass, render the model into a separate render target that has only depth buffer
-    GLuint depth_fbo = 0;
-    GLuint depth_tex = 0;
-    if (framebuffers_type == GUI::OpenGLManager::EFramebufferType::Arb) {
-        glsafe(::glGenFramebuffers(1, &depth_fbo));
-        glsafe(::glBindFramebuffer(GL_FRAMEBUFFER, depth_fbo));
-
-        glActiveTexture(GL_TEXTURE0);
-        glsafe(::glGenTextures(1, &depth_tex));
-        glsafe(::glBindTexture(GL_TEXTURE_2D, depth_tex));
-        glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE));
-        glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE));
-        glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR));
-        glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR));
-        glsafe(::glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT32F, cnv_size.get_width(), cnv_size.get_height(), 0, GL_DEPTH_COMPONENT,
-                              GL_FLOAT, nullptr));
-
-        glsafe(::glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, depth_tex, 0));
-    } else {
-        glsafe(::glGenFramebuffers(1, &depth_fbo));
-        glsafe(::glBindFramebuffer(GL_FRAMEBUFFER, depth_fbo));
-
-        glActiveTexture(GL_TEXTURE0);
-        glsafe(::glGenTextures(1, &depth_tex));
-        glsafe(::glBindTexture(GL_TEXTURE_2D, depth_tex));
-        glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE));
-        glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE));
-        glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR));
-        glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR));
-        glsafe(::glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT32F, cnv_size.get_width(), cnv_size.get_height(), 0, GL_DEPTH_COMPONENT,
-                              GL_FLOAT, nullptr));
-
-        glsafe(::glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, depth_tex, 0));
-    }
-    glsafe(::glClear(GL_DEPTH_BUFFER_BIT));
-    if (tverts_range == std::make_pair<size_t, size_t>(0, -1))
-        model.render();
-    else
-        model.render(this->tverts_range);
-    glsafe(::glBindTexture(GL_TEXTURE_2D, 0));
-
-    // 2nd. render pass, just a normal render with the depth buffer passed as a texture
-    if (framebuffers_type == GUI::OpenGLManager::EFramebufferType::Arb) {
-        glsafe(::glBindFramebuffer(GL_FRAMEBUFFER, 0));
-    } else if (framebuffers_type == GUI::OpenGLManager::EFramebufferType::Ext) {
-        glsafe(::glBindFramebuffer(GL_FRAMEBUFFER, 0));
-    }
-    shader->set_uniform("is_outline", true);
-    shader->set_uniform("screen_size", Vec2f{cnv_size.get_width(), cnv_size.get_height()});
-    glActiveTexture(GL_TEXTURE0);
-    glsafe(::glBindTexture(GL_TEXTURE_2D, depth_tex));
-    shader->set_uniform("depth_tex", 0);
-    simple_render(shader, model_objects, colors);
-
-    // Some clean up to do
-    glsafe(::glBindTexture(GL_TEXTURE_2D, 0));
-    shader->set_uniform("is_outline", false);
-    if (framebuffers_type == GUI::OpenGLManager::EFramebufferType::Arb) {
-        glsafe(::glBindFramebuffer(GL_FRAMEBUFFER, 0));
-        if (depth_fbo != 0)
-            glsafe(::glDeleteFramebuffers(1, &depth_fbo));
-    } else if (framebuffers_type == GUI::OpenGLManager::EFramebufferType::Ext) {
-        glsafe(::glBindFramebuffer(GL_FRAMEBUFFER, 0));
-        if (depth_fbo != 0)
-            glsafe(::glDeleteFramebuffers(1, &depth_fbo));
-    }
-    if (depth_tex != 0)
-        glsafe(::glDeleteTextures(1, &depth_tex));
-}
-
 // BBS add render for simple case
 void GLVolume::simple_render(GLShaderProgram*        shader,
                              ModelObjectPtrs&        model_objects,
@@ -922,6 +832,7 @@ void GLVolumeCollection::render(GLVolumeCollection::ERenderType      type,
                                 std::function<bool(const GLVolume&)> filter_func,
                                 bool                                 partly_inside_enable) const
 {
+    (void)cnv_size;
     const Transform3d& view_matrix = camera.get_view_matrix();
     const Transform3d& projection_matrix = camera.get_projection_matrix();
     GLVolumeWithIdAndZList to_render = volumes_to_render(volumes, type, view_matrix, filter_func);
@@ -1042,8 +953,8 @@ void GLVolumeCollection::render(GLVolumeCollection::ERenderType      type,
         shader->set_uniform("color_clip_side_alpha_1", pass_alphas[0]);
         shader->set_uniform("color_clip_side_alpha_2", pass_alphas[1]);
         // Curved cut: split the two halves by the sheet's height field rather
-        // than by the flat plane. Texture unit 3 - 0 is taken by depth_tex in
-        // the outline pass below, 1 and 2 by the environment map.
+        // than by the flat plane. Texture unit 3 - 0/1/2 stay free for the
+        // environment map and other scene textures; do not collide with paint/cut.
         const bool curved_split = m_use_color_clip_plane && m_curved_sheet_tex != 0;
         shader->set_uniform("curved_sheet_active", curved_split);
         if (curved_split) {
@@ -1055,8 +966,8 @@ void GLVolumeCollection::render(GLVolumeCollection::ERenderType      type,
             shader->set_uniform("curved_sheet_half_size", m_curved_sheet_half_size);
             shader->set_uniform("curved_sheet_range", m_curved_sheet_range);
         }
-        // Drawn cut: the 3D sign field takes over instead. Texture unit 4 - 0 is
-        // depth_tex in the outline pass, 1 and 2 the environment map, 3 the sheet.
+        // Drawn cut: the 3D sign field takes over instead. Texture unit 4 - 1 and 2
+        // are the environment map, 3 the sheet.
         const bool draw_split = m_use_color_clip_plane && m_draw_field_tex != 0;
         shader->set_uniform("draw_field_active", draw_split);
         if (draw_split) {
@@ -1115,11 +1026,7 @@ void GLVolumeCollection::render(GLVolumeCollection::ERenderType      type,
         const Matrix3d view_normal_matrix = view_matrix.matrix().block(0, 0, 3, 3) *
                                             model_matrix.matrix().block(0, 0, 3, 3).inverse().transpose();
         shader->set_uniform("view_normal_matrix", view_normal_matrix);
-        // BBS: add outline related logic
-        if (volume.first->selected && GUI::wxGetApp().show_outline())
-            volume.first->render_with_outline(cnv_size);
-        else
-            volume.first->render();
+        volume.first->render();
 
 #if ENABLE_ENVIRONMENT_MAP
         if (use_environment_texture)
