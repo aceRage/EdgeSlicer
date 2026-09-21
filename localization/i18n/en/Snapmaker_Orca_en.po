@@ -16851,6 +16851,30 @@ msgstr ""
 "ABS, appropriately increasing the heatbed temperature can reduce the "
 "probability of warping?"
 
+msgid "[Both]"
+msgstr "[Both]"
+
+msgid "Copy Standard to High flow"
+msgstr "Copy Standard to High flow"
+
+msgid "Copy all High-flow variant settings from Standard"
+msgstr "Copy all High-flow variant settings from Standard"
+
+msgid "Flow settings differ"
+msgstr "Flow settings differ"
+
+msgid "Standard and High flow settings differ. Choose which values to keep for both flow modes. This will overwrite the other mode."
+msgstr "Standard and High flow settings differ. Choose which values to keep for both flow modes. This will overwrite the other mode."
+
+msgid "Use Standard values"
+msgstr "Use Standard values"
+
+msgid "Use High-flow values"
+msgstr "Use High-flow values"
+
+msgid "High flow settings already differ from Standard. Overwrite High flow with Standard values?"
+msgstr "High flow settings already differ from Standard. Overwrite High flow with Standard values?"
+
 #~ msgid "Recent projects"
 #~ msgstr "Recent Projects"
 

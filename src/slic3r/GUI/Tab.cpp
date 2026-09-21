@@ -14,6 +14,7 @@
 
 #include <wx/app.h>
 #include <wx/button.h>
+#include <wx/panel.h>
 #include <wx/scrolwin.h>
 #include <wx/sizer.h>
 
@@ -65,6 +66,7 @@
 #include "Widgets/ComboBox.hpp"
 #include "Widgets/Button.hpp"
 #include "Widgets/SegmentedToggle.hpp"
+#include "FlowVariantEdit.hpp"
 #include <wx/textdlg.h>
 #ifdef WIN32
 	#include <commctrl.h>
@@ -900,6 +902,25 @@ void Tab::decorate()
         m_active_page->refresh();
 }
 
+void Tab::destroy_flow_variant_header_controls()
+{
+    if (!m_flow_variant_view)
+        return;
+
+    wxWindow* widget = m_flow_variant_view->host
+        ? static_cast<wxWindow*>(m_flow_variant_view->host)
+        : static_cast<wxWindow*>(m_flow_variant_view->selector);
+    if (widget == nullptr)
+        return;
+
+    if (auto* header_sizer = m_parent->get_page_header_sizer())
+        header_sizer->Detach(widget);
+    widget->Destroy();
+    m_flow_variant_view->host     = nullptr;
+    m_flow_variant_view->selector = nullptr;
+    m_flow_variant_view->copy_btn = nullptr;
+}
+
 void Tab::register_flow_variant_view(ConfigFlowDomain domain,
                                      const std::vector<PageShp>& pages,
                                      std::function<const std::vector<std::string>&()> options,
@@ -909,11 +930,7 @@ void Tab::register_flow_variant_view(ConfigFlowDomain domain,
     // filament and printer tabs share one ParamsPanel); destroy it before replacing
     // the view so re-registration (e.g. TabPrinter's kinematics-page rebuild) does
     // not leave orphaned selectors stacked in the header.
-    if (m_flow_variant_view && m_flow_variant_view->selector) {
-        if (auto* header_sizer = m_parent->get_page_header_sizer())
-            header_sizer->Detach(m_flow_variant_view->selector);
-        m_flow_variant_view->selector->Destroy();
-    }
+    destroy_flow_variant_header_controls();
     m_flow_variant_view = std::make_unique<FlowVariantView>();
     m_flow_variant_view->domain = domain;
     m_flow_variant_view->pages = pages;
@@ -936,6 +953,133 @@ size_t Tab::flow_variant_view_index() const
         : size_t(std::distance(m_flow_variant_view->modes.begin(), mode));
 }
 
+bool Tab::flow_variant_both_allowed() const
+{
+    return m_flow_variant_view
+        && m_flow_variant_view->domain != ConfigFlowDomain::Printer
+        && m_flow_variant_view->modes.size() > 1;
+}
+
+int Tab::flow_variant_selector_index() const
+{
+    if (!m_flow_variant_view)
+        return 0;
+    if (m_flow_variant_view->edit_scope == FlowVariantView::EditScope::Both && flow_variant_both_allowed())
+        return int(m_flow_variant_view->modes.size());
+    return int(flow_variant_view_index());
+}
+
+void Tab::on_flow_variant_segment_selected(int index)
+{
+    if (!m_flow_variant_view || index < 0)
+        return;
+
+    const int both_index = int(m_flow_variant_view->modes.size());
+    if (flow_variant_both_allowed() && index == both_index) {
+        if (m_flow_variant_view->edit_scope == FlowVariantView::EditScope::Both)
+            return;
+        if (!enter_flow_variant_both()) {
+            if (m_flow_variant_view->selector)
+                m_flow_variant_view->selector->setSelected(flow_variant_selector_index());
+            return;
+        }
+    } else if (size_t(index) < m_flow_variant_view->modes.size()) {
+        m_flow_variant_view->edit_scope    = FlowVariantView::EditScope::ActiveMode;
+        m_flow_variant_view->selected_mode = m_flow_variant_view->modes[size_t(index)];
+    } else {
+        return;
+    }
+
+    refresh_flow_variant_view();
+    Tab::reload_config();
+    // Entering Both may copy a winner onto the other slot; mark the preset dirty.
+    if (m_flow_variant_view && m_flow_variant_view->edit_scope == FlowVariantView::EditScope::Both)
+        update_dirty();
+    else
+        update_changed_ui();
+    toggle_options();
+    update_visibility();
+    m_parent->Layout();
+}
+
+bool Tab::enter_flow_variant_both()
+{
+    if (!flow_variant_both_allowed() || !m_config)
+        return false;
+
+    const bool has_standard = std::find(m_flow_variant_view->modes.begin(),
+                                        m_flow_variant_view->modes.end(),
+                                        FLOW_MODE_STANDARD) != m_flow_variant_view->modes.end();
+    const bool has_high_flow = std::find(m_flow_variant_view->modes.begin(),
+                                         m_flow_variant_view->modes.end(),
+                                         FLOW_MODE_HIGH_FLOW) != m_flow_variant_view->modes.end();
+
+    if (has_standard && has_high_flow &&
+        flow_variant_slots_differ(*m_config, m_flow_variant_view->domain, FLOW_MODE_STANDARD, FLOW_MODE_HIGH_FLOW)) {
+        wxWindow* parent = wxGetApp().plater() ? static_cast<wxWindow*>(wxGetApp().plater()) : this;
+        RichMessageDialog dlg(parent,
+            _L("Standard and High flow settings differ. Choose which values to keep for both flow modes. "
+               "This will overwrite the other mode."),
+            _L("Flow settings differ"),
+            wxYES_NO | wxCANCEL | wxICON_QUESTION);
+        dlg.SetYesNoCancelLabels(_L("Use Standard values"), _L("Use High-flow values"), _L("Cancel"));
+        const int answer = dlg.ShowModal();
+        if (answer == wxID_YES)
+            copy_flow_variant_slot(*m_config, m_flow_variant_view->domain, FLOW_MODE_STANDARD, FLOW_MODE_HIGH_FLOW);
+        else if (answer == wxID_NO)
+            copy_flow_variant_slot(*m_config, m_flow_variant_view->domain, FLOW_MODE_HIGH_FLOW, FLOW_MODE_STANDARD);
+        else
+            return false;
+    }
+
+    m_flow_variant_view->edit_scope = FlowVariantView::EditScope::Both;
+    const auto standard = std::find(m_flow_variant_view->modes.begin(),
+                                    m_flow_variant_view->modes.end(),
+                                    FLOW_MODE_STANDARD);
+    m_flow_variant_view->selected_mode = (standard == m_flow_variant_view->modes.end())
+        ? m_flow_variant_view->modes.front()
+        : *standard;
+    return true;
+}
+
+void Tab::on_copy_standard_to_high_flow()
+{
+    if (!m_flow_variant_view || !m_config)
+        return;
+    if (std::find(m_flow_variant_view->modes.begin(), m_flow_variant_view->modes.end(), FLOW_MODE_HIGH_FLOW)
+        == m_flow_variant_view->modes.end())
+        return;
+
+    if (flow_variant_slots_differ(*m_config, m_flow_variant_view->domain, FLOW_MODE_STANDARD, FLOW_MODE_HIGH_FLOW)) {
+        wxWindow* parent = wxGetApp().plater() ? static_cast<wxWindow*>(wxGetApp().plater()) : this;
+        MessageDialog dlg(parent,
+            _L("High flow settings already differ from Standard. Overwrite High flow with Standard values?"),
+            _L("Copy Standard to High flow"),
+            wxYES_NO | wxICON_WARNING);
+        if (dlg.ShowModal() != wxID_YES)
+            return;
+    }
+
+    copy_flow_variant_slot(*m_config, m_flow_variant_view->domain, FLOW_MODE_STANDARD, FLOW_MODE_HIGH_FLOW);
+    refresh_flow_variant_view();
+    Tab::reload_config();
+    update_dirty();
+    toggle_options();
+    update_visibility();
+    m_parent->Layout();
+}
+
+void Tab::maybe_dual_write_flow_variant(const std::string& opt_key)
+{
+    if (!m_flow_variant_view || !m_config)
+        return;
+    if (m_flow_variant_view->edit_scope != FlowVariantView::EditScope::Both)
+        return;
+    if (!m_flow_variant_view->is_option(opt_key))
+        return;
+    replicate_flow_variant_value(*m_config, opt_key, flow_variant_view_index(), m_flow_variant_view->modes);
+}
+
 void Tab::refresh_flow_variant_view()
 {
     if (!m_flow_variant_view || !m_config)
@@ -952,22 +1096,22 @@ void Tab::refresh_flow_variant_view()
     {
         const auto standard = std::find(modes.begin(), modes.end(), FLOW_MODE_STANDARD);
         m_flow_variant_view->selected_mode = (standard == modes.end()) ? modes.front() : *standard;
+        m_flow_variant_view->edit_scope    = FlowVariantView::EditScope::ActiveMode;
     }
 
     if (m_flow_variant_view->selector == nullptr || modes != m_flow_variant_view->modes)
     {
-        if (m_flow_variant_view->selector != nullptr)
-        {
-            m_parent->get_page_header_sizer()->Detach(m_flow_variant_view->selector);
-            m_flow_variant_view->selector->Destroy();
-        }
+        if (modes != m_flow_variant_view->modes)
+            m_flow_variant_view->edit_scope = FlowVariantView::EditScope::ActiveMode;
+
+        destroy_flow_variant_header_controls();
 
         m_flow_variant_view->modes = modes;
         // The brackets are part of the localized label (ASCII "[High flow]" by
         // default, CJK "【高流量】" in Chinese), so the glyph choice lives in the
         // translation catalog rather than being switched on the UI language here.
         std::vector<wxString> labels;
-        labels.reserve(modes.size());
+        labels.reserve(modes.size() + 1);
         for (const std::string& mode : modes)
         {
             if (mode == FLOW_MODE_STANDARD)
@@ -981,37 +1125,53 @@ void Tab::refresh_flow_variant_view()
                 labels.emplace_back(wxString("[") + from_u8(label) + "]");
             }
         }
+        if (flow_variant_both_allowed())
+            labels.emplace_back(_L("[Both]"));
+
+        wxWindow* header = m_parent->get_page_header();
+        auto* host = new wxPanel(header, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxBORDER_NONE);
+        host->SetBackgroundColour(header->GetBackgroundColour());
+        auto* host_sizer = new wxBoxSizer(wxHORIZONTAL);
 
         // Plain style = borderless teal/grey text (Figma), hosted in the frozen page header.
-        m_flow_variant_view->selector = new SegmentedToggle(m_parent->get_page_header(),
+        m_flow_variant_view->selector = new SegmentedToggle(host,
                                                             labels,
-                                                            int(flow_variant_view_index()),
+                                                            flow_variant_selector_index(),
                                                             SegmentedToggle::Style::Plain);
-        m_parent->get_page_header_sizer()->Add(m_flow_variant_view->selector,
+        host_sizer->Add(m_flow_variant_view->selector, 0, wxALIGN_CENTER_VERTICAL);
+
+        auto* copy_btn = new Button(host, _L("Copy Standard to High flow"));
+        copy_btn->SetFont(Label::Body_12);
+        copy_btn->SetBorderWidth(0);
+        copy_btn->SetPaddingSize(wxSize(FromDIP(8), FromDIP(2)));
+        copy_btn->SetCornerRadius(FromDIP(4));
+        copy_btn->SetBackgroundColor(StateColor(std::pair(header->GetBackgroundColour(), (int)StateColor::Normal)));
+        copy_btn->SetTextColor(StateColor(std::pair(wxColour("#009688"), (int)StateColor::Normal)));
+        copy_btn->SetCanFocus(false);
+        copy_btn->SetToolTip(_L("Copy all High-flow variant settings from Standard"));
+        copy_btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { on_copy_standard_to_high_flow(); });
+        host_sizer->Add(copy_btn, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP(10));
+        m_flow_variant_view->copy_btn = copy_btn;
+
+        host->SetSizer(host_sizer);
+        m_flow_variant_view->host = host;
+        m_parent->get_page_header_sizer()->Add(host,
                                                0,
                                                wxALIGN_CENTER_VERTICAL | wxLEFT | wxRIGHT | wxTOP | wxBOTTOM,
                                                FromDIP(10));
         m_flow_variant_view->selector->bindSelectionCallback([this](int index) {
-            if (!m_flow_variant_view || index < 0 || size_t(index) >= m_flow_variant_view->modes.size())
-                return;
-
-            m_flow_variant_view->selected_mode = m_flow_variant_view->modes[size_t(index)];
-            refresh_flow_variant_view();
-            Tab::reload_config();
-            update_changed_ui();
-            toggle_options();
-            update_visibility();
-            m_parent->Layout();
+            on_flow_variant_segment_selected(index);
         });
-        m_parent->get_page_header()->Layout();
+        header->Layout();
     }
-    else
+    else if (m_flow_variant_view->selector != nullptr)
     {
-        m_flow_variant_view->selector->setSelected(int(flow_variant_view_index()));
+        m_flow_variant_view->selector->setSelected(flow_variant_selector_index());
     }
 
     update_flow_variant_view_visibility();
 
+    // Both is editor-only: fields stay bound to the Standard (display) index.
     const int flow_index = int(flow_variant_view_index());
     for (const PageShp& page : m_flow_variant_view->pages)
     {
@@ -1032,28 +1192,43 @@ void Tab::update_flow_variant_view_visibility()
     // The dialog page header is shared by the filament and printer tabs. Only the
     // currently-active tab manages it; a background tab's refresh (e.g. a preset
     // reload) must not stomp the active tab's header or show a stale selector.
+    wxWindow* host = m_flow_variant_view ? m_flow_variant_view->host : nullptr;
+    if (host == nullptr && m_flow_variant_view)
+        host = m_flow_variant_view->selector;
+
     if (m_parent->get_current_tab() != this) {
-        if (m_flow_variant_view && m_flow_variant_view->selector)
-            m_flow_variant_view->selector->Hide();
+        if (host)
+            host->Hide();
         return;
     }
 
     const bool active_page_supports_flow_variants = m_flow_variant_view &&
         std::any_of(m_flow_variant_view->pages.begin(), m_flow_variant_view->pages.end(),
                     [this](const PageShp& page) { return m_active_page == page.get(); });
-    const bool show = active_page_supports_flow_variants && m_flow_variant_view->selector
+    const bool show = active_page_supports_flow_variants && host
                       && m_flow_variant_view->modes.size() > 1;
 
-    if (m_flow_variant_view && m_flow_variant_view->selector) {
-        // Reveal only this tab's selector; hide any sibling selector left visible by
+    if (host) {
+        // Reveal only this tab's host; hide any sibling selector left visible by
         // the other tab that shares this header.
         if (show) {
             for (wxWindow* sibling : m_parent->get_page_header()->GetChildren())
-                if (sibling != m_flow_variant_view->selector)
+                if (sibling != host)
                     sibling->Hide();
         }
-        m_flow_variant_view->selector->Show(show);
+        host->Show(show);
+        if (m_flow_variant_view && m_flow_variant_view->copy_btn) {
+            const bool show_copy = show
+                && flow_variant_both_allowed()
+                && m_flow_variant_view->edit_scope == FlowVariantView::EditScope::ActiveMode
+                && m_flow_variant_view->selected_mode == FLOW_MODE_STANDARD
+                && std::find(m_flow_variant_view->modes.begin(), m_flow_variant_view->modes.end(), FLOW_MODE_HIGH_FLOW)
+                    != m_flow_variant_view->modes.end();
+            m_flow_variant_view->copy_btn->Show(show_copy);
+        }
+        host->Layout();
     }
+
     m_parent->show_page_header(show);
 }
 
@@ -1110,12 +1285,27 @@ void Tab::update_changed_ui()
 
     if (m_flow_variant_view)
     {
+        const bool both = m_flow_variant_view->edit_scope == FlowVariantView::EditScope::Both;
         const size_t current_index = flow_variant_view_index();
         for (const std::string& key : m_flow_variant_view->options())
         {
-            const auto current = m_options_list.find(key + "#" + std::to_string(current_index));
-            if (current != m_options_list.end())
-                m_options_list[key] = current->second;
+            if (both) {
+                int flags = m_opt_status_value;
+                bool any = false;
+                for (size_t index = 0; index < m_flow_variant_view->modes.size(); ++index) {
+                    const auto it = m_options_list.find(key + "#" + std::to_string(index));
+                    if (it != m_options_list.end()) {
+                        flags &= it->second;
+                        any = true;
+                    }
+                }
+                if (any)
+                    m_options_list[key] = flags;
+            } else {
+                const auto current = m_options_list.find(key + "#" + std::to_string(current_index));
+                if (current != m_options_list.end())
+                    m_options_list[key] = current->second;
+            }
         }
     }
 
@@ -1679,6 +1869,9 @@ static wxString pad_combo_value_for_config(const DynamicPrintConfig &config)
 
 void Tab::on_value_change(const std::string& opt_key, const boost::any& value)
 {
+    if (m_config != nullptr)
+        maybe_dual_write_flow_variant(opt_key);
+
     if (wxGetApp().plater() == nullptr) {
         return;
     }
