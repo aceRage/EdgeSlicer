@@ -898,6 +898,13 @@ namespace Slic3r
         std::optional<unsigned int> start_extruder_id,
         float* min_cost)
     {
+        // Snapmaker #754 residual: Edge's Ultra grouping copy of the DP solver has the
+        // same wipe_volumes[id] OOB when a mixed/virtual filament id exceeds the flush matrix.
+        for (auto id : all_extruders) {
+            if (id >= wipe_volumes.size())
+                return all_extruders;
+        }
+
         bool add_start_extruder_flag = false;
 
         if (start_extruder_id) {

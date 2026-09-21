@@ -5,7 +5,7 @@
     cli = OrcaCli(r"C:\\Program Files\\EdgeSlicer\\EdgeSlicer.exe")
     result = cli.slice(["model.stl"],
                        printer="Snapmaker U1 (0.4 nozzle)",
-                       process="0.20 Standard @Snapmaker U1 (0.4 nozzle)",
+                       process="0.20mm Standard @Snapmaker U1 (0.4 nozzle)",
                        filaments=["Snapmaker PLA Matte @U1"],
                        outdir="out", export_3mf="out.3mf",
                        progress=lambda ev: print(ev["plate_percent"], ev.get("message")))
