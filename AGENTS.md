@@ -21,3 +21,10 @@ The history favors concise, sentence-style subject lines with optional issue ref
 
 ## Security & Configuration Tips
 Follow `SECURITY.md` for vulnerability reporting. Keep API tokens and printer credentials out of tracked configs; use `sandboxes/` for experimental settings. When touching third-party code in `deps_src/`, record the upstream commit or release in your PR description and run the relevant platform build script to confirm integration.
+
+## Mesh Fixture & Draw-Cut Test Gotchas
+- `its_make_sphere(radius, fa)`'s second argument is a **facet angle in radians**, not a length. The common `0.6` gives ~34° facets; points computed on the analytic sphere then float millimetres above the faceted surface. Use `M_PI / 180.0` for ~1° facets when samples must sit on the mesh.
+- `its_make_cube(x, y, z)` is corner-origin (spans `0..x, 0..y, 0..z`); `its_make_cylinder(r, h, fa)` stands on `z == 0`. Translate manually to center fixtures.
+- Resampled draw-cut stroke points sit a few microns inside the faceted skin (resample chord sagitta plus float32 vertex quantization). Geometric hit tests fired from stroke samples need a hit floor well above that noise (0.05 mm in `DrawCut.cpp`'s `ray_first_hit`), or a ray leaving the body clamps back onto the skin.
+- On draw-cut changes, run `libslic3r_tests.exe "[DrawCut]"` from `build/tests/libslic3r/Release`; the suite is the fast gate (~92 cases), a full Snapmaker_Orca rebuild is only needed for the deliverable.
+- From Git Bash, MSBuild switches must be dash-style (`-- -m -v:m`); slash-style `/m /v:m` gets path-mangled into `M:/`.

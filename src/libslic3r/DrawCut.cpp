@@ -776,6 +776,10 @@ Vec3d draw_cut_skirt_dir(const Vec3d& inward, const Vec3d& normal, const DrawCut
 // empty-side pre-check uses). Named here so the outward-side test can borrow the
 // SAME inside/outside answer the rest of the file trusts.
 static bool point_in_solid(const indexed_triangle_set& solid, const Vec3d& pt);
+// Its distance-keeping sibling, also defined further down: the nearest surface
+// crossing along +dir, which is what keeps the outward-side probes from crossing
+// a gap into neighbouring material.
+static double ray_first_hit(const indexed_triangle_set& solid, const Vec3d& pt, const Vec3d& dir);
 
 Vec3d draw_cut_outward_side(const DrawCutStroke&        stroke,
                             const Vec3d&                n,
@@ -811,6 +815,20 @@ Vec3d draw_cut_outward_side(const DrawCutStroke&        stroke,
     // with FEWER inside points is the outward one. A short step, because the skin
     // curves: a tenth of the loop's own in-plane radius, floored at a fraction of a
     // millimetre so a tiny loop still steps off its own facets.
+    //
+    // 2026-09-20, review item 3: the probe may NOT cross a gap to do it. The step
+    // scales off the LOOP, but loops are frequently drawn in slots or against walls
+    // where ANOTHER part of the model sits within that distance - and a probe that
+    // lands inside the neighbour votes for material on its side, which is exactly
+    // how the answer got flipped near adjacent geometry. So each probe first asks
+    // how far the surface actually is along its direction; when something is closer
+    // than the full step, the probe lands HALF WAY to it instead. Inside the body's
+    // own wall that mid-point is still inside the body (the count is unchanged);
+    // across a gap it sits in the gap (the neighbour no longer counts). The entry
+    // crossing through the skin AT the sample is invisible to that scan (it sits
+    // at w == 0, or within resample sagitta of it - the 0.05 mm floor filters
+    // both), so a direction whose nearest hit is the far wall of the body probes
+    // at the full step, exactly as before.
     double r = 0.0;
     Vec3d  c = Vec3d::Zero();
     for (const DrawCutSample& s : p)
@@ -840,8 +858,17 @@ Vec3d draw_cut_outward_side(const DrawCutStroke&        stroke,
     int in_pos = 0, in_neg = 0;
     for (size_t k = 0; k < probes; ++ k) {
         const Vec3d& q = p[(k * p.size()) / probes].pos;
-        if (point_in_solid(*mesh, q + step * cand)) ++ in_pos;
-        if (point_in_solid(*mesh, q - step * cand)) ++ in_neg;
+        // Gap-clamped probe (see the note above): land half way to the nearest
+        // surface inside the step, so a neighbour across a slot cannot vote.
+        // Directions whose nearest hit is beyond the step (open air, or the far
+        // wall of the body's own skin - the entry crossing at w == 0 is filtered
+        // as noise) probe at the full step, exactly as before.
+        const double reach_pos = ray_first_hit(*mesh, q,  cand);
+        const double reach_neg = ray_first_hit(*mesh, q, -cand);
+        const double dp = reach_pos < step ? 0.5 * reach_pos : step;
+        const double dn = reach_neg < step ? 0.5 * reach_neg : step;
+        if (point_in_solid(*mesh, q + dp * cand)) ++ in_pos;
+        if (point_in_solid(*mesh, q - dn * cand)) ++ in_neg;
         const int left = int(probes - k - 1);
         if (std::abs(in_pos - in_neg) > left)
             break;   // the rest cannot change the answer
@@ -3034,6 +3061,52 @@ static bool point_in_solid(const indexed_triangle_set& solid, const Vec3d& pt)
             ++ crossings;
     }
     return (crossings & 1) != 0;
+}
+
+// Nearest surface crossing of the ray pt + t * dir along +dir, or infinity when
+// nothing is hit. The same deterministic frame solve as point_in_solid - the two
+// must agree about where the surface is - but the DISTANCE is kept, which is what
+// draw_cut_outward_side() needs to keep its probes on the stroke's own body: a
+// probe that would cross a gap into NEIGHBOURING material is pulled up short of
+// the gap instead, so the neighbour cannot vote.
+static double ray_first_hit(const indexed_triangle_set& solid, const Vec3d& pt, const Vec3d& dir)
+{
+    const Vec3d ax = (std::abs(dir.x()) < 0.9 ? Vec3d::UnitX() : Vec3d::UnitY());
+    const Vec3d e0 = (ax - ax.dot(dir) * dir).normalized();
+    const Vec3d e1 = dir.cross(e0);
+
+    double best = std::numeric_limits<double>::infinity();
+    for (const Vec3i32& tri : solid.indices) {
+        Vec3d uvw[3];
+        for (int k = 0; k < 3; ++ k) {
+            const Vec3d rel = solid.vertices[tri(k)].cast<double>() - pt;
+            uvw[k]          = Vec3d(rel.dot(e0), rel.dot(e1), rel.dot(dir));
+        }
+
+        const double det = (uvw[1].y() - uvw[2].y()) * (uvw[0].x() - uvw[2].x()) +
+                           (uvw[2].x() - uvw[1].x()) * (uvw[0].y() - uvw[2].y());
+        if (std::abs(det) < 1e-12)
+            continue;
+        const double l0 = ((uvw[1].y() - uvw[2].y()) * (-uvw[2].x()) + (uvw[2].x() - uvw[1].x()) * (-uvw[2].y())) / det;
+        const double l1 = ((uvw[2].y() - uvw[0].y()) * (-uvw[2].x()) + (uvw[0].x() - uvw[2].x()) * (-uvw[2].y())) / det;
+        const double l2 = 1.0 - l0 - l1;
+        if (l0 < 0.0 || l1 < 0.0 || l2 < 0.0)
+            continue;
+
+        const double w = l0 * uvw[0].z() + l1 * uvw[1].z() + l2 * uvw[2].z();
+        // A floor, so the triangles that CONTAIN pt cannot clamp the probe to a
+        // hair's width and leave the parity test grazing the skin. It has to be
+        // FAR above float noise - resampled stroke points sit a few MICRONS
+        // inside the faceted skin (chord sagitta of the resample plus float32
+        // vertex quantization), and the ray out through that skin is then a real
+        // hit at w ~ 1e-5 - but well below any gap that matters: a neighbour
+        // closer than this to the stroke is touching it, and may as well vote.
+        // 0.05 mm clears the noise by an order of magnitude and ignores only
+        // contact-scale "gaps".
+        if (w > 0.05 && w < best)
+            best = w;
+    }
+    return best;
 }
 
 void draw_cut_empty_sides(const indexed_triangle_set& mesh,
