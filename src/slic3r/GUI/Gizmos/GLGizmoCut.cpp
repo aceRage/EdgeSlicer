@@ -4645,17 +4645,32 @@ void GLGizmoCut3D::release_draw_field_texture()
 
 void GLGizmoCut3D::apply_draw_color_clip()
 {
-    // Only a Draw cut with a CLOSED, usable line takes over the split. An open chain
-    // keeps the plain plane colours, which is honest: there is no cut surface yet.
-    // "Hide cut plane and grabbers" clearing the DRAWN classification is its own trap:
-    // in Draw mode the plane's grabbers are hidden anyway (render() stands the stroke in
-    // for them), so a user who ticks that box because the plane is meaningless here gets
-    // the flat plane's COLOURS back - the one thing the box is not about. Draw mode's
-    // colouring does not come from the plane, so the checkbox does not gate it.
-    if (!is_draw_surface() || !m_draw_stroke.valid() || m_connectors_editing) {
+    if (!is_draw_surface()) {
         m_parent.set_draw_color_clip(0, Transform3d::Identity(), Vec3d::Zero(), Vec3d::Ones());
+        // Back from Draw mode with no line (which turned the plane split off):
+        // the flat surface owns the colouring again, and it IS the cut here.
+        m_parent.set_use_color_clip_plane(true);
         return;
     }
+
+    // 2026-09-20, OWNER REPORT items 2 and 4. Until a closed, usable line exists
+    // there is no cut surface - and the flat plane's halves must not stand in for
+    // one, or switching to Draw keeps showing a cut that will never happen (item
+    // 2). So Draw mode without a line shows the object UNSPLIT, and the plane
+    // colour clip is switched off until a line completes or the surface switches
+    // back. "Hide cut plane and grabbers" does not gate this (the comment below
+    // about that trap still stands); CONNECTORS EDITING does not either: with a
+    // finished line the drawn classification is the cut, and it has to stay drawn
+    // while connectors are placed on it (item 4).
+    if (!m_draw_stroke.valid()) {
+        m_parent.set_draw_color_clip(0, Transform3d::Identity(), Vec3d::Zero(), Vec3d::Ones());
+        m_parent.set_use_color_clip_plane(false);
+        return;
+    }
+
+    // Restore on the way back (see the off-branch above): a line exists, so the
+    // colouring is armed again and the draw field takes it over.
+    m_parent.set_use_color_clip_plane(true);
 
     update_draw_field_texture();
     if (m_draw_field_tex == 0 || !m_draw_field_bbox.defined) {
@@ -6170,7 +6185,13 @@ void GLGizmoCut3D::render_clipper_cut()
     // drawn surface's own preview is the translucent cutter shell
     // render_draw_stroke() puts up, which IS the surface the boolean will use, so
     // there is nothing to draw here.
-    if (is_draw_surface() && !m_connectors_editing)
+    //
+    // 2026-09-20, OWNER REPORT item 4: the carve-out for connectors editing went
+    // back to the flat cap + contour whenever "Add connectors" was picked on a
+    // drawn cut - the one moment the flat outline is guaranteed to be wrong. The
+    // draw surface is the substrate there too (placement raycasts it), so in Draw
+    // mode the clipper never renders, connectors editing or not.
+    if (is_draw_surface())
         return;
 
     if (! m_connectors_editing)
@@ -6477,7 +6498,12 @@ void GLGizmoCut3D::on_render()
 
     render_clipper_cut();
 
-    if (!m_hide_cut_plane && !m_connectors_editing) {
+    // 2026-09-20, OWNER REPORT item 4: connectors editing hides the surface so the
+    // flat plane can stand in - on a DRAWN cut that both removes the only visual
+    // substrate a connector lands on and (with the clipper skip above) leaves
+    // nothing in its place. The draw stroke and its shell stay up while connectors
+    // are placed; the plane grabbers stay hidden exactly as before.
+    if (!m_hide_cut_plane && (!m_connectors_editing || is_draw_surface())) {
         // Curved surface: the deformed sheet stands in for the flat plane and
         // its control handles are drawn on top. The plane's own rotate and
         // translate grabbers stay exactly as they are, and the sheet rides on
@@ -7733,7 +7759,13 @@ void GLGizmoCut3D::render_cut_plane_input_window(CutConnectors &connectors, floa
             // connector_rotation_m(). The remaining conditions are the flat cut's
             // own (both halves kept, not cut-to-parts, not a one-object contour
             // selection), unchanged.
-            m_imgui->disabled_begin(!m_keep_upper || !m_keep_lower || m_keep_as_parts || (m_part_selection.valid() && m_part_selection.is_one_object()));
+            //
+            // 2026-09-20, OWNER REPORT item 4: on a DRAWN cut a connector can only
+            // stand on the drawn surface, which does not exist until a line is
+            // finished - offering the button before that would silently fall back
+            // to placing connectors on the (now hidden) flat plane.
+            m_imgui->disabled_begin(!m_keep_upper || !m_keep_lower || m_keep_as_parts || (m_part_selection.valid() && m_part_selection.is_one_object())
+                                    || (is_draw_surface() && !m_draw_stroke.valid()));
                 if (m_imgui->button(has_connectors ? _L("Edit connectors") : _L("Add connectors")))
                     set_connectors_editing(true);
             m_imgui->disabled_end();
