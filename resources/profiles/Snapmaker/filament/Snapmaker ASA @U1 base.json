@@ -137,5 +137,8 @@
   ],
   "bed_type": [
     "Hot Plate"
+  ],
+  "filament_flow_support": [
+    "standard"
   ]
 }

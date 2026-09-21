@@ -138,5 +138,8 @@
   "bed_type": [
     "Hot Plate"
   ],
-  "is_custom_defined": "0"
+  "is_custom_defined": "0",
+  "filament_flow_support": [
+    "standard"
+  ]
 }

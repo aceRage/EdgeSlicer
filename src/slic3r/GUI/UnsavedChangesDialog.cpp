@@ -2,6 +2,7 @@
 #include "RemoteAccess.hpp"
 #include <boost/log/trivial.hpp>
 
+#include <algorithm>
 #include <cstddef>
 #include <string>
 #include <vector>
@@ -1703,6 +1704,27 @@ void UnsavedChangesDialog::update_tree(Preset::Type type, PresetCollection* pres
         // Collect dirty options.
         const bool deep_compare = (type == Preset::TYPE_PRINTER || type == Preset::TYPE_SLA_MATERIAL);
         auto dirty_options = presets->current_dirty_options(deep_compare);
+        const std::vector<std::string> *flow_options = nullptr;
+        ConfigFlowDomain                flow_domain  = ConfigFlowDomain::Process;
+        if (type == Preset::TYPE_FILAMENT) {
+            flow_domain  = ConfigFlowDomain::Filament;
+            flow_options = &filament_flow_variant_options();
+        } else if (type == Preset::TYPE_PRINT) {
+            flow_options = &process_flow_variant_options();
+        }
+
+        if (flow_options != nullptr) {
+            dirty_options.erase(std::remove_if(dirty_options.begin(), dirty_options.end(),
+                                               [flow_options](const std::string &key) {
+                                                   return std::find(flow_options->begin(), flow_options->end(), key) !=
+                                                          flow_options->end();
+                                               }),
+                                dirty_options.end());
+
+            const std::vector<std::string> flow_dirty_options =
+                presets->current_flow_variant_dirty_options(flow_domain, *flow_options);
+            dirty_options.insert(dirty_options.end(), flow_dirty_options.begin(), flow_dirty_options.end());
+        }
 
         // process changes of extruders count
         if (type == Preset::TYPE_PRINTER && old_pt == ptFFF &&

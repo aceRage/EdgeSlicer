@@ -149,5 +149,9 @@
     ],
     "supertack_plate_temp_initial_layer": [
         "45"
+    ],
+    "filament_flow_support": [
+        "standard",
+        "high_flow"
     ]
 }

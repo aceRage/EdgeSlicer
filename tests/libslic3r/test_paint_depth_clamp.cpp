@@ -167,7 +167,7 @@ PrintObject *slice_painted_box(double x, double y, double z, const std::vector<i
         config.option<ConfigOptionFloat>("mmu_segmented_region_interlocking_depth")->value = interlocking_depth;
     config.option<ConfigOptionEnum<PerimeterGeneratorType>>("wall_generator")->value = wall_generator;
     if (gap_infill_speed >= 0.0)
-        config.option<ConfigOptionFloat>("gap_infill_speed")->value = gap_infill_speed;
+        config.option<ConfigOptionFloats>("gap_infill_speed")->values.front() = gap_infill_speed;
 
     print.set_status_silent();
     print.apply(model, config);
@@ -2907,7 +2907,7 @@ PrintObject *slice_bounded_frustum(double bottom, double top, double height,
     config.option<ConfigOptionFloat>("bottom_shell_thickness")->value           = 0.0;
     config.option<ConfigOptionEnum<PerimeterGeneratorType>>("wall_generator")->value = wall_generator;
     if (gap_infill_speed >= 0.0)
-        config.option<ConfigOptionFloat>("gap_infill_speed")->value = gap_infill_speed;
+        config.option<ConfigOptionFloats>("gap_infill_speed")->values.front() = gap_infill_speed;
 
     print.set_status_silent();
     print.apply(model, config);
@@ -3588,7 +3588,7 @@ PrintObject *slice_two_painted_colours(double x, double y, double z,
     config.option<ConfigOptionInt>("top_shell_layers")->value    = 4;
     config.option<ConfigOptionFloat>("top_shell_thickness")->value = 0.6;
     if (gap_infill_speed >= 0.0)
-        config.option<ConfigOptionFloat>("gap_infill_speed")->value = gap_infill_speed;
+        config.option<ConfigOptionFloats>("gap_infill_speed")->values.front() = gap_infill_speed;
 
     print.set_status_silent();
     print.apply(model, config);
@@ -3890,7 +3890,7 @@ PrintObject *slice_bounded_frustum_two_colours(double bottom, double top, double
     config.option<ConfigOptionFloat>("bottom_shell_thickness")->value           = 0.0;
     config.option<ConfigOptionEnum<PerimeterGeneratorType>>("wall_generator")->value = wall_generator;
     if (gap_infill_speed >= 0.0)
-        config.option<ConfigOptionFloat>("gap_infill_speed")->value = gap_infill_speed;
+        config.option<ConfigOptionFloats>("gap_infill_speed")->values.front() = gap_infill_speed;
 
     print.set_status_silent();
     print.apply(model, config);
@@ -4196,7 +4196,7 @@ PrintObject *slice_bounded_sphere_two_colours(double radius, PaintDepthMode mode
         ModelVolume *modifier = object->add_volume(make_cube(modifier_side, modifier_side, gapfill_off_modifier_z_max - gapfill_off_modifier_z_min),
                                                     ModelVolumeType::PARAMETER_MODIFIER);
         modifier->translate(-0.5 * modifier_side, -0.5 * modifier_side, gapfill_off_modifier_z_min - radius);
-        modifier->config.set_key_value("gap_infill_speed", new ConfigOptionFloat(0.0));
+        modifier->config.set_key_value("gap_infill_speed", new ConfigOptionFloats { 0.0 });
     }
 
     object->add_instance();
@@ -4217,7 +4217,7 @@ PrintObject *slice_bounded_sphere_two_colours(double radius, PaintDepthMode mode
     config.option<ConfigOptionInt>("bottom_shell_layers")->value                = 3;
     config.option<ConfigOptionFloat>("bottom_shell_thickness")->value           = 0.0;
     if (gap_infill_speed >= 0.0)
-        config.option<ConfigOptionFloat>("gap_infill_speed")->value = gap_infill_speed;
+        config.option<ConfigOptionFloats>("gap_infill_speed")->values.front() = gap_infill_speed;
 
     print.set_status_silent();
     print.apply(model, config);
@@ -4658,7 +4658,7 @@ TEST_CASE("multi_material_segmentation_by_painting: the interior inter-claim abs
     // fully spans whatever region (base or painted) it overlaps in Z - confined to z in [9,10].
     ModelVolume *modifier = object->add_volume(make_cube(20., 60., 1.), ModelVolumeType::PARAMETER_MODIFIER);
     modifier->translate(-8.265, -10., 9.);
-    modifier->config.set_key_value("gap_infill_speed", new ConfigOptionFloat(0.0));
+    modifier->config.set_key_value("gap_infill_speed", new ConfigOptionFloats { 0.0 });
 
     object->add_instance();
     object->ensure_on_bed();

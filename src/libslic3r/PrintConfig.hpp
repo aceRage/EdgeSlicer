@@ -444,6 +444,58 @@ enum RetractLiftEnforceType {
     rletTopAndBottom
 };
 
+
+// Snapmaker: flow-variant (standard / high flow) presets ------------------------------------------
+enum class ConfigFlowDomain {
+    Filament,   // *_flow_support key: filament_flow_support
+    Process,    // *_flow_support key: process_flow_support
+    Printer     // *_flow_support key: printer_flow_support
+};
+
+constexpr const char* FLOW_MODE_STANDARD  = "standard";
+constexpr const char* FLOW_MODE_HIGH_FLOW = "high_flow";
+
+enum FilamentVolumeType {
+    fvtStandard = 0,
+    fvtHighFlow = 1,
+};
+
+constexpr const char* FILAMENT_GROUPING_STANDARD = "standard";
+constexpr const char* FILAMENT_GROUPING_CUSTOM   = "custom";
+
+// Bounds-checked: values outside the mapping render as FLOW_MODE_STANDARD.
+const char* to_string(FilamentVolumeType type);
+
+// Unknown names resolve to fvtStandard.
+FilamentVolumeType filament_volume_type_from_string(const std::string &str);
+
+size_t flow_variant_index(const std::vector<std::string> &flow_support, const std::string &mode);
+
+const char* flow_support_key(ConfigFlowDomain domain);
+
+// Filament options whose vector values are stored per declared flow variant.
+const std::vector<std::string>& filament_flow_variant_options();
+bool is_filament_flow_variant_option(const std::string &key);
+
+// Process / printer options whose vector values are stored per declared flow variant.
+const std::vector<std::string>& process_flow_variant_options();
+bool is_process_flow_variant_option(const std::string &key);
+
+// Machine / print options whose vector values are stored per declared flow variant.
+const std::vector<std::string>& machine_flow_variant_options();
+bool is_machine_flow_variant_option(const std::string &key);
+
+size_t get_config_idx(const ConfigBase &config, ConfigFlowDomain domain, unsigned int filament_id = 0);
+
+template<typename VectorOption>
+inline auto get_value_at(const ConfigBase &config, const VectorOption &opt, ConfigFlowDomain domain, unsigned int filament_id = 0)
+    -> decltype(opt.get_at(0))
+{
+    return opt.get_at(get_config_idx(config, domain, filament_id));
+}
+
+// end Snapmaker: flow variant------------------------------------------------------------------------
+
 enum class GCodeThumbnailsFormat {
     PNG, JPG, QOI, BTT_TFT, ColPic
 };
@@ -578,6 +630,8 @@ CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(PrintHostType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(AuthorizationType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(WipeTowerWallType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(PerimeterGeneratorType)
+// Snapmaker: flow-variant
+CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(FilamentVolumeType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(ToolChangeOrderingType)
 // Ultra: nozzle flow variant declared to Bambu printers (metadata only in this fork).
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(NozzleVolumeType)
@@ -1047,13 +1101,13 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionInt,                 support_interface_bottom_layers))
     // Spacing between interface lines (the hatching distance). Set zero to get a solid interface.
     ((ConfigOptionFloat,               support_interface_spacing))
-    ((ConfigOptionFloat,               support_interface_speed))
+    ((ConfigOptionFloats,               support_interface_speed))
     ((ConfigOptionEnum<SupportMaterialPattern>, support_base_pattern))
     ((ConfigOptionEnum<SupportMaterialInterfacePattern>, support_interface_pattern))
     // Spacing between support material lines (the hatching distance).
     ((ConfigOptionFloat,               support_base_pattern_spacing))
     ((ConfigOptionFloat,               support_expansion))
-    ((ConfigOptionFloat,               support_speed))
+    ((ConfigOptionFloats,               support_speed))
     ((ConfigOptionEnum<SupportMaterialStyle>, support_style))
     // BBS
     //((ConfigOptionBool,                independent_support_layer_height))
@@ -1117,25 +1171,25 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloat,              min_length_factor))
 
     // Move all acceleration and jerk settings to object
-    ((ConfigOptionFloat,              default_acceleration))
-    ((ConfigOptionFloat,              outer_wall_acceleration))
-    ((ConfigOptionFloat,              inner_wall_acceleration))
-    ((ConfigOptionFloat,              top_surface_acceleration))
-    ((ConfigOptionFloat,              initial_layer_acceleration))
-    ((ConfigOptionFloatOrPercent,     bridge_acceleration))
-    ((ConfigOptionFloat,              travel_acceleration))
-    ((ConfigOptionFloatOrPercent,     sparse_infill_acceleration))
-    ((ConfigOptionFloatOrPercent,     internal_solid_infill_acceleration))
+    ((ConfigOptionFloats,              default_acceleration))
+    ((ConfigOptionFloats,              outer_wall_acceleration))
+    ((ConfigOptionFloats,              inner_wall_acceleration))
+    ((ConfigOptionFloats,              top_surface_acceleration))
+    ((ConfigOptionFloats,              initial_layer_acceleration))
+    ((ConfigOptionFloatsOrPercents,     bridge_acceleration))
+    ((ConfigOptionFloats,              travel_acceleration))
+    ((ConfigOptionFloatsOrPercents,     sparse_infill_acceleration))
+    ((ConfigOptionFloatsOrPercents,     internal_solid_infill_acceleration))
 
-    ((ConfigOptionFloat,              default_jerk))
-    ((ConfigOptionFloat,              outer_wall_jerk))
-    ((ConfigOptionFloat,              inner_wall_jerk))
-    ((ConfigOptionFloat,              infill_jerk))
-    ((ConfigOptionFloat,              top_surface_jerk))
-    ((ConfigOptionFloat,              initial_layer_jerk))
-    ((ConfigOptionFloat,              travel_jerk))
+    ((ConfigOptionFloats,              default_jerk))
+    ((ConfigOptionFloats,              outer_wall_jerk))
+    ((ConfigOptionFloats,              inner_wall_jerk))
+    ((ConfigOptionFloats,              infill_jerk))
+    ((ConfigOptionFloats,              top_surface_jerk))
+    ((ConfigOptionFloats,              initial_layer_jerk))
+    ((ConfigOptionFloats,              travel_jerk))
     ((ConfigOptionBool,               precise_z_height))
-    ((ConfigOptionFloat,              default_junction_deviation))
+    ((ConfigOptionFloats,              default_junction_deviation))
         
     ((ConfigOptionBool, interlocking_beam))
     ((ConfigOptionFloat,interlocking_beam_width))
@@ -1160,8 +1214,8 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloat,                internal_bridge_angle)) // ORCA: Internal bridge angle override
     ((ConfigOptionFloat,                bridge_flow))
     ((ConfigOptionFloat,                internal_bridge_flow))
-    ((ConfigOptionFloat,                bridge_speed))
-    ((ConfigOptionFloatOrPercent,       internal_bridge_speed))
+    ((ConfigOptionFloats,                bridge_speed))
+    ((ConfigOptionFloatsOrPercents,       internal_bridge_speed))
     // Ultra (over-support surfaces): bottom surfaces that land on support with a non-zero top Z
     // distance are classified stBottomOverSupport instead of stBottomBridge and printed with
     // these, not with the bridge settings right above them.
@@ -1182,7 +1236,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionEnum<InfillPattern>,  bottom_surface_pattern))
     ((ConfigOptionEnum<InfillPattern>, internal_solid_infill_pattern))
     ((ConfigOptionFloatOrPercent,       outer_wall_line_width))
-    ((ConfigOptionFloat,                outer_wall_speed))
+    ((ConfigOptionFloats,                outer_wall_speed))
     ((ConfigOptionFloat,                infill_direction))
     ((ConfigOptionFloat,                solid_infill_direction))
     ((ConfigOptionString,               solid_infill_rotate_template))
@@ -1206,12 +1260,12 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionInt,                  fuzzy_skin_octaves))
     ((ConfigOptionFloat,                fuzzy_skin_persistence))
     ((ConfigOptionBool,                 fuzzy_skin_skip_overhangs))
-    ((ConfigOptionFloat,                gap_infill_speed))
+    ((ConfigOptionFloats,                gap_infill_speed))
     ((ConfigOptionInt,                  sparse_infill_filament))
     ((ConfigOptionFloatOrPercent,       sparse_infill_line_width))
     ((ConfigOptionPercent,              infill_wall_overlap))
     ((ConfigOptionPercent,              top_bottom_infill_wall_overlap))
-    ((ConfigOptionFloat,                sparse_infill_speed))
+    ((ConfigOptionFloats,                sparse_infill_speed))
     ((ConfigOptionPercent, skeleton_infill_density))
     ((ConfigOptionPercent, skin_infill_density))
     // Locked Zag: the fill pattern each band is drawn with. ipCount ("same as the sparse infill
@@ -1237,7 +1291,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloat, ironing_spacing))
     ((ConfigOptionFloat, ironing_inset))
     ((ConfigOptionFloat, ironing_direction))
-    ((ConfigOptionFloat, ironing_speed))
+    ((ConfigOptionFloats, ironing_speed))
     ((ConfigOptionFloat, ironing_angle))
     // Detect bridging perimeters
     ((ConfigOptionBool, detect_overhang_wall))
@@ -1246,14 +1300,14 @@ PRINT_CONFIG_CLASS_DEFINE(
     // Ultra: 0 = same as wall_filament
     ((ConfigOptionInt, outer_wall_filament))
     ((ConfigOptionFloatOrPercent, inner_wall_line_width))
-    ((ConfigOptionFloat, inner_wall_speed))
+    ((ConfigOptionFloats, inner_wall_speed))
     // Total number of perimeters.
     ((ConfigOptionInt, wall_loops))
     ((ConfigOptionBool, alternate_extra_wall))
     ((ConfigOptionFloat, minimum_sparse_infill_area))
     ((ConfigOptionInt, solid_infill_filament))
     ((ConfigOptionFloatOrPercent, internal_solid_infill_line_width))
-    ((ConfigOptionFloat, internal_solid_infill_speed))
+    ((ConfigOptionFloats, internal_solid_infill_speed))
     // Detect thin walls.
     ((ConfigOptionBool, detect_thin_wall))
     // Ultra: offset layers (interlocked half-layer-shifted odd walls)
@@ -1261,13 +1315,13 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloatOrPercent, top_surface_line_width))
     ((ConfigOptionInt, top_shell_layers))
     ((ConfigOptionFloat, top_shell_thickness))
-    ((ConfigOptionFloat, top_surface_speed))
+    ((ConfigOptionFloats, top_surface_speed))
     //BBS
-    ((ConfigOptionBool,                 enable_overhang_speed))
-    ((ConfigOptionFloatOrPercent,       overhang_1_4_speed))
-    ((ConfigOptionFloatOrPercent,       overhang_2_4_speed))
-    ((ConfigOptionFloatOrPercent,       overhang_3_4_speed))
-    ((ConfigOptionFloatOrPercent,       overhang_4_4_speed))
+    ((ConfigOptionBools,                 enable_overhang_speed))
+    ((ConfigOptionFloatsOrPercents,       overhang_1_4_speed))
+    ((ConfigOptionFloatsOrPercents,       overhang_2_4_speed))
+    ((ConfigOptionFloatsOrPercents,       overhang_3_4_speed))
+    ((ConfigOptionFloatsOrPercents,       overhang_4_4_speed))
     ((ConfigOptionBool,                 only_one_wall_top))
 
     //SoftFever
@@ -1285,8 +1339,8 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionBool,                 precise_outer_wall))
     ((ConfigOptionPercent,              bridge_density))
     ((ConfigOptionFloat,                 filter_out_gap_fill))
-    ((ConfigOptionFloatOrPercent,       small_perimeter_speed))
-    ((ConfigOptionFloat,                small_perimeter_threshold))
+    ((ConfigOptionFloatsOrPercents,       small_perimeter_speed))
+    ((ConfigOptionFloats,                small_perimeter_threshold))
     ((ConfigOptionFloat,                top_solid_infill_flow_ratio))
     ((ConfigOptionFloat,                bottom_solid_infill_flow_ratio))
     ((ConfigOptionFloatOrPercent,       infill_anchor))
@@ -1295,7 +1349,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     // Orca
     ((ConfigOptionBool,                 make_overhang_printable))
     ((ConfigOptionBool,                 extra_perimeters_on_overhangs))
-    ((ConfigOptionBool,                 slowdown_for_curled_perimeters))
+    ((ConfigOptionBools,                 slowdown_for_curled_perimeters))
     ((ConfigOptionBool,                 hole_to_polyhole))
     ((ConfigOptionFloatOrPercent,       hole_to_polyhole_threshold))
     ((ConfigOptionBool,                 hole_to_polyhole_twisted))
@@ -1422,9 +1476,9 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionString,              layer_change_gcode))
     ((ConfigOptionString,              time_lapse_gcode))
 
-    ((ConfigOptionFloat,               max_volumetric_extrusion_rate_slope))
-    ((ConfigOptionFloat,               max_volumetric_extrusion_rate_slope_segment_length))
-    ((ConfigOptionBool,               extrusion_rate_smoothing_external_perimeter_only))
+    ((ConfigOptionFloats,               max_volumetric_extrusion_rate_slope))
+    ((ConfigOptionFloats,               max_volumetric_extrusion_rate_slope_segment_length))
+    ((ConfigOptionBools,               extrusion_rate_smoothing_external_perimeter_only))
 
     // Edge: layer-time speed smoothing. Process options; G-code export only (Print::steps_gcode).
     ((ConfigOptionEnum<LayerTimeSpeedSmoothMode>, layer_time_speed_smoothing))
@@ -1467,7 +1521,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionBool,                wipe_tower_no_sparse_layers))
     ((ConfigOptionString,              change_filament_gcode))
     ((ConfigOptionString,              change_extrusion_role_gcode))
-    ((ConfigOptionFloat,               travel_speed))
+    ((ConfigOptionFloats,               travel_speed))
     ((ConfigOptionFloat,               travel_speed_z))
     ((ConfigOptionBool,                silent_mode))
     ((ConfigOptionString,              machine_pause_gcode))
@@ -1484,9 +1538,9 @@ PRINT_CONFIG_CLASS_DEFINE(
     // SoftFever
     ((ConfigOptionBool,                use_firmware_retraction))
     ((ConfigOptionBool,                use_relative_e_distances))
-    ((ConfigOptionBool,                accel_to_decel_enable))
-    ((ConfigOptionPercent,             accel_to_decel_factor))
-    ((ConfigOptionFloatOrPercent,      initial_layer_travel_speed))
+    ((ConfigOptionBools,                accel_to_decel_enable))
+    ((ConfigOptionPercents,             accel_to_decel_factor))
+    ((ConfigOptionFloatsOrPercents,      initial_layer_travel_speed))
     ((ConfigOptionBool,                bbl_calib_mark_logo))
     ((ConfigOptionBool,                disable_m73))
 
@@ -1530,6 +1584,15 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionStrings,              small_area_infill_flow_compensation_model))
 
     ((ConfigOptionBool,                has_scarf_joint_seam))
+
+    // Snapmaker: flow-variant
+    ((ConfigOptionEnumsGeneric,        filament_volume_type))
+    ((ConfigOptionString,              filament_grouping_mode))
+    ((ConfigOptionInt,                 project_schema_version))
+    ((ConfigOptionStrings,             filament_flow_support))
+    ((ConfigOptionStrings,             process_flow_support))
+    ((ConfigOptionStrings,             printer_flow_support))
+    ((ConfigOptionInts,                filament_flow_step_size))
 
     // Ultra (dual-nozzle): struct members for the new multi-extruder options so they enter
     // FullPrintConfig::defaults() and are not stripped by Preset::remove_invalid_keys. Preset-TYPE
@@ -1627,10 +1690,10 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionInts,               complete_print_exhaust_fan_speed))
     ((ConfigOptionFloatOrPercent,     initial_layer_line_width))
     ((ConfigOptionFloat,              initial_layer_print_height))
-    ((ConfigOptionFloat,              initial_layer_speed))
+    ((ConfigOptionFloats,              initial_layer_speed))
 
     //BBS
-    ((ConfigOptionFloat,              initial_layer_infill_speed))
+    ((ConfigOptionFloats,              initial_layer_infill_speed))
     ((ConfigOptionInts,               nozzle_temperature_initial_layer))
     ((ConfigOptionInts,               full_fan_speed_layer))
     ((ConfigOptionFloats,               fan_max_speed))
@@ -1751,7 +1814,7 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionBool,                gcode_label_objects))
     ((ConfigOptionBool,                exclude_object))
     ((ConfigOptionBool,                gcode_comments))
-    ((ConfigOptionInt,                 slow_down_layers))
+    ((ConfigOptionInts,                 slow_down_layers))
     ((ConfigOptionInts,                support_material_interface_fan_speed))
     ((ConfigOptionInts,                internal_bridge_fan_speed)) // ORCA: Add support for separate internal bridge fan speed control
     ((ConfigOptionInts,                ironing_fan_speed))

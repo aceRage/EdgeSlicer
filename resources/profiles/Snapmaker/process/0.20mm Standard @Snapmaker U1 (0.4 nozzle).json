@@ -51,5 +51,9 @@
     "sparse_infill_speed": [
         "270",
         "600"
+    ],
+    "process_flow_support": [
+        "standard",
+        "high_flow"
     ]
 }

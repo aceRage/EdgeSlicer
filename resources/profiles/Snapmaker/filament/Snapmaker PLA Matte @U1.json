@@ -340,5 +340,9 @@
     "textured_cool_plate_temp_initial_layer": [
         "40"
     ],
-    "version": "0.0.0.0"
+    "version": "0.0.0.0",
+    "filament_flow_support": [
+        "standard",
+        "high_flow"
+    ]
 }

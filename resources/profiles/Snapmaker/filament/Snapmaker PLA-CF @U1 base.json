@@ -140,5 +140,8 @@
   ],
   "chamber_temperatures": [
     "0"
+  ],
+  "filament_flow_support": [
+    "standard"
   ]
 }

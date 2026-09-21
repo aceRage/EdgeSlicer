@@ -181,5 +181,8 @@
     ],
     "filament_scarf_length": [
         "10"
+    ],
+    "filament_flow_support": [
+        "standard"
     ]
 }

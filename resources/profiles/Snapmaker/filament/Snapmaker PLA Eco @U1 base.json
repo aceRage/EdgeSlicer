@@ -321,5 +321,8 @@
   "version": "0.0.0.0",
   "bed_type": [
     "Hot Plate"
+  ],
+  "filament_flow_support": [
+    "standard"
   ]
 }

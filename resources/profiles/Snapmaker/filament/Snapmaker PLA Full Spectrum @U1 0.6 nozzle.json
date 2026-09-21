@@ -321,5 +321,8 @@
     ],
     "filament_unload_time": [
         "2"
+    ],
+    "filament_flow_support": [
+        "standard"
     ]
 }
