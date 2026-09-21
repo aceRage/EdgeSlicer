@@ -293,3 +293,92 @@ TEST_CASE("a short flush matrix does not truncate the cyclic sequence", "[ToolOr
     // Whereas validating against the short matrix alone would drop the top half.
     CHECK(parse_cyclic_order("4,3,2,1", short_flush_matrix_extruders) == std::vector<unsigned int>({1, 0}));
 }
+
+TEST_CASE("cyclic_order_from_customized_sequence derives the fallback from the plate customization",
+          "[ToolOrdering][Cyclic]")
+{
+    // The customized per-plate sequence ("Other layers filament sequence" -> Customize) stores
+    // 1-based filament numbers per layer range; the first range with a usable sequence supplies
+    // the cyclic fallback order as 0-based indices.
+    SECTION("first customized range supplies the order") {
+        const std::vector<LayerPrintSequence> seqs = {{{2, 5}, {3, 1, 2}}};
+        CHECK(cyclic_order_from_customized_sequence(seqs, 4) == std::vector<unsigned int>({2, 0, 1}));
+    }
+
+    SECTION("no customization yields empty, leaving the ascending order") {
+        CHECK(cyclic_order_from_customized_sequence({}, 4).empty());
+    }
+
+    SECTION("out-of-range and duplicate entries are dropped like parse_cyclic_order") {
+        const std::vector<LayerPrintSequence> seqs = {{{2, 5}, {3, 3, 1, 9, 0}}};
+        CHECK(cyclic_order_from_customized_sequence(seqs, 4) == std::vector<unsigned int>({2, 0}));
+    }
+
+    SECTION("a range whose sequence validates empty falls through to the next one") {
+        const std::vector<LayerPrintSequence> seqs = {{{2, 3}, {9, 0}}, {{4, 6}, {2, 4}}};
+        CHECK(cyclic_order_from_customized_sequence(seqs, 4) == std::vector<unsigned int>({1, 3}));
+    }
+}
+
+TEST_CASE("get_custom_seq follows the customized plate sequence when no explicit cyclic order is set",
+          "[ToolOrdering][Cyclic]")
+{
+    // Composition contract exercised by reorder_extruders_for_minimum_flush_volume: when
+    // toolchange_cyclic_order is empty, the cyclic base order comes from the customized
+    // plate sequence, and layers inside a customized range still get that range's exact
+    // sequence. Layers are 0-based here, ranges and sequences 1-based.
+    const std::vector<std::vector<unsigned int>> layer_filaments = {{0, 1, 2}, {0, 1, 2}, {0, 1, 2}};
+    // Layer 2 only (1-based) customized to 3,1,2; 1-based layer 3 (0-based 2) sits outside every
+    // range, which is where the cyclic base order (fallback or explicit) applies.
+    const std::vector<LayerPrintSequence> other_layers_seqs = {{{2, 2}, {3, 1, 2}}};
+
+    SECTION("customized sequence present, empty cyclic string: outside layers follow the customization") {
+        const std::vector<unsigned int> fallback = cyclic_order_from_customized_sequence(other_layers_seqs, 3);
+        REQUIRE(fallback == std::vector<unsigned int>({2, 0, 1}));
+
+        auto fn = make_cyclic_custom_seq(other_layers_seqs, layer_filaments,
+                                         /*use_cyclic_ordering*/ true,
+                                         /*cyclic_first_layer*/ false,
+                                         fallback);
+
+        bool applied = false;
+        // Layer 0 keeps its adhesion-optimized order (cyclic_first_layer off).
+        run_custom_seq(fn, 0, applied);
+        CHECK_FALSE(applied);
+
+        // The customized range still wins with its exact sequence.
+        CHECK(run_custom_seq(fn, 1, applied) == std::vector<int>({3, 1, 2}));
+        CHECK(applied);
+
+        // Outside every range, the cyclic order is now the customized one, not ascending.
+        CHECK(run_custom_seq(fn, 2, applied) == std::vector<int>({3, 1, 2}));
+        CHECK(applied);
+    }
+
+    SECTION("explicit cyclic string still wins over the customized fallback") {
+        auto fn = make_cyclic_custom_seq(other_layers_seqs, layer_filaments,
+                                         /*use_cyclic_ordering*/ true,
+                                         /*cyclic_first_layer*/ false,
+                                         parse_cyclic_order("2,1,3", 3));
+
+        bool applied = false;
+        // Inside the range: customized sequence, unchanged.
+        CHECK(run_custom_seq(fn, 1, applied) == std::vector<int>({3, 1, 2}));
+        CHECK(applied);
+
+        // Outside the range: the explicit string, not the customization.
+        CHECK(run_custom_seq(fn, 2, applied) == std::vector<int>({2, 1, 3}));
+        CHECK(applied);
+    }
+
+    SECTION("no customization anywhere: outside layers keep the plain ascending order") {
+        auto fn = make_cyclic_custom_seq({}, layer_filaments,
+                                         /*use_cyclic_ordering*/ true,
+                                         /*cyclic_first_layer*/ false,
+                                         cyclic_order_from_customized_sequence({}, 3));
+
+        bool applied = false;
+        CHECK(run_custom_seq(fn, 2, applied) == std::vector<int>({1, 2, 3}));
+        CHECK(applied);
+    }
+}

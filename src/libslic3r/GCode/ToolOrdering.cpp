@@ -1740,6 +1740,29 @@ std::vector<unsigned int> parse_cyclic_order(const std::string& str, unsigned in
     return order;
 }
 
+std::vector<unsigned int> cyclic_order_from_customized_sequence(
+    const std::vector<LayerPrintSequence>& other_layers_seqs, unsigned int filament_count)
+{
+    // The plate's customized "other layers print sequence" (set per plate through the filament
+    // sequence UI) stores 1-based filament numbers per layer range. A cyclic layer outside every
+    // customized range uses the first customized range's sequence as its base order, so a user who
+    // customized the plate's filament order gets that same order from cyclic ordering without
+    // duplicating it into toolchange_cyclic_order. Same validation as parse_cyclic_order: drop
+    // out-of-range and duplicate entries. An empty result means "nothing customized" and leaves
+    // the plain ascending order.
+    for (const LayerPrintSequence& range_seq : other_layers_seqs) {
+        std::vector<unsigned int> order;
+        for (int filament_1based : range_seq.second) {
+            if (filament_1based >= 1 && (unsigned int)filament_1based <= filament_count
+                && std::find(order.begin(), order.end(), (unsigned int)(filament_1based - 1)) == order.end())
+                order.emplace_back((unsigned int)(filament_1based - 1));
+        }
+        if (!order.empty())
+            return order;
+    }
+    return {};
+}
+
 void apply_cyclic_order(std::vector<unsigned int>& filaments, const std::vector<unsigned int>& cyclic_order)
 {
     std::sort(filaments.begin(), filaments.end());
@@ -1922,8 +1945,16 @@ void ToolOrdering::reorder_extruders_for_minimum_flush_volume()
         use_cyclic_ordering ? parse_cyclic_order(print_config->toolchange_cyclic_order.value, filament_count)
                             : std::vector<unsigned int>();
 
+    // No explicit cyclic string: fall back to the plate's customized filament sequence (the
+    // per-plate "other layers print sequence") as the cyclic base order. The explicit string
+    // keeps winning, and with no customization anywhere this stays empty, so cyclic layers keep
+    // the plain ascending order exactly as before.
+    const std::vector<unsigned int> effective_cyclic_order =
+        cyclic_order.empty() ? cyclic_order_from_customized_sequence(other_layers_seqs, filament_count)
+                             : cyclic_order;
+
     auto get_custom_seq = make_cyclic_custom_seq(other_layers_seqs, layer_filaments,
-                                                 use_cyclic_ordering, cyclic_first_layer, cyclic_order);
+                                                 use_cyclic_ordering, cyclic_first_layer, effective_cyclic_order);
 
     std::optional<unsigned int> current_extruder_id;
     for (int i = 0; i < m_layer_tools.size(); ++i) {

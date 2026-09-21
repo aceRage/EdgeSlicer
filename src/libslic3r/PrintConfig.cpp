@@ -6412,7 +6412,8 @@ void PrintConfigDef::init_fff_params()
     def->tooltip = L(
         "Custom filament sequence used by the cyclic toolchange ordering, as filament numbers separated by commas (e.g. \"3,2,1,4\").\n"
         "Each layer prints its filaments following this sequence; filaments not listed are printed last, in ascending order.\n"
-        "Leave empty to cycle through the filaments in ascending order."
+        "Leave empty to use the customized filament sequence set for the plate (Other layers filament sequence) when one exists, "
+        "and to cycle through the filaments in ascending order otherwise."
     );
     def->mode = comAdvanced;   // upstream uses comExpert; this fork has no such tier
     def->set_default_value(new ConfigOptionString(""));
