@@ -5,6 +5,7 @@
 #include "libslic3r/PrintConfig.hpp"
 
 #include <functional>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -292,4 +293,26 @@ TEST_CASE("a short flush matrix does not truncate the cyclic sequence", "[ToolOr
           == std::vector<unsigned int>({3, 2, 1, 0}));
     // Whereas validating against the short matrix alone would drop the top half.
     CHECK(parse_cyclic_order("4,3,2,1", short_flush_matrix_extruders) == std::vector<unsigned int>({1, 0}));
+}
+
+TEST_CASE("solve_extruder_order returns the input order when an id is outside wipe_volumes", "[ToolOrdering][OOB]")
+{
+    // Snapmaker #754: mixed / virtual filament ids can exceed the flush matrix.
+    // The DP solver used to index wipe_volumes[id] and crash (near-null 0x4).
+    const std::vector<std::vector<float>> wipe_volumes = {
+        {0.f, 10.f},
+        {12.f, 0.f},
+    };
+
+    SECTION("in-range ids still produce an order of the same length") {
+        const std::vector<unsigned int> ids{0, 1};
+        const auto ordered = get_extruders_order(wipe_volumes, ids, std::nullopt);
+        REQUIRE(ordered.size() == ids.size());
+    }
+
+    SECTION("an id past the matrix is returned unchanged rather than crashing") {
+        const std::vector<unsigned int> ids{0, 5};
+        const auto ordered = get_extruders_order(wipe_volumes, ids, std::nullopt);
+        REQUIRE(ordered == ids);
+    }
 }

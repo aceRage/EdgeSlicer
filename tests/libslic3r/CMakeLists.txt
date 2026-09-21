@@ -80,6 +80,8 @@ add_executable(${_TEST_NAME}_tests
     test_wipe_tower_estimate.cpp
     test_wipe_path.cpp
     test_toolordering_cyclic.cpp
+    test_shortest_path.cpp
+    test_gcode_import.cpp
     # test_png_io.cpp
     test_indexed_triangle_set.cpp
     ../libnest2d/printer_parts.cpp
