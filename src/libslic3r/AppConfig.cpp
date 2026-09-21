@@ -1673,22 +1673,13 @@ std::string AppConfig::get_web_resource_upgrade_url()
 
 std::string AppConfig::get_version_upgrade_url(bool stable_only /* = false*/) 
 {
-    
-    std::string resourceUrl = get("orca_upgrade_url");
-    
-    if(!resourceUrl.empty())
-        return resourceUrl;
-    
-    //get local area and get the resource from diff server
-    std::string localLanguage = get("language");
-    if (localLanguage != "zh_CN")
-        localLanguage = "en";
-    std::string url = APP_UPDATE_URL_BASE_EN + APP_UPDATE_URL + localLanguage + std::string("/version.json");
-    auto countryArea = get_country_code();
-    if (countryArea == std::string("CN"))
-        url = APP_UPDATE_URL_BASE_CN + APP_UPDATE_URL + localLanguage + std::string("/version.json");
-
-    return url; 
+    // 2026-09-21: the Snapmaker default is gone. It pointed at Snapmaker's own
+    // update server (meta-cfg.snapmaker.com/upgrade/orca/...), so EdgeSlicer
+    // advertised Snapmaker Orca releases - notes, download link and all - and
+    // the same JSON could even force-upgrade the app into the upstream build.
+    // An override in the ini ("orca_upgrade_url") still wins: that is the hook
+    // to repoint at our own update server later, without a rebuild.
+    return get("orca_upgrade_url");
 }
 
 std::string AppConfig::version_check_url(bool stable_only/* = false*/) const
