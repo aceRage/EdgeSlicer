@@ -74,6 +74,7 @@ add_executable(${_TEST_NAME}_tests
 	# test_marchingsquares.cpp
 	test_timeutils.cpp
 	test_utils.cpp
+	TestMD5.cpp
 	test_voronoi.cpp
     test_optimizers.cpp
     test_wipe_tower.cpp
@@ -91,7 +92,7 @@ endif()
     
 target_link_libraries(${_TEST_NAME}_tests test_common libslic3r OpenSSL::Crypto)
 if (WIN32)
-    target_link_libraries(${_TEST_NAME}_tests bcrypt.lib)
+    target_link_libraries(${_TEST_NAME}_tests bcrypt.lib crypt32.lib)
 endif()
 set_property(TARGET ${_TEST_NAME}_tests PROPERTY FOLDER "tests")
 
