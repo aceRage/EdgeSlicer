@@ -224,6 +224,12 @@ public:
 						iy += 1;
 						assert(iy <= iyb);
 					}
+					// Snapmaker #752 / Orca #12806: Release builds strip the asserts above.
+					// Painted-line projection can walk (ix, iy) past the grid (closed max
+					// boundary, or exact cell-corner crossing), and visitor() then OOB-reads
+					// m_cells / m_contours — the "paint colour data overflow" slice crash.
+					if (ix < 0 || iy < 0 || ix >= (int64_t)m_cols || iy >= (int64_t)m_rows)
+						return;
 					if (! visitor(iy, ix))
 						return;
 				} while (ix != ixb || iy != iyb);
@@ -245,6 +251,8 @@ public:
 						iy -= 1;
 						assert(iy >= iyb);
 					}
+					if (ix < 0 || iy < 0 || ix >= (int64_t)m_cols || iy >= (int64_t)m_rows)
+						return;
 					if (! visitor(iy, ix))
 						return;
 				} while (ix != ixb || iy != iyb);
@@ -270,6 +278,8 @@ public:
 						iy += 1;
 						assert(iy <= iyb);
 					}
+					if (ix < 0 || iy < 0 || ix >= (int64_t)m_cols || iy >= (int64_t)m_rows)
+						return;
 					if (! visitor(iy, ix))
 						return;
 				} while (ix != ixb || iy != iyb);
@@ -307,6 +317,8 @@ public:
 						iy -= 1;
 						assert(iy >= iyb);
 					}
+					if (ix < 0 || iy < 0 || ix >= (int64_t)m_cols || iy >= (int64_t)m_rows)
+						return;
 					if (! visitor(iy, ix))
 						return;
 				} while (ix != ixb || iy != iyb);
