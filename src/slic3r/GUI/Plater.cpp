@@ -19205,7 +19205,7 @@ void Plater::_calib_pa_pattern(const Calib_Params& params)
     } else if (speeds.size() == 1) {
         // If we have single value provided, set speed using global configuration.
         // per-object config is not set in this case
-        print_config.set_key_value("outer_wall_speed", new ConfigOptionFloats { speeds.front( }));
+        print_config.set_key_value("outer_wall_speed", new ConfigOptionFloats { speeds.front() });
     }
 
     wxGetApp().get_tab(Preset::TYPE_PRINT)->update_dirty();

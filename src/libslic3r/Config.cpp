@@ -559,6 +559,7 @@ void ConfigBase::set(const std::string &opt_key, int value, bool create)
     	case coInt:    static_cast<ConfigOptionInt*>(opt)->value = value; break;
     	case coFloat:  static_cast<ConfigOptionFloat*>(opt)->value = value; break;
 		case coFloatOrPercent:  static_cast<ConfigOptionFloatOrPercent*>(opt)->value = value; static_cast<ConfigOptionFloatOrPercent*>(opt)->percent = false; break;
+		case coFloats: { auto *vec = static_cast<ConfigOptionFloats*>(opt); if (vec->values.empty()) vec->values.resize(1, 0.); vec->values.front() = value; break; }
 		case coString: static_cast<ConfigOptionString*>(opt)->value = std::to_string(value); break;
     	default: throw BadOptionTypeException("Configbase::set() - conversion from int not possible");
     }
@@ -570,6 +571,7 @@ void ConfigBase::set(const std::string &opt_key, double value, bool create)
     switch (opt->type()) {
     	case coFloat:  			static_cast<ConfigOptionFloat*>(opt)->value = value; break;
     	case coFloatOrPercent:  static_cast<ConfigOptionFloatOrPercent*>(opt)->value = value; static_cast<ConfigOptionFloatOrPercent*>(opt)->percent = false; break;
+        case coFloats: 			{ auto *vec = static_cast<ConfigOptionFloats*>(opt); if (vec->values.empty()) vec->values.resize(1, 0.); vec->values.front() = value; break; }
         case coString: 			static_cast<ConfigOptionString*>(opt)->value = float_to_string_decimal_point(value); break;
     	default: throw BadOptionTypeException("Configbase::set() - conversion from float not possible");
     }

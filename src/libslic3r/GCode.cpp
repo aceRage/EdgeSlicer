@@ -5564,12 +5564,12 @@ LayerResult GCode::process_layer(const Print& print,
     }
     case CalibMode::Calib_VFA_Tower: {
         auto _speed = print.calib_params().start + std::floor(print_z / 5.0) * print.calib_params().step;
-        m_calib_config.set_key_value("outer_wall_speed", new ConfigOptionFloats { std::round(_speed }));
+        m_calib_config.set_key_value("outer_wall_speed", new ConfigOptionFloats { std::round(_speed) });
         break;
     }
     case CalibMode::Calib_Vol_speed_Tower: {
         auto _speed = print.calib_params().start + print_z * print.calib_params().step;
-        m_calib_config.set_key_value("outer_wall_speed", new ConfigOptionFloats { std::round(_speed }));
+        m_calib_config.set_key_value("outer_wall_speed", new ConfigOptionFloats { std::round(_speed) });
         break;
     }
     case CalibMode::Calib_Retraction_tower: {
@@ -8751,13 +8751,13 @@ std::string GCode::_extrude(const ExtrusionPath& path, std::string description, 
         // wall lines have be attached
         if (path.role() != erBottomSurface)
             speed = m_config.get_abs_value("initial_layer_speed");
-    } else if (m_config.slow_down_layers > 1) {
+    } else if (m_config.slow_down_layers.values.front() > 1) {
         const auto _layer = layer_id();
-        if (_layer > 0 && _layer < m_config.slow_down_layers) {
+        if (_layer > 0 && _layer < m_config.slow_down_layers.values.front()) {
             const auto first_layer_speed = is_perimeter(path.role()) ? m_config.get_abs_value("initial_layer_speed") :
                                                                        m_config.get_abs_value("initial_layer_infill_speed");
             if (first_layer_speed < speed) {
-                speed = std::min(speed, Slic3r::lerp(first_layer_speed, speed, (double) _layer / m_config.slow_down_layers));
+                speed = std::min(speed, Slic3r::lerp(first_layer_speed, speed, (double) _layer / m_config.slow_down_layers.values.front()));
             }
         }
     }
