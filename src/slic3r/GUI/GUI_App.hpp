@@ -607,8 +607,6 @@ private:
     const wxImage&  getUsrPic() { return m_usr_pic_image; }
 
     wxString get_international_url(const wxString& origin_url);
-    wxString flutter_web_base_url(const wxString& path);
-    wxString build_flutter_web_url(const wxString& path);
 
     // SM
     struct SMUserInfo
