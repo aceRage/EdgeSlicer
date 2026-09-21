@@ -230,7 +230,7 @@ static bool line_eligible(LayerTimeSpeedSmoothMode mode, LayerTimeSlowdownScope 
 static float scaled_feedrate(const ParsedLine &line, double factor, const PrintConfig &config)
 {
     float f = float(line.feedrate_mm_min * factor);
-    const double max_vol = config.filament_max_volumetric_speed.get_at(line.extruder);
+    const double max_vol = get_value_at(config, config.filament_max_volumetric_speed, ConfigFlowDomain::Filament, line.extruder);
     if (max_vol > 0.0 && line.mm3_per_mm > 0.f) {
         const float cap = float(60.0 * max_vol / line.mm3_per_mm);
         if (cap > 0.f)
@@ -319,7 +319,7 @@ static std::vector<ParsedLine> parse_layer_lines(ParseState &state, const std::s
 
         line.feedrate_mm_min = gline.has_f() ? gline.f() : reader.f();
         if (line.feedrate_mm_min <= 0.f)
-            line.feedrate_mm_min = float(config.travel_speed.value) * 60.f;
+            line.feedrate_mm_min = float(config.travel_speed.values.front()) * 60.f;
         const float feedrate_mm_s = line.feedrate_mm_min / 60.f;
         if (line.length > 0.f && feedrate_mm_s > 0.f)
             line.time = line.length / feedrate_mm_s;
@@ -505,7 +505,7 @@ LayerTimeSpeedSmoothingFilter::LayerTimeSpeedSmoothingFilter(const PrintConfig &
     , m_slowdown_scope(config.layer_time_speed_slowdown_scope.value)
     , m_spiral_mode(config.spiral_mode.value)
     , m_relative_e(config.use_relative_e_distances.value)
-    , m_slow_down_layers(config.slow_down_layers.value)
+    , m_slow_down_layers(config.slow_down_layers.values.front())
 {}
 
 void LayerTimeSpeedSmoothingFilter::reset() { m_layers.clear(); }
@@ -562,7 +562,7 @@ std::string LayerTimeSpeedSmoothingFilter::flush()
         return {};
 
     auto init_parse_state = [this](ParseState &state) {
-        state.reader.f() = float(m_config.travel_speed.value) * 60.f;
+        state.reader.f() = float(m_config.travel_speed.values.front()) * 60.f;
         state.relative_e = m_relative_e;
     };
 
@@ -627,7 +627,7 @@ std::string LayerTimeSpeedSmoothingFilter::flush()
     // buffered size up front keeps the peak at about two copies of the text with no regrowth.
     std::string out;
     out.reserve(buffered_bytes + m_layers.size() * 96);
-    float      emitted_f = float(m_config.travel_speed.value) * 60.f;
+    float      emitted_f = float(m_config.travel_speed.values.front()) * 60.f;
     ParseState state;
     init_parse_state(state);
     for (size_t i = 0; i < m_layers.size(); ++i) {

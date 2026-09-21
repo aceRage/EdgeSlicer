@@ -809,7 +809,7 @@ WipeTower::WipeTower(const PrintConfig& config, int plate_idx, Vec3d plate_origi
     m_sparse_layers_skipped(wipe_tower_sparse_layers_skipped(config)),
     m_gcode_flavor(config.gcode_flavor),
     m_has_nozzle_rack(Slic3r::has_nozzle_rack(config)),
-    m_travel_speed(config.travel_speed),
+    m_travel_speed(float(get_value_at(config, config.travel_speed, ConfigFlowDomain::Process, initial_tool))),
     m_current_tool(initial_tool),
     //wipe_volumes(flush_matrix)
     m_wipe_volume(prime_volume),
@@ -819,7 +819,7 @@ WipeTower::WipeTower(const PrintConfig& config, int plate_idx, Vec3d plate_origi
     // it is taken over following default. Speeds from config are not
     // easily accessible here.
     const float default_speed = 60.f;
-    m_first_layer_speed = config.get_abs_value("initial_layer_speed");
+    m_first_layer_speed = float(get_value_at(config, config.initial_layer_speed, ConfigFlowDomain::Process, initial_tool));
     if (m_first_layer_speed == 0.f) // just to make sure autospeed doesn't break it.
         m_first_layer_speed = default_speed / 2.f;
 
@@ -870,8 +870,8 @@ void WipeTower::set_extruder(size_t idx, const PrintConfig& config)
     m_filpar[idx].is_soluble = config.wipe_tower_filament == 0 ? config.filament_soluble.get_at(idx) : (idx != size_t(config.wipe_tower_filament - 1));
     // BBS
     m_filpar[idx].is_support = config.filament_is_support.get_at(idx);
-    m_filpar[idx].nozzle_temperature = config.nozzle_temperature.get_at(idx);
-    m_filpar[idx].nozzle_temperature_initial_layer = config.nozzle_temperature_initial_layer.get_at(idx);
+    m_filpar[idx].nozzle_temperature = get_value_at(config, config.nozzle_temperature, ConfigFlowDomain::Filament, idx);
+    m_filpar[idx].nozzle_temperature_initial_layer = get_value_at(config, config.nozzle_temperature_initial_layer, ConfigFlowDomain::Filament, idx);
 
     // If this is a single extruder MM printer, we will use all the SE-specific config values.
     // Otherwise, the defaults will be used to turn off the SE stuff.
@@ -893,7 +893,7 @@ void WipeTower::set_extruder(size_t idx, const PrintConfig& config)
     float nozzle_diameter = float(config.nozzle_diameter.get_at(idx));
     m_filpar[idx].nozzle_diameter = nozzle_diameter; // to be used in future with (non-single) multiextruder MM
 
-    float max_vol_speed = float(config.filament_max_volumetric_speed.get_at(idx));
+    float max_vol_speed = float(get_value_at(config, config.filament_max_volumetric_speed, ConfigFlowDomain::Filament, idx));
     if (max_vol_speed!= 0.f)
         m_filpar[idx].max_e_speed = (max_vol_speed / filament_area());
 

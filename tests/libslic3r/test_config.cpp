@@ -87,13 +87,13 @@ SCENARIO("Config accessor functions perform as expected.", "[Config]") {
         WHEN("An floating-point option is set through the integer interface") {
             config.set("inner_wall_speed", 10);
             THEN("The underlying value is set correctly.") {
-                REQUIRE(config.opt<ConfigOptionFloat>("inner_wall_speed")->getFloat() == 10.0);
+                REQUIRE(config.opt<ConfigOptionFloats>("inner_wall_speed")->get_at(0) == 10.0);
             }
         }
         WHEN("A floating-point option is set through the double interface") {
             config.set("inner_wall_speed", 5.5);
             THEN("The underlying value is set correctly.") {
-                REQUIRE(config.opt<ConfigOptionFloat>("inner_wall_speed")->getFloat() == 5.5);
+                REQUIRE(config.opt<ConfigOptionFloats>("inner_wall_speed")->get_at(0) == 5.5);
             }
         }
         WHEN("An integer-based option is set through the double interface") {
@@ -106,7 +106,7 @@ SCENARIO("Config accessor functions perform as expected.", "[Config]") {
                 REQUIRE_THROWS_AS(config.set_deserialize_strict("inner_wall_speed", "zzzz"), BadOptionValueException);
             }
             THEN("The value does not change.") {
-                REQUIRE(config.opt<ConfigOptionFloat>("inner_wall_speed")->getFloat() == 60.0);
+                REQUIRE(config.opt<ConfigOptionFloats>("inner_wall_speed")->get_at(0) == 60.0);
             }
         }
         WHEN("A string option is set through the string interface") {
@@ -475,4 +475,18 @@ TEST_CASE("save_to_json leaves an existing file untouched when the config cannot
     }
     boost::filesystem::remove(path);
     CHECK(contents == "previous");
+}
+
+// Snapmaker #810: enabling small-area flow compensation must fall back to the
+// PrintConfig default model (not an empty per-preset override). The toggle
+// itself stays off until the user turns it on.
+TEST_CASE("Small-area flow compensation default model is populated", "[Config][SAFC]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    REQUIRE_FALSE(config.opt_bool("small_area_infill_flow_compensation"));
+    const auto *model = config.opt<ConfigOptionStrings>("small_area_infill_flow_compensation_model");
+    REQUIRE(model != nullptr);
+    REQUIRE_FALSE(model->values.empty());
+    CHECK(model->values.front() == "0,0");
+    CHECK(model->values.back() == "\n10,1");
 }

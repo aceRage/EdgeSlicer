@@ -23,6 +23,7 @@
 #include <wx/imaglist.h>
 #include <wx/settings.h>
 #include <wx/filedlg.h>
+#include <algorithm>
 #include <iomanip>
 #include <sstream>
 
@@ -63,6 +64,7 @@
 #include "SupportSetEditDialog.hpp"
 #include "Widgets/ComboBox.hpp"
 #include "Widgets/Button.hpp"
+#include "Widgets/SegmentedToggle.hpp"
 #include <wx/textdlg.h>
 #ifdef WIN32
 	#include <commctrl.h>
@@ -898,15 +900,200 @@ void Tab::decorate()
         m_active_page->refresh();
 }
 
+void Tab::register_flow_variant_view(ConfigFlowDomain domain,
+                                     const std::vector<PageShp>& pages,
+                                     std::function<const std::vector<std::string>&()> options,
+                                     std::function<bool(const std::string&)> is_option)
+{
+    // A previously-registered view's selector lives in the shared page header (the
+    // filament and printer tabs share one ParamsPanel); destroy it before replacing
+    // the view so re-registration (e.g. TabPrinter's kinematics-page rebuild) does
+    // not leave orphaned selectors stacked in the header.
+    if (m_flow_variant_view && m_flow_variant_view->selector) {
+        if (auto* header_sizer = m_parent->get_page_header_sizer())
+            header_sizer->Detach(m_flow_variant_view->selector);
+        m_flow_variant_view->selector->Destroy();
+    }
+    m_flow_variant_view = std::make_unique<FlowVariantView>();
+    m_flow_variant_view->domain = domain;
+    m_flow_variant_view->pages = pages;
+    m_flow_variant_view->options = std::move(options);
+    m_flow_variant_view->is_option = std::move(is_option);
+
+    refresh_flow_variant_view();
+}
+
+size_t Tab::flow_variant_view_index() const
+{
+    if (!m_flow_variant_view || m_flow_variant_view->modes.empty())
+        return 0;
+
+    const auto mode = std::find(m_flow_variant_view->modes.begin(),
+                                m_flow_variant_view->modes.end(),
+                                m_flow_variant_view->selected_mode);
+    return mode == m_flow_variant_view->modes.end()
+        ? 0
+        : size_t(std::distance(m_flow_variant_view->modes.begin(), mode));
+}
+
+void Tab::refresh_flow_variant_view()
+{
+    if (!m_flow_variant_view || !m_config)
+        return;
+
+    std::vector<std::string> modes;
+    const auto* support = m_config->option<ConfigOptionStrings>(flow_support_key(m_flow_variant_view->domain));
+    if (support != nullptr)
+        modes = support->values;
+    if (modes.empty())
+        modes.emplace_back(FLOW_MODE_STANDARD);
+
+    if (std::find(modes.begin(), modes.end(), m_flow_variant_view->selected_mode) == modes.end())
+    {
+        const auto standard = std::find(modes.begin(), modes.end(), FLOW_MODE_STANDARD);
+        m_flow_variant_view->selected_mode = (standard == modes.end()) ? modes.front() : *standard;
+    }
+
+    if (m_flow_variant_view->selector == nullptr || modes != m_flow_variant_view->modes)
+    {
+        if (m_flow_variant_view->selector != nullptr)
+        {
+            m_parent->get_page_header_sizer()->Detach(m_flow_variant_view->selector);
+            m_flow_variant_view->selector->Destroy();
+        }
+
+        m_flow_variant_view->modes = modes;
+        // The brackets are part of the localized label (ASCII "[High flow]" by
+        // default, CJK "【高流量】" in Chinese), so the glyph choice lives in the
+        // translation catalog rather than being switched on the UI language here.
+        std::vector<wxString> labels;
+        labels.reserve(modes.size());
+        for (const std::string& mode : modes)
+        {
+            if (mode == FLOW_MODE_STANDARD)
+                labels.emplace_back(_L("[Standard flow]"));
+            else if (mode == FLOW_MODE_HIGH_FLOW)
+                labels.emplace_back(_L("[High flow]"));
+            else
+            {
+                std::string label = mode;
+                std::replace(label.begin(), label.end(), '_', ' ');
+                labels.emplace_back(wxString("[") + from_u8(label) + "]");
+            }
+        }
+
+        // Plain style = borderless teal/grey text (Figma), hosted in the frozen page header.
+        m_flow_variant_view->selector = new SegmentedToggle(m_parent->get_page_header(),
+                                                            labels,
+                                                            int(flow_variant_view_index()),
+                                                            SegmentedToggle::Style::Plain);
+        m_parent->get_page_header_sizer()->Add(m_flow_variant_view->selector,
+                                               0,
+                                               wxALIGN_CENTER_VERTICAL | wxLEFT | wxRIGHT | wxTOP | wxBOTTOM,
+                                               FromDIP(10));
+        m_flow_variant_view->selector->bindSelectionCallback([this](int index) {
+            if (!m_flow_variant_view || index < 0 || size_t(index) >= m_flow_variant_view->modes.size())
+                return;
+
+            m_flow_variant_view->selected_mode = m_flow_variant_view->modes[size_t(index)];
+            refresh_flow_variant_view();
+            Tab::reload_config();
+            update_changed_ui();
+            toggle_options();
+            update_visibility();
+            m_parent->Layout();
+        });
+        m_parent->get_page_header()->Layout();
+    }
+    else
+    {
+        m_flow_variant_view->selector->setSelected(int(flow_variant_view_index()));
+    }
+
+    update_flow_variant_view_visibility();
+
+    const int flow_index = int(flow_variant_view_index());
+    for (const PageShp& page : m_flow_variant_view->pages)
+    {
+        for (const ConfigOptionsGroupShp& group : page->m_optgroups)
+        {
+            for (const auto& option : group->opt_map())
+            {
+                const std::string& key = option.second.first;
+                if (m_flow_variant_view->is_option(key))
+                    group->set_option_index(key, flow_index);
+            }
+        }
+    }
+}
+
+void Tab::update_flow_variant_view_visibility()
+{
+    // The dialog page header is shared by the filament and printer tabs. Only the
+    // currently-active tab manages it; a background tab's refresh (e.g. a preset
+    // reload) must not stomp the active tab's header or show a stale selector.
+    if (m_parent->get_current_tab() != this) {
+        if (m_flow_variant_view && m_flow_variant_view->selector)
+            m_flow_variant_view->selector->Hide();
+        return;
+    }
+
+    const bool active_page_supports_flow_variants = m_flow_variant_view &&
+        std::any_of(m_flow_variant_view->pages.begin(), m_flow_variant_view->pages.end(),
+                    [this](const PageShp& page) { return m_active_page == page.get(); });
+    const bool show = active_page_supports_flow_variants && m_flow_variant_view->selector
+                      && m_flow_variant_view->modes.size() > 1;
+
+    if (m_flow_variant_view && m_flow_variant_view->selector) {
+        // Reveal only this tab's selector; hide any sibling selector left visible by
+        // the other tab that shares this header.
+        if (show) {
+            for (wxWindow* sibling : m_parent->get_page_header()->GetChildren())
+                if (sibling != m_flow_variant_view->selector)
+                    sibling->Hide();
+        }
+        m_flow_variant_view->selector->Show(show);
+    }
+    m_parent->show_page_header(show);
+}
+
+
 // Update UI according to changes
 void Tab::update_changed_ui()
 {
     if (m_postpone_update_ui)
         return;
 
-    const bool deep_compare = (m_type == Slic3r::Preset::TYPE_PRINTER || m_type == Slic3r::Preset::TYPE_SLA_MATERIAL);
+    const bool deep_compare = (m_type == Slic3r::Preset::TYPE_PRINTER ||
+                               m_type == Slic3r::Preset::TYPE_SLA_MATERIAL);
     auto dirty_options = m_presets->current_dirty_options(deep_compare);
     auto nonsys_options = m_presets->current_different_from_parent_options(deep_compare);
+
+    if (m_flow_variant_view && !deep_compare)
+    {
+        auto merge_flow_variant_options = [this](std::vector<std::string>& options,
+                                                  std::vector<std::string> deep_options) {
+            options.erase(std::remove_if(options.begin(), options.end(), [this](const std::string& key) {
+                return m_flow_variant_view->is_option(key);
+            }), options.end());
+            for (const std::string& key : deep_options)
+            {
+                const size_t index_separator = key.find('#');
+                const std::string base_key = key.substr(0, index_separator);
+                if (m_flow_variant_view->is_option(base_key))
+                    options.emplace_back(key);
+            }
+        };
+
+        merge_flow_variant_options(
+            dirty_options,
+            m_presets->current_flow_variant_dirty_options(m_flow_variant_view->domain,
+                                                          m_flow_variant_view->options()));
+        merge_flow_variant_options(
+            nonsys_options,
+            m_presets->current_flow_variant_different_from_parent_options(m_flow_variant_view->domain,
+                                                                          m_flow_variant_view->options()));
+    }
     if (m_type == Preset::TYPE_PRINTER && static_cast<TabPrinter*>(this)->m_printer_technology == ptFFF) {
         TabPrinter* tab = static_cast<TabPrinter*>(this);
         if (tab->m_initial_extruders_count != tab->m_extruders_count)
@@ -920,6 +1107,17 @@ void Tab::update_changed_ui()
 
     for (auto opt_key : dirty_options)	m_options_list[opt_key] &= ~osInitValue;
     for (auto opt_key : nonsys_options)	m_options_list[opt_key] &= ~osSystemValue;
+
+    if (m_flow_variant_view)
+    {
+        const size_t current_index = flow_variant_view_index();
+        for (const std::string& key : m_flow_variant_view->options())
+        {
+            const auto current = m_options_list.find(key + "#" + std::to_string(current_index));
+            if (current != m_options_list.end())
+                m_options_list[key] = current->second;
+        }
+    }
 
     update_custom_dirty();
 
@@ -940,6 +1138,19 @@ void Tab::init_options_list()
 
     for (const std::string& opt_key : m_config->keys())
         m_options_list.emplace(opt_key, m_opt_status_value);
+
+    if (!m_flow_variant_view)
+        return;
+
+    const size_t flow_count = m_flow_variant_view->modes.empty() ? 1 : m_flow_variant_view->modes.size();
+    for (const std::string& key : m_flow_variant_view->options())
+    {
+        if (!m_config->has(key))
+            continue;
+
+        for (size_t index = 0; index < flow_count; ++index)
+            m_options_list.emplace(key + "#" + std::to_string(index), m_opt_status_value);
+    }
 }
 
 template<class T>
@@ -2460,6 +2671,14 @@ void TabPrint::build()
         optgroup->append_single_option_line("ensure_vertical_shell_thickness", "strength_settings_advanced#ensure-vertical-shell-thickness");
 
     page = add_options_page(L("Speed"), "custom-gcode_speed"); // ORCA: icon only visible on placeholders
+        if (m_type == Preset::TYPE_PRINT)
+        {
+            register_flow_variant_view(
+                ConfigFlowDomain::Process,
+                page,
+                []() -> const std::vector<std::string>& { return process_flow_variant_options(); },
+                [](const std::string& key) { return is_process_flow_variant_option(key); });
+        }
         optgroup = page->new_optgroup(L("Initial layer speed"), L"param_speed_first", 15);
     optgroup->append_single_option_line("initial_layer_speed", "speed_settings_initial_layer_speed#initial-layer");
         optgroup->append_single_option_line("initial_layer_infill_speed", "speed_settings_initial_layer_speed#initial-layer-infill");
@@ -2801,6 +3020,7 @@ optgroup->append_single_option_line("skirt_loops", "others_settings_skirt#loops"
 // Reload current config (aka presets->edited_preset->config) into the UI fields.
 void TabPrint::reload_config()
 {
+    refresh_flow_variant_view();
     this->compatible_widget_reload(m_compatible_printers);
     Tab::reload_config();
 }
@@ -3172,7 +3392,7 @@ void TabPrint::toggle_options()
         m_config_manipulation.set_is_BBL_Printer(is_BBL_printer);
     }
 
-    m_config_manipulation.toggle_print_fff_options(m_config, m_type < Preset::TYPE_COUNT);
+    m_config_manipulation.toggle_print_fff_options(m_config, m_type < Preset::TYPE_COUNT, flow_variant_view_index());
 
     Field *field = m_active_page->get_field("support_style");
     auto   support_type = m_config->opt_enum<SupportType>("support_type");
@@ -3193,6 +3413,11 @@ void TabPrint::toggle_options()
             cb->Append(_(def->enum_labels[i]));
         }
         cb->SetValue(n);
+        // The stale label (e.g. a tree style left over after support_type changed while support
+        // is disabled) may not exist in the rebuilt list; GetValue()/SetValue() then leaves the
+        // selection invalid, and Choice::get_value would index enum_values out of bounds.
+        if (cb->GetSelection() == wxNOT_FOUND && cb->GetCount() > 0)
+            cb->SetSelection(0);
     }
 
     // Keep plate bed-type list in sync with currently selected printer.
@@ -3999,24 +4224,27 @@ void TabFilament::set_custom_gcode(const t_config_option_key& opt_key, const std
     load_config(new_conf);
 }
 
-void TabFilament::add_filament_overrides_page()
+PageShp TabFilament::add_filament_overrides_page()
 {
     //BBS
     PageShp page = add_options_page(L("Setting Overrides"), "custom-gcode_setting_override"); // ORCA: icon only visible on placeholders
     ConfigOptionsGroupShp optgroup = page->new_optgroup(L("Retraction"), L"param_retraction");
 
-    auto append_single_option_line = [optgroup, this](const std::string& opt_key, int opt_index)
+    auto append_single_option_line = [optgroup, this](const std::string& opt_key)
     {
         Line line {"",""};
         //BBS
         line = optgroup->create_single_option_line(optgroup->get_option(opt_key));
 
-        line.near_label_widget = [this, optgroup_wk = ConfigOptionsGroupWkp(optgroup), opt_key, opt_index](wxWindow* parent) {
+        line.near_label_widget = [this, optgroup_wk = ConfigOptionsGroupWkp(optgroup), opt_key](wxWindow* parent) {
             auto check_box = new ::CheckBox(parent); // ORCA modernize checkboxes
-            check_box->Bind(wxEVT_TOGGLEBUTTON, [this, optgroup_wk, opt_key, opt_index](wxCommandEvent& evt) {
+            check_box->Bind(wxEVT_TOGGLEBUTTON, [this, optgroup_wk, opt_key](wxCommandEvent& evt) {
                 const bool is_checked = evt.IsChecked();
+                const int option_index = is_filament_flow_variant_option(opt_key)
+                    ? int(flow_variant_view_index())
+                    : 0;
                 if (auto optgroup_sh = optgroup_wk.lock(); optgroup_sh) {
-                    if (Field *field = optgroup_sh->get_fieldc(opt_key, opt_index); field != nullptr) {
+                    if (Field *field = optgroup_sh->get_fieldc(opt_key, option_index); field != nullptr) {
                         field->toggle(is_checked);
 
                         if (is_checked) {
@@ -4026,9 +4254,19 @@ void TabFilament::add_filament_overrides_page()
                         else {
                             const std::string printer_opt_key = opt_key.substr(strlen("filament_"));
                             const auto printer_config = m_preset_bundle->printers.get_edited_preset().config;
-                            const boost::any printer_config_value = optgroup_sh->get_config_value(printer_config, printer_opt_key, opt_index);
+                            const boost::any printer_config_value = optgroup_sh->get_config_value(printer_config, printer_opt_key, 0);
                             field->update_na_value(printer_config_value);
-                            field->set_na_value();
+                            const ConfigOptionDef *option_def = m_config->def()->get(opt_key);
+                            if (option_def != nullptr &&
+                                (option_def->type == coFloats || option_def->type == coPercents)) {
+                                const double nil_value = ConfigOptionFloatsNullable::nil_value();
+                                Slic3r::GUI::change_opt_value(*m_config, opt_key, nil_value, option_index);
+                                field->set_value(printer_config_value, false);
+                                on_value_change(opt_key, nil_value);
+                                update_dirty();
+                            } else {
+                                field->set_na_value();
+                            }
                         }
                     }
                 }
@@ -4040,8 +4278,6 @@ void TabFilament::add_filament_overrides_page()
 
         optgroup->append_line(line);
     };
-
-    const int extruder_idx = 0; // #ys_FIXME
 
     for (const std::string opt_key : {  "filament_retraction_length",
                                         "filament_z_hop",
@@ -4065,7 +4301,9 @@ void TabFilament::add_filament_overrides_page()
                                         //SoftFever
                                         // "filament_seam_gap"
                                      })
-        append_single_option_line(opt_key, extruder_idx);
+        append_single_option_line(opt_key);
+
+    return page;
 }
 
 void TabFilament::update_filament_overrides_page(const DynamicPrintConfig* printers_config)
@@ -4107,20 +4345,26 @@ void TabFilament::update_filament_overrides_page(const DynamicPrintConfig* print
                                             // "filament_seam_gap"
                                         };
 
+    const int flow_index = int(flow_variant_view_index());
     const int extruder_idx = 0; // #ys_FIXME
+    const int retract_length_index = is_filament_flow_variant_option("filament_retraction_length") ? flow_index : extruder_idx;
 
-    const bool have_retract_length = m_config->option("filament_retraction_length")->is_nil() ||
-                                     m_config->opt_float("filament_retraction_length", extruder_idx) > 0;
+    const ConfigOptionVectorBase* retract_length =
+        dynamic_cast<const ConfigOptionVectorBase*>(m_config->option("filament_retraction_length"));
+    const bool have_retract_length = retract_length == nullptr || retract_length->is_nil(retract_length_index) ||
+                                     m_config->opt_float("filament_retraction_length", retract_length_index) > 0;
 
     for (const std::string& opt_key : opt_keys)
     {
+        const int option_index = is_filament_flow_variant_option(opt_key) ? flow_index : extruder_idx;
         bool is_checked = opt_key=="filament_retraction_length" ? true : have_retract_length;
         m_overrides_options[opt_key]->Enable(is_checked);
 
-        is_checked &= !m_config->option(opt_key)->is_nil();
+        const ConfigOptionVectorBase* option = dynamic_cast<const ConfigOptionVectorBase*>(m_config->option(opt_key));
+        is_checked &= option != nullptr && !option->is_nil(option_index);
         m_overrides_options[opt_key]->SetValue(is_checked);
 
-        Field* field = optgroup->get_fieldc(opt_key, extruder_idx);
+        Field* field = optgroup->get_fieldc(opt_key, option_index);
         if (field == nullptr) continue;
 
         if (opt_key == "filament_long_retractions_when_cut") {
@@ -4133,7 +4377,7 @@ void TabFilament::update_filament_overrides_page(const DynamicPrintConfig* print
             int machine_enabled_level = printers_config->option<ConfigOptionInt>(
                 "enable_long_retraction_when_cut")->value;
             bool machine_enabled = machine_enabled_level == LongRectrationLevel::EnableFilament;
-            bool filament_enabled = m_config->option<ConfigOptionBools>("filament_long_retractions_when_cut")->values[extruder_idx] == 1;
+            bool filament_enabled = m_config->option<ConfigOptionBools>("filament_long_retractions_when_cut")->values[option_index] == 1;
             toggle_line(opt_key, filament_enabled && machine_enabled);
             field->toggle(is_checked && filament_enabled && machine_enabled);
         } else {
@@ -4155,6 +4399,7 @@ void TabFilament::build()
     load_initial_data();
 
     auto page = add_options_page(L("Filament"), "custom-gcode_filament"); // ORCA: icon only visible on placeholders
+    const PageShp filament_page = page;
         //BBS
         auto optgroup = page->new_optgroup(L("Basic information"), L"param_information");
         optgroup->append_single_option_line("filament_type"); // ORCA use same width with other elements
@@ -4320,6 +4565,7 @@ void TabFilament::build()
         //optgroup->append_line(line);
 
     page = add_options_page(L("Cooling"), "custom-gcode_cooling_fan"); // ORCA: icon only visible on placeholders
+    const PageShp cooling_page = page;
 
         //line = { "", "" };
         //line.full_width = 1;
@@ -4370,7 +4616,7 @@ void TabFilament::build()
         line.append_option(optgroup->get_option("complete_print_exhaust_fan_speed"));
         optgroup->append_line(line);
         //BBS
-        add_filament_overrides_page();
+        const PageShp overrides_page = add_filament_overrides_page();
         const int gcode_field_height = 15; // 150
         const int notes_field_height = 25; // 250
 
@@ -4400,6 +4646,7 @@ void TabFilament::build()
         optgroup->append_single_option_line(option);
 
     page = add_options_page(L("Multimaterial"), "custom-gcode_multi_material"); // ORCA: icon only visible on placeholders
+    const PageShp multimaterial_page = page;
         optgroup = page->new_optgroup(L("Wipe tower parameters"), "param_tower");
         optgroup->append_single_option_line("filament_minimal_purge_on_wipe_tower");
 
@@ -4470,11 +4717,18 @@ void TabFilament::build()
         optgroup->append_single_option_line(option);
 
         //build_preset_description_line(optgroup.get());
+
+    register_flow_variant_view(
+        ConfigFlowDomain::Filament,
+        {filament_page, cooling_page, overrides_page, multimaterial_page},
+        []() -> const std::vector<std::string>& { return filament_flow_variant_options(); },
+        [](const std::string& key) { return is_filament_flow_variant_option(key); });
 }
 
 // Reload current config (aka presets->edited_preset->config) into the UI fields.
 void TabFilament::reload_config()
 {
+    refresh_flow_variant_view();
     this->compatible_widget_reload(m_compatible_printers);
     this->compatible_widget_reload(m_compatible_prints);
     Tab::reload_config();
@@ -5158,8 +5412,16 @@ void TabPrinter::build_unregular_pages(bool from_initial_build/* = false*/)
         auto page = build_kinematics_page();
         if (from_initial_build && !is_marlin_flavor)
             page->clear();
-        else
+        else {
             m_pages.insert(m_pages.begin() + n_before_extruders, page);
+
+            if (!machine_flow_variant_options().empty())
+                register_flow_variant_view(
+                    ConfigFlowDomain::Printer,
+                    page,
+                    []() -> const std::vector<std::string>& { return machine_flow_variant_options(); },
+                    [](const std::string& key) { return is_machine_flow_variant_option(key); });
+        }
     }
 
 if (is_marlin_flavor)
@@ -5552,6 +5814,7 @@ void TabPrinter::update_pages()
 
 void TabPrinter::reload_config()
 {
+    refresh_flow_variant_view();
     Tab::reload_config();
 
     // "extruders_count" doesn't update from the update_config(),
@@ -6250,6 +6513,17 @@ bool Tab::select_preset(std::string preset_name, bool delete_current /*=false*/,
                     oldFilamentColourModes[i] = oldFilamentColourModes[i] == 1 ? 1 : 0;
                 }
 
+                // Snapmaker #805: update_selections() restores the target printer's saved flush
+                // matrix (often 1x1 after a single-filament nozzle variant). Filament presets and
+                // colours are then carried back, leaving N filaments paired with a 1x1 matrix.
+                // auto_calc_flushing_volumes writes matrix[row * n + id] past that buffer.
+                std::vector<double> oldFlushVolumesMatrix;
+                std::vector<double> oldFlushVolumesVector;
+                if (const ConfigOptionFloats *flushMatrix = projectConfig.option<ConfigOptionFloats>("flush_volumes_matrix"))
+                    oldFlushVolumesMatrix = flushMatrix->values;
+                if (const ConfigOptionFloats *flushVector = projectConfig.option<ConfigOptionFloats>("flush_volumes_vector"))
+                    oldFlushVolumesVector = flushVector->values;
+
                 m_preset_bundle->update_selections(*wxGetApp().app_config);
 
                 m_preset_bundle->filament_presets = oldFilamentPresets;
@@ -6257,6 +6531,11 @@ bool Tab::select_preset(std::string preset_name, bool delete_current /*=false*/,
                 projectConfig.option<ConfigOptionStrings>("filament_colour")->values = oldFilamentColors;
                 projectConfig.option<ConfigOptionStrings>("filament_multi_colors", true)->values = oldFilamentMultiColors;
                 projectConfig.option<ConfigOptionInts>("filament_colour_mode", true)->values = oldFilamentColourModes;
+
+                if (ConfigOptionFloats *flushMatrix = projectConfig.option<ConfigOptionFloats>("flush_volumes_matrix"))
+                    flushMatrix->values = oldFlushVolumesMatrix;
+                if (ConfigOptionFloats *flushVector = projectConfig.option<ConfigOptionFloats>("flush_volumes_vector"))
+                    flushVector->values = oldFlushVolumesVector;
 
                 std::vector<std::string> filamentColourModeStrings;
                 filamentColourModeStrings.reserve(oldFilamentColourModes.size());
@@ -6397,6 +6676,7 @@ void Tab::clear_pages()
 {
     // invalidated highlighter, if any exists
     m_highlighter.invalidate();
+    m_parent->show_page_header(false);
     // clear pages from the controlls
     for (auto p : m_pages)
         p->clear();
@@ -6468,6 +6748,7 @@ void Tab::activate_selected_page(std::function<void()> throw_if_canceled)
     if (m_active_page && !(m_active_page->title() == "Dependencies"))
         toggle_options();
     m_active_page->update_visibility(m_mode, true); // for taggle line
+    update_flow_variant_view_visibility();
 }
 
 //BBS: GUI refactor

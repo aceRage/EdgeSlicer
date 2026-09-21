@@ -53,6 +53,7 @@ class PrintHostQueueDialog;
 class Plater;
 class MainFrame;
 class ParamsDialog;
+class SliceModePopup;
 
 enum QuickSlice
 {
@@ -319,6 +320,7 @@ public:
     //bool        is_dlg_layout() const { return m_layout == ESettingsLayout::Dlg; }
 
     void        reslice_now();
+    void        start_slice();
     void        export_config();
     // Query user for the config file and open it.
     void        load_config_file();
@@ -461,6 +463,7 @@ public:
     // Button* m_publish_btn{ nullptr };
     SideButton* m_slice_btn{ nullptr };
     SideButton* m_slice_option_btn{ nullptr };
+    SliceModePopup* m_slice_mode_popup{ nullptr };
     SideButton* m_print_btn{ nullptr };
     SideButton* m_print_option_btn{ nullptr };
     mutable bool          m_slice_enable{ true };

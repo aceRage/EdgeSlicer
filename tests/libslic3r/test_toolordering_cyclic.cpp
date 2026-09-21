@@ -5,6 +5,7 @@
 #include "libslic3r/PrintConfig.hpp"
 
 #include <functional>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -380,5 +381,27 @@ TEST_CASE("get_custom_seq follows the customized plate sequence when no explicit
         bool applied = false;
         CHECK(run_custom_seq(fn, 2, applied) == std::vector<int>({1, 2, 3}));
         CHECK(applied);
+    }
+}
+
+TEST_CASE("solve_extruder_order returns the input order when an id is outside wipe_volumes", "[ToolOrdering][OOB]")
+{
+    // Snapmaker #754: mixed / virtual filament ids can exceed the flush matrix.
+    // The DP solver used to index wipe_volumes[id] and crash (near-null 0x4).
+    const std::vector<std::vector<float>> wipe_volumes = {
+        {0.f, 10.f},
+        {12.f, 0.f},
+    };
+
+    SECTION("in-range ids still produce an order of the same length") {
+        const std::vector<unsigned int> ids{0, 1};
+        const auto ordered = get_extruders_order(wipe_volumes, ids, std::nullopt);
+        REQUIRE(ordered.size() == ids.size());
+    }
+
+    SECTION("an id past the matrix is returned unchanged rather than crashing") {
+        const std::vector<unsigned int> ids{0, 5};
+        const auto ordered = get_extruders_order(wipe_volumes, ids, std::nullopt);
+        REQUIRE(ordered == ids);
     }
 }
