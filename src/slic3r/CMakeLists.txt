@@ -129,6 +129,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/FilamentGroupDialog.hpp
     GUI/FlowTypeHelper.cpp
     GUI/FlowTypeHelper.hpp
+    GUI/FlowVariantEdit.cpp
+    GUI/FlowVariantEdit.hpp
     GUI/HighFlowCompat.cpp
     GUI/HighFlowCompat.hpp
     GUI/FileArchiveDialog.cpp
