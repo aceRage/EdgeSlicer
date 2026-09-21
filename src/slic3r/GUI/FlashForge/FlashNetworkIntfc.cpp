@@ -11,11 +11,11 @@
 
 namespace fnet {
 
-// EdgeSlicer: the reference build of this stack targeted FlashNetwork 3.4.1, but FlashForge's
-// current Flash Studio / Orca-Flashforge installers ship FlashNetwork 3.0.0, which exports the
-// full fnet_* surface this wrapper binds (verified by scanning the shipped DLL). Accept any
-// 3.x.y instead of pinning an exact build, and log when the version differs from the reference
-// so a future ABI break is at least visible in the log.
+// EdgeSlicer: FlashForge's Flash Studio / Orca-Flashforge installers currently ship
+// FlashNetwork 3.0.0, which exports the full fnet_* surface this wrapper binds (verified by
+// scanning the shipped DLL). The original port pinned an exact "3.4.1" string, but that
+// references a stale FlashPrint-era build and should not gate loading. Accept any 3.x.y and
+// record the loaded version in the log so a future ABI break is at least visible there.
 static bool fnet_version_usable(const char *version)
 {
     if (version == nullptr)
@@ -161,9 +161,7 @@ FlashNetworkIntfc::FlashNetworkIntfc(const char *libraryPath, const char *server
     INIT_FUNC_PTR(freeString, fnet_freeString);
     const char *version = getVersion();
     if (initlize(serverSettingsPath, &logSettings) == FNET_OK && fnet_version_usable(version)) {
-        if (strcmp(version, "3.4.1") != 0)
-            BOOST_LOG_TRIVIAL(warning) << "FlashNetwork " << version
-                << " is not the reference 3.4.1 build; continuing because the fnet_* surface matches";
+        BOOST_LOG_TRIVIAL(info) << "FlashNetwork initialized, library version " << version;
         m_isOk = true;
     }
     else {
