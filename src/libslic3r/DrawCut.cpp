@@ -3234,6 +3234,55 @@ double draw_cut_chain_snap_radius(const BoundingBoxf3& bbox)
     return std::clamp(ChainSnapFraction * bbox.size().norm(), ChainSnapMinMm, ChainSnapMaxMm);
 }
 
+std::vector<DrawCutSample> draw_cut_filter_capture_skims(const std::vector<DrawCutSample>& stroke)
+{
+    // cos(45 deg): a sample on a surface disoriented from the face being drawn on.
+    constexpr double kDiffer = 0.70710678118654752;
+    // The two flanking samples must agree at least this much for the excursion to
+    // count as "off the face and back" rather than the line genuinely travelling.
+    constexpr double kFlanksAgree = 0.5;
+    // The run's own samples must agree this much for it to count as ONE other
+    // surface; a run of mixed normals is a wander, kept.
+    constexpr double kRunAgree = 0.5;
+    // A longer excursion is a deliberate detour, kept.
+    constexpr size_t kMaxSkimRun = 3;
+
+    std::vector<DrawCutSample> out = stroke;
+    if (out.size() < 4)
+        return out; // nothing interior to judge
+
+    // Repeat until no removal: erasing a run can expose a second skim against the
+    // samples that were previously separated by the first one.
+    for (;;) {
+        const size_t n = out.size();
+        size_t rem_begin = n, rem_end = n; // half-open [rem_begin, rem_end)
+        for (size_t i = 1; i + 1 < n; ++ i) {
+            if (out[i].normal.dot(out[i - 1].normal) >= kDiffer)
+                continue; // continuous with the left flank - not a skim start
+            // Maximal run [i, j] on one other surface: every sample disagrees with
+            // the left flank's normal and agrees with the run's own first normal.
+            size_t j = i;
+            while (j + 1 < n &&
+                   out[j + 1].normal.dot(out[i - 1].normal) < kDiffer &&
+                   out[j + 1].normal.dot(out[i].normal) > kRunAgree)
+                ++ j;
+            if (j - i + 1 <= kMaxSkimRun &&
+                j + 1 < n && // j + 1 is the right flank; it must exist (interior)
+                out[j + 1].normal.dot(out[i - 1].normal) > kFlanksAgree &&
+                out[j + 1].normal.dot(out[j].normal) < kDiffer) {
+                rem_begin = i;
+                rem_end   = j + 1;
+                break;
+            }
+            i = j; // this run is kept - continue scanning past it
+        }
+        if (rem_begin == n)
+            break;
+        out.erase(out.begin() + rem_begin, out.begin() + rem_end);
+    }
+    return out;
+}
+
 void DrawCutChain::clear()
 {
     m_samples.clear();

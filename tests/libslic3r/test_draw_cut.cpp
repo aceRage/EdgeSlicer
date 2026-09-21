@@ -5237,3 +5237,143 @@ TEST_CASE("Draw cut: the preview surface for an open line is exactly the old dra
     std::sort(preview_tris.begin(), preview_tris.end());
     REQUIRE(preview_tris == full_drawn_face);
 }
+
+// ---------------------------------------------------------------------------
+// Capture continuity filtering (review item 2: skim hits near edges zigzag the
+// raw capture off the drawn face and back).
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// A straight run of `n` samples on one surface, from `from` to `to`, all carrying
+// `normal` - the shape the raw capture has when the mouse ray keeps landing on the
+// same face.
+std::vector<DrawCutSample> sample_run(Vec3d from, Vec3d to, size_t n, Vec3d normal)
+{
+    std::vector<DrawCutSample> v;
+    v.reserve(n);
+    for (size_t i = 0; i < n; ++ i) {
+        const double t = n > 1 ? double(i) / double(n - 1) : 0.0;
+        DrawCutSample s;
+        s.pos    = from + t * (to - from);
+        s.normal = normal;
+        v.push_back(s);
+    }
+    return v;
+}
+
+} // namespace
+
+TEST_CASE("Draw cut: capture filtering removes short skims onto a neighbouring surface", "[DrawCut]")
+{
+    const Vec3d z{ Vec3d::UnitZ() };
+    const Vec3d x{ Vec3d::UnitX() };
+
+    SECTION("a single skim sample in the middle is dropped")
+    {
+        std::vector<DrawCutSample> s = sample_run({ 0, 0, 0 }, { 10, 0, 0 }, 9, z);
+        s[4].normal = x;
+        const auto out = draw_cut_filter_capture_skims(s);
+        REQUIRE(out.size() == 8);
+        for (const DrawCutSample& smp : out)
+            REQUIRE(smp.normal.dot(z) == Approx(1.0));
+    }
+
+    SECTION("a two-sample skim is dropped")
+    {
+        std::vector<DrawCutSample> s = sample_run({ 0, 0, 0 }, { 10, 0, 0 }, 10, z);
+        s[4].normal = x;
+        s[5].normal = x;
+        const auto out = draw_cut_filter_capture_skims(s);
+        REQUIRE(out.size() == 8);
+    }
+
+    SECTION("skims at both ends of the middle are both dropped")
+    {
+        std::vector<DrawCutSample> s = sample_run({ 0, 0, 0 }, { 12, 0, 0 }, 13, z);
+        s[3].normal  = x;
+        s[4].normal  = x;
+        s[9].normal  = x;
+        const auto out = draw_cut_filter_capture_skims(s);
+        // 13 - 2 (first skim) - 1 (second skim, exposed once the first is gone)
+        REQUIRE(out.size() == 10);
+        for (const DrawCutSample& smp : out)
+            REQUIRE(smp.normal.dot(z) == Approx(1.0));
+    }
+
+    SECTION("a four-sample excursion is deliberate and kept")
+    {
+        std::vector<DrawCutSample> s = sample_run({ 0, 0, 0 }, { 10, 0, 0 }, 11, z);
+        for (size_t i = 4; i <= 7; ++ i)
+            s[i].normal = x;
+        REQUIRE(draw_cut_filter_capture_skims(s).size() == 11);
+    }
+
+    SECTION("a permanent crossing to the other face is kept")
+    {
+        // First half on +Z, second half on +X: the run is longer than kMaxSkimRun,
+        // so the filter must read it as travel, not a skim.
+        std::vector<DrawCutSample> s = sample_run({ 0, 0, 0 }, { 5, 0, 0 }, 6, z);
+        std::vector<DrawCutSample> t = sample_run({ 5, 0, 0 }, { 10, 0, 0 }, 6, x);
+        s.insert(s.end(), t.begin(), t.end());
+        const auto out = draw_cut_filter_capture_skims(s);
+        REQUIRE(out.size() == 12);
+        REQUIRE(out.front().normal.dot(z) == Approx(1.0));
+        REQUIRE(out.back().normal.dot(x)  == Approx(1.0));
+    }
+
+    SECTION("a wander whose off-face run exceeds the skim limit is kept")
+    {
+        // Four +X samples then one +Y between +Z flanks. The +X run alone is longer
+        // than kMaxSkimRun, so it reads as travel; the lone +Y sits between
+        // disagreeing flanks (+X before, +Z after), so it is travel too. Nothing
+        // is removed.
+        std::vector<DrawCutSample> s = sample_run({ 0, 0, 0 }, { 15, 0, 0 }, 16, z);
+        for (size_t i = 6; i <= 9; ++ i)
+            s[i].normal = x;
+        s[10].normal = Vec3d::UnitY();
+        const auto out = draw_cut_filter_capture_skims(s);
+        REQUIRE(out.size() == 16);
+    }
+
+    SECTION("a skim against disagreeing flanks is kept")
+    {
+        // A genuine corner: +Z before, +X after, one -Y sample between. The flanks
+        // disagree with each other, so this is travel around the corner, not a skim.
+        std::vector<DrawCutSample> s = sample_run({ 0, 0, 0 }, { 10, 0, 0 }, 9, z);
+        s[4].normal = -Vec3d::UnitY();
+        for (size_t i = 5; i < 9; ++ i)
+            s[i].normal = x;
+        const auto out = draw_cut_filter_capture_skims(s);
+        REQUIRE(out.size() == 9);
+    }
+
+    SECTION("the first and last sample are never removed")
+    {
+        std::vector<DrawCutSample> s = sample_run({ 0, 0, 0 }, { 10, 0, 0 }, 8, z);
+        s[0].normal = x;   // skim on the FIRST sample: the join span is judged by
+        s[7].normal = x;   // append_at(), not by this filter - both must survive.
+        const auto out = draw_cut_filter_capture_skims(s);
+        REQUIRE(out.size() == 8);
+        REQUIRE(out.front().normal.dot(x) == Approx(1.0));
+        REQUIRE(out.back().normal.dot(x)  == Approx(1.0));
+        for (size_t i = 1; i + 1 < out.size(); ++ i)
+            REQUIRE(out[i].normal.dot(z) == Approx(1.0));
+    }
+
+    SECTION("a clean stroke passes through unchanged")
+    {
+        std::vector<DrawCutSample> s = sample_run({ 0, 0, 0 }, { 10, 0, 0 }, 16, z);
+        const auto out = draw_cut_filter_capture_skims(s);
+        REQUIRE(out.size() == 16);
+        for (size_t i = 0; i < out.size(); ++ i)
+            REQUIRE(out[i].pos == s[i].pos);
+    }
+
+    SECTION("fewer than four samples are returned as-is")
+    {
+        std::vector<DrawCutSample> s = sample_run({ 0, 0, 0 }, { 2, 0, 0 }, 3, z);
+        s[1].normal = x;
+        REQUIRE(draw_cut_filter_capture_skims(s).size() == 3);
+    }
+}
