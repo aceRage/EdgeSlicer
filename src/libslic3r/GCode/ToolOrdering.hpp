@@ -14,6 +14,7 @@
 #include <vector>
 #include <functional>
 #include <string>
+#include <optional>
 
 #include <boost/container/small_vector.hpp>
 
@@ -315,6 +316,12 @@ private:
 // Out-of-range entries, duplicates and non-numeric tokens are dropped, so a partially valid string
 // still orders the filaments it does name. Exposed for unit testing.
 std::vector<unsigned int> parse_cyclic_order(const std::string& str, unsigned int number_of_extruders);
+
+// Classic DP flush-volume solver used by reorder_extruders_for_minimum_flush_volume.
+// Snapmaker #754: exposed so Catch2 can drive the wipe_volumes OOB guard without constructing a Print.
+std::vector<unsigned int> get_extruders_order(const std::vector<std::vector<float>> &wipe_volumes,
+                                              std::vector<unsigned int>              all_extruders,
+                                              std::optional<unsigned int>            start_extruder_id);
 
 // Reorder a layer's 0-based filaments for cyclic ordering: ascending by default, or following
 // cyclic_order when non-empty. Filaments absent from the sequence keep ascending order after

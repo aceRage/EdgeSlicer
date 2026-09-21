@@ -9679,6 +9679,12 @@ void Sidebar::show_sync_filament_dialog()
         std::vector<FilamentData> syncedData = dlg.getSyncDataList();
 
         size_t effective_size = syncedData.size();
+        // Snapmaker #740: the number of filaments cannot be reduced to zero. An empty
+        // sync result (e.g. device 1 not mounted) used to call set_num_filaments(0)
+        // and then crash when the user added a filament.
+        if (effective_size == 0)
+            return;
+
         size_t combo_Size = p->combos_filament.size();
         if (effective_size != combo_Size) {
             if (effective_size > combo_Size &&
@@ -10197,6 +10203,17 @@ void Sidebar::auto_calc_flushing_volumes(const int modify_id)
         multi_colours.push_back(single_filament);
     }
 
+    // Snapmaker #805: log (and below, skip OOB writes) if the flush matrix was not
+    // resized with the filament list — the U1 nozzle-switch desync that used to
+    // corrupt the heap in this loop.
+    const size_t expectedMatrixSize = multi_colours.size() * multi_colours.size();
+    if (matrix.size() != expectedMatrixSize) {
+        BOOST_LOG_TRIVIAL(error) << "Invalid flushing volume matrix: modify_id=" << modify_id
+                                 << ", filament_count=" << multi_colours.size()
+                                 << ", matrix_size=" << matrix.size()
+                                 << ", expected_size=" << expectedMatrixSize;
+    }
+
     if (modify_id >= 0 && modify_id < multi_colours.size()) {
         for (int i = 0; i < multi_colours.size(); ++i) {
             // from to modify
@@ -10221,7 +10238,9 @@ void Sidebar::auto_calc_flushing_volumes(const int modify_id)
                     if (is_from_support)
                         flushing_volume = std::max(flushing_volume, Slic3r::g_min_flush_volume_from_support);
                 }
-                matrix[m_number_of_extruders * from_idx + modify_id] = flushing_volume;
+                const size_t from_idx_pos = size_t(m_number_of_extruders) * size_t(from_idx) + size_t(modify_id);
+                if (from_idx_pos < matrix.size())
+                    matrix[from_idx_pos] = flushing_volume;
             }
 
             // modify to to
@@ -10246,7 +10265,9 @@ void Sidebar::auto_calc_flushing_volumes(const int modify_id)
                     if (is_from_support)
                         flushing_volume = std::max(flushing_volume, Slic3r::g_min_flush_volume_from_support);
 
-                    matrix[m_number_of_extruders * modify_id + to_idx] = flushing_volume;
+                    const size_t to_idx_pos = size_t(m_number_of_extruders) * size_t(modify_id) + size_t(to_idx);
+                    if (to_idx_pos < matrix.size())
+                        matrix[to_idx_pos] = flushing_volume;
                 }
             }
         }
@@ -10917,9 +10938,16 @@ bool PlaterDropTarget::OnDropFiles(wxCoord x, wxCoord y, const wxArrayString &fi
 #endif // WIN32
 
     m_mainframe.Raise();
-    m_mainframe.select_tab(size_t(MainFrame::tp3DEditor));
-    if (wxGetApp().is_editor())
-        m_plater.select_view_3D("3D");
+    // Do not force the 3D editor before we even know what was dropped. When a
+    // G-code is already loaded (only-gcode mode) the user is on the Preview
+    // tab: load_gcode()'s same-file guard switches straight back to Preview
+    // on a repeat drop, and the other load paths select their own final view,
+    // so switching here would only flash the (empty) 3D editor.
+    if (!m_plater.only_gcode_mode()) {
+        m_mainframe.select_tab(size_t(MainFrame::tp3DEditor));
+        if (wxGetApp().is_editor())
+            m_plater.select_view_3D("3D");
+    }
 
     // When only one .svg file is dropped on scene
     if (filenames.size() == 1) {
@@ -19946,10 +19974,21 @@ void Plater::load_gcode(const wxString& filename)
 {
     BOOST_LOG_TRIVIAL(trace) << __FUNCTION__ << __LINE__ << " entry and filename: " << filename;
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__;
-    if (! is_gcode_file(into_u8(filename))
-        || (m_last_loaded_gcode == filename && m_only_gcode)
-        )
+    if (! is_gcode_file(into_u8(filename)))
         return;
+
+    if (m_last_loaded_gcode == filename && m_only_gcode) {
+        // The same G-code is already loaded: reloading would be a no-op, so
+        // just make sure the user is looking at its preview — callers may
+        // have left the UI on another view (e.g. the 3D editor after a
+        // drag & drop).
+        wxGetApp().mainframe->select_tab(MainFrame::tpPreview);
+        p->set_current_panel(p->preview, true);
+        GLCanvas3D* canvas = p->get_current_canvas3D();
+        if (canvas)
+            canvas->render();
+        return;
+    }
 
     // Reject a missing / inaccessible file up front. Without this check the
     // code below would walk through process_file -> parse_file_raw_internal,

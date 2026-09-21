@@ -13,7 +13,7 @@
   <key>CFBundleShortVersionString</key>
   <string>@SLIC3R_APP_NAME@ @SLIC3R_BUILD_ID@</string>
   <key>CFBundleIdentifier</key>
-  <string>com.snapmaker.snapmaker-orca</string>
+  <string>io.github.acerage.EdgeSlicer</string>
   <key>CFBundleInfoDictionaryVersion</key>
   <string>6.0</string>
   <key>CFBundlePackageType</key>
@@ -157,6 +157,8 @@
   <array>
     <string>_http._tcp</string>
     <string>_printer._tcp</string>
+    <string>_snapmaker._tcp</string>
+    <string>_services._dns-sd._udp</string>
   </array>
   <key>LSEnvironment</key>
   <dict>
@@ -172,6 +174,8 @@
     <!-- Allow arbitrary loads for local development server -->
     <key>NSAllowsArbitraryLoads</key>
     <false/>
+    <key>NSAllowsArbitraryLoadsInWebContent</key>
+    <true/>
     <!-- Specific exception for localhost connections -->
     <key>NSExceptionDomains</key>
     <dict>

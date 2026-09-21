@@ -88,6 +88,30 @@ TEST_CASE("The no-check flag skips the support-needed check", "[SupportMaterial]
     CHECK(support_needed_statuses(true).empty());
 }
 
+// Snapmaker #728 / Orca #13454: Tree Hybrid used to force ipConcentric on the
+// bed-contacting base (layer 0, no raft) with spacing =
+// support_base_pattern_spacing * density. Spacing 0 made FillConcentric's
+// offset-convergence loop a no-op, so one worker spun forever and slicing
+// stalled around 70%. After the port, the same config finishes and still
+// produces support under this large-flat overhang.
+TEST_CASE("Tree hybrid with zero base pattern spacing finishes slicing", "[SupportMaterial][TreeHybrid]")
+{
+    Slic3r::Print print;
+    Slic3r::Model model;
+    Slic3r::Test::init_print({ support_capital() }, print, model, {
+        { "enable_support",               1 },
+        { "support_type",                 "tree(auto)" },
+        { "support_style",                "tree_hybrid" },
+        { "support_base_pattern_spacing", 0 },
+        { "raft_layers",                  0 },
+        { "layer_height",                 "0.2" },
+        { "initial_layer_print_height",   "0.2" },
+    });
+    REQUIRE_NOTHROW(print.process());
+    REQUIRE(! print.objects().empty());
+    REQUIRE(! print.objects().front()->support_layers().empty());
+}
+
 // v2.5a Task 1 (spec: "residual pin", ToolOrdering.cpp's is_support_overriddable):
 // a mode-active object (support_filament_matching == true) must never
 // be overriddable by WipingExtrusions, for ANY support role, regardless of the
