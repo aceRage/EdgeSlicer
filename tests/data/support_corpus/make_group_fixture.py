@@ -38,7 +38,7 @@ SOURCE = os.path.join(HERE, "twopart_bridge.3mf")
 TARGET = os.path.join(HERE, "twopart_groups.3mf")
 
 PRINTER = "Snapmaker U1 (0.4 nozzle)"
-PROCESS = "0.20 Standard @Snapmaker U1 (0.4 nozzle)"
+PROCESS = "0.20mm Standard @Snapmaker U1 (0.4 nozzle)"
 
 # Two profiles, because Stage 3 needs two kinds of ON-mode evidence:
 #

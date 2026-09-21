@@ -31,7 +31,7 @@ def main() -> int:
     ap.add_argument("--project", help="optional project 3mf to slice (all plates)")
     ap.add_argument("--datadir", help="isolated data directory (default: the user's real one)")
     ap.add_argument("--printer", default="Snapmaker U1 (0.4 nozzle)")
-    ap.add_argument("--process", default="0.20 Standard @Snapmaker U1 (0.4 nozzle)")
+    ap.add_argument("--process", default="0.20mm Standard @Snapmaker U1 (0.4 nozzle)")
     ap.add_argument("--filament", default="Snapmaker PLA Matte @U1")
     ap.add_argument("--keep", action="store_true", help="keep the output directory")
     a = ap.parse_args()
