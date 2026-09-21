@@ -3,6 +3,7 @@
     "from": "system",
     "instantiation": "false",
     "name": "Generic ASA @U1 base",
+    "renamed_from": "Generic ASA @base",
     "inherits": "fdm_filament_asa_category",
     "chamber_temperatures": [
         "0"

@@ -3,6 +3,7 @@
   "from": "system",
   "instantiation": "false",
   "name": "Snapmaker PLA Matte @U1 base",
+  "renamed_from": "Snapmaker PLA Matte @base;Snapmaker PLA Matte @U1 base2",
   "filament_id": "141703112701",
   "inherits": "fdm_filament_pla_matte_category",
   "filament_end_gcode": [

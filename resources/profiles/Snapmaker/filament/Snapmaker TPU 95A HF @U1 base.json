@@ -3,6 +3,7 @@
     "from": "system",
     "instantiation": "false",
     "name": "Snapmaker TPU 95A HF @U1 base",
+    "renamed_from": "Snapmaker TPU 95A @U1 base",
     "inherits": "fdm_filament_tpu_95a_hf_category",
     "filament_cost": [
         "20"

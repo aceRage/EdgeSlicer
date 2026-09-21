@@ -3,5 +3,6 @@
     "from": "system",
     "instantiation": "false",
     "name": "Generic PLA-CF @U1 base",
+    "renamed_from": "Generic PLA-CF @base;Generic PLA-CF @base2",
     "inherits": "fdm_filament_pla_cf_category"
 }
