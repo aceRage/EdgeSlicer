@@ -103,6 +103,7 @@ void WebDeviceDialog::OnDocumentLoaded(wxWebViewEvent &evt)
 
 void WebDeviceDialog::OnError(wxWebViewEvent &evt)
 {
+    evt.Skip();
     auto e = "unknown error";
     switch (evt.GetInt()) {
     case wxWEBVIEW_NAV_ERR_CONNECTION: e = "wxWEBVIEW_NAV_ERR_CONNECTION"; break;
