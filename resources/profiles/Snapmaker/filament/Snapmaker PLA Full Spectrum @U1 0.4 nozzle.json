@@ -57,7 +57,8 @@
         "1"
     ],
     "enable_pressure_advance": [
-        "0"
+        "0",
+        "1"
     ],
     "eng_plate_temp": [
         "60"
@@ -156,7 +157,8 @@
         "nil"
     ],
     "filament_retraction_length": [
-        "nil"
+        "nil",
+        "0.5"
     ],
     "filament_retraction_minimum_travel": [
         "nil"
@@ -207,7 +209,8 @@
         "nil"
     ],
     "filament_z_hop_types": [
-        "nil"
+        "nil",
+        "Slope Lift"
     ],
     "full_fan_speed_layer": [
         "0"
@@ -244,7 +247,8 @@
         "0.4157"
     ],
     "pressure_advance": [
-        "0.02"
+        "0.02",
+        "0.024"
     ],
     "reduce_fan_stop_start_freq": [
         "1"
@@ -280,12 +284,17 @@
         "65"
     ],
     "filament_retract_length_toolchange": [
-        "10"
+        "10",
+        "5"
     ],
     "graphic_effect_plate_temp": [
         "65"
     ],
     "graphic_effect_plate_temp_initial_layer": [
         "65"
+    ],
+    "filament_flow_support": [
+        "standard",
+        "high_flow"
     ]
 }

@@ -23,9 +23,6 @@
     "filament_retract_length_toolchange": [
         "10"
     ],
-
-
-
     "eng_plate_temp": [
         "65"
     ],
@@ -59,7 +56,16 @@
     "filament_multitool_ramming_flow": [
         "5"
     ],
-    "supertack_plate_temp": ["40"],
-    "supertack_plate_temp_initial_layer": ["40"],
-    "filament_type": ["PLA"]
+    "supertack_plate_temp": [
+        "40"
+    ],
+    "supertack_plate_temp_initial_layer": [
+        "40"
+    ],
+    "filament_type": [
+        "PLA"
+    ],
+    "filament_flow_support": [
+        "standard"
+    ]
 }

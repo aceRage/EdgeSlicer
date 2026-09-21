@@ -1,6 +1,6 @@
 {
     "type": "filament",
-    "name": "Snapmaker PLA Wood @U1 0.4 nozzle",  
+    "name": "Snapmaker PLA Wood @U1 0.4 nozzle",
     "inherits": "Generic PLA @base",
     "from": "system",
     "setting_id": "GFSL991",
@@ -38,13 +38,12 @@
     "hot_plate_temp_initial_layer": [
         "65"
     ],
-
-
     "filament_flow_ratio": [
         "0.97"
     ],
     "filament_max_volumetric_speed": [
-        "18"
+        "18",
+        "20"
     ],
     "filament_multitool_ramming_flow": [
         "40"
@@ -53,7 +52,8 @@
         "10"
     ],
     "filament_retract_length_toolchange": [
-        "5"
+        "5",
+        "6"
     ],
     "filament_retraction_length": [
         "0.6"
@@ -62,14 +62,33 @@
         "PLA WOOD"
     ],
     "pressure_advance": [
-        "0.025"
+        "0.025",
+        "0.024"
     ],
     "slow_down_layer_time": [
         "4"
     ],
-    "graphic_effect_plate_temp": ["65"],
-    "graphic_effect_plate_temp_initial_layer": ["65"],
-    "supertack_plate_temp": ["40"],
-    "supertack_plate_temp_initial_layer": ["40"],
-    "filament_type": ["PLA"]
+    "graphic_effect_plate_temp": [
+        "65"
+    ],
+    "graphic_effect_plate_temp_initial_layer": [
+        "65"
+    ],
+    "supertack_plate_temp": [
+        "40"
+    ],
+    "supertack_plate_temp_initial_layer": [
+        "40"
+    ],
+    "filament_type": [
+        "PLA"
+    ],
+    "filament_flow_support": [
+        "standard",
+        "high_flow"
+    ],
+    "filament_z_hop_types": [
+        "nil",
+        "Auto Lift"
+    ]
 }

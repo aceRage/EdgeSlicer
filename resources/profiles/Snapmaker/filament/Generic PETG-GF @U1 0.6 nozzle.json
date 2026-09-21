@@ -44,7 +44,6 @@
     "compatible_printers": [
         "Snapmaker U1 (0.6 nozzle)"
     ],
-
     "eng_plate_temp": [
         "80"
     ],
@@ -80,5 +79,8 @@
     ],
     "textured_plate_temp_initial_layer": [
         "80"
+    ],
+    "filament_flow_support": [
+        "standard"
     ]
 }

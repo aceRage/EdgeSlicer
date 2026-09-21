@@ -25,7 +25,9 @@
     "adaptive_pressure_advance_overhangs": [
         "0"
     ],
-    "additional_cooling_fan_speed": ["100"],
+    "additional_cooling_fan_speed": [
+        "100"
+    ],
     "chamber_temperature": [
         "0"
     ],
@@ -53,7 +55,9 @@
     "enable_overhang_bridge_fan": [
         "1"
     ],
-    "enable_pressure_advance": ["1"],
+    "enable_pressure_advance": [
+        "1"
+    ],
     "eng_plate_temp": [
         "60"
     ],
@@ -69,9 +73,15 @@
     "fan_min_speed": [
         "100"
     ],
-    "filament_cooling_final_speed": ["3.4"],
-    "filament_cooling_initial_speed": ["2.2"],
-    "filament_cooling_moves": ["4"],
+    "filament_cooling_final_speed": [
+        "3.4"
+    ],
+    "filament_cooling_initial_speed": [
+        "2.2"
+    ],
+    "filament_cooling_moves": [
+        "4"
+    ],
     "filament_cost": [
         "25.4"
     ],
@@ -87,22 +97,36 @@
     "filament_end_gcode": [
         "; filament end gcode \n"
     ],
-    "filament_flow_ratio": ["0.97"],
+    "filament_flow_ratio": [
+        "0.97"
+    ],
     "filament_is_support": [
         "0"
     ],
-    "filament_loading_speed": ["8"],
-    "filament_loading_speed_start": ["3"],
+    "filament_loading_speed": [
+        "8"
+    ],
+    "filament_loading_speed_start": [
+        "3"
+    ],
     "filament_long_retractions_when_cut": [
         "nil"
     ],
-    "filament_max_volumetric_speed": ["12"],
-    "filament_minimal_purge_on_wipe_tower": ["50"],
+    "filament_max_volumetric_speed": [
+        "12"
+    ],
+    "filament_minimal_purge_on_wipe_tower": [
+        "50"
+    ],
     "filament_multitool_ramming": [
         "1"
     ],
-    "filament_multitool_ramming_flow": ["20"],
-    "filament_multitool_ramming_volume": ["10"],
+    "filament_multitool_ramming_flow": [
+        "20"
+    ],
+    "filament_multitool_ramming_volume": [
+        "10"
+    ],
     "filament_notes": [
         ""
     ],
@@ -130,7 +154,9 @@
     "filament_retraction_distances_when_cut": [
         "nil"
     ],
-    "filament_retraction_length": ["0.2"],
+    "filament_retraction_length": [
+        "0.2"
+    ],
     "filament_retraction_minimum_travel": [
         "nil"
     ],
@@ -146,8 +172,12 @@
     "filament_soluble": [
         "0"
     ],
-    "filament_stamping_distance": ["0"],
-    "filament_stamping_loading_speed": ["0"],
+    "filament_stamping_distance": [
+        "0"
+    ],
+    "filament_stamping_loading_speed": [
+        "0"
+    ],
     "filament_start_gcode": [
         "; filament start gcode\n"
     ],
@@ -157,7 +187,9 @@
     "filament_type": [
         "PLA"
     ],
-    "filament_unloading_speed": ["90"],
+    "filament_unloading_speed": [
+        "90"
+    ],
     "filament_unloading_speed_start": [
         "100"
     ],
@@ -173,7 +205,9 @@
     "filament_z_hop": [
         "nil"
     ],
-    "filament_z_hop_types": ["Slope Lift"],
+    "filament_z_hop_types": [
+        "Slope Lift"
+    ],
     "full_fan_speed_layer": [
         "0"
     ],
@@ -187,8 +221,12 @@
         "0"
     ],
     "is_custom_defined": "0",
-    "nozzle_temperature": ["220"],
-    "nozzle_temperature_initial_layer": ["220"],
+    "nozzle_temperature": [
+        "220"
+    ],
+    "nozzle_temperature_initial_layer": [
+        "220"
+    ],
     "nozzle_temperature_range_high": [
         "240"
     ],
@@ -205,7 +243,8 @@
         "0.4157"
     ],
     "pressure_advance": [
-        "0.02"
+        "0.02",
+        "0.024"
     ],
     "reduce_fan_stop_start_freq": [
         "1"
@@ -216,7 +255,9 @@
     "slow_down_for_layer_cooling": [
         "1"
     ],
-    "slow_down_layer_time": ["8"],
+    "slow_down_layer_time": [
+        "8"
+    ],
     "slow_down_min_speed": [
         "20"
     ],
@@ -247,6 +288,14 @@
     "graphic_effect_plate_temp_initial_layer": [
         "65"
     ],
-    "supertack_plate_temp": ["45"],
-    "supertack_plate_temp_initial_layer": ["45"]
+    "supertack_plate_temp": [
+        "45"
+    ],
+    "supertack_plate_temp_initial_layer": [
+        "45"
+    ],
+    "filament_flow_support": [
+        "standard",
+        "high_flow"
+    ]
 }

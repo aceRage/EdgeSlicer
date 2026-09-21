@@ -1320,9 +1320,9 @@ WipeTower2::WipeTower2(const PrintConfig&                     config,
     , m_bridging(float(config.wipe_tower_bridging))
     , m_sparse_layers_skipped(wipe_tower_sparse_layers_skipped(config))
     , m_gcode_flavor(config.gcode_flavor)
-    , m_travel_speed(config.travel_speed)
-    , m_infill_speed(default_region_config.sparse_infill_speed)
-    , m_perimeter_speed(default_region_config.inner_wall_speed)
+    , m_travel_speed(float(get_value_at(config, config.travel_speed, ConfigFlowDomain::Process, initial_tool)))
+    , m_infill_speed(float(get_value_at(config, default_region_config.sparse_infill_speed, ConfigFlowDomain::Process, initial_tool)))
+    , m_perimeter_speed(float(get_value_at(config, default_region_config.inner_wall_speed, ConfigFlowDomain::Process, initial_tool)))
     , m_current_tool(initial_tool)
     , wipe_volumes(wiping_matrix)
     , m_wipe_tower_max_purge_speed(float(config.wipe_tower_max_purge_speed))
@@ -1340,7 +1340,7 @@ WipeTower2::WipeTower2(const PrintConfig&                     config,
     // it is taken over following default. Speeds from config are not
     // easily accessible here.
     const float default_speed = 60.f;
-    m_first_layer_speed       = config.initial_layer_speed;
+    m_first_layer_speed       = config.initial_layer_speed.values.front();
     if (m_first_layer_speed == 0.f) // just to make sure autospeed doesn't break it.
         m_first_layer_speed = default_speed / 2.f;
 

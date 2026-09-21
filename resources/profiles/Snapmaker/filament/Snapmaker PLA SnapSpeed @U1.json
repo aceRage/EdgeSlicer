@@ -27,6 +27,7 @@
         "0"
     ],
     "additional_cooling_fan_speed": [
+        "70",
         "70"
     ],
     "chamber_temperature": [
@@ -57,7 +58,8 @@
         "1"
     ],
     "enable_pressure_advance": [
-        "0"
+        "0",
+        "1"
     ],
     "eng_plate_temp": [
         "60"
@@ -69,9 +71,11 @@
         "100"
     ],
     "fan_max_speed": [
+        "100",
         "100"
     ],
     "fan_min_speed": [
+        "100",
         "100"
     ],
     "filament_cooling_final_speed": [
@@ -99,6 +103,7 @@
         "; filament end gcode \n"
     ],
     "filament_flow_ratio": [
+        "0.966",
         "0.966"
     ],
     "filament_is_support": [
@@ -114,18 +119,23 @@
         "nil"
     ],
     "filament_max_volumetric_speed": [
-        "20"
+        "20",
+        "40"
     ],
     "filament_minimal_purge_on_wipe_tower": [
+        "15",
         "15"
     ],
     "filament_multitool_ramming": [
+        "1",
         "1"
     ],
     "filament_multitool_ramming_flow": [
-        "30"
+        "30",
+        "40"
     ],
     "filament_multitool_ramming_volume": [
+        "5",
         "5"
     ],
     "filament_notes": [
@@ -156,6 +166,7 @@
         "nil"
     ],
     "filament_retraction_length": [
+        "1.2",
         "1.2"
     ],
     "filament_retraction_minimum_travel": [
@@ -207,6 +218,7 @@
         "0.4"
     ],
     "filament_z_hop_types": [
+        "Slope Lift",
         "Slope Lift"
     ],
     "full_fan_speed_layer": [
@@ -222,9 +234,11 @@
         "0"
     ],
     "nozzle_temperature": [
+        "220",
         "220"
     ],
     "nozzle_temperature_initial_layer": [
+        "220",
         "220"
     ],
     "nozzle_temperature_range_high": [
@@ -243,7 +257,8 @@
         "0.4157"
     ],
     "pressure_advance": [
-        "0.02"
+        "0.02",
+        "0.024"
     ],
     "reduce_fan_stop_start_freq": [
         "1"
@@ -279,6 +294,7 @@
         "65"
     ],
     "filament_retract_length_toolchange": [
+        "5",
         "5"
     ],
     "graphic_effect_plate_temp": [
@@ -287,6 +303,14 @@
     "graphic_effect_plate_temp_initial_layer": [
         "65"
     ],
-    "supertack_plate_temp": ["40"],
-    "supertack_plate_temp_initial_layer": ["40"]
+    "supertack_plate_temp": [
+        "40"
+    ],
+    "supertack_plate_temp_initial_layer": [
+        "40"
+    ],
+    "filament_flow_support": [
+        "standard",
+        "high_flow"
+    ]
 }

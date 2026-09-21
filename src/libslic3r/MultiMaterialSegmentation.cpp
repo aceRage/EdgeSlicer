@@ -1816,8 +1816,8 @@ static LayerColorStat compute_layer_color_stat(const ConstLayerPtrsAdaptor &laye
             const double nozzle_diameter = print_object.print()->config().nozzle_diameter.get_at(0);
             double outer_wall_line_width = config.get_abs_value("outer_wall_line_width", nozzle_diameter);
             out.extrusion_width     = std::max<float>(out.extrusion_width, outer_wall_line_width);
-            const bool  gapfill_off = ! (config.gap_infill_speed.value > 0.f);
-            float small_region_threshold = config.gap_infill_speed.value > 0 ?
+            const bool  gapfill_off = ! (config.gap_infill_speed.values.front() > 0.f);
+            float small_region_threshold = config.gap_infill_speed.values.front() > 0 ?
                                          // Gap fill enabled. Enable a single line of 1/2 extrusion width.
                                          0.5f * outer_wall_line_width :
                                          // Gap fill disabled. Enable two lines slightly overlapping.
@@ -3965,7 +3965,7 @@ std::vector<std::vector<ExPolygons>> multi_material_segmentation_by_painting(con
         if (perimeter_spacing > 0.f)
             min_perimeter_spacing = min_perimeter_spacing > 0.f ? std::min(min_perimeter_spacing, perimeter_spacing) : perimeter_spacing;
         const int wall_filament_color = region.config().wall_filament.value;
-        if (wall_filament_color >= 1 && region.config().gap_infill_speed.value <= 0.f) {
+        if (wall_filament_color >= 1 && region.config().gap_infill_speed.values.front() <= 0.f) {
             const float claim_width = ext_perimeter_width + 0.7f * Flow::rounded_rectangle_extrusion_spacing(ext_perimeter_width, float(print_object.config().layer_height.value));
             if (size_t(wall_filament_color) >= claim_width_gapfill_off_by_color.size())
                 claim_width_gapfill_off_by_color.resize(size_t(wall_filament_color) + 1, 0.f);

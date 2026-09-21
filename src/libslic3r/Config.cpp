@@ -471,8 +471,16 @@ void ConfigBase::apply_only(const ConfigBase &other, const t_config_option_keys 
                 }
                 if (my_opt2) {
                     int index = std::atoi(opt_key.c_str() + n + 1);
-                    if (other_opt)
-                        my_opt2->set_at(other_opt, index, index);
+                    if (index < 0)
+                        continue;
+                    if (other_opt) {
+                        const auto *other_vec = dynamic_cast<const ConfigOptionVectorBase *>(other_opt);
+                        if (my_opt2->empty())
+                            my_opt2->resize(size_t(index) + 1, other_opt);
+                        else if (size_t(index) >= my_opt2->size())
+                            my_opt2->resize(size_t(index) + 1);
+                        my_opt2->set_at(other_opt, index, other_vec != nullptr && size_t(index) < other_vec->size() ? index : 0);
+                    }
                     continue;
                 }
             }
@@ -708,6 +716,12 @@ double ConfigBase::get_abs_value(const t_config_option_key &opt_key) const
       return static_cast<const ConfigOptionInt *>(raw_opt)->value;
     if (raw_opt->type() == coBool)
       return static_cast<const ConfigOptionBool *>(raw_opt)->value ? 1 : 0;
+    // Snapmaker: flow-variant
+    if (raw_opt->type() == coFloats) {
+        const auto *floats = static_cast<const ConfigOptionFloats*>(raw_opt);
+        if (!floats->values.empty())
+            return floats->values.front();
+    }
 
     const ConfigOptionPercent *cast_opt = nullptr;
     if (raw_opt->type() == coFloatOrPercent) {

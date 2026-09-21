@@ -286,5 +286,8 @@
     ],
     "pressure_advance": [
         "0.015"
+    ],
+    "filament_flow_support": [
+        "standard"
     ]
 }

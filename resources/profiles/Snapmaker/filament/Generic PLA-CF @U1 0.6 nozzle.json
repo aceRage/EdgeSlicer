@@ -47,5 +47,10 @@
     "graphic_effect_plate_temp_initial_layer": [
         "65"
     ],
-    "filament_type": ["PLA-CF"]
+    "filament_type": [
+        "PLA-CF"
+    ],
+    "filament_flow_support": [
+        "standard"
+    ]
 }

@@ -164,6 +164,8 @@ set(lisbslic3r_sources
     Feature/Interlocking/VoxelUtils.cpp
     Feature/Interlocking/VoxelUtils.hpp
     FileParserError.hpp
+    AllowlistManager.cpp
+    AllowlistManager.hpp
     FilamentColorLibrary.cpp
     FilamentColorLibrary.hpp
     FilamentHotBedNozzleRules.cpp
@@ -416,6 +418,8 @@ set(lisbslic3r_sources
     StartupProfile.hpp
     Preset.cpp
     Preset.hpp
+    PresetFlowVariant.cpp
+    PresetFlowVariant.hpp
     PrincipalComponents2D.cpp
     PrincipalComponents2D.hpp
     PrintApply.cpp
@@ -430,6 +434,8 @@ set(lisbslic3r_sources
     PrintObject.cpp
     PrintObjectSlice.cpp
     PrintRegion.cpp
+    ProjectSchemaVersion.cpp
+    ProjectSchemaVersion.hpp
     ProjectTask.cpp
     ProjectTask.hpp
     QuadricEdgeCollapse.cpp

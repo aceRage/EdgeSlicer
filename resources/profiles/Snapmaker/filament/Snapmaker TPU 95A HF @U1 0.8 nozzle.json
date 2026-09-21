@@ -27,17 +27,33 @@
     "graphic_effect_plate_temp_initial_layer": [
         "35"
     ],
-    "enable_pressure_advance": ["0"],
-    "fan_cooling_layer_time": ["100"],
-    "fan_max_speed": ["100"],
-    "fan_min_speed": ["100"],
+    "enable_pressure_advance": [
+        "0"
+    ],
+    "fan_cooling_layer_time": [
+        "100"
+    ],
+    "fan_max_speed": [
+        "100"
+    ],
+    "fan_min_speed": [
+        "100"
+    ],
     "filament_deretraction_speed": [
         "nil"
     ],
-    "filament_flow_ratio": ["1.045"],
-    "filament_max_volumetric_speed": ["16"],
-    "filament_multitool_ramming_flow": ["15"],
-    "filament_retract_length_toolchange": ["8"],
+    "filament_flow_ratio": [
+        "1.045"
+    ],
+    "filament_max_volumetric_speed": [
+        "16"
+    ],
+    "filament_multitool_ramming_flow": [
+        "15"
+    ],
+    "filament_retract_length_toolchange": [
+        "8"
+    ],
     "filament_retraction_length": [
         "1"
     ],
@@ -50,12 +66,31 @@
     "filament_vendor": [
         "Snapmaker"
     ],
-    "nozzle_temperature": ["215"],
-    "nozzle_temperature_initial_layer": ["215"],
-    "overhang_fan_threshold": ["95%"],
-    "pressure_advance": ["0.12"],
-    "slow_down_layer_time": ["12"],
-    "additional_cooling_fan_speed": ["100"],
-    "filament_z_hop_types": ["Slope Lift"],
-    "filament_type": ["TPU"]
+    "nozzle_temperature": [
+        "215"
+    ],
+    "nozzle_temperature_initial_layer": [
+        "215"
+    ],
+    "overhang_fan_threshold": [
+        "95%"
+    ],
+    "pressure_advance": [
+        "0.12"
+    ],
+    "slow_down_layer_time": [
+        "12"
+    ],
+    "additional_cooling_fan_speed": [
+        "100"
+    ],
+    "filament_z_hop_types": [
+        "Slope Lift"
+    ],
+    "filament_type": [
+        "TPU"
+    ],
+    "filament_flow_support": [
+        "standard"
+    ]
 }
