@@ -1,5 +1,7 @@
 #include "FlashNetworkIntfc.h"
 #include <vector>
+#include <cstdio>
+#include <boost/log/trivial.hpp>
 
 #ifdef _WIN32
 #include <Windows.h>
@@ -8,6 +10,21 @@
 #endif
 
 namespace fnet {
+
+// EdgeSlicer: the reference build of this stack targeted FlashNetwork 3.4.1, but FlashForge's
+// current Flash Studio / Orca-Flashforge installers ship FlashNetwork 3.0.0, which exports the
+// full fnet_* surface this wrapper binds (verified by scanning the shipped DLL). Accept any
+// 3.x.y instead of pinning an exact build, and log when the version differs from the reference
+// so a future ABI break is at least visible in the log.
+static bool fnet_version_usable(const char *version)
+{
+    if (version == nullptr)
+        return false;
+    unsigned int major = 0, minor = 0, patch = 0;
+    if (sscanf(version, "%u.%u.%u", &major, &minor, &patch) < 2)
+        return false;
+    return major == 3;
+}
 
 FlashNetworkIntfc::FlashNetworkIntfc(const char *libraryPath, const char *serverSettingsPath,
     const fnet_log_settings_t &logSettings)
@@ -142,11 +159,15 @@ FlashNetworkIntfc::FlashNetworkIntfc(const char *libraryPath, const char *server
     INIT_FUNC_PTR(freeSyncOnlineInfo, fnet_freeSyncOnlineInfo);
     INIT_FUNC_PTR(allocString, fnet_allocString);
     INIT_FUNC_PTR(freeString, fnet_freeString);
-    if (initlize(serverSettingsPath, &logSettings) == FNET_OK && strcmp(getVersion(), "3.4.1") == 0) {
+    const char *version = getVersion();
+    if (initlize(serverSettingsPath, &logSettings) == FNET_OK && fnet_version_usable(version)) {
+        if (strcmp(version, "3.4.1") != 0)
+            BOOST_LOG_TRIVIAL(warning) << "FlashNetwork " << version
+                << " is not the reference 3.4.1 build; continuing because the fnet_* surface matches";
         m_isOk = true;
     }
     else {
-        printf("initlize flashnetwork failed, version = %s", getVersion());
+        printf("initlize flashnetwork failed, version = %s", version);
     }
 }
 
