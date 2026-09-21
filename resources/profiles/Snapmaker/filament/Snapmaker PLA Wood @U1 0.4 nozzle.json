@@ -56,5 +56,9 @@
     ],
     "slow_down_layer_time": [
         "12"
+    ],
+    "filament_flow_support": [
+        "standard",
+        "high_flow"
     ]
 }

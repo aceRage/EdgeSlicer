@@ -32,5 +32,8 @@
     ],
     "pellet_flow_coefficient": [
         "0.4157"
+    ],
+    "filament_flow_support": [
+        "standard"
     ]
 }

@@ -467,5 +467,8 @@
     ],
     "volumetric_speed_coefficients": [
         "0 0 0 0 0 0"
+    ],
+    "filament_flow_support": [
+        "standard"
     ]
 }

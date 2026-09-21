@@ -333,5 +333,9 @@
   "filament_unload_time": [
     "2"
   ],
-  "is_custom_defined": "0"
+  "is_custom_defined": "0",
+  "filament_flow_support": [
+    "standard",
+    "high_flow"
+  ]
 }
