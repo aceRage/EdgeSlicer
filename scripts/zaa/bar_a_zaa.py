@@ -27,8 +27,8 @@ CASES = [
     ("p1s", "Bambu Lab P1S 0.4 nozzle", "0.20mm Standard @BBL X1C", "Generic PLA", []),
     ("p1s_ofs", "Bambu Lab P1S 0.4 nozzle", "0.20mm Standard @BBL X1C", "Generic PLA",
      ["--offset-layers=1"]),
-    ("u1", "Snapmaker U1 (0.4 nozzle)", "0.20 Standard @Snapmaker U1 (0.4 nozzle)", "Snapmaker PLA Basic @U1", []),
-    ("u1_ofs", "Snapmaker U1 (0.4 nozzle)", "0.20 Standard @Snapmaker U1 (0.4 nozzle)", "Snapmaker PLA Basic @U1",
+    ("u1", "Snapmaker U1 (0.4 nozzle)", "0.20mm Standard @Snapmaker U1 (0.4 nozzle)", "Snapmaker PLA Basic @U1", []),
+    ("u1_ofs", "Snapmaker U1 (0.4 nozzle)", "0.20mm Standard @Snapmaker U1 (0.4 nozzle)", "Snapmaker PLA Basic @U1",
      ["--offset-layers=1"]),
 ]
 
