@@ -80,7 +80,7 @@
   ],
   "presets": {
     "printer": "Snapmaker U1 (0.4 nozzle)",
-    "process": "0.20 Standard @Snapmaker U1 (0.4 nozzle)",
+    "process": "0.20mm Standard @Snapmaker U1 (0.4 nozzle)",
     "filaments": [
       "Generic PLA"
     ]
