@@ -15489,6 +15489,30 @@ msgstr "自动选择官方混色耗材套装进行混色匹配。单色混色比
 msgid "Manually select filaments from the current list for color mixing."
 msgstr "手动选择当前列表中的耗材进行混色匹配。"
 
+msgid "[Both]"
+msgstr "【两者】"
+
+msgid "Copy Standard to High flow"
+msgstr "将标准流量复制到高流量"
+
+msgid "Copy all High-flow variant settings from Standard"
+msgstr "将全部高流量参数从标准流量复制过去"
+
+msgid "Flow settings differ"
+msgstr "流量参数不一致"
+
+msgid "Standard and High flow settings differ. Choose which values to keep for both flow modes. This will overwrite the other mode."
+msgstr "标准流量与高流量参数不一致。请选择两边都保留的值，另一侧将被覆盖。"
+
+msgid "Use Standard values"
+msgstr "使用标准流量值"
+
+msgid "Use High-flow values"
+msgstr "使用高流量值"
+
+msgid "High flow settings already differ from Standard. Overwrite High flow with Standard values?"
+msgstr "高流量参数已与标准流量不同。要用标准流量覆盖高流量吗？"
+
 msgid "Official Full Spectrum filaments are not configured. Configured filaments will be used instead. Once the official filaments are added, the previously selected filaments can be replaced in the filament list without affecting the color mixing match result."
 msgstr "未配置官方 Full Spectrum 全光谱耗材，将自动使用已配置的耗材。完成官方耗材配置后，可在耗材列表中进行替换，不影响混色匹配结果。"
 
