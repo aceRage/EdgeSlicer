@@ -1471,7 +1471,10 @@ std::string WipeTowerIntegration::tool_change(GCode& gcodegen, int extruder_id, 
 
         double feedrate = std::max(1.0, double(gcodegen.config().wipe_tower_max_purge_speed.value)) * 60.0;
         if (m_layer_idx == 0)
-            feedrate = std::min(feedrate, std::max(1.0, double(gcodegen.config().initial_layer_speed.values.front())) * 60.0);
+            feedrate = std::min(feedrate,
+                                std::max(1.0, double(get_value_at(gcodegen.config(), gcodegen.config().initial_layer_speed,
+                                                                  ConfigFlowDomain::Process, unsigned(extruder_id)))) *
+                                    60.0);
         gcode += gcodegen.writer().set_speed(feedrate, "Local-Z wipe tower reserve");
 
         for (size_t point_idx = 1; point_idx < local_path.size(); ++point_idx) {

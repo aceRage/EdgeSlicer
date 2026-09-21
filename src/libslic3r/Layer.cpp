@@ -186,8 +186,8 @@ bool Layer::is_perimeter_compatible(const PrintRegion& a, const PrintRegion& b)
 		&& config.wall_loops                  == other_config.wall_loops
 		&& config.wall_sequence               == other_config.wall_sequence
 		&& config.is_infill_first             == other_config.is_infill_first
-		&& config.inner_wall_speed.values.front() == other_config.inner_wall_speed
-		&& config.outer_wall_speed.values.front() == other_config.outer_wall_speed
+		&& config.inner_wall_speed.values.front() == other_config.inner_wall_speed.values.front()
+		&& config.outer_wall_speed.values.front() == other_config.outer_wall_speed.values.front()
 		// Ultra (over-support surfaces, Stage 5 of the support-sets plan): these three decide how
 		// a bottom shell over support is printed, and they are per PART. Two regions that differ
 		// only in them would otherwise be merged here, and make_perimeters() assigns the merged
