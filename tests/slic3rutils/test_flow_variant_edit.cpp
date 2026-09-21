@@ -27,6 +27,26 @@ static DynamicPrintConfig make_two_mode_process_config()
     return config;
 }
 
+TEST_CASE("flow_variant_slots_differ detects Standard vs High flow diverge", "[FlowVariantEdit]")
+{
+    DynamicPrintConfig filament = make_two_mode_filament_config();
+    REQUIRE(flow_variant_slots_differ(filament, ConfigFlowDomain::Filament, FLOW_MODE_STANDARD, FLOW_MODE_HIGH_FLOW));
+    // Same-mode and missing High-flow support are no-ops (Both-enter / Copy confirm stay silent).
+    REQUIRE_FALSE(flow_variant_slots_differ(filament, ConfigFlowDomain::Filament, FLOW_MODE_STANDARD, FLOW_MODE_STANDARD));
+    REQUIRE_FALSE(flow_variant_slots_differ(filament, ConfigFlowDomain::Process, FLOW_MODE_STANDARD, FLOW_MODE_HIGH_FLOW));
+
+    DynamicPrintConfig process = make_two_mode_process_config();
+    REQUIRE(flow_variant_slots_differ(process, ConfigFlowDomain::Process, FLOW_MODE_STANDARD, FLOW_MODE_HIGH_FLOW));
+
+    DynamicPrintConfig single = DynamicPrintConfig::full_print_config();
+    single.set_key_value("filament_flow_support", new ConfigOptionStrings{FLOW_MODE_STANDARD});
+    single.set_key_value("filament_max_volumetric_speed", new ConfigOptionFloats{12.0});
+    REQUIRE_FALSE(flow_variant_slots_differ(single, ConfigFlowDomain::Filament, FLOW_MODE_STANDARD, FLOW_MODE_HIGH_FLOW));
+
+    REQUIRE(copy_flow_variant_slot(filament, ConfigFlowDomain::Filament, FLOW_MODE_STANDARD, FLOW_MODE_HIGH_FLOW));
+    REQUIRE_FALSE(flow_variant_slots_differ(filament, ConfigFlowDomain::Filament, FLOW_MODE_STANDARD, FLOW_MODE_HIGH_FLOW));
+}
+
 TEST_CASE("copy_flow_variant_slot copies domain keys Standard to High flow", "[FlowVariantEdit]")
 {
     DynamicPrintConfig config = make_two_mode_filament_config();
