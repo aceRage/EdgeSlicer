@@ -3413,6 +3413,11 @@ void TabPrint::toggle_options()
             cb->Append(_(def->enum_labels[i]));
         }
         cb->SetValue(n);
+        // The stale label (e.g. a tree style left over after support_type changed while support
+        // is disabled) may not exist in the rebuilt list; GetValue()/SetValue() then leaves the
+        // selection invalid, and Choice::get_value would index enum_values out of bounds.
+        if (cb->GetSelection() == wxNOT_FOUND && cb->GetCount() > 0)
+            cb->SetSelection(0);
     }
 
     // Keep plate bed-type list in sync with currently selected printer.
@@ -6508,6 +6513,17 @@ bool Tab::select_preset(std::string preset_name, bool delete_current /*=false*/,
                     oldFilamentColourModes[i] = oldFilamentColourModes[i] == 1 ? 1 : 0;
                 }
 
+                // Snapmaker #805: update_selections() restores the target printer's saved flush
+                // matrix (often 1x1 after a single-filament nozzle variant). Filament presets and
+                // colours are then carried back, leaving N filaments paired with a 1x1 matrix.
+                // auto_calc_flushing_volumes writes matrix[row * n + id] past that buffer.
+                std::vector<double> oldFlushVolumesMatrix;
+                std::vector<double> oldFlushVolumesVector;
+                if (const ConfigOptionFloats *flushMatrix = projectConfig.option<ConfigOptionFloats>("flush_volumes_matrix"))
+                    oldFlushVolumesMatrix = flushMatrix->values;
+                if (const ConfigOptionFloats *flushVector = projectConfig.option<ConfigOptionFloats>("flush_volumes_vector"))
+                    oldFlushVolumesVector = flushVector->values;
+
                 m_preset_bundle->update_selections(*wxGetApp().app_config);
 
                 m_preset_bundle->filament_presets = oldFilamentPresets;
@@ -6515,6 +6531,11 @@ bool Tab::select_preset(std::string preset_name, bool delete_current /*=false*/,
                 projectConfig.option<ConfigOptionStrings>("filament_colour")->values = oldFilamentColors;
                 projectConfig.option<ConfigOptionStrings>("filament_multi_colors", true)->values = oldFilamentMultiColors;
                 projectConfig.option<ConfigOptionInts>("filament_colour_mode", true)->values = oldFilamentColourModes;
+
+                if (ConfigOptionFloats *flushMatrix = projectConfig.option<ConfigOptionFloats>("flush_volumes_matrix"))
+                    flushMatrix->values = oldFlushVolumesMatrix;
+                if (ConfigOptionFloats *flushVector = projectConfig.option<ConfigOptionFloats>("flush_volumes_vector"))
+                    flushVector->values = oldFlushVolumesVector;
 
                 std::vector<std::string> filamentColourModeStrings;
                 filamentColourModeStrings.reserve(oldFilamentColourModes.size());

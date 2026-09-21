@@ -425,6 +425,10 @@ static std::vector<ExPolygons> extract_colored_segments(const MMU_Graph& graph, 
         for (const size_t &arc_idx : node.arc_idxs) {
             const MMU_Graph::Arc &arc = graph.arcs[arc_idx];
             if (arc.type == MMU_Graph::ARC_TYPE::NON_BORDER || used_arcs[arc_idx]) continue;
+            // Paint colour overflow: drop arcs whose colour is outside the current
+            // filament/segmentation range rather than indexing expolygons_segments[].
+            // Does not change in-range paint-depth or inspect-paint (Edge #46) paths.
+            if (arc.color < 0 || size_t(arc.color) >= num_facets_states) continue;
 
             Linef process_line(graph.nodes[arc.from_idx].point, graph.nodes[arc.to_idx].point);
             used_arcs[arc_idx] = true;
