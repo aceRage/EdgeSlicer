@@ -3148,17 +3148,28 @@ void GLGizmoCut3D::reproject_draw_stroke_on_mesh()
     if (!update_draw_raycaster() || !m_draw_raycaster)
         return;
 
+    // REVIEW GUARD: get_closest_point() is mesh-global - near an edge, a sample that
+    // smoothing pulled slightly into the material snaps to the NEIGHBOURING face
+    // across the edge, which puts a zigzag into the finished path exactly where the
+    // capture filter above keeps one out. Only accept the reprojection when it stays
+    // close AND does not flip to a disoriented (in the limit back-facing) surface;
+    // otherwise leave the sample where phase 1 put it - it is already on the face.
+    const double dist_limit = std::max(1.0, 0.2 * draw_chain_snap_radius());
+
     std::vector<DrawCutSample> path = m_draw_stroke.path();
     bool moved = false;
     for (DrawCutSample& smp : path) {
         Vec3f normal = Vec3f::Zero();
         const Vec3f closest = m_draw_raycaster->get_closest_point(smp.pos.cast<float>(), &normal);
         const Vec3d to = closest.cast<double>();
+        const Vec3d n  = normal.cast<double>();
+        if ((to - smp.pos).norm() > dist_limit ||
+            (n.squaredNorm() > 1e-12 && n.normalized().dot(smp.normal) < -0.2))
+            continue;
         if ((to - smp.pos).squaredNorm() > 1e-12) {
             smp.pos = to;
             moved = true;
         }
-        const Vec3d n = normal.cast<double>();
         if (n.squaredNorm() > 1e-12 && (n.normalized() - smp.normal).squaredNorm() > 1e-12) {
             smp.normal = n.normalized();
             moved = true;
@@ -4024,7 +4035,14 @@ bool GLGizmoCut3D::draw_on_mouse(const wxMouseEvent& mouse_event)
             // A stroke of one sample (a click, or a drag that only ever hit once) is
             // dropped rather than appended: append() needs two samples to have a
             // direction, and a one-sample link would be invisible and unremovable.
-            const std::vector<DrawCutSample> captured = m_draw_capture;
+            // CAPTURE CONTINUITY FILTER (draw-cut review item 2): near an edge or a
+            // neighbouring wall the mouse ray can skim onto an adjacent surface, and a
+            // handful of those hits makes the line zigzag off the face and back. Drop
+            // short confirmed skims BEFORE the append sees the stroke; the first and
+            // last sample are never touched, so the join span and the closing span are
+            // judged by append_at() exactly as before.
+            const std::vector<DrawCutSample> captured =
+                draw_cut_filter_capture_skims(m_draw_capture);
             m_draw_capture.clear();
             // 2026-09-13, ITEM 1: appended AT THE END THE PRESS PICKED. append()'s own
             // `snap_radius` decides two things - which end the stroke joins, and whether

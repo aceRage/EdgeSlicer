@@ -966,6 +966,26 @@ static constexpr double ChainSnapMinMm    = 1.0;
 static constexpr double ChainSnapMaxMm    = 6.0;
 double draw_cut_chain_snap_radius(const BoundingBoxf3& bbox);
 
+// CAPTURE CONTINUITY FILTER, applied to one gesture's raw samples before they are
+// appended to the chain (review item: near an edge or a neighbouring wall the mouse
+// ray can skim onto an ADJACENT surface, and a handful of those hits produces a
+// zigzag - the line leaps off the face the user is drawing on and comes straight
+// back).
+//
+// The filter removes a SHORT run of interior samples (at most
+// kMaxSkimRun long) that sits on ONE other, disoriented surface (each sample's
+// normal disagrees with both flanking samples' normals by more than 45 deg, the
+// two flanking samples agree with each other, and the run's own samples agree with
+// each other) - i.e. an excursion off the face and back. A longer excursion, a
+// wandering one (mixed normals inside the run), or one whose flanks disagree is
+// indistinguishable from a deliberate detour and is KEPT.
+//
+// The FIRST and LAST sample are never removed: the join span to the chain and the
+// closing span are user intent, judged by append_at(), not by this filter. The
+// filter is pure (no mesh, no camera) so it is unit-testable; it only reads
+// normals.
+std::vector<DrawCutSample> draw_cut_filter_capture_skims(const std::vector<DrawCutSample>& stroke);
+
 // Which end of the chain a new stroke starting at `p` continues, if either.
 enum class DrawChainEnd {
     // Not within the snap radius of either endpoint: the stroke is DISJOINT and is
