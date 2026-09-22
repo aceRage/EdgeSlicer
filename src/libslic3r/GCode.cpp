@@ -35,6 +35,8 @@
 #include <numeric>
 #include <math.h>
 #include <optional>
+#include <memory>
+#include <set>
 #include <stdlib.h>
 #include <string>
 #include <utility>
@@ -2514,6 +2516,45 @@ static BambuBedType to_bambu_bed_type(BedType type)
 void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGeneratorCallback thumbnail_cb)
 {
     PROFILE_FUNC();
+
+    // Snapmaker (feedrate guard): make a refused feedrate VISIBLE. The writer cannot reach Print,
+    // so install a sink here that turns a guard trip into a real slicing warning naming the
+    // config key that resolved badly. Without this the substitution was a log line only, and the
+    // user got a file that quietly printed at the wrong speed with nothing to explain it.
+    //
+    // CRITICAL level, but note that WarningLevel is NOT what drives visibility here: the GUI picks
+    // its notification level from message_type (Plater.cpp), and the CLI's own filter drops
+    // anything left on SlicingDefaultNotification. That is why this warning has its own
+    // SlicingInvalidPrintSpeed id, why Plater.cpp maps that id to SeriousWarningNotificationLevel
+    // (a bold, non-fading notification), and why Snapmaker_Orca.cpp exits non-zero on it. The
+    // CRITICAL level is still correct for any consumer that does read it.
+    //
+    // Reported once per offending setting - a setting that trips on thousands of paths yields one
+    // warning, not thousands.
+    m_writer.set_feedrate_guard_reporter(
+        [&print, reported = std::make_shared<std::set<std::string>>()](const FeedrateOrigin &origin, double bad_value,
+                                                                      double substituted) {
+            const std::string setting = origin.setting != nullptr ? origin.setting : "unknown print speed setting";
+            if (!reported->insert(setting).second)
+                return;
+            // mm/min back to mm/s for a message the user can compare against the UI, which shows
+            // every one of these settings in mm/s.
+            std::string message = Slic3r::format(_(L("Print speed setting \"%1%\" resolved to %2% (invalid); "
+                                                     "printing at %3% mm/s instead.")),
+                                                 setting, bad_value,
+                                                 std::round(substituted / 60. * 10.) / 10.);
+            if (origin.role_name != nullptr && *origin.role_name != '\0')
+                message += " " + Slic3r::format(_(L("Affected feature: %1%.")), _(origin.role_name));
+            if (origin.object_name != nullptr && *origin.object_name != '\0')
+                message += " " + Slic3r::format(_(L("Object: %1%.")), origin.object_name);
+            if (origin.layer_id >= 0)
+                message += " " + Slic3r::format(_(L("Layer: %1%.")), origin.layer_id);
+            message += "\n" + _(L("This setting should never be zero. Check it in Process settings - the printed "
+                                  "result will not match the profile."));
+            BOOST_LOG_TRIVIAL(error) << "feedrate guard: " << message;
+            print.active_step_add_warning(PrintStateBase::WarningLevel::CRITICAL, message,
+                                          PrintStateBase::SlicingInvalidPrintSpeed);
+        });
 
     // modifies m_silent_time_estimator_enabled
     DoExport::init_gcode_processor(print.config(), m_processor, m_silent_time_estimator_enabled);
@@ -8706,16 +8747,38 @@ std::string GCode::_extrude(const ExtrusionPath& path, std::string description, 
     // accelerations and jerks above. The old get_abs_value("<key>") path returned the first
     // vector slot for coFloats and hit undefined behavior for coFloatsOrPercents, which
     // produced denormal speeds and literal "G1 F0" output on internal bridges.
+    // Snapmaker (feedrate guard): which config key this role's speed was read from. Recorded so
+    // that if the value resolves to something the writer has to refuse, the resulting warning can
+    // name the ACTUAL SETTING the user has to go fix - nothing in the UI suggests any of these
+    // should ever be zero, so a message naming only the role would leave them hunting. Assigning a
+    // string literal pointer costs nothing on the valid path; it is only ever read if the guard
+    // fires.
+    const char *speed_setting = nullptr;
+    // A caller-supplied speed (skirt and brim pass support_speed explicitly, extrude_support
+    // passes -1 and resolves below) did not come from this role switch, so attribute it to the
+    // key those callers actually read rather than leaving the warning with no setting at all.
+    if (speed != -1 && (path.role() == erSkirt || path.role() == erBrim))
+        speed_setting = "support_speed";
     if (speed == -1) {
         if (path.role() == erPerimeter) {
+            speed_setting = "inner_wall_speed";
             speed = this->process_flow_value(m_config.inner_wall_speed);
             if (sloped) {
-                speed = std::min(speed, m_config.scarf_joint_speed.get_abs_value(speed));
+                const double scarf = m_config.scarf_joint_speed.get_abs_value(speed);
+                if (scarf < speed) {
+                    speed         = scarf;
+                    speed_setting = "scarf_joint_speed";
+                }
             }
         } else if (path.role() == erExternalPerimeter) {
+            speed_setting = "outer_wall_speed";
             speed = this->process_flow_value(m_config.outer_wall_speed);
             if (sloped) {
-                speed = std::min(speed, m_config.scarf_joint_speed.get_abs_value(speed));
+                const double scarf = m_config.scarf_joint_speed.get_abs_value(speed);
+                if (scarf < speed) {
+                    speed         = scarf;
+                    speed_setting = "scarf_joint_speed";
+                }
             }
         } else if (path.role() == erInternalBridgeInfill) {
             // internal_bridge_speed is a FloatOrPercent vector whose ratio_over target is
@@ -8723,31 +8786,49 @@ std::string GCode::_extrude(const ExtrusionPath& path, std::string description, 
             const auto   ib_fop  = this->process_flow_value(m_config.internal_bridge_speed);
             const double ib_base = this->process_flow_value(m_config.bridge_speed);
             speed                = ib_fop.percent ? (ib_fop.value * 0.01 * ib_base) : ib_fop.value;
+            // A percentage resolves against bridge_speed, so a zero result can be either key's
+            // fault. Name whichever one is actually bad; this is the exact pair that produced the
+            // original G1 F0.
+            speed_setting = (ib_fop.percent && !(ib_base > 0.)) ? "bridge_speed" : "internal_bridge_speed";
         } else if (path.role() == erOverhangPerimeter || path.role() == erSupportTransition || path.role() == erBridgeInfill) {
+            speed_setting = "bridge_speed";
             speed = this->process_flow_value(m_config.bridge_speed);
         } else if (path.role() == erInternalInfill) {
+            speed_setting = "sparse_infill_speed";
             speed = this->process_flow_value(m_config.sparse_infill_speed);
         } else if (path.role() == erSolidInfill) {
+            speed_setting = "internal_solid_infill_speed";
             speed = this->process_flow_value(m_config.internal_solid_infill_speed);
         } else if (path.role() == erTopSolidInfill) {
+            speed_setting = "top_surface_speed";
             speed = this->process_flow_value(m_config.top_surface_speed);
         } else if (path.role() == erIroning) {
+            speed_setting = "ironing_speed";
             speed = this->process_flow_value(m_config.ironing_speed);
         } else if (path.role() == erBottomSurface) {
+            speed_setting = "initial_layer_infill_speed";
             speed = this->process_flow_value(m_config.initial_layer_infill_speed);
         } else if (path.role() == erBottomSurfaceOverSupport || path.role() == erOverSupportPerimeter) {
             // Ultra (over-support surfaces / walls): 0 means "match the walls around this feature",
             // which is the whole point - the surface, and the wall continuing into it, should look
             // like the outer wall they are framed by, not like a bridge.
+            speed_setting = "over_support_speed";
             speed = m_config.over_support_speed.value;
-            if (speed <= 0.)
+            if (speed <= 0.) {
+                // Documented fallback, not a fault: 0 here MEANS "use the outer wall speed", so
+                // if anything is wrong it is outer_wall_speed that the user must fix.
+                speed_setting = "outer_wall_speed";
                 speed = this->process_flow_value(m_config.outer_wall_speed);
+            }
         } else if (path.role() == erGapFill) {
+            speed_setting = "gap_infill_speed";
             speed = this->process_flow_value(m_config.gap_infill_speed);
         } else if (path.role() == erSupportMaterial || path.role() == erSupportMaterialInterface) {
             const double support_speed           = this->process_flow_value(m_config.support_speed);
             const double support_interface_speed = this->process_flow_value(m_config.support_interface_speed);
-            speed                                = (path.role() == erSupportMaterial) ? support_speed : support_interface_speed;
+            const bool   is_support              = path.role() == erSupportMaterial;
+            speed_setting                        = is_support ? "support_speed" : "support_interface_speed";
+            speed                                = is_support ? support_speed : support_interface_speed;
         } else {
             throw Slic3r::InvalidArgument("Invalid speed");
         }
@@ -8756,28 +8837,47 @@ std::string GCode::_extrude(const ExtrusionPath& path, std::string description, 
     // Snapmaker: use !(speed >= eps) instead of speed == 0 so that denormals / NaN / garbage
     // from a misresolved config value also fall back to the volumetric floor instead of
     // being formatted into a literal "G1 F0". Legitimate speeds (>= ~1 mm/s) are unaffected.
-    if (!(speed >= 1e-6))
+    //
+    // Snapmaker (feedrate guard): THIS is where a zero/denormal role speed is actually absorbed -
+    // the writer-level guard downstream never sees it, because this line has already replaced it
+    // with the volumetric ceiling. That ceiling is not a neutral choice: on the g1_error.3mf
+    // bridge it is ~162 mm/s where the profile asks for 45, so a mistyped or misresolved setting
+    // silently prints ~3.6x too fast. Report it here, with the setting name, for exactly the
+    // reason the writer guard reports: the user must be told WHICH value was ignored.
+    const bool speed_was_invalid = !(speed >= 1e-6);
+    if (speed_was_invalid)
         speed = EXTRUDER_CONFIG(filament_max_volumetric_speed) / _mm3_per_mm;
     if (this->on_first_layer()) {
         // BBS: for solid infill of initial layer, speed can be higher as long as
         // wall lines have be attached
-        if (path.role() != erBottomSurface)
+        if (path.role() != erBottomSurface) {
+            // This OVERRIDES the role speed outright on the first layer, so a bad
+            // initial_layer_speed is the culprit here regardless of which role we are printing.
+            speed_setting = "initial_layer_speed";
             speed = this->process_flow_value(m_config.initial_layer_speed);
+        }
     } else if (m_config.slow_down_layers.values.front() > 1) {
         const auto _layer = layer_id();
         if (_layer > 0 && _layer < m_config.slow_down_layers.values.front()) {
-            const auto first_layer_speed = is_perimeter(path.role()) ? this->process_flow_value(m_config.initial_layer_speed) :
-                                                                       this->process_flow_value(m_config.initial_layer_infill_speed);
+            const bool perim = is_perimeter(path.role());
+            const auto first_layer_speed = perim ? this->process_flow_value(m_config.initial_layer_speed) :
+                                                   this->process_flow_value(m_config.initial_layer_infill_speed);
             if (first_layer_speed < speed) {
                 speed = std::min(speed, Slic3r::lerp(first_layer_speed, speed, (double) _layer / m_config.slow_down_layers.values.front()));
+                // The lerp floor is first_layer_speed, so if the result is unusable that key is
+                // what dragged it down.
+                if (!(speed >= 1e-6))
+                    speed_setting = perim ? "initial_layer_speed" : "initial_layer_infill_speed";
             }
         }
     }
     // Override skirt speed if set
     if (path.role() == erSkirt) {
         const double skirt_speed = m_config.get_abs_value("skirt_speed");
-        if (skirt_speed > 0.0)
+        if (skirt_speed > 0.0) {
+            speed_setting = "skirt_speed";
             speed = skirt_speed;
+        }
     }
     // BBS: remove this config
     // else if (this->object_layer_over_raft())
@@ -8883,6 +8983,31 @@ std::string GCode::_extrude(const ExtrusionPath& path, std::string description, 
     }
 
     double F = speed * 60; // convert mm/sec to mm/min
+
+    // Snapmaker (feedrate guard): hand the writer the provenance of this feedrate and the
+    // preferred substitute, so that if F turns out to be non-positive / non-finite the guard can
+    // name the offending setting in a user-visible warning instead of silently swapping in a
+    // number. Both are plain stores of values already computed above - no formatting, no
+    // allocation - so the valid path is unaffected.
+    {
+        FeedrateOrigin origin;
+        origin.setting   = speed_setting;
+        origin.role_name = ExtrusionEntity::role_to_cstr(path.role());
+        if (m_layer != nullptr && m_layer->object() != nullptr && m_layer->object()->model_object() != nullptr)
+            origin.object_name = m_layer->object()->model_object()->name.c_str();
+        origin.layer_id = this->layer_id();
+        m_writer.set_feedrate_origin(origin);
+        // Preferred fallback: this object/region's resolved outer wall speed, converted to mm/min.
+        // Resolved the same variant-aware way as every other role speed above. If it is itself
+        // unusable the writer's ladder falls through to the last valid emitted speed.
+        m_writer.set_guard_fallback_speed(this->process_flow_value(m_config.outer_wall_speed) * 60.);
+
+        // The role speed was zero/denormal/NaN and the volumetric ceiling above stood in for it.
+        // The writer guard will never fire for this path (F is now a large valid number), so
+        // raise the warning from here instead - same sink, same message, same dedupe.
+        if (speed_was_invalid)
+            m_writer.report_bad_feedrate(0., F);
+    }
 
     // ZAA (zaa_speed_scaling): emit a new feed rate for the contoured segments that follow.
     //
@@ -9458,6 +9583,12 @@ std::string GCode::_extrude(const ExtrusionPath& path, std::string description, 
     if (path.role() != ExtrusionRole::erGapFill) {
         m_last_notgapfill_extrusion_role = path.role();
     }
+
+    // Snapmaker (feedrate guard): this path's provenance stops being true once we leave it, so
+    // drop it rather than let a later travel move or custom G-code inherit it and be blamed on
+    // the wrong setting. The fallback speed is deliberately left in place - it stays a valid
+    // substitute between extrusions.
+    m_writer.clear_feedrate_origin();
 
     this->set_last_pos(path.last_point());
     return gcode;

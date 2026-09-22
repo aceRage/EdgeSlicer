@@ -167,6 +167,9 @@ public:
     int inset_idx = -1;
 
     static std::string role_to_string(ExtrusionRole role);
+    // Snapmaker (feedrate guard): role_to_string with static storage, so diagnostics can borrow
+    // the pointer rather than own a std::string. Keep in sync with role_to_string.
+    static const char *role_to_cstr(ExtrusionRole role);
     static ExtrusionRole string_to_role(const std::string_view role);
 };
 
