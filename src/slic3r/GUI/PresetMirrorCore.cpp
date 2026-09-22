@@ -1,0 +1,269 @@
+#include "PresetMirrorCore.hpp"
+
+#include <nlohmann/json.hpp>
+
+#include <algorithm>
+#include <set>
+
+using json = nlohmann::json;
+
+namespace Slic3r { namespace GUI { namespace mirror {
+
+// ---- manifest ---------------------------------------------------------------------------------
+
+std::map<std::string, Entry> parse_manifest(const std::string& json_text)
+{
+    std::map<std::string, Entry> out;
+    json j;
+    try {
+        j = json::parse(json_text);
+    } catch (...) {
+        return out;   // malformed -> behave as if empty; callers then treat every file as new
+    }
+    if (!j.is_object())
+        return out;
+
+    // Current shape { "files": { "<rel>": {"t":N,"deleted":b} } }; legacy flat shape { "<rel>": {"t":N} }.
+    const json* files = nullptr;
+    if (j.contains("files") && j["files"].is_object())
+        files = &j["files"];
+    else
+        files = &j;
+
+    for (auto it = files->begin(); it != files->end(); ++it) {
+        if (!it.value().is_object())
+            continue;
+        const json& v = it.value();
+        if (!v.contains("t"))
+            continue;
+        Entry e;
+        try {
+            if (v["t"].is_number())
+                e.t = v["t"].get<long long>();
+        } catch (...) {
+            e.t = 0;
+        }
+        try {
+            if (v.contains("deleted") && v["deleted"].is_boolean())
+                e.deleted = v["deleted"].get<bool>();
+        } catch (...) {
+            e.deleted = false;
+        }
+        out[it.key()] = e;
+    }
+    return out;
+}
+
+std::string dump_manifest(const std::map<std::string, Entry>& files)
+{
+    json j      = json::object();
+    json fj     = json::object();
+    for (const auto& kv : files)
+        fj[kv.first] = json{{"t", kv.second.t}, {"deleted", kv.second.deleted}};
+    j["files"] = fj;
+    return j.dump(1);
+}
+
+// ---- the parse guard --------------------------------------------------------------------------
+
+bool preset_is_parseable(const std::string&              json_text,
+                         const std::vector<std::string>& nullable_keys,
+                         std::string*                    reason)
+{
+    json j;
+    try {
+        j = json::parse(json_text);
+    } catch (const std::exception& e) {
+        if (reason) *reason = std::string("invalid json: ") + e.what();
+        return false;
+    }
+    if (!j.is_object()) {
+        if (reason) *reason = "top level is not an object";
+        return false;
+    }
+
+    const std::set<std::string> nullable(nullable_keys.begin(), nullable_keys.end());
+
+    for (auto it = j.begin(); it != j.end(); ++it) {
+        const std::string& key = it.key();
+        if (nullable.count(key))
+            continue;   // "nil" is a legal value for this option in this fork
+
+        // A literal "nil", either as the whole value or as one element of a per-extruder array,
+        // is what makes ConfigOption*::deserialize() throw for a non-nullable option - and that
+        // throw is what makes PresetCollection::load_presets() delete the file.
+        auto is_nil = [](const json& v) {
+            if (!v.is_string())
+                return false;
+            std::string s = v.get<std::string>();
+            // trim
+            const char* ws = " \t\r\n";
+            auto b = s.find_first_not_of(ws);
+            if (b == std::string::npos)
+                return false;
+            auto e = s.find_last_not_of(ws);
+            return s.substr(b, e - b + 1) == "nil";
+        };
+
+        if (is_nil(it.value())) {
+            if (reason) *reason = "nil value for non-nullable option '" + key + "'";
+            return false;
+        }
+        if (it.value().is_array()) {
+            for (const auto& el : it.value()) {
+                if (is_nil(el)) {
+                    if (reason) *reason = "nil element for non-nullable option '" + key + "'";
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+
+// ---- the plan ---------------------------------------------------------------------------------
+
+std::vector<PlanItem> build_plan(const SourceListing&                src,
+                                 const std::map<std::string, Entry>& manifest,
+                                 const DestState&                    dst)
+{
+    std::vector<PlanItem> plan;
+
+    // A source listing we could not trust is a strict no-op. Returning an empty plan here is the
+    // whole safety property: no Retire, no RespectDelete, nothing for a caller to act on.
+    if (!src.ok)
+        return plan;
+
+    auto dst_present = [&dst](const std::string& rel) {
+        auto it = dst.present.find(rel);
+        return it != dst.present.end() && it->second;
+    };
+
+    std::set<std::string> seen;
+
+    for (const SourceFile& f : src.files) {
+        seen.insert(f.rel);
+
+        auto mit      = manifest.find(f.rel);
+        bool tracked  = mit != manifest.end();
+        bool exists   = dst_present(f.rel);
+
+        PlanItem item;
+        item.rel = f.rel;
+        item.t   = f.t;
+
+        if (exists && !tracked) {
+            // Someone else's file at our path. We never own it, never overwrite it.
+            item.action = Action::ProtectNative;
+            item.t      = 0;
+            plan.push_back(item);
+            continue;
+        }
+
+        if (exists && tracked) {
+            if (f.t <= mit->second.t) {
+                item.action = Action::UpToDate;
+                item.t      = mit->second.t;
+            } else if (!f.parseable) {
+                // Source moved on but we still cannot read it - leave our older copy in place.
+                item.action = Action::SkipUnparseable;
+                item.t      = mit->second.t;
+            } else {
+                item.action = Action::Copy;
+            }
+            plan.push_back(item);
+            continue;
+        }
+
+        // Not on disk.
+        if (tracked && f.t <= mit->second.t) {
+            // We copied it, the user removed it, the source has not changed since: honour that.
+            item.action = Action::RespectDelete;
+            item.t      = mit->second.t;
+            plan.push_back(item);
+            continue;
+        }
+
+        // New, or the source was edited after the user deleted our copy -> (re-)pull it, but only
+        // if the fork can actually read it. Copying an unparseable preset is what triggered the
+        // loader's hard delete, so we skip instead.
+        item.action = f.parseable ? Action::Copy : Action::SkipUnparseable;
+        if (!f.parseable)
+            item.t = tracked ? mit->second.t : 0;
+        plan.push_back(item);
+    }
+
+    // Tracked entries the source no longer lists. Only reachable with src.ok == true.
+    for (const auto& kv : manifest) {
+        if (seen.count(kv.first))
+            continue;
+        if (dst_present(kv.first))
+            continue;   // still on disk though unlisted: leave it and its entry alone
+        PlanItem item;
+        item.rel    = kv.first;
+        item.action = Action::Retire;
+        item.t      = kv.second.t;
+        plan.push_back(item);
+    }
+
+    return plan;
+}
+
+std::map<std::string, Entry> apply_plan(const std::map<std::string, Entry>& manifest,
+                                        const std::vector<PlanItem>&        plan)
+{
+    std::map<std::string, Entry> out = manifest;
+    for (const PlanItem& p : plan) {
+        switch (p.action) {
+        case Action::Copy:
+            out[p.rel] = Entry{p.t, false};
+            break;
+        case Action::RespectDelete:
+            out[p.rel] = Entry{p.t, true};
+            break;
+        case Action::Retire:
+            out.erase(p.rel);
+            break;
+        case Action::UpToDate:
+        case Action::ProtectNative:
+        case Action::SkipUnparseable:
+        default:
+            break;   // manifest untouched
+        }
+    }
+    return out;
+}
+
+// ---- source directory resolution ---------------------------------------------------------------
+
+int choose_uid(const std::vector<UidCandidate>& cands, const std::string& logged_in_uid)
+{
+    auto stable = [](const UidCandidate& c) { return c.root == "BambuStudio"; };
+
+    if (!logged_in_uid.empty()) {
+        int best = -1;
+        for (size_t i = 0; i < cands.size(); ++i) {
+            if (cands[i].uid != logged_in_uid)
+                continue;
+            if (best < 0 || (stable(cands[i]) && !stable(cands[best])))
+                best = (int) i;
+        }
+        if (best >= 0)
+            return best;
+    }
+
+    int best = -1;
+    for (size_t i = 0; i < cands.size(); ++i) {
+        if (best < 0) {
+            best = (int) i;
+            continue;
+        }
+        if (cands[i].mtime > cands[best].mtime)
+            best = (int) i;
+        else if (cands[i].mtime == cands[best].mtime && stable(cands[i]) && !stable(cands[best]))
+            best = (int) i;
+    }
+    return best;
+}
+
+}}} // namespace Slic3r::GUI::mirror

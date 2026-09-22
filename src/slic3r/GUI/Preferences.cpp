@@ -4,6 +4,7 @@
 #include "MainFrame.hpp"
 #include "Plater.hpp"
 #include "MsgDialog.hpp"
+#include "PresetMirror.hpp"
 #include "I18N.hpp"
 #include "libslic3r/AppConfig.hpp"
 #include <wx/language.h>
@@ -1701,6 +1702,21 @@ wxWindow* PreferencesDialog::create_ultra_page()
         _L("Import from Bambu Studio now"),
         _L("Re-run the one-way import of your Bambu Studio custom print/filament/machine presets and refresh the lists immediately."),
         []() { wxGetApp().sync_bambu_user_presets(true); });
+    // Recovery affordance: an earlier build could delete mirrored presets it had copied (a Bambu
+    // preset the loader could not parse was removed from disk and flagged deleted in the manifest,
+    // so it was never pulled again). Clearing the flags makes the next sync restore them from
+    // Bambu Studio, which still has every one of them.
+    auto item_repull = create_item_button(_L("Re-import presets removed earlier"), _L("Re-pull all"), page,
+        _L("Re-import presets removed earlier"),
+        _L("Forget which mirrored presets were removed from this slicer, so the next import pulls them "
+           "back from Bambu Studio. Your own presets are untouched."),
+        []() {
+            int cleared = repull_mirrored_presets();
+            wxGetApp().sync_bambu_user_presets(true);
+            MessageDialog(nullptr,
+                wxString::Format(_L("Re-imported %d preset(s) that had been removed from this slicer."), cleared),
+                _L("Import from Bambu Studio"), wxICON_INFORMATION | wxOK).ShowModal();
+        });
 
     auto title_bambu = create_item_title(_L("Bambu Network"), page, _L("Bambu Network"));
     auto item_bambu_plugin = create_item_checkbox(_L("Enable Bambu network plugin"), page,
@@ -1755,6 +1771,7 @@ wxWindow* PreferencesDialog::create_ultra_page()
     sizer_page->Add(item_auto_shadow, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_sync_bambu_presets, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_sync_now, 0, wxTOP, FromDIP(3));
+    sizer_page->Add(item_repull, 0, wxTOP, FromDIP(3));
     sizer_page->Add(title_bambu, 0, wxTOP | wxEXPAND, FromDIP(20));
     sizer_page->Add(item_bambu_plugin, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_bambu_stealth, 0, wxTOP, FromDIP(3));
