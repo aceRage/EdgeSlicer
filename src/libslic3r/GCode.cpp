@@ -8424,7 +8424,7 @@ std::string GCode::extrude_support(const ExtrusionEntityCollection& support_fill
         chain_and_reorder_extrusion_entities(extrusions, &m_last_pos);
 
         const double support_speed           = this->process_flow_value(m_config.support_speed);
-        const double support_interface_speed = m_config.get_abs_value("support_interface_speed");
+        const double support_interface_speed = this->process_flow_value(m_config.support_interface_speed);
         for (const ExtrusionEntity* ee : extrusions) {
             ExtrusionRole role = ee->role();
             assert(role == erSupportMaterial || role == erSupportMaterialInterface || role == erSupportTransition || role == erIroning);
@@ -8701,61 +8701,73 @@ std::string GCode::_extrude(const ExtrusionPath& path, std::string description, 
     e_per_mm /= filament_flow_ratio;
 
     // set speed
+    // Snapmaker: all role speeds are flow-variant vector options (coFloats / coFloatsOrPercents)
+    // since the High-Flow change; resolve them variant-aware via process_flow_value like the
+    // accelerations and jerks above. The old get_abs_value("<key>") path returned the first
+    // vector slot for coFloats and hit undefined behavior for coFloatsOrPercents, which
+    // produced denormal speeds and literal "G1 F0" output on internal bridges.
     if (speed == -1) {
         if (path.role() == erPerimeter) {
-            speed = m_config.get_abs_value("inner_wall_speed");
+            speed = this->process_flow_value(m_config.inner_wall_speed);
             if (sloped) {
-                speed = std::min(speed, m_config.scarf_joint_speed.get_abs_value(m_config.get_abs_value("inner_wall_speed")));
+                speed = std::min(speed, m_config.scarf_joint_speed.get_abs_value(speed));
             }
         } else if (path.role() == erExternalPerimeter) {
-            speed = m_config.get_abs_value("outer_wall_speed");
+            speed = this->process_flow_value(m_config.outer_wall_speed);
             if (sloped) {
-                speed = std::min(speed, m_config.scarf_joint_speed.get_abs_value(m_config.get_abs_value("outer_wall_speed")));
+                speed = std::min(speed, m_config.scarf_joint_speed.get_abs_value(speed));
             }
         } else if (path.role() == erInternalBridgeInfill) {
-            speed = m_config.get_abs_value("internal_bridge_speed");
+            // internal_bridge_speed is a FloatOrPercent vector whose ratio_over target is
+            // bridge_speed; resolve the percentage against the variant-matched bridge_speed.
+            const auto   ib_fop  = this->process_flow_value(m_config.internal_bridge_speed);
+            const double ib_base = this->process_flow_value(m_config.bridge_speed);
+            speed                = ib_fop.percent ? (ib_fop.value * 0.01 * ib_base) : ib_fop.value;
         } else if (path.role() == erOverhangPerimeter || path.role() == erSupportTransition || path.role() == erBridgeInfill) {
-            speed = m_config.get_abs_value("bridge_speed");
+            speed = this->process_flow_value(m_config.bridge_speed);
         } else if (path.role() == erInternalInfill) {
-            speed = m_config.get_abs_value("sparse_infill_speed");
+            speed = this->process_flow_value(m_config.sparse_infill_speed);
         } else if (path.role() == erSolidInfill) {
-            speed = m_config.get_abs_value("internal_solid_infill_speed");
+            speed = this->process_flow_value(m_config.internal_solid_infill_speed);
         } else if (path.role() == erTopSolidInfill) {
-            speed = m_config.get_abs_value("top_surface_speed");
+            speed = this->process_flow_value(m_config.top_surface_speed);
         } else if (path.role() == erIroning) {
-            speed = m_config.get_abs_value("ironing_speed");
+            speed = this->process_flow_value(m_config.ironing_speed);
         } else if (path.role() == erBottomSurface) {
-            speed = m_config.get_abs_value("initial_layer_infill_speed");
+            speed = this->process_flow_value(m_config.initial_layer_infill_speed);
         } else if (path.role() == erBottomSurfaceOverSupport || path.role() == erOverSupportPerimeter) {
             // Ultra (over-support surfaces / walls): 0 means "match the walls around this feature",
             // which is the whole point - the surface, and the wall continuing into it, should look
             // like the outer wall they are framed by, not like a bridge.
             speed = m_config.over_support_speed.value;
             if (speed <= 0.)
-                speed = m_config.get_abs_value("outer_wall_speed");
+                speed = this->process_flow_value(m_config.outer_wall_speed);
         } else if (path.role() == erGapFill) {
-            speed = m_config.get_abs_value("gap_infill_speed");
+            speed = this->process_flow_value(m_config.gap_infill_speed);
         } else if (path.role() == erSupportMaterial || path.role() == erSupportMaterialInterface) {
             const double support_speed           = this->process_flow_value(m_config.support_speed);
-            const double support_interface_speed = m_config.get_abs_value("support_interface_speed");
+            const double support_interface_speed = this->process_flow_value(m_config.support_interface_speed);
             speed                                = (path.role() == erSupportMaterial) ? support_speed : support_interface_speed;
         } else {
             throw Slic3r::InvalidArgument("Invalid speed");
         }
     }
-    // BBS: if not set the speed, then use the filament_max_volumetric_speed directly
-    if (speed == 0)
+    // BBS: if not set the speed, then use the filament_max_volumetric_speed directly.
+    // Snapmaker: use !(speed >= eps) instead of speed == 0 so that denormals / NaN / garbage
+    // from a misresolved config value also fall back to the volumetric floor instead of
+    // being formatted into a literal "G1 F0". Legitimate speeds (>= ~1 mm/s) are unaffected.
+    if (!(speed >= 1e-6))
         speed = EXTRUDER_CONFIG(filament_max_volumetric_speed) / _mm3_per_mm;
     if (this->on_first_layer()) {
         // BBS: for solid infill of initial layer, speed can be higher as long as
         // wall lines have be attached
         if (path.role() != erBottomSurface)
-            speed = m_config.get_abs_value("initial_layer_speed");
+            speed = this->process_flow_value(m_config.initial_layer_speed);
     } else if (m_config.slow_down_layers.values.front() > 1) {
         const auto _layer = layer_id();
         if (_layer > 0 && _layer < m_config.slow_down_layers.values.front()) {
-            const auto first_layer_speed = is_perimeter(path.role()) ? m_config.get_abs_value("initial_layer_speed") :
-                                                                       m_config.get_abs_value("initial_layer_infill_speed");
+            const auto first_layer_speed = is_perimeter(path.role()) ? this->process_flow_value(m_config.initial_layer_speed) :
+                                                                       this->process_flow_value(m_config.initial_layer_infill_speed);
             if (first_layer_speed < speed) {
                 speed = std::min(speed, Slic3r::lerp(first_layer_speed, speed, (double) _layer / m_config.slow_down_layers.values.front()));
             }

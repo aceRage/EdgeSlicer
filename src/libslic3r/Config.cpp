@@ -724,6 +724,23 @@ double ConfigBase::get_abs_value(const t_config_option_key &opt_key) const
         if (!floats->values.empty())
             return floats->values.front();
     }
+    // Snapmaker: flow-variant percentage options (e.g. internal_bridge_speed).
+    // Resolve the first variant over the option's ratio_over target, mirroring the
+    // coFloatOrPercent path below. This must NOT fall through to the scalar
+    // ConfigOptionFloatOrPercent cast, which would reinterpret the vector's storage
+    // as a scalar and read a garbage (denormal) double - the root cause of the
+    // "Invalid speed in 'G1 F0'" failures from internal_bridge_speed.
+    if (raw_opt->type() == coFloatsOrPercents) {
+        const auto *floats_percents = static_cast<const ConfigOptionFloatsOrPercents*>(raw_opt);
+        if (!floats_percents->values.empty()) {
+            const FloatOrPercent &front = floats_percents->values.front();
+            if (! front.percent)
+                return front.value;
+            const ConfigOptionDef *opt_def = this->def() ? this->def()->get(opt_key) : nullptr;
+            if (opt_def != nullptr && ! opt_def->ratio_over.empty())
+                return front.value * this->get_abs_value(opt_def->ratio_over) / 100;
+        }
+    }
 
     const ConfigOptionPercent *cast_opt = nullptr;
     if (raw_opt->type() == coFloatOrPercent) {
@@ -748,16 +765,20 @@ double ConfigBase::get_abs_value(const t_config_option_key &opt_key) const
 
 
     assert(opt_def != nullptr);
+    if (cast_opt == nullptr) {
+        // Unhandled option type (or an empty vector) reached this point. Never
+        // reinterpret raw_opt as ConfigOptionFloatOrPercent - that reads garbage
+        // memory. Log and fail safe with a zero instead.
+        std::cerr << "ConfigBase::get_abs_value(" << opt_key << "): unsupported option type "
+                  << raw_opt->type() << ", returning 0" << std::endl;
+        return 0.;
+    }
     if (opt_def->ratio_over == "")
         return cast_opt->get_abs_value(1);
     // Compute absolute value over the absolute value of the base option.
     //FIXME there are some ratio_over chains, which end with empty ratio_with.
     // For example, XXX_extrusion_width parameters are not handled by get_abs_value correctly.
-    return opt_def->ratio_over.empty() ? 0. :
-        static_cast<const ConfigOptionFloatOrPercent*>(raw_opt)->get_abs_value(this->get_abs_value(opt_def->ratio_over));
-    
-
-    throw ConfigurationError("ConfigBase::get_abs_value(): Not a valid option type for get_abs_value()");
+    return cast_opt->get_abs_value(this->get_abs_value(opt_def->ratio_over));
 }
 
 // Return an absolute value of a possibly relative config variable.
