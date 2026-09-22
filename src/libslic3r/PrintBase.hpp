@@ -99,7 +99,13 @@ public:
         // The modifier found no parent part at all - no MODEL_PART's extruded bounding box
         // intersects it in any layer range it spans - so no region was ever built for it and its
         // geometry never reaches the slice.
-        SlicingModifierNoParent
+        SlicingModifierNoParent,
+        // Snapmaker (feedrate guard): a print speed setting resolved to a non-positive or
+        // non-finite value, so the G-code writer refused it and substituted a safe speed. Its own
+        // id for the usual reason (active_step_add_warning de-duplicates by id), and critically so
+        // that the CLI's result.json filter - which drops anything left on
+        // SlicingDefaultNotification - actually reports it. Appended, so no existing value moves.
+        SlicingInvalidPrintSpeed
     };
 
     typedef size_t TimeStamp;

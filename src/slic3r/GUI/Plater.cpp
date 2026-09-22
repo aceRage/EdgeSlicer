@@ -16029,7 +16029,13 @@ void Plater::priv::on_slicing_update(SlicingStatusEvent &evt)
         for (auto const& warning : state.warnings) {
             if (warning.current) {
                 NotificationManager::NotificationLevel notif_level = NotificationManager::NotificationLevel::WarningNotificationLevel;
-                if (evt.status.message_type == PrintStateBase::SlicingNotificationType::SlicingReplaceInitEmptyLayers || evt.status.message_type == PrintStateBase::SlicingNotificationType::SlicingEmptyGcodeLayers) {
+                if (evt.status.message_type == PrintStateBase::SlicingNotificationType::SlicingReplaceInitEmptyLayers || evt.status.message_type == PrintStateBase::SlicingNotificationType::SlicingEmptyGcodeLayers
+                    // Snapmaker (feedrate guard): a print speed setting resolved to something the
+                    // G-code writer had to refuse. The notification LEVEL here is chosen by
+                    // message_type, not by the warning's own WarningLevel::CRITICAL, so without
+                    // this line the message would render as an ordinary dismissible warning - the
+                    // exact 'easy to miss' failure this change exists to fix.
+                    || evt.status.message_type == PrintStateBase::SlicingNotificationType::SlicingInvalidPrintSpeed) {
                     notif_level = NotificationManager::NotificationLevel::SeriousWarningNotificationLevel;
                 }
                 notification_manager->push_slicing_warning_notification(warning.message, false, model_object, object_id, warning_step, warning.message_id, notif_level);

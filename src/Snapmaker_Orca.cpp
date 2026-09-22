@@ -6068,6 +6068,33 @@ int CLI::run(int argc, char **argv)
                                     outfile = print_fff->export_gcode(outfile, gcode_result, nullptr);
                                     time_using_cache = time_using_cache + ((long long)Slic3r::Utils::get_current_time_utc() - temp_time);
                                     BOOST_LOG_TRIVIAL(info) << "export_gcode finished: time_using_cache update to " << time_using_cache << " secs.";
+
+                                    // Snapmaker (feedrate guard): warnings raised DURING G-code
+                                    // generation - the feedrate guard's among them - arrive after
+                                    // the g_slicing_warnings sweep above, which runs before this
+                                    // export call. Without this second check they would be
+                                    // recorded and then silently dropped, and a CI slice with an
+                                    // invalid print speed would exit 0. CI and scripted slicing
+                                    // have no notification UI at all, so this is the only place
+                                    // the message can reach them.
+                                    for (unsigned int i = 0; i < g_slicing_warnings.size(); i++) {
+                                        PrintBase::SlicingStatus& status = g_slicing_warnings[i];
+                                        if (status.warning_step == -1 ||
+                                            status.message_type != PrintStateBase::SlicingInvalidPrintSpeed)
+                                            continue;
+                                        sliced_plate_info.warning_message = status.text;
+                                        sliced_plate_info.warnings.push_back(status.text);
+                                        cli_record_warning(sliced_info, "invalid_print_speed",
+                                                           nlohmann::json{{"plate_id", index+1}, {"text", status.text}});
+                                        // Straight to stderr: a scripted consumer reading only the
+                                        // process output still sees exactly which setting is bad.
+                                        boost::nowide::cerr << "ERROR: plate " << (index+1) << ": " << status.text << std::endl;
+                                        boost::nowide::cerr.flush();
+                                        BOOST_LOG_TRIVIAL(error) << "plate " << index+1 << ": invalid print speed: " << status.text;
+                                        sliced_info.sliced_plates.push_back(sliced_plate_info);
+                                        record_exit_reson(outfile_dir, CLI_SLICING_ERROR, index+1, cli_errors[CLI_SLICING_ERROR], sliced_info);
+                                        flush_and_exit(CLI_SLICING_ERROR);
+                                    }
                                     // Ultra: estimates for result.json
                                     sliced_plate_info.gcode_path = outfile;
                                     if (gcode_result) {
