@@ -2560,7 +2560,18 @@ bool PresetBundle::check_filament_temp_equation_by_printer_type_and_nozzle_for_m
     std::map<std::string, std::vector<Preset const *>> filament_list = filaments.get_filament_presets();
     std::set<std::string> printer_names       = get_printer_names_by_printer_type_and_nozzle(printer_type, nozzle_diameter_str);
 
-    for (const Preset *preset : filament_list.find(setting_id)->second) {
+    // The caller (MachineObject::check_ams_filament_valid) only asks about filament ids its own
+    // snapshot of user presets knew about, but that snapshot is refreshed on the next status push,
+    // not when a user preset is deleted, renamed away, removed by logout/cloud sync or quarantined
+    // on reload. Dereferencing end() here was undefined behaviour (garbage vector in Release).
+    // Nothing to compare against means nothing to reset on the printer: report "unchanged".
+    auto filament_it = filament_list.find(setting_id);
+    if (filament_it == filament_list.end()) {
+        BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << " " << __LINE__ << " no filament preset with filament_id: " << setting_id << ", skip temp check";
+        return is_equation;
+    }
+
+    for (const Preset *preset : filament_it->second) {
         if (tag_uid == "0" || (tag_uid.size() == 16 && tag_uid.substr(12, 2) == "01")) continue;
         if (preset && !preset->is_user()) continue;
         ConfigOption *       printer_opt  = const_cast<Preset *>(preset)->config.option("compatible_printers");
