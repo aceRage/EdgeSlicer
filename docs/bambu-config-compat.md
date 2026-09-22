@@ -17,8 +17,9 @@ literal string `"nil"` into the slots of extruders the setting does not apply to
 "top_surface_acceleration": ["100", "nil", "100", "nil", "nil"]
 ```
 
-This fork types many of the same options as **scalars**, and others as **plain, non-nullable
-vectors**. Either way `ConfigOption*::deserialize()` throws
+This fork types a few of the same options as **scalars**, and the rest as **plain,
+non-nullable vectors** (since the High-Flow work, c3c82dbf64, that includes most of the speed and
+acceleration family). Either way `ConfigOption*::deserialize()` throws
 
 ```
 Deserializing nil into a non-nullable object
@@ -39,7 +40,9 @@ zero. (A zero Bambu genuinely wrote is preserved as-is; several options use `0` 
 
 ## Measured impact on the owner's data
 
-Scan of 275 presets copied from `%APPDATA%/BambuStudio/user/<id>/`:
+Scan of 275 presets copied from `%APPDATA%/BambuStudio/user/<id>/` (2026-09-21, before the
+High-Flow retype; the totals still hold, but most of what was then a scalar collapse is now a
+vector backfill - see table A):
 
 | measure | count |
 |---|---|
@@ -61,56 +64,47 @@ before any deserialize happens. They are not part of the problem and need no tra
 
 ## Inventory
 
-### A. Fork SCALAR / Bambu VECTOR (32)
+### A. Fork SCALAR / Bambu VECTOR (6)
 
 These are the per-extruder vectorization gap. Bambu can write a `nil` in any of them.
 Translation: strip `nil`, then collapse to a single value.
 
 | option | fork type | Bambu type |
 |---|---|---|
-| `bridge_speed` | `coFloat` | `coFloats` |
-| `default_acceleration` | `coFloat` | `coFloats` |
-| `enable_overhang_speed` | `coBool` | `coBools` |
 | `filament_extruder_id` | `coInt` | `coInts` |
 | `flush_multiplier` | `coFloat` | `coFloats` |
-| `gap_infill_speed` | `coFloat` | `coFloats` |
-| `initial_layer_acceleration` | `coFloat` | `coFloats` |
-| `initial_layer_infill_speed` | `coFloat` | `coFloats` |
-| `initial_layer_speed` | `coFloat` | `coFloats` |
-| `inner_wall_acceleration` | `coFloat` | `coFloats` |
-| `inner_wall_speed` | `coFloat` | `coFloats` |
-| `internal_solid_infill_speed` | `coFloat` | `coFloats` |
 | `nozzle_type` | `coEnum` | `coEnums` |
 | `nozzle_volume` | `coFloat` | `coFloats` |
-| `outer_wall_acceleration` | `coFloat` | `coFloats` |
-| `outer_wall_speed` | `coFloat` | `coFloats` |
-| `overhang_1_4_speed` | `coFloatOrPercent` | `coFloats` |
-| `overhang_2_4_speed` | `coFloatOrPercent` | `coFloats` |
-| `overhang_3_4_speed` | `coFloatOrPercent` | `coFloats` |
-| `overhang_4_4_speed` | `coFloatOrPercent` | `coFloats` |
-| `small_perimeter_speed` | `coFloatOrPercent` | `coFloatsOrPercents` |
-| `small_perimeter_threshold` | `coFloat` | `coFloats` |
-| `sparse_infill_acceleration` | `coFloatOrPercent` | `coFloatsOrPercents` |
-| `sparse_infill_speed` | `coFloat` | `coFloats` |
-| `support_interface_speed` | `coFloat` | `coFloats` |
-| `support_speed` | `coFloat` | `coFloats` |
 | `top_solid_infill_flow_ratio` | `coFloat` | `coFloats` |
-| `top_surface_acceleration` | `coFloat` | `coFloats` |
-| `top_surface_speed` | `coFloat` | `coFloats` |
-| `travel_acceleration` | `coFloat` | `coFloats` |
-| `travel_speed` | `coFloat` | `coFloats` |
 | `travel_speed_z` | `coFloat` | `coFloats` |
 
-The four `overhang_N_4_speed` rows are a **double** mismatch: scalar-vs-vector *and*
-`FloatOrPercent`-vs-plain-`Float`. A Bambu value of `"50"` means 50 mm/s in both, so the arity fix
-is enough in practice; a fork-side percent has no Bambu equivalent and is a fork-only extension.
+Until 2026-09-21 this table had 32 rows. The High-Flow work (c3c82dbf64) retyped the other 26 to
+per-flow-variant vectors, and 22 of them now have **exactly** Bambu's type, so they left the
+mismatch list altogether: `bridge_speed`, `default_acceleration`, `enable_overhang_speed`,
+`gap_infill_speed`, `initial_layer_acceleration`, `initial_layer_infill_speed`,
+`initial_layer_speed`, `inner_wall_acceleration`, `inner_wall_speed`,
+`internal_solid_infill_speed`, `outer_wall_acceleration`, `outer_wall_speed`,
+`small_perimeter_speed`, `small_perimeter_threshold`, `sparse_infill_acceleration`,
+`sparse_infill_speed`, `support_interface_speed`, `support_speed`, `top_surface_acceleration`,
+`top_surface_speed`, `travel_acceleration`, `travel_speed`. The four `overhang_N_4_speed` rows
+moved to table C (arity now matches, base type does not). A `nil` in any of the 26 takes the
+backfill path - see table D2.
 
-### A2. Fork VECTOR / Bambu SCALAR (2)
+### A2. Fork VECTOR / Bambu SCALAR (12)
 
 | option | fork type | Bambu type | note |
 |---|---|---|---|
 | `filament_notes` | `coStrings` | `coString` | harmless: a scalar string deserializes into a 1-element vector |
 | `scale` | `coStrings` | `coFloat` | artefact of a **duplicate declaration** in this fork, see below |
+| `ironing_speed` | `coFloats` | `coFloat` | High-Flow retype; harmless, see below |
+| `default_jerk`, `outer_wall_jerk`, `inner_wall_jerk`, `infill_jerk`, `top_surface_jerk`, `initial_layer_jerk`, `travel_jerk` | `coFloats` | `coFloat` | High-Flow retype; harmless |
+| `accel_to_decel_enable` | `coBools` | `coBool` | High-Flow retype; harmless |
+| `accel_to_decel_factor` | `coPercents` | `coPercent` | High-Flow retype; harmless |
+
+The High-Flow rows are harmless for the same reason as `filament_notes`: Bambu writes a scalar,
+which deserializes into a 1-element vector, and `Preset::normalize` grows it to the length of
+`process_flow_support`. Bambu never writes `nil` into a scalar, so none of them reaches the
+translation.
 
 ### B. Nullable-axis mismatches on shared keys: **none**
 
@@ -151,9 +145,18 @@ they are silent precision/semantics differences.
 | `top_surface_line_width` | `coFloatOrPercent` | `coFloat` |
 | `seam_gap` | `coFloatOrPercent` | `coPercent` |
 | `wipe_speed` | `coFloatOrPercent` | `coPercent` |
+| `overhang_1_4_speed` | `coFloatsOrPercents` | `coFloats` |
+| `overhang_2_4_speed` | `coFloatsOrPercents` | `coFloats` |
+| `overhang_3_4_speed` | `coFloatsOrPercents` | `coFloats` |
+| `overhang_4_4_speed` | `coFloatsOrPercents` | `coFloats` |
 
 `coFloats` reading a Bambu `coInts` value is safe (widening). The `coFloatOrPercent` rows are a
 fork superset: the fork accepts everything Bambu writes plus a percent form.
+
+The four `overhang_N_4_speed` rows used to be a double mismatch (scalar-vs-vector as well). Since
+the High-Flow retype only the base type differs: a Bambu value of `"50"` means 50 mm/s on both
+sides, and a fork-side percent has no Bambu equivalent (a fork-only extension). Unlike the rest of
+this table they **can** carry a `nil` - they are vectors - and take the backfill path (table D2).
 
 ### D. Non-nullable vectors that can still receive a `nil`
 
@@ -173,14 +176,58 @@ Not a *type* mismatch - both sides call these vectors - but the fork's is not nu
 These must **not** be collapsed to a scalar - that would destroy per-extruder indexing. They are
 backfilled instead, preserving the slot count.
 
+### D2. Per-flow-variant vectors (the High-Flow retype)
+
+The 26 options that left table A are now non-nullable vectors listed in
+`process_flow_variant_options()` (`PrintConfig.cpp`), so a Bambu `nil` in them is **backfilled**,
+not collapsed: `["200","nil","200","nil","160"]` loads as `200,200,200,200,160`, where it used to
+load as the scalar `200`.
+
+This was checked against how the slicer reads them, because the two sides index these vectors
+differently:
+
+- **Bambu** writes one slot per *extruder variant* - `print_extruder_variant`, 4 entries in
+  `fdm_process_dual_common.json`, 5-7 in the H2D/H2C process presets
+  (`Direct Drive Standard`, `Direct Drive High Flow`, ... per extruder).
+- **This fork** reads one slot per *flow variant*: `get_config_idx(config, ConfigFlowDomain::Process, ...)`
+  looks the filament's flow type up in `process_flow_support` (default `["standard"]`; an unknown
+  type resolves to 0). A Bambu preset carries no `process_flow_support`, so every read resolves to
+  **slot 0**, for standard and high-flow filaments alike.
+- `print_extruder_variant` / `print_extruder_id` are declared here but nothing indexes by them.
+
+Consequences:
+
+1. **The value the slicer uses is Bambu's slot 0** - extruder 1, Direct Drive Standard - which is
+   what Bambu Studio itself prints with on that nozzle. Where slot 0 differs from the majority this
+   is a *change* from the old collapse, and a more faithful one: `support_interface_speed`
+   `30,50,nil,50,nil` (in the 43-preset corpus) now slices at 30 (was 50), and
+   `outer_wall_acceleration` `3000,2000,nil,2000,nil` (fixture `0.30mm @H2D - Custom ASA`) at 3000
+   (was 2000).
+2. **Keeping the full slot count is right.** `Preset::normalize` only ever *grows* a flow-variant
+   vector to the length of `process_flow_support`; it never truncates, and the extra slots are
+   inert. The fork's own shipped BBL H2D/H2C system profiles already load with the same 5-7 slot
+   layout, so a translated Bambu user preset has the same shape as its system parent.
+   Collapsing to one slot would make it differ from that parent in every such key.
+3. **Slots 0 and 1 line up.** If a high-flow column is ever added to such a preset
+   (`process_flow_support = ["standard","high_flow"]`), a high-flow filament reads slot 1, which is
+   Bambu's `Direct Drive High Flow` on extruder 1. Slots 2+ (extruder 2, TPU) are never read.
+4. A nil in slot 0 is filled from the first real value after it, so the value the slicer reads is
+   never invented: it is always a value Bambu wrote for some variant.
+
+`tests/slic3rutils/bambu_config_compat_tests.cpp` pins all of this end-to-end ("a backfilled Bambu
+vector is read at the slot the slicer uses").
+
 ### Incidental findings
 
-The fork declares two keys **twice, with different types**; the later declaration wins at runtime
-and the earlier one is dead code. Bambu declares each once.
+The fork declares some keys **twice**; the later declaration wins at runtime and the earlier one
+is dead code. Bambu declares each once.
 
-- `downward_check` - `coStrings` at `PrintConfig.cpp:9533`, then `coBool` at `:9850`.
-- `scale` - `coFloat` at `:9772`, then `coStrings` at `:10258`. This redeclaration is the only
-  reason `scale` appears in table A2 above.
+- `scale` - `coFloat` at `PrintConfig.cpp:10115`, then `coStrings` at `:10601`. This redeclaration
+  is the only reason `scale` appears in table A2 above.
+- `outer_wall_acceleration` - `coFloats` at `:3037` and again at `:3069` (same type; the second
+  one's default of 500 wins over the first one's 10000). Predates the High-Flow retype, which
+  converted both.
+- `downward_check` (formerly `coStrings`, then `coBool`) is now declared once.
 
 Neither is caused by this change; both are worth cleaning up separately.
 
@@ -191,9 +238,9 @@ Lives in `src/libslic3r/BambuConfigCompat.{hpp,cpp}`, called from
 
 ### Why there
 
-`PrintConfigDef::handle_legacy(opt_key, value)` (`PrintConfig.cpp:8508`) looks like the natural
+`PrintConfigDef::handle_legacy(opt_key, value)` (`PrintConfig.cpp` ~8857) looks like the natural
 hook - it takes both key and value by reference and already rewrites both. It is not usable for
-this, because on the **array** path (`Config.cpp:576` scalar / `Config.cpp:1045` array) it is
+this, because on the **array** path (`Config.cpp` ~598 scalar / ~1105 array) it is
 called *before* `value_str` is assembled from the array elements (assembly happens ~30 lines
 later). At that point `value` is still empty, so a value-rewriting translation there has nothing
 to rewrite.
@@ -203,7 +250,7 @@ then the elements have been joined into a single comma-separated string, so the 
 have to re-split it, and `handle_legacy` has no access to the `ConfigOptionDef` it needs to know
 whether the target is a scalar, a vector, or nullable.
 
-The chosen site is the existing collapse block at `Config.cpp` ~1096, where `array_values` is
+The chosen site is the existing collapse block at `Config.cpp` ~1163, where `array_values` is
 still a `std::vector<std::string>` and `optdef` is in hand. That block already collapsed
 single-element and all-equal arrays for scalar targets; the `nil` translation runs just before it
 and sets a flag so the two do not both fire.
@@ -266,7 +313,11 @@ Retyping a scalar to a vector to match upstream is the cleaner long-term answer 
 acceleration families - it would make the fork's model match the hardware (H2D/H2C really do have
 per-extruder speeds) and remove the lossy class entirely.
 
-**It is not done here, and should not be done casually.** The High-Flow retype of
+**Update (2026-09-22):** the High-Flow work (c3c82dbf64) has since done this for 26 of the 32
+options, as per-flow-variant vectors (table D2). The six left in table A are the ones that remain
+scalar. The advice below still applies to them.
+
+**It was not done as part of this change, and should not be done casually.** The High-Flow retype of
 `internal_bridge_speed` from a scalar to a vector is precisely what produced this week's `G1 F0`
 outage: every read site has to be audited, because a `coFloat` read as `opt->value` silently
 becomes `opt->values[idx]` with a different default and a different empty-vector behaviour.
@@ -277,29 +328,32 @@ If it is attempted later, the cost per option is roughly:
 - profile migration for every shipped profile that sets the option as a scalar
 - a regression test asserting the option is non-zero at the G-code writer
 
-`travel_speed`, `default_acceleration` and the `overhang_N_4_speed` family are the best candidates
-(few read sites, genuinely per-extruder in hardware). `small_perimeter_threshold` and
-`top_solid_infill_flow_ratio` are the worst (widely read, rarely differ per extruder). Doing them
+Of the six left, `travel_speed_z` is the best candidate (few read sites) and
+`top_solid_infill_flow_ratio` the worst (widely read, rarely differs per extruder). Doing them
 one at a time, each with its own gate, is the only safe route.
 
 ## Tests
 
 `tests/slic3rutils/bambu_config_compat_tests.cpp`, tag `[BambuCompat]`. Covers each rule in the
-table above, an all-nil array, an untouched nullable option, and a regression asserting that no
-translation ever yields `0` for a speed or acceleration while a zero Bambu really wrote is
-preserved. Fixtures in `tests/data/bambu_compat/` and `tests/data/bambu_compat_43/` are copies of
-real presets from the owner's Bambu Studio data; nothing reads the live folder at test time.
+table above on both paths - the collapse path on a key picked at run time from table A that must
+still be scalar (so a future retype fails loudly instead of silently testing a vector), and the
+backfill path on the retyped keys - plus an all-nil array, an untouched nullable option, a
+regression asserting that no translation ever yields `0` for a speed or acceleration while a zero
+Bambu really wrote is preserved, and an end-to-end check that a translated H2D preset is read at
+slot 0 for standard and high-flow filaments. Fixtures in `tests/data/bambu_compat/` and
+`tests/data/bambu_compat_43/` are copies of real presets from the owner's Bambu Studio data;
+nothing reads the live folder at test time.
 
 ### Verified results
 
-`[BambuCompat]`: 18 test cases, 296 assertions, all passing.
+Re-verified 2026-09-22 on `fix/bambu-compat-tests` (main 0ebb94d331 plus test changes only):
 
-Full suites after the change:
+`[BambuCompat]`: 27 test cases, 962 assertions, all passing.
 
-| suite | result |
-|---|---|
-| `slic3rutils_tests` | 231 cases, 230 passed, 1 failed - the pre-existing `[NotWorking]` Http basic-auth test (`slic3rutils_tests_main.cpp:58`, external service returns 403) |
-| `libslic3r_tests` | 1184 cases, 1181 passed, 3 failed **as expected** (pre-existing `[!shouldfail]`) |
+`slic3rutils_tests` (default run, as ctest runs it): 255 test cases, 3522 assertions, all passing. The three `[Http]`
+cases that talk to github.com and jigsaw.w3.org are hidden (`[.network]`): jigsaw.w3.org's
+`/HTTP/Basic/` answers 403 to every client now, plain curl included, so it failed on every machine
+without saying anything about this code. Run them on purpose with `slic3rutils_tests "[network]"`.
 
 The 43 presets named in `2026-09-21-16-52-41.log.0` as `parse config ... failed`, run through the
 fork's own `load_from_json`:
@@ -310,19 +364,20 @@ fork's own `load_from_json`:
 | still fail | 0 |
 | load with at least one lossy value | 2 |
 | total lossy values | 4 |
+| nil arrays translated, all via backfill (no scalar collapse left in this corpus) | 389 |
 
-The four lossy values, all of them `CollapsedLossy` on an H2D preset where the second nozzle
-genuinely differs:
+The four lossy values, all `BackfilledLossy` on an H2D preset where the second nozzle genuinely
+differs (before the High-Flow retype they were `CollapsedLossy` to 100, 100, 100 and 50):
 
 ```
-0.20mm @H2D - ABS.json     inner_wall_speed            100,nil,100,nil,150 -> 100
-0.20mm @H2D - ABS.json     internal_solid_infill_speed 100,nil,100,nil,180 -> 100
-0.20mm @H2D - ABS.json     sparse_infill_speed         100,nil,100,nil,180 -> 100
-0.30mm @H2D - Custom.json  support_interface_speed     30,50,nil,50,nil    -> 50
+0.20mm @H2D - ABS.json     inner_wall_speed            100,nil,100,nil,150 -> 100,100,100,100,150
+0.20mm @H2D - ABS.json     internal_solid_infill_speed 100,nil,100,nil,180 -> 100,100,100,100,180
+0.20mm @H2D - ABS.json     sparse_infill_speed         100,nil,100,nil,180 -> 100,100,100,100,180
+0.30mm @H2D - Custom.json  support_interface_speed     30,50,nil,50,nil    -> 30,50,50,50,50
 ```
 
-The last one shows the majority rule working as intended: `50` occupies two slots and wins over
-the first slot's `30`.
+No real value is lost any more: only the `nil` slots are guesses. The slicer reads slot 0, so the
+last one now slices at 30 (Bambu's extruder-1 standard value) rather than the old majority 50.
 
 ## Note for other work in flight
 

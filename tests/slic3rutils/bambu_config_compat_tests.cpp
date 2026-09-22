@@ -3,6 +3,7 @@
 #include "libslic3r/BambuConfigCompat.hpp"
 #include "libslic3r/Config.hpp"
 #include "libslic3r/PrintConfig.hpp"
+#include "libslic3r/Preset.hpp"
 
 #include <boost/filesystem.hpp>
 #include <fstream>
@@ -15,8 +16,9 @@ using namespace Slic3r;
 using namespace Slic3r::BambuConfigCompat;
 
 // Bambu Studio writes a literal "nil" into the per-extruder slots a setting does not apply to.
-// This fork types many of those options as scalars, or as plain non-nullable vectors, so the
-// value has to be translated before it reaches deserialize() - otherwise the option throws and
+// This fork types some of those options as scalars and many as plain non-nullable vectors (most
+// of the speed / acceleration family became per-flow-variant vectors with the High-Flow work),
+// so the value has to be translated before it reaches deserialize() - otherwise the option throws and
 // PresetCollection::load_presets deletes the user's preset file.
 //
 // The rule these tests exist to protect: a nil slot means "not applicable", never zero. A speed
@@ -45,35 +47,68 @@ TEST_CASE("has_nil spots the Bambu not-applicable marker", "[BambuCompat]")
     CHECK_FALSE(has_nil(V({"nil_", "0nil"})));
 }
 
+// ---------------------------------------------------------------------------------------------
+// Scalar targets: the COLLAPSE path.
+//
+// The High-Flow work (c3c82dbf64) retyped most of the speed / acceleration family to per-flow-
+// variant vectors, so those keys now take the backfill path below. The collapse path is still
+// live for the options that remain scalar here but are per-extruder vectors in Bambu Studio
+// (docs/bambu-config-compat.md, table A). The key is picked from that list at run time and must
+// still be scalar, so a future retype fails here loudly instead of silently testing a vector.
+// ---------------------------------------------------------------------------------------------
+static const ConfigOptionDef* live_scalar_float_key()
+{
+    // Bambu: coFloats. Here: coFloat. Any one of them exercises the same collapse code.
+    for (const char *key : { "travel_speed_z", "top_solid_infill_flow_ratio", "nozzle_volume", "flush_multiplier" }) {
+        const ConfigOptionDef *def = def_of(key);
+        if (def != nullptr && def->is_scalar() && def->type == coFloat && ! def->nullable)
+            return def;
+    }
+    return nullptr;
+}
+
+TEST_CASE("the collapse path still has a live scalar key to protect", "[BambuCompat]")
+{
+    const ConfigOptionDef *def = live_scalar_float_key();
+    INFO("every table-A float key has been retyped to a vector: move the collapse tests to a new "
+         "scalar key, or drop them if the collapse path is now dead");
+    REQUIRE(def != nullptr);
+    CHECK(def->is_scalar());
+    CHECK_FALSE(def->nullable);
+}
+
 TEST_CASE("nil slots around identical values collapse to that value", "[BambuCompat]")
 {
-    // top_surface_acceleration is coFloat here and coFloats in Bambu: the classic case.
-    const ConfigOptionDef *def = def_of("top_surface_acceleration");
+    const ConfigOptionDef *def = live_scalar_float_key();
     REQUIRE(def != nullptr);
     REQUIRE(def->is_scalar());
 
-    const NilResult r = translate_nil_array(def, V({"100", "nil", "100", "nil", "nil"}));
+    const NilResult r = translate_nil_array(def, V({"12", "nil", "12", "nil", "nil"}));
     CHECK(r.fix == NilFix::Collapsed);
-    CHECK(r.value == "100");
+    CHECK(r.value == "12");
     CHECK(r.changed());
     CHECK_FALSE(r.lossy());
     CHECK_FALSE(r.drop());
-    CHECK(r.original == "100,nil,100,nil,nil");
+    CHECK(r.original == "12,nil,12,nil,nil");
 }
 
 TEST_CASE("a single surviving value collapses and is not called lossy", "[BambuCompat]")
 {
-    const NilResult r = translate_nil_array(def_of("sparse_infill_speed"), V({"nil", "nil", "250"}));
+    const ConfigOptionDef *def = live_scalar_float_key();
+    REQUIRE(def != nullptr);
+    const NilResult r = translate_nil_array(def, V({"nil", "nil", "25"}));
     CHECK(r.fix == NilFix::Collapsed);
-    CHECK(r.value == "250");
+    CHECK(r.value == "25");
     CHECK_FALSE(r.lossy());
 }
 
 TEST_CASE("differing values take the documented rule and report the loss", "[BambuCompat]")
 {
-    // Real shape from the owner's 0.10mm @H2D 2W Arachne.json.
+    // Same shape as the owner's 0.10mm @H2D 2W Arachne.json.
     // Majority of the non-nil slots wins: 200 appears twice, 160 once.
-    const NilResult r = translate_nil_array(def_of("inner_wall_speed"), V({"200", "nil", "200", "nil", "160"}));
+    const ConfigOptionDef *def = live_scalar_float_key();
+    REQUIRE(def != nullptr);
+    const NilResult r = translate_nil_array(def, V({"200", "nil", "200", "nil", "160"}));
     CHECK(r.fix == NilFix::CollapsedLossy);
     CHECK(r.value == "200");
     CHECK(r.lossy());
@@ -82,8 +117,10 @@ TEST_CASE("differing values take the documented rule and report the loss", "[Bam
 
 TEST_CASE("the majority wins even when it is not the first slot", "[BambuCompat]")
 {
-    // Real shape from 0.30mm @H2D - Custom ASA.json: 2000 twice beats 3000 once.
-    const NilResult r = translate_nil_array(def_of("outer_wall_acceleration"), V({"3000", "2000", "nil", "2000", "nil"}));
+    // Same shape as 0.30mm @H2D - Custom ASA.json: 2000 twice beats 3000 once.
+    const ConfigOptionDef *def = live_scalar_float_key();
+    REQUIRE(def != nullptr);
+    const NilResult r = translate_nil_array(def, V({"3000", "2000", "nil", "2000", "nil"}));
     CHECK(r.fix == NilFix::CollapsedLossy);
     CHECK(r.value == "2000");
 }
@@ -92,17 +129,111 @@ TEST_CASE("a tie is broken by the first non-nil slot", "[BambuCompat]")
 {
     // Bambu writes the primary extruder first, so the first slot is what a single-extruder
     // machine actually prints with.
-    const NilResult r = translate_nil_array(def_of("inner_wall_speed"), V({"120", "nil", "180"}));
+    const ConfigOptionDef *def = live_scalar_float_key();
+    REQUIRE(def != nullptr);
+    const NilResult r = translate_nil_array(def, V({"120", "nil", "180"}));
     CHECK(r.fix == NilFix::CollapsedLossy);
     CHECK(r.value == "120");
 }
 
 TEST_CASE("percent values survive the collapse as percents", "[BambuCompat]")
 {
-    // small_perimeter_speed is coFloatOrPercent here, coFloatsOrPercents in Bambu.
-    const NilResult r = translate_nil_array(def_of("small_perimeter_speed"), V({"80%", "nil", "80%", "nil"}));
+    // No coFloatOrPercent option is still scalar-here / vector-in-Bambu since the High-Flow
+    // retype, so the translator's handling of the type is pinned with a stand-in definition.
+    ConfigOptionDef def;
+    def.type = coFloatOrPercent;
+    REQUIRE(def.is_scalar());
+    const NilResult r = translate_nil_array(&def, V({"80%", "nil", "80%", "nil"}));
     CHECK(r.fix == NilFix::Collapsed);
     CHECK(r.value == "80%");
+}
+
+TEST_CASE("an enum scalar collapses to its name", "[BambuCompat]")
+{
+    // nozzle_type is coEnum here and coEnums in Bambu.
+    const ConfigOptionDef *def = def_of("nozzle_type");
+    REQUIRE(def != nullptr);
+    if (! def->is_scalar())
+        return; // retyped: covered by the vector tests below
+    const NilResult r = translate_nil_array(def, V({"hardened_steel", "nil", "hardened_steel", "nil"}));
+    CHECK(r.fix == NilFix::Collapsed);
+    CHECK(r.value == "hardened_steel");
+}
+
+// ---------------------------------------------------------------------------------------------
+// Vector targets retyped by the High-Flow work: the BACKFILL path.
+//
+// These were scalars when this translation was written and are per-flow-variant vectors now
+// (process_flow_variant_options()). Bambu writes one slot per extruder variant (4 for
+// fdm_process_dual_common, 5-7 for the H2D/H2C process presets), and the fork's own BBL system
+// profiles carry the same slot layout, so the slot count is kept and only the nil slots are
+// filled. Slot 0 is Bambu's "extruder 1, Direct Drive Standard" and is also this fork's
+// "standard" flow variant - the one the slicer reads - see the end-to-end test further down.
+// ---------------------------------------------------------------------------------------------
+static const ConfigOptionDef* retyped_vector(const char *key)
+{
+    const ConfigOptionDef *def = def_of(key);
+    REQUIRE(def != nullptr);
+    INFO(key << " is expected to be a non-nullable per-flow-variant vector since the High-Flow retype");
+    REQUIRE_FALSE(def->is_scalar());
+    REQUIRE_FALSE(def->nullable);
+    CHECK(is_process_flow_variant_option(key));
+    return def;
+}
+
+TEST_CASE("a retyped acceleration keeps its slot count and is backfilled", "[BambuCompat]")
+{
+    // The classic shape that motivated this module.
+    const NilResult r = translate_nil_array(retyped_vector("top_surface_acceleration"), V({"100", "nil", "100", "nil", "nil"}));
+    CHECK(r.fix == NilFix::Backfilled);
+    CHECK(r.value == "100,100,100,100,100");
+    CHECK_FALSE(r.lossy());
+    CHECK(r.original == "100,nil,100,nil,nil");
+}
+
+TEST_CASE("a retyped speed with a single surviving value fills every slot with it", "[BambuCompat]")
+{
+    // 0.10mm @H2D 2W Arachne.json writes sparse_infill_speed as ["nil","nil","nil","nil","200"].
+    const NilResult r = translate_nil_array(retyped_vector("sparse_infill_speed"), V({"nil", "nil", "250"}));
+    CHECK(r.fix == NilFix::Backfilled);
+    CHECK(r.value == "250,250,250");
+    CHECK_FALSE(r.lossy());
+}
+
+TEST_CASE("a retyped speed with differing slots keeps every real value", "[BambuCompat]")
+{
+    // Real shape from 0.10mm @H2D 2W Arachne.json. Nothing Bambu wrote is dropped any more: the
+    // 160 of the fifth variant survives in its own slot, only the nil slots are guesses.
+    const NilResult r = translate_nil_array(retyped_vector("inner_wall_speed"), V({"200", "nil", "200", "nil", "160"}));
+    CHECK(r.fix == NilFix::BackfilledLossy);
+    CHECK(r.value == "200,200,200,200,160");
+    CHECK(r.lossy());
+    CHECK(r.original == "200,nil,200,nil,160");
+}
+
+TEST_CASE("a retyped acceleration keeps slot 0 as Bambu wrote it", "[BambuCompat]")
+{
+    // Real shape from 0.30mm @H2D - Custom ASA.json. The old scalar collapse took the majority
+    // (2000); as a vector, slot 0 keeps Bambu's extruder-1 standard value (3000) and the nils
+    // take their preceding neighbour.
+    const NilResult r = translate_nil_array(retyped_vector("outer_wall_acceleration"), V({"3000", "2000", "nil", "2000", "nil"}));
+    CHECK(r.fix == NilFix::BackfilledLossy);
+    CHECK(r.value == "3000,2000,2000,2000,2000");
+}
+
+TEST_CASE("retyped percent vectors keep their percents per slot", "[BambuCompat]")
+{
+    // small_perimeter_speed is coFloatsOrPercents on both sides now.
+    const NilResult r = translate_nil_array(retyped_vector("small_perimeter_speed"), V({"80%", "nil", "80%", "nil"}));
+    CHECK(r.fix == NilFix::Backfilled);
+    CHECK(r.value == "80%,80%,80%,80%");
+}
+
+TEST_CASE("a retyped bool vector is backfilled too", "[BambuCompat]")
+{
+    const NilResult r = translate_nil_array(retyped_vector("enable_overhang_speed"), V({"1", "nil", "1", "nil"}));
+    CHECK(r.fix == NilFix::Backfilled);
+    CHECK(r.value == "1,1,1,1");
 }
 
 TEST_CASE("an all-nil array keeps no value at all", "[BambuCompat]")
@@ -216,11 +347,88 @@ TEST_CASE("translation never invents a zero for a speed or acceleration", "[Bamb
 TEST_CASE("a zero Bambu really wrote is preserved, not scrubbed", "[BambuCompat]")
 {
     // Bambu genuinely stores 0 for some of these as a "not set / use default" sentinel, e.g.
-    // "overhang_1_4_speed": ["0","nil","0","nil"]. Translation must carry that through
-    // faithfully - the rule is "never INVENT a zero", not "never allow one".
-    const NilResult r = translate_nil_array(def_of("overhang_1_4_speed"), V({"0", "nil", "0", "nil"}));
-    CHECK(r.fix == NilFix::Collapsed);
-    CHECK(r.value == "0");
+    // "overhang_1_4_speed": ["0","nil","0","nil"] and "travel_speed_z": ["0","0","0","0"].
+    // Translation must carry that through faithfully - the rule is "never INVENT a zero", not
+    // "never allow one". Both paths are checked.
+    SECTION("vector target (backfill)") {
+        const NilResult r = translate_nil_array(retyped_vector("overhang_1_4_speed"), V({"0", "nil", "0", "nil"}));
+        CHECK(r.fix == NilFix::Backfilled);
+        CHECK(r.value == "0,0,0,0");
+    }
+    SECTION("scalar target (collapse)") {
+        const ConfigOptionDef *def = live_scalar_float_key();
+        REQUIRE(def != nullptr);
+        const NilResult r = translate_nil_array(def, V({"0", "nil", "0", "nil"}));
+        CHECK(r.fix == NilFix::Collapsed);
+        CHECK(r.value == "0");
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// End-to-end for a retyped key: the backfilled vector must be read at the right slot.
+//
+// Bambu's arrays are indexed by extruder variant (print_extruder_variant, 5 entries for this
+// H2D preset); this fork's are indexed by flow variant (process_flow_support). A Bambu preset
+// carries no process_flow_support, so the default ["standard"] applies and get_config_idx()
+// resolves to slot 0 whatever the filament's flow type is. Slot 0 is Bambu's
+// "Direct Drive Standard" on extruder 1, i.e. what Bambu Studio itself prints with there.
+// The extra slots are kept (Preset::normalize only ever grows a flow-variant vector), exactly as
+// for the fork's own shipped BBL H2D profiles, which carry the same 5-7 slot layout.
+// ---------------------------------------------------------------------------------------------
+TEST_CASE("a backfilled Bambu vector is read at the slot the slicer uses", "[BambuCompat]")
+{
+    const boost::filesystem::path file = boost::filesystem::path(TEST_DATA_DIR) / "bambu_compat" / "0.30mm_@H2D_-_Custom_ASA.json";
+    if (! boost::filesystem::exists(file)) {
+        WARN("fixture missing: " << file.string());
+        return;
+    }
+
+    DynamicPrintConfig loaded;
+    std::map<std::string, std::string> key_values;
+    std::string reason;
+    loaded.load_from_json(file.string(), ForwardCompatibilitySubstitutionRule::Enable, key_values, reason);
+    REQUIRE(reason.empty());
+
+    // Bambu wrote ["3000","2000","nil","2000","nil"] and ["30","50","nil","50","nil"].
+    const auto *accel = loaded.option<ConfigOptionFloats>("outer_wall_acceleration");
+    const auto *iface = loaded.option<ConfigOptionFloats>("support_interface_speed");
+    REQUIRE(accel != nullptr);
+    REQUIRE(iface != nullptr);
+    CHECK(accel->values == std::vector<double>{ 3000, 2000, 2000, 2000, 2000 });
+    CHECK(iface->values == std::vector<double>{ 30, 50, 50, 50, 50 });
+
+    // Normalize as PresetCollection does on load (a print preset: flow-variant vectors are only
+    // ever grown to process_flow_support's length, never truncated), then compose the way the
+    // slicer sees it: full defaults with the preset on top.
+    Preset::normalize(loaded);
+    REQUIRE(loaded.option<ConfigOptionFloats>("outer_wall_acceleration")->size() == 5);
+    DynamicPrintConfig full = DynamicPrintConfig::full_print_config();
+    full.apply(loaded, true);
+    REQUIRE(full.option<ConfigOptionFloats>("outer_wall_acceleration")->size() == 5);
+
+    for (FilamentVolumeType flow : { fvtStandard, fvtHighFlow }) {
+        INFO("filament flow type " << to_string(flow));
+        if (auto *types = full.option<ConfigOptionEnumsGeneric>("filament_volume_type", true))
+            types->values.assign(1, int(flow));
+        const size_t idx = get_config_idx(full, ConfigFlowDomain::Process, 0);
+        CHECK(idx == 0);
+        CHECK(get_value_at(full, *full.option<ConfigOptionFloats>("outer_wall_acceleration"), ConfigFlowDomain::Process, 0) == Approx(3000.));
+        CHECK(get_value_at(full, *full.option<ConfigOptionFloats>("support_interface_speed"), ConfigFlowDomain::Process, 0) == Approx(30.));
+        // Every flow-variant speed / acceleration the slicer can read is a real, non-zero value.
+        for (const char *key : { "outer_wall_speed", "inner_wall_speed", "sparse_infill_speed", "top_surface_acceleration" }) {
+            const auto *opt = full.option<ConfigOptionFloats>(key);
+            REQUIRE(opt != nullptr);
+            INFO(key << " = " << opt->serialize());
+            CHECK(get_value_at(full, *opt, ConfigFlowDomain::Process, 0) > 0.);
+        }
+    }
+
+    // If the process preset is later given a high-flow column, Bambu's slot 1 ("Direct Drive High
+    // Flow" on extruder 1) is what a high-flow filament reads - the two layouts agree on slots 0-1.
+    full.option<ConfigOptionStrings>("process_flow_support", true)->values = { "standard", "high_flow" };
+    full.option<ConfigOptionEnumsGeneric>("filament_volume_type", true)->values.assign(1, int(fvtHighFlow));
+    CHECK(get_config_idx(full, ConfigFlowDomain::Process, 0) == 1);
+    CHECK(get_value_at(full, *full.option<ConfigOptionFloats>("outer_wall_acceleration"), ConfigFlowDomain::Process, 0) == Approx(2000.));
 }
 
 // ---------------------------------------------------------------------------------------------
