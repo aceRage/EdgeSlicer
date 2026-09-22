@@ -25,6 +25,7 @@ add_executable(${_TEST_NAME}_tests
     bambu_config_compat_tests.cpp
     preset_quarantine_tests.cpp
     test_flow_variant_edit.cpp
+    app_update_check_tests.cpp
     )
 
 # The watcher's transition rule lives in libslic3r_gui, and reaching it pulls GUI_App and the

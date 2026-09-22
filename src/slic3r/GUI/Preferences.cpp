@@ -1759,6 +1759,10 @@ wxWindow* PreferencesDialog::create_general_page()
 
     auto item_show_splash_screen = create_item_checkbox(_L("Show splash screen"), page, _L("Show the splash screen during startup."), 50, "show_splash_screen");
     auto item_hints = create_item_checkbox(_L("Show \"Tip of the day\" notification after start"), page, _L("If enabled, useful hints are displayed at startup."), 50, "show_hints");
+    auto item_check_updates = create_item_checkbox(_L("Check for new versions on startup"), page,
+        _L("If enabled, EdgeSlicer asks GitHub once per start whether a newer release has been published and offers it. "
+           "Help > Check for Update works either way."),
+        50, "check_for_updates_on_startup");
 
     auto item_calc_mode = create_item_checkbox(_L("Flushing volumes: Auto-calculate every time the color changed."), page, _L("If enabled, auto-calculate every time the color changed."), 50, "auto_calculate");
     auto item_calc_in_long_retract = create_item_checkbox(_L("Flushing volumes: Auto-calculate every time when the filament is changed."), page, _L("If enabled, auto-calculate every time when filament is changed"), 50, "auto_calculate_when_filament_change");
@@ -1829,21 +1833,10 @@ wxWindow* PreferencesDialog::create_general_page()
     auto item_darkmode = create_item_darkmode_checkbox(_L("Enable Dark mode"), page,_L("Enable dark mode"), 50, "dark_color_mode");
 #endif
 
-    std::string enUrl = "https://www.snapmaker.com/privacy-policy";
-    std::string cnUrl = "https://www.snapmaker.cn/privacy-policy";
-    auto app_config   = wxGetApp().app_config;
-    std::string region = app_config->get("language");
-
-    auto title_user_experience = create_item_title(_L("User Experience"), page, _L("User Experience"));
-    auto             item_priv_policy      = create_item_checkbox(_L("Join Customer Experience Improvement Program."), page, _L(""), 50,PRIVACY_POLICY_FLAGS);
-    wxHyperlinkCtrl* hyperlink = nullptr;
-    if (region.empty() || region != "zh_CN")
-        hyperlink = new wxHyperlinkCtrl(page, wxID_ANY, _L("What data would be collected?"), enUrl);
-    else
-        hyperlink = new wxHyperlinkCtrl(page, wxID_ANY, _L("What data would be collected?"), cnUrl);
-
-    hyperlink->SetFont(Label::Head_13);
-    item_priv_policy->Add(hyperlink, 0, wxALIGN_CENTER, 0);
+    // The "User Experience" section ("Join Customer Experience Improvement Program", linking to
+    // Snapmaker's privacy policy) is gone: EdgeSlicer runs no such program. The flag it wrote
+    // (privacy_policy_isagree) only ever gated Sentry uploads, which additionally need a
+    // maintainer's own "ultra_sentry_dsn" - none ships - so nothing was being collected.
 
     auto title_develop_mode = create_item_title(_L("Develop mode"), page, _L("Develop mode"));
     auto item_develop_mode  = create_item_checkbox(_L("Develop mode"), page, _L("Develop mode"), 50, "developer_mode");
@@ -1866,6 +1859,7 @@ wxWindow* PreferencesDialog::create_general_page()
     sizer_page->Add(item_selection_highlight, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_show_splash_screen, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_hints, 0, wxTOP, FromDIP(3));
+    sizer_page->Add(item_check_updates, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_calc_in_long_retract, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_multi_machine, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_step_mesh_setting, 0, wxTOP, FromDIP(3));
@@ -1928,10 +1922,6 @@ wxWindow* PreferencesDialog::create_general_page()
     sizer_page->Add(title_develop_mode, 0, wxTOP | wxEXPAND, FromDIP(20));
     sizer_page->Add(item_develop_mode, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_skip_ams_blacklist_check, 0, wxTOP, FromDIP(3));
-
-
-    sizer_page->Add(title_user_experience, 0, wxTOP, FromDIP(20));
-    sizer_page->Add(item_priv_policy, 0, wxTOP, FromDIP(3));
 
     page->SetSizer(sizer_page);
     page->Layout();

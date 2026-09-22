@@ -340,9 +340,9 @@ public:
 	bool 				legacy_datadir() const { return m_legacy_datadir; }
 	void 				set_legacy_datadir(bool value) { m_legacy_datadir = value; }
 
-	// Get the Slic3r version check url.
-	// This returns a hardcoded string unless it is overriden by "version_check_url" in the ini file.
-	std::string 		version_check_url(bool stable_only = false) const;
+	// The self-hosted update server override ("orca_upgrade_url", Snapmaker JSON schema).
+	// Empty (the default) means the app checks the GitHub release feed instead; see
+	// docs/update-server/README.md and slic3r/Utils/AppUpdateCheck.hpp.
 	std::string 		get_version_upgrade_url(bool stable_only = false);
 	std::string 		get_preset_upgrade_url();
 	std::string 		get_web_resource_upgrade_url();

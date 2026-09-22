@@ -22,6 +22,7 @@
 #include <wx/progdlg.h>
 #include <wx/clipbrd.h>
 #include <wx/dcgraph.h>
+#include <wx/hyperlink.h>
 #include <miniz.h>
 #include <algorithm>
 #include "Plater.hpp"
@@ -526,7 +527,7 @@ std::vector<std::string> UpdateVersionDialog::splitWithStl(std::string str,std::
     return result;
 }
 
-void UpdateVersionDialog::update_version_info(wxString release_note, wxString version)
+void UpdateVersionDialog::update_version_info(wxString release_note, wxString version, const std::string& full_notes_url)
 {
     //bbs check whether the web display is used
     bool use_web_link = false;
@@ -542,11 +543,20 @@ void UpdateVersionDialog::update_version_info(wxString release_note, wxString ve
         m_simplebook_release_note->SetMaxSize(wxSize(FromDIP(560), FromDIP(430)));
         m_simplebook_release_note->SetSelection(0);
         m_text_up_info->SetLabel(wxString::Format(_L("Click to download new version in default browser: %s"), version));
+        // A second check in the same session used to stack a new label on top of the old one.
+        m_scrollwindows_release_note->DestroyChildren();
         wxBoxSizer* sizer_text_release_note = new wxBoxSizer(wxVERTICAL);
         auto        m_staticText_release_note = new ::Label(m_scrollwindows_release_note, release_note, LB_AUTO_WRAP);
         m_staticText_release_note->SetMinSize(wxSize(FromDIP(560), -1));
         m_staticText_release_note->SetMaxSize(wxSize(FromDIP(560), -1));
         sizer_text_release_note->Add(m_staticText_release_note, 0, wxALL, 5);
+        if (!full_notes_url.empty()) {
+            // The notes above are the compact update notice; the whole story is on GitHub.
+            auto link = new wxHyperlinkCtrl(m_scrollwindows_release_note, wxID_ANY, _L("See the full release notes"),
+                                            wxString::FromUTF8(full_notes_url));
+            link->SetFont(Label::Body_13);
+            sizer_text_release_note->Add(link, 0, wxLEFT | wxRIGHT | wxBOTTOM, 5);
+        }
         m_scrollwindows_release_note->SetSizer(sizer_text_release_note);
         m_scrollwindows_release_note->Layout();
         m_scrollwindows_release_note->Fit();

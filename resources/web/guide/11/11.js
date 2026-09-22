@@ -63,7 +63,8 @@ function GotoPolicyPage()
 	SendWXMessage( JSON.stringify(tSend) );
 	
 
-	window.location.href="../3/index.html";
+	// EdgeSlicer: no Customer Experience Improvement Program page (guide/3); straight to printers.
+	window.location.href="../21/index.html";
 }
 
 

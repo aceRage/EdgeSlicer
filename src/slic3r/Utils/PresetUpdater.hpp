@@ -13,8 +13,6 @@ class AppConfig;
 class PresetBundle;
 class Semver;
 
-static constexpr const int SLIC3R_VERSION_BODY_MAX = 256;
-
 class PresetUpdater
 {
 public:
@@ -80,7 +78,6 @@ wxDECLARE_EVENT(EVT_REQUEST_SERVER_FAIL, wxCommandEvent);
 wxDECLARE_EVENT(EVT_NO_WEB_RESOURCE_UPDATE, wxCommandEvent);
 wxDECLARE_EVENT(EVT_NO_PRESET_UPDATE, wxCommandEvent);
 wxDECLARE_EVENT(EVT_SLIC3R_VERSION_ONLINE, wxCommandEvent);
-wxDECLARE_EVENT(EVT_SLIC3R_EXPERIMENTAL_VERSION_ONLINE, wxCommandEvent);
 
 
 }

@@ -101,6 +101,7 @@
 #include "GeneratedConfig.hpp"
 
 #include "../Utils/PresetUpdater.hpp"
+#include "../Utils/AppUpdateCheck.hpp"
 #include "../Utils/PrintHost.hpp"
 #include "../Utils/Process.hpp"
 #include "../Utils/MacDarkMode.hpp"
@@ -186,6 +187,11 @@ typedef BOOL (WINAPI *LPFN_ISWOW64PROCESS2)(
 #endif
 
 #define UPDATE_BY_USER 1
+
+// The GitHub release page for the new-version offer on screen, shown as "See the full release
+// notes" under the compact notes. Empty for the self-hosted (orca_upgrade_url) schema.
+static std::string s_update_full_notes_url;
+
 #define RELEASE_TYPE_STABLE "stable"
 #define RELEASE_TYPE_BETA  "beta"
 #define RELEASE_TYPE_ALPHA "alpha"
@@ -3431,7 +3437,8 @@ bool GUI_App::on_init_inner()
                 bool skip_this_version = false;
                 if (!skip_version_str.empty()) {
                     BOOST_LOG_TRIVIAL(info) << "new version = " << version_info.version_str << ", skip version = " << skip_version_str;
-                    if (version_info.version_str <= skip_version_str) {
+                    // Numeric, four-part compare: the old string compare put 2.10 below 2.9.
+                    if (AppUpdate::is_skipped(version_info.version_str, skip_version_str)) {
                         skip_this_version = true;
                     } else {
                         app_config->set("skip_version", "");
@@ -3442,10 +3449,11 @@ bool GUI_App::on_init_inner()
                     wxString            extmsg = wxString::FromUTF8(version_info.description);
                     if(!m_updateDialog)
                         return;
-                    m_updateDialog->update_version_info(extmsg, version_info.version_str);
-                    if (evt.GetInt() != 0) {
-                        m_updateDialog->m_button_skip_version->Hide();
-                    }
+                    m_updateDialog->update_version_info(extmsg, version_info.version_str, s_update_full_notes_url);
+                    // Skip this Version only makes sense on the unprompted offer; show it again
+                    // after a Help > Check for Update hid it.
+                    m_updateDialog->m_button_skip_version->Show(evt.GetInt() == 0);
+                    m_updateDialog->Layout();
                     m_updateDialog->Raise();
                     m_updateDialog->Show();
                     m_updateDialog->setUrl(version_info.url);
@@ -4762,6 +4770,9 @@ void GUI_App::recreate_GUI(const wxString &msg_name)
     switch_window_pools();
     mainframe = new MainFrame();
 
+    // The update dialog is a child of the old main frame and is destroyed with it below; a
+    // kept pointer would dangle and crash the next Help > Check for Update.
+    m_updateDialog = nullptr;
     if (!m_updateDialog) {
         m_updateDialog = new UpdateVersionDialog(mainframe);
         m_updateDialog->Hide();
@@ -6098,13 +6109,112 @@ void GUI_App::check_preset_version()
 }
 void GUI_App::check_new_version_sf(bool show_tips, bool by_user)
 {
+    (void) show_tips;
+
+    // The startup check respects Preferences > "Check for new versions on startup";
+    // Help > Check for Update (by_user) always runs.
+    if (!by_user) {
+        if (!app_config->get_bool("check_for_updates_on_startup")) {
+            BOOST_LOG_TRIVIAL(info) << "new-version check: disabled in preferences";
+            return;
+        }
+        if (m_hub_managed && RemoteAccess::get().hidden()) {
+            BOOST_LOG_TRIVIAL(info) << "new-version check: skipped on a hidden instance";
+            return;
+        }
+    }
+
     std::string update_url = app_config->get_version_upgrade_url();
 
-    // No update server is configured (the Snapmaker default was removed; see
-    // AppConfig::get_version_upgrade_url) - there is nothing to check and,
-    // importantly, nothing to force-upgrade from. Silent by design.
-    if (update_url.empty())
+    // Default: the GitHub release feed of aceRage/EdgeSlicer. A self-hosted server set in the
+    // ini ("orca_upgrade_url") replaces it and keeps the Snapmaker JSON schema, handled below.
+    if (update_url.empty()) {
+        const AppUpdate::Platform platform = AppUpdate::current_platform();
+        if (platform == AppUpdate::Platform::LinuxFlatpak) {
+            // Flatpak installs are updated by Flathub / the software centre, not by us.
+            BOOST_LOG_TRIVIAL(info) << "new-version check: Flatpak build, updates come through Flathub";
+            if (by_user) {
+                wxCommandEvent* evt = new wxCommandEvent(EVT_SHOW_DIALOG);
+                evt->SetString(_L("This is the Flatpak build of EdgeSlicer. New versions arrive through Flathub or your software centre."));
+                GUI::wxGetApp().QueueEvent(evt);
+            }
+            return;
+        }
+
+        // Debug aid: EDGESLICER_FAKE_LOCAL_VERSION=2.3.0.0 makes this build compare as that
+        // version, so the dialog can be seen without a newer release. Logged loudly.
+        const std::string local_version = AppUpdate::effective_local_version(Snapmaker_VERSION);
+        if (local_version != Snapmaker_VERSION)
+            BOOST_LOG_TRIVIAL(warning) << "new-version check: DEBUG EDGESLICER_FAKE_LOCAL_VERSION=" << local_version
+                                       << " (real build " << Snapmaker_VERSION << ")";
+
+        auto report_failure = [by_user](const std::string& detail) {
+            BOOST_LOG_TRIVIAL(warning) << "new-version check failed: " << detail;
+            if (!by_user)
+                return; // the startup check stays silent
+            wxCommandEvent* evt = new wxCommandEvent(EVT_REQUEST_SERVER_FAIL);
+            evt->SetString(_L("Could not check for a new version of EdgeSlicer.") + "\n\n" + wxString::FromUTF8(detail));
+            GUI::wxGetApp().QueueEvent(evt);
+        };
+
+        BOOST_LOG_TRIVIAL(info) << "new-version check: " << AppUpdate::GITHUB_LATEST_RELEASE_API << " (local " << local_version << ")";
+        Http::get(AppUpdate::GITHUB_LATEST_RELEASE_API)
+            // GitHub requires a User-Agent; it gets "EdgeSlicer/<release version>" and nothing
+            // else: the process-wide X-BBL-* headers carry a device id and are not for them.
+            .clear_headers()
+            .header("User-Agent", std::string(SLIC3R_APP_NAME "/") + Snapmaker_VERSION)
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .timeout_connect(TIMEOUT_CONNECT)
+            .timeout_max(30)
+            .on_error([report_failure](std::string body, std::string error, unsigned http_status) {
+                std::string detail = error;
+                const AppUpdate::ReleaseInfo parsed = AppUpdate::parse_github_release(body, AppUpdate::current_platform());
+                if (!parsed.ok && parsed.error.rfind("GitHub:", 0) == 0)
+                    detail = parsed.error; // e.g. "GitHub: API rate limit exceeded ..."
+                if (http_status != 0)
+                    detail = "HTTP " + std::to_string(http_status) + (detail.empty() ? std::string() : ": " + detail);
+                report_failure(detail);
+            })
+            .on_complete([this, by_user, platform, local_version, report_failure](std::string body, unsigned http_status) {
+                if (http_status != 200) {
+                    report_failure("HTTP " + std::to_string(http_status));
+                    return;
+                }
+                const AppUpdate::ReleaseInfo release = AppUpdate::parse_github_release(body, platform);
+                switch (AppUpdate::evaluate(release, local_version)) {
+                case AppUpdate::Verdict::Invalid:
+                    report_failure(release.error.empty() ? "unrecognised answer" : release.error);
+                    return;
+                case AppUpdate::Verdict::Ignored:
+                case AppUpdate::Verdict::UpToDate:
+                    BOOST_LOG_TRIVIAL(info) << "new-version check: latest " << release.tag
+                                            << (release.prerelease || release.draft ? " (prerelease/draft, ignored)" : "")
+                                            << ", nothing newer than " << local_version;
+                    if (by_user)
+                        this->no_new_version();
+                    return;
+                case AppUpdate::Verdict::UpdateAvailable: break;
+                }
+                BOOST_LOG_TRIVIAL(info) << "new-version check: " << release.tag << " is newer than " << local_version
+                                        << ", download " << release.download_url;
+                // Hand the result to the UI thread; the event handler below shows the dialog.
+                GUI::wxGetApp().CallAfter([this, release, by_user]() {
+                    version_info.force_upgrade = false; // a GitHub release never forces anything
+                    version_info.version_str   = release.version_str;
+                    version_info.description   = release.notes.text;
+                    version_info.url           = release.download_url;
+                    s_update_full_notes_url    = release.html_url;
+                    wxCommandEvent* evt = new wxCommandEvent(EVT_SLIC3R_VERSION_ONLINE);
+                    evt->SetString(version_info.url);
+                    if (by_user)
+                        evt->SetInt(UPDATE_BY_USER);
+                    GUI::wxGetApp().QueueEvent(evt);
+                });
+            })
+            .perform();
         return;
+    }
 
     AppConfig* app_config = wxGetApp().app_config;
 
@@ -6208,12 +6318,12 @@ void GUI_App::check_new_version_sf(bool show_tips, bool by_user)
                 return;
             }
 
-            std::regex matcher("[0-9]+\\.[0-9]+(\\.[0-9]+)*(-[A-Za-z0-9]+)?(\\+[A-Za-z0-9]+)?");
-            Semver     current_version = get_version(Snapmaker_VERSION, matcher);
+            // Same four-part comparison as the GitHub path (Semver folds a fourth part into
+            // patch*100, which misorders 2.3.9 against 2.3.8.5).
+            const AppUpdate::Version current_version = AppUpdate::parse_version(AppUpdate::effective_local_version(Snapmaker_VERSION));
+            const AppUpdate::Version server_version  = AppUpdate::parse_version(version_info.version_str);
 
-            Semver server_version = get_version(version_info.version_str, matcher);
-
-            if (current_version >= server_version) {
+            if (!server_version.valid || AppUpdate::compare_versions(current_version, server_version) >= 0) {
                 if(by_user)
                     this->no_new_version();
                 return;
@@ -6230,6 +6340,7 @@ void GUI_App::check_new_version_sf(bool show_tips, bool by_user)
                 return;
             }
 
+            s_update_full_notes_url.clear(); // the self-hosted schema has no release page
             wxCommandEvent* evt = new wxCommandEvent(EVT_SLIC3R_VERSION_ONLINE);
             evt->SetString(version_info.url);
             if (by_user)
