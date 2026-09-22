@@ -359,6 +359,36 @@ def check_obsolete_keys(profiles_dir, vendor_name):
     return error_count
 
 
+def _case_exact_is_file(base_dir, rel_path):
+    """
+    True only if rel_path exists under base_dir with EXACTLY this spelling.
+
+    Path.is_file() asks the filesystem, and NTFS (Windows) and APFS (macOS) answer
+    case-insensitively: 'biqu_b1_...stl' happily resolves to 'BIQU_B1_...stl'. CI runs
+    on ext4, which does not, so a mis-cased reference passed every local run and failed
+    every CI run -- exactly the class of bug that kept this gate red. Compare each path
+    component against an actual directory listing instead, so the answer is the same
+    on every platform and a mis-cased reference is an error everywhere.
+    """
+    current = Path(base_dir)
+    if not current.is_dir():
+        return False
+    parts = [part for part in str(rel_path).replace("\\", "/").split("/") if part and part != "."]
+    if not parts:
+        return False
+    for index, part in enumerate(parts):
+        try:
+            entries = os.listdir(current)
+        except OSError:
+            return False
+        if part not in entries:
+            return False
+        current = current / part
+        if index < len(parts) - 1 and not current.is_dir():
+            return False
+    return current.is_file()
+
+
 def _build_name_index(vendor_dir, subdir):
     """
     Index every json under vendor_dir/subdir by its own "name" field.
@@ -484,7 +514,7 @@ def check_asset_files(profiles_dir, vendor_name):
                     value = value[0] if value else ""
                 if not value:
                     continue
-                if not (vendor_dir / value).is_file():
+                if not _case_exact_is_file(vendor_dir, value):
                     print_error(f"Missing {key}: '{value}' referenced in {origin}")
                     error_count += 1
 
@@ -493,12 +523,12 @@ def check_asset_files(profiles_dir, vendor_name):
         model_name = child.get("name")
         if not model_name:
             continue
-        if not (vendor_dir / f"{model_name}_cover.png").is_file():
+        if not _case_exact_is_file(vendor_dir, f"{model_name}_cover.png"):
             print_error(f"Missing cover image: '{model_name}_cover.png' for machine model "
                         f"'{model_name}' in {vendor_file.relative_to(profiles_dir)}")
             error_count += 1
         # ConfigWizard.cpp's legacy tile; a miss only downgrades to a placeholder icon.
-        if not (vendor_dir / f"{model_name}_thumbnail.png").is_file():
+        if not _case_exact_is_file(vendor_dir, f"{model_name}_thumbnail.png"):
             warning_count += 1
 
     # Filament / process presets: the inherits chain.
