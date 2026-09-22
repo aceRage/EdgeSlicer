@@ -3,6 +3,7 @@
   "from": "system",
   "instantiation": "true",
   "name": "Snapmaker PLA Silk",
+  "filament_id": "76896312",
   "setting_id": "76896312",
   "inherits": "fdm_filament_pla_silk_category",
   "compatible_printers": [

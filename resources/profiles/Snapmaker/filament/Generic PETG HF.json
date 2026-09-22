@@ -3,6 +3,7 @@
     "from": "system",
     "instantiation": "true",
     "name": "Generic PETG HF",
+    "filament_id": "GFSG02_001",
     "setting_id": "GFSG02_001",
     "inherits": "Generic PETG HF @U1 base",
     "fan_cooling_layer_time": [

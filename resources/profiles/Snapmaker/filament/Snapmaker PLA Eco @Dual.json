@@ -3,6 +3,7 @@
   "from": "system",
   "instantiation": "true",
   "name": "Snapmaker PLA Eco @Dual",
+  "filament_id": "2158656028",
   "setting_id": "2158656028",
   "inherits": "fdm_filament_pla_category",
   "compatible_printers": [

@@ -3,6 +3,7 @@
     "from": "system",
     "instantiation": "true",
     "name": "Generic PETG-CF @U1 0.6 nozzle",
+    "filament_id": "GFSG50",
     "setting_id": "GFSG50",
     "inherits": "Generic PETG-CF @U1 base",
     "compatible_printers": [

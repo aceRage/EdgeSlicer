@@ -3,6 +3,7 @@
   "from": "system",
   "instantiation": "true",
   "name": "Snapmaker PETG @Dual",
+  "filament_id": "2452014271",
   "setting_id": "2452014271",
   "inherits": "fdm_filament_petg_category",
   "compatible_printers": [

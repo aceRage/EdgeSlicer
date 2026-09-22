@@ -3,6 +3,7 @@
   "from": "system",
   "instantiation": "true",
   "name": "Snapmaker PLA-CF @Dual",
+  "filament_id": "3589359438",
   "setting_id": "3589359438",
   "inherits": "fdm_filament_pla_cf_category",
   "compatible_printers": [

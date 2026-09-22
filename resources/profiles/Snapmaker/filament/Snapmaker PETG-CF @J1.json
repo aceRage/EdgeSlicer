@@ -3,6 +3,7 @@
   "from": "system",
   "instantiation": "true",
   "name": "Snapmaker PETG-CF @J1",
+  "filament_id": "961448549",
   "setting_id": "961448549",
   "inherits": "fdm_filament_petg_cf_category",
   "compatible_printers": [

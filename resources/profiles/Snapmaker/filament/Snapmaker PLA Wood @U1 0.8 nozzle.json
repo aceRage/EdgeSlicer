@@ -3,6 +3,7 @@
     "from": "system",
     "instantiation": "true",
     "name": "Snapmaker PLA Wood @U1 0.8 nozzle",
+    "filament_id": "GFSL991",
     "setting_id": "GFSL991",
     "inherits": "Snapmaker PLA Wood @U1 base",
     "compatible_printers": [

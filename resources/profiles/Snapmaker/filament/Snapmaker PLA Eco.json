@@ -3,6 +3,7 @@
   "from": "system",
   "instantiation": "true",
   "name": "Snapmaker PLA Eco",
+  "filament_id": "978926393",
   "setting_id": "978926393",
   "inherits": "fdm_filament_pla_category",
   "compatible_printers": [

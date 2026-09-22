@@ -3,6 +3,7 @@
   "from": "system",
   "instantiation": "true",
   "name": "PolyLite PLA @Dual 0.2 nozzle",
+  "filament_id": "490991920",
   "setting_id": "490991920",
   "inherits": "PolyLite PLA @Dual base",
   "compatible_printers": [

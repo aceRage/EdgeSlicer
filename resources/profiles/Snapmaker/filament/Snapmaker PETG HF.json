@@ -4,6 +4,7 @@
     "instantiation": "true",
     "name": "Snapmaker PETG HF",
     "renamed_from": "Snapmaker PETG @U1",
+    "filament_id": "GFSG02_0012",
     "setting_id": "GFSG02_0012",
     "inherits": "Snapmaker PETG HF @U1 base",
     "fan_cooling_layer_time": [

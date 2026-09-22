@@ -3,6 +3,7 @@
     "from": "system",
     "instantiation": "true",
     "name": "Generic PLA High Speed",
+    "filament_id": "GFSL95_0011",
     "setting_id": "GFSL95_0011",
     "inherits": "Generic PLA High Speed @U1 base",
     "slow_down_layer_time": [

@@ -3,6 +3,7 @@
     "from": "system",
     "instantiation": "true",
     "name": "Polymaker Silk PLA Family @U1",
+    "filament_id": "POLY_SILK_PLA_U1_001",
     "setting_id": "POLY_SILK_PLA_U1_001",
     "inherits": "Polymaker Silk PLA Family @U1 base",
     "compatible_printers": [

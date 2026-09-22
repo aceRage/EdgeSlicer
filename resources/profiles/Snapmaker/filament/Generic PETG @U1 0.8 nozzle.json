@@ -3,6 +3,7 @@
     "from": "system",
     "instantiation": "true",
     "name": "Generic PETG @U1 0.8 nozzle",
+    "filament_id": "GFSG99",
     "setting_id": "GFSG99",
     "inherits": "Generic PETG @U1 base",
     "compatible_printers": [

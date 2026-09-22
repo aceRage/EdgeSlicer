@@ -3,6 +3,7 @@
   "from": "system",
   "instantiation": "true",
   "name": "PolyLite PLA @J1 0.2 nozzle",
+  "filament_id": "431382384",
   "setting_id": "431382384",
   "inherits": "PolyLite PLA @J1 base",
   "compatible_printers": [

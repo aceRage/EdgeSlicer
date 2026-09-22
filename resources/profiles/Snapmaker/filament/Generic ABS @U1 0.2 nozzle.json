@@ -3,6 +3,7 @@
     "from": "system",
     "instantiation": "true",
     "name": "Generic ABS @U1 0.2 nozzle",
+    "filament_id": "GFSB99",
     "setting_id": "GFSB99",
     "inherits": "Generic ABS @U1 base",
     "compatible_printers": [

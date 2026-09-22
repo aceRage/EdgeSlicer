@@ -3,6 +3,7 @@
     "from": "system",
     "instantiation": "true",
     "name": "Generic PLA High Speed @U1 0.2 nozzle",
+    "filament_id": "GFSL95_01",
     "setting_id": "GFSL95_01",
     "inherits": "Generic PLA High Speed @U1 base",
     "filament_flow_ratio": [

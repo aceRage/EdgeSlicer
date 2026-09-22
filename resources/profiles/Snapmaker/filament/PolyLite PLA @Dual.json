@@ -3,6 +3,7 @@
   "from": "system",
   "instantiation": "true",
   "name": "PolyLite PLA @Dual",
+  "filament_id": "64868365",
   "setting_id": "64868365",
   "inherits": "fdm_filament_pla_category",
   "compatible_printers": [

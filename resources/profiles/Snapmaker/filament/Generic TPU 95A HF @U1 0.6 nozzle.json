@@ -3,6 +3,7 @@
     "from": "system",
     "instantiation": "true",
     "name": "Generic TPU 95A HF @U1 0.6 nozzle",
+    "filament_id": "GFSR99",
     "setting_id": "GFSR99",
     "inherits": "Generic TPU 95A HF @U1 base",
     "compatible_printers": [

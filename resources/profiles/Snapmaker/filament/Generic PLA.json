@@ -4,6 +4,7 @@
     "instantiation": "true",
     "name": "Generic PLA",
     "renamed_from": "Generic PLA @U1 0.4 nozzle",
+    "filament_id": "GFSL991",
     "setting_id": "GFSL991",
     "inherits": "Generic PLA @U1 base",
     "compatible_printers": [

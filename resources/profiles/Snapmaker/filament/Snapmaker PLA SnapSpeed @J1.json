@@ -3,6 +3,7 @@
     "from": "system",
     "instantiation": "true",
     "name": "Snapmaker PLA SnapSpeed @J1",
+    "filament_id": "28360872781",
     "setting_id": "28360872781",
     "inherits": "fdm_filament_pla_hs_category",
     "compatible_printers": [

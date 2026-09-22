@@ -4,6 +4,7 @@
     "instantiation": "true",
     "name": "Generic PC",
     "renamed_from": "Generic PC @U1 0.4 nozzle",
+    "filament_id": "GFSC99",
     "setting_id": "GFSC99",
     "inherits": "Generic PC @U1 base",
     "compatible_printers": [

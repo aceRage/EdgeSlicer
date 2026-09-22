@@ -3,6 +3,7 @@
   "from": "system",
   "instantiation": "true",
   "name": "Snapmaker TPU High-Flow @Dual",
+  "filament_id": "1072918854",
   "setting_id": "1072918854",
   "inherits": "fdm_filament_tpu_unspecified_category",
   "compatible_printers": [
