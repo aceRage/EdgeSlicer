@@ -35,6 +35,8 @@ set(lisbslic3r_sources
     AnyPtr.hpp
     AppConfig.cpp
     AppConfig.hpp
+    BambuConfigCompat.cpp
+    BambuConfigCompat.hpp
     Arachne/BeadingStrategy/BeadingStrategy.cpp
     Arachne/BeadingStrategy/BeadingStrategyFactory.cpp
     Arachne/BeadingStrategy/BeadingStrategyFactory.hpp

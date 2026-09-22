@@ -1,0 +1,130 @@
+{
+    "bottom_color_penetration_layers": "3",
+    "bottom_shell_layers": "5",
+    "brim_type": "no_brim",
+    "brim_width": "8",
+    "enable_support": "1",
+    "flush_into_support": "0",
+    "from": "User",
+    "gap_infill_speed": [
+        "100",
+        "nil",
+        "nil",
+        "nil",
+        "100"
+    ],
+    "independent_support_layer_height": "0",
+    "inherits": "0.16mm Balanced Quality @BBL H2D",
+    "initial_layer_infill_speed": [
+        "50",
+        "nil",
+        "nil",
+        "nil",
+        "50"
+    ],
+    "inner_wall_speed": [
+        "100",
+        "nil",
+        "nil",
+        "nil",
+        "100"
+    ],
+    "internal_solid_infill_speed": [
+        "60",
+        "nil",
+        "nil",
+        "nil",
+        "60"
+    ],
+    "layer_height": "0.2",
+    "max_bridge_length": "10",
+    "max_travel_detour_distance": "100",
+    "name": "0.20mm Balanced 3W - PC-HIPS",
+    "overhang_1_4_speed": [
+        "0",
+        "nil",
+        "nil",
+        "nil",
+        "0"
+    ],
+    "precise_z_height": "1",
+    "prime_tower_infill_gap": "100%",
+    "prime_tower_rib_wall": "0",
+    "print_extruder_id": [
+        "1",
+        "1",
+        "2",
+        "2",
+        "2"
+    ],
+    "print_extruder_variant": [
+        "Direct Drive Standard",
+        "Direct Drive High Flow",
+        "Direct Drive Standard",
+        "Direct Drive High Flow",
+        "Direct Drive TPU High Flow"
+    ],
+    "print_settings_id": "0.20mm Balanced 3W - PC-HIPS",
+    "reduce_crossing_wall": "1",
+    "resolution": "0.01",
+    "seam_gap": "5%",
+    "seam_slope_conditional": "0",
+    "smooth_coefficient": "5",
+    "sparse_infill_density": "30%",
+    "sparse_infill_pattern": "octagramspiral",
+    "sparse_infill_speed": [
+        "100",
+        "nil",
+        "nil",
+        "nil",
+        "100"
+    ],
+    "support_bottom_z_distance": "0.24",
+    "support_filament": "1",
+    "support_interface_filament": "3",
+    "support_interface_pattern": "rectilinear_interlaced",
+    "support_interface_spacing": "0",
+    "support_interface_speed": [
+        "30",
+        "nil",
+        "nil",
+        "nil",
+        "30"
+    ],
+    "support_object_xy_distance": "0.45",
+    "support_on_build_plate_only": "1",
+    "support_speed": [
+        "100",
+        "nil",
+        "nil",
+        "nil",
+        "100"
+    ],
+    "support_style": "snug",
+    "support_threshold_angle": "15",
+    "support_top_z_distance": "0",
+    "support_type": "normal(auto)",
+    "top_color_penetration_layers": "3",
+    "top_one_wall_type": "not apply",
+    "top_shell_layers": "3",
+    "top_shell_thickness": "0",
+    "top_surface_speed": [
+        "80",
+        "nil",
+        "nil",
+        "nil",
+        "80"
+    ],
+    "top_z_overrides_xy_distance": "1",
+    "version": "2.4.0.1",
+    "vertical_shell_speed": [
+        "60",
+        "nil",
+        "nil",
+        "nil",
+        "60"
+    ],
+    "wall_generator": "arachne",
+    "wall_loops": "4",
+    "wall_sequence": "inner-outer-inner wall"
+}

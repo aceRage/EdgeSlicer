@@ -1,0 +1,49 @@
+{
+    "from": "User",
+    "inherits": "Bambu Lab H2C 0.4 nozzle",
+    "machine_max_jerk_e": [
+        "10",
+        "2.5",
+        "10",
+        "2.5",
+        "nil",
+        "nil",
+        "nil",
+        "nil"
+    ],
+    "machine_max_jerk_x": [
+        "20",
+        "9",
+        "20",
+        "9",
+        "nil",
+        "nil",
+        "nil",
+        "nil"
+    ],
+    "machine_max_jerk_y": [
+        "20",
+        "9",
+        "20",
+        "9",
+        "nil",
+        "nil",
+        "nil",
+        "nil"
+    ],
+    "name": "Bambu Lab H2C 0.4 nozzle - Custom",
+    "printer_extruder_id": [
+        "1",
+        "1",
+        "2",
+        "2"
+    ],
+    "printer_extruder_variant": [
+        "Direct Drive Standard",
+        "Direct Drive High Flow",
+        "Direct Drive Standard",
+        "Direct Drive High Flow"
+    ],
+    "printer_settings_id": "Bambu Lab H2C 0.4 nozzle - Custom",
+    "version": "2.7.0.8"
+}

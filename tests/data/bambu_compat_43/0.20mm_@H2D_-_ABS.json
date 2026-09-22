@@ -1,0 +1,104 @@
+{
+    "brim_type": "no_brim",
+    "enable_prime_tower": "0",
+    "enable_support": "1",
+    "flush_into_support": "0",
+    "from": "User",
+    "inherits": "0.20mm Standard @BBL H2D",
+    "inner_wall_line_width": "0.6",
+    "inner_wall_speed": [
+        "100",
+        "nil",
+        "100",
+        "nil",
+        "150"
+    ],
+    "internal_solid_infill_speed": [
+        "100",
+        "nil",
+        "100",
+        "nil",
+        "180"
+    ],
+    "name": "0.20mm @H2D - ABS",
+    "outer_wall_acceleration": [
+        "3000",
+        "nil",
+        "3000",
+        "nil",
+        "nil"
+    ],
+    "outer_wall_line_width": "0.6",
+    "outer_wall_speed": [
+        "60",
+        "nil",
+        "60",
+        "nil",
+        "nil"
+    ],
+    "overhang_3_4_speed": [
+        "20",
+        "nil",
+        "20",
+        "nil",
+        "nil"
+    ],
+    "prime_tower_infill_gap": "100%",
+    "prime_tower_rib_wall": "0",
+    "print_extruder_id": [
+        "1",
+        "1",
+        "2",
+        "2",
+        "2"
+    ],
+    "print_extruder_variant": [
+        "Direct Drive Standard",
+        "Direct Drive High Flow",
+        "Direct Drive Standard",
+        "Direct Drive High Flow",
+        "Direct Drive TPU High Flow"
+    ],
+    "print_settings_id": "0.20mm @H2D - ABS",
+    "raft_first_layer_expansion": "10",
+    "reduce_crossing_wall": "1",
+    "reduce_infill_retraction_mode": "Disabled",
+    "skeleton_infill_density": "8%",
+    "skin_infill_density": "8%",
+    "sparse_infill_density": "8%",
+    "sparse_infill_pattern": "adaptivecubic",
+    "sparse_infill_speed": [
+        "100",
+        "nil",
+        "100",
+        "nil",
+        "180"
+    ],
+    "support_bottom_z_distance": "0.24",
+    "support_interface_pattern": "rectilinear_interlaced",
+    "support_interface_spacing": "0.1",
+    "support_interface_speed": [
+        "50",
+        "nil",
+        "50",
+        "nil",
+        "nil"
+    ],
+    "support_object_first_layer_gap": "0.3",
+    "support_object_xy_distance": "0.4",
+    "support_on_build_plate_only": "1",
+    "support_threshold_angle": "25",
+    "support_top_z_distance": "0.24",
+    "top_one_wall_type": "not apply",
+    "top_surface_speed": [
+        "150",
+        "nil",
+        "150",
+        "nil",
+        "nil"
+    ],
+    "top_z_overrides_xy_distance": "1",
+    "version": "2.4.0.7",
+    "wall_generator": "arachne",
+    "wall_sequence": "inner-outer-inner wall"
+}

@@ -4,6 +4,7 @@
 #include "LocalesUtils.hpp"
 #include "Preset.hpp"
 
+#include <algorithm>
 #include <assert.h>
 #include <cstdlib>
 #include <fstream>
@@ -29,6 +30,7 @@
 #include <string.h>
 //BBS: add json support
 #include "nlohmann/json.hpp"
+#include "BambuConfigCompat.hpp"
 
 using namespace nlohmann;
 
@@ -967,6 +969,17 @@ int ConfigBase::load_from_json_document(const std::string &file, json &j, Config
     std::string get_wall_sequence;
     bool is_project_settings = false;
 
+    // Bambu "nil" slots translated while parsing the arrays below. The substitution report wants
+    // the option as it finally landed, which only exists once set_deserialize() has run, so the
+    // interesting cases are collected here and turned into ConfigSubstitutions at the end.
+    struct NilTranslation {
+        t_config_option_key        opt_key;
+        std::string                original;
+        std::string                translated;
+        BambuConfigCompat::NilFix  fix;
+    };
+    std::vector<NilTranslation> nil_report;
+
     CNumericLocalesSetter locales_setter;
 
     try {
@@ -1093,7 +1106,42 @@ int ConfigBase::load_from_json_document(const std::string &file, json &j, Config
                             break;
                         }
                     }
-                    if (valid && optdef != nullptr && optdef->is_scalar() && optdef->type != coPoint && optdef->type != coPoint3) {
+                    // Bambu Studio writes the literal "nil" into the per-extruder slots a setting
+                    // does not apply to. Options this fork types as nullable cope with that on
+                    // their own; every other type throws out of deserialize(), and the preset
+                    // loader answers a parse failure by deleting the file. Translate here, where
+                    // the elements are still a vector - handle_legacy() runs further up, before
+                    // value_str is assembled, so a value rewrite cannot live at that call site.
+                    bool nil_handled = false;
+                    if (valid && optdef != nullptr && BambuConfigCompat::has_nil(array_values)) {
+                        const BambuConfigCompat::NilResult nil_result =
+                            BambuConfigCompat::translate_nil_array(optdef, array_values);
+                        if (nil_result.drop()) {
+                            // No value survives. Inventing one - above all 0 - would be worse than
+                            // the compiled-in default: a 0 speed or acceleration emits `G1 F0`.
+                            BOOST_LOG_TRIVIAL(warning)
+                                << __FUNCTION__ << ": " << it.key() << " in " << file << " is \""
+                                << nil_result.original << "\"; " << BambuConfigCompat::describe(nil_result.fix);
+                            nil_report.push_back({ opt_key, nil_result.original, std::string(), nil_result.fix });
+                            continue;
+                        }
+                        if (nil_result.changed()) {
+                            value_str   = nil_result.value;
+                            nil_handled = true;
+                            if (nil_result.lossy())
+                                BOOST_LOG_TRIVIAL(warning)
+                                    << __FUNCTION__ << ": " << it.key() << " in " << file << ": \""
+                                    << nil_result.original << "\" -> \"" << nil_result.value << "\" ("
+                                    << BambuConfigCompat::describe(nil_result.fix) << ")";
+                            else
+                                BOOST_LOG_TRIVIAL(info)
+                                    << __FUNCTION__ << ": " << it.key() << " in " << file << ": \""
+                                    << nil_result.original << "\" -> \"" << nil_result.value << "\" ("
+                                    << BambuConfigCompat::describe(nil_result.fix) << ")";
+                            nil_report.push_back({ opt_key, nil_result.original, nil_result.value, nil_result.fix });
+                        }
+                    }
+                    if (valid && ! nil_handled && optdef != nullptr && optdef->is_scalar() && optdef->type != coPoint && optdef->type != coPoint3) {
                         if (array_values.size() == 1) {
                             value_str = array_values.front();
                         } else if (!array_values.empty()) {
@@ -1146,6 +1194,35 @@ int ConfigBase::load_from_json_document(const std::string &file, json &j, Config
                 else {
                     //should not happen
                     BOOST_LOG_TRIVIAL(error) << __FUNCTION__<< ": parse "<<file<<" error, invalid json type for " << it.key();
+                }
+            }
+        }
+        if (! nil_report.empty()) {
+            const size_t lossy_count = std::count_if(nil_report.begin(), nil_report.end(),
+                [](const NilTranslation &n) {
+                    return n.fix == BambuConfigCompat::NilFix::CollapsedLossy ||
+                           n.fix == BambuConfigCompat::NilFix::BackfilledLossy ||
+                           n.fix == BambuConfigCompat::NilFix::AllNil;
+                });
+            BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ": " << file << ": translated "
+                                    << nil_report.size() << " Bambu per-extruder setting(s) with not-applicable slots, "
+                                    << lossy_count << " of them lossy";
+            // Only the lossy ones are worth interrupting the user for. A clean collapse of
+            // ["200","nil","200"] to "200" loses nothing and would only add noise to the dialog.
+            if (lossy_count > 0 && substitution_context.rule != ForwardCompatibilitySubstitutionRule::Disable) {
+                for (const NilTranslation &n : nil_report) {
+                    if (n.fix != BambuConfigCompat::NilFix::CollapsedLossy &&
+                        n.fix != BambuConfigCompat::NilFix::BackfilledLossy &&
+                        n.fix != BambuConfigCompat::NilFix::AllNil)
+                        continue;
+                    const ConfigOption *landed = this->option(n.opt_key);
+                    if (landed == nullptr)
+                        continue;
+                    ConfigSubstitution config_substitution;
+                    config_substitution.opt_def   = config_def->get(n.opt_key);
+                    config_substitution.old_value = n.original;
+                    config_substitution.new_value = ConfigOptionUniquePtr(landed->clone());
+                    substitution_context.substitutions.emplace_back(std::move(config_substitution));
                 }
             }
         }

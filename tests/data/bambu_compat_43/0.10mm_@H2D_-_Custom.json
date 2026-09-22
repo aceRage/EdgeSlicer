@@ -1,0 +1,42 @@
+{
+    "from": "User",
+    "inherits": "0.10mm Standard @BBL H2D 0.2 nozzle",
+    "minimum_sparse_infill_area": "0",
+    "name": "0.10mm @H2D - Custom",
+    "outer_wall_acceleration": [
+        "3000",
+        "nil",
+        "3000",
+        "nil"
+    ],
+    "precise_outer_wall": "1",
+    "print_extruder_id": [
+        "1",
+        "1",
+        "2",
+        "2"
+    ],
+    "print_extruder_variant": [
+        "Direct Drive Standard",
+        "Direct Drive High Flow",
+        "Direct Drive Standard",
+        "Direct Drive High Flow"
+    ],
+    "print_settings_id": "0.10mm @H2D - Custom",
+    "sparse_infill_pattern": "gyroid",
+    "support_interface_speed": [
+        "50",
+        "nil",
+        "50",
+        "nil"
+    ],
+    "support_top_z_distance": "0.16",
+    "top_surface_acceleration": [
+        "1000",
+        "nil",
+        "1000",
+        "nil"
+    ],
+    "version": "2.6.0.1",
+    "wall_loops": "5"
+}

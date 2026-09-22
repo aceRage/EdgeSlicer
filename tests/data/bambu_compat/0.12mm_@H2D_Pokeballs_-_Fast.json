@@ -1,0 +1,219 @@
+{
+    "bottom_color_penetration_layers": "2",
+    "bottom_shell_layers": "4",
+    "bottom_shell_thickness": "0.8",
+    "bridge_flow": "0.95",
+    "brim_object_gap": "0.12",
+    "brim_type": "brim_ears",
+    "brim_width": "8",
+    "default_acceleration": [
+        "10000",
+        "nil",
+        "10000",
+        "nil",
+        "nil"
+    ],
+    "enable_arc_fitting": "0",
+    "enable_support": "1",
+    "enable_support_ironing": "1",
+    "flush_into_support": "0",
+    "from": "User",
+    "fuzzy_skin_point_distance": "0.4",
+    "fuzzy_skin_thickness": "0.09",
+    "gap_infill_speed": [
+        "150",
+        "nil",
+        "150",
+        "nil",
+        "150"
+    ],
+    "infill_wall_overlap": "10%",
+    "inherits": "0.20mm Standard @BBL H2D",
+    "initial_layer_infill_speed": [
+        "50",
+        "nil",
+        "50",
+        "nil",
+        "nil"
+    ],
+    "inner_wall_speed": [
+        "200",
+        "nil",
+        "200",
+        "nil",
+        "160"
+    ],
+    "interlocking_beam_width": "0.5",
+    "interlocking_orientation": "0",
+    "internal_solid_infill_speed": [
+        "200",
+        "nil",
+        "200",
+        "nil",
+        "120"
+    ],
+    "layer_height": "0.12",
+    "locked_skeleton_infill_pattern": "crosshatch",
+    "locked_skin_infill_pattern": "concentric",
+    "max_bridge_length": "10",
+    "max_travel_detour_distance": "150",
+    "min_feature_size": "15%",
+    "minimum_sparse_infill_area": "8",
+    "name": "0.12mm @H2D Pokeballs - Fast",
+    "outer_wall_acceleration": [
+        "2000",
+        "nil",
+        "2000",
+        "nil",
+        "2000"
+    ],
+    "outer_wall_line_width": "0.45",
+    "outer_wall_speed": [
+        "60",
+        "nil",
+        "60",
+        "nil",
+        "60"
+    ],
+    "overhang_1_4_speed": [
+        "50",
+        "nil",
+        "50",
+        "nil",
+        "50"
+    ],
+    "overhang_3_4_speed": [
+        "50",
+        "nil",
+        "50",
+        "nil",
+        "50"
+    ],
+    "overhang_4_4_speed": [
+        "30",
+        "nil",
+        "30",
+        "nil",
+        "nil"
+    ],
+    "overhang_totally_speed": [
+        "20",
+        "nil",
+        "20",
+        "nil",
+        "nil"
+    ],
+    "prime_tower_enable_framework": "1",
+    "prime_tower_fillet_wall": "0",
+    "prime_tower_infill_gap": "100%",
+    "prime_tower_rib_wall": "0",
+    "print_extruder_id": [
+        "1",
+        "1",
+        "2",
+        "2",
+        "2"
+    ],
+    "print_extruder_variant": [
+        "Direct Drive Standard",
+        "Direct Drive High Flow",
+        "Direct Drive Standard",
+        "Direct Drive High Flow",
+        "Direct Drive TPU High Flow"
+    ],
+    "print_settings_id": "0.12mm @H2D Pokeballs - Fast",
+    "reduce_crossing_wall": "1",
+    "reduce_infill_retraction_mode": "Disabled",
+    "resolution": "0.002",
+    "seam_position": "back",
+    "seam_slope_gap": "20%",
+    "seam_slope_min_length": "12",
+    "seam_slope_start_height": "0",
+    "skeleton_infill_density": "10%",
+    "skin_infill_density": "10%",
+    "skin_infill_depth": "1",
+    "skin_infill_line_width": "0.5",
+    "slice_closing_radius": "0.03",
+    "small_perimeter_speed": [
+        "40%",
+        "nil",
+        "40%",
+        "nil",
+        "60"
+    ],
+    "smooth_coefficient": "150",
+    "sparse_infill_anchor": "2",
+    "sparse_infill_density": "10%",
+    "sparse_infill_pattern": "crosshatch",
+    "sparse_infill_speed": [
+        "200",
+        "nil",
+        "200",
+        "nil",
+        "200"
+    ],
+    "support_bottom_interface_spacing": "0.35",
+    "support_interface_pattern": "rectilinear_interlaced",
+    "support_interface_spacing": "0",
+    "support_interface_speed": [
+        "50",
+        "nil",
+        "50",
+        "nil",
+        "30"
+    ],
+    "support_interface_top_layers": "3",
+    "support_object_first_layer_gap": "0.35",
+    "support_object_xy_distance": "0.45",
+    "support_on_build_plate_only": "1",
+    "support_speed": [
+        "nil",
+        "nil",
+        "nil",
+        "nil",
+        "100"
+    ],
+    "support_threshold_angle": "29",
+    "support_type": "normal(auto)",
+    "top_color_penetration_layers": "1",
+    "top_one_wall_type": "not apply",
+    "top_shell_layers": "4",
+    "top_shell_thickness": "0.8",
+    "top_solid_infill_flow_ratio": [
+        "nil",
+        "1.02",
+        "nil",
+        "1.02",
+        "1.02"
+    ],
+    "top_surface_acceleration": [
+        "200",
+        "nil",
+        "200",
+        "nil",
+        "500"
+    ],
+    "top_surface_line_width": "0.4",
+    "top_surface_pattern": "monotonic",
+    "top_surface_speed": [
+        "100",
+        "nil",
+        "100",
+        "nil",
+        "150"
+    ],
+    "top_z_overrides_xy_distance": "1",
+    "tree_support_branch_angle": "40",
+    "version": "2.3.0.4",
+    "vertical_shell_speed": [
+        "nil",
+        "nil",
+        "nil",
+        "nil",
+        "100"
+    ],
+    "wall_distribution_count": "2",
+    "wall_transition_angle": "30",
+    "xy_contour_compensation": "0.02",
+    "xy_hole_compensation": "0.02"
+}

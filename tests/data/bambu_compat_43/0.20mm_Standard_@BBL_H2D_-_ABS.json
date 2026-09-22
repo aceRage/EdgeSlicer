@@ -1,0 +1,57 @@
+{
+    "enable_support": "1",
+    "flush_into_support": "0",
+    "from": "User",
+    "inherits": "0.20mm Standard @BBL H2D",
+    "inner_wall_speed": [
+        "150",
+        "nil",
+        "nil",
+        "nil",
+        "150"
+    ],
+    "internal_solid_infill_speed": [
+        "180",
+        "nil",
+        "nil",
+        "nil",
+        "180"
+    ],
+    "name": "0.20mm Standard @BBL H2D - ABS",
+    "print_extruder_id": [
+        "1",
+        "1",
+        "2",
+        "2",
+        "2"
+    ],
+    "print_extruder_variant": [
+        "Direct Drive Standard",
+        "Direct Drive High Flow",
+        "Direct Drive Standard",
+        "Direct Drive High Flow",
+        "Direct Drive TPU High Flow"
+    ],
+    "print_settings_id": "0.20mm Standard @BBL H2D - ABS",
+    "skeleton_infill_density": "30%",
+    "skin_infill_density": "30%",
+    "sparse_infill_density": "30%",
+    "sparse_infill_pattern": "cubic",
+    "sparse_infill_speed": [
+        "180",
+        "nil",
+        "nil",
+        "nil",
+        "180"
+    ],
+    "support_bottom_z_distance": "0.24",
+    "support_interface_pattern": "rectilinear_interlaced",
+    "support_interface_spacing": "0.1",
+    "support_interface_top_layers": "4",
+    "support_top_z_distance": "0.18",
+    "top_z_overrides_xy_distance": "1",
+    "version": "2.4.0.7",
+    "wall_generator": "arachne",
+    "wall_loops": "3",
+    "wall_sequence": "inner-outer-inner wall"
+}
