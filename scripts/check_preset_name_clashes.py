@@ -121,9 +121,13 @@ def main():
     #     because every lookup tries find_preset_internal before find_preset_renamed, so the
     #     alias can never fire. Reported as a warning, not an error: the tree carries a number
     #     of long-standing cases of this (Creality, Flashforge, OrcaFilamentLibrary) that
-    #     upstream's own validator accepts, and they are inert rather than wrong. It is still
-    #     worth seeing, because it is the trap that makes `renamed_from: "Generic PLA"` the
-    #     wrong way to alias a renamed Snapmaker generic -- BBL's "Generic PLA" is still live.
+    #     upstream's own validator accepts, and they are inert rather than wrong.
+    #     "Inert" holds only while the vendor owning the live name is loaded. The app loads just
+    #     the vendors the user enabled (PresetUpdater::check_installed_vendor_profiles), so the
+    #     Snapmaker U1 generics' `renamed_from: "Generic PLA"` etc. is deliberate: with BBL
+    #     enabled, BBL's live "Generic PLA" wins every lookup and the alias never fires; without
+    #     BBL, it migrates presets and projects saved against the plain names that the v2.4.0
+    #     lockstep briefly shipped. Never use such an alias to *replace* a live preset.
     shadowed = 0
     for old, owners in sorted(claims.items()):
         if old in live_names:
