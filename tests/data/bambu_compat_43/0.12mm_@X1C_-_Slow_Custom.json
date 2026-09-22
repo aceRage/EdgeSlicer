@@ -1,0 +1,139 @@
+{
+    "bottom_shell_layers": "4",
+    "bridge_flow": "0.97",
+    "brim_type": "no_brim",
+    "default_acceleration": [
+        "5000",
+        "nil"
+    ],
+    "enable_support": "1",
+    "enable_support_ironing": "1",
+    "flush_into_support": "0",
+    "from": "User",
+    "fuzzy_skin_point_distance": "1",
+    "fuzzy_skin_thickness": "0.03",
+    "gap_infill_speed": [
+        "200",
+        "200"
+    ],
+    "inherits": "0.12mm Fine @BBL X1C",
+    "initial_layer_infill_speed": [
+        "40",
+        "nil"
+    ],
+    "initial_layer_speed": [
+        "40",
+        "nil"
+    ],
+    "inner_wall_line_width": "0.5",
+    "inner_wall_speed": [
+        "70",
+        "120"
+    ],
+    "internal_solid_infill_speed": [
+        "200",
+        "nil"
+    ],
+    "min_feature_size": "15%",
+    "name": "0.12mm @X1C - Slow Custom",
+    "outer_wall_acceleration": [
+        "2000",
+        "nil"
+    ],
+    "outer_wall_line_width": "0.5",
+    "outer_wall_speed": [
+        "50",
+        "nil"
+    ],
+    "overhang_1_4_speed": [
+        "50",
+        "nil"
+    ],
+    "overhang_2_4_speed": [
+        "50",
+        "nil"
+    ],
+    "overhang_3_4_speed": [
+        "50",
+        "nil"
+    ],
+    "overhang_4_4_speed": [
+        "50",
+        "nil"
+    ],
+    "overhang_totally_speed": [
+        "50",
+        "nil"
+    ],
+    "precise_outer_wall": "1",
+    "prime_tower_fillet_wall": "0",
+    "prime_tower_rib_wall": "0",
+    "print_extruder_id": [
+        "1",
+        "1"
+    ],
+    "print_extruder_variant": [
+        "Direct Drive Standard",
+        "Direct Drive High Flow"
+    ],
+    "print_settings_id": "0.12mm @X1C - Slow Custom",
+    "reduce_infill_retraction_mode": "Disabled",
+    "seam_position": "back",
+    "seam_slope_gap": "12%",
+    "seam_slope_inner_walls": "0",
+    "seam_slope_min_length": "5",
+    "skeleton_infill_density": "10%",
+    "skeleton_infill_line_width": "0.5",
+    "skin_infill_density": "10%",
+    "skin_infill_line_width": "0.5",
+    "small_perimeter_speed": [
+        "80%",
+        "nil"
+    ],
+    "smooth_coefficient": "4",
+    "sparse_infill_anchor": "2",
+    "sparse_infill_anchor_max": "10",
+    "sparse_infill_density": "10%",
+    "sparse_infill_line_width": "0.5",
+    "sparse_infill_pattern": "gyroid",
+    "sparse_infill_speed": [
+        "160",
+        "nil"
+    ],
+    "support_base_pattern_spacing": "5",
+    "support_bottom_interface_spacing": "0.3",
+    "support_bottom_z_distance": "0.2",
+    "support_interface_pattern": "rectilinear_interlaced",
+    "support_interface_spacing": "0",
+    "support_interface_speed": [
+        "40",
+        "30"
+    ],
+    "support_interface_top_layers": "3",
+    "support_object_xy_distance": "0.45",
+    "support_on_build_plate_only": "1",
+    "support_style": "tree_hybrid",
+    "support_threshold_angle": "29",
+    "support_top_z_distance": "0.2",
+    "top_color_penetration_layers": "4",
+    "top_one_wall_type": "not apply",
+    "top_shell_layers": "3",
+    "top_surface_acceleration": [
+        "1000",
+        "nil"
+    ],
+    "top_surface_pattern": "monotonic",
+    "top_surface_speed": [
+        "150",
+        "nil"
+    ],
+    "top_z_overrides_xy_distance": "1",
+    "travel_acceleration": [
+        "6000",
+        "nil"
+    ],
+    "tree_support_branch_angle": "40",
+    "version": "2.4.0.10",
+    "wall_distribution_count": "3",
+    "wall_loops": "3"
+}

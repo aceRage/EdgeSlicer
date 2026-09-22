@@ -1,0 +1,110 @@
+{
+    "bottom_shell_thickness": "1",
+    "bridge_flow": "0.95",
+    "brim_object_gap": "0.12",
+    "brim_type": "outer_only",
+    "brim_width": "8",
+    "enable_prime_tower": "0",
+    "enable_support": "1",
+    "from": "User",
+    "gap_infill_speed": [
+        "100",
+        "nil"
+    ],
+    "infill_direction": "30",
+    "inherits": "0.20mm Standard @BBL H2S",
+    "initial_layer_infill_speed": [
+        "40",
+        "nil"
+    ],
+    "initial_layer_speed": [
+        "40",
+        "nil"
+    ],
+    "inner_wall_line_width": "0.5",
+    "inner_wall_speed": [
+        "120",
+        "nil"
+    ],
+    "internal_solid_infill_line_width": "0.5",
+    "internal_solid_infill_speed": [
+        "60",
+        "nil"
+    ],
+    "max_travel_detour_distance": "200",
+    "name": "0.20mm Standard @BBL H2S - ASA (Slow)",
+    "outer_wall_acceleration": [
+        "1000",
+        "nil"
+    ],
+    "outer_wall_speed": [
+        "80",
+        "nil"
+    ],
+    "overhang_2_4_speed": [
+        "40",
+        "nil"
+    ],
+    "precise_z_height": "1",
+    "prime_tower_infill_gap": "100%",
+    "prime_tower_rib_wall": "0",
+    "print_extruder_id": [
+        "1",
+        "1"
+    ],
+    "print_extruder_variant": [
+        "Direct Drive Standard",
+        "Direct Drive High Flow"
+    ],
+    "print_settings_id": "0.20mm Standard @BBL H2S - ASA (Slow)",
+    "reduce_crossing_wall": "1",
+    "resolution": "0.008",
+    "seam_gap": "12%",
+    "skeleton_infill_line_width": "0.5",
+    "skin_infill_line_width": "0.5",
+    "smooth_coefficient": "10",
+    "sparse_infill_anchor": "5",
+    "sparse_infill_anchor_max": "40",
+    "sparse_infill_line_width": "0.5",
+    "sparse_infill_pattern": "gyroid",
+    "sparse_infill_speed": [
+        "120",
+        "nil"
+    ],
+    "support_interface_spacing": "0.1",
+    "support_interface_speed": [
+        "30",
+        "nil"
+    ],
+    "support_interface_top_layers": "4",
+    "support_object_xy_distance": "0.45",
+    "support_on_build_plate_only": "1",
+    "support_style": "tree_organic",
+    "support_top_z_distance": "0.16",
+    "top_color_penetration_layers": "3",
+    "top_one_wall_type": "not apply",
+    "top_solid_infill_flow_ratio": [
+        "0.98",
+        "0.98"
+    ],
+    "top_surface_acceleration": [
+        "0",
+        "nil"
+    ],
+    "top_surface_line_width": "0.5",
+    "top_surface_pattern": "monotonic",
+    "top_surface_speed": [
+        "100",
+        "nil"
+    ],
+    "top_z_overrides_xy_distance": "1",
+    "tree_support_branch_diameter": "3",
+    "version": "2.2.0.4",
+    "vertical_shell_speed": [
+        "80",
+        "nil"
+    ],
+    "wall_generator": "arachne",
+    "wall_loops": "3",
+    "wall_sequence": "inner-outer-inner wall"
+}

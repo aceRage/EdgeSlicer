@@ -1,0 +1,155 @@
+{
+    "brim_object_gap": "0.14",
+    "brim_type": "no_brim",
+    "brim_width": "8",
+    "enable_support": "1",
+    "from": "User",
+    "gap_infill_speed": [
+        "150",
+        "nil",
+        "nil",
+        "nil",
+        "150"
+    ],
+    "inherits": "0.20mm Standard @BBL H2D",
+    "inner_wall_speed": [
+        "120",
+        "nil",
+        "nil",
+        "nil",
+        "120"
+    ],
+    "internal_solid_infill_speed": [
+        "120",
+        "nil",
+        "nil",
+        "nil",
+        "120"
+    ],
+    "max_bridge_length": "10",
+    "name": "0.20mm Standard Arachne - PLA (Slow)",
+    "outer_wall_acceleration": [
+        "2000",
+        "nil",
+        "nil",
+        "nil",
+        "2000"
+    ],
+    "outer_wall_speed": [
+        "60",
+        "nil",
+        "nil",
+        "nil",
+        "60"
+    ],
+    "overhang_2_4_speed": [
+        "40",
+        "nil",
+        "nil",
+        "nil",
+        "40"
+    ],
+    "overhang_3_4_speed": [
+        "20",
+        "nil",
+        "nil",
+        "nil",
+        "20"
+    ],
+    "precise_outer_wall": "1",
+    "precise_z_height": "1",
+    "prime_tower_enable_framework": "1",
+    "print_extruder_id": [
+        "1",
+        "1",
+        "2",
+        "2",
+        "2"
+    ],
+    "print_extruder_variant": [
+        "Direct Drive Standard",
+        "Direct Drive High Flow",
+        "Direct Drive Standard",
+        "Direct Drive High Flow",
+        "Direct Drive TPU High Flow"
+    ],
+    "print_settings_id": "0.20mm Standard Arachne - PLA (Slow)",
+    "seam_position": "back",
+    "small_perimeter_speed": [
+        "60",
+        "nil",
+        "nil",
+        "nil",
+        "60"
+    ],
+    "smooth_coefficient": "10",
+    "sparse_infill_anchor": "5",
+    "sparse_infill_anchor_max": "40",
+    "sparse_infill_pattern": "crosszag",
+    "sparse_infill_speed": [
+        "200",
+        "nil",
+        "nil",
+        "nil",
+        "200"
+    ],
+    "support_bottom_z_distance": "0.23",
+    "support_interface_pattern": "rectilinear",
+    "support_interface_spacing": "0.1",
+    "support_interface_speed": [
+        "30",
+        "nil",
+        "nil",
+        "nil",
+        "30"
+    ],
+    "support_interface_top_layers": "4",
+    "support_object_xy_distance": "0",
+    "support_on_build_plate_only": "1",
+    "support_speed": [
+        "100",
+        "nil",
+        "nil",
+        "nil",
+        "100"
+    ],
+    "support_top_z_distance": "0.16",
+    "support_type": "tree(manual)",
+    "top_color_penetration_layers": "3",
+    "top_shell_layers": "3",
+    "top_solid_infill_flow_ratio": [
+        "0.99",
+        "0.99",
+        "0.99",
+        "0.99",
+        "0.99"
+    ],
+    "top_surface_acceleration": [
+        "500",
+        "nil",
+        "nil",
+        "nil",
+        "500"
+    ],
+    "top_surface_speed": [
+        "100",
+        "nil",
+        "nil",
+        "nil",
+        "100"
+    ],
+    "top_z_overrides_xy_distance": "1",
+    "tree_support_branch_angle": "40",
+    "tree_support_branch_diameter": "1.75",
+    "version": "2.3.0.4",
+    "vertical_shell_speed": [
+        "100",
+        "nil",
+        "nil",
+        "nil",
+        "100"
+    ],
+    "wall_generator": "arachne",
+    "wall_loops": "3",
+    "wall_sequence": "inner-outer-inner wall"
+}

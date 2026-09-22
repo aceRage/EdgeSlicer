@@ -1,0 +1,119 @@
+{
+    "bridge_flow": "0.98",
+    "enable_support": "1",
+    "from": "User",
+    "fuzzy_skin_thickness": "0.07",
+    "inherits": "0.30mm Standard @BBL H2D 0.6 nozzle",
+    "initial_layer_infill_speed": [
+        "40",
+        "nil",
+        "nil",
+        "40",
+        "nil"
+    ],
+    "initial_layer_speed": [
+        "40",
+        "nil",
+        "nil",
+        "40",
+        "nil"
+    ],
+    "inner_wall_line_width": "0.5",
+    "inner_wall_speed": [
+        "80",
+        "80",
+        "nil",
+        "80",
+        "nil"
+    ],
+    "internal_solid_infill_speed": [
+        "80",
+        "80",
+        "nil",
+        "80",
+        "nil"
+    ],
+    "ironing_flow": "25%",
+    "ironing_pattern": "concentric",
+    "ironing_speed": "50",
+    "max_travel_detour_distance": "200",
+    "name": "0.30mm @H2D - Custom",
+    "only_one_wall_first_layer": "1",
+    "outer_wall_acceleration": [
+        "3000",
+        "3000",
+        "nil",
+        "3000",
+        "nil"
+    ],
+    "outer_wall_line_width": "0.6",
+    "outer_wall_speed": [
+        "50",
+        "50",
+        "nil",
+        "50",
+        "nil"
+    ],
+    "precise_outer_wall": "1",
+    "prime_tower_infill_gap": "100%",
+    "prime_tower_rib_wall": "0",
+    "print_extruder_id": [
+        "1",
+        "1",
+        "2",
+        "2",
+        "2"
+    ],
+    "print_extruder_variant": [
+        "Direct Drive Standard",
+        "Direct Drive High Flow",
+        "Direct Drive Standard",
+        "Direct Drive High Flow",
+        "Direct Drive TPU High Flow"
+    ],
+    "print_settings_id": "0.30mm @H2D - Custom",
+    "seam_placement_away_from_overhangs": "1",
+    "seam_position": "back",
+    "seam_slope_steps": "15",
+    "skeleton_infill_density": "10%",
+    "skin_infill_density": "10%",
+    "sparse_infill_density": "10%",
+    "sparse_infill_pattern": "crosshatch",
+    "sparse_infill_speed": [
+        "160",
+        "160",
+        "nil",
+        "160",
+        "nil"
+    ],
+    "support_bottom_z_distance": "0.38",
+    "support_interface_pattern": "rectilinear_interlaced",
+    "support_interface_spacing": "0.1",
+    "support_interface_speed": [
+        "30",
+        "50",
+        "nil",
+        "50",
+        "nil"
+    ],
+    "support_interface_top_layers": "3",
+    "support_object_xy_distance": "0.5",
+    "support_on_build_plate_only": "1",
+    "support_style": "tree_hybrid",
+    "support_threshold_angle": "25",
+    "support_top_z_distance": "0.34",
+    "top_one_wall_type": "not apply",
+    "top_surface_line_width": "0.4",
+    "top_surface_speed": [
+        "100",
+        "100",
+        "nil",
+        "100",
+        "nil"
+    ],
+    "top_z_overrides_xy_distance": "1",
+    "tree_support_branch_diameter": "1.75",
+    "version": "2.6.0.2",
+    "wall_generator": "arachne",
+    "wall_loops": "3"
+}

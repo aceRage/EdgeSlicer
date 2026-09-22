@@ -1,0 +1,32 @@
+{
+    "bridge_flow": "0.95",
+    "enable_support": "1",
+    "enable_support_ironing": "1",
+    "from": "User",
+    "inherits": "0.12mm Balanced Quality @BBL H2S 0.2 nozzle",
+    "name": "0.12mm @H2S - Custom",
+    "precise_outer_wall": "1",
+    "print_extruder_id": [
+        "1",
+        "1"
+    ],
+    "print_extruder_variant": [
+        "Direct Drive Standard",
+        "Direct Drive High Flow"
+    ],
+    "print_settings_id": "0.12mm @H2S - Custom",
+    "sparse_infill_pattern": "gyroid",
+    "support_interface_pattern": "rectilinear_interlaced",
+    "support_interface_spacing": "0",
+    "support_interface_speed": [
+        "50",
+        "nil"
+    ],
+    "support_remove_small_overhang": "0",
+    "support_style": "tree_slim",
+    "support_top_z_distance": "0.2",
+    "top_one_wall_type": "topmost",
+    "top_z_overrides_xy_distance": "1",
+    "version": "2.5.0.7",
+    "wall_loops": "5"
+}

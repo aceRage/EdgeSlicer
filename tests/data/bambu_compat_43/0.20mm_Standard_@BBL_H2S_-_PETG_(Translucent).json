@@ -1,0 +1,107 @@
+{
+    "brim_object_gap": "0.12",
+    "brim_type": "no_brim",
+    "elefant_foot_compensation": "0.1",
+    "enable_prime_tower": "0",
+    "enable_support": "1",
+    "from": "User",
+    "gap_infill_speed": [
+        "100",
+        "nil"
+    ],
+    "inherits": "0.20mm Standard @BBL H2S",
+    "initial_layer_infill_speed": [
+        "50",
+        "nil"
+    ],
+    "inner_wall_speed": [
+        "100",
+        "nil"
+    ],
+    "internal_solid_infill_speed": [
+        "60",
+        "nil"
+    ],
+    "max_travel_detour_distance": "200",
+    "name": "0.20mm Standard @BBL H2S - PETG (Translucent)",
+    "outer_wall_acceleration": [
+        "1000",
+        "nil"
+    ],
+    "outer_wall_speed": [
+        "60",
+        "nil"
+    ],
+    "overhang_2_4_speed": [
+        "30",
+        "nil"
+    ],
+    "overhang_3_4_speed": [
+        "20",
+        "nil"
+    ],
+    "override_filament_scarf_seam_setting": "1",
+    "precise_outer_wall": "1",
+    "prime_tower_infill_gap": "100%",
+    "prime_tower_rib_wall": "0",
+    "print_extruder_id": [
+        "1",
+        "1"
+    ],
+    "print_extruder_variant": [
+        "Direct Drive Standard",
+        "Direct Drive High Flow"
+    ],
+    "print_settings_id": "0.20mm Standard @BBL H2S - PETG (Translucent)",
+    "reduce_crossing_wall": "1",
+    "resolution": "0.01",
+    "slice_closing_radius": "0.04",
+    "small_perimeter_speed": [
+        "60",
+        "nil"
+    ],
+    "smooth_coefficient": "10",
+    "sparse_infill_anchor": "10",
+    "sparse_infill_anchor_max": "40",
+    "sparse_infill_density": "10%",
+    "sparse_infill_pattern": "lightning",
+    "sparse_infill_speed": [
+        "80",
+        "nil"
+    ],
+    "support_bottom_z_distance": "0.23",
+    "support_interface_pattern": "rectilinear",
+    "support_interface_spacing": "0.1",
+    "support_interface_speed": [
+        "20",
+        "nil"
+    ],
+    "support_interface_top_layers": "4",
+    "support_object_xy_distance": "0.45",
+    "support_on_build_plate_only": "1",
+    "support_speed": [
+        "100",
+        "nil"
+    ],
+    "support_style": "tree_organic",
+    "support_top_z_distance": "0.18",
+    "top_color_penetration_layers": "3",
+    "top_one_wall_type": "not apply",
+    "top_shell_layers": "3",
+    "top_surface_acceleration": [
+        "0",
+        "nil"
+    ],
+    "top_surface_speed": [
+        "80",
+        "nil"
+    ],
+    "top_z_overrides_xy_distance": "1",
+    "version": "2.2.0.4",
+    "vertical_shell_speed": [
+        "60",
+        "nil"
+    ],
+    "wall_generator": "arachne",
+    "wall_sequence": "inner-outer-inner wall"
+}

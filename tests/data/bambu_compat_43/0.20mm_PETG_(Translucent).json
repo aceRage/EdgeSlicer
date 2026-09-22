@@ -1,0 +1,162 @@
+{
+    "brim_object_gap": "0.12",
+    "brim_type": "outer_and_inner",
+    "brim_width": "8",
+    "elefant_foot_compensation": "0.1",
+    "enable_support": "1",
+    "from": "User",
+    "gap_infill_speed": [
+        "100",
+        "nil",
+        "nil",
+        "nil",
+        "100"
+    ],
+    "inherits": "0.20mm Standard @BBL H2D",
+    "initial_layer_infill_speed": [
+        "50",
+        "nil",
+        "nil",
+        "nil",
+        "50"
+    ],
+    "inner_wall_speed": [
+        "100",
+        "nil",
+        "nil",
+        "nil",
+        "100"
+    ],
+    "internal_solid_infill_speed": [
+        "60",
+        "nil",
+        "nil",
+        "nil",
+        "60"
+    ],
+    "max_bridge_length": "10",
+    "max_travel_detour_distance": "200",
+    "name": "0.20mm PETG (Translucent)",
+    "outer_wall_acceleration": [
+        "1000",
+        "nil",
+        "nil",
+        "nil",
+        "1000"
+    ],
+    "outer_wall_speed": [
+        "60",
+        "nil",
+        "nil",
+        "nil",
+        "60"
+    ],
+    "overhang_2_4_speed": [
+        "30",
+        "nil",
+        "nil",
+        "nil",
+        "30"
+    ],
+    "overhang_3_4_speed": [
+        "20",
+        "nil",
+        "nil",
+        "nil",
+        "20"
+    ],
+    "override_filament_scarf_seam_setting": "1",
+    "precise_outer_wall": "1",
+    "prime_tower_enable_framework": "1",
+    "print_extruder_id": [
+        "1",
+        "1",
+        "2",
+        "2",
+        "2"
+    ],
+    "print_extruder_variant": [
+        "Direct Drive Standard",
+        "Direct Drive High Flow",
+        "Direct Drive Standard",
+        "Direct Drive High Flow",
+        "Direct Drive TPU High Flow"
+    ],
+    "print_settings_id": "0.20mm PETG (Translucent)",
+    "reduce_crossing_wall": "1",
+    "resolution": "0.01",
+    "skeleton_infill_density": "10%",
+    "skin_infill_density": "10%",
+    "slice_closing_radius": "0.04",
+    "small_perimeter_speed": [
+        "60",
+        "nil",
+        "nil",
+        "nil",
+        "60"
+    ],
+    "smooth_coefficient": "10",
+    "sparse_infill_anchor": "10",
+    "sparse_infill_anchor_max": "40",
+    "sparse_infill_density": "10%",
+    "sparse_infill_pattern": "lightning",
+    "sparse_infill_speed": [
+        "80",
+        "nil",
+        "nil",
+        "nil",
+        "80"
+    ],
+    "support_bottom_z_distance": "0.23",
+    "support_interface_pattern": "rectilinear_interlaced",
+    "support_interface_spacing": "0.1",
+    "support_interface_speed": [
+        "20",
+        "nil",
+        "nil",
+        "nil",
+        "20"
+    ],
+    "support_interface_top_layers": "4",
+    "support_object_xy_distance": "0.45",
+    "support_on_build_plate_only": "1",
+    "support_speed": [
+        "100",
+        "nil",
+        "nil",
+        "nil",
+        "100"
+    ],
+    "support_style": "tree_organic",
+    "support_top_z_distance": "0.18",
+    "top_color_penetration_layers": "3",
+    "top_one_wall_type": "not apply",
+    "top_shell_layers": "3",
+    "top_surface_acceleration": [
+        "500",
+        "nil",
+        "nil",
+        "nil",
+        "500"
+    ],
+    "top_surface_speed": [
+        "80",
+        "nil",
+        "nil",
+        "nil",
+        "80"
+    ],
+    "top_z_overrides_xy_distance": "1",
+    "tree_support_branch_angle": "40",
+    "version": "2.3.0.4",
+    "vertical_shell_speed": [
+        "60",
+        "nil",
+        "nil",
+        "nil",
+        "60"
+    ],
+    "wall_generator": "arachne",
+    "wall_sequence": "inner-outer-inner wall",
+    "z_direction_outwall_speed_continuous": "0"
+}

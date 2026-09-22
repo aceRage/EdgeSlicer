@@ -1,0 +1,172 @@
+{
+    "bottom_color_penetration_layers": "5",
+    "bottom_shell_layers": "5",
+    "bridge_flow": "0.95",
+    "brim_object_gap": "0.12",
+    "brim_type": "brim_ears",
+    "brim_width": "8",
+    "enable_support": "1",
+    "enable_support_ironing": "1",
+    "flush_into_support": "0",
+    "from": "User",
+    "fuzzy_skin_point_distance": "0.4",
+    "fuzzy_skin_thickness": "0.08",
+    "gap_infill_speed": [
+        "150",
+        "nil",
+        "nil",
+        "nil",
+        "150"
+    ],
+    "inherits": "0.20mm Standard @BBL H2D",
+    "inner_wall_speed": [
+        "200",
+        "nil",
+        "200",
+        "nil",
+        "160"
+    ],
+    "interlocking_beam": "1",
+    "interlocking_beam_width": "0.5",
+    "interlocking_orientation": "0",
+    "internal_solid_infill_speed": [
+        "nil",
+        "nil",
+        "nil",
+        "nil",
+        "120"
+    ],
+    "layer_height": "0.1",
+    "max_bridge_length": "10",
+    "name": "0.10mm @H2D 2W Arachne",
+    "outer_wall_acceleration": [
+        "nil",
+        "nil",
+        "nil",
+        "nil",
+        "2000"
+    ],
+    "outer_wall_line_width": "0.5",
+    "outer_wall_speed": [
+        "60",
+        "nil",
+        "60",
+        "nil",
+        "60"
+    ],
+    "overhang_1_4_speed": [
+        "nil",
+        "nil",
+        "nil",
+        "nil",
+        "50"
+    ],
+    "overhang_3_4_speed": [
+        "nil",
+        "nil",
+        "nil",
+        "nil",
+        "50"
+    ],
+    "precise_outer_wall": "1",
+    "prime_tower_enable_framework": "1",
+    "print_extruder_id": [
+        "1",
+        "1",
+        "2",
+        "2",
+        "2"
+    ],
+    "print_extruder_variant": [
+        "Direct Drive Standard",
+        "Direct Drive High Flow",
+        "Direct Drive Standard",
+        "Direct Drive High Flow",
+        "Direct Drive TPU High Flow"
+    ],
+    "print_settings_id": "0.10mm @H2D 2W Arachne",
+    "reduce_infill_retraction_mode": "Disabled",
+    "seam_position": "back",
+    "seam_slope_inner_walls": "0",
+    "seam_slope_min_length": "5",
+    "seam_slope_steps": "6",
+    "seam_slope_type": "external",
+    "skeleton_infill_density": "10%",
+    "skin_infill_density": "10%",
+    "small_perimeter_speed": [
+        "80%",
+        "nil",
+        "80%",
+        "nil",
+        "60"
+    ],
+    "sparse_infill_anchor": "5",
+    "sparse_infill_anchor_max": "40",
+    "sparse_infill_density": "10%",
+    "sparse_infill_pattern": "adaptivecubic",
+    "sparse_infill_speed": [
+        "nil",
+        "nil",
+        "nil",
+        "nil",
+        "200"
+    ],
+    "support_bottom_z_distance": "0.24",
+    "support_interface_pattern": "rectilinear_interlaced",
+    "support_interface_spacing": "0",
+    "support_interface_speed": [
+        "50",
+        "nil",
+        "50",
+        "nil",
+        "30"
+    ],
+    "support_interface_top_layers": "3",
+    "support_object_xy_distance": "0.3",
+    "support_on_build_plate_only": "1",
+    "support_speed": [
+        "nil",
+        "nil",
+        "nil",
+        "nil",
+        "100"
+    ],
+    "support_threshold_angle": "29",
+    "top_color_penetration_layers": "7",
+    "top_one_wall_type": "not apply",
+    "top_solid_infill_flow_ratio": [
+        "nil",
+        "1.02",
+        "nil",
+        "1.02",
+        "1.02"
+    ],
+    "top_surface_acceleration": [
+        "nil",
+        "nil",
+        "nil",
+        "nil",
+        "500"
+    ],
+    "top_surface_pattern": "monotonic",
+    "top_surface_speed": [
+        "150",
+        "nil",
+        "150",
+        "nil",
+        "150"
+    ],
+    "top_z_overrides_xy_distance": "1",
+    "tree_support_branch_angle": "40",
+    "version": "2.3.0.4",
+    "vertical_shell_speed": [
+        "nil",
+        "nil",
+        "nil",
+        "nil",
+        "100"
+    ],
+    "wall_generator": "arachne",
+    "wall_loops": "3",
+    "wall_transition_angle": "30"
+}
