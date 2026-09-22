@@ -891,12 +891,24 @@ wxBoxSizer *PreferencesDialog::create_item_gizmo_panel_opacity(wxWindow *parent,
         apply_percent(percent);
     };
 
-    entry->GetTextCtrl()->Bind(wxEVT_TEXT_ENTER, [commit_entry](wxCommandEvent &e) {
+    wxTextCtrl *entry_ctrl = entry->GetTextCtrl();
+    entry_ctrl->Bind(wxEVT_TEXT_ENTER, [commit_entry, entry_ctrl](wxCommandEvent &e) {
+        commit_entry();
+        entry_ctrl->SelectAll();
+        e.Skip();
+    });
+    entry_ctrl->Bind(wxEVT_KILL_FOCUS, [commit_entry](wxFocusEvent &e) {
         commit_entry();
         e.Skip();
     });
-    entry->GetTextCtrl()->Bind(wxEVT_KILL_FOCUS, [commit_entry](wxFocusEvent &e) {
-        commit_entry();
+    // Focusing the box selects its text, so typing replaces the value instead of appending to it.
+    // A click on the box's frame (outside the inner edit) also focuses the edit.
+    entry_ctrl->Bind(wxEVT_SET_FOCUS, [entry_ctrl](wxFocusEvent &e) {
+        entry_ctrl->CallAfter([entry_ctrl]() { entry_ctrl->SelectAll(); });
+        e.Skip();
+    });
+    entry->Bind(wxEVT_LEFT_DOWN, [entry_ctrl](wxMouseEvent &e) {
+        entry_ctrl->SetFocus();
         e.Skip();
     });
 
