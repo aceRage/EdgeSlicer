@@ -3,6 +3,7 @@
   "from": "system",
   "instantiation": "true",
   "name": "Snapmaker PET @J1",
+  "filament_id": "802807698",
   "setting_id": "802807698",
   "inherits": "fdm_filament_pet_category",
   "compatible_printers": [

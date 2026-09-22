@@ -3,6 +3,7 @@
   "from": "system",
   "instantiation": "true",
   "name": "PolyTerra PLA",
+  "filament_id": "3016316214",
   "setting_id": "3016316214",
   "inherits": "fdm_filament_pla_category",
   "compatible_printers": [

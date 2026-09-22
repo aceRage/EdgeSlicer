@@ -4,6 +4,7 @@
     "instantiation": "true",
     "name": "Generic PVA",
     "renamed_from": "Generic PVA @U1 0.4 nozzle",
+    "filament_id": "GFSS99",
     "setting_id": "GFSS99",
     "inherits": "Generic PVA @U1 base",
     "compatible_printers": [

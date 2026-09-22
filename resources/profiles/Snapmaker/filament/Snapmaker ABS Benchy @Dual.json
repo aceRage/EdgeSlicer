@@ -3,6 +3,7 @@
   "from": "system",
   "instantiation": "true",
   "name": "Snapmaker ABS Benchy @Dual",
+  "filament_id": "3540754477",
   "setting_id": "3540754477",
   "inherits": "fdm_filament_abs_category",
   "compatible_printers": [

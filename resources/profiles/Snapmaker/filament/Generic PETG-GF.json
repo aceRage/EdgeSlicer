@@ -3,6 +3,7 @@
     "from": "system",
     "instantiation": "true",
     "name": "Generic PETG-GF",
+    "filament_id": "GFSG50_022",
     "setting_id": "GFSG50_022",
     "inherits": "Generic PETG-GF @U1 base",
     "fan_cooling_layer_time": [

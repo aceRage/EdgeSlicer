@@ -3,6 +3,7 @@
     "from": "system",
     "instantiation": "true",
     "name": "Generic PETG HF @U1 0.8 nozzle",
+    "filament_id": "GFSG96_00",
     "setting_id": "GFSG96_00",
     "inherits": "Generic PETG HF @U1 base",
     "filament_retraction_length": [

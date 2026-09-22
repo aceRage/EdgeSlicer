@@ -4,6 +4,7 @@
     "instantiation": "true",
     "name": "Polymaker General PLA Family @U1",
     "renamed_from": "PolyLite PLA @U1;PolyTerra PLA @U1",
+    "filament_id": "POLY_GENERAL_PLA_U1_001",
     "setting_id": "POLY_GENERAL_PLA_U1_001",
     "inherits": "Polymaker General PLA Family @U1 base",
     "compatible_printers": [

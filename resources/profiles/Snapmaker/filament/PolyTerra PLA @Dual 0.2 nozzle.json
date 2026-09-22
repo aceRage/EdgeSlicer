@@ -3,6 +3,7 @@
   "from": "system",
   "instantiation": "true",
   "name": "PolyTerra PLA @Dual 0.2 nozzle",
+  "filament_id": "1258531391",
   "setting_id": "1258531391",
   "inherits": "PolyTerra PLA @Dual base",
   "compatible_printers": [

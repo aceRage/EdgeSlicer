@@ -3,6 +3,7 @@
   "from": "system",
   "instantiation": "true",
   "name": "Snapmaker TPE @Dual",
+  "filament_id": "2704030359",
   "setting_id": "2704030359",
   "inherits": "fdm_filament_tpu_unspecified_category",
   "compatible_printers": [

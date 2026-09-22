@@ -3,6 +3,7 @@
   "from": "system",
   "instantiation": "true",
   "name": "Snapmaker PA-CF @Dual",
+  "filament_id": "2799665789",
   "setting_id": "2799665789",
   "inherits": "fdm_filament_pa_cf_category",
   "compatible_printers": [

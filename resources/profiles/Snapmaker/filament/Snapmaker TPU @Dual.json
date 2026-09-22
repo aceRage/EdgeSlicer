@@ -3,6 +3,7 @@
   "from": "system",
   "instantiation": "true",
   "name": "Snapmaker TPU @Dual",
+  "filament_id": "3164285683",
   "setting_id": "3164285683",
   "inherits": "fdm_filament_tpu_unspecified_category",
   "compatible_printers": [

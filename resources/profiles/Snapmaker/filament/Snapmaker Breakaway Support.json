@@ -3,6 +3,7 @@
   "from": "system",
   "instantiation": "true",
   "name": "Snapmaker Breakaway Support",
+  "filament_id": "4146000000",
   "setting_id": "4146000000",
   "inherits": "fdm_filament_support_breakaway_category",
   "compatible_printers": [

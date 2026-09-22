@@ -3,6 +3,7 @@
   "from": "system",
   "instantiation": "true",
   "name": "Snapmaker PET @Dual",
+  "filament_id": "4213200045",
   "setting_id": "4213200045",
   "inherits": "fdm_filament_pet_category",
   "compatible_printers": [

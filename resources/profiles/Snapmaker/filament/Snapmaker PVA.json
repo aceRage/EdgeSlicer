@@ -3,6 +3,7 @@
   "from": "system",
   "instantiation": "true",
   "name": "Snapmaker PVA",
+  "filament_id": "3741816734",
   "setting_id": "3741816734",
   "inherits": "fdm_filament_pva_category",
   "compatible_printers": [

@@ -3,6 +3,7 @@
     "from": "system",
     "instantiation": "true",
     "name": "Generic PLA Silk @U1 0.8 nozzle",
+    "filament_id": "GFSL99_01",
     "setting_id": "GFSL99_01",
     "inherits": "Generic PLA Silk @U1 base",
     "filament_max_volumetric_speed": [

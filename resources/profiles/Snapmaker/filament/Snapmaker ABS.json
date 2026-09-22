@@ -3,6 +3,7 @@
   "from": "system",
   "instantiation": "true",
   "name": "Snapmaker ABS",
+  "filament_id": "536148164",
   "setting_id": "536148164",
   "inherits": "fdm_filament_abs_category",
   "compatible_printers": [

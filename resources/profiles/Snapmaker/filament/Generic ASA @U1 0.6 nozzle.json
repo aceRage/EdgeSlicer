@@ -3,6 +3,7 @@
     "from": "system",
     "instantiation": "true",
     "name": "Generic ASA @U1 0.6 nozzle",
+    "filament_id": "GFSB98",
     "setting_id": "GFSB98",
     "inherits": "Generic ASA @U1 base",
     "compatible_printers": [

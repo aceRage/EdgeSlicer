@@ -3,6 +3,7 @@
   "from": "system",
   "instantiation": "true",
   "name": "Snapmaker PLA Matte @J1",
+  "filament_id": "2836087278",
   "setting_id": "2836087278",
   "inherits": "fdm_filament_pla_matte_category",
   "compatible_printers": [

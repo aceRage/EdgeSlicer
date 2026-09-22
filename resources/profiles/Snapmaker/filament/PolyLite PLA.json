@@ -3,6 +3,7 @@
   "from": "system",
   "instantiation": "true",
   "name": "PolyLite PLA",
+  "filament_id": "599651858",
   "setting_id": "599651858",
   "inherits": "fdm_filament_pla_category",
   "compatible_printers": [

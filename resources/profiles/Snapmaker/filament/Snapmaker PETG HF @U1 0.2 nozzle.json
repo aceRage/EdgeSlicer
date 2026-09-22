@@ -3,6 +3,7 @@
     "from": "system",
     "instantiation": "true",
     "name": "Snapmaker PETG HF @U1 0.2 nozzle",
+    "filament_id": "GFSG96_01",
     "setting_id": "GFSG96_01",
     "inherits": "Snapmaker PETG HF @U1 base",
     "filament_max_volumetric_speed": [

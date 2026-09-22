@@ -3,6 +3,7 @@
   "from": "system",
   "instantiation": "true",
   "name": "Snapmaker TPU @U1 0.8 nozzle",
+  "filament_id": "STPU001",
   "setting_id": "STPU001",
   "inherits": "Snapmaker TPU @U1 base",
   "compatible_printers": [

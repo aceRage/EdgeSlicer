@@ -3,6 +3,7 @@
   "from": "system",
   "instantiation": "true",
   "name": "Snapmaker PLA Metal @J1",
+  "filament_id": "1744865289",
   "setting_id": "1744865289",
   "inherits": "fdm_filament_pla_category",
   "compatible_printers": [

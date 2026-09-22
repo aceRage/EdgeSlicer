@@ -3,6 +3,7 @@
     "from": "system",
     "instantiation": "true",
     "name": "Generic PLA @U1 0.6 nozzle",
+    "filament_id": "GFSL99",
     "setting_id": "GFSL99",
     "inherits": "Generic PLA @U1 base",
     "compatible_printers": [

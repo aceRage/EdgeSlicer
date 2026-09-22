@@ -4,6 +4,7 @@
     "instantiation": "true",
     "name": "Generic ABS",
     "renamed_from": "Generic ABS @U1 0.4 nozzle",
+    "filament_id": "GFSB99",
     "setting_id": "GFSB99",
     "inherits": "Generic ABS @U1 base",
     "filament_max_volumetric_speed": [

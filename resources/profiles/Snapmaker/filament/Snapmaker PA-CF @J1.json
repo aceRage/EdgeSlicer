@@ -3,6 +3,7 @@
   "from": "system",
   "instantiation": "true",
   "name": "Snapmaker PA-CF @J1",
+  "filament_id": "2221614608",
   "setting_id": "2221614608",
   "inherits": "fdm_filament_pa_cf_category",
   "compatible_printers": [

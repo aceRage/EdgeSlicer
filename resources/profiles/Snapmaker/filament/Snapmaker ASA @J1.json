@@ -3,6 +3,7 @@
   "from": "system",
   "instantiation": "true",
   "name": "Snapmaker ASA @J1",
+  "filament_id": "1131956201",
   "setting_id": "1131956201",
   "inherits": "fdm_filament_asa_category",
   "compatible_printers": [

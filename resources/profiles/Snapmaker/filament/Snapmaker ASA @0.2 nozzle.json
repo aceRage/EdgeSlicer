@@ -3,6 +3,7 @@
   "from": "system",
   "instantiation": "true",
   "name": "Snapmaker ASA @0.2 nozzle",
+  "filament_id": "978004695",
   "setting_id": "978004695",
   "inherits": "fdm_filament_asa_category",
   "compatible_printers": [

@@ -3,6 +3,7 @@
     "from": "system",
     "instantiation": "true",
     "name": "Generic TPU 95A HF",
+    "filament_id": "GFSU00_00",
     "setting_id": "GFSU00_00",
     "inherits": "Generic TPU 95A HF @U1 base",
     "compatible_printers": [

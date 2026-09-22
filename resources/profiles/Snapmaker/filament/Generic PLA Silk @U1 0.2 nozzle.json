@@ -3,6 +3,7 @@
     "from": "system",
     "instantiation": "true",
     "name": "Generic PLA Silk @U1 0.2 nozzle",
+    "filament_id": "GFSL99_0122",
     "setting_id": "GFSL99_0122",
     "inherits": "Generic PLA Silk @U1 base",
     "compatible_printers": [

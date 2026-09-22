@@ -3,6 +3,7 @@
   "from": "system",
   "instantiation": "true",
   "name": "PolyLite PLA @0.2 nozzle",
+  "filament_id": "1592803578",
   "setting_id": "1592803578",
   "inherits": "fdm_filament_pla_category",
   "compatible_printers": [

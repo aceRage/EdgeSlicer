@@ -3,6 +3,7 @@
   "from": "system",
   "instantiation": "true",
   "name": "Snapmaker Support For PLA @U1 0.4 nozzle",
+  "filament_id": "41460000000",
   "setting_id": "41460000000",
   "inherits": "Snapmaker Support For PLA @U1 base",
   "compatible_printers": [
