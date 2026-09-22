@@ -819,9 +819,17 @@ wxBoxSizer *PreferencesDialog::create_item_gcode_archive_max(wxWindow *parent, w
 // Tool panels on the 3D view (Move/Rotate/Scale, paint palettes, Text, ...): background
 // opacity, 30-100 %. Stored in AppConfig as "gizmo_panel_opacity" (0.3-1.0); read every
 // frame by GLGizmoBase::gizmo_panel_opacity(), so no restart is needed.
+//
+// Slider + a manual numeric entry kept in sync both ways (owner request, alongside PR #85's
+// glow-strength slider getting the same treatment): the entry commits on Enter/focus-loss and
+// clamps to the slider's 30-100 range. Kept self-contained rather than sharing a helper with
+// PR #85's create_item_selection_highlight() to avoid a merge dependency between the two
+// branches; worth a shared "slider with numeric entry" helper once both land.
 wxBoxSizer *PreferencesDialog::create_item_gizmo_panel_opacity(wxWindow *parent, wxString tooltip)
 {
     const std::string param = "gizmo_panel_opacity";
+    const int         min_percent = 30;
+    const int         max_percent = 100;
     wxBoxSizer *sizer = new wxBoxSizer(wxHORIZONTAL);
     auto        title = new wxStaticText(parent, wxID_ANY, _L("Gizmo panel opacity"));
     title->SetForegroundColour(DESIGN_GRAY900_COLOR);
@@ -835,29 +843,72 @@ wxBoxSizer *PreferencesDialog::create_item_gizmo_panel_opacity(wxWindow *parent,
     } catch (...) {
         opacity = 1.0f;
     }
+    const int start_percent = int(opacity * 100.0f + 0.5f);
 
-    auto slider = new wxSlider(parent, wxID_ANY, int(opacity * 100.0f + 0.5f), 30, 100,
+    auto slider = new wxSlider(parent, wxID_ANY, start_percent, min_percent, max_percent,
                                wxDefaultPosition, FromDIP(wxSize(180, -1)), wxSL_HORIZONTAL);
     slider->SetToolTip(tooltip);
 
-    auto value_label = new wxStaticText(parent, wxID_ANY, wxString::Format("%d%%", slider->GetValue()),
-                                        wxDefaultPosition, DESIGN_TITLE_SIZE, 0);
-    value_label->SetForegroundColour(DESIGN_GRAY900_COLOR);
-    value_label->SetFont(::Label::Body_13);
-    value_label->SetToolTip(tooltip);
+    auto entry = new ::TextInput(parent, wxString::Format("%d", start_percent), "%", wxEmptyString,
+                                 wxDefaultPosition, DESIGN_INPUT_SIZE, wxTE_PROCESS_ENTER);
+    StateColor entry_bg(std::pair<wxColour, int>(wxColour("#F0F0F1"), StateColor::Disabled), std::pair<wxColour, int>(*wxWHITE, StateColor::Enabled));
+    entry->SetBackgroundColor(entry_bg);
+    entry->GetTextCtrl()->SetValue(wxString::Format("%d", start_percent));
+    wxTextValidator entry_validator(wxFILTER_DIGITS);
+    entry->GetTextCtrl()->SetValidator(entry_validator);
+    entry->SetToolTip(tooltip);
 
     sizer->Add(0, 0, 0, wxEXPAND | wxLEFT, 23);
     sizer->Add(title, 0, wxALIGN_CENTER_VERTICAL | wxALL, 3);
     sizer->Add(slider, 0, wxALIGN_CENTER_VERTICAL | wxLEFT | wxRIGHT, FromDIP(8));
-    sizer->Add(value_label, 0, wxALIGN_CENTER_VERTICAL | wxALL, 3);
+    sizer->Add(entry, 0, wxALIGN_CENTER_VERTICAL | wxALL, 3);
 
-    slider->Bind(wxEVT_SLIDER, [this, param, slider, value_label](wxCommandEvent &e) {
-        const int percent = slider->GetValue();
-        value_label->SetLabel(wxString::Format("%d%%", percent));
+    // Applies the (already clamped) percent everywhere but back into whichever control just
+    // produced it: AppConfig, canvas refresh, and the other control's displayed value.
+    auto apply_percent = [this, param](int percent) {
         app_config->set(param, wxString::Format("%.2f", percent / 100.0).ToStdString());
         app_config->save();
         if (wxGetApp().plater() != nullptr)
             wxGetApp().plater()->get_current_canvas3D()->set_as_dirty();
+    };
+
+    slider->Bind(wxEVT_SLIDER, [slider, entry, apply_percent](wxCommandEvent &e) {
+        const int percent = slider->GetValue();
+        entry->GetTextCtrl()->ChangeValue(wxString::Format("%d", percent));
+        apply_percent(percent);
+        e.Skip();
+    });
+
+    auto commit_entry = [slider, entry, apply_percent, min_percent, max_percent]() {
+        long value = 0;
+        int  percent;
+        if (entry->GetTextCtrl()->GetValue().ToLong(&value))
+            percent = std::clamp(int(value), min_percent, max_percent);
+        else
+            percent = slider->GetValue();
+        entry->GetTextCtrl()->ChangeValue(wxString::Format("%d", percent));
+        slider->SetValue(percent);
+        apply_percent(percent);
+    };
+
+    wxTextCtrl *entry_ctrl = entry->GetTextCtrl();
+    entry_ctrl->Bind(wxEVT_TEXT_ENTER, [commit_entry, entry_ctrl](wxCommandEvent &e) {
+        commit_entry();
+        entry_ctrl->SelectAll();
+        e.Skip();
+    });
+    entry_ctrl->Bind(wxEVT_KILL_FOCUS, [commit_entry](wxFocusEvent &e) {
+        commit_entry();
+        e.Skip();
+    });
+    // Focusing the box selects its text, so typing replaces the value instead of appending to it.
+    // A click on the box's frame (outside the inner edit) also focuses the edit.
+    entry_ctrl->Bind(wxEVT_SET_FOCUS, [entry_ctrl](wxFocusEvent &e) {
+        entry_ctrl->CallAfter([entry_ctrl]() { entry_ctrl->SelectAll(); });
+        e.Skip();
+    });
+    entry->Bind(wxEVT_LEFT_DOWN, [entry_ctrl](wxMouseEvent &e) {
+        entry_ctrl->SetFocus();
         e.Skip();
     });
 
@@ -1695,6 +1746,14 @@ wxWindow* PreferencesDialog::create_general_page()
             dlg.SetButtonLabel(wxID_CANCEL, _L("Cancel"));
             return dlg.ShowModal() == wxID_OK;
         });
+    // Was built on an unreachable "GUI" preferences page (create_gui_page(), never added to the
+    // dialog's tab list) so it was inaccessible from the UI; moved here since the row itself works
+    // and AppConfig["gizmo_panel_opacity"] is read live by GLGizmoBase::gizmo_panel_opacity().
+    // Placed before "Orbit speed multiplier" (rather than after, alongside PR #85's own insertion
+    // point) so this row and PR #85's selection-highlight rows land on disjoint lines and merge
+    // cleanly in either order.
+    auto item_panel_opacity = create_item_gizmo_panel_opacity(page,
+        _L("Background opacity of the tool panels on the 3D view. Lower values let you see the model behind a docked panel. Applies immediately."));
     auto camera_orbit_mult = create_camera_orbit_mult_input(_L("Orbit speed multiplier"), page, _L("Multiplies the orbit speed for finer or coarser camera movement."));
     auto item_selection_highlight = create_item_selection_highlight(page);
 
@@ -1802,6 +1861,7 @@ wxWindow* PreferencesDialog::create_general_page()
     sizer_page->Add(swap_pan_rotate, 0, wxTOP, FromDIP(3));
     sizer_page->Add(reverse_mouse_zoom, 0, wxTOP, FromDIP(3));
     sizer_page->Add(allow_filament_temp_mixing, 0, wxTOP, FromDIP(3));
+    sizer_page->Add(item_panel_opacity, 0, wxTOP, FromDIP(3));
     sizer_page->Add(camera_orbit_mult, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_selection_highlight, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_show_splash_screen, 0, wxTOP, FromDIP(3));
@@ -2011,6 +2071,12 @@ wxWindow* PreferencesDialog::create_ultra_page()
     return page;
 }
 
+// NOTE: this page is still never added to create()'s `pages` tab list (create_gui_page() itself
+// is never called), so it remains unreachable from the UI. The one working control it built,
+// the gizmo panel opacity slider, has been moved to create_general_page() (see
+// create_item_gizmo_panel_opacity() usage there). "show_home_page" is left here unexposed: it is
+// only ever set to a default in AppConfig::set_defaults() and is not read anywhere else, so a
+// checkbox for it would not do anything yet.
 void PreferencesDialog::create_gui_page()
 {
     auto page = new wxWindow(this, wxID_ANY);
