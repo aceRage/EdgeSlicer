@@ -1534,6 +1534,14 @@ wxWindow* PreferencesDialog::create_general_page()
             dlg.SetButtonLabel(wxID_CANCEL, _L("Cancel"));
             return dlg.ShowModal() == wxID_OK;
         });
+    // Was built on an unreachable "GUI" preferences page (create_gui_page(), never added to the
+    // dialog's tab list) so it was inaccessible from the UI; moved here since the row itself works
+    // and AppConfig["gizmo_panel_opacity"] is read live by GLGizmoBase::gizmo_panel_opacity().
+    // Placed before "Orbit speed multiplier" (rather than after, alongside PR #85's own insertion
+    // point) so this row and PR #85's selection-highlight rows land on disjoint lines and merge
+    // cleanly in either order.
+    auto item_panel_opacity = create_item_gizmo_panel_opacity(page,
+        _L("Background opacity of the tool panels on the 3D view. Lower values let you see the model behind a docked panel. Applies immediately."));
     auto camera_orbit_mult = create_camera_orbit_mult_input(_L("Orbit speed multiplier"), page, _L("Multiplies the orbit speed for finer or coarser camera movement."));
 
     auto item_show_splash_screen = create_item_checkbox(_L("Show splash screen"), page, _L("Show the splash screen during startup."), 50, "show_splash_screen");
@@ -1640,6 +1648,7 @@ wxWindow* PreferencesDialog::create_general_page()
     sizer_page->Add(swap_pan_rotate, 0, wxTOP, FromDIP(3));
     sizer_page->Add(reverse_mouse_zoom, 0, wxTOP, FromDIP(3));
     sizer_page->Add(allow_filament_temp_mixing, 0, wxTOP, FromDIP(3));
+    sizer_page->Add(item_panel_opacity, 0, wxTOP, FromDIP(3));
     sizer_page->Add(camera_orbit_mult, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_show_splash_screen, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_hints, 0, wxTOP, FromDIP(3));
@@ -1848,6 +1857,12 @@ wxWindow* PreferencesDialog::create_ultra_page()
     return page;
 }
 
+// NOTE: this page is still never added to create()'s `pages` tab list (create_gui_page() itself
+// is never called), so it remains unreachable from the UI. The one working control it built,
+// the gizmo panel opacity slider, has been moved to create_general_page() (see
+// create_item_gizmo_panel_opacity() usage there). "show_home_page" is left here unexposed: it is
+// only ever set to a default in AppConfig::set_defaults() and is not read anywhere else, so a
+// checkbox for it would not do anything yet.
 void PreferencesDialog::create_gui_page()
 {
     auto page = new wxWindow(this, wxID_ANY);
