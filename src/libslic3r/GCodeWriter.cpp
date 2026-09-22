@@ -1,10 +1,12 @@
 #include "GCodeWriter.hpp"
 #include "CustomGCode.hpp"
 #include <algorithm>
+#include <cmath>
 #include <iomanip>
 #include <iostream>
 #include <map>
 #include <assert.h>
+#include <boost/log/trivial.hpp>
 #include <GCode/GCodeProcessor.hpp>
 
 #ifdef __APPLE__
@@ -17,6 +19,38 @@
 namespace Slic3r {
 
 bool GCodeWriter::full_gcode_comment = true;
+
+// Snapmaker (feedrate guard): the substitute used when a non-positive or non-finite feedrate is
+// refused, in mm/min. The ladder, safest rung first:
+//
+//   1. The resolved outer wall speed (m_guard_fallback_speed, set per object/region by
+//      GCode::_extrude). This is the owner's requested default. Outer wall speed is typically far
+//      BELOW the old hard-coded 600 mm/min in these profiles, and that is exactly the point: a
+//      substituted speed that is too slow only costs print time and can be recovered from, while
+//      one that is too fast destroys the part. It is also a speed the profile author has already
+//      certified as printable for this filament/nozzle combination, unlike any constant we pick.
+//   2. The last valid feedrate actually emitted on this stream (m_current_speed). Only reached
+//      when outer_wall_speed is itself unusable (0, negative, NaN - e.g. the very bug class this
+//      guard exists for could take out outer_wall_speed too). Still a speed this print has
+//      demonstrably run at.
+//   3. GUARD_LAST_RESORT_FEEDRATE (600 mm/min = 10 mm/s). Only when nothing above is available,
+//      which in practice means the guard tripped before a single valid move was emitted.
+//
+// Every rung is validated with isfinite() && > 0 before it is taken, so a poisoned value at one
+// rung falls through to the next rather than being substituted for another poisoned value.
+double GCodeWriter::resolve_guard_fallback() const
+{
+    if (std::isfinite(m_guard_fallback_speed) && m_guard_fallback_speed > 0.)
+        return m_guard_fallback_speed;
+    if (std::isfinite(m_current_speed) && m_current_speed > 0.)
+        return m_current_speed;
+    return GCodeFormatter::GUARD_LAST_RESORT_FEEDRATE;
+}
+
+void GCodeWriter::seed_formatter_guard(GCodeFormatter &w) const
+{
+    w.set_fallback_feedrate(this->resolve_guard_fallback());
+}
 
 bool GCodeWriter::supports_separate_travel_acceleration(GCodeFlavor flavor)
 {
@@ -217,8 +251,9 @@ std::string GCodeWriter::set_acceleration_internal(Acceleration type, unsigned i
         gcode << (separate_travel ? "M204 T" : "M204 P") << acceleration;
     else if (FLAVOR_IS(gcfKlipper)) {
         gcode << "SET_VELOCITY_LIMIT ACCEL=" << acceleration;
-        if (this->config.accel_to_decel_enable) {
-            gcode << " ACCEL_TO_DECEL=" << acceleration * this->config.accel_to_decel_factor / 100;
+        unsigned int filament_id = m_extruder != nullptr ? m_extruder->id() : 0;
+        if (get_value_at(this->config, this->config.accel_to_decel_enable, ConfigFlowDomain::Process, filament_id)) {
+            gcode << " ACCEL_TO_DECEL=" << acceleration * get_value_at(this->config, this->config.accel_to_decel_factor, ConfigFlowDomain::Process, filament_id) / 100;
             if (GCodeWriter::full_gcode_comment)
                 gcode << " ; adjust ACCEL_TO_DECEL";
         }
@@ -285,8 +320,9 @@ std::string GCodeWriter::set_accel_and_jerk(unsigned int acceleration, double je
     gcode << "SET_VELOCITY_LIMIT";
     if (acceleration != 0 && acceleration != m_last_acceleration) {
         gcode << " ACCEL=" << acceleration;
-        if (this->config.accel_to_decel_enable) {
-            gcode << " ACCEL_TO_DECEL=" << acceleration * this->config.accel_to_decel_factor / 100;
+        unsigned int filament_id = m_extruder != nullptr ? m_extruder->id() : 0;
+        if (get_value_at(this->config, this->config.accel_to_decel_enable, ConfigFlowDomain::Process, filament_id)) {
+            gcode << " ACCEL_TO_DECEL=" << acceleration * get_value_at(this->config, this->config.accel_to_decel_factor, ConfigFlowDomain::Process, filament_id) / 100;
         }
         m_last_acceleration = acceleration;
         is_empty = false;
@@ -475,16 +511,50 @@ std::string GCodeWriter::toolchange(unsigned int extruder_id)
 
 std::string GCodeWriter::set_speed(double F, const std::string &comment, const std::string &cooling_marker)
 {
+    if (! std::isfinite(F) || F <= 0.) {
+        // Release-active guard: the asserts below are compiled out in Release builds, which used
+        // to let F0 / negative / NaN feedrates flow verbatim into the G-code and silently wedge
+        // Bambu printers. Refuse the bad value and substitute down the ladder in
+        // resolve_guard_fallback().
+        //
+        // The substitution is NOT silent: report_bad_feedrate() raises a user-visible slicing
+        // warning naming the config key that resolved badly (see GCode::do_export). A quiet log
+        // line was the original defect - it produced a file that printed at a wrong speed with
+        // nothing in the UI to explain why.
+        const double fallback = this->resolve_guard_fallback();
+        BOOST_LOG_TRIVIAL(error) << "GCodeWriter::set_speed: refusing non-positive or non-finite feedrate "
+                                 << F << " (setting: " << (m_feedrate_origin.setting ? m_feedrate_origin.setting : "unknown")
+                                 << "), substituting " << fallback;
+        this->report_bad_feedrate(F, fallback);
+        F = fallback;
+    }
     assert(F > 0.);
     assert(F < 100000.);
-    
+
     m_current_speed = F;
     GCodeG1Formatter w;
+    // Seed the formatter's own guard with the same ladder, so the choke-point clamp in emit_axis
+    // substitutes the outer wall speed rather than a bare constant if it ever has to fire.
+    w.set_fallback_feedrate(this->resolve_guard_fallback());
     w.emit_f(F);
     //BBS
     w.emit_comment(GCodeWriter::full_gcode_comment, comment);
     w.emit_string(cooling_marker);
     return w.string();
+}
+
+
+double GCodeWriter::active_travel_speed(bool first_layer_aware) const
+{
+    unsigned int extruder_id = m_extruder != nullptr ? m_extruder->id() : 0;
+    double speed = get_value_at(this->config, this->config.travel_speed, ConfigFlowDomain::Process, extruder_id);
+
+    if (first_layer_aware && m_is_first_layer) {
+        const auto ilt_fop = get_value_at(this->config, this->config.initial_layer_travel_speed, ConfigFlowDomain::Process, extruder_id);
+        speed              = ilt_fop.percent ? (ilt_fop.value * 0.01 * speed) : ilt_fop.value;
+    }
+
+    return speed;
 }
 
 std::string GCodeWriter::travel_to_xy(const Vec2d &point, const std::string &comment)
@@ -498,8 +568,8 @@ std::string GCodeWriter::travel_to_xy(const Vec2d &point, const std::string &com
     
     GCodeG1Formatter w;
     w.emit_xy(point_on_plate);
-    auto speed = m_is_first_layer
-        ? this->config.get_abs_value("initial_layer_travel_speed") : this->config.travel_speed.value;
+    auto speed = this->active_travel_speed(true);
+    this->seed_formatter_guard(w);
     w.emit_f(speed * 60.0);
     //BBS
     w.emit_comment(GCodeWriter::full_gcode_comment, comment);
@@ -519,8 +589,7 @@ std::string GCodeWriter::travel_to_xyz(const Vec3d &point, const std::string &co
         used for unlift. */
         // BBS
     Vec3d dest_point = point;
-    auto travel_speed =
-        m_is_first_layer ? this->config.get_abs_value("initial_layer_travel_speed") : this->config.travel_speed.value;
+    auto travel_speed = this->active_travel_speed(true);
     //BBS: a z_hop need to be handle when travel
     if (std::abs(m_to_lift) > EPSILON) {
         assert(std::abs(m_lifted) < EPSILON);
@@ -562,6 +631,7 @@ std::string GCodeWriter::travel_to_xyz(const Vec3d &point, const std::string &co
                 Vec3d slope_top_point = Vec3d(temp(0), temp(1), delta(2)) + source;
                 GCodeG1Formatter w0;
                 w0.emit_xyz(slope_top_point);
+                this->seed_formatter_guard(w0);
                 w0.emit_f(travel_speed * 60.0);
                 //BBS
                 w0.emit_comment(GCodeWriter::full_gcode_comment, comment);
@@ -577,12 +647,14 @@ std::string GCodeWriter::travel_to_xyz(const Vec3d &point, const std::string &co
             GCodeG1Formatter w0;
             if (this->is_current_position_clear()) {
                 w0.emit_xyz(target);
+                this->seed_formatter_guard(w0);
                 w0.emit_f(travel_speed * 60.0);
                 w0.emit_comment(GCodeWriter::full_gcode_comment, comment);
                 xy_z_move = w0.string();
             }
             else {
                 w0.emit_xy(Vec2d(target.x(), target.y()));
+                this->seed_formatter_guard(w0);
                 w0.emit_f(travel_speed * 60.0);
                 w0.emit_comment(GCodeWriter::full_gcode_comment, comment);
                 xy_z_move = w0.string() + _travel_to_z(target.z(), comment);
@@ -617,13 +689,15 @@ std::string GCodeWriter::travel_to_xyz(const Vec3d &point, const std::string &co
     {
         //force to move xy first then z after filament change
         w.emit_xy(Vec2d(point_on_plate.x(), point_on_plate.y()));
-        w.emit_f(this->config.travel_speed.value * 60.0);
+        this->seed_formatter_guard(w);
+        w.emit_f(this->active_travel_speed() * 60.0);
         w.emit_comment(GCodeWriter::full_gcode_comment, comment);
         out_string = w.string() + _travel_to_z(point_on_plate.z(), comment);
     } else {
         GCodeG1Formatter w;
         w.emit_xyz(point_on_plate);
-        w.emit_f(this->config.travel_speed.value * 60.0);
+        this->seed_formatter_guard(w);
+        w.emit_f(this->active_travel_speed() * 60.0);
         w.emit_comment(GCodeWriter::full_gcode_comment, comment);
         out_string = w.string();
     }
@@ -657,13 +731,12 @@ std::string GCodeWriter::_travel_to_z(double z, const std::string &comment)
     m_pos(2) = z;
 
     double speed = this->config.travel_speed_z.value;
-    if (speed == 0.) {
-        speed = m_is_first_layer ? this->config.get_abs_value("initial_layer_travel_speed")
-                                 : this->config.travel_speed.value;
-    }
+    if (speed == 0.)
+        speed = this->active_travel_speed(true);
     
     GCodeG1Formatter w;
     w.emit_z(z);
+    this->seed_formatter_guard(w);
     w.emit_f(speed * 60.0);
     //BBS
     w.emit_comment(GCodeWriter::full_gcode_comment, comment);
@@ -675,16 +748,15 @@ std::string GCodeWriter::_spiral_travel_to_z(double z, const Vec2d &ij_offset, c
     m_pos(2) = z;
 
     double speed = this->config.travel_speed_z.value;
-    if (speed == 0.) {
-        speed = m_is_first_layer ? this->config.get_abs_value("initial_layer_travel_speed")
-                                 : this->config.travel_speed.value;
-    }
+    if (speed == 0.)
+        speed = this->active_travel_speed(true);
     
     std::string output = "G17\n";
     GCodeG2G3Formatter w(true);
     w.emit_z(z);
     w.emit_ij(ij_offset);
     w.emit_string(" P1 ");
+    this->seed_formatter_guard(w);
     w.emit_f(speed * 60.0);
     w.emit_comment(GCodeWriter::full_gcode_comment, comment);
     return output + w.string();
@@ -809,6 +881,7 @@ std::string GCodeWriter::_retract(double length, double restart_extra, const std
             // BBS
             GCodeG1Formatter w;
             w.emit_e(m_extruder->E());
+            this->seed_formatter_guard(w);
             w.emit_f(m_extruder->retract_speed() * 60.);
             // BBS
             w.emit_comment(GCodeWriter::full_gcode_comment, comment);
@@ -839,6 +912,7 @@ std::string GCodeWriter::unretract()
             // use G1 instead of G0 because G0 will blend the restart with the previous travel move
             GCodeG1Formatter w;
             w.emit_e(m_extruder->E());
+            this->seed_formatter_guard(w);
             w.emit_f(m_extruder->deretract_speed() * 60.);
             //BBS
             w.emit_comment(GCodeWriter::full_gcode_comment, " ; unretract");
@@ -980,8 +1054,23 @@ void GCodeWriter::add_object_change_labels(std::string& gcode)
     add_object_start_labels(gcode);
 }
 
-void GCodeFormatter::emit_axis(const char axis, const double v, size_t digits) {
+void GCodeFormatter::emit_axis(const char axis, const double v_in, size_t digits) {
     assert(digits <= 9);
+    double v = v_in;
+    if (axis == 'F' && (! std::isfinite(v) || v <= 0.)) {
+        // Release-active defense in depth: never let a non-finite or non-positive feedrate reach
+        // the printer. A bad F word (0, negative, NaN) does not raise an error on Bambu printers -
+        // it wedges the motion planner indefinitely. This is the single choke point for F words,
+        // so paths that bypass set_speed (travel_to_xy/xyz/z, spiral-lift arcs, retract/unretract,
+        // PressureEqualizer) are covered here.
+        //
+        // The substitute is whatever the formatter's owner seeded via set_fallback_feedrate()
+        // (GCodeWriter::set_speed seeds it with the outer-wall-speed ladder), else the last-resort
+        // constant. Formerly this read and wrote a mutable static shared by every formatter
+        // instance; that has been removed - see set_fallback_feedrate() in the header.
+        v = (std::isfinite(m_fallback_feedrate) && m_fallback_feedrate > 0.) ? m_fallback_feedrate
+                                                                            : GUARD_LAST_RESORT_FEEDRATE;
+    }
     static constexpr const std::array<int, 10> pow_10{1, 10, 100, 1000, 10000, 100000, 1000000, 10000000, 100000000, 1000000000};
     *ptr_err.ptr++ = ' '; *ptr_err.ptr++ = axis;
 

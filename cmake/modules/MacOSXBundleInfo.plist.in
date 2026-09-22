@@ -11,7 +11,7 @@
 	<key>CFBundleIconFile</key>
 	<string>${MACOSX_BUNDLE_ICON_FILE}</string>
 	<key>CFBundleIdentifier</key>
-	<string>com.snapmaker.snapmaker-orca</string>
+	<string>${MACOSX_BUNDLE_GUI_IDENTIFIER}</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleLongVersionString</key>
@@ -32,11 +32,14 @@
     <array>
       <dict>
         <key>CFBundleURLName</key>
-        <string>Snapmaker Orca Downloads</string>
+        <string>EdgeSlicer Open URL</string>
         <key>CFBundleURLSchemes</key>
         <array>
+          <string>edgeslicer</string>
+          <string>edgesliceropen</string>
+          <string>ultraone</string>
           <string>snapmaker-orca</string>
-		  <string>Snapmaker_Orca</string>
+          <string>Snapmaker_Orca</string>
         </array>
       </dict>
     </array>
@@ -132,13 +135,42 @@
 	<true/>
 	<key>NSHumanReadableCopyright</key>
 	<string>${MACOSX_BUNDLE_COPYRIGHT}</string>
-	<key>NSAppTransportSecurity</key>  
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>EdgeSlicer needs access to your local network to discover and connect to your 3D printer(s), and to serve the app's device interface on localhost.</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_http._tcp</string>
+		<string>_printer._tcp</string>
+		<string>_snapmaker._tcp</string>
+		<string>_services._dns-sd._udp</string>
+	</array>
+	<key>NSAppTransportSecurity</key>
 	<dict>
-		<!-- Disable App Transport Security. Resolves https://github.com/SoftFever/OrcaSlicer/issues/791 -->
+		<!-- Keep arbitrary loads for remote printer HTTP. Resolves https://github.com/SoftFever/OrcaSlicer/issues/791 -->
 		<key>NSAllowsArbitraryLoads</key>
-		<true/>  
+		<true/>
 		<key>NSAllowsArbitraryLoadsInWebContent</key>
 		<true/>
+		<!-- Tahoe 26.x+: declare local HTTP even if ArbitraryLoads is on; later OS may require explicit keys. -->
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+		<key>NSExceptionDomains</key>
+		<dict>
+			<key>localhost</key>
+			<dict>
+				<key>NSExceptionAllowsInsecureHTTPLoads</key>
+				<true/>
+				<key>NSIncludesSubdomains</key>
+				<true/>
+			</dict>
+			<key>127.0.0.1</key>
+			<dict>
+				<key>NSExceptionAllowsInsecureHTTPLoads</key>
+				<true/>
+				<key>NSIncludesSubdomains</key>
+				<false/>
+			</dict>
+		</dict>
 	</dict>
 </dict>
 </plist>

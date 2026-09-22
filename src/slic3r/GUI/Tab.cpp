@@ -14,6 +14,7 @@
 
 #include <wx/app.h>
 #include <wx/button.h>
+#include <wx/panel.h>
 #include <wx/scrolwin.h>
 #include <wx/sizer.h>
 
@@ -23,6 +24,7 @@
 #include <wx/imaglist.h>
 #include <wx/settings.h>
 #include <wx/filedlg.h>
+#include <algorithm>
 #include <iomanip>
 #include <sstream>
 
@@ -63,6 +65,9 @@
 #include "SupportSetEditDialog.hpp"
 #include "Widgets/ComboBox.hpp"
 #include "Widgets/Button.hpp"
+#include "Widgets/SegmentedToggle.hpp"
+#include "FlowVariantEdit.hpp"
+#include "FlowTypeHelper.hpp"
 #include <wx/textdlg.h>
 #ifdef WIN32
 	#include <commctrl.h>
@@ -898,15 +903,396 @@ void Tab::decorate()
         m_active_page->refresh();
 }
 
+void Tab::destroy_flow_variant_header_controls()
+{
+    if (!m_flow_variant_view)
+        return;
+
+    wxWindow* widget = m_flow_variant_view->host
+        ? static_cast<wxWindow*>(m_flow_variant_view->host)
+        : static_cast<wxWindow*>(m_flow_variant_view->selector);
+    if (widget == nullptr)
+        return;
+
+    if (auto* header_sizer = m_parent->get_page_header_sizer())
+        header_sizer->Detach(widget);
+    widget->Destroy();
+    m_flow_variant_view->host     = nullptr;
+    m_flow_variant_view->selector = nullptr;
+    m_flow_variant_view->copy_btn = nullptr;
+}
+
+void Tab::register_flow_variant_view(ConfigFlowDomain domain,
+                                     const std::vector<PageShp>& pages,
+                                     std::function<const std::vector<std::string>&()> options,
+                                     std::function<bool(const std::string&)> is_option)
+{
+    // A previously-registered view's selector lives in the shared page header (the
+    // filament and printer tabs share one ParamsPanel); destroy it before replacing
+    // the view so re-registration (e.g. TabPrinter's kinematics-page rebuild) does
+    // not leave orphaned selectors stacked in the header.
+    destroy_flow_variant_header_controls();
+    m_flow_variant_view = std::make_unique<FlowVariantView>();
+    m_flow_variant_view->domain = domain;
+    m_flow_variant_view->pages = pages;
+    m_flow_variant_view->options = std::move(options);
+    m_flow_variant_view->is_option = std::move(is_option);
+
+    refresh_flow_variant_view();
+}
+
+size_t Tab::flow_variant_view_index() const
+{
+    if (!m_flow_variant_view || m_flow_variant_view->modes.empty())
+        return 0;
+
+    const auto mode = std::find(m_flow_variant_view->modes.begin(),
+                                m_flow_variant_view->modes.end(),
+                                m_flow_variant_view->selected_mode);
+    return mode == m_flow_variant_view->modes.end()
+        ? 0
+        : size_t(std::distance(m_flow_variant_view->modes.begin(), mode));
+}
+
+bool Tab::flow_variant_both_allowed() const
+{
+    // Both is always offered for non-printer domains as soon as more than one
+    // flow mode exists; the filament's *_flow_support key no longer gates it.
+    return m_flow_variant_view
+        && m_flow_variant_view->domain != ConfigFlowDomain::Printer
+        && m_flow_variant_view->modes.size() > 1;
+}
+
+int Tab::flow_variant_selector_index() const
+{
+    if (!m_flow_variant_view)
+        return 0;
+    if (m_flow_variant_view->edit_scope == FlowVariantView::EditScope::Both && flow_variant_both_allowed())
+        return int(m_flow_variant_view->modes.size());
+    return int(flow_variant_view_index());
+}
+
+void Tab::on_flow_variant_segment_selected(int index)
+{
+    if (!m_flow_variant_view || index < 0)
+        return;
+
+    const int both_index = int(m_flow_variant_view->modes.size());
+    if (flow_variant_both_allowed() && index == both_index) {
+        if (m_flow_variant_view->edit_scope == FlowVariantView::EditScope::Both)
+            return;
+        // Filament tab: persist filament_flow_support before entering Both on a
+        // filament that does not carry the key yet, so the dual-write target
+        // exists. ensure_flow_support_mode is a no-op when the key is present.
+        if (m_config && m_flow_variant_view->domain == ConfigFlowDomain::Filament)
+            ensure_flow_support_mode(*m_config, m_flow_variant_view->domain, FLOW_MODE_HIGH_FLOW);
+        if (!enter_flow_variant_both()) {
+            if (m_flow_variant_view->selector)
+                m_flow_variant_view->selector->setSelected(flow_variant_selector_index());
+            return;
+        }
+    } else if (size_t(index) < m_flow_variant_view->modes.size()) {
+        m_flow_variant_view->edit_scope    = FlowVariantView::EditScope::ActiveMode;
+        m_flow_variant_view->selected_mode = m_flow_variant_view->modes[size_t(index)];
+
+        // Filament tab: switching to High flow must persist filament_flow_support
+        // first, otherwise the mode would not survive saving the preset.
+        if (m_config && m_flow_variant_view->domain == ConfigFlowDomain::Filament &&
+            m_flow_variant_view->selected_mode == FLOW_MODE_HIGH_FLOW &&
+            ensure_flow_support_mode(*m_config, m_flow_variant_view->domain, FLOW_MODE_HIGH_FLOW))
+            update_dirty();
+    } else {
+        return;
+    }
+
+    refresh_flow_variant_view();
+    Tab::reload_config();
+    // Entering Both may copy a winner onto the other slot; mark the preset dirty.
+    if (m_flow_variant_view && m_flow_variant_view->edit_scope == FlowVariantView::EditScope::Both)
+        update_dirty();
+    else
+        update_changed_ui();
+    toggle_options();
+    update_visibility();
+    m_parent->Layout();
+}
+
+bool Tab::enter_flow_variant_both()
+{
+    if (!flow_variant_both_allowed() || !m_config)
+        return false;
+
+    const bool has_standard = std::find(m_flow_variant_view->modes.begin(),
+                                        m_flow_variant_view->modes.end(),
+                                        FLOW_MODE_STANDARD) != m_flow_variant_view->modes.end();
+    const bool has_high_flow = std::find(m_flow_variant_view->modes.begin(),
+                                         m_flow_variant_view->modes.end(),
+                                         FLOW_MODE_HIGH_FLOW) != m_flow_variant_view->modes.end();
+
+    if (has_standard && has_high_flow &&
+        flow_variant_slots_differ(*m_config, m_flow_variant_view->domain, FLOW_MODE_STANDARD, FLOW_MODE_HIGH_FLOW)) {
+        wxWindow* parent = wxGetApp().plater() ? static_cast<wxWindow*>(wxGetApp().plater()) : this;
+        RichMessageDialog dlg(parent,
+            _L("Standard and High flow settings differ. Choose which values to keep for both flow modes. "
+               "This will overwrite the other mode."),
+            _L("Flow settings differ"),
+            wxYES_NO | wxCANCEL | wxICON_QUESTION);
+        dlg.SetYesNoCancelLabels(_L("Use Standard values"), _L("Use High-flow values"), _L("Cancel"));
+        const int answer = dlg.ShowModal();
+        if (answer == wxID_YES)
+            copy_flow_variant_slot(*m_config, m_flow_variant_view->domain, FLOW_MODE_STANDARD, FLOW_MODE_HIGH_FLOW);
+        else if (answer == wxID_NO)
+            copy_flow_variant_slot(*m_config, m_flow_variant_view->domain, FLOW_MODE_HIGH_FLOW, FLOW_MODE_STANDARD);
+        else
+            return false;
+    }
+
+    m_flow_variant_view->edit_scope = FlowVariantView::EditScope::Both;
+    const auto standard = std::find(m_flow_variant_view->modes.begin(),
+                                    m_flow_variant_view->modes.end(),
+                                    FLOW_MODE_STANDARD);
+    m_flow_variant_view->selected_mode = (standard == m_flow_variant_view->modes.end())
+        ? m_flow_variant_view->modes.front()
+        : *standard;
+    return true;
+}
+
+void Tab::on_copy_standard_to_high_flow()
+{
+    if (!m_flow_variant_view || !m_config)
+        return;
+    if (std::find(m_flow_variant_view->modes.begin(), m_flow_variant_view->modes.end(), FLOW_MODE_HIGH_FLOW)
+        == m_flow_variant_view->modes.end())
+        return;
+
+    if (flow_variant_slots_differ(*m_config, m_flow_variant_view->domain, FLOW_MODE_STANDARD, FLOW_MODE_HIGH_FLOW)) {
+        wxWindow* parent = wxGetApp().plater() ? static_cast<wxWindow*>(wxGetApp().plater()) : this;
+        MessageDialog dlg(parent,
+            _L("High flow settings already differ from Standard. Overwrite High flow with Standard values?"),
+            _L("Copy Standard to High flow"),
+            wxYES_NO | wxICON_WARNING);
+        if (dlg.ShowModal() != wxID_YES)
+            return;
+    }
+
+    copy_flow_variant_slot(*m_config, m_flow_variant_view->domain, FLOW_MODE_STANDARD, FLOW_MODE_HIGH_FLOW);
+    refresh_flow_variant_view();
+    Tab::reload_config();
+    update_dirty();
+    toggle_options();
+    update_visibility();
+    m_parent->Layout();
+}
+
+void Tab::maybe_dual_write_flow_variant(const std::string& opt_key)
+{
+    if (!m_flow_variant_view || !m_config)
+        return;
+    if (m_flow_variant_view->edit_scope != FlowVariantView::EditScope::Both)
+        return;
+    if (!m_flow_variant_view->is_option(opt_key))
+        return;
+    replicate_flow_variant_value(*m_config, opt_key, flow_variant_view_index(), m_flow_variant_view->modes);
+}
+
+void Tab::refresh_flow_variant_view()
+{
+    if (!m_flow_variant_view || !m_config)
+        return;
+
+    std::vector<std::string> modes;
+    const auto* support = m_config->option<ConfigOptionStrings>(flow_support_key(m_flow_variant_view->domain));
+    if (support != nullptr)
+        modes = support->values;
+    if (modes.empty())
+        modes.emplace_back(FLOW_MODE_STANDARD);
+
+    // Filament tab on a high-flow-capable machine: always offer the High flow
+    // segment, even when the filament key doesn't carry it yet. The key is
+    // persisted when the user switches to High flow or enters Both (see
+    // on_flow_variant_segment_selected); until then the page keeps showing the
+    // Standard slot, exactly like a filament without the key does today.
+    if (m_flow_variant_view->domain == ConfigFlowDomain::Filament &&
+        std::find(modes.begin(), modes.end(), FLOW_MODE_HIGH_FLOW) == modes.end() &&
+        FlowType::printer_supports_high_flow()) {
+        modes.emplace_back(FLOW_MODE_HIGH_FLOW);
+    }
+
+    if (std::find(modes.begin(), modes.end(), m_flow_variant_view->selected_mode) == modes.end())
+    {
+        const auto standard = std::find(modes.begin(), modes.end(), FLOW_MODE_STANDARD);
+        m_flow_variant_view->selected_mode = (standard == modes.end()) ? modes.front() : *standard;
+        m_flow_variant_view->edit_scope    = FlowVariantView::EditScope::ActiveMode;
+    }
+
+    if (m_flow_variant_view->selector == nullptr || modes != m_flow_variant_view->modes)
+    {
+        if (modes != m_flow_variant_view->modes)
+            m_flow_variant_view->edit_scope = FlowVariantView::EditScope::ActiveMode;
+
+        destroy_flow_variant_header_controls();
+
+        m_flow_variant_view->modes = modes;
+        std::vector<wxString> labels;
+        labels.reserve(modes.size() + 1);
+        for (const std::string& mode : modes)
+        {
+            if (mode == FLOW_MODE_STANDARD)
+                labels.emplace_back(_L("Standard flow"));
+            else if (mode == FLOW_MODE_HIGH_FLOW)
+                labels.emplace_back(_L("High flow"));
+            else
+            {
+                std::string label = mode;
+                std::replace(label.begin(), label.end(), '_', ' ');
+                labels.emplace_back(from_u8(label));
+            }
+        }
+        if (flow_variant_both_allowed())
+            labels.emplace_back(_L("Both"));
+
+        wxWindow* header = m_parent->get_page_header();
+        auto* host = new wxPanel(header, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxBORDER_NONE);
+        host->SetBackgroundColour(header->GetBackgroundColour());
+        auto* host_sizer = new wxBoxSizer(wxHORIZONTAL);
+
+        // Pill style = dark rounded container with a filled green selected
+        // segment (Bambu-style segmented control), hosted in the frozen page header.
+        m_flow_variant_view->selector = new SegmentedToggle(host,
+                                                            labels,
+                                                            flow_variant_selector_index(),
+                                                            SegmentedToggle::Style::Pill);
+        host_sizer->Add(m_flow_variant_view->selector, 0, wxALIGN_CENTER_VERTICAL);
+
+        auto* copy_btn = new Button(host, _L("Copy Standard to High flow"));
+        copy_btn->SetFont(Label::Body_12);
+        copy_btn->SetBorderWidth(0);
+        copy_btn->SetPaddingSize(wxSize(FromDIP(8), FromDIP(2)));
+        copy_btn->SetCornerRadius(FromDIP(4));
+        copy_btn->SetBackgroundColor(StateColor(std::pair(header->GetBackgroundColour(), (int)StateColor::Normal)));
+        copy_btn->SetTextColor(StateColor(std::pair(wxColour("#009688"), (int)StateColor::Normal)));
+        copy_btn->SetCanFocus(false);
+        copy_btn->SetToolTip(_L("Copy all High-flow variant settings from Standard"));
+        copy_btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { on_copy_standard_to_high_flow(); });
+        host_sizer->Add(copy_btn, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP(10));
+        m_flow_variant_view->copy_btn = copy_btn;
+
+        host->SetSizer(host_sizer);
+        m_flow_variant_view->host = host;
+        m_parent->get_page_header_sizer()->Add(host,
+                                               0,
+                                               wxALIGN_CENTER_VERTICAL | wxLEFT | wxRIGHT | wxTOP | wxBOTTOM,
+                                               FromDIP(10));
+        m_flow_variant_view->selector->bindSelectionCallback([this](int index) {
+            on_flow_variant_segment_selected(index);
+        });
+        header->Layout();
+    }
+    else if (m_flow_variant_view->selector != nullptr)
+    {
+        m_flow_variant_view->selector->setSelected(flow_variant_selector_index());
+    }
+
+    update_flow_variant_view_visibility();
+
+    // Both is editor-only: fields stay bound to the Standard (display) index.
+    const int flow_index = int(flow_variant_view_index());
+    for (const PageShp& page : m_flow_variant_view->pages)
+    {
+        for (const ConfigOptionsGroupShp& group : page->m_optgroups)
+        {
+            for (const auto& option : group->opt_map())
+            {
+                const std::string& key = option.second.first;
+                if (m_flow_variant_view->is_option(key))
+                    group->set_option_index(key, flow_index);
+            }
+        }
+    }
+}
+
+void Tab::update_flow_variant_view_visibility()
+{
+    // The dialog page header is shared by the filament and printer tabs. Only the
+    // currently-active tab manages it; a background tab's refresh (e.g. a preset
+    // reload) must not stomp the active tab's header or show a stale selector.
+    wxWindow* host = m_flow_variant_view ? m_flow_variant_view->host : nullptr;
+    if (host == nullptr && m_flow_variant_view)
+        host = m_flow_variant_view->selector;
+
+    if (m_parent->get_current_tab() != this) {
+        if (host)
+            host->Hide();
+        return;
+    }
+
+    const bool active_page_supports_flow_variants = m_flow_variant_view &&
+        std::any_of(m_flow_variant_view->pages.begin(), m_flow_variant_view->pages.end(),
+                    [this](const PageShp& page) { return m_active_page == page.get(); });
+    const bool show = active_page_supports_flow_variants && host
+                      && m_flow_variant_view->modes.size() > 1;
+
+    if (host) {
+        // Reveal only this tab's host; hide any sibling selector left visible by
+        // the other tab that shares this header.
+        if (show) {
+            for (wxWindow* sibling : m_parent->get_page_header()->GetChildren())
+                if (sibling != host)
+                    sibling->Hide();
+        }
+        host->Show(show);
+        if (m_flow_variant_view && m_flow_variant_view->copy_btn) {
+            const bool show_copy = show
+                && flow_variant_both_allowed()
+                && m_flow_variant_view->edit_scope == FlowVariantView::EditScope::ActiveMode
+                && m_flow_variant_view->selected_mode == FLOW_MODE_STANDARD
+                && std::find(m_flow_variant_view->modes.begin(), m_flow_variant_view->modes.end(), FLOW_MODE_HIGH_FLOW)
+                    != m_flow_variant_view->modes.end();
+            m_flow_variant_view->copy_btn->Show(show_copy);
+        }
+        host->Layout();
+    }
+
+    m_parent->show_page_header(show);
+}
+
+
 // Update UI according to changes
 void Tab::update_changed_ui()
 {
     if (m_postpone_update_ui)
         return;
 
-    const bool deep_compare = (m_type == Slic3r::Preset::TYPE_PRINTER || m_type == Slic3r::Preset::TYPE_SLA_MATERIAL);
+    const bool deep_compare = (m_type == Slic3r::Preset::TYPE_PRINTER ||
+                               m_type == Slic3r::Preset::TYPE_SLA_MATERIAL);
     auto dirty_options = m_presets->current_dirty_options(deep_compare);
     auto nonsys_options = m_presets->current_different_from_parent_options(deep_compare);
+
+    if (m_flow_variant_view && !deep_compare)
+    {
+        auto merge_flow_variant_options = [this](std::vector<std::string>& options,
+                                                  std::vector<std::string> deep_options) {
+            options.erase(std::remove_if(options.begin(), options.end(), [this](const std::string& key) {
+                return m_flow_variant_view->is_option(key);
+            }), options.end());
+            for (const std::string& key : deep_options)
+            {
+                const size_t index_separator = key.find('#');
+                const std::string base_key = key.substr(0, index_separator);
+                if (m_flow_variant_view->is_option(base_key))
+                    options.emplace_back(key);
+            }
+        };
+
+        merge_flow_variant_options(
+            dirty_options,
+            m_presets->current_flow_variant_dirty_options(m_flow_variant_view->domain,
+                                                          m_flow_variant_view->options()));
+        merge_flow_variant_options(
+            nonsys_options,
+            m_presets->current_flow_variant_different_from_parent_options(m_flow_variant_view->domain,
+                                                                          m_flow_variant_view->options()));
+    }
     if (m_type == Preset::TYPE_PRINTER && static_cast<TabPrinter*>(this)->m_printer_technology == ptFFF) {
         TabPrinter* tab = static_cast<TabPrinter*>(this);
         if (tab->m_initial_extruders_count != tab->m_extruders_count)
@@ -920,6 +1306,32 @@ void Tab::update_changed_ui()
 
     for (auto opt_key : dirty_options)	m_options_list[opt_key] &= ~osInitValue;
     for (auto opt_key : nonsys_options)	m_options_list[opt_key] &= ~osSystemValue;
+
+    if (m_flow_variant_view)
+    {
+        const bool both = m_flow_variant_view->edit_scope == FlowVariantView::EditScope::Both;
+        const size_t current_index = flow_variant_view_index();
+        for (const std::string& key : m_flow_variant_view->options())
+        {
+            if (both) {
+                int flags = m_opt_status_value;
+                bool any = false;
+                for (size_t index = 0; index < m_flow_variant_view->modes.size(); ++index) {
+                    const auto it = m_options_list.find(key + "#" + std::to_string(index));
+                    if (it != m_options_list.end()) {
+                        flags &= it->second;
+                        any = true;
+                    }
+                }
+                if (any)
+                    m_options_list[key] = flags;
+            } else {
+                const auto current = m_options_list.find(key + "#" + std::to_string(current_index));
+                if (current != m_options_list.end())
+                    m_options_list[key] = current->second;
+            }
+        }
+    }
 
     update_custom_dirty();
 
@@ -940,6 +1352,19 @@ void Tab::init_options_list()
 
     for (const std::string& opt_key : m_config->keys())
         m_options_list.emplace(opt_key, m_opt_status_value);
+
+    if (!m_flow_variant_view)
+        return;
+
+    const size_t flow_count = m_flow_variant_view->modes.empty() ? 1 : m_flow_variant_view->modes.size();
+    for (const std::string& key : m_flow_variant_view->options())
+    {
+        if (!m_config->has(key))
+            continue;
+
+        for (size_t index = 0; index < flow_count; ++index)
+            m_options_list.emplace(key + "#" + std::to_string(index), m_opt_status_value);
+    }
 }
 
 template<class T>
@@ -1468,6 +1893,9 @@ static wxString pad_combo_value_for_config(const DynamicPrintConfig &config)
 
 void Tab::on_value_change(const std::string& opt_key, const boost::any& value)
 {
+    if (m_config != nullptr)
+        maybe_dual_write_flow_variant(opt_key);
+
     if (wxGetApp().plater() == nullptr) {
         return;
     }
@@ -1640,6 +2068,20 @@ void Tab::on_value_change(const std::string& opt_key, const boost::any& value)
 
     // reload scene to update timelapse wipe tower
     if (opt_key == "timelapse_type") {
+        // Smooth timelapse parks the nozzle on the prime tower every layer, so it needs a tower on
+        // every layer. That is exactly what "No sparse layers" removes, and with both on the tower is
+        // planned full height and then dropped on emission. Drop "No sparse layers" and tell the user.
+        if (boost::any_cast<int>(value) == (int) TimelapseType::tlSmooth && m_config->opt_bool("wipe_tower_no_sparse_layers")) {
+            MessageDialog dlg(wxGetApp().plater(),
+                              _L("Smooth timelapse needs a prime tower on every layer, which is not compatible with \"No sparse layers\". "
+                                 "\"No sparse layers\" has been turned off."),
+                              _L("Warning"), wxICON_WARNING | wxOK);
+            dlg.ShowModal();
+            DynamicPrintConfig new_conf = *m_config;
+            new_conf.set_key_value("wipe_tower_no_sparse_layers", new ConfigOptionBool(false));
+            m_config_manipulation.apply(m_config, &new_conf);
+        }
+
         bool wipe_tower_enabled = m_config->option<ConfigOptionBool>("enable_prime_tower")->value;
         if (!wipe_tower_enabled && boost::any_cast<int>(value) == (int)TimelapseType::tlSmooth) {
             MessageDialog dlg(wxGetApp().plater(), _L("A prime tower is required for smooth timelapse. There may be flaws on the model without prime tower. Do you want to enable prime tower?"),
@@ -1651,6 +2093,23 @@ void Tab::on_value_change(const std::string& opt_key, const boost::any& value)
                 wxGetApp().plater()->update();
             }
         } else {
+            wxGetApp().plater()->update();
+        }
+    }
+
+    // Mirror of the timelapse_type branch above: enabling "No sparse layers" while smooth timelapse
+    // is active would leave the tower on every layer anyway, so fall back to traditional timelapse.
+    if (opt_key == "wipe_tower_no_sparse_layers" && boost::any_cast<bool>(value)) {
+        auto timelapse_type = m_config->option<ConfigOptionEnum<TimelapseType>>("timelapse_type");
+        if (timelapse_type && timelapse_type->value == TimelapseType::tlSmooth) {
+            MessageDialog dlg(wxGetApp().plater(),
+                              _L("\"No sparse layers\" is not compatible with smooth timelapse, which needs a prime tower on every layer. "
+                                 "Timelapse has been switched to traditional mode."),
+                              _L("Warning"), wxICON_WARNING | wxOK);
+            dlg.ShowModal();
+            DynamicPrintConfig new_conf = *m_config;
+            new_conf.set_key_value("timelapse_type", new ConfigOptionEnum<TimelapseType>(TimelapseType::tlTraditional));
+            m_config_manipulation.apply(m_config, &new_conf);
             wxGetApp().plater()->update();
         }
     }
@@ -2284,6 +2743,8 @@ void TabPrint::build()
         optgroup->append_single_option_line("role_based_wipe_speed","quality_settings_seam#role-based-wipe-speed");
         optgroup->append_single_option_line("wipe_speed", "quality_settings_seam#wipe-speed");
         optgroup->append_single_option_line("wipe_on_loops","quality_settings_seam#wipe-on-loop-inward-movement");
+        optgroup->append_single_option_line("wipe_inward", "quality_settings_seam#wipe-inward");
+        optgroup->append_single_option_line("wipe_inward_distance", "quality_settings_seam#wipe-inward");
         optgroup->append_single_option_line("wipe_before_external_loop","quality_settings_seam#wipe-before-external");
 
 
@@ -2427,6 +2888,14 @@ void TabPrint::build()
         optgroup->append_single_option_line("ensure_vertical_shell_thickness", "strength_settings_advanced#ensure-vertical-shell-thickness");
 
     page = add_options_page(L("Speed"), "custom-gcode_speed"); // ORCA: icon only visible on placeholders
+        if (m_type == Preset::TYPE_PRINT)
+        {
+            register_flow_variant_view(
+                ConfigFlowDomain::Process,
+                page,
+                []() -> const std::vector<std::string>& { return process_flow_variant_options(); },
+                [](const std::string& key) { return is_process_flow_variant_option(key); });
+        }
         optgroup = page->new_optgroup(L("Initial layer speed"), L"param_speed_first", 15);
     optgroup->append_single_option_line("initial_layer_speed", "speed_settings_initial_layer_speed#initial-layer");
         optgroup->append_single_option_line("initial_layer_infill_speed", "speed_settings_initial_layer_speed#initial-layer-infill");
@@ -2768,6 +3237,7 @@ optgroup->append_single_option_line("skirt_loops", "others_settings_skirt#loops"
 // Reload current config (aka presets->edited_preset->config) into the UI fields.
 void TabPrint::reload_config()
 {
+    refresh_flow_variant_view();
     this->compatible_widget_reload(m_compatible_printers);
     Tab::reload_config();
 }
@@ -3139,7 +3609,7 @@ void TabPrint::toggle_options()
         m_config_manipulation.set_is_BBL_Printer(is_BBL_printer);
     }
 
-    m_config_manipulation.toggle_print_fff_options(m_config, m_type < Preset::TYPE_COUNT);
+    m_config_manipulation.toggle_print_fff_options(m_config, m_type < Preset::TYPE_COUNT, flow_variant_view_index());
 
     Field *field = m_active_page->get_field("support_style");
     auto   support_type = m_config->opt_enum<SupportType>("support_type");
@@ -3160,6 +3630,11 @@ void TabPrint::toggle_options()
             cb->Append(_(def->enum_labels[i]));
         }
         cb->SetValue(n);
+        // The stale label (e.g. a tree style left over after support_type changed while support
+        // is disabled) may not exist in the rebuilt list; GetValue()/SetValue() then leaves the
+        // selection invalid, and Choice::get_value would index enum_values out of bounds.
+        if (cb->GetSelection() == wxNOT_FOUND && cb->GetCount() > 0)
+            cb->SetSelection(0);
     }
 
     // Keep plate bed-type list in sync with currently selected printer.
@@ -3966,24 +4441,27 @@ void TabFilament::set_custom_gcode(const t_config_option_key& opt_key, const std
     load_config(new_conf);
 }
 
-void TabFilament::add_filament_overrides_page()
+PageShp TabFilament::add_filament_overrides_page()
 {
     //BBS
     PageShp page = add_options_page(L("Setting Overrides"), "custom-gcode_setting_override"); // ORCA: icon only visible on placeholders
     ConfigOptionsGroupShp optgroup = page->new_optgroup(L("Retraction"), L"param_retraction");
 
-    auto append_single_option_line = [optgroup, this](const std::string& opt_key, int opt_index)
+    auto append_single_option_line = [optgroup, this](const std::string& opt_key)
     {
         Line line {"",""};
         //BBS
         line = optgroup->create_single_option_line(optgroup->get_option(opt_key));
 
-        line.near_label_widget = [this, optgroup_wk = ConfigOptionsGroupWkp(optgroup), opt_key, opt_index](wxWindow* parent) {
+        line.near_label_widget = [this, optgroup_wk = ConfigOptionsGroupWkp(optgroup), opt_key](wxWindow* parent) {
             auto check_box = new ::CheckBox(parent); // ORCA modernize checkboxes
-            check_box->Bind(wxEVT_TOGGLEBUTTON, [this, optgroup_wk, opt_key, opt_index](wxCommandEvent& evt) {
+            check_box->Bind(wxEVT_TOGGLEBUTTON, [this, optgroup_wk, opt_key](wxCommandEvent& evt) {
                 const bool is_checked = evt.IsChecked();
+                const int option_index = is_filament_flow_variant_option(opt_key)
+                    ? int(flow_variant_view_index())
+                    : 0;
                 if (auto optgroup_sh = optgroup_wk.lock(); optgroup_sh) {
-                    if (Field *field = optgroup_sh->get_fieldc(opt_key, opt_index); field != nullptr) {
+                    if (Field *field = optgroup_sh->get_fieldc(opt_key, option_index); field != nullptr) {
                         field->toggle(is_checked);
 
                         if (is_checked) {
@@ -3993,9 +4471,19 @@ void TabFilament::add_filament_overrides_page()
                         else {
                             const std::string printer_opt_key = opt_key.substr(strlen("filament_"));
                             const auto printer_config = m_preset_bundle->printers.get_edited_preset().config;
-                            const boost::any printer_config_value = optgroup_sh->get_config_value(printer_config, printer_opt_key, opt_index);
+                            const boost::any printer_config_value = optgroup_sh->get_config_value(printer_config, printer_opt_key, 0);
                             field->update_na_value(printer_config_value);
-                            field->set_na_value();
+                            const ConfigOptionDef *option_def = m_config->def()->get(opt_key);
+                            if (option_def != nullptr &&
+                                (option_def->type == coFloats || option_def->type == coPercents)) {
+                                const double nil_value = ConfigOptionFloatsNullable::nil_value();
+                                Slic3r::GUI::change_opt_value(*m_config, opt_key, nil_value, option_index);
+                                field->set_value(printer_config_value, false);
+                                on_value_change(opt_key, nil_value);
+                                update_dirty();
+                            } else {
+                                field->set_na_value();
+                            }
                         }
                     }
                 }
@@ -4007,8 +4495,6 @@ void TabFilament::add_filament_overrides_page()
 
         optgroup->append_line(line);
     };
-
-    const int extruder_idx = 0; // #ys_FIXME
 
     for (const std::string opt_key : {  "filament_retraction_length",
                                         "filament_z_hop",
@@ -4032,7 +4518,9 @@ void TabFilament::add_filament_overrides_page()
                                         //SoftFever
                                         // "filament_seam_gap"
                                      })
-        append_single_option_line(opt_key, extruder_idx);
+        append_single_option_line(opt_key);
+
+    return page;
 }
 
 void TabFilament::update_filament_overrides_page(const DynamicPrintConfig* printers_config)
@@ -4074,20 +4562,26 @@ void TabFilament::update_filament_overrides_page(const DynamicPrintConfig* print
                                             // "filament_seam_gap"
                                         };
 
+    const int flow_index = int(flow_variant_view_index());
     const int extruder_idx = 0; // #ys_FIXME
+    const int retract_length_index = is_filament_flow_variant_option("filament_retraction_length") ? flow_index : extruder_idx;
 
-    const bool have_retract_length = m_config->option("filament_retraction_length")->is_nil() ||
-                                     m_config->opt_float("filament_retraction_length", extruder_idx) > 0;
+    const ConfigOptionVectorBase* retract_length =
+        dynamic_cast<const ConfigOptionVectorBase*>(m_config->option("filament_retraction_length"));
+    const bool have_retract_length = retract_length == nullptr || retract_length->is_nil(retract_length_index) ||
+                                     m_config->opt_float("filament_retraction_length", retract_length_index) > 0;
 
     for (const std::string& opt_key : opt_keys)
     {
+        const int option_index = is_filament_flow_variant_option(opt_key) ? flow_index : extruder_idx;
         bool is_checked = opt_key=="filament_retraction_length" ? true : have_retract_length;
         m_overrides_options[opt_key]->Enable(is_checked);
 
-        is_checked &= !m_config->option(opt_key)->is_nil();
+        const ConfigOptionVectorBase* option = dynamic_cast<const ConfigOptionVectorBase*>(m_config->option(opt_key));
+        is_checked &= option != nullptr && !option->is_nil(option_index);
         m_overrides_options[opt_key]->SetValue(is_checked);
 
-        Field* field = optgroup->get_fieldc(opt_key, extruder_idx);
+        Field* field = optgroup->get_fieldc(opt_key, option_index);
         if (field == nullptr) continue;
 
         if (opt_key == "filament_long_retractions_when_cut") {
@@ -4100,7 +4594,7 @@ void TabFilament::update_filament_overrides_page(const DynamicPrintConfig* print
             int machine_enabled_level = printers_config->option<ConfigOptionInt>(
                 "enable_long_retraction_when_cut")->value;
             bool machine_enabled = machine_enabled_level == LongRectrationLevel::EnableFilament;
-            bool filament_enabled = m_config->option<ConfigOptionBools>("filament_long_retractions_when_cut")->values[extruder_idx] == 1;
+            bool filament_enabled = m_config->option<ConfigOptionBools>("filament_long_retractions_when_cut")->values[option_index] == 1;
             toggle_line(opt_key, filament_enabled && machine_enabled);
             field->toggle(is_checked && filament_enabled && machine_enabled);
         } else {
@@ -4122,6 +4616,7 @@ void TabFilament::build()
     load_initial_data();
 
     auto page = add_options_page(L("Filament"), "custom-gcode_filament"); // ORCA: icon only visible on placeholders
+    const PageShp filament_page = page;
         //BBS
         auto optgroup = page->new_optgroup(L("Basic information"), L"param_information");
         optgroup->append_single_option_line("filament_type"); // ORCA use same width with other elements
@@ -4287,6 +4782,7 @@ void TabFilament::build()
         //optgroup->append_line(line);
 
     page = add_options_page(L("Cooling"), "custom-gcode_cooling_fan"); // ORCA: icon only visible on placeholders
+    const PageShp cooling_page = page;
 
         //line = { "", "" };
         //line.full_width = 1;
@@ -4337,7 +4833,7 @@ void TabFilament::build()
         line.append_option(optgroup->get_option("complete_print_exhaust_fan_speed"));
         optgroup->append_line(line);
         //BBS
-        add_filament_overrides_page();
+        const PageShp overrides_page = add_filament_overrides_page();
         const int gcode_field_height = 15; // 150
         const int notes_field_height = 25; // 250
 
@@ -4367,6 +4863,7 @@ void TabFilament::build()
         optgroup->append_single_option_line(option);
 
     page = add_options_page(L("Multimaterial"), "custom-gcode_multi_material"); // ORCA: icon only visible on placeholders
+    const PageShp multimaterial_page = page;
         optgroup = page->new_optgroup(L("Wipe tower parameters"), "param_tower");
         optgroup->append_single_option_line("filament_minimal_purge_on_wipe_tower");
 
@@ -4437,11 +4934,18 @@ void TabFilament::build()
         optgroup->append_single_option_line(option);
 
         //build_preset_description_line(optgroup.get());
+
+    register_flow_variant_view(
+        ConfigFlowDomain::Filament,
+        {filament_page, cooling_page, overrides_page, multimaterial_page},
+        []() -> const std::vector<std::string>& { return filament_flow_variant_options(); },
+        [](const std::string& key) { return is_filament_flow_variant_option(key); });
 }
 
 // Reload current config (aka presets->edited_preset->config) into the UI fields.
 void TabFilament::reload_config()
 {
+    refresh_flow_variant_view();
     this->compatible_widget_reload(m_compatible_printers);
     this->compatible_widget_reload(m_compatible_prints);
     Tab::reload_config();
@@ -4769,6 +5273,7 @@ void TabPrinter::build_fff()
 
         optgroup = page->new_optgroup(L("Extruder Clearance"), "param_extruder_clearence");
         optgroup->append_single_option_line("extruder_clearance_radius");
+        optgroup->append_single_option_line("extruder_clearance_dist_to_rod");
         optgroup->append_single_option_line("extruder_clearance_height_to_rod");
         optgroup->append_single_option_line("extruder_clearance_height_to_lid");
 
@@ -5124,8 +5629,16 @@ void TabPrinter::build_unregular_pages(bool from_initial_build/* = false*/)
         auto page = build_kinematics_page();
         if (from_initial_build && !is_marlin_flavor)
             page->clear();
-        else
+        else {
             m_pages.insert(m_pages.begin() + n_before_extruders, page);
+
+            if (!machine_flow_variant_options().empty())
+                register_flow_variant_view(
+                    ConfigFlowDomain::Printer,
+                    page,
+                    []() -> const std::vector<std::string>& { return machine_flow_variant_options(); },
+                    [](const std::string& key) { return is_machine_flow_variant_option(key); });
+        }
     }
 
 if (is_marlin_flavor)
@@ -5518,6 +6031,7 @@ void TabPrinter::update_pages()
 
 void TabPrinter::reload_config()
 {
+    refresh_flow_variant_view();
     Tab::reload_config();
 
     // "extruders_count" doesn't update from the update_config(),
@@ -6216,6 +6730,17 @@ bool Tab::select_preset(std::string preset_name, bool delete_current /*=false*/,
                     oldFilamentColourModes[i] = oldFilamentColourModes[i] == 1 ? 1 : 0;
                 }
 
+                // Snapmaker #805: update_selections() restores the target printer's saved flush
+                // matrix (often 1x1 after a single-filament nozzle variant). Filament presets and
+                // colours are then carried back, leaving N filaments paired with a 1x1 matrix.
+                // auto_calc_flushing_volumes writes matrix[row * n + id] past that buffer.
+                std::vector<double> oldFlushVolumesMatrix;
+                std::vector<double> oldFlushVolumesVector;
+                if (const ConfigOptionFloats *flushMatrix = projectConfig.option<ConfigOptionFloats>("flush_volumes_matrix"))
+                    oldFlushVolumesMatrix = flushMatrix->values;
+                if (const ConfigOptionFloats *flushVector = projectConfig.option<ConfigOptionFloats>("flush_volumes_vector"))
+                    oldFlushVolumesVector = flushVector->values;
+
                 m_preset_bundle->update_selections(*wxGetApp().app_config);
 
                 m_preset_bundle->filament_presets = oldFilamentPresets;
@@ -6223,6 +6748,11 @@ bool Tab::select_preset(std::string preset_name, bool delete_current /*=false*/,
                 projectConfig.option<ConfigOptionStrings>("filament_colour")->values = oldFilamentColors;
                 projectConfig.option<ConfigOptionStrings>("filament_multi_colors", true)->values = oldFilamentMultiColors;
                 projectConfig.option<ConfigOptionInts>("filament_colour_mode", true)->values = oldFilamentColourModes;
+
+                if (ConfigOptionFloats *flushMatrix = projectConfig.option<ConfigOptionFloats>("flush_volumes_matrix"))
+                    flushMatrix->values = oldFlushVolumesMatrix;
+                if (ConfigOptionFloats *flushVector = projectConfig.option<ConfigOptionFloats>("flush_volumes_vector"))
+                    flushVector->values = oldFlushVolumesVector;
 
                 std::vector<std::string> filamentColourModeStrings;
                 filamentColourModeStrings.reserve(oldFilamentColourModes.size());
@@ -6363,6 +6893,7 @@ void Tab::clear_pages()
 {
     // invalidated highlighter, if any exists
     m_highlighter.invalidate();
+    m_parent->show_page_header(false);
     // clear pages from the controlls
     for (auto p : m_pages)
         p->clear();
@@ -6434,6 +6965,7 @@ void Tab::activate_selected_page(std::function<void()> throw_if_canceled)
     if (m_active_page && !(m_active_page->title() == "Dependencies"))
         toggle_options();
     m_active_page->update_visibility(m_mode, true); // for taggle line
+    update_flow_variant_view_visibility();
 }
 
 //BBS: GUI refactor

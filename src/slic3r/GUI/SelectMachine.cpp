@@ -4,6 +4,8 @@
 #include "libslic3r/Utils.hpp"
 #include "libslic3r/Thread.hpp"
 #include "libslic3r/Color.hpp"
+#include "libslic3r/MultiNozzleUtils.hpp"
+#include "libslic3r/GCode/GCodeProcessor.hpp"
 #include "GUI.hpp"
 #include "GUI_App.hpp"
 #include "GUI_Preview.hpp"
@@ -23,6 +25,8 @@
 #include <wx/mstream.h>
 #include <miniz.h>
 #include <algorithm>
+#include <cstdio>
+#include <set>
 #include "Plater.hpp"
 #include "Notebook.hpp"
 #include "BitmapCache.hpp"
@@ -1342,6 +1346,207 @@ bool SelectMachineDialog::build_nozzles_info(std::string& nozzles_info)
     return true;
 }
 
+/* get_auto_nozzle_mapping handshake request, ported from BambuStudio
+ * DeviceCore/DevMappingNozzle.cpp (DevNozzleMappingCtrl::CtrlGetAutoNozzleMappingV0/V1).
+ *
+ * Before a dual-nozzle send, upstream asks the printer to build the filament->nozzle
+ * mapping table and echoes the printer's "mapping" answer back into the project_file payload
+ * as "nozzle_mapping". H2D firmware requires this binding (H2C tolerates its absence); without
+ * it the screen reprint binds every filament to the left nozzle and the right nozzle keeps the
+ * left one's z-offset.
+ *
+ * Version selection mirrors upstream: V1 (logical nozzle groups, {"version":1,...,"group_info"})
+ * only when the sliced plate's nozzle group result reports dynamic-nozzle-map support (filament
+ * switcher machines); V0 (per-filament table) otherwise. Upstream decides this in
+ * SelectMachineDialog::use_dynamic_nozzle_map() from DevUtilBackend::GetNozzleGroupResult(); the
+ * equivalent here is the grouping result ToolOrdering stores on the Print for grouping-model
+ * machines (H2D/H2C/X2D). When it is absent the job cannot be dynamic-mapped, so V0 applies -
+ * there is no per-device flag in this fork's DeviceManager reports to consult instead.
+ *
+ * Returns false (request left empty = no handshake) for every job that must behave exactly as
+ * before: single-nozzle printers, non-sliced sends (sdcard view), jobs whose filaments all use
+ * the left nozzle only (upstream skips the query the same way - the mapping is trivially
+ * left=identity), and any job whose slicing data is unavailable. A failed or unanswered query
+ * at send time is handled by the network agent: it logs and sends the job without
+ * "nozzle_mapping", so a printer that never answers cannot block a print. */
+bool SelectMachineDialog::build_nozzle_mapping_request(std::string& request)
+{
+    request.clear();
+
+    // The request is built from live slicing data; a reprint from the sdcard has none.
+    if (m_print_type != PrintFromType::FROM_NORMAL)
+        return false;
+
+    PresetBundle* preset_bundle = wxGetApp().preset_bundle;
+    if (!preset_bundle || !m_plater)
+        return false;
+
+    // Same dual-nozzle gate as build_nozzles_info()/get_ams_mapping_result(): only a printer
+    // whose edited preset declares two nozzle diameters is treated as nozzle-aware, which is
+    // exactly the condition under which the payload carries nozzles_info/nozzleId.
+    auto opt_nozzle_diameters = preset_bundle->printers.get_edited_preset().config.option<ConfigOptionFloats>("nozzle_diameter");
+    if (!opt_nozzle_diameters || opt_nozzle_diameters->size() != 2)
+        return false;
+
+    // Fork convention (matches nozzles_info / filament_map): nozzle index 0 = left, 1 = right.
+    const int kLogicLeftExtruder = 0;
+    const int kLogicRightExtruder = 1;
+
+    Print* print = &m_plater->fff_print();
+    auto   group_result = print ? print->get_nozzle_group_result() : nullptr;
+    GCodeProcessorResult* gcode_result = m_plater->get_partplate_list().get_current_slice_result();
+
+    // Upstream skips the query when the right nozzle is never used: the mapping is trivial.
+    if (group_result &&
+        group_result->get_used_nozzles_in_extruder(kLogicRightExtruder).empty())
+        return false;
+
+    // Without the AMS mapping there is no ams_mapping table to send.
+    if (m_ams_mapping_result.empty())
+        return false;
+
+    json command_jj;
+    command_jj["print"]["command"] = "get_auto_nozzle_mapping";
+    // Placeholder: the network agent overwrites this with its own MQTT sequence id before
+    // publishing and matches the printer's answer against it.
+    command_jj["print"]["sequence_id"] = "0";
+
+    // V1: logical-nozzle groups for dynamic-map (filament switcher) machines.
+    if (group_result && group_result->is_support_dynamic_nozzle_map()) {
+        json group_info_jj;
+        std::set<int> used_groups;
+        for (const auto& nozzle : group_result->get_used_nozzles_in_extruder()) {
+            if (!used_groups.insert(nozzle.group_id).second)
+                continue;
+            json nozzle_info;
+            nozzle_info["id"]  = nozzle.group_id;
+            nozzle_info["ext"] = nozzle.extruder_id + 1;
+            if (nozzle.diameter.empty())
+                continue;
+            try {
+                nozzle_info["dia"] = std::stod(nozzle.diameter);
+            } catch (...) {
+                continue;
+            }
+            if (nozzle.volume_type == NozzleVolumeType::nvtHighFlow)
+                nozzle_info["vol"] = "High Flow";
+            else if (nozzle.volume_type == NozzleVolumeType::nvtStandard)
+                nozzle_info["vol"] = "Standard";
+            else if (nozzle.volume_type == NozzleVolumeType::nvtTPUHighFlow)
+                nozzle_info["vol"] = "TPU Flow";
+            else
+                continue;
+            group_info_jj.push_back(nozzle_info);
+        }
+        command_jj["print"]["group_info"] = group_info_jj;
+        command_jj["print"]["version"]    = 1;
+        request = command_jj.dump();
+        return true;
+    }
+
+    // V0: per-filament table. Everything below follows the upstream request field for field;
+    // data the fork does not track (per-nozzle wear, filament loaded in a nozzle) is omitted
+    // rather than invented.
+
+    // flow calibration option (1/0; upstream's tri-state switch can also say 2 = auto).
+    const int flow_cali_opt = m_checkbox_list["flow_cali"] && m_checkbox_list["flow_cali"]->GetValue() ? 1 : 0;
+    command_jj["print"]["calibration"] = flow_cali_opt;
+    // No PA-value switch in this fork: automatic calibration (1), same value the payload sends.
+    command_jj["print"]["extrude_cali_manual_mode"] = 1;
+
+    // filament sequence: first occurrence index per 1-based filament id, -1 for unused ids.
+    // (nlohmann objects key on strings; use std::to_string consistently.)
+    json filament_seq_jj;
+    int  max_fila_id = 0;
+    std::set<int> seen;
+    if (gcode_result) {
+        for (int idx = 0; idx < (int) gcode_result->filament_change_sequence.size(); idx++) {
+            int fila_id = (int) gcode_result->filament_change_sequence[idx];
+            if (seen.insert(fila_id).second) {
+                filament_seq_jj[std::to_string(fila_id + 1)] = idx;
+                max_fila_id = std::max(max_fila_id, fila_id + 1);
+            }
+        }
+    }
+    for (int fila_id = 0; fila_id <= max_fila_id; fila_id++) {
+        const std::string key = std::to_string(fila_id);
+        if (!filament_seq_jj.contains(key) || filament_seq_jj[key].is_null())
+            filament_seq_jj[key] = -1;
+    }
+    command_jj["print"]["filament_seq"] = filament_seq_jj;
+
+    // ams mapping: 33 slots, packed ams_id << 8 | slot_id at the 1-based filament index.
+    std::vector<int> ams_mapping_vec(33, 0xFFFF);
+    for (const auto& item : m_ams_mapping_result) {
+        try {
+            int ams_id  = std::stoi(item.ams_id);
+            int slot_id = item.slot_id.empty() ? 0 : std::stoi(item.slot_id);
+            if (item.id + 1 >= 0 && item.id + 1 < (int) ams_mapping_vec.size())
+                ams_mapping_vec[item.id + 1] = (ams_id << 8) | slot_id;
+        } catch (...) {
+            if (item.id + 1 >= 0 && item.id + 1 < (int) ams_mapping_vec.size())
+                ams_mapping_vec[item.id + 1] = item.tray_id;
+        }
+    }
+    command_jj["print"]["ams_mapping"] = ams_mapping_vec;
+
+    // fila_info: one entry per (filament, logical nozzle) pair the slicing result routes it to.
+    auto diameter_str = [](double d) {
+        char buf[16];
+        snprintf(buf, sizeof buf, "%.2f", d);
+        return std::string(buf);
+    };
+    auto flow_str = [](NozzleVolumeType vt) {
+        return vt == NozzleVolumeType::nvtHighFlow ? "High Flow" : "Standard";
+    };
+
+    json filament_info_jj;
+    if (group_result) {
+        for (const auto& fila : m_ams_mapping_result) {
+            const auto nozzle_list = group_result->get_nozzles_for_filament(fila.id);
+            if (nozzle_list.empty())
+                continue;
+            for (const auto& nozzle_info : nozzle_list) {
+                json fila_item_jj;
+                fila_item_jj["id"]    = fila.id + 1;
+                // Upstream: 1 = left logic extruder, 2 = right.
+                fila_item_jj["direction"] = nozzle_info.extruder_id == kLogicLeftExtruder ? 1 : 2;
+                fila_item_jj["group"]     = nozzle_info.group_id;
+                fila_item_jj["nozzle_d"]  = nozzle_info.diameter.empty()
+                                                ? diameter_str(opt_nozzle_diameters->get_at(
+                                                      nozzle_info.extruder_id == kLogicLeftExtruder ? 0 : 1))
+                                                : nozzle_info.diameter;
+                fila_item_jj["nozzle_v"]  = flow_str(nozzle_info.volume_type);
+                fila_item_jj["cate"]      = fila.filament_id;
+                fila_item_jj["color"]     = fila.color;
+                filament_info_jj.push_back(fila_item_jj);
+            }
+        }
+    }
+    command_jj["print"]["fila_info"] = filament_info_jj;
+
+    // nozzle_info: the two toolhead nozzles, from the edited preset (the fork has no
+    // DevNozzleSystem report to read wear/loaded-filament from; those keys are omitted).
+    // INFERRED pos ids: the fork's task convention (CloudTaskNozzleId, validated against the
+    // H2C send path) names the left nozzle 1 and the right nozzle 0; hardware capture pending.
+    auto opt_nozzle_volume_type = preset_bundle->project_config.option<ConfigOptionEnumsGeneric>("nozzle_volume_type");
+    json nozzle_info_jj;
+    for (int i = 0; i < 2; i++) {
+        json nozzle_item_jj;
+        nozzle_item_jj["pos"] = (i == kLogicLeftExtruder) ? (int) CloudTaskNozzleId::NOZZLE_LEFT
+                                                          : (int) CloudTaskNozzleId::NOZZLE_RIGHT;
+        nozzle_item_jj["nozzle_d"] = diameter_str(opt_nozzle_diameters->get_at(i));
+        nozzle_item_jj["nozzle_v"] = (opt_nozzle_volume_type && i < (int) opt_nozzle_volume_type->size())
+                                         ? flow_str((NozzleVolumeType) opt_nozzle_volume_type->get_at(i))
+                                         : "Standard";
+        nozzle_info_jj.push_back(nozzle_item_jj);
+    }
+    command_jj["print"]["nozzle_info"] = nozzle_info_jj;
+
+    request = command_jj.dump();
+    return true;
+}
+
 void SelectMachineDialog::prepare(int print_plate_idx)
 {
     m_print_plate_idx = print_plate_idx;
@@ -2272,6 +2477,17 @@ void SelectMachineDialog::on_send_print()
         BOOST_LOG_TRIVIAL(info) << "build_nozzles_info = " << m_print_job->task_nozzles_info;
     else
         BOOST_LOG_TRIVIAL(info) << "build_nozzles_info: no per-nozzle info for this printer";
+
+    /* Nozzle mapping handshake request (get_auto_nozzle_mapping). Empty for every printer/job
+     * that is not a dual-nozzle sliced send - the network agent then skips the handshake and
+     * the project_file payload stays exactly what those machines have always been sent. */
+    if (build_nozzle_mapping_request(m_print_job->task_nozzle_mapping_request))
+        BOOST_LOG_TRIVIAL(info) << "build_nozzle_mapping_request = " << m_print_job->task_nozzle_mapping_request;
+    else
+        BOOST_LOG_TRIVIAL(info) << "build_nozzle_mapping_request: none for this job";
+
+    // No PA-value switch in this fork: automatic extruder calibration (1), per the payload docs.
+    m_print_job->extruder_cali_manual_mode = 1;
 
     m_print_job->has_sdcard = obj_->get_sdcard_state() == MachineObject::SdcardState::HAS_SDCARD_NORMAL;
 

@@ -1,0 +1,8 @@
+{
+    "type": "filament",
+    "from": "system",
+    "instantiation": "false",
+    "name": "Snapmaker PETG HF @U1 base",
+    "renamed_from": "Snapmaker PETG @U1 base;Snapmaker PETG @base;Snapmaker PETG HF @base;Snapmaker PETG HF @U1 base2",
+    "inherits": "fdm_filament_petg_hf_category"
+}

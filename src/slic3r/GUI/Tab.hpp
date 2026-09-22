@@ -57,6 +57,7 @@ namespace GUI {
 
 class TabPresetComboBox;
 class OG_CustomCtrl;
+class SegmentedToggle;
 
 // Single Tab page containing a{ vsizer } of{ optgroups }
 // package Slic3r::GUI::Tab::Page;
@@ -279,6 +280,24 @@ protected:
     m_highlighter;
 
 	DynamicPrintConfig 	m_cache_config;
+    t_config_option_keys m_cache_config_keys;
+
+    struct FlowVariantView
+    {
+        enum class EditScope { ActiveMode, Both };
+
+        ConfigFlowDomain domain { ConfigFlowDomain::Process };
+        std::vector<PageShp> pages;
+        wxPanel* host { nullptr };
+        SegmentedToggle* selector { nullptr };
+        Button* copy_btn { nullptr };
+        std::vector<std::string> modes;
+        std::string selected_mode;
+        EditScope edit_scope { EditScope::ActiveMode };
+        std::function<const std::vector<std::string>&()> options;
+        std::function<bool(const std::string&)> is_option;
+    };
+    std::unique_ptr<FlowVariantView> m_flow_variant_view;
 
 
 	bool				m_page_switch_running = false;
@@ -427,6 +446,28 @@ public:
     virtual void				set_custom_gcode(const t_config_option_key& opt_key, const std::string& value);
 
 protected:
+    void register_flow_variant_view(ConfigFlowDomain domain,
+                                    const std::vector<PageShp>& pages,
+                                    std::function<const std::vector<std::string>&()> options,
+                                    std::function<bool(const std::string&)> is_option);
+    void register_flow_variant_view(ConfigFlowDomain domain,
+                                    const PageShp& page,
+                                    std::function<const std::vector<std::string>&()> options,
+                                    std::function<bool(const std::string&)> is_option)
+    {
+        register_flow_variant_view(domain, std::vector<PageShp> {page}, std::move(options), std::move(is_option));
+    }
+    void refresh_flow_variant_view();
+    void update_flow_variant_view_visibility();
+    size_t flow_variant_view_index() const;
+    void destroy_flow_variant_header_controls();
+    bool flow_variant_both_allowed() const;
+    int  flow_variant_selector_index() const;
+    void on_flow_variant_segment_selected(int index);
+    bool enter_flow_variant_both();
+    void on_copy_standard_to_high_flow();
+    void maybe_dual_write_flow_variant(const std::string& opt_key);
+
 	void			create_line_with_widget(ConfigOptionsGroup* optgroup, const std::string& opt_key, const std::string& path, widget_t widget);
 	wxSizer*		compatible_widget_create(wxWindow* parent, PresetDependencies &deps);
 	void 			compatible_widget_reload(PresetDependencies &deps);
@@ -597,7 +638,7 @@ private:
 	ogStaticText*	m_volumetric_speed_description_line {nullptr};
 	ogStaticText*	m_cooling_description_line {nullptr};
 
-    void            add_filament_overrides_page();
+    PageShp         add_filament_overrides_page();
     void            update_filament_overrides_page(const DynamicPrintConfig* printers_config);
 	void 			update_volumetric_flow_preset_hints();
 

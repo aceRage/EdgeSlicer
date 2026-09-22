@@ -186,6 +186,13 @@ void remove_duplicates_preserve_order(std::vector<unsigned int> &values)
 // Shortest hamilton path problem
 static std::vector<unsigned int> solve_extruder_order(const std::vector<std::vector<float>>& wipe_volumes, std::vector<unsigned int> all_extruders, std::optional<unsigned int> start_extruder_id) 
 {
+    // Snapmaker #754: an extruder id outside wipe_volumes is a near-null OOB
+    // (Sentry SNAPMAKER_ORCA-7VR). Keep the input order rather than indexing the matrix.
+    for (auto id : all_extruders) {
+        if (id >= wipe_volumes.size())
+            return all_extruders;
+    }
+
     bool add_start_extruder_flag = false;
 
     if (start_extruder_id) {
@@ -249,43 +256,13 @@ static std::vector<unsigned int> solve_extruder_order(const std::vector<std::vec
     return path;
 }
 
-std::vector<unsigned int> get_extruders_order(const std::vector<std::vector<float>> &wipe_volumes, std::vector<unsigned int> all_extruders, std::optional<unsigned int>start_extruder_id)
+// Declared in ToolOrdering.hpp (exposed for unit testing). One-line public wrapper around the
+// static DP solver so Catch2 [ToolOrdering][OOB] can link without exporting solve_extruder_order.
+std::vector<unsigned int> get_extruders_order(const std::vector<std::vector<float>> &wipe_volumes,
+                                              std::vector<unsigned int>              all_extruders,
+                                              std::optional<unsigned int>            start_extruder_id)
 {
-#define USE_DP_OPTIMIZE
-#ifdef USE_DP_OPTIMIZE
     return solve_extruder_order(wipe_volumes, all_extruders, start_extruder_id);
-#else
-if (all_extruders.size() > 1) {
-        int begin_index = 0;
-        auto iter = std::find(all_extruders.begin(), all_extruders.end(), start_extruder_id);
-        if (iter != all_extruders.end()) {
-            for (int i = 0; i < all_extruders.size(); ++i) {
-                if (all_extruders[i] == start_extruder_id) {
-                    std::swap(all_extruders[i], all_extruders[0]);
-                }
-            }
-            begin_index = 1;
-        }
-
-        std::pair<float, std::vector<unsigned int>> volumes_to_extruder_order;
-        volumes_to_extruder_order.first = 10000 * all_extruders.size();
-        std::sort(all_extruders.begin() + begin_index, all_extruders.end());
-        do {
-            float flush_volume = 0;
-            for (int i = 0; i < all_extruders.size() - 1; ++i) {
-                flush_volume += wipe_volumes[all_extruders[i]][all_extruders[i + 1]];
-            }
-            if (flush_volume < volumes_to_extruder_order.first) {
-                volumes_to_extruder_order = std::pair(flush_volume, all_extruders);
-            }
-        } while (std::next_permutation(all_extruders.begin() + begin_index, all_extruders.end()));
-
-        if (volumes_to_extruder_order.second.size() > 0)
-            return volumes_to_extruder_order.second;
-    }
-    return all_extruders;
-
-#endif // OPTIMIZE
 }
 
 // Returns true in case that extruder a comes before b (b does not have to be present). False otherwise.
@@ -1190,10 +1167,14 @@ void ToolOrdering::fill_wipe_tower_partitions(const PrintConfig &config, coordf_
                     LayerTools lt_new(0.5f * (lt.print_z + lt_object.print_z));
                     // Find the 1st layer above lt_new.
                     for (j = i + 1; j < m_layer_tools.size() && m_layer_tools[j].print_z < lt_new.print_z - EPSILON; ++ j);
-                    if (std::abs(m_layer_tools[j].print_z - lt_new.print_z) < EPSILON) {
+                    if (j < m_layer_tools.size() && std::abs(m_layer_tools[j].print_z - lt_new.print_z) < EPSILON) {
 						m_layer_tools[j].has_wipe_tower = true;
-					} else {
-						LayerTools &lt_extra = *m_layer_tools.insert(m_layer_tools.begin() + j, lt_new);
+					} else if (j < m_layer_tools.size() && ! m_layer_tools[j].extruders.empty()) {
+                        // The layer right above the inserted one may carry no extruders, e.g. when
+                        // support generation was toggled off after a slice that had it enabled: the
+                        // layer plan for the raft gap then contains no extrusions for some layers.
+                        // lt_next.extruders.front() would dereference a null begin() and crash.
+                        LayerTools &lt_extra = *m_layer_tools.insert(m_layer_tools.begin() + j, lt_new);
                         //LayerTools &lt_prev  = m_layer_tools[j];
                         LayerTools &lt_next  = m_layer_tools[j + 1];
                         assert(! m_layer_tools[j - 1].extruders.empty() && ! lt_next.extruders.empty());
@@ -1740,6 +1721,29 @@ std::vector<unsigned int> parse_cyclic_order(const std::string& str, unsigned in
     return order;
 }
 
+std::vector<unsigned int> cyclic_order_from_customized_sequence(
+    const std::vector<LayerPrintSequence>& other_layers_seqs, unsigned int filament_count)
+{
+    // The plate's customized "other layers print sequence" (set per plate through the filament
+    // sequence UI) stores 1-based filament numbers per layer range. A cyclic layer outside every
+    // customized range uses the first customized range's sequence as its base order, so a user who
+    // customized the plate's filament order gets that same order from cyclic ordering without
+    // duplicating it into toolchange_cyclic_order. Same validation as parse_cyclic_order: drop
+    // out-of-range and duplicate entries. An empty result means "nothing customized" and leaves
+    // the plain ascending order.
+    for (const LayerPrintSequence& range_seq : other_layers_seqs) {
+        std::vector<unsigned int> order;
+        for (int filament_1based : range_seq.second) {
+            if (filament_1based >= 1 && (unsigned int)filament_1based <= filament_count
+                && std::find(order.begin(), order.end(), (unsigned int)(filament_1based - 1)) == order.end())
+                order.emplace_back((unsigned int)(filament_1based - 1));
+        }
+        if (!order.empty())
+            return order;
+    }
+    return {};
+}
+
 void apply_cyclic_order(std::vector<unsigned int>& filaments, const std::vector<unsigned int>& cyclic_order)
 {
     std::sort(filaments.begin(), filaments.end());
@@ -1922,8 +1926,16 @@ void ToolOrdering::reorder_extruders_for_minimum_flush_volume()
         use_cyclic_ordering ? parse_cyclic_order(print_config->toolchange_cyclic_order.value, filament_count)
                             : std::vector<unsigned int>();
 
+    // No explicit cyclic string: fall back to the plate's customized filament sequence (the
+    // per-plate "other layers print sequence") as the cyclic base order. The explicit string
+    // keeps winning, and with no customization anywhere this stays empty, so cyclic layers keep
+    // the plain ascending order exactly as before.
+    const std::vector<unsigned int> effective_cyclic_order =
+        cyclic_order.empty() ? cyclic_order_from_customized_sequence(other_layers_seqs, filament_count)
+                             : cyclic_order;
+
     auto get_custom_seq = make_cyclic_custom_seq(other_layers_seqs, layer_filaments,
-                                                 use_cyclic_ordering, cyclic_first_layer, cyclic_order);
+                                                 use_cyclic_ordering, cyclic_first_layer, effective_cyclic_order);
 
     std::optional<unsigned int> current_extruder_id;
     for (int i = 0; i < m_layer_tools.size(); ++i) {

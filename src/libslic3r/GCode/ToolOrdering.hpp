@@ -14,6 +14,7 @@
 #include <vector>
 #include <functional>
 #include <string>
+#include <optional>
 
 #include <boost/container/small_vector.hpp>
 
@@ -316,6 +317,12 @@ private:
 // still orders the filaments it does name. Exposed for unit testing.
 std::vector<unsigned int> parse_cyclic_order(const std::string& str, unsigned int number_of_extruders);
 
+// Classic DP flush-volume solver used by reorder_extruders_for_minimum_flush_volume.
+// Snapmaker #754: exposed so Catch2 can drive the wipe_volumes OOB guard without constructing a Print.
+std::vector<unsigned int> get_extruders_order(const std::vector<std::vector<float>> &wipe_volumes,
+                                              std::vector<unsigned int>              all_extruders,
+                                              std::optional<unsigned int>            start_extruder_id);
+
 // Reorder a layer's 0-based filaments for cyclic ordering: ascending by default, or following
 // cyclic_order when non-empty. Filaments absent from the sequence keep ascending order after
 // the listed ones. Exposed for unit testing.
@@ -327,6 +334,15 @@ void apply_cyclic_order(std::vector<unsigned int>& filaments, const std::vector<
 // sequence. number_of_extruders is only the fallback when there is no physical count at all.
 // Exposed for unit testing.
 unsigned int cyclic_filament_count(size_t num_physical, const MixedFilamentManager *mixed_mgr, unsigned int number_of_extruders);
+
+// Derive a cyclic base order from the plate's customized filament sequence (the per-plate
+// "other layers print sequence" ranges): the first customized range with a usable sequence
+// supplies the order, its 1-based filament numbers converted to 0-based indices. Entries
+// outside [1, filament_count] and duplicates are dropped, mirroring parse_cyclic_order.
+// Returns empty when nothing is customized, leaving the caller the plain ascending order.
+// Exposed for unit testing.
+std::vector<unsigned int> cyclic_order_from_customized_sequence(
+    const std::vector<LayerPrintSequence> &other_layers_seqs, unsigned int filament_count);
 
 // Build the per-layer custom-sequence callback used by reorder_extruders_for_minimum_flush_volume.
 // An explicit other_layers_print_sequence always wins; otherwise, under cyclic ordering, the layer

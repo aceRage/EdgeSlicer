@@ -64,6 +64,9 @@ public:
     std::string task_ams_mapping2;
     std::string task_ams_mapping_info;
     std::string task_nozzles_info;
+    /* Ultra (dual-nozzle): see BBL::PrintParams::nozzle_mapping_request. Empty for
+     * single-nozzle printers. */
+    std::string task_nozzle_mapping_request;
     std::string connection_type;
     std::string m_print_type;
     std::string m_dst_path;
@@ -86,6 +89,9 @@ public:
     int         auto_bed_leveling{0};
     int         auto_flow_cali{0};
     int         auto_offset_cali{0};
+    /* Ultra (dual-nozzle): BBL::PrintParams::extruder_cali_manual_mode. This fork has no
+     * PA-value switch; the default 1 (automatic calibration) is always used. */
+    int         extruder_cali_manual_mode{1};
 
     void set_print_config(std::string bed_type, bool bed_leveling, bool flow_cali, bool vabration_cali, bool record_timelapse, bool layer_inspect,
         int auto_bed_levelingt,

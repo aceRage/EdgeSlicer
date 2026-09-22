@@ -173,6 +173,12 @@ This setting will use your printer/material Wipe Distance and retract amount bef
 
 ![seam-wipe-on-loops-options](https://github.com/SoftFever/OrcaSlicer/blob/main/doc/images/seam/seam-wipe-on-loops-options.png?raw=true)
 
+### Wipe inward
+
+Offset the external-wall wipe path toward already-printed inner walls, so the seam tail is tucked into material that is already on the part instead of being dragged along the outer surface. The offset distance (`wipe_inward_distance`) can be given in millimetres or as a percentage of the actual outer-wall width (default 50%).
+
+The wipe falls back to the regular outward wipe when there is no adjacent inner wall yet (single-wall areas, or Outer/Inner wall order) or when no supported inward path exists. Wipe inward is forced off for pressure advance and retraction calibrations.
+
 ### Wipe Before External
 
 To minimize the visibility of potential over-extrusion at the start of an external perimeter, the de-retraction move is performed slightly on the inside of the model and, hence, the start of the external perimeter. That way, any potential over-extrusion is hidden from the outside surface.

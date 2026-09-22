@@ -38,6 +38,7 @@ namespace Slic3r {
 
 // Forward declarations.
 class GCode;
+struct WipeInwardSupport;
 
 namespace { struct Item; }
 struct PrintInstance;
@@ -69,6 +70,8 @@ public:
     void reset_path() { this->path = Polyline(); }
     std::string wipe(GCode &gcodegen, double length, bool toolchange = false, bool is_last = false);
     RetractionValues calculateWipeRetractionLengths(GCode& gcodegen, bool toolchange);
+    // Orca: rebuild the stored path while deduplicating shared path boundaries.
+    void update_path(const ExtrusionPaths &paths, bool reverse = false);
 };
 
 class WipeTowerIntegration {
@@ -100,8 +103,15 @@ public:
         m_plate_origin(plate_origin),
         m_single_extruder_multi_material(print_config.single_extruder_multi_material),
         m_enable_timelapse_print(print_config.timelapse_type.value == TimelapseType::tlSmooth),
-        m_is_first_print(true)
-    {}
+        m_is_first_print(true),
+        m_last_wipe_tower_print_z(print_config.z_offset.value),
+        m_sparse_layers_skipped(wipe_tower_sparse_layers_skipped(print_config))
+    {
+        // Precomputed rather than accumulated while emitting, so that the clearance validator and
+        // the emitter cannot disagree about where the compacted tower sits on any given layer.
+        if (m_sparse_layers_skipped)
+            m_compacted_tower_z = compute_compacted_wipe_tower_z(tool_changes, float(print_config.z_offset.value));
+    }
 
     std::string prime(GCode &gcodegen);
     void next_layer() {
@@ -153,13 +163,18 @@ private:
     int                                                          m_tool_change_idx;
     std::vector<size_t>                                          m_local_z_tool_change_idx;
     std::vector<size_t>                                          m_local_z_reserve_slot_idx;
-    double                                                       m_last_wipe_tower_print_z = 0.f;
 
     // BBS
     Vec3d                                                        m_plate_origin;
     bool                                                         m_single_extruder_multi_material;
     bool                                                         m_enable_timelapse_print;
     bool                                                         m_is_first_print;
+    double                                                       m_last_wipe_tower_print_z = 0.f;
+    // wipe_tower_no_sparse_layers, as answered by the shared compaction rule rather than by the raw
+    // option: smooth timelapse keeps a tower on every layer regardless.
+    const bool                                                   m_sparse_layers_skipped;
+    // Print z of the compacted tower per planned layer. Empty when the tower is not compacted.
+    std::vector<float>                                           m_compacted_tower_z;
 };
 
 class ColorPrintColors
@@ -404,6 +419,13 @@ private:
     //BBS
     void check_placeholder_parser_failed();
 
+    /*
+     * Build scalar process options for custom G-code evaluation.
+     * Flow-variant vectors are resolved for current_extruder_id, and explicit overrides take precedence.
+    */
+    DynamicConfig build_placeholder_process_config(unsigned int current_extruder_id,
+                                                   const DynamicConfig *config_override) const;
+
     void            set_last_pos(const Point &pos) { m_last_pos = pos; m_last_pos_defined = true; }
     bool            last_pos_defined() const { return m_last_pos_defined; }
     void            set_extruders(const std::vector<unsigned int> &extruder_ids);
@@ -412,10 +434,14 @@ private:
     std::string     change_layer(coordf_t print_z);
     // Orca: pass the complete collection of region perimeters to the extrude loop to check whether the wipe before external loop
     // should be executed
-    std::string     extrude_entity(const ExtrusionEntity &entity, std::string description = "", double speed = -1., const ExtrusionEntitiesPtr& region_perimeters = ExtrusionEntitiesPtr());
+    std::string     extrude_entity(const ExtrusionEntity &entity, std::string description = "", double speed = -1.,
+                                   const ExtrusionEntitiesPtr& region_perimeters = ExtrusionEntitiesPtr(),
+                                   const WipeInwardSupport* wipe_support = nullptr);
     // Orca: pass the complete collection of region perimeters to the extrude loop to check whether the wipe before external loop
     // should be executed
-    std::string     extrude_loop(ExtrusionLoop loop, std::string description, double speed = -1., const ExtrusionEntitiesPtr& region_perimeters = ExtrusionEntitiesPtr(), const Point* start_point = nullptr);
+    std::string     extrude_loop(ExtrusionLoop loop, std::string description, double speed = -1.,
+                                 const ExtrusionEntitiesPtr& region_perimeters = ExtrusionEntitiesPtr(),
+                                 const Point* start_point = nullptr, const WipeInwardSupport* wipe_support = nullptr);
     std::string     extrude_multi_path(ExtrusionMultiPath multipath, std::string description = "", double speed = -1.);
     std::string     extrude_path(ExtrusionPath path, std::string description = "", double speed = -1.);
     
@@ -677,6 +703,15 @@ private:
 
     std::string _extrude(const ExtrusionPath &path, std::string description = "", double speed = -1);
     bool _needSAFC(const ExtrusionPath &path);
+
+    // Snapmaker: flow variant — read a process-domain vector option
+    template<typename VectorOption>
+    auto process_flow_value(const VectorOption &opt) const -> decltype(opt.get_at(0))
+    {
+        return get_value_at(m_config, opt, ConfigFlowDomain::Process,
+                            m_writer.extruder() != nullptr ? m_writer.extruder()->id() : 0);
+    }
+
     void print_machine_envelope(GCodeOutputStream &file, Print &print);
     void _print_first_layer_bed_temperature(GCodeOutputStream &file, Print &print, const std::string &gcode, bool wait);
     void _print_first_layer_extruder_temperatures(GCodeOutputStream &file, Print &print, const std::string &gcode, unsigned int first_printing_extruder_id, bool wait);

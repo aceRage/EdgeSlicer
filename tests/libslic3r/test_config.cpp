@@ -13,6 +13,7 @@
 #include <cereal/archives/binary.hpp>
 
 #include <sstream>
+#include <cmath>
 
 using namespace Slic3r;
 
@@ -87,13 +88,13 @@ SCENARIO("Config accessor functions perform as expected.", "[Config]") {
         WHEN("An floating-point option is set through the integer interface") {
             config.set("inner_wall_speed", 10);
             THEN("The underlying value is set correctly.") {
-                REQUIRE(config.opt<ConfigOptionFloat>("inner_wall_speed")->getFloat() == 10.0);
+                REQUIRE(config.opt<ConfigOptionFloats>("inner_wall_speed")->get_at(0) == 10.0);
             }
         }
         WHEN("A floating-point option is set through the double interface") {
             config.set("inner_wall_speed", 5.5);
             THEN("The underlying value is set correctly.") {
-                REQUIRE(config.opt<ConfigOptionFloat>("inner_wall_speed")->getFloat() == 5.5);
+                REQUIRE(config.opt<ConfigOptionFloats>("inner_wall_speed")->get_at(0) == 5.5);
             }
         }
         WHEN("An integer-based option is set through the double interface") {
@@ -106,7 +107,7 @@ SCENARIO("Config accessor functions perform as expected.", "[Config]") {
                 REQUIRE_THROWS_AS(config.set_deserialize_strict("inner_wall_speed", "zzzz"), BadOptionValueException);
             }
             THEN("The value does not change.") {
-                REQUIRE(config.opt<ConfigOptionFloat>("inner_wall_speed")->getFloat() == 60.0);
+                REQUIRE(config.opt<ConfigOptionFloats>("inner_wall_speed")->get_at(0) == 60.0);
             }
         }
         WHEN("A string option is set through the string interface") {
@@ -517,4 +518,88 @@ TEST_CASE("PrintConfigDef and the CLI ConfigDefs never register the same option 
     for (const std::string &d : duplicates)
         UNSCOPED_INFO(d);
     CHECK(duplicates.empty());
+
+// Snapmaker #810: enabling small-area flow compensation must fall back to the
+// PrintConfig default model (not an empty per-preset override). The toggle
+// itself stays off until the user turns it on.
+TEST_CASE("Small-area flow compensation default model is populated", "[Config][SAFC]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    REQUIRE_FALSE(config.opt_bool("small_area_infill_flow_compensation"));
+    const auto *model = config.opt<ConfigOptionStrings>("small_area_infill_flow_compensation_model");
+    REQUIRE(model != nullptr);
+    REQUIRE_FALSE(model->values.empty());
+    CHECK(model->values.front() == "0,0");
+    CHECK(model->values.back() == "\n10,1");
+}
+
+// ---------------------------------------------------------------------------
+// Snapmaker: regression tests for the "Invalid speed in 'G1 F0'" failure.
+//
+// internal_bridge_speed is a coFloatsOrPercents (flow-variant) option with
+// ratio_over = bridge_speed. ConfigBase::get_abs_value() had no branch for
+// coFloatsOrPercents and fell through to an invalid ConfigOptionFloatOrPercent
+// cast, reading the vector's heap pointer bits as a double (a denormal). The
+// gcode formatter then rounded F = speed * 60 to integer millimeters and
+// emitted a literal "G1 F0", aborting the print on the U1.
+// ---------------------------------------------------------------------------
+TEST_CASE("get_abs_value resolves coFloatsOrPercents over its ratio_over target", "[Config]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+
+    // Defaults: internal_bridge_speed = 150%, bridge_speed = 25 mm/s -> 37.5 mm/s.
+    // Must be a sane absolute speed, not a denormal garbage value.
+    const double dflt = config.get_abs_value("internal_bridge_speed");
+    REQUIRE(std::abs(dflt - 37.5) < 1e-9);
+    REQUIRE(dflt > 1e-6);
+
+    // Changing the ratio_over target must be honored: 150% of 30 -> 45.
+    config.set("bridge_speed", 30);
+    REQUIRE(std::abs(config.get_abs_value("internal_bridge_speed") - 45.0) < 1e-9);
+
+    // An absolute (non-percent) entry passes through unchanged.
+    config.set_deserialize_strict("internal_bridge_speed", "20");
+    REQUIRE(config.get_abs_value("internal_bridge_speed") == 20.0);
+
+    // A multi-variant vector resolves the percentage from slot 0: 120% of 30 -> 36.
+    config.set_deserialize_strict("internal_bridge_speed", "120%,80%");
+    REQUIRE(std::abs(config.get_abs_value("internal_bridge_speed") - 36.0) < 1e-9);
+}
+
+TEST_CASE("get_abs_value fails safe on unsupported option types", "[Config]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    // "printer_notes" is a coString. Previously this fell through to an
+    // invalid ConfigOptionFloatOrPercent cast (undefined behavior); it must
+    // now log and return 0 instead of reading garbage memory.
+    REQUIRE(config.get_abs_value("printer_notes") == 0.0);
+}
+
+// Mirror of the erInternalBridgeInfill speed resolution in GCode::_extrude():
+// a percentage resolves against the variant-matched bridge_speed, so the
+// high-flow slot of internal_bridge_speed pairs with the high-flow slot of
+// bridge_speed. This is the exact get_value_at / process_flow_value machinery
+// _extrude relies on after the High-Flow migration.
+TEST_CASE("internal bridge speed resolution is flow-variant aware", "[Config][FlowVariant]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    // coStrings does not split on commas during deserialize; assign the vector directly.
+    config.option<ConfigOptionStrings>("process_flow_support")->values = {FLOW_MODE_STANDARD, FLOW_MODE_HIGH_FLOW};
+    config.set_deserialize_strict("filament_volume_type", "high_flow");
+    config.set_deserialize_strict("bridge_speed", "25,50");
+    config.set_deserialize_strict("internal_bridge_speed", "150%,100%");
+
+    const size_t idx = get_config_idx(config, ConfigFlowDomain::Process, 0);
+    REQUIRE(idx == 1);
+
+    const auto   ib_fop  = get_value_at(config, *config.option<ConfigOptionFloatsOrPercents>("internal_bridge_speed"),
+                                        ConfigFlowDomain::Process, 0);
+    const double ib_base = get_value_at(config, *config.option<ConfigOptionFloats>("bridge_speed"),
+                                        ConfigFlowDomain::Process, 0);
+    const double speed   = ib_fop.percent ? (ib_fop.value * 0.01 * ib_base) : ib_fop.value;
+
+    // 100% of the high-flow bridge_speed (50), not 150% of 25 and not the
+    // Standard slot's value - and far above the 1e-6 zero-guard floor.
+    REQUIRE(std::abs(speed - 50.0) < 1e-9);
+    REQUIRE(speed > 1e-6);
 }

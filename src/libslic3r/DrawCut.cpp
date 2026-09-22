@@ -776,6 +776,10 @@ Vec3d draw_cut_skirt_dir(const Vec3d& inward, const Vec3d& normal, const DrawCut
 // empty-side pre-check uses). Named here so the outward-side test can borrow the
 // SAME inside/outside answer the rest of the file trusts.
 static bool point_in_solid(const indexed_triangle_set& solid, const Vec3d& pt);
+// Its distance-keeping sibling, also defined further down: the nearest surface
+// crossing along +dir, which is what keeps the outward-side probes from crossing
+// a gap into neighbouring material.
+static double ray_first_hit(const indexed_triangle_set& solid, const Vec3d& pt, const Vec3d& dir);
 
 Vec3d draw_cut_outward_side(const DrawCutStroke&        stroke,
                             const Vec3d&                n,
@@ -811,6 +815,20 @@ Vec3d draw_cut_outward_side(const DrawCutStroke&        stroke,
     // with FEWER inside points is the outward one. A short step, because the skin
     // curves: a tenth of the loop's own in-plane radius, floored at a fraction of a
     // millimetre so a tiny loop still steps off its own facets.
+    //
+    // 2026-09-20, review item 3: the probe may NOT cross a gap to do it. The step
+    // scales off the LOOP, but loops are frequently drawn in slots or against walls
+    // where ANOTHER part of the model sits within that distance - and a probe that
+    // lands inside the neighbour votes for material on its side, which is exactly
+    // how the answer got flipped near adjacent geometry. So each probe first asks
+    // how far the surface actually is along its direction; when something is closer
+    // than the full step, the probe lands HALF WAY to it instead. Inside the body's
+    // own wall that mid-point is still inside the body (the count is unchanged);
+    // across a gap it sits in the gap (the neighbour no longer counts). The entry
+    // crossing through the skin AT the sample is invisible to that scan (it sits
+    // at w == 0, or within resample sagitta of it - the 0.05 mm floor filters
+    // both), so a direction whose nearest hit is the far wall of the body probes
+    // at the full step, exactly as before.
     double r = 0.0;
     Vec3d  c = Vec3d::Zero();
     for (const DrawCutSample& s : p)
@@ -840,8 +858,17 @@ Vec3d draw_cut_outward_side(const DrawCutStroke&        stroke,
     int in_pos = 0, in_neg = 0;
     for (size_t k = 0; k < probes; ++ k) {
         const Vec3d& q = p[(k * p.size()) / probes].pos;
-        if (point_in_solid(*mesh, q + step * cand)) ++ in_pos;
-        if (point_in_solid(*mesh, q - step * cand)) ++ in_neg;
+        // Gap-clamped probe (see the note above): land half way to the nearest
+        // surface inside the step, so a neighbour across a slot cannot vote.
+        // Directions whose nearest hit is beyond the step (open air, or the far
+        // wall of the body's own skin - the entry crossing at w == 0 is filtered
+        // as noise) probe at the full step, exactly as before.
+        const double reach_pos = ray_first_hit(*mesh, q,  cand);
+        const double reach_neg = ray_first_hit(*mesh, q, -cand);
+        const double dp = reach_pos < step ? 0.5 * reach_pos : step;
+        const double dn = reach_neg < step ? 0.5 * reach_neg : step;
+        if (point_in_solid(*mesh, q + dp * cand)) ++ in_pos;
+        if (point_in_solid(*mesh, q - dn * cand)) ++ in_neg;
         const int left = int(probes - k - 1);
         if (std::abs(in_pos - in_neg) > left)
             break;   // the rest cannot change the answer
@@ -2282,30 +2309,45 @@ static indexed_triangle_set draw_cut_cutter_solid_impl(const DrawCutStroke& stro
     }
     sweep = safe_normalize(sweep, Vec3d::UnitY());
 
-    auto push_rail = [&](const Vec3d& pos, const Vec3d& t, const Vec3d& d, const Vec3d& b) {
+    auto push_rail = [&](const Vec3d& pos, double out_ext, const Vec3d& t, const Vec3d& d, const Vec3d& b) {
         // Away from the cutter's interior, so a POSITIVE offset always grows the
         // cutter and a negative one always shrinks it - see above.
         const Vec3d out_of_cutter = closed ? Vec3d(-b) : Vec3d(-sweep);
         const Vec3d shift = face_offset * out_of_cutter;
         Rail r;
-        r.out = pos - ext * d + shift;
+        r.out = pos - out_ext * d + shift;
         r.in  = pos + depth * d + shift;
         rails.push_back(r);
+    };
+
+    // 2026-09-20: THE EXTENSION CLAMP. Where the unclamped extension would reach
+    // into other geometry of the same instance - the wall across a narrow gap, a
+    // branch just past the stroke's end - the blind extrusion buried the rim in
+    // material and the boolean cut a slot into the neighbour. The gizmo hands a
+    // per-rail clearance in RAIL ORDER ([front tangent end, samples 0..n-1, back
+    // tangent end]); entry 0 also clamps the front tangent continuation, the last
+    // entry the back one, and each end rail takes its outward clamp from the
+    // nearest path sample. An absent or wrong-sized vector means "no clamp",
+    // which is the legacy behaviour.
+    const std::vector<double>& clr = params.extension_clearance;
+    const bool                 clamp_ext = !closed && clr.size() == n + 2;
+    auto clamped = [&](size_t k) {
+        return clamp_ext ? std::min(ext, std::max(0.0, clr[k])) : ext;
     };
 
     if (!closed) {
         // Leading end, extended BACKWARDS along the tangent so the surface reaches
         // past the silhouette on that side.
         const Vec3d t0 = stroke.tangent(0);
-        push_rail(p.front().pos - ext * t0, t0, draw_cut_inward_dir(stroke, params, 0), stroke.binormal(0));
+        push_rail(p.front().pos - clamped(0) * t0, clamped(1), t0, draw_cut_inward_dir(stroke, params, 0), stroke.binormal(0));
     }
 
     for (size_t i = 0; i < n; ++ i)
-        push_rail(p[i].pos, stroke.tangent(i), draw_cut_inward_dir(stroke, params, i), stroke.binormal(i));
+        push_rail(p[i].pos, clamped(i + 1), stroke.tangent(i), draw_cut_inward_dir(stroke, params, i), stroke.binormal(i));
 
     if (!closed) {
         const Vec3d tN = stroke.tangent(n - 1);
-        push_rail(p.back().pos + ext * tN, tN, draw_cut_inward_dir(stroke, params, n - 1), stroke.binormal(n - 1));
+        push_rail(p.back().pos + clamped(n + 1) * tN, clamped(n), tN, draw_cut_inward_dir(stroke, params, n - 1), stroke.binormal(n - 1));
     }
 
     const size_t m = rails.size();
@@ -2872,7 +2914,13 @@ bool draw_cut_surface_contains(const DrawCutStroke& stroke, const DrawCutParams&
     // The ruled span the cutter actually builds: out at -extension, in at +depth.
     // A connector has to sit `margin` clear of both rims, or its body hangs off the
     // surface and the split leaves it half-made.
-    const double lo = -std::max(0.0, params.extension) + m;
+    // The clamped extension can only SHRINK the band (extension_clearance floors
+    // at 0), so the connector domain's far edge is the least-clamped out rail -
+    // anywhere w < -ext_eff + m has no real surface under it once clipping bites.
+    double ext_eff = std::max(0.0, params.extension);
+    for (double c : params.extension_clearance)
+        ext_eff = std::min(ext_eff, std::max(0.0, c));
+    const double lo = -ext_eff + m;
     const double hi = std::max(0.0, depth_reach) - m;
     if (lo > hi || w < lo || w > hi)
         return false;
@@ -3013,6 +3061,52 @@ static bool point_in_solid(const indexed_triangle_set& solid, const Vec3d& pt)
             ++ crossings;
     }
     return (crossings & 1) != 0;
+}
+
+// Nearest surface crossing of the ray pt + t * dir along +dir, or infinity when
+// nothing is hit. The same deterministic frame solve as point_in_solid - the two
+// must agree about where the surface is - but the DISTANCE is kept, which is what
+// draw_cut_outward_side() needs to keep its probes on the stroke's own body: a
+// probe that would cross a gap into NEIGHBOURING material is pulled up short of
+// the gap instead, so the neighbour cannot vote.
+static double ray_first_hit(const indexed_triangle_set& solid, const Vec3d& pt, const Vec3d& dir)
+{
+    const Vec3d ax = (std::abs(dir.x()) < 0.9 ? Vec3d::UnitX() : Vec3d::UnitY());
+    const Vec3d e0 = (ax - ax.dot(dir) * dir).normalized();
+    const Vec3d e1 = dir.cross(e0);
+
+    double best = std::numeric_limits<double>::infinity();
+    for (const Vec3i32& tri : solid.indices) {
+        Vec3d uvw[3];
+        for (int k = 0; k < 3; ++ k) {
+            const Vec3d rel = solid.vertices[tri(k)].cast<double>() - pt;
+            uvw[k]          = Vec3d(rel.dot(e0), rel.dot(e1), rel.dot(dir));
+        }
+
+        const double det = (uvw[1].y() - uvw[2].y()) * (uvw[0].x() - uvw[2].x()) +
+                           (uvw[2].x() - uvw[1].x()) * (uvw[0].y() - uvw[2].y());
+        if (std::abs(det) < 1e-12)
+            continue;
+        const double l0 = ((uvw[1].y() - uvw[2].y()) * (-uvw[2].x()) + (uvw[2].x() - uvw[1].x()) * (-uvw[2].y())) / det;
+        const double l1 = ((uvw[2].y() - uvw[0].y()) * (-uvw[2].x()) + (uvw[0].x() - uvw[2].x()) * (-uvw[2].y())) / det;
+        const double l2 = 1.0 - l0 - l1;
+        if (l0 < 0.0 || l1 < 0.0 || l2 < 0.0)
+            continue;
+
+        const double w = l0 * uvw[0].z() + l1 * uvw[1].z() + l2 * uvw[2].z();
+        // A floor, so the triangles that CONTAIN pt cannot clamp the probe to a
+        // hair's width and leave the parity test grazing the skin. It has to be
+        // FAR above float noise - resampled stroke points sit a few MICRONS
+        // inside the faceted skin (chord sagitta of the resample plus float32
+        // vertex quantization), and the ray out through that skin is then a real
+        // hit at w ~ 1e-5 - but well below any gap that matters: a neighbour
+        // closer than this to the stroke is touching it, and may as well vote.
+        // 0.05 mm clears the noise by an order of magnitude and ignores only
+        // contact-scale "gaps".
+        if (w > 0.05 && w < best)
+            best = w;
+    }
+    return best;
 }
 
 void draw_cut_empty_sides(const indexed_triangle_set& mesh,
@@ -3211,6 +3305,55 @@ double draw_cut_chain_snap_radius(const BoundingBoxf3& bbox)
     if (!bbox.defined)
         return ChainSnapMinMm;
     return std::clamp(ChainSnapFraction * bbox.size().norm(), ChainSnapMinMm, ChainSnapMaxMm);
+}
+
+std::vector<DrawCutSample> draw_cut_filter_capture_skims(const std::vector<DrawCutSample>& stroke)
+{
+    // cos(45 deg): a sample on a surface disoriented from the face being drawn on.
+    constexpr double kDiffer = 0.70710678118654752;
+    // The two flanking samples must agree at least this much for the excursion to
+    // count as "off the face and back" rather than the line genuinely travelling.
+    constexpr double kFlanksAgree = 0.5;
+    // The run's own samples must agree this much for it to count as ONE other
+    // surface; a run of mixed normals is a wander, kept.
+    constexpr double kRunAgree = 0.5;
+    // A longer excursion is a deliberate detour, kept.
+    constexpr size_t kMaxSkimRun = 3;
+
+    std::vector<DrawCutSample> out = stroke;
+    if (out.size() < 4)
+        return out; // nothing interior to judge
+
+    // Repeat until no removal: erasing a run can expose a second skim against the
+    // samples that were previously separated by the first one.
+    for (;;) {
+        const size_t n = out.size();
+        size_t rem_begin = n, rem_end = n; // half-open [rem_begin, rem_end)
+        for (size_t i = 1; i + 1 < n; ++ i) {
+            if (out[i].normal.dot(out[i - 1].normal) >= kDiffer)
+                continue; // continuous with the left flank - not a skim start
+            // Maximal run [i, j] on one other surface: every sample disagrees with
+            // the left flank's normal and agrees with the run's own first normal.
+            size_t j = i;
+            while (j + 1 < n &&
+                   out[j + 1].normal.dot(out[i - 1].normal) < kDiffer &&
+                   out[j + 1].normal.dot(out[i].normal) > kRunAgree)
+                ++ j;
+            if (j - i + 1 <= kMaxSkimRun &&
+                j + 1 < n && // j + 1 is the right flank; it must exist (interior)
+                out[j + 1].normal.dot(out[i - 1].normal) > kFlanksAgree &&
+                out[j + 1].normal.dot(out[j].normal) < kDiffer) {
+                rem_begin = i;
+                rem_end   = j + 1;
+                break;
+            }
+            i = j; // this run is kept - continue scanning past it
+        }
+        if (rem_begin == n)
+            break;
+        out.erase(out.begin() + rem_begin, out.begin() + rem_end);
+    }
+    return out;
 }
 
 void DrawCutChain::clear()

@@ -110,6 +110,7 @@ src/slic3r/GUI/SendToPrinter.cpp
 src/slic3r/GUI/SlicingProgressNotification.cpp
 src/slic3r/GUI/BindDialog.cpp
 src/slic3r/GUI/Tab.cpp
+src/slic3r/GUI/FlowVariantEdit.cpp
 src/slic3r/GUI/Tab.hpp
 src/slic3r/GUI/UnsavedChangesDialog.cpp
 src/slic3r/GUI/Auxiliary.cpp
@@ -180,3 +181,5 @@ src/slic3r/Utils/Flashforge.cpp
 src/slic3r/GUI/Jobs/OAuthJob.cpp
 src/slic3r/GUI/BackgroundSlicingProcess.cpp
 src/slic3r/GUI/Gizmos/GLGizmoBrimEars.cpp
+src/slic3r/GUI/MixedFilamentBatchDialog.cpp
+src/slic3r/GUI/MixedColorMatchHelpers.cpp

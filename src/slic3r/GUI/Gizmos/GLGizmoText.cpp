@@ -784,8 +784,7 @@ void GLGizmoText::on_render_input_window(float x, float y, float bottom_limit)
     }
 
     const float win_h = ImGui::GetWindowHeight();
-    y = std::min(y, bottom_limit - win_h);
-    GizmoImguiSetNextWIndowPos(x, y, ImGuiCond_Always, 0.0f, 0.0f);
+    dock_setup_next_window(x, y, bottom_limit);
 
     static float last_y = 0.0f;
     static float last_h = 0.0f;
@@ -794,7 +793,13 @@ void GLGizmoText::on_render_input_window(float x, float y, float bottom_limit)
     ImGuiWrapper::push_toolbar_style(currt_scale);
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(4.0,5.0) * currt_scale);
     ImGui::PushStyleVar(ImGuiStyleVar_ScrollbarSize, 4.0f * currt_scale);
-    GizmoImguiBegin("Text", ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoTitleBar);
+    GizmoImguiBegin("Text", dock_window_flags(ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoTitleBar));
+    if (!dock_render_titlebar("Text")) {
+        GizmoImguiEnd();
+        ImGui::PopStyleVar(2);
+        ImGuiWrapper::pop_toolbar_style();
+        return;
+    }
 
     const float space_size = m_imgui->get_style_scaling() * 8;
     const std::array<std::string, 7> cap_array = std::array<std::string, 7>{ "font", "size", "thickness", "text_gap", "angle", "embeded_depth", "input_text" };

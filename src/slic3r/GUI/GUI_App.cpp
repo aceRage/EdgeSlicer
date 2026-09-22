@@ -6100,6 +6100,12 @@ void GUI_App::check_new_version_sf(bool show_tips, bool by_user)
 {
     std::string update_url = app_config->get_version_upgrade_url();
 
+    // No update server is configured (the Snapmaker default was removed; see
+    // AppConfig::get_version_upgrade_url) - there is nothing to check and,
+    // importantly, nothing to force-upgrade from. Silent by design.
+    if (update_url.empty())
+        return;
+
     AppConfig* app_config = wxGetApp().app_config;
 
     Http::get(update_url)

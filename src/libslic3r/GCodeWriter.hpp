@@ -4,12 +4,47 @@
 #include "libslic3r.h"
 #include <string>
 #include <charconv>
+#include <cmath>
+#include <functional>
 #include "Extruder.hpp"
 #include "Point.hpp"
 #include "PrintConfig.hpp"
 #include "GCode/CoolingBuffer.hpp"
 
 namespace Slic3r {
+
+// Snapmaker (feedrate guard): describes where a feedrate about to be emitted came from, so that
+// when the guard in GCodeWriter::set_speed / GCodeFormatter::emit_axis refuses a non-positive or
+// non-finite value it can name the ACTUAL CONFIG KEY that resolved badly, instead of leaving the
+// user with a silent substitution or a message that only names an extrusion role.
+//
+// Cost on the valid path: assigning this is a handful of stores of already-computed values (two
+// pointers to string literals and an int). Nothing is formatted, allocated or copied unless the
+// guard actually fires. `setting`, `role_name` and `object_name` only BORROW their storage, which
+// must outlive the writer - string literals, config key names, or a ModelObject's name whose
+// lifetime spans the export.
+struct FeedrateOrigin
+{
+    // Config key the speed was read from, e.g. "internal_bridge_speed". nullptr when unknown
+    // (travel moves, custom G-code, wipe tower - paths that do not resolve a role speed).
+    const char *setting     = nullptr;
+    // Human-readable extrusion role, e.g. "Internal Bridge".
+    const char *role_name   = nullptr;
+    // Object being extruded, or nullptr when not applicable.
+    const char *object_name = nullptr;
+    // Layer index of the extrusion, or -1 when not applicable.
+    int         layer_id    = -1;
+
+    void clear() { *this = FeedrateOrigin{}; }
+    bool known() const { return setting != nullptr; }
+};
+
+// Snapmaker (feedrate guard): a sink the guard reports a refused feedrate to. GCodeWriter and
+// GCodeFormatter live below Print in the dependency graph and cannot call
+// Print::active_step_add_warning directly, so GCode::do_export installs a callback that forwards
+// to it. When no sink is installed (unit tests, standalone writer use) the guard still clamps and
+// logs - it just has nowhere to raise a user-visible warning.
+using FeedrateGuardReporter = std::function<void(const FeedrateOrigin &origin, double bad_value, double substituted)>;
 
 class GCodeWriter {
 public:
@@ -70,6 +105,38 @@ public:
     std::string set_speed(double F, const std::string &comment = std::string(), const std::string &cooling_marker = std::string());
     // SoftFever NOTE: the returned speed is mm/minute
     double      get_current_speed() const { return m_current_speed;}
+
+    // Snapmaker (feedrate guard) ------------------------------------------------------------
+    // Where the feedrate currently being emitted came from. GCode::_extrude sets this right
+    // before it hands a speed to the writer and clears it afterwards, so a guard trip can name
+    // the offending config key. Plain assignment; no cost unless the guard fires.
+    void                  set_feedrate_origin(const FeedrateOrigin &origin) { m_feedrate_origin = origin; }
+    void                  clear_feedrate_origin() { m_feedrate_origin.clear(); }
+    const FeedrateOrigin& feedrate_origin() const { return m_feedrate_origin; }
+
+    // Preferred substitute when a bad feedrate is refused: the resolved outer wall speed in
+    // mm/min. GCode::do_export sets this per object/region. 0 means "not available", in which
+    // case the guard falls further down the ladder. Outer wall speed is deliberately chosen over
+    // any faster default: a substitution that is too slow only costs print time, while one that
+    // is too fast ruins the part.
+    void   set_guard_fallback_speed(double F) { m_guard_fallback_speed = (std::isfinite(F) && F > 0.) ? F : 0.; }
+    double guard_fallback_speed() const { return m_guard_fallback_speed; }
+
+    // Sink for user-visible reporting of a refused feedrate. See FeedrateGuardReporter.
+    void set_feedrate_guard_reporter(FeedrateGuardReporter reporter) { m_feedrate_guard_reporter = std::move(reporter); }
+    // Report a refused feedrate through the installed sink (no-op when none is installed).
+    void report_bad_feedrate(double bad_value, double substituted) const
+        { if (m_feedrate_guard_reporter) m_feedrate_guard_reporter(m_feedrate_origin, bad_value, substituted); }
+    // Resolve the substitute for a refused feedrate, in mm/min. See GCodeWriter.cpp for the ladder.
+    double resolve_guard_fallback() const;
+    // Seed a formatter this writer is about to emit an F word through, so the choke-point clamp
+    // in GCodeFormatter::emit_axis substitutes down this writer's ladder instead of the bare
+    // last-resort constant. Defined out of line (GCodeFormatter is declared below this class).
+    void seed_formatter_guard(class GCodeFormatter &w) const;
+
+    // Snapmaker: flow variant
+    double      active_travel_speed(bool first_layer_aware = false) const;
+
     std::string travel_to_xy(const Vec2d &point, const std::string &comment = std::string());
     std::string travel_to_xyz(const Vec3d &point, const std::string &comment = std::string(), bool force_z = false);
     std::string travel_to_z(double z, const std::string &comment = std::string(), bool force = false);
@@ -170,6 +237,11 @@ public:
     double          m_current_speed;
     bool            m_is_first_layer = true;
 
+    // Snapmaker (feedrate guard): see set_feedrate_origin / set_guard_fallback_speed above.
+    FeedrateOrigin        m_feedrate_origin;
+    double                m_guard_fallback_speed = 0.;
+    FeedrateGuardReporter m_feedrate_guard_reporter;
+
     enum class Acceleration {
         Travel,
         Print
@@ -240,6 +312,22 @@ public:
     void emit_f(double speed) {
         this->emit_axis('F', speed, XYZF_EXPORT_DIGITS);
     }
+
+    // Snapmaker (feedrate guard): substitute used by emit_axis() when a caller tries to emit a
+    // non-finite or non-positive F word. Formerly a mutable static shared by every formatter
+    // instance, which was a latent data race: G-code emission happens to be single-threaded today
+    // (the pipeline's generator stage is slic3r_tbb_filtermode::serial_in_order, GCode.cpp), but
+    // nothing enforced that, and parallelising it would have corrupted the fallback silently.
+    // It is now per-instance and explicitly seeded by whoever constructs the formatter (see
+    // GCodeWriter::set_speed and GCode::_extrude), so there is no shared mutable state at all.
+    // 0 means "no substitute supplied"; emit_axis then falls back to GUARD_LAST_RESORT_FEEDRATE.
+    void   set_fallback_feedrate(double F) { m_fallback_feedrate = (std::isfinite(F) && F > 0.) ? F : 0.; }
+    double fallback_feedrate() const { return m_fallback_feedrate; }
+
+    // Absolute last-resort feedrate (mm/min) when no better substitute is known anywhere in the
+    // ladder. 600 mm/min = 10 mm/s: slow enough to be harmless on any machine, and slow enough
+    // that it is conspicuous if it ever reaches a real print.
+    static constexpr const double GUARD_LAST_RESORT_FEEDRATE = 600.;
     //BBS
     void emit_ij(const Vec2d &point) {
         this->emit_axis('I', point.x(), XYZF_EXPORT_DIGITS);
@@ -268,6 +356,8 @@ protected:
     char                            buf[buflen];
     char* buf_end;
     std::to_chars_result            ptr_err;
+    // Snapmaker (feedrate guard): per-instance substitute, see set_fallback_feedrate().
+    double                          m_fallback_feedrate = 0.;
 };
 
 class GCodeG1Formatter : public GCodeFormatter {

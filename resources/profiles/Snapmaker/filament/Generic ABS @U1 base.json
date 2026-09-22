@@ -1,0 +1,8 @@
+{
+    "type": "filament",
+    "from": "system",
+    "instantiation": "false",
+    "name": "Generic ABS @U1 base",
+    "renamed_from": "Generic ABS @base",
+    "inherits": "fdm_filament_abs_category"
+}

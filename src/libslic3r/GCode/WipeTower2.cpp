@@ -1318,11 +1318,11 @@ WipeTower2::WipeTower2(const PrintConfig&                     config,
     , m_y_shift(0.f)
     , m_z_pos(0.f)
     , m_bridging(float(config.wipe_tower_bridging))
-    , m_no_sparse_layers(config.wipe_tower_no_sparse_layers)
+    , m_sparse_layers_skipped(wipe_tower_sparse_layers_skipped(config))
     , m_gcode_flavor(config.gcode_flavor)
-    , m_travel_speed(config.travel_speed)
-    , m_infill_speed(default_region_config.sparse_infill_speed)
-    , m_perimeter_speed(default_region_config.inner_wall_speed)
+    , m_travel_speed(float(get_value_at(config, config.travel_speed, ConfigFlowDomain::Process, initial_tool)))
+    , m_infill_speed(float(get_value_at(config, default_region_config.sparse_infill_speed, ConfigFlowDomain::Process, initial_tool)))
+    , m_perimeter_speed(float(get_value_at(config, default_region_config.inner_wall_speed, ConfigFlowDomain::Process, initial_tool)))
     , m_current_tool(initial_tool)
     , wipe_volumes(wiping_matrix)
     , m_wipe_tower_max_purge_speed(float(config.wipe_tower_max_purge_speed))
@@ -1340,7 +1340,7 @@ WipeTower2::WipeTower2(const PrintConfig&                     config,
     // it is taken over following default. Speeds from config are not
     // easily accessible here.
     const float default_speed = 60.f;
-    m_first_layer_speed       = config.initial_layer_speed;
+    m_first_layer_speed = float(get_value_at(config, config.initial_layer_speed, ConfigFlowDomain::Process, initial_tool));
     if (m_first_layer_speed == 0.f) // just to make sure autospeed doesn't break it.
         m_first_layer_speed = default_speed / 2.f;
 
@@ -2016,6 +2016,11 @@ void WipeTower2::toolchange_Change(WipeTowerWriter2& writer, const size_t new_to
     // This is where we want to place the custom gcodes. We will use placeholders for this.
     // These will be substituted by the actual gcodes when the gcode is generated.
     // writer.append("[end_filament_gcode]\n");
+    // Orca #15441: restore Z to the real topmost printed layer before running change_filament_gcode.
+    // The wipe tower can be printing below that height (e.g. wipe_tower_no_sparse_layers), and
+    // change_filament_gcode is free to travel anywhere on the bed, so it must not run while the
+    // toolhead sits lower than already-printed parts. See append_tcr2() in GCode.cpp.
+    writer.append("[restore_layer_z_before_toolchange]\n");
     writer.append("[change_filament_gcode]\n");
 
     if (m_is_mk4mmu3)
@@ -2086,7 +2091,7 @@ void WipeTower2::toolchange_Wipe(WipeTowerWriter2& writer, const WipeTower::box_
     // All the calculations in all other places take the spacing into account for all the layers.
 
     // If spare layers are excluded->if 1 or less toolchange has been done, it must be sill the first layer, too.So slow down.
-    const float target_speed = is_first_layer() || (m_num_tool_changes <= 1 && m_no_sparse_layers) ?
+    const float target_speed = is_first_layer() || (m_num_tool_changes <= 1 && m_sparse_layers_skipped) ?
                                    m_first_layer_speed * 60.f :
                                    std::min(m_wipe_tower_max_purge_speed * 60.f, m_infill_speed * 60.f);
     float       wipe_speed   = 0.33f * target_speed;
@@ -2214,7 +2219,7 @@ WipeTower::ToolChangeResult WipeTower2::finish_layer()
 
     // Slow down on the 1st layer.
     // If spare layers are excluded -> if 1 or less toolchange has been done, it must be still the first layer, too. So slow down.
-    bool  first_layer   = is_first_layer() || (m_num_tool_changes <= 1 && m_no_sparse_layers);
+    bool  first_layer   = is_first_layer() || (m_num_tool_changes <= 1 && m_sparse_layers_skipped);
     float feedrate      = first_layer ? m_first_layer_speed * 60.f : std::min(m_wipe_tower_max_purge_speed * 60.f, m_infill_speed * 60.f);
     float reserve_depth = m_layer_info->local_z_reserve_depth();
     float current_depth = std::max(0.f, m_layer_info->depth - m_layer_info->toolchanges_depth() - reserve_depth);
@@ -2373,7 +2378,7 @@ WipeTower::ToolChangeResult WipeTower2::finish_layer()
 
     // Ask our writer about how much material was consumed.
     // Skip this in case the layer is sparse and config option to not print sparse layers is enabled.
-    if (!m_no_sparse_layers || toolchanges_on_layer || first_layer) {
+    if (!m_sparse_layers_skipped || toolchanges_on_layer || first_layer) {
         if (m_current_tool < m_used_filament_length.size())
             m_used_filament_length[m_current_tool] += writer.get_and_reset_used_filament_length();
         m_current_height += m_layer_info->height;
@@ -2518,7 +2523,7 @@ void WipeTower2::plan_toolchange(float z_par, float layer_height_par, unsigned i
     if (m_plan.empty() || m_plan.back().z + WT_EPSILON < z_par) // if we moved to a new layer, we'll add it to m_plan first
         m_plan.push_back(WipeTowerInfo(z_par, layer_height_par));
 
-    if (m_first_layer_idx == size_t(-1) && (!m_no_sparse_layers || old_tool != new_tool || m_plan.size() == 1))
+    if (m_first_layer_idx == size_t(-1) && (!m_sparse_layers_skipped || old_tool != new_tool || m_plan.size() == 1))
         m_first_layer_idx = m_plan.size() - 1;
 
     if (old_tool == new_tool) // new layer without toolchanges - we are done
@@ -2554,7 +2559,7 @@ void WipeTower2::plan_local_z_toolchange(float z_par, float layer_height_par, un
     if (m_plan.empty() || m_plan.back().z + WT_EPSILON < z_par)
         m_plan.push_back(WipeTowerInfo(z_par, layer_height_par));
 
-    if (m_first_layer_idx == size_t(-1) && (!m_no_sparse_layers || old_tool != new_tool || m_plan.size() == 1))
+    if (m_first_layer_idx == size_t(-1) && (!m_sparse_layers_skipped || old_tool != new_tool || m_plan.size() == 1))
         m_first_layer_idx = m_plan.size() - 1;
 
     if (old_tool == new_tool)
@@ -3077,7 +3082,7 @@ Polygon WipeTower2::generate_support_cone_wall(
     const auto [R, support_scale] = get_wipe_tower_cone_base(m_wipe_tower_width, m_wipe_tower_height, m_wipe_tower_depth,
                                                              m_wipe_tower_cone_angle);
 
-    double z = m_no_sparse_layers ?
+    double z = m_sparse_layers_skipped ?
                    (m_current_height + m_layer_info->height) :
                    m_layer_info->z; // the former should actually work in both cases, but let's stay on the safe side (the 2.6.0 is close)
 

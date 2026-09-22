@@ -238,6 +238,8 @@ void PrintJob::process(Ctl &ctl)
     params.ams_mapping2         = this->task_ams_mapping2;
     params.ams_mapping_info     = this->task_ams_mapping_info;
     params.nozzles_info         = this->task_nozzles_info;
+    params.nozzle_mapping_request = this->task_nozzle_mapping_request;
+    params.extruder_cali_manual_mode = this->extruder_cali_manual_mode;
     params.connection_type      = this->connection_type;
     params.task_use_ams         = this->task_use_ams;
     params.task_bed_type        = this->task_bed_type;

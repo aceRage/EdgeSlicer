@@ -5237,3 +5237,221 @@ TEST_CASE("Draw cut: the preview surface for an open line is exactly the old dra
     std::sort(preview_tris.begin(), preview_tris.end());
     REQUIRE(preview_tris == full_drawn_face);
 }
+
+// ---------------------------------------------------------------------------
+// Capture continuity filtering (review item 2: skim hits near edges zigzag the
+// raw capture off the drawn face and back).
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// A straight run of `n` samples on one surface, from `from` to `to`, all carrying
+// `normal` - the shape the raw capture has when the mouse ray keeps landing on the
+// same face.
+std::vector<DrawCutSample> sample_run(Vec3d from, Vec3d to, size_t n, Vec3d normal)
+{
+    std::vector<DrawCutSample> v;
+    v.reserve(n);
+    for (size_t i = 0; i < n; ++ i) {
+        const double t = n > 1 ? double(i) / double(n - 1) : 0.0;
+        DrawCutSample s;
+        s.pos    = from + t * (to - from);
+        s.normal = normal;
+        v.push_back(s);
+    }
+    return v;
+}
+
+} // namespace
+
+TEST_CASE("Draw cut: capture filtering removes short skims onto a neighbouring surface", "[DrawCut]")
+{
+    const Vec3d z{ Vec3d::UnitZ() };
+    const Vec3d x{ Vec3d::UnitX() };
+
+    SECTION("a single skim sample in the middle is dropped")
+    {
+        std::vector<DrawCutSample> s = sample_run({ 0, 0, 0 }, { 10, 0, 0 }, 9, z);
+        s[4].normal = x;
+        const auto out = draw_cut_filter_capture_skims(s);
+        REQUIRE(out.size() == 8);
+        for (const DrawCutSample& smp : out)
+            REQUIRE(smp.normal.dot(z) == Approx(1.0));
+    }
+
+    SECTION("a two-sample skim is dropped")
+    {
+        std::vector<DrawCutSample> s = sample_run({ 0, 0, 0 }, { 10, 0, 0 }, 10, z);
+        s[4].normal = x;
+        s[5].normal = x;
+        const auto out = draw_cut_filter_capture_skims(s);
+        REQUIRE(out.size() == 8);
+    }
+
+    SECTION("skims at both ends of the middle are both dropped")
+    {
+        std::vector<DrawCutSample> s = sample_run({ 0, 0, 0 }, { 12, 0, 0 }, 13, z);
+        s[3].normal  = x;
+        s[4].normal  = x;
+        s[9].normal  = x;
+        const auto out = draw_cut_filter_capture_skims(s);
+        // 13 - 2 (first skim) - 1 (second skim, exposed once the first is gone)
+        REQUIRE(out.size() == 10);
+        for (const DrawCutSample& smp : out)
+            REQUIRE(smp.normal.dot(z) == Approx(1.0));
+    }
+
+    SECTION("a four-sample excursion is deliberate and kept")
+    {
+        std::vector<DrawCutSample> s = sample_run({ 0, 0, 0 }, { 10, 0, 0 }, 11, z);
+        for (size_t i = 4; i <= 7; ++ i)
+            s[i].normal = x;
+        REQUIRE(draw_cut_filter_capture_skims(s).size() == 11);
+    }
+
+    SECTION("a permanent crossing to the other face is kept")
+    {
+        // First half on +Z, second half on +X: the run is longer than kMaxSkimRun,
+        // so the filter must read it as travel, not a skim.
+        std::vector<DrawCutSample> s = sample_run({ 0, 0, 0 }, { 5, 0, 0 }, 6, z);
+        std::vector<DrawCutSample> t = sample_run({ 5, 0, 0 }, { 10, 0, 0 }, 6, x);
+        s.insert(s.end(), t.begin(), t.end());
+        const auto out = draw_cut_filter_capture_skims(s);
+        REQUIRE(out.size() == 12);
+        REQUIRE(out.front().normal.dot(z) == Approx(1.0));
+        REQUIRE(out.back().normal.dot(x)  == Approx(1.0));
+    }
+
+    SECTION("a wander whose off-face run exceeds the skim limit is kept")
+    {
+        // Four +X samples then one +Y between +Z flanks. The +X run alone is longer
+        // than kMaxSkimRun, so it reads as travel; the lone +Y sits between
+        // disagreeing flanks (+X before, +Z after), so it is travel too. Nothing
+        // is removed.
+        std::vector<DrawCutSample> s = sample_run({ 0, 0, 0 }, { 15, 0, 0 }, 16, z);
+        for (size_t i = 6; i <= 9; ++ i)
+            s[i].normal = x;
+        s[10].normal = Vec3d::UnitY();
+        const auto out = draw_cut_filter_capture_skims(s);
+        REQUIRE(out.size() == 16);
+    }
+
+    SECTION("a skim against disagreeing flanks is kept")
+    {
+        // A genuine corner: +Z before, +X after, one -Y sample between. The flanks
+        // disagree with each other, so this is travel around the corner, not a skim.
+        std::vector<DrawCutSample> s = sample_run({ 0, 0, 0 }, { 10, 0, 0 }, 9, z);
+        s[4].normal = -Vec3d::UnitY();
+        for (size_t i = 5; i < 9; ++ i)
+            s[i].normal = x;
+        const auto out = draw_cut_filter_capture_skims(s);
+        REQUIRE(out.size() == 9);
+    }
+
+    SECTION("the first and last sample are never removed")
+    {
+        std::vector<DrawCutSample> s = sample_run({ 0, 0, 0 }, { 10, 0, 0 }, 8, z);
+        s[0].normal = x;   // skim on the FIRST sample: the join span is judged by
+        s[7].normal = x;   // append_at(), not by this filter - both must survive.
+        const auto out = draw_cut_filter_capture_skims(s);
+        REQUIRE(out.size() == 8);
+        REQUIRE(out.front().normal.dot(x) == Approx(1.0));
+        REQUIRE(out.back().normal.dot(x)  == Approx(1.0));
+        for (size_t i = 1; i + 1 < out.size(); ++ i)
+            REQUIRE(out[i].normal.dot(z) == Approx(1.0));
+    }
+
+    SECTION("a clean stroke passes through unchanged")
+    {
+        std::vector<DrawCutSample> s = sample_run({ 0, 0, 0 }, { 10, 0, 0 }, 16, z);
+        const auto out = draw_cut_filter_capture_skims(s);
+        REQUIRE(out.size() == 16);
+        for (size_t i = 0; i < out.size(); ++ i)
+            REQUIRE(out[i].pos == s[i].pos);
+    }
+
+    SECTION("fewer than four samples are returned as-is")
+    {
+        std::vector<DrawCutSample> s = sample_run({ 0, 0, 0 }, { 2, 0, 0 }, 3, z);
+        s[1].normal = x;
+        REQUIRE(draw_cut_filter_capture_skims(s).size() == 3);
+    }
+}
+
+
+TEST_CASE("Draw cut: outward-side probes do not cross gaps into neighbouring material",
+          "[DrawCut]")
+{
+    // REVIEW ITEM 3. draw_cut_outward_side() steps off the drawn line by a tenth
+    // of the loop's in-plane radius (2.36 mm here) and parity-tests each side.
+    // The regression: a loop on a sphere's shoulder with a plate hovering in the
+    // air above it. The +Z probe's first real surface hit is the PLATE'S face,
+    // inside the step; the old full-step probe landed inside the plate and voted
+    // it as material on the +Z side. That tied the vote and kept the candidate,
+    // which here is deterministically -Z (normals tilted down so the sample
+    // answer is ignored) - so "outward" pointed into the solid sphere. The probe
+    // now lands half way to the nearest surface inside the step: mid-gap, in the
+    // air, and the neighbour cannot vote.
+    //
+    // The loop sits at 65 degrees of latitude on a radius-26 sphere, tessellated
+    // finely (its_make_sphere's second argument is an ANGLE in radians - one
+    // degree here; the 0.6 default leaves 34-degree facets the samples would
+    // float above). At this latitude the surface falls away above the loop, so
+    // a +Z ray from a sample is in air immediately (its w == 0 entry crossing
+    // is filtered as noise) and the plate is genuinely the first hit. The -Z
+    // ray runs through the sphere's interior and lands well inside it at the
+    // full step.
+    auto make_loop = [] {
+        DrawCutStroke stroke;
+        const int    n   = 96;
+        const double lat = 65.0 * M_PI / 180.0;
+        for (int i = 0; i < n; ++ i) {
+            const double th = 2.0 * M_PI * double(i) / double(n);
+            const Vec3d  dir(std::sin(lat) * std::cos(th), std::sin(lat) * std::sin(th),
+                             std::cos(lat));
+            // Tilted DOWN so the sample vote falls through to the mesh with a
+            // deterministic -Z candidate (|along| ~ 0.29 < 0.5).
+            const Vec3d normal = (dir - 0.8 * Vec3d::UnitZ()).normalized();
+            stroke.append(26.0 * dir, normal, size_t(i));
+        }
+        stroke.append(stroke.samples().front().pos, stroke.samples().front().normal, 0);
+        REQUIRE(stroke.finish(1.0, 0.0) == DrawCutError::None);
+        return stroke;
+    };
+
+    const Vec3d n = Vec3d::UnitZ();
+
+    // (a) Sphere alone: -Z probes land inside the sphere, +Z probes land in the
+    // air above the shoulder. Material is on the candidate's own side, so the
+    // vote flips the answer to +Z. This section validates the loop, the tilted
+    // candidate and the probe plumbing; both old and new code pass it.
+    SECTION("sphere alone: the vote flips the tilted candidate to the open side")
+    {
+        const indexed_triangle_set sphere = its_make_sphere(26.0, M_PI / 180.0);
+        const DrawCutStroke        ring   = make_loop();
+        const Vec3d outward = draw_cut_outward_side(ring, n, &sphere);
+        INFO("outward " << outward.x() << " " << outward.y() << " " << outward.z());
+        REQUIRE(outward.z() > 0.0);
+    }
+
+    // (b) A plate across the air gap above the loop. Its bottom face is 1.5 mm
+    // above the samples - inside the 2.36 mm probe step - and it is the FIRST
+    // surface hit along +Z, so the clamped probe lands mid-gap and the plate
+    // cannot vote. The OLD probe landed inside the plate, tied the vote, and
+    // kept -Z - into the solid sphere.
+    SECTION("plate across the gap: the neighbour cannot vote")
+    {
+        indexed_triangle_set sphere = its_make_sphere(26.0, M_PI / 180.0);
+        indexed_triangle_set plate  = its_make_cube(80.0, 80.0, 3.0);
+        // its_make_cube is corner-origin. The loop is at z ~= 11.0; put the
+        // plate's bottom face 1.5 mm above it, its top beyond the probe step.
+        its_transform(plate,
+                      Geometry::translation_transform(Vec3d(-40.0, -40.0, 12.5)));
+        its_merge(sphere, plate);
+
+        const DrawCutStroke ring = make_loop();
+        const Vec3d outward = draw_cut_outward_side(ring, n, &sphere);
+        INFO("outward " << outward.x() << " " << outward.y() << " " << outward.z());
+        REQUIRE(outward.z() > 0.0);
+    }
+}

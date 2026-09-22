@@ -168,6 +168,8 @@ set(lisbslic3r_sources
     Feature/Interlocking/VoxelUtils.cpp
     Feature/Interlocking/VoxelUtils.hpp
     FileParserError.hpp
+    AllowlistManager.cpp
+    AllowlistManager.hpp
     FilamentColorLibrary.cpp
     FilamentColorLibrary.hpp
     FilamentHotBedNozzleRules.cpp
@@ -282,6 +284,8 @@ set(lisbslic3r_sources
     GCode/SmallAreaInfillFlowCompensator.hpp
     GCode/SpiralVase.cpp
     GCode/SpiralVase.hpp
+    GCode/WipePathHelpers.cpp
+    GCode/WipePathHelpers.hpp
     GCode/ThumbnailData.cpp
     GCode/ThumbnailData.hpp
     GCode/Thumbnails.cpp
@@ -418,6 +422,8 @@ set(lisbslic3r_sources
     StartupProfile.hpp
     Preset.cpp
     Preset.hpp
+    PresetFlowVariant.cpp
+    PresetFlowVariant.hpp
     PrincipalComponents2D.cpp
     PrincipalComponents2D.hpp
     PrintApply.cpp
@@ -432,6 +438,8 @@ set(lisbslic3r_sources
     PrintObject.cpp
     PrintObjectSlice.cpp
     PrintRegion.cpp
+    ProjectSchemaVersion.cpp
+    ProjectSchemaVersion.hpp
     ProjectTask.cpp
     ProjectTask.hpp
     QuadricEdgeCollapse.cpp
@@ -676,7 +684,9 @@ target_link_libraries(libslic3r
         ZLIB::ZLIB
     )
 
-if(NOT WIN32)
+if (WIN32)
+    target_link_libraries(libslic3r PRIVATE OpenSSL::Crypto crypt32 ws2_32)
+else()
     # Link freetype for OCCT dependency (CAD operations need font rendering)
     target_link_libraries(libslic3r PRIVATE ${FREETYPE_LIBRARIES})
     target_link_libraries(libslic3r PRIVATE OpenSSL::Crypto)

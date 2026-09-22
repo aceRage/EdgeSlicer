@@ -641,6 +641,18 @@ void GLGizmoCut3D::set_center(const Vec3d& center, bool update_tbb /*=false*/)
     update_clipper();
 }
 
+// 2026-09-20, OWNER REPORT (connectors on a drawn cut): on a DRAWN cut the plane
+// is not the cut, so connector editing must not hand the clipper the plane either.
+// set_behavior(hide_clipped=true) makes the canvas clip the model render at the
+// flat plane - which hollowed the part ("no top") and drew the flat section cap
+// as a ghost disc while connectors were being placed on a cut that does not go
+// there. The draw field colours the halves and the cutter shell shows the surface;
+// the plane clip is wanted only for the flat (and curved-sheet) cut.
+static bool clip_by_plane_during_connector_editing(bool connectors_editing, bool draw_surface, bool draw_stroke_valid)
+{
+    return connectors_editing && !(draw_surface && draw_stroke_valid);
+}
+
 void GLGizmoCut3D::switch_to_mode(size_t new_mode)
 {
     m_mode = new_mode;
@@ -649,7 +661,8 @@ void GLGizmoCut3D::switch_to_mode(size_t new_mode)
     apply_color_clip_plane_colors();
     if (auto oc = m_c->object_clipper()) {
         m_contour_width = CutMode(m_mode) == CutMode::cutTongueAndGroove ? 0.f : 0.4f;
-        oc->set_behavior(m_connectors_editing, m_connectors_editing, double(m_contour_width));
+        const bool clip = clip_by_plane_during_connector_editing(m_connectors_editing, is_draw_surface(), m_draw_stroke.valid());
+        oc->set_behavior(clip, clip, double(m_contour_width));
     }
 
     update_plane_model();
@@ -2632,6 +2645,7 @@ void GLGizmoCut3D::render_curved_surface_inputs()
         m_draw_hover_pt = m_draw_drag_pt = -1;
         m_draw_points.clear();
         m_draw_frame_flips = false;
+        m_draw_ext_clipped = false;
         m_draw_surface_raycaster.reset();
         m_draw_surface_pick_dirty = true;
         invalidate_draw_stroke();
@@ -2892,6 +2906,52 @@ bool GLGizmoCut3D::update_draw_raycaster()
     return true;
 }
 
+std::vector<double> GLGizmoCut3D::compute_draw_extension_clearance()
+{
+    // 2026-09-20, the extension-clip fix: the unclamped extension is a blind
+    // extrusion, and where another wall of the part - or a branch just past the
+    // stroke's end - sits within Extension of the line, the extended surface ran
+    // through it and the boolean cut a slot into the neighbour. Each entry below
+    // is the distance from one rail's base point along its extension direction to
+    // the first mesh hit (infinity when there is none), minus a small margin, so
+    // the cutter can clamp the outward rail per sample instead of trusting the
+    // slider value everywhere.
+    //
+    // Layout matches the cutter's rail order: [front tangent end, path samples
+    // 0..n-1, back tangent end]. EMPTY means "no clamp" - closed strokes (the
+    // band/skirt is a different mechanism), no valid stroke, or no raycaster all
+    // keep the legacy behaviour.
+    std::vector<double> out;
+    if (!m_draw_stroke.valid() || m_draw_stroke.is_closed())
+        return out;
+    if (!update_draw_raycaster() || !m_draw_raycaster)
+        return out;
+
+    const std::vector<DrawCutSample>& p = m_draw_stroke.path();
+    const auto& em = m_draw_raycaster->get_aabb_mesh();
+
+    // The origin starts 0.05 mm along the cast direction so the facet the stroke
+    // was drawn on cannot be the first hit; the same 0.05 mm comes back out of
+    // the reported distance, and a further 0.1 mm margin keeps grazing
+    // self-intersections (a curved wall the ray clips on its own way out) from
+    // zeroing the clamp.
+    auto clearance_along = [&em](const Vec3d& from, const Vec3d& dir) -> double {
+        const Vec3d d = dir.norm() > 1e-9 ? Vec3d(dir.normalized()) : -Vec3d::UnitZ();
+        const auto  hit = em.query_ray_hit(from + 0.05 * d, d);
+        const double t  = hit.is_hit() ? hit.distance() + 0.05 : std::numeric_limits<double>::max();
+        return std::max(0.0, t - 0.1);
+    };
+
+    const size_t n = p.size();
+    out.reserve(n + 2);
+    // Front tangent end, then one outward query per sample, then the back end.
+    out.push_back(clearance_along(p.front().pos, -m_draw_stroke.tangent(0)));
+    for (size_t i = 0; i < n; ++ i)
+        out.push_back(clearance_along(p[i].pos, -draw_cut_inward_dir(m_draw_stroke, m_draw_params, i)));
+    out.push_back(clearance_along(p.back().pos, m_draw_stroke.tangent(n - 1)));
+    return out;
+}
+
 bool GLGizmoCut3D::draw_sample_at(const Vec2d& mouse_position)
 {
     if (!update_draw_raycaster())
@@ -3036,6 +3096,16 @@ void GLGizmoCut3D::refresh_draw_stroke()
     m_draw_folds = m_draw_stroke.valid() &&
                    draw_cut_band_folds(m_draw_stroke, m_draw_params, &tight);
 
+    // THE EXTENSION CLAMP, 2026-09-20: per-rail clearance against the instance
+    // mesh, so the outward extension stops where it would run into other geometry
+    // instead of cutting a slot into it. Computed only for OPEN strokes; a closed
+    // loop leaves the vector empty and the band/skirt behaviour unchanged. The
+    // advisory flag tells the panel to say the clamp bit.
+    m_draw_params.extension_clearance = compute_draw_extension_clearance();
+    m_draw_ext_clipped = false;
+    for (double c : m_draw_params.extension_clearance)
+        if (c < double(m_draw_extension) - 1e-6) { m_draw_ext_clipped = true; break; }
+
     sync_draw_points();
     update_draw_empty_sides();
     update_draw_connector_warnings();
@@ -3091,17 +3161,28 @@ void GLGizmoCut3D::reproject_draw_stroke_on_mesh()
     if (!update_draw_raycaster() || !m_draw_raycaster)
         return;
 
+    // REVIEW GUARD: get_closest_point() is mesh-global - near an edge, a sample that
+    // smoothing pulled slightly into the material snaps to the NEIGHBOURING face
+    // across the edge, which puts a zigzag into the finished path exactly where the
+    // capture filter above keeps one out. Only accept the reprojection when it stays
+    // close AND does not flip to a disoriented (in the limit back-facing) surface;
+    // otherwise leave the sample where phase 1 put it - it is already on the face.
+    const double dist_limit = std::max(1.0, 0.2 * draw_chain_snap_radius());
+
     std::vector<DrawCutSample> path = m_draw_stroke.path();
     bool moved = false;
     for (DrawCutSample& smp : path) {
         Vec3f normal = Vec3f::Zero();
         const Vec3f closest = m_draw_raycaster->get_closest_point(smp.pos.cast<float>(), &normal);
         const Vec3d to = closest.cast<double>();
+        const Vec3d n  = normal.cast<double>();
+        if ((to - smp.pos).norm() > dist_limit ||
+            (n.squaredNorm() > 1e-12 && n.normalized().dot(smp.normal) < -0.2))
+            continue;
         if ((to - smp.pos).squaredNorm() > 1e-12) {
             smp.pos = to;
             moved = true;
         }
-        const Vec3d n = normal.cast<double>();
         if (n.squaredNorm() > 1e-12 && (n.normalized() - smp.normal).squaredNorm() > 1e-12) {
             smp.normal = n.normalized();
             moved = true;
@@ -3703,6 +3784,7 @@ void GLGizmoCut3D::clear_draw_stroke(bool push_undo)
     m_draw_last_mouse = Vec2d::Zero();
     m_draw_upper_empty = m_draw_lower_empty = false;
     m_draw_folds       = false;
+    m_draw_ext_clipped = false;
     // PHASE 2: the handles belong to a line that no longer exists, and leaving
     // Edit points on with nothing to edit is a mode the user cannot get out of by
     // doing the obvious thing (drawing a new line, which editing mode refuses).
@@ -3966,7 +4048,14 @@ bool GLGizmoCut3D::draw_on_mouse(const wxMouseEvent& mouse_event)
             // A stroke of one sample (a click, or a drag that only ever hit once) is
             // dropped rather than appended: append() needs two samples to have a
             // direction, and a one-sample link would be invisible and unremovable.
-            const std::vector<DrawCutSample> captured = m_draw_capture;
+            // CAPTURE CONTINUITY FILTER (draw-cut review item 2): near an edge or a
+            // neighbouring wall the mouse ray can skim onto an adjacent surface, and a
+            // handful of those hits makes the line zigzag off the face and back. Drop
+            // short confirmed skims BEFORE the append sees the stroke; the first and
+            // last sample are never touched, so the join span and the closing span are
+            // judged by append_at() exactly as before.
+            const std::vector<DrawCutSample> captured =
+                draw_cut_filter_capture_skims(m_draw_capture);
             m_draw_capture.clear();
             // 2026-09-13, ITEM 1: appended AT THE END THE PRESS PICKED. append()'s own
             // `snap_radius` decides two things - which end the stroke joins, and whether
@@ -4569,17 +4658,32 @@ void GLGizmoCut3D::release_draw_field_texture()
 
 void GLGizmoCut3D::apply_draw_color_clip()
 {
-    // Only a Draw cut with a CLOSED, usable line takes over the split. An open chain
-    // keeps the plain plane colours, which is honest: there is no cut surface yet.
-    // "Hide cut plane and grabbers" clearing the DRAWN classification is its own trap:
-    // in Draw mode the plane's grabbers are hidden anyway (render() stands the stroke in
-    // for them), so a user who ticks that box because the plane is meaningless here gets
-    // the flat plane's COLOURS back - the one thing the box is not about. Draw mode's
-    // colouring does not come from the plane, so the checkbox does not gate it.
-    if (!is_draw_surface() || !m_draw_stroke.valid() || m_connectors_editing) {
+    if (!is_draw_surface()) {
         m_parent.set_draw_color_clip(0, Transform3d::Identity(), Vec3d::Zero(), Vec3d::Ones());
+        // Back from Draw mode with no line (which turned the plane split off):
+        // the flat surface owns the colouring again, and it IS the cut here.
+        m_parent.set_use_color_clip_plane(true);
         return;
     }
+
+    // 2026-09-20, OWNER REPORT items 2 and 4. Until a closed, usable line exists
+    // there is no cut surface - and the flat plane's halves must not stand in for
+    // one, or switching to Draw keeps showing a cut that will never happen (item
+    // 2). So Draw mode without a line shows the object UNSPLIT, and the plane
+    // colour clip is switched off until a line completes or the surface switches
+    // back. "Hide cut plane and grabbers" does not gate this (the comment below
+    // about that trap still stands); CONNECTORS EDITING does not either: with a
+    // finished line the drawn classification is the cut, and it has to stay drawn
+    // while connectors are placed on it (item 4).
+    if (!m_draw_stroke.valid()) {
+        m_parent.set_draw_color_clip(0, Transform3d::Identity(), Vec3d::Zero(), Vec3d::Ones());
+        m_parent.set_use_color_clip_plane(false);
+        return;
+    }
+
+    // Restore on the way back (see the off-branch above): a line exists, so the
+    // colouring is armed again and the draw field takes it over.
+    m_parent.set_use_color_clip_plane(true);
 
     update_draw_field_texture();
     if (m_draw_field_tex == 0 || !m_draw_field_bbox.defined) {
@@ -4996,6 +5100,13 @@ void GLGizmoCut3D::render_draw_surface_inputs()
                                      ? _L("The line turns tighter than the cut surface reaches sideways, so the surface folds there. Reduce the Angle, the Extension or the Depth.")
                                      : _L("The line turns tighter than the Extension reaches, so the cut surface folds there. Reduce Extension.")));
 
+        // 2026-09-20: the extension-clip advisory. Not an error - the cut works -
+        // but the surface the user asked for is shorter than the slider says,
+        // exactly where the unclamped extension would have crossed other geometry.
+        if (m_draw_ext_clipped)
+            m_imgui->text_colored(ImGuiWrapper::COL_ORANGE_LIGHT,
+                                  _L("The Extension reaches other parts of the model here, so it has been clipped to keep the cut on the line you drew. Shorten the line's gap to those parts or reduce Extension."));
+
         // PHASE 2: the holonomy fallback. Said plainly, because the symptom without
         // it ("the draft went the wrong way round half my loop") is baffling.
         if (m_draw_frame_flips)
@@ -5364,6 +5475,7 @@ void GLGizmoCut3D::on_set_state()
     m_draw_last_mouse  = Vec2d::Zero();
     m_draw_upper_empty = m_draw_lower_empty = false;
     m_draw_folds       = false;
+    m_draw_ext_clipped = false;
     // OWNER FEEDBACK 3: the classification field is per-cut state too, and it holds a
     // GL texture, so it has to be released here and not merely marked dirty.
     release_draw_field_texture();
@@ -6086,7 +6198,13 @@ void GLGizmoCut3D::render_clipper_cut()
     // drawn surface's own preview is the translucent cutter shell
     // render_draw_stroke() puts up, which IS the surface the boolean will use, so
     // there is nothing to draw here.
-    if (is_draw_surface() && !m_connectors_editing)
+    //
+    // 2026-09-20, OWNER REPORT item 4: the carve-out for connectors editing went
+    // back to the flat cap + contour whenever "Add connectors" was picked on a
+    // drawn cut - the one moment the flat outline is guaranteed to be wrong. The
+    // draw surface is the substrate there too (placement raycasts it), so in Draw
+    // mode the clipper never renders, connectors editing or not.
+    if (is_draw_surface())
         return;
 
     if (! m_connectors_editing)
@@ -6393,7 +6511,12 @@ void GLGizmoCut3D::on_render()
 
     render_clipper_cut();
 
-    if (!m_hide_cut_plane && !m_connectors_editing) {
+    // 2026-09-20, OWNER REPORT item 4: connectors editing hides the surface so the
+    // flat plane can stand in - on a DRAWN cut that both removes the only visual
+    // substrate a connector lands on and (with the clipper skip above) leaves
+    // nothing in its place. The draw stroke and its shell stay up while connectors
+    // are placed; the plane grabbers stay hidden exactly as before.
+    if (!m_hide_cut_plane && (!m_connectors_editing || is_draw_surface())) {
         // Curved surface: the deformed sheet stands in for the flat plane and
         // its control handles are drawn on top. The plane's own rotate and
         // translate grabbers stay exactly as they are, and the sheet rides on
@@ -7115,7 +7238,8 @@ void GLGizmoCut3D::set_connectors_editing(bool connectors_editing)
         m_facet_picker.set_active(false); // pick-face is a planar-cut interaction only
     update_raycasters_for_picking();
 
-    m_c->object_clipper()->set_behavior(m_connectors_editing, m_connectors_editing, double(m_contour_width));
+    const bool clip = clip_by_plane_during_connector_editing(m_connectors_editing, is_draw_surface(), m_draw_stroke.valid());
+    m_c->object_clipper()->set_behavior(clip, clip, double(m_contour_width));
 
     m_parent.request_extra_frame();
 }
@@ -7649,7 +7773,13 @@ void GLGizmoCut3D::render_cut_plane_input_window(CutConnectors &connectors, floa
             // connector_rotation_m(). The remaining conditions are the flat cut's
             // own (both halves kept, not cut-to-parts, not a one-object contour
             // selection), unchanged.
-            m_imgui->disabled_begin(!m_keep_upper || !m_keep_lower || m_keep_as_parts || (m_part_selection.valid() && m_part_selection.is_one_object()));
+            //
+            // 2026-09-20, OWNER REPORT item 4: on a DRAWN cut a connector can only
+            // stand on the drawn surface, which does not exist until a line is
+            // finished - offering the button before that would silently fall back
+            // to placing connectors on the (now hidden) flat plane.
+            m_imgui->disabled_begin(!m_keep_upper || !m_keep_lower || m_keep_as_parts || (m_part_selection.valid() && m_part_selection.is_one_object())
+                                    || (is_draw_surface() && !m_draw_stroke.valid()));
                 if (m_imgui->button(has_connectors ? _L("Edit connectors") : _L("Add connectors")))
                     set_connectors_editing(true);
             m_imgui->disabled_end();

@@ -483,8 +483,16 @@ void ConfigBase::apply_only(const ConfigBase &other, const t_config_option_keys 
                 }
                 if (my_opt2) {
                     int index = std::atoi(opt_key.c_str() + n + 1);
-                    if (other_opt)
-                        my_opt2->set_at(other_opt, index, index);
+                    if (index < 0)
+                        continue;
+                    if (other_opt) {
+                        const auto *other_vec = dynamic_cast<const ConfigOptionVectorBase *>(other_opt);
+                        if (my_opt2->empty())
+                            my_opt2->resize(size_t(index) + 1, other_opt);
+                        else if (size_t(index) >= my_opt2->size())
+                            my_opt2->resize(size_t(index) + 1);
+                        my_opt2->set_at(other_opt, index, other_vec != nullptr && size_t(index) < other_vec->size() ? index : 0);
+                    }
                     continue;
                 }
             }
@@ -563,6 +571,7 @@ void ConfigBase::set(const std::string &opt_key, int value, bool create)
     	case coInt:    static_cast<ConfigOptionInt*>(opt)->value = value; break;
     	case coFloat:  static_cast<ConfigOptionFloat*>(opt)->value = value; break;
 		case coFloatOrPercent:  static_cast<ConfigOptionFloatOrPercent*>(opt)->value = value; static_cast<ConfigOptionFloatOrPercent*>(opt)->percent = false; break;
+		case coFloats: { auto *vec = static_cast<ConfigOptionFloats*>(opt); if (vec->values.empty()) vec->values.resize(1, 0.); vec->values.front() = value; break; }
 		case coString: static_cast<ConfigOptionString*>(opt)->value = std::to_string(value); break;
     	default: throw BadOptionTypeException("Configbase::set() - conversion from int not possible");
     }
@@ -574,6 +583,7 @@ void ConfigBase::set(const std::string &opt_key, double value, bool create)
     switch (opt->type()) {
     	case coFloat:  			static_cast<ConfigOptionFloat*>(opt)->value = value; break;
     	case coFloatOrPercent:  static_cast<ConfigOptionFloatOrPercent*>(opt)->value = value; static_cast<ConfigOptionFloatOrPercent*>(opt)->percent = false; break;
+        case coFloats: 			{ auto *vec = static_cast<ConfigOptionFloats*>(opt); if (vec->values.empty()) vec->values.resize(1, 0.); vec->values.front() = value; break; }
         case coString: 			static_cast<ConfigOptionString*>(opt)->value = float_to_string_decimal_point(value); break;
     	default: throw BadOptionTypeException("Configbase::set() - conversion from float not possible");
     }
@@ -720,6 +730,29 @@ double ConfigBase::get_abs_value(const t_config_option_key &opt_key) const
       return static_cast<const ConfigOptionInt *>(raw_opt)->value;
     if (raw_opt->type() == coBool)
       return static_cast<const ConfigOptionBool *>(raw_opt)->value ? 1 : 0;
+    // Snapmaker: flow-variant
+    if (raw_opt->type() == coFloats) {
+        const auto *floats = static_cast<const ConfigOptionFloats*>(raw_opt);
+        if (!floats->values.empty())
+            return floats->values.front();
+    }
+    // Snapmaker: flow-variant percentage options (e.g. internal_bridge_speed).
+    // Resolve the first variant over the option's ratio_over target, mirroring the
+    // coFloatOrPercent path below. This must NOT fall through to the scalar
+    // ConfigOptionFloatOrPercent cast, which would reinterpret the vector's storage
+    // as a scalar and read a garbage (denormal) double - the root cause of the
+    // "Invalid speed in 'G1 F0'" failures from internal_bridge_speed.
+    if (raw_opt->type() == coFloatsOrPercents) {
+        const auto *floats_percents = static_cast<const ConfigOptionFloatsOrPercents*>(raw_opt);
+        if (!floats_percents->values.empty()) {
+            const FloatOrPercent &front = floats_percents->values.front();
+            if (! front.percent)
+                return front.value;
+            const ConfigOptionDef *opt_def = this->def() ? this->def()->get(opt_key) : nullptr;
+            if (opt_def != nullptr && ! opt_def->ratio_over.empty())
+                return front.value * this->get_abs_value(opt_def->ratio_over) / 100;
+        }
+    }
 
     const ConfigOptionPercent *cast_opt = nullptr;
     if (raw_opt->type() == coFloatOrPercent) {
@@ -744,16 +777,20 @@ double ConfigBase::get_abs_value(const t_config_option_key &opt_key) const
 
 
     assert(opt_def != nullptr);
+    if (cast_opt == nullptr) {
+        // Unhandled option type (or an empty vector) reached this point. Never
+        // reinterpret raw_opt as ConfigOptionFloatOrPercent - that reads garbage
+        // memory. Log and fail safe with a zero instead.
+        std::cerr << "ConfigBase::get_abs_value(" << opt_key << "): unsupported option type "
+                  << raw_opt->type() << ", returning 0" << std::endl;
+        return 0.;
+    }
     if (opt_def->ratio_over == "")
         return cast_opt->get_abs_value(1);
     // Compute absolute value over the absolute value of the base option.
     //FIXME there are some ratio_over chains, which end with empty ratio_with.
     // For example, XXX_extrusion_width parameters are not handled by get_abs_value correctly.
-    return opt_def->ratio_over.empty() ? 0. :
-        static_cast<const ConfigOptionFloatOrPercent*>(raw_opt)->get_abs_value(this->get_abs_value(opt_def->ratio_over));
-    
-
-    throw ConfigurationError("ConfigBase::get_abs_value(): Not a valid option type for get_abs_value()");
+    return cast_opt->get_abs_value(this->get_abs_value(opt_def->ratio_over));
 }
 
 // Return an absolute value of a possibly relative config variable.
@@ -1601,6 +1638,10 @@ ConfigSubstitutions ConfigBase::load_from_gcode_file(const std::string &file, Fo
         std::string bambuslicer_gcode_header      = "; Snapmaker_Orca";
         std::string legacy_fs_gcode_header        = std::string("; generated by ") + SLIC3R_APP_NAME;
         std::string compat_snapmaker_gcode_header = "; generated by Snapmaker Orca";
+        // Must stay in sync with GCodeProcessor::Producers: upstream OrcaSlicer G-code
+        // shares our config block format, and rejecting its header here would abort
+        // the whole import even though the producer is already recognized there.
+        std::string upstream_orca_gcode_header    = "; generated by OrcaSlicer";
 
         std::string header;
         bool        header_found = false;
@@ -1613,7 +1654,8 @@ ConfigSubstitutions ConfigBase::load_from_gcode_file(const std::string &file, Fo
             // BBS
             if (strncmp(bambuslicer_gcode_header.c_str(), line_c, strlen(bambuslicer_gcode_header.c_str())) == 0 ||
                 strncmp(legacy_fs_gcode_header.c_str(), line_c, strlen(legacy_fs_gcode_header.c_str())) == 0 ||
-                strncmp(compat_snapmaker_gcode_header.c_str(), line_c, strlen(compat_snapmaker_gcode_header.c_str())) == 0) {
+                strncmp(compat_snapmaker_gcode_header.c_str(), line_c, strlen(compat_snapmaker_gcode_header.c_str())) == 0 ||
+                strncmp(upstream_orca_gcode_header.c_str(), line_c, strlen(upstream_orca_gcode_header.c_str())) == 0) {
                 header_found = true;
                 break;
             }
@@ -1674,8 +1716,19 @@ ConfigSubstitutions ConfigBase::load_from_gcode_file(const std::string &file, Fo
                     }
                     thumb_content = base64_data;
 
-                    this->set_deserialize("thumb" + std::to_string(thumbnail_id++), thumb_content, substitutions_ctxt);
-                    
+                    // Only thumb0/thumb1 are defined in PrintConfigDef; gcode from upstream
+                    // OrcaSlicer may carry more thumbnail blocks. Consult the definition (not
+                    // this->has()) because DynamicPrintConfig does not pre-instantiate thumb0/thumb1
+                    // from FullPrintConfig::defaults(); set_deserialize will create them from the def.
+                    // Undefined keys (thumb2+) used to abort the whole import with UnknownOptionException.
+                    const std::string thumb_key = "thumb" + std::to_string(thumbnail_id++);
+                    if (this->def() != nullptr && this->def()->get(thumb_key) != nullptr) {
+                        this->set_deserialize(thumb_key, thumb_content, substitutions_ctxt);
+                    } else {
+                        BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << boost::format(
+                            ": no config option for thumbnail block %1% (%2%x%3%), skipping") % (thumbnail_id - 1) % width % height;
+                    }
+
                 }
 
                 // 读取到块结束标记

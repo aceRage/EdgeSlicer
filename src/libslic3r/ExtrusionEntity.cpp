@@ -572,6 +572,38 @@ double ExtrusionLoopSloped::slope_path_length() {
     return total_length;
 }
 
+// Snapmaker (feedrate guard): same names as role_to_string(), but with static storage so a
+// diagnostic can borrow the pointer instead of owning a std::string. Kept adjacent to
+// role_to_string so the two are updated together when a role is added.
+const char *ExtrusionEntity::role_to_cstr(ExtrusionRole role)
+{
+    switch (role) {
+        case erNone                         : return L("Undefined");
+        case erPerimeter                    : return L("Inner wall");
+        case erExternalPerimeter            : return L("Outer wall");
+        case erOverhangPerimeter            : return L("Overhang wall");
+        case erOverSupportPerimeter         : return L("Wall over support");
+        case erInternalInfill               : return L("Sparse infill");
+        case erSolidInfill                  : return L("Internal solid infill");
+        case erTopSolidInfill               : return L("Top surface");
+        case erBottomSurface                : return L("Bottom surface");
+        case erBottomSurfaceOverSupport     : return L("Bottom surface over support");
+        case erIroning                      : return L("Ironing");
+        case erBridgeInfill                 : return L("Bridge");
+        case erInternalBridgeInfill         : return L("Internal Bridge");
+        case erGapFill                      : return L("Gap infill");
+        case erSkirt                        : return L("Skirt");
+        case erBrim                         : return L("Brim");
+        case erSupportMaterial              : return L("Support");
+        case erSupportMaterialInterface     : return L("Support interface");
+        case erSupportTransition            : return L("Support transition");
+        case erWipeTower                    : return L("Prime tower");
+        case erCustom                       : return L("Custom");
+        case erMixed                        : return L("Multiple");
+        default                             : return "";
+    }
+}
+
 std::string ExtrusionEntity::role_to_string(ExtrusionRole role)
 {
     switch (role) {

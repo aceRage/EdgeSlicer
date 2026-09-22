@@ -691,6 +691,8 @@ public:
 	            std::istringstream iss(item_str);
 	            double value;
 	            iss >> value;
+	            if (iss.fail())
+	            	return false;
 	            this->values.push_back(value);
 	        }
         }

@@ -1,0 +1,8 @@
+{
+    "type": "filament",
+    "from": "system",
+    "instantiation": "false",
+    "name": "Generic BVOH @U1 base",
+    "renamed_from": "Generic BVOH @base",
+    "inherits": "fdm_filament_support_bvoh_category"
+}

@@ -288,6 +288,12 @@ protected:
     // dock_render_titlebar() draws the title, the pin and the chevron and
     // returns false when the body must be skipped this frame.
 
+public:
+    // ---- public dock facade -------------------------------------------------
+    // Public (not protected) so non-gizmo panel renderers - specifically
+    // GizmoObjectManipulation, which draws the Move/Rotate/Scale windows - can
+    // drive the same docking machinery through the owning gizmo.
+
     // Stable, translation-independent config-key suffix for this gizmo. The
     // default keys off the sprite id, which IS the GLGizmosManager::EType value
     // and unique per gizmo; a gizmo may override it for a readable key.
@@ -298,8 +304,10 @@ protected:
     // Place the window for this frame: either against the right edge of the
     // canvas (docked) or under the toolbar icon at `x`, `y` (undocked, the
     // original behaviour). `window_width` is the panel's own fixed width, or 0
-    // for an AlwaysAutoResize panel that lets its contents decide.
-    void dock_setup_next_window(float &x, float &y, float bottom_limit, float window_width = 0.f);
+    // for an AlwaysAutoResize panel that lets its contents decide. Pass
+    // `size_to_content = true` for a small panel: docked, it keeps
+    // AlwaysAutoResize and is anchored right-top instead of filling the height.
+    void dock_setup_next_window(float &x, float &y, float bottom_limit, float window_width = 0.f, bool size_to_content = false);
 
     // The flags to pass to GizmoImguiBegin(): the panel's own flags while
     // undocked, plus the resize/scroll flags a docked panel needs.
@@ -308,6 +316,13 @@ protected:
     // Draws the panel's title row (title, chevron, pin). Returns false when the
     // panel is collapsed and the caller must skip the body.
     bool dock_render_titlebar(const std::string &title);
+
+    // Global panel opacity preference (AppConfig "gizmo_panel_opacity"),
+    // clamped to [0.3, 1], default 1 (opaque). Applied per window by
+    // GizmoImguiBegin() and by the Move/Rotate/Scale panel renderer.
+    static float gizmo_panel_opacity();
+
+protected:
 
     void register_grabbers_for_picking();
     void unregister_grabbers_for_picking();
@@ -347,6 +362,10 @@ private:
     bool m_docked{ false };
     bool m_collapsed{ false };
     bool m_dock_state_loaded{ false };
+    // Set by dock_setup_next_window() each frame: a size-to-content panel keeps
+    // AlwaysAutoResize while docked and is anchored right-top; a tall panel
+    // keeps the full-height docked rect. Read by dock_window_flags().
+    bool m_dock_size_to_content{ false };
     // Set by dock_render_titlebar() when the panel body follows this frame, read
     // by GizmoImguiEnd() to decide whether the frame's content measurement is a
     // real one or just the title row.

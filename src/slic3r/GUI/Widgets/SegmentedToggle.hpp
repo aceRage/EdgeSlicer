@@ -21,9 +21,17 @@ class SegmentedToggle : public wxPanel
 public:
     using SelectionCallback = std::function<void(int index)>;
 
+    // Boxed: pill container with a filled selected segment (default).
+    // Plain: borderless text only; selected item is colored+bold, no fill/container.
+    // Pill: rounded container in the page background color; the selected segment
+    // is a solid filled rounded accent button, inactive segments are grey text
+    // with a subtle hover fill.
+    enum class Style { Boxed, Plain, Pill };
+
     SegmentedToggle(wxWindow* parent,
                     const std::vector<wxString>& options,
-                    int selectedIndex = 0);
+                    int selectedIndex = 0,
+                    Style style = Style::Boxed);
 
     void setSelected(int index);
     int  getSelected() const;
@@ -32,7 +40,9 @@ public:
 
 private:
     void onButtonClicked(int index);
+    void applyButtonColors(int index, bool selected);
 
+    Style                  m_style = Style::Boxed;
     StaticBox*             m_pContainer = nullptr;
     std::vector<Button*>   m_buttons;
     int                    m_selectedIndex = 0;

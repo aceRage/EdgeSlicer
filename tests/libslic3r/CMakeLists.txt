@@ -21,12 +21,14 @@ add_executable(${_TEST_NAME}_tests
 	test_contour_z.cpp
 	test_curved_cut.cpp
 	test_draw_cut.cpp
+	test_edgegrid.cpp
 	test_cut_recipe.cpp
 	test_config_include.cpp
 	test_custom_gcode.cpp
 	test_default_bed_type.cpp
 	test_dual_nozzle_group.cpp
 	test_ec_retraction.cpp
+	test_gcodewriter_feedrate_guard.cpp
 	# test_ec_retraction.cpp slices a real two-filament plate, so it needs the
 	# Slic3r::Test slicing helpers that otherwise only fff_print_tests links.
 	../fff_print/test_data.cpp
@@ -74,11 +76,15 @@ add_executable(${_TEST_NAME}_tests
 	# test_marchingsquares.cpp
 	test_timeutils.cpp
 	test_utils.cpp
+	TestMD5.cpp
 	test_voronoi.cpp
     test_optimizers.cpp
     test_wipe_tower.cpp
     test_wipe_tower_estimate.cpp
+    test_wipe_path.cpp
     test_toolordering_cyclic.cpp
+    test_shortest_path.cpp
+    test_gcode_import.cpp
     # test_png_io.cpp
     test_indexed_triangle_set.cpp
     ../libnest2d/printer_parts.cpp
@@ -90,7 +96,7 @@ endif()
     
 target_link_libraries(${_TEST_NAME}_tests test_common libslic3r OpenSSL::Crypto)
 if (WIN32)
-    target_link_libraries(${_TEST_NAME}_tests bcrypt.lib)
+    target_link_libraries(${_TEST_NAME}_tests bcrypt.lib crypt32.lib)
 endif()
 set_property(TARGET ${_TEST_NAME}_tests PROPERTY FOLDER "tests")
 

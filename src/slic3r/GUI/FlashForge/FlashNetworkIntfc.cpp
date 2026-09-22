@@ -1,5 +1,7 @@
 #include "FlashNetworkIntfc.h"
 #include <vector>
+#include <cstdio>
+#include <boost/log/trivial.hpp>
 
 #ifdef _WIN32
 #include <Windows.h>
@@ -8,6 +10,21 @@
 #endif
 
 namespace fnet {
+
+// EdgeSlicer: FlashForge's Flash Studio / Orca-Flashforge installers currently ship
+// FlashNetwork 3.0.0, which exports the full fnet_* surface this wrapper binds (verified by
+// scanning the shipped DLL). The original port pinned an exact "3.4.1" string, but that
+// references a stale FlashPrint-era build and should not gate loading. Accept any 3.x.y and
+// record the loaded version in the log so a future ABI break is at least visible there.
+static bool fnet_version_usable(const char *version)
+{
+    if (version == nullptr)
+        return false;
+    unsigned int major = 0, minor = 0, patch = 0;
+    if (sscanf(version, "%u.%u.%u", &major, &minor, &patch) < 2)
+        return false;
+    return major == 3;
+}
 
 FlashNetworkIntfc::FlashNetworkIntfc(const char *libraryPath, const char *serverSettingsPath,
     const fnet_log_settings_t &logSettings)
@@ -142,11 +159,13 @@ FlashNetworkIntfc::FlashNetworkIntfc(const char *libraryPath, const char *server
     INIT_FUNC_PTR(freeSyncOnlineInfo, fnet_freeSyncOnlineInfo);
     INIT_FUNC_PTR(allocString, fnet_allocString);
     INIT_FUNC_PTR(freeString, fnet_freeString);
-    if (initlize(serverSettingsPath, &logSettings) == FNET_OK && strcmp(getVersion(), "3.4.1") == 0) {
+    const char *version = getVersion();
+    if (initlize(serverSettingsPath, &logSettings) == FNET_OK && fnet_version_usable(version)) {
+        BOOST_LOG_TRIVIAL(info) << "FlashNetwork initialized, library version " << version;
         m_isOk = true;
     }
     else {
-        printf("initlize flashnetwork failed, version = %s", getVersion());
+        printf("initlize flashnetwork failed, version = %s", version);
     }
 }
 
