@@ -3,6 +3,7 @@
 #include "Config.hpp"
 #include "Exception.hpp"
 #include "Preset.hpp"
+#include "PresetQuarantine.hpp"
 #include "PresetBundle.hpp"
 #include "AppConfig.hpp"
 
@@ -1332,13 +1333,12 @@ void PresetCollection::load_presets(
                     if (! config_substitutions.empty())
                         substitutions.push_back({ preset.name, m_type, PresetConfigSubstitutions::Source::UserFile, preset.file, std::move(config_substitutions) });
                     if (!reason.empty()) {
-                        fs::path file_path(preset.file);
-                        if (fs::exists(file_path))
-                            fs::remove(file_path);
-                        file_path.replace_extension(".info");
-                        if (fs::exists(file_path))
-                            fs::remove(file_path);
-                        BOOST_LOG_TRIVIAL(error) << boost::format("parse config %1% failed")%preset.file;
+                        // Upstream deleted the .json and the .info here. A preset we cannot
+                        // parse is not a preset the user asked to discard: move it aside so it
+                        // can be inspected or repaired. Logged BEFORE the move, so the message
+                        // still names the path the user recognises.
+                        BOOST_LOG_TRIVIAL(error) << boost::format("parse config %1% failed: %2%")%preset.file %reason;
+                        PresetQuarantine::record(PresetQuarantine::quarantine(preset.file, reason));
                         ++m_errors;
                         continue;
                     }
@@ -1432,23 +1432,16 @@ void PresetCollection::load_presets(
                 } catch (const std::ifstream::failure &err) {
                     ++m_errors;
                     BOOST_LOG_TRIVIAL(error) << boost::format("The user-config cannot be loaded: %1%. Reason: %2%")%preset.file %err.what();
-                    fs::path file_path(preset.file);
-                    if (fs::exists(file_path))
-                        fs::remove(file_path);
-                    file_path.replace_extension(".info");
-                    if (fs::exists(file_path))
-                        fs::remove(file_path);
+                    // Upstream deleted the .json and the .info here; quarantine instead.
+                    PresetQuarantine::record(PresetQuarantine::quarantine(preset.file, err.what()));
                     //throw Slic3r::RuntimeError(std::string("The selected preset cannot be loaded: ") + preset.file + "\n\tReason: " + err.what());
+                    continue;
                 } catch (const std::runtime_error &err) {
                     ++m_errors;
                     BOOST_LOG_TRIVIAL(error) << boost::format("Failed loading the user-config file: %1%. Reason: %2%")%preset.file %err.what();
                     //throw Slic3r::RuntimeError(std::string("Failed loading the preset file: ") + preset.file + "\n\tReason: " + err.what());
-                    fs::path file_path(preset.file);
-                    if (fs::exists(file_path))
-                        fs::remove(file_path);
-                    file_path.replace_extension(".info");
-                    if (fs::exists(file_path))
-                        fs::remove(file_path);
+                    PresetQuarantine::record(PresetQuarantine::quarantine(preset.file, err.what()));
+                    continue;
                 }
                 presets_loaded.emplace_back(preset);
                 BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << __LINE__ << " load config successful and preset name is:" << preset.name;

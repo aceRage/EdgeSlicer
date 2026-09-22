@@ -51,6 +51,9 @@ inline void show_info(wxWindow* parent, const std::string& message,const std::st
 void warning_catcher(wxWindow* parent, const wxString& message);
 void show_substitutions_info(const PresetsConfigSubstitutions& presets_config_substitutions);
 void show_substitutions_info(const ConfigSubstitutions& config_substitutions, const std::string& filename);
+// Reports preset files that could not be parsed and were moved aside rather than deleted.
+// Drains the accumulator, so it is safe (and a no-op) to call when nothing was quarantined.
+void show_preset_quarantine_info();
 
 // Creates a wxCheckListBoxComboPopup inside the given wxComboCtrl, filled with the given text and items.
 // Items data must be separated by '|', and contain the item name to be shown followed by its initial value (0 for false, 1 for true).

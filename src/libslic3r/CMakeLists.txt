@@ -37,6 +37,8 @@ set(lisbslic3r_sources
     AppConfig.hpp
     BambuConfigCompat.cpp
     BambuConfigCompat.hpp
+    PresetQuarantine.cpp
+    PresetQuarantine.hpp
     Arachne/BeadingStrategy/BeadingStrategy.cpp
     Arachne/BeadingStrategy/BeadingStrategyFactory.cpp
     Arachne/BeadingStrategy/BeadingStrategyFactory.hpp
