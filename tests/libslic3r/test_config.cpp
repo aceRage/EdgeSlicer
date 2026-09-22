@@ -518,6 +518,7 @@ TEST_CASE("PrintConfigDef and the CLI ConfigDefs never register the same option 
     for (const std::string &d : duplicates)
         UNSCOPED_INFO(d);
     CHECK(duplicates.empty());
+}
 
 // Snapmaker #810: enabling small-area flow compensation must fall back to the
 // PrintConfig default model (not an empty per-preset override). The toggle
