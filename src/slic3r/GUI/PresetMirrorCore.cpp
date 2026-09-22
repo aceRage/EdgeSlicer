@@ -121,6 +121,71 @@ bool preset_is_parseable(const std::string&              json_text,
     return true;
 }
 
+bool sanitize_nil_arrays(const std::string&              json_text,
+                         const std::vector<std::string>& nullable_keys,
+                         std::string*                    out,
+                         int*                            collapsed)
+{
+    if (collapsed) *collapsed = 0;
+
+    json j;
+    try {
+        j = json::parse(json_text);
+    } catch (...) {
+        return false;
+    }
+    if (!j.is_object())
+        return false;
+
+    const std::set<std::string> nullable(nullable_keys.begin(), nullable_keys.end());
+
+    auto is_nil = [](const json& v) {
+        if (!v.is_string())
+            return false;
+        std::string s = v.get<std::string>();
+        const char* ws = " \t\r\n";
+        auto b2 = s.find_first_not_of(ws);
+        if (b2 == std::string::npos)
+            return false;
+        auto e2 = s.find_last_not_of(ws);
+        return s.substr(b2, e2 - b2 + 1) == "nil";
+    };
+
+    int changed = 0;
+    for (auto it = j.begin(); it != j.end(); ++it) {
+        if (nullable.count(it.key()))
+            continue;               // nil is legal here; leave it exactly as Bambu wrote it
+        if (!it.value().is_array())
+            continue;
+
+        bool              any_nil = false;
+        std::vector<json> keep;
+        for (const auto& el : it.value()) {
+            if (is_nil(el)) { any_nil = true; continue; }
+            keep.push_back(el);
+        }
+        if (!any_nil || keep.empty())
+            continue;               // nothing to do, or nothing real to collapse to
+
+        // Only collapse when every remaining slot agrees - otherwise the array really is
+        // per-extruder and we must not invent a single value for it.
+        bool all_same = true;
+        for (size_t i = 1; i < keep.size(); ++i)
+            if (keep[i] != keep[0]) { all_same = false; break; }
+        if (!all_same)
+            continue;
+
+        it.value() = json::array({keep[0]});
+        ++changed;
+    }
+
+    if (changed == 0)
+        return false;
+    if (collapsed) *collapsed = changed;
+    if (out) *out = j.dump(1);
+    return true;
+}
+
 // ---- the plan ---------------------------------------------------------------------------------
 
 std::vector<PlanItem> build_plan(const SourceListing&                src,

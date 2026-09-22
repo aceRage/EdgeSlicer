@@ -14,6 +14,8 @@
 
 #include "slic3r/GUI/PresetMirrorCore.hpp"
 
+#include <nlohmann/json.hpp>
+
 #include <algorithm>
 
 using namespace Slic3r::GUI::mirror;
@@ -130,6 +132,57 @@ TEST_CASE("ordinary presets and malformed json are classified correctly", "[Pres
     CHECK_FALSE(preset_is_parseable("[1,2,3]", {}));
     // "nil" as a substring is fine; only a standalone value counts.
     CHECK(preset_is_parseable(R"({"name":"nil-ish","notes":"nil pointer"})", {}));
+}
+
+TEST_CASE("unambiguous per-extruder nil padding is collapsed", "[PresetMirror]")
+{
+    // Bambu's shape for a 2-extruder machine where only the first is used.
+    const std::string bambu = R"({
+        "name": "Amolen PLA Silk",
+        "nozzle_temperature": ["230", "nil"],
+        "hot_plate_temp": ["60", "nil", "60"]
+    })";
+
+    std::string out;
+    int         collapsed = 0;
+    REQUIRE(sanitize_nil_arrays(bambu, {}, &out, &collapsed));
+    CHECK(collapsed == 2);
+
+    // and the result is now loadable
+    CHECK(preset_is_parseable(out, {}));
+
+    auto j = nlohmann::json::parse(out);
+    CHECK(j["nozzle_temperature"] == nlohmann::json::array({"230"}));
+    CHECK(j["hot_plate_temp"] == nlohmann::json::array({"60"}));
+    CHECK(j["name"] == "Amolen PLA Silk");   // untouched
+}
+
+TEST_CASE("a genuinely per-extruder array is never collapsed", "[PresetMirror]")
+{
+    // Differing real values: there is no single correct answer, so we must not invent one.
+    const std::string mixed = R"({"filament_flow_ratio": ["0.96", "0.99", "nil"]})";
+    std::string out;
+    CHECK_FALSE(sanitize_nil_arrays(mixed, {}, &out));
+    CHECK_FALSE(preset_is_parseable(mixed, {}));   // still refused, so still never copied
+
+    // An all-nil array has nothing to collapse to either.
+    const std::string empty = R"({"filament_flow_ratio": ["nil", "nil"]})";
+    CHECK_FALSE(sanitize_nil_arrays(empty, {}, &out));
+}
+
+TEST_CASE("sanitizing leaves nullable options alone", "[PresetMirror]")
+{
+    // nil is meaningful for these - collapsing would change behaviour.
+    const std::string s = R"({"filament_retraction_length": ["nil", "0.8"]})";
+    std::string out;
+    CHECK_FALSE(sanitize_nil_arrays(s, {"filament_retraction_length"}, &out));
+}
+
+TEST_CASE("sanitizing is a no-op for clean presets and malformed input", "[PresetMirror]")
+{
+    std::string out;
+    CHECK_FALSE(sanitize_nil_arrays(R"({"name":"Clean","wall_loops":"3"})", {}, &out));
+    CHECK_FALSE(sanitize_nil_arrays("{ not json", {}, &out));
 }
 
 // ---- deletion semantics --------------------------------------------------------------------------

@@ -88,6 +88,17 @@ const std::vector<std::string>& nullable_option_keys()
     return keys;
 }
 
+// A source preset is usable if this fork can already read it, or if the only thing stopping it is
+// per-extruder "nil" padding we can collapse without changing the preset's meaning.
+bool source_is_usable(const std::string& text, const std::vector<std::string>& nullable)
+{
+    if (mirror::preset_is_parseable(text, nullable))
+        return true;
+    std::string fixed;
+    return mirror::sanitize_nil_arrays(text, nullable, &fixed)
+        && mirror::preset_is_parseable(fixed, nullable);
+}
+
 // Find the Bambu Studio user\<uid> dir. Prefer the logged-in uid; prefer stable over Beta; else
 // the most-recently-modified numeric dir. Returns empty path if none.
 bfs::path find_bambu_user_dir(const std::string& logged_in_uid)
@@ -146,7 +157,7 @@ mirror::SourceListing list_source(const bfs::path& src_uid)
                 mirror::SourceFile f;
                 f.rel = std::string(typ) + "/base/" + it->path().filename().string();
                 f.t   = (long long) bfs::last_write_time(it->path(), ec);
-                f.parseable = mirror::preset_is_parseable(read_file(it->path()), nullable);
+                f.parseable = source_is_usable(read_file(it->path()), nullable);
                 out.files.push_back(f);
             }
         }
@@ -165,7 +176,7 @@ mirror::SourceListing list_source(const bfs::path& src_uid)
                 bfs::path info = it->path(); info.replace_extension(".info");
                 f.t = read_updated_time(info);
                 if (f.t == 0) f.t = (long long) bfs::last_write_time(it->path(), ec);
-                f.parseable = mirror::preset_is_parseable(read_file(it->path()), nullable);
+                f.parseable = source_is_usable(read_file(it->path()), nullable);
                 out.files.push_back(f);
             }
         }
@@ -213,7 +224,7 @@ int mirror_bambu_user_presets(const std::string& logged_in_uid)
         std::map<std::string, const mirror::SourceFile*> by_rel;
         for (const auto& f : src.files) by_rel[f.rel] = &f;
 
-        int copied = 0, uptodate = 0, native_protected = 0, respected = 0, skipped = 0, retired = 0, errors = 0;
+        int copied = 0, uptodate = 0, native_protected = 0, respected = 0, skipped = 0, retired = 0, errors = 0, sanitized = 0;
 
         for (const auto& item : plan) {
             switch (item.action) {
@@ -222,11 +233,29 @@ int mirror_bambu_user_presets(const std::string& logged_in_uid)
                 bfs::path srcp = src_uid / bfs::path(item.rel);
                 bfs::path dstp = dst_root / bfs::path(item.rel);
                 bfs::create_directories(dstp.parent_path(), ec);
-                bfs::copy_file(srcp, dstp, bfs::copy_option::overwrite_if_exists, ec);
-                if (ec) {
-                    BOOST_LOG_TRIVIAL(warning) << "[preset-mirror] copy failed " << srcp.string() << ": " << ec.message();
-                    ++errors;
-                    break;
+
+                // Collapse Bambu's per-extruder "nil" padding where it is unambiguous, so the
+                // preset loads here instead of being rejected (and then deleted) by the loader.
+                std::string text = read_file(srcp);
+                std::string fixed;
+                int         collapsed = 0;
+                if (!mirror::preset_is_parseable(text, nullable_option_keys())
+                    && mirror::sanitize_nil_arrays(text, nullable_option_keys(), &fixed, &collapsed)) {
+                    std::ofstream o(dstp.string(), std::ios::binary | std::ios::trunc);
+                    o << fixed;
+                    if (!o) {
+                        BOOST_LOG_TRIVIAL(warning) << "[preset-mirror] write failed " << dstp.string();
+                        ++errors;
+                        break;
+                    }
+                    sanitized += collapsed ? 1 : 0;
+                } else {
+                    bfs::copy_file(srcp, dstp, bfs::copy_option::overwrite_if_exists, ec);
+                    if (ec) {
+                        BOOST_LOG_TRIVIAL(warning) << "[preset-mirror] copy failed " << srcp.string() << ": " << ec.message();
+                        ++errors;
+                        break;
+                    }
                 }
                 // base\ entries have no .info; only the top-level user presets carry one.
                 if (item.rel.find("/base/") == std::string::npos) {
@@ -255,6 +284,7 @@ int mirror_bambu_user_presets(const std::string& logged_in_uid)
             << " -> copied=" << copied << " uptodate=" << uptodate
             << " fork_native_protected=" << native_protected << " user_deletions_respected=" << respected
             << " skipped_unparseable=" << skipped << " retired=" << retired
+            << " nil_collapsed=" << sanitized
             << " errors=" << errors;
         if (skipped > 0)
             BOOST_LOG_TRIVIAL(info) << "[preset-mirror] " << skipped << " Bambu preset(s) use per-extruder 'nil' "

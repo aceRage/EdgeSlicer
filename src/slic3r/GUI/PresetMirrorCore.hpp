@@ -66,6 +66,25 @@ bool preset_is_parseable(const std::string& json_text,
                          const std::vector<std::string>& nullable_keys,
                          std::string* reason = nullptr);
 
+// Rewrite a Bambu preset so this fork can load it, WITHOUT changing what it means.
+//
+// Bambu stores per-extruder arrays on multi-extruder machines (H2C/H2D/H2S) and writes "nil" for
+// the slots an extruder does not use, e.g. "nozzle_temperature": ["230", "nil"]. The fork models
+// these options as non-nullable, so the array cannot be loaded at all. Where every non-nil slot
+// carries the SAME value the array is just that one value plus unused slots, so it collapses to
+// the scalar with no loss - which is exactly how the preset already behaves.
+//
+// Only that unambiguous case is rewritten. A genuinely per-extruder array with differing values
+// (or one that is entirely nil) has no single correct answer, so it is left alone and the preset
+// stays unparseable rather than being silently given a value the user never chose.
+//
+// Returns true when `out` holds a rewritten document; false when nothing needed changing or the
+// input could not be parsed. `collapsed` counts the keys rewritten.
+bool sanitize_nil_arrays(const std::string&              json_text,
+                         const std::vector<std::string>& nullable_keys,
+                         std::string*                    out,
+                         int*                            collapsed = nullptr);
+
 // ---- the plan ---------------------------------------------------------------------------------
 
 enum class Action {
