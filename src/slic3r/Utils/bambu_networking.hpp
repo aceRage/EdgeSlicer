@@ -276,6 +276,18 @@ struct PrintParams {
     int             auto_bed_leveling{ 0 };
     int             auto_flow_cali{ 0 };
     int             auto_offset_cali{ 0 };
+    /* Ultra (dual-nozzle): fully-built {"print":{"command":"get_auto_nozzle_mapping",...}}
+     * request JSON the host assembled from slicing data (BambuStudio's
+     * DevNozzleMappingCtrl::CtrlGetAutoNozzleMappingV0/V1 equivalent). When non-empty the
+     * agent performs the MQTT request/response handshake before project_file and echoes the
+     * printer's "mapping" answer as "nozzle_mapping" in the payload. Empty = no handshake,
+     * which is what every single-nozzle job sends, keeping its payload byte-identical. */
+    std::string     nozzle_mapping_request;
+    /* Ultra (dual-nozzle): 1 = automatic extruder (PA) calibration, 0 = manual PA values.
+     * BambuStudio reads this from a "PA value" switch (m_pa_value_switch->GetValue() ? 0 : 1);
+     * this fork has no such switch, so the host leaves the default 1. Serialized into the
+     * project_file payload only for dual-nozzle jobs. */
+    int             extruder_cali_manual_mode{ 1 };
 };
 
 struct TaskQueryParams

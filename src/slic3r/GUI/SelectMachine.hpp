@@ -388,6 +388,10 @@ public:
     bool do_ams_mapping(MachineObject* obj_);
     bool get_ams_mapping_result(std::string& mapping_array_str, std::string& mapping_array_str2, std::string& ams_mapping_info);
     bool build_nozzles_info(std::string& nozzles_info);
+    /* Ultra (dual-nozzle): BambuStudio's DevNozzleMappingCtrl::CtrlGetAutoNozzleMappingV0/V1
+     * equivalent. Fills `request` with the get_auto_nozzle_mapping command JSON; empty when
+     * the handshake does not apply (single-nozzle, no slicing data, left-nozzle-only job). */
+    bool build_nozzle_mapping_request(std::string& request);
 
     std::string get_print_status_info(PrintDialogStatus status);
 
