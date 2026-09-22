@@ -2,7 +2,12 @@
 
 #include "slic3r/Utils/Http.hpp"
 
-TEST_CASE("Check SSL certificates paths", "[Http][NotWorking]") {
+// These three cases talk to real hosts on the internet (github.com, jigsaw.w3.org), so their
+// outcome says more about the network and those servers than about this code: jigsaw.w3.org's
+// /HTTP/Basic/ answers 403 to every client now, curl included. They are hidden ([.network]) so a
+// plain run and ctest skip them; run them on purpose with  slic3rutils_tests "[network]".
+
+TEST_CASE("Check SSL certificates paths", "[Http][NotWorking][.network]") {
     
     Slic3r::Http g = Slic3r::Http::get("https://github.com/");
     
@@ -20,7 +25,7 @@ TEST_CASE("Check SSL certificates paths", "[Http][NotWorking]") {
     REQUIRE(status == 200);
 }
 
-TEST_CASE("Http digest authentication", "[Http][NotWorking]") {
+TEST_CASE("Http digest authentication", "[Http][NotWorking][.network]") {
     Slic3r::Http g = Slic3r::Http::get("https://jigsaw.w3.org/HTTP/Digest/");
 
     g.auth_digest("guest", "guest");
@@ -39,7 +44,7 @@ TEST_CASE("Http digest authentication", "[Http][NotWorking]") {
     REQUIRE(status == 200);
 }
 
-TEST_CASE("Http basic authentication", "[Http][NotWorking]") {
+TEST_CASE("Http basic authentication", "[Http][NotWorking][.network]") {
     Slic3r::Http g = Slic3r::Http::get("https://jigsaw.w3.org/HTTP/Basic/");
 
     g.auth_basic("guest", "guest");
