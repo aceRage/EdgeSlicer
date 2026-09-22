@@ -3746,6 +3746,12 @@ bool GUI_App::on_init_inner()
     }
     profiler.mark("mainframe construction");
 
+    // Preset files the loader could not parse were moved into a sibling "unloadable" directory
+    // rather than deleted. Report that now the main window exists: deferred through CallAfter so
+    // the modal cannot land while the splash is still up, which is what happens if it is raised
+    // at the load_presets() call site.
+    CallAfter([]() { show_preset_quarantine_info(); });
+
     // hide settings tabs after first Layout
     if (is_editor()) {
         mainframe->select_tab(size_t(0));

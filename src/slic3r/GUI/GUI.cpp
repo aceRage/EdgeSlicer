@@ -1,4 +1,7 @@
 #include "GUI.hpp"
+#include "libslic3r/PresetQuarantine.hpp"
+
+#include <boost/filesystem/path.hpp>
 #include "GUI_App.hpp"
 #include "format.hpp"
 #include "I18N.hpp"
@@ -376,6 +379,47 @@ static bool skip_settings_mapping_warnings()
 {
 	const AppConfig* config = wxGetApp().app_config;
 	return config != nullptr && config->get("skip_settings_mapping_warnings") == "true";
+}
+
+// A preset the loader could not parse is moved into a sibling "unloadable" directory instead of
+// being deleted (see libslic3r/PresetQuarantine.hpp). Tell the user it happened and where the
+// files went - silence here is what made the 2026-09-21 data loss invisible until the presets
+// were already gone. Deliberately NOT gated on skip_settings_mapping_warnings: that preference
+// suppresses "a value was remapped" noise, which is routine; a preset that would not load at all
+// is not routine and the user needs the path.
+void show_preset_quarantine_info()
+{
+	const PresetQuarantine::Report report = PresetQuarantine::take();
+	if (report.empty())
+		return;
+
+	const std::string directory = report.directory();
+	// Every move failed: the files are untouched where they always were, so there is no new
+	// location to point at. Still worth saying the presets did not load.
+	wxString body;
+	if (directory.empty())
+		body = _L("These presets were left untouched on disk, but they could not be loaded.");
+	else
+		body = format_wxstr(_L("They were moved to \"%1%\" instead of being deleted, so nothing was lost. You can inspect or repair them there."),
+		                    from_u8(directory));
+
+	wxString details;
+	size_t   shown = 0;
+	for (const PresetQuarantine::Entry &entry : report.entries()) {
+		// A long list in a modal is unreadable; the log and the directory hold the rest.
+		if (shown ++ == 10) {
+			details += "\n" + format_wxstr(_L("... and %1% more."), report.size() - 10);
+			break;
+		}
+		details += "\n" + from_u8(boost::filesystem::path(entry.original_path).filename().string());
+		if (! entry.reason.empty())
+			details += format_wxstr(" - %1%", from_u8(entry.reason));
+	}
+
+	InfoDialog msg(nullptr,
+		format_wxstr(_L("%1% preset file(s) could not be read"), report.size()),
+		body + "\n" + details, true);
+	msg.ShowModal();
 }
 
 void show_substitutions_info(const PresetsConfigSubstitutions& presets_config_substitutions)
