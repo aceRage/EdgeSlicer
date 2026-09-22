@@ -864,6 +864,167 @@ wxBoxSizer *PreferencesDialog::create_item_gizmo_panel_opacity(wxWindow *parent,
     return sizer;
 }
 
+// Selected-object highlight. "selection_highlight_style": "glow" (default: white/yellow edge with
+// a soft halo that stays off neighbouring parts) or "thin" (a crisp 1-2 px outline, no halo).
+// "selection_glow_strength": 0-200 % of the default halo. Both are read by GLCanvas3D every
+// highlighted frame, so redrawing the 3D views is all a change needs.
+wxBoxSizer *PreferencesDialog::create_item_selection_highlight(wxWindow *parent)
+{
+    const std::string style_param    = "selection_highlight_style";
+    const std::string strength_param = "selection_glow_strength";
+
+    auto redraw_3d_views = []() {
+        Plater *plater = wxGetApp().plater();
+        if (plater == nullptr)
+            return;
+        for (GLCanvas3D *canvas : { plater->get_view3D_canvas3D(), plater->get_assmeble_canvas3D() }) {
+            if (canvas != nullptr) {
+                canvas->set_as_dirty();
+                canvas->request_extra_frame();
+            }
+        }
+    };
+
+    // Rows built here rather than with create_item_combobox_base(): its fixed 100 DIP title
+    // column cuts "Selection highlight" off.
+    auto make_title = [parent](const wxString &text, const wxString &tooltip) {
+        auto title = new wxStaticText(parent, wxID_ANY, text);
+        title->SetForegroundColour(DESIGN_GRAY900_COLOR);
+        title->SetFont(::Label::Body_13);
+        title->SetToolTip(tooltip);
+        title->Wrap(-1);
+        return title;
+    };
+
+    const bool thin = app_config->get(style_param) == "thin";
+    const wxString style_tooltip = _L("How selected objects and parts are outlined in the 3D view.\nGlow: a white edge (yellow in the assembly view) with a soft halo over the background; the halo never covers neighbouring parts.\nThin outline: a crisp thin line around the selection, no halo - best for assemblies with touching parts.");
+    wxBoxSizer *style_sizer = new wxBoxSizer(wxHORIZONTAL);
+    auto style_combo = new ::ComboBox(parent, wxID_ANY, wxEmptyString, wxDefaultPosition, DESIGN_LARGE_COMBOBOX_SIZE, 0, nullptr, wxCB_READONLY);
+    style_combo->SetFont(::Label::Body_13);
+    style_combo->GetDropDown().SetFont(::Label::Body_13);
+    style_combo->Append(_L("Glow"));
+    style_combo->Append(_L("Thin outline"));
+    style_combo->SetSelection(thin ? 1 : 0);
+    style_combo->SetToolTip(style_tooltip);
+    style_sizer->Add(0, 0, 0, wxEXPAND | wxLEFT, 23);
+    style_sizer->Add(make_title(_L("Selection highlight"), style_tooltip), 0, wxALIGN_CENTER_VERTICAL | wxALL, 3);
+    style_sizer->Add(style_combo, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP(8));
+
+    const wxString strength_tooltip = _L("Strength of the Glow halo around the selection, in percent of the default. 0 % leaves only the edge line. Only used by the Glow style.");
+    float strength = 100.0f;
+    try {
+        strength = std::clamp(std::stof(app_config->get(strength_param)), 0.0f, 200.0f);
+    } catch (...) {
+        strength = 100.0f;
+    }
+
+    wxBoxSizer *strength_sizer = new wxBoxSizer(wxHORIZONTAL);
+    auto        strength_title = make_title(_L("Selection glow strength"), strength_tooltip);
+
+    auto slider = new wxSlider(parent, wxID_ANY, int(strength + 0.5f), 0, 200, wxDefaultPosition, FromDIP(wxSize(180, -1)), wxSL_HORIZONTAL);
+    slider->SetToolTip(strength_tooltip);
+    // Exact value box next to the slider (same TextInput as "Orbit speed multiplier"): whole
+    // percent 0-200, committed on Enter or when the box loses focus, kept in sync with the slider.
+    auto value_input = new ::TextInput(parent, wxEmptyString, wxEmptyString, wxEmptyString, wxDefaultPosition,
+                                       wxSize(FromDIP(72), -1), wxTE_PROCESS_ENTER);
+    StateColor value_bg(std::pair<wxColour, int>(wxColour("#F0F0F1"), StateColor::Disabled),
+                        std::pair<wxColour, int>(*wxWHITE, StateColor::Enabled));
+    value_input->SetBackgroundColor(value_bg);
+    wxTextCtrl *value_ctrl = value_input->GetTextCtrl();
+    value_ctrl->SetValue(wxString::Format("%d", slider->GetValue()));
+    value_ctrl->SetValidator(wxTextValidator(wxFILTER_DIGITS));
+    value_input->SetToolTip(strength_tooltip);
+    auto percent_label = make_title("%", strength_tooltip);
+
+    strength_sizer->Add(0, 0, 0, wxEXPAND | wxLEFT, 23);
+    strength_sizer->Add(strength_title, 0, wxALIGN_CENTER_VERTICAL | wxALL, 3);
+    strength_sizer->Add(slider, 0, wxALIGN_CENTER_VERTICAL | wxLEFT | wxRIGHT, FromDIP(8));
+    strength_sizer->Add(value_input, 0, wxALIGN_CENTER_VERTICAL, 0);
+    strength_sizer->Add(percent_label, 0, wxALIGN_CENTER_VERTICAL | wxALL, 3);
+    // Both stay editable in Thin mode too (the value is kept for when Glow is picked again): a
+    // greyed-out box read as "the box does not take input".
+
+    // Saves a strength (already clamped) and redraws; shared by the slider and the value box.
+    auto apply_strength = [this, strength_param, redraw_3d_views](int percent) {
+        app_config->set(strength_param, std::to_string(percent));
+        app_config->save();
+        redraw_3d_views();
+    };
+
+    // Bound on the combo itself: it re-sends both a drop-down pick and an arrow-key change there.
+    style_combo->Bind(wxEVT_COMBOBOX, [this, style_param, style_combo, redraw_3d_views](wxCommandEvent &e) {
+        const bool thin_selected = style_combo->GetSelection() == 1;
+        app_config->set(style_param, thin_selected ? "thin" : "glow");
+        app_config->save();
+        redraw_3d_views();
+        e.Skip();
+    });
+
+    // Soft detent at the default: a move that lands within 3 % of 100 snaps to it, unless it
+    // starts from 100 (so arrow keys can still step to 99 or 101).
+    auto last_percent = std::make_shared<int>(slider->GetValue());
+    slider->Bind(wxEVT_SLIDER, [slider, value_ctrl, apply_strength, last_percent](wxCommandEvent &e) {
+        int percent = slider->GetValue();
+        if (percent != 100 && *last_percent != 100 && std::abs(percent - 100) <= 3) {
+            percent = 100;
+            slider->SetValue(percent);
+        }
+        *last_percent = percent;
+        value_ctrl->ChangeValue(wxString::Format("%d", percent)); // ChangeValue: no wxEVT_TEXT
+        apply_strength(percent);
+        e.Skip();
+    });
+
+    // Typing applies live: every in-range entry moves the slider and redraws at once, so the box
+    // visibly "takes" the value; out-of-range or empty text waits for the commit below.
+    value_ctrl->Bind(wxEVT_TEXT, [slider, value_ctrl, apply_strength, last_percent](wxCommandEvent &e) {
+        long typed = 0;
+        if (value_ctrl->GetValue().ToLong(&typed) && typed >= 0 && typed <= 200 && int(typed) != slider->GetValue()) {
+            slider->SetValue(int(typed));
+            *last_percent = int(typed);
+            apply_strength(int(typed));
+        }
+        e.Skip();
+    });
+
+    // Commit on Enter or focus loss: digits only; empty or unparsable falls back to the slider's
+    // value, anything else is clamped to 0-200 and written back so the box shows what is applied.
+    auto commit_typed = [slider, value_ctrl, apply_strength, last_percent]() {
+        long typed = slider->GetValue();
+        if (!value_ctrl->GetValue().ToLong(&typed))
+            typed = slider->GetValue();
+        const int percent = int(std::clamp(typed, 0L, 200L));
+        value_ctrl->ChangeValue(wxString::Format("%d", percent));
+        if (percent != slider->GetValue()) {
+            slider->SetValue(percent);
+            *last_percent = percent;
+            apply_strength(percent);
+        }
+    };
+    value_ctrl->Bind(wxEVT_TEXT_ENTER, [commit_typed, value_ctrl](wxCommandEvent &e) {
+        commit_typed();
+        value_ctrl->SelectAll();
+        e.Skip();
+    });
+    value_ctrl->Bind(wxEVT_KILL_FOCUS, [commit_typed](wxFocusEvent &e) { commit_typed(); e.Skip(); });
+    // Focusing the box selects its text, so typing replaces "100" instead of appending to it
+    // ("100" + "80" = "10080", clamped to 200, looked like the typing was ignored). A click on
+    // the box's frame (outside the inner edit) also focuses the edit.
+    value_ctrl->Bind(wxEVT_SET_FOCUS, [value_ctrl](wxFocusEvent &e) {
+        value_ctrl->CallAfter([value_ctrl]() { value_ctrl->SelectAll(); });
+        e.Skip();
+    });
+    value_input->Bind(wxEVT_LEFT_DOWN, [value_ctrl](wxMouseEvent &e) {
+        value_ctrl->SetFocus();
+        e.Skip();
+    });
+
+    wxBoxSizer *sizer = new wxBoxSizer(wxVERTICAL);
+    sizer->Add(style_sizer, 0, 0, 0);
+    sizer->Add(strength_sizer, 0, wxTOP, FromDIP(3));
+    return sizer;
+}
+
 
 wxBoxSizer *PreferencesDialog::create_item_switch(wxString title, wxWindow *parent, wxString tooltip ,std::string param)
 {
@@ -1535,6 +1696,7 @@ wxWindow* PreferencesDialog::create_general_page()
             return dlg.ShowModal() == wxID_OK;
         });
     auto camera_orbit_mult = create_camera_orbit_mult_input(_L("Orbit speed multiplier"), page, _L("Multiplies the orbit speed for finer or coarser camera movement."));
+    auto item_selection_highlight = create_item_selection_highlight(page);
 
     auto item_show_splash_screen = create_item_checkbox(_L("Show splash screen"), page, _L("Show the splash screen during startup."), 50, "show_splash_screen");
     auto item_hints = create_item_checkbox(_L("Show \"Tip of the day\" notification after start"), page, _L("If enabled, useful hints are displayed at startup."), 50, "show_hints");
@@ -1641,6 +1803,7 @@ wxWindow* PreferencesDialog::create_general_page()
     sizer_page->Add(reverse_mouse_zoom, 0, wxTOP, FromDIP(3));
     sizer_page->Add(allow_filament_temp_mixing, 0, wxTOP, FromDIP(3));
     sizer_page->Add(camera_orbit_mult, 0, wxTOP, FromDIP(3));
+    sizer_page->Add(item_selection_highlight, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_show_splash_screen, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_hints, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_calc_in_long_retract, 0, wxTOP, FromDIP(3));

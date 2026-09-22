@@ -539,6 +539,17 @@ private:
         unsigned int height{ 0 };
     };
 
+    /**
+     * @brief Look of the selected-object highlight, from Preferences
+     *        ("selection_highlight_style" = glow | thin, "selection_glow_strength" = 0..200 %).
+     */
+    struct SelectionHighlightStyle
+    {
+        bool thin{ false };
+        float glowIntensity{ 1.0f };  // additive Glow multiplier; 0 skips the Glow passes
+        float pixelScale{ 1.0f };     // framebuffer pixels per logical pixel (DPI scaling)
+    };
+
     /** @brief Data-driven symmetric samples for one Gaussian blur pass. */
     struct GaussianSampleKernel
     {
@@ -660,6 +671,9 @@ private:
     Slope m_slope;
 
     SelectionHighlightResources m_selectionHighlightResources;
+    // Refreshed from AppConfig at the start of every highlighted frame, so a Preferences change
+    // applies on the next redraw without a restart.
+    SelectionHighlightStyle m_selectionHighlightStyle;
 
     OrientSettings m_orient_settings_fff, m_orient_settings_sla;
 
@@ -1257,6 +1271,15 @@ public:
 
 private:
     bool _is_shown_on_screen() const;
+
+    /** @brief Framebuffer pixels per logical pixel, used to keep highlight widths DPI independent. */
+    float GetSelectionHighlightPixelScale() const;
+
+    /** @brief Selection mask resolution relative to the framebuffer (0.5 at 100 % scaling). */
+    float GetSelectionMaskScale() const;
+
+    /** @brief Reads the highlight style and Glow strength preferences. */
+    SelectionHighlightStyle ReadSelectionHighlightStyle() const;
 
     /** @brief Selects and prepares the selection highlight path for the current frame. */
     ESelectionHighlightMode ResolveSelectionHighlightMode();
