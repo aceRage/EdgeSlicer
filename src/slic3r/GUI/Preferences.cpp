@@ -819,9 +819,17 @@ wxBoxSizer *PreferencesDialog::create_item_gcode_archive_max(wxWindow *parent, w
 // Tool panels on the 3D view (Move/Rotate/Scale, paint palettes, Text, ...): background
 // opacity, 30-100 %. Stored in AppConfig as "gizmo_panel_opacity" (0.3-1.0); read every
 // frame by GLGizmoBase::gizmo_panel_opacity(), so no restart is needed.
+//
+// Slider + a manual numeric entry kept in sync both ways (owner request, alongside PR #85's
+// glow-strength slider getting the same treatment): the entry commits on Enter/focus-loss and
+// clamps to the slider's 30-100 range. Kept self-contained rather than sharing a helper with
+// PR #85's create_item_selection_highlight() to avoid a merge dependency between the two
+// branches; worth a shared "slider with numeric entry" helper once both land.
 wxBoxSizer *PreferencesDialog::create_item_gizmo_panel_opacity(wxWindow *parent, wxString tooltip)
 {
     const std::string param = "gizmo_panel_opacity";
+    const int         min_percent = 30;
+    const int         max_percent = 100;
     wxBoxSizer *sizer = new wxBoxSizer(wxHORIZONTAL);
     auto        title = new wxStaticText(parent, wxID_ANY, _L("Gizmo panel opacity"));
     title->SetForegroundColour(DESIGN_GRAY900_COLOR);
@@ -835,29 +843,60 @@ wxBoxSizer *PreferencesDialog::create_item_gizmo_panel_opacity(wxWindow *parent,
     } catch (...) {
         opacity = 1.0f;
     }
+    const int start_percent = int(opacity * 100.0f + 0.5f);
 
-    auto slider = new wxSlider(parent, wxID_ANY, int(opacity * 100.0f + 0.5f), 30, 100,
+    auto slider = new wxSlider(parent, wxID_ANY, start_percent, min_percent, max_percent,
                                wxDefaultPosition, FromDIP(wxSize(180, -1)), wxSL_HORIZONTAL);
     slider->SetToolTip(tooltip);
 
-    auto value_label = new wxStaticText(parent, wxID_ANY, wxString::Format("%d%%", slider->GetValue()),
-                                        wxDefaultPosition, DESIGN_TITLE_SIZE, 0);
-    value_label->SetForegroundColour(DESIGN_GRAY900_COLOR);
-    value_label->SetFont(::Label::Body_13);
-    value_label->SetToolTip(tooltip);
+    auto entry = new ::TextInput(parent, wxString::Format("%d", start_percent), "%", wxEmptyString,
+                                 wxDefaultPosition, DESIGN_INPUT_SIZE, wxTE_PROCESS_ENTER);
+    StateColor entry_bg(std::pair<wxColour, int>(wxColour("#F0F0F1"), StateColor::Disabled), std::pair<wxColour, int>(*wxWHITE, StateColor::Enabled));
+    entry->SetBackgroundColor(entry_bg);
+    entry->GetTextCtrl()->SetValue(wxString::Format("%d", start_percent));
+    wxTextValidator entry_validator(wxFILTER_DIGITS);
+    entry->GetTextCtrl()->SetValidator(entry_validator);
+    entry->SetToolTip(tooltip);
 
     sizer->Add(0, 0, 0, wxEXPAND | wxLEFT, 23);
     sizer->Add(title, 0, wxALIGN_CENTER_VERTICAL | wxALL, 3);
     sizer->Add(slider, 0, wxALIGN_CENTER_VERTICAL | wxLEFT | wxRIGHT, FromDIP(8));
-    sizer->Add(value_label, 0, wxALIGN_CENTER_VERTICAL | wxALL, 3);
+    sizer->Add(entry, 0, wxALIGN_CENTER_VERTICAL | wxALL, 3);
 
-    slider->Bind(wxEVT_SLIDER, [this, param, slider, value_label](wxCommandEvent &e) {
-        const int percent = slider->GetValue();
-        value_label->SetLabel(wxString::Format("%d%%", percent));
+    // Applies the (already clamped) percent everywhere but back into whichever control just
+    // produced it: AppConfig, canvas refresh, and the other control's displayed value.
+    auto apply_percent = [this, param](int percent) {
         app_config->set(param, wxString::Format("%.2f", percent / 100.0).ToStdString());
         app_config->save();
         if (wxGetApp().plater() != nullptr)
             wxGetApp().plater()->get_current_canvas3D()->set_as_dirty();
+    };
+
+    slider->Bind(wxEVT_SLIDER, [slider, entry, apply_percent](wxCommandEvent &e) {
+        const int percent = slider->GetValue();
+        entry->GetTextCtrl()->ChangeValue(wxString::Format("%d", percent));
+        apply_percent(percent);
+        e.Skip();
+    });
+
+    auto commit_entry = [slider, entry, apply_percent, min_percent, max_percent]() {
+        long value = 0;
+        int  percent;
+        if (entry->GetTextCtrl()->GetValue().ToLong(&value))
+            percent = std::clamp(int(value), min_percent, max_percent);
+        else
+            percent = slider->GetValue();
+        entry->GetTextCtrl()->ChangeValue(wxString::Format("%d", percent));
+        slider->SetValue(percent);
+        apply_percent(percent);
+    };
+
+    entry->GetTextCtrl()->Bind(wxEVT_TEXT_ENTER, [commit_entry](wxCommandEvent &e) {
+        commit_entry();
+        e.Skip();
+    });
+    entry->GetTextCtrl()->Bind(wxEVT_KILL_FOCUS, [commit_entry](wxFocusEvent &e) {
+        commit_entry();
         e.Skip();
     });
 
