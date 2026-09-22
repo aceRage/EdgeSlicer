@@ -5,6 +5,7 @@ add_executable(${_TEST_NAME}_tests
 	test_3mf.cpp
 	test_arrange_support_clearance.cpp
 	test_aabbindirect.cpp
+	test_ams_lookup.cpp
 	test_assembly_face_pick.cpp
 	test_curve_pick.cpp
 	test_chameleon_brim.cpp
