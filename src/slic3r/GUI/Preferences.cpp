@@ -864,6 +864,101 @@ wxBoxSizer *PreferencesDialog::create_item_gizmo_panel_opacity(wxWindow *parent,
     return sizer;
 }
 
+// Selected-object highlight. "selection_highlight_style": "glow" (default: white/yellow edge with
+// a soft halo that stays off neighbouring parts) or "thin" (a crisp 1-2 px outline, no halo).
+// "selection_glow_strength": 0-200 % of the default halo. Both are read by GLCanvas3D every
+// highlighted frame, so redrawing the 3D views is all a change needs.
+wxBoxSizer *PreferencesDialog::create_item_selection_highlight(wxWindow *parent)
+{
+    const std::string style_param    = "selection_highlight_style";
+    const std::string strength_param = "selection_glow_strength";
+
+    auto redraw_3d_views = []() {
+        Plater *plater = wxGetApp().plater();
+        if (plater == nullptr)
+            return;
+        for (GLCanvas3D *canvas : { plater->get_view3D_canvas3D(), plater->get_assmeble_canvas3D() }) {
+            if (canvas != nullptr) {
+                canvas->set_as_dirty();
+                canvas->request_extra_frame();
+            }
+        }
+    };
+
+    // Rows built here rather than with create_item_combobox_base(): its fixed 100 DIP title
+    // column cuts "Selection highlight" off.
+    auto make_title = [parent](const wxString &text, const wxString &tooltip) {
+        auto title = new wxStaticText(parent, wxID_ANY, text);
+        title->SetForegroundColour(DESIGN_GRAY900_COLOR);
+        title->SetFont(::Label::Body_13);
+        title->SetToolTip(tooltip);
+        title->Wrap(-1);
+        return title;
+    };
+
+    const bool thin = app_config->get(style_param) == "thin";
+    const wxString style_tooltip = _L("How selected objects and parts are outlined in the 3D view.\nGlow: a white edge (yellow in the assembly view) with a soft halo over the background; the halo never covers neighbouring parts.\nThin outline: a crisp thin line around the selection, no halo - best for assemblies with touching parts.");
+    wxBoxSizer *style_sizer = new wxBoxSizer(wxHORIZONTAL);
+    auto style_combo = new ::ComboBox(parent, wxID_ANY, wxEmptyString, wxDefaultPosition, DESIGN_LARGE_COMBOBOX_SIZE, 0, nullptr, wxCB_READONLY);
+    style_combo->SetFont(::Label::Body_13);
+    style_combo->GetDropDown().SetFont(::Label::Body_13);
+    style_combo->Append(_L("Glow"));
+    style_combo->Append(_L("Thin outline"));
+    style_combo->SetSelection(thin ? 1 : 0);
+    style_combo->SetToolTip(style_tooltip);
+    style_sizer->Add(0, 0, 0, wxEXPAND | wxLEFT, 23);
+    style_sizer->Add(make_title(_L("Selection highlight"), style_tooltip), 0, wxALIGN_CENTER_VERTICAL | wxALL, 3);
+    style_sizer->Add(style_combo, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP(8));
+
+    const wxString strength_tooltip = _L("Strength of the Glow halo around the selection, in percent of the default. 0 % leaves only the edge line. Only used by the Glow style.");
+    float strength = 100.0f;
+    try {
+        strength = std::clamp(std::stof(app_config->get(strength_param)), 0.0f, 200.0f);
+    } catch (...) {
+        strength = 100.0f;
+    }
+
+    wxBoxSizer *strength_sizer = new wxBoxSizer(wxHORIZONTAL);
+    auto        strength_title = make_title(_L("Selection glow strength"), strength_tooltip);
+
+    auto slider = new wxSlider(parent, wxID_ANY, int(strength + 0.5f), 0, 200, wxDefaultPosition, FromDIP(wxSize(180, -1)), wxSL_HORIZONTAL);
+    slider->SetToolTip(strength_tooltip);
+    auto value_label = new wxStaticText(parent, wxID_ANY, wxString::Format("%d%%", slider->GetValue()), wxDefaultPosition, wxDefaultSize, 0);
+    value_label->SetForegroundColour(DESIGN_GRAY900_COLOR);
+    value_label->SetFont(::Label::Body_13);
+    value_label->SetToolTip(strength_tooltip);
+
+    strength_sizer->Add(0, 0, 0, wxEXPAND | wxLEFT, 23);
+    strength_sizer->Add(strength_title, 0, wxALIGN_CENTER_VERTICAL | wxALL, 3);
+    strength_sizer->Add(slider, 0, wxALIGN_CENTER_VERTICAL | wxLEFT | wxRIGHT, FromDIP(8));
+    strength_sizer->Add(value_label, 0, wxALIGN_CENTER_VERTICAL | wxALL, 3);
+    slider->Enable(!thin);
+
+    // Bound on the combo itself: it re-sends both a drop-down pick and an arrow-key change there.
+    style_combo->Bind(wxEVT_COMBOBOX, [this, style_param, style_combo, slider, redraw_3d_views](wxCommandEvent &e) {
+        const bool thin_selected = style_combo->GetSelection() == 1;
+        app_config->set(style_param, thin_selected ? "thin" : "glow");
+        app_config->save();
+        slider->Enable(!thin_selected);
+        redraw_3d_views();
+        e.Skip();
+    });
+
+    slider->Bind(wxEVT_SLIDER, [this, strength_param, slider, value_label, redraw_3d_views](wxCommandEvent &e) {
+        const int percent = slider->GetValue();
+        value_label->SetLabel(wxString::Format("%d%%", percent));
+        app_config->set(strength_param, std::to_string(percent));
+        app_config->save();
+        redraw_3d_views();
+        e.Skip();
+    });
+
+    wxBoxSizer *sizer = new wxBoxSizer(wxVERTICAL);
+    sizer->Add(style_sizer, 0, 0, 0);
+    sizer->Add(strength_sizer, 0, wxTOP, FromDIP(3));
+    return sizer;
+}
+
 
 wxBoxSizer *PreferencesDialog::create_item_switch(wxString title, wxWindow *parent, wxString tooltip ,std::string param)
 {
@@ -1535,6 +1630,7 @@ wxWindow* PreferencesDialog::create_general_page()
             return dlg.ShowModal() == wxID_OK;
         });
     auto camera_orbit_mult = create_camera_orbit_mult_input(_L("Orbit speed multiplier"), page, _L("Multiplies the orbit speed for finer or coarser camera movement."));
+    auto item_selection_highlight = create_item_selection_highlight(page);
 
     auto item_show_splash_screen = create_item_checkbox(_L("Show splash screen"), page, _L("Show the splash screen during startup."), 50, "show_splash_screen");
     auto item_hints = create_item_checkbox(_L("Show \"Tip of the day\" notification after start"), page, _L("If enabled, useful hints are displayed at startup."), 50, "show_hints");
@@ -1641,6 +1737,7 @@ wxWindow* PreferencesDialog::create_general_page()
     sizer_page->Add(reverse_mouse_zoom, 0, wxTOP, FromDIP(3));
     sizer_page->Add(allow_filament_temp_mixing, 0, wxTOP, FromDIP(3));
     sizer_page->Add(camera_orbit_mult, 0, wxTOP, FromDIP(3));
+    sizer_page->Add(item_selection_highlight, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_show_splash_screen, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_hints, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_calc_in_long_retract, 0, wxTOP, FromDIP(3));

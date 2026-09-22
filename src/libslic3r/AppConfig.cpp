@@ -220,6 +220,12 @@ void AppConfig::set_defaults()
     if (get("show_3d_navigator").empty())
         set_bool("show_3d_navigator", true);
 
+    // Selected-object highlight: "glow" (default) or "thin"; Glow strength in percent (0-200).
+    if (get("selection_highlight_style").empty())
+        set("selection_highlight_style", "glow");
+    if (get("selection_glow_strength").empty())
+        set("selection_glow_strength", "100");
+
 #ifdef _WIN32
 
 //#ifdef SUPPORT_3D_CONNEXION

@@ -132,6 +132,8 @@ public:
     wxWindow   *create_item_gcode_archive_dir(wxWindow *parent, wxString tooltip);
     wxBoxSizer *create_item_gcode_archive_max(wxWindow *parent, wxString tooltip);
     wxBoxSizer *create_item_gizmo_panel_opacity(wxWindow *parent, wxString tooltip);
+    // Selected-object highlight: style combo (Glow / Thin outline) plus the Glow strength slider.
+    wxBoxSizer *create_item_selection_highlight(wxWindow *parent);
     wxBoxSizer *create_item_multiple_combobox(
         wxString title, wxWindow *parent, wxString tooltip, int padding_left, std::string parama, std::vector<wxString> vlista, std::vector<wxString> vlistb);
     wxBoxSizer *create_item_switch(wxString title, wxWindow *parent, wxString tooltip, std::string param);

@@ -108,10 +108,28 @@ namespace GUI {
 
 namespace {
 
+// Mask resolution relative to the framebuffer at 100 % display scaling. It is divided by the
+// DPI scale (see GetSelectionMaskScale()), so every width below measured in mask texels keeps
+// the same on-screen size on HiDPI displays instead of shrinking to half.
 constexpr float SELECTION_MASK_SCALE = 0.5f;
+constexpr float SELECTION_MASK_MIN_SCALE = 0.125f;
 constexpr float SELECTION_GLOW_SCALE = 0.5f;
 constexpr float SELECTION_EDGE_THICKNESS = 1.0f;
-constexpr float SELECTION_GLOW_BLUR_RADIUS = 4.0f;
+constexpr float SELECTION_EDGE_STRENGTH = 3.0f;
+// Glow blur radius in glow-texture texels (a quarter of the framebuffer at 100 %). It was 4
+// (sigma about 8 px, the halo reached about 16 px past the silhouette); 2 keeps it hugging the edge.
+constexpr float SELECTION_GLOW_BLUR_RADIUS = 2.0f;
+// Additive Glow intensity at "selection_glow_strength" = 100 %. It was 3.0 * 0.8 = 2.4, which
+// saturated to a wide white halo on light backgrounds.
+constexpr float SELECTION_GLOW_INTENSITY = 1.0f;
+constexpr float SELECTION_GLOW_STRENGTH_MAX_PERCENT = 200.0f;
+// Darkening fill over the selected silhouette (mix toward 40 % grey).
+constexpr float SELECTION_FILL_ALPHA_GLOW = 0.4f;
+constexpr float SELECTION_FILL_ALPHA_THIN = 0.25f;
+// Thin style: outline and dark rim widths in logical pixels (multiplied by the DPI scale).
+constexpr float SELECTION_THIN_OUTLINE_WIDTH = 1.5f;
+constexpr float SELECTION_THIN_RIM_WIDTH = 1.0f;
+constexpr float SELECTION_THIN_RIM_ALPHA = 0.3f;
 constexpr int GAUSSIAN_LOGICAL_TAP_COUNT = 4;
 constexpr float GAUSSIAN_MAX_RADIUS = 4.0f; // Larger radii use the original nine-fetch kernel.
 constexpr float GAUSSIAN_EPSILON = 1.0e-6f;
@@ -222,6 +240,7 @@ struct CompositeRenderState
     GLint texture0Binding2D{ 0 };
     GLint texture1Binding2D{ 0 };
     GLint texture2Binding2D{ 0 };
+    GLint texture3Binding2D{ 0 };
     GLint currentProgram{ 0 };
 };
 
@@ -246,6 +265,8 @@ CompositeRenderState SaveCompositeRenderState()
     glsafe(::glGetIntegerv(GL_TEXTURE_BINDING_2D, &state.texture1Binding2D));
     glsafe(::glActiveTexture(GL_TEXTURE2));
     glsafe(::glGetIntegerv(GL_TEXTURE_BINDING_2D, &state.texture2Binding2D));
+    glsafe(::glActiveTexture(GL_TEXTURE3));
+    glsafe(::glGetIntegerv(GL_TEXTURE_BINDING_2D, &state.texture3Binding2D));
     glsafe(::glActiveTexture(static_cast<GLenum>(state.activeTexture)));
     glsafe(::glGetIntegerv(GL_CURRENT_PROGRAM, &state.currentProgram));
     return state;
@@ -263,6 +284,8 @@ void RestoreCompositeRenderState(const CompositeRenderState& state)
     glsafe(::glBindTexture(GL_TEXTURE_2D, static_cast<GLuint>(state.texture1Binding2D)));
     glsafe(::glActiveTexture(GL_TEXTURE2));
     glsafe(::glBindTexture(GL_TEXTURE_2D, static_cast<GLuint>(state.texture2Binding2D)));
+    glsafe(::glActiveTexture(GL_TEXTURE3));
+    glsafe(::glBindTexture(GL_TEXTURE_2D, static_cast<GLuint>(state.texture3Binding2D)));
     glsafe(::glActiveTexture(static_cast<GLenum>(state.activeTexture)));
     glsafe(::glBlendFuncSeparate(static_cast<GLenum>(state.blendSourceRgb),
                                  static_cast<GLenum>(state.blendDestinationRgb),
@@ -1661,11 +1684,62 @@ bool GLCanvas3D::init()
     return true;
 }
 
+float GLCanvas3D::GetSelectionHighlightPixelScale() const
+{
+    // Framebuffer pixels per logical pixel. em_unit() is 10 at 100 % display scaling on
+    // Windows/Linux; on macOS the Retina factor carries the scaling instead.
+    float scale = static_cast<float>(wxGetApp().em_unit()) / 10.0f;
+#if ENABLE_RETINA_GL
+    if (m_retina_helper != nullptr)
+        scale = std::max(scale, m_retina_helper->get_scale_factor());
+#endif
+    if (!std::isfinite(scale))
+        scale = 1.0f;
+    return std::clamp(scale, 1.0f, 4.0f);
+}
+
+float GLCanvas3D::GetSelectionMaskScale() const
+{
+    return std::max(SELECTION_MASK_MIN_SCALE, SELECTION_MASK_SCALE / GetSelectionHighlightPixelScale());
+}
+
+GLCanvas3D::SelectionHighlightStyle GLCanvas3D::ReadSelectionHighlightStyle() const
+{
+    SelectionHighlightStyle style;
+    style.pixelScale = GetSelectionHighlightPixelScale();
+    const AppConfig* config = wxGetApp().app_config;
+    if (config == nullptr)
+        return style;
+
+    style.thin = config->get("selection_highlight_style") == "thin";
+    float strengthPercent = 100.0f;
+    const std::string strength = config->get("selection_glow_strength");
+    if (!strength.empty())
+    {
+        try
+        {
+            strengthPercent = std::stof(strength);
+        }
+        catch (...)
+        {
+            strengthPercent = 100.0f;
+        }
+    }
+    if (!std::isfinite(strengthPercent))
+        strengthPercent = 100.0f;
+    strengthPercent = std::clamp(strengthPercent, 0.0f, SELECTION_GLOW_STRENGTH_MAX_PERCENT);
+    style.glowIntensity = style.thin ? 0.0f : SELECTION_GLOW_INTENSITY * strengthPercent / 100.0f;
+    return style;
+}
+
 GLCanvas3D::ESelectionHighlightMode GLCanvas3D::ResolveSelectionHighlightMode()
 {
     const bool highlightEnabled = m_picking_enabled && !m_selection.is_empty();
     if (!highlightEnabled)
         return ESelectionHighlightMode::Disabled;
+
+    // Read once per frame: the Mask and Composite passes below must agree on the style.
+    m_selectionHighlightStyle = ReadSelectionHighlightStyle();
 
     GLShaderProgram* const maskShader = wxGetApp().get_shader("selection_mask");
     GLShaderProgram* const compositeShader = wxGetApp().get_shader("selection_composite");
@@ -1694,8 +1768,9 @@ bool GLCanvas3D::EnsureSelectionHighlightResources(const Size& canvasSize)
 
     const unsigned int canvasWidth = static_cast<unsigned int>(canvasSize.get_width());
     const unsigned int canvasHeight = static_cast<unsigned int>(canvasSize.get_height());
-    const unsigned int width = std::max(1U, static_cast<unsigned int>(std::ceil(canvasWidth * SELECTION_MASK_SCALE)));
-    const unsigned int height = std::max(1U, static_cast<unsigned int>(std::ceil(canvasHeight * SELECTION_MASK_SCALE)));
+    const float maskScale = GetSelectionMaskScale();
+    const unsigned int width = std::max(1U, static_cast<unsigned int>(std::ceil(canvasWidth * maskScale)));
+    const unsigned int height = std::max(1U, static_cast<unsigned int>(std::ceil(canvasHeight * maskScale)));
     const unsigned int glowWidth = std::max(1U, static_cast<unsigned int>(std::ceil(width * SELECTION_GLOW_SCALE)));
     const unsigned int glowHeight = std::max(1U, static_cast<unsigned int>(std::ceil(height * SELECTION_GLOW_SCALE)));
     const SelectionHighlightResources& resources = m_selectionHighlightResources;
@@ -1814,6 +1889,34 @@ bool GLCanvas3D::RenderSelectionHighlightMask()
     shader->set_uniform("projection_matrix", projectionMatrix);
 
     const Selection::IndicesList& volumeIndices = m_selection.get_volume_idxs();
+
+    // Neighbour coverage (red channel): every visible unselected object or part, so the Glow can
+    // be kept off them - adjacent parts of an assembly stay readable, the halo only lights the
+    // background. Only needed while a Glow is drawn.
+    if (!m_selectionHighlightStyle.thin && m_selectionHighlightStyle.glowIntensity > 0.0f)
+    {
+        glsafe(::glColorMask(GL_TRUE, GL_FALSE, GL_FALSE, GL_FALSE));
+        for (unsigned int volumeIdx = 0; volumeIdx < static_cast<unsigned int>(m_volumes.volumes.size()); ++volumeIdx)
+        {
+            GLVolume* const volume = m_volumes.volumes[volumeIdx];
+            if (volume == nullptr || volumeIndices.count(volumeIdx) != 0 || !volume->is_active ||
+                volume->plate_focus_hidden || volume->is_modifier)
+                continue;
+
+            if (m_canvas_type == ECanvasType::CanvasAssembleView ? volume->is_wipe_tower :
+                                                                     (!m_render_sla_auxiliaries && volume->composite_id.volume_id < 0))
+                continue;
+
+            if (!camera.GetFrustum().Intersects(volume->transformed_bounding_box()))
+                continue;
+
+            shader->set_uniform("view_model_matrix", viewMatrix * volume->world_matrix());
+            volume->render();
+        }
+    }
+
+    // Selection coverage (alpha). Red is left alone so it only ever holds neighbours.
+    glsafe(::glColorMask(GL_FALSE, GL_TRUE, GL_TRUE, GL_TRUE));
     for (unsigned int volumeIdx : volumeIndices)
     {
         GLVolume* const volume = m_selection.get_volume(volumeIdx);
@@ -1829,6 +1932,7 @@ bool GLCanvas3D::RenderSelectionHighlightMask()
         shader->set_uniform("view_model_matrix", viewMatrix * volume->world_matrix());
         volume->render();
     }
+    glsafe(::glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE));
     shader->stop_using();
 
     BindSelectionHighlightDrawFramebuffer(framebufferType, m_selectionHighlightResources.maskFramebuffer);
@@ -2087,13 +2191,17 @@ bool GLCanvas3D::RenderSelectionOutlineTextures()
         gaussianShader->stop_using();
     });
 
-    return RenderSelectionGaussianPass(m_selectionHighlightResources.edgeBlurPingPongFramebuffer,
-                                       m_selectionHighlightResources.edgeTexture, edgeSize,
-                                       edgeHorizontalStepUv, edgeKernel) &&
-           RenderSelectionGaussianPass(m_selectionHighlightResources.edgeFramebuffer,
-                                       m_selectionHighlightResources.edgeBlurPingPongTexture, edgeSize,
-                                       edgeVerticalStepUv, edgeKernel) &&
-           RenderSelectionGaussianPass(m_selectionHighlightResources.glowBlurPingPongFramebuffer,
+    const bool edgeReady = RenderSelectionGaussianPass(m_selectionHighlightResources.edgeBlurPingPongFramebuffer,
+                                                       m_selectionHighlightResources.edgeTexture, edgeSize,
+                                                       edgeHorizontalStepUv, edgeKernel) &&
+                           RenderSelectionGaussianPass(m_selectionHighlightResources.edgeFramebuffer,
+                                                       m_selectionHighlightResources.edgeBlurPingPongTexture, edgeSize,
+                                                       edgeVerticalStepUv, edgeKernel);
+    // Glow strength 0 %: the composite never samples the Glow texture, skip its two passes.
+    if (!edgeReady || m_selectionHighlightStyle.glowIntensity <= 0.0f)
+        return edgeReady;
+
+    return RenderSelectionGaussianPass(m_selectionHighlightResources.glowBlurPingPongFramebuffer,
                                        m_selectionHighlightResources.edgeTexture, glowSize,
                                        glowHorizontalStepUv, horizontalGlowKernel) &&
            RenderSelectionGaussianPass(m_selectionHighlightResources.glowFramebuffer,
@@ -2109,13 +2217,17 @@ void GLCanvas3D::CompositeSelectionHighlight()
 
     const unsigned int canvasWidth = static_cast<unsigned int>(canvasSize.get_width());
     const unsigned int canvasHeight = static_cast<unsigned int>(canvasSize.get_height());
-    const unsigned int maskWidth = std::max(1U, static_cast<unsigned int>(std::ceil(canvasWidth * SELECTION_MASK_SCALE)));
-    const unsigned int maskHeight = std::max(1U, static_cast<unsigned int>(std::ceil(canvasHeight * SELECTION_MASK_SCALE)));
+    const float maskScale = GetSelectionMaskScale();
+    const unsigned int maskWidth = std::max(1U, static_cast<unsigned int>(std::ceil(canvasWidth * maskScale)));
+    const unsigned int maskHeight = std::max(1U, static_cast<unsigned int>(std::ceil(canvasHeight * maskScale)));
     if (m_selectionHighlightResources.maskTexture == 0 ||
+        m_selectionHighlightResources.fullResolutionMaskTexture == 0 ||
         m_selectionHighlightResources.edgeTexture == 0 ||
         m_selectionHighlightResources.glowTexture == 0 ||
         m_selectionHighlightResources.width != maskWidth ||
-        m_selectionHighlightResources.height != maskHeight || !m_background.is_initialized())
+        m_selectionHighlightResources.height != maskHeight ||
+        m_selectionHighlightResources.fullResolutionWidth != canvasWidth ||
+        m_selectionHighlightResources.fullResolutionHeight != canvasHeight || !m_background.is_initialized())
     {
         return;
     }
@@ -2130,7 +2242,9 @@ void GLCanvas3D::CompositeSelectionHighlight()
         RestoreCompositeRenderState(previousState);
     });
 
-    if (!RenderSelectionOutlineTextures())
+    // Thin draws its outline straight from the full-resolution mask: no Edge or Glow passes.
+    const SelectionHighlightStyle& style = m_selectionHighlightStyle;
+    if (!style.thin && !RenderSelectionOutlineTextures())
         return;
 
     glsafe(::glDisable(GL_DEPTH_TEST));
@@ -2142,9 +2256,17 @@ void GLCanvas3D::CompositeSelectionHighlight()
     shader->set_uniform("mask_texture", 0);
     shader->set_uniform("edge_texture", 1);
     shader->set_uniform("glow_texture", 2);
+    shader->set_uniform("full_mask_texture", 3);
     const ColorRGB outlineColor = m_canvas_type == ECanvasType::CanvasAssembleView ?
                                       ASSEMBLE_VIEW_SELECTION_OUTLINE_COLOR : SELECTION_OUTLINE_COLOR;
     shader->set_uniform("outline_color", outlineColor);
+    shader->set_uniform("fill_alpha", style.thin ? SELECTION_FILL_ALPHA_THIN : SELECTION_FILL_ALPHA_GLOW);
+    shader->set_uniform("edge_strength", SELECTION_EDGE_STRENGTH);
+    shader->set_uniform("glow_strength", style.thin ? 0.0f : style.glowIntensity);
+    shader->set_uniform("thin_outline_width", style.thin ? SELECTION_THIN_OUTLINE_WIDTH * style.pixelScale : 0.0f);
+    shader->set_uniform("thin_rim_width", SELECTION_THIN_RIM_WIDTH * style.pixelScale);
+    shader->set_uniform("thin_rim_alpha", SELECTION_THIN_RIM_ALPHA);
+    shader->set_uniform("full_texel_size", Vec2f(1.0f / static_cast<float>(canvasWidth), 1.0f / static_cast<float>(canvasHeight)));
 
     glsafe(::glActiveTexture(GL_TEXTURE0));
     glsafe(::glBindTexture(GL_TEXTURE_2D, m_selectionHighlightResources.maskTexture));
@@ -2152,6 +2274,8 @@ void GLCanvas3D::CompositeSelectionHighlight()
     glsafe(::glBindTexture(GL_TEXTURE_2D, m_selectionHighlightResources.edgeTexture));
     glsafe(::glActiveTexture(GL_TEXTURE2));
     glsafe(::glBindTexture(GL_TEXTURE_2D, m_selectionHighlightResources.glowTexture));
+    glsafe(::glActiveTexture(GL_TEXTURE3));
+    glsafe(::glBindTexture(GL_TEXTURE_2D, m_selectionHighlightResources.fullResolutionMaskTexture));
 
     m_background.render();
     shader->stop_using();
