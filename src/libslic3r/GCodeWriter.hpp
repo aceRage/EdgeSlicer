@@ -244,6 +244,11 @@ public:
     void emit_f(double speed) {
         this->emit_axis('F', speed, XYZF_EXPORT_DIGITS);
     }
+
+    // Last feedrate known to be valid (finite and positive), used as the
+    // fallback by the release-active feedrate guard in emit_axis(). Static
+    // because all formatter instances serialize one logical G-code stream.
+    static double s_last_valid_feedrate;
     //BBS
     void emit_ij(const Vec2d &point) {
         this->emit_axis('I', point.x(), XYZF_EXPORT_DIGITS);

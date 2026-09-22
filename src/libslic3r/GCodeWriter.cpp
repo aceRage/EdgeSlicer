@@ -1,10 +1,12 @@
 #include "GCodeWriter.hpp"
 #include "CustomGCode.hpp"
 #include <algorithm>
+#include <cmath>
 #include <iomanip>
 #include <iostream>
 #include <map>
 #include <assert.h>
+#include <boost/log/trivial.hpp>
 #include <GCode/GCodeProcessor.hpp>
 
 #ifdef __APPLE__
@@ -17,6 +19,10 @@
 namespace Slic3r {
 
 bool GCodeWriter::full_gcode_comment = true;
+
+// See GCodeFormatter::emit_axis: last feedrate known to be valid, used as the
+// fallback when a caller tries to emit a non-finite or non-positive F word.
+double GCodeFormatter::s_last_valid_feedrate = 0.;
 
 bool GCodeWriter::supports_separate_travel_acceleration(GCodeFlavor flavor)
 {
@@ -477,6 +483,18 @@ std::string GCodeWriter::toolchange(unsigned int extruder_id)
 
 std::string GCodeWriter::set_speed(double F, const std::string &comment, const std::string &cooling_marker)
 {
+    if (! std::isfinite(F) || F <= 0.) {
+        // Release-active guard: the asserts below are compiled out in Release
+        // builds, which used to let F0 / negative / NaN feedrates flow verbatim
+        // into the G-code and silently wedge Bambu printers. Refuse the bad
+        // value, log it, and substitute the last valid emitted speed if one
+        // exists (m_current_speed is initialized to a valid default), else a
+        // conservative 600 mm/min (10 mm/s).
+        const double fallback = (std::isfinite(m_current_speed) && m_current_speed > 0.) ? m_current_speed : 600.;
+        BOOST_LOG_TRIVIAL(error) << "GCodeWriter::set_speed: refusing non-positive or non-finite feedrate "
+                                 << F << ", substituting " << fallback;
+        F = fallback;
+    }
     assert(F > 0.);
     assert(F < 100000.);
     
@@ -990,8 +1008,22 @@ void GCodeWriter::add_object_change_labels(std::string& gcode)
     add_object_start_labels(gcode);
 }
 
-void GCodeFormatter::emit_axis(const char axis, const double v, size_t digits) {
+void GCodeFormatter::emit_axis(const char axis, const double v_in, size_t digits) {
     assert(digits <= 9);
+    double v = v_in;
+    if (axis == 'F') {
+        if (! std::isfinite(v) || v <= 0.) {
+            // Release-active defense in depth: never let a non-finite or
+            // non-positive feedrate reach the printer. A bad F word (0,
+            // negative, NaN) does not raise an error on Bambu printers - it
+            // wedges the motion planner indefinitely. Substitute the last
+            // valid feedrate seen on this G-code stream, or a conservative
+            // default (600 mm/min = 10 mm/s) if none was seen yet.
+            v = (std::isfinite(s_last_valid_feedrate) && s_last_valid_feedrate > 0.) ? s_last_valid_feedrate : 600.;
+        } else {
+            s_last_valid_feedrate = v;
+        }
+    }
     static constexpr const std::array<int, 10> pow_10{1, 10, 100, 1000, 10000, 100000, 1000000, 10000000, 100000000, 1000000000};
     *ptr_err.ptr++ = ' '; *ptr_err.ptr++ = axis;
 
