@@ -287,8 +287,42 @@ one at a time, each with its own gate, is the only safe route.
 `tests/slic3rutils/bambu_config_compat_tests.cpp`, tag `[BambuCompat]`. Covers each rule in the
 table above, an all-nil array, an untouched nullable option, and a regression asserting that no
 translation ever yields `0` for a speed or acceleration while a zero Bambu really wrote is
-preserved. Fixtures in `tests/data/bambu_compat/` are copies of real presets from the owner's
-Bambu Studio data; nothing reads the live folder at test time.
+preserved. Fixtures in `tests/data/bambu_compat/` and `tests/data/bambu_compat_43/` are copies of
+real presets from the owner's Bambu Studio data; nothing reads the live folder at test time.
+
+### Verified results
+
+`[BambuCompat]`: 18 test cases, 296 assertions, all passing.
+
+Full suites after the change:
+
+| suite | result |
+|---|---|
+| `slic3rutils_tests` | 231 cases, 230 passed, 1 failed - the pre-existing `[NotWorking]` Http basic-auth test (`slic3rutils_tests_main.cpp:58`, external service returns 403) |
+| `libslic3r_tests` | 1184 cases, 1181 passed, 3 failed **as expected** (pre-existing `[!shouldfail]`) |
+
+The 43 presets named in `2026-09-21-16-52-41.log.0` as `parse config ... failed`, run through the
+fork's own `load_from_json`:
+
+| outcome | count |
+|---|---|
+| now load successfully | **43 / 43** |
+| still fail | 0 |
+| load with at least one lossy value | 2 |
+| total lossy values | 4 |
+
+The four lossy values, all of them `CollapsedLossy` on an H2D preset where the second nozzle
+genuinely differs:
+
+```
+0.20mm @H2D - ABS.json     inner_wall_speed            100,nil,100,nil,150 -> 100
+0.20mm @H2D - ABS.json     internal_solid_infill_speed 100,nil,100,nil,180 -> 100
+0.20mm @H2D - ABS.json     sparse_infill_speed         100,nil,100,nil,180 -> 100
+0.30mm @H2D - Custom.json  support_interface_speed     30,50,nil,50,nil    -> 50
+```
+
+The last one shows the majority rule working as intended: `50` occupies two slots and wins over
+the first slot's `30`.
 
 ## Note for other work in flight
 
