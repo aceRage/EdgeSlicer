@@ -44,14 +44,21 @@ struct KR
     bool operator==(const KR &rhs) const { return k == rhs.k && r == rhs.r; }
 };
 
-// An exported G-code ends with a "; key = value" config dump that echoes change_filament_gcode
-// verbatim - both literal branches of the macro included - so every scan must stop before it.
+// An exported G-code carries a "; key = value" config dump that echoes change_filament_gcode
+// verbatim - both literal branches of the macro included - so every scan must skip it. The dump sits
+// at the END of the file for a non-Bambu printer and right after the header for a Bambu one
+// (Print::is_BBL_printer()), so cut the delimited block out wherever it is instead of assuming
+// the tail: a head-of-file dump used to make the "body" empty and every scan find nothing.
 std::string body_of(const std::string &gcode)
 {
-    const std::regex re(R"(
-; [a-z_]+ = )");
-    std::smatch      m;
-    return std::regex_search(gcode, m, re) ? gcode.substr(0, size_t(m.position(0))) : gcode;
+    static const std::string begin_tag = "; CONFIG_BLOCK_START";
+    static const std::string end_tag   = "; CONFIG_BLOCK_END";
+    std::string body = gcode;
+    for (size_t b; (b = body.find(begin_tag)) != std::string::npos;) {
+        const size_t e = body.find(end_tag, b);
+        body.erase(b, e == std::string::npos ? std::string::npos : e + end_tag.size() - b);
+    }
+    return body;
 }
 
 std::vector<KR> collect_kr(const std::string &gcode_in)
@@ -228,6 +235,64 @@ SCENARIO("Extruder-change retraction placeholders follow the target filament", "
             // The raw value is the sentinel, which is exactly why the emitter may not read it
             // without checking is_nil() first: as a plain bool it would be true, not false.
             REQUIRE(lr->values[0] != 0);
+        }
+    }
+}
+
+SCENARIO("Extruder-change retraction probe works in both G-code layouts", "[EcRetraction]")
+{
+    // Print::is_BBL_printer() decides where the config dump goes: after the header for a Bambu
+    // printer (the H2D case this feature is for), at the end otherwise. It used to be an
+    // uninitialized member, so a stack Print in a test picked a layout at random and the tail-only
+    // scan above saw an empty body whenever the garbage byte was non-zero.
+    GIVEN("a default-constructed Print")
+    {
+        Slic3r::Print print;
+        THEN("it is not a Bambu printer until the GUI or CLI says so")
+        {
+            REQUIRE_FALSE(print.is_BBL_printer());
+        }
+    }
+
+    for (const bool bbl : { false, true }) {
+        GIVEN(std::string("the per-filament values, is_BBL_printer = ") + (bbl ? "true" : "false"))
+        {
+            DynamicPrintConfig config = two_filament_config();
+            config.set_deserialize_strict({
+                { "long_retractions_when_ec", "1,0" },
+                { "retraction_distances_when_ec", "10,7" },
+            });
+            Slic3r::Print print;
+            Slic3r::Model model;
+            Slic3r::Test::init_print({ Slic3r::Test::TestMesh::cube_20x20x20 }, print, model, config);
+            print.is_BBL_printer() = bbl;
+            const std::string     gcode = Slic3r::Test::gcode(print);
+            const std::vector<KR> krs   = collect_kr(gcode);
+
+            THEN("the config dump is where the layout puts it")
+            {
+                const size_t config_at = gcode.find("; CONFIG_BLOCK_START");
+                const size_t exec_at   = gcode.find("; EXECUTABLE_BLOCK_START");
+                REQUIRE(config_at != std::string::npos);
+                if (bbl && exec_at != std::string::npos)
+                    REQUIRE(config_at < exec_at);
+            }
+            THEN("switches to filament 0 carry K1 R10 and switches to filament 1 carry K0 R0")
+            {
+                REQUIRE(krs.size() >= 2);
+                bool saw_on = false, saw_off = false;
+                for (const KR &kr : krs) {
+                    if (kr.k == "1") {
+                        saw_on = true;
+                        REQUIRE(kr.r == "10");
+                    } else {
+                        saw_off = true;
+                        REQUIRE(kr == KR{ "0", "0" });
+                    }
+                }
+                REQUIRE(saw_on);
+                REQUIRE(saw_off);
+            }
         }
     }
 }

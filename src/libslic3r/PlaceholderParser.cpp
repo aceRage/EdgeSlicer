@@ -1019,6 +1019,78 @@ namespace client
             output.it_range.end()   = it_end;
         }
 
+        // Value of a "ratio_over" parent. Scalars are read as they are; a per-extruder vector (the
+        // High-Flow work retyped outer_wall_speed, travel_speed, bridge_speed, default_acceleration ...
+        // from scalars to vectors) is read at `index`, falling back to the first element exactly like
+        // a bare vector reference does. Returns false for a parent type that carries no such value.
+        static bool ratio_over_parent_value(const ConfigOption *opt_parent, int index, double &value, bool &percent)
+        {
+            switch (opt_parent->type()) {
+            case coFloat:
+                value   = opt_parent->getFloat();
+                percent = false;
+                return true;
+            case coFloatOrPercent:
+                value   = static_cast<const ConfigOptionFloatOrPercent*>(opt_parent)->value;
+                percent = static_cast<const ConfigOptionFloatOrPercent*>(opt_parent)->percent;
+                return true;
+            case coFloats:
+            case coFloatsOrPercents: {
+                const ConfigOptionVectorBase *vec = static_cast<const ConfigOptionVectorBase*>(opt_parent);
+                if (vec->empty())
+                    return false;
+                const size_t idx = (index < 0 || index >= int(vec->size())) ? 0 : size_t(index);
+                if (vec->is_nil(idx))
+                    return false;
+                if (opt_parent->type() == coFloats) {
+                    value   = static_cast<const ConfigOptionFloats*>(opt_parent)->values[idx];
+                    percent = false;
+                } else {
+                    const FloatOrPercent &v = static_cast<const ConfigOptionFloatsOrPercents*>(opt_parent)->values[idx];
+                    value   = v.value;
+                    percent = v.percent;
+                }
+                return true;
+            }
+            default:
+                return false;
+            }
+        }
+
+        // Resolve a percent value (already converted to a ratio) of option `opt_key` against its
+        // "ratio_over" chain. `index` selects the element of any per-extruder vector on the way up.
+        static double resolve_ratio_over(const MyContext *ctx, const std::string &opt_key, double ratio, int index, const IteratorRange &it_range)
+        {
+            const ConfigOptionDef *opt_def = print_config_def.get(opt_key);
+            if (opt_def == nullptr)
+                ctx->throw_exception("FloatOrPercent variable failed to resolve the \"ratio_over\" dependencies", it_range);
+            double v = ratio;
+            for (;;) {
+                const ConfigOption *opt_parent = opt_def->ratio_over.empty() ? nullptr : ctx->resolve_symbol(opt_def->ratio_over);
+                if (opt_parent == nullptr)
+                    ctx->throw_exception("FloatOrPercent variable failed to resolve the \"ratio_over\" dependencies", it_range);
+                if (boost::ends_with(opt_def->ratio_over, "extrusion_width")) {
+                    // Extrusion width supports defaults and a complex graph of dependencies.
+                    assert(opt_parent->type() == coFloatOrPercent);
+                    v *= Flow::extrusion_width(opt_def->ratio_over, static_cast<const ConfigOptionFloatOrPercent*>(opt_parent), *ctx, static_cast<unsigned int>(ctx->current_extruder_id));
+                    break;
+                }
+                double parent_value   = 0.;
+                bool   parent_percent = false;
+                if (ratio_over_parent_value(opt_parent, index, parent_value, parent_percent)) {
+                    v *= parent_value;
+                    if (! parent_percent)
+                        break;
+                    v *= 0.01; // percent to ratio
+                }
+                // Continue one level up in the "ratio_over" hierarchy.
+                opt_def = print_config_def.get(opt_def->ratio_over);
+                if (opt_def == nullptr)
+                    ctx->throw_exception("FloatOrPercent variable failed to resolve the \"ratio_over\" dependencies", it_range);
+            }
+            return v;
+        }
+
         // Evaluating a scalar variable into expr,
         // all possible ConfigOption types are supported.
         static void scalar_variable_to_expr(const MyContext *ctx, OptWithPos &opt, expr &output)
@@ -1049,31 +1121,10 @@ namespace client
                     // Not a percent, just return the value.
                     output.set_d(opt.opt->getFloat());
                 } else {
-                    // Resolve dependencies using the "ratio_over" link to a parent value.
-    			    const ConfigOptionDef  *opt_def = print_config_def.get(opt_key);
-    			    assert(opt_def != nullptr);
-    			    double v = opt.opt->getFloat() * 0.01; // percent to ratio
-    			    for (;;) {
-    			        const ConfigOption *opt_parent = opt_def->ratio_over.empty() ? nullptr : ctx->resolve_symbol(opt_def->ratio_over);
-    			        if (opt_parent == nullptr)
-    			            ctx->throw_exception("FloatOrPercent variable failed to resolve the \"ratio_over\" dependencies", opt.it_range);
-    			        if (boost::ends_with(opt_def->ratio_over, "extrusion_width")) {
-                    		// Extrusion width supports defaults and a complex graph of dependencies.
-                            assert(opt_parent->type() == coFloatOrPercent);
-                        	v *= Flow::extrusion_width(opt_def->ratio_over, static_cast<const ConfigOptionFloatOrPercent*>(opt_parent), *ctx, static_cast<unsigned int>(ctx->current_extruder_id));
-                        	break;
-                        }
-                        if (opt_parent->type() == coFloat || opt_parent->type() == coFloatOrPercent) {
-    			        	v *= opt_parent->getFloat();
-    			        	if (opt_parent->type() == coFloat || ! static_cast<const ConfigOptionFloatOrPercent*>(opt_parent)->percent)
-    			        		break;
-    			        	v *= 0.01; // percent to ratio
-    			        }
-    		        	// Continue one level up in the "ratio_over" hierarchy.
-    				    opt_def = print_config_def.get(opt_def->ratio_over);
-    				    assert(opt_def != nullptr);
-    			    }
-                    output.set_d(v);
+                    // Resolve dependencies using the "ratio_over" link to a parent value. The parent may
+                    // be a per-extruder vector (e.g. wipe_speed over travel_speed); read it at the
+                    // current extruder.
+                    output.set_d(resolve_ratio_over(ctx, opt_key, opt.opt->getFloat() * 0.01, int(ctx->current_extruder_id), opt.it_range));
     	        }
     		    break;
     		}
@@ -1109,6 +1160,23 @@ namespace client
             case coPoints:   output.set_s(to_string(static_cast<const ConfigOptionPoints*>(opt.opt)->values[idx])); break;
             case coBools:    output.set_b(static_cast<const ConfigOptionBools*>(opt.opt)->values[idx] != 0); break;
             case coEnums:    output.set_i(static_cast<const ConfigOptionInts    *>(opt.opt)->values[idx]); break;
+            case coFloatsOrPercents: {
+                // Per-extruder float-or-percent (small_perimeter_speed, overhang_N_4_speed,
+                // internal_bridge_speed, initial_layer_travel_speed, bridge/sparse/internal-solid
+                // acceleration since the High-Flow retype). Same rules as the scalar coFloatOrPercent:
+                // an absolute value as is, a percent resolved over its "ratio_over" parent at the same
+                // element (BambuStudio resolves these the same way).
+                const FloatOrPercent &v = static_cast<const ConfigOptionFloatsOrPercents*>(opt.opt)->values[idx];
+                if (! v.percent) {
+                    output.set_d(v.value);
+                } else {
+                    // it_range spans "key[index]" for an indexed reference; the definition is keyed by the name alone.
+                    std::string opt_key(opt.it_range.begin(), opt.it_range.end());
+                    opt_key = opt_key.substr(0, opt_key.find_first_of("[ \t"));
+                    output.set_d(resolve_ratio_over(ctx, opt_key, v.value * 0.01, int(idx), opt.it_range));
+                }
+                break;
+            }
             default:
                 ctx->throw_exception("Unsupported vector variable type", opt.it_range);
             }
