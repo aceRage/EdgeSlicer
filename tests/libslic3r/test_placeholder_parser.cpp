@@ -14,13 +14,21 @@ SCENARIO("Placeholder parser scripting", "[PlaceholderParser]") {
 	    { "nozzle_diameter", "0.6,0.6,0.6,0.6" },
 	    { "nozzle_temperature", "357,359,363,378" },
 	    // FloatOrPercent options exercising the "ratio_over" resolution paths below:
+	    // Since the High-Flow retype, outer_wall_speed / bridge_speed / travel_speed are per-extruder
+	    // coFloats and small_perimeter_speed / internal_bridge_speed / overhang_N_4_speed are
+	    // coFloatsOrPercents; a bare reference resolves to the current extruder's element.
 	    { "outer_wall_speed", "60" },            // parent of small_perimeter_speed
-	    { "small_perimeter_speed", "50%" },      // percent over outer_wall_speed (coFloat)
+	    { "small_perimeter_speed", "50%" },      // percent over outer_wall_speed (coFloats)
+	    { "bridge_speed", "50" },                // parent of internal_bridge_speed
+	    { "internal_bridge_speed", "150%" },     // percent over bridge_speed (coFloats)
+	    { "overhang_1_4_speed", "40" },          // absolute coFloatsOrPercents, returned as-is
+	    { "travel_speed", "200" },               // parent of wipe_speed
+	    { "wipe_speed", "80%" },                 // scalar percent over a coFloats parent
 	    { "sparse_infill_line_width", "0.45" },  // absolute parent of infill_anchor
 	    { "infill_anchor", "300%" },             // percent over sparse_infill_line_width (coFloatOrPercent)
 	    { "initial_layer_line_width", "0.9" },   // absolute FloatOrPercent, returned as-is
-	    // line_width is a percent whose ratio_over parent (nozzle_diameter) is a vector
-	    // the PlaceholderParser cannot resolve, so referencing it throws.
+	    // line_width is a percent whose ratio_over parent (nozzle_diameter) is a per-extruder vector,
+	    // read at the current extruder.
 	    { "line_width", "112.5%" },
 	});
 
@@ -70,13 +78,19 @@ SCENARIO("Placeholder parser scripting", "[PlaceholderParser]") {
 
     // Test the "coFloatOrPercent" substitutions via the "ratio_over" chains.
     SECTION("initial_layer_line_width, absolute") { REQUIRE(std::stod(parser.process("{initial_layer_line_width}")) == Approx(0.9)); }
-    // small_perimeter_speed 50% over outer_wall_speed (coFloat) 60
+    // small_perimeter_speed 50% over outer_wall_speed (coFloats) 60
     SECTION("small_perimeter_speed") { REQUIRE(std::stod(parser.process("{small_perimeter_speed}")) == Approx(30.)); }
+    SECTION("small_perimeter_speed, indexed") { REQUIRE(std::stod(parser.process("{small_perimeter_speed[0]}")) == Approx(30.)); }
+    SECTION("small_perimeter_speed in a condition") { REQUIRE(parser.process("{if small_perimeter_speed > 20}fast{else}slow{endif}") == "fast"); }
+    // internal_bridge_speed 150% over bridge_speed (coFloats) 50
+    SECTION("internal_bridge_speed") { REQUIRE(std::stod(parser.process("{internal_bridge_speed}")) == Approx(75.)); }
+    SECTION("overhang_1_4_speed, absolute") { REQUIRE(std::stod(parser.process("{overhang_1_4_speed}")) == Approx(40.)); }
+    // wipe_speed (scalar coFloatOrPercent) 80% over travel_speed (coFloats) 200
+    SECTION("wipe_speed") { REQUIRE(std::stod(parser.process("{wipe_speed}")) == Approx(160.)); }
     // infill_anchor 300% over sparse_infill_line_width (absolute coFloatOrPercent) 0.45
     SECTION("infill_anchor") { REQUIRE(std::stod(parser.process("{infill_anchor}")) == Approx(1.35)); }
-    // line_width is a percent and its ratio_over parent (nozzle_diameter) is a vector the
-    // PlaceholderParser cannot resolve a scalar percent against, therefore it throws.
-    SECTION("line_width") { REQUIRE_THROWS(parser.process("{line_width}")); }
+    // line_width 112.5% over nozzle_diameter (coFloats) 0.6 at the current extruder
+    SECTION("line_width") { REQUIRE(std::stod(parser.process("{line_width}")) == Approx(0.675)); }
 
     // Test the boolean expression parser.
     auto boolean_expression = [&parser](const std::string& templ) { return parser.evaluate_boolean_expression(templ, parser.config()); };

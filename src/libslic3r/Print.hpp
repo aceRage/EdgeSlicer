@@ -1341,7 +1341,10 @@ private:
     bool                                                  m_ultra_force_match_mode = false;
 
     //SoftFever
-    bool m_isBBLPrinter;
+    // Set by the GUI (BackgroundSlicingProcess) and the CLI before export. It must still have a defined
+    // value for a Print built any other way (tests, tools): as an uninitialized member of a stack Print it
+    // was garbage, and a non-zero byte moved the whole config dump into the G-code header.
+    bool m_isBBLPrinter = false;
 
     // Ordered collections of extrusion paths to build skirt loops and brim.
     ExtrusionEntityCollection               m_skirt;
