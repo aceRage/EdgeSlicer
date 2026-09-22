@@ -1,6 +1,7 @@
 #ifndef NOFITPOLY_HPP
 #define NOFITPOLY_HPP
 
+#include <algorithm>
 #include <cassert>
 
 // For parallel for
@@ -1111,7 +1112,24 @@ private:
         default: ; // DONT_ALIGN
         }
 
-        auto d = cb - ci;       
+        auto d = cb - ci;
+
+        // Keep the final pile inside the bed when a preferred position is near an edge.
+        //
+        // std::clamp is UB when lo > hi, and that is not hypothetical here: a pile bigger than
+        // the bed in either axis inverts the bounds (min shift exceeds max shift). Clamp through
+        // a helper that detects it and keeps the pile centred on the bed in that axis instead,
+        // which is the only sane placement when nothing can fit.
+        // Explicit return type: the two returns would otherwise deduce from different
+        // expressions ((lo+hi)/2 can promote) and fail to compile.
+        auto clamp_shift = [](auto v, auto lo, auto hi) -> decltype(v) {
+            if (lo > hi) return static_cast<decltype(v)>((lo + hi) / 2);  // bigger than the bed: centre it
+            return std::max(lo, std::min(v, hi));
+        };
+        setX(d, clamp_shift(getX(d), getX(bbin.minCorner()) - getX(bb.minCorner()),
+                            getX(bbin.maxCorner()) - getX(bb.maxCorner())));
+        setY(d, clamp_shift(getY(d), getY(bbin.minCorner()) - getY(bb.minCorner()),
+                            getY(bbin.maxCorner()) - getY(bb.maxCorner())));
 
         // BBS make sure the item won't clash with excluded regions
         // do we have wipe tower after arranging?
@@ -1141,9 +1159,7 @@ private:
                 return;
             }
             Item   objs_convex_hull_item(objs_convex_hull);
-            Vertex objs_convex_hull_ref = objs_convex_hull_item.referenceVertex();
-            Vertex diff                 = objs_convex_hull_ref - sl::boundingBox(objs_convex_hull).center();
-            Vertex ref_aligned = cb + diff;  // reference point when pile center aligned with bed center
+            Vertex ref_aligned = objs_convex_hull_item.referenceVertex() + d;
             bool ref_aligned_is_ok = std::any_of(nfps.begin(), nfps.end(), [&ref_aligned](auto& nfp) {return sl::isInside(ref_aligned, nfp); });
             if (!ref_aligned_is_ok) {
                 // ref_aligned is not good, then find a nearest point on nfp boundary
