@@ -1,25 +1,28 @@
 #include "PresetMirror.hpp"
+#include "PresetMirrorCore.hpp"
 
 #include "libslic3r/libslic3r.h"   // Slic3r::data_dir()
 #include "libslic3r/Utils.hpp"
+#include "libslic3r/PrintConfig.hpp"
 
 #include <boost/filesystem.hpp>
 #include <boost/log/trivial.hpp>
-#include <nlohmann/json.hpp>
 
 #include <fstream>
 #include <sstream>
 #include <vector>
+#include <map>
 #include <ctime>
 
 namespace bfs = boost::filesystem;
-using json = nlohmann::json;
 
 namespace Slic3r { namespace GUI {
 
+namespace {
+
 // ---- helpers ----------------------------------------------------------------
 
-static long long read_updated_time(const bfs::path& info_path)
+long long read_updated_time(const bfs::path& info_path)
 {
     // .info is a simple "key = value" text file; return updated_time or 0.
     boost::system::error_code ec;
@@ -43,7 +46,7 @@ static long long read_updated_time(const bfs::path& info_path)
 
 // Copy an .info, forcing sync_info blank so the mirrored preset is inert to the fork's cloud
 // delete/upload gates (keeps user_id + setting_id + base_id).
-static void copy_info_inert(const bfs::path& src_info, const bfs::path& dst_info)
+void copy_info_inert(const bfs::path& src_info, const bfs::path& dst_info)
 {
     boost::system::error_code ec;
     if (!bfs::exists(src_info, ec)) return;
@@ -62,110 +65,128 @@ static void copy_info_inert(const bfs::path& src_info, const bfs::path& dst_info
     for (auto& l : lines) out << l << "\n";
 }
 
+std::string read_file(const bfs::path& p)
+{
+    std::ifstream in(p.string(), std::ios::binary);
+    std::ostringstream ss;
+    ss << in.rdbuf();
+    return ss.str();
+}
+
+// Every option this fork declares nullable, i.e. where a literal "nil" is a legal value. Any other
+// key carrying "nil" makes ConfigOption::deserialize() throw, and PresetCollection::load_presets()
+// DELETES (.json + .info) every preset it fails to parse - so such a preset must never be copied in.
+const std::vector<std::string>& nullable_option_keys()
+{
+    static const std::vector<std::string> keys = []() {
+        std::vector<std::string> k;
+        for (const auto& kv : print_config_def.options)
+            if (kv.second.nullable)
+                k.push_back(kv.first);
+        return k;
+    }();
+    return keys;
+}
+
+// A source preset is usable if this fork can already read it, or if the only thing stopping it is
+// per-extruder "nil" padding we can collapse without changing the preset's meaning.
+bool source_is_usable(const std::string& text, const std::vector<std::string>& nullable)
+{
+    if (mirror::preset_is_parseable(text, nullable))
+        return true;
+    std::string fixed;
+    return mirror::sanitize_nil_arrays(text, nullable, &fixed)
+        && mirror::preset_is_parseable(fixed, nullable);
+}
+
 // Find the Bambu Studio user\<uid> dir. Prefer the logged-in uid; prefer stable over Beta; else
 // the most-recently-modified numeric dir. Returns empty path if none.
-static bfs::path find_bambu_user_dir(const std::string& logged_in_uid)
+bfs::path find_bambu_user_dir(const std::string& logged_in_uid)
 {
-    // data_dir() is %APPDATA%\Snapmaker_Orca; BambuStudio is a sibling under %APPDATA%.
+    // data_dir() is %APPDATA%\<fork>; BambuStudio is a sibling under %APPDATA%.
     bfs::path appdata = bfs::path(Slic3r::data_dir()).parent_path();
     const char* roots[] = { "BambuStudio", "BambuStudioBeta" };
-    bfs::path newest; std::time_t newest_t = 0;
+
+    std::vector<mirror::UidCandidate> cands;
+    std::vector<bfs::path>            paths;
     for (const char* r : roots) {
         bfs::path user = appdata / r / "user";
         boost::system::error_code ec;
         if (!bfs::is_directory(user, ec)) continue;
-        // exact uid match wins immediately (stable checked before Beta)
-        if (!logged_in_uid.empty()) {
-            bfs::path cand = user / logged_in_uid;
-            if (bfs::is_directory(cand, ec)) return cand;
-        }
-        // else track newest numeric dir
         for (bfs::directory_iterator it(user, ec), end; it != end && !ec; it.increment(ec)) {
             if (!bfs::is_directory(it->status())) continue;
             std::string name = it->path().filename().string();
             if (name.empty() || name == "default") continue;
             if (name.find_first_not_of("0123456789") != std::string::npos) continue;
-            std::time_t t = bfs::last_write_time(it->path(), ec);
-            if (t > newest_t) { newest_t = t; newest = it->path(); }
+            mirror::UidCandidate c;
+            c.root  = r;
+            c.uid   = name;
+            c.mtime = (long long) bfs::last_write_time(it->path(), ec);
+            cands.push_back(c);
+            paths.push_back(it->path());
         }
     }
-    return newest;
+    int pick = mirror::choose_uid(cands, logged_in_uid);
+    return pick < 0 ? bfs::path() : paths[(size_t) pick];
 }
 
-// ---- manifest ---------------------------------------------------------------
-
-struct Manifest {
-    bfs::path path;
-    json j = json::object();
-    void load(const bfs::path& p) {
-        path = p;
-        boost::system::error_code ec;
-        if (bfs::exists(p, ec)) {
-            try { std::ifstream in(p.string()); in >> j; } catch (...) { j = json::object(); }
-        }
-        if (!j.is_object()) j = json::object();
-        if (!j.contains("files")) {
-            // Migrate the flat spike manifest { "<rel>": {"t": N}, ... } into { "files": {...} }, so
-            // presets copied by the Stage-0 spike are adopted (tracked/updatable) rather than treated
-            // as fork-native.
-            json files = json::object();
-            for (auto it = j.begin(); it != j.end(); ++it)
-                if (it.value().is_object() && it.value().contains("t"))
-                    files[it.key()] = json{{"t", it.value()["t"]}, {"deleted", false}};
-            j = json::object();
-            j["files"] = files;
-        }
-        if (!j["files"].is_object()) j["files"] = json::object();
-    }
-    bool has(const std::string& rel) const { return j["files"].contains(rel); }
-    long long time_of(const std::string& rel) const {
-        try { return j["files"].at(rel).at("t").get<long long>(); } catch (...) { return 0; }
-    }
-    bool deleted(const std::string& rel) const {
-        try { return j["files"].at(rel).value("deleted", false); } catch (...) { return false; }
-    }
-    void set(const std::string& rel, long long t, bool del) {
-        j["files"][rel] = json{{"t", t}, {"deleted", del}};
-    }
-    void save() {
-        try { std::ofstream out(path.string(), std::ios::binary | std::ios::trunc); out << j.dump(1); } catch (...) {}
-    }
-};
-
-// ---- core -------------------------------------------------------------------
-
-// Mirror one file (json/base) applying the older-or-missing + fork-native-protect + deletion rules.
-// rel is the manifest key (relative to the fork user\default dir). Returns action for stats.
-static const char* mirror_one(const bfs::path& src, const bfs::path& dst, const std::string& rel,
-                              long long src_t, Manifest& man, bool is_user_preset)
+// Enumerate the Bambu source tree. `ok` stays false unless every directory we touched was read
+// without error - a partial or failed listing must never be mistaken for "the user deleted things".
+mirror::SourceListing list_source(const bfs::path& src_uid)
 {
+    mirror::SourceListing out;
     boost::system::error_code ec;
-    bool dst_exists = bfs::exists(dst, ec);
-    bool in_man = man.has(rel);
+    if (!bfs::is_directory(src_uid, ec)) return out;   // ok == false
 
-    if (dst_exists && !in_man)
-        return "protect";                     // fork-native file we don't own
-    if (dst_exists && in_man) {
-        if (src_t <= man.time_of(rel)) return "uptodate";
-    } else { // dst missing
-        if (in_man && src_t <= man.time_of(rel)) {  // user deleted it, BS not newer -> respect deletion
-            man.set(rel, man.time_of(rel), true);
-            return "respect_delete";
+    const char* types[] = { "filament", "process", "machine" };
+    const auto& nullable = nullable_option_keys();
+
+    for (const char* typ : types) {
+        bfs::path sdir = src_uid / typ;
+        if (!bfs::is_directory(sdir, ec)) continue;   // a type the user simply has none of
+
+        // 1) base\ cache (full inheritance copies; no .info, use mtime)
+        bfs::path sbase = sdir / "base";
+        if (bfs::is_directory(sbase, ec)) {
+            boost::system::error_code it_ec;
+            bfs::directory_iterator it(sbase, it_ec), end;
+            if (it_ec) return mirror::SourceListing();   // unreadable -> whole run is not ok
+            for (; it != end; it.increment(it_ec)) {
+                if (it_ec) return mirror::SourceListing();
+                if (it->path().extension() != ".json") continue;
+                mirror::SourceFile f;
+                f.rel = std::string(typ) + "/base/" + it->path().filename().string();
+                f.t   = (long long) bfs::last_write_time(it->path(), ec);
+                f.parseable = source_is_usable(read_file(it->path()), nullable);
+                out.files.push_back(f);
+            }
         }
-        // in_man && src_t newer -> BS edited since deletion: re-pull. not in_man -> new. both copy.
+
+        // 2) top-level user presets (sparse override diffs; use .info updated_time)
+        {
+            boost::system::error_code it_ec;
+            bfs::directory_iterator it(sdir, it_ec), end;
+            if (it_ec) return mirror::SourceListing();
+            for (; it != end; it.increment(it_ec)) {
+                if (it_ec) return mirror::SourceListing();
+                if (!bfs::is_regular_file(it->status())) continue;
+                if (it->path().extension() != ".json") continue;
+                mirror::SourceFile f;
+                f.rel = std::string(typ) + "/" + it->path().filename().string();
+                bfs::path info = it->path(); info.replace_extension(".info");
+                f.t = read_updated_time(info);
+                if (f.t == 0) f.t = (long long) bfs::last_write_time(it->path(), ec);
+                f.parseable = source_is_usable(read_file(it->path()), nullable);
+                out.files.push_back(f);
+            }
+        }
     }
 
-    bfs::create_directories(dst.parent_path(), ec);
-    bfs::copy_file(src, dst, bfs::copy_option::overwrite_if_exists, ec);
-    if (ec) { BOOST_LOG_TRIVIAL(warning) << "[preset-mirror] copy failed " << src.string() << ": " << ec.message(); return "error"; }
-    if (is_user_preset) {
-        bfs::path si = src; si.replace_extension(".info");
-        bfs::path di = dst; di.replace_extension(".info");
-        copy_info_inert(si, di);
-    }
-    man.set(rel, src_t, false);
-    return "copied";
+    out.ok = true;
+    return out;
 }
+
+} // namespace
 
 int mirror_bambu_user_presets(const std::string& logged_in_uid)
 {
@@ -177,56 +198,124 @@ int mirror_bambu_user_presets(const std::string& logged_in_uid)
         boost::system::error_code ec;
         bfs::create_directories(dst_root, ec);
 
-        Manifest man; man.load(dst_root / ".bs_mirror_manifest.json");
+        bfs::path man_path = dst_root / ".bs_mirror_manifest.json";
+        auto manifest = mirror::parse_manifest(read_file(man_path));
 
-        int copied = 0, uptodate = 0, native_protected = 0, respected = 0, errors = 0;
-        auto tally = [&](const char* a) {
-            std::string s = a;
-            if (s == "copied") ++copied; else if (s == "uptodate") ++uptodate;
-            else if (s == "protect") ++native_protected; else if (s == "respect_delete") ++respected;
-            else if (s == "error") ++errors;
+        // Enumerate first. Nothing destructive happens before we know the listing is good.
+        mirror::SourceListing src = list_source(src_uid);
+        if (!src.ok) {
+            BOOST_LOG_TRIVIAL(warning) << "[preset-mirror] could not enumerate " << src_uid.string()
+                                       << "; skipping this run (no presets touched)";
+            return 0;
+        }
+
+        // Which of our tracked/listed files are on disk right now.
+        mirror::DestState dst;
+        auto note_present = [&](const std::string& rel) {
+            bfs::path p = dst_root / bfs::path(rel);
+            dst.present[rel] = bfs::exists(p, ec);
         };
+        for (const auto& f : src.files) note_present(f.rel);
+        for (const auto& kv : manifest) note_present(kv.first);
 
-        // print + filament + machine (Stage 2). base\ first so inherits resolve; a machine preset
-        // whose inherits/base is a printer this fork lacks is dropped non-fatally by the loader.
-        const char* types[] = { "filament", "process", "machine" };
-        for (const char* typ : types) {
-            bfs::path sdir = src_uid / typ;
-            if (!bfs::is_directory(sdir, ec)) continue;
-            bfs::path ddir = dst_root / typ;
+        auto plan = mirror::build_plan(src, manifest, dst);
 
-            // 1) base\ cache (full inheritance copies; no .info, use mtime)
-            bfs::path sbase = sdir / "base";
-            if (bfs::is_directory(sbase, ec)) {
-                for (bfs::directory_iterator it(sbase, ec), end; it != end && !ec; it.increment(ec)) {
-                    if (it->path().extension() != ".json") continue;
-                    std::string rel = std::string(typ) + "/base/" + it->path().filename().string();
-                    long long t = (long long) bfs::last_write_time(it->path(), ec);
-                    tally(mirror_one(it->path(), ddir / "base" / it->path().filename(), rel, t, man, false));
+        // Index the source files so we can find what to copy.
+        std::map<std::string, const mirror::SourceFile*> by_rel;
+        for (const auto& f : src.files) by_rel[f.rel] = &f;
+
+        int copied = 0, uptodate = 0, native_protected = 0, respected = 0, skipped = 0, retired = 0, errors = 0, sanitized = 0;
+
+        for (const auto& item : plan) {
+            switch (item.action) {
+            case mirror::Action::Copy: {
+                if (by_rel.find(item.rel) == by_rel.end()) { ++errors; break; }
+                bfs::path srcp = src_uid / bfs::path(item.rel);
+                bfs::path dstp = dst_root / bfs::path(item.rel);
+                bfs::create_directories(dstp.parent_path(), ec);
+
+                // Collapse Bambu's per-extruder "nil" padding where it is unambiguous, so the
+                // preset loads here instead of being rejected (and then deleted) by the loader.
+                std::string text = read_file(srcp);
+                std::string fixed;
+                int         collapsed = 0;
+                if (!mirror::preset_is_parseable(text, nullable_option_keys())
+                    && mirror::sanitize_nil_arrays(text, nullable_option_keys(), &fixed, &collapsed)) {
+                    std::ofstream o(dstp.string(), std::ios::binary | std::ios::trunc);
+                    o << fixed;
+                    if (!o) {
+                        BOOST_LOG_TRIVIAL(warning) << "[preset-mirror] write failed " << dstp.string();
+                        ++errors;
+                        break;
+                    }
+                    sanitized += collapsed ? 1 : 0;
+                } else {
+                    bfs::copy_file(srcp, dstp, bfs::copy_option::overwrite_if_exists, ec);
+                    if (ec) {
+                        BOOST_LOG_TRIVIAL(warning) << "[preset-mirror] copy failed " << srcp.string() << ": " << ec.message();
+                        ++errors;
+                        break;
+                    }
                 }
+                // base\ entries have no .info; only the top-level user presets carry one.
+                if (item.rel.find("/base/") == std::string::npos) {
+                    bfs::path si = srcp; si.replace_extension(".info");
+                    bfs::path di = dstp; di.replace_extension(".info");
+                    copy_info_inert(si, di);
+                }
+                ++copied;
+                break;
             }
-            // 2) top-level user presets (sparse override diffs; use .info updated_time)
-            for (bfs::directory_iterator it(sdir, ec), end; it != end && !ec; it.increment(ec)) {
-                if (!bfs::is_regular_file(it->status())) continue;
-                if (it->path().extension() != ".json") continue;
-                std::string rel = std::string(typ) + "/" + it->path().filename().string();
-                bfs::path info = it->path(); info.replace_extension(".info");
-                long long t = read_updated_time(info);
-                if (t == 0) t = (long long) bfs::last_write_time(it->path(), ec);
-                tally(mirror_one(it->path(), ddir / it->path().filename(), rel, t, man, true));
+            case mirror::Action::UpToDate:        ++uptodate;         break;
+            case mirror::Action::ProtectNative:   ++native_protected; break;
+            case mirror::Action::RespectDelete:   ++respected;        break;
+            case mirror::Action::SkipUnparseable: ++skipped;          break;
+            case mirror::Action::Retire:          ++retired;          break;
             }
         }
 
-        man.save();
+        auto updated = mirror::apply_plan(manifest, plan);
+        try {
+            std::ofstream out(man_path.string(), std::ios::binary | std::ios::trunc);
+            out << mirror::dump_manifest(updated);
+        } catch (...) {}
+
         BOOST_LOG_TRIVIAL(info) << "[preset-mirror] from " << src_uid.string()
             << " -> copied=" << copied << " uptodate=" << uptodate
             << " fork_native_protected=" << native_protected << " user_deletions_respected=" << respected
+            << " skipped_unparseable=" << skipped << " retired=" << retired
+            << " nil_collapsed=" << sanitized
             << " errors=" << errors;
+        if (skipped > 0)
+            BOOST_LOG_TRIVIAL(info) << "[preset-mirror] " << skipped << " Bambu preset(s) use per-extruder 'nil' "
+                                       "values this slicer cannot read; they stay in Bambu Studio only";
         return copied;
     } catch (const std::exception& e) {
         BOOST_LOG_TRIVIAL(error) << "[preset-mirror] failed: " << e.what();
     } catch (...) {
         BOOST_LOG_TRIVIAL(error) << "[preset-mirror] failed (unknown)";
+    }
+    return 0;
+}
+
+int repull_mirrored_presets()
+{
+    // Recovery affordance: clear every "deleted" flag so the next sync re-pulls anything that was
+    // removed from this slicer but that Bambu Studio still has.
+    try {
+        bfs::path man_path = bfs::path(Slic3r::data_dir()) / "user" / "default" / ".bs_mirror_manifest.json";
+        auto manifest = mirror::parse_manifest(read_file(man_path));
+        int cleared = 0;
+        for (auto& kv : manifest)
+            if (kv.second.deleted) { kv.second.deleted = false; kv.second.t = 0; ++cleared; }
+        if (cleared > 0) {
+            std::ofstream out(man_path.string(), std::ios::binary | std::ios::trunc);
+            out << mirror::dump_manifest(manifest);
+        }
+        BOOST_LOG_TRIVIAL(info) << "[preset-mirror] re-pull requested: cleared " << cleared << " deletion flag(s)";
+        return cleared;
+    } catch (const std::exception& e) {
+        BOOST_LOG_TRIVIAL(error) << "[preset-mirror] re-pull failed: " << e.what();
     }
     return 0;
 }

@@ -21,6 +21,7 @@ add_executable(${_TEST_NAME}_tests
     hms_actions_tests.cpp
     remote_error_actions_tests.cpp
     plate_focus_hide_tests.cpp
+    preset_mirror_tests.cpp
     )
 
 # The watcher's transition rule lives in libslic3r_gui, and reaching it pulls GUI_App and the
