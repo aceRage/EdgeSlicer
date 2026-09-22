@@ -202,6 +202,58 @@ void GLVolume::load_render_colors()
     RenderColor::colors[RenderCol_Model_Unprintable] = GUI::ImGuiWrapper::to_ImVec4(GLVolume::UNPRINTABLE_COLOR);
 }
 
+ColorRGBA GLVolume::brighten_color(const ColorRGBA& color, float multiplier)
+{
+    // Convert RGB to HSL, increase lightness, convert back
+    // Orca #15776: selected MMU paint stays filament-colored but reads as selected.
+    // The call site passes 1.25f; that factor is the lightness lift (l + 0.25).
+    float r = color.r(), g = color.g(), b = color.b();
+
+    // RGB to HSL conversion
+    float max_val = std::max({r, g, b});
+    float min_val = std::min({r, g, b});
+    float l       = (max_val + min_val) / 2.0f;
+    float h       = 0.0f, s = 0.0f;
+
+    if (max_val != min_val) {
+        float delta = max_val - min_val;
+        s           = l > 0.5f ? delta / (2.0f - max_val - min_val) : delta / (max_val + min_val);
+
+        if (max_val == r)
+            h = (g - b) / delta + (g < b ? 6.0f : 0.0f);
+        else if (max_val == g)
+            h = (b - r) / delta + 2.0f;
+        else
+            h = (r - g) / delta + 4.0f;
+        h /= 6.0f;
+    }
+
+    // Increase lightness by (multiplier - 1). 1.25f matches Orca's fixed +0.25 lift.
+    l = std::min(l + (multiplier - 1.0f), 1.0f);
+
+    // HSL to RGB conversion
+    auto hue_to_rgb = [](float p, float q, float t) {
+        if (t < 0.0f) t += 1.0f;
+        if (t > 1.0f) t -= 1.0f;
+        if (t < 1.0f / 6.0f) return p + (q - p) * 6.0f * t;
+        if (t < 1.0f / 2.0f) return q;
+        if (t < 2.0f / 3.0f) return p + (q - p) * (2.0f / 3.0f - t) * 6.0f;
+        return p;
+    };
+
+    if (s == 0.0f) {
+        r = g = b = l; // achromatic (gray)
+    } else {
+        float q = l < 0.5f ? l * (1.0f + s) : l + s - l * s;
+        float p = 2.0f * l - q;
+        r       = hue_to_rgb(p, q, h + 1.0f / 3.0f);
+        g       = hue_to_rgb(p, q, h);
+        b       = hue_to_rgb(p, q, h - 1.0f / 3.0f);
+    }
+
+    return ColorRGBA(r, g, b, color.a());
+}
+
 GLVolume::GLVolume(float r, float g, float b, float a)
     : m_sla_shift_z(0.0)
     , m_sinking_contours(*this)
@@ -464,6 +516,12 @@ void GLVolume::simple_render(GLShaderProgram*        shader,
     } while (0);
 
     if (color_volume && !picking) {
+        // Orca #15776 adapt: keep per-triangle MMU paint under selection and lift
+        // the painted extruder colors so the volume still reads as selected.
+        // force_native_color / force_neutral_color cover paint, color-clip, and
+        // cut gizmos; do not brighten those sessions.
+        const bool brighten_selected = selected && !disabled && !force_native_color && !force_neutral_color;
+
         // when force_transparent, we need to keep the alpha
         if (force_native_color && render_color.is_transparent()) {
             for (auto& extruder_color : extruder_colors)
@@ -482,6 +540,8 @@ void GLVolume::simple_render(GLShaderProgram*        shader,
                         extruder_id = 1;
                     // to make black not too hard too see
                     ColorRGBA new_color = adjust_color_for_rendering(extruder_colors[extruder_id - 1]);
+                    if (brighten_selected)
+                        new_color = brighten_color(new_color, 1.25f);
                     if (ban_light) {
                         new_color[3] = (255 - (extruder_id - 1)) / 255.0f;
                     }
@@ -491,6 +551,8 @@ void GLVolume::simple_render(GLShaderProgram*        shader,
                     if (idx <= extruder_colors.size()) {
                         // to make black not too hard too see
                         ColorRGBA new_color = adjust_color_for_rendering(extruder_colors[idx - 1]);
+                        if (brighten_selected)
+                            new_color = brighten_color(new_color, 1.25f);
                         if (ban_light) {
                             new_color[3] = (255 - (idx - 1)) / 255.0f;
                         }
@@ -499,6 +561,8 @@ void GLVolume::simple_render(GLShaderProgram*        shader,
                     } else {
                         // to make black not too hard too see
                         ColorRGBA new_color = adjust_color_for_rendering(extruder_colors[0]);
+                        if (brighten_selected)
+                            new_color = brighten_color(new_color, 1.25f);
                         if (ban_light) {
                             new_color[3] = (255 - 0) / 255.0f;
                         }
