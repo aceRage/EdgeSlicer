@@ -1709,8 +1709,8 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             //plate->pattern_file = it->second->pattern_file;
             plate->no_light_thumbnail_file = it->second->no_light_thumbnail_file;
             plate->top_file = it->second->top_file;
-            plate->pick_file = it->second->pick_file.empty();
-            plate->pattern_bbox_file = it->second->pattern_bbox_file.empty();
+            plate->pick_file = it->second->pick_file;
+            plate->pattern_bbox_file = it->second->pattern_bbox_file;
             plate->config = it->second->config;
 
             if (!plate->thumbnail_file.empty())
@@ -4478,6 +4478,11 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             if (boost::starts_with(m_curr_characters, "BambuStudio-")) {
                 m_is_bbl_3mf = true;
                 m_bambuslicer_generator_version = Semver::parse(m_curr_characters.substr(12));
+            }
+            else if (boost::starts_with(m_curr_characters, std::string(SLIC3R_APP_NAME) + "-")) {
+                // Files we wrote ourselves (post-rebrand); treat as full projects like BambuStudio stamps.
+                m_is_bbl_3mf = true;
+                m_bambuslicer_generator_version = Semver::parse(m_curr_characters.substr(std::string(SLIC3R_APP_NAME).size() + 1));
             }
             else if (boost::starts_with(m_curr_characters, "Snapmaker_Orca-")) {
                 m_is_bbl_3mf = true;
@@ -7354,14 +7359,17 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                     metadata_item_map = model.model_info.get()->metadata_items;
                 }
 
-                metadata_item_map[BBL_MODEL_NAME_TAG]           = xml_escape(name);
-                metadata_item_map[BBL_ORIGIN_TAG]               = xml_escape(origin);
-                metadata_item_map[BBL_DESIGNER_TAG]             = xml_escape(user_name);
+                // NOTE: values are stored raw here and escaped exactly once at write time
+                // (xml_escape in the store loop below). Escaping here too double-escapes
+                // entities on every load/save round trip (e.g. "Chris's" -> "&amp;apos;" -> ...).
+                metadata_item_map[BBL_MODEL_NAME_TAG]           = name;
+                metadata_item_map[BBL_ORIGIN_TAG]               = origin;
+                metadata_item_map[BBL_DESIGNER_TAG]             = user_name;
                 metadata_item_map[BBL_DESIGNER_USER_ID_TAG]     = ""; // Orca: PRIVACY: do not store BBL user id in 3mf
-                metadata_item_map[BBL_DESIGNER_COVER_FILE_TAG]  = xml_escape(design_cover);
-                metadata_item_map[BBL_DESCRIPTION_TAG]          = xml_escape(description);
-                metadata_item_map[BBL_COPYRIGHT_NORMATIVE_TAG]  = xml_escape(copyright);
-                metadata_item_map[BBL_LICENSE_TAG]              = xml_escape(license);
+                metadata_item_map[BBL_DESIGNER_COVER_FILE_TAG]  = design_cover;
+                metadata_item_map[BBL_DESCRIPTION_TAG]          = description;
+                metadata_item_map[BBL_COPYRIGHT_NORMATIVE_TAG]  = copyright;
+                metadata_item_map[BBL_LICENSE_TAG]              = license;
 
                 /* save model info */
                 if (!model_id.empty()) {
@@ -7372,24 +7380,26 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 // Orca: PRIVACY: do not store creation & modification date in 3mf
                 metadata_item_map[BBL_CREATION_DATE_TAG] = "";
                 metadata_item_map[BBL_MODIFICATION_TAG]  = "";
-                //SoftFever: write BambuStudio tag to keep it compatible 
-                metadata_item_map[BBL_APPLICATION_TAG] = (boost::format("%1%-%2%") % "BambuStudio" % Snapmaker_VERSION).str();
+                // Identify ourselves honestly. We used to write "BambuStudio-<fork version>",
+                // which put our own version number into BambuStudio's version slot; BambuStudio
+                // version-gates files on that string, and a bogus version can mislead it.
+                metadata_item_map[BBL_APPLICATION_TAG] = (boost::format("%1%-%2%") % SLIC3R_APP_NAME % Snapmaker_VERSION).str();
             }
             metadata_item_map[BBS_3MF_VERSION] = std::to_string(VERSION_BBS_3MF);
 
             if (!model.mk_name.empty()) {
-                metadata_item_map[BBL_MAKERLAB_TAG] = xml_escape(model.mk_name);
+                metadata_item_map[BBL_MAKERLAB_TAG] = model.mk_name;
                 BOOST_LOG_TRIVIAL(info) << "saved mk_name " << model.mk_name;
             }
             if (!model.mk_version.empty()) {
-                metadata_item_map[BBL_MAKERLAB_VERSION_TAG] = xml_escape(model.mk_version);
+                metadata_item_map[BBL_MAKERLAB_VERSION_TAG] = model.mk_version;
                 BOOST_LOG_TRIVIAL(info) << "saved mk_version " << model.mk_version;
             }
             if (!model.md_name.empty()) {
                 for (unsigned int i = 0; i < model.md_name.size(); i++)
                 {
                     BOOST_LOG_TRIVIAL(info) << boost::format("saved metadata_name %1%, metadata_value %2%") %model.md_name[i] %model.md_value[i];
-                    metadata_item_map[model.md_name[i]] = xml_escape(model.md_value[i]);
+                    metadata_item_map[model.md_name[i]] = model.md_value[i];
                 }
             }
 
