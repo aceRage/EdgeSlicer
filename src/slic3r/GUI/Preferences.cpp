@@ -926,12 +926,13 @@ wxBoxSizer *PreferencesDialog::create_item_selection_highlight(wxWindow *parent)
     // Exact value box next to the slider (same TextInput as "Orbit speed multiplier"): whole
     // percent 0-200, committed on Enter or when the box loses focus, kept in sync with the slider.
     auto value_input = new ::TextInput(parent, wxEmptyString, wxEmptyString, wxEmptyString, wxDefaultPosition,
-                                       wxSize(FromDIP(56), -1), wxTE_PROCESS_ENTER);
+                                       wxSize(FromDIP(72), -1), wxTE_PROCESS_ENTER);
     StateColor value_bg(std::pair<wxColour, int>(wxColour("#F0F0F1"), StateColor::Disabled),
                         std::pair<wxColour, int>(*wxWHITE, StateColor::Enabled));
     value_input->SetBackgroundColor(value_bg);
-    value_input->GetTextCtrl()->SetValue(wxString::Format("%d", slider->GetValue()));
-    value_input->GetTextCtrl()->SetValidator(wxTextValidator(wxFILTER_DIGITS));
+    wxTextCtrl *value_ctrl = value_input->GetTextCtrl();
+    value_ctrl->SetValue(wxString::Format("%d", slider->GetValue()));
+    value_ctrl->SetValidator(wxTextValidator(wxFILTER_DIGITS));
     value_input->SetToolTip(strength_tooltip);
     auto percent_label = make_title("%", strength_tooltip);
 
@@ -940,8 +941,8 @@ wxBoxSizer *PreferencesDialog::create_item_selection_highlight(wxWindow *parent)
     strength_sizer->Add(slider, 0, wxALIGN_CENTER_VERTICAL | wxLEFT | wxRIGHT, FromDIP(8));
     strength_sizer->Add(value_input, 0, wxALIGN_CENTER_VERTICAL, 0);
     strength_sizer->Add(percent_label, 0, wxALIGN_CENTER_VERTICAL | wxALL, 3);
-    slider->Enable(!thin);
-    value_input->Enable(!thin);
+    // Both stay editable in Thin mode too (the value is kept for when Glow is picked again): a
+    // greyed-out box read as "the box does not take input".
 
     // Saves a strength (already clamped) and redraws; shared by the slider and the value box.
     auto apply_strength = [this, strength_param, redraw_3d_views](int percent) {
@@ -951,12 +952,10 @@ wxBoxSizer *PreferencesDialog::create_item_selection_highlight(wxWindow *parent)
     };
 
     // Bound on the combo itself: it re-sends both a drop-down pick and an arrow-key change there.
-    style_combo->Bind(wxEVT_COMBOBOX, [this, style_param, style_combo, slider, value_input, redraw_3d_views](wxCommandEvent &e) {
+    style_combo->Bind(wxEVT_COMBOBOX, [this, style_param, style_combo, redraw_3d_views](wxCommandEvent &e) {
         const bool thin_selected = style_combo->GetSelection() == 1;
         app_config->set(style_param, thin_selected ? "thin" : "glow");
         app_config->save();
-        slider->Enable(!thin_selected);
-        value_input->Enable(!thin_selected);
         redraw_3d_views();
         e.Skip();
     });
@@ -964,34 +963,61 @@ wxBoxSizer *PreferencesDialog::create_item_selection_highlight(wxWindow *parent)
     // Soft detent at the default: a move that lands within 3 % of 100 snaps to it, unless it
     // starts from 100 (so arrow keys can still step to 99 or 101).
     auto last_percent = std::make_shared<int>(slider->GetValue());
-    slider->Bind(wxEVT_SLIDER, [slider, value_input, apply_strength, last_percent](wxCommandEvent &e) {
+    slider->Bind(wxEVT_SLIDER, [slider, value_ctrl, apply_strength, last_percent](wxCommandEvent &e) {
         int percent = slider->GetValue();
         if (percent != 100 && *last_percent != 100 && std::abs(percent - 100) <= 3) {
             percent = 100;
             slider->SetValue(percent);
         }
         *last_percent = percent;
-        value_input->GetTextCtrl()->ChangeValue(wxString::Format("%d", percent));
+        value_ctrl->ChangeValue(wxString::Format("%d", percent)); // ChangeValue: no wxEVT_TEXT
         apply_strength(percent);
         e.Skip();
     });
 
-    // Typed value: digits only; empty or unparsable falls back to the slider's value, anything
-    // else is clamped to 0-200 and written back so the box always shows what is applied.
-    auto commit_typed = [slider, value_input, apply_strength, last_percent]() {
+    // Typing applies live: every in-range entry moves the slider and redraws at once, so the box
+    // visibly "takes" the value; out-of-range or empty text waits for the commit below.
+    value_ctrl->Bind(wxEVT_TEXT, [slider, value_ctrl, apply_strength, last_percent](wxCommandEvent &e) {
+        long typed = 0;
+        if (value_ctrl->GetValue().ToLong(&typed) && typed >= 0 && typed <= 200 && int(typed) != slider->GetValue()) {
+            slider->SetValue(int(typed));
+            *last_percent = int(typed);
+            apply_strength(int(typed));
+        }
+        e.Skip();
+    });
+
+    // Commit on Enter or focus loss: digits only; empty or unparsable falls back to the slider's
+    // value, anything else is clamped to 0-200 and written back so the box shows what is applied.
+    auto commit_typed = [slider, value_ctrl, apply_strength, last_percent]() {
         long typed = slider->GetValue();
-        if (!value_input->GetTextCtrl()->GetValue().ToLong(&typed))
+        if (!value_ctrl->GetValue().ToLong(&typed))
             typed = slider->GetValue();
         const int percent = int(std::clamp(typed, 0L, 200L));
-        value_input->GetTextCtrl()->ChangeValue(wxString::Format("%d", percent));
+        value_ctrl->ChangeValue(wxString::Format("%d", percent));
         if (percent != slider->GetValue()) {
             slider->SetValue(percent);
             *last_percent = percent;
             apply_strength(percent);
         }
     };
-    value_input->GetTextCtrl()->Bind(wxEVT_TEXT_ENTER, [commit_typed](wxCommandEvent &e) { commit_typed(); e.Skip(); });
-    value_input->GetTextCtrl()->Bind(wxEVT_KILL_FOCUS, [commit_typed](wxFocusEvent &e) { commit_typed(); e.Skip(); });
+    value_ctrl->Bind(wxEVT_TEXT_ENTER, [commit_typed, value_ctrl](wxCommandEvent &e) {
+        commit_typed();
+        value_ctrl->SelectAll();
+        e.Skip();
+    });
+    value_ctrl->Bind(wxEVT_KILL_FOCUS, [commit_typed](wxFocusEvent &e) { commit_typed(); e.Skip(); });
+    // Focusing the box selects its text, so typing replaces "100" instead of appending to it
+    // ("100" + "80" = "10080", clamped to 200, looked like the typing was ignored). A click on
+    // the box's frame (outside the inner edit) also focuses the edit.
+    value_ctrl->Bind(wxEVT_SET_FOCUS, [value_ctrl](wxFocusEvent &e) {
+        value_ctrl->CallAfter([value_ctrl]() { value_ctrl->SelectAll(); });
+        e.Skip();
+    });
+    value_input->Bind(wxEVT_LEFT_DOWN, [value_ctrl](wxMouseEvent &e) {
+        value_ctrl->SetFocus();
+        e.Skip();
+    });
 
     wxBoxSizer *sizer = new wxBoxSizer(wxVERTICAL);
     sizer->Add(style_sizer, 0, 0, 0);
