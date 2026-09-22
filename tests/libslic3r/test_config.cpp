@@ -476,3 +476,45 @@ TEST_CASE("save_to_json leaves an existing file untouched when the config cannot
     boost::filesystem::remove(path);
     CHECK(contents == "previous");
 }
+
+// Regression test for a fork bug: "downward_check" was declared twice with disagreeing types
+// (coStrings in CLIActionsConfigDef, coBool in CLIMiscConfigDef). Because DynamicPrintAndCLIConfig
+// merges print_config_def + cli_actions_config_def + cli_transform_config_def + cli_misc_config_def
+// into one map via std::map::insert (which KEEPS the first-seen entry on a key collision), the
+// coStrings definition silently won, and `m_config.option<ConfigOptionBool>("downward_check")` in
+// Snapmaker_Orca.cpp returned nullptr via dynamic_cast, so --downward_check was a silent no-op.
+// This walks every option key registered across the four ConfigDef instances that
+// DynamicPrintAndCLIConfig::PrintAndCLIConfigDef merges together and fails if any key is
+// registered in more than one of them, so a colliding pair (same type or not) can never again
+// hide behind std::map::insert's first-wins semantics.
+TEST_CASE("PrintConfigDef and the CLI ConfigDefs never register the same option key twice", "[Config][ConfigDefs]")
+{
+    struct Source { const char *name; const ConfigDef *def; };
+    const Source sources[] = {
+        { "print_config_def",        &print_config_def },
+        { "cli_actions_config_def",   &cli_actions_config_def },
+        { "cli_transform_config_def", &cli_transform_config_def },
+        { "cli_misc_config_def",      &cli_misc_config_def },
+    };
+
+    // opt_key -> list of (source name, type) it was found registered under.
+    std::map<std::string, std::vector<std::pair<std::string, ConfigOptionType>>> seen;
+    for (const Source &src : sources)
+        for (const auto &kvp : src.def->options)
+            seen[kvp.first].push_back({ src.name, kvp.second.type });
+
+    std::vector<std::string> duplicates;
+    for (const auto &entry : seen) {
+        if (entry.second.size() <= 1)
+            continue;
+        std::string msg = entry.first + " registered in:";
+        for (const auto &where : entry.second)
+            msg += " " + where.first + "(type=" + std::to_string(int(where.second)) + ")";
+        duplicates.push_back(msg);
+    }
+
+    INFO("Duplicate option key registrations found (first entry wins the merge silently): ");
+    for (const std::string &d : duplicates)
+        UNSCOPED_INFO(d);
+    CHECK(duplicates.empty());
+}
