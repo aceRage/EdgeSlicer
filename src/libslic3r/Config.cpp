@@ -331,6 +331,16 @@ void ConfigOptionDef::bind_enum_keys_map(ConfigOption *opt) const
 ConfigOptionDef* ConfigDef::add(const t_config_option_key &opt_key, ConfigOptionType type)
 {
 	static size_t serialization_key_ordinal_last = 0;
+    // Debug-only: ConfigDef::options is a std::map, so re-adding the same opt_key into the
+    // *same* ConfigDef instance silently overwrites the earlier definition (possibly with a
+    // different ConfigOptionType) instead of erroring. That produced a real bug once (fork
+    // history: two "downward_check" registrations disagreeing on coStrings vs coBool). Assert
+    // here so a same-instance duplicate registration fails loudly in debug/test builds instead
+    // of silently discarding the first definition. Kept debug-only: this runs once per option at
+    // static-init time across several ConfigDef instances, so the cost is negligible either way,
+    // but there is no reason to pay even that in a release binary.
+    assert(this->options.find(opt_key) == this->options.end() &&
+           "ConfigDef::add: duplicate option key registered in the same ConfigDef instance");
     ConfigOptionDef *opt = &this->options[opt_key];
     opt->opt_key = opt_key;
     opt->type = type;
