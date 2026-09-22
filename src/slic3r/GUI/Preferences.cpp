@@ -923,35 +923,75 @@ wxBoxSizer *PreferencesDialog::create_item_selection_highlight(wxWindow *parent)
 
     auto slider = new wxSlider(parent, wxID_ANY, int(strength + 0.5f), 0, 200, wxDefaultPosition, FromDIP(wxSize(180, -1)), wxSL_HORIZONTAL);
     slider->SetToolTip(strength_tooltip);
-    auto value_label = new wxStaticText(parent, wxID_ANY, wxString::Format("%d%%", slider->GetValue()), wxDefaultPosition, wxDefaultSize, 0);
-    value_label->SetForegroundColour(DESIGN_GRAY900_COLOR);
-    value_label->SetFont(::Label::Body_13);
-    value_label->SetToolTip(strength_tooltip);
+    // Exact value box next to the slider (same TextInput as "Orbit speed multiplier"): whole
+    // percent 0-200, committed on Enter or when the box loses focus, kept in sync with the slider.
+    auto value_input = new ::TextInput(parent, wxEmptyString, wxEmptyString, wxEmptyString, wxDefaultPosition,
+                                       wxSize(FromDIP(56), -1), wxTE_PROCESS_ENTER);
+    StateColor value_bg(std::pair<wxColour, int>(wxColour("#F0F0F1"), StateColor::Disabled),
+                        std::pair<wxColour, int>(*wxWHITE, StateColor::Enabled));
+    value_input->SetBackgroundColor(value_bg);
+    value_input->GetTextCtrl()->SetValue(wxString::Format("%d", slider->GetValue()));
+    value_input->GetTextCtrl()->SetValidator(wxTextValidator(wxFILTER_DIGITS));
+    value_input->SetToolTip(strength_tooltip);
+    auto percent_label = make_title("%", strength_tooltip);
 
     strength_sizer->Add(0, 0, 0, wxEXPAND | wxLEFT, 23);
     strength_sizer->Add(strength_title, 0, wxALIGN_CENTER_VERTICAL | wxALL, 3);
     strength_sizer->Add(slider, 0, wxALIGN_CENTER_VERTICAL | wxLEFT | wxRIGHT, FromDIP(8));
-    strength_sizer->Add(value_label, 0, wxALIGN_CENTER_VERTICAL | wxALL, 3);
+    strength_sizer->Add(value_input, 0, wxALIGN_CENTER_VERTICAL, 0);
+    strength_sizer->Add(percent_label, 0, wxALIGN_CENTER_VERTICAL | wxALL, 3);
     slider->Enable(!thin);
+    value_input->Enable(!thin);
+
+    // Saves a strength (already clamped) and redraws; shared by the slider and the value box.
+    auto apply_strength = [this, strength_param, redraw_3d_views](int percent) {
+        app_config->set(strength_param, std::to_string(percent));
+        app_config->save();
+        redraw_3d_views();
+    };
 
     // Bound on the combo itself: it re-sends both a drop-down pick and an arrow-key change there.
-    style_combo->Bind(wxEVT_COMBOBOX, [this, style_param, style_combo, slider, redraw_3d_views](wxCommandEvent &e) {
+    style_combo->Bind(wxEVT_COMBOBOX, [this, style_param, style_combo, slider, value_input, redraw_3d_views](wxCommandEvent &e) {
         const bool thin_selected = style_combo->GetSelection() == 1;
         app_config->set(style_param, thin_selected ? "thin" : "glow");
         app_config->save();
         slider->Enable(!thin_selected);
+        value_input->Enable(!thin_selected);
         redraw_3d_views();
         e.Skip();
     });
 
-    slider->Bind(wxEVT_SLIDER, [this, strength_param, slider, value_label, redraw_3d_views](wxCommandEvent &e) {
-        const int percent = slider->GetValue();
-        value_label->SetLabel(wxString::Format("%d%%", percent));
-        app_config->set(strength_param, std::to_string(percent));
-        app_config->save();
-        redraw_3d_views();
+    // Soft detent at the default: a move that lands within 3 % of 100 snaps to it, unless it
+    // starts from 100 (so arrow keys can still step to 99 or 101).
+    auto last_percent = std::make_shared<int>(slider->GetValue());
+    slider->Bind(wxEVT_SLIDER, [slider, value_input, apply_strength, last_percent](wxCommandEvent &e) {
+        int percent = slider->GetValue();
+        if (percent != 100 && *last_percent != 100 && std::abs(percent - 100) <= 3) {
+            percent = 100;
+            slider->SetValue(percent);
+        }
+        *last_percent = percent;
+        value_input->GetTextCtrl()->ChangeValue(wxString::Format("%d", percent));
+        apply_strength(percent);
         e.Skip();
     });
+
+    // Typed value: digits only; empty or unparsable falls back to the slider's value, anything
+    // else is clamped to 0-200 and written back so the box always shows what is applied.
+    auto commit_typed = [slider, value_input, apply_strength, last_percent]() {
+        long typed = slider->GetValue();
+        if (!value_input->GetTextCtrl()->GetValue().ToLong(&typed))
+            typed = slider->GetValue();
+        const int percent = int(std::clamp(typed, 0L, 200L));
+        value_input->GetTextCtrl()->ChangeValue(wxString::Format("%d", percent));
+        if (percent != slider->GetValue()) {
+            slider->SetValue(percent);
+            *last_percent = percent;
+            apply_strength(percent);
+        }
+    };
+    value_input->GetTextCtrl()->Bind(wxEVT_TEXT_ENTER, [commit_typed](wxCommandEvent &e) { commit_typed(); e.Skip(); });
+    value_input->GetTextCtrl()->Bind(wxEVT_KILL_FOCUS, [commit_typed](wxFocusEvent &e) { commit_typed(); e.Skip(); });
 
     wxBoxSizer *sizer = new wxBoxSizer(wxVERTICAL);
     sizer->Add(style_sizer, 0, 0, 0);
