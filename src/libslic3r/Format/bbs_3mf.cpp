@@ -7383,7 +7383,15 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 // Identify ourselves honestly. We used to write "BambuStudio-<fork version>",
                 // which put our own version number into BambuStudio's version slot; BambuStudio
                 // version-gates files on that string, and a bogus version can mislead it.
-                metadata_item_map[BBL_APPLICATION_TAG] = (boost::format("%1%-%2%") % SLIC3R_APP_NAME % Snapmaker_VERSION).str();
+                // Keep writing the "BambuStudio-" prefix. It is not vanity: BambuStudio's reader
+                // only records a generator version when the tag starts with that literal
+                // (bbs_3mf.cpp, "BambuStudio-" check), and with no version it sets
+                // dont_load_config = true and skips the project config AND every embedded
+                // print/filament preset in the file. Naming ourselves honestly here would mean
+                // any 3MF we export opens in BambuStudio with its settings silently dropped.
+                // The read side below now also accepts our own name, so files we write are
+                // recognised as full projects by us either way.
+                metadata_item_map[BBL_APPLICATION_TAG] = (boost::format("%1%-%2%") % "BambuStudio" % Snapmaker_VERSION).str();
             }
             metadata_item_map[BBS_3MF_VERSION] = std::to_string(VERSION_BBS_3MF);
 
