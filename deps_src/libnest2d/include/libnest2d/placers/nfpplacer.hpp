@@ -1,6 +1,7 @@
 #ifndef NOFITPOLY_HPP
 #define NOFITPOLY_HPP
 
+#include <algorithm>
 #include <cassert>
 
 // For parallel for
@@ -1114,10 +1115,21 @@ private:
         auto d = cb - ci;
 
         // Keep the final pile inside the bed when a preferred position is near an edge.
-        setX(d, std::clamp(getX(d), getX(bbin.minCorner()) - getX(bb.minCorner()),
-                          getX(bbin.maxCorner()) - getX(bb.maxCorner())));
-        setY(d, std::clamp(getY(d), getY(bbin.minCorner()) - getY(bb.minCorner()),
-                          getY(bbin.maxCorner()) - getY(bb.maxCorner())));
+        //
+        // std::clamp is UB when lo > hi, and that is not hypothetical here: a pile bigger than
+        // the bed in either axis inverts the bounds (min shift exceeds max shift). Clamp through
+        // a helper that detects it and keeps the pile centred on the bed in that axis instead,
+        // which is the only sane placement when nothing can fit.
+        // Explicit return type: the two returns would otherwise deduce from different
+        // expressions ((lo+hi)/2 can promote) and fail to compile.
+        auto clamp_shift = [](auto v, auto lo, auto hi) -> decltype(v) {
+            if (lo > hi) return static_cast<decltype(v)>((lo + hi) / 2);  // bigger than the bed: centre it
+            return std::max(lo, std::min(v, hi));
+        };
+        setX(d, clamp_shift(getX(d), getX(bbin.minCorner()) - getX(bb.minCorner()),
+                            getX(bbin.maxCorner()) - getX(bb.maxCorner())));
+        setY(d, clamp_shift(getY(d), getY(bbin.minCorner()) - getY(bb.minCorner()),
+                            getY(bbin.maxCorner()) - getY(bb.maxCorner())));
 
         // BBS make sure the item won't clash with excluded regions
         // do we have wipe tower after arranging?
