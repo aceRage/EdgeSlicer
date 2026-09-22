@@ -194,7 +194,7 @@ def draw_foreground(d):
 
     # Version line, then the loading line, at the positions the splash uses.
     f_small = pick_font(int(13 * SS))
-    d.text((DESIGN_W * SS / 2, Y(168 + 30)), "V2.3.8.1", font=f_small,
+    d.text((DESIGN_W * SS / 2, Y(168 + 30)), "V2.4.0.0", font=f_small,
            fill=(143, 143, 143), anchor="ma")
     d.text((DESIGN_W * SS / 2, Y(258)), "Loading configuration...", font=f_small,
            fill=(143, 143, 143), anchor="ma")
