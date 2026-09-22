@@ -956,9 +956,10 @@ size_t Tab::flow_variant_view_index() const
 
 bool Tab::flow_variant_both_allowed() const
 {
+    // Both is always offered for non-printer domains as soon as more than one
+    // flow mode exists; the filament's *_flow_support key no longer gates it.
     return m_flow_variant_view
         && m_flow_variant_view->domain != ConfigFlowDomain::Printer
-        && !m_flow_variant_view->offers_unpersisted_high_flow
         && m_flow_variant_view->modes.size() > 1;
 }
 
@@ -980,6 +981,11 @@ void Tab::on_flow_variant_segment_selected(int index)
     if (flow_variant_both_allowed() && index == both_index) {
         if (m_flow_variant_view->edit_scope == FlowVariantView::EditScope::Both)
             return;
+        // Filament tab: persist filament_flow_support before entering Both on a
+        // filament that does not carry the key yet, so the dual-write target
+        // exists. ensure_flow_support_mode is a no-op when the key is present.
+        if (m_config && m_flow_variant_view->domain == ConfigFlowDomain::Filament)
+            ensure_flow_support_mode(*m_config, m_flow_variant_view->domain, FLOW_MODE_HIGH_FLOW);
         if (!enter_flow_variant_both()) {
             if (m_flow_variant_view->selector)
                 m_flow_variant_view->selector->setSelected(flow_variant_selector_index());
@@ -1103,19 +1109,16 @@ void Tab::refresh_flow_variant_view()
 
     // Filament tab on a high-flow-capable machine: always offer the High flow
     // segment, even when the filament key doesn't carry it yet. The key is
-    // persisted when the user switches to High flow (see
+    // persisted when the user switches to High flow or enters Both (see
     // on_flow_variant_segment_selected); until then the page keeps showing the
     // Standard slot, exactly like a filament without the key does today.
-    m_flow_variant_view->offers_unpersisted_high_flow = false;
     if (m_flow_variant_view->domain == ConfigFlowDomain::Filament &&
         std::find(modes.begin(), modes.end(), FLOW_MODE_HIGH_FLOW) == modes.end() &&
         FlowType::printer_supports_high_flow()) {
         modes.emplace_back(FLOW_MODE_HIGH_FLOW);
-        m_flow_variant_view->offers_unpersisted_high_flow = true;
     }
 
-    if (std::find(modes.begin(), modes.end(), m_flow_variant_view->selected_mode) == modes.end() ||
-        (m_flow_variant_view->offers_unpersisted_high_flow && m_flow_variant_view->selected_mode == FLOW_MODE_HIGH_FLOW))
+    if (std::find(modes.begin(), modes.end(), m_flow_variant_view->selected_mode) == modes.end())
     {
         const auto standard = std::find(modes.begin(), modes.end(), FLOW_MODE_STANDARD);
         m_flow_variant_view->selected_mode = (standard == modes.end()) ? modes.front() : *standard;
@@ -1130,37 +1133,35 @@ void Tab::refresh_flow_variant_view()
         destroy_flow_variant_header_controls();
 
         m_flow_variant_view->modes = modes;
-        // The brackets are part of the localized label (ASCII "[High flow]" by
-        // default, CJK "【高流量】" in Chinese), so the glyph choice lives in the
-        // translation catalog rather than being switched on the UI language here.
         std::vector<wxString> labels;
         labels.reserve(modes.size() + 1);
         for (const std::string& mode : modes)
         {
             if (mode == FLOW_MODE_STANDARD)
-                labels.emplace_back(_L("[Standard flow]"));
+                labels.emplace_back(_L("Standard flow"));
             else if (mode == FLOW_MODE_HIGH_FLOW)
-                labels.emplace_back(_L("[High flow]"));
+                labels.emplace_back(_L("High flow"));
             else
             {
                 std::string label = mode;
                 std::replace(label.begin(), label.end(), '_', ' ');
-                labels.emplace_back(wxString("[") + from_u8(label) + "]");
+                labels.emplace_back(from_u8(label));
             }
         }
         if (flow_variant_both_allowed())
-            labels.emplace_back(_L("[Both]"));
+            labels.emplace_back(_L("Both"));
 
         wxWindow* header = m_parent->get_page_header();
         auto* host = new wxPanel(header, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxBORDER_NONE);
         host->SetBackgroundColour(header->GetBackgroundColour());
         auto* host_sizer = new wxBoxSizer(wxHORIZONTAL);
 
-        // Plain style = borderless teal/grey text (Figma), hosted in the frozen page header.
+        // Pill style = dark rounded container with a filled green selected
+        // segment (Bambu-style segmented control), hosted in the frozen page header.
         m_flow_variant_view->selector = new SegmentedToggle(host,
                                                             labels,
                                                             flow_variant_selector_index(),
-                                                            SegmentedToggle::Style::Plain);
+                                                            SegmentedToggle::Style::Pill);
         host_sizer->Add(m_flow_variant_view->selector, 0, wxALIGN_CENTER_VERTICAL);
 
         auto* copy_btn = new Button(host, _L("Copy Standard to High flow"));

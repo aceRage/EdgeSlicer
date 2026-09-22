@@ -162,6 +162,28 @@ TEST_CASE("ensure_flow_support_mode maps domains to their support keys", "[FlowV
             std::vector<std::string>{FLOW_MODE_STANDARD});
 }
 
+TEST_CASE("Both-click path: keyless filament gets High flow injected before entering Both", "[FlowVariantEdit]")
+{
+    // Simulates on_flow_variant_segment_selected's Both branch on a filament
+    // whose filament_flow_support does not carry high_flow yet: ensure first,
+    // so the Both-enter differ check then sees a well-defined High-flow slot.
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_key_value("filament_max_volumetric_speed", new ConfigOptionFloats{12.0});
+
+    REQUIRE(ensure_flow_support_mode(config, ConfigFlowDomain::Filament, FLOW_MODE_HIGH_FLOW));
+    REQUIRE(config.option<ConfigOptionStrings>("filament_flow_support")->values ==
+            std::vector<std::string>{FLOW_MODE_STANDARD, FLOW_MODE_HIGH_FLOW});
+
+    // The variant vectors still hold a single (Standard) slot; the differ check
+    // the Both-enter dialog gates on reads the missing High-flow slot as the
+    // Standard slot, so no overwrite prompt appears.
+    REQUIRE_FALSE(flow_variant_slots_differ(config, ConfigFlowDomain::Filament, FLOW_MODE_STANDARD, FLOW_MODE_HIGH_FLOW));
+
+    // Copying Standard onto High flow then materializes the second slot.
+    REQUIRE(copy_flow_variant_slot(config, ConfigFlowDomain::Filament, FLOW_MODE_STANDARD, FLOW_MODE_HIGH_FLOW));
+    REQUIRE(config.option<ConfigOptionFloats>("filament_max_volumetric_speed")->values == std::vector<double>{12.0, 12.0});
+}
+
 TEST_CASE("copy_flow_variant_slot visits every filament_flow_variant_options key", "[FlowVariantEdit]")
 {
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();

@@ -33,6 +33,18 @@ constexpr const char* g_plainSelectedFg   = "#009688"; // teal
 constexpr const char* g_plainUnselectedFg = "#6B6B6B"; // grey
 constexpr int g_plainButtonGap = 8; // DIP — gap between text options
 
+// Pill style (Bambu-style segmented control): rounded container slightly offset
+// from the page background; the selected segment is a solid accent-filled
+// rounded button, inactive segments are plain grey text with a subtle hover
+// fill. All colors go through the StateColor dark map (see StateColor.cpp).
+constexpr int g_pillContainerRadius   = 14; // DIP — fully rounded container
+constexpr int g_pillButtonMinHeight   = 24; // DIP — container 28 minus 2x margin
+constexpr int g_pillButtonRadius      = 12; // DIP — rounded selected button
+constexpr int g_pillButtonMarginV     = 2;  // DIP — vertical inset inside the container
+constexpr const char* g_pillContainerBg = "#E9E9E9"; // -> #34343A in dark mode
+constexpr const char* g_pillHoverBg     = "#DDDDDD"; // -> #40404A in dark mode
+constexpr const char* g_pillSelectedFg  = "#FEFEFE"; // near-white in both modes
+
 } // namespace
 
 namespace Slic3r
@@ -66,17 +78,32 @@ SegmentedToggle::SegmentedToggle(wxWindow* parent,
     auto* outerSizer = new wxBoxSizer(wxVERTICAL);
 
     const bool plain = (m_style == Style::Plain);
+    const bool pill  = (m_style == Style::Pill);
 
-    // Boxed style parents the buttons inside a rounded container; plain style
-    // has no container and lays the text buttons directly on the panel.
+    // Pill style re-colors the buttons below (before the first applyButtonColors).
+    if (pill) {
+        const wxColour containerColour(g_pillContainerBg);
+        m_unselectedBg = StateColor(
+            std::pair(wxColour(g_pillHoverBg), (int)StateColor::Hovered),
+            std::pair(containerColour, (int)StateColor::Normal));
+        m_unselectedFg = StateColor(std::pair(wxColour(g_unselectedFg), (int)StateColor::Normal));
+        m_selectedBg   = StateColor(
+            std::pair(wxColour(g_selectedBg), (int)StateColor::Pressed),
+            std::pair(wxColour(g_selectedBg), (int)StateColor::Hovered),
+            std::pair(wxColour(g_selectedBg), (int)StateColor::Normal));
+        m_selectedFg   = StateColor(std::pair(wxColour(g_pillSelectedFg), (int)StateColor::Normal));
+    }
+
+    // Boxed/Pill styles parent the buttons inside a rounded container; plain
+    // style has no container and lays the text buttons directly on the panel.
     wxWindow* btnParent = this;
     if (!plain) {
         m_pContainer = new StaticBox(this, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxBORDER_NONE);
-        m_pContainer->SetCornerRadius(FromDIP(g_containerRadius));
+        m_pContainer->SetCornerRadius(FromDIP(pill ? g_pillContainerRadius : g_containerRadius));
         m_pContainer->SetBorderWidth(0);
         m_pContainer->SetMinSize(wxSize(-1, FromDIP(g_containerHeight)));
         m_pContainer->SetBackgroundColor(
-            StateColor(std::pair(wxColour(g_containerBg), (int)StateColor::Normal)));
+            StateColor(std::pair(wxColour(pill ? g_pillContainerBg : g_containerBg), (int)StateColor::Normal)));
         btnParent = m_pContainer;
     }
 
@@ -96,9 +123,9 @@ SegmentedToggle::SegmentedToggle(wxWindow* parent,
             btn->SetPaddingSize(wxSize(0, 0));
             btn->SetCornerRadius(0);
         } else {
-            btn->SetMinSize(wxSize(FromDIP(g_buttonMinWidth), FromDIP(g_buttonMinHeight)));
+            btn->SetMinSize(wxSize(FromDIP(g_buttonMinWidth), FromDIP(pill ? g_pillButtonMinHeight : g_buttonMinHeight)));
             btn->SetPaddingSize(wxSize(FromDIP(g_buttonPaddingW), FromDIP(g_buttonPaddingH)));
-            btn->SetCornerRadius(FromDIP(g_buttonRadius));
+            btn->SetCornerRadius(FromDIP(pill ? g_pillButtonRadius : g_buttonRadius));
             btn->SetFont(Label::Body_12);
         }
 
@@ -112,7 +139,7 @@ SegmentedToggle::SegmentedToggle(wxWindow* parent,
         if (plain)
             btnSizer->Add(btn, 0, wxALIGN_CENTER_VERTICAL);
         else
-            btnSizer->Add(btn, 1, wxEXPAND | wxTOP | wxBOTTOM, FromDIP(g_buttonMarginV));
+            btnSizer->Add(btn, 1, wxEXPAND | wxTOP | wxBOTTOM, FromDIP(pill ? g_pillButtonMarginV : g_buttonMarginV));
     }
 
     if (plain) {

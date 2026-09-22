@@ -23,7 +23,10 @@ public:
 
     // Boxed: pill container with a filled selected segment (default).
     // Plain: borderless text only; selected item is colored+bold, no fill/container.
-    enum class Style { Boxed, Plain };
+    // Pill: rounded container in the page background color; the selected segment
+    // is a solid filled rounded accent button, inactive segments are grey text
+    // with a subtle hover fill.
+    enum class Style { Boxed, Plain, Pill };
 
     SegmentedToggle(wxWindow* parent,
                     const std::vector<wxString>& options,

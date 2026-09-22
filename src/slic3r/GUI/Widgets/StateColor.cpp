@@ -67,6 +67,8 @@ static std::map<wxColour, wxColour> gDarkColors{
     {"#019687", "#00675B"}, // rgb(1, 150, 135)    Confirm button bg (near #009688)
     {"#26A69A", "#00675B"}, // rgb(38, 166, 154)   Default target/match color
     {"#FEFEFE", "#FEFEFE"}, // rgb(254, 254, 254)   Near-white text (segment btn selected, confirm btn)
+    {"#E9E9E9", "#34343A"}, // rgb(233, 233, 233)  Segmented pill container background
+    {"#DDDDDD", "#40404A"}, // rgb(221, 221, 221)  Segmented pill inactive-segment hover fill
 };
 
 std::tuple<double, double, double> StateColor::GetLAB(const wxColour& color) {
