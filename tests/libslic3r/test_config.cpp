@@ -650,12 +650,21 @@ TEST_CASE("CLI --align-to-y-axis is a misc bool whose default must stay implicit
         CHECK(config.opt_bool("align_to_y_axis"));
     }
     {
+        // Bare bool flag (no =value) deserializes as true, same as --allow-rotations.
+        auto [config, keys] = parse({"prog", "--align-to-y-axis"});
+        CHECK(std::find(keys.begin(), keys.end(), "align_to_y_axis") != keys.end());
+        REQUIRE(config.has("align_to_y_axis"));
+        CHECK(config.opt_bool("align_to_y_axis"));
+    }
+    {
         auto [config, keys] = parse({"prog"});
         CHECK(std::find(keys.begin(), keys.end(), "align_to_y_axis") == keys.end());
         CHECK_FALSE(config.has("align_to_y_axis"));
         // setup() fills CLI defaults afterwards; that must not count as "given".
+        // CLI::run uses m_given_option_keys (from opt_order), not config.has().
         config.option("align_to_y_axis", true);
         REQUIRE(config.has("align_to_y_axis"));
         CHECK_FALSE(config.opt_bool("align_to_y_axis"));
+        CHECK(std::find(keys.begin(), keys.end(), "align_to_y_axis") == keys.end());
     }
 }
