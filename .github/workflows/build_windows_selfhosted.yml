@@ -300,6 +300,14 @@ jobs:
       - name: Build dependencies (only when stale)
         if: steps.deps.outputs.refresh == 'true'
         shell: cmd
+        env:
+          # The shared dep tree's source checkouts were cloned by the VM's admin account, and the
+          # runner is NETWORK SERVICE, so git refuses to work in them ("detected dubious
+          # ownership" in dep_Sentry's submodule update, run 35804726225). Trust them for this
+          # step's processes only: nothing is written to any git config.
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: safe.directory
+          GIT_CONFIG_VALUE_0: '*'
         run: |
           call "%VCVARS%" || exit /b 1
           set "PATH=%CMAKE_DIR%;%PERL_DIR%;%PATH%"
