@@ -1834,6 +1834,15 @@ wxWindow* PreferencesDialog::create_general_page()
     auto title_downloads = create_item_title(_L("Downloads"), page, _L("Downloads"));
     auto item_downloads = create_item_downloads(page,50,"download_path");
 
+    // "Export & Open in Bambu Studio" looks for an installed Bambu Studio automatically
+    // (registry / file association / default path); this lets a user whose install it cannot
+    // find point at bambu-studio.exe directly. Left blank, discovery runs as usual.
+    auto title_bambu_studio = create_item_title(_L("Bambu Studio"), page, _L("Bambu Studio"));
+    auto item_bambu_studio_path = create_item_text_input(_L("Bambu Studio path"), page,
+        _L("Only needed if \"Export & Open in Bambu Studio\" cannot find your Bambu Studio installation automatically. "
+           "Full path to bambu-studio.exe (Windows), the BambuStudio.app bundle (macOS), or the executable (Linux)."),
+        "bambu_studio_path");
+
     //dark mode
 #ifdef _WIN32
     auto title_darkmode = create_item_title(_L("Dark Mode"), page, _L("Dark Mode"));
@@ -1944,6 +1953,9 @@ wxWindow* PreferencesDialog::create_general_page()
 
     sizer_page->Add(title_downloads, 0, wxTOP| wxEXPAND, FromDIP(20));
     sizer_page->Add(item_downloads, 0, wxEXPAND, FromDIP(3));
+
+    sizer_page->Add(title_bambu_studio, 0, wxTOP | wxEXPAND, FromDIP(20));
+    sizer_page->Add(item_bambu_studio_path, 0, wxTOP, FromDIP(3));
 
 #ifdef _WIN32
     sizer_page->Add(title_darkmode, 0, wxTOP | wxEXPAND, FromDIP(20));
