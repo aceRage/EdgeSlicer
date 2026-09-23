@@ -39,6 +39,7 @@ add_executable(${_TEST_NAME}_tests
 	../fff_print/test_data.cpp
 	test_identity_filament_map.cpp
 	test_bambu_extruder_map.cpp
+	test_bambu_dual_nozzle_sync.cpp
 	test_export_stl_part.cpp
 	test_elephant_foot_compensation.cpp
 	test_fill_bed_pack.cpp
