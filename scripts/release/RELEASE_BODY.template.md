@@ -1,6 +1,7 @@
 <!--
   Release notes template for EdgeSlicer GitHub releases (gh release create --notes-file).
-  Copy to RELEASE_BODY.md in the release output folder and fill in.
+  Copy to docs/release-notes/<version>.md (one file per release, committed) and fill in;
+  that file is the --notes-file for gh release create.
 
   The block between the two update-notice comments is what the in-app "New version of
   EdgeSlicer" dialog shows (as plain text: headings, bold and links are flattened, "- "
