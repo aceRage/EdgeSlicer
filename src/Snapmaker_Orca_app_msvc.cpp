@@ -8,6 +8,7 @@
 #include <wchar.h>
 #include <shlobj.h>
 #include "sentry_wrapper/SentryWrapper.hpp"
+#include "common_func/common_func.hpp"
 
 #ifdef SLIC3R_GUI
 extern "C" {
@@ -226,7 +227,13 @@ int wmain(int argc, wchar_t** argv)
     // the application will be killed even if "Ignore" button is pressed.
     _set_error_mode(_OUT_TO_MSGBOX);
 
+    // Before initSentry(): it reads the crash-report preference from the EdgeSlicer.conf that
+    // --datadir points at.
+    common::set_datadir_from_command_line(argc, argv);
     initSentry();
+    // argv above is CommandLineToArgvW's own copy; blank secret option values in the original
+    // (the one a crash minidump carries). Nothing reads GetCommandLineW() after this.
+    common::mask_secret_args_in_process_command_line();
     auto        soft_start_time = get_time_timestamp();        
 
     std::vector<wchar_t*> argv_extended;

@@ -1797,6 +1797,12 @@ void NotificationManager::push_notification(NotificationType type,
     push_notification_data({ type, level, duration, text, hypertext, callback }, timestamp);
 }
 
+void NotificationManager::push_crash_report_offer(const std::string& text, const std::string& hypertext, std::function<bool(wxEvtHandler*)> callback)
+{
+    close_notification_of_type(NotificationType::CrashReportOffer);
+    push_notification_data({ NotificationType::CrashReportOffer, NotificationLevel::ImportantNotificationLevel, 0, text, hypertext, callback }, 0);
+}
+
 void NotificationManager::push_delayed_notification(const NotificationType type, std::function<bool(void)> condition_callback, int64_t initial_delay, int64_t delay_interval)
 {
 	auto it = std::find_if(std::begin(basic_notifications), std::end(basic_notifications),

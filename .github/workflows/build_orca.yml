@@ -17,6 +17,9 @@ on:
         release:
           description: "Release version/tag for the build"
           value: ${{ jobs.build_orca.outputs.release }}
+        sentry_release:
+          description: "Sentry release name the app reports (edgeslicer@<Snapmaker_VERSION>)"
+          value: ${{ jobs.build_orca.outputs.sentry_release }}
 
 jobs:
   build_orca:
@@ -24,10 +27,15 @@ jobs:
     runs-on: ${{ inputs.os }}
     outputs:
       release: ${{ steps.set_release.outputs.release || steps.set_release_win.outputs.release }}
+      sentry_release: ${{ steps.set_release.outputs.sentry_release || steps.set_release_win.outputs.sentry_release }}
     env:
       date:
       ver:
       ver_pure:
+      # Opt-in crash reports (docs/privacy.md): the Sentry environment compiled into the app.
+      # "release" for the refs shipped builds come from, "ci" for everything else; local
+      # builds say "dev". The DSN itself is only handed to the two build steps below.
+      EDGESLICER_SENTRY_ENVIRONMENT: ${{ (startsWith(github.ref, 'refs/tags/') || startsWith(github.ref, 'refs/heads/ci/') || startsWith(github.ref, 'refs/heads/release/') || github.ref == 'refs/heads/main') && 'release' || 'ci' }}
 
     steps:
       - name: Checkout
@@ -74,20 +82,21 @@ jobs:
           $eventName = "${{ github.event_name }}"
           $prNumber = "${{ github.event.number }}"
 
+          # See the bash step above: the version number lives in the header now, not version.inc.
+          $versionContent = Get-Content src/common_func/common_func.hpp -Raw
+          if ($versionContent -match '#define\s+Snapmaker_VERSION\s+"(.*?)"') {
+              $verPure = $matches[1]
+          } else {
+              throw "could not read Snapmaker_VERSION from src/common_func/common_func.hpp"
+          }
           if ($eventName -eq 'pull_request') {
               $ver = "PR" + $prNumber
           } else {
-              # See the bash step above: the version number lives in the header now, not version.inc.
-              $versionContent = Get-Content src/common_func/common_func.hpp -Raw
-              if ($versionContent -match '#define\s+Snapmaker_VERSION\s+"(.*?)"') {
-                  $ver = $matches[1]
-              } else {
-                  throw "could not read Snapmaker_VERSION from src/common_func/common_func.hpp"
-              }
-              $ver = "V$ver"
+              $ver = "V$verPure"
           }
 
           echo "ver=$ver" | Out-File -Append -FilePath $env:GITHUB_ENV -Encoding utf8
+          echo "ver_pure=$verPure" | Out-File -Append -FilePath $env:GITHUB_ENV -Encoding utf8
           echo "date=$date" | Out-File -Append -FilePath $env:GITHUB_ENV -Encoding utf8
           echo "date: ${{ env.date }} version: ${{ env.ver }}"
         shell: pwsh
@@ -97,6 +106,7 @@ jobs:
         if: inputs.os != 'windows-2022'
         run: |
           echo "release=$ver" >> $GITHUB_OUTPUT
+          echo "sentry_release=edgeslicer@$ver_pure" >> $GITHUB_OUTPUT
         shell: bash
 
       - name: Set release output (Windows)
@@ -105,6 +115,7 @@ jobs:
         run: |
           $release = $env:ver
           Write-Output ("release=$release") | Out-File -Append -FilePath $env:GITHUB_OUTPUT -Encoding utf8
+          Write-Output ("sentry_release=edgeslicer@$env:ver_pure") | Out-File -Append -FilePath $env:GITHUB_OUTPUT -Encoding utf8
         shell: pwsh
 
 #   Mac
@@ -126,6 +137,9 @@ jobs:
       - name: Build slicer mac
         if: inputs.os == 'macos-14'
         working-directory: ${{ github.workspace }}
+        env:
+          # Compiled in for opt-in crash reports; empty without the secret (forks) = no uploads.
+          EDGESLICER_SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
         run: |
           ./build_release_macos.sh -s -n -x -a universal -t 10.15 -1
 
@@ -384,6 +398,8 @@ jobs:
         env:
           WindowsSdkDir: 'C:\Program Files (x86)\Windows Kits\10\'
           WindowsSDKVersion: '10.0.26100.0\'
+          # Compiled in for opt-in crash reports; empty without the secret (forks) = no uploads.
+          EDGESLICER_SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
         run: .\build_release_vs2022.bat slicer
 
       - name: Create installer Win
@@ -397,6 +413,19 @@ jobs:
         working-directory: ${{ github.workspace }}/build
         shell: cmd
         run: '"C:/Program Files/7-Zip/7z.exe" a -tzip EdgeSlicer_Windows_${{ env.ver }}_portable.zip ${{ github.workspace }}/build/Snapmaker_Orca'
+
+      # The crash handler's own symbols come from the deps tree; next to ours they let Sentry
+      # walk frames that pass through sentry.dll.
+      - name: Add Sentry/crashpad PDBs
+        if: inputs.os == 'windows-2022'
+        shell: pwsh
+        run: |
+          $bin = Join-Path "${{ github.workspace }}" 'deps/build/OrcaSlicer_dep/usr/local/bin'
+          foreach ($f in 'sentry.pdb', 'crashpad_handler.pdb', 'crashpad_wer.pdb') {
+            $src = Join-Path $bin $f
+            if (Test-Path -LiteralPath $src) { Copy-Item -LiteralPath $src -Destination "${{ github.workspace }}/build/src/Release/" -Force }
+            else { Write-Host "no $f in the deps tree" }
+          }
 
       - name: Pack PDB
         if: inputs.os == 'windows-2022'

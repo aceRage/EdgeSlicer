@@ -978,6 +978,9 @@ public:
     void page_state_notify_webview(wxWebView* webview, const std::string& state);
     void cache_notify(const std::string& key, const json& res);
     void user_update_privacy_notify(const bool& res);
+    // Crash reports (opt-in): the one-time offer after a crash, and the tester's crash switch.
+    void offer_crash_reports_after_crash();
+    void run_test_crash_if_asked();
 
 public:
     bool sm_disconnect_current_machine(bool need_reload_printerview = true);

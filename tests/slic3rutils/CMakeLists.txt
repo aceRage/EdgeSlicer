@@ -26,6 +26,10 @@ add_executable(${_TEST_NAME}_tests
     preset_quarantine_tests.cpp
     test_flow_variant_edit.cpp
     app_update_check_tests.cpp
+    sentry_scrub_tests.cpp
+    # The crash-report scrubber is plain C++ with no library of its own; the test compiles
+    # the very file the app does.
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../src/sentry_wrapper/SentryScrub.cpp
     )
 
 # The watcher's transition rule lives in libslic3r_gui, and reaching it pulls GUI_App and the

@@ -60,6 +60,15 @@ env:
   # Where the owner stages the closed-source payloads. Absent on a clean VM; each is probed
   # for so the same workflow ships them the moment they appear.
   SHIP_ROOT: 'C:\Dev\ship'
+  # Opt-in crash reports (docs/privacy.md). The Sentry environment compiled into the app:
+  # "release" for the refs shipped builds come from, "ci" otherwise (local builds say "dev").
+  # The DSN is handed only to the configure step; without the secret it is empty and the build
+  # can never upload anything.
+  EDGESLICER_SENTRY_ENVIRONMENT: ${{ (startsWith(github.ref, 'refs/tags/') || startsWith(github.ref, 'refs/heads/ci/') || startsWith(github.ref, 'refs/heads/release/') || github.ref == 'refs/heads/main') && 'release' || 'ci' }}
+  # sentry-cli for the symbol upload, pinned. To update: version and sha256 digest from
+  # https://api.github.com/repos/getsentry/sentry-cli/releases/tags/<version> (same pin as sentry_cli.yml).
+  SENTRY_CLI_VERSION: '3.8.0'
+  SENTRY_CLI_SHA256_WINDOWS: '2257cf6805a616f5c3ee291a549ebbba021190048b646adc006beb4e8cdef7fd'
 
 jobs:
   build:
@@ -334,6 +343,9 @@ jobs:
 
       - name: Configure and build the slicer
         shell: cmd
+        env:
+          # Compiled in for opt-in crash reports (CMake reads it at configure time).
+          EDGESLICER_SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
         run: |
           call "%VCVARS%" || exit /b 1
           set "PATH=%CMAKE_DIR%;%PERL_DIR%;%PATH%"
@@ -414,6 +426,92 @@ jobs:
           call "%VCVARS%" || exit /b 1
           set "PATH=%CMAKE_DIR%;%PATH%"
           cmake --build . --target install --config Release || exit /b 1
+
+      # ---- Sentry: debug symbols for opt-in crash reports ------------------------------------
+      # Skipped (green, with a notice) without the SENTRY_* secrets. A Sentry outage turns the
+      # upload step red but never fails the run: continue-on-error, and the packaging steps below
+      # do not depend on it.
+      - name: Sentry - check configuration
+        id: sentry
+        shell: powershell -NoProfile -ExecutionPolicy Bypass -Command ". '{0}'"
+        env:
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          SENTRY_ORG: ${{ secrets.SENTRY_ORG }}
+          SENTRY_PROJECT: ${{ secrets.SENTRY_PROJECT }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ([string]::IsNullOrEmpty($env:SENTRY_AUTH_TOKEN) -or [string]::IsNullOrEmpty($env:SENTRY_ORG) -or [string]::IsNullOrEmpty($env:SENTRY_PROJECT)) {
+            Write-Host "::notice::SENTRY_AUTH_TOKEN / SENTRY_ORG / SENTRY_PROJECT are not available - skipping the symbol upload."
+            "enabled=false" | Out-File -Append -FilePath $env:GITHUB_OUTPUT -Encoding ascii
+          } else {
+            "enabled=true" | Out-File -Append -FilePath $env:GITHUB_OUTPUT -Encoding ascii
+          }
+          # Must match what the app reports (src/sentry_wrapper/SentryWrapper.cpp).
+          "release=edgeslicer@$($env:ver_pure)" | Out-File -Append -FilePath $env:GITHUB_OUTPUT -Encoding ascii
+          Write-Host "Sentry release: edgeslicer@$($env:ver_pure), environment: $env:EDGESLICER_SENTRY_ENVIRONMENT"
+
+      - name: Sentry - upload debug symbols
+        if: steps.sentry.outputs.enabled == 'true'
+        continue-on-error: true
+        shell: powershell -NoProfile -ExecutionPolicy Bypass -Command ". '{0}'"
+        env:
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          SENTRY_ORG: ${{ secrets.SENTRY_ORG }}
+          SENTRY_PROJECT: ${{ secrets.SENTRY_PROJECT }}
+          SENTRY_RELEASE_NAME: ${{ steps.sentry.outputs.release }}
+          CREATE_RELEASE: ${{ startsWith(github.ref, 'refs/tags/') || startsWith(github.ref, 'refs/heads/ci/') || startsWith(github.ref, 'refs/heads/release/') || github.ref == 'refs/heads/main' }}
+        run: |
+          # Native tools write progress to stderr; with 'Stop' Windows PowerShell 5.1 would turn
+          # that into a terminating error. Exit codes are checked explicitly instead.
+          $ErrorActionPreference = 'Continue'
+
+          # sentry-cli: pinned release asset, sha256-verified before it is ever run.
+          $dir = Join-Path $env:RUNNER_TEMP 'sentry-cli'
+          New-Item -ItemType Directory -Path $dir -Force | Out-Null
+          $cli = Join-Path $dir 'sentry-cli.exe'
+          $url = "https://github.com/getsentry/sentry-cli/releases/download/$($env:SENTRY_CLI_VERSION)/sentry-cli-Windows-x86_64.exe"
+          Write-Host "downloading $url"
+          & curl.exe -sL --fail --retry 3 --max-time 300 -o $cli $url
+          if ($LASTEXITCODE -ne 0) { Write-Host "::warning::could not download sentry-cli (curl $LASTEXITCODE)"; exit 1 }
+          $got = (Get-FileHash -LiteralPath $cli -Algorithm SHA256).Hash.ToLower()
+          if ($got -ne $env:SENTRY_CLI_SHA256_WINDOWS) {
+            Remove-Item -LiteralPath $cli -Force
+            Write-Host "::warning::sentry-cli sha256 mismatch (got $got) - not running it"
+            exit 1
+          }
+          & $cli --version
+
+          # What Sentry needs to symbolicate a minidump from this build: our PE files (unwind
+          # tables) and PDBs (names, lines), plus the crash handler's. Nothing third-party.
+          $stage = Join-Path $env:RUNNER_TEMP 'sentry-symbols'
+          if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }
+          New-Item -ItemType Directory -Path $stage -Force | Out-Null
+          $release  = Join-Path $env:GITHUB_WORKSPACE 'build\src\Release'
+          $portable = Join-Path $env:GITHUB_WORKSPACE 'build\Snapmaker_Orca'
+          $depsBin  = Join-Path $env:SHARED_DEPS_ROOT 'OrcaSlicer_dep\usr\local\bin'
+          $files = @(
+            (Join-Path $release 'EdgeSlicer.exe'), (Join-Path $release 'EdgeSlicer.dll'),
+            (Join-Path $release 'EdgeSlicer.pdb'), (Join-Path $release 'EdgeSlicer_app.pdb'),
+            (Join-Path $portable 'sentry.dll'), (Join-Path $portable 'crashpad_handler.exe'), (Join-Path $portable 'crashpad_wer.dll'),
+            (Join-Path $depsBin 'sentry.pdb'), (Join-Path $depsBin 'crashpad_handler.pdb'), (Join-Path $depsBin 'crashpad_wer.pdb')
+          )
+          foreach ($f in $files) {
+            if (Test-Path -LiteralPath $f) { Copy-Item -LiteralPath $f -Destination $stage -Force; Write-Host "staged $f" }
+            else { Write-Host "not found: $f" }
+          }
+
+          $status = 0
+          if ($env:CREATE_RELEASE -eq 'true') {
+            & $cli releases new $env:SENTRY_RELEASE_NAME
+            if ($LASTEXITCODE -ne 0) { Write-Host "::warning::sentry-cli releases new failed"; $status = 1 }
+          }
+          & $cli --log-level=info debug-files upload $stage
+          if ($LASTEXITCODE -ne 0) { Write-Host "::warning::sentry-cli debug-files upload failed - crash reports from this build will not symbolicate until its symbols are uploaded"; $status = 1 }
+          if ($env:CREATE_RELEASE -eq 'true') {
+            & $cli releases finalize $env:SENTRY_RELEASE_NAME
+            if ($LASTEXITCODE -ne 0) { Write-Host "::warning::sentry-cli releases finalize failed"; $status = 1 }
+          }
+          exit $status
 
       # Skipped when the NSIS step could not obtain a verified installer. Everything else
       # (portable zip, tests, sums) still ships, so a SourceForge outage costs the installer

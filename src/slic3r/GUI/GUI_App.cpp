@@ -1296,6 +1296,65 @@ std::vector<std::string> GUI_App::split_str(std::string src, std::string separat
 // post_init(). A migration happens at most once in the life of an install.
 static Slic3r::DataDirMigrationResult g_datadir_migration;
 
+// Crash reports are opt-in and off by default (docs/privacy.md). The one time EdgeSlicer asks is
+// the start after a crash the handler caught: a notification, nothing modal, shown once per
+// install and never again whatever the answer. Closing it is "no"; Preferences > General >
+// Privacy is where the choice lives from then on.
+void GUI_App::offer_crash_reports_after_crash()
+{
+    // A hidden, hub-managed instance has nobody in front of it: leave the crash marker for the
+    // visible one.
+    if (m_hub_managed || !is_editor() || plater_ == nullptr)
+        return;
+    const bool crashed = sentryCrashedLastRun(/* clear */ true);
+    if (!crashed || !sentryCrashReportsAvailable() || app_config->get_bool("send_crash_reports") ||
+        app_config->get_bool("crash_reports_offered"))
+        return;
+    app_config->set_bool("crash_reports_offered", true);
+    app_config->save(); // once means once, even if this session crashes too
+
+    const std::string text = _u8L("EdgeSlicer closed unexpectedly last time. Send crash reports to help fix crashes like this? "
+                                  "A report holds the crash stack trace, the app version, your operating system and recent "
+                                  "warning lines of the app log, with IP addresses, host names, serial numbers, access codes, "
+                                  "tokens, e-mail addresses and user names removed. Nothing is sent unless you agree; "
+                                  "Preferences > General > Privacy has the details and the switch.");
+    plater_->get_notification_manager()->push_crash_report_offer(text, _u8L("Send crash reports from now on"), [this](wxEvtHandler*) {
+        // Not from inside the notification's own render/click pass.
+        CallAfter([this] {
+            app_config->set_bool("send_crash_reports", true);
+            app_config->save();
+            setSentryUserConsent(true);
+            BOOST_LOG_TRIVIAL(warning) << "crash reports switched on from the after-crash offer";
+            if (plater_ != nullptr)
+                plater_->get_notification_manager()->push_notification(
+                    _u8L("Crash reports are on. Preferences > General > Privacy turns them off again."));
+        });
+        return true;
+    });
+}
+
+// EDGESLICER_TEST_CRASH=1 crashes the app on purpose about 3 s after start, to test crash
+// reporting end to end (docs/privacy.md, "Testing crash reports"). It first logs a few lines
+// full of FAKE personal data, so the report's breadcrumbs show the scrubber at work. Not a user
+// feature: nothing sets the variable but a tester, and it does nothing without it.
+void GUI_App::run_test_crash_if_asked()
+{
+    wxString v;
+    if (!wxGetEnv("EDGESLICER_TEST_CRASH", &v) || v.IsEmpty() || v == "0")
+        return;
+    BOOST_LOG_TRIVIAL(warning) << "EDGESLICER_TEST_CRASH is set: crashing on purpose in 3 s to test crash reporting";
+    BOOST_LOG_TRIVIAL(warning) << "[crash-test] Bambu MQTT connect ssl://bblp:12345678@192.168.1.23:8883 dev_id=01P00A451601234 access_code=12345678";
+    BOOST_LOG_TRIVIAL(warning) << "[crash-test] OctoPrint POST http://octopi.local:5000/api/files/local X-Api-Key: 0123456789ABCDEF0123456789ABCDEF";
+    BOOST_LOG_TRIVIAL(error) << "[crash-test] FlashForge {\"serialNumber\":\"SNMQRE9400123\",\"checkCode\":\"a1b2c3d4\"} at 192.168.1.77:8898";
+    BOOST_LOG_TRIVIAL(error) << R"([crash-test] hub --hub-token 3f9a2b7c1d0e4f5a6b7c8d9e0f1a2b3c for alice@example.com, data C:\Users\Alice\AppData\Roaming\EdgeSlicer)";
+    flush_logs();
+    std::thread([] {
+        std::this_thread::sleep_for(std::chrono::seconds(3));
+        volatile int* p = nullptr;
+        *p = 42; // the test crash (access violation / SIGSEGV)
+    }).detach();
+}
+
 void GUI_App::post_init()
 {
     assert(initialized());
@@ -1463,6 +1522,13 @@ void GUI_App::post_init()
         plater_->get_notification_manager()->push_hint_notification(false);
     }
 #endif
+
+    // Crash reports: follow the saved preference (initSentry() read the same EdgeSlicer.conf
+    // before the window existed; this keeps the two in step), offer them once after a crash,
+    // and honour a tester's EDGESLICER_TEST_CRASH.
+    setSentryUserConsent(app_config->get_bool("send_crash_reports"));
+    offer_crash_reports_after_crash();
+    run_test_crash_if_asked();
 
     // Always: the tables shipped under <resources>/hms and cached under <datadir>/hms answer
     // offline, and an owner who has not finished the setup wizard is exactly the owner most
@@ -2821,6 +2887,13 @@ void GUI_App::init_app_config()
 #else
     set_log_path_and_level(log_filename, 3);
 #endif
+    // Opt-in crash reports carry the last warning/error lines of this log as breadcrumbs. The
+    // callee drops everything unless the user has switched crash reports on, and scrubs
+    // personal data out of what it keeps (sentry_wrapper/SentryScrub.cpp). Registered only here,
+    // next to the file sink: a sink of its own in a console CLI run would switch off Boost.Log's
+    // default console output.
+    Slic3r::set_log_observer([](int severity, const std::string& message) { Slic3r::sentryAddLogBreadcrumb(severity, message); },
+                             3 /* boost::log::trivial::warning */);
 
     //BBS: remove GCodeViewer as seperate APP logic
 	if (!app_config)
@@ -8334,10 +8407,9 @@ void GUI_App::cache_notify(const std::string& key, const json& res)
 
 void GUI_App::user_update_privacy_notify(const bool& res)
 {
+    // Only the flutter home page's flag. Crash-report consent is its own preference
+    // (send_crash_reports); the old CEIP flag no longer decides anything about crash reports.
     set_privacy_policy(res);
-    // Ultra: the same checkbox has to reach sentry's consent flag, or crashpad would keep
-    // uploading dumps after the user opted out. It is a no-op unless a DSN is configured.
-    setSentryUserConsent(res);
 
     json data;
 

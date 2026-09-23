@@ -200,6 +200,18 @@ Both Windows packages include the Bambu network plug-in (UltraNet); the Linux an
 
 Settings, presets and the hub's state live in `%APPDATA%\EdgeSlicer` (`EdgeSlicer.conf`). The fork has been renamed twice — Snapmaker_Orca → UltraOne → EdgeSlicer — so on first run it **copies** (never moves) the newest legacy data directory it finds into the new one, once, rewriting absolute paths in the config. On Windows it also carries over the embedded browser's profile (`%LOCALAPPDATA%\<name>\EBWebView`), which holds the Stream tab's layout and your Snapmaker account session. Older URL schemes, file associations and uninstall keys stay recognised, so links and shortcuts made under the old names keep working.
 
+### Privacy and crash reports
+
+EdgeSlicer sends no usage statistics. It can send **crash reports**, and they are **opt-in**: *Preferences → General → Privacy → Send crash reports*, off by default. The only time EdgeSlicer asks is once, as a notification, on the first start after a crash. Turning the setting off takes effect at once.
+
+A crash report holds:
+- the crash stack trace (a minidump);
+- the app version;
+- your operating system;
+- the last warning and error lines of the app log.
+
+Those log lines are scrubbed before they are stored. IP addresses, host names, printer serial numbers, access codes, passwords, tokens, API keys, e-mail addresses and the user name in file paths are all replaced. Log files, configs, projects and presets are never sent. Builds you compile yourself, forks and the Linux builds have no crash-report destination and never send anything. The details, including exactly what a minidump carries, are in [docs/privacy.md](docs/privacy.md).
+
 ---
 
 ## Build from source
