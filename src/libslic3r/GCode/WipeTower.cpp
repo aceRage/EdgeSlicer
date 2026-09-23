@@ -1419,11 +1419,11 @@ WipeTower::ToolChangeResult WipeTower::tool_change(size_t tool, bool extrude_per
             writer.travel(Vec2f(0, 0));
             writer.travel(initial_position);
         }
-        const bool interface = planned != nullptr && planned->interface;
-        if (interface)
+        const bool at_interface = planned != nullptr && planned->is_interface;
+        if (at_interface)
             interface_before_wipe(writer, *planned);
         toolchange_Wipe(writer, cleaning_box, wipe_length);     // Wipe the newly loaded filament until the end of the assigned wipe area.
-        if (interface)
+        if (at_interface)
             interface_after_wipe(writer, *planned);
         writer.append(";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Wipe_Tower_End) + "\n");
         ++ m_num_tool_changes;
@@ -2517,9 +2517,9 @@ void WipeTower::plan_interfaces()
                     break;
                 }
             // The tower's first layer is never an interface (Bambu Studio: "first layer never be contact").
-            tc.interface = layer_id != m_first_layer_idx && layer.depth >= m_perimeter_width &&
+            tc.is_interface = layer_id != m_first_layer_idx && layer.depth >= m_perimeter_width &&
                            TowerInterface::triggers(m_interface.trigger, m_filpar[tc.old_tool].kind, m_filpar[tc.new_tool].kind);
-            tc.run_in    = tc.interface && run_in && m_filpar[tc.new_tool].run_in_distance > EPSILON;
+            tc.run_in    = tc.is_interface && run_in && m_filpar[tc.new_tool].run_in_distance > EPSILON;
             if (tc.run_in) {
                 // The purge starts one perimeter in from the tower's left side and runs to the right,
                 // so the run-in comes in from the left along its first line.

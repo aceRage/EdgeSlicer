@@ -320,7 +320,7 @@ private:
 			float wipe_volume_total;
             // Tower interface: whether the trigger picks this change, and where its run-in crosses
             // the outer wall (tower-local; x is 0 or the tower width). Set by plan_interfaces().
-            bool  interface = false;
+            bool  is_interface = false;
             bool  run_in    = false;
             Vec2f run_in_cross = Vec2f::Zero();
             ToolChange(size_t old, size_t newtool, float depth=0.f, float ramming_depth=0.f, float fwl=0.f, float wv=0.f)

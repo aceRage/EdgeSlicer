@@ -1779,11 +1779,11 @@ WipeTower::ToolChangeResult WipeTower2::emit_planned_tool_change(const WipeTower
         toolchange_Change(writer, tool, m_filpar[tool].material); // Change the tool, set a speed override for soluble and flex materials.
         toolchange_Load(writer, cleaning_box);
         writer.travel(writer.x(), writer.y() - m_perimeter_width); // cooling and loading were done a bit down the road
-        const bool interface = tool_change != nullptr && tool_change->interface;
-        if (interface)
+        const bool at_interface = tool_change != nullptr && tool_change->is_interface;
+        if (at_interface)
             interface_before_wipe(writer, *tool_change);
         toolchange_Wipe(writer, cleaning_box, wipe_volume); // Wipe the newly loaded filament until the end of the assigned wipe area.
-        if (interface)
+        if (at_interface)
             interface_after_wipe(writer, *tool_change);
         writer.append(";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Wipe_Tower_End) + "\n");
         ++m_num_tool_changes;
@@ -2983,9 +2983,9 @@ void WipeTower2::plan_interfaces()
     for (size_t layer_id = 0; layer_id < m_plan.size(); ++layer_id)
         for (WipeTowerInfo::ToolChange &tc : m_plan[layer_id].tool_changes) {
             // The tower's first layer is never an interface (Bambu Studio: "first layer never be contact").
-            tc.interface = m_interface.any() && layer_id != m_first_layer_idx &&
+            tc.is_interface = m_interface.any() && layer_id != m_first_layer_idx &&
                            TowerInterface::triggers(m_interface.trigger, m_filpar[tc.old_tool].kind, m_filpar[tc.new_tool].kind);
-            tc.run_in    = tc.interface && m_interface.run_in && m_use_gap_wall && m_filpar[tc.new_tool].run_in_distance > EPSILON;
+            tc.run_in    = tc.is_interface && m_interface.run_in && m_use_gap_wall && m_filpar[tc.new_tool].run_in_distance > EPSILON;
             for (size_t f : { tc.old_tool, tc.new_tool })
                 if (std::find(filaments.begin(), filaments.end(), (unsigned int) f) == filaments.end())
                     filaments.push_back((unsigned int) f);
