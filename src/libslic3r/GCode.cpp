@@ -7932,9 +7932,55 @@ void GCode::apply_print_config(const PrintConfig& print_config)
 #endif
 }
 
+// Ultra (dual-nozzle header): the "; filament_nozzle_map" / "; filament_volume_map" CONFIG_BLOCK lines
+// for a plate the filament->nozzle grouping ran on, taken from that grouping result - the other half of
+// BambuStudio's Print::update_filament_maps_to_config (Print.cpp:2840, static-map branch called from
+// ToolOrdering.cpp:2804): the logical nozzle id per filament (= slice_info <filament group_id>) and the
+// volume type of the nozzle each USED filament landed on (unused filaments keep their config value).
+// ToolOrdering already writes filament_map; without this the other two lines printed the stale project
+// values (e.g. filament_nozzle_map 1,0,0,... while filament_map put every filament on the right rack).
+//
+// Derived here, at header time, rather than written into the Print's configs from ToolOrdering: the fork's
+// Print::apply has no BambuStudio-style mask for these keys and the GUI does not write them back to the
+// project (it does for filament_map), so a config write would make every later apply() see a diff -
+// a full re-slice, or an export-only re-run that re-applied the stale values to the header. Nothing in
+// G-code generation reads either key, so the header is the only consumer to fix. Covers every grouping
+// mode (auto, match, manual): they all store their result on the Print the same way.
+// Gated like the grouping itself (ToolOrdering::reorder_extruders_for_minimum_flush_volume): a machine
+// with distinct extruder variants and no sequential print, so a result left on the Print by an earlier
+// slice of another printer or plate arrangement is never used.
+static bool grouping_header_maps(const Print& print, std::vector<int>& nozzle_map, std::vector<int>& volume_map)
+{
+    auto group_result = print.get_layered_nozzle_group_result();
+    if (!group_result || group_result->is_support_dynamic_nozzle_map())
+        return false;
+    int        extruder_count = 0;
+    const bool is_sequential  = print.config().print_sequence == PrintSequence::ByObject && print.objects().size() > 1;
+    if (is_sequential || !const_cast<DynamicPrintConfig&>(print.full_print_config()).support_different_extruders(extruder_count))
+        return false;
+
+    const DynamicPrintConfig& cfg = print.full_print_config();
+    const auto*               fm  = cfg.option<ConfigOptionInts>("filament_map");
+    const size_t              num_filaments = fm ? fm->values.size() : 0;
+    nozzle_map = group_result->get_nozzle_map();
+    if (nozzle_map.empty() || num_filaments == 0)
+        return false;
+
+    const auto* vm_opt = cfg.option<ConfigOptionInts>("filament_volume_map");
+    volume_map         = vm_opt ? vm_opt->values : std::vector<int>();
+    volume_map.resize(num_filaments, int(NozzleVolumeType::nvtStandard));
+    const std::vector<int> grouped_volumes = group_result->get_volume_map();
+    for (unsigned int f : group_result->get_used_filaments())
+        if (f < volume_map.size() && f < grouped_volumes.size())
+            volume_map[f] = grouped_volumes[f];
+    return true;
+}
+
 void GCode::append_full_config(const Print& print, std::string& str)
 {
     const DynamicPrintConfig& cfg = print.full_print_config();
+    std::vector<int> grouped_nozzle_map, grouped_volume_map;
+    const bool       use_grouped_maps = grouping_header_maps(print, grouped_nozzle_map, grouped_volume_map);
     // Sorted list of config keys, which shall not be stored into the G-code. Initializer list.
     static const std::set<std::string_view> banned_keys({"compatible_printers"sv, "compatible_prints"sv, "print_host"sv,
                                                          "print_host_webui"sv, "printhost_apikey"sv, "printhost_cafile"sv,
@@ -7949,6 +7995,10 @@ void GCode::append_full_config(const Print& print, std::string& str)
             }
             if (key == "extruder_colour")
                 ss << "; " << key << " = " << cfg.opt_serialize("filament_colour") << "\n";
+            else if (use_grouped_maps && key == "filament_nozzle_map")
+                ss << "; " << key << " = " << ConfigOptionInts(grouped_nozzle_map).serialize() << "\n";
+            else if (use_grouped_maps && key == "filament_volume_map")
+                ss << "; " << key << " = " << ConfigOptionInts(grouped_volume_map).serialize() << "\n";
             else
                 ss << "; " << key << " = " << cfg.opt_serialize(key) << "\n";
         }
