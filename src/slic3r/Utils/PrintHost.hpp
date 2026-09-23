@@ -196,11 +196,24 @@ public:
 
     virtual nlohmann::json get_auth_info() { return nlohmann::json::object(); }
 
+    // Reads the physical printer's certificate settings ("printhost_cafile",
+    // "printhost_ssl_ignore_revoke"). get_print_host() calls it for every host type.
+    void set_tls_config(const DynamicPrintConfig *config);
+
 protected:
     virtual wxString format_error(const std::string &body, const std::string &error, unsigned status) const;
 
+    // Applies the certificate settings to a request to this host. Without a CA file the request
+    // gets tls_policy_without_ca() - for printers TlsPolicy::PrintHost, i.e. not verified, as it
+    // always was; with one, the host's certificate is verified against that CA file alone.
+    Http &apply_tls(Http &http) const;
+    // Printers default to not verifying; cloud-backed host types override this.
+    virtual Http::TlsPolicy tls_policy_without_ca() const { return Http::TlsPolicy::PrintHost; }
+
 private:
     std::function<void()> m_connection_lost_cb = nullptr;
+    std::string           m_tls_cafile;
+    bool                  m_tls_ignore_revoke { false };
 };
 
 

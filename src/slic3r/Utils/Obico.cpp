@@ -79,6 +79,7 @@ bool Obico::test(wxString& msg) const
     BOOST_LOG_TRIVIAL(info) << boost::format("%1%: Get version at: %2%") % name % url;
     // Here we do not have to add custom "Host" header - the url contains host filled by user and libCurl will set the header by itself.
     auto http = Http::get(std::move(url));
+    apply_tls(http); // verified as an internet host; against the CA file if one is set
     set_auth(http);
     http.on_error([&](std::string body, std::string error, unsigned status) {
             BOOST_LOG_TRIVIAL(error) << boost::format("%1%: Error getting version: %2%, HTTP %3%, body: `%4%`") % name % error % status %
@@ -110,6 +111,7 @@ bool Obico::get_printers(wxArrayString& printers) const
     BOOST_LOG_TRIVIAL(info) << boost::format("%1%: List printers at: %2%") % name % url;
 
     auto http = Http::get(std::move(url));
+    apply_tls(http); // verified as an internet host; against the CA file if one is set
     set_auth(http);
 
     http.on_error([&](std::string body, std::string error, unsigned status) {
@@ -170,6 +172,7 @@ bool Obico::upload(PrintHostUpload upload_data, ProgressFn prorgess_fn, ErrorFn 
     auto url = make_url("api/v1/g_code_files/");
 
     auto  http = Http::post(url); // std::move(url));
+    apply_tls(http); // verified as an internet host; against the CA file if one is set
     set_auth(http);
     http.form_add("print", upload_data.post_action == PrintHostPostUploadAction::StartPrint ? "true" : "false")
         .form_add("path", upload_parent_path.string()) // XXX: slashes on windows ???

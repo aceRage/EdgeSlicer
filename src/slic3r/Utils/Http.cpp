@@ -128,7 +128,8 @@ struct Http::priv
 	std::string error_buffer;    // Used for CURLOPT_ERRORBUFFER
 	std::string url;             // As given to the constructor; the certificate policy is decided on it
 	Http::TlsPolicy tls_policy { Http::TlsPolicy::Auto };
-	bool ca_file_set { false };  // ca_file() named a CA bundle: do not replace it with the system one
+	bool ca_file_set { false };  // ca_file() named a CA bundle: verify against it alone
+	bool no_revoke { false };    // ssl_revoke_best_effort(true): CURLSSLOPT_NO_REVOKE
     std::string headers;
 	size_t limit;
 	bool cancel;
@@ -219,19 +220,24 @@ static const std::string& system_ca_bundle()
 
 // Sets the certificate checks of one easy handle. With `verify` off this is what every request
 // did until 2026-09-22 (VERIFYPEER=0, VERIFYHOST=0).
-static void apply_tls_options(::CURL *curl, bool verify, bool ca_file_set)
+static void apply_tls_options(::CURL *curl, bool verify, bool ca_file_set, bool no_revoke = false)
 {
     ::curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, verify ? 1L : 0L);
     ::curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, verify ? 2L : 0L);
     if (!verify)
         return;
+    // NO_REVOKE only means something to Schannel; with our OpenSSL build it is a no-op.
+    long ssl_options = no_revoke ? long(CURLSSLOPT_NO_REVOKE) : 0L;
 #ifdef _WIN32
     // Our libcurl is built on OpenSSL on every platform (deps/CURL/CURL.cmake), and OpenSSL has no
     // CA store of its own on Windows: take the trusted roots from the Windows certificate store
-    // (CURLSSLOPT_NATIVE_CA, libcurl >= 7.71; ours is 7.75). A ca_file() is loaded on top of it.
-    (void)ca_file_set;
-    ::curl_easy_setopt(curl, CURLOPT_SSL_OPTIONS, long(CURLSSLOPT_NATIVE_CA));
+    // (CURLSSLOPT_NATIVE_CA, libcurl >= 7.71; ours is 7.75) - unless ca_file() named the CA to
+    // trust, which is then the only one (a printer's own CA must not be widened to every root).
+    if (!ca_file_set)
+        ssl_options |= long(CURLSSLOPT_NATIVE_CA);
+    ::curl_easy_setopt(curl, CURLOPT_SSL_OPTIONS, ssl_options);
 #else
+    ::curl_easy_setopt(curl, CURLOPT_SSL_OPTIONS, ssl_options);
     if (!ca_file_set) {
         const std::string &bundle = system_ca_bundle();
         if (!bundle.empty())
@@ -514,8 +520,8 @@ std::string Http::priv::body_size_error()
 
 void Http::priv::http_perform()
 {
-	const bool tls_verify = Http::tls_verify_for(url, tls_policy);
-	apply_tls_options(curl, tls_verify, ca_file_set);
+	const bool tls_verify = Http::tls_verify_for(url, tls_policy, ca_file_set);
+	apply_tls_options(curl, tls_verify, ca_file_set, no_revoke);
 
 	::curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
 	::curl_easy_setopt(curl, CURLOPT_POSTREDIR, CURL_REDIR_POST_ALL);
@@ -885,14 +891,16 @@ bool Http::tls_host_is_private(const std::string &host_in)
     return false;
 }
 
-bool Http::tls_verify_for(const std::string &url, TlsPolicy policy)
+bool Http::tls_verify_for(const std::string &url, TlsPolicy policy, bool has_ca_file)
 {
-    if (policy == TlsPolicy::PrintHost)
-        return false;
     std::string scheme = url.substr(0, url.find("://"));
     boost::algorithm::to_lower(scheme);
     if (scheme != "https" && scheme != "wss")
         return false; // no TLS at all (curl treats a URL without a scheme as http)
+    if (has_ca_file)
+        return true;  // an explicit CA file means "check this host against it"
+    if (policy == TlsPolicy::PrintHost)
+        return false;
     if (policy == TlsPolicy::Verify)
         return true;
     return !tls_host_is_private(url_host(url));
@@ -965,20 +973,13 @@ Http& Http::form_add_file(const std::string &name, const fs::path &path, const s
 	return *this;
 }
 
-#ifdef WIN32
-// Tells libcurl to ignore certificate revocation checks in case of missing or offline distribution points for those SSL backends where such behavior is present.
-// This option is only supported for Schannel (the native Windows SSL library).
+// Recorded here and applied in http_perform() together with the other CURLOPT_SSL_OPTIONS bits
+// (see apply_tls_options). It used to be compiled out entirely.
 Http& Http::ssl_revoke_best_effort(bool set)
 {
-	// BBS
-#if 0
-	if(p && set){
-		::curl_easy_setopt(p->curl, CURLOPT_SSL_OPTIONS, CURLSSLOPT_REVOKE_BEST_EFFORT);
-	}
-#endif
+	if (p) { p->no_revoke = set; }
 	return *this;
 }
-#endif // WIN32
 
 Http& Http::set_post_body(const fs::path &path)
 {

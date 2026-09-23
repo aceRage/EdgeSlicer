@@ -40,7 +40,22 @@ namespace Slic3r {
 
 PrintHost::~PrintHost() {}
 
-PrintHost* PrintHost::get_print_host(DynamicPrintConfig *config, bool change_engine)
+void PrintHost::set_tls_config(const DynamicPrintConfig *config)
+{
+    m_tls_cafile        = config != nullptr && config->has("printhost_cafile") ? config->opt_string("printhost_cafile") : std::string();
+    m_tls_ignore_revoke = config != nullptr && config->has("printhost_ssl_ignore_revoke") && config->opt_bool("printhost_ssl_ignore_revoke");
+}
+
+Http &PrintHost::apply_tls(Http &http) const
+{
+    http.tls_policy(tls_policy_without_ca());
+    if (!m_tls_cafile.empty())
+        http.ca_file(m_tls_cafile); // verifies this host against the CA file, see Http::tls_verify_for
+    http.ssl_revoke_best_effort(m_tls_ignore_revoke);
+    return http;
+}
+
+static PrintHost* make_print_host(DynamicPrintConfig *config, bool change_engine)
 {
     PrinterTechnology tech = ptFFF;
 
@@ -77,6 +92,14 @@ PrintHost* PrintHost::get_print_host(DynamicPrintConfig *config, bool change_eng
     } else {
         return new SL1Host(config);
     }
+}
+
+PrintHost* PrintHost::get_print_host(DynamicPrintConfig *config, bool change_engine)
+{
+    PrintHost *host = make_print_host(config, change_engine);
+    if (host != nullptr)
+        host->set_tls_config(config);
+    return host;
 }
 
 wxString PrintHost::format_error(const std::string &body, const std::string &error, unsigned status) const

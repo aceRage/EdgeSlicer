@@ -713,7 +713,7 @@ bool Flashforge::upload_local_api(PrintHostUpload upload_data, ProgressFn progre
     }
 
     auto http = Http::post(url);
-    http.tls_policy(Http::TlsPolicy::PrintHost); // printer: keep accepting self-signed certificates
+    apply_tls(http); // not verified unless the printer has a CA file (printhost_cafile)
     http.header("serialNumber", m_serial_number)
         .header("checkCode", m_check_code)
         .header("fileSize", file_size)
@@ -755,7 +755,7 @@ bool Flashforge::request_local_api_json(const std::string& path, const std::stri
 {
     bool ok = true;
     auto http = Http::post(make_http_url(path));
-    http.tls_policy(Http::TlsPolicy::PrintHost); // printer: keep accepting self-signed certificates
+    apply_tls(http); // not verified unless the printer has a CA file (printhost_cafile)
     http.header("Content-Type", "application/json")
         .set_post_body(body)
         .on_complete([&](std::string body_text, unsigned) {

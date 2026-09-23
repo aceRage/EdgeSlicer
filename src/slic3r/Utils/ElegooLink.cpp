@@ -237,7 +237,7 @@ namespace Slic3r {
     auto url = make_url("");
     // Here we do not have to add custom "Host" header - the url contains host filled by user and libCurl will set the header by itself.
     auto http = Http::get(std::move(url));
-    http.tls_policy(Http::TlsPolicy::PrintHost); // printer: keep accepting self-signed certificates
+    apply_tls(http); // not verified unless the printer has a CA file (printhost_cafile)
     set_auth(http);
     http.on_error([&](std::string body, std::string error, unsigned status) {
             BOOST_LOG_TRIVIAL(error) << boost::format("%1%: Error getting version: %2%, HTTP %3%, body: `%4%`") % name % error % status % body;
@@ -288,7 +288,7 @@ namespace Slic3r {
         msg.Clear();
         std::string host = get_host_from_url(m_host);
         auto        http = Http::get(url); // std::move(url));
-        http.tls_policy(Http::TlsPolicy::PrintHost); // printer: keep accepting self-signed certificates
+        apply_tls(http); // not verified unless the printer has a CA file (printhost_cafile)
         // "Host" header is necessary here. We have resolved IP address and subsituted it into "url" variable.
         // And when creating Http object above, libcurl automatically includes "Host" header from address it got.
         // Thus "Host" is set to the resolved IP instead of host filled by user. We need to change it back.
@@ -514,7 +514,7 @@ namespace Slic3r {
         }
 
         auto        http   = Http::post(url);
-        http.tls_policy(Http::TlsPolicy::PrintHost); // printer: keep accepting self-signed certificates
+        apply_tls(http); // not verified unless the printer has a CA file (printhost_cafile)
 #ifdef WIN32
         // "Host" header is necessary here. In the workaround above (two mDNS..) we have got IP address from test connection and subsituted
         // it into "url" variable. And when creating Http object above, libcurl automatically includes "Host" header from address it got.

@@ -66,7 +66,7 @@ bool Repetier::test(wxString &msg) const
     BOOST_LOG_TRIVIAL(info) << boost::format("%1%: List version at: %2%") % name % url;
 
     auto http = Http::get(std::move(url));
-    http.tls_policy(Http::TlsPolicy::PrintHost); // printer: keep accepting self-signed certificates
+    apply_tls(http); // not verified unless the printer has a CA file (printhost_cafile)
     set_auth(http);
     
     http.on_error([&](std::string body, std::string error, unsigned status) {
@@ -141,7 +141,7 @@ bool Repetier::upload(PrintHostUpload upload_data, ProgressFn prorgess_fn, Error
         % upload_data.group;
 
     auto http = Http::post(std::move(url));
-    http.tls_policy(Http::TlsPolicy::PrintHost); // printer: keep accepting self-signed certificates
+    apply_tls(http); // not verified unless the printer has a CA file (printhost_cafile)
     set_auth(http);
 
     if (! upload_data.group.empty() && upload_data.group != _utf8(L("Default"))) {
@@ -210,7 +210,7 @@ bool Repetier::get_groups(wxArrayString& groups) const
     BOOST_LOG_TRIVIAL(info) << boost::format("%1%: Get groups at: %2%") % name % url;
 
     auto http = Http::get(std::move(url));
-    http.tls_policy(Http::TlsPolicy::PrintHost); // printer: keep accepting self-signed certificates
+    apply_tls(http); // not verified unless the printer has a CA file (printhost_cafile)
     set_auth(http);
     http.form_add("a", "listModelGroups");
     http.on_error([&](std::string body, std::string error, unsigned status) {
@@ -253,7 +253,7 @@ bool Repetier::get_printers(wxArrayString& printers) const
     BOOST_LOG_TRIVIAL(info) << boost::format("%1%: List printers at: %2%") % name % url;
 
     auto http = Http::get(std::move(url));
-    http.tls_policy(Http::TlsPolicy::PrintHost); // printer: keep accepting self-signed certificates
+    apply_tls(http); // not verified unless the printer has a CA file (printhost_cafile)
     set_auth(http);
     
     http.on_error([&](std::string body, std::string error, unsigned status) {

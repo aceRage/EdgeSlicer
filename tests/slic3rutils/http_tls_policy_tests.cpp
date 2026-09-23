@@ -15,6 +15,8 @@
 #include <catch2/catch.hpp>
 
 #include "slic3r/Utils/Http.hpp"
+#include "slic3r/Utils/PrintHost.hpp"
+#include "libslic3r/PrintConfig.hpp"
 
 #include <boost/asio.hpp>
 #include <boost/asio/ssl.hpp>
@@ -81,6 +83,13 @@ TEST_CASE("TLS policy: which URLs verify the certificate", "[Http][TlsPolicy]")
         CHECK(Http::tls_verify_for("https://octopi.local/", Policy::Verify));
         CHECK_FALSE(Http::tls_verify_for("https://api.github.com/", Policy::PrintHost));
         CHECK_FALSE(Http::tls_verify_for("https://octoprint.example.com/", Policy::PrintHost));
+    }
+
+    SECTION("a request with its own CA file (printhost_cafile) always verifies over TLS")
+    {
+        CHECK(Http::tls_verify_for("https://192.168.1.5/api/version", Policy::PrintHost, true));
+        CHECK(Http::tls_verify_for("https://octopi.local/", Policy::Auto, true));
+        CHECK_FALSE(Http::tls_verify_for("http://192.168.1.5/api/version", Policy::PrintHost, true));
     }
 }
 
@@ -171,8 +180,12 @@ struct TlsServer
     std::atomic<int> served { 0 };
     std::atomic<int> refused { 0 };
 
-    explicit TlsServer(const SelfSigned &cert)
+    std::string      body { "{\"ok\":true}" };
+
+    explicit TlsServer(const SelfSigned &cert, std::string reply = {})
     {
+        if (!reply.empty())
+            body = std::move(reply);
         ctx.use_certificate_chain(asio::buffer(cert.cert_pem));
         ctx.use_private_key(asio::buffer(cert.key_pem), ssl::context::pem);
         acceptor.open(tcp::v4());
@@ -200,7 +213,6 @@ struct TlsServer
                         break;
                     request.append(buf, n);
                 }
-                const std::string body = "{\"ok\":true}";
                 const std::string head = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " +
                                          std::to_string(body.size()) + "\r\nConnection: close\r\n\r\n";
                 asio::write(stream, asio::buffer(head + body), ec);
@@ -219,6 +231,26 @@ struct TlsServer
     }
 
     std::string url(const std::string &host = "127.0.0.1") const { return "https://" + host + ":" + std::to_string(port) + "/ping"; }
+};
+
+// The certificate as a PEM file, as a user would pick it for "printhost_cafile". Removed on scope exit.
+struct PemFile
+{
+    boost::filesystem::path path;
+    explicit PemFile(const std::string &pem)
+        : path(boost::filesystem::temp_directory_path() / boost::filesystem::unique_path("edgeslicer-tls-test-%%%%-%%%%.pem"))
+    {
+        boost::nowide::ofstream f(path.string(), std::ios::binary);
+        f << pem;
+    }
+    ~PemFile()
+    {
+        boost::system::error_code ig;
+        boost::filesystem::remove(path, ig);
+    }
+    std::string str() const { return path.string(); }
+    // For a config value: set_deserialize() unescapes backslashes, as the preset loader does.
+    std::string cfg() const { return path.generic_string(); }
 };
 
 struct Result
@@ -274,20 +306,83 @@ TEST_CASE("TLS policy against a local self-signed server", "[Http][TlsPolicy][so
 
     SECTION("verification passes once the certificate is trusted, by name and by IP")
     {
-        const boost::filesystem::path ca = boost::filesystem::temp_directory_path() /
-                                           boost::filesystem::unique_path("edgeslicer-tls-test-%%%%-%%%%.pem");
-        {
-            boost::nowide::ofstream f(ca.string(), std::ios::binary);
-            f << cert.cert_pem;
-        }
+        const PemFile ca(cert.cert_pem);
         for (const char *host : { "127.0.0.1", "localhost" }) {
             INFO(host);
-            Result r = fetch(std::move(Http::get(server.url(host)).tls_policy(Policy::Verify).ca_file(ca.string())));
+            Result r = fetch(std::move(Http::get(server.url(host)).tls_policy(Policy::Verify).ca_file(ca.str())));
             INFO("error: " << r.error);
             CHECK(r.status == 200);
             CHECK(r.body == "{\"ok\":true}");
         }
-        boost::system::error_code ig;
-        boost::filesystem::remove(ca, ig);
+    }
+
+    SECTION("a print-host request with the right CA file connects, verified")
+    {
+        const PemFile ca(cert.cert_pem);
+        Result r = fetch(std::move(Http::get(server.url()).tls_policy(Policy::PrintHost).ca_file(ca.str()).ssl_revoke_best_effort(true)));
+        INFO("error: " << r.error);
+        CHECK(r.status == 200);
+    }
+
+    SECTION("a print-host request with the wrong CA file is refused")
+    {
+        const SelfSigned other; // a different key and certificate: not the server's issuer
+        const PemFile    ca(other.cert_pem);
+        Result r = fetch(std::move(Http::get(server.url()).tls_policy(Policy::PrintHost).ca_file(ca.str())));
+        INFO("error: " << r.error);
+        CHECK(r.status == 0);
+        CHECK(r.error.find("[Error 60]") != std::string::npos);
+    }
+}
+
+// The same, end to end through a physical printer's settings: PrintHost::get_print_host() hands
+// "printhost_cafile" / "printhost_ssl_ignore_revoke" to the host, whose requests use them.
+namespace {
+Slic3r::DynamicPrintConfig printer_config(const std::string &host_type, const std::string &url, const std::string &cafile)
+{
+    Slic3r::DynamicPrintConfig cfg;
+    cfg.set_deserialize_strict({ { "printer_technology", "FFF" }, { "host_type", host_type }, { "print_host", url },
+                                 { "printhost_apikey", "k" }, { "printhost_cafile", cafile }, { "printhost_ssl_ignore_revoke", "1" },
+                                 { "printhost_authorization_type", "key" }, { "printhost_user", "" }, { "printhost_password", "" } });
+    return cfg;
+}
+bool host_test(Slic3r::DynamicPrintConfig cfg, wxString &msg)
+{
+    std::unique_ptr<Slic3r::PrintHost> host(Slic3r::PrintHost::get_print_host(&cfg));
+    REQUIRE(host != nullptr);
+    return host->test(msg);
+}
+} // namespace
+
+TEST_CASE("printhost_cafile reaches the print host", "[Http][TlsPolicy][socket][PrintHost]")
+{
+    const SelfSigned cert;
+    TlsServer        server(cert, R"({"api":"0.1","server":"1.9.0","text":"OctoPrint 1.9.0"})");
+    const std::string base = "https://127.0.0.1:" + std::to_string(server.port);
+    wxString msg;
+
+    SECTION("OctoPrint without a CA file: not verified, as before")
+    {
+        CHECK(host_test(printer_config("octoprint", base, ""), msg));
+        CHECK(server.refused == 0);
+    }
+    SECTION("OctoPrint with its CA file: verified, and it connects")
+    {
+        const PemFile ca(cert.cert_pem);
+        CHECK(host_test(printer_config("octoprint", base, ca.cfg()), msg));
+        CHECK(server.refused == 0);
+    }
+    SECTION("OctoPrint with the wrong CA file: refused")
+    {
+        const SelfSigned other;
+        const PemFile    ca(other.cert_pem);
+        INFO(msg.ToStdString());
+        CHECK_FALSE(host_test(printer_config("octoprint", base, ca.cfg()), msg));
+        CHECK(server.served == 0);
+    }
+    SECTION("PrusaConnect is a cloud service: verified even without a CA file")
+    {
+        CHECK_FALSE(host_test(printer_config("prusaconnect", base, ""), msg));
+        CHECK(server.served == 0);
     }
 }

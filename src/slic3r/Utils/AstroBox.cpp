@@ -44,7 +44,7 @@ bool AstroBox::test(wxString &msg) const
     BOOST_LOG_TRIVIAL(info) << boost::format("%1%: Get version at: %2%") % name % url;
 
     auto http = Http::get(std::move(url));
-    http.tls_policy(Http::TlsPolicy::PrintHost); // printer: keep accepting self-signed certificates
+    apply_tls(http); // not verified unless the printer has a CA file (printhost_cafile)
     set_auth(http);
     http.on_error([&](std::string body, std::string error, unsigned status) {
             BOOST_LOG_TRIVIAL(error) << boost::format("%1%: Error getting version: %2%, HTTP %3%, body: `%4%`") % name % error % status % body;
@@ -119,7 +119,7 @@ bool AstroBox::upload(PrintHostUpload upload_data, ProgressFn prorgess_fn, Error
         % (upload_data.post_action == PrintHostPostUploadAction::StartPrint ? "true" : "false");
 
     auto http = Http::post(std::move(url));
-    http.tls_policy(Http::TlsPolicy::PrintHost); // printer: keep accepting self-signed certificates
+    apply_tls(http); // not verified unless the printer has a CA file (printhost_cafile)
     set_auth(http);
     http.form_add("print", upload_data.post_action == PrintHostPostUploadAction::StartPrint ? "true" : "false")
         .form_add("path", upload_parent_path.string())      // XXX: slashes on windows ???

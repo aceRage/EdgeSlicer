@@ -20,6 +20,8 @@ public:
     ~Obico() override = default;
 
     const char* get_name() const override;
+    // app.obico.io (or a self-hosted server): verified when it is an internet host, as before.
+    Http::TlsPolicy tls_policy_without_ca() const override { return Http::TlsPolicy::Auto; }
     virtual bool can_test() const { return true; };
     bool has_auto_discovery() const override { return false; }
     bool is_cloud() const override { return true; }
