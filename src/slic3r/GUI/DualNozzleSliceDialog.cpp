@@ -1,6 +1,7 @@
 #include "DualNozzleSliceDialog.hpp"
 
 #include "DeviceManager.hpp"
+#include "DualNozzleLayout.hpp"
 #include "DualNozzleState.hpp"
 #include "GUI_App.hpp"
 #include "I18N.hpp"
@@ -21,7 +22,10 @@
 #include <wx/choice.h>
 #include <wx/dcbuffer.h>
 #include <wx/dcmemory.h>
+#include <wx/display.h>
 #include <wx/dnd.h>
+#include <wx/scrolwin.h>
+#include <wx/settings.h>
 #include <wx/sizer.h>
 #include <wx/stattext.h>
 
@@ -189,9 +193,8 @@ DualNozzleSliceDialog::DualNozzleSliceDialog(wxWindow *parent, PartPlate *plate,
     }
     rebuild_columns();
     update_status();
-    update_issues();
+    update_issues(); // ends in relayout(): cards and dialog sized to the rows
 
-    Fit();
     CenterOnParent();
     wxGetApp().UpdateDlgDarkUI(this);
 
@@ -260,14 +263,25 @@ void DualNozzleSliceDialog::build_ui()
         title->SetFont(Label::Head_14);
         title->SetBackgroundColour(box_bg);
         bs->Add(title, 0, wxLEFT | wxTOP | wxRIGHT, FromDIP(12));
+        // The rows live in a scrolled body. Its height is set by relayout(): every row at its
+        // natural height, scrolling only when the dialog would pass 80% of the display. (A
+        // fully specified SetMinSize on the card used to pin it at 140 DIP and squash the last
+        // row once a side had three or more filaments.)
+        auto *body = new wxScrolledWindow(box, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxVSCROLL);
+        body->SetBackgroundColour(box_bg);
+        body->ShowScrollbars(wxSHOW_SB_NEVER, wxSHOW_SB_DEFAULT);
+        body->SetScrollRate(0, FromDIP(10));
         auto *rows = new wxBoxSizer(wxVERTICAL);
-        bs->Add(rows, 1, wxEXPAND | wxALL, FromDIP(12));
+        body->SetSizer(rows);
+        bs->Add(body, 1, wxEXPAND | wxALL, FromDIP(12));
         box->SetSizer(bs);
-        box->SetMinSize(wxSize(FromDIP(330), FromDIP(140)));
+        box->SetMinSize(wxSize(FromDIP(330), -1)); // width only: the height follows the rows
         box->SetDropTarget(new SideDropTarget(this, side));
+        body->SetDropTarget(new SideDropTarget(this, side));
         m_side_box[side]   = box;
         m_side_title[side] = title;
         m_side_rows[side]  = rows;
+        m_side_body[side]  = body;
         cols->Add(box, 1, wxEXPAND);
         if (side == 0) {
             auto *mid  = new wxBoxSizer(wxVERTICAL);
@@ -275,6 +289,7 @@ void DualNozzleSliceDialog::build_ui()
             swap->SetToolTip(_L("Swap the two extruders"));
             swap->SetMinSize(FromDIP(wxSize(36, 28)));
             swap->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { swap_sides(); });
+            // Centred against the two cards, which relayout() keeps equally tall.
             mid->AddStretchSpacer();
             mid->Add(swap, 0, wxALIGN_CENTER);
             mid->AddStretchSpacer();
@@ -513,8 +528,8 @@ void DualNozzleSliceDialog::rebuild_columns()
             title += wxString::Format(" (%s)", wxString::Format(n == 1 ? _L("%d nozzle") : _L("%d nozzles"), n));
         m_side_title[side]->SetLabel(title);
 
-        StaticBox     *box    = m_side_box[side];
-        const wxColour box_bg = box->GetBackgroundColour();
+        wxScrolledWindow *box    = m_side_body[side];
+        const wxColour    box_bg = m_side_box[side]->GetBackgroundColour();
         const auto     trays  = trays_for_extruder(m_state, side);
         int            shown  = 0;
         for (const auto &f : m_used) {
@@ -527,7 +542,7 @@ void DualNozzleSliceDialog::rebuild_columns()
                                           wxSize(FromDIP(56), -1));
             type->SetBackgroundColour(box_bg);
 
-            auto *combo = new wxBitmapComboBox(box, wxID_ANY, "", wxDefaultPosition, wxSize(FromDIP(150), -1), 0, nullptr, wxCB_READONLY);
+            auto *combo = new wxBitmapComboBox(box, wxID_ANY, "", wxDefaultPosition, wxSize(FromDIP(140), -1), 0, nullptr, wxCB_READONLY);
             const int sw = FromDIP(14);
             combo->Append(m_state.has_report ? _L("No AMS slot") : _L("Printer not synced"), swatch(wxColour(0xE0, 0xE0, 0xE0), sw));
             int selected = 0;
@@ -571,12 +586,10 @@ void DualNozzleSliceDialog::rebuild_columns()
             empty->SetForegroundColour(StateColor::darkModeColorFor(wxColour("#909090")));
             m_side_rows[side]->Add(empty, 0, wxALL, FromDIP(4));
         }
-        box->Layout();
     }
-    Layout();
-    Fit();
-    Thaw();
     wxGetApp().UpdateDlgDarkUI(this);
+    relayout();
+    Thaw();
 }
 
 static wxString side_summary(const std::map<int, int> &ams, const std::map<NozzleVolumeType, int> &nozzles, bool nozzles_known)
@@ -630,8 +643,7 @@ void DualNozzleSliceDialog::update_status()
     m_status->SetForegroundColour(warn ? wxColour(0xFF, 0x6F, 0x00) : StateColor::darkModeColorFor(wxColour("#4A4A4A")));
     m_status->Wrap(FromDIP(700));
     m_sync_btn->Enable(m_state.has_report);
-    Layout();
-    Fit();
+    relayout();
 }
 
 void DualNozzleSliceDialog::update_issues()
@@ -673,14 +685,65 @@ void DualNozzleSliceDialog::update_issues()
     m_issues->Show(!lines.empty());
     if (m_confirm_btn)
         m_confirm_btn->Enable(!blocking);
+    relayout();
+}
+
+void DualNozzleSliceDialog::relayout()
+{
+    if (!m_side_body[0] || !m_side_body[1] || !GetSizer())
+        return;
+    const int min_body = FromDIP(60);
+
+    // Natural height of each side's rows (the rows sizer's minimum, incl. the per-row gaps).
+    int natural[2];
+    int rows_w = 0;
+    for (int side = 0; side < 2; ++side) {
+        const wxSize m = m_side_rows[side]->CalcMin();
+        natural[side]  = m.y;
+        rows_w         = std::max(rows_w, m.x);
+    }
+    // Room for the vertical scrollbar is always reserved, so a side starting to scroll neither
+    // clips its dropdowns nor makes the two cards different widths.
+    int sb_w = wxSystemSettings::GetMetric(wxSYS_VSCROLL_X, this);
+    if (sb_w <= 0)
+        sb_w = FromDIP(16);
+    const int body_w = rows_w + sb_w;
+
+    // The dialog's height without the bodies: measure with both bodies at zero height.
+    for (int side = 0; side < 2; ++side)
+        m_side_body[side]->SetMinSize(wxSize(body_w, 0));
+    SetMinSize(wxDefaultSize);
+    const int decoration = GetSize().y - GetClientSize().y;
+    const int chrome     = GetSizer()->CalcMin().y + decoration;
+
+    int display_h = 0;
+    {
+        int idx = wxDisplay::GetFromWindow(this);
+        wxDisplay disp(idx == wxNOT_FOUND ? 0u : unsigned(idx));
+        display_h = disp.GetClientArea().GetHeight();
+    }
+    const DualNozzleLayout::CardBodies bodies =
+        DualNozzleLayout::card_bodies(natural[0], natural[1], chrome, DualNozzleLayout::max_dialog_height(display_h), min_body);
+
+    for (int side = 0; side < 2; ++side) {
+        wxScrolledWindow *body = m_side_body[side];
+        body->SetMinSize(wxSize(body_w, bodies.height));
+        body->SetMaxSize(wxSize(-1, bodies.height));
+        body->FitInside(); // virtual size = the rows' natural size; scrolls when taller than the body
+        body->Scroll(0, 0);
+        m_side_box[side]->Layout();
+    }
     Layout();
     Fit();
+    SetMinSize(GetSize());
+    BOOST_LOG_TRIVIAL(debug) << "[DualNozzle] arrangement dialog layout: rows " << natural[0] << "/" << natural[1] << " px, chrome " << chrome
+                             << ", body " << bodies.height << (bodies.scroll ? " (scrolling)" : "") << ", dialog " << GetSize().y
+                             << " of max " << DualNozzleLayout::max_dialog_height(display_h);
 }
 
 void DualNozzleSliceDialog::on_dpi_changed(const wxRect &)
 {
     rebuild_columns();
-    Fit();
     Refresh();
 }
 

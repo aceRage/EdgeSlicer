@@ -15,6 +15,7 @@ class wxChoice;
 class wxStaticText;
 class wxBoxSizer;
 class wxPanel;
+class wxScrolledWindow;
 
 namespace Slic3r { namespace GUI {
 
@@ -60,6 +61,9 @@ private:
     void rebuild_columns();
     void update_status();
     void update_issues();
+    // Sizes the two card bodies (rows keep their natural height; equal heights; scrolling past
+    // 80% of the display height, DualNozzleLayout::card_bodies) and fits the dialog to them.
+    void relayout();
     int  nozzle_count(int logical_extruder) const;
     void pick_tray_for(int filament, int logical_extruder);
 
@@ -85,6 +89,7 @@ private:
     StaticBox    *m_side_box[2]{ nullptr, nullptr };
     wxStaticText *m_side_title[2]{ nullptr, nullptr };
     wxBoxSizer   *m_side_rows[2]{ nullptr, nullptr };
+    wxScrolledWindow *m_side_body[2]{ nullptr, nullptr };
     Button       *m_confirm_btn{ nullptr };
     wxTimer       m_timer;
 };
