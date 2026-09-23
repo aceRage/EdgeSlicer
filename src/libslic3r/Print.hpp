@@ -4,6 +4,7 @@
 #include "Fill/FillAdaptive.hpp"
 #include "Fill/FillLightning.hpp"
 #include "PrintBase.hpp"
+#include "FilamentCompaction.hpp"
 
 #include "BoundingBox.hpp"
 #include "Polygon.hpp"
@@ -1095,6 +1096,11 @@ public:
 
     ApplyStatus         apply(const Model &model, DynamicPrintConfig config) override;
 
+    // The filament renumbering this Print was sliced with, on printers whose firmware only
+    // accepts T0..T(tool_count-1) (see FilamentCompaction.hpp). Identity -- and empty -- for
+    // every other printer.
+    const FilamentCompaction& filament_compaction() const { return m_filament_compaction; }
+
     void                process(long long *time_cost_with_cache = nullptr, bool use_cache = false) override;
     // Exports G-code into a file name based on the path_template, returns the file path of the generated G-code file.
     // If preview_data is not null, the preview_data is filled in for the G-code visualization (not used by the command line Slic3r).
@@ -1324,6 +1330,11 @@ private:
     Polygons            first_layer_islands() const;
 
     PrintConfig                             m_config;
+    FilamentCompaction                      m_filament_compaction;
+    // The renumbered copy of the caller's model that apply() slices from when a compaction is
+    // in effect. A MEMBER, never a local: the PrintObjects keep raw pointers into whichever
+    // model apply() sliced from, and those are dereferenced during validate() and export.
+    Model                                   m_compacted_model;
     PrintObjectConfig                       m_default_object_config;
     PrintRegionConfig                       m_default_region_config;
     MixedFilamentManager                    m_mixed_filament_mgr;

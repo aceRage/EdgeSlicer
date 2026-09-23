@@ -172,6 +172,10 @@ set(lisbslic3r_sources
     AllowlistManager.hpp
     FilamentColorLibrary.cpp
     FilamentColorLibrary.hpp
+    FilamentCompaction.cpp
+    FilamentCompaction.hpp
+    FilamentInventory.cpp
+    FilamentInventory.hpp
     FilamentHotBedNozzleRules.cpp
     FilamentHotBedNozzleRules.hpp
     FillBedPack.cpp

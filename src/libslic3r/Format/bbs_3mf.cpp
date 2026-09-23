@@ -324,6 +324,7 @@ static constexpr const char* OTHER_LAYERS_PRINT_SEQUENCE_NUMS_ATTR = "other_laye
 static constexpr const char* SPIRAL_VASE_MODE = "spiral_mode";
 static constexpr const char* FILAMENT_MAP_MODE_ATTR = "filament_map_mode";
 static constexpr const char* FILAMENT_MAP_ATTR = "filament_maps";
+static constexpr const char* FILAMENT_PHYSICAL_MAP_ATTR = "physical_filament_maps";
 static constexpr const char* GCODE_FILE_ATTR = "gcode_file";
 static constexpr const char* THUMBNAIL_FILE_ATTR = "thumbnail_file";
 static constexpr const char* NO_LIGHT_THUMBNAIL_FILE_ATTR = "thumbnail_no_light_file";
@@ -5082,6 +5083,22 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 if (m_curr_plater)
                     m_curr_plater->limit_filament_maps = parse_int_list(value);
             }
+            else if (key == FILAMENT_PHYSICAL_MAP_ATTR)
+            {
+                if (m_curr_plater) {
+                    auto get_vector_from_string = [](const std::string &str) -> std::vector<int> {
+                        std::stringstream stream(str);
+                        int value;
+                        std::vector<int> results;
+                        while (stream >> value)
+                            results.push_back(value);
+                        return results;
+                    };
+                    // Entries are physical-filament ids (0 = unassigned); normalization against
+                    // the project's filament count happens at the plate list, not here.
+                    m_curr_plater->config.set_key_value("filament_physical_map", new ConfigOptionInts(get_vector_from_string(value)));
+                }
+            }
         }
 
         return true;
@@ -8668,6 +8685,22 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 }
                 stream << "\"/>\n";
 
+                {
+                    ConfigOptionInts* filament_physical_maps_opt = plate_data->config.option<ConfigOptionInts>("filament_physical_map");
+                    if (filament_physical_maps_opt == nullptr)
+                        filament_physical_maps_opt = config.option<ConfigOptionInts>("filament_physical_map");
+                    if (filament_physical_maps_opt != nullptr && !filament_physical_maps_opt->values.empty()) {
+                        stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << FILAMENT_PHYSICAL_MAP_ATTR << "\" " << VALUE_ATTR << "=\"";
+                        const std::vector<int>& physical_values = filament_physical_maps_opt->values;
+                        for (size_t i = 0; i < physical_values.size(); ++i) {
+                            stream << physical_values[i];
+                            if (i + 1 != physical_values.size())
+                                stream << " ";
+                        }
+                        stream << "\"/>\n";
+                    }
+                }
+
                 if (save_gcode)
                     stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << GCODE_FILE_ATTR << "\" " << VALUE_ATTR << "=\"" << std::boolalpha << xml_escape(plate_data->gcode_file) << "\"/>\n";
                 if (!plate_data->gcode_file.empty()) {
@@ -9176,6 +9209,17 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << FILAMENT_MAP_ATTR << "\" " << VALUE_ATTR << "=\"";
                 add_vector<int>(stream, filament_maps);
                 stream << "\"/>\n";
+
+                {
+                    ConfigOptionInts* filament_physical_maps_opt = plate_data->config.option<ConfigOptionInts>("filament_physical_map");
+                    if (filament_physical_maps_opt == nullptr)
+                        filament_physical_maps_opt = config.option<ConfigOptionInts>("filament_physical_map");
+                    if (filament_physical_maps_opt != nullptr && !filament_physical_maps_opt->values.empty()) {
+                        stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << FILAMENT_PHYSICAL_MAP_ATTR << "\" " << VALUE_ATTR << "=\"";
+                        add_vector<int>(stream, filament_physical_maps_opt->values);
+                        stream << "\"/>\n";
+                    }
+                }
 
                 if (plate_data->limit_filament_maps.size() > 0) {
                     stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << LIMIT_FILAMENT_MAP_ATTR << "\" " << VALUE_ATTR << "=\"";

@@ -5,7 +5,8 @@
     "instantiation": "false",
     "inherits": "fdm_toolchanger",
     "gcode_flavor": "klipper",
-    "single_extruder_multi_material": "0",
+	"single_extruder_multi_material": "0",
+	"filament_mapping_protocol": "snapmaker",
     "bed_model": "Snapmaker U1_bed.stl",
     "bed_texture": "Snapmaker U1_texture.svg",
     "max_layer_height": [

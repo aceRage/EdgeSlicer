@@ -705,6 +705,11 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
         "complete_print_exhaust_fan_speed",
         "activate_chamber_temp_control",
         "manual_filament_change",
+        "device_tool_count",
+        "flush_volumes_synced",
+        "filament_mapping_protocol",
+        "device_changer",
+        "enable_filament_mapping",
         "disable_m73",
         "use_firmware_retraction",
         "enable_long_retraction_when_cut",
@@ -834,6 +839,7 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
             || opt_key == "wipe_tower_extra_flow"
             || opt_key == "wipe_tower_no_sparse_layers"
             || opt_key == "flush_volumes_matrix"
+            || opt_key == "filament_physical_map"
             || opt_key == "prime_volume"
             || opt_key == "prime_tower_brim_chamfer"
             || opt_key == "prime_tower_brim_chamfer_max_width"
@@ -2108,6 +2114,27 @@ StringObjectException Print::validate(StringObjectException *warning, Polygons* 
 
     if (extruders.empty())
         return { L("No extrusions under current settings.") };
+
+    // When the PRINTER resolves the filament->tool assignment the project may hold more
+    // filaments than the printer has tools; a single plate is bounded by the printer's T
+    // namespace. Numbering never matters here: a plate reaching past the namespace was
+    // renumbered densely on apply, so what is left to check is the COUNT of distinct
+    // physical filaments the plate commands.
+    const DynamicPrintConfig& printer_config = this->full_print_config();
+    if (device_resolves_filament_mapping(printer_config)) {
+        const size_t namespace_size = filament_namespace_size(printer_config, nozzles);
+        const size_t num_physical = m_config.filament_colour.size();
+        std::vector<int> physical_ids;
+        physical_ids.reserve(extruders.size());
+        for (unsigned int e : extruders)
+            physical_ids.push_back(int(e) + 1);
+        m_mixed_filament_mgr.expand_virtual_extruder_ids(physical_ids, num_physical);
+        sort_remove_duplicates(physical_ids);
+        if (physical_ids.size() > namespace_size)
+            return {(boost::format(L("This plate uses %1% filaments, but this printer can only print %2% filaments on one "
+                                     "plate. Reduce the number of filaments used on this plate."))
+                     % physical_ids.size() % namespace_size).str()};
+    }
 
     if (m_config.print_sequence == PrintSequence::ByObject) {
         if (m_config.timelapse_type == TimelapseType::tlSmooth)

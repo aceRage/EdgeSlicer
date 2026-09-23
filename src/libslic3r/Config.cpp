@@ -1157,8 +1157,17 @@ int ConfigBase::load_from_json_document(const std::string &file, json &j, Config
                 std::string value_str;
 
                 if (it.value().is_string()) {
-                    //bool test1 = (it.key() == std::string("end_gcode"));
-                    this->set_deserialize(opt_key, it.value(), substitution_context);
+                    // A bad VALUE for a known key must only cost that key, not the rest of
+                    // the file. This loop runs under the function-wide try, so an uncaught
+                    // BadOptionValueException abandons every key after the bad one.
+                    try {
+                        this->set_deserialize(opt_key, it.value(), substitution_context);
+                    } catch (const BadOptionValueException& err) {
+                        BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ": skipping bad value in " << file << ": " << err.what();
+                        if (auto* dyn = dynamic_cast<DynamicConfig*>(this))
+                            dyn->erase(opt_key);
+                        continue;
+                    }
                     //some logic for special values
                     if (opt_key == "support_type") {
                         //std::string new_value = dynamic_cast<ConfigOptionString*>(this->option(opt_key))->value;
@@ -1304,9 +1313,17 @@ int ConfigBase::load_from_json_document(const std::string &file, json &j, Config
                     // A Bambu Studio alias is deserialized under its own name, so handle_legacy()
                     // sees the assembled value and applies the value conversion that goes with the
                     // rename (the first handle_legacy() call above only had the key).
-                    if (valid)
-                        this->set_deserialize(BambuKeyAliases::by_bambu(opt_key_src) != nullptr ? opt_key_src : opt_key, value_str,
-                                              substitution_context);
+                    if (valid) {
+                        try {
+                            this->set_deserialize(BambuKeyAliases::by_bambu(opt_key_src) != nullptr ? opt_key_src : opt_key, value_str,
+                                                  substitution_context);
+                        } catch (const BadOptionValueException& err) {
+                            BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ": skipping bad value in " << file << ": " << err.what();
+                            if (auto* dyn = dynamic_cast<DynamicConfig*>(this))
+                                dyn->erase(opt_key);
+                            continue;
+                        }
+                    }
                 }
                 else if (it.value().is_boolean() || it.value().is_number()) {
                     // Port of OrcaSlicer PR #15370: a bare JSON number or boolean used to be
@@ -1319,7 +1336,14 @@ int ConfigBase::load_from_json_document(const std::string &file, json &j, Config
                         value_str = std::to_string(it.value().get<int64_t>());
                     else
                         value_str = float_to_string_decimal_point(it.value().get<double>());
-                    this->set_deserialize(opt_key, value_str, substitution_context);
+                    try {
+                        this->set_deserialize(opt_key, value_str, substitution_context);
+                    } catch (const BadOptionValueException& err) {
+                        BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ": skipping bad value in " << file << ": " << err.what();
+                        if (auto* dyn = dynamic_cast<DynamicConfig*>(this))
+                            dyn->erase(opt_key);
+                        continue;
+                    }
                 }
                 else {
                     //should not happen
