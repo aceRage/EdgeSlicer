@@ -1,10 +1,13 @@
 #include <catch2/catch.hpp>
 
+#include <algorithm>
 #include <memory>
 
+#include "libslic3r/GCodeReader.hpp"
 #include "libslic3r/GCodeWriter.hpp"
 
 using namespace Slic3r;
+using Catch::Matchers::WithinAbs;
 
 SCENARIO("lift() is not ignored after unlift() at normal values of Z", "[GCodeWriter]") {
     GIVEN("A config from a file and a single extruder.") {
@@ -105,4 +108,104 @@ SCENARIO("set_speed emits values with fixed-point output.", "[GCodeWriter]") {
             }
         }
     }
+}
+
+// Orca #15848: custom G-code e_retracted R/W must use the same retract storage as
+// retract()/unretract(). Edge keeps a single static m_share_retracted (not Orca's
+// per-physical vector / filament_map / extruder_id()), so these cases cover shared
+// vs per-filament and relative vs absolute E against that scalar model.
+//
+// Deferred from upstream:
+// - "follows the physical extruder mapping" — needs filament_map + vector share.
+// - "Start G-code retraction is repaid..." — needs multifilament_config + a full
+//   slice with placeholder start G-code. Unit-level retract/unretract below is
+//   the Edge stand-in.
+
+namespace {
+
+void parse_retract_unretract(const std::string &gcode, const GCodeConfig &config, double &retracted, double &unretracted)
+{
+    retracted   = 0.;
+    unretracted = 0.;
+    GCodeReader reader;
+    reader.apply_config(config);
+    reader.parse_buffer(gcode, [&](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        if (line.retracting(self))
+            retracted -= line.dist_E(self);
+        else if (line.extruding(self))
+            unretracted += line.dist_E(self);
+    });
+}
+
+} // namespace
+
+TEST_CASE("Custom retraction state controls generated retract and unretract moves", "[GCodeWriter][Retraction]")
+{
+    const bool   shared            = GENERATE(false, true);
+    const bool   relative_e        = GENERATE(false, true);
+    const double custom_retraction = GENERATE(0., 0.5, 0.8);
+    CAPTURE(shared, relative_e, custom_retraction);
+
+    GCodeWriter writer;
+    writer.config.single_extruder_multi_material.value = shared;
+    writer.config.use_relative_e_distances.value       = relative_e;
+    writer.config.retraction_length.values             = {0.6};
+    writer.config.retract_restart_extra.values         = {0.};
+    writer.set_extruders({0, 1});
+    writer.set_extruder(1);
+    REQUIRE(writer.extruder() != nullptr);
+
+    writer.extruder()->set_retracted(custom_retraction, 0.);
+    std::string    gcode            = writer.retract();
+    const double   total_retraction = std::max(custom_retraction, 0.6);
+    CHECK_THAT(writer.extruder()->retracted(), WithinAbs(total_retraction, 1e-9));
+    gcode += writer.unretract();
+    CHECK_THAT(writer.extruder()->retracted(), WithinAbs(0., 1e-9));
+
+    double retracted = 0., unretracted = 0.;
+    parse_retract_unretract(gcode, writer.config, retracted, unretracted);
+    CHECK_THAT(retracted, WithinAbs(total_retraction - custom_retraction, 1e-6));
+    CHECK_THAT(unretracted, WithinAbs(total_retraction, 1e-6));
+}
+
+TEST_CASE("Custom retraction state uses the shared SEMM scalar", "[GCodeWriter][Retraction]")
+{
+    GCodeWriter writer;
+    writer.config.single_extruder_multi_material.value = true;
+    writer.config.use_relative_e_distances.value       = true;
+    writer.config.retraction_length.values             = {0.6};
+    writer.config.retract_restart_extra.values         = {0.};
+    writer.set_extruders({0, 1});
+    writer.set_extruder(1);
+    REQUIRE(writer.extruder() != nullptr);
+
+    writer.extruder()->set_retracted(0.5, 0.2);
+    // One static m_share_retracted: every SEMM filament sees the same length.
+    CHECK_THAT(writer.extruders()[0].retracted(), WithinAbs(0.5, 1e-9));
+    CHECK_THAT(writer.extruders()[1].retracted(), WithinAbs(0.5, 1e-9));
+    CHECK_THAT(writer.extruder()->unretract(), WithinAbs(0.7, 1e-9));
+    CHECK_THAT(writer.extruders()[0].retracted(), WithinAbs(0., 1e-9));
+    CHECK_THAT(writer.extruders()[1].retracted(), WithinAbs(0., 1e-9));
+
+    writer.extruder()->set_retracted(0.5, 0.2);
+    writer.extruder()->set_retracted(0., 0.2);
+    CHECK_THAT(writer.extruder()->retracted(), WithinAbs(0., 1e-9));
+    CHECK_THAT(writer.extruder()->restart_extra(), WithinAbs(0., 1e-9));
+    CHECK(writer.unretract().empty());
+}
+
+TEST_CASE("Custom retraction state stays per-filament when SEMM is off", "[GCodeWriter][Retraction]")
+{
+    GCodeWriter writer;
+    writer.config.single_extruder_multi_material.value = false;
+    writer.config.use_relative_e_distances.value       = true;
+    writer.config.retraction_length.values             = {0.6};
+    writer.set_extruders({0, 1});
+    writer.set_extruder(1);
+    REQUIRE(writer.extruder() != nullptr);
+
+    writer.extruder()->set_retracted(0.5, 0.2);
+    CHECK_THAT(writer.extruders()[0].retracted(), WithinAbs(0., 1e-9));
+    CHECK_THAT(writer.extruders()[1].retracted(), WithinAbs(0.5, 1e-9));
+    CHECK_THAT(writer.extruder()->restart_extra(), WithinAbs(0.2, 1e-9));
 }

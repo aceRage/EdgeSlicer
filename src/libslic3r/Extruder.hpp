@@ -47,7 +47,9 @@ public:
     // Get current extruder position. Only applicable with absolute extruder addressing.
     double position() const { return m_E; }
     // Get current retraction value. Only non-negative values.
-    double retracted() const { return m_retracted; }
+    // SEMM (m_share_extruder) reads the shared scalar so custom G-code e_retracted
+    // matches retract()/unretract(). Edge keeps one static, not Orca's per-physical vector.
+    double retracted() const { return m_share_extruder ? m_share_retracted : m_retracted; }
     // Get extra retraction planned after
     double restart_extra() const { return m_restart_extra; }
     // Setters for the PlaceholderParser.
