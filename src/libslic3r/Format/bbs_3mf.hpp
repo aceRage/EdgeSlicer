@@ -110,6 +110,8 @@ struct PlateData
     // Hexadecimal number, the 0th digit corresponds to extruder 1, and so on.
     // 0 means can be printed on this extruder, 1 means cannot.
     std::vector<int>          limit_filament_maps;
+    // EdgeSlicer: DualNozzleSync::Confirmation JSON of the plate (empty = none).
+    std::string               dual_nozzle_confirm;
     std::vector<unsigned int> filament_change_sequence;
     std::vector<unsigned int> nozzle_change_sequence;
     std::vector<int>          optimal_assignment;

@@ -102,6 +102,10 @@ private:
     float m_height_to_rod;
     bool m_printable;
     bool m_locked;
+    std::string m_dual_nozzle_confirm;
+    bool        m_dual_nozzle_sliced{ false };
+    std::string m_dual_nozzle_sliced_dev;
+    std::string m_dual_nozzle_sliced_fp;
     bool m_ready_for_slice;
     bool m_slice_result_valid;
     bool m_apply_invalid {false};
@@ -244,6 +248,23 @@ public:
     PrintSequence get_real_print_seq(bool* plate_same_as_global=nullptr) const;
 
     void clear_filament_map();
+
+    // Bambu two-extruder printers (H2D/H2C/X2D): the grouping the user confirmed before slicing
+    // (Plater::guard_before_slice_*). set_manual_filament_map writes filament_map_mode = Manual and
+    // the 1-based map into this plate's config, which BackgroundSlicingProcess::apply lays over the
+    // full config (BambuStudio PartPlate::set_filament_maps / set_filament_map_mode).
+    void set_manual_filament_map(const std::vector<int>& filament_map);
+    void clear_manual_filament_map();
+    // Empty unless this plate is in manual grouping.
+    std::vector<int> get_manual_filament_map() const;
+    // DualNozzleSync::Confirmation JSON (saved in the project; empty = never confirmed).
+    const std::string& dual_nozzle_confirm() const { return m_dual_nozzle_confirm; }
+    void set_dual_nozzle_confirm(const std::string& json) { m_dual_nozzle_confirm = json; }
+    // The printer (and its state fingerprint) the current slice was made for; the dual-nozzle
+    // watcher invalidates the slice when the selected printer or its state moves away from it.
+    void set_dual_nozzle_sliced_for(const std::string& dev_id, const std::string& state_fp) { m_dual_nozzle_sliced = true; m_dual_nozzle_sliced_dev = dev_id; m_dual_nozzle_sliced_fp = state_fp; }
+    void clear_dual_nozzle_sliced_for() { m_dual_nozzle_sliced = false; m_dual_nozzle_sliced_dev.clear(); m_dual_nozzle_sliced_fp.clear(); }
+    bool dual_nozzle_sliced_for(std::string& dev_id, std::string& state_fp) const { dev_id = m_dual_nozzle_sliced_dev; state_fp = m_dual_nozzle_sliced_fp; return m_dual_nozzle_sliced; }
 
     bool has_spiral_mode_config() const;
     bool get_spiral_vase_mode() const;

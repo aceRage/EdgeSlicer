@@ -125,6 +125,10 @@ set(SLIC3R_GUI_SOURCES
     GUI/Field.hpp
     GUI/FilamentColorUtils.cpp
     GUI/FilamentColorUtils.hpp
+    GUI/DualNozzleSliceDialog.cpp
+    GUI/DualNozzleSliceDialog.hpp
+    GUI/DualNozzleState.cpp
+    GUI/DualNozzleState.hpp
     GUI/FilamentGroupDialog.cpp
     GUI/FilamentGroupDialog.hpp
     GUI/FlowTypeHelper.cpp

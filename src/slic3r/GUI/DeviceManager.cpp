@@ -3055,6 +3055,21 @@ int MachineObject::publish_json(std::string json_str, int qos, int flag)
     return rtn;
 }
 
+std::string MachineObject::command_get_auto_nozzle_mapping(const std::string& request_json)
+{
+    try {
+        json j = json::parse(request_json);
+        const std::string seq = std::to_string(MachineObject::m_sequence_id++);
+        j["print"]["sequence_id"] = seq;
+        m_nozzle_mapping_reply = NozzleMappingReply();
+        if (publish_json(j.dump()) != 0)
+            return "";
+        return seq;
+    } catch (...) {
+        return "";
+    }
+}
+
 int MachineObject::cloud_publish_json(std::string json_str, int qos, int flag)
 {
     int result = -1;
@@ -4738,6 +4753,22 @@ int MachineObject::parse_json(std::string payload, bool key_field_only)
                         }
                     }
 
+                } else if (jj["command"].get<std::string>() == "get_auto_nozzle_mapping") {
+                    // Answer to a nozzle mapping query (ours or the network agent's).
+                    NozzleMappingReply reply;
+                    reply.valid = true;
+                    if (jj.contains("sequence_id")) {
+                        if (jj["sequence_id"].is_string()) reply.sequence_id = jj["sequence_id"].get<std::string>();
+                        else if (jj["sequence_id"].is_number()) reply.sequence_id = std::to_string(jj["sequence_id"].get<long long>());
+                    }
+                    if (jj.contains("result") && jj["result"].is_string()) reply.result = jj["result"].get<std::string>();
+                    if (jj.contains("reason") && jj["reason"].is_string()) reply.reason = jj["reason"].get<std::string>();
+                    if (jj.contains("errno") && jj["errno"].is_number()) reply.err_no = jj["errno"].get<int>();
+                    if (jj.contains("mapping") && jj["mapping"].is_array()) reply.mapping = jj["mapping"].dump();
+                    m_nozzle_mapping_reply = reply;
+                    BOOST_LOG_TRIVIAL(warning) << "[DualNozzle] get_auto_nozzle_mapping answer seq=" << reply.sequence_id
+                                               << " result=" << reply.result << " reason=" << reply.reason
+                                               << " errno=" << reply.err_no << " mapping=" << reply.mapping;
                 } else if (jj["command"].get<std::string>() == "project_file") {
                     //ack of project file
                     BOOST_LOG_TRIVIAL(debug) << "parse_json, ack of project_file = " << j.dump(4);
@@ -5923,9 +5954,24 @@ void MachineObject::parse_new_info(json print)
                                                                       : NozzleVolumeType::nvtStandard;
                 }
 
-                nozzle_obj.diameter     = njon["diameter"].get<float>();
-                nozzle_obj.max_temp     = njon["tm"].get<int>();
-                nozzle_obj.wear         = njon["wear"].get<int>();
+                if (type.length() >= 2) {
+                    switch ((char) std::toupper((unsigned char) type[1])) {
+                    case 'H': nozzle_obj.volume_exact = NozzleVolumeType::nvtHighFlow; break;
+                    case 'U': nozzle_obj.volume_exact = NozzleVolumeType::nvtTPUHighFlow; break;
+                    case 'E': nozzle_obj.volume_exact = NozzleVolumeType::nvtE3DHighFlow; break;
+                    default: nozzle_obj.volume_exact = NozzleVolumeType::nvtStandard; break;
+                    }
+                }
+
+                // BambuStudio reads only id/type/diameter unconditionally and treats the rest as
+                // optional (DevNozzleSystem.cpp:778-796); H2C rack entries carry no "tm", and a
+                // missing key used to throw out of the whole "device" block.
+                nozzle_obj.diameter     = njon.contains("diameter") && njon["diameter"].is_number() ? njon["diameter"].get<float>() : 0.0f;
+                nozzle_obj.max_temp     = njon.contains("tm") && njon["tm"].is_number() ? njon["tm"].get<int>() : 0;
+                nozzle_obj.wear         = njon.contains("wear") && njon["wear"].is_number() ? njon["wear"].get<int>() : 0;
+                nozzle_obj.stat         = njon.contains("stat") && njon["stat"].is_number() ? njon["stat"].get<int>() : 0;
+                if (njon.contains("fila_id") && njon["fila_id"].is_string()) nozzle_obj.fila_id = njon["fila_id"].get<std::string>();
+                if (njon.contains("color_m") && njon["color_m"].is_string()) nozzle_obj.color_m = njon["color_m"].get<std::string>();
                 if (nozzle_obj.diameter == 0.0f) {nozzle_obj.diameter = 0.4f;}
                 m_nozzle_data.nozzles.push_back(nozzle_obj);
             }
