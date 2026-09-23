@@ -233,8 +233,14 @@ Neither is caused by this change; both are worth cleaning up separately.
 
 ## The translation
 
-Lives in `src/libslic3r/BambuConfigCompat.{hpp,cpp}`, called from
-`ConfigBase::load_from_json_document` in `src/libslic3r/Config.cpp`.
+Lives in `src/libslic3r/BambuConfigCompat.{hpp,cpp}`, called from two places in
+`src/libslic3r/Config.cpp`:
+
+- `ConfigBase::load_from_json_document`, for JSON arrays (presets, `project_settings.config`);
+- `ConfigBase::set_deserialize_raw`, for every value that arrives as a comma-joined string
+  (3MF per-object / per-part / layer-range settings, ini files, G-code config blocks, the CLI).
+  JSON arrays are translated before they get here, so the two never both fire. See
+  [Overrides](#overrides-per-object-per-part-and-layer-range-settings-in-a-3mf).
 
 ### Why there
 
@@ -275,6 +281,95 @@ and a third (a different nozzle) does not - taking 200 matches what the machine'
 Backfill takes the nearest *preceding* non-nil value, or the first following one when the array
 starts with `nil`, so an extruder that had no value of its own inherits its neighbour's rather
 than a fabricated constant.
+
+## Overrides: per-object, per-part and layer-range settings in a 3MF
+
+A Bambu Studio project stores object, part (modifier) and layer-range settings in
+`Metadata/model_settings.config` and `Metadata/layer_config_ranges.xml` as comma-joined strings,
+one slot per `print_extruder_variant`, with `nil` where the override does not apply:
+
+```xml
+<metadata key="outer_wall_speed" value="80,nil,80,nil"/>
+```
+
+Those strings went straight into `ConfigOptionFloats::deserialize` (`bbs_3mf.cpp`, the
+`set_deserialize` calls in the object loop and in `_generate_volumes_new`, and in
+`_extract_layer_config_ranges_from_archive`), bypassing the JSON translation above, so the whole
+project failed to load with *Deserializing nil into a non-nullable object*. Bambu's own
+`resources/calib/pressure_advance/auto_pa_line_dual.3mf` (H2D, 02.00.02.01) was the repro.
+
+### How Bambu Studio reads a nil in an override
+
+Not like a preset. `PrintObject::object_config_from_model_object` and
+`apply_to_print_region_config` (Bambu `PrintObject.cpp` ~3052 / ~3069) apply an object or part
+config with `ConfigOptionVector::set_to_index` (Bambu `Config.hpp` ~602): for each physical
+extruder it takes the override's slot for that extruder's variant **unless that slot is nil**, in
+which case the value already there - the print settings, or the enclosing object's override for a
+part - is kept. A nil slot in an override therefore means **inherit that slot from the parent**,
+per slot. An all-nil override is no override at all.
+
+### What this fork does
+
+This fork applies an object / part / layer-range config as a **whole vector**
+(`ConfigOption::set` in `PrintObject::object_config_from_model_object` and
+`apply_to_print_region_config`); a `ModelConfig` cannot hold a per-slot "inherit" marker in a
+non-nullable option. So the reader resolves the nil slots **at load time from the same parents
+Bambu would use**:
+
+- `BambuConfigCompat::OverrideScope` marks a stretch of loading as "these are overrides" and names
+  the parent. `bbs_3mf.cpp` opens one with the project config around the object loop and around
+  the (now deferred) layer-range read, and a nested one with the object's own config inside
+  `_generate_volumes_new`, so a part looks at its object first and then at the project.
+- `ConfigBase::set_deserialize_raw` sees the scope (`ConfigSubstitutionContext::bambu_override_parents`)
+  and calls `translate_nil_override` instead of the preset rule.
+- `layer_config_ranges.xml` is now read after the archive loop: Bambu writes it *before*
+  `project_settings.config`, so reading it in archive order would find no parent.
+
+| override (object has 4 variant slots) | parent (project) | result | reported |
+|---|---|---|---|
+| `80,nil,80,nil` | `200,250,200,250` | `80,250,80,250` (`Inherited`) | no - exactly what Bambu slices |
+| `nil,90,nil,90` | `350,600,350,600` | `350,90,350,90` (`Inherited`) | no |
+| `nil,nil,nil,nil` | any | key dropped, object inherits everything (`AllNil`) | no - that is Bambu's meaning |
+| `80,nil,80,nil` | none, or a different slot count | `80,80,80,80` (`BackfilledLossy`) | **yes** |
+| scalar target, `12,nil,12,nil` | scalar `12` | `12` (`Collapsed`) | no |
+| scalar target, `12,nil,12,nil` | scalar `20`, or none | `12` (`CollapsedLossy`) | **yes** - the uncovered variants print at 12, not 20 |
+
+Nil in slot 0 matters most: the slicer reads slot 0 for a standard-flow filament (table D2), and
+Bambu's override did not cover that variant, so slot 0 must be the parent's value. The old preset
+backfill would have spread the override's `90` into it.
+
+### Lossy cases and caveats
+
+- **Snapshot, not a live link.** The inherited slots are copied into the object's override. If
+  the process preset is changed later, those slots keep the value the project had at load. In
+  practice only slot 0 (and slot 1 with a `high_flow` column in `process_flow_support`) is ever
+  read, and slot 0 is usually one the override itself set. Not reported: at load time the value
+  is exactly Bambu's.
+- **No parent known** (the project config lacks the key, or its slot count differs from the
+  override's): the nil slots are backfilled from the override's own values and the key is
+  reported through `ConfigSubstitutionContext`, so the Plater's substitution dialog lists it with
+  the original `80,nil,80,nil` next to what landed.
+- **Layer ranges** inherit from the project config only. Bambu layers them over the part and
+  object too, but the ranges are read before objects exist; a layer range and its object both
+  overriding the same key with nil slots is the one shape that can differ, silently.
+- **Modifier parts** inherit from their object and then the project - not from the normal part's
+  own override, which Bambu's region stacking would consult first. Rare in practice.
+- **Scalars** in this fork (table A) can only hold one value; the collapse rule applies and it is
+  reported unless every uncovered variant would have inherited that same value.
+
+### Round trip
+
+An object loaded this way is written back by this fork with full vectors and no `nil`
+(`80,250,80,250`), which reloads here unchanged with nothing translated. Bambu Studio will read
+the same file as an override that now covers every variant - equal values at the time of export,
+but no longer tracking Bambu's process preset for the uncovered variants.
+
+### The shared layer also covers every other string path
+
+Outside an `OverrideScope`, `set_deserialize_raw` applies the **preset** rule (table above) to a
+comma-joined value, so an ini file, a G-code config block or a CLI `--key 200,nil,200` carrying a
+Bambu `nil` now loads instead of throwing. Nullable and string options are untouched on every
+path.
 
 ## What the user sees
 
@@ -378,6 +473,30 @@ differs (before the High-Flow retype they were `CollapsedLossy` to 100, 100, 100
 
 No real value is lost any more: only the `nil` slots are guesses. The slicer reads slot 0, so the
 last one now slices at 30 (Bambu's extruder-1 standard value) rather than the old majority 50.
+
+### Overrides in a 3MF
+
+`tests/libslic3r/test_bambu_nil_override.cpp`, tag `[BambuOverride]` (also `[BambuCompat]`):
+`translate_nil_override` (nil in the middle, nil in slot 0, nearest parent, slot-count mismatch,
+all-nil, no parent, scalar targets, never a zero), `set_deserialize` under nested
+`OverrideScope`s and outside any scope, and Bambu Studio's own
+`resources/calib/pressure_advance/auto_pa_line_dual.3mf` (fixture in
+`tests/data/bambu_compat_3mf/`, AGPL like this project): it loads with and without its config,
+every modifier holds `80,<project slot>,80,<project slot>`, nothing is reported, and it
+round-trips through this fork's own 3MF writer unchanged.
+
+A hidden harness, `libslic3r_tests "[.corpus3mf]"` with `EDGE_3MF_CORPUS=<dir>`, loads every
+`.3mf` under a directory and prints one line per file. Run 2026-09-22 on copies of every 3MF in
+Bambu Studio's `resources/` (5), this fork's `resources/` (12) and `tests/` of the main checkout
+(13), with and without the `set_deserialize_raw` hook:
+
+| corpus | before | after |
+|---|---|---|
+| Bambu Studio resources | 4 / 5 (`auto_pa_line_dual.3mf`: *Deserializing nil*) | 5 / 5 |
+| EdgeSlicer resources | 12 / 12 | 12 / 12 |
+| main checkout `tests/` | 13 / 13 | 13 / 13 |
+
+No file in the corpus needed a lossy override translation.
 
 ## Note for other work in flight
 

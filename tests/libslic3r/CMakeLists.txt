@@ -4,6 +4,7 @@ add_executable(${_TEST_NAME}_tests
 	${_TEST_NAME}_tests.cpp
 	test_3mf.cpp
 	test_bambu_3mf_export.cpp
+	test_bambu_nil_override.cpp
 	test_arrange_support_clearance.cpp
 	test_aabbindirect.cpp
 	test_ams_lookup.cpp
