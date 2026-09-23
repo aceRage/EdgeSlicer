@@ -1118,6 +1118,8 @@ static std::vector<std::string> s_Preset_filament_options {
     // Ultra (H2C rack): the nozzle-change pre-cool target. The BBL H2C filament profiles in
     // this tree already carry it; without it here the loader drops it off the preset.
     "filament_pre_cooling_temperature_nc",
+    // BBS (H2C rack): hotend-change retraction (M620.11 O1 T<len>); same reason as above.
+    "filament_retract_length_nc",
     "filament_flow_support"
     };
 

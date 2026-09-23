@@ -598,6 +598,8 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
         "machine_end_gcode",
         "printing_by_object_gcode",
         "filament_end_gcode",
+        // BBS (H2C rack): only read by change_filament_gcode (M620.11 O1 T<len>).
+        "filament_retract_length_nc",
         "post_process",
         "extruder_clearance_height_to_rod",
         "extruder_clearance_height_to_lid",
