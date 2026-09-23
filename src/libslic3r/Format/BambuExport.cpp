@@ -1,0 +1,889 @@
+#include "BambuExport.hpp"
+
+#include "../Config.hpp"
+#include "../PrintConfig.hpp"
+#include "../Preset.hpp"
+
+#include <boost/algorithm/string/predicate.hpp>
+#include <boost/algorithm/string/split.hpp>
+#include <boost/algorithm/string/trim.hpp>
+#include <boost/log/trivial.hpp>
+
+#include "nlohmann/json.hpp"
+
+#include <algorithm>
+#include <cerrno>
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <mutex>
+#include <unordered_map>
+
+namespace Slic3r {
+namespace BambuExport {
+
+namespace {
+
+// ---------------------------------------------------------------------------------------------
+// Static tables that are a judgement call rather than something the generator can derive.
+// ---------------------------------------------------------------------------------------------
+
+// Our key -> Bambu's key for the same setting. The first group is the exact reverse of what our
+// own PrintConfigDef::handle_legacy() does when it imports a Bambu file, so a Bambu project that
+// round-trips through us keeps these settings. The second group are settings Orca/this fork
+// ported from Bambu Studio under a different name, with the same meaning and unit.
+struct Rename { const char *ours; const char *bambu; };
+const Rename RENAMES[] = {
+    // reverse of handle_legacy()
+    { "infill_anchor",                  "sparse_infill_anchor" },
+    { "infill_anchor_max",              "sparse_infill_anchor_max" },
+    { "chamber_temperature",            "chamber_temperatures" },
+    { "bottom_solid_infill_flow_ratio", "initial_layer_flow_ratio" },
+    { "ironing_angle",                  "ironing_direction" },
+    { "only_one_wall_top",              "top_one_wall_type" },
+    // same setting, different name
+    { "support_ironing",                "enable_support_ironing" },
+    { "extruder_clearance_radius",      "extruder_clearance_max_radius" },
+    { "dont_slow_down_outer_wall",      "no_slow_down_for_cooling_on_outwalls" },
+    { "role_based_wipe_speed",          "role_base_wipe_speed" },
+    { "reduce_infill_retraction",       "reduce_infill_retraction_mode" },
+    { "wipe_tower_rib_width",           "prime_tower_rib_width" },
+    { "wipe_tower_extra_rib_length",    "prime_tower_extra_rib_length" },
+    { "wipe_tower_fillet_wall",         "prime_tower_fillet_wall" },
+    { "wipe_tower_wall_type",           "prime_tower_rib_wall" },
+    { "wipe_tower_max_purge_speed",     "prime_tower_max_speed" },
+};
+
+// Enum values whose enumerator names differ between the two code bases, so the generator cannot
+// pair them. Checked before the generated table.
+const EnumTranslation MANUAL_ENUMS[] = {
+    // Orca's four-level ensure_vertical_shell_thickness vs Bambu's three levels.
+    { "ensure_vertical_shell_thickness", "none",                 "disabled" },
+    { "ensure_vertical_shell_thickness", "ensure_critical_only", "partial" },
+    { "ensure_vertical_shell_thickness", "ensure_moderate",      "partial" },
+    { "ensure_vertical_shell_thickness", "ensure_all",           "enabled" },
+};
+
+// Options whose "%" is relative to something our ConfigOptionDef does not name in ratio_over.
+const std::pair<const char *, const char *> EXTRA_RATIO_OVER[] = {
+    { "seam_gap", "nozzle_diameter" },
+};
+
+// Lists Bambu reads differently when present-but-empty than when absent. Bambu Studio's CLI
+// derives extruder_nozzle_stats from extruder_max_nozzle_count + nozzle_volume_type only when the
+// key is missing (BambuStudio.cpp, "has_extruder_nozzle_stats"); an empty list means "no nozzles"
+// and every multi-extruder slice then fails ("Failed slicing the model"). We never fill it.
+const std::set<std::string> OMIT_WHEN_EMPTY = {
+    "extruder_nozzle_stats", "extruder_nozzle_stats_new",
+};
+
+// Keys that describe the per-extruder-variant layout; convert_project() writes them from the
+// computed layout instead of copying ours.
+const std::set<std::string> LAYOUT_KEYS = {
+    "print_extruder_variant", "print_extruder_id",
+    "printer_extruder_variant", "printer_extruder_id",
+    "filament_extruder_variant", "filament_self_index",
+};
+
+// ---------------------------------------------------------------------------------------------
+// Small helpers
+// ---------------------------------------------------------------------------------------------
+
+const std::unordered_map<std::string, const BambuKeyDef *> &key_index()
+{
+    static const std::unordered_map<std::string, const BambuKeyDef *> index = [] {
+        std::unordered_map<std::string, const BambuKeyDef *> m;
+        for (const BambuKeyDef &d : bambu_key_defs())
+            m.emplace(d.key, &d);
+        return m;
+    }();
+    return index;
+}
+
+const std::unordered_map<std::string, std::string> &rename_index()
+{
+    static const std::unordered_map<std::string, std::string> index = [] {
+        std::unordered_map<std::string, std::string> m;
+        for (const Rename &r : RENAMES)
+            m.emplace(r.ours, r.bambu);
+        return m;
+    }();
+    return index;
+}
+
+bool parse_number(const std::string &s_in, double &out, bool allow_percent = false, bool *is_percent = nullptr)
+{
+    std::string s = boost::algorithm::trim_copy(s_in);
+    bool percent = false;
+    if (allow_percent && ! s.empty() && s.back() == '%') {
+        percent = true;
+        s.pop_back();
+    }
+    if (s.empty())
+        return false;
+    char *end = nullptr;
+    errno = 0;
+    const double v = std::strtod(s.c_str(), &end);
+    if (end == s.c_str() || *end != '\0' || errno == ERANGE || ! std::isfinite(v))
+        return false;
+    out = v;
+    if (is_percent)
+        *is_percent = percent;
+    return true;
+}
+
+bool is_integer(const std::string &s_in)
+{
+    const std::string s = boost::algorithm::trim_copy(s_in);
+    if (s.empty())
+        return false;
+    char *end = nullptr;
+    errno = 0;
+    std::strtoll(s.c_str(), &end, 10);
+    return end != s.c_str() && *end == '\0' && errno != ERANGE;
+}
+
+std::string format_number(double v)
+{
+    // %.10g keeps a hand-entered 0.42 as "0.42" while avoiding binary noise like 0.41999999999.
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), "%.10g", v);
+    return buf;
+}
+
+std::string join(const std::vector<std::string> &v, const char *sep = ",")
+{
+    std::string out;
+    for (size_t i = 0; i < v.size(); ++i) {
+        if (i) out += sep;
+        out += v[i];
+    }
+    return out;
+}
+
+// Bambu type name -> (base kind, is vector).
+struct TypeInfo { std::string base; bool vector = false; };
+TypeInfo type_info(const std::string &type)
+{
+    static const std::unordered_map<std::string, TypeInfo> m = {
+        { "coFloat", { "Float", false } },           { "coFloats", { "Float", true } },
+        { "coInt", { "Int", false } },               { "coInts", { "Int", true } },
+        { "coString", { "String", false } },         { "coStrings", { "String", true } },
+        { "coPercent", { "Percent", false } },       { "coPercents", { "Percent", true } },
+        { "coFloatOrPercent", { "FloatOrPercent", false } }, { "coFloatsOrPercents", { "FloatOrPercent", true } },
+        { "coPoint", { "Point", false } },           { "coPoints", { "Point", true } },
+        { "coPoint3", { "Point3", false } },
+        { "coBool", { "Bool", false } },             { "coBools", { "Bool", true } },
+        { "coEnum", { "Enum", false } },             { "coEnums", { "Enum", true } },
+    };
+    auto it = m.find(type);
+    if (it != m.end())
+        return it->second;
+    // Unknown / group types (coPointsGroups, coIntsGroups ...): vectors of opaque elements.
+    return { "Opaque", boost::algorithm::ends_with(type, "s") };
+}
+
+std::set<std::string> split_enum_values(const char *joined)
+{
+    std::set<std::string> out;
+    if (! joined)
+        return out;
+    std::vector<std::string> parts;
+    std::string s(joined);
+    boost::algorithm::split(parts, s, [](char c) { return c == '|'; });
+    out.insert(parts.begin(), parts.end());
+    return out;
+}
+
+const std::set<std::string> &accepted_enum_values(const BambuKeyDef &def)
+{
+    static std::unordered_map<std::string, std::set<std::string>> cache;
+    static std::mutex                                             mutex;
+    std::lock_guard<std::mutex>                                   lock(mutex);
+    auto it = cache.find(def.key);
+    if (it == cache.end())
+        it = cache.emplace(def.key, split_enum_values(def.enum_values)).first;
+    return it->second;
+}
+
+// Read one of our options as a Value, the way save_to_json / opt_serialize would write it.
+Value read_value(const ConfigOption &opt)
+{
+    Value v;
+    if (opt.is_scalar()) {
+        v.vector  = false;
+        v.strings = opt.type() == coString;
+        v.values  = { v.strings ? static_cast<const ConfigOptionString &>(opt).value : opt.serialize() };
+    } else {
+        v.vector  = true;
+        v.strings = opt.type() == coStrings;
+        v.values  = static_cast<const ConfigOptionVectorBase &>(opt).vserialize();
+    }
+    return v;
+}
+
+// The numeric base a relative ("%") value of `our_key` is measured against, slot `slot`.
+bool ratio_base(const std::string &our_key, const ConfigBase &cfg, const Context &ctx, size_t slot, double &base)
+{
+    std::string over;
+    if (const ConfigOptionDef *def = print_config_def.get(our_key))
+        over = def->ratio_over;
+    for (const auto &extra : EXTRA_RATIO_OVER)
+        if (our_key == extra.first)
+            over = extra.second;
+    if (over.empty())
+        return false;
+    // An override in the config being converted (a per-object outer_wall_speed) wins over the project.
+    std::vector<double> values;
+    if (const ConfigOption *opt = cfg.option(over)) {
+        for (const std::string &s : read_value(*opt).values) {
+            double d;
+            if (parse_number(s, d))
+                values.push_back(d);
+        }
+    }
+    if (values.empty()) {
+        auto it = ctx.numbers.find(over);
+        if (it != ctx.numbers.end())
+            values = it->second;
+    }
+    if (values.empty())
+        return false;
+    base = values[std::min(slot, values.size() - 1)];
+    return base > 0.;
+}
+
+// ---------------------------------------------------------------------------------------------
+// The conversion of one key
+// ---------------------------------------------------------------------------------------------
+
+struct KeyResult
+{
+    bool        keep = false;
+    std::string reason; // why it was dropped, or what was changed
+    bool        changed = false;
+};
+
+std::string translate_enum(const std::string &bambu_key, const std::string &value, const std::set<std::string> &accepted)
+{
+    if (accepted.count(value))
+        return value;
+    for (const EnumTranslation &t : MANUAL_ENUMS)
+        if (bambu_key == t.key && value == t.ours)
+            return t.bambu;
+    for (const EnumTranslation &t : generated_enum_translations())
+        if (bambu_key == t.key && value == t.ours)
+            return t.bambu;
+    return {};
+}
+
+// Value rewrites tied to a rename, where the two settings are the same idea in different units.
+bool rename_value(const std::string &our_key, Value &v, KeyResult &r)
+{
+    auto all = [&v](auto fn) {
+        for (std::string &s : v.values)
+            if (! fn(s))
+                return false;
+        return true;
+    };
+    if (our_key == "only_one_wall_top") {
+        r.changed = true;
+        return all([](std::string &s) { s = (s == "1") ? "all top" : "not apply"; return true; });
+    }
+    if (our_key == "reduce_infill_retraction") {
+        r.changed = true;
+        return all([](std::string &s) { s = (s == "1") ? "Enabled" : "Disabled"; return true; });
+    }
+    if (our_key == "wipe_tower_wall_type") {
+        r.changed = true;
+        return all([](std::string &s) { s = (s == "rib") ? "1" : "0"; return true; });
+    }
+    if (our_key == "ironing_angle") {
+        // Ours: a negative angle means "use the default method". Bambu has no such value; leaving
+        // the key out gives Bambu's own default, which is the same intent.
+        double d;
+        if (v.values.empty() || ! parse_number(v.values.front(), d) || d < 0.) {
+            r.reason = "negative ironing angle means \"default\" here; Bambu keeps its own default";
+            return false;
+        }
+        return true;
+    }
+    return true;
+}
+
+// Reshape `v` (ours) into Bambu's type for `def`. Returns false (with r.reason) when it cannot.
+bool fit_type(const std::string &our_key, const BambuKeyDef &def, const ConfigBase &cfg, const Context &ctx, Value &v, KeyResult &r)
+{
+    const TypeInfo ti = type_info(def.type);
+
+    // --- vector <-> scalar --------------------------------------------------------------------
+    if (v.vector && ! ti.vector) {
+        if (v.values.empty()) {
+            r.reason = "empty list";
+            return false;
+        }
+        const bool uniform = std::all_of(v.values.begin(), v.values.end(), [&](const std::string &s) { return s == v.values.front(); });
+        v.values.resize(1);
+        v.vector = false;
+        r.changed = true;
+        if (! uniform)
+            r.reason = "per-variant list collapsed to its first slot (Bambu has a single value)";
+    } else if (! v.vector && ti.vector) {
+        v.vector  = true;
+        r.changed = true;
+    }
+    v.strings = ti.base == "String";
+
+    // --- element conversions -----------------------------------------------------------------
+    const std::set<std::string> *accepted = ti.base == "Enum" ? &accepted_enum_values(def) : nullptr;
+    for (size_t i = 0; i < v.values.size(); ++i) {
+        std::string &s = v.values[i];
+        if (s == "nil") {
+            if (def.nullable && ti.vector)
+                continue;
+            r.reason = "\"nil\" in an option Bambu does not allow to be empty";
+            return false;
+        }
+        double d = 0.;
+        bool   pct = false;
+        if (ti.base == "Float") {
+            if (! parse_number(s, d, true, &pct)) {
+                r.reason = "value \"" + s + "\" is not a number";
+                return false;
+            }
+            if (pct) {
+                double base;
+                if (! ratio_base(our_key, cfg, ctx, i, base)) {
+                    r.reason = "relative value \"" + s + "\" has nothing to resolve against";
+                    return false;
+                }
+                s = format_number(d * base / 100.);
+                r.changed = true;
+            }
+        } else if (ti.base == "Int") {
+            if (! is_integer(s)) {
+                if (! parse_number(s, d)) {
+                    r.reason = "value \"" + s + "\" is not a number";
+                    return false;
+                }
+                s = format_number(std::round(d));
+                r.changed = true;
+            }
+        } else if (ti.base == "Percent") {
+            if (! parse_number(s, d, true, &pct)) {
+                r.reason = "value \"" + s + "\" is not a number";
+                return false;
+            }
+            if (! pct) {
+                // Ours is absolute ("mm or %"); Bambu only takes a percentage of the same base.
+                double base;
+                if (d == 0.)
+                    s = "0%";
+                else if (ratio_base(our_key, cfg, ctx, i, base))
+                    s = format_number(d * 100. / base) + "%";
+                else {
+                    r.reason = "absolute value \"" + s + "\" has nothing to express it relative to";
+                    return false;
+                }
+                r.changed = true;
+            }
+        } else if (ti.base == "FloatOrPercent") {
+            if (! parse_number(s, d, true, &pct)) {
+                r.reason = "value \"" + s + "\" is not a number";
+                return false;
+            }
+        } else if (ti.base == "Bool") {
+            if (s == "true")  { s = "1"; r.changed = true; }
+            if (s == "false") { s = "0"; r.changed = true; }
+            if (s != "0" && s != "1") {
+                r.reason = "value \"" + s + "\" is not a boolean";
+                return false;
+            }
+        } else if (ti.base == "Enum") {
+            if (accepted->empty())
+                continue; // no list to check against (should not happen for a real enum)
+            const std::string t = translate_enum(def.key, s, *accepted);
+            if (t.empty()) {
+                r.reason = "value \"" + s + "\" does not exist in Bambu Studio";
+                return false;
+            }
+            if (t != s) {
+                s = t;
+                r.changed = true;
+            }
+        }
+    }
+    return true;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Variant layout
+// ---------------------------------------------------------------------------------------------
+
+std::vector<std::string> list_of(const ConfigBase &cfg, const Context *ctx, const char *key)
+{
+    if (const ConfigOption *opt = cfg.option(key))
+        return read_value(*opt).values;
+    if (ctx) {
+        auto it = ctx->lists.find(key);
+        if (it != ctx->lists.end())
+            return it->second;
+    }
+    return {};
+}
+
+Layout make_layout(const std::vector<std::string> &names, const std::vector<std::string> &ids)
+{
+    Layout l;
+    l.names = names;
+    for (size_t i = 0; i < names.size(); ++i) {
+        double d = 0.;
+        l.ids.push_back(i < ids.size() && parse_number(ids[i], d) ? int(d) : 1);
+    }
+    return l;
+}
+
+bool covers_extruders(const Layout &l, size_t extruders)
+{
+    for (size_t e = 1; e <= extruders; ++e)
+        if (std::find(l.ids.begin(), l.ids.end(), int(e)) == l.ids.end())
+            return false;
+    return true;
+}
+
+// Which slot of our vector (length n, laid out as `ours`) feeds slot j of the Bambu layout.
+size_t source_slot(size_t j, size_t n, const Layout &ours, const Layout &target, size_t per_group, const Context &ctx, bool print_flow)
+{
+    if (n <= 1)
+        return 0;
+    const std::string &name = target.names[j];
+    const int          id   = target.ids[j];
+    if (n == ours.size()) {
+        for (size_t k = 0; k < ours.size(); ++k)
+            if (ours.names[k] == name && ours.ids[k] == id)
+                return k;
+        for (size_t k = 0; k < ours.size(); ++k)
+            if (ours.ids[k] == id)
+                return k;
+        for (size_t k = 0; k < ours.size(); ++k)
+            if (ours.names[k] == name)
+                return k;
+    }
+    if (per_group > 1 && n == per_group && id >= 1)
+        return std::min(size_t(id - 1), n - 1);
+    if (print_flow && n == ctx.process_flow_support.size()) {
+        // Ours: one slot per flow type (process_flow_support); Bambu: one per extruder variant.
+        const bool high_flow = name.find("High Flow") != std::string::npos;
+        for (size_t k = 0; k < n; ++k)
+            if (high_flow == (ctx.process_flow_support[k] == "high_flow"))
+                return k;
+        return 0;
+    }
+    return std::min(j, n - 1);
+}
+
+void fit_layout(Value &v, VariantClass cls, const Context &ctx, const Layout &ours_print, const Layout &ours_printer,
+                const Layout &ours_filament, const Layout &target_print, const Layout &target_printer, const Layout &target_filament, size_t filament_count, bool &changed)
+{
+    if (! v.vector || v.values.empty())
+        return;
+    const std::vector<std::string> in = v.values;
+    const size_t                   n  = in.size();
+    std::vector<std::string>       out;
+    switch (cls) {
+    case VariantClass::Print:
+        for (size_t j = 0; j < target_print.size(); ++j)
+            out.push_back(in[source_slot(j, n, ours_print, target_print, 0, ctx, true)]);
+        break;
+    case VariantClass::Printer:
+        for (size_t j = 0; j < target_printer.size(); ++j)
+            out.push_back(in[source_slot(j, n, ours_printer, target_printer, ctx.extruder_count, ctx, false)]);
+        break;
+    case VariantClass::PrinterPair: {
+        // (normal, silent) pairs, variant-major: Bambu's get_index_for_extruder(..., stride 2).
+        const size_t pairs = std::max<size_t>(1, n / 2);
+        for (size_t j = 0; j < target_printer.size(); ++j) {
+            const size_t p = source_slot(j, pairs, ours_printer, target_printer, ctx.extruder_count, ctx, false);
+            for (size_t sub = 0; sub < 2; ++sub)
+                out.push_back(in[std::min(p * 2 + sub, n - 1)]);
+        }
+        break;
+    }
+    case VariantClass::Filament: {
+        // Bambu: one slot per (filament, variant), filament_self_index names the filament.
+        // Ours: our full config keeps one slot per filament (or, for a preset with several
+        // variants, g consecutive slots per filament); within a filament's group match the
+        // variant by name. Our own filament_self_index is not trusted: the fork concatenates
+        // each preset's [1] into [1,1,1,...].
+        const size_t g = (filament_count > 0 && n % filament_count == 0) ? n / filament_count : 0;
+        for (size_t j = 0; j < target_filament.size(); ++j) {
+            const size_t f   = size_t(std::max(1, target_filament.ids[j]) - 1);
+            size_t       src = std::min(j, n - 1);
+            if (g >= 1) {
+                src = std::min(f * g, n - 1);
+                if (ours_filament.size() == n)
+                    for (size_t k = f * g; k < std::min(n, f * g + g); ++k)
+                        if (ours_filament.names[k] == target_filament.names[j]) { src = k; break; }
+            }
+            out.push_back(in[src]);
+        }
+        break;
+    }
+    case VariantClass::Extruder:
+        for (size_t e = 0; e < ctx.extruder_count; ++e)
+            out.push_back(in[std::min(e, n - 1)]);
+        break;
+    case VariantClass::None:
+        return;
+    }
+    if (out.empty())
+        return;
+    if (out != in)
+        changed = true;
+    v.values = std::move(out);
+}
+
+Value strings_value(const std::vector<std::string> &s) { Value v; v.vector = true; v.strings = true; v.values = s; return v; }
+Value ints_value(const std::vector<int> &ids)
+{
+    Value v;
+    v.vector = true;
+    for (int i : ids)
+        v.values.push_back(std::to_string(i));
+    return v;
+}
+
+Layout filament_layout(const Layout &printer, size_t filament_count)
+{
+    // One slot per (filament, distinct printer variant), like Bambu's own full config, so that
+    // every extruder a filament can be mapped to finds its variant.
+    std::vector<std::string> distinct;
+    for (const std::string &n : printer.names)
+        if (std::find(distinct.begin(), distinct.end(), n) == distinct.end())
+            distinct.push_back(n);
+    if (distinct.empty())
+        distinct.push_back("Direct Drive Standard");
+    Layout l;
+    for (size_t f = 0; f < std::max<size_t>(1, filament_count); ++f)
+        for (const std::string &n : distinct) {
+            l.names.push_back(n);
+            l.ids.push_back(int(f + 1));
+        }
+    return l;
+}
+
+// The core: convert every key of `cfg`.
+Config convert_impl(const ConfigBase &cfg, const Context &ctx, Scope scope, Report &report, const std::string &where)
+{
+    Config out;
+    Report local;
+
+    // Our layout, from this config or the project.
+    const Layout ours_print   = make_layout(list_of(cfg, &ctx, "print_extruder_variant"), list_of(cfg, &ctx, "print_extruder_id"));
+    const Layout ours_printer = make_layout(list_of(cfg, &ctx, "printer_extruder_variant"), list_of(cfg, &ctx, "printer_extruder_id"));
+    const Layout ours_filament = make_layout(list_of(cfg, &ctx, "filament_extruder_variant"), {});
+    const size_t filament_count = scope == Scope::Filament ? 1 : ctx.filament_count;
+    const Layout target_filament = scope == Scope::Filament ? filament_layout(ctx.printer, 1) : ctx.filament;
+
+    std::vector<std::pair<std::string, std::string>> dropped; // our key, reason
+
+    for (const std::string &our_key : cfg.keys()) {
+        if (LAYOUT_KEYS.count(our_key) && scope != Scope::Object)
+            continue; // written from the computed layout below
+        const ConfigOption *opt = cfg.option(our_key);
+        if (! opt)
+            continue;
+        std::string bkey = bambu_key_name(our_key);
+        if (bkey != our_key && cfg.has(bkey))
+            bkey = our_key; // both spellings present: the direct key wins, this one is dropped below
+        const BambuKeyDef *def = (bkey != our_key || ! rename_index().count(our_key)) ? find_key(bkey) : nullptr;
+        if (! def) {
+            dropped.emplace_back(our_key, "not a Bambu Studio setting");
+            continue;
+        }
+        Value     v = read_value(*opt);
+        if (v.vector && v.values.empty() && OMIT_WHEN_EMPTY.count(bkey)) {
+            local.notes.push_back(where + ": " + bkey + " is empty; left out so Bambu Studio derives it from the printer");
+            continue;
+        }
+        KeyResult r;
+        if (bkey != our_key && ! rename_value(our_key, v, r)) {
+            dropped.emplace_back(our_key, r.reason);
+            continue;
+        }
+        if (! fit_type(our_key, *def, cfg, ctx, v, r)) {
+            dropped.emplace_back(our_key, r.reason);
+            continue;
+        }
+        bool layout_changed = false;
+        if (scope != Scope::Object || def->variant != VariantClass::Filament) {
+            fit_layout(v, def->variant, ctx, ours_print, ours_printer, ours_filament, ctx.print, ctx.printer, target_filament, filament_count, layout_changed);
+        } else {
+            // A per-object override of a filament-variant option is a single value.
+            fit_layout(v, def->variant, ctx, ours_print, ours_printer, ours_filament, ctx.print, ctx.printer, filament_layout(ctx.printer, 1), 1, layout_changed);
+        }
+        if (bkey != our_key) {
+            local.renamed[our_key] = bkey;
+            local.notes.push_back(where + ": " + our_key + " -> " + bkey);
+        }
+        if (r.changed || layout_changed) {
+            local.converted.insert(bkey);
+            if (! r.reason.empty())
+                local.notes.push_back(where + ": " + bkey + ": " + r.reason);
+        }
+        out[bkey] = std::move(v);
+    }
+
+    // Layout keys.
+    if (scope == Scope::Project || scope == Scope::Print) {
+        out["print_extruder_variant"] = strings_value(ctx.print.names);
+        out["print_extruder_id"]      = ints_value(ctx.print.ids);
+    }
+    if (scope == Scope::Project || scope == Scope::Printer) {
+        out["printer_extruder_variant"] = strings_value(ctx.printer.names);
+        out["printer_extruder_id"]      = ints_value(ctx.printer.ids);
+    }
+    if (scope == Scope::Project || scope == Scope::Filament) {
+        out["filament_extruder_variant"] = strings_value(target_filament.names);
+        out["filament_self_index"]       = ints_value(target_filament.ids);
+    }
+
+    // different_settings_to_system names keys per preset type; keep it in Bambu's vocabulary.
+    if (auto it = out.find("different_settings_to_system"); it != out.end()) {
+        for (std::string &list : it->second.values) {
+            std::vector<std::string> keys, kept;
+            boost::algorithm::split(keys, list, [](char c) { return c == ';'; });
+            for (const std::string &k : keys) {
+                if (k.empty()) continue;
+                const std::string bk = bambu_key_name(k);
+                if (find_key(bk) && std::find(kept.begin(), kept.end(), bk) == kept.end())
+                    kept.push_back(bk);
+            }
+            list = join(kept, ";");
+        }
+    }
+
+    for (const auto &d : dropped) {
+        local.dropped.insert(d.first);
+        if (d.second != "not a Bambu Studio setting")
+            local.notes.push_back(where + ": left out " + d.first + ": " + d.second);
+    }
+    if (! dropped.empty()) {
+        std::vector<std::string> names;
+        for (const auto &d : dropped)
+            names.push_back(d.first);
+        BOOST_LOG_TRIVIAL(info) << "Bambu export, " << where << ": " << dropped.size() << " setting(s) left out: " << join(names, ", ");
+    }
+    for (const std::string &n : local.notes)
+        BOOST_LOG_TRIVIAL(info) << "Bambu export, " << n;
+    report.merge(local);
+    return out;
+}
+
+} // namespace
+
+// ---------------------------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------------------------
+
+const BambuKeyDef *find_key(const std::string &bambu_key)
+{
+    auto it = key_index().find(bambu_key);
+    return it == key_index().end() ? nullptr : it->second;
+}
+
+std::string bambu_key_name(const std::string &our_key)
+{
+    auto it = rename_index().find(our_key);
+    return it == rename_index().end() ? our_key : it->second;
+}
+
+std::string export_version()
+{
+    // "02.08.02.61" -> "02.08.00.00": the schema line the key list targets, without claiming a
+    // particular Bambu Studio build. Bambu compares this against its own version: a file from the
+    // same major.minor line loads silently, an older Bambu Studio warns that the file is newer.
+    std::vector<std::string> parts;
+    std::string              ref = bambu_reference_version();
+    boost::algorithm::split(parts, ref, [](char c) { return c == '.'; });
+    if (parts.size() < 2)
+        return ref;
+    return parts[0] + "." + parts[1] + ".00.00";
+}
+
+std::string application_tag() { return "BambuStudio-" + export_version(); }
+
+void Report::merge(const Report &other)
+{
+    dropped.insert(other.dropped.begin(), other.dropped.end());
+    for (const auto &kv : other.renamed)
+        renamed.insert(kv);
+    converted.insert(other.converted.begin(), other.converted.end());
+    notes.insert(notes.end(), other.notes.begin(), other.notes.end());
+}
+
+std::string Report::summary() const
+{
+    return std::to_string(dropped.size()) + " setting(s) not supported by Bambu Studio left out, " +
+           std::to_string(renamed.size()) + " renamed, " + std::to_string(converted.size()) + " converted";
+}
+
+Context Context::from_project(const ConfigBase &project)
+{
+    Context ctx;
+    for (const std::string &key : project.keys()) {
+        const ConfigOption *opt = project.option(key);
+        if (! opt)
+            continue;
+        const Value v = read_value(*opt);
+        if (! v.strings) {
+            std::vector<double> nums;
+            for (const std::string &s : v.values) {
+                double d;
+                if (parse_number(s, d, true))
+                    nums.push_back(d);
+            }
+            if (! nums.empty() && nums.size() == v.values.size())
+                ctx.numbers[key] = std::move(nums);
+        }
+    }
+    for (const char *key : { "print_extruder_variant", "print_extruder_id", "printer_extruder_variant", "printer_extruder_id",
+                             "filament_extruder_variant", "filament_self_index", "extruder_type", "nozzle_volume_type" })
+        if (const ConfigOption *opt = project.option(key))
+            ctx.lists[key] = read_value(*opt).values;
+    if (auto it = ctx.numbers.find("nozzle_diameter"); it != ctx.numbers.end() && ! it->second.empty()) {
+        ctx.nozzle_diameter = it->second.front();
+        ctx.extruder_count  = it->second.size();
+    }
+    // One entry per filament in the application's full config; filament_settings_id is the list
+    // the per-filament options are merged from, filament_colour the fallback.
+    for (const char *key : { "filament_colour", "filament_settings_id" })
+        if (const ConfigOption *opt = project.option(key))
+            ctx.filament_count = std::max<size_t>(1, read_value(*opt).values.size());
+    if (const ConfigOption *opt = project.option("process_flow_support"))
+        ctx.process_flow_support = read_value(*opt).values;
+    return ctx;
+}
+
+Config convert_project(const ConfigBase &project, Context &ctx, Report &report)
+{
+    // Printer layout: ours when it names every extruder, else one variant per extruder built from
+    // extruder_type + nozzle_volume_type, which is how Bambu names variants
+    // (get_extruder_variant_string). A single-variant layout on a multi-extruder machine would
+    // leave extruders 2+ without a variant: Bambu then logs "could not found extruder_type" and
+    // reads the wrong slot.
+    Layout ours_printer = make_layout(list_of(project, &ctx, "printer_extruder_variant"), list_of(project, &ctx, "printer_extruder_id"));
+    if (ours_printer.size() > 0 && covers_extruders(ours_printer, ctx.extruder_count)) {
+        ctx.printer = ours_printer;
+    } else {
+        const std::vector<std::string> types = list_of(project, &ctx, "extruder_type");
+        const std::vector<std::string> nvts  = list_of(project, &ctx, "nozzle_volume_type");
+        ctx.printer = Layout();
+        for (size_t e = 0; e < ctx.extruder_count; ++e) {
+            std::string type = types.empty() ? "Direct Drive" : types[std::min(e, types.size() - 1)];
+            std::string nvt  = nvts.empty() ? "Standard" : nvts[std::min(e, nvts.size() - 1)];
+            if (nvt == "Hybrid")
+                nvt = "Standard"; // Bambu: "nvtHybrid not supported in presets, switch to nvtStandard"
+            ctx.printer.names.push_back(type + " " + nvt);
+            ctx.printer.ids.push_back(int(e + 1));
+        }
+    }
+    // Print layout: ours when it has a slot for every printer variant, else the printer's layout.
+    Layout ours_print = make_layout(list_of(project, &ctx, "print_extruder_variant"), list_of(project, &ctx, "print_extruder_id"));
+    bool   print_ok   = ours_print.size() > 0;
+    for (size_t j = 0; print_ok && j < ctx.printer.size(); ++j) {
+        bool found = false;
+        for (size_t k = 0; k < ours_print.size() && ! found; ++k)
+            found = ours_print.names[k] == ctx.printer.names[j] && ours_print.ids[k] == ctx.printer.ids[j];
+        print_ok = found;
+    }
+    ctx.print    = print_ok ? ours_print : ctx.printer;
+    ctx.filament = filament_layout(ctx.printer, ctx.filament_count);
+
+    Config out = convert_impl(project, ctx, Scope::Project, report, "project");
+
+    // Bambu Studio refuses to slice ooze prevention together with a prime tower (Print::validate:
+    // "Ooze prevention is currently not supported with the prime tower enabled."); this fork
+    // supports the combination (tool changers). The prime tower is what a multi-material plate
+    // needs, so ooze prevention is the one left out.
+    if (auto ooze = out.find("ooze_prevention"), tower = out.find("enable_prime_tower");
+        ooze != out.end() && tower != out.end() && !ooze->second.values.empty() && !tower->second.values.empty() &&
+        ooze->second.values.front() == "1" && tower->second.values.front() == "1") {
+        out.erase(ooze);
+        report.dropped.insert("ooze_prevention");
+        report.notes.push_back("project: left out ooze_prevention: Bambu Studio cannot combine it with a prime tower");
+        BOOST_LOG_TRIVIAL(info) << "Bambu export, project: left out ooze_prevention: Bambu Studio cannot combine it with a prime tower";
+    }
+
+    // Flushing is per extruder in Bambu: flush_multiplier has one value per extruder and
+    // flush_volumes_matrix one filament x filament matrix per extruder, extruder-major. Ours is a
+    // single matrix / multiplier used for every extruder, so repeat it.
+    if (ctx.extruder_count > 1) {
+        const size_t f2 = ctx.filament_count * ctx.filament_count;
+        if (auto it = out.find("flush_volumes_matrix"); it != out.end() && it->second.values.size() == f2) {
+            std::vector<std::string> per_extruder;
+            for (size_t e = 0; e < ctx.extruder_count; ++e)
+                per_extruder.insert(per_extruder.end(), it->second.values.begin(), it->second.values.end());
+            it->second.values = std::move(per_extruder);
+            report.converted.insert("flush_volumes_matrix");
+        }
+    }
+
+    // Per-extruder option lists Bambu checks against nozzle_diameter on load (check_project_config
+    // in Bambu's Plater: a multi-extruder project whose extruder_type is shorter than
+    // nozzle_diameter is loaded geometry-only).
+    for (const char *key : { "extruder_type", "nozzle_volume_type", "flush_multiplier" }) {
+        auto it = out.find(key);
+        if (it == out.end() || ! it->second.vector || it->second.values.empty())
+            continue;
+        std::vector<std::string> &vals = it->second.values;
+        if (vals.size() != ctx.extruder_count) {
+            std::vector<std::string> fitted;
+            for (size_t e = 0; e < ctx.extruder_count; ++e)
+                fitted.push_back(vals[std::min(e, vals.size() - 1)]);
+            vals = std::move(fitted);
+            report.converted.insert(key);
+        }
+    }
+    return out;
+}
+
+Config convert(const ConfigBase &cfg, const Context &ctx, Scope scope, Report &report, const std::string &where)
+{
+    return convert_impl(cfg, ctx, scope, report, where);
+}
+
+std::string to_json(const Config &cfg, const std::string &name, const std::string &from, const std::string &version)
+{
+    nlohmann::json j;
+    j[BBL_JSON_KEY_VERSION] = version;
+    j[BBL_JSON_KEY_NAME]    = name;
+    j[BBL_JSON_KEY_FROM]    = from;
+    for (const auto &kv : cfg) {
+        if (kv.second.vector)
+            j[kv.first] = kv.second.values;
+        else
+            j[kv.first] = kv.second.values.empty() ? std::string() : kv.second.values.front();
+    }
+    return j.dump(4, ' ', false, nlohmann::json::error_handler_t::replace) + "\n";
+}
+
+std::string serialize(const Value &value)
+{
+    if (! value.vector) {
+        const std::string s = value.values.empty() ? std::string() : value.values.front();
+        return value.strings ? escape_string_cstyle(s) : s;
+    }
+    return value.strings ? escape_strings_cstyle(value.values) : join(value.values);
+}
+
+std::string translate_enum_value(const std::string &bambu_key, const std::string &our_value)
+{
+    const BambuKeyDef *def = find_key(bambu_key);
+    if (! def || ! def->enum_values)
+        return our_value;
+    return translate_enum(bambu_key, our_value, accepted_enum_values(*def));
+}
+
+} // namespace BambuExport
+} // namespace Slic3r

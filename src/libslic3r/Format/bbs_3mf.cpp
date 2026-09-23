@@ -1,5 +1,6 @@
 #include "../libslic3r.h"
 #include "../Exception.hpp"
+#include "BambuExport.hpp"
 #include "../Model.hpp"
 #include "../MixedFilament.hpp"
 #include "../Preset.hpp"
@@ -4486,7 +4487,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             }
             else if (boost::starts_with(m_curr_characters, "Snapmaker_Orca-")) {
                 m_is_bbl_3mf = true;
-                m_bambuslicer_generator_version = Semver::parse(m_curr_characters.substr(11));
+                m_bambuslicer_generator_version = Semver::parse(m_curr_characters.substr(std::string("Snapmaker_Orca-").size()));
             }
         //TODO: currently use version 0, no need to load&&save this string
         /*} else if (m_curr_metadata_name == BBS_FDM_SUPPORTS_PAINTING_VERSION) {
@@ -6374,6 +6375,12 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         bool m_skip_auxiliary { false };    // skip normal axuiliary files
         bool m_use_loaded_id { false };        // whether to use loaded id for identify_id
         bool m_share_mesh { false };        // whether to share mesh between objects
+        // Export Bambu 3MF (StoreParams::bambu_compat): the project config converted once up front,
+        // the context the per-object conversions need, and what was changed.
+        bool m_bambu_compat { false };
+        BambuExport::Context m_bambu_ctx;
+        BambuExport::Config  m_bambu_project;
+        BambuExport::Report  m_bambu_report;
         std::string m_thumbnail_middle = PRINTER_THUMBNAIL_MIDDLE_FILE;
         std::string m_thumbnail_small  = PRINTER_THUMBNAIL_SMALL_FILE;
         std::map<void const *, std::pair<ObjectData*, ModelVolume const *>> m_shared_meshes;
@@ -6483,6 +6490,14 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
 
         m_use_loaded_id = store_params.strategy & SaveStrategy::UseLoadedId;
 
+        m_bambu_compat = store_params.bambu_compat;
+        m_bambu_report = BambuExport::Report();
+        m_bambu_project.clear();
+        if (m_bambu_compat && store_params.config != nullptr) {
+            m_bambu_ctx     = BambuExport::Context::from_project(*store_params.config);
+            m_bambu_project = BambuExport::convert_project(*store_params.config, m_bambu_ctx, m_bambu_report);
+        }
+
         if (auto info = store_params.model->model_info) {
             if (auto iter = info->metadata_items.find("Thumbnail_Small"); iter != info->metadata_items.end())
                 m_thumbnail_small = iter->second;
@@ -6506,6 +6521,11 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             }
             if (!(store_params.strategy & SaveStrategy::Silence))
                 save_string_file(store_params.model->get_backup_path() + "/origin.txt", filename);
+        }
+        if (m_bambu_compat) {
+            BOOST_LOG_TRIVIAL(info) << "Export Bambu 3MF " << filename << ": " << m_bambu_report.summary();
+            if (store_params.bambu_report)
+                store_params.bambu_report->merge(m_bambu_report);
         }
         return result;
     }
@@ -7380,18 +7400,23 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 // Orca: PRIVACY: do not store creation & modification date in 3mf
                 metadata_item_map[BBL_CREATION_DATE_TAG] = "";
                 metadata_item_map[BBL_MODIFICATION_TAG]  = "";
-                // Identify ourselves honestly. We used to write "BambuStudio-<fork version>",
-                // which put our own version number into BambuStudio's version slot; BambuStudio
-                // version-gates files on that string, and a bogus version can mislead it.
-                // Keep writing the "BambuStudio-" prefix. It is not vanity: BambuStudio's reader
-                // only records a generator version when the tag starts with that literal
-                // (bbs_3mf.cpp, "BambuStudio-" check), and with no version it sets
-                // dont_load_config = true and skips the project config AND every embedded
-                // print/filament preset in the file. Naming ourselves honestly here would mean
-                // any 3MF we export opens in BambuStudio with its settings silently dropped.
-                // The read side below now also accepts our own name, so files we write are
-                // recognised as full projects by us either way.
-                metadata_item_map[BBL_APPLICATION_TAG] = (boost::format("%1%-%2%") % "BambuStudio" % Snapmaker_VERSION).str();
+                // Name the application that wrote the file. A project save is ours, so it says
+                // so: "EdgeSlicer-<version>". Bambu Studio's reader only takes a project's
+                // settings and embedded presets from a file whose tag starts with "BambuStudio-"
+                // (anything else loads geometry-only there), which is what "Export Bambu 3MF"
+                // is for: that export writes "BambuStudio-<the Bambu Studio line its settings
+                // were converted for>" (Format/BambuExport.cpp, docs/bambu-3mf-export.md).
+                // OrcaSlicer and Snapmaker Orca load project settings whatever the tag says.
+                // Our own reader accepts both tags as full projects (_handle_end_metadata).
+                // A sliced-plate file (SkipModel: print jobs, "Export plate sliced file",
+                // calibration jobs) is a Bambu printer / Bambu Studio artifact rather than a
+                // project, and keeps the tag it always had until that path is checked on a printer.
+                if (m_bambu_compat)
+                    metadata_item_map[BBL_APPLICATION_TAG] = BambuExport::application_tag();
+                else if (m_skip_model)
+                    metadata_item_map[BBL_APPLICATION_TAG] = (boost::format("%1%-%2%") % "BambuStudio" % Snapmaker_VERSION).str();
+                else
+                    metadata_item_map[BBL_APPLICATION_TAG] = (boost::format("%1%-%2%") % SLIC3R_APP_NAME % Snapmaker_VERSION).str();
             }
             metadata_item_map[BBS_3MF_VERSION] = std::to_string(VERSION_BBS_3MF);
 
@@ -8149,6 +8174,12 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
 
                     // store range configuration
                     const ModelConfig& config = range.second;
+                    if (m_bambu_compat) {
+                        for (const auto &kv : BambuExport::convert(config.get(), m_bambu_ctx, BambuExport::Scope::Object, m_bambu_report, "height range of " + object->name)) {
+                            pt::ptree& opt_tree = range_tree.add("option", BambuExport::serialize(kv.second));
+                            opt_tree.put("<xmlattr>.opt_key", kv.first);
+                        }
+                    } else
                     for (const std::string& opt_key : config.keys()) {
                         pt::ptree& opt_tree = range_tree.add("option", config.opt_serialize(opt_key));
                         opt_tree.put("<xmlattr>.opt_key", opt_key);
@@ -8331,6 +8362,14 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
     //BBS: add project config file logic for new json format
     bool _BBS_3MF_Exporter::_add_project_config_file_to_archive(mz_zip_archive& archive, const DynamicPrintConfig &config, Model& model)
     {
+        if (m_bambu_compat) {
+            const std::string out = BambuExport::to_json(m_bambu_project, "project_settings", "project", BambuExport::export_version());
+            if (!mz_zip_writer_add_mem(&archive, BBS_PROJECT_CONFIG_FILE.c_str(), (const void *) out.data(), out.length(), MZ_DEFAULT_COMPRESSION)) {
+                add_error("Unable to add project config file to archive");
+                return false;
+            }
+            return true;
+        }
         const std::string& temp_path = model.get_backup_path();
         std::string temp_file = temp_path + std::string("/") + "_temp_1.config";
         config.save_to_json(temp_file, std::string("project_settings"), std::string("project"), std::string(Snapmaker_VERSION));
@@ -8354,6 +8393,13 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 preset->file = temp_path + std::string("/") + "_temp_1.config";
                 DynamicPrintConfig& config = preset->config;
                 //config.save(preset->file);
+                if (m_bambu_compat) {
+                    const BambuExport::Scope scope = preset->type == Preset::TYPE_PRINT    ? BambuExport::Scope::Print :
+                                                     preset->type == Preset::TYPE_FILAMENT ? BambuExport::Scope::Filament :
+                                                                                             BambuExport::Scope::Printer;
+                    const BambuExport::Config converted = BambuExport::convert(config, m_bambu_ctx, scope, m_bambu_report, "preset " + preset->name);
+                    save_string_file(preset->file, BambuExport::to_json(converted, preset->name, "project", BambuExport::export_version()));
+                } else
                 config.save_to_json(preset->file, preset->name, std::string("project"), preset->version.to_string());
 
                 std::string dest_file;
@@ -8421,6 +8467,10 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                     stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"module\" " << VALUE_ATTR << "=\"" << xml_escape(obj->module_name) << "\"/>\n";
 
                 // stores object's config data
+                if (m_bambu_compat) {
+                    for (const auto &kv : BambuExport::convert(obj->config.get(), m_bambu_ctx, BambuExport::Scope::Object, m_bambu_report, "object " + obj->name))
+                        stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << kv.first << "\" " << VALUE_ATTR << "=\"" << xml_escape(BambuExport::serialize(kv.second)) << "\"/>\n";
+                } else
                 for (const std::string& key : obj->config.keys()) {
                     stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << key << "\" " << VALUE_ATTR << "=\"" << obj->config.opt_serialize(key) << "\"/>\n";
                 }
@@ -8487,6 +8537,10 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                             }
 
                             // stores volume's config data
+                            if (m_bambu_compat) {
+                                for (const auto &kv : BambuExport::convert(volume->config.get(), m_bambu_ctx, BambuExport::Scope::Object, m_bambu_report, "part " + volume->name))
+                                    stream << "      <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << kv.first << "\" " << VALUE_ATTR << "=\"" << xml_escape(BambuExport::serialize(kv.second)) << "\"/>\n";
+                            } else
                             for (const std::string& key : volume->config.keys()) {
                                 stream << "      <" << METADATA_TAG << " "<< KEY_ATTR << "=\"" << key << "\" " << VALUE_ATTR << "=\"" << volume->config.opt_serialize(key) << "\"/>\n";
                             }
@@ -8533,7 +8587,15 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 ConfigOption* bed_type_opt = plate_data->config.option("curr_bed_type");
                 t_config_enum_names bed_type_names = ConfigOptionEnum<BedType>::get_enum_names();
                 if (bed_type_opt != nullptr && bed_type_names.size() > bed_type_opt->getInt())
-                    stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << BED_TYPE_ATTR << "\" " << VALUE_ATTR << "=\"" << bed_type_names[bed_type_opt->getInt()] << "\"/>\n";
+                {
+                    // Bambu export: a plate type Bambu Studio does not have is left out, so the
+                    // plate follows the project's bed type there.
+                    const std::string bed_type_name = m_bambu_compat ?
+                        BambuExport::translate_enum_value("curr_bed_type", bed_type_names[bed_type_opt->getInt()]) :
+                        bed_type_names[bed_type_opt->getInt()];
+                    if (!bed_type_name.empty())
+                        stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << BED_TYPE_ATTR << "\" " << VALUE_ATTR << "=\"" << bed_type_name << "\"/>\n";
+                }
 
                 ConfigOption* print_sequence_opt = plate_data->config.option("print_sequence");
                 t_config_enum_names print_sequence_names = ConfigOptionEnum<PrintSequence>::get_enum_names();
@@ -8975,7 +9037,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         // save slice header for debug
         stream << "  <" << SLICE_HEADER_TAG << ">\n";
         stream << "    <" << SLICE_HEADER_ITEM_TAG << " " << KEY_ATTR << "=\"" << "X-BBL-Client-Type"    << "\" " << VALUE_ATTR << "=\"" << "slicer" << "\"/>\n";
-        stream << "    <" << SLICE_HEADER_ITEM_TAG << " " << KEY_ATTR << "=\"" << "X-BBL-Client-Version" << "\" " << VALUE_ATTR << "=\"" << convert_to_full_version(Snapmaker_VERSION) << "\"/>\n";
+        stream << "    <" << SLICE_HEADER_ITEM_TAG << " " << KEY_ATTR << "=\"" << "X-BBL-Client-Version" << "\" " << VALUE_ATTR << "=\"" << convert_to_full_version(m_bambu_compat ? BambuExport::export_version() : std::string(Snapmaker_VERSION)) << "\"/>\n";
         stream << "  </" << SLICE_HEADER_TAG << ">\n";
 
         for (unsigned int i = 0; i < (unsigned int)plate_data_list.size(); ++i)

@@ -2970,6 +2970,9 @@ void MainFrame::init_menubar_as_editor()
         append_menu_item(export_menu, wxID_ANY, _L("Export Generic 3MF") + dots/* + "\t" + ctrl + "G"*/, _L("Export 3mf file without using some 3mf-extensions"),
             [this](wxCommandEvent&) { if (m_plater) m_plater->export_core_3mf(); }, "menu_export_sliced_file", nullptr,
             [this](){return can_export_model(); }, this);
+        append_menu_item(export_menu, wxID_ANY, _L("Export Bambu 3MF") + dots, _L("Export a project Bambu Studio opens with its settings (settings Bambu Studio does not have are left out)"),
+            [this](wxCommandEvent&) { if (m_plater) m_plater->export_bambu_3mf(); }, "menu_export_sliced_file", nullptr,
+            [this](){return can_export_model(); }, this);
         // BBS export .gcode.3mf
         append_menu_item(export_menu, wxID_ANY, _L("Export plate sliced file") + dots + "\t" + ctrl + "G", _L("Export current sliced file"),
             [this](wxCommandEvent&) { if (m_plater) wxPostEvent(m_plater, SimpleEvent(EVT_GLTOOLBAR_EXPORT_SLICED_FILE)); }, "menu_export_sliced_file", nullptr,

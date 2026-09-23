@@ -231,6 +231,8 @@ typedef std::vector<PlateData*> PlateDataPtrs;
 
 typedef std::map<int, PlateData*> PlateDataMaps;
 
+namespace BambuExport { struct Report; }
+
 struct StoreParams
 {
     const char* path;
@@ -249,6 +251,11 @@ struct StoreParams
     std::vector<PlateBBoxData*> id_bboxes;
     BBLProject* project = nullptr;
     BBLProfile* profile = nullptr;
+    // "Export Bambu 3MF": tag the file as a Bambu Studio project and write every config (project
+    // settings, embedded presets, per-object / per-part / per-layer-range settings) in Bambu
+    // Studio's vocabulary (Format/BambuExport.hpp). What had to change is added to bambu_report.
+    bool bambu_compat = false;
+    BambuExport::Report* bambu_report = nullptr;
 
     StoreParams() {}
 };
