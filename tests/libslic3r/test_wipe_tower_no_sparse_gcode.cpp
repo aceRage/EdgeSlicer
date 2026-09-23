@@ -1,0 +1,210 @@
+#include <catch2/catch.hpp>
+
+#include "libslic3r/Model.hpp"
+#include "libslic3r/Print.hpp"
+#include "libslic3r/PrintConfig.hpp"
+#include "libslic3r/TriangleMesh.hpp"
+
+#include "../fff_print/test_data.hpp"
+
+#include <algorithm>
+#include <cmath>
+#include <regex>
+#include <sstream>
+#include <string>
+#include <vector>
+
+using namespace Slic3r;
+
+// "No sparse layers" on a Bambu Lab (WipeTower, append_tcr) prime tower, checked on the exported G-code.
+//
+// Owner report (H2D / H2C): towers printed with no sparse layers keep failing to stick. Slicing the
+// same job in Bambu Studio showed the compacted Z schedule is identical, but in this fork every
+// compacted tower layer - the first one on the bed included - had its wall extruded at travel speed:
+// the descent back down to the tower after change_filament_gcode was a bare "G1 Z.. F<travel>", and
+// the tower's toolchange wall carries no F word of its own, so it inherited F60000. On top of that the
+// "auto" brim (-1, shipped by the H2D/H2C process presets) was never resolved, so the tower had no
+// brim at all while the preview drew one.
+
+namespace {
+
+struct TowerMove
+{
+    double z;       // commanded Z of the extrusion
+    double layer_z; // object layer the tower was printed on (; Z_HEIGHT)
+    double f;       // feedrate in effect (mm/min)
+    double x;
+    double y;
+};
+
+// Every extruding XY move between WIPE_TOWER_START and WIPE_TOWER_END, with the modal Z and F that
+// the printer really uses for it (the last Z / F word seen anywhere before it).
+std::vector<TowerMove> tower_moves(const std::string &gcode)
+{
+    std::vector<TowerMove> out;
+    std::istringstream     in(gcode);
+    std::string            line;
+    double                 x = 0, y = 0, z = 0, f = 0, layer_z = 0;
+    bool                   in_tower = false;
+    bool                   relative_e = false;
+    double                 e = 0;
+    const std::regex       word("([XYZEF])(-?[0-9]*\\.?[0-9]+)");
+    while (std::getline(in, line)) {
+        if (!line.empty() && line.back() == '\r')
+            line.pop_back();
+        if (line.rfind("; Z_HEIGHT:", 0) == 0) {
+            layer_z = std::atof(line.c_str() + 11);
+            continue;
+        }
+        if (line.find("; WIPE_TOWER_START") == 0) { in_tower = true; continue; }
+        if (line.find("; WIPE_TOWER_END") == 0) { in_tower = false; continue; }
+        const std::string code = line.substr(0, line.find(';'));
+        if (code.rfind("M83", 0) == 0) { relative_e = true; continue; }
+        if (code.rfind("M82", 0) == 0) { relative_e = false; continue; }
+        if (!(code.rfind("G1 ", 0) == 0 || code.rfind("G0 ", 0) == 0))
+            continue;
+        double nx = x, ny = y, de = 0;
+        bool   has_e = false;
+        for (auto it = std::sregex_iterator(code.begin(), code.end(), word); it != std::sregex_iterator(); ++it) {
+            const char   axis = (*it)[1].str()[0];
+            const double v    = std::atof((*it)[2].str().c_str());
+            switch (axis) {
+            case 'X': nx = v; break;
+            case 'Y': ny = v; break;
+            case 'Z': z = v; break;
+            case 'F': f = v; break;
+            case 'E': has_e = true; de = relative_e ? v : v - e; if (!relative_e) e = v; break;
+            }
+        }
+        const bool moves_xy = std::abs(nx - x) > 1e-6 || std::abs(ny - y) > 1e-6;
+        if (in_tower && has_e && de > 1e-6 && moves_xy)
+            out.push_back({z, layer_z, f, nx, ny});
+        x = nx;
+        y = ny;
+    }
+    return out;
+}
+
+// A 20 mm cube with walls in filament 1 and sparse infill in filament 2 (solid infill in filament 1),
+// plus a 0.6 mm pad in filament 2. Layers 1-2 change filament (the pad), layers 3-6 are the cube's
+// single-filament bottom shell (sparse tower layers, skipped), every layer above changes filament
+// twice. So from layer 7 on the tower is printed well below the object and the nozzle has to come
+// back down to it after every toolchange. (The pad is what makes the plate count as two-filament:
+// Print::extruders() does not see per-feature filaments, and a one-filament plate drops the tower.)
+DynamicPrintConfig no_sparse_config()
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_num_extruders(2);
+    config.set_num_filaments(2);
+    config.set_deserialize_strict({
+        // A Bambu-style toolchange: lift clear of the print, then switch. The lift is what the
+        // compacted tower has to come back down from.
+        { "change_filament_gcode", "G1 Z{max_layer_z + 3.0} F1200\nT[next_extruder]\n" },
+        { "layer_height", 0.3 },
+        { "initial_layer_print_height", 0.3 },
+        { "wall_loops", 1 },
+        { "wall_filament", 1 },
+        { "sparse_infill_filament", 2 },
+        { "solid_infill_filament", 1 },
+        { "sparse_infill_density", "15%" },
+        { "bottom_shell_layers", 6 },
+        { "top_shell_layers", 0 },
+        { "enable_support", false },
+        { "skirt_loops", 0 },
+        { "enable_prime_tower", true },
+        { "wipe_tower_no_sparse_layers", true },
+        { "prime_tower_width", 30 },
+        { "prime_tower_brim_width", -1 },
+        { "wipe_tower_x", "140" },
+        { "wipe_tower_y", "140" },
+        { "travel_speed", 500 },
+        { "retraction_length", "0.8,0.8" },
+    });
+    return config;
+}
+
+std::string slice_bbl(const DynamicPrintConfig &config)
+{
+    Slic3r::Print print;
+    Slic3r::Model model;
+    ModelObject  *object = model.add_object();
+    object->name         = "cube.stl";
+    object->add_volume(Slic3r::Test::mesh(Slic3r::Test::TestMesh::cube_20x20x20));
+    object->add_instance()->set_offset(Vec3d(40., 40., 0.));
+    object->ensure_on_bed();
+    print.auto_assign_extruders(object);
+    ModelObject *pad = model.add_object();
+    pad->name        = "pad.stl";
+    pad->add_volume(make_cube(10., 10., 0.6));
+    pad->add_instance()->set_offset(Vec3d(80., 40., 0.));
+    pad->ensure_on_bed();
+    pad->config.set("extruder", 2);
+    print.apply(model, config);
+    print.is_BBL_printer() = true;
+    const StringObjectException err = print.validate();
+    INFO(err.string);
+    REQUIRE(err.string.empty());
+    return Slic3r::Test::gcode(print);
+}
+
+} // namespace
+
+TEST_CASE("No-sparse Bambu tower: compacted layers print at tower speed on a supported, brimmed base", "[WipeTower][NoSparseLayers]")
+{
+    const DynamicPrintConfig     config = no_sparse_config();
+    const std::string            gcode  = slice_bbl(config);
+    const std::vector<TowerMove> moves  = tower_moves(gcode);
+    REQUIRE(!moves.empty());
+
+    const double layer_height = 0.3;
+    const double travel_f     = 60. * 500.;
+
+    // The case only means something if the tower really was compacted below the object.
+    const bool compacted = std::any_of(moves.begin(), moves.end(),
+                                       [](const TowerMove &m) { return m.z < m.layer_z - 1e-3; });
+    REQUIRE(compacted);
+
+    SECTION("no tower extrusion runs at travel feedrate")
+    {
+        // The tower's own speeds top out at 90 mm/s (F5400); the first layer is slower still.
+        double worst = 0;
+        for (const TowerMove &m : moves)
+            worst = std::max(worst, m.f);
+        INFO("fastest tower extrusion F" << worst << ", travel F" << travel_f);
+        CHECK(worst <= 5400. + 1e-3);
+        CHECK(worst < travel_f);
+    }
+
+    SECTION("every tower layer sits exactly one layer on top of the last one")
+    {
+        // Compaction must never leave a gap under a tower layer (printing into air) nor print below it.
+        double top = 0;
+        for (const TowerMove &m : moves) {
+            if (m.z > top + 1e-3) {
+                INFO("tower layer at z " << m.z << " (object layer " << m.layer_z << "), tower top was " << top);
+                CHECK(m.z <= top + layer_height + 1e-3);
+                top = m.z;
+            } else {
+                INFO("tower extrusion at z " << m.z << " below the tower top " << top);
+                CHECK(m.z >= top - 1e-3);
+            }
+        }
+    }
+
+    SECTION("the first tower layer is on the bed and carries the auto brim")
+    {
+        const double first_z = std::min_element(moves.begin(), moves.end(),
+                                                [](const TowerMove &a, const TowerMove &b) { return a.z < b.z; })->z;
+        CHECK(std::abs(first_z - 0.3) < 1e-3);
+        double xmin = 1e9, xmax = -1e9;
+        for (const TowerMove &m : moves)
+            if (std::abs(m.z - first_z) < 1e-3) {
+                xmin = std::min(xmin, m.x);
+                xmax = std::max(xmax, m.x);
+            }
+        // The object is 20 mm tall, so the auto brim is 20 / 100 * 8 = 1.6 mm per side: the first
+        // layer must reach well past the 30 mm tower body. Without the brim it spans exactly 30 mm.
+        INFO("first tower layer spans " << (xmax - xmin) << " mm");
+        CHECK(xmax - xmin > 30. + 2.);
+    }
+}
