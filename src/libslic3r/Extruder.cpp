@@ -103,11 +103,14 @@ void Extruder::set_retracted(double retracted, double restart_extra)
     if (restart_extra < - EPSILON)
         throw Slic3r::RuntimeError("Custom G-code reports negative z_restart_extra.");
 
+    // Custom G-code writes e_retracted through this setter. On SEMM the live retract
+    // length lives in the shared scalar, so keep R/W on the same storage retract() uses.
+    double &retracted_state = m_share_extruder ? m_share_retracted : m_retracted;
     if (retracted > EPSILON) {
-        m_retracted     = retracted;
+        retracted_state = retracted;
         m_restart_extra = restart_extra < EPSILON ? 0 : restart_extra;
     } else {
-        m_retracted     = 0;
+        retracted_state = 0;
         m_restart_extra = 0;
     }
 }
