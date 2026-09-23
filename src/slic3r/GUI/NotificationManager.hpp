@@ -151,6 +151,8 @@ enum class NotificationType
     BBLPrinterConfigUpdateAvailable,
 	BBLUserPresetExceedLimit,
         FilamentIncompatibleMixed,
+    // EdgeSlicer: the one-time "turn on crash reports?" offer after a crash (GUI_App::post_init).
+    CrashReportOffer,
 };
 
 class NotificationManager
@@ -196,6 +198,9 @@ public:
                            std::function<bool(wxEvtHandler*)> callback = std::function<bool(wxEvtHandler*)>(), int timestamp = 0);
 	// Pushes basic_notification with delay. See push_delayed_notification_data.
 	void push_delayed_notification(const NotificationType type, std::function<bool(void)> condition_callback, int64_t initial_delay, int64_t delay_interval);
+	// EdgeSlicer: the crash-report offer. It asks a question, so it does not fade out; closing it
+	// is the "no".
+	void push_crash_report_offer(const std::string& text, const std::string& hypertext, std::function<bool(wxEvtHandler*)> callback);
 	// Removes all notifications of type from m_waiting_notifications
 	void stop_delayed_notifications_of_type(const NotificationType type);
 	// Creates Validate Error notification with a custom text and no fade out.

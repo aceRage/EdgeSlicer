@@ -50,6 +50,8 @@
 #include <boost/log/trivial.hpp>
 #include <boost/log/expressions.hpp>
 #include <boost/log/sinks/text_file_backend.hpp>
+#include <boost/log/sinks/basic_sink_backend.hpp>
+#include <boost/log/sinks/sync_frontend.hpp>
 #include <boost/log/utility/setup/file.hpp>
 #include <boost/log/utility/setup/common_attributes.hpp>
 #include <boost/log/sources/severity_logger.hpp>
@@ -366,6 +368,41 @@ void set_log_path_and_level(const std::string& file, unsigned int level)
 	set_logging_level(level);
 
 	return;
+}
+
+// A second consumer of log records next to the file sink: see set_log_observer() in Utils.hpp.
+namespace {
+class LogObserverBackend : public boost::log::sinks::basic_sink_backend<boost::log::sinks::synchronized_feeding>
+{
+public:
+    explicit LogObserverBackend(std::function<void(int, const std::string&)> fn) : m_fn(std::move(fn)) {}
+    void consume(const boost::log::record_view& rec)
+    {
+        auto severity = rec[logging::trivial::severity];
+        auto message  = rec[expr::smessage];
+        if (severity && message)
+            m_fn(int(severity.get()), message.get());
+    }
+
+private:
+    std::function<void(int, const std::string&)> m_fn;
+};
+boost::shared_ptr<boost::log::sinks::synchronous_sink<LogObserverBackend>> g_log_observer_sink;
+} // namespace
+
+void set_log_observer(std::function<void(int severity, const std::string& message)> observer, int min_severity)
+{
+    auto core = logging::core::get();
+    if (g_log_observer_sink) {
+        core->remove_sink(g_log_observer_sink);
+        g_log_observer_sink.reset();
+    }
+    if (!observer)
+        return;
+    auto backend        = boost::make_shared<LogObserverBackend>(std::move(observer));
+    g_log_observer_sink = boost::make_shared<boost::log::sinks::synchronous_sink<LogObserverBackend>>(backend);
+    g_log_observer_sink->set_filter(logging::trivial::severity >= logging::trivial::severity_level(min_severity));
+    core->add_sink(g_log_observer_sink);
 }
 
 void flush_logs()

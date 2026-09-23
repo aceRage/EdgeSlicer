@@ -272,9 +272,11 @@ function build_slicer() {
         mkdir -p "${DSYM_DIR}"
         
         # Generate dSYM for main app
-        if [ -f "${APP_MACOS_DIR}/Snapmaker_Orca" ]; then
-            echo "Generating dSYM for Snapmaker_Orca..."
-            dsymutil "${APP_MACOS_DIR}/Snapmaker_Orca" -o "${DSYM_DIR}/Snapmaker_Orca.dSYM" 2>/dev/null || echo "Warning: Failed to generate dSYM for Snapmaker_Orca (no debug symbols?)"
+        # The binary is EdgeSlicer since the rebrand (EXECUTABLE above); the old Snapmaker_Orca
+        # name matched nothing, so per-arch builds shipped without the main app's dSYM.
+        if [ -f "${EXECUTABLE}" ]; then
+            echo "Generating dSYM for EdgeSlicer..."
+            dsymutil "${EXECUTABLE}" -o "${DSYM_DIR}/EdgeSlicer.dSYM" 2>/dev/null || echo "Warning: Failed to generate dSYM for EdgeSlicer (no debug symbols?)"
         fi
         
         # Generate dSYM for crashpad_handler if it exists

@@ -18,6 +18,7 @@
 #include "Widgets/TextInput.hpp"
 #include <wx/listimpl.cpp>
 #include <wx/display.h>
+#include <wx/hyperlink.h>
 #include <algorithm>
 #include <map>
 #include <memory>
@@ -1209,6 +1210,12 @@ wxBoxSizer *PreferencesDialog::create_item_checkbox(wxString title, wxWindow *pa
         if (param == "allow_filament_temp_mixing" && wxGetApp().plater())
             wxGetApp().plater()->notify_filament_usage_changed();
 
+        // Opt-in crash reports: takes effect at once, through Sentry's consent switch.
+        if (param == "send_crash_reports") {
+            setSentryUserConsent(checkbox->GetValue());
+            BOOST_LOG_TRIVIAL(warning) << "crash reports switched " << (checkbox->GetValue() ? "on" : "off") << " in Preferences";
+        }
+
         if (param == PRIVACY_POLICY_FLAGS)
             {
             app_config->set("app", PRIVACY_POLICY_FLAGS, checkbox->GetValue());
@@ -1834,9 +1841,33 @@ wxWindow* PreferencesDialog::create_general_page()
 #endif
 
     // The "User Experience" section ("Join Customer Experience Improvement Program", linking to
-    // Snapmaker's privacy policy) is gone: EdgeSlicer runs no such program. The flag it wrote
-    // (privacy_policy_isagree) only ever gated Sentry uploads, which additionally need a
-    // maintainer's own "ultra_sentry_dsn" - none ships - so nothing was being collected.
+    // Snapmaker's privacy policy) is gone: EdgeSlicer runs no such program. What replaced it is
+    // the one thing EdgeSlicer can send, opt-in crash reports (docs/privacy.md).
+    auto title_privacy = create_item_title(_L("Privacy"), page, _L("Privacy"));
+    const wxString crash_reports_what =
+        _L("When EdgeSlicer crashes, send a crash report to its developers (via Sentry): the crash stack trace, "
+           "the app version, your operating system and the last warning and error lines of the app log. IP addresses, "
+           "host names, printer serial numbers, access codes, passwords, tokens, e-mail addresses and the user name in "
+           "file paths are removed from the log lines first. Nothing is sent while this is off, and EdgeSlicer sends no "
+           "usage statistics either way.");
+    auto item_crash_reports = create_item_checkbox(_L("Send crash reports"), page, crash_reports_what, 50, "send_crash_reports");
+    auto crash_reports_link = new wxHyperlinkCtrl(page, wxID_ANY, _L("What is sent (privacy note)"),
+                                                  "https://github.com/aceRage/EdgeSlicer/blob/main/docs/privacy.md");
+    crash_reports_link->SetFont(Label::Head_13);
+    item_crash_reports->Add(crash_reports_link, 0, wxALIGN_CENTER | wxLEFT, FromDIP(10));
+    auto crash_reports_text = new wxStaticText(page, wxID_ANY, crash_reports_what);
+    crash_reports_text->SetForegroundColour(DESIGN_GRAY600_COLOR);
+    crash_reports_text->SetFont(::Label::Body_12);
+    crash_reports_text->Wrap(FromDIP(560));
+    if (!sentryCrashReportsAvailable()) {
+        // A local or fork build has no destination: say so rather than offer a switch that
+        // could not send anything.
+        if (wxSizerItem* cb = item_crash_reports->GetItem(size_t(1)); cb != nullptr && cb->GetWindow() != nullptr)
+            cb->GetWindow()->Disable();
+        crash_reports_text->SetLabel(crash_reports_what + "\n" +
+                                     _L("This build was made without a crash-report destination, so it cannot send any."));
+        crash_reports_text->Wrap(FromDIP(560));
+    }
 
     auto title_develop_mode = create_item_title(_L("Develop mode"), page, _L("Develop mode"));
     auto item_develop_mode  = create_item_checkbox(_L("Develop mode"), page, _L("Develop mode"), 50, "developer_mode");
@@ -1919,6 +1950,9 @@ wxWindow* PreferencesDialog::create_general_page()
     sizer_page->Add(item_darkmode, 0, wxEXPAND, FromDIP(3));
 #endif
 
+    sizer_page->Add(title_privacy, 0, wxTOP | wxEXPAND, FromDIP(20));
+    sizer_page->Add(item_crash_reports, 0, wxTOP, FromDIP(3));
+    sizer_page->Add(crash_reports_text, 0, wxLEFT | wxTOP, FromDIP(50));
     sizer_page->Add(title_develop_mode, 0, wxTOP | wxEXPAND, FromDIP(20));
     sizer_page->Add(item_develop_mode, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_skip_ams_blacklist_check, 0, wxTOP, FromDIP(3));

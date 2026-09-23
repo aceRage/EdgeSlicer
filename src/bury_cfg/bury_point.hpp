@@ -66,6 +66,10 @@
     BURY_API bool get_sentry_flags();
     BURY_API void set_sentry_flags(bool flags);
 
+    // Whether a crash-report destination exists in this build (see bury_point.cpp).
+    BURY_API bool get_crash_reports_available();
+    BURY_API void set_crash_reports_available(bool available);
+
     BURY_API bool               get_privacy_policy();
     BURY_API void               set_privacy_policy(bool isAgree);
     BURY_API std::string get_timestamp_seconds();

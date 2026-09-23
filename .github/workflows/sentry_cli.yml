@@ -1,186 +1,175 @@
 name: Upload Debug Symbols to Sentry
 
+# Reusable workflow: build_deps.yml calls it after build_orca.yml, with `secrets: inherit`.
+#
+# What it does: installs a pinned, checksum-verified sentry-cli, uploads the build's debug
+# symbols (Windows: the PDBs plus EdgeSlicer.exe/.dll and the Sentry/crashpad binaries; macOS:
+# the dSYMs), and on release refs creates and finalizes the Sentry release named exactly as the
+# app reports it (edgeslicer@<Snapmaker_VERSION>, see src/sentry_wrapper/SentryWrapper.cpp).
+#
+# What it never does: fail the calling workflow. Without SENTRY_AUTH_TOKEN / SENTRY_ORG /
+# SENTRY_PROJECT (forks, pull requests from forks) every step after the check is skipped and the
+# job is green with a notice. With them, a Sentry outage turns the upload step red, but the job is
+# continue-on-error, so the build's artifacts and status are untouched; the failure is in the log.
+
 on:
   workflow_call:
     inputs:
       os:
         required: true
         type: string
-        description: "Target OS: windows-2022, macos-14, ubuntu-20.04, ubuntu-24.04"
+        description: "Runner: windows-2022 or macos-14 (Linux builds carry no crash handler)"
       pdb-artifact-name:
         required: false
         type: string
-        description: "Artifact name for Windows PDB archive (e.g., 'PDB')"
+        default: ''
+        description: "Windows: artifact holding the Debug_PDB_*.7z archive (e.g. 'PDB')"
+      portable-artifact-name:
+        required: false
+        type: string
+        default: ''
+        description: "Windows: artifact holding the portable tree (EdgeSlicer.exe, EdgeSlicer.dll, sentry.dll, crashpad_handler.exe)"
       dsym-artifact-name:
         required: false
         type: string
-        description: "Artifact name for macOS dSYM archive (e.g., 'dSYM_Mac_V1.0.0')"
+        default: ''
+        description: "macOS: artifact holding the *.dSYM bundles"
       release:
         required: true
         type: string
-        description: "Release version/tag"
+        description: "Sentry release name, e.g. edgeslicer@2.4.0.0 - must match what the app reports"
+      create-release:
+        required: false
+        type: boolean
+        default: false
+        description: "Create and finalize the Sentry release (release refs only; symbols are uploaded either way)"
 
 jobs:
   upload_symbols:
     name: Upload Debug Symbols to Sentry
     runs-on: ${{ inputs.os }}
+    # Symbol upload is a convenience for crash triage, never a reason to fail a build.
+    continue-on-error: true
+    env:
+      # Pinned. To update: take the version and the per-asset sha256 digests from
+      # https://api.github.com/repos/getsentry/sentry-cli/releases/tags/<version>.
+      SENTRY_CLI_VERSION: '3.8.0'
+      SENTRY_CLI_SHA256_WINDOWS: '2257cf6805a616f5c3ee291a549ebbba021190048b646adc006beb4e8cdef7fd'
+      SENTRY_CLI_SHA256_MACOS: '2c26914636c47ab9bf9e710484ad7b44d371cbec8bd29cafb36b3cf877bf4285'
+      SENTRY_CLI_SHA256_LINUX: '13f8cb34ae01a6a272d7d7c22e277a105286615b4020de900ea95a8de47cdbb6'
+      # sentry-cli reads these three from the environment; they never appear on a command line.
+      SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+      SENTRY_ORG: ${{ secrets.SENTRY_ORG }}
+      SENTRY_PROJECT: ${{ secrets.SENTRY_PROJECT }}
+      SENTRY_RELEASE_NAME: ${{ inputs.release }}
     steps:
-      # ==================== Windows ====================
-      - name: "[Windows] Install sentry-cli via choco"
-        if: inputs.os == 'windows-2022'
-        shell: pwsh
+      - name: Check Sentry configuration
+        id: cfg
+        shell: bash
         run: |
-          choco install sentry-cli -y -y 2>&1 | Out-Null
+          if [ -z "$SENTRY_AUTH_TOKEN" ] || [ -z "$SENTRY_ORG" ] || [ -z "$SENTRY_PROJECT" ]; then
+            echo "::notice::SENTRY_AUTH_TOKEN / SENTRY_ORG / SENTRY_PROJECT are not available here (fork or fork PR?) - skipping the symbol upload."
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Sentry symbol upload enabled for release ${SENTRY_RELEASE_NAME}"
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          fi
 
+      - name: Install sentry-cli (pinned, sha256-verified)
+        if: steps.cfg.outputs.enabled == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$RUNNER_OS" in
+            Windows) asset="sentry-cli-Windows-x86_64.exe"; want="$SENTRY_CLI_SHA256_WINDOWS"; exe="sentry-cli.exe" ;;
+            macOS)   asset="sentry-cli-Darwin-universal";   want="$SENTRY_CLI_SHA256_MACOS";   exe="sentry-cli" ;;
+            Linux)   asset="sentry-cli-Linux-x86_64";       want="$SENTRY_CLI_SHA256_LINUX";   exe="sentry-cli" ;;
+            *) echo "::error::unsupported runner OS $RUNNER_OS"; exit 1 ;;
+          esac
+          dir="$RUNNER_TEMP/sentry-cli"
+          mkdir -p "$dir"
+          url="https://github.com/getsentry/sentry-cli/releases/download/${SENTRY_CLI_VERSION}/${asset}"
+          echo "downloading $url"
+          curl -fsSL --retry 3 --max-time 300 -o "$dir/$exe" "$url"
+          got=$( (sha256sum "$dir/$exe" 2>/dev/null || shasum -a 256 "$dir/$exe") | cut -d' ' -f1)
+          if [ "$got" != "$want" ]; then
+            echo "::error::sentry-cli sha256 mismatch (got $got, want $want) - not running it"
+            rm -f "$dir/$exe"
+            exit 1
+          fi
+          chmod +x "$dir/$exe"
+          echo "$dir" >> "$GITHUB_PATH"
+          "$dir/$exe" --version
+
+      # ==================== Windows ====================
       - name: "[Windows] Download PDB artifact"
-        if: inputs.os == 'windows-2022'
+        if: steps.cfg.outputs.enabled == 'true' && runner.os == 'Windows' && inputs.pdb-artifact-name != ''
         uses: actions/download-artifact@v4
         with:
           name: ${{ inputs.pdb-artifact-name }}
-          path: ./symbols
+          path: ./symbols/pdb
 
-      - name: "[Windows] Extract PDB archive"
-        if: inputs.os == 'windows-2022'
-        shell: pwsh
+      - name: "[Windows] Download portable tree"
+        if: steps.cfg.outputs.enabled == 'true' && runner.os == 'Windows' && inputs.portable-artifact-name != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.portable-artifact-name }}
+          path: ./symbols/portable
+
+      - name: "[Windows] Collect symbol files"
+        if: steps.cfg.outputs.enabled == 'true' && runner.os == 'Windows'
+        shell: bash
         run: |
-          $archive = Get-ChildItem -Path ./symbols -Filter "*.7z" -File | Select-Object -First 1
-          if ($archive) {
-            Write-Host "Found archive: $($archive.FullName)"
-            Write-Host "Extracting to ./symbols/extracted ..."
-            7z x "$($archive.FullName)" -o"./symbols/extracted" -y
-            if ($LASTEXITCODE -ne 0) {
-              Write-Host "::error::Failed to extract archive with exit code $LASTEXITCODE"
-              exit $LASTEXITCODE
-            }
-            Write-Host "Extraction complete. Contents:"
-            Get-ChildItem -Path ./symbols/extracted -Recurse | ForEach-Object { Write-Host "  $($_.FullName)" }
-          } else {
-            Write-Host "No .7z archive found, assuming PDB files are already extracted"
-            Get-ChildItem -Path ./symbols -Recurse | ForEach-Object { Write-Host "  Found: $($_.FullName)" }
-          }
-
-      - name: "[Windows] Upload PDB to Sentry (sentry-cli)"
-        if: inputs.os == 'windows-2022'
-        shell: pwsh
-        env:
-          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
-          SENTRY_ORG: ${{ secrets.SENTRY_ORG }}
-          SENTRY_PROJECT: ${{ secrets.SENTRY_PROJECT }}
-          SENTRY_LOG_LEVEL: debug
-        run: |
-          # See the macOS step: without credentials sentry-cli is called with an empty --org
-          # and fails the release run. Symbol upload is optional.
-          if ([string]::IsNullOrEmpty($env:SENTRY_AUTH_TOKEN) -or [string]::IsNullOrEmpty($env:SENTRY_ORG) -or [string]::IsNullOrEmpty($env:SENTRY_PROJECT)) {
-            Write-Host "::notice::SENTRY_AUTH_TOKEN/SENTRY_ORG/SENTRY_PROJECT are not configured; skipping PDB upload."
-            exit 0
-          }
-
-          # Determine upload path - prefer extracted folder if it exists
-          $uploadPath = "./symbols"
-          if (Test-Path "./symbols/extracted") {
-            $uploadPath = "./symbols/extracted"
-          }
-          
-          $pdbFiles = Get-ChildItem -Path $uploadPath -Filter "*.pdb" -File -Recurse
-          if ($pdbFiles.Count -gt 0) {
-            Write-Host "Found $($pdbFiles.Count) PDB file(s) to upload from $uploadPath :"
-            $pdbFiles | ForEach-Object { Write-Host "  - $($_.FullName)" }
-            Write-Host ""
-            Write-Host "Starting Sentry upload with debug logging..."
-            sentry-cli.exe --log-level=debug --auth-token $env:SENTRY_AUTH_TOKEN upload-dif --org "$env:SENTRY_ORG" --project "$env:SENTRY_PROJECT" $uploadPath 2>&1 | Out-Host
-            if ($LASTEXITCODE -ne 0) {
-              Write-Host "::error::Sentry upload failed with exit code $LASTEXITCODE"
-              exit $LASTEXITCODE
-            }
-          } else {
-            Write-Host "::error::No PDB files found in $uploadPath"
-            Get-ChildItem -Path ./symbols -Recurse | ForEach-Object { Write-Host "  Found: $($_.FullName)" }
-            exit 1
-          }
+          set -euo pipefail
+          mkdir -p ./symbols/upload
+          for a in ./symbols/pdb/*.7z; do
+            [ -f "$a" ] || continue
+            echo "extracting $a"
+            7z x "$a" -o"./symbols/upload" -y > /dev/null
+          done
+          # The PE files carry the unwind tables Sentry needs to walk a minidump's stacks; the
+          # PDBs carry names and lines. Only EdgeSlicer's own binaries and the crash handler:
+          # third-party DLLs have no symbols to offer.
+          for f in EdgeSlicer.exe EdgeSlicer.dll sentry.dll crashpad_handler.exe crashpad_wer.dll; do
+            if [ -f "./symbols/portable/$f" ]; then cp "./symbols/portable/$f" ./symbols/upload/; fi
+          done
+          echo "files to upload:"
+          ls -la ./symbols/upload
 
       # ==================== macOS ====================
-      - name: "[macOS] Install sentry-cli"
-        if: inputs.os == 'macos-14'
-        run: |
-          # Try multiple installation methods for reliability
-          # Method 1: Official install script (most reliable)
-          if ! command -v sentry-cli &> /dev/null; then
-            echo "Installing sentry-cli via official script..."
-            curl -sL https://sentry.io/get-cli/ | bash || true
-          fi
-          
-          # Method 2: npm fallback
-          if ! command -v sentry-cli &> /dev/null; then
-            echo "Official script failed, trying npm..."
-            npm install -g @sentry/cli || true
-          fi
-          
-          # Method 3: Direct binary download fallback
-          if ! command -v sentry-cli &> /dev/null; then
-            echo "npm failed, downloading binary directly..."
-            SENTRY_CLI_VERSION=$(curl -s https://api.github.com/repos/getsentry/sentry-cli/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
-            curl -sL "https://github.com/getsentry/sentry-cli/releases/download/${SENTRY_CLI_VERSION}/sentry-cli-Darwin-universal" -o /usr/local/bin/sentry-cli
-            chmod +x /usr/local/bin/sentry-cli
-          fi
-          
-          # Verify installation
-          if command -v sentry-cli &> /dev/null; then
-            echo "sentry-cli installed successfully:"
-            sentry-cli --version
-          else
-            echo "::error::Failed to install sentry-cli via all methods"
-            exit 1
-          fi
-
       - name: "[macOS] Download dSYM artifact"
-        if: inputs.os == 'macos-14'
+        if: steps.cfg.outputs.enabled == 'true' && runner.os == 'macOS' && inputs.dsym-artifact-name != ''
         uses: actions/download-artifact@v4
         with:
           name: ${{ inputs.dsym-artifact-name }}
-          path: ./symbols
+          path: ./symbols/upload
 
-      - name: "[macOS] Upload dSYM to Sentry (sentry-cli)"
-        if: inputs.os == 'macos-14'
+      - name: "[macOS] List dSYMs"
+        if: steps.cfg.outputs.enabled == 'true' && runner.os == 'macOS'
+        shell: bash
+        run: find ./symbols/upload -maxdepth 1 -name "*.dSYM" -print || true
+
+      # ==================== all ====================
+      - name: Upload symbols and tag the release
+        if: steps.cfg.outputs.enabled == 'true'
+        # Sentry being down must not cost the build: this step may go red, the job stays green.
+        continue-on-error: true
+        shell: bash
         env:
-          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
-          SENTRY_ORG: ${{ secrets.SENTRY_ORG }}
-          SENTRY_PROJECT: ${{ secrets.SENTRY_PROJECT }}
-          SENTRY_LOG_LEVEL: debug
+          CREATE_RELEASE: ${{ inputs.create-release }}
         run: |
-          # A fork without Sentry credentials would otherwise call sentry-cli with an empty
-          # --org and fail the whole release run on "organization not found". Symbol upload is
-          # optional; the build artifacts do not depend on it.
-          if [ -z "$SENTRY_AUTH_TOKEN" ] || [ -z "$SENTRY_ORG" ] || [ -z "$SENTRY_PROJECT" ]; then
-            echo "::notice::SENTRY_AUTH_TOKEN/SENTRY_ORG/SENTRY_PROJECT are not configured; skipping dSYM upload."
-            exit 0
+          set -uo pipefail
+          status=0
+          if [ "$CREATE_RELEASE" = "true" ]; then
+            sentry-cli releases new "$SENTRY_RELEASE_NAME" || { echo "::warning::sentry-cli releases new failed"; status=1; }
           fi
-
-          echo "Checking for dSYM files in ./symbols..."
-          find ./symbols -name "*.dSYM" -type d | while read dsym; do
-            echo "Found dSYM: $dsym"
-          done
-          
-          dsymCount=$(find ./symbols -name "*.dSYM" -type d | wc -l | tr -d ' ')
-          if [ "$dsymCount" -gt 0 ]; then
-            echo "Found $dsymCount dSYM file(s) to upload from ./symbols:"
-            find ./symbols -name "*.dSYM" -type d | while read dsym; do
-              echo "  - $dsym"
-            done
-            echo ""
-            echo "Starting Sentry upload with debug logging..."
-            # upload-dif does not support --release flag, it auto-associates with releases
-            sentry-cli --log-level=debug --auth-token "$SENTRY_AUTH_TOKEN" upload-dif --org "$SENTRY_ORG" --project "$SENTRY_PROJECT" ./symbols
-            UPLOAD_EXIT_CODE=$?
-            if [ $UPLOAD_EXIT_CODE -ne 0 ]; then
-              echo "::error::Sentry upload failed with exit code $UPLOAD_EXIT_CODE"
-              exit 1
-            fi
+          if [ -z "$(ls -A ./symbols/upload 2>/dev/null)" ]; then
+            echo "::warning::no symbol files were found to upload"
+            status=1
           else
-            echo "::error::No dSYM files found in ./symbols"
-            echo "Contents of ./symbols:"
-            find ./symbols -type f -o -type d | head -20
-            exit 1
+            sentry-cli --log-level=info debug-files upload ./symbols/upload || { echo "::warning::sentry-cli debug-files upload failed - crash reports from this build will not symbolicate until its symbols are uploaded"; status=1; }
           fi
-
-      # ==================== Linux ====================
-
+          if [ "$CREATE_RELEASE" = "true" ]; then
+            sentry-cli releases finalize "$SENTRY_RELEASE_NAME" || { echo "::warning::sentry-cli releases finalize failed"; status=1; }
+          fi
+          exit $status

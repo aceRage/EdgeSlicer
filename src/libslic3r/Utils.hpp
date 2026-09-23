@@ -170,6 +170,12 @@ std::string debug_out_path(const char *name, ...);
 // smaller level means less log. level=5 means saving all logs.
 void set_log_path_and_level(const std::string& file, unsigned int level);
 
+// Hands every log record of min_severity or worse (boost::log::trivial levels: 3 warning,
+// 4 error, 5 fatal) to `observer` as (severity, message), on the thread that logged it, in
+// addition to the log file. One observer at a time; an empty function removes it. Used to keep
+// a short, scrubbed tail of the log for opt-in crash reports (sentry_wrapper/SentryWrapper.cpp).
+void set_log_observer(std::function<void(int severity, const std::string& message)> observer, int min_severity);
+
 /*
  * TODO : This interface may have truncation issues.
  */
