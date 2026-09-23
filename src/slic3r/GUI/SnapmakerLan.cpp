@@ -45,7 +45,7 @@ std::string base_url(const Device& d)
 static bool get_json(const std::string& url, json& out, std::string& error, int timeout_s = 4)
 {
     bool ok = false;
-    Http::get(url)
+    Http::get(url).tls_policy(Http::TlsPolicy::PrintHost) // printer: keep accepting self-signed certificates
         .timeout_connect(timeout_s)
         .timeout_max(timeout_s)
         .on_complete([&](std::string body, unsigned) {
@@ -710,7 +710,7 @@ bool upload(const Device& d, const std::string& source_path, const std::string& 
     bool ok = false;
     // print=false always: a print that will not start must still leave a file the person can use
     // from the printer's own screen.
-    Http::post(base_url(d) + "/server/files/upload")
+    Http::post(base_url(d) + "/server/files/upload").tls_policy(Http::TlsPolicy::PrintHost) // printer: keep accepting self-signed certificates
         .timeout_connect(10)
         .form_add("print", "false")
         .form_add("root", "gcodes")
@@ -767,7 +767,7 @@ bool metadata(const Device& d, const std::string& filename, long long& size, std
 bool run_script(const Device& d, const std::string& script, std::string& error)
 {
     bool ok = false;
-    Http::post(base_url(d) + "/printer/gcode/script?script=" + Http::url_encode(script))
+    Http::post(base_url(d) + "/printer/gcode/script?script=" + Http::url_encode(script)).tls_policy(Http::TlsPolicy::PrintHost) // printer: keep accepting self-signed certificates
         .timeout_connect(5)
         .timeout_max(60) // the printer answers a script only once it has run it
         // Everything is in the query string, but the body has to be set: without it the Http
@@ -921,7 +921,7 @@ bool start_print_mapped(const Device& d, const std::string& filename, const std:
 bool start_print(const Device& d, const std::string& filename, std::string& error)
 {
     bool ok = false;
-    Http::post(base_url(d) + "/printer/print/start?filename=" + Http::url_encode(filename))
+    Http::post(base_url(d) + "/printer/print/start?filename=" + Http::url_encode(filename)).tls_policy(Http::TlsPolicy::PrintHost) // printer: keep accepting self-signed certificates
         .timeout_connect(5)
         .timeout_max(30)
         .header("Content-Type", "application/json")

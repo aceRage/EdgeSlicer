@@ -73,6 +73,16 @@ public:
 
 	typedef std::function<void(std::string headers)> HeaderCallbackFn;
 
+	// Whether a request checks the server's TLS certificate (CURLOPT_SSL_VERIFYPEER/VERIFYHOST).
+	//  Auto      - the default: verify for internet hosts, not for loopback / private / LAN
+	//              addresses and names (see tls_host_is_private()).
+	//  Verify    - always verify, whatever the host.
+	//  PrintHost - never verify. For printers, their cameras and other user-run LAN services
+	//              (OctoPrint, Moonraker, PrusaLink, Duet, FlashForge, Snapmaker U1, Spoolman...),
+	//              which very often present self-signed certificates, even behind a public name.
+	//              This is how every request behaved before 2026-09-22.
+	enum class TlsPolicy { Auto, Verify, PrintHost };
+
 	Http(Http &&other);
 
 	// Note: strings are expected to be UTF-8-encoded
@@ -133,6 +143,8 @@ public:
 	// specifically, this is supported with OpenSSL and NOT supported with Windows and OS X native certificate store.
 	// See also ca_file_supported().
 	Http& ca_file(const std::string &filename);
+	// Overrides the certificate policy of this request; the default is TlsPolicy::Auto.
+	Http& tls_policy(TlsPolicy policy);
 
 	Http& form_clear();
 	// Add a HTTP multipart form field
@@ -148,11 +160,11 @@ public:
 	// Same as above except also override the file's filename with a custom one
 	Http& form_add_file(const std::string &name, const boost::filesystem::path &path, const std::string &filename, boost::filesystem::ifstream::off_type offset = 0, size_t length = 0);
 
-#ifdef WIN32
-	// Tells libcurl to ignore certificate revocation checks in case of missing or offline distribution points for those SSL backends where such behavior is present.
-	// This option is only supported for Schannel (the native Windows SSL library).
+	// "printhost_ssl_ignore_revoke": asks libcurl to skip certificate revocation checks
+	// (CURLSSLOPT_NO_REVOKE) on verified requests. libcurl implements revocation checks only for
+	// Schannel; ours is built on OpenSSL, which does not check revocation at all, so this changes
+	// nothing today and is kept so the setting stays harmless if the backend ever changes.
 	Http& ssl_revoke_best_effort(bool set);
-#endif // WIN32
 
 	// Set the file contents as a POST request body.
 	// The data is used verbatim, it is not additionally encoded in any way.
@@ -203,6 +215,21 @@ public:
     // Return empty string on success or error message on fail.
     static std::string tls_global_init();
     static std::string tls_system_cert_store();
+
+	// The certificate policy, as pure functions (unit-tested in tests/slic3rutils/http_tls_policy_tests.cpp).
+	// Host part of a URL, lower-cased, without userinfo, port, IPv6 brackets or a trailing dot.
+	static std::string url_host(const std::string &url);
+	// True for hosts on this machine or the local network: localhost, loopback, RFC 1918, link-local,
+	// CGNAT/Tailscale (100.64/10), IPv6 ULA and link-local, single-label names and the usual LAN
+	// suffixes (.local, .lan, .home, .internal, .localdomain, .home.arpa, .ts.net).
+	static bool tls_host_is_private(const std::string &host);
+	// Whether a request to `url` under `policy` verifies the certificate. Plain http never does.
+	// A request given its own CA file (ca_file(), e.g. a printer's "printhost_cafile") always
+	// verifies over TLS, against that CA file alone, whatever the policy.
+	static bool tls_verify_for(const std::string &url, TlsPolicy policy, bool has_ca_file = false);
+	// For the few places that drive libcurl directly: applies the same policy and CA source to an
+	// easy handle (a ::CURL*, passed as void* so this header does not need curl.h).
+	static void apply_tls_policy(void *curl_handle, const std::string &url, TlsPolicy policy = TlsPolicy::Auto);
 
 	// converts the given string to an url_encoded_string
 	static std::string url_encode(const std::string &str);

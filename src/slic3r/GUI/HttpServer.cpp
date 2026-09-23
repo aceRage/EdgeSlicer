@@ -1066,7 +1066,7 @@ std::string HttpServer::map_url_to_file_path(const std::string& url)
     }
 
     if (trimmed_url == "/") {
-        trimmed_url = "/flutter_web/index.html"; // defualt home page
+        trimmed_url = "/web/flutter_web/index.html"; // default home page
     }
     else if (trimmed_url.substr(0, 11) == "/localfile/") {
         auto real_path = trimmed_url.substr(11);
@@ -1099,22 +1099,11 @@ std::string HttpServer::map_url_to_file_path(const std::string& url)
 
         return decoded;
     }
-    auto data_web_path = boost::filesystem::path(data_dir()) / "web";
-    if (!boost::filesystem::exists(data_web_path / "flutter_web")) {
-        if (!GUI::wxGetApp().copy_bundled_flutter_web(false))
-            GUI::wxGetApp().try_notify_flutter_web_copy_failure();
-    }
+    // Every page, the flutter ones included, comes from the installed resources. Upstream served
+    // /web/flutter_web/ from a copy in the data dir, which Snapmaker's update feed could replace
+    // with its own build; that copy (if one is still there) is no longer read.
+    wxString res = wxString::FromUTF8(resources_dir()) + trimmed_url;
 
-    wxString res = "";
-    if (trimmed_url.find("flutter_web") == std::string::npos) 
-    {
-       res = wxString::FromUTF8(resources_dir()) + trimmed_url;
-    }
-    else
-    {
-       res = wxString::FromUTF8(data_dir()) + trimmed_url;
-    }
- 
     auto strUTF8 = res.ToStdString(wxConvUTF8);
 
     if (strUTF8.empty())

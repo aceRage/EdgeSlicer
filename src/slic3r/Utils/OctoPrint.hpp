@@ -114,6 +114,9 @@ public:
     bool get_storage(wxArrayString& storage_path, wxArrayString& storage_name) const override { return false; }
 protected:
     void set_http_post_header_args(Http& http, PrintHostPostUploadAction post_action) const override;
+    // connect.prusa3d.com is Prusa's public cloud, not a printer: always verify its certificate.
+    // (OctoPrint and PrusaLink hosts on the LAN keep the printer default.)
+    Http::TlsPolicy tls_policy_without_ca() const override { return Http::TlsPolicy::Verify; }
 };
 
 class SL1Host : public PrusaLink

@@ -40,14 +40,13 @@ namespace Slic3r {
 
 // The app's own new-version check lives in slic3r/Utils/AppUpdateCheck (GitHub release feed of
 // aceRage/EdgeSlicer); the upstream Snapmaker/OrcaSlicer GitHub URLs and the Snapmaker
-// /upgrade/orca/ app-update paths that used to sit here are gone. What remains below is the
-// profile and web-resource (flutter) update feed, which still points at Snapmaker's server.
-static const std::string PROFILE_UPDATE_URL = "/upgrade/profile/";
-static const std::string FLUTTER_UPDATE_URL = "/upgrade/flutter/";
+// /upgrade/orca/ app-update paths that used to sit here are gone.
+// 2026-09-22: so are Snapmaker's profile and web-resource feeds (meta-cfg.snapmaker.com / .cn,
+// /upgrade/profile/<lang>/version.json and /upgrade/flutter/<lang>/version.json). The profile feed
+// replaced data_dir/system/Snapmaker with Snapmaker's own package whenever its version was higher,
+// reverting our shipped profile fixes; the flutter feed replaced our bundled web pages with
+// Snapmaker's. Both now default to nothing; see get_preset_upgrade_url() for the override.
 static const std::string MODELS_STR = "models";
-
-#define APP_UPDATE_URL_BASE_CN "https://meta-cfg.snapmaker.cn"
-#define APP_UPDATE_URL_BASE_EN "https://meta-cfg.snapmaker.com"
 
 
 const std::string AppConfig::SECTION_FILAMENTS = "filaments";
@@ -1634,41 +1633,22 @@ std::string AppConfig::config_path()
     return path;
 }
 
+// The profile update feed: only a self-hosted server named in the ini ("profile_upgrade_url",
+// the full URL of a version.json in Snapmaker's schema) - there is no default any more. Empty
+// means the app never asks anyone for profile packages; the profiles it uses are the ones it
+// ships in resources/profiles. (PresetUpdater also ignores a package Snapmaker's server left in
+// data_dir/ota/profiles while this is empty.)
 std::string AppConfig::get_preset_upgrade_url() 
 {
-    std::string resourceUrl = get("profile_upgrade_url");
-    
-    if(!resourceUrl.empty())
-        return resourceUrl;
-    
-    std::string localLanguage = get("language");
-    if (localLanguage != "zh_CN")
-        localLanguage = "en";
-    std::string url = APP_UPDATE_URL_BASE_EN + PROFILE_UPDATE_URL + localLanguage + std::string("/version.json");
-    auto countryArea = get_country_code();
-    if (countryArea == std::string("CN"))
-        url = APP_UPDATE_URL_BASE_CN + PROFILE_UPDATE_URL + localLanguage + std::string("/version.json");
-
-    return url;
+    return get("profile_upgrade_url");
 }
 
+// The web-resource (flutter_web) feed. Kept for reference only: EdgeSlicer serves the flutter pages
+// from its installed resources and never downloads replacements (PresetUpdater::sync_web_async is
+// a no-op), so even a "flutter_upgrade_url" in the ini is not used.
 std::string AppConfig::get_web_resource_upgrade_url()
 {
-    
-    std::string resourceUrl = get("flutter_upgrade_url");
-    
-    if(!resourceUrl.empty())
-        return resourceUrl;
-    
-    std::string localLanguage = get("language");
-    if (localLanguage != "zh_CN")
-        localLanguage = "en";
-    std::string url  = APP_UPDATE_URL_BASE_EN + FLUTTER_UPDATE_URL + localLanguage + std::string("/version.json");
-    auto countryArea = get_country_code();
-    if (countryArea == std::string("CN"))
-        url = APP_UPDATE_URL_BASE_CN + FLUTTER_UPDATE_URL + localLanguage + std::string("/version.json");
-
-    return url;
+    return get("flutter_upgrade_url");
 }
 
 std::string AppConfig::get_version_upgrade_url(bool stable_only /* = false*/) 

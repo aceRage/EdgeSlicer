@@ -134,6 +134,7 @@ void StreamPanel::OnScriptMessage(wxWebViewEvent& evt)
             });
         };
         auto http = Http::post("http://" + ip + ":8898/detail");
+        http.tls_policy(Http::TlsPolicy::PrintHost); // printer: keep accepting self-signed certificates
         http.timeout_connect(4)
             .timeout_max(8)
             .header("Content-Type", "application/json")

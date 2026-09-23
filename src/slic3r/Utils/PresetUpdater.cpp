@@ -294,6 +294,10 @@ struct PresetUpdater::priv
 
 	bool enabled_version_check;
 	bool enabled_config_update;
+	// The profile update server, from AppConfig::get_preset_upgrade_url(): empty unless the ini
+	// names a self-hosted one. Empty = never download profile packages, and ignore any package a
+	// previous version downloaded from Snapmaker's server into ota/profiles.
+	std::string remote_profile_url;
 
 	fs::path cache_path;
 	fs::path rsrc_path;
@@ -370,11 +374,14 @@ PresetUpdater::priv::priv()
 // Pull relevant preferences from AppConfig
 void PresetUpdater::priv::set_download_prefs(AppConfig *app_config)
 {
-	auto profile_update_url = app_config->get_preset_upgrade_url();
-	if (!profile_update_url.empty())
-		enabled_config_update = true;
-	else
-		enabled_config_update = false;
+	// enabled_config_update also selects how check_installed_vendor_profiles() refreshes
+	// data_dir/system from resources/profiles (only newer bundles, removing disabled vendors), so it
+	// stays on whether or not a profile server is configured. It used to follow the server URL,
+	// which was always set (Snapmaker's meta-cfg), so this keeps the behaviour everyone had.
+	enabled_config_update = true;
+	remote_profile_url    = app_config->get_preset_upgrade_url();
+	BOOST_LOG_TRIVIAL(info) << "[Orca Updater]: profile update server: "
+	                        << (remote_profile_url.empty() ? std::string("none (profiles ship with the app)") : remote_profile_url);
 }
 
 //BBS: refine the Preset Updater logic
@@ -898,6 +905,16 @@ void PresetUpdater::priv::download_profiles_resource_async(const std::string& ur
 
 void PresetUpdater::priv::sync_update_flutter_resource(bool isAuto_check)
 {
+    // EdgeSlicer: the web pages ship with the app and are served from resources/web/flutter_web
+    // (HttpServer::map_url_to_file_path). Snapmaker's /upgrade/flutter/ feed used to download its
+    // own build over them; that is off for good, with or without a "flutter_upgrade_url".
+    BOOST_LOG_TRIVIAL(info) << "[Flutter Updater] remote web-resource updates are disabled; using the bundled pages";
+    if (!isAuto_check) {
+        wxCommandEvent *evt = new wxCommandEvent(EVT_NO_WEB_RESOURCE_UPDATE);
+        GUI::wxGetApp().QueueEvent(evt);
+    }
+    return;
+#if 0 // Snapmaker's flutter OTA, kept for reference
     auto cache_profile_path = cache_path;
 
     AppConfig* app_config = GUI::wxGetApp().app_config;
@@ -1018,6 +1035,7 @@ void PresetUpdater::priv::sync_update_flutter_resource(bool isAuto_check)
             }
         })
         .perform_sync();
+#endif
 }
     // Orca: sync config update for currect App version
 void PresetUpdater::priv::sync_config(bool isAuto_check)
@@ -1027,6 +1045,15 @@ void PresetUpdater::priv::sync_config(bool isAuto_check)
     AppConfig *app_config = GUI::wxGetApp().app_config;
 
     auto profile_update_url = app_config->get_preset_upgrade_url();
+    if (profile_update_url.empty()) {
+        // No profile server (the default since 2026-09-22): the profiles are the ones the app ships.
+        BOOST_LOG_TRIVIAL(info) << "[Orca Updater]: no profile update server configured, not checking";
+        if (!isAuto_check) {
+            wxCommandEvent *evt = new wxCommandEvent(EVT_NO_PRESET_UPDATE);
+            GUI::wxGetApp().QueueEvent(evt);
+        }
+        return;
+    }
     // parse the assets section and get the latest asset by comparing the name
 
     Http::get(profile_update_url)
@@ -1755,6 +1782,14 @@ Updates PresetUpdater::priv::get_config_updates(const Semver &old_slic3r_version
 
 	BOOST_LOG_TRIVIAL(info) << "[Orca Updater]:Checking for cached configuration updates...";
     auto cache_profile_path =  cache_path / "profiles/profiles";
+    if (remote_profile_url.empty()) {
+        // A package in ota/profiles can only have come from a profile server, and with none
+        // configured it is Snapmaker's, left by an earlier version: installing it would put
+        // Snapmaker's profiles over the ones this build ships. Leave the files, do not use them.
+        BOOST_LOG_TRIVIAL(info) << "[Orca Updater]:no profile update server configured, ignoring "
+                                << cache_profile_path.string();
+        return updates;
+    }
     BOOST_LOG_TRIVIAL(info) << "[Orca Updater]:cache_profile_path: " << cache_profile_path.string()
                             << ", exists: " << fs::exists(cache_profile_path);
     if (!fs::exists(cache_profile_path) || !fs::is_directory(cache_profile_path)) {
@@ -2121,6 +2156,12 @@ bool PresetUpdater::install_bundles_rsrc(std::vector<std::string> bundles, bool 
 
 void PresetUpdater::sync_web_async(bool isAutoUpdata)
 {
+    // No thread and no request: sync_update_flutter_resource() only reports that remote web
+    // updates are off (and, for a manual check, that the bundled pages are current).
+    if (isAutoUpdata) {
+        BOOST_LOG_TRIVIAL(debug) << "[Orca Updater] web resource updates are disabled";
+        return;
+    }
     if (p->m_web_resource_thread.joinable()) {
         p->m_web_thread_cancel = true;
         p->m_web_resource_thread.join();

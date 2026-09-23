@@ -258,6 +258,7 @@ bool Moonraker::test_with_resolved_ip(wxString& msg) const
 
     std::string host = get_host_from_url(m_host);
     auto        http = Http::get(url); // std::move(url));
+    apply_tls(http); // not verified unless the printer has a CA file (printhost_cafile)
     // "Host" header is necessary here. We have resolved IP address and subsituted it into "url" variable.
     // And when creating Http object above, libcurl automatically includes "Host" header from address it got.
     // Thus "Host" is set to the resolved IP instead of host filled by user. We need to change it back.
@@ -317,6 +318,7 @@ bool Moonraker::get_machine_info(const std::vector<std::pair<std::string, std::v
     bool res = true;
     auto url = make_url("printer/objects/query");
     auto http = Http::post(std::move(url));
+    apply_tls(http); // not verified unless the printer has a CA file (printhost_cafile)
 
     for (const auto pair : targets) {
         std::string value = "";
@@ -363,6 +365,7 @@ bool Moonraker::send_gcodes(const std::vector<std::string>& codes, std::string& 
     }
     auto url = make_url("printer/gcode/script");
     auto http = Http::post(std::move(url));
+    apply_tls(http); // not verified unless the printer has a CA file (printhost_cafile)
 
     http.form_add("script", param)
         .on_error([&](std::string body, std::string error, unsigned status) {
@@ -394,6 +397,7 @@ bool Moonraker::test(wxString& msg) const
     wcp_loger.add_log(name + std::string(": fetching version info, URL: ") + url, false, "", "Moonraker_Mqtt", "info");
     // Here we do not have to add custom "Host" header - the url contains host filled by user and libCurl will set the header by itself.
     auto http = Http::get(std::move(url));
+    apply_tls(http); // not verified unless the printer has a CA file (printhost_cafile)
     set_auth(http);
     http.on_error([&](std::string body, std::string error, unsigned status) {
             BOOST_LOG_TRIVIAL(error) << "[Moonraker_Mqtt] " << boost::format("%1%: failed to fetch version info: %2%, HTTP status: %3%, response body: `%4%`") % name % error % status %
@@ -580,6 +584,7 @@ bool Moonraker::upload_inner_with_resolved_ip(PrintHostUpload upload_data, Progr
 
     std::string host = get_host_from_url(m_host);
     auto        http = Http::post(url); // std::move(url));
+    apply_tls(http); // not verified unless the printer has a CA file (printhost_cafile)
     // "Host" header is necessary here. We have resolved IP address and subsituted it into "url" variable.
     // And when creating Http object above, libcurl automatically includes "Host" header from address it got.
     // Thus "Host" is set to the resolved IP instead of host filled by user. We need to change it back.
@@ -603,6 +608,7 @@ bool Moonraker::upload_inner_with_resolved_ip(PrintHostUpload upload_data, Progr
             url = substitute_host(make_url_8080("server/files/upload"), GUI::into_u8(test_msg_or_host_ip));
 
             auto http_8080 = Http::post(std::move(url));
+            apply_tls(http_8080); // not verified unless the printer has a CA file (printhost_cafile)
             http_8080.header("host", host);
             set_auth(http_8080);
 
@@ -688,6 +694,7 @@ bool Moonraker::upload_inner_with_host(PrintHostUpload upload_data, ProgressFn p
     
     wcp_loger.add_log(name + std::string(": uploading file ") + upload_data.source_path.string() + " to " + url + ", filename: " + upload_filename.string() + ", path: " + upload_parent_path.string() + ", print: " + (upload_data.post_action == PrintHostPostUploadAction::StartPrint ? "yes" : "no"), false, "", "Moonraker_Mqtt", "info");
     auto http = Http::post(std::move(url));
+    apply_tls(http); // not verified unless the printer has a CA file (printhost_cafile)
 
 #ifdef WIN32
     // "Host" header is necessary here. In the workaround above (two mDNS..) we have got IP address from test connection and subsituted it
@@ -715,6 +722,7 @@ bool Moonraker::upload_inner_with_host(PrintHostUpload upload_data, ProgressFn p
             wcp_loger.add_log("Retrying upload on port 8080", false, "", "Moonraker_Mqtt", "info");
             url = make_url_8080("server/files/upload");            
             auto http_8080 = Http::post(std::move(url));
+            apply_tls(http_8080); // not verified unless the printer has a CA file (printhost_cafile)
             set_auth(http_8080);
 
             http_8080.form_add("print", upload_data.post_action == PrintHostPostUploadAction::StartPrint ? "true" : "false")

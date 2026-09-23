@@ -188,6 +188,7 @@ bool OctoPrint::test_with_resolved_ip(wxString &msg) const
 
     std::string host = get_host_from_url(m_host);
     auto http = Http::get(url);//std::move(url));
+    apply_tls(http); // not verified unless the printer has a CA file (printhost_cafile)
     // "Host" header is necessary here. We have resolved IP address and subsituted it into "url" variable.
     // And when creating Http object above, libcurl automatically includes "Host" header from address it got.
     // Thus "Host" is set to the resolved IP instead of host filled by user. We need to change it back.
@@ -245,6 +246,7 @@ bool OctoPrint::test(wxString& msg) const
     BOOST_LOG_TRIVIAL(info) << boost::format("%1%: Get version at: %2%") % name % url;
     // Here we do not have to add custom "Host" header - the url contains host filled by user and libCurl will set the header by itself.
     auto http = Http::get(std::move(url));
+    apply_tls(http); // not verified unless the printer has a CA file (printhost_cafile)
     set_auth(http);
     http.on_error([&](std::string body, std::string error, unsigned status) {
             BOOST_LOG_TRIVIAL(error) << boost::format("%1%: Error getting version: %2%, HTTP %3%, body: `%4%`") % name % error % status % body;
@@ -395,6 +397,7 @@ bool OctoPrint::upload_inner_with_resolved_ip(PrintHostUpload upload_data, Progr
 
     std::string host = get_host_from_url(m_host);
     auto http = Http::post(url);//std::move(url));
+    apply_tls(http); // not verified unless the printer has a CA file (printhost_cafile)
     // "Host" header is necessary here. We have resolved IP address and subsituted it into "url" variable.
     // And when creating Http object above, libcurl automatically includes "Host" header from address it got.
     // Thus "Host" is set to the resolved IP instead of host filled by user. We need to change it back.
@@ -479,6 +482,7 @@ bool OctoPrint::upload_inner_with_host(PrintHostUpload upload_data, ProgressFn p
         % (upload_data.post_action == PrintHostPostUploadAction::StartPrint ? "true" : "false");
 
     auto http = Http::post(std::move(url));
+    apply_tls(http); // not verified unless the printer has a CA file (printhost_cafile)
 #ifdef WIN32
     // "Host" header is necessary here. In the workaround above (two mDNS..) we have got IP address from test connection and subsituted it into "url" variable.
     // And when creating Http object above, libcurl automatically includes "Host" header from address it got.
@@ -650,6 +654,7 @@ bool PrusaLink::test(wxString& msg) const
     BOOST_LOG_TRIVIAL(info) << boost::format("%1%: Get version at: %2%") % name % url;
 
     auto http = Http::get(std::move(url));
+    apply_tls(http); // not verified unless the printer has a CA file (printhost_cafile)
     set_auth(http);
     http.on_error([&](std::string body, std::string error, unsigned status) {
         BOOST_LOG_TRIVIAL(error) << boost::format("%1%: Error getting version: %2%, HTTP %3%, body: `%4%`") % name % error % status % body;
@@ -715,6 +720,7 @@ bool PrusaLink::get_storage(wxArrayString& storage_path, wxArrayString& storage_
     std::string lang = GUI::format(wlang.SubString(0, 1));
 
     auto http = Http::get(std::move(url));
+    apply_tls(http); // not verified unless the printer has a CA file (printhost_cafile)
     set_auth(http);
     http.header("Accept-Language", lang);
     http.on_error([&](std::string body, std::string error, unsigned status) {
@@ -813,6 +819,7 @@ bool PrusaLink::test_with_method_check(wxString& msg, bool& use_put) const
     BOOST_LOG_TRIVIAL(info) << boost::format("%1%: Get version at: %2%") % name % url;
     // Here we do not have to add custom "Host" header - the url contains host filled by user and libCurl will set the header by itself.
     auto http = Http::get(std::move(url));
+    apply_tls(http); // not verified unless the printer has a CA file (printhost_cafile)
     set_auth(http);
     http.on_error([&](std::string body, std::string error, unsigned status) {
         BOOST_LOG_TRIVIAL(error) << boost::format("%1%: Error getting version: %2%, HTTP %3%, body: `%4%`") % name % error % status % body;
@@ -886,6 +893,7 @@ bool PrusaLink::test_with_resolved_ip_and_method_check(wxString& msg, bool& use_
 
     std::string host = get_host_from_url(m_host);
     auto http = Http::get(url);//std::move(url));
+    apply_tls(http); // not verified unless the printer has a CA file (printhost_cafile)
     // "Host" header is necessary here. We have resolved IP address and subsituted it into "url" variable.
     // And when creating Http object above, libcurl automatically includes "Host" header from address it got.
     // Thus "Host" is set to the resolved IP instead of host filled by user. We need to change it back.
@@ -1047,6 +1055,7 @@ bool PrusaLink::put_inner(PrintHostUpload upload_data, std::string url, const st
     // Percent escape all filenames in on path and add it to the url. This is different from POST.
     url += "/" + escape_path_by_element(upload_data.upload_path);
     Http http = Http::put(std::move(url));
+    apply_tls(http); // not verified unless the printer has a CA file (printhost_cafile)
 #ifdef WIN32
     // "Host" header is necessary here. We have resolved IP address and subsituted it into "url" variable.
     // And when creating Http object above, libcurl automatically includes "Host" header from address it got.
@@ -1097,6 +1106,7 @@ bool PrusaLink::post_inner(PrintHostUpload upload_data, std::string url, const s
     const auto upload_parent_path = upload_data.upload_path.parent_path();
 
     Http http = Http::post(std::move(url));
+    apply_tls(http); // not verified unless the printer has a CA file (printhost_cafile)
 #ifdef WIN32
     // "Host" header is necessary here. We have resolved IP address and subsituted it into "url" variable.
     // And when creating Http object above, libcurl automatically includes "Host" header from address it got.
