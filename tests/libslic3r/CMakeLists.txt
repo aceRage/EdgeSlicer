@@ -38,6 +38,7 @@ add_executable(${_TEST_NAME}_tests
 	# Slic3r::Test slicing helpers that otherwise only fff_print_tests links.
 	../fff_print/test_data.cpp
 	test_identity_filament_map.cpp
+	test_bambu_extruder_map.cpp
 	test_export_stl_part.cpp
 	test_elephant_foot_compensation.cpp
 	test_fill_bed_pack.cpp
