@@ -111,17 +111,55 @@ option(SLIC3R_ASAN              "Enable ASan on Clang and GCC" 0)
 
 # Sentry crash handling - built in on Windows and macOS by default.
 #
-# Ultra: this switch no longer decides whether crashes are REPORTED anywhere. It only builds
-# in the SDK, which is what starts crashpad, which is what writes the local minidumps we
-# debug with (%LOCALAPPDATA%\Snapmaker_Orca\reports\*.dmp). Uploading is off unless the app
-# config names a DSN in "ultra_sentry_dsn" AND the user has opted in - see
-# src/sentry_wrapper/SentryWrapper.cpp. Turn this OFF to drop local crash capture too.
+# This switch builds in the SDK, which starts crashpad, which writes the local minidumps we
+# debug with (%LOCALAPPDATA%\EdgeSlicer\reports\*.dmp). Whether a crash is REPORTED anywhere
+# is decided at run time: only with a destination (EDGESLICER_SENTRY_DSN below, or a tester's
+# "ultra_sentry_dsn" in the app config) AND the user's opt-in (Preferences > General >
+# "Send crash reports", off by default) - see src/sentry_wrapper/SentryWrapper.cpp and
+# docs/privacy.md. Turn this OFF to drop local crash capture too.
 if (WIN32 OR APPLE)
     set(SLIC3R_SENTRY_DEFAULT ON)
 else()
     set(SLIC3R_SENTRY_DEFAULT OFF)
 endif()
 option(SLIC3R_SENTRY            "Build in the Sentry/crashpad crash handler (local minidumps; uploads need a DSN)" ${SLIC3R_SENTRY_DEFAULT})
+
+# Crash-report destination, compiled in. Empty (every local build) means crash reports are
+# never uploaded. CI release builds set it from the SENTRY_DSN repository secret, through the
+# environment variable of the same name so the platform build scripts need no extra argument;
+# -DEDGESLICER_SENTRY_DSN=... works too. Never commit a DSN. It goes into a generated header
+# in the build tree, not onto compiler command lines, and is never printed here.
+set(EDGESLICER_SENTRY_DSN "" CACHE STRING "Sentry DSN compiled in for opt-in crash reports (empty = no uploads)")
+mark_as_advanced(EDGESLICER_SENTRY_DSN)
+set(EDGESLICER_SENTRY_ENVIRONMENT "" CACHE STRING "Sentry environment reported with crashes (default: dev)")
+set(_edge_sentry_dsn "${EDGESLICER_SENTRY_DSN}")
+if (_edge_sentry_dsn STREQUAL "" AND DEFINED ENV{EDGESLICER_SENTRY_DSN})
+    set(_edge_sentry_dsn "$ENV{EDGESLICER_SENTRY_DSN}")
+endif ()
+string(STRIP "${_edge_sentry_dsn}" _edge_sentry_dsn)
+set(_edge_sentry_env "${EDGESLICER_SENTRY_ENVIRONMENT}")
+if (_edge_sentry_env STREQUAL "" AND DEFINED ENV{EDGESLICER_SENTRY_ENVIRONMENT})
+    set(_edge_sentry_env "$ENV{EDGESLICER_SENTRY_ENVIRONMENT}")
+endif ()
+if (_edge_sentry_env STREQUAL "")
+    set(_edge_sentry_env "dev")
+endif ()
+if (NOT _edge_sentry_dsn STREQUAL "" AND NOT _edge_sentry_dsn MATCHES "^https?://[^\"\\ ]+$")
+    message(FATAL_ERROR "EDGESLICER_SENTRY_DSN is not a Sentry DSN (expected https://<key>@<host>/<project>)")
+endif ()
+if (NOT _edge_sentry_env MATCHES "^[A-Za-z0-9._-]+$")
+    message(FATAL_ERROR "EDGESLICER_SENTRY_ENVIRONMENT may only contain letters, digits, '.', '_' and '-'")
+endif ()
+if (_edge_sentry_dsn STREQUAL "")
+    message(STATUS "Crash reports: no DSN compiled in - crashes stay on the user's machine (environment ${_edge_sentry_env})")
+else ()
+    message(STATUS "Crash reports: DSN compiled in, opt-in at run time (environment ${_edge_sentry_env})")
+endif ()
+set(EDGESLICER_SENTRY_DSN_VALUE "${_edge_sentry_dsn}")
+set(EDGESLICER_SENTRY_ENVIRONMENT_VALUE "${_edge_sentry_env}")
+configure_file(${CMAKE_CURRENT_SOURCE_DIR}/src/sentry_wrapper/edgeslicer_sentry_config.h.in
+               ${CMAKE_CURRENT_BINARY_DIR}/generated/edgeslicer_sentry_config.h @ONLY)
+include_directories(${CMAKE_CURRENT_BINARY_DIR}/generated)
 # If SLIC3R_FHS is 1 -> SLIC3R_DESKTOP_INTEGRATION is always 0, othrewise variable.
 CMAKE_DEPENDENT_OPTION(SLIC3R_DESKTOP_INTEGRATION "Allow perfoming desktop integration during runtime" 1 "NOT SLIC3R_FHS" 0)
 

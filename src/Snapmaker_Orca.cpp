@@ -33,6 +33,7 @@ using namespace nlohmann;
 
 
 #include "sentry_wrapper/SentryWrapper.hpp"
+#include "common_func/common_func.hpp"
 
 
 #include <boost/algorithm/string/predicate.hpp>
@@ -1356,6 +1357,14 @@ int CLI::run(int argc, char **argv)
     set_current_thread_name("Snapmaker_Orca_main");
     // Save the thread ID of the main thread.
     save_main_thread_id();
+
+    // EDGESLICER_TEST_CRASH=startup crashes right here, before any window, to test crash
+    // reporting from a command line (docs/privacy.md, "Testing crash reports"; the GUI variant is
+    // GUI_App::run_test_crash_if_asked). Testers only: nothing sets it otherwise.
+    if (const char* test_crash = std::getenv("EDGESLICER_TEST_CRASH"); test_crash != nullptr && std::strcmp(test_crash, "startup") == 0) {
+        volatile int* p = nullptr;
+        *p = 42; // the test crash (access violation / SIGSEGV)
+    }
 
 #ifdef __WXGTK__
     // On Linux, wxGTK has no support for Wayland, and the app crashes on
@@ -7342,9 +7351,20 @@ extern "C" {
 #else /* _MSC_VER */
 int main(int argc, char **argv)
 {
+    // Before initSentry(): it reads the crash-report preference from the EdgeSlicer.conf that
+    // --datadir points at.
+    common::set_datadir_from_command_line(argc, argv);
     initSentry();
     auto soft_start_time = get_time_timestamp();    
-    auto res = CLI().run(argc, argv);
+    // Parse from copies, then blank secret option values in the originals: those sit at the
+    // top of the main thread's stack, which a crash minidump includes.
+    std::vector<std::string> arg_copies(argv, argv + argc);
+    std::vector<char*>       arg_ptrs;
+    for (std::string& a : arg_copies)
+        arg_ptrs.push_back(a.data());
+    arg_ptrs.push_back(nullptr);
+    common::mask_secret_args(argc, argv);
+    auto res = CLI().run(argc, arg_ptrs.data());
     auto soft_end_time = get_time_timestamp();    
 
     std::string softEndTime = BP_SOFT_WORKS_TIME + std::string(":") + get_works_time(soft_end_time - soft_start_time);

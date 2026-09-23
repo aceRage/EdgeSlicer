@@ -37,10 +37,33 @@
 
 namespace common
 {
-	// Reads one string out of the "app" section of the app config in the default per-user
-	// data directory. For code that runs before AppConfig exists; returns "" when the file
-	// or the key is missing.
+	// Remembers the --datadir of this process's command line (either "--datadir X" or
+	// "--datadir=X"), so the reads below look where AppConfig will. Call it before initSentry().
+	void set_datadir_from_command_line(int argc, char** argv);
+#ifdef _WIN32
+	void set_datadir_from_command_line(int argc, wchar_t** argv);
+#endif
+
+	// That --datadir (UTF-8), or "" when the command line had none.
+	std::string datadir_override();
+
+	// The EdgeSlicer.conf AppConfig will use: --datadir, else a portable "data_dir" next to
+	// the application, else the per-user default (%APPDATA%\EdgeSlicer on Windows). UTF-8.
+	std::string app_config_path();
+
+	// Read one value out of the "app" section of that file. For code that runs before
+	// AppConfig exists; a missing file, key or a broken file gives "" / default_value.
 	std::string get_app_config_string(const std::string& key);
+	bool        get_app_config_bool(const std::string& key, bool default_value);
+
+	// A crash report's minidump holds the command line: on Windows crashpad copies the process
+	// parameters block, on macOS/Linux the argv strings sit at the top of the main thread's
+	// stack. These overwrite the values of secret options (--hub-token) with '*' in those
+	// copies. Call them only once the arguments have been copied elsewhere for parsing.
+	void mask_secret_args(int argc, char** argv);
+#ifdef _WIN32
+	void mask_secret_args_in_process_command_line();
+#endif
 
 	std::string get_pc_name();
 

@@ -150,14 +150,21 @@ jobs:
       arch: ${{ inputs.arch }}
     secrets: inherit
 
+  # Debug symbols for opt-in crash reports (docs/privacy.md). Windows and macOS only: the Linux
+  # builds carry no crash handler. Skips itself without the SENTRY_* secrets and can never fail
+  # this workflow (see sentry_cli.yml). The Sentry release is created/finalized only for refs
+  # that produce shipped builds; symbols are uploaded for every build that has the DSN in it.
   upload_symbols:
     name: Upload Debug Symbols to Sentry
     needs: [build_orca]
-    if: ${{ !cancelled() && needs.build_orca.result == 'success' }}
+    if: ${{ !cancelled() && needs.build_orca.result == 'success' && (inputs.os == 'windows-2022' || inputs.os == 'macos-14') }}
     uses: ./.github/workflows/sentry_cli.yml
     with:
       os: ${{ inputs.os }}
-      pdb-artifact-name: PDB
+      pdb-artifact-name: ${{ inputs.os == 'windows-2022' && 'PDB' || '' }}
+      portable-artifact-name: ${{ inputs.os == 'windows-2022' && format('EdgeSlicer_Windows_{0}_portable', needs.build_orca.outputs.release) || '' }}
       dsym-artifact-name: ${{ inputs.os == 'macos-14' && format('dSYM_Mac_{0}', needs.build_orca.outputs.release) || '' }}
-      release: ${{ needs.build_orca.outputs.release || github.sha }}
+      release: ${{ needs.build_orca.outputs.sentry_release }}
+      create-release: ${{ startsWith(github.ref, 'refs/tags/') || startsWith(github.ref, 'refs/heads/ci/') || startsWith(github.ref, 'refs/heads/release/') || github.ref == 'refs/heads/main' }}
+    secrets: inherit
     secrets: inherit

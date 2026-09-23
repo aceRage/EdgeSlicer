@@ -8,6 +8,8 @@
 #pragma comment(lib, "iphlpapi.lib")
 #elif __APPLE__
 #include <stdlib.h>
+#include <limits.h>
+#include <mach-o/dyld.h>
 #include <IOKit/IOKitLib.h>
 #include <CoreFoundation/CoreFoundation.h>
 #include <IOKit/IOKitLib.h>
@@ -16,7 +18,10 @@
 #include <AvailabilityMacros.h>
 #endif
 
+#include <cstring>
+#include <filesystem>
 #include <fstream>
+#include <vector>
 #include <nlohmann/json.hpp>
 
 #ifdef __linux__
@@ -32,61 +37,237 @@ static std::string get_linux_config_dir()
 }
 #endif
 
-// Ultra: the app config file in the DEFAULT per-user data directory.
-//
-// The callers below run before wxWidgets exists (initSentry() is the first thing main()
-// does), so AppConfig is not available and neither is a parsed --datadir. This is the same
-// path AppConfig itself ends up using when no override is given.
-static std::string ultra_app_config_path()
+// The --datadir given on the command line, UTF-8; empty when there was none. Set by
+// common::set_datadir_from_command_line() before initSentry() runs.
+static std::string g_datadir_override;
+
+#ifdef _WIN32
+static std::string wide_to_utf8(const wchar_t* w)
+{
+    if (w == nullptr || *w == L'\0')
+        return std::string();
+    const int len = WideCharToMultiByte(CP_UTF8, 0, w, -1, nullptr, 0, nullptr, nullptr);
+    if (len <= 1)
+        return std::string();
+    std::string out(size_t(len - 1), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, w, -1, &out[0], len, nullptr, nullptr);
+    return out;
+}
+#endif
+
+static std::filesystem::path path_from_utf8(const std::string& s)
 {
 #ifdef _WIN32
-    PWSTR   pszPath    = nullptr;
-    size_t  pathLength = 0;
-    char*   path       = new char[MAX_PATH]();
-    HRESULT hr         = SHGetKnownFolderPath(FOLDERID_RoamingAppData, 0, nullptr, &pszPath);
-    if (SUCCEEDED(hr) && pszPath != nullptr) {
-        wcstombs_s(&pathLength, path, MAX_PATH, pszPath, MAX_PATH);
-        CoTaskMemFree(pszPath);
-    }
-    std::string cfgfile = std::string(path) + "\\Snapmaker_Orca\\Snapmaker_Orca.conf";
-    delete[] path;
-    return cfgfile;
+    return std::filesystem::u8path(s);
+#else
+    return std::filesystem::path(s);
+#endif
+}
+
+// The directory holding the running executable ("" if unknown).
+static std::filesystem::path executable_dir()
+{
+#ifdef _WIN32
+    std::wstring buf(32768, L'\0');
+    const DWORD  n = ::GetModuleFileNameW(nullptr, &buf[0], DWORD(buf.size()));
+    if (n == 0 || n >= buf.size())
+        return {};
+    buf.resize(n);
+    return std::filesystem::path(buf).parent_path();
+#elif __APPLE__
+    char     exe[PATH_MAX] = {0};
+    uint32_t size          = sizeof(exe);
+    if (_NSGetExecutablePath(exe, &size) != 0)
+        return {};
+    return std::filesystem::path(exe).parent_path();
+#else
+    std::error_code ec;
+    auto            exe = std::filesystem::read_symlink("/proc/self/exe", ec);
+    return ec ? std::filesystem::path() : exe.parent_path();
+#endif
+}
+
+// The data directory AppConfig will use, worked out the same way GUI_App::init_app_config()
+// and CLI::setup() do it, but before either exists: initSentry() is the first thing main()
+// does, so there is no AppConfig, no wxWidgets and no parsed command line yet.
+//   1. --datadir on the command line
+//   2. a "data_dir" folder next to the application (portable installs)
+//   3. the per-user default: %APPDATA%\EdgeSlicer, ~/Library/Application Support/EdgeSlicer,
+//      $XDG_CONFIG_HOME/EdgeSlicer
+static std::filesystem::path app_data_dir()
+{
+    if (!g_datadir_override.empty())
+        return path_from_utf8(g_datadir_override);
+
+    std::error_code ec;
+    std::filesystem::path app_folder = executable_dir();
+#ifdef __APPLE__
+    // <folder>/EdgeSlicer.app/Contents/MacOS/EdgeSlicer: the portable folder sits beside the bundle.
+    app_folder = app_folder.parent_path().parent_path().parent_path();
+#endif
+    if (!app_folder.empty() && std::filesystem::is_directory(app_folder / "data_dir", ec))
+        return app_folder / "data_dir";
+
+#ifdef _WIN32
+    PWSTR   psz = nullptr;
+    std::filesystem::path dir;
+    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_RoamingAppData, 0, nullptr, &psz)) && psz != nullptr)
+        dir = std::filesystem::path(psz) / SLIC3R_APP_KEY;
+    if (psz != nullptr)
+        CoTaskMemFree(psz);
+    return dir;
 #elif __APPLE__
     const char* home_env = getenv("HOME");
     if (!home_env || home_env[0] == '\0')
-        return std::string();
-    return std::string(home_env) + "/Library/Application Support/Snapmaker_Orca/Snapmaker_Orca.conf";
+        return {};
+    return std::filesystem::path(home_env) / "Library" / "Application Support" / SLIC3R_APP_KEY;
 #else
-    std::string config_dir = get_linux_config_dir();
-    if (config_dir.empty())
-        return std::string();
-    return config_dir + "/Snapmaker_Orca.conf";
+    return std::filesystem::path(get_linux_config_dir());
 #endif
+}
+
+// The app config file (EdgeSlicer.conf) in that data directory.
+static std::filesystem::path app_config_file()
+{
+    const std::filesystem::path dir = app_data_dir();
+    if (dir.empty())
+        return {};
+    return dir / (SLIC3R_APP_KEY ".conf");
+}
+
+// The "app" section of the app config, or an empty object when the file is missing or broken.
+static nlohmann::json read_app_section()
+{
+    const std::filesystem::path cfgfile = app_config_file();
+    if (cfgfile.empty())
+        return nlohmann::json::object();
+    std::ifstream json_file(cfgfile);
+    if (!json_file.is_open())
+        return nlohmann::json::object();
+    // A half-written or hand-edited config must not take the process down: this runs
+    // before any of the app's own error reporting is up.
+    try {
+        nlohmann::json json_data;
+        json_file >> json_data;
+        auto app = json_data.value("app", nlohmann::json::object());
+        return app.is_object() ? app : nlohmann::json::object();
+    } catch (const std::exception&) {
+        return nlohmann::json::object();
+    }
 }
 
 namespace common
 {
-    std::string get_app_config_string(const std::string& key)
+    static void take_datadir_arg(int argc, const std::vector<std::string>& args)
     {
-        const std::string cfgfile = ultra_app_config_path();
-        if (cfgfile.empty())
-            return std::string();
-
-        std::ifstream json_file(cfgfile);
-        if (!json_file.is_open())
-            return std::string();
-
-        // A half-written or hand-edited config must not take the process down: this runs
-        // before any of the app's own error reporting is up.
-        try {
-            nlohmann::json json_data;
-            json_file >> json_data;
-            auto dataObj = json_data.value("app", nlohmann::json::object());
-            return dataObj.value(key, std::string());
-        } catch (const std::exception&) {
-            return std::string();
+        for (int i = 1; i < argc; ++i) {
+            const std::string& a = args[size_t(i)];
+            if (a == "--datadir" && i + 1 < argc) {
+                g_datadir_override = args[size_t(i) + 1];
+                ++i;
+            } else if (a.rfind("--datadir=", 0) == 0) {
+                g_datadir_override = a.substr(10);
+            }
         }
     }
+
+    void set_datadir_from_command_line(int argc, char** argv)
+    {
+        std::vector<std::string> args;
+        for (int i = 0; i < argc; ++i)
+            args.emplace_back(argv[i] ? argv[i] : "");
+        take_datadir_arg(argc, args);
+    }
+
+#ifdef _WIN32
+    void set_datadir_from_command_line(int argc, wchar_t** argv)
+    {
+        std::vector<std::string> args;
+        for (int i = 0; i < argc; ++i)
+            args.emplace_back(wide_to_utf8(argv[i]));
+        take_datadir_arg(argc, args);
+    }
+#endif
+
+    std::string datadir_override() { return g_datadir_override; }
+
+    std::string app_config_path()
+    {
+        const std::filesystem::path p = app_config_file();
+#ifdef _WIN32
+        return wide_to_utf8(p.wstring().c_str());
+#else
+        return p.string();
+#endif
+    }
+
+    std::string get_app_config_string(const std::string& key)
+    {
+        const nlohmann::json app = read_app_section();
+        auto it = app.find(key);
+        if (it == app.end() || !it->is_string())
+            return std::string();
+        return it->get<std::string>();
+    }
+
+    bool get_app_config_bool(const std::string& key, bool default_value)
+    {
+        const nlohmann::json app = read_app_section();
+        auto it = app.find(key);
+        if (it == app.end())
+            return default_value;
+        // AppConfig writes "true"/"false" as JSON booleans; older files and hand edits use strings.
+        if (it->is_boolean())
+            return it->get<bool>();
+        if (it->is_string()) {
+            const std::string v = it->get<std::string>();
+            return v == "true" || v == "1";
+        }
+        return default_value;
+    }
+
+    // Command-line options whose values are secrets. The phone hub's keeper process is started
+    // with --hub-token <token>.
+    static const char* const k_secret_flags[] = { "--hub-token" };
+
+    void mask_secret_args(int argc, char** argv)
+    {
+        for (int i = 1; i < argc; ++i) {
+            if (argv[i] == nullptr)
+                continue;
+            for (const char* flag : k_secret_flags) {
+                const size_t n = strlen(flag);
+                char*        value = nullptr;
+                if (strcmp(argv[i], flag) == 0 && i + 1 < argc)
+                    value = argv[i + 1];
+                else if (strncmp(argv[i], flag, n) == 0 && argv[i][n] == '=')
+                    value = argv[i] + n + 1;
+                for (; value != nullptr && *value != '\0'; ++value)
+                    *value = '*';
+            }
+        }
+    }
+
+#ifdef _WIN32
+    void mask_secret_args_in_process_command_line()
+    {
+        // GetCommandLineW() hands out the buffer in the process parameters block (PEB), which is
+        // exactly what crashpad copies into a Windows minidump.
+        wchar_t* cl = ::GetCommandLineW();
+        if (cl == nullptr)
+            return;
+        for (const char* flag : k_secret_flags) {
+            std::wstring wflag(flag, flag + strlen(flag));
+            for (wchar_t* p = wcsstr(cl, wflag.c_str()); p != nullptr; p = wcsstr(p, wflag.c_str())) {
+                p += wflag.size();
+                while (*p == L' ' || *p == L'\t' || *p == L'=' || *p == L'"')
+                    ++p;
+                for (; *p != L'\0' && *p != L' ' && *p != L'\t' && *p != L'"'; ++p)
+                    *p = L'*';
+            }
+        }
+    }
+#endif
 
     std::string get_pc_name()
     {
