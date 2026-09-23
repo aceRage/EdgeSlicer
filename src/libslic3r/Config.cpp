@@ -31,6 +31,7 @@
 //BBS: add json support
 #include "nlohmann/json.hpp"
 #include "BambuConfigCompat.hpp"
+#include "Format/BambuKeyAliases.hpp"
 
 using namespace nlohmann;
 
@@ -1073,6 +1074,11 @@ int ConfigBase::load_from_json_document(const std::string &file, json &j, Config
                 key_values.emplace(BBL_JSON_KEY_INHERITS, it.value());
             } else if (boost::iequals(it.key(), ORCA_JSON_KEY_RENAMED_FROM)) {
                 key_values.emplace(ORCA_JSON_KEY_RENAMED_FROM, it.value());
+            } else if (BambuKeyAliases::shadowed_by_our_key(it.key(), [&j](const std::string &k) { return j.contains(k); })) {
+                // Bambu Studio's name for a setting this file also sets under our own name: ours
+                // wins, whichever of the two the (sorted) document lists last.
+                BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ": " << file << ": ignoring Bambu Studio's " << it.key()
+                                        << ", the file also sets " << BambuKeyAliases::by_bambu(it.key())->ours;
             } else {
                 t_config_option_key opt_key = it.key();
                 std::string value_str;
@@ -1222,8 +1228,12 @@ int ConfigBase::load_from_json_document(const std::string &file, json &j, Config
                             }
                         }
                     }
+                    // A Bambu Studio alias is deserialized under its own name, so handle_legacy()
+                    // sees the assembled value and applies the value conversion that goes with the
+                    // rename (the first handle_legacy() call above only had the key).
                     if (valid)
-                        this->set_deserialize(opt_key, value_str, substitution_context);
+                        this->set_deserialize(BambuKeyAliases::by_bambu(opt_key_src) != nullptr ? opt_key_src : opt_key, value_str,
+                                              substitution_context);
                 }
                 else if (it.value().is_boolean() || it.value().is_number()) {
                     // Port of OrcaSlicer PR #15370: a bare JSON number or boolean used to be

@@ -1,4 +1,5 @@
 #include "BambuExport.hpp"
+#include "BambuKeyAliases.hpp"
 
 #include "../Config.hpp"
 #include "../PrintConfig.hpp"
@@ -28,41 +29,10 @@ namespace {
 // Static tables that are a judgement call rather than something the generator can derive.
 // ---------------------------------------------------------------------------------------------
 
-// Our key -> Bambu's key for the same setting. The first group is the exact reverse of what our
-// own PrintConfigDef::handle_legacy() does when it imports a Bambu file, so a Bambu project that
-// round-trips through us keeps these settings. The second group are settings Orca/this fork
-// ported from Bambu Studio under a different name, with the same meaning and unit.
-struct Rename { const char *ours; const char *bambu; };
-const Rename RENAMES[] = {
-    // reverse of handle_legacy()
-    { "infill_anchor",                  "sparse_infill_anchor" },
-    { "infill_anchor_max",              "sparse_infill_anchor_max" },
-    { "chamber_temperature",            "chamber_temperatures" },
-    { "bottom_solid_infill_flow_ratio", "initial_layer_flow_ratio" },
-    { "ironing_angle",                  "ironing_direction" },
-    { "only_one_wall_top",              "top_one_wall_type" },
-    // same setting, different name
-    { "support_ironing",                "enable_support_ironing" },
-    { "extruder_clearance_radius",      "extruder_clearance_max_radius" },
-    { "dont_slow_down_outer_wall",      "no_slow_down_for_cooling_on_outwalls" },
-    { "role_based_wipe_speed",          "role_base_wipe_speed" },
-    { "reduce_infill_retraction",       "reduce_infill_retraction_mode" },
-    { "wipe_tower_rib_width",           "prime_tower_rib_width" },
-    { "wipe_tower_extra_rib_length",    "prime_tower_extra_rib_length" },
-    { "wipe_tower_fillet_wall",         "prime_tower_fillet_wall" },
-    { "wipe_tower_wall_type",           "prime_tower_rib_wall" },
-    { "wipe_tower_max_purge_speed",     "prime_tower_max_speed" },
-};
-
-// Enum values whose enumerator names differ between the two code bases, so the generator cannot
-// pair them. Checked before the generated table.
-const EnumTranslation MANUAL_ENUMS[] = {
-    // Orca's four-level ensure_vertical_shell_thickness vs Bambu's three levels.
-    { "ensure_vertical_shell_thickness", "none",                 "disabled" },
-    { "ensure_vertical_shell_thickness", "ensure_critical_only", "partial" },
-    { "ensure_vertical_shell_thickness", "ensure_moderate",      "partial" },
-    { "ensure_vertical_shell_thickness", "ensure_all",           "enabled" },
-};
+// Keys Bambu spells differently (infill_anchor -> sparse_infill_anchor, ...) and enum values whose
+// enumerator names differ between the two code bases, so the generator cannot pair them, live in
+// Format/BambuKeyAliases.cpp: the same table drives the import direction (handle_legacy), so a
+// Bambu project that round-trips through us keeps these settings.
 
 // Options whose "%" is relative to something our ConfigOptionDef does not name in ratio_over.
 const std::pair<const char *, const char *> EXTRA_RATIO_OVER[] = {
@@ -100,16 +70,7 @@ const std::unordered_map<std::string, const BambuKeyDef *> &key_index()
     return index;
 }
 
-const std::unordered_map<std::string, std::string> &rename_index()
-{
-    static const std::unordered_map<std::string, std::string> index = [] {
-        std::unordered_map<std::string, std::string> m;
-        for (const Rename &r : RENAMES)
-            m.emplace(r.ours, r.bambu);
-        return m;
-    }();
-    return index;
-}
+bool is_renamed(const std::string &our_key) { return BambuKeyAliases::by_ours(our_key) != nullptr; }
 
 bool parse_number(const std::string &s_in, double &out, bool allow_percent = false, bool *is_percent = nullptr)
 {
@@ -268,7 +229,7 @@ std::string translate_enum(const std::string &bambu_key, const std::string &valu
 {
     if (accepted.count(value))
         return value;
-    for (const EnumTranslation &t : MANUAL_ENUMS)
+    for (const BambuKeyAliases::EnumAlias &t : BambuKeyAliases::enum_aliases())
         if (bambu_key == t.key && value == t.ours)
             return t.bambu;
     for (const EnumTranslation &t : generated_enum_translations())
@@ -277,36 +238,24 @@ std::string translate_enum(const std::string &bambu_key, const std::string &valu
     return {};
 }
 
-// Value rewrites tied to a rename, where the two settings are the same idea in different units.
+// Value rewrites tied to a rename, where the two settings are the same idea written differently
+// (BambuKeyAliases::Alias::to_bambu; handle_legacy applies the inverse on load).
 bool rename_value(const std::string &our_key, Value &v, KeyResult &r)
 {
-    auto all = [&v](auto fn) {
-        for (std::string &s : v.values)
-            if (! fn(s))
-                return false;
+    const BambuKeyAliases::Alias *alias = BambuKeyAliases::by_ours(our_key);
+    if (alias == nullptr || alias->to_bambu == nullptr)
         return true;
-    };
-    if (our_key == "only_one_wall_top") {
-        r.changed = true;
-        return all([](std::string &s) { s = (s == "1") ? "all top" : "not apply"; return true; });
+    if (v.values.empty()) {
+        r.reason = "empty value";
+        return false;
     }
-    if (our_key == "reduce_infill_retraction") {
-        r.changed = true;
-        return all([](std::string &s) { s = (s == "1") ? "Enabled" : "Disabled"; return true; });
-    }
-    if (our_key == "wipe_tower_wall_type") {
-        r.changed = true;
-        return all([](std::string &s) { s = (s == "rib") ? "1" : "0"; return true; });
-    }
-    if (our_key == "ironing_angle") {
-        // Ours: a negative angle means "use the default method". Bambu has no such value; leaving
-        // the key out gives Bambu's own default, which is the same intent.
-        double d;
-        if (v.values.empty() || ! parse_number(v.values.front(), d) || d < 0.) {
-            r.reason = "negative ironing angle means \"default\" here; Bambu keeps its own default";
+    for (std::string &s : v.values) {
+        const std::string before = s;
+        if (! alias->to_bambu(s)) {
+            r.reason = alias->drop_reason ? alias->drop_reason : "value \"" + before + "\" has no Bambu Studio equivalent";
             return false;
         }
-        return true;
+        r.changed |= s != before;
     }
     return true;
 }
@@ -596,7 +545,7 @@ Config convert_impl(const ConfigBase &cfg, const Context &ctx, Scope scope, Repo
         std::string bkey = bambu_key_name(our_key);
         if (bkey != our_key && cfg.has(bkey))
             bkey = our_key; // both spellings present: the direct key wins, this one is dropped below
-        const BambuKeyDef *def = (bkey != our_key || ! rename_index().count(our_key)) ? find_key(bkey) : nullptr;
+        const BambuKeyDef *def = (bkey != our_key || ! is_renamed(our_key)) ? find_key(bkey) : nullptr;
         if (! def) {
             dropped.emplace_back(our_key, "not a Bambu Studio setting");
             continue;
@@ -694,8 +643,8 @@ const BambuKeyDef *find_key(const std::string &bambu_key)
 
 std::string bambu_key_name(const std::string &our_key)
 {
-    auto it = rename_index().find(our_key);
-    return it == rename_index().end() ? our_key : it->second;
+    const BambuKeyAliases::Alias *alias = BambuKeyAliases::by_ours(our_key);
+    return alias == nullptr ? our_key : std::string(alias->bambu);
 }
 
 std::string export_version()
