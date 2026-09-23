@@ -5783,7 +5783,9 @@ bool GLGizmoCut3D::on_is_activable() const
 
 bool GLGizmoCut3D::on_is_selectable() const
 {
-    return wxGetApp().get_mode() != comSimple;
+    // Always on the toolbar, as in BambuStudio: new installs start in Simple mode, and hiding
+    // Cut there left users unable to find it without first switching to Advanced.
+    return true;
 }
 
 Vec3d GLGizmoCut3D::mouse_position_in_local_plane(GrabberID axis, const Linef3& mouse_ray) const
