@@ -1016,6 +1016,30 @@ void ObjectList::update_objects_list_filament_column_when_delete_filament(size_t
     m_prevent_update_filament_in_config = false;
 }
 
+void ObjectList::refresh_layer_range_filament_items()
+{
+    if (m_objects == nullptr || m_objects_model == nullptr)
+        return;
+
+    for (size_t obj_idx = 0; obj_idx < m_objects->size(); ++obj_idx) {
+        const ModelObject *object = (*m_objects)[obj_idx];
+        for (const auto &range : object->layer_config_ranges) {
+            const ModelConfig &config = range.second;
+            if (!config.has("extruder"))
+                continue;
+
+            wxDataViewItem layer_item =
+                m_objects_model->GetItemByLayerRange(int(obj_idx), range.first);
+            if (!layer_item)
+                continue;
+
+            m_objects_model->SetExtruder(
+                wxString::Format("%d", config.extruder()),
+                layer_item);
+        }
+    }
+}
+
 void ObjectList::update_objects_list_filament_column(size_t filaments_count)
 {
     assert(filaments_count >= 1);
