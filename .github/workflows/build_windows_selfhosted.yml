@@ -365,6 +365,13 @@ jobs:
           @rem BUILD_TESTS defaults to OFF, so the test targets are not part of ALL_BUILD
           @rem unless it is asked for here. Without it the test step finds no binaries at all
           @rem (run 34736678876) rather than running zero tests loudly.
+          @rem vcvars leaves WindowsSDKVersion with a trailing backslash ("10.0.26100.0\"). Inside a
+          @rem quoted -D value that backslash escapes the closing quote, and every flag after it
+          @rem ended up inside WIN10SDK_PATH - which is how the 2.4.0.0 VM build lost
+          @rem ULTRANET/FLASHNETWORK/FFMPEG_BIN_DIR and packaged no plugins. Strip it, and keep the
+          @rem payload flags ahead of the SDK path regardless.
+          set "SDKVER=%WindowsSDKVersion%"
+          if "%SDKVER:~-1%"=="\" set "SDKVER=%SDKVER:~0,-1%"
           if not exist build mkdir build
           cd build
           cmake .. -G "Visual Studio 17 2022" -A x64 ^
@@ -372,10 +379,10 @@ jobs:
             -DORCA_TOOLS=ON ^
             -DBUILD_TESTS=ON ^
             -DCMAKE_PREFIX_PATH="%DEPS%/usr/local" ^
-            -DCMAKE_INSTALL_PREFIX="./Snapmaker_Orca" ^
+            -DCMAKE_INSTALL_PREFIX="./EdgeSlicer" ^
             -DCMAKE_BUILD_TYPE=Release ^
-            -DWIN10SDK_PATH="%WindowsSdkDir%Include\%WindowsSDKVersion%" ^
-            ${{ steps.ship.outputs.flags }} || exit /b 1
+            ${{ steps.ship.outputs.flags }} ^
+            -DWIN10SDK_PATH="%WindowsSdkDir%Include\%SDKVER%" || exit /b 1
           cmake --build . --config Release --target ALL_BUILD -- -m || exit /b 1
 
       - name: Compile translations
@@ -434,6 +441,29 @@ jobs:
           call "%VCVARS%" || exit /b 1
           set "PATH=%CMAKE_DIR%;%PATH%"
           cmake --build . --target install --config Release || exit /b 1
+
+      # A payload the probe found must be in the installed tree. The 2.4.0.0 build found all three
+      # and packaged none of them (see the WIN10SDK_PATH note above) without anything going red.
+      - name: Verify the shipped payloads landed
+        shell: powershell -NoProfile -ExecutionPolicy Bypass -Command ". '{0}'"
+        env:
+          SHIP_FLAGS: ${{ steps.ship.outputs.flags }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tree = Join-Path $env:GITHUB_WORKSPACE 'build\EdgeSlicer'
+          $expect = @(
+            @{ var = 'ULTRANET_BIN_DIR';     path = 'ultranet\bambu_networking.dll' },
+            @{ var = 'FLASHNETWORK_BIN_DIR'; path = 'FlashNetwork.dll' },
+            @{ var = 'FFMPEG_BIN_DIR';       path = 'resources\tools\go2rtc\ffmpeg.exe' }
+          )
+          $missing = @()
+          foreach ($e in $expect) {
+            if ($env:SHIP_FLAGS -match $e.var) {
+              if (Test-Path -LiteralPath (Join-Path $tree $e.path)) { Write-Host "ok: $($e.path)" }
+              else { $missing += $e.path }
+            }
+          }
+          if ($missing.Count -gt 0) { throw "found on the VM but not in the package: $($missing -join ', ')" }
 
       # ---- Sentry: debug symbols for opt-in crash reports ------------------------------------
       # Skipped (green, with a notice) without the SENTRY_* secrets. A Sentry outage turns the
@@ -495,7 +525,7 @@ jobs:
           if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }
           New-Item -ItemType Directory -Path $stage -Force | Out-Null
           $release  = Join-Path $env:GITHUB_WORKSPACE 'build\src\Release'
-          $portable = Join-Path $env:GITHUB_WORKSPACE 'build\Snapmaker_Orca'
+          $portable = Join-Path $env:GITHUB_WORKSPACE 'build\EdgeSlicer'
           $depsBin  = Join-Path $env:SHARED_DEPS_ROOT 'OrcaSlicer_dep\usr\local\bin'
           $files = @(
             (Join-Path $release 'EdgeSlicer.exe'), (Join-Path $release 'EdgeSlicer.dll'),
@@ -536,7 +566,7 @@ jobs:
         shell: cmd
         working-directory: build
         run: |
-          "%SEVENZIP%" a -tzip "EdgeSlicer_Windows_%ver%_portable.zip" "%GITHUB_WORKSPACE%\build\Snapmaker_Orca" || exit /b 1
+          "%SEVENZIP%" a -tzip "EdgeSlicer_Windows_%ver%_portable.zip" "%GITHUB_WORKSPACE%\build\EdgeSlicer" || exit /b 1
 
       - name: Collect artifacts and checksums
         id: pack
