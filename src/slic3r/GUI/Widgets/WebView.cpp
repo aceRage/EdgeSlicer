@@ -334,6 +334,8 @@ wxDEFINE_EVENT(EVT_WEBVIEW_RECREATED, wxCommandEvent);
 
 static std::vector<wxWebView*> g_webviews;
 static std::vector<wxWebView*> g_delay_webviews;
+// Views RecreateAll() must not reload (WebView::SetReloadOnThemeChange).
+static std::vector<wxWebView*> g_no_theme_reload;
 
 class WebViewRef : public wxObjectRefData
 {
@@ -350,11 +352,14 @@ public:
         auto diter = std::find(g_delay_webviews.begin(), g_delay_webviews.end(), m_webView);
         if (diter != g_delay_webviews.end())
             g_delay_webviews.erase(diter);
+        auto niter = std::find(g_no_theme_reload.begin(), g_no_theme_reload.end(), m_webView);
+        if (niter != g_no_theme_reload.end())
+            g_no_theme_reload.erase(niter);
     }
     wxWebView *m_webView;
 };
 
-wxWebView* WebView::CreateWebView(wxWindow * parent, wxString const & url, wxString const & brand_tag)
+wxWebView* WebView::CreateWebView(wxWindow * parent, wxString const & url, wxString const & brand_tag, bool script_bridge)
 {
 #if wxUSE_WEBVIEW_EDGE
     // Check if a fixed version of edge is present in
@@ -445,6 +450,7 @@ wxWebView* WebView::CreateWebView(wxWindow * parent, wxString const & url, wxStr
             static_cast<WebViewWebKit *>(webView)->SetScriptMessageHandlerInstalled();
 #endif
         };
+        if (script_bridge) {
 #ifndef __WIN32__
         webView->CallAfter([webView, addScriptMessageHandler] {
             // CallAfter can run after this webView has been destroyed (macOS 26.5+).
@@ -469,6 +475,13 @@ wxWebView* WebView::CreateWebView(wxWindow * parent, wxString const & url, wxStr
 #ifndef __WIN32__
         });
 #endif
+        } else {
+#ifdef __WXMAC__
+            // Loads wait for the handler install on macOS; with no handler to install, open
+            // the gate now or the view would stay on about:blank.
+            static_cast<WebViewWebKit *>(webView)->SetScriptMessageHandlerInstalled();
+#endif
+        } // script_bridge
         webView->EnableContextMenu(true);
     } else {
         BOOST_LOG_TRIVIAL(fatal) << __FUNCTION__ << ": failed. Use fake web view.";
@@ -547,9 +560,21 @@ void WebView::RecreateAll()
         // so keep the fork's default SM-Slicer here (the login dialog is modal and is not
         // alive across a theme switch).
         webView->SetUserAgent(wxString::FromUTF8(Slic3r::bbl_login_user_agent(
-            Slic3r::LoginUAPlatform::MacOS, dark,
+            Slic3r::current_login_ua_platform(), dark,
             Slic3r::GUI::wxGetApp().current_language_code().ToStdString(),
             "SM-Slicer", SLIC3R_VERSION)));
-        webView->Reload();
+        if (std::find(g_no_theme_reload.begin(), g_no_theme_reload.end(), webView) == g_no_theme_reload.end())
+            webView->Reload();
     }
+}
+
+void WebView::SetReloadOnThemeChange(wxWebView *webView, bool reload)
+{
+    if (webView == nullptr)
+        return;
+    auto iter = std::find(g_no_theme_reload.begin(), g_no_theme_reload.end(), webView);
+    if (reload && iter != g_no_theme_reload.end())
+        g_no_theme_reload.erase(iter);
+    else if (!reload && iter == g_no_theme_reload.end())
+        g_no_theme_reload.push_back(webView);
 }

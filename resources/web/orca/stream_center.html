@@ -7,6 +7,44 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="theme-color" content="#1f1f1f">
+<script>
+// Theme, decided before anything is drawn (no dark flash on a light page). In this order:
+//   1. ?theme=dark|light - the slicer's Home tab passes its own setting;
+//   2. window.__edgeTheme('dark'|'light') - the slicer switching live, without a reload;
+//   3. the device's own setting (prefers-color-scheme), followed as it changes - a phone;
+//   4. dark.
+// ?embed=1 marks the page as shown inside the slicer (see html[data-embed] in the stylesheet).
+(function() {
+    var root = document.documentElement, explicit = '', mq = null, q = null;
+    try { q = new URLSearchParams(location.search); } catch (e) {}
+    if (q && (q.get('theme') === 'dark' || q.get('theme') === 'light')) explicit = q.get('theme');
+    if (q && q.get('embed') === '1') root.setAttribute('data-embed', '1');
+    try { mq = window.matchMedia ? window.matchMedia('(prefers-color-scheme: light)') : null; } catch (e) {}
+    function device() { return mq && mq.matches ? 'light' : 'dark'; }
+    function apply(t) {
+        root.setAttribute('data-theme', t);
+        var m = document.querySelector('meta[name="theme-color"]');
+        if (m) m.setAttribute('content', t === 'light' ? '#ffffff' : '#1f1f1f');
+    }
+    apply(explicit || device());
+    if (mq) {
+        var follow = function() { if (!explicit) apply(device()); };
+        if (mq.addEventListener) mq.addEventListener('change', follow);
+        else if (mq.addListener) mq.addListener(follow);
+    }
+    window.__edgeTheme = function(t) {
+        if (t !== 'dark' && t !== 'light') return;
+        explicit = t;
+        apply(t);
+        // Keep the address in step, so a reload comes back in the same theme.
+        try {
+            var u = new URL(location.href);
+            u.searchParams.set('theme', t);
+            history.replaceState(history.state, '', u.toString());
+        } catch (e) {}
+    };
+})();
+</script>
 <!-- Both are relative, so they resolve under /r/<token>/ and the installed icon keeps the token
      in its start_url. iOS prefers apple-touch-icon over the manifest's icons, so ship both and
      make them the same picture. Off the hub (the PC's own Stream tab) these simply 404. -->
@@ -15,33 +53,43 @@
 <link rel="icon" type="image/png" sizes="192x192" href="icon-192.png">
 <title>Stream</title>
 <style>
+/* Theme. Every colour below is a variable; the dark values are the page's original look and
+   the light ones follow the slicer's light palette. data-theme on <html> is set by the script in
+   <head>: ?theme= (the slicer's Home tab) or window.__edgeTheme() (a live switch) win, otherwise
+   the device's own prefers-color-scheme (a phone), otherwise dark. The @media block is the same
+   fallback for a browser that has not run that script. */
+:root { --bg: #2b2b2b; --bar: #1f1f1f; --bar-shadow: none; --field: #222; --well: #222; --sunk: #262626; --info-bg: #2a2a2a; --tab-bg: #2c2c2c; --bed: #2e2e2e; --panel2: #2f2f2f; --panel: #303030; --card: #333; --chip2: #333; --modal-bg: #333; --ctl: #3a3a3a; --num: #444; --chip: #4a4a4a; --dim: #555; --on-dim: #fff; --home-bg: #14562f; --home-fg: #cdebd8; --sel-bg: #234a33; --warn-bg: #3a2f1f; --border: #555; --border2: #666; --border3: #777; --border-head: #454545; --line: #3a3a3a; --line2: #333; --scroll-track: #222; --scroll: #555; --scroll-hover: #777; --fg: #fff; --fg2: #eee; --fg3: #ddd; --fg4: #ccc; --fg5: #bbb; --mute: #aaa; --mute2: #9a9a9a; --mute3: #999; --mute4: #8a8a8a; --mute5: #888; --mute6: #8f8f8f; --faint: #777; --faint2: #666; --ok-fg: #5fd08a; --warn-fg: #f0a030; --warn2-fg: #e0a33c; --err-fg: #e88; --err2-fg: #c66; --note-fg: #9ed; --link-fg: #8ab; }
+:root[data-theme="light"] { --bg: #f4f4f4; --bar: #ffffff; --bar-shadow: 0 1px 0 #dbdbdb; --field: #ffffff; --well: #e8e8e8; --sunk: #f0f0f1; --info-bg: #f0f0f1; --tab-bg: #eeeeee; --bed: #e8e8e8; --panel2: #ffffff; --panel: #ffffff; --card: #ffffff; --chip2: #e4e4e4; --modal-bg: #ffffff; --ctl: #eeeeee; --num: #dfdfdf; --chip: #dfdfdf; --dim: #d4d4d4; --on-dim: #262e30; --home-bg: #d7f0e0; --home-fg: #0a5a2e; --sel-bg: #dff3e6; --warn-bg: #fff3e0; --border: #dbdbdb; --border2: #cecece; --border3: #acacac; --border-head: #dbdbdb; --line: #eeeeee; --line2: #eeeeee; --scroll-track: #eeeeee; --scroll: #c4c4c4; --scroll-hover: #a8a8a8; --fg: #262e30; --fg2: #262e30; --fg3: #323a3d; --fg4: #3b4446; --fg5: #4f5759; --mute: #6b6b6a; --mute2: #6b6b6b; --mute3: #6b6b6b; --mute4: #757575; --mute5: #757575; --mute6: #757575; --faint: #909090; --faint2: #9e9e9e; --ok-fg: #0a7a3e; --warn-fg: #b26a00; --warn2-fg: #b26a00; --err-fg: #c0392b; --err2-fg: #c0392b; --note-fg: #00796b; --link-fg: #1f6fb2; }
+@media (prefers-color-scheme: light) {
+    :root:not([data-theme]) { --bg: #f4f4f4; --bar: #ffffff; --bar-shadow: 0 1px 0 #dbdbdb; --field: #ffffff; --well: #e8e8e8; --sunk: #f0f0f1; --info-bg: #f0f0f1; --tab-bg: #eeeeee; --bed: #e8e8e8; --panel2: #ffffff; --panel: #ffffff; --card: #ffffff; --chip2: #e4e4e4; --modal-bg: #ffffff; --ctl: #eeeeee; --num: #dfdfdf; --chip: #dfdfdf; --dim: #d4d4d4; --on-dim: #262e30; --home-bg: #d7f0e0; --home-fg: #0a5a2e; --sel-bg: #dff3e6; --warn-bg: #fff3e0; --border: #dbdbdb; --border2: #cecece; --border3: #acacac; --border-head: #dbdbdb; --line: #eeeeee; --line2: #eeeeee; --scroll-track: #eeeeee; --scroll: #c4c4c4; --scroll-hover: #a8a8a8; --fg: #262e30; --fg2: #262e30; --fg3: #323a3d; --fg4: #3b4446; --fg5: #4f5759; --mute: #6b6b6a; --mute2: #6b6b6b; --mute3: #6b6b6b; --mute4: #757575; --mute5: #757575; --mute6: #757575; --faint: #909090; --faint2: #9e9e9e; --ok-fg: #0a7a3e; --warn-fg: #b26a00; --warn2-fg: #b26a00; --err-fg: #c0392b; --err2-fg: #c0392b; --note-fg: #00796b; --link-fg: #1f6fb2; }
+}
 * { box-sizing: border-box; margin: 0; padding: 0; }
-html, body { width: 100%; height: 100%; background: #2b2b2b; font-family: 'Segoe UI', Roboto, -apple-system, sans-serif; overflow: hidden; touch-action: manipulation; -webkit-text-size-adjust: 100%; }
+html, body { width: 100%; height: 100%; background: var(--bg); font-family: 'Segoe UI', Roboto, -apple-system, sans-serif; overflow: hidden; touch-action: manipulation; -webkit-text-size-adjust: 100%; }
 /* Header rows: each conceptual group (tabs, camera chips/actions, connection strip) gets its
    own flex-wrap row so wrapping never mixes unrelated controls onto the same line - the bug
    this replaced let "Switch to home network" wrap onto the printer filter chips' line, and the
    filter chips then covered the still-wrapping "Remote · <login>" text underneath them. #topbar
    is normal flow (not fixed-height), so it is exactly as tall as its rows need to be at any
    width; #grid/.view read that real height back via --bar-h (see the JS that sets it). */
-#topbar { display: flex; flex-direction: column; gap: 4px; padding: 10px 12px; background: #1f1f1f; padding-top: calc(10px + env(safe-area-inset-top)); padding-left: calc(12px + env(safe-area-inset-left)); padding-right: calc(12px + env(safe-area-inset-right)); }
+#topbar { display: flex; flex-direction: column; gap: 4px; padding: 10px 12px; background: var(--bar); padding-top: calc(10px + env(safe-area-inset-top)); padding-left: calc(12px + env(safe-area-inset-left)); padding-right: calc(12px + env(safe-area-inset-right)); }
 #topbar .tbrow { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
 #topbar .tbrow:empty { display: none; }
-.chip { display: inline-flex; align-items: center; gap: 6px; padding: 6px 10px; border-radius: 16px; background: #4a4a4a; color: #fff; font-size: 13px; cursor: pointer; user-select: none; -webkit-user-select: none; white-space: nowrap; }
+.chip { display: inline-flex; align-items: center; gap: 6px; padding: 6px 10px; border-radius: 16px; background: var(--chip); color: var(--fg); font-size: 13px; cursor: pointer; user-select: none; -webkit-user-select: none; white-space: nowrap; }
 .chip.active { background: #0a9e50; }
 .chip.over { outline: 2px solid #5fd08a; }
 .chip .icon { opacity: 0.7; font-size: 12px; padding: 0 2px; }
 .chip .icon:hover { opacity: 1; }
-#addchip { background: #3a3a3a; border: 1px dashed #777; }
+#addchip { background: var(--ctl); border: 1px dashed var(--border3); }
 #spacer { flex: 1; }
-select { background: #3a3a3a; color: #fff; border: 1px solid #555; border-radius: 6px; padding: 5px 8px; font-size: 13px; }
-#layoutbox { display: inline-flex; align-items: center; gap: 4px; color: #aaa; font-size: 12px; }
+select { background: var(--ctl); color: var(--fg); border: 1px solid var(--border); border-radius: 6px; padding: 5px 8px; font-size: 13px; }
+#layoutbox { display: inline-flex; align-items: center; gap: 4px; color: var(--mute); font-size: 12px; }
 #videobox { display: none; align-items: center; gap: 4px; margin-right: 8px; }
-#videowarn { display: none; color: #e0a33c; font-size: 15px; cursor: pointer; padding: 0 2px; }
-#grid { position: absolute; top: var(--bar-h, 52px); left: 0; right: 0; bottom: 0; display: grid; gap: 4px; padding: 4px; padding-bottom: calc(4px + env(safe-area-inset-bottom)); padding-left: calc(4px + env(safe-area-inset-left)); padding-right: calc(4px + env(safe-area-inset-right)); background: #2b2b2b; overflow-y: auto; overflow-x: hidden; align-content: start; -webkit-overflow-scrolling: touch; }
+#videowarn { display: none; color: var(--warn2-fg); font-size: 15px; cursor: pointer; padding: 0 2px; }
+#grid { position: absolute; top: var(--bar-h, 52px); left: 0; right: 0; bottom: 0; display: grid; gap: 4px; padding: 4px; padding-bottom: calc(4px + env(safe-area-inset-bottom)); padding-left: calc(4px + env(safe-area-inset-left)); padding-right: calc(4px + env(safe-area-inset-right)); background: var(--bg); overflow-y: auto; overflow-x: hidden; align-content: start; -webkit-overflow-scrolling: touch; }
 #grid::-webkit-scrollbar { width: 10px; }
-#grid::-webkit-scrollbar-track { background: #222; }
-#grid::-webkit-scrollbar-thumb { background: #555; border-radius: 5px; }
-#grid::-webkit-scrollbar-thumb:hover { background: #777; }
+#grid::-webkit-scrollbar-track { background: var(--scroll-track); }
+#grid::-webkit-scrollbar-thumb { background: var(--scroll); border-radius: 5px; }
+#grid::-webkit-scrollbar-thumb:hover { background: var(--scroll-hover); }
 .cell { position: relative; background: #000; border-radius: 4px; overflow: hidden; }
 .cell iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; }
 /* Phone only (body.remote, set next to the other REMOTE-mode setup): each tile takes the shape of
@@ -65,15 +113,15 @@ body.remote .cell.expanded { aspect-ratio: auto; max-height: none; }
 .cell.expanded .label { top: calc(6px + env(safe-area-inset-top)); left: calc(8px + env(safe-area-inset-left)); }
 .cell.expanded .expand { top: calc(6px + env(safe-area-inset-top)); right: calc(8px + env(safe-area-inset-right)); }
 @media (pointer: coarse) { .cell .expand { min-width: 36px; height: 30px; line-height: 30px; font-size: 16px; } }
-.cell.empty { border: 1px dashed #555; background: #262626; }
+.cell.empty { border: 1px dashed var(--border); background: var(--sunk); }
 .cell.over { outline: 2px solid #5fd08a; outline-offset: -2px; }
 body.dragging .cell iframe, body.dragging .cell img { pointer-events: none; }
-#note { color: #999; font-size: 12px; }
+#note { color: var(--mute3); font-size: 12px; }
 /* "Remote · <login>" sits next to the connection strip in the same row now (see markup), so it
    always has a line rather than wrapping onto its own unpredictable one. If the row is tight it
    is the first thing allowed to shrink and ellipsize - the host address and the switch button
    matter more - so it gets min-width:0 and a small, capped flex-basis instead of pushing them. */
-#via { color: #5fd08a; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; flex: 0 1 auto; max-width: 40%; }
+#via { color: var(--ok-fg); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; flex: 0 1 auto; max-width: 40%; }
 #via:empty { display: none; }
 /* The Connection control: which of the hub's two origins this page came from, and the way over
    to the other one. Always visible on the phone, because the switch is the one thing that always
@@ -82,18 +130,18 @@ body.dragging .cell iframe, body.dragging .cell img { pointer-events: none; }
    that mixing is what let the switch button wrap onto the chips' line and get drawn over. */
 #conn { display: flex; align-items: center; gap: 6px; font-size: 12px; flex: 1 1 auto; min-width: 0; }
 #conn:empty { display: none; }
-#conn .connwhere { color: #ddd; padding: 3px 8px; border-radius: 10px; background: #3a3a3a; white-space: nowrap; flex: none; }
-#conn .connwhere.home { color: #cdebd8; background: #14562f; }
+#conn .connwhere { color: var(--fg3); padding: 3px 8px; border-radius: 10px; background: var(--ctl); white-space: nowrap; flex: none; }
+#conn .connwhere.home { color: var(--home-fg); background: var(--home-bg); }
 /* The host itself, so the control says which origin this is and not only which kind. A tailnet
    name is long and the header is a phone's: it gets its own ellipsis rather than wrapping, and
    the full address is still available via the title attribute (a long-press/hover tooltip). The
    flex basis + min-width:0 is what lets the ellipsis actually engage instead of pushing the
    switch button off-row - a lone max-width on a flex item does not shrink it on its own. */
-#conn .connhost { color: #999; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1 1 auto; }
+#conn .connhost { color: var(--mute3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1 1 auto; }
 /* Never wraps and never shrinks: the switch is the one control that always works, so it keeps
    its full label and stays clickable rather than folding under the host text. */
-.connbtn { display: inline-block; padding: 4px 10px; border-radius: 10px; background: #3a3a3a; color: #fff;
-           border: 1px dashed #777; font-size: 12px; cursor: pointer; user-select: none; -webkit-user-select: none; white-space: nowrap; flex: none; }
+.connbtn { display: inline-block; padding: 4px 10px; border-radius: 10px; background: var(--ctl); color: var(--fg);
+           border: 1px dashed var(--border3); font-size: 12px; cursor: pointer; user-select: none; -webkit-user-select: none; white-space: nowrap; flex: none; }
 @media (pointer: coarse) { .connbtn, #conn .connwhere { padding: 6px 12px; font-size: 13px; } }
 /* Per-card stream mode. "Auto - MP4" reads as a badge and opens as a picker. */
 .cell .modepick { position: absolute; left: 8px; bottom: 6px; z-index: 2; max-width: 60%; padding: 2px 6px; border-radius: 10px;
@@ -101,46 +149,46 @@ body.dragging .cell iframe, body.dragging .cell img { pointer-events: none; }
 .cell.expanded .modepick { bottom: calc(6px + env(safe-area-inset-bottom)); left: calc(8px + env(safe-area-inset-left)); }
 @media (pointer: coarse) { .cell .modepick { font-size: 12px; padding: 4px 8px; } }
 #modal-bg { display: none; position: fixed; inset: 0; z-index: 100; background: rgba(0,0,0,0.6); align-items: center; justify-content: center; }
-#modal { background: #333; border-radius: 8px; padding: 18px; min-width: 360px; max-width: 480px; max-height: 92vh; overflow-y: auto; color: #fff; box-shadow: 0 6px 24px rgba(0,0,0,0.5); }
+#modal { background: var(--modal-bg); border-radius: 8px; padding: 18px; min-width: 360px; max-width: 480px; max-height: 92vh; overflow-y: auto; color: var(--fg); box-shadow: 0 6px 24px rgba(0,0,0,0.5); }
 #modal h3 { font-size: 15px; margin-bottom: 12px; font-weight: 600; }
 #modal .field { margin-bottom: 10px; }
-#modal .field label { display: block; font-size: 12px; color: #aaa; margin-bottom: 4px; }
-#modal .field .info { font-size: 12px; color: #bbb; line-height: 1.4; background: #2a2a2a; border-radius: 5px; padding: 7px 9px; }
-#modal .field .status { font-size: 12px; color: #999; margin-top: 4px; }
-#modal input, #modal select { width: 100%; background: #222; color: #fff; border: 1px solid #555; border-radius: 5px; padding: 7px 9px; font-size: 13px; }
+#modal .field label { display: block; font-size: 12px; color: var(--mute); margin-bottom: 4px; }
+#modal .field .info { font-size: 12px; color: var(--fg5); line-height: 1.4; background: var(--info-bg); border-radius: 5px; padding: 7px 9px; }
+#modal .field .status { font-size: 12px; color: var(--mute3); margin-top: 4px; }
+#modal input, #modal select { width: 100%; background: var(--field); color: var(--fg); border: 1px solid var(--border); border-radius: 5px; padding: 7px 9px; font-size: 13px; }
 #modal .buttons { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
-#modal .buttons span, #modal .field .btn { display: inline-block; padding: 7px 16px; border-radius: 6px; font-size: 13px; cursor: pointer; user-select: none; background: #555; }
+#modal .buttons span, #modal .field .btn { display: inline-block; padding: 7px 16px; border-radius: 6px; font-size: 13px; cursor: pointer; user-select: none; background: var(--dim); }
 #modal .ok { background: #0a9e50 !important; }
 #modal .qr { display: block; margin: 10px auto; background: #fff; border-radius: 6px; }
 #tabs { display: none; gap: 4px; margin-right: 6px; }
-#tabs .tab { padding: 6px 12px; border-radius: 6px; background: #3a3a3a; color: #ccc; font-size: 13px; cursor: pointer; user-select: none; }
+#tabs .tab { padding: 6px 12px; border-radius: 6px; background: var(--ctl); color: var(--fg4); font-size: 13px; cursor: pointer; user-select: none; }
 #tabs .tab.active { background: #0a9e50; color: #fff; }
 /* How many printer events have happened since this phone last looked at the Devices tab. */
 #tabs .tab .badge { display: inline-block; margin-left: 6px; min-width: 16px; padding: 0 4px; border-radius: 9px; background: #c8503a; color: #fff; font-size: 11px; line-height: 16px; text-align: center; font-weight: 600; }
 #tabs .tab.active .badge { background: #fff; color: #0a7a3e; }
-.view { display: none; position: absolute; top: var(--bar-h, 52px); left: 0; right: 0; bottom: 0; overflow-y: auto; padding: 10px; padding-bottom: calc(10px + env(safe-area-inset-bottom)); color: #ddd; font-size: 13px; }
-.view .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 10px; color: #ccc; }
+.view { display: none; position: absolute; top: var(--bar-h, 52px); left: 0; right: 0; bottom: 0; overflow-y: auto; padding: 10px; padding-bottom: calc(10px + env(safe-area-inset-bottom)); color: var(--fg3); font-size: 13px; }
+.view .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 10px; color: var(--fg4); }
 .view .btn { padding: 7px 14px; border-radius: 6px; background: #0a9e50; color: #fff; font-size: 13px; cursor: pointer; user-select: none; white-space: nowrap; }
-.view .btn.dim { background: #555; }
-.view .btn.small { padding: 5px 10px; font-size: 12px; background: #3a3a3a; border: 1px dashed #777; }
-.setup { background: #303030; border-radius: 8px; padding: 10px 12px; margin-bottom: 12px; }
-.setup .lbl { color: #9a9a9a; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; margin: 8px 0 4px; }
+.view .btn.dim { background: var(--dim); }
+.view .btn.small { padding: 5px 10px; font-size: 12px; background: var(--ctl); border: 1px dashed var(--border3); }
+.setup { background: var(--panel); border-radius: 8px; padding: 10px 12px; margin-bottom: 12px; }
+.setup .lbl { color: var(--mute2); font-size: 11px; text-transform: uppercase; letter-spacing: .04em; margin: 8px 0 4px; }
 .setup .lbl:first-child { margin-top: 0; }
-.setup select { width: 100%; background: #222; color: #fff; border: 1px solid #555; border-radius: 6px; padding: 8px 10px; font-size: 14px; }
+.setup select { width: 100%; background: var(--field); color: var(--fg); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; font-size: 14px; }
 .setup .filrow { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
-.setup .filrow .num { width: 22px; height: 22px; border-radius: 4px; background: #444; color: #fff; font-size: 12px; display: inline-flex; align-items: center; justify-content: center; flex: none; }
-.setup .filrow input[type=color] { width: 34px; height: 34px; border: 1px solid #555; border-radius: 6px; padding: 0; background: #222; flex: none; }
+.setup .filrow .num { width: 22px; height: 22px; border-radius: 4px; background: var(--num); color: var(--fg); font-size: 12px; display: inline-flex; align-items: center; justify-content: center; flex: none; }
+.setup .filrow input[type=color] { width: 34px; height: 34px; border: 1px solid var(--border); border-radius: 6px; padding: 0; background: var(--field); flex: none; }
 .setup .filrow select { flex: 1; min-width: 0; }
 .setup.busy { opacity: .6; pointer-events: none; }
 .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 10px; }
-.card { background: #333; border-radius: 8px; overflow: hidden; color: #eee; }
-.card img { display: block; width: 100%; aspect-ratio: 1 / 1; object-fit: contain; background: #222; }
+.card { background: var(--card); border-radius: 8px; overflow: hidden; color: var(--fg2); }
+.card img { display: block; width: 100%; aspect-ratio: 1 / 1; object-fit: contain; background: var(--well); }
 .card .body { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 10px 10px; }
 .card .title { font-weight: 600; }
-.card .meta { color: #aaa; font-size: 12px; line-height: 1.4; }
-.card .bar { height: 6px; background: #222; margin: 0 10px 10px; border-radius: 3px; overflow: hidden; }
+.card .meta { color: var(--mute); font-size: 12px; line-height: 1.4; }
+.card .bar { height: 6px; background: var(--well); margin: 0 10px 10px; border-radius: 3px; overflow: hidden; }
 .card .bar div { height: 100%; background: #0a9e50; width: 0; transition: width .3s; }
-.printer { background: #2f2f2f; border-left: 4px solid #555; border-radius: 6px; padding: 10px 12px; color: #ddd; margin-bottom: 8px; }
+.printer { background: var(--panel2); border-left: 4px solid var(--border); border-radius: 6px; padding: 10px 12px; color: var(--fg3); margin-bottom: 8px; }
 .printer.online { border-left-color: #0a9e50; }
 /* The card a notification was tapped through on: the app writes its printer id to localStorage
    (edgeslicer_pending_printer) and the page scrolls here and says so for a moment. Deliberately a
@@ -150,14 +198,14 @@ body.dragging .cell iframe, body.dragging .cell img { pointer-events: none; }
 @keyframes pointed { 0%, 60% { box-shadow: 0 0 0 2px #3d8fd6; } 100% { box-shadow: 0 0 0 2px rgba(61,143,214,0); } }
 @media (prefers-reduced-motion: reduce) { .printer.pointed { animation: none; } }
 .printer .name { font-weight: 600; margin-bottom: 4px; }
-.printer .meta { color: #aaa; font-size: 12px; line-height: 1.5; }
+.printer .meta { color: var(--mute); font-size: 12px; line-height: 1.5; }
 .printer .temps { display: flex; gap: 14px; margin-top: 6px; }
 .printer .temps.wrap { flex-wrap: wrap; } /* more cells than a Bambu card ever has (a four-extruder print host) */
-.printer .temps div { background: #262626; border-radius: 6px; padding: 6px 10px; text-align: center; }
-.printer .temps .v { font-size: 16px; color: #fff; }
-.printer .temps .k { font-size: 11px; color: #888; }
-.setup .file { font-size: 15px; font-weight: 600; color: #fff; margin-bottom: 8px; word-break: break-all; }
-.setup .file .sub { font-size: 11px; font-weight: 400; color: #8a8a8a; text-transform: uppercase; letter-spacing: .04em; display: block; margin-bottom: 2px; }
+.printer .temps div { background: var(--sunk); border-radius: 6px; padding: 6px 10px; text-align: center; }
+.printer .temps .v { font-size: 16px; color: var(--fg); }
+.printer .temps .k { font-size: 11px; color: var(--mute5); }
+.setup .file { font-size: 15px; font-weight: 600; color: var(--fg); margin-bottom: 8px; word-break: break-all; }
+.setup .file .sub { font-size: 11px; font-weight: 400; color: var(--mute4); text-transform: uppercase; letter-spacing: .04em; display: block; margin-bottom: 2px; }
 .setup .procrow { display: flex; gap: 8px; align-items: center; }
 .setup .procrow select { flex: 1; min-width: 0; }
 .setup .procrow .btn { flex: none; }
@@ -167,106 +215,106 @@ body.dragging .cell iframe, body.dragging .cell img { pointer-events: none; }
 .setup .procrow .btn.eye svg { display: block; }
 .printer .acts { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; align-items: center; }
 .printer .heads { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
-.printer .heads .head { display: flex; align-items: center; gap: 5px; background: #262626; border-radius: 6px; padding: 4px 8px; font-size: 11px; color: #bbb; }
-.printer .heads .sw { width: 12px; height: 12px; border-radius: 3px; border: 1px solid #666; flex: none; }
+.printer .heads .head { display: flex; align-items: center; gap: 5px; background: var(--sunk); border-radius: 6px; padding: 4px 8px; font-size: 11px; color: var(--fg5); }
+.printer .heads .sw { width: 12px; height: 12px; border-radius: 3px; border: 1px solid var(--border2); flex: none; }
 .printer .heads .head.empty { opacity: .45; }
 .view .addrow { display: flex; gap: 8px; margin: 8px 0 4px; }
-.view .addrow input { flex: 1; min-width: 0; background: #222; color: #fff; border: 1px solid #555; border-radius: 6px; padding: 8px 10px; font-size: 14px; }
+.view .addrow input { flex: 1; min-width: 0; background: var(--field); color: var(--fg); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; font-size: 14px; }
 #send .maprow { display: flex; align-items: center; gap: 8px; margin: 12px 0 6px; }
-#send .maprow .sw { width: 22px; height: 22px; border-radius: 4px; border: 1px solid #666; flex: none; }
+#send .maprow .sw { width: 22px; height: 22px; border-radius: 4px; border: 1px solid var(--border2); flex: none; }
 #send .maprow .who { flex: 1; min-width: 0; font-size: 13px; }
-#send .maprow .who .sub { display: block; color: #8a8a8a; font-size: 11px; }
+#send .maprow .who .sub { display: block; color: var(--mute4); font-size: 11px; }
 /* The toolhead chooser: one tappable chip per toolhead, radio-like. A select cannot show a
    colour, and the colour is what the choice is about. */
 #send .heads { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
-#send .heads .head { display: flex; align-items: center; gap: 6px; min-height: 40px; padding: 6px 10px; border-radius: 8px; background: #303030; border: 1px solid #454545; color: #ccc; font-size: 12px; cursor: pointer; user-select: none; -webkit-user-select: none; }
-#send .heads .head .sw { width: 16px; height: 16px; border-radius: 4px; border: 1px solid #666; flex: none; }
-#send .heads .head .n { color: #fff; font-weight: 600; }
-#send .heads .head.sel { background: #234a33; border-color: #0a9e50; color: #fff; }
+#send .heads .head { display: flex; align-items: center; gap: 6px; min-height: 40px; padding: 6px 10px; border-radius: 8px; background: var(--panel); border: 1px solid var(--border-head); color: var(--fg4); font-size: 12px; cursor: pointer; user-select: none; -webkit-user-select: none; }
+#send .heads .head .sw { width: 16px; height: 16px; border-radius: 4px; border: 1px solid var(--border2); flex: none; }
+#send .heads .head .n { color: var(--fg); font-weight: 600; }
+#send .heads .head.sel { background: var(--sel-bg); border-color: #0a9e50; color: var(--fg); }
 #send .heads .head.empty { opacity: .5; font-style: italic; }
-#send .heads .head.empty.sel { opacity: .85; border-color: #b26a00; background: #3a2f1f; }
+#send .heads .head.empty.sel { opacity: .85; border-color: #b26a00; background: var(--warn-bg); }
 .setup .filerow { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .setup .filerow label.btn { display: inline-block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.setup .note { color: #9ed; font-size: 12px; margin-top: 8px; }
-.setup .note.err { color: #e88; }
-.view .empty { color: #999; padding: 24px 6px; text-align: center; line-height: 1.5; }
+.setup .note { color: var(--note-fg); font-size: 12px; margin-top: 8px; }
+.setup .note.err { color: var(--err-fg); }
+.view .empty { color: var(--mute3); padding: 24px 6px; text-align: center; line-height: 1.5; }
 /* Settings editor (full-screen sheet) */
-#sheet { display: none; position: fixed; inset: 0; z-index: 200; background: #262626; color: #ddd; font-size: 13px; flex-direction: column; }
-#sheet .head { display: flex; align-items: center; gap: 8px; padding: 10px 12px; padding-top: calc(10px + env(safe-area-inset-top)); background: #1f1f1f; flex-wrap: wrap; }
-#sheet .head .name { flex: 1; min-width: 0; font-weight: 600; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-#sheet .head .name .mod { color: #f0a030; }
+#sheet { display: none; position: fixed; inset: 0; z-index: 200; background: var(--sunk); color: var(--fg3); font-size: 13px; flex-direction: column; }
+#sheet .head { display: flex; align-items: center; gap: 8px; padding: 10px 12px; padding-top: calc(10px + env(safe-area-inset-top)); background: var(--bar); flex-wrap: wrap; }
+#sheet .head .name { flex: 1; min-width: 0; font-weight: 600; color: var(--fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#sheet .head .name .mod { color: var(--warn-fg); }
 #sheet .head .btn { padding: 6px 12px; }
 #sheet .head .btn.warn { background: #8a3a3a; }
-#sheet .head select { background: #3a3a3a; color: #fff; border: 1px solid #555; border-radius: 6px; padding: 5px 8px; font-size: 12px; }
-#sheet .pagetabs { display: flex; gap: 2px; padding: 6px 8px 0; background: #1f1f1f; overflow-x: auto; }
-#sheet .pagetabs .pt { padding: 8px 12px; border-radius: 6px 6px 0 0; background: #2c2c2c; color: #bbb; cursor: pointer; white-space: nowrap; user-select: none; font-size: 13px; }
+#sheet .head select { background: var(--ctl); color: var(--fg); border: 1px solid var(--border); border-radius: 6px; padding: 5px 8px; font-size: 12px; }
+#sheet .pagetabs { display: flex; gap: 2px; padding: 6px 8px 0; background: var(--bar); overflow-x: auto; }
+#sheet .pagetabs .pt { padding: 8px 12px; border-radius: 6px 6px 0 0; background: var(--tab-bg); color: var(--fg5); cursor: pointer; white-space: nowrap; user-select: none; font-size: 13px; }
 #sheet .pagetabs .pt.active { background: #0a9e50; color: #fff; }
 #sheet .body { flex: 1; overflow-y: auto; padding: 8px 10px; padding-bottom: calc(12px + env(safe-area-inset-bottom)); -webkit-overflow-scrolling: touch; }
-#sheet .grp { background: #303030; border-radius: 8px; margin-bottom: 8px; overflow: hidden; }
-#sheet .grp .gh { display: flex; align-items: center; justify-content: space-between; padding: 10px 12px; font-weight: 600; color: #fff; cursor: pointer; user-select: none; }
-#sheet .grp .gh .chev { transition: transform .15s; color: #9a9a9a; font-size: 12px; }
+#sheet .grp { background: var(--panel); border-radius: 8px; margin-bottom: 8px; overflow: hidden; }
+#sheet .grp .gh { display: flex; align-items: center; justify-content: space-between; padding: 10px 12px; font-weight: 600; color: var(--fg); cursor: pointer; user-select: none; }
+#sheet .grp .gh .chev { transition: transform .15s; color: var(--mute2); font-size: 12px; }
 #sheet .grp.open .gh .chev { transform: rotate(90deg); }
 #sheet .grp .gb { display: none; padding: 0 12px 8px; }
 #sheet .grp.open .gb { display: block; }
-#sheet .ln { display: flex; align-items: center; gap: 10px; padding: 7px 0; border-top: 1px solid #3a3a3a; flex-wrap: wrap; }
-#sheet .ln .ll { flex: 1 1 140px; min-width: 120px; color: #ccc; }
-#sheet .ln .ll.dirty::before { content: '●'; color: #f0a030; margin-right: 6px; font-size: 10px; vertical-align: middle; }
-#sheet .ln .ll .u { color: #777; font-size: 11px; margin-left: 4px; }
+#sheet .ln { display: flex; align-items: center; gap: 10px; padding: 7px 0; border-top: 1px solid var(--line); flex-wrap: wrap; }
+#sheet .ln .ll { flex: 1 1 140px; min-width: 120px; color: var(--fg4); }
+#sheet .ln .ll.dirty::before { content: '●'; color: var(--warn-fg); margin-right: 6px; font-size: 10px; vertical-align: middle; }
+#sheet .ln .ll .u { color: var(--faint); font-size: 11px; margin-left: 4px; }
 #sheet .ln .ctl { display: flex; gap: 6px; align-items: center; flex: 0 1 auto; }
-#sheet .ln input[type=text], #sheet .ln select { background: #222; color: #fff; border: 1px solid #555; border-radius: 6px; padding: 7px 9px; font-size: 14px; width: 120px; }
+#sheet .ln input[type=text], #sheet .ln select { background: var(--field); color: var(--fg); border: 1px solid var(--border); border-radius: 6px; padding: 7px 9px; font-size: 14px; width: 120px; }
 #sheet .ln input[type=text].wide { width: 220px; }
 #sheet .ln input.dirty, #sheet .ln select.dirty { border-color: #f0a030; }
 #sheet .ln input[type=checkbox] { width: 22px; height: 22px; accent-color: #0a9e50; }
-#sheet .ln .ctl .sub { color: #777; font-size: 11px; }
+#sheet .ln .ctl .sub { color: var(--faint); font-size: 11px; }
 #sheet .hidden { display: none !important; }
 #sheet .toast { position: fixed; left: 50%; bottom: calc(20px + env(safe-area-inset-bottom)); transform: translateX(-50%); background: #0a9e50; color: #fff; padding: 8px 14px; border-radius: 8px; font-size: 13px; display: none; z-index: 210; }
 .card .btns { display: flex; gap: 6px; flex: none; }
 /* Send sheet (full-screen): pick a printer, upload the sliced plate or upload and print it.
    The Stop confirmation (#ctlsheet) is the same sheet in every respect but its contents. */
-#send, #ctlsheet { display: none; position: fixed; inset: 0; z-index: 230; background: #262626; color: #ddd; font-size: 13px; flex-direction: column; }
-#send .head, #ctlsheet .head { display: flex; align-items: center; gap: 8px; padding: 10px 12px; padding-top: calc(10px + env(safe-area-inset-top)); background: #1f1f1f; }
-#send .head .name, #ctlsheet .head .name { flex: 1; min-width: 0; font-weight: 600; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#send, #ctlsheet { display: none; position: fixed; inset: 0; z-index: 230; background: var(--sunk); color: var(--fg3); font-size: 13px; flex-direction: column; }
+#send .head, #ctlsheet .head { display: flex; align-items: center; gap: 8px; padding: 10px 12px; padding-top: calc(10px + env(safe-area-inset-top)); background: var(--bar); }
+#send .head .name, #ctlsheet .head .name { flex: 1; min-width: 0; font-weight: 600; color: var(--fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 #send .head .btn, #ctlsheet .head .btn { padding: 6px 12px; font-size: 13px; }
 #send .body, #ctlsheet .body { flex: 1; overflow-y: auto; padding: 10px 12px; padding-bottom: calc(12px + env(safe-area-inset-bottom)); -webkit-overflow-scrolling: touch; }
-#send .lbl, #ctlsheet .lbl { color: #9a9a9a; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; margin: 14px 0 4px; }
-#send select, #send input[type=text] { width: 100%; background: #222; color: #fff; border: 1px solid #555; border-radius: 6px; padding: 8px 10px; font-size: 14px; box-sizing: border-box; }
-#send .opt { display: flex; align-items: center; gap: 10px; padding: 9px 0; border-top: 1px solid #333; cursor: pointer; }
+#send .lbl, #ctlsheet .lbl { color: var(--mute2); font-size: 11px; text-transform: uppercase; letter-spacing: .04em; margin: 14px 0 4px; }
+#send select, #send input[type=text] { width: 100%; background: var(--field); color: var(--fg); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; font-size: 14px; box-sizing: border-box; }
+#send .opt { display: flex; align-items: center; gap: 10px; padding: 9px 0; border-top: 1px solid var(--line2); cursor: pointer; }
 #send .opt input[type=checkbox] { width: 22px; height: 22px; accent-color: #0a9e50; flex: none; margin: 0; }
-#send .info, #ctlsheet .info { color: #aaa; font-size: 12px; line-height: 1.5; margin-top: 6px; }
-#send .info.warn, #ctlsheet .info.warn { color: #f0a030; }
-#send .info.err, #ctlsheet .info.err { color: #e88; }
+#send .info, #ctlsheet .info { color: var(--mute); font-size: 12px; line-height: 1.5; margin-top: 6px; }
+#send .info.warn, #ctlsheet .info.warn { color: var(--warn-fg); }
+#send .info.err, #ctlsheet .info.err { color: var(--err-fg); }
 #send .actions, #ctlsheet .actions { display: flex; gap: 10px; margin-top: 16px; flex-wrap: wrap; }
 #send .btn, #ctlsheet .btn { padding: 10px 18px; border-radius: 6px; background: #0a9e50; color: #fff; font-size: 14px; cursor: pointer; user-select: none; white-space: nowrap; }
-#send .btn.dim, #ctlsheet .btn.dim { background: #555; pointer-events: none; }
-#send .btn.alt, #ctlsheet .btn.alt { background: #3a3a3a; border: 1px solid #666; }
+#send .btn.dim, #ctlsheet .btn.dim { background: var(--dim); pointer-events: none; }
+#send .btn.alt, #ctlsheet .btn.alt { background: var(--ctl); border: 1px solid var(--border2); }
 #send .btn.warn, #ctlsheet .btn.warn { background: #b26a00; }
 #send .btn.stop, #ctlsheet .btn.stop { background: #8a3a3a; }
-#send .confirm, #ctlsheet .confirm { background: #3a2f1f; border: 1px solid #b26a00; border-radius: 8px; padding: 12px; margin-top: 14px; line-height: 1.5; }
-#send .bar { height: 8px; background: #222; border-radius: 4px; overflow: hidden; margin: 14px 0 6px; }
+#send .confirm, #ctlsheet .confirm { background: var(--warn-bg); border: 1px solid #b26a00; border-radius: 8px; padding: 12px; margin-top: 14px; line-height: 1.5; }
+#send .bar { height: 8px; background: var(--well); border-radius: 4px; overflow: hidden; margin: 14px 0 6px; }
 #send .bar div { height: 100%; background: #0a9e50; width: 0; transition: width .3s; }
-#send .done { color: #5fd08a; font-weight: 600; margin-top: 12px; font-size: 15px; }
-#send .plate, #ctlsheet .plate { background: #303030; border-radius: 8px; padding: 10px 12px; color: #fff; font-weight: 600; }
-#send .plate .sub, #ctlsheet .plate .sub { display: block; font-weight: 400; color: #aaa; font-size: 12px; margin-top: 2px; }
+#send .done { color: var(--ok-fg); font-weight: 600; margin-top: 12px; font-size: 15px; }
+#send .plate, #ctlsheet .plate { background: var(--panel); border-radius: 8px; padding: 10px 12px; color: var(--fg); font-weight: 600; }
+#send .plate .sub, #ctlsheet .plate .sub { display: block; font-weight: 400; color: var(--mute); font-size: 12px; margin-top: 2px; }
 /* The control line under a printer card: what pause / resume / stop is doing, and why not */
 /* "Enable notifications": the Web Push control, in the same card styling as the event list. */
-.pushbox { background: #2f2f2f; border-radius: 8px; padding: 10px 12px; margin-bottom: 10px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-.pushbox .txt { flex: 1; min-width: 150px; font-size: 12px; line-height: 1.45; color: #bbb; }
-.pushbox .txt b { color: #fff; font-weight: 600; display: block; font-size: 13px; margin-bottom: 2px; }
-.pushbox .dot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: #555; }
+.pushbox { background: var(--panel2); border-radius: 8px; padding: 10px 12px; margin-bottom: 10px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.pushbox .txt { flex: 1; min-width: 150px; font-size: 12px; line-height: 1.45; color: var(--fg5); }
+.pushbox .txt b { color: var(--fg); font-weight: 600; display: block; font-size: 13px; margin-bottom: 2px; }
+.pushbox .dot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--dim); }
 .pushbox.on .dot { background: #5fd08a; }
 /* The Reprints tab: the G-code archive, one row per file this PC has sent to a printer. The row
    is the whole tap target - a phone has no hover, so a hidden button on a row is a lost button. */
 .view .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
-.view .chips .f { padding: 5px 11px; border-radius: 14px; background: #333; color: #bbb; font-size: 12px; cursor: pointer; user-select: none; }
+.view .chips .f { padding: 5px 11px; border-radius: 14px; background: var(--chip2); color: var(--fg5); font-size: 12px; cursor: pointer; user-select: none; }
 .view .chips .f.on { background: #0a9e50; color: #fff; }
-.rp { display: flex; gap: 10px; align-items: center; background: #2f2f2f; border-radius: 8px; padding: 8px 10px; margin-bottom: 8px; cursor: pointer; }
-.rp .th { width: 56px; height: 56px; flex: none; border-radius: 6px; background: #222; object-fit: contain; }
-.rp .noth { width: 56px; height: 56px; flex: none; border-radius: 6px; background: #262626; color: #666; display: flex; align-items: center; justify-content: center; font-size: 11px; }
+.rp { display: flex; gap: 10px; align-items: center; background: var(--panel2); border-radius: 8px; padding: 8px 10px; margin-bottom: 8px; cursor: pointer; }
+.rp .th { width: 56px; height: 56px; flex: none; border-radius: 6px; background: var(--well); object-fit: contain; }
+.rp .noth { width: 56px; height: 56px; flex: none; border-radius: 6px; background: var(--sunk); color: var(--faint2); display: flex; align-items: center; justify-content: center; font-size: 11px; }
 .rp .body { flex: 1; min-width: 0; }
-.rp .body .name { color: #fff; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.rp .body .meta { color: #9a9a9a; font-size: 12px; line-height: 1.5; }
-.rp .body .sw { display: inline-block; width: 10px; height: 10px; border-radius: 3px; border: 1px solid #666; margin-right: 3px; vertical-align: -1px; }
-.rp .chev { flex: none; color: #777; font-size: 16px; }
+.rp .body .name { color: var(--fg); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rp .body .meta { color: var(--mute2); font-size: 12px; line-height: 1.5; }
+.rp .body .sw { display: inline-block; width: 10px; height: 10px; border-radius: 3px; border: 1px solid var(--border2); margin-right: 3px; vertical-align: -1px; }
+.rp .chev { flex: none; color: var(--faint); font-size: 16px; }
 .rp.gone { opacity: .5; }
 /* Swipe-left to delete, touch only. The row keeps its own look and slides over a Delete panel
    that is painted underneath it; the desktop's Delete button in the sheet is untouched, because a
@@ -281,54 +329,54 @@ body.dragging .cell iframe, body.dragging .cell img { pointer-events: none; }
 /* While a row is swiped open its own tap must not also open the sheet. */
 .rpsw.open > .rp { cursor: default; }
 /* The Devices tab's event list: what the printers have done, newest first, in the card styling. */
-.evbox { background: #2f2f2f; border-radius: 8px; padding: 8px 12px 10px; margin-bottom: 10px; }
+.evbox { background: var(--panel2); border-radius: 8px; padding: 8px 12px 10px; margin-bottom: 10px; }
 .evbox .evhead { display: flex; align-items: center; gap: 8px; margin-bottom: 2px; }
-.evbox .evhead .ttl { flex: 1; font-weight: 600; color: #fff; }
-.evbox .ev { display: flex; gap: 8px; padding: 5px 0; border-top: 1px solid #3a3a3a; font-size: 12px; line-height: 1.45; color: #ccc; }
+.evbox .evhead .ttl { flex: 1; font-weight: 600; color: var(--fg); }
+.evbox .ev { display: flex; gap: 8px; padding: 5px 0; border-top: 1px solid var(--line); font-size: 12px; line-height: 1.45; color: var(--fg4); }
 .evbox .ev .dot { flex: none; width: 8px; height: 8px; border-radius: 50%; margin-top: 5px; background: #5fd08a; }
 .evbox .ev.warn .dot { background: #f0a030; }
 .evbox .ev.err .dot { background: #e05a4a; }
-.evbox .ev.unread { color: #fff; }
+.evbox .ev.unread { color: var(--fg); }
 .evbox .ev .body { flex: 1; min-width: 0; }
-.evbox .ev .body .sub { color: #8f8f8f; }
-.evbox .ev .when { flex: none; color: #888; }
-.printer .ctlline { font-size: 12px; line-height: 1.5; margin-top: 6px; color: #aaa; }
-.printer .ctlline.err { color: #e88; }
-.printer .ctlline.warn { color: #f0a030; }
-.printer .ctlline.ok { color: #5fd08a; }
+.evbox .ev .body .sub { color: var(--mute6); }
+.evbox .ev .when { flex: none; color: var(--mute5); }
+.printer .ctlline { font-size: 12px; line-height: 1.5; margin-top: 6px; color: var(--mute); }
+.printer .ctlline.err { color: var(--err-fg); }
+.printer .ctlline.warn { color: var(--warn-fg); }
+.printer .ctlline.ok { color: var(--ok-fg); }
 .printer .acts .btn.stop:not(.dim) { background: #8a3a3a; border-color: #8a3a3a; }
 /* Plate layout editor (full-screen sheet): top-down plate, tap to select, drag to move */
-#plate { display: none; position: fixed; inset: 0; z-index: 220; background: #262626; color: #ddd; font-size: 13px; flex-direction: column; }
-#plate .head { display: flex; align-items: center; gap: 8px; padding: 10px 12px; padding-top: calc(10px + env(safe-area-inset-top)); background: #1f1f1f; }
-#plate .head .name { flex: 1; min-width: 0; font-weight: 600; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#plate { display: none; position: fixed; inset: 0; z-index: 220; background: var(--sunk); color: var(--fg3); font-size: 13px; flex-direction: column; }
+#plate .head { display: flex; align-items: center; gap: 8px; padding: 10px 12px; padding-top: calc(10px + env(safe-area-inset-top)); background: var(--bar); }
+#plate .head .name { flex: 1; min-width: 0; font-weight: 600; color: var(--fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 #plate .head .btn { padding: 6px 12px; }
-#plate .canvas { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; background: #222; touch-action: none; }
+#plate .canvas { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; background: var(--well); touch-action: none; }
 #plate svg { max-width: 100%; max-height: 100%; touch-action: none; }
-#plate .bed { fill: #2e2e2e; stroke: #666; stroke-width: 1; }
-#plate .gridline { stroke: #3a3a3a; stroke-width: 0.6; }
+#plate .bed { fill: var(--bed); stroke: var(--border2); stroke-width: 1; }
+#plate .gridline { stroke: var(--line); stroke-width: 0.6; }
 #plate .excl { fill: rgba(200,60,60,0.25); stroke: #a44; stroke-width: 0.6; }
 #plate .obj { stroke: #000; stroke-width: 0.8; fill-opacity: 0.85; cursor: pointer; }
-#plate .obj.sel { stroke: #fff; stroke-width: 1.6; }
+#plate .obj.sel { stroke: var(--fg); stroke-width: 1.6; }
 #plate .obj.out { stroke: #e55; stroke-dasharray: 3 2; }
 #plate .lbl { fill: #fff; font-size: 7px; pointer-events: none; paint-order: stroke; stroke: #000; stroke-width: 2px; }
-#plate .ctl { background: #1f1f1f; padding: 10px 12px; padding-bottom: calc(12px + env(safe-area-inset-bottom)); }
+#plate .ctl { background: var(--bar); padding: 10px 12px; padding-bottom: calc(12px + env(safe-area-inset-bottom)); }
 #plate .ctl .row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
 #plate .ctl .row:last-child { margin-bottom: 0; }
-#plate .ctl .k { color: #9a9a9a; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; width: 64px; flex: none; }
-#plate .ctl input[type=text] { width: 76px; background: #222; color: #fff; border: 1px solid #555; border-radius: 6px; padding: 8px 10px; font-size: 14px; }
+#plate .ctl .k { color: var(--mute2); font-size: 11px; text-transform: uppercase; letter-spacing: .04em; width: 64px; flex: none; }
+#plate .ctl input[type=text] { width: 76px; background: var(--field); color: var(--fg); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; font-size: 14px; }
 #plate .ctl .btn { margin: 2px 0; padding: 9px 16px; }
 #plate .ctl .btn.small { border-style: solid; padding: 8px 14px; }
 #plate .ctl .slider { flex: 1 1 160px; min-width: 140px; display: flex; flex-direction: column; gap: 2px; }
 #plate .ctl input[type=range] { width: 100%; margin: 6px 0 0; accent-color: #0a9e50; }
-#plate .ctl .ticks { display: flex; justify-content: space-between; color: #777; font-size: 10px; padding: 0 2px; }
+#plate .ctl .ticks { display: flex; justify-content: space-between; color: var(--faint); font-size: 10px; padding: 0 2px; }
 #plate .ctl .ticks span { width: 0; text-align: center; white-space: nowrap; }
-#plate .rot-line { stroke: #fff; stroke-width: 0.8; stroke-dasharray: 2 2; pointer-events: none; }
+#plate .rot-line { stroke: var(--fg); stroke-width: 0.8; stroke-dasharray: 2 2; pointer-events: none; }
 #plate .rot-grab { fill: #0a9e50; stroke: #fff; stroke-width: 1.2; cursor: grab; }
 #plate .rot-grab.active { fill: #5fd08a; }
-#plate .ctl .sel-name { color: #fff; font-weight: 600; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-#plate .ctl .hint { color: #888; font-size: 12px; }
-#plate .seg { display: inline-flex; border-radius: 6px; overflow: hidden; border: 1px solid #555; flex: none; }
-#plate .seg span { padding: 7px 12px; background: #3a3a3a; color: #ccc; font-size: 12px; cursor: pointer; user-select: none; white-space: nowrap; }
+#plate .ctl .sel-name { color: var(--fg); font-weight: 600; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#plate .ctl .hint { color: var(--mute5); font-size: 12px; }
+#plate .seg { display: inline-flex; border-radius: 6px; overflow: hidden; border: 1px solid var(--border); flex: none; }
+#plate .seg span { padding: 7px 12px; background: var(--ctl); color: var(--fg4); font-size: 12px; cursor: pointer; user-select: none; white-space: nowrap; }
 #plate .seg span.active { background: #0a9e50; color: #fff; }
 #plate .pv { display: flex; width: 100%; height: 100%; }
 #plate .pv-img { flex: 1; min-width: 0; position: relative; display: flex; align-items: center; justify-content: center; }
@@ -337,25 +385,38 @@ body.dragging .cell iframe, body.dragging .cell img { pointer-events: none; }
 #plate .pv-img .status { position: absolute; left: 10px; top: 10px; color: #bbb; font-size: 12px; background: rgba(0,0,0,.45); padding: 3px 8px; border-radius: 6px; pointer-events: none; }
 #plate .pv-img .status:empty { display: none; }
 #plate .pv-slider { width: 64px; flex: none; display: flex; flex-direction: column; align-items: center; padding: 10px 0; touch-action: none; user-select: none; cursor: pointer; }
-#plate .pv-slider .track { position: relative; flex: 1; width: 6px; background: #444; border-radius: 3px; margin: 14px 0; }
+#plate .pv-slider .track { position: relative; flex: 1; width: 6px; background: var(--num); border-radius: 3px; margin: 14px 0; }
 #plate .pv-slider .fill { position: absolute; left: 0; right: 0; bottom: 0; background: #0a9e50; border-radius: 3px; }
 #plate .pv-slider .thumb { position: absolute; left: 50%; width: 46px; height: 28px; margin: -14px 0 0 -23px; background: #0a9e50; color: #fff; border-radius: 14px; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 600; box-shadow: 0 1px 4px rgba(0,0,0,.5); }
-#plate .pv-slider .end { color: #888; font-size: 11px; }
+#plate .pv-slider .end { color: var(--mute5); font-size: 11px; }
 #plate .pv-empty { display: flex; flex-direction: column; align-items: center; gap: 14px; padding: 24px; text-align: center; }
 #plate .pv-banner { position: absolute; left: 50%; top: 10px; transform: translateX(-50%); display: flex; align-items: center; gap: 10px; background: rgba(0,0,0,.65); color: #eee; padding: 6px 10px; border-radius: 8px; font-size: 12px; z-index: 2; white-space: nowrap; max-width: calc(100% - 20px); }
 #plate .pv-banner:empty { display: none; }
 #plate .pv-banner .btn { padding: 6px 12px; }
 #plate .btn.flash { animation: pvflash 1s ease-in-out infinite; }
 @keyframes pvflash { 0%, 100% { background: #0a9e50; color: #fff; } 50% { background: #8ce8b4; color: #000; } }
-#modal .url { font-family: Consolas, monospace; font-size: 12px; color: #9ed; text-align: center; word-break: break-all; user-select: all; }
+#modal .url { font-family: Consolas, monospace; font-size: 12px; color: var(--note-fg); text-align: center; word-break: break-all; user-select: all; }
 /* AGPL-3.0 section 13: the source offer every remote user must be able to see. */
-.view .srcbox { margin: 22px 0 4px; color: #777; font-size: 11px; line-height: 1.5; }
-.view .srcbox a { color: #8ab; }
+.view .srcbox { margin: 22px 0 4px; color: var(--faint); font-size: 11px; line-height: 1.5; }
+.view .srcbox a { color: var(--link-fg); }
 @media (max-width: 640px) {
     #topbar { padding: 6px 8px; gap: 6px; }
     .chip { font-size: 12px; padding: 5px 8px; }
     #modal { min-width: 0; width: 92vw; }
 }
+/* Light-theme fixes: text on the accent and status colours stays white; the rules above give
+   neutral controls theme text colours. In dark these resolve to the same #fff as before. */
+.chip.active { color: #fff; }
+.view .btn.dim { color: var(--on-dim); }
+.view .btn.small { color: var(--fg); }
+.printer .acts .btn.stop:not(.dim) { color: #fff; }
+#modal .ok { color: #fff; }
+#send .btn.dim, #ctlsheet .btn.dim { color: var(--on-dim); }
+#send .btn.alt, #ctlsheet .btn.alt { color: var(--fg); }
+#topbar { box-shadow: var(--bar-shadow); }
+/* Inside the slicer's Home tab (?embed=1): no Home/Away switch, no Tailscale login line and no
+   phone notification setup - those are about the phone's own connection. */
+html[data-embed] #conn, html[data-embed] #via, html[data-embed] .pushbox { display: none !important; }
 </style>
 </head>
 <body>
@@ -416,6 +477,12 @@ body.dragging .cell iframe, body.dragging .cell img { pointer-events: none; }
         return m ? m[1] + '/' : '';
     })();
     var REMOTE_KEY = 'snorca_remote_v1';
+    // Shown inside the slicer's Home tab (?embed=1, set by the <head> script): the phone-only
+    // parts (Home/Away switch, push notifications) stay out of it.
+    var EMBED = document.documentElement.hasAttribute('data-embed');
+    // The slicer pauses the page while its tab is not on screen (window.__edgeActive below): the
+    // periodic refreshes skip their turn instead of polling for a page nobody sees.
+    var edgePaused = false;
     if (REMOTE) {
         try { document.cookie = 'rt=' + REMOTE.split('/')[2] + '; path=/; SameSite=Lax'; } catch (e) {}
         // The phone's per-tile aspect rules hang off this class (see .cell in the stylesheet), so
@@ -849,7 +916,7 @@ body.dragging .cell iframe, body.dragging .cell img { pointer-events: none; }
     function relayWaitCell(cell, failed) {
         ensureHub();
         var wait = document.createElement('div');
-        wait.style.cssText = 'position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:' + (failed ? '#c66' : '#888') + ';font-size:13px;text-align:center;padding:8px;';
+        wait.style.cssText = 'position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:' + (failed ? 'var(--err2-fg)' : 'var(--mute5)') + ';font-size:13px;text-align:center;padding:8px;';
         wait.textContent = failed ? 'Stream relay failed to start - check <data dir>/hub/hub.log.' : 'Starting stream relay…';
         cell.appendChild(wait);
         cell.dataset.id = ''; // rebuild this cell once the relay reports in
@@ -904,14 +971,14 @@ body.dragging .cell iframe, body.dragging .cell img { pointer-events: none; }
         if (url === undefined) {
             postToSlicer('ff_detail:' + h.ip);
             var wait = document.createElement('div');
-            wait.style.cssText = 'position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#888;font-size:13px;';
+            wait.style.cssText = 'position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:var(--mute5);font-size:13px;';
             wait.textContent = 'Contacting printer…';
             cell.appendChild(wait);
             return;
         }
         if (url === '') {
             var err = document.createElement('div');
-            err.style.cssText = 'position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#c66;font-size:12px;text-align:center;padding:8px;';
+            err.style.cssText = 'position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:var(--err2-fg);font-size:12px;text-align:center;padding:8px;';
             err.textContent = 'No camera URL from ' + h.ip + ':8898. If you know the stream address, re-add this printer using the full rtsp:// URL.';
             cell.appendChild(err);
             return;
@@ -1172,7 +1239,7 @@ body.dragging .cell iframe, body.dragging .cell img { pointer-events: none; }
         }
         if (msg) {
             var d = document.createElement('div');
-            d.style.cssText = 'position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#888;font-size:13px;text-align:center;padding:8px;';
+            d.style.cssText = 'position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:var(--mute5);font-size:13px;text-align:center;padding:8px;';
             d.textContent = msg;
             cell.appendChild(d);
         }
@@ -1313,7 +1380,7 @@ body.dragging .cell iframe, body.dragging .cell img { pointer-events: none; }
         modal.appendChild(h);
         if (opts.message) {
             var msg = document.createElement('div');
-            msg.style.cssText = 'font-size:13px;color:#ccc;margin-bottom:8px;';
+            msg.style.cssText = 'font-size:13px;color:var(--fg4);margin-bottom:8px;';
             msg.textContent = opts.message;
             modal.appendChild(msg);
         }
@@ -1966,9 +2033,9 @@ body.dragging .cell iframe, body.dragging .cell img { pointer-events: none; }
         // an intervening resize would keep whatever height Streams last measured.
         else syncBarH();
         if (viewTimer) { clearInterval(viewTimer); viewTimer = null; }
-        if (v === 'prepare') { lastPresetsJson = ''; refreshInstances(refreshPrepare); viewTimer = setInterval(function() { refreshInstances(refreshPrepare); }, 10000); }
-        if (v === 'devices') { refreshEvents(); refreshInstances(refreshDevices); viewTimer = setInterval(function() { refreshEvents(); refreshInstances(refreshDevices); }, 5000); }
-        if (v === 'reprints') { rpJson = ''; refreshInstances(refreshReprints); viewTimer = setInterval(function() { refreshInstances(refreshReprints); }, 15000); }
+        if (v === 'prepare') { lastPresetsJson = ''; refreshInstances(refreshPrepare); viewTimer = setInterval(function() { if (!edgePaused) refreshInstances(refreshPrepare); }, 10000); }
+        if (v === 'devices') { refreshEvents(); refreshInstances(refreshDevices); viewTimer = setInterval(function() { if (!edgePaused) { refreshEvents(); refreshInstances(refreshDevices); } }, 5000); }
+        if (v === 'reprints') { rpJson = ''; refreshInstances(refreshReprints); viewTimer = setInterval(function() { if (!edgePaused) refreshInstances(refreshReprints); }, 15000); }
         try { localStorage.setItem('snorca_remote_view', v); } catch (e) {}
     }
     function el(tag, cls, text) {
@@ -2087,6 +2154,7 @@ body.dragging .cell iframe, body.dragging .cell img { pointer-events: none; }
     // every launch. That re-post is the only mechanism that works everywhere: iOS Safari never
     // fires pushsubscriptionchange, and Chrome only got it right in 138.
     function pushInit() {
+        if (EMBED) return;   // no service worker or push subscription inside the slicer
         if (!REMOTE || !pushSupported()) { pushRender(); return; }
         navigator.serviceWorker.register('sw.js', { scope: './' }).then(function(reg) {
             pushReg = reg;
@@ -2146,7 +2214,7 @@ body.dragging .cell iframe, body.dragging .cell img { pointer-events: none; }
     }
     function pushRender() {
         var page = document.getElementById('devices');
-        if (!page || !REMOTE) return;
+        if (!page || !REMOTE || EMBED) return;
         var box = page.querySelector('.pushbox');
         // On the Wi-Fi link there is nothing to offer: no secure context, so no service worker and
         // no push. Say nothing rather than showing a button that cannot work.
@@ -2448,7 +2516,7 @@ body.dragging .cell iframe, body.dragging .cell img { pointer-events: none; }
         plateIndex = index; plateSel = null; plateZoom = 1; plateCenter = null;
         var sheet = document.getElementById('plate');
         sheet.style.display = 'flex';
-        sheet.querySelector('.canvas').innerHTML = '<div class="hint" style="color:#888">Loading plate…</div>';
+        sheet.querySelector('.canvas').innerHTML = '<div class="hint" style="color:var(--mute5)">Loading plate…</div>';
         sheet.querySelector('.ctl').innerHTML = '';
         if (plateMode === 'preview') openPreview(); else loadPlate();
     }
@@ -2463,7 +2531,7 @@ body.dragging .cell iframe, body.dragging .cell img { pointer-events: none; }
         try { localStorage.setItem('snorca_plate_mode', mode); } catch (e) {}
         pvStop();
         var sheet = document.getElementById('plate');
-        sheet.querySelector('.canvas').innerHTML = '<div class="hint" style="color:#888">Loading…</div>';
+        sheet.querySelector('.canvas').innerHTML = '<div class="hint" style="color:var(--mute5)">Loading…</div>';
         sheet.querySelector('.ctl').innerHTML = '';
         if (mode === 'preview') openPreview(); else loadPlate();
     }
@@ -2669,7 +2737,7 @@ body.dragging .cell iframe, body.dragging .cell img { pointer-events: none; }
         var canvas = document.querySelector('#plate .canvas'), ctl = document.querySelector('#plate .ctl');
         var index = plateIndex;
         renderPlateHead('Plate ' + (index + 1), true);
-        canvas.innerHTML = '<div class="hint" style="color:#888">Loading preview…</div>'; ctl.innerHTML = '';
+        canvas.innerHTML = '<div class="hint" style="color:var(--mute5)">Loading preview…</div>'; ctl.innerHTML = '';
         pv.z = 1; pv.cx = 0.5; pv.cy = 0.5; pv.shown = null; pv.stale = false;
         api('/plates/' + index + '/preview').then(function(info) {
             if (plateMode !== 'preview' || index !== plateIndex || !plateOpen()) return;
@@ -4229,11 +4297,18 @@ body.dragging .cell iframe, body.dragging .cell img { pointer-events: none; }
         connRender();
         syncBarH(); // connRender() just gave row 2 its first content; fetchRemoteState() below is async
         fetchRemoteState();
-        setInterval(fetchRemoteState, 15000);
+        setInterval(function() { if (!edgePaused) fetchRemoteState(); }, 15000);
         // The badge has to be right whichever tab is open, so the events feed is polled on the
         // page's own cadence too, not only while the Devices tab is showing.
         refreshEvents();
-        setInterval(refreshEvents, 15000);
+        setInterval(function() { if (!edgePaused) refreshEvents(); }, 15000);
+        // The slicer's Home tab: false when the tab is left, true when it comes back (then
+        // everything is refreshed at once rather than at the next tick).
+        window.__edgeActive = function(on) {
+            var was = edgePaused;
+            edgePaused = !on;
+            if (on && was) { fetchRemoteState(); refreshEvents(); if (view !== 'streams') setView(view); }
+        };
         pushInit();
         var v = 'streams';
         try { v = localStorage.getItem('snorca_remote_view') || 'streams'; } catch (e) {}

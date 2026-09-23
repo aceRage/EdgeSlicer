@@ -7,6 +7,7 @@ add_executable(${_TEST_NAME}_tests
     plugin_guard_tests.cpp
     device_model_code_tests.cpp
     login_useragent_tests.cpp
+    hub_home_tests.cpp
     ff_diagnostics_tests.cpp
     elegoo_canvas_tests.cpp
     splash_animation_tests.cpp
