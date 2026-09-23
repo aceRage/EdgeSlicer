@@ -438,6 +438,21 @@ void ConfigManipulation::update_print_fff_config(DynamicPrintConfig* config, con
     }
 #endif
 
+    // A cone wall is a WipeTower2 feature: the Bambu Lab tower generator (like Bambu Studio's) only
+    // knows rectangle and rib walls and would print a cone as a rectangle. Say so instead of letting
+    // the choice look honoured.
+    if (is_BBL_Printer && is_global_config && config->has("wipe_tower_wall_type") &&
+        config->opt_enum<WipeTowerWallType>("wipe_tower_wall_type") == WipeTowerWallType::wtwCone) {
+        const wxString msg_text = _(L("Bambu Lab printers do not support a cone prime tower wall.\nReset to Rectangle."));
+        MessageDialog dialog(m_msg_dlg_parent, msg_text, "", wxICON_WARNING | wxOK);
+        DynamicPrintConfig new_conf = *config;
+        is_msg_dlg_already_exist = true;
+        dialog.ShowModal();
+        new_conf.set_key_value("wipe_tower_wall_type", new ConfigOptionEnum<WipeTowerWallType>(WipeTowerWallType::wtwRectangle));
+        apply(config, &new_conf);
+        is_msg_dlg_already_exist = false;
+    }
+
     // Check "enable_support" and "overhangs" relations only on global settings level
     if (is_global_config && config->opt_bool("enable_support")) {
         // Ask only once.
@@ -851,11 +866,13 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
 
     bool purge_in_primetower = preset_bundle->printers.get_edited_preset().config.opt_bool("purge_in_prime_tower");
 
-    for (auto el : {"wipe_tower_cone_angle",
-                    "wipe_tower_extra_spacing", "wipe_tower_max_purge_speed",
-                    "wipe_tower_wall_type",
-                    "wipe_tower_extra_rib_length","wipe_tower_rib_width","wipe_tower_fillet_wall",
-                    "wipe_tower_bridging", "wipe_tower_extra_flow"})
+    // The Bambu Lab (Type1) tower generator honours the wall type (rectangle or rib, with the rib
+    // options) and the max speed, like Bambu Studio's prime_tower_rib_wall and prime_tower_max_speed.
+    // Cone, the extra spacing, bridging and extra flow are WipeTower2 features it does not have.
+    for (auto el : {"wipe_tower_max_purge_speed", "wipe_tower_wall_type",
+                    "wipe_tower_extra_rib_length","wipe_tower_rib_width","wipe_tower_fillet_wall"})
+      toggle_line(el, have_prime_tower);
+    for (auto el : {"wipe_tower_cone_angle", "wipe_tower_extra_spacing", "wipe_tower_bridging", "wipe_tower_extra_flow"})
       toggle_line(el, have_prime_tower && !is_BBL_Printer);
 
     // Orca: both tower generators skip sparse layers, so this is not a wipe tower 2 exclusive.
@@ -870,9 +887,9 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
 
     WipeTowerWallType wipe_tower_wall_type = config->opt_enum<WipeTowerWallType>("wipe_tower_wall_type");
     toggle_line("wipe_tower_cone_angle", have_prime_tower && !is_BBL_Printer && wipe_tower_wall_type == WipeTowerWallType::wtwCone);
-    toggle_line("wipe_tower_extra_rib_length", have_prime_tower && !is_BBL_Printer && wipe_tower_wall_type == WipeTowerWallType::wtwRib);
-    toggle_line("wipe_tower_rib_width", have_prime_tower && !is_BBL_Printer && wipe_tower_wall_type == WipeTowerWallType::wtwRib);
-    toggle_line("wipe_tower_fillet_wall", have_prime_tower && !is_BBL_Printer && wipe_tower_wall_type == WipeTowerWallType::wtwRib);
+    toggle_line("wipe_tower_extra_rib_length", have_prime_tower && wipe_tower_wall_type == WipeTowerWallType::wtwRib);
+    toggle_line("wipe_tower_rib_width", have_prime_tower && wipe_tower_wall_type == WipeTowerWallType::wtwRib);
+    toggle_line("wipe_tower_fillet_wall", have_prime_tower && wipe_tower_wall_type == WipeTowerWallType::wtwRib);
     
     toggle_field("prime_tower_width", have_prime_tower && wipe_tower_wall_type != WipeTowerWallType::wtwRib);
 

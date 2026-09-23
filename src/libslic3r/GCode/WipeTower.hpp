@@ -59,6 +59,8 @@ public:
     // then re-plans the depth at the squared width.
     static float estimate_rib_tower_bbox_side(const std::vector<PurgeEstimate> &purges, float width, float layer_height, float nozzle_diameter, float extra_spacing, float rib_width, float extra_rib_length, float max_height);
     static TriangleMesh its_make_rib_brim(const Polygon &brim, float layer_height);
+    // Fillets the corners of a rib wall (Bambu Studio WipeTower.cpp:128 rounding_polygon()).
+    static Polygon rounding_polygon(Polygon &polygon, double rounding = 2., double angle_tol = 30. / 180. * PI);
 
     struct Extrusion
     {
@@ -194,6 +196,23 @@ public:
     float get_height() const { return m_wipe_tower_height; }
     float get_layer_height() const { return m_layer_height; }
 
+    // Rib wall (wipe_tower_wall_type = rib). Valid after generate().
+    bool  is_rib_wall() const { return m_use_rib_wall; }
+    float get_rib_length() const { return m_rib_length; }
+    float get_rib_width() const { return m_rib_width; }
+    // Shift of the whole tower so that its first-layer wall starts at the tower position, as
+    // Bambu Studio's rib_offset does. Already applied to all G-code, extrusions and wipe paths the
+    // generator returns (unlike Bambu Studio, where GCode.cpp adds it), so callers only need it to
+    // place the tower body: the body box spans rib_offset .. rib_offset + (width, depth).
+    Vec2f get_rib_offset() const { return m_rib_offset; }
+    // Size of the tower's first-layer wall, brim excluded, from the tower position: the rib
+    // wall's bounding box, or width x depth for a rectangle.
+    Vec2f get_footprint_size() const { return m_use_rib_wall ? m_rib_footprint : Vec2f(m_wipe_tower_width, m_wipe_tower_depth); }
+    // First-layer wall outline in the tower frame (rib wall only; empty otherwise).
+    const Polygon &get_first_layer_wall() const { return m_first_layer_wall; }
+    // Extruded outer walls (and brim loops) per print_z, in the tower frame (rib wall only).
+    const std::map<float, Polylines> &get_outer_wall() const { return m_outer_wall; }
+
 	void set_last_layer_extruder_fill(bool extruder_fill) {
         if (!m_plan.empty()) {
 			m_plan.back().extruder_fill = extruder_fill;
@@ -303,6 +322,7 @@ public:
         std::vector<float>  ramming_speed;
         float               nozzle_diameter;
         float               filament_area;
+        float               wipe_dist = 0.f; // wipe_distance, for the wipe along a rib wall
     };
 
 private:
@@ -351,6 +371,23 @@ private:
     GCodeFlavor     m_gcode_flavor;
     // Ultra (H2C rack): machine has a swappable nozzle rack (extruder_max_nozzle_count > 1).
     bool            m_has_nozzle_rack           = false;
+
+    // Rib wall, ported from Bambu Studio (prime_tower_rib_wall and friends). A cone wall is a
+    // WipeTower2 feature; this generator prints it as a rectangle.
+    bool            m_use_rib_wall              = false;
+    float           m_rib_width                 = 0.f; // clamped to half the tower's shorter side by plan_tower()
+    float           m_extra_rib_length          = 0.f;
+    float           m_rib_length                = 0.f; // full rib length at the first layer, set by plan_tower()
+    bool            m_used_fillet               = false;
+    // wipe_tower_max_purge_speed (Bambu Studio's prime_tower_max_speed), mm/min.
+    float           m_max_speed                 = 5400.f;
+    // Emit G2/G3 for the rib wall's fillets, like Bambu Studio with enable_arc_fitting. Off for a
+    // rotated tower: the G-code post-processor rotates X/Y but not the I/J centre offsets.
+    bool            m_enable_arc_fitting        = false;
+    Vec2f           m_rib_offset                = Vec2f::Zero();
+    Vec2f           m_rib_footprint             = Vec2f::Zero();
+    Polygon         m_first_layer_wall;
+    std::map<float, Polylines> m_outer_wall;
 
     // Bed properties
     enum {
@@ -403,6 +440,22 @@ private:
 
 	// BBS
 	box_coordinates align_perimeter(const box_coordinates& perimeter_box);
+
+    // Rib wall of the current layer around wt_box (tower-local coordinates, like wt_box): Bambu
+    // Studio's generate_rib_polygon(), filleted and re-unioned with the box when fillet_wall is on,
+    // as its generate_support_wall_new() does.
+    Polygon generate_rib_polygon(const box_coordinates &wt_box) const;
+    Polygon rib_wall_polygon(const box_coordinates &wt_box) const;
+    // Records an extruded wall / brim loop (tower-local) for the fake tower the conflict checker and
+    // the object brim use.
+    void    record_outer_wall(const Polygon &wall);
+    // Squares a rib tower off (Bambu Studio's plan_tower_new(): width = sqrt(depth * width)) and
+    // re-plans every tool change's depth at that width.
+    void    make_rib_tower_square();
+    // Measures the first printed layer's wall and sets m_rib_offset / m_rib_footprint from it.
+    void    set_rib_offset();
+    // Speed of the outer wall and brim: Bambu Studio caps it at prime_tower_max_speed.
+    float   wall_feedrate(size_t tool) const;
 
 
     // to store information about tool changes for a given layer

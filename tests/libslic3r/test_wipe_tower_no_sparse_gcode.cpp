@@ -61,7 +61,8 @@ std::vector<TowerMove> tower_moves(const std::string &gcode)
         const std::string code = line.substr(0, line.find(';'));
         if (code.rfind("M83", 0) == 0) { relative_e = true; continue; }
         if (code.rfind("M82", 0) == 0) { relative_e = false; continue; }
-        if (!(code.rfind("G1 ", 0) == 0 || code.rfind("G0 ", 0) == 0))
+        // G2/G3: a rib wall's fillets are arcs when arc fitting is on (I/J are not needed here).
+        if (!(code.rfind("G1 ", 0) == 0 || code.rfind("G0 ", 0) == 0 || code.rfind("G2 ", 0) == 0 || code.rfind("G3 ", 0) == 0))
             continue;
         double nx = x, ny = y, de = 0;
         bool   has_e = false;
@@ -147,11 +148,13 @@ std::string slice_bbl(const DynamicPrintConfig &config)
     return Slic3r::Test::gcode(print);
 }
 
-} // namespace
-
-TEST_CASE("No-sparse Bambu tower: compacted layers print at tower speed on a supported, brimmed base", "[WipeTower][NoSparseLayers]")
+// The checks below for one wall type of the Bambu Lab generator (the rib wall squares the tower
+// and adds ribs, with arcs for its fillets).
+void check_no_sparse_tower(const std::string &wall)
 {
-    const DynamicPrintConfig     config = no_sparse_config();
+    DynamicPrintConfig config = no_sparse_config();
+    config.set_deserialize_strict({ { "wipe_tower_wall_type", wall }, { "enable_arc_fitting", 1 } });
+    INFO("wall type " << wall);
     const std::string            gcode  = slice_bbl(config);
     const std::vector<TowerMove> moves  = tower_moves(gcode);
     REQUIRE(!moves.empty());
@@ -196,15 +199,36 @@ TEST_CASE("No-sparse Bambu tower: compacted layers print at tower speed on a sup
         const double first_z = std::min_element(moves.begin(), moves.end(),
                                                 [](const TowerMove &a, const TowerMove &b) { return a.z < b.z; })->z;
         CHECK(std::abs(first_z - 0.3) < 1e-3);
-        double xmin = 1e9, xmax = -1e9;
-        for (const TowerMove &m : moves)
-            if (std::abs(m.z - first_z) < 1e-3) {
-                xmin = std::min(xmin, m.x);
-                xmax = std::max(xmax, m.x);
-            }
+        auto span_at = [&moves](double z) {
+            double xmin = 1e9, xmax = -1e9;
+            for (const TowerMove &m : moves)
+                if (std::abs(m.z - z) < 1e-3) {
+                    xmin = std::min(xmin, m.x);
+                    xmax = std::max(xmax, m.x);
+                }
+            return xmax - xmin;
+        };
         // The object is 20 mm tall, so the auto brim is 20 / 100 * 8 = 1.6 mm per side: the first
-        // layer must reach well past the 30 mm tower body. Without the brim it spans exactly 30 mm.
-        INFO("first tower layer spans " << (xmax - xmin) << " mm");
-        CHECK(xmax - xmin > 30. + 2.);
+        // layer must reach well past the tower body. Without the brim a rectangle spans exactly 30 mm.
+        const double first_span = span_at(first_z);
+        INFO("first tower layer spans " << first_span << " mm");
+        if (wall == "rectangle")
+            CHECK(first_span > 30. + 2.);
+        else {
+            // A rib tower is squared off: compare with the sixth tower layer, where the brim chamfer
+            // (one line narrower per layer) has run out and the ribs have barely tapered.
+            const double upper_span = span_at(first_z + 5. * layer_height);
+            INFO("sixth tower layer spans " << upper_span << " mm");
+            CHECK(upper_span > 0.);
+            CHECK(first_span > upper_span + 2.);
+        }
     }
+}
+
+} // namespace
+
+TEST_CASE("No-sparse Bambu tower: compacted layers print at tower speed on a supported, brimmed base", "[WipeTower][NoSparseLayers]")
+{
+    for (const char *wall : { "rectangle", "rib" })
+        DYNAMIC_SECTION("wall " << wall) { check_no_sparse_tower(wall); }
 }
