@@ -32,6 +32,7 @@ add_executable(${_TEST_NAME}_tests
 	test_default_bed_type.cpp
 	test_dual_nozzle_group.cpp
 	test_ec_retraction.cpp
+	test_wipe_tower_no_sparse_gcode.cpp
 	test_gcodewriter_feedrate_guard.cpp
 	# test_ec_retraction.cpp slices a real two-filament plate, so it needs the
 	# Slic3r::Test slicing helpers that otherwise only fff_print_tests links.
