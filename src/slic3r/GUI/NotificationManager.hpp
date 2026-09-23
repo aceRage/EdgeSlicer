@@ -333,6 +333,7 @@ public:
 	void bbl_show_objectsinfo_notification(const std::string &text, bool is_warning, bool is_hidden);
     void bbl_close_objectsinfo_notification();
 
+    //BBS--Seq Print Info
     void bbl_show_seqprintinfo_notification(const std::string &text);
     void bbl_close_seqprintinfo_notification();
 
