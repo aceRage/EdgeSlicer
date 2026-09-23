@@ -85,6 +85,7 @@
 #include "libslic3r/Format/AMF.hpp"
 //#include "libslic3r/Format/3mf.hpp"
 #include "libslic3r/Format/bbs_3mf.hpp"
+#include "libslic3r/Format/BambuExport.hpp"
 #include "libslic3r/GCode/ThumbnailData.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/ModelArrange.hpp"   // get_instance_arrange_poly, for the Fill bed dialog's defaults
@@ -21631,6 +21632,24 @@ void Plater::export_core_3mf()
     export_3mf(path_u8, SaveStrategy::Silence);
 }
 
+void Plater::export_bambu_3mf()
+{
+    wxString path = p->get_export_file(FT_3MF);
+    if (path.empty()) { return; }
+    const std::string   path_u8 = into_u8(path);
+    BambuExport::Report report;
+    if (export_3mf(path_u8, SaveStrategy::Silence, -1, nullptr, &report) < 0) {
+        show_error(this, _L("Failed to export the project for Bambu Studio."));
+        return;
+    }
+    BOOST_LOG_TRIVIAL(info) << "Export Bambu 3MF " << path_u8 << ": " << report.summary();
+    wxString msg = report.dropped.empty() ?
+        _L("Exported for Bambu Studio.") :
+        wxString::Format(_L("Exported for Bambu Studio: %d settings not supported by Bambu Studio were left out."), int(report.dropped.size()));
+    p->notification_manager->push_notification(NotificationType::CustomNotification,
+                                               NotificationManager::NotificationLevel::RegularNotificationLevel, into_u8(msg));
+}
+
 // Following lambda generates a combined mesh for export with normals pointing outwards.
 TriangleMesh Plater::combine_mesh_fff(const ModelObject& mo, int instance_id, std::function<void(const std::string&)> notify_func)
 {
@@ -22132,7 +22151,7 @@ void publish(Model &model, SaveStrategy strategy) {
 }
 
 // BBS: backup
-int Plater::export_3mf(const boost::filesystem::path& output_path, SaveStrategy strategy, int export_plate_idx, Export3mfProgressFn proFn)
+int Plater::export_3mf(const boost::filesystem::path& output_path, SaveStrategy strategy, int export_plate_idx, Export3mfProgressFn proFn, BambuExport::Report* bambu_report)
 {
     int ret = 0;
     //if (p->model.objects.empty()) {
@@ -22269,6 +22288,8 @@ int Plater::export_3mf(const boost::filesystem::path& output_path, SaveStrategy 
     store_params.id_bboxes = plate_bboxes;//BBS
     store_params.project = &p->project;
     store_params.strategy = strategy | SaveStrategy::Zip64;
+    store_params.bambu_compat = bambu_report != nullptr;
+    store_params.bambu_report = bambu_report;
 
 
     // get type and color for platedata

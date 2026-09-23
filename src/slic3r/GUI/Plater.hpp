@@ -505,6 +505,9 @@ public:
     void export_gcode_3mf(bool export_all = false);
     void send_gcode_finish(wxString name);
     void export_core_3mf();
+    // File > Export > Export Bambu 3MF: a project Bambu Studio loads with its settings
+    // (Format/BambuExport.hpp, docs/bambu-3mf-export.md).
+    void export_bambu_3mf();
     static TriangleMesh combine_mesh_fff(const ModelObject& mo, int instance_id, std::function<void(const std::string&)> notify_func = {});
     void export_stl(bool extended = false, bool selection_only = false, bool multi_stls = false);
     // Export just the one selected part (ModelVolume) as a binary STL, in world coordinates.
@@ -513,7 +516,9 @@ public:
     //void export_amf();
     //BBS add extra param for exporting 3mf silence
     // BBS: backup
-    int export_3mf(const boost::filesystem::path& output_path = boost::filesystem::path(), SaveStrategy strategy = SaveStrategy::Default, int export_plate_idx = -1, Export3mfProgressFn proFn = nullptr);
+    // bambu_report != nullptr writes the Bambu Studio flavour ("Export Bambu 3MF") and fills it.
+    int export_3mf(const boost::filesystem::path& output_path = boost::filesystem::path(), SaveStrategy strategy = SaveStrategy::Default, int export_plate_idx = -1, Export3mfProgressFn proFn = nullptr,
+                   BambuExport::Report* bambu_report = nullptr);
 
     //BBS
     void publish_project();
