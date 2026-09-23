@@ -474,6 +474,30 @@ differs (before the High-Flow retype they were `CollapsedLossy` to 100, 100, 100
 No real value is lost any more: only the `nil` slots are guesses. The slicer reads slot 0, so the
 last one now slices at 30 (Bambu's extruder-1 standard value) rather than the old majority 50.
 
+### Overrides in a 3MF
+
+`tests/libslic3r/test_bambu_nil_override.cpp`, tag `[BambuOverride]` (also `[BambuCompat]`):
+`translate_nil_override` (nil in the middle, nil in slot 0, nearest parent, slot-count mismatch,
+all-nil, no parent, scalar targets, never a zero), `set_deserialize` under nested
+`OverrideScope`s and outside any scope, and Bambu Studio's own
+`resources/calib/pressure_advance/auto_pa_line_dual.3mf` (fixture in
+`tests/data/bambu_compat_3mf/`, AGPL like this project): it loads with and without its config,
+every modifier holds `80,<project slot>,80,<project slot>`, nothing is reported, and it
+round-trips through this fork's own 3MF writer unchanged.
+
+A hidden harness, `libslic3r_tests "[.corpus3mf]"` with `EDGE_3MF_CORPUS=<dir>`, loads every
+`.3mf` under a directory and prints one line per file. Run 2026-09-22 on copies of every 3MF in
+Bambu Studio's `resources/` (5), this fork's `resources/` (12) and `tests/` of the main checkout
+(13), with and without the `set_deserialize_raw` hook:
+
+| corpus | before | after |
+|---|---|---|
+| Bambu Studio resources | 4 / 5 (`auto_pa_line_dual.3mf`: *Deserializing nil*) | 5 / 5 |
+| EdgeSlicer resources | 12 / 12 | 12 / 12 |
+| main checkout `tests/` | 13 / 13 | 13 / 13 |
+
+No file in the corpus needed a lossy override translation.
+
 ## Note for other work in flight
 
 The destructive delete-on-parse-failure in `PresetCollection::load_presets` is **not** addressed

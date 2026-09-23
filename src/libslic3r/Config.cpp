@@ -703,7 +703,10 @@ bool ConfigBase::set_deserialize_raw(const t_config_option_key &opt_key_src, con
                 if (nil_result.lossy())
                     BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": " << opt_key << (is_override ? " (override)" : "") << ": \""
                                                << nil_result.original << "\" -> \"" << nil_value << "\" ("
-                                               << BambuConfigCompat::describe(nil_result.fix) << ")";
+                                               << (is_override ? std::string("no parent value to inherit for some not-applicable slots - "
+                                                                             "they were filled from the override itself; Bambu Studio "
+                                                                             "would have used the print settings there") :
+                                                                 BambuConfigCompat::describe(nil_result.fix)) << ")";
                 else
                     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ": " << opt_key << (is_override ? " (override)" : "") << ": \""
                                             << nil_result.original << "\" -> \"" << nil_value << "\" ("
