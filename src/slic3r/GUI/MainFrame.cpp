@@ -65,6 +65,7 @@
 
 #include "GUI_App.hpp"
 #include "FilamentGroupDialog.hpp"
+#include "DualNozzleState.hpp"
 #include "FlowTypeHelper.hpp"
 #include "SliceModePopup.hpp"
 #include "UnsavedChangesDialog.hpp"
@@ -2120,6 +2121,22 @@ wxBoxSizer* MainFrame::create_side_tools()
                 });
             p->append_button(slice_all_btn);
             p->append_button(slice_plate_btn);
+            // Bambu two-extruder printers: change the plate's filament -> extruder arrangement
+            // (opens the pre-slice confirmation even when nothing changed, then slices the plate).
+            if (GUI::DualNozzle::preset_is_dual_nozzle_bambu() && m_slice_enable) {
+                SideButton* arrange_btn = new SideButton(p, _L("Filament arrangement..."), "");
+                arrange_btn->SetCornerRadius(0);
+                arrange_btn->Bind(wxEVT_BUTTON, [this, p](wxCommandEvent&) {
+                    p->Dismiss();
+                    if (!m_plater)
+                        return;
+                    GUI::DualNozzle::request_arrangement_dialog(m_plater->get_partplate_list().get_curr_plate_index());
+                    m_plater->exit_gizmo();
+                    m_plater->update(true, true);
+                    wxPostEvent(m_plater, SimpleEvent(EVT_GLTOOLBAR_SLICE_PLATE));
+                });
+                p->append_button(arrange_btn);
+            }
             p->Popup(m_slice_btn);
         }
     );

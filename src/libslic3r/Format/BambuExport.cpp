@@ -1,5 +1,6 @@
 #include "BambuExport.hpp"
 #include "BambuKeyAliases.hpp"
+#include "../BambuDualNozzleSync.hpp"
 
 #include "../Config.hpp"
 #include "../PrintConfig.hpp"
@@ -750,6 +751,27 @@ Config convert_project(const ConfigBase &project, Context &ctx, Report &report)
     ctx.filament = filament_layout(ctx.printer, ctx.filament_count);
 
     Config out = convert_impl(project, ctx, Scope::Project, report, "project");
+
+    // Bambu Studio writes the nozzle stats twice (split_nozzle_stats_for_export, PrintConfig.cpp:912-938):
+    // extruder_nozzle_stats_new with the real volume types, and the legacy key with types newer than
+    // TPU High Flow folded into Standard for older readers. Its own H2C projects carry both
+    // (h2c_wrongextruder_bambu_manual.gcode.3mf: ["Standard#1", "Standard#6"] twice).
+    if (auto it = out.find("extruder_nozzle_stats"); it != out.end() && !it->second.values.empty()) {
+        out["extruder_nozzle_stats_new"] = it->second;
+        auto stats      = get_extruder_nozzle_stats(it->second.values);
+        bool downgraded = false;
+        for (auto &extruder_stat : stats) {
+            std::map<NozzleVolumeType, int> legacy;
+            for (const auto &entry : extruder_stat) {
+                const NozzleVolumeType legacy_type = entry.first > nvtTPUHighFlow ? nvtStandard : entry.first;
+                downgraded |= legacy_type != entry.first;
+                legacy[legacy_type] += entry.second;
+            }
+            extruder_stat = std::move(legacy);
+        }
+        if (downgraded)
+            it->second.values = DualNozzleSync::save_extruder_nozzle_stats_to_string(stats);
+    }
 
     // Bambu Studio refuses to slice ooze prevention together with a prime tower (Print::validate:
     // "Ooze prevention is currently not supported with the prime tower enabled."); this fork

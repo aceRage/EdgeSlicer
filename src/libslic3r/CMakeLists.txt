@@ -364,6 +364,10 @@ set(lisbslic3r_sources
     MixedFilamentCliGates.hpp
     BambuExtruderMap.cpp
     BambuExtruderMap.hpp
+    BambuDualNozzleSync.cpp
+    BambuDualNozzleSync.hpp
+    BambuNozzleMappingRequest.cpp
+    BambuNozzleMappingRequest.hpp
     MultiNozzleUtils.cpp
     MultiNozzleUtils.hpp
     FilamentGroup.cpp

@@ -1656,6 +1656,18 @@ MultiNozzleUtils::LayeredNozzleGroupResult ToolOrdering::get_recommended_filamen
         if (has_multiple_nozzle && mode == FilamentMapMode::fmmManual) {
             auto manual_filament_map = print_config.filament_map.values;
             std::transform(manual_filament_map.begin(), manual_filament_map.end(), manual_filament_map.begin(), [](int v) { return v - 1; });
+            {
+                std::string map_str, used_str;
+                for (int v : manual_filament_map) map_str += std::to_string(v) + " ";
+                for (auto f : used_filaments) used_str += std::to_string(f) + " ";
+                BOOST_LOG_TRIVIAL(warning) << "[DualNozzle] manual grouping: filament->extruder(0-based) " << map_str << "| used " << used_str;
+            }
+            // calc_filament_group_for_manual_multi_nozzle indexes the map with every used filament
+            // and the per-extruder unprintable list with the map value (BambuStudio does the same,
+            // unchecked); a short map or a value other than left/right is a group error, not a crash.
+            for (auto fid : used_filaments)
+                if (fid >= manual_filament_map.size() || (manual_filament_map[fid] != 0 && manual_filament_map[fid] != 1))
+                    throw Slic3r::RuntimeError(std::string("Group error in manual mode. Please check nozzle count or regroup."));
             ret = calc_filament_group_for_manual_multi_nozzle(manual_filament_map, context);
         } else if (has_multiple_nozzle && mode == FilamentMapMode::fmmAutoForMatch &&
                    std::any_of(context.machine_info.machine_filament_info.begin(), context.machine_info.machine_filament_info.end(),
@@ -1830,9 +1842,13 @@ void ToolOrdering::reorder_extruders_for_minimum_flush_volume()
             LayerData layer_data = collect_layer_and_unprintable_data();
             // Ultra (Phase 10): force match mode from the Print flag (set when a live AMS is available) rather
             // than the config key, which we do NOT overwrite (the web device UI reads filament_map_mode).
-            FilamentMapMode group_mode = m_print->get_ultra_force_match_mode()
+            // A plate grouped by hand (filament_map_mode Manual from the plate config, the pre-slice
+            // confirmation on a Bambu two-extruder printer) always wins over the live-AMS match mode.
+            const FilamentMapMode config_mode = print_config->filament_map_mode.value;
+            const bool            manual      = config_mode == FilamentMapMode::fmmManual || config_mode == FilamentMapMode::fmmNozzleManual;
+            FilamentMapMode group_mode = (!manual && m_print->get_ultra_force_match_mode())
                                          ? FilamentMapMode::fmmAutoForMatch
-                                         : print_config->filament_map_mode.value;
+                                         : config_mode;
             auto grouping = ToolOrdering::get_recommended_filament_maps(
                 m_print, layer_data.layer_filaments, group_mode,
                 layer_data.physical_unprintables, layer_data.geometric_unprintables, layer_data.filament_unprintable_volumes);

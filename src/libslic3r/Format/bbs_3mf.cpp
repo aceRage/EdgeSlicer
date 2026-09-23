@@ -344,6 +344,9 @@ static constexpr const char* NOZZLE_DIAMETERS_ATTR = "nozzle_diameters";
 static constexpr const char* NOZZLE_VOLUME_TYPE_ATTR = "nozzle_volume_type";
 static constexpr const char* EXTRUDER_TYPE_ATTR = "extruder_type";
 static constexpr const char* LIMIT_FILAMENT_MAP_ATTR = "limit_filament_maps";
+// EdgeSlicer: the per-plate filament arrangement the user confirmed before slicing on a Bambu
+// two-extruder printer (DualNozzleSync::Confirmation JSON). Not written into Bambu exports.
+static constexpr const char* DUAL_NOZZLE_CONFIRM_ATTR = "edgeslicer_dual_nozzle_confirm";
 static constexpr const char* PAUSE_COUNT_ATTR = "pause_count";
 static constexpr const char* FIRST_LAYER_TIME_ATTR = "first_layer_time";
 static constexpr const char* SUPPORT_MATERIAL_ON_WIPE_TOWER_ATTR = "support_material_on_wipe_tower";
@@ -5082,6 +5085,35 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 if (m_curr_plater)
                     m_curr_plater->limit_filament_maps = parse_int_list(value);
             }
+            // A plate's own grouping: only "Manual" is kept (the auto modes are regrouped at slice
+            // time anyway). filament_maps is written after the mode, so it follows it.
+            else if (key == FILAMENT_MAP_MODE_ATTR)
+            {
+                if (m_curr_plater && value == "Manual")
+                    m_curr_plater->config.set_key_value("filament_map_mode", new ConfigOptionEnum<FilamentMapMode>(FilamentMapMode::fmmManual));
+            }
+            else if (key == FILAMENT_MAP_ATTR)
+            {
+                if (m_curr_plater && m_curr_plater->config.has("filament_map_mode")) {
+                    // In filament order: parse_int_list sorts and de-duplicates (it reads id sets).
+                    std::vector<int>         maps;
+                    std::vector<std::string> tokens;
+                    boost::split(tokens, value, boost::is_any_of(" ,"), boost::token_compress_on);
+                    for (const std::string &t : tokens) {
+                        if (t.empty())
+                            continue;
+                        int v = 1;
+                        try { v = boost::lexical_cast<int>(t); } catch (...) {}
+                        maps.push_back(v < 1 ? 1 : v);
+                    }
+                    m_curr_plater->config.set_key_value("filament_map", new ConfigOptionInts(maps));
+                }
+            }
+            else if (key == DUAL_NOZZLE_CONFIRM_ATTR)
+            {
+                if (m_curr_plater)
+                    m_curr_plater->dual_nozzle_confirm = value;
+            }
         }
 
         return true;
@@ -8651,7 +8683,16 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
 
                 // TODO: Orca: hack
                 //filament map related
-                stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << FILAMENT_MAP_MODE_ATTR << "\" " << VALUE_ATTR << "=\"" << "Auto For Flush" << "\"/>\n";
+                // A plate grouped by hand (the pre-slice confirmation on a Bambu two-extruder printer)
+                // carries its own mode and map, as Bambu Studio writes a plate's own filament_map_mode /
+                // filament_maps (bbs_3mf.cpp:8389-8418); every other plate keeps "Auto For Flush" and the
+                // project's map exactly as before.
+                // getInt(): a copied config holds the mode as ConfigOptionEnumGeneric, not ConfigOptionEnum<>.
+                const ConfigOption* plate_mode_opt = plate_data->config.option("filament_map_mode");
+                const auto*         plate_map_opt  = dynamic_cast<const ConfigOptionInts*>(plate_data->config.option("filament_map"));
+                const bool          plate_manual   = plate_mode_opt && plate_mode_opt->getInt() == int(FilamentMapMode::fmmManual) &&
+                                                  plate_map_opt && !plate_map_opt->values.empty();
+                stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << FILAMENT_MAP_MODE_ATTR << "\" " << VALUE_ATTR << "=\"" << (plate_manual ? "Manual" : "Auto For Flush") << "\"/>\n";
 
                 // filament map override global settings only when group mode overrides the global settings
                 stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << FILAMENT_MAP_ATTR << "\" " << VALUE_ATTR << "=\"";
@@ -8659,7 +8700,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 // Ultra (Phase 8): write the real per-filament nozzle map (1-based) when present, so a saved
                 // project keeps the dual-nozzle grouping. Falls back to 1 (single nozzle) per filament when
                 // filament_map is absent/short (classic machines, or not yet grouped).
-                const auto* fmap_opt = dynamic_cast<const ConfigOptionInts*>(config.option("filament_map"));
+                const auto* fmap_opt = plate_manual ? plate_map_opt : dynamic_cast<const ConfigOptionInts*>(config.option("filament_map"));
                 for (int i = 0; i < filaments_count; ++i) {
                     int v = (fmap_opt && i < (int)fmap_opt->values.size() && fmap_opt->values[i] >= 1) ? fmap_opt->values[i] : 1;
                     stream << v;
@@ -8667,6 +8708,9 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                         stream << " ";
                 }
                 stream << "\"/>\n";
+
+                if (!m_bambu_compat && !plate_data->dual_nozzle_confirm.empty())
+                    stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << DUAL_NOZZLE_CONFIRM_ATTR << "\" " << VALUE_ATTR << "=\"" << xml_escape(plate_data->dual_nozzle_confirm) << "\"/>\n";
 
                 if (save_gcode)
                     stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << GCODE_FILE_ATTR << "\" " << VALUE_ATTR << "=\"" << std::boolalpha << xml_escape(plate_data->gcode_file) << "\"/>\n";

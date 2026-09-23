@@ -3284,6 +3284,30 @@ void PartPlate::clear_filament_map()
         m_config.erase("filament_map");
 }
 
+void PartPlate::set_manual_filament_map(const std::vector<int>& filament_map)
+{
+    m_config.set_key_value("filament_map_mode", new ConfigOptionEnum<FilamentMapMode>(FilamentMapMode::fmmManual));
+    m_config.set_key_value("filament_map", new ConfigOptionInts(filament_map));
+}
+
+void PartPlate::clear_manual_filament_map()
+{
+    if (get_manual_filament_map().empty())
+        return;
+    m_config.set_key_value("filament_map_mode", new ConfigOptionEnum<FilamentMapMode>(FilamentMapMode::fmmAutoForFlush));
+    clear_filament_map();
+}
+
+std::vector<int> PartPlate::get_manual_filament_map() const
+{
+    // getInt(): a plate config filled by apply() (3MF load) holds the mode as ConfigOptionEnumGeneric.
+    const ConfigOption* mode = m_config.option("filament_map_mode");
+    const auto*         map  = m_config.option<ConfigOptionInts>("filament_map");
+    if (!mode || mode->getInt() != int(FilamentMapMode::fmmManual) || !map)
+        return {};
+    return map->values;
+}
+
 void PartPlate::on_extruder_count_changed(int extruder_count)
 {
     if (extruder_count < 2) {
@@ -3294,7 +3318,9 @@ void PartPlate::on_extruder_count_changed(int extruder_count)
         clear_filament_map();
         // clear_filament_map_mode();
         //  do not clear mode now, reset to default mode
-        m_config.option<ConfigOptionEnum<FilamentMapMode>>("filament_map_mode", true)->value = FilamentMapMode::fmmAutoForFlush;
+        // set_key_value, not option<ConfigOptionEnum<>>(key, true): a mode loaded from a 3MF is a
+        // ConfigOptionEnumGeneric, which that cast turns into a null pointer.
+        m_config.set_key_value("filament_map_mode", new ConfigOptionEnum<FilamentMapMode>(FilamentMapMode::fmmAutoForFlush));
     }
 }
 
@@ -5631,6 +5657,7 @@ int PartPlateList::store_to_3mf_structure(PlateDataPtrs& plate_data_list, bool w
 		BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(": plate %1% after load, width %2%, height %3%, size %4%!")
 			%(i+1) %plate_data_item->plate_thumbnail.width %plate_data_item->plate_thumbnail.height %plate_data_item->plate_thumbnail.pixels.size();
 		plate_data_item->config.apply(*m_plate_list[i]->config());
+		plate_data_item->dual_nozzle_confirm = m_plate_list[i]->dual_nozzle_confirm();
 
 		if (m_plate_list[i]->no_light_thumbnail_data.is_valid())
 			plate_data_item->no_light_thumbnail_file = "valid_no_light";
@@ -5770,6 +5797,7 @@ int PartPlateList::load_from_3mf_structure(PlateDataPtrs& plate_data_list)
 		int index = create_plate(false);
 		m_plate_list[index]->m_locked = plate_data_list[i]->locked;
 		m_plate_list[index]->config()->apply(plate_data_list[i]->config);
+		m_plate_list[index]->set_dual_nozzle_confirm(plate_data_list[i]->dual_nozzle_confirm);
 		m_plate_list[index]->set_plate_name(plate_data_list[i]->plate_name);
 		if (plate_data_list[i]->plate_index != index)
 		{
