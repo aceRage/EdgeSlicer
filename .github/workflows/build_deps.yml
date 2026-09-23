@@ -167,4 +167,3 @@ jobs:
       release: ${{ needs.build_orca.outputs.sentry_release }}
       create-release: ${{ startsWith(github.ref, 'refs/tags/') || startsWith(github.ref, 'refs/heads/ci/') || startsWith(github.ref, 'refs/heads/release/') || github.ref == 'refs/heads/main' }}
     secrets: inherit
-    secrets: inherit
