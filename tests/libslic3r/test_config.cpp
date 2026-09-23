@@ -12,8 +12,9 @@
 #include <cereal/types/vector.hpp> 
 #include <cereal/archives/binary.hpp>
 
-#include <sstream>
+#include <algorithm>
 #include <cmath>
+#include <sstream>
 
 using namespace Slic3r;
 
@@ -603,4 +604,67 @@ TEST_CASE("internal bridge speed resolution is flow-variant aware", "[Config][Fl
     // Standard slot's value - and far above the 1e-6 zero-guard floor.
     REQUIRE(std::abs(speed - 50.0) < 1e-9);
     REQUIRE(speed > 1e-6);
+}
+
+// Orca #15836 / Edge CLI --align-to-y-axis: the option lives only in
+// CLIMiscConfigDef (default false). setup() later materializes every CLI
+// default, so CLI::run must treat the key as "given" only when it appeared
+// on the command line. Otherwise the default false would override the i3
+// printer-structure default (align on).
+TEST_CASE("CLI --align-to-y-axis is a misc bool whose default must stay implicit", "[Config][CLI][AlignToYAxis]")
+{
+    const ConfigOptionDef *def = cli_misc_config_def.get("align_to_y_axis");
+    REQUIRE(def != nullptr);
+    CHECK(def->type == coBool);
+    const auto *dflt = dynamic_cast<const ConfigOptionBool *>(def->default_value.get());
+    REQUIRE(dflt != nullptr);
+    CHECK_FALSE(dflt->value);
+
+    const std::vector<std::string> cli = def->cli_args("align_to_y_axis");
+    REQUIRE_FALSE(cli.empty());
+    CHECK(std::find(cli.begin(), cli.end(), "align-to-y-axis") != cli.end());
+
+    std::ostringstream help;
+    cli_misc_config_def.print_cli_help(help, false);
+    CHECK(help.str().find("--align-to-y-axis") != std::string::npos);
+
+    auto parse = [](std::initializer_list<const char *> args) {
+        DynamicPrintAndCLIConfig config;
+        t_config_option_keys extra;
+        t_config_option_keys keys;
+        std::vector<const char *> argv(args);
+        REQUIRE(config.read_cli(int(argv.size()), argv.data(), &extra, &keys));
+        return std::make_pair(std::move(config), std::move(keys));
+    };
+
+    {
+        auto [config, keys] = parse({"prog", "--align-to-y-axis=0"});
+        CHECK(std::find(keys.begin(), keys.end(), "align_to_y_axis") != keys.end());
+        REQUIRE(config.has("align_to_y_axis"));
+        CHECK_FALSE(config.opt_bool("align_to_y_axis"));
+    }
+    {
+        auto [config, keys] = parse({"prog", "--align-to-y-axis=1"});
+        CHECK(std::find(keys.begin(), keys.end(), "align_to_y_axis") != keys.end());
+        REQUIRE(config.has("align_to_y_axis"));
+        CHECK(config.opt_bool("align_to_y_axis"));
+    }
+    {
+        // Bare bool flag (no =value) deserializes as true, same as --allow-rotations.
+        auto [config, keys] = parse({"prog", "--align-to-y-axis"});
+        CHECK(std::find(keys.begin(), keys.end(), "align_to_y_axis") != keys.end());
+        REQUIRE(config.has("align_to_y_axis"));
+        CHECK(config.opt_bool("align_to_y_axis"));
+    }
+    {
+        auto [config, keys] = parse({"prog"});
+        CHECK(std::find(keys.begin(), keys.end(), "align_to_y_axis") == keys.end());
+        CHECK_FALSE(config.has("align_to_y_axis"));
+        // setup() fills CLI defaults afterwards; that must not count as "given".
+        // CLI::run uses m_given_option_keys (from opt_order), not config.has().
+        config.option("align_to_y_axis", true);
+        REQUIRE(config.has("align_to_y_axis"));
+        CHECK_FALSE(config.opt_bool("align_to_y_axis"));
+        CHECK(std::find(keys.begin(), keys.end(), "align_to_y_axis") == keys.end());
+    }
 }
