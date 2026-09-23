@@ -158,6 +158,16 @@ struct Nozzle
     int   max_temp = 0;
     int   wear = 0;
     NozzleVolumeType nozzle_flow{NozzleVolumeType::nvtStandard}; // Ultra: Standard / High Flow
+    // Dual-nozzle sync (BambuStudio DevNozzleSystemParser::ParseV2_0, DevNozzleSystem.cpp:772-806):
+    // the exact flow type ('S' Standard, 'H' High Flow, 'U' TPU High Flow, 'E' E3D High Flow),
+    // the status bits ("stat"; bits 1-2 == 0 is DevNozzle::IsNormal), and what was last printed
+    // with it. id is the raw report id: 0/1 = extruder nozzle, 0x10 + n = rack slot n (H2C).
+    NozzleVolumeType volume_exact{NozzleVolumeType::nvtStandard};
+    int              stat{0};
+    std::string      fila_id;
+    std::string      color_m;
+    bool on_rack() const { return ((id >> 4) & 0xF) == 1; }
+    bool is_normal() const { return ((stat >> 1) & 0x3) == 0; }
 };
 
 struct NozzleData
@@ -1156,6 +1166,22 @@ public:
     int local_publish_json(std::string json_str, int qos = 0, int flag = 0);
     int parse_json(std::string payload, bool key_filed_only = false);
     int publish_gcode(std::string gcode_str);
+
+    /* Dual-nozzle send (BambuStudio DevNozzleMappingCtrl, DevMappingNozzle.cpp:244-268): the
+     * printer's answer to a get_auto_nozzle_mapping query. The send dialog publishes its own
+     * query (command_get_auto_nozzle_mapping) and keeps Send disabled until the answer with its
+     * sequence id arrives; a "fail"/"failed" answer blocks the send as it does in Bambu Studio. */
+    struct NozzleMappingReply {
+        std::string sequence_id;
+        std::string result;   // "success" / "fail" / "failed"
+        std::string reason;
+        int         err_no{0};
+        std::string mapping;  // the "mapping" array, serialized
+        bool        valid{false};
+    };
+    NozzleMappingReply m_nozzle_mapping_reply;
+    // Stamps a fresh sequence id over request_json's and publishes it; returns that id ("" on error).
+    std::string command_get_auto_nozzle_mapping(const std::string& request_json);
 
     std::string setting_id_to_type(std::string setting_id, std::string tray_type);
     BBLSubTask* get_subtask();
