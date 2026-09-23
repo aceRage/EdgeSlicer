@@ -2327,8 +2327,12 @@ public:
     bool         set_key_value(const std::string &opt_key, ConfigOption *opt) { bool out = m_data.set_key_value(opt_key, opt); this->touch(); return out; }
     template<typename T>
     void         set(const std::string &opt_key, T value) { m_data.set(opt_key, value, true); this->touch(); }
+    // A Bambu Studio alias (prime_tower_rib_wall, ...) of a key this config already holds is
+    // skipped, so a per-object / per-part setting written under both names keeps ours whatever
+    // order the file lists them in (Format/BambuKeyAliases.hpp).
     void         set_deserialize(const t_config_option_key &opt_key, const std::string &str, ConfigSubstitutionContext &substitution_context, bool append = false)
-        { m_data.set_deserialize(opt_key, str, substitution_context, append); this->touch(); }
+        { if (this->bambu_alias_shadowed(opt_key)) return; m_data.set_deserialize(opt_key, str, substitution_context, append); this->touch(); }
+    bool         bambu_alias_shadowed(const t_config_option_key &opt_key) const;
     bool         erase(const t_config_option_key &opt_key) { bool out = m_data.erase(opt_key); if (out) this->touch(); return out; }
 
     // Getters are thread safe.

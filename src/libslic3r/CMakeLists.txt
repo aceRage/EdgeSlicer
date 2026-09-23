@@ -226,6 +226,8 @@ set(lisbslic3r_sources
     Format/bbs_3mf.hpp
     Format/BambuExport.cpp
     Format/BambuExport.hpp
+    Format/BambuKeyAliases.cpp
+    Format/BambuKeyAliases.hpp
     Format/BambuKnownKeys.cpp
     Format/GLTF.cpp
     Format/GLTF.hpp

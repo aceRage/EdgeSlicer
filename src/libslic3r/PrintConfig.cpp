@@ -6,6 +6,7 @@
 #include "format.hpp"
 
 #include "GCode/Thumbnails.hpp"
+#include "Format/BambuKeyAliases.hpp"
 #include <algorithm>
 #include <set>
 #include <boost/algorithm/string/replace.hpp>
@@ -8856,6 +8857,12 @@ size_t get_config_idx(const ConfigBase &config, ConfigFlowDomain domain, unsigne
 
 void PrintConfigDef::handle_legacy(t_config_option_key &opt_key, std::string &value)
 {
+    // Bambu Studio's names for settings we spell differently (prime_tower_rib_wall ->
+    // wipe_tower_wall_type, ...), with the inverse of the value conversion "Export Bambu 3MF"
+    // applies. One table for both directions: Format/BambuKeyAliases.cpp.
+    if (BambuKeyAliases::import_key(opt_key, value))
+        return;
+
     //BBS: handle legacy options
     if (opt_key == "enable_wipe_tower") {
         opt_key = "enable_prime_tower";
@@ -8952,15 +8959,8 @@ void PrintConfigDef::handle_legacy(t_config_option_key &opt_key, std::string &va
         else if (value == "0"){
             value = "ensure_moderate";
         }
-        // Bambu Studio's three levels (its EnsureVerticalThicknessLevel). "Export Bambu 3MF"
-        // writes the reverse (Format/BambuExport.cpp, MANUAL_ENUMS).
-        else if (value == "enabled") {
-            value = "ensure_all";
-        } else if (value == "partial") {
-            value = "ensure_moderate";
-        } else if (value == "disabled") {
-            value = "none";
-        }
+        // Bambu Studio's three levels (enabled / partial / disabled) are translated below from
+        // BambuKeyAliases::enum_aliases(), the table "Export Bambu 3MF" writes them from.
     } else if (opt_key == "rotate_solid_infill_direction") {
         opt_key = "solid_infill_rotate_template";
         if (value == "1") {
@@ -8968,22 +8968,8 @@ void PrintConfigDef::handle_legacy(t_config_option_key &opt_key, std::string &va
         } else if (value == "0") {
             value = "0";
         }
-    } else if (opt_key == "sparse_infill_anchor") {
-        opt_key = "infill_anchor";
-    } else if (opt_key == "sparse_infill_anchor_max") {
-        opt_key = "infill_anchor_max";
-    } else if (opt_key == "chamber_temperatures") {
-        opt_key = "chamber_temperature";
     } else if (opt_key == "thumbnail_size") {
         opt_key = "thumbnails";
-    } else if (opt_key == "top_one_wall_type" && value != "none") {
-        opt_key = "only_one_wall_top";
-        // Bambu Studio spells "off" as "not apply" (its TopOneWallType::None).
-        value = value == "not apply" ? "0" : "1";
-    } else if (opt_key == "initial_layer_flow_ratio") {
-        opt_key = "bottom_solid_infill_flow_ratio";
-    } else if (opt_key == "ironing_direction") {
-        opt_key = "ironing_angle";
     } else if (opt_key == "counterbole_hole_bridging") {
         opt_key = "counterbore_hole_bridging";
     } else if (opt_key == "draft_shield" && value == "limited") {
@@ -9020,6 +9006,13 @@ void PrintConfigDef::handle_legacy(t_config_option_key &opt_key, std::string &va
         value = "rectilinear";
     }
 
+    // Enum values Bambu Studio spells differently for a key we share ("2dlattice" is our
+    // "lateral-lattice", "tree_organic" our "organic", ...): the manual and generated tables
+    // "Export Bambu 3MF" translates with, read backwards.
+    if (! value.empty() && ! opt_key.empty())
+        if (std::string ours = BambuKeyAliases::import_enum_value(opt_key, value); ! ours.empty())
+            value = std::move(ours);
+
     // Ignore the following obsolete configuration keys:
     static std::set<std::string> ignore = {
         "acceleration", "scale", "rotate", "duplicate", "duplicate_grid",
@@ -9035,7 +9028,7 @@ void PrintConfigDef::handle_legacy(t_config_option_key &opt_key, std::string &va
         "z_hop_type", "z_lift_type", "bed_temperature_difference","long_retraction_when_cut",
         "retraction_distance_when_cut",
         "extruder_type",
-        "internal_bridge_support_thickness","extruder_clearance_max_radius", "top_area_threshold", "reduce_wall_solid_infill","filament_load_time","filament_unload_time",
+        "internal_bridge_support_thickness", "top_area_threshold", "reduce_wall_solid_infill","filament_load_time","filament_unload_time",
         "smooth_coefficient", "overhang_totally_speed", "silent_mode",
     };
 
@@ -10832,6 +10825,11 @@ const CustomGcodeSpecificConfigDef custom_gcode_specific_config_def;
 #undef new_def
 
 uint64_t ModelConfig::s_last_timestamp = 1;
+
+bool ModelConfig::bambu_alias_shadowed(const t_config_option_key &opt_key) const
+{
+    return BambuKeyAliases::shadowed_by_our_key(opt_key, [this](const std::string &ours) { return m_data.has(ours); });
+}
 
 static Points to_points(const std::vector<Vec2d> &dpts)
 {

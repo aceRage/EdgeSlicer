@@ -8,7 +8,8 @@ Two changes that belong together (target release 2.4.0.0):
 2. **File > Export > Export Bambu 3MF** writes a project Bambu Studio opens with its settings.
 
 Code: `src/libslic3r/Format/BambuExport.{hpp,cpp}` (conversion), `BambuKnownKeys.cpp`
-(generated), `bbs_3mf.cpp` (`StoreParams::bambu_compat`), `Plater::export_bambu_3mf`, the CLI
+(generated), `BambuKeyAliases.{hpp,cpp}` (renamed keys and enum spellings, shared with the
+import direction), `bbs_3mf.cpp` (`StoreParams::bambu_compat`), `Plater::export_bambu_3mf`, the CLI
 option `--export-bambu-3mf` (with `--export-3mf`). Tests: `tests/libslic3r/test_bambu_3mf_export.cpp`
 (tag `[BambuExport]`).
 
@@ -67,19 +68,23 @@ Regenerate when targeting a newer Bambu Studio, or when one of our enum options 
 For every key of every config written (project settings, embedded print/filament/printer presets,
 per-object, per-part and per-height-range settings):
 
-1. **Rename** where Bambu spells the same setting differently. The first group is the reverse of
-   our own `handle_legacy()` import mapping, so these round-trip:
-   `infill_anchor(_max)` -> `sparse_infill_anchor(_max)`, `chamber_temperature` ->
-   `chamber_temperatures`, `bottom_solid_infill_flow_ratio` -> `initial_layer_flow_ratio`,
-   `ironing_angle` -> `ironing_direction` (our `-1` = "default" is left out),
-   `only_one_wall_top` -> `top_one_wall_type` (`all top` / `not apply`). The second group are
-   settings ported from Bambu under another name (export only; our reader does not map them back):
+1. **Rename** where Bambu spells the same setting differently, from the one table in
+   `Format/BambuKeyAliases.cpp` that our loader also reads backwards (see
+   `bambu-config-compat.md`, "Renamed keys", for the full table and the import rules), so every
+   rename round-trips: `infill_anchor(_max)` -> `sparse_infill_anchor(_max)`,
+   `chamber_temperature` -> `chamber_temperatures`, `bottom_solid_infill_flow_ratio` ->
+   `initial_layer_flow_ratio`, `ironing_angle` -> `ironing_direction` (our `-1` = "default" is
+   left out), `only_one_wall_top` -> `top_one_wall_type` (`all top` / `not apply`),
    `support_ironing` -> `enable_support_ironing`, `extruder_clearance_radius` ->
    `extruder_clearance_max_radius`, `dont_slow_down_outer_wall` ->
    `no_slow_down_for_cooling_on_outwalls`, `role_based_wipe_speed` -> `role_base_wipe_speed`,
    `reduce_infill_retraction` -> `reduce_infill_retraction_mode` (`Enabled` / `Disabled`),
    `wipe_tower_rib_width` / `_extra_rib_length` / `_fillet_wall` / `_max_purge_speed` ->
-   `prime_tower_*`, `wipe_tower_wall_type` -> `prime_tower_rib_wall` (`rib` = on).
+   `prime_tower_*`, `wipe_tower_wall_type` -> `prime_tower_rib_wall` (`rib` = on; Bambu has no
+   cone tower, a cone goes out as off), and since 2026-09-22 `lateral_lattice_angle_1/2` ->
+   `sparse_infill_lattice_angle_1/2`, `notes` -> `process_notes`, `filament_colour_mode` ->
+   `filament_colour_type` (0/1 swapped: Bambu's 0 is gradient) and `filament_multi_colors` ->
+   `filament_multi_colour` (`|`-separated -> space-separated).
 2. **Drop** keys Bambu does not know (about 240 of ours: Orca/EdgeSlicer features).
 3. **Reshape** to Bambu's type (the doc `bambu-config-compat.md` tables, in reverse):
    our vector -> Bambu scalar keeps slot 0 (`*_jerk`, `ironing_speed`, `accel_to_decel_*`,
@@ -89,10 +94,12 @@ per-object, per-part and per-height-range settings):
    against the option's `ratio_over` (line widths over `nozzle_diameter`, overhang speeds over
    `outer_wall_speed`); mm -> % for Bambu's percent-only `seam_gap` (of the nozzle diameter) and
    `wipe_speed` (of `travel_speed`).
-4. **Translate enum values** (generated table plus `ensure_vertical_shell_thickness`: `none` ->
-   `disabled`, `ensure_critical_only` / `ensure_moderate` -> `partial`, `ensure_all` -> `enabled`).
-   A value Bambu does not have (`seam_position = aligned_back`, `brim_type = painted`, the
-   `lateral-*` / `tpms*` / `quartercubic` infills, `Textured Cool Plate`, ...) drops the key, so
+4. **Translate enum values** (generated table plus the manual rows in `BambuKeyAliases.cpp`:
+   `ensure_vertical_shell_thickness` `none` -> `disabled`, `ensure_critical_only` /
+   `ensure_moderate` -> `partial`, `ensure_all` -> `enabled`; `lateral-lattice` -> `2dlattice`,
+   Bambu's name for the same pattern, in every pattern option).
+   A value Bambu does not have (`seam_position = aligned_back`, `brim_type = painted`,
+   `lateral-honeycomb`, the `tpms*` / `quartercubic` infills, `Textured Cool Plate`, ...) drops the key, so
    Bambu keeps its own default; a plate whose bed type Bambu lacks omits its plate bed type.
 5. **Validate** the result against the Bambu type (numbers, bools, enum strings, `nil` only in a
    nullable vector); anything that does not fit is dropped rather than written.
@@ -134,11 +141,16 @@ and objects). The CLI prints the summary.
 
 ### Round trip
 
-EdgeSlicer reads both kinds of file as full projects. Reading a Bambu export back restores the
-first rename group, `zig-zag` -> `rectilinear`, and (fixed here, it affected any Bambu Studio file)
-`ensure_vertical_shell_thickness` `enabled/partial/disabled` and `top_one_wall_type = not apply`,
-which used to become `only_one_wall_top = 1`. Settings Bambu does not have come back at their
-defaults: the export is lossy by design.
+EdgeSlicer reads both kinds of file as full projects. Reading a Bambu export back restores every
+renamed key (the loader reads the same `BambuKeyAliases` table backwards, with the inverse value
+conversion), every translated enum value (`zig-zag` -> `rectilinear`, `2dlattice` ->
+`lateral-lattice`, `tree_organic` -> `organic`, `ensure_vertical_shell_thickness`
+`enabled/partial/disabled`), and `top_one_wall_type = not apply` as `only_one_wall_top = 0`. The
+`[BambuAliases]` test "Our config survives Export Bambu 3MF and our own import, key by key" pins
+this for every row of the table. What cannot come back: `wipe_tower_wall_type = cone` returns as
+`rectangle`, `ironing_angle = -1` stays at our default (it was left out), `ensure_critical_only`
+returns as `ensure_moderate`; settings Bambu does not have come back at their defaults: the export
+is lossy by design.
 
 ## Sliced-plate files keep the old tag
 
