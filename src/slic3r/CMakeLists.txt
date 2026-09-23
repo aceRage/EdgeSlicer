@@ -776,6 +776,8 @@ set(SLIC3R_GUI_SOURCES
     Utils/AstroBox.cpp
     Utils/AstroBox.hpp
     Utils/bambu_networking.hpp
+    Utils/BambuStudioLauncher.cpp
+    Utils/BambuStudioLauncher.hpp
     Utils/Bonjour.cpp
     Utils/Bonjour.hpp
     Utils/MeshInspect.cpp

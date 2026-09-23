@@ -508,6 +508,9 @@ public:
     // File > Export > Export Bambu 3MF: a project Bambu Studio loads with its settings
     // (Format/BambuExport.hpp, docs/bambu-3mf-export.md).
     void export_bambu_3mf();
+    // File > Export > Export & Open in Bambu Studio: same export as export_bambu_3mf(), then
+    // launch the installed Bambu Studio with the exported file (Utils/BambuStudioLauncher.hpp).
+    void export_and_open_in_bambu_studio();
     static TriangleMesh combine_mesh_fff(const ModelObject& mo, int instance_id, std::function<void(const std::string&)> notify_func = {});
     void export_stl(bool extended = false, bool selection_only = false, bool multi_stls = false);
     // Export just the one selected part (ModelVolume) as a binary STL, in world coordinates.

@@ -88,6 +88,7 @@
 //#include "libslic3r/Format/3mf.hpp"
 #include "libslic3r/Format/bbs_3mf.hpp"
 #include "libslic3r/Format/BambuExport.hpp"
+#include "../Utils/BambuStudioLauncher.hpp"
 #include "libslic3r/GCode/ThumbnailData.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/ModelArrange.hpp"   // get_instance_arrange_poly, for the Fill bed dialog's defaults
@@ -21657,6 +21658,55 @@ void Plater::export_bambu_3mf()
         wxString::Format(_L("Exported for Bambu Studio: %d settings not supported by Bambu Studio were left out."), int(report.dropped.size()));
     p->notification_manager->push_notification(NotificationType::CustomNotification,
                                                NotificationManager::NotificationLevel::RegularNotificationLevel, into_u8(msg));
+}
+
+void Plater::export_and_open_in_bambu_studio()
+{
+    wxString path = p->get_export_file(FT_3MF);
+    if (path.empty()) { return; }
+    const std::string   path_u8 = into_u8(path);
+    BambuExport::Report report;
+    if (export_3mf(path_u8, SaveStrategy::Silence, -1, nullptr, &report) < 0) {
+        show_error(this, _L("Failed to export the project for Bambu Studio."));
+        return;
+    }
+    BOOST_LOG_TRIVIAL(info) << "Export & Open in Bambu Studio " << path_u8 << ": " << report.summary();
+    wxString msg = report.dropped.empty() ?
+        _L("Exported for Bambu Studio.") :
+        wxString::Format(_L("Exported for Bambu Studio: %d settings not supported by Bambu Studio were left out."), int(report.dropped.size()));
+    p->notification_manager->push_notification(NotificationType::CustomNotification,
+                                               NotificationManager::NotificationLevel::RegularNotificationLevel, into_u8(msg));
+
+    // The export succeeded regardless of what happens below - never turn a launch problem into
+    // an export failure.
+    std::string custom_path = wxGetApp().app_config->get("bambu_studio_path");
+    auto        result      = BambuStudioLauncher::open_in_bambu_studio(path_u8, custom_path);
+    using Outcome = BambuStudioLauncher::LaunchOutcome;
+    switch (result.outcome) {
+    case Outcome::Launched:
+        break; // the exported-notice above already told the user; nothing more to say
+    case Outcome::NotFound: {
+        wxString not_found_msg = wxString::Format(
+            _L("Bambu Studio was not found. The file was exported to %s."), path);
+        RichMessageDialog dlg(this, not_found_msg, _L("Bambu Studio not found"), wxOK | wxCANCEL | wxICON_INFORMATION);
+        dlg.SetOKCancelLabels(_L("Show in Folder"), _L("Close"));
+        dlg.CentreOnScreen();
+        if (dlg.ShowModal() == wxID_OK)
+            desktop_open_any_folderEx(path_u8);
+        break;
+    }
+    case Outcome::LaunchFailed: {
+        wxString failed_msg = wxString::Format(
+            _L("Failed to launch Bambu Studio (found at %s). The file was exported to %s."),
+            from_u8(result.exe_path), path);
+        RichMessageDialog dlg(this, failed_msg, _L("Could not launch Bambu Studio"), wxOK | wxCANCEL | wxICON_INFORMATION);
+        dlg.SetOKCancelLabels(_L("Show in Folder"), _L("Close"));
+        dlg.CentreOnScreen();
+        if (dlg.ShowModal() == wxID_OK)
+            desktop_open_any_folderEx(path_u8);
+        break;
+    }
+    }
 }
 
 // Following lambda generates a combined mesh for export with normals pointing outwards.
