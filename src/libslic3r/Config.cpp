@@ -620,7 +620,7 @@ void ConfigBase::set_deserialize(std::initializer_list<SetDeserializeItem> items
 		this->set_deserialize(item.opt_key, item.opt_value, substitutions_ctxt, item.append);
 }
 
-bool ConfigBase::set_deserialize_raw(const t_config_option_key &opt_key_src, const std::string &value, ConfigSubstitutionContext& substitutions_ctxt, bool append)
+bool ConfigBase::set_deserialize_raw(const t_config_option_key &opt_key_src, const std::string &value_src, ConfigSubstitutionContext& substitutions_ctxt, bool append)
 {
     t_config_option_key    opt_key = opt_key_src;
     // Try to deserialize the option by its name.
@@ -649,10 +649,73 @@ bool ConfigBase::set_deserialize_raw(const t_config_option_key &opt_key_src, con
         // Aliasing for example "solid_layers" to "top_shell_layers" and "bottom_shell_layers".
         for (const t_config_option_key &shortcut : optdef->shortcut)
             // Recursive call.
-            if (! this->set_deserialize_raw(shortcut, value, substitutions_ctxt, append))
+            if (! this->set_deserialize_raw(shortcut, value_src, substitutions_ctxt, append))
                 return false;
         return true;
     }
+
+    // Bambu Studio writes the literal "nil" into the per-extruder-variant slots a setting does not
+    // apply to. A nullable option parses that natively; any other type throws out of deserialize().
+    // load_from_json_document translates JSON arrays before they get here; this catches every
+    // path that hands over a comma-joined string instead - above all the per-object, per-part and
+    // layer-range settings of a 3MF (model_settings.config), which carry Bambu OVERRIDE semantics:
+    // a nil slot inherits that slot from the parent config (see ConfigSubstitutionContext::
+    // bambu_override_parents and docs/bambu-config-compat.md). Never invents a value, never 0.
+    BambuConfigCompat::NilResult nil_result;
+    std::string                  nil_value;
+    {
+        std::vector<std::string> slots;
+        if (BambuConfigCompat::split_nil_value(*optdef, value_src, slots)) {
+            const bool is_override = ! substitutions_ctxt.bambu_override_parents.empty() && ! append;
+            if (is_override) {
+                std::vector<std::vector<std::string>> parent_slots;
+                for (auto it = substitutions_ctxt.bambu_override_parents.rbegin(); it != substitutions_ctxt.bambu_override_parents.rend(); ++it) {
+                    const ConfigBase *parent = *it;
+                    if (parent == nullptr || parent == this)
+                        continue;
+                    if (const ConfigOption *popt = parent->option(opt_key); popt != nullptr)
+                        parent_slots.emplace_back(popt->is_vector() ? static_cast<const ConfigOptionVectorBase*>(popt)->vserialize() :
+                                                                      std::vector<std::string>{ popt->serialize() });
+                }
+                nil_result = BambuConfigCompat::translate_nil_override(optdef, slots, parent_slots);
+            } else
+                nil_result = BambuConfigCompat::translate_nil_array(optdef, slots);
+
+            if (nil_result.drop()) {
+                BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": " << opt_key << " is \"" << nil_result.original << "\"; "
+                                           << (is_override ? "override applies to no extruder variant, dropped" :
+                                                             BambuConfigCompat::describe(nil_result.fix));
+                // A preset value with no surviving slot is a loss worth a notice when the option
+                // already holds something (a static config); an empty override is not a loss.
+                if (! is_override && (substitutions_ctxt.rule == ForwardCompatibilitySubstitutionRule::Enable ||
+                                      substitutions_ctxt.rule == ForwardCompatibilitySubstitutionRule::EnableSystemSilent)) {
+                    if (const ConfigOption *landed = this->option(opt_key); landed != nullptr) {
+                        ConfigSubstitution config_substitution;
+                        config_substitution.opt_def   = optdef;
+                        config_substitution.old_value = nil_result.original;
+                        config_substitution.new_value = ConfigOptionUniquePtr(landed->clone());
+                        substitutions_ctxt.substitutions.emplace_back(std::move(config_substitution));
+                    }
+                }
+                return true;
+            }
+            if (nil_result.changed()) {
+                nil_value = nil_result.value;
+                if (nil_result.lossy())
+                    BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": " << opt_key << (is_override ? " (override)" : "") << ": \""
+                                               << nil_result.original << "\" -> \"" << nil_value << "\" ("
+                                               << (is_override ? std::string("no parent value to inherit for some not-applicable slots - "
+                                                                             "they were filled from the override itself; Bambu Studio "
+                                                                             "would have used the print settings there") :
+                                                                 BambuConfigCompat::describe(nil_result.fix)) << ")";
+                else
+                    BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ": " << opt_key << (is_override ? " (override)" : "") << ": \""
+                                            << nil_result.original << "\" -> \"" << nil_value << "\" ("
+                                            << BambuConfigCompat::describe(nil_result.fix) << ")";
+            }
+        }
+    }
+    const std::string &value = nil_result.changed() ? nil_value : value_src;
 
     ConfigOption *opt = this->option(opt_key, true);
     assert(opt != nullptr);
@@ -706,6 +769,16 @@ bool ConfigBase::set_deserialize_raw(const t_config_option_key &opt_key_src, con
         ConfigSubstitution config_substitution;
         config_substitution.opt_def   = optdef;
         config_substitution.old_value = value;
+        config_substitution.new_value = ConfigOptionUniquePtr(opt->clone());
+        substitutions_ctxt.substitutions.emplace_back(std::move(config_substitution));
+    } else if (success && nil_result.lossy() &&
+               (substitutions_ctxt.rule == ForwardCompatibilitySubstitutionRule::Enable ||
+                substitutions_ctxt.rule == ForwardCompatibilitySubstitutionRule::EnableSystemSilent)) {
+        // A Bambu nil translation had to guess: show the user what Bambu wrote and what landed,
+        // through the same dialog every other load-time substitution uses.
+        ConfigSubstitution config_substitution;
+        config_substitution.opt_def   = optdef;
+        config_substitution.old_value = nil_result.original;
         config_substitution.new_value = ConfigOptionUniquePtr(opt->clone());
         substitutions_ctxt.substitutions.emplace_back(std::move(config_substitution));
     }

@@ -258,6 +258,8 @@ struct ConfigSubstitution {
 
 using  ConfigSubstitutions = std::vector<ConfigSubstitution>;
 
+class  ConfigBase;
+
 // Filled in by ConfigBase::set_deserialize_raw(), which based on "rule" either bails out
 // or performs substitutions when encountering an unknown configuration value.
 struct ConfigSubstitutionContext
@@ -268,6 +270,12 @@ struct ConfigSubstitutionContext
     ForwardCompatibilitySubstitutionRule 	rule;
     ConfigSubstitutions					    substitutions;
     std::vector<std::string>                unrecogized_keys;
+    // Bambu Studio override semantics for "nil" slots (per-object / per-part / layer-range
+    // settings in a 3MF). While non-empty, the values being deserialized are overrides, and a nil
+    // slot inherits the same slot of these parent configs, searched from the back (nearest) to
+    // the front; nullptr entries only switch the mode on. Maintained by
+    // BambuConfigCompat::OverrideScope - never push to it by hand. See docs/bambu-config-compat.md.
+    std::vector<const ConfigBase*>          bambu_override_parents;
 };
 
 // A generic value of a configuration option.
