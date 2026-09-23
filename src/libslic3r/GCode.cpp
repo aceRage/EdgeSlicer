@@ -898,13 +898,38 @@ std::string WipeTowerIntegration::append_tcr(GCode& gcodegen, const WipeTower::T
 
     // Orca #15441: mirror of restore_layer_z_str above - bring Z back down to the wipe tower layer
     // once change_filament_gcode has finished, so the rest of the tower prints at the right height.
+    // The descent is wrapped in retract -> Z -> unretract, exactly like the "Travel down to the last
+    // wipe tower layer" move above and like Bambu Studio's own no-sparse descent. That matters for more
+    // than oozing: the tower G-code that follows prints its wall without an F word of its own (see
+    // WipeTower::tool_change, writer.rectangle(wt_box)), so it inherits whatever feedrate the last move
+    // carried. A bare Z move leaves the travel feedrate active and every compacted tower layer, the
+    // first one on the bed included, got its wall extruded at travel speed (F60000 on the H2D/H2C).
+    // The unretract leaves the deretraction feedrate instead, which is what the wall prints at when
+    // the tower is not compacted.
+    // With no retraction configured there is nothing to unretract, so the deretraction feedrate is
+    // written out explicitly instead.
+    auto descend_to_tower = [&gcodegen](double tower_z, const std::string &comment, bool force) {
+        GCodeWriter &writer = gcodegen.writer();
+        std::string  z_move = writer.travel_to_z(tower_z, comment, force);
+        if (z_move.empty())
+            return z_move;
+        check_add_eol(z_move);
+        std::string out = writer.retract();
+        const bool  retracted_here = !out.empty();
+        out += z_move;
+        if (retracted_here)
+            out += writer.unretract();
+        else if (writer.extruder() != nullptr)
+            out += writer.set_speed(60. * writer.extruder()->deretract_speed());
+        check_add_eol(out);
+        return out;
+    };
     std::string deretraction_str;
     if (will_go_down) {
-        deretraction_str += gcodegen.writer().travel_to_z(z, "Restore wipe tower layer Z after toolchange", true);
+        deretraction_str += descend_to_tower(z, "Restore wipe tower layer Z after toolchange", true);
         Vec3d position{gcodegen.writer().get_position()};
         position.z() = z;
         gcodegen.writer().set_position(position);
-        check_add_eol(deretraction_str);
     }
 
     std::string toolchange_command;
@@ -937,11 +962,10 @@ std::string WipeTowerIntegration::append_tcr(GCode& gcodegen, const WipeTower::T
     // Orca: the custom change_filament_gcode lifts to the object layer height and the unretract
     // de-hops back to it, so every tower extrusion emitted after it (purge moves, and the wall
     // when it prints after the toolchange) would float above the compacted tower. Descend first.
-    if (compacted_below_object) {
-        std::string z_descend = gcodegen.writer().travel_to_z(z, "Descend to compacted wipe tower z (no sparse layers)");
-        check_add_eol(z_descend);
-        start_filament_gcode_str += z_descend;
-    }
+    // Same retract -> Z -> unretract wrapping as deretraction_str above, so the tower wall does not
+    // inherit the travel feedrate of the Z move. Usually a no-op: deretraction_str already descended.
+    if (compacted_below_object)
+        start_filament_gcode_str += descend_to_tower(z, "Descend to compacted wipe tower z (no sparse layers)", false);
 
     // Insert the end filament, toolchange, and start filament gcode into the generated gcode.
     DynamicConfig config;
