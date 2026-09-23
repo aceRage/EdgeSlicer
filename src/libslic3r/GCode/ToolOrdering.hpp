@@ -21,6 +21,7 @@
 namespace Slic3r {
 
 class Print;
+class PrintConfig;
 class PrintObject;
 class LayerTools;
 namespace CustomGCode { struct Item; }
@@ -224,6 +225,11 @@ public:
 
     // For a multi-material print, the printing extruders are ordered in the order they shall be primed.
     const std::vector<unsigned int>& all_extruders() const { return m_all_printing_extruders; }
+
+    // First 0-based extruder used for non-support object extrusion.
+    // Matches the G-code generator: if the initial tool is a support filament, walk object layers
+    // for the first non-support extruder. Returns 0 when initial_extruder_id is unsigned(-1).
+    unsigned int first_non_support_extruder(const PrintConfig &print_config, unsigned int initial_extruder_id) const;
 
     // Find LayerTools with the closest print_z.
     const LayerTools&	tools_for_layer(coordf_t print_z) const;
