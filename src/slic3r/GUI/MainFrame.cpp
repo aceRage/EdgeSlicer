@@ -2189,7 +2189,20 @@ wxBoxSizer* MainFrame::create_side_tools()
             p->append_button(export_all_sliced_file_btn);
             p->append_button(export_gcode_btn);
         } else {
-            SideButton* print_plate_btn = new SideButton(p, _L("Print"), "");
+            // BBL vendor (LAN or cloud): the native print flow is ePrintPlate /
+            // EVT_GLTOOLBAR_PRINT_PLATE, which on_action_print_plate() wires to
+            // SelectMachineDialog. eSendGcode/send_gcode_legacy() is the third-party
+            // print-host flow (bound above for !is_bbl_vendor()) and additionally gates
+            // on can_send_gcode(), i.e. PrintHostDevices::can_send_for() / a non-empty
+            // print_host - neither of which a native Bambu printer normally populates.
+            // This item used to set m_print_select = eSendGcode while showing the same
+            // "Print" label as the default ePrintPlate state, so re-selecting "Print"
+            // after e.g. "Export plate sliced file" would wrongly gate the button on
+            // can_send_gcode() and leave it greyed out even though the plate was
+            // print-ready. Keep the label and the enum in sync with
+            // set_print_button_to_default(ePrintPlate) and the Ctrl+Shift+G shortcut
+            // ("Print plate" in KBShortcutsDialog).
+            SideButton* print_plate_btn = new SideButton(p, _L("Print plate"), "");
             print_plate_btn->SetCornerRadius(0);
 
             SideButton* export_sliced_file_btn = new SideButton(p, _L("Export plate sliced file"), "");
@@ -2199,8 +2212,8 @@ wxBoxSizer* MainFrame::create_side_tools()
             export_all_sliced_file_btn->SetCornerRadius(0);
 
             print_plate_btn->Bind(wxEVT_BUTTON, [this, p](wxCommandEvent&) {
-                m_print_btn->SetLabel(_L("Print"));
-                m_print_select = eSendGcode;
+                m_print_btn->SetLabel(_L("Print plate"));
+                m_print_select = ePrintPlate;
                 m_print_enable = get_enable_print_status();
                 m_print_btn->Enable(m_print_enable);
                 this->Layout();
@@ -4190,31 +4203,38 @@ void MainFrame::on_config_changed(DynamicPrintConfig* config) const
 
 void MainFrame::set_print_button_to_default(PrintSelectType select_type)
 {
-    if (select_type == PrintSelectType::ePrintPlate) {
-        m_print_btn->SetLabel(_L("Print plate"));
-        m_print_select = ePrintPlate;
-        if (m_print_enable)
-            m_print_enable = get_enable_print_status();
-        m_print_btn->Enable(m_print_enable);
-        this->Layout();
-    } else if (select_type == PrintSelectType::eSendGcode) {
-        m_print_btn->SetLabel(_L("Print"));
-        m_print_select = eSendGcode;
-        if (m_print_enable)
-            m_print_enable = get_enable_print_status() && can_send_gcode();
-        m_print_btn->Enable(m_print_enable);
-        this->Layout();
-    } else if (select_type == PrintSelectType::eExportGcode) {
-        m_print_btn->SetLabel(_L("Export G-code file"));
-        m_print_select = eExportGcode;
-        if (m_print_enable)
-            m_print_enable = get_enable_print_status() && can_send_gcode();
-        m_print_btn->Enable(m_print_enable);
-        this->Layout();
-    } else {
-        // unsupport
+    // Every branch here must: (1) set the label callers see, (2) set m_print_select to
+    // the SAME enum the matching dropdown item in create_side_tools() uses for that
+    // label, and (3) unconditionally recompute m_print_enable from the *new* selection.
+    //
+    // Recomputing only "if (m_print_enable)" (the old code) meant that once the button
+    // had been left disabled - e.g. while m_print_select was some other mode that failed
+    // its own gate - a later call here could never re-enable it, even though the newly
+    // selected mode's own get_enable_print_status() would say it should be enabled. That
+    // left the button stuck grey until something else happened to flip m_print_enable
+    // true first. Always recompute so the button's enabled state matches whatever mode
+    // is being switched to, independent of whatever it was before.
+    wxString label;
+    switch (select_type) {
+    case PrintSelectType::ePrintPlate:       label = _L("Print plate"); break;
+    case PrintSelectType::eSendGcode:        label = _L("Print"); break;
+    case PrintSelectType::eExportGcode:      label = _L("Export G-code file"); break;
+    case PrintSelectType::eExportSlicedFile: label = _L("Export plate sliced file"); break;
+    case PrintSelectType::eExportAllSlicedFile: label = _L("Export all sliced file"); break;
+    default:
+        // unsupported from this entry point (ePrintAll / eSendToPrinter / eSendToPrinterAll /
+        // eUploadGcode / ePrintMultiMachine are only reachable via the dropdown items
+        // themselves, which set their own label/select/enable directly).
         return;
     }
+
+    m_print_btn->SetLabel(label);
+    m_print_select = select_type;
+    m_print_enable = get_enable_print_status();
+    if (select_type == PrintSelectType::eSendGcode || select_type == PrintSelectType::eExportGcode)
+        m_print_enable = m_print_enable && can_send_gcode();
+    m_print_btn->Enable(m_print_enable);
+    this->Layout();
 }
 
 void MainFrame::add_to_recent_projects(const wxString& filename)
