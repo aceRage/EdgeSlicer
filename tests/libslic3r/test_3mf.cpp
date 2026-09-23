@@ -889,3 +889,68 @@ TEST_CASE("Deft: write a single-filament P1S-shaped project 3MF as the slice-det
     WARN("Determinism control (single-filament P1S-shaped) project written to " << out);
     // Left on disk on purpose - the CLI slice-determinism gate reads it from there.
 }
+
+// Per-plate project-filament -> physical-filament-id map. Locks the
+// physical_filament_maps 3mf plate attribute round-trip.
+SCENARIO("physical_filament_maps .3mf plate round-trip", "[3mf]")
+{
+    GIVEN("a plate carrying a project-filament to physical-filament-id map") {
+        Model model;
+        ModelObject *object = model.add_object();
+        object->add_volume(make_cube(10., 10., 10.));
+        object->add_instance();
+
+        const boost::filesystem::path backup_dir =
+            boost::filesystem::temp_directory_path() / boost::filesystem::unique_path("edge_pfm_%%%%%%%%");
+        boost::filesystem::create_directories(backup_dir);
+        model.set_backup_path(backup_dir.string());
+
+        DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+
+        PlateData* plate = new PlateData();
+        plate->plate_index = 0;
+        plate->config.set_key_value("filament_map_mode", new ConfigOptionEnum<FilamentMapMode>(fmmManual));
+        plate->config.set_key_value("filament_physical_map", new ConfigOptionInts({ 3, 0, 7 }));
+
+        WHEN("stored to and reloaded from a .3mf") {
+            const boost::filesystem::path tmp_root = boost::filesystem::temp_directory_path() / "snorca_tests";
+            boost::filesystem::create_directories(tmp_root);
+            Slic3r::set_temporary_dir(tmp_root.string());
+            const std::string test_file = (tmp_root / "pfm_roundtrip.3mf").string();
+
+            StoreParams store_params;
+            store_params.path     = test_file.c_str();
+            store_params.model    = &model;
+            store_params.config   = &config;
+            store_params.plate_data_list.push_back(plate);
+            store_params.strategy = SaveStrategy::Zip64 | SaveStrategy::Silence | SaveStrategy::SkipAuxiliary;
+            REQUIRE(store_bbs_3mf(store_params));
+
+            Model dst_model;
+            DynamicPrintConfig dst_config;
+            ConfigSubstitutionContext ctxt{ ForwardCompatibilitySubstitutionRule::Enable };
+            PlateDataPtrs        dst_plates;
+            std::vector<Preset*> project_presets;
+            bool   is_bbl_3mf = false;
+            Semver file_version;
+            bool loaded = load_bbs_3mf(test_file.c_str(), &dst_config, &ctxt, &dst_model, &dst_plates,
+                                       &project_presets, &is_bbl_3mf, &file_version, nullptr,
+                                       LoadStrategy::LoadModel | LoadStrategy::LoadConfig);
+
+            THEN("physical_filament_map round-trips intact") {
+                REQUIRE(loaded);
+                REQUIRE(dst_plates.size() >= 1);
+                PlateData* rt = dst_plates.front();
+
+                auto* pmap = rt->config.option<ConfigOptionInts>("filament_physical_map");
+                REQUIRE(pmap != nullptr);
+                REQUIRE(pmap->values == std::vector<int>({ 3, 0, 7 }));
+            }
+
+            release_PlateData_list(dst_plates);
+            boost::filesystem::remove(test_file);
+        }
+        delete plate;
+        boost::filesystem::remove_all(backup_dir);
+    }
+}

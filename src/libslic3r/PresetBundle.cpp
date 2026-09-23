@@ -216,11 +216,12 @@ static std::vector<std::string> s_project_options {
     "filament_volume_type",
     "filament_grouping_mode",
     "flush_multiplier",
+    "flush_volumes_synced",
     "flush_multiplier_fast", // Ultra (dual-nozzle) grouping input
     // Ultra: nozzle flow variant declared to the printer (metadata only; auto-matched at send)
     "nozzle_volume_type",
     // Ultra (dual-nozzle): plate-level filament grouping state.
-    "filament_map", "filament_map_2", "filament_volume_map", "filament_nozzle_map", "filament_map_mode",
+    "filament_map", "filament_map_2", "filament_volume_map", "filament_nozzle_map", "filament_physical_map", "filament_map_mode",
     "enable_filament_dynamic_map", "has_filament_switcher", "prime_volume_mode",
     // Mixed filament / local-Z settings
     "mixed_filament_gradient_mode",
@@ -2249,6 +2250,11 @@ void PresetBundle::export_selections(AppConfig &config)
     auto printer_name = printers.get_selected_preset_name();
     config.set("presets", PRESET_PRINTER_NAME, printer_name);
 
+    // The per-machine loaded-filament inventory (maintained later by Stage B/C store) is written
+    // independently of this function's selection rewrite; preserve it across the clear below so a
+    // filament/printer selection change doesn't silently wipe it.
+    std::string loaded_filaments = config.get_printer_setting(printer_name, "loaded_filaments");
+
     config.clear_printer_settings(printer_name);
     config.set_printer_setting(printer_name, PRESET_PRINTER_NAME, printer_name);
     config.set_printer_setting(printer_name, PRESET_PRINT_NAME, prints.get_selected_preset_name());
@@ -2257,8 +2263,11 @@ void PresetBundle::export_selections(AppConfig &config)
     for (unsigned i = 1; i < filament_presets.size(); ++i) {
         char name[64];
         assert(!filament_presets[i].empty());
+        // load_selections()/update_selections() read these back with a loop that stops at the
+        // first empty value, so persisting one here would also silently drop every later slot.
+        const std::string &value = filament_presets[i].empty() ? filament_presets.front() : filament_presets[i];
         sprintf(name, "filament_%02u", i);
-        config.set_printer_setting(printer_name, name, filament_presets[i]);
+        config.set_printer_setting(printer_name, name, value);
     }
     CNumericLocalesSetter locales_setter;
     std::vector<std::string> projectColors = project_config.option<ConfigOptionStrings>("filament_colour")->values;
@@ -2306,6 +2315,9 @@ void PresetBundle::export_selections(AppConfig &config)
 
     auto flush_multi_opt = project_config.option<ConfigOptionFloat>("flush_multiplier");
     config.set("flush_multiplier", std::to_string(flush_multi_opt ? flush_multi_opt->getFloat() : 1.0f));
+
+    if (!loaded_filaments.empty())
+        config.set_printer_setting(printer_name, "loaded_filaments", loaded_filaments);
     // BBS
     //config.set("presets", "sla_print",    sla_prints.get_selected_preset_name());
     //config.set("presets", "sla_material", sla_materials.get_selected_preset_name());
@@ -2721,6 +2733,25 @@ DynamicPrintConfig PresetBundle::full_fff_config() const
 
     // BBS
     size_t  num_filaments = this->filament_presets.size();
+
+    // A device-owned mapping protocol means the printer routes logical tools itself: neither a
+    // stray project filament_map nor grouping leftover may select extruder-variant columns.
+    // Force the same clamped identity map normalize_fdm_1 derives for the engine proper.
+    if (device_resolves_filament_mapping(out)) {
+        const ConfigOptionFloats* nozzle_diams   = out.option<ConfigOptionFloats>("nozzle_diameter");
+        const size_t              extruder_count = nozzle_diams ? nozzle_diams->size() : 0;
+        int master_extruder_id = 1;
+        if (auto* me = out.option<ConfigOptionInt>("master_extruder_id"))
+            master_extruder_id = me->value;
+        const std::vector<int> extruder_of_filament =
+            non_bbl_identity_filament_extruder_map(num_filaments, extruder_count, master_extruder_id - 1);
+        if (auto* map = out.option<ConfigOptionInts>("filament_map", true)) {
+            map->values.resize(num_filaments);
+            for (size_t i = 0; i < num_filaments; ++i)
+                map->values[i] = extruder_of_filament[i] + 1;
+        }
+    }
+
     auto* extruder_diameter = dynamic_cast<const ConfigOptionFloats*>(out.option("nozzle_diameter"));
     // Collect the "compatible_printers_condition" and "inherits" values over all presets (print, filaments, printers) into a single vector.
     std::vector<std::string> compatible_printers_condition;

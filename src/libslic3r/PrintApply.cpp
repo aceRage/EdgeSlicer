@@ -1,3 +1,4 @@
+#include "FilamentCompaction.hpp"
 #include "MixedFilament.hpp"
 #include "Model.hpp"
 #include "Print.hpp"
@@ -1357,11 +1358,26 @@ static bool same_layer_pointillism_enabled(const MixedFilamentManager &mixed_mgr
     return false;
 }
 
-Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_config)
+Print::ApplyStatus Print::apply(const Model &model_in, DynamicPrintConfig new_full_config)
 {
 #ifdef _DEBUG
-    check_model_ids_validity(model);
+    check_model_ids_validity(model_in);
 #endif /* _DEBUG */
+
+    // Printers whose firmware only accepts T0..T(tool_count-1) need the plate's filaments
+    // renumbered to a dense range before anything else looks at them. Inert when the printer
+    // does not resolve mapping, and when the plate already uses a dense prefix.
+    const size_t nozzle_count = new_full_config.option<ConfigOptionFloats>("nozzle_diameter", true)->values.size();
+    m_filament_compaction     = device_resolves_filament_mapping(new_full_config)
+                                    ? build_filament_compaction(model_in, new_full_config, filament_namespace_size(new_full_config, nozzle_count))
+                                    : FilamentCompaction();
+    const bool compacting = !m_filament_compaction.slot_of_tool.empty();
+    if (compacting) {
+        m_compacted_model = model_in;
+        apply_filament_compaction(m_compacted_model, model_in, m_filament_compaction);
+        apply_filament_compaction(new_full_config, m_filament_compaction);
+    }
+    const Model &model = compacting ? m_compacted_model : model_in;
 
     //BBS: add more logs
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(", Line %1%: enter")%__LINE__;

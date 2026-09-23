@@ -1634,6 +1634,15 @@ MultiNozzleUtils::LayeredNozzleGroupResult ToolOrdering::get_recommended_filamen
     size_t filament_nums = print_config.filament_colour.values.size();
     size_t extruder_nums = print_config.nozzle_diameter.values.size();
     auto used_filaments = collect_sorted_used_filaments(layer_filaments);
+    int master_extruder_id_0based = print_config.master_extruder_id.value - 1;
+    // Device-owned mapping: the printer routes logical tools itself. Keep the identity /
+    // master-extruder fallback so grouping cannot bind filaments to a slicer-side map.
+    if (device_resolves_filament_mapping(print->full_print_config()) && !print->is_BBL_printer()) {
+        auto nozzle_list_early = build_default_nozzle_list(print_config, extruder_nums);
+        std::vector<int> identity = non_bbl_identity_filament_extruder_map(filament_nums, extruder_nums, master_extruder_id_0based);
+        auto result_opt = LayeredNozzleGroupResult::create(identity, nozzle_list_early, used_filaments);
+        return result_opt ? *result_opt : LayeredNozzleGroupResult();
+    }
     bool has_multiple_nozzle = std::any_of(print_config.extruder_max_nozzle_count.values.begin(), print_config.extruder_max_nozzle_count.values.end(),
                                            [](int v) { return v > 1; });
     bool has_multiple_extruder = extruder_nums > 1;

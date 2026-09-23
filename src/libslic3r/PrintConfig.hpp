@@ -398,6 +398,15 @@ enum FilamentMapMode {
     fmmDefault
 };
 
+// How a printer that owns filament mapping natively receives the map. The vendor's
+// declaration only; a Klipper filament changer the printer reports at sync time is cached in
+// device_changer (reported_changer_of) and overrides this for delivery.
+enum class FilamentMappingProtocol {
+    fmpNone = 0,
+    fmpSnapmaker,
+    fmpWonderMaker,
+};
+
 enum ExtruderType {
     etDirectDrive = 0,
     etBowden,
@@ -629,6 +638,7 @@ CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(CounterboreHoleBridgingOption)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(PrintHostType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(AuthorizationType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(WipeTowerWallType)
+CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(FilamentMappingProtocol)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(PerimeterGeneratorType)
 // Snapmaker: flow-variant
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(FilamentVolumeType)
@@ -1514,6 +1524,10 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionStrings,             filament_start_gcode))
     ((ConfigOptionBool,                single_extruder_multi_material))
     ((ConfigOptionBool,                manual_filament_change))
+    ((ConfigOptionBool,                enable_filament_mapping))
+    ((ConfigOptionInt,                 device_tool_count))
+    ((ConfigOptionEnum<FilamentMappingProtocol>, filament_mapping_protocol))
+    ((ConfigOptionString,              device_changer))
     ((ConfigOptionBool,                single_extruder_multi_material_priming))
     ((ConfigOptionEnum<ToolChangeOrderingType>, toolchange_ordering))
     ((ConfigOptionString,              toolchange_cyclic_order))
@@ -1625,6 +1639,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionEnum<PrimeVolumeMode>, prime_volume_mode))
     ((ConfigOptionEnum<FilamentMapMode>, filament_map_mode))
     ((ConfigOptionInts,                filament_map))
+    ((ConfigOptionInts,                filament_physical_map)) // per project filament, the id of the physical filament it resolves to (0 = unassigned)
     ((ConfigOptionInts,                filament_map_2))
     ((ConfigOptionInts,                filament_volume_map))
     ((ConfigOptionInts,                filament_nozzle_map))
@@ -1777,6 +1792,7 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionFloat,              local_z_wipe_tower_purge_lines))
     ((ConfigOptionFloats,             flush_volumes_matrix))
     ((ConfigOptionFloats,             flush_volumes_vector))
+    ((ConfigOptionBool,               flush_volumes_synced))
 
     // Orca: mmu support
     ((ConfigOptionFloat,              wipe_tower_cone_angle))
@@ -2267,6 +2283,42 @@ bool is_identical_multi_extruder_printer(const ConfigBase &cfg);
 // a flush, which leaves the executable G-code byte-identical.
 std::vector<int> identity_filament_map(const ConfigBase &cfg, size_t filament_count);
 
+// The printer's configured filament_mapping_protocol (fmpNone if the option is absent).
+FilamentMappingProtocol filament_mapping_protocol_of(const ConfigBase& printer_config);
+
+// The Klipper filament changer the printer reported at the last sync ("afc", "happy_hare",
+// "openace"), "" when none. A cached fact, not a setting: see seed_printer_from_report.
+std::string reported_changer_of(const ConfigBase& printer_config);
+
+// Record what the printer reported so offline slicing runs against the last known
+// printer: the changer into device_changer (a different changer replaces it; "" never clears
+// it) and the registered T<n> count into device_tool_count (0 = not probed, leaves the cache).
+// The vendor's protocol is never touched. Returns true when the config changed.
+bool seed_printer_from_report(DynamicPrintConfig& printer_config, const std::string& reported_dialect, int reported_tool_count);
+
+// True when the PRINTER resolves filament->tool assignment rather than the slicer: a vendor
+// protocol, a reported changer, or the printer-agnostic enable_filament_mapping opt-in.
+bool device_resolves_filament_mapping(const ConfigBase& printer_config);
+
+// The size of the printer's T<n> namespace: what a sync counted (device_tool_count), else the
+// vendor's constant (the U1's 32-entry extruder_map_table), else the nozzle count.
+size_t filament_namespace_size(const ConfigBase& printer_config, size_t nozzle_count);
+
+// True when filament-count decoupling / physical-filament inventory UI should be offered.
+bool physical_filament_features_enabled(const ConfigBase& printer_config);
+
+// True when the printer's filament count is not tied to its nozzle count: SEMM or a printer
+// whose device resolves the filament->tool mapping.
+bool filament_count_decoupled_from_nozzles(const ConfigBase& printer_config);
+
+// The identity/master-extruder-fallback filament->extruder assignment used by non-BBL
+// multi-extruder printers. Returns one 0-based extruder index per filament.
+std::vector<int> non_bbl_identity_filament_extruder_map(size_t filament_count, size_t extruder_count, int master_extruder_id_0based);
+
+// Normalize a per-plate filament_map loaded from a 3mf: pad (never truncate) short maps with 1,
+// clamp every entry into [1, nozzle_count], and leave an empty map empty.
+void normalize_plate_filament_map(std::vector<int>& values, size_t filament_count, size_t nozzle_count);
+
 Points get_bed_shape(const DynamicPrintConfig &cfg);
 Points get_bed_shape(const PrintConfig &cfg);
 Points get_bed_shape(const SLAPrinterConfig &cfg);
@@ -2300,6 +2352,13 @@ public:
     // Following method clears the config and increases its timestamp, so the deleted
     // state is considered changed from perspective of the undo/redo stack.
     void         reset() { m_data.clear(); touch(); }
+
+    // The filament-compaction transform rebuilds a DERIVED copy of a model config
+    // deterministically from a source on every Print::apply. Mirroring the source's
+    // timestamp onto the derived copy keys change detection to the source's edit
+    // history; without it every rebuild stamps a fresh timestamp and re-flags the
+    // copy as changed, silently invalidating a finished slice on the very next apply.
+    void         mirror_timestamp_of(const ModelConfig &rhs) { m_timestamp = rhs.m_timestamp; }
 
     void         assign_config(const ModelConfig &rhs) {
         if (m_timestamp != rhs.m_timestamp) {

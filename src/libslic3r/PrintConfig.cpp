@@ -489,6 +489,13 @@ static t_config_enum_values s_keys_map_FilamentMapMode {
 };
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(FilamentMapMode)
 
+static t_config_enum_values s_keys_map_FilamentMappingProtocol {
+    { "none",        int(FilamentMappingProtocol::fmpNone) },
+    { "snapmaker",   int(FilamentMappingProtocol::fmpSnapmaker) },
+    { "wondermaker", int(FilamentMappingProtocol::fmpWonderMaker) }
+};
+CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(FilamentMappingProtocol)
+
 static t_config_enum_values s_keys_map_PrimeVolumeMode {
     { "Default", int(PrimeVolumeMode::pvmDefault) },
     { "Saving",  int(PrimeVolumeMode::pvmSaving) },
@@ -3681,6 +3688,14 @@ void PrintConfigDef::init_fff_params()
     def->mode = comDevelop;
     def->set_default_value(new ConfigOptionInts{ 1 });
 
+    // Per project filament, the stable id of the physical filament it resolves to (0 =
+    // unassigned). A genuine per-plate user input, not engine-derived state.
+    def = this->add("filament_physical_map", coInts);
+    def->label = "Filament map to physical filament";
+    def->tooltip = "Filament map to physical filament.";
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionInts{});
+
     def = this->add("filament_map_2", coInts);
     def->label = "Filament map plus for multi nozzle";
     def->tooltip = "Filament map to the index identified by extruder and nozzle_volume_type";
@@ -6416,6 +6431,45 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionBool(true));
 
+    def = this->add("enable_filament_mapping", coBool);
+    def->label = L("Decouple filaments from tools");
+    def->tooltip = L("Allow the project to use more filament profiles than the printer has tools. "
+                     "The G-code addresses one logical tool per filament and the printer's own "
+                     "firmware decides which physical tool prints each of them. Only for multi-tool "
+                     "printers without single-extruder multi-material; printers with a native "
+                     "filament-mapping protocol have this behaviour already.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("filament_mapping_protocol", coEnum);
+    def->label = L("Filament mapping protocol");
+    def->tooltip = L("The printer's native filament-to-tool mapping protocol. When set, the slicer "
+                     "slices in logical tool space and sends the mapping to the printer at print time "
+                     "instead of baking it into the G-code.");
+    def->enum_keys_map = &ConfigOptionEnum<FilamentMappingProtocol>::get_enum_values();
+    def->enum_values.emplace_back("none");
+    def->enum_values.emplace_back("snapmaker");
+    def->enum_values.emplace_back("wondermaker");
+    def->enum_labels.emplace_back(L("None"));
+    def->enum_labels.emplace_back(L("Snapmaker"));
+    def->enum_labels.emplace_back(L("WonderMaker"));
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionEnum<FilamentMappingProtocol>(FilamentMappingProtocol::fmpNone));
+
+    def = this->add("device_tool_count", coInt);
+    def->label = L("Logical tools reported by the printer");
+    def->tooltip = L("How many logical tools (T0..Tn) the printer's firmware registers, as read from the printer "
+                     "by the materials sync. 0 until the printer has been synced.");
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionInt(0));
+
+    def = this->add("device_changer", coString);
+    def->label = L("Filament changer reported by the printer");
+    def->tooltip = L("The Klipper filament changer the materials sync found on the printer (AFC, Happy Hare, openACE). "
+                     "Written by the sync, not by hand.");
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionString(""));
+
     def = this->add("manual_filament_change", coBool);
     def->label = L("Manual Filament Change");
     def->tooltip = L("Enable this option to omit the custom Change filament G-code only at the beginning of the print. "
@@ -7405,6 +7459,12 @@ void PrintConfigDef::init_fff_params()
                                                     280.f,   0.f, 280.f, 280.f,
                                                     280.f, 280.f,   0.f, 280.f,
                                                     280.f, 280.f, 280.f,   0.f });
+
+    def = this->add("flush_volumes_synced", coBool);
+    def->label = L("Same flushing volumes for all extruders");
+    def->tooltip = L("Edit one flushing-volume matrix and apply it to every extruder. Off: each extruder keeps its own matrix.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(true));
 
     def = this->add("flush_multiplier", coFloat);
     def->label = L("Flush multiplier");
@@ -9340,6 +9400,45 @@ void DynamicPrintConfig::normalize_fdm_1()
         // Resolution will be above 1um.
         opt_gcode_resolution->value = std::max(opt_gcode_resolution->value, 0.001);
 
+    // Device-resolved mapping means the printer routes logical tools itself, so the slicer
+    // slices in pure logical space and keeps no mapping of its own.
+    if (device_resolves_filament_mapping(*this)) {
+        const ConfigOptionStrings* colours = this->option<ConfigOptionStrings>("filament_colour");
+        const size_t filament_count = colours ? colours->size() : 0;
+        const ConfigOptionFloats* nozzle_diams   = this->option<ConfigOptionFloats>("nozzle_diameter");
+        const size_t              extruder_count = nozzle_diams ? nozzle_diams->size() : 0;
+        int master_extruder_id = 1;
+        if (auto* me = this->option<ConfigOptionInt>("master_extruder_id"))
+            master_extruder_id = me->value;
+        const std::vector<int> extruder_of_filament =
+            non_bbl_identity_filament_extruder_map(filament_count, extruder_count, master_extruder_id - 1);
+        const ConfigOptionEnumsGeneric* nozzle_volume_types = this->option<ConfigOptionEnumsGeneric>("nozzle_volume_type");
+        auto volume_type_for_extruder = [&](size_t extruder_0based) -> int {
+            return (nozzle_volume_types && extruder_0based < nozzle_volume_types->size())
+                       ? nozzle_volume_types->values[extruder_0based]
+                       : (int) nvtStandard;
+        };
+        if (auto* map = this->option<ConfigOptionInts>("filament_map"); map != nullptr && filament_count > 0) {
+            map->values.resize(filament_count);
+            for (size_t i = 0; i < filament_count; ++i)
+                map->values[i] = extruder_of_filament[i] + 1;
+        }
+        if (auto* vmap = this->option<ConfigOptionInts>("filament_volume_map"); vmap != nullptr && filament_count > 0) {
+            vmap->values.resize(filament_count);
+            for (size_t i = 0; i < filament_count; ++i)
+                vmap->values[i] = volume_type_for_extruder((size_t) extruder_of_filament[i]);
+        }
+        if (auto* nmap = this->option<ConfigOptionInts>("filament_nozzle_map"); nmap != nullptr && filament_count > 0) {
+            nmap->values.resize(filament_count);
+            for (size_t i = 0; i < filament_count; ++i)
+                nmap->values[i] = extruder_of_filament[i];
+        }
+        if (auto* pmap = this->option<ConfigOptionInts>("filament_physical_map"))
+            pmap->values.clear();
+        if (auto* mode = this->option<ConfigOptionEnum<FilamentMapMode>>("filament_map_mode"))
+            mode->value = FilamentMapMode::fmmAutoForFlush;
+    }
+
     return;
 }
 
@@ -10981,6 +11080,95 @@ std::vector<int> identity_filament_map(const ConfigBase &cfg, size_t filament_co
     for (size_t i = 0; i < filament_count; ++i)
         map.push_back(int(i % extruders) + 1); // 1-based, wrapping past the last toolhead
     return map;
+}
+
+static bool mapping_option_enabled(const ConfigBase& printer_config, const char* key)
+{
+    const ConfigOption* opt = printer_config.option(key);
+    if (opt == nullptr || !opt->getBool())
+        return false;
+    const ConfigOptionFloats* nozzle_diameter = printer_config.option<ConfigOptionFloats>("nozzle_diameter");
+    if (nozzle_diameter == nullptr || nozzle_diameter->size() < 2)
+        return false;
+    const ConfigOption* semm = printer_config.option("single_extruder_multi_material");
+    return semm == nullptr || !semm->getBool();
+}
+
+FilamentMappingProtocol filament_mapping_protocol_of(const ConfigBase& printer_config)
+{
+    const ConfigOption* opt = printer_config.option("filament_mapping_protocol");
+    return opt == nullptr ? FilamentMappingProtocol::fmpNone : (FilamentMappingProtocol) opt->getInt();
+}
+
+std::string reported_changer_of(const ConfigBase& printer_config)
+{
+    const ConfigOption* opt = printer_config.option("device_changer");
+    return opt != nullptr ? opt->serialize() : std::string();
+}
+
+bool seed_printer_from_report(DynamicPrintConfig& printer_config, const std::string& reported_dialect, int reported_tool_count)
+{
+    bool changed = false;
+    if (!reported_dialect.empty() && reported_changer_of(printer_config) != reported_dialect) {
+        printer_config.set_key_value("device_changer", new ConfigOptionString(reported_dialect));
+        changed = true;
+    }
+    if (reported_tool_count > 0 && printer_config.opt_int("device_tool_count") != reported_tool_count) {
+        printer_config.set_key_value("device_tool_count", new ConfigOptionInt(reported_tool_count));
+        changed = true;
+    }
+    return changed;
+}
+
+bool device_resolves_filament_mapping(const ConfigBase& printer_config)
+{
+    return filament_mapping_protocol_of(printer_config) != FilamentMappingProtocol::fmpNone ||
+           !reported_changer_of(printer_config).empty() ||
+           mapping_option_enabled(printer_config, "enable_filament_mapping");
+}
+
+size_t filament_namespace_size(const ConfigBase& printer_config, size_t nozzle_count)
+{
+    if (const ConfigOption* probed = printer_config.option("device_tool_count"); probed != nullptr && probed->getInt() > 0)
+        return size_t(probed->getInt());
+    switch (filament_mapping_protocol_of(printer_config)) {
+    case FilamentMappingProtocol::fmpSnapmaker:
+        return 32;
+    case FilamentMappingProtocol::fmpWonderMaker:
+    case FilamentMappingProtocol::fmpNone:
+        break;
+    }
+    return nozzle_count;
+}
+
+bool physical_filament_features_enabled(const ConfigBase& printer_config)
+{
+    return device_resolves_filament_mapping(printer_config);
+}
+
+bool filament_count_decoupled_from_nozzles(const ConfigBase& printer_config)
+{
+    const ConfigOption* semm = printer_config.option("single_extruder_multi_material");
+    return (semm != nullptr && semm->getBool()) || physical_filament_features_enabled(printer_config);
+}
+
+std::vector<int> non_bbl_identity_filament_extruder_map(size_t filament_count, size_t extruder_count, int master_extruder_id_0based)
+{
+    master_extruder_id_0based = std::max(0, master_extruder_id_0based);
+    std::vector<int> ret(filament_count, master_extruder_id_0based);
+    for (size_t i = 0; i < filament_count && i < extruder_count; ++i)
+        ret[i] = (int) i;
+    return ret;
+}
+
+void normalize_plate_filament_map(std::vector<int>& values, size_t filament_count, size_t nozzle_count)
+{
+    if (values.empty())
+        return;
+    if (values.size() < filament_count)
+        values.resize(filament_count, 1);
+    for (int& v : values)
+        v = std::clamp(v, 1, std::max((int) nozzle_count, 1));
 }
 } // namespace Slic3r
 

@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <map>
 #include <sstream>
 
 using namespace Slic3r;
@@ -667,4 +668,87 @@ TEST_CASE("CLI --align-to-y-axis is a misc bool whose default must stay implicit
         CHECK_FALSE(config.opt_bool("align_to_y_axis"));
         CHECK(std::find(keys.begin(), keys.end(), "align_to_y_axis") == keys.end());
     }
+}
+
+TEST_CASE("A json config with one bad value still loads every other key", "[Config]")
+{
+    const boost::filesystem::path path =
+        boost::filesystem::temp_directory_path() / boost::filesystem::unique_path("cfg-bad-%%%%%%%%.json");
+    {
+        boost::nowide::ofstream out(path.string());
+        out << R"({
+            "bed_mesh_max": "290",
+            "filament_colour": ["#112233", "#445566"],
+            "layer_height": "0.28"
+        })";
+    }
+
+    DynamicPrintConfig                 config;
+    ConfigSubstitutionContext          substitutions(ForwardCompatibilitySubstitutionRule::Enable);
+    std::map<std::string, std::string> key_values;
+    std::string                        reason;
+    const int ret = config.load_from_json(path.string(), substitutions, true, key_values, reason);
+    boost::filesystem::remove(path);
+
+    CHECK(ret == 0);
+    CHECK(config.option("bed_mesh_max") == nullptr);
+    REQUIRE(config.option<ConfigOptionStrings>("filament_colour") != nullptr);
+    CHECK(config.option<ConfigOptionStrings>("filament_colour")->values ==
+          std::vector<std::string>{"#112233", "#445566"});
+    REQUIRE(config.option("layer_height") != nullptr);
+    CHECK(config.option<ConfigOptionFloat>("layer_height")->value == Catch::Approx(0.28));
+}
+
+TEST_CASE("A reported changer is cached beside the vendor protocol, never over it", "[Config]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    CHECK(reported_changer_of(config).empty());
+    CHECK_FALSE(device_resolves_filament_mapping(config));
+
+    CHECK(seed_printer_from_report(config, "afc", 0));
+    CHECK(reported_changer_of(config) == "afc");
+    CHECK(filament_mapping_protocol_of(config) == FilamentMappingProtocol::fmpNone);
+    CHECK(device_resolves_filament_mapping(config));
+    CHECK_FALSE(seed_printer_from_report(config, "afc", 0));
+    CHECK(seed_printer_from_report(config, "openace", 0));
+    CHECK_FALSE(seed_printer_from_report(config, "", 0));
+    CHECK(reported_changer_of(config) == "openace");
+
+    DynamicPrintConfig vendor = DynamicPrintConfig::full_print_config();
+    vendor.set_deserialize_strict({ { "filament_mapping_protocol", "wondermaker" } });
+    CHECK(seed_printer_from_report(vendor, "openace", 32));
+    CHECK(filament_mapping_protocol_of(vendor) == FilamentMappingProtocol::fmpWonderMaker);
+    CHECK(reported_changer_of(vendor) == "openace");
+    CHECK(vendor.opt_int("device_tool_count") == 32);
+}
+
+TEST_CASE("The filament namespace is the probed tool count, else the vendor's constant", "[Config]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    CHECK(filament_namespace_size(config, 4) == 4);
+    config.set_deserialize_strict({ { "filament_mapping_protocol", "snapmaker" } });
+    CHECK(filament_namespace_size(config, 4) == 32);
+    config.set_key_value("device_tool_count", new ConfigOptionInt(28));
+    CHECK(filament_namespace_size(config, 4) == 28);
+    config.set_deserialize_strict({ { "filament_mapping_protocol", "wondermaker" } });
+    config.set_key_value("device_tool_count", new ConfigOptionInt(0));
+    CHECK(filament_namespace_size(config, 4) == 4);
+    CHECK(seed_printer_from_report(config, "", 4));
+    CHECK_FALSE(seed_printer_from_report(config, "", 0));
+    CHECK(filament_namespace_size(config, 4) == 4);
+}
+
+TEST_CASE("klipper_changer is no longer a protocol value", "[Config]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    ConfigSubstitutionContext ctx(ForwardCompatibilitySubstitutionRule::Enable);
+    config.set_deserialize({ { "filament_mapping_protocol", "klipper_changer" } }, ctx);
+    CHECK(filament_mapping_protocol_of(config) == FilamentMappingProtocol::fmpNone);
+    CHECK(ctx.substitutions.size() == 1);
+}
+
+TEST_CASE("flush_volumes_synced is a print option defaulting to one matrix for every extruder", "[Config]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    CHECK(config.opt_bool("flush_volumes_synced"));
 }

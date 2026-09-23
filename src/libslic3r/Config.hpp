@@ -652,7 +652,9 @@ public:
     static double 			nil_value() { return std::numeric_limits<double>::quiet_NaN(); }
     // A scalar is nil, or all values of a vector are nil.
     bool 					is_nil() const override { for (auto v : this->values) if (! std::isnan(v)) return false; return true; }
-    bool 					is_nil(size_t idx) const override { return std::isnan(this->values[idx]); }
+    // Clamp like get_at(): per-filament options default to a single element, and probing them
+    // with a filament id must answer for the value get_at() would return, not read past the end.
+    bool 					is_nil(size_t idx) const override { return this->values.empty() || std::isnan(idx < this->values.size() ? this->values[idx] : this->values.front()); }
 
     std::string serialize() const override
     {
@@ -827,7 +829,8 @@ public:
     static int	 			nil_value() { return std::numeric_limits<int>::max(); }
     // A scalar is nil, or all values of a vector are nil.
     bool 					is_nil() const override { for (auto v : this->values) if (v != nil_value()) return false; return true; }
-    bool 					is_nil(size_t idx) const override { return this->values[idx] == nil_value(); }
+    // Clamp like get_at() -- see ConfigOptionFloatsTempl::is_nil(idx).
+    bool 					is_nil(size_t idx) const override { return this->values.empty() || (idx < this->values.size() ? this->values[idx] : this->values.front()) == nil_value(); }
 
     std::string serialize() const override
     {
@@ -1151,7 +1154,8 @@ public:
     static FloatOrPercent   nil_value() { return { std::numeric_limits<double>::quiet_NaN(), false }; }
     // A scalar is nil, or all values of a vector are nil.
     bool                    is_nil() const override { for (auto v : this->values) if (! std::isnan(v.value)) return false; return true; }
-    bool                    is_nil(size_t idx) const override { return std::isnan(this->values[idx].value); }
+    // Clamp like get_at() -- see ConfigOptionFloatsTempl::is_nil(idx).
+    bool                    is_nil(size_t idx) const override { return this->values.empty() || std::isnan((idx < this->values.size() ? this->values[idx] : this->values.front()).value); }
 
     std::string serialize() const override
     {
@@ -1580,7 +1584,8 @@ public:
     static unsigned char	nil_value() { return std::numeric_limits<unsigned char>::max(); }
     // A scalar is nil, or all values of a vector are nil.
     bool 					is_nil() const override { for (auto v : this->values) if (v != nil_value()) return false; return true; }
-    bool 					is_nil(size_t idx) const override { return this->values[idx] == nil_value(); }
+    // Clamp like get_at() -- see ConfigOptionFloatsTempl::is_nil(idx).
+    bool 					is_nil(size_t idx) const override { return this->values.empty() || (idx < this->values.size() ? this->values[idx] : this->values.front()) == nil_value(); }
 
     bool& get_at(size_t i) {
         assert(! this->values.empty());
