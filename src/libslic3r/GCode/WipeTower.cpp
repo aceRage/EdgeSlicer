@@ -823,6 +823,14 @@ WipeTower::WipeTower(const PrintConfig& config, int plate_idx, Vec3d plate_origi
     if (m_first_layer_speed == 0.f) // just to make sure autospeed doesn't break it.
         m_first_layer_speed = default_speed / 2.f;
 
+    // prime_tower_brim_width -1 is Bambu Studio's "auto" brim, which the H2D/H2C/X2D/H2S/P2S/A2L
+    // process presets ship. Bambu Studio resolves it from the tower height (plan_tower_new), and so
+    // does estimate_wipe_tower_footprint() for the plate preview and the clearance checks. This
+    // generator never did: finish_layer() turned -1 into zero brim loops, so those printers got a
+    // tower with no brim at all while the preview promised one.
+    if (m_wipe_tower_brim_width < 0.f)
+        m_wipe_tower_brim_width = get_auto_brim_by_height(m_wipe_tower_height);
+
     // If this is a single extruder MM printer, we will use all the SE-specific config values.
     // Otherwise, the defaults will be used to turn off the SE stuff.
     // BBS: remove useless config
@@ -1526,7 +1534,10 @@ WipeTower::ToolChangeResult WipeTower::finish_layer(bool extrude_perimeter, bool
         box_coordinates box = wt_box;
         for (size_t i = 0; i < loops_num; ++i) {
             box.expand(spacing);
-            writer.rectangle(box);
+            // Explicit feedrate: on a layer whose wall was printed by the toolchange (extrude_perimeter
+            // false, e.g. the first layer of a no-sparse tower) the last F in the writer is a travel, and
+            // the brim would inherit it. Where the wall was just printed this emits no F at all.
+            writer.rectangle(box, feedrate);
         }
 
         if (first_layer) {
