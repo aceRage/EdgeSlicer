@@ -89,7 +89,11 @@ enum PrintDialogStatus {
     PrintStatusNotSupportedPrintAll,
     PrintStatusBlankPlate,
     PrintStatusUnsupportedPrinter,
-    PrintStatusTimelapseWarning
+    PrintStatusTimelapseWarning,
+    // Two-extruder Bambu jobs: waiting for / refused by the printer's get_auto_nozzle_mapping answer
+    // (BambuStudio PrintStatusRackNozzleMappingWaiting / PrintStatusRackNozzleMappingError).
+    PrintStatusNozzleMappingWaiting,
+    PrintStatusNozzleMappingFailed
 };
 
 class Material
@@ -205,6 +209,12 @@ private:
     std::string                         m_print_info;
     wxString                            m_current_project_name;
     PrintDialogStatus                   m_print_status { PrintStatusInit };
+    /* Nozzle mapping handshake the dialog runs before enabling Send (two-extruder jobs). */
+    std::string                         m_nm_request;   // request last published
+    std::string                         m_nm_dev;       // printer it went to
+    std::string                         m_nm_seq;       // its sequence id
+    long long                           m_nm_sent_ms{ 0 };
+    bool                                m_nm_logged_result{ false };
     wxColour                            m_colour_def_color{wxColour(255, 255, 255)};
     wxColour                            m_colour_bold_color{wxColour(38, 46, 48)};
     StateColor                          m_btn_bg_enable;
@@ -399,6 +409,14 @@ public:
      * equivalent. Fills `request` with the get_auto_nozzle_mapping command JSON; empty when
      * the handshake does not apply (single-nozzle, no slicing data, left-nozzle-only job). */
     bool build_nozzle_mapping_request(std::string& request);
+    /* 0 = not needed / answered with a mapping, 1 = waiting for the answer, 2 = the printer refused
+     * (reason filled), 3 = no answer within the timeout (sent anyway, as before). Publishes the
+     * request once per printer and request content, like BambuStudio's
+     * CheckErrorSyncNozzleMappingResultV0 (SelectMachine.cpp:6111-6192). */
+    int  check_nozzle_mapping(MachineObject* obj_, wxString& reason);
+    /* The plate's confirmed trays (pre-slice confirmation) as the initial AMS mapping, where each
+     * tray is still loaded and feeds the extruder the plate was sliced for. */
+    void apply_confirmed_trays(MachineObject* obj_);
 
     std::string get_print_status_info(PrintDialogStatus status);
 

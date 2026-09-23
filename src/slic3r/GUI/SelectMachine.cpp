@@ -6,6 +6,9 @@
 #include "libslic3r/Color.hpp"
 #include "libslic3r/MultiNozzleUtils.hpp"
 #include "libslic3r/BambuExtruderMap.hpp"
+#include "libslic3r/BambuNozzleMappingRequest.hpp"
+#include "DualNozzleState.hpp"
+#include <chrono>
 #include "libslic3r/GCode/GCodeProcessor.hpp"
 #include "GUI.hpp"
 #include "GUI_App.hpp"
@@ -1147,6 +1150,7 @@ bool SelectMachineDialog::do_ams_mapping(MachineObject *obj_)
     } else {
         result = obj_->ams_filament_mapping(m_filaments, m_ams_mapping_result);
     }
+    apply_confirmed_trays(obj_);
     for (const auto& r : m_ams_mapping_result)
         BOOST_LOG_TRIVIAL(warning) << "[Ultra P10] map F(" << (r.id+1) << ") -> tray " << (r.tray_id+1)
                                    << " ams_id=" << r.ams_id << " slot_id=" << r.slot_id;
@@ -1527,107 +1531,130 @@ bool SelectMachineDialog::build_nozzle_mapping_request(std::string& request)
         return true;
     }
 
-    // V0: per-filament table. Everything below follows the upstream request field for field;
-    // data the fork does not track (per-nozzle wear, filament loaded in a nozzle) is omitted
-    // rather than invented.
+    // V0: per-filament table, built by BambuNozzleMapping::build_v0_request (field for field
+    // BambuStudio's CtrlGetAutoNozzleMappingV0, DevMappingNozzle.cpp:38-179). nozzle_info lists
+    // the nozzles the printer reports - both extruder nozzles and the H2C rack (pos 0x10 + n) -
+    // and falls back to the preset's two nozzles when the printer has not reported any.
+    BambuNozzleMapping::RequestInput in;
+    in.calibration              = m_checkbox_list["flow_cali"] && m_checkbox_list["flow_cali"]->GetValue() ? 1 : 0;
+    in.extrude_cali_manual_mode = 1; // no PA-value switch in this fork: automatic, as the payload sends
+    if (gcode_result)
+        for (auto f : gcode_result->filament_change_sequence)
+            in.filament_change_sequence.push_back(int(f));
+    for (const auto& item : m_ams_mapping_result)
+        in.mapped.push_back({ item.id, item.ams_id, item.slot_id, item.tray_id, item.filament_id, item.color });
+    if (group_result)
+        for (const auto& fila : m_ams_mapping_result)
+            for (const auto& nz : group_result->get_nozzles_for_filament(fila.id))
+                in.filament_nozzles.push_back({ fila.id, nz.extruder_id, nz.group_id, nz.diameter, nz.volume_type });
+    in.physical_extruder_map = printer_physical_extruder_map();
+    in.preset_diameters      = opt_nozzle_diameters->values;
+    if (auto* nvt = preset_bundle->project_config.option<ConfigOptionEnumsGeneric>("nozzle_volume_type"))
+        for (int v : nvt->values)
+            in.preset_volumes.push_back(NozzleVolumeType(v));
+    if (DeviceManager* dev = wxGetApp().getDeviceManager())
+        if (MachineObject* obj = dev->get_my_machine(m_printer_last_select))
+            in.printer_nozzles = DualNozzle::printer_state(obj).nozzles;
+    (void) kLogicLeftExtruder;
 
-    // flow calibration option (1/0; upstream's tri-state switch can also say 2 = auto).
-    const int flow_cali_opt = m_checkbox_list["flow_cali"] && m_checkbox_list["flow_cali"]->GetValue() ? 1 : 0;
-    command_jj["print"]["calibration"] = flow_cali_opt;
-    // No PA-value switch in this fork: automatic calibration (1), same value the payload sends.
-    command_jj["print"]["extrude_cali_manual_mode"] = 1;
-
-    // filament sequence: first occurrence index per 1-based filament id, -1 for unused ids.
-    // (nlohmann objects key on strings; use std::to_string consistently.)
-    json filament_seq_jj;
-    int  max_fila_id = 0;
-    std::set<int> seen;
-    if (gcode_result) {
-        for (int idx = 0; idx < (int) gcode_result->filament_change_sequence.size(); idx++) {
-            int fila_id = (int) gcode_result->filament_change_sequence[idx];
-            if (seen.insert(fila_id).second) {
-                filament_seq_jj[std::to_string(fila_id + 1)] = idx;
-                max_fila_id = std::max(max_fila_id, fila_id + 1);
-            }
-        }
-    }
-    for (int fila_id = 0; fila_id <= max_fila_id; fila_id++) {
-        const std::string key = std::to_string(fila_id);
-        if (!filament_seq_jj.contains(key) || filament_seq_jj[key].is_null())
-            filament_seq_jj[key] = -1;
-    }
-    command_jj["print"]["filament_seq"] = filament_seq_jj;
-
-    // ams mapping: 33 slots, packed ams_id << 8 | slot_id at the 1-based filament index.
-    std::vector<int> ams_mapping_vec(33, 0xFFFF);
-    for (const auto& item : m_ams_mapping_result) {
-        try {
-            int ams_id  = std::stoi(item.ams_id);
-            int slot_id = item.slot_id.empty() ? 0 : std::stoi(item.slot_id);
-            if (item.id + 1 >= 0 && item.id + 1 < (int) ams_mapping_vec.size())
-                ams_mapping_vec[item.id + 1] = (ams_id << 8) | slot_id;
-        } catch (...) {
-            if (item.id + 1 >= 0 && item.id + 1 < (int) ams_mapping_vec.size())
-                ams_mapping_vec[item.id + 1] = item.tray_id;
-        }
-    }
-    command_jj["print"]["ams_mapping"] = ams_mapping_vec;
-
-    // fila_info: one entry per (filament, logical nozzle) pair the slicing result routes it to.
-    auto diameter_str = [](double d) {
-        char buf[16];
-        snprintf(buf, sizeof buf, "%.2f", d);
-        return std::string(buf);
-    };
-    auto flow_str = [](NozzleVolumeType vt) {
-        return vt == NozzleVolumeType::nvtHighFlow ? "High Flow" : "Standard";
-    };
-
-    json filament_info_jj;
-    if (group_result) {
-        for (const auto& fila : m_ams_mapping_result) {
-            const auto nozzle_list = group_result->get_nozzles_for_filament(fila.id);
-            if (nozzle_list.empty())
-                continue;
-            for (const auto& nozzle_info : nozzle_list) {
-                json fila_item_jj;
-                fila_item_jj["id"]    = fila.id + 1;
-                // Upstream: 1 = left logic extruder, 2 = right.
-                fila_item_jj["direction"] = nozzle_info.extruder_id == kLogicLeftExtruder ? 1 : 2;
-                fila_item_jj["group"]     = nozzle_info.group_id;
-                fila_item_jj["nozzle_d"]  = nozzle_info.diameter.empty()
-                                                ? diameter_str(opt_nozzle_diameters->get_at(
-                                                      nozzle_info.extruder_id == kLogicLeftExtruder ? 0 : 1))
-                                                : nozzle_info.diameter;
-                fila_item_jj["nozzle_v"]  = flow_str(nozzle_info.volume_type);
-                fila_item_jj["cate"]      = fila.filament_id;
-                fila_item_jj["color"]     = fila.color;
-                filament_info_jj.push_back(fila_item_jj);
-            }
-        }
-    }
-    command_jj["print"]["fila_info"] = filament_info_jj;
-
-    // nozzle_info: the two toolhead nozzles, from the edited preset (the fork has no
-    // DevNozzleSystem report to read wear/loaded-filament from; those keys are omitted).
-    // INFERRED pos ids: the fork's task convention (CloudTaskNozzleId, validated against the
-    // H2C send path) names the left nozzle 1 and the right nozzle 0; hardware capture pending.
-    auto opt_nozzle_volume_type = preset_bundle->project_config.option<ConfigOptionEnumsGeneric>("nozzle_volume_type");
-    json nozzle_info_jj;
-    for (int i = 0; i < 2; i++) {
-        json nozzle_item_jj;
-        nozzle_item_jj["pos"] = (i == kLogicLeftExtruder) ? (int) CloudTaskNozzleId::NOZZLE_LEFT
-                                                          : (int) CloudTaskNozzleId::NOZZLE_RIGHT;
-        nozzle_item_jj["nozzle_d"] = diameter_str(opt_nozzle_diameters->get_at(i));
-        nozzle_item_jj["nozzle_v"] = (opt_nozzle_volume_type && i < (int) opt_nozzle_volume_type->size())
-                                         ? flow_str((NozzleVolumeType) opt_nozzle_volume_type->get_at(i))
-                                         : "Standard";
-        nozzle_info_jj.push_back(nozzle_item_jj);
-    }
-    command_jj["print"]["nozzle_info"] = nozzle_info_jj;
-
-    request = command_jj.dump();
+    request = BambuNozzleMapping::build_v0_request(in);
     return true;
+}
+
+int SelectMachineDialog::check_nozzle_mapping(MachineObject* obj_, wxString& reason)
+{
+    reason.clear();
+    if (!obj_)
+        return 0;
+    std::string req;
+    if (!build_nozzle_mapping_request(req) || req.empty())
+        return 0;
+    const long long now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    if (req != m_nm_request || obj_->dev_id != m_nm_dev || m_nm_seq.empty()) {
+        m_nm_request       = req;
+        m_nm_dev           = obj_->dev_id;
+        m_nm_seq           = obj_->command_get_auto_nozzle_mapping(req);
+        m_nm_sent_ms       = now_ms;
+        m_nm_logged_result = false;
+        BOOST_LOG_TRIVIAL(warning) << "[DualNozzle] send dialog nozzle mapping query seq=" << m_nm_seq << " " << req;
+        if (m_nm_seq.empty())
+            return 3; // could not publish: the network agent still queries at send time
+        return 1;
+    }
+    const MachineObject::NozzleMappingReply& reply = obj_->m_nozzle_mapping_reply;
+    if (reply.valid && reply.sequence_id == m_nm_seq) {
+        // Only a refusal blocks, as in BambuStudio (CheckErrorSyncNozzleMappingResultV0: "failed" /
+        // "fail" -> RackNozzleMappingError, return false; an empty table is reported but not blocking).
+        const bool ok = !(reply.result == "fail" || reply.result == "failed" || reply.result == "FAIL");
+        if (!m_nm_logged_result) {
+            BOOST_LOG_TRIVIAL(warning) << "[DualNozzle] nozzle mapping answer: " << (ok ? "accepted" : "refused") << " result=" << reply.result << " mapping=" << reply.mapping
+                                       << " reason=" << reply.reason << " errno=" << reply.err_no;
+            m_nm_logged_result = true;
+        }
+        if (ok)
+            return 0;
+        reason = from_u8(reply.reason.empty() ? reply.result : reply.reason);
+        if (reply.err_no != 0)
+            reason += wxString::Format(" %d", reply.err_no);
+        return 2;
+    }
+    // BambuStudio waits indefinitely (re-asking every 10 s). A printer that never answers the
+    // query (older firmware, a report the LAN session missed) must not lock the dialog: after
+    // 15 s Send is allowed again and the network agent asks once more while sending.
+    if (now_ms - m_nm_sent_ms > 15000) {
+        if (!m_nm_logged_result) {
+            BOOST_LOG_TRIVIAL(warning) << "[DualNozzle] no nozzle mapping answer for seq " << m_nm_seq << " within 15 s; Send allowed";
+            m_nm_logged_result = true;
+        }
+        return 3;
+    }
+    return 1;
+}
+
+void SelectMachineDialog::apply_confirmed_trays(MachineObject* obj_)
+{
+    if (!obj_ || m_print_type != PrintFromType::FROM_NORMAL || !m_plater)
+        return;
+    PartPlate* plate = m_plater->get_partplate_list().get_curr_plate();
+    if (!plate)
+        return;
+    const DualNozzleSync::Confirmation conf = DualNozzleSync::Confirmation::deserialize(plate->dual_nozzle_confirm());
+    if (conf.trays.empty())
+        return;
+    const std::vector<int> fil_map = sliced_filament_map();
+    const std::vector<int> pem     = printer_physical_extruder_map();
+    int applied = 0;
+    for (FilamentInfo& r : m_ams_mapping_result) {
+        auto it = conf.trays.find(r.id);
+        if (it == conf.trays.end() || !it->second.valid())
+            continue;
+        auto ams_it = obj_->amsList.find(std::to_string(it->second.ams_id));
+        if (ams_it == obj_->amsList.end() || !ams_it->second)
+            continue;
+        // Only a tray that feeds the extruder the G-code prints this filament with.
+        if (r.id >= 0 && r.id < (int) fil_map.size() &&
+            BambuExtruderMap::physical_to_logical(pem, ams_it->second->nozzle) != fil_map[r.id] - 1)
+            continue;
+        auto tray_it = ams_it->second->trayList.find(std::to_string(it->second.slot_id));
+        if (tray_it == ams_it->second->trayList.end() || !tray_it->second || !tray_it->second->is_exists)
+            continue;
+        AmsTray* t = tray_it->second;
+        r.tray_id        = it->second.ams_id * 4 + it->second.slot_id;
+        r.ams_id         = std::to_string(it->second.ams_id);
+        r.slot_id        = std::to_string(it->second.slot_id);
+        r.color          = t->color;
+        r.colors         = t->cols;
+        r.ctype          = t->ctype;
+        r.type           = t->get_filament_type();
+        r.filament_id    = t->setting_id;
+        r.distance       = 0;
+        r.mapping_result = 0;
+        ++applied;
+    }
+    if (applied > 0) {
+        BOOST_LOG_TRIVIAL(warning) << "[DualNozzle] send dialog starts from the " << applied << " AMS slot(s) confirmed before slicing";
+        sync_ams_mapping_result(m_ams_mapping_result);
+    }
 }
 
 void SelectMachineDialog::prepare(int print_plate_idx)
@@ -1940,6 +1967,19 @@ void SelectMachineDialog::show_status(PrintDialogStatus status, std::vector<wxSt
         Enable_Refresh_Button(true);
     } else if (status == PrintDialogStatus::PrintStatusNotSupportedPrintAll) {
         wxString msg_text = _L("This printer does not support printing all plates");
+        update_print_status_msg(msg_text, true, true);
+        Enable_Send_Button(false);
+        Enable_Refresh_Button(true);
+    } else if (status == PrintDialogStatus::PrintStatusNozzleMappingWaiting) {
+        wxString msg_text = _L("Asking the printer to map the filaments to its nozzles...");
+        update_print_status_msg(msg_text, false, true);
+        Enable_Send_Button(false);
+        Enable_Refresh_Button(true);
+    } else if (status == PrintDialogStatus::PrintStatusNozzleMappingFailed) {
+        wxString msg_text = _L("The printer could not map the filaments to its nozzles, so the job cannot be sent as sliced.");
+        if (!params.empty() && !params[0].empty())
+            msg_text += " (" + params[0] + ")";
+        msg_text += " " + _L("Check the nozzles on the printer and the extruder of each filament, then re-slice or pick other AMS slots.");
         update_print_status_msg(msg_text, true, true);
         Enable_Send_Button(false);
         Enable_Refresh_Button(true);
@@ -3339,6 +3379,21 @@ void SelectMachineDialog::update_show_status()
         }
     }
 
+    // Two-extruder job: the printer must accept the filament -> nozzle mapping before Send, as in
+    // BambuStudio (update_show_status -> CheckErrorSyncNozzleMappingResultV0, SelectMachine.cpp:4269).
+    {
+        wxString reason;
+        const int nm = check_nozzle_mapping(obj_, reason);
+        if (nm == 1) {
+            show_status(PrintDialogStatus::PrintStatusNozzleMappingWaiting);
+            return;
+        }
+        if (nm == 2) {
+            show_status(PrintDialogStatus::PrintStatusNozzleMappingFailed, { reason });
+            return;
+        }
+    }
+
     if (!obj_->is_support_ams_mapping()) {
         int exceed_index = -1;
         if (obj_->is_mapping_exceed_filament(m_ams_mapping_result, exceed_index)) {
@@ -4330,6 +4385,9 @@ bool SelectMachineDialog::Show(bool show)
 {
     if (show) {
         m_refresh_timer->Start(LIST_REFRESH_INTERVAL);
+        // A fresh nozzle mapping query for every opening of the dialog.
+        m_nm_request.clear();
+        m_nm_seq.clear();
     } else {
         m_refresh_timer->Stop();
 
@@ -4438,6 +4496,8 @@ std::string SelectMachineDialog::get_print_status_info(PrintDialogStatus status)
     case PrintStatusUnsupportedPrinter: return "PrintStatusUnsupportedPrinter";
     case PrintStatusTimelapseNoSdcard: return "PrintStatusTimelapseNoSdcard";
     case PrintStatusNotSupportedPrintAll: return "PrintStatusNotSupportedPrintAll";
+    case PrintStatusNozzleMappingWaiting: return "PrintStatusNozzleMappingWaiting";
+    case PrintStatusNozzleMappingFailed: return "PrintStatusNozzleMappingFailed";
     }
     return "unknown";
 }
