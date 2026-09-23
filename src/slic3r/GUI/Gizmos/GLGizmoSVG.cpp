@@ -2018,8 +2018,8 @@ void GLGizmoSVG::draw_model_type()
             m_imgui->tooltip(_u8L("Click to change part type into negative volume."), m_gui_cfg->max_tooltip_width);
     }
 
-    // In simple mode are not modifiers
-    if (wxGetApp().plater()->printer_technology() != ptSLA && wxGetApp().get_mode() != ConfigOptionMode::comSimple) {
+    // Modifiers are offered in every user mode (Simple included), like the right-click Add menu.
+    if (wxGetApp().plater()->printer_technology() != ptSLA) {
         ImGui::SameLine();
         if (ImGui::RadioButton(_u8L("Modifier").c_str(), type == modifier))
             new_type = modifier;
