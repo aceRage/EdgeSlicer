@@ -2869,32 +2869,28 @@ bool GUI_App::check_older_app_config(Semver current_version, bool backup)
 void GUI_App::copy_web_resources() {
     StartupProfiler profiler("GUI_App::copy_web_resources");
 
-    auto data_web_path = boost::filesystem::path(data_dir()) / "web";
-    if (!boost::filesystem::exists(data_web_path / "flutter_web")) {
-        copy_bundled_flutter_web(false);
-        profiler.mark("copy flutter_web (missing target)");
-    } else {
-        auto source_version_file = boost::filesystem::path(resources_dir()) / "web" / "flutter_web" / "version.json";
-        auto target_version_file = data_web_path / "flutter_web" / "version.json";
-
-        try {
-            boost::property_tree::ptree source_config, target_config;
-            boost::property_tree::read_json(source_version_file.string(), source_config);
-            boost::property_tree::read_json(target_version_file.string(), target_config);
-            std::string source_build_number_str = source_config.get<std::string>("build_number", "0");
-            std::string target_build_number_str = target_config.get<std::string>("build_number", "0");
-
-            if (source_build_number_str > target_build_number_str) {
-                copy_bundled_flutter_web(true);
-                profiler.mark("copy flutter_web (version upgrade)");
-            } else {
-                profiler.note("flutter_web already up to date");
-            }
-        }
-        catch (std::exception& e) {
-            profiler.note(std::string("version check failed: ") + e.what());
-        }
+    // EdgeSlicer serves the flutter pages straight from its installed resources (HttpServer::
+    // map_url_to_file_path), so nothing is copied into the data dir any more. Upstream copied them
+    // to data_dir/web/flutter_web and served that copy, which Snapmaker's /upgrade/flutter/ feed
+    // replaced with its own build - and a copy with a higher build number was never overwritten by
+    // ours again. An existing copy is left where it is (it is the user's file) but is not read.
+    auto bundled_version = boost::filesystem::path(resources_dir()) / "web" / "flutter_web" / "version.json";
+    auto data_copy       = boost::filesystem::path(data_dir()) / "web" / "flutter_web";
+    std::string version = "?", build = "?";
+    try {
+        boost::property_tree::ptree config;
+        boost::property_tree::read_json(bundled_version.string(), config);
+        version = config.get<std::string>("version", "?");
+        build   = config.get<std::string>("build_number", "?");
+    } catch (const std::exception& e) {
+        BOOST_LOG_TRIVIAL(error) << "[Flutter] cannot read the bundled version.json: " << e.what();
     }
+    boost::system::error_code ec;
+    const bool stale_copy = boost::filesystem::exists(data_copy, ec);
+    BOOST_LOG_TRIVIAL(info) << "[Flutter] serving the bundled web pages " << version << "+" << build << " from "
+                            << bundled_version.parent_path().string()
+                            << (stale_copy ? "; the old data-dir copy in " + data_copy.string() + " is ignored" : std::string());
+    profiler.note("flutter_web served from resources");
 }
 
 bool GUI_App::copy_bundled_flutter_web(bool upgrade)

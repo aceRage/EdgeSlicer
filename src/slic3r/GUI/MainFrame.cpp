@@ -2690,27 +2690,23 @@ static wxMenu* generate_help_menu()
             return true;
         });
 
-    append_menu_item(
-        helpMenu, wxID_ANY, _L("Check for Process Preset Updates"), _L("Check for Process Preset Updates"),
-        [](wxCommandEvent&) { 
-            wxGetApp().check_preset_version();
+    // Profile packages come only from a self-hosted server named in the ini ("profile_upgrade_url");
+    // without one there is nothing to check, so the item is not offered.
+    if (!wxGetApp().app_config->get_preset_upgrade_url().empty())
+        append_menu_item(
+            helpMenu, wxID_ANY, _L("Check for Process Preset Updates"), _L("Check for Process Preset Updates"),
+            [](wxCommandEvent&) { 
+                wxGetApp().check_preset_version();
 
-        },
-        "", nullptr, []() { return true; });
+            },
+            "", nullptr, []() { return true; });
 
-    append_menu_item(
-        helpMenu, wxID_ANY, _L("Check for Web Resource Updates"), _L("Check for Web Resource Updates"),
-        [](wxCommandEvent&) { 
-            wxGetApp().check_web_version();
-        },
-        "", nullptr, []() { return true; });
+    // No "Check for Web Resource Updates" / "Import Web Resource": the web pages are served from the
+    // installed resources only (HttpServer::map_url_to_file_path), so a downloaded or imported
+    // package would never be shown.
 
     append_menu_item(helpMenu, wxID_ANY, _L("Import Profile"), _L("Import Profile"), [](wxCommandEvent&) {
         wxGetApp().import_presets();
-    });
-
-    append_menu_item(helpMenu, wxID_ANY, _L("Import Web Resource"), _L("Import Web Resource"), [](wxCommandEvent&) {
-        wxGetApp().import_flutter_web();
     });
 
     append_menu_item(helpMenu, wxID_ANY, _L("Open Network Test"), _L("Open Network Test"), [](wxCommandEvent&) {
