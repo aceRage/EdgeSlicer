@@ -60,6 +60,7 @@ using namespace nlohmann;
 #include "libslic3r/TriangleMesh.hpp"
 #include "libslic3r/Format/AMF.hpp"
 #include "libslic3r/Format/3mf.hpp"
+#include "libslic3r/Format/BambuExport.hpp"
 #include "libslic3r/Format/STL.hpp"
 #include "libslic3r/Format/OBJ.hpp"
 #include "libslic3r/Format/SL1.hpp"
@@ -5587,6 +5588,8 @@ int CLI::run(int argc, char **argv)
             //already processed before
         } else if (opt_key == "min_save") {
             //already processed before
+        } else if (opt_key == "export_bambu_3mf") {
+            //read by export_project()
         } else if (opt_key == "load_defaultfila") {
             //already processed before
         } else if (opt_key == "mtcpp") {
@@ -7243,8 +7246,15 @@ bool CLI::export_project(Model *model, std::string& path, PlateDataPtrs &partpla
     store_params.export_plate_idx = plate_to_export;
     if (minimum_save)
         store_params.strategy = store_params.strategy | SaveStrategy::SkipModel;
+    BambuExport::Report bambu_report;
+    if (const ConfigOptionBool *opt = m_config.option<ConfigOptionBool>("export_bambu_3mf"); opt != nullptr && opt->value) {
+        store_params.bambu_compat = true;
+        store_params.bambu_report = &bambu_report;
+    }
 
     success = Slic3r::store_bbs_3mf(store_params);
+    if (success && store_params.bambu_compat)
+        boost::nowide::cout << "Exported for Bambu Studio (" << BambuExport::application_tag() << "): " << bambu_report.summary() << std::endl;
 
     if (success)
         BOOST_LOG_TRIVIAL(info) << "Project exported to " << path << std::endl;

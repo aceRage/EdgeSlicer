@@ -8952,6 +8952,15 @@ void PrintConfigDef::handle_legacy(t_config_option_key &opt_key, std::string &va
         else if (value == "0"){
             value = "ensure_moderate";
         }
+        // Bambu Studio's three levels (its EnsureVerticalThicknessLevel). "Export Bambu 3MF"
+        // writes the reverse (Format/BambuExport.cpp, MANUAL_ENUMS).
+        else if (value == "enabled") {
+            value = "ensure_all";
+        } else if (value == "partial") {
+            value = "ensure_moderate";
+        } else if (value == "disabled") {
+            value = "none";
+        }
     } else if (opt_key == "rotate_solid_infill_direction") {
         opt_key = "solid_infill_rotate_template";
         if (value == "1") {
@@ -8969,7 +8978,8 @@ void PrintConfigDef::handle_legacy(t_config_option_key &opt_key, std::string &va
         opt_key = "thumbnails";
     } else if (opt_key == "top_one_wall_type" && value != "none") {
         opt_key = "only_one_wall_top";
-        value = "1";
+        // Bambu Studio spells "off" as "not apply" (its TopOneWallType::None).
+        value = value == "not apply" ? "0" : "1";
     } else if (opt_key == "initial_layer_flow_ratio") {
         opt_key = "bottom_solid_infill_flow_ratio";
     } else if (opt_key == "ironing_direction") {
@@ -9888,6 +9898,13 @@ CLIActionsConfigDef::CLIActionsConfigDef()
     def = this->add("min_save", coBool);
     def->label = L("Minimum save");
     def->tooltip = L("export 3mf with minimum size.");
+    def->cli_params = "option";
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("export_bambu_3mf", coBool);
+    def->label = L("Export Bambu 3MF");
+    def->tooltip = L("Write the project given to --export-3mf in Bambu Studio's format (like File > Export > Export Bambu 3MF): "
+                     "settings Bambu Studio does not have are left out, the others are converted to Bambu Studio's names and types.");
     def->cli_params = "option";
     def->set_default_value(new ConfigOptionBool(false));
 
