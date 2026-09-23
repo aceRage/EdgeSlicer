@@ -57,6 +57,7 @@ private:
     };
 
     void tick(wxTimerEvent&);
+    void poll();
     void visibility_changed(bool visible);
     void begin(bool spawn);                       // off-thread ensure_running (spawn) or query
     void recheck();                               // off-thread query, compare with what is loaded

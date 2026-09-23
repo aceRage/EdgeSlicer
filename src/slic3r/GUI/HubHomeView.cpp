@@ -100,8 +100,7 @@ HubHomeView::~HubHomeView()
 
 void HubHomeView::on_activated()
 {
-    wxTimerEvent dummy;
-    tick(dummy);
+    poll();
 }
 
 void HubHomeView::on_deactivated()
@@ -110,7 +109,9 @@ void HubHomeView::on_deactivated()
         visibility_changed(false);
 }
 
-void HubHomeView::tick(wxTimerEvent&)
+void HubHomeView::tick(wxTimerEvent&) { poll(); }
+
+void HubHomeView::poll()
 {
     const bool visible = IsShownOnScreen() && !hidden_instance();
     if (visible != m_visible)
