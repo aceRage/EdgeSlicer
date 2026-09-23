@@ -23,12 +23,12 @@ namespace GUI {
 StreamPanel::StreamPanel(wxWindow* parent)
     : wxPanel(parent, wxID_ANY, wxDefaultPosition, wxDefaultSize)
 {
-    wxString url = wxString::FromUTF8(LOCALHOST_URL + std::to_string(wxGetApp().get_page_http_port()) +
-                                      "/web/orca/stream_center.html");
+    std::string path = "/web/orca/stream_center.html";
     // Seed the page's host list from the legacy camera-address preference, if set.
     const std::string seed = wxGetApp().app_config->get("hd_camera_host");
     if (!seed.empty())
-        url += "?seed=" + wxURI(wxString::FromUTF8(seed)).BuildURI();
+        path += "?seed=" + wxURI(wxString::FromUTF8(seed)).BuildURI().ToStdString(wxConvUTF8);
+    wxString url = wxString::FromUTF8(wxGetApp().page_url(path));
 
     m_browser = WebView::CreateWebView(this, url);
     if (m_browser == nullptr)

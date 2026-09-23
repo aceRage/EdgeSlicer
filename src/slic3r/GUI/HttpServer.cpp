@@ -1,5 +1,7 @@
 #include "HttpServer.hpp"
+#include "PageServerSecurity.hpp"
 #include <boost/log/trivial.hpp>
+#include <boost/nowide/fstream.hpp>
 #include <boost/algorithm/string.hpp>
 #include <boost/filesystem.hpp>
 #include <cstdio>
@@ -260,20 +262,29 @@ std::string get_cache_control_header(const std::string& file_path)
     return "no-cache";
 }
 
+} // namespace
+
 // Writes the header lines shared by every response: the status line, the CORS
-// headers, and Connection: close. The server never reuses a connection, so the
-// explicit Connection: close stops clients from assuming HTTP/1.1 keep-alive and
-// racing against our socket close.
-void write_common_headers(std::stringstream& out, int status_code, const std::string& reason_phrase)
+// headers (login-callback servers only), extra headers, and Connection: close. The
+// server never reuses a connection, so the explicit Connection: close stops clients
+// from assuming HTTP/1.1 keep-alive and racing against our socket close.
+void HttpServer::Response::write_head(std::stringstream& out, int status_code, const std::string& reason_phrase) const
 {
     out << "HTTP/1.1 " << status_code << " " << reason_phrase << "\r\n";
-    out << "Access-Control-Allow-Origin: *\r\n";
-    out << "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n";
-    out << "Access-Control-Allow-Headers: Content-Type, Authorization\r\n";
+    if (m_allow_any_origin) {
+        out << "Access-Control-Allow-Origin: *\r\n";
+        out << "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n";
+        out << "Access-Control-Allow-Headers: Content-Type, Authorization\r\n";
+    } else {
+        // The page server's files are for our web views only: no content-type sniffing, and no
+        // other site may frame them.
+        out << "X-Content-Type-Options: nosniff\r\n";
+        out << "X-Frame-Options: SAMEORIGIN\r\n";
+    }
+    for (const std::string& h : m_extra_headers)
+        out << h << "\r\n";
     out << "Connection: close\r\n";
 }
-
-} // namespace
 
 std::string url_get_param(const std::string& url, const std::string& key)
 {
@@ -338,17 +349,31 @@ void session::read_next_line()
     auto self(shared_from_this());
 
     if (headers.method == "OPTIONS") {
-        // 构造OPTIONS响应（允许跨域）
-        std::stringstream ssOut;
-        write_common_headers(ssOut, 200, "OK");
-        ssOut << "Content-Length: 0\r\n"; // no response body
-        ssOut << "\r\n";                  // blank line between headers and body (required)
+        std::shared_ptr<std::string> str;
+        if (server.server.page_security()) {
+            // No cross-origin caller is ever allowed on the page server, so no preflight passes.
+            HttpServer::ResponseForbidden forbidden(403, "cors");
+            std::stringstream             ssOut;
+            forbidden.write_response(ssOut);
+            str = std::make_shared<std::string>(ssOut.str());
+        } else {
+            // 构造OPTIONS响应（允许跨域）
+            std::stringstream ssOut;
+            ssOut << "HTTP/1.1 200 OK\r\n";
+            ssOut << "Access-Control-Allow-Origin: *\r\n";
+            ssOut << "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n";
+            ssOut << "Access-Control-Allow-Headers: Content-Type, Authorization\r\n";
+            ssOut << "Connection: close\r\n";
+            ssOut << "Content-Length: 0\r\n"; // no response body
+            ssOut << "\r\n";                  // blank line between headers and body (required)
+            str = std::make_shared<std::string>(ssOut.str());
+        }
 
-        // 异步发送响应
-        async_write(socket, boost::asio::buffer(ssOut.str()), [this, self](const boost::beast::error_code& e, std::size_t s) {
-            std::cout << "OPTIONS预检请求已处理" << std::endl;
-            server.stop(self); // 关闭连接
-        });
+        // 异步发送响应 (the buffer must outlive the async write)
+        async_write(socket, boost::asio::buffer(str->c_str(), str->length()),
+                    [this, self, str](const boost::beast::error_code& e, std::size_t s) {
+                        server.stop(self); // 关闭连接
+                    });
         return; // 提前返回，避免后续逻辑
     }
 
@@ -358,26 +383,59 @@ void session::read_next_line()
             std::istream stream{&buff};
             std::getline(stream, line, '\r');
             std::getline(stream, ignore, '\n');
+            if (line.length() != 0 && ++header_lines > 100) {
+                server.stop(self); // not a browser request
+                return;
+            }
             headers.on_read_header(line);
 
             if (line.length() == 0) {
                 if (headers.content_length() == 0) {
-                    std::cout << "Request received: " << headers.method << " " << headers.get_url();
                     if (headers.method == "OPTIONS") {
                         // Ignore http OPTIONS
                         server.stop(self);
                         return;
                     }
 
-                    const std::string url_str = Http::url_decode(headers.get_url());
-                    const auto        resp    = server.server.m_request_handler(url_str);
-                    resp->set_conditional_headers(headers.get_header("if-modified-since"), headers.get_header("if-none-match"));
+                    HttpServer&                           http        = server.server;
+                    const bool                            locked_down = http.page_security();
+                    std::string                           target      = headers.get_url();
+                    std::shared_ptr<HttpServer::Response> resp;
+                    bool                                  set_cookie  = false;
+                    std::string                           secret;
+                    if (locked_down) {
+                        secret = http.page_secret();
+                        page_server::RequestInfo req;
+                        req.method         = headers.method;
+                        req.target         = target;
+                        req.host           = headers.get_header("host");
+                        req.origin         = headers.get_header("origin");
+                        req.sec_fetch_site = headers.get_header("sec-fetch-site");
+                        req.cookie         = headers.get_header("cookie");
+                        req.header_token   = headers.get_header(page_server::TOKEN_HEADER);
+                        const page_server::Decision d = page_server::authorize(req, http.get_port(), secret);
+                        target                        = d.target; // never log or route on the token
+                        if (!d.allowed) {
+                            BOOST_LOG_TRIVIAL(warning) << "page server: refused " << headers.method << " "
+                                                       << target.substr(0, target.find('?')) << " (" << d.reason
+                                                       << ", origin '" << req.origin << "', host '" << req.host << "')";
+                            resp = std::make_shared<HttpServer::ResponseForbidden>(d.status, d.reason);
+                        }
+                        set_cookie = d.set_cookie;
+                    }
+                    if (!resp) {
+                        const std::string url_str = Http::url_decode(target);
+                        resp                      = http.m_request_handler(url_str);
+                        resp->set_conditional_headers(headers.get_header("if-modified-since"), headers.get_header("if-none-match"));
+                        if (set_cookie)
+                            resp->add_header("Set-Cookie: " + page_server::set_cookie_header_value(http.get_port(), secret));
+                    }
+                    resp->set_allow_any_origin(!locked_down);
                     std::stringstream ssOut;
                     resp->write_response(ssOut);
                     std::shared_ptr<std::string> str = std::make_shared<std::string>(ssOut.str());
                     async_write(socket, boost::asio::buffer(str->c_str(), str->length()),
                                 [this, self, str](const boost::beast::error_code& e, std::size_t s) {
-                                    std::cout << "done" << std::endl;
                                     server.stop(self);
                                 });
                 } else {
@@ -428,27 +486,81 @@ void HttpServer::IOServer::stop_all()
     sessions.clear();
 }
 
-HttpServer::IOServer::IOServer(HttpServer& server) : server(server), acceptor(io_service)
+HttpServer::IOServer::IOServer(HttpServer& server) : server(server), acceptor(io_service) {}
+
+bool HttpServer::IOServer::bind_loopback(boost::asio::ip::port_type p, std::string* error)
 {
-    try {
-        // Loopback only: these servers exist for the app's own web views and the local
-        // login redirect. Binding every interface exposed /localfile/<any path> to the LAN;
-        // phone access goes through the token-gated RemoteAccess listener instead.
-        boost::asio::ip::tcp::endpoint endpoint(boost::asio::ip::make_address_v4("127.0.0.1"), server.port);
-        acceptor.open(endpoint.protocol());
-        acceptor.set_option(boost::asio::ip::tcp::acceptor::reuse_address(true));
-        acceptor.bind(endpoint);
-    } 
-    catch (const boost::system::system_error& errorInfo)
-    {
-        BOOST_LOG_TRIVIAL(error) << "local server start failed with port:" << server.port;
-        BOOST_LOG_TRIVIAL(error) << "local server start failed with errorInfo:" << errorInfo.what();
+    // Loopback only: these servers exist for the app's own web views and the local
+    // login redirect. Binding every interface exposed /localfile/<any path> to the LAN;
+    // phone access goes through the token-gated RemoteAccess listener instead.
+    boost::system::error_code      ec;
+    boost::asio::ip::tcp::endpoint endpoint(boost::asio::ip::make_address_v4("127.0.0.1"), p);
+    if (acceptor.is_open())
+        acceptor.close(ec);
+    ec.clear();
+    acceptor.open(endpoint.protocol(), ec);
+#ifdef _WIN32
+    // SO_REUSEADDR on Windows lets a second socket bind a port that is already listening, and
+    // which of the two then gets each connection is undefined: that is how several instances
+    // ended up "sharing" 13619 and how any local process could take the port over. Exclusive
+    // use makes a busy port fail to bind, so each instance moves on to its own port.
+    if (!ec)
+        acceptor.set_option(boost::asio::detail::socket_option::boolean<SOL_SOCKET, SO_EXCLUSIVEADDRUSE>(true), ec);
+#else
+    // POSIX SO_REUSEADDR only skips TIME_WAIT; it does not allow a second listener.
+    if (!ec)
+        acceptor.set_option(boost::asio::ip::tcp::acceptor::reuse_address(true), ec);
+#endif
+    if (!ec)
+        acceptor.bind(endpoint, ec);
+    if (!ec)
+        acceptor.listen(boost::asio::socket_base::max_listen_connections, ec);
+    if (ec) {
+        if (error)
+            *error = ec.message();
+        boost::system::error_code ignored;
+        acceptor.close(ignored);
+        return false;
     }
+    return true;
 }
 
-HttpServer::HttpServer(boost::asio::ip::port_type port) : port(port)
-{ 
-    std::cout << "local server init";
+HttpServer::HttpServer(boost::asio::ip::port_type port) : port(port), m_secret(page_server::generate_secret())
+{
+}
+
+std::string HttpServer::page_secret() const
+{
+    std::lock_guard<std::mutex> lock(m_secret_mtx);
+    return m_secret;
+}
+
+std::string HttpServer::page_url(const std::string& path_and_query) const
+{
+    const std::string url = std::string(LOCALHOST_URL) + std::to_string(get_port()) + path_and_query;
+    return m_page_security ? page_server::append_token(url, page_secret()) : url;
+}
+
+std::string HttpServer::localfile_url(const std::string& utf8_path) const
+{
+    const std::string id   = page_server::file_grants().grant(utf8_path);
+    const size_t      cut  = utf8_path.find_last_of("/\\");
+    const std::string name = cut == std::string::npos ? utf8_path : utf8_path.substr(cut + 1);
+    return std::string(LOCALHOST_URL) + std::to_string(get_port()) + "/localfile/cap/" + id + "/" + Http::url_encode(name);
+}
+
+std::string HttpServer::add_token_if_ours(const std::string& url) const
+{
+    if (!m_page_security)
+        return url;
+    const std::string origin = std::string(LOCALHOST_URL) + std::to_string(get_port());
+    if (url.compare(0, origin.size(), origin) != 0)
+        return url;
+    if (url.size() > origin.size() && url[origin.size()] != '/' && url[origin.size()] != '?' && url[origin.size()] != '#')
+        return url; // e.g. port 136190
+    std::string existing;
+    page_server::strip_token_param(url, &existing);
+    return existing.empty() ? page_server::append_token(url, page_secret()) : url;
 }
 
 HttpServer::~HttpServer()
@@ -456,37 +568,6 @@ HttpServer::~HttpServer()
     BOOST_LOG_TRIVIAL(debug) << "HttpServer destructor called, cleaning up resources...";
     stop();
     BOOST_LOG_TRIVIAL(debug) << "HttpServer destructor completed";
-}
-
-bool HttpServer::is_port_available(boost::asio::ip::port_type port)
-{
-    try {
-        boost::asio::io_service        io_service;
-        boost::asio::ip::tcp::acceptor acceptor(io_service);
-        boost::asio::ip::tcp::endpoint endpoint(boost::asio::ip::tcp::v4(), port);
-
-        acceptor.open(endpoint.protocol());
-        acceptor.set_option(boost::asio::ip::tcp::acceptor::reuse_address(true));
-        acceptor.bind(endpoint);
-        acceptor.close();
-        return true;
-    } catch (const boost::system::system_error&) {
-        return false;
-    }
-}
-
-boost::asio::ip::port_type HttpServer::find_available_port(boost::asio::ip::port_type start_port)
-{
-    // 尝试从起始端口开始查找可用端口
-    for (boost::asio::ip::port_type p = start_port; p < start_port + 1000; ++p) {
-        if (is_port_available(p)) {
-            BOOST_LOG_TRIVIAL(error) << "use new port for start server:"<<p;
-            return p;
-        }
-    }
-    BOOST_LOG_TRIVIAL(fatal) << "no available port for start server:";
-
-    throw std::runtime_error("No available ports found");
 }
 
 void HttpServer::start()
@@ -507,23 +588,42 @@ void HttpServer::start_locked()
     BOOST_LOG_TRIVIAL(info) << "start_http_service...";
 
     try {
-        // 如果指定端口不可用，查找下一个可用端口
-        if (!is_port_available(port)) {
-            auto new_port = find_available_port(port + 1);
-            BOOST_LOG_TRIVIAL(info) << "Original port " << port << " is in use, switching to port " << new_port;
-            port = new_port;
-        }
-
-        start_http_server = true;
         // Create the IOServer on the CALLING thread so the io thread never
         // writes server_ (that write raced the locked readers in
         // is_healthy()/stop()/restart()). Thread creation provides the
         // happens-before, and stop()/restart() join the io thread before
         // destroying the server, so the raw pointer below stays valid. If
-        // listen() throws, the next start() overwrites server_ (unique_ptr
+        // binding fails, the next start() overwrites server_ (unique_ptr
         // assignment destroys the stale server) — no cleanup needed here.
         server_ = std::make_unique<IOServer>(*this);
-        server_->acceptor.listen();
+
+        // Bind directly (no probe-then-bind race) to the wanted port or the next free one.
+        const boost::asio::ip::port_type wanted = get_port();
+        boost::asio::ip::port_type       bound  = 0;
+        std::string                      last_error;
+        for (unsigned p = wanted; p != 0 && p < unsigned(wanted) + 1000 && p <= 65535; ++p) {
+            if (server_->bind_loopback((boost::asio::ip::port_type) p, &last_error)) {
+                bound = (boost::asio::ip::port_type) p;
+                break;
+            }
+        }
+        if (bound == 0) {
+            BOOST_LOG_TRIVIAL(fatal) << "no available port for start server from " << wanted << ": " << last_error;
+            throw std::runtime_error("No available ports found");
+        }
+        if (bound != wanted) {
+            BOOST_LOG_TRIVIAL(info) << "Original port " << wanted << " is in use, switching to port " << bound;
+            if (m_bound_once && m_page_security) {
+                // A restart that lost its port: whatever answers on the old one now may be handed
+                // our secret by a web view still pointing there. Retire it.
+                std::lock_guard<std::mutex> lock(m_secret_mtx);
+                m_secret = page_server::generate_secret();
+            }
+        }
+        port         = bound;
+        m_bound_once = true;
+
+        start_http_server = true;
         server_->do_accept();
         IOServer* srv = server_.get();
         m_http_server_thread = create_thread([this, srv] {
@@ -541,18 +641,18 @@ void HttpServer::start_locked()
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
         if (!start_http_server) {
-            BOOST_LOG_TRIVIAL(error) << "Failed to start HTTP server:" << port;
+            BOOST_LOG_TRIVIAL(error) << "Failed to start HTTP server:" << get_port();
             throw std::runtime_error("Failed to start HTTP server");
         }
 
-        BOOST_LOG_TRIVIAL(info) << "HTTP server started successfully on port " << port;
+        BOOST_LOG_TRIVIAL(info) << "HTTP server started successfully on port " << get_port();
 
         // The health check is started by start()/restart() AFTER m_server_mtx
         // is released (see start_health_check's join path).
 
     } catch (const std::exception& e) {
         BOOST_LOG_TRIVIAL(error) << "Failed to start HTTP server: " << e.what();
-        std::string error_msg = "bury_point_Failed to start HTTP server on port " + std::to_string(port) + ": " + e.what();
+        std::string error_msg = "bury_point_Failed to start HTTP server on port " + std::to_string(get_port()) + ": " + e.what();
         Slic3r::sentryReportLog(Slic3r::SENTRY_LOG_FATAL, error_msg.c_str(), BP_LOCAL_SERVER);
         start_http_server = false;
         throw;
@@ -589,7 +689,7 @@ void HttpServer::stop()
 
 void HttpServer::restart()
 {
-    BOOST_LOG_TRIVIAL(info) << "Restarting HTTP server on port " << port << "...";
+    BOOST_LOG_TRIVIAL(info) << "Restarting HTTP server on port " << get_port() << "...";
 
     BOOST_LOG_TRIVIAL(debug) << "Stopping current HTTP server...";
     // 只停止HTTP服务器，不停止健康检查和重启检查线程
@@ -655,14 +755,14 @@ bool HttpServer::is_healthy()
         // 尝试创建一个测试连接来验证服务器是否真正响应
         boost::asio::io_service test_io_service;
         boost::asio::ip::tcp::socket test_socket(test_io_service);
-        boost::asio::ip::tcp::endpoint endpoint(boost::asio::ip::address::from_string("127.0.0.1"), port);
+        boost::asio::ip::tcp::endpoint endpoint(boost::asio::ip::address::from_string("127.0.0.1"), get_port());
         
         boost::system::error_code ec;
         test_socket.connect(endpoint, ec);
         
         if (!ec) {
             test_socket.close();
-            BOOST_LOG_TRIVIAL(debug) << "Health check passed: test connection successful on port " << port;
+            BOOST_LOG_TRIVIAL(debug) << "Health check passed: test connection successful on port " << get_port();
             return true;
         }
         
@@ -757,7 +857,7 @@ void HttpServer::start_health_check()
                     BOOST_LOG_TRIVIAL(info) << "HTTP server restart completed by health check thread";
                 } catch (const std::exception& e) {
                     BOOST_LOG_TRIVIAL(error) << "Failed to restart HTTP server: " << e.what();
-                    std::string error_msg = "bury_point_HTTP server restart failed after health check on port " + std::to_string(port) + ": " + e.what();
+                    std::string error_msg = "bury_point_HTTP server restart failed after health check on port " + std::to_string(get_port()) + ": " + e.what();
                     Slic3r::sentryReportLog(Slic3r::SENTRY_LOG_ERROR, error_msg.c_str(), BP_LOCAL_SERVER);
                 }
             } else if (start_http_server) {
@@ -1048,15 +1148,30 @@ std::shared_ptr<HttpServer::Response> HttpServer::web_server_handle_request(cons
     }
 
     BOOST_LOG_TRIVIAL(info) << "Handling file_path request for URL: " << file_path;
-    bool native_path = (url.find(WCP_DOWNLOAD_PREFIX) != std::string::npos);
-    return std::make_shared<ResponseFile>(file_path, native_path);
+    if (file_path.empty()) {
+        // The file routes answer 403 whether the file is missing or not handed out, so a caller
+        // learns nothing about what exists on disk.
+        if (url.compare(0, 11, "/localfile/") == 0 || url.compare(0, strlen(WCP_DOWNLOAD_PREFIX), WCP_DOWNLOAD_PREFIX) == 0)
+            return std::make_shared<ResponseForbidden>(403, "not-granted");
+        return std::make_shared<ResponseNotFound>();
+    }
+    // map_url_to_file_path returns the resolved UTF-8 path of an allowed file.
+    return std::make_shared<ResponseFile>(file_path, false);
 }
 
+// Every route serves one of three things, and nothing else:
+//   /localfile/cap/<id>/<name>, /localfile/<abs path>, /wcp_download/<b64 path>
+//       a file the app itself handed to a page (page_server::file_grants(): the active G-code/3MF
+//       and its zip) or a file inside the installed resources - never the data dir's config;
+//   everything else (/web/..., /profiles/..., "/" = the flutter home page)
+//       a file inside the installed resources dir.
+// Paths are resolved to the real file (symlinks, junctions, 8.3 names, case) before the check.
+// Returns "" to refuse.
 std::string HttpServer::map_url_to_file_path(const std::string& url)
 {
-    if (url.find("..") != std::string::npos) {
-        return "";
-    }
+    page_server::FileRoots roots;
+    roots.resources_dir = resources_dir();
+    roots.data_dir      = data_dir();
 
     wxString trimmed_url = wxString::FromUTF8(url);
 
@@ -1072,11 +1187,10 @@ std::string HttpServer::map_url_to_file_path(const std::string& url)
         auto real_path = trimmed_url.substr(11);
         auto realUTF8Path = real_path.ToStdString(wxConvUTF8);
 
-        if (realUTF8Path.empty()) {
-            BOOST_LOG_TRIVIAL(error) << "realUTF8Path is null for: " << trimmed_url;
-        }
-
-        return realUTF8Path;
+        const std::string allowed = page_server::resolve_localfile(realUTF8Path, roots, page_server::file_grants());
+        if (allowed.empty())
+            BOOST_LOG_TRIVIAL(warning) << "page server: /localfile/ refused for a path the app did not hand out";
+        return allowed;
     }
     else if (trimmed_url.find(WCP_DOWNLOAD_PREFIX) == 0) {
         // Decode URL-safe base64-encoded path: revert '-'→'+', '_'→'/', then pad
@@ -1097,22 +1211,27 @@ std::string HttpServer::map_url_to_file_path(const std::string& url)
         auto result = boost::beast::detail::base64::decode(decoded.data(), b64.data(), b64.size());
         decoded.resize(result.first);
 
-        return decoded;
+        const std::string allowed = page_server::resolve_granted_path(decoded, roots, page_server::file_grants());
+        if (allowed.empty())
+            BOOST_LOG_TRIVIAL(warning) << "page server: " WCP_DOWNLOAD_PREFIX " refused for a path the app did not hand out";
+        return allowed;
     }
     // Every page, the flutter ones included, comes from the installed resources. Upstream served
     // /web/flutter_web/ from a copy in the data dir, which Snapmaker's update feed could replace
     // with its own build; that copy (if one is still there) is no longer read.
-    wxString res = wxString::FromUTF8(resources_dir()) + trimmed_url;
+    const std::string url_path = trimmed_url.ToStdString(wxConvUTF8);
+    return page_server::resolve_resource(url_path, roots.resources_dir);
+}
 
-    auto strUTF8 = res.ToStdString(wxConvUTF8);
-
-    if (strUTF8.empty())
-    {
-        BOOST_LOG_TRIVIAL(error) << "strUTF8 is null for: " << res;
-    }
-
-    return strUTF8;
-    
+void HttpServer::ResponseForbidden::write_response(std::stringstream& ssOut)
+{
+    const std::string body = std::string(m_status == 405 ? "405 Method Not Allowed" : "403 Forbidden") + ": " + m_reason + "\n";
+    write_head(ssOut, m_status, m_status == 405 ? "Method Not Allowed" : "Forbidden");
+    ssOut << "Content-Type: text/plain\r\n";
+    ssOut << "Cache-Control: no-store\r\n";
+    ssOut << "Content-Length: " << body.size() << "\r\n";
+    ssOut << "\r\n";
+    ssOut << body;
 }
 
 void HttpServer::ResponseRedirect::write_response(std::stringstream& ssOut)
@@ -1120,7 +1239,7 @@ void HttpServer::ResponseRedirect::write_response(std::stringstream& ssOut)
     const std::string sHTML          = "<html><body><p>redirect to url </p></body></html>";
     size_t            content_length = sHTML.size(); // 字节长度（与字符数相同，因无多字节字符）
 
-    write_common_headers(ssOut, 302, "Found");
+    write_head(ssOut, 302, "Found");
     ssOut << "Location: " << location_str << "\r\n";
     ssOut << "Content-Type: text/html\r\n";
     ssOut << "Content-Length: " << content_length << "\r\n"; // 正确计算长度
@@ -1133,7 +1252,7 @@ void HttpServer::ResponseLoginFailed::write_response(std::stringstream& ssOut)
     const std::string sHTML = "<html><body><h1>Sign-in failed</h1>"
                               "<p>The sign-in could not be completed. You can close this page and try again "
                               "in the slicer.</p></body></html>";
-    write_common_headers(ssOut, 200, "OK");
+    write_head(ssOut, 200, "OK");
     ssOut << "Content-Type: text/html\r\n";
     ssOut << "Content-Length: " << sHTML.size() << "\r\n";
     ssOut << "\r\n";
@@ -1145,7 +1264,7 @@ void HttpServer::ResponseNotFound::write_response(std::stringstream& ssOut)
     const std::string sHTML          = "<html><body><h1>404 Not Found</h1><p>There's nothing here.</p></body></html>";
     size_t            content_length = sHTML.size(); // 字节长度
 
-    write_common_headers(ssOut, 404, "Not Found");
+    write_head(ssOut, 404, "Not Found");
     ssOut << "Content-Type: text/html\r\n";
     ssOut << "Content-Length: " << content_length << "\r\n"; // 正确计算长度
     ssOut << "\r\n";                                         // 头和主体之间的空行（必须）
@@ -1154,18 +1273,18 @@ void HttpServer::ResponseNotFound::write_response(std::stringstream& ssOut)
 
 void HttpServer::ResponseFile::write_response(std::stringstream& ssOut)
 {
-    std::ifstream file;
-    if (m_native_path) {
-        file.open(file_path, std::ios::binary);
-    } else {
-        std::string system_file_path = utf8_to_filesystem_encoding(file_path);
-        file.open(system_file_path, std::ios::binary);
-        if (!file) {
-            file.open(file_path, std::ios::binary);
-        }
+    // UTF-8 path -> wide API on Windows, so non-ASCII paths open whatever the code page.
+    boost::nowide::ifstream file;
+    if (!file_path.empty())
+        file.open(file_path.c_str(), std::ios::binary);
+    if (!file && !file_path.empty()) {
+        std::string system_file_path = m_native_path ? file_path : utf8_to_filesystem_encoding(file_path);
+        file.clear();
+        file.open(system_file_path.c_str(), std::ios::binary);
     }
     if (!file) {
         ResponseNotFound notFoundResponse;
+        copy_head_policy_to(notFoundResponse);
         notFoundResponse.write_response(ssOut);
         return;
     }
@@ -1183,7 +1302,7 @@ void HttpServer::ResponseFile::write_response(std::stringstream& ssOut)
 
     if (can_revalidate && is_not_modified(m_if_modified_since, m_if_none_match, etag, last_write_time)) {
         // Client's cached copy is still current: no body.
-        write_common_headers(ssOut, 304, "Not Modified");
+        write_head(ssOut, 304, "Not Modified");
         ssOut << "Cache-Control: " << get_cache_control_header(file_path) << "\r\n";
         ssOut << "ETag: " << etag << "\r\n";
         ssOut << "Last-Modified: " << last_modified << "\r\n";
@@ -1223,7 +1342,7 @@ void HttpServer::ResponseFile::write_response(std::stringstream& ssOut)
         content_type = "font/woff2";
 
     // 构造响应头（严格使用\r\n，头结束后空行）
-    write_common_headers(ssOut, 200, "OK");
+    write_head(ssOut, 200, "OK");
     ssOut << "Content-Type: " << content_type << "\r\n";
     ssOut << "Content-Length: " << content_length << "\r\n"; // 必须与实际内容长度一致
     ssOut << "Cache-Control: " << get_cache_control_header(file_path) << "\r\n";

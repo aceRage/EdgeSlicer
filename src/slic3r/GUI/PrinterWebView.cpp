@@ -35,7 +35,7 @@ PrinterWebView::PrinterWebView(wxWindow *parent)
 
     wxBoxSizer* topsizer = new wxBoxSizer(wxVERTICAL);
 
-    wxString url      = wxString::FromUTF8(LOCALHOST_URL + std::to_string(wxGetApp().get_page_http_port()) + "/web/flutter_web/index.html?path=2");
+    wxString url      = wxString::FromUTF8(wxGetApp().page_url("/web/flutter_web/index.html?path=2"));
     auto     real_url = wxGetApp().get_international_url(url);
     // CreateWebView still takes the Flutter URL. On macOS, WebViewWebKit holds it
     // until the script-message handler is installed (SM #857/#865).
