@@ -5998,4 +5998,35 @@ TEST_CASE("Mixed filament config remap sends deleted mixed rows to default", "[M
     CHECK(object_config.extruder() == 0);
     CHECK_FALSE(object_config.has("wall_filament"));
     CHECK(object_config.opt_int("solid_infill_filament") == 5);
+
+    DynamicPrintConfig global_config = DynamicPrintConfig::full_print_config();
+    global_config.set("wall_filament", 5, true);
+    remap_dynamic_config_feature_filament_ids(global_config, id_remap, 6);
+    CHECK_FALSE(global_config.has("wall_filament"));
+
+    ModelConfig default_config;
+    default_config.set("extruder", 0);
+    default_config.set("wall_filament", 0);
+    remap_model_config_filament_ids(default_config, id_remap, 6);
+    CHECK(default_config.extruder() == 0);
+    CHECK(default_config.has("wall_filament"));
+    CHECK(default_config.opt_int("wall_filament") == 0);
+}
+
+TEST_CASE("Mixed filament config remap follows mixed-deletion painting table", "[MixedFilament][ConfigRemap]")
+{
+    // 4 physical + mixed A=v5, B=v6. Deleting A is T2→T3: B 6→5, A→0.
+    const auto id_remap = MixedFilamentManager::build_mixed_deletion_painting_remap(4, 6, {5});
+    REQUIRE(id_remap.size() == 7);
+    CHECK(id_remap[5] == 0u);
+    CHECK(id_remap[6] == 5u);
+
+    ModelConfig object_config;
+    object_config.set("extruder", 6);
+    object_config.set("wall_filament", 6);
+    object_config.set("sparse_infill_filament", 5);
+    remap_model_config_filament_ids(object_config, id_remap, 5);
+    CHECK(object_config.extruder() == 5);
+    CHECK(object_config.opt_int("wall_filament") == 5);
+    CHECK_FALSE(object_config.has("sparse_infill_filament"));
 }

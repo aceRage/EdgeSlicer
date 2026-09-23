@@ -9292,42 +9292,26 @@ void Sidebar::cleanup_unused_filaments_after_batch_match(const BatchMatchResult 
                 if (mv->type() == ModelVolumeType::MODEL_PART)
                     mv->remap_extruder_ids(t3_total, state_map);
 
-        // Config "extruder" references (object/volume/layer) must follow the same
-        // remap as painting — remap_extruder_ids above touches triangle data only,
-        // so a config entry on a mixed row would stay on its stale pre-deletion id
-        // (the config side of the merged-slot regression). In the table, physical
-        // ids are identity, a deleted row maps to 0 (default), a survivor keeps
-        // its shifted id, and out-of-range/absent keys are left untouched. EPOCH
-        // NOTE: config values are naive-decremented per physical deletion while
-        // the table is cascade-aware (T2) — consistent only with no cascade removal
-        // (the batch-match flow's case); if a cascade ever fires, skip via
-        // cascade_mixed_count == 0 or normalise first.
-        auto remap_config_extruder = [&mixed_deletion_remap](ModelConfig &cfg) {
-            if (!cfg.has("extruder")) return;
-            const int old = cfg.extruder();
-            if (old <= 0) return;
-            const size_t idx = static_cast<size_t>(old);
-            if (idx >= mixed_deletion_remap.size()) return;
-            const unsigned int mapped = mixed_deletion_remap[idx];
-            if (mapped == 0) {
-                // Deleted row: revert to default.  Set the key to 0 rather than
-                // erasing it — a missing "extruder" would make cfg.extruder()
-                // (opt_int, nullptr on absent key) a dangling dereference for
-                // any unprotected reader (GUI_ObjectList's delete path writes 0
-                // to layer ranges too).  Objects/volumes with extruder 0 resolve
-                // to "default" via ModelVolume::extruder_id()'s inherit-from-
-                // object fallback, so inheriting children stay "default".
-                cfg.set("extruder", 0);
-            } else if (mapped != static_cast<unsigned int>(old)) {
-                cfg.set_key_value("extruder", new ConfigOptionInt(static_cast<int>(mapped)));
-            }
-        };
-        for (ModelObject* mo : wxGetApp().model().objects) {
-            remap_config_extruder(mo->config);
-            for (ModelVolume* mv : mo->volumes)
-                remap_config_extruder(mv->config);
+        // Config-level object/volume/layer + global feature keys must follow the
+        // same remap as painting. remap_extruder_ids above touches triangle data
+        // only. Physical ids stay identity; a deleted mixed row maps to 0
+        // (extruder → explicit default, feature keys → erase so the global
+        // default applies); survivors keep their shifted virtual id.
+        //
+        // Epoch: on_filaments_delete already applied the per-physical-deletion
+        // remap (cascade-aware when a table exists), so config IDs are in T2
+        // space. This table is T2→T3 for the mixed rows marked above. Applying
+        // it here — including feature keys — is required before the ObjectList
+        // refresh below, which clamps keys > T3 total and would otherwise erase
+        // or alias a stale T2 mixed ID.
+        if (DynamicPrintConfig *cfg = const_cast<DynamicPrintConfig *>(wxGetApp().plater()->config()))
+            remap_dynamic_config_feature_filament_ids(*cfg, mixed_deletion_remap, t3_total);
+        for (ModelObject *mo : wxGetApp().model().objects) {
+            remap_model_config_filament_ids(mo->config, mixed_deletion_remap, t3_total);
+            for (ModelVolume *mv : mo->volumes)
+                remap_model_config_filament_ids(mv->config, mixed_deletion_remap, t3_total);
             for (auto &lr : mo->layer_config_ranges)
-                remap_config_extruder(lr.second);
+                remap_model_config_filament_ids(lr.second, mixed_deletion_remap, t3_total);
         }
     }
 
@@ -10460,7 +10444,7 @@ struct Plater::priv
     bool m_slice_all_only_has_gcode{ false };
 
     bool m_need_update{false};
-    int  m_batch_physical_deletion{0}; // >0: skip per-deletion painting remap in on_filaments_delete
+    int  m_batch_physical_deletion{0}; // >0: skip per-deletion painting remap and ObjectList refresh
     //BBS: add popup object table logic
     //ObjectTableDialog* m_popup_table{ nullptr };
 
