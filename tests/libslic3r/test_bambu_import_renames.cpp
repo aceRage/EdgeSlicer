@@ -240,6 +240,7 @@ DynamicPrintConfig aliased_project()
         { "wipe_tower_fillet_wall", "0" },
         { "wipe_tower_wall_type", "rib" },
         { "wipe_tower_max_purge_speed", "120" },
+        { "wipe_tower_wall_gap", "0" },
         { "lateral_lattice_angle_1", "-30" },
         { "lateral_lattice_angle_2", "40" },
         { "notes", "keep me; and me" },
@@ -285,6 +286,7 @@ TEST_CASE("Bambu Studio's names load as our keys, with the value converted", "[B
     CHECK(legacy("prime_tower_rib_width", "8") == "wipe_tower_rib_width=8");
     CHECK(legacy("prime_tower_extra_rib_length", "2") == "wipe_tower_extra_rib_length=2");
     CHECK(legacy("prime_tower_fillet_wall", "0") == "wipe_tower_fillet_wall=0");
+    CHECK(legacy("prime_tower_skip_points", "0") == "wipe_tower_wall_gap=0");
     CHECK(legacy("extruder_clearance_max_radius", "73") == "extruder_clearance_radius=73");
     CHECK(legacy("enable_support_ironing", "1") == "support_ironing=1");
     CHECK(legacy("role_base_wipe_speed", "0") == "role_based_wipe_speed=0");

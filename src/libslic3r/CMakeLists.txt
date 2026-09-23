@@ -305,6 +305,8 @@ set(lisbslic3r_sources
     GCode/WipeTower.hpp
     GCode/WipeTowerEstimate.cpp
     GCode/WipeTowerEstimate.hpp
+    GCode/WipeTowerInterface.cpp
+    GCode/WipeTowerInterface.hpp
     GCodeWriter.cpp
     GCodeWriter.hpp
     Geometry/Bicubic.hpp

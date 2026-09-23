@@ -597,6 +597,32 @@ Config convert_impl(const ConfigBase &cfg, const Context &ctx, Scope scope, Repo
         out["filament_self_index"]       = ints_value(target_filament.ids);
     }
 
+    // Bambu Studio has one switch, enable_tower_interface_features, for the bundle our three tower
+    // interface options split up (GCode/WipeTowerInterface.hpp). It is written from them, never from
+    // the Bambu value a loaded file kept: on when any of them is, since Bambu Studio can only turn
+    // on the whole bundle. The per-filament values keep Bambu's key names and go out as they are.
+    if (scope == Scope::Project || scope == Scope::Print) {
+        std::vector<std::string> on;
+        bool                     present = false;
+        for (const char *key : { "wipe_tower_interface_temp", "wipe_tower_interface_run_in", "wipe_tower_interface_extra_prime" })
+            if (const ConfigOption *opt = cfg.option(key); opt != nullptr) {
+                present = true;
+                if (opt->getBool())
+                    on.emplace_back(key);
+            }
+        if (present) {
+            Value v;
+            v.values = { on.empty() ? "0" : "1" };
+            out["enable_tower_interface_features"] = v;
+            if (! on.empty() && on.size() < 3)
+                local.notes.push_back(where + ": enable_tower_interface_features written as on although only " + join(on, ", ") +
+                                      " is on: Bambu Studio turns on its whole tower interface bundle (interface temperature, run-in, "
+                                      "extra prime, interface wall gaps and, on the H2 series, a firmware purge)");
+        } else {
+            out.erase("enable_tower_interface_features");
+        }
+    }
+
     // different_settings_to_system names keys per preset type; keep it in Bambu's vocabulary.
     if (auto it = out.find("different_settings_to_system"); it != out.end()) {
         for (std::string &list : it->second.values) {

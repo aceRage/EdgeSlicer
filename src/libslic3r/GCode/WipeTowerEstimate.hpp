@@ -23,7 +23,8 @@ struct WipeTowerFootprint
     double width      = 0.; // effective width: equals depth for a rib wall, which squares the tower
     double depth      = 0.; // 0 when these inputs imply no tower
     double height     = 0.; // tallest object; drives the stability floor and the auto brim
-    double brim_width = 0.; // printed width: auto (-1) resolved by height, laid in whole loops
+    double brim_width = 0.; // printed width: auto (-1) resolved by height, laid in whole loops; at least the
+                            // tower interface run-in reserve (TowerInterface::run_in_reserve())
 };
 
 // Which planner builds the tower: Bambu Lab printers always get Type1, the rest follow
