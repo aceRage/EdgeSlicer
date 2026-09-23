@@ -7971,7 +7971,8 @@ static bool grouping_header_maps(const Print& print, std::vector<int>& nozzle_ma
     volume_map.resize(num_filaments, int(NozzleVolumeType::nvtStandard));
     const std::vector<int> grouped_volumes = group_result->get_volume_map();
     for (unsigned int f : group_result->get_used_filaments())
-        if (f < volume_map.size() && f < grouped_volumes.size())
+        if (f < volume_map.size() && f < grouped_volumes.size() && grouped_volumes[f] >= 0 &&
+            grouped_volumes[f] <= int(NozzleVolumeType::nvtMaxNozzleVolumeType))
             volume_map[f] = grouped_volumes[f];
     return true;
 }
