@@ -442,6 +442,10 @@ set(SLIC3R_GUI_SOURCES
     GUI/PrinterWebView.hpp
     GUI/StreamPanel.cpp
     GUI/StreamPanel.hpp
+    GUI/HomePanel.cpp
+    GUI/HomePanel.hpp
+    GUI/HubHomeView.cpp
+    GUI/HubHomeView.hpp
     GUI/BambuCamRelay.cpp
     GUI/BambuCamRelay.hpp
     GUI/RemoteAccess.cpp
@@ -830,6 +834,8 @@ set(SLIC3R_GUI_SOURCES
     Utils/InstanceID.hpp
     Utils/LoginUserAgent.cpp
     Utils/LoginUserAgent.hpp
+    Utils/HubHomeLogic.cpp
+    Utils/HubHomeLogic.hpp
     Utils/json_diff.cpp
     Utils/json_diff.hpp
     Utils/minilzo_extension.cpp

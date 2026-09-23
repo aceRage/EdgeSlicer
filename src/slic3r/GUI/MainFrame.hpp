@@ -54,6 +54,7 @@ class Plater;
 class MainFrame;
 class ParamsDialog;
 class SliceModePopup;
+class HomePanel;
 
 enum QuickSlice
 {
@@ -440,7 +441,14 @@ public:
     // Dark-mode/DPI treatment for a panel built after the startup theme pass.
     void              apply_theme_to_lazy_panel(wxWindow* panel);
 
+    // The Home tab (HomePanel): the phone hub page, with the old flutter start page kept behind it.
+    // m_webview IS that start page. It is built only when something asks for it (File > Start page,
+    // EVT_LOAD_URL, the hub view's "Open start page"), so test it for null before use - or go
+    // through start_page(), which builds it.
+    HomePanel*            m_home { nullptr };
     WebViewPanel*         m_webview { nullptr };
+    WebViewPanel*         start_page();
+    void                  show_start_page();
     PrinterWebView*       m_printer_view{nullptr};
     ProgressDialog*       m_log_progress_dlg{nullptr}; // Ultra: Flashforge log-export progress
     wxPanel*              m_ff_device{nullptr};        // Ultra: Flashforge device tab (FFDeviceTab)

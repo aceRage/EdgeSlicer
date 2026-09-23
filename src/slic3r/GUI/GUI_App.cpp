@@ -5305,7 +5305,10 @@ void GUI_App::sm_get_login_info() {
         wxString    strJS      = wxString::Format("window.postMessage(%s)", login_cmd);
         GUI::wxGetApp().run_script(strJS);
     }
-    mainframe->m_webview->SetLoginPanelVisibility(true);
+    // The start page is built on demand now (Home shows the phone hub): nothing to update if it
+    // was never opened - it asks for the login state itself when it loads.
+    if (mainframe->m_webview)
+        mainframe->m_webview->SetLoginPanelVisibility(true);
 }
 
 void GUI_App::sm_request_login(bool show_user_info)
@@ -5395,7 +5398,8 @@ void GUI_App::get_login_info()
             wxString strJS = wxString::Format("window.postMessage(%s)", logout_cmd);
             GUI::wxGetApp().run_script(strJS);
         }
-        mainframe->m_webview->SetLoginPanelVisibility(true);
+        if (mainframe->m_webview)
+            mainframe->m_webview->SetLoginPanelVisibility(true);
     }
 }
 
@@ -6914,7 +6918,8 @@ void GUI_App::stop_page_http_server()
 
 void GUI_App::switch_staff_pick(bool on)
 {
-    mainframe->m_webview->SendDesignStaffpick(on);
+    if (mainframe && mainframe->m_webview)
+        mainframe->m_webview->SendDesignStaffpick(on);
 }
 
 bool GUI_App::switch_language()
@@ -7333,7 +7338,8 @@ void GUI_App::update_mode()
         mainframe->m_param_dialog->panel()->update_mode();
     if (mainframe->m_printer_view)
         mainframe->m_printer_view->update_mode();
-    mainframe->m_webview->update_mode();
+    if (mainframe->m_webview)
+        mainframe->m_webview->update_mode();
 
 #ifdef _MSW_DARK_MODE
     if (!wxGetApp().tabs_as_menu())
@@ -7351,7 +7357,8 @@ void GUI_App::update_mode()
 }
 
 void GUI_App::update_internal_development() {
-    mainframe->m_webview->update_mode();
+    if (mainframe->m_webview)
+        mainframe->m_webview->update_mode();
     if (mainframe->m_printer_view)
         mainframe->m_printer_view->update_mode();
 }

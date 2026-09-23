@@ -45,6 +45,7 @@
 #include "RemoteAccess.hpp"
 #include "FlashForge/FFDeviceTab.hpp"
 #include "WebViewDialog.hpp"
+#include "HomePanel.hpp"
 #include "../Utils/Process.hpp"
 #include "format.hpp"
 // BBS
@@ -1372,11 +1373,10 @@ void MainFrame::init_tabpanel() {
 
         // Send "inactive" to previous tab if leaving a monitored tab
         if (prev_monitored_tab == tpHome && sel != tpHome) {
-            // Leaving homepage
-            if (m_webview) {
-                wxWebView* home_webview = m_webview->getWebView();
-                wxGetApp().page_state_notify_webview(home_webview, "inactive");
-            }
+            // Leaving Home: the hub view pauses; the start page (if it is the one showing) hears
+            // "inactive" from HomePanel.
+            if (m_home)
+                m_home->on_tab_changed(false);
         } else if (prev_monitored_tab == tpMonitor && sel != tpMonitor) {
             // Leaving device page (PrinterWebView)
             if (m_printer_view) {
@@ -1387,11 +1387,10 @@ void MainFrame::init_tabpanel() {
 
         // Send "active" to current tab if entering a monitored tab
         if (sel == tpHome) {
-            // Entering homepage
-            if (m_webview) {
-                wxWebView* home_webview = m_webview->getWebView();
-                wxGetApp().page_state_notify_webview(home_webview, "active");
-            }
+            // Entering Home: the hub view loads (first time) or re-checks the hub; the start page
+            // (if it is the one showing) hears "active" from HomePanel.
+            if (m_home)
+                m_home->on_tab_changed(true);
             prev_monitored_tab = tpHome;
         } else if (sel == tpMonitor) {
             // Entering device page (PrinterWebView)
@@ -1431,15 +1430,19 @@ void MainFrame::init_tabpanel() {
 
     if (wxGetApp().is_editor()) {
         {
-            Slic3r::StartupScopedTimer t("MainFrame::init_tabpanel step=WebViewPanel");
-            m_webview         = new WebViewPanel(m_tabpanel);
+            // Home shows the phone hub. The old start page (m_webview) is built only when asked
+            // for (show_start_page / start_page), so nothing loads it at startup any more.
+            Slic3r::StartupScopedTimer t("MainFrame::init_tabpanel step=HomePanel");
+            m_home = new HomePanel(m_tabpanel);
         }
         Bind(EVT_LOAD_URL, [this](wxCommandEvent &evt) {
+            // A URL for the home page goes to the start page, which is where it always went.
             wxString url = evt.GetString();
-            select_tab(MainFrame::tpHome);
-            m_webview->load_url(url);
+            show_start_page();
+            if (m_webview)
+                m_webview->load_url(url);
         });
-        m_tabpanel->AddPage(m_webview, "", "tab_home_active", "tab_home_active", false);
+        m_tabpanel->AddPage(m_home, "", "tab_home_active", "tab_home_active", false);
         Slic3r::StartupScopedTimer t("MainFrame::init_tabpanel step=ParamsPanel");
         m_param_panel = new ParamsPanel(m_tabpanel, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxBK_LEFT | wxTAB_TRAVERSAL);
       
@@ -2667,6 +2670,9 @@ void MainFrame::on_sys_color_changed()
 
     MenuFactory::sys_color_changed(m_menubar);
 
+    // Before RecreateAll: the hub view switches theme in place (it is excluded from the reload).
+    if (m_home)
+        m_home->sys_color_changed();
     WebView::RecreateAll();
 
     this->Refresh();
@@ -2937,6 +2943,12 @@ void MainFrame::init_menubar_as_editor()
         m_recent_projects.LoadThumbnails();
 
         Bind(wxEVT_UPDATE_UI, [this](wxUpdateUIEvent& evt) { evt.Enable(can_open_project() && (m_recent_projects.GetCount() > 0)); }, recent_projects_submenu->GetId());
+
+        // The Home tab shows the phone hub; the old start page (recent projects, Snapmaker's
+        // model library) stays one click away here.
+        append_menu_item(fileMenu, wxID_ANY, _L("Start page"), _L("Show the start page with recent projects on the Home tab"),
+            [this](wxCommandEvent&) { show_start_page(); }, "", nullptr,
+            [this]() { return m_home != nullptr; }, this);
 
         // BBS: close save project
 #ifndef __APPLE__
@@ -3665,7 +3677,8 @@ void MainFrame::set_max_recent_count(int max)
         }
         wxGetApp().app_config->set_recent_projects(recent_projects);
         wxGetApp().app_config->save();
-        m_webview->SendRecentList(-1);
+        if (m_webview)
+            m_webview->SendRecentList(-1);
 
         // wcp 订阅
         json data;
@@ -4269,7 +4282,8 @@ void MainFrame::add_to_recent_projects(const wxString& filename)
             recent_projects.push_back(into_u8(m_recent_projects.GetHistoryFile(i)));
         }
         wxGetApp().app_config->set_recent_projects(recent_projects);
-        m_webview->SendRecentList(0);
+        if (m_webview)
+            m_webview->SendRecentList(0);
 
         // wcp 订阅
         json data;
@@ -4421,7 +4435,8 @@ void MainFrame::open_recent_project(size_t file_id, wxString const & filename)
                 recent_projects.push_back(into_u8(m_recent_projects.GetHistoryFile(i)));
             }
             wxGetApp().app_config->set_recent_projects(recent_projects);
-            m_webview->SendRecentList(-1);
+            if (m_webview)
+                m_webview->SendRecentList(-1);
 
             // wcp 订阅
             json data;
@@ -4475,12 +4490,29 @@ void MainFrame::remove_recent_project(size_t file_id, wxString const &filename)
         recent_projects.push_back(into_u8(m_recent_projects.GetHistoryFile(i)));
     }
     wxGetApp().app_config->set_recent_projects(recent_projects);
-    m_webview->SendRecentList(-1);
+    if (m_webview)
+        m_webview->SendRecentList(-1);
 
     // wcp 订阅
     json data;
     wxGetApp().mainframe->get_recent_projects(data, INT_MAX);
     wxGetApp().recent_file_notify(data);
+}
+
+WebViewPanel* MainFrame::start_page()
+{
+    if (m_webview == nullptr && m_home != nullptr)
+        m_webview = m_home->start_page();
+    return m_webview;
+}
+
+void MainFrame::show_start_page()
+{
+    if (m_home == nullptr)
+        return;
+    start_page();
+    m_home->show_start_page();
+    select_tab(MainFrame::tpHome);
 }
 
 void MainFrame::load_url(wxString url)

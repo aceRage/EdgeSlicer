@@ -4777,6 +4777,11 @@ int run_server(const std::string& token_hint, bool phone_on)
 
 static std::mutex  s_state_mutex;
 static std::string s_last_state;
+// ensure_running() one caller at a time within this process: the startup call
+// (GUI_App::start_remote_access), the Stream tab and the Home tab can all ask at once, and two
+// callers that both find no hub would both spawn one. The second caller now waits and finds the
+// first one's hub.
+static std::mutex  s_ensure_mutex;
 
 std::string Info::url() const
 {
@@ -4915,6 +4920,7 @@ bool post_event(const std::string& event_json)
 
 Info ensure_running(const std::string& token_hint, bool phone_on)
 {
+    std::lock_guard<std::mutex> ensure_lock(s_ensure_mutex);
     Info i = query();
     if (i.alive && i.version != SLIC3R_VERSION) {
         BOOST_LOG_TRIVIAL(info) << "RemoteHub: hub version " << i.version << " != " << SLIC3R_VERSION << ", restarting it";
