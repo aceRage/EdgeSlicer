@@ -1230,6 +1230,8 @@ public:
     bool                        enable_timelapse_print() const;
 
 	std::string                 output_filename(const std::string &filename_base = std::string()) const override;
+    // Same 0-based index the G-code generator publishes as initial_no_support_extruder.
+    unsigned int                initial_no_support_extruder_id() const;
 
 	std::string                 get_model_name() const;
 	std::string                 get_plate_number_formatted() const;
