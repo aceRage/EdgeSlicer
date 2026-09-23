@@ -371,6 +371,168 @@ comma-joined value, so an ini file, a G-code config block or a CLI `--key 200,ni
 Bambu `nil` now loads instead of throwing. Nullable and string options are untouched on every
 path.
 
+## Renamed keys (Bambu Studio's name -> ours)
+
+Some settings exist on both sides under different names, or with an enum value spelled
+differently. Until 2026-09-22 only six of them were read back (`sparse_infill_anchor(_max)`,
+`chamber_temperatures`, `initial_layer_flow_ratio`, `ironing_direction`, `top_one_wall_type`);
+the rest were dropped as unknown keys, so a genuine Bambu Studio project lost its prime tower
+settings, its clearance radius, its process notes and so on, even though "Export Bambu 3MF" was
+already writing all of them in the other direction.
+
+### One table, both directions
+
+`src/libslic3r/Format/BambuKeyAliases.{hpp,cpp}` holds every pair once, with the value conversion
+in each direction:
+
+- export: `BambuExport` renames our key and applies `to_bambu` (docs/bambu-3mf-export.md);
+- import: `PrintConfigDef::handle_legacy` calls `BambuKeyAliases::import_key` first, which renames
+  Bambu's key and applies `from_bambu`. Every loader goes through `handle_legacy`, so this covers
+  3MF project settings, embedded presets, per-object / per-part / height-range settings
+  (`model_settings.config`, `layer_config_ranges.xml`), loose preset `.json` files (Import
+  Configs, the Bambu Studio preset mirror, system profiles), ini files and G-code config blocks.
+
+| Bambu Studio | ours | value on import | since |
+|---|---|---|---|
+| `sparse_infill_anchor` / `_max` | `infill_anchor` / `_max` | same | before |
+| `chamber_temperatures` | `chamber_temperature` | same | before |
+| `initial_layer_flow_ratio` | `bottom_solid_infill_flow_ratio` | same | before |
+| `ironing_direction` | `ironing_angle` | same (export leaves our `-1` = "default" out) | before |
+| `top_one_wall_type` | `only_one_wall_top` | `not apply` -> 0, `all top` / `topmost` -> 1 (topmost is approximate) | before |
+| `enable_support_ironing` | `support_ironing` | same | **new** |
+| `extruder_clearance_max_radius` | `extruder_clearance_radius` | same (was in the ignore set) | **new** |
+| `no_slow_down_for_cooling_on_outwalls` | `dont_slow_down_outer_wall` | same | **new** |
+| `role_base_wipe_speed` | `role_based_wipe_speed` | same | **new** |
+| `reduce_infill_retraction_mode` | `reduce_infill_retraction` | `Enabled` -> 1, `Disabled` -> 0, `Auto` -> not loaded | **new** |
+| `prime_tower_rib_width` | `wipe_tower_rib_width` | same | **new** |
+| `prime_tower_extra_rib_length` | `wipe_tower_extra_rib_length` | same | **new** |
+| `prime_tower_fillet_wall` | `wipe_tower_fillet_wall` | same | **new** |
+| `prime_tower_rib_wall` | `wipe_tower_wall_type` | 1 -> `rib`, 0 -> `rectangle` | **new** |
+| `prime_tower_max_speed` | `wipe_tower_max_purge_speed` | same | **new** |
+| `sparse_infill_lattice_angle_1` / `_2` | `lateral_lattice_angle_1` / `_2` | same | **new**, both directions |
+| `process_notes` | `notes` | same | **new**, both directions |
+| `filament_colour_type` | `filament_colour_mode` | 0 (gradient) <-> 1, 1 (default) <-> 0 | **new**, both directions |
+| `filament_multi_colour` | `filament_multi_colors` | colours space-separated <-> `\|`-separated | **new**, both directions |
+
+Enum values (same key, different spelling), read back from the manual rows in
+`BambuKeyAliases::enum_aliases()` and from the generated `BambuKnownKeys.cpp` table:
+`2dlattice` -> `lateral-lattice` (every pattern option; it is the same pattern, `Fill2DLattice` /
+`FillLateralLattice`, with the same angle options), `tree_organic` -> `organic` (`support_style`;
+used to fall back to the default with a substitution warning), `zig-zag` -> `rectilinear`, and
+`ensure_vertical_shell_thickness` `enabled` / `partial` / `disabled` -> `ensure_all` /
+`ensure_moderate` / `none`. The `[BambuAliases]` test "Every Bambu enum value of a shared key
+loads" walks every enum value Bambu can write for a key we share; the only ones left without an
+equivalent are `fuzzy_skin = disabled_fuzzy` (Bambu: off and ignore paint) and
+`nozzle_type = tungsten_carbide`, which fall back through the normal substitution report.
+
+### Value conversions and what cannot be represented
+
+- A conversion works element by element on the value as our option serializes it (whole value
+  for a scalar, `,`-split for a vector, the quoted `;` form for `coStrings`), so it is the same for
+  a JSON array, a JSON string and a `model_settings.config` attribute. `nil` slots are passed
+  through untouched to the nil translation above, which runs after the rename, against our
+  option's type.
+- A key-only pass (the first `handle_legacy` call on a JSON array, `different_settings_to_system`)
+  only renames. For a JSON array whose key is an alias, `load_from_json_document` deserializes the
+  assembled value under the Bambu name, so `handle_legacy` sees the whole value and converts it.
+- A Bambu value with no equivalent here (`reduce_infill_retraction_mode = Auto`, decided per
+  filament) is not loaded: the key is dropped like any unknown key and ours keeps its own or its
+  inherited value. Nothing is invented.
+- Lossy on export, by design: `wipe_tower_wall_type = cone` goes out as a plain wall and comes back
+  as `rectangle`; `ironing_angle = -1` is left out; `ensure_critical_only` comes back as
+  `ensure_moderate`. The `[BambuAliases]` test "What Export Bambu 3MF cannot say ..." pins these.
+
+### Both spellings in one file: ours wins
+
+A file may carry both names (our own BBL/Qidi/Elegoo machine profiles carry
+`extruder_clearance_radius` *and* `extruder_clearance_max_radius`, copied from Bambu's). Our key
+wins, whatever order the two are read in:
+
+- JSON documents: `load_from_json_document` skips a Bambu alias when the same document also has
+  our key (logged at `info`). Before this, the loader's sorted key order decided, and for most
+  pairs (`top_one_wall_type` after `only_one_wall_top`, `process_notes` after `notes`, ...) the
+  Bambu value was applied last and won.
+- Per-object / per-part settings: `ModelConfig::set_deserialize` skips a Bambu alias when the
+  config already holds our key; our key read later overwrites anyway.
+- Not covered: a height range (`layer_config_ranges.xml`) that lists both names keeps the one it
+  lists last. Neither Bambu Studio nor this fork writes both.
+
+Consequence for `extruder_clearance_radius`: Bambu's own machine profiles still carry a stale
+`extruder_clearance_radius` (49 on the H2D) that Bambu Studio itself ignores in favour of
+`extruder_clearance_max_radius` (96). A Bambu system profile loaded as a file keeps 49 - the value
+our shipped copy of the same profile has always loaded as. Bambu projects and user presets only
+ever carry `extruder_clearance_max_radius` (Bambu does not write keys it does not declare), so
+they get Bambu's value.
+
+### Effect on this fork's shipped profiles
+
+`resources/profiles` (11,600 files) carries some Bambu names that used to be dropped. Where the
+same file does not also set our key, they now apply:
+
+| Bambu key | files | effect |
+|---|---|---|
+| `extruder_clearance_max_radius` alone | 11 | **changes** the sequential-print clearance radius: BBL A1 / A1 mini / A2L 57 -> 73, X2D 13 -> 60, Elegoo CC2 common 65 -> 68, Qidi Q2 / Q2C / X-Plus 5 65 -> 75, X-Max 4 65 -> 80, Geeetech common 40 (default) -> 47 / 65. The new values are the vendors' own (what Bambu / Qidi Studio use) |
+| `prime_tower_rib_wall` = 1 | 15 | **changes** the wipe tower wall of the Anycubic Kobra S1 Max process presets from `rectangle` to `rib` |
+| `no_slow_down_for_cooling_on_outwalls` = [0] | 229 | none (our default, nothing inherited) |
+| `prime_tower_max_speed` 90, `_rib_width` 8, `_extra_rib_length` 0, `_fillet_wall` 1 | 15-16 | none (our defaults) |
+| `enable_support_ironing` 0, `sparse_infill_lattice_angle_1/2` -45 / 45 | 2 (Qidi) | none (our defaults) |
+| `extruder_clearance_max_radius` next to `extruder_clearance_radius` | 29 | none (ours wins) |
+
+### Deliberately not mapped
+
+Audited against Bambu Studio's `PrintConfig.cpp` (02.08.02.61): every Bambu-only key was checked
+for an equivalent here. These look related but are not the same setting:
+
+- `skirt_per_object` (sequential printing only, `comDevelop`, default on) vs our `skirt_type`:
+  mapping it would switch every Bambu project to per-object skirts.
+- `print_in_clockwise` (`comDevelop`, always off in practice) vs our `wall_direction`.
+- `prime_tower_infill_gap` (150 %) vs our `wipe_tower_extra_spacing` (100 %): ours only drives the
+  Type 2 tower; our Type 1 tower computes its spacing.
+- `machine_hotend_change_time` (H2C hotend rack) vs our `machine_tool_change_time`;
+  `machine_prepare_compensation_time` (default 260 s, `comDevelop`) vs our `machine_prepare_time`.
+- `max_volumetric_extrusion_rate_slope_positive/_negative` (compiled out in Bambu) vs our single
+  `max_volumetric_extrusion_rate_slope`.
+- `thumbnail_size` -> `thumbnails` is an older Orca rename in `handle_legacy`, not part of this table.
+
+### Measured on a corpus of genuine Bambu Studio files
+
+`libslic3r_tests "[.bambu_corpus]"` with `BAMBU_CORPUS` set loads every file and counts, per file,
+the distinct keys the loader drops as unknown (`ConfigSubstitutionContext::unrecogized_keys`); a
+3MF counts its project settings and embedded presets plus a full project load. Corpus: Bambu
+Studio's `resources/calib` 3MFs (5, three with project settings, BambuStudio-01.07 / 02.00),
+the owner's Bambu user presets in `tests/data/bambu_compat` and `bambu_compat_43` (52), and Bambu
+Studio's `resources/profiles/BBL` process / filament / machine presets (2,494). "Before" is
+origin/main 5264e22e6a with only the counting test added; "after" is this branch merged with
+main 3dca92a1bf (PR #95, which also makes `auto_pa_line_dual.3mf` load fully).
+
+| corpus | files | unknown keys dropped, before | after |
+|---|---|---|---|
+| Bambu 3MF projects | 5 | 138 | 121 |
+| Bambu preset .json | 2,546 | 34,284 | 34,191 |
+
+Every aliased key left the dropped list, per file that carried it:
+
+| Bambu key | 3MF before -> after | .json before -> after |
+|---|---|---|
+| `extruder_clearance_max_radius` | 3 -> 0 | 12 -> 0 |
+| `prime_tower_rib_wall` | 2 -> 0 | 23 -> 0 |
+| `prime_tower_fillet_wall` | 2 -> 0 | 14 -> 0 |
+| `prime_tower_max_speed` | 2 -> 0 | 4 -> 0 |
+| `prime_tower_rib_width`, `prime_tower_extra_rib_length` | 2 -> 0 each | - |
+| `role_base_wipe_speed` | 2 -> 0 | - |
+| `process_notes` | 2 -> 0 | - |
+| `enable_support_ironing` | - | 20 -> 0 |
+| `reduce_infill_retraction_mode` | - | 18 -> 1 (the one `Auto`: Bambu's `fdm_process_common.json`) |
+| `no_slow_down_for_cooling_on_outwalls` | - | 1 -> 0 |
+| `sparse_infill_lattice_angle_1` / `_2` | - | 1 -> 0 each |
+
+What is still dropped is Bambu-only (the per-filament overhang / ramming / retraction overrides,
+`pre_start_fan_time`, `first_x_layer_fan_speed`, hole and counter compensation, scarf-seam
+filament overrides, ...), plus a few keys Bambu Studio 02.00 wrote that current Bambu Studio no
+longer declares either (`chamber_temp_control`, `layer_time_smoothing`, `end_print_exhaust_fan_*`).
+The Bambu system presets carry few aliased keys because they inherit them from a handful of
+`*_common.json` files; each file is counted on its own, without resolving `inherits`.
+
 ## What the user sees
 
 Never silent. Three layers:
@@ -438,6 +600,16 @@ Bambu really wrote is preserved, and an end-to-end check that a translated H2D p
 slot 0 for standard and high-flow filaments. Fixtures in `tests/data/bambu_compat/` and
 `tests/data/bambu_compat_43/` are copies of real presets from the owner's Bambu Studio data;
 nothing reads the live folder at test time.
+
+`tests/libslic3r/test_bambu_import_renames.cpp`, tag `[BambuAliases]` (renamed keys): the alias
+table names real keys once each (and no Bambu name is one of ours); every Bambu name loads as our
+key with its value converted, including the key-only pass and `different_settings_to_system`;
+every enum value Bambu can write for a shared key loads; our config survives Export Bambu 3MF and
+our own import for every row of the table; the documented lossy cases; both spellings in one
+file keep ours (JSON and per-object, either order); Bambu's own `auto_pa_line_single.3mf` keeps
+its prime tower, clearance radius, wipe and ironing settings; Bambu user and system presets map
+theirs. Fixtures in `tests/data/bambu_import_renames/` are unmodified copies from Bambu Studio's
+`resources`. The hidden `[.bambu_corpus]` case produced the corpus table above.
 
 ### Verified results
 
