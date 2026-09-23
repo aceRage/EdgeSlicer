@@ -7477,7 +7477,7 @@ void PrintConfigDef::init_fff_params()
 
     def = this->add("prime_tower_brim_width", coFloat);
     def->label = L("Brim width");
-    def->tooltip = L("Width of the brim. A negative value means no prime tower brim; it is the \"auto\" sentinel used by the Bambu Lab, Flashforge and Qidi process profiles.");
+    def->tooltip = L("Width of the brim. A negative value is the \"auto\" sentinel used by the Bambu Lab, Flashforge and Qidi process profiles: on Bambu Lab printers the brim then grows with the tower height (8 mm from 100 mm up), on other printers the prime tower gets no brim.");
     def->sidetext = "mm";	// milimeters, don't need translation
     def->mode = comAdvanced;
     // 128 of the process profiles shipped in resources/profiles (107 BBL, 12 Qidi, 9 Flashforge)
@@ -7486,8 +7486,8 @@ void PrintConfigDef::init_fff_params()
     // range check in Slic3r::validate() (PrintConfig.cpp, "Out of range validation"), so declaring
     // min = 0 made every BBL/Qidi/Flashforge preset unsliceable from the command line without an
     // override. Declaring the range the shipped data actually uses fixes the CLI and leaves the
-    // GUI slicing result untouched (this fork has no auto-brim computation: WipeTower.cpp:1310
-    // turns any value < spacing/2 into zero brim loops).
+    // GUI slicing result untouched. The Bambu Lab generator (WipeTower) resolves -1 to Bambu Studio's
+    // height-based auto brim, like estimate_wipe_tower_footprint(); WipeTower2 still prints no brim.
     def->min = -1.;
     def->set_default_value(new ConfigOptionFloat(3.));
 
