@@ -12,6 +12,7 @@
 #include "libslic3r/Point.hpp"
 #include "libslic3r/Polygon.hpp"
 #include "libslic3r/TriangleMesh.hpp"
+#include "WipeTowerInterface.hpp"
 
 namespace Slic3r
 {
@@ -192,7 +193,9 @@ public:
 	WipeTower::ToolChangeResult only_generate_out_wall();
 
     float get_depth() const { return m_wipe_tower_depth; }
-    float get_brim_width() const { return m_wipe_tower_brim_width_real; }
+    // The brim, or the room tower interface run-ins need when that is wider: what the plate has to
+    // keep clear around the tower (see TowerInterface::run_in_reserve()).
+    float get_brim_width() const { return std::max(m_wipe_tower_brim_width_real, m_run_in_reserve); }
     float get_height() const { return m_wipe_tower_height; }
     float get_layer_height() const { return m_layer_height; }
 
@@ -323,6 +326,12 @@ public:
         float               nozzle_diameter;
         float               filament_area;
         float               wipe_dist = 0.f; // wipe_distance, for the wipe along a rib wall
+        // Tower interface (TowerInterface::): the filament as the trigger sees it, and its values.
+        TowerInterface::FilamentKind kind;
+        int                 interface_temperature = 0;
+        float               run_in_distance       = 0.f;
+        float               extra_prime_length    = 0.f;
+        int                 physical_extruder     = -1; // T of its M104/M109 on a multi-nozzle machine, -1 for none
     };
 
 private:
@@ -388,6 +397,15 @@ private:
     Vec2f           m_rib_footprint             = Vec2f::Zero();
     Polygon         m_first_layer_wall;
     std::map<float, Polylines> m_outer_wall;
+
+    // Tower interface options. This generator has no wall gaps of its own: they are only cut for
+    // interface run-ins, on the interface layer and the layers below it (m_interface_gaps, per plan
+    // layer, tower-local), so a tower without run-ins prints exactly as before.
+    TowerInterface::Settings m_interface;
+    bool            m_use_gap_wall              = false; // wipe_tower_wall_gap, which the run-in needs
+    BoundingBoxf    m_shared_bed;                        // printable area every nozzle reaches, plate coordinates
+    float           m_run_in_reserve            = 0.f;
+    std::vector<std::vector<TowerInterface::GapPoint>> m_interface_gaps;
 
     // Bed properties
     enum {
@@ -470,6 +488,11 @@ private:
 			float wipe_length;
 			// BBS
 			float purge_volume;
+            // Tower interface: whether the trigger picks this change, and where its run-in crosses
+            // the outer wall (tower-local, on the left side). Set by plan_interfaces().
+            bool  is_interface = false;
+            bool  run_in    = false;
+            Vec2f run_in_cross = Vec2f::Zero();
             ToolChange(size_t old, size_t newtool, float depth=0.f, float ramming_depth=0.f, float fwl=0.f, float wv=0.f, float wl = 0, float pv = 0)
 				: old_tool{ old }, new_tool{ newtool }, required_depth{ depth }, ramming_depth{ ramming_depth }, first_wipe_line{ fwl }, wipe_volume{ wv }, wipe_length{ wl }, purge_volume{ pv } {}
 		};
@@ -488,6 +511,14 @@ private:
 
 	std::vector<WipeTowerInfo> m_plan; 	// Stores information about all layers and toolchanges for the future wipe tower (filled by plan_toolchange(...))
 	std::vector<WipeTowerInfo>::iterator m_layer_info = m_plan.end();
+
+    // Tower interface: marks the interface tool changes, plans their run-in gaps and the reserve.
+    void    plan_interfaces();
+    // The current layer's outer wall (rectangle or rib), cut open for interface run-ins when it has any.
+    bool    print_wall_with_interface_gaps(WipeTowerWriter &writer, const box_coordinates &wt_box, float feedrate);
+    // Tower interface steps around a purge; the writer stands at the start of the purge.
+    void    interface_before_wipe(WipeTowerWriter &writer, const WipeTowerInfo::ToolChange &tool_change);
+    void    interface_after_wipe(WipeTowerWriter &writer, const WipeTowerInfo::ToolChange &tool_change);
 
     // Stores information about used filament length per extruder:
     std::vector<float> m_used_filament_length;

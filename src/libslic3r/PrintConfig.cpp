@@ -738,6 +738,15 @@ static const t_config_enum_values s_keys_map_WipeTowerWallType{
 };
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(WipeTowerWallType)
 
+static const t_config_enum_values s_keys_map_TowerInterfaceTrigger{
+    {"every_toolchange", titEveryToolChange},
+    {"material_change", titMaterialChange},
+    {"material_family_change", titMaterialFamilyChange},
+};
+CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(TowerInterfaceTrigger)
+
+thread_local bool SystemPresetTowerKeysScope::s_active = false;
+
 // Snapmaker: flow-variant
 static const t_config_enum_values s_keys_map_FilamentVolumeType = {
     { FLOW_MODE_STANDARD,   fvtStandard },
@@ -7584,6 +7593,69 @@ void PrintConfigDef::init_fff_params()
     def->mode    = comAdvanced;
     def->set_default_value(new ConfigOptionBool(true));
 
+    // Tower interface options: three behaviours of Bambu Studio's enable_tower_interface_features,
+    // each on its own and for both tower generators. See GCode/WipeTowerInterface.hpp.
+    def          = this->add("wipe_tower_interface_trigger", coEnum);
+    def->label   = L("Interface features apply on");
+    def->tooltip = L("Which prime tower tool changes count as a tower interface, where one material is purged onto a "
+                     "different one, for the three tower interface options below.\n"
+                     "Every tool change: all of them.\n"
+                     "Material change: the two filaments differ in filament type, or only one of them is a support filament.\n"
+                     "Material family change: the two filaments belong to different material families "
+                     "(PLA and PLA-CF are one family, so are ABS and ASA, PETG and PCTG, the PA grades, TPU grades, PVA and BVOH; "
+                     "support filaments form their own family). This is closest to Bambu Studio, which applies its interface "
+                     "features where a different adhesion category starts on the tower.\n"
+                     "The tower's first layer is never an interface.");
+    def->enum_keys_map = &ConfigOptionEnum<TowerInterfaceTrigger>::get_enum_values();
+    def->enum_values.emplace_back("every_toolchange");
+    def->enum_values.emplace_back("material_change");
+    def->enum_values.emplace_back("material_family_change");
+    def->enum_labels.emplace_back(L("Every tool change"));
+    def->enum_labels.emplace_back(L("Material change"));
+    def->enum_labels.emplace_back(L("Material family change"));
+    def->mode    = comAdvanced;
+    def->set_default_value(new ConfigOptionEnum<TowerInterfaceTrigger>(titMaterialChange));
+
+    def          = this->add("wipe_tower_interface_temp", coBool);
+    def->label   = L("Heat up for tower interfaces");
+    def->tooltip = L("At a tower interface tool change, wait for the new filament's tower interface temperature (filament "
+                     "setting) before purging it on the prime tower, and set the normal nozzle temperature again right after "
+                     "the purge. A hotter first line bonds better onto a different material. Costs one heat-up wait per "
+                     "interface.");
+    def->mode    = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def          = this->add("wipe_tower_interface_run_in", coBool);
+    def->label   = L("Run in from outside the tower");
+    def->tooltip = L("At a tower interface tool change, start the purge the filament's tower interface run-in distance "
+                     "(filament setting) outside the side of the tower and extrude from there into it, so the blob that "
+                     "builds up while the pressure returns lands outside the tower instead of on it. The run-in line enters "
+                     "through a gap cut in the tower's outer wall on that layer and the three layers below, so it never drags "
+                     "across the wall: this needs \"Wall gap\" and does nothing without it. The prime tower's reserved area "
+                     "grows by the run-in distance, so objects and the skirt keep clear of the run-in; the start is also kept "
+                     "on the printable bed.");
+    def->mode    = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def          = this->add("wipe_tower_interface_extra_prime", coBool);
+    def->label   = L("Extra prime at tower interfaces");
+    def->tooltip = L("At a tower interface tool change, push extra filament through the standing nozzle before the purge to "
+                     "rebuild the pressure lost in the tool change: the filament's tower interface extra prime length plus "
+                     "2 mm, as Bambu Studio does. With \"Run in from outside the tower\" the prime happens at the run-in start, "
+                     "outside the tower; otherwise at the start of the purge, in the wall gap when \"Wall gap\" is on.");
+    def->mode    = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
+    // Bambu Studio's one switch for its whole interface bundle (Bambu PrintConfig.cpp:2956). Kept only
+    // so a Bambu project or preset that sets it can be mapped onto the three options above; see
+    // handle_legacy_composite. "Export Bambu 3MF" writes it from those options.
+    def          = this->add("enable_tower_interface_features", coBool);
+    def->label   = L("Enable tower interface features");
+    def->tooltip = L("Bambu Studio's switch for its prime tower interface features. Only read when a Bambu Studio project "
+                     "or preset is loaded, where it turns on the three tower interface options and the wall gap.");
+    def->mode    = comDevelop;
+    def->set_default_value(new ConfigOptionBool(false));
+
     def = this->add("wiping_volumes_extruders", coFloats);
     def->label = L("Purging volumes - load/unload volumes");
     def->tooltip = L("This vector saves required volumes to change from/to each tool used on the "
@@ -7671,6 +7743,36 @@ void PrintConfigDef::init_fff_params()
     def->min = 0;
     def->mode = comDevelop;
     def->set_default_value(new ConfigOptionFloats{4.});
+
+    // Per-filament values of the tower interface options, under Bambu Studio's key names and with its
+    // defaults (Bambu PrintConfig.cpp:2956-3000), so they load from and export to Bambu files as they are.
+    def = this->add("filament_tower_interface_print_temp", coInts);
+    def->label = L("Tower interface temperature");
+    def->tooltip = L("Nozzle temperature this filament is purged at on a prime tower interface, used by \"Heat up for tower "
+                     "interfaces\" (process setting). -1 uses the top of the recommended nozzle temperature range.");
+    def->sidetext = u8"\u2103" /* °C */;	// degrees Celsius, don't need translation
+    def->min = -1;
+    def->max = max_temp;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionInts{-1});
+
+    def = this->add("filament_tower_interface_pre_extrusion_dist", coFloats);
+    def->label = L("Tower interface run-in distance");
+    def->tooltip = L("How far outside the prime tower this filament's purge starts at a tower interface, used by \"Run in from "
+                     "outside the tower\" (process setting). The prime tower's reserved area grows by this distance.");
+    def->sidetext = L("mm");
+    def->min = 0;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloats{10.});
+
+    def = this->add("filament_tower_interface_pre_extrusion_length", coFloats);
+    def->label = L("Tower interface extra prime length");
+    def->tooltip = L("Filament pushed through the nozzle before this filament's purge at a tower interface, used by \"Extra "
+                     "prime at tower interfaces\" (process setting). 2 mm are always added, as in Bambu Studio.");
+    def->sidetext = L("mm");
+    def->min = 0;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloats{0.});
 
     def = this->add("xy_hole_compensation", coFloat);
     def->label = L("X-Y hole compensation");
@@ -9129,6 +9231,30 @@ void PrintConfigDef::handle_legacy_composite(DynamicPrintConfig &config)
             // forever. Zeroing it here (its own "disabled" convention) means a re-save
             // never re-triggers this migration.
             config.set_key_value("mmu_segmented_region_max_width", new ConfigOptionFloat(0.));
+        }
+    }
+
+    // Bambu Studio's enable_tower_interface_features is one switch for a bundle of prime tower
+    // behaviours; here three of them are options of their own (GCode/WipeTowerInterface.hpp) and
+    // the wall gaps they rely on are wipe_tower_wall_gap. A Bambu project or preset that turns the
+    // bundle on gets all of them, applied at material changes, the nearest this tower gets to
+    // Bambu's interface layers. Off maps to nothing: ours stay as they are.
+    //
+    // Guarded like the paint-depth migration above: a config that already carries one of our keys
+    // was saved by a build that has them and is never overwritten. Once migrated, the Bambu key is
+    // set to false (its default) so a diff-serialized re-save cannot re-arm the migration after the
+    // user turns the options back off. The bundled vendor presets are left alone, see
+    // SystemPresetTowerKeysScope.
+    if (config.has("enable_tower_interface_features") && ! SystemPresetTowerKeysScope::active()) {
+        const bool has_ours = config.has("wipe_tower_interface_temp") || config.has("wipe_tower_interface_run_in") ||
+                              config.has("wipe_tower_interface_extra_prime") || config.has("wipe_tower_interface_trigger");
+        if (! has_ours && config.opt_bool("enable_tower_interface_features")) {
+            config.set_key_value("wipe_tower_interface_temp", new ConfigOptionBool(true));
+            config.set_key_value("wipe_tower_interface_run_in", new ConfigOptionBool(true));
+            config.set_key_value("wipe_tower_interface_extra_prime", new ConfigOptionBool(true));
+            config.set_key_value("wipe_tower_interface_trigger", new ConfigOptionEnum<TowerInterfaceTrigger>(titMaterialChange));
+            config.set_key_value("wipe_tower_wall_gap", new ConfigOptionBool(true));
+            config.set_key_value("enable_tower_interface_features", new ConfigOptionBool(false));
         }
     }
 }

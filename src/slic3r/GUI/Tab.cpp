@@ -3094,6 +3094,11 @@ void TabPrint::build()
         optgroup->append_single_option_line("wipe_tower_fillet_wall", "multimaterial_settings_prime_tower#fillet-wall");
         optgroup->append_single_option_line("wipe_tower_no_sparse_layers", "multimaterial_settings_prime_tower#no-sparse-layers");
         optgroup->append_single_option_line("wipe_tower_wall_gap", "multimaterial_settings_prime_tower#wall-gap");
+        // Tower interface options (per-filament values on the filament Multimaterial page).
+        optgroup->append_single_option_line("wipe_tower_interface_temp", "multimaterial_settings_prime_tower");
+        optgroup->append_single_option_line("wipe_tower_interface_run_in", "multimaterial_settings_prime_tower");
+        optgroup->append_single_option_line("wipe_tower_interface_extra_prime", "multimaterial_settings_prime_tower");
+        optgroup->append_single_option_line("wipe_tower_interface_trigger", "multimaterial_settings_prime_tower");
         optgroup->append_single_option_line("single_extruder_multi_material_priming", "multimaterial_settings_prime_tower");
         // H2 preload: only shown for dual-extruder Bambu machines (see ConfigManipulation).
         optgroup->append_single_option_line("preload_all_filaments", "multimaterial_settings_prime_tower");
@@ -4884,6 +4889,10 @@ void TabFilament::build()
     const PageShp multimaterial_page = page;
         optgroup = page->new_optgroup(L("Wipe tower parameters"), "param_tower");
         optgroup->append_single_option_line("filament_minimal_purge_on_wipe_tower");
+        // Used by the process's tower interface options, on every printer.
+        optgroup->append_single_option_line("filament_tower_interface_print_temp");
+        optgroup->append_single_option_line("filament_tower_interface_pre_extrusion_dist");
+        optgroup->append_single_option_line("filament_tower_interface_pre_extrusion_length");
 
         optgroup = page->new_optgroup(L("Tool change parameters with single extruder MM printers"), "param_toolchange");
         optgroup->append_single_option_line("filament_loading_speed_start", "semm");

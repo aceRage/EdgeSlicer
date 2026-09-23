@@ -12,6 +12,7 @@
 #include "libslic3r/Point.hpp"
 #include "libslic3r/Polygon.hpp"
 #include "WipeTower.hpp"
+#include "WipeTowerInterface.hpp"
 namespace Slic3r
 {
 
@@ -67,7 +68,9 @@ public:
     float get_depth() const { return m_wipe_tower_depth; }
 	std::vector<std::pair<float, float>> get_z_and_depth_pairs() const;
     std::vector<std::vector<WipeTower::box_coordinates>> get_local_z_reserve_boxes() const;
-    float get_brim_width() const { return m_wipe_tower_brim_width_real; }
+    // The brim, or the room tower interface run-ins need when that is wider: what the plate has to
+    // keep clear around the tower (see TowerInterface::run_in_reserve()).
+    float get_brim_width() const { return std::max(m_wipe_tower_brim_width_real, m_run_in_reserve); }
 	float get_wipe_tower_height() const { return m_wipe_tower_height; }
 
 
@@ -175,6 +178,11 @@ public:
         float               retract_length;
         float               retract_speed;
         float               flat_iron_area;
+        // Tower interface (TowerInterface::): the filament as the trigger sees it, and its values.
+        TowerInterface::FilamentKind kind;
+        int                 interface_temperature = 0;
+        float               run_in_distance       = 0.f;
+        float               extra_prime_length    = 0.f;
     };
 
     const std::map<float, Polylines>& get_outer_wall() const { return m_outer_wall; }
@@ -230,6 +238,11 @@ private:
     float  m_rib_width                    = 10;
     float  m_extra_rib_length             = 0;
     std::vector<std::vector<Vec2f>> m_wall_skip_points;
+    // Tower interface run-in gaps on the layers below an interface, per layer (tower-local).
+    std::vector<std::vector<TowerInterface::GapPoint>> m_interface_gap_points;
+    TowerInterface::Settings m_interface;
+    BoundingBoxf           m_shared_bed;        // printable area every nozzle reaches, plate coordinates
+    float                  m_run_in_reserve = 0.f;
     float  m_rib_length                   = 0;
 
     bool   m_enable_arc_fitting           = false;
@@ -305,6 +318,11 @@ private:
             float first_wipe_line;
             float wipe_volume;
 			float wipe_volume_total;
+            // Tower interface: whether the trigger picks this change, and where its run-in crosses
+            // the outer wall (tower-local; x is 0 or the tower width). Set by plan_interfaces().
+            bool  is_interface = false;
+            bool  run_in    = false;
+            Vec2f run_in_cross = Vec2f::Zero();
             ToolChange(size_t old, size_t newtool, float depth=0.f, float ramming_depth=0.f, float fwl=0.f, float wv=0.f)
             : old_tool{old}, new_tool{newtool}, required_depth{depth}, ramming_depth{ramming_depth}, first_wipe_line{fwl}, wipe_volume{wv}, wipe_volume_total{wv} {}
 		};
@@ -371,9 +389,20 @@ private:
                                       bool                   first_layer,
                                       bool                   rib_wall,
                                       bool                   extrude_perimeter,
-                                      const std::vector<Vec2f>&         skip_points);
+                                      const std::vector<Vec2f>&         skip_points,
+                                      const std::vector<TowerInterface::GapPoint>& interface_gaps = {});
 
     void get_all_wall_skip_points();
+    // Tower interface: marks the interface tool changes and sets the run-in reserve.
+    void plan_interfaces();
+    // Run-in gaps of the current layer from interfaces above it (empty for most layers).
+    std::vector<TowerInterface::GapPoint> interface_gaps_of_layer() const;
+    // The legacy gap points (each on the side it is on) followed by the interface ones.
+    std::vector<TowerInterface::GapPoint> combined_gaps(const std::vector<Vec2f> &skip_points,
+                                                        const std::vector<TowerInterface::GapPoint> &interface_gaps) const;
+    // Tower interface steps around a purge; the writer stands at the start of the purge.
+    void interface_before_wipe(WipeTowerWriter2 &writer, const WipeTowerInfo::ToolChange &tool_change);
+    void interface_after_wipe(WipeTowerWriter2 &writer, const WipeTowerInfo::ToolChange &tool_change);
     // Retrieve pre-computed gap points for a specific layer. Returns empty if layer_id out of bounds.
     std::vector<Vec2f> get_wall_skip_points(size_t layer_id);
     // Predict nozzle X after toolchange_Unload ramming, matching its xl/xr and do_ramming logic.
@@ -386,7 +415,8 @@ private:
 		double feedrate, 
 		bool infill_cone, 
 		float spacing,
-		const std::vector<Vec2f>& skip_points = {});
+		const std::vector<Vec2f>& skip_points = {},
+		const std::vector<TowerInterface::GapPoint>& interface_gaps = {});
 
     Polygon generate_rib_polygon(const WipeTower::box_coordinates& wt_box);
 

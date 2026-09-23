@@ -24744,6 +24744,8 @@ void Plater::on_config_change(const DynamicPrintConfig &config)
             boost::starts_with(opt_key, "prime_tower") ||
             boost::starts_with(opt_key, "wipe_tower") ||
             opt_key == "filament_minimal_purge_on_wipe_tower" ||
+            // The tower interface run-in widens the tower's reserved area.
+            opt_key == "filament_tower_interface_pre_extrusion_dist" ||
             opt_key == "single_extruder_multi_material" ||
             // BBS
             opt_key == "prime_volume") {

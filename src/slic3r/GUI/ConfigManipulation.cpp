@@ -878,6 +878,16 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
     // Orca: both tower generators skip sparse layers, so this is not a wipe tower 2 exclusive.
     toggle_line("wipe_tower_no_sparse_layers", have_prime_tower);
 
+    // Tower interface options: both generators, every printer. The run-in only ever enters the tower
+    // through a wall gap, so it is greyed out (and ignored by the generators) without them.
+    for (auto el : {"wipe_tower_interface_temp", "wipe_tower_interface_run_in", "wipe_tower_interface_extra_prime", "wipe_tower_interface_trigger"})
+        toggle_line(el, have_prime_tower);
+    toggle_field("wipe_tower_interface_run_in", have_prime_tower && config->opt_bool("wipe_tower_wall_gap"));
+    const bool have_tower_interface = config->opt_bool("wipe_tower_interface_temp") ||
+                                      (config->opt_bool("wipe_tower_interface_run_in") && config->opt_bool("wipe_tower_wall_gap")) ||
+                                      config->opt_bool("wipe_tower_interface_extra_prime");
+    toggle_field("wipe_tower_interface_trigger", have_prime_tower && have_tower_interface);
+
     const bool local_z_dithering_enabled =
         config->has("dithering_local_z_mode") && config->option("dithering_local_z_mode") != nullptr &&
         config->opt_bool("dithering_local_z_mode");
