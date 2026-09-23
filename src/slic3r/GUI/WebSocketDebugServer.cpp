@@ -1,9 +1,45 @@
 // WebSocket Debug Server implementation
 #include "WebSocketDebugServer.hpp"
+#include <boost/beast/http.hpp>
 #include <boost/log/trivial.hpp>
 #include <iostream>
 
 namespace Slic3r { namespace GUI {
+
+namespace {
+
+// The debug client is a flutter dev build served from localhost (or a CLI tool with no Origin).
+// WebSockets are not covered by CORS, so without this check any website open in a browser could
+// connect and drive the app through SSWCP while debug mode is on.
+bool is_loopback_origin(const std::string& origin)
+{
+    if (origin.empty())
+        return true;
+    std::string rest;
+    if (origin.compare(0, 7, "http://") == 0)
+        rest = origin.substr(7);
+    else if (origin.compare(0, 8, "https://") == 0)
+        rest = origin.substr(8);
+    else
+        return false;
+    std::string host;
+    if (!rest.empty() && rest[0] == '[') {
+        const size_t close = rest.find(']');
+        if (close == std::string::npos)
+            return false;
+        host = rest.substr(0, close + 1);
+        rest = rest.substr(close + 1);
+    } else {
+        const size_t colon = rest.find(':');
+        host = rest.substr(0, colon);
+        rest = colon == std::string::npos ? std::string() : rest.substr(colon);
+    }
+    if (!rest.empty() && (rest[0] != ':' || rest.size() < 2 || rest.find_first_not_of("0123456789", 1) != std::string::npos))
+        return false;
+    return host == "localhost" || host == "127.0.0.1" || host == "[::1]";
+}
+
+} // namespace
 
 WebSocketDebugServer::WebSocketDebugServer(unsigned short port)
     : m_port(port)
@@ -27,7 +63,8 @@ bool WebSocketDebugServer::start()
 
     m_io_context = std::make_unique<net::io_context>();
 
-    tcp::endpoint endpoint(tcp::v4(), m_port);
+    // Loopback only: this is a developer bridge straight into SSWCP with no authentication.
+    tcp::endpoint endpoint(net::ip::make_address_v4("127.0.0.1"), m_port);
     m_acceptor = std::make_unique<tcp::acceptor>(*m_io_context, endpoint);
 
     m_running.store(true);
@@ -131,8 +168,25 @@ void WebSocketDebugServer::session_loop(tcp::socket socket)
         }
     ));
 
+    // Read the upgrade request ourselves so its Origin can be checked before the handshake.
+    beast::flat_buffer                              hs_buffer;
+    beast::http::request<beast::http::string_body> hs_request;
+    boost::system::error_code                       hs_ec;
+    beast::http::read(ws->next_layer(), hs_buffer, hs_request, hs_ec);
+    const std::string origin(hs_request[beast::http::field::origin]);
+    if (hs_ec || !websocket::is_upgrade(hs_request) || !is_loopback_origin(origin)) {
+        BOOST_LOG_TRIVIAL(warning) << "WebSocket Debug Server: refused a connection (origin '" << origin << "')";
+        boost::system::error_code ignored;
+        ws->next_layer().close(ignored);
+        return;
+    }
+
     // Accept WebSocket handshake
-    ws->accept();
+    ws->accept(hs_request, hs_ec);
+    if (hs_ec) {
+        BOOST_LOG_TRIVIAL(warning) << "WebSocket Debug Server: handshake failed: " << hs_ec.message();
+        return;
+    }
 
     // Swap in the new stream under the lock, then close old streams outside
     // the lock so send_worker is never blocked waiting for TCP teardown.

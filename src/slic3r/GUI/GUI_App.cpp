@@ -1701,8 +1701,11 @@ GUI_App::GUI_App()
     // test
     m_page_http_server.setPort(PAGE_HTTP_PORT);
     m_page_http_server.set_request_handler(HttpServer::web_server_handle_request);
+    // Our web views only: per-process secret, Host/Origin checks, no CORS, exclusive port.
+    m_page_http_server.enable_page_security(true);
     m_page_http_server.start();
     profiler.mark("m_page_http_server.start");
+    repoint_saved_device_covers();
     BOOST_LOG_TRIVIAL(info) << "[Flutter] Version:" << common::get_flutter_version();
     BOOST_LOG_TRIVIAL(info) << "[Profile] Version:" << common::get_profile_version();
     flush_logs();
@@ -4906,12 +4909,11 @@ void GUI_App::recreate_GUI(const wxString &msg_name)
 
     if (!preset_bundle->is_bbl_vendor()) {
         if (is_snapmaker_u1) {
-            wxString url      = wxString::FromUTF8(LOCALHOST_URL + std::to_string(get_page_http_port()) + "/web/flutter_web/index.html?path=2");
+            wxString url      = wxString::FromUTF8(page_url("/web/flutter_web/index.html?path=2"));
             auto     real_url = wxGetApp().get_international_url(url);
             mainframe->load_printer_url(real_url);
         } else {
-            std::string base_url = LOCALHOST_URL + std::to_string(wxGetApp().m_page_http_server.get_port());
-            auto url = wxString::Format("%s/web/orca/missing_connection.html", from_u8(base_url));
+            auto url = wxString::FromUTF8(page_url("/web/orca/missing_connection.html"));
             mainframe->load_printer_url(url);
         }
     }
@@ -6870,6 +6872,34 @@ void GUI_App::kick_user_device_refresh()
         if (auto* dev = Slic3r::GUI::wxGetApp().getDeviceManager())
             dev->update_user_machine_list_info();
     }).detach();
+}
+
+// Device cards keep their printer picture as an absolute page-server URL
+// ("http://127.0.0.1:<port>/profiles/<vendor>/<model>_cover.png"), saved with whatever port the
+// server had then. Each instance now holds its own port and only answers its own web views, so a
+// URL saved by another run would point at a dead port or at another instance that refuses it.
+// Re-point those URLs at this instance's server once it is listening.
+void GUI_App::repoint_saved_device_covers()
+{
+    if (!app_config || !m_page_http_server.is_started())
+        return;
+    const std::string prefix = LOCALHOST_URL;
+    const std::string mine   = prefix + std::to_string(get_page_http_port()) + "/profiles/";
+    for (DeviceInfo info : app_config->get_devices()) {
+        if (info.img.compare(0, prefix.size(), prefix) != 0)
+            continue;
+        const size_t path = info.img.find("/profiles/", prefix.size());
+        if (path == std::string::npos)
+            continue;
+        const std::string port = info.img.substr(prefix.size(), path - prefix.size());
+        if (port.empty() || port.find_first_not_of("0123456789") != std::string::npos)
+            continue;
+        const std::string repointed = mine + info.img.substr(path + 10);
+        if (repointed == info.img)
+            continue;
+        info.img = repointed;
+        app_config->save_device_info(info);
+    }
 }
 
 void GUI_App::start_page_http_server()

@@ -707,6 +707,11 @@ private:
     void            stop_page_http_server();
     /// Actual listen port (may differ from PAGE_HTTP_PORT if the default was in use).
     boost::asio::ip::port_type get_page_http_port() const { return m_page_http_server.get_port(); }
+    /// URL of a page on the local page server, carrying this process's page secret. Every web view
+    /// load of a local page must go through here: the server refuses requests without the secret
+    /// (or the cookie the first tokened load sets), so no other website can read from it.
+    std::string page_url(const std::string& path_and_query) const { return m_page_http_server.page_url(path_and_query); }
+    void        repoint_saved_device_covers();
 
     enum class FlutterWebCopyStatus { Ok, UpgradeFailed, InstallFailed, Other };
     /// Copy bundled flutter_web into the user data directory. On failure, records status for deferred user notification.

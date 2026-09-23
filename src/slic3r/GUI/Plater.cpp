@@ -3870,8 +3870,7 @@ void Sidebar::update_all_preset_comboboxes(bool reload_printer_view)
             wxString url = cfg.opt_string("print_host_webui").empty() ? cfg.opt_string("print_host") : cfg.opt_string("print_host_webui");
             wxString apikey;
             if (url.empty()) {
-                std::string base_url = LOCALHOST_URL + std::to_string(wxGetApp().m_page_http_server.get_port());
-                url                  = wxString::Format("%s/web/orca/missing_connection.html", from_u8(base_url));
+                url = wxString::FromUTF8(wxGetApp().page_url("/web/orca/missing_connection.html"));
             }
             else {
                 if (!url.Lower().starts_with("http"))
@@ -3883,7 +3882,7 @@ void Sidebar::update_all_preset_comboboxes(bool reload_printer_view)
                                                                  MainFrame::PrintSelectType::eSendGcode;
 
                 if (url.find("127.0.0.1") != std::string::npos) {
-                    url = wxString::FromUTF8(LOCALHOST_URL + std::to_string(wxGetApp().get_page_http_port()) + "/web/flutter_web/index.html?path=3");
+                    url = wxString::FromUTF8(wxGetApp().page_url("/web/flutter_web/index.html?path=3"));
                 }
             }
 
@@ -3932,8 +3931,7 @@ void Sidebar::update_all_preset_comboboxes(bool reload_printer_view)
                 if(hasOnlineMachine)
                     p->combo_printer->set_show_machine_connecting_button(true);
     
-                wxString url = wxString::FromUTF8(LOCALHOST_URL + std::to_string(wxGetApp().get_page_http_port()) +
-                                                  "/web/flutter_web/index.html?path=2");
+                wxString url = wxString::FromUTF8(wxGetApp().page_url("/web/flutter_web/index.html?path=2"));
                 auto real_url = wxGetApp().get_international_url(url);
                 
                 if (!is_sm_page && reload_printer_view) {

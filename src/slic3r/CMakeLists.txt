@@ -266,6 +266,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/HMSPanel.hpp
     GUI/HttpServer.cpp
     GUI/HttpServer.hpp
+    GUI/PageServerSecurity.cpp
+    GUI/PageServerSecurity.hpp
     GUI/I18N.cpp
     GUI/I18N.hpp
     GUI/IconManager.cpp

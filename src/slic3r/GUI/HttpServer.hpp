@@ -14,6 +14,7 @@
 #include <string>
 #include <set>
 #include <memory>
+#include <vector>
 
 #define LOCALHOST_PORT      13618
 #define PAGE_HTTP_PORT      13619
@@ -75,18 +76,13 @@ public:
         ssRequestLine >> method;
         ssRequestLine >> url;
         ssRequestLine >> version;
-
-        std::cout << "request for resource: " << url << std::endl;
     }
 };
 
 class HttpServer
 {
-    boost::asio::ip::port_type port;
-
-    // 添加辅助函数声明
-    static bool is_port_available(boost::asio::ip::port_type port);
-    boost::asio::ip::port_type find_available_port(boost::asio::ip::port_type start_port);
+    // Written by start_locked() (io/health-check threads) and read by the GUI thread.
+    std::atomic<boost::asio::ip::port_type> port;
 
 public:
     class Response
@@ -103,9 +99,38 @@ public:
             m_if_none_match     = if_none_match;
         }
 
+        // "Access-Control-Allow-Origin: *" and friends. Only the login-callback servers send
+        // them; the page server answers our own web views only (see page_server::authorize).
+        void set_allow_any_origin(bool on) { m_allow_any_origin = on; }
+        // Extra "Name: value" header lines (e.g. Set-Cookie), written after the status line.
+        void add_header(const std::string& line) { m_extra_headers.push_back(line); }
+
     protected:
-        std::string m_if_modified_since;
-        std::string m_if_none_match;
+        // Status line + CORS (when allowed) + extra headers + Connection: close.
+        void write_head(std::stringstream& out, int status_code, const std::string& reason_phrase) const;
+        // Copies the header policy onto a response written on this one's behalf.
+        void copy_head_policy_to(Response& other) const
+        {
+            other.m_allow_any_origin = m_allow_any_origin;
+            other.m_extra_headers    = m_extra_headers;
+        }
+
+        std::string              m_if_modified_since;
+        std::string              m_if_none_match;
+        bool                     m_allow_any_origin = false;
+        std::vector<std::string> m_extra_headers;
+    };
+
+    // Refused request (page server authorisation). Plain-text body naming the reason.
+    class ResponseForbidden : public Response
+    {
+        int         m_status;
+        std::string m_reason;
+
+    public:
+        ResponseForbidden(int status, const std::string& reason) : m_status(status), m_reason(reason) {}
+        ~ResponseForbidden() override = default;
+        void write_response(std::stringstream& ssOut) override;
     };
 
     class ResponseNotFound : public Response
@@ -199,6 +224,25 @@ public:
 
     boost::asio::ip::port_type get_port() const { return port; }
 
+    // ---- page server lock-down (see PageServerSecurity.hpp) ----
+    // When on, every request must come from one of our web views: Host 127.0.0.1/localhost:<port>,
+    // no foreign Origin, and this process's secret as ?edge_page_token=, X-Edge-Page-Token or the
+    // cookie set on the first tokened page load. No CORS headers are sent. Off for the login
+    // callback servers, which a system browser reaches by redirect.
+    void enable_page_security(bool on) { m_page_security = on; }
+    bool page_security() const { return m_page_security; }
+    std::string page_secret() const;
+    // "http://127.0.0.1:<port><path_and_query>" with the secret appended: the URL to load into a
+    // web view. Use it for every top-level page load; requests the page then makes itself carry
+    // the cookie and need no token.
+    std::string page_url(const std::string& path_and_query) const;
+    // Adds the secret to url if it points at this server (for URLs a page asks us to open).
+    std::string add_token_if_ours(const std::string& url) const;
+    // Hands a file to the pages: registers it with page_server::file_grants() and returns
+    // "http://127.0.0.1:<port>/localfile/cap/<random id>/<name>". Only granted files (and the
+    // installed resources) can be read through /localfile/ and /wcp_download/.
+    std::string localfile_url(const std::string& utf8_path) const;
+
     static std::string map_url_to_file_path(const std::string& url);
 
     static std::shared_ptr<Response> bbl_auth_handle_request(const std::string& url);
@@ -206,6 +250,11 @@ public:
     static std::shared_ptr<Response> web_server_handle_request(const std::string& url);
 
 private:
+    std::atomic<bool>  m_page_security{false};
+    mutable std::mutex m_secret_mtx;
+    std::string        m_secret; // per process; replaced if a restart has to move to another port
+    bool               m_bound_once = false;
+
     class IOServer
     {
     public:
@@ -216,6 +265,11 @@ private:
 
         // 只声明构造函数，不在头文件中定义
         IOServer(HttpServer& server);
+
+        // Binds 127.0.0.1:<port> and listens. Exclusive on Windows (SO_EXCLUSIVEADDRUSE): nobody
+        // else can bind the port while we hold it, and a port somebody else holds - even with
+        // SO_REUSEADDR, as older builds did - fails instead of being silently shared.
+        bool bind_loopback(boost::asio::ip::port_type port, std::string* error);
 
         void do_accept();
         void start(std::shared_ptr<session> session);
@@ -246,8 +300,10 @@ class session : public std::enable_shared_from_this<session>
     HttpServer::IOServer& server;
     boost::asio::ip::tcp::socket socket;
 
-    boost::asio::streambuf buff;
-    http_headers headers;
+    // Bounded: a client that never ends its header line must not grow the buffer without limit.
+    boost::asio::streambuf buff{64 * 1024};
+    http_headers           headers;
+    int                    header_lines = 0;
 
     void read_first_line();
     void read_next_line();

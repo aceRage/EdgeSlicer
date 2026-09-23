@@ -42,6 +42,7 @@
 
 #include "slic3r/GUI/WebPresetDialog.hpp"
 #include "slic3r/GUI/HttpServer.hpp"
+#include "slic3r/GUI/PageServerSecurity.hpp"
 #include <mutex>
 
 #include "slic3r/GUI/SMPhysicalPrinterDialog.hpp"
@@ -385,6 +386,8 @@ bool read_existing_zip(const std::string& zip_path, std::vector<char>& out_data)
 std::string make_wcp_download_url(const std::string& file_path)
 {
     auto& server = wxGetApp().m_page_http_server;
+    // The page server only returns files the app handed out (HttpServer::map_url_to_file_path).
+    page_server::file_grants().grant(file_path);
     std::string b64 = base64_encode(file_path.data(), file_path.size());
     for (auto& c : b64) {
         if (c == '+') {
@@ -624,7 +627,8 @@ void SSWCP_Instance::sw_OpenOrcaWebview() {
                 return;
             }
             auto dialog = new WebUrlDialog();
-            dialog->load_url(wx_url);
+            // A page of ours opened in its own window needs the page server's secret too.
+            dialog->load_url(wxString::FromUTF8(wxGetApp().m_page_http_server.add_token_if_ours(wx_url.ToStdString(wxConvUTF8))));
             self->send_to_js();
             self->finish_job();
             dialog->Show();
@@ -704,9 +708,9 @@ void SSWCP_Instance::sw_GetActiveFile()
                 self->m_res_data["file_path"] = wxString(zipname).ToUTF8();
                 SSWCP::m_file_size_mutex.lock();
                 self->m_res_data["origin_size"] = SSWCP::m_active_file_size;
-                std::string url_zip_path = std::string(wxString(zipname).ToUTF8());
-                std::replace(url_zip_path.begin(), url_zip_path.end(), '\\', '/');
-                self->m_res_data["url"] = LOCALHOST_URL + std::to_string(wxGetApp().get_page_http_port()) + "/localfile/" + Http::url_encode(url_zip_path);
+                // A capability URL. The page falls back to /localfile/<file_path> when "url" is
+                // missing; that works too, because localfile_url grants the path itself.
+                self->m_res_data["url"] = wxGetApp().m_page_http_server.localfile_url(zipname);
                 SSWCP::m_file_size_mutex.unlock();
 
                 // checksum: SHA-256 digest as standard Base64, for Flutter-side integrity verification
@@ -730,14 +734,12 @@ void SSWCP_Instance::sw_GetActiveFile()
 
     } else {
         m_res_data["file_name"] = file_name;
-        std::string url_path = file_path;
-        std::replace(url_path.begin(), url_path.end(), '\\', '/');
         m_res_data["file_path"] = file_path;
         m_res_data["origin_size"] = boost::filesystem::file_size(file_path);
 
         // checksum: SHA-256 digest as standard Base64, for Flutter-side integrity verification
         m_res_data["checksum"] = calc_sha256_base64(file_path);
-        m_res_data["url"]      = LOCALHOST_URL + std::to_string(wxGetApp().get_page_http_port()) + "/localfile/" + Http::url_encode(url_path);
+        m_res_data["url"]      = wxGetApp().m_page_http_server.localfile_url(file_path);
 
         send_to_js();
         finish_job();
@@ -7035,14 +7037,12 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_set_engine()
                                     wxGetApp().mainframe->update_slice_print_status(MainFrame::eEventPlateUpdate);
 
                                     if (!wxGetApp().mainframe->m_printer_view->isSnapmakerPage()) {
-                                        wxString url      = wxString::FromUTF8(LOCALHOST_URL + std::to_string(wxGetApp().get_page_http_port()) +
-                                                                               "/web/flutter_web/index.html?path=2");
+                                        wxString url      = wxString::FromUTF8(wxGetApp().page_url("/web/flutter_web/index.html?path=2"));
                                         auto     real_url = wxGetApp().get_international_url(url);
                                         wxGetApp().mainframe->load_printer_url(real_url); 
                                     } else {
                                         if (reload_device_view) {
-                                            wxString url      = wxString::FromUTF8(LOCALHOST_URL + std::to_string(wxGetApp().get_page_http_port()) +
-                                                                                   "/web/flutter_web/index.html?path=2");
+                                            wxString url      = wxString::FromUTF8(wxGetApp().page_url("/web/flutter_web/index.html?path=2"));
                                             auto     real_url = wxGetApp().get_international_url(url);
 
                                             wxGetApp().mainframe->load_printer_url(real_url);

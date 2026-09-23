@@ -290,8 +290,7 @@ static void announce_connected()
     // update_all_preset_comboboxes only loads the device page the first time (its is_sm_page
     // latch), so ask for it here the way the Device page's own connect does.
     if (mf->m_printer_view) {
-        const wxString url = wxString::FromUTF8(LOCALHOST_URL + std::to_string(wxGetApp().get_page_http_port()) +
-                                                "/web/flutter_web/index.html?path=2");
+        const wxString url = wxString::FromUTF8(wxGetApp().page_url("/web/flutter_web/index.html?path=2"));
         mf->load_printer_url(wxGetApp().get_international_url(url));
     }
 }
