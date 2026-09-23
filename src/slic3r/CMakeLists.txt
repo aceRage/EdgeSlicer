@@ -769,6 +769,8 @@ set(SLIC3R_GUI_SOURCES
     pchheader.hpp
     Utils/ASCIIFolding.cpp
     Utils/ASCIIFolding.hpp
+    Utils/AppUpdateCheck.cpp
+    Utils/AppUpdateCheck.hpp
     Utils/AstroBox.cpp
     Utils/AstroBox.hpp
     Utils/bambu_networking.hpp

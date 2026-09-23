@@ -623,6 +623,18 @@ Http& Http::remove_header(std::string name)
 	return *this;
 }
 
+Http& Http::clear_headers()
+{
+	if (p) {
+		::curl_slist_free_all(p->headerlist);
+		p->headerlist = nullptr;
+		// Same default the constructor starts from: no "Expect: 100-continue" round trip.
+		p->headerlist = curl_slist_append(p->headerlist, "Expect:");
+	}
+
+	return *this;
+}
+
 // Authorization by HTTP digest, based on RFC2617.
 Http& Http::auth_digest(const std::string &user, const std::string &password)
 {

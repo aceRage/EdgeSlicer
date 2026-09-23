@@ -121,6 +121,10 @@ public:
 	Http& header(std::string name, const std::string &value);
 	// Removes a header field.
 	Http& remove_header(std::string name);
+	// Drops every custom header set so far, including the process-wide extra headers the
+	// constructor added (X-BBL-* client and device id). For requests to third-party hosts
+	// that must not receive them, e.g. the GitHub release check.
+	Http& clear_headers();
 	// Authorization by HTTP digest, based on RFC2617.
 	Http& auth_digest(const std::string &user, const std::string &password);
     // Basic HTTP authorization

@@ -644,9 +644,9 @@ int GuideFrame::SaveProfile()
     //     m_MainPtr->app_config->set(std::string(m_SectionName.mb_str()), "privacyuse", "1");
     // } else
     //     m_MainPtr->app_config->set(std::string(m_SectionName.mb_str()), "privacyuse", "0");
-    m_MainPtr->app_config->set("app", PRIVACY_POLICY_FLAGS, PrivacyUse);
-    BOOST_LOG_TRIVIAL(warning) << "SaveProfile changed the privacy policy with: " << (PrivacyUse ? "true" : "false");
-    wxGetApp().user_update_privacy_notify(PrivacyUse);
+    // EdgeSlicer: the wizard no longer has a "Customer Experience Improvement Program" page
+    // (guide/11 goes straight to the printer page), so it leaves privacy_policy_isagree alone:
+    // a fresh install never opts in, and re-running the wizard does not flip an existing value.
     m_MainPtr->app_config->set("region", m_Region);
     m_MainPtr->app_config->set_bool("stealth_mode", StealthMode);
 

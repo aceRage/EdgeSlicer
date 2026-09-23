@@ -38,24 +38,16 @@ using namespace nlohmann;
 
 namespace Slic3r {
 
-static const std::string VERSION_CHECK_URL_STABLE = "https://api.github.com/repos/Snapmaker/OrcaSlicer/releases/latest";
-static const std::string VERSION_CHECK_URL = "https://api.github.com/repos/Snapmaker/OrcaSlicer/releases";
+// The app's own new-version check lives in slic3r/Utils/AppUpdateCheck (GitHub release feed of
+// aceRage/EdgeSlicer); the upstream Snapmaker/OrcaSlicer GitHub URLs and the Snapmaker
+// /upgrade/orca/ app-update paths that used to sit here are gone. What remains below is the
+// profile and web-resource (flutter) update feed, which still points at Snapmaker's server.
 static const std::string PROFILE_UPDATE_URL = "/upgrade/profile/";
 static const std::string FLUTTER_UPDATE_URL = "/upgrade/flutter/";
 static const std::string MODELS_STR = "models";
 
 #define APP_UPDATE_URL_BASE_CN "https://meta-cfg.snapmaker.cn"
 #define APP_UPDATE_URL_BASE_EN "https://meta-cfg.snapmaker.com"
-
-#if defined(_WIN32)
-static const std::string APP_UPDATE_URL = std::string("/upgrade/orca/win/");
-#elif defined(__APPLE__)
-static const std::string APP_UPDATE_URL = std::string("/upgrade/orca/mac/");
-#elif defined(__linux__)
-static const std::string APP_UPDATE_URL = std::string("/upgrade/orca/linux/");
-#else
-static const std::string APP_UPDATE_URL = "";
-#endif
 
 
 const std::string AppConfig::SECTION_FILAMENTS = "filaments";
@@ -295,6 +287,11 @@ void AppConfig::set_defaults()
     }
     // SM prerelease does not update
     set_bool("check_stable_update_only", true);
+
+    // Look for a newer EdgeSlicer release (GitHub) once at startup. Help > Check for Update
+    // works regardless. Preferences > General.
+    if (get("check_for_updates_on_startup").empty())
+        set_bool("check_for_updates_on_startup", true);
 
 
     // Orca
@@ -1680,15 +1677,11 @@ std::string AppConfig::get_version_upgrade_url(bool stable_only /* = false*/)
     // update server (meta-cfg.snapmaker.com/upgrade/orca/...), so EdgeSlicer
     // advertised Snapmaker Orca releases - notes, download link and all - and
     // the same JSON could even force-upgrade the app into the upstream build.
-    // An override in the ini ("orca_upgrade_url") still wins: that is the hook
-    // to repoint at our own update server later, without a rebuild.
+    // 2026-09-22: with no override the app now checks the GitHub release feed of
+    // aceRage/EdgeSlicer (GUI_App::check_new_version_sf, Utils/AppUpdateCheck). An
+    // override in the ini ("orca_upgrade_url") still wins and keeps the old Snapmaker
+    // JSON schema, for self-hosting. See docs/update-server/README.md.
     return get("orca_upgrade_url");
-}
-
-std::string AppConfig::version_check_url(bool stable_only/* = false*/) const
-{
-    auto from_settings = get("version_check_url");
-    return from_settings.empty() ? stable_only ? VERSION_CHECK_URL_STABLE : VERSION_CHECK_URL : from_settings;
 }
 
 bool AppConfig::exists()

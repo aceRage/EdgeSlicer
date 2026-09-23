@@ -103,7 +103,9 @@ public:
     bool ShowReleaseNote(std::string content);
     void RunScript(std::string script);
     void on_dpi_changed(const wxRect& suggested_rect) override;
-    void update_version_info(wxString release_note, wxString version);
+    // Replaces the dialog's notes. A non-empty full_notes_url adds a "See the full release
+    // notes" link under the text (the GitHub release page when the notes were shortened).
+    void update_version_info(wxString release_note, wxString version, const std::string& full_notes_url = {});
     std::vector<std::string> splitWithStl(std::string str, std::string pattern);
 
     void setDialogMode(bool mode) { isModal = mode; }
