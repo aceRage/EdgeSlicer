@@ -136,6 +136,7 @@
 #include "3DBed.hpp"
 #include "PartPlate.hpp"
 #include "RemoteAccess.hpp"
+#include "DualNozzleState.hpp"
 #include "Camera.hpp"
 #include "Mouse3DController.hpp"
 #include "Tab.hpp"
@@ -10485,6 +10486,8 @@ struct Plater::priv
     std::string                 delayed_error_message;
 
     wxTimer                     background_process_timer;
+    // Bambu two-extruder printers: marks plates for re-slice when the selected printer changes.
+    std::unique_ptr<DualNozzle::Watcher> dual_nozzle_watcher;
 
     std::string                 label_btn_export;
     std::string                 label_btn_send;
@@ -11090,6 +11093,8 @@ Plater::priv::priv(Plater *q, MainFrame *main_frame)
     panels.push_back(assemble_view);
 
     this->background_process_timer.SetOwner(this->q, 0);
+    // Own event handler and timer: q's wxEVT_TIMER binding below takes every timer event of q.
+    this->dual_nozzle_watcher = std::make_unique<DualNozzle::Watcher>(this->q);
     this->q->Bind(wxEVT_TIMER, [this](wxTimerEvent &evt)
     {
         if (!this->suppressed_backround_processing_update)
@@ -14581,6 +14586,25 @@ bool Plater::priv::restart_background_process(unsigned int state)
             print->set_ultra_ams_count({});
             DeviceManager* dev = wxGetApp().getDeviceManager();
             MachineObject* obj = dev ? dev->get_selected_machine() : nullptr;
+            // A plate grouped by hand (the pre-slice confirmation) slices with its own map; the AMS
+            // data below then only feeds the logs. Without either, the grouping falls back to Auto
+            // For Flush - say so instead of doing it silently (on the H2C that put every filament on
+            // the six-nozzle rack, 2026-09-23).
+            if (DualNozzle::preset_is_dual_nozzle_bambu()) {
+                PartPlate* cur_plate  = this->background_process.get_current_plate();
+                const bool manual_map = cur_plate && !cur_plate->get_manual_filament_map().empty();
+                const bool live_ams   = obj && obj->is_multi_extruders() && !obj->amsList.empty();
+                static int s_logged_plate = -2; // once per plate until it changes state, not per apply
+                const int  plate_no       = cur_plate ? cur_plate->get_index() + 1 : 0;
+                if (!manual_map && !live_ams) {
+                    if (s_logged_plate != plate_no)
+                        BOOST_LOG_TRIVIAL(warning) << "[DualNozzle] slicing plate " << plate_no
+                                                   << " without a confirmed arrangement or live AMS data: grouping falls back to Auto For Flush";
+                    s_logged_plate = plate_no;
+                } else if (s_logged_plate == plate_no) {
+                    s_logged_plate = -2;
+                }
+            }
             if (obj && obj->is_multi_extruders() && print->is_BBL_printer()) {
                 int ec = 0;
                 bool dual_nozzle_profile = const_cast<DynamicPrintConfig&>(print->full_print_config()).support_different_extruders(ec);
@@ -22470,7 +22494,29 @@ bool Plater::reslice()
         DeviceManager* dev = wxGetApp().getDeviceManager();
         if (pb && dev && pb->is_bbl_vendor()) {
             if (MachineObject* obj = dev->get_selected_machine()) {
-                if (obj->is_connected() && !obj->m_extder_data.extders.empty()) {
+                if (obj->is_connected() && !obj->m_extder_data.extders.empty() && DualNozzle::preset_is_dual_nozzle_bambu()) {
+                    // Two extruders: one value per LOGICAL extruder, read from the physical extruder
+                    // it maps to (physical 0 = right on the H2D/H2C). Writing the single value below
+                    // shrank the two-entry list to one and dropped the other extruder's type.
+                    auto* cur = pb->project_config.option<ConfigOptionEnumsGeneric>("nozzle_volume_type");
+                    std::vector<int> want = cur ? cur->values : std::vector<int>();
+                    want.resize(2, int(NozzleVolumeType::nvtStandard));
+                    const std::vector<int> pem = DualNozzle::preset_physical_extruder_map();
+                    for (int logical = 0; logical < 2; ++logical) {
+                        const int physical = BambuExtruderMap::logical_to_physical(pem, logical);
+                        for (const Extder& e : obj->m_extder_data.extders)
+                            if (e.id == physical && e.nozzle_id != 0xff)
+                                want[size_t(logical)] = int(e.current_nozzle_flow);
+                    }
+                    if (!cur || cur->values != want) {
+                        if (cur)
+                            cur->values = want; // in place: keeps the option's enum key map
+                        else
+                            pb->project_config.set_key_value("nozzle_volume_type", new ConfigOptionEnumsGeneric(want));
+                        BOOST_LOG_TRIVIAL(info) << "[DualNozzle] auto-matched nozzle_volume_type per extruder to the printer: "
+                                                << want[0] << "," << want[1];
+                    }
+                } else if (obj->is_connected() && !obj->m_extder_data.extders.empty()) {
                     NozzleVolumeType flow = obj->m_extder_data.extders[0].current_nozzle_flow;
                     // Ultra: nozzle_volume_type is now per-extruder (coEnums). This single-nozzle
                     // auto-match sets the first extruder's value; dual-nozzle per-extruder matching
@@ -24501,6 +24547,9 @@ void Plater::check_seq_print_caution(bool all_plates)
 
 bool Plater::guard_before_slice_plate()
 {
+    // Bambu two-extruder printers: confirm the filament arrangement first (no-op elsewhere).
+    if (!DualNozzle::confirm_before_slice(this, false))
+        return false;
     sync_filament_temp_mixing_notification();
     sync_flow_ratio_zero_notification();
     sync_cold_plate_notification();
@@ -24510,6 +24559,8 @@ bool Plater::guard_before_slice_plate()
 
 bool Plater::guard_before_slice_all()
 {
+    if (!DualNozzle::confirm_before_slice(this, true))
+        return false;
     sync_flow_ratio_zero_notification();
     check_seq_print_caution(true);
     return confirm_filament_temp_mixing_before_slice_all();
