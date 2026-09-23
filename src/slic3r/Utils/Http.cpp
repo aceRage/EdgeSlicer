@@ -1,11 +1,14 @@
 #include "Http.hpp"
 
+#include <algorithm>
+#include <cstdint>
 #include <cstdlib>
 #include <functional>
 #include <thread>
 #include <deque>
 #include <sstream>
 #include <exception>
+#include <vector>
 #include <boost/filesystem/fstream.hpp>
 #include <boost/filesystem/path.hpp>
 #include <boost/filesystem.hpp>
@@ -123,6 +126,9 @@ struct Http::priv
 	// form_file_read_cb, whose CURLOPT_READDATA is only ever set for a PUT.
 	bool postfields_set { false };
 	std::string error_buffer;    // Used for CURLOPT_ERRORBUFFER
+	std::string url;             // As given to the constructor; the certificate policy is decided on it
+	Http::TlsPolicy tls_policy { Http::TlsPolicy::Auto };
+	bool ca_file_set { false };  // ca_file() named a CA bundle: do not replace it with the system one
     std::string headers;
 	size_t limit;
 	bool cancel;
@@ -181,6 +187,59 @@ static const char* NOPROXY_DOMAINS =
     "127.0.0.1,"
     "::1";
 
+#ifndef _WIN32
+// A PEM CA bundle for OpenSSL on Linux and macOS: $SSL_CERT_FILE when it names a file, otherwise
+// the first system bundle that exists. Empty when none does; libcurl then falls back to its own
+// build-time default (and on Linux to OpenSSL's default paths, which CurlGlobalInit points at).
+static const std::string& system_ca_bundle()
+{
+    static const std::string bundle = []() -> std::string {
+        boost::system::error_code ec;
+        if (const char *env = ::getenv("SSL_CERT_FILE"); env != nullptr && *env != '\0' && fs::exists(fs::path(env), ec))
+            return env;
+        static const char *const candidates[] = {
+            "/etc/ssl/cert.pem",                     // macOS, Alpine, Arch, Fedora (link)
+            "/etc/ssl/certs/ca-certificates.crt",    // Debian/Ubuntu/Gentoo
+            "/etc/pki/tls/certs/ca-bundle.crt",      // Fedora/RHEL
+            "/usr/share/ssl/certs/ca-bundle.crt",
+            "/usr/local/share/certs/ca-root-nss.crt", // FreeBSD
+            "/etc/ssl/ca-bundle.pem",                // openSUSE
+            "/usr/local/etc/openssl/cert.pem",       // Homebrew OpenSSL
+            "/opt/homebrew/etc/openssl@3/cert.pem",
+        };
+        for (const char *c : candidates)
+            if (fs::exists(fs::path(c), ec))
+                return c;
+        BOOST_LOG_TRIVIAL(warning) << "Http: no system CA bundle found; certificate checks rely on libcurl's built-in default";
+        return {};
+    }();
+    return bundle;
+}
+#endif
+
+// Sets the certificate checks of one easy handle. With `verify` off this is what every request
+// did until 2026-09-22 (VERIFYPEER=0, VERIFYHOST=0).
+static void apply_tls_options(::CURL *curl, bool verify, bool ca_file_set)
+{
+    ::curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, verify ? 1L : 0L);
+    ::curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, verify ? 2L : 0L);
+    if (!verify)
+        return;
+#ifdef _WIN32
+    // Our libcurl is built on OpenSSL on every platform (deps/CURL/CURL.cmake), and OpenSSL has no
+    // CA store of its own on Windows: take the trusted roots from the Windows certificate store
+    // (CURLSSLOPT_NATIVE_CA, libcurl >= 7.71; ours is 7.75). A ca_file() is loaded on top of it.
+    (void)ca_file_set;
+    ::curl_easy_setopt(curl, CURLOPT_SSL_OPTIONS, long(CURLSSLOPT_NATIVE_CA));
+#else
+    if (!ca_file_set) {
+        const std::string &bundle = system_ca_bundle();
+        if (!bundle.empty())
+            ::curl_easy_setopt(curl, CURLOPT_CAINFO, bundle.c_str());
+    }
+#endif
+}
+
 Http::priv::priv(const std::string &url)
 	: curl(::curl_easy_init())
 	, form(nullptr)
@@ -188,6 +247,7 @@ Http::priv::priv(const std::string &url)
 	, mime(nullptr)
 	, headerlist(nullptr)
 	, error_buffer(CURL_ERROR_SIZE + 1, '\0')
+	, url(url)
 	, limit(0)
 	, cancel(false)
 {
@@ -207,8 +267,8 @@ Http::priv::priv(const std::string &url)
 	::curl_easy_setopt(curl, CURLOPT_SSLVERSION, CURL_SSLVERSION_MAX_TLSv1_2);
 #endif
 	::curl_easy_setopt(curl, CURLOPT_IPRESOLVE, CURL_IPRESOLVE_V4);
-	::curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
-	::curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
+	// The certificate checks are set in http_perform(), from `url` and tls_policy (see
+	// apply_tls_options below). Until 2026-09-22 they were switched off here for every request.
 
 	// Bypass proxy for Snapmaker domains - this fixes issues when users have
 	// Shadowsocks/Clash/V2Ray or other proxy software enabled
@@ -454,6 +514,9 @@ std::string Http::priv::body_size_error()
 
 void Http::priv::http_perform()
 {
+	const bool tls_verify = Http::tls_verify_for(url, tls_policy);
+	apply_tls_options(curl, tls_verify, ca_file_set);
+
 	::curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
 	::curl_easy_setopt(curl, CURLOPT_POSTREDIR, CURL_REDIR_POST_ALL);
 	::curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, writecb);
@@ -517,6 +580,9 @@ void Http::priv::http_perform()
 		else if (res == CURLE_WRITE_ERROR) {
 			if (errorfn) { errorfn(std::move(buffer), body_size_error(), 0); }
 		} else {
+			if (tls_verify && (res == CURLE_PEER_FAILED_VERIFICATION || res == CURLE_SSL_CACERT_BADFILE))
+				BOOST_LOG_TRIVIAL(warning) << "Http: TLS certificate check failed for host " << Http::url_host(url)
+				                           << ": " << error_buffer.c_str();
 			if (errorfn) { errorfn(std::move(buffer), curl_error(res), 0); }
 		};
 	} else {
@@ -658,9 +724,184 @@ Http& Http::ca_file(const std::string &name)
 {
 	if (p && priv::ca_file_supported(p->curl)) {
 		::curl_easy_setopt(p->curl, CURLOPT_CAINFO, name.c_str());
+		p->ca_file_set = true;
 	}
 
 	return *this;
+}
+
+Http& Http::tls_policy(TlsPolicy policy)
+{
+	if (p) { p->tls_policy = policy; }
+	return *this;
+}
+
+std::string Http::url_host(const std::string &url)
+{
+    const size_t scheme_end = url.find("://");
+    const size_t start      = scheme_end == std::string::npos ? 0 : scheme_end + 3;
+    const size_t end        = url.find_first_of("/?#", start);
+    std::string  authority  = url.substr(start, end == std::string::npos ? std::string::npos : end - start);
+    if (const size_t at = authority.rfind('@'); at != std::string::npos)
+        authority.erase(0, at + 1);
+
+    std::string host;
+    if (!authority.empty() && authority.front() == '[') {
+        const size_t close = authority.find(']');
+        host = authority.substr(1, close == std::string::npos ? std::string::npos : close - 1);
+        if (const size_t zone = host.find('%'); zone != std::string::npos)
+            host.erase(zone); // fe80::1%25eth0
+    } else {
+        host = authority.substr(0, authority.find(':'));
+    }
+    boost::algorithm::to_lower(host);
+    while (!host.empty() && host.back() == '.')
+        host.pop_back();
+    return host;
+}
+
+// Dotted-quad IPv4 only (what URLs carry); false for anything else.
+static bool parse_ipv4(const std::string &s, unsigned char out[4])
+{
+    int    part = 0;
+    size_t i    = 0;
+    while (part < 4) {
+        size_t   digits = 0;
+        unsigned value  = 0;
+        while (i < s.size() && s[i] >= '0' && s[i] <= '9' && digits < 3) {
+            value = value * 10 + unsigned(s[i] - '0');
+            ++i, ++digits;
+        }
+        if (digits == 0 || value > 255)
+            return false;
+        out[part++] = (unsigned char) value;
+        if (part < 4) {
+            if (i >= s.size() || s[i] != '.')
+                return false;
+            ++i;
+        }
+    }
+    return i == s.size();
+}
+
+static bool ipv4_is_private(const unsigned char a[4])
+{
+    return a[0] == 127                                  // loopback
+        || a[0] == 10                                   // RFC 1918
+        || (a[0] == 172 && (a[1] & 0xf0) == 16)         // RFC 1918 172.16/12
+        || (a[0] == 192 && a[1] == 168)                 // RFC 1918
+        || (a[0] == 169 && a[1] == 254)                 // link-local
+        || (a[0] == 100 && (a[1] & 0xc0) == 64)         // CGNAT 100.64/10: Tailscale addresses
+        || a[0] == 0;                                   // "this network"
+}
+
+// Expands an IPv6 literal (no brackets, no zone) into 8 groups; false when it is not one.
+static bool parse_ipv6(const std::string &s, uint16_t out[8])
+{
+    auto parse_groups = [](const std::string &part, std::vector<uint16_t> &groups, bool allow_v4_tail) -> bool {
+        if (part.empty())
+            return true;
+        size_t pos = 0;
+        while (true) {
+            const size_t colon = part.find(':', pos);
+            const std::string g = part.substr(pos, colon == std::string::npos ? std::string::npos : colon - pos);
+            if (colon == std::string::npos && allow_v4_tail && g.find('.') != std::string::npos) {
+                unsigned char v4[4];
+                if (!parse_ipv4(g, v4))
+                    return false;
+                groups.push_back(uint16_t((v4[0] << 8) | v4[1]));
+                groups.push_back(uint16_t((v4[2] << 8) | v4[3]));
+                return true;
+            }
+            if (g.empty() || g.size() > 4 || g.find_first_not_of("0123456789abcdef") != std::string::npos)
+                return false;
+            groups.push_back(uint16_t(std::stoul(g, nullptr, 16)));
+            if (colon == std::string::npos)
+                return true;
+            pos = colon + 1;
+        }
+    };
+    std::vector<uint16_t> head, tail;
+    const size_t gap = s.find("::");
+    if (gap == std::string::npos) {
+        if (!parse_groups(s, head, true) || head.size() != 8)
+            return false;
+    } else {
+        if (s.find("::", gap + 1) != std::string::npos)
+            return false;
+        if (!parse_groups(s.substr(0, gap), head, false) || !parse_groups(s.substr(gap + 2), tail, true) ||
+            head.size() + tail.size() > 7)
+            return false;
+    }
+    std::fill(out, out + 8, uint16_t(0));
+    std::copy(head.begin(), head.end(), out);
+    std::copy(tail.begin(), tail.end(), out + 8 - tail.size());
+    return true;
+}
+
+bool Http::tls_host_is_private(const std::string &host_in)
+{
+    std::string host = host_in;
+    boost::algorithm::to_lower(host);
+    while (!host.empty() && host.back() == '.')
+        host.pop_back();
+    if (host.empty())
+        return true;
+    if (host == "localhost" || boost::algorithm::ends_with(host, ".localhost"))
+        return true;
+
+    unsigned char v4[4];
+    if (parse_ipv4(host, v4))
+        return ipv4_is_private(v4);
+
+    if (host.find(':') != std::string::npos) {
+        uint16_t g[8];
+        if (!parse_ipv6(host, g))
+            return true; // not a host we understand; do not start failing requests on it
+        const bool upper_zero = g[0] == 0 && g[1] == 0 && g[2] == 0 && g[3] == 0 && g[4] == 0;
+        if (upper_zero && g[5] == 0 && g[6] == 0 && (g[7] == 0 || g[7] == 1))
+            return true;                                   // :: and ::1
+        if (upper_zero && g[5] == 0xffff) {                // ::ffff:a.b.c.d
+            const unsigned char m[4] = { (unsigned char) (g[6] >> 8), (unsigned char) g[6], (unsigned char) (g[7] >> 8), (unsigned char) g[7] };
+            return ipv4_is_private(m);
+        }
+        return (g[0] & 0xfe00) == 0xfc00                   // unique local fc00::/7
+            || (g[0] & 0xffc0) == 0xfe80;                  // link-local fe80::/10
+    }
+
+    // A single-label name ("octopi", "u1") only resolves on the local network.
+    if (host.find('.') == std::string::npos)
+        return true;
+
+    // Names that only exist on a LAN. ts.net is Tailscale MagicDNS: those hosts are reached through
+    // the WireGuard tunnel (already authenticated and encrypted end to end), and a device there
+    // serves its own self-signed certificate unless Tailscale Serve fronts it.
+    static const char *const private_suffixes[] = {
+        ".local", ".lan", ".home", ".internal", ".intranet", ".localdomain", ".home.arpa", ".ts.net",
+    };
+    for (const char *suffix : private_suffixes)
+        if (boost::algorithm::ends_with(host, suffix))
+            return true;
+    return false;
+}
+
+bool Http::tls_verify_for(const std::string &url, TlsPolicy policy)
+{
+    if (policy == TlsPolicy::PrintHost)
+        return false;
+    std::string scheme = url.substr(0, url.find("://"));
+    boost::algorithm::to_lower(scheme);
+    if (scheme != "https" && scheme != "wss")
+        return false; // no TLS at all (curl treats a URL without a scheme as http)
+    if (policy == TlsPolicy::Verify)
+        return true;
+    return !tls_host_is_private(url_host(url));
+}
+
+void Http::apply_tls_policy(void *curl_handle, const std::string &url, TlsPolicy policy)
+{
+    if (curl_handle != nullptr)
+        apply_tls_options(static_cast<::CURL *>(curl_handle), tls_verify_for(url, policy), false);
 }
 
 Http& Http::form_clear() {

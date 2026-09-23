@@ -76,6 +76,7 @@ bool MKS::upload(PrintHostUpload upload_data, ProgressFn prorgess_fn, ErrorFn er
 		% upload_cmd;
 
 	auto http = Http::post(std::move(upload_cmd));
+	http.tls_policy(Http::TlsPolicy::PrintHost); // printer: keep accepting self-signed certificates
 	http.set_post_body(upload_data.source_path);
 
 	http.on_complete([&](std::string body, unsigned status) {

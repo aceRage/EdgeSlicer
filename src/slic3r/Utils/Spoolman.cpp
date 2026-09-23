@@ -55,6 +55,7 @@ bool Spoolman::get_spools(std::vector<SpoolmanSpool>& spools, std::string& error
     }
     bool ok = false;
     auto http = Http::get(base + "/api/v1/spool");
+    http.tls_policy(Http::TlsPolicy::PrintHost); // printer: keep accepting self-signed certificates
     http.timeout_connect(4)
         .timeout_max(10)
         .on_error([&](std::string body, std::string err, unsigned status) {
@@ -111,6 +112,7 @@ bool Spoolman::use_weight(int spool_id, double grams, std::string& error)
     // anything reaches the server. put2() is a plain PUT that sends POSTFIELDS, which is what a
     // Spoolman deduction is. (The same trap is noted at RemoteHub.cpp's go2rtc stream call.)
     auto http = Http::put2(base + "/api/v1/spool/" + std::to_string(spool_id) + "/use");
+    http.tls_policy(Http::TlsPolicy::PrintHost); // printer: keep accepting self-signed certificates
     http.timeout_connect(4)
         .timeout_max(10)
         .header("Content-Type", "application/json")

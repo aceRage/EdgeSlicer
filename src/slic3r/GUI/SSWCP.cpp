@@ -985,6 +985,7 @@ void SSWCP_Instance::finish_job() {
 // Asynchronous test implementation
 void SSWCP_Instance::async_test() {
     auto http = Http::get("http://172.18.1.69/");
+    http.tls_policy(Http::TlsPolicy::PrintHost); // printer: keep accepting self-signed certificates
     http.on_error([&](std::string body, std::string error, unsigned status) {
 
     })
@@ -2944,6 +2945,7 @@ void SSWCP_MachineOption_Instance::sw_UploadFiletoMachine() {
             auto final_url = Http::encode_url_path(tmp_url);
 
             Http http_object = Http::post(final_url);
+            http_object.tls_policy(Http::TlsPolicy::PrintHost); // printer: keep accepting self-signed certificates
             http_object
                 .form_add("print", "false")
                 .form_add_file("file", std::string(filepath.ToUTF8()), std::string(filename.ToUTF8()))
@@ -3035,6 +3037,7 @@ void SSWCP_MachineOption_Instance::sw_DownloadMachineFile() {
 
 
             Http http_object = Http::get(final_url);
+            http_object.tls_policy(Http::TlsPolicy::PrintHost); // printer: keep accepting self-signed certificates
             http_object
                 .on_error([=](std::string body, std::string error, unsigned status) {
                     handle_general_fail();

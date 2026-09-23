@@ -52,7 +52,7 @@ static std::string moonraker_base(const std::string& host)
 static bool moonraker_get(const std::string& url, std::string& body, std::string& error, int timeout_s)
 {
     bool ok = false;
-    Http::get(url)
+    Http::get(url).tls_policy(Http::TlsPolicy::PrintHost) // printer: keep accepting self-signed certificates
         .timeout_connect(timeout_s)
         .timeout_max(timeout_s)
         .size_limit(512 * 1024)

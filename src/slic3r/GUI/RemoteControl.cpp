@@ -147,6 +147,7 @@ static bool moonraker_http(const std::string& url, bool post, std::string& body,
 {
     bool ok = false;
     auto http = post ? Http::post(url) : Http::get(url);
+    http.tls_policy(Http::TlsPolicy::PrintHost); // printer: keep accepting self-signed certificates
     // An empty JSON object rather than no body at all: CURLOPT_POST without post fields would fall
     // through to the wrapper's file-upload read callback. Moonraker ignores the body of these three.
     if (post) http.header("Content-Type", "application/json").set_post_body(std::string("{}"));

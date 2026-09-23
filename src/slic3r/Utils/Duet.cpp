@@ -74,6 +74,7 @@ bool Duet::upload(PrintHostUpload upload_data, ProgressFn prorgess_fn, ErrorFn e
 		% upload_cmd;
 
 	auto http = (dsf ? Http::put(std::move(upload_cmd)) : Http::post(std::move(upload_cmd)));
+	http.tls_policy(Http::TlsPolicy::PrintHost); // printer: keep accepting self-signed certificates
 	if (dsf) {
 		http.set_put_body(upload_data.source_path);
 	} else {
@@ -127,9 +128,11 @@ Duet::ConnectionType Duet::connect(wxString &msg) const
 	auto url = get_connect_url(false);
 
 	auto http = Http::get(std::move(url));
+	http.tls_policy(Http::TlsPolicy::PrintHost); // printer: keep accepting self-signed certificates
 	http.on_error([&](std::string body, std::string error, unsigned status) {
 			auto dsfUrl = get_connect_url(true);
 			auto dsfHttp = Http::get(std::move(dsfUrl));
+			dsfHttp.tls_policy(Http::TlsPolicy::PrintHost); // printer: keep accepting self-signed certificates
 			dsfHttp.on_error([&](std::string body, std::string error, unsigned status) {
 					BOOST_LOG_TRIVIAL(error) << boost::format("Duet: Error connecting: %1%, HTTP %2%, body: `%3%`") % error % status % body;
 					msg = format_error(body, error, status);
@@ -174,6 +177,7 @@ void Duet::disconnect(ConnectionType connectionType) const
 			% get_base_url()).str();
 
 	auto http = Http::get(std::move(url));
+	http.tls_policy(Http::TlsPolicy::PrintHost); // printer: keep accepting self-signed certificates
 	http.on_error([&](std::string body, std::string error, unsigned status) {
 		// we don't care about it, if disconnect is not working Duet will disconnect automatically after some time
 		BOOST_LOG_TRIVIAL(error) << boost::format("Duet: Error disconnecting: %1%, HTTP %2%, body: `%3%`") % error % status % body;
@@ -253,6 +257,7 @@ bool Duet::start_print(wxString &msg, const std::string &filename, ConnectionTyp
 			% Http::url_encode(filename)).str();
 
 	auto http = (dsf ? Http::post(std::move(url)) : Http::get(std::move(url)));
+	http.tls_policy(Http::TlsPolicy::PrintHost); // printer: keep accepting self-signed certificates
 	if (dsf) {
 		http.set_post_body(
 				(boost::format(simulationMode

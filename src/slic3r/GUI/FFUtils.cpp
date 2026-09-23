@@ -11,6 +11,7 @@
 #include "slic3r/GUI/I18N.hpp"
 #include "slic3r/GUI/FlashForge/MultiComMgr.hpp"
 #include "slic3r/GUI/Widgets/WebView.hpp"
+#include "slic3r/Utils/Http.hpp"
 
 namespace Slic3r::GUI
 {
@@ -534,8 +535,9 @@ long FFUtils::getHttpHeaders(const std::string &url, const std::vector<std::stri
     std::unique_ptr<curl_slist, decltype(&curl_slist_free_all)> freeCurlSlist(curlSlist, curl_slist_free_all);
     client_data_t clientData(headerMap, keys);
     curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
-    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
+    // Download links from the FlashForge web pages: the same certificate policy as every Http
+    // request (checked for internet hosts, not for LAN ones). Was VERIFYPEER/VERIFYHOST 0.
+    Slic3r::Http::apply_tls_policy(curl, url);
     //curl_easy_setopt(curl, CURLOPT_HTTPHEADER, curlSlist);
     curl_easy_setopt(curl, CURLOPT_HEADERDATA, &clientData);
     curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, headerCallback);

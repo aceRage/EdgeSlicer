@@ -45,6 +45,7 @@ bool FlashAir::test(wxString &msg) const
 	BOOST_LOG_TRIVIAL(info) << boost::format("%1%: Get upload enabled at: %2%") % name % url;
 
 	auto http = Http::get(std::move(url));
+	http.tls_policy(Http::TlsPolicy::PrintHost); // printer: keep accepting self-signed certificates
 	http.on_error([&](std::string body, std::string error, unsigned status) {
 			BOOST_LOG_TRIVIAL(error) << boost::format("%1%: Error getting upload enabled: %2%, HTTP %3%, body: `%4%`") % name % error % status % body;
 			res = false;
@@ -109,6 +110,7 @@ bool FlashAir::upload(PrintHostUpload upload_data, ProgressFn prorgess_fn, Error
 
 	// set filetime for upload and make card writeprotect to prevent filesystem damage
 	auto httpPrepare = Http::get(std::move(urlPrepare));
+	httpPrepare.tls_policy(Http::TlsPolicy::PrintHost); // printer: keep accepting self-signed certificates
 	httpPrepare.on_error([&](std::string body, std::string error, unsigned status) {
             BOOST_LOG_TRIVIAL(error) << boost::format("%1%: Error preparing upload: %2%, HTTP %3%, body: `%4%`") % name % error % status % body;
 			error_fn(format_error(body, error, status));
@@ -130,6 +132,7 @@ bool FlashAir::upload(PrintHostUpload upload_data, ProgressFn prorgess_fn, Error
 	
 	// start file upload
     auto httpDir = Http::get(std::move(urlSetDir));
+    httpDir.tls_policy(Http::TlsPolicy::PrintHost); // printer: keep accepting self-signed certificates
     httpDir.on_error([&](std::string body, std::string error, unsigned status) {
             BOOST_LOG_TRIVIAL(error) << boost::format("%1%: Error setting upload dir: %2%, HTTP %3%, body: `%4%`") % name % error % status % body;
             error_fn(format_error(body, error, status));
@@ -150,6 +153,7 @@ bool FlashAir::upload(PrintHostUpload upload_data, ProgressFn prorgess_fn, Error
     }
 
 	auto http = Http::post(std::move(urlUpload));
+	http.tls_policy(Http::TlsPolicy::PrintHost); // printer: keep accepting self-signed certificates
 	http.form_add_file("file", upload_data.source_path.string(), upload_filename.string())
 		.on_complete([&](std::string body, unsigned status) {
 			BOOST_LOG_TRIVIAL(debug) << boost::format("%1%: File uploaded: HTTP %2%: %3%") % name % status % body;

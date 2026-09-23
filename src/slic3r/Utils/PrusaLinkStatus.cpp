@@ -190,6 +190,7 @@ static bool get(const std::string& url, const Auth& auth, std::string& body, std
 {
     bool ok = false;
     auto http = Http::get(url);
+    http.tls_policy(Http::TlsPolicy::PrintHost); // printer: keep accepting self-signed certificates
     // Exactly PrusaLink::set_auth (OctoPrint.cpp:597): a key in the header, or HTTP Digest.
     if (auth.auth_type == "user")
         http.auth_digest(auth.user, auth.password);

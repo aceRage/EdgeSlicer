@@ -73,6 +73,16 @@ public:
 
 	typedef std::function<void(std::string headers)> HeaderCallbackFn;
 
+	// Whether a request checks the server's TLS certificate (CURLOPT_SSL_VERIFYPEER/VERIFYHOST).
+	//  Auto      - the default: verify for internet hosts, not for loopback / private / LAN
+	//              addresses and names (see tls_host_is_private()).
+	//  Verify    - always verify, whatever the host.
+	//  PrintHost - never verify. For printers, their cameras and other user-run LAN services
+	//              (OctoPrint, Moonraker, PrusaLink, Duet, FlashForge, Snapmaker U1, Spoolman...),
+	//              which very often present self-signed certificates, even behind a public name.
+	//              This is how every request behaved before 2026-09-22.
+	enum class TlsPolicy { Auto, Verify, PrintHost };
+
 	Http(Http &&other);
 
 	// Note: strings are expected to be UTF-8-encoded
@@ -133,6 +143,8 @@ public:
 	// specifically, this is supported with OpenSSL and NOT supported with Windows and OS X native certificate store.
 	// See also ca_file_supported().
 	Http& ca_file(const std::string &filename);
+	// Overrides the certificate policy of this request; the default is TlsPolicy::Auto.
+	Http& tls_policy(TlsPolicy policy);
 
 	Http& form_clear();
 	// Add a HTTP multipart form field
@@ -203,6 +215,19 @@ public:
     // Return empty string on success or error message on fail.
     static std::string tls_global_init();
     static std::string tls_system_cert_store();
+
+	// The certificate policy, as pure functions (unit-tested in tests/slic3rutils/http_tls_policy_tests.cpp).
+	// Host part of a URL, lower-cased, without userinfo, port, IPv6 brackets or a trailing dot.
+	static std::string url_host(const std::string &url);
+	// True for hosts on this machine or the local network: localhost, loopback, RFC 1918, link-local,
+	// CGNAT/Tailscale (100.64/10), IPv6 ULA and link-local, single-label names and the usual LAN
+	// suffixes (.local, .lan, .home, .internal, .localdomain, .home.arpa, .ts.net).
+	static bool tls_host_is_private(const std::string &host);
+	// Whether a request to `url` under `policy` verifies the certificate. Plain http never does.
+	static bool tls_verify_for(const std::string &url, TlsPolicy policy);
+	// For the few places that drive libcurl directly: applies the same policy and CA source to an
+	// easy handle (a ::CURL*, passed as void* so this header does not need curl.h).
+	static void apply_tls_policy(void *curl_handle, const std::string &url, TlsPolicy policy = TlsPolicy::Auto);
 
 	// converts the given string to an url_encoded_string
 	static std::string url_encode(const std::string &str);

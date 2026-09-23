@@ -42,6 +42,7 @@ bool ESP3D::test(wxString& msg) const
     bool        ret      = false;
     std::string url_test = format_command("/command", "plain", "M105");
     auto        http     = Http::get(url_test);
+    http.tls_policy(Http::TlsPolicy::PrintHost); // printer: keep accepting self-signed certificates
     http.on_complete([&](std::string body, unsigned status) {
             // check  for OK
             ret = true;
@@ -68,6 +69,7 @@ bool ESP3D::upload(PrintHostUpload upload_data, ProgressFn prorgess_fn, ErrorFn 
     bool        res        = false;
 
     auto http = Http::post((boost::format("http://%1%/upload_serial") % m_host).str());
+    http.tls_policy(Http::TlsPolicy::PrintHost); // printer: keep accepting self-signed certificates
     http.header("Connection", "keep-alive")
         .form_add_file("file", upload_data.source_path, short_name)
         .on_complete([&](std::string body, unsigned status) {
@@ -115,6 +117,7 @@ bool ESP3D::start_print(wxString& msg, const std::string& filename) const
     auto select_file = (boost::format("%1% %2%") % "M23" % filename).str();
     auto select      = format_command("/command", "plain", Http::url_encode(select_file));
     auto http_sel    = Http::get(select);
+    http_sel.tls_policy(Http::TlsPolicy::PrintHost); // printer: keep accepting self-signed certificates
     http_sel
         .on_complete([&](std::string body, unsigned status) { 
             ret = true;
@@ -131,6 +134,7 @@ bool ESP3D::start_print(wxString& msg, const std::string& filename) const
 
     auto start      = format_command("/command", "plain", "M24");
     auto http_start = Http::get(start);
+    http_start.tls_policy(Http::TlsPolicy::PrintHost); // printer: keep accepting self-signed certificates
     http_start
         .on_complete([&](std::string body, unsigned status) {
             // print kicked off succesfully
