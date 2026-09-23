@@ -200,14 +200,16 @@ std::vector<ParkCommands> collect_park_commands(const std::string &gcode)
     static const std::regex re_precool(R"(^M620\.15 P(\d+))");
     static const std::regex re_retract(R"(^M620\.11 O1 T([0-9.]+))");
     std::vector<ParkCommands> out;
-    int                       current = -1, previous = -1;
+    // The outgoing filament is the one the previous change block loaded; the start G-code's own
+    // "M620 S0A" does not count (no filament is loaded yet when the first block runs).
+    int                       pending = -1, loaded = -1;
     for (const std::string &line : lines_of(body_of(gcode))) {
         std::smatch m;
         if (std::regex_search(line, m, re_change)) {
-            previous = current;
-            current  = std::stoi(m[1].str());
+            pending = std::stoi(m[1].str());
         } else if (std::regex_search(line, m, re_precool)) {
-            out.push_back({ previous, current, std::stoi(m[1].str()), -1. });
+            out.push_back({ loaded, pending, std::stoi(m[1].str()), -1. });
+            loaded = pending;
         } else if (std::regex_search(line, m, re_retract)) {
             if (!out.empty() && out.back().retract < 0.)
                 out.back().retract = std::stod(m[1].str());
@@ -261,13 +263,16 @@ SCENARIO("H2C tool changes tell the firmware how to park the outgoing hotend", "
                     CHECK(c.precool == precool[c.incoming]);
                     CHECK(c.precool != 0);
                     REQUIRE(c.retract >= 0.);
-                    CHECK(c.retract != 0.);
                     if (c.outgoing >= 0) {
                         ++with_outgoing;
                         CHECK(c.retract == retract[c.outgoing]);
+                    } else {
+                        // The first load after the start G-code: nothing is in a hotend yet, and Bambu
+                        // Studio publishes 0 there too (GCode.cpp:8208).
+                        CHECK(c.retract == 0.);
                     }
                 }
-                CHECK(with_outgoing >= changes.size() - 1);
+                CHECK(with_outgoing == changes.size() - 1);
             }
             THEN("no Orca tool-changer preheat is written")
             {
@@ -286,7 +291,8 @@ SCENARIO("H2C tool changes tell the firmware how to park the outgoing hotend", "
         REQUIRE_FALSE(changes.empty());
         for (const ParkCommands &c : changes) {
             CHECK(c.precool == 180);
-            CHECK(c.retract == 18.);
+            if (c.outgoing >= 0)
+                CHECK(c.retract == 18.);
         }
     }
 }
@@ -304,6 +310,11 @@ SCENARIO("Header nozzle and volume maps follow the plate's grouping", "[H2CRackP
         ConfigOptionInts       parsed;
         parsed.deserialize(header_volumes);
         REQUIRE(parsed.values.size() == size_t(NUM_FILAMENTS));
+        // Real NozzleVolumeType values only (a short nozzle_volume_type used to leak garbage here).
+        for (int v : parsed.values) {
+            CHECK(v >= 0);
+            CHECK(v <= int(NozzleVolumeType::nvtMaxNozzleVolumeType));
+        }
         for (unsigned int f : group->get_used_filaments())
             CHECK(parsed.values[f] == volumes[f]);
         // The header's nozzle ids are the same ids slice_info writes as <filament group_id>: each one
