@@ -10,6 +10,7 @@
 #include "../GCode/ThumbnailData.hpp"
 #include "../Semver.hpp"
 #include "../Time.hpp"
+#include "../BambuConfigCompat.hpp"
 
 #include "../I18N.hpp"
 
@@ -1946,6 +1947,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         // }
 
         // we then loop again the entries to read other files stored in the archive
+        mz_uint layer_config_ranges_entry = num_entries;
         for (mz_uint i = 0; i < num_entries; ++i) {
             if (mz_zip_reader_file_stat(&archive, i, &stat)) {
 
@@ -1972,8 +1974,10 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 }
                 else
                 if (boost::algorithm::iequals(name, LAYER_CONFIG_RANGES_FILE)) {
-                    // extract slic3r layer config ranges file
-                    _extract_layer_config_ranges_from_archive(archive, stat, config_substitutions);
+                    // extract slic3r layer config ranges file - after this loop, once the project
+                    // config its Bambu "nil" slots inherit from has been read (Bambu Studio
+                    // writes this file BEFORE project_settings.config).
+                    layer_config_ranges_entry = i;
                 }
                 else if (boost::algorithm::iequals(name, BRIM_EAR_POINTS_FILE)) {
                     // extract slic3r config file
@@ -2076,6 +2080,10 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 }
             }
         }
+        if (layer_config_ranges_entry < num_entries && mz_zip_reader_file_stat(&archive, layer_config_ranges_entry, &stat)) {
+            BambuConfigCompat::OverrideScope nil_override(config_substitutions, &config);
+            _extract_layer_config_ranges_from_archive(archive, stat, config_substitutions);
+        }
 
         lock.close();
 
@@ -2148,6 +2156,9 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 current_plate_data = it->second;
             }
         }
+        // Per-object and per-part settings are Bambu overrides: their "nil" slots inherit from the
+        // project config (and, for a part, from its object - see _generate_volumes_new).
+        BambuConfigCompat::OverrideScope nil_override(config_substitutions, &config);
         for (const IdToModelObjectMap::value_type& object : m_objects) {
             if (object.second >= int(m_model->objects.size())) {
                 add_error("invalid object, id: "+std::to_string(object.first.second));
@@ -5433,6 +5444,8 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             add_error("object already built with parts");
             return false;
         }
+        // A part's "nil" slots inherit from its object first, then from any outer scope.
+        BambuConfigCompat::OverrideScope nil_override(config_substitutions, &object.config.get());
 
         //unsigned int geo_tri_count = (unsigned int)geometry.triangles.size();
         unsigned int renamed_volumes_count = 0;
