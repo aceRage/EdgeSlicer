@@ -892,14 +892,21 @@ void MachineObject::get_ams_colors(std::vector<wxColour> &ams_colors) {
     }
 }
 
-int MachineObject::ams_filament_mapping(std::vector<FilamentInfo> filaments, std::vector<FilamentInfo> &result, std::vector<int> exclude_id)
+int MachineObject::ams_filament_mapping(std::vector<FilamentInfo> filaments, std::vector<FilamentInfo> &result, std::vector<int> exclude_id,
+                                        int only_physical_extruder)
 {
     if (filaments.empty())
         return -1;
 
+    auto feeds_requested_extruder = [only_physical_extruder](const Ams *ams) {
+        return only_physical_extruder < 0 || (ams && ams->nozzle == only_physical_extruder);
+    };
+
     // tray_index : tray_color
     std::map<int, FilamentInfo> tray_filaments;
     for (auto ams = amsList.begin(); ams != amsList.end(); ams++) {
+        if (!feeds_requested_extruder(ams->second))
+            continue;
 
         std::string ams_id = ams->second->id;
 
@@ -935,11 +942,18 @@ int MachineObject::ams_filament_mapping(std::vector<FilamentInfo> filaments, std
     std::vector<FilamentInfo> tray_info_list;
     int flament_index_id = 0;
     for (auto ams = amsList.begin(); ams != amsList.end(); ams++) {
+        if (!feeds_requested_extruder(ams->second))
+            continue;
         for (auto tray = ams->second->trayList.begin(); tray != ams->second->trayList.end(); tray++) {
 
             FilamentInfo info;
             info.id = flament_index_id;
             info.tray_id = flament_index_id;
+            /* A per-extruder call sees only part of the AMS list, so a running index would name the
+             * wrong tray (the left side's AMS HT would become tray 0 = "A1"). Use the real
+             * ams_id * 4 + slot_id tray index there; the unrestricted call keeps its old numbering. */
+            if (only_physical_extruder >= 0)
+                info.tray_id = atoi(ams->first.c_str()) * 4 + atoi(tray->first.c_str());
             info.color = tray->second->color;
             info.type = tray->second->get_filament_type();
             info.ctype = tray->second->ctype;

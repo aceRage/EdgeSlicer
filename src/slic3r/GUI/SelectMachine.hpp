@@ -75,6 +75,7 @@ enum PrintDialogStatus {
     PrintStatusAmsMappingU0Invalid,
     PrintStatusAmsMappingValid,
     PrintStatusAmsMappingByOrder,
+    PrintStatusAmsMappingWrongExtruder,
     PrintStatusRefreshingMachineList,
     PrintStatusSending,
     PrintStatusSendingCanceled,
@@ -386,6 +387,12 @@ public:
     void set_print_type(PrintFromType type) {m_print_type = type;};
     bool Show(bool show);
     bool do_ams_mapping(MachineObject* obj_);
+    /* Two-extruder Bambu jobs (H2D/H2D Pro/H2C): the sliced filament -> extruder map of the plate
+     * being sent (1 = left, 2 = right), empty for any other job; the printer profile's
+     * physical_extruder_map; and the filaments whose mapped AMS tray feeds the other extruder. */
+    std::vector<int> sliced_filament_map() const;
+    std::vector<int> printer_physical_extruder_map() const;
+    std::vector<int> filaments_mapped_to_wrong_extruder(MachineObject* obj_) const;
     bool get_ams_mapping_result(std::string& mapping_array_str, std::string& mapping_array_str2, std::string& ams_mapping_info);
     bool build_nozzles_info(std::string& nozzles_info);
     /* Ultra (dual-nozzle): BambuStudio's DevNozzleMappingCtrl::CtrlGetAutoNozzleMappingV0/V1

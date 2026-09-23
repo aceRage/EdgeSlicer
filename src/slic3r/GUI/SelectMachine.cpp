@@ -5,6 +5,7 @@
 #include "libslic3r/Thread.hpp"
 #include "libslic3r/Color.hpp"
 #include "libslic3r/MultiNozzleUtils.hpp"
+#include "libslic3r/BambuExtruderMap.hpp"
 #include "libslic3r/GCode/GCodeProcessor.hpp"
 #include "GUI.hpp"
 #include "GUI_App.hpp"
@@ -1116,7 +1117,36 @@ bool SelectMachineDialog::do_ams_mapping(MachineObject *obj_)
     }
 
     // try color and type mapping
-    int result = obj_->ams_filament_mapping(m_filaments, m_ams_mapping_result);
+    int result = 0;
+    const std::vector<int> fil_map = sliced_filament_map();
+    if (!fil_map.empty()) {
+        /* Two-extruder job: a filament can only be fed from an AMS connected to the extruder the
+         * G-code prints it with, so map each side against its own AMS units, as BambuStudio's
+         * do_ams_mapping does. Mapping every filament against every AMS let the 2026-09-23 H2C job
+         * (sliced all on the right rack) send filament 10 from the left extruder's AMS HT; the
+         * printer then re-arranged the filaments itself. */
+        const std::vector<int> pem = printer_physical_extruder_map();
+        std::vector<FilamentInfo> per_side[3]; // left, right, unknown
+        for (const FilamentInfo& f : m_filaments) {
+            const int logical = (f.id >= 0 && f.id < (int) fil_map.size()) ? fil_map[f.id] - 1 : -1;
+            per_side[(logical == 0 || logical == 1) ? logical : 2].push_back(f);
+        }
+        m_ams_mapping_result.clear();
+        for (int side = 0; side < 3; ++side) {
+            if (per_side[side].empty())
+                continue;
+            std::vector<FilamentInfo> side_result;
+            const int only_physical = side < 2 ? BambuExtruderMap::logical_to_physical(pem, side) : -1;
+            const int rc = obj_->ams_filament_mapping(per_side[side], side_result, std::vector<int>(), only_physical);
+            if (rc != 0)
+                result = rc;
+            m_ams_mapping_result.insert(m_ams_mapping_result.end(), side_result.begin(), side_result.end());
+        }
+        std::sort(m_ams_mapping_result.begin(), m_ams_mapping_result.end(),
+                  [](const FilamentInfo& a, const FilamentInfo& b) { return a.id < b.id; });
+    } else {
+        result = obj_->ams_filament_mapping(m_filaments, m_ams_mapping_result);
+    }
     for (const auto& r : m_ams_mapping_result)
         BOOST_LOG_TRIVIAL(warning) << "[Ultra P10] map F(" << (r.id+1) << ") -> tray " << (r.tray_id+1)
                                    << " ams_id=" << r.ams_id << " slot_id=" << r.slot_id;
@@ -1151,6 +1181,53 @@ bool SelectMachineDialog::do_ams_mapping(MachineObject *obj_)
     }
 
     return true;
+}
+
+std::vector<int> SelectMachineDialog::sliced_filament_map() const
+{
+    if (m_print_type != PrintFromType::FROM_NORMAL || !m_plater)
+        return {};
+    PresetBundle* preset_bundle = wxGetApp().preset_bundle;
+    if (!preset_bundle)
+        return {};
+    auto opt_nozzle_diameters = preset_bundle->printers.get_edited_preset().config.option<ConfigOptionFloats>("nozzle_diameter");
+    if (!opt_nozzle_diameters || opt_nozzle_diameters->size() != 2)
+        return {};
+    // What the plate's G-code was generated with (ToolOrdering writes the grouping into the
+    // plate's Print config); the project config is only the fallback.
+    std::vector<int> fil_map = m_plater->get_partplate_list().get_current_fff_print().config().filament_map.values;
+    if (fil_map.size() < preset_bundle->filament_presets.size()) {
+        if (auto* fm = preset_bundle->project_config.option<ConfigOptionInts>("filament_map"))
+            fil_map = fm->values;
+    }
+    return fil_map;
+}
+
+std::vector<int> SelectMachineDialog::printer_physical_extruder_map() const
+{
+    if (PresetBundle* preset_bundle = wxGetApp().preset_bundle)
+        if (auto* pem = preset_bundle->printers.get_edited_preset().config.option<ConfigOptionInts>("physical_extruder_map"))
+            return pem->values;
+    return {};
+}
+
+std::vector<int> SelectMachineDialog::filaments_mapped_to_wrong_extruder(MachineObject* obj_) const
+{
+    if (!obj_)
+        return {};
+    const std::vector<int> fil_map = sliced_filament_map();
+    if (fil_map.empty())
+        return {};
+    std::vector<BambuExtruderMap::MappedTray> mapped;
+    for (const FilamentInfo& f : m_ams_mapping_result) {
+        if (f.tray_id < 0 || f.ams_id.empty())
+            continue;
+        auto ams_it = obj_->amsList.find(f.ams_id);
+        if (ams_it == obj_->amsList.end() || !ams_it->second)
+            continue; // external spool or unknown unit: no AMS binding to check
+        mapped.push_back({ f.id, ams_it->second->nozzle });
+    }
+    return BambuExtruderMap::filaments_on_wrong_extruder(fil_map, printer_physical_extruder_map(), mapped);
 }
 
 /* project_config "filament_map" numbers the nozzles 1 = left, 2 = right; the print task
@@ -1204,10 +1281,12 @@ bool SelectMachineDialog::get_ams_mapping_result(std::string &mapping_array_str,
         {
             auto opt_nozzle_diameters = wxGetApp().preset_bundle->printers.get_edited_preset().config.option<ConfigOptionFloats>("nozzle_diameter");
             if (opt_nozzle_diameters && opt_nozzle_diameters->size() == 2) {
-                if (auto *fm = wxGetApp().preset_bundle->project_config.option<ConfigOptionInts>("filament_map")) {
-                    filament_maps  = fm->values;
-                    emit_nozzle_id = !filament_maps.empty();
-                }
+                // The map the plate was sliced with, so nozzleId agrees with the G-code.
+                filament_maps = sliced_filament_map();
+                if (filament_maps.empty())
+                    if (auto *fm = wxGetApp().preset_bundle->project_config.option<ConfigOptionInts>("filament_map"))
+                        filament_maps = fm->values;
+                emit_nozzle_id = !filament_maps.empty();
             }
         }
 
@@ -1392,7 +1471,11 @@ bool SelectMachineDialog::build_nozzle_mapping_request(std::string& request)
     const int kLogicLeftExtruder = 0;
     const int kLogicRightExtruder = 1;
 
-    Print* print = &m_plater->fff_print();
+    // The plate being sent has its own Print (PartPlateList keeps one per plate); Plater::fff_print()
+    // is a different object whose grouping result is empty or stale for any other plate. Reading it
+    // sent the 2026-09-23 H2C job's request with "fila_info":null, which the printer answered with
+    // a failure, so the job went out without a nozzle_mapping.
+    Print* print = &m_plater->get_partplate_list().get_current_fff_print();
     auto   group_result = print ? print->get_nozzle_group_result() : nullptr;
     GCodeProcessorResult* gcode_result = m_plater->get_partplate_list().get_current_slice_result();
 
@@ -1767,6 +1850,17 @@ void SelectMachineDialog::show_status(PrintDialogStatus status, std::vector<wxSt
         wxString msg_text = _L("An SD card needs to be inserted before printing via LAN.");
         update_print_status_msg(msg_text, true, true);
         Enable_Send_Button(true);
+        Enable_Refresh_Button(true);
+    } else if (status == PrintDialogStatus::PrintStatusAmsMappingWrongExtruder) {
+        wxString msg_text;
+        if (params.size() > 1)
+            msg_text = wxString::Format(_L("Filament %s was sliced for the %s extruder, but its AMS slot feeds the other extruder. "
+                                           "Pick a slot on the %s extruder's AMS, or re-slice with the printer connected so the grouping follows the AMS."),
+                                        params[0], params[1], params[1]);
+        else
+            msg_text = _L("A filament's AMS slot feeds a different extruder than the one it was sliced for. Pick another slot or re-slice.");
+        update_print_status_msg(msg_text, true, false);
+        Enable_Send_Button(false);
         Enable_Refresh_Button(true);
     } else if (status == PrintDialogStatus::PrintStatusAmsMappingByOrder) {
         wxString msg_text = _L("The printer firmware only supports sequential mapping of filament => AMS slot.");
@@ -3225,6 +3319,26 @@ void SelectMachineDialog::update_show_status()
         do_ams_mapping(obj_);
     }
 
+    // Two-extruder job: every mapped tray must feed the extruder the G-code prints that filament
+    // with. Otherwise the printer re-arranges the filaments on its own (BambuStudio refuses such
+    // a mapping: its tray picker only offers the filament's own extruder's AMS units).
+    {
+        const std::vector<int> wrong = filaments_mapped_to_wrong_extruder(obj_);
+        if (!wrong.empty()) {
+            const std::vector<int> fil_map = sliced_filament_map();
+            wxString list;
+            for (int id : wrong) {
+                if (!list.empty())
+                    list += ", ";
+                list += wxString::Format("%d", id + 1);
+            }
+            const int logical = (wrong.front() < (int) fil_map.size()) ? fil_map[wrong.front()] - 1 : -1;
+            show_status(PrintDialogStatus::PrintStatusAmsMappingWrongExtruder,
+                        { list, logical == 0 ? _L("left") : _L("right") });
+            return;
+        }
+    }
+
     if (!obj_->is_support_ams_mapping()) {
         int exceed_index = -1;
         if (obj_->is_mapping_exceed_filament(m_ams_mapping_result, exceed_index)) {
@@ -4315,6 +4429,7 @@ std::string SelectMachineDialog::get_print_status_info(PrintDialogStatus status)
     case PrintStatusAmsMappingU0Invalid: return "PrintStatusAmsMappingU0Invalid";
     case PrintStatusAmsMappingValid: return "PrintStatusAmsMappingValid";
     case PrintStatusAmsMappingByOrder: return "PrintStatusAmsMappingByOrder";
+    case PrintStatusAmsMappingWrongExtruder: return "PrintStatusAmsMappingWrongExtruder";
     case PrintStatusRefreshingMachineList: return "PrintStatusRefreshingMachineList";
     case PrintStatusSending: return "PrintStatusSending";
     case PrintStatusSendingCanceled: return "PrintStatusSendingCanceled";

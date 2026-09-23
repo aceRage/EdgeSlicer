@@ -618,7 +618,11 @@ public:
     bool is_support_ams_mapping();
 
     void get_ams_colors(std::vector<wxColour>& ams_colors);
-    int ams_filament_mapping(std::vector<FilamentInfo> filaments, std::vector<FilamentInfo> &result, std::vector<int> exclude_id = std::vector<int>());
+    /* only_physical_extruder >= 0 restricts the candidate trays to AMS units feeding that physical
+     * extruder (Ams::nozzle), as BambuStudio's per-extruder mapping does on two-extruder machines:
+     * a filament sliced for one extruder can only be fed from an AMS connected to it. */
+    int ams_filament_mapping(std::vector<FilamentInfo> filaments, std::vector<FilamentInfo> &result, std::vector<int> exclude_id = std::vector<int>(),
+                             int only_physical_extruder = -1);
     bool is_valid_mapping_result(std::vector<FilamentInfo>& result, bool check_empty_slot = false);
     // exceed index start with 0
     bool is_mapping_exceed_filament(std::vector<FilamentInfo>& result, int &exceed_index);

@@ -8,6 +8,7 @@
 #include "MixedColorMatchHelpers.hpp"
 #include "libslic3r/FilamentColorLibrary.hpp" // kFullSpectrumSlotCount (recommended slot write-back)
 #include "libslic3r/Config.hpp"
+#include "libslic3r/BambuExtruderMap.hpp"
 #include "libslic3r/MixedFilament.hpp"
 #include "libslic3r/MixedFilamentConfigRemap.hpp"
 #include "libslic3r/filament_mixer.h"
@@ -14166,9 +14167,20 @@ unsigned int Plater::priv::update_background_process(bool force_validation, bool
     return return_state;
 }
 
-// Ultra (Phase 10): per-nozzle loaded-filament info + AMS slot budget from the connected multi-nozzle
-// printer's AMS. Splits AMS banks by Ams::nozzle. Empty if the layout is not multi-nozzle.
-static std::vector<std::vector<DynamicPrintConfig>> ultra_build_extruder_filament_info_from_ams(MachineObject* obj, std::vector<std::string>* out_ams_count = nullptr)
+// Ultra (Phase 10): per-extruder loaded-filament info + AMS slot budget from the connected multi-nozzle
+// printer's AMS. Empty if the layout is not multi-nozzle.
+//
+// Both outputs are indexed by LOGICAL extruder (0 = left, 1 = right), which is what the grouping reads
+// (BambuStudio PresetBundle::get_extruder_filament_info / extruder_ams_count). Ams::nozzle is the
+// PHYSICAL extruder id from the MQTT report, and on the H2D/H2C physical 0 is the right extruder, so
+// each AMS is filed under physical_to_logical(physical_extruder_map, Ams::nozzle). Filing it under its
+// physical id swapped the two sides: the H2C's right-side AMS units were offered to the grouping as the
+// left extruder's filaments and the left-side AMS HT as the right's, so a match-mode slice put every
+// filament on the extruder its spool is NOT connected to (ams_count logged as [4#2][1#1] where Bambu
+// Studio writes extruder_ams_count ["1#1|4#0", "1#0|4#2"] for the same printer, 2026-09-23).
+static std::vector<std::vector<DynamicPrintConfig>> ultra_build_extruder_filament_info_from_ams(MachineObject* obj,
+                                                                                                const std::vector<int>& physical_extruder_map,
+                                                                                                std::vector<std::string>* out_ams_count = nullptr)
 {
     std::vector<std::vector<DynamicPrintConfig>> infos;
     if (!obj) return infos;
@@ -14177,30 +14189,27 @@ static std::vector<std::vector<DynamicPrintConfig>> ultra_build_extruder_filamen
         if (kv.second) nozzles = std::max(nozzles, kv.second->nozzle + 1);
     if (nozzles < 2) return infos;
     infos.resize(nozzles);
-    std::vector<std::map<int, int>> cap_per_noz(nozzles); // map<bank_slot_count, num_banks>
+    std::vector<std::map<int, int>> cap_per_noz(nozzles); // logical extruder -> map<bank_slot_count, num_banks>
     for (auto& kv : obj->amsList) {
         Ams* a = kv.second;
         if (!a) continue;
-        int nz = a->nozzle;
+        const int nz = BambuExtruderMap::physical_to_logical(physical_extruder_map, a->nozzle);
         if (nz < 0 || nz >= nozzles) continue;
         int cap = (int) a->trayList.size();
         if (cap > 0) cap_per_noz[nz][cap] += 1;
-        // The external spool shows up as a one-tray "AMS" with a high id; the grouping's
-        // machine-filament builder (FilamentGroupUtils::build_full_machine_filaments) DROPS any
-        // entry without a tray_name and treats "Ext" as the external spool, exactly like the
-        // AMS sync list (Sidebar::build_filament_ams_list). Without the name every loaded
-        // filament was discarded and match mode saw an empty machine - the H2C's "Empty ams
-        // filament in For-Match mode" slice error (2026-09-06).
+        // The grouping's machine-filament builder (FilamentGroupUtils::build_full_machine_filaments)
+        // DROPS any entry without a tray_name (the H2C's "Empty ams filament in For-Match mode" slice
+        // error, 2026-09-06) and treats "Ext" as the external spool. Name trays as BambuStudio's
+        // Sidebar::build_filament_ams_list does: an AMS HT (ams id 128+, one slot) is "HT-A", an
+        // ordinary AMS slot, not "Ext" - only the external spool holders (254/255) are.
         int ams_no = -1;
         try { ams_no = std::stoi(kv.first); } catch (...) {}
-        const bool is_ext = cap == 1 && ams_no >= 128;
         for (auto& tv : a->trayList) {
             AmsTray* t = tv.second;
             if (!t || !t->is_tray_info_ready() || !t->is_exists) continue;
-            std::string tray_name;
-            if (is_ext) tray_name = "Ext";
-            else if (ams_no >= 0 && !tv.first.empty()) tray_name = std::string(1, char('A' + (ams_no % 26))) + std::string(1, char(tv.first.front() - '0' + '1'));
-            else tray_name = "A1";
+            int slot_no = 0;
+            try { slot_no = std::stoi(tv.first); } catch (...) {}
+            const std::string tray_name = BambuExtruderMap::tray_name(ams_no, slot_no);
             DynamicPrintConfig cfg;
             cfg.set_key_value("filament_type",   new ConfigOptionStrings{ t->get_filament_type() });
             cfg.set_key_value("filament_colour", new ConfigOptionStrings{ into_u8(wxColour("#" + t->color).GetAsString(wxC2S_HTML_SYNTAX)) });
@@ -14576,7 +14585,12 @@ bool Plater::priv::restart_background_process(unsigned int state)
                 int ec = 0;
                 bool dual_nozzle_profile = const_cast<DynamicPrintConfig&>(print->full_print_config()).support_different_extruders(ec);
                 std::vector<std::string> ams_count;
-                auto infos = ultra_build_extruder_filament_info_from_ams(obj, &ams_count);
+                // The edited printer preset, not print->config(): the Print only carries the map after
+                // its first apply, and a default [0] there would silently turn the conversion off.
+                std::vector<int> physical_extruder_map = print->config().physical_extruder_map.values;
+                if (auto* pem = wxGetApp().preset_bundle->printers.get_edited_preset().config.option<ConfigOptionInts>("physical_extruder_map"))
+                    physical_extruder_map = pem->values;
+                auto infos = ultra_build_extruder_filament_info_from_ams(obj, physical_extruder_map, &ams_count);
                 const size_t profile_nozzles = print->config().nozzle_diameter.values.size();
                 // "A live AMS" means an AMS with filaments in it: a machine whose AMS list is present but
                 // empty (fresh LAN connection, no spool data yet) produced one empty list per nozzle,
