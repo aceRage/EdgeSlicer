@@ -5453,6 +5453,14 @@ Points Print::first_layer_wipe_tower_corners(bool check_wipe_tower_existance) co
     Points corners;
     if (check_wipe_tower_existance && (!has_wipe_tower() || m_wipe_tower_data.tool_changes.empty()))
         return corners;
+    if (is_BBL_printer() && m_config.wipe_tower_wall_type.value == WipeTowerWallType::wtwRib && m_wipe_tower_data.wipe_tower_mesh_data.has_value() &&
+        m_wipe_tower_data.wipe_tower_mesh_data->bottom.size() > 4) {
+        // A Bambu Lab rib tower: its generated first-layer outline, brim included.
+        Polygon outline = m_wipe_tower_data.wipe_tower_mesh_data->bottom;
+        outline.rotate(Geometry::deg2rad(m_config.wipe_tower_rotation_angle.value));
+        outline.translate(Point(scale_(m_config.wipe_tower_x.get_at(m_plate_index) + m_origin(0)), scale_(m_config.wipe_tower_y.get_at(m_plate_index) + m_origin(1))));
+        return outline.points;
+    }
     {
         double width = m_config.prime_tower_width + 2*m_wipe_tower_data.brim_width;
         double depth = m_wipe_tower_data.depth + 2*m_wipe_tower_data.brim_width;
@@ -5754,16 +5762,29 @@ void Print::_make_wipe_tower()
         // Generate the wipe tower layers.
         m_wipe_tower_data.tool_changes.reserve(m_wipe_tower_data.tool_ordering.layer_tools().size());
         wipe_tower.generate(m_wipe_tower_data.tool_changes);
-        m_wipe_tower_data.depth      = wipe_tower.get_depth();
-        m_wipe_tower_data.width      = wipe_tower.width();
+        // A rib tower is placed by the box around its first-layer wall (the generator shifts its
+        // output by the rib offset so that box starts at the tower position), which is also the
+        // square the pre-slice estimate reserves for it: report that box, not the body.
+        const Vec2f wt_footprint     = wipe_tower.get_footprint_size();
+        m_wipe_tower_data.depth      = wt_footprint.y();
+        m_wipe_tower_data.width      = wt_footprint.x();
         m_wipe_tower_data.brim_width = wipe_tower.get_brim_width();
         // The Type1 (Bambu-style) tower ignores the cone wall option, exactly as the pre-slice
         // estimate (estimate_wipe_tower_first_layer_outline) does, so the two footprints agree.
         m_wipe_tower_data.construct_mesh(wipe_tower.width(), wipe_tower.get_depth(), wipe_tower.get_height(), wipe_tower.get_brim_width(),
-                                         m_config.wipe_tower_wall_type.value == WipeTowerWallType::wtwRib,
-                                         float(m_config.wipe_tower_rib_width), float(m_config.wipe_tower_extra_rib_length),
+                                         wipe_tower.is_rib_wall(), wipe_tower.get_rib_width(), wipe_tower.get_rib_length(),
                                          m_config.wipe_tower_fillet_wall,
                                          0.f);
+        if (wipe_tower.is_rib_wall() && ! wipe_tower.get_first_layer_wall().empty()) {
+            // The printed first layer: the rib wall and the brim loops laid around it.
+            Polygon bottom = wipe_tower.get_first_layer_wall();
+            if (wipe_tower.get_brim_width() > EPSILON) {
+                Polygons brimmed = offset(bottom, float(scale_(wipe_tower.get_brim_width())));
+                if (! brimmed.empty())
+                    bottom = brimmed.front();
+            }
+            m_wipe_tower_data.wipe_tower_mesh_data->bottom = std::move(bottom);
+        }
 
         // Unload the current filament over the purge tower.
         coordf_t layer_height = m_objects.front()->config().layer_height.value;
@@ -5787,9 +5808,12 @@ void Print::_make_wipe_tower()
         m_wipe_tower_data.used_filament         = wipe_tower.get_used_filament();
         m_wipe_tower_data.number_of_toolchanges = wipe_tower.get_number_of_toolchanges();
         const Vec3d origin                      = this->get_plate_origin();
-        m_fake_wipe_tower.set_fake_extrusion_data(wipe_tower.position(), wipe_tower.width(), wipe_tower.get_height(),
+        m_fake_wipe_tower.set_fake_extrusion_data(wipe_tower.position(), m_wipe_tower_data.width, wipe_tower.get_height(),
                                                   wipe_tower.get_layer_height(), m_wipe_tower_data.depth, m_wipe_tower_data.brim_width,
                                                   {scale_(origin.x()), scale_(origin.y())});
+        // The rib wall's real outline for the conflict checker and the object brim, as Bambu Studio
+        // hands over its outer walls; a rectangle tower keeps the box model.
+        m_fake_wipe_tower.outer_wall = wipe_tower.get_outer_wall();
     } else {
         // Initialize the wipe tower.
         WipeTower2 wipe_tower(m_config, m_default_region_config, m_plate_index, m_origin, wipe_volumes,

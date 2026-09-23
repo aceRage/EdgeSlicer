@@ -10,6 +10,8 @@
 
 #include "GCodeProcessor.hpp"
 #include "BoundingBox.hpp"
+#include "Circle.hpp"
+#include "ClipperUtils.hpp"
 #include "LocalesUtils.hpp"
 #include "PrintConfig.hpp"
 #include "Triangulation.hpp"
@@ -42,6 +44,62 @@ std::vector<float> compute_compacted_wipe_tower_z(const std::vector<std::vector<
 }
 
 static const double wipe_tower_wall_infill_overlap = 0.0;
+// Rib wall path resolution and fillet sampling, as in Bambu Studio's WipeTower.cpp.
+static constexpr double WIPE_TOWER_RESOLUTION         = 0.1;
+static const double     SCALED_WIPE_TOWER_RESOLUTION  = WIPE_TOWER_RESOLUTION / SCALING_FACTOR;
+static const double     WT_SIMPLIFY_TOLERANCE_SCALED  = 0.001 / SCALING_FACTOR;
+static constexpr int    arc_fit_size                  = 20;
+
+// Bambu Studio WipeTower.cpp:282 generate_rectange(): the band of half-width `offset` around a line.
+static Polygon generate_rectange(const Line &line, coord_t offset)
+{
+    Point p1 = line.a;
+    Point p2 = line.b;
+
+    double dx = p2.x() - p1.x();
+    double dy = p2.y() - p1.y();
+
+    double length = std::sqrt(dx * dx + dy * dy);
+
+    double ux = dx / length;
+    double uy = dy / length;
+
+    double vx = -uy;
+    double vy = ux;
+
+    double ox = vx * offset;
+    double oy = vy * offset;
+
+    Points rect;
+    rect.resize(4);
+    rect[0] = {p1.x() + ox, p1.y() + oy};
+    rect[1] = {p1.x() - ox, p1.y() - oy};
+    rect[2] = {p2.x() - ox, p2.y() - oy};
+    rect[3] = {p2.x() + ox, p2.y() + oy};
+    Polygon poly(rect);
+    return poly;
+}
+
+// Bambu Studio WipeTower.cpp:633 generate_rectange_polygon().
+static Polygon generate_rectange_polygon(const Vec2f &wt_box_min, const Vec2f &wt_box_max)
+{
+    Polygon res;
+    res.points.push_back(scaled(wt_box_min));
+    res.points.push_back(scaled(Vec2f{wt_box_max[0], wt_box_min[1]}));
+    res.points.push_back(scaled(wt_box_max));
+    res.points.push_back(scaled(Vec2f{wt_box_min[0], wt_box_max[1]}));
+    return res;
+}
+
+// One straight or arc piece of a wall path (Bambu Studio WipeTower.cpp:311 Segment).
+struct WallSegment
+{
+    Vec2f      start;
+    Vec2f      end;
+    bool       is_arc = false;
+    ArcSegment arcsegment;
+    WallSegment(const Vec2f &s, const Vec2f &e) : start(s), end(e) {}
+};
 
 inline float align_round(float value, float base)
 {
@@ -146,6 +204,10 @@ public:
 	}
 
     WipeTowerWriter&				 set_initial_tool(size_t tool) { m_current_tool = tool; return *this; }
+
+    // Rib wall: shift of the whole output (Bambu Studio's rib_offset), set before the initial position.
+    WipeTowerWriter&            set_origin_offset(const Vec2f &offset) { m_origin_offset = offset; return *this; }
+    WipeTowerWriter&            set_arc_fitting(bool enable) { m_enable_arc_fitting = enable; return *this; }
 
 	WipeTowerWriter&				 set_z(float z) 
 		{ m_current_z = z; return *this; }
@@ -261,6 +323,116 @@ public:
 
 	WipeTowerWriter& extrude_explicit(const Vec2f &dest, float e, float f = 0.f, bool record_length = false, bool limit_volumetric_flow = true)
 		{ return extrude_explicit(dest.x(), dest.y(), e, f, record_length); }
+
+    // Extrude along an arc with the extrusion amount given by m_extrusion_flow. Bambu Studio
+    // WipeTower.cpp:821 extrude_arc_explicit(), minus its acceleration commands.
+    WipeTowerWriter& extrude_arc(const ArcSegment &arc, float f = 0.f)
+    {
+        float x   = (float)unscale(arc.end_point).x();
+        float y   = (float)unscale(arc.end_point).y();
+        float len = unscaled<float>(arc.length);
+        float e   = len * m_extrusion_flow;
+        if (len < (float) EPSILON && e == 0.f && (f == 0.f || f == m_current_feedrate))
+            // Neither extrusion nor a travel move.
+            return *this;
+        m_used_filament_length += e;
+
+        // Now do the "internal rotation" with respect to the wipe tower center
+        Vec2f rotated_current_pos(this->pos_rotated());
+        Vec2f rot(this->rotate(Vec2f(x, y))); // this is where we want to go
+
+        if (!m_preview_suppressed && e > 0.f && len > 0.f) {
+#if ENABLE_GCODE_VIEWER_DATA_CHECKING
+            change_analyzer_mm3_per_mm(len, e);
+#endif // ENABLE_GCODE_VIEWER_DATA_CHECKING
+            // Width of a squished extrusion, corrected for the roundings of the squished extrusions.
+            float width = e * m_filpar[0].filament_area / (len * m_layer_height);
+            // Correct for the roundings of a squished extrusion.
+            width += m_layer_height * float(1. - M_PI / 4.);
+            if (m_extrusions.empty() || m_extrusions.back().pos != rotated_current_pos)
+                m_extrusions.emplace_back(WipeTower::Extrusion(rotated_current_pos, 0, m_current_tool));
+            for (int j = 0; j < arc_fit_size; j++) {
+                float cur_angle = arc.polar_start_theta + (float) j / arc_fit_size * arc.angle_radians;
+                if (cur_angle > 2 * PI)
+                    cur_angle -= 2 * PI;
+                else if (cur_angle < 0)
+                    cur_angle += 2 * PI;
+                Point tmp = arc.center + Point{arc.radius * std::cos(cur_angle), arc.radius * std::sin(cur_angle)};
+                m_extrusions.emplace_back(WipeTower::Extrusion(this->rotate(unscaled<float>(tmp)), width, m_current_tool));
+            }
+            m_extrusions.emplace_back(WipeTower::Extrusion(rot, width, m_current_tool));
+        }
+
+        m_gcode += arc.direction == ArcDirection::Arc_Dir_CCW ? "G3" : "G2";
+        const Vec2f center_offset = this->rotate(unscaled<float>(arc.center)) - rotated_current_pos;
+        m_gcode += set_format_X(rot.x());
+        m_gcode += set_format_Y(rot.y());
+        m_gcode += " I" + Slic3r::float_to_string_decimal_point(center_offset.x(), 3);
+        m_gcode += " J" + Slic3r::float_to_string_decimal_point(center_offset.y(), 3);
+        if (e != 0.f)
+            m_gcode += set_format_E(e);
+        if (f != 0.f && f != m_current_feedrate) {
+            float e_speed = e / (((len == 0.f) ? std::abs(e) : len) / f * 60.f);
+            f /= std::max(1.f, e_speed / m_filpar[m_current_tool].max_e_speed);
+            m_gcode += set_format_F(f);
+        }
+
+        m_current_pos.x() = x;
+        m_current_pos.y() = y;
+
+        // Update the elapsed time with a rough estimate.
+        m_elapsed_time += ((len == 0.f) ? std::abs(e) : len) / m_current_feedrate * 60.f;
+        m_gcode += "\n";
+        return *this;
+    }
+
+    // Extrude a closed wall once around, starting from the vertex closest to the current position.
+    // Bambu Studio WipeTower.cpp:1030 polygon() (brim loops, pre_simplify) and :1272 generate_path()
+    // (the wall itself); a single closed polygon has no gaps, so generate_path()'s retracts between
+    // disjoint pieces never fire and are left out.
+    WipeTowerWriter& polygon(const Polygon &wall_polygon, const float f, bool pre_simplify)
+    {
+        Polyline pl = to_polyline(wall_polygon);
+        if (pre_simplify)
+            pl.simplify(WT_SIMPLIFY_TOLERANCE_SCALED);
+        std::vector<WallSegment> segments;
+        if (m_enable_arc_fitting) {
+            pl.simplify_by_fitting_arc(SCALED_WIPE_TOWER_RESOLUTION);
+            for (const PathFittingData &fit : pl.fitting_result) {
+                if (fit.path_type == EMovePathType::Linear_move) {
+                    for (size_t j = fit.start_point_index; j < fit.end_point_index; ++j)
+                        segments.emplace_back(unscaled<float>(pl.points[j]), unscaled<float>(pl.points[j + 1]));
+                } else if (fit.path_type == EMovePathType::Arc_move_ccw || fit.path_type == EMovePathType::Arc_move_cw) {
+                    segments.emplace_back(unscaled<float>(pl.points[fit.start_point_index]), unscaled<float>(pl.points[fit.end_point_index]));
+                    segments.back().is_arc     = true;
+                    segments.back().arcsegment = fit.arc_data;
+                }
+            }
+        } else {
+            pl.simplify(SCALED_WIPE_TOWER_RESOLUTION);
+            for (size_t j = 0; j + 1 < pl.points.size(); ++j)
+                segments.emplace_back(unscaled<float>(pl.points[j]), unscaled<float>(pl.points[j + 1]));
+        }
+        if (segments.empty())
+            return *this;
+
+        int   index_of_closest = 0;
+        float min_distance     = std::numeric_limits<float>::max();
+        for (int i = 0; i < int(segments.size()); ++i) {
+            const float distance = (segments[i].start - m_current_pos).squaredNorm();
+            if (distance < min_distance) {
+                min_distance     = distance;
+                index_of_closest = i;
+            }
+        }
+        int i = index_of_closest;
+        travel(segments[i].start); // travel to the closest points
+        do {
+            segments[i].is_arc ? extrude_arc(segments[i].arcsegment, f) : extrude(segments[i].end, f);
+            i = (i + 1) % int(segments.size());
+        } while (i != index_of_closest);
+        return *this;
+    }
 
 	// Travel to a new XY position. f=0 means use the current value.
 	WipeTowerWriter& travel(float x, float y, float f = 0.f)
@@ -533,6 +705,20 @@ public:
         return add_wipe_point(Vec2f(x, y));
     }
 
+    // Wipe back along a wall for wipe_dist (Bambu Studio WipeTower.cpp:1260 add_wipe_path()).
+    WipeTowerWriter& add_wipe_path(const Polygon &polygon, double wipe_dist)
+    {
+        int      closest_idx = polygon.closest_point_index(scaled(m_current_pos));
+        Polyline wipe_path   = polygon.split_at_index(closest_idx);
+        wipe_path.reverse();
+        for (int i = 0; i < int(wipe_path.size()); ++i) {
+            if (wipe_dist < EPSILON) break;
+            add_wipe_point(unscaled<float>(wipe_path[i]));
+            if (i != 0) wipe_dist -= (unscaled(wipe_path[i]) - unscaled(wipe_path[i - 1])).norm();
+        }
+        return *this;
+    }
+
 private:
 	Vec2f         m_start_pos;
 	Vec2f         m_current_pos;
@@ -558,6 +744,8 @@ private:
     float         m_used_filament_length = 0.f;
     GCodeFlavor   m_gcode_flavor;
     bool          m_has_nozzle_rack = false;   // Ultra (H2C rack)
+    bool          m_enable_arc_fitting = false;
+    Vec2f         m_origin_offset = Vec2f::Zero();
     const std::vector<WipeTower::FilamentParameters>& m_filpar;
 
 	std::string   set_format_X(float x)
@@ -596,7 +784,11 @@ private:
 	    double angle = m_internal_angle * float(M_PI/180.);
 	    double c = cos(angle);
 	    double s = sin(angle);
-	    return Vec2f(float(pt.x() * c - pt.y() * s) + m_wipe_tower_width / 2.f, float(pt.x() * s + pt.y() * c) + m_wipe_tower_depth / 2.f);
+	    Vec2f out(float(pt.x() * c - pt.y() * s) + m_wipe_tower_width / 2.f, float(pt.x() * s + pt.y() * c) + m_wipe_tower_depth / 2.f);
+	    // Only a rib wall moves the tower, so every other output stays bit-identical.
+	    if (m_origin_offset != Vec2f::Zero())
+	        out += m_origin_offset;
+	    return out;
 	}
 
 }; // class WipeTowerWriter
@@ -794,6 +986,123 @@ TriangleMesh WipeTower::its_make_rib_brim(const Polygon &brim, float layer_heigh
     return res;
 }
 
+// Bambu Studio WipeTower.cpp:128 rounding_polygon(): replaces every corner sharper than angle_tol
+// by a circular arc of arc_fit_size points, tangent to both sides `rounding` mm from the corner.
+Polygon WipeTower::rounding_polygon(Polygon &polygon, double rounding /*= 2.*/, double angle_tol /* = 30. / 180. * PI*/)
+{
+    if (polygon.points.size() < 3) return polygon;
+    Polygon res;
+    res.points.reserve(polygon.points.size() * 2);
+    int    mod           = polygon.points.size();
+    double cos_angle_tol = std::abs(std::cos(angle_tol));
+
+    for (int i = 0; i < int(polygon.points.size()); i++) {
+        Vec2d  a      = unscaled(polygon.points[(i - 1 + mod) % mod]);
+        Vec2d  b      = unscaled(polygon.points[i]);
+        Vec2d  c      = unscaled(polygon.points[(i + 1) % mod]);
+        double ab_len = (a - b).norm();
+        double bc_len = (b - c).norm();
+        Vec2d  ab     = (b - a) / ab_len;
+        Vec2d  bc     = (c - b) / bc_len;
+        assert(ab_len != 0);
+        assert(bc_len != 0);
+        float cosangle = ab.dot(bc);
+        cosangle       = std::clamp(cosangle, -1.f, 1.f);
+        bool  is_ccw   = cross2(ab, bc) > 0;
+        if (std::abs(cosangle) < cos_angle_tol) {
+            float real_rounding_dis = std::min({rounding, ab_len / 2.1, bc_len / 2.1}); // 2.1 to ensure the points do not coincide
+            Vec2d left              = b - ab * real_rounding_dis;
+            Vec2d right             = b + bc * real_rounding_dis;
+            {
+                float half_angle = std::acos(cosangle) / 2.f;
+                Vec2d dir        = (right - left).normalized();
+                dir              = Vec2d{-dir[1], dir[0]};
+                dir              = is_ccw ? dir : -dir;
+                double dis       = real_rounding_dis / sin(half_angle);
+
+                Vec2d      center = b + dir * dis;
+                double     radius = (left - center).norm();
+                ArcSegment arc(scaled(center), scaled(radius), scaled(left), scaled(right), is_ccw ? ArcDirection::Arc_Dir_CCW : ArcDirection::Arc_Dir_CW);
+                int        n = arc_fit_size;
+                for (int j = 0; j < n; j++) {
+                    float cur_angle = arc.polar_start_theta + (float) j / n * arc.angle_radians;
+                    if (cur_angle > 2 * PI)
+                        cur_angle -= 2 * PI;
+                    else if (cur_angle < 0)
+                        cur_angle += 2 * PI;
+                    Point tmp = arc.center + Point{arc.radius * std::cos(cur_angle), arc.radius * std::sin(cur_angle)};
+                    res.points.push_back(tmp);
+                }
+            }
+            res.points.push_back(scaled(right));
+        } else
+            res.points.push_back(polygon.points[i]);
+    }
+    res.remove_duplicate_points();
+    res.points.shrink_to_fit();
+    return res;
+}
+
+// Bambu Studio WipeTower.cpp:5041 generate_rib_polygon(). The ribs run along the diagonals of the
+// whole tower (m_wipe_tower_width x m_wipe_tower_depth), which sits m_y_shift below this layer's
+// local origin, and are extended past the corners by a length that shrinks linearly from its
+// first-layer value to nothing at the top of the tower.
+Polygon WipeTower::generate_rib_polygon(const box_coordinates &wt_box) const
+{
+    auto    get_current_layer_rib_len = [](float cur_height, float max_height, float max_len) -> float { return std::abs(max_height - cur_height) / max_height * max_len; };
+    coord_t diagonal_width            = scaled(m_rib_width) / 2;
+    float   a = this->m_wipe_tower_width, b = this->m_wipe_tower_depth;
+    Line    line_1(Point::new_scale(Vec2f{0, 0}), Point::new_scale(Vec2f{a, b}));
+    Line    line_2(Point::new_scale(Vec2f{a, 0}), Point::new_scale(Vec2f{0, b}));
+    float   diagonal_extra_length = std::max(0.f, m_rib_length - (float) unscaled(line_1.length())) / 2.f;
+    diagonal_extra_length         = scaled(get_current_layer_rib_len(this->m_z_pos, this->m_wipe_tower_height, diagonal_extra_length));
+    Point   y_shift{0, scaled(this->m_y_shift)};
+
+    line_1.extend(double(diagonal_extra_length));
+    line_2.extend(double(diagonal_extra_length));
+    line_1.translate(-y_shift);
+    line_2.translate(-y_shift);
+
+    Polygon poly_1 = generate_rectange(line_1, diagonal_width);
+    Polygon poly_2 = generate_rectange(line_2, diagonal_width);
+    Polygon poly;
+    poly.points.push_back(Point::new_scale(wt_box.ld));
+    poly.points.push_back(Point::new_scale(wt_box.rd));
+    poly.points.push_back(Point::new_scale(wt_box.ru));
+    poly.points.push_back(Point::new_scale(wt_box.lu));
+
+    Polygons p_1_2 = union_({poly_1, poly_2, poly});
+    return p_1_2.front();
+}
+
+// The wall Bambu Studio's generate_support_wall_new() (WipeTower.cpp:5073) extrudes for a rib
+// wall: the rib polygon, filleted and unioned with the box again when fillet_wall is on.
+Polygon WipeTower::rib_wall_polygon(const box_coordinates &wt_box) const
+{
+    Polygon wall_polygon = generate_rib_polygon(wt_box);
+    if (m_used_fillet) {
+        wall_polygon           = rounding_polygon(wall_polygon);
+        Polygon wt_box_polygon = generate_rectange_polygon(wt_box.ld, wt_box.ru);
+        wall_polygon           = union_({wall_polygon, wt_box_polygon}).front();
+    }
+    return wall_polygon;
+}
+
+void WipeTower::record_outer_wall(const Polygon &wall)
+{
+    // To the frame the writer emits in: the layer's y shift, then the rib offset.
+    Polyline pl = to_polyline(wall);
+    pl.translate(scaled(m_rib_offset.x()), scaled(m_rib_offset.y() + m_y_shift));
+    m_outer_wall[m_z_pos].push_back(std::move(pl));
+}
+
+float WipeTower::wall_feedrate(size_t tool) const
+{
+    // Bambu Studio WipeTower.cpp:3591 (finish_layer_new): the wall speed, capped by prime_tower_max_speed.
+    return is_first_layer() ? std::min(m_first_layer_speed * 60.f, m_max_speed) :
+                              std::min(60.0f * m_filpar[tool].max_e_speed / m_extrusion_flow, m_max_speed);
+}
+
 WipeTower::WipeTower(const PrintConfig& config, int plate_idx, Vec3d plate_origin, const float prime_volume, size_t initial_tool, const float wipe_tower_height) :
     m_semm(config.single_extruder_multi_material.value),
     m_wipe_tower_pos(config.wipe_tower_x.get_at(plate_idx), config.wipe_tower_y.get_at(plate_idx)),
@@ -822,6 +1131,15 @@ WipeTower::WipeTower(const PrintConfig& config, int plate_idx, Vec3d plate_origi
     m_first_layer_speed = float(get_value_at(config, config.initial_layer_speed, ConfigFlowDomain::Process, initial_tool));
     if (m_first_layer_speed == 0.f) // just to make sure autospeed doesn't break it.
         m_first_layer_speed = default_speed / 2.f;
+
+    // Bambu Studio's prime_tower_rib_wall / _rib_width / _extra_rib_length / _fillet_wall /
+    // _max_speed (WipeTower.cpp:1773-1779), under the names this fork shares with Orca.
+    m_use_rib_wall       = config.wipe_tower_wall_type.value == WipeTowerWallType::wtwRib;
+    m_rib_width          = float(config.wipe_tower_rib_width.value);
+    m_extra_rib_length   = float(config.wipe_tower_extra_rib_length.value);
+    m_used_fillet        = config.wipe_tower_fillet_wall.value;
+    m_max_speed          = float(config.wipe_tower_max_purge_speed.value) * 60.f;
+    m_enable_arc_fitting = config.enable_arc_fitting.value && std::abs(m_wipe_tower_rotation_angle) < EPSILON;
 
     // If this is a single extruder MM printer, we will use all the SE-specific config values.
     // Otherwise, the defaults will be used to turn off the SE stuff.
@@ -896,6 +1214,7 @@ void WipeTower::set_extruder(size_t idx, const PrintConfig& config)
     float max_vol_speed = float(get_value_at(config, config.filament_max_volumetric_speed, ConfigFlowDomain::Filament, idx));
     if (max_vol_speed!= 0.f)
         m_filpar[idx].max_e_speed = (max_vol_speed / filament_area());
+    m_filpar[idx].wipe_dist = float(config.wipe_distance.get_at(idx));
 
     m_perimeter_width = nozzle_diameter * Width_To_Nozzle_Ratio; // all extruders are now assumed to have the same diameter
     // BBS: remove useless config
@@ -962,6 +1281,8 @@ WipeTower::ToolChangeResult WipeTower::tool_change(size_t tool, bool extrude_per
 	writer.set_extrusion_flow(m_extrusion_flow)
 		.set_z(m_z_pos)
 		.set_initial_tool(m_current_tool)
+        .set_origin_offset(m_rib_offset)
+        .set_arc_fitting(m_enable_arc_fitting)
         .set_y_shift(m_y_shift + (tool!=(unsigned int)(-1) && (m_current_shape == SHAPE_REVERSED) ? m_layer_info->depth - m_layer_info->toolchanges_depth(): 0.f))
 		.append(";--------------------\n"
 				"; CP TOOLCHANGE START\n")
@@ -1016,7 +1337,12 @@ WipeTower::ToolChangeResult WipeTower::tool_change(size_t tool, bool extrude_per
             writer.set_initial_position(pos, m_wipe_tower_width, m_wipe_tower_depth, m_internal_rotation);
 
             wt_box = align_perimeter(wt_box);
-            writer.rectangle(wt_box);
+            if (m_use_rib_wall) {
+                const Polygon wall = rib_wall_polygon(wt_box);
+                writer.polygon(wall, wall_feedrate(m_current_tool), false);
+                record_outer_wall(wall);
+            } else
+                writer.rectangle(wt_box);
         }
 
         {
@@ -1289,7 +1615,9 @@ void WipeTower::toolchange_Wipe(
     float x_to_wipe = wipe_length;
     float dy = m_layer_info->extra_spacing * m_perimeter_width;
 
-    const float target_speed = is_first_layer() ? std::min(m_first_layer_speed * 60.f, 4800.f) : 4800.f;
+    // Bambu Studio's toolchange_wipe_new() (WipeTower.cpp:4034) caps the purge at prime_tower_max_speed.
+    const float max_wipe_speed = std::min(4800.f, m_max_speed);
+    const float target_speed = is_first_layer() ? std::min(m_first_layer_speed * 60.f, max_wipe_speed) : max_wipe_speed;
     float wipe_speed = 0.33f * target_speed;
 
     float start_y = writer.y();
@@ -1408,14 +1736,16 @@ WipeTower::ToolChangeResult WipeTower::finish_layer(bool extrude_perimeter, bool
 	writer.set_extrusion_flow(m_extrusion_flow)
 		.set_z(m_z_pos)
 		.set_initial_tool(m_current_tool)
+        .set_origin_offset(m_rib_offset)
+        .set_arc_fitting(m_enable_arc_fitting)
         .set_y_shift(m_y_shift - (m_current_shape == SHAPE_REVERSED ? m_layer_info->toolchanges_depth() : 0.f));
 
     writer.append(";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Wipe_Tower_Start) + "\n");
 
 	// Slow down on the 1st layer.
     bool first_layer = is_first_layer();
-    // BBS: speed up perimeter speed to 90mm/s for non-first layer
-    float           feedrate   = first_layer ? std::min(m_first_layer_speed * 60.f, 5400.f) : std::min(60.0f * m_filpar[m_current_tool].max_e_speed / m_extrusion_flow, 5400.f);
+    // BBS: speed up perimeter speed to 90mm/s for non-first layer (prime_tower_max_speed, 90 mm/s by default)
+    float           feedrate   = wall_feedrate(m_current_tool);
     float fill_box_y = m_layer_info->toolchanges_depth() + m_perimeter_width;
     box_coordinates fill_box(Vec2f(m_perimeter_width, fill_box_y),
                              m_wipe_tower_width - 2 * m_perimeter_width, m_layer_info->depth - fill_box_y);
@@ -1500,8 +1830,17 @@ WipeTower::ToolChangeResult WipeTower::finish_layer(bool extrude_perimeter, bool
     box_coordinates wt_box(Vec2f(0.f, (m_current_shape == SHAPE_REVERSED ? m_layer_info->toolchanges_depth() : 0.f)),
         m_wipe_tower_width, m_layer_info->depth + m_perimeter_width);
     wt_box = align_perimeter(wt_box);
+    // Bambu Studio finish_layer_new() (WipeTower.cpp:3699): the rib wall is needed for the brim
+    // loops even when the tool change already printed it.
+    Polygon outer_wall;
+    if (m_use_rib_wall)
+        outer_wall = rib_wall_polygon(wt_box);
     if (extrude_perimeter) {
-        writer.rectangle(wt_box, feedrate);
+        if (m_use_rib_wall) {
+            writer.polygon(outer_wall, feedrate, false);
+            record_outer_wall(outer_wall);
+        } else
+            writer.rectangle(wt_box, feedrate);
     }
 
     // brim chamfer
@@ -1522,7 +1861,19 @@ WipeTower::ToolChangeResult WipeTower::finish_layer(bool extrude_perimeter, bool
         }
     }
 
-    if (loops_num > 0) {
+    if (loops_num > 0 && m_use_rib_wall) {
+        // Bambu Studio finish_layer_new() (WipeTower.cpp:3726): the brim follows the rib wall.
+        for (int i = 0; i < loops_num; ++i) {
+            Polygons grown = offset(outer_wall, scaled(spacing));
+            if (grown.empty())
+                break;
+            outer_wall = std::move(grown.front());
+            writer.polygon(outer_wall, feedrate, true);
+            record_outer_wall(outer_wall);
+        }
+        if (first_layer)
+            m_wipe_tower_brim_width_real = loops_num * spacing + spacing / 2.f;
+    } else if (loops_num > 0) {
         box_coordinates box = wt_box;
         for (size_t i = 0; i < loops_num; ++i) {
             box.expand(spacing);
@@ -1537,18 +1888,23 @@ WipeTower::ToolChangeResult WipeTower::finish_layer(bool extrude_perimeter, bool
         wt_box = box;
     }
 
-    // Now prepare future wipe. box contains rectangle that was extruded last (ccw).
-    Vec2f target = (writer.pos() == wt_box.ld ? wt_box.rd :
-                   (writer.pos() == wt_box.rd ? wt_box.ru :
-                   (writer.pos() == wt_box.ru ? wt_box.lu :
-                    wt_box.ld)));
+    if (m_use_rib_wall && (extrude_perimeter || loops_num > 0)) {
+        // Bambu Studio WipeTower.cpp:3749: wipe back along the wall just printed.
+        writer.add_wipe_path(outer_wall, m_filpar[m_current_tool].wipe_dist);
+    } else {
+        // Now prepare future wipe. box contains rectangle that was extruded last (ccw).
+        Vec2f target = (writer.pos() == wt_box.ld ? wt_box.rd :
+                       (writer.pos() == wt_box.rd ? wt_box.ru :
+                       (writer.pos() == wt_box.ru ? wt_box.lu :
+                        wt_box.ld)));
 
-    // BBS: add wipe_path for this case: only with finish rectangle
-    if (finish_rect_wipe_path.size() == 2 && finish_rect_wipe_path[0] == writer.pos())
-        target = finish_rect_wipe_path[1];
+        // BBS: add wipe_path for this case: only with finish rectangle
+        if (finish_rect_wipe_path.size() == 2 && finish_rect_wipe_path[0] == writer.pos())
+            target = finish_rect_wipe_path[1];
 
-    writer.add_wipe_point(writer.pos())
-          .add_wipe_point(target);
+        writer.add_wipe_point(writer.pos())
+              .add_wipe_point(target);
+    }
 
     writer.append(";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Wipe_Tower_End) + "\n");
 
@@ -1612,8 +1968,32 @@ void WipeTower::plan_toolchange(float z_par, float layer_height_par, unsigned in
 
 
 
+void WipeTower::make_rib_tower_square()
+{
+    // Bambu Studio plan_tower_new() (WipeTower.cpp:4524-4535): a rib tower is square, with the
+    // purge area it would have had at the configured width.
+    float max_depth = 0.f;
+    for (const auto &info : m_plan)
+        max_depth = std::max(max_depth, info.toolchanges_depth());
+    if (max_depth < EPSILON)
+        return;
+    max_depth += m_perimeter_width;
+    const float square_width = align_ceil(std::sqrt(max_depth * m_wipe_tower_width * m_extra_spacing), m_perimeter_width);
+    if (square_width - 2 * m_perimeter_width <= EPSILON)
+        return;
+    m_wipe_tower_width = square_width;
+    // plan_toolchange() at the new line length.
+    const float line_len = m_wipe_tower_width - 2 * m_perimeter_width;
+    for (auto &info : m_plan)
+        for (auto &toolchange : info.tool_changes)
+            toolchange.required_depth = std::ceil(volume_to_length(toolchange.wipe_volume, m_perimeter_width, info.height) / line_len) * m_perimeter_width;
+}
+
 void WipeTower::plan_tower()
 {
+    if (m_use_rib_wall)
+        make_rib_tower_square();
+
     // BBS
     // calculate extra spacing
     float max_depth = 0.f;
@@ -1653,12 +2033,22 @@ void WipeTower::plan_tower()
     }
 
     {
-        if (m_enable_timelapse_print && max_depth < EPSILON)
+        if (m_enable_timelapse_print && max_depth < EPSILON) {
             max_depth = min_wipe_tower_depth;
+            // Bambu Studio WipeTower.cpp:4558: an idle rib tower is a square of the minimum depth.
+            if (m_use_rib_wall)
+                m_wipe_tower_width = max_depth;
+        }
 
-        if (max_depth + EPSILON < min_wipe_tower_depth)
-            m_extra_spacing = min_wipe_tower_depth / max_depth;
-        else
+        if (max_depth + EPSILON < min_wipe_tower_depth) {
+            // Bambu Studio WipeTower.cpp:4561-4566: a rib wall reaches the stability minimum by
+            // lengthening the ribs, not by spreading the purge lines.
+            if (m_use_rib_wall) {
+                m_rib_length    = std::max(m_rib_length, min_wipe_tower_depth * float(std::sqrt(2.)));
+                m_extra_spacing = 1.f;
+            } else
+                m_extra_spacing = min_wipe_tower_depth / max_depth;
+        } else
             m_extra_spacing = 1.f;
 
         for (int idx = 0; idx < m_plan.size(); idx++) {
@@ -1721,6 +2111,44 @@ void WipeTower::plan_tower()
             m_plan[i].depth = max_depth_for_all;
         }
     }
+
+    if (m_use_rib_wall) {
+        // Bambu Studio WipeTower.cpp:4603-4607.
+        float diagonal = std::sqrt(m_wipe_tower_depth * m_wipe_tower_depth + m_wipe_tower_width * m_wipe_tower_width);
+        m_rib_length   = std::max({m_rib_length, diagonal});
+        m_rib_length += m_extra_rib_length;
+        m_rib_length = std::max(diagonal, m_rib_length);
+        m_rib_width  = std::min(m_rib_width, std::min(m_wipe_tower_depth, m_wipe_tower_width) / 2.f); // Ensure that the rib wall of the wipetower are attached to the infill.
+    }
+}
+
+void WipeTower::set_rib_offset()
+{
+    // Bambu Studio measures the first layer's wall as it extrudes it (generate_support_wall_new(),
+    // WipeTower.cpp:5117) and GCode.cpp shifts every tower move by the result. Here it is measured
+    // up front so the writer can emit the shifted coordinates directly: same state as generate()
+    // sets for the first printed layer.
+    m_rib_offset    = Vec2f::Zero();
+    m_rib_footprint = Vec2f::Zero();
+    m_first_layer_wall.clear();
+    auto first = std::find_if(m_plan.begin(), m_plan.end(), [this](const WipeTowerInfo &info) { return info.depth >= m_perimeter_width; });
+    if (first == m_plan.end())
+        return;
+    const float saved_z = m_z_pos, saved_y_shift = m_y_shift;
+    m_z_pos = first->z;
+    if (first->depth < m_wipe_tower_depth - m_perimeter_width)
+        m_y_shift = align_round((m_wipe_tower_depth - first->depth) / 2.f, m_extra_spacing * m_perimeter_width);
+    box_coordinates wt_box(Vec2f(0.f, 0.f), m_wipe_tower_width, first->depth + m_perimeter_width);
+    wt_box = align_perimeter(wt_box);
+    Polygon wall = rib_wall_polygon(wt_box);
+    wall.translate(0, scaled(m_y_shift));
+    const BoundingBox bbox = get_extents(wall);
+    m_rib_offset    = Vec2f(-unscaled<float>(bbox.min.x()), -unscaled<float>(bbox.min.y()));
+    m_rib_footprint = unscaled<float>(bbox.size());
+    wall.translate(-bbox.min.x(), -bbox.min.y());
+    m_first_layer_wall = std::move(wall);
+    m_z_pos   = saved_z;
+    m_y_shift = saved_y_shift;
 }
 
 void WipeTower::save_on_last_wipe()
@@ -1797,6 +2225,10 @@ void WipeTower::generate(std::vector<std::vector<WipeTower::ToolChangeResult>> &
 
     m_extra_spacing = 1.f;
 
+    // Bambu Studio generate_new() (WipeTower.cpp:4672): the ribs taper to the real tower top.
+    if (m_use_rib_wall)
+        m_wipe_tower_height = m_plan.back().z;
+
 	plan_tower();
     // BBS
 #if 0
@@ -1805,6 +2237,9 @@ void WipeTower::generate(std::vector<std::vector<WipeTower::ToolChangeResult>> &
         plan_tower();
     }
 #endif
+    m_outer_wall.clear();
+    if (m_use_rib_wall)
+        set_rib_offset();
 
     m_layer_info = m_plan.begin();
 
@@ -1900,12 +2335,13 @@ WipeTower::ToolChangeResult WipeTower::only_generate_out_wall()
     writer.set_extrusion_flow(m_extrusion_flow)
         .set_z(m_z_pos)
         .set_initial_tool(m_current_tool)
+        .set_origin_offset(m_rib_offset)
+        .set_arc_fitting(m_enable_arc_fitting)
         .set_y_shift(m_y_shift - (m_current_shape == SHAPE_REVERSED ? m_layer_info->toolchanges_depth() : 0.f));
 
     // Slow down on the 1st layer.
-    bool first_layer = is_first_layer();
-    // BBS: speed up perimeter speed to 90mm/s for non-first layer
-    float           feedrate   = first_layer ? std::min(m_first_layer_speed * 60.f, 5400.f) : std::min(60.0f * m_filpar[m_current_tool].max_e_speed / m_extrusion_flow, 5400.f);
+    // BBS: speed up perimeter speed to 90mm/s for non-first layer (prime_tower_max_speed, 90 mm/s by default)
+    float           feedrate   = wall_feedrate(m_current_tool);
     float           fill_box_y = m_layer_info->toolchanges_depth() + m_perimeter_width;
     box_coordinates fill_box(Vec2f(m_perimeter_width, fill_box_y), m_wipe_tower_width - 2 * m_perimeter_width, m_layer_info->depth - fill_box_y);
 
@@ -1923,11 +2359,19 @@ WipeTower::ToolChangeResult WipeTower::only_generate_out_wall()
     // BBS
     box_coordinates wt_box(Vec2f(0.f, (m_current_shape == SHAPE_REVERSED ? m_layer_info->toolchanges_depth() : 0.f)), m_wipe_tower_width, m_layer_info->depth + m_perimeter_width);
     wt_box = align_perimeter(wt_box);
-    writer.rectangle(wt_box, feedrate);
+    if (m_use_rib_wall) {
+        // Bambu Studio only_generate_out_wall() (WipeTower.cpp:5023-5030).
+        const Polygon wall = rib_wall_polygon(wt_box);
+        writer.polygon(wall, feedrate, false);
+        record_outer_wall(wall);
+        writer.add_wipe_path(wall, m_filpar[m_current_tool].wipe_dist);
+    } else {
+        writer.rectangle(wt_box, feedrate);
 
-    // Now prepare future wipe. box contains rectangle that was extruded last (ccw).
-    Vec2f target = (writer.pos() == wt_box.ld ? wt_box.rd : (writer.pos() == wt_box.rd ? wt_box.ru : (writer.pos() == wt_box.ru ? wt_box.lu : wt_box.ld)));
-    writer.add_wipe_point(writer.pos()).add_wipe_point(target);
+        // Now prepare future wipe. box contains rectangle that was extruded last (ccw).
+        Vec2f target = (writer.pos() == wt_box.ld ? wt_box.rd : (writer.pos() == wt_box.rd ? wt_box.ru : (writer.pos() == wt_box.ru ? wt_box.lu : wt_box.ld)));
+        writer.add_wipe_point(writer.pos()).add_wipe_point(target);
+    }
 
     writer.append(";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Wipe_Tower_End) + "\n");
 
