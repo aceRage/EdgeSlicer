@@ -6274,6 +6274,27 @@ LayerResult GCode::process_layer(const Print& print,
                     }
                 }
 
+                // Support filament matching: a layer with nothing matched (no bucket for the pin
+                // above) - the plate layer with the support brim pads, a layer without wall
+                // samples, a layer whose buckets were all gated away - prints its leftover support
+                // in the filament the pass chose for it (SupportLayer::chameleon_residual_extruder,
+                // Print.cpp) instead of whatever extruder happens to be active. The plate layer
+                // without a raft (chameleon_residual_all_roles) takes it for a configured filament
+                // too, so its pads print with the columns standing on them. -1 on every layer of
+                // an object that does not match, so nothing changes there. ToolOrdering's
+                // collect_extruders registers the same extruder for the same condition.
+                if (support_layer.chameleon_residual_extruder >= 0) {
+                    const unsigned int pinned = unsigned(support_layer.chameleon_residual_extruder);
+                    if (support_dontcare || support_layer.chameleon_residual_all_roles) {
+                        support_extruder = pinned;
+                        support_dontcare = false;
+                    }
+                    if (interface_dontcare || support_layer.chameleon_residual_all_roles) {
+                        interface_extruder = pinned;
+                        interface_dontcare = false;
+                    }
+                }
+
                 // BBS: try to print support base with a filament other than interface filament
                 if (support_dontcare && !interface_dontcare) {
                     unsigned int dontcare_extruder = first_extruder_id;
