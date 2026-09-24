@@ -153,6 +153,7 @@
 #include <dbt.h>
 #include <shlobj.h>
 #include <shellapi.h> // ShellExecuteEx, for registering the Bambu camera component
+#include <netlistmgr.h> // INetworkListManager: the silent Snapmaker sign-in skips when offline
 
 #ifdef __WINDOWS__
 #ifdef _MSW_DARK_MODE
@@ -173,6 +174,7 @@ typedef BOOL (WINAPI *LPFN_ISWOW64PROCESS2)(
 #ifdef _WIN32
 #include <boost/dll/runtime_symbol_info.hpp>
 #endif
+#include "slic3r/Utils/SnapmakerSilentLogin.hpp"
 
 #ifdef WIN32
 #include "dev-utils/BaseException.h"
@@ -1658,6 +1660,18 @@ void GUI_App::post_init()
            }
         }
     }
+    // Snapmaker account: sign back in from the saved web session, quietly, once the window is up
+    // and the first-start work above has had its turn. Never blocks: the page loads in a hidden
+    // web view and the account lookup runs on a worker thread.
+    {
+        wxTimer* silent_login_timer = new wxTimer(); // owns itself: notifies its own handlers
+        silent_login_timer->Bind(wxEVT_TIMER, [this, silent_login_timer](wxTimerEvent&) {
+            CallAfter([silent_login_timer] { delete silent_login_timer; });
+            sm_start_silent_login();
+        });
+        silent_login_timer->StartOnce(2000);
+    }
+
     BOOST_LOG_TRIVIAL(info) << "finished post_init";
 //BBS: remove the single instance currently
 #ifdef _WIN32
@@ -1735,6 +1749,15 @@ void GUI_App::shutdown(bool isRecreate)
         delete sm_login_dlg;
         sm_login_dlg = nullptr;
     }
+
+    if (sm_silent_login_dlg != nullptr) {
+        // Not deferred: the main frame, its parent, goes next.
+        sm_silent_login_dlg->stop_silent();
+        delete sm_silent_login_dlg;
+        sm_silent_login_dlg = nullptr;
+    }
+    if (m_sm_silent_active)
+        sm_cancel_silent_login("app closing");
 
     if (web_device_dialog != nullptr) {
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(": web device dialog");
@@ -5311,7 +5334,7 @@ void GUI_App::sm_get_login_info() {
     }
     // The start page is built on demand now (Home shows the phone hub): nothing to update if it
     // was never opened - it asks for the login state itself when it loads.
-    if (mainframe->m_webview)
+    if (mainframe && mainframe->m_webview)
         mainframe->m_webview->SetLoginPanelVisibility(true);
 }
 
@@ -5327,6 +5350,11 @@ void GUI_App::sm_request_login(bool show_user_info)
 
 void GUI_App::sm_ShowUserLogin(bool show)
 {
+    // One sign-in web view at a time: the user's (or a page's) request replaces a startup
+    // attempt still in flight. With a valid session this dialog closes itself just the same.
+    if (m_sm_silent_active)
+        sm_cancel_silent_login(show ? "sign-in dialog opened" : "sign-in requested by a page");
+
     // BBS: User Login Dialog
     if (show) {
         try {
@@ -5355,8 +5383,143 @@ void GUI_App::sm_ShowUserLogin(bool show)
     }
 }
 
+// false only when the OS says there is no network connection at all. Unknown (no answer, not
+// Windows) counts as connected: the attempt then just times out like any other failure. "No
+// internet" alone is not trusted - Windows' internet probe is wrong behind some VPNs and proxies.
+static bool sm_network_connected()
+{
+#ifdef __WXMSW__
+    INetworkListManager* nlm = nullptr;
+    if (FAILED(CoCreateInstance(__uuidof(NetworkListManager), nullptr, CLSCTX_ALL, __uuidof(INetworkListManager),
+                                reinterpret_cast<void**>(&nlm))) || nlm == nullptr)
+        return true;
+    NLM_CONNECTIVITY status = NLM_CONNECTIVITY_DISCONNECTED;
+    const HRESULT    hr     = nlm->GetConnectivity(&status);
+    nlm->Release();
+    if (FAILED(hr))
+        return true;
+    return status != NLM_CONNECTIVITY_DISCONNECTED;
+#else
+    return true;
+#endif
+}
+
+void GUI_App::sm_start_silent_login()
+{
+    SMSilentLogin::StartupInputs in;
+    in.pref_enabled      = app_config->get_bool(SMSilentLogin::k_pref_key);
+    in.is_editor         = is_editor();
+    // SNORCA_SM_SILENT_LOGIN=1 runs the attempt in a hidden instance too. Test-only knob: it lets
+    // an agent check the never-shown path without a window on anyone's screen. No effect unless set.
+    wxString force_env;
+    const bool force_hidden = wxGetEnv("SNORCA_SM_SILENT_LOGIN", &force_env) && force_env == "1";
+    in.hidden_instance   = m_hub_managed && !force_hidden;
+    if (m_hub_managed && force_hidden)
+        BOOST_LOG_TRIVIAL(warning) << "Snapmaker silent login: SNORCA_SM_SILENT_LOGIN=1, attempting in a hidden instance";
+    in.main_window_ready = mainframe != nullptr && !m_is_closing;
+    in.already_signed_in = m_login_userinfo.is_user_login();
+    in.login_dialog_open = m_sm_silent_active || (sm_login_dlg != nullptr && sm_login_dlg->IsShown());
+    // Asked last and only when everything else says go: it is a COM call.
+    in.network_down = SMSilentLogin::skip_reason(in).empty() && !sm_network_connected();
+
+    const std::string skip = SMSilentLogin::skip_reason(in);
+    if (!skip.empty()) {
+        BOOST_LOG_TRIVIAL(warning) << SMSilentLogin::log_line(SMSilentLogin::Outcome::Skipped, skip);
+        flush_logs();
+        return;
+    }
+
+    const unsigned gen   = ++m_sm_silent_gen;
+    m_sm_silent_active   = true;
+    try {
+        sm_silent_login_dlg = new SMUserLogin(/* isLogout */ false, /* silent */ true);
+    } catch (const std::exception& e) {
+        sm_silent_login_dlg = nullptr;
+        sm_finish_silent_login(SMSilentLogin::log_line(SMSilentLogin::Outcome::Failed, std::string("web view: ") + e.what()));
+        return;
+    }
+    BOOST_LOG_TRIVIAL(info) << "Snapmaker silent login: started (hidden web view, gives up after "
+                            << SMSilentLogin::k_overall_timeout_ms / 1000 << " s)";
+    sm_silent_login_dlg->start_silent([this, gen](const SMUserLogin::SilentResult& r) { sm_on_silent_login_result(gen, r); });
+}
+
+void GUI_App::sm_on_silent_login_result(unsigned gen, const SMUserLogin::SilentResult& r)
+{
+    // Called from inside the hidden dialog's own event handler: tear it down deferred.
+    sm_teardown_silent_login_dlg();
+    if (gen != m_sm_silent_gen || !m_sm_silent_active)
+        return; // cancelled meanwhile
+
+    if (r.token.empty()) {
+        const SMSilentLogin::Outcome o = r.outcome == "no session" ? SMSilentLogin::Outcome::NoSession :
+                                         r.outcome == "timed out"  ? SMSilentLogin::Outcome::TimedOut :
+                                                                     SMSilentLogin::Outcome::Failed;
+        sm_finish_silent_login(SMSilentLogin::log_line(o, r.detail));
+        return;
+    }
+
+    // The session was valid. Look the account up off the UI thread, then fill SMUserInfo on it
+    // (the same end state as a manual sign-in: Account menu, pages told through the login events).
+    const std::string token = r.token;
+    Http http = Http::get(r.user_info_url);
+    http.header("Authorization", token);
+    http.timeout_max(15);
+    http.on_complete([this, gen, token](std::string body, unsigned status) {
+            CallAfter([this, gen, token, body, status] {
+                if (gen != m_sm_silent_gen || !m_sm_silent_active)
+                    return;
+                if (status == 200 && SMUserLogin::apply_account_info(body, token)) {
+                    sm_get_login_info();
+                    sm_finish_silent_login(SMSilentLogin::log_line(SMSilentLogin::Outcome::SignedIn));
+                } else {
+                    sm_finish_silent_login(SMSilentLogin::log_line(SMSilentLogin::Outcome::Failed,
+                                                                   "account lookup HTTP " + std::to_string(status)));
+                }
+            });
+        })
+        .on_error([this, gen](std::string /*body*/, std::string error, unsigned status) {
+            CallAfter([this, gen, error, status] {
+                if (gen != m_sm_silent_gen || !m_sm_silent_active)
+                    return;
+                sm_finish_silent_login(SMSilentLogin::log_line(SMSilentLogin::Outcome::Failed,
+                                                               "account lookup HTTP " + std::to_string(status) +
+                                                                   (error.empty() ? std::string() : ", " + error)));
+            });
+        })
+        .perform();
+}
+
+void GUI_App::sm_finish_silent_login(const std::string& log_line)
+{
+    m_sm_silent_active = false;
+    BOOST_LOG_TRIVIAL(warning) << log_line;
+    flush_logs(); // the file sink is buffered; this line is what someone reads when sign-in "did not stick"
+}
+
+void GUI_App::sm_teardown_silent_login_dlg()
+{
+    if (sm_silent_login_dlg == nullptr)
+        return;
+    SMUserLogin* dlg    = sm_silent_login_dlg;
+    sm_silent_login_dlg = nullptr;
+    dlg->stop_silent();
+    // Deferred: this can run inside one of the dialog's own web view events.
+    dlg->Destroy();
+}
+
+void GUI_App::sm_cancel_silent_login(const std::string& reason)
+{
+    sm_teardown_silent_login_dlg();
+    if (!m_sm_silent_active)
+        return;
+    ++m_sm_silent_gen; // an account lookup still in flight is dropped when it answers
+    sm_finish_silent_login(SMSilentLogin::log_line(SMSilentLogin::Outcome::Cancelled, reason));
+}
+
 void GUI_App::sm_request_user_logout()
 {
+    if (m_sm_silent_active)
+        sm_cancel_silent_login("signed out");
     if (m_login_userinfo.is_user_login()) {
         m_login_userinfo.set_user_login(false);
     }

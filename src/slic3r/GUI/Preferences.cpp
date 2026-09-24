@@ -1770,6 +1770,10 @@ wxWindow* PreferencesDialog::create_general_page()
         _L("If enabled, EdgeSlicer asks GitHub once per start whether a newer release has been published and offers it. "
            "Help > Check for Update works either way."),
         50, "check_for_updates_on_startup");
+    auto item_sm_auto_login = create_item_checkbox(_L("Sign in to my Snapmaker account automatically at startup"), page,
+        _L("If enabled, EdgeSlicer quietly reuses the Snapmaker account session saved from your last sign-in when it starts, "
+           "so you do not have to sign in again. Nothing is shown; if there is no saved session you simply stay signed out."),
+        50, "snapmaker_auto_login");
 
     auto item_calc_mode = create_item_checkbox(_L("Flushing volumes: Auto-calculate every time the color changed."), page, _L("If enabled, auto-calculate every time the color changed."), 50, "auto_calculate");
     auto item_calc_in_long_retract = create_item_checkbox(_L("Flushing volumes: Auto-calculate every time when the filament is changed."), page, _L("If enabled, auto-calculate every time when filament is changed"), 50, "auto_calculate_when_filament_change");
@@ -1900,6 +1904,7 @@ wxWindow* PreferencesDialog::create_general_page()
     sizer_page->Add(item_show_splash_screen, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_hints, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_check_updates, 0, wxTOP, FromDIP(3));
+    sizer_page->Add(item_sm_auto_login, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_calc_in_long_retract, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_multi_machine, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_step_mesh_setting, 0, wxTOP, FromDIP(3));
