@@ -74,6 +74,22 @@ std::pair<int, std::string> set_options(const std::string& body);
 // the provider, the host it reached and the status.
 std::pair<int, std::string> test();
 
+// ---- the hosted push service (HostedPush.hpp) ----
+// "mode" in set_options picks "hosted" (the EdgeSlicer push service), "own" (this hub's own APNs
+// .p8 / FCM service account) or "auto" (own when own keys are set up, hosted otherwise - the
+// default); "hosted":{"url":...} points it at another service (https only).
+
+// This hub's Ed25519 identity, which signs every request to the push service. Called by the hub
+// before start(); the private half stays in memory and is never logged or returned.
+void set_identity(const std::string& hubid, const std::string& public_hex, const std::string& private_hex);
+
+// POST /hub/apppush/hosted/check {"register":bool,"quota":bool} - GET /healthz and, when asked,
+// POST /v1/register and /v1/quota; answers masked_json() with the fresh status under "hosted".
+std::pair<int, std::string> hosted_check(const std::string& body);
+
+// POST /hub/apppush/hosted/unregister - the push service forgets this hub (and its counters).
+std::pair<int, std::string> hosted_unregister();
+
 // Called from RemoteNotify's worker for every event that passes the hub's own filter.
 void deliver(const nlohmann::json& event);
 
