@@ -1641,6 +1641,15 @@ FilamentGroupContext build_filament_group_context(
 
 } // namespace GroupReorder
 
+MultiNozzleUtils::LayeredNozzleGroupResult ToolOrdering::group_by_plate_map(Print *print, const std::vector<std::vector<unsigned int>> &layer_filaments)
+{
+    if (print == nullptr)
+        return MultiNozzleUtils::LayeredNozzleGroupResult();
+    const size_t extruders = print->config().nozzle_diameter.size();
+    return get_recommended_filament_maps(print, layer_filaments, FilamentMapMode::fmmManual, std::vector<std::set<int>>(extruders),
+                                         std::vector<std::set<int>>(extruders), std::map<int, std::set<NozzleVolumeType>>());
+}
+
 MultiNozzleUtils::LayeredNozzleGroupResult ToolOrdering::get_recommended_filament_maps(
     Print*                                            print,
     const std::vector<std::vector<unsigned int>>&     layer_filaments,
