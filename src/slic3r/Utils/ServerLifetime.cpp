@@ -33,7 +33,7 @@ struct ServerLifetime::State
         // thread (it only sends the FIN; the unit test caught this). Cancelling every I/O request
         // outstanding on the handle does: the blocked recv returns WSAEINTR. Closing the handle
         // would too, but asio would then close it a second time when the owner destroys it.
-        ::CancelIoEx(reinterpret_cast<HANDLE>(s->native_handle()), nullptr);
+        ::CancelIoEx(reinterpret_cast<HANDLE>(static_cast<SOCKET>(s->native_handle())), nullptr);
 #endif
     }
 };
