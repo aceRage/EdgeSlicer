@@ -344,6 +344,13 @@ private:
     // login widget
     ZUserLogin*     login_dlg { nullptr };
     SMUserLogin*    sm_login_dlg{ nullptr };
+    // Startup sign-in (sm_start_silent_login): a never-shown SMUserLogin, gone once it reports.
+    SMUserLogin*    sm_silent_login_dlg{ nullptr };
+    unsigned        m_sm_silent_gen{ 0 };         // bumped on every start/cancel; stale answers are dropped
+    bool            m_sm_silent_active{ false };  // from start until the outcome is logged
+    void            sm_on_silent_login_result(unsigned gen, const SMUserLogin::SilentResult& r);
+    void            sm_finish_silent_login(const std::string& log_line);
+    void            sm_teardown_silent_login_dlg();
 
 
 public:
@@ -655,6 +662,12 @@ private:
     void            sm_request_login(bool show_user_info = false);
     void            sm_ShowUserLogin(bool show  =  true);
     void            sm_request_user_logout();
+    // Sign back in from the saved id.snapmaker.com session without showing anything; ends quietly
+    // signed out if there is none. Called once, a moment after startup (post_init).
+    void            sm_start_silent_login();
+    // Stops an attempt in flight (the user opened the sign-in dialog, signed out, or the app closes).
+    void            sm_cancel_silent_login(const std::string& reason);
+    bool            sm_silent_login_active() const { return m_sm_silent_active; }
   
     void            request_user_logout();
     int             request_user_unbind(std::string dev_id);

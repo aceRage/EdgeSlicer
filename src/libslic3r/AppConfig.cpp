@@ -296,6 +296,11 @@ void AppConfig::set_defaults()
     if (get("check_for_updates_on_startup").empty())
         set_bool("check_for_updates_on_startup", true);
 
+    // Sign back in to the Snapmaker account at startup from the web view's saved session, without
+    // showing anything (GUI_App::sm_start_silent_login). Preferences > General.
+    if (get("snapmaker_auto_login").empty())
+        set_bool("snapmaker_auto_login", true);
+
 
     // Orca
     if(get("show_splash_screen").empty()) {
