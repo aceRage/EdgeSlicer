@@ -18,6 +18,7 @@ namespace AppPush {
 // exactly what APNs and FCM see.
 struct PushRequest
 {
+    std::string platform;          // "apns" or "fcm": the device row's platform (the hosted service needs it)
     std::string device_token;      // APNs hex device token, or an FCM registration token
     std::string env;               // APNs only: "production" or "sandbox" (see risk R3)
     std::string bundle;            // APNs apns-topic
@@ -38,8 +39,8 @@ struct PushResult
     std::string host;           // which host answered, so a BadDeviceToken is diagnosable
 };
 
-// A destination for already-encrypted notifications. ApnsProvider and FcmProvider are the two
-// implementations phase 1 ships.
+// A destination for already-encrypted notifications. ApnsProvider and FcmProvider use this hub's own
+// keys; HostedProvider (HostedPush.hpp) hands the notification to the EdgeSlicer push service.
 struct Provider
 {
     virtual ~Provider() = default;

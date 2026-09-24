@@ -985,6 +985,118 @@ Testing::HubIdentity Testing::identity_from_settings(const std::string& settings
     return id;
 }
 
+// ---- signing with the hub identity (the push forwarder's X-Hub-Sig) ---------------------------
+// Pure Ed25519 through the same OpenSSL EVP_PKEY_ED25519 the identity is minted with: no new
+// dependency, and EVP_DigestSign with a null digest is exactly RFC 8032's one-shot signature.
+
+static bool hex_to_bytes(const std::string& hex, std::vector<unsigned char>& out)
+{
+    out.clear();
+    if (hex.size() % 2) return false;
+    out.reserve(hex.size() / 2);
+    for (size_t i = 0; i < hex.size(); i += 2) {
+        const int hi = hex_nibble(hex[i]), lo = hex_nibble(hex[i + 1]);
+        if (hi < 0 || lo < 0) { out.clear(); return false; }
+        out.push_back((unsigned char) ((hi << 4) | lo));
+    }
+    return true;
+}
+
+static const char* const SIG_B64URL = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+
+static std::string sig_b64url_encode(const unsigned char* data, size_t len)
+{
+    std::string out;
+    out.reserve((len + 2) / 3 * 4);
+    for (size_t i = 0; i < len; i += 3) {
+        const unsigned v = (unsigned(data[i]) << 16) | (i + 1 < len ? unsigned(data[i + 1]) << 8 : 0u) |
+                           (i + 2 < len ? unsigned(data[i + 2]) : 0u);
+        out += SIG_B64URL[(v >> 18) & 63];
+        out += SIG_B64URL[(v >> 12) & 63];
+        if (i + 1 < len) out += SIG_B64URL[(v >> 6) & 63];
+        if (i + 2 < len) out += SIG_B64URL[v & 63];
+    }
+    return out;
+}
+
+// base64url with the padding tolerated (and '+' '/' as well, so a standard-alphabet signature
+// still decodes). Anything else is refused rather than skipped.
+static bool sig_b64url_decode(const std::string& in, std::vector<unsigned char>& out)
+{
+    out.clear();
+    unsigned acc  = 0;
+    int      bits = 0;
+    for (char c : in) {
+        int v;
+        if (c >= 'A' && c <= 'Z') v = c - 'A';
+        else if (c >= 'a' && c <= 'z') v = c - 'a' + 26;
+        else if (c >= '0' && c <= '9') v = c - '0' + 52;
+        else if (c == '-' || c == '+') v = 62;
+        else if (c == '_' || c == '/') v = 63;
+        else if (c == '=') break;
+        else return false;
+        acc = ((acc << 6) | (unsigned) v) & 0xffffff;
+        bits += 6;
+        if (bits >= 8) { bits -= 8; out.push_back((unsigned char) ((acc >> bits) & 0xff)); }
+    }
+    return true;
+}
+
+Testing::HubIdentity Testing::identity_from_seed_hex(const std::string& private_hex)
+{
+    HubIdentity                id;
+    std::vector<unsigned char> seed;
+    if (private_hex.size() != 64 || !hex_to_bytes(private_hex, seed)) return id;
+    EVP_PKEY* pkey = EVP_PKEY_new_raw_private_key(EVP_PKEY_ED25519, nullptr, seed.data(), seed.size());
+    OPENSSL_cleanse(seed.data(), seed.size());
+    if (!pkey) return id;
+    unsigned char pub[32] = {};
+    size_t        publen  = sizeof(pub);
+    if (EVP_PKEY_get_raw_public_key(pkey, pub, &publen) == 1 && publen == sizeof(pub)) {
+        id.public_hex  = to_hex(pub, publen);
+        id.private_hex = lower(private_hex);
+        id.hubid       = hubid_from_public_key(std::vector<unsigned char>(pub, pub + publen));
+    }
+    EVP_PKEY_free(pkey);
+    return id;
+}
+
+bool identity_sign(const Testing::HubIdentity& id, const std::string& message, std::string& out_sig_b64url)
+{
+    out_sig_b64url.clear();
+    std::vector<unsigned char> seed;
+    if (id.private_hex.size() != 64 || !hex_to_bytes(id.private_hex, seed)) return false;
+    EVP_PKEY* pkey = EVP_PKEY_new_raw_private_key(EVP_PKEY_ED25519, nullptr, seed.data(), seed.size());
+    OPENSSL_cleanse(seed.data(), seed.size());
+    if (!pkey) return false;
+    unsigned char sig[64] = {};
+    size_t        siglen  = sizeof(sig);
+    EVP_MD_CTX*   md      = EVP_MD_CTX_new();
+    const bool    ok      = md && EVP_DigestSignInit(md, nullptr, nullptr, nullptr, pkey) == 1 &&
+                   EVP_DigestSign(md, sig, &siglen, (const unsigned char*) message.data(), message.size()) == 1 &&
+                   siglen == sizeof(sig);
+    if (md) EVP_MD_CTX_free(md);
+    EVP_PKEY_free(pkey);
+    if (!ok) return false;
+    out_sig_b64url = sig_b64url_encode(sig, siglen);
+    return true;
+}
+
+bool identity_verify(const std::string& public_hex, const std::string& message, const std::string& sig_b64url)
+{
+    std::vector<unsigned char> pub, sig;
+    if (public_hex.size() != 64 || !hex_to_bytes(public_hex, pub)) return false;
+    if (!sig_b64url_decode(sig_b64url, sig) || sig.size() != 64) return false;
+    EVP_PKEY* pkey = EVP_PKEY_new_raw_public_key(EVP_PKEY_ED25519, nullptr, pub.data(), pub.size());
+    if (!pkey) return false;
+    EVP_MD_CTX* md = EVP_MD_CTX_new();
+    const bool  ok = md && EVP_DigestVerifyInit(md, nullptr, nullptr, nullptr, pkey) == 1 &&
+                    EVP_DigestVerify(md, sig.data(), sig.size(), (const unsigned char*) message.data(), message.size()) == 1;
+    if (md) EVP_MD_CTX_free(md);
+    EVP_PKEY_free(pkey);
+    return ok;
+}
+
 // ---- the loopback trust of Tailscale Serve's headers (design section 6.6) ---------------------
 // Tailscale Serve terminates on loopback and sets Tailscale-User-Login / X-Forwarded-Proto,
 // stripping whatever a client tried to send. That is the whole basis for trusting them - so they
@@ -3807,6 +3919,18 @@ void HubServer::handle_hub(tcp::socket& client, Request& r)
         const auto res = AppPush::test();
         write_hub_json(); // a test can prune a device the platform says is gone
         respond_json(client, res.first, res.second);
+    } else if (r.path == "/hub/apppush/hosted/check" && r.method == "POST") {
+        // The hub page's "Check": /healthz on the push service and, when asked, /v1/quota (which
+        // also registers this hub on first use) - synchronously, somebody is watching for it.
+        std::string body;
+        if (!read_small_body(client, r, body, 4 * 1024)) { respond_json(client, 413, json_error("that is too large")); return; }
+        const auto res = AppPush::hosted_check(body);
+        respond_json(client, res.first, res.second);
+    } else if (r.path == "/hub/apppush/hosted/unregister" && r.method == "POST") {
+        // The push service forgets this hub's id, key and counters. It is registered again by the
+        // next push, so this is "forget me now", not an off switch (that is the mode).
+        const auto res = AppPush::hosted_unregister();
+        respond_json(client, res.first, res.second);
     } else if (r.path == "/hub/apppush/debug" && r.method == "POST") {
         // Only answers at all with SNORCA_DEBUG_ROUTES=1 (AppPush::debug_op checks).
         std::string body;
@@ -4480,6 +4604,9 @@ bool HubServer::start()
     // Web Push before the relay worker: RemoteNotify::deliver() asks it whether any phone is
     // subscribed before deciding there is nothing to queue.
     WebPush::start(webpush_saved); // mints the VAPID key pair the first time this data dir runs
+    // The identity signs every request to the hosted push service; handed over before start() so
+    // the very first push can be signed. Only AppPush's memory holds the private half.
+    AppPush::set_identity(m_identity.hubid, m_identity.public_hex, m_identity.private_hex);
     AppPush::start(apppush_saved);  // reads the .p8 and the service account, if either is set
     RemoteNotify::start(notify_saved); // the relay worker; deliver() is a no-op until it has one
 

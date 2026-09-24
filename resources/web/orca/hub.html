@@ -644,24 +644,159 @@ select { background: #222; color: #ddd; border: 1px solid #555; border-radius: 6
     // here as paths and are never shown back, only ever "set" or "not set". The availability line
     // matters more than it looks: it is where "this build of libcurl has no HTTP/2" gets said out
     // loud, instead of every APNs push failing with a transport error nobody can interpret.
-    var app = null, lastApp = null, appNote = '';
+    var app = null, lastApp = null, appNote = '', hostedChecked = false, hostedBusy = false;
+    function when(ms) {
+        if (!ms) return '';
+        var d = new Date(ms), now = new Date();
+        return d.toDateString() === now.toDateString() ? d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : d.toLocaleString();
+    }
+    // /hub/apppush/hosted/check: /healthz always (anonymous), /v1/quota when asked. /v1/quota
+    // registers this hub on the service on first use, so the page only asks for it on its own
+    // once a phone is registered - or when the person presses Check.
+    function hostedCheck(quota) {
+        hostedBusy = true; lastApp = null; renderApp();
+        return jfetch('/hub/apppush/hosted/check', 'POST', { quota: !!quota }).then(function(r) {
+            hostedBusy = false;
+            if (r.status === 200) app = r.j;
+            else appNote = 'Check failed: ' + (r.j.error || ('HTTP ' + r.status)) + '.';
+            lastApp = null; renderApp();
+        }, function() { hostedBusy = false; lastApp = null; renderApp(); });
+    }
+    function setMode(mode) {
+        return jfetch('/hub/apppush/options', 'POST', { mode: mode }).then(function(r) {
+            if (r.status !== 200) { alert(r.j.error || ('The hub refused that (' + r.status + ').')); return; }
+            app = r.j; lastApp = null; appNote = '';
+            if (mode === 'hosted') hostedChecked = false;
+            renderApp();
+        });
+    }
+    // How pushes leave this PC: the EdgeSlicer push service (the default for every hub without
+    // its own keys), or this hub's own APNs .p8 / Firebase service account.
+    function renderDelivery(body, devs) {
+        var hosted = app.mode === 'hosted';
+        var h = app.hosted || {};
+        var modeRow = el('div', 'note');
+        modeRow.appendChild(document.createTextNode('Send pushes through '));
+        var sel = document.createElement('select');
+        [['hosted', 'EdgeSlicer push service'], ['own', 'my own keys (APNs .p8 / Firebase)']].forEach(function(o) {
+            var op = document.createElement('option'); op.value = o[0]; op.textContent = o[1]; sel.appendChild(op);
+        });
+        sel.value = hosted ? 'hosted' : 'own';
+        sel.onchange = function() {
+            if (sel.value === 'own' && !app.own_keys
+                && !confirm('This hub has no APNs key or Firebase service account set up, so nothing could be sent. Switch anyway?')) {
+                sel.value = 'hosted'; return;
+            }
+            setMode(sel.value);
+        };
+        modeRow.appendChild(sel);
+        body.appendChild(modeRow);
+
+        if (!hosted) {
+            if (app.own_keys) {
+                // The owner's migration: one switch, keys stay saved, phones keep working.
+                var mig = el('div', 'dest');
+                mig.appendChild(el('div', 't', 'Switch to the EdgeSlicer push service?'));
+                mig.appendChild(el('div', 'm', 'This hub sends with its own APNs / Firebase keys. The push service needs no keys and no HTTP/2 build. '
+                    + 'Your keys stay saved here, so choosing "my own keys" again switches straight back. Registered phones keep working either way: nothing changes on the phone.'));
+                var sw = el('span', 'btn small', 'Switch to the push service');
+                sw.onclick = function() { setMode('hosted'); };
+                mig.appendChild(sw);
+                body.appendChild(mig);
+            }
+            var prov = app.providers || {};
+            [['apns', 'iOS (APNs)'], ['fcm', 'Android (FCM)']].forEach(function(p) {
+                var ok = !!prov[p[0]];
+                var line = el('div', 'note');
+                line.appendChild(el('span', 'badge' + (ok ? ' ok' : ' bad'), ok ? 'ready' : 'not ready'));
+                line.appendChild(document.createTextNode(' ' + p[1] + (ok ? '' : ' - ' + (prov[p[0] + '_reason'] || 'not configured'))));
+                body.appendChild(line);
+            });
+            if (!app.http2) body.appendChild(el('div', 'err', 'This build of libcurl has no HTTP/2, so iOS push cannot work with your own keys. Rebuild the dependencies to pick up nghttp2, or use the push service.'));
+            return;
+        }
+
+        // ---- the hosted service
+        var health = h.health || {}, quota = h.quota || {};
+        var up = h.available && health.ok !== false && !health.error && (health.forwarding !== false);
+        var svc = el('div', 'note');
+        var state = hostedBusy ? 'checking…' : (!h.health_at ? (h.available ? 'not checked yet' : 'not ready') : (up ? 'ready' : 'not ready'));
+        svc.appendChild(el('span', 'badge' + (hostedBusy || !h.health_at ? '' : (up ? ' ok' : ' bad')), state));
+        var what = ' Push service ' + (h.url || '');
+        if (!h.available && h.why) what += ' - ' + h.why;
+        else if (health.error) what += ' - ' + health.error;
+        else if (h.health_at) {
+            var plat = [];
+            if (health.apns) plat.push('iOS ' + health.apns);
+            if (health.fcm) plat.push('Android ' + health.fcm);
+            what += (health.forwarding === false ? ' - up, but not forwarding to Apple or Google yet' : ' - up') + (plat.length ? ' (' + plat.join(', ') + ')' : '');
+        }
+        if (h.health_at) what += ', checked ' + when(h.health_at);
+        svc.appendChild(document.createTextNode(what + '.'));
+        body.appendChild(svc);
+
+        if (h.suspended) body.appendChild(el('div', 'err', 'The push service has suspended this hub' + (h.suspended_reason ? ': ' + h.suspended_reason : '') + '. Nothing is sent until that is lifted.'));
+        if (quota.limit !== undefined) {
+            var q = quota.remaining === -1 ? ('No daily limit (' + (quota.tier || 'owner') + ' tier); ' + (quota.used || 0) + ' sent today')
+                : ((quota.used || 0) + ' of ' + quota.limit + ' pushes used today' + (quota.resets_at ? ', resets ' + when(quota.resets_at * 1000) : ''));
+            body.appendChild(el('div', 'note', q + (h.quota_at ? ' (as of ' + when(h.quota_at) + ').' : '.')));
+        }
+        if (h.quota_note) body.appendChild(el('div', 'err', 'Not sent: ' + h.quota_note + (h.quota_note_at ? ' (' + when(h.quota_note_at) + ')' : '')));
+        if (h.bug) body.appendChild(el('div', 'err', h.bug));
+        if (h.clock_warning) body.appendChild(el('div', 'err', 'This PC\'s clock is ' + Math.abs(h.clock_offset_s) + ' s ' + (h.clock_offset_s > 0 ? 'behind' : 'ahead') + '; pushes still work (the hub corrects for it), but other things may not. Set the time automatically in Windows settings.'));
+        if (h.queued) body.appendChild(el('div', 'note strong', h.queued + ' notification' + (h.queued === 1 ? '' : 's') + ' waiting for the push service (tried again for up to 30 minutes).'));
+        if (h.last_error && h.last_error_at > (h.last_ok_at || 0)) body.appendChild(el('div', 'err', 'Last error: ' + h.last_error + ' (' + when(h.last_error_at) + ')'));
+
+        var acts = el('div', 'acts');
+        var chk = el('span', 'btn dim small', hostedBusy ? 'Checking…' : 'Check now');
+        chk.onclick = function() { if (!hostedBusy) hostedCheck(true); };
+        acts.appendChild(chk);
+        var url = el('span', 'btn dim small', 'Service URL…');
+        url.style.marginLeft = '6px';
+        url.onclick = function() {
+            var v = prompt('Push service URL (https://). Leave empty for the EdgeSlicer service.', h.url || '');
+            if (v === null) return;
+            jfetch('/hub/apppush/options', 'POST', { hosted: { url: v.trim() } }).then(function(r) {
+                if (r.status !== 200) { alert(r.j.error || ('The hub refused that (' + r.status + ').')); return; }
+                app = r.j; lastApp = null; hostedChecked = false; renderApp();
+            });
+        };
+        acts.appendChild(url);
+        if (quota.limit !== undefined) {
+            var forget = el('span', 'btn warn small', 'Forget this hub on the service');
+            forget.style.marginLeft = '6px';
+            forget.onclick = function() {
+                if (!confirm('Ask the push service to delete this hub\'s id and counters? The next push registers it again.')) return;
+                jfetch('/hub/apppush/hosted/unregister', 'POST', {}).then(function(r) {
+                    var u = (r.j && r.j.unregister) || {};
+                    appNote = u.ok ? 'The push service has forgotten this hub.' : ('The push service did not forget this hub: ' + (u.error || ('HTTP ' + (u.status || r.status))) + '.');
+                    if (r.status === 200) app = r.j;
+                    lastApp = null; renderApp();
+                });
+            };
+            acts.appendChild(forget);
+        }
+        body.appendChild(acts);
+        body.appendChild(el('div', 'note', 'How pushes reach your phone: Apple and Google only take notifications signed with the app publisher\'s key, so this PC hands each one to the EdgeSlicer push service, which signs it and passes it on. '
+            + 'The service cannot read what the notification says - it is encrypted on this PC to a key only your phone holds - and it sees only this hub\'s id, the device it goes to and the size. Notifications and device tokens are not stored. '
+            + 'The hub id is derived from a key made on this PC; no account, email or name is sent.'));
+    }
     function renderApp() {
         var body = document.getElementById('appbody');
         if (!app) return;
         if (tab !== 'app') { body.innerHTML = ''; lastApp = null; return; }
-        var key = JSON.stringify(app) + '|' + appNote;
+        var devs = app.devices || [];
+        if (app.mode === 'hosted' && !hostedChecked) {
+            // Once per page load: /healthz always, /v1/quota only once a phone is registered.
+            hostedChecked = true;
+            hostedCheck(devs.length > 0 || !!(app.hosted && app.hosted.quota_at));
+            return;
+        }
+        var key = JSON.stringify(app) + '|' + appNote + '|' + hostedBusy;
         if (key === lastApp) return;
         lastApp = key;
         body.innerHTML = '';
-        var prov = app.providers || {};
-        [['apns', 'iOS (APNs)'], ['fcm', 'Android (FCM)']].forEach(function(p) {
-            var ok = !!prov[p[0]];
-            var line = el('div', 'note');
-            line.appendChild(el('span', 'badge' + (ok ? ' ok' : ' bad'), ok ? 'ready' : 'not ready'));
-            line.appendChild(document.createTextNode(' ' + p[1] + (ok ? '' : ' - ' + (prov[p[0] + '_reason'] || 'not configured'))));
-            body.appendChild(line);
-        });
-        var devs = app.devices || [];
+        renderDelivery(body, devs);
         if (!devs.length) body.appendChild(el('div', 'note', 'No app has registered a device yet.'));
         devs.forEach(function(d) {
             var row = el('div', 'dest' + (d.status === 'failing' ? ' bad' : ''));
@@ -700,8 +835,8 @@ select { background: #222; color: #ddd; border: 1px solid #555; border-radius: 6
         tog.style.marginLeft = '6px';
         tog.onclick = function() { jfetch('/hub/apppush/options', 'POST', { enabled: !app.enabled }).then(function(r) { app = r.j; lastApp = null; renderApp(); }); };
         acts.appendChild(tog);
-        if (devs.length) {
-            var test = el('span', 'btn dim small', 'Test');
+        {
+            var test = el('span', 'btn dim small', 'Send test notification');
             test.style.marginLeft = '6px';
             test.onclick = function() {
                 test.textContent = 'Sending…';
@@ -720,10 +855,9 @@ select { background: #222; color: #ddd; border: 1px solid #555; border-radius: 6
         }
         body.appendChild(acts);
         if (appNote) body.appendChild(el('div', 'note', appNote));
-        if (!app.http2) body.appendChild(el('div', 'err', 'This build of libcurl has no HTTP/2, so iOS push cannot work. Rebuild the dependencies to pick up nghttp2.'));
-        body.appendChild(el('div', 'note', 'Push straight to the companion app, on any network - no Tailscale and no Home Screen install needed. '
-            + 'Set the APNs .p8 path, key id, team id and bundle id (and the Firebase service account for Android) under "apppush" in the hub\'s settings.json; '
-            + 'the keys are read from wherever you keep them and are never copied into the data dir.'));
+        body.appendChild(el('div', 'note', 'Push straight to the companion app, on any network - no Tailscale and no Home Screen install needed.'
+            + (app.mode === 'hosted' ? '' : ' With your own keys: set the APNs .p8 path, key id, team id and bundle id (and the Firebase service account for Android) under "apppush" in the hub\'s settings.json; '
+            + 'the keys are read from wherever you keep them and are never copied into the data dir.')));
     }
     function refreshApp() {
         return fetch('/hub/apppush', { headers: hdrs() }).then(function(r) { return r.json(); })

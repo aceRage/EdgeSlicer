@@ -1,8 +1,11 @@
 // Native app push (see AppPush.hpp). Hub process only; wx-free, like the rest of the hub server.
 //
 // This file owns the device store, the settings, the routes and the fan-out. The two platform
-// contracts live next door in ApnsProvider.cpp and FcmProvider.cpp, behind the Provider seam, so
-// that a hosted relay could one day be a third implementation rather than a rewrite.
+// contracts live next door in ApnsProvider.cpp and FcmProvider.cpp, behind the Provider seam, and
+// the third implementation - the EdgeSlicer push service, for hubs without their own keys - is
+// HostedProvider.cpp. Which one a device's notifications take is the "mode": "own" (this hub's own
+// APNs .p8 / FCM service account) or "hosted"; with no mode saved, a hub that has own keys set up
+// keeps using them and every other hub uses the hosted service.
 //
 // The crypto is not here either: the payload is encrypted by WebPush::encrypt, unchanged. An app
 // that generates a P-256 key pair and a 16-byte auth secret on first launch and registers the
@@ -13,6 +16,7 @@
 #include "RemoteEvents.hpp"
 
 #include "AppPushProvider.hpp"
+#include "HostedPush.hpp"
 #include "WebPush.hpp"
 #include "slic3r/Utils/Http.hpp"
 
@@ -78,9 +82,14 @@ static std::string          g_min_severity { "info" };
 static std::vector<std::string> g_kinds;
 static json                 g_apns_cfg = json::object();
 static json                 g_fcm_cfg  = json::object();
+// "own", "hosted", or "" = decide from the settings (own when own keys are set up, else hosted).
+static std::string          g_mode;
+static json                 g_hosted_cfg = json::object(); // {"url": ...}; no url = the default service
 static std::atomic<bool>    g_stopping { false };
 static std::atomic<bool>    g_dirty { false };
 static std::unique_ptr<Provider> g_apns, g_fcm;
+static std::unique_ptr<Hosted::HostedProvider> g_hosted;
+static Hosted::Identity     g_identity; // this hub's Ed25519 identity, handed over by RemoteHub
 
 // ------------------------------------------------------------------ small helpers ----
 
@@ -445,6 +454,29 @@ static json fcm_masked(const json& c)
     return j;
 }
 
+// Whether this hub has its own APNs or FCM credential configured - the owner's setup.
+static bool own_keys_locked()
+{
+    return !g_apns_cfg.value("key_path", "").empty() || !g_apns_cfg.value("key_pem", "").empty() ||
+           !g_fcm_cfg.value("service_account_path", "").empty() || !g_fcm_cfg.value("service_account_json", "").empty();
+}
+
+// The mode actually in force. An explicit choice from the hub page wins; without one, a hub that
+// already has its own keys keeps them (nothing changes for it on upgrade) and every other hub uses
+// the hosted service, which is the only way it can push at all.
+static bool hosted_mode_locked()
+{
+    if (g_mode == "hosted") return true;
+    if (g_mode == "own") return false;
+    return !own_keys_locked();
+}
+
+static std::string hosted_url_locked()
+{
+    const std::string u = g_hosted_cfg.value("url", "");
+    return u.empty() ? std::string(Hosted::DEFAULT_URL) : u;
+}
+
 json settings_json()
 {
     std::lock_guard<std::mutex> lock(g_mutex);
@@ -454,6 +486,8 @@ json settings_json()
     j["kinds"]        = g_kinds;
     j["apns"]         = g_apns_cfg;
     j["fcm"]          = g_fcm_cfg;
+    if (!g_mode.empty()) j["mode"] = g_mode;
+    j["hosted"]       = g_hosted_cfg;
     j["devices"]      = json::array();
     for (const Device& d : g_devices) j["devices"].push_back(device_json(d, false));
     return j;
@@ -461,21 +495,51 @@ json settings_json()
 
 json providers_json()
 {
+    bool hosted;
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        hosted = hosted_mode_locked();
+    }
     json j;
     std::string why;
+    if (hosted) {
+        // One service carries both platforms, so both answer the same - and /pair tells the app it
+        // may register for its platform's push exactly as it would with own keys.
+        const bool ok = g_hosted && g_hosted->available(why);
+        j["apns"] = ok;
+        j["apns_reason"] = ok ? "" : why;
+        j["fcm"] = ok;
+        j["fcm_reason"] = ok ? "" : why;
+        j["mode"] = "hosted";
+        return j;
+    }
     j["apns"] = g_apns && g_apns->available(why);
     j["apns_reason"] = j["apns"].get<bool>() ? "" : why;
     why.clear();
     j["fcm"] = g_fcm && g_fcm->available(why);
     j["fcm_reason"] = j["fcm"].get<bool>() ? "" : why;
+    j["mode"] = "own";
     return j;
 }
 
 json masked_json()
 {
     json prov = providers_json();
+    json hosted_status = json::object();
+    if (g_hosted) {
+        try { hosted_status = json::parse(g_hosted->status_json()); } catch (...) {}
+    }
     std::lock_guard<std::mutex> lock(g_mutex);
     json j;
+    // How pushes leave this PC. `mode` is what is in force, `mode_setting` what was chosen ("" =
+    // decided from the settings), `own_keys` whether an APNs/FCM credential is configured - the
+    // hub page offers the switch to the hosted service when it is.
+    j["mode"]         = hosted_mode_locked() ? "hosted" : "own";
+    j["mode_setting"] = g_mode;
+    j["own_keys"]     = own_keys_locked();
+    // The hosted URL is not a secret: it is shown in full, so a person can see where pushes go.
+    hosted_status["url"] = hosted_url_locked();
+    j["hosted"]       = hosted_status;
     j["enabled"]      = g_enabled;
     j["min_severity"] = g_min_severity;
     j["kinds"]        = g_kinds;
@@ -506,16 +570,19 @@ bool consume_dirty() { return g_dirty.exchange(false); }
 
 // ------------------------------------------------------------------- the sender ----
 
-static Provider* provider_for(const std::string& platform)
+static Provider* provider_for(const std::string& platform, bool hosted)
 {
+    if (platform != "apns" && platform != "fcm") return nullptr;
+    // In hosted mode one provider carries both platforms: it puts the platform in the request body.
+    if (hosted) return g_hosted.get();
     if (platform == "apns") return g_apns.get();
-    if (platform == "fcm") return g_fcm.get();
-    return nullptr;
+    return g_fcm.get();
 }
 
 static PushRequest request_for(const Device& d, const json& event, const std::string& ciphertext_b64u)
 {
     PushRequest req;
+    req.platform        = d.platform;
     req.device_token    = d.token;
     req.env             = d.env;
     req.bundle          = d.bundle;
@@ -604,12 +671,38 @@ static void record(const Device& sent_to, const PushResult& r)
     }
 }
 
+// A queued hosted notification's final outcome, from the hosted provider's worker.
+static void record_by_id(const std::string& id, const PushResult& r)
+{
+    Device d;
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        auto it = std::find_if(g_devices.begin(), g_devices.end(), [&](const Device& row) { return row.id == id; });
+        if (it == g_devices.end()) return; // removed while its notification waited
+        d = *it;
+    }
+    record(d, r);
+}
+
+// The first try reached no push service and the notification is queued: say so on the row without
+// counting it as a failure yet - the outcome arrives through record_by_id.
+static void note_waiting(const Device& sent_to, const PushResult& r)
+{
+    std::lock_guard<std::mutex> lock(g_mutex);
+    for (Device& row : g_devices)
+        if (row.id == sent_to.id) {
+            row.last_error = "waiting for the push service: " + scrub_locked(r.error, sent_to);
+            g_dirty        = true;
+        }
+}
+
 void deliver(const json& event)
 {
     std::vector<Device>      targets;
     std::vector<std::string> kinds;
     std::string              min_sev;
     json                     apns_cfg, fcm_cfg;
+    bool                     hosted;
     {
         std::lock_guard<std::mutex> lock(g_mutex);
         if (!g_enabled || g_devices.empty()) return;
@@ -618,6 +711,7 @@ void deliver(const json& event)
         kinds    = g_kinds;
         apns_cfg = g_apns_cfg;
         fcm_cfg  = g_fcm_cfg;
+        hosted   = hosted_mode_locked();
     }
     const std::string severity = ev_str(event, "severity", "info");
     // Severity and kind are an AND, as on every other channel.
@@ -627,7 +721,7 @@ void deliver(const json& event)
 
     for (const Device& d : targets) {
         if (g_stopping) return;
-        Provider* p = provider_for(d.platform);
+        Provider* p = provider_for(d.platform, hosted);
         if (!p) continue;
         std::string why;
         if (!p->available(why)) {
@@ -646,6 +740,15 @@ void deliver(const json& event)
                 if (row.id == d.id) { row.last_error = scrub_locked(err, d); ++row.failures; g_dirty = true; }
             continue;
         }
+        if (hosted) {
+            // No in-process 1 s / 3 s retries here: the hosted provider has its own bounded queue
+            // (5 s, 30 s, 2 min, 5 min... up to 30 min or the TTL) that outlives a short outage.
+            bool             queued = false;
+            const PushResult r      = g_hosted->deliver(d.id, request_for(d, event, blob), queued);
+            if (queued) note_waiting(d, r);
+            else record(d, r);
+            continue;
+        }
         record(d, send_with_retries(p, request_for(d, event, blob), d.platform == "apns" ? apns_cfg : fcm_cfg));
     }
 }
@@ -658,6 +761,7 @@ static void reconfigure_locked()
 {
     if (g_apns) g_apns->configure(g_apns_cfg.dump());
     if (g_fcm) g_fcm->configure(g_fcm_cfg.dump());
+    if (g_hosted) g_hosted->configure(g_hosted_cfg.dump());
 }
 
 std::pair<int, std::string> register_device(const std::string& body)
@@ -829,10 +933,63 @@ std::pair<int, std::string> set_options(const std::string& body)
                 v = g_fcm_cfg.value("token_uri_override", ""); take_string(f, "token_uri_override", v); g_fcm_cfg["token_uri_override"] = v;
             }
         }
+        if (in.contains("mode") && in["mode"].is_string()) {
+            const std::string m = trim(in["mode"].get<std::string>());
+            if (m != "hosted" && m != "own" && m != "auto")
+                return { 400, json({ { "error", "mode must be hosted, own or auto" } }).dump() };
+            g_mode = m == "auto" ? std::string() : m;
+            BOOST_LOG_TRIVIAL(info) << "AppPush: push mode set to " << (g_mode.empty() ? "auto" : g_mode)
+                                    << " (in force: " << (hosted_mode_locked() ? "hosted" : "own") << ")";
+        }
+        if (in.contains("hosted") && in["hosted"].is_object()) {
+            std::string url = g_hosted_cfg.value("url", "");
+            take_string(in["hosted"], "url", url);
+            while (!url.empty() && url.back() == '/') url.pop_back();
+            if (url == Hosted::DEFAULT_URL) url.clear(); // the default is not pinned: it can move with a release
+            std::string why;
+            if (!url.empty() && !Hosted::url_allowed(url, why)) return { 400, json({ { "error", why } }).dump() };
+            g_hosted_cfg["url"] = url;
+        }
         reconfigure_locked();
         g_dirty = true;
     }
     return { 200, masked_json().dump() };
+}
+
+std::pair<int, std::string> hosted_check(const std::string& body)
+{
+    if (!g_hosted) return { 503, json({ { "error", "app push is not running" } }).dump() };
+    bool do_register = false, with_quota = true;
+    try {
+        const json in = body.empty() ? json::object() : json::parse(body);
+        take_bool(in, "register", do_register);
+        take_bool(in, "quota", with_quota);
+    } catch (...) {
+        return { 400, json({ { "error", "the body must be JSON" } }).dump() };
+    }
+    // Synchronous, on the request thread, like the test button: somebody is watching for it.
+    g_hosted->check(do_register, with_quota);
+    return { 200, masked_json().dump() };
+}
+
+std::pair<int, std::string> hosted_unregister()
+{
+    if (!g_hosted) return { 503, json({ { "error", "app push is not running" } }).dump() };
+    json out;
+    try { out = json::parse(g_hosted->unregister()); } catch (...) { out = json::object(); }
+    json j = masked_json();
+    j["unregister"] = json{ { "ok", out.value("ok", false) }, { "status", out.value("status", 0) },
+                            { "error", out.value("error", std::string()) } };
+    return { 200, j.dump() };
+}
+
+void set_identity(const std::string& hubid, const std::string& public_hex, const std::string& private_hex)
+{
+    std::lock_guard<std::mutex> lock(g_mutex);
+    g_identity.hubid       = hubid;
+    g_identity.public_hex  = public_hex;
+    g_identity.private_hex = private_hex;
+    if (g_hosted) g_hosted->set_identity(g_identity);
 }
 
 std::pair<int, std::string> test()
@@ -840,12 +997,14 @@ std::pair<int, std::string> test()
     std::vector<Device>      targets;
     std::vector<std::string> kinds;
     json                     apns_cfg, fcm_cfg;
+    bool                     hosted;
     {
         std::lock_guard<std::mutex> lock(g_mutex);
         targets  = g_devices;
         kinds    = g_kinds;
         apns_cfg = g_apns_cfg;
         fcm_cfg  = g_fcm_cfg;
+        hosted   = hosted_mode_locked();
     }
     if (targets.empty())
         return { 200, json({ { "ok", false }, { "error", "no app has registered a device yet" },
@@ -872,7 +1031,7 @@ std::pair<int, std::string> test()
         one["platform"] = d.platform;
         one["label"]    = d.label;
         one["token"]    = mask(d.token);
-        Provider*   p = provider_for(d.platform);
+        Provider*   p = provider_for(d.platform, hosted);
         std::string why;
         if (!p || !p->available(why)) {
             one["ok"]     = false;
@@ -901,6 +1060,7 @@ std::pair<int, std::string> test()
     }
     // The filter goes back with the results so the page can say which kinds are on.
     return { 200, json({ { "ok", any }, { "results", results }, { "kind", e["kind"] },
+                         { "mode", hosted ? "hosted" : "own" },
                          { "kinds", RemoteEvents::enabled_kinds(kinds) },
                          { "events", RemoteEvents::events_map(kinds) } }).dump() };
 }
@@ -936,10 +1096,17 @@ void start(const json& saved)
     g_stopping = false;
     if (!g_apns) g_apns = make_apns_provider();
     if (!g_fcm) g_fcm = make_fcm_provider();
+    if (!g_hosted) {
+        g_hosted = Hosted::make_hosted_provider();
+        // A queued notification's final outcome lands on its device row like any other result.
+        g_hosted->set_result_sink([](const std::string& id, const PushResult& r) { record_by_id(id, r); });
+    }
     std::lock_guard<std::mutex> lock(g_mutex);
     g_devices.clear();
     g_apns_cfg = json::object();
     g_fcm_cfg  = json::object();
+    g_mode.clear();
+    g_hosted_cfg = json::object();
     try {
         if (saved.is_object()) {
             g_enabled      = saved.value("enabled", true);
@@ -951,6 +1118,16 @@ void start(const json& saved)
                     if (k.is_string() && RemoteEvents::is_kind(k.get<std::string>())) g_kinds.push_back(k.get<std::string>());
             if (saved.contains("apns") && saved["apns"].is_object()) g_apns_cfg = saved["apns"];
             if (saved.contains("fcm") && saved["fcm"].is_object()) g_fcm_cfg = saved["fcm"];
+            {
+                const std::string m = saved.value("mode", std::string());
+                g_mode = (m == "hosted" || m == "own") ? m : std::string();
+            }
+            if (saved.contains("hosted") && saved["hosted"].is_object()) {
+                const std::string url = saved["hosted"].value("url", std::string());
+                std::string       why;
+                // A hand-edited URL that would not be accepted from the page is not accepted here.
+                if (!url.empty() && Hosted::url_allowed(url, why)) g_hosted_cfg["url"] = url;
+            }
             if (saved.contains("devices") && saved["devices"].is_array())
                 for (const auto& e : saved["devices"]) {
                     Device d;
@@ -977,13 +1154,19 @@ void start(const json& saved)
                 }
         }
     } catch (...) {} // a settings.json somebody hand-edited must not stop the hub starting
+    g_hosted->set_identity(g_identity);
     reconfigure_locked();
-    BOOST_LOG_TRIVIAL(info) << "AppPush: " << g_devices.size() << " registered device(s)";
+    BOOST_LOG_TRIVIAL(info) << "AppPush: " << g_devices.size() << " registered device(s), push via "
+                            << (hosted_mode_locked() ? "the hosted service (" + hosted_url_locked() + ")" : std::string("own keys"));
 }
 
 void stop()
 {
     g_stopping = true;
+    // Stops the retry worker and forgets the queue: it holds device tokens and ciphertext, and a
+    // hub that is quitting keeps neither. Outside g_mutex: the worker records a queued
+    // notification's outcome under that lock, and this joins it.
+    if (g_hosted) g_hosted->stop();
     std::lock_guard<std::mutex> lock(g_mutex);
     // Drops the cached provider credentials - the parsed .p8 and the OAuth2 access token - so
     // nothing sensitive outlives a hub that has been told to quit.
