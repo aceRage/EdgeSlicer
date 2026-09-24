@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "libslic3r/BoundingBox.hpp"
+#include "libslic3r/BrimFilament.hpp"
 #include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/ExtrusionEntityCollection.hpp"
 #include "libslic3r/GCodeReader.hpp"
@@ -1538,9 +1539,9 @@ TEST_CASE("Support filament matching: partially painted part - the interface fol
     REQUIRE(above != nullptr);
     std::map<unsigned, double> above_length;
     for (const auto &[extruder, bucket] : above->interface_by_extruder)
-        above_length[extruder] += bucket.length();
+        above_length[extruder] += total_path_length_mm(bucket);
     if (above->chameleon_residual_extruder >= 0)
-        above_length[unsigned(above->chameleon_residual_extruder)] += above->support_fills.length();
+        above_length[unsigned(above->chameleon_residual_extruder)] += total_path_length_mm(above->support_fills);
     REQUIRE(! above_length.empty());
     const auto dominant = std::max_element(above_length.begin(), above_length.end(),
                                            [](const auto &l, const auto &r) { return l.second < r.second; });

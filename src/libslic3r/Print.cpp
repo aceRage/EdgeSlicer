@@ -4764,13 +4764,13 @@ static void chameleon_assign_support_interfaces(Print &print)
             std::map<unsigned, double> length;
             if (above != nullptr) {
                 for (const auto &[extruder, bucket] : above->interface_by_extruder)
-                    length[extruder] += bucket.length();
+                    length[extruder] += total_path_length_mm(bucket);
                 if (!above->support_fills.entities.empty()) {
                     int residual = above->chameleon_residual_extruder;
                     if (residual < 0)
                         residual = chameleon_dominant_matched_extruder(above->interface_by_extruder);
                     if (residual >= 0)
-                        length[unsigned(residual)] += above->support_fills.length();
+                        length[unsigned(residual)] += total_path_length_mm(above->support_fills);
                 }
             }
             unsigned winner = 0;
