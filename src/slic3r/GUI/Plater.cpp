@@ -25553,6 +25553,27 @@ void Plater::apply_background_progress()
             p->main_frame->update_slice_print_status(MainFrame::eEventPlateUpdate, true);
         else
             p->main_frame->update_slice_print_status(MainFrame::eEventPlateUpdate, false);
+        // The Print / Export buttons run this check right before they act. When it throws a finished
+        // slice away, say so: a silent reset (Print plate greyed out, Slice plate lit again, no dialog)
+        // looked like a broken Print button on the H2C (2026-09-23).
+        if (result_valid) {
+            std::string keys;
+            if (p->printer_technology == ptFFF)
+                if (const Print *print = p->background_process.fff_print()) {
+                    const auto &changed = print->last_apply_changed_keys();
+                    for (size_t i = 0; i < changed.size() && i < 6; ++i)
+                        keys += (i ? ", " : "") + changed[i];
+                    if (changed.size() > 6)
+                        keys += ", ...";
+                }
+            BOOST_LOG_TRIVIAL(warning) << "apply_background_progress: plate " << plate_index + 1
+                                       << " slice result no longer matches the current settings" << (keys.empty() ? "" : " (" + keys + ")");
+            std::string msg = _u8L("The sliced plate no longer matches the current settings, so it has to be sliced again before it can be printed or exported.");
+            if (!keys.empty())
+                msg += " " + (boost::format(_u8L("Changed: %1%.")) % keys).str();
+            get_notification_manager()->push_notification(NotificationType::CustomNotification,
+                                                          NotificationManager::NotificationLevel::WarningNotificationLevel, msg);
+        }
     }
 }
 

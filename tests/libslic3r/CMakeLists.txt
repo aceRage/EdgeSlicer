@@ -51,6 +51,7 @@ add_executable(${_TEST_NAME}_tests
 	test_geometry.cpp
 	test_h2c_rack_nozzle_change.cpp
 	test_h2c_rack_park_preheat.cpp
+	test_filament_map_reapply.cpp
 	test_h2_preload_filaments.cpp
 	test_mixed_filament.cpp
 	test_mixed_filament_cli_gates.cpp

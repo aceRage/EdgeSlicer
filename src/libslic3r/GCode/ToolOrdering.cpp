@@ -1657,7 +1657,9 @@ MultiNozzleUtils::LayeredNozzleGroupResult ToolOrdering::get_recommended_filamen
     auto nozzle_list = build_default_nozzle_list(print_config, extruder_nums);
 
     if (mode == FilamentMapMode::fmmManual && !has_multiple_nozzle) {
-        auto manual_filament_map = print_config.filament_map.values;
+        // The map the plate asked for, not config().filament_map: an earlier pass of this slice (or the
+        // previous slice) overwrote that with its computed result.
+        auto manual_filament_map = print->filament_map_input();
         std::transform(manual_filament_map.begin(), manual_filament_map.end(), manual_filament_map.begin(), [](int v) { return v - 1; });
         auto result = LayeredNozzleGroupResult::create(manual_filament_map, nozzle_list, used_filaments);
         return result ? *result : LayeredNozzleGroupResult();
@@ -1670,7 +1672,7 @@ MultiNozzleUtils::LayeredNozzleGroupResult ToolOrdering::get_recommended_filamen
         auto context = build_filament_group_context(print, layer_filaments, physical_unprintables, geometric_unprintables, unprintable_volumes, mode, nozzle_status);
 
         if (has_multiple_nozzle && mode == FilamentMapMode::fmmManual) {
-            auto manual_filament_map = print_config.filament_map.values;
+            auto manual_filament_map = print->filament_map_input();
             std::transform(manual_filament_map.begin(), manual_filament_map.end(), manual_filament_map.begin(), [](int v) { return v - 1; });
             {
                 std::string map_str, used_str;
