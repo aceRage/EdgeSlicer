@@ -27,6 +27,7 @@
 #include "GUI_App.hpp"
 #include "GUI_ObjectList.hpp"
 #include "MainFrame.hpp"
+#include "UntrustedSettingsGuard.hpp"
 #include <slic3r/GUI/Widgets/WebView.hpp>
 
 namespace Slic3r { namespace GUI {
@@ -245,6 +246,12 @@ void ProjectPanel::on_navigated(wxWebViewEvent& event)
 
 void ProjectPanel::OnScriptMessage(wxWebViewEvent& evt)
 {
+    // Ultra: only the installed project page (resources/web/model) may ask for anything; a link in a
+    // project description must not bring another page into this view that could.
+    if (m_browser == nullptr || !wxGetApp().is_own_page_url(m_browser->GetCurrentURL().ToUTF8().data())) {
+        BOOST_LOG_TRIVIAL(warning) << "ProjectPanel: ignored a message from a page that is not ours";
+        return;
+    }
     try {
         wxString strInput = evt.GetString();
         json     j = json::parse(strInput.utf8_string());
@@ -258,9 +265,10 @@ void ProjectPanel::OnScriptMessage(wxWebViewEvent& evt)
                 std::string decode_path = wxGetApp().url_decode(accessory_path.ToStdString());
                 fs::path path(decode_path);
 
-                if (fs::exists(path)) {
-                    wxLaunchDefaultApplication(path.wstring(), 0);
-                }
+                // Ultra: the page shows the project's own description (text from the 3MF), so what it
+                // asks for here is not trusted: only a file among this project's attachments, and only
+                // a document / picture / model type is opened; anything else is shown in its folder.
+                open_project_attachment(path);
             }
         }
         else if (strCmd == "request_3mf_info") {

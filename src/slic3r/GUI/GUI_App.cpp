@@ -142,6 +142,8 @@
 #include "HintNotification.hpp"
 #include "bury_cfg/bury_point.hpp"
 #include "sentry_wrapper/SentryWrapper.hpp"
+#include "UntrustedSettingsGuard.hpp"
+#include "PageServerSecurity.hpp"
 //#ifdef WIN32
 //#include "BaseException.h"
 //#endif
@@ -3458,6 +3460,8 @@ bool GUI_App::on_init_inner()
     }
     BOOST_LOG_TRIVIAL(info) << "loading systen presets...";
     preset_bundle = new PresetBundle();
+    // Preset / G-code config imports get the same untrusted-settings check as project files.
+    install_untrusted_config_filter();
 
     // just checking for existence of Slic3r::data_dir is not enough : it may be an empty directory
     // supplied as argument to --datadir; in that case we should still run the wizard
@@ -5507,10 +5511,73 @@ wxString GUI_App::get_homepage_url()
     return url;
 }
 
-std::string GUI_App::handle_web_request(std::string cmd, const std::vector<std::string>& /*limitCmds*/)
+static std::string web_request_command(const std::string& cmd)
 {
-    // The Orca-Flashforge variant filters commands for embedded pages; Phase A delegates unfiltered.
+    const nlohmann::json j = nlohmann::json::parse(cmd, nullptr, false);
+    if (j.is_object() && j.contains("command") && j["command"].is_string())
+        return j["command"].get<std::string>();
+    return std::string();
+}
+
+// scheme://host[:port] of a page, for the log (never the query: our URLs carry the page secret).
+static std::string page_origin_for_log(const std::string& url)
+{
+    untrusted::Url u;
+    if (untrusted::parse_url(url, u))
+        return u.scheme + "://" + u.host + (u.port > 0 ? ":" + std::to_string(u.port) : std::string());
+    return url.substr(0, std::min<size_t>(url.find_first_of("?#"), 64));
+}
+
+// A URL a web page asks us to open goes to the system browser only when it is a plain web link
+// (http/https, or mailto:). wxLaunchDefaultBrowser hands anything else to the shell: file: paths,
+// UNC shares, ms-msdt: and other protocol handlers - a way to start programs from a page.
+static void launch_external_url_from_page(const std::string& url)
+{
+    if (!untrusted::is_safe_to_open_externally(url)) {
+        BOOST_LOG_TRIVIAL(warning) << "web bridge: refused to open a non-web URL (" << page_origin_for_log(url) << ")";
+        return;
+    }
+    wxLaunchDefaultBrowser(wxString::FromUTF8(url));
+}
+
+std::string GUI_App::handle_web_request(std::string cmd, const std::vector<std::string>& limitCmds)
+{
+    // Only the commands the embedding view expects (the FlashForge banner, a remote page).
+    const std::string command = web_request_command(cmd);
+    if (std::find(limitCmds.begin(), limitCmds.end(), command) == limitCmds.end()) {
+        BOOST_LOG_TRIVIAL(warning) << "web bridge: ignored \"" << command << "\" (not expected from this view)";
+        return "";
+    }
     return handle_web_request(cmd);
+}
+
+bool GUI_App::is_own_page_url(const std::string& url) const
+{
+    if (untrusted::is_page_server_url(url, int(m_page_http_server.get_port())))
+        return true;
+    const std::string path = untrusted::local_path_from_file_url(url);
+    if (path.empty())
+        return false;
+    std::string key, web_key;
+    if (!page_server::resolve_final_path(path, &key, nullptr) ||
+        !page_server::resolve_final_path(resources_dir() + "/web", &web_key, nullptr))
+        return false;
+    return page_server::key_is_within(key, web_key);
+}
+
+std::string GUI_App::handle_web_request_from(const std::string& page_url, std::string cmd)
+{
+    if (is_own_page_url(page_url))
+        return handle_web_request(std::move(cmd));
+    // Not our page: the commands below only open an http(s) link in the system browser (checked
+    // again where it is opened) or forward a key press. Opening projects or folders, downloads,
+    // login and plug-in actions stay with our own pages.
+    static const char* const allowed[] = {"common_openurl", "userguide_wiki_open", "get_web_shortcut"};
+    const std::string command = web_request_command(cmd);
+    if (std::find(std::begin(allowed), std::end(allowed), command) != std::end(allowed))
+        return handle_web_request(std::move(cmd));
+    BOOST_LOG_TRIVIAL(warning) << "web bridge: ignored \"" << command << "\" from a page that is not ours (" << page_origin_for_log(page_url) << ")";
+    return "";
 }
 
 void GUI_App::get_uds_id(std::string& uid, std::string& did, std::string& sid)
@@ -5680,7 +5747,7 @@ std::string GUI_App::handle_web_request(std::string cmd)
                     pt::ptree                    data_node = root.get_child("data");
                     boost::optional<std::string> path      = data_node.get_optional<std::string>("url");
                     if (path.has_value()) {
-                        wxLaunchDefaultBrowser(path.value());
+                        launch_external_url_from_page(path.value());
                     }
                 }
             }
@@ -5698,7 +5765,7 @@ std::string GUI_App::handle_web_request(std::string cmd)
             else if (command_str.compare("common_openurl") == 0) {
                 boost::optional<std::string> path      = root.get_optional<std::string>("url");
                 if (path.has_value()) {
-                    wxLaunchDefaultBrowser(path.value());
+                    launch_external_url_from_page(path.value());
                 }
             }
             else if (command_str.compare("homepage_makerlab_get") == 0) {

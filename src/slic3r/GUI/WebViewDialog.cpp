@@ -3,6 +3,7 @@
 #include "I18N.hpp"
 #include "slic3r/GUI/wxExtensions.hpp"
 #include "slic3r/GUI/GUI_App.hpp"
+#include "libslic3r/UntrustedInput.hpp"
 #include "slic3r/GUI/MainFrame.hpp"
 #include "sentry_wrapper/SentryWrapper.hpp"
 #include "../Utils/Http.hpp"
@@ -561,6 +562,13 @@ void WebViewPanel::OnNavigationRequest(wxWebViewEvent& evt)
     BOOST_LOG_TRIVIAL(trace) << __FUNCTION__ << ": " << evt.GetTarget().ToUTF8().data();
     const wxString &url = evt.GetURL();
     if (url.StartsWith("File://") || url.StartsWith("file://")) {
+        // Ultra: a file:// link opens the file as a project, so only our own start page may use
+        // it; any other page that ended up in this view (a site a link led to) gets it refused.
+        if (!wxGetApp().is_own_page_url(m_browser->GetCurrentURL().ToUTF8().data())) {
+            BOOST_LOG_TRIVIAL(warning) << "WebViewPanel: refused a file:// navigation from a page that is not ours";
+            evt.Veto();
+            return;
+        }
         if (!url.Contains("/web/homepage/index.html")) {
             auto file = wxURL::Unescape(wxURL(url).GetPath());
 #ifdef _WIN32
@@ -649,7 +657,15 @@ void WebViewPanel::OnNewWindow(wxWebViewEvent& evt)
 
     //If we handle new window events then just load them in this window as we
     //are a single window browser
-    if (m_tools_handle_new_window->IsChecked())
+    // Ultra: only our own pages open in place (this view carries the app bridge); a link to any
+    // other site goes to the system browser, and only when it is a plain web link.
+    const std::string target = evt.GetURL().ToUTF8().data();
+    if (!wxGetApp().is_own_page_url(target)) {
+        if (untrusted::is_safe_to_open_externally(target))
+            wxLaunchDefaultBrowser(evt.GetURL());
+        else
+            BOOST_LOG_TRIVIAL(warning) << "WebViewPanel: refused a new window for a non-web URL";
+    } else if (m_tools_handle_new_window->IsChecked())
         m_browser->LoadURL(evt.GetURL());
 
     UpdateState();
@@ -671,7 +687,7 @@ void WebViewPanel::OnScriptMessage(wxWebViewEvent& evt)
     // test
     SSWCP::handle_web_message(evt.GetString().ToUTF8().data(), m_browser);
 
-    std::string response = wxGetApp().handle_web_request(evt.GetString().ToUTF8().data());
+    std::string response = wxGetApp().handle_web_request_from(m_browser->GetCurrentURL().ToUTF8().data(), evt.GetString().ToUTF8().data());
     if (response.empty()) return;
 
     /* remove \n in response string */

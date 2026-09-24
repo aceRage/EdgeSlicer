@@ -10,6 +10,7 @@
 #include "SnapmakerTaskConfig.hpp" // Ultra: END_UNLOAD_FILAMENT is built in one place for every send path
 #include "Timelapse/TimelapseDownloadPopup.hpp"
 #include "nlohmann/json.hpp"
+#include "libslic3r/UntrustedInput.hpp"
 #include "slic3r/GUI/Tab.hpp"
 #include "libslic3r/Model.hpp"
 #include "sentry_wrapper/SentryWrapper.hpp"
@@ -7364,6 +7365,18 @@ void SSWCP::handle_web_message(std::string message, wxWebView* webview) {
 
         if (!webview) {
             return;
+        }
+        // Ultra: SSWCP drives printers, downloads, projects and logins. Only our own pages (the page
+        // server, resources/web) may use it; a printer's web UI in the Device tab, a page opened
+        // through sw_OpenOrcaWebview or wherever a link led gets nothing.
+        {
+            const std::string page = webview->GetCurrentURL().ToUTF8().data();
+            if (!wxGetApp().is_own_page_url(page)) {
+                untrusted::Url u;
+                const std::string origin = untrusted::parse_url(page, u) ? u.scheme + "://" + u.host : std::string("(unknown)");
+                BOOST_LOG_TRIVIAL(warning) << "SSWCP: ignored a message from a page that is not ours (" << origin << ")";
+                return;
+            }
         }
         WCP_Logger::getInstance().add_log(message, false, "", "WCP", "info");
 

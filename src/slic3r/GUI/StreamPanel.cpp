@@ -48,6 +48,11 @@ StreamPanel::StreamPanel(wxWindow* parent)
 
 void StreamPanel::OnScriptMessage(wxWebViewEvent& evt)
 {
+    // Ultra: only our own stream page may start the hub or read the remote-access state.
+    if (m_browser == nullptr || !wxGetApp().is_own_page_url(m_browser->GetCurrentURL().ToUTF8().data())) {
+        BOOST_LOG_TRIVIAL(warning) << "StreamPanel: ignored a message from a page that is not ours";
+        return;
+    }
     const wxString msg = evt.GetString();
     if (msg == "hub_start") {
         // The page needs a relay (go2rtc for RTSP/ONVIF, MJPEG for Bambu P1): make sure the
