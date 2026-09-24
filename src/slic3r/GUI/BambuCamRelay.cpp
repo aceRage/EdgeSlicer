@@ -191,7 +191,9 @@ void BambuCamRelay::ensure_started()
     if (!m_started.compare_exchange_strong(expected, true))
         return;
     try {
-        static asio::io_context ioc; // lives for the process
+        // Lives for the process and is never destroyed: the client threads are detached, and a socket
+        // destroyed after its io_context crashes in the socket service (see ServerLifetime.hpp).
+        static asio::io_context& ioc = *new asio::io_context();
         auto* acceptor = new tcp::acceptor(ioc, tcp::endpoint(asio::ip::make_address("127.0.0.1"), 0));
         m_acceptor = acceptor;
         m_port     = acceptor->local_endpoint().port();

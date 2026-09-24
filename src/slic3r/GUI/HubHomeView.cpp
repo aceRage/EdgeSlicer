@@ -161,7 +161,9 @@ static void run_hub_call(HubHomeView* view, std::weak_ptr<int> life, bool spawn,
 {
     std::thread([view, life, spawn, seed, done]() {
         RemoteHub::Info info = spawn ? RemoteHub::ensure_running(seed, false) : RemoteHub::query(HUB_PROBE_TIMEOUT_S);
-        wxGetApp().CallAfter([view, life, info, done]() {
+        // Gated (RemoteAccess::post_to_app): an ensure_running() can take ~12 s and must not post
+        // to an app that is being torn down meanwhile. `life` covers the view itself.
+        RemoteAccess::post_to_app([view, life, info, done]() {
             if (life.expired())
                 return;
             done(view, info);
@@ -223,7 +225,7 @@ void HubHomeView::recheck()
             probe.presence              = rec.presence;
             probe.exit_reason           = rec.exit_reason;
         }
-        wxGetApp().CallAfter([this, life, probe]() {
+        RemoteAccess::post_to_app([this, life, probe]() {
             if (life.expired())
                 return;
             m_busy = false;

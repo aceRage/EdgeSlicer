@@ -5,6 +5,7 @@
 #include "MainFrame.hpp"
 #include "Plater.hpp"
 #include "PrinterWebView.hpp"
+#include "RemoteAccess.hpp"
 #include "RemoteHub.hpp" // hub_dir
 #include "SSWCP.hpp"     // query_machine_info
 #include "libslic3r/AppConfig.hpp"
@@ -41,13 +42,9 @@ namespace fs   = boost::filesystem;
 // e.g. a modal dialog is blocking the app.
 static bool on_main(std::function<void()> fn, int timeout_ms = 15000)
 {
-    auto done = std::make_shared<std::promise<void>>();
-    auto fut  = done->get_future();
-    wxGetApp().CallAfter([done, fn]() {
-        try { fn(); } catch (...) {}
-        done->set_value();
-    });
-    return fut.wait_for(std::chrono::milliseconds(timeout_ms)) == std::future_status::ready;
+    // Through the gate (MainThreadGate.hpp): once the main window is closing this is false at once
+    // and fn never runs against a Plater that is going away.
+    return RemoteAccess::call_on_main(std::move(fn), timeout_ms) == MainCallResult::Done;
 }
 
 // ------------------------------------------------------ credential store ----
@@ -238,7 +235,7 @@ void list(json& out)
 // put a modal on a PC nobody is looking at, so this only logs.
 static void note_connection_lost()
 {
-    wxGetApp().CallAfter([]() {
+    RemoteAccess::post_to_main([]() {
         BOOST_LOG_TRIVIAL(warning) << "[RemoteSnapmaker] the connected Snapmaker dropped";
         wxGetApp().app_config->set("use_new_connect", "false");
         std::shared_ptr<PrintHost> ptr = nullptr;

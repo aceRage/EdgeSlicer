@@ -840,6 +840,10 @@ set(SLIC3R_GUI_SOURCES
     Utils/LoginUserAgent.hpp
     Utils/HubHomeLogic.cpp
     Utils/HubHomeLogic.hpp
+    Utils/MainThreadGate.cpp
+    Utils/MainThreadGate.hpp
+    Utils/ServerLifetime.cpp
+    Utils/ServerLifetime.hpp
     Utils/SnapmakerSilentLogin.cpp
     Utils/SnapmakerSilentLogin.hpp
     Utils/json_diff.cpp

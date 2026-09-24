@@ -1,11 +1,14 @@
 #pragma once
 
 #include <deque>
+#include <functional>
 #include <mutex>
 #include <string>
 #include <vector>
 
 #include <nlohmann/json.hpp>
+
+#include "slic3r/Utils/MainThreadGate.hpp"
 
 namespace Slic3r {
 namespace GUI {
@@ -28,6 +31,22 @@ public:
     void start();
     void stop(); // removes the instance file; the listener dies with the process
     int  port();
+
+    // ---- handing work to the GUI thread (MainThreadGate.hpp) ----
+    // Every request, send, control and connect thread in the Remote* modules reaches the GUI thread
+    // through these two, never through a bare wxApp::CallAfter: once the main window starts closing
+    // the gate is shut, queued work that has not started is dropped and nothing new is queued, so no
+    // request can run against a Plater that is being (or has been) destroyed.
+    static MainCallResult call_on_main(std::function<void()> fn, int timeout_ms); // wait for it
+    static bool           post_to_main(std::function<void()> fn);                 // fire and forget
+    // For UI code that guards its own lifetime (a weak_ptr to the view): only the app quitting
+    // stops it, not a language switch's rebuild - a rebuilt view must still hear back.
+    static bool           post_to_app(std::function<void()> fn);
+    // MainFrame::shutdown, first thing (both a quit and a language switch's rebuild).
+    static void close_gui_gate(bool quitting);
+    // GUI_App::recreate_GUI, once the rebuilt main window and Plater exist.
+    static void reopen_gui_gate();
+    static bool gui_closing();
 
     // Ultra: window visibility, mirrored into <pid>.json and /api/info so the hub can list
     // and toggle it. GUI thread (or before start()).

@@ -7,6 +7,7 @@
 #include "I18N.hpp"
 #include "PartPlate.hpp"
 #include "Plater.hpp"
+#include "RemoteAccess.hpp"
 #include "SelectMachine.hpp" // CloudTaskNozzleId
 #include "SpoolmanDialog.hpp" // deduct_after_send_async
 #include "Jobs/PrintJob.hpp" // PrintPrepareData
@@ -46,13 +47,9 @@ using nlohmann::json;
 // From the worker thread: run fn on the GUI thread and wait for it (bounded).
 static bool on_main(std::function<void()> fn, int timeout_ms = 10000)
 {
-    auto done = std::make_shared<std::promise<void>>();
-    auto fut  = done->get_future();
-    wxGetApp().CallAfter([done, fn]() {
-        try { fn(); } catch (...) {}
-        done->set_value();
-    });
-    return fut.wait_for(std::chrono::milliseconds(timeout_ms)) == std::future_status::ready;
+    // Through the gate (MainThreadGate.hpp): once the main window is closing this is false at once
+    // and fn never runs against a Plater that is going away.
+    return RemoteAccess::call_on_main(std::move(fn), timeout_ms) == MainCallResult::Done;
 }
 
 static bool env_flag(const char* name)
@@ -995,9 +992,10 @@ static void deduct_spoolman(std::shared_ptr<Prepared> p, json& result)
     if (p->dry_run || !p->spoolman_deduct) return;
     result["spoolman_deduct"] = true;
     try {
-        wxGetApp().CallAfter([]() {
-            try { SpoolmanDialog::deduct_after_send_async(); } catch (...) {}
-        });
+        if (!RemoteAccess::post_to_main([]() {
+                try { SpoolmanDialog::deduct_after_send_async(); } catch (...) {}
+            }))
+            BOOST_LOG_TRIVIAL(warning) << "RemoteSend: the Spoolman deduction was not queued: the slicer is closing";
     } catch (...) {
         BOOST_LOG_TRIVIAL(warning) << "RemoteSend: the Spoolman deduction could not be queued";
     }
