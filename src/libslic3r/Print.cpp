@@ -3479,7 +3479,9 @@ static bool chameleon_projection_extruder_from_view(const std::vector<Projection
                                                       // below) is byte-identical to before. base_projection_lookup
                                                       // (chameleon_assign_support_interfaces, below) is the only caller
                                                       // that ever passes a real limit - see that lambda's own comment.
-                                                      size_t layer_limit = std::numeric_limits<size_t>::max())
+                                                      size_t layer_limit = std::numeric_limits<size_t>::max(),
+                                                      // Optional: receives the object layer the hit is on.
+                                                      const Layer **out_hit_layer = nullptr)
 {
     size_t hit_layer = 0, hit_region = 0;
     if (!chameleon_pick_projection_region(view, p, hit_layer, hit_region, layer_limit))
@@ -3493,6 +3495,8 @@ static bool chameleon_projection_extruder_from_view(const std::vector<Projection
 
     const LayerRegion &lr = *regions[hit_region];
     out_extruder = chameleon_projection_region_extruder(lr.region());
+    if (out_hit_layer != nullptr)
+        *out_hit_layer = view_layers[hit_layer];
     return true;
 }
 
@@ -3939,6 +3943,47 @@ static void chameleon_assign_support_interfaces(Print &print)
         for (const ModelVolume *volume : object->model_object()->volumes)
             if (volume != nullptr && volume->is_model_part())
                 assigned_extruders.insert(unsigned(std::max(1, volume->extruder_id()) - 1));
+
+        // Per object layer, built on first use: a sample index of its visible walls.
+        std::map<const Layer *, size_t> layer_index_of;
+        for (size_t li = 0; li < object->layers().size(); ++li)
+            layer_index_of.emplace(object->layers()[li], li);
+        std::vector<std::unique_ptr<WallSampleIndex>> visible_wall_index(object->layers().size());
+        auto visible_wall_index_of = [&](size_t li) -> const WallSampleIndex & {
+            if (!visible_wall_index[li]) {
+                visible_wall_index[li] = std::make_unique<WallSampleIndex>();
+                for (const ChameleonWallPiece &piece : visible_walls_of(li))
+                    visible_wall_index[li]->add_polyline(piece.polyline.points, piece.extruder, obj_idx);
+            }
+            return *visible_wall_index[li];
+        };
+
+        // Painted-part rule for the upward projection (see the projection lookups below): the
+        // projection resolves the region directly above a support sample, on `hit_layer`. When
+        // that region prints in one of the object's ASSIGNED filaments and no visible wall of that
+        // same layer does, it is the unpainted core of a painted part showing through - the paint
+        // claim is only so deep, and where it does not cover an underside the core prints its
+        // own filament there. On a part imported with the wrong assigned filament and painted
+        // over, that filament is exactly the one the support must not take: the sample takes
+        // the filament of the nearest visible wall of the hit layer instead - the paint around
+        // that underside. An assigned filament that IS on a visible wall of the hit layer (an
+        // unpainted part, the unpainted half of a partly painted one) and any painted region's
+        // filament are kept. Returns false (a miss) only if the layer has no visible wall at all.
+        auto resolve_core_hit = [&](const Layer *hit_layer, const Point &p, unsigned &extruder) -> bool {
+            if (hit_layer == nullptr || assigned_extruders.count(extruder) == 0)
+                return true;
+            const auto it = layer_index_of.find(hit_layer);
+            if (it == layer_index_of.end())
+                return true;
+            for (const ChameleonWallPiece &piece : visible_walls_of(it->second))
+                if (piece.extruder == extruder)
+                    return true;
+            const auto nearest = visible_wall_index_of(it->second).knn(p, 1);
+            if (nearest.empty())
+                return false;
+            extruder = nearest.front().first->extruder;
+            return true;
+        };
         auto layer_surface_extruder = [&](const std::vector<size_t> &coplanar, const std::vector<size_t> &contact) {
             unsigned e = object_surface_extruder;
             if (!dominant_visible_wall(coplanar, e))
@@ -4345,9 +4390,6 @@ static void chameleon_assign_support_interfaces(Print &print)
             // alone) is never charged the cost of a second, pointless lookup, and a
             // coplanar layer is sampled into both indices exactly once each.
             const std::set<size_t> coplanar_idx_set(coplanar_idx.begin(), coplanar_idx.end());
-            // Filaments seen on a visible wall anywhere in this layer's band (see the projection
-            // lookups below).
-            std::set<unsigned> band_visible_extruders;
             for (size_t li : union_layer_indices(contact_idx, coplanar_idx)) {
                 std::map<unsigned, size_t>  debug_band_li_counts;
                 std::map<unsigned, size_t> *debug_band_li_counts_ptr = chameleon_debug_on ? &debug_band_li_counts : nullptr;
@@ -4355,10 +4397,8 @@ static void chameleon_assign_support_interfaces(Print &print)
                 // boundary loops inside a painted part. Supports and walls share object
                 // coordinates, so no instance shift.
                 const std::vector<ChameleonWallPiece> &pieces = visible_walls_of(li);
-                for (const ChameleonWallPiece &piece : pieces) {
+                for (const ChameleonWallPiece &piece : pieces)
                     band_idx.add_polyline(piece.polyline.points, piece.extruder, obj_idx, /*spacing_mm=*/0.8, debug_band_li_counts_ptr);
-                    band_visible_extruders.insert(piece.extruder);
-                }
                 if (chameleon_debug_on)
                     debug_band_samples.emplace_back(li, std::move(debug_band_li_counts));
 
@@ -4497,25 +4537,17 @@ static void chameleon_assign_support_interfaces(Print &print)
                 // counters around the specific engine call that's currently running -
                 // see proj_hits_before_base's own comment at that call site.
                 //
-                // Painted-part rule (fix/support-filament-matching-paint-brim): a hit on a region
-                // printed in one of the object's ASSIGNED filaments that no visible wall in this
-                // band shows is the unpainted core of a painted part - the paint claim is only
-                // so deep, and where it does not reach the underside the core prints its own
-                // filament there. On a part imported with the wrong assigned filament and painted
-                // over, that filament is exactly the one the support must not take, so such a
-                // hit counts as a miss and the sample falls through to the visible-wall vote. An
-                // assigned filament that IS on a visible wall nearby (an unpainted part, or the
-                // unpainted half of a partly painted one) and any painted region's filament are
-                // taken as before.
-                auto hidden_core_hit = [&assigned_extruders, &band_visible_extruders](unsigned extruder) {
-                    return assigned_extruders.count(extruder) != 0 && band_visible_extruders.count(extruder) == 0;
-                };
+                // Painted-part rule (fix/support-filament-matching-paint-brim): every hit goes
+                // through resolve_core_hit (above the per-layer loop), so the unpainted core of a
+                // painted part never hands its assigned filament to the support under it.
                 std::function<bool(const Point &, unsigned &)> projection_lookup =
                     [&projection_view, &projection_view_layers, &debug_projection_hits,
-                     &debug_projection_misses, hidden_core_hit](const Point &p, unsigned &out_extruder) -> bool {
-                        const bool hit = chameleon_projection_extruder_from_view(
-                            projection_view, projection_view_layers, p, out_extruder) &&
-                            !hidden_core_hit(out_extruder);
+                     &debug_projection_misses, &resolve_core_hit](const Point &p, unsigned &out_extruder) -> bool {
+                        const Layer *hit_layer = nullptr;
+                        const bool   hit       = chameleon_projection_extruder_from_view(
+                            projection_view, projection_view_layers, p, out_extruder,
+                            std::numeric_limits<size_t>::max(), &hit_layer) &&
+                            resolve_core_hit(hit_layer, p, out_extruder);
                         if (hit)
                             ++debug_projection_hits;
                         else
@@ -4540,10 +4572,11 @@ static void chameleon_assign_support_interfaces(Print &print)
                 // unaffected by which of the two lookups actually produced the hit/miss).
                 std::function<bool(const Point &, unsigned &)> base_projection_lookup =
                     [&projection_view, &projection_view_layers, base_view_count, &debug_projection_hits,
-                     &debug_projection_misses, hidden_core_hit](const Point &p, unsigned &out_extruder) -> bool {
-                        const bool hit = chameleon_projection_extruder_from_view(
-                            projection_view, projection_view_layers, p, out_extruder, base_view_count) &&
-                            !hidden_core_hit(out_extruder);
+                     &debug_projection_misses, &resolve_core_hit](const Point &p, unsigned &out_extruder) -> bool {
+                        const Layer *hit_layer = nullptr;
+                        const bool   hit       = chameleon_projection_extruder_from_view(
+                            projection_view, projection_view_layers, p, out_extruder, base_view_count, &hit_layer) &&
+                            resolve_core_hit(hit_layer, p, out_extruder);
                         if (hit)
                             ++debug_projection_hits;
                         else
