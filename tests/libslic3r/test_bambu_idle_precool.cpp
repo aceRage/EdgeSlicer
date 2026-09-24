@@ -177,6 +177,9 @@ const std::regex re_any_injected(R"(;Multi extruder pre (cooling|heating))");
 const std::regex re_m632(R"(^M632 S(\d+)( N R)? W$)");
 const std::regex re_tool(R"(^T(\d+)( |$))");
 const std::regex re_extrude(R"(^G[123] .*[XY][-\d.]+.* E(\d*\.?\d+))");
+// Any other nozzle temperature command naming a hotend: "M104 S<t> T<h>" or "M104 T<h> S<t>".
+const std::regex re_set_temp_st(R"(^M10[49] [^;]*S(\d+)[^;]*T(\d+))");
+const std::regex re_set_temp_ts(R"(^M10[49] [^;]*T(\d+)[^;]*S(\d+))");
 
 struct Walk
 {
@@ -269,6 +272,23 @@ Walk walk(const std::string &gcode)
                 }
             }
             continue;
+        }
+        if (started) {
+            // A pre-cooled hotend is heated only by its own pre-heat: an object-start or 2nd-layer
+            // "M104 S<print temperature> T<hotend>" on it undoes the pre-cool (owner's H2C, 2026-09-24).
+            int temp = -1, tool = -1;
+            if (std::regex_search(line, m, re_set_temp_st)) {
+                temp = std::stoi(m[1].str());
+                tool = std::stoi(m[2].str());
+            } else if (std::regex_search(line, m, re_set_temp_ts)) {
+                tool = std::stoi(m[1].str());
+                temp = std::stoi(m[2].str());
+            }
+            if (tool >= 0 && temp > 0 && cooled[tool]) {
+                w.errors.push_back("pre-cooled hotend " + std::to_string(tool) + " set to " + std::to_string(temp) + " before its pre-heat, line " +
+                                   std::to_string(i) + ": " + line);
+                continue;
+            }
         }
         if (started && loaded >= 0 && std::regex_search(line, m, re_extrude) && std::stod(m[1].str()) > 0.) {
             const int h = hotend_of(loaded);
@@ -410,24 +430,39 @@ TEST_CASE("Printers without pre-heating keep their G-code", "[BambuPreCool]")
     }
 }
 
-TEST_CASE("H2D print by object: pre-cooling never touches a printing hotend", "[BambuPreCool]")
+TEST_CASE("Print by object: the idle hotend stays cool while the other one prints", "[BambuPreCool]")
 {
     // A by-object plate is grouped only once PR #138 (ToolOrdering::group_by_plate_map) is in; before
-    // that pre_cooling_active() is false for it and nothing is injected. Either way the invariant holds.
-    const DynamicPrintConfig cfg = machine_config(H2D, {
-        { "print_sequence", "by object" },
-        { "filament_map_mode", "Manual" },
-        { "filament_map", "1,2,2" },
-        { "enable_prime_tower", "0" },
-    });
-    Print print;
-    Model model;
-    const std::string gcode = slice(print, model, cfg, H2D, 115.);
-    REQUIRE(count_lines(gcode, std::regex(R"(^T[012]( |$))")) >= 3);
-    const Walk        w     = walk(gcode);
-    check_walk(w);
-    if (!PreCooling::pre_cooling_active(print))
-        CHECK(count_lines(gcode, re_any_injected) == 0);
+    // that pre_cooling_active() is false for it and nothing is injected. Either way the invariants hold:
+    // no pre-cooled hotend prints, loads, or is set to a temperature by anything but its own pre-heat
+    // (the object-start and 2nd-layer temperature lines used to heat both hotends: owner's H2C,
+    // 2026-09-24). Filaments right, left, right, so every object changes hotend; a first layer hotter
+    // than the rest so the 2nd-layer lines are written too.
+    for (const Machine *m : { &H2D, &H2C }) {
+        for (const bool tower : { false, true }) {
+            CAPTURE(m->printer, tower);
+            const DynamicPrintConfig cfg = machine_config(*m, {
+                { "print_sequence", "by object" },
+                { "filament_map_mode", "Manual" },
+                { "filament_map", "2,1,2" },
+                { "enable_prime_tower", tower ? "1" : "0" },
+                { "nozzle_temperature_initial_layer", "230,230,230" },
+                { "nozzle_temperature", "220,220,220" },
+            });
+            Print print;
+            Model model;
+            const std::string gcode = slice(print, model, cfg, *m, 115.);
+            REQUIRE(count_lines(gcode, std::regex(R"(^T[012]( |$))")) >= 3);
+            const Walk w = walk(gcode);
+            check_walk(w);
+            if (PreCooling::pre_cooling_active(print)) {
+                // Two hotend changes: each outgoing hotend is cooled once it is done.
+                CHECK(w.precools >= 2);
+            } else {
+                CHECK(count_lines(gcode, re_any_injected) == 0);
+            }
+        }
+    }
 }
 
 TEST_CASE("An H2D project saved before enable_pre_heating existed pre-heats once opened", "[BambuPreCool]")
