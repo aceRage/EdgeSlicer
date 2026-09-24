@@ -1,9 +1,13 @@
 #include <catch2/catch.hpp>
 
+#include <boost/filesystem.hpp>
+#include <boost/nowide/cstdio.hpp>
+
 #include <algorithm>
 #include <cmath>
 #include <functional>
 #include <limits>
+#include <map>
 #include <mutex>
 #include <utility>
 #include <vector>
@@ -12,6 +16,7 @@
 #include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/ExtrusionEntityCollection.hpp"
 #include "libslic3r/GCodeReader.hpp"
+#include "libslic3r/GCode/GCodeProcessor.hpp"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Print.hpp"
@@ -1374,12 +1379,25 @@ void make_painted_table_print(Slic3r::Print &print, Slic3r::Model &model, const 
 
 DynamicPrintConfig painted_table_config(bool matching, const std::string &support_type = "normal(auto)")
 {
+    // Two filaments, set up the way the image-row wall tests do it: every per-extruder and
+    // per-filament vector resized (painting needs filament_colour to count two physical
+    // filaments), absolute line widths, a tool changer so tool changes are real, no prime tower.
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_num_extruders(2);
+    config.set_num_filaments(2);
+    config.option<ConfigOptionFloats>("filament_diameter")->values = { 1.75, 1.75 };
+    config.option<ConfigOptionStrings>("filament_colour")->values  = { "#FF0000", "#0000FF" };
+    config.option<ConfigOptionFloats>("nozzle_diameter")->values   = { 0.4, 0.4 };
+    for (const char *key : { "line_width", "initial_layer_line_width", "outer_wall_line_width", "inner_wall_line_width",
+                             "top_surface_line_width", "sparse_infill_line_width", "internal_solid_infill_line_width",
+                             "support_line_width" })
+        if (auto *opt = config.option<ConfigOptionFloatOrPercent>(key); opt != nullptr) {
+            opt->value   = 0.42;
+            opt->percent = false;
+        }
+    config.option<ConfigOptionBool>("single_extruder_multi_material")->value = true;
+    config.option<ConfigOptionBool>("enable_prime_tower")->value             = false;
     config.set_deserialize_strict({
-        { "nozzle_diameter",             "0.4,0.4" },
-        { "filament_diameter",           "1.75,1.75" },
-        { "filament_type",               "PLA;PLA" },
-        { "filament_soluble",            "0,0" },
         { "enable_support",              "1" },
         { "support_type",                support_type },
         { "support_on_build_plate_only", "0" },
@@ -1463,6 +1481,32 @@ TEST_CASE("Support filament matching: a part painted B all over but assigned A n
             // (no raft) even over a configured filament.
             CHECK(m.plate_residual == 1);
             CHECK(m.plate_all_roles);
+
+            // End to end: in the G-code every support extrusion, the first layer's included, is
+            // printed with B.
+            GCodeProcessorResult result;
+            const boost::filesystem::path out = Slic3r::Test::scratch_path(".gcode");
+            print.export_gcode(out.string(), &result, nullptr);
+            boost::nowide::remove(out.string().c_str());
+            float first_z = std::numeric_limits<float>::max();
+            for (const auto &move : result.moves)
+                if (move.type == EMoveType::Extrude)
+                    first_z = std::min(first_z, move.position.z());
+            std::map<int, size_t> support_moves, first_layer_support_moves;
+            for (const auto &move : result.moves) {
+                if (move.type != EMoveType::Extrude)
+                    continue;
+                if (move.extrusion_role != erSupportMaterial && move.extrusion_role != erSupportMaterialInterface &&
+                    move.extrusion_role != erSupportTransition)
+                    continue;
+                ++support_moves[int(move.extruder_id)];
+                if (std::abs(move.position.z() - first_z) < 1e-4f)
+                    ++first_layer_support_moves[int(move.extruder_id)];
+            }
+            REQUIRE(support_moves.count(1) == 1);
+            CHECK(support_moves.count(0) == 0);
+            REQUIRE(first_layer_support_moves.count(1) == 1);
+            CHECK(first_layer_support_moves.size() == 1);
         }
     }
 }
