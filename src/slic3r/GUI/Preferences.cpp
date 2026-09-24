@@ -1243,6 +1243,15 @@ wxBoxSizer *PreferencesDialog::create_item_checkbox(wxString title, wxWindow *pa
             if (m_autosave_interval_textinput != nullptr) { m_autosave_interval_textinput->Enable(pbool); }
         }
 
+        // Print-by-object advisory notices: take effect immediately rather than waiting for the
+        // next plate switch / slice attempt to re-evaluate.
+        if (param == "show_print_by_object_caution" && wxGetApp().plater()) {
+            if (checkbox->GetValue())
+                wxGetApp().plater()->sync_print_seq_warning_notification();
+            else
+                wxGetApp().plater()->get_notification_manager()->bbl_close_seqprintinfo_notification();
+        }
+
         // Ultra: the archive's folder and retention only mean anything while it is on.
         if (param == "ultra_gcode_archive") {
             bool pbool = checkbox->GetValue();
@@ -1995,6 +2004,8 @@ wxWindow* PreferencesDialog::create_ultra_page()
         _L("When opening a project made for another printer, switch back to the last printer you selected or sliced with, instead of the printer embedded in the file."), 50, "keep_printer_on_open");
     auto item_skip_mapping_warnings = create_item_checkbox(_L("Skip Settings Mapping Warnings"), page,
         _L("Don't show warnings about unrecognized or invalid settings replaced while loading project files; the defaults or automatic fixes are applied silently."), 50, "skip_settings_mapping_warnings");
+    auto item_print_by_object_caution = create_item_checkbox(_L("Show print-by-object caution notices"), page,
+        _L("Show the advisory notices suggesting auto-arrange, and the pre-slice caution, when Print sequence is set to \"By object\". Turn off here or via \"Do not show again\" on the notice itself."), 50, "show_print_by_object_caution");
 
     auto item_auto_drop = create_item_checkbox(_L("Drop imported models to the bed"), page,
         _L("When off, imported models keep the Z position stored in the file instead of being dropped onto the build plate."), 50, "auto_drop_on_import");
@@ -2075,6 +2086,7 @@ wxWindow* PreferencesDialog::create_ultra_page()
     item_autosave->Add(item_autosave_interval, 0, wxLEFT, 0);
     sizer_page->Add(item_keep_printer, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_skip_mapping_warnings, 0, wxTOP, FromDIP(3));
+    sizer_page->Add(item_print_by_object_caution, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_auto_drop, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_bottom_z, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_hide_other_plates, 0, wxTOP, FromDIP(3));

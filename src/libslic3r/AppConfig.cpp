@@ -452,6 +452,13 @@ void AppConfig::set_defaults()
         set_bool("hide_other_plates_on_move", false);
     }
 
+    // Print-by-object advisory notices (the yellow "suggest auto-arrange" warning and the
+    // pre-slice U1 caution). Both are informational, not slicing errors; default on, and
+    // each has its own "Do not show again" link that clears this same key.
+    if (get("show_print_by_object_caution").empty()) {
+        set_bool("show_print_by_object_caution", true);
+    }
+
     if (get("auto_shadow_system_presets").empty()) {
         set_bool("auto_shadow_system_presets", true);
     }

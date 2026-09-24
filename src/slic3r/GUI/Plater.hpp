@@ -671,9 +671,11 @@ public:
     /// effective print sequence is by-object. Re-evaluated on global/per-plate
     /// print-sequence edits and on plate switch.
     void sync_print_seq_warning_notification();
-    /// Single pre-slice check point: show a red, non-blocking error
+    /// Single pre-slice check point: show an advisory, non-blocking Warning-level
     /// notification when the effective print sequence is by-object on a
-    /// Snapmaker U1 (print head collision risk during tool switches).
+    /// Snapmaker U1 (print head collision risk during tool switches). This is
+    /// advisory only, not a slicing error - genuine clearance/collision violations
+    /// are reported separately via Print::sequential_print_clearance_valid.
     /// @param all_plates Scan every plate (slice-all) instead of only the current plate.
     void check_seq_print_caution(bool all_plates);
     /// Check and guard filament temp mixing before slicing all plates.

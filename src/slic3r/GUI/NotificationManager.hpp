@@ -153,6 +153,8 @@ enum class NotificationType
         FilamentIncompatibleMixed,
     // EdgeSlicer: the one-time "turn on crash reports?" offer after a crash (GUI_App::post_init).
     CrashReportOffer,
+    // EdgeSlicer: pre-slice print-by-object caution. Advisory (Warning level), not a slicing error.
+    PrintByObjectCaution,
 };
 
 class NotificationManager
@@ -334,8 +336,15 @@ public:
     void bbl_close_objectsinfo_notification();
 
     //BBS--Seq Print Info
+    // Both take a "Do not show again" hypertext link that clears AppConfig's
+    // "show_print_by_object_caution" key (Preferences > Ultra has the matching checkbox);
+    // when that key is already false the push is a no-op.
     void bbl_show_seqprintinfo_notification(const std::string &text);
     void bbl_close_seqprintinfo_notification();
+    // Advisory (non-error) caution shown before slicing by-object on printers that need it.
+    // Warning level, at most once per session unless closed and re-triggered, never blocks slicing.
+    void push_print_by_object_caution_notification(const std::string& text);
+    void close_print_by_object_caution_notification(const std::string& text);
 
 	//BBS--EmptyLayer
 	void bbl_show_slice_emptylayer_notification(const std::string &text, bool bOverride = true);
