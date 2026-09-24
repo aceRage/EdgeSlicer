@@ -954,6 +954,11 @@ public:
     bool is_support_agora{false};
     bool is_support_upgrade_kit{false};
     bool is_support_command_homing { false };// fun[32]
+    // fun[60]: the printer has a nozzle rack (H2C). BambuStudio sends get_auto_nozzle_mapping only
+    // to such printers (DevNozzleRack::IsSupported gates CheckErrorSyncNozzleMappingResultV0/V1).
+    bool is_support_nozzle_rack { false };
+    // is_support_nozzle_rack, or rack nozzles in the report (older reports without fun[60]).
+    bool has_nozzle_rack() const;
 
     bool installed_upgrade_kit{false};
     int  nozzle_max_temperature = -1;

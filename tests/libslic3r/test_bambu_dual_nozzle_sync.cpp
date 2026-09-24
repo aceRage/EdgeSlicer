@@ -360,3 +360,86 @@ TEST_CASE("Nozzle mapping request lists the rack and matches Bambu Studio's shap
     CHECK(fb[0]["pos"] == 1);
     CHECK(fb[1]["pos"] == 0);
 }
+
+TEST_CASE("A refused or unanswered nozzle mapping never blocks Send", "[DualNozzleSync][NozzleMapping]")
+{
+    using namespace Slic3r::BambuNozzleMapping;
+    // The H2D answered result=fail errno=1 to every query on 2026-09-23 (one black PLA on its own
+    // extruder); jobs sent without nozzle_mapping print fine, so a refusal is a warning only.
+    CHECK(reply_is_refusal("fail"));
+    CHECK(reply_is_refusal("failed"));
+    CHECK(reply_is_refusal("FAIL"));
+    CHECK_FALSE(reply_is_refusal("success"));
+    CHECK_FALSE(reply_is_refusal(""));
+
+    for (QueryState s : { QueryState::None, QueryState::Waiting, QueryState::Accepted, QueryState::Refused, QueryState::NoAnswer })
+        CHECK(send_gate(s).send_enabled);
+
+    CHECK(send_gate(QueryState::Refused).warn);
+    CHECK_FALSE(send_gate(QueryState::Refused).note);
+    CHECK(send_gate(QueryState::Waiting).note);
+    CHECK_FALSE(send_gate(QueryState::Waiting).warn);
+    CHECK_FALSE(send_gate(QueryState::NoAnswer).warn);
+    CHECK_FALSE(send_gate(QueryState::Accepted).warn);
+    CHECK_FALSE(send_gate(QueryState::None).warn);
+}
+
+TEST_CASE("Nozzle mapping request for the refused one-filament H2D job", "[DualNozzleSync][NozzleMapping]")
+{
+    using namespace Slic3r::BambuNozzleMapping;
+    // tests/h2d_sendrefuse.gcode.3mf: filament 2 (0-based 1), black PLA GFL01, sliced for the right
+    // extruder, AMS A2 (ams 0 slot 1); H2D reports two 0.4 Standard extruder nozzles.
+    RequestInput in;
+    in.calibration              = 1;
+    in.extrude_cali_manual_mode = 1;
+    in.filament_change_sequence = { 1 };
+    in.mapped                   = { { 1, "0", "1", 1, "GFL01", "161616FF" } };
+    in.filament_nozzles         = { { 1, 1, 1, "0.4", nvtStandard } };
+    DualNozzleSync::PrinterNozzle right, left;
+    right.pos = 0; right.diameter = "0.4"; right.normal = true; right.color = "00000000";
+    left.pos  = 1; left.diameter  = "0.4"; left.normal  = true; left.color  = "00000000";
+    in.printer_nozzles       = { left, right };
+    in.physical_extruder_map = { 1, 0 };
+    in.preset_diameters      = { 0.4, 0.4 };
+
+    // Golden: the request the send dialog logged for this plate (seq 20031, 2026-09-23 19:42),
+    // which has BambuStudio's V0 shape. The H2D refused it; BambuStudio never sends it to an H2D
+    // (no nozzle rack), see query_applies.
+    const auto golden = nlohmann::json::parse(R"({"print":{"ams_mapping":[65535,65535,1,65535,65535,65535,65535,65535,65535,65535,65535,65535,65535,65535,65535,65535,65535,65535,65535,65535,65535,65535,65535,65535,65535,65535,65535,65535,65535,65535,65535,65535,65535],"calibration":1,"command":"get_auto_nozzle_mapping","extrude_cali_manual_mode":1,"fila_info":[{"cate":"GFL01","color":"161616FF","direction":2,"group":1,"id":2,"nozzle_d":"0.40","nozzle_v":"Standard"}],"filament_seq":[-1,-1,0],"nozzle_info":[{"cate":"","color":"00000000","nozzle_d":"0.40","nozzle_v":"Standard","pos":0,"wear":0.0},{"cate":"","color":"00000000","nozzle_d":"0.40","nozzle_v":"Standard","pos":1,"wear":0.0}],"sequence_id":"0"}})");
+    const auto j = nlohmann::json::parse(build_v0_request(in));
+    CHECK(j == golden);
+}
+
+TEST_CASE("Only printers with a nozzle rack are asked for a nozzle mapping", "[DualNozzleSync][NozzleMapping]")
+{
+    using namespace Slic3r::BambuNozzleMapping;
+    // BambuStudio gates CheckErrorSyncNozzleMappingResultV0/V1 on DevNozzleRack::IsSupported()
+    // (fun bit 60): the H2C is asked, the H2D never is (it answers result=fail errno=1).
+    QueryConditions h2c;
+    h2c.sliced_send        = true;
+    h2c.dual_nozzle_preset = true;
+    h2c.printer_has_rack   = true;
+    h2c.right_nozzle_used  = true;
+    h2c.has_ams_mapping    = true;
+    CHECK(query_applies(h2c));
+
+    QueryConditions h2d = h2c;
+    h2d.printer_has_rack = false;
+    CHECK_FALSE(query_applies(h2d));
+
+    QueryConditions left_only = h2c;
+    left_only.right_nozzle_used = false;
+    CHECK_FALSE(query_applies(left_only));
+
+    QueryConditions reprint = h2c;
+    reprint.sliced_send = false;
+    CHECK_FALSE(query_applies(reprint));
+
+    QueryConditions no_ams = h2c;
+    no_ams.has_ams_mapping = false;
+    CHECK_FALSE(query_applies(no_ams));
+
+    QueryConditions single = h2c;
+    single.dual_nozzle_preset = false;
+    CHECK_FALSE(query_applies(single));
+}

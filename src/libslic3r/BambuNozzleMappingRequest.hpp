@@ -62,4 +62,42 @@ std::string diameter_str(const std::string &d);
 //    reported (Bambu :138-176). Without a report: the preset's two extruder nozzles.
 std::string build_v0_request(const RequestInput &in);
 
+// The send dialog's own get_auto_nozzle_mapping query is ADVISORY. The network agent asks the
+// printer again while sending and, on a refusal or no answer, sends the job without
+// "nozzle_mapping" - the pre-#114 behaviour, which prints fine. A refusal therefore only warns:
+// the H2D answered result=fail errno=1 to every query (2026-09-23), even for a one-filament job
+// on the extruder it was sliced for, and blocking on it made the printer unusable from here.
+// Only mismatches detected locally and with certainty (a tray on the wrong extruder's AMS) block.
+enum class QueryState {
+    None,     // no query for this job (single nozzle, right nozzle unused, not a sliced send)
+    Waiting,  // query published, no answer yet
+    Accepted, // printer returned a mapping
+    Refused,  // printer answered result=fail
+    NoAnswer, // no answer within the timeout, or the query could not be published
+};
+
+struct SendGate
+{
+    bool send_enabled{ true };
+    bool warn{ false }; // amber note under the AMS mapping
+    bool note{ false }; // grey (informational) note
+};
+
+// "fail" / "failed" / "FAIL" (BambuStudio CheckErrorSyncNozzleMappingResultV0).
+bool reply_is_refusal(const std::string &result);
+SendGate send_gate(QueryState state);
+
+// Whether a job is sent through the get_auto_nozzle_mapping handshake at all. BambuStudio asks
+// only printers with a nozzle rack (DevNozzleRack::IsSupported, fun bit 60 = H2C), only for sliced
+// sends, and only when the right extruder is used; the H2D (no rack) is never asked.
+struct QueryConditions
+{
+    bool sliced_send{ false };       // not a reprint from the printer's storage
+    bool dual_nozzle_preset{ false };
+    bool printer_has_rack{ false };
+    bool right_nozzle_used{ true };  // unknown grouping counts as used
+    bool has_ams_mapping{ false };
+};
+bool query_applies(const QueryConditions &c);
+
 }} // namespace Slic3r::BambuNozzleMapping
