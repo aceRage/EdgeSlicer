@@ -1143,6 +1143,26 @@ public:
     bool get_ultra_force_match_mode() const { return m_ultra_force_match_mode; }
     void set_ultra_force_match_mode(bool v) { m_ultra_force_match_mode = v; }
 
+    // The slice's grouping (ToolOrdering, dual-nozzle Bambu) rewrites the Print's filament_map with the
+    // map it computed. On a rack printer (H2C) that map can differ from the plate's manual map for
+    // filaments the plate does not use, and comparing the next apply()'s unchanged manual map with it
+    // invalidated the finished slice (Print plate on the H2C, 2026-09-23). True when the incoming map is
+    // the same input the current map was computed from, i.e. nothing changed and the sliced map stays.
+    static bool keep_sliced_filament_map(const std::vector<int> &incoming, const std::vector<int> &sliced_input,
+                                         const std::vector<int> &current)
+    {
+        return !sliced_input.empty() && incoming == sliced_input && incoming != current;
+    }
+    // The filament_map the settings asked for (the manual map of a hand-grouped plate), as opposed to
+    // config().filament_map, which holds the grouping's result once a slice has run. Falls back to the
+    // config value for a Print that was never applied a map.
+    const std::vector<int>& filament_map_input() const
+    {
+        return m_filament_map_input.size() == m_config.filament_map.values.size() ? m_filament_map_input : m_config.filament_map.values;
+    }
+    // Print config keys that differed in the last apply(), empty when nothing did.
+    const std::vector<std::string>& last_apply_changed_keys() const { return m_last_apply_changed_keys; }
+
     // methods for handling state
     bool                is_step_done(PrintStep step) const { return Inherited::is_step_done(step); }
     // Returns true if an object step is done on all objects and there's at least one object.
@@ -1339,6 +1359,12 @@ private:
     // Ultra (Phase 10): AMS-aware grouping inputs kept out of the print config (see accessors).
     std::vector<std::string>                              m_ultra_ams_count;
     bool                                                  m_ultra_force_match_mode = false;
+    // filament_map as the config last handed it to apply(): the grouping's INPUT. A slice on a
+    // dual-nozzle Bambu printer overwrites m_config.filament_map with the map it computed (ToolOrdering),
+    // so apply() compares an incoming map with this, not with that output (see keep_sliced_filament_map).
+    std::vector<int>                                      m_filament_map_input;
+    // Print config keys that differed in the last apply() (diagnostics for the GUI).
+    std::vector<std::string>                              m_last_apply_changed_keys;
 
     //SoftFever
     // Set by the GUI (BackgroundSlicingProcess) and the CLI before export. It must still have a defined

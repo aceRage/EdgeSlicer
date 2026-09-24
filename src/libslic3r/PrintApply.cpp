@@ -1455,11 +1455,33 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ", has_scarf_joint_seam:" << has_scarf_joint_seam;
     }
 
+    // Ultra (dual-nozzle): filament_map is the grouping's input, but the slice overwrites the Print's copy
+    // (m_config and m_full_print_config) with the map the grouping computed. Compare the incoming map with
+    // the input the current result was sliced from: unchanged input keeps the computed map, so a re-apply
+    // of the same settings (the Print button runs one) does not throw the finished slice away.
+    if (auto *incoming_map = new_full_config.option<ConfigOptionInts>("filament_map")) {
+        if (keep_sliced_filament_map(incoming_map->values, m_filament_map_input, m_config.filament_map.values))
+            incoming_map->values = m_config.filament_map.values;
+        else
+            m_filament_map_input = incoming_map->values;
+    }
+
     // Find modified keys of the various configs. Resolve overrides extruder retract values by filament profiles.
     DynamicPrintConfig   filament_overrides;
     //BBS: add plate index
     t_config_option_keys print_diff       = print_config_diffs(m_config, new_full_config, filament_overrides, this->m_plate_index);
     t_config_option_keys full_config_diff = full_print_config_diffs(m_full_print_config, new_full_config, this->m_plate_index);
+    m_last_apply_changed_keys             = print_diff;
+    if (!print_diff.empty() && this->is_step_done(psGCodeExport)) {
+        // A finished slice is about to be thrown away: say by what, so the next "why did my slice
+        // reset" is answered by the log (warning level survives the default log filter).
+        std::string keys;
+        for (size_t i = 0; i < print_diff.size() && i < 12; ++i)
+            keys += (i ? ", " : "") + print_diff[i];
+        if (print_diff.size() > 12)
+            keys += ", ...";
+        BOOST_LOG_TRIVIAL(warning) << "Print::apply: plate " << this->m_plate_index + 1 << " sliced result invalidated by " << keys;
+    }
     // Collect changes to object and region configs.
     t_config_option_keys object_diff      = m_default_object_config.diff(new_full_config);
     t_config_option_keys region_diff      = m_default_region_config.diff(new_full_config);

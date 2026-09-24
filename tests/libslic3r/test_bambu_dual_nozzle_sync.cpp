@@ -5,6 +5,9 @@
 
 #include "nlohmann/json.hpp"
 
+#include <algorithm>
+#include <utility>
+
 using namespace Slic3r;
 using namespace Slic3r::DualNozzleSync;
 
@@ -140,6 +143,35 @@ TEST_CASE("State fingerprint follows what matters and ignores report noise", "[D
     // No report: no fingerprint.
     PrinterState off;
     CHECK(state_fingerprint(off).empty());
+}
+
+TEST_CASE("H2C nozzles moving between the hotend and the rack do not invalidate a slice", "[DualNozzleSync]")
+{
+    // The H2C picks rack nozzles up during a print and parks the one it held: the report then lists
+    // the same nozzles at other positions, in another order.
+    PrinterState a = h2c_state();
+    a.nozzles[0].volume = nvtHighFlow; // the right hotend holds a high flow nozzle
+    PrinterState b = a;
+    std::swap(b.nozzles[0].pos, b.nozzles[4].pos); // ...which is now parked in rack slot 2
+    std::reverse(b.nozzles.begin(), b.nozzles.end());
+    CHECK(state_fingerprint(a) == state_fingerprint(b));
+    CHECK_FALSE(slice_invalidated_by(a.dev_id, state_fingerprint(a), b));
+    CHECK(extruder_nozzle_stats_strings(a, 2, { 0.4, 0.4 }) == extruder_nozzle_stats_strings(b, 2, { 0.4, 0.4 }));
+
+    // A nozzle of another flow type or diameter is a real change.
+    PrinterState c = a;
+    c.nozzles[5].volume = nvtHighFlow;
+    CHECK(slice_invalidated_by(a.dev_id, state_fingerprint(a), c));
+    PrinterState d = a;
+    d.nozzles[6].diameter = "0.6";
+    CHECK(slice_invalidated_by(a.dev_id, state_fingerprint(a), d));
+    // Moving a nozzle to the other extruder is too (H2D: the two hotends swap flow types).
+    const PrinterState h2d = h2d_state();
+    PrinterState       h2d_swapped = h2d;
+    std::swap(h2d_swapped.nozzles[0].volume, h2d_swapped.nozzles[1].volume);
+    CHECK(slice_invalidated_by(h2d.dev_id, state_fingerprint(h2d), h2d_swapped));
+    // An unchanged H2D report is not.
+    CHECK_FALSE(slice_invalidated_by(h2d.dev_id, state_fingerprint(h2d), h2d_state()));
 }
 
 TEST_CASE("Manual grouping 10 left, 4 and 8 right gives Bambu's filament_maps", "[DualNozzleSync]")
