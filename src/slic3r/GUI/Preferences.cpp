@@ -3,6 +3,7 @@
 #include "GUI_App.hpp"
 #include "MainFrame.hpp"
 #include "Plater.hpp"
+#include "NotificationManager.hpp"
 #include "MsgDialog.hpp"
 #include "PresetMirror.hpp"
 #include "I18N.hpp"
