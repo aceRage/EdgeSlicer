@@ -384,6 +384,27 @@ static void set_ec_retraction_placeholders(PlaceholderParser& pp, const PrintCon
     pp.set("retraction_distance_when_ec", new ConfigOptionFloat(distance));
 }
 
+// BBS (H2C rack): the change_filament_gcode scalar filament_retract_length_nc (M620.11 O1 T<len>) is
+// the OUTGOING filament's per-filament value - BambuStudio GCode.cpp:934 / :8170 read
+// filament_retract_length_nc.get_at(old_filament_id). It tells the firmware how far to pull the
+// filament back inside the hotend that is about to be parked, while that hotend is still on the
+// toolhead (a racked nozzle cannot be heated or retracted). A negative id (no filament loaded yet)
+// reads the first entry, as upstream's get_at(size_t(-1)) does. A nil entry falls back to the
+// option default (10 mm): upstream resolves a nil filament override to the printer-side value,
+// which for this key is its default; the raw nil would land "Tnan" on the wire.
+static double outgoing_filament_retract_length_nc(const PrintConfig& config, int old_filament_id)
+{
+    const ConfigOptionFloatsNullable& opt = config.filament_retract_length_nc;
+    const double fallback = static_cast<const ConfigOptionFloatsNullable*>(
+                                print_config_def.get("filament_retract_length_nc")->default_value.get())->values.front();
+    if (opt.values.empty())
+        return fallback;
+    const size_t i = (old_filament_id < 0 || size_t(old_filament_id) >= opt.values.size()) ? 0 : size_t(old_filament_id);
+    if (opt.is_nil(i) || std::isnan(opt.values[i]))
+        return fallback;
+    return opt.values[i];
+}
+
 // Return true if tch_prefix is found in custom_gcode
 static bool custom_gcode_changes_tool(const std::string& custom_gcode, const std::string& tch_prefix, unsigned next_extruder)
 {
@@ -805,6 +826,9 @@ std::string WipeTowerIntegration::append_tcr(GCode& gcodegen, const WipeTower::T
             config.set_key_value("fan_speed", new ConfigOptionInt((int) 0));
             config.set_key_value("old_retract_length", new ConfigOptionFloat(old_retract_length));
             config.set_key_value("new_retract_length", new ConfigOptionFloat(new_retract_length));
+            // BBS (H2C rack): BambuStudio GCode.cpp:934/976 - the outgoing filament's hotend-change retraction.
+            config.set_key_value("filament_retract_length_nc",
+                                 new ConfigOptionFloat(outgoing_filament_retract_length_nc(full_config, previous_extruder_id)));
             config.set_key_value("old_retract_length_toolchange", new ConfigOptionFloat(old_retract_length_toolchange));
             config.set_key_value("new_retract_length_toolchange", new ConfigOptionFloat(new_retract_length_toolchange));
             config.set_key_value("old_filament_temp", new ConfigOptionInt(old_filament_temp));
@@ -3374,11 +3398,12 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
             this->placeholder_parser().set("close_additional_fan_first_x_layers",new ConfigOptionInts(std::vector<int>(nf, 0)));
             this->placeholder_parser().set("additional_fan_full_speed_layer",    new ConfigOptionInts(std::vector<int>(nf, 1)));
             this->placeholder_parser().set("first_x_layer_fan_speed",            new ConfigOptionFloats(std::vector<double>(nf, 0.)));
-            // Ultra: per-filament nozzle-change (_nc) vars + wipe-tower center coords used via the
-            // [opt_key] placeholder syntax in change_filament (single-mapped: no real nozzle change,
-            // so 0 is inert; wipe_tower_center_pos_valid=false gates the center coords).
-            this->placeholder_parser().set("filament_pre_cooling_temperature_nc", new ConfigOptionInts(std::vector<int>(nf, 0)));
-            this->placeholder_parser().set("filament_retract_length_nc",          new ConfigOptionFloats(std::vector<double>(nf, 0.)));
+            // Ultra: wipe-tower center coords used via the [opt_key] placeholder syntax in
+            // change_filament (wipe_tower_center_pos_valid=false gates them).
+            // The per-filament hotend-change (_nc) vars are NOT shimmed any more: the H2C template's
+            // M620.15 P[filament_pre_cooling_temperature_nc[next_filament_id]] reads the real config
+            // option, and M620.11 O1 T[filament_retract_length_nc] gets the outgoing filament's value
+            // per toolchange (outgoing_filament_retract_length_nc), as in BambuStudio.
             this->placeholder_parser().set("wipe_tower_center_pos_x",             new ConfigOptionFloat(0.));
             this->placeholder_parser().set("wipe_tower_center_pos_y",             new ConfigOptionFloat(0.));
         }
@@ -7907,9 +7932,56 @@ void GCode::apply_print_config(const PrintConfig& print_config)
 #endif
 }
 
+// Ultra (dual-nozzle header): the "; filament_nozzle_map" / "; filament_volume_map" CONFIG_BLOCK lines
+// for a plate the filament->nozzle grouping ran on, taken from that grouping result - the other half of
+// BambuStudio's Print::update_filament_maps_to_config (Print.cpp:2840, static-map branch called from
+// ToolOrdering.cpp:2804): the logical nozzle id per filament (= slice_info <filament group_id>) and the
+// volume type of the nozzle each USED filament landed on (unused filaments keep their config value).
+// ToolOrdering already writes filament_map; without this the other two lines printed the stale project
+// values (e.g. filament_nozzle_map 1,0,0,... while filament_map put every filament on the right rack).
+//
+// Derived here, at header time, rather than written into the Print's configs from ToolOrdering: the fork's
+// Print::apply has no BambuStudio-style mask for these keys and the GUI does not write them back to the
+// project (it does for filament_map), so a config write would make every later apply() see a diff -
+// a full re-slice, or an export-only re-run that re-applied the stale values to the header. Nothing in
+// G-code generation reads either key, so the header is the only consumer to fix. Covers every grouping
+// mode (auto, match, manual): they all store their result on the Print the same way.
+// Gated like the grouping itself (ToolOrdering::reorder_extruders_for_minimum_flush_volume): a machine
+// with distinct extruder variants and no sequential print, so a result left on the Print by an earlier
+// slice of another printer or plate arrangement is never used.
+static bool grouping_header_maps(const Print& print, std::vector<int>& nozzle_map, std::vector<int>& volume_map)
+{
+    auto group_result = print.get_layered_nozzle_group_result();
+    if (!group_result || group_result->is_support_dynamic_nozzle_map())
+        return false;
+    int        extruder_count = 0;
+    const bool is_sequential  = print.config().print_sequence == PrintSequence::ByObject && print.objects().size() > 1;
+    if (is_sequential || !const_cast<DynamicPrintConfig&>(print.full_print_config()).support_different_extruders(extruder_count))
+        return false;
+
+    const DynamicPrintConfig& cfg = print.full_print_config();
+    const auto*               fm  = cfg.option<ConfigOptionInts>("filament_map");
+    const size_t              num_filaments = fm ? fm->values.size() : 0;
+    nozzle_map = group_result->get_nozzle_map();
+    if (nozzle_map.empty() || num_filaments == 0)
+        return false;
+
+    const auto* vm_opt = cfg.option<ConfigOptionInts>("filament_volume_map");
+    volume_map         = vm_opt ? vm_opt->values : std::vector<int>();
+    volume_map.resize(num_filaments, int(NozzleVolumeType::nvtStandard));
+    const std::vector<int> grouped_volumes = group_result->get_volume_map();
+    for (unsigned int f : group_result->get_used_filaments())
+        if (f < volume_map.size() && f < grouped_volumes.size() && grouped_volumes[f] >= 0 &&
+            grouped_volumes[f] <= int(NozzleVolumeType::nvtMaxNozzleVolumeType))
+            volume_map[f] = grouped_volumes[f];
+    return true;
+}
+
 void GCode::append_full_config(const Print& print, std::string& str)
 {
     const DynamicPrintConfig& cfg = print.full_print_config();
+    std::vector<int> grouped_nozzle_map, grouped_volume_map;
+    const bool       use_grouped_maps = grouping_header_maps(print, grouped_nozzle_map, grouped_volume_map);
     // Sorted list of config keys, which shall not be stored into the G-code. Initializer list.
     static const std::set<std::string_view> banned_keys({"compatible_printers"sv, "compatible_prints"sv, "print_host"sv,
                                                          "print_host_webui"sv, "printhost_apikey"sv, "printhost_cafile"sv,
@@ -7924,6 +7996,10 @@ void GCode::append_full_config(const Print& print, std::string& str)
             }
             if (key == "extruder_colour")
                 ss << "; " << key << " = " << cfg.opt_serialize("filament_colour") << "\n";
+            else if (use_grouped_maps && key == "filament_nozzle_map")
+                ss << "; " << key << " = " << ConfigOptionInts(grouped_nozzle_map).serialize() << "\n";
+            else if (use_grouped_maps && key == "filament_volume_map")
+                ss << "; " << key << " = " << ConfigOptionInts(grouped_volume_map).serialize() << "\n";
             else
                 ss << "; " << key << " = " << cfg.opt_serialize(key) << "\n";
         }
@@ -10192,6 +10268,9 @@ std::string GCode::set_extruder(unsigned int extruder_id, double print_z, bool b
     dyn_config.set_key_value("fan_speed", new ConfigOptionInt((int) 0));
     dyn_config.set_key_value("old_retract_length", new ConfigOptionFloat(old_retract_length));
     dyn_config.set_key_value("new_retract_length", new ConfigOptionFloat(new_retract_length));
+    // BBS (H2C rack): BambuStudio GCode.cpp:8170/8208/8247 - outgoing filament's value, 0 with none loaded.
+    dyn_config.set_key_value("filament_retract_length_nc",
+                             new ConfigOptionFloat(previous_extruder_id >= 0 ? outgoing_filament_retract_length_nc(m_config, previous_extruder_id) : 0.));
     dyn_config.set_key_value("old_retract_length_toolchange", new ConfigOptionFloat(old_retract_length_toolchange));
     dyn_config.set_key_value("new_retract_length_toolchange", new ConfigOptionFloat(new_retract_length_toolchange));
     dyn_config.set_key_value("old_filament_temp", new ConfigOptionInt(old_filament_temp));

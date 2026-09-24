@@ -1412,17 +1412,27 @@ std::function<bool(int, std::vector<int>&)> create_custom_seq_function(
     };
 }
 
+// nozzle_volume_type is one value per extruder in Bambu Studio's profiles, but this fork's configs can
+// carry a single value for a two-extruder machine (the H2D/H2C CONFIG_BLOCK reads
+// "nozzle_volume_type = Standard"). Indexing values[1] then read past the end of the vector, and the
+// garbage landed in the grouping's nozzle list (seen as filament_volume_map 1700932980 in a header).
+// A missing entry is a Standard nozzle, as GCode.cpp's per-nozzle shim already assumes.
+static NozzleVolumeType nozzle_volume_type_at(const PrintConfig& print_config, size_t idx)
+{
+    const auto& values = print_config.nozzle_volume_type.values;
+    return idx < values.size() ? NozzleVolumeType(values[idx]) : NozzleVolumeType::nvtStandard;
+}
+
 std::vector<MultiNozzleUtils::NozzleGroupInfo> build_nozzle_groups(const PrintConfig& print_config, size_t extruder_nums)
 {
     std::vector<MultiNozzleUtils::NozzleGroupInfo> nozzle_groups;
     auto extruder_nozzle_counts = get_extruder_nozzle_stats(print_config.extruder_nozzle_stats.values);
-    auto nozzle_volume_types = print_config.nozzle_volume_type.values;
     for (size_t idx = 0; idx < extruder_nums; ++idx) {
         if (idx >= extruder_nozzle_counts.size() || extruder_nozzle_counts[idx].empty()) {
-            nozzle_groups.emplace_back(format_diameter_to_str(print_config.nozzle_diameter.values[idx]), NozzleVolumeType(print_config.nozzle_volume_type.values[idx]), idx,
+            nozzle_groups.emplace_back(format_diameter_to_str(print_config.nozzle_diameter.values[idx]), nozzle_volume_type_at(print_config, idx), idx,
                                        print_config.extruder_max_nozzle_count.values[idx]);
         } else {
-            NozzleVolumeType type = NozzleVolumeType(nozzle_volume_types[idx]);
+            NozzleVolumeType type = nozzle_volume_type_at(print_config, idx);
             if (type == nvtHybrid) {
                 for (auto [volume_type, count] : extruder_nozzle_counts[idx])
                     nozzle_groups.emplace_back(format_diameter_to_str(print_config.nozzle_diameter.values[idx]), volume_type, idx, count);
@@ -1442,7 +1452,7 @@ std::vector<MultiNozzleUtils::NozzleInfo> build_default_nozzle_list(const PrintC
         tmp.diameter = format_diameter_to_str(print_config.nozzle_diameter.values[idx]);
         tmp.group_id = idx;
         tmp.extruder_id = idx;
-        tmp.volume_type = NozzleVolumeType(print_config.nozzle_volume_type.values[idx]);
+        tmp.volume_type = nozzle_volume_type_at(print_config, idx);
         nozzle_list.emplace_back(std::move(tmp));
     }
     return nozzle_list;
@@ -1574,9 +1584,15 @@ FilamentGroupContext build_filament_group_context(
     context.group_info.ignore_ext_filament = ignore_ext_filament;
     context.group_info.has_filament_switcher = print_config.has_filament_switcher.value;
 
-    if (mode == FilamentMapMode::fmmManual)
+    if (mode == FilamentMapMode::fmmManual) {
         context.group_info.filament_volume_map = print_config.filament_volume_map.values;
-    else
+        // FilamentGroup::rebuild_nozzle_unprintables indexes this with every used filament. Bambu Studio's
+        // GUI keeps the project value sized to the filament count; this fork has no UI for it, so a project
+        // usually carries the one-entry default and the manual grouping read past its end (undefined
+        // behaviour: the same plate grouped differently from slice to slice). A filament without an entry
+        // expects no particular nozzle volume type - Hybrid, as every automatic mode uses below.
+        context.group_info.filament_volume_map.resize(filament_nums, (int)(NozzleVolumeType::nvtHybrid));
+    } else
         context.group_info.filament_volume_map = std::vector<int>(filament_nums, (int)(NozzleVolumeType::nvtHybrid));
 
     context.nozzle_info.nozzle_list = build_nozzle_list(nozzle_groups);

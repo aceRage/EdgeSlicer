@@ -2502,6 +2502,22 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionInts { 0 });
 
+    // BBS (H2C rack): BambuStudio PrintConfig.cpp:4994. How far the firmware pulls the filament back
+    // inside the OUTGOING hotend before a hotend change (M620.11 O1 T<len> in the H2C
+    // change_filament_gcode). A racked nozzle has no electrical contact, so this has to happen while
+    // it is still on the toolhead. 282 BBL filament profiles carry the key (H2C: 14-18); without this
+    // def the loader dropped it and the template got a hard-coded 0.
+    def = this->add("filament_retract_length_nc", coFloats);
+    def->label = L("Length when change hotend");
+    def->tooltip = L("When this retraction value is modified, it will be used as the amount of filament retracted "
+                     "inside the hotend before changing hotends.");
+    def->sidetext = "mm";	// milimeters, don't need translation
+    def->mode = comDevelop;
+    def->nullable = true;
+    def->min = 0;
+    def->max = 18;
+    def->set_default_value(new ConfigOptionFloatsNullable { 10. });
+
     def = this->add("machine_load_filament_time", coFloat);
     def->label = L("Filament load time");
     def->tooltip = L("Time to load new filament when switch filament. It's usually applicable for single-extruder multi-material machines. "
@@ -8068,7 +8084,9 @@ void PrintConfigDef::init_filament_option_keys()
         "default_filament_profile","retraction_distances_when_cut","long_retractions_when_cut",
         // BBS: per-filament extruder-change long retraction. Listed here so set_num_filaments()
         // resizes the vectors to the filament count (defaults fill any filament that has no value).
-        "long_retractions_when_ec","retraction_distances_when_ec"/*,"filament_seam_gap"*/
+        "long_retractions_when_ec","retraction_distances_when_ec",
+        // BBS (H2C rack): per-filament hotend-change retraction, sized with the filament count too.
+        "filament_retract_length_nc"/*,"filament_seam_gap"*/
     };
 
     m_filament_retract_keys = {

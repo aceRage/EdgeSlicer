@@ -722,7 +722,15 @@ void GCodeProcessor::apply_config(const PrintConfig& config)
     // sanity check
     if(m_preheat_steps < 1)
         m_preheat_steps = 1;
-    m_result.backtrace_enabled = m_preheat_time > 0 && (m_is_XL_printer || (!m_single_extruder_multi_material && extruders_count > 1));
+    // Ultra: never on a Bambu Lab printer. The fork's BBL dual-nozzle base profile
+    // (fdm_bbl_3dp_002_common: H2D/H2C/X2D) keeps single_extruder_multi_material = 0, which
+    // other fork code reads as "has several toolheads", so it would enable this tool-changer
+    // preheat. It writes M104 S<t> T<filament index>, but Bambu firmware reads M104 T as a
+    // PHYSICAL extruder (BambuStudio writes T<physical_extruder_map[e]>): filament 1/2 heated
+    // the wrong hotend - on an H2C possibly a nozzle about to be parked. Bambu Studio never
+    // emits these lines. Every other tool changer (U1, Prusa XL, ...) keeps them.
+    m_result.backtrace_enabled = m_preheat_time > 0 && !s_IsBBLPrinter &&
+                                 (m_is_XL_printer || (!m_single_extruder_multi_material && extruders_count > 1));
 
     m_extruder_offsets.resize(extruders_count);
     m_extruder_colors.resize(extruders_count);
