@@ -145,4 +145,23 @@ std::string build_v0_request(const RequestInput &in)
     return command_jj.dump();
 }
 
+bool reply_is_refusal(const std::string &result)
+{
+    return result == "fail" || result == "failed" || result == "FAIL" || result == "FAILED";
+}
+
+SendGate send_gate(QueryState state)
+{
+    SendGate g;
+    g.send_enabled = true; // never blocks: see the QueryState comment
+    g.warn         = state == QueryState::Refused;
+    g.note         = state == QueryState::Waiting;
+    return g;
+}
+
+bool query_applies(const QueryConditions &c)
+{
+    return c.sliced_send && c.dual_nozzle_preset && c.printer_has_rack && c.right_nozzle_used && c.has_ams_mapping;
+}
+
 }} // namespace Slic3r::BambuNozzleMapping

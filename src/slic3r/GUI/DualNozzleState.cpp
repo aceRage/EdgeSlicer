@@ -4,6 +4,8 @@
 #include "PartPlate.hpp"
 #include "DeviceManager.hpp"
 #include "DualNozzleSliceDialog.hpp"
+#include "GLToolbar.hpp"
+#include "Event.hpp"
 #include "I18N.hpp"
 #include "MainFrame.hpp"
 #include "NotificationManager.hpp"
@@ -216,6 +218,21 @@ static std::string join_map(const std::vector<int> &m)
 static int s_requested_plate = -1;
 
 void request_arrangement_dialog(int plate_index) { s_requested_plate = plate_index; }
+
+void open_arrangement_and_reslice(Plater *plater, int plate_index)
+{
+    if (!plater)
+        return;
+    PartPlateList &list = plater->get_partplate_list();
+    if (plate_index < 0 || plate_index >= list.get_plate_count())
+        return;
+    if (list.get_curr_plate_index() != plate_index)
+        plater->select_plate(plate_index);
+    request_arrangement_dialog(plate_index);
+    plater->exit_gizmo();
+    plater->update(true, true);
+    wxPostEvent(plater, SimpleEvent(EVT_GLTOOLBAR_SLICE_PLATE));
+}
 
 bool confirm_before_slice(Plater *plater, bool slice_all)
 {

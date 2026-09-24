@@ -443,6 +443,13 @@ SelectMachineDialog::SelectMachineDialog(Plater *plater)
     m_statictext_ams_msg->SetFont(::Label::Body_13);
     m_statictext_ams_msg->Hide();
 
+    // Two-extruder Bambu jobs: back to the pre-slice filament arrangement (also in Slice > menu).
+    m_link_change_arrangement = new wxHyperlinkCtrl(this, wxID_ANY, _L("Change filament arrangement..."), "");
+    m_link_change_arrangement->SetFont(::Label::Body_13);
+    m_link_change_arrangement->SetToolTip(_L("Close this dialog, choose again which extruder and AMS slot each filament uses, and re-slice the plate."));
+    m_link_change_arrangement->Bind(wxEVT_HYPERLINK, [this](wxHyperlinkEvent&) { on_change_arrangement(); });
+    m_link_change_arrangement->Hide();
+
 
 
     /*options*/
@@ -644,6 +651,7 @@ SelectMachineDialog::SelectMachineDialog(Plater *plater)
     m_sizer_main->Add(m_sizer_filament_2extruder, 0, wxALIGN_CENTER|wxLEFT|wxRIGHT, FromDIP(15));
     m_sizer_main->Add(0, 0, 0, wxEXPAND | wxTOP, FromDIP(6));
     m_sizer_main->Add(m_statictext_ams_msg, 0, wxLEFT, 0);
+    m_sizer_main->Add(m_link_change_arrangement, 0, wxALIGN_CENTER_HORIZONTAL | wxTOP, FromDIP(4));
     m_sizer_main->Add(0, 0, 0, wxTOP, FromDIP(16));
     m_sizer_main->Add(sizer_split_options, 1, wxEXPAND|wxLEFT|wxRIGHT, FromDIP(15));
     m_sizer_main->Add(m_sizer_options, 0, wxLEFT|wxRIGHT, FromDIP(15));
@@ -1434,9 +1442,9 @@ bool SelectMachineDialog::build_nozzles_info(std::string& nozzles_info)
  *
  * Before a dual-nozzle send, upstream asks the printer to build the filament->nozzle
  * mapping table and echoes the printer's "mapping" answer back into the project_file payload
- * as "nozzle_mapping". H2D firmware requires this binding (H2C tolerates its absence); without
- * it the screen reprint binds every filament to the left nozzle and the right nozzle keeps the
- * left one's z-offset.
+ * as "nozzle_mapping". Upstream does this only for printers with a nozzle rack (H2C, fun bit 60);
+ * an H2D is never asked and refuses the query (result=fail errno=1) when it is, so it is skipped
+ * for printers without a rack (see the gate below).
  *
  * Version selection mirrors upstream: V1 (logical nozzle groups, {"version":1,...,"group_info"})
  * only when the sliced plate's nozzle group result reports dynamic-nozzle-map support (filament
@@ -1456,10 +1464,6 @@ bool SelectMachineDialog::build_nozzle_mapping_request(std::string& request)
 {
     request.clear();
 
-    // The request is built from live slicing data; a reprint from the sdcard has none.
-    if (m_print_type != PrintFromType::FROM_NORMAL)
-        return false;
-
     PresetBundle* preset_bundle = wxGetApp().preset_bundle;
     if (!preset_bundle || !m_plater)
         return false;
@@ -1468,8 +1472,14 @@ bool SelectMachineDialog::build_nozzle_mapping_request(std::string& request)
     // whose edited preset declares two nozzle diameters is treated as nozzle-aware, which is
     // exactly the condition under which the payload carries nozzles_info/nozzleId.
     auto opt_nozzle_diameters = preset_bundle->printers.get_edited_preset().config.option<ConfigOptionFloats>("nozzle_diameter");
-    if (!opt_nozzle_diameters || opt_nozzle_diameters->size() != 2)
-        return false;
+
+    // BambuStudio asks only printers with a nozzle rack (H2C): CheckErrorSyncNozzleMappingResultV0/V1
+    // and the flow-cali / PA toggles all return early on !GetNozzleRack()->IsSupported() (fun bit 60),
+    // so an H2D never receives get_auto_nozzle_mapping and its jobs carry no nozzle_mapping. The H2D
+    // answers the query with result=fail errno=1 (2026-09-23, every job); without the query the
+    // network agent sends exactly what BambuStudio sends it.
+    DeviceManager* dev = wxGetApp().getDeviceManager();
+    MachineObject* obj = dev ? dev->get_my_machine(m_printer_last_select) : nullptr;
 
     // Fork convention (matches nozzles_info / filament_map): nozzle index 0 = left, 1 = right.
     const int kLogicLeftExtruder = 0;
@@ -1483,13 +1493,16 @@ bool SelectMachineDialog::build_nozzle_mapping_request(std::string& request)
     auto   group_result = print ? print->get_nozzle_group_result() : nullptr;
     GCodeProcessorResult* gcode_result = m_plater->get_partplate_list().get_current_slice_result();
 
+    BambuNozzleMapping::QueryConditions qc;
+    // The request is built from live slicing data; a reprint from the sdcard has none.
+    qc.sliced_send        = m_print_type == PrintFromType::FROM_NORMAL;
+    qc.dual_nozzle_preset = opt_nozzle_diameters && opt_nozzle_diameters->size() == 2;
+    qc.printer_has_rack   = obj && obj->has_nozzle_rack();
     // Upstream skips the query when the right nozzle is never used: the mapping is trivial.
-    if (group_result &&
-        group_result->get_used_nozzles_in_extruder(kLogicRightExtruder).empty())
-        return false;
-
+    qc.right_nozzle_used  = !group_result || !group_result->get_used_nozzles_in_extruder(kLogicRightExtruder).empty();
     // Without the AMS mapping there is no ams_mapping table to send.
-    if (m_ams_mapping_result.empty())
+    qc.has_ams_mapping    = !m_ams_mapping_result.empty();
+    if (!BambuNozzleMapping::query_applies(qc))
         return false;
 
     json command_jj;
@@ -1552,9 +1565,8 @@ bool SelectMachineDialog::build_nozzle_mapping_request(std::string& request)
     if (auto* nvt = preset_bundle->project_config.option<ConfigOptionEnumsGeneric>("nozzle_volume_type"))
         for (int v : nvt->values)
             in.preset_volumes.push_back(NozzleVolumeType(v));
-    if (DeviceManager* dev = wxGetApp().getDeviceManager())
-        if (MachineObject* obj = dev->get_my_machine(m_printer_last_select))
-            in.printer_nozzles = DualNozzle::printer_state(obj).nozzles;
+    if (obj)
+        in.printer_nozzles = DualNozzle::printer_state(obj).nozzles;
     (void) kLogicLeftExtruder;
 
     request = BambuNozzleMapping::build_v0_request(in);
@@ -1583,12 +1595,12 @@ int SelectMachineDialog::check_nozzle_mapping(MachineObject* obj_, wxString& rea
     }
     const MachineObject::NozzleMappingReply& reply = obj_->m_nozzle_mapping_reply;
     if (reply.valid && reply.sequence_id == m_nm_seq) {
-        // Only a refusal blocks, as in BambuStudio (CheckErrorSyncNozzleMappingResultV0: "failed" /
-        // "fail" -> RackNozzleMappingError, return false; an empty table is reported but not blocking).
-        const bool ok = !(reply.result == "fail" || reply.result == "failed" || reply.result == "FAIL");
+        // BambuStudio blocks on a refusal (CheckErrorSyncNozzleMappingResultV0: "failed" / "fail" ->
+        // RackNozzleMappingError). Here it is reported as a warning only (update_show_status).
+        const bool ok = !BambuNozzleMapping::reply_is_refusal(reply.result);
         if (!m_nm_logged_result) {
             BOOST_LOG_TRIVIAL(warning) << "[DualNozzle] nozzle mapping answer: " << (ok ? "accepted" : "refused") << " result=" << reply.result << " mapping=" << reply.mapping
-                                       << " reason=" << reply.reason << " errno=" << reply.err_no;
+                                       << " reason=" << reply.reason << " errno=" << reply.err_no << (ok ? "" : "; warning only, Send stays enabled");
             m_nm_logged_result = true;
         }
         if (ok)
@@ -1609,6 +1621,51 @@ int SelectMachineDialog::check_nozzle_mapping(MachineObject* obj_, wxString& rea
         return 3;
     }
     return 1;
+}
+
+void SelectMachineDialog::show_nozzle_mapping_note(PrintDialogStatus status)
+{
+    // update_print_status_msg only substitutes the note while show_status runs.
+    m_nm_note_active = false;
+    if (!m_link_change_arrangement)
+        return;
+    bool show = false;
+    if (m_print_type == PrintFromType::FROM_NORMAL && m_plater && DualNozzle::preset_is_dual_nozzle_bambu()) {
+        switch (status) {
+        case PrintDialogStatus::PrintStatusDisableAms:
+        case PrintDialogStatus::PrintStatusAmsMappingSuccess:
+        case PrintDialogStatus::PrintStatusAmsMappingInvalid:
+        case PrintDialogStatus::PrintStatusAmsMappingU0Invalid:
+        case PrintDialogStatus::PrintStatusAmsMappingValid:
+        case PrintDialogStatus::PrintStatusAmsMappingByOrder:
+        case PrintDialogStatus::PrintStatusAmsMappingWrongExtruder:
+        case PrintDialogStatus::PrintStatusTimelapseWarning:
+        case PrintDialogStatus::PrintStatusTimelapseNoSdcard:
+        case PrintDialogStatus::PrintStatusNozzleMappingWaiting:
+        case PrintDialogStatus::PrintStatusNozzleMappingFailed: show = true; break;
+        default: break;
+        }
+    }
+    if (m_link_change_arrangement->IsShown() != show) {
+        m_link_change_arrangement->Show(show);
+        Layout();
+        Fit();
+    }
+}
+
+void SelectMachineDialog::on_change_arrangement()
+{
+    if (!m_plater)
+        return;
+    const int plate_idx = m_plater->get_partplate_list().get_curr_plate_index();
+    BOOST_LOG_TRIVIAL(warning) << "[DualNozzle] send dialog: change filament arrangement for plate " << plate_idx + 1;
+    if (m_mapping_popup.IsShown())
+        m_mapping_popup.Dismiss();
+    m_worker->cancel_all();
+    Plater* plater = m_plater;
+    EndModal(wxID_CANCEL);
+    // After the modal loop has returned: reopen the arrangement for this plate and re-slice it.
+    wxGetApp().CallAfter([plater, plate_idx]() { DualNozzle::open_arrangement_and_reslice(plater, plate_idx); });
 }
 
 void SelectMachineDialog::apply_confirmed_trays(MachineObject* obj_)
@@ -1734,6 +1791,12 @@ void SelectMachineDialog::update_priner_status_msg(wxString msg, bool is_warning
 
 void SelectMachineDialog::update_print_status_msg(wxString msg, bool is_warning, bool is_printer_msg)
 {
+    if (m_nm_note_active) {
+        // The nozzle mapping note takes the AMS line (it replaces "mappings have been established").
+        update_ams_status_msg(m_nm_note, m_nm_note_warn);
+        update_priner_status_msg(is_printer_msg ? msg : wxString(), is_printer_msg && is_warning);
+        return;
+    }
     if (is_printer_msg) {
         update_ams_status_msg(wxEmptyString, false);
         update_priner_status_msg(msg, is_warning);
@@ -1771,6 +1834,12 @@ void SelectMachineDialog::show_status(PrintDialogStatus status, std::vector<wxSt
     if (m_print_status != status)
         BOOST_LOG_TRIVIAL(info) << "select_machine_dialog: show_status = " << status << "(" << get_print_status_info(status) << ")";
     m_print_status = status;
+    // Ready-to-send statuses carry the nozzle mapping note in the AMS message line
+    // (update_print_status_msg), so it does not flicker against the status's own text.
+    m_nm_note_active = !m_nm_note.empty() &&
+                       (status == PrintDialogStatus::PrintStatusAmsMappingSuccess || status == PrintDialogStatus::PrintStatusAmsMappingValid ||
+                        status == PrintDialogStatus::PrintStatusAmsMappingByOrder || status == PrintDialogStatus::PrintStatusTimelapseWarning ||
+                        status == PrintDialogStatus::PrintStatusTimelapseNoSdcard);
 
     // m_comboBox_printer
     if (status == PrintDialogStatus::PrintStatusRefreshingMachineList)
@@ -1970,18 +2039,12 @@ void SelectMachineDialog::show_status(PrintDialogStatus status, std::vector<wxSt
         update_print_status_msg(msg_text, true, true);
         Enable_Send_Button(false);
         Enable_Refresh_Button(true);
-    } else if (status == PrintDialogStatus::PrintStatusNozzleMappingWaiting) {
-        wxString msg_text = _L("Asking the printer to map the filaments to its nozzles...");
-        update_print_status_msg(msg_text, false, true);
-        Enable_Send_Button(false);
-        Enable_Refresh_Button(true);
-    } else if (status == PrintDialogStatus::PrintStatusNozzleMappingFailed) {
-        wxString msg_text = _L("The printer could not map the filaments to its nozzles, so the job cannot be sent as sliced.");
-        if (!params.empty() && !params[0].empty())
-            msg_text += " (" + params[0] + ")";
-        msg_text += " " + _L("Check the nozzles on the printer and the extruder of each filament, then re-slice or pick other AMS slots.");
-        update_print_status_msg(msg_text, true, true);
-        Enable_Send_Button(false);
+    } else if (status == PrintDialogStatus::PrintStatusNozzleMappingWaiting ||
+               status == PrintDialogStatus::PrintStatusNozzleMappingFailed) {
+        // No longer set by update_show_status (the answer is advisory, shown as a note with the
+        // ready status). Kept non-blocking in case anything still reports them.
+        update_print_status_msg(m_nm_note, m_nm_note_warn, false);
+        Enable_Send_Button(true);
         Enable_Refresh_Button(true);
     } else if (status == PrintDialogStatus::PrintStatusTimelapseWarning) {
         wxString   msg_text;
@@ -2000,6 +2063,8 @@ void SelectMachineDialog::show_status(PrintDialogStatus status, std::vector<wxSt
         Enable_Send_Button(true);
         Enable_Refresh_Button(true);
     }
+
+    show_nozzle_mapping_note(status);
 
     // m_panel_warn m_simplebook
     if (status == PrintDialogStatus::PrintStatusSending) {
@@ -3202,6 +3267,10 @@ void SelectMachineDialog::update_show_status()
     if (get_status() == PrintDialogStatus::PrintStatusSendingCanceled)
         return;
 
+    // Set again below when this pass reaches the nozzle mapping query.
+    m_nm_note.clear();
+    m_nm_note_warn = false;
+
     NetworkAgent* agent = Slic3r::GUI::wxGetApp().getAgent();
     DeviceManager* dev = Slic3r::GUI::wxGetApp().getDeviceManager();
     if (!agent) {
@@ -3379,18 +3448,30 @@ void SelectMachineDialog::update_show_status()
         }
     }
 
-    // Two-extruder job: the printer must accept the filament -> nozzle mapping before Send, as in
-    // BambuStudio (update_show_status -> CheckErrorSyncNozzleMappingResultV0, SelectMachine.cpp:4269).
+    // Two-extruder job: ask the printer for its filament -> nozzle mapping, as BambuStudio does
+    // (update_show_status -> CheckErrorSyncNozzleMappingResultV0, SelectMachine.cpp:4269), but only
+    // to inform: unlike BambuStudio a refusal does not block Send. The H2D refused every query
+    // (result=fail errno=1) even for a one-filament job on its own extruder, while the same job
+    // sent without "nozzle_mapping" - what the network agent does on a refusal - printed fine.
     {
         wxString reason;
         const int nm = check_nozzle_mapping(obj_, reason);
-        if (nm == 1) {
-            show_status(PrintDialogStatus::PrintStatusNozzleMappingWaiting);
-            return;
-        }
-        if (nm == 2) {
-            show_status(PrintDialogStatus::PrintStatusNozzleMappingFailed, { reason });
-            return;
+        using BambuNozzleMapping::QueryState;
+        const QueryState qs = nm == 1 ? QueryState::Waiting :
+                              nm == 2 ? QueryState::Refused :
+                              nm == 3 ? QueryState::NoAnswer :
+                              (m_nm_seq.empty() ? QueryState::None : QueryState::Accepted);
+        const BambuNozzleMapping::SendGate gate = BambuNozzleMapping::send_gate(qs);
+        m_nm_note.clear();
+        m_nm_note_warn = gate.warn;
+        if (gate.warn) {
+            m_nm_note = _L("The printer did not confirm how it maps the filaments to its nozzles");
+            if (!reason.empty())
+                m_nm_note += " (" + reason + ")";
+            m_nm_note += ". " + _L("The job can still be sent: it goes out without a nozzle mapping, as before. "
+                                   "To use other extruders or AMS slots, change the filament arrangement.");
+        } else if (gate.note) {
+            m_nm_note = _L("Asking the printer how it maps the filaments to its nozzles...");
         }
     }
 

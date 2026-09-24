@@ -2126,17 +2126,18 @@ wxBoxSizer* MainFrame::create_side_tools()
             p->append_button(slice_plate_btn);
             // Bambu two-extruder printers: change the plate's filament -> extruder arrangement
             // (opens the pre-slice confirmation even when nothing changed, then slices the plate).
-            if (GUI::DualNozzle::preset_is_dual_nozzle_bambu() && m_slice_enable) {
+            // Not gated on m_slice_enable: that is false once the plate is sliced, which is exactly
+            // when the arrangement is wanted again (the Slice button itself stays disabled then).
+            PartPlate* arrange_plate = m_plater ? m_plater->get_partplate_list().get_curr_plate() : nullptr;
+            if (GUI::DualNozzle::preset_is_dual_nozzle_bambu() && arrange_plate && arrange_plate->has_printable_instances() &&
+                !m_plater->is_background_process_slicing() && !m_plater->only_gcode_mode() && !m_plater->using_exported_file()) {
                 SideButton* arrange_btn = new SideButton(p, _L("Filament arrangement..."), "");
                 arrange_btn->SetCornerRadius(0);
                 arrange_btn->Bind(wxEVT_BUTTON, [this, p](wxCommandEvent&) {
                     p->Dismiss();
                     if (!m_plater)
                         return;
-                    GUI::DualNozzle::request_arrangement_dialog(m_plater->get_partplate_list().get_curr_plate_index());
-                    m_plater->exit_gizmo();
-                    m_plater->update(true, true);
-                    wxPostEvent(m_plater, SimpleEvent(EVT_GLTOOLBAR_SLICE_PLATE));
+                    GUI::DualNozzle::open_arrangement_and_reslice(m_plater, m_plater->get_partplate_list().get_curr_plate_index());
                 });
                 p->append_button(arrange_btn);
             }

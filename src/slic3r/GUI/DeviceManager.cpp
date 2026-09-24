@@ -5878,6 +5878,7 @@ void MachineObject::parse_new_info(json print)
         is_support_nozzle_blob_detection = get_flag_bits(fun, 13);
         is_support_upgrade_kit = get_flag_bits(cfg, 14);
         is_support_command_homing = get_flag_bits(fun, 32);
+        is_support_nozzle_rack = get_flag_bits(fun, 60);
     }
 
     /*aux*/
@@ -6086,6 +6087,16 @@ bool MachineObject::is_nozzle_data_invalid()
         }
     }
 
+    return false;
+}
+
+bool MachineObject::has_nozzle_rack() const
+{
+    if (is_support_nozzle_rack)
+        return true;
+    for (const Nozzle& n : m_nozzle_data.nozzles)
+        if (n.on_rack())
+            return true;
     return false;
 }
 

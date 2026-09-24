@@ -61,6 +61,10 @@ bool confirm_before_slice(Plater *plater, bool slice_all);
 // is still valid (the Slice menu's "Filament arrangement..." entry; BambuStudio opens its
 // grouping dialog from a plate icon instead).
 void request_arrangement_dialog(int plate_index);
+// request_arrangement_dialog + slice that plate (Slice menu "Filament arrangement...", the send
+// dialog's "Change filament arrangement..." link). Works on an already sliced plate too: the
+// dialog opens, and a changed arrangement invalidates the slice so it is redone.
+void open_arrangement_and_reslice(Plater *plater, int plate_index);
 
 // Watches the selected printer; when it changes, or its AMS / nozzle state changes materially,
 // every plate sliced for a different printer or state is marked dirty so Slice re-enables and
