@@ -6316,6 +6316,32 @@ void WipeTowerData::construct_mesh(float width, float depth, float height, float
     }
 }
 
+unsigned int Print::initial_no_support_extruder_id() const
+{
+    ToolOrdering        ordering;
+    unsigned int        initial_extruder_id = (unsigned int) -1;
+    const bool          is_bbl_printers     = is_BBL_printer();
+
+    if (config().print_sequence == PrintSequence::ByObject) {
+        for (const PrintInstance *instance : sort_object_instances_by_model_order(*this)) {
+            ordering            = ToolOrdering(*instance->print_object, initial_extruder_id);
+            initial_extruder_id = ordering.first_extruder();
+            if (initial_extruder_id != (unsigned int) -1)
+                break;
+        }
+    } else {
+        ordering = this->tool_ordering();
+        ordering.assign_custom_gcodes(*this);
+        const bool has_wipe_tower = this->has_wipe_tower() && ordering.has_wipe_tower();
+        if (!is_bbl_printers && has_wipe_tower && !config().single_extruder_multi_material_priming)
+            initial_extruder_id = ordering.all_extruders().empty() ? (unsigned int) -1 : ordering.all_extruders().back();
+        else
+            initial_extruder_id = ordering.first_extruder();
+    }
+
+    return ordering.first_non_support_extruder(config(), initial_extruder_id);
+}
+
 // Generate a recommended G-code output file name based on the format template, default extension, and template parameters
 // (timestamps, object placeholders derived from the model, current placeholder prameters and print statistics.
 // Use the final print statistics if available, or just keep the print statistics placeholders if not available yet (before G-code is finalized).
@@ -6329,6 +6355,14 @@ std::string Print::output_filename(const std::string &filename_base) const
     config.set_key_value("plate_name", new ConfigOptionString(get_plate_name()));
     config.set_key_value("plate_number", new ConfigOptionString(get_plate_number_formatted()));
     config.set_key_value("model_name", new ConfigOptionString(get_model_name()));
+    // GCode.cpp publishes this only on its own parser. Export G-code / plate / print-host
+    // name files through this path, so the U1 filename_format must see the same index here.
+    const int initial_no_support = static_cast<int>(this->initial_no_support_extruder_id());
+    config.set_key_value("initial_no_support_extruder", new ConfigOptionInt(initial_no_support));
+    config.set_key_value("initial_no_support_tool", new ConfigOptionInt(initial_no_support));
+    // U1 filename_format does arithmetic on total_weight. The unfinished-print
+    // placeholder is a string ("{total_weight}"), which would throw here.
+    config.set_key_value("total_weight", new ConfigOptionFloat(this->print_statistics().total_weight));
 
     return this->PrintBase::output_filename(m_config.filename_format.value, ".gcode", filename_base, &config);
 }

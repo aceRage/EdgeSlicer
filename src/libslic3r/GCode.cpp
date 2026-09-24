@@ -2885,29 +2885,7 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
             tool_ordering = ToolOrdering(*(*print_object_instance_sequential_active)->print_object, initial_extruder_id);
             if ((initial_extruder_id = tool_ordering.first_extruder()) != static_cast<unsigned int>(-1)) {
                 // BBS: try to find the non-support filament extruder if is multi color and initial_extruder is support filament
-                initial_non_support_extruder_id = initial_extruder_id;
-                if (tool_ordering.all_extruders().size() > 1 && print.config().filament_is_support.get_at(initial_extruder_id)) {
-                    bool has_non_support_filament = false;
-                    for (unsigned int extruder : tool_ordering.all_extruders()) {
-                        if (!print.config().filament_is_support.get_at(extruder)) {
-                            has_non_support_filament = true;
-                            break;
-                        }
-                    }
-                    // BBS: find the non-support filament extruder of object
-                    if (has_non_support_filament)
-                        for (LayerTools layer_tools : tool_ordering.layer_tools()) {
-                            if (!layer_tools.has_object)
-                                continue;
-                            for (unsigned int extruder : layer_tools.extruders) {
-                                if (print.config().filament_is_support.get_at(extruder))
-                                    continue;
-                                initial_non_support_extruder_id = extruder;
-                                break;
-                            }
-                        }
-                }
-
+                initial_non_support_extruder_id = tool_ordering.first_non_support_extruder(print.config(), initial_extruder_id);
                 break;
             }
         }
@@ -2936,30 +2914,8 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
                                   tool_ordering.first_extruder();
 
         // BBS: try to find the non-support filament extruder if is multi color and initial_extruder is support filament
-        if (initial_extruder_id != static_cast<unsigned int>(-1)) {
-            initial_non_support_extruder_id = initial_extruder_id;
-            if (tool_ordering.all_extruders().size() > 1 && print.config().filament_is_support.get_at(initial_extruder_id)) {
-                bool has_non_support_filament = false;
-                for (unsigned int extruder : tool_ordering.all_extruders()) {
-                    if (!print.config().filament_is_support.get_at(extruder)) {
-                        has_non_support_filament = true;
-                        break;
-                    }
-                }
-                // BBS: find the non-support filament extruder of object
-                if (has_non_support_filament)
-                    for (LayerTools layer_tools : tool_ordering.layer_tools()) {
-                        if (!layer_tools.has_object)
-                            continue;
-                        for (unsigned int extruder : layer_tools.extruders) {
-                            if (print.config().filament_is_support.get_at(extruder))
-                                continue;
-                            initial_non_support_extruder_id = extruder;
-                            break;
-                        }
-                    }
-            }
-        }
+        if (initial_extruder_id != static_cast<unsigned int>(-1))
+            initial_non_support_extruder_id = tool_ordering.first_non_support_extruder(print.config(), initial_extruder_id);
 
         // In non-sequential print, the printing extruders may have been modified by the extruder switches stored in
         // Model::custom_gcode_per_print_z. Therefore initialize the printing extruders from there.

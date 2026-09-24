@@ -2546,6 +2546,38 @@ int WipingExtrusions::get_support_interface_extruder_overrides(const PrintObject
     return -1;
 }
 
+unsigned int ToolOrdering::first_non_support_extruder(const PrintConfig &print_config, unsigned int initial_extruder_id) const
+{
+    if (initial_extruder_id == (unsigned int) -1)
+        return 0;
+
+    unsigned int result = initial_extruder_id;
+    if (m_all_printing_extruders.size() > 1 && print_config.filament_is_support.get_at(initial_extruder_id)) {
+        bool has_non_support_filament = false;
+        for (unsigned int extruder : m_all_printing_extruders) {
+            if (!print_config.filament_is_support.get_at(extruder)) {
+                has_non_support_filament = true;
+                break;
+            }
+        }
+        // Same walk as GCode.cpp: last object layer's first non-support extruder wins
+        // (the original loops only break the inner extruder scan).
+        if (has_non_support_filament) {
+            for (const LayerTools &layer : m_layer_tools) {
+                if (!layer.has_object)
+                    continue;
+                for (unsigned int extruder : layer.extruders) {
+                    if (print_config.filament_is_support.get_at(extruder))
+                        continue;
+                    result = extruder;
+                    break;
+                }
+            }
+        }
+    }
+    return result;
+}
+
 // Resolve a 1-based filament ID through the mixed-filament manager.
 unsigned int ToolOrdering::resolve_mixed(unsigned int filament_id_1based,
                                          int          layer_index,
