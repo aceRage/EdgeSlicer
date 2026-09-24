@@ -430,8 +430,23 @@ void DualNozzleSliceDialog::sync_now()
     fill_printer_choice();
     m_state_fp.clear(); // force a full re-read
     read_printer_state(false);
-    if (m_state.has_report)
+    if (m_state.has_report) {
         DualNozzle::persist_synced_state(m_state);
+    } else if (!m_state.dev_id.empty() && !m_model_mismatch) {
+        // Not synced yet (offline, still connecting, or connected without a full report): ask the
+        // printer again. The dialog's timer picks the report up and fills the slots when it lands.
+        DeviceManager *dev = wxGetApp().getDeviceManager();
+        MachineObject *obj = dev ? dev->get_selected_machine() : nullptr;
+        if (obj && obj->dev_id == m_state.dev_id) {
+            BOOST_LOG_TRIVIAL(warning) << "[DualNozzle] slice dialog: sync requested from " << obj->dev_id
+                                       << (obj->is_connected() ? " (asking for a full report)" : " (reconnecting)");
+            if (obj->is_connected())
+                obj->command_request_push_all(true);
+            else
+                dev->set_selected_machine(obj->dev_id);
+            m_sync_requested = true;
+        }
+    }
     update_status();
 }
 
@@ -629,8 +644,10 @@ void DualNozzleSliceDialog::update_status()
         text = wxString::Format(_L("%s is a different printer model than this project's printer. Not synced: check the arrangement by hand."),
                                 from_u8(m_state.dev_name.empty() ? m_state.dev_id : m_state.dev_name));
     } else if (!m_state.has_report) {
-        text = wxString::Format(_L("%s is offline or has not reported yet. Not synced: you can slice, but check the arrangement by hand."),
-                                from_u8(m_state.dev_name.empty() ? m_state.dev_id : m_state.dev_name));
+        const wxString name = from_u8(m_state.dev_name.empty() ? m_state.dev_id : m_state.dev_name);
+        text = m_sync_requested
+                   ? wxString::Format(_L("Waiting for %s to report its AMS units and nozzles. Not synced: you can still slice, but check the arrangement by hand."), name)
+                   : wxString::Format(_L("%s is offline or has not reported yet. Not synced: you can slice, but check the arrangement by hand."), name);
     } else {
         warn             = false;
         const auto ams   = extruder_ams_counts(m_state, 2);
@@ -642,7 +659,9 @@ void DualNozzleSliceDialog::update_status()
     m_status->SetLabel(text);
     m_status->SetForegroundColour(warn ? wxColour(0xFF, 0x6F, 0x00) : StateColor::darkModeColorFor(wxColour("#4A4A4A")));
     m_status->Wrap(FromDIP(700));
-    m_sync_btn->Enable(m_state.has_report);
+    // Also offline: Sync then asks the printer to (re)connect and report. Only nothing to sync
+    // from - no printer, or another model - leaves it off.
+    m_sync_btn->Enable(!m_state.dev_id.empty() && !m_model_mismatch);
     relayout();
 }
 

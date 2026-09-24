@@ -64,7 +64,20 @@ void request_arrangement_dialog(int plate_index);
 // request_arrangement_dialog + slice that plate (Slice menu "Filament arrangement...", the send
 // dialog's "Change filament arrangement..." link). Works on an already sliced plate too: the
 // dialog opens, and a changed arrangement invalidates the slice so it is redone.
-void open_arrangement_and_reslice(Plater *plater, int plate_index);
+// force = false only slices the plate: the confirmation still opens when the plate needs it
+// (the "confirm to slice" notification uses that, so the dialog explains why).
+void open_arrangement_and_reslice(Plater *plater, int plate_index, bool force = true);
+
+// The last line of defence, called by Plater::priv::restart_background_process right before a
+// slice of `plate` actually starts, whatever started it. confirm_before_slice only runs on the
+// paths that call Plater::guard_before_slice_*; everything else (automatic re-slice after an
+// edit, an export that needs a slice first, a direct reslice) used to slice an unconfirmed
+// plate with Auto For Flush, silently. Returns true to let the slice start. For an unconfirmed
+// plate (DualNozzleSync::slice_gate): a user-started slice (explicit_request) is turned into a
+// normal guarded Slice plate so the confirmation opens; an automatic one is held back and a
+// "Confirm filament arrangement" notification offers the dialog; a remote / hidden-instance
+// slice goes ahead with the stored or automatic grouping and says so in the log.
+bool allow_slice_start(Plater *plater, PartPlate *plate, bool explicit_request);
 
 // Watches the selected printer; when it changes, or its AMS / nozzle state changes materially,
 // every plate sliced for a different printer or state is marked dirty so Slice re-enables and
