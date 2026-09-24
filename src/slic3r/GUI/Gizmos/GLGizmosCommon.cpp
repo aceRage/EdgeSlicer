@@ -1,4 +1,5 @@
 #include "GLGizmosCommon.hpp"
+#include "GizmoSelectionObject.hpp"
 
 #include <cassert>
 
@@ -108,9 +109,12 @@ void SelectionInfo::on_update()
 
     // BBS still keep object pointer when selection is volume
     // if (selection.is_single_full_instance()) {
+    // A selection spanning several objects has get_object_idx() == -1: no object then, instead of
+    // objects[-1] (see GizmoSelectionObject.hpp).
     if (!selection.is_empty()) {
-        m_model_object = selection.get_model()->objects[selection.get_object_idx()];
-        m_z_shift = selection.get_first_volume()->get_sla_shift_z();
+        m_model_object = gizmo_selection_object(selection.get_model()->objects, selection.get_object_idx());
+        if (m_model_object != nullptr)
+            m_z_shift = selection.get_first_volume()->get_sla_shift_z();
     }
 }
 

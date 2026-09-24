@@ -315,6 +315,55 @@ TEST_CASE("Confirmation is remembered until something relevant changes", "[DualN
     CHECK(needs_confirmation(offline, s, used, map) == ConfirmReason::NowSynced);
 }
 
+TEST_CASE("Slice gate: an unconfirmed plate never slices silently", "[DualNozzleSync]")
+{
+    const auto       used = plate4_used();
+    std::vector<int> map(10, 2);
+    map[9] = 1;
+
+    // The owner's first H2D slice (2026-09-23): printer not connected / not synced yet, plate
+    // never confirmed. No live data must not mean "slice with Auto For Flush".
+    const PrinterState offline;
+    const ConfirmReason fresh = needs_confirmation(Confirmation(), offline, used, {});
+    CHECK(fresh == ConfirmReason::NeverConfirmed);
+    CHECK(slice_gate(fresh, SliceTrigger::User) == SliceGate::ShowDialog);
+    // Automatic re-slice after an edit: held back until the user confirms, not auto grouped.
+    CHECK(slice_gate(fresh, SliceTrigger::Background) == SliceGate::Defer);
+    // Phone / hub / hidden instance: nobody can answer, slice with the stored or automatic grouping.
+    CHECK(slice_gate(fresh, SliceTrigger::Remote) == SliceGate::Proceed);
+
+    // Same with the printer connected: still asked about.
+    const ConfirmReason fresh_online = needs_confirmation(Confirmation(), h2c_state(), used, {});
+    CHECK(slice_gate(fresh_online, SliceTrigger::User) == SliceGate::ShowDialog);
+    CHECK(slice_gate(fresh_online, SliceTrigger::Background) == SliceGate::Defer);
+
+    // Confirmed without printer data (the dialog's "not synced" Confirm & Slice): later slices,
+    // user or automatic, go ahead while the printer stays offline.
+    Confirmation c;
+    c.filaments_fp = filaments_fingerprint(used);
+    c.filament_map = map;
+    c.synced       = false;
+    const ConfirmReason confirmed = needs_confirmation(c, offline, used, map);
+    CHECK(confirmed == ConfirmReason::None);
+    for (SliceTrigger t : { SliceTrigger::User, SliceTrigger::Background, SliceTrigger::Remote })
+        CHECK(slice_gate(confirmed, t) == SliceGate::Proceed);
+
+    // The printer reports later: the user is asked again, an automatic slice waits.
+    const ConfirmReason now_synced = needs_confirmation(c, h2c_state(), used, map);
+    CHECK(now_synced == ConfirmReason::NowSynced);
+    CHECK(slice_gate(now_synced, SliceTrigger::User) == SliceGate::ShowDialog);
+    CHECK(slice_gate(now_synced, SliceTrigger::Background) == SliceGate::Defer);
+    CHECK(slice_gate(now_synced, SliceTrigger::Remote) == SliceGate::Proceed);
+
+    // Every other reason to re-confirm behaves the same way.
+    for (ConfirmReason r : { ConfirmReason::PrinterChanged, ConfirmReason::PrinterStateChanged, ConfirmReason::FilamentsChanged,
+                             ConfirmReason::MapChanged, ConfirmReason::UserRequested }) {
+        CHECK(slice_gate(r, SliceTrigger::User) == SliceGate::ShowDialog);
+        CHECK(slice_gate(r, SliceTrigger::Background) == SliceGate::Defer);
+        CHECK(slice_gate(r, SliceTrigger::Remote) == SliceGate::Proceed);
+    }
+}
+
 TEST_CASE("A printer change invalidates dual-nozzle slices", "[DualNozzleSync]")
 {
     const PrinterState s  = h2c_state();

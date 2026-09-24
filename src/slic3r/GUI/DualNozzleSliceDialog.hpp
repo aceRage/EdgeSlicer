@@ -78,6 +78,7 @@ private:
     DualNozzleSync::Arrangement                  m_arr;
     bool                                         m_user_touched{ false };
     bool                                         m_model_mismatch{ false };
+    bool                                         m_sync_requested{ false }; // Sync pressed while not synced
     std::vector<std::string>                     m_choice_dev_ids;
 
     wxChoice     *m_printer_choice{ nullptr };
