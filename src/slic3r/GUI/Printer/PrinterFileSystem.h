@@ -68,6 +68,13 @@ public:
     // at once with -2 (the Fake_Bambu_Create fallback) whatever the network is doing.
     static bool HasTunnelLibrary();
 
+    // True when the loaded tunnel library can only reach a printer on the local network and says
+    // so by exporting EdgeSlicer_TunnelLanOnly() (EdgeSlicer's network plug-in serves the storage
+    // browser over the printer's LAN FTPS). The panel then gives it the printer's LAN address even
+    // for a cloud-bound printer, instead of a cloud relay URL it cannot use. Bambu's own library
+    // does not export it, so with it everything stays as it was.
+    static bool TunnelIsLanOnly();
+
 public:
     enum FileType {
         F_TIMELAPSE,
