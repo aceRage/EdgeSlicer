@@ -14,10 +14,12 @@
 #include "libslic3r/BambuExtruderMap.hpp"
 #include "libslic3r/PresetBundle.hpp"
 
+#include <boost/format.hpp>
 #include <boost/log/trivial.hpp>
 
 #include <cstdio>
 #include <cstdlib>
+#include <set>
 
 namespace Slic3r { namespace GUI { namespace DualNozzle {
 
@@ -219,7 +221,38 @@ static int s_requested_plate = -1;
 
 void request_arrangement_dialog(int plate_index) { s_requested_plate = plate_index; }
 
-void open_arrangement_and_reslice(Plater *plater, int plate_index)
+// The printer the gate compares against: the selected two-extruder printer when it is the
+// preset's model, else "no printer data" (still carrying the preset's physical extruder map).
+static DualNozzleSync::PrinterState gate_printer_state()
+{
+    MachineObject *obj = selected_machine();
+    if (obj && machine_matches_preset(obj))
+        return printer_state(obj);
+    DualNozzleSync::PrinterState state;
+    state.physical_extruder_map = preset_physical_extruder_map();
+    return state;
+}
+
+// Plate held back by allow_slice_start (index + reason), so the notification and the log line
+// are pushed once and not on every automatic restart. Cleared when the plate is confirmed.
+static std::string s_deferred_key;
+
+// Plates a remote (phone / hub) request let through unconfirmed in confirm_before_slice. A remote
+// Slice all slices plates 2..n after the request has returned (start_next_slice), outside its
+// auto-confirm scope, so the gate would otherwise see them as automatic slices and hold them
+// back. Reset by every confirm_before_slice run; each entry is used once.
+static std::set<int> s_remote_approved;
+
+static void clear_deferred_notice(Plater *plater)
+{
+    if (s_deferred_key.empty())
+        return;
+    s_deferred_key.clear();
+    if (auto *nm = plater ? plater->get_notification_manager() : nullptr)
+        nm->close_notification_of_type(NotificationType::DualNozzleArrangementNeeded);
+}
+
+void open_arrangement_and_reslice(Plater *plater, int plate_index, bool force)
 {
     if (!plater)
         return;
@@ -228,16 +261,83 @@ void open_arrangement_and_reslice(Plater *plater, int plate_index)
         return;
     if (list.get_curr_plate_index() != plate_index)
         plater->select_plate(plate_index);
-    request_arrangement_dialog(plate_index);
+    if (force)
+        request_arrangement_dialog(plate_index);
     plater->exit_gizmo();
     plater->update(true, true);
     wxPostEvent(plater, SimpleEvent(EVT_GLTOOLBAR_SLICE_PLATE));
+}
+
+bool allow_slice_start(Plater *plater, PartPlate *plate, bool explicit_request)
+{
+    if (!plater || !plate || !preset_is_dual_nozzle_bambu() || plater->only_gcode_mode() || !plate->has_printable_instances())
+        return true;
+    const std::vector<ProjectFilament> used = plate_filaments(plate);
+    if (used.empty())
+        return true;
+
+    const DualNozzleSync::PrinterState state  = gate_printer_state();
+    const Confirmation                 stored = Confirmation::deserialize(plate->dual_nozzle_confirm());
+    const ConfirmReason reason      = needs_confirmation(stored, state, used, plate->get_manual_filament_map());
+    const bool          interactive = RemoteAccess::dialog_mode() == RemoteAccess::Mode::Interactive;
+    const int           idx         = plate->get_index();
+    const bool          remote      = !interactive || s_remote_approved.erase(idx) > 0;
+    const SliceTrigger  trigger     = remote ? SliceTrigger::Remote : (explicit_request ? SliceTrigger::User : SliceTrigger::Background);
+
+    switch (slice_gate(reason, trigger)) {
+    case SliceGate::Proceed:
+        if (reason == ConfirmReason::None && s_deferred_key.rfind(std::to_string(idx) + "|", 0) == 0)
+            clear_deferred_notice(plater);
+        if (reason != ConfirmReason::None)
+            BOOST_LOG_TRIVIAL(warning) << "[DualNozzle] plate " << idx + 1 << ": remote slice of an unconfirmed arrangement (reason " << int(reason)
+                                       << "); grouping: " << (plate->get_manual_filament_map().empty() ? "Auto For Flush" : "the last confirmed map");
+        return true;
+
+    case SliceGate::ShowDialog: {
+        // A slice the user asked for that did not come through Plater::guard_before_slice_plate.
+        // Do not start it; run it again as an ordinary Slice plate, whose guard opens the
+        // confirmation (and slices after Confirm, or stops on Cancel).
+        BOOST_LOG_TRIVIAL(warning) << "[DualNozzle] plate " << idx + 1 << ": slice requested without a confirmed arrangement (reason "
+                                   << int(reason) << "); opening the confirmation first";
+        static bool s_pending = false;
+        if (!s_pending) {
+            s_pending = true;
+            wxGetApp().CallAfter([plater, idx]() {
+                s_pending = false;
+                if (plater->get_partplate_list().get_curr_plate_index() == idx)
+                    wxPostEvent(plater, SimpleEvent(EVT_GLTOOLBAR_SLICE_PLATE));
+            });
+        }
+        return false;
+    }
+
+    case SliceGate::Defer: {
+        const std::string key = std::to_string(idx) + "|" + std::to_string(int(reason));
+        if (key != s_deferred_key) {
+            s_deferred_key = key;
+            BOOST_LOG_TRIVIAL(warning) << "[DualNozzle] plate " << idx + 1 << ": automatic slice held back, the filament arrangement is not confirmed (reason "
+                                       << int(reason) << (state.has_report ? ", printer synced" : ", no printer data") << ")";
+            if (auto *nm = plater->get_notification_manager()) {
+                nm->close_notification_of_type(NotificationType::DualNozzleArrangementNeeded);
+                nm->push_notification(NotificationType::DualNozzleArrangementNeeded, NotificationManager::NotificationLevel::WarningNotificationLevel,
+                                      (boost::format(_u8L("Plate %1% was not sliced: confirm which extruder prints each filament first.")) % (idx + 1)).str(),
+                                      _u8L("Confirm filament arrangement"), [plater, idx](wxEvtHandler *) {
+                                          wxGetApp().CallAfter([plater, idx]() { open_arrangement_and_reslice(plater, idx, false); });
+                                          return true;
+                                      });
+            }
+        }
+        return false;
+    }
+    }
+    return true;
 }
 
 bool confirm_before_slice(Plater *plater, bool slice_all)
 {
     const int requested = s_requested_plate;
     s_requested_plate   = -1;
+    s_remote_approved.clear();
     if (!plater || !preset_is_dual_nozzle_bambu() || plater->only_gcode_mode())
         return true;
     PartPlateList &list = plater->get_partplate_list();
@@ -251,13 +351,7 @@ bool confirm_before_slice(Plater *plater, bool slice_all)
         plates.push_back(list.get_curr_plate_index());
     }
 
-    MachineObject *obj      = selected_machine();
-    const bool     mismatch = obj && !machine_matches_preset(obj);
-    DualNozzleSync::PrinterState   state;
-    if (obj && !mismatch)
-        state = printer_state(obj);
-    else
-        state.physical_extruder_map = preset_physical_extruder_map();
+    DualNozzleSync::PrinterState state = gate_printer_state();
     const bool interactive = RemoteAccess::dialog_mode() == RemoteAccess::Mode::Interactive;
 
     for (int idx : plates) {
@@ -288,6 +382,7 @@ bool confirm_before_slice(Plater *plater, bool slice_all)
                                        << int(reason) << "); slicing with "
                                        << (plate->get_manual_filament_map().empty() ? "automatic grouping" : "the last confirmed map");
             plate->set_dual_nozzle_sliced_for(std::string(), std::string());
+            s_remote_approved.insert(idx);
             continue;
         }
 
@@ -315,6 +410,7 @@ bool confirm_before_slice(Plater *plater, bool slice_all)
         if (old_map != arr.filament_map)
             plate->update_slice_result_valid_state(false);
         plater->set_plater_dirty(true);
+        clear_deferred_notice(plater);
 
         std::string trays;
         for (const auto &kv : arr.trays)

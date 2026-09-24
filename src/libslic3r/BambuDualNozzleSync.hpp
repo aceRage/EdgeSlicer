@@ -217,6 +217,25 @@ enum class ConfirmReason {
 ConfirmReason needs_confirmation(const Confirmation &stored, const PrinterState &state,
                                  const std::vector<ProjectFilament> &used, const std::vector<int> &current_map);
 
+// Who is starting a slice of a plate whose arrangement may be unconfirmed.
+enum class SliceTrigger {
+    User,       // Slice / Slice all / Ctrl+R / Preview tab / plate thumbnail / any direct reslice
+    Background, // automatic re-slice after an edit ("background processing"), or an export that must slice first
+    Remote,     // phone / hub request or a hidden instance: nobody can answer a dialog
+};
+
+enum class SliceGate {
+    Proceed,    // slice now
+    ShowDialog, // show the arrangement confirmation first; slice after Confirm
+    Defer,      // do not slice; tell the user the arrangement has to be confirmed first
+};
+
+// What to do with a slice of a plate given why it needs confirming (None = confirmed and still
+// valid). Missing printer data never makes a plate "confirmed": an unconfirmed plate is asked
+// about (User) or held back (Background) whether or not the printer is connected. Only a remote
+// request, which nobody can answer, slices unconfirmed with the stored or automatic grouping.
+SliceGate slice_gate(ConfirmReason reason, SliceTrigger trigger);
+
 // Whether a plate sliced against sliced_dev/sliced_fp must be invalidated now that the selected
 // printer is state. Going offline (no report) never invalidates; a different printer, a changed
 // state fingerprint, or a printer appearing after an unsynced slice does.

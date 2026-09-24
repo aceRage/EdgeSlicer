@@ -153,6 +153,9 @@ enum class NotificationType
         FilamentIncompatibleMixed,
     // EdgeSlicer: the one-time "turn on crash reports?" offer after a crash (GUI_App::post_init).
     CrashReportOffer,
+    // EdgeSlicer: a Bambu two-extruder plate was not sliced because its filament arrangement is
+    // not confirmed yet (DualNozzle::allow_slice_start); the hyperlink opens the confirmation.
+    DualNozzleArrangementNeeded,
 };
 
 class NotificationManager
