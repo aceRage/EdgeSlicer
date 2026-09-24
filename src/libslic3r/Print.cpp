@@ -3479,7 +3479,9 @@ static bool chameleon_projection_extruder_from_view(const std::vector<Projection
                                                       // below) is byte-identical to before. base_projection_lookup
                                                       // (chameleon_assign_support_interfaces, below) is the only caller
                                                       // that ever passes a real limit - see that lambda's own comment.
-                                                      size_t layer_limit = std::numeric_limits<size_t>::max())
+                                                      size_t layer_limit = std::numeric_limits<size_t>::max(),
+                                                      // Optional: receives the object layer the hit is on.
+                                                      const Layer **out_hit_layer = nullptr)
 {
     size_t hit_layer = 0, hit_region = 0;
     if (!chameleon_pick_projection_region(view, p, hit_layer, hit_region, layer_limit))
@@ -3493,6 +3495,8 @@ static bool chameleon_projection_extruder_from_view(const std::vector<Projection
 
     const LayerRegion &lr = *regions[hit_region];
     out_extruder = chameleon_projection_region_extruder(lr.region());
+    if (out_hit_layer != nullptr)
+        *out_hit_layer = view_layers[hit_layer];
     return true;
 }
 
@@ -3585,7 +3589,11 @@ static bool chameleon_mixed_gradient_active(const Print &print)
 // object default" convention, PrintRegion.cpp:18-35) contributes nothing - this table
 // only ever records an EXPLICIT non-zero per-region filament assignment, not a scalar
 // default that could still mean any extruder depending on context.
-static LayerFilamentTable chameleon_collect_layer_filaments(const Print &print)
+//
+// `only` (by-object sequence): restrict the walk to that one object. A sequential print prints
+// each object on its own, so an extruder that some OTHER object uses at this z is not already
+// active here and must not count as free.
+static LayerFilamentTable chameleon_collect_layer_filaments(const Print &print, const PrintObject *only = nullptr)
 {
     if (chameleon_mixed_gradient_active(print))
         return {};
@@ -3593,6 +3601,8 @@ static LayerFilamentTable chameleon_collect_layer_filaments(const Print &print)
     std::vector<std::pair<double, unsigned>> raw;
     for (const PrintObject *object : print.objects()) {
         if (object == nullptr || object->get_shared_object() != nullptr)
+            continue;
+        if (only != nullptr && object != only)
             continue;
         for (const Layer *layer : object->layers()) {
             if (layer == nullptr)
@@ -3618,6 +3628,104 @@ static LayerFilamentTable chameleon_collect_layer_filaments(const Print &print)
         }
     }
     return build_layer_filament_table(std::move(raw));
+}
+
+// Support filament matching, "visible surface" rule (fix/support-filament-matching-paint-brim).
+//
+// One wall piece of an object layer that a support can actually stand against: a wall path
+// clipped to the ring within one external-perimeter width of the layer's outline, tagged with
+// the filament that prints it (0-based, chameleon_region_extruder).
+struct ChameleonWallPiece
+{
+    Polyline polyline;
+    unsigned extruder;
+};
+
+static void chameleon_collect_wall_polylines(const ExtrusionEntity *entity, const PrintRegion &region,
+                                             std::map<unsigned, Polylines> &out)
+{
+    if (entity == nullptr)
+        return;
+    if (entity->is_collection()) {
+        for (const ExtrusionEntity *child : static_cast<const ExtrusionEntityCollection *>(entity)->entities)
+            chameleon_collect_wall_polylines(child, region, out);
+        return;
+    }
+    auto add_path = [&](const ExtrusionPath &path) {
+        if (path.polyline.points.size() < 2)
+            return;
+        out[chameleon_region_extruder(region, path.role() == erExternalPerimeter)].emplace_back(path.polyline.points);
+    };
+    if (const auto *path = dynamic_cast<const ExtrusionPath *>(entity)) {
+        add_path(*path);
+    } else if (const auto *multipath = dynamic_cast<const ExtrusionMultiPath *>(entity)) {
+        for (const ExtrusionPath &path : multipath->paths)
+            add_path(path);
+    } else if (const auto *loop = dynamic_cast<const ExtrusionLoop *>(entity)) {
+        for (const ExtrusionPath &path : loop->paths)
+            add_path(path);
+    }
+}
+
+// The visible walls of one object layer. A part that is multi-material painted all over while its
+// volume is assigned a different filament (the typical CAD import: the paint is right, the
+// assignment is not) slices into a painted claim along the surface and the unpainted base region
+// inside it. With a bounded paint depth the base region gets its own loop of EXTERNAL perimeter
+// along that colour boundary, deep inside the part, printed in the assigned filament; every inner
+// wall is inside the part too. None of that can be seen, and none of it can touch a support - but
+// before this rule all of it was a wall sample, and on the reported part the assigned filament
+// carried nearly half of the samples in every contact band (CHAMELEON_DEBUG), so nearest-wall votes
+// under a painted overhang picked the invisible colour. Only wall paths inside the ring within one
+// external-perimeter width of Layer::lslices (the merged outline of every region) are kept. Should
+// clipping leave nothing (degenerate geometry), the unclipped walls are returned, so this rule
+// never turns a layer that had samples into a zero-sample one.
+static std::vector<ChameleonWallPiece> chameleon_visible_wall_pieces(const Layer &layer)
+{
+    std::map<unsigned, Polylines> by_extruder;
+    coord_t                       ext_width = 0;
+    for (const LayerRegion *lr : layer.regions()) {
+        if (lr == nullptr || lr->perimeters.entities.empty())
+            continue;
+        ext_width = std::max(ext_width, coord_t(lr->flow(frExternalPerimeter).scaled_width()));
+        chameleon_collect_wall_polylines(&lr->perimeters, lr->region(), by_extruder);
+    }
+
+    std::vector<ChameleonWallPiece> out;
+    if (by_extruder.empty())
+        return out;
+    if (ext_width > 0 && !layer.lslices.empty()) {
+        // Everything deeper than one external-perimeter width inside the outline.
+        const ExPolygons interior = offset_ex(layer.lslices, -float(ext_width));
+        for (const auto &[extruder, polylines] : by_extruder)
+            for (Polyline &pl : interior.empty() ? Polylines(polylines) : diff_pl(polylines, interior))
+                if (pl.points.size() >= 2)
+                    out.push_back({ std::move(pl), extruder });
+    }
+    if (out.empty())
+        for (auto &[extruder, polylines] : by_extruder)
+            for (Polyline &pl : polylines)
+                out.push_back({ std::move(pl), extruder });
+    return out;
+}
+
+// The filament with the most visible wall length over `pieces` (ties -> lowest id). False when
+// there is none.
+static bool chameleon_dominant_wall_extruder(const std::vector<const std::vector<ChameleonWallPiece> *> &pieces,
+                                             unsigned                                                    &out)
+{
+    std::map<unsigned, double> length;
+    for (const std::vector<ChameleonWallPiece> *layer_pieces : pieces)
+        for (const ChameleonWallPiece &piece : *layer_pieces)
+            length[piece.extruder] += piece.polyline.length();
+    bool   found = false;
+    double best  = 0.;
+    for (const auto &[extruder, len] : length)
+        if (!found || len > best) { // std::map is ordered, so a tie keeps the lower id
+            found = true;
+            best  = len;
+            out   = extruder;
+        }
+    return found;
 }
 
 // Chameleon P2.1: support match pass (renamed from "interface partition pass" - v2.1
@@ -3705,9 +3813,18 @@ static LayerFilamentTable chameleon_collect_layer_filaments(const Print &print)
 // this sits in the pipeline; unlike Part 1's brim pass, no post-hoc union hack is needed
 // because this pass always runs first).
 //
-// Off (checkbox unchecked / single extruder / ByObject sequence): this function returns
+// Off (checkbox unchecked / single extruder): this function returns
 // immediately without touching support_fills or interface_by_extruder on ANY object -
-// byte-identical gcode is a hard requirement (spec's off-mode purity). The
+// byte-identical gcode is a hard requirement (spec's off-mode purity). By-object sequence
+// used to be "off" too, which is why the checkbox did nothing on sequential plates and their
+// support kept printing in whatever filament happened to be active - layer by layer the
+// part's assigned filament (still used for its unpainted core) and its painted one, mixed.
+// A sequential print prints each object with its own tool ordering (ToolOrdering(const
+// PrintObject&) registers interface_by_extruder exactly like the plate-wide one), so the pass
+// now runs for it as well; the only by-object difference is that the free-extruder table is
+// built per object (chameleon_collect_layer_filaments' `only`). Print::apply already
+// regenerates the support of opted-in objects when print_sequence changes, so no partition
+// made under one sequence survives into the other. The
 // `support_filament_matching.value` gate (below) is the WHOLE opt-in - v2.4 deleted the
 // second per-object mode branch that gate used to feed (the old `nearest_wall_mode`
 // local and its else-arm), and v2.6 replaced the manual/nearest_wall enum itself with
@@ -3715,11 +3832,11 @@ static LayerFilamentTable chameleon_collect_layer_filaments(const Print &print)
 // per-object branching left.
 static void chameleon_assign_support_interfaces(Print &print)
 {
-    if (print.extruders().size() <= 1 || print.config().print_sequence == PrintSequence::ByObject)
+    if (print.extruders().size() <= 1)
         return;
+    const bool by_object = print.config().print_sequence == PrintSequence::ByObject;
 
     PrintObjectPtrs &objects  = print.objects_mutable();
-    const Point      no_shift(0, 0); // supports and walls share object coordinates (no instance shift)
 
     // CHAMELEON_DEBUG (v2.5c diagnostic instrumentation): checked ONCE per pass
     // invocation, here - not per object, not per layer, not per sample - so every
@@ -3731,7 +3848,8 @@ static void chameleon_assign_support_interfaces(Print &print)
     // v2.3 Task 1 (spec C1): once per PASS (not once per object) - every object's walls/
     // solid/sparse infill contribute to the SAME free-extruder table, since the whole
     // point is "is some extruder already printing at this z ANYWHERE on the plate".
-    const LayerFilamentTable layer_filament_table = chameleon_collect_layer_filaments(print);
+    // By-object sequence: built per object inside the loop instead (see the function comment).
+    const LayerFilamentTable plate_filament_table = by_object ? LayerFilamentTable{} : chameleon_collect_layer_filaments(print);
 
     for (size_t obj_idx = 0; obj_idx < objects.size(); ++obj_idx) {
         PrintObject *object = objects[obj_idx];
@@ -3770,13 +3888,116 @@ static void chameleon_assign_support_interfaces(Print &print)
         if (object->has_support_group_interface_filament())
             continue;
 
-        const unsigned object_default_extruder = chameleon_object_default_extruder(print, *object);
+        // By-object sequence: this object's own free-extruder table (see the function comment).
+        const LayerFilamentTable layer_filament_table = by_object ? chameleon_collect_layer_filaments(print, object) : plate_filament_table;
+
+        // Visible walls per object layer (chameleon_visible_wall_pieces), built on first use: a
+        // support layer reads its coplanar layer and a contact band of ~16 layers above it, so
+        // every object layer is read by many support layers.
+        std::vector<std::vector<ChameleonWallPiece>> visible_walls(object->layers().size());
+        std::vector<char>                            visible_walls_done(object->layers().size(), 0);
+        auto visible_walls_of = [&](size_t li) -> const std::vector<ChameleonWallPiece> & {
+            if (!visible_walls_done[li]) {
+                visible_walls[li]       = chameleon_visible_wall_pieces(*object->layers()[li]);
+                visible_walls_done[li]  = 1;
+            }
+            return visible_walls[li];
+        };
+        auto dominant_visible_wall = [&](const std::vector<size_t> &layer_indices, unsigned &out) {
+            std::vector<const std::vector<ChameleonWallPiece> *> pieces;
+            pieces.reserve(layer_indices.size());
+            for (size_t li : layer_indices)
+                if (li < object->layers().size())
+                    pieces.push_back(&visible_walls_of(li));
+            return chameleon_dominant_wall_extruder(pieces, out);
+        };
+
+        // The object's surface filament: the filament with the most VISIBLE wall length, sampled
+        // over up to 64 evenly spread layers. It replaces chameleon_object_default_extruder (the
+        // lowest filament id among first-layer regions with ANY extrusion, infill included) as the
+        // object-wide last resort: on a part painted all over in B but assigned A, the unpainted
+        // core region still prints infill in A on the first layer, so "lowest id" handed support
+        // that nothing else resolved to A whenever A < B. The old value is kept only for an object
+        // with no walls at all.
+        unsigned object_surface_extruder = chameleon_object_default_extruder(print, *object);
+        {
+            std::vector<size_t> sample_layers;
+            const size_t        n    = object->layers().size();
+            const size_t        step = std::max<size_t>(1, n / 64);
+            for (size_t li = 0; li < n; li += step)
+                sample_layers.push_back(li);
+            dominant_visible_wall(sample_layers, object_surface_extruder);
+        }
+
+        // Per support layer, a "don't care" support role (support_filament / support_interface_
+        // filament = 0) falls back to the SURFACE filament around that layer instead of one
+        // object-wide id: the dominant visible wall filament of the layers the support layer is
+        // coplanar with, else of its contact band, else the object's surface filament. An
+        // explicitly configured filament stays the fallback for its role, as before.
+        const bool interface_dontcare = object->config().support_interface_filament.value <= 0;
+        const bool base_dontcare      = object->config().support_filament.value <= 0;
+
+        // The filaments this object's parts are ASSIGNED (0-based; 0 in the config means the
+        // first filament). See the projection lookups below for what they are needed for.
+        std::set<unsigned> assigned_extruders;
+        for (const ModelVolume *volume : object->model_object()->volumes)
+            if (volume != nullptr && volume->is_model_part())
+                assigned_extruders.insert(unsigned(std::max(1, volume->extruder_id()) - 1));
+
+        // Per object layer, built on first use: a sample index of its visible walls.
+        std::map<const Layer *, size_t> layer_index_of;
+        for (size_t li = 0; li < object->layers().size(); ++li)
+            layer_index_of.emplace(object->layers()[li], li);
+        std::vector<std::unique_ptr<WallSampleIndex>> visible_wall_index(object->layers().size());
+        auto visible_wall_index_of = [&](size_t li) -> const WallSampleIndex & {
+            if (!visible_wall_index[li]) {
+                visible_wall_index[li] = std::make_unique<WallSampleIndex>();
+                for (const ChameleonWallPiece &piece : visible_walls_of(li))
+                    visible_wall_index[li]->add_polyline(piece.polyline.points, piece.extruder, obj_idx);
+            }
+            return *visible_wall_index[li];
+        };
+
+        // Painted-part rule for the upward projection (see the projection lookups below): the
+        // projection resolves the region directly above a support sample, on `hit_layer`. When
+        // that region prints in one of the object's ASSIGNED filaments and no visible wall of that
+        // same layer does, it is the unpainted core of a painted part showing through - the paint
+        // claim is only so deep, and where it does not cover an underside the core prints its
+        // own filament there. On a part imported with the wrong assigned filament and painted
+        // over, that filament is exactly the one the support must not take: the sample takes
+        // the filament of the nearest visible wall of the hit layer instead - the paint around
+        // that underside. An assigned filament that IS on a visible wall of the hit layer (an
+        // unpainted part, the unpainted half of a partly painted one) and any painted region's
+        // filament are kept. Returns false (a miss) only if the layer has no visible wall at all.
+        auto resolve_core_hit = [&](const Layer *hit_layer, const Point &p, unsigned &extruder) -> bool {
+            if (hit_layer == nullptr || assigned_extruders.count(extruder) == 0)
+                return true;
+            const auto it = layer_index_of.find(hit_layer);
+            if (it == layer_index_of.end())
+                return true;
+            for (const ChameleonWallPiece &piece : visible_walls_of(it->second))
+                if (piece.extruder == extruder)
+                    return true;
+            const auto nearest = visible_wall_index_of(it->second).knn(p, 1);
+            if (nearest.empty())
+                return false;
+            extruder = nearest.front().first->extruder;
+            return true;
+        };
+        auto layer_surface_extruder = [&](const std::vector<size_t> &coplanar, const std::vector<size_t> &contact) {
+            unsigned e = object_surface_extruder;
+            if (!dominant_visible_wall(coplanar, e))
+                dominant_visible_wall(contact, e);
+            return e;
+        };
+
         // Spec-mandated fallback: the object's resolved interface extruder, mirroring
         // ToolOrdering's own scalar computation (ToolOrdering.cpp ~709) for the case
-        // where no per-layer match beats it.
-        const unsigned fallback_extruder = object->config().support_interface_filament.value > 0
+        // where no per-layer match beats it. (Object-level value: logging and the per-layer
+        // default below; each support layer resolves its own, see layer_surface_extruder.)
+        const unsigned fallback_extruder = !interface_dontcare
             ? unsigned(object->config().support_interface_filament.value - 1)
-            : object_default_extruder;
+            : object_surface_extruder;
         // v2.1 base fallback: mirrors ToolOrdering's own BASE scalar computation
         // (ToolOrdering.cpp ~704: extruder_support = resolve_mixed(object.config().
         // support_filament.value, ...)) the same APPROXIMATE way the interface fallback
@@ -3785,9 +4006,9 @@ static void chameleon_assign_support_interfaces(Print &print)
         // mix resolution (that's the "mixed filament" gradient-printing feature, orthogonal
         // to this pass's role-mixing). Good enough for a last-resort default when no
         // per-point match beats it, same as the interface case.
-        const unsigned base_fallback_extruder = object->config().support_filament.value > 0
+        const unsigned base_fallback_extruder = !base_dontcare
             ? unsigned(object->config().support_filament.value - 1)
-            : object_default_extruder;
+            : object_surface_extruder;
 
         // Ascending object-layer TOP z values, for select_contact_layers (VLH-safe: keyed
         // by z overlap, not index arithmetic).
@@ -3935,13 +4156,23 @@ static void chameleon_assign_support_interfaces(Print &print)
         size_t base_proj_hits         = 0;
         size_t base_proj_misses       = 0;
 
+        // Plate layers (see the plate guard below), resolved after this loop once the layer above
+        // them has its final colours.
+        std::vector<SupportLayer *> plate_layers;
+
         for (SupportLayer *support_layer : object->support_layers()) {
             if (support_layer == nullptr || support_layer->support_fills.entities.empty())
                 continue;
-            // Plate guard: the first support layer (touching the build plate) always
-            // keeps the fallback extruder - never split its plate adhesion.
-            if (support_layer->print_z <= first_layer_top_z + EPSILON)
+            // Plate guard: the first support layer (touching the build plate) is never
+            // partitioned - never split its plate adhesion, and its geometry stays in
+            // support_fills where the brim, skirt and first-layer island code read it. It is
+            // not left to "don't care" any more either (that printed the support brim pads in
+            // whatever filament the first layer happened to start with - neither the part's nor
+            // the support's): see the plate-layer block after this loop.
+            if (support_layer->print_z <= first_layer_top_z + EPSILON) {
+                plate_layers.push_back(support_layer);
                 continue;
+            }
             // C1 fix, guard (b): this layer was already visited by an earlier pass over
             // the SAME SupportLayer object - either the shared source this object's copy
             // aliases (belt-and-suspenders backstop for guard (a) above, in case that
@@ -4162,18 +4393,20 @@ static void chameleon_assign_support_interfaces(Print &print)
             for (size_t li : union_layer_indices(contact_idx, coplanar_idx)) {
                 std::map<unsigned, size_t>  debug_band_li_counts;
                 std::map<unsigned, size_t> *debug_band_li_counts_ptr = chameleon_debug_on ? &debug_band_li_counts : nullptr;
-                for (const LayerRegion *lr : object->layers()[li]->regions())
-                    chameleon_collect_wall_samples(&lr->perimeters, lr->region(),
-                        no_shift, obj_idx, band_idx, debug_band_li_counts_ptr);
+                // Visible walls only (chameleon_visible_wall_pieces): no inner walls, no colour-
+                // boundary loops inside a painted part. Supports and walls share object
+                // coordinates, so no instance shift.
+                const std::vector<ChameleonWallPiece> &pieces = visible_walls_of(li);
+                for (const ChameleonWallPiece &piece : pieces)
+                    band_idx.add_polyline(piece.polyline.points, piece.extruder, obj_idx, /*spacing_mm=*/0.8, debug_band_li_counts_ptr);
                 if (chameleon_debug_on)
                     debug_band_samples.emplace_back(li, std::move(debug_band_li_counts));
 
                 if (coplanar_idx_set.count(li)) {
                     std::map<unsigned, size_t>  debug_coplanar_li_counts;
                     std::map<unsigned, size_t> *debug_coplanar_li_counts_ptr = chameleon_debug_on ? &debug_coplanar_li_counts : nullptr;
-                    for (const LayerRegion *lr : object->layers()[li]->regions())
-                        chameleon_collect_wall_samples(&lr->perimeters, lr->region(),
-                            no_shift, obj_idx, coplanar_wall_idx, debug_coplanar_li_counts_ptr);
+                    for (const ChameleonWallPiece &piece : pieces)
+                        coplanar_wall_idx.add_polyline(piece.polyline.points, piece.extruder, obj_idx, /*spacing_mm=*/0.8, debug_coplanar_li_counts_ptr);
                     if (chameleon_debug_on)
                         debug_coplanar_samples.emplace_back(li, std::move(debug_coplanar_li_counts));
                 }
@@ -4197,6 +4430,13 @@ static void chameleon_assign_support_interfaces(Print &print)
             // bucket like any other (v2.5c: fallback buckets too), not a special case.
             zero_sample = band_idx.empty() && coplanar_wall_idx.empty();
 
+            // This layer's own "nothing matched" answer for a don't-care role (see
+            // layer_surface_extruder above); an explicitly configured filament keeps its role.
+            const unsigned layer_surface_extruder_id = layer_surface_extruder(coplanar_idx, contact_idx);
+            const unsigned layer_fallback_extruder      = interface_dontcare ? layer_surface_extruder_id : fallback_extruder;
+            const unsigned layer_base_fallback_extruder = base_dontcare ? layer_surface_extruder_id : base_fallback_extruder;
+            vote_params.fallback_extruder = layer_fallback_extruder;
+
             // CHAMELEON_DEBUG: common per-layer line prefix, built once here so both the
             // zero-sample early-exit just below and the full engine-call path further
             // down emit the same fields - only the trailing `buckets=` segment differs
@@ -4210,8 +4450,8 @@ static void chameleon_assign_support_interfaces(Print &print)
                     "obj="            + std::to_string(obj_idx) +
                     " print_z="       + chameleon_debug_format_mm(support_layer->print_z) +
                     " height="        + chameleon_debug_format_mm(support_layer->height) +
-                    " fallback="      + std::to_string(fallback_extruder) +
-                    " base_fallback=" + std::to_string(base_fallback_extruder) +
+                    " fallback="      + std::to_string(layer_fallback_extruder) +
+                    " base_fallback=" + std::to_string(layer_base_fallback_extruder) +
                     " free_windowed=" + chameleon_debug_format_ids(free_extruders) +
                     " free_strict="   + chameleon_debug_format_ids(free_extruders_exempt) +
                     // v2.5g: base's own projection depth limit for THIS layer - see this
@@ -4296,11 +4536,18 @@ static void chameleon_assign_support_interfaces(Print &print)
                 // needed, is recovered further down by snapshotting these same shared
                 // counters around the specific engine call that's currently running -
                 // see proj_hits_before_base's own comment at that call site.
+                //
+                // Painted-part rule (fix/support-filament-matching-paint-brim): every hit goes
+                // through resolve_core_hit (above the per-layer loop), so the unpainted core of a
+                // painted part never hands its assigned filament to the support under it.
                 std::function<bool(const Point &, unsigned &)> projection_lookup =
                     [&projection_view, &projection_view_layers, &debug_projection_hits,
-                     &debug_projection_misses](const Point &p, unsigned &out_extruder) -> bool {
-                        const bool hit = chameleon_projection_extruder_from_view(
-                            projection_view, projection_view_layers, p, out_extruder);
+                     &debug_projection_misses, &resolve_core_hit](const Point &p, unsigned &out_extruder) -> bool {
+                        const Layer *hit_layer = nullptr;
+                        const bool   hit       = chameleon_projection_extruder_from_view(
+                            projection_view, projection_view_layers, p, out_extruder,
+                            std::numeric_limits<size_t>::max(), &hit_layer) &&
+                            resolve_core_hit(hit_layer, p, out_extruder);
                         if (hit)
                             ++debug_projection_hits;
                         else
@@ -4325,9 +4572,11 @@ static void chameleon_assign_support_interfaces(Print &print)
                 // unaffected by which of the two lookups actually produced the hit/miss).
                 std::function<bool(const Point &, unsigned &)> base_projection_lookup =
                     [&projection_view, &projection_view_layers, base_view_count, &debug_projection_hits,
-                     &debug_projection_misses](const Point &p, unsigned &out_extruder) -> bool {
-                        const bool hit = chameleon_projection_extruder_from_view(
-                            projection_view, projection_view_layers, p, out_extruder, base_view_count);
+                     &debug_projection_misses, &resolve_core_hit](const Point &p, unsigned &out_extruder) -> bool {
+                        const Layer *hit_layer = nullptr;
+                        const bool   hit       = chameleon_projection_extruder_from_view(
+                            projection_view, projection_view_layers, p, out_extruder, base_view_count, &hit_layer) &&
+                            resolve_core_hit(hit_layer, p, out_extruder);
                         if (hit)
                             ++debug_projection_hits;
                         else
@@ -4350,7 +4599,7 @@ static void chameleon_assign_support_interfaces(Print &print)
                 // replaces (formerly built inline, right here, pre-v2.5e).
                 const ChameleonSupportResolvers resolvers = chameleon_build_support_resolvers(
                     band_idx, coplanar_wall_idx, projection_lookup, base_projection_lookup, vote_params,
-                    fallback_extruder, base_fallback_extruder);
+                    layer_fallback_extruder, layer_base_fallback_extruder);
                 interface_resolver = resolvers.interface_resolver;
                 base_resolver      = resolvers.base_resolver;
                 ironing_resolver   = resolvers.ironing_resolver;
@@ -4369,6 +4618,10 @@ static void chameleon_assign_support_interfaces(Print &print)
                     chameleon_debug_log(chameleon_debug_line +
                         " proj_hits=0 proj_misses=0 proj_hits_base=0 proj_misses_base=0 buckets=");
                 ++layers_zero_sample;
+                // The support stays in support_fills; its don't-care roles print in this
+                // layer's surface filament instead of whatever extruder is active
+                // (SupportLayer::chameleon_residual_extruder).
+                support_layer->chameleon_residual_extruder = int(layer_surface_extruder_id);
                 support_layer->chameleon_interface_visited = true;
                 continue;
             }
@@ -4389,7 +4642,7 @@ static void chameleon_assign_support_interfaces(Print &print)
             DescendColumnMap descended_this_layer;
 
             const size_t interface_switches = partition_support_entities(support_layer->support_fills,
-                erSupportMaterialInterface, fallback_extruder, interface_resolver, vote_params, partitioned,
+                erSupportMaterialInterface, layer_fallback_extruder, interface_resolver, vote_params, partitioned,
                 &descended_this_layer);
 
             // v2.5f (v2.5e review M3 fix, base half): debug_projection_hits/misses are
@@ -4409,7 +4662,7 @@ static void chameleon_assign_support_interfaces(Print &print)
             const size_t proj_misses_before_base = debug_projection_misses;
 
             const size_t base_switches = partition_support_entities(support_layer->support_fills,
-                erSupportMaterial, base_fallback_extruder, base_resolver, vote_params, partitioned,
+                erSupportMaterial, layer_base_fallback_extruder, base_resolver, vote_params, partitioned,
                 &descended_this_layer);
 
             // v2.5f: base's own isolated projection hit/miss count for THIS layer - see
@@ -4441,7 +4694,7 @@ static void chameleon_assign_support_interfaces(Print &print)
             // correct: apply_bucket_caps' total_path_length_mm already recurses into any
             // nested collection a bucket might hold, per C7).
             const size_t ironing_switches = partition_support_entities(support_layer->support_fills,
-                erIroning, fallback_extruder, ironing_resolver, vote_params, partitioned,
+                erIroning, layer_fallback_extruder, ironing_resolver, vote_params, partitioned,
                 &descended_this_layer);
 
             interface_runs_matched += interface_switches;
@@ -4525,7 +4778,11 @@ static void chameleon_assign_support_interfaces(Print &print)
             // else: partitioned can be empty only via (a) an all-degenerate layer (every
             // entity Unchanged under the empty-chain guard) or (b) apply_bucket_caps gating/
             // trimming everything with no-survivor merge-back (support_fills already holds
-            // that geometry back). interface_by_extruder stays empty either way.
+            // that geometry back). interface_by_extruder stays empty either way, so GCode's
+            // dominant-bucket pin has nothing to pin to: the don't-care roles of what is left
+            // print in this layer's surface filament rather than the active extruder.
+            else if (!support_layer->support_fills.entities.empty())
+                support_layer->chameleon_residual_extruder = int(layer_surface_extruder_id);
 
             // Hysteresis (v2.3 Task 1, spec C2): this layer reached the engine calls, so
             // chameleon_update_prev_kept (BrimFilament.hpp/.cpp - see its own doc
@@ -4543,6 +4800,55 @@ static void chameleon_assign_support_interfaces(Print &print)
             // fresh accumulation is the whole next-layer state, not an addition to it.
             descended_last_layer = std::move(descended_this_layer);
             support_layer->chameleon_interface_visited = true;
+        }
+
+        // Plate layers (the support brim pads under every column of a tree support, the first
+        // layer of a normal support). They are never partitioned (plate guard above), and they
+        // used to be left to "don't care" - i.e. whatever filament the first layer's tool order
+        // happened to start with, often neither the part's nor the support's. Rule: a plate
+        // layer prints in the filament the support directly above it prints in - the one with
+        // the most extrusion length on the next support layer that prints anything (its matched
+        // buckets, plus its leftover support at the filament GCode pins that to). Without one,
+        // the surface filament of the plate layer's own object layers. Without a raft this
+        // replaces an explicitly configured support/interface filament too (the pads belong to
+        // their columns, and matching already decides the columns' colour); with a raft only a
+        // don't-care role follows, the raft's base stays in the configured support filament.
+        // Re-running is idempotent: the layer above is visited once and keeps its result.
+        for (SupportLayer *plate : plate_layers) {
+            const SupportLayer *above = nullptr;
+            for (const SupportLayer *sl : object->support_layers())
+                if (sl != nullptr && sl->print_z > plate->print_z + EPSILON &&
+                    (!sl->support_fills.entities.empty() || !sl->interface_by_extruder.empty())) {
+                    above = sl;
+                    break;
+                }
+            std::map<unsigned, double> length;
+            if (above != nullptr) {
+                for (const auto &[extruder, bucket] : above->interface_by_extruder)
+                    length[extruder] += total_path_length_mm(bucket);
+                if (!above->support_fills.entities.empty()) {
+                    int residual = above->chameleon_residual_extruder;
+                    if (residual < 0)
+                        residual = chameleon_dominant_matched_extruder(above->interface_by_extruder);
+                    if (residual >= 0)
+                        length[unsigned(residual)] += total_path_length_mm(above->support_fills);
+                }
+            }
+            unsigned winner = 0;
+            bool     found  = false;
+            double   best   = 0.;
+            for (const auto &[extruder, len] : length)
+                if (!found || len > best) { // ordered map: a tie keeps the lower id
+                    found  = true;
+                    best   = len;
+                    winner = extruder;
+                }
+            if (!found)
+                winner = layer_surface_extruder(select_layers_overlapping_span(layer_print_zs, plate->print_z - plate->height, plate->print_z,
+                                                                               object->layers().front()->print_z - object->layers().front()->height),
+                                                {});
+            plate->chameleon_residual_extruder  = int(winner);
+            plate->chameleon_residual_all_roles = object->config().raft_layers.value == 0;
         }
 
         // v2.4 (spec A): "mode=nearest_wall" is now a constant, not a per-object

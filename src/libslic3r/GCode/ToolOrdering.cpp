@@ -766,6 +766,17 @@ void ToolOrdering::collect_extruders(const PrintObject &object, const std::vecto
                                                         float(support_layer->print_z),
                                                         float(support_layer->height),
                                                         &object);
+        // Support filament matching: the filament the pass chose for this layer's leftover support
+        // (SupportLayer::chameleon_residual_extruder, -1 everywhere else) replaces "don't care" -
+        // and, on a plate layer without a raft, a configured filament too - so the tool it prints
+        // with is scheduled here. Mirrors the pin in GCode::process_layer exactly.
+        if (support_layer->chameleon_residual_extruder >= 0) {
+            const unsigned int pinned = unsigned(support_layer->chameleon_residual_extruder) + 1;
+            if (object.config().support_filament.value == 0 || support_layer->chameleon_residual_all_roles)
+                extruder_support = pinned;
+            if (object.config().support_interface_filament.value == 0 || support_layer->chameleon_residual_all_roles)
+                extruder_interface = pinned;
+        }
         if (has_support)
             layer_tools.extruders.push_back(extruder_support);
         if (has_interface)

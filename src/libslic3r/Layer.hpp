@@ -306,6 +306,16 @@ public:
     // the layers (PrintObject::clear_support_layers deletes the old SupportLayer objects
     // and add_support_layer/add_tree_support_layer allocate new ones).
     bool                         chameleon_interface_visited = false;
+    // Support filament matching: the filament (0-based) chosen for the support this layer still
+    // prints from support_fills when nothing on it was matched into interface_by_extruder - the
+    // plate layer (support brim pads), a layer with no wall samples, a layer whose buckets were all
+    // gated away. -1 = none (every layer of an object that does not match, and every layer with
+    // buckets, where GCode pins leftovers to the dominant bucket instead). Applies to the
+    // "don't care" support roles; with chameleon_residual_all_roles (plate layer, no raft) to an
+    // explicitly configured support / interface filament as well. Read by ToolOrdering (to
+    // schedule it) and GCode (to print with it). Reset with the layer like the flag above.
+    int                          chameleon_residual_extruder  = -1;
+    bool                         chameleon_residual_all_roles = false;
     SupportInnerType            support_type = stInnerNormal;
 
     // for tree supports
