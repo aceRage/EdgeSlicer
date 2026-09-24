@@ -5,6 +5,10 @@
 #include <set>
 #include <thread>
 
+#ifdef _WIN32
+#  include <windows.h>
+#endif
+
 namespace Slic3r {
 
 using tcp = boost::asio::ip::tcp;
@@ -24,6 +28,13 @@ struct ServerLifetime::State
     {
         boost::system::error_code ig;
         s->shutdown(tcp::socket::shutdown_both, ig);
+#ifdef _WIN32
+        // On Windows shutdown() alone does not wake a recv() that is already blocked in another
+        // thread (it only sends the FIN; the unit test caught this). Cancelling every I/O request
+        // outstanding on the handle does: the blocked recv returns WSAEINTR. Closing the handle
+        // would too, but asio would then close it a second time when the owner destroys it.
+        ::CancelIoEx(reinterpret_cast<HANDLE>(s->native_handle()), nullptr);
+#endif
     }
 };
 
