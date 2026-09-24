@@ -249,6 +249,13 @@ public:
     // If the file is loaded successfully, its print / filament / printer profiles will be activated.
     ConfigSubstitutions         load_config_file(const std::string &path, ForwardCompatibilitySubstitutionRule compatibility_rule);
 
+    // Ultra: called with every config read from a file the user imports - preset JSON files and
+    // bundles (import_presets) and the config block of a G-code file (load_config_file) - before it
+    // becomes a preset. source names the file. The GUI uses it to strip post-processing scripts and
+    // similar settings the user did not write themselves (see UntrustedInput.hpp); project 3MFs go
+    // through the same check in Plater. Empty = no filter (CLI, tests).
+    std::function<void(const std::string &source, DynamicPrintConfig &config)> untrusted_config_filter;
+
     // Load a config bundle file, into presets and store the loaded presets into separate files
     // of the local configuration directory.
     // Load settings into the provided settings instance.

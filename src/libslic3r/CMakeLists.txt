@@ -556,6 +556,8 @@ set(lisbslic3r_sources
     TriangulateWall.hpp
     utils.cpp
     Utils.hpp
+    UntrustedInput.cpp
+    UntrustedInput.hpp
     VariableWidth.cpp
     VariableWidth.hpp
     Zipper.cpp
