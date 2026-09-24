@@ -668,6 +668,12 @@ private:
 
     int m_timelapse_warning_code = 0;
     bool m_support_traditional_timelapse = true;
+    // BBL timelapse on a dual-nozzle machine: the (logical, 0-based) extruder that takes the
+    // per-layer photo, BambuStudio's ToolOrdering::get_most_used_extruder(). Set at the start of
+    // every process_layers() run; 0 whenever the plate has no nozzle grouping.
+    int m_timelapse_photo_extruder = 0;
+    int timelapse_extruder_of_filament(int filament_id) const;
+    int timelapse_physical_extruder(int extruder_id) const;
 
     bool m_silent_time_estimator_enabled;
 
