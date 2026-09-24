@@ -355,3 +355,72 @@ SCENARIO("H2D: no second change_filament block for the filament the start G-code
         }
     }
 }
+
+// Owner's H2C, 2026-09-24: on a print-by-object plate the idle hotend was cooled at each filament change
+// and then heated back to print temperature for the whole next object. The object-start temperature
+// lines (_print_first_layer_extruder_temperatures) set BOTH hotends, and the 2nd-layer transition set
+// every hotend that holds a filament. Only the hotend that prints may be set; the idle one is heated by
+// its own tool change (M620.10 A1 ... P<temp>) or by the idle-nozzle pre-heat ("... pre heating").
+SCENARIO("H2D print by object: the idle hotend is never set to print temperature", "[H2DByObject]")
+{
+    for (const bool tower : { false, true }) {
+        GIVEN(std::string("filaments right, left, right; first layer 230, other layers 220; prime tower ") + (tower ? "on" : "off"))
+        {
+            DynamicPrintConfig cfg = h2d_config("by object", tower);
+            cfg.set_deserialize_strict({
+                { "nozzle_temperature_initial_layer", "230,230,230" },
+                { "nozzle_temperature", "220,220,220" },
+            });
+            Print print;
+            Model model;
+            add_objects(model, { 1, 2, 3 });
+            const std::string              gcode = slice(print, model, cfg);
+            const std::vector<std::string> lines = body_lines(gcode);
+
+            // filament_map 2,1,2 with physical_extruder_map [1,0]: filaments 0 and 2 print on hotend 0.
+            auto hotend_of = [](int filament) { return filament == 1 ? 1 : 0; };
+            static const std::regex re_tool(R"(^T(\d+)( |$))");
+            static const std::regex re_temp(R"(^M10[49] [^;]*S(\d+)[^;]*T(\d+))");
+            static const std::regex re_temp2(R"(^M10[49] [^;]*T(\d+)[^;]*S(\d+))");
+            int    loaded = -1;
+            bool   printing = false;
+            size_t object_starts = 0, active_lines = 0;
+            for (size_t i = 0; i < lines.size(); ++i) {
+                const std::string &line = lines[i];
+                std::smatch        m;
+                if (line.rfind("; start printing object", 0) == 0) {
+                    printing = true;
+                    ++object_starts;
+                    continue;
+                }
+                if (std::regex_search(line, m, re_tool)) {
+                    const int t = std::stoi(m[1].str());
+                    if (t < 255)
+                        loaded = t;
+                    continue;
+                }
+                if (!printing || loaded < 0 || line.find("pre heating") != std::string::npos)
+                    continue;
+                int temp = -1, tool = -1;
+                if (std::regex_search(line, m, re_temp)) {
+                    temp = std::stoi(m[1].str());
+                    tool = std::stoi(m[2].str());
+                } else if (std::regex_search(line, m, re_temp2)) {
+                    tool = std::stoi(m[1].str());
+                    temp = std::stoi(m[2].str());
+                } else
+                    continue;
+                if (temp == 0)
+                    continue; // the end G-code switching the hotends off
+                CAPTURE(i, line, loaded);
+                if (tool == hotend_of(loaded))
+                    ++active_lines;
+                else
+                    CHECK(temp < 200); // a pre-cool at most, never print temperature
+            }
+            CHECK(object_starts >= 3);
+            // The printing hotend still gets its object-start and 2nd-layer temperatures.
+            CHECK(active_lines >= 4);
+        }
+    }
+}

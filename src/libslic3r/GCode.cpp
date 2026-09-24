@@ -4506,22 +4506,15 @@ void GCode::_print_first_layer_extruder_temperatures(
             if (temp > 0)
                 file.write(m_writer.set_temperature(temp, wait, first_printing_extruder_id));
         } else if (is_bbl_multi_extruder()) {
-            // Bambu two-extruder printer (reached between objects of a print-by-object plate): one line
-            // per PHYSICAL hotend. "M104 S<t> T<filament index>" named a hotend that does not exist
-            // for filament slots >= 2 (e.g. "M104 S220 T6"), and the wrong hotend for slots 0/1.
-            // The hotend that prints next gets the next filament's first-layer temperature and is
-            // written last; the other one gets the first-layer temperature of the first used
-            // filament assigned to it.
-            const int        active_tool = temperature_tool_for_filament(int(first_printing_extruder_id));
-            std::map<int, int> temp_by_tool;
-            for (unsigned int tool_id : print.extruders()) {
-                const int tool = temperature_tool_for_filament(int(tool_id));
-                const int temp = print.config().nozzle_temperature_initial_layer.get_at(tool_id);
-                if (tool != active_tool && temp > 0 && temp_by_tool.find(tool) == temp_by_tool.end())
-                    temp_by_tool[tool] = temp;
-            }
-            for (const auto &[tool, temp] : temp_by_tool)
-                file.write(m_writer.set_temperature(temp, wait, tool));
+            // Bambu two-extruder printer (reached between objects of a print-by-object plate). M104 T is
+            // a PHYSICAL hotend: "M104 S<t> T<filament index>" named a hotend that does not exist for
+            // filament slots >= 2 (e.g. "M104 S220 T6"), and the wrong hotend for slots 0/1.
+            // Only the hotend that prints the next object is set, to its first filament's first-layer
+            // temperature. The other hotend is idle: setting it to print temperature here heated a
+            // hotend the idle-nozzle pre-cooling had just cooled, for the whole object (owner's H2C,
+            // 2026-09-24). It is heated again by its own tool change ("M620.10 A1 ... P<temp>") or,
+            // with pre-cooling, by the pre-heat timed for its next use.
+            const int active_tool = temperature_tool_for_filament(int(first_printing_extruder_id));
             const int active_temp = print.config().nozzle_temperature_initial_layer.get_at(first_printing_extruder_id);
             if (active_temp > 0)
                 file.write(m_writer.set_temperature(active_temp, wait, active_tool));
@@ -5896,22 +5889,16 @@ LayerResult GCode::process_layer(const Print& print,
         // Transition from 1st to 2nd layer. Adjust nozzle temperatures as prescribed by the nozzle dependent
         // nozzle_temperature_initial_layer vs. temperature settings.
         if (is_bbl_multi_extruder() && !print.config().single_extruder_multi_material.value) {
-            // Bambu two-extruder printer: M104 T is a PHYSICAL hotend. Set each hotend for the filament
-            // it holds now (the active one first), never "T<filament index>".
-            std::vector<int> loaded;
-            if (m_writer.extruder() != nullptr)
-                loaded.push_back(int(m_writer.extruder()->id()));
-            for (const auto &[nozzle, filament] : m_filament_in_nozzle)
-                if (filament >= 0)
-                    loaded.push_back(filament);
-            std::set<int> done_tools;
-            for (int filament : loaded) {
-                const int tool = temperature_tool_for_filament(filament);
-                if (!done_tools.insert(tool).second)
-                    continue;
+            // Bambu two-extruder printer: M104 T is a PHYSICAL hotend, never "T<filament index>". Only
+            // the hotend that is printing is set. The idle one gets its temperature from its own tool
+            // change ("M620.10 A1 ... P<new_filament_temp>") or, with the idle-nozzle pre-cooling, from
+            // the pre-heat timed for its next use; heating it here undid that pre-cool (on a
+            // print-by-object plate, at the 2nd layer of every object).
+            if (m_writer.extruder() != nullptr) {
+                const int filament    = int(m_writer.extruder()->id());
                 const int temperature = print.config().nozzle_temperature.get_at(filament);
                 if (temperature > 0 && temperature != print.config().nozzle_temperature_initial_layer.get_at(filament))
-                    gcode += m_writer.set_temperature(temperature, false, tool);
+                    gcode += m_writer.set_temperature(temperature, false, temperature_tool_for_filament(filament));
             }
         } else
         for (const Extruder& extruder : m_writer.extruders()) {
