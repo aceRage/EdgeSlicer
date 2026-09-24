@@ -137,6 +137,7 @@
 #include "3DBed.hpp"
 #include "PartPlate.hpp"
 #include "RemoteAccess.hpp"
+#include "UntrustedSettingsGuard.hpp"
 #include "DualNozzleState.hpp"
 #include "Camera.hpp"
 #include "Mouse3DController.hpp"
@@ -12029,6 +12030,13 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                                             << boost::format(", plate_data.size %1%, project_preset.size %2%, is_bbs_3mf %3%, file_version %4% \n") % plate_data.size() %
                                                    project_presets.size() % (en_3mf_file_type == En3mfType::From_BBS) % file_version.to_string();
 
+                    // Ultra: a project may not bring post-processing scripts (programs this PC would run on
+                    // export / slice), an output name that leaves the output folder, or print-host
+                    // endpoints along silently - neither in its settings nor in its embedded presets.
+                    // Our own crash backup (Restore) is not a foreign file.
+                    if (load_config && !(strategy & LoadStrategy::Restore))
+                        guard_untrusted_settings(into_u8(from_path(real_filename)), &config_loaded, &project_presets);
+
                     auto imported_string_count = [&config_loaded](const char *key) -> size_t {
                         if (const auto *opt = config_loaded.option<ConfigOptionStrings>(key))
                             return opt->values.size();
@@ -12679,6 +12687,7 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
 
                 // BBS:: project embedded presets
                 if (project_presets.size() > 0) {
+                    guard_untrusted_settings(into_u8(from_path(real_filename)), nullptr, &project_presets);
                     // load project embedded presets
                     PresetsConfigSubstitutions preset_substitutions;
                     PresetBundle &             preset_bundle = *wxGetApp().preset_bundle;
@@ -18819,6 +18828,26 @@ void Plater::import_model_id(wxString download_info)
     catch (const std::exception&)
     {
         //wxString sError = error.what();
+    }
+
+    // Ultra: this is reached from "Open in" links and from web pages. The file is fetched only
+    // over https from a public host (the host allowlist and the "unknown site" question are the
+    // Downloader's, before it gets here), and the name it is saved under is a plain file name in
+    // the download folder: "&name=../../x.3mf" or an absolute path used to write anywhere.
+    {
+        const std::string url_u8 = into_u8(download_url);
+        const untrusted::DownloadCheck check = untrusted::check_model_download(url_u8, "bambustudioopen");
+        if (check.verdict == untrusted::DownloadVerdict::Refuse) {
+            BOOST_LOG_TRIVIAL(error) << "import_model_id: refused (" << check.reason << ")";
+            MessageDialog(nullptr, format_wxstr(_L("The model was not downloaded: %1%"), from_u8(check.reason)), wxEmptyString,
+                          wxICON_WARNING | wxOK).ShowModal();
+            return;
+        }
+        std::string name = into_u8(filename);
+        const size_t query = name.find_first_of("?#");
+        if (query != std::string::npos)
+            name = name.substr(0, query);
+        filename = from_u8(untrusted::sanitize_download_filename(name));
     }
 
     bool download_ok = false;

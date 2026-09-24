@@ -272,6 +272,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/HttpServer.hpp
     GUI/PageServerSecurity.cpp
     GUI/PageServerSecurity.hpp
+    GUI/UntrustedSettingsGuard.cpp
+    GUI/UntrustedSettingsGuard.hpp
     GUI/I18N.cpp
     GUI/I18N.hpp
     GUI/IconManager.cpp
