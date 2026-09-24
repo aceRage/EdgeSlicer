@@ -259,6 +259,79 @@ void TempInput::SetMaxTemp(int temp) { max_temp = temp; }
 
 void TempInput::SetMinTemp(int temp) { min_temp = temp; }
 
+void TempInput::SetBadge(const wxString &badge, bool highlight)
+{
+    if (badge == m_badge && highlight == m_badge_highlight) return;
+    const bool relayout = badge.IsEmpty() != m_badge.IsEmpty();
+    m_badge           = badge;
+    m_badge_highlight = highlight;
+    if (relayout) {
+        // The badge shifts the target-temperature field; re-run the size pass so the text
+        // control moves with it.
+        messureMiniSize();
+        messureSize();
+        wxSize sz = GetSize();
+        DoSetSize(-1, -1, sz.x, sz.y, wxSIZE_AUTO);
+    }
+    Refresh();
+}
+
+int TempInput::badge_extent() const
+{
+    if (m_badge.IsEmpty()) return 0;
+    return FromDIP(16) + FromDIP(4);
+}
+
+void TempInput::draw_badge(wxDC &dc, const wxPoint &pt)
+{
+    if (m_badge.IsEmpty()) return;
+
+    const int     d = FromDIP(16);
+    const wxPoint at(pt.x, (GetSize().y - d) / 2);
+
+    // Same look as Bambu Studio's "round" badge (#262E30 disc, white letter; inverted in dark
+    // mode), with the active extruder in the accent colour.
+    wxColour fill, letter;
+    if (!IsEnabled()) {
+        fill   = StateColor::darkModeColorFor(wxColour("#ACACAC"));
+        letter = *wxWHITE;
+    } else if (m_badge_highlight) {
+        fill   = StateColor::darkModeColorFor(wxColour("#009688"));
+        letter = *wxWHITE;
+    } else {
+        fill   = StateColor::darkModeColorFor(wxColour("#262E30"));
+        letter = StateColor::darkModeColorFor(*wxWHITE);
+    }
+
+    auto paint = [&](wxDC &gdc, const wxPoint &o) {
+        gdc.SetPen(*wxTRANSPARENT_PEN);
+        gdc.SetBrush(wxBrush(fill));
+        gdc.DrawEllipse(o, wxSize(d, d));
+        gdc.SetFont(::Label::Body_12);
+        gdc.SetTextForeground(letter);
+        gdc.SetBackgroundMode(wxBRUSHSTYLE_TRANSPARENT);
+        const wxSize ts = gdc.GetTextExtent(m_badge);
+        gdc.DrawText(m_badge, o.x + (d - ts.x) / 2, o.y + (d - ts.y) / 2);
+    };
+
+#ifdef __WXMSW__
+    // GDI draws aliased circles; paint through a GC on a copy of the background instead
+    // (the same trick AMSextruderImage uses).
+    wxMemoryDC memdc;
+    wxBitmap   bmp(d, d);
+    memdc.SelectObject(bmp);
+    memdc.Blit({0, 0}, {d, d}, &dc, at);
+    {
+        wxGCDC gcdc(memdc);
+        paint(gcdc, {0, 0});
+    }
+    memdc.SelectObject(wxNullBitmap);
+    dc.DrawBitmap(bmp, at);
+#else
+    paint(dc, at);
+#endif
+}
+
 void TempInput::SetLabel(const wxString &label)
 {
     wxWindow::SetLabel(label);
@@ -281,6 +354,7 @@ void TempInput::SetLabelColor(StateColor const &color)
 void TempInput::Rescale()
 {
     if (this->normal_icon.bmp().IsOk()) this->normal_icon.msw_rescale();
+    if (this->actice_icon.bmp().IsOk()) this->actice_icon.msw_rescale();
     if (this->degree_icon.bmp().IsOk()) this->degree_icon.msw_rescale();
     messureSize();
 }
@@ -323,6 +397,9 @@ void TempInput::DoSetSize(int x, int y, int width, int height, int sizeFlags)
 
     // interval
     left += 9;
+
+    // extruder badge
+    left += badge_extent();
 
     // label
     dc.SetFont(::Label::Head_14);
@@ -394,6 +471,12 @@ void TempInput::render(wxDC &dc)
         pt.x += szIcon.x + 9;
     }
 
+    // extruder badge
+    if (!m_badge.IsEmpty()) {
+        draw_badge(dc, pt);
+        pt.x += badge_extent();
+    }
+
     // label
     auto text = wxWindow::GetLabel();
     dc.SetFont(::Label::Head_14);
@@ -460,6 +543,9 @@ void TempInput::messureMiniSize()
     // interval
     width += 9;
 
+    // extruder badge
+    width += badge_extent();
+
     // label
     dc.SetFont(::Label::Head_14);
     labelSize = dc.GetMultiLineTextExtent(wxWindow::GetLabel());
@@ -487,6 +573,12 @@ void TempInput::messureMiniSize()
 
     if (size.x < width) {
         size.x = width;
+        if (!m_badge.IsEmpty()) {
+            // The badge can push the content past the configured minimum; grow the minimum so
+            // the sizer does not clip the degree sign (only badged rows, the rest is unchanged).
+            padding_left = 0;
+            wxWindow::SetMinSize(wxSize(width, GetMinSize().y));
+        }
     } else {
         padding_left = (size.x - width) / 2;
     }
@@ -513,6 +605,9 @@ void TempInput::messureSize()
 
     // interval
     width += 9;
+
+    // extruder badge
+    width += badge_extent();
 
     // label
     dc.SetFont(::Label::Head_14);

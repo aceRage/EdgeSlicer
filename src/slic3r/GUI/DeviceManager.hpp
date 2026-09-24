@@ -1072,6 +1072,9 @@ public:
     int command_task_resume();
     int command_set_bed(int temp);
     int command_set_nozzle(int temp);
+    // Per-extruder target on multi-nozzle printers (H2D/H2C/X2D): extruder_index 0 = right/main,
+    // 1 = left/deputy. Same payload Bambu Studio sends ("set_nozzle_temp").
+    int command_set_nozzle_new(int extruder_index, int temp);
     int command_set_chamber(int temp);
     // ams controls
     //int command_ams_switch(int tray_index, int old_temp = 210, int new_temp = 210);

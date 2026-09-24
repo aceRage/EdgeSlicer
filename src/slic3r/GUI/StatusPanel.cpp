@@ -17,6 +17,7 @@
 
 #include "RecenterDialog.hpp"
 #include "CalibUtils.hpp"
+#include "NozzleTempRows.hpp"
 #include <slic3r/GUI/Widgets/ProgressDialog.hpp>
 #include <wx/display.h>
 #include <wx/mstream.h>
@@ -123,6 +124,9 @@ static wxImage fail_image;
 #define MISC_BUTTON_2FAN_SIZE (wxSize(FromDIP(66), FromDIP(51)))
 #define MISC_BUTTON_3FAN_SIZE (wxSize(FromDIP(44), FromDIP(51)))
 #define TEMP_CTRL_MIN_SIZE (wxSize(FromDIP(122), FromDIP(52)))
+// The two nozzle rows of a two-nozzle printer are a little shorter so the column does not grow
+// by a full row (Bambu Studio does the same, 52 -> 48).
+#define TEMP_CTRL_DUAL_MIN_SIZE (wxSize(FromDIP(122), FromDIP(44)))
 #define AXIS_MIN_SIZE (wxSize(FromDIP(220), FromDIP(220)))
 #define EXTRUDER_IMAGE_SIZE (wxSize(FromDIP(48), FromDIP(76)))
 
@@ -1218,6 +1222,19 @@ wxBoxSizer *StatusBasePanel::create_temp_control(wxWindow *parent)
     m_tempCtrl_nozzle->SetTextColor(tempinput_text_colour);
     m_tempCtrl_nozzle->SetBorderColor(tempinput_border_colour);
 
+    // Left nozzle of two-nozzle printers; shown by StatusPanel::set_nozzle_temp_layout.
+    wxWindowID nozzle_deputy_id = wxWindow::NewControlId();
+    m_tempCtrl_nozzle_deputy    = new TempInput(parent, nozzle_deputy_id, TEMP_BLANK_STR, TEMP_BLANK_STR, wxString("monitor_nozzle_temp"),
+                                             wxString("monitor_nozzle_temp_active"), wxDefaultPosition, wxDefaultSize, wxALIGN_CENTER);
+    m_tempCtrl_nozzle_deputy->SetMinSize(TEMP_CTRL_MIN_SIZE);
+    m_tempCtrl_nozzle_deputy->SetMinTemp(nozzle_temp_range[0]);
+    m_tempCtrl_nozzle_deputy->SetMaxTemp(nozzle_temp_range[1]);
+    m_tempCtrl_nozzle_deputy->SetBorderWidth(FromDIP(2));
+    m_tempCtrl_nozzle_deputy->SetTextColor(tempinput_text_colour);
+    m_tempCtrl_nozzle_deputy->SetBorderColor(tempinput_border_colour);
+    m_tempCtrl_nozzle_deputy->Hide();
+
+    sizer->Add(m_tempCtrl_nozzle_deputy, 0, wxEXPAND | wxALL, 1);
     sizer->Add(m_tempCtrl_nozzle, 0, wxEXPAND | wxALL, 1);
 
     m_line_nozzle = new StaticLine(parent);
@@ -1392,6 +1409,8 @@ void StatusBasePanel::reset_temp_misc_control()
     // reset temp string
     m_tempCtrl_nozzle->SetLabel(TEMP_BLANK_STR);
     m_tempCtrl_nozzle->GetTextCtrl()->SetValue(TEMP_BLANK_STR);
+    m_tempCtrl_nozzle_deputy->SetLabel(TEMP_BLANK_STR);
+    m_tempCtrl_nozzle_deputy->GetTextCtrl()->SetValue(TEMP_BLANK_STR);
     m_tempCtrl_bed->SetLabel(TEMP_BLANK_STR);
     m_tempCtrl_bed->GetTextCtrl()->SetValue(TEMP_BLANK_STR);
     m_tempCtrl_chamber->SetLabel(TEMP_BLANK_STR);
@@ -1399,6 +1418,7 @@ void StatusBasePanel::reset_temp_misc_control()
     m_button_unload->Show();
 
     m_tempCtrl_nozzle->Enable(true);
+    m_tempCtrl_nozzle_deputy->Enable(true);
     m_tempCtrl_chamber->Enable(true);
     m_tempCtrl_bed->Enable(true);
 
@@ -1743,6 +1763,8 @@ StatusPanel::StatusPanel(wxWindow *parent, wxWindowID id, const wxPoint &pos, co
             on_set_bed_temp();
         } else if (id == m_tempCtrl_nozzle->GetType()) {
             on_set_nozzle_temp();
+        } else if (id == m_tempCtrl_nozzle_deputy->GetType()) {
+            on_set_nozzle_deputy_temp();
         } else if (id == m_tempCtrl_chamber->GetType()) {
             on_set_chamber_temp();
         }
@@ -1763,6 +1785,8 @@ StatusPanel::StatusPanel(wxWindow *parent, wxWindowID id, const wxPoint &pos, co
     m_tempCtrl_bed->Connect(wxEVT_SET_FOCUS, wxFocusEventHandler(StatusPanel::on_bed_temp_set_focus), NULL, this);
     m_tempCtrl_nozzle->Connect(wxEVT_KILL_FOCUS, wxFocusEventHandler(StatusPanel::on_nozzle_temp_kill_focus), NULL, this);
     m_tempCtrl_nozzle->Connect(wxEVT_SET_FOCUS, wxFocusEventHandler(StatusPanel::on_nozzle_temp_set_focus), NULL, this);
+    m_tempCtrl_nozzle_deputy->Connect(wxEVT_KILL_FOCUS, wxFocusEventHandler(StatusPanel::on_nozzle_deputy_temp_kill_focus), NULL, this);
+    m_tempCtrl_nozzle_deputy->Connect(wxEVT_SET_FOCUS, wxFocusEventHandler(StatusPanel::on_nozzle_deputy_temp_set_focus), NULL, this);
     m_tempCtrl_chamber->Connect(wxEVT_KILL_FOCUS, wxFocusEventHandler(StatusPanel::on_cham_temp_kill_focus), NULL, this);
     m_tempCtrl_chamber->Connect(wxEVT_SET_FOCUS, wxFocusEventHandler(StatusPanel::on_cham_temp_set_focus), NULL, this);
     m_switch_lamp->Connect(wxEVT_COMMAND_BUTTON_CLICKED, wxCommandEventHandler(StatusPanel::on_lamp_switch), NULL, this);
@@ -1822,6 +1846,8 @@ StatusPanel::~StatusPanel()
     m_tempCtrl_bed->Disconnect(wxEVT_SET_FOCUS, wxFocusEventHandler(StatusPanel::on_bed_temp_set_focus), NULL, this);
     m_tempCtrl_nozzle->Disconnect(wxEVT_KILL_FOCUS, wxFocusEventHandler(StatusPanel::on_nozzle_temp_kill_focus), NULL, this);
     m_tempCtrl_nozzle->Disconnect(wxEVT_SET_FOCUS, wxFocusEventHandler(StatusPanel::on_nozzle_temp_set_focus), NULL, this);
+    m_tempCtrl_nozzle_deputy->Disconnect(wxEVT_KILL_FOCUS, wxFocusEventHandler(StatusPanel::on_nozzle_deputy_temp_kill_focus), NULL, this);
+    m_tempCtrl_nozzle_deputy->Disconnect(wxEVT_SET_FOCUS, wxFocusEventHandler(StatusPanel::on_nozzle_deputy_temp_set_focus), NULL, this);
     m_switch_lamp->Disconnect(wxEVT_COMMAND_BUTTON_CLICKED, wxCommandEventHandler(StatusPanel::on_lamp_switch), NULL, this);
     m_switch_nozzle_fan->Disconnect(wxEVT_COMMAND_TOGGLEBUTTON_CLICKED, wxCommandEventHandler(StatusPanel::on_nozzle_fan_switch), NULL, this);
     m_switch_printing_fan->Disconnect(wxEVT_COMMAND_TOGGLEBUTTON_CLICKED, wxCommandEventHandler(StatusPanel::on_nozzle_fan_switch), NULL, this);
@@ -2383,6 +2409,7 @@ void StatusPanel::show_printing_status(bool ctrl_area, bool temp_area)
 
     if (!temp_area) {
         m_tempCtrl_nozzle->Enable(false);
+        m_tempCtrl_nozzle_deputy->Enable(false);
         m_tempCtrl_bed->Enable(false);
         m_tempCtrl_chamber->Enable(false);
         m_switch_speed->Enable(false);
@@ -2393,6 +2420,7 @@ void StatusPanel::show_printing_status(bool ctrl_area, bool temp_area)
         m_switch_cham_fan->Enable(false);
     } else {
         m_tempCtrl_nozzle->Enable();
+        m_tempCtrl_nozzle_deputy->Enable();
         m_tempCtrl_bed->Enable();
         m_tempCtrl_chamber->Enable();
         m_switch_speed->Enable();
@@ -2424,24 +2452,63 @@ void StatusPanel::update_temp_ctrl(MachineObject *obj)
         m_tempCtrl_bed->SetIconNormal();
     }
 
-    m_tempCtrl_nozzle->SetCurrTemp((int) obj->m_extder_data.extders[0].temp);
-    if (obj->nozzle_max_temperature > -1) {
-        if (m_tempCtrl_nozzle) m_tempCtrl_nozzle->SetMaxTemp(obj->nozzle_max_temperature);
+    // Nozzle(s): one row per extruder on two-nozzle printers, the single row otherwise.
+    std::vector<NozzleTempRow> nozzle_rows;
+    {
+        std::vector<NozzleTempSample> samples;
+        for (const Extder &e : obj->m_extder_data.extders) samples.push_back({e.id, e.temp, e.target_temp});
+        nozzle_rows = nozzle_temp_rows(samples, obj->m_extder_data.total_extder_count, obj->m_extder_data.current_extder_id);
     }
-    else {
-        if (m_tempCtrl_nozzle) m_tempCtrl_nozzle->SetMaxTemp(nozzle_temp_range[1]);
-    }
-
-    if (m_temp_nozzle_timeout > 0) {
-        m_temp_nozzle_timeout--;
+    const bool dual_nozzle = nozzle_rows.size() == 2;
+    if (dual_nozzle) {
+        // Badges first: they change the rows' width, which the layout pass below measures.
+        m_nozzle_deputy_ctrl_extruder_id = nozzle_rows[0].extruder_id;
+        m_nozzle_ctrl_extruder_id        = nozzle_rows[1].extruder_id;
+        m_tempCtrl_nozzle_deputy->SetBadge(wxString::FromUTF8(nozzle_rows[0].badge), nozzle_rows[0].active);
+        m_tempCtrl_nozzle->SetBadge(wxString::FromUTF8(nozzle_rows[1].badge), nozzle_rows[1].active);
     } else {
-        if (!nozzle_temp_input) { m_tempCtrl_nozzle->SetTagTemp((int) obj->m_extder_data.extders[0].target_temp); }
+        m_nozzle_ctrl_extruder_id = 0;
     }
+    set_nozzle_temp_layout(dual_nozzle);
 
-    if ((obj->m_extder_data.extders[0].target_temp - obj->m_extder_data.extders[0].temp) >= TEMP_THRESHOLD_VAL) {
-        m_tempCtrl_nozzle->SetIconActive();
+    const int nozzle_max = obj->nozzle_max_temperature > -1 ? obj->nozzle_max_temperature : nozzle_temp_range[1];
+
+    if (!dual_nozzle) {
+        m_tempCtrl_nozzle->SetCurrTemp((int) obj->m_extder_data.extders[0].temp);
+        if (obj->nozzle_max_temperature > -1) {
+            if (m_tempCtrl_nozzle) m_tempCtrl_nozzle->SetMaxTemp(obj->nozzle_max_temperature);
+        }
+        else {
+            if (m_tempCtrl_nozzle) m_tempCtrl_nozzle->SetMaxTemp(nozzle_temp_range[1]);
+        }
+
+        if (m_temp_nozzle_timeout > 0) {
+            m_temp_nozzle_timeout--;
+        } else {
+            if (!nozzle_temp_input) { m_tempCtrl_nozzle->SetTagTemp((int) obj->m_extder_data.extders[0].target_temp); }
+        }
+
+        if ((obj->m_extder_data.extders[0].target_temp - obj->m_extder_data.extders[0].temp) >= TEMP_THRESHOLD_VAL) {
+            m_tempCtrl_nozzle->SetIconActive();
+        } else {
+            m_tempCtrl_nozzle->SetIconNormal();
+        }
     } else {
-        m_tempCtrl_nozzle->SetIconNormal();
+        auto update_row = [nozzle_max](TempInput *ctrl, const NozzleTempRow &row, int &hold_count, bool editing) {
+            ctrl->SetCurrTemp(row.temp);
+            ctrl->SetMaxTemp(nozzle_max);
+            if (hold_count > 0) {
+                hold_count--;
+            } else if (!editing) {
+                ctrl->SetTagTemp(row.target);
+            }
+            if (row.heating)
+                ctrl->SetIconActive();
+            else
+                ctrl->SetIconNormal();
+        };
+        update_row(m_tempCtrl_nozzle_deputy, nozzle_rows[0], m_temp_nozzle_deputy_timeout, nozzle_deputy_temp_input);
+        update_row(m_tempCtrl_nozzle, nozzle_rows[1], m_temp_nozzle_timeout, nozzle_temp_input);
     }
 
     m_tempCtrl_chamber->SetCurrTemp(obj->chamber_temp);
@@ -2459,6 +2526,32 @@ void StatusPanel::update_temp_ctrl(MachineObject *obj)
     else {
         m_tempCtrl_chamber->SetIconNormal();
     }
+}
+
+void StatusPanel::set_nozzle_temp_layout(bool dual)
+{
+    if (dual == m_nozzle_dual_layout) return;
+    m_nozzle_dual_layout = dual;
+
+    if (!dual) {
+        m_tempCtrl_nozzle->SetBadge(wxEmptyString);
+        m_tempCtrl_nozzle_deputy->SetBadge(wxEmptyString);
+        m_tempCtrl_nozzle_deputy->SetLabel(TEMP_BLANK_STR);
+        m_tempCtrl_nozzle_deputy->GetTextCtrl()->SetValue(TEMP_BLANK_STR);
+        m_tempCtrl_nozzle_deputy->SetIconNormal();
+        nozzle_deputy_temp_input     = false;
+        m_temp_nozzle_deputy_timeout = 0;
+    }
+    const wxSize row_size = dual ? TEMP_CTRL_DUAL_MIN_SIZE : TEMP_CTRL_MIN_SIZE;
+    m_tempCtrl_nozzle->SetMinSize(row_size);
+    m_tempCtrl_nozzle_deputy->SetMinSize(row_size);
+    m_tempCtrl_nozzle_deputy->Show(dual);
+
+    // The rows live in the temperature/axis box, which has its own sizer: size the box first,
+    // then lay out its children (its height may not change when only the row sizes do).
+    Layout();
+    if (wxWindow *box = m_tempCtrl_nozzle->GetParent()) box->Layout();
+    Refresh();
 }
 
 void StatusPanel::update_misc_ctrl(MachineObject *obj)
@@ -3510,17 +3603,46 @@ void StatusPanel::on_set_bed_temp()
 
 void StatusPanel::on_set_nozzle_temp()
 {
-    wxString str = m_tempCtrl_nozzle->GetTextCtrl()->GetValue();
+    send_nozzle_temp(m_tempCtrl_nozzle, m_temp_nozzle_timeout, m_nozzle_ctrl_extruder_id);
+}
+
+void StatusPanel::on_set_nozzle_deputy_temp()
+{
+    // Only reachable while the row is shown, i.e. on a two-nozzle printer.
+    if (!m_nozzle_dual_layout) return;
+    send_nozzle_temp(m_tempCtrl_nozzle_deputy, m_temp_nozzle_deputy_timeout, m_nozzle_deputy_ctrl_extruder_id);
+}
+
+void StatusPanel::send_nozzle_temp(TempInput *ctrl, int &hold_count, int extruder_id)
+{
+    wxString str = ctrl->GetTextCtrl()->GetValue();
     try {
         long nozzle_temp;
         if (str.ToLong(&nozzle_temp) && obj) {
-            set_hold_count(m_temp_nozzle_timeout);
-            if (nozzle_temp > m_tempCtrl_nozzle->get_max_temp()) {
-                nozzle_temp = m_tempCtrl_nozzle->get_max_temp();
-                m_tempCtrl_nozzle->SetTagTemp(wxString::Format("%d", nozzle_temp));
-                m_tempCtrl_nozzle->Warning(false);
+            if (m_nozzle_dual_layout) {
+                // Same guard as Bambu Studio: the printer ignores a target for an empty hotend slot.
+                for (const Extder &e : obj->m_extder_data.extders) {
+                    if (e.id == extruder_id && !e.nozzle_exist) {
+                        const wxString side = extruder_id == 1 ? _L("Left extruder") : _L("Right extruder");
+                        MessageDialog msg_dlg(this, wxString::Format(_L("%s hotend not detected. Cannot set nozzle temperature."), side), _L("Warning"),
+                                              wxICON_WARNING | wxOK);
+                        msg_dlg.ShowModal();
+                        return;
+                    }
+                }
             }
-            obj->command_set_nozzle(nozzle_temp);
+            set_hold_count(hold_count);
+            if (nozzle_temp > ctrl->get_max_temp()) {
+                nozzle_temp = ctrl->get_max_temp();
+                ctrl->SetTagTemp(wxString::Format("%d", nozzle_temp));
+                ctrl->Warning(false);
+            }
+            if (m_nozzle_dual_layout) {
+                BOOST_LOG_TRIVIAL(info) << "set nozzle temp: extruder " << extruder_id << " -> " << nozzle_temp;
+                obj->command_set_nozzle_new(extruder_id, nozzle_temp);
+            } else {
+                obj->command_set_nozzle(nozzle_temp);
+            }
         }
     } catch (...) {
         ;
@@ -4043,6 +4165,18 @@ void StatusPanel::on_nozzle_temp_set_focus(wxFocusEvent &event)
     nozzle_temp_input = true;
 }
 
+void StatusPanel::on_nozzle_deputy_temp_kill_focus(wxFocusEvent &event)
+{
+    event.Skip();
+    nozzle_deputy_temp_input = false;
+}
+
+void StatusPanel::on_nozzle_deputy_temp_set_focus(wxFocusEvent &event)
+{
+    event.Skip();
+    nozzle_deputy_temp_input = true;
+}
+
 void StatusPanel::on_switch_speed(wxCommandEvent &event)
 {
     auto now = boost::posix_time::microsec_clock::universal_time();
@@ -4518,8 +4652,10 @@ void StatusPanel::msw_rescale()
 
 
     m_bpButton_xy->Rescale();
-    m_tempCtrl_nozzle->SetMinSize(TEMP_CTRL_MIN_SIZE);
+    m_tempCtrl_nozzle->SetMinSize(m_nozzle_dual_layout ? TEMP_CTRL_DUAL_MIN_SIZE : TEMP_CTRL_MIN_SIZE);
     m_tempCtrl_nozzle->Rescale();
+    m_tempCtrl_nozzle_deputy->SetMinSize(m_nozzle_dual_layout ? TEMP_CTRL_DUAL_MIN_SIZE : TEMP_CTRL_MIN_SIZE);
+    m_tempCtrl_nozzle_deputy->Rescale();
     m_line_nozzle->SetSize(wxSize(-1, FromDIP(1)));
     m_tempCtrl_bed->SetMinSize(TEMP_CTRL_MIN_SIZE);
     m_tempCtrl_bed->Rescale();

@@ -2125,6 +2125,17 @@ int MachineObject::command_set_nozzle(int temp)
     return this->publish_gcode(gcode_str);
 }
 
+int MachineObject::command_set_nozzle_new(int extruder_index, int temp)
+{
+    json j;
+    j["print"]["sequence_id"]    = std::to_string(MachineObject::m_sequence_id++);
+    j["print"]["command"]        = "set_nozzle_temp";
+    j["print"]["extruder_index"] = extruder_index;
+    j["print"]["target_temp"]    = temp;
+
+    return this->publish_json(j.dump(), 1);
+}
+
 int MachineObject::command_set_chamber(int temp)
 {
     json j;

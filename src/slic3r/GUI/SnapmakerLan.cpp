@@ -480,6 +480,18 @@ static std::vector<Toolhead> toolheads_of(const json& status_obj)
     return out;
 }
 
+std::vector<std::pair<double, double>> nozzle_temps_of(const json& status_obj)
+{
+    std::vector<std::pair<double, double>> out;
+    for (int i = 0; i < TOOLHEAD_COUNT; ++i) {
+        const std::string ex = i == 0 ? "extruder" : ("extruder" + std::to_string(i));
+        if (!status_obj.contains(ex) || !status_obj[ex].is_object())
+            break;
+        out.emplace_back(num_of(status_obj[ex], "temperature"), num_of(status_obj[ex], "target"));
+    }
+    return out;
+}
+
 static Status probe(const Device& d, std::vector<Toolhead>* heads = nullptr)
 {
     Status      s;
@@ -524,6 +536,7 @@ static Status probe(const Device& d, std::vector<Toolhead>* heads = nullptr)
             s.nozzle_temp   = num_of(st["extruder"], "temperature");
             s.nozzle_target = num_of(st["extruder"], "target");
         }
+        s.nozzles = nozzle_temps_of(st);
     }
     return s;
 }
@@ -685,7 +698,12 @@ void list_printers(json& printers)
         p["can_print"]      = s.online && !s.login_required;
         p["bed_temp"]       = s.bed_temp;
         p["bed_target"]     = s.bed_target;
-        p["nozzles"]        = json::array({ json { { "temp", s.nozzle_temp }, { "target", s.nozzle_target } } });
+        // Every toolhead the probe saw (the U1 has four); the phone's card labels them nozzle 1..n.
+        p["nozzles"] = json::array();
+        for (const auto& n : s.nozzles)
+            p["nozzles"].push_back(json { { "temp", n.first }, { "target", n.second } });
+        if (p["nozzles"].empty())
+            p["nozzles"].push_back(json { { "temp", s.nozzle_temp }, { "target", s.nozzle_target } });
         p["toolheads"]      = toolheads_json(c.heads);
         // The predicates RemoteControl derives for any Moonraker printer, so the phone's Pause /
         // Resume / Stop buttons work on a printer found over the LAN too. `task` already names the

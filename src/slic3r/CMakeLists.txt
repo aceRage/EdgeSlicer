@@ -472,6 +472,7 @@ set(SLIC3R_GUI_SOURCES
     GUI/PluginGuard.cpp
     GUI/DeviceModelCode.hpp
     GUI/DeviceModelCode.cpp
+    GUI/NozzleTempRows.hpp
     GUI/SnapmakerLan.hpp
     GUI/RemoteHub.cpp
     GUI/RemoteHub.hpp
