@@ -27,6 +27,7 @@
 #include "libslic3r/format.hpp"
 #include "Time.hpp"
 #include "GCode/ExtrusionProcessor.hpp"
+#include "GCode/PreCoolingInjector.hpp"
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
@@ -710,7 +711,10 @@ std::string WipeTowerIntegration::append_tcr(GCode& gcodegen, const WipeTower::T
     // BambuStudio puts nozzle_change_gcode_trans (GCode.cpp:855-899). Rack machines only
     // (extruder_max_nozzle_count > 1); on P1S/H2D this whole block is skipped and the emitted
     // g-code is unchanged. See docs/superpowers/specs/2026-09-07-h2c-rack-nozzle-change.md.
-    if (has_nozzle_rack(gcodegen.m_config) && new_extruder_id >= 0) {
+    // BBS: a Bambu two-extruder printer that pre-heats (H2D, H2D Pro, X2D) gets the same markers around a
+    // change onto the other extruder: Bambu Studio writes them from WipeTower::ramming for every
+    // extruder change, and the idle-nozzle pre-cooling times the idle hotend from them.
+    if ((has_nozzle_rack(gcodegen.m_config) || gcodegen.m_pre_cooling_markers) && new_extruder_id >= 0) {
         auto group_result = gcodegen.m_curr_print ? gcodegen.m_curr_print->get_layered_nozzle_group_result() : nullptr;
         int old_filament_id = gcodegen.writer().extruder() ? (int) gcodegen.writer().extruder()->id() : -1;
         if (group_result && old_filament_id >= 0 && old_filament_id != (int) new_extruder_id) {
@@ -3428,6 +3432,11 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
 
     // Write the custom start G-code
     file.writeln(machine_start_gcode);
+    // BBS: mark the end of the machine start G-code for the idle-nozzle pre-cooling (BambuStudio
+    // GCode.cpp:2991). Written only when it applies, so no other printer's G-code changes.
+    m_pre_cooling_markers = PreCooling::pre_cooling_active(print);
+    if (m_pre_cooling_markers)
+        file.write_format(";%s\n", PreCooling::MachineStartGCodeEndMarker);
 
     // BBS: gcode writer doesn't know where the real position of extruder is after inserting custom gcode
     m_writer.set_current_position_clear(false);
@@ -3724,6 +3733,9 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
     // adds tag for processor
     file.write_format(";%s%s\n", GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Role).c_str(),
                       ExtrusionEntity::role_to_string(erCustom).c_str());
+    // BBS: mark the start of the machine end G-code for the idle-nozzle pre-cooling (BambuStudio GCode.cpp:3356).
+    if (m_pre_cooling_markers)
+        file.write_format(";%s\n", PreCooling::MachineEndGCodeStartMarker);
 
     // Process filament-specific gcode in extruder order.
     {
@@ -8008,8 +8020,15 @@ void GCode::append_full_config(const Print& print, std::string& str)
                                                          "print_host_webui"sv, "printhost_apikey"sv, "printhost_cafile"sv,
                                                          "printhost_user"sv, "printhost_password"sv, "printhost_port"sv});
     auto                                    is_banned = [](const std::string& key) { return banned_keys.find(key) != banned_keys.end(); };
+    // BBS: the idle-nozzle pre-heating keys are dumped (as Bambu Studio does) only for a printer that
+    // pre-heats; every other printer's config block stays as it was before the keys existed.
+    static const std::set<std::string_view> pre_heating_keys({"enable_pre_heating"sv, "filament_pre_cooling_temperature"sv,
+                                                              "filament_preheat_temperature_delta"sv});
+    const bool dump_pre_heating_keys = print.config().enable_pre_heating.value;
     std::ostringstream                      ss;
     for (const std::string& key : cfg.keys()) {
+        if (!dump_pre_heating_keys && pre_heating_keys.find(key) != pre_heating_keys.end())
+            continue;
         if (!is_banned(key) && !cfg.option(key)->is_nil()) {
             if (key == "wipe_tower_x" || key == "wipe_tower_y") {
                 ss << std::fixed << std::setprecision(3) << "; " << key << " = "

@@ -2502,6 +2502,28 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionInts { 0 });
 
+    // BBS: BambuStudio PrintConfig.cpp:3029. The extruder-change counterpart of the key above: the
+    // temperature the idle-nozzle pre-cooling (GCode/PreCoolingInjector) may drop the outgoing nozzle
+    // to while it still extrudes on the tower. 0 disables that partial cooling; the idle-window
+    // pre-cool itself does not need it. Read only when the printer sets enable_pre_heating.
+    def = this->add("filament_pre_cooling_temperature", coInts);
+    def->label = L("Extruder change");
+    def->tooltip = L("To prevent oozing, the nozzle temperature will be cooled during ramming. Therefore, the ramming time must be greater than the cooldown time. 0 means disabled.");
+    def->sidetext = "°C";
+    def->min = 0;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionInts { 0 });
+
+    // BBS: BambuStudio PrintConfig.cpp:2940. How far below its printing temperature the idle-nozzle
+    // pre-heating brings a nozzle back before it prints again (the tower wipe finishes the heat-up).
+    // Read only when the printer sets enable_pre_heating.
+    def = this->add("filament_preheat_temperature_delta", coFloats);
+    def->label = L("Preheat temperature delta");
+    def->tooltip = L("Temperature delta applied during pre-heating before tool change.");
+    def->sidetext = "°C";
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionFloats { 0. });
+
     // BBS (H2C rack): BambuStudio PrintConfig.cpp:4994. How far the firmware pulls the filament back
     // inside the OUTGOING hotend before a hotend change (M620.11 O1 T<len> in the H2C
     // change_filament_gcode). A racked nozzle has no electrical contact, so this has to happen while
@@ -3773,6 +3795,15 @@ void PrintConfigDef::init_fff_params()
     def = this->add("hotend_heating_rate", coFloats);
     def->nullable = true;
     def->set_default_value(new ConfigOptionFloatsNullable{ 2 });
+
+    // BBS: BambuStudio PrintConfig.cpp:2642. The printer cools an idle nozzle between uses and
+    // heats it back in time for its next use (GCode/PreCoolingInjector: "M104 T<hotend> S<t> N0
+    // ;Multi extruder pre cooling/heating"). Set by the Bambu H2D, H2D Pro, H2C and X2D profiles.
+    def = this->add("enable_pre_heating", coBool);
+    def->label = "Enable pre-heating";
+    def->tooltip = "Cool an idle nozzle between uses and heat it back before it prints again.";
+    def->mode = comDevelop;
+    def->set_default_value(new ConfigOptionBool(false));
 
     def = this->add("nozzle_flush_dataset", coInts);
     def->nullable = true;

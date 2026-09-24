@@ -41,6 +41,7 @@ add_executable(${_TEST_NAME}_tests
 	test_identity_filament_map.cpp
 	test_bambu_extruder_map.cpp
 	test_bambu_dual_nozzle_sync.cpp
+	test_bambu_idle_precool.cpp
 	test_export_stl_part.cpp
 	test_elephant_foot_compensation.cpp
 	test_fill_bed_pack.cpp

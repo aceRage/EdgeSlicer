@@ -668,6 +668,8 @@ private:
 
     int m_timelapse_warning_code = 0;
     bool m_support_traditional_timelapse = true;
+    // BBS: this export gets Bambu's idle-nozzle pre-cooling (GCode/PreCoolingInjector); set in _do_export.
+    bool m_pre_cooling_markers = false;
 
     bool m_silent_time_estimator_enabled;
 

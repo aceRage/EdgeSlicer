@@ -9,6 +9,7 @@
 
 #include <cstdint>
 #include <array>
+#include <map>
 #include <vector>
 #include <mutex>
 #include <string>
@@ -18,6 +19,7 @@
 namespace Slic3r {
 
 class Print;
+namespace PreCooling { struct Plan; }
 
 // Ultra: Bambu machine start/end/change gcode emits reserved T<n> markers (n > 254) that are NOT tool
 // changes and cost no print time: T255, T1000/T1001 (mech-sweep / hotend-type detection), T1100, and the
@@ -717,6 +719,19 @@ inline bool is_bbl_special_tool_command(int tool_number)
         bool m_wipe_tower;
         float m_remaining_volume;
         bool m_manual_filament_change;
+        // BBS pre-cooling: where the time estimator booked each synchronising wait (a tool change, G4,
+        // ...). calculate_time() adds that time to the OLDEST block still in the planner queue, which
+        // can be a few hundred moves before the command; plan_pre_cooling() moves it back onto its line.
+        // Recording only: the estimate and the G-code are not changed.
+        struct BookedTime
+        {
+            unsigned int line_id;      // the command's line
+            unsigned int first_g1_id;  // g1 line id the time was added to, (unsigned)-1 when it was dropped
+            float        time;
+            bool         tool_change;
+        };
+        std::vector<BookedTime> m_booked_times;
+        bool                    m_booking_tool_change{ false };
 
         //BBS: x, y offset for gcode generated
         double          m_x_offset{ 0 };
@@ -983,6 +998,10 @@ inline bool is_bbl_special_tool_command(int tool_number)
         // 1) add remaining time lines M73 and update moves' gcode ids accordingly
         // 2) update used filament data
         void run_post_process();
+        // BBS: plans the idle-nozzle pre-cooling / pre-heating lines of a Bambu two-extruder print from
+        // a scan of the finished G-code (GCode/PreCoolingInjector); keyed on run_post_process()'s input
+        // line ids, each entry is written right after its line.
+        std::map<unsigned int, std::vector<std::string>> plan_pre_cooling(const PreCooling::Plan &plan) const;
 
         //BBS: different path_type is only used for arc move
         void store_move_vertex(EMoveType type, EMovePathType path_type = EMovePathType::Noop_move);
