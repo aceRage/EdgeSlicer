@@ -418,6 +418,18 @@ ConfirmReason needs_confirmation(const Confirmation &stored, const PrinterState 
     return ConfirmReason::None;
 }
 
+SliceGate slice_gate(ConfirmReason reason, SliceTrigger trigger)
+{
+    if (reason == ConfirmReason::None)
+        return SliceGate::Proceed;
+    switch (trigger) {
+    case SliceTrigger::User: return SliceGate::ShowDialog;
+    case SliceTrigger::Background: return SliceGate::Defer;
+    case SliceTrigger::Remote: return SliceGate::Proceed;
+    }
+    return SliceGate::ShowDialog;
+}
+
 bool slice_invalidated_by(const std::string &sliced_dev, const std::string &sliced_fp, const PrinterState &state)
 {
     if (!state.has_report)

@@ -14596,25 +14596,6 @@ bool Plater::priv::restart_background_process(unsigned int state)
             print->set_ultra_ams_count({});
             DeviceManager* dev = wxGetApp().getDeviceManager();
             MachineObject* obj = dev ? dev->get_selected_machine() : nullptr;
-            // A plate grouped by hand (the pre-slice confirmation) slices with its own map; the AMS
-            // data below then only feeds the logs. Without either, the grouping falls back to Auto
-            // For Flush - say so instead of doing it silently (on the H2C that put every filament on
-            // the six-nozzle rack, 2026-09-23).
-            if (DualNozzle::preset_is_dual_nozzle_bambu()) {
-                PartPlate* cur_plate  = this->background_process.get_current_plate();
-                const bool manual_map = cur_plate && !cur_plate->get_manual_filament_map().empty();
-                const bool live_ams   = obj && obj->is_multi_extruders() && !obj->amsList.empty();
-                static int s_logged_plate = -2; // once per plate until it changes state, not per apply
-                const int  plate_no       = cur_plate ? cur_plate->get_index() + 1 : 0;
-                if (!manual_map && !live_ams) {
-                    if (s_logged_plate != plate_no)
-                        BOOST_LOG_TRIVIAL(warning) << "[DualNozzle] slicing plate " << plate_no
-                                                   << " without a confirmed arrangement or live AMS data: grouping falls back to Auto For Flush";
-                    s_logged_plate = plate_no;
-                } else if (s_logged_plate == plate_no) {
-                    s_logged_plate = -2;
-                }
-            }
             if (obj && obj->is_multi_extruders() && print->is_BBL_printer()) {
                 int ec = 0;
                 bool dual_nozzle_profile = const_cast<DynamicPrintConfig&>(print->full_print_config()).support_different_extruders(ec);
@@ -14653,6 +14634,24 @@ bool Plater::priv::restart_background_process(unsigned int state)
            (state & UPDATE_BACKGROUND_PROCESS_FORCE_EXPORT) != 0 ||
            (state & UPDATE_BACKGROUND_PROCESS_RESTART) != 0 ) ) {
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(", Line %1%: print is valid, try to start it now")%__LINE__;
+        // Bambu two-extruder printers: every slice passes the filament arrangement gate here,
+        // whatever started it - the Slice paths already ran the confirmation, but an automatic
+        // re-slice after an edit, an export that must slice first or a direct reslice did not, and
+        // silently grouped an unconfirmed plate with Auto For Flush (owner's first H2D slice,
+        // 2026-09-23). Only when there is slicing left to do: exporting a finished print is not a
+        // slice. A user-started slice counts as explicit; a Slice all continuation already had
+        // every plate confirmed up front, so a plate that still fails there is held back instead.
+        if (this->printer_technology == ptFFF && !this->background_process.finished()) {
+            const bool explicit_request = (state & UPDATE_BACKGROUND_PROCESS_FORCE_RESTART) != 0 && !this->m_slice_all;
+            if (!DualNozzle::allow_slice_start(q, this->background_process.get_current_plate(), explicit_request)) {
+                BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(", Line %1%: held back by the filament arrangement gate, state=%2%")%__LINE__%state;
+                return false;
+            }
+            if (DualNozzle::preset_is_dual_nozzle_bambu())
+                if (PartPlate* cur_plate = this->background_process.get_current_plate())
+                    BOOST_LOG_TRIVIAL(warning) << "[DualNozzle] plate " << cur_plate->get_index() + 1 << " slice starts (state " << state << ", "
+                                               << (cur_plate->get_manual_filament_map().empty() ? "automatic grouping" : "confirmed map") << ")";
+        }
         // The print is valid and it can be started.
         if (this->background_process.start()) {
             if (!show_warning_dialog)
