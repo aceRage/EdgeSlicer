@@ -1031,9 +1031,15 @@ PresetsConfigSubstitutions PresetBundle::import_presets(std::vector<std::string>
                 if (status) {
                     std::string file_name = file_stat.m_filename;
                     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " Form zip file: " << file << ". Read file name: " << file_stat.m_filename;
-                    size_t index = file_name.find_last_of('/');
+                    // Only the entry's own name is used, never its folders: "..\..\x" (a
+                    // Windows separator) used to climb out of the temp folder (zip-slip).
+                    size_t index = file_name.find_last_of("/\\");
                     if (std::string::npos != index) {
                         file_name = file_name.substr(index + 1);
+                    }
+                    if (!untrusted::is_safe_archive_relative_path(file_name)) {
+                        BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << " skipping bundle entry with an unsafe name: " << file_stat.m_filename;
+                        continue;
                     }
                     if (BUNDLE_STRUCTURE_JSON_NAME == file_name) continue;
                     // create target file path
@@ -1074,6 +1080,8 @@ bool PresetBundle::import_json_presets(PresetsConfigSubstitutions &            s
         ConfigSubstitutions                config_substitutions = config.load_from_json(file, rule, key_values, reason);
         std::string                        name                 = key_values[BBL_JSON_KEY_NAME];
         std::string                        version_str          = key_values[BBL_JSON_KEY_VERSION];
+        if (untrusted_config_filter)
+            untrusted_config_filter(name.empty() ? file : name, config);
         boost::optional<Semver>            version              = Semver::parse(version_str);
         if (!version) return false;
 
@@ -3045,6 +3053,8 @@ ConfigSubstitutions PresetBundle::load_config_file(const std::string &path, Forw
         BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << boost::format(" enter, gcodefile %1%, compatibility_rule %2%")%path %compatibility_rule;
 		config.apply(FullPrintConfig::defaults());
         ConfigSubstitutions config_substitutions = config.load_from_gcode_file(path, compatibility_rule);
+        if (untrusted_config_filter)
+            untrusted_config_filter(path, config);
         Preset::normalize(config);
 		load_config_file_config(path, true, std::move(config));
 		return config_substitutions;

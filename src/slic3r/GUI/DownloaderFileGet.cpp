@@ -18,7 +18,8 @@ namespace Slic3r {
 namespace GUI {
 
 const size_t DOWNLOAD_MAX_CHUNK_SIZE	= 10 * 1024 * 1024;
-const size_t DOWNLOAD_SIZE_LIMIT		= 1024 * 1024 * 1024;
+// Ultra: the model-file cap (500 MB), same as the MakerWorld import path.
+const size_t DOWNLOAD_SIZE_LIMIT		= untrusted::MODEL_DOWNLOAD_SIZE_LIMIT;
 
 std::string FileGet::escape_url(const std::string& unescaped)
 {
@@ -165,7 +166,10 @@ void FileGet::priv::get_perform()
 			final_filename = GUI::format("%1%(%2%)", just_filename, std::to_string(version));
 		}
 
-        m_filename = sanitize_filename(final_filename + extension);
+        // Ultra: a plain file name in the download folder, never a path ("..", "a\b", "C:").
+        m_filename = untrusted::sanitize_download_filename(final_filename + extension);
+        if (m_filename.empty())
+            m_filename = "download";
 
         m_tmp_path = m_dest_folder / (m_filename + "." + std::to_string(get_current_pid()) + ".download");
 
@@ -215,10 +219,17 @@ void FileGet::priv::get_perform()
 		.set_range(range_string)
 		.on_header_callback([&](std::string header) {
 			if(dest_path.empty()) {
-				std::string filename = extract_remote_filename(header);
-				if (!filename.empty()) {
-					m_filename = filename;
-					dest_path = m_dest_folder / m_filename;
+				// Ultra: the server names the file; it gets the same treatment as a name from the
+				// link (no path, a model type only) and never replaces a file already there.
+				std::string filename = untrusted::sanitize_download_filename(extract_remote_filename(header));
+				if (!filename.empty() && untrusted::has_model_extension(filename)) {
+					const boost::filesystem::path p(boost::nowide::widen(filename));
+					const std::wstring stem = p.stem().wstring(), ext = p.extension().wstring();
+					boost::filesystem::path candidate = m_dest_folder / p;
+					for (int version = 1; boost::filesystem::exists(candidate) && version < 1000; ++version)
+						candidate = m_dest_folder / (stem + L"(" + std::to_wstring(version) + L")" + ext);
+					m_filename = boost::nowide::narrow(candidate.filename().wstring());
+					dest_path = candidate;
 					//the signals not work
 					//wxCommandEvent* evt = new wxCommandEvent(EVT_DWNLDR_FILE_NAME_CHANGE);
 					//evt->SetString(boost::nowide::widen(m_filename));
@@ -305,6 +316,32 @@ void FileGet::priv::get_perform()
                 m_evt_handler->QueueEvent(evt);
             }
 			fclose(file);
+			// Ultra: only a model file whose bytes match its type is kept and opened.
+			{
+				std::string why;
+				if (dest_path.empty() || !untrusted::has_model_extension(boost::nowide::narrow(dest_path.filename().wstring())))
+					why = "the server did not send a 3MF, STL, STEP, OBJ or ZIP file";
+				else {
+					std::string head(512, '\0');
+					boost::nowide::ifstream in(m_tmp_path.string(), std::ios::binary);
+					in.read(&head[0], std::streamsize(head.size()));
+					head.resize(size_t(std::max<std::streamsize>(in.gcount(), 0)));
+					in.close();
+					boost::system::error_code ec;
+					const auto size = boost::filesystem::file_size(m_tmp_path, ec);
+					untrusted::content_matches_extension(boost::nowide::narrow(dest_path.filename().wstring()), head, ec ? 0 : size, &why);
+				}
+				if (!why.empty()) {
+					boost::system::error_code ec;
+					boost::filesystem::remove(m_tmp_path, ec);
+					BOOST_LOG_TRIVIAL(error) << "Download " << m_id << " refused: " << why;
+					wxCommandEvent* evt = new wxCommandEvent(EVT_DWNLDR_FILE_ERROR);
+					evt->SetString(GUI::from_u8(why));
+					evt->SetInt(m_id);
+					m_evt_handler->QueueEvent(evt);
+					return;
+				}
+			}
 			boost::filesystem::rename(m_tmp_path, dest_path);
 
 			wxCommandEvent* evt = new wxCommandEvent(EVT_DWNLDR_FILE_COMPLETE);

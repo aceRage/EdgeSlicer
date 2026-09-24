@@ -3,6 +3,9 @@
 #include "NotificationManager.hpp"
 #include "format.hpp"
 #include "MainFrame.hpp"
+#include "MsgDialog.hpp"
+#include "RemoteAccess.hpp"
+#include "I18N.hpp"
 
 #include <boost/algorithm/string.hpp>
 #include <boost/filesystem/path.hpp>
@@ -96,42 +99,22 @@ std::string filename_from_url(const std::string& url)
     return result;
 }
 
-// Payload is the part after "?file=" in a custom-scheme URL (still URL-encoded).
-struct SchemeDownloadPayload {
-    std::string file_url;
-    std::string name_param;
-};
-
-static SchemeDownloadPayload split_scheme_file_payload(const std::string& payload)
+// Ultra: the name the downloaded file gets in the download folder. The link's "&name=" wins,
+// then the last segment of the file URL; either way it is a plain file name (no folders, no "..",
+// no device names) and, when the link says what type it is, a model type. A name without a model
+// extension is left without one: FileGet then takes the type from the server's file name and
+// refuses anything but a model.
+static std::string resolve_download_filename(const std::string& file_url, const std::string& name_param)
 {
-    SchemeDownloadPayload out{ payload, {} };
-    static const std::string name_sep = "&name=";
-    const auto               pos    = payload.find(name_sep);
-
-    if (pos != std::string::npos) {
-        out.file_url    = payload.substr(0, pos);
-        out.name_param  = payload.substr(pos + name_sep.size());
-    }
-
-    return out;
-}
-
-static std::string resolve_download_filename(const std::string& http_url, const std::string& name_param_encoded)
-{
-    if (name_param_encoded.empty())
-        return filename_from_url(http_url);
-
-    std::string name = FileGet::escape_url(name_param_encoded);
-    name             = sanitize_filename(name);
+    const std::string from_url = untrusted::sanitize_download_filename(untrusted::percent_decode(filename_from_url(file_url)));
+    std::string       name     = untrusted::sanitize_download_filename(name_param);
     if (name.empty())
-        return filename_from_url(http_url);
-
-    boost::filesystem::path name_path(name);
-    if (name_path.extension().empty()) {
-        std::string ext = boost::filesystem::path(filename_from_url(http_url)).extension().string();
-        if (ext.empty())
-            ext = ".3mf";
-        name += ext;
+        name = from_url;
+    if (name.empty())
+        name = "model";
+    if (!untrusted::has_model_extension(name) && untrusted::has_model_extension(from_url)) {
+        const std::string ext = boost::filesystem::path(from_url).extension().string();
+        name = untrusted::sanitize_download_filename(name + ext);
     }
     return name;
 }
@@ -203,34 +186,57 @@ void Downloader::start_download(const std::string& full_url)
     plater->get_current_canvas3D()->zoom_to_bed();
     mainframe->Thaw();
 
-    // Orca: Replace PS workaround for "mysterious slash" with a more dynamic approach
-    // Windows seems to have fixed the issue and this provides backwards compatability for those it still affects
-    boost::regex  re(R"(^(edgeslicer|ultraone|snapmaker-orca|Snapmaker_Orca|orcaslicer|prusaslicer|bambustudio|cura):\/\/open[\/]?\?file=)", boost::regbase::icase);
-	boost::regex re2(R"(^(bambustudioopen):\/\/)", boost::regex::icase);
-    boost::smatch results;
-
-	if (!boost::regex_search(full_url, results, re) && !boost::regex_search(full_url, results, re2)) {
-		BOOST_LOG_TRIVIAL(error) << "Could not start download due to wrong URL: " << full_url;
-        // Orca: show error
-        NotificationManager* ntf_mngr = wxGetApp().notification_manager();
+    NotificationManager* ntf_mngr = wxGetApp().notification_manager();
+    auto refuse = [ntf_mngr](const std::string& why) {
+        BOOST_LOG_TRIVIAL(error) << "Model link refused: " << why;
         ntf_mngr->push_notification(NotificationType::CustomNotification, NotificationManager::NotificationLevel::ErrorNotificationLevel,
-                                    "Could not start download due to malformed URL");
-		return;
-	}
+                                    into_u8(format_wxstr(_L("The model link was not opened: %1%"), from_u8(why))));
+    };
+
+    // Ultra: one parser for every "Open in" scheme (UntrustedInput.cpp), then a host check before
+    // anything is fetched. A link used to fetch whatever its file= named - file:// paths, LAN
+    // addresses, any host - with the OS "open this app?" prompt as the only gate.
+    const untrusted::OpenLink link = untrusted::parse_open_link(full_url);
+    if (!link.ok) {
+        refuse(link.error);
+        return;
+    }
+    const untrusted::DownloadCheck check = untrusted::check_model_download(link.file_url, link.scheme);
+    BOOST_LOG_TRIVIAL(info) << "Model link (" << link.scheme << "): host " << check.host << ", " << check.reason;
+    if (check.verdict == untrusted::DownloadVerdict::Refuse) {
+        refuse(check.reason);
+        return;
+    }
+    if (check.verdict == untrusted::DownloadVerdict::Ask) {
+        // Nobody to ask on a hidden / phone-driven instance: an unknown host is refused there.
+        if (RemoteAccess::dialog_mode() != RemoteAccess::Mode::Interactive) {
+            refuse(check.reason);
+            return;
+        }
+        MessageDialog dlg(mainframe,
+                          format_wxstr(_L("A link asks EdgeSlicer to download and open a file from %1%, which is not one of the "
+                                          "model sites it knows (Printables, MakerWorld, Thingiverse, Snapmaker, Cults3D).\n\n"
+                                          "Only continue if you trust this site. Download and open the file?"),
+                                       from_u8(check.host)),
+                          _L("Download from an unknown site"), wxYES_NO | wxICON_WARNING);
+        dlg.SetButtonLabel(wxID_NO, _L("Don't download"), true);
+        dlg.SetButtonLabel(wxID_YES, _L("Download"));
+        if (dlg.ShowModal() != wxID_YES) {
+            BOOST_LOG_TRIVIAL(info) << "Model link from " << check.host << " declined by the user";
+            return;
+        }
+    }
+
     size_t id = get_next_id();
-    const auto  payload_parts = split_scheme_file_payload(full_url.substr(results.length()));
-    std::string escaped_url   = FileGet::escape_url(payload_parts.file_url);
+    const std::string filename = resolve_download_filename(link.file_url, link.name);
 
-    // MakerWorld path uses Plater::import_model_id which already splits "&name=".
-    if (is_bambustudio_open(full_url) || (is_orca_open(full_url) && is_makerworld_link(full_url))) {        
-        const std::string makerworld_arg = payload_parts.name_param.empty() ? escaped_url: (escaped_url + "&name=" + payload_parts.name_param);
-        plater->request_model_download(wxString::FromUTF8(makerworld_arg));
-
+    // MakerWorld (its own scheme, or an "Open in" link whose file lives on MakerWorld) goes through
+    // Plater::import_model_id, which opens the 3MF as a project; it splits "&name=" itself.
+    if (link.scheme == "bambustudio" || link.scheme == "bambustudioopen" || untrusted::is_makerworld_file_url(link.file_url)) {
+        plater->request_model_download(wxString::FromUTF8(link.file_url + "&name=" + filename));
     } else {
-        const std::string filename = resolve_download_filename(escaped_url, payload_parts.name_param);
-        m_downloads.emplace_back(std::make_unique<Download>(id, std::move(escaped_url), this, m_dest_folder, filename));
-
-        NotificationManager* ntf_mngr = wxGetApp().notification_manager();
+        std::string file_url = link.file_url;
+        m_downloads.emplace_back(std::make_unique<Download>(id, std::move(file_url), this, m_dest_folder, filename));
 
         ntf_mngr->push_download_URL_progress_notification(id, m_downloads.back()->get_filename(),
                                                           std::bind(&Downloader::user_action_callback, this, std::placeholders::_1,

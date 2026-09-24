@@ -263,7 +263,7 @@ WebDialog::WebDialog(wxWindow* parent, const wxString& title, const wxString& ur
         if (m_browser == nullptr) {
             return;
         }
-        std::string response = wxGetApp().handle_web_request(evt.GetString().ToUTF8().data());
+        std::string response = wxGetApp().handle_web_request_from(m_browser->GetCurrentURL().ToUTF8().data(), evt.GetString().ToUTF8().data());
         if (response == "close") {
             if (this->IsModal())
                 this->EndModal(wxID_OK);

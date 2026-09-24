@@ -197,6 +197,42 @@ function ShowProjectInfo( p3MF )
 	AddScrollEvent();
 }
 
+// Ultra: everything below comes out of the 3MF, i.e. from whoever made the file. Plain fields are
+// shown as text; the descriptions keep their formatting, but nothing in them may run or load from
+// this machine: scripts, frames, forms and event handlers are dropped, links and images only keep
+// http(s) addresses. Parsing in a DOMParser document is inert (no script runs, nothing loads).
+function EscapeHtml( s )
+{
+	return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+
+function SafeHtml( html )
+{
+	let doc=new DOMParser().parseFromString('<!DOCTYPE html><html><body>'+String(html)+'</body></html>','text/html');
+	let bad=doc.body.querySelectorAll('script,style,iframe,frame,frameset,object,embed,applet,link,meta,base,form,input,button,textarea,select,option,svg,math,template,noscript,portal');
+	for( let i=0;i<bad.length;i++ )
+		bad[i].remove();
+	let all=doc.body.querySelectorAll('*');
+	for( let i=0;i<all.length;i++ )
+	{
+		let el=all[i];
+		for( let j=el.attributes.length-1;j>=0;j-- )
+		{
+			let name=el.attributes[j].name.toLowerCase();
+			let value=el.attributes[j].value.replace(/[\s\u0000-\u001f]/g,'').toLowerCase();
+			let isUrl=(name=='href' || name=='src' || name=='xlink:href' || name=='action' || name=='formaction' || name=='background' || name=='poster' || name=='srcset' || name=='data');
+			if( name.indexOf('on')==0 || name=='style' || (isUrl && !/^(https?:|#)/.test(value)) )
+				el.removeAttribute(el.attributes[j].name);
+		}
+		if( el.tagName=='A' )
+		{
+			el.setAttribute('target','_blank');
+			el.setAttribute('rel','noopener noreferrer');
+		}
+	}
+	return doc.body.innerHTML;
+}
+
 function ShowModelInfo( pModel )
 {
 	//==========Model Info==========
@@ -214,9 +250,9 @@ function ShowModelInfo( pModel )
 	
 	SendWXDebugInfo("Model Name:  "+sModelName);
 	
-	$('#ModelName').html(sModelName);
+	$('#ModelName').text(sModelName);
 	$('#ModelName').attr('title',sModelName);
-    $('#ModelAuthorName').html(sModelAuthor);
+    $('#ModelAuthorName').text(sModelAuthor);
 	
 	switch(UploadType)
 	{
@@ -268,7 +304,7 @@ function ShowModelInfo( pModel )
 			break;
 	}
 	
-	$('#Model_Desc').html( html_decode(sModelDesc) );
+	$('#Model_Desc').html( SafeHtml(html_decode(sModelDesc)) );
 			
 	let ModelPreviewList=pModel.preview_img;				
     let TotalPreview=ModelPreviewList.length;
@@ -415,8 +451,11 @@ function ConstructFileHtml( ID, pItem )
 	{
 		let pOne=pItem[f];
 		
-		let tPath=pOne['filepath'];
-		let tName=decodeURIComponent(pOne['filename']);
+		// Attachment names come from the 3MF: escape them for HTML, and the path for the
+		// single-quoted JS string inside onClick (a name may contain ' on Windows).
+		let tPathRaw=String(pOne['filepath']);
+		let tPath=tPathRaw.replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/"/g,'&quot;').replace(/</g,'&lt;');
+		let tName=EscapeHtml(decodeURIComponent(pOne['filename']));
 		
 		let sTail=getFileTail(tName).toLowerCase();
 		
@@ -428,7 +467,7 @@ function ConstructFileHtml( ID, pItem )
 		{
 			strClass='ImageIcon';
 			
-			ImgPath=tPath;
+			ImgPath=EscapeHtml(tPathRaw);
 		}
 		else if( $.inArray( sTail, ExcelTail )>=0 )
 		{			
@@ -483,10 +522,10 @@ function ShowProfilelInfo( pProfile )
 	let sProfileAuthor=decodeURIComponent(pProfile.author);
 	let sProfileDesc=decodeURIComponent(pProfile.description);
 	
-	$('#ProfileName').html(sProfileName);
-    $('#ProfileAuthor').html(sProfileAuthor);
+	$('#ProfileName').text(sProfileName);
+    $('#ProfileAuthor').text(sProfileAuthor);
 		
-	$('#Profile_Desc').html( html_decode(sProfileDesc) );
+	$('#Profile_Desc').html( SafeHtml(html_decode(sProfileDesc)) );
 			
 	let ProfilePreviewList=pProfile.preview_img;				
     let TotalPreview=ProfilePreviewList.length;

@@ -2420,11 +2420,22 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 add_error("invalid plate index");
                 return false;
             }
+            // A file name from the 3MF metadata is joined to the backup folder only when it stays
+            // inside it; "../.." would otherwise point the plate at any file on the disk.
+            auto in_backup = [this](const std::string &file) -> std::string {
+                if (m_load_restore || file.empty())
+                    return file;
+                if (!untrusted::is_safe_archive_relative_path(file)) {
+                    BOOST_LOG_TRIVIAL(warning) << "3mf: ignoring plate file reference outside the archive: " << file;
+                    return std::string();
+                }
+                return m_backup_path + "/" + file;
+            };
             plate_data_list[it->first-1]->locked = it->second->locked;
             plate_data_list[it->first-1]->plate_index = it->second->plate_index-1;
             plate_data_list[it->first-1]->plate_name = it->second->plate_name;
             plate_data_list[it->first-1]->obj_inst_map = it->second->obj_inst_map;
-            plate_data_list[it->first-1]->gcode_file = (m_load_restore || it->second->gcode_file.empty()) ? it->second->gcode_file : m_backup_path + "/" + it->second->gcode_file;
+            plate_data_list[it->first-1]->gcode_file = in_backup(it->second->gcode_file);
             plate_data_list[it->first-1]->gcode_prediction = it->second->gcode_prediction;
             plate_data_list[it->first-1]->gcode_weight = it->second->gcode_weight;
             plate_data_list[it->first-1]->toolpath_outside = it->second->toolpath_outside;
@@ -2445,12 +2456,12 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             plate_data_list[it->first-1]->first_layer_time = it->second->first_layer_time;
             plate_data_list[it->first-1]->skipped_objects = it->second->skipped_objects;
             plate_data_list[it->first-1]->warnings = it->second->warnings;
-            plate_data_list[it->first-1]->thumbnail_file = (m_load_restore || it->second->thumbnail_file.empty()) ? it->second->thumbnail_file : m_backup_path + "/" + it->second->thumbnail_file;
+            plate_data_list[it->first-1]->thumbnail_file = in_backup(it->second->thumbnail_file);
             //plate_data_list[it->first-1]->pattern_file = (m_load_restore || it->second->pattern_file.empty()) ? it->second->pattern_file : m_backup_path + "/" + it->second->pattern_file;
-            plate_data_list[it->first-1]->no_light_thumbnail_file = (m_load_restore || it->second->no_light_thumbnail_file.empty()) ? it->second->no_light_thumbnail_file : m_backup_path + "/" + it->second->no_light_thumbnail_file;
-            plate_data_list[it->first-1]->top_file = (m_load_restore || it->second->top_file.empty()) ? it->second->top_file : m_backup_path + "/" + it->second->top_file;
-            plate_data_list[it->first-1]->pick_file = (m_load_restore || it->second->pick_file.empty()) ? it->second->pick_file : m_backup_path + "/" + it->second->pick_file;
-            plate_data_list[it->first-1]->pattern_bbox_file = (m_load_restore || it->second->pattern_bbox_file.empty()) ? it->second->pattern_bbox_file : m_backup_path + "/" + it->second->pattern_bbox_file;
+            plate_data_list[it->first-1]->no_light_thumbnail_file = in_backup(it->second->no_light_thumbnail_file);
+            plate_data_list[it->first-1]->top_file = in_backup(it->second->top_file);
+            plate_data_list[it->first-1]->pick_file = in_backup(it->second->pick_file);
+            plate_data_list[it->first-1]->pattern_bbox_file = in_backup(it->second->pattern_bbox_file);
             plate_data_list[it->first-1]->config = it->second->config;
 
             current_plate_data = plate_data_list[it->first - 1];
@@ -3352,6 +3363,11 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 dest_file = dest_file.substr(found + AUXILIARY_STR_LEN);
             else
                 return;
+            // zip-slip: an entry named "Auxiliaries/../../x" must not leave the temp folder.
+            if (!untrusted::is_safe_archive_relative_path(dest_file)) {
+                BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": skipping auxiliary entry with an unsafe path: " << stat.m_filename;
+                return;
+            }
 
             if (dest_file.find('/') != std::string::npos) {
                 boost::filesystem::path src_path = boost::filesystem::path(dest_file);
@@ -3376,6 +3392,10 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
     {
         if (stat.m_uncomp_size > 0) {
             std::string src_file = decode_path(stat.m_filename);
+            if (!untrusted::is_safe_archive_relative_path(src_file)) {
+                BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": skipping entry with an unsafe path: " << stat.m_filename;
+                return;
+            }
             // BBS: use backup path
             //aux directory from model
             boost::filesystem::path dest_path = boost::filesystem::path(m_backup_path + "/" + src_file);
