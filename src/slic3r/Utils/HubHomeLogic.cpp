@@ -80,6 +80,103 @@ Recheck recheck(bool hub_alive, int hub_port, const std::string& hub_token, int 
     return Recheck::Keep;
 }
 
+ExitReason exit_reason_from(const std::string& reason)
+{
+    if (reason == "tray")
+        return ExitReason::Tray;
+    if (reason == "request")
+        return ExitReason::Requested;
+    if (reason == "idle")
+        return ExitReason::Idle;
+    return ExitReason::Unknown;
+}
+
+Presence classify_record(bool file_exists, bool parsed, bool pid_alive)
+{
+    if (!file_exists)
+        return Presence::NoRecord;
+    if (!parsed)
+        return Presence::Unknown; // there but unreadable: most likely caught mid-rewrite
+    return pid_alive ? Presence::Running : Presence::Crashed;
+}
+
+const char* verdict_name(Verdict v)
+{
+    switch (v) {
+    case Verdict::Keep: return "keep";
+    case Verdict::Reload: return "reload";
+    case Verdict::Retry: return "retry";
+    case Verdict::Unreachable: return "unreachable";
+    case Verdict::Gone: return "gone";
+    }
+    return "?";
+}
+
+const char* presence_name(Presence p)
+{
+    switch (p) {
+    case Presence::Unknown: return "record unreadable";
+    case Presence::Running: return "record says running";
+    case Presence::NoRecord: return "no record (quit cleanly)";
+    case Presence::Crashed: return "record names a dead process";
+    }
+    return "?";
+}
+
+const char* exit_reason_name(ExitReason r)
+{
+    switch (r) {
+    case ExitReason::Unknown: return "unknown";
+    case ExitReason::Tray: return "tray";
+    case ExitReason::Requested: return "request";
+    case ExitReason::Idle: return "idle";
+    }
+    return "?";
+}
+
+Verdict Watch::judge(const Probe& probe, int loaded_port, const std::string& loaded_token)
+{
+    if (probe.answered && valid_port(probe.port) && valid_token(probe.token)) {
+        reset();
+        return recheck(true, probe.port, probe.token, loaded_port, loaded_token) == Recheck::Keep ? Verdict::Keep
+                                                                                                    : Verdict::Reload;
+    }
+    // An answer that cannot be used counts as no answer; so does everything else.
+    ++m_failures;
+    const bool gone_signal = !probe.answered && (probe.presence == Presence::NoRecord || probe.presence == Presence::Crashed);
+    m_gone                 = gone_signal ? m_gone + 1 : 0;
+    if (m_gone >= GONE_AFTER)
+        return Verdict::Gone;
+    if (!gone_signal && m_failures >= UNREACHABLE_AFTER)
+        return Verdict::Unreachable;
+    return Verdict::Retry;
+}
+
+int Watch::next_check_s() const
+{
+    switch (m_failures) {
+    case 0: return RECHECK_S;
+    case 1: return 2;
+    case 2: return 4;
+    case 3: return 8;
+    default: return 10;
+    }
+}
+
+LoadError classify_load_error(bool cancelled, bool connection, const std::string& url, int loaded_port,
+                              const std::string& loaded_token)
+{
+    if (cancelled)
+        return LoadError::Ignore;
+    // A stale navigation to a page this view has already left (the old port after a move, the old
+    // link after "New link") or to anything that is not the hub page is not about what is loaded.
+    // An empty address or about:blank is kept: a first load that failed can still report the blank
+    // page it started from.
+    if (!url.empty() && url != "about:blank" && !is_hub_page_url(url, loaded_port, loaded_token))
+        return LoadError::Ignore;
+    return connection ? LoadError::Connection : LoadError::Page;
+}
+
 std::string theme_script(bool dark)
 {
     return std::string("if (window.__edgeTheme) window.__edgeTheme('") + theme_name(dark) + "');";

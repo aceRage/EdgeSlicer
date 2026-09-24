@@ -4,6 +4,8 @@
 #include <utility>
 #include <vector>
 
+#include "slic3r/Utils/HubHomeLogic.hpp"
+
 namespace Slic3r {
 namespace GUI {
 
@@ -51,7 +53,16 @@ struct Info
 int run_server(const std::string& token_hint, bool phone_on);
 
 // ---- client side (a slicer instance) ----
-Info query();                                                       // is a hub running? (~1 s worst case)
+Info query(long timeout_s = 3);                                     // is a hub running? (answer within timeout_s)
+// What <datadir>/hub says when query() got no answer: no network, one file read and a process
+// check. Tells "quit cleanly" (and why) and "crashed" apart from "running but slow to answer".
+struct Record
+{
+    HubHome::Presence   presence { HubHome::Presence::Unknown };
+    HubHome::ExitReason exit_reason { HubHome::ExitReason::Unknown }; // NoRecord only
+    bool                pid_alive { false };
+};
+Record record();
 std::pair<int, std::string> onvif_discover();                       // ONVIF WS-Discovery via the hub's go2rtc: {http status, body}
 Info ensure_running(const std::string& token_hint, bool phone_on); // spawn one if needed; waits for it
 Info set_phone(bool on, const std::string& token = ""); // off and on keeps the same link; a valid
