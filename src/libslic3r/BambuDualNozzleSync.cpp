@@ -191,10 +191,13 @@ std::string state_fingerprint(const PrinterState &state)
         ams_parts.push_back(s + "]");
     }
     std::sort(ams_parts.begin(), ams_parts.end());
+    // Nozzles by the extruder they serve, not by where they sit: the H2C swaps nozzles between its
+    // hotend and the rack slots during a print, which changes nothing a slice depends on (the
+    // G-code reads extruder_nozzle_stats, the per-extruder count of each diameter and flow type).
     std::vector<std::string> noz_parts;
     for (const PrinterNozzle &n : state.nozzles)
-        noz_parts.push_back("n" + std::to_string(n.pos) + ":" + n.diameter + ":" + get_nozzle_volume_type_string(n.volume) +
-                            (n.normal ? "" : ":bad"));
+        noz_parts.push_back("n" + std::to_string(state.logical_extruder_of(n)) + ":" + n.diameter + ":" +
+                            get_nozzle_volume_type_string(n.volume) + (n.normal ? "" : ":bad"));
     std::sort(noz_parts.begin(), noz_parts.end());
     std::string fp = "dev=" + state.dev_id + ";";
     for (const auto &s : ams_parts) fp += s + ";";
