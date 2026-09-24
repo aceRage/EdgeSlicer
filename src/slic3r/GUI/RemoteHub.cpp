@@ -132,6 +132,9 @@ std::string instances_dir() { return (fs::path(hub_dir()) / "instances").string(
 std::string uploads_dir()   { return (fs::path(hub_dir()) / "uploads").string(); }
 std::string saves_dir()     { return (fs::path(hub_dir()) / "saves").string(); }
 static std::string hub_json_path()     { return (fs::path(hub_dir()) / "hub.json").string(); }
+// Left by a clean quit next to where hub.json was: why the hub quit ("tray", "request", "idle"), so
+// a slicer that finds no hub can say which it was. Removed again when a hub starts.
+static std::string last_exit_json_path() { return (fs::path(hub_dir()) / "last_exit.json").string(); }
 static std::string streams_json_path() { return (fs::path(hub_dir()) / "streams.json").string(); }
 static std::string settings_json_path() { return (fs::path(hub_dir()) / "settings.json").string(); } // survives a hub quit (hub.json does not)
 static std::string events_json_path()   { return (fs::path(hub_dir()) / "events.json").string(); }   // the printer-event ring, likewise
@@ -1915,7 +1918,14 @@ public:
     bool start();                 // state, go2rtc, relay, listener, hub.json
     void loop(bool idle_exit);    // until request_quit(); with idle_exit also once nobody needs us
     void shutdown();
-    void request_quit() { m_quit = true; }
+    // `reason` ends up in last_exit.json ("tray", "request", "idle"); the first one given wins,
+    // so the OnExit() that follows a tray quit does not overwrite it.
+    void request_quit(const char* reason = nullptr)
+    {
+        const char* none = nullptr;
+        if (reason != nullptr) m_quit_reason.compare_exchange_strong(none, reason);
+        m_quit = true;
+    }
 
     struct Snapshot
     {
@@ -2013,6 +2023,7 @@ private:
     FirewallState  firewall_state(bool refresh);       // cached; the query runs on a detached thread
     FirewallState  lan_firewall_state(bool refresh);   // same, but for the phone/LAN listener port
     TailscaleState remote_state(bool refresh);         // cached ~15 s; runs the tailscale CLI off the lock
+    TailscaleState remote_state_nowait();              // /hub/info's: never waits on the CLI once there is an answer
     bool  set_remote(bool on, std::string& error);     // tailscale serve on/off for this hub
     void  remote_logins(const std::string& add, const std::string& remove);
     bool  login_allowed(const std::string& login);
@@ -2057,6 +2068,7 @@ private:
     std::atomic<bool>              m_fw_busy { false };
     FirewallState                  m_lan_fw;                     // last lan_firewall_state() (the phone/LAN listener port)
     std::atomic<bool>              m_lan_fw_busy { false };
+    std::atomic<bool>              m_ts_busy { false };          // a remote_state_nowait() refresh is running
     // Set by bind() when it had to step past HUB_PORT: what (if anything) was found holding it,
     // for the status JSON's "port_note" and the hub page's warning. Empty once the hub is on
     // HUB_PORT itself.
@@ -2064,6 +2076,7 @@ private:
     long                           m_go2rtc_pid { 0 };
     void*                          m_job { nullptr };
     std::atomic<bool>              m_quit { false };
+    std::atomic<const char*>       m_quit_reason { nullptr }; // a string literal, see request_quit()
     // Printer events, newest last. The hub owns the sequence, so ids keep increasing across every
     // instance that reports and across a restart of the hub itself.
     std::deque<json>               m_events;
@@ -3570,6 +3583,30 @@ TailscaleState HubServer::remote_state(bool refresh)
     return m_ts;
 }
 
+// Stale-while-revalidate: with an answer already cached, a stale one is returned at once and one
+// refresh runs on a detached thread (like firewall_state()); only the very first call, with
+// nothing cached yet, waits for the CLI.
+TailscaleState HubServer::remote_state_nowait()
+{
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (m_ts.checked_at) {
+            if ((long long) std::time(nullptr) - m_ts.checked_at >= 15 && !m_ts_busy.exchange(true)) {
+                std::thread([this]() {
+                    TailscaleState t = tailscale_query();
+                    {
+                        std::lock_guard<std::mutex> lock(m_mutex);
+                        m_ts = t;
+                    }
+                    m_ts_busy = false;
+                }).detach();
+            }
+            return m_ts;
+        }
+    }
+    return remote_state(false);
+}
+
 // The remote-access card's whole content, in the shape the page draws it. The six states and
 // their wording come from Testing::classify_remote_access() so that nothing here and nothing in
 // hub.html carries a second copy of a sentence; the older flat booleans stay alongside because the
@@ -3715,7 +3752,11 @@ bool HubServer::instance_quit(long pid, bool discard) { return instance_post(pid
 void HubServer::handle_hub(tcp::socket& client, Request& r)
 {
     if (r.path == "/hub/info" && r.method == "GET") {
-        remote_state(false);
+        // Never the blocking remote_state(false) here: every slicer's "is the hub there?" probe
+        // lands on this route with a short timeout, and a stale cache used to make it wait for two
+        // tailscale CLI runs (up to 15 s each) - long enough for the probe to give up and report
+        // a running hub as gone (the Home tab's false "not running", 2026-09-23).
+        remote_state_nowait();
         respond_json(client, 200, info_json().dump());
     } else if (r.path == "/hub/remote" && r.method == "POST") {
         // ?on=1|0 turns Tailscale Serve for this hub on or off; ?add= / ?remove= edit the allow-list.
@@ -3939,7 +3980,7 @@ void HubServer::handle_hub(tcp::socket& client, Request& r)
         respond_json(client, res.first, res.second);
     } else if (r.path == "/hub/quit" && r.method == "POST") {
         respond_json(client, 200, "{\"ok\":true}");
-        m_quit = true;
+        request_quit("request");
     } else if (r.path.compare(0, 15, "/hub/instances/") == 0 && r.method == "POST") {
         // /hub/instances/<pid>/window?show=1|0, /hub/instances/<pid>/quit[?discard=1] and
         // /hub/instances/<pid>/attention/clear (the hub page's Dismiss)
@@ -4521,6 +4562,10 @@ void HubServer::serve(std::unique_ptr<tcp::socket> owner, bool admin)
 bool HubServer::start()
 {
     ensure_dirs();
+    {
+        boost::system::error_code ig;
+        fs::remove(last_exit_json_path(), ig); // describes a hub that is no longer the latest
+    }
     // Settings from the last run, unless the caller decided them.
     try {
         json j = json::parse(read_file(hub_json_path()));
@@ -4654,6 +4699,7 @@ void HubServer::loop(bool idle_exit)
         if (busy) idle_since = now;
         else if (now - idle_since > std::chrono::seconds(IDLE_EXIT_SECONDS)) {
             BOOST_LOG_TRIVIAL(info) << "RemoteHub: idle (phone access off, no slicer running), exiting";
+            request_quit("idle");
             break;
         }
     }
@@ -4662,6 +4708,14 @@ void HubServer::loop(bool idle_exit)
 void HubServer::shutdown()
 {
     {
+        // The exit note first, then hub.json: a slicer that finds hub.json gone must find the note.
+        const char* reason = m_quit_reason.load();
+        json        note;
+        note["pid"]    = current_pid();
+        note["reason"] = reason ? reason : "exit";
+        note["at"]     = (long long) std::time(nullptr);
+        write_file(last_exit_json_path(), note.dump());
+        BOOST_LOG_TRIVIAL(info) << "RemoteHub: shutting down (" << (reason ? reason : "exit") << ")";
         boost::system::error_code ig;
         fs::remove(hub_json_path(), ig);
         std::lock_guard<std::mutex> lock(m_mutex);
@@ -4820,7 +4874,7 @@ public:
             BOOST_LOG_TRIVIAL(error) << "RemoteHub: could not start the listener";
             return false;
         }
-        m_icon = new HubTaskBarIcon(m_server, [this]() { m_server.request_quit(); });
+        m_icon = new HubTaskBarIcon(m_server, [this]() { m_server.request_quit("tray"); });
         wxIcon icon(wxString::FromUTF8(Slic3r::var("Snapmaker_Orca.ico")), wxBITMAP_TYPE_ICO);
         if (!icon.IsOk()) icon = wxIcon(wxString::FromUTF8(Slic3r::var("Snapmaker_Orca_128px.png")), wxBITMAP_TYPE_PNG);
         m_icon->set_icon(icon);
@@ -4953,20 +5007,31 @@ static Info parse_info(const std::string& body)
 
 // admin_port is where /hub/* answers (the loopback-only control plane); port is the listener the
 // phone and any tunnel use. Everything below talks to the control plane.
-struct HubFile { int port { 0 }; int admin_port { 0 }; std::string secret; };
+struct HubFile { int port { 0 }; int admin_port { 0 }; std::string secret; bool exists { false }; bool parsed { false }; bool pid_alive { false }; };
 static HubFile hub_file()
 {
     HubFile h;
-    try {
-        json j = json::parse(read_file(hub_json_path()));
-        if (!pid_alive(j.value("pid", 0L))) return h;
-        h.port       = j.value("port", 0);
-        h.admin_port = j.value("admin_port", 0);
-        h.secret     = j.value("secret", "");
-        // A hub from before the split served /hub/* on its one listener; talking to it there is
-        // what lets ensure_running() shut it down and put this build's hub in its place.
-        if (h.admin_port == 0) h.admin_port = h.port;
-    } catch (...) {}
+    // hub.json is rewritten in place when the rename over it fails (a reader has it open), so a
+    // read can catch it empty or half written: that is a moment to wait out, not a missing hub.
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        if (attempt > 0) std::this_thread::sleep_for(std::chrono::milliseconds(40));
+        boost::system::error_code ec;
+        h.exists = fs::exists(hub_json_path(), ec);
+        if (!h.exists) return h;
+        try {
+            json j   = json::parse(read_file(hub_json_path()));
+            h.parsed = true;
+            if (!pid_alive(j.value("pid", 0L))) return h;
+            h.pid_alive  = true;
+            h.port       = j.value("port", 0);
+            h.admin_port = j.value("admin_port", 0);
+            h.secret     = j.value("secret", "");
+            // A hub from before the split served /hub/* on its one listener; talking to it there is
+            // what lets ensure_running() shut it down and put this build's hub in its place.
+            if (h.admin_port == 0) h.admin_port = h.port;
+            return h;
+        } catch (...) {}
+    }
     return h;
 }
 
@@ -4985,7 +5050,22 @@ static Info hub_call(const std::string& method, const std::string& path, const s
     return out;
 }
 
-Info query() { return hub_call("GET", "/hub/info", "", 3); }
+Info query(long timeout_s) { return hub_call("GET", "/hub/info", "", timeout_s); }
+
+Record record()
+{
+    Record r;
+    const HubFile hf = hub_file();
+    r.presence       = HubHome::classify_record(hf.exists, hf.parsed, hf.pid_alive);
+    r.pid_alive      = hf.pid_alive;
+    if (r.presence == HubHome::Presence::NoRecord) {
+        try {
+            json j        = json::parse(read_file(last_exit_json_path()));
+            r.exit_reason = HubHome::exit_reason_from(j.value("reason", ""));
+        } catch (...) {}
+    }
+    return r;
+}
 
 std::pair<int, std::string> onvif_discover()
 {
