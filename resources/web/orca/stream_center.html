@@ -535,8 +535,12 @@ html[data-embed] #conn, html[data-embed] #via, html[data-embed] .pushbox { displ
         try { sessionStorage.removeItem(CONN_TRIED); } catch (e) {}
         // The same path in the same tab on the other origin. The token is part of the base url the
         // hub handed us, so nothing has to be carried across by hand.
+        // localStorage does not cross origins, so the preference just saved above lands only on
+        // *this* origin - the arriving page cannot see it. #conn=<to> carries the user's explicit
+        // choice along in the URL instead; the arrival code below reads it, saves it locally there
+        // too, and skips the automatic hop for that one load (see connConsumeHashPref).
         var tail = location.pathname.replace(/^\/r\/[^/]+/, '');
-        location.href = base.replace(/\/$/, '') + tail + location.search + location.hash;
+        location.href = base.replace(/\/$/, '') + tail + location.search + '#conn=' + to;
     }
     // The beacon: a never-cached 43-byte GIF on the LAN hub (RemoteHub.cpp, /r/<token>/ping.gif).
     function connProbe(cb) {
@@ -548,7 +552,23 @@ html[data-embed] #conn, html[data-embed] #via, html[data-embed] .pushbox { displ
         im.onerror = function() { end(false); };
         im.src = connLan + 'ping.gif?t=' + Date.now();   // the query keeps a proxy out of it too
     }
+    // An explicit choice, carried in the URL by connSwitch since localStorage cannot cross origins
+    // (see there). Consumed at most once, on the load that arrives with it: saves the choice as
+    // this origin's own preference, strips the marker so a refresh or share of the URL does not
+    // replay it, and tells connMaybeHop to sit out this load instead of immediately re-probing and
+    // (via connSwitch's own CONN_TRIED reset) potentially bouncing straight back.
+    var connSkipHop = false;
+    (function connConsumeHashPref() {
+        var m = /(?:^|#)conn=(home|away)\b/.exec(location.hash);
+        if (!m) return;
+        connSkipHop = true;
+        connSetPref(m[1]);
+        var stripped = location.hash.replace(/(?:^|#)conn=(home|away)\b&?/, '');
+        if (stripped === '#') stripped = '';
+        try { history.replaceState(null, '', location.pathname + location.search + stripped); } catch (e) {}
+    })();
     function connMaybeHop() {
+        if (connSkipHop) { connSkipHop = false; return; }
         if (connHere !== 'away' || connPref() !== 'home' || !connLan) return;
         var tried = '';
         try { tried = sessionStorage.getItem(CONN_TRIED) || ''; } catch (e) {}
