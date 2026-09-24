@@ -1104,6 +1104,14 @@ void MainFrame::request_quit(bool discard)
 void MainFrame::shutdown(bool isRecreate)
 {
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << "MainFrame::shutdown enter";
+    // First of all: no phone/agent request, send or control job may queue work for the GUI thread
+    // any more, and what is already queued is dropped. The Plater is torn down below and freed
+    // with this frame, and a request that ran after that crashed (c2a7d4de, 2026-09-22). A quit
+    // also takes this instance off the hub's list now, so the hub stops routing requests here;
+    // a language switch's rebuild reopens the gate once the new frame exists (recreate_GUI).
+    RemoteAccess::close_gui_gate(!isRecreate);
+    if (!isRecreate)
+        RemoteAccess::get().stop();
     // BBS: backup
     Slic3r::set_backup_callback(nullptr);
     if (m_autosave_timer != nullptr)

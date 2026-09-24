@@ -14,6 +14,7 @@ add_executable(${_TEST_NAME}_tests
     splash_animation_tests.cpp
     remote_events_tests.cpp
     remote_hub_tests.cpp
+    shutdown_gate_tests.cpp
     hosted_push_tests.cpp
     flashforge_tests.cpp
     mqtt_reconnect_tests.cpp

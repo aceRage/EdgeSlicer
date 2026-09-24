@@ -10,6 +10,7 @@
 #include "HMS.hpp"
 #include "libslic3r/Utils.hpp"
 #include "slic3r/Utils/Http.hpp"
+#include "slic3r/Utils/ServerLifetime.hpp"
 
 #include <boost/asio.hpp>
 #include <boost/beast/core/detail/base64.hpp>
@@ -90,6 +91,9 @@ static const char* const GO2RTC_WS   = "/api/ws";
 static const size_t      MAX_API_BODY       = 64 * 1024;
 static const uint64_t    MAX_UPLOAD         = 2ull * 1024 * 1024 * 1024;
 static const int         IDLE_EXIT_SECONDS  = 60;
+// How long shutdown() waits for connection and helper threads once it has shut their sockets.
+// Past it the server is left alive for them rather than destroyed underneath them.
+static const int         SHUTDOWN_DRAIN_MS  = 3000;
 // Where the remote-access card sends people who have no Tailscale yet, and where the one error
 // nobody can fix from this PC (tailnet-wide HTTPS certificates) is actually switched on.
 static const char* const TAILSCALE_DOWNLOAD_URL  = "https://tailscale.com/download/windows";
@@ -1917,7 +1921,12 @@ public:
 
     bool start();                 // state, go2rtc, relay, listener, hub.json
     void loop(bool idle_exit);    // until request_quit(); with idle_exit also once nobody needs us
-    void shutdown();
+    // Closes the listeners, ends every connection and waits (bounded) for every thread this
+    // server started. False when some are still running: the caller must then not destroy the
+    // server, because those threads still use it.
+    bool shutdown();
+    // A detached helper thread that shutdown() knows about and waits for. False once shutting down.
+    bool spawn(std::function<void()> fn) { return m_life.spawn(std::move(fn)); }
     // `reason` ends up in last_exit.json ("tray", "request", "idle"); the first one given wins,
     // so the OnExit() that follows a tray quit does not overwrite it.
     void request_quit(const char* reason = nullptr)
@@ -2039,7 +2048,11 @@ private:
     bool                           m_phone { false };
     bool                           m_lan { false };
     int                            m_port { 0 };
-    asio::io_context               m_ioc;
+    // The io_context every listener and connection socket belongs to, shared with the threads
+    // that use them, and the count of those threads - so shutdown() can end them and wait, and a
+    // socket can never outlive its io_context (crash a2375b06). Declared before the acceptors so
+    // they are destroyed first.
+    ServerLifetime                 m_life;
     std::shared_ptr<tcp::acceptor> m_acceptor;
     // The control plane has its own acceptor on an ephemeral loopback port, recorded in hub.json
     // as admin_port. Nothing else binds it, so no tunnel (Tailscale Serve, zrok, anything a user
@@ -2895,7 +2908,7 @@ bool HubServer::bind(bool lan)
     if (old) { boost::system::error_code ig; old->close(ig); } // releases the port; its accept loop exits
 
     int  port = HUB_PORT;
-    auto acceptor = try_bind_range(m_ioc, lan ? asio::ip::address_v4::any() : asio::ip::address_v4::loopback(), &port);
+    auto acceptor = try_bind_range(m_life.io(), lan ? asio::ip::address_v4::any() : asio::ip::address_v4::loopback(), &port);
     if (!acceptor) {
         BOOST_LOG_TRIVIAL(error) << "RemoteHub: no free port in " << HUB_PORT << "-" << (HUB_PORT + 19)
                                  << " for " << (lan ? "0.0.0.0" : "127.0.0.1") << " (another hub is probably already running)";
@@ -2903,13 +2916,13 @@ bool HubServer::bind(bool lan)
         // own address and port, if there was one.
         if (had_old) {
             int fallback_port = old_port;
-            auto fallback = try_bind_range(m_ioc, old_lan ? asio::ip::address_v4::any() : asio::ip::address_v4::loopback(), &fallback_port);
+            auto fallback = try_bind_range(m_life.io(), old_lan ? asio::ip::address_v4::any() : asio::ip::address_v4::loopback(), &fallback_port);
             if (fallback) {
                 std::lock_guard<std::mutex> lock(m_mutex);
                 m_acceptor = fallback;
                 m_lan      = old_lan;
                 m_port     = fallback_port;
-                std::thread([this, fallback]() { accept_loop(fallback, false); }).detach();
+                m_life.spawn([this, fallback]() { accept_loop(fallback, false); });
                 BOOST_LOG_TRIVIAL(warning) << "RemoteHub: could not switch listener mode; restored "
                                            << (old_lan ? "0.0.0.0" : "127.0.0.1") << ":" << fallback_port;
             } else {
@@ -2944,14 +2957,14 @@ bool HubServer::bind(bool lan)
         m_port_note_holder.clear();
         was_remote_on      = m_remote_on;
     }
-    std::thread([this, acceptor]() { accept_loop(acceptor, false); }).detach();
+    m_life.spawn([this, acceptor]() { accept_loop(acceptor, false); });
     if (fell_back)
-        std::thread([this]() {
+        m_life.spawn([this]() {
             const std::string holder = port_holder_description(HUB_PORT);
             if (!holder.empty()) BOOST_LOG_TRIVIAL(warning) << "RemoteHub: port " << HUB_PORT << " is held by " << holder;
             std::lock_guard<std::mutex> lock(m_mutex);
             if (m_port != HUB_PORT) m_port_note_holder = holder;
-        }).detach();
+        });
     BOOST_LOG_TRIVIAL(info) << "RemoteHub: listening on " << (lan ? "0.0.0.0" : "127.0.0.1") << ":" << port;
     // Tailscale Serve's forwarding target is Tailscale's own persisted config, not ours: if remote
     // access was already on and the listener just moved port (this bind, or the very first one),
@@ -2960,7 +2973,7 @@ bool HubServer::bind(bool lan)
     // `tailscale serve` command with the port current right now, which is exactly what re-pointing
     // it means; it is a no-op for the tailnet config itself when the target already matches.
     if (was_remote_on) {
-        std::thread([this]() {
+        m_life.spawn([this]() {
             TailscaleState t = remote_state(true);
             int            p;
             {
@@ -2973,7 +2986,7 @@ bool HubServer::bind(bool lan)
                 if (!err.empty()) BOOST_LOG_TRIVIAL(warning) << "RemoteHub: could not re-point Tailscale Serve at the new port: " << err;
                 else BOOST_LOG_TRIVIAL(info) << "RemoteHub: re-pointed Tailscale Serve at 127.0.0.1:" << p;
             }
-        }).detach();
+        });
     }
     return true;
 }
@@ -2983,7 +2996,7 @@ bool HubServer::bind(bool lan)
 // /relay/h264 URLs registered in go2rtc stay valid when phone access flips the main listener.
 bool HubServer::bind_admin()
 {
-    auto acceptor = std::make_shared<tcp::acceptor>(m_ioc);
+    auto acceptor = std::make_shared<tcp::acceptor>(m_life.io());
     boost::system::error_code ec;
     acceptor->open(tcp::v4(), ec);
     if (ec) return false;
@@ -3001,7 +3014,7 @@ bool HubServer::bind_admin()
         m_admin_acceptor = acceptor;
         m_admin_port     = (int) acceptor->local_endpoint().port();
     }
-    std::thread([this, acceptor]() { accept_loop(acceptor, true); }).detach();
+    m_life.spawn([this, acceptor]() { accept_loop(acceptor, true); });
     BOOST_LOG_TRIVIAL(info) << "RemoteHub: control plane on 127.0.0.1:" << m_admin_port;
     return true;
 }
@@ -3009,12 +3022,15 @@ bool HubServer::bind_admin()
 void HubServer::accept_loop(std::shared_ptr<tcp::acceptor> acceptor, bool admin)
 {
     for (;;) {
-        auto sock = std::make_unique<tcp::socket>(m_ioc);
+        auto sock = std::make_unique<tcp::socket>(m_life.io());
         boost::system::error_code ec;
         acceptor->accept(*sock, ec);
         if (ec) break; // closed by a rebind or at shutdown
         tcp::socket* raw = sock.release();
-        std::thread([this, raw, admin]() { serve(std::unique_ptr<tcp::socket>(raw), admin); }).detach();
+        if (!m_life.spawn([this, raw, admin]() { serve(std::unique_ptr<tcp::socket>(raw), admin); })) {
+            delete raw; // shutting down: never started, so still ours (this thread keeps the io_context alive)
+            break;
+        }
     }
 }
 
@@ -3148,7 +3164,7 @@ FirewallState HubServer::firewall_state(bool refresh)
         if (!refresh && m_fw.checked_at && (long long) std::time(nullptr) - m_fw.checked_at < 300) return m_fw;
     }
     if (port > 0 && !m_fw_busy.exchange(true)) {
-        std::thread([this, port]() {
+        const bool started = m_life.spawn([this, port]() {
             FirewallState fw = firewall_query_go2rtc(go2rtc_exe_path(), port);
             {
                 std::lock_guard<std::mutex> lock(m_mutex);
@@ -3158,7 +3174,8 @@ FirewallState HubServer::firewall_state(bool refresh)
                 BOOST_LOG_TRIVIAL(info) << "RemoteHub: Windows Firewall for go2rtc.exe: " << fw.state << " (" << fw.note
                                          << (fw.command.empty() ? "" : " " + fw.command) << ")";
             m_fw_busy = false;
-        }).detach();
+        });
+        if (!started) m_fw_busy = false;
     }
     std::lock_guard<std::mutex> lock(m_mutex);
     return m_fw;
@@ -3179,7 +3196,7 @@ FirewallState HubServer::lan_firewall_state(bool refresh)
         if (!refresh && m_lan_fw.checked_at && (long long) std::time(nullptr) - m_lan_fw.checked_at < 300) return m_lan_fw;
     }
     if (on && !m_lan_fw_busy.exchange(true)) {
-        std::thread([this, port]() {
+        const bool started = m_life.spawn([this, port]() {
             const std::string exe = current_exe();
             FirewallState      fw = firewall_query(exe, port, "EdgeSlicer.exe",
                 "netsh advfirewall firewall add rule name=\"EdgeSlicer\" dir=in action=allow program=\"" + exe +
@@ -3193,7 +3210,8 @@ FirewallState HubServer::lan_firewall_state(bool refresh)
                 BOOST_LOG_TRIVIAL(info) << "RemoteHub: Windows Firewall for the phone/LAN port " << port << ": " << fw.state << " (" << fw.note
                                          << (fw.command.empty() ? "" : " " + fw.command) << ")";
             m_lan_fw_busy = false;
-        }).detach();
+        });
+        if (!started) m_lan_fw_busy = false;
     }
     std::lock_guard<std::mutex> lock(m_mutex);
     return m_lan_fw;
@@ -3592,14 +3610,15 @@ TailscaleState HubServer::remote_state_nowait()
         std::lock_guard<std::mutex> lock(m_mutex);
         if (m_ts.checked_at) {
             if ((long long) std::time(nullptr) - m_ts.checked_at >= 15 && !m_ts_busy.exchange(true)) {
-                std::thread([this]() {
+                const bool started = m_life.spawn([this]() {
                     TailscaleState t = tailscale_query();
                     {
                         std::lock_guard<std::mutex> lock(m_mutex);
                         m_ts = t;
                     }
                     m_ts_busy = false;
-                }).detach();
+                });
+                if (!started) m_ts_busy = false;
             }
             return m_ts;
         }
@@ -4379,6 +4398,9 @@ void HubServer::serve(std::unique_ptr<tcp::socket> owner, bool admin)
     static ConnCount s_main, s_admin;
     ConnGuard        guard(admin ? s_admin : s_main, admin ? MAX_ADMIN_CONNECTIONS : MAX_CONNECTIONS);
     tcp::socket&     client = *owner;
+    // shutdown() ends this connection through here: a long-lived tunnel (a camera WebSocket on
+    // /api/ws) or a stream would otherwise keep this thread - and its socket - past the server.
+    ServerLifetime::Tracked tracked(m_life, client);
     try {
         boost::system::error_code ec;
         const auto peer = client.remote_endpoint(ec).address();
@@ -4705,7 +4727,7 @@ void HubServer::loop(bool idle_exit)
     }
 }
 
-void HubServer::shutdown()
+bool HubServer::shutdown()
 {
     {
         // The exit note first, then hub.json: a slicer that finds hub.json gone must find the note.
@@ -4722,6 +4744,15 @@ void HubServer::shutdown()
         if (m_acceptor) m_acceptor->close(ig);
         if (m_admin_acceptor) m_admin_acceptor->close(ig);
     }
+    // The accept loops end on the closed acceptors; every open connection is shut down so its
+    // blocking read returns, and then we wait for all of those threads - and the helper threads
+    // (firewall, Tailscale) - to be gone before anything they use is destroyed. Not under m_mutex:
+    // the connections take it. Crash a2375b06 was a tunnel thread destroying its socket after
+    // HubApp had already destroyed this server, and the io_context with it.
+    const bool drained = m_life.stop(std::chrono::milliseconds(SHUTDOWN_DRAIN_MS));
+    if (!drained)
+        BOOST_LOG_TRIVIAL(warning) << "RemoteHub: " << m_life.running() << " connection/helper thread(s) still running after "
+                                   << SHUTDOWN_DRAIN_MS << " ms; the server is left in place for them";
 #ifndef _WIN32
     if (m_go2rtc_pid > 0) ::kill((pid_t) m_go2rtc_pid, SIGTERM);
 #endif
@@ -4732,6 +4763,7 @@ void HubServer::shutdown()
     RemoteNotify::stop(); // let an in-flight relay send finish, then join the worker
     // On Windows the kill-on-close job object takes go2rtc down with us.
     flush_logs();
+    return drained;
 }
 
 // ------------------------------------------------------------ tray icon ----
@@ -4766,11 +4798,11 @@ public:
             if (n < 0 || n >= (int) m_menu_pids.size()) return;
             const long pid = m_menu_pids[n];
             HubServer* s   = &m_server;
-            // HTTP: never on the tray's (GUI) thread.
-            std::thread([s, pid, what]() {
+            // HTTP: never on the tray's (GUI) thread. Counted by the server, which waits for it.
+            s->spawn([s, pid, what]() {
                 if (what == 2) s->instance_quit(pid, false);
                 else           s->instance_window(pid, what == 0);
-            }).detach();
+            });
         }, ID_INST_FIRST, ID_INST_LAST);
         Bind(wxEVT_MENU, [this](wxCommandEvent&) { m_on_quit(); }, ID_QUIT);
         Bind(wxEVT_TASKBAR_LEFT_DCLICK, [this](wxTaskBarIconEvent&) { open_page(); });
@@ -4863,7 +4895,7 @@ private:
 class HubApp : public wxApp
 {
 public:
-    HubApp(std::string token, bool phone) : m_server(std::move(token), phone) {}
+    HubApp(std::string token, bool phone) : m_owned(new HubServer(std::move(token), phone)), m_server(*m_owned) {}
 
     bool OnInit() override
     {
@@ -4901,14 +4933,20 @@ public:
         set_balloon(nullptr); // the icon is about to go; nothing may reach it after this
         m_server.request_quit();
         if (m_thread.joinable()) m_thread.join();
-        m_server.shutdown();
+        if (!m_server.shutdown()) {
+            // A connection or helper thread is still running and still uses the server. Leave it
+            // alive for them; the process is about to exit and takes everything with it. Destroying
+            // it here is what crashed (a2375b06).
+            (void) m_owned.release();
+        }
         delete m_icon;
         m_icon = nullptr;
         return 0;
     }
 
 private:
-    HubServer       m_server;
+    std::unique_ptr<HubServer> m_owned; // released, not destroyed, if shutdown() could not drain
+    HubServer&      m_server;
     HubTaskBarIcon* m_icon { nullptr };
     std::thread     m_thread;
     wxTimer         m_timer;

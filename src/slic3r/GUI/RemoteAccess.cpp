@@ -275,6 +275,11 @@ class GuiHeartbeat : public wxTimer
 public:
     void Notify() override
     {
+        // The dialog policy, the LAN reconnect and the event watcher all reach into the devices and
+        // the main window; none of that may run once it has started closing (it keeps ticking
+        // until GUI_App::OnExit stops it).
+        if (RemoteAccess::gui_closing())
+            return;
         RemoteAccess::get().heartbeat_review(g_modal_depth);
         // The LAN reconnect tick rides here too. A LAN-mode Bambu printer's MQTT session used to be
         // re-established only by MonitorPanel::update, and only with a Bambu cloud login - so with
@@ -308,7 +313,8 @@ void RemoteAccess::show_window(const std::string& reason)
         RemoteAccess::get().set_hidden(!mf->IsShown());
         RemoteAccess::get().note_attention("window shown: " + reason, "shown");
     };
-    if (wxThread::IsMain()) show(); else wxGetApp().CallAfter(show);
+    if (wxThread::IsMain()) { if (!gui_closing()) show(); }
+    else post_to_main(show);
 }
 
 void RemoteAccess::note_attention(const std::string& dialog, const std::string& answered)
@@ -393,18 +399,63 @@ void RemoteAccess::heartbeat_review(int modal_depth)
     }
 }
 
+// Never destroyed: request threads may still ask it something while the process exits.
+static MainThreadGate& gui_gate()
+{
+    static MainThreadGate* gate = new MainThreadGate();
+    return *gate;
+}
+// Closed only when the app quits (never reopened): the wxApp that CallAfter needs is about to go.
+static MainThreadGate& app_gate()
+{
+    static MainThreadGate* gate = new MainThreadGate();
+    return *gate;
+}
+
+static void post_via_wx(std::function<void()> f) { wxGetApp().CallAfter(std::move(f)); }
+
+MainCallResult RemoteAccess::call_on_main(std::function<void()> fn, int timeout_ms)
+{
+    return call_and_wait(gui_gate(), post_via_wx, std::move(fn), std::chrono::milliseconds(timeout_ms));
+}
+
+bool RemoteAccess::post_to_main(std::function<void()> fn) { return gui_gate().post(post_via_wx, std::move(fn)); }
+
+bool RemoteAccess::post_to_app(std::function<void()> fn) { return app_gate().post(post_via_wx, std::move(fn)); }
+
+void RemoteAccess::close_gui_gate(bool quitting)
+{
+    if (!gui_gate().closed())
+        BOOST_LOG_TRIVIAL(info) << "RemoteAccess: main window closing" << (quitting ? " (quit)" : " (rebuild)")
+                                << ", no more GUI-thread work from requests";
+    gui_gate().close();
+    if (quitting)
+        app_gate().close();
+}
+
+void RemoteAccess::reopen_gui_gate()
+{
+    gui_gate().reopen();
+    BOOST_LOG_TRIVIAL(info) << "RemoteAccess: main window rebuilt, requests reach the GUI thread again";
+}
+
+bool RemoteAccess::gui_closing() { return gui_gate().closed(); }
+
 static bool run_on_main(std::function<void()> fn, int timeout_ms = 15000, const char* what = "a request")
 {
-    auto done = std::make_shared<std::promise<void>>();
-    auto fut  = done->get_future();
-    wxGetApp().CallAfter([done, fn]() {
+    const MainCallResult r = RemoteAccess::call_on_main([fn]() {
         RemoteAccess::AutoConfirmScope auto_yes;
-        try { fn(); } catch (...) {}
-        done->set_value();
-    });
-    if (fut.wait_for(std::chrono::milliseconds(timeout_ms)) == std::future_status::ready) {
+        fn();
+    }, timeout_ms);
+    if (r == MainCallResult::Done) {
         RemoteAccess::get().note_request_done();
         return true;
+    }
+    if (r == MainCallResult::Closing) {
+        // Not a stall: the window is going away and the request is answered 503 (crash c2a7d4de:
+        // this used to run anyway, against a Plater that had already been freed).
+        BOOST_LOG_TRIVIAL(info) << "RemoteAccess: " << what << " was not run: the slicer is closing";
+        return false;
     }
     RemoteAccess::get().raise_attention(std::string(what) + " did not finish on the PC within " + std::to_string(timeout_ms / 1000) + " s", "timeout");
     return false;
@@ -431,7 +482,9 @@ void RemoteAccess::start()
     if (m_on)
         return;
     try {
-        static asio::io_context ioc; // lives for the process
+        // Lives for the process and is never destroyed: the connection threads are detached, and a
+        // socket destroyed after its io_context crashes in the socket service (see ServerLifetime.hpp).
+        static asio::io_context& ioc = *new asio::io_context();
         auto* acceptor = new tcp::acceptor(ioc, tcp::endpoint(asio::ip::address_v4::loopback(), 0));
         acceptor->listen();
         m_acceptor = acceptor;
@@ -2170,7 +2223,7 @@ RemoteAccess::ApiResponse RemoteAccess::api_quit(bool discard)
     if (!ok) { r.status = 503; r.body = json_error("the slicer is busy"); return r; }
     if (result->first != 200) { r.status = result->first; r.body = json_error(result->second); return r; }
     // The close runs after this response has been written.
-    wxGetApp().CallAfter([discard]() {
+    post_to_main([discard]() {
         if (wxGetApp().mainframe) wxGetApp().mainframe->request_quit(discard);
     });
     r.body = "{\"ok\":true}";
@@ -2252,6 +2305,13 @@ RemoteAccess::ApiResponse RemoteAccess::api_project_open(const std::string& path
 RemoteAccess::ApiResponse RemoteAccess::handle_api(const std::string& method, const std::string& path, const std::string& query, const std::string& body)
 {
     ApiResponse r;
+    // The main window is going away: say so at once rather than queueing work for a GUI thread
+    // that will not run it (and must not - the Plater may already be gone).
+    if (gui_closing()) {
+        r.status = 503;
+        r.body   = json_error("the slicer is closing");
+        return r;
+    }
     auto num  = [](const std::string& s, int def) { try { return s.empty() ? def : std::stoi(s); } catch (...) { return def; } };
     auto numd = [](const std::string& s, double def) { try { return s.empty() ? def : std::stod(s); } catch (...) { return def; } };
     if (path.empty() || path == "/") {
@@ -2508,6 +2568,8 @@ void RemoteAccess::serve(void* socket_ptr)
             body.append(buf, n);
         }
         ApiResponse ar = handle_api(method, path.substr(4), query, body);
+        if (ar.status == 503 && gui_closing()) // it began before the close; its GUI step was dropped
+            ar.body = json_error("the slicer is closing");
         const char* status = ar.status == 200 ? "200 OK" : ar.status == 400 ? "400 Bad Request" : ar.status == 404 ? "404 Not Found"
                            : ar.status == 409 ? "409 Conflict" : ar.status == 413 ? "413 Payload Too Large"
                            : ar.status == 502 ? "502 Bad Gateway" : ar.status == 504 ? "504 Gateway Timeout"

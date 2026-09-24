@@ -4911,6 +4911,7 @@ void GUI_App::recreate_GUI(const wxString &msg_name)
     update_publish_status();
 
     m_is_recreating_gui = false;
+    RemoteAccess::reopen_gui_gate(); // closed by mainframe->shutdown(true) above
 
     //reload home and device page
     sm_disconnect_current_machine(true);
