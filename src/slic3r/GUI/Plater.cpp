@@ -24613,13 +24613,16 @@ void Plater::check_seq_print_caution(bool all_plates)
         }
     }
 
-    // Close-then-push keeps a single notification even when slicing is
-    // retriggered; close on the non-caution path clears the stale one.
+    // Advisory only, not a slicing error: Warning level, closed and (if still applicable)
+    // re-pushed so slicing can be retriggered without stacking duplicate notifications.
+    // Genuine collision/clearance violations are a separate path (Print::sequential_print_clearance_valid,
+    // surfaced via push_validate_error_notification / STRING_EXCEPT_OBJECT_COLLISION_IN_*_PRINT) and are
+    // untouched here.
     if (by_object) {
-        get_notification_manager()->close_plater_error_notification(caution_text.ToStdString());
-        get_notification_manager()->push_plater_error_notification(caution_text.ToStdString());
+        get_notification_manager()->close_print_by_object_caution_notification(caution_text.ToStdString());
+        get_notification_manager()->push_print_by_object_caution_notification(caution_text.ToStdString());
     } else {
-        get_notification_manager()->close_plater_error_notification(caution_text.ToStdString());
+        get_notification_manager()->close_print_by_object_caution_notification(caution_text.ToStdString());
     }
 }
 
