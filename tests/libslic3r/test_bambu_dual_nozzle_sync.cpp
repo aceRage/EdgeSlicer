@@ -402,17 +402,12 @@ TEST_CASE("Nozzle mapping request for the refused one-filament H2D job", "[DualN
     in.physical_extruder_map = { 1, 0 };
     in.preset_diameters      = { 0.4, 0.4 };
 
-    const auto j = nlohmann::json::parse(build_v0_request(in))["print"];
-    CHECK(j["filament_seq"] == nlohmann::json({ -1, 0 }));
-    CHECK(j["ams_mapping"].size() == 33);
-    CHECK(j["ams_mapping"][1] == 1);
-    REQUIRE(j["fila_info"].size() == 1);
-    CHECK(j["fila_info"][0]["id"] == 2);
-    CHECK(j["fila_info"][0]["direction"] == 2);
-    CHECK(j["fila_info"][0]["nozzle_d"] == "0.40");
-    REQUIRE(j["nozzle_info"].size() == 2);
-    CHECK(j["nozzle_info"][0]["pos"] == 0);
-    CHECK(j["nozzle_info"][1]["pos"] == 1);
+    // Golden: the request the send dialog logged for this plate (seq 20031, 2026-09-23 19:42),
+    // which has BambuStudio's V0 shape. The H2D refused it; BambuStudio never sends it to an H2D
+    // (no nozzle rack), see query_applies.
+    const auto golden = nlohmann::json::parse(R"({"print":{"ams_mapping":[65535,65535,1,65535,65535,65535,65535,65535,65535,65535,65535,65535,65535,65535,65535,65535,65535,65535,65535,65535,65535,65535,65535,65535,65535,65535,65535,65535,65535,65535,65535,65535,65535],"calibration":1,"command":"get_auto_nozzle_mapping","extrude_cali_manual_mode":1,"fila_info":[{"cate":"GFL01","color":"161616FF","direction":2,"group":1,"id":2,"nozzle_d":"0.40","nozzle_v":"Standard"}],"filament_seq":[-1,-1,0],"nozzle_info":[{"cate":"","color":"00000000","nozzle_d":"0.40","nozzle_v":"Standard","pos":0,"wear":0.0},{"cate":"","color":"00000000","nozzle_d":"0.40","nozzle_v":"Standard","pos":1,"wear":0.0}],"sequence_id":"0"}})");
+    const auto j = nlohmann::json::parse(build_v0_request(in));
+    CHECK(j == golden);
 }
 
 TEST_CASE("Only printers with a nozzle rack are asked for a nozzle mapping", "[DualNozzleSync][NozzleMapping]")
