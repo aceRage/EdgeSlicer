@@ -250,4 +250,29 @@ bool may_overwrite_bambusource(bool dest_exists, bool dest_is_real_filter)
     return ! (dest_exists && dest_is_real_filter);
 }
 
+bool bambusource_needs_refresh(bool bundled_present,
+                               bool installed_present,
+                               bool identical,
+                               bool installed_is_real_filter,
+                               bool keep_foreign)
+{
+    if (! bundled_present || keep_foreign)
+        return false;
+    if (installed_present && identical)
+        return false;
+    return may_overwrite_bambusource(installed_present, installed_is_real_filter);
+}
+
+bool storage_browser_use_lan_url(bool lan_mode,
+                                 bool local_proto,
+                                 bool remote_proto,
+                                 bool has_ip,
+                                 bool has_access_code,
+                                 bool lan_only_tunnel)
+{
+    if ((lan_mode || ! remote_proto) && local_proto && has_ip)
+        return true; // stock
+    return lan_only_tunnel && has_ip && has_access_code;
+}
+
 } } // namespace Slic3r::GUI
