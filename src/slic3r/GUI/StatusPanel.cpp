@@ -18,6 +18,7 @@
 #include "RecenterDialog.hpp"
 #include "CalibUtils.hpp"
 #include "NozzleTempRows.hpp"
+#include "BambuDevicePalette.hpp"
 #include <slic3r/GUI/Widgets/ProgressDialog.hpp>
 #include <wx/display.h>
 #include <wx/mstream.h>
@@ -48,13 +49,14 @@ static const wxColour STATIC_BOX_LINE_COL = wxColour(238, 238, 238);
 static const wxColour BUTTON_NORMAL1_COL = wxColour(238, 238, 238);
 static const wxColour BUTTON_NORMAL2_COL = wxColour(206, 206, 206);
 static const wxColour BUTTON_PRESS_COL   = wxColour(172, 172, 172);
-static const wxColour BUTTON_HOVER_COL   = wxColour(0, 150, 136);
+// The Bambu Device page uses Bambu Studio's green, not the app accent (BambuDevicePalette.hpp).
+static const wxColour BUTTON_HOVER_COL   = BambuDevicePalette::Green;
 
 static const wxColour DISCONNECT_TEXT_COL = wxColour(171, 172, 172);
 static const wxColour NORMAL_TEXT_COL     = wxColour(48,58,60);
 static const wxColour NORMAL_FAN_TEXT_COL = wxColour(107, 107, 107);
 static const wxColour WARNING_INFO_BG_COL = wxColour(255, 111, 0);
-static const wxColour STAGE_TEXT_COL      = wxColour(0, 150, 136);
+static const wxColour STAGE_TEXT_COL      = BambuDevicePalette::SecondaryText; // grey, as in Bambu Studio
 
 static const wxColour GROUP_STATIC_LINE_COL = wxColour(206, 206, 206);
 
@@ -243,7 +245,14 @@ void PrintingTaskPanel::create_panel(wxWindow* parent)
      fgSizer_task->SetFlexibleDirection(wxVERTICAL);
      fgSizer_task->SetNonFlexibleGrowMode(wxFLEX_GROWMODE_SPECIFIED);*/
 
-    m_printing_stage_value = new wxStaticText(parent, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, wxALIGN_LEFT | wxST_ELLIPSIZE_END);
+    // Bambu Studio's line under the progress bar: the printing stage ("Printing", "Heatbed
+    // preheating", ...) on the left, "Estimated finish time: HH:MM" on the right. Same 600 px cap
+    // as the percent/layer line above the bar, so both end where the bar ends.
+    wxPanel *penel_finish_time = new wxPanel(parent);
+    penel_finish_time->SetBackgroundColour(*wxWHITE);
+    penel_finish_time->SetMaxSize(wxSize(FromDIP(600), -1));
+
+    m_printing_stage_value = new wxStaticText(penel_finish_time, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, wxALIGN_LEFT | wxST_ELLIPSIZE_END);
     m_printing_stage_value->Wrap(-1);
     m_printing_stage_value->SetMaxSize(wxSize(FromDIP(800),-1));
     #ifdef __WXOSX_MAC__
@@ -272,6 +281,11 @@ void PrintingTaskPanel::create_panel(wxWindow* parent)
     m_gauge_progress = new ProgressBar(m_panel_progress, wxID_ANY, 100, wxDefaultPosition, wxDefaultSize);
     m_gauge_progress->SetValue(0);
     m_gauge_progress->SetHeight(PROGRESSBAR_HEIGHT);
+    // The Bambu Device page draws its bar, percent and buttons in Bambu Studio's green; the
+    // calibration wizard's copy of this panel keeps the app accent. (ProgressBar's
+    // SetProgressBackgroundColour sets the filled part, despite the name.)
+    const wxColour progress_accent = m_type == PrintingTaskType::CALIBRATION ? wxColour(0, 150, 136) : BambuDevicePalette::Green;
+    m_gauge_progress->SetProgressBackgroundColour(progress_accent);
     m_gauge_progress->SetMaxSize(wxSize(FromDIP(600), -1));
     m_panel_progress->SetSizer(m_sizer_progressbar);
     m_panel_progress->Layout();
@@ -340,12 +354,12 @@ void PrintingTaskPanel::create_panel(wxWindow* parent)
     m_staticText_progress_percent = new wxStaticText(penel_text, wxID_ANY, "0", wxDefaultPosition, wxDefaultSize, 0);
     m_staticText_progress_percent->SetFont(::Label::Head_18);
     m_staticText_progress_percent->SetMaxSize(wxSize(-1, FromDIP(20)));
-    m_staticText_progress_percent->SetForegroundColour(wxColour(0, 150, 136));
+    m_staticText_progress_percent->SetForegroundColour(progress_accent);
 
     m_staticText_progress_percent_icon = new wxStaticText(penel_text, wxID_ANY, "%", wxDefaultPosition, wxDefaultSize, 0);
     m_staticText_progress_percent_icon->SetFont(::Label::Body_11);
     m_staticText_progress_percent_icon->SetMaxSize(wxSize(-1, FromDIP(13)));
-    m_staticText_progress_percent_icon->SetForegroundColour(wxColour(0, 150, 136));
+    m_staticText_progress_percent_icon->SetForegroundColour(progress_accent);
 
     sizer_percent->Add(m_staticText_progress_percent, 0, 0, 0);
 
@@ -361,8 +375,9 @@ void PrintingTaskPanel::create_panel(wxWindow* parent)
     m_staticText_progress_left->SetFont(wxFont(12, wxFONTFAMILY_DEFAULT, wxFONTSTYLE_NORMAL, wxFONTWEIGHT_NORMAL, false, wxT("HarmonyOS Sans SC")));
     m_staticText_progress_left->SetForegroundColour(wxColour(146, 146, 146));
 
-    // Orca: display the end time of the print
-    m_staticText_progress_end = new wxStaticText(penel_text, wxID_ANY, L("N/A"), wxDefaultPosition, wxDefaultSize, 0);
+    // Orca: display the end time of the print. Labelled and placed as in Bambu Studio, under the
+    // bar at the right of the stage line (see update_left_time).
+    m_staticText_progress_end = new wxStaticText(penel_finish_time, wxID_ANY, _L("Estimated finish time: ") + NA_STR, wxDefaultPosition, wxDefaultSize, 0);
     m_staticText_progress_end->Wrap(-1);
     m_staticText_progress_end->SetFont(
         wxFont(12, wxFONTFAMILY_DEFAULT, wxFONTSTYLE_NORMAL, wxFONTWEIGHT_NORMAL, false, wxT("HarmonyOS Sans SC")));
@@ -389,9 +404,6 @@ void PrintingTaskPanel::create_panel(wxWindow* parent)
     bSizer_text->Add(m_staticText_layers, 0, wxALIGN_CENTER | wxALL, 0);
     bSizer_text->Add(0, 0, 0, wxLEFT, FromDIP(20));
     bSizer_text->Add(m_staticText_progress_left, 0, wxALIGN_CENTER | wxALL, 0);
-    // Orca: display the end time of the print
-    bSizer_text->Add(0, 0, 0, wxLEFT, FromDIP(8));
-    bSizer_text->Add(m_staticText_progress_end, 0, wxALIGN_CENTER | wxALL, 0);
 
     penel_text->SetMaxSize(wxSize(FromDIP(600), -1));
     penel_text->SetSizer(bSizer_text);
@@ -403,12 +415,18 @@ void PrintingTaskPanel::create_panel(wxWindow* parent)
     penel_bottons->SetSizer(bSizer_buttons);
     penel_bottons->Layout();
 
+    wxBoxSizer *bSizer_finish_time = new wxBoxSizer(wxHORIZONTAL);
+    bSizer_finish_time->Add(m_printing_stage_value, 1, wxALIGN_CENTER_VERTICAL, 0);
+    bSizer_finish_time->Add(m_staticText_progress_end, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP(8));
+    penel_finish_time->SetSizer(bSizer_finish_time);
+    penel_finish_time->Layout();
+
     bSizer_subtask_info->Add(0, 0, 0, wxEXPAND | wxTOP, FromDIP(14));
     bSizer_subtask_info->Add(bSizer_task_name, 0, wxEXPAND|wxRIGHT, FromDIP(18));
     bSizer_subtask_info->Add(m_staticText_profile_value, 0, wxEXPAND | wxTOP, FromDIP(5));
-    bSizer_subtask_info->Add(m_printing_stage_value, 0, wxEXPAND | wxTOP, FromDIP(5));
     bSizer_subtask_info->Add(penel_bottons, 0, wxEXPAND | wxTOP, FromDIP(10));
     bSizer_subtask_info->Add(m_panel_progress, 0, wxEXPAND|wxRIGHT, FromDIP(25));
+    bSizer_subtask_info->Add(penel_finish_time, 0, wxEXPAND | wxRIGHT, FromDIP(25));
 
 
     m_printing_sizer = new wxBoxSizer(wxHORIZONTAL);
@@ -474,9 +492,9 @@ void PrintingTaskPanel::create_panel(wxWindow* parent)
     m_request_failed_info->SetForegroundColour(*wxRED);
     m_request_failed_info->SetFont(::Label::Body_10);
     static_request_failed_panel_sizer->Add(m_request_failed_info, 0, wxEXPAND | wxALL, FromDIP(10));
-    StateColor btn_bg_green(std::pair<wxColour, int>(AMS_CONTROL_DISABLE_COLOUR, StateColor::Disabled), std::pair<wxColour, int>(wxColour(0, 137, 123), StateColor::Pressed),
-                            std::pair<wxColour, int>(wxColour(38, 166, 154), StateColor::Hovered), std::pair<wxColour, int>(AMS_CONTROL_BRAND_COLOUR, StateColor::Normal));
-    StateColor btn_bd_green(std::pair<wxColour, int>(AMS_CONTROL_WHITE_COLOUR, StateColor::Disabled), std::pair<wxColour, int>(AMS_CONTROL_BRAND_COLOUR, StateColor::Enabled));
+    StateColor btn_bg_green(std::pair<wxColour, int>(AMS_CONTROL_DISABLE_COLOUR, StateColor::Disabled), std::pair<wxColour, int>(BambuDevicePalette::GreenPressed, StateColor::Pressed),
+                            std::pair<wxColour, int>(BambuDevicePalette::GreenHovered, StateColor::Hovered), std::pair<wxColour, int>(BambuDevicePalette::Green, StateColor::Normal));
+    StateColor btn_bd_green(std::pair<wxColour, int>(AMS_CONTROL_WHITE_COLOUR, StateColor::Disabled), std::pair<wxColour, int>(BambuDevicePalette::Green, StateColor::Enabled));
     m_button_market_retry = new Button(m_request_failed_panel, _L("Retry"));
     m_button_market_retry->SetBackgroundColor(btn_bg_green);
     m_button_market_retry->SetBorderColor(btn_bd_green);
@@ -699,6 +717,9 @@ void PrintingTaskPanel::update_progress_percent(wxString percent, wxString icon)
 void PrintingTaskPanel::update_left_time(wxString time)
 {
     m_staticText_progress_left->SetLabelText(time);
+    // No remaining time (idle, preparing, reset): do not leave the last print's finish time up.
+    if (time == NA_STR)
+        m_staticText_progress_end->SetLabelText(_L("Estimated finish time: ") + NA_STR);
 }
 
 void PrintingTaskPanel::update_left_time(int mc_left_time)
@@ -730,7 +751,12 @@ void PrintingTaskPanel::update_left_time(int mc_left_time)
     else
         end_time_text = NA_STR;
 
-    m_staticText_progress_end->SetLabelText(end_time_text);
+    const wxString finish_label = _L("Estimated finish time: ") + end_time_text;
+    if (m_staticText_progress_end->GetLabelText() != finish_label) {
+        m_staticText_progress_end->SetLabelText(finish_label);
+        // The label grows from "N/A" to a time; let the stage line give it the room.
+        m_staticText_progress_end->GetParent()->Layout();
+    }
 
 }
 
@@ -1108,9 +1134,9 @@ wxBoxSizer *StatusBasePanel::create_machine_control_page(wxWindow *parent)
     //m_staticText_control->SetFont(PAGE_TITLE_FONT);
     m_staticText_control->SetForegroundColour(PAGE_TITLE_FONT_COL);
 
-    StateColor btn_bg_green(std::pair<wxColour, int>(AMS_CONTROL_DISABLE_COLOUR, StateColor::Disabled), std::pair<wxColour, int>(wxColour(0, 137, 123), StateColor::Pressed),
-        std::pair<wxColour, int>(wxColour(38, 166, 154), StateColor::Hovered), std::pair<wxColour, int>(AMS_CONTROL_BRAND_COLOUR, StateColor::Normal));
-    StateColor btn_bd_green(std::pair<wxColour, int>(AMS_CONTROL_WHITE_COLOUR, StateColor::Disabled), std::pair<wxColour, int>(AMS_CONTROL_BRAND_COLOUR, StateColor::Enabled));
+    StateColor btn_bg_green(std::pair<wxColour, int>(AMS_CONTROL_DISABLE_COLOUR, StateColor::Disabled), std::pair<wxColour, int>(BambuDevicePalette::GreenPressed, StateColor::Pressed),
+        std::pair<wxColour, int>(BambuDevicePalette::GreenHovered, StateColor::Hovered), std::pair<wxColour, int>(BambuDevicePalette::Green, StateColor::Normal));
+    StateColor btn_bd_green(std::pair<wxColour, int>(AMS_CONTROL_WHITE_COLOUR, StateColor::Disabled), std::pair<wxColour, int>(BambuDevicePalette::Green, StateColor::Enabled));
 
     m_parts_btn = new Button(m_panel_control_title, _L("Printer Parts"));
     m_parts_btn->SetBackgroundColor(btn_bg_green);
@@ -1338,7 +1364,7 @@ wxBoxSizer *StatusBasePanel::create_misc_control(wxWindow *parent)
     m_switch_nozzle_fan->SetTextColor(StateColor(std::make_pair(DISCONNECT_TEXT_COL, (int) StateColor::Disabled), std::make_pair(NORMAL_FAN_TEXT_COL, (int) StateColor::Normal)));
 
     m_switch_nozzle_fan->Bind(wxEVT_ENTER_WINDOW, [this](auto& e) {
-        m_fan_panel->SetBackgroundColor(wxColour(0, 150, 136));
+        m_fan_panel->SetBackgroundColor(BambuDevicePalette::Green);
     });
 
     m_switch_nozzle_fan->Bind(wxEVT_LEAVE_WINDOW, [this, parent](auto& e) {
@@ -1358,7 +1384,7 @@ wxBoxSizer *StatusBasePanel::create_misc_control(wxWindow *parent)
         StateColor(std::make_pair(DISCONNECT_TEXT_COL, (int) StateColor::Disabled), std::make_pair(NORMAL_FAN_TEXT_COL, (int) StateColor::Normal)));
 
     m_switch_printing_fan->Bind(wxEVT_ENTER_WINDOW, [this](auto& e) {
-        m_fan_panel->SetBackgroundColor(wxColour(0, 150, 136));
+        m_fan_panel->SetBackgroundColor(BambuDevicePalette::Green);
     });
 
     m_switch_printing_fan->Bind(wxEVT_LEAVE_WINDOW, [this, parent](auto& e) {
@@ -1378,7 +1404,7 @@ wxBoxSizer *StatusBasePanel::create_misc_control(wxWindow *parent)
         StateColor(std::make_pair(DISCONNECT_TEXT_COL, (int)StateColor::Disabled), std::make_pair(NORMAL_FAN_TEXT_COL, (int)StateColor::Normal)));
 
     m_switch_cham_fan->Bind(wxEVT_ENTER_WINDOW, [this](auto& e) {
-        m_fan_panel->SetBackgroundColor(wxColour(0, 150, 136));
+        m_fan_panel->SetBackgroundColor(BambuDevicePalette::Green);
     });
 
     m_switch_cham_fan->Bind(wxEVT_LEAVE_WINDOW, [this, parent](auto& e) {
@@ -3290,12 +3316,12 @@ void StatusPanel::update_subtask(MachineObject *obj)
             // update printing stage
             m_project_task_panel->update_left_time(obj->mc_left_time);
             if (obj->subtask_) {
-                m_project_task_panel->update_stage_value(obj->get_curr_stage(), obj->subtask_->task_progress);
+                m_project_task_panel->update_stage_value(device_page_stage_text(obj), obj->subtask_->task_progress);
                 m_project_task_panel->update_progress_percent(wxString::Format("%d", obj->subtask_->task_progress), "%");
                 m_project_task_panel->update_layers_num(true, wxString::Format(_L("Layer: %d/%d"), obj->curr_layer, obj->total_layers));
 
             } else {
-                m_project_task_panel->update_stage_value(obj->get_curr_stage(), 0);
+                m_project_task_panel->update_stage_value(device_page_stage_text(obj), 0);
                 m_project_task_panel->update_progress_percent(NA_STR, wxEmptyString);
                 m_project_task_panel->update_layers_num(true, wxString::Format(_L("Layer: %s"), NA_STR));
             }
@@ -3416,6 +3442,17 @@ void StatusPanel::update_cloud_subtask(MachineObject *obj)
             }
         }
     }
+}
+
+// The stage line under the progress bar. Bambu Studio names stage 0 "Printing"; our
+// get_stage_string() returns "" for it because the multi-device pages and the phone hub treat an
+// empty stage as "plain printing", so the Device page fills the word in itself.
+wxString StatusPanel::device_page_stage_text(MachineObject *obj)
+{
+    wxString stage = obj->get_curr_stage();
+    if (stage.IsEmpty() && obj->print_status == "RUNNING")
+        stage = _L("Printing");
+    return stage;
 }
 
 void StatusPanel::update_sdcard_subtask(MachineObject *obj)
@@ -5091,8 +5128,8 @@ wxBoxSizer *ScoreDialog::get_button_sizer()
     wxBoxSizer *bSizer_button = new wxBoxSizer(wxHORIZONTAL);
     bSizer_button->Add(0, 0, 1, wxEXPAND, 0);
 
-    StateColor btn_bg_green(std::pair<wxColour, int>(wxColour(0, 137, 123), StateColor::Pressed), std::pair<wxColour, int>(wxColour(38, 166, 154), StateColor::Hovered),
-                            std::pair<wxColour, int>(AMS_CONTROL_BRAND_COLOUR, StateColor::Normal));
+    StateColor btn_bg_green(std::pair<wxColour, int>(BambuDevicePalette::GreenPressed, StateColor::Pressed), std::pair<wxColour, int>(BambuDevicePalette::GreenHovered, StateColor::Hovered),
+                            std::pair<wxColour, int>(BambuDevicePalette::Green, StateColor::Normal));
 
     m_button_ok = new Button(this, _L("Submit"));
     m_button_ok->SetBackgroundColor(btn_bg_green);

@@ -69,6 +69,10 @@ static std::map<wxColour, wxColour> gDarkColors{
     {"#FEFEFE", "#FEFEFE"}, // rgb(254, 254, 254)   Near-white text (segment btn selected, confirm btn)
     {"#E9E9E9", "#34343A"}, // rgb(233, 233, 233)  Segmented pill container background
     {"#DDDDDD", "#40404A"}, // rgb(221, 221, 221)  Segmented pill inactive-segment hover fill
+    // Bambu Device page (BambuDevicePalette.hpp): Bambu Studio's own dark twins of its brand green
+    {"#00AE42", "#21A452"}, // rgb(0, 174, 66)     Bambu green: buttons, percent text
+    {"#3DCB73", "#37B865"}, // rgb(61, 203, 115)   Bambu green, hovered
+    {"#1B8844", "#1C8A46"}, // rgb(27, 136, 68)    Bambu green, pressed
 };
 
 std::tuple<double, double, double> StateColor::GetLAB(const wxColour& color) {

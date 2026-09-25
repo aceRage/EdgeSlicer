@@ -1,6 +1,7 @@
 #include "AxisCtrlButton.hpp"
 #include "Label.hpp"
 #include "libslic3r/libslic3r.h"
+#include "../BambuDevicePalette.hpp"
 
 #include <wx/dcclient.h>
 #include <wx/dcgraph.h>
@@ -9,7 +10,8 @@ StateColor blank_bg(StateColor(std::make_pair(wxColour("#FFFFFF"), (int)StateCol
 static const wxColour BUTTON_BG_COL = wxColour("#EEEEEE");
 static const wxColour BUTTON_IN_BG_COL = wxColour("#CECECE");
 
-static const wxColour bd = wxColour(0, 150, 136);
+// Only the Bambu Device page uses this widget: Bambu Studio's green hover ring.
+static const wxColour bd = Slic3r::GUI::BambuDevicePalette::Green;
 static const wxColour text_num_color = wxColour(0x898989);
 static const wxColour BUTTON_PRESS_COL = wxColour(172, 172, 172);
 static const double sqrt2 = std::sqrt(2);

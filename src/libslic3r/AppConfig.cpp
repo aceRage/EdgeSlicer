@@ -599,6 +599,38 @@ static bool verify_config_file_checksum(boost::nowide::ifstream &ifs)
 }
 #endif
 
+#ifdef WIN32
+// Split the raw contents of a JSON app config file into the JSON body ("left") and whatever
+// trailing comment/checksum line follows the final '}' ("right"), e.g. "# MD5 checksum ...".
+// Handles: no trailing newline after '}', CRLF line endings, an empty file, a file that is only
+// whitespace/comments (no '}' at all), and a truncated/missing checksum line. Never throws.
+static void split_config_body_and_checksum(const std::string& total_string, std::string& left_string, std::string& right_string)
+{
+    left_string.clear();
+    right_string.clear();
+
+    const size_t last_pos = total_string.find_last_of('}');
+    if (last_pos == std::string::npos) {
+        // No closing brace at all: treat the whole thing as (invalid) body, nothing to strip.
+        left_string = total_string;
+        return;
+    }
+
+    // Body is everything up to and including the last '}'.
+    left_string = total_string.substr(0, last_pos + 1);
+
+    // Whatever follows the '}' is the newline + checksum comment, if present. Skip a single
+    // line ending (either "\n" or "\r\n") before treating the remainder as the checksum text.
+    size_t right_start = last_pos + 1;
+    if (right_start < total_string.size() && total_string[right_start] == '\r')
+        ++right_start;
+    if (right_start < total_string.size() && total_string[right_start] == '\n')
+        ++right_start;
+
+    if (right_start < total_string.size())
+        right_string = total_string.substr(right_start);
+}
+#endif // WIN32
 
 
 #ifdef USE_JSON_CONFIG
@@ -620,16 +652,18 @@ std::string AppConfig::load()
         std::stringstream input_stream;
         input_stream << ifs.rdbuf();
         std::string total_string = input_stream.str();
-        size_t last_pos = total_string.find_last_of('}');
-        std::string left_string = total_string.substr(0, last_pos+1);
-        //skip the "\n"
-        std::string right_string = total_string.substr(last_pos+2);
+        std::string left_string, right_string;
+        split_config_body_and_checksum(total_string, left_string, right_string);
 
         std::string md5_str = appconfig_md5_hash_line({left_string.data()});
         // Verify the checksum of the config file without taking just for debugging purpose.
         if (md5_str != right_string)
             BOOST_LOG_TRIVIAL(info) << "The configuration file " << AppConfig::loading_path() <<
             " has a wrong MD5 checksum or the checksum is missing. This may indicate a file corruption or a harmless user edit.";
+        // An empty or whitespace-only config file has no JSON body to parse: treat it the same
+        // as a parse error so it goes through the usual "corrupted config" recovery path below.
+        if (left_string.find_first_not_of(" \t\r\n") == std::string::npos)
+            throw nlohmann::detail::parse_error::create(101, 0, "configuration file is empty", nullptr);
         j = json::parse(left_string);
 #else
         ifs >> j;
@@ -648,13 +682,12 @@ std::string AppConfig::load()
             std::stringstream back_input_stream;
             back_input_stream << backup_ifs.rdbuf();
             std::string back_total_string = back_input_stream.str();
-            size_t back_last_pos = back_total_string.find_last_of('}');
-            std::string back_left_string = back_total_string.substr(0, back_last_pos+1);
-            std::string back_right_string = back_total_string.substr(back_last_pos+2);
+            std::string back_left_string, back_right_string;
+            split_config_body_and_checksum(back_total_string, back_left_string, back_right_string);
 
             std::string back_md5_str = appconfig_md5_hash_line({back_left_string.data()});
             // Verify the checksum of the config file without taking just for debugging purpose.
-            if (back_md5_str != back_right_string) {
+            if (back_left_string.find_first_not_of(" \t\r\n") == std::string::npos || back_md5_str != back_right_string) {
                 BOOST_LOG_TRIVIAL(error) << format("Both \"%1%\" and \"%2%\" are corrupted. It isn't possible to restore configuration from the backup.", AppConfig::loading_path(), backup_path);
                 backup_ifs.close();
                 boost::filesystem::remove(backup_path);
@@ -666,9 +699,14 @@ std::string AppConfig::load()
             }
             else {
                 BOOST_LOG_TRIVIAL(info) << format("Configuration file \"%1%\" was corrupted. It has been succesfully restored from the backup \"%2%\".", AppConfig::loading_path(), backup_path);
-                // Try parse configuration file after restore from backup.
-                j = json::parse(back_left_string);
-                recovered = true;
+                // Try parse configuration file after restore from backup. The backup can itself be
+                // truncated/corrupted, so guard this the same way as the primary parse above.
+                try {
+                    j = json::parse(back_left_string);
+                    recovered = true;
+                } catch (const std::exception &back_err) {
+                    BOOST_LOG_TRIVIAL(error) << format("Backup configuration \"%1%\" is also corrupted: %2%", backup_path, back_err.what());
+                }
             }
         }
         else
@@ -677,6 +715,13 @@ std::string AppConfig::load()
 
         if (!recovered)
             return err.what();
+    }
+    catch (const std::exception &err) {
+        // Defensive catch-all: any unexpected failure while reading/splitting/parsing the config
+        // (e.g. a stray std::out_of_range from malformed content) must fail gracefully through the
+        // "config corrupted" path rather than crash the application at startup.
+        BOOST_LOG_TRIVIAL(error) << format("Unexpected error while loading configuration file \"%1%\": %2%", AppConfig::loading_path(), err.what());
+        return err.what();
     }
 
     try {

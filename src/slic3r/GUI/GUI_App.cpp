@@ -2,6 +2,7 @@
 #include "libslic3r/FilamentHotBedNozzleRules.hpp"
 #include "GUI_App.hpp"
 #include "AmsUiPreview.hpp"
+#include "DarkModeBackground.hpp"
 #include "RemoteAccess.hpp"
 #include "RemoteHub.hpp"
 #include "GUI_Init.hpp"
@@ -2578,6 +2579,14 @@ void GUI_App::init_networking_callbacks()
                     MachineObject* obj = m_device_manager->get_my_machine(dev_id);
                     wxCommandEvent event(EVT_CONNECT_LAN_MODE_PRINT);
 
+                    // What the plug-in says about the LAN session, for the reconnect tick
+                    // (LanReconnectLadder::lan_tick_step): a quiet printer whose session is up is
+                    // asked for a report, a session reported down is re-dialled.
+                    if (obj)
+                        obj->set_lan_session_up(state == ConnectStatus::ConnectStatusOk);
+                    if (MachineObject* local = m_device_manager->get_local_machine(dev_id); local && local != obj)
+                        local->set_lan_session_up(state == ConnectStatus::ConnectStatusOk);
+
                     if (obj) {
 
                         if (obj->is_lan_mode_printer()) {
@@ -2705,6 +2714,9 @@ void GUI_App::init_networking_callbacks()
                 }
 
                 if (obj) {
+                    // A LAN report only ever arrives over a live LAN session - even one the host
+                    // never saw an Ok for (a connect_printer the plug-in answered "already up").
+                    obj->set_lan_session_up(true);
                     obj->parse_json(msg, DeviceManager::key_field_only);
                     if (this->m_device_manager->get_selected_machine() == obj && obj->is_ams_need_update) {
                         GUI::wxGetApp().sidebar().load_ams_list(obj->dev_id, obj);
@@ -2712,6 +2724,7 @@ void GUI_App::init_networking_callbacks()
                 }
                 obj = m_device_manager->get_local_machine(dev_id);
                 if (obj) {
+                    obj->set_lan_session_up(true);
                     obj->parse_json(msg, DeviceManager::key_field_only);
                 }
                 });
@@ -3729,16 +3742,7 @@ bool GUI_App::on_init_inner()
                 if (action == PluginSync::ReplaceForeign && ! fs::exists(theirs, ec) && fs::exists(replaced, ec))
                     fs::rename(replaced, theirs, ec);
             } else {
-                // Ultra (live view): our sidecar BambuSource is a placeholder. If the user has
-                // already fetched Bambu's real camera component into plugins/, it must survive
-                // this upgrade - stamping the stub back over it would break live view again.
-                const char *bs = "BambuSource.dll";
-                if (fs::exists(bundled / bs, ec)) {
-                    if (may_overwrite_bambusource(fs::exists(pf / bs, ec), exports_dll_register_server(pf / bs)))
-                        fs::copy_file(bundled / bs, pf / bs, fs::copy_option::overwrite_if_exists, ec);
-                    else
-                        BOOST_LOG_TRIVIAL(info) << "[UltraNet] keeping the installed Bambu camera component in " << pf.string();
-                }
+                // BambuSource is synced on its own below.
                 write_marker();
                 BOOST_LOG_TRIVIAL(info) << "[UltraNet] " << (action == PluginSync::InstallFresh ? "installed" : "updated")
                                         << " the bundled network plug-in in " << pf.string();
@@ -3750,6 +3754,49 @@ bool GUI_App::on_init_inner()
             BOOST_LOG_TRIVIAL(info) << "[UltraNet] existing plug-in matches the bundled one; marker written";
         } else if (keep_foreign && sidecar_present && installed_present && ! identical) {
             BOOST_LOG_TRIVIAL(warning) << "[UltraNet] ultranet_keep_foreign_plugin is set; leaving a foreign network plug-in in " << pf.string();
+        }
+
+        // BambuSource follows the sidecar on its own. It carries the storage browser's tunnel now,
+        // so it can change while bambu_networking.dll stays byte-identical, and it used to be
+        // copied only together with a plug-in replacement - with an overwrite that silently fails
+        // while another EdgeSlicer instance (the hub) has the old file loaded, after which nothing
+        // retried. Move the old one aside first, like the plug-in above. Bambu's real camera
+        // filter, when the user fetched it, is never replaced (live view needs it).
+        {
+            const fs::path bs_ours     = bundled / "BambuSource.dll";
+            const fs::path bs_theirs   = pf / "BambuSource.dll";
+            const fs::path bs_replaced = pf / "BambuSource.dll.replaced";
+            if (fs::exists(bs_replaced, ec))
+                fs::remove(bs_replaced, ec);
+            const bool bs_bundled   = fs::exists(bs_ours, ec);
+            const bool bs_installed = fs::exists(bs_theirs, ec);
+            bool       bs_same      = false;
+            if (bs_bundled && bs_installed && fs::file_size(bs_ours, ec) == fs::file_size(bs_theirs, ec)) {
+                boost::nowide::ifstream a(bs_ours.string().c_str(), std::ios::binary), b(bs_theirs.string().c_str(), std::ios::binary);
+                std::string sa((std::istreambuf_iterator<char>(a)), std::istreambuf_iterator<char>());
+                std::string sb((std::istreambuf_iterator<char>(b)), std::istreambuf_iterator<char>());
+                bs_same = ! sa.empty() && sa == sb;
+            }
+            const bool bs_real = bs_installed && exports_dll_register_server(bs_theirs);
+            if (bambusource_needs_refresh(bs_bundled, bs_installed, bs_same, bs_real, keep_foreign)) {
+                fs::create_directories(pf, ec);
+                if (bs_installed) {
+                    fs::rename(bs_theirs, bs_replaced, ec);
+                    ec.clear();
+                }
+                fs::copy_file(bs_ours, bs_theirs, fs::copy_option::overwrite_if_exists, ec);
+                if (ec) {
+                    BOOST_LOG_TRIVIAL(error) << "[UltraNet] copying the bundled BambuSource failed: " << ec.message()
+                                             << " (will retry on the next start)";
+                    if (! fs::exists(bs_theirs, ec) && fs::exists(bs_replaced, ec))
+                        fs::rename(bs_replaced, bs_theirs, ec);
+                } else {
+                    BOOST_LOG_TRIVIAL(info) << "[UltraNet] " << (bs_installed ? "updated" : "installed")
+                                            << " the bundled BambuSource in " << pf.string();
+                }
+            } else if (bs_bundled && bs_real && ! bs_same) {
+                BOOST_LOG_TRIVIAL(info) << "[UltraNet] keeping the installed Bambu camera component in " << pf.string();
+            }
         }
     } catch (...) {}
 
@@ -4502,10 +4549,14 @@ void GUI_App::UpdateDarkUI(wxWindow* window, bool highlited/* = false*/, bool ju
     if (m_is_dark_mode) {
 
         auto orig_col = window->GetBackgroundColour();
-        auto bg_col = StateColor::darkModeColorFor(orig_col);
-        // there are cases where the background color of an item is bright, specifically:
-        // * the background color of a button: #009688  -- 73
-        if (bg_col != orig_col) {
+        // DarkModeBackground.hpp: a child painted with its parent's brush must not get the dark
+        // twin of the system button face pinned on it (the grey band behind every label).
+        const DarkBackground dark_bg = dark_mode_background_for(window);
+        const wxColour       bg_col  = dark_bg.colour;
+        if (dark_bg.action == DarkBackground::Action::SetParent ||
+            (dark_bg.action == DarkBackground::Action::Map && bg_col != orig_col)) {
+            // there are cases where the background color of an item is bright, specifically:
+            // * the background color of a button: #009688  -- 73
             window->SetBackgroundColour(bg_col);
         }
 

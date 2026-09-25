@@ -16,6 +16,8 @@
 #include "slic3r/GUI/PrintErrorCommands.hpp"
 #include "slic3r/GUI/RemoteEvents.hpp"
 
+#include <algorithm>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -300,6 +302,139 @@ TEST_CASE("[RemoteEvents] the LAN reconnect backoff is 15s, 30s, 60s and then ca
     // DISCONNECT_TIMEOUT, and the tick waits that long again before touching it.
     CHECK(L::GRACE_MS == 15000);
     CHECK(L::MAX_MS == 60000);
+}
+
+// ---- the LAN reconnect tick's rule (LanReconnectLadder::lan_tick_step) ----
+//
+// The owner's Device tab dropped and came back every minute or so on Bambu printers. Half of it was
+// this tick: it re-dialled any LAN session that had gone 30 s (+15 s grace) without a report, so a
+// quiet printer was torn down, and when a second EdgeSlicer process took the session over (same
+// MQTT ClientId, fixed in UltraNet) the silence made this process take it straight back. These
+// cases drive the rule through simulated minutes, one tick a second, the way the GUI heartbeat does.
+namespace {
+
+namespace L = Slic3r::LanReconnectLadder;
+
+// A simulated printer + plug-in, and the host tick over them. The printer pushes a report every
+// `report_every_ms` unless `quiet(now)`; it answers a probe (pushall) after 400 ms while its
+// session is up. A Reconnect resets the report clock like MachineObject::reset() does and leaves
+// the session down until `dial_ok(now)` says a dial would get through.
+struct Sim
+{
+    long long now = 0, last_report = 0, pending_answer = -1;
+    bool      session_up = true;
+    bool      answers    = true; // the printer answers a pushall
+    long long report_every_ms = 1000;
+    std::function<bool(long long)> quiet   = [](long long) { return false; };
+    std::function<bool(long long)> away    = [](long long) { return false; }; // printer unreachable
+    std::function<bool(long long)> dial_ok = [](long long) { return true; };
+    L::LinkState st;
+    std::vector<long long> probes, redials;
+    long long max_silence = 0;
+
+    void run_until(long long end)
+    {
+        for (; now < end; now += 1000) {
+            if (away(now)) session_up = false;
+            if (session_up && !quiet(now) && now % report_every_ms == 0) last_report = now;
+            if (session_up && pending_answer >= 0 && now >= pending_answer) { last_report = now; pending_answer = -1; }
+            max_silence = std::max(max_silence, now - last_report);
+            switch (L::lan_tick_step(st, now, now - last_report, session_up)) {
+            case L::TickAction::None: break;
+            case L::TickAction::Probe:
+                probes.push_back(now);
+                if (session_up && answers) pending_answer = now + 400;
+                break;
+            case L::TickAction::Reconnect:
+                redials.push_back(now);
+                last_report = now; // MachineObject::reset()
+                session_up = !away(now) && dial_ok(now);
+                break;
+            }
+        }
+    }
+};
+
+} // namespace
+
+TEST_CASE("[RemoteEvents] a LAN session with steady reports is never touched for ten minutes", "[RemoteEvents]")
+{
+    Sim s;
+    s.run_until(10 * 60 * 1000);
+    CHECK(s.redials.empty());
+    CHECK(s.probes.empty());
+    CHECK(s.max_silence <= 1000);
+}
+
+TEST_CASE("[RemoteEvents] a quiet LAN printer is asked for a report, never re-dialled", "[RemoteEvents]")
+{
+    // 90 s without a periodic report in every two minutes, for ten minutes - longer than the old
+    // 30 s + 15 s rule ever let a session live.
+    Sim s;
+    s.quiet = [](long long t) { return t % 120000 >= 30000; };
+    s.run_until(10 * 60 * 1000);
+    CHECK(s.redials.empty());
+    CHECK(!s.probes.empty());
+    // Each silence ends with the answer to a probe sent at 20 s: the Device tab (30 s rule) never
+    // sees the printer as disconnected.
+    CHECK(s.max_silence <= L::PROBE_AFTER_MS + 1000);
+    CHECK(s.max_silence < 30000);
+}
+
+TEST_CASE("[RemoteEvents] a session the plug-in calls up but that stays mute is re-dialled at two minutes", "[RemoteEvents]")
+{
+    Sim s;
+    // The last report lands at 59 s; after that nothing, and probes go unanswered (a half-open
+    // socket) - and the plug-in never says the session is gone.
+    s.quiet   = [](long long t) { return t >= 60000; };
+    s.answers = false;
+    s.run_until(190000);
+    REQUIRE(s.redials.size() == 1);
+    CHECK(s.redials[0] - 59000 == L::STALE_MS);
+    // One probe per 10 s from 20 s of silence until the re-dial.
+    CHECK(s.probes.size() == (size_t) ((L::STALE_MS - L::PROBE_AFTER_MS) / L::PROBE_EVERY_MS));
+}
+
+TEST_CASE("[RemoteEvents] a real LAN drop is re-dialled after the grace, then on the ladder, until the printer is back", "[RemoteEvents]")
+{
+    Sim s;
+    // The printer leaves at 60 s (the plug-in reports the session lost) and is back at 400 s.
+    s.away    = [](long long t) { return t >= 60000 && t < 400000; };
+    s.run_until(10 * 60 * 1000);
+    REQUIRE(s.redials.size() >= 4);
+    // First re-dial: 20 s of silence after the last report (59 s) to notice, then the 15 s grace.
+    CHECK(s.redials[0] == 59000 + L::PROBE_AFTER_MS + L::GRACE_MS);
+    // Then 20 s (the reset report clock needs 20 s of silence again, which is longer than the
+    // 15 s first rung), 30 s, 60 s, 60 s...
+    CHECK(s.redials[1] - s.redials[0] == 20000);
+    CHECK(s.redials[2] - s.redials[1] == 30000);
+    CHECK(s.redials[3] - s.redials[2] == 60000);
+    for (size_t i = 4; i < s.redials.size(); ++i) CHECK(s.redials[i] - s.redials[i - 1] == 60000);
+    // No probe is wasted on a session the plug-in said is gone.
+    CHECK(s.probes.empty());
+    // Back at 400 s: the first re-dial after that gets through, and nothing happens afterwards.
+    CHECK(s.redials.back() >= 400000);
+    CHECK(s.redials.back() < 400000 + 60000 + 1000);
+    CHECK(s.session_up);
+    CHECK(s.st.attempts == 0);
+    CHECK(s.now - s.last_report <= 1000);
+}
+
+TEST_CASE("[RemoteEvents] a report publish that finds no session counts as a drop", "[RemoteEvents]")
+{
+    // A plug-in that drops the session without telling the host (or the callback was lost): the
+    // probe cannot be published, the tick is told session_up = false, and the ladder takes over.
+    L::LinkState st;
+    const long long t0 = 100000; // the host's clock is epoch milliseconds, never 0
+    CHECK(L::lan_tick_step(st, t0, 25000, true) == L::TickAction::Probe);
+    // The host saw rc != 0 from the publish and marked the session down: the grace window runs
+    // from the first silent tick.
+    CHECK(L::lan_tick_step(st, t0 + 1000, 26000, false) == L::TickAction::None);
+    CHECK(L::lan_tick_step(st, t0 + L::GRACE_MS, 25000 + L::GRACE_MS, false) == L::TickAction::Reconnect);
+    // A report from a live session afterwards clears everything.
+    CHECK(L::lan_tick_step(st, t0 + L::GRACE_MS + 1000, 500, true) == L::TickAction::None);
+    CHECK(st.attempts == 0);
+    CHECK(st.down_since == 0);
 }
 
 // The notification body, shared by ntfy, Web Push and the native-app push plane.
