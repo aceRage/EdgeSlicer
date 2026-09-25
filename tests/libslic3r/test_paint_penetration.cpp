@@ -327,7 +327,9 @@ TEST_CASE("Paint penetration 0 follows the shell exactly: same segmentation and 
     explicit_depth.top_penetration    = 4;
     explicit_depth.bottom_penetration = 3;
 
-    const std::vector<int> painted = { 0, 1, 2, 3, 4, 5 }; // top, bottom and one side
+    // Top, bottom and one side. (Unlimited mode lets the painted side claim the whole interior of
+    // every layer, so the depths are pinned by the tests below, not here.)
+    const std::vector<int> painted = { 0, 1, 2, 3, 4, 5 };
     Model a_model, b_model;
     Print a, b;
     apply_painted_slab(painted, follow, a_model, a);
@@ -335,8 +337,6 @@ TEST_CASE("Paint penetration 0 follows the shell exactly: same segmentation and 
     const std::string a_gcode = Slic3r::Test::gcode(a);
     const std::string b_gcode = Slic3r::Test::gcode(b);
     CHECK(segmentation_of(*a.objects().front()) == segmentation_of(*b.objects().front()));
-    CHECK(top_depth(*a.objects().front()) == 4);
-    CHECK(bottom_depth(*a.objects().front()) == 3);
     REQUIRE(! a_gcode.empty());
     CHECK(a_gcode.find("; top_color_penetration_layers = 0") != std::string::npos);
     CHECK(without_config_block(a_gcode) == without_config_block(b_gcode));
