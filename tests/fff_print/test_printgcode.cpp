@@ -296,3 +296,54 @@ SCENARIO( "PrintGCode basic functionality", "[PrintGCode]") {
         }
     }
 }
+
+// BBL timelapse: the H2D/H2C/H2S/P2S profiles carry the per-layer photo (M971 / M9711) only in
+// time_lapse_gcode, so a non-i3 BBL machine must get that block on every layer, or the printer's
+// timelapse flag has nothing to record. The X1/P1 profiles keep the photo in layer_change_gcode
+// and leave time_lapse_gcode empty; i3 machines keep their own placement.
+TEST_CASE("BBL time_lapse_gcode is emitted once per layer", "[PrintGCode][Timelapse]")
+{
+    auto slice_bbl = [](const char *structure, const char *time_lapse_gcode) {
+        DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+        config.set_deserialize_strict({
+            { "printer_structure",          structure },
+            { "time_lapse_gcode",           time_lapse_gcode },
+            { "layer_change_gcode",         ";TEST_LAYER_CHANGE [layer_num]" },
+            { "machine_start_gcode",        "" },
+            { "layer_height",               0.2 },
+            { "initial_layer_print_height", 0.2 },
+        });
+        Slic3r::Print print;
+        Slic3r::Model model;
+        Slic3r::Test::init_print({TestMesh::cube_20x20x20}, print, model, config);
+        print.is_BBL_printer() = true;
+        return Slic3r::Test::gcode(print);
+    };
+    auto count = [](const std::string &gcode, const std::string &token) {
+        size_t n = 0;
+        for (size_t pos = gcode.find(token); pos != std::string::npos; pos = gcode.find(token, pos + token.size()))
+            ++n;
+        return n;
+    };
+    // Tokens carry the leading newline so the config dump at the end of the file
+    // ("; time_lapse_gcode = ;TEST_TIMELAPSE ...") is not counted.
+    const char *marker = ";TEST_TIMELAPSE layer={layer_num} photo={most_used_physical_extruder_id} curr={curr_physical_extruder_id}";
+
+    SECTION("core-xy machine: one photo block per layer, placeholders resolved") {
+        std::string gcode  = slice_bbl("corexy", marker);
+        size_t      layers = count(gcode, "\n;TEST_LAYER_CHANGE ");
+        REQUIRE(layers == 100);
+        REQUIRE(count(gcode, "\n;TEST_TIMELAPSE ") == layers);
+        REQUIRE(gcode.find(";TEST_TIMELAPSE layer=0 photo=0 curr=0") != std::string::npos);
+        // The photo block comes before the layer's own layer_change_gcode, as in BambuStudio.
+        REQUIRE(gcode.find(";TEST_TIMELAPSE layer=0 ") < gcode.find(";TEST_LAYER_CHANGE 0"));
+    }
+    SECTION("profile without time_lapse_gcode (X1/P1): nothing added") {
+        std::string gcode = slice_bbl("corexy", "");
+        REQUIRE(count(gcode, "\n;TEST_TIMELAPSE ") == 0);
+    }
+    SECTION("i3 machine keeps its traditional placement: still one block per layer") {
+        std::string gcode = slice_bbl("i3", marker);
+        REQUIRE(count(gcode, "\n;TEST_TIMELAPSE ") == count(gcode, "\n;TEST_LAYER_CHANGE "));
+    }
+}

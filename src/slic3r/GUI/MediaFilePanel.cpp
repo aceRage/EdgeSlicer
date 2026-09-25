@@ -433,6 +433,18 @@ void MediaFilePanel::fetchUrl(boost::weak_ptr<PrinterFileSystem> wfs)
         return;
     }
     m_waiting_enable = false;
+    if (!PrinterFileSystem::HasTunnelLibrary()) {
+        // Ultra: the storage browser reaches the printer through the tunnel API of Bambu's
+        // BambuSource library (LAN port 6000, or the cloud relay). The BambuSource EdgeSlicer
+        // ships beside its network plug-in is an empty placeholder, so the connect used to fail
+        // at once and the panel blamed the network: "Please check the network and try again ...
+        // [-2]". Say what is actually missing instead of sending the user after their network.
+        BOOST_LOG_TRIVIAL(info) << "MediaFilePanel::fetchUrl: BambuSource has no tunnel API, storage browsing unavailable";
+        m_image_grid->SetStatus(m_bmp_failed, _L("Browsing the printer's storage (timelapse videos and print files) needs Bambu's "
+                                                 "BambuSource component, which EdgeSlicer's network plug-in does not include."));
+        fs->SetUrl("0");
+        return;
+    }
     if (!m_local_proto && !m_remote_proto) {
         m_waiting_support = true;
         m_image_grid->SetStatus(m_bmp_failed, _L("Browsing file in SD card is not supported in current firmware. Please update the printer firmware."));

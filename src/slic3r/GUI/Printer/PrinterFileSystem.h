@@ -63,6 +63,11 @@ public:
 
     ~PrinterFileSystem();
 
+    // False when the BambuSource library that was loaded exports no tunnel API. EdgeSlicer's
+    // network plug-in ships an empty placeholder under that name, and with it every connect fails
+    // at once with -2 (the Fake_Bambu_Create fallback) whatever the network is doing.
+    static bool HasTunnelLibrary();
+
 public:
     enum FileType {
         F_TIMELAPSE,
