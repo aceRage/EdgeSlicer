@@ -8,6 +8,8 @@
 #include <boost/log/trivial.hpp>
 #include <random>
 #include <algorithm>
+#include <array>
+#include <chrono>
 #include <queue>
 
 #include "libslic3r/AABBTreeLines.hpp"
@@ -342,6 +344,47 @@ struct GlobalModelInfo {
   AABBTreeIndirect::Tree<3, float> enforcers_tree;
   AABBTreeIndirect::Tree<3, float> blockers_tree;
 
+  // Part joints (seam_prefer_part_joints): points on the surface of one part that touch another part,
+  // see gather_part_joints(). Empty unless the object has touching parts (or touches another object).
+  std::vector<Vec3f> part_joint_points;
+  CoordinateFunctor part_joint_coordinate_functor;
+  KDTreeIndirect<3, float, CoordinateFunctor> part_joint_tree { CoordinateFunctor { } };
+  // Spacing of the joint samples; a perimeter point is on a joint within flow width + half of this.
+  float part_joint_sample_spacing = 0.f;
+
+  bool has_part_joints() const { return !part_joint_points.empty(); }
+
+  // Is any joint sample within `radius`? A bounded search that stops at the first hit: most perimeter points are
+  // nowhere near a joint, and an unbounded closest-point query is slow for those.
+  bool is_near_part_joint(const Vec3f &position, float radius) const {
+    if (part_joint_points.empty()) {
+      return false;
+    }
+    struct Visitor {
+      const KDTreeIndirect<3, float, CoordinateFunctor> &tree;
+      const Vec3f                                       &center;
+      const float                                        radius_sqr;
+      bool                                               found = false;
+      unsigned int operator()(size_t idx, size_t dimension) {
+        if (found) {
+          return (unsigned int) VisitorReturnMask::STOP;
+        }
+        float dist_sqr = 0.f;
+        for (size_t i = 0; i < 3; ++i) {
+          const float d = center[i] - tree.coordinate(idx, i);
+          dist_sqr += d * d;
+        }
+        if (dist_sqr <= radius_sqr) {
+          found = true;
+          return (unsigned int) VisitorReturnMask::STOP;
+        }
+        return tree.descent_mask(center[dimension], radius_sqr, idx, dimension);
+      }
+    } visitor { part_joint_tree, position, radius * radius };
+    part_joint_tree.visit(visitor);
+    return visitor.found;
+  }
+
   bool is_enforced(const Vec3f &position, float radius) const {
     if (enforcers.empty()) {
       return false;
@@ -440,6 +483,12 @@ struct GlobalModelInfo {
 #endif
 }
 ;
+
+// How far from a joint sample a perimeter point still counts as "on the joint". The outer wall runs half a
+// line width inside the surface, and the samples are part_joint_sample_spacing apart.
+static float part_joint_radius(const Perimeter &perimeter, const GlobalModelInfo &global_model_info) {
+  return std::max(perimeter.flow_width, 0.4f) + 0.5f * global_model_info.part_joint_sample_spacing;
+}
 
 //Extract perimeter polygons of the given layer
 Polygons extract_perimeter_polygons(const Layer *layer, std::vector<const LayerRegion*> &corresponding_regions_out) {
@@ -551,7 +600,13 @@ void process_perimeter_polygon(const Polygon &orig_polygon, float z_coord, const
     if (orig_point) {
       Vec3f pos_of_next = orig_polygon_points.empty() ? first : orig_polygon_points.front();
       float distance_to_next = (position - pos_of_next).norm();
-      if (global_model_info.is_enforced(position, distance_to_next)) {
+      // Part joints: a joint usually crosses a long straight edge far from its vertices, so the edge is
+      // oversampled like an enforced one when a joint sample is anywhere near it (the query sphere is
+      // centred on the edge and covers it). No joint samples: is_near_part_joint() is false, no change.
+      const bool edge_near_part_joint = global_model_info.has_part_joints() &&
+          global_model_info.is_near_part_joint(0.5f * (position + pos_of_next),
+                                               0.5f * distance_to_next + part_joint_radius(perimeter, global_model_info));
+      if (global_model_info.is_enforced(position, distance_to_next) || edge_near_part_joint) {
         Vec3f vec_to_next = (pos_of_next - position).normalized();
         float step_size = SeamPlacer::enforcer_oversampling_distance;
         float step = step_size;
@@ -563,6 +618,10 @@ void process_perimeter_polygon(const Polygon &orig_polygon, float z_coord, const
     }
 
     result.points.emplace_back(position, perimeter, local_ccw_angle, type);
+    if (global_model_info.has_part_joints()) {
+      result.points.back().part_joint =
+          global_model_info.is_near_part_joint(position, part_joint_radius(perimeter, global_model_info));
+    }
   }
 
   perimeter.end_index = result.points.size();
@@ -658,6 +717,361 @@ std::pair<size_t, size_t> find_previous_and_next_perimeter_point(const std::vect
   assert(prev >= 0);
   assert(next >= 0);
   return {size_t(prev),size_t(next)};
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Part joints (seam_prefer_part_joints).
+//
+// An assembly - an object made of several parts, or objects placed against each other - has joints: lines on the
+// outer surface where one part meets the next. A seam hides well in such a line. The ordinary scoring rarely finds
+// it: once the parts are unioned per layer a flush joint has no corner for the angle term, the visibility estimate
+// only sees it diluted, and any concave corner elsewhere wins. So, for the Aligned seam positions only
+// (is_aligned_setup: Aligned, Aligned back, Aligned left/right), the contact regions are detected on the meshes
+// (gather_part_joints), the outer wall points near them are marked (SeamCandidate::part_joint), the middle of each
+// run of marked points is promoted (central_part_joint, mark_part_joint_centers), and that point then beats
+// everything but painted enforcers and blockers, including during alignment. An object with a single part and nothing touching it gets no samples, so no flag is ever set
+// and its seams are exactly what they were.
+
+namespace PartJoints {
+// Two surfaces closer than this and facing each other (normals at least ~135 degrees apart) touch.
+constexpr float contact_gap = 0.2f;
+constexpr float facing_cos  = -0.7f;
+// A surface point inside another part (interpenetrating parts) is in contact too. Only points within `reach` of
+// that part's surface are looked at: a deeper one is further than a line width from every outer wall anyway, and
+// a part buried well under the surface must not mark the surface above it.
+constexpr float inside_epsilon = 0.01f;
+constexpr float reach          = 0.5f;
+// A contact on a (nearly) horizontal face - a part standing on another - crosses every wall of a layer or two
+// and says nothing about where along the loop the seam should go.
+constexpr float max_abs_normal_z = 0.95f;
+// Sample spacing on the contact surfaces, widened with the total candidate area to bound the work.
+constexpr float  min_spacing = 0.15f;
+constexpr float  max_spacing = 1.0f;
+constexpr double max_samples = 300000.;
+
+struct Body {
+  indexed_triangle_set             its;
+  BoundingBoxf3                    bbox;
+  bool                             own = false; // a part of the object being processed (only these get samples)
+  AABBTreeIndirect::Tree<3, float> tree;
+};
+
+struct Candidate {
+  size_t body;
+  size_t facet;
+  size_t other;
+};
+
+// Closest point of `its` to `point`, if one is within `max_dist`.
+static bool closest_point_within(const indexed_triangle_set &its, const AABBTreeIndirect::Tree<3, float> &tree,
+                                 const Vec3f &point, float max_dist, size_t &hit_idx, Vec3f &hit_point)
+{
+  if (tree.empty())
+    return false;
+  auto distancer = AABBTreeIndirect::detail::IndexedTriangleSetDistancer<Vec3f, stl_triangle_vertex_indices,
+                                                                          AABBTreeIndirect::Tree<3, float>, Vec3f>
+      { its.vertices, its.indices, tree, point };
+  hit_idx   = size_t(-1);
+  hit_point = Vec3f::Constant(std::numeric_limits<float>::quiet_NaN());
+  AABBTreeIndirect::detail::squared_distance_to_indexed_primitives_recursive(distancer, size_t(0), 0.f,
+                                                                             max_dist * max_dist, hit_idx, hit_point);
+  return hit_point.allFinite() && hit_idx < its.indices.size();
+}
+} // namespace PartJoints
+
+// Fills result.part_joint_points with samples of the part surfaces of `po` that touch another part of `po`, or a
+// part of another object of the same print placed against it. All in the print object's (centred) coordinates,
+// the same as the seam candidates.
+void gather_part_joints(GlobalModelInfo &result, const Print &print, const PrintObject *po,
+                        const std::function<void(void)> &throw_if_canceled)
+{
+  using namespace PartJoints;
+  const auto time_start = std::chrono::steady_clock::now();
+
+  std::vector<Body> bodies;
+  auto add_body = [&bodies](const ModelVolume *mv, const Transform3d &trafo, bool own) {
+    Body body;
+    body.its = mv->mesh().its;
+    its_transform(body.its, trafo, true);
+    for (const Vec3f &v : body.its.vertices)
+      body.bbox.merge(v.cast<double>());
+    body.own = own;
+    bodies.emplace_back(std::move(body));
+  };
+  // Embossed text and SVG are decoration on a surface, not assembly parts: their outline must not pull the seam.
+  auto is_assembly_part = [](const ModelVolume *mv) {
+    return mv->type() == ModelVolumeType::MODEL_PART && !mv->is_text() && !mv->is_svg() && !mv->mesh().empty();
+  };
+
+  const Transform3d obj_transform = po->trafo_centered();
+  for (const ModelVolume *mv : po->model_object()->volumes)
+    if (is_assembly_part(mv))
+      add_body(mv, obj_transform * mv->get_matrix(), true);
+  if (bodies.empty())
+    return;
+
+  BoundingBoxf3 own_bbox;
+  for (const Body &body : bodies)
+    own_bbox.merge(body.bbox);
+  const auto          own_bbox_reach = own_bbox.inflated(reach);
+
+  // Separate objects placed against this one. The seams of a print object are shared by all its instances, so
+  // this only makes sense with a single instance - and likewise only when no identical object shares its slices
+  // (Print::process shares layers between identical objects, and G-code export then looks the seams up through
+  // the shared layers, so a copy would get this object's joints at the wrong place). By-object printing keeps
+  // objects apart anyway; skip it there.
+  bool shares_layers = po->get_shared_object() != nullptr;
+  for (const PrintObject *other : print.objects())
+    shares_layers = shares_layers || other->get_shared_object() == po;
+  if (po->instances().size() == 1 && !shares_layers && print.config().print_sequence != PrintSequence::ByObject) {
+    const Point own_shift = po->instances().front().shift;
+    for (const PrintObject *other : print.objects()) {
+      if (other == po)
+        continue;
+      for (const PrintInstance &instance : other->instances()) {
+        // A print object's centred coordinates plus its instance shift are bed coordinates (PrintApply.cpp), so
+        // this takes the other object's parts into our centred coordinates.
+        const Vec2d offset = unscale(Point(instance.shift - own_shift));
+        Transform3d to_own = other->trafo_centered();
+        to_own.pretranslate(Vec3d(offset.x(), offset.y(), 0.));
+        for (const ModelVolume *mv : other->model_object()->volumes) {
+          if (!is_assembly_part(mv))
+            continue;
+          const Transform3d trafo = to_own * mv->get_matrix();
+          if (mv->mesh().bounding_box().transformed(trafo).intersects(own_bbox_reach))
+            add_body(mv, trafo, false);
+        }
+      }
+    }
+  }
+  if (bodies.size() < 2)
+    return;
+
+  // Pairs (own part, any other part) whose boxes come within reach of each other.
+  std::vector<std::vector<size_t>> others_of(bodies.size());
+  std::vector<char>                needs_tree(bodies.size(), 0);
+  bool                             any_pair = false;
+  for (size_t i = 0; i < bodies.size(); ++i) {
+    if (!bodies[i].own)
+      continue;
+    const auto          reach_box = bodies[i].bbox.inflated(reach);
+    for (size_t j = 0; j < bodies.size(); ++j)
+      if (j != i && reach_box.intersects(bodies[j].bbox)) {
+        others_of[i].push_back(j);
+        needs_tree[j] = 1;
+        any_pair      = true;
+      }
+  }
+  if (!any_pair)
+    return;
+
+  tbb::parallel_for(tbb::blocked_range<size_t>(0, bodies.size()), [&bodies, &needs_tree](tbb::blocked_range<size_t> r) {
+    for (size_t i = r.begin(); i < r.end(); ++i)
+      if (needs_tree[i])
+        bodies[i].tree = AABBTreeIndirect::build_aabb_tree_over_indexed_triangle_set(bodies[i].its.vertices,
+                                                                                     bodies[i].its.indices);
+  });
+  throw_if_canceled();
+  const auto time_trees = std::chrono::steady_clock::now();
+
+  // Facets of each own part that come within reach of another part: cheap test on the facet's bounding sphere.
+  std::vector<Candidate> candidates;
+  for (size_t i = 0; i < bodies.size(); ++i) {
+    for (size_t j : others_of[i]) {
+      const Body         &body      = bodies[i];
+      const Body         &other     = bodies[j];
+      const auto          reach_box = other.bbox.inflated(reach);
+      std::vector<char>   hit(body.its.indices.size(), 0);
+      tbb::parallel_for(tbb::blocked_range<size_t>(0, body.its.indices.size()),
+                        [&body, &other, &reach_box, &hit](tbb::blocked_range<size_t> r) {
+        for (size_t f = r.begin(); f < r.end(); ++f) {
+          const stl_triangle_vertex_indices &face = body.its.indices[f];
+          const Vec3f &a = body.its.vertices[face[0]];
+          const Vec3f &b = body.its.vertices[face[1]];
+          const Vec3f &c = body.its.vertices[face[2]];
+          BoundingBoxf3 facet_box;
+          facet_box.merge(a.cast<double>());
+          facet_box.merge(b.cast<double>());
+          facet_box.merge(c.cast<double>());
+          if (!facet_box.intersects(reach_box))
+            continue;
+          const Vec3f cross = (b - a).cross(c - a);
+          const float cross_norm = cross.norm();
+          if (!(cross_norm > 1e-9f) || std::abs(cross.z()) > max_abs_normal_z * cross_norm)
+            continue; // degenerate or horizontal
+          const Vec3f centroid = (a + b + c) / 3.f;
+          const float radius   = std::sqrt(std::max({ (a - centroid).squaredNorm(), (b - centroid).squaredNorm(),
+                                                      (c - centroid).squaredNorm() }));
+          size_t hit_idx;
+          Vec3f  hit_point;
+          if (closest_point_within(other.its, other.tree, centroid, radius + reach, hit_idx, hit_point))
+            hit[f] = 1;
+        }
+      });
+      for (size_t f = 0; f < hit.size(); ++f)
+        if (hit[f])
+          candidates.push_back({ i, f, j });
+    }
+  }
+  throw_if_canceled();
+  const auto time_candidates = std::chrono::steady_clock::now();
+  if (candidates.empty())
+    return;
+
+  double candidate_area = 0.;
+  for (const Candidate &cand : candidates) {
+    const indexed_triangle_set &its = bodies[cand.body].its;
+    const stl_triangle_vertex_indices &face = its.indices[cand.facet];
+    candidate_area += 0.5 * double((its.vertices[face[1]] - its.vertices[face[0]])
+                                       .cross(its.vertices[face[2]] - its.vertices[face[0]]).norm());
+  }
+  // Leaves of the longest-edge bisection below average about a quarter of spacing^2.
+  const float spacing = std::clamp(float(std::sqrt(4. * candidate_area / max_samples)), min_spacing, max_spacing);
+
+  // Sample each candidate facet (longest-edge bisection down to `spacing`, one sample per leaf) and keep the
+  // samples that touch the other part or lie just inside it.
+  std::vector<std::vector<Vec3f>> found(candidates.size());
+  tbb::parallel_for(tbb::blocked_range<size_t>(0, candidates.size()),
+                    [&bodies, &candidates, &found, spacing](tbb::blocked_range<size_t> r) {
+    std::vector<std::array<Vec3f, 3>> stack;
+    const float                       sqr_spacing = spacing * spacing;
+    for (size_t k = r.begin(); k < r.end(); ++k) {
+      const Candidate                   &cand  = candidates[k];
+      const Body                        &body  = bodies[cand.body];
+      const Body                        &other = bodies[cand.other];
+      const stl_triangle_vertex_indices &face  = body.its.indices[cand.facet];
+      const Vec3f                        normal = its_face_normal(body.its, cand.facet);
+      stack.clear();
+      stack.push_back({ body.its.vertices[face[0]], body.its.vertices[face[1]], body.its.vertices[face[2]] });
+      while (!stack.empty()) {
+        const std::array<Vec3f, 3> t = stack.back();
+        stack.pop_back();
+        const float l01 = (t[1] - t[0]).squaredNorm();
+        const float l12 = (t[2] - t[1]).squaredNorm();
+        const float l20 = (t[0] - t[2]).squaredNorm();
+        if (std::max({ l01, l12, l20 }) > sqr_spacing) {
+          if (l01 >= l12 && l01 >= l20) {
+            const Vec3f m = 0.5f * (t[0] + t[1]);
+            stack.push_back({ t[0], m, t[2] });
+            stack.push_back({ m, t[1], t[2] });
+          } else if (l12 >= l20) {
+            const Vec3f m = 0.5f * (t[1] + t[2]);
+            stack.push_back({ t[0], t[1], m });
+            stack.push_back({ t[0], m, t[2] });
+          } else {
+            const Vec3f m = 0.5f * (t[2] + t[0]);
+            stack.push_back({ t[0], t[1], m });
+            stack.push_back({ m, t[1], t[2] });
+          }
+          continue;
+        }
+        const Vec3f sample = (t[0] + t[1] + t[2]) / 3.f;
+        size_t      hit_idx;
+        Vec3f       hit_point;
+        if (!closest_point_within(other.its, other.tree, sample, reach, hit_idx, hit_point))
+          continue;
+        const Vec3f other_normal = its_face_normal(other.its, int(hit_idx));
+        const bool  touching     = (sample - hit_point).squaredNorm() <= contact_gap * contact_gap &&
+                                  normal.dot(other_normal) <= facing_cos;
+        const bool  inside       = (sample - hit_point).dot(other_normal) < -inside_epsilon;
+        if (touching || inside)
+          found[k].push_back(sample);
+      }
+    }
+  });
+  throw_if_canceled();
+  const auto time_sampled = std::chrono::steady_clock::now();
+
+  size_t count = 0;
+  for (const std::vector<Vec3f> &samples : found)
+    count += samples.size();
+  if (count == 0)
+    return;
+  result.part_joint_points.reserve(count);
+  for (const std::vector<Vec3f> &samples : found)
+    result.part_joint_points.insert(result.part_joint_points.end(), samples.begin(), samples.end());
+  result.part_joint_sample_spacing     = spacing;
+  result.part_joint_coordinate_functor = CoordinateFunctor(&result.part_joint_points);
+  result.part_joint_tree = KDTreeIndirect<3, float, CoordinateFunctor>(result.part_joint_coordinate_functor,
+                                                                       result.part_joint_points.size());
+
+  BOOST_LOG_TRIVIAL(debug) << "SeamPlacer: part joints of " << po->model_object()->name << ": " << bodies.size()
+                           << " parts, " << candidates.size() << " candidate facets, " << count
+                           << " joint samples at " << spacing << " mm; meshes and trees "
+                           << std::chrono::duration<double>(time_trees - time_start).count() << " s, candidates "
+                           << std::chrono::duration<double>(time_candidates - time_trees).count() << " s, samples "
+                           << std::chrono::duration<double>(time_sampled - time_candidates).count() << " s, total "
+                           << std::chrono::duration<double>(std::chrono::steady_clock::now() - time_start).count()
+                           << " s";
+}
+
+// Promotes the middle of every run of joint points on each perimeter to central_part_joint. Runs of points that
+// are blocked or overhang are split there. A loop that is on a joint all the way round (a part standing on
+// another, cut through by the layer) has no run and gets nothing.
+void mark_part_joint_centers(std::vector<PrintObjectSeamData::LayerSeams> &layers)
+{
+  tbb::parallel_for(tbb::blocked_range<size_t>(0, layers.size()), [&layers](tbb::blocked_range<size_t> r) {
+    std::vector<size_t> run;
+    std::vector<size_t> preferred;
+    for (size_t layer_idx = r.begin(); layer_idx < r.end(); ++layer_idx) {
+      std::vector<SeamCandidate> &points = layers[layer_idx].points;
+      auto eligible = [&points](size_t idx) {
+        const SeamCandidate &c = points[idx];
+        return c.part_joint && c.type != EnforcedBlockedSeamPoint::Blocked && c.overhang <= 0.f;
+      };
+      // The middle of a run: a point hidden inside the print if there are any (a joint between two materials),
+      // else a sharp concave corner (where interpenetrating parts meet), else the middle by length.
+      auto run_center = [&points, &preferred](const std::vector<size_t> &seg) {
+        preferred.clear();
+        for (size_t idx : seg)
+          if (points[idx].embedded_distance < -0.5f)
+            preferred.push_back(idx);
+        if (preferred.empty())
+          for (size_t idx : seg)
+            if (points[idx].local_ccw_angle < -SeamPlacer::sharp_angle_snapping_threshold)
+              preferred.push_back(idx);
+        if (!preferred.empty())
+          return preferred[preferred.size() / 2];
+        float length = 0.f;
+        for (size_t k = 1; k < seg.size(); ++k)
+          length += (points[seg[k]].position - points[seg[k - 1]].position).norm();
+        float walked = 0.f;
+        for (size_t k = 1; k < seg.size(); ++k) {
+          walked += (points[seg[k]].position - points[seg[k - 1]].position).norm();
+          if (walked >= 0.5f * length)
+            return seg[k];
+        }
+        return seg.front();
+      };
+
+      for (size_t start = 0; start < points.size(); start = points[start].perimeter.end_index) {
+        const size_t begin = points[start].perimeter.start_index;
+        const size_t end   = points[start].perimeter.end_index;
+        const size_t count = end - begin;
+        if (count < 3)
+          continue;
+        // Start the walk where a run starts, so no run wraps around the end of the loop.
+        size_t first = count;
+        for (size_t i = 0; i < count; ++i)
+          if (eligible(begin + i) && !eligible(begin + (i + count - 1) % count)) {
+            first = i;
+            break;
+          }
+        if (first == count)
+          continue; // no joint point, or all of them
+        run.clear();
+        for (size_t i = 0; i <= count; ++i) {
+          const size_t idx = begin + (first + i) % count;
+          if (i < count && eligible(idx)) {
+            run.push_back(idx);
+          } else if (!run.empty()) {
+            points[run_center(run)].central_part_joint = true;
+            run.clear();
+          }
+        }
+      }
+    }
+  });
 }
 
 // Computes all global model info - transforms object, performs raycasting
@@ -833,6 +1247,12 @@ struct SeamComparator {
       return a.type > b.type;
     }
 
+    // Part joints: the middle of a joint beats any ordinary point (only ever set for the Aligned family; never an
+    // overhanging or blocked point, see mark_part_joint_centers). Painted enforcers and blockers were settled above.
+    if (a.central_part_joint != b.central_part_joint) {
+      return a.central_part_joint;
+    }
+
     //avoid overhangs
     if (a.overhang > 0.0f || b.overhang > 0.0f) {
       return a.overhang < b.overhang;
@@ -892,6 +1312,11 @@ struct SeamComparator {
 
     if (a.type != b.type) {
       return a.type > b.type;
+    }
+
+    // Part joints: alignment must not trade the middle of a joint for an ordinary point.
+    if (a.central_part_joint != b.central_part_joint) {
+      return a.central_part_joint;
     }
 
     //avoid overhangs
@@ -1239,6 +1664,13 @@ std::optional<std::pair<size_t, size_t>> SeamPlacer::find_next_seam_in_layer(
     return {std::pair<size_t, size_t> {layer_idx, nearest_point.perimeter.seam_index}};
   }
 
+  // Likewise follow a part joint from layer to layer.
+  if (next_layer_seam.central_part_joint
+      && (next_layer_seam.position - projected_position).squaredNorm()
+             < sqr(3 * max_distance)) {
+    return {std::pair<size_t, size_t> {layer_idx, nearest_point.perimeter.seam_index}};
+  }
+
   // First try to align the nearest, then try the best nearby
   if (comparator.is_first_not_much_worse(nearest_point, next_layer_seam)) {
     return {std::pair<size_t, size_t> {layer_idx, nearest_point_index}};
@@ -1433,6 +1865,10 @@ void SeamPlacer::align_seam_points(const PrintObject *po, const SeamPlacerImpl::
           curling_influence = 1.0f;
           weights[index] += 3.0f;
         }
+        if (current.central_part_joint) {
+          curling_influence = 1.0f;
+          weights[index] += 3.0f;
+        }
         total_length += curling_influence * (last_point_pos - current.position).norm();
         last_point_pos = current.position;
       }
@@ -1463,6 +1899,14 @@ void SeamPlacer::align_seam_points(const PrintObject *po, const SeamPlacerImpl::
         Vec3f final_position = t * current_pos + (1.0f - t) * to_3d(fitted_pos, current_pos.z());
 
         Perimeter &perimeter = layers[pair.first].points[pair.second].perimeter;
+        if (layers[pair.first].points[pair.second].central_part_joint) {
+          // Smooth along the joint, but never off it: stay within half a line width of the joint point.
+          const Vec3f shift     = final_position - current_pos;
+          const float max_shift = 0.5f * perimeter.flow_width;
+          if (shift.norm() > max_shift) {
+            final_position = current_pos + shift * (max_shift / shift.norm());
+          }
+        }
         perimeter.seam_index = pair.second;
         perimeter.final_seam_position = final_position;
         perimeter.finalized = true;
@@ -1508,9 +1952,14 @@ void SeamPlacer::init(const Print &print, std::function<void(void)> throw_if_can
     throw_if_canceled_func();
     SeamPosition configured_seam_preference = po->config().seam_position.value;
     SeamComparator comparator { configured_seam_preference };
+    bool has_part_joints = false;
 
     {
       GlobalModelInfo global_model_info { };
+      if (po->config().seam_prefer_part_joints.value && is_aligned_setup(configured_seam_preference)) {
+        gather_part_joints(global_model_info, print, po, throw_if_canceled_func);
+        has_part_joints = global_model_info.has_part_joints();
+      }
       gather_enforcers_blockers(global_model_info, po);
       throw_if_canceled_func();
       if (is_aligned_setup(configured_seam_preference) || configured_seam_preference == spNearest) {
@@ -1538,6 +1987,10 @@ void SeamPlacer::init(const Print &print, std::function<void(void)> throw_if_can
     BOOST_LOG_TRIVIAL(debug)
         << "SeamPlacer: calculate_overhangs and layer embdedding: end";
     throw_if_canceled_func();
+    if (has_part_joints) {
+      mark_part_joint_centers(m_seam_per_object[po].layers);
+      throw_if_canceled_func();
+    }
     if (configured_seam_preference != spNearest) { // For spNearest, the seam is picked in the place_seam method with actual nozzle position information
       BOOST_LOG_TRIVIAL(debug)
           << "SeamPlacer: pick_seam_point : start";

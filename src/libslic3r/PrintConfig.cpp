@@ -6030,7 +6030,17 @@ void PrintConfigDef::init_fff_params()
     def->tooltip = L("This option causes the inner seams to be shifted backwards based on their depth, forming a zigzag pattern.");
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionBool(false));
-    
+
+    def = this->add("seam_prefer_part_joints", coBool);
+    def->label = L("Hide seam in part joints");
+    def->category = L("Quality");
+    def->tooltip = L("For the Aligned seam positions (Aligned, Aligned back, Aligned left and Aligned right): when an object is an "
+                     "assembly of parts, or touches another object, put the seam on the line where two parts meet, "
+                     "so it hides in the joint instead of on a corner elsewhere. Painted seam enforcers and blockers "
+                     "still take priority. Objects made of a single part are not affected.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(true));
+
     def = this->add("seam_gap", coFloatOrPercent);
     def->label = L("Seam gap");
     def->tooltip = L("In order to reduce the visibility of the seam in a closed loop extrusion, the loop is interrupted and shortened by a specified amount.\n"
