@@ -600,6 +600,10 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
         "filament_end_gcode",
         // BBS (H2C rack): only read by change_filament_gcode (M620.11 O1 T<len>).
         "filament_retract_length_nc",
+        // BBS: read only by the idle-nozzle pre-cooling / pre-heating of the G-code post-processor.
+        "enable_pre_heating",
+        "filament_pre_cooling_temperature",
+        "filament_preheat_temperature_delta",
         "post_process",
         "extruder_clearance_height_to_rod",
         "extruder_clearance_height_to_lid",

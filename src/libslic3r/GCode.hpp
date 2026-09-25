@@ -668,6 +668,8 @@ private:
 
     int m_timelapse_warning_code = 0;
     bool m_support_traditional_timelapse = true;
+    // BBS: this export gets Bambu's idle-nozzle pre-cooling (GCode/PreCoolingInjector); set in _do_export.
+    bool m_pre_cooling_markers = false;
     // BBL timelapse on a dual-nozzle machine: the (logical, 0-based) extruder that takes the
     // per-layer photo, BambuStudio's ToolOrdering::get_most_used_extruder(). Set at the start of
     // every process_layers() run; 0 whenever the plate has no nozzle grouping.

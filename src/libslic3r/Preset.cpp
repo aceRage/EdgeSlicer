@@ -1124,6 +1124,8 @@ static std::vector<std::string> s_Preset_filament_options {
     "filament_pre_cooling_temperature_nc",
     // BBS (H2C rack): hotend-change retraction (M620.11 O1 T<len>); same reason as above.
     "filament_retract_length_nc",
+    // BBS: idle-nozzle pre-cooling / pre-heating (GCode/PreCoolingInjector); same reason as above.
+    "filament_pre_cooling_temperature", "filament_preheat_temperature_delta",
     "filament_flow_support"
     };
 
@@ -1145,6 +1147,7 @@ static std::vector<std::string> s_Preset_printer_options {
     "extruder_nozzle_stats", "machine_switch_extruder_time", "group_algo_with_time", // Ultra (dual-nozzle) grouping inputs
     "printer_extruder_variant", "master_extruder_id", "physical_extruder_map", "extruder_printable_area",
     "extruder_printable_height", "grab_length", "hotend_cooling_rate", "hotend_heating_rate", "nozzle_flush_dataset",
+    "enable_pre_heating", // BBS: idle-nozzle pre-cooling / pre-heating (GCode/PreCoolingInjector)
     "printer_technology",
     "printable_area", "bed_exclude_area","bed_custom_texture", "bed_custom_model", "gcode_flavor",
     "fan_kickstart", "fan_speedup_time", "fan_speedup_overhangs",
