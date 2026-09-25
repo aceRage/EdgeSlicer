@@ -280,7 +280,8 @@ static t_config_enum_values s_keys_map_SeamPosition {
     { "back",           spRear },
     { "random",         spRandom },
     { "left",           spLeft },
-    { "right",          spRight }
+    { "right",          spRight },
+    { "aligned_front",  spAlignedFront }
 };
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(SeamPosition)
 
@@ -6004,13 +6005,14 @@ void PrintConfigDef::init_fff_params()
     def->category = L("Quality");
     def->tooltip = L("The start position to print each part of outer wall. "
                      "Back places the seam toward the back of the bed. "
-                     "Aligned left/right work like Aligned back, but bias the seam toward the "
-                     "left/right of the bed instead: hidden and low-visibility points on that "
+                     "Aligned front/left/right work like Aligned back, but bias the seam toward the "
+                     "front/left/right of the bed instead: hidden and low-visibility points on that "
                      "side of the model are still preferred over an exposed point.");
     def->enum_keys_map = &ConfigOptionEnum<SeamPosition>::get_enum_values();
     def->enum_values.push_back("nearest");
     def->enum_values.push_back("aligned");
     def->enum_values.push_back("aligned_back");
+    def->enum_values.push_back("aligned_front");
     def->enum_values.push_back("back");
     def->enum_values.push_back("left");
     def->enum_values.push_back("right");
@@ -6018,6 +6020,7 @@ void PrintConfigDef::init_fff_params()
     def->enum_labels.push_back(L("Nearest"));
     def->enum_labels.push_back(L("Aligned"));
     def->enum_labels.push_back(L("Aligned back"));
+    def->enum_labels.push_back(L("Aligned front"));
     def->enum_labels.push_back(L("Back"));
     def->enum_labels.push_back(L("Aligned left"));
     def->enum_labels.push_back(L("Aligned right"));
@@ -6034,7 +6037,7 @@ void PrintConfigDef::init_fff_params()
     def = this->add("seam_prefer_part_joints", coBool);
     def->label = L("Hide seam in part joints");
     def->category = L("Quality");
-    def->tooltip = L("For the Aligned seam positions (Aligned, Aligned back, Aligned left and Aligned right): when an object is an "
+    def->tooltip = L("For the Aligned seam positions (Aligned, Aligned back, Aligned front, Aligned left and Aligned right): when an object is an "
                      "assembly of parts, or touches another object, put the seam on the line where two parts meet, "
                      "so it hides in the joint instead of on a corner elsewhere. Painted seam enforcers and blockers "
                      "still take priority. Objects made of a single part are not affected.");
