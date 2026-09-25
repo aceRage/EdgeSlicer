@@ -2577,6 +2577,14 @@ void GUI_App::init_networking_callbacks()
                     MachineObject* obj = m_device_manager->get_my_machine(dev_id);
                     wxCommandEvent event(EVT_CONNECT_LAN_MODE_PRINT);
 
+                    // What the plug-in says about the LAN session, for the reconnect tick
+                    // (LanReconnectLadder::lan_tick_step): a quiet printer whose session is up is
+                    // asked for a report, a session reported down is re-dialled.
+                    if (obj)
+                        obj->set_lan_session_up(state == ConnectStatus::ConnectStatusOk);
+                    if (MachineObject* local = m_device_manager->get_local_machine(dev_id); local && local != obj)
+                        local->set_lan_session_up(state == ConnectStatus::ConnectStatusOk);
+
                     if (obj) {
 
                         if (obj->is_lan_mode_printer()) {
@@ -2704,6 +2712,9 @@ void GUI_App::init_networking_callbacks()
                 }
 
                 if (obj) {
+                    // A LAN report only ever arrives over a live LAN session - even one the host
+                    // never saw an Ok for (a connect_printer the plug-in answered "already up").
+                    obj->set_lan_session_up(true);
                     obj->parse_json(msg, DeviceManager::key_field_only);
                     if (this->m_device_manager->get_selected_machine() == obj && obj->is_ams_need_update) {
                         GUI::wxGetApp().sidebar().load_ams_list(obj->dev_id, obj);
@@ -2711,6 +2722,7 @@ void GUI_App::init_networking_callbacks()
                 }
                 obj = m_device_manager->get_local_machine(dev_id);
                 if (obj) {
+                    obj->set_lan_session_up(true);
                     obj->parse_json(msg, DeviceManager::key_field_only);
                 }
                 });
