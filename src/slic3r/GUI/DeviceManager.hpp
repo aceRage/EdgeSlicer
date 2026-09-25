@@ -569,6 +569,14 @@ public:
     bool m_set_ctt_dlg{ false };
     void set_lan_mode_connection_state(bool state) {m_lan_mode_connection_state = state;};
     bool get_lan_mode_connection_state() {return m_lan_mode_connection_state;};
+    // What the network plug-in last said about this printer's LAN MQTT session: true after
+    // on_local_connect(Ok), false after any other status, when a new dial starts, and when a
+    // publish finds no session. Unlike m_lan_mode_connection_state ("a connect is in flight",
+    // cleared by every callback) it stays true while the session is up, which is what lets the
+    // reconnect tick tell a quiet printer from a dropped one (LanReconnectLadder::lan_tick_step).
+    bool m_lan_session_up{false};
+    void set_lan_session_up(bool up) { m_lan_session_up = up; }
+    bool lan_session_up() const { return m_lan_session_up; }
     void set_ctt_dlg( wxString text);
     int  parse_msg_count = 0;
     int  keep_alive_count = 0;
@@ -1280,12 +1288,8 @@ public:
 private:
     // Per-printer reconnect bookkeeping. Keyed by dev_id so a printer that comes and goes does not
     // inherit another's backoff.
-    struct LanReconnect
-    {
-        long long down_since { 0 };  // first tick at which this printer looked disconnected
-        long long last_try { 0 };    // when the last reconnect was attempted
-        int       attempts { 0 };    // consecutive attempts without a push since
-    };
+    // (down_since / probe_at / last_try / attempts - see LanReconnectLadder::lan_tick_step.)
+    using LanReconnect = LanReconnectLadder::LinkState;
     std::map<std::string, LanReconnect> m_lan_reconnect;
     // One reconnect attempt against one LAN machine: the same three steps the Device tab's
     // set_selected_machine runs (disconnect, reset, connect, mark LAN-connected).

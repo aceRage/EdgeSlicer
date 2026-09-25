@@ -6546,10 +6546,17 @@ void DeviceManager::lan_reconnect_now(MachineObject* obj, const char* why)
 {
     if (!obj || !m_agent) return;
     LanReconnect& r = m_lan_reconnect[obj->dev_id];
-    BOOST_LOG_TRIVIAL(info) << "lan_reconnect: " << why << " dev_id=" << obj->dev_id << " ip=" << obj->dev_ip
-                            << " attempt=" << (r.attempts + 1) << " next_backoff_ms=" << lan_backoff_ms(r.attempts + 1);
+    // Warning level on purpose: a re-dial is rare once the tick only acts on real drops, and the
+    // release build logs nothing below warning - this line is how a flap shows in a user's log.
+    // The hidden instance's watch rotation re-dials by design every LAN_WATCH_DWELL_MS: info.
+    if (std::string(why) == "watch rotation")
+        BOOST_LOG_TRIVIAL(info) << "lan_reconnect: " << why << " dev_id=" << obj->dev_id << " ip=" << obj->dev_ip;
+    else
+        BOOST_LOG_TRIVIAL(warning) << "lan_reconnect: " << why << " dev_id=" << obj->dev_id << " ip=" << obj->dev_ip
+                                   << " attempt=" << r.attempts << " next_backoff_ms=" << lan_backoff_ms(r.attempts);
     try {
         m_agent->disconnect_printer();
+        obj->set_lan_session_up(false); // up again when the new dial's on_local_connect(Ok) lands
         obj->reset();
 #if !BBL_RELEASE_TO_PUBLIC
         obj->connect(false, Slic3r::GUI::wxGetApp().app_config->get("enable_ssl_for_mqtt") == "true" ? true : false);
@@ -6563,12 +6570,15 @@ void DeviceManager::lan_reconnect_now(MachineObject* obj, const char* why)
 }
 
 // GUI thread, once a second (RemoteAccess's GuiHeartbeat). Cheap: in the normal case it is one
-// map lookup and one is_connected() per selected LAN printer.
+// map lookup and one clock read per selected LAN printer.
 //
-// The rule: a LAN-mode printer that has looked !is_connected() for longer than the grace window
-// gets a reconnect, then another after 15 s, 30 s, 60 s, 60 s... A push that lands resets the
-// ladder. Cloud-mode printers are left alone - the agent's own refresh_connection owns those, and
-// it only makes sense with a login.
+// The rule (LanReconnectLadder::lan_tick_step): a LAN-mode printer that has sent no report for
+// 20 s is asked for one (pushall), again every 10 s while the silence lasts - a quiet printer is
+// not a dropped one. It is re-dialled only after a real drop: the plug-in reported the session
+// lost or failed, a probe found no session to publish on, or it stayed mute for two minutes. Then
+// the grace window, and 15 s, 30 s, 60 s, 60 s... A report from a live session resets it all.
+// Cloud-mode printers are left alone - the agent's own refresh_connection owns those, and it only
+// makes sense with a login.
 void DeviceManager::lan_reconnect_tick()
 {
     if (!m_agent) return;
@@ -6607,25 +6617,39 @@ void DeviceManager::lan_reconnect_tick()
     for (MachineObject* obj : want) {
         if (!obj->has_access_right() || obj->dev_ip.empty()) continue;
         LanReconnect& r = m_lan_reconnect[obj->dev_id];
-        if (obj->is_connected()) {
-            // A push landed inside DISCONNECT_TIMEOUT: the session is alive, so the ladder resets.
-            if (r.attempts != 0 || r.down_since != 0)
-                BOOST_LOG_TRIVIAL(info) << "lan_reconnect: dev_id=" << obj->dev_id << " is back (after "
-                                        << r.attempts << " attempt(s))";
-            r = LanReconnect();
-            continue;
+        const LanReconnect before = r;
+        const long long silence = (long long) std::chrono::duration_cast<std::chrono::milliseconds>(
+                                      std::chrono::system_clock::now() - obj->last_update_time).count();
+        const bool session_up = obj->lan_session_up();
+        const LanReconnectLadder::TickAction act = LanReconnectLadder::lan_tick_step(r, now, silence, session_up);
+
+        if (r.down_since == 0 && (before.attempts != 0 || before.down_since != 0))
+            BOOST_LOG_TRIVIAL(warning) << "lan_reconnect: dev_id=" << obj->dev_id << " is back (after "
+                                       << before.attempts << " re-dial(s))";
+        else if (before.down_since == 0 && r.down_since != 0)
+            BOOST_LOG_TRIVIAL(info) << "lan_reconnect: dev_id=" << obj->dev_id << " no report for " << silence
+                                    << " ms, session " << (session_up ? "up (quiet?)" : "reported down");
+
+        switch (act) {
+        case LanReconnectLadder::TickAction::None: break;
+        case LanReconnectLadder::TickAction::Probe: {
+            // What Bambu Studio does for a silent printer: ask for the full status. A healthy
+            // printer answers within a second and the silence is over; a publish that fails means
+            // the plug-in has no session to put it on, which the next tick treats as a drop.
+            const int rc = obj->command_request_push_all(true);
+            BOOST_LOG_TRIVIAL(info) << "lan_reconnect: dev_id=" << obj->dev_id << " quiet for " << silence
+                                    << " ms, asked for a report (rc=" << rc << ")";
+            if (rc != 0) {
+                BOOST_LOG_TRIVIAL(warning) << "lan_reconnect: dev_id=" << obj->dev_id
+                                           << " the report request could not be sent (rc=" << rc << "): session is gone";
+                obj->set_lan_session_up(false);
+            }
+            break;
         }
-        if (r.down_since == 0) {
-            r.down_since = now;
-            BOOST_LOG_TRIVIAL(info) << "lan_reconnect: dev_id=" << obj->dev_id
-                                    << " looks disconnected; grace " << LAN_RECONNECT_GRACE_MS << " ms";
-            continue;
+        case LanReconnectLadder::TickAction::Reconnect:
+            lan_reconnect_now(obj, !session_up ? "session lost" : "no report for two minutes");
+            break;
         }
-        if (now - r.down_since < LAN_RECONNECT_GRACE_MS) continue;
-        if (r.last_try != 0 && now - r.last_try < lan_backoff_ms(r.attempts)) continue;
-        r.last_try = now;
-        ++r.attempts;
-        lan_reconnect_now(obj, r.attempts == 1 ? "first retry" : "backoff retry");
     }
 }
 
