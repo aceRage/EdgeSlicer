@@ -127,6 +127,42 @@ Vec3f sample_power_cosine_hemisphere(const Vec2f &samples, float power) {
   return Vec3f(cos(term1) * term3, sin(term1) * term3, term2);
 }
 
+// The "aligned" seam positions that bias the seam toward one side of the bed by penalising
+// surfaces that face the OPPOSITE side (so those surfaces look "more visible" and get avoided,
+// steering the seam toward the biased side instead). `bias_direction` points toward the biased
+// side; the surfaces that get penalised are the ones facing away from it, i.e. whose normal is
+// close to `-bias_direction`. Aligned back is biased toward the back (+Y): it penalises surfaces
+// facing -Y (front-facing surfaces). Aligned left/right do the same thing along X, biased toward
+// -X/+X respectively. Every other SeamPosition is left alone (returns false) and keeps no penalty
+// at all.
+// The penalty is applied via `normal.dot(-bias_direction)`, i.e. the existing Aligned back formula
+// `normal.dot(0,-1,0)` is `-bias_direction` with `bias_direction = (0,1,0)`. This keeps the
+// Aligned back arithmetic bit-for-bit identical to before this became a parameter.
+static inline bool aligned_penalty_direction(SeamPosition setup, Vec3f &bias_direction)
+{
+  // Every value is listed and there is no default, so a new SeamPosition makes the compiler ask
+  // whether it belongs here.
+  switch (setup) {
+  case spAlignedBack: bias_direction = Vec3f(0.0f, 1.0f, 0.0f);  return true; // biased to the back
+  case spLeft:        bias_direction = Vec3f(-1.0f, 0.0f, 0.0f); return true; // biased to the left
+  case spRight:        bias_direction = Vec3f(1.0f, 0.0f, 0.0f); return true; // biased to the right
+  case spNearest:
+  case spAligned:
+  case spRear:
+  case spRandom:
+    break;
+  }
+  return false;
+}
+
+// True for the setups that are "Aligned" in every other respect (occlusion/visibility computed,
+// candidates picked by visibility and angle, concave-corner preference via central_enforcer, then
+// aligned): plain Aligned plus the three biased variants.
+static inline bool is_aligned_setup(SeamPosition setup)
+{
+  return setup == spAligned || setup == spAlignedBack || setup == spLeft || setup == spRight;
+}
+
 std::vector<float> raycast_visibility(const AABBTreeIndirect::Tree<3, float> &raycasting_tree,
                                       const indexed_triangle_set &triangles,
                                       const TriangleSetSamples &samples,
@@ -151,10 +187,13 @@ std::vector<float> raycast_visibility(const AABBTreeIndirect::Tree<3, float> &ra
 
   bool model_contains_negative_parts = negative_volumes_start_index < triangles.indices.size();
 
+  Vec3f bias_direction       = Vec3f(0.0f, 1.0f, 0.0f);
+  bool  has_directional_bias = aligned_penalty_direction(seam_position, bias_direction);
+
   std::vector<float> result(samples.positions.size());
   tbb::parallel_for(tbb::blocked_range<size_t>(0, result.size()),
                     [&triangles, &precomputed_sample_directions, model_contains_negative_parts, negative_volumes_start_index,
-                     &raycasting_tree, &result, &samples, seam_position](tbb::blocked_range<size_t> r) {
+                     &raycasting_tree, &result, &samples, has_directional_bias, bias_direction](tbb::blocked_range<size_t> r) {
                       // Maintaining hits memory outside of the loop, so it does not have to be reallocated for each query.
                       std::vector<igl::Hit> hits;
                       for (size_t s_idx = r.begin(); s_idx < r.end(); ++s_idx) {
@@ -164,8 +203,8 @@ std::vector<float> raycast_visibility(const AABBTreeIndirect::Tree<3, float> &ra
 
                         const Vec3f &center = samples.positions[s_idx];
                         const Vec3f &normal = samples.normals[s_idx];
-                        if (seam_position == spAlignedBack) {
-                            const float front_adjustment = std::clamp((normal.dot(Vec3f(0.0f, -1.0f, 0.0f)) + 1.2f) * 0.5f, 0.0f, 1.0f);
+                        if (has_directional_bias) {
+                            const float front_adjustment = std::clamp((normal.dot(-bias_direction) + 1.2f) * 0.5f, 0.0f, 1.0f);
                             result[s_idx] += front_adjustment;
                         }
 
@@ -1167,23 +1206,25 @@ void gather_enforcers_blockers(GlobalModelInfo &result, const PrintObject *po) {
       << "SeamPlacer: build AABB trees for raycasting enforcers/blockers: end";
 }
 
-// The seam positions that steer the seam toward one side of the bed. They are all one rule with a
-// different axis and sign: score the candidate by `sign * position[axis]` and prefer the largest
-// score. Back is +Y, Right is +X, Left is -X. Returns false for every other setup, which then falls
-// through to the visibility/angle penalty.
-// The sign is applied as a multiplication by exactly +/-1.0f, so the Back path is bit-for-bit the
+// The seam position that steers the seam toward one side of the bed by a hard rule rather than by
+// a visibility penalty: score the candidate by `sign * position[axis]` and prefer the largest
+// score. Back is +Y. Returns false for every other setup, which then falls through to the
+// visibility/angle penalty. Left and Right are NOT here: they are Aligned setups (see
+// aligned_penalty_direction above) that bias toward -X/+X via the occlusion penalty, instead of
+// pinning the seam to the extreme coordinate the way Back does.
+// The sign is applied as a multiplication by exactly +1.0f, so the Back path is bit-for-bit the
 // comparison it was before this became a parameter.
 static inline bool directional_seam_axis(SeamPosition setup, int &axis, float &sign)
 {
   // Every value is listed and there is no default, so a new SeamPosition makes the compiler ask
   // whether it belongs here.
   switch (setup) {
-  case spRear:  axis = 1; sign =  1.0f; return true;
-  case spLeft:  axis = 0; sign = -1.0f; return true;
-  case spRight: axis = 0; sign =  1.0f; return true;
+  case spRear: axis = 1; sign = 1.0f; return true;
   case spNearest:
   case spAligned:
   case spAlignedBack:
+  case spLeft:
+  case spRight:
   case spRandom:
     break;
   }
@@ -1193,7 +1234,7 @@ static inline bool directional_seam_axis(SeamPosition setup, int &axis, float &s
 struct SeamComparator {
   SeamPosition setup;
   float angle_importance;
-  // Set for spRear/spLeft/spRight; picks out the coordinate the seam is pulled along.
+  // Set for spRear; picks out the coordinate the seam is pulled along.
   bool  directional;
   int   directional_axis;
   float directional_sign;
@@ -1215,7 +1256,7 @@ struct SeamComparator {
   // should return if a is better seamCandidate than b
   bool is_first_better(const SeamCandidate &a, const SeamCandidate &b, const Vec2f &preffered_location = Vec2f { 0.0f,
                                                                                                                0.0f }) const {
-    if ((setup == SeamPosition::spAligned || setup == SeamPosition::spAlignedBack) && a.central_enforcer != b.central_enforcer) {
+    if (is_aligned_setup(setup) && a.central_enforcer != b.central_enforcer) {
       return a.central_enforcer;
     }
 
@@ -1274,7 +1315,7 @@ struct SeamComparator {
   // Also used by the random seam generator.
   bool is_first_not_much_worse(const SeamCandidate &a, const SeamCandidate &b) const {
     // Blockers/Enforcers discrimination, top priority
-    if ((setup == SeamPosition::spAligned || setup == SeamPosition::spAlignedBack) && a.central_enforcer != b.central_enforcer) {
+    if (is_aligned_setup(setup) && a.central_enforcer != b.central_enforcer) {
       // Prefer centers of enforcers.
       return a.central_enforcer;
     }
@@ -1939,7 +1980,7 @@ void SeamPlacer::init(const Print &print, std::function<void(void)> throw_if_can
       }
       gather_enforcers_blockers(global_model_info, po);
       throw_if_canceled_func();
-      if (configured_seam_preference == spAligned || configured_seam_preference == spNearest || configured_seam_preference == spAlignedBack) {
+      if (is_aligned_setup(configured_seam_preference) || configured_seam_preference == spNearest) {
         compute_global_occlusion(global_model_info, po, throw_if_canceled_func, configured_seam_preference);
       }
       throw_if_canceled_func();
@@ -1949,7 +1990,7 @@ void SeamPlacer::init(const Print &print, std::function<void(void)> throw_if_can
       BOOST_LOG_TRIVIAL(debug)
           << "SeamPlacer: gather_seam_candidates: end";
       throw_if_canceled_func();
-      if (configured_seam_preference == spAligned || configured_seam_preference == spNearest || configured_seam_preference == spAlignedBack) {
+      if (is_aligned_setup(configured_seam_preference) || configured_seam_preference == spNearest) {
         BOOST_LOG_TRIVIAL(debug)
             << "SeamPlacer: calculate_candidates_visibility : start";
         calculate_candidates_visibility(po, global_model_info);

@@ -3681,14 +3681,17 @@ bool GUI_App::on_init_inner()
     // and a Bambu-original plug-in - which our host cannot run on Windows - is replaced, unless the
     // escape hatch `ultranet_keep_foreign_plugin` is set. BambuSource stays in the sidecar so the
     // host does not LoadLibrary it as the media filter from the exe dir.
+    // macOS and Linux run the same logic with their own library names (libbambu_networking.dylib /
+    // .so) and sidecar location (Contents/Resources/ultranet in the app bundle; bin/ultranet in
+    // the AppImage) - see network_library_name() and ultranet_sidecar_dir().
     try {
         namespace fs = boost::filesystem;
         boost::system::error_code ec;
         const fs::path pf      = fs::path(data_dir()) / "plugins";
         const fs::path exe_dir = fs::path(wxStandardPaths::Get().GetExecutablePath().ToUTF8().data()).parent_path();
-        const fs::path bundled = exe_dir / "ultranet";
-        const fs::path ours    = bundled / "bambu_networking.dll";
-        const fs::path theirs  = pf / "bambu_networking.dll";
+        const fs::path bundled = ultranet_sidecar_dir(exe_dir);
+        const fs::path ours    = bundled / network_library_name();
+        const fs::path theirs  = pf / network_library_name();
 
         const bool sidecar_present   = fs::exists(ours, ec);
         const bool installed_present = fs::exists(theirs, ec);
@@ -3717,7 +3720,7 @@ bool GUI_App::on_init_inner()
 
         // A previous replacement leaves the old DLL renamed beside ours (a loaded image can be
         // renamed on Windows but not deleted); clear it now that nothing should hold it.
-        const fs::path replaced = pf / "bambu_networking.dll.replaced";
+        const fs::path replaced = pf / (std::string(network_library_name()) + ".replaced");
         if (fs::exists(replaced, ec))
             fs::remove(replaced, ec);
 
@@ -3763,9 +3766,10 @@ bool GUI_App::on_init_inner()
         // retried. Move the old one aside first, like the plug-in above. Bambu's real camera
         // filter, when the user fetched it, is never replaced (live view needs it).
         {
-            const fs::path bs_ours     = bundled / "BambuSource.dll";
-            const fs::path bs_theirs   = pf / "BambuSource.dll";
-            const fs::path bs_replaced = pf / "BambuSource.dll.replaced";
+            const char    *bs_name     = bambu_source_library_name(); // BambuSource.dll / libBambuSource.dylib / .so
+            const fs::path bs_ours     = bundled / bs_name;
+            const fs::path bs_theirs   = pf / bs_name;
+            const fs::path bs_replaced = pf / (std::string(bs_name) + ".replaced");
             if (fs::exists(bs_replaced, ec))
                 fs::remove(bs_replaced, ec);
             const bool bs_bundled   = fs::exists(bs_ours, ec);
@@ -3777,7 +3781,7 @@ bool GUI_App::on_init_inner()
                 std::string sb((std::istreambuf_iterator<char>(b)), std::istreambuf_iterator<char>());
                 bs_same = ! sa.empty() && sa == sb;
             }
-            const bool bs_real = bs_installed && exports_dll_register_server(bs_theirs);
+            const bool bs_real = bs_installed && is_real_camera_component(bs_theirs); // DllRegisterServer on Windows, no UltraNet tag elsewhere
             if (bambusource_needs_refresh(bs_bundled, bs_installed, bs_same, bs_real, keep_foreign)) {
                 fs::create_directories(pf, ec);
                 if (bs_installed) {

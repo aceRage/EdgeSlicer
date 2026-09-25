@@ -274,7 +274,16 @@ TEST_CASE("The Bambu alias table names real keys, once each", "[BambuAliases]")
         REQUIRE(def != nullptr);
         REQUIRE(def->enum_keys_map != nullptr);
         CHECK(def->enum_keys_map->count(e.ours) == 1);
-        CHECK(def->enum_keys_map->count(e.bambu) == 0);
+        // For an export-only row (import=false), e.bambu is allowed to already be one of our own
+        // enum keys: that is exactly how a many-of-ours-to-one-of-theirs fallback (e.g. seam
+        // position Left/Right export as our own "aligned", which Bambu Studio also spells that
+        // way) is written. import_enum_value() guards this on the way in - it returns immediately
+        // when the incoming value is already a native key of ours (BambuKeyAliases.cpp), before it
+        // ever consults this table - so such a row can never shadow a native import. A reversible
+        // row (import=true) still must not collide: it is the one whose Bambu spelling has to
+        // round-trip back through this table rather than the "already native" fast path.
+        if (e.import)
+            CHECK(def->enum_keys_map->count(e.bambu) == 0);
         CHECK(BambuExport::translate_enum_value(e.key, e.ours) == e.bambu);
     }
 }

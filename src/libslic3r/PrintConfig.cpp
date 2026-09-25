@@ -6003,7 +6003,10 @@ void PrintConfigDef::init_fff_params()
     def->label = L("Seam position");
     def->category = L("Quality");
     def->tooltip = L("The start position to print each part of outer wall. "
-                     "Back/Left/Right place the seam toward that side of the bed.");
+                     "Back places the seam toward the back of the bed. "
+                     "Aligned left/right work like Aligned back, but bias the seam toward the "
+                     "left/right of the bed instead: hidden and low-visibility points on that "
+                     "side of the model are still preferred over an exposed point.");
     def->enum_keys_map = &ConfigOptionEnum<SeamPosition>::get_enum_values();
     def->enum_values.push_back("nearest");
     def->enum_values.push_back("aligned");
@@ -6016,8 +6019,8 @@ void PrintConfigDef::init_fff_params()
     def->enum_labels.push_back(L("Aligned"));
     def->enum_labels.push_back(L("Aligned back"));
     def->enum_labels.push_back(L("Back"));
-    def->enum_labels.push_back(L("Left"));
-    def->enum_labels.push_back(L("Right"));
+    def->enum_labels.push_back(L("Aligned left"));
+    def->enum_labels.push_back(L("Aligned right"));
     def->enum_labels.push_back(L("Random"));
     def->mode = comSimple;
     def->set_default_value(new ConfigOptionEnum<SeamPosition>(spAligned));
