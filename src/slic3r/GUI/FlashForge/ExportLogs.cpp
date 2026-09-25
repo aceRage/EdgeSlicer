@@ -2,6 +2,7 @@
 #include <thread>
 #include <boost/log/trivial.hpp>
 #include <wx/datetime.h>
+#include <wx/dir.h>
 #include <wx/file.h>
 #include <wx/filedlg.h>
 #include <wx/filefn.h>
