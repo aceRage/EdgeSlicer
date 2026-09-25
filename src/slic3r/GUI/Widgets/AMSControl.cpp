@@ -5,6 +5,9 @@
 #include "../GUI_App.hpp"
 
 #include "slic3r/GUI/DeviceTab/uiAmsHumidityPopup.h"
+#include "slic3r/GUI/AMSDryCtrlDialog.hpp"
+#include "slic3r/GUI/AmsDrying.hpp"
+#include "slic3r/GUI/AmsDualLayout.hpp"
 
 #include <wx/simplebook.h>
 #include <wx/dcgraph.h>
@@ -350,111 +353,23 @@ AMSControl::AMSControl(wxWindow *parent, wxWindowID id, const wxPoint &pos, cons
     m_vams_sizer->Add(m_vams_extra_road, 1, wxEXPAND, 0);
 
 
-    //Right
-    wxBoxSizer *m_sizer_right = new wxBoxSizer(wxVERTICAL);
-    m_simplebook_right        = new wxSimplebook(m_amswin, wxID_ANY);
-    m_simplebook_right->SetMinSize(wxSize(AMS_STEP_SIZE.x, AMS_STEP_SIZE.y + FromDIP(19)));
-    m_simplebook_right->SetMaxSize(wxSize(AMS_STEP_SIZE.x, AMS_STEP_SIZE.y + FromDIP(19)));
-    m_simplebook_right->SetBackgroundColour(*wxWHITE);
-
-    m_sizer_right->Add(m_simplebook_right, 0, wxALL, 0);
-
-    auto tip_right    = new wxPanel(m_simplebook_right, wxID_ANY, wxDefaultPosition, AMS_STEP_SIZE, wxTAB_TRAVERSAL);
-    m_sizer_right_tip = new wxBoxSizer(wxVERTICAL);
-
-    m_tip_right_top   = new wxStaticText(tip_right, wxID_ANY, _L("Tips"), wxDefaultPosition, wxDefaultSize, 0);
-    m_tip_right_top->SetFont(::Label::Head_13);
-    m_tip_right_top->SetForegroundColour(AMS_CONTROL_BRAND_COLOUR);
-    m_tip_right_top->Wrap(AMS_STEP_SIZE.x);
-
-
-    m_tip_load_info = new ::Label(tip_right, wxEmptyString);
-    m_tip_load_info->SetFont(::Label::Body_13);
-    m_tip_load_info->SetBackgroundColour(*wxWHITE);
-    m_tip_load_info->SetForegroundColour(AMS_CONTROL_GRAY700);
-
-    m_sizer_right_tip->Add(m_tip_right_top, 0, 0, 0);
-    m_sizer_right_tip->Add(0, 0, 0, wxEXPAND, FromDIP(10));
-    m_sizer_right_tip->Add(m_tip_load_info, 0, 0, 0);
-
-    tip_right->SetSizer(m_sizer_right_tip);
-    tip_right->Layout();
-
-    m_filament_load_step = new ::StepIndicator(m_simplebook_right, wxID_ANY);
-    m_filament_load_step->SetMinSize(AMS_STEP_SIZE);
-    m_filament_load_step->SetMaxSize(AMS_STEP_SIZE);
-    m_filament_load_step->SetBackgroundColour(*wxWHITE);
-
-    m_filament_unload_step = new ::StepIndicator(m_simplebook_right, wxID_ANY);
-    m_filament_unload_step->SetMinSize(AMS_STEP_SIZE);
-    m_filament_unload_step->SetMaxSize(AMS_STEP_SIZE);
-    m_filament_unload_step->SetBackgroundColour(*wxWHITE);
-
-    m_filament_vt_load_step = new ::StepIndicator(m_simplebook_right, wxID_ANY);
-    m_filament_vt_load_step->SetMinSize(AMS_STEP_SIZE);
-    m_filament_vt_load_step->SetMaxSize(AMS_STEP_SIZE);
-    m_filament_vt_load_step->SetBackgroundColour(*wxWHITE);
-
-    m_simplebook_right->AddPage(tip_right, wxEmptyString, false);
-    m_simplebook_right->AddPage(m_filament_load_step, wxEmptyString, false);
-    m_simplebook_right->AddPage(m_filament_unload_step, wxEmptyString, false);
-    m_simplebook_right->AddPage(m_filament_vt_load_step, wxEmptyString, false);
-
-
+    // The former right-hand column (Tips text, load/unload step list, Guide and Retry buttons) is
+    // gone: Bambu Studio dropped it and it only took space. The AMS settings gear sits in the
+    // button row instead.
     m_button_ams_setting_normal = ScalableBitmap(this, "ams_setting_normal", 24);
     m_button_ams_setting_hover = ScalableBitmap(this, "ams_setting_hover", 24);
     m_button_ams_setting_press = ScalableBitmap(this, "ams_setting_press", 24);
 
-    wxBoxSizer *m_sizer_right_bottom = new wxBoxSizer(wxHORIZONTAL);
-    m_button_ams_setting = new wxStaticBitmap(m_amswin, wxID_ANY, m_button_ams_setting_normal.bmp(), wxDefaultPosition, wxSize(FromDIP(24), FromDIP(24)));
+    m_button_ams_setting = new wxStaticBitmap(m_button_area, wxID_ANY, m_button_ams_setting_normal.bmp(), wxDefaultPosition, wxSize(FromDIP(24), FromDIP(24)));
     m_button_ams_setting->SetBackgroundColour(m_amswin->GetBackgroundColour());
-
-    m_button_guide = new Button(m_amswin, _L("Guide"));
-    m_button_guide->SetFont(Label::Body_13);
-    if (wxGetApp().app_config->get("language") == "de_DE") m_button_guide->SetFont(Label::Body_9);
-    if (wxGetApp().app_config->get("language") == "fr_FR") m_button_guide->SetFont(Label::Body_9);
-    if (wxGetApp().app_config->get("language") == "ru_RU") m_button_guide->SetLabel("Guide");
-    if (wxGetApp().app_config->get("language") == "nl_NL") m_button_guide->SetFont(Label::Body_9);
-    if (wxGetApp().app_config->get("language") == "hu_HU") m_button_guide->SetFont(Label::Body_9);
-    if (wxGetApp().app_config->get("language") == "ja_JP") m_button_guide->SetFont(Label::Body_9);
-    if (wxGetApp().app_config->get("language") == "sv_SE") m_button_guide->SetFont(Label::Body_9);
-    if (wxGetApp().app_config->get("language") == "cs_CZ") m_button_guide->SetFont(Label::Body_9);
-    if (wxGetApp().app_config->get("language") == "uk_UA") m_button_guide->SetFont(Label::Body_9);
-
-    m_button_guide->SetCornerRadius(FromDIP(12));
-    m_button_guide->SetBorderColor(btn_bd_white);
-    m_button_guide->SetTextColor(btn_text_white);
-    m_button_guide->SetMinSize(wxSize(-1, FromDIP(24)));
-    m_button_guide->SetBackgroundColor(btn_bg_white);
-
-    m_button_retry = new Button(m_amswin, _L("Retry"));
-    m_button_retry->SetFont(Label::Body_13);
-    if (wxGetApp().app_config->get("language") == "de_DE") m_button_retry->SetFont(Label::Body_9);
-    if (wxGetApp().app_config->get("language") == "fr_FR") m_button_retry->SetFont(Label::Body_9);
-    if (wxGetApp().app_config->get("language") == "ru_RU") m_button_retry->SetLabel("Retry");
-    if (wxGetApp().app_config->get("language") == "nl_NL") m_button_retry->SetLabel("Retry");
-    if (wxGetApp().app_config->get("language") == "hu_HU") m_button_retry->SetFont(Label::Body_9);
-    if (wxGetApp().app_config->get("language") == "ja_JP") m_button_retry->SetFont(Label::Body_9);
-    if (wxGetApp().app_config->get("language") == "sv_SE") m_button_retry->SetFont(Label::Body_9);
-    if (wxGetApp().app_config->get("language") == "cs_CZ") m_button_retry->SetFont(Label::Body_9);
-    if (wxGetApp().app_config->get("language") == "uk_UA") m_button_retry->SetFont(Label::Body_9);
-
-    m_button_retry->SetCornerRadius(FromDIP(12));
-    m_button_retry->SetBorderColor(btn_bd_white);
-    m_button_retry->SetTextColor(btn_text_white);
-    m_button_retry->SetMinSize(wxSize(-1, FromDIP(24)));
-    m_button_retry->SetBackgroundColor(btn_bg_white);
-
-    m_sizer_right_bottom->Add(m_button_ams_setting, 0);
-    m_sizer_right_bottom->Add(m_button_guide, 0, wxLEFT, FromDIP(10));
-    m_sizer_right_bottom->Add(m_button_retry, 0, wxLEFT, FromDIP(10));
-    m_sizer_right->Add(m_sizer_right_bottom, 0, wxEXPAND | wxTOP, FromDIP(20));
+    m_button_ams_setting->SetToolTip(_L("AMS settings"));
+    m_sizer_button_area->Insert(0, m_button_ams_setting, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(4));
+    m_button_area->Layout();
+    m_button_area->Fit();
 
 
     m_sizer_bottom->Add(m_vams_sizer, 0, wxEXPAND, 0);
     m_sizer_bottom->Add(m_sizer_left, 0, wxEXPAND, 0);
-    m_sizer_bottom->Add(0, 0, 0, wxLEFT, FromDIP(15));
-    m_sizer_bottom->Add(m_sizer_right, 0, wxEXPAND, FromDIP(0));
 
     m_sizer_body->Add(m_simplebook_amsprvs, 0, wxEXPAND, 0);
     m_sizer_body->Add(0, 0, 1, wxEXPAND | wxTOP, FromDIP(18));
@@ -536,8 +451,46 @@ AMSControl::AMSControl(wxWindow *parent, wxWindowID id, const wxPoint &pos, cons
     m_simplebook_calibration->AddPage(m_in_calibration_panel, wxEmptyString, false);
     m_simplebook_calibration->AddPage(m_calibration_err_panel, wxEmptyString, false);
 
+    // Two-extruder layout.
+    m_dual_view = new AMSDualView(this);
+    m_dual_view->on_selection_changed = [this]() { m_current_ams = m_dual_view->SelectedAms(); };
+    m_dual_view->on_edit = [this](const std::string &ams_id, const std::string &slot_id) {
+        wxCommandEvent evt(EVT_AMS_ON_FILAMENT_EDIT);
+        evt.SetInt(atoi(ams_id.c_str()));
+        evt.SetString(slot_id);
+        post_event(std::move(evt));
+    };
+    m_dual_view->on_refresh = [this](const std::string &ams_id, const std::string &slot_id) {
+        wxCommandEvent evt(EVT_AMS_REFRESH_RFID);
+        evt.SetString(slot_id);
+        post_event(std::move(evt));
+    };
+    m_dual_view->on_humidity = [this](const std::string &ams_id, wxPoint) {
+        if (try_open_dry_dialog(ams_id))
+            return;
+        if (!m_obj)
+            return;
+        auto it = m_obj->amsList.find(ams_id);
+        if (it == m_obj->amsList.end() || !it->second)
+            return;
+        uiAmsHumidityInfo info;
+        info.ams_id              = ams_id;
+        info.humidity_level      = it->second->humidity;
+        info.humidity_percent    = it->second->humidity_raw;
+        info.left_dry_time       = it->second->left_dry_time;
+        info.current_temperature = it->second->current_temperature;
+        if (it->second->type == AMSModel::GENERIC_AMS)
+            return; /* STUDIO-12083, as the classic view: no popup for the first-generation AMS */
+        show_humidity_popup(info);
+    };
+    m_dual_view->m_btn_load->Bind(wxEVT_BUTTON, [this](wxCommandEvent &e) { on_filament_load(e); });
+    m_dual_view->m_btn_unload->Bind(wxEVT_BUTTON, [this](wxCommandEvent &e) { on_filament_unload(e); });
+    m_dual_view->m_btn_auto_refill->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { post_event(SimpleEvent(EVT_AMS_FILAMENT_BACKUP)); });
+    m_dual_view->m_btn_settings->Bind(wxEVT_LEFT_DOWN, [this](wxMouseEvent &e) { on_ams_setting_click(e); });
+
     AddPage(m_amswin, wxEmptyString, false);
     AddPage(m_simplebook_calibration, wxEmptyString, false);
+    AddPage(m_dual_view, wxEmptyString, false);
 
     UpdateStepCtrl(false);
 
@@ -563,39 +516,206 @@ AMSControl::AMSControl(wxWindow *parent, wxWindowID id, const wxPoint &pos, cons
         uiAmsHumidityInfo *info    = (uiAmsHumidityInfo *) evt.GetClientData();
         if (info)
         {
-            if (info->humidity_percent >= 0)
-            {
-                m_percent_humidity_dry_popup->Update(info);
-
-                wxPoint img_pos = ClientToScreen(wxPoint(0, 0));
-                wxPoint popup_pos(img_pos.x - m_percent_humidity_dry_popup->GetSize().GetWidth() + FromDIP(150), img_pos.y - FromDIP(80));
-                m_percent_humidity_dry_popup->Position(popup_pos, wxSize(0, 0));
-                m_percent_humidity_dry_popup->Popup();
-            }
-            else
-            {
-                wxPoint img_pos = ClientToScreen(wxPoint(0, 0));
-                wxPoint popup_pos(img_pos.x - m_Humidity_tip_popup.GetSize().GetWidth() + FromDIP(150), img_pos.y - FromDIP(80));
-                m_Humidity_tip_popup.Position(popup_pos, wxSize(0, 0));
-
-                int humidity_value = info->humidity_level;
-                if (humidity_value > 0 && humidity_value <= 5) { m_Humidity_tip_popup.set_humidity_level(humidity_value); }
-                m_Humidity_tip_popup.Popup();
-            }
+            if (!try_open_dry_dialog(info->ams_id))
+                show_humidity_popup(*info);
         }
 
         delete info;
     });
     Bind(EVT_AMS_ON_SELECTED, &AMSControl::AmsSelectedSwitch, this);
 
-    m_button_guide->Bind(wxEVT_BUTTON, [this](wxCommandEvent& e) {
-        post_event(wxCommandEvent(EVT_AMS_GUIDE_WIKI));
-        });
-    m_button_retry->Bind(wxEVT_BUTTON, [this](wxCommandEvent& e) {
-        post_event(wxCommandEvent(EVT_AMS_RETRY));
-        });
 
     EnterNoneAMSMode();
+}
+
+AMSControl::~AMSControl()
+{
+    if (m_dry_dlg) {
+        m_dry_dlg->Destroy();
+        m_dry_dlg = nullptr;
+    }
+}
+
+void AMSControl::show_humidity_popup(const uiAmsHumidityInfo &info_in)
+{
+    uiAmsHumidityInfo info = info_in;
+    if (info.humidity_percent >= 0)
+    {
+        m_percent_humidity_dry_popup->Update(&info);
+
+        wxPoint img_pos = ClientToScreen(wxPoint(0, 0));
+        wxPoint popup_pos(img_pos.x - m_percent_humidity_dry_popup->GetSize().GetWidth() + FromDIP(150), img_pos.y - FromDIP(80));
+        m_percent_humidity_dry_popup->Position(popup_pos, wxSize(0, 0));
+        m_percent_humidity_dry_popup->Popup();
+    }
+    else
+    {
+        wxPoint img_pos = ClientToScreen(wxPoint(0, 0));
+        wxPoint popup_pos(img_pos.x - m_Humidity_tip_popup.GetSize().GetWidth() + FromDIP(150), img_pos.y - FromDIP(80));
+        m_Humidity_tip_popup.Position(popup_pos, wxSize(0, 0));
+
+        int humidity_value = info.humidity_level;
+        if (humidity_value > 0 && humidity_value <= 5) { m_Humidity_tip_popup.set_humidity_level(humidity_value); }
+        m_Humidity_tip_popup.Popup();
+    }
+}
+
+bool AMSControl::try_open_dry_dialog(const std::string &ams_id)
+{
+    if (!m_obj)
+        return false;
+    auto it = m_obj->amsList.find(ams_id);
+    if (it == m_obj->amsList.end() || !it->second)
+        return false;
+    // Only units with a heater, and only when the firmware accepts remote drying (fun2 bit 5).
+    if (!AmsDrying::unit_supports_remote_dry(m_obj->is_support_remote_dry, it->second->type))
+        return false;
+
+    if (!m_dry_dlg)
+        m_dry_dlg = new AMSDryCtrlDialog(wxGetTopLevelParent(this));
+    m_dry_dlg_obj = m_obj;
+    m_dry_dlg->set_ams_id(ams_id);
+    m_dry_dlg->update(m_obj);
+    m_dry_dlg->CentreOnParent();
+    m_dry_dlg->ShowModal();
+    m_dry_dlg_obj = nullptr;
+    return true;
+}
+
+void AMSControl::UpdateDryDialog(MachineObject *obj)
+{
+    if (!m_dry_dlg || !m_dry_dlg->IsShown())
+        return;
+    if (!obj || obj != m_dry_dlg_obj) {
+        // The printer changed under the dialog: never send to the wrong one.
+        if (m_dry_dlg->IsModal())
+            m_dry_dlg->EndModal(wxID_CANCEL);
+        else
+            m_dry_dlg->Hide();
+        return;
+    }
+    m_dry_dlg->update(obj);
+}
+
+void AMSControl::SetDualMode(bool dual)
+{
+    if (dual == m_dual_mode)
+        return;
+    m_dual_mode = dual;
+    if (GetSelection() != 1) // leave the calibration page alone
+        SetSelection(dual ? 2 : 0);
+    // The book resizes every page to its own size, so ask the pages what they want instead.
+    wxSize want;
+    if (dual) {
+        want = m_dual_view->GetMinSize();
+    } else {
+        m_amswin->Layout();
+        m_amswin->Fit();
+        want = m_amswin->GetSize();
+    }
+    SetSize(want);
+    SetMinSize(want);
+    Layout();
+    if (GetParent())
+        GetParent()->Layout();
+}
+
+void AMSControl::UpdateDual(MachineObject *obj)
+{
+    if (!obj || !m_dual_view)
+        return;
+
+    DualModel model;
+    model.extruder_count = std::max(1, obj->m_extder_data.total_extder_count);
+
+    auto tray_view = [](AmsTray tray) {
+        DualSlotView sv;
+        sv.slot_id = "0";
+        sv.state   = AMSCanType::AMS_CAN_TYPE_VIRTUAL;
+        if (tray.is_tray_info_ready() || !tray.type.empty()) {
+            sv.material = wxString::FromUTF8(tray.get_display_filament_type());
+            sv.colour   = AmsTray::decode_color(tray.color);
+            for (const std::string &c : tray.cols)
+                sv.cols.push_back(AmsTray::decode_color(c));
+        } else {
+            sv.state    = AMSCanType::AMS_CAN_TYPE_THIRDBRAND; // drawn as "?"
+            sv.material = wxEmptyString;
+        }
+        // Editing an external spool on a two-extruder printer needs the 254/255 split in the
+        // filament-settings command, which this fork does not have yet.
+        sv.editable = false;
+        return sv;
+    };
+
+    for (auto &kv : obj->amsList) {
+        Ams *ams = kv.second;
+        if (!ams || !ams->is_exists)
+            continue;
+        AMSinfo info;
+        if (!info.parse_ams_info(obj, ams, obj->ams_calibrate_remain_flag, obj->is_support_ams_humidity))
+            continue;
+        DualUnitView u;
+        u.ref.ams_id      = kv.first;
+        u.ref.type        = ams->type;
+        u.ref.extruder_id = ams->nozzle;
+        u.ref.slot_count  = ams->type == AMSModel::N3S_AMS ? 1 : 4; // AMS HT has one slot, the others four
+        for (const Caninfo &can : info.cans) {
+            DualSlotView sv;
+            sv.slot_id  = can.can_id;
+            sv.material = can.material_name;
+            sv.colour   = can.material_colour;
+            sv.cols     = can.material_cols;
+            sv.state    = can.material_state;
+            sv.editable = true;
+            u.slots.push_back(sv);
+        }
+        u.humidity_level   = info.ams_humidity;
+        u.humidity_percent = info.humidity_raw;
+        u.has_heater       = AmsDrying::unit_has_heater(ams->type);
+        u.drying           = AmsDrying::shows_drying_icon(ams->dry, obj->is_support_remote_dry, ams->left_dry_time);
+        u.rfid_refresh     = true;
+        model.units.push_back(u);
+    }
+
+    std::vector<AmsTray> spools = obj->vir_slots;
+    if (spools.empty() && obj->ams_support_virtual_tray) {
+        AmsTray t = obj->vt_tray;
+        t.id      = model.extruder_count >= 2 ? std::to_string(AmsDual::VIRTUAL_SLOT_MAIN) : std::to_string(VIRTUAL_TRAY_ID);
+        spools.push_back(t);
+    }
+    for (const AmsTray &t : spools) {
+        if (!AmsDual::is_virtual_slot(t.id))
+            continue;
+        DualUnitView u;
+        u.ref.ams_id     = t.id;
+        u.ref.type       = AmsDual::UNIT_EXT_SPOOL;
+        u.ref.slot_count = 1;
+        u.slots.push_back(tray_view(t));
+        model.units.push_back(u);
+    }
+
+    for (const Extder &e : obj->m_extder_data.extders) {
+        DualExtruderView ev;
+        ev.id      = e.id;
+        ev.ams_id  = e.snow.ams_id;
+        ev.slot_id = e.snow.slot_id;
+        ev.loaded  = AmsDual::slot_is_loaded(e.snow.ams_id, e.snow.slot_id);
+        if (ev.loaded) {
+            if (AmsDual::is_virtual_slot(ev.ams_id)) {
+                ev.slot_id = "0";
+                for (const DualUnitView &u : model.units)
+                    if (u.ref.ams_id == ev.ams_id && !u.slots.empty())
+                        ev.colour = u.slots.front().colour;
+            } else if (AmsTray *tray = obj->get_ams_tray(ev.ams_id, ev.slot_id)) {
+                ev.colour = AmsTray::decode_color(tray->color);
+            }
+        }
+        model.extruders.push_back(ev);
+    }
+
+    m_dual_view->SetModel(model);
+    m_dual_view->ShowAutoRefill(!obj->amsList.empty());
+    m_current_ams = m_dual_view->SelectedAms();
 }
 
 void AMSControl::on_retry()
@@ -612,14 +732,20 @@ void AMSControl::init_scaled_buttons()
 }
 
 std::string AMSControl::GetCurentAms() {
+    if (m_dual_mode)
+        return m_dual_view->SelectedAms();
     return m_current_ams;
 }
 std::string AMSControl::GetCurentShowAms() {
+    if (m_dual_mode)
+        return m_dual_view->ShownAms();
     return m_current_show_ams;
 }
 
 std::string AMSControl::GetCurrentCan(std::string amsid)
 {
+    if (m_dual_mode)
+        return amsid == m_dual_view->SelectedAms() ? m_dual_view->SelectedSlot() : std::string();
     std::string current_can;
     for (auto ams_item : m_ams_item_list) {
         AmsItem* item = ams_item.second;
@@ -656,6 +782,8 @@ void AMSControl::AmsSelectedSwitch(wxCommandEvent& event) {
 
 wxColour AMSControl::GetCanColour(std::string amsid, std::string canid)
 {
+    if (m_dual_mode)
+        return m_dual_view->SlotColour(amsid, canid);
     wxColour col = *wxWHITE;
     for (auto i = 0; i < m_ams_info.size(); i++) {
         if (m_ams_info[i].ams_id == amsid) {
@@ -676,6 +804,9 @@ void AMSControl::SetActionState(bool button_status[])
 
     if (button_status[ActionButton::ACTION_BTN_UNLOAD]) m_button_extruder_back->Enable();
     else m_button_extruder_back->Disable();
+
+    m_dual_view->m_btn_load->Enable(button_status[ActionButton::ACTION_BTN_LOAD]);
+    m_dual_view->m_btn_unload->Enable(button_status[ActionButton::ACTION_BTN_UNLOAD]);
 }
 
 void AMSControl::EnterNoneAMSMode()
@@ -689,11 +820,9 @@ void AMSControl::EnterNoneAMSMode()
     m_simplebook_ams->SetSelection(0);
     m_extruder->no_ams_mode(true);
     m_button_ams_setting->Hide();
-    m_button_guide->Hide();
     m_button_extruder_feed->Show();
     m_button_extruder_back->Show();
 
-    ShowFilamentTip(false);
     m_amswin->Layout();
     m_amswin->Fit();
     Layout();
@@ -718,11 +847,8 @@ void AMSControl::EnterGenericAMSMode()
     m_simplebook_ams->SetSelection(1);
     m_extruder->no_ams_mode(false);
     m_button_ams_setting->Show();
-    m_button_guide->Show();
-    m_button_retry->Show();
     m_button_extruder_feed->Show();
     m_button_extruder_back->Show();
-    ShowFilamentTip(true);
     m_amswin->Layout();
     m_amswin->Fit();
     Layout();
@@ -748,11 +874,8 @@ void AMSControl::EnterExtraAMSMode()
     m_simplebook_ams->SetSelection(2);
     m_extruder->no_ams_mode(false);
     m_button_ams_setting->Show();
-    m_button_guide->Show();
-    m_button_retry->Show();
     m_button_extruder_feed->Show();
     m_button_extruder_back->Show();
-    ShowFilamentTip(true);
     m_amswin->Layout();
     m_amswin->Fit();
     Layout();
@@ -770,7 +893,7 @@ void AMSControl::EnterCalibrationMode(bool read_to_calibration)
         m_simplebook_calibration->SetSelection(1);
 }
 
-void AMSControl::ExitcClibrationMode() { SetSelection(0); }
+void AMSControl::ExitcClibrationMode() { SetSelection(m_dual_mode ? 2 : 0); }
 
 void AMSControl::SetClibrationpercent(int percent) { m_text_calibration_percent->SetLabelText(wxString::Format("%d%%", percent)); }
 
@@ -815,8 +938,13 @@ void AMSControl::msw_rescale()
     m_button_extruder_feed->SetMinSize(wxSize(-1, FromDIP(24)));
     m_button_extruder_back->SetMinSize(wxSize(-1, FromDIP(24)));
     m_button_ams_setting->SetMinSize(wxSize(FromDIP(25), FromDIP(24)));
-    m_button_guide->SetMinSize(wxSize(-1, FromDIP(24)));
-    m_button_retry->SetMinSize(wxSize(-1, FromDIP(24)));
+    if (m_dual_view) {
+        m_dual_view->msw_rescale();
+        if (m_dual_mode) {
+            SetSize(m_dual_view->GetMinSize());
+            SetMinSize(m_dual_view->GetMinSize());
+        }
+    }
     m_vams_lib->msw_rescale();
 
     for (auto ams_item : m_ams_item_list) {
@@ -836,67 +964,7 @@ void AMSControl::msw_rescale()
 
 void AMSControl::UpdateStepCtrl(bool is_extrusion)
 {
-    wxString FILAMENT_CHANGE_STEP_STRING[FilamentStep::STEP_COUNT] = {
-            _L("Idling..."),
-            _L("Heat the nozzle"),
-            _L("Cut filament"),
-            _L("Pull back current filament"),
-            _L("Push new filament into extruder"),
-            _L("Purge old filament"),
-            _L("Feed Filament"),
-            _L("Confirm extruded"),
-            _L("Check filament location")
-    };
-
-    m_filament_load_step->DeleteAllItems();
-    m_filament_unload_step->DeleteAllItems();
-    m_filament_vt_load_step->DeleteAllItems();
-
-    if (IS_GENERIC_AMS(m_ams_model) || IS_GENERIC_AMS(m_ext_model)) {
-        if (is_extrusion) {
-            m_filament_load_step->AppendItem(FILAMENT_CHANGE_STEP_STRING[FilamentStep::STEP_HEAT_NOZZLE]);
-            m_filament_load_step->AppendItem(FILAMENT_CHANGE_STEP_STRING[FilamentStep::STEP_CUT_FILAMENT]);
-            m_filament_load_step->AppendItem(FILAMENT_CHANGE_STEP_STRING[FilamentStep::STEP_PULL_CURR_FILAMENT]);
-            m_filament_load_step->AppendItem(FILAMENT_CHANGE_STEP_STRING[FilamentStep::STEP_PUSH_NEW_FILAMENT]);
-            m_filament_load_step->AppendItem(FILAMENT_CHANGE_STEP_STRING[FilamentStep::STEP_PURGE_OLD_FILAMENT]);
-        }
-        else {
-            m_filament_load_step->AppendItem(FILAMENT_CHANGE_STEP_STRING[FilamentStep::STEP_HEAT_NOZZLE]);
-            m_filament_load_step->AppendItem(FILAMENT_CHANGE_STEP_STRING[FilamentStep::STEP_PUSH_NEW_FILAMENT]);
-            m_filament_load_step->AppendItem(FILAMENT_CHANGE_STEP_STRING[FilamentStep::STEP_PURGE_OLD_FILAMENT]);
-        }
-
-        m_filament_vt_load_step->AppendItem(FILAMENT_CHANGE_STEP_STRING[FilamentStep::STEP_HEAT_NOZZLE]);
-        m_filament_vt_load_step->AppendItem(FILAMENT_CHANGE_STEP_STRING[FilamentStep::STEP_PUSH_NEW_FILAMENT]);
-        m_filament_vt_load_step->AppendItem(_L("Grab new filament"));
-        m_filament_vt_load_step->AppendItem(FILAMENT_CHANGE_STEP_STRING[FilamentStep::STEP_PURGE_OLD_FILAMENT]);
-
-        m_filament_unload_step->AppendItem(FILAMENT_CHANGE_STEP_STRING[FilamentStep::STEP_HEAT_NOZZLE]);
-        m_filament_unload_step->AppendItem(FILAMENT_CHANGE_STEP_STRING[FilamentStep::STEP_CUT_FILAMENT]);
-        m_filament_unload_step->AppendItem(FILAMENT_CHANGE_STEP_STRING[FilamentStep::STEP_PULL_CURR_FILAMENT]);
-    }
-
-
-    if (m_ams_model == AMSModel::AMS_LITE || m_ext_model == AMSModel::AMS_LITE) {
-        m_filament_load_step->AppendItem(FILAMENT_CHANGE_STEP_STRING[FilamentStep::STEP_HEAT_NOZZLE]);
-        m_filament_load_step->AppendItem(FILAMENT_CHANGE_STEP_STRING[FilamentStep::STEP_CHECK_POSITION]);
-        m_filament_load_step->AppendItem(FILAMENT_CHANGE_STEP_STRING[FilamentStep::STEP_CUT_FILAMENT]);
-        m_filament_load_step->AppendItem(FILAMENT_CHANGE_STEP_STRING[FilamentStep::STEP_PULL_CURR_FILAMENT]);
-        m_filament_load_step->AppendItem(FILAMENT_CHANGE_STEP_STRING[FilamentStep::STEP_PUSH_NEW_FILAMENT]);
-        m_filament_load_step->AppendItem(FILAMENT_CHANGE_STEP_STRING[FilamentStep::STEP_PURGE_OLD_FILAMENT]);
-
-        m_filament_vt_load_step->AppendItem(FILAMENT_CHANGE_STEP_STRING[FilamentStep::STEP_HEAT_NOZZLE]);
-        m_filament_vt_load_step->AppendItem(FILAMENT_CHANGE_STEP_STRING[FilamentStep::STEP_CHECK_POSITION]);
-        m_filament_vt_load_step->AppendItem(FILAMENT_CHANGE_STEP_STRING[FilamentStep::STEP_CUT_FILAMENT]);
-        m_filament_vt_load_step->AppendItem(FILAMENT_CHANGE_STEP_STRING[FilamentStep::STEP_PULL_CURR_FILAMENT]);
-        m_filament_vt_load_step->AppendItem(FILAMENT_CHANGE_STEP_STRING[FilamentStep::STEP_PUSH_NEW_FILAMENT]);
-        m_filament_vt_load_step->AppendItem(FILAMENT_CHANGE_STEP_STRING[FilamentStep::STEP_PURGE_OLD_FILAMENT]);
-
-        m_filament_unload_step->AppendItem(FILAMENT_CHANGE_STEP_STRING[FilamentStep::STEP_HEAT_NOZZLE]);
-        m_filament_unload_step->AppendItem(FILAMENT_CHANGE_STEP_STRING[FilamentStep::STEP_CHECK_POSITION]);
-        m_filament_unload_step->AppendItem(FILAMENT_CHANGE_STEP_STRING[FilamentStep::STEP_CUT_FILAMENT]);
-        m_filament_unload_step->AppendItem(FILAMENT_CHANGE_STEP_STRING[FilamentStep::STEP_PULL_CURR_FILAMENT]);
-    }
+    // The load/unload step list was part of the removed right-hand column.
 }
 
 void AMSControl::CreateAms()
@@ -1058,6 +1126,15 @@ void AMSControl::reset_vams()
 
 void AMSControl::UpdateAms(std::vector<AMSinfo> ams_info, bool is_reset)
 {
+    if (m_dual_mode) {
+        // The classic page is not shown and must not resize this book; UpdateDual draws the units.
+        // Forget what it showed so it is rebuilt if the next printer uses it again.
+        if (!m_ams_info.empty())
+            ClearAms();
+        m_ams_info.clear();
+        return;
+    }
+
     m_button_area->Layout();
     m_button_area->Fit();
 
@@ -1277,91 +1354,12 @@ void AMSControl::SwitchAms(std::string ams_id)
 
 void AMSControl::SetFilamentStep(int item_idx, FilamentStepType f_type)
 {
-    wxString FILAMENT_CHANGE_STEP_STRING[FilamentStep::STEP_COUNT] = {
-        _L("Idling..."),
-        _L("Heat the nozzle"),
-        _L("Cut filament"),
-        _L("Pull back current filament"),
-        _L("Push new filament into extruder"),
-        _L("Purge old filament"),
-        _L("Feed Filament"),
-        _L("Confirm extruded"),
-        _L("Check filament location")
-    };
-
-
-    if (item_idx == FilamentStep::STEP_IDLE) {
-        m_simplebook_right->SetSelection(0);
-        m_filament_load_step->Idle();
-        m_filament_unload_step->Idle();
-        m_filament_vt_load_step->Idle();
-        return;
-    }
-
-    wxString step_str = wxEmptyString;
-    if (item_idx < FilamentStep::STEP_COUNT) {
-        step_str = FILAMENT_CHANGE_STEP_STRING[item_idx];
-    }
-
-    if (f_type == FilamentStepType::STEP_TYPE_LOAD) {
-        if (item_idx > 0 && item_idx < FilamentStep::STEP_COUNT) {
-            if (m_simplebook_right->GetSelection() != 1) {
-                m_simplebook_right->SetSelection(1);
-            }
-
-            m_filament_load_step->SelectItem( m_filament_load_step->GetItemUseText(step_str) );
-        } else {
-            m_filament_load_step->Idle();
-        }
-    } else if (f_type == FilamentStepType::STEP_TYPE_UNLOAD) {
-        if (item_idx > 0 && item_idx < FilamentStep::STEP_COUNT) {
-            if (m_simplebook_right->GetSelection() != 2) {
-                m_simplebook_right->SetSelection(2);
-            }
-            m_filament_unload_step->SelectItem( m_filament_unload_step->GetItemUseText(step_str) );
-        }
-        else {
-            m_filament_unload_step->Idle();
-        }
-    } else if (f_type == FilamentStepType::STEP_TYPE_VT_LOAD) {
-        m_simplebook_right->SetSelection(3);
-        if (item_idx > 0 && item_idx < FilamentStep::STEP_COUNT) {
-            if (item_idx == STEP_CONFIRM_EXTRUDED) {
-                m_filament_vt_load_step->SelectItem(2);
-            }
-            else {
-                m_filament_vt_load_step->SelectItem( m_filament_vt_load_step->GetItemUseText(step_str) );
-            }
-        }
-        else {
-            m_filament_vt_load_step->Idle();
-        }
-    } else {
-        if (item_idx > 0 && item_idx < FilamentStep::STEP_COUNT) {
-            m_simplebook_right->SetSelection(1);
-            m_filament_load_step->SelectItem( m_filament_load_step->GetItemUseText(step_str) );
-        }
-        else {
-            m_filament_load_step->Idle();
-        }
-    }
+    // No step list any more (see UpdateStepCtrl); the printer's own screen shows the steps.
 }
 
 void AMSControl::ShowFilamentTip(bool hasams)
 {
-    m_simplebook_right->SetSelection(0);
-    if (hasams) {
-        m_tip_right_top->Show();
-        m_tip_load_info->SetLabelText(_L("Choose an AMS slot then press \"Load\" or \"Unload\" button to automatically load or unload filaments."));
-    } else {
-        // m_tip_load_info->SetLabelText(_L("Before loading, please make sure the filament is pushed into toolhead."));
-        m_tip_right_top->Hide();
-        m_tip_load_info->SetLabelText(wxEmptyString);
-    }
-
-    m_tip_load_info->SetMinSize(AMS_STEP_SIZE);
-    m_tip_load_info->Wrap(AMS_STEP_SIZE.x - FromDIP(5));
-    m_sizer_right_tip->Layout();
+    // The "Tips" text was part of the removed right-hand column.
 }
 
 bool AMSControl::Enable(bool enable)
@@ -1380,7 +1378,8 @@ bool AMSControl::Enable(bool enable)
     m_button_extruder_back->Enable(enable);
     m_button_ams_setting->Enable(enable);
 
-    m_filament_load_step->Enable(enable);
+    if (m_dual_view)
+        m_dual_view->Enable(enable);
     return wxWindow::Enable(enable);
 }
 

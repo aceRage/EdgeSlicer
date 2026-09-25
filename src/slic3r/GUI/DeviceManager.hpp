@@ -17,6 +17,7 @@
 #include "boost/bimap/bimap.hpp"
 #include "CameraPopup.hpp"
 #include "LanReconnectLadder.hpp"
+#include "AmsDrying.hpp"
 #include "libslic3r/calib.hpp"
 #include "libslic3r/Utils.hpp"
 #define USE_LOCAL_SOCKET_BIND 0
@@ -333,6 +334,8 @@ public:
 
     int nozzle;
     int type{1}; // 0:dummy 1:ams 2:ams-lite 3:n3f 4:n3s
+    // Remote drying state (AMS 2 Pro / AMS HT): info bits 4-7/18-23, dry_setting, dry_sf_reason.
+    GUI::AmsDrying::DryState dry;
 };
 
 enum PrinterFirmwareType {
@@ -937,6 +940,7 @@ public:
     bool is_support_auto_leveling{false};
     bool is_support_auto_recovery_step_loss{false};
     bool is_support_ams_humidity {false};
+    bool is_support_remote_dry {false}; // fun2 bit 5: "ams_filament_drying" is accepted
     bool is_support_prompt_sound{false};
     bool is_support_filament_tangle_detect{false};
     bool is_support_1080dpi {false};
@@ -1045,6 +1049,10 @@ public:
     int command_stop_buzzer();
     int command_purification_disable();
     int command_ams_drying_stop();
+    /* AMS Dryness Control (AMS 2 Pro / AMS HT), the payloads of DevFilaSystem::CtrlAmsStartDryingHour /
+     * CtrlAmsStopDrying; see AmsDrying.hpp */
+    int command_ams_filament_drying_start(int ams_id, const std::string& filament_type, int temp, int hours, bool rotate_tray, int cooling_temp);
+    int command_ams_filament_drying_off(int ams_id);
     /* both take the blob the dialog was handed with the error; see PrintErrorCommands.hpp */
     int command_ack_proceed(const nlohmann::json& action_json);
     int command_dont_remind_next_time(const nlohmann::json& action_json);
@@ -1213,6 +1221,9 @@ public:
 
     /*vi slot data*/
     AmsTray vt_tray;                        // virtual tray
+    // Two-extruder machines report one external spool per extruder in print.vir_slot[] (ids 254 =
+    // deputy/left, 255 = main/right). Display only: vt_tray keeps driving the legacy paths.
+    std::vector<AmsTray> vir_slots;
     //std::vector<AmsTray> vt_trays;          // virtual tray for new
     AmsTray parse_vt_tray(json vtray);
     /*for parse new info*/

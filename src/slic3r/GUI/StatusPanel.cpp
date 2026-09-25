@@ -1810,7 +1810,6 @@ StatusPanel::StatusPanel(wxWindow *parent, wxWindowID id, const wxPoint &pos, co
     Bind(EVT_AMS_ON_SELECTED, &StatusPanel::on_ams_selected, this);
     Bind(EVT_AMS_ON_FILAMENT_EDIT, &StatusPanel::on_filament_edit, this);
     Bind(EVT_VAMS_ON_FILAMENT_EDIT, &StatusPanel::on_ext_spool_edit, this);
-    Bind(EVT_AMS_GUIDE_WIKI, &StatusPanel::on_ams_guide, this);
     Bind(EVT_AMS_RETRY, &StatusPanel::on_ams_retry, this);
     Bind(EVT_FAN_CHANGED, &StatusPanel::on_fan_changed, this);
     Bind(EVT_SECONDARY_CHECK_DONE, &StatusPanel::on_print_error_done, this);
@@ -2736,6 +2735,15 @@ void StatusPanel::update_ams(MachineObject *obj)
     bool is_support_filament_backup = obj->is_support_filament_backup;
     AMSModel ams_mode               = AMSModel::GENERIC_AMS;
 
+    // Two-extruder printers (H2D, H2D Pro, H2C, X2D) get the per-extruder layout.
+    m_ams_control->SetMachine(obj);
+    if (m_ams_control->IsDualMode() != obj->is_multi_extruders()) {
+        m_ams_control->SetDualMode(obj->is_multi_extruders());
+        m_ams_control_box->Layout();
+        m_ams_control_box->Fit();
+        Layout();
+    }
+
     if (obj) {
         if (obj->get_printer_ams_type() == "f1") { ams_mode = AMSModel::AMS_LITE; }
         obj->check_ams_filament_valid();
@@ -2797,6 +2805,12 @@ void StatusPanel::update_ams(MachineObject *obj)
 
     // must select a current can
     m_ams_control->UpdateAms(ams_info, false);
+    if (m_ams_control->IsDualMode()) {
+        m_ams_control->UpdateDual(obj);
+        // The external spools are always there, so the area shows even without an AMS.
+        show_ams_group(true);
+    }
+    m_ams_control->UpdateDryDialog(obj);
 
     last_tray_exist_bits  = obj->tray_exist_bits;
     last_ams_exist_bits   = obj->ams_exist_bits;
@@ -3694,12 +3708,17 @@ void StatusPanel::on_ams_load_curr()
 
 
         update_filament_step();
-        //virtual tray
-        if (curr_ams_id.compare(std::to_string(VIRTUAL_TRAY_ID)) == 0)
+        //virtual tray (254; on two-extruder printers also 255, the right-hand spool)
+        const bool is_ext_spool = curr_ams_id.compare(std::to_string(VIRTUAL_TRAY_ID)) == 0 ||
+                                  (obj->is_multi_extruders() && curr_ams_id == "255");
+        if (is_ext_spool)
         {
             int old_temp = -1;
             int new_temp = -1;
             AmsTray* curr_tray = &obj->vt_tray;
+            for (AmsTray& slot : obj->vir_slots)
+                if (slot.id == curr_ams_id)
+                    curr_tray = &slot;
 
             if (!curr_tray) return;
 
@@ -4078,12 +4097,6 @@ void StatusPanel::on_ams_selected(wxCommandEvent &event)
             }
         }
     }
-}
-
-void StatusPanel::on_ams_guide(wxCommandEvent& event)
-{
-    wxString ams_wiki_url = "https://wiki.bambulab.com/en/software/bambu-studio/use-ams-on-bambu-studio";
-    wxLaunchDefaultBrowser(ams_wiki_url);
 }
 
 void StatusPanel::on_ams_retry(wxCommandEvent& event)
@@ -4537,6 +4550,7 @@ void StatusPanel::set_default()
     m_ams_control->Hide();
     m_ams_control_box->Hide();
     m_ams_control->Reset();
+    m_ams_control->SetMachine(nullptr);
     error_info_reset();
     SetFocus();
 }

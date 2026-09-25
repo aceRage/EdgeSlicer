@@ -1,6 +1,8 @@
 #include "libslic3r/libslic3r.h"
 #include "DeviceManager.hpp"
 #include "PrintErrorCommands.hpp"
+#include "AmsDrying.hpp"
+#include "AmsDualLayout.hpp"
 #include "DeviceModelCode.hpp"
 #include "libslic3r/Time.hpp"
 #include "libslic3r/Thread.hpp"
@@ -1872,6 +1874,20 @@ int MachineObject::command_ams_drying_stop()
     return this->publish_json(j.dump());
 }
 
+int MachineObject::command_ams_filament_drying_start(int ams_id, const std::string& filament_type, int temp, int hours, bool rotate_tray, int cooling_temp)
+{
+    const json j = GUI::AmsDrying::build_start(std::to_string(MachineObject::m_sequence_id++), ams_id, filament_type, temp, hours, rotate_tray, cooling_temp);
+    BOOST_LOG_TRIVIAL(info) << "command_ams_filament_drying_start: " << j.dump();
+    return this->publish_json(j.dump());
+}
+
+int MachineObject::command_ams_filament_drying_off(int ams_id)
+{
+    const json j = GUI::AmsDrying::build_stop(std::to_string(MachineObject::m_sequence_id++), ams_id);
+    BOOST_LOG_TRIVIAL(info) << "command_ams_filament_drying_off: " << j.dump();
+    return this->publish_json(j.dump());
+}
+
 int MachineObject::command_ack_proceed(const nlohmann::json& action_json)
 {
     json        payload;
@@ -2185,8 +2201,10 @@ int MachineObject::command_ams_change_filament(bool load, std::string ams_id, st
         if (ams_id < "16") {
             tray_id = atoi(ams_id.c_str()) * 4 + atoi(slot_id.c_str());
         }
-        // TODO: Orca hack
-        if (ams_id == "254")
+        // TODO: Orca hack. Single-extruder firmware calls its one spool holder 255 while this fork
+        // calls it 254. Two-extruder machines have both (254 = left/deputy, 255 = right/main) and
+        // the dual layout passes the real id, so leave it alone there.
+        if (ams_id == "254" && !is_multi_extruders())
             ams_id = "255";
 
 
@@ -2951,6 +2969,8 @@ void MachineObject::reset()
     print_json.diff2all_base_reset(empty_j);
 
     vt_tray.reset();
+    vir_slots.clear();
+    is_support_remote_dry = false;
 
     subtask_ = nullptr;
 
@@ -4485,6 +4505,11 @@ int MachineObject::parse_json(std::string payload, bool key_field_only)
                                         curr_ams->left_dry_time = (*it)["dry_time"].get<int>();
                                     }
 
+                                    /* remote drying state (AMS 2 Pro / AMS HT), DevFilaSystemParser::ParseAmsInfo */
+                                    try {
+                                        GUI::AmsDrying::parse_dry_fields(*it, curr_ams->dry);
+                                    } catch (...) {}
+
                                     if (it->contains("humidity")) {
                                         std::string humidity = (*it)["humidity"].get<std::string>();
 
@@ -4730,6 +4755,24 @@ int MachineObject::parse_json(std::string payload, bool key_field_only)
                     /* vitrual tray*/
                     if (!key_field_only) {
                         try {
+                            // One external spool per extruder on two-extruder machines (display only).
+                            if (jj.contains("vir_slot") && jj["vir_slot"].is_array()) {
+                                const bool keep_vt_support = ams_support_virtual_tray; // parse_vt_tray sets it
+                                std::vector<AmsTray> slots;
+                                for (const auto& vs : jj["vir_slot"]) {
+                                    if (!vs.is_object()) continue;
+                                    AmsTray slot = parse_vt_tray(vs);
+                                    if (vs.contains("id") && vs["id"].is_string())
+                                        slot.id = vs["id"].get<std::string>();
+                                    slots.push_back(slot);
+                                }
+                                ams_support_virtual_tray = keep_vt_support;
+                                bool changed = slots.size() != vir_slots.size();
+                                for (size_t i = 0; !changed && i < slots.size(); ++i)
+                                    changed = slots[i] != vir_slots[i];
+                                is_ams_need_update |= changed;
+                                vir_slots = std::move(slots);
+                            }
                             if (jj.contains("vt_tray")) {
                                 auto main_slot = parse_vt_tray(jj["vt_tray"].get<json>());
                                 main_slot.id = std::to_string(VIRTUAL_TRAY_ID);
@@ -5890,6 +5933,13 @@ void MachineObject::parse_new_info(json print)
         is_support_upgrade_kit = get_flag_bits(cfg, 14);
         is_support_command_homing = get_flag_bits(fun, 32);
         is_support_nozzle_rack = get_flag_bits(fun, 60);
+    }
+
+    /*fun2 - may be longer than 64 bits, read without a border (Bambu DevUtil::get_flag_bits_no_border)*/
+    if (print.contains("fun2") && print["fun2"].is_string()) {
+        const std::string fun2 = print["fun2"].get<std::string>();
+        if (!fun2.empty())
+            is_support_remote_dry = GUI::AmsDual::fun2_supports_remote_dry(fun2);
     }
 
     /*aux*/
