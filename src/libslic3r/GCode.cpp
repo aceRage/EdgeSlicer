@@ -433,20 +433,40 @@ static bool custom_gcode_changes_tool(const std::string& custom_gcode, const std
     return ok;
 }
 
-std::string OozePrevention::pre_toolchange(GCode& gcodegen)
+std::string OozePrevention::pre_toolchange(GCode& gcodegen, double print_z)
 {
     std::string gcode;
 
     unsigned int extruder_id        = gcodegen.writer().extruder()->id();
 
-    // Check if this tool will ever be used again in this print.
-    // Never turn off heaters on Single Extruder Multi-Material (AMS/MMU) setups.
+    // Check if this tool will ever be used again in this print, so we can turn its heater
+    // fully off (S0) instead of parking it at standby/idle temperature.
+    //
+    // This is restricted to "true" multi-tool setups where filament id == physical
+    // extruder id (classic multi-extruder / IDEX / toolchanger machines with
+    // ooze_prevention enabled - m_ooze_prevention.enable already requires
+    // !single_extruder_multi_material, so SEMM/AMS/MMU never reach here):
+    //  - Bambu (H2/H2C/H2D) printers are excluded outright: they map filaments to
+    //    physical nozzles through a separate grouping/virtual-filament layer
+    //    (MultiNozzleUtils::LayeredNozzleGroupResult, MixedFilamentManager) where
+    //    writer().extruder()->id() is a filament id that does not equal the physical
+    //    extruder/nozzle id, and their idle-cool behavior is already handled by
+    //    GCode/PreCoolingInjector. Leave their G-code untouched here.
+    //  - PrintSequence::ByObject is excluded: Print::process() explicitly skips
+    //    building the print-wide m_tool_ordering for a by-object plate (see
+    //    Print::process(), psWipeTower step), and GCode::_do_export builds a fresh,
+    //    per-object-only ToolOrdering local variable for that mode instead of storing
+    //    it on the Print. So m_curr_print->tool_ordering() here is either empty or, if
+    //    a wipe tower forced it to be populated for a single-object plate, is not
+    //    guaranteed to describe every object's usage of this extruder. Rather than
+    //    risk cutting power to a tool another object still needs, always keep by-object
+    //    prints on the existing standby/idle-temperature behavior.
     bool is_last_use = false;
     if (gcodegen.m_curr_print != nullptr && !gcodegen.config().single_extruder_multi_material.value &&
+        !gcodegen.is_BBL_Printer() &&
+        gcodegen.config().print_sequence == PrintSequence::ByLayer &&
         !gcodegen.m_curr_print->tool_ordering().empty()) {
-        size_t cur_layer_idx = gcodegen.layer() ? gcodegen.layer()->id() :
-                               (gcodegen.m_layer_index >= 0 ? static_cast<size_t>(gcodegen.m_layer_index) : 0);
-        is_last_use = gcodegen.m_curr_print->tool_ordering().is_last_extrusion_layer(cur_layer_idx, extruder_id);
+        is_last_use = gcodegen.m_curr_print->tool_ordering().is_last_extrusion_layer(print_z, extruder_id);
     }
 
     if (is_last_use) {
@@ -10601,7 +10621,7 @@ std::string GCode::set_extruder(unsigned int extruder_id, double print_z, bool b
     // If ooze prevention is enabled, park current extruder in the nearest
     // standby point and set it to the standby temperature.
     if (m_ooze_prevention.enable && m_writer.extruder() != nullptr)
-        gcode += m_ooze_prevention.pre_toolchange(*this);
+        gcode += m_ooze_prevention.pre_toolchange(*this, print_z);
 
     // BBS
     float new_retract_length            = m_config.retraction_length.get_at(extruder_id);

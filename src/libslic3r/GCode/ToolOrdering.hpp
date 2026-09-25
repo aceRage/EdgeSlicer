@@ -241,9 +241,17 @@ public:
     // map (manual mode) for the given per-layer filament lists. See GCode::_do_export.
     static MultiNozzleUtils::LayeredNozzleGroupResult group_by_plate_map(Print *print, const std::vector<std::vector<unsigned int>> &layer_filaments);
 
-    // True when this extruder has no later extrusion layer than layer_idx.
-    // Missing extruders are treated as finished (never used again).
-    bool                is_last_extrusion_layer(size_t layer_idx, unsigned int extruder_id) const;
+    // True when this extruder (as it appears in LayerTools::extruders - this already
+    // covers support / support-interface extruders and anything the wipe tower touches
+    // for that layer, since those are folded into LayerTools::extruders by
+    // collect_extruders()) has no later extrusion layer than the one at print_z.
+    // print_z is matched against m_layer_tools the same way tools_for_layer() does, so
+    // callers stay consistent with the print-wide layer index regardless of which
+    // object / support layer produced print_z.
+    // An extruder missing from m_last_layer_per_extruder is conservatively treated as
+    // NOT finished (kept heated) - it never printed anything we know about, so we must
+    // not assume it is safe to shut off.
+    bool                is_last_extrusion_layer(coordf_t print_z, unsigned int extruder_id) const;
 
 private:
     void				initialize_layers(std::vector<coordf_t> &zs);
