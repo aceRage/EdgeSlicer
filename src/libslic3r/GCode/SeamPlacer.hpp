@@ -74,6 +74,12 @@ struct SeamCandidate {
   float local_ccw_angle;
   EnforcedBlockedSeamPoint type;
   bool central_enforcer; //marks this candidate as central point of enforced segment on the perimeter - important for alignment
+  // Part joints (seam_prefer_part_joints): the point lies where two parts of the object (or a touching
+  // object) meet. Only ever set for the aligned seam positions, and only when the object has touching parts,
+  // so for everything else these stay false and the comparator never sees them differ.
+  bool part_joint = false;
+  // Middle of a run of part_joint points on this perimeter (one per run), the joint's own "central enforcer".
+  bool central_part_joint = false;
 };
 
 struct SeamCandidateCoordinateFunctor {
