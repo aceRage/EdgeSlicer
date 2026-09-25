@@ -522,6 +522,63 @@ Layout filament_layout(const Layout &printer, size_t filament_count)
     return l;
 }
 
+// Paint penetration (top_color_penetration_layers / bottom_color_penetration_layers). Bambu Studio
+// always sets the depth (min 1, default 4 / 3); ours adds 0 = "follow the shell", which Bambu
+// cannot represent: written as "0" it would claim no painted depth at all there. So a 0 goes out as
+// the depth our own shell settings give (MultiMaterialSegmentation.cpp, compute_layer_color_stat):
+// the shell layer count, raised to however many layers of layer_height the shell thickness needs,
+// and at least 1 (Bambu's minimum; a 0-layer shell claims nothing here, the closest Bambu can do is
+// the surface layer). A value >= 1 is Bambu's own and was already written as it is.
+//
+// An object that overrides its shells (or layer height) but not the penetration would otherwise
+// take the project's converted depth in Bambu Studio, computed from the PROJECT's shells, so it
+// gets its own when the project follows the shell too.
+double number_of(const ConfigBase &cfg, const Context &ctx, const char *key, double fallback)
+{
+    if (const ConfigOption *opt = cfg.option(key)) {
+        const Value v = read_value(*opt);
+        double      d;
+        if (! v.values.empty() && parse_number(v.values.front(), d))
+            return d;
+    }
+    if (auto it = ctx.numbers.find(key); it != ctx.numbers.end() && ! it->second.empty())
+        return it->second.front();
+    return fallback;
+}
+
+void write_paint_penetration(const ConfigBase &cfg, const Context &ctx, Scope scope, Config &out, Report &local, const std::string &where)
+{
+    if (scope != Scope::Project && scope != Scope::Print && scope != Scope::Object)
+        return;
+    for (const bool top : { true, false }) {
+        const char *key        = top ? "top_color_penetration_layers" : "bottom_color_penetration_layers";
+        const char *layers_key = top ? "top_shell_layers" : "bottom_shell_layers";
+        const char *thick_key  = top ? "top_shell_thickness" : "bottom_shell_thickness";
+        if (cfg.has(key)) {
+            if (number_of(cfg, ctx, key, 0.) >= 1.)
+                continue; // an explicit depth, already written as it is
+        } else {
+            if (scope != Scope::Object || ! (cfg.has(layers_key) || cfg.has(thick_key) || cfg.has("layer_height")))
+                continue;
+            if (number_of(cfg, ctx, key, 0.) >= 1.)
+                continue; // the object inherits the project's explicit depth, in Bambu Studio too
+        }
+        const int    layers    = int(std::lround(number_of(cfg, ctx, layers_key, 0.)));
+        const double thickness = number_of(cfg, ctx, thick_key, 0.);
+        const double height    = number_of(cfg, ctx, "layer_height", 0.);
+        int          depth     = layers;
+        if (layers > 0 && thickness > 0. && height > 0.)
+            depth = std::max(depth, int(std::ceil((thickness - 1e-4) / height)));
+        depth = std::max(depth, 1);
+        Value v;
+        v.values = { std::to_string(depth) };
+        out[key] = v;
+        local.converted.insert(key);
+        local.notes.push_back(where + ": " + key + " 0 (follow the shell) written as " + std::to_string(depth) +
+                              ", the depth the " + (top ? "top" : "bottom") + " shell settings give");
+    }
+}
+
 // The core: convert every key of `cfg`.
 Config convert_impl(const ConfigBase &cfg, const Context &ctx, Scope scope, Report &report, const std::string &where)
 {
@@ -583,6 +640,8 @@ Config convert_impl(const ConfigBase &cfg, const Context &ctx, Scope scope, Repo
         }
         out[bkey] = std::move(v);
     }
+
+    write_paint_penetration(cfg, ctx, scope, out, local, where);
 
     // Layout keys.
     if (scope == Scope::Project || scope == Scope::Print) {

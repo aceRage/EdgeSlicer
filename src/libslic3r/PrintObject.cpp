@@ -1142,6 +1142,9 @@ bool PrintObject::invalidate_state_by_config_options(
             // the MMU segmentation, not just the later shell-generation step.
             || opt_key == "top_shell_thickness"
             || opt_key == "bottom_shell_thickness"
+            // Paint penetration: read by the same MMU segmentation top/bottom descent.
+            || opt_key == "top_color_penetration_layers"
+            || opt_key == "bottom_color_penetration_layers"
             || opt_key == "raft_layers"
             || opt_key == "raft_contact_distance"
             || opt_key == "slice_closing_radius"
