@@ -201,12 +201,6 @@ bool run_ams_ui_preview_if_asked()
     log_saved(capture(frame, out("ams_dual_light.png")), out("ams_dual_light.png"));
     log_saved(render_canvas(ctrl->GetDualView(), out("ams_dual_canvas_light.png")), out("ams_dual_canvas_light.png"));
 
-    StateColor::SetDarkMode(true);
-    frame->SetBackgroundColour(StateColor::darkModeColorFor(*wxWHITE));
-    log_saved(capture(frame, out("ams_dual_dark.png")), out("ams_dual_dark.png"));
-    log_saved(render_canvas(ctrl->GetDualView(), out("ams_dual_canvas_dark.png")), out("ams_dual_canvas_dark.png"));
-    StateColor::SetDarkMode(dark_before);
-
     auto *dlg = new AMSDryCtrlDialog(frame);
     dlg->set_ams_id("128");
     dlg->update(obj.get());
@@ -218,9 +212,44 @@ bool run_ams_ui_preview_if_asked()
     dlg->set_ams_id("0");
     dlg->update(obj.get());
     log_saved(capture(dlg, out("ams_dry_dialog_idle.png")), out("ams_dry_dialog_idle.png"));
-
     dlg->Hide();
     frame->Hide();
+
+    // Dark: switch the app's theme for this process only (the preview never saves the config and
+    // ends right after), then build fresh windows so the theme is applied as it is at start-up.
+    wxGetApp().app_config->set("dark_color_mode", "1");
+    wxGetApp().Update_dark_mode_flag();
+    StateColor::SetDarkMode(true);
+
+    auto *dframe = new wxFrame(nullptr, wxID_ANY, "AMS preview dark", wxPoint(-20000, -20000), wxDefaultSize,
+                               wxFRAME_NO_TASKBAR | wxFRAME_TOOL_WINDOW | wxBORDER_NONE);
+    dframe->SetBackgroundColour(*wxWHITE);
+    auto *dsizer = new wxBoxSizer(wxVERTICAL);
+    auto *dctrl  = new AMSControl(dframe);
+    dsizer->Add(dctrl, 0, wxALL, dframe->FromDIP(10));
+    dframe->SetSizer(dsizer);
+    dctrl->SetMachine(obj.get());
+    dctrl->SetDualMode(obj->is_multi_extruders());
+    dctrl->UpdateDual(obj.get());
+    wxGetApp().UpdateDarkUIWin(dframe);
+    dsizer->Fit(dframe);
+    dframe->SetPosition(wxPoint(-20000, -20000));
+    dframe->ShowWithoutActivating();
+    log_saved(capture(dframe, out("ams_dual_dark.png")), out("ams_dual_dark.png"));
+    log_saved(render_canvas(dctrl->GetDualView(), out("ams_dual_canvas_dark.png")), out("ams_dual_canvas_dark.png"));
+
+    auto *ddlg = new AMSDryCtrlDialog(dframe);
+    ddlg->set_ams_id("128");
+    ddlg->update(obj.get());
+    ddlg->SetPosition(wxPoint(-20000, -18000));
+    ddlg->ShowWithoutActivating();
+    log_saved(capture(ddlg, out("ams_dry_dialog_dark.png")), out("ams_dry_dialog_dark.png"));
+    ddlg->set_ams_id("0");
+    ddlg->update(obj.get());
+    log_saved(capture(ddlg, out("ams_dry_dialog_idle_dark.png")), out("ams_dry_dialog_idle_dark.png"));
+    ddlg->Hide();
+    dframe->Hide();
+    (void) dark_before;
     // The caller ends the process next; the windows still point at the made-up printer, so keep it.
     obj.release();
     return true;

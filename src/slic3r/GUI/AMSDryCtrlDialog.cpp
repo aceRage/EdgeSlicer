@@ -9,6 +9,7 @@
 #include "Widgets/ComboBox.hpp"
 #include "Widgets/Label.hpp"
 #include "Widgets/StateColor.hpp"
+#include "BambuDevicePalette.hpp"
 
 #include <wx/sizer.h>
 #include <wx/statbmp.h>
@@ -102,11 +103,11 @@ void AMSDryCtrlDialog::create()
     // Left: picture, status, readouts.
     auto *left = new wxBoxSizer(wxVERTICAL);
     m_image = new wxStaticBitmap(this, wxID_ANY, wxNullBitmap);
-    set_image("hum_level1_no_num_light", 96);
+    set_image("hum_level5_no_num_light", 96);
     left->Add(m_image, 0, wxALIGN_CENTER_HORIZONTAL | wxTOP, FromDIP(20));
 
     auto *status_row = new wxBoxSizer(wxHORIZONTAL);
-    m_status_icon_bmp = ScalableBitmap(this, "ams_is_drying", 20);
+    m_status_icon_bmp = ScalableBitmap(this, "dev_ams_dry_ctr_heating_icon", 20);
     m_status_icon     = new wxStaticBitmap(this, wxID_ANY, m_status_icon_bmp.bmp());
     m_status          = new Label(this, _L("Idle"));
     m_status->SetFont(Label::Head_14);
@@ -194,9 +195,9 @@ void AMSDryCtrlDialog::create()
     right->Add(m_cannot, 0, wxEXPAND | wxTOP, FromDIP(6));
 
     StateColor green_bg(std::pair<wxColour, int>(wxColour(206, 206, 206), StateColor::Disabled),
-                        std::pair<wxColour, int>(wxColour(0, 137, 123), StateColor::Pressed),
-                        std::pair<wxColour, int>(wxColour(38, 166, 154), StateColor::Hovered),
-                        std::pair<wxColour, int>(wxColour(0, 150, 136), StateColor::Normal));
+                        std::pair<wxColour, int>(BambuDevicePalette::GreenPressed, StateColor::Pressed),
+                        std::pair<wxColour, int>(BambuDevicePalette::GreenHovered, StateColor::Hovered),
+                        std::pair<wxColour, int>(BambuDevicePalette::Green, StateColor::Normal));
     StateColor red_bg(std::pair<wxColour, int>(wxColour(206, 206, 206), StateColor::Disabled),
                       std::pair<wxColour, int>(wxColour(176, 20, 20), StateColor::Pressed),
                       std::pair<wxColour, int>(wxColour(230, 50, 50), StateColor::Hovered),
@@ -360,14 +361,31 @@ void AMSDryCtrlDialog::update(MachineObject *obj)
     // Status and picture.
     const DryState &st   = ams->dry;
     const bool      idle = is_idle(st);
-    const bool      dark = wxGetApp().dark_mode();
-    int             lvl  = std::clamp(ams->humidity, 1, 5);
+    // Bambu Studio's pictures: the humidity drop by percentage when idle (its
+    // get_humidity_level_img_path, "_no_num_light" in both themes as there), the unit's drying
+    // frame otherwise (get_dry_status_img_path; cooling gets its own frame here).
+    auto humidity_image = [](int percent, int level) {
+        int lvl = level;
+        if (percent >= 0)
+            lvl = percent <= 20 ? 5 : percent <= 40 ? 4 : percent <= 60 ? 3 : percent <= 80 ? 2 : 1;
+        return "hum_level" + std::to_string(std::clamp(lvl, 1, 5)) + "_no_num_light";
+    };
+    const std::string unit_tag = m_unit_type == AmsDual::UNIT_N3S ? "n3s" : "n3f";
+    if (idle && st.status != int(DryStatus::Cooling)) {
+        set_image(humidity_image(ams->humidity_raw, ams->humidity), 96);
+    } else if (is_error(st)) {
+        set_image("dev_ams_dry_ctr_" + unit_tag + "_error", 96);
+    } else if (st.status == int(DryStatus::Cooling)) {
+        set_image("dev_ams_dry_ctr_" + unit_tag + "_cooling", 96);
+    } else if (st.sub_status == int(DrySubStatus::Dehumidify)) {
+        set_image("dev_ams_dry_ctr_" + unit_tag + "_dehumidifying", 96);
+    } else {
+        set_image("dev_ams_dry_ctr_" + unit_tag + "_heating", 96);
+    }
     if (idle) {
-        set_image("hum_level" + std::to_string(lvl) + (dark ? "_no_num_dark" : "_no_num_light"), 96);
         m_status->SetLabel(_L("Idle"));
         m_status_icon->Hide();
     } else {
-        set_image("ams_is_drying", 96);
         wxString s = _L("Drying");
         if (is_error(st))
             s = _L("Drying Error");
@@ -470,7 +488,7 @@ void AMSDryCtrlDialog::on_dpi_changed(const wxRect &)
     const std::string name = m_image_name;
     m_image_name.clear();
     set_image(name, 96);
-    m_status_icon_bmp = ScalableBitmap(this, "ams_is_drying", 20);
+    m_status_icon_bmp = ScalableBitmap(this, "dev_ams_dry_ctr_heating_icon", 20);
     m_status_icon->SetBitmap(m_status_icon_bmp.bmp());
     m_start->SetMinSize(wxSize(FromDIP(80), FromDIP(28)));
     m_stop->SetMinSize(wxSize(FromDIP(80), FromDIP(28)));

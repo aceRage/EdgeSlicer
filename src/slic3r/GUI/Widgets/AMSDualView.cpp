@@ -4,6 +4,7 @@
 #include "StateColor.hpp"
 #include "../GUI_App.hpp"
 #include "../I18N.hpp"
+#include "../BambuDevicePalette.hpp"
 
 #include <wx/dcbuffer.h>
 #include <wx/dcgraph.h>
@@ -16,11 +17,11 @@ namespace {
 
 // Geometry in DIP, scaled with FromDIP at use.
 constexpr int VIEW_W     = 578;
-constexpr int VIEW_H     = 300;
+constexpr int VIEW_H     = 318;
 constexpr int SIDE_W     = 284;
 constexpr int SIDE_GAP   = 10;
-constexpr int STRIP_H    = 40;
-constexpr int BODY_Y     = 48;
+constexpr int STRIP_H    = 44;
+constexpr int BODY_Y     = STRIP_H + 8;
 constexpr int BODY_H     = 190;
 constexpr int PILL_H     = 24;
 constexpr int LABEL_D    = 24;
@@ -28,12 +29,13 @@ constexpr int TILE_Y     = BODY_Y + 66;
 constexpr int TILE_W     = 52;
 constexpr int TILE_H     = 72;
 constexpr int BUS_Y      = TILE_Y + TILE_H + 16;
-constexpr int BAND_Y     = BODY_Y + BODY_H + 12;
-constexpr int EXT_TOP    = BAND_Y + 8;
-constexpr int EXT_W      = 16;
-constexpr int EXT_H      = 22;
-constexpr int EXT_NOZZLE = 8;
-constexpr int EXT_PITCH  = 16; // half the distance between the two extruders
+constexpr int BAND_Y     = BODY_Y + BODY_H + 10;
+constexpr int EXT_TOP    = BAND_Y + 6;
+constexpr int EXT_IMG_H  = 52; // Bambu's left/right_extruder_*.svg (24 x 62), scaled
+// Filament inlets of those pictures, in their 24-wide viewBox: the left half's at x = 14 (its
+// right edge sits on the centre line), the right half's at x = 9.8 (its left edge on the centre).
+constexpr double EXT_INLET_LEFT  = 14.0 / 24.0;
+constexpr double EXT_INLET_RIGHT = 9.8 / 24.0;
 
 bool is_light(const wxColour &c)
 {
@@ -56,16 +58,17 @@ AMSDualView::AMSDualView(wxWindow *parent, wxWindowID id)
 
     load_bitmaps();
 
+    // Bambu Device page: Bambu Studio's green (BambuDevicePalette.hpp), as the rest of the page.
     StateColor btn_bg_green(std::pair<wxColour, int>(AMS_CONTROL_DISABLE_COLOUR, StateColor::Disabled),
-                            std::pair<wxColour, int>(wxColour(0, 137, 123), StateColor::Pressed),
-                            std::pair<wxColour, int>(wxColour(38, 166, 154), StateColor::Hovered),
-                            std::pair<wxColour, int>(AMS_CONTROL_BRAND_COLOUR, StateColor::Normal));
+                            std::pair<wxColour, int>(BambuDevicePalette::GreenPressed, StateColor::Pressed),
+                            std::pair<wxColour, int>(BambuDevicePalette::GreenHovered, StateColor::Hovered),
+                            std::pair<wxColour, int>(BambuDevicePalette::Green, StateColor::Normal));
     StateColor btn_bg_white(std::pair<wxColour, int>(AMS_CONTROL_DISABLE_COLOUR, StateColor::Disabled),
                             std::pair<wxColour, int>(AMS_CONTROL_DISABLE_COLOUR, StateColor::Pressed),
                             std::pair<wxColour, int>(AMS_CONTROL_DEF_BLOCK_BK_COLOUR, StateColor::Hovered),
                             std::pair<wxColour, int>(AMS_CONTROL_WHITE_COLOUR, StateColor::Normal));
     StateColor btn_bd_green(std::pair<wxColour, int>(wxColour(255, 255, 254), StateColor::Disabled),
-                            std::pair<wxColour, int>(AMS_CONTROL_BRAND_COLOUR, StateColor::Enabled));
+                            std::pair<wxColour, int>(BambuDevicePalette::Green, StateColor::Enabled));
     StateColor btn_bd_white(std::pair<wxColour, int>(wxColour(255, 255, 254), StateColor::Disabled),
                             std::pair<wxColour, int>(wxColour(38, 46, 48), StateColor::Enabled));
     StateColor btn_text_green(std::pair<wxColour, int>(wxColour(255, 255, 254), StateColor::Disabled),
@@ -122,6 +125,39 @@ void AMSDualView::load_bitmaps()
     }
     m_settings_normal = ScalableBitmap(this, "ams_setting_normal", 24);
     m_settings_hover  = ScalableBitmap(this, "ams_setting_hover", 24);
+
+    // Bambu Studio's unit frames (drawn over the colour cubes, as its AMSPreview does) and
+    // extruder halves (its DevExtruderImage).
+    m_four_slot        = ScalableBitmap(this, "four_slot_ams_item", 32);
+    m_four_slot_dark   = ScalableBitmap(this, "four_slot_ams_item_dark", 32);
+    m_single_slot      = ScalableBitmap(this, "single_slot_ams_item", 33);
+    m_single_slot_dark = ScalableBitmap(this, "single_slot_ams_item_dark", 33);
+    m_ts_cube          = ScalableBitmap(this, "ts_bitmap_cube", 14);
+    m_ts_cube_dark     = ScalableBitmap(this, "ts_bitmap_cube_dark", 14);
+    for (int active = 0; active < 2; ++active)
+        for (int filled = 0; filled < 2; ++filled) {
+            const std::string state = std::string(active ? "active" : "unactive") + (filled ? "_filled" : "_empty");
+            m_ext_left[active][filled]  = ScalableBitmap(this, "left_extruder_" + state, EXT_IMG_H);
+            m_ext_right[active][filled] = ScalableBitmap(this, "right_extruder_" + state, EXT_IMG_H);
+        }
+}
+
+wxSize AMSDualView::unit_icon_size(const AmsDual::UnitRef &ref) const
+{
+    if (ref.slot_count > 1)
+        return m_four_slot.GetBmpSize();
+    return m_single_slot.GetBmpSize();
+}
+
+int AMSDualView::extruder_inlet_x(int extruder_id) const
+{
+    const int mx = GetSize().x / 2;
+    if (m_model.extruder_count < 2)
+        return mx;
+    const int w = m_ext_left[1][1].GetBmpWidth();
+    if (extruder_id == AmsDual::DEPUTY_EXTRUDER)
+        return mx - w + int(w * EXT_INLET_LEFT + 0.5);
+    return mx + int(w * EXT_INLET_RIGHT + 0.5);
 }
 
 void AMSDualView::msw_rescale()
@@ -172,7 +208,7 @@ AMSDualView::Palette AMSDualView::palette() const
     p.icon_bg         = dm("#FFFFFF");
     p.tile_empty      = dm("#FFFFFF");
     p.pill            = dm("#EEEEEE");
-    p.brand           = AMS_CONTROL_BRAND_COLOUR;
+    p.brand           = StateColor::darkModeColorFor(BambuDevicePalette::Green);
     p.active_underlay = dm("#6B6B6B");
     return p;
 }
@@ -342,29 +378,85 @@ void AMSDualView::render(wxDC &dc)
 
 void AMSDualView::draw_unit_icon(wxDC &dc, const wxRect &r, const DualUnitView *unit, bool selected, const Palette &pal)
 {
-    dc.SetPen(wxPen(selected ? pal.brand : pal.icon_border, selected ? FromDIP(2) : 1));
-    dc.SetBrush(wxBrush(pal.icon_bg));
-    dc.DrawRoundedRectangle(r, FromDIP(4));
-    if (!unit)
-        return;
-    const int n      = std::max<int>(1, int(unit->slots.size()));
-    const int pill_w = FromDIP(6);
-    const int pill_h = r.height - FromDIP(12);
-    const int gap    = FromDIP(3);
-    const int total  = n * pill_w + (n - 1) * gap;
-    int       x      = r.x + (r.width - total) / 2;
-    for (int i = 0; i < n; ++i) {
-        wxColour c = pal.line;
-        if (i < int(unit->slots.size())) {
-            const DualSlotView &sv = unit->slots[i];
-            const bool empty = sv.state == AMSCanType::AMS_CAN_TYPE_EMPTY || sv.state == AMSCanType::AMS_CAN_TYPE_NONE;
-            if (!empty && !sv.material.empty())
-                c = sv.colour.Alpha() == 0 ? pal.tile_empty : wxColour(sv.colour.Red(), sv.colour.Green(), sv.colour.Blue());
+    // As Bambu Studio's AMSPreview: colour cubes, then the unit's frame picture on top. The external
+    // spool has no frame, just its colour pill on a grey plate.
+    const bool dark = wxGetApp().dark_mode();
+    dc.SetPen(*wxTRANSPARENT_PEN);
+    dc.SetBrush(wxBrush(dm("#FFFFFF")));
+    dc.DrawRoundedRectangle(r, FromDIP(3));
+
+    if (unit) {
+        const bool is_ext = unit->ref.type == AmsDual::UNIT_EXT_SPOOL;
+        auto       cube_colour = [&](const DualSlotView &sv, bool &transparent, bool &empty) {
+            empty       = sv.state == AMSCanType::AMS_CAN_TYPE_EMPTY || sv.state == AMSCanType::AMS_CAN_TYPE_NONE;
+            transparent = !empty && !sv.material.empty() && sv.colour.Alpha() == 0;
+            if (empty || sv.material.empty())
+                return dm("#FFFFFF");
+            return wxColour(sv.colour.Red(), sv.colour.Green(), sv.colour.Blue());
+        };
+
+        if (unit->ref.slot_count > 1) {
+            const wxSize cube(FromDIP(9), FromDIP(14));
+            int          x = r.x + FromDIP(8);
+            const int    y = r.y + (r.height - cube.y) / 2;
+            for (const DualSlotView &sv : unit->slots) {
+                bool transparent = false, empty = false;
+                const wxColour c = cube_colour(sv, transparent, empty);
+                if (transparent) {
+                    const ScalableBitmap &ts = dark ? m_ts_cube_dark : m_ts_cube;
+                    dc.DrawBitmap(ts.bmp(), x - FromDIP(1), r.y + (r.height - ts.GetBmpHeight()) / 2, true);
+                } else if (!sv.cols.empty() && sv.cols.size() > 1) {
+                    const int n = int(sv.cols.size());
+                    for (int i = 0; i < n; ++i) {
+                        dc.SetBrush(wxBrush(sv.cols[i]));
+                        dc.DrawRectangle(x + cube.x * i / n, y, cube.x / n + 1, cube.y);
+                    }
+                } else {
+                    dc.SetBrush(wxBrush(c));
+                    dc.DrawRectangle(x, y, cube.x, cube.y);
+                    if (empty) {
+                        dc.SetPen(wxPen(pal.text, 1));
+                        dc.DrawLine(x + cube.x - 1, y + 1, x + 1, y + cube.y - 1);
+                        dc.SetPen(*wxTRANSPARENT_PEN);
+                    }
+                }
+                x += cube.x;
+            }
+            dc.DrawBitmap((dark ? m_four_slot_dark : m_four_slot).bmp(), r.x, r.y, true);
+        } else if (!unit->slots.empty()) {
+            const DualSlotView &sv = unit->slots.front();
+            bool transparent = false, empty = false;
+            const wxColour c = cube_colour(sv, transparent, empty);
+            // grey plate
+            const wxSize plate(FromDIP(16), FromDIP(24));
+            dc.SetBrush(wxBrush(dm("#EEEEEE")));
+            dc.DrawRoundedRectangle(r.x + (r.width - plate.x) / 2, r.y + (r.height - plate.y) / 2, plate.x, plate.y, FromDIP(2));
+            if (!is_ext) {
+                const wxSize cube(FromDIP(9), FromDIP(14));
+                dc.SetBrush(wxBrush(c));
+                dc.DrawRectangle(r.x + (r.width - cube.x) / 2, r.y + (r.height - cube.y) / 2, cube.x, cube.y);
+                dc.DrawBitmap((dark ? m_single_slot_dark : m_single_slot).bmp(), r.x, r.y, true);
+            } else {
+                const wxSize pill(FromDIP(6), FromDIP(12));
+                const wxRect pr(r.x + (r.width - pill.x) / 2, r.y + (r.height - pill.y) / 2, pill.x, pill.y);
+                dc.SetBrush(wxBrush(c));
+                dc.DrawRoundedRectangle(pr, FromDIP(3));
+                if (is_light(c) || transparent) {
+                    dc.SetPen(wxPen(AMS_CONTROL_GRAY500, 1));
+                    dc.SetBrush(*wxTRANSPARENT_BRUSH);
+                    dc.DrawRoundedRectangle(pr, FromDIP(3));
+                    dc.SetPen(*wxTRANSPARENT_PEN);
+                }
+            }
         }
-        dc.SetPen(wxPen(pal.icon_border, 1));
-        dc.SetBrush(wxBrush(c));
-        dc.DrawRoundedRectangle(x, r.y + FromDIP(6), pill_w, pill_h, FromDIP(2));
-        x += pill_w + gap;
+    }
+
+    if (selected) {
+        wxRect outer = r;
+        outer.Inflate(FromDIP(2));
+        dc.SetPen(wxPen(pal.brand, FromDIP(2)));
+        dc.SetBrush(*wxTRANSPARENT_BRUSH);
+        dc.DrawRoundedRectangle(outer, FromDIP(5));
     }
 }
 
@@ -496,12 +588,13 @@ void AMSDualView::draw_side(wxDC &dc, int s, const Palette &pal)
     int                           ix   = x0 + FromDIP(10);
     for (int u = 0; u < int(side.units.size()); ++u) {
         const AmsDual::UnitRef &ref     = side.units[u];
-        const int               iw      = ref.slot_count > 1 ? FromDIP(46) : FromDIP(22);
-        const wxRect            r(ix, FromDIP(6), iw, FromDIP(STRIP_H - 12));
+        const wxSize            is      = unit_icon_size(ref);
+        const int               iw      = is.x;
+        const wxRect            r(ix, (FromDIP(STRIP_H) - is.y) / 2, is.x, is.y);
         const bool              on_page = std::find(page.begin(), page.end(), u) != page.end();
         draw_unit_icon(dc, r, unit_view(ref.ams_id), on_page, pal);
         m_hits.push_back(Hit{r, HitKind::UnitIcon, s, u, -1});
-        ix += iw + FromDIP(8);
+        ix += iw + FromDIP(10);
     }
 
     // Body.
@@ -538,9 +631,7 @@ void AMSDualView::draw_side(wxDC &dc, int s, const Palette &pal)
     // Feed lines: every tile drops to the bus, the bus joins them at the side's centre, the trunk
     // runs down to the band and across to this side's extruder.
     const DualExtruderView *ext   = extruder_view(side.extruder_id);
-    const int               ext_x = (m_model.extruder_count >= 2) ?
-                                        GetSize().x / 2 + (side.extruder_id == AmsDual::DEPUTY_EXTRUDER ? -FromDIP(EXT_PITCH) : FromDIP(EXT_PITCH)) :
-                                        GetSize().x / 2;
+    const int               ext_x = extruder_inlet_x(side.extruder_id);
     const int tile_bottom = FromDIP(TILE_Y + TILE_H);
     const int bus_y       = FromDIP(BUS_Y);
     const int band_y      = FromDIP(BAND_Y);
@@ -637,30 +728,30 @@ void AMSDualView::draw_side(wxDC &dc, int s, const Palette &pal)
 
 void AMSDualView::draw_extruders(wxDC &dc, const Palette &pal)
 {
-    const int n  = m_model.extruder_count >= 2 ? 2 : 1;
-    const int mx = GetSize().x / 2;
-    for (int i = 0; i < n; ++i) {
-        const int id  = (n == 2) ? (i == 0 ? AmsDual::DEPUTY_EXTRUDER : AmsDual::MAIN_EXTRUDER) : AmsDual::MAIN_EXTRUDER;
-        const int x   = (n == 2) ? (i == 0 ? mx - FromDIP(EXT_PITCH) : mx + FromDIP(EXT_PITCH)) : mx;
-        const int bw  = FromDIP(EXT_W), bh = FromDIP(EXT_H), nh = FromDIP(EXT_NOZZLE);
-        const int top = FromDIP(EXT_TOP);
-        const DualExtruderView *ev = extruder_view(id);
-
-        wxColour fill = pal.icon_bg;
-        if (ev && ev->loaded)
-            fill = ev->colour.Alpha() == 0 ? pal.tile_empty : wxColour(ev->colour.Red(), ev->colour.Green(), ev->colour.Blue());
-        dc.SetPen(wxPen(pal.text_dim, 1));
-        dc.SetBrush(wxBrush(pal.strip));
-        dc.DrawRoundedRectangle(x - bw / 2, top, bw, bh, FromDIP(3));
-        // filament window
-        dc.SetBrush(wxBrush(fill));
-        dc.DrawRoundedRectangle(x - bw / 2 + FromDIP(4), top + FromDIP(4), bw - FromDIP(8), bh - FromDIP(8), FromDIP(2));
-        // nozzle
-        wxPoint tri[4] = {wxPoint(x - FromDIP(5), top + bh), wxPoint(x + FromDIP(5), top + bh), wxPoint(x + FromDIP(2), top + bh + nh),
-                          wxPoint(x - FromDIP(2), top + bh + nh)};
-        dc.SetBrush(wxBrush(pal.text_dim));
-        dc.DrawPolygon(4, tri);
+    // Bambu Studio's DevExtruderImage: two halves meeting on the centre line, "active" for the
+    // extruder in use, "filled" when filament is at the extruder.
+    const int mx  = GetSize().x / 2;
+    const int top = FromDIP(EXT_TOP);
+    if (m_model.extruder_count >= 2) {
+        const DualExtruderView *left  = extruder_view(AmsDual::DEPUTY_EXTRUDER);
+        const DualExtruderView *right = extruder_view(AmsDual::MAIN_EXTRUDER);
+        const bool any_active = (left && left->active) || (right && right->active);
+        auto pick = [&](ScalableBitmap (&set)[2][2], const DualExtruderView *ev) -> const ScalableBitmap & {
+            const bool active = ev ? (ev->active || !any_active) : true;
+            const bool filled = ev && (ev->filled || ev->loaded);
+            return set[active ? 1 : 0][filled ? 1 : 0];
+        };
+        const ScalableBitmap &lb = pick(m_ext_left, left);
+        const ScalableBitmap &rb = pick(m_ext_right, right);
+        dc.DrawBitmap(lb.bmp(), mx - lb.GetBmpWidth(), top, true);
+        dc.DrawBitmap(rb.bmp(), mx, top, true);
+    } else {
+        const DualExtruderView *ev = extruder_view(AmsDual::MAIN_EXTRUDER);
+        const bool filled = ev && (ev->filled || ev->loaded);
+        const ScalableBitmap &bmp = m_ext_right[1][filled ? 1 : 0];
+        dc.DrawBitmap(bmp.bmp(), mx - int(bmp.GetBmpWidth() * EXT_INLET_RIGHT + 0.5), top, true);
     }
+    (void) pal;
 }
 
 void AMSDualView::on_left_down(wxMouseEvent &evt)

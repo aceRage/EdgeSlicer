@@ -45,6 +45,8 @@ struct DualUnitView
 struct DualExtruderView
 {
     int         id{0};
+    bool        active{false};   // the extruder printing / selected right now (current_extder_id)
+    bool        filled{false};   // filament at the extruder (ext_has_filament)
     bool        loaded{false};
     std::string ams_id;
     std::string slot_id;
@@ -122,6 +124,12 @@ private:
     ScalableBitmap m_sun_drying;
     std::vector<ScalableBitmap> m_hum_num_light, m_hum_num_dark, m_hum_light, m_hum_dark;
     ScalableBitmap m_settings_normal, m_settings_hover;
+    // Bambu Studio artwork (resources/images, from BambuStudio under AGPL-3.0).
+    ScalableBitmap m_four_slot, m_four_slot_dark, m_single_slot, m_single_slot_dark, m_ts_cube, m_ts_cube_dark;
+    ScalableBitmap m_ext_left[2][2], m_ext_right[2][2]; // [active][filled]
+
+    int  extruder_inlet_x(int extruder_id) const; // where a side's feed line enters its extruder
+    wxSize unit_icon_size(const AmsDual::UnitRef &ref) const;
 
     Palette palette() const;
     const DualUnitView *unit_view(const std::string &ams_id) const;

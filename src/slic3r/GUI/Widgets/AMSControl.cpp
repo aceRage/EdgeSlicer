@@ -8,6 +8,7 @@
 #include "slic3r/GUI/AMSDryCtrlDialog.hpp"
 #include "slic3r/GUI/AmsDrying.hpp"
 #include "slic3r/GUI/AmsDualLayout.hpp"
+#include "slic3r/GUI/BambuDevicePalette.hpp"
 
 #include <wx/simplebook.h>
 #include <wx/dcgraph.h>
@@ -95,7 +96,7 @@ AMSControl::AMSControl(wxWindow *parent, wxWindowID id, const wxPoint &pos, cons
     //backup tips
     m_ams_backup_tip = new Label(m_amswin, _L("Auto Refill"));
     m_ams_backup_tip->SetFont(::Label::Head_12);
-    m_ams_backup_tip->SetForegroundColour(wxColour(0x009688));
+    m_ams_backup_tip->SetForegroundColour(BambuDevicePalette::Green);
     m_ams_backup_tip->SetBackgroundColour(*wxWHITE);
     m_img_ams_backup = new wxStaticBitmap(m_amswin, wxID_ANY, create_scaled_bitmap("automatic_material_renewal", this, 16), wxDefaultPosition, wxSize(FromDIP(16), FromDIP(16)), 0);
     m_img_ams_backup->SetBackgroundColour(*wxWHITE);
@@ -178,18 +179,19 @@ AMSControl::AMSControl(wxWindow *parent, wxWindowID id, const wxPoint &pos, cons
 
     //m_sizer_left_bottom->Add(0, 0, 0, wxEXPAND, 0);
 
+    // Bambu Device page: Bambu Studio's green, not the app accent (BambuDevicePalette.hpp).
     StateColor btn_bg_green(std::pair<wxColour, int>(AMS_CONTROL_DISABLE_COLOUR, StateColor::Disabled),
-                            std::pair<wxColour, int>(wxColour(0, 137, 123), StateColor::Pressed), 
-                            std::pair<wxColour, int>(wxColour(38, 166, 154), StateColor::Hovered),
-                            std::pair<wxColour, int>(AMS_CONTROL_BRAND_COLOUR, StateColor::Normal));
+                            std::pair<wxColour, int>(BambuDevicePalette::GreenPressed, StateColor::Pressed),
+                            std::pair<wxColour, int>(BambuDevicePalette::GreenHovered, StateColor::Hovered),
+                            std::pair<wxColour, int>(BambuDevicePalette::Green, StateColor::Normal));
 
     StateColor btn_bg_white(std::pair<wxColour, int>(AMS_CONTROL_DISABLE_COLOUR, StateColor::Disabled), 
                             std::pair<wxColour, int>(AMS_CONTROL_DISABLE_COLOUR, StateColor::Pressed),
                             std::pair<wxColour, int>(AMS_CONTROL_DEF_BLOCK_BK_COLOUR, StateColor::Hovered),
                             std::pair<wxColour, int>(AMS_CONTROL_WHITE_COLOUR, StateColor::Normal));
 
-    StateColor btn_bd_green(std::pair<wxColour, int>(wxColour(255,255,254), StateColor::Disabled), 
-                            std::pair<wxColour, int>(AMS_CONTROL_BRAND_COLOUR, StateColor::Enabled));
+    StateColor btn_bd_green(std::pair<wxColour, int>(wxColour(255,255,254), StateColor::Disabled),
+                            std::pair<wxColour, int>(BambuDevicePalette::Green, StateColor::Enabled));
 
     StateColor btn_bd_white(std::pair<wxColour, int>(wxColour(255,255,254), StateColor::Disabled), 
                             std::pair<wxColour, int>(wxColour(38, 46, 48), StateColor::Enabled));
@@ -394,7 +396,7 @@ AMSControl::AMSControl(wxWindow *parent, wxWindowID id, const wxPoint &pos, cons
     auto        thumbnail           = new wxStaticBitmap(m_in_calibration_panel, wxID_ANY, create_scaled_bitmap("ams_icon", nullptr, 126), wxDefaultPosition, wxDefaultSize);
     m_text_calibration_percent      = new wxStaticText(m_in_calibration_panel, wxID_ANY, wxT("0%"), wxDefaultPosition, wxDefaultSize, 0);
     m_text_calibration_percent->SetFont(::Label::Head_16);
-    m_text_calibration_percent->SetForegroundColour(AMS_CONTROL_BRAND_COLOUR);
+    m_text_calibration_percent->SetForegroundColour(BambuDevicePalette::Green);
     auto m_text_calibration_tip = new wxStaticText(m_in_calibration_panel, wxID_ANY, _L("Calibrating AMS..."), wxDefaultPosition, wxDefaultSize, 0);
     m_text_calibration_tip->SetFont(::Label::Body_14);
     m_text_calibration_tip->SetForegroundColour(AMS_CONTROL_GRAY700);
@@ -422,7 +424,7 @@ AMSControl::AMSControl(wxWindow *parent, wxWindowID id, const wxPoint &pos, cons
 
     auto m_button_calibration_again = new Button(m_calibration_err_panel, _L("Calibrate again"));
     m_button_calibration_again->SetBackgroundColor(btn_bg_green);
-    m_button_calibration_again->SetBorderColor(AMS_CONTROL_BRAND_COLOUR);
+    m_button_calibration_again->SetBorderColor(BambuDevicePalette::Green);
     m_button_calibration_again->SetTextColor(AMS_CONTROL_WHITE_COLOUR);
     m_button_calibration_again->SetMinSize(AMS_CONTRO_CALIBRATION_BUTTON_SIZE);
     m_button_calibration_again->SetCornerRadius(FromDIP(12));
@@ -697,6 +699,8 @@ void AMSControl::UpdateDual(MachineObject *obj)
     for (const Extder &e : obj->m_extder_data.extders) {
         DualExtruderView ev;
         ev.id      = e.id;
+        ev.active  = e.id == obj->m_extder_data.current_extder_id;
+        ev.filled  = e.ext_has_filament != 0;
         ev.ams_id  = e.snow.ams_id;
         ev.slot_id = e.snow.slot_id;
         ev.loaded  = AmsDual::slot_is_loaded(e.snow.ams_id, e.snow.slot_id);
