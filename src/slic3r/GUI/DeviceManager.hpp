@@ -17,6 +17,7 @@
 #include "boost/bimap/bimap.hpp"
 #include "CameraPopup.hpp"
 #include "LanReconnectLadder.hpp"
+#include "AmsDrying.hpp"
 #include "libslic3r/calib.hpp"
 #include "libslic3r/Utils.hpp"
 #define USE_LOCAL_SOCKET_BIND 0
@@ -158,6 +159,16 @@ struct Nozzle
     int   max_temp = 0;
     int   wear = 0;
     NozzleVolumeType nozzle_flow{NozzleVolumeType::nvtStandard}; // Ultra: Standard / High Flow
+    // Dual-nozzle sync (BambuStudio DevNozzleSystemParser::ParseV2_0, DevNozzleSystem.cpp:772-806):
+    // the exact flow type ('S' Standard, 'H' High Flow, 'U' TPU High Flow, 'E' E3D High Flow),
+    // the status bits ("stat"; bits 1-2 == 0 is DevNozzle::IsNormal), and what was last printed
+    // with it. id is the raw report id: 0/1 = extruder nozzle, 0x10 + n = rack slot n (H2C).
+    NozzleVolumeType volume_exact{NozzleVolumeType::nvtStandard};
+    int              stat{0};
+    std::string      fila_id;
+    std::string      color_m;
+    bool on_rack() const { return ((id >> 4) & 0xF) == 1; }
+    bool is_normal() const { return ((stat >> 1) & 0x3) == 0; }
 };
 
 struct NozzleData
@@ -323,6 +334,8 @@ public:
 
     int nozzle;
     int type{1}; // 0:dummy 1:ams 2:ams-lite 3:n3f 4:n3s
+    // Remote drying state (AMS 2 Pro / AMS HT): info bits 4-7/18-23, dry_setting, dry_sf_reason.
+    GUI::AmsDrying::DryState dry;
 };
 
 enum PrinterFirmwareType {
@@ -559,6 +572,14 @@ public:
     bool m_set_ctt_dlg{ false };
     void set_lan_mode_connection_state(bool state) {m_lan_mode_connection_state = state;};
     bool get_lan_mode_connection_state() {return m_lan_mode_connection_state;};
+    // What the network plug-in last said about this printer's LAN MQTT session: true after
+    // on_local_connect(Ok), false after any other status, when a new dial starts, and when a
+    // publish finds no session. Unlike m_lan_mode_connection_state ("a connect is in flight",
+    // cleared by every callback) it stays true while the session is up, which is what lets the
+    // reconnect tick tell a quiet printer from a dropped one (LanReconnectLadder::lan_tick_step).
+    bool m_lan_session_up{false};
+    void set_lan_session_up(bool up) { m_lan_session_up = up; }
+    bool lan_session_up() const { return m_lan_session_up; }
     void set_ctt_dlg( wxString text);
     int  parse_msg_count = 0;
     int  keep_alive_count = 0;
@@ -927,6 +948,7 @@ public:
     bool is_support_auto_leveling{false};
     bool is_support_auto_recovery_step_loss{false};
     bool is_support_ams_humidity {false};
+    bool is_support_remote_dry {false}; // fun2 bit 5: "ams_filament_drying" is accepted
     bool is_support_prompt_sound{false};
     bool is_support_filament_tangle_detect{false};
     bool is_support_1080dpi {false};
@@ -944,6 +966,11 @@ public:
     bool is_support_agora{false};
     bool is_support_upgrade_kit{false};
     bool is_support_command_homing { false };// fun[32]
+    // fun[60]: the printer has a nozzle rack (H2C). BambuStudio sends get_auto_nozzle_mapping only
+    // to such printers (DevNozzleRack::IsSupported gates CheckErrorSyncNozzleMappingResultV0/V1).
+    bool is_support_nozzle_rack { false };
+    // is_support_nozzle_rack, or rack nozzles in the report (older reports without fun[60]).
+    bool has_nozzle_rack() const;
 
     bool installed_upgrade_kit{false};
     int  nozzle_max_temperature = -1;
@@ -1030,6 +1057,10 @@ public:
     int command_stop_buzzer();
     int command_purification_disable();
     int command_ams_drying_stop();
+    /* AMS Dryness Control (AMS 2 Pro / AMS HT), the payloads of DevFilaSystem::CtrlAmsStartDryingHour /
+     * CtrlAmsStopDrying; see AmsDrying.hpp */
+    int command_ams_filament_drying_start(int ams_id, const std::string& filament_type, int temp, int hours, bool rotate_tray, int cooling_temp);
+    int command_ams_filament_drying_off(int ams_id);
     /* both take the blob the dialog was handed with the error; see PrintErrorCommands.hpp */
     int command_ack_proceed(const nlohmann::json& action_json);
     int command_dont_remind_next_time(const nlohmann::json& action_json);
@@ -1057,6 +1088,9 @@ public:
     int command_task_resume();
     int command_set_bed(int temp);
     int command_set_nozzle(int temp);
+    // Per-extruder target on multi-nozzle printers (H2D/H2C/X2D): extruder_index 0 = right/main,
+    // 1 = left/deputy. Same payload Bambu Studio sends ("set_nozzle_temp").
+    int command_set_nozzle_new(int extruder_index, int temp);
     int command_set_chamber(int temp);
     // ams controls
     //int command_ams_switch(int tray_index, int old_temp = 210, int new_temp = 210);
@@ -1157,6 +1191,22 @@ public:
     int parse_json(std::string payload, bool key_filed_only = false);
     int publish_gcode(std::string gcode_str);
 
+    /* Dual-nozzle send (BambuStudio DevNozzleMappingCtrl, DevMappingNozzle.cpp:244-268): the
+     * printer's answer to a get_auto_nozzle_mapping query. The send dialog publishes its own
+     * query (command_get_auto_nozzle_mapping) and keeps Send disabled until the answer with its
+     * sequence id arrives; a "fail"/"failed" answer blocks the send as it does in Bambu Studio. */
+    struct NozzleMappingReply {
+        std::string sequence_id;
+        std::string result;   // "success" / "fail" / "failed"
+        std::string reason;
+        int         err_no{0};
+        std::string mapping;  // the "mapping" array, serialized
+        bool        valid{false};
+    };
+    NozzleMappingReply m_nozzle_mapping_reply;
+    // Stamps a fresh sequence id over request_json's and publishes it; returns that id ("" on error).
+    std::string command_get_auto_nozzle_mapping(const std::string& request_json);
+
     std::string setting_id_to_type(std::string setting_id, std::string tray_type);
     BBLSubTask* get_subtask();
     BBLModelTask* get_modeltask();
@@ -1179,6 +1229,9 @@ public:
 
     /*vi slot data*/
     AmsTray vt_tray;                        // virtual tray
+    // Two-extruder machines report one external spool per extruder in print.vir_slot[] (ids 254 =
+    // deputy/left, 255 = main/right). Display only: vt_tray keeps driving the legacy paths.
+    std::vector<AmsTray> vir_slots;
     //std::vector<AmsTray> vt_trays;          // virtual tray for new
     AmsTray parse_vt_tray(json vtray);
     /*for parse new info*/
@@ -1246,12 +1299,8 @@ public:
 private:
     // Per-printer reconnect bookkeeping. Keyed by dev_id so a printer that comes and goes does not
     // inherit another's backoff.
-    struct LanReconnect
-    {
-        long long down_since { 0 };  // first tick at which this printer looked disconnected
-        long long last_try { 0 };    // when the last reconnect was attempted
-        int       attempts { 0 };    // consecutive attempts without a push since
-    };
+    // (down_since / probe_at / last_try / attempts - see LanReconnectLadder::lan_tick_step.)
+    using LanReconnect = LanReconnectLadder::LinkState;
     std::map<std::string, LanReconnect> m_lan_reconnect;
     // One reconnect attempt against one LAN machine: the same three steps the Device tab's
     // set_selected_machine runs (disconnect, reset, connect, mark LAN-connected).

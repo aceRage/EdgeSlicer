@@ -1063,7 +1063,10 @@ static std::vector<std::string> s_Preset_print_options {
      "toolchange_ordering",
      "toolchange_cyclic_order",
      "toolchange_cyclic_first_layer",
-     "wipe_tower_rotation_angle", "wipe_tower_wall_gap", "tree_support_branch_distance_organic", "tree_support_branch_diameter_organic", "tree_support_branch_angle_organic",
+     "wipe_tower_rotation_angle", "wipe_tower_wall_gap",
+     "wipe_tower_interface_temp", "wipe_tower_interface_run_in", "wipe_tower_interface_extra_prime", "wipe_tower_interface_trigger",
+     "enable_tower_interface_features",
+     "tree_support_branch_distance_organic", "tree_support_branch_diameter_organic", "tree_support_branch_angle_organic",
      "hole_to_polyhole", "hole_to_polyhole_threshold", "hole_to_polyhole_twisted", "mmu_segmented_region_max_width", "mmu_segmented_region_interlocking_depth",
      "paint_depth_mode", "paint_depth_walls", "paint_depth_mm", "paint_infill_override", "paint_depth_solid_interfaces",
      "small_area_infill_flow_compensation", "small_area_infill_flow_compensation_model",
@@ -1115,9 +1118,14 @@ static std::vector<std::string> s_Preset_filament_options {
     // s_Preset_filament_options; without these the keys are dropped when a filament preset loads.
     "long_retractions_when_ec", "retraction_distances_when_ec",
     "filament_tower_ironing_area",
+    "filament_tower_interface_print_temp", "filament_tower_interface_pre_extrusion_dist", "filament_tower_interface_pre_extrusion_length",
     // Ultra (H2C rack): the nozzle-change pre-cool target. The BBL H2C filament profiles in
     // this tree already carry it; without it here the loader drops it off the preset.
     "filament_pre_cooling_temperature_nc",
+    // BBS (H2C rack): hotend-change retraction (M620.11 O1 T<len>); same reason as above.
+    "filament_retract_length_nc",
+    // BBS: idle-nozzle pre-cooling / pre-heating (GCode/PreCoolingInjector); same reason as above.
+    "filament_pre_cooling_temperature", "filament_preheat_temperature_delta",
     "filament_flow_support"
     };
 
@@ -1139,6 +1147,7 @@ static std::vector<std::string> s_Preset_printer_options {
     "extruder_nozzle_stats", "machine_switch_extruder_time", "group_algo_with_time", // Ultra (dual-nozzle) grouping inputs
     "printer_extruder_variant", "master_extruder_id", "physical_extruder_map", "extruder_printable_area",
     "extruder_printable_height", "grab_length", "hotend_cooling_rate", "hotend_heating_rate", "nozzle_flush_dataset",
+    "enable_pre_heating", // BBS: idle-nozzle pre-cooling / pre-heating (GCode/PreCoolingInjector)
     "printer_technology",
     "printable_area", "bed_exclude_area","bed_custom_texture", "bed_custom_model", "gcode_flavor",
     "fan_kickstart", "fan_speedup_time", "fan_speedup_overhangs",

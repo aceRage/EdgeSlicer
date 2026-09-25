@@ -32,9 +32,7 @@
       <key>CFBundleURLSchemes</key>
       <array>
         <string>edgeslicer</string>
-        <string>edgesliceropen</string>
         <string>ultraone</string>
-        <string>snapmaker-orca</string>
       </array>
     </dict>
   </array>

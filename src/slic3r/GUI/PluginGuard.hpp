@@ -85,6 +85,18 @@ PluginSync plugin_sync_decision(bool sidecar_present,
                                 bool marker_present,
                                 bool keep_foreign);
 
+// The network plug-in's file name on this platform - the name NetworkAgent loads from
+// <data_dir>/plugins and the name the sidecar ships it under: bambu_networking.dll on Windows,
+// libbambu_networking.dylib on macOS, libbambu_networking.so on Linux.
+const char *network_library_name();
+
+// Where a released build keeps the bundled plug-in (the "sidecar"), given the folder of the
+// running executable. <exe dir>/ultranet on Windows and Linux (the AppImage's bin/ultranet);
+// Contents/Resources/ultranet inside the macOS app bundle, because Contents/MacOS may hold only
+// code - a text file there (the marker) makes the bundle unsignable.
+boost::filesystem::path ultranet_sidecar_dir(const boost::filesystem::path &exe_dir);
+// The same rule with the layout spelled out, so both can be tested on any platform.
+boost::filesystem::path ultranet_sidecar_dir(const boost::filesystem::path &exe_dir, bool macos_app_bundle);
 
 // ---------------------------------------------------------------------------------------------
 // The camera component (BambuSource), which is a different thing from the network plug-in.
@@ -135,6 +147,46 @@ CameraToolsCopy camera_tools_copy_decision(bool plugins_copy_is_stub,
 // Whether the first-run/upgrade copier may write BambuSource over `dest`. A real filter the user
 // obtained from Bambu must survive an EdgeSlicer upgrade, so the sidecar stub never replaces it.
 bool may_overwrite_bambusource(bool dest_exists, bool dest_is_real_filter);
+
+// macOS/Linux have no DllRegisterServer to look for, so there the placeholder identifies itself
+// instead: every camera module UltraNet builds for those platforms carries this string (as an
+// exported constant), and Bambu's own libBambuSource never does.
+extern const char *const kUltraNetModuleTag; // "UltraNet-module"
+
+// True when the file at `lib` contains kUltraNetModuleTag. Reads the file; never loads it. A
+// missing, unreadable or oversized file answers false.
+bool carries_ultranet_module_tag(const boost::filesystem::path &lib);
+
+// The copier's "is what is already in plugins/ a real camera component?" question, per platform:
+// a PE exporting DllRegisterServer on Windows (exports_dll_register_server, unchanged), and on
+// macOS/Linux any existing library that does not carry the UltraNet tag - i.e. Bambu's.
+bool is_real_camera_component(const boost::filesystem::path &lib);
+// Whether start-up should copy the sidecar's BambuSource over <data_dir>/plugins/BambuSource.dll.
+// BambuSource is checked on its own rather than only when the network plug-in is replaced: since
+// it carries the storage browser it can change while bambu_networking.dll stays byte-identical,
+// and a copy that failed once (the file was in use) must be retried on the next start. Never over
+// Bambu's real camera filter, and not while the user keeps a foreign plug-in on purpose.
+bool bambusource_needs_refresh(bool bundled_present,
+                               bool installed_present,
+                               bool identical,
+                               bool installed_is_real_filter,
+                               bool keep_foreign);
+
+// ---------------------------------------------------------------------------------------------
+// The Device tab's storage browser (MediaFilePanel::fetchUrl): whether to hand the tunnel library
+// the printer's LAN address (bambu:///local/<ip>...) rather than ask the network agent for a
+// cloud relay URL.
+//
+// Stock rule: the printer is in LAN-only mode or offers no remote file protocol, it offers the
+// local one, and its IP is known. A tunnel library that can only reach printers on the LAN
+// (PrinterFileSystem::TunnelIsLanOnly, EdgeSlicer's) has no other route at all, so it also takes
+// the LAN address for a cloud-bound printer - whenever the IP and the access code are both known.
+bool storage_browser_use_lan_url(bool lan_mode,
+                                 bool local_proto,
+                                 bool remote_proto,
+                                 bool has_ip,
+                                 bool has_access_code,
+                                 bool lan_only_tunnel);
 
 } } // namespace Slic3r::GUI
 

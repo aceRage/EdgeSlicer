@@ -344,6 +344,9 @@ static constexpr const char* NOZZLE_DIAMETERS_ATTR = "nozzle_diameters";
 static constexpr const char* NOZZLE_VOLUME_TYPE_ATTR = "nozzle_volume_type";
 static constexpr const char* EXTRUDER_TYPE_ATTR = "extruder_type";
 static constexpr const char* LIMIT_FILAMENT_MAP_ATTR = "limit_filament_maps";
+// EdgeSlicer: the per-plate filament arrangement the user confirmed before slicing on a Bambu
+// two-extruder printer (DualNozzleSync::Confirmation JSON). Not written into Bambu exports.
+static constexpr const char* DUAL_NOZZLE_CONFIRM_ATTR = "edgeslicer_dual_nozzle_confirm";
 static constexpr const char* PAUSE_COUNT_ATTR = "pause_count";
 static constexpr const char* FIRST_LAYER_TIME_ATTR = "first_layer_time";
 static constexpr const char* SUPPORT_MATERIAL_ON_WIPE_TOWER_ATTR = "support_material_on_wipe_tower";
@@ -2417,11 +2420,22 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 add_error("invalid plate index");
                 return false;
             }
+            // A file name from the 3MF metadata is joined to the backup folder only when it stays
+            // inside it; "../.." would otherwise point the plate at any file on the disk.
+            auto in_backup = [this](const std::string &file) -> std::string {
+                if (m_load_restore || file.empty())
+                    return file;
+                if (!untrusted::is_safe_archive_relative_path(file)) {
+                    BOOST_LOG_TRIVIAL(warning) << "3mf: ignoring plate file reference outside the archive: " << file;
+                    return std::string();
+                }
+                return m_backup_path + "/" + file;
+            };
             plate_data_list[it->first-1]->locked = it->second->locked;
             plate_data_list[it->first-1]->plate_index = it->second->plate_index-1;
             plate_data_list[it->first-1]->plate_name = it->second->plate_name;
             plate_data_list[it->first-1]->obj_inst_map = it->second->obj_inst_map;
-            plate_data_list[it->first-1]->gcode_file = (m_load_restore || it->second->gcode_file.empty()) ? it->second->gcode_file : m_backup_path + "/" + it->second->gcode_file;
+            plate_data_list[it->first-1]->gcode_file = in_backup(it->second->gcode_file);
             plate_data_list[it->first-1]->gcode_prediction = it->second->gcode_prediction;
             plate_data_list[it->first-1]->gcode_weight = it->second->gcode_weight;
             plate_data_list[it->first-1]->toolpath_outside = it->second->toolpath_outside;
@@ -2442,12 +2456,12 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             plate_data_list[it->first-1]->first_layer_time = it->second->first_layer_time;
             plate_data_list[it->first-1]->skipped_objects = it->second->skipped_objects;
             plate_data_list[it->first-1]->warnings = it->second->warnings;
-            plate_data_list[it->first-1]->thumbnail_file = (m_load_restore || it->second->thumbnail_file.empty()) ? it->second->thumbnail_file : m_backup_path + "/" + it->second->thumbnail_file;
+            plate_data_list[it->first-1]->thumbnail_file = in_backup(it->second->thumbnail_file);
             //plate_data_list[it->first-1]->pattern_file = (m_load_restore || it->second->pattern_file.empty()) ? it->second->pattern_file : m_backup_path + "/" + it->second->pattern_file;
-            plate_data_list[it->first-1]->no_light_thumbnail_file = (m_load_restore || it->second->no_light_thumbnail_file.empty()) ? it->second->no_light_thumbnail_file : m_backup_path + "/" + it->second->no_light_thumbnail_file;
-            plate_data_list[it->first-1]->top_file = (m_load_restore || it->second->top_file.empty()) ? it->second->top_file : m_backup_path + "/" + it->second->top_file;
-            plate_data_list[it->first-1]->pick_file = (m_load_restore || it->second->pick_file.empty()) ? it->second->pick_file : m_backup_path + "/" + it->second->pick_file;
-            plate_data_list[it->first-1]->pattern_bbox_file = (m_load_restore || it->second->pattern_bbox_file.empty()) ? it->second->pattern_bbox_file : m_backup_path + "/" + it->second->pattern_bbox_file;
+            plate_data_list[it->first-1]->no_light_thumbnail_file = in_backup(it->second->no_light_thumbnail_file);
+            plate_data_list[it->first-1]->top_file = in_backup(it->second->top_file);
+            plate_data_list[it->first-1]->pick_file = in_backup(it->second->pick_file);
+            plate_data_list[it->first-1]->pattern_bbox_file = in_backup(it->second->pattern_bbox_file);
             plate_data_list[it->first-1]->config = it->second->config;
 
             current_plate_data = plate_data_list[it->first - 1];
@@ -3349,6 +3363,11 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 dest_file = dest_file.substr(found + AUXILIARY_STR_LEN);
             else
                 return;
+            // zip-slip: an entry named "Auxiliaries/../../x" must not leave the temp folder.
+            if (!untrusted::is_safe_archive_relative_path(dest_file)) {
+                BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": skipping auxiliary entry with an unsafe path: " << stat.m_filename;
+                return;
+            }
 
             if (dest_file.find('/') != std::string::npos) {
                 boost::filesystem::path src_path = boost::filesystem::path(dest_file);
@@ -3373,6 +3392,10 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
     {
         if (stat.m_uncomp_size > 0) {
             std::string src_file = decode_path(stat.m_filename);
+            if (!untrusted::is_safe_archive_relative_path(src_file)) {
+                BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": skipping entry with an unsafe path: " << stat.m_filename;
+                return;
+            }
             // BBS: use backup path
             //aux directory from model
             boost::filesystem::path dest_path = boost::filesystem::path(m_backup_path + "/" + src_file);
@@ -5081,6 +5104,35 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             {
                 if (m_curr_plater)
                     m_curr_plater->limit_filament_maps = parse_int_list(value);
+            }
+            // A plate's own grouping: only "Manual" is kept (the auto modes are regrouped at slice
+            // time anyway). filament_maps is written after the mode, so it follows it.
+            else if (key == FILAMENT_MAP_MODE_ATTR)
+            {
+                if (m_curr_plater && value == "Manual")
+                    m_curr_plater->config.set_key_value("filament_map_mode", new ConfigOptionEnum<FilamentMapMode>(FilamentMapMode::fmmManual));
+            }
+            else if (key == FILAMENT_MAP_ATTR)
+            {
+                if (m_curr_plater && m_curr_plater->config.has("filament_map_mode")) {
+                    // In filament order: parse_int_list sorts and de-duplicates (it reads id sets).
+                    std::vector<int>         maps;
+                    std::vector<std::string> tokens;
+                    boost::split(tokens, value, boost::is_any_of(" ,"), boost::token_compress_on);
+                    for (const std::string &t : tokens) {
+                        if (t.empty())
+                            continue;
+                        int v = 1;
+                        try { v = boost::lexical_cast<int>(t); } catch (...) {}
+                        maps.push_back(v < 1 ? 1 : v);
+                    }
+                    m_curr_plater->config.set_key_value("filament_map", new ConfigOptionInts(maps));
+                }
+            }
+            else if (key == DUAL_NOZZLE_CONFIRM_ATTR)
+            {
+                if (m_curr_plater)
+                    m_curr_plater->dual_nozzle_confirm = value;
             }
         }
 
@@ -8651,7 +8703,16 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
 
                 // TODO: Orca: hack
                 //filament map related
-                stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << FILAMENT_MAP_MODE_ATTR << "\" " << VALUE_ATTR << "=\"" << "Auto For Flush" << "\"/>\n";
+                // A plate grouped by hand (the pre-slice confirmation on a Bambu two-extruder printer)
+                // carries its own mode and map, as Bambu Studio writes a plate's own filament_map_mode /
+                // filament_maps (bbs_3mf.cpp:8389-8418); every other plate keeps "Auto For Flush" and the
+                // project's map exactly as before.
+                // getInt(): a copied config holds the mode as ConfigOptionEnumGeneric, not ConfigOptionEnum<>.
+                const ConfigOption* plate_mode_opt = plate_data->config.option("filament_map_mode");
+                const auto*         plate_map_opt  = dynamic_cast<const ConfigOptionInts*>(plate_data->config.option("filament_map"));
+                const bool          plate_manual   = plate_mode_opt && plate_mode_opt->getInt() == int(FilamentMapMode::fmmManual) &&
+                                                  plate_map_opt && !plate_map_opt->values.empty();
+                stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << FILAMENT_MAP_MODE_ATTR << "\" " << VALUE_ATTR << "=\"" << (plate_manual ? "Manual" : "Auto For Flush") << "\"/>\n";
 
                 // filament map override global settings only when group mode overrides the global settings
                 stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << FILAMENT_MAP_ATTR << "\" " << VALUE_ATTR << "=\"";
@@ -8659,7 +8720,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 // Ultra (Phase 8): write the real per-filament nozzle map (1-based) when present, so a saved
                 // project keeps the dual-nozzle grouping. Falls back to 1 (single nozzle) per filament when
                 // filament_map is absent/short (classic machines, or not yet grouped).
-                const auto* fmap_opt = dynamic_cast<const ConfigOptionInts*>(config.option("filament_map"));
+                const auto* fmap_opt = plate_manual ? plate_map_opt : dynamic_cast<const ConfigOptionInts*>(config.option("filament_map"));
                 for (int i = 0; i < filaments_count; ++i) {
                     int v = (fmap_opt && i < (int)fmap_opt->values.size() && fmap_opt->values[i] >= 1) ? fmap_opt->values[i] : 1;
                     stream << v;
@@ -8667,6 +8728,9 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                         stream << " ";
                 }
                 stream << "\"/>\n";
+
+                if (!m_bambu_compat && !plate_data->dual_nozzle_confirm.empty())
+                    stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << DUAL_NOZZLE_CONFIRM_ATTR << "\" " << VALUE_ATTR << "=\"" << xml_escape(plate_data->dual_nozzle_confirm) << "\"/>\n";
 
                 if (save_gcode)
                     stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << GCODE_FILE_ATTR << "\" " << VALUE_ATTR << "=\"" << std::boolalpha << xml_escape(plate_data->gcode_file) << "\"/>\n";

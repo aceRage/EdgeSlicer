@@ -9,6 +9,7 @@
 #include "../DeviceManager.hpp"
 #include "slic3r/GUI/Event.hpp"
 #include "slic3r/GUI/AmsMappingPopup.hpp"
+#include "AMSDualView.hpp"
 #include <wx/simplebook.h>
 #include <wx/hyperlink.h>
 #include <wx/animate.h>
@@ -19,11 +20,15 @@ namespace Slic3r { namespace GUI {
 
 //Previous definitions
 class uiAmsPercentHumidityDryPopup;
+struct uiAmsHumidityInfo;
+class AMSDryCtrlDialog;
 
 class AMSControl : public wxSimplebook
 {
 public:
     AMSControl(wxWindow *parent, wxWindowID id = wxID_ANY, const wxPoint &pos = wxDefaultPosition, const wxSize &size = wxDefaultSize);
+
+    ~AMSControl();
 
     void on_retry();
     void init_scaled_buttons();
@@ -44,7 +49,6 @@ protected:
 
     AmsIntroducePopup m_ams_introduce_popup;
 
-    wxSimplebook *m_simplebook_right       = {nullptr};
     wxSimplebook *m_simplebook_calibration = {nullptr};
     wxSimplebook *m_simplebook_amsprvs    = {nullptr};
     wxSimplebook *m_simplebook_ams         = {nullptr};
@@ -53,8 +57,6 @@ protected:
 
     wxSimplebook *m_simplebook_bottom      = {nullptr};
 
-    wxStaticText *m_tip_right_top            = {nullptr};
-    Label        *m_tip_load_info            = {nullptr};
     wxStaticText *m_text_calibration_percent = {nullptr};
     wxWindow *    m_none_ams_panel           = {nullptr};
     wxWindow*     m_panel_prv                = {nullptr};
@@ -74,12 +76,7 @@ protected:
     StaticBox * m_panel_can       = {nullptr};
     wxBoxSizer* m_sizer_prv       = {nullptr};
     wxBoxSizer *m_sizer_cans      = {nullptr};
-    wxBoxSizer *m_sizer_right_tip = {nullptr};
     wxBoxSizer* m_sizer_ams_tips  = {nullptr};
-
-    ::StepIndicator *m_filament_load_step   = {nullptr};
-    ::StepIndicator *m_filament_unload_step = {nullptr};
-    ::StepIndicator *m_filament_vt_load_step = {nullptr};
 
     Button *m_button_extruder_feed = {nullptr};
     Button *m_button_extruder_back = {nullptr};
@@ -90,8 +87,6 @@ protected:
     ScalableBitmap m_button_ams_setting_normal;
     ScalableBitmap m_button_ams_setting_hover;
     ScalableBitmap m_button_ams_setting_press;
-    Button *m_button_guide = {nullptr};
-    Button *m_button_retry = {nullptr};
     wxWindow* m_button_area = {nullptr};
 
     wxHyperlinkCtrl *m_hyperlink = {nullptr};
@@ -100,6 +95,16 @@ protected:
 
     std::string m_last_ams_id;
     std::string m_last_tray_id;
+
+    /* two-extruder layout (H2D, H2D Pro, H2C, X2D): page 2 of this book */
+    AMSDualView*      m_dual_view{nullptr};
+    bool              m_dual_mode{false};
+    MachineObject*    m_obj{nullptr};
+    AMSDryCtrlDialog* m_dry_dlg{nullptr};
+    MachineObject*    m_dry_dlg_obj{nullptr};
+
+    void show_humidity_popup(const uiAmsHumidityInfo& info);
+    bool try_open_dry_dialog(const std::string& ams_id);
 
 public:
     std::string GetCurentAms();
@@ -160,6 +165,16 @@ public:
     void update_vams_kn_value(AmsTray tray, MachineObject* obj);
 
     void reset_vams();
+
+    // The printer this control shows; the drying dialog and the dual layout read it.
+    void SetMachine(MachineObject* obj) { m_obj = obj; }
+    // Two-extruder Bambu printers get the per-extruder layout; everything else keeps the classic one.
+    void SetDualMode(bool dual);
+    bool IsDualMode() const { return m_dual_mode; }
+    AMSDualView* GetDualView() const { return m_dual_view; }
+    void UpdateDual(MachineObject* obj);
+    // Keep an open AMS Dryness Control dialog in step with the printer's reports.
+    void UpdateDryDialog(MachineObject* obj);
     void post_event(wxEvent&& event);
 
     virtual bool Enable(bool enable = true);

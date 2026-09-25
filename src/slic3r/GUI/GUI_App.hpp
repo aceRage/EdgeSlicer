@@ -344,6 +344,13 @@ private:
     // login widget
     ZUserLogin*     login_dlg { nullptr };
     SMUserLogin*    sm_login_dlg{ nullptr };
+    // Startup sign-in (sm_start_silent_login): a never-shown SMUserLogin, gone once it reports.
+    SMUserLogin*    sm_silent_login_dlg{ nullptr };
+    unsigned        m_sm_silent_gen{ 0 };         // bumped on every start/cancel; stale answers are dropped
+    bool            m_sm_silent_active{ false };  // from start until the outcome is logged
+    void            sm_on_silent_login_result(unsigned gen, const SMUserLogin::SilentResult& r);
+    void            sm_finish_silent_login(const std::string& log_line);
+    void            sm_teardown_silent_login_dlg();
 
 
 public:
@@ -655,10 +662,23 @@ private:
     void            sm_request_login(bool show_user_info = false);
     void            sm_ShowUserLogin(bool show  =  true);
     void            sm_request_user_logout();
+    // Sign back in from the saved id.snapmaker.com session without showing anything; ends quietly
+    // signed out if there is none. Called once, a moment after startup (post_init).
+    void            sm_start_silent_login();
+    // Stops an attempt in flight (the user opened the sign-in dialog, signed out, or the app closes).
+    void            sm_cancel_silent_login(const std::string& reason);
+    bool            sm_silent_login_active() const { return m_sm_silent_active; }
   
     void            request_user_logout();
     int             request_user_unbind(std::string dev_id);
     std::string     handle_web_request(std::string cmd);
+    // Ultra: the entry point for script messages from a web view. page_url is the view's current
+    // URL. Our own pages (the page server, the installed resources/web pages) get every command;
+    // any other page (a vendor site, a printer's web UI, wherever a link led) only the harmless
+    // ones (open an http(s) link, forward a shortcut key).
+    std::string     handle_web_request_from(const std::string& page_url, std::string cmd);
+    // True for http://127.0.0.1:<page server port>/... and file:// pages inside resources/web.
+    bool            is_own_page_url(const std::string& url) const;
     void            request_model_download(wxString url);
     void            download_project(std::string project_id);
     void            request_project_download(std::string project_id);

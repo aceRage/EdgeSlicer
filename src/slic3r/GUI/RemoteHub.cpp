@@ -10,6 +10,7 @@
 #include "HMS.hpp"
 #include "libslic3r/Utils.hpp"
 #include "slic3r/Utils/Http.hpp"
+#include "slic3r/Utils/ServerLifetime.hpp"
 
 #include <boost/asio.hpp>
 #include <boost/beast/core/detail/base64.hpp>
@@ -90,6 +91,9 @@ static const char* const GO2RTC_WS   = "/api/ws";
 static const size_t      MAX_API_BODY       = 64 * 1024;
 static const uint64_t    MAX_UPLOAD         = 2ull * 1024 * 1024 * 1024;
 static const int         IDLE_EXIT_SECONDS  = 60;
+// How long shutdown() waits for connection and helper threads once it has shut their sockets.
+// Past it the server is left alive for them rather than destroyed underneath them.
+static const int         SHUTDOWN_DRAIN_MS  = 3000;
 // Where the remote-access card sends people who have no Tailscale yet, and where the one error
 // nobody can fix from this PC (tailnet-wide HTTPS certificates) is actually switched on.
 static const char* const TAILSCALE_DOWNLOAD_URL  = "https://tailscale.com/download/windows";
@@ -132,6 +136,9 @@ std::string instances_dir() { return (fs::path(hub_dir()) / "instances").string(
 std::string uploads_dir()   { return (fs::path(hub_dir()) / "uploads").string(); }
 std::string saves_dir()     { return (fs::path(hub_dir()) / "saves").string(); }
 static std::string hub_json_path()     { return (fs::path(hub_dir()) / "hub.json").string(); }
+// Left by a clean quit next to where hub.json was: why the hub quit ("tray", "request", "idle"), so
+// a slicer that finds no hub can say which it was. Removed again when a hub starts.
+static std::string last_exit_json_path() { return (fs::path(hub_dir()) / "last_exit.json").string(); }
 static std::string streams_json_path() { return (fs::path(hub_dir()) / "streams.json").string(); }
 static std::string settings_json_path() { return (fs::path(hub_dir()) / "settings.json").string(); } // survives a hub quit (hub.json does not)
 static std::string events_json_path()   { return (fs::path(hub_dir()) / "events.json").string(); }   // the printer-event ring, likewise
@@ -985,6 +992,118 @@ Testing::HubIdentity Testing::identity_from_settings(const std::string& settings
     return id;
 }
 
+// ---- signing with the hub identity (the push forwarder's X-Hub-Sig) ---------------------------
+// Pure Ed25519 through the same OpenSSL EVP_PKEY_ED25519 the identity is minted with: no new
+// dependency, and EVP_DigestSign with a null digest is exactly RFC 8032's one-shot signature.
+
+static bool hex_to_bytes(const std::string& hex, std::vector<unsigned char>& out)
+{
+    out.clear();
+    if (hex.size() % 2) return false;
+    out.reserve(hex.size() / 2);
+    for (size_t i = 0; i < hex.size(); i += 2) {
+        const int hi = hex_nibble(hex[i]), lo = hex_nibble(hex[i + 1]);
+        if (hi < 0 || lo < 0) { out.clear(); return false; }
+        out.push_back((unsigned char) ((hi << 4) | lo));
+    }
+    return true;
+}
+
+static const char* const SIG_B64URL = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+
+static std::string sig_b64url_encode(const unsigned char* data, size_t len)
+{
+    std::string out;
+    out.reserve((len + 2) / 3 * 4);
+    for (size_t i = 0; i < len; i += 3) {
+        const unsigned v = (unsigned(data[i]) << 16) | (i + 1 < len ? unsigned(data[i + 1]) << 8 : 0u) |
+                           (i + 2 < len ? unsigned(data[i + 2]) : 0u);
+        out += SIG_B64URL[(v >> 18) & 63];
+        out += SIG_B64URL[(v >> 12) & 63];
+        if (i + 1 < len) out += SIG_B64URL[(v >> 6) & 63];
+        if (i + 2 < len) out += SIG_B64URL[v & 63];
+    }
+    return out;
+}
+
+// base64url with the padding tolerated (and '+' '/' as well, so a standard-alphabet signature
+// still decodes). Anything else is refused rather than skipped.
+static bool sig_b64url_decode(const std::string& in, std::vector<unsigned char>& out)
+{
+    out.clear();
+    unsigned acc  = 0;
+    int      bits = 0;
+    for (char c : in) {
+        int v;
+        if (c >= 'A' && c <= 'Z') v = c - 'A';
+        else if (c >= 'a' && c <= 'z') v = c - 'a' + 26;
+        else if (c >= '0' && c <= '9') v = c - '0' + 52;
+        else if (c == '-' || c == '+') v = 62;
+        else if (c == '_' || c == '/') v = 63;
+        else if (c == '=') break;
+        else return false;
+        acc = ((acc << 6) | (unsigned) v) & 0xffffff;
+        bits += 6;
+        if (bits >= 8) { bits -= 8; out.push_back((unsigned char) ((acc >> bits) & 0xff)); }
+    }
+    return true;
+}
+
+Testing::HubIdentity Testing::identity_from_seed_hex(const std::string& private_hex)
+{
+    HubIdentity                id;
+    std::vector<unsigned char> seed;
+    if (private_hex.size() != 64 || !hex_to_bytes(private_hex, seed)) return id;
+    EVP_PKEY* pkey = EVP_PKEY_new_raw_private_key(EVP_PKEY_ED25519, nullptr, seed.data(), seed.size());
+    OPENSSL_cleanse(seed.data(), seed.size());
+    if (!pkey) return id;
+    unsigned char pub[32] = {};
+    size_t        publen  = sizeof(pub);
+    if (EVP_PKEY_get_raw_public_key(pkey, pub, &publen) == 1 && publen == sizeof(pub)) {
+        id.public_hex  = to_hex(pub, publen);
+        id.private_hex = lower(private_hex);
+        id.hubid       = hubid_from_public_key(std::vector<unsigned char>(pub, pub + publen));
+    }
+    EVP_PKEY_free(pkey);
+    return id;
+}
+
+bool identity_sign(const Testing::HubIdentity& id, const std::string& message, std::string& out_sig_b64url)
+{
+    out_sig_b64url.clear();
+    std::vector<unsigned char> seed;
+    if (id.private_hex.size() != 64 || !hex_to_bytes(id.private_hex, seed)) return false;
+    EVP_PKEY* pkey = EVP_PKEY_new_raw_private_key(EVP_PKEY_ED25519, nullptr, seed.data(), seed.size());
+    OPENSSL_cleanse(seed.data(), seed.size());
+    if (!pkey) return false;
+    unsigned char sig[64] = {};
+    size_t        siglen  = sizeof(sig);
+    EVP_MD_CTX*   md      = EVP_MD_CTX_new();
+    const bool    ok      = md && EVP_DigestSignInit(md, nullptr, nullptr, nullptr, pkey) == 1 &&
+                   EVP_DigestSign(md, sig, &siglen, (const unsigned char*) message.data(), message.size()) == 1 &&
+                   siglen == sizeof(sig);
+    if (md) EVP_MD_CTX_free(md);
+    EVP_PKEY_free(pkey);
+    if (!ok) return false;
+    out_sig_b64url = sig_b64url_encode(sig, siglen);
+    return true;
+}
+
+bool identity_verify(const std::string& public_hex, const std::string& message, const std::string& sig_b64url)
+{
+    std::vector<unsigned char> pub, sig;
+    if (public_hex.size() != 64 || !hex_to_bytes(public_hex, pub)) return false;
+    if (!sig_b64url_decode(sig_b64url, sig) || sig.size() != 64) return false;
+    EVP_PKEY* pkey = EVP_PKEY_new_raw_public_key(EVP_PKEY_ED25519, nullptr, pub.data(), pub.size());
+    if (!pkey) return false;
+    EVP_MD_CTX* md = EVP_MD_CTX_new();
+    const bool  ok = md && EVP_DigestVerifyInit(md, nullptr, nullptr, nullptr, pkey) == 1 &&
+                    EVP_DigestVerify(md, sig.data(), sig.size(), (const unsigned char*) message.data(), message.size()) == 1;
+    if (md) EVP_MD_CTX_free(md);
+    EVP_PKEY_free(pkey);
+    return ok;
+}
+
 // ---- the loopback trust of Tailscale Serve's headers (design section 6.6) ---------------------
 // Tailscale Serve terminates on loopback and sets Tailscale-User-Login / X-Forwarded-Proto,
 // stripping whatever a client tried to send. That is the whole basis for trusting them - so they
@@ -1802,8 +1921,20 @@ public:
 
     bool start();                 // state, go2rtc, relay, listener, hub.json
     void loop(bool idle_exit);    // until request_quit(); with idle_exit also once nobody needs us
-    void shutdown();
-    void request_quit() { m_quit = true; }
+    // Closes the listeners, ends every connection and waits (bounded) for every thread this
+    // server started. False when some are still running: the caller must then not destroy the
+    // server, because those threads still use it.
+    bool shutdown();
+    // A detached helper thread that shutdown() knows about and waits for. False once shutting down.
+    bool spawn(std::function<void()> fn) { return m_life.spawn(std::move(fn)); }
+    // `reason` ends up in last_exit.json ("tray", "request", "idle"); the first one given wins,
+    // so the OnExit() that follows a tray quit does not overwrite it.
+    void request_quit(const char* reason = nullptr)
+    {
+        const char* none = nullptr;
+        if (reason != nullptr) m_quit_reason.compare_exchange_strong(none, reason);
+        m_quit = true;
+    }
 
     struct Snapshot
     {
@@ -1901,6 +2032,7 @@ private:
     FirewallState  firewall_state(bool refresh);       // cached; the query runs on a detached thread
     FirewallState  lan_firewall_state(bool refresh);   // same, but for the phone/LAN listener port
     TailscaleState remote_state(bool refresh);         // cached ~15 s; runs the tailscale CLI off the lock
+    TailscaleState remote_state_nowait();              // /hub/info's: never waits on the CLI once there is an answer
     bool  set_remote(bool on, std::string& error);     // tailscale serve on/off for this hub
     void  remote_logins(const std::string& add, const std::string& remove);
     bool  login_allowed(const std::string& login);
@@ -1916,7 +2048,11 @@ private:
     bool                           m_phone { false };
     bool                           m_lan { false };
     int                            m_port { 0 };
-    asio::io_context               m_ioc;
+    // The io_context every listener and connection socket belongs to, shared with the threads
+    // that use them, and the count of those threads - so shutdown() can end them and wait, and a
+    // socket can never outlive its io_context (crash a2375b06). Declared before the acceptors so
+    // they are destroyed first.
+    ServerLifetime                 m_life;
     std::shared_ptr<tcp::acceptor> m_acceptor;
     // The control plane has its own acceptor on an ephemeral loopback port, recorded in hub.json
     // as admin_port. Nothing else binds it, so no tunnel (Tailscale Serve, zrok, anything a user
@@ -1945,6 +2081,7 @@ private:
     std::atomic<bool>              m_fw_busy { false };
     FirewallState                  m_lan_fw;                     // last lan_firewall_state() (the phone/LAN listener port)
     std::atomic<bool>              m_lan_fw_busy { false };
+    std::atomic<bool>              m_ts_busy { false };          // a remote_state_nowait() refresh is running
     // Set by bind() when it had to step past HUB_PORT: what (if anything) was found holding it,
     // for the status JSON's "port_note" and the hub page's warning. Empty once the hub is on
     // HUB_PORT itself.
@@ -1952,6 +2089,7 @@ private:
     long                           m_go2rtc_pid { 0 };
     void*                          m_job { nullptr };
     std::atomic<bool>              m_quit { false };
+    std::atomic<const char*>       m_quit_reason { nullptr }; // a string literal, see request_quit()
     // Printer events, newest last. The hub owns the sequence, so ids keep increasing across every
     // instance that reports and across a restart of the hub itself.
     std::deque<json>               m_events;
@@ -2770,7 +2908,7 @@ bool HubServer::bind(bool lan)
     if (old) { boost::system::error_code ig; old->close(ig); } // releases the port; its accept loop exits
 
     int  port = HUB_PORT;
-    auto acceptor = try_bind_range(m_ioc, lan ? asio::ip::address_v4::any() : asio::ip::address_v4::loopback(), &port);
+    auto acceptor = try_bind_range(m_life.io(), lan ? asio::ip::address_v4::any() : asio::ip::address_v4::loopback(), &port);
     if (!acceptor) {
         BOOST_LOG_TRIVIAL(error) << "RemoteHub: no free port in " << HUB_PORT << "-" << (HUB_PORT + 19)
                                  << " for " << (lan ? "0.0.0.0" : "127.0.0.1") << " (another hub is probably already running)";
@@ -2778,13 +2916,13 @@ bool HubServer::bind(bool lan)
         // own address and port, if there was one.
         if (had_old) {
             int fallback_port = old_port;
-            auto fallback = try_bind_range(m_ioc, old_lan ? asio::ip::address_v4::any() : asio::ip::address_v4::loopback(), &fallback_port);
+            auto fallback = try_bind_range(m_life.io(), old_lan ? asio::ip::address_v4::any() : asio::ip::address_v4::loopback(), &fallback_port);
             if (fallback) {
                 std::lock_guard<std::mutex> lock(m_mutex);
                 m_acceptor = fallback;
                 m_lan      = old_lan;
                 m_port     = fallback_port;
-                std::thread([this, fallback]() { accept_loop(fallback, false); }).detach();
+                m_life.spawn([this, fallback]() { accept_loop(fallback, false); });
                 BOOST_LOG_TRIVIAL(warning) << "RemoteHub: could not switch listener mode; restored "
                                            << (old_lan ? "0.0.0.0" : "127.0.0.1") << ":" << fallback_port;
             } else {
@@ -2819,14 +2957,14 @@ bool HubServer::bind(bool lan)
         m_port_note_holder.clear();
         was_remote_on      = m_remote_on;
     }
-    std::thread([this, acceptor]() { accept_loop(acceptor, false); }).detach();
+    m_life.spawn([this, acceptor]() { accept_loop(acceptor, false); });
     if (fell_back)
-        std::thread([this]() {
+        m_life.spawn([this]() {
             const std::string holder = port_holder_description(HUB_PORT);
             if (!holder.empty()) BOOST_LOG_TRIVIAL(warning) << "RemoteHub: port " << HUB_PORT << " is held by " << holder;
             std::lock_guard<std::mutex> lock(m_mutex);
             if (m_port != HUB_PORT) m_port_note_holder = holder;
-        }).detach();
+        });
     BOOST_LOG_TRIVIAL(info) << "RemoteHub: listening on " << (lan ? "0.0.0.0" : "127.0.0.1") << ":" << port;
     // Tailscale Serve's forwarding target is Tailscale's own persisted config, not ours: if remote
     // access was already on and the listener just moved port (this bind, or the very first one),
@@ -2835,7 +2973,7 @@ bool HubServer::bind(bool lan)
     // `tailscale serve` command with the port current right now, which is exactly what re-pointing
     // it means; it is a no-op for the tailnet config itself when the target already matches.
     if (was_remote_on) {
-        std::thread([this]() {
+        m_life.spawn([this]() {
             TailscaleState t = remote_state(true);
             int            p;
             {
@@ -2848,7 +2986,7 @@ bool HubServer::bind(bool lan)
                 if (!err.empty()) BOOST_LOG_TRIVIAL(warning) << "RemoteHub: could not re-point Tailscale Serve at the new port: " << err;
                 else BOOST_LOG_TRIVIAL(info) << "RemoteHub: re-pointed Tailscale Serve at 127.0.0.1:" << p;
             }
-        }).detach();
+        });
     }
     return true;
 }
@@ -2858,7 +2996,7 @@ bool HubServer::bind(bool lan)
 // /relay/h264 URLs registered in go2rtc stay valid when phone access flips the main listener.
 bool HubServer::bind_admin()
 {
-    auto acceptor = std::make_shared<tcp::acceptor>(m_ioc);
+    auto acceptor = std::make_shared<tcp::acceptor>(m_life.io());
     boost::system::error_code ec;
     acceptor->open(tcp::v4(), ec);
     if (ec) return false;
@@ -2876,7 +3014,7 @@ bool HubServer::bind_admin()
         m_admin_acceptor = acceptor;
         m_admin_port     = (int) acceptor->local_endpoint().port();
     }
-    std::thread([this, acceptor]() { accept_loop(acceptor, true); }).detach();
+    m_life.spawn([this, acceptor]() { accept_loop(acceptor, true); });
     BOOST_LOG_TRIVIAL(info) << "RemoteHub: control plane on 127.0.0.1:" << m_admin_port;
     return true;
 }
@@ -2884,12 +3022,15 @@ bool HubServer::bind_admin()
 void HubServer::accept_loop(std::shared_ptr<tcp::acceptor> acceptor, bool admin)
 {
     for (;;) {
-        auto sock = std::make_unique<tcp::socket>(m_ioc);
+        auto sock = std::make_unique<tcp::socket>(m_life.io());
         boost::system::error_code ec;
         acceptor->accept(*sock, ec);
         if (ec) break; // closed by a rebind or at shutdown
         tcp::socket* raw = sock.release();
-        std::thread([this, raw, admin]() { serve(std::unique_ptr<tcp::socket>(raw), admin); }).detach();
+        if (!m_life.spawn([this, raw, admin]() { serve(std::unique_ptr<tcp::socket>(raw), admin); })) {
+            delete raw; // shutting down: never started, so still ours (this thread keeps the io_context alive)
+            break;
+        }
     }
 }
 
@@ -3023,7 +3164,7 @@ FirewallState HubServer::firewall_state(bool refresh)
         if (!refresh && m_fw.checked_at && (long long) std::time(nullptr) - m_fw.checked_at < 300) return m_fw;
     }
     if (port > 0 && !m_fw_busy.exchange(true)) {
-        std::thread([this, port]() {
+        const bool started = m_life.spawn([this, port]() {
             FirewallState fw = firewall_query_go2rtc(go2rtc_exe_path(), port);
             {
                 std::lock_guard<std::mutex> lock(m_mutex);
@@ -3033,7 +3174,8 @@ FirewallState HubServer::firewall_state(bool refresh)
                 BOOST_LOG_TRIVIAL(info) << "RemoteHub: Windows Firewall for go2rtc.exe: " << fw.state << " (" << fw.note
                                          << (fw.command.empty() ? "" : " " + fw.command) << ")";
             m_fw_busy = false;
-        }).detach();
+        });
+        if (!started) m_fw_busy = false;
     }
     std::lock_guard<std::mutex> lock(m_mutex);
     return m_fw;
@@ -3054,7 +3196,7 @@ FirewallState HubServer::lan_firewall_state(bool refresh)
         if (!refresh && m_lan_fw.checked_at && (long long) std::time(nullptr) - m_lan_fw.checked_at < 300) return m_lan_fw;
     }
     if (on && !m_lan_fw_busy.exchange(true)) {
-        std::thread([this, port]() {
+        const bool started = m_life.spawn([this, port]() {
             const std::string exe = current_exe();
             FirewallState      fw = firewall_query(exe, port, "EdgeSlicer.exe",
                 "netsh advfirewall firewall add rule name=\"EdgeSlicer\" dir=in action=allow program=\"" + exe +
@@ -3068,7 +3210,8 @@ FirewallState HubServer::lan_firewall_state(bool refresh)
                 BOOST_LOG_TRIVIAL(info) << "RemoteHub: Windows Firewall for the phone/LAN port " << port << ": " << fw.state << " (" << fw.note
                                          << (fw.command.empty() ? "" : " " + fw.command) << ")";
             m_lan_fw_busy = false;
-        }).detach();
+        });
+        if (!started) m_lan_fw_busy = false;
     }
     std::lock_guard<std::mutex> lock(m_mutex);
     return m_lan_fw;
@@ -3458,6 +3601,31 @@ TailscaleState HubServer::remote_state(bool refresh)
     return m_ts;
 }
 
+// Stale-while-revalidate: with an answer already cached, a stale one is returned at once and one
+// refresh runs on a detached thread (like firewall_state()); only the very first call, with
+// nothing cached yet, waits for the CLI.
+TailscaleState HubServer::remote_state_nowait()
+{
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (m_ts.checked_at) {
+            if ((long long) std::time(nullptr) - m_ts.checked_at >= 15 && !m_ts_busy.exchange(true)) {
+                const bool started = m_life.spawn([this]() {
+                    TailscaleState t = tailscale_query();
+                    {
+                        std::lock_guard<std::mutex> lock(m_mutex);
+                        m_ts = t;
+                    }
+                    m_ts_busy = false;
+                });
+                if (!started) m_ts_busy = false;
+            }
+            return m_ts;
+        }
+    }
+    return remote_state(false);
+}
+
 // The remote-access card's whole content, in the shape the page draws it. The six states and
 // their wording come from Testing::classify_remote_access() so that nothing here and nothing in
 // hub.html carries a second copy of a sentence; the older flat booleans stay alongside because the
@@ -3603,7 +3771,11 @@ bool HubServer::instance_quit(long pid, bool discard) { return instance_post(pid
 void HubServer::handle_hub(tcp::socket& client, Request& r)
 {
     if (r.path == "/hub/info" && r.method == "GET") {
-        remote_state(false);
+        // Never the blocking remote_state(false) here: every slicer's "is the hub there?" probe
+        // lands on this route with a short timeout, and a stale cache used to make it wait for two
+        // tailscale CLI runs (up to 15 s each) - long enough for the probe to give up and report
+        // a running hub as gone (the Home tab's false "not running", 2026-09-23).
+        remote_state_nowait();
         respond_json(client, 200, info_json().dump());
     } else if (r.path == "/hub/remote" && r.method == "POST") {
         // ?on=1|0 turns Tailscale Serve for this hub on or off; ?add= / ?remove= edit the allow-list.
@@ -3807,6 +3979,18 @@ void HubServer::handle_hub(tcp::socket& client, Request& r)
         const auto res = AppPush::test();
         write_hub_json(); // a test can prune a device the platform says is gone
         respond_json(client, res.first, res.second);
+    } else if (r.path == "/hub/apppush/hosted/check" && r.method == "POST") {
+        // The hub page's "Check": /healthz on the push service and, when asked, /v1/quota (which
+        // also registers this hub on first use) - synchronously, somebody is watching for it.
+        std::string body;
+        if (!read_small_body(client, r, body, 4 * 1024)) { respond_json(client, 413, json_error("that is too large")); return; }
+        const auto res = AppPush::hosted_check(body);
+        respond_json(client, res.first, res.second);
+    } else if (r.path == "/hub/apppush/hosted/unregister" && r.method == "POST") {
+        // The push service forgets this hub's id, key and counters. It is registered again by the
+        // next push, so this is "forget me now", not an off switch (that is the mode).
+        const auto res = AppPush::hosted_unregister();
+        respond_json(client, res.first, res.second);
     } else if (r.path == "/hub/apppush/debug" && r.method == "POST") {
         // Only answers at all with SNORCA_DEBUG_ROUTES=1 (AppPush::debug_op checks).
         std::string body;
@@ -3815,7 +3999,7 @@ void HubServer::handle_hub(tcp::socket& client, Request& r)
         respond_json(client, res.first, res.second);
     } else if (r.path == "/hub/quit" && r.method == "POST") {
         respond_json(client, 200, "{\"ok\":true}");
-        m_quit = true;
+        request_quit("request");
     } else if (r.path.compare(0, 15, "/hub/instances/") == 0 && r.method == "POST") {
         // /hub/instances/<pid>/window?show=1|0, /hub/instances/<pid>/quit[?discard=1] and
         // /hub/instances/<pid>/attention/clear (the hub page's Dismiss)
@@ -4214,6 +4398,9 @@ void HubServer::serve(std::unique_ptr<tcp::socket> owner, bool admin)
     static ConnCount s_main, s_admin;
     ConnGuard        guard(admin ? s_admin : s_main, admin ? MAX_ADMIN_CONNECTIONS : MAX_CONNECTIONS);
     tcp::socket&     client = *owner;
+    // shutdown() ends this connection through here: a long-lived tunnel (a camera WebSocket on
+    // /api/ws) or a stream would otherwise keep this thread - and its socket - past the server.
+    ServerLifetime::Tracked tracked(m_life, client);
     try {
         boost::system::error_code ec;
         const auto peer = client.remote_endpoint(ec).address();
@@ -4397,6 +4584,10 @@ void HubServer::serve(std::unique_ptr<tcp::socket> owner, bool admin)
 bool HubServer::start()
 {
     ensure_dirs();
+    {
+        boost::system::error_code ig;
+        fs::remove(last_exit_json_path(), ig); // describes a hub that is no longer the latest
+    }
     // Settings from the last run, unless the caller decided them.
     try {
         json j = json::parse(read_file(hub_json_path()));
@@ -4480,6 +4671,9 @@ bool HubServer::start()
     // Web Push before the relay worker: RemoteNotify::deliver() asks it whether any phone is
     // subscribed before deciding there is nothing to queue.
     WebPush::start(webpush_saved); // mints the VAPID key pair the first time this data dir runs
+    // The identity signs every request to the hosted push service; handed over before start() so
+    // the very first push can be signed. Only AppPush's memory holds the private half.
+    AppPush::set_identity(m_identity.hubid, m_identity.public_hex, m_identity.private_hex);
     AppPush::start(apppush_saved);  // reads the .p8 and the service account, if either is set
     RemoteNotify::start(notify_saved); // the relay worker; deliver() is a no-op until it has one
 
@@ -4527,20 +4721,38 @@ void HubServer::loop(bool idle_exit)
         if (busy) idle_since = now;
         else if (now - idle_since > std::chrono::seconds(IDLE_EXIT_SECONDS)) {
             BOOST_LOG_TRIVIAL(info) << "RemoteHub: idle (phone access off, no slicer running), exiting";
+            request_quit("idle");
             break;
         }
     }
 }
 
-void HubServer::shutdown()
+bool HubServer::shutdown()
 {
     {
+        // The exit note first, then hub.json: a slicer that finds hub.json gone must find the note.
+        const char* reason = m_quit_reason.load();
+        json        note;
+        note["pid"]    = current_pid();
+        note["reason"] = reason ? reason : "exit";
+        note["at"]     = (long long) std::time(nullptr);
+        write_file(last_exit_json_path(), note.dump());
+        BOOST_LOG_TRIVIAL(info) << "RemoteHub: shutting down (" << (reason ? reason : "exit") << ")";
         boost::system::error_code ig;
         fs::remove(hub_json_path(), ig);
         std::lock_guard<std::mutex> lock(m_mutex);
         if (m_acceptor) m_acceptor->close(ig);
         if (m_admin_acceptor) m_admin_acceptor->close(ig);
     }
+    // The accept loops end on the closed acceptors; every open connection is shut down so its
+    // blocking read returns, and then we wait for all of those threads - and the helper threads
+    // (firewall, Tailscale) - to be gone before anything they use is destroyed. Not under m_mutex:
+    // the connections take it. Crash a2375b06 was a tunnel thread destroying its socket after
+    // HubApp had already destroyed this server, and the io_context with it.
+    const bool drained = m_life.stop(std::chrono::milliseconds(SHUTDOWN_DRAIN_MS));
+    if (!drained)
+        BOOST_LOG_TRIVIAL(warning) << "RemoteHub: " << m_life.running() << " connection/helper thread(s) still running after "
+                                   << SHUTDOWN_DRAIN_MS << " ms; the server is left in place for them";
 #ifndef _WIN32
     if (m_go2rtc_pid > 0) ::kill((pid_t) m_go2rtc_pid, SIGTERM);
 #endif
@@ -4551,6 +4763,7 @@ void HubServer::shutdown()
     RemoteNotify::stop(); // let an in-flight relay send finish, then join the worker
     // On Windows the kill-on-close job object takes go2rtc down with us.
     flush_logs();
+    return drained;
 }
 
 // ------------------------------------------------------------ tray icon ----
@@ -4585,11 +4798,11 @@ public:
             if (n < 0 || n >= (int) m_menu_pids.size()) return;
             const long pid = m_menu_pids[n];
             HubServer* s   = &m_server;
-            // HTTP: never on the tray's (GUI) thread.
-            std::thread([s, pid, what]() {
+            // HTTP: never on the tray's (GUI) thread. Counted by the server, which waits for it.
+            s->spawn([s, pid, what]() {
                 if (what == 2) s->instance_quit(pid, false);
                 else           s->instance_window(pid, what == 0);
-            }).detach();
+            });
         }, ID_INST_FIRST, ID_INST_LAST);
         Bind(wxEVT_MENU, [this](wxCommandEvent&) { m_on_quit(); }, ID_QUIT);
         Bind(wxEVT_TASKBAR_LEFT_DCLICK, [this](wxTaskBarIconEvent&) { open_page(); });
@@ -4682,7 +4895,7 @@ private:
 class HubApp : public wxApp
 {
 public:
-    HubApp(std::string token, bool phone) : m_server(std::move(token), phone) {}
+    HubApp(std::string token, bool phone) : m_owned(new HubServer(std::move(token), phone)), m_server(*m_owned) {}
 
     bool OnInit() override
     {
@@ -4693,7 +4906,7 @@ public:
             BOOST_LOG_TRIVIAL(error) << "RemoteHub: could not start the listener";
             return false;
         }
-        m_icon = new HubTaskBarIcon(m_server, [this]() { m_server.request_quit(); });
+        m_icon = new HubTaskBarIcon(m_server, [this]() { m_server.request_quit("tray"); });
         wxIcon icon(wxString::FromUTF8(Slic3r::var("Snapmaker_Orca.ico")), wxBITMAP_TYPE_ICO);
         if (!icon.IsOk()) icon = wxIcon(wxString::FromUTF8(Slic3r::var("Snapmaker_Orca_128px.png")), wxBITMAP_TYPE_PNG);
         m_icon->set_icon(icon);
@@ -4720,14 +4933,20 @@ public:
         set_balloon(nullptr); // the icon is about to go; nothing may reach it after this
         m_server.request_quit();
         if (m_thread.joinable()) m_thread.join();
-        m_server.shutdown();
+        if (!m_server.shutdown()) {
+            // A connection or helper thread is still running and still uses the server. Leave it
+            // alive for them; the process is about to exit and takes everything with it. Destroying
+            // it here is what crashed (a2375b06).
+            (void) m_owned.release();
+        }
         delete m_icon;
         m_icon = nullptr;
         return 0;
     }
 
 private:
-    HubServer       m_server;
+    std::unique_ptr<HubServer> m_owned; // released, not destroyed, if shutdown() could not drain
+    HubServer&      m_server;
     HubTaskBarIcon* m_icon { nullptr };
     std::thread     m_thread;
     wxTimer         m_timer;
@@ -4777,6 +4996,11 @@ int run_server(const std::string& token_hint, bool phone_on)
 
 static std::mutex  s_state_mutex;
 static std::string s_last_state;
+// ensure_running() one caller at a time within this process: the startup call
+// (GUI_App::start_remote_access), the Stream tab and the Home tab can all ask at once, and two
+// callers that both find no hub would both spawn one. The second caller now waits and finds the
+// first one's hub.
+static std::mutex  s_ensure_mutex;
 
 std::string Info::url() const
 {
@@ -4821,20 +5045,31 @@ static Info parse_info(const std::string& body)
 
 // admin_port is where /hub/* answers (the loopback-only control plane); port is the listener the
 // phone and any tunnel use. Everything below talks to the control plane.
-struct HubFile { int port { 0 }; int admin_port { 0 }; std::string secret; };
+struct HubFile { int port { 0 }; int admin_port { 0 }; std::string secret; bool exists { false }; bool parsed { false }; bool pid_alive { false }; };
 static HubFile hub_file()
 {
     HubFile h;
-    try {
-        json j = json::parse(read_file(hub_json_path()));
-        if (!pid_alive(j.value("pid", 0L))) return h;
-        h.port       = j.value("port", 0);
-        h.admin_port = j.value("admin_port", 0);
-        h.secret     = j.value("secret", "");
-        // A hub from before the split served /hub/* on its one listener; talking to it there is
-        // what lets ensure_running() shut it down and put this build's hub in its place.
-        if (h.admin_port == 0) h.admin_port = h.port;
-    } catch (...) {}
+    // hub.json is rewritten in place when the rename over it fails (a reader has it open), so a
+    // read can catch it empty or half written: that is a moment to wait out, not a missing hub.
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        if (attempt > 0) std::this_thread::sleep_for(std::chrono::milliseconds(40));
+        boost::system::error_code ec;
+        h.exists = fs::exists(hub_json_path(), ec);
+        if (!h.exists) return h;
+        try {
+            json j   = json::parse(read_file(hub_json_path()));
+            h.parsed = true;
+            if (!pid_alive(j.value("pid", 0L))) return h;
+            h.pid_alive  = true;
+            h.port       = j.value("port", 0);
+            h.admin_port = j.value("admin_port", 0);
+            h.secret     = j.value("secret", "");
+            // A hub from before the split served /hub/* on its one listener; talking to it there is
+            // what lets ensure_running() shut it down and put this build's hub in its place.
+            if (h.admin_port == 0) h.admin_port = h.port;
+            return h;
+        } catch (...) {}
+    }
     return h;
 }
 
@@ -4853,7 +5088,22 @@ static Info hub_call(const std::string& method, const std::string& path, const s
     return out;
 }
 
-Info query() { return hub_call("GET", "/hub/info", "", 3); }
+Info query(long timeout_s) { return hub_call("GET", "/hub/info", "", timeout_s); }
+
+Record record()
+{
+    Record r;
+    const HubFile hf = hub_file();
+    r.presence       = HubHome::classify_record(hf.exists, hf.parsed, hf.pid_alive);
+    r.pid_alive      = hf.pid_alive;
+    if (r.presence == HubHome::Presence::NoRecord) {
+        try {
+            json j        = json::parse(read_file(last_exit_json_path()));
+            r.exit_reason = HubHome::exit_reason_from(j.value("reason", ""));
+        } catch (...) {}
+    }
+    return r;
+}
 
 std::pair<int, std::string> onvif_discover()
 {
@@ -4915,6 +5165,7 @@ bool post_event(const std::string& event_json)
 
 Info ensure_running(const std::string& token_hint, bool phone_on)
 {
+    std::lock_guard<std::mutex> ensure_lock(s_ensure_mutex);
     Info i = query();
     if (i.alive && i.version != SLIC3R_VERSION) {
         BOOST_LOG_TRIVIAL(info) << "RemoteHub: hub version " << i.version << " != " << SLIC3R_VERSION << ", restarting it";

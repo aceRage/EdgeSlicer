@@ -7,6 +7,7 @@
 #include "Widgets/SwitchButton.hpp"
 #include "Widgets/Label.hpp"
 #include "Printer/PrinterFileSystem.h"
+#include "PluginGuard.hpp"
 #include "MsgDialog.hpp"
 #include "Widgets/ProgressDialog.hpp"
 #include <libslic3r/Model.hpp>
@@ -433,6 +434,18 @@ void MediaFilePanel::fetchUrl(boost::weak_ptr<PrinterFileSystem> wfs)
         return;
     }
     m_waiting_enable = false;
+    if (!PrinterFileSystem::HasTunnelLibrary()) {
+        // Ultra: the storage browser reaches the printer through the tunnel API of Bambu's
+        // BambuSource library (LAN port 6000, or the cloud relay). The BambuSource EdgeSlicer
+        // ships beside its network plug-in is an empty placeholder, so the connect used to fail
+        // at once and the panel blamed the network: "Please check the network and try again ...
+        // [-2]". Say what is actually missing instead of sending the user after their network.
+        BOOST_LOG_TRIVIAL(info) << "MediaFilePanel::fetchUrl: BambuSource has no tunnel API, storage browsing unavailable";
+        m_image_grid->SetStatus(m_bmp_failed, _L("Browsing the printer's storage (timelapse videos and print files) needs Bambu's "
+                                                 "BambuSource component, which EdgeSlicer's network plug-in does not include."));
+        fs->SetUrl("0");
+        return;
+    }
     if (!m_local_proto && !m_remote_proto) {
         m_waiting_support = true;
         m_image_grid->SetStatus(m_bmp_failed, _L("Browsing file in SD card is not supported in current firmware. Please update the printer firmware."));
@@ -452,7 +465,14 @@ void MediaFilePanel::fetchUrl(boost::weak_ptr<PrinterFileSystem> wfs)
     m_waiting_support = false;
     NetworkAgent *agent = wxGetApp().getAgent();
     std::string  agent_version = agent ? agent->get_version() : "";
-    if ((m_lan_mode || !m_remote_proto) && m_local_proto && !m_lan_ip.empty()) {
+    // Ultra: EdgeSlicer's tunnel library reaches the printer's storage over its LAN FTPS only, so
+    // it gets the LAN address for a cloud-bound printer too when the IP and access code are known
+    // (the cloud branch below would hand it a relay URL it cannot open).
+    const bool lan_only_tunnel = PrinterFileSystem::TunnelIsLanOnly();
+    if (storage_browser_use_lan_url(m_lan_mode, m_local_proto != 0, m_remote_proto != 0, !m_lan_ip.empty(),
+                                    !m_lan_passwd.empty(), lan_only_tunnel)) {
+        if (lan_only_tunnel && !m_lan_mode)
+            BOOST_LOG_TRIVIAL(info) << "MediaFilePanel::fetchUrl: LAN-only storage tunnel, using the printer's LAN address";
         std::string url = "bambu:///local/" + m_lan_ip + ".?port=6000&user=" + m_lan_user + "&passwd=" + m_lan_passwd;
         url += "&device=" + m_machine;
         url += "&net_ver=" + agent_version;
@@ -480,7 +500,7 @@ void MediaFilePanel::fetchUrl(boost::weak_ptr<PrinterFileSystem> wfs)
     if (agent) {
         std::string protocols[] = {"", "\"tutk\"", "\"agora\"", "\"tutk\",\"agora\""};
         agent->get_camera_url(m_machine + "|" + m_dev_ver + "|" + protocols[m_remote_proto],
-            [this, wfs, m = m_machine, v = agent->get_version(), dv = m_dev_ver](std::string url) {
+            [this, wfs, m = m_machine, v = agent->get_version(), dv = m_dev_ver, pw = m_lan_passwd, lan_only_tunnel](std::string url) {
             if (boost::algorithm::starts_with(url, "bambu:///")) {
                 url += "&device=" + m;
                 url += "&net_ver=" + v;
@@ -489,12 +509,22 @@ void MediaFilePanel::fetchUrl(boost::weak_ptr<PrinterFileSystem> wfs)
                 url += "&cli_id=" + wxGetApp().app_config->get("slicer_uuid");
                 url += "&cli_ver=" + std::string(SLIC3R_VERSION);
             }
-            BOOST_LOG_TRIVIAL(info) << "MediaFilePanel::fetchUrl: camera_url: " << hide_passwd(url, {"?uid=", "authkey=", "passwd="});
+            // Ultra: a LAN camera URL from our network plug-in carries the access code as
+            // "bblp:<code>@<ip>"; mask it too.
+            std::vector<wxString> secrets{"?uid=", "authkey=", "passwd="};
+            if (!pw.empty()) secrets.push_back(wxString::FromUTF8(pw));
+            BOOST_LOG_TRIVIAL(info) << "MediaFilePanel::fetchUrl: camera_url: " << hide_passwd(url, secrets);
             CallAfter([=] {
                 boost::shared_ptr fs(wfs.lock());
                 if (!fs || fs != m_image_grid->GetFileSystem()) return;
                 if (boost::algorithm::starts_with(url, "bambu:///")) {
                     fs->SetUrl(url);
+                } else if (lan_only_tunnel) {
+                    // No relay exists for this library: the only thing missing is a LAN route.
+                    m_image_grid->SetStatus(m_bmp_failed, _L("Browsing the printer's storage works over the local network. "
+                                                             "Connect this computer to the printer's network, or add the printer "
+                                                             "by its IP address and access code, and try again."));
+                    fs->SetUrl("0"); // keep this message up; showing the tab again retries
                 } else {
                     m_image_grid->SetStatus(m_bmp_failed, _L("Connection Failed. Please check the network and try again"));
                     fs->SetUrl("3");

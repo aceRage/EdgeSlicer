@@ -58,6 +58,12 @@ bool tower_wall_from_bambu(std::string &v)
     return false;
 }
 
+// wipe_tower_wall_gap <-> prime_tower_skip_points: the same wall gaps at the start of a purge. Read
+// back from anything but the bundled vendor presets: 9 Flashforge Creator 5 process presets carry
+// Bambu's "0", and their shipped towers print with our default (gaps on); see
+// SystemPresetTowerKeysScope.
+bool wall_gap_from_bambu(std::string &) { return ! SystemPresetTowerKeysScope::active(); }
+
 // ironing_angle: ours uses a negative angle for "use the default method". Bambu has no such value;
 // leaving the key out gives Bambu its own default, which is the same intent.
 bool ironing_angle_to_bambu(std::string &v)
@@ -120,6 +126,7 @@ std::vector<Alias> make_aliases()
     { "wipe_tower_fillet_wall",         "prime_tower_fillet_wall",              nullptr, nullptr, nullptr },
     { "wipe_tower_wall_type",           "prime_tower_rib_wall",                 tower_wall_to_bambu, tower_wall_from_bambu, nullptr },
     { "wipe_tower_max_purge_speed",     "prime_tower_max_speed",                nullptr, nullptr, nullptr },
+    { "wipe_tower_wall_gap",            "prime_tower_skip_points",              nullptr, wall_gap_from_bambu, nullptr },
     // Found auditing Bambu Studio's PrintConfig.cpp (2026-09-22): same meaning, same unit.
     { "lateral_lattice_angle_1",        "sparse_infill_lattice_angle_1",        nullptr, nullptr, nullptr },
     { "lateral_lattice_angle_2",        "sparse_infill_lattice_angle_2",        nullptr, nullptr, nullptr },

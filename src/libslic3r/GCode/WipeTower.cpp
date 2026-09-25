@@ -9,6 +9,7 @@
 #include <iomanip>
 
 #include "GCodeProcessor.hpp"
+#include "GCodeWriter.hpp"
 #include "BoundingBox.hpp"
 #include "Circle.hpp"
 #include "ClipperUtils.hpp"
@@ -539,6 +540,45 @@ public:
 
 	WipeTowerWriter& retract(float e, float f = 0.f)
 		{ return load(-e, f); }
+
+    // Push e mm of filament through the standing nozzle (tower interface extra prime), counted as used.
+    WipeTowerWriter& prime(float e, float f)
+    {
+        if (e <= 0.f)
+            return *this;
+        m_used_filament_length += e;
+        m_elapsed_time += e / f * 60.f;
+        return load(e, f);
+    }
+
+    // A wall cut open by tower interface gaps: the pieces in wall order, starting with the one that
+    // begins nearest to the current position, travelling over each gap.
+    WipeTowerWriter& wall_pieces(const Polylines &pieces, float f)
+    {
+        std::vector<std::vector<Vec2f>> paths;
+        for (Polyline pl : pieces) {
+            pl.simplify(SCALED_WIPE_TOWER_RESOLUTION);
+            if (pl.points.size() < 2)
+                continue;
+            std::vector<Vec2f> path;
+            for (const Point &pt : pl.points)
+                path.push_back(unscaled<float>(pt));
+            paths.push_back(std::move(path));
+        }
+        if (paths.empty())
+            return *this;
+        size_t first = 0;
+        for (size_t i = 1; i < paths.size(); ++i)
+            if ((paths[i].front() - m_current_pos).squaredNorm() < (paths[first].front() - m_current_pos).squaredNorm())
+                first = i;
+        for (size_t k = 0; k < paths.size(); ++k) {
+            const std::vector<Vec2f> &path = paths[(first + k) % paths.size()];
+            travel(path.front());
+            for (size_t i = 1; i < path.size(); ++i)
+                extrude(path[i], f);
+        }
+        return *this;
+    }
 
 // Loads filament while also moving towards given points in x-axis (x feedrate is limited by cutting the distance short if necessary)
     WipeTowerWriter& load_move_x_advanced(float farthest_x, float loading_dist, float loading_speed, float max_x_speed = 50.f)
@@ -1182,6 +1222,10 @@ WipeTower::WipeTower(const PrintConfig& config, int plate_idx, Vec3d plate_origi
     m_bed_bottom_left = m_bed_shape == RectangularBed
                   ? Vec2f(bed_points.front().x(), bed_points.front().y())
                   : Vec2f::Zero();
+
+    m_interface    = TowerInterface::Settings::from_config(config);
+    m_use_gap_wall = config.wipe_tower_wall_gap.value;
+    m_shared_bed   = TowerInterface::shared_printable_box(config);
 }
 
 
@@ -1224,6 +1268,20 @@ void WipeTower::set_extruder(size_t idx, const PrintConfig& config)
         m_filpar[idx].max_e_speed = (max_vol_speed / filament_area());
     m_filpar[idx].wipe_dist = float(config.wipe_distance.get_at(idx));
 
+    m_filpar[idx].kind                  = TowerInterface::filament_kind(config, (unsigned int) idx);
+    m_filpar[idx].interface_temperature = TowerInterface::interface_temperature(config.filament_tower_interface_print_temp.get_at(idx),
+                                                                                config.nozzle_temperature_range_high.get_at(idx),
+                                                                                m_filpar[idx].nozzle_temperature);
+    m_filpar[idx].run_in_distance       = std::max(0.f, float(config.filament_tower_interface_pre_extrusion_dist.get_at(idx)));
+    m_filpar[idx].extra_prime_length    = std::max(0.f, float(config.filament_tower_interface_pre_extrusion_length.get_at(idx)));
+    // Bambu Studio names the nozzle of an interface M109 / M104 on multi-nozzle machines
+    // (format_line_M109: T<physical extruder> ... N0).
+    if (config.nozzle_diameter.values.size() > 1 && idx < config.filament_map.values.size()) {
+        const int logical = config.filament_map.values[idx] - 1;
+        if (logical >= 0)
+            m_filpar[idx].physical_extruder = logical < int(config.physical_extruder_map.values.size()) ? config.physical_extruder_map.values[logical] : logical;
+    }
+
     m_perimeter_width = nozzle_diameter * Width_To_Nozzle_Ratio; // all extruders are now assumed to have the same diameter
     // BBS: remove useless config
 #if 0
@@ -1263,6 +1321,7 @@ WipeTower::ToolChangeResult WipeTower::tool_change(size_t tool, bool extrude_per
     float wipe_depth = 0.f;
 	float wipe_length = 0.f;
     float purge_volume = 0.f;
+    const WipeTowerInfo::ToolChange *planned = nullptr;
 
 	// Finds this toolchange info
 	if (tool != (unsigned int)(-1))
@@ -1272,6 +1331,7 @@ WipeTower::ToolChangeResult WipeTower::tool_change(size_t tool, bool extrude_per
                 wipe_length = b.wipe_length;
                 wipe_depth = b.required_depth;
                 purge_volume = b.purge_volume;
+                planned = &b;
 				break;
 			}
 	}
@@ -1345,7 +1405,9 @@ WipeTower::ToolChangeResult WipeTower::tool_change(size_t tool, bool extrude_per
             writer.set_initial_position(pos, m_wipe_tower_width, m_wipe_tower_depth, m_internal_rotation);
 
             wt_box = align_perimeter(wt_box);
-            if (m_use_rib_wall) {
+            if (print_wall_with_interface_gaps(writer, wt_box, wall_feedrate(m_current_tool))) {
+                // Cut open for a tower interface run-in.
+            } else if (m_use_rib_wall) {
                 const Polygon wall = rib_wall_polygon(wt_box);
                 writer.polygon(wall, wall_feedrate(m_current_tool), false);
                 record_outer_wall(wall);
@@ -1357,7 +1419,12 @@ WipeTower::ToolChangeResult WipeTower::tool_change(size_t tool, bool extrude_per
             writer.travel(Vec2f(0, 0));
             writer.travel(initial_position);
         }
+        const bool at_interface = planned != nullptr && planned->is_interface;
+        if (at_interface)
+            interface_before_wipe(writer, *planned);
         toolchange_Wipe(writer, cleaning_box, wipe_length);     // Wipe the newly loaded filament until the end of the assigned wipe area.
+        if (at_interface)
+            interface_after_wipe(writer, *planned);
         writer.append(";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Wipe_Tower_End) + "\n");
         ++ m_num_tool_changes;
     } else
@@ -1843,13 +1910,25 @@ WipeTower::ToolChangeResult WipeTower::finish_layer(bool extrude_perimeter, bool
     Polygon outer_wall;
     if (m_use_rib_wall)
         outer_wall = rib_wall_polygon(wt_box);
-    if (extrude_perimeter) {
+    if (extrude_perimeter && ! print_wall_with_interface_gaps(writer, wt_box, feedrate)) {
         if (m_use_rib_wall) {
             writer.polygon(outer_wall, feedrate, false);
             record_outer_wall(outer_wall);
         } else
             writer.rectangle(wt_box, feedrate);
     }
+    // A tower interface run-in also crosses the brim loops (the chamfer above the first layer).
+    const size_t layer_id = size_t(m_layer_info - m_plan.begin());
+    const std::vector<TowerInterface::GapPoint> no_gaps;
+    const std::vector<TowerInterface::GapPoint> &loop_gaps = layer_id < m_interface_gaps.size() ? m_interface_gaps[layer_id] : no_gaps;
+    auto print_loop = [&writer, &loop_gaps, feedrate, this](const Polygon &loop, bool pre_simplify) {
+        if (loop_gaps.empty()) {
+            writer.polygon(loop, feedrate, pre_simplify);
+        } else {
+            Polygon inserted;
+            writer.wall_pieces(TowerInterface::cut_wall_gaps(loop, loop_gaps, 2.5f * m_perimeter_width, inserted), feedrate);
+        }
+    };
 
     // brim chamfer
     float spacing = m_perimeter_width - m_layer_height * float(1. - M_PI_4);
@@ -1876,7 +1955,7 @@ WipeTower::ToolChangeResult WipeTower::finish_layer(bool extrude_perimeter, bool
             if (grown.empty())
                 break;
             outer_wall = std::move(grown.front());
-            writer.polygon(outer_wall, feedrate, true);
+            print_loop(outer_wall, true);
             record_outer_wall(outer_wall);
         }
         if (first_layer)
@@ -1888,7 +1967,10 @@ WipeTower::ToolChangeResult WipeTower::finish_layer(bool extrude_perimeter, bool
             // Explicit feedrate: on a layer whose wall was printed by the toolchange (extrude_perimeter
             // false, e.g. the first layer of a no-sparse tower) the last F in the writer is a travel, and
             // the brim would inherit it. Where the wall was just printed this emits no F at all.
-            writer.rectangle(box, feedrate);
+            if (loop_gaps.empty())
+                writer.rectangle(box, feedrate);
+            else
+                print_loop(generate_rectange_polygon(box.ld, box.ru), false);
         }
 
         if (first_layer) {
@@ -2251,6 +2333,7 @@ void WipeTower::generate(std::vector<std::vector<WipeTower::ToolChangeResult>> &
     m_outer_wall.clear();
     if (m_use_rib_wall)
         set_rib_offset();
+    plan_interfaces();
 
     m_layer_info = m_plan.begin();
 
@@ -2373,11 +2456,14 @@ WipeTower::ToolChangeResult WipeTower::only_generate_out_wall()
     if (m_use_rib_wall) {
         // Bambu Studio only_generate_out_wall() (WipeTower.cpp:5023-5030).
         const Polygon wall = rib_wall_polygon(wt_box);
-        writer.polygon(wall, feedrate, false);
-        record_outer_wall(wall);
+        if (! print_wall_with_interface_gaps(writer, wt_box, feedrate)) {
+            writer.polygon(wall, feedrate, false);
+            record_outer_wall(wall);
+        }
         writer.add_wipe_path(wall, m_filpar[m_current_tool].wipe_dist);
     } else {
-        writer.rectangle(wt_box, feedrate);
+        if (! print_wall_with_interface_gaps(writer, wt_box, feedrate))
+            writer.rectangle(wt_box, feedrate);
 
         // Now prepare future wipe. box contains rectangle that was extruded last (ccw).
         Vec2f target = (writer.pos() == wt_box.ld ? wt_box.rd : (writer.pos() == wt_box.rd ? wt_box.ru : (writer.pos() == wt_box.ru ? wt_box.lu : wt_box.ld)));
@@ -2392,6 +2478,127 @@ WipeTower::ToolChangeResult WipeTower::only_generate_out_wall()
         if (m_current_tool < m_used_filament_length.size()) m_used_filament_length[m_current_tool] += writer.get_and_reset_used_filament_length();
 
     return construct_tcr(writer, false, old_tool, true, 0.f);
+}
+
+void WipeTower::plan_interfaces()
+{
+    m_interface_gaps.assign(m_plan.size(), {});
+    m_run_in_reserve = 0.f;
+    if (! m_interface.any())
+        return;
+    const bool run_in = m_interface.run_in && m_use_gap_wall;
+
+    // y shift of each layer, as generate() sets it: a run-in gap is also cut into the
+    // GAP_LAYERS - 1 layers below, in the same place on the bed.
+    std::vector<float> y_shift(m_plan.size(), 0.f);
+    {
+        float shift = m_y_shift;
+        for (size_t layer_id = 0; layer_id < m_plan.size(); ++layer_id) {
+            const float depth = m_plan[layer_id].depth;
+            if (depth >= m_perimeter_width && depth < m_wipe_tower_depth - m_perimeter_width)
+                shift = align_round((m_wipe_tower_depth - depth) / 2.f, m_extra_spacing * m_perimeter_width);
+            y_shift[layer_id] = shift;
+        }
+    }
+
+    std::vector<unsigned int> filaments;
+    for (size_t layer_id = 0; layer_id < m_plan.size(); ++layer_id) {
+        WipeTowerInfo &layer     = m_plan[layer_id];
+        float          traversed = 0.f; // m_depth_traversed when tool_change() starts each change
+        for (WipeTowerInfo::ToolChange &tc : layer.tool_changes) {
+            for (size_t f : { tc.old_tool, tc.new_tool })
+                if (std::find(filaments.begin(), filaments.end(), (unsigned int) f) == filaments.end())
+                    filaments.push_back((unsigned int) f);
+            // tool_change() purges from the first planned change to this filament.
+            float wipe_depth = tc.required_depth;
+            for (const WipeTowerInfo::ToolChange &b : layer.tool_changes)
+                if (b.new_tool == tc.new_tool) {
+                    wipe_depth = b.required_depth;
+                    break;
+                }
+            // The tower's first layer is never an interface (Bambu Studio: "first layer never be contact").
+            tc.is_interface = layer_id != m_first_layer_idx && layer.depth >= m_perimeter_width &&
+                           TowerInterface::triggers(m_interface.trigger, m_filpar[tc.old_tool].kind, m_filpar[tc.new_tool].kind);
+            tc.run_in    = tc.is_interface && run_in && m_filpar[tc.new_tool].run_in_distance > EPSILON;
+            if (tc.run_in) {
+                // The purge starts one perimeter in from the tower's left side and runs to the right,
+                // so the run-in comes in from the left along its first line.
+                tc.run_in_cross = Vec2f(0.f, m_perimeter_width + traversed);
+                for (int below = 0; below < TowerInterface::GAP_LAYERS && below <= int(layer_id); ++below) {
+                    const size_t lower = layer_id - below;
+                    m_interface_gaps[lower].push_back({ Vec2f(0.f, tc.run_in_cross.y() + y_shift[layer_id] - y_shift[lower]), true });
+                }
+            }
+            traversed += wipe_depth;
+        }
+    }
+    if (run_in) {
+        std::vector<TowerInterface::FilamentKind> kinds;
+        std::vector<float>                        distances;
+        for (const FilamentParameters &fp : m_filpar) {
+            kinds.push_back(fp.kind);
+            distances.push_back(fp.run_in_distance);
+        }
+        m_run_in_reserve = float(TowerInterface::run_in_reserve(m_interface, kinds, distances, filaments, m_perimeter_width));
+    }
+}
+
+bool WipeTower::print_wall_with_interface_gaps(WipeTowerWriter &writer, const box_coordinates &wt_box, float feedrate)
+{
+    const size_t layer_id = size_t(m_layer_info - m_plan.begin());
+    if (layer_id >= m_interface_gaps.size() || m_interface_gaps[layer_id].empty())
+        return false;
+    const Polygon wall = m_use_rib_wall ? rib_wall_polygon(wt_box) : generate_rectange_polygon(wt_box.ld, wt_box.ru);
+    if (m_use_rib_wall)
+        record_outer_wall(wall);
+    Polygon inserted;
+    writer.wall_pieces(TowerInterface::cut_wall_gaps(wall, m_interface_gaps[layer_id], 2.5f * m_perimeter_width, inserted), feedrate);
+    return true;
+}
+
+void WipeTower::interface_before_wipe(WipeTowerWriter &writer, const WipeTowerInfo::ToolChange &tool_change)
+{
+    const FilamentParameters &fp = m_filpar[tool_change.new_tool];
+    writer.append("; tower interface\n");
+    if (m_interface.temp && fp.interface_temperature != fp.nozzle_temperature)
+        writer.append(GCodeWriter::set_temperature(fp.interface_temperature, m_gcode_flavor, true, fp.physical_extruder, "tower interface temperature"));
+
+    const Vec2f start  = writer.pos();
+    bool        primed = false;
+    if (tool_change.run_in) {
+        // Out through the gap along the purge's first line, then run in along the same line: nothing
+        // is ever dragged over the wall.
+        const Vec2f cross  = tool_change.run_in_cross;
+        const float alpha  = m_wipe_tower_rotation_angle * float(M_PI / 180.);
+        const Vec2f shift  = Vec2f(0.f, m_y_shift) + m_rib_offset; // what the writer adds (no internal rotation here)
+        auto        to_bed = [alpha, shift, this](const Vec2f &p) -> Vec2f {
+            return Vec2f(Eigen::Rotation2Df(alpha) * (p + shift)) + m_wipe_tower_pos;
+        };
+        const float dist = TowerInterface::clamp_to_bed(cross, Vec2f(-1.f, 0.f), fp.run_in_distance, to_bed, m_shared_bed);
+        if (dist > EPSILON) {
+            const Vec2f inside(m_perimeter_width, cross.y());
+            const Vec2f outside = cross - Vec2f(dist, 0.f);
+            // toolchange_Wipe() starts its first line at a third of the purge speed.
+            const float speed = 0.33f * std::min(4800.f, m_max_speed);
+            writer.append("; tower interface run-in\n").travel(inside, m_travel_speed * 60.f).travel(outside);
+            if (m_interface.extra_prime) {
+                writer.prime(fp.extra_prime_length + TowerInterface::EXTRA_PRIME_BASE, TowerInterface::PRIME_FEEDRATE);
+                primed = true;
+            }
+            writer.extrude(inside, speed).extrude(start, speed);
+        }
+    }
+    if (m_interface.extra_prime && ! primed)
+        writer.prime(fp.extra_prime_length + TowerInterface::EXTRA_PRIME_BASE, TowerInterface::PRIME_FEEDRATE);
+}
+
+void WipeTower::interface_after_wipe(WipeTowerWriter &writer, const WipeTowerInfo::ToolChange &tool_change)
+{
+    const FilamentParameters &fp = m_filpar[tool_change.new_tool];
+    // Back to the normal temperature; wait only if that means heating up.
+    if (m_interface.temp && fp.interface_temperature != fp.nozzle_temperature)
+        writer.append(GCodeWriter::set_temperature(fp.nozzle_temperature, m_gcode_flavor, fp.nozzle_temperature > fp.interface_temperature,
+                                                   fp.physical_extruder, "tower interface done, normal temperature"));
 }
 
 bool WipeTower::get_floating_area(float &start_pos_y, float &end_pos_y) const {

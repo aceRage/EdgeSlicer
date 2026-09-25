@@ -264,6 +264,8 @@ set(lisbslic3r_sources
     GCode/LayerTimeSpeedSmoothingFilter.hpp
     GCode/GCodeProcessor.cpp
     GCode/GCodeProcessor.hpp
+    GCode/PreCoolingInjector.cpp
+    GCode/PreCoolingInjector.hpp
     SliceCompare/Snapshot.cpp
     SliceCompare/Snapshot.hpp
     SliceCompare/Diff.cpp
@@ -305,6 +307,8 @@ set(lisbslic3r_sources
     GCode/WipeTower.hpp
     GCode/WipeTowerEstimate.cpp
     GCode/WipeTowerEstimate.hpp
+    GCode/WipeTowerInterface.cpp
+    GCode/WipeTowerInterface.hpp
     GCodeWriter.cpp
     GCodeWriter.hpp
     Geometry/Bicubic.hpp
@@ -364,6 +368,10 @@ set(lisbslic3r_sources
     MixedFilamentCliGates.hpp
     BambuExtruderMap.cpp
     BambuExtruderMap.hpp
+    BambuDualNozzleSync.cpp
+    BambuDualNozzleSync.hpp
+    BambuNozzleMappingRequest.cpp
+    BambuNozzleMappingRequest.hpp
     MultiNozzleUtils.cpp
     MultiNozzleUtils.hpp
     FilamentGroup.cpp
@@ -552,6 +560,8 @@ set(lisbslic3r_sources
     TriangulateWall.hpp
     utils.cpp
     Utils.hpp
+    UntrustedInput.cpp
+    UntrustedInput.hpp
     VariableWidth.cpp
     VariableWidth.hpp
     Zipper.cpp

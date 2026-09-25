@@ -1,21 +1,28 @@
 #include <catch2/catch.hpp>
 
+#include <boost/filesystem.hpp>
+#include <boost/nowide/cstdio.hpp>
+
 #include <algorithm>
 #include <cmath>
 #include <functional>
 #include <limits>
+#include <map>
 #include <mutex>
 #include <utility>
 #include <vector>
 
 #include "libslic3r/BoundingBox.hpp"
+#include "libslic3r/BrimFilament.hpp"
 #include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/ExtrusionEntityCollection.hpp"
 #include "libslic3r/GCodeReader.hpp"
+#include "libslic3r/GCode/GCodeProcessor.hpp"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/TriangleMesh.hpp"
+#include "libslic3r/TriangleSelector.hpp"
 #include "libslic3r/GCode/ToolOrdering.hpp"
 
 #include "test_data.hpp" // get access to init_print, etc
@@ -1312,4 +1319,260 @@ TEST_CASE("SupportMaterial: per-group ironing, classic tree",
     REQUIRE(groups == 2);
     CHECK(m.right > 1.);
     CHECK(m.left == 0.);
+}
+
+
+// ============================================================================================
+// Support filament matching on a part that is painted in another filament than it is assigned
+// (fix/support-filament-matching-paint-brim). The owner's report: a part imported from CAD is
+// assigned filament A but multi-material painted all over in B, so every visible wall prints B -
+// yet matching mixed A into the support, and the support brim pads under the columns printed in a
+// third filament. Rules pinned here:
+//   1. Only VISIBLE walls vote (outer walls on the layer outline): the colour-boundary loop the
+//      unpainted core grows inside a painted part, and every inner wall, are never support colours.
+//   2. A "don't care" role's fallback is the dominant visible wall filament around that layer.
+//   3. A layer with nothing matched (plate layer, no samples, everything gated) gets an explicit
+//      filament for its leftover support instead of "whatever is active"; the plate layer (support
+//      brim pads) takes the dominant filament of the support directly above it.
+//   4. The pass runs for by-object sequence too.
+// Filament ids below are 0-based (A = 0, B = 1), as in SupportLayer.
+// ============================================================================================
+
+namespace {
+
+// A 4 x 4 mm leg on the bed carrying a 24 x 24 x 3 mm slab 10 mm up: ONE model part, assigned
+// filament A (1-based 1). `paint` picks which facets are painted B: all of them, or only the
+// slab's (every facet whose lowest vertex is at or above the slab's underside).
+enum class SlabPaint { None, All, SlabOnly };
+
+void make_painted_table_print(Slic3r::Print &print, Slic3r::Model &model, const DynamicPrintConfig &config, SlabPaint paint)
+{
+    ModelObject *object = model.add_object();
+    object->name = "painted_table";
+    TriangleMesh mesh = Slic3r::make_cube(4., 4., 10.);
+    TriangleMesh slab = Slic3r::make_cube(24., 24., 3.);
+    slab.translate(-10.f, -10.f, 10.f);
+    mesh.merge(slab);
+    ModelVolume *volume = object->add_volume(mesh);
+    volume->config.set("extruder", 1);
+    if (paint != SlabPaint::None) {
+        const indexed_triangle_set &its = volume->mesh().its;
+        float min_z = std::numeric_limits<float>::max();
+        for (const stl_vertex &v : its.vertices)
+            min_z = std::min(min_z, v.z());
+        TriangleSelector selector(volume->mesh());
+        for (int f = 0; f < int(its.indices.size()); ++f) {
+            float facet_min_z = std::numeric_limits<float>::max();
+            for (int k = 0; k < 3; ++k)
+                facet_min_z = std::min(facet_min_z, its.vertices[its.indices[f][k]].z());
+            // add_volume centres the mesh, so the slab's underside is 10 mm above the mesh bottom.
+            if (paint == SlabPaint::All || facet_min_z >= min_z + 10.f - 1e-3f)
+                selector.set_facet(f, EnforcerBlockerType(2));
+        }
+        REQUIRE(volume->mmu_segmentation_facets.set(selector));
+    }
+    object->add_instance();
+    object->ensure_on_bed();
+    print.apply(model, config);
+    print.set_status_silent();
+    print.process();
+}
+
+DynamicPrintConfig painted_table_config(bool matching, const std::string &support_type = "normal(auto)")
+{
+    // Two filaments, set up the way the image-row wall tests do it: every per-extruder and
+    // per-filament vector resized (painting needs filament_colour to count two physical
+    // filaments), absolute line widths, a tool changer so tool changes are real, no prime tower.
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_num_extruders(2);
+    config.set_num_filaments(2);
+    config.option<ConfigOptionFloats>("filament_diameter")->values = { 1.75, 1.75 };
+    config.option<ConfigOptionStrings>("filament_colour")->values  = { "#FF0000", "#0000FF" };
+    config.option<ConfigOptionFloats>("nozzle_diameter")->values   = { 0.4, 0.4 };
+    for (const char *key : { "line_width", "initial_layer_line_width", "outer_wall_line_width", "inner_wall_line_width",
+                             "top_surface_line_width", "sparse_infill_line_width", "internal_solid_infill_line_width",
+                             "support_line_width" })
+        if (auto *opt = config.option<ConfigOptionFloatOrPercent>(key); opt != nullptr) {
+            opt->value   = 0.42;
+            opt->percent = false;
+        }
+    config.option<ConfigOptionBool>("single_extruder_multi_material")->value = true;
+    config.option<ConfigOptionBool>("enable_prime_tower")->value             = false;
+    config.set_deserialize_strict({
+        { "enable_support",              "1" },
+        { "support_type",                support_type },
+        { "support_on_build_plate_only", "0" },
+        { "support_filament",            "0" },
+        { "support_interface_filament",  "0" },
+        { "support_filament_matching",   matching },
+    });
+    return config;
+}
+
+struct MatchOutcome
+{
+    // Extrusion length (mm) per bucket filament over every layer above the plate, in total and for
+    // the interface role alone.
+    std::map<unsigned, double> bucket_length;
+    std::map<unsigned, double> interface_bucket_length;
+    // Number of layers per leftover-support filament (chameleon_residual_extruder >= 0).
+    std::map<int, size_t>      residual_layers;
+    int                        plate_residual  = -2;
+    bool                       plate_all_roles = false;
+};
+
+void sum_bucket(const ExtrusionEntityCollection &collection, unsigned extruder, MatchOutcome &out)
+{
+    for (const ExtrusionEntity *ee : collection.entities) {
+        if (const auto *eec = dynamic_cast<const ExtrusionEntityCollection *>(ee)) {
+            sum_bucket(*eec, extruder, out);
+            continue;
+        }
+        const double len = unscale<double>(ee->length());
+        out.bucket_length[extruder] += len;
+        if (ee->role() == erSupportMaterialInterface)
+            out.interface_bucket_length[extruder] += len;
+    }
+}
+
+MatchOutcome match_outcome(const PrintObject &object)
+{
+    MatchOutcome out;
+    for (const SupportLayer *layer : object.support_layers()) {
+        if (layer == nullptr)
+            continue;
+        if (layer == object.support_layers().front()) {
+            out.plate_residual  = layer->chameleon_residual_extruder;
+            out.plate_all_roles = layer->chameleon_residual_all_roles;
+            // The plate layer is never partitioned: its geometry stays where brim / skirt read it.
+            CHECK(layer->interface_by_extruder.empty());
+            CHECK(! layer->support_fills.entities.empty());
+            continue;
+        }
+        for (const auto &[extruder, bucket] : layer->interface_by_extruder)
+            sum_bucket(bucket, extruder, out);
+        if (layer->chameleon_residual_extruder >= 0)
+            ++out.residual_layers[layer->chameleon_residual_extruder];
+    }
+    return out;
+}
+
+} // namespace
+
+TEST_CASE("Support filament matching: a part painted B all over but assigned A never puts A in its support",
+          "[SupportMaterial][chameleon][paint]")
+{
+    for (const std::string support_type : { "normal(auto)", "tree(auto)" }) {
+        SECTION(support_type) {
+            Slic3r::Print print;
+            Slic3r::Model model;
+            make_painted_table_print(print, model, painted_table_config(true, support_type), SlabPaint::All);
+            REQUIRE(print.objects().size() == 1);
+            const PrintObject &object = *print.objects().front();
+            REQUIRE(object.support_layers().size() > 2);
+
+            const MatchOutcome m = match_outcome(object);
+            // Something was matched, and all of it went to B.
+            REQUIRE(m.bucket_length.count(1) == 1);
+            CHECK(m.bucket_length.at(1) > 10.);
+            CHECK(m.bucket_length.count(0) == 0);
+            // Every layer that prints leftover support prints it in B.
+            CHECK(m.residual_layers.count(0) == 0);
+            // The support brim pads / first support layer follow the support above them: B, and
+            // (no raft) even over a configured filament.
+            CHECK(m.plate_residual == 1);
+            CHECK(m.plate_all_roles);
+
+            // End to end: in the G-code every support extrusion, the first layer's included, is
+            // printed with B.
+            GCodeProcessorResult result;
+            const boost::filesystem::path out = Slic3r::Test::scratch_path(".gcode");
+            print.export_gcode(out.string(), &result, nullptr);
+            boost::nowide::remove(out.string().c_str());
+            float first_z = std::numeric_limits<float>::max();
+            for (const auto &move : result.moves)
+                if (move.type == EMoveType::Extrude)
+                    first_z = std::min(first_z, move.position.z());
+            std::map<int, size_t> support_moves, first_layer_support_moves;
+            for (const auto &move : result.moves) {
+                if (move.type != EMoveType::Extrude)
+                    continue;
+                if (move.extrusion_role != erSupportMaterial && move.extrusion_role != erSupportMaterialInterface &&
+                    move.extrusion_role != erSupportTransition)
+                    continue;
+                ++support_moves[int(move.extruder_id)];
+                if (std::abs(move.position.z() - first_z) < 1e-4f)
+                    ++first_layer_support_moves[int(move.extruder_id)];
+            }
+            REQUIRE(support_moves.count(1) == 1);
+            CHECK(support_moves.count(0) == 0);
+            REQUIRE(first_layer_support_moves.count(1) == 1);
+            CHECK(first_layer_support_moves.size() == 1);
+        }
+    }
+}
+
+TEST_CASE("Support filament matching: partially painted part - the interface follows the painted surface above",
+          "[SupportMaterial][chameleon][paint]")
+{
+    // The slab is painted B, the leg keeps its assigned A. The support under the slab touches B, so
+    // its interface is B; the plate layer follows whatever the support right above it prints.
+    Slic3r::Print print;
+    Slic3r::Model model;
+    make_painted_table_print(print, model, painted_table_config(true), SlabPaint::SlabOnly);
+    const PrintObject &object = *print.objects().front();
+    REQUIRE(object.support_layers().size() > 2);
+
+    const MatchOutcome m = match_outcome(object);
+    REQUIRE(m.interface_bucket_length.count(1) == 1);
+    CHECK(m.interface_bucket_length.at(1) > 10.);
+    CHECK(m.interface_bucket_length.count(0) == 0);
+
+    // Plate layer: the dominant filament of the next support layer that prints anything.
+    const SupportLayer *above = nullptr;
+    for (const SupportLayer *layer : object.support_layers())
+        if (layer != object.support_layers().front() &&
+            (! layer->interface_by_extruder.empty() || ! layer->support_fills.entities.empty())) {
+            above = layer;
+            break;
+        }
+    REQUIRE(above != nullptr);
+    std::map<unsigned, double> above_length;
+    for (const auto &[extruder, bucket] : above->interface_by_extruder)
+        above_length[extruder] += total_path_length_mm(bucket);
+    if (above->chameleon_residual_extruder >= 0)
+        above_length[unsigned(above->chameleon_residual_extruder)] += total_path_length_mm(above->support_fills);
+    REQUIRE(! above_length.empty());
+    const auto dominant = std::max_element(above_length.begin(), above_length.end(),
+                                           [](const auto &l, const auto &r) { return l.second < r.second; });
+    CHECK(m.plate_residual == int(dominant->first));
+}
+
+TEST_CASE("Support filament matching: by-object sequence matches too", "[SupportMaterial][chameleon][paint]")
+{
+    DynamicPrintConfig config = painted_table_config(true);
+    config.set_deserialize_strict({ { "print_sequence", "by object" } });
+    Slic3r::Print print;
+    Slic3r::Model model;
+    make_painted_table_print(print, model, config, SlabPaint::All);
+    const MatchOutcome m = match_outcome(*print.objects().front());
+    REQUIRE(m.bucket_length.count(1) == 1);
+    CHECK(m.bucket_length.at(1) > 10.);
+    CHECK(m.bucket_length.count(0) == 0);
+    CHECK(m.plate_residual == 1);
+}
+
+TEST_CASE("Support filament matching off: no support layer is touched", "[SupportMaterial][chameleon][paint]")
+{
+    Slic3r::Print print;
+    Slic3r::Model model;
+    make_painted_table_print(print, model, painted_table_config(false), SlabPaint::All);
+    const PrintObject &object = *print.objects().front();
+    REQUIRE(object.support_layers().size() > 2);
+    for (const SupportLayer *layer : object.support_layers()) {
+        CHECK(layer->interface_by_extruder.empty());
+        CHECK(layer->chameleon_residual_extruder == -1);
+        CHECK_FALSE(layer->chameleon_residual_all_roles);
+        CHECK_FALSE(layer->chameleon_interface_visited);
+    }
 }

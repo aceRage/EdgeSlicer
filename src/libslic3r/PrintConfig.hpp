@@ -510,6 +510,16 @@ enum CounterboreHoleBridgingOption {
      wtwRib
  };
 
+// Which prime tower tool changes count as a "tower interface" (a material printed onto a
+// different one) for the wipe_tower_interface_* options. Bambu Studio decides this per layer from
+// its per-adhesion-category block planner, which neither tower generator here has; these modes
+// decide it per tool change instead. See GCode/WipeTowerInterface.hpp.
+enum TowerInterfaceTrigger {
+    titEveryToolChange = 0,   // every tool change on the tower
+    titMaterialChange,        // filament_type differs, or one of the two is a support filament
+    titMaterialFamilyChange,  // the material families differ (PLA and PLA-CF are one family)
+};
+
 static std::string bed_type_to_gcode_string(const BedType type)
 {
     std::string type_str;
@@ -629,6 +639,7 @@ CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(CounterboreHoleBridgingOption)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(PrintHostType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(AuthorizationType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(WipeTowerWallType)
+CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(TowerInterfaceTrigger)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(PerimeterGeneratorType)
 // Snapmaker: flow-variant
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(FilamentVolumeType)
@@ -639,6 +650,32 @@ CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(NozzleVolumeType)
 #undef CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS
 
 class DynamicPrintConfig;
+
+// While one of these is alive on a thread, configs loaded on that thread keep the shipped meaning
+// of two Bambu Studio keys that the vendor presets under resources/profiles carry:
+// enable_tower_interface_features is not fanned out into the wipe_tower_interface_* options
+// (PrintConfigDef::handle_legacy_composite) and prime_tower_skip_points is not read into
+// wipe_tower_wall_gap (Format/BambuKeyAliases.cpp). PresetBundle::load_vendor_configs_from_json
+// holds one, so the bundled system presets print exactly as before these mappings existed, while
+// a Bambu project, a Bambu preset the user imports and a loose preset file are still mapped.
+// Set kMapSystemPresetTowerKeys to true to map the bundled presets as well.
+class SystemPresetTowerKeysScope
+{
+public:
+    static constexpr bool kMapSystemPresetTowerKeys = false;
+
+    SystemPresetTowerKeysScope() : m_previous(s_active) { s_active = !kMapSystemPresetTowerKeys; }
+    ~SystemPresetTowerKeysScope() { s_active = m_previous; }
+    SystemPresetTowerKeysScope(const SystemPresetTowerKeysScope &) = delete;
+    SystemPresetTowerKeysScope &operator=(const SystemPresetTowerKeysScope &) = delete;
+
+    // True while the keys above are to be left as the vendor preset has them.
+    static bool active() { return s_active; }
+
+private:
+    bool                      m_previous;
+    static thread_local bool  s_active;
+};
 
 // Defines each and every confiuration option of Slic3r, including the properties of the GUI dialogs.
 // Does not store the actual values, but defines default values.
@@ -1463,6 +1500,10 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloats,              filament_flush_volumetric_speed))  // Ultra: BBS 2.x flush speed (0 = use filament_max_volumetric_speed)
     ((ConfigOptionFloats,              filament_cooling_before_tower))  // Ultra: BBS 2.x change_filament (per-filament, °C)
     ((ConfigOptionInts,                filament_pre_cooling_temperature_nc))  // Ultra (H2C rack): nozzle-change pre-cool target, 0 = off
+    ((ConfigOptionInts,                filament_pre_cooling_temperature))  // BBS: extruder-change pre-cool target, 0 = off
+    ((ConfigOptionFloats,              filament_preheat_temperature_delta))  // BBS: idle-nozzle pre-heat stops this far below the print temperature
+    // BBS (H2C rack): filament pulled back inside the outgoing hotend before it is parked. Nullable like upstream.
+    ((ConfigOptionFloatsNullable,      filament_retract_length_nc))
     ((ConfigOptionInts,                required_nozzle_HRC))
     // BBS
     ((ConfigOptionBool,                scan_first_layer))
@@ -1617,6 +1658,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloats,              grab_length))
     ((ConfigOptionFloats,              hotend_cooling_rate))
     ((ConfigOptionFloats,              hotend_heating_rate))
+    ((ConfigOptionBool,                enable_pre_heating))  // BBS: idle-nozzle pre-cooling / pre-heating (GCode/PreCoolingInjector)
     ((ConfigOptionInts,                nozzle_flush_dataset))
     ((ConfigOptionStrings,             filament_extruder_variant))
     ((ConfigOptionInts,                filament_self_index))
@@ -1787,6 +1829,17 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionFloat,              wipe_tower_rib_width))
     ((ConfigOptionBool,               wipe_tower_fillet_wall))
     ((ConfigOptionBool,               wipe_tower_wall_gap))
+    // Tower interface options (GCode/WipeTowerInterface.hpp), each off by default.
+    ((ConfigOptionBool,               wipe_tower_interface_temp))
+    ((ConfigOptionBool,               wipe_tower_interface_run_in))
+    ((ConfigOptionBool,               wipe_tower_interface_extra_prime))
+    ((ConfigOptionEnum<TowerInterfaceTrigger>, wipe_tower_interface_trigger))
+    // Bambu Studio's single switch for its interface bundle. Load-only: handle_legacy_composite
+    // fans it out into the options above; nothing reads it otherwise.
+    ((ConfigOptionBool,               enable_tower_interface_features))
+    ((ConfigOptionInts,               filament_tower_interface_print_temp))
+    ((ConfigOptionFloats,             filament_tower_interface_pre_extrusion_dist))
+    ((ConfigOptionFloats,             filament_tower_interface_pre_extrusion_length))
     ((ConfigOptionInt,                wipe_tower_filament))
     ((ConfigOptionFloats,             wiping_volumes_extruders))
     ((ConfigOptionInts,       idle_temperature))

@@ -45,6 +45,7 @@
 #include "RemoteAccess.hpp"
 #include "FlashForge/FFDeviceTab.hpp"
 #include "WebViewDialog.hpp"
+#include "HomePanel.hpp"
 #include "../Utils/Process.hpp"
 #include "format.hpp"
 // BBS
@@ -65,6 +66,7 @@
 
 #include "GUI_App.hpp"
 #include "FilamentGroupDialog.hpp"
+#include "DualNozzleState.hpp"
 #include "FlowTypeHelper.hpp"
 #include "SliceModePopup.hpp"
 #include "UnsavedChangesDialog.hpp"
@@ -1102,6 +1104,14 @@ void MainFrame::request_quit(bool discard)
 void MainFrame::shutdown(bool isRecreate)
 {
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << "MainFrame::shutdown enter";
+    // First of all: no phone/agent request, send or control job may queue work for the GUI thread
+    // any more, and what is already queued is dropped. The Plater is torn down below and freed
+    // with this frame, and a request that ran after that crashed (c2a7d4de, 2026-09-22). A quit
+    // also takes this instance off the hub's list now, so the hub stops routing requests here;
+    // a language switch's rebuild reopens the gate once the new frame exists (recreate_GUI).
+    RemoteAccess::close_gui_gate(!isRecreate);
+    if (!isRecreate)
+        RemoteAccess::get().stop();
     // BBS: backup
     Slic3r::set_backup_callback(nullptr);
     if (m_autosave_timer != nullptr)
@@ -1371,11 +1381,10 @@ void MainFrame::init_tabpanel() {
 
         // Send "inactive" to previous tab if leaving a monitored tab
         if (prev_monitored_tab == tpHome && sel != tpHome) {
-            // Leaving homepage
-            if (m_webview) {
-                wxWebView* home_webview = m_webview->getWebView();
-                wxGetApp().page_state_notify_webview(home_webview, "inactive");
-            }
+            // Leaving Home: the hub view pauses; the start page (if it is the one showing) hears
+            // "inactive" from HomePanel.
+            if (m_home)
+                m_home->on_tab_changed(false);
         } else if (prev_monitored_tab == tpMonitor && sel != tpMonitor) {
             // Leaving device page (PrinterWebView)
             if (m_printer_view) {
@@ -1386,11 +1395,10 @@ void MainFrame::init_tabpanel() {
 
         // Send "active" to current tab if entering a monitored tab
         if (sel == tpHome) {
-            // Entering homepage
-            if (m_webview) {
-                wxWebView* home_webview = m_webview->getWebView();
-                wxGetApp().page_state_notify_webview(home_webview, "active");
-            }
+            // Entering Home: the hub view loads (first time) or re-checks the hub; the start page
+            // (if it is the one showing) hears "active" from HomePanel.
+            if (m_home)
+                m_home->on_tab_changed(true);
             prev_monitored_tab = tpHome;
         } else if (sel == tpMonitor) {
             // Entering device page (PrinterWebView)
@@ -1430,15 +1438,19 @@ void MainFrame::init_tabpanel() {
 
     if (wxGetApp().is_editor()) {
         {
-            Slic3r::StartupScopedTimer t("MainFrame::init_tabpanel step=WebViewPanel");
-            m_webview         = new WebViewPanel(m_tabpanel);
+            // Home shows the phone hub. The old start page (m_webview) is built only when asked
+            // for (show_start_page / start_page), so nothing loads it at startup any more.
+            Slic3r::StartupScopedTimer t("MainFrame::init_tabpanel step=HomePanel");
+            m_home = new HomePanel(m_tabpanel);
         }
         Bind(EVT_LOAD_URL, [this](wxCommandEvent &evt) {
+            // A URL for the home page goes to the start page, which is where it always went.
             wxString url = evt.GetString();
-            select_tab(MainFrame::tpHome);
-            m_webview->load_url(url);
+            show_start_page();
+            if (m_webview)
+                m_webview->load_url(url);
         });
-        m_tabpanel->AddPage(m_webview, "", "tab_home_active", "tab_home_active", false);
+        m_tabpanel->AddPage(m_home, "", "tab_home_active", "tab_home_active", false);
         Slic3r::StartupScopedTimer t("MainFrame::init_tabpanel step=ParamsPanel");
         m_param_panel = new ParamsPanel(m_tabpanel, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxBK_LEFT | wxTAB_TRAVERSAL);
       
@@ -2120,6 +2132,26 @@ wxBoxSizer* MainFrame::create_side_tools()
                 });
             p->append_button(slice_all_btn);
             p->append_button(slice_plate_btn);
+            // Bambu two-extruder printers: change the plate's filament -> extruder arrangement
+            // (opens the pre-slice confirmation even when nothing changed, then slices the plate).
+            // Not gated on m_slice_enable: that is false once the plate is sliced, which is exactly
+            // when the arrangement is wanted again (the Slice button itself stays disabled then).
+            // Whenever Slice is available the arrangement is too, whatever the Plater's "slicing" flag
+            // says (the owner found the entry missing once a sliced H2C plate had been reset, 2026-09-23).
+            PartPlate* arrange_plate = m_plater ? m_plater->get_partplate_list().get_curr_plate() : nullptr;
+            if (GUI::DualNozzle::preset_is_dual_nozzle_bambu() && arrange_plate && arrange_plate->has_printable_instances() &&
+                (m_slice_enable || !m_plater->is_background_process_slicing()) && !m_plater->only_gcode_mode() &&
+                !m_plater->using_exported_file()) {
+                SideButton* arrange_btn = new SideButton(p, _L("Filament arrangement..."), "");
+                arrange_btn->SetCornerRadius(0);
+                arrange_btn->Bind(wxEVT_BUTTON, [this, p](wxCommandEvent&) {
+                    p->Dismiss();
+                    if (!m_plater)
+                        return;
+                    GUI::DualNozzle::open_arrangement_and_reslice(m_plater, m_plater->get_partplate_list().get_curr_plate_index());
+                });
+                p->append_button(arrange_btn);
+            }
             p->Popup(m_slice_btn);
         }
     );
@@ -2650,6 +2682,9 @@ void MainFrame::on_sys_color_changed()
 
     MenuFactory::sys_color_changed(m_menubar);
 
+    // Before RecreateAll: the hub view switches theme in place (it is excluded from the reload).
+    if (m_home)
+        m_home->sys_color_changed();
     WebView::RecreateAll();
 
     this->Refresh();
@@ -2921,6 +2956,12 @@ void MainFrame::init_menubar_as_editor()
 
         Bind(wxEVT_UPDATE_UI, [this](wxUpdateUIEvent& evt) { evt.Enable(can_open_project() && (m_recent_projects.GetCount() > 0)); }, recent_projects_submenu->GetId());
 
+        // The Home tab shows the phone hub; the old start page (recent projects, Snapmaker's
+        // model library) stays one click away here.
+        append_menu_item(fileMenu, wxID_ANY, _L("Start page"), _L("Show the start page with recent projects on the Home tab"),
+            [this](wxCommandEvent&) { show_start_page(); }, "", nullptr,
+            [this]() { return m_home != nullptr; }, this);
+
         // BBS: close save project
 #ifndef __APPLE__
         append_menu_item(fileMenu, wxID_ANY, _L("Save Project") + "\t" + ctrl + "S", _L("Save current project to file"),
@@ -2985,6 +3026,9 @@ void MainFrame::init_menubar_as_editor()
             [this](){return can_export_model(); }, this);
         append_menu_item(export_menu, wxID_ANY, _L("Export Bambu 3MF") + dots, _L("Export a project Bambu Studio opens with its settings (settings Bambu Studio does not have are left out)"),
             [this](wxCommandEvent&) { if (m_plater) m_plater->export_bambu_3mf(); }, "menu_export_sliced_file", nullptr,
+            [this](){return can_export_model(); }, this);
+        append_menu_item(export_menu, wxID_ANY, _L("Export && Open in Bambu Studio") + dots, _L("Export a project Bambu Studio opens with its settings, then launch Bambu Studio with it"),
+            [this](wxCommandEvent&) { if (m_plater) m_plater->export_and_open_in_bambu_studio(); }, "menu_export_sliced_file", nullptr,
             [this](){return can_export_model(); }, this);
         // BBS export .gcode.3mf
         append_menu_item(export_menu, wxID_ANY, _L("Export plate sliced file") + dots + "\t" + ctrl + "G", _L("Export current sliced file"),
@@ -3645,7 +3689,8 @@ void MainFrame::set_max_recent_count(int max)
         }
         wxGetApp().app_config->set_recent_projects(recent_projects);
         wxGetApp().app_config->save();
-        m_webview->SendRecentList(-1);
+        if (m_webview)
+            m_webview->SendRecentList(-1);
 
         // wcp 订阅
         json data;
@@ -4249,7 +4294,8 @@ void MainFrame::add_to_recent_projects(const wxString& filename)
             recent_projects.push_back(into_u8(m_recent_projects.GetHistoryFile(i)));
         }
         wxGetApp().app_config->set_recent_projects(recent_projects);
-        m_webview->SendRecentList(0);
+        if (m_webview)
+            m_webview->SendRecentList(0);
 
         // wcp 订阅
         json data;
@@ -4401,7 +4447,8 @@ void MainFrame::open_recent_project(size_t file_id, wxString const & filename)
                 recent_projects.push_back(into_u8(m_recent_projects.GetHistoryFile(i)));
             }
             wxGetApp().app_config->set_recent_projects(recent_projects);
-            m_webview->SendRecentList(-1);
+            if (m_webview)
+                m_webview->SendRecentList(-1);
 
             // wcp 订阅
             json data;
@@ -4455,12 +4502,29 @@ void MainFrame::remove_recent_project(size_t file_id, wxString const &filename)
         recent_projects.push_back(into_u8(m_recent_projects.GetHistoryFile(i)));
     }
     wxGetApp().app_config->set_recent_projects(recent_projects);
-    m_webview->SendRecentList(-1);
+    if (m_webview)
+        m_webview->SendRecentList(-1);
 
     // wcp 订阅
     json data;
     wxGetApp().mainframe->get_recent_projects(data, INT_MAX);
     wxGetApp().recent_file_notify(data);
+}
+
+WebViewPanel* MainFrame::start_page()
+{
+    if (m_webview == nullptr && m_home != nullptr)
+        m_webview = m_home->start_page();
+    return m_webview;
+}
+
+void MainFrame::show_start_page()
+{
+    if (m_home == nullptr)
+        return;
+    start_page();
+    m_home->show_start_page();
+    select_tab(MainFrame::tpHome);
 }
 
 void MainFrame::load_url(wxString url)

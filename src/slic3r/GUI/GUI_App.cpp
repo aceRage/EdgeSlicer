@@ -1,6 +1,8 @@
 #include "libslic3r/Technologies.hpp"
 #include "libslic3r/FilamentHotBedNozzleRules.hpp"
 #include "GUI_App.hpp"
+#include "AmsUiPreview.hpp"
+#include "DarkModeBackground.hpp"
 #include "RemoteAccess.hpp"
 #include "RemoteHub.hpp"
 #include "GUI_Init.hpp"
@@ -142,6 +144,8 @@
 #include "HintNotification.hpp"
 #include "bury_cfg/bury_point.hpp"
 #include "sentry_wrapper/SentryWrapper.hpp"
+#include "UntrustedSettingsGuard.hpp"
+#include "PageServerSecurity.hpp"
 //#ifdef WIN32
 //#include "BaseException.h"
 //#endif
@@ -151,6 +155,7 @@
 #include <dbt.h>
 #include <shlobj.h>
 #include <shellapi.h> // ShellExecuteEx, for registering the Bambu camera component
+#include <netlistmgr.h> // INetworkListManager: the silent Snapmaker sign-in skips when offline
 
 #ifdef __WINDOWS__
 #ifdef _MSW_DARK_MODE
@@ -171,6 +176,7 @@ typedef BOOL (WINAPI *LPFN_ISWOW64PROCESS2)(
 #ifdef _WIN32
 #include <boost/dll/runtime_symbol_info.hpp>
 #endif
+#include "slic3r/Utils/SnapmakerSilentLogin.hpp"
 
 #ifdef WIN32
 #include "dev-utils/BaseException.h"
@@ -1656,6 +1662,18 @@ void GUI_App::post_init()
            }
         }
     }
+    // Snapmaker account: sign back in from the saved web session, quietly, once the window is up
+    // and the first-start work above has had its turn. Never blocks: the page loads in a hidden
+    // web view and the account lookup runs on a worker thread.
+    {
+        wxTimer* silent_login_timer = new wxTimer(); // owns itself: notifies its own handlers
+        silent_login_timer->Bind(wxEVT_TIMER, [this, silent_login_timer](wxTimerEvent&) {
+            CallAfter([silent_login_timer] { delete silent_login_timer; });
+            sm_start_silent_login();
+        });
+        silent_login_timer->StartOnce(2000);
+    }
+
     BOOST_LOG_TRIVIAL(info) << "finished post_init";
 //BBS: remove the single instance currently
 #ifdef _WIN32
@@ -1733,6 +1751,15 @@ void GUI_App::shutdown(bool isRecreate)
         delete sm_login_dlg;
         sm_login_dlg = nullptr;
     }
+
+    if (sm_silent_login_dlg != nullptr) {
+        // Not deferred: the main frame, its parent, goes next.
+        sm_silent_login_dlg->stop_silent();
+        delete sm_silent_login_dlg;
+        sm_silent_login_dlg = nullptr;
+    }
+    if (m_sm_silent_active)
+        sm_cancel_silent_login("app closing");
 
     if (web_device_dialog != nullptr) {
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(": web device dialog");
@@ -2552,6 +2579,14 @@ void GUI_App::init_networking_callbacks()
                     MachineObject* obj = m_device_manager->get_my_machine(dev_id);
                     wxCommandEvent event(EVT_CONNECT_LAN_MODE_PRINT);
 
+                    // What the plug-in says about the LAN session, for the reconnect tick
+                    // (LanReconnectLadder::lan_tick_step): a quiet printer whose session is up is
+                    // asked for a report, a session reported down is re-dialled.
+                    if (obj)
+                        obj->set_lan_session_up(state == ConnectStatus::ConnectStatusOk);
+                    if (MachineObject* local = m_device_manager->get_local_machine(dev_id); local && local != obj)
+                        local->set_lan_session_up(state == ConnectStatus::ConnectStatusOk);
+
                     if (obj) {
 
                         if (obj->is_lan_mode_printer()) {
@@ -2679,6 +2714,9 @@ void GUI_App::init_networking_callbacks()
                 }
 
                 if (obj) {
+                    // A LAN report only ever arrives over a live LAN session - even one the host
+                    // never saw an Ok for (a connect_printer the plug-in answered "already up").
+                    obj->set_lan_session_up(true);
                     obj->parse_json(msg, DeviceManager::key_field_only);
                     if (this->m_device_manager->get_selected_machine() == obj && obj->is_ams_need_update) {
                         GUI::wxGetApp().sidebar().load_ams_list(obj->dev_id, obj);
@@ -2686,6 +2724,7 @@ void GUI_App::init_networking_callbacks()
                 }
                 obj = m_device_manager->get_local_machine(dev_id);
                 if (obj) {
+                    obj->set_lan_session_up(true);
                     obj->parse_json(msg, DeviceManager::key_field_only);
                 }
                 });
@@ -3458,6 +3497,8 @@ bool GUI_App::on_init_inner()
     }
     BOOST_LOG_TRIVIAL(info) << "loading systen presets...";
     preset_bundle = new PresetBundle();
+    // Preset / G-code config imports get the same untrusted-settings check as project files.
+    install_untrusted_config_filter();
 
     // just checking for existence of Slic3r::data_dir is not enough : it may be an empty directory
     // supplied as argument to --datadir; in that case we should still run the wizard
@@ -3640,14 +3681,17 @@ bool GUI_App::on_init_inner()
     // and a Bambu-original plug-in - which our host cannot run on Windows - is replaced, unless the
     // escape hatch `ultranet_keep_foreign_plugin` is set. BambuSource stays in the sidecar so the
     // host does not LoadLibrary it as the media filter from the exe dir.
+    // macOS and Linux run the same logic with their own library names (libbambu_networking.dylib /
+    // .so) and sidecar location (Contents/Resources/ultranet in the app bundle; bin/ultranet in
+    // the AppImage) - see network_library_name() and ultranet_sidecar_dir().
     try {
         namespace fs = boost::filesystem;
         boost::system::error_code ec;
         const fs::path pf      = fs::path(data_dir()) / "plugins";
         const fs::path exe_dir = fs::path(wxStandardPaths::Get().GetExecutablePath().ToUTF8().data()).parent_path();
-        const fs::path bundled = exe_dir / "ultranet";
-        const fs::path ours    = bundled / "bambu_networking.dll";
-        const fs::path theirs  = pf / "bambu_networking.dll";
+        const fs::path bundled = ultranet_sidecar_dir(exe_dir);
+        const fs::path ours    = bundled / network_library_name();
+        const fs::path theirs  = pf / network_library_name();
 
         const bool sidecar_present   = fs::exists(ours, ec);
         const bool installed_present = fs::exists(theirs, ec);
@@ -3676,7 +3720,7 @@ bool GUI_App::on_init_inner()
 
         // A previous replacement leaves the old DLL renamed beside ours (a loaded image can be
         // renamed on Windows but not deleted); clear it now that nothing should hold it.
-        const fs::path replaced = pf / "bambu_networking.dll.replaced";
+        const fs::path replaced = pf / (std::string(network_library_name()) + ".replaced");
         if (fs::exists(replaced, ec))
             fs::remove(replaced, ec);
 
@@ -3701,16 +3745,7 @@ bool GUI_App::on_init_inner()
                 if (action == PluginSync::ReplaceForeign && ! fs::exists(theirs, ec) && fs::exists(replaced, ec))
                     fs::rename(replaced, theirs, ec);
             } else {
-                // Ultra (live view): our sidecar BambuSource is a placeholder. If the user has
-                // already fetched Bambu's real camera component into plugins/, it must survive
-                // this upgrade - stamping the stub back over it would break live view again.
-                const char *bs = "BambuSource.dll";
-                if (fs::exists(bundled / bs, ec)) {
-                    if (may_overwrite_bambusource(fs::exists(pf / bs, ec), exports_dll_register_server(pf / bs)))
-                        fs::copy_file(bundled / bs, pf / bs, fs::copy_option::overwrite_if_exists, ec);
-                    else
-                        BOOST_LOG_TRIVIAL(info) << "[UltraNet] keeping the installed Bambu camera component in " << pf.string();
-                }
+                // BambuSource is synced on its own below.
                 write_marker();
                 BOOST_LOG_TRIVIAL(info) << "[UltraNet] " << (action == PluginSync::InstallFresh ? "installed" : "updated")
                                         << " the bundled network plug-in in " << pf.string();
@@ -3722,6 +3757,50 @@ bool GUI_App::on_init_inner()
             BOOST_LOG_TRIVIAL(info) << "[UltraNet] existing plug-in matches the bundled one; marker written";
         } else if (keep_foreign && sidecar_present && installed_present && ! identical) {
             BOOST_LOG_TRIVIAL(warning) << "[UltraNet] ultranet_keep_foreign_plugin is set; leaving a foreign network plug-in in " << pf.string();
+        }
+
+        // BambuSource follows the sidecar on its own. It carries the storage browser's tunnel now,
+        // so it can change while bambu_networking.dll stays byte-identical, and it used to be
+        // copied only together with a plug-in replacement - with an overwrite that silently fails
+        // while another EdgeSlicer instance (the hub) has the old file loaded, after which nothing
+        // retried. Move the old one aside first, like the plug-in above. Bambu's real camera
+        // filter, when the user fetched it, is never replaced (live view needs it).
+        {
+            const char    *bs_name     = bambu_source_library_name(); // BambuSource.dll / libBambuSource.dylib / .so
+            const fs::path bs_ours     = bundled / bs_name;
+            const fs::path bs_theirs   = pf / bs_name;
+            const fs::path bs_replaced = pf / (std::string(bs_name) + ".replaced");
+            if (fs::exists(bs_replaced, ec))
+                fs::remove(bs_replaced, ec);
+            const bool bs_bundled   = fs::exists(bs_ours, ec);
+            const bool bs_installed = fs::exists(bs_theirs, ec);
+            bool       bs_same      = false;
+            if (bs_bundled && bs_installed && fs::file_size(bs_ours, ec) == fs::file_size(bs_theirs, ec)) {
+                boost::nowide::ifstream a(bs_ours.string().c_str(), std::ios::binary), b(bs_theirs.string().c_str(), std::ios::binary);
+                std::string sa((std::istreambuf_iterator<char>(a)), std::istreambuf_iterator<char>());
+                std::string sb((std::istreambuf_iterator<char>(b)), std::istreambuf_iterator<char>());
+                bs_same = ! sa.empty() && sa == sb;
+            }
+            const bool bs_real = bs_installed && is_real_camera_component(bs_theirs); // DllRegisterServer on Windows, no UltraNet tag elsewhere
+            if (bambusource_needs_refresh(bs_bundled, bs_installed, bs_same, bs_real, keep_foreign)) {
+                fs::create_directories(pf, ec);
+                if (bs_installed) {
+                    fs::rename(bs_theirs, bs_replaced, ec);
+                    ec.clear();
+                }
+                fs::copy_file(bs_ours, bs_theirs, fs::copy_option::overwrite_if_exists, ec);
+                if (ec) {
+                    BOOST_LOG_TRIVIAL(error) << "[UltraNet] copying the bundled BambuSource failed: " << ec.message()
+                                             << " (will retry on the next start)";
+                    if (! fs::exists(bs_theirs, ec) && fs::exists(bs_replaced, ec))
+                        fs::rename(bs_replaced, bs_theirs, ec);
+                } else {
+                    BOOST_LOG_TRIVIAL(info) << "[UltraNet] " << (bs_installed ? "updated" : "installed")
+                                            << " the bundled BambuSource in " << pf.string();
+                }
+            } else if (bs_bundled && bs_real && ! bs_same) {
+                BOOST_LOG_TRIVIAL(info) << "[UltraNet] keeping the installed Bambu camera component in " << pf.string();
+            }
         }
     } catch (...) {}
 
@@ -3812,6 +3891,17 @@ bool GUI_App::on_init_inner()
 
     // Let the libslic3r know the callback, which will translate messages on demand.
     Slic3r::I18N::set_translate_callback(libslic3r_translate_callback);
+
+    // Test aid (EDGESLICER_TEST_AMS_PREVIEW): render the AMS panels to PNG and stop here, before
+    // any window, hub or listener exists. Inert unless a tester sets the variable.
+    if (run_ams_ui_preview_if_asked()) {
+        flush_logs();
+#ifdef _WIN32
+        ::TerminateProcess(::GetCurrentProcess(), 0);
+#else
+        std::_Exit(0);
+#endif
+    }
 
     BOOST_LOG_TRIVIAL(info) << "create the main window";
     mainframe = new MainFrame();
@@ -4463,10 +4553,14 @@ void GUI_App::UpdateDarkUI(wxWindow* window, bool highlited/* = false*/, bool ju
     if (m_is_dark_mode) {
 
         auto orig_col = window->GetBackgroundColour();
-        auto bg_col = StateColor::darkModeColorFor(orig_col);
-        // there are cases where the background color of an item is bright, specifically:
-        // * the background color of a button: #009688  -- 73
-        if (bg_col != orig_col) {
+        // DarkModeBackground.hpp: a child painted with its parent's brush must not get the dark
+        // twin of the system button face pinned on it (the grey band behind every label).
+        const DarkBackground dark_bg = dark_mode_background_for(window);
+        const wxColour       bg_col  = dark_bg.colour;
+        if (dark_bg.action == DarkBackground::Action::SetParent ||
+            (dark_bg.action == DarkBackground::Action::Map && bg_col != orig_col)) {
+            // there are cases where the background color of an item is bright, specifically:
+            // * the background color of a button: #009688  -- 73
             window->SetBackgroundColour(bg_col);
         }
 
@@ -4884,6 +4978,7 @@ void GUI_App::recreate_GUI(const wxString &msg_name)
     update_publish_status();
 
     m_is_recreating_gui = false;
+    RemoteAccess::reopen_gui_gate(); // closed by mainframe->shutdown(true) above
 
     //reload home and device page
     sm_disconnect_current_machine(true);
@@ -5305,7 +5400,10 @@ void GUI_App::sm_get_login_info() {
         wxString    strJS      = wxString::Format("window.postMessage(%s)", login_cmd);
         GUI::wxGetApp().run_script(strJS);
     }
-    mainframe->m_webview->SetLoginPanelVisibility(true);
+    // The start page is built on demand now (Home shows the phone hub): nothing to update if it
+    // was never opened - it asks for the login state itself when it loads.
+    if (mainframe && mainframe->m_webview)
+        mainframe->m_webview->SetLoginPanelVisibility(true);
 }
 
 void GUI_App::sm_request_login(bool show_user_info)
@@ -5320,6 +5418,11 @@ void GUI_App::sm_request_login(bool show_user_info)
 
 void GUI_App::sm_ShowUserLogin(bool show)
 {
+    // One sign-in web view at a time: the user's (or a page's) request replaces a startup
+    // attempt still in flight. With a valid session this dialog closes itself just the same.
+    if (m_sm_silent_active)
+        sm_cancel_silent_login(show ? "sign-in dialog opened" : "sign-in requested by a page");
+
     // BBS: User Login Dialog
     if (show) {
         try {
@@ -5348,8 +5451,143 @@ void GUI_App::sm_ShowUserLogin(bool show)
     }
 }
 
+// false only when the OS says there is no network connection at all. Unknown (no answer, not
+// Windows) counts as connected: the attempt then just times out like any other failure. "No
+// internet" alone is not trusted - Windows' internet probe is wrong behind some VPNs and proxies.
+static bool sm_network_connected()
+{
+#ifdef __WXMSW__
+    INetworkListManager* nlm = nullptr;
+    if (FAILED(CoCreateInstance(__uuidof(NetworkListManager), nullptr, CLSCTX_ALL, __uuidof(INetworkListManager),
+                                reinterpret_cast<void**>(&nlm))) || nlm == nullptr)
+        return true;
+    NLM_CONNECTIVITY status = NLM_CONNECTIVITY_DISCONNECTED;
+    const HRESULT    hr     = nlm->GetConnectivity(&status);
+    nlm->Release();
+    if (FAILED(hr))
+        return true;
+    return status != NLM_CONNECTIVITY_DISCONNECTED;
+#else
+    return true;
+#endif
+}
+
+void GUI_App::sm_start_silent_login()
+{
+    SMSilentLogin::StartupInputs in;
+    in.pref_enabled      = app_config->get_bool(SMSilentLogin::k_pref_key);
+    in.is_editor         = is_editor();
+    // SNORCA_SM_SILENT_LOGIN=1 runs the attempt in a hidden instance too. Test-only knob: it lets
+    // an agent check the never-shown path without a window on anyone's screen. No effect unless set.
+    wxString force_env;
+    const bool force_hidden = wxGetEnv("SNORCA_SM_SILENT_LOGIN", &force_env) && force_env == "1";
+    in.hidden_instance   = m_hub_managed && !force_hidden;
+    if (m_hub_managed && force_hidden)
+        BOOST_LOG_TRIVIAL(warning) << "Snapmaker silent login: SNORCA_SM_SILENT_LOGIN=1, attempting in a hidden instance";
+    in.main_window_ready = mainframe != nullptr && !m_is_closing;
+    in.already_signed_in = m_login_userinfo.is_user_login();
+    in.login_dialog_open = m_sm_silent_active || (sm_login_dlg != nullptr && sm_login_dlg->IsShown());
+    // Asked last and only when everything else says go: it is a COM call.
+    in.network_down = SMSilentLogin::skip_reason(in).empty() && !sm_network_connected();
+
+    const std::string skip = SMSilentLogin::skip_reason(in);
+    if (!skip.empty()) {
+        BOOST_LOG_TRIVIAL(warning) << SMSilentLogin::log_line(SMSilentLogin::Outcome::Skipped, skip);
+        flush_logs();
+        return;
+    }
+
+    const unsigned gen   = ++m_sm_silent_gen;
+    m_sm_silent_active   = true;
+    try {
+        sm_silent_login_dlg = new SMUserLogin(/* isLogout */ false, /* silent */ true);
+    } catch (const std::exception& e) {
+        sm_silent_login_dlg = nullptr;
+        sm_finish_silent_login(SMSilentLogin::log_line(SMSilentLogin::Outcome::Failed, std::string("web view: ") + e.what()));
+        return;
+    }
+    BOOST_LOG_TRIVIAL(info) << "Snapmaker silent login: started (hidden web view, gives up after "
+                            << SMSilentLogin::k_overall_timeout_ms / 1000 << " s)";
+    sm_silent_login_dlg->start_silent([this, gen](const SMUserLogin::SilentResult& r) { sm_on_silent_login_result(gen, r); });
+}
+
+void GUI_App::sm_on_silent_login_result(unsigned gen, const SMUserLogin::SilentResult& r)
+{
+    // Called from inside the hidden dialog's own event handler: tear it down deferred.
+    sm_teardown_silent_login_dlg();
+    if (gen != m_sm_silent_gen || !m_sm_silent_active)
+        return; // cancelled meanwhile
+
+    if (r.token.empty()) {
+        const SMSilentLogin::Outcome o = r.outcome == "no session" ? SMSilentLogin::Outcome::NoSession :
+                                         r.outcome == "timed out"  ? SMSilentLogin::Outcome::TimedOut :
+                                                                     SMSilentLogin::Outcome::Failed;
+        sm_finish_silent_login(SMSilentLogin::log_line(o, r.detail));
+        return;
+    }
+
+    // The session was valid. Look the account up off the UI thread, then fill SMUserInfo on it
+    // (the same end state as a manual sign-in: Account menu, pages told through the login events).
+    const std::string token = r.token;
+    Http http = Http::get(r.user_info_url);
+    http.header("Authorization", token);
+    http.timeout_max(15);
+    http.on_complete([this, gen, token](std::string body, unsigned status) {
+            CallAfter([this, gen, token, body, status] {
+                if (gen != m_sm_silent_gen || !m_sm_silent_active)
+                    return;
+                if (status == 200 && SMUserLogin::apply_account_info(body, token)) {
+                    sm_get_login_info();
+                    sm_finish_silent_login(SMSilentLogin::log_line(SMSilentLogin::Outcome::SignedIn));
+                } else {
+                    sm_finish_silent_login(SMSilentLogin::log_line(SMSilentLogin::Outcome::Failed,
+                                                                   "account lookup HTTP " + std::to_string(status)));
+                }
+            });
+        })
+        .on_error([this, gen](std::string /*body*/, std::string error, unsigned status) {
+            CallAfter([this, gen, error, status] {
+                if (gen != m_sm_silent_gen || !m_sm_silent_active)
+                    return;
+                sm_finish_silent_login(SMSilentLogin::log_line(SMSilentLogin::Outcome::Failed,
+                                                               "account lookup HTTP " + std::to_string(status) +
+                                                                   (error.empty() ? std::string() : ", " + error)));
+            });
+        })
+        .perform();
+}
+
+void GUI_App::sm_finish_silent_login(const std::string& log_line)
+{
+    m_sm_silent_active = false;
+    BOOST_LOG_TRIVIAL(warning) << log_line;
+    flush_logs(); // the file sink is buffered; this line is what someone reads when sign-in "did not stick"
+}
+
+void GUI_App::sm_teardown_silent_login_dlg()
+{
+    if (sm_silent_login_dlg == nullptr)
+        return;
+    SMUserLogin* dlg    = sm_silent_login_dlg;
+    sm_silent_login_dlg = nullptr;
+    dlg->stop_silent();
+    // Deferred: this can run inside one of the dialog's own web view events.
+    dlg->Destroy();
+}
+
+void GUI_App::sm_cancel_silent_login(const std::string& reason)
+{
+    sm_teardown_silent_login_dlg();
+    if (!m_sm_silent_active)
+        return;
+    ++m_sm_silent_gen; // an account lookup still in flight is dropped when it answers
+    sm_finish_silent_login(SMSilentLogin::log_line(SMSilentLogin::Outcome::Cancelled, reason));
+}
+
 void GUI_App::sm_request_user_logout()
 {
+    if (m_sm_silent_active)
+        sm_cancel_silent_login("signed out");
     if (m_login_userinfo.is_user_login()) {
         m_login_userinfo.set_user_login(false);
     }
@@ -5395,7 +5633,8 @@ void GUI_App::get_login_info()
             wxString strJS = wxString::Format("window.postMessage(%s)", logout_cmd);
             GUI::wxGetApp().run_script(strJS);
         }
-        mainframe->m_webview->SetLoginPanelVisibility(true);
+        if (mainframe->m_webview)
+            mainframe->m_webview->SetLoginPanelVisibility(true);
     }
 }
 
@@ -5507,10 +5746,73 @@ wxString GUI_App::get_homepage_url()
     return url;
 }
 
-std::string GUI_App::handle_web_request(std::string cmd, const std::vector<std::string>& /*limitCmds*/)
+static std::string web_request_command(const std::string& cmd)
 {
-    // The Orca-Flashforge variant filters commands for embedded pages; Phase A delegates unfiltered.
+    const nlohmann::json j = nlohmann::json::parse(cmd, nullptr, false);
+    if (j.is_object() && j.contains("command") && j["command"].is_string())
+        return j["command"].get<std::string>();
+    return std::string();
+}
+
+// scheme://host[:port] of a page, for the log (never the query: our URLs carry the page secret).
+static std::string page_origin_for_log(const std::string& url)
+{
+    untrusted::Url u;
+    if (untrusted::parse_url(url, u))
+        return u.scheme + "://" + u.host + (u.port > 0 ? ":" + std::to_string(u.port) : std::string());
+    return url.substr(0, std::min<size_t>(url.find_first_of("?#"), 64));
+}
+
+// A URL a web page asks us to open goes to the system browser only when it is a plain web link
+// (http/https, or mailto:). wxLaunchDefaultBrowser hands anything else to the shell: file: paths,
+// UNC shares, ms-msdt: and other protocol handlers - a way to start programs from a page.
+static void launch_external_url_from_page(const std::string& url)
+{
+    if (!untrusted::is_safe_to_open_externally(url)) {
+        BOOST_LOG_TRIVIAL(warning) << "web bridge: refused to open a non-web URL (" << page_origin_for_log(url) << ")";
+        return;
+    }
+    wxLaunchDefaultBrowser(wxString::FromUTF8(url));
+}
+
+std::string GUI_App::handle_web_request(std::string cmd, const std::vector<std::string>& limitCmds)
+{
+    // Only the commands the embedding view expects (the FlashForge banner, a remote page).
+    const std::string command = web_request_command(cmd);
+    if (std::find(limitCmds.begin(), limitCmds.end(), command) == limitCmds.end()) {
+        BOOST_LOG_TRIVIAL(warning) << "web bridge: ignored \"" << command << "\" (not expected from this view)";
+        return "";
+    }
     return handle_web_request(cmd);
+}
+
+bool GUI_App::is_own_page_url(const std::string& url) const
+{
+    if (untrusted::is_page_server_url(url, int(m_page_http_server.get_port())))
+        return true;
+    const std::string path = untrusted::local_path_from_file_url(url);
+    if (path.empty())
+        return false;
+    std::string key, web_key;
+    if (!page_server::resolve_final_path(path, &key, nullptr) ||
+        !page_server::resolve_final_path(resources_dir() + "/web", &web_key, nullptr))
+        return false;
+    return page_server::key_is_within(key, web_key);
+}
+
+std::string GUI_App::handle_web_request_from(const std::string& page_url, std::string cmd)
+{
+    if (is_own_page_url(page_url))
+        return handle_web_request(std::move(cmd));
+    // Not our page: the commands below only open an http(s) link in the system browser (checked
+    // again where it is opened) or forward a key press. Opening projects or folders, downloads,
+    // login and plug-in actions stay with our own pages.
+    static const char* const allowed[] = {"common_openurl", "userguide_wiki_open", "get_web_shortcut"};
+    const std::string command = web_request_command(cmd);
+    if (std::find(std::begin(allowed), std::end(allowed), command) != std::end(allowed))
+        return handle_web_request(std::move(cmd));
+    BOOST_LOG_TRIVIAL(warning) << "web bridge: ignored \"" << command << "\" from a page that is not ours (" << page_origin_for_log(page_url) << ")";
+    return "";
 }
 
 void GUI_App::get_uds_id(std::string& uid, std::string& did, std::string& sid)
@@ -5680,7 +5982,7 @@ std::string GUI_App::handle_web_request(std::string cmd)
                     pt::ptree                    data_node = root.get_child("data");
                     boost::optional<std::string> path      = data_node.get_optional<std::string>("url");
                     if (path.has_value()) {
-                        wxLaunchDefaultBrowser(path.value());
+                        launch_external_url_from_page(path.value());
                     }
                 }
             }
@@ -5698,7 +6000,7 @@ std::string GUI_App::handle_web_request(std::string cmd)
             else if (command_str.compare("common_openurl") == 0) {
                 boost::optional<std::string> path      = root.get_optional<std::string>("url");
                 if (path.has_value()) {
-                    wxLaunchDefaultBrowser(path.value());
+                    launch_external_url_from_page(path.value());
                 }
             }
             else if (command_str.compare("homepage_makerlab_get") == 0) {
@@ -6914,7 +7216,8 @@ void GUI_App::stop_page_http_server()
 
 void GUI_App::switch_staff_pick(bool on)
 {
-    mainframe->m_webview->SendDesignStaffpick(on);
+    if (mainframe && mainframe->m_webview)
+        mainframe->m_webview->SendDesignStaffpick(on);
 }
 
 bool GUI_App::switch_language()
@@ -7333,7 +7636,8 @@ void GUI_App::update_mode()
         mainframe->m_param_dialog->panel()->update_mode();
     if (mainframe->m_printer_view)
         mainframe->m_printer_view->update_mode();
-    mainframe->m_webview->update_mode();
+    if (mainframe->m_webview)
+        mainframe->m_webview->update_mode();
 
 #ifdef _MSW_DARK_MODE
     if (!wxGetApp().tabs_as_menu())
@@ -7351,7 +7655,8 @@ void GUI_App::update_mode()
 }
 
 void GUI_App::update_internal_development() {
-    mainframe->m_webview->update_mode();
+    if (mainframe->m_webview)
+        mainframe->m_webview->update_mode();
     if (mainframe->m_printer_view)
         mainframe->m_printer_view->update_mode();
 }

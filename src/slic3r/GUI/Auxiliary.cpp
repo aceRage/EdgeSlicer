@@ -27,6 +27,7 @@
 #include "GUI_App.hpp"
 #include "GUI_ObjectList.hpp"
 #include "MainFrame.hpp"
+#include "UntrustedSettingsGuard.hpp"
 #include "Widgets/Label.hpp"
 
 namespace Slic3r { namespace GUI {
@@ -428,7 +429,9 @@ void AuFile::on_dclick(wxMouseEvent &evt)
     if (m_type == AddFileButton)
         return;
     else
-        wxLaunchDefaultApplication(m_file_path.wstring(), 0);
+        // Ultra: a project's attachments come from whoever made the 3MF; programs and scripts
+        // among them are shown in their folder, not started.
+        open_project_attachment(m_file_path);
 }
 
 void AuFile::on_mouse_left_up(wxMouseEvent &evt)

@@ -409,6 +409,7 @@ in each direction:
 | `prime_tower_fillet_wall` | `wipe_tower_fillet_wall` | same | **new** |
 | `prime_tower_rib_wall` | `wipe_tower_wall_type` | 1 -> `rib`, 0 -> `rectangle` | **new** |
 | `prime_tower_max_speed` | `wipe_tower_max_purge_speed` | same | **new** |
+| `prime_tower_skip_points` | `wipe_tower_wall_gap` | same (not read from the bundled vendor presets, see below) | **new**, both directions |
 | `sparse_infill_lattice_angle_1` / `_2` | `lateral_lattice_angle_1` / `_2` | same | **new**, both directions |
 | `process_notes` | `notes` | same | **new**, both directions |
 | `filament_colour_type` | `filament_colour_mode` | 0 (gradient) <-> 1, 1 (default) <-> 0 | **new**, both directions |
@@ -477,6 +478,28 @@ same file does not also set our key, they now apply:
 | `prime_tower_max_speed` 90, `_rib_width` 8, `_extra_rib_length` 0, `_fillet_wall` 1 | 15-16 | none (our defaults) |
 | `enable_support_ironing` 0, `sparse_infill_lattice_angle_1/2` -45 / 45 | 2 (Qidi) | none (our defaults) |
 | `extruder_clearance_max_radius` next to `extruder_clearance_radius` | 29 | none (ours wins) |
+| `prime_tower_skip_points` = 0 | 9 (Flashforge Creator 5) | none: not read from vendor presets (`SystemPresetTowerKeysScope`); would turn the WipeTower2 wall gaps off |
+| `enable_tower_interface_features` = 1 | 59 (50 BBL H2D / H2C / X2D, 9 Flashforge Creator 5) | none: kept as Bambu's value, not mapped for vendor presets; see "Tower interface features" |
+
+### Tower interface features (`enable_tower_interface_features`)
+
+Bambu Studio's one developer switch for a bundle of prime tower behaviours on its interface
+layers. Three of them are separate options here, for every printer and both tower generators
+(`src/libslic3r/GCode/WipeTowerInterface.hpp`): `wipe_tower_interface_temp`,
+`wipe_tower_interface_run_in` (needs `wipe_tower_wall_gap`), `wipe_tower_interface_extra_prime`,
+plus `wipe_tower_interface_trigger`. The per-filament values keep Bambu's names
+(`filament_tower_interface_print_temp`, `_pre_extrusion_dist`, `_pre_extrusion_length`), so they
+load and export as they are. Bambu's firmware purge (`M620.13`, H2 templates) is not ported.
+
+- Import (`PrintConfigDef::handle_legacy_composite`): `true` in a file that has none of our three
+  options (nor the trigger) turns on all three and the wall gaps, triggered at material changes,
+  then sets the Bambu key to false so a re-save cannot re-arm it. `false` changes nothing.
+- The bundled vendor presets are loaded under `SystemPresetTowerKeysScope`: the key is kept but not
+  mapped, and `prime_tower_skip_points` is not read, so their shipped output is unchanged. A Bambu
+  project, an imported Bambu preset or a loose preset file is mapped.
+- Export ("Export Bambu 3MF"): written from our three options, `true` when any of them is on (Bambu
+  can only switch on the whole bundle; a report note says when only some were on), never from the
+  stored Bambu value. `wipe_tower_wall_gap` goes out as `prime_tower_skip_points`.
 
 ### Deliberately not mapped
 

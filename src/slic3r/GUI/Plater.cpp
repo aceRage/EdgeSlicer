@@ -88,6 +88,7 @@
 //#include "libslic3r/Format/3mf.hpp"
 #include "libslic3r/Format/bbs_3mf.hpp"
 #include "libslic3r/Format/BambuExport.hpp"
+#include "../Utils/BambuStudioLauncher.hpp"
 #include "libslic3r/GCode/ThumbnailData.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/ModelArrange.hpp"   // get_instance_arrange_poly, for the Fill bed dialog's defaults
@@ -136,6 +137,8 @@
 #include "3DBed.hpp"
 #include "PartPlate.hpp"
 #include "RemoteAccess.hpp"
+#include "UntrustedSettingsGuard.hpp"
+#include "DualNozzleState.hpp"
 #include "Camera.hpp"
 #include "Mouse3DController.hpp"
 #include "Tab.hpp"
@@ -10485,6 +10488,8 @@ struct Plater::priv
     std::string                 delayed_error_message;
 
     wxTimer                     background_process_timer;
+    // Bambu two-extruder printers: marks plates for re-slice when the selected printer changes.
+    std::unique_ptr<DualNozzle::Watcher> dual_nozzle_watcher;
 
     std::string                 label_btn_export;
     std::string                 label_btn_send;
@@ -11090,6 +11095,8 @@ Plater::priv::priv(Plater *q, MainFrame *main_frame)
     panels.push_back(assemble_view);
 
     this->background_process_timer.SetOwner(this->q, 0);
+    // Own event handler and timer: q's wxEVT_TIMER binding below takes every timer event of q.
+    this->dual_nozzle_watcher = std::make_unique<DualNozzle::Watcher>(this->q);
     this->q->Bind(wxEVT_TIMER, [this](wxTimerEvent &evt)
     {
         if (!this->suppressed_backround_processing_update)
@@ -12023,6 +12030,13 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                                             << boost::format(", plate_data.size %1%, project_preset.size %2%, is_bbs_3mf %3%, file_version %4% \n") % plate_data.size() %
                                                    project_presets.size() % (en_3mf_file_type == En3mfType::From_BBS) % file_version.to_string();
 
+                    // Ultra: a project may not bring post-processing scripts (programs this PC would run on
+                    // export / slice), an output name that leaves the output folder, or print-host
+                    // endpoints along silently - neither in its settings nor in its embedded presets.
+                    // Our own crash backup (Restore) is not a foreign file.
+                    if (load_config && !(strategy & LoadStrategy::Restore))
+                        guard_untrusted_settings(into_u8(from_path(real_filename)), &config_loaded, &project_presets);
+
                     auto imported_string_count = [&config_loaded](const char *key) -> size_t {
                         if (const auto *opt = config_loaded.option<ConfigOptionStrings>(key))
                             return opt->values.size();
@@ -12673,6 +12687,7 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
 
                 // BBS:: project embedded presets
                 if (project_presets.size() > 0) {
+                    guard_untrusted_settings(into_u8(from_path(real_filename)), nullptr, &project_presets);
                     // load project embedded presets
                     PresetsConfigSubstitutions preset_substitutions;
                     PresetBundle &             preset_bundle = *wxGetApp().preset_bundle;
@@ -14619,6 +14634,24 @@ bool Plater::priv::restart_background_process(unsigned int state)
            (state & UPDATE_BACKGROUND_PROCESS_FORCE_EXPORT) != 0 ||
            (state & UPDATE_BACKGROUND_PROCESS_RESTART) != 0 ) ) {
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(", Line %1%: print is valid, try to start it now")%__LINE__;
+        // Bambu two-extruder printers: every slice passes the filament arrangement gate here,
+        // whatever started it - the Slice paths already ran the confirmation, but an automatic
+        // re-slice after an edit, an export that must slice first or a direct reslice did not, and
+        // silently grouped an unconfirmed plate with Auto For Flush (owner's first H2D slice,
+        // 2026-09-23). Only when there is slicing left to do: exporting a finished print is not a
+        // slice. A user-started slice counts as explicit; a Slice all continuation already had
+        // every plate confirmed up front, so a plate that still fails there is held back instead.
+        if (this->printer_technology == ptFFF && !this->background_process.finished()) {
+            const bool explicit_request = (state & UPDATE_BACKGROUND_PROCESS_FORCE_RESTART) != 0 && !this->m_slice_all;
+            if (!DualNozzle::allow_slice_start(q, this->background_process.get_current_plate(), explicit_request)) {
+                BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(", Line %1%: held back by the filament arrangement gate, state=%2%")%__LINE__%state;
+                return false;
+            }
+            if (DualNozzle::preset_is_dual_nozzle_bambu())
+                if (PartPlate* cur_plate = this->background_process.get_current_plate())
+                    BOOST_LOG_TRIVIAL(warning) << "[DualNozzle] plate " << cur_plate->get_index() + 1 << " slice starts (state " << state << ", "
+                                               << (cur_plate->get_manual_filament_map().empty() ? "automatic grouping" : "confirmed map") << ")";
+        }
         // The print is valid and it can be started.
         if (this->background_process.start()) {
             if (!show_warning_dialog)
@@ -18796,6 +18829,26 @@ void Plater::import_model_id(wxString download_info)
         //wxString sError = error.what();
     }
 
+    // Ultra: this is reached from "Open in" links and from web pages. The file is fetched only
+    // over https from a public host (the host allowlist and the "unknown site" question are the
+    // Downloader's, before it gets here), and the name it is saved under is a plain file name in
+    // the download folder: "&name=../../x.3mf" or an absolute path used to write anywhere.
+    {
+        const std::string url_u8 = into_u8(download_url);
+        const untrusted::DownloadCheck check = untrusted::check_model_download(url_u8, "bambustudioopen");
+        if (check.verdict == untrusted::DownloadVerdict::Refuse) {
+            BOOST_LOG_TRIVIAL(error) << "import_model_id: refused (" << check.reason << ")";
+            MessageDialog(nullptr, format_wxstr(_L("The model was not downloaded: %1%"), from_u8(check.reason)), wxEmptyString,
+                          wxICON_WARNING | wxOK).ShowModal();
+            return;
+        }
+        std::string name = into_u8(filename);
+        const size_t query = name.find_first_of("?#");
+        if (query != std::string::npos)
+            name = name.substr(0, query);
+        filename = from_u8(untrusted::sanitize_download_filename(name));
+    }
+
     bool download_ok = false;
     int retry_count = 0;
     const int max_retries = 3;
@@ -21659,6 +21712,55 @@ void Plater::export_bambu_3mf()
                                                NotificationManager::NotificationLevel::RegularNotificationLevel, into_u8(msg));
 }
 
+void Plater::export_and_open_in_bambu_studio()
+{
+    wxString path = p->get_export_file(FT_3MF);
+    if (path.empty()) { return; }
+    const std::string   path_u8 = into_u8(path);
+    BambuExport::Report report;
+    if (export_3mf(path_u8, SaveStrategy::Silence, -1, nullptr, &report) < 0) {
+        show_error(this, _L("Failed to export the project for Bambu Studio."));
+        return;
+    }
+    BOOST_LOG_TRIVIAL(info) << "Export & Open in Bambu Studio " << path_u8 << ": " << report.summary();
+    wxString msg = report.dropped.empty() ?
+        _L("Exported for Bambu Studio.") :
+        wxString::Format(_L("Exported for Bambu Studio: %d settings not supported by Bambu Studio were left out."), int(report.dropped.size()));
+    p->notification_manager->push_notification(NotificationType::CustomNotification,
+                                               NotificationManager::NotificationLevel::RegularNotificationLevel, into_u8(msg));
+
+    // The export succeeded regardless of what happens below - never turn a launch problem into
+    // an export failure.
+    std::string custom_path = wxGetApp().app_config->get("bambu_studio_path");
+    auto        result      = BambuStudioLauncher::open_in_bambu_studio(path_u8, custom_path);
+    using Outcome = BambuStudioLauncher::LaunchOutcome;
+    switch (result.outcome) {
+    case Outcome::Launched:
+        break; // the exported-notice above already told the user; nothing more to say
+    case Outcome::NotFound: {
+        wxString not_found_msg = wxString::Format(
+            _L("Bambu Studio was not found. The file was exported to %s."), path);
+        RichMessageDialog dlg(this, not_found_msg, _L("Bambu Studio not found"), wxOK | wxCANCEL | wxICON_INFORMATION);
+        dlg.SetOKCancelLabels(_L("Show in Folder"), _L("Close"));
+        dlg.CentreOnScreen();
+        if (dlg.ShowModal() == wxID_OK)
+            desktop_open_any_folderEx(path_u8);
+        break;
+    }
+    case Outcome::LaunchFailed: {
+        wxString failed_msg = wxString::Format(
+            _L("Failed to launch Bambu Studio (found at %s). The file was exported to %s."),
+            from_u8(result.exe_path), path);
+        RichMessageDialog dlg(this, failed_msg, _L("Could not launch Bambu Studio"), wxOK | wxCANCEL | wxICON_INFORMATION);
+        dlg.SetOKCancelLabels(_L("Show in Folder"), _L("Close"));
+        dlg.CentreOnScreen();
+        if (dlg.ShowModal() == wxID_OK)
+            desktop_open_any_folderEx(path_u8);
+        break;
+    }
+    }
+}
+
 // Following lambda generates a combined mesh for export with normals pointing outwards.
 TriangleMesh Plater::combine_mesh_fff(const ModelObject& mo, int instance_id, std::function<void(const std::string&)> notify_func)
 {
@@ -22470,7 +22572,29 @@ bool Plater::reslice()
         DeviceManager* dev = wxGetApp().getDeviceManager();
         if (pb && dev && pb->is_bbl_vendor()) {
             if (MachineObject* obj = dev->get_selected_machine()) {
-                if (obj->is_connected() && !obj->m_extder_data.extders.empty()) {
+                if (obj->is_connected() && !obj->m_extder_data.extders.empty() && DualNozzle::preset_is_dual_nozzle_bambu()) {
+                    // Two extruders: one value per LOGICAL extruder, read from the physical extruder
+                    // it maps to (physical 0 = right on the H2D/H2C). Writing the single value below
+                    // shrank the two-entry list to one and dropped the other extruder's type.
+                    auto* cur = pb->project_config.option<ConfigOptionEnumsGeneric>("nozzle_volume_type");
+                    std::vector<int> want = cur ? cur->values : std::vector<int>();
+                    want.resize(2, int(NozzleVolumeType::nvtStandard));
+                    const std::vector<int> pem = DualNozzle::preset_physical_extruder_map();
+                    for (int logical = 0; logical < 2; ++logical) {
+                        const int physical = BambuExtruderMap::logical_to_physical(pem, logical);
+                        for (const Extder& e : obj->m_extder_data.extders)
+                            if (e.id == physical && e.nozzle_id != 0xff)
+                                want[size_t(logical)] = int(e.current_nozzle_flow);
+                    }
+                    if (!cur || cur->values != want) {
+                        if (cur)
+                            cur->values = want; // in place: keeps the option's enum key map
+                        else
+                            pb->project_config.set_key_value("nozzle_volume_type", new ConfigOptionEnumsGeneric(want));
+                        BOOST_LOG_TRIVIAL(info) << "[DualNozzle] auto-matched nozzle_volume_type per extruder to the printer: "
+                                                << want[0] << "," << want[1];
+                    }
+                } else if (obj->is_connected() && !obj->m_extder_data.extders.empty()) {
                     NozzleVolumeType flow = obj->m_extder_data.extders[0].current_nozzle_flow;
                     // Ultra: nozzle_volume_type is now per-extruder (coEnums). This single-nozzle
                     // auto-match sets the first extruder's value; dual-nozzle per-extruder matching
@@ -24489,18 +24613,24 @@ void Plater::check_seq_print_caution(bool all_plates)
         }
     }
 
-    // Close-then-push keeps a single notification even when slicing is
-    // retriggered; close on the non-caution path clears the stale one.
+    // Advisory only, not a slicing error: Warning level, closed and (if still applicable)
+    // re-pushed so slicing can be retriggered without stacking duplicate notifications.
+    // Genuine collision/clearance violations are a separate path (Print::sequential_print_clearance_valid,
+    // surfaced via push_validate_error_notification / STRING_EXCEPT_OBJECT_COLLISION_IN_*_PRINT) and are
+    // untouched here.
     if (by_object) {
-        get_notification_manager()->close_plater_error_notification(caution_text.ToStdString());
-        get_notification_manager()->push_plater_error_notification(caution_text.ToStdString());
+        get_notification_manager()->close_print_by_object_caution_notification(caution_text.ToStdString());
+        get_notification_manager()->push_print_by_object_caution_notification(caution_text.ToStdString());
     } else {
-        get_notification_manager()->close_plater_error_notification(caution_text.ToStdString());
+        get_notification_manager()->close_print_by_object_caution_notification(caution_text.ToStdString());
     }
 }
 
 bool Plater::guard_before_slice_plate()
 {
+    // Bambu two-extruder printers: confirm the filament arrangement first (no-op elsewhere).
+    if (!DualNozzle::confirm_before_slice(this, false))
+        return false;
     sync_filament_temp_mixing_notification();
     sync_flow_ratio_zero_notification();
     sync_cold_plate_notification();
@@ -24510,6 +24640,8 @@ bool Plater::guard_before_slice_plate()
 
 bool Plater::guard_before_slice_all()
 {
+    if (!DualNozzle::confirm_before_slice(this, true))
+        return false;
     sync_flow_ratio_zero_notification();
     check_seq_print_caution(true);
     return confirm_filament_temp_mixing_before_slice_all();
@@ -24643,6 +24775,8 @@ void Plater::on_config_change(const DynamicPrintConfig &config)
             boost::starts_with(opt_key, "prime_tower") ||
             boost::starts_with(opt_key, "wipe_tower") ||
             opt_key == "filament_minimal_purge_on_wipe_tower" ||
+            // The tower interface run-in widens the tower's reserved area.
+            opt_key == "filament_tower_interface_pre_extrusion_dist" ||
             opt_key == "single_extruder_multi_material" ||
             // BBS
             opt_key == "prime_volume") {
@@ -25421,6 +25555,27 @@ void Plater::apply_background_progress()
             p->main_frame->update_slice_print_status(MainFrame::eEventPlateUpdate, true);
         else
             p->main_frame->update_slice_print_status(MainFrame::eEventPlateUpdate, false);
+        // The Print / Export buttons run this check right before they act. When it throws a finished
+        // slice away, say so: a silent reset (Print plate greyed out, Slice plate lit again, no dialog)
+        // looked like a broken Print button on the H2C (2026-09-23).
+        if (result_valid) {
+            std::string keys;
+            if (p->printer_technology == ptFFF)
+                if (const Print *print = p->background_process.fff_print()) {
+                    const auto &changed = print->last_apply_changed_keys();
+                    for (size_t i = 0; i < changed.size() && i < 6; ++i)
+                        keys += (i ? ", " : "") + changed[i];
+                    if (changed.size() > 6)
+                        keys += ", ...";
+                }
+            BOOST_LOG_TRIVIAL(warning) << "apply_background_progress: plate " << plate_index + 1
+                                       << " slice result no longer matches the current settings" << (keys.empty() ? "" : " (" + keys + ")");
+            std::string msg = _u8L("The sliced plate no longer matches the current settings, so it has to be sliced again before it can be printed or exported.");
+            if (!keys.empty())
+                msg += " " + (boost::format(_u8L("Changed: %1%.")) % keys).str();
+            get_notification_manager()->push_notification(NotificationType::CustomNotification,
+                                                          NotificationManager::NotificationLevel::WarningNotificationLevel, msg);
+        }
     }
 }
 

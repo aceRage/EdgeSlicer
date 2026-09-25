@@ -212,6 +212,10 @@ static std::vector<std::string> s_project_options {
     "wipe_tower_y",
     "wipe_tower_rotation_angle",
     "curr_bed_type",
+    // Bambu two-extruder printers: the printer state synced before slicing (BambuStudio keeps it
+    // outside the presets too, PresetBundle::extruder_ams_counts / extruder_nozzle_stat).
+    "extruder_ams_count",
+    "extruder_nozzle_stats",
     // Snapmaker: flow variants
     "filament_volume_type",
     "filament_grouping_mode",
@@ -1027,9 +1031,15 @@ PresetsConfigSubstitutions PresetBundle::import_presets(std::vector<std::string>
                 if (status) {
                     std::string file_name = file_stat.m_filename;
                     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " Form zip file: " << file << ". Read file name: " << file_stat.m_filename;
-                    size_t index = file_name.find_last_of('/');
+                    // Only the entry's own name is used, never its folders: "..\..\x" (a
+                    // Windows separator) used to climb out of the temp folder (zip-slip).
+                    size_t index = file_name.find_last_of("/\\");
                     if (std::string::npos != index) {
                         file_name = file_name.substr(index + 1);
+                    }
+                    if (!untrusted::is_safe_archive_relative_path(file_name)) {
+                        BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << " skipping bundle entry with an unsafe name: " << file_stat.m_filename;
+                        continue;
                     }
                     if (BUNDLE_STRUCTURE_JSON_NAME == file_name) continue;
                     // create target file path
@@ -1070,6 +1080,8 @@ bool PresetBundle::import_json_presets(PresetsConfigSubstitutions &            s
         ConfigSubstitutions                config_substitutions = config.load_from_json(file, rule, key_values, reason);
         std::string                        name                 = key_values[BBL_JSON_KEY_NAME];
         std::string                        version_str          = key_values[BBL_JSON_KEY_VERSION];
+        if (untrusted_config_filter)
+            untrusted_config_filter(name.empty() ? file : name, config);
         boost::optional<Semver>            version              = Semver::parse(version_str);
         if (!version) return false;
 
@@ -3041,6 +3053,8 @@ ConfigSubstitutions PresetBundle::load_config_file(const std::string &path, Forw
         BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << boost::format(" enter, gcodefile %1%, compatibility_rule %2%")%path %compatibility_rule;
 		config.apply(FullPrintConfig::defaults());
         ConfigSubstitutions config_substitutions = config.load_from_gcode_file(path, compatibility_rule);
+        if (untrusted_config_filter)
+            untrusted_config_filter(path, config);
         Preset::normalize(config);
 		load_config_file_config(path, true, std::move(config));
 		return config_substitutions;
@@ -3375,6 +3389,10 @@ std::pair<PresetsConfigSubstitutions, size_t> PresetBundle::load_vendor_configs_
 {
     const bool startup_profile = startup_profile_enabled();
     const auto total_start     = std::chrono::steady_clock::now();
+
+    // The bundled vendor presets keep the shipped meaning of Bambu Studio's tower interface keys
+    // (enable_tower_interface_features, prime_tower_skip_points): see SystemPresetTowerKeysScope.
+    SystemPresetTowerKeysScope tower_keys_scope;
 
     // Enable substitutions for user config bundle, throw an exception when loading a system profile.
     ConfigSubstitutionContext  substitution_context { compatibility_rule };

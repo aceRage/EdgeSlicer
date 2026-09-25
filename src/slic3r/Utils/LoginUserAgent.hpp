@@ -21,6 +21,20 @@ static const char *const BBL_LOGIN_UA_VERSION = "02.08.02.61";
 
 enum class LoginUAPlatform { Windows, MacOS, Linux };
 
+// The platform this binary was built for. Every webview's User-Agent must use it - including
+// the refresh WebView::RecreateAll() does after a theme change, which used to hard-code MacOS
+// and so left Windows and Linux views reporting a Mac browser from then on.
+constexpr LoginUAPlatform current_login_ua_platform()
+{
+#if defined(_WIN32)
+    return LoginUAPlatform::Windows;
+#elif defined(__APPLE__)
+    return LoginUAPlatform::MacOS;
+#else
+    return LoginUAPlatform::Linux;
+#endif
+}
+
 // Build the User-Agent for the Bambu login webview, byte-for-byte in Bambu Studio's own
 // token order: the Mozilla/browser prefix first, then BBL-Slicer/v<ver> (<theme>) and
 // BBL-Language/<lang>. The fork used to put BBL-Slicer FIRST, which some of bambulab's

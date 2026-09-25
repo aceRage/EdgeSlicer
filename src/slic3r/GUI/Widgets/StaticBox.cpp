@@ -93,6 +93,15 @@ void StaticBox::SetBackgroundColor2(StateColor const &color)
 
 wxColor StaticBox::GetParentBackgroundColor(wxWindow* parent)
 {
+#ifdef __WXMSW__
+    // A plain child panel that never had a colour of its own reports the system button face
+    // (#F0F0F0), but MSW paints it with its nearest coloured ancestor's brush. Copy what is
+    // actually on screen, or a Label on such a panel shows a #F0F0F0 band in light mode and a
+    // #3F3F46 one (the dark twin of #F0F0F0) in dark mode.
+    while (parent != nullptr && !parent->UseBgCol() && !parent->IsTopLevel() && parent->GetParent() != nullptr &&
+           parent->HasTransparentBackground())
+        parent = parent->GetParent();
+#endif
     if (auto box = dynamic_cast<StaticBox*>(parent)) {
         if (box->background_color.count() > 0) {
             if (box->background_color2.count() == 0)

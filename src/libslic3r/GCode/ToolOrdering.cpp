@@ -766,6 +766,17 @@ void ToolOrdering::collect_extruders(const PrintObject &object, const std::vecto
                                                         float(support_layer->print_z),
                                                         float(support_layer->height),
                                                         &object);
+        // Support filament matching: the filament the pass chose for this layer's leftover support
+        // (SupportLayer::chameleon_residual_extruder, -1 everywhere else) replaces "don't care" -
+        // and, on a plate layer without a raft, a configured filament too - so the tool it prints
+        // with is scheduled here. Mirrors the pin in GCode::process_layer exactly.
+        if (support_layer->chameleon_residual_extruder >= 0) {
+            const unsigned int pinned = unsigned(support_layer->chameleon_residual_extruder) + 1;
+            if (object.config().support_filament.value == 0 || support_layer->chameleon_residual_all_roles)
+                extruder_support = pinned;
+            if (object.config().support_interface_filament.value == 0 || support_layer->chameleon_residual_all_roles)
+                extruder_interface = pinned;
+        }
         if (has_support)
             layer_tools.extruders.push_back(extruder_support);
         if (has_interface)
@@ -1419,17 +1430,27 @@ std::function<bool(int, std::vector<int>&)> create_custom_seq_function(
     };
 }
 
+// nozzle_volume_type is one value per extruder in Bambu Studio's profiles, but this fork's configs can
+// carry a single value for a two-extruder machine (the H2D/H2C CONFIG_BLOCK reads
+// "nozzle_volume_type = Standard"). Indexing values[1] then read past the end of the vector, and the
+// garbage landed in the grouping's nozzle list (seen as filament_volume_map 1700932980 in a header).
+// A missing entry is a Standard nozzle, as GCode.cpp's per-nozzle shim already assumes.
+static NozzleVolumeType nozzle_volume_type_at(const PrintConfig& print_config, size_t idx)
+{
+    const auto& values = print_config.nozzle_volume_type.values;
+    return idx < values.size() ? NozzleVolumeType(values[idx]) : NozzleVolumeType::nvtStandard;
+}
+
 std::vector<MultiNozzleUtils::NozzleGroupInfo> build_nozzle_groups(const PrintConfig& print_config, size_t extruder_nums)
 {
     std::vector<MultiNozzleUtils::NozzleGroupInfo> nozzle_groups;
     auto extruder_nozzle_counts = get_extruder_nozzle_stats(print_config.extruder_nozzle_stats.values);
-    auto nozzle_volume_types = print_config.nozzle_volume_type.values;
     for (size_t idx = 0; idx < extruder_nums; ++idx) {
         if (idx >= extruder_nozzle_counts.size() || extruder_nozzle_counts[idx].empty()) {
-            nozzle_groups.emplace_back(format_diameter_to_str(print_config.nozzle_diameter.values[idx]), NozzleVolumeType(print_config.nozzle_volume_type.values[idx]), idx,
+            nozzle_groups.emplace_back(format_diameter_to_str(print_config.nozzle_diameter.values[idx]), nozzle_volume_type_at(print_config, idx), idx,
                                        print_config.extruder_max_nozzle_count.values[idx]);
         } else {
-            NozzleVolumeType type = NozzleVolumeType(nozzle_volume_types[idx]);
+            NozzleVolumeType type = nozzle_volume_type_at(print_config, idx);
             if (type == nvtHybrid) {
                 for (auto [volume_type, count] : extruder_nozzle_counts[idx])
                     nozzle_groups.emplace_back(format_diameter_to_str(print_config.nozzle_diameter.values[idx]), volume_type, idx, count);
@@ -1449,7 +1470,7 @@ std::vector<MultiNozzleUtils::NozzleInfo> build_default_nozzle_list(const PrintC
         tmp.diameter = format_diameter_to_str(print_config.nozzle_diameter.values[idx]);
         tmp.group_id = idx;
         tmp.extruder_id = idx;
-        tmp.volume_type = NozzleVolumeType(print_config.nozzle_volume_type.values[idx]);
+        tmp.volume_type = nozzle_volume_type_at(print_config, idx);
         nozzle_list.emplace_back(std::move(tmp));
     }
     return nozzle_list;
@@ -1581,9 +1602,15 @@ FilamentGroupContext build_filament_group_context(
     context.group_info.ignore_ext_filament = ignore_ext_filament;
     context.group_info.has_filament_switcher = print_config.has_filament_switcher.value;
 
-    if (mode == FilamentMapMode::fmmManual)
+    if (mode == FilamentMapMode::fmmManual) {
         context.group_info.filament_volume_map = print_config.filament_volume_map.values;
-    else
+        // FilamentGroup::rebuild_nozzle_unprintables indexes this with every used filament. Bambu Studio's
+        // GUI keeps the project value sized to the filament count; this fork has no UI for it, so a project
+        // usually carries the one-entry default and the manual grouping read past its end (undefined
+        // behaviour: the same plate grouped differently from slice to slice). A filament without an entry
+        // expects no particular nozzle volume type - Hybrid, as every automatic mode uses below.
+        context.group_info.filament_volume_map.resize(filament_nums, (int)(NozzleVolumeType::nvtHybrid));
+    } else
         context.group_info.filament_volume_map = std::vector<int>(filament_nums, (int)(NozzleVolumeType::nvtHybrid));
 
     context.nozzle_info.nozzle_list = build_nozzle_list(nozzle_groups);
@@ -1621,6 +1648,15 @@ FilamentGroupContext build_filament_group_context(
 
 } // namespace GroupReorder
 
+MultiNozzleUtils::LayeredNozzleGroupResult ToolOrdering::group_by_plate_map(Print *print, const std::vector<std::vector<unsigned int>> &layer_filaments)
+{
+    if (print == nullptr)
+        return MultiNozzleUtils::LayeredNozzleGroupResult();
+    const size_t extruders = print->config().nozzle_diameter.size();
+    return get_recommended_filament_maps(print, layer_filaments, FilamentMapMode::fmmManual, std::vector<std::set<int>>(extruders),
+                                         std::vector<std::set<int>>(extruders), std::map<int, std::set<NozzleVolumeType>>());
+}
+
 MultiNozzleUtils::LayeredNozzleGroupResult ToolOrdering::get_recommended_filament_maps(
     Print*                                            print,
     const std::vector<std::vector<unsigned int>>&     layer_filaments,
@@ -1648,7 +1684,9 @@ MultiNozzleUtils::LayeredNozzleGroupResult ToolOrdering::get_recommended_filamen
     auto nozzle_list = build_default_nozzle_list(print_config, extruder_nums);
 
     if (mode == FilamentMapMode::fmmManual && !has_multiple_nozzle) {
-        auto manual_filament_map = print_config.filament_map.values;
+        // The map the plate asked for, not config().filament_map: an earlier pass of this slice (or the
+        // previous slice) overwrote that with its computed result.
+        auto manual_filament_map = print->filament_map_input();
         std::transform(manual_filament_map.begin(), manual_filament_map.end(), manual_filament_map.begin(), [](int v) { return v - 1; });
         auto result = LayeredNozzleGroupResult::create(manual_filament_map, nozzle_list, used_filaments);
         return result ? *result : LayeredNozzleGroupResult();
@@ -1661,8 +1699,20 @@ MultiNozzleUtils::LayeredNozzleGroupResult ToolOrdering::get_recommended_filamen
         auto context = build_filament_group_context(print, layer_filaments, physical_unprintables, geometric_unprintables, unprintable_volumes, mode, nozzle_status);
 
         if (has_multiple_nozzle && mode == FilamentMapMode::fmmManual) {
-            auto manual_filament_map = print_config.filament_map.values;
+            auto manual_filament_map = print->filament_map_input();
             std::transform(manual_filament_map.begin(), manual_filament_map.end(), manual_filament_map.begin(), [](int v) { return v - 1; });
+            {
+                std::string map_str, used_str;
+                for (int v : manual_filament_map) map_str += std::to_string(v) + " ";
+                for (auto f : used_filaments) used_str += std::to_string(f) + " ";
+                BOOST_LOG_TRIVIAL(warning) << "[DualNozzle] manual grouping: filament->extruder(0-based) " << map_str << "| used " << used_str;
+            }
+            // calc_filament_group_for_manual_multi_nozzle indexes the map with every used filament
+            // and the per-extruder unprintable list with the map value (BambuStudio does the same,
+            // unchecked); a short map or a value other than left/right is a group error, not a crash.
+            for (auto fid : used_filaments)
+                if (fid >= manual_filament_map.size() || (manual_filament_map[fid] != 0 && manual_filament_map[fid] != 1))
+                    throw Slic3r::RuntimeError(std::string("Group error in manual mode. Please check nozzle count or regroup."));
             ret = calc_filament_group_for_manual_multi_nozzle(manual_filament_map, context);
         } else if (has_multiple_nozzle && mode == FilamentMapMode::fmmAutoForMatch &&
                    std::any_of(context.machine_info.machine_filament_info.begin(), context.machine_info.machine_filament_info.end(),
@@ -1837,9 +1887,13 @@ void ToolOrdering::reorder_extruders_for_minimum_flush_volume()
             LayerData layer_data = collect_layer_and_unprintable_data();
             // Ultra (Phase 10): force match mode from the Print flag (set when a live AMS is available) rather
             // than the config key, which we do NOT overwrite (the web device UI reads filament_map_mode).
-            FilamentMapMode group_mode = m_print->get_ultra_force_match_mode()
+            // A plate grouped by hand (filament_map_mode Manual from the plate config, the pre-slice
+            // confirmation on a Bambu two-extruder printer) always wins over the live-AMS match mode.
+            const FilamentMapMode config_mode = print_config->filament_map_mode.value;
+            const bool            manual      = config_mode == FilamentMapMode::fmmManual || config_mode == FilamentMapMode::fmmNozzleManual;
+            FilamentMapMode group_mode = (!manual && m_print->get_ultra_force_match_mode())
                                          ? FilamentMapMode::fmmAutoForMatch
-                                         : print_config->filament_map_mode.value;
+                                         : config_mode;
             auto grouping = ToolOrdering::get_recommended_filament_maps(
                 m_print, layer_data.layer_filaments, group_mode,
                 layer_data.physical_unprintables, layer_data.geometric_unprintables, layer_data.filament_unprintable_volumes);

@@ -4,6 +4,8 @@
 #include <utility>
 #include <vector>
 
+#include "slic3r/Utils/HubHomeLogic.hpp"
+
 namespace Slic3r {
 namespace GUI {
 
@@ -51,7 +53,16 @@ struct Info
 int run_server(const std::string& token_hint, bool phone_on);
 
 // ---- client side (a slicer instance) ----
-Info query();                                                       // is a hub running? (~1 s worst case)
+Info query(long timeout_s = 3);                                     // is a hub running? (answer within timeout_s)
+// What <datadir>/hub says when query() got no answer: no network, one file read and a process
+// check. Tells "quit cleanly" (and why) and "crashed" apart from "running but slow to answer".
+struct Record
+{
+    HubHome::Presence   presence { HubHome::Presence::Unknown };
+    HubHome::ExitReason exit_reason { HubHome::ExitReason::Unknown }; // NoRecord only
+    bool                pid_alive { false };
+};
+Record record();
 std::pair<int, std::string> onvif_discover();                       // ONVIF WS-Discovery via the hub's go2rtc: {http status, body}
 Info ensure_running(const std::string& token_hint, bool phone_on); // spawn one if needed; waits for it
 Info set_phone(bool on, const std::string& token = ""); // off and on keeps the same link; a valid
@@ -147,6 +158,11 @@ struct HubIdentity
 std::string  identity_settings_dump(const HubIdentity& id);              // the JSON object, as text
 HubIdentity  identity_from_settings(const std::string& settings_json_text);
 
+// The whole identity rebuilt from the 32-byte Ed25519 seed (64 hex): the public half and the hubid
+// are derived, never trusted. Invalid if the seed is not 64 hex characters. Used by the tests to
+// pin RFC 8032's vectors; a running hub mints its pair instead.
+HubIdentity  identity_from_seed_hex(const std::string& private_hex);
+
 // ---- the loopback trust of Tailscale Serve's headers (design section 6.6) ----
 // Tailscale Serve terminates on loopback and sets Tailscale-User-Login / X-Forwarded-Proto,
 // stripping whatever the client sent. Those two headers are therefore trusted from a loopback peer
@@ -167,6 +183,17 @@ std::string pair_identity_json(const std::string& lan_url, const std::string& re
                                const std::string& public_key_hex);
 
 } // namespace Testing
+
+// ---- signing with the hub identity (the push forwarder's X-Hub-Sig) ----
+// Ed25519 (RFC 8032, pure - no pre-hash) over exactly the bytes of `message`, as base64url with no
+// padding. The caller signs the very string it is about to post and never re-serialises it: a
+// signature over "the same JSON" re-dumped is a signature over different bytes. False, with the
+// output empty, if the identity's private half is not a 32-byte hex seed.
+bool identity_sign(const Testing::HubIdentity& id, const std::string& message, std::string& out_sig_b64url);
+
+// The other half, for the tests and a loopback mock: whether `sig_b64url` (padding tolerated) is a
+// valid Ed25519 signature by `public_hex` over exactly `message`.
+bool identity_verify(const std::string& public_hex, const std::string& message, const std::string& sig_b64url);
 
 } // namespace RemoteHub
 } // namespace GUI

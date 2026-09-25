@@ -1,5 +1,6 @@
 #include "BambuExport.hpp"
 #include "BambuKeyAliases.hpp"
+#include "../BambuDualNozzleSync.hpp"
 
 #include "../Config.hpp"
 #include "../PrintConfig.hpp"
@@ -597,6 +598,32 @@ Config convert_impl(const ConfigBase &cfg, const Context &ctx, Scope scope, Repo
         out["filament_self_index"]       = ints_value(target_filament.ids);
     }
 
+    // Bambu Studio has one switch, enable_tower_interface_features, for the bundle our three tower
+    // interface options split up (GCode/WipeTowerInterface.hpp). It is written from them, never from
+    // the Bambu value a loaded file kept: on when any of them is, since Bambu Studio can only turn
+    // on the whole bundle. The per-filament values keep Bambu's key names and go out as they are.
+    if (scope == Scope::Project || scope == Scope::Print) {
+        std::vector<std::string> on;
+        bool                     present = false;
+        for (const char *key : { "wipe_tower_interface_temp", "wipe_tower_interface_run_in", "wipe_tower_interface_extra_prime" })
+            if (const ConfigOption *opt = cfg.option(key); opt != nullptr) {
+                present = true;
+                if (opt->getBool())
+                    on.emplace_back(key);
+            }
+        if (present) {
+            Value v;
+            v.values = { on.empty() ? "0" : "1" };
+            out["enable_tower_interface_features"] = v;
+            if (! on.empty() && on.size() < 3)
+                local.notes.push_back(where + ": enable_tower_interface_features written as on although only " + join(on, ", ") +
+                                      " is on: Bambu Studio turns on its whole tower interface bundle (interface temperature, run-in, "
+                                      "extra prime, interface wall gaps and, on the H2 series, a firmware purge)");
+        } else {
+            out.erase("enable_tower_interface_features");
+        }
+    }
+
     // different_settings_to_system names keys per preset type; keep it in Bambu's vocabulary.
     if (auto it = out.find("different_settings_to_system"); it != out.end()) {
         for (std::string &list : it->second.values) {
@@ -750,6 +777,27 @@ Config convert_project(const ConfigBase &project, Context &ctx, Report &report)
     ctx.filament = filament_layout(ctx.printer, ctx.filament_count);
 
     Config out = convert_impl(project, ctx, Scope::Project, report, "project");
+
+    // Bambu Studio writes the nozzle stats twice (split_nozzle_stats_for_export, PrintConfig.cpp:912-938):
+    // extruder_nozzle_stats_new with the real volume types, and the legacy key with types newer than
+    // TPU High Flow folded into Standard for older readers. Its own H2C projects carry both
+    // (h2c_wrongextruder_bambu_manual.gcode.3mf: ["Standard#1", "Standard#6"] twice).
+    if (auto it = out.find("extruder_nozzle_stats"); it != out.end() && !it->second.values.empty()) {
+        out["extruder_nozzle_stats_new"] = it->second;
+        auto stats      = get_extruder_nozzle_stats(it->second.values);
+        bool downgraded = false;
+        for (auto &extruder_stat : stats) {
+            std::map<NozzleVolumeType, int> legacy;
+            for (const auto &entry : extruder_stat) {
+                const NozzleVolumeType legacy_type = entry.first > nvtTPUHighFlow ? nvtStandard : entry.first;
+                downgraded |= legacy_type != entry.first;
+                legacy[legacy_type] += entry.second;
+            }
+            extruder_stat = std::move(legacy);
+        }
+        if (downgraded)
+            it->second.values = DualNozzleSync::save_extruder_nozzle_stats_to_string(stats);
+    }
 
     // Bambu Studio refuses to slice ooze prevention together with a prime tower (Print::validate:
     // "Ooze prevention is currently not supported with the prime tower enabled."); this fork

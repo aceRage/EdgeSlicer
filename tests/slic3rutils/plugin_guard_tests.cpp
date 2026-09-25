@@ -13,11 +13,17 @@
 // The trap the marker exists for: a leftover marker with no library beside it, and a Bambu-original
 // library with no marker. Neither is UltraNet, and both must keep the CDN path fully working.
 //
-// Nothing here touches wx, a config file, the filesystem, the network, or a printer.
+// Nothing here touches wx, a config file, the network, or a printer; only the UltraNet-tag case
+// near the end writes two scratch files under the temp folder.
 
 #include <catch2/catch.hpp>
 
 #include "slic3r/GUI/PluginGuard.hpp"
+
+#include <fstream>
+#include <string>
+
+#include <boost/filesystem.hpp>
 
 using Slic3r::GUI::CameraToolsCopy;
 using Slic3r::GUI::LoginGuardAction;
@@ -25,6 +31,8 @@ using Slic3r::GUI::bambu_cdn_download_allowed;
 using Slic3r::GUI::camera_tools_copy_decision;
 using Slic3r::GUI::is_ultranet_plugin;
 using Slic3r::GUI::may_overwrite_bambusource;
+using Slic3r::GUI::bambusource_needs_refresh;
+using Slic3r::GUI::storage_browser_use_lan_url;
 using Slic3r::GUI::plugin_guard_decision;
 using Slic3r::GUI::PluginSync;
 using Slic3r::GUI::plugin_sync_decision;
@@ -163,4 +171,109 @@ TEST_CASE("No sidecar means no opinion, and the escape hatch keeps a foreign plu
     // The hatch never blocks a fresh install or the marker on an identical copy.
     CHECK(plugin_sync_decision(true, false, false, false, true) == PluginSync::InstallFresh);
     CHECK(plugin_sync_decision(true, true, true, false, true) == PluginSync::WriteMarkerOnly);
+}
+
+// ---------------------------------------------------------------------------------------------
+// macOS and Linux (the UltraNet port). The copier and the guards run the same decisions there;
+// only the file names and the sidecar location differ, and Windows must keep its exact values.
+
+TEST_CASE("The network library carries the name NetworkAgent loads on this platform", "[PluginGuard]")
+{
+    const std::string name = Slic3r::GUI::network_library_name();
+#if defined(_WIN32)
+    CHECK(name == "bambu_networking.dll");
+    CHECK(std::string(Slic3r::GUI::bambu_source_library_name()) == "BambuSource.dll");
+#elif defined(__APPLE__)
+    CHECK(name == "libbambu_networking.dylib");
+    CHECK(std::string(Slic3r::GUI::bambu_source_library_name()) == "libBambuSource.dylib");
+#else
+    CHECK(name == "libbambu_networking.so");
+    CHECK(std::string(Slic3r::GUI::bambu_source_library_name()) == "libBambuSource.so");
+#endif
+}
+
+TEST_CASE("The sidecar sits beside the exe, or in the app bundle's Resources on macOS", "[PluginGuard]")
+{
+    namespace fs = boost::filesystem;
+    using Slic3r::GUI::ultranet_sidecar_dir;
+    // Windows install dir and the Linux AppImage's bin/: <exe dir>/ultranet, as it always was.
+    CHECK(ultranet_sidecar_dir(fs::path("C:/Program Files/EdgeSlicer"), false) ==
+          fs::path("C:/Program Files/EdgeSlicer") / "ultranet");
+    CHECK(ultranet_sidecar_dir(fs::path("/tmp/.mount_EdgeS/bin"), false) == fs::path("/tmp/.mount_EdgeS/bin/ultranet"));
+    // macOS: Contents/MacOS may hold only code, so the plug-in and its marker live in Resources.
+    CHECK(ultranet_sidecar_dir(fs::path("/Applications/EdgeSlicer.app/Contents/MacOS"), true) ==
+          fs::path("/Applications/EdgeSlicer.app/Contents/Resources/ultranet"));
+#if defined(_WIN32)
+    // The platform default is unchanged on Windows.
+    CHECK(ultranet_sidecar_dir(fs::path("C:/EdgeSlicer")) == fs::path("C:/EdgeSlicer") / "ultranet");
+#endif
+}
+
+// This one writes two small files under the temp folder (per-process unique names).
+TEST_CASE("macOS/Linux tell our camera placeholder from Bambu's by the UltraNet tag", "[PluginGuard]")
+{
+    namespace fs = boost::filesystem;
+    using Slic3r::GUI::carries_ultranet_module_tag;
+    using Slic3r::GUI::kUltraNetModuleTag;
+    const fs::path dir = fs::temp_directory_path() / fs::unique_path("plugin_guard_tag_%%%%-%%%%-%%%%");
+    fs::create_directories(dir);
+    const fs::path ours = dir / "ours.bin", theirs = dir / "theirs.bin", edge = dir / "edge.bin";
+    {
+        // The tag buried in the middle of a larger image, as it sits in .rodata.
+        std::ofstream f(ours.string(), std::ios::binary);
+        f << std::string(100000, '\x7f') << kUltraNetModuleTag << std::string(5000, '\0');
+    }
+    {
+        std::ofstream f(theirs.string(), std::ios::binary);
+        f << std::string(200000, 'B') << "Bambu_Create" << std::string(10, '\0');
+    }
+    {
+        // Straddling the 64 KB read boundary.
+        std::ofstream f(edge.string(), std::ios::binary);
+        f << std::string(64 * 1024 - 5, 'x') << kUltraNetModuleTag;
+    }
+    CHECK(carries_ultranet_module_tag(ours));
+    CHECK(carries_ultranet_module_tag(edge));
+    CHECK_FALSE(carries_ultranet_module_tag(theirs));
+    CHECK_FALSE(carries_ultranet_module_tag(dir / "missing.bin"));
+#if !defined(_WIN32)
+    // Off Windows this is the copier's "keep it" question: only Bambu's module is kept.
+    CHECK(Slic3r::GUI::is_real_camera_component(theirs));
+    CHECK_FALSE(Slic3r::GUI::is_real_camera_component(ours));
+    CHECK_FALSE(Slic3r::GUI::is_real_camera_component(dir / "missing.bin"));
+#endif
+    boost::system::error_code ec;
+    fs::remove_all(dir, ec);
+}
+
+TEST_CASE("BambuSource is refreshed on its own, never over Bambu's camera filter", "[PluginGuard]")
+{
+    // The storage-browser tunnel changed BambuSource while the network plug-in may stay identical:
+    // an older placeholder is replaced even then.
+    CHECK(bambusource_needs_refresh(/*bundled*/ true, /*installed*/ true, /*identical*/ false, /*real*/ false, /*keep*/ false));
+    // A fresh data dir gets it; an identical copy is left alone.
+    CHECK(bambusource_needs_refresh(true, false, false, false, false));
+    CHECK_FALSE(bambusource_needs_refresh(true, true, true, false, false));
+    // Bambu's real filter (live view) always survives.
+    CHECK_FALSE(bambusource_needs_refresh(true, true, false, true, false));
+    // No sidecar, or the developer escape hatch: hands off.
+    CHECK_FALSE(bambusource_needs_refresh(false, true, false, false, false));
+    CHECK_FALSE(bambusource_needs_refresh(true, true, false, false, true));
+}
+
+TEST_CASE("Storage browser route: stock rule, plus the LAN address for a LAN-only tunnel", "[PluginGuard]")
+{
+    // Stock: LAN mode (or no remote file protocol) + a local protocol + a known IP.
+    CHECK(storage_browser_use_lan_url(/*lan*/ true, /*local*/ true, /*remote*/ true, /*ip*/ true, /*code*/ true, /*lan_only*/ false));
+    CHECK(storage_browser_use_lan_url(false, true, false, true, true, false));
+    // Stock: a cloud-bound printer with a relay goes to the cloud, whatever is known locally.
+    CHECK_FALSE(storage_browser_use_lan_url(false, true, true, true, true, false));
+    CHECK_FALSE(storage_browser_use_lan_url(true, true, true, false, true, false));
+    // A LAN-only tunnel (EdgeSlicer's FTPS one) takes the LAN address for that cloud-bound printer...
+    CHECK(storage_browser_use_lan_url(false, true, true, true, true, true));
+    // ...even when the printer advertises no local port-6000 protocol, which FTPS does not use...
+    CHECK(storage_browser_use_lan_url(false, false, true, true, true, true));
+    // ...but only with both the IP and the access code; otherwise the stock flow decides.
+    CHECK_FALSE(storage_browser_use_lan_url(false, true, true, false, true, true));
+    CHECK_FALSE(storage_browser_use_lan_url(false, true, true, true, false, true));
 }

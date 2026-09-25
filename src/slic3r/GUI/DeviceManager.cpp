@@ -1,6 +1,8 @@
 #include "libslic3r/libslic3r.h"
 #include "DeviceManager.hpp"
 #include "PrintErrorCommands.hpp"
+#include "AmsDrying.hpp"
+#include "AmsDualLayout.hpp"
 #include "DeviceModelCode.hpp"
 #include "libslic3r/Time.hpp"
 #include "libslic3r/Thread.hpp"
@@ -1872,6 +1874,20 @@ int MachineObject::command_ams_drying_stop()
     return this->publish_json(j.dump());
 }
 
+int MachineObject::command_ams_filament_drying_start(int ams_id, const std::string& filament_type, int temp, int hours, bool rotate_tray, int cooling_temp)
+{
+    const json j = GUI::AmsDrying::build_start(std::to_string(MachineObject::m_sequence_id++), ams_id, filament_type, temp, hours, rotate_tray, cooling_temp);
+    BOOST_LOG_TRIVIAL(info) << "command_ams_filament_drying_start: " << j.dump();
+    return this->publish_json(j.dump());
+}
+
+int MachineObject::command_ams_filament_drying_off(int ams_id)
+{
+    const json j = GUI::AmsDrying::build_stop(std::to_string(MachineObject::m_sequence_id++), ams_id);
+    BOOST_LOG_TRIVIAL(info) << "command_ams_filament_drying_off: " << j.dump();
+    return this->publish_json(j.dump());
+}
+
 int MachineObject::command_ack_proceed(const nlohmann::json& action_json)
 {
     json        payload;
@@ -2125,6 +2141,17 @@ int MachineObject::command_set_nozzle(int temp)
     return this->publish_gcode(gcode_str);
 }
 
+int MachineObject::command_set_nozzle_new(int extruder_index, int temp)
+{
+    json j;
+    j["print"]["sequence_id"]    = std::to_string(MachineObject::m_sequence_id++);
+    j["print"]["command"]        = "set_nozzle_temp";
+    j["print"]["extruder_index"] = extruder_index;
+    j["print"]["target_temp"]    = temp;
+
+    return this->publish_json(j.dump(), 1);
+}
+
 int MachineObject::command_set_chamber(int temp)
 {
     json j;
@@ -2174,8 +2201,10 @@ int MachineObject::command_ams_change_filament(bool load, std::string ams_id, st
         if (ams_id < "16") {
             tray_id = atoi(ams_id.c_str()) * 4 + atoi(slot_id.c_str());
         }
-        // TODO: Orca hack
-        if (ams_id == "254")
+        // TODO: Orca hack. Single-extruder firmware calls its one spool holder 255 while this fork
+        // calls it 254. Two-extruder machines have both (254 = left/deputy, 255 = right/main) and
+        // the dual layout passes the real id, so leave it alone there.
+        if (ams_id == "254" && !is_multi_extruders())
             ams_id = "255";
 
 
@@ -2940,6 +2969,8 @@ void MachineObject::reset()
     print_json.diff2all_base_reset(empty_j);
 
     vt_tray.reset();
+    vir_slots.clear();
+    is_support_remote_dry = false;
 
     subtask_ = nullptr;
 
@@ -3053,6 +3084,21 @@ int MachineObject::publish_json(std::string json_str, int qos, int flag)
     }
 
     return rtn;
+}
+
+std::string MachineObject::command_get_auto_nozzle_mapping(const std::string& request_json)
+{
+    try {
+        json j = json::parse(request_json);
+        const std::string seq = std::to_string(MachineObject::m_sequence_id++);
+        j["print"]["sequence_id"] = seq;
+        m_nozzle_mapping_reply = NozzleMappingReply();
+        if (publish_json(j.dump()) != 0)
+            return "";
+        return seq;
+    } catch (...) {
+        return "";
+    }
 }
 
 int MachineObject::cloud_publish_json(std::string json_str, int qos, int flag)
@@ -4459,6 +4505,11 @@ int MachineObject::parse_json(std::string payload, bool key_field_only)
                                         curr_ams->left_dry_time = (*it)["dry_time"].get<int>();
                                     }
 
+                                    /* remote drying state (AMS 2 Pro / AMS HT), DevFilaSystemParser::ParseAmsInfo */
+                                    try {
+                                        GUI::AmsDrying::parse_dry_fields(*it, curr_ams->dry);
+                                    } catch (...) {}
+
                                     if (it->contains("humidity")) {
                                         std::string humidity = (*it)["humidity"].get<std::string>();
 
@@ -4704,6 +4755,24 @@ int MachineObject::parse_json(std::string payload, bool key_field_only)
                     /* vitrual tray*/
                     if (!key_field_only) {
                         try {
+                            // One external spool per extruder on two-extruder machines (display only).
+                            if (jj.contains("vir_slot") && jj["vir_slot"].is_array()) {
+                                const bool keep_vt_support = ams_support_virtual_tray; // parse_vt_tray sets it
+                                std::vector<AmsTray> slots;
+                                for (const auto& vs : jj["vir_slot"]) {
+                                    if (!vs.is_object()) continue;
+                                    AmsTray slot = parse_vt_tray(vs);
+                                    if (vs.contains("id") && vs["id"].is_string())
+                                        slot.id = vs["id"].get<std::string>();
+                                    slots.push_back(slot);
+                                }
+                                ams_support_virtual_tray = keep_vt_support;
+                                bool changed = slots.size() != vir_slots.size();
+                                for (size_t i = 0; !changed && i < slots.size(); ++i)
+                                    changed = slots[i] != vir_slots[i];
+                                is_ams_need_update |= changed;
+                                vir_slots = std::move(slots);
+                            }
                             if (jj.contains("vt_tray")) {
                                 auto main_slot = parse_vt_tray(jj["vt_tray"].get<json>());
                                 main_slot.id = std::to_string(VIRTUAL_TRAY_ID);
@@ -4738,6 +4807,22 @@ int MachineObject::parse_json(std::string payload, bool key_field_only)
                         }
                     }
 
+                } else if (jj["command"].get<std::string>() == "get_auto_nozzle_mapping") {
+                    // Answer to a nozzle mapping query (ours or the network agent's).
+                    NozzleMappingReply reply;
+                    reply.valid = true;
+                    if (jj.contains("sequence_id")) {
+                        if (jj["sequence_id"].is_string()) reply.sequence_id = jj["sequence_id"].get<std::string>();
+                        else if (jj["sequence_id"].is_number()) reply.sequence_id = std::to_string(jj["sequence_id"].get<long long>());
+                    }
+                    if (jj.contains("result") && jj["result"].is_string()) reply.result = jj["result"].get<std::string>();
+                    if (jj.contains("reason") && jj["reason"].is_string()) reply.reason = jj["reason"].get<std::string>();
+                    if (jj.contains("errno") && jj["errno"].is_number()) reply.err_no = jj["errno"].get<int>();
+                    if (jj.contains("mapping") && jj["mapping"].is_array()) reply.mapping = jj["mapping"].dump();
+                    m_nozzle_mapping_reply = reply;
+                    BOOST_LOG_TRIVIAL(warning) << "[DualNozzle] get_auto_nozzle_mapping answer seq=" << reply.sequence_id
+                                               << " result=" << reply.result << " reason=" << reply.reason
+                                               << " errno=" << reply.err_no << " mapping=" << reply.mapping;
                 } else if (jj["command"].get<std::string>() == "project_file") {
                     //ack of project file
                     BOOST_LOG_TRIVIAL(debug) << "parse_json, ack of project_file = " << j.dump(4);
@@ -5847,6 +5932,14 @@ void MachineObject::parse_new_info(json print)
         is_support_nozzle_blob_detection = get_flag_bits(fun, 13);
         is_support_upgrade_kit = get_flag_bits(cfg, 14);
         is_support_command_homing = get_flag_bits(fun, 32);
+        is_support_nozzle_rack = get_flag_bits(fun, 60);
+    }
+
+    /*fun2 - may be longer than 64 bits, read without a border (Bambu DevUtil::get_flag_bits_no_border)*/
+    if (print.contains("fun2") && print["fun2"].is_string()) {
+        const std::string fun2 = print["fun2"].get<std::string>();
+        if (!fun2.empty())
+            is_support_remote_dry = GUI::AmsDual::fun2_supports_remote_dry(fun2);
     }
 
     /*aux*/
@@ -5923,9 +6016,24 @@ void MachineObject::parse_new_info(json print)
                                                                       : NozzleVolumeType::nvtStandard;
                 }
 
-                nozzle_obj.diameter     = njon["diameter"].get<float>();
-                nozzle_obj.max_temp     = njon["tm"].get<int>();
-                nozzle_obj.wear         = njon["wear"].get<int>();
+                if (type.length() >= 2) {
+                    switch ((char) std::toupper((unsigned char) type[1])) {
+                    case 'H': nozzle_obj.volume_exact = NozzleVolumeType::nvtHighFlow; break;
+                    case 'U': nozzle_obj.volume_exact = NozzleVolumeType::nvtTPUHighFlow; break;
+                    case 'E': nozzle_obj.volume_exact = NozzleVolumeType::nvtE3DHighFlow; break;
+                    default: nozzle_obj.volume_exact = NozzleVolumeType::nvtStandard; break;
+                    }
+                }
+
+                // BambuStudio reads only id/type/diameter unconditionally and treats the rest as
+                // optional (DevNozzleSystem.cpp:778-796); H2C rack entries carry no "tm", and a
+                // missing key used to throw out of the whole "device" block.
+                nozzle_obj.diameter     = njon.contains("diameter") && njon["diameter"].is_number() ? njon["diameter"].get<float>() : 0.0f;
+                nozzle_obj.max_temp     = njon.contains("tm") && njon["tm"].is_number() ? njon["tm"].get<int>() : 0;
+                nozzle_obj.wear         = njon.contains("wear") && njon["wear"].is_number() ? njon["wear"].get<int>() : 0;
+                nozzle_obj.stat         = njon.contains("stat") && njon["stat"].is_number() ? njon["stat"].get<int>() : 0;
+                if (njon.contains("fila_id") && njon["fila_id"].is_string()) nozzle_obj.fila_id = njon["fila_id"].get<std::string>();
+                if (njon.contains("color_m") && njon["color_m"].is_string()) nozzle_obj.color_m = njon["color_m"].get<std::string>();
                 if (nozzle_obj.diameter == 0.0f) {nozzle_obj.diameter = 0.4f;}
                 m_nozzle_data.nozzles.push_back(nozzle_obj);
             }
@@ -6040,6 +6148,16 @@ bool MachineObject::is_nozzle_data_invalid()
         }
     }
 
+    return false;
+}
+
+bool MachineObject::has_nozzle_rack() const
+{
+    if (is_support_nozzle_rack)
+        return true;
+    for (const Nozzle& n : m_nozzle_data.nozzles)
+        if (n.on_rack())
+            return true;
     return false;
 }
 
@@ -6478,10 +6596,17 @@ void DeviceManager::lan_reconnect_now(MachineObject* obj, const char* why)
 {
     if (!obj || !m_agent) return;
     LanReconnect& r = m_lan_reconnect[obj->dev_id];
-    BOOST_LOG_TRIVIAL(info) << "lan_reconnect: " << why << " dev_id=" << obj->dev_id << " ip=" << obj->dev_ip
-                            << " attempt=" << (r.attempts + 1) << " next_backoff_ms=" << lan_backoff_ms(r.attempts + 1);
+    // Warning level on purpose: a re-dial is rare once the tick only acts on real drops, and the
+    // release build logs nothing below warning - this line is how a flap shows in a user's log.
+    // The hidden instance's watch rotation re-dials by design every LAN_WATCH_DWELL_MS: info.
+    if (std::string(why) == "watch rotation")
+        BOOST_LOG_TRIVIAL(info) << "lan_reconnect: " << why << " dev_id=" << obj->dev_id << " ip=" << obj->dev_ip;
+    else
+        BOOST_LOG_TRIVIAL(warning) << "lan_reconnect: " << why << " dev_id=" << obj->dev_id << " ip=" << obj->dev_ip
+                                   << " attempt=" << r.attempts << " next_backoff_ms=" << lan_backoff_ms(r.attempts);
     try {
         m_agent->disconnect_printer();
+        obj->set_lan_session_up(false); // up again when the new dial's on_local_connect(Ok) lands
         obj->reset();
 #if !BBL_RELEASE_TO_PUBLIC
         obj->connect(false, Slic3r::GUI::wxGetApp().app_config->get("enable_ssl_for_mqtt") == "true" ? true : false);
@@ -6495,12 +6620,15 @@ void DeviceManager::lan_reconnect_now(MachineObject* obj, const char* why)
 }
 
 // GUI thread, once a second (RemoteAccess's GuiHeartbeat). Cheap: in the normal case it is one
-// map lookup and one is_connected() per selected LAN printer.
+// map lookup and one clock read per selected LAN printer.
 //
-// The rule: a LAN-mode printer that has looked !is_connected() for longer than the grace window
-// gets a reconnect, then another after 15 s, 30 s, 60 s, 60 s... A push that lands resets the
-// ladder. Cloud-mode printers are left alone - the agent's own refresh_connection owns those, and
-// it only makes sense with a login.
+// The rule (LanReconnectLadder::lan_tick_step): a LAN-mode printer that has sent no report for
+// 20 s is asked for one (pushall), again every 10 s while the silence lasts - a quiet printer is
+// not a dropped one. It is re-dialled only after a real drop: the plug-in reported the session
+// lost or failed, a probe found no session to publish on, or it stayed mute for two minutes. Then
+// the grace window, and 15 s, 30 s, 60 s, 60 s... A report from a live session resets it all.
+// Cloud-mode printers are left alone - the agent's own refresh_connection owns those, and it only
+// makes sense with a login.
 void DeviceManager::lan_reconnect_tick()
 {
     if (!m_agent) return;
@@ -6539,25 +6667,39 @@ void DeviceManager::lan_reconnect_tick()
     for (MachineObject* obj : want) {
         if (!obj->has_access_right() || obj->dev_ip.empty()) continue;
         LanReconnect& r = m_lan_reconnect[obj->dev_id];
-        if (obj->is_connected()) {
-            // A push landed inside DISCONNECT_TIMEOUT: the session is alive, so the ladder resets.
-            if (r.attempts != 0 || r.down_since != 0)
-                BOOST_LOG_TRIVIAL(info) << "lan_reconnect: dev_id=" << obj->dev_id << " is back (after "
-                                        << r.attempts << " attempt(s))";
-            r = LanReconnect();
-            continue;
+        const LanReconnect before = r;
+        const long long silence = (long long) std::chrono::duration_cast<std::chrono::milliseconds>(
+                                      std::chrono::system_clock::now() - obj->last_update_time).count();
+        const bool session_up = obj->lan_session_up();
+        const LanReconnectLadder::TickAction act = LanReconnectLadder::lan_tick_step(r, now, silence, session_up);
+
+        if (r.down_since == 0 && (before.attempts != 0 || before.down_since != 0))
+            BOOST_LOG_TRIVIAL(warning) << "lan_reconnect: dev_id=" << obj->dev_id << " is back (after "
+                                       << before.attempts << " re-dial(s))";
+        else if (before.down_since == 0 && r.down_since != 0)
+            BOOST_LOG_TRIVIAL(info) << "lan_reconnect: dev_id=" << obj->dev_id << " no report for " << silence
+                                    << " ms, session " << (session_up ? "up (quiet?)" : "reported down");
+
+        switch (act) {
+        case LanReconnectLadder::TickAction::None: break;
+        case LanReconnectLadder::TickAction::Probe: {
+            // What Bambu Studio does for a silent printer: ask for the full status. A healthy
+            // printer answers within a second and the silence is over; a publish that fails means
+            // the plug-in has no session to put it on, which the next tick treats as a drop.
+            const int rc = obj->command_request_push_all(true);
+            BOOST_LOG_TRIVIAL(info) << "lan_reconnect: dev_id=" << obj->dev_id << " quiet for " << silence
+                                    << " ms, asked for a report (rc=" << rc << ")";
+            if (rc != 0) {
+                BOOST_LOG_TRIVIAL(warning) << "lan_reconnect: dev_id=" << obj->dev_id
+                                           << " the report request could not be sent (rc=" << rc << "): session is gone";
+                obj->set_lan_session_up(false);
+            }
+            break;
         }
-        if (r.down_since == 0) {
-            r.down_since = now;
-            BOOST_LOG_TRIVIAL(info) << "lan_reconnect: dev_id=" << obj->dev_id
-                                    << " looks disconnected; grace " << LAN_RECONNECT_GRACE_MS << " ms";
-            continue;
+        case LanReconnectLadder::TickAction::Reconnect:
+            lan_reconnect_now(obj, !session_up ? "session lost" : "no report for two minutes");
+            break;
         }
-        if (now - r.down_since < LAN_RECONNECT_GRACE_MS) continue;
-        if (r.last_try != 0 && now - r.last_try < lan_backoff_ms(r.attempts)) continue;
-        r.last_try = now;
-        ++r.attempts;
-        lan_reconnect_now(obj, r.attempts == 1 ? "first retry" : "backoff retry");
     }
 }
 

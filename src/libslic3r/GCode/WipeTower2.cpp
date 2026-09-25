@@ -20,6 +20,8 @@
 #include "Config.hpp"
 #include "Surface.hpp"
 #include "Fill/FillRectilinear.hpp"
+#include "GCodeWriter.hpp"
+#include "WipeTowerInterface.hpp"
 
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/log/trivial.hpp>
@@ -541,6 +543,132 @@ Polylines contrust_gap_for_skip_points(
     return remove_points_from_polygon(polygon, skip_points, gap_length, is_left, insert_skip_polygon);
 };
 
+// remove_points_from_polygon() with a ray direction per point, taking the NEAREST crossing along
+// each ray. The legacy code casts every ray the way the first point's goes and takes the first
+// crossing in wall order, which is right for the rectangle wall it was written for (a point on the
+// wall is its own crossing) but not for a gap on the far side of a rib or cone wall. Only the tower
+// interface gaps use this, so walls without them keep their legacy gaps exactly.
+Polylines TowerInterface::cut_wall_gaps(const Polygon &polygon, const std::vector<TowerInterface::GapPoint> &gap_points, float gap_length,
+                                        Polygon &insert_skip_pg)
+{
+    insert_skip_pg = Polygon();
+    if (gap_points.empty() || polygon.size() < 3) {
+        insert_skip_pg = polygon;
+        return Polylines{ to_polyline(polygon) };
+    }
+    // The nearest crossing of a gap point's ray with the closed wall `pts`.
+    auto nearest_crossing = [](const std::vector<Vec2f> &pts, const TowerInterface::GapPoint &g, int &seg, Vec2f &pos) {
+        const Vec2f ray    = g.is_left ? Vec2f(-1, 0) : Vec2f(1, 0);
+        float       best_t = std::numeric_limits<float>::max();
+        seg                = -1;
+        for (int j = 0; j < int(pts.size()); ++j) {
+            auto [is_inter, inter_pos] = ray_intersetion_line(g.pos, ray, pts[j], pts[(j + 1) % pts.size()]);
+            if (! is_inter)
+                continue;
+            const float t = (inter_pos - g.pos).norm();
+            if (t < best_t) {
+                best_t = t;
+                seg    = j;
+                pos    = inter_pos;
+            }
+        }
+        return seg >= 0;
+    };
+
+    // Walk the wall from the vertex farthest from every gap, so that no gap straddles the start:
+    // the piece assembly below assumes the first point is extruded.
+    std::vector<Vec2f> points;
+    {
+        std::vector<Vec2f> raw;
+        for (const Point &p : polygon.points)
+            raw.push_back(unscale(p).cast<float>());
+        std::vector<Vec2f> crossings;
+        for (const TowerInterface::GapPoint &g : gap_points) {
+            int   seg;
+            Vec2f pos;
+            if (nearest_crossing(raw, g, seg, pos))
+                crossings.push_back(pos);
+        }
+        int   anchor    = 0;
+        float best_dist = -1.f;
+        for (int k = 0; k < int(raw.size()); ++k) {
+            float d = std::numeric_limits<float>::max();
+            for (const Vec2f &c : crossings)
+                d = std::min(d, (raw[k] - c).norm());
+            if (d > best_dist) {
+                best_dist = d;
+                anchor    = k;
+            }
+        }
+        points.reserve(polygon.points.size());
+        Polyline tmp_poly = polygon.split_at_index(anchor);
+        for (const Point &p : tmp_poly)
+            points.push_back(unscale(p).cast<float>());
+        points.pop_back();
+    }
+
+    std::vector<IntersectionInfo> inter_info;
+    for (int i = 0; i < int(gap_points.size()); ++i) {
+        int   best_j;
+        Vec2f best_pos;
+        if (! nearest_crossing(points, gap_points[i], best_j, best_pos))
+            continue;
+        IntersectionInfo forward  = move_point_along_polygon(points, best_pos, best_j, gap_length, true, i);
+        IntersectionInfo backward = move_point_along_polygon(points, best_pos, best_j, gap_length, false, i);
+        backward.is_forward       = false;
+        forward.is_forward        = true;
+        inter_info.push_back(backward);
+        inter_info.push_back(forward);
+    }
+
+    std::vector<PointWithFlag> new_pl;
+    for (const Vec2f &p : points)
+        new_pl.push_back({ p, -1 });
+    std::sort(inter_info.begin(), inter_info.end(), [](const IntersectionInfo &lhs, const IntersectionInfo &rhs) {
+        if (rhs.idx == lhs.idx)
+            return lhs.dis_from_idx < rhs.dis_from_idx;
+        return lhs.idx < rhs.idx;
+    });
+    for (int i = int(inter_info.size()) - 1; i >= 0; i--)
+        insert_points(new_pl, inter_info[i].idx, inter_info[i].pos, inter_info[i].pair_idx, inter_info[i].is_forward);
+    for (const PointWithFlag &p : new_pl)
+        insert_skip_pg.points.push_back(scaled(p.pos));
+
+    Polylines result;
+    int       beg  = 0;
+    bool      skip = true;
+    int       i    = beg;
+    Polyline  pl;
+    do {
+        if (skip || new_pl[i].pair_idx == -1) {
+            pl.points.push_back(scaled(new_pl[i].pos));
+            i    = (i + 1) % new_pl.size();
+            skip = false;
+        } else {
+            if (! pl.points.empty()) {
+                pl.points.push_back(scaled(new_pl[i].pos));
+                result.push_back(pl);
+                pl.points.clear();
+            }
+            int left = new_pl[i].pair_idx;
+            int j    = (i + 1) % new_pl.size();
+            while (j != beg && new_pl[j].pair_idx != left) {
+                if (new_pl[j].pair_idx != -1 && ! new_pl[j].is_forward)
+                    left = new_pl[j].pair_idx;
+                j = (j + 1) % new_pl.size();
+            }
+            i    = j;
+            skip = true;
+        }
+    } while (i != beg);
+    if (! pl.points.empty()) {
+        if (new_pl[i].pair_idx == -1)
+            pl.points.push_back(scaled(new_pl[i].pos));
+        result.push_back(pl);
+    }
+    return result;
+}
+
 Polygon generate_rectange_polygon(const Vec2f& wt_box_min, const Vec2f& wt_box_max)
 {
     Polygon res;
@@ -844,6 +972,16 @@ public:
     }
 
     WipeTowerWriter2& retract(float e, float f = 0.f) { return load(-e, f); }
+
+    // Push e mm of filament through the standing nozzle (tower interface extra prime), counted as used.
+    WipeTowerWriter2& prime(float e, float f)
+    {
+        if (e <= 0.f)
+            return *this;
+        m_used_filament_length += e;
+        m_elapsed_time += e / f * 60.f;
+        return load(e, f);
+    }
 
     // Loads filament while also moving towards given points in x-axis (x feedrate is limited by cutting the distance short if necessary)
     WipeTowerWriter2& load_move_x_advanced(float farthest_x, float loading_dist, float loading_speed, float max_x_speed = 50.f)
@@ -1384,6 +1522,9 @@ WipeTower2::WipeTower2(const PrintConfig&                     config,
     }
 
     m_bed_bottom_left = m_bed_shape == RectangularBed ? Vec2f(bed_points.front().x(), bed_points.front().y()) : Vec2f::Zero();
+
+    m_interface  = TowerInterface::Settings::from_config(config);
+    m_shared_bed = TowerInterface::shared_printable_box(config);
 }
 
 void WipeTower2::set_extruder(size_t idx, const PrintConfig& config)
@@ -1460,6 +1601,13 @@ void WipeTower2::set_extruder(size_t idx, const PrintConfig& config)
 
     m_filpar[idx].retract_length = config.retraction_length.get_at(idx);
     m_filpar[idx].retract_speed  = config.retraction_speed.get_at(idx);
+
+    m_filpar[idx].kind                  = TowerInterface::filament_kind(config, (unsigned int) idx);
+    m_filpar[idx].interface_temperature = TowerInterface::interface_temperature(config.filament_tower_interface_print_temp.get_at(idx),
+                                                                                config.nozzle_temperature_range_high.get_at(idx),
+                                                                                m_filpar[idx].temperature);
+    m_filpar[idx].run_in_distance       = std::max(0.f, float(config.filament_tower_interface_pre_extrusion_dist.get_at(idx)));
+    m_filpar[idx].extra_prime_length    = std::max(0.f, float(config.filament_tower_interface_pre_extrusion_length.get_at(idx)));
 }
 
 // Returns gcode to prime the nozzles at the front edge of the print bed.
@@ -1631,7 +1779,12 @@ WipeTower::ToolChangeResult WipeTower2::emit_planned_tool_change(const WipeTower
         toolchange_Change(writer, tool, m_filpar[tool].material); // Change the tool, set a speed override for soluble and flex materials.
         toolchange_Load(writer, cleaning_box);
         writer.travel(writer.x(), writer.y() - m_perimeter_width); // cooling and loading were done a bit down the road
+        const bool at_interface = tool_change != nullptr && tool_change->is_interface;
+        if (at_interface)
+            interface_before_wipe(writer, *tool_change);
         toolchange_Wipe(writer, cleaning_box, wipe_volume); // Wipe the newly loaded filament until the end of the assigned wipe area.
+        if (at_interface)
+            interface_after_wipe(writer, *tool_change);
         writer.append(";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Wipe_Tower_End) + "\n");
         ++m_num_tool_changes;
     } else
@@ -2300,11 +2453,12 @@ WipeTower::ToolChangeResult WipeTower2::finish_layer()
         // outer contour (always)
         bool infill_cone = first_layer && m_wipe_tower_width > 2 * spacing && m_wipe_tower_depth > 2 * spacing;
         std::vector<Vec2f> skip_points = get_wall_skip_points(m_layer_info - m_plan.begin());
-        poly = generate_support_cone_wall(writer, wt_box, feedrate, infill_cone, spacing, skip_points);
+        poly = generate_support_cone_wall(writer, wt_box, feedrate, infill_cone, spacing, skip_points, interface_gaps_of_layer());
     } else {
         WipeTower::box_coordinates wt_box(Vec2f(0.f, 0.f), m_wipe_tower_width, m_layer_info->depth + m_perimeter_width);
         std::vector<Vec2f> skip_points = get_wall_skip_points(m_layer_info - m_plan.begin());
-        poly = generate_support_rib_wall(writer, wt_box, feedrate, first_layer, m_wall_type == (int) wtwRib, true, skip_points);
+        poly = generate_support_rib_wall(writer, wt_box, feedrate, first_layer, m_wall_type == (int) wtwRib, true, skip_points,
+                                         interface_gaps_of_layer());
     }
 
     // brim with chamfer (gradual layer-by-layer reduction)
@@ -2347,9 +2501,18 @@ WipeTower::ToolChangeResult WipeTower2::finish_layer()
     if (loops_num > 0) {
         writer.append("; WIPE_TOWER_BRIM_START\n");
 
+        // A tower interface run-in also crosses the brim loops (the chamfer above the first layer).
+        const std::vector<TowerInterface::GapPoint> loop_gaps = interface_gaps_of_layer();
         for (int i = 0; i < loops_num; ++i) {
             poly   = offset(poly, scale_(spacing)).front();
             m_outer_wall[m_z_pos].push_back(to_polyline(poly));
+            if (! loop_gaps.empty()) {
+                Polygon   inserted;
+                Polylines pieces = TowerInterface::cut_wall_gaps(poly, loop_gaps, 2.5f * m_perimeter_width, inserted);
+                writer.generate_path(pieces, feedrate, m_filpar[m_current_tool].retract_length, m_filpar[m_current_tool].retract_speed * 60,
+                                     m_used_fillet);
+                continue;
+            }
             int cp = poly.closest_point_index(Point::new_scale(writer.x(), writer.y()));
             writer.travel(unscale(poly.points[cp]).cast<float>());
             for (int j = cp + 1; true; ++j) {
@@ -2762,25 +2925,143 @@ void WipeTower2::get_all_wall_skip_points()
 {
     m_wall_skip_points.clear();
     m_wall_skip_points.resize(m_plan.size());
+    m_interface_gap_points.clear();
+    m_interface_gap_points.resize(m_plan.size());
+
+    // Tower interface run-in gaps are also cut into the GAP_LAYERS - 1 layers below. generate()
+    // turns the tower 180 degrees every layer and centres a shallower layer with m_y_shift, so a
+    // gap point is carried over to the frame of the layer it goes on.
+    std::vector<float> y_shift(m_plan.size(), 0.f);
+    {
+        float shift = m_y_shift;
+        for (size_t layer_id = 0; layer_id < m_plan.size(); ++layer_id) {
+            if (m_plan[layer_id].depth < m_wipe_tower_depth - m_perimeter_width)
+                shift = (m_wipe_tower_depth - m_plan[layer_id].depth - m_perimeter_width) / 2.f;
+            y_shift[layer_id] = shift;
+        }
+    }
+    const Vec2f center(m_wipe_tower_width / 2.f, m_wipe_tower_depth / 2.f);
 
     for (size_t layer_id = 0; layer_id < m_plan.size(); ++layer_id) {
-        const auto& layer = m_plan[layer_id];
+        auto& layer = m_plan[layer_id];
         if (layer.tool_changes.empty()) continue;
 
         std::vector<Vec2f> skip_points;
         float              process_depth = 0.f;
 
         for (size_t tc_idx = 0; tc_idx < layer.tool_changes.size(); ++tc_idx) {
-            const auto& tc = layer.tool_changes[tc_idx];
+            auto& tc = layer.tool_changes[tc_idx];
             // Gap on wall closest to where ramming ends; Y at ramming-wiping boundary
             bool do_ramming = (m_semm && m_enable_filament_ramming) || m_filpar[tc.old_tool].multitool_ramming;
             float x = (predict_ramming_end_x((int) tc.old_tool, layer.height) < m_wipe_tower_width / 2.f) ? 0.f : m_wipe_tower_width;
             float y = process_depth + (do_ramming ? tc.ramming_depth : 0.f) + m_perimeter_width / 2.f;
             skip_points.emplace_back(x, y);
             process_depth += tc.required_depth;
+
+            if (tc.run_in) {
+                // The run-in enters through this very gap. Listed for this layer as well, so that the
+                // brim loops around the wall get it too (combined_gaps() drops the duplicate).
+                tc.run_in_cross = Vec2f(x, y);
+                for (int below = 0; below < TowerInterface::GAP_LAYERS && below <= int(layer_id); ++below) {
+                    const size_t lower = layer_id - below;
+                    Vec2f        p     = Vec2f(x, y + y_shift[layer_id]) - center;
+                    if (below % 2 == 1)
+                        p = -p;
+                    p += center - Vec2f(0.f, y_shift[lower]);
+                    m_interface_gap_points[lower].push_back({ p, p.x() < m_wipe_tower_width / 2.f });
+                }
+            }
         }
         m_wall_skip_points[layer_id] = std::move(skip_points);
     }
+}
+
+void WipeTower2::plan_interfaces()
+{
+    m_run_in_reserve = 0.f;
+    std::vector<unsigned int> filaments;
+    for (size_t layer_id = 0; layer_id < m_plan.size(); ++layer_id)
+        for (WipeTowerInfo::ToolChange &tc : m_plan[layer_id].tool_changes) {
+            // The tower's first layer is never an interface (Bambu Studio: "first layer never be contact").
+            tc.is_interface = m_interface.any() && layer_id != m_first_layer_idx &&
+                           TowerInterface::triggers(m_interface.trigger, m_filpar[tc.old_tool].kind, m_filpar[tc.new_tool].kind);
+            tc.run_in    = tc.is_interface && m_interface.run_in && m_use_gap_wall && m_filpar[tc.new_tool].run_in_distance > EPSILON;
+            for (size_t f : { tc.old_tool, tc.new_tool })
+                if (std::find(filaments.begin(), filaments.end(), (unsigned int) f) == filaments.end())
+                    filaments.push_back((unsigned int) f);
+        }
+    if (m_interface.run_in && m_use_gap_wall) {
+        std::vector<TowerInterface::FilamentKind> kinds;
+        std::vector<float>                        distances;
+        for (const FilamentParameters &fp : m_filpar) {
+            kinds.push_back(fp.kind);
+            distances.push_back(fp.run_in_distance);
+        }
+        m_run_in_reserve = float(TowerInterface::run_in_reserve(m_interface, kinds, distances, filaments, m_perimeter_width));
+    }
+}
+
+std::vector<TowerInterface::GapPoint> WipeTower2::interface_gaps_of_layer() const
+{
+    const size_t layer_id = size_t(m_layer_info - m_plan.begin());
+    return layer_id < m_interface_gap_points.size() ? m_interface_gap_points[layer_id] : std::vector<TowerInterface::GapPoint>();
+}
+
+std::vector<TowerInterface::GapPoint> WipeTower2::combined_gaps(const std::vector<Vec2f>                     &skip_points,
+                                                                const std::vector<TowerInterface::GapPoint> &interface_gaps) const
+{
+    std::vector<TowerInterface::GapPoint> out;
+    for (const Vec2f &p : skip_points)
+        out.push_back({ p, p.x() < m_wipe_tower_width / 2.f });
+    for (const TowerInterface::GapPoint &g : interface_gaps)
+        if (std::none_of(skip_points.begin(), skip_points.end(), [&g](const Vec2f &p) { return (p - g.pos).squaredNorm() < 1e-6f; }))
+            out.push_back(g);
+    return out;
+}
+
+void WipeTower2::interface_before_wipe(WipeTowerWriter2 &writer, const WipeTowerInfo::ToolChange &tool_change)
+{
+    const FilamentParameters &fp = m_filpar[tool_change.new_tool];
+    writer.append("; tower interface\n");
+    if (m_interface.temp && fp.interface_temperature != fp.temperature)
+        writer.append(GCodeWriter::set_temperature(fp.interface_temperature, m_gcode_flavor, true, -1, "tower interface temperature"));
+
+    const Vec2f start  = writer.pos();
+    bool        primed = false;
+    if (tool_change.run_in) {
+        // Out through the gap this change's purge was given, along the wall-crossing line, then run
+        // in along the same line: nothing is ever dragged over the wall.
+        const Vec2f cross  = tool_change.run_in_cross;
+        const float side   = cross.x() < m_wipe_tower_width / 2.f ? -1.f : 1.f;
+        const float alpha  = m_wipe_tower_rotation_angle * float(M_PI / 180.);
+        auto        to_bed = [&writer, alpha, this](const Vec2f &p) -> Vec2f {
+            return Vec2f(Eigen::Rotation2Df(alpha) * writer.rotate(p)) + m_wipe_tower_pos;
+        };
+        const float dist = TowerInterface::clamp_to_bed(cross, Vec2f(side, 0.f), fp.run_in_distance, to_bed, m_shared_bed);
+        if (dist > EPSILON) {
+            const Vec2f inside(side < 0.f ? m_perimeter_width : m_wipe_tower_width - m_perimeter_width, cross.y());
+            const Vec2f outside     = cross + Vec2f(side * dist, 0.f);
+            const float purge_speed = std::min(m_wipe_tower_max_purge_speed * 60.f, m_infill_speed * 60.f);
+            writer.append("; tower interface run-in\n").travel(inside, m_travel_speed * 60.f).travel(outside);
+            if (m_interface.extra_prime) {
+                writer.prime(fp.extra_prime_length + TowerInterface::EXTRA_PRIME_BASE, TowerInterface::PRIME_FEEDRATE);
+                primed = true;
+            }
+            // At the speed toolchange_Wipe starts its first line at.
+            writer.extrude(inside, 0.33f * purge_speed).extrude(start, 0.33f * purge_speed);
+        }
+    }
+    if (m_interface.extra_prime && ! primed)
+        writer.prime(fp.extra_prime_length + TowerInterface::EXTRA_PRIME_BASE, TowerInterface::PRIME_FEEDRATE);
+}
+
+void WipeTower2::interface_after_wipe(WipeTowerWriter2 &writer, const WipeTowerInfo::ToolChange &tool_change)
+{
+    const FilamentParameters &fp = m_filpar[tool_change.new_tool];
+    // Back to the normal temperature; wait only if that means heating up.
+    if (m_interface.temp && fp.interface_temperature != fp.temperature)
+        writer.append(GCodeWriter::set_temperature(fp.temperature, m_gcode_flavor, fp.temperature > fp.interface_temperature, -1,
+                                                   "tower interface done, normal temperature"));
 }
 
 // Return pre-computed gap points for a given layer, with bounds check.
@@ -2823,6 +3104,7 @@ void WipeTower2::generate(std::vector<std::vector<WipeTower::ToolChangeResult>>&
     m_rib_length = std::max(diagonal, m_rib_length);
     m_rib_width  = std::min(m_rib_width, std::min(m_wipe_tower_depth, m_wipe_tower_width) / 2.f); // Ensure that the rib wall of the wipetower are attached to the infill.
 
+    plan_interfaces();
     if (m_use_gap_wall)
         get_all_wall_skip_points();
 
@@ -3039,7 +3321,8 @@ Polygon WipeTower2::generate_support_rib_wall(WipeTowerWriter2&                 
                                               bool                              first_layer,
                                               bool                              rib_wall,
                                               bool                              extrude_perimeter,
-                                              const std::vector<Vec2f>&         skip_points)
+                                              const std::vector<Vec2f>&         skip_points,
+                                              const std::vector<TowerInterface::GapPoint>& interface_gaps)
 {
     float     retract_length = m_filpar[m_current_tool].retract_length;
     float     retract_speed  = m_filpar[m_current_tool].retract_speed * 60;
@@ -3058,7 +3341,10 @@ Polygon WipeTower2::generate_support_rib_wall(WipeTowerWriter2&                 
     if (!extrude_perimeter)
         return wall_polygon;
 
-    if (!skip_points.empty()) {
+    if (!interface_gaps.empty()) {
+        result_wall = TowerInterface::cut_wall_gaps(wall_polygon, combined_gaps(skip_points, interface_gaps), 2.5 * m_perimeter_width,
+                                                    insert_skip_polygon);
+    } else if (!skip_points.empty()) {
         result_wall = contrust_gap_for_skip_points(wall_polygon, skip_points, m_wipe_tower_width, 2.5 * m_perimeter_width,
                                                    insert_skip_polygon);
     } else {
@@ -3077,7 +3363,8 @@ Polygon WipeTower2::generate_support_rib_wall(WipeTowerWriter2&                 
 // This block creates the stabilization cone.
 // First define a lambda to draw the rectangle with stabilization.
 Polygon WipeTower2::generate_support_cone_wall(
-    WipeTowerWriter2& writer, const WipeTower::box_coordinates& wt_box, double feedrate, bool infill_cone, float spacing, const std::vector<Vec2f>& skip_points)
+    WipeTowerWriter2& writer, const WipeTower::box_coordinates& wt_box, double feedrate, bool infill_cone, float spacing, const std::vector<Vec2f>& skip_points,
+    const std::vector<TowerInterface::GapPoint>& interface_gaps)
 {
     const auto [R, support_scale] = get_wipe_tower_cone_base(m_wipe_tower_width, m_wipe_tower_height, m_wipe_tower_depth,
                                                              m_wipe_tower_cone_angle);
@@ -3148,7 +3435,10 @@ Polygon WipeTower2::generate_support_cone_wall(
     Polylines result_wall;
     Polygon   insert_skip_polygon;
 
-    if (!skip_points.empty()) {
+    if (!interface_gaps.empty()) {
+        result_wall = TowerInterface::cut_wall_gaps(poly, combined_gaps(skip_points, interface_gaps), 2.5 * m_perimeter_width,
+                                                    insert_skip_polygon);
+    } else if (!skip_points.empty()) {
         result_wall = contrust_gap_for_skip_points(poly, skip_points, m_wipe_tower_width,
                                                    2.5 * m_perimeter_width, insert_skip_polygon);
     } else {

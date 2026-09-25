@@ -3,6 +3,7 @@
 #include "GUI_App.hpp"
 #include "MainFrame.hpp"
 #include "Plater.hpp"
+#include "NotificationManager.hpp"
 #include "MsgDialog.hpp"
 #include "PresetMirror.hpp"
 #include "I18N.hpp"
@@ -1243,6 +1244,15 @@ wxBoxSizer *PreferencesDialog::create_item_checkbox(wxString title, wxWindow *pa
             if (m_autosave_interval_textinput != nullptr) { m_autosave_interval_textinput->Enable(pbool); }
         }
 
+        // Print-by-object advisory notices: take effect immediately rather than waiting for the
+        // next plate switch / slice attempt to re-evaluate.
+        if (param == "show_print_by_object_caution" && wxGetApp().plater()) {
+            if (checkbox->GetValue())
+                wxGetApp().plater()->sync_print_seq_warning_notification();
+            else
+                wxGetApp().plater()->get_notification_manager()->bbl_close_seqprintinfo_notification();
+        }
+
         // Ultra: the archive's folder and retention only mean anything while it is on.
         if (param == "ultra_gcode_archive") {
             bool pbool = checkbox->GetValue();
@@ -1770,6 +1780,10 @@ wxWindow* PreferencesDialog::create_general_page()
         _L("If enabled, EdgeSlicer asks GitHub once per start whether a newer release has been published and offers it. "
            "Help > Check for Update works either way."),
         50, "check_for_updates_on_startup");
+    auto item_sm_auto_login = create_item_checkbox(_L("Sign in to my Snapmaker account automatically at startup"), page,
+        _L("If enabled, EdgeSlicer quietly reuses the Snapmaker account session saved from your last sign-in when it starts, "
+           "so you do not have to sign in again. Nothing is shown; if there is no saved session you simply stay signed out."),
+        50, "snapmaker_auto_login");
 
     auto item_calc_mode = create_item_checkbox(_L("Flushing volumes: Auto-calculate every time the color changed."), page, _L("If enabled, auto-calculate every time the color changed."), 50, "auto_calculate");
     auto item_calc_in_long_retract = create_item_checkbox(_L("Flushing volumes: Auto-calculate every time when the filament is changed."), page, _L("If enabled, auto-calculate every time when filament is changed"), 50, "auto_calculate_when_filament_change");
@@ -1834,6 +1848,15 @@ wxWindow* PreferencesDialog::create_general_page()
     auto title_downloads = create_item_title(_L("Downloads"), page, _L("Downloads"));
     auto item_downloads = create_item_downloads(page,50,"download_path");
 
+    // "Export & Open in Bambu Studio" looks for an installed Bambu Studio automatically
+    // (registry / file association / default path); this lets a user whose install it cannot
+    // find point at bambu-studio.exe directly. Left blank, discovery runs as usual.
+    auto title_bambu_studio = create_item_title(_L("Bambu Studio"), page, _L("Bambu Studio"));
+    auto item_bambu_studio_path = create_item_text_input(_L("Bambu Studio path"), page,
+        _L("Only needed if \"Export & Open in Bambu Studio\" cannot find your Bambu Studio installation automatically. "
+           "Full path to bambu-studio.exe (Windows), the BambuStudio.app bundle (macOS), or the executable (Linux)."),
+        "bambu_studio_path");
+
     //dark mode
 #ifdef _WIN32
     auto title_darkmode = create_item_title(_L("Dark Mode"), page, _L("Dark Mode"));
@@ -1891,6 +1914,7 @@ wxWindow* PreferencesDialog::create_general_page()
     sizer_page->Add(item_show_splash_screen, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_hints, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_check_updates, 0, wxTOP, FromDIP(3));
+    sizer_page->Add(item_sm_auto_login, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_calc_in_long_retract, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_multi_machine, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_step_mesh_setting, 0, wxTOP, FromDIP(3));
@@ -1945,6 +1969,9 @@ wxWindow* PreferencesDialog::create_general_page()
     sizer_page->Add(title_downloads, 0, wxTOP| wxEXPAND, FromDIP(20));
     sizer_page->Add(item_downloads, 0, wxEXPAND, FromDIP(3));
 
+    sizer_page->Add(title_bambu_studio, 0, wxTOP | wxEXPAND, FromDIP(20));
+    sizer_page->Add(item_bambu_studio_path, 0, wxTOP, FromDIP(3));
+
 #ifdef _WIN32
     sizer_page->Add(title_darkmode, 0, wxTOP | wxEXPAND, FromDIP(20));
     sizer_page->Add(item_darkmode, 0, wxEXPAND, FromDIP(3));
@@ -1978,6 +2005,8 @@ wxWindow* PreferencesDialog::create_ultra_page()
         _L("When opening a project made for another printer, switch back to the last printer you selected or sliced with, instead of the printer embedded in the file."), 50, "keep_printer_on_open");
     auto item_skip_mapping_warnings = create_item_checkbox(_L("Skip Settings Mapping Warnings"), page,
         _L("Don't show warnings about unrecognized or invalid settings replaced while loading project files; the defaults or automatic fixes are applied silently."), 50, "skip_settings_mapping_warnings");
+    auto item_print_by_object_caution = create_item_checkbox(_L("Show print-by-object caution notices"), page,
+        _L("Show the advisory notices suggesting auto-arrange, and the pre-slice caution, when Print sequence is set to \"By object\". Turn off here or via \"Do not show again\" on the notice itself."), 50, "show_print_by_object_caution");
 
     auto item_auto_drop = create_item_checkbox(_L("Drop imported models to the bed"), page,
         _L("When off, imported models keep the Z position stored in the file instead of being dropped onto the build plate."), 50, "auto_drop_on_import");
@@ -2058,6 +2087,7 @@ wxWindow* PreferencesDialog::create_ultra_page()
     item_autosave->Add(item_autosave_interval, 0, wxLEFT, 0);
     sizer_page->Add(item_keep_printer, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_skip_mapping_warnings, 0, wxTOP, FromDIP(3));
+    sizer_page->Add(item_print_by_object_caution, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_auto_drop, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_bottom_z, 0, wxTOP, FromDIP(3));
     sizer_page->Add(item_hide_other_plates, 0, wxTOP, FromDIP(3));

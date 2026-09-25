@@ -17,6 +17,8 @@
 
 #include "RecenterDialog.hpp"
 #include "CalibUtils.hpp"
+#include "NozzleTempRows.hpp"
+#include "BambuDevicePalette.hpp"
 #include <slic3r/GUI/Widgets/ProgressDialog.hpp>
 #include <wx/display.h>
 #include <wx/mstream.h>
@@ -47,13 +49,14 @@ static const wxColour STATIC_BOX_LINE_COL = wxColour(238, 238, 238);
 static const wxColour BUTTON_NORMAL1_COL = wxColour(238, 238, 238);
 static const wxColour BUTTON_NORMAL2_COL = wxColour(206, 206, 206);
 static const wxColour BUTTON_PRESS_COL   = wxColour(172, 172, 172);
-static const wxColour BUTTON_HOVER_COL   = wxColour(0, 150, 136);
+// The Bambu Device page uses Bambu Studio's green, not the app accent (BambuDevicePalette.hpp).
+static const wxColour BUTTON_HOVER_COL   = BambuDevicePalette::Green;
 
 static const wxColour DISCONNECT_TEXT_COL = wxColour(171, 172, 172);
 static const wxColour NORMAL_TEXT_COL     = wxColour(48,58,60);
 static const wxColour NORMAL_FAN_TEXT_COL = wxColour(107, 107, 107);
 static const wxColour WARNING_INFO_BG_COL = wxColour(255, 111, 0);
-static const wxColour STAGE_TEXT_COL      = wxColour(0, 150, 136);
+static const wxColour STAGE_TEXT_COL      = BambuDevicePalette::SecondaryText; // grey, as in Bambu Studio
 
 static const wxColour GROUP_STATIC_LINE_COL = wxColour(206, 206, 206);
 
@@ -123,6 +126,9 @@ static wxImage fail_image;
 #define MISC_BUTTON_2FAN_SIZE (wxSize(FromDIP(66), FromDIP(51)))
 #define MISC_BUTTON_3FAN_SIZE (wxSize(FromDIP(44), FromDIP(51)))
 #define TEMP_CTRL_MIN_SIZE (wxSize(FromDIP(122), FromDIP(52)))
+// The two nozzle rows of a two-nozzle printer are a little shorter so the column does not grow
+// by a full row (Bambu Studio does the same, 52 -> 48).
+#define TEMP_CTRL_DUAL_MIN_SIZE (wxSize(FromDIP(122), FromDIP(44)))
 #define AXIS_MIN_SIZE (wxSize(FromDIP(220), FromDIP(220)))
 #define EXTRUDER_IMAGE_SIZE (wxSize(FromDIP(48), FromDIP(76)))
 
@@ -239,7 +245,14 @@ void PrintingTaskPanel::create_panel(wxWindow* parent)
      fgSizer_task->SetFlexibleDirection(wxVERTICAL);
      fgSizer_task->SetNonFlexibleGrowMode(wxFLEX_GROWMODE_SPECIFIED);*/
 
-    m_printing_stage_value = new wxStaticText(parent, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, wxALIGN_LEFT | wxST_ELLIPSIZE_END);
+    // Bambu Studio's line under the progress bar: the printing stage ("Printing", "Heatbed
+    // preheating", ...) on the left, "Estimated finish time: HH:MM" on the right. Same 600 px cap
+    // as the percent/layer line above the bar, so both end where the bar ends.
+    wxPanel *penel_finish_time = new wxPanel(parent);
+    penel_finish_time->SetBackgroundColour(*wxWHITE);
+    penel_finish_time->SetMaxSize(wxSize(FromDIP(600), -1));
+
+    m_printing_stage_value = new wxStaticText(penel_finish_time, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, wxALIGN_LEFT | wxST_ELLIPSIZE_END);
     m_printing_stage_value->Wrap(-1);
     m_printing_stage_value->SetMaxSize(wxSize(FromDIP(800),-1));
     #ifdef __WXOSX_MAC__
@@ -268,6 +281,11 @@ void PrintingTaskPanel::create_panel(wxWindow* parent)
     m_gauge_progress = new ProgressBar(m_panel_progress, wxID_ANY, 100, wxDefaultPosition, wxDefaultSize);
     m_gauge_progress->SetValue(0);
     m_gauge_progress->SetHeight(PROGRESSBAR_HEIGHT);
+    // The Bambu Device page draws its bar, percent and buttons in Bambu Studio's green; the
+    // calibration wizard's copy of this panel keeps the app accent. (ProgressBar's
+    // SetProgressBackgroundColour sets the filled part, despite the name.)
+    const wxColour progress_accent = m_type == PrintingTaskType::CALIBRATION ? wxColour(0, 150, 136) : BambuDevicePalette::Green;
+    m_gauge_progress->SetProgressBackgroundColour(progress_accent);
     m_gauge_progress->SetMaxSize(wxSize(FromDIP(600), -1));
     m_panel_progress->SetSizer(m_sizer_progressbar);
     m_panel_progress->Layout();
@@ -336,12 +354,12 @@ void PrintingTaskPanel::create_panel(wxWindow* parent)
     m_staticText_progress_percent = new wxStaticText(penel_text, wxID_ANY, "0", wxDefaultPosition, wxDefaultSize, 0);
     m_staticText_progress_percent->SetFont(::Label::Head_18);
     m_staticText_progress_percent->SetMaxSize(wxSize(-1, FromDIP(20)));
-    m_staticText_progress_percent->SetForegroundColour(wxColour(0, 150, 136));
+    m_staticText_progress_percent->SetForegroundColour(progress_accent);
 
     m_staticText_progress_percent_icon = new wxStaticText(penel_text, wxID_ANY, "%", wxDefaultPosition, wxDefaultSize, 0);
     m_staticText_progress_percent_icon->SetFont(::Label::Body_11);
     m_staticText_progress_percent_icon->SetMaxSize(wxSize(-1, FromDIP(13)));
-    m_staticText_progress_percent_icon->SetForegroundColour(wxColour(0, 150, 136));
+    m_staticText_progress_percent_icon->SetForegroundColour(progress_accent);
 
     sizer_percent->Add(m_staticText_progress_percent, 0, 0, 0);
 
@@ -357,8 +375,9 @@ void PrintingTaskPanel::create_panel(wxWindow* parent)
     m_staticText_progress_left->SetFont(wxFont(12, wxFONTFAMILY_DEFAULT, wxFONTSTYLE_NORMAL, wxFONTWEIGHT_NORMAL, false, wxT("HarmonyOS Sans SC")));
     m_staticText_progress_left->SetForegroundColour(wxColour(146, 146, 146));
 
-    // Orca: display the end time of the print
-    m_staticText_progress_end = new wxStaticText(penel_text, wxID_ANY, L("N/A"), wxDefaultPosition, wxDefaultSize, 0);
+    // Orca: display the end time of the print. Labelled and placed as in Bambu Studio, under the
+    // bar at the right of the stage line (see update_left_time).
+    m_staticText_progress_end = new wxStaticText(penel_finish_time, wxID_ANY, _L("Estimated finish time: ") + NA_STR, wxDefaultPosition, wxDefaultSize, 0);
     m_staticText_progress_end->Wrap(-1);
     m_staticText_progress_end->SetFont(
         wxFont(12, wxFONTFAMILY_DEFAULT, wxFONTSTYLE_NORMAL, wxFONTWEIGHT_NORMAL, false, wxT("HarmonyOS Sans SC")));
@@ -385,9 +404,6 @@ void PrintingTaskPanel::create_panel(wxWindow* parent)
     bSizer_text->Add(m_staticText_layers, 0, wxALIGN_CENTER | wxALL, 0);
     bSizer_text->Add(0, 0, 0, wxLEFT, FromDIP(20));
     bSizer_text->Add(m_staticText_progress_left, 0, wxALIGN_CENTER | wxALL, 0);
-    // Orca: display the end time of the print
-    bSizer_text->Add(0, 0, 0, wxLEFT, FromDIP(8));
-    bSizer_text->Add(m_staticText_progress_end, 0, wxALIGN_CENTER | wxALL, 0);
 
     penel_text->SetMaxSize(wxSize(FromDIP(600), -1));
     penel_text->SetSizer(bSizer_text);
@@ -399,12 +415,18 @@ void PrintingTaskPanel::create_panel(wxWindow* parent)
     penel_bottons->SetSizer(bSizer_buttons);
     penel_bottons->Layout();
 
+    wxBoxSizer *bSizer_finish_time = new wxBoxSizer(wxHORIZONTAL);
+    bSizer_finish_time->Add(m_printing_stage_value, 1, wxALIGN_CENTER_VERTICAL, 0);
+    bSizer_finish_time->Add(m_staticText_progress_end, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP(8));
+    penel_finish_time->SetSizer(bSizer_finish_time);
+    penel_finish_time->Layout();
+
     bSizer_subtask_info->Add(0, 0, 0, wxEXPAND | wxTOP, FromDIP(14));
     bSizer_subtask_info->Add(bSizer_task_name, 0, wxEXPAND|wxRIGHT, FromDIP(18));
     bSizer_subtask_info->Add(m_staticText_profile_value, 0, wxEXPAND | wxTOP, FromDIP(5));
-    bSizer_subtask_info->Add(m_printing_stage_value, 0, wxEXPAND | wxTOP, FromDIP(5));
     bSizer_subtask_info->Add(penel_bottons, 0, wxEXPAND | wxTOP, FromDIP(10));
     bSizer_subtask_info->Add(m_panel_progress, 0, wxEXPAND|wxRIGHT, FromDIP(25));
+    bSizer_subtask_info->Add(penel_finish_time, 0, wxEXPAND | wxRIGHT, FromDIP(25));
 
 
     m_printing_sizer = new wxBoxSizer(wxHORIZONTAL);
@@ -470,9 +492,9 @@ void PrintingTaskPanel::create_panel(wxWindow* parent)
     m_request_failed_info->SetForegroundColour(*wxRED);
     m_request_failed_info->SetFont(::Label::Body_10);
     static_request_failed_panel_sizer->Add(m_request_failed_info, 0, wxEXPAND | wxALL, FromDIP(10));
-    StateColor btn_bg_green(std::pair<wxColour, int>(AMS_CONTROL_DISABLE_COLOUR, StateColor::Disabled), std::pair<wxColour, int>(wxColour(0, 137, 123), StateColor::Pressed),
-                            std::pair<wxColour, int>(wxColour(38, 166, 154), StateColor::Hovered), std::pair<wxColour, int>(AMS_CONTROL_BRAND_COLOUR, StateColor::Normal));
-    StateColor btn_bd_green(std::pair<wxColour, int>(AMS_CONTROL_WHITE_COLOUR, StateColor::Disabled), std::pair<wxColour, int>(AMS_CONTROL_BRAND_COLOUR, StateColor::Enabled));
+    StateColor btn_bg_green(std::pair<wxColour, int>(AMS_CONTROL_DISABLE_COLOUR, StateColor::Disabled), std::pair<wxColour, int>(BambuDevicePalette::GreenPressed, StateColor::Pressed),
+                            std::pair<wxColour, int>(BambuDevicePalette::GreenHovered, StateColor::Hovered), std::pair<wxColour, int>(BambuDevicePalette::Green, StateColor::Normal));
+    StateColor btn_bd_green(std::pair<wxColour, int>(AMS_CONTROL_WHITE_COLOUR, StateColor::Disabled), std::pair<wxColour, int>(BambuDevicePalette::Green, StateColor::Enabled));
     m_button_market_retry = new Button(m_request_failed_panel, _L("Retry"));
     m_button_market_retry->SetBackgroundColor(btn_bg_green);
     m_button_market_retry->SetBorderColor(btn_bd_green);
@@ -695,6 +717,9 @@ void PrintingTaskPanel::update_progress_percent(wxString percent, wxString icon)
 void PrintingTaskPanel::update_left_time(wxString time)
 {
     m_staticText_progress_left->SetLabelText(time);
+    // No remaining time (idle, preparing, reset): do not leave the last print's finish time up.
+    if (time == NA_STR)
+        m_staticText_progress_end->SetLabelText(_L("Estimated finish time: ") + NA_STR);
 }
 
 void PrintingTaskPanel::update_left_time(int mc_left_time)
@@ -726,7 +751,12 @@ void PrintingTaskPanel::update_left_time(int mc_left_time)
     else
         end_time_text = NA_STR;
 
-    m_staticText_progress_end->SetLabelText(end_time_text);
+    const wxString finish_label = _L("Estimated finish time: ") + end_time_text;
+    if (m_staticText_progress_end->GetLabelText() != finish_label) {
+        m_staticText_progress_end->SetLabelText(finish_label);
+        // The label grows from "N/A" to a time; let the stage line give it the room.
+        m_staticText_progress_end->GetParent()->Layout();
+    }
 
 }
 
@@ -1104,9 +1134,9 @@ wxBoxSizer *StatusBasePanel::create_machine_control_page(wxWindow *parent)
     //m_staticText_control->SetFont(PAGE_TITLE_FONT);
     m_staticText_control->SetForegroundColour(PAGE_TITLE_FONT_COL);
 
-    StateColor btn_bg_green(std::pair<wxColour, int>(AMS_CONTROL_DISABLE_COLOUR, StateColor::Disabled), std::pair<wxColour, int>(wxColour(0, 137, 123), StateColor::Pressed),
-        std::pair<wxColour, int>(wxColour(38, 166, 154), StateColor::Hovered), std::pair<wxColour, int>(AMS_CONTROL_BRAND_COLOUR, StateColor::Normal));
-    StateColor btn_bd_green(std::pair<wxColour, int>(AMS_CONTROL_WHITE_COLOUR, StateColor::Disabled), std::pair<wxColour, int>(AMS_CONTROL_BRAND_COLOUR, StateColor::Enabled));
+    StateColor btn_bg_green(std::pair<wxColour, int>(AMS_CONTROL_DISABLE_COLOUR, StateColor::Disabled), std::pair<wxColour, int>(BambuDevicePalette::GreenPressed, StateColor::Pressed),
+        std::pair<wxColour, int>(BambuDevicePalette::GreenHovered, StateColor::Hovered), std::pair<wxColour, int>(BambuDevicePalette::Green, StateColor::Normal));
+    StateColor btn_bd_green(std::pair<wxColour, int>(AMS_CONTROL_WHITE_COLOUR, StateColor::Disabled), std::pair<wxColour, int>(BambuDevicePalette::Green, StateColor::Enabled));
 
     m_parts_btn = new Button(m_panel_control_title, _L("Printer Parts"));
     m_parts_btn->SetBackgroundColor(btn_bg_green);
@@ -1218,6 +1248,19 @@ wxBoxSizer *StatusBasePanel::create_temp_control(wxWindow *parent)
     m_tempCtrl_nozzle->SetTextColor(tempinput_text_colour);
     m_tempCtrl_nozzle->SetBorderColor(tempinput_border_colour);
 
+    // Left nozzle of two-nozzle printers; shown by StatusPanel::set_nozzle_temp_layout.
+    wxWindowID nozzle_deputy_id = wxWindow::NewControlId();
+    m_tempCtrl_nozzle_deputy    = new TempInput(parent, nozzle_deputy_id, TEMP_BLANK_STR, TEMP_BLANK_STR, wxString("monitor_nozzle_temp"),
+                                             wxString("monitor_nozzle_temp_active"), wxDefaultPosition, wxDefaultSize, wxALIGN_CENTER);
+    m_tempCtrl_nozzle_deputy->SetMinSize(TEMP_CTRL_MIN_SIZE);
+    m_tempCtrl_nozzle_deputy->SetMinTemp(nozzle_temp_range[0]);
+    m_tempCtrl_nozzle_deputy->SetMaxTemp(nozzle_temp_range[1]);
+    m_tempCtrl_nozzle_deputy->SetBorderWidth(FromDIP(2));
+    m_tempCtrl_nozzle_deputy->SetTextColor(tempinput_text_colour);
+    m_tempCtrl_nozzle_deputy->SetBorderColor(tempinput_border_colour);
+    m_tempCtrl_nozzle_deputy->Hide();
+
+    sizer->Add(m_tempCtrl_nozzle_deputy, 0, wxEXPAND | wxALL, 1);
     sizer->Add(m_tempCtrl_nozzle, 0, wxEXPAND | wxALL, 1);
 
     m_line_nozzle = new StaticLine(parent);
@@ -1321,7 +1364,7 @@ wxBoxSizer *StatusBasePanel::create_misc_control(wxWindow *parent)
     m_switch_nozzle_fan->SetTextColor(StateColor(std::make_pair(DISCONNECT_TEXT_COL, (int) StateColor::Disabled), std::make_pair(NORMAL_FAN_TEXT_COL, (int) StateColor::Normal)));
 
     m_switch_nozzle_fan->Bind(wxEVT_ENTER_WINDOW, [this](auto& e) {
-        m_fan_panel->SetBackgroundColor(wxColour(0, 150, 136));
+        m_fan_panel->SetBackgroundColor(BambuDevicePalette::Green);
     });
 
     m_switch_nozzle_fan->Bind(wxEVT_LEAVE_WINDOW, [this, parent](auto& e) {
@@ -1341,7 +1384,7 @@ wxBoxSizer *StatusBasePanel::create_misc_control(wxWindow *parent)
         StateColor(std::make_pair(DISCONNECT_TEXT_COL, (int) StateColor::Disabled), std::make_pair(NORMAL_FAN_TEXT_COL, (int) StateColor::Normal)));
 
     m_switch_printing_fan->Bind(wxEVT_ENTER_WINDOW, [this](auto& e) {
-        m_fan_panel->SetBackgroundColor(wxColour(0, 150, 136));
+        m_fan_panel->SetBackgroundColor(BambuDevicePalette::Green);
     });
 
     m_switch_printing_fan->Bind(wxEVT_LEAVE_WINDOW, [this, parent](auto& e) {
@@ -1361,7 +1404,7 @@ wxBoxSizer *StatusBasePanel::create_misc_control(wxWindow *parent)
         StateColor(std::make_pair(DISCONNECT_TEXT_COL, (int)StateColor::Disabled), std::make_pair(NORMAL_FAN_TEXT_COL, (int)StateColor::Normal)));
 
     m_switch_cham_fan->Bind(wxEVT_ENTER_WINDOW, [this](auto& e) {
-        m_fan_panel->SetBackgroundColor(wxColour(0, 150, 136));
+        m_fan_panel->SetBackgroundColor(BambuDevicePalette::Green);
     });
 
     m_switch_cham_fan->Bind(wxEVT_LEAVE_WINDOW, [this, parent](auto& e) {
@@ -1392,6 +1435,8 @@ void StatusBasePanel::reset_temp_misc_control()
     // reset temp string
     m_tempCtrl_nozzle->SetLabel(TEMP_BLANK_STR);
     m_tempCtrl_nozzle->GetTextCtrl()->SetValue(TEMP_BLANK_STR);
+    m_tempCtrl_nozzle_deputy->SetLabel(TEMP_BLANK_STR);
+    m_tempCtrl_nozzle_deputy->GetTextCtrl()->SetValue(TEMP_BLANK_STR);
     m_tempCtrl_bed->SetLabel(TEMP_BLANK_STR);
     m_tempCtrl_bed->GetTextCtrl()->SetValue(TEMP_BLANK_STR);
     m_tempCtrl_chamber->SetLabel(TEMP_BLANK_STR);
@@ -1399,6 +1444,7 @@ void StatusBasePanel::reset_temp_misc_control()
     m_button_unload->Show();
 
     m_tempCtrl_nozzle->Enable(true);
+    m_tempCtrl_nozzle_deputy->Enable(true);
     m_tempCtrl_chamber->Enable(true);
     m_tempCtrl_bed->Enable(true);
 
@@ -1743,6 +1789,8 @@ StatusPanel::StatusPanel(wxWindow *parent, wxWindowID id, const wxPoint &pos, co
             on_set_bed_temp();
         } else if (id == m_tempCtrl_nozzle->GetType()) {
             on_set_nozzle_temp();
+        } else if (id == m_tempCtrl_nozzle_deputy->GetType()) {
+            on_set_nozzle_deputy_temp();
         } else if (id == m_tempCtrl_chamber->GetType()) {
             on_set_chamber_temp();
         }
@@ -1763,6 +1811,8 @@ StatusPanel::StatusPanel(wxWindow *parent, wxWindowID id, const wxPoint &pos, co
     m_tempCtrl_bed->Connect(wxEVT_SET_FOCUS, wxFocusEventHandler(StatusPanel::on_bed_temp_set_focus), NULL, this);
     m_tempCtrl_nozzle->Connect(wxEVT_KILL_FOCUS, wxFocusEventHandler(StatusPanel::on_nozzle_temp_kill_focus), NULL, this);
     m_tempCtrl_nozzle->Connect(wxEVT_SET_FOCUS, wxFocusEventHandler(StatusPanel::on_nozzle_temp_set_focus), NULL, this);
+    m_tempCtrl_nozzle_deputy->Connect(wxEVT_KILL_FOCUS, wxFocusEventHandler(StatusPanel::on_nozzle_deputy_temp_kill_focus), NULL, this);
+    m_tempCtrl_nozzle_deputy->Connect(wxEVT_SET_FOCUS, wxFocusEventHandler(StatusPanel::on_nozzle_deputy_temp_set_focus), NULL, this);
     m_tempCtrl_chamber->Connect(wxEVT_KILL_FOCUS, wxFocusEventHandler(StatusPanel::on_cham_temp_kill_focus), NULL, this);
     m_tempCtrl_chamber->Connect(wxEVT_SET_FOCUS, wxFocusEventHandler(StatusPanel::on_cham_temp_set_focus), NULL, this);
     m_switch_lamp->Connect(wxEVT_COMMAND_BUTTON_CLICKED, wxCommandEventHandler(StatusPanel::on_lamp_switch), NULL, this);
@@ -1786,7 +1836,6 @@ StatusPanel::StatusPanel(wxWindow *parent, wxWindowID id, const wxPoint &pos, co
     Bind(EVT_AMS_ON_SELECTED, &StatusPanel::on_ams_selected, this);
     Bind(EVT_AMS_ON_FILAMENT_EDIT, &StatusPanel::on_filament_edit, this);
     Bind(EVT_VAMS_ON_FILAMENT_EDIT, &StatusPanel::on_ext_spool_edit, this);
-    Bind(EVT_AMS_GUIDE_WIKI, &StatusPanel::on_ams_guide, this);
     Bind(EVT_AMS_RETRY, &StatusPanel::on_ams_retry, this);
     Bind(EVT_FAN_CHANGED, &StatusPanel::on_fan_changed, this);
     Bind(EVT_SECONDARY_CHECK_DONE, &StatusPanel::on_print_error_done, this);
@@ -1822,6 +1871,8 @@ StatusPanel::~StatusPanel()
     m_tempCtrl_bed->Disconnect(wxEVT_SET_FOCUS, wxFocusEventHandler(StatusPanel::on_bed_temp_set_focus), NULL, this);
     m_tempCtrl_nozzle->Disconnect(wxEVT_KILL_FOCUS, wxFocusEventHandler(StatusPanel::on_nozzle_temp_kill_focus), NULL, this);
     m_tempCtrl_nozzle->Disconnect(wxEVT_SET_FOCUS, wxFocusEventHandler(StatusPanel::on_nozzle_temp_set_focus), NULL, this);
+    m_tempCtrl_nozzle_deputy->Disconnect(wxEVT_KILL_FOCUS, wxFocusEventHandler(StatusPanel::on_nozzle_deputy_temp_kill_focus), NULL, this);
+    m_tempCtrl_nozzle_deputy->Disconnect(wxEVT_SET_FOCUS, wxFocusEventHandler(StatusPanel::on_nozzle_deputy_temp_set_focus), NULL, this);
     m_switch_lamp->Disconnect(wxEVT_COMMAND_BUTTON_CLICKED, wxCommandEventHandler(StatusPanel::on_lamp_switch), NULL, this);
     m_switch_nozzle_fan->Disconnect(wxEVT_COMMAND_TOGGLEBUTTON_CLICKED, wxCommandEventHandler(StatusPanel::on_nozzle_fan_switch), NULL, this);
     m_switch_printing_fan->Disconnect(wxEVT_COMMAND_TOGGLEBUTTON_CLICKED, wxCommandEventHandler(StatusPanel::on_nozzle_fan_switch), NULL, this);
@@ -2383,6 +2434,7 @@ void StatusPanel::show_printing_status(bool ctrl_area, bool temp_area)
 
     if (!temp_area) {
         m_tempCtrl_nozzle->Enable(false);
+        m_tempCtrl_nozzle_deputy->Enable(false);
         m_tempCtrl_bed->Enable(false);
         m_tempCtrl_chamber->Enable(false);
         m_switch_speed->Enable(false);
@@ -2393,6 +2445,7 @@ void StatusPanel::show_printing_status(bool ctrl_area, bool temp_area)
         m_switch_cham_fan->Enable(false);
     } else {
         m_tempCtrl_nozzle->Enable();
+        m_tempCtrl_nozzle_deputy->Enable();
         m_tempCtrl_bed->Enable();
         m_tempCtrl_chamber->Enable();
         m_switch_speed->Enable();
@@ -2424,24 +2477,63 @@ void StatusPanel::update_temp_ctrl(MachineObject *obj)
         m_tempCtrl_bed->SetIconNormal();
     }
 
-    m_tempCtrl_nozzle->SetCurrTemp((int) obj->m_extder_data.extders[0].temp);
-    if (obj->nozzle_max_temperature > -1) {
-        if (m_tempCtrl_nozzle) m_tempCtrl_nozzle->SetMaxTemp(obj->nozzle_max_temperature);
+    // Nozzle(s): one row per extruder on two-nozzle printers, the single row otherwise.
+    std::vector<NozzleTempRow> nozzle_rows;
+    {
+        std::vector<NozzleTempSample> samples;
+        for (const Extder &e : obj->m_extder_data.extders) samples.push_back({e.id, e.temp, e.target_temp});
+        nozzle_rows = nozzle_temp_rows(samples, obj->m_extder_data.total_extder_count, obj->m_extder_data.current_extder_id);
     }
-    else {
-        if (m_tempCtrl_nozzle) m_tempCtrl_nozzle->SetMaxTemp(nozzle_temp_range[1]);
-    }
-
-    if (m_temp_nozzle_timeout > 0) {
-        m_temp_nozzle_timeout--;
+    const bool dual_nozzle = nozzle_rows.size() == 2;
+    if (dual_nozzle) {
+        // Badges first: they change the rows' width, which the layout pass below measures.
+        m_nozzle_deputy_ctrl_extruder_id = nozzle_rows[0].extruder_id;
+        m_nozzle_ctrl_extruder_id        = nozzle_rows[1].extruder_id;
+        m_tempCtrl_nozzle_deputy->SetBadge(wxString::FromUTF8(nozzle_rows[0].badge), nozzle_rows[0].active);
+        m_tempCtrl_nozzle->SetBadge(wxString::FromUTF8(nozzle_rows[1].badge), nozzle_rows[1].active);
     } else {
-        if (!nozzle_temp_input) { m_tempCtrl_nozzle->SetTagTemp((int) obj->m_extder_data.extders[0].target_temp); }
+        m_nozzle_ctrl_extruder_id = 0;
     }
+    set_nozzle_temp_layout(dual_nozzle);
 
-    if ((obj->m_extder_data.extders[0].target_temp - obj->m_extder_data.extders[0].temp) >= TEMP_THRESHOLD_VAL) {
-        m_tempCtrl_nozzle->SetIconActive();
+    const int nozzle_max = obj->nozzle_max_temperature > -1 ? obj->nozzle_max_temperature : nozzle_temp_range[1];
+
+    if (!dual_nozzle) {
+        m_tempCtrl_nozzle->SetCurrTemp((int) obj->m_extder_data.extders[0].temp);
+        if (obj->nozzle_max_temperature > -1) {
+            if (m_tempCtrl_nozzle) m_tempCtrl_nozzle->SetMaxTemp(obj->nozzle_max_temperature);
+        }
+        else {
+            if (m_tempCtrl_nozzle) m_tempCtrl_nozzle->SetMaxTemp(nozzle_temp_range[1]);
+        }
+
+        if (m_temp_nozzle_timeout > 0) {
+            m_temp_nozzle_timeout--;
+        } else {
+            if (!nozzle_temp_input) { m_tempCtrl_nozzle->SetTagTemp((int) obj->m_extder_data.extders[0].target_temp); }
+        }
+
+        if ((obj->m_extder_data.extders[0].target_temp - obj->m_extder_data.extders[0].temp) >= TEMP_THRESHOLD_VAL) {
+            m_tempCtrl_nozzle->SetIconActive();
+        } else {
+            m_tempCtrl_nozzle->SetIconNormal();
+        }
     } else {
-        m_tempCtrl_nozzle->SetIconNormal();
+        auto update_row = [nozzle_max](TempInput *ctrl, const NozzleTempRow &row, int &hold_count, bool editing) {
+            ctrl->SetCurrTemp(row.temp);
+            ctrl->SetMaxTemp(nozzle_max);
+            if (hold_count > 0) {
+                hold_count--;
+            } else if (!editing) {
+                ctrl->SetTagTemp(row.target);
+            }
+            if (row.heating)
+                ctrl->SetIconActive();
+            else
+                ctrl->SetIconNormal();
+        };
+        update_row(m_tempCtrl_nozzle_deputy, nozzle_rows[0], m_temp_nozzle_deputy_timeout, nozzle_deputy_temp_input);
+        update_row(m_tempCtrl_nozzle, nozzle_rows[1], m_temp_nozzle_timeout, nozzle_temp_input);
     }
 
     m_tempCtrl_chamber->SetCurrTemp(obj->chamber_temp);
@@ -2459,6 +2551,32 @@ void StatusPanel::update_temp_ctrl(MachineObject *obj)
     else {
         m_tempCtrl_chamber->SetIconNormal();
     }
+}
+
+void StatusPanel::set_nozzle_temp_layout(bool dual)
+{
+    if (dual == m_nozzle_dual_layout) return;
+    m_nozzle_dual_layout = dual;
+
+    if (!dual) {
+        m_tempCtrl_nozzle->SetBadge(wxEmptyString);
+        m_tempCtrl_nozzle_deputy->SetBadge(wxEmptyString);
+        m_tempCtrl_nozzle_deputy->SetLabel(TEMP_BLANK_STR);
+        m_tempCtrl_nozzle_deputy->GetTextCtrl()->SetValue(TEMP_BLANK_STR);
+        m_tempCtrl_nozzle_deputy->SetIconNormal();
+        nozzle_deputy_temp_input     = false;
+        m_temp_nozzle_deputy_timeout = 0;
+    }
+    const wxSize row_size = dual ? TEMP_CTRL_DUAL_MIN_SIZE : TEMP_CTRL_MIN_SIZE;
+    m_tempCtrl_nozzle->SetMinSize(row_size);
+    m_tempCtrl_nozzle_deputy->SetMinSize(row_size);
+    m_tempCtrl_nozzle_deputy->Show(dual);
+
+    // The rows live in the temperature/axis box, which has its own sizer: size the box first,
+    // then lay out its children (its height may not change when only the row sizes do).
+    Layout();
+    if (wxWindow *box = m_tempCtrl_nozzle->GetParent()) box->Layout();
+    Refresh();
 }
 
 void StatusPanel::update_misc_ctrl(MachineObject *obj)
@@ -2643,6 +2761,15 @@ void StatusPanel::update_ams(MachineObject *obj)
     bool is_support_filament_backup = obj->is_support_filament_backup;
     AMSModel ams_mode               = AMSModel::GENERIC_AMS;
 
+    // Two-extruder printers (H2D, H2D Pro, H2C, X2D) get the per-extruder layout.
+    m_ams_control->SetMachine(obj);
+    if (m_ams_control->IsDualMode() != obj->is_multi_extruders()) {
+        m_ams_control->SetDualMode(obj->is_multi_extruders());
+        m_ams_control_box->Layout();
+        m_ams_control_box->Fit();
+        Layout();
+    }
+
     if (obj) {
         if (obj->get_printer_ams_type() == "f1") { ams_mode = AMSModel::AMS_LITE; }
         obj->check_ams_filament_valid();
@@ -2704,6 +2831,12 @@ void StatusPanel::update_ams(MachineObject *obj)
 
     // must select a current can
     m_ams_control->UpdateAms(ams_info, false);
+    if (m_ams_control->IsDualMode()) {
+        m_ams_control->UpdateDual(obj);
+        // The external spools are always there, so the area shows even without an AMS.
+        show_ams_group(true);
+    }
+    m_ams_control->UpdateDryDialog(obj);
 
     last_tray_exist_bits  = obj->tray_exist_bits;
     last_ams_exist_bits   = obj->ams_exist_bits;
@@ -3183,12 +3316,12 @@ void StatusPanel::update_subtask(MachineObject *obj)
             // update printing stage
             m_project_task_panel->update_left_time(obj->mc_left_time);
             if (obj->subtask_) {
-                m_project_task_panel->update_stage_value(obj->get_curr_stage(), obj->subtask_->task_progress);
+                m_project_task_panel->update_stage_value(device_page_stage_text(obj), obj->subtask_->task_progress);
                 m_project_task_panel->update_progress_percent(wxString::Format("%d", obj->subtask_->task_progress), "%");
                 m_project_task_panel->update_layers_num(true, wxString::Format(_L("Layer: %d/%d"), obj->curr_layer, obj->total_layers));
 
             } else {
-                m_project_task_panel->update_stage_value(obj->get_curr_stage(), 0);
+                m_project_task_panel->update_stage_value(device_page_stage_text(obj), 0);
                 m_project_task_panel->update_progress_percent(NA_STR, wxEmptyString);
                 m_project_task_panel->update_layers_num(true, wxString::Format(_L("Layer: %s"), NA_STR));
             }
@@ -3309,6 +3442,17 @@ void StatusPanel::update_cloud_subtask(MachineObject *obj)
             }
         }
     }
+}
+
+// The stage line under the progress bar. Bambu Studio names stage 0 "Printing"; our
+// get_stage_string() returns "" for it because the multi-device pages and the phone hub treat an
+// empty stage as "plain printing", so the Device page fills the word in itself.
+wxString StatusPanel::device_page_stage_text(MachineObject *obj)
+{
+    wxString stage = obj->get_curr_stage();
+    if (stage.IsEmpty() && obj->print_status == "RUNNING")
+        stage = _L("Printing");
+    return stage;
 }
 
 void StatusPanel::update_sdcard_subtask(MachineObject *obj)
@@ -3510,17 +3654,46 @@ void StatusPanel::on_set_bed_temp()
 
 void StatusPanel::on_set_nozzle_temp()
 {
-    wxString str = m_tempCtrl_nozzle->GetTextCtrl()->GetValue();
+    send_nozzle_temp(m_tempCtrl_nozzle, m_temp_nozzle_timeout, m_nozzle_ctrl_extruder_id);
+}
+
+void StatusPanel::on_set_nozzle_deputy_temp()
+{
+    // Only reachable while the row is shown, i.e. on a two-nozzle printer.
+    if (!m_nozzle_dual_layout) return;
+    send_nozzle_temp(m_tempCtrl_nozzle_deputy, m_temp_nozzle_deputy_timeout, m_nozzle_deputy_ctrl_extruder_id);
+}
+
+void StatusPanel::send_nozzle_temp(TempInput *ctrl, int &hold_count, int extruder_id)
+{
+    wxString str = ctrl->GetTextCtrl()->GetValue();
     try {
         long nozzle_temp;
         if (str.ToLong(&nozzle_temp) && obj) {
-            set_hold_count(m_temp_nozzle_timeout);
-            if (nozzle_temp > m_tempCtrl_nozzle->get_max_temp()) {
-                nozzle_temp = m_tempCtrl_nozzle->get_max_temp();
-                m_tempCtrl_nozzle->SetTagTemp(wxString::Format("%d", nozzle_temp));
-                m_tempCtrl_nozzle->Warning(false);
+            if (m_nozzle_dual_layout) {
+                // Same guard as Bambu Studio: the printer ignores a target for an empty hotend slot.
+                for (const Extder &e : obj->m_extder_data.extders) {
+                    if (e.id == extruder_id && !e.nozzle_exist) {
+                        const wxString side = extruder_id == 1 ? _L("Left extruder") : _L("Right extruder");
+                        MessageDialog msg_dlg(this, wxString::Format(_L("%s hotend not detected. Cannot set nozzle temperature."), side), _L("Warning"),
+                                              wxICON_WARNING | wxOK);
+                        msg_dlg.ShowModal();
+                        return;
+                    }
+                }
             }
-            obj->command_set_nozzle(nozzle_temp);
+            set_hold_count(hold_count);
+            if (nozzle_temp > ctrl->get_max_temp()) {
+                nozzle_temp = ctrl->get_max_temp();
+                ctrl->SetTagTemp(wxString::Format("%d", nozzle_temp));
+                ctrl->Warning(false);
+            }
+            if (m_nozzle_dual_layout) {
+                BOOST_LOG_TRIVIAL(info) << "set nozzle temp: extruder " << extruder_id << " -> " << nozzle_temp;
+                obj->command_set_nozzle_new(extruder_id, nozzle_temp);
+            } else {
+                obj->command_set_nozzle(nozzle_temp);
+            }
         }
     } catch (...) {
         ;
@@ -3572,12 +3745,17 @@ void StatusPanel::on_ams_load_curr()
 
 
         update_filament_step();
-        //virtual tray
-        if (curr_ams_id.compare(std::to_string(VIRTUAL_TRAY_ID)) == 0)
+        //virtual tray (254; on two-extruder printers also 255, the right-hand spool)
+        const bool is_ext_spool = curr_ams_id.compare(std::to_string(VIRTUAL_TRAY_ID)) == 0 ||
+                                  (obj->is_multi_extruders() && curr_ams_id == "255");
+        if (is_ext_spool)
         {
             int old_temp = -1;
             int new_temp = -1;
             AmsTray* curr_tray = &obj->vt_tray;
+            for (AmsTray& slot : obj->vir_slots)
+                if (slot.id == curr_ams_id)
+                    curr_tray = &slot;
 
             if (!curr_tray) return;
 
@@ -3958,12 +4136,6 @@ void StatusPanel::on_ams_selected(wxCommandEvent &event)
     }
 }
 
-void StatusPanel::on_ams_guide(wxCommandEvent& event)
-{
-    wxString ams_wiki_url = "https://wiki.bambulab.com/en/software/bambu-studio/use-ams-on-bambu-studio";
-    wxLaunchDefaultBrowser(ams_wiki_url);
-}
-
 void StatusPanel::on_ams_retry(wxCommandEvent& event)
 {
     BOOST_LOG_TRIVIAL(info) << "on_ams_retry";
@@ -4041,6 +4213,18 @@ void StatusPanel::on_nozzle_temp_set_focus(wxFocusEvent &event)
 {
     event.Skip();
     nozzle_temp_input = true;
+}
+
+void StatusPanel::on_nozzle_deputy_temp_kill_focus(wxFocusEvent &event)
+{
+    event.Skip();
+    nozzle_deputy_temp_input = false;
+}
+
+void StatusPanel::on_nozzle_deputy_temp_set_focus(wxFocusEvent &event)
+{
+    event.Skip();
+    nozzle_deputy_temp_input = true;
 }
 
 void StatusPanel::on_switch_speed(wxCommandEvent &event)
@@ -4403,6 +4587,7 @@ void StatusPanel::set_default()
     m_ams_control->Hide();
     m_ams_control_box->Hide();
     m_ams_control->Reset();
+    m_ams_control->SetMachine(nullptr);
     error_info_reset();
     SetFocus();
 }
@@ -4518,8 +4703,10 @@ void StatusPanel::msw_rescale()
 
 
     m_bpButton_xy->Rescale();
-    m_tempCtrl_nozzle->SetMinSize(TEMP_CTRL_MIN_SIZE);
+    m_tempCtrl_nozzle->SetMinSize(m_nozzle_dual_layout ? TEMP_CTRL_DUAL_MIN_SIZE : TEMP_CTRL_MIN_SIZE);
     m_tempCtrl_nozzle->Rescale();
+    m_tempCtrl_nozzle_deputy->SetMinSize(m_nozzle_dual_layout ? TEMP_CTRL_DUAL_MIN_SIZE : TEMP_CTRL_MIN_SIZE);
+    m_tempCtrl_nozzle_deputy->Rescale();
     m_line_nozzle->SetSize(wxSize(-1, FromDIP(1)));
     m_tempCtrl_bed->SetMinSize(TEMP_CTRL_MIN_SIZE);
     m_tempCtrl_bed->Rescale();
@@ -4941,8 +5128,8 @@ wxBoxSizer *ScoreDialog::get_button_sizer()
     wxBoxSizer *bSizer_button = new wxBoxSizer(wxHORIZONTAL);
     bSizer_button->Add(0, 0, 1, wxEXPAND, 0);
 
-    StateColor btn_bg_green(std::pair<wxColour, int>(wxColour(0, 137, 123), StateColor::Pressed), std::pair<wxColour, int>(wxColour(38, 166, 154), StateColor::Hovered),
-                            std::pair<wxColour, int>(AMS_CONTROL_BRAND_COLOUR, StateColor::Normal));
+    StateColor btn_bg_green(std::pair<wxColour, int>(BambuDevicePalette::GreenPressed, StateColor::Pressed), std::pair<wxColour, int>(BambuDevicePalette::GreenHovered, StateColor::Hovered),
+                            std::pair<wxColour, int>(BambuDevicePalette::Green, StateColor::Normal));
 
     m_button_ok = new Button(this, _L("Submit"));
     m_button_ok->SetBackgroundColor(btn_bg_green);

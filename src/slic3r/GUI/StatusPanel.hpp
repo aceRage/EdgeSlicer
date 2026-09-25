@@ -349,6 +349,14 @@ protected:
     StaticLine *    m_line_nozzle;
     TempInput* m_tempCtrl_nozzle;
     int             m_temp_nozzle_timeout{ 0 };
+    // Two-nozzle printers (H2D, H2D Pro, H2C, X2D...): m_tempCtrl_nozzle_deputy is the upper row
+    // ("L", extruder 1) and m_tempCtrl_nozzle the lower one ("R", extruder 0), as in Bambu Studio.
+    // Hidden, and m_tempCtrl_nozzle unbadged, on single-nozzle printers.
+    TempInput*      m_tempCtrl_nozzle_deputy{ nullptr };
+    int             m_temp_nozzle_deputy_timeout{ 0 };
+    bool            m_nozzle_dual_layout{ false };
+    int             m_nozzle_ctrl_extruder_id{ 0 };        // extruder shown by m_tempCtrl_nozzle
+    int             m_nozzle_deputy_ctrl_extruder_id{ 1 }; // extruder shown by m_tempCtrl_nozzle_deputy
     TempInput *     m_tempCtrl_bed;
     int             m_temp_bed_timeout {0};
     TempInput *     m_tempCtrl_chamber;
@@ -519,6 +527,7 @@ protected:
     wxWebRequest web_request;
     bool bed_temp_input    = false;
     bool nozzle_temp_input = false;
+    bool nozzle_deputy_temp_input = false;
     bool cham_temp_input   = false;
     bool request_model_info_flag = false;
     int speed_lvl = 1; // 0 - 3
@@ -570,7 +579,13 @@ protected:
     void on_set_bed_temp();
     void on_nozzle_temp_kill_focus(wxFocusEvent &event);
     void on_nozzle_temp_set_focus(wxFocusEvent &event);
+    void on_nozzle_deputy_temp_kill_focus(wxFocusEvent &event);
+    void on_nozzle_deputy_temp_set_focus(wxFocusEvent &event);
     void on_set_nozzle_temp();
+    void on_set_nozzle_deputy_temp();
+    // Sends the target typed into `ctrl`: M104 on single-nozzle printers, the per-extruder
+    // set_nozzle_temp command on two-nozzle ones.
+    void send_nozzle_temp(TempInput *ctrl, int &hold_count, int extruder_id);
     void on_set_chamber_temp();
 
     /* extruder apis */
@@ -586,7 +601,6 @@ protected:
     void on_filament_extrusion_cali(wxCommandEvent &event);
     void on_ams_refresh_rfid(wxCommandEvent &event);
     void on_ams_selected(wxCommandEvent &event);
-    void on_ams_guide(wxCommandEvent &event);
     void on_ams_retry(wxCommandEvent &event);
     void on_print_error_done(wxCommandEvent& event);
 
@@ -623,7 +637,9 @@ protected:
     void update_subtask(MachineObject* obj);
     void update_cloud_subtask(MachineObject *obj);
     void update_sdcard_subtask(MachineObject *obj);
+    static wxString device_page_stage_text(MachineObject *obj);
     void update_temp_ctrl(MachineObject *obj);
+    void set_nozzle_temp_layout(bool dual);
     void update_misc_ctrl(MachineObject *obj);
     void update_ams(MachineObject* obj);
     void update_ams_insert_material(MachineObject* obj);

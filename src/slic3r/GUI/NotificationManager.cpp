@@ -2880,7 +2880,21 @@ void NotificationManager::bbl_close_objectsinfo_notification()
 
 void NotificationManager::bbl_show_seqprintinfo_notification(const std::string &text)
 {
-    NotificationData data{NotificationType::BBLSeqPrintInfo, NotificationLevel::WarningNotificationLevel, 0, text};
+    // Owner preference: both by-object advisory notices (this one and the pre-slice
+    // caution) can be turned off from Preferences > Ultra; respect it here.
+    if (wxGetApp().app_config != nullptr && !wxGetApp().app_config->get_bool("show_print_by_object_caution"))
+        return;
+
+    const std::string hypertext = _u8L("Do not show again");
+    std::function<bool(wxEvtHandler*)> callback = [](wxEvtHandler*) {
+        if (wxGetApp().app_config != nullptr) {
+            wxGetApp().app_config->set_bool("show_print_by_object_caution", false);
+            wxGetApp().app_config->save();
+        }
+        return true; // close after click
+    };
+
+    NotificationData data{NotificationType::BBLSeqPrintInfo, NotificationLevel::WarningNotificationLevel, 0, text, hypertext, callback};
 
     for (std::unique_ptr<PopNotification> &notification : m_pop_notifications) {
         if (notification->get_type() == NotificationType::BBLSeqPrintInfo) {
@@ -2899,6 +2913,44 @@ void NotificationManager::bbl_close_seqprintinfo_notification()
 {
     for (std::unique_ptr<PopNotification> &notification : m_pop_notifications)
         if (notification->get_type() == NotificationType::BBLSeqPrintInfo) { notification->close(); }
+}
+
+void NotificationManager::push_print_by_object_caution_notification(const std::string& text)
+{
+    // Advisory only (not a slicing error): Warning level, and honors the same
+    // "Do not show again" preference as the yellow by-object warning above.
+    if (wxGetApp().app_config != nullptr && !wxGetApp().app_config->get_bool("show_print_by_object_caution"))
+        return;
+
+    const std::string full_text = _u8L("Warning:") + "\n" + text;
+
+    // Already showing with the same text: leave it (avoids re-triggering the fade-in / stacking).
+    for (std::unique_ptr<PopNotification>& notification : m_pop_notifications) {
+        if (notification->get_type() == NotificationType::PrintByObjectCaution && notification->compare_text(full_text))
+            return;
+    }
+
+    const std::string hypertext = _u8L("Do not show again");
+    std::function<bool(wxEvtHandler*)> callback = [](wxEvtHandler*) {
+        if (wxGetApp().app_config != nullptr) {
+            wxGetApp().app_config->set_bool("show_print_by_object_caution", false);
+            wxGetApp().app_config->save();
+        }
+        return true; // close after click
+    };
+
+    NotificationData data{NotificationType::PrintByObjectCaution, NotificationLevel::WarningNotificationLevel, 0, full_text, hypertext, callback};
+    auto notification = std::make_unique<NotificationManager::PlaterWarningNotification>(data, m_id_provider, m_evt_handler);
+    push_notification_data(std::move(notification), 0);
+}
+
+void NotificationManager::close_print_by_object_caution_notification(const std::string& text)
+{
+    const std::string full_text = _u8L("Warning:") + "\n" + text;
+    for (std::unique_ptr<PopNotification>& notification : m_pop_notifications) {
+        if (notification->get_type() == NotificationType::PrintByObjectCaution && notification->compare_text(full_text))
+            dynamic_cast<PlaterWarningNotification*>(notification.get())->real_close();
+    }
 }
 
 void NotificationManager::bbl_show_plugin_install_notification(const std::string &text)

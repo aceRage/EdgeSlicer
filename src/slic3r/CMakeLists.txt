@@ -125,6 +125,10 @@ set(SLIC3R_GUI_SOURCES
     GUI/Field.hpp
     GUI/FilamentColorUtils.cpp
     GUI/FilamentColorUtils.hpp
+    GUI/DualNozzleSliceDialog.cpp
+    GUI/DualNozzleSliceDialog.hpp
+    GUI/DualNozzleState.cpp
+    GUI/DualNozzleState.hpp
     GUI/FilamentGroupDialog.cpp
     GUI/FilamentGroupDialog.hpp
     GUI/FlowTypeHelper.cpp
@@ -227,6 +231,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/GLTexture.hpp
     GUI/GLToolbar.cpp
     GUI/GLToolbar.hpp
+    GUI/DarkModeBackground.cpp
+    GUI/DarkModeBackground.hpp
     GUI/GUI_App.cpp
     GUI/GUI_App.hpp
     GUI/SplashAnimation.hpp
@@ -262,12 +268,22 @@ set(SLIC3R_GUI_SOURCES
     GUI/HMS.hpp
     GUI/PrintErrorCommands.cpp
     GUI/PrintErrorCommands.hpp
+    GUI/AmsDualLayout.cpp
+    GUI/AmsDualLayout.hpp
+    GUI/AmsDrying.cpp
+    GUI/AmsDrying.hpp
+    GUI/AMSDryCtrlDialog.cpp
+    GUI/AMSDryCtrlDialog.hpp
+    GUI/AmsUiPreview.cpp
+    GUI/AmsUiPreview.hpp
     GUI/HMSPanel.cpp
     GUI/HMSPanel.hpp
     GUI/HttpServer.cpp
     GUI/HttpServer.hpp
     GUI/PageServerSecurity.cpp
     GUI/PageServerSecurity.hpp
+    GUI/UntrustedSettingsGuard.cpp
+    GUI/UntrustedSettingsGuard.hpp
     GUI/I18N.cpp
     GUI/I18N.hpp
     GUI/IconManager.cpp
@@ -438,6 +454,10 @@ set(SLIC3R_GUI_SOURCES
     GUI/PrinterWebView.hpp
     GUI/StreamPanel.cpp
     GUI/StreamPanel.hpp
+    GUI/HomePanel.cpp
+    GUI/HomePanel.hpp
+    GUI/HubHomeView.cpp
+    GUI/HubHomeView.hpp
     GUI/BambuCamRelay.cpp
     GUI/BambuCamRelay.hpp
     GUI/RemoteAccess.cpp
@@ -462,6 +482,7 @@ set(SLIC3R_GUI_SOURCES
     GUI/PluginGuard.cpp
     GUI/DeviceModelCode.hpp
     GUI/DeviceModelCode.cpp
+    GUI/NozzleTempRows.hpp
     GUI/SnapmakerLan.hpp
     GUI/RemoteHub.cpp
     GUI/RemoteHub.hpp
@@ -474,6 +495,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/AppPushProvider.hpp
     GUI/ApnsProvider.cpp
     GUI/FcmProvider.cpp
+    GUI/HostedPush.hpp
+    GUI/HostedProvider.cpp
     GUI/PrintHostDialogs.cpp
     GUI/PrintHostDialogs.hpp
     GUI/PrintHostDevicesDialog.cpp
@@ -672,6 +695,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/WebViewDialog.hpp
     GUI/Widgets/AMSControl.cpp
     GUI/Widgets/AMSControl.hpp
+    GUI/Widgets/AMSDualView.cpp
+    GUI/Widgets/AMSDualView.hpp
     GUI/Widgets/AMSItem.cpp
     GUI/Widgets/AMSItem.hpp
     GUI/Widgets/AxisCtrlButton.cpp
@@ -776,6 +801,8 @@ set(SLIC3R_GUI_SOURCES
     Utils/AstroBox.cpp
     Utils/AstroBox.hpp
     Utils/bambu_networking.hpp
+    Utils/BambuStudioLauncher.cpp
+    Utils/BambuStudioLauncher.hpp
     Utils/Bonjour.cpp
     Utils/Bonjour.hpp
     Utils/MeshInspect.cpp
@@ -824,6 +851,14 @@ set(SLIC3R_GUI_SOURCES
     Utils/InstanceID.hpp
     Utils/LoginUserAgent.cpp
     Utils/LoginUserAgent.hpp
+    Utils/HubHomeLogic.cpp
+    Utils/HubHomeLogic.hpp
+    Utils/MainThreadGate.cpp
+    Utils/MainThreadGate.hpp
+    Utils/ServerLifetime.cpp
+    Utils/ServerLifetime.hpp
+    Utils/SnapmakerSilentLogin.cpp
+    Utils/SnapmakerSilentLogin.hpp
     Utils/json_diff.cpp
     Utils/json_diff.hpp
     Utils/minilzo_extension.cpp

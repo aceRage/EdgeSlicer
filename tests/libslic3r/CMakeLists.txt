@@ -6,7 +6,9 @@ add_executable(${_TEST_NAME}_tests
 	test_bambu_3mf_export.cpp
 	test_bambu_import_renames.cpp
 	test_bambu_nil_override.cpp
+	test_untrusted_input.cpp
 	test_arrange_support_clearance.cpp
+	test_appconfig_trailing_newline.cpp
 	test_aabbindirect.cpp
 	test_ams_lookup.cpp
 	test_assembly_face_pick.cpp
@@ -39,6 +41,8 @@ add_executable(${_TEST_NAME}_tests
 	../fff_print/test_data.cpp
 	test_identity_filament_map.cpp
 	test_bambu_extruder_map.cpp
+	test_bambu_dual_nozzle_sync.cpp
+	test_bambu_idle_precool.cpp
 	test_export_stl_part.cpp
 	test_elephant_foot_compensation.cpp
 	test_fill_bed_pack.cpp
@@ -48,6 +52,9 @@ add_executable(${_TEST_NAME}_tests
 	test_fuzzy_skin.cpp
 	test_geometry.cpp
 	test_h2c_rack_nozzle_change.cpp
+	test_h2c_rack_park_preheat.cpp
+	test_h2d_byobject_toolchange.cpp
+	test_filament_map_reapply.cpp
 	test_h2_preload_filaments.cpp
 	test_mixed_filament.cpp
 	test_mixed_filament_cli_gates.cpp
@@ -88,6 +95,7 @@ add_executable(${_TEST_NAME}_tests
     test_wipe_tower.cpp
     test_wipe_tower_estimate.cpp
     test_bbl_rib_tower.cpp
+    test_tower_interface.cpp
     test_wipe_path.cpp
     test_toolordering_cyclic.cpp
     test_shortest_path.cpp

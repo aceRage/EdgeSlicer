@@ -236,6 +236,10 @@ public:
     bool 				empty()       const { return m_layer_tools.empty(); }
     std::vector<LayerTools>& layer_tools() { return m_layer_tools; }
     bool 				has_wipe_tower() const { return ! m_layer_tools.empty() && m_first_printing_extruder != (unsigned int)-1 && m_layer_tools.front().has_wipe_tower; }
+    // A print-by-object plate on a grouping-model machine (H2D/H2C/X2D) skips the grouping of
+    // reorder_extruders_for_minimum_flush_volume(); this groups it from the plate's own filament
+    // map (manual mode) for the given per-layer filament lists. See GCode::_do_export.
+    static MultiNozzleUtils::LayeredNozzleGroupResult group_by_plate_map(Print *print, const std::vector<std::vector<unsigned int>> &layer_filaments);
 
     // True when this extruder has no later extrusion layer than layer_idx.
     // Missing extruders are treated as finished (never used again).

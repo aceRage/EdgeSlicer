@@ -171,6 +171,27 @@ echo -n "[9/9] Generating Linux app..."
     fi
     cp -fl "${ORIGINAL_BINARY_LOCATION}" "$BIN_DIR/@SLIC3R_APP_CMD@"
 
+    # EdgeSlicer: the bundled network plug-in (UltraNet, a private clean-room component that is
+    # built separately - CI does it with a deploy key). Set ULTRANET_BIN_DIR to a folder holding
+    # libbambu_networking.so (+ libBambuSource.so, ultranet.txt) to ship it; without it the package
+    # carries no plug-in, as before. It sits beside the binary in bin/ultranet, and the app copies it
+    # into <data dir>/plugins on first run (GUI_App, PluginGuard::ultranet_sidecar_dir).
+    if [ -n "${ULTRANET_BIN_DIR:-}" ] && [ -f "${ULTRANET_BIN_DIR}/libbambu_networking.so" ]; then
+        echo "Bundling the network plug-in from ${ULTRANET_BIN_DIR}..."
+        mkdir -p "$BIN_DIR/ultranet"
+        cp -f "${ULTRANET_BIN_DIR}/libbambu_networking.so" "$BIN_DIR/ultranet/"
+        if [ -f "${ULTRANET_BIN_DIR}/libBambuSource.so" ]; then
+            cp -f "${ULTRANET_BIN_DIR}/libBambuSource.so" "$BIN_DIR/ultranet/"
+        fi
+        if [ -f "${ULTRANET_BIN_DIR}/ultranet.txt" ]; then
+            cp -f "${ULTRANET_BIN_DIR}/ultranet.txt" "$BIN_DIR/ultranet/"
+        else
+            echo "UltraNet: EdgeSlicer's own network plug-in. Do not replace with the Bambu CDN package." > "$BIN_DIR/ultranet/ultranet.txt"
+        fi
+    elif [ -n "${ULTRANET_BIN_DIR:-}" ]; then
+        echo "Warning: ULTRANET_BIN_DIR=${ULTRANET_BIN_DIR} holds no libbambu_networking.so - no network plug-in bundled"
+    fi
+
     if [ "$BUNDLE_DESKTOP_STACK" = "1" ]; then
         GSTREAMER_PLUGIN_SOURCE_DIR="$(find_pkg_config_dir pluginsdir gstreamer-1.0 || true)"
         if [ -z "$GSTREAMER_PLUGIN_SOURCE_DIR" ]; then
