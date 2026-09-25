@@ -6034,7 +6034,7 @@ void PrintConfigDef::init_fff_params()
     def = this->add("seam_prefer_part_joints", coBool);
     def->label = L("Hide seam in part joints");
     def->category = L("Quality");
-    def->tooltip = L("For the Aligned seam positions (Aligned, Aligned back, Left and Right): when an object is an "
+    def->tooltip = L("For the Aligned seam positions (Aligned, Aligned back, Aligned left and Aligned right): when an object is an "
                      "assembly of parts, or touches another object, put the seam on the line where two parts meet, "
                      "so it hides in the joint instead of on a corner elsewhere. Painted seam enforcers and blockers "
                      "still take priority. Objects made of a single part are not affected.");

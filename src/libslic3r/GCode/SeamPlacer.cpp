@@ -725,30 +725,12 @@ std::pair<size_t, size_t> find_previous_and_next_perimeter_point(const std::vect
 // An assembly - an object made of several parts, or objects placed against each other - has joints: lines on the
 // outer surface where one part meets the next. A seam hides well in such a line. The ordinary scoring rarely finds
 // it: once the parts are unioned per layer a flush joint has no corner for the angle term, the visibility estimate
-// only sees it diluted, and any concave corner elsewhere wins. So, for the Aligned seam positions only, the contact
-// regions are detected on the meshes (gather_part_joints), the outer wall points near them are marked
-// (SeamCandidate::part_joint), the middle of each run of marked points is promoted (central_part_joint,
-// mark_part_joint_centers), and that point then beats everything but painted enforcers and blockers, including
-// during alignment. An object with a single part and nothing touching it gets no samples, so no flag is ever set
+// only sees it diluted, and any concave corner elsewhere wins. So, for the Aligned seam positions only
+// (is_aligned_setup: Aligned, Aligned back, Aligned left/right), the contact regions are detected on the meshes
+// (gather_part_joints), the outer wall points near them are marked (SeamCandidate::part_joint), the middle of each
+// run of marked points is promoted (central_part_joint, mark_part_joint_centers), and that point then beats
+// everything but painted enforcers and blockers, including during alignment. An object with a single part and nothing touching it gets no samples, so no flag is ever set
 // and its seams are exactly what they were.
-
-// The Aligned family: Aligned, Aligned back, and the Left/Right side variants.
-static bool seam_position_uses_part_joints(SeamPosition setup)
-{
-  // Every value is listed and there is no default, so a new SeamPosition makes the compiler ask.
-  switch (setup) {
-  case spAligned:
-  case spAlignedBack:
-  case spLeft:
-  case spRight:
-    return true;
-  case spNearest:
-  case spRear:
-  case spRandom:
-    break;
-  }
-  return false;
-}
 
 namespace PartJoints {
 // Two surfaces closer than this and facing each other (normals at least ~135 degrees apart) touch.
@@ -1974,7 +1956,7 @@ void SeamPlacer::init(const Print &print, std::function<void(void)> throw_if_can
 
     {
       GlobalModelInfo global_model_info { };
-      if (po->config().seam_prefer_part_joints.value && seam_position_uses_part_joints(configured_seam_preference)) {
+      if (po->config().seam_prefer_part_joints.value && is_aligned_setup(configured_seam_preference)) {
         gather_part_joints(global_model_info, print, po, throw_if_canceled_func);
         has_part_joints = global_model_info.has_part_joints();
       }
