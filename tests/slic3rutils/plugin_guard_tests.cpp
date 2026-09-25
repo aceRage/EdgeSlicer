@@ -31,6 +31,8 @@ using Slic3r::GUI::bambu_cdn_download_allowed;
 using Slic3r::GUI::camera_tools_copy_decision;
 using Slic3r::GUI::is_ultranet_plugin;
 using Slic3r::GUI::may_overwrite_bambusource;
+using Slic3r::GUI::bambusource_needs_refresh;
+using Slic3r::GUI::storage_browser_use_lan_url;
 using Slic3r::GUI::plugin_guard_decision;
 using Slic3r::GUI::PluginSync;
 using Slic3r::GUI::plugin_sync_decision;
@@ -242,4 +244,36 @@ TEST_CASE("macOS/Linux tell our camera placeholder from Bambu's by the UltraNet 
 #endif
     boost::system::error_code ec;
     fs::remove_all(dir, ec);
+}
+
+TEST_CASE("BambuSource is refreshed on its own, never over Bambu's camera filter", "[PluginGuard]")
+{
+    // The storage-browser tunnel changed BambuSource while the network plug-in may stay identical:
+    // an older placeholder is replaced even then.
+    CHECK(bambusource_needs_refresh(/*bundled*/ true, /*installed*/ true, /*identical*/ false, /*real*/ false, /*keep*/ false));
+    // A fresh data dir gets it; an identical copy is left alone.
+    CHECK(bambusource_needs_refresh(true, false, false, false, false));
+    CHECK_FALSE(bambusource_needs_refresh(true, true, true, false, false));
+    // Bambu's real filter (live view) always survives.
+    CHECK_FALSE(bambusource_needs_refresh(true, true, false, true, false));
+    // No sidecar, or the developer escape hatch: hands off.
+    CHECK_FALSE(bambusource_needs_refresh(false, true, false, false, false));
+    CHECK_FALSE(bambusource_needs_refresh(true, true, false, false, true));
+}
+
+TEST_CASE("Storage browser route: stock rule, plus the LAN address for a LAN-only tunnel", "[PluginGuard]")
+{
+    // Stock: LAN mode (or no remote file protocol) + a local protocol + a known IP.
+    CHECK(storage_browser_use_lan_url(/*lan*/ true, /*local*/ true, /*remote*/ true, /*ip*/ true, /*code*/ true, /*lan_only*/ false));
+    CHECK(storage_browser_use_lan_url(false, true, false, true, true, false));
+    // Stock: a cloud-bound printer with a relay goes to the cloud, whatever is known locally.
+    CHECK_FALSE(storage_browser_use_lan_url(false, true, true, true, true, false));
+    CHECK_FALSE(storage_browser_use_lan_url(true, true, true, false, true, false));
+    // A LAN-only tunnel (EdgeSlicer's FTPS one) takes the LAN address for that cloud-bound printer...
+    CHECK(storage_browser_use_lan_url(false, true, true, true, true, true));
+    // ...even when the printer advertises no local port-6000 protocol, which FTPS does not use...
+    CHECK(storage_browser_use_lan_url(false, false, true, true, true, true));
+    // ...but only with both the IP and the access code; otherwise the stock flow decides.
+    CHECK_FALSE(storage_browser_use_lan_url(false, true, true, false, true, true));
+    CHECK_FALSE(storage_browser_use_lan_url(false, true, true, true, false, true));
 }

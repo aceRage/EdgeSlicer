@@ -36,7 +36,9 @@ add_executable(${_TEST_NAME}_tests
     page_server_security_tests.cpp
     sentry_scrub_tests.cpp
     dual_nozzle_layout_tests.cpp
+    nozzle_temp_rows_tests.cpp
     gizmo_selection_object_tests.cpp
+    dark_mode_background_tests.cpp
     # The crash-report scrubber is plain C++ with no library of its own; the test compiles
     # the very file the app does.
     ${CMAKE_CURRENT_SOURCE_DIR}/../../src/sentry_wrapper/SentryScrub.cpp

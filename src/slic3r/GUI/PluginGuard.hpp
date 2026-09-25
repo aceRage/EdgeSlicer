@@ -161,6 +161,32 @@ bool carries_ultranet_module_tag(const boost::filesystem::path &lib);
 // a PE exporting DllRegisterServer on Windows (exports_dll_register_server, unchanged), and on
 // macOS/Linux any existing library that does not carry the UltraNet tag - i.e. Bambu's.
 bool is_real_camera_component(const boost::filesystem::path &lib);
+// Whether start-up should copy the sidecar's BambuSource over <data_dir>/plugins/BambuSource.dll.
+// BambuSource is checked on its own rather than only when the network plug-in is replaced: since
+// it carries the storage browser it can change while bambu_networking.dll stays byte-identical,
+// and a copy that failed once (the file was in use) must be retried on the next start. Never over
+// Bambu's real camera filter, and not while the user keeps a foreign plug-in on purpose.
+bool bambusource_needs_refresh(bool bundled_present,
+                               bool installed_present,
+                               bool identical,
+                               bool installed_is_real_filter,
+                               bool keep_foreign);
+
+// ---------------------------------------------------------------------------------------------
+// The Device tab's storage browser (MediaFilePanel::fetchUrl): whether to hand the tunnel library
+// the printer's LAN address (bambu:///local/<ip>...) rather than ask the network agent for a
+// cloud relay URL.
+//
+// Stock rule: the printer is in LAN-only mode or offers no remote file protocol, it offers the
+// local one, and its IP is known. A tunnel library that can only reach printers on the LAN
+// (PrinterFileSystem::TunnelIsLanOnly, EdgeSlicer's) has no other route at all, so it also takes
+// the LAN address for a cloud-bound printer - whenever the IP and the access code are both known.
+bool storage_browser_use_lan_url(bool lan_mode,
+                                 bool local_proto,
+                                 bool remote_proto,
+                                 bool has_ip,
+                                 bool has_access_code,
+                                 bool lan_only_tunnel);
 
 } } // namespace Slic3r::GUI
 

@@ -2,6 +2,7 @@
 #include "Label.hpp"
 #include "StaticBox.hpp"
 #include "../wxExtensions.hpp"
+#include "../BambuDevicePalette.hpp"
 
 #include <wx/dcclient.h>
 #include <wx/dcgraph.h>
@@ -26,7 +27,8 @@ EVT_PAINT(FanSwitchButton::paintEvent)
 
 END_EVENT_TABLE()
 
-static const wxColour DEFAULT_HOVER_COL = wxColour(0, 150, 136);
+// Only the Bambu Device page uses these switches: Bambu Studio's green hover ring.
+static const wxColour DEFAULT_HOVER_COL = Slic3r::GUI::BambuDevicePalette::Green;
 static const wxColour DEFAULT_PRESS_COL = wxColour(238, 238, 238);
 
 ImageSwitchButton::ImageSwitchButton(wxWindow *parent, ScalableBitmap &img_on, ScalableBitmap &img_off, long style)

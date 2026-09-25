@@ -7,6 +7,7 @@
 #include "libslic3r/LocalesUtils.hpp"
 #include "libslic3r/format.hpp"
 #include "GCodeProcessor.hpp"
+#include "PreCoolingInjector.hpp"
 
 #include <boost/log/trivial.hpp>
 #include <boost/algorithm/string/predicate.hpp>
@@ -20,6 +21,7 @@
 #include <float.h>
 #include <assert.h>
 #include <regex>
+#include <cctype>
 #include <charconv>
 #include <string>
 #include <system_error>
@@ -1143,6 +1145,8 @@ void GCodeProcessor::enable_stealth_time_estimator(bool enabled)
 
 void GCodeProcessor::reset()
 {
+    m_booked_times.clear();
+    m_booking_tool_change = false;
     m_units = EUnits::Millimeters;
     m_global_positioning_type = EPositioningType::Absolute;
     m_e_local_positioning_type = EPositioningType::Absolute;
@@ -4031,7 +4035,9 @@ void GCodeProcessor::process_T(const std::string_view command)
                     m_time_processor.extruder_unloaded = false;
                     extra_time += get_filament_load_time(static_cast<size_t>(m_extruder_id));
                     extra_time += m_time_processor.machine_tool_change_time;
+                    m_booking_tool_change = true;
                     simulate_st_synchronize(extra_time);
+                    m_booking_tool_change = false;
                 }
 
                 // store tool change move
@@ -4697,6 +4703,29 @@ void GCodeProcessor::run_post_process()
     m_result.lines_ends.clear();
     // m_result.lines_ends.emplace_back(std::vector<size_t>());
 
+    // BBS: idle-nozzle pre-cooling / pre-heating on Bambu printers with two extruders (H2D, H2D Pro,
+    // H2C, X2D; GCode/PreCoolingInjector). Bambu Studio places these lines from the time estimate, in
+    // a pass of its post-processor (BambuStudio GCodeProcessor.cpp:1182-1218). Here the lines are
+    // planned from a read-only scan of the finished G-code, keyed on the same input line ids this
+    // loop counts, and written right after their line below. Printers that do not pre-heat never
+    // get past make_plan(), so their output is untouched.
+    PreCooling::InsertedLines pre_cooling_lines;
+    if (m_print != nullptr) {
+        PreCooling::Plan plan;
+        if (PreCooling::make_plan(*m_print, plan))
+            pre_cooling_lines = plan_pre_cooling(plan);
+    }
+    auto pre_cooling_it = pre_cooling_lines.cbegin();
+    auto append_pre_cooling_lines = [&pre_cooling_lines, &pre_cooling_it, &export_lines](unsigned int id) {
+        while (pre_cooling_it != pre_cooling_lines.cend() && pre_cooling_it->first < id)
+            ++pre_cooling_it;
+        if (pre_cooling_it == pre_cooling_lines.cend() || pre_cooling_it->first != id)
+            return;
+        for (const std::string &line : pre_cooling_it->second)
+            export_lines.append_line(line, true);
+        ++pre_cooling_it;
+    };
+
     unsigned int line_id = 0;
     // Backtrace data for Tx gcode lines
     const ExportLines::Backtrace backtrace_T = { m_preheat_time, m_preheat_steps };
@@ -4746,12 +4775,14 @@ void GCodeProcessor::run_post_process()
                     if (!processed && !is_temporary_decoration(gcode_line)) {
                         if (GCodeReader::GCodeLine::cmd_is(gcode_line, "G0") || GCodeReader::GCodeLine::cmd_is(gcode_line, "G1")) {
                             export_lines.append_line(gcode_line);
+                            append_pre_cooling_lines(line_id);
                             // add lines M73 where needed
                             process_line_G1(g1_lines_counter++);
                             gcode_line.clear();
                         }
                         else if (GCodeReader::GCodeLine::cmd_is(gcode_line, "G2") || GCodeReader::GCodeLine::cmd_is(gcode_line, "G3")) {
                             export_lines.append_line(gcode_line);
+                            append_pre_cooling_lines(line_id);
                             // add lines M73 where needed
                             process_line_G1(g1_lines_counter + internal_g1_lines_counter);
                             g1_lines_counter += (1 + internal_g1_lines_counter);
@@ -4769,6 +4800,7 @@ void GCodeProcessor::run_post_process()
 
                     if (!gcode_line.empty())
                         export_lines.append_line(gcode_line);
+                    append_pre_cooling_lines(line_id);
                     export_lines.write(out, 1.1f * max_backtrace_time, m_result, out_path);
                     gcode_line.clear();
                 }
@@ -4790,6 +4822,202 @@ void GCodeProcessor::run_post_process()
     if (rename_file(out_path, result_filename))
         throw Slic3r::RuntimeError(std::string("Failed to rename the output G-code file from ") + out_path + " to " + result_filename + '\n' +
             "Is " + out_path + " locked?" + '\n');
+}
+
+std::map<unsigned int, std::vector<std::string>> GCodeProcessor::plan_pre_cooling(const PreCooling::Plan &plan) const
+{
+    PreCooling::InsertedLines out;
+    if (!plan.group)
+        return out;
+
+    FilePtr in{ boost::nowide::fopen(m_result.filename.c_str(), "rb") };
+    if (in.f == nullptr) {
+        BOOST_LOG_TRIVIAL(error) << "pre-cooling: cannot open " << m_result.filename;
+        return out;
+    }
+
+    // The time at the end of each move, from the same g1 time cache (and the same line and g1 line
+    // counting) run_post_process() uses to write M73. Bambu reads it from the moves.
+    const auto  &cache    = m_time_processor.machines[static_cast<size_t>(PrintEstimatedStatistics::ETimeMode::Normal)].g1_times_cache;
+    size_t       cache_id = 0;
+    float        cur_time = 0.f;
+    unsigned int cur_g1_id = 0;
+    auto update_time = [&cache, &cache_id, &cur_time, &cur_g1_id](const std::string &line, size_t g1_lines_counter) -> unsigned int {
+        const bool arc = GCodeReader::GCodeLine::cmd_is(line, "G2") || GCodeReader::GCodeLine::cmd_is(line, "G3");
+        if (!arc && !GCodeReader::GCodeLine::cmd_is(line, "G0") && !GCodeReader::GCodeLine::cmd_is(line, "G1") &&
+            !GCodeReader::GCodeLine::cmd_is(line, "G28"))
+            return 0;
+        unsigned int ret = 0;
+        ++g1_lines_counter;
+        auto it = cache.begin() + cache_id;
+        while (it != cache.end() && it->id < g1_lines_counter) {
+            ++it;
+            ++cache_id;
+        }
+        if (it == cache.end() || it->id > g1_lines_counter)
+            return ret;
+        if (arc) {
+            while (it != cache.end() && it->remaining_internal_g1_lines > 0) {
+                ++it;
+                ++cache_id;
+                ++g1_lines_counter;
+                ++ret;
+            }
+        }
+        if (it != cache.end() && it->id == g1_lines_counter) {
+            cur_time  = it->elapsed_time;
+            cur_g1_id = it->id;
+        }
+        return ret;
+    };
+
+    PreCooling::UsageBlockBuilder         builder(*plan.group, reserved_tag(ETags::Layer_Change));
+    std::vector<PreCooling::TimedMove>    moves;
+    std::vector<unsigned int>             move_g1_ids;   // the g1 time cache entry each move's time came from
+    // Bambu Studio books a filament change on the T line itself, as the extruder switch time plus
+    // unload / load when the nozzle changes filament (BambuStudio GCodeProcessor.cpp:5940-6040).
+    // Replay that per T line here.
+    std::vector<std::pair<unsigned int, float>> bambu_tool_change_times; // T line id, seconds
+    std::map<int, int> filament_in_nozzle;   // logical nozzle -> filament
+    std::map<int, int> nozzle_in_extruder;   // logical extruder -> nozzle
+    int                current_filament = -1, current_extruder = -1;
+    bool               extruder_unloaded = true;
+    auto book_bambu_tool_change = [&](const std::string &line, unsigned int line_id) {
+        const size_t first = line.find_first_not_of(" \t");
+        if (first == std::string::npos)
+            return;
+        const std::string_view v = std::string_view(line).substr(first);
+        if (v.size() < 2 || v.front() != 'T' || !std::isdigit(static_cast<unsigned char>(v[1])))
+            return;
+        int nozzle_id = -1;
+        const int filament = std::atoi(std::string(v.substr(1)).c_str());
+        if (filament < 0 || filament >= 255)
+            return;
+        const size_t h = v.find(" H");
+        if (h != std::string_view::npos)
+            nozzle_id = std::atoi(std::string(v.substr(h + 2)).c_str());
+        if (filament == current_filament && nozzle_id == -1)
+            return;
+        std::optional<MultiNozzleUtils::NozzleInfo> nozzle;
+        if (nozzle_id >= 0)
+            nozzle = plan.group->get_nozzle_from_id(nozzle_id);
+        if (!nozzle)
+            nozzle = plan.group->get_nozzle_for_filament(filament, -1);
+        if (!nozzle)
+            return;
+        float      time             = 0.f;
+        const bool extruder_change  = nozzle->extruder_id != current_extruder;
+        auto       it_mounted       = nozzle_in_extruder.find(nozzle->extruder_id);
+        const int  mounted_nozzle   = it_mounted == nozzle_in_extruder.end() ? -1 : it_mounted->second;
+        auto       it_in_nozzle     = filament_in_nozzle.find(nozzle->group_id);
+        const int  old_in_nozzle    = it_in_nozzle == filament_in_nozzle.end() ? -1 : it_in_nozzle->second;
+        auto       it_in_mounted    = filament_in_nozzle.find(mounted_nozzle);
+        const int  old_in_extruder  = it_in_mounted == filament_in_nozzle.end() ? -1 : it_in_mounted->second;
+        if (extruder_change && current_extruder != -1)
+            time += plan.params.extruder_change_time;
+        if (mounted_nozzle != nozzle->group_id || old_in_nozzle != filament) {
+            if (old_in_extruder >= 0 && !extruder_unloaded)
+                time += plan.params.filament_unload_time;
+            extruder_unloaded = false;
+            time += plan.params.filament_load_time;
+        }
+        current_filament = filament;
+        current_extruder = nozzle->extruder_id;
+        nozzle_in_extruder[nozzle->extruder_id] = nozzle->group_id;
+        filament_in_nozzle[nozzle->group_id]    = filament;
+        if (time > 0.f)
+            bambu_tool_change_times.emplace_back(line_id, time);
+    };
+    unsigned int                          line_id          = 0;
+    size_t                                g1_lines_counter = 0;
+    std::string                           gcode_line;
+    std::vector<char>                     buffer(65536 * 10, 0);
+    for (;;) {
+        const size_t cnt_read = ::fread(buffer.data(), 1, buffer.size(), in.f);
+        if (::ferror(in.f)) {
+            BOOST_LOG_TRIVIAL(error) << "pre-cooling: error while reading " << m_result.filename;
+            return PreCooling::InsertedLines();
+        }
+        const bool eof       = cnt_read == 0;
+        auto       it        = buffer.begin();
+        const auto it_bufend = buffer.begin() + cnt_read;
+        while (it != it_bufend || (eof && !gcode_line.empty())) {
+            // Split lines exactly as run_post_process() does, so the line ids match.
+            bool eol    = false;
+            auto it_end = it;
+            for (; it_end != it_bufend && !(eol = *it_end == '\r' || *it_end == '\n'); ++it_end);
+            eol |= eof && it_end == it_bufend;
+            gcode_line.insert(gcode_line.end(), it, it_end);
+            it = it_end;
+            if (it != it_bufend && *it == '\r')
+                gcode_line += *it++;
+            if (it != it_bufend && *it == '\n')
+                gcode_line += *it++;
+            if (eol) {
+                ++line_id;
+                const unsigned int internal_g1_lines = update_time(gcode_line, g1_lines_counter);
+                if (GCodeReader::GCodeLine::cmd_is(gcode_line, "G0") || GCodeReader::GCodeLine::cmd_is(gcode_line, "G1")) {
+                    moves.push_back({ line_id, cur_time });
+                    move_g1_ids.push_back(cur_g1_id);
+                    ++g1_lines_counter;
+                } else if (GCodeReader::GCodeLine::cmd_is(gcode_line, "G2") || GCodeReader::GCodeLine::cmd_is(gcode_line, "G3")) {
+                    moves.push_back({ line_id, cur_time });
+                    move_g1_ids.push_back(cur_g1_id);
+                    g1_lines_counter += 1 + internal_g1_lines;
+                } else if (GCodeReader::GCodeLine::cmd_is(gcode_line, "G28")) {
+                    ++g1_lines_counter;
+                } else {
+                    builder.on_line(gcode_line, line_id);
+                    book_bambu_tool_change(gcode_line, line_id);
+                }
+                gcode_line.clear();
+            }
+        }
+        if (eof)
+            break;
+    }
+    builder.finish();
+
+    // Put every booked wait on its own line: take it off the moves the estimator added it to, then add
+    // it back to the moves after its line - a tool change as Bambu Studio books it, anything else
+    // (G4, M400 S, ...) as booked. Without this a tool change's time lands on moves before the switch
+    // and the idle windows look much shorter than they are.
+    {
+        std::vector<std::pair<unsigned int, float>> subtract; // first g1 id, seconds
+        std::vector<std::pair<unsigned int, float>> add;      // line id, seconds (added to moves after it)
+        for (const BookedTime &b : m_booked_times) {
+            if (b.first_g1_id != (unsigned int) -1)
+                subtract.emplace_back(b.first_g1_id, b.time);
+            if (!b.tool_change)
+                add.emplace_back(b.line_id, b.time);
+        }
+        add.insert(add.end(), bambu_tool_change_times.begin(), bambu_tool_change_times.end());
+        std::sort(subtract.begin(), subtract.end());
+        std::sort(add.begin(), add.end());
+        size_t is = 0, ia = 0;
+        float  sub = 0.f, plus = 0.f;
+        for (size_t i = 0; i < moves.size(); ++i) {
+            while (is < subtract.size() && subtract[is].first <= move_g1_ids[i])
+                sub += subtract[is++].second;
+            while (ia < add.size() && add[ia].first < moves[i].gcode_id)
+                plus += add[ia++].second;
+            moves[i].time = moves[i].time - sub + plus;
+        }
+    }
+
+    if (builder.machine_start_gcode_end_id == (unsigned int) -1) {
+        // GCode.cpp writes the marker whenever pre-cooling is active; without it nothing can be placed.
+        BOOST_LOG_TRIVIAL(warning) << "pre-cooling: no MACHINE_START_GCODE_END marker, nothing injected";
+        return out;
+    }
+
+    PreCooling::PreCoolingInjector injector(moves, *plan.group, plan.params, builder.skippable_blocks, builder.machine_start_gcode_end_id,
+                                            builder.machine_end_gcode_start_id);
+    injector.build_extruder_free_blocks(builder.filament_blocks, builder.extruder_blocks);
+    injector.process_pre_cooling_and_heating(out);
+    BOOST_LOG_TRIVIAL(info) << "pre-cooling: " << builder.filament_blocks.size() << " filament blocks, " << builder.extruder_blocks.size()
+                            << " extruder blocks, " << injector.free_blocks().size() << " idle windows, " << out.size() << " insertion points";
+    return out;
 }
 
 void GCodeProcessor::store_move_vertex(EMoveType type, EMovePathType path_type)
@@ -5018,6 +5246,13 @@ void GCodeProcessor::process_filaments(CustomGCode::Type code)
 
 void GCodeProcessor::simulate_st_synchronize(float additional_time)
 {
+    if (additional_time > 0.f) {
+        // TimeMachine::calculate_time() adds additional_time to blocks.front(), or drops it when fewer
+        // than two blocks are queued. See m_booked_times.
+        const TimeMachine &normal = m_time_processor.machines[static_cast<size_t>(PrintEstimatedStatistics::ETimeMode::Normal)];
+        m_booked_times.push_back({ m_line_id, (normal.enabled && normal.blocks.size() >= 2) ? normal.blocks.front().g1_line_id : (unsigned int) -1,
+                                   additional_time, m_booking_tool_change });
+    }
     for (size_t i = 0; i < static_cast<size_t>(PrintEstimatedStatistics::ETimeMode::Count); ++i) {
         m_time_processor.machines[i].simulate_st_synchronize(additional_time);
     }

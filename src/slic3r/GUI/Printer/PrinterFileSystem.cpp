@@ -1378,6 +1378,25 @@ StaticBambuLib &StaticBambuLib::get()
     return lib;
 }
 
+bool PrinterFileSystem::HasTunnelLibrary()
+{
+    return StaticBambuLib::get().Bambu_Open != nullptr;
+}
+
+bool PrinterFileSystem::TunnelIsLanOnly()
+{
+    if (!HasTunnelLibrary() || !module)
+        return false;
+    // Looked up directly rather than through get_function(): it is optional, and its absence
+    // (Bambu's library) is the normal case, not something to warn about.
+#if defined(_MSC_VER) || defined(_WIN32)
+    auto lan_only = reinterpret_cast<int (*)()>(GetProcAddress(module, "EdgeSlicer_TunnelLanOnly"));
+#else
+    auto lan_only = reinterpret_cast<int (*)()>(dlsym(module, "EdgeSlicer_TunnelLanOnly"));
+#endif
+    return lan_only && lan_only() != 0;
+}
+
 extern "C" BambuLib *bambulib_get() {
     return &StaticBambuLib::get();
 }

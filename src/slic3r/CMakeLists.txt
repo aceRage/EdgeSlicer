@@ -231,6 +231,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/GLTexture.hpp
     GUI/GLToolbar.cpp
     GUI/GLToolbar.hpp
+    GUI/DarkModeBackground.cpp
+    GUI/DarkModeBackground.hpp
     GUI/GUI_App.cpp
     GUI/GUI_App.hpp
     GUI/SplashAnimation.hpp
@@ -472,6 +474,7 @@ set(SLIC3R_GUI_SOURCES
     GUI/PluginGuard.cpp
     GUI/DeviceModelCode.hpp
     GUI/DeviceModelCode.cpp
+    GUI/NozzleTempRows.hpp
     GUI/SnapmakerLan.hpp
     GUI/RemoteHub.cpp
     GUI/RemoteHub.hpp

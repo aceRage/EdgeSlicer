@@ -613,7 +613,15 @@ void PrintJob::process(Ctl &ctl)
             const std::string job_id_before       = obj ? obj->job_id_ : std::string();
             const bool        was_printing_before = obj && obj->is_in_printing_status(obj->print_status);
             const bool        was_reporting       = obj && obj->is_connected();
-            result = m_agent->start_local_print(params, update_fn, cancel_fn);
+            if (m_print_type == "from_sdcard_view") {
+                // Ultra: "Print" on a file in the Device tab's storage. The file is already on the
+                // printer, so this is start_sdcard_print in LAN mode too, as in Bambu Studio;
+                // start_local_print would upload whatever the plater last sliced (params.filename).
+                BOOST_LOG_TRIVIAL(info) << "print_job: LAN print of a file on the printer's storage";
+                result = m_agent->start_sdcard_print(params, update_fn, cancel_fn);
+            } else {
+                result = m_agent->start_local_print(params, update_fn, cancel_fn);
+            }
             if (result == 0 && !ctl.was_canceled()
                 && !lan_started_fn(job_id_before, was_printing_before, was_reporting))
                 result = BAMBU_NETWORK_ERR_PRINT_LP_PUBLISH_MSG_FAILED;

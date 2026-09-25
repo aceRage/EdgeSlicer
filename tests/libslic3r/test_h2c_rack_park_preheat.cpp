@@ -199,17 +199,23 @@ std::vector<ParkCommands> collect_park_commands(const std::string &gcode)
     static const std::regex re_change(R"(^M620 S(\d+)A)");
     static const std::regex re_precool(R"(^M620\.15 P(\d+))");
     static const std::regex re_retract(R"(^M620\.11 O1 T([0-9.]+))");
+    static const std::regex re_tool(R"(^T(\d+)( |$))");
     std::vector<ParkCommands> out;
-    // The outgoing filament is the one the previous change block loaded; the start G-code's own
-    // "M620 S0A" does not count (no filament is loaded yet when the first block runs).
-    int                       pending = -1, loaded = -1;
+    // The outgoing filament is the one in the hotend when the block starts: the last "T<n>" (n < 255)
+    // before it, the start G-code's own load included. The start G-code's "M620 S<n>A" has no
+    // M620.15 P, so it never becomes an entry itself.
+    int                       pending = -1, in_hotend = -1, outgoing = -1;
     for (const std::string &line : lines_of(body_of(gcode))) {
         std::smatch m;
-        if (std::regex_search(line, m, re_change)) {
-            pending = std::stoi(m[1].str());
+        if (std::regex_search(line, m, re_tool)) {
+            const int t = std::stoi(m[1].str());
+            if (t < 255)
+                in_hotend = t;
+        } else if (std::regex_search(line, m, re_change)) {
+            pending  = std::stoi(m[1].str());
+            outgoing = in_hotend;
         } else if (std::regex_search(line, m, re_precool)) {
-            out.push_back({ loaded, pending, std::stoi(m[1].str()), -1. });
-            loaded = pending;
+            out.push_back({ outgoing, pending, std::stoi(m[1].str()), -1. });
         } else if (std::regex_search(line, m, re_retract)) {
             if (!out.empty() && out.back().retract < 0.)
                 out.back().retract = std::stod(m[1].str());
@@ -266,13 +272,11 @@ SCENARIO("H2C tool changes tell the firmware how to park the outgoing hotend", "
                     if (c.outgoing >= 0) {
                         ++with_outgoing;
                         CHECK(c.retract == retract[c.outgoing]);
-                    } else {
-                        // The first load after the start G-code: nothing is in a hotend yet, and Bambu
-                        // Studio publishes 0 there too (GCode.cpp:8208).
-                        CHECK(c.retract == 0.);
                     }
                 }
-                CHECK(with_outgoing == changes.size() - 1);
+                // The start G-code loads the first filament and it is adopted, as in Bambu Studio
+                // (GCodeWriter::init_extruder): no change block runs without a filament in the hotend.
+                CHECK(with_outgoing == changes.size());
             }
             THEN("no Orca tool-changer preheat is written")
             {
