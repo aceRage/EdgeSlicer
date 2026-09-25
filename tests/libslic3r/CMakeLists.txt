@@ -16,6 +16,7 @@ add_executable(${_TEST_NAME}_tests
 	test_chameleon_brim.cpp
 	test_paint_depth.cpp
 	test_paint_depth_clamp.cpp
+	test_paint_penetration.cpp
 	test_color_mix_solver.cpp
 	test_color_split.cpp
 	test_image_fill.cpp

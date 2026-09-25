@@ -1267,6 +1267,22 @@ void PrintConfigDef::init_fff_params()
     def->min = 0;
     def->set_default_value(new ConfigOptionFloat(0.));
 
+    // Bambu Studio's key, same name and type so Bambu projects/presets import 1:1. Bambu's own
+    // definition is min 1 / default 3; ours adds 0 = "follow the bottom shell" (today's
+    // behaviour, the default) - see top_color_penetration_layers and docs/bambu-3mf-export.md.
+    def = this->add("bottom_color_penetration_layers", coInt);
+    def->label = L("Bottom paint penetration layers");
+    def->category = L("Strength");
+    def->sidetext = L("layers");
+    def->tooltip = L("How many layers deep the colour painted on a bottom surface is carried into the object, "
+                     "counting the bottom surface layer itself.\n"
+                     "0 means the same depth as the bottom shell (bottom shell layers or bottom shell thickness, "
+                     "whichever is deeper).\n"
+                     "More layers give a more solid colour, but cost more filament changes and purge.");
+    def->min = 0;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionInt(0));
+
     def = this->add("gap_fill_target", coEnum);
     def->label = L("Apply gap fill");
     def->category = L("Strength");
@@ -7374,6 +7390,25 @@ void PrintConfigDef::init_fff_params()
     def->sidetext = "mm";	// milimeters, don't need translation
     def->min = 0;
     def->set_default_value(new ConfigOptionFloat(0.6));
+
+    // Bambu Studio's key, same name and type so Bambu projects/presets import 1:1. Bambu's own
+    // definition is min 1 / default 4 and always sets the depth; ours adds 0 = "follow the top
+    // shell" (today's behaviour, the default), so an EdgeSlicer project slices exactly as before
+    // until the user sets a value. A Bambu value (always >= 1) is taken as-is on import; Export
+    // Bambu 3MF writes the depth our shell settings give in place of 0 (BambuExport.cpp).
+    // Consumed by MultiMaterialSegmentation.cpp's compute_layer_color_stat().
+    def = this->add("top_color_penetration_layers", coInt);
+    def->label = L("Top paint penetration layers");
+    def->category = L("Strength");
+    def->sidetext = L("layers");
+    def->tooltip = L("How many layers deep the colour painted on a top surface is carried into the object, "
+                     "counting the top surface layer itself.\n"
+                     "0 means the same depth as the top shell (top shell layers or top shell thickness, "
+                     "whichever is deeper).\n"
+                     "More layers give a more solid colour, but cost more filament changes and purge.");
+    def->min = 0;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionInt(0));
 
     def = this->add("top_surface_density", coPercent);
     def->label = L("Top surface density");
