@@ -29,6 +29,12 @@ class TempInput : public wxNavigationEnabled<StaticBox>
     bool warning_mode = false;
 
     int              padding_left    = 0;
+
+    // Extruder badge ("L" / "R") drawn between the heater icon and the current temperature on
+    // printers with more than one nozzle. Empty = no badge (the single-nozzle layout).
+    wxString m_badge;
+    bool     m_badge_highlight{false};
+
     static const int TempInputWidth  = 200;
     static const int TempInputHeight = 50;
 public:
@@ -82,6 +88,12 @@ public:
 
    void SetReadOnly(bool ro) { m_read_only = ro; }
 
+    // Show a round badge with `badge` (one or two characters) after the heater icon; an empty
+    // string removes it. `highlight` paints it in the accent colour (the active extruder).
+    void SetBadge(const wxString &badge, bool highlight = false);
+    const wxString &GetBadge() const { return m_badge; }
+    bool IsBadgeHighlighted() const { return m_badge_highlight; }
+
     void SetMaxTemp(int temp);
     void SetMinTemp(int temp);
 
@@ -120,6 +132,10 @@ private:
 
 	void messureMiniSize();
     void messureSize();
+
+    // Horizontal space the badge takes, including its trailing gap; 0 without a badge.
+    int  badge_extent() const;
+    void draw_badge(wxDC &dc, const wxPoint &pt);
 
     // some useful events
     void mouseMoved(wxMouseEvent &event);

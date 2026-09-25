@@ -2,6 +2,7 @@
 
 #include <functional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -44,6 +45,9 @@ struct Status
     std::string message;      // the printer's own error / display message
     double      progress { 0 };   // 0..1
     double      bed_temp { 0 }, bed_target { 0 }, nozzle_temp { 0 }, nozzle_target { 0 };
+    // (temperature, target) of every toolhead heater that answered, toolhead order; nozzle_temp /
+    // nozzle_target above are the first one's, kept for the readers that show a single nozzle.
+    std::vector<std::pair<double, double>> nozzles;
     int         layer { 0 }, total_layers { 0 };
     double      print_duration { 0 }, total_duration { 0 };
     std::string klippy;       // klippy_state: ready | startup | shutdown | error
@@ -82,6 +86,10 @@ void                start_discovery();
 void                merge_stream_devices();
 
 // ---- live state ----
+// (temperature, target) of extruder, extruder1, ... in a /printer/objects/query status object, in
+// toolhead order, up to TOOLHEAD_COUNT; stops at the first toolhead the answer lacks so the index
+// stays the toolhead number.
+std::vector<std::pair<double, double>> nozzle_temps_of(const nlohmann::json& status_obj);
 // Probes the printer, at most once every few seconds per device.
 Status status(const Device& d);
 // The same, ignoring that cache: for watching a printer right after telling it to do something.
