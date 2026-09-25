@@ -268,6 +268,14 @@ set(SLIC3R_GUI_SOURCES
     GUI/HMS.hpp
     GUI/PrintErrorCommands.cpp
     GUI/PrintErrorCommands.hpp
+    GUI/AmsDualLayout.cpp
+    GUI/AmsDualLayout.hpp
+    GUI/AmsDrying.cpp
+    GUI/AmsDrying.hpp
+    GUI/AMSDryCtrlDialog.cpp
+    GUI/AMSDryCtrlDialog.hpp
+    GUI/AmsUiPreview.cpp
+    GUI/AmsUiPreview.hpp
     GUI/HMSPanel.cpp
     GUI/HMSPanel.hpp
     GUI/HttpServer.cpp
@@ -687,6 +695,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/WebViewDialog.hpp
     GUI/Widgets/AMSControl.cpp
     GUI/Widgets/AMSControl.hpp
+    GUI/Widgets/AMSDualView.cpp
+    GUI/Widgets/AMSDualView.hpp
     GUI/Widgets/AMSItem.cpp
     GUI/Widgets/AMSItem.hpp
     GUI/Widgets/AxisCtrlButton.cpp

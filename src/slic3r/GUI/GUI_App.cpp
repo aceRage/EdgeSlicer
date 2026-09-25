@@ -1,6 +1,7 @@
 #include "libslic3r/Technologies.hpp"
 #include "libslic3r/FilamentHotBedNozzleRules.hpp"
 #include "GUI_App.hpp"
+#include "AmsUiPreview.hpp"
 #include "DarkModeBackground.hpp"
 #include "RemoteAccess.hpp"
 #include "RemoteHub.hpp"
@@ -3886,6 +3887,17 @@ bool GUI_App::on_init_inner()
 
     // Let the libslic3r know the callback, which will translate messages on demand.
     Slic3r::I18N::set_translate_callback(libslic3r_translate_callback);
+
+    // Test aid (EDGESLICER_TEST_AMS_PREVIEW): render the AMS panels to PNG and stop here, before
+    // any window, hub or listener exists. Inert unless a tester sets the variable.
+    if (run_ams_ui_preview_if_asked()) {
+        flush_logs();
+#ifdef _WIN32
+        ::TerminateProcess(::GetCurrentProcess(), 0);
+#else
+        std::_Exit(0);
+#endif
+    }
 
     BOOST_LOG_TRIVIAL(info) << "create the main window";
     mainframe = new MainFrame();

@@ -601,7 +601,6 @@ protected:
     void on_filament_extrusion_cali(wxCommandEvent &event);
     void on_ams_refresh_rfid(wxCommandEvent &event);
     void on_ams_selected(wxCommandEvent &event);
-    void on_ams_guide(wxCommandEvent &event);
     void on_ams_retry(wxCommandEvent &event);
     void on_print_error_done(wxCommandEvent& event);
 
