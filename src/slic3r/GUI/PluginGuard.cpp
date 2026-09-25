@@ -44,6 +44,34 @@ PluginSync plugin_sync_decision(bool sidecar_present,
     return keep_foreign ? PluginSync::Nothing : PluginSync::ReplaceForeign;
 }
 
+const char *network_library_name()
+{
+#if defined(_WIN32)
+    return "bambu_networking.dll";
+#elif defined(__APPLE__)
+    return "libbambu_networking.dylib";
+#else
+    return "libbambu_networking.so";
+#endif
+}
+
+boost::filesystem::path ultranet_sidecar_dir(const boost::filesystem::path &exe_dir, bool macos_app_bundle)
+{
+    // <App>.app/Contents/MacOS/<exe> -> <App>.app/Contents/Resources/ultranet
+    if (macos_app_bundle)
+        return exe_dir.parent_path() / "Resources" / "ultranet";
+    return exe_dir / "ultranet";
+}
+
+boost::filesystem::path ultranet_sidecar_dir(const boost::filesystem::path &exe_dir)
+{
+#if defined(__APPLE__)
+    return ultranet_sidecar_dir(exe_dir, true);
+#else
+    return ultranet_sidecar_dir(exe_dir, false);
+#endif
+}
+
 LoginGuardAction plugin_guard_decision(bool plugin_present,
                                        bool ultranet_marker,
                                        bool installed_networking,
@@ -248,6 +276,50 @@ bool may_overwrite_bambusource(bool dest_exists, bool dest_is_real_filter)
     // Upgrades re-run the first-run copier. A real filter the user fetched from Bambu must outlive
     // that; anything else (absent, or our own stub from a previous version) may be refreshed.
     return ! (dest_exists && dest_is_real_filter);
+}
+
+const char *const kUltraNetModuleTag = "UltraNet-module";
+
+bool carries_ultranet_module_tag(const boost::filesystem::path &lib)
+{
+    boost::system::error_code ec;
+    if (! boost::filesystem::exists(lib, ec) || ec)
+        return false;
+    const boost::uintmax_t size = boost::filesystem::file_size(lib, ec);
+    if (ec || size == 0 || size > 256ull * 1024 * 1024)
+        return false;
+    try {
+        std::ifstream f(lib.string().c_str(), std::ios::binary);
+        if (! f)
+            return false;
+        // Stream it in chunks, keeping a tag-sized overlap so a match across a boundary is found.
+        const std::string tag(kUltraNetModuleTag);
+        std::string       window;
+        std::vector<char> chunk(64 * 1024);
+        while (f) {
+            f.read(chunk.data(), std::streamsize(chunk.size()));
+            const std::streamsize n = f.gcount();
+            if (n <= 0)
+                break;
+            window.append(chunk.data(), std::size_t(n));
+            if (window.find(tag) != std::string::npos)
+                return true;
+            if (window.size() > tag.size())
+                window.erase(0, window.size() - tag.size());
+        }
+    } catch (...) {
+    }
+    return false;
+}
+
+bool is_real_camera_component(const boost::filesystem::path &lib)
+{
+#if defined(_WIN32)
+    return exports_dll_register_server(lib);
+#else
+    boost::system::error_code ec;
+    return boost::filesystem::exists(lib, ec) && ! ec && ! carries_ultranet_module_tag(lib);
+#endif
 }
 
 } } // namespace Slic3r::GUI

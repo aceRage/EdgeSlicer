@@ -118,6 +118,53 @@ jobs:
           Write-Output ("sentry_release=edgeslicer@$env:ver_pure") | Out-File -Append -FilePath $env:GITHUB_OUTPUT -Encoding utf8
         shell: pwsh
 
+#   UltraNet (macOS / Linux): EdgeSlicer's private clean-room Bambu network plug-in, aceRage/ultranet.
+#   It is fetched with a read-only deploy key (secret ULTRANET_DEPLOY_KEY), built here, and only the
+#   compiled .dylib/.so + marker travel on: the checkout is moved out of the workspace before
+#   anything else runs and deleted after the build, the compiler output never reaches this log (see
+#   scripts/build_ultranet_posix.sh), and no step uploads it. Forks, fork PRs and a repository
+#   without the secret skip all of this and build exactly as before, with no plug-in.
+#   Windows keeps its own pipeline (the self-hosted runner ships the prebuilt DLLs).
+      - name: UltraNet - check for the deploy key
+        id: ultranet
+        if: inputs.os != 'windows-2022'
+        shell: bash
+        env:
+          ULTRANET_DEPLOY_KEY: ${{ secrets.ULTRANET_DEPLOY_KEY }}
+        run: |
+          if [ -n "$ULTRANET_DEPLOY_KEY" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+            echo "ULTRANET_DEPLOY_KEY is set: the UltraNet network plug-in will be built and bundled."
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::ULTRANET_DEPLOY_KEY is not set - skipping UltraNet; this package carries no network plug-in (Bambu LAN printing unavailable), exactly as before."
+          fi
+
+      - name: UltraNet - fetch (deploy key)
+        if: inputs.os != 'windows-2022' && steps.ultranet.outputs.enabled == 'true'
+        uses: actions/checkout@v5
+        with:
+          repository: aceRage/ultranet
+          ref: main
+          ssh-key: ${{ secrets.ULTRANET_DEPLOY_KEY }}
+          persist-credentials: false
+          path: .ultranet-src
+
+      - name: UltraNet - build and stage the binaries
+        if: inputs.os != 'windows-2022' && steps.ultranet.outputs.enabled == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          SRC="$RUNNER_TEMP/ultranet-src"
+          OUT="$RUNNER_TEMP/ultranet-bin"
+          rm -rf "$SRC" "$OUT"
+          # Out of the workspace before anything else can see it.
+          mv "$GITHUB_WORKSPACE/.ultranet-src" "$SRC"
+          trap 'rm -rf "$SRC" "$RUNNER_TEMP/ultranet-logs"' EXIT
+          EDGESLICER_VERSION="$ver_pure" ULTRANET_LOG_DIR="$RUNNER_TEMP/ultranet-logs" \
+            bash scripts/build_ultranet_posix.sh "$SRC" "$OUT"
+          echo "ULTRANET_BIN_DIR=$OUT" >> "$GITHUB_ENV"
+
 #   Mac
       - name: Install tools mac
         if: inputs.os == 'macos-14'
@@ -142,6 +189,17 @@ jobs:
           EDGESLICER_SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
         run: |
           ./build_release_macos.sh -s -n -x -a universal -t 10.15 -1
+
+      # The same guard the Windows pipeline has: a plug-in that was built must be in the package.
+      - name: UltraNet - verify it is in the app bundle
+        if: inputs.os == 'macos-14' && steps.ultranet.outputs.enabled == 'true'
+        shell: bash
+        run: |
+          d="${{ github.workspace }}/build/universal/Snapmaker_Orca/EdgeSlicer.app/Contents/Resources/ultranet"
+          for f in libbambu_networking.dylib libBambuSource.dylib ultranet.txt; do
+            [ -f "$d/$f" ] || { echo "::error::UltraNet was built but $f is missing from $d"; exit 1; }
+          done
+          echo "bundled: $(lipo -archs "$d/libbambu_networking.dylib") - $(sed -n 2p "$d/ultranet.txt")"
 
       # Signing and notarization are opt-in by secrets, not by branch: a fork, a pull request or a
       # checkout of this repository without the Developer ID secrets builds the same unsigned dmg
@@ -530,6 +588,17 @@ jobs:
           # which the rebrand changed from Snapmaker_Orca to EdgeSlicer.
           mv -n ./build/EdgeSlicer_Linux_V${{ env.ver_pure }}.AppImage ./build/EdgeSlicer_Linux_AppImage${{ env.ubuntu-ver-str }}_${{ env.ver }}.AppImage
           chmod +x ./build/EdgeSlicer_Linux_AppImage${{ env.ubuntu-ver-str }}_${{ env.ver }}.AppImage
+
+      # The same guard the Windows pipeline has: a plug-in that was built must be in the package.
+      - name: UltraNet - verify it is in the AppImage tree
+        if: (inputs.os == 'ubuntu-20.04' || inputs.os == 'ubuntu-24.04') && steps.ultranet.outputs.enabled == 'true'
+        shell: bash
+        run: |
+          d=./build/package/bin/ultranet
+          for f in libbambu_networking.so libBambuSource.so ultranet.txt; do
+            [ -f "$d/$f" ] || { echo "::error::UltraNet was built but $f is missing from $d"; exit 1; }
+          done
+          echo "bundled: $(sed -n 2p "$d/ultranet.txt")"
 
       - name: Upload artifacts Ubuntu
         if: ${{ ! env.ACT && inputs.os == 'ubuntu-20.04' || inputs.os == 'ubuntu-24.04' }}

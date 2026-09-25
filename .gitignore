@@ -42,3 +42,8 @@ deps_src/build/
 .claude/
 .hermes/
 CLAUDE.md__pycache__/
+
+# UltraNet (private network plug-in): never part of this repository. src/ultranet is where a
+# developer tree keeps it; .ultranet-src is where CI checks it out before moving it away.
+src/ultranet/
+.ultranet-src/

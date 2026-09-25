@@ -47,6 +47,7 @@ while getopts ":dpa:snt:xbc:1h" opt; do
         echo "   -b: Build without reconfiguring CMake"
         echo "   -c: Set CMake build configuration, default is Release"
         echo "   -1: Use single job for building"
+        echo "   env ULTRANET_BIN_DIR: bundle the network plug-in (libbambu_networking.dylib) from this folder"
         exit 0
         ;;
     * )
@@ -221,6 +222,33 @@ function build_slicer() {
         cp -R "$resources_path" "./EdgeSlicer.app/Contents/Resources"
         # delete .DS_Store file
         find "./EdgeSlicer.app/" -name '.DS_Store' -delete
+
+        # EdgeSlicer: the bundled network plug-in (UltraNet, a private clean-room component that is
+        # built separately - CI does it with a deploy key). Set ULTRANET_BIN_DIR to a folder holding
+        # libbambu_networking.dylib (+ libBambuSource.dylib, ultranet.txt) to ship it; without it the
+        # app carries no plug-in, as before. It goes in Contents/Resources/ultranet - Contents/MacOS
+        # may hold only code - and the app copies it into <data dir>/plugins on first run
+        # (GUI_App, PluginGuard::ultranet_sidecar_dir). Pass a universal dylib for a universal app.
+        if [ -n "${ULTRANET_BIN_DIR:-}" ] && [ -f "${ULTRANET_BIN_DIR}/libbambu_networking.dylib" ]; then
+            UN_DIR='./EdgeSlicer.app/Contents/Resources/ultranet'
+            echo "Bundling the network plug-in from ${ULTRANET_BIN_DIR}..."
+            rm -rf "${UN_DIR}"
+            mkdir -p "${UN_DIR}"
+            cp -f "${ULTRANET_BIN_DIR}/libbambu_networking.dylib" "${UN_DIR}/"
+            if [ -f "${ULTRANET_BIN_DIR}/libBambuSource.dylib" ]; then
+                cp -f "${ULTRANET_BIN_DIR}/libBambuSource.dylib" "${UN_DIR}/"
+            fi
+            if [ -f "${ULTRANET_BIN_DIR}/ultranet.txt" ]; then
+                cp -f "${ULTRANET_BIN_DIR}/ultranet.txt" "${UN_DIR}/"
+            else
+                echo "UltraNet: EdgeSlicer's own network plug-in. Do not replace with the Bambu CDN package." > "${UN_DIR}/ultranet.txt"
+            fi
+            # Ad-hoc, like crashpad/libsentry below; a Developer ID build re-signs every nested
+            # Mach-O (scripts/macos_sign_app.sh).
+            codesign --force --sign - "${UN_DIR}"/*.dylib 2>/dev/null || true
+        elif [ -n "${ULTRANET_BIN_DIR:-}" ]; then
+            echo "Warning: ULTRANET_BIN_DIR=${ULTRANET_BIN_DIR} holds no libbambu_networking.dylib - no network plug-in bundled"
+        fi
 
         # Copy Sentry crashpad_handler and libsentry.dylib for crash reporting
         CRASHPAD_HANDLER="${DEPS}/usr/local/bin/crashpad_handler"

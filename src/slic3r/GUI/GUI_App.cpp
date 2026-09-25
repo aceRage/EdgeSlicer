@@ -3667,14 +3667,17 @@ bool GUI_App::on_init_inner()
     // and a Bambu-original plug-in - which our host cannot run on Windows - is replaced, unless the
     // escape hatch `ultranet_keep_foreign_plugin` is set. BambuSource stays in the sidecar so the
     // host does not LoadLibrary it as the media filter from the exe dir.
+    // macOS and Linux run the same logic with their own library names (libbambu_networking.dylib /
+    // .so) and sidecar location (Contents/Resources/ultranet in the app bundle; bin/ultranet in
+    // the AppImage) - see network_library_name() and ultranet_sidecar_dir().
     try {
         namespace fs = boost::filesystem;
         boost::system::error_code ec;
         const fs::path pf      = fs::path(data_dir()) / "plugins";
         const fs::path exe_dir = fs::path(wxStandardPaths::Get().GetExecutablePath().ToUTF8().data()).parent_path();
-        const fs::path bundled = exe_dir / "ultranet";
-        const fs::path ours    = bundled / "bambu_networking.dll";
-        const fs::path theirs  = pf / "bambu_networking.dll";
+        const fs::path bundled = ultranet_sidecar_dir(exe_dir);
+        const fs::path ours    = bundled / network_library_name();
+        const fs::path theirs  = pf / network_library_name();
 
         const bool sidecar_present   = fs::exists(ours, ec);
         const bool installed_present = fs::exists(theirs, ec);
@@ -3703,7 +3706,7 @@ bool GUI_App::on_init_inner()
 
         // A previous replacement leaves the old DLL renamed beside ours (a loaded image can be
         // renamed on Windows but not deleted); clear it now that nothing should hold it.
-        const fs::path replaced = pf / "bambu_networking.dll.replaced";
+        const fs::path replaced = pf / (std::string(network_library_name()) + ".replaced");
         if (fs::exists(replaced, ec))
             fs::remove(replaced, ec);
 
@@ -3731,11 +3734,20 @@ bool GUI_App::on_init_inner()
                 // Ultra (live view): our sidecar BambuSource is a placeholder. If the user has
                 // already fetched Bambu's real camera component into plugins/, it must survive
                 // this upgrade - stamping the stub back over it would break live view again.
-                const char *bs = "BambuSource.dll";
+                const char *bs = bambu_source_library_name();
                 if (fs::exists(bundled / bs, ec)) {
-                    if (may_overwrite_bambusource(fs::exists(pf / bs, ec), exports_dll_register_server(pf / bs)))
+                    if (may_overwrite_bambusource(fs::exists(pf / bs, ec), is_real_camera_component(pf / bs))) {
+#ifdef _WIN32
                         fs::copy_file(bundled / bs, pf / bs, fs::copy_option::overwrite_if_exists, ec);
-                    else
+#else
+                        // Another instance (the hub) may have the old library mapped: truncating it
+                        // under that process can crash it, so write a new file and rename it over.
+                        const fs::path fresh = pf / (std::string(bs) + ".new");
+                        fs::copy_file(bundled / bs, fresh, fs::copy_option::overwrite_if_exists, ec);
+                        if (! ec)
+                            fs::rename(fresh, pf / bs, ec);
+#endif
+                    } else
                         BOOST_LOG_TRIVIAL(info) << "[UltraNet] keeping the installed Bambu camera component in " << pf.string();
                 }
                 write_marker();
