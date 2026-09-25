@@ -638,6 +638,7 @@ protected:
     void update_subtask(MachineObject* obj);
     void update_cloud_subtask(MachineObject *obj);
     void update_sdcard_subtask(MachineObject *obj);
+    static wxString device_page_stage_text(MachineObject *obj);
     void update_temp_ctrl(MachineObject *obj);
     void set_nozzle_temp_layout(bool dual);
     void update_misc_ctrl(MachineObject *obj);
