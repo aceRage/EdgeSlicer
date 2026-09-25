@@ -3828,6 +3828,50 @@ void GCode::check_placeholder_parser_failed()
     }
 }
 
+// BBL timelapse (BambuStudio ToolOrdering::calc_most_used_extruder): on a dual-nozzle machine the
+// extruder that prints on the most layers takes the timelapse photo. 0 when the plate has a single
+// extruder or no nozzle grouping result.
+static int timelapse_most_used_extruder(const Print &print, const ToolOrdering &tool_ordering)
+{
+    const int num_extruders = int(print.config().nozzle_diameter.size());
+    auto      group_result  = print.get_layered_nozzle_group_result();
+    if (num_extruders < 2 || !group_result)
+        return 0;
+    std::vector<int> layers_used(num_extruders, 0);
+    int              layer_idx = 0;
+    for (const LayerTools &layer_tools : tool_ordering) {
+        std::set<int> used;
+        for (unsigned int filament : layer_tools.extruders) {
+            const int extruder = group_result->get_extruder_id(int(filament), layer_idx);
+            if (extruder >= 0 && extruder < num_extruders)
+                used.insert(extruder);
+        }
+        for (int extruder : used)
+            ++layers_used[extruder];
+        ++layer_idx;
+    }
+    int most_used = 0;
+    for (int extruder = 1; extruder < num_extruders; ++extruder)
+        if (layers_used[extruder] >= layers_used[most_used])
+            most_used = extruder;
+    return most_used;
+}
+
+int GCode::timelapse_extruder_of_filament(int filament_id) const
+{
+    auto group_result = m_curr_print ? m_curr_print->get_layered_nozzle_group_result() : nullptr;
+    if (!group_result || filament_id < 0)
+        return 0;
+    const int extruder = group_result->get_extruder_id(filament_id, m_layer_index);
+    return extruder < 0 ? 0 : extruder;
+}
+
+int GCode::timelapse_physical_extruder(int extruder_id) const
+{
+    const ConfigOptionInts &map = m_config.physical_extruder_map;
+    return (extruder_id >= 0 && extruder_id < int(map.values.size())) ? map.get_at(extruder_id) : extruder_id;
+}
+
 // Process all layers of all objects (non-sequential mode) with a parallel pipeline:
 // Generate G-code, run the filters (vase mode, cooling buffer), run the G-code analyser
 // and export G-code into file.
@@ -3837,6 +3881,7 @@ void GCode::process_layers(const Print&                                         
                            const std::vector<std::pair<coordf_t, std::vector<LayerToPrint>>>& layers_to_print,
                            GCodeOutputStream&                                                 output_stream)
 {
+    m_timelapse_photo_extruder = timelapse_most_used_extruder(print, tool_ordering);
     // The pipeline is variable: The vase mode filter is optional.
     size_t     layer_to_print_idx = 0;
     const auto generator          = tbb::make_filter<void, LayerResult>(
@@ -3959,6 +4004,7 @@ void GCode::process_layers(const Print&              print,
                            // BBS
                            const bool prime_extruder)
 {
+    m_timelapse_photo_extruder = timelapse_most_used_extruder(print, tool_ordering);
     // The pipeline is variable: The vase mode filter is optional.
     size_t     layer_to_print_idx = 0;
     const auto generator =
@@ -5581,16 +5627,41 @@ LayerResult GCode::process_layer(const Print& print,
         print.config().print_sequence == PrintSequence::ByLayer) {
         need_insert_timelapse_gcode_for_traditional = true;
     }
+    // Every BBL machine that is not an i3 (X1/P1 family excepted, whose older profiles still carry
+    // the photo inside layer_change_gcode and leave time_lapse_gcode empty) takes its timelapse
+    // photo from time_lapse_gcode, once per layer, as BambuStudio's process_layer does: at the
+    // layer start on a single-nozzle machine, and on a dual-nozzle machine (H2D, H2C, X2D) while
+    // the photo head is active, unless the smooth-timelapse tower owns the layer. Without this the
+    // H2D/H2C/H2S/P2S G-code carried no photo command at all, so the printer's timelapse flag had
+    // nothing to record.
+    const bool bbl_layer_timelapse = is_BBL_Printer() && printer_structure != PrinterStructure::psI3 &&
+                                     !m_config.time_lapse_gcode.value.empty();
+    const bool bbl_dual_nozzle_timelapse = bbl_layer_timelapse && m_config.nozzle_diameter.size() == 2;
+    if (bbl_dual_nozzle_timelapse && (!m_wipe_tower || !m_wipe_tower->enable_timelapse_print()))
+        need_insert_timelapse_gcode_for_traditional = true;
+    auto timelapse_on_photo_head = [this]() {
+        return m_writer.extruder() != nullptr &&
+               timelapse_extruder_of_filament(int(m_writer.extruder()->id())) == m_timelapse_photo_extruder;
+    };
     bool has_insert_timelapse_gcode = false;
     bool has_wipe_tower             = (layer_tools.has_wipe_tower && m_wipe_tower);
 
-    auto insert_timelapse_gcode = [this, print_z, &print]() -> std::string {
+    auto insert_timelapse_gcode = [this, print_z, &print, bbl_layer_timelapse]() -> std::string {
         std::string gcode_res;
-        if (!m_config.time_lapse_gcode.value.empty()) {
+        if (!m_config.time_lapse_gcode.value.empty() && m_writer.extruder() != nullptr) {
             DynamicConfig config;
             config.set_key_value("layer_num", new ConfigOptionInt(m_layer_index));
             config.set_key_value("layer_z", new ConfigOptionFloat(print_z));
             config.set_key_value("max_layer_z", new ConfigOptionFloat(m_max_layer_z));
+            if (bbl_layer_timelapse) {
+                // Per call, as BambuStudio's generate_timelapse_gcode sets them: the templates park
+                // the head and lift Z only when the active head is not the photo head.
+                config.set_key_value("most_used_physical_extruder_id",
+                                     new ConfigOptionInt(timelapse_physical_extruder(m_timelapse_photo_extruder)));
+                config.set_key_value("curr_physical_extruder_id",
+                                     new ConfigOptionInt(timelapse_physical_extruder(
+                                         timelapse_extruder_of_filament(int(m_writer.extruder()->id())))));
+            }
             gcode_res = this->placeholder_parser_process("timelapse_gcode", print.config().time_lapse_gcode.value,
                                                          m_writer.extruder()->id(), &config) +
                         "\n";
@@ -5616,6 +5687,22 @@ LayerResult GCode::process_layer(const Print& print,
                     pos(2)    = temp_z_after_timepals_gcode;
                     m_writer.set_position(pos);
                 }
+            }
+        } else if (bbl_layer_timelapse && !need_insert_timelapse_gcode_for_traditional && m_writer.extruder() != nullptr) {
+            // Equivalent to the timelapse G-code the older profiles placed in layer_change_gcode.
+            if (EXTRUDER_CONFIG(retract_when_changing_layer))
+                gcode += this->retract(false, false, LiftType::NormalLift);
+            std::string timepals_gcode = insert_timelapse_gcode();
+            if (!timepals_gcode.empty()) {
+                gcode += timepals_gcode;
+                m_writer.set_current_position_clear(false);
+                double temp_z_after_timepals_gcode;
+                if (GCodeProcessor::get_last_z_from_gcode(timepals_gcode, temp_z_after_timepals_gcode)) {
+                    Vec3d pos = m_writer.get_position();
+                    pos(2)    = temp_z_after_timepals_gcode;
+                    m_writer.set_position(pos);
+                }
+                has_insert_timelapse_gcode = true;
             }
         }
     } else {
@@ -7388,7 +7475,8 @@ LayerResult GCode::process_layer(const Print& print,
         std::string gcode_toolchange;
         if (has_wipe_tower) {
             if (!m_wipe_tower->is_empty_wipe_tower_gcode(*this, extruder_id, extruder_id == layer_extruders.back())) {
-                if (need_insert_timelapse_gcode_for_traditional && !has_insert_timelapse_gcode) {
+                if (need_insert_timelapse_gcode_for_traditional && !has_insert_timelapse_gcode &&
+                    (!bbl_dual_nozzle_timelapse || timelapse_on_photo_head())) {
                     gcode += this->retract(false, false, LiftType::NormalLift);
                     m_writer.add_object_change_labels(gcode);
 
@@ -7409,6 +7497,23 @@ LayerResult GCode::process_layer(const Print& print,
                 gcode_toolchange = m_wipe_tower->tool_change(*this, extruder_id, extruder_id == layer_extruders.back());
             }
         } else {
+            if (bbl_dual_nozzle_timelapse && need_insert_timelapse_gcode_for_traditional && !has_insert_timelapse_gcode &&
+                m_writer.need_toolchange(extruder_id) && timelapse_on_photo_head()) {
+                gcode += this->retract(false, false, LiftType::NormalLift);
+                m_writer.add_object_change_labels(gcode);
+                std::string timepals_gcode = insert_timelapse_gcode();
+                if (!timepals_gcode.empty()) {
+                    gcode += timepals_gcode;
+                    m_writer.set_current_position_clear(false);
+                    double temp_z_after_timepals_gcode;
+                    if (GCodeProcessor::get_last_z_from_gcode(timepals_gcode, temp_z_after_timepals_gcode)) {
+                        Vec3d pos = m_writer.get_position();
+                        pos(2)    = temp_z_after_timepals_gcode;
+                        m_writer.set_position(pos);
+                    }
+                }
+                has_insert_timelapse_gcode = true;
+            }
             gcode_toolchange = this->set_extruder(extruder_id, print_z);
         }
         if (!gcode_toolchange.empty()) {
@@ -7804,7 +7909,7 @@ LayerResult GCode::process_layer(const Print& print,
                         // Print perimeters of regions that has is_infill_first == false
                         gcode += this->extrude_perimeters(print, by_region_specific, first_layer, false);
                         if (!has_wipe_tower && need_insert_timelapse_gcode_for_traditional && !has_insert_timelapse_gcode &&
-                            has_infill(by_region_specific)) {
+                            printer_structure == PrinterStructure::psI3 && has_infill(by_region_specific)) {
                             gcode += this->retract(false, false, LiftType::NormalLift);
 
                             std::string timepals_gcode = insert_timelapse_gcode();
@@ -7884,8 +7989,14 @@ LayerResult GCode::process_layer(const Print& print,
 
     BOOST_LOG_TRIVIAL(trace) << "Exported layer " << layer.id() << " print_z " << print_z << log_memory_info();
 
-    if (!has_wipe_tower && need_insert_timelapse_gcode_for_traditional && !has_insert_timelapse_gcode) {
-        if (m_support_traditional_timelapse)
+    if ((!has_wipe_tower || bbl_dual_nozzle_timelapse) && need_insert_timelapse_gcode_for_traditional && !has_insert_timelapse_gcode) {
+        if (bbl_dual_nozzle_timelapse) {
+            // BambuStudio: a traditional photo taken on the other head, with no tower to hide the
+            // head swap, can mark the surface.
+            if (m_support_traditional_timelapse && m_config.timelapse_type.value == TimelapseType::tlTraditional &&
+                !has_wipe_tower && !timelapse_on_photo_head())
+                m_support_traditional_timelapse = false;
+        } else if (m_support_traditional_timelapse)
             m_support_traditional_timelapse = false;
 
         gcode += this->retract(false, false, LiftType::NormalLift);

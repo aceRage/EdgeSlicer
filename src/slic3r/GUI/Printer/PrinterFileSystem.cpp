@@ -1378,6 +1378,11 @@ StaticBambuLib &StaticBambuLib::get()
     return lib;
 }
 
+bool PrinterFileSystem::HasTunnelLibrary()
+{
+    return StaticBambuLib::get().Bambu_Open != nullptr;
+}
+
 extern "C" BambuLib *bambulib_get() {
     return &StaticBambuLib::get();
 }
