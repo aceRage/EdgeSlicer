@@ -4,6 +4,7 @@
 #include "slic3r/Utils/LoginUserAgent.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <boost/log/trivial.hpp>
 
 #include <wx/webviewarchivehandler.h>
@@ -33,6 +34,8 @@
 #define WEBKIT_API
 struct WebKitWebView;
 struct WebKitJavascriptResult;
+struct WebKitWebContext;
+struct WebKitUserContentManager;
 extern "C" {
 WEBKIT_API void
 webkit_web_view_run_javascript                       (WebKitWebView             *web_view,
@@ -46,6 +49,16 @@ webkit_web_view_run_javascript_finish                (WebKitWebView             
 						      GError                    **error);
 WEBKIT_API void
 webkit_javascript_result_unref              (WebKitJavascriptResult *js_result);
+WEBKIT_API WebKitWebContext *
+webkit_web_context_get_default              (void);
+WEBKIT_API void
+webkit_web_context_set_preferred_languages  (WebKitWebContext          *context,
+                                             const gchar * const       *languages);
+WEBKIT_API WebKitUserContentManager *
+webkit_web_view_get_user_content_manager    (WebKitWebView             *web_view);
+WEBKIT_API void
+webkit_user_content_manager_unregister_script_message_handler(WebKitUserContentManager *manager,
+                                                              const gchar              *name);
 }
 #endif
 
@@ -359,6 +372,63 @@ public:
     wxWebView *m_webView;
 };
 
+#if defined(__linux__)
+// The flatpak launcher exports LC_ALL=C.UTF-8 (BambuStudio #3440). WebKitGTK derives
+// navigator.languages from LC_CTYPE and maps only a bare "C" to en-US, so "C.UTF-8" becomes
+// the tag "C". Intl.Locale rejects that, the Flutter web engine shipped since v2.4.0 fails to
+// start, and every web view stays blank. Hand WebKit the UI language as a valid BCP 47 tag.
+static std::string to_bcp47_language_tag(std::string name)
+{
+    name = name.substr(0, name.find_first_of(".@")); // drop codeset / modifier: "ja_JP.UTF-8" -> "ja_JP"
+    std::replace(name.begin(), name.end(), '_', '-');
+    const size_t primary = std::min(name.find('-'), name.size());
+    const bool valid = (primary == 2 || primary == 3) &&
+        std::all_of(name.begin(), name.end(), [](unsigned char c) { return std::isalnum(c) || c == '-'; });
+    return valid ? name : "en-US"; // "C", "POSIX", "" or anything odd would reintroduce the bug
+}
+
+static void apply_webkit_preferred_language()
+{
+    const wxLocale *locale = wxGetLocale();
+    const std::string tag = to_bcp47_language_tag(locale ? locale->GetCanonicalName().ToStdString() : std::string());
+    static std::string s_applied; // re-applied only when the UI language changes
+    if (tag == s_applied)
+        return;
+    WebKitWebContext *ctx = webkit_web_context_get_default();
+    if (ctx == nullptr)
+        return;
+    const gchar *const languages[] = {tag.c_str(), nullptr};
+    webkit_web_context_set_preferred_languages(ctx, languages);
+    s_applied = tag;
+    BOOST_LOG_TRIVIAL(info) << "WebKit preferred language: " << tag;
+}
+
+// wx connects "script-message-received" on the view's WebKitUserContentManager with the
+// wxWebViewWebKit as user data, but ~wxWebViewWebKit only disconnects handlers from the
+// WebKitWebView. A message the page still has in flight during teardown (e.g. a language
+// switch, where AddScriptMessageHandler() on a new view spins a nested main loop) then reaches
+// a freed object. Unregister the handler and drop wx's connections before the view goes away.
+// The native view is captured here: on the plain delete path wxEVT_DESTROY is only sent from
+// ~wxWindow, when calling back into the wxWebView is no longer safe, while the GTK widget itself
+// is disposed only after that event.
+static void disconnect_script_messages_on_destroy(wxWebView *webView)
+{
+    WebKitWebView *view = static_cast<WebKitWebView *>(webView->GetNativeBackend());
+    if (view == nullptr)
+        return;
+    webView->Bind(wxEVT_DESTROY, [webView, view](wxWindowDestroyEvent &evt) {
+        evt.Skip();
+        if (evt.GetEventObject() != webView)
+            return; // destroy events of child windows propagate up to us
+        WebKitUserContentManager *ucm = webkit_web_view_get_user_content_manager(view);
+        if (ucm == nullptr)
+            return;
+        webkit_user_content_manager_unregister_script_message_handler(ucm, "wx");
+        g_signal_handlers_disconnect_by_data(ucm, webView);
+    });
+}
+#endif
+
 wxWebView* WebView::CreateWebView(wxWindow * parent, wxString const & url, wxString const & brand_tag, bool script_bridge)
 {
 #if wxUSE_WEBVIEW_EDGE
@@ -384,6 +454,9 @@ wxWebView* WebView::CreateWebView(wxWindow * parent, wxString const & url, wxStr
 #elif defined(__WXOSX__)
     wxWebView *webView = new WebViewWebKit(url2);
 #else
+#if defined(__linux__)
+    apply_webkit_preferred_language();
+#endif
     auto webView = wxWebView::New();
 #endif
     if (webView) {
@@ -423,6 +496,9 @@ wxWebView* WebView::CreateWebView(wxWindow * parent, wxString const & url, wxStr
         static_cast<WebViewWebKit *>(webView)->AttachNavigationGate();
 #else
         webView->Create(parent, wxID_ANY, url2, wxDefaultPosition, wxDefaultSize, wxBORDER_NONE);
+#endif
+#if defined(__linux__)
+        disconnect_script_messages_on_destroy(webView);
 #endif
         // Same UA layout as the Windows branch above; macOS/Linux WebKit prefix.
         webView->SetUserAgent(wxString::FromUTF8(Slic3r::bbl_login_user_agent(
