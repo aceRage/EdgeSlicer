@@ -732,7 +732,11 @@ void list_host_targets(std::vector<HostTarget>& out)
     }
     std::shared_ptr<PrintHost> connected;
     wxGetApp().get_connect_host(connected);
-    if (connected) out.push_back({ "connect", moonraker_base(connected->get_host()), "", "", "", "", "" });
+    // Not when the Device tab reached the printer through the Snapmaker cloud: its host is then the
+    // cloud's MQTT broker, which answers no Moonraker request - asking it cost a timeout on every
+    // poll and could only ever say "offline". The connect card keeps the MQTT link's own state.
+    if (connected && !SnapmakerLan::is_cloud_host(connected->get_host()))
+        out.push_back({ "connect", moonraker_base(connected->get_host()), "", "", "", "", "" });
     // The model's own devices (<datadir>/hub/print_host_devices.json), under the ids /api/printers
     // gives them. Only the Moonraker-shaped ones are worth asking - an Elegoo Link box answers SDCP
     // over its own websocket and would just spend this call's timeout - so the rest are left with

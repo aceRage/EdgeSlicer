@@ -3,6 +3,7 @@ add_executable(${_TEST_NAME}_tests
     ${_TEST_NAME}_tests_main.cpp
     printhost_devices_tests.cpp
     snapmaker_unload_tests.cpp
+    snapmaker_probe_tests.cpp
     wizard_networking_tests.cpp
     plugin_guard_tests.cpp
     device_model_code_tests.cpp

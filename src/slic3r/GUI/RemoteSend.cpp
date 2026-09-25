@@ -11,6 +11,7 @@
 #include "SelectMachine.hpp" // CloudTaskNozzleId
 #include "SpoolmanDialog.hpp" // deduct_after_send_async
 #include "Jobs/PrintJob.hpp" // PrintPrepareData
+#include "libslic3r/AppConfig.hpp" // DeviceInfo
 #include "libslic3r/Model.hpp"
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/PrintConfig.hpp"
@@ -1401,12 +1402,33 @@ void list_hosts(json& printers, int plate)
     std::shared_ptr<PrintHost> connected;
     wxGetApp().get_connect_host(connected);
     if (connected) {
+        const std::string host  = connected->get_host();
+        // Through the Snapmaker cloud the host is the cloud's MQTT broker
+        // (a1pr8yczi3n0se.iot.us-west-1.amazonaws.com:8883), which named the card "Snapmaker
+        // a1pr8y...amazonaws.com" and read as the printer's address. The card is named after the
+        // printer the Device tab marked connected instead, and says "cloud" rather than an address.
+        const bool        cloud = SnapmakerLan::is_cloud_host(host);
+        DeviceInfo        which;
+        bool              known = false;
+        if (wxGetApp().app_config)
+            for (const DeviceInfo& d : wxGetApp().app_config->get_devices()) {
+                if (!d.connected) continue;
+                const bool same_addr = !d.ip.empty() && host.compare(0, d.ip.size(), d.ip) == 0;
+                if (!known || same_addr) { which = d; known = true; }
+                if (same_addr) break;
+            }
         json p;
         p["id"]          = "connect";
         p["kind"]        = "connect";
-        p["name"]        = "Snapmaker " + connected->get_host();
-        p["model"]       = cfg.opt_string("printer_model");
-        p["url"]         = connected->get_host();
+        p["name"]        = known && !which.dev_name.empty() ? which.dev_name
+                                                            : (cloud ? std::string("Snapmaker (cloud)") : "Snapmaker " + host);
+        p["model"]       = known && !which.model_name.empty() ? which.model_name : cfg.opt_string("printer_model");
+        p["url"]         = host;
+        p["via"]         = cloud ? "cloud" : "lan";
+        if (!cloud) p["ip"] = SnapmakerLan::host_of(host);
+        // The LAN card of the same printer, when it has one: /api/printers lets that card win while
+        // it answers (RemoteAccess::api_printers), and the connect stays as the cloud fallback.
+        if (known && !which.sn.empty()) p["lan_id"] = "sm:" + which.sn;
         p["online"]      = connected->check_sn_arrived();
         p["can_upload"]  = true;
         p["can_print"]   = dynamic_cast<Moonraker_Mqtt*>(connected.get()) != nullptr;

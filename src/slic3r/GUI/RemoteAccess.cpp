@@ -1098,6 +1098,9 @@ RemoteAccess::ApiResponse RemoteAccess::api_printers(int plate)
     // A print host has no live status in the app: ask it over Moonraker's HTTP API from this
     // request thread, never from the GUI one (api_snapmaker_devices probes the same way).
     try { RemoteControl::describe_hosts(*targets, (*out)["printers"]); } catch (...) {}
+    // One card per printer: the Device tab's connect (often through the Snapmaker cloud) gives way
+    // to the same printer's LAN card while that one answers.
+    try { SnapmakerLan::prefer_lan((*out)["printers"]); } catch (...) {}
     r.body = out->dump();
     return r;
 }
