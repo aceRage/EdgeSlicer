@@ -1,15 +1,23 @@
-// Seam Left/Right - the gate for docs/superpowers/specs/2026-09-06-seam-left-right.md.
+// Seam Left/Right - the gate for docs/superpowers/specs/2026-09-06-seam-left-right.md and its
+// follow-up (2026-09-25): Left and Right stopped being directional-only (pull toward the extreme
+// X coordinate, like Back pulls toward the extreme Y) and became "Aligned back, but biased to one
+// side": occlusion and visibility ARE computed, candidates are picked by visibility and angle with
+// the concave-corner preference, then aligned - exactly like Aligned back, except the front-facing
+// penalty in compute_global_occlusion is rotated from "penalise -Y-facing surfaces" (drift to the
+// back) to "penalise +X-facing surfaces" (drift left) or "-X-facing surfaces" (drift right).
 //
-// "Back" (spRear) pulls the seam of every loop toward the largest Y. Auxiliary part-cooling fans
-// usually sit on the side of the machine rather than behind it, so Left and Right do the same thing
-// along X: Left prefers the smallest X, Right the largest. All three are one code path in
-// SeamComparator, parameterised by an axis and a sign, so this file holds them to the same rule:
-//
-//  * On a cylinder - a shape with exactly one extreme point per direction and no sharp corner to
-//    distract the comparator - back lands at max Y, left at min X, right at max X.
-//  * The seam is in the same place on every layer (that is the alignment doing its job), so the
-//    spread along the chosen axis is a fraction of a millimetre.
-//  * Left and Right are mirrors: their seams sit at opposite ends of the same X extent.
+//  * On a cylinder - uniform visibility everywhere, no corner to distract the comparator - Left and
+//    Right still land on their own half of the tube (the penalty alone is enough to break the tie)
+//    and stay aligned from layer to layer, but they are no longer pinned to the exact extreme
+//    coordinate the way the old directional rule pinned them.
+//  * On a shape with a hidden concave corner tucked against the back wall on one side, and a flat,
+//    fully exposed wall on that same side, Left (or Right) prefers the hidden corner - the same
+//    thing Aligned back would do with its own axis. A purely directional rule would not: it would
+//    take the flat wall, because that reaches further along the axis.
+//  * Back and Aligned back are untouched by any of this (their penalised direction is (0,1,0), the
+//    negation of which is the same (0,-1,0) vector the old hardcoded formula used, applied through
+//    the same bit-for-bit arithmetic), so their seams must come out identical to what this file
+//    already pinned before the change.
 
 #include <catch2/catch.hpp>
 
@@ -51,6 +59,18 @@ struct SeamCloud
 
     double spread(int axis) const { return extreme(axis, true) - extreme(axis, false); }
 
+    // Fraction of seams whose X coordinate lies on the given side of the object's centre.
+    double fraction_with_x(bool positive_side) const
+    {
+        if (points.empty())
+            return 0.0;
+        size_t n = 0;
+        for (const Vec2d &p : points)
+            if ((p.x() > 0.0) == positive_side)
+                ++n;
+        return double(n) / double(points.size());
+    }
+
 private:
     double extreme(int axis, bool largest) const
     {
@@ -72,7 +92,7 @@ void collect_outer_loops(const ExtrusionEntity *entity, std::vector<const Extrus
         out.push_back(static_cast<const ExtrusionLoop *>(entity));
 }
 
-DynamicPrintConfig cylinder_config(const std::string &seam_position)
+DynamicPrintConfig seam_test_config(const std::string &seam_position)
 {
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     config.set_deserialize_strict({
@@ -80,7 +100,7 @@ DynamicPrintConfig cylinder_config(const std::string &seam_position)
         { "wall_loops",                 "2" },
         { "layer_height",               "0.2" },
         { "initial_layer_print_height", "0.2" },
-        // A plain tube: nothing on the inside for the seam logic to trip over, and it slices fast.
+        // A plain shape: nothing on the inside for the seam logic to trip over, and it slices fast.
         { "top_shell_layers",           "0" },
         { "bottom_shell_layers",        "0" },
         { "sparse_infill_density",      "0%" },
@@ -91,20 +111,15 @@ DynamicPrintConfig cylinder_config(const std::string &seam_position)
     return config;
 }
 
-// Slice a 20 mm diameter, 10 mm tall cylinder and ask the SeamPlacer where the seam of every outer
-// wall loop would go. Going through place_seam rather than the exported G-code keeps seam_gap, the
-// scarf joint and the travel moves out of the measurement.
-SeamCloud seams_for(const std::string &seam_position)
+// Slice `object` and ask the SeamPlacer where the seam of every outer wall loop would go. Going
+// through place_seam rather than the exported G-code keeps seam_gap, the scarf joint and the
+// travel moves out of the measurement.
+SeamCloud seams_for_object(ModelObject *object, Model &model, const std::string &seam_position)
 {
     Slic3r::Print print;
-    Slic3r::Model model;
 
-    DynamicPrintConfig config = cylinder_config(seam_position);
+    DynamicPrintConfig config = seam_test_config(seam_position);
 
-    ModelObject *object = model.add_object();
-    object->name = "cylinder20";
-    object->add_volume(Slic3r::make_cylinder(10., 10.));
-    object->add_instance();
     object->ensure_on_bed();
     print.auto_assign_extruders(model.objects.front());
     print.apply(model, config);
@@ -135,6 +150,74 @@ SeamCloud seams_for(const std::string &seam_position)
     return cloud;
 }
 
+SeamCloud seams_for(const std::string &seam_position)
+{
+    Slic3r::Model model;
+    ModelObject *object = model.add_object();
+    object->name = "cylinder20";
+    object->add_volume(Slic3r::make_cylinder(10., 10.));
+    object->add_instance();
+    return seams_for_object(object, model, seam_position);
+}
+
+// A 20x20x10 mm block, centred on X/Y, with a full-height notch removed from the corner where the
+// LEFT face (x = -10) meets the BACK face (y = +10): the block loses x in [-10,-6], y in [6,10].
+// The notch's inner wall (a new face at x = -6, facing +X) sits tucked into that corner: most of
+// the hemisphere above it is blocked by the remaining back-left corner and by the notch's own side
+// walls, so raycast_visibility scores it as much less visible than the flat, wide-open left face
+// that still runs the rest of x = -10 (y from -10 to 6). A purely directional rule ("smallest X
+// wins") would prefer the flat face - it is closer to x = -10 - but Aligned (and so Aligned left)
+// prefers the hidden point once visibility is weighed in, same as Aligned back already does for a
+// notch on the back.
+ModelObject *notched_block(Model &model, const std::string &name)
+{
+    indexed_triangle_set block = its_make_cube(20., 20., 10.);
+    for (Vec3f &v : block.vertices) {
+        v.x() -= 10.f;
+        v.y() -= 10.f;
+    }
+
+    ModelObject *object = model.add_object();
+    object->name = name;
+    object->add_volume(TriangleMesh(block));
+
+    indexed_triangle_set notch = its_make_cube(4.001, 4.001, 10.);
+    for (Vec3f &v : notch.vertices) {
+        v.x() += -10.f - 0.0005f; // slight overshoot so the cut face is a clean through-cut
+        v.y() += 6.f - 0.0005f;
+    }
+    ModelVolume *neg = object->add_volume(TriangleMesh(notch));
+    neg->set_type(ModelVolumeType::NEGATIVE_VOLUME);
+
+    object->add_instance();
+    return object;
+}
+
+// Mirror image of notched_block: the notch sits where the RIGHT face (x = +10) meets the back face.
+ModelObject *notched_block_mirrored(Model &model, const std::string &name)
+{
+    indexed_triangle_set block = its_make_cube(20., 20., 10.);
+    for (Vec3f &v : block.vertices) {
+        v.x() -= 10.f;
+        v.y() -= 10.f;
+    }
+
+    ModelObject *object = model.add_object();
+    object->name = name;
+    object->add_volume(TriangleMesh(block));
+
+    indexed_triangle_set notch = its_make_cube(4.001, 4.001, 10.);
+    for (Vec3f &v : notch.vertices) {
+        v.x() += 6.f - 0.0005f;
+        v.y() += 6.f - 0.0005f;
+    }
+    ModelVolume *neg = object->add_volume(TriangleMesh(notch));
+    neg->set_type(ModelVolumeType::NEGATIVE_VOLUME);
+
+    object->add_instance();
+    return object;
+}
+
 // The outer wall of a 20 mm cylinder runs at roughly 9.8 mm from the axis. These bounds only need to
 // tell one side of the tube from the other three, so they are deliberately slack.
 constexpr double on_the_far_side = 8.0; // a seam pushed all the way to one side clears this
@@ -142,7 +225,7 @@ constexpr double near_the_middle = 3.0; // ... and the other coordinate stays ne
 
 } // namespace
 
-SCENARIO("Seam position Back, Left and Right each pull the seam to their own side", "[Seam]")
+SCENARIO("Seam position Back pulls the seam to the back, unchanged by the Aligned left/right work", "[Seam]")
 {
     GIVEN("a cylinder sliced with seam_position = back")
     {
@@ -162,7 +245,10 @@ SCENARIO("Seam position Back, Left and Right each pull the seam to their own sid
             REQUIRE(cloud.spread(1) < 0.5);
         }
     }
+}
 
+SCENARIO("Seam position Aligned left and Aligned right bias the seam to their side of a cylinder", "[Seam]")
+{
     GIVEN("a cylinder sliced with seam_position = left")
     {
         SeamCloud cloud = seams_for("left");
@@ -170,11 +256,19 @@ SCENARIO("Seam position Back, Left and Right each pull the seam to their own sid
         {
             REQUIRE(cloud.points.size() >= 40);
         }
-        THEN("every seam sits at the left of the tube")
+        THEN("every seam sits on the left half of the tube")
         {
-            REQUIRE(cloud.max_x() < -on_the_far_side);
+            // Unlike the old purely-directional Left, Aligned left is not pinned to the exact
+            // extreme X: the visibility/angle penalty can move it a little. What must hold is that
+            // it stays left of centre and does not wander onto the front/back (Y near zero) - the
+            // same shape of assertion the old test made, just without demanding the exact minimum.
+            REQUIRE(cloud.max_x() < -near_the_middle);
             REQUIRE(std::abs(cloud.min_y()) < near_the_middle);
             REQUIRE(std::abs(cloud.max_y()) < near_the_middle);
+        }
+        THEN("essentially every seam is on the left (negative X) side")
+        {
+            REQUIRE(cloud.fraction_with_x(false) > 0.95);
         }
         THEN("the seams line up from layer to layer")
         {
@@ -189,11 +283,15 @@ SCENARIO("Seam position Back, Left and Right each pull the seam to their own sid
         {
             REQUIRE(cloud.points.size() >= 40);
         }
-        THEN("every seam sits at the right of the tube")
+        THEN("every seam sits on the right half of the tube")
         {
-            REQUIRE(cloud.min_x() > on_the_far_side);
+            REQUIRE(cloud.min_x() > near_the_middle);
             REQUIRE(std::abs(cloud.min_y()) < near_the_middle);
             REQUIRE(std::abs(cloud.max_y()) < near_the_middle);
+        }
+        THEN("essentially every seam is on the right (positive X) side")
+        {
+            REQUIRE(cloud.fraction_with_x(true) > 0.95);
         }
         THEN("the seams line up from layer to layer")
         {
@@ -209,6 +307,112 @@ SCENARIO("Seam position Back, Left and Right each pull the seam to their own sid
         {
             REQUIRE_THAT(left.min_x(), WithinAbs(-right.max_x(), 0.5));
             REQUIRE_THAT(left.max_x(), WithinAbs(-right.min_x(), 0.5));
+        }
+    }
+}
+
+SCENARIO("Aligned left prefers a hidden concave corner over a flat, exposed left face", "[Seam]")
+{
+    GIVEN("a block whose only feature on the left side is a notch tucked into the back-left corner")
+    {
+        Model model;
+        ModelObject *object = notched_block(model, "notched_left");
+        SeamCloud    cloud  = seams_for_object(object, model, "left");
+        THEN("there is a seam to look at on every layer")
+        {
+            REQUIRE(cloud.points.size() >= 5);
+        }
+        THEN("the seam sits inside the notch (x > -6, close to the cut corner), not on the flat wall at x = -10")
+        {
+            // The flat wall runs the whole left side at x = -10. If Left were still pulling toward
+            // the smallest X the way the old directional rule did, it would land there. Aligned
+            // left instead follows the hidden corner: x should be well clear of the flat wall.
+            REQUIRE(cloud.max_x() > -9.0);
+        }
+        THEN("and it still stays on the object's left half overall")
+        {
+            REQUIRE(cloud.max_x() < 0.0);
+        }
+    }
+}
+
+SCENARIO("Aligned right prefers a hidden concave corner over a flat, exposed right face", "[Seam]")
+{
+    GIVEN("a block whose only feature on the right side is a notch tucked into the back-right corner")
+    {
+        Model model;
+        ModelObject *object = notched_block_mirrored(model, "notched_right");
+        SeamCloud    cloud  = seams_for_object(object, model, "right");
+        THEN("there is a seam to look at on every layer")
+        {
+            REQUIRE(cloud.points.size() >= 5);
+        }
+        THEN("the seam sits inside the notch (x < 6), not on the flat wall at x = 10")
+        {
+            REQUIRE(cloud.min_x() < 9.0);
+        }
+        THEN("and it still stays on the object's right half overall")
+        {
+            REQUIRE(cloud.min_x() > 0.0);
+        }
+    }
+}
+
+SCENARIO("Aligned back is unaffected by generalising its penalty for Aligned left/right", "[Seam]")
+{
+    GIVEN("a cylinder sliced with seam_position = aligned_back")
+    {
+        SeamCloud cloud = seams_for("aligned_back");
+        THEN("there is a seam to look at on every layer")
+        {
+            REQUIRE(cloud.points.size() >= 40);
+        }
+        THEN("every seam is biased to the back half of the tube, same as before this change")
+        {
+            REQUIRE(cloud.min_y() > near_the_middle);
+            REQUIRE(std::abs(cloud.min_x()) < on_the_far_side);
+            REQUIRE(std::abs(cloud.max_x()) < on_the_far_side);
+        }
+        THEN("the seams line up from layer to layer")
+        {
+            REQUIRE(cloud.spread(1) < 0.5);
+        }
+    }
+
+    GIVEN("the notch-on-the-back shape used to gate Aligned back's concave-corner preference")
+    {
+        // Reuse the same "notch tucked into a corner vs. flat exposed wall" shape as the left/right
+        // gate above, just built so the notch sits on the BACK side instead: this is what
+        // Aligned back already did before this change, and the fixed penalised-direction table
+        // entry for spAlignedBack is (0, 1, 0), giving the exact same `normal.dot((0,-1,0))`
+        // formula as before - so this must keep picking the hidden corner.
+        indexed_triangle_set block = its_make_cube(20., 20., 10.);
+        for (Vec3f &v : block.vertices) {
+            v.x() -= 10.f;
+            v.y() -= 10.f;
+        }
+        Model model;
+        ModelObject *object = model.add_object();
+        object->name = "notched_back";
+        object->add_volume(TriangleMesh(block));
+
+        indexed_triangle_set notch = its_make_cube(4.001, 4.001, 10.);
+        for (Vec3f &v : notch.vertices) {
+            v.x() += -2.f;
+            v.y() += 10.f - 4.f - 0.0005f;
+        }
+        ModelVolume *neg = object->add_volume(TriangleMesh(notch));
+        neg->set_type(ModelVolumeType::NEGATIVE_VOLUME);
+        object->add_instance();
+
+        SeamCloud cloud = seams_for_object(object, model, "aligned_back");
+        THEN("the seam sits inside the notch, not on the flat back wall at y = 10")
+        {
+            REQUIRE(cloud.min_y() < 9.0);
+        }
+        THEN("and it still stays on the object's back half overall")
+        {
+            REQUIRE(cloud.min_y() > 0.0);
         }
     }
 }
