@@ -4,6 +4,7 @@
 #include <wx/dirdlg.h>
 #include <wx/filefn.h>
 #include <wx/filename.h>
+#include <wx/mstream.h>
 #include "libslic3r/Utils.hpp"
 #include "slic3r/GUI/FFUtils.hpp"
 #include "slic3r/GUI/GUI_App.hpp"

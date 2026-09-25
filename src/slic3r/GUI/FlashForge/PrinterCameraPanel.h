@@ -1,6 +1,7 @@
 #ifndef slic3r_GUI_PrinterCameraPanel_hpp_
 #define slic3r_GUI_PrinterCameraPanel_hpp_
 
+#include <wx/dialog.h>
 #include <wx/event.h>
 #include <wx/panel.h>
 #include <wx/webview.h>

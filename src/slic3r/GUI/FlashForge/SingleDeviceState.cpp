@@ -15,6 +15,7 @@
 #include <boost/uuid/uuid_generators.hpp>
 #include <boost/uuid/uuid_io.hpp>
 #include <wx/dcgraph.h>
+#include <wx/mstream.h>
 using namespace std::literals;
 using json   = nlohmann::json;
 namespace pt = boost::property_tree;
