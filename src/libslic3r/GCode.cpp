@@ -959,6 +959,8 @@ std::string WipeTowerIntegration::append_tcr(GCode& gcodegen, const WipeTower::T
     std::string toolchange_command;
     if (tcr.priming || (new_extruder_id >= 0 && gcodegen.writer().need_toolchange(new_extruder_id)))
         toolchange_command = gcodegen.writer().toolchange(new_extruder_id);
+    if (new_extruder_id >= 0)
+        gcodegen.note_filament_loaded(new_extruder_id);
     if (!custom_gcode_changes_tool(toolchange_gcode_str, gcodegen.writer().toolchange_prefix(), new_extruder_id))
         toolchange_gcode_str += toolchange_command;
     else {
@@ -2635,6 +2637,43 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
 
     m_writer.set_is_bbl_machine(is_bbl_printers);
 
+    // Bambu two-extruder printers, print by object: the filament -> nozzle grouping
+    // (ToolOrdering::reorder_extruders_for_minimum_flush_volume) never runs for such a plate - it is
+    // skipped for a sequential print, and Print::process builds no print-wide ToolOrdering for a
+    // by-object plate even with one object - so nothing told the printer which hotend each filament
+    // uses: the CONFIG_BLOCK kept the
+    // project's stale filament_nozzle_map (an H2D plate with filament_map 2,1,2,2,... went out as
+    // "1,0,0,0,..." - filament 5 on nozzle 0, the LEFT hotend, while its AMS feeds the right one),
+    // slice_info gave every filament group 0 with no <nozzle> table, and the start G-code's
+    // filament_map shim heated and selected the left hotend ("M104 T1 ; rise temp in advance",
+    // "G151 P1 M"). Bambu Studio groups print-by-object plates too; group this one from the plate's
+    // own map, before the header is written. A by-layer plate keeps the grouping ToolOrdering made.
+    // (A by-object plate with ONE object and a prime tower does get the print-wide ToolOrdering, and
+    // its grouping, from Print::_make_wipe_tower; keep that one.)
+    if (is_bbl_printers && print.config().print_sequence == PrintSequence::ByObject && print.config().nozzle_diameter.size() >= 2 &&
+        (print.objects().size() > 1 || !print.has_wipe_tower())) {
+        std::vector<std::vector<unsigned int>> layer_filaments;
+        for (const PrintObject *object : print.objects()) {
+            ToolOrdering object_ordering(*object, (unsigned int) -1);
+            for (const LayerTools &lt : object_ordering.layer_tools())
+                if (!lt.extruders.empty())
+                    layer_filaments.push_back(lt.extruders);
+        }
+        std::shared_ptr<MultiNozzleUtils::LayeredNozzleGroupResult> grouping;
+        if (!layer_filaments.empty()) {
+            try {
+                grouping = std::make_shared<MultiNozzleUtils::LayeredNozzleGroupResult>(ToolOrdering::group_by_plate_map(&print, layer_filaments));
+                if (grouping->get_used_filaments().empty())
+                    grouping.reset();
+            } catch (const std::exception &e) {
+                BOOST_LOG_TRIVIAL(warning) << "print-by-object nozzle grouping failed: " << e.what();
+                grouping.reset();
+            }
+        }
+        // Always replace: a result from an earlier by-layer slice of this Print must not describe this one.
+        print.set_nozzle_group_result(grouping);
+    }
+
     // How many times will be change_layer() called?
     // change_layer() in turn increments the progress bar status.
     m_layer_count = 0;
@@ -3296,6 +3335,16 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
                 auto em = gr->get_extruder_map(false); // 1-based, per filament index
                 for (size_t i = 0; i < fmap.size() && i < em.size(); ++i)
                     if (em[i] >= 1) fmap[i] = em[i];
+            } else if (print.is_BBL_printer() && print.config().nozzle_diameter.size() >= 2) {
+                // A print-by-object plate with several objects has no grouping result (the grouping is
+                // skipped for sequential prints), but its filament_map is still the plate's assignment,
+                // which is what Bambu Studio publishes here. The all-1 shim sent the start G-code's
+                // "M104 T{filament_map[..] % 2}" / "G151 P{..} M" to the LEFT hotend while the first
+                // filament was loaded into the right one.
+                const std::vector<int> &cfm = print.config().filament_map.values;
+                for (size_t i = 0; i < fmap.size() && i < cfm.size(); ++i)
+                    if (cfm[i] >= 1 && size_t(cfm[i]) <= print.config().nozzle_diameter.size())
+                        fmap[i] = cfm[i];
             }
             this->placeholder_parser().set("filament_map", new ConfigOptionInts(fmap));
             bool all_bbl = true;
@@ -3378,8 +3427,56 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
             this->placeholder_parser().set("timelapse_pos_x",                  new ConfigOptionFloat(0.));
             this->placeholder_parser().set("timelapse_pos_y",                  new ConfigOptionFloat(0.));
             std::vector<int> first_fils(num_nozzles, int(initial_extruder_id));
+            std::vector<int> first_non_support_fils = first_fils;
+            if (print.is_BBL_printer() && num_nozzles >= 2) {
+                // Bambu Studio GCode.cpp:2575-2705 (ToolOrdering::cal_non_support_filaments +
+                // match_physical_extruder_for_each_filament): the first filament, and the first
+                // non-support filament, each extruder prints, indexed by PHYSICAL extruder, -1 when an
+                // extruder prints nothing. The start G-code's toolhead-offset calibration hands these to
+                // the firmware per hotend ("M620.17 T<physical> S<temp> L<filament>"); the old shim
+                // named the first filament for BOTH hotends, so the idle hotend was given a filament
+                // that is fed to the other one.
+                const std::vector<int> &fm  = print.config().filament_map.values;
+                const std::vector<int> &pem = print.config().physical_extruder_map.values;
+                std::vector<int> first_logical(num_nozzles, -1), first_ns_logical(num_nozzles, -1);
+                auto scan = [&](const ToolOrdering &to) {
+                    for (const LayerTools &lt : to)
+                        for (unsigned int f : lt.extruders) {
+                            if (f >= fm.size() || fm[f] < 1 || size_t(fm[f]) > num_nozzles)
+                                continue;
+                            const size_t e = size_t(fm[f] - 1);
+                            if (first_logical[e] < 0)
+                                first_logical[e] = int(f);
+                            if (first_ns_logical[e] < 0 && !print.config().filament_is_support.get_at(f))
+                                first_ns_logical[e] = int(f);
+                        }
+                };
+                if (print.config().print_sequence == PrintSequence::ByObject) {
+                    const PrintObject *prev = nullptr;
+                    for (const PrintInstance *inst : print_object_instances_ordering) {
+                        if (inst->print_object == prev)
+                            continue;
+                        prev = inst->print_object;
+                        scan(ToolOrdering(*inst->print_object, (unsigned int) -1));
+                        if (std::find(first_ns_logical.begin(), first_ns_logical.end(), -1) == first_ns_logical.end())
+                            break;
+                    }
+                } else {
+                    scan(tool_ordering);
+                }
+                auto to_physical = [&](const std::vector<int> &logical) {
+                    std::vector<int> physical(num_nozzles, -1);
+                    for (size_t e = 0; e < num_nozzles; ++e) {
+                        const size_t p = (e < pem.size() && pem[e] >= 0 && size_t(pem[e]) < num_nozzles) ? size_t(pem[e]) : e;
+                        physical[p] = logical[e];
+                    }
+                    return physical;
+                };
+                first_fils             = to_physical(first_logical);
+                first_non_support_fils = to_physical(first_ns_logical);
+            }
             this->placeholder_parser().set("first_filaments",             new ConfigOptionInts(first_fils));
-            this->placeholder_parser().set("first_non_support_filaments", new ConfigOptionInts(first_fils));
+            this->placeholder_parser().set("first_non_support_filaments", new ConfigOptionInts(first_non_support_fils));
             // H2C templates also reference these (single-mapped: hotend ids -1, no computed wipe-tower center).
             this->placeholder_parser().set("first_non_support_hotend",    new ConfigOptionInts(std::vector<int>(num_nozzles, -1)));
             this->placeholder_parser().set("wipe_tower_center_pos_valid", new ConfigOptionBool(false));
@@ -3432,6 +3529,27 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
     // BBS: gcode writer doesn't know where the real position of extruder is after inserting custom gcode
     m_writer.set_current_position_clear(false);
     m_start_gcode_filament = GCodeProcessor::get_gcode_last_filament(machine_start_gcode);
+    m_filament_in_nozzle.clear();
+    if (m_start_gcode_filament < 0 && is_bbl_multi_extruder()) {
+        // The Bambu two-extruder start G-code loads the first filament with
+        // "T[initial_no_support_filament_id] H[initial_no_support_hotend]", which the plain parser above
+        // does not read ("T4 H-1" is not a number). The last such T<n> (n < 255; T1000/T1001 are
+        // Bambu's own tool commands) is the filament left in the hotend.
+        std::istringstream lines(machine_start_gcode);
+        for (std::string line; std::getline(lines, line);) {
+            const size_t b = line.find_first_not_of(" \t");
+            if (b == std::string::npos || line[b] != 'T')
+                continue;
+            size_t e = b + 1;
+            while (e < line.size() && std::isdigit(static_cast<unsigned char>(line[e])))
+                ++e;
+            if (e == b + 1 || (e < line.size() && !std::isspace(static_cast<unsigned char>(line[e])) && line[e] != ';'))
+                continue;
+            const int t = std::atoi(line.substr(b + 1, e - b - 1).c_str());
+            if (t >= 0 && t < 255)
+                m_start_gcode_filament = t;
+        }
+    }
 
     // Ultra (H2C 3MF schema): mark the first filament used in the print, the way BambuStudio does
     // (GCode.cpp: file.write_format(";VT%d H%d\n", initial_extruder_id, initial_nozzle_id)).
@@ -4433,6 +4551,19 @@ void GCode::_print_first_layer_extruder_temperatures(
             int temp = print.config().nozzle_temperature_initial_layer.get_at(first_printing_extruder_id);
             if (temp > 0)
                 file.write(m_writer.set_temperature(temp, wait, first_printing_extruder_id));
+        } else if (is_bbl_multi_extruder()) {
+            // Bambu two-extruder printer (reached between objects of a print-by-object plate). M104 T is
+            // a PHYSICAL hotend: "M104 S<t> T<filament index>" named a hotend that does not exist for
+            // filament slots >= 2 (e.g. "M104 S220 T6"), and the wrong hotend for slots 0/1.
+            // Only the hotend that prints the next object is set, to its first filament's first-layer
+            // temperature. The other hotend is idle: setting it to print temperature here heated a
+            // hotend the idle-nozzle pre-cooling had just cooled, for the whole object (owner's H2C,
+            // 2026-09-24). It is heated again by its own tool change ("M620.10 A1 ... P<temp>") or,
+            // with pre-cooling, by the pre-heat timed for its next use.
+            const int active_tool = temperature_tool_for_filament(int(first_printing_extruder_id));
+            const int active_temp = print.config().nozzle_temperature_initial_layer.get_at(first_printing_extruder_id);
+            if (active_temp > 0)
+                file.write(m_writer.set_temperature(active_temp, wait, active_tool));
         } else {
             // Set temperatures of all the printing extruders.
             bool is_active   = true;
@@ -5844,6 +5975,19 @@ LayerResult GCode::process_layer(const Print& print,
 
         // Transition from 1st to 2nd layer. Adjust nozzle temperatures as prescribed by the nozzle dependent
         // nozzle_temperature_initial_layer vs. temperature settings.
+        if (is_bbl_multi_extruder() && !print.config().single_extruder_multi_material.value) {
+            // Bambu two-extruder printer: M104 T is a PHYSICAL hotend, never "T<filament index>". Only
+            // the hotend that is printing is set. The idle one gets its temperature from its own tool
+            // change ("M620.10 A1 ... P<new_filament_temp>") or, with the idle-nozzle pre-cooling, from
+            // the pre-heat timed for its next use; heating it here undid that pre-cool (on a
+            // print-by-object plate, at the 2nd layer of every object).
+            if (m_writer.extruder() != nullptr) {
+                const int filament    = int(m_writer.extruder()->id());
+                const int temperature = print.config().nozzle_temperature.get_at(filament);
+                if (temperature > 0 && temperature != print.config().nozzle_temperature_initial_layer.get_at(filament))
+                    gcode += m_writer.set_temperature(temperature, false, temperature_tool_for_filament(filament));
+            }
+        } else
         for (const Extruder& extruder : m_writer.extruders()) {
             if ((print.config().single_extruder_multi_material.value || m_ooze_prevention.enable) &&
                 extruder.id() != m_writer.extruder()->id())
@@ -8088,7 +8232,10 @@ static bool grouping_header_maps(const Print& print, std::vector<int>& nozzle_ma
         return false;
     int        extruder_count = 0;
     const bool is_sequential  = print.config().print_sequence == PrintSequence::ByObject && print.objects().size() > 1;
-    if (is_sequential || !const_cast<DynamicPrintConfig&>(print.full_print_config()).support_different_extruders(extruder_count))
+    // A Bambu print-by-object plate is grouped afresh at the top of GCode::_do_export, so its result
+    // describes this slice too.
+    if ((is_sequential && !print.is_BBL_printer()) ||
+        !const_cast<DynamicPrintConfig&>(print.full_print_config()).support_different_extruders(extruder_count))
         return false;
 
     const DynamicPrintConfig& cfg = print.full_print_config();
@@ -10240,6 +10387,73 @@ void GCode::record_filament_change(unsigned int filament_id)
     m_nozzle_change_sequence.emplace_back(static_cast<unsigned int>(std::max(0, nozzle_id)));
 }
 
+bool GCode::is_bbl_multi_extruder() const
+{
+    return m_curr_print != nullptr && m_curr_print->is_BBL_printer() && m_config.nozzle_diameter.size() >= 2;
+}
+
+int GCode::logical_extruder_for_filament(int filament_id) const
+{
+    if (filament_id < 0 || !is_bbl_multi_extruder())
+        return -1;
+    // filament_map is 1-based. On a by-layer plate the grouping writes its result into the print
+    // config (ToolOrdering::reorder_extruders_for_minimum_flush_volume); on a print-by-object plate
+    // there is no grouping and filament_map is the plate's own (manual) map.
+    const std::vector<int> &fm = m_config.filament_map.values;
+    if (size_t(filament_id) < fm.size() && fm[size_t(filament_id)] >= 1 && size_t(fm[size_t(filament_id)]) <= m_config.nozzle_diameter.size())
+        return fm[size_t(filament_id)] - 1;
+    return -1;
+}
+
+int GCode::nozzle_key_for_filament(int filament_id) const
+{
+    const int extruder = logical_extruder_for_filament(filament_id);
+    if (extruder < 0)
+        return -1;
+    // A rack (H2C) has several nozzles on one extruder: key on the logical nozzle id there.
+    if (has_nozzle_rack(m_config) && m_curr_print != nullptr)
+        if (auto group_result = m_curr_print->get_layered_nozzle_group_result()) {
+            const int nozzle = group_result->get_nozzle_id(filament_id, m_layer_index);
+            if (nozzle >= 0)
+                return 1000 + nozzle;
+        }
+    return extruder;
+}
+
+int GCode::temperature_tool_for_filament(int filament_id) const
+{
+    const int extruder = logical_extruder_for_filament(filament_id);
+    if (extruder < 0)
+        return filament_id;
+    const std::vector<int> &pem = m_config.physical_extruder_map.values;
+    return size_t(extruder) < pem.size() ? pem[size_t(extruder)] : extruder;
+}
+
+void GCode::note_filament_loaded(int filament_id)
+{
+    const int key = nozzle_key_for_filament(filament_id);
+    if (key >= 0)
+        m_filament_in_nozzle[key] = filament_id;
+}
+
+bool GCode::cross_extruder_flush_volume(int old_filament_id, int new_filament_id, float &volume) const
+{
+    const int old_extruder = logical_extruder_for_filament(old_filament_id);
+    const int new_extruder = logical_extruder_for_filament(new_filament_id);
+    if (old_extruder < 0 || new_extruder < 0 || old_extruder == new_extruder)
+        return false;
+    volume = 0.f;
+    auto it = m_filament_in_nozzle.find(nozzle_key_for_filament(new_filament_id));
+    if (it == m_filament_in_nozzle.end() || it->second < 0 || it->second == new_filament_id)
+        return true; // empty nozzle, or it already holds the new filament
+    const std::vector<double> &matrix = m_config.flush_volumes_matrix.values;
+    const size_t               n      = size_t(std::sqrt(double(matrix.size())) + EPSILON);
+    const size_t               idx    = size_t(it->second) * n + size_t(new_filament_id);
+    if (n > 0 && size_t(it->second) < n && size_t(new_filament_id) < n && idx < matrix.size())
+        volume = float(matrix[idx] * m_config.flush_multiplier.value);
+    return true;
+}
+
 std::string GCode::set_extruder(unsigned int extruder_id, double print_z, bool by_object)
 {
     if (!m_writer.need_toolchange(extruder_id))
@@ -10276,6 +10490,42 @@ std::string GCode::set_extruder(unsigned int extruder_id, double print_z, bool b
         }
 
         gcode += m_writer.toolchange(extruder_id);
+        return gcode;
+    }
+
+    // Bambu two-extruder printers: the start G-code has already loaded the first filament
+    // ("M620 S<f>A ... T<f> H.. ... M621 S<f>A"). Bambu Studio adopts it (GCodeWriter::init_extruder,
+    // GCode.cpp:2996) and never runs change_filament_gcode for it. Running it again after the prime
+    // line told the firmware the hotend held filament 0 ("M620.11 ... I0", old temperature
+    // "M620.10 A0 ... P0") whatever the start G-code had loaded, right before the first layer.
+    if (m_writer.extruder() == nullptr && m_start_gcode_filament >= 0 && (unsigned int) m_start_gcode_filament == extruder_id &&
+        is_bbl_multi_extruder()) {
+        m_start_gcode_filament = -1;
+        // Bookkeeping only: the start G-code sent the T command itself.
+        m_writer.toolchange(extruder_id);
+        note_filament_loaded(int(extruder_id));
+        // _do_export already recorded it next to ";VT" when the plate has a grouping result.
+        if (m_filament_change_sequence.empty())
+            this->record_filament_change(extruder_id);
+        this->placeholder_parser().set("current_extruder", extruder_id);
+        this->placeholder_parser().set("retraction_distance_when_cut", m_config.retraction_distances_when_cut.get_at(extruder_id));
+        this->placeholder_parser().set("long_retraction_when_cut", m_config.long_retractions_when_cut.get_at(extruder_id));
+        set_ec_retraction_placeholders(this->placeholder_parser(), m_config, size_t(extruder_id));
+
+        std::string gcode;
+        const std::string& filament_start_gcode = m_config.filament_start_gcode.get_at(extruder_id);
+        if (!filament_start_gcode.empty()) {
+            DynamicConfig config;
+            config.set_key_value("layer_num", new ConfigOptionInt(m_layer_index));
+            config.set_key_value("layer_z", new ConfigOptionFloat(this->writer().get_position().z() - m_config.z_offset.value));
+            config.set_key_value("max_layer_z", new ConfigOptionFloat(m_max_layer_z));
+            config.set_key_value("filament_extruder_id", new ConfigOptionInt(int(extruder_id)));
+            gcode += this->placeholder_parser_process("filament_start_gcode", filament_start_gcode, extruder_id, &config);
+            check_add_eol(gcode);
+        }
+        if (get_value_at(m_config, m_config.enable_pressure_advance, ConfigFlowDomain::Filament, extruder_id))
+            gcode += m_writer.set_pressure_advance(get_value_at(m_config, m_config.pressure_advance, ConfigFlowDomain::Filament, extruder_id));
+        m_last_pos_defined = false;
         return gcode;
     }
 
@@ -10350,8 +10600,16 @@ std::string GCode::set_extruder(unsigned int extruder_id, double print_z, bool b
         size_t flush_idx = size_t(previous_extruder_id) * number_of_extruders + extruder_id;
         wipe_volume      = flush_idx < flush_matrix.size() ? flush_matrix[flush_idx] : 0.f;
         wipe_volume *= m_config.flush_multiplier;
-        // Ultra (Phase 7): cross-nozzle change (filament_map differs) is a nozzle switch, not a color purge -> no flush.
-        {
+        // A change onto the other extruder of a Bambu two-extruder printer purges what that nozzle
+        // still holds (Bambu Studio GCode.cpp:8180-8196): nothing when it is empty or already holds
+        // this filament, else the flush from the filament parked in it. Zeroing every cross-extruder
+        // change (the old "Phase 7" rule) told the firmware "M620.10 ... L0" when it went back to a
+        // nozzle loaded with a different colour.
+        float cross_extruder_volume = 0.f;
+        if (cross_extruder_flush_volume(previous_extruder_id, int(extruder_id), cross_extruder_volume)) {
+            wipe_volume = cross_extruder_volume;
+        } else {
+            // Ultra (Phase 7): other machines with a filament_map: a nozzle switch is not a colour purge.
             const auto& fm = m_config.filament_map.values;
             if (previous_extruder_id >= 0 && (size_t)previous_extruder_id < fm.size() && (size_t)extruder_id < fm.size()
                 && fm[previous_extruder_id] != fm[extruder_id])
@@ -10502,6 +10760,7 @@ std::string GCode::set_extruder(unsigned int extruder_id, double print_z, bool b
     else {
         // user provided his own toolchange gcode, no need to do anything
     }
+    note_filament_loaded(int(extruder_id));
 
     // Set the temperature if the wipe tower didn't (not needed for non-single extruder MM)
     if (m_config.single_extruder_multi_material && !m_config.enable_prime_tower) {

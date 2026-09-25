@@ -700,6 +700,26 @@ private:
     bool m_need_change_layer_lift_z = false;
     int m_start_gcode_filament = -1;
 
+    // Bambu two-extruder printers (H2D/H2C/X2D). A nozzle keeps the last filament loaded into it while
+    // the other extruder prints, so a change back into it has to purge THAT filament, which is what
+    // Bambu Studio's switch_to_nozzle() does (GCode.cpp:8180). Key: nozzle_key_for_filament().
+    std::map<int, int> m_filament_in_nozzle;
+    // The nozzle a filament prints from: the logical nozzle id on a rack machine (H2C), else the
+    // 1-based extruder from filament_map; -1 on a printer with one extruder.
+    int  nozzle_key_for_filament(int filament_id) const;
+    // The logical (0-based) extruder a filament is assigned to, -1 when there is only one.
+    int  logical_extruder_for_filament(int filament_id) const;
+    // M104/M109 T on a Bambu two-extruder printer names the PHYSICAL extruder (the start template's
+    // "T{filament_map[..] % 2}", the end G-code's T0/T1, Bambu Studio's pre-cool lines), never a
+    // filament slot. Returns filament_id unchanged on every other printer.
+    int  temperature_tool_for_filament(int filament_id) const;
+    bool is_bbl_multi_extruder() const;
+    void note_filament_loaded(int filament_id);
+    // Purge volume for a change old -> new that crosses extruders: the flush from the filament the
+    // target nozzle still holds, 0 when it holds nothing or already holds the new filament.
+    // Returns false (and leaves volume alone) when old and new share an extruder.
+    bool cross_extruder_flush_volume(int old_filament_id, int new_filament_id, float &volume) const;
+
     std::set<unsigned int>                  m_initial_layer_extruders;
     // BBS
     int get_bed_temperature(const int extruder_id, const bool is_first_layer, const BedType bed_type) const;
