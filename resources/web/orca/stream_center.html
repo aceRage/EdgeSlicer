@@ -3106,7 +3106,7 @@ html[data-embed] #conn, html[data-embed] #via, html[data-embed] .pushbox { displ
             var sel = el('select');
             if (!s.printers.length) { var o0 = el('option', '', s.error ? 'No printers' : 'Loading printers…'); sel.appendChild(o0); sel.disabled = true; }
             s.printers.forEach(function(pr) {
-                var kind = pr.kind === 'printhost' ? ' · print host' : pr.kind === 'connect' ? ' · connected' : pr.kind === 'snapmaker' ? ' · LAN' : '';
+                var kind = pr.kind === 'printhost' ? ' · print host' : pr.kind === 'connect' ? (pr.via === 'cloud' ? ' · cloud' : ' · connected') : pr.kind === 'snapmaker' ? ' · LAN' : '';
                 var o = el('option', '', pr.name + (pr.model ? ' · ' + pr.model : '') + kind + (pr.online ? '' : ' (offline)'));
                 o.value = pr.id;
                 if (pr.id === s.sel) o.selected = true;
@@ -3451,6 +3451,11 @@ html[data-embed] #conn, html[data-embed] #via, html[data-embed] .pushbox { displ
     }
     function smDeviceId(p) { return String(p.id || '').indexOf('sm:') === 0 ? p.id.slice(3) : p.id; }
     function smHost(u) { return String(u || '').replace(/^\w+:\/\//, '').split(':')[0]; }
+    // The Snapmaker cloud's endpoints (its AWS IoT MQTT broker above all): not a printer address.
+    function isCloudHost(h) {
+        h = smHost(h).toLowerCase().replace(/\.+$/, '');
+        return /(^|\.)(amazonaws\.com(\.cn)?|aliyuncs\.com|snapmaker\.(com|cn|net))$/.test(h) || h.indexOf('.iot.') >= 0;
+    }
     // Forget a printer somebody typed in (the discovered ones come back on the next pass).
     function smRemoveBtn(p) {
         var rm = el('span', 'btn small dim', 'Remove');
@@ -4221,7 +4226,12 @@ html[data-embed] #conn, html[data-embed] #via, html[data-embed] .pushbox { displ
                 if (p.printing) meta += ' · ' + p.percent + '% · ' + fmtTime(p.left_time_s) + ' left' + (p.total_layers ? ' · layer ' + p.layer + '/' + p.total_layers : '');
                 if (p.task) meta += ' · ' + p.task;
                 if (p.stage) meta += ' · ' + p.stage; // "Paused due to filament runout" rather than a bare PAUSE
-                if (p.ip) meta += ' · ' + p.ip;
+                // Where the printer is: its LAN address, or "cloud" for a printer the PC reaches only
+                // through the Snapmaker cloud. Never the cloud's MQTT broker, which the Device tab
+                // records as a cloud-bound printer's "ip" (older slicers passed it through).
+                if (p.ip && !isCloudHost(p.ip)) meta += ' · ' + p.ip;
+                else if (p.via === 'cloud' || (p.ip && isCloudHost(p.ip))) meta += ' · cloud';
+                if (!p.online && p.cloud_online) meta += ' · reachable through the cloud';
                 if (p.login_required) meta += ' · asks for a login';
                 card.appendChild(el('div', 'meta', meta));
                 if (p.online) {

@@ -36,6 +36,7 @@
 #include <functional>
 #include <initializer_list>
 #include <map>
+#include <set>
 #include <memory>
 #include <mutex>
 #include <random>
@@ -2493,6 +2494,7 @@ void HubServer::poll_printers()
         if (!rows.is_object() || !rows.contains("printers") || !rows["printers"].is_array()) continue;
         const long long at = now_millis();
         std::lock_guard<std::mutex> lock(m_mutex);
+        std::set<std::string> reported;
         for (const json& row : rows["printers"]) {
             if (!row.is_object()) continue;
             const std::string id = row.value("id", std::string());
@@ -2501,6 +2503,21 @@ void HubServer::poll_printers()
             c.row      = row;
             c.at       = at;
             c.instance = inst.pid;
+            reported.insert(id);
+        }
+        // A Snapmaker row this window (or the hub's previous run) reported and no longer does is
+        // gone, not stale: the Device tab's connect card after a disconnect, or one that now gives
+        // way to the printer's LAN card, or a LAN entry that was a duplicate. Kept, it sat in the
+        // app for hours as a stale "Snapmaker a1pr8y...amazonaws.com" card. Bambu and print-host
+        // rows keep the old rule (shown as stale) - a Bambu printer can drop out of the device list
+        // for a moment.
+        for (auto it = m_printers.begin(); it != m_printers.end();) {
+            const std::string kind = it->second.row.value("kind", std::string());
+            if ((kind == "connect" || kind == "snapmaker") && !reported.count(it->first) &&
+                (it->second.instance == inst.pid || it->second.instance == 0))
+                it = m_printers.erase(it);
+            else
+                ++it;
         }
         // A hub that ran for weeks with a changing fleet must not grow without bound: keep the
         // most recently seen rows and drop the oldest.

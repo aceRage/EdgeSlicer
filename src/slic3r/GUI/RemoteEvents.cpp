@@ -538,9 +538,9 @@ static void snapshot_bambu(Snapshot& s)
 }
 
 // Worker thread: the LAN Snapmakers, over the Moonraker HTTP API they serve themselves. This is
-// the same cached probe /api/printers uses (four-second TTL, and half a minute of backoff on a
-// printer that did not answer), so a phone polling the Devices tab and the watcher share the answer
-// instead of asking twice.
+// the same cached probe /api/printers uses (four-second TTL, a retry every ten seconds once a
+// printer is offline, and SnapmakerLan::Presence deciding when that is), so a phone polling the
+// Devices tab and the watcher share the answer instead of asking twice.
 //
 // Side by side, not one after the other. Asked in turn, one printer that was switched off added its
 // whole connect timeout to every poll - with three Snapmakers on the LAN and one of them off, the
