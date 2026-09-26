@@ -8,6 +8,11 @@ It answers what SnapmakerLan asks a U1:
                               print_task_config, shaped like firmware 1.5.2's answer
   GET /machine/system_info    model, serial number and device name (what identify() reads)
   GET /printer/info           hostname
+  POST /server/files/upload   multipart (root=gcodes, file=...): kept in memory, name -> bytes
+  GET /server/files/metadata  ?filename= -> {size, modified} of an uploaded file, 404 otherwise
+  GET /server/files/list      ?root=gcodes -> every uploaded file
+  POST /printer/print/start   ?filename= -> starts that file (404 when it was never uploaded)
+  POST /printer/gcode/script  ?script= -> accepted (the mapped start's macros)
 
 and has a control port of its own, so a test can change how the "printer" behaves:
   GET /fake/mode?m=normal           answer at once
@@ -16,6 +21,8 @@ and has a control port of its own, so a test can change how the "printer" behave
   GET /fake/mode?m=up               listen again and answer at once (same as normal)
   GET /fake/state?state=printing    what print_stats.state says (standby, printing, paused, ...)
   GET /fake/stats                   {"mode":..., "requests": {path: count}}
+  GET /fake/files                   {"files": {name: size}, "started": [names], "uploads": n}
+  GET /fake/reset                   forget every file and start, state standby
 
 Nothing here ever talks to a real printer: both ports bind to 127.0.0.1 only.
 
@@ -31,7 +38,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 LOCK = threading.Lock()
-STATE = {"mode": "normal", "delay": 0.0, "state": "printing", "requests": {}}
+STATE = {"mode": "normal", "delay": 0.0, "state": "printing", "requests": {},
+         "files": {}, "started": [], "uploads": 0, "current": ""}
 ARGS = None
 
 
@@ -52,7 +60,7 @@ def query_status(state):
     status = {
         "print_stats": {
             "state": state,
-            "filename": "fake_job.gcode" if state in ("printing", "paused") else "",
+            "filename": (STATE["current"] or "fake_job.gcode") if state in ("printing", "paused") else "",
             "message": "",
             "print_duration": 600.0,
             "total_duration": 640.0,
@@ -97,7 +105,58 @@ class Printer(BaseHTTPRequestHandler):
                 "machine_type": "Snapmaker U1", "serial_number": ARGS.sn, "device_name": ARGS.name}}}})
         if u.path == "/printer/info":
             return reply(self, 200, {"result": {"hostname": ARGS.name, "state": "ready"}})
+        q = {k: v[0] for k, v in parse_qs(u.query).items()}
+        if u.path == "/server/files/metadata":
+            with LOCK:
+                size = STATE["files"].get(q.get("filename", ""))
+            if size is None:
+                return reply(self, 404, {"error": {"code": 404, "message": "Metadata not available for " + q.get("filename", "")}})
+            return reply(self, 200, {"result": {"filename": q["filename"], "size": size, "modified": time.time()}})
+        if u.path == "/server/files/list":
+            with LOCK:
+                files = [{"path": n, "size": sz, "modified": time.time(), "permissions": "rw"} for n, sz in STATE["files"].items()]
+            return reply(self, 200, {"result": files})
         return reply(self, 404, {"error": {"code": 404, "message": "Not Found"}})
+
+    def do_POST(self):
+        u = urlparse(self.path)
+        q = {k: v[0] for k, v in parse_qs(u.query).items()}
+        n = int(self.headers.get("Content-Length") or 0)
+        body = self.rfile.read(n) if n else b""
+        with LOCK:
+            STATE["requests"][u.path] = STATE["requests"].get(u.path, 0) + 1
+        if u.path == "/server/files/upload":
+            name, data = multipart_file(self.headers.get("Content-Type", ""), body)
+            if not name:
+                return reply(self, 400, {"error": {"code": 400, "message": "no file in the upload"}})
+            with LOCK:
+                STATE["files"][name] = len(data)
+                STATE["uploads"] += 1
+            return reply(self, 201, {"result": {"item": {"path": name, "root": "gcodes"}, "action": "create_file"}})
+        if u.path == "/printer/print/start":
+            name = q.get("filename", "")
+            with LOCK:
+                if name not in STATE["files"]:
+                    return reply(self, 404, {"error": {"code": 404, "message": "File not found: " + name}})
+                STATE["started"].append(name)
+                STATE["current"] = name
+                STATE["state"] = "printing"
+            return reply(self, 200, {"result": "ok"})
+        if u.path == "/printer/gcode/script":
+            return reply(self, 200, {"result": "ok"})
+        return reply(self, 404, {"error": {"code": 404, "message": "Not Found"}})
+
+
+def multipart_file(content_type, body):
+    """The one file part of a multipart/form-data body: (filename, bytes)."""
+    import email.parser, email.policy
+    msg = email.parser.BytesParser(policy=email.policy.HTTP).parsebytes(
+        b"Content-Type: " + content_type.encode() + b"\r\n\r\n" + body)
+    for part in msg.iter_parts():
+        name = part.get_filename()
+        if name:
+            return name, part.get_payload(decode=True) or b""
+    return "", b""
 
 
 class PrinterPort:
@@ -153,6 +212,14 @@ class Control(BaseHTTPRequestHandler):
             with LOCK:
                 STATE["state"] = q.get("state", "standby")
             return reply(self, 200, {"state": STATE["state"]})
+        if u.path == "/fake/files":
+            with LOCK:
+                return reply(self, 200, {"files": dict(STATE["files"]), "started": list(STATE["started"]),
+                                         "uploads": STATE["uploads"]})
+        if u.path == "/fake/reset":
+            with LOCK:
+                STATE.update({"files": {}, "started": [], "uploads": 0, "current": "", "state": "standby"})
+            return reply(self, 200, {"ok": True})
         if u.path == "/fake/stats":
             with LOCK:
                 return reply(self, 200, {"mode": STATE["mode"], "delay": STATE["delay"],

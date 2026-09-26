@@ -90,6 +90,12 @@ bool                merge_device(std::vector<Device>& list, const Device& d);
 // What a stored list looks like once read: cloud endpoints dropped and one entry per id (the first
 // one with a usable address wins), so no two cards - and no two status slots - share an id.
 std::vector<Device> sanitize(const std::vector<Device>& raw);
+// The LAN card a connection address belongs to: the PC's Device tab connects a U1 over MQTT at
+// "<ip>:<port>", and this finds the printer in `list` that answers HTTP on the same host. False for
+// a cloud broker (a cloud-bound U1 has no LAN identity from its connection alone) or no match.
+bool                match_host(const std::vector<Device>& list, const std::string& address, Device& out);
+// The same against the stored list (devices()).
+bool                device_for_host(const std::string& address, Device& out);
 
 // ---- online / offline ----
 //
@@ -185,6 +191,9 @@ bool upload(const Device& d, const std::string& source_path, const std::string& 
             std::function<void(int)> progress, std::string& error);
 // GET /server/files/metadata?filename= - proof that the file really landed.
 bool metadata(const Device& d, const std::string& filename, long long& size, std::string& error);
+// The file is still on the printer, byte for byte as far as a size can tell: what lets a reprint
+// start it in place instead of uploading it again. `expected_size` <= 0 accepts any size.
+bool file_on_printer(const Device& d, const std::string& filename, long long expected_size);
 // POST /printer/print/start?filename= - the whole file as it was sliced, no mapping.
 bool start_print(const Device& d, const std::string& filename, std::string& error);
 

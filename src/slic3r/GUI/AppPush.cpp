@@ -377,6 +377,9 @@ static std::string plaintext_for(const json& e)
     }
     if (e.is_object() && e.contains("id") && e["id"].is_number_integer()) p["id"] = e["id"];
     if (e.is_object() && e.contains("time") && e["time"].is_number_integer()) p["time"] = e["time"];
+    // The stable id (<hub instance>-<id>): the app keys its history on it, so the pushed copy and
+    // the pulled copy of one event are one row even across a data-dir reset or a second hub.
+    if (e.is_object() && e.contains("uid") && e["uid"].is_string()) p["uid"] = e["uid"];
     std::string out = p.dump();
     if (out.size() > MAX_PLAINTEXT) {
         p["body"] = body.substr(0, 400);

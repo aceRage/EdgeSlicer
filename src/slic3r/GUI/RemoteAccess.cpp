@@ -2071,6 +2071,10 @@ RemoteAccess::ApiResponse RemoteAccess::api_info()
     // <id>/thumbnail.png): the sidecars are plain files, but only an instance knows which
     // folder the preference points at. A path on this PC, and this API is loopback-only.
     j["archive_dir"] = GcodeArchive::dir();
+    // And whether it is on, and how many records it keeps, so the hub can list the archive itself
+    // (GET /r/<token>/api/archive) with the same "storing is off" note the instance's own list has.
+    j["archive_enabled"] = GcodeArchive::enabled();
+    j["archive_max"]     = GcodeArchive::max_records();
     j["needs_attention"]  = m_needs_attention;
     j["attention_reason"] = m_attention_reason;
     j["attention_kind"]   = m_attention_kind;

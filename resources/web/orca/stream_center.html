@@ -307,6 +307,8 @@ body.dragging .cell iframe, body.dragging .cell img { pointer-events: none; }
 .view .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
 .view .chips .f { padding: 5px 11px; border-radius: 14px; background: var(--chip2); color: var(--fg5); font-size: 12px; cursor: pointer; user-select: none; }
 .view .chips .f.on { background: #0a9e50; color: #fff; }
+.rpmore { display: flex; justify-content: center; padding: 6px 0 14px; }
+.rpnote { color: var(--mute2); font-size: 12px; text-align: center; padding: 2px 6px 8px; }
 .rp { display: flex; gap: 10px; align-items: center; background: var(--panel2); border-radius: 8px; padding: 8px 10px; margin-bottom: 8px; cursor: pointer; }
 .rp .th { width: 56px; height: 56px; flex: none; border-radius: 6px; background: var(--well); object-fit: contain; }
 .rp .noth { width: 56px; height: 56px; flex: none; border-radius: 6px; background: var(--sunk); color: var(--faint2); display: flex; align-items: center; justify-content: center; font-size: 11px; }
@@ -1650,6 +1652,12 @@ html[data-embed] #conn, html[data-embed] #via, html[data-embed] .pushbox { displ
     // author has not thought to chase down by hand. ResizeObserver callbacks run after layout, so
     // offsetHeight here is always the settled value, never a mid-reflow one.
     if (window.ResizeObserver) new ResizeObserver(syncBarH).observe(document.getElementById('topbar'));
+    // Drop every camera tile (and so its stream). render() builds them again on the Streams view.
+    function stopTiles() {
+        var grid = document.getElementById('grid');
+        if (!grid) return;
+        Array.prototype.slice.call(grid.children).forEach(function(cell) { cell.remove(); });
+    }
     function render() {
         var chips = document.getElementById('chips');
         chips.innerHTML = '';
@@ -1710,6 +1718,12 @@ html[data-embed] #conn, html[data-embed] #via, html[data-embed] .pushbox { displ
             chips.appendChild(c);
         });
 
+        // The phone page's other views never show the cameras, so they must not start them: every
+        // tile is a live stream (an iframe with its own WebRTC / MSE connection), and the app
+        // opens this page once per tab. A Reprint tab that quietly ran every camera behind its
+        // list competed with the Stream tab for the same cameras and for the handful of
+        // connections a WebView keeps per host - the list's own requests queued behind them.
+        if (REMOTE && view !== 'streams') { stopTiles(); return; }
         var lay = cellCount(state.layout);
         document.getElementById('cols').value = lay.cols;
         document.getElementById('rows').value = lay.rows;
@@ -2047,6 +2061,7 @@ html[data-embed] #conn, html[data-embed] #via, html[data-embed] .pushbox { displ
         document.getElementById('layoutbox').style.display = v === 'streams' ? '' : 'none';
         renderVideoBox();
         if (v === 'streams') render(); // tile sizes come from the grid's on-screen size
+        else if (REMOTE) stopTiles();
         // Hiding/showing the camera chips row just changed #topbar's height (fewer rows outside
         // Streams); every .view reads --bar-h to know where it starts, so it has to be recomputed
         // right here and not only from render()/resize - otherwise switching to Reprints without
@@ -2055,7 +2070,9 @@ html[data-embed] #conn, html[data-embed] #via, html[data-embed] .pushbox { displ
         if (viewTimer) { clearInterval(viewTimer); viewTimer = null; }
         if (v === 'prepare') { lastPresetsJson = ''; refreshInstances(refreshPrepare); viewTimer = setInterval(function() { if (!edgePaused) refreshInstances(refreshPrepare); }, 10000); }
         if (v === 'devices') { refreshEvents(); refreshInstances(refreshDevices); viewTimer = setInterval(function() { if (!edgePaused) { refreshEvents(); refreshInstances(refreshDevices); } }, 5000); }
-        if (v === 'reprints') { rpJson = ''; refreshInstances(refreshReprints); viewTimer = setInterval(function() { if (!edgePaused) refreshInstances(refreshReprints); }, 15000); }
+        // The list comes from the hub itself and is drawn as soon as it answers; the windows are
+        // asked alongside, only because sending a stored file again needs one.
+        if (v === 'reprints') { rpJson = ''; refreshReprints(); refreshInstances(rpInstancesKnown); viewTimer = setInterval(function() { if (!edgePaused) { refreshReprints(); refreshInstances(rpInstancesKnown); } }, 15000); }
         try { localStorage.setItem('snorca_remote_view', v); } catch (e) {}
     }
     function el(tag, cls, text) {
@@ -3755,6 +3772,31 @@ html[data-embed] #conn, html[data-embed] #via, html[data-embed] .pushbox { displ
     // GET /api/archive lists them, POST /api/archive/{id}/send replays one, and the job it answers
     // with is followed exactly like a plate send's. ----
     var rpRecords = [], rpFilter = '', rpJson = '', rpState = null;
+    // The list is paged: RP_PAGE rows first, "Show more" for the next RP_PAGE. A poll re-reads the
+    // rows already on screen (rpShown) in one request, so paging and polling never disagree.
+    var RP_PAGE = 30, RP_TIMEOUT_MS = 12000, rpShown = RP_PAGE, rpReq = 0, rpPrinters = [], rpLast = null, rpInstKnown = false;
+    function rpSig(j) { return JSON.stringify([j.enabled, j.max, j.total, rpFilter, rpInstKnown && !instSel, rpRecords]); }
+    // The windows answered: whether one is open decides the "needs EdgeSlicer open" note and the
+    // Reprint button, so the list is redrawn if that changed - and only then.
+    function rpInstancesKnown() {
+        rpInstKnown = true;
+        if (view !== 'reprints' || !rpLast) return;
+        var sig = rpSig(rpLast);
+        if (sig !== rpJson) { rpJson = sig; rpRender(rpLast); }
+    }
+    // fetch() with a deadline. A request the hub never answers (the PC asleep mid-request, a
+    // tunnel that dropped) used to leave the tab blank for good: now it fails, and says so.
+    function fetchT(url, opts, ms) {
+        opts = opts || {};
+        var ctl = (typeof AbortController === 'function') ? new AbortController() : null;
+        if (ctl) opts.signal = ctl.signal;
+        var timer = setTimeout(function() { if (ctl) ctl.abort(); }, ms || RP_TIMEOUT_MS);
+        return fetch(url, opts).then(jsonOf).then(function(j) { clearTimeout(timer); return j; }, function(e) {
+            clearTimeout(timer);
+            if (e && e.name === 'AbortError') throw new Error('the PC did not answer within ' + Math.round((ms || RP_TIMEOUT_MS) / 1000) + ' s');
+            throw e;
+        });
+    }
     function rpWhen(sec) {
         var d = Math.floor(Date.now() / 1000 - (sec || 0));
         if (d < 0) d = 0;
@@ -3778,70 +3820,90 @@ html[data-embed] #conn, html[data-embed] #via, html[data-embed] .pushbox { displ
     // A reprint replays the record's own mode: an upload stays an upload, a print stays a print.
     function rpCanSend(rec) {
         var k = rpPrinter(rec).kind;
-        return rec.exists !== false && (k === 'snapmaker' || k === 'printhost');
+        return !!instSel && rec.exists !== false && (k === 'snapmaker' || k === 'printhost');
     }
     function rpWhyNot(rec) {
         if (rec.exists === false) return 'The stored file is gone - retention removed it, or the archive folder moved.';
+        if (!instSel) return 'Sending a stored file again needs EdgeSlicer open on the PC. Open it there, and this button comes on.';
         var k = rpPrinter(rec).kind;
         if (k === 'bambu') return 'Reprinting to a Bambu printer is not supported yet. Send that plate from the Prepare tab.';
         if (k === 'connect') return 'This one went out over the PC\u2019s own connection; send it from the Prepare tab.';
         return 'This record cannot be sent again.';
     }
-    function refreshReprints() {
-        var root = document.getElementById('reprints');
-        if (!instSel) {
-            root.innerHTML = '';
-            root.appendChild(el('div', 'empty', 'No slicer is open on the PC. The stored files are listed by the slicer.'));
-            rpJson = '';
-            return;
+    function rpStatus(root, text, retry) {
+        root.innerHTML = '';
+        var box = el('div', 'empty', text);
+        if (retry) {
+            var again = el('div', 'rpmore');
+            var b = el('span', 'btn', 'Try again');
+            b.onclick = function() { rpJson = ''; refreshReprints(); };
+            again.appendChild(b);
+            box.appendChild(again);
         }
-        api('/archive').then(function(j) {
+        root.appendChild(box);
+    }
+    // `more`: the "Show more" button - the rows on screen plus the next page.
+    function refreshReprints(more) {
+        var root = document.getElementById('reprints');
+        var want = more ? rpShown + RP_PAGE : Math.max(RP_PAGE, rpShown);
+        // Nothing drawn yet (first open, or after an error): say that it is on its way.
+        if (!rpJson) rpStatus(root, 'Loading stored files\u2026', false);
+        var my = ++rpReq;
+        var q = '?offset=0&limit=' + want + (rpFilter ? '&printer=' + encodeURIComponent(rpFilter) : '');
+        fetchT(REMOTE + 'api/archive' + q).then(function(j) {
+            if (my !== rpReq) return; // a newer request (a filter tap, "Show more") owns the list
+            rpShown = want;
             rpRecords = j.records || [];
-            var sig = JSON.stringify([!!j.enabled, j.max, rpFilter, rpRecords]);
+            rpPrinters = j.printers || [];
+            rpLast = j;
+            var sig = rpSig(j);
             if (sig === rpJson) return; // nothing moved: leave the list, and the scroll, alone
             rpJson = sig;
             rpRender(j);
         }).catch(function(e) {
-            root.innerHTML = '';
-            root.appendChild(el('div', 'empty', 'Cannot reach the slicer: ' + e.message));
-            rpJson = '';
+            if (my !== rpReq) return;
+            if (rpJson) return; // a list is already on screen: keep it, the next poll tries again
+            rpStatus(root, 'Could not load the stored files: ' + (e.message || e), true);
         });
     }
     function rpRender(j) {
         var root = document.getElementById('reprints');
         root.innerHTML = '';
-        if (!j.enabled) {
+        if (j.enabled === false) {
             root.appendChild(el('div', 'empty', 'Storing G-code files is off. Turn on Preferences \u203a Ultra \u203a Store G-Code Files on the PC, and every file sent to a printer from then on can be sent again from here.'));
             if (!rpRecords.length) return;
         }
-        // One chip per printer these files went to, in the order the list has them.
-        var seen = {}, order = [];
-        rpRecords.forEach(function(r) {
-            var p = rpPrinter(r);
-            if (!p.id || seen[p.id]) return;
-            seen[p.id] = p;
-            order.push(p);
-        });
-        if (order.length > 1) {
+        // One chip per printer these files went to, across the whole archive - not only the
+        // page loaded so far - in the order the list has them.
+        if (rpPrinters.length > 1) {
             var chips = el('div', 'chips');
             var all = el('span', 'f' + (rpFilter ? '' : ' on'), 'All');
-            all.onclick = function() { rpFilter = ''; rpJson = ''; refreshReprints(); };
+            all.onclick = function() { rpFilter = ''; rpShown = RP_PAGE; rpJson = ''; refreshReprints(); };
             chips.appendChild(all);
-            order.forEach(function(p) {
+            rpPrinters.forEach(function(p) {
                 var c = el('span', 'f' + (rpFilter === p.id ? ' on' : ''), p.name || p.id);
-                c.onclick = function() { rpFilter = (rpFilter === p.id ? '' : p.id); rpJson = ''; refreshReprints(); };
+                c.onclick = function() { rpFilter = (rpFilter === p.id ? '' : p.id); rpShown = RP_PAGE; rpJson = ''; refreshReprints(); };
                 chips.appendChild(c);
             });
             root.appendChild(chips);
         }
-        var rows = rpRecords.filter(function(r) { return !rpFilter || rpPrinter(r).id === rpFilter; });
-        if (!rows.length) {
-            root.appendChild(el('div', 'empty', rpRecords.length
+        if (rpInstKnown && !instSel && rpRecords.length)
+            root.appendChild(el('div', 'rpnote', 'EdgeSlicer is not open on the PC: the stored files are listed, and sending one again needs it open.'));
+        if (!rpRecords.length) {
+            root.appendChild(el('div', 'empty', rpFilter
                 ? 'Nothing stored for that printer.'
                 : 'Nothing stored yet. Every file the PC sends to a printer lands here, and can be sent again without the project being open.'));
             return;
         }
-        rows.forEach(function(rec) { root.appendChild(rpSwipeWrap(rpRow(rec), rec)); });
+        rpRecords.forEach(function(rec) { root.appendChild(rpSwipeWrap(rpRow(rec), rec)); });
+        var left = (j.total || 0) - rpRecords.length;
+        if (left > 0) {
+            var more = el('div', 'rpmore');
+            var b = el('span', 'btn alt', 'Show ' + Math.min(RP_PAGE, left) + ' more (' + left + ' left)');
+            b.onclick = function() { b.textContent = 'Loading\u2026'; refreshReprints(true); };
+            more.appendChild(b);
+            root.appendChild(more);
+        }
     }
     // Swipe-left to delete, on touch screens only. The row is put in a clipping frame over a
     // Delete panel and follows the finger; past a third of the panel it stays open, otherwise it
@@ -3927,7 +3989,10 @@ html[data-embed] #conn, html[data-embed] #via, html[data-embed] .pushbox { displ
             img.className = 'th';
             img.alt = '';
             img.loading = 'lazy';
-            img.src = instBase() + 'api/archive/' + encodeURIComponent(rec.id) + '/thumbnail.png';
+            img.decoding = 'async';
+            // From the hub, not through a slicer window: a record's preview never changes, so the
+            // hub lets the WebView keep it, and scrolling back up costs nothing.
+            img.src = REMOTE + 'api/archive/' + encodeURIComponent(rec.id) + '/thumbnail.png';
             img.onerror = function() { var n = el('div', 'noth', 'no preview'); if (img.parentNode) img.parentNode.replaceChild(n, img); };
             row.appendChild(img);
         } else {
@@ -3937,7 +4002,9 @@ html[data-embed] #conn, html[data-embed] #via, html[data-embed] .pushbox { displ
         body.appendChild(el('div', 'name', rpName(rec)));
         var p = rpPrinter(rec);
         var bits = [(p.name || p.id || 'unknown printer') + (p.kind ? ' \u00b7 ' + rpKind(p.kind) : ''), rpWhen(rec.time), rpSize(rec.size)];
-        if (rec.mode === 'print') bits.push('printed');
+        // An upload made to start later is worth saying so: it is the one the person may want to
+        // start from here.
+        bits.push(rec.mode === 'print' ? 'printed' : 'uploaded, not started');
         if (rec.exists === false) bits.push('file gone');
         body.appendChild(el('div', 'meta', bits.join(' \u00b7 ')));
         var fils = rec.filaments || [];
@@ -4025,18 +4092,26 @@ html[data-embed] #conn, html[data-embed] #via, html[data-embed] .pushbox { displ
         if (s.phase === 'view') {
             var acts = el('div', 'actions');
             var can = rpCanSend(rec);
-            var go = el('span', 'btn' + (can ? (s.mode === 'print' ? ' warn' : '') : ' dim'),
-                        'Reprint to ' + (p.name || p.id || 'the printer'));
-            go.onclick = function() { if (can) { s.phase = 'confirm'; rpRenderSheet(); } };
+            var uploadOnly = rec.mode !== 'print';
+            // An upload that was never started offers the start first: the printer usually still
+            // has the file, and then it is started in place rather than uploaded again.
+            var go = el('span', 'btn' + (can ? ' warn' : ' dim'),
+                        (uploadOnly ? 'Start print on ' : 'Reprint to ') + (p.name || p.id || 'the printer'));
+            go.onclick = function() { if (can) { s.mode = 'print'; s.phase = 'confirm'; rpRenderSheet(); } };
             acts.appendChild(go);
+            if (uploadOnly) {
+                var again = el('span', 'btn' + (can ? ' alt' : ' dim'), 'Upload again');
+                again.onclick = function() { if (can) { s.mode = 'upload'; s.phase = 'confirm'; rpRenderSheet(); } };
+                acts.appendChild(again);
+            }
             var del = el('span', 'btn stop', 'Delete');
             del.onclick = function() { s.phase = 'trash'; rpRenderSheet(); };
             acts.appendChild(del);
             body.appendChild(acts);
             body.appendChild(el('div', 'info' + (can ? '' : ' warn'), can
-                ? (s.mode === 'print'
-                    ? 'The stored file goes back to that printer under the same name and starts, with the toolheads it used last time. Nothing is re-sliced.'
-                    : 'The stored file goes back to that printer under the same name, without starting it. Nothing is re-sliced.')
+                ? (uploadOnly
+                    ? 'Uploaded without starting. Start print runs the file the printer already has when it is still there (else the stored copy goes back first), with the toolheads it was sent with. Nothing is re-sliced.'
+                    : 'The file starts on that printer again, with the toolheads it used last time: the copy the printer still has when it is there, else the stored one, uploaded again. Nothing is re-sliced.')
                 : rpWhyNot(rec)));
         } else if (s.phase === 'confirm') {
             var c = el('div', 'confirm');
@@ -4319,6 +4394,15 @@ html[data-embed] #conn, html[data-embed] #via, html[data-embed] .pushbox { displ
     }
 
     load();
+    if (REMOTE) {
+        // The view this page opens on, known before the first render(): opened straight onto
+        // Prepare, Devices or Reprints (the app's Slice and Reprint tabs), it starts no cameras.
+        try {
+            var v0 = localStorage.getItem('snorca_remote_view') || 'streams';
+            if (v0 === 'prepare' || v0 === 'devices' || v0 === 'reprints') view = v0;
+            else if (v0 === 'plates') view = 'prepare';
+        } catch (e) {}
+    }
     // Default: first host active in the default single-stream layout.
     if (state.active.length === 0 && state.hosts.length > 0) state.active = [state.hosts[0].id];
     save();

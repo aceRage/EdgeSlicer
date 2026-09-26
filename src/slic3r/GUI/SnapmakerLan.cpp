@@ -259,6 +259,28 @@ bool merge_device(std::vector<Device>& list, const Device& d)
     return true;
 }
 
+bool match_host(const std::vector<Device>& list, const std::string& address, Device& out)
+{
+    std::string host = host_of(address);
+    if (host.empty() || is_cloud_host(host)) return false;
+    for (char& c : host) c = (char) std::tolower((unsigned char) c);
+    for (const Device& d : list) {
+        std::string ip = host_of(d.ip);
+        for (char& c : ip) c = (char) std::tolower((unsigned char) c);
+        if (!ip.empty() && ip == host) { out = d; return true; }
+    }
+    return false;
+}
+
+bool device_for_host(const std::string& address, Device& out)
+{
+    try {
+        return match_host(devices(), address, out);
+    } catch (...) {
+        return false;
+    }
+}
+
 std::vector<Device> sanitize(const std::vector<Device>& raw)
 {
     std::vector<Device> out;
@@ -1291,6 +1313,15 @@ bool start_print_mapped(const Device& d, const std::string& filename, const std:
         return false;
     }
     return true;
+}
+
+bool file_on_printer(const Device& d, const std::string& filename, long long expected_size)
+{
+    if (filename.empty()) return false;
+    long long   size = 0;
+    std::string error;
+    if (!metadata(d, filename, size, error)) return false;
+    return expected_size <= 0 || size == expected_size;
 }
 
 bool start_print(const Device& d, const std::string& filename, std::string& error)

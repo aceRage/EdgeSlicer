@@ -7,6 +7,8 @@
 #include "RemoteNotify.hpp"
 #include "WebPush.hpp"
 #include "AppPush.hpp"
+#include "HubEventDedupe.hpp"
+#include "HubPushOwner.hpp"
 #include "HMS.hpp"
 #include "libslic3r/Utils.hpp"
 #include "slic3r/Utils/Http.hpp"
@@ -697,6 +699,24 @@ static void respond(tcp::socket& s, int status, const std::string& type, const s
 }
 
 static void respond_json(tcp::socket& s, int status, const std::string& body) { respond(s, status, "application/json", body); }
+
+// A 200 the phone may keep: an archive record's preview, which never changes under its URL. The
+// same headers as respond() except the cache line (private: the URL carries the phone's token).
+static void respond_cacheable(tcp::socket& s, const std::string& type, const std::string& body)
+{
+    std::ostringstream o;
+    o << "HTTP/1.1 200 OK\r\n"
+      << "Content-Type: " << type << "\r\n"
+      << "Content-Length: " << body.size() << "\r\n"
+      << "Cache-Control: private, max-age=604800, immutable\r\n"
+      << "X-Content-Type-Options: nosniff\r\n"
+      << "Referrer-Policy: no-referrer\r\n"
+      << "Connection: close\r\n\r\n"
+      << body;
+    write_all(s, o.str());
+    boost::system::error_code ig;
+    s.shutdown(tcp::socket::shutdown_send, ig);
+}
 
 // Make the upstream close after this response (unless it is a WebSocket upgrade), so the
 // browser cannot reuse the spliced connection for a request that belongs to us.
@@ -2013,6 +2033,15 @@ private:
     void load_printers();        // start(): the last-known printer status from the last run
     void save_printers_locked(); // m_mutex held
     std::string archive_dir();   // where the G-code archive keeps its sidecars (see m_archive_dir)
+public:
+    // The G-code archive as the Reprint tab lists it, read by the hub itself: one page of records,
+    // newest first, from a cached pass over the sidecars. No slicer window is involved, so the
+    // list answers with every window closed and does not wait on a window that is busy.
+    json        archive_page_json(const std::string& printer, int offset, int limit);
+    // One record's preview, by the record's own id; "" = none.
+    std::string archive_thumbnail(const std::string& id);
+private:
+    std::vector<json> archive_records(); // every record, newest first; cached (see m_archive_cache)
     json  info_json();
     json  instances_json();
     void  write_hub_json();
@@ -2109,6 +2138,18 @@ private:
     // a thumbnail still resolves after the window that told us closed; empty falls back to
     // <datadir>/gcode_archive, which is the archive's own default.
     std::string                    m_archive_dir;
+    // What the instances last said about the archive (/api/info): on (1) or off (0), -1 before any
+    // window has said; and how many records it keeps. Read again once a minute.
+    int                            m_archive_enabled { -1 };
+    int                            m_archive_max { 0 };
+    long long                      m_archive_info_at { 0 };
+    // The parsed sidecars, and what the folder looked like when they were read (its entry count
+    // and its newest write time). A list request reuses them until the folder changes or they
+    // are ARCHIVE_CACHE_MS old, so opening the Reprint tab is one small read, not a hundred.
+    std::vector<json>              m_archive_cache;
+    std::string                    m_archive_cache_sig;
+    long long                      m_archive_cache_at { 0 };
+    std::mutex                     m_archive_mutex; // the cache only; never held with m_mutex
     std::string                    m_hub_instance; // this data dir's hub uuid (settings.json)
     // How many phone links this data dir has ever had, 1 for the first. It has to be its own
     // counter rather than the number of remembered old tokens, because that list is capped at
@@ -2318,6 +2359,14 @@ static bool one_of(const std::string& v, std::initializer_list<const char*> allo
     return false;
 }
 
+// This process's claims on the printers whose notifications it sends (HubPushOwner). One per
+// process: there is one hub per process, and the claims live exactly as long as it does.
+static HubPushOwner& push_owner()
+{
+    static HubPushOwner owner;
+    return owner;
+}
+
 void HubServer::accept_event(json& event)
 {
     // Normalise before anything else: the kinds and severities are a closed set (the P4/P5
@@ -2333,6 +2382,12 @@ void HubServer::accept_event(json& event)
     const std::string code = clip(event, "code", 64), job = clip(event, "job", 200);
     if (!code.empty()) e["code"] = code;
     if (!job.empty()) e["job"] = job;
+    // The printer's own job id, when the watcher had one: it is what tells "the same print, seen
+    // again" from "the same file, printed again" (HubEventDedupe), and the app keeps it.
+    {
+        const std::string job_id = clip(event, "job_id", 64);
+        if (!job_id.empty() && job_id != "0") e["job_id"] = job_id;
+    }
     e["instance"] = event.is_object() && event.contains("instance") && event["instance"].is_number_integer()
                         ? event["instance"].get<long long>() : 0LL;
     json p = json::object();
@@ -2354,29 +2409,25 @@ void HubServer::accept_event(json& event)
         const long long now_ms = (long long) std::chrono::duration_cast<std::chrono::milliseconds>(
                                      std::chrono::system_clock::now().time_since_epoch()).count();
         // Every slicer window watches the same printers and each one reports what it sees, so a
-        // print start arrived once per open window ("started" twice, 10 s apart, 2026-09-06).
-        // The same printer, kind and job inside two minutes FROM ANOTHER WINDOW is the same
-        // event: answer with the stored one and send nothing again. The same window repeating
-        // itself is not filtered: its watcher only reports edges, so a repeat from it is a real
-        // second event (paused, resumed, paused again), and the synthetic events the gates post
-        // all come from one instance id.
-        const std::string pid      = p.value("id", std::string());
-        const long long   instance = e.value("instance", 0LL);
-        for (auto it = m_events.rbegin(); it != m_events.rend(); ++it) {
-            const json& o = *it;
-            if (now_ms - o.value("time", 0LL) > 120000) break;
-            if (o.value("instance", 0LL) != instance &&
-                o.value("kind", std::string()) == e["kind"].get<std::string>() &&
-                o.value("job", std::string()) == e.value("job", std::string()) &&
-                o.contains("printer") && o["printer"].value("id", std::string()) == pid) {
-                event = o;
-                BOOST_LOG_TRIVIAL(info) << "RemoteHub: event " << e["kind"].get<std::string>() << " on " << pid
-                                        << " repeated within 2 min by another window - not stored again";
-                return;
-            }
+        // print start arrived once per open window ("started" twice, 10 s apart, 2026-09-06), and
+        // an HMS code once per window that had a LAN session at the time. HubEventDedupe says
+        // whether this is one the ring already holds - one start per job until the job ends, one
+        // error per code for half an hour, the rest inside two minutes, and only across windows:
+        // a window's own watcher reports edges, so a repeat from the same window is real. The
+        // answer is the stored event, and nothing is sent again.
+        const std::string pid = p.value("id", std::string());
+        const int         dup = HubEventDedupe::find_duplicate(m_events, e, now_ms);
+        if (dup >= 0) {
+            event = m_events[(size_t) dup];
+            if (!event.contains("uid") && event.contains("id") && event["id"].is_number_integer())
+                event["uid"] = HubEventDedupe::uid(m_hub_instance, event["id"].get<long long>());
+            BOOST_LOG_TRIVIAL(info) << "RemoteHub: event " << e["kind"].get<std::string>() << " on " << pid
+                                    << " repeats stored event " << event.value("id", 0) << " from another window - not stored or sent again";
+            return;
         }
         e["id"]   = ++m_next_event_id;
         e["time"] = now_ms;
+        e["uid"]  = HubEventDedupe::uid(m_hub_instance, e["id"].get<long long>());
         m_events.push_back(e);
         while (m_events.size() > MAX_EVENTS) m_events.pop_front();
         save_events_locked();
@@ -2387,12 +2438,23 @@ void HubServer::accept_event(json& event)
     }
     event = e; // the caller answers with what was really stored
 
-    // P5 (relay notifications) sends from here: one call with `e`, off this thread.
+    // P5 (relay notifications) sends from here: one call with `e`, off this thread - unless another
+    // hub on this PC already sends this printer's notifications (HubPushOwner). The event stays in
+    // this hub's ring either way; only the delivery is skipped, so one printer is one notification
+    // however many EdgeSlicer data dirs are running.
     update_notify_link();
-    RemoteNotify::deliver(e); // queued; this thread never waits on a relay
+    bool              deliver_it = true;
+    const std::string printer_id = p.value("id", std::string());
+    if (HubPushOwner::claimable_kind(p.value("kind", std::string())) && !printer_id.empty() && RemoteNotify::has_destinations()) {
+        deliver_it = push_owner().claim(printer_id);
+        if (!deliver_it)
+            BOOST_LOG_TRIVIAL(info) << "RemoteHub: event " << id << " on " << printer_id
+                                    << " stored, not sent: another EdgeSlicer hub on this PC sends that printer's notifications";
+    }
+    if (deliver_it) RemoteNotify::deliver(e); // queued; this thread never waits on a relay
 
     // On the PC: anything that went wrong, and the one piece of good news worth interrupting for.
-    if (sev == "warning" || sev == "error" || e["kind"] == "finished")
+    if (deliver_it && (sev == "warning" || sev == "error" || e["kind"] == "finished"))
         if (BalloonFn show = balloon_fn()) show(title, text, sev);
     BOOST_LOG_TRIVIAL(info) << "RemoteHub: event " << id << " " << e["kind"].get<std::string>() << " on "
                             << p.value("id", std::string()) << ": " << title;
@@ -2404,7 +2466,13 @@ json HubServer::events_json(int since)
     out["events"] = json::array();
     std::lock_guard<std::mutex> lock(m_mutex);
     for (const json& e : m_events)
-        if (e.value("id", 0) > since) out["events"].push_back(e);
+        if (e.value("id", 0) > since) {
+            json row = e;
+            // Stored before events carried one: the same value the hub would have given it.
+            if (!row.contains("uid") && row.contains("id") && row["id"].is_number_integer())
+                row["uid"] = HubEventDedupe::uid(m_hub_instance, row["id"].get<long long>());
+            out["events"].push_back(row);
+        }
     out["last_id"] = m_next_event_id;
     // Which hub these ids belong to. A data dir's hub keeps this for ever; a fresh one mints a new
     // value, and that - not an id that went backwards - is how a client detects the reset.
@@ -2534,7 +2602,7 @@ void HubServer::poll_printers()
     bool need_dir;
     {
         std::lock_guard<std::mutex> lock(m_mutex);
-        need_dir = m_archive_dir.empty();
+        need_dir = m_archive_dir.empty() || now_millis() - m_archive_info_at > 60000;
     }
     if (need_dir) {
         for (const Instance& inst : live) {
@@ -2546,11 +2614,22 @@ void HubServer::poll_printers()
                 .on_error([&](std::string, std::string, unsigned) {})
                 .perform_sync();
             std::string dir;
-            try { dir = json::parse(body).value("archive_dir", std::string()); } catch (...) {}
+            int         enabled = -1, max = 0;
+            try {
+                const json info = json::parse(body);
+                dir             = info.value("archive_dir", std::string());
+                if (info.contains("archive_enabled") && info["archive_enabled"].is_boolean())
+                    enabled = info["archive_enabled"].get<bool>() ? 1 : 0;
+                max = info.value("archive_max", 0);
+            } catch (...) {}
             if (dir.empty()) continue;
             std::lock_guard<std::mutex> lock(m_mutex);
-            m_archive_dir = dir;
-            save_printers_locked();
+            const bool moved  = m_archive_dir != dir;
+            m_archive_dir     = dir;
+            m_archive_enabled = enabled;
+            m_archive_max     = max;
+            m_archive_info_at = now_millis();
+            if (moved) save_printers_locked();
             break;
         }
     }
@@ -2627,6 +2706,126 @@ std::string HubServer::archive_dir()
         if (!m_archive_dir.empty()) return m_archive_dir;
     }
     return (fs::path(data_dir()) / "gcode_archive").string();
+}
+
+// ---------------------------------------------- the G-code archive, for the Reprint tab ----
+//
+// The Reprint tab used to list the archive through a slicer window: the page asked the hub for
+// the windows (/api/instances, which probes every one of them), then asked the first one for
+// /api/archive, then fetched every preview through the same window. With no window open it said
+// so and listed nothing; with a busy one it waited on it; and it drew nothing at all until every
+// step had answered. The sidecars are plain JSON files in a folder the hub already knows
+// (archive_dir(), the same one the printer thumbnails read), so the hub lists them itself.
+
+static const long long ARCHIVE_CACHE_MS = 30000;
+
+// An archive record id: what GcodeArchive::sanitize() produces. Checked before it goes near a
+// file name, the same alphabet the instance's own routes accept.
+static bool archive_id_ok(const std::string& id)
+{
+    if (id.empty() || id.size() > 200 || id[0] == '.') return false;
+    for (char c : id)
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '-' || c == '_'))
+            return false;
+    return true;
+}
+
+std::vector<json> HubServer::archive_records()
+{
+    const fs::path            root(archive_dir());
+    boost::system::error_code ec;
+    // What the folder looks like right now, cheaply: how many entries and the newest write time.
+    // A new record, a deleted one or a rewritten sidecar all move one of the two.
+    std::string sig = root.string();
+    {
+        size_t      n      = 0;
+        std::time_t newest = fs::is_directory(root, ec) ? fs::last_write_time(root, ec) : 0;
+        if (fs::is_directory(root, ec))
+            for (fs::directory_iterator it(root, ec), end; !ec && it != end; it.increment(ec)) {
+                ++n;
+                boost::system::error_code ig;
+                const std::time_t t = fs::last_write_time(it->path(), ig);
+                if (!ig && t > newest) newest = t;
+            }
+        sig += "|" + std::to_string(n) + "|" + std::to_string((long long) newest);
+    }
+    {
+        std::lock_guard<std::mutex> lock(m_archive_mutex);
+        if (sig == m_archive_cache_sig && now_millis() - m_archive_cache_at < ARCHIVE_CACHE_MS) return m_archive_cache;
+    }
+    std::vector<json> out;
+    if (fs::is_directory(root, ec)) {
+        for (fs::directory_iterator it(root, ec), end; !ec && it != end; it.increment(ec)) {
+            boost::system::error_code ig;
+            if (it->path().extension() != ".json" || !fs::is_regular_file(it->path(), ig)) continue;
+            json j;
+            try { j = json::parse(read_file(it->path().string())); } catch (...) { continue; }
+            if (!j.is_object() || !j.contains("id") || !j["id"].is_string()) continue;
+            const std::string id = j["id"].get<std::string>();
+            if (!archive_id_ok(id)) continue;
+            // Never a path on the PC, exactly as the instance's /api/archive hands them out.
+            j.erase("path");
+            j.erase("project_path");
+            const std::string file = j.value("file", std::string());
+            j["has_thumbnail"] = fs::is_regular_file(root / (id + ".png"), ig);
+            j["exists"]        = !file.empty() && file.find_first_of("/\\") == std::string::npos &&
+                          fs::is_regular_file(root / file, ig);
+            out.push_back(std::move(j));
+        }
+    }
+    std::sort(out.begin(), out.end(), [](const json& a, const json& b) {
+        const long long ta = a.value("time", (long long) 0), tb = b.value("time", (long long) 0);
+        return ta != tb ? ta > tb : a.value("id", std::string()) > b.value("id", std::string());
+    });
+    std::lock_guard<std::mutex> lock(m_archive_mutex);
+    m_archive_cache     = out;
+    m_archive_cache_sig = sig;
+    m_archive_cache_at  = now_millis();
+    return out;
+}
+
+json HubServer::archive_page_json(const std::string& printer, int offset, int limit)
+{
+    const std::vector<json> all = archive_records();
+    json                    j;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (m_archive_enabled >= 0) j["enabled"] = m_archive_enabled == 1;
+        if (m_archive_max > 0) j["max"] = m_archive_max;
+    }
+    // Every printer the records went to, in list order: the page's filter chips, which have to
+    // know about printers whose records are not on the page it has loaded yet.
+    json                  printers = json::array();
+    std::set<std::string> seen;
+    std::vector<const json*> rows;
+    for (const json& r : all) {
+        const json        p  = r.contains("printer") && r["printer"].is_object() ? r["printer"] : json::object();
+        const std::string id = p.value("id", std::string());
+        if (!id.empty() && seen.insert(id).second)
+            printers.push_back({ { "id", id }, { "name", p.value("name", std::string()) }, { "kind", p.value("kind", std::string()) } });
+        if (printer.empty() || id == printer) rows.push_back(&r);
+    }
+    offset = std::max(0, offset);
+    limit  = std::max(1, std::min(200, limit));
+    j["records"] = json::array();
+    for (size_t i = (size_t) offset; i < rows.size() && i < (size_t) offset + (size_t) limit; ++i) j["records"].push_back(*rows[i]);
+    j["total"]       = (long long) rows.size();
+    j["offset"]      = offset;
+    j["limit"]       = limit;
+    j["next_offset"] = (size_t) offset + (size_t) limit < rows.size() ? json((long long) offset + limit) : json(nullptr);
+    j["printers"]    = printers;
+    j["source"]      = "hub";
+    return j;
+}
+
+std::string HubServer::archive_thumbnail(const std::string& id)
+{
+    if (!archive_id_ok(id)) return "";
+    const fs::path            png = fs::path(archive_dir()) / (id + ".png");
+    boost::system::error_code ec;
+    if (!fs::is_regular_file(png, ec)) return "";
+    if (fs::file_size(png, ec) > 8u * 1024 * 1024) return ""; // a preview, not an arbitrary file
+    return read_file(png.string());
 }
 
 // The running job's picture, from the G-code archive: the hub reads the sidecars itself (they are
@@ -4301,6 +4500,8 @@ void HubServer::handle_phone(tcp::socket& client, Request& r, const std::string&
         j["version"] = 2;
         j["routes"]  = json::array({
             { {"method", "GET"},  {"path", "/api/instances"},       {"description", "running slicer instances: id (pid), index, title, project path, slicing"} },
+            { {"method", "GET"},  {"path", "/api/archive[?offset=&limit=&printer={id}]"}, {"description", "the G-code archive, read by the hub (no slicer window needed): {enabled?, max?, total, offset, limit, next_offset, printers [{id, name, kind}], records}, newest first; records are the same rows /i/{id}/api/archive lists. Sending or deleting one still goes through a slicer window (/i/{id}/api/archive/{id}/send)"} },
+            { {"method", "GET"},  {"path", "/api/archive/{id}/thumbnail.png"}, {"description", "one record's preview; cacheable, since a record's preview never changes"} },
             { {"method", "POST"}, {"path", "/api/instances/open"},  {"description", "body = a .3mf/.stl/.obj/.step/.glb file, header X-File-Name = its name; starts a new (hidden) slicer instance with it; ?visible=1 opens a window"} },
             { {"method", "POST"}, {"path", "/i/{id}/open?mode=load|import"}, {"description", "same upload, opened in instance {id}: load = save the current project, then open this project (default for .3mf); import = add the model to the current plate (default otherwise)"} },
             { {"method", "*"},    {"path", "/i/{id}/api/..."},      {"description", "the instance's own API (see GET /i/{id}/api)"} },
@@ -4322,6 +4523,28 @@ void HubServer::handle_phone(tcp::socket& client, Request& r, const std::string&
     if (rest == "/api/instances" && r.method == "GET") {
         respond_json(client, 200, instances_json().dump());
         return;
+    }
+    // The Reprint tab's list, from the hub itself (archive_page_json): no slicer window needed.
+    if (rest == "/api/archive" && r.method == "GET") {
+        const std::string off = query_param(r.query, "offset"), lim = query_param(r.query, "limit");
+        respond_json(client, 200,
+                     archive_page_json(percent_decode(query_param(r.query, "printer")), off.empty() ? 0 : std::atoi(off.c_str()),
+                                       lim.empty() ? 200 : std::atoi(lim.c_str()))
+                         .dump());
+        return;
+    }
+    // GET /api/archive/<id>/thumbnail.png - one record's preview. A record's preview never
+    // changes (a new send is a new record with a new id), so this one may be cached, which is
+    // what makes scrolling back up the list free.
+    if (r.method == "GET" && rest.compare(0, 13, "/api/archive/") == 0) {
+        const std::string tail  = rest.substr(13);
+        const size_t      slash = tail.find('/');
+        if (slash != std::string::npos && tail.substr(slash) == "/thumbnail.png") {
+            const std::string png = archive_thumbnail(tail.substr(0, slash));
+            if (png.empty()) { respond_json(client, 404, json_error("no thumbnail for this record")); return; }
+            respond_cacheable(client, "image/png", png);
+            return;
+        }
     }
     if (rest == "/api/instances/open" && r.method == "POST") {
         // Refuse before reading the upload: there is no point spooling a gigabyte we will not open.
