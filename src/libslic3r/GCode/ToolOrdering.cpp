@@ -1378,6 +1378,13 @@ void ToolOrdering::collect_extruder_statistics(bool prime_multi_material)
         sort_remove_duplicates(m_all_printing_extruders);
     }
 
+    m_last_layer_per_extruder.clear();
+    for (size_t layer_idx = 0; layer_idx < m_layer_tools.size(); ++layer_idx) {
+        for (unsigned int ext : m_layer_tools[layer_idx].extruders) {
+            m_last_layer_per_extruder[ext] = layer_idx;
+        }
+    }
+
     if (prime_multi_material && ! m_all_printing_extruders.empty()) {
         // Reorder m_all_printing_extruders in the sequence they will be primed, the last one will be m_first_printing_extruder.
         // Then set m_first_printing_extruder to the 1st extruder primed.
@@ -2574,6 +2581,28 @@ unsigned int ToolOrdering::resolve_mixed(unsigned int filament_id_1based,
                                             m_mixed_layer_height_b,
                                             m_mixed_base_layer_height,
                                             current_object);
+}
+
+bool ToolOrdering::is_last_extrusion_layer(coordf_t print_z, unsigned int extruder_id) const
+{
+    if (m_layer_tools.empty())
+        // Unknown state: never claim a tool is finished when we have nothing to check against.
+        return false;
+
+    // Resolve print_z to the same LayerTools entry (and therefore the same print-wide
+    // m_layer_tools index) that tools_for_layer() would return, so this stays consistent
+    // regardless of which object's/support's layer produced print_z (multiple objects,
+    // differing layer heights, rafts, ...).
+    const LayerTools &lt = this->tools_for_layer(print_z);
+    size_t cur_layer_idx = size_t(&lt - &m_layer_tools.front());
+
+    auto it = m_last_layer_per_extruder.find(extruder_id);
+    if (it == m_last_layer_per_extruder.end())
+        // This extruder never appears in any LayerTools - we do not know its last use,
+        // so conservatively treat it as still needed (keep it heated) rather than assume
+        // it is finished.
+        return false;
+    return cur_layer_idx >= it->second;
 }
 
 } // namespace Slic3r
