@@ -61,6 +61,9 @@ struct Meta
     // Stage 1d: a Spoolman deduction was asked for after this send (the preference was on and a
     // server was configured). Whether the server accepted it is Spoolman's business, not ours.
     bool        spoolman_deduct { false };
+    // Where the file sits on the printer when the send said so (the U1 pre-print page's
+    // sw_StartLocalPrint "path"): what a reprint starts in place instead of uploading again.
+    std::string remote_path;
 };
 
 // One archived send, as the sidecar holds it.
@@ -104,6 +107,13 @@ Record find(const std::string& id);
 
 // Any thread. Removes the file, its sidecar and its thumbnail. True when the sidecar was there.
 bool remove(const std::string& id);
+
+// A record's mode after the fact: an upload the person then started (on the PC's pre-print page,
+// or from the phone's Reprint tab) becomes a print, and learns where the printer keeps the file
+// when the start said. False when there is no such record or its sidecar could not be rewritten.
+bool set_mode(const std::string& id, const std::string& mode, const std::string& remote_path = "");
+// The same on an explicit folder, with no app config involved (tests).
+bool set_mode_in(const std::string& root_dir, const std::string& id, const std::string& mode, const std::string& remote_path = "");
 
 } // namespace GcodeArchive
 } // namespace GUI

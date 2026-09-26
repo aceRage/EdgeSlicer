@@ -808,14 +808,21 @@ static std::vector<SnapmakerLan::FileFilament> file_filaments_of_record(const js
     return out;
 }
 
-// Which of the four send kinds a printer id names, without asking anything.
-static std::string kind_of_printer(const std::string& id)
+// Which of the four send kinds a printer id names, without asking anything. "ph:<device>" - one of
+// a printer model's print-host devices (Moonraker, PrusaLink, OctoPrint, FlashForge, Elegoo...) -
+// is a print host like the preset's own "host"; it used to fall through to "bambu", so every
+// record sent to such a device was refused a reprint as "sent to a printhost printer and ph:... is
+// a bambu one".
+std::string printer_kind_of(const std::string& id)
 {
     if (id.compare(0, 3, "sm:") == 0) return "snapmaker";
     if (id == "host")                 return "printhost";
+    if (id.compare(0, 3, "ph:") == 0) return "printhost";
     if (id == "connect")              return "connect";
     return "bambu";
 }
+
+static std::string kind_of_printer(const std::string& id) { return printer_kind_of(id); }
 
 std::pair<int, std::string> prepare_from_record(const Request& req, std::shared_ptr<Prepared>& out)
 {
@@ -887,8 +894,18 @@ std::pair<int, std::string> prepare_from_record(const Request& req, std::shared_
         p->lan          = d;
         p->toolheads    = SnapmakerLan::toolheads(d);
         if (!boost::iends_with(name, ".gcode")) name += ".gcode";
+        // Where the printer keeps it, when the send said (the PC's pre-print page names the path
+        // it started): the file a reprint looks for first.
+        std::string remote = j.value("remote_path", std::string());
+        if (remote.compare(0, 7, "gcodes/") == 0) remote = remote.substr(7);
+        while (!remote.empty() && remote.front() == '/') remote.erase(remote.begin());
+        if (!remote.empty() && remote.find("..") == std::string::npos && req.name.empty()) name = remote;
         p->upload.upload_path = fs::path(name);
         p->lan_filename       = name;
+        // Still on the printer, the same size as the archived bytes: start it in place. An upload
+        // made "to start later" is exactly this - the phone starts the file the printer already
+        // has. Anything else (gone, a different size, the printer cannot say) uploads again.
+        p->reuse_remote       = SnapmakerLan::file_on_printer(d, name, rec.size);
         p->file_filaments     = file_filaments_of_record(j);
         // A reprint unloads if the print it replays did. A record written before this existed has
         // no such key and reprints the way it always has.
@@ -926,15 +943,31 @@ std::pair<int, std::string> prepare_from_record(const Request& req, std::shared_
         return { 200, "" };
     }
 
-    // A print host: the address is the PC's current printer preset, which only the GUI thread may
-    // read. Nothing else here touches the plater, so this is the one hop onto it.
+    // A print host: the address is the recorded device's ("ph:<id>", looked up across every printer
+    // model, since the record may be for a printer other than the one the PC has selected now), or
+    // the PC's current printer preset's for a plain "host" record. Presets are GUI-thread state,
+    // so this is the one hop onto it.
     auto host  = std::make_shared<std::shared_ptr<PrintHost>>();
     auto url   = std::make_shared<std::string>();
     auto hname = std::make_shared<std::string>();
     auto rc    = std::make_shared<std::pair<int, std::string>>(200, "");
-    const bool ran = on_main([host, url, hname, rc]() {
+    const std::string device = printer.compare(0, 3, "ph:") == 0 ? printer.substr(3) : std::string();
+    const bool ran = on_main([host, url, hname, rc, device]() {
         PresetBundle* bundle = wxGetApp().preset_bundle;
         if (!bundle) { *rc = { 503, "no preset bundle" }; return; }
+        if (!device.empty()) {
+            for (const auto& kv : PrintHostDevices::all_devices())
+                for (const PrintHostDevices::Device& d : kv.second) {
+                    if (d.id != device || host->get()) continue;
+                    if (d.address.empty()) { *rc = { 409, d.display_name() + " has no address" }; return; }
+                    DynamicPrintConfig dev_cfg = PrintHostDevices::config_for(d, bundle->printers.get_edited_preset().config);
+                    host->reset(PrintHost::get_print_host(&dev_cfg, false));
+                    *url   = d.address;
+                    *hname = d.display_name();
+                }
+            if (!*host) { *rc = { 404, "no such print-host device: ph:" + device }; return; }
+            return;
+        }
         if (bundle->use_bbl_network()) {
             *rc = { 409, "the current printer preset sends through the Bambu network; pick that printer by its id" };
             return;
@@ -950,8 +983,9 @@ std::pair<int, std::string> prepare_from_record(const Request& req, std::shared_
     if (rc->first != 200) return *rc;
 
     p->kind         = "printhost";
-    p->printer_name = *hname + " " + *url;
+    p->printer_name = device.empty() ? *hname + " " + *url : *hname;
     p->host         = *host;
+    p->device_id    = device;
     // The archived file keeps the extension it was sent with, so the payload's form is on disk.
     p->upload.use_3mf = boost::iends_with(rec.file, ".3mf");
     if (mode == "print") {
@@ -1208,14 +1242,21 @@ static void run_snapmaker(std::shared_ptr<Prepared> p, Sink& sink)
         return;
     }
     std::string error;
-    sink.progress(1, "uploading " + p->lan_filename);
-    if (!SnapmakerLan::upload(p->lan, p->upload.source_path.string(), p->lan_filename,
-                              [&sink](int pct) { sink.progress(std::min(95, pct * 95 / 100), "uploading " + std::to_string(pct) + "%"); },
-                              error)) {
-        sink.done(false, error.empty() ? "the upload failed" : error, result);
-        return;
+    if (p->reuse_remote && p->mode == "print") {
+        // A reprint of a file the printer still holds: nothing to upload, start it where it is.
+        result["uploaded"]    = false;
+        result["reused_file"] = true;
+        sink.progress(90, p->lan_filename + " is still on the printer");
+    } else {
+        sink.progress(1, "uploading " + p->lan_filename);
+        if (!SnapmakerLan::upload(p->lan, p->upload.source_path.string(), p->lan_filename,
+                                  [&sink](int pct) { sink.progress(std::min(95, pct * 95 / 100), "uploading " + std::to_string(pct) + "%"); },
+                                  error)) {
+            sink.done(false, error.empty() ? "the upload failed" : error, result);
+            return;
+        }
+        result["uploaded"] = true;
     }
-    result["uploaded"] = true;
     archive_sent(p, p->upload.source_path.string(), result);
     deduct_spoolman(p, result);
     long long size     = 0;
@@ -1240,6 +1281,9 @@ static void run_snapmaker(std::shared_ptr<Prepared> p, Sink& sink)
         sink.done(false, error + " (the file is on the printer)", result);
         return;
     }
+    // An upload made to start later, started now: the record is a print from here on.
+    if (p->from_record && !p->record_id.empty())
+        GcodeArchive::set_mode(p->record_id, "print", p->reuse_remote ? p->lan_filename : std::string());
     // What the printer itself says a moment later - the only proof the job took.
     for (int i = 0; i < 6; ++i) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1500));

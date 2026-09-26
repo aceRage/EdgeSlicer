@@ -87,6 +87,9 @@ struct Prepared
     // run() neither archives them again nor deducts filament for a plate that is not loaded.
     bool        from_record { false };
     std::string record_id;
+    // A reprint to a printer that still holds the file (the same name, the same size): start it
+    // where it is instead of uploading it again. Snapmaker over the LAN only.
+    bool        reuse_remote { false };
     // Stage 1d: after a successful send, ask Spoolman to deduct this plate's filament the way the
     // desktop's own send path does. Decided on the GUI thread in prepare(), where the preference
     // and the Spoolman URL can be read; run() only fires it.
@@ -118,6 +121,10 @@ std::pair<int, std::string> prepare(const Request& req, std::shared_ptr<Prepared
 // it talks to the printer, and only steps onto the GUI thread for the printer preset. Errors as
 // prepare(), plus 409 when the record's file is gone or the target printer is of another kind.
 std::pair<int, std::string> prepare_from_record(const Request& req, std::shared_ptr<Prepared>& out);
+
+// Which send path a printer id names, without asking anything: "sm:<id>" snapmaker, "host" and
+// "ph:<device>" printhost, "connect" connect, anything else a Bambu serial.
+std::string printer_kind_of(const std::string& id);
 
 // Worker thread. The upload / print start (or the dry run); reports through the sink and always
 // ends with sink.done.

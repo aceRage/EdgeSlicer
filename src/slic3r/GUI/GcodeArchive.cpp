@@ -268,6 +268,7 @@ static json meta_json(const Meta& m)
     if (m.estimated_weight_g > 0.0) j["estimated_weight_g"] = m.estimated_weight_g;
     if (!m.mapping.empty())         j["mapping"] = m.mapping;
     if (m.unload_at_end)            j["unload_at_end"] = true;
+    if (!m.remote_path.empty())     j["remote_path"] = m.remote_path;
     j["spoolman_deduct"] = m.spoolman_deduct;
     return j;
 }
@@ -494,6 +495,36 @@ static fs::path sidecar_path_of(const fs::path& root, const std::string& id)
         if (record_from_sidecar(it->path()).id == id) return it->path();
     }
     return direct;
+}
+
+bool set_mode_in(const std::string& root_dir, const std::string& id, const std::string& mode, const std::string& remote_path)
+{
+    if (mode != "upload" && mode != "print") return false;
+    if (id.empty() || id.size() > 200 || id != sanitize(id, 200)) return false;
+    try {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        const fs::path root(root_dir);
+        const fs::path sidecar = sidecar_path_of(root, id);
+        boost::system::error_code ec;
+        if (!fs::is_regular_file(sidecar, ec)) return false;
+        boost::nowide::ifstream f(sidecar.string().c_str(), std::ios::binary);
+        if (!f) return false;
+        std::stringstream ss;
+        ss << f.rdbuf();
+        f.close();
+        json j = json::parse(ss.str());
+        if (!j.is_object() || j.value("id", std::string()) != id) return false;
+        j["mode"] = mode;
+        if (!remote_path.empty()) j["remote_path"] = remote_path;
+        return write_atomic(sidecar, j.dump(2));
+    } catch (...) {
+        return false;
+    }
+}
+
+bool set_mode(const std::string& id, const std::string& mode, const std::string& remote_path)
+{
+    return set_mode_in(dir(), id, mode, remote_path);
 }
 
 bool remove(const std::string& id)

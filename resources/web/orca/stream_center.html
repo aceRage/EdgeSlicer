@@ -4002,7 +4002,9 @@ html[data-embed] #conn, html[data-embed] #via, html[data-embed] .pushbox { displ
         body.appendChild(el('div', 'name', rpName(rec)));
         var p = rpPrinter(rec);
         var bits = [(p.name || p.id || 'unknown printer') + (p.kind ? ' \u00b7 ' + rpKind(p.kind) : ''), rpWhen(rec.time), rpSize(rec.size)];
-        if (rec.mode === 'print') bits.push('printed');
+        // An upload made to start later is worth saying so: it is the one the person may want to
+        // start from here.
+        bits.push(rec.mode === 'print' ? 'printed' : 'uploaded, not started');
         if (rec.exists === false) bits.push('file gone');
         body.appendChild(el('div', 'meta', bits.join(' \u00b7 ')));
         var fils = rec.filaments || [];
@@ -4090,18 +4092,26 @@ html[data-embed] #conn, html[data-embed] #via, html[data-embed] .pushbox { displ
         if (s.phase === 'view') {
             var acts = el('div', 'actions');
             var can = rpCanSend(rec);
-            var go = el('span', 'btn' + (can ? (s.mode === 'print' ? ' warn' : '') : ' dim'),
-                        'Reprint to ' + (p.name || p.id || 'the printer'));
-            go.onclick = function() { if (can) { s.phase = 'confirm'; rpRenderSheet(); } };
+            var uploadOnly = rec.mode !== 'print';
+            // An upload that was never started offers the start first: the printer usually still
+            // has the file, and then it is started in place rather than uploaded again.
+            var go = el('span', 'btn' + (can ? ' warn' : ' dim'),
+                        (uploadOnly ? 'Start print on ' : 'Reprint to ') + (p.name || p.id || 'the printer'));
+            go.onclick = function() { if (can) { s.mode = 'print'; s.phase = 'confirm'; rpRenderSheet(); } };
             acts.appendChild(go);
+            if (uploadOnly) {
+                var again = el('span', 'btn' + (can ? ' alt' : ' dim'), 'Upload again');
+                again.onclick = function() { if (can) { s.mode = 'upload'; s.phase = 'confirm'; rpRenderSheet(); } };
+                acts.appendChild(again);
+            }
             var del = el('span', 'btn stop', 'Delete');
             del.onclick = function() { s.phase = 'trash'; rpRenderSheet(); };
             acts.appendChild(del);
             body.appendChild(acts);
             body.appendChild(el('div', 'info' + (can ? '' : ' warn'), can
-                ? (s.mode === 'print'
-                    ? 'The stored file goes back to that printer under the same name and starts, with the toolheads it used last time. Nothing is re-sliced.'
-                    : 'The stored file goes back to that printer under the same name, without starting it. Nothing is re-sliced.')
+                ? (uploadOnly
+                    ? 'Uploaded without starting. Start print runs the file the printer already has when it is still there (else the stored copy goes back first), with the toolheads it was sent with. Nothing is re-sliced.'
+                    : 'The file starts on that printer again, with the toolheads it used last time: the copy the printer still has when it is there, else the stored one, uploaded again. Nothing is re-sliced.')
                 : rpWhyNot(rec)));
         } else if (s.phase === 'confirm') {
             var c = el('div', 'confirm');
