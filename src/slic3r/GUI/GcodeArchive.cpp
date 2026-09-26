@@ -21,6 +21,8 @@
 #include <openssl/sha.h>
 
 #include <algorithm>
+#include <cctype>
+#include <map>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
