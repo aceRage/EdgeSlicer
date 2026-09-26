@@ -7710,15 +7710,33 @@ void SSWCP::archive_print_once(const std::string& mode, const std::string& remot
     wxGetApp().get_connect_host(host);
     GcodeArchive::Meta am = GcodeArchive::meta_for_plate(-1, mode);
     SnapmakerLan::Device lan;
-    if (host && SnapmakerLan::device_for_host(host->get_host(), lan)) {
+    // The Device-tab entry this connection belongs to: through the Snapmaker cloud the host is the
+    // cloud's MQTT broker, which says nothing about which printer it is, but the entry marked
+    // connected carries the printer's serial and name (RemoteSend's /api/printers picks it the same way).
+    DeviceInfo which;
+    bool       known = false;
+    if (host && wxGetApp().app_config)
+        for (const DeviceInfo& d : wxGetApp().app_config->get_devices()) {
+            if (!d.connected) continue;
+            const bool same_addr = !d.ip.empty() && host->get_host().compare(0, d.ip.size(), d.ip) == 0;
+            if (!known || same_addr) { which = d; known = true; }
+            if (same_addr) break;
+        }
+    if (host && (SnapmakerLan::device_for_host(host->get_host(), lan) ||
+                 (known && !which.sn.empty() && SnapmakerLan::find(which.sn, lan)))) {
+        // Its LAN card, by address or - for a cloud-bound connection - by serial: the LAN wins.
         am.printer_id    = "sm:" + lan.id;
         am.printer_kind  = "snapmaker";
-        am.printer_name  = lan.name.empty() ? lan.ip : lan.name;
-        am.printer_model = lan.model;
+        am.printer_name  = GcodeArchive::display_printer_name(lan.name, lan.model, "snapmaker");
+        // The model the file was sliced for is the preset's (meta_for_plate); the card's only when that is unknown.
+        if (am.printer_model.empty()) am.printer_model = lan.model;
     } else {
         am.printer_id   = "connect";
         am.printer_kind = "connect";
-        am.printer_name = host ? "Snapmaker " + host->get_host() : "Snapmaker";
+        if (am.printer_model.empty() && known) am.printer_model = which.model_name;
+        if (known) am.printer_serial = which.sn;
+        // Never the broker's address: the printer's own name, else its model ("Snapmaker U1").
+        am.printer_name = GcodeArchive::display_printer_name(known ? which.dev_name : "", am.printer_model, "connect");
     }
     am.file_name    = SSWCP::get_display_filename();
     am.remote_path  = remote_path;
