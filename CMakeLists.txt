@@ -113,6 +113,26 @@ option(SLIC3R_MSVC_PDB          "Generate PDB files on MSVC in Release mode" 1)
 option(SLIC3R_PERL_XS           "Compile XS Perl module and enable Perl unit and integration tests" 0)
 option(SLIC3R_ASAN              "Enable ASan on Clang and GCC" 0)
 
+# Unity ("jumbo") build of the two big libraries: CMake compiles their sources in batches of
+# SLIC3R_UNITY_BUILD_BATCH_SIZE files per translation unit, so the common headers are parsed once per
+# batch instead of once per file. Off by default, so CI and the Visual Studio workflow are unchanged.
+# Sources that cannot share a translation unit are listed next to each slic3r_unity_build() call.
+option(SLIC3R_UNITY_BUILD       "Unity (jumbo) build of libslic3r and libslic3r_gui" 0)
+set(SLIC3R_UNITY_BUILD_BATCH_SIZE 8 CACHE STRING "Source files per unity translation unit (SLIC3R_UNITY_BUILD; use 16 with /Z7, see src/slic3r)")
+
+# slic3r_unity_build(<target> [SKIP <source>...]): unity-build <target> when SLIC3R_UNITY_BUILD is on;
+# the SKIP sources keep a translation unit of their own. Call it from the directory that owns the sources.
+function(slic3r_unity_build _target)
+    if (NOT SLIC3R_UNITY_BUILD)
+        return()
+    endif ()
+    cmake_parse_arguments(_UB "" "" "SKIP" ${ARGN})
+    set_target_properties(${_target} PROPERTIES UNITY_BUILD ON UNITY_BUILD_BATCH_SIZE ${SLIC3R_UNITY_BUILD_BATCH_SIZE})
+    if (_UB_SKIP)
+        set_source_files_properties(${_UB_SKIP} PROPERTIES SKIP_UNITY_BUILD_INCLUSION ON)
+    endif ()
+endfunction()
+
 # Sentry crash handling - built in on Windows and macOS by default.
 #
 # This switch builds in the SDK, which starts crashpad, which writes the local minidumps we

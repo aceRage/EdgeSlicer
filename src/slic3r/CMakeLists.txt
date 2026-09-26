@@ -972,7 +972,114 @@ configure_file(${CMAKE_CURRENT_SOURCE_DIR}/GeneratedConfig.hpp.in
                @ONLY)
 
 add_library(libslic3r_gui STATIC ${SLIC3R_GUI_SOURCES})
-if (MSVC AND SLIC3R_MSVC_Z7)
+# -DSLIC3R_UNITY_BUILD=ON: these sources do not survive being merged with their batch neighbours
+# (duplicate file-local names or leaking macros), so they keep their own translation unit.
+slic3r_unity_build(libslic3r_gui SKIP
+    GUI/AMSDryCtrlDialog.cpp                      # file-scope using namespace AmsDrying leaks into neighbours
+    GUI/AuxiliaryDataViewModel.cpp                # s_default_folders / count clash
+    GUI/BindDialog.cpp                            # uses ::CheckBox, a neighbour's Field.hpp brings GUI::CheckBox
+    GUI/calib_dlg.cpp                             # file-local names clash
+    GUI/CalibrationWizard.cpp                     # NA_STR also in CalibrationWizardCaliPage.cpp
+    GUI/ConfigWizard.cpp                          # _MSW_DARK_MODE from a neighbour's GUI_App.hpp pulls a missing header
+    GUI/dark_mode.cpp                             # GDI Polygon vs Slic3r::Polygon
+    GUI/FcmProvider.cpp                           # T_CONNECT/T_MAX also in ApnsProvider.cpp
+    GUI/HostedProvider.cpp                        # T_CONNECT/T_MAX/trim also in ApnsProvider.cpp/AppPush.cpp
+    GUI/FilamentGroupDialog.cpp                   # DRAG_PREFIX also in DualNozzleSliceDialog.cpp
+    GUI/GUI_ObjectList.cpp                        # printer_technology()/filaments_count() defined by a neighbour too
+    GUI/Gizmos/GLGizmoBrimEars.cpp                # HOVER_COLOR clash
+    GUI/Gizmos/GLGizmoEmboss.cpp                  # needs IMGUI_DEFINE_MATH_OPERATORS before the first imgui.h
+    GUI/Gizmos/GLGizmoMeshBoolean.cpp             # needs IMGUI_DEFINE_MATH_OPERATORS before the first imgui.h
+    GUI/Gizmos/GLGizmoSVG.cpp                     # needs IMGUI_DEFINE_MATH_OPERATORS before the first imgui.h
+    GUI/GLCanvas3D.cpp                            # needs IMGUI_DEFINE_MATH_OPERATORS before the first imgui.h
+    GUI/ImGuiWrapper.cpp                          # needs IMGUI_DEFINE_MATH_OPERATORS before the first imgui.h
+    GUI/IMSlider.cpp                              # needs IMGUI_DEFINE_MATH_OPERATORS before the first imgui.h
+    GUI/Jobs/SendJob.cpp                          # message strings also defined in PrintJob.cpp
+    GUI/MsgDialog.cpp                             # uses ::CheckBox, a neighbour's Field.hpp brings GUI::CheckBox
+    GUI/OptionsGroup.cpp                          # titleWidth clash
+    GUI/RecenterDialog.cpp                        # #define BORDER leaks into neighbours
+    GUI/RemeshDialog.cpp                          # CFG_* constants also in RoundDialog.cpp / FillBedDialog.cpp
+    GUI/RoundDialog.cpp                           # CFG_* constants also in RemeshDialog.cpp / FillBedDialog.cpp
+    GUI/SelectMachinePop.cpp                      # EVT_* definitions also in SelectMachine.cpp
+    GUI/SendToPrinter.cpp                         # file-local names clash with SelectMachine.cpp
+    GUI/SliceBakeDialog.cpp                       # CFG_SECTION also in QuadRemeshDialog.cpp
+    GUI/SliceInfoPanel.cpp                        # file-local names clash
+    GUI/SupportGroupsDialog.cpp                   # uses ::CheckBox, a neighbour's Field.hpp brings GUI::CheckBox
+    GUI/TabButton.cpp                             # TAB_BUTTON_* colours clash
+    GUI/WipeTowerDialog.cpp                       # #define style leaks into neighbours
+    GUI/QuadRemeshDialog.cpp                      # CFG_* constants also in RemeshDialog.cpp / FillBedDialog.cpp
+    GUI/ScaleToVolumeDialog.cpp                   # CFG_SECTION / mm_str() also in FillBedDialog.cpp
+    GUI/ColorSplitDialog.cpp                      # mm_str() also in FillBedDialog.cpp
+    GUI/filamentsync/PlaterPreview.cpp            # g_* style constants also in filamentsync/FilamentColorMapBox.cpp
+    GUI/SelectMachine.cpp                         # uses ::CheckBox, a neighbour's Field.hpp brings GUI::CheckBox
+    GUI/filamentsync/SyncFilamentColorDialog.cpp  # g_* style constants also in FilamentColorMapBox.cpp
+    Utils/FixModelByWin10.cpp                     # a neighbour's using namespace std makes WinRT's byte ambiguous
+    GUI/SendMultiMachinePage.cpp                  # uses ::CheckBox, a neighbour's Field.hpp brings GUI::CheckBox
+    GUI/DeviceTab/uiDeviceUpdateVersion.cpp       # #define VERSION_STR breaks paho's async_client.h in neighbours
+    Utils/Bonjour.cpp                             # optional becomes ambiguous (std vs boost) after a neighbour's using-directive
+    GUI/BitmapCache.cpp                           # defines NANOSVG(RAST)_IMPLEMENTATION before its include
+    GUI/GLTexture.cpp                             # defines STB_DXT_IMPLEMENTATION before its include
+    GUI/IconManager.cpp                           # defines STB_RECT_PACK_IMPLEMENTATION before its include
+    GUI/Search.cpp                                # defines FTS_FUZZY_MATCH_IMPLEMENTATION before its include
+    GUI/DualNozzleSliceDialog.cpp                 # namespace-scope using namespace DualNozzleSync
+    GUI/DualNozzleState.cpp                       # namespace-scope using namespace DualNozzleSync
+    GUI/Gizmos/GLGizmoCut.cpp                     # namespace-scope using namespace Geometry
+    GUI/Gizmos/GLGizmosCommon.cpp                 # namespace-scope using-directives for the gizmo data objects
+    GUI/UntrustedSettingsGuard.cpp                # namespace-scope using namespace Slic3r::untrusted
+    GUI/Jobs/CreateFontStyleImagesJob.cpp         # namespace-scope using namespace Emboss
+    GUI/Jobs/EmbossJob.cpp                        # namespace-scope using namespace Emboss
+    GUI/TextLines.cpp                             # namespace-scope using namespace Emboss
+    Utils/EmbossStyleManager.cpp                  # namespace-scope using namespace Emboss
+    GUI/WebUserLoginDialog.cpp                    # file-scope using namespace std
+    GUI/WebSMUserLoginDialog.cpp                  # file-scope using namespace std
+    Utils/json_diff.cpp                           # file-scope using namespace std
+    Utils/NetworkAgent.cpp                        # file-scope using namespace BBL
+    GUI/GUI_App.cpp                               # includes wx/glcanvas.h (GL/gl.h) before a neighbour's glad
+    GUI/Widgets/CheckBox.cpp                      # ::CheckBox vs GUI::CheckBox (Field.hpp) under neighbours' using-directives
+    GUI/CalibrationWizardPresetPage.cpp           # uses ::CheckBox, a neighbour's Field.hpp brings GUI::CheckBox
+    GUI/CalibrationWizardSavePage.cpp             # uses ::CheckBox, a neighbour's Field.hpp brings GUI::CheckBox
+    GUI/CreatePresetsDialog.cpp                   # uses ::CheckBox, a neighbour's Field.hpp brings GUI::CheckBox
+    GUI/MultiTaskManagerPage.cpp                  # uses ::CheckBox, a neighbour's Field.hpp brings GUI::CheckBox
+    GUI/OG_CustomCtrl.cpp                         # uses ::CheckBox, a neighbour's Field.hpp brings GUI::CheckBox
+    GUI/PhysicalPrinterDialog.cpp                 # uses ::CheckBox, a neighbour's Field.hpp brings GUI::CheckBox
+    GUI/Plater.cpp                                # uses ::CheckBox, a neighbour's Field.hpp brings GUI::CheckBox
+    GUI/PrintHostDialogs.cpp                      # uses ::CheckBox, a neighbour's Field.hpp brings GUI::CheckBox
+    GUI/PrintOptionsDialog.cpp                    # uses ::CheckBox, a neighbour's Field.hpp brings GUI::CheckBox
+    GUI/ReleaseNote.cpp                           # uses ::CheckBox, a neighbour's Field.hpp brings GUI::CheckBox
+    GUI/SMPhysicalPrinterDialog.cpp               # uses ::CheckBox, a neighbour's Field.hpp brings GUI::CheckBox
+    GUI/UnsavedChangesDialog.cpp                  # uses ::CheckBox, a neighbour's Field.hpp brings GUI::CheckBox
+    GUI/FlashForge/PrintDevLocalFileDlg.cpp       # uses ::CheckBox, a neighbour's Field.hpp brings GUI::CheckBox
+    GUI/Selection.cpp                             # CGAL must come before OCCT's Handle() macro (Model.hpp -> STEP.hpp)
+    GUI/GLToolbar.cpp                             # includes wx/glcanvas.h (GL/gl.h) before a neighbour's glad
+    GUI/GUI_Preview.cpp                           # includes wx/glcanvas.h (GL/gl.h) before a neighbour's glad
+    GUI/MainFrame.cpp                             # wx/glcanvas.h before glad; Windows shell headers vs UserNotification
+    GUI/Mouse3DController.cpp                     # includes wx/glcanvas.h (GL/gl.h) before a neighbour's glad
+    GUI/NotificationManager.cpp                   # includes wx/glcanvas.h (GL/gl.h) before a neighbour's glad
+    GUI/OpenGLManager.cpp                         # includes wx/glcanvas.h (GL/gl.h) before a neighbour's glad
+    GUI/Gizmos/GLGizmosManager.cpp                # includes wx/glcanvas.h (GL/gl.h) before a neighbour's glad
+    GUI/MediaFilePanel.cpp                        # Windows shell headers declare UserNotification (clashes with UserNotification.hpp)
+    GUI/wxMediaCtrl2.cpp                          # Windows shell headers declare UserNotification (clashes with UserNotification.hpp)
+    GUI/Widgets/WebView.cpp                       # Windows shell headers declare UserNotification (clashes with UserNotification.hpp)
+    GUI/AMSSetting.cpp                            # ::CheckBox vs GUI::CheckBox (Field.hpp)
+    GUI/Calibration.cpp                           # ::CheckBox vs GUI::CheckBox (Field.hpp)
+    GUI/CloneDialog.cpp                           # ::CheckBox vs GUI::CheckBox (Field.hpp)
+    GUI/FillBedDialog.cpp                         # ::CheckBox vs GUI::CheckBox (Field.hpp)
+    GUI/MediaPlayCtrl.cpp                         # ::CheckBox vs GUI::CheckBox (Field.hpp)
+    GUI/ParamsPanel.cpp                           # ::CheckBox vs GUI::CheckBox (Field.hpp)
+    GUI/Preferences.cpp                           # ::CheckBox vs GUI::CheckBox (Field.hpp)
+    GUI/Tab.cpp                                   # ::CheckBox vs GUI::CheckBox (Field.hpp)
+    GUI/AMSMaterialsSetting.cpp                   # ::CheckBox members vs GUI::CheckBox (Field.hpp)
+    GUI/AmsMappingPopup.cpp                       # ::CheckBox members vs GUI::CheckBox (Field.hpp)
+    GUI/CalibrationWizardPage.cpp                 # ::CheckBox members vs GUI::CheckBox (Field.hpp)
+    GUI/ExtrusionCalibration.cpp                  # ::CheckBox members vs GUI::CheckBox (Field.hpp)
+)
+if (MSVC AND SLIC3R_MSVC_Z7 AND SLIC3R_UNITY_BUILD)
+    # A unity build repeats the debug info of the shared headers once per batch instead of once per
+    # source file, and /Zc:inline leaves unreferenced inline functions and data out of the objects
+    # (the linker's /OPT:REF drops them from the binaries anyway). Together they keep this /Z7
+    # library under the 4 GB static-library limit, so it stays cacheable: 4.3 GB without /Zc:inline,
+    # 3.9 GB with it at 8 sources per batch, 3.4 GB at -DSLIC3R_UNITY_BUILD_BATCH_SIZE=16 (use that).
+    target_compile_options(libslic3r_gui PRIVATE /Zc:inline)
+elseif (MSVC AND SLIC3R_MSVC_Z7)
     # With /Z7 the debug info embedded in this library pushes it past the 4 GB static-library limit
     # (LNK1248), so this one target keeps /Zi and the real compiler (bypassing any CLToolExe cache wrapper).
     target_compile_options(libslic3r_gui PRIVATE /Zi)
@@ -1034,6 +1141,11 @@ endif ()
 
 if (SLIC3R_PCH AND NOT SLIC3R_SYNTAXONLY)
     add_precompiled_header(libslic3r_gui pchheader.hpp FORCEINCLUDE)
+elseif (SLIC3R_UNITY_BUILD AND MSVC)
+    # A unity build without the PCH (a compiler cache cannot cache /Yc /Yu compiles) still starts
+    # every translation unit with pchheader.hpp, so the batches see the same Windows macros and
+    # include order as the PCH build instead of whatever their first source happened to include.
+    target_compile_options(libslic3r_gui PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:/FI${CMAKE_CURRENT_SOURCE_DIR}/pchheader.hpp>")
 endif ()
 
 # We need to implement some hacks for wxWidgets and touch the underlying GTK
