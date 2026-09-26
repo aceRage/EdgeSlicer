@@ -182,6 +182,7 @@ def phase_h2d(args, hub, archive):
     try:
         st, pv = wait_connected(hub, rid, "SNFAKEH2D0001")
         print("preview:", st, json.dumps(pv)[:600])
+        json.dump(pv, open(os.path.join(args.work, "h2d_preview.json"), "w"), indent=1)  # the app tests' fixture shape
         if not check(st == 200, "H2D preview answers 200"):
             return
         check(pv.get("can_send") is True, "H2D preview: the job can be sent")
