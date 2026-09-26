@@ -3,8 +3,11 @@
 #include "slic3r/GUI/I18N.hpp"
 #include "slic3r/GUI/Widgets/WebView.hpp"
 
+#include <boost/log/trivial.hpp>
 #include <wx/uri.h>
 #include <wx/dir.h>
+#include <wx/file.h>
+#include <wx/filename.h>
 
 const char* htmlTemplate = R"(
 <!DOCTYPE html>

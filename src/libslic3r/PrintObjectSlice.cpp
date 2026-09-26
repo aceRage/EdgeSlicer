@@ -12,6 +12,7 @@
 #include <tbb/parallel_for.h>
 #include "ClipperUtils.hpp"
 #include "ElephantFootCompensation.hpp"
+#include "format.hpp"
 #include "I18N.hpp"
 #include "Layer.hpp"
 #include "MixedFilament.hpp"
