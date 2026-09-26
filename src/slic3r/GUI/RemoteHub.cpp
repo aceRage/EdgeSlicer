@@ -4300,8 +4300,9 @@ static bool instance_api_allowed(const std::string& method, const std::string& s
         return id.find("%2f") == std::string::npos && id.find("%2F") == std::string::npos;
     }
 
-    // /api/archive/<id> (GET the record, DELETE it), /api/archive/<id>/thumbnail.png, and the
-    // stage 2 pair /api/archive/<id>/send and /api/archive/<id>/delete. The id is a name the
+    // /api/archive/<id> (GET the record, DELETE it), /api/archive/<id>/thumbnail.png, the stage 2
+    // pair /api/archive/<id>/send and /api/archive/<id>/delete, and a Bambu reprint's mapping
+    // sheet /api/archive/<id>/preview. The id is a name the
     // archive itself made: letters, digits, dot, dash and underscore, one segment, nothing to
     // decode - checked here before it reaches a file system, and again by GcodeArchive::find.
     if (sub.compare(0, 13, "/api/archive/") == 0) {
@@ -4314,7 +4315,7 @@ static bool instance_api_allowed(const std::string& method, const std::string& s
         if (slash == std::string::npos) return get || del;
         const std::string what = rest.substr(slash);
         if (what == "/thumbnail.png") return get;
-        if (what == "/send" || what == "/delete") return post;
+        if (what == "/send" || what == "/delete" || what == "/preview") return post;
         return false;
     }
 
