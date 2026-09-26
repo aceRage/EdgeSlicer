@@ -86,6 +86,12 @@ struct Caps
     bool                has_light { false };
     bool                light_on { false };
     std::vector<Fan>    fans;
+    // Loading / unloading filament (FilamentCommands.hpp): whether the printer takes the
+    // load_filament / unload_filament verbs at all. Which slot can do what right now is on each AMS
+    // tray / toolhead as can_load / can_unload. `filament_assumed` marks the U1, whose macros come
+    // from U1 owners rather than from Snapmaker (the owner verifies them on hardware).
+    bool                filament_actions { false };
+    bool                filament_assumed { false };
 };
 
 // ------------------------------------------------------------- capabilities ----
@@ -239,6 +245,10 @@ inline nlohmann::json to_json(const Caps& caps)
     nlohmann::json fs = nlohmann::json::array();
     for (const Fan& f : caps.fans) fs.push_back({ { "id", f.id }, { "label", f.label }, { "percent", f.percent } });
     j["fans"] = fs;
+    if (caps.filament_actions) {
+        j["filament"] = { { "load", true }, { "unload", true } };
+        if (caps.filament_assumed) j["filament"]["assumed"] = true;
+    }
     return j;
 }
 

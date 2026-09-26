@@ -15,6 +15,12 @@ It answers what the hub's LAN list asks a U1 (SnapmakerLan::probe / identify_at)
                                   SET_LED LED=cavity_led WHITE=<0..1>
                                   M106 S<0..255>
                                   SET_FAN_SPEED FAN=cavity_fan SPEED=<0..1>
+                                and the filament macros the phone's load / unload send (ASSUMED
+                                names, see FilamentCommands.hpp): T<n> selects a toolhead,
+                                INNER_FILAMENT_UNLOAD empties it, SM_PRINT_AUTO_FEED EXTRUDER=<n>
+                                fills toolhead n - flipping print_task_config.filament_exist
+  GET  /printer/gcode/help      the commands this "printer" knows, including those four macros
+                                unless /mock/macros?on=0 took them away
 and a control surface for the test:
   GET  /mock/state   {"scripts": [...], "heaters": {...}, "speed_factor", "led", "fan", "cavity_fan"}
   GET  /mock/reset   forget the scripts and put every value back
@@ -44,6 +50,9 @@ def fresh():
         "led": 1.0,
         "fan": 0.0,
         "cavity_fan": 0.0,
+        "active": 0,
+        "exist": [True, True, False, True],
+        "macros": True,
     }
 
 
@@ -51,7 +60,7 @@ STATE = fresh()
 
 TOOLHEADS = {
     "filament_vendor": ["Snapmaker"] * 4,
-    "filament_type": ["PLA", "PLA", "PETG", "PLA"],
+    "filament_type": ["PLA", "PLA", "PETG", "TPU"],
     "filament_sub_type": ["Matte", "Matte", "Basic", "Matte"],
     "filament_color_rgba": ["D93A2BFF", "8E8E93FF", "F5F04AFF", "000000FF"],
     "filament_official": [False] * 4,
@@ -85,6 +94,12 @@ def apply(script):
                 STATE["fan"] = float(args.get("S", "0")) / 255.0
             elif cmd == "SET_FAN_SPEED" and args.get("FAN") == "cavity_fan":
                 STATE["cavity_fan"] = float(args.get("SPEED", "0"))
+            elif len(cmd) == 2 and cmd[0] == "T" and cmd[1].isdigit():
+                STATE["active"] = int(cmd[1])
+            elif cmd == "INNER_FILAMENT_UNLOAD" and STATE["macros"]:
+                STATE["exist"][STATE["active"]] = False
+            elif cmd == "SM_PRINT_AUTO_FEED" and STATE["macros"]:
+                STATE["exist"][int(args.get("EXTRUDER", "0"))] = True
         except ValueError:
             pass
 
@@ -97,7 +112,7 @@ def status():
                         "total_duration": 0.0, "message": "", "info": {"total_layer": 0, "current_layer": 0}},
         "display_status": {"progress": 0.0, "message": None},
         "heater_bed": {"temperature": 24.0, "target": h["heater_bed"]},
-        "print_task_config": dict(TOOLHEADS),
+        "print_task_config": dict(TOOLHEADS, filament_exist=list(STATE["exist"])),
         "gcode_move": {"speed_factor": STATE["speed_factor"], "speed": 1500.0, "extrude_factor": 1.0},
         "fan": {"speed": STATE["fan"]},
         "led cavity_led": {"color_data": [[0.0, 0.0, 0.0, STATE["led"]]]},
@@ -142,6 +157,19 @@ class H(BaseHTTPRequestHandler):
             if wanted:
                 st = {k: v for k, v in st.items() if k in wanted}
             return self._json(200, {"result": {"eventtime": time.time(), "status": st}})
+        if u.path == "/printer/gcode/help":
+            with LOCK:
+                macros = STATE["macros"]
+            cmds = {"G28": "Home", "M106": "Set fan", "SET_HEATER_TEMPERATURE": "Sets a heater temperature"}
+            if macros:
+                cmds.update({"INNER_FILAMENT_UNLOAD": "G-Code macro", "PARK_EXTRUDER": "G-Code macro",
+                             "SM_PRINT_EXTRUDER_PREHEAT": "G-Code macro", "SM_PRINT_AUTO_FEED": "G-Code macro"})
+            return self._json(200, {"result": cmds})
+        if u.path == "/mock/macros":
+            q = dict(parse_qsl(u.query))
+            with LOCK:
+                STATE["macros"] = q.get("on", "1") == "1"
+            return self._json(200, {"ok": True})
         if u.path == "/mock/state":
             with LOCK:
                 return self._json(200, {k: v for k, v in STATE.items()})
