@@ -85,7 +85,11 @@ if(GIT_FOUND AND EXISTS "${CMAKE_SOURCE_DIR}/.git")
         OUTPUT_VARIABLE GIT_COMMIT_HASH
         OUTPUT_STRIP_TRAILING_WHITESPACE
     )
-    add_definitions("-DGIT_COMMIT_HASH=\"${GIT_COMMIT_HASH}\"")
+    # Not passed as a global -DGIT_COMMIT_HASH any more: that put the commit into every compile
+    # command, so each new commit + reconfigure recompiled everything (Ninja and MSBuild both track
+    # command lines) and invalidated every compiler-cache entry. No source reads the macro
+    # (common_func.hpp falls back to "0000000"); a file that needs it should get it through its own
+    # COMPILE_DEFINITIONS source property or a configured header.
 endif()
 
 if(DEFINED ENV{SLIC3R_STATIC})
