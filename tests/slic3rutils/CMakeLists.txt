@@ -38,6 +38,7 @@ add_executable(${_TEST_NAME}_tests
     sentry_scrub_tests.cpp
     dual_nozzle_layout_tests.cpp
     nozzle_temp_rows_tests.cpp
+    device_controls_tests.cpp
     ams_dual_layout_tests.cpp
     gizmo_selection_object_tests.cpp
     dark_mode_background_tests.cpp

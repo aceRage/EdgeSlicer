@@ -7,6 +7,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "DeviceControls.hpp"      // Caps: what the phone may set on the printer
 #include "SnapmakerTaskConfig.hpp" // TOOLHEAD_COUNT, end_unload_parameter, with_end_unload
 
 namespace Slic3r {
@@ -54,6 +55,9 @@ struct Status
     // How old this reading is: 0 for a probe that just answered, more while the printer is still
     // counted online through a probe or two that did not (see Presence), -1 when it never answered.
     long long   age_ms { -1 };
+    // What the phone's printer screen may set, from the same query: the bed and each toolhead with
+    // their limits, the speed factor, the cavity light and the fans (DeviceControls::moonraker_caps).
+    DeviceControls::Caps caps;
     bool        printing() const { return state == "printing" || state == "paused"; }
 };
 

@@ -695,7 +695,7 @@ static Probe probe(const Device& d, bool ask_access)
     std::string qerror;
     if (get_json(base_url(d) +
                      "/printer/objects/query?print_stats&display_status&heater_bed&extruder&extruder1&extruder2&extruder3&"
-                     "print_task_config",
+                     "print_task_config&" + DeviceControls::moonraker_controls_query(),
                  q, qerror, 3, 2) &&
         q.contains("result") && q["result"].contains("status")) {
         r.queried      = true;
@@ -724,6 +724,10 @@ static Probe probe(const Device& d, bool ask_access)
             s.nozzle_target = num_of(st["extruder"], "target");
         }
         s.nozzles = nozzle_temps_of(st);
+        // The U1's heaters, speed factor, cavity light and fans, for the phone's printer screen.
+        // Limits: the U1's own (bed 100 C, toolheads 300 C); Klipper refuses anything past its
+        // configured max_temp in any case, and says so in the command's answer.
+        s.caps = DeviceControls::moonraker_caps(st, 100, 300, TOOLHEAD_COUNT);
     }
     return r;
 }
@@ -1010,6 +1014,9 @@ void list_printers(json& printers)
         if (p["nozzles"].empty())
             p["nozzles"].push_back(json { { "temp", s.nozzle_temp }, { "target", s.nozzle_target } });
         p["toolheads"]      = toolheads_json(c.heads);
+        // What the phone's native printer screen may set on it (heaters with limits, speed factor,
+        // cavity light, fans), only while it answers: an offline card offers nothing.
+        if (s.online && !s.caps.heaters.empty()) p["controls"] = DeviceControls::to_json(s.caps);
         // The predicates RemoteControl derives for any Moonraker printer, so the phone's Pause /
         // Resume / Stop buttons work on a printer found over the LAN too. `task` already names the
         // job, so no `stage`; the printer's message is an error only when its state says so.
