@@ -9,6 +9,8 @@
 #include "AppPush.hpp"
 #include "HubEventDedupe.hpp"
 #include "HubPushOwner.hpp"
+#include "GcodeArchive.hpp" // normalize_printer: the Reprint list's printer names
+#include "SnapmakerLan.hpp" // the LAN cards a "connect" record may belong to
 #include "HMS.hpp"
 #include "libslic3r/Utils.hpp"
 #include "slic3r/Utils/Http.hpp"
@@ -2037,7 +2039,7 @@ public:
     // The G-code archive as the Reprint tab lists it, read by the hub itself: one page of records,
     // newest first, from a cached pass over the sidecars. No slicer window is involved, so the
     // list answers with every window closed and does not wait on a window that is busy.
-    json        archive_page_json(const std::string& printer, int offset, int limit);
+    json        archive_page_json(const std::string& printer, int offset, int limit, const std::string& model = "");
     // One record's preview, by the record's own id; "" = none.
     std::string archive_thumbnail(const std::string& id);
 private:
@@ -2755,6 +2757,10 @@ std::vector<json> HubServer::archive_records()
     }
     std::vector<json> out;
     if (fs::is_directory(root, ec)) {
+        // A record's printer as the phone should see it (GcodeArchive::normalize_printer): a U1 send
+        // filed under the Snapmaker cloud's broker is listed under its LAN card when its serial names
+        // one, and no printer is ever called by an address. The chips below are built from the same.
+        const std::vector<SnapmakerLan::Device> lan = SnapmakerLan::devices();
         for (fs::directory_iterator it(root, ec), end; !ec && it != end; it.increment(ec)) {
             boost::system::error_code ig;
             if (it->path().extension() != ".json" || !fs::is_regular_file(it->path(), ig)) continue;
@@ -2763,6 +2769,7 @@ std::vector<json> HubServer::archive_records()
             if (!j.is_object() || !j.contains("id") || !j["id"].is_string()) continue;
             const std::string id = j["id"].get<std::string>();
             if (!archive_id_ok(id)) continue;
+            GcodeArchive::normalize_printer(j, lan);
             // Never a path on the PC, exactly as the instance's /api/archive hands them out.
             j.erase("path");
             j.erase("project_path");
@@ -2777,6 +2784,10 @@ std::vector<json> HubServer::archive_records()
         const long long ta = a.value("time", (long long) 0), tb = b.value("time", (long long) 0);
         return ta != tb ? ta > tb : a.value("id", std::string()) > b.value("id", std::string());
     });
+    // A record that lacks its printer's model (or names the printer by its serial) takes them from
+    // the printer's other records, then every record says which model it was sliced for: the phone
+    // groups and filters by that, and offers every printer of the model as a target.
+    GcodeArchive::annotate_models(out, GcodeArchive::model_names());
     std::lock_guard<std::mutex> lock(m_archive_mutex);
     m_archive_cache     = out;
     m_archive_cache_sig = sig;
@@ -2784,7 +2795,7 @@ std::vector<json> HubServer::archive_records()
     return out;
 }
 
-json HubServer::archive_page_json(const std::string& printer, int offset, int limit)
+json HubServer::archive_page_json(const std::string& printer, int offset, int limit, const std::string& model)
 {
     const std::vector<json> all = archive_records();
     json                    j;
@@ -2803,8 +2814,12 @@ json HubServer::archive_page_json(const std::string& printer, int offset, int li
         const std::string id = p.value("id", std::string());
         if (!id.empty() && seen.insert(id).second)
             printers.push_back({ { "id", id }, { "name", p.value("name", std::string()) }, { "kind", p.value("kind", std::string()) } });
-        if (printer.empty() || id == printer) rows.push_back(&r);
+        const std::string mk = r.value("model_key", std::string("other"));
+        if ((printer.empty() || id == printer) && (model.empty() || mk == model)) rows.push_back(&r);
     }
+    // And every model the records were sliced for (the app's chips), "Other" last, each with the
+    // printers this hub knows of that model: where a record of it may be reprinted.
+    j["models"] = GcodeArchive::archive_models(all, printers_json(), GcodeArchive::model_names());
     offset = std::max(0, offset);
     limit  = std::max(1, std::min(200, limit));
     j["records"] = json::array();
@@ -4500,7 +4515,7 @@ void HubServer::handle_phone(tcp::socket& client, Request& r, const std::string&
         j["version"] = 2;
         j["routes"]  = json::array({
             { {"method", "GET"},  {"path", "/api/instances"},       {"description", "running slicer instances: id (pid), index, title, project path, slicing"} },
-            { {"method", "GET"},  {"path", "/api/archive[?offset=&limit=&printer={id}]"}, {"description", "the G-code archive, read by the hub (no slicer window needed): {enabled?, max?, total, offset, limit, next_offset, printers [{id, name, kind}], records}, newest first; records are the same rows /i/{id}/api/archive lists. Sending or deleting one still goes through a slicer window (/i/{id}/api/archive/{id}/send)"} },
+            { {"method", "GET"},  {"path", "/api/archive[?offset=&limit=&printer={id}&model={key}]"}, {"description", "the G-code archive, read by the hub (no slicer window needed): {enabled?, max?, total, offset, limit, next_offset, printers [{id, name, kind}], models [{key, name, count, printers [{id, name, kind, online}]}], records}, newest first; records are the same rows /i/{id}/api/archive lists plus model_key / model_name (the model the file was sliced for; \"other\" when unknown), and a printer is never named by an address. models[].printers are where a record of that model may be reprinted (send with printer={id}). Sending or deleting one still goes through a slicer window (/i/{id}/api/archive/{id}/send)"} },
             { {"method", "GET"},  {"path", "/api/archive/{id}/thumbnail.png"}, {"description", "one record's preview; cacheable, since a record's preview never changes"} },
             { {"method", "POST"}, {"path", "/api/instances/open"},  {"description", "body = a .3mf/.stl/.obj/.step/.glb file, header X-File-Name = its name; starts a new (hidden) slicer instance with it; ?visible=1 opens a window"} },
             { {"method", "POST"}, {"path", "/i/{id}/open?mode=load|import"}, {"description", "same upload, opened in instance {id}: load = save the current project, then open this project (default for .3mf); import = add the model to the current plate (default otherwise)"} },
@@ -4529,7 +4544,7 @@ void HubServer::handle_phone(tcp::socket& client, Request& r, const std::string&
         const std::string off = query_param(r.query, "offset"), lim = query_param(r.query, "limit");
         respond_json(client, 200,
                      archive_page_json(percent_decode(query_param(r.query, "printer")), off.empty() ? 0 : std::atoi(off.c_str()),
-                                       lim.empty() ? 200 : std::atoi(lim.c_str()))
+                                       lim.empty() ? 200 : std::atoi(lim.c_str()), percent_decode(query_param(r.query, "model")))
                          .dump());
         return;
     }

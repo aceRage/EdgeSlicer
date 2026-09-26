@@ -846,11 +846,18 @@ std::pair<int, std::string> prepare_from_record(const Request& req, std::shared_
     if (printer.empty())
         return { 409, "this record does not say which printer it went to; name one with printer=" };
     const std::string kind = kind_of_printer(printer);
-    // Cross-kind is a hard refusal, not a warning: a .gcode.3mf cannot go to a Moonraker host and
-    // a plain .gcode cannot go through the Bambu plugin.
-    if (!recorded_kd.empty() && kind != recorded_kd)
-        return { 409, "this file was sent to a " + recorded_kd + " printer and " + printer + " is a " + kind +
-                          " one; the file a printer takes differs by kind" };
+    // Another printer than the one the record went to: the same kind (a .gcode.3mf cannot go to a
+    // Moonraker host and a plain .gcode cannot go through the Bambu plugin) and the same model - a
+    // sliced file is made for one model, and any printer of that model takes it. The model check
+    // needs the target's model, so it is made again below once the target is looked up; this first
+    // pass refuses what the ids alone already rule out.
+    const std::string record_model = jp.value("model", std::string());
+    const bool        same_printer = GcodeArchive::reprint_in_place_allowed(recorded, printer);
+    if (!same_printer) {
+        const std::string why = GcodeArchive::reprint_target_refusal(recorded, recorded_kd, record_model, printer, kind,
+                                                                     record_model, GcodeArchive::model_names());
+        if (!why.empty()) return { 409, why };
+    }
     // Stage 2 stops where the design's open question 1 does: a Bambu printer handed a gcode 3mf
     // whose PrintParams were composed for another send is unproven, and the MQTT "connect" path
     // starts its print from the PC's own preprint page. Both wait for the hardware pass.
@@ -882,6 +889,11 @@ std::pair<int, std::string> prepare_from_record(const Request& req, std::shared_
         SnapmakerLan::Device d;
         if (!SnapmakerLan::find(printer.substr(3), d))
             return { 404, "no such printer: " + printer };
+        if (!same_printer) {
+            const std::string why = GcodeArchive::reprint_target_refusal(recorded, recorded_kd, record_model, printer, kind,
+                                                                         d.model, GcodeArchive::model_names());
+            if (!why.empty()) return { 409, why };
+        }
         const SnapmakerLan::Status st = SnapmakerLan::status(d);
         if (!st.online)
             return { 409, d.name + " is not answering on the network" };
@@ -896,7 +908,8 @@ std::pair<int, std::string> prepare_from_record(const Request& req, std::shared_
         if (!boost::iends_with(name, ".gcode")) name += ".gcode";
         // Where the printer keeps it, when the send said (the PC's pre-print page names the path
         // it started): the file a reprint looks for first.
-        std::string remote = j.value("remote_path", std::string());
+        // Only on the printer the file went to: another one never has "the same file" by name.
+        std::string remote = same_printer ? j.value("remote_path", std::string()) : std::string();
         if (remote.compare(0, 7, "gcodes/") == 0) remote = remote.substr(7);
         while (!remote.empty() && remote.front() == '/') remote.erase(remote.begin());
         if (!remote.empty() && remote.find("..") == std::string::npos && req.name.empty()) name = remote;
@@ -905,7 +918,7 @@ std::pair<int, std::string> prepare_from_record(const Request& req, std::shared_
         // Still on the printer, the same size as the archived bytes: start it in place. An upload
         // made "to start later" is exactly this - the phone starts the file the printer already
         // has. Anything else (gone, a different size, the printer cannot say) uploads again.
-        p->reuse_remote       = SnapmakerLan::file_on_printer(d, name, rec.size);
+        p->reuse_remote       = same_printer && SnapmakerLan::file_on_printer(d, name, rec.size);
         p->file_filaments     = file_filaments_of_record(j);
         // A reprint unloads if the print it replays did. A record written before this existed has
         // no such key and reprints the way it always has.
@@ -917,7 +930,11 @@ std::pair<int, std::string> prepare_from_record(const Request& req, std::shared_
         if (mode == "print") {
             // The record's own mapping is the memory; the caller may override it, and a record
             // written before mappings were kept falls back to the colour match.
-            const std::string wanted = req.mapping.empty() ? j.value("mapping", std::string()) : req.mapping;
+            // Another printer of the model has its own toolheads: match them by colour again rather
+            // than replaying toolhead numbers that belonged to the first printer.
+            const std::string wanted = !req.mapping.empty() ? req.mapping
+                                     : same_printer         ? j.value("mapping", std::string())
+                                                            : std::string();
             std::string       error;
             if (wanted.empty())
                 p->mapping = SnapmakerLan::auto_match(p->file_filaments, p->toolheads);
@@ -950,9 +967,10 @@ std::pair<int, std::string> prepare_from_record(const Request& req, std::shared_
     auto host  = std::make_shared<std::shared_ptr<PrintHost>>();
     auto url   = std::make_shared<std::string>();
     auto hname = std::make_shared<std::string>();
+    auto tmodel = std::make_shared<std::string>(); // the target's printer model, for a reprint to another printer
     auto rc    = std::make_shared<std::pair<int, std::string>>(200, "");
     const std::string device = printer.compare(0, 3, "ph:") == 0 ? printer.substr(3) : std::string();
-    const bool ran = on_main([host, url, hname, rc, device]() {
+    const bool ran = on_main([host, url, hname, tmodel, rc, device]() {
         PresetBundle* bundle = wxGetApp().preset_bundle;
         if (!bundle) { *rc = { 503, "no preset bundle" }; return; }
         if (!device.empty()) {
@@ -962,12 +980,15 @@ std::pair<int, std::string> prepare_from_record(const Request& req, std::shared_
                     if (d.address.empty()) { *rc = { 409, d.display_name() + " has no address" }; return; }
                     DynamicPrintConfig dev_cfg = PrintHostDevices::config_for(d, bundle->printers.get_edited_preset().config);
                     host->reset(PrintHost::get_print_host(&dev_cfg, false));
-                    *url   = d.address;
-                    *hname = d.display_name();
+                    *url    = d.address;
+                    *hname  = d.display_name();
+                    *tmodel = d.printer_model.empty() ? kv.first : d.printer_model;
                 }
             if (!*host) { *rc = { 404, "no such print-host device: ph:" + device }; return; }
             return;
         }
+        if (auto* model = bundle->printers.get_edited_preset().config.option<ConfigOptionString>("printer_model"))
+            *tmodel = model->value;
         if (bundle->use_bbl_network()) {
             *rc = { 409, "the current printer preset sends through the Bambu network; pick that printer by its id" };
             return;
@@ -981,6 +1002,11 @@ std::pair<int, std::string> prepare_from_record(const Request& req, std::shared_
     }, 20000);
     if (!ran) return { 503, "the slicer is busy" };
     if (rc->first != 200) return *rc;
+    if (!same_printer) {
+        const std::string why = GcodeArchive::reprint_target_refusal(recorded, recorded_kd, record_model, printer, kind,
+                                                                     *tmodel, GcodeArchive::model_names());
+        if (!why.empty()) return { 409, why };
+    }
 
     p->kind         = "printhost";
     p->printer_name = device.empty() ? *hname + " " + *url : *hname;
