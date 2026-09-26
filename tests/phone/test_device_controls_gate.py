@@ -10,7 +10,10 @@ Covers, on a Snapmaker over the LAN (sm:<id>) played by the mock:
   * real sends - to the MOCK - land as SET_HEATER_TEMPERATURE / M220 / SET_LED / M106 /
     SET_FAN_SPEED, and the next /api/printers reports the new values;
   * /summary carries `controls` and `toolheads` through to the app;
-  * the settings go through the same authenticated route as pause: a wrong token is refused.
+  * the settings go through the same authenticated route as pause: a wrong token is refused;
+  * filament: controls.filament marks the U1 as offering load / unload (assumed macros, found in
+    its G-code help), each toolhead carries can_load / can_unload, a print or a flexible filament
+    refuses, and a load / unload sends the macro script to the mock and the toolhead reads back.
 
 Nothing is ever sent to a real printer: the only printer this adds is the mock on 127.0.0.1, and it
 is removed again at the end.
@@ -228,6 +231,54 @@ until(lambda p: p.get("print_status") == "printing")
 send("SET_HEATER_TEMPERATURE HEATER=extruder TARGET=215", action="set_temp", heater="nozzle0", target="215")
 http(MOCK_URL + "/mock/print?state=standby", timeout=15)
 
+print("\n-- filament load / unload (assumed U1 macros) --", flush=True)
+# The printing check above left the mock printing a moment ago: wait for the idle reading.
+p = until(lambda p: bool((p.get("controls") or {}).get("filament")) and p.get("print_status") == "standby")
+fil = (p.get("controls") or {}).get("filament") or {}
+check(fil.get("load") is True and fil.get("unload") is True and fil.get("assumed") is True,
+      "controls.filament: load, unload, assumed (%s)" % fil)
+heads = p.get("toolheads") or []
+check([h.get("can_load") for h in heads] == [False, False, True, False],
+      "can_load: only the empty toolhead 3 (%s)" % [h.get("can_load") for h in heads])
+check([h.get("can_unload") for h in heads] == [True, True, False, False],
+      "can_unload: toolheads 1, 2; not the empty 3 nor the TPU in 4 (%s)" % [h.get("can_unload") for h in heads])
+check((heads[3] if len(heads) > 3 else {}).get("filament_why") == "flexible filament is unloaded by hand",
+      "the TPU toolhead says why (%s)" % (heads[3] if len(heads) > 3 else {}).get("filament_why"))
+before = len(scripts())
+for form, want, words, why in [
+    (dict(action="load_filament", slot="0"), 409, "already loaded", "loading a toolhead that is already loaded"),
+    (dict(action="unload_filament", slot="2"), 409, "empty", "unloading an empty toolhead"),
+    (dict(action="unload_filament", slot="3"), 409, "flexible", "unloading flexible filament"),
+    (dict(action="load_filament", slot="7"), 404, "toolhead", "a toolhead the U1 has not got"),
+    (dict(action="load_filament"), 400, "slot", "no toolhead"),
+]:
+    st, j = control(**form)
+    check(st == want and words in (j.get("error") or ""), "%s -> %d (%d %s)" % (why, want, st, j.get("error")))
+check(len(scripts()) == before, "the mock received nothing while all that was refused")
+UNLOAD_1 = "T1\nINNER_FILAMENT_UNLOAD TEMP=220 NOZZLE_DIAMETER=0.4\nPARK_EXTRUDER"
+LOAD_2 = "SM_PRINT_EXTRUDER_PREHEAT EXTRUDER=2 TEMP=140\nSM_PRINT_AUTO_FEED EXTRUDER=2"
+st, j = control(action="unload_filament", slot="1", dry_run="1")
+if st == 200:
+    r = wait_job(j["job"])
+    check((r.get("result") or {}).get("script") == UNLOAD_1,
+          "dry-run unload of toolhead 2 composes T1 / INNER_FILAMENT_UNLOAD TEMP=220 / PARK_EXTRUDER (%r)" % (r.get("result") or {}).get("script"))
+else:
+    check(False, "dry-run unload -> %d %s" % (st, j.get("error")))
+check(len(scripts()) == before, "the dry run sent nothing")
+send(UNLOAD_1, action="unload_filament", slot="1")
+send(LOAD_2, action="load_filament", slot="2")
+p = until(lambda p: [h.get("loaded") for h in (p.get("toolheads") or [])] == [True, False, True, True])
+check([h.get("loaded") for h in (p.get("toolheads") or [])] == [True, False, True, True],
+      "toolhead 2 now reads empty and toolhead 3 loaded (%s)" % [h.get("loaded") for h in (p.get("toolheads") or [])])
+http(MOCK_URL + "/mock/print?state=printing", timeout=15)
+until(lambda p: p.get("print_status") == "printing")
+st, j = control(action="load_filament", slot="1")
+check(st == 409 and "print" in (j.get("error") or ""), "load while printing -> 409 (%d %s)" % (st, j.get("error")))
+p = row()
+check(all(h.get("can_load") is False and h.get("can_unload") is False for h in (p.get("toolheads") or [])),
+      "while printing no toolhead offers load or unload")
+http(MOCK_URL + "/mock/print?state=standby", timeout=15)
+
 print("\n-- /summary carries the controls to the app --", flush=True)
 summary_row = {}
 t0 = time.time()
@@ -239,6 +290,7 @@ while time.time() - t0 < 40:  # the hub re-reads its windows every 10 s
     time.sleep(2)
 check(bool((summary_row.get("controls") or {}).get("heaters")), "/summary row carries controls.heaters")
 check(len(summary_row.get("toolheads") or []) == 4, "/summary row carries the four toolheads")
+check("can_load" in ((summary_row.get("toolheads") or [{}])[0]), "/summary toolheads carry can_load / can_unload")
 
 print("\n-- the same authenticated route as pause --", flush=True)
 bad = "%s/r/%s/i/%d/api/printers/%s/control" % (HUB, "wrongtoken000", PID, urllib.parse.quote("sm:" + MOCK_ID, safe=""))

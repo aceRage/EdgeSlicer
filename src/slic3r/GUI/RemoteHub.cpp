@@ -2789,7 +2789,7 @@ json HubServer::summary_json()
         // The phone's native printer screen: what may be set (heaters with limits, speed, light,
         // fans), the U1's toolhead filaments and a Bambu printer's AMS units - as the instance's
         // row carried them. A stale row keeps them for display; the app offers no control on one.
-        for (const char* k : { "controls", "toolheads", "ams", "hms" })
+        for (const char* k : { "controls", "toolheads", "ams", "ext_spools", "hms" })
             if (row.contains(k)) p[k] = row[k];
         p["stale"]    = row.value("stale", false);
         p["age_s"]    = row.value("age_s", 0);

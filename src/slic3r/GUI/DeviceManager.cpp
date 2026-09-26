@@ -1,5 +1,6 @@
 #include "libslic3r/libslic3r.h"
 #include "DeviceManager.hpp"
+#include "FilamentCommands.hpp"
 #include "PrintErrorCommands.hpp"
 #include "AmsDrying.hpp"
 #include "AmsDualLayout.hpp"
@@ -2197,36 +2198,14 @@ int MachineObject::command_ams_change_filament(bool load, std::string ams_id, st
 {
     json j;
     try {
-        auto tray_id = 0;
-        if (ams_id < "16") {
-            tray_id = atoi(ams_id.c_str()) * 4 + atoi(slot_id.c_str());
-        }
-        // TODO: Orca hack. Single-extruder firmware calls its one spool holder 255 while this fork
-        // calls it 254. Two-extruder machines have both (254 = left/deputy, 255 = right/main) and
-        // the dual layout passes the real id, so leave it alone there.
-        if (ams_id == "254" && !is_multi_extruders())
-            ams_id = "255";
-
-
-        j["print"]["command"]     = "ams_change_filament";
+        // The payload is built in one place (FilamentCommands.hpp), shared with the phone's
+        // load / unload, so the two cannot drift. That includes the Orca hack: single-extruder
+        // firmware calls its one spool holder 255 while this fork calls it 254; two-extruder
+        // machines have both (254 = left/deputy, 255 = right/main) and the dual layout passes the
+        // real id, so it is left alone there.
+        j["print"]                = GUI::FilamentCommands::ams_change_filament_json(load, ams_id, slot_id, old_temp, new_temp,
+                                                                                    is_multi_extruders());
         j["print"]["sequence_id"] = std::to_string(MachineObject::m_sequence_id++);
-        j["print"]["curr_temp"]   = old_temp;
-        j["print"]["tar_temp"]    = new_temp;
-        j["print"]["ams_id"]      = atoi(ams_id.c_str());
-
-        if (!load) {
-            j["print"]["target"]  = 255;
-            j["print"]["slot_id"] = 255; // the new protocol to mark unload
-
-        } else {
-            if (tray_id == 0) {
-                j["print"]["target"]  = atoi(ams_id.c_str());
-            } else {
-                j["print"]["target"]  = tray_id;
-            }
-
-            j["print"]["slot_id"] = atoi(slot_id.c_str());
-        }
     } catch (const std::exception &) {}
 
     return this->publish_json(j.dump());

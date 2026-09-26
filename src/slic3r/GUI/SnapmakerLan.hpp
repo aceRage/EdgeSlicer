@@ -58,6 +58,9 @@ struct Status
     // What the phone's printer screen may set, from the same query: the bed and each toolhead with
     // their limits, the speed factor, the cavity light and the fans (DeviceControls::moonraker_caps).
     DeviceControls::Caps caps;
+    // The printer's G-code help lists every command the load / unload scripts use
+    // (FilamentCommands::u1_filament_macros_available). Asked with the login check, not every probe.
+    bool        filament_macros { false };
     bool        printing() const { return state == "printing" || state == "paused"; }
 };
 

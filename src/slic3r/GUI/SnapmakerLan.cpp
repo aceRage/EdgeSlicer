@@ -1,4 +1,5 @@
 #include "SnapmakerLan.hpp"
+#include "FilamentCommands.hpp"
 
 #include "GUI_App.hpp"
 #include "RemoteHub.hpp" // hub_dir
@@ -690,6 +691,12 @@ static Probe probe(const Device& d, bool ask_access)
         if (get_json(base_url(d) + "/access/info", access, ignore, 3, 2) && access.contains("result"))
             s.login_required = access["result"].contains("login_required") && access["result"]["login_required"].is_boolean() &&
                                access["result"]["login_required"].get<bool>();
+        // Whether this printer has the commands the phone's load / unload would send. Asked here,
+        // with the login check (the first probe, then every few minutes), because the list only
+        // changes with a firmware update.
+        json help;
+        if (get_json(base_url(d) + "/printer/gcode/help", help, ignore, 3, 2))
+            s.filament_macros = FilamentCommands::u1_filament_macros_available(help);
     }
     json        q;
     std::string qerror;
@@ -753,7 +760,8 @@ static void apply(Cached& c, const Device& d, Probe&& p, long long now)
 {
     c.when = now;
     if (p.access_asked) c.access_checked = now;
-    const bool login_required = p.access_asked ? p.st.login_required : c.st.login_required;
+    const bool login_required  = p.access_asked ? p.st.login_required : c.st.login_required;
+    const bool filament_macros = p.access_asked ? p.st.filament_macros : c.st.filament_macros;
     const bool changed        = c.presence.observe(p.st.online, now);
     if (p.st.online) {
         if (!p.queried && c.st.online) {
@@ -765,7 +773,10 @@ static void apply(Cached& c, const Device& d, Probe&& p, long long now)
             p.st         = keep;
             p.heads      = c.heads;
         }
-        p.st.login_required = login_required;
+        p.st.login_required  = login_required;
+        p.st.filament_macros = filament_macros;
+        p.st.caps.filament_actions = filament_macros;
+        p.st.caps.filament_assumed = filament_macros;
         c.st                = std::move(p.st);
         c.heads             = std::move(p.heads);
         c.last_error.clear();
@@ -1014,6 +1025,15 @@ void list_printers(json& printers)
         if (p["nozzles"].empty())
             p["nozzles"].push_back(json { { "temp", s.nozzle_temp }, { "target", s.nozzle_target } });
         p["toolheads"]      = toolheads_json(c.heads);
+        // Load / unload per toolhead, only on a U1 whose G-code help lists the commands.
+        if (s.online && s.filament_macros)
+            for (size_t k = 0; k < c.heads.size() && k < p["toolheads"].size(); ++k) {
+                FilamentCommands::PrinterState ps;
+                ps.printing = s.printing();
+                FilamentCommands::write_availability(
+                    FilamentCommands::availability(ps, true, c.heads[k].loaded, FilamentCommands::is_flexible(c.heads[k].type)),
+                    p["toolheads"][k]);
+            }
         // What the phone's native printer screen may set on it (heaters with limits, speed factor,
         // cavity light, fans), only while it answers: an offline card offers nothing.
         if (s.online && !s.caps.heaters.empty()) p["controls"] = DeviceControls::to_json(s.caps);

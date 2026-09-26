@@ -48,6 +48,9 @@ struct Request
     // set_speed value=<level or %>, set_light on=<1|0>, set_fan fan=<id>&percent=<0..100>. Carried as
     // the form spelled them and checked against the printer's own `controls` before anything goes out.
     std::string heater, target, value, fan, percent, on;
+    // load_filament / unload_filament: ams=<AMS id, 128+ for an AMS HT, 254 / 255 for an external
+    // spool>&slot=<0..3> on a Bambu printer; slot=<toolhead 0..3> (no ams) on a Snapmaker U1.
+    std::string ams, slot;
 };
 
 // Everything prepare() worked out on the GUI thread; run() only sends the command.
@@ -88,6 +91,14 @@ struct Prepared
     bool        dual_nozzle { false }; // command_set_nozzle_new (per extruder) rather than command_set_nozzle
     int         fan_type { 0 };     // MachineObject::FanType
     bool        light_on { false };
+    // load_filament / unload_filament on a Bambu printer: the arguments of
+    // command_ams_change_filament, as StatusPanel's Load / Unload work them out.
+    std::string fil_ams, fil_slot;
+    int         fil_old_temp { -1 }, fil_new_temp { -1 };
+    bool        multi_extruders { false };
+    // How long a Moonraker command may take: a filament load or unload runs for minutes and the
+    // printer answers the script only when it is done.
+    int         timeout_s { 15 };
 };
 
 struct Sink
@@ -122,6 +133,8 @@ void describe_bambu(MachineObject* m, nlohmann::json& p);
 
 // Whether an action is one of the settings verbs (set_temp, set_speed, set_light, set_fan).
 bool is_setting_verb(const std::string& action);
+// load_filament / unload_filament.
+bool is_filament_verb(const std::string& action);
 
 // GUI thread. The action ids the desktop's error dialog would draw for this printer and this
 // code: the shipped hms_action_<devtype>.json entry, StatusPanel's 0300-800x liveview special

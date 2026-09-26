@@ -1,6 +1,7 @@
 #include "RemoteControl.hpp"
 
 #include "DeviceControls.hpp"
+#include "FilamentCommands.hpp"
 #include "DeviceManager.hpp"
 #include "GUI_App.hpp"
 #include "HMS.hpp"
@@ -158,8 +159,49 @@ static DeviceControls::Caps bambu_caps(MachineObject* m)
     caps.fans.push_back(Fan { "part", "Part cooling", percent_of_byte(m->cooling_fan_speed) });
     if (m->is_support_aux_fan) caps.fans.push_back(Fan { "aux", "Aux", percent_of_byte(m->big_fan1_speed) });
     if (m->is_support_chamber_fan) caps.fans.push_back(Fan { "chamber", "Chamber", percent_of_byte(m->big_fan2_speed) });
+    caps.filament_actions = true; // StatusPanel's Load / Unload, which every Bambu printer has
     return caps;
 }
+
+// ------------------------------------------------------ filament load / unload ----
+
+// The printer as the load / unload rules see it (FilamentCommands::availability).
+static FilamentCommands::PrinterState filament_state(MachineObject* m)
+{
+    FilamentCommands::PrinterState s;
+    s.printing             = m->is_in_printing();
+    s.changing_filament    = m->ams_status_main == AmsStatusMain::AMS_STATUS_MAIN_FILAMENT_CHANGE;
+    s.calibrating          = m->is_in_extrusion_cali();
+    s.filament_at_extruder = m->is_filament_at_extruder();
+    return s;
+}
+
+// Whether this slot is the one feeding: an extruder's tray_now on the new protocol (two-extruder
+// printers), the printer's single tray_now otherwise - the same test StatusPanel's unload makes.
+static bool slot_loaded(MachineObject* m, const std::string& ams_id, const std::string& slot_id)
+{
+    if (m->is_enable_np) {
+        for (const Extder& e : m->m_extder_data.extders)
+            if (e.snow.ams_id == ams_id && (e.snow.slot_id == slot_id || ams_id == "254" || ams_id == "255")) return true;
+        return false;
+    }
+    return m->m_tray_now == FilamentCommands::tray_now_of(ams_id, slot_id);
+}
+
+// The external spools: vir_slots on a two-extruder printer (254 left, 255 right), the one
+// vt_tray (254) otherwise.
+static std::vector<const AmsTray*> ext_trays(MachineObject* m)
+{
+    std::vector<const AmsTray*> out;
+    if (m->is_multi_extruders() && !m->vir_slots.empty()) {
+        for (const AmsTray& t : m->vir_slots) out.push_back(&t);
+    } else {
+        out.push_back(&m->vt_tray);
+    }
+    return out;
+}
+
+static bool tray_present(const AmsTray& t) { return t.is_exists || !t.type.empty(); }
 
 // "#RRGGBB" out of the tray's RRGGBBAA; empty when there is no colour.
 static std::string tray_rgb(const std::string& rrggbbaa)
@@ -202,10 +244,35 @@ static json ams_json(MachineObject* m)
             j["sub_type"] = t->sub_brands;
             j["color"]    = tray_rgb(t->color);
             j["remain"]   = t->remain;
+            FilamentCommands::write_availability(
+                FilamentCommands::availability(filament_state(m), t->is_exists, slot_loaded(m, a->id, t->id)), j);
             trays.push_back(j);
         }
         u["trays"] = trays;
         out.push_back(u);
+    }
+    return out;
+}
+
+// The external spool holders, in the tray shape plus the id the load / unload verbs take:
+// [{ams_id "254"|"255", side L|R|"", exists, type, sub_type, color, can_load, can_unload}].
+static json ext_spools_json(MachineObject* m)
+{
+    json       out  = json::array();
+    const bool dual = m->is_multi_extruders();
+    for (const AmsTray* t : ext_trays(m)) {
+        const std::string id = dual ? (t->id.empty() ? std::string("254") : t->id) : std::string("254");
+        AmsTray copy = *t;
+        json    j;
+        j["ams_id"]   = id;
+        j["side"]     = dual ? (id == "254" ? "L" : "R") : "";
+        j["exists"]   = tray_present(*t);
+        j["type"]     = copy.get_display_filament_type();
+        j["sub_type"] = t->sub_brands;
+        j["color"]    = tray_rgb(t->color);
+        FilamentCommands::write_availability(
+            FilamentCommands::availability(filament_state(m), tray_present(*t), slot_loaded(m, id, "0")), j);
+        out.push_back(j);
     }
     return out;
 }
@@ -707,8 +774,141 @@ static std::pair<int, std::string> prepare_setting_moonraker(const Request& req,
     return { 200, "" };
 }
 
+bool is_filament_verb(const std::string& action) { return action == "load_filament" || action == "unload_filament"; }
+
+static bool all_digits(const std::string& s)
+{
+    if (s.empty() || s.size() > 3) return false;
+    for (char c : s)
+        if (c < '0' || c > '9') return false;
+    return true;
+}
+
+// A Bambu printer: StatusPanel::on_ams_load_curr / on_ams_unload, for one named slot.
+static std::pair<int, std::string> prepare_filament_bambu(const Request& req, std::shared_ptr<Prepared> p, std::shared_ptr<Prepared>& out)
+{
+    const bool load = req.action == "load_filament";
+    if (!all_digits(req.ams) || !all_digits(req.slot))
+        return { 400, "ams and slot are required (ams: the AMS id, 128+ for an AMS HT, 254 / 255 for an external spool; slot: 0..3)" };
+    DeviceManager* dm = wxGetApp().getDeviceManager();
+    if (!dm) return { 503, "no device manager" };
+    MachineObject* obj = find_machine(dm, req.printer);
+    if (!obj) return { 404, "no such printer: " + req.printer };
+    if (!obj->is_online()) return { 409, obj->dev_name + " is offline" };
+    if (obj->is_lan_mode_printer() && !obj->has_access_right())
+        return { 409, obj->dev_name + " needs its access code entered on the PC first" };
+    if (!obj->is_connected())
+        return { 409, obj->dev_name + " is not connected; open it on the PC's Device tab once, or pick it in a send" };
+
+    const std::string ams  = std::to_string(std::atoi(req.ams.c_str()));
+    const std::string slot = std::to_string(std::atoi(req.slot.c_str()));
+    const bool        ext  = ams == "254" || (ams == "255" && obj->is_multi_extruders());
+    const AmsTray*    tray = nullptr;
+    if (ext) {
+        for (const AmsTray* t : ext_trays(obj))
+            if (!obj->is_multi_extruders() || t->id == ams) tray = t;
+        if (!tray) return { 404, obj->dev_name + " has no external spool " + ams };
+    } else {
+        tray = obj->get_ams_tray(ams, slot);
+        if (!tray) return { 404, obj->dev_name + " has no AMS " + ams + " slot " + slot };
+    }
+    const bool exists = ext ? tray_present(*tray) : tray->is_exists;
+    const auto a      = FilamentCommands::availability(filament_state(obj), exists, slot_loaded(obj, ams, ext ? "0" : slot));
+    if (load && !a.can_load)
+        return { 409, "cannot load that slot: " + (a.why.empty() ? std::string("it is already loaded") : a.why) };
+    if (!load && !a.can_unload)
+        return { 409, "cannot unload that slot: " + (a.why.empty() ? std::string("it is not the one loaded") : a.why) };
+
+    p->kind            = "bambu";
+    p->printer_name    = obj->dev_name;
+    p->is_setting      = true;
+    p->command         = req.action;
+    p->call            = "command_ams_change_filament";
+    p->multi_extruders = obj->is_multi_extruders();
+    const std::string where = ext ? (p->multi_extruders ? (ams == "254" ? "left external spool" : "right external spool") : "external spool")
+                                  : (std::atoi(ams.c_str()) >= FilamentCommands::BAMBU_HT_FIRST ? "AMS HT " + std::to_string(std::atoi(ams.c_str()) - 127)
+                                                                                                 : "AMS " + std::to_string(std::atoi(ams.c_str()) + 1)) +
+                                        " slot " + std::to_string(std::atoi(slot.c_str()) + 1);
+    if (load) {
+        if (ext) {
+            // The external spool's own range, both ways (StatusPanel: old and new both from it);
+            // the new protocol names the spool, the old one always 254.
+            p->fil_old_temp = p->fil_new_temp = FilamentCommands::tray_mid_temp(tray->nozzle_temp_min, tray->nozzle_temp_max);
+            p->fil_ams      = (obj->is_enable_np || obj->is_enable_ams_np) ? ams : std::string("254");
+            p->fil_slot     = "0";
+        } else {
+            const AmsTray* curr = obj->get_curr_tray();
+            if (curr) {
+                p->fil_old_temp = FilamentCommands::tray_mid_temp(curr->nozzle_temp_min, curr->nozzle_temp_max);
+                p->fil_new_temp = FilamentCommands::tray_mid_temp(tray->nozzle_temp_min, tray->nozzle_temp_max);
+            }
+            p->fil_ams  = ams;
+            p->fil_slot = slot;
+        }
+        p->setting_text = "load " + where;
+    } else {
+        p->fil_ams      = ams;
+        p->fil_slot     = "255";
+        p->fil_old_temp = p->fil_new_temp = FilamentCommands::UNLOAD_DEFAULT_TEMP;
+        p->setting_text = "unload " + where;
+    }
+    p->status_before      = obj->print_status;
+    p->print_error_before = obj->print_error;
+    out                   = p;
+    BOOST_LOG_TRIVIAL(info) << "RemoteControl: " << p->setting_text << " prepared for " << obj->dev_name;
+    return { 200, "" };
+}
+
+// A Snapmaker U1 over the LAN: the toolhead macros, only where its G-code help lists them.
+static std::pair<int, std::string> prepare_filament_u1(const Request& req, std::shared_ptr<Prepared> p, std::shared_ptr<Prepared>& out)
+{
+    const bool load = req.action == "load_filament";
+    if (!all_digits(req.slot)) return { 400, "slot is required (the toolhead, 0..3)" };
+    SnapmakerLan::Device d;
+    if (!SnapmakerLan::find(req.printer.substr(3), d)) return { 404, "no such printer: " + req.printer };
+    p->kind         = "snapmaker";
+    p->printer_name = d.name.empty() ? d.ip : d.name;
+    SnapmakerLan::Status s;
+    if (!SnapmakerLan::cached_status(d, s)) return { 409, p->printer_name + " has not answered yet; open its card once and try again" };
+    if (!s.online) return { 409, p->printer_name + " is offline" };
+    if (s.login_required) return { 409, p->printer_name + " requires a login for its LAN API, so it cannot be controlled from here" };
+    if (!s.filament_macros)
+        return { 409, p->printer_name + " does not list the load / unload commands (INNER_FILAMENT_UNLOAD, SM_PRINT_AUTO_FEED, ...), so this is left to its screen" };
+    const int                                 index = std::atoi(req.slot.c_str());
+    const std::vector<SnapmakerLan::Toolhead> heads = SnapmakerLan::toolheads(d);
+    if (index < 0 || index >= (int) heads.size()) return { 404, p->printer_name + " has no toolhead " + std::to_string(index + 1) };
+    const SnapmakerLan::Toolhead& h = heads[index];
+    FilamentCommands::PrinterState ps;
+    ps.printing  = s.printing();
+    const auto a = FilamentCommands::availability(ps, true, h.loaded, FilamentCommands::is_flexible(h.type));
+    if (load && !a.can_load) return { 409, "cannot load toolhead " + std::to_string(index + 1) + ": " + (a.why.empty() ? std::string("it is already loaded") : a.why) };
+    if (!load && !a.can_unload) return { 409, "cannot unload toolhead " + std::to_string(index + 1) + ": " + (a.why.empty() ? std::string("it is empty") : a.why) };
+
+    p->is_setting       = true;
+    p->script           = load ? FilamentCommands::u1_load_script(index)
+                               : FilamentCommands::u1_unload_script(index, FilamentCommands::u1_unload_temp(h.type), h.nozzle);
+    p->setting_text     = (load ? "load toolhead " : "unload toolhead ") + std::to_string(index + 1);
+    p->url              = SnapmakerLan::base_url(d) + "/printer/gcode/script?script=" + Http::url_encode(p->script);
+    p->moonraker_method = "printer.gcode.script";
+    p->timeout_s        = 300; // heating and feeding: the printer answers when the macro is done
+    out                 = p;
+    BOOST_LOG_TRIVIAL(info) << "RemoteControl: " << p->setting_text << " prepared for " << p->printer_name << " (assumed macros)";
+    return { 200, "" };
+}
+
 std::pair<int, std::string> prepare(const Request& req, std::shared_ptr<Prepared>& out)
 {
+    if (is_filament_verb(req.action)) {
+        if (req.printer.empty()) return { 400, "printer is required" };
+        auto p        = std::make_shared<Prepared>();
+        p->action     = req.action;
+        p->dry_run    = req.dry_run || env_flag("SNORCA_SEND_DRYRUN");
+        p->printer_id = req.printer;
+        if (req.printer.compare(0, 3, "sm:") == 0) return prepare_filament_u1(req, p, out);
+        if (req.printer == "host" || req.printer == "connect" || req.printer.compare(0, 3, "ph:") == 0)
+            return { 409, "loading and unloading filament is not offered for this printer" };
+        return prepare_filament_bambu(req, p, out);
+    }
     if (is_setting_verb(req.action)) {
         if (req.printer.empty()) return { 400, "printer is required" };
         if (req.printer.compare(0, 3, "ph:") == 0) return { 409, "this printer's settings cannot be changed from here" };
@@ -834,6 +1034,14 @@ static void run_bambu(std::shared_ptr<Prepared> p, Sink& sink)
             args["level"] = p->int_value;
         } else if (p->action == "set_light") {
             args["on"] = p->light_on;
+        } else if (is_filament_verb(p->action)) {
+            args["ams_id"]    = p->fil_ams;
+            args["slot_id"]   = p->fil_slot;
+            args["curr_temp"] = p->fil_old_temp;
+            args["tar_temp"]  = p->fil_new_temp;
+            // What goes over MQTT, bar the sequence id: the same builder the Device tab uses.
+            args["payload"]   = FilamentCommands::ams_change_filament_json(p->action == "load_filament", p->fil_ams, p->fil_slot,
+                                                                           p->fil_old_temp, p->fil_new_temp, p->multi_extruders);
         } else {
             args["fan"]      = p->heater;
             args["fan_type"] = p->fan_type;
@@ -885,7 +1093,10 @@ static void run_bambu(std::shared_ptr<Prepared> p, Sink& sink)
         if (p->is_setting) {
             // Exactly the calls the Device tab's own controls make (StatusPanel::on_set_bed_temp,
             // send_nozzle_temp, on_set_chamber_temp, the speed popup, on_lamp_switch, FanControl).
-            if (p->action == "set_temp") {
+            if (is_filament_verb(p->action)) {
+                *rc = obj->command_ams_change_filament(p->action == "load_filament", p->fil_ams, p->fil_slot, p->fil_old_temp,
+                                                       p->fil_new_temp);
+            } else if (p->action == "set_temp") {
                 if (p->heater == "bed")          *rc = obj->command_set_bed(p->int_value);
                 else if (p->heater == "chamber") *rc = obj->command_set_chamber(p->int_value);
                 else if (p->dual_nozzle)         *rc = obj->command_set_nozzle_new(p->extruder_id, p->int_value);
@@ -964,7 +1175,8 @@ static void run_host(std::shared_ptr<Prepared> p, Sink& sink)
     }
     sink.progress(40, "sending " + p->action + " to the printer");
     std::string body, error;
-    if (moonraker_http(p->url, true, body, error, 15)) {
+    if (is_filament_verb(p->action)) sink.progress(30, p->setting_text + ": the printer is heating and feeding");
+    if (moonraker_http(p->url, true, body, error, p->timeout_s)) {
         result["reply"] = parse_or_raw(body);
         sink.done(true, "", result);
         return;
@@ -1039,8 +1251,9 @@ void describe_bambu(MachineObject* m, json& p)
     }
     p["hms"] = hms;
     // The native printer screen's controls and the AMS, from the same object.
-    p["controls"] = DeviceControls::to_json(bambu_caps(m));
-    p["ams"]      = ams_json(m);
+    p["controls"]   = DeviceControls::to_json(bambu_caps(m));
+    p["ams"]        = ams_json(m);
+    p["ext_spools"] = ext_spools_json(m);
 }
 
 void list_host_targets(std::vector<HostTarget>& out)
