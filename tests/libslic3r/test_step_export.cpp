@@ -163,6 +163,7 @@ TEST_CASE("mesh_to_brep merges a tessellated cylinder's caps and wall quads", "[
     CHECK(info.solids == 1);
     CHECK(info.faces == 36 + 2);
     CHECK(info.planar_faces == info.faces);
+    CHECK(info.edges == 3 * 36); // 36 vertical edges, 36 around each cap
     CHECK_THAT(info.volume, WithinRel(double(its_volume(its)), 1e-5));
 }
 
@@ -256,11 +257,13 @@ TEST_CASE("mesh_to_brep on large meshes completes in reasonable time", "[MeshToB
         const auto            t0   = std::chrono::steady_clock::now();
         const TopoDS_Shape    shape = BRep::mesh_to_brep(its, {}, stats);
         const double          secs  = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-        const BRep::ShapeInfo info  = BRep::shape_info(shape);
+        const BRep::ShapeInfo info  = BRep::shape_info(shape, true);
         WARN("gridded cube 120000 triangles: build " << stats.seconds_build << " s, merge " << stats.seconds_merge << " s, total " << secs
                                                    << " s, faces " << stats.faces_before_merge << " -> " << info.faces);
         CHECK(stats.is_solid);
+        CHECK(info.valid);
         CHECK(info.faces == 6);
+        CHECK(info.edges == 12); // the 100 grid segments along each side are joined into one edge
         CHECK_THAT(info.volume, WithinRel(125000., 1e-6));
         CHECK(secs < 120.);
     }

@@ -390,6 +390,7 @@ bool store_step(const std::string &path, const std::vector<StepExportItem> &item
         return done(false);
     }
     report.objects = int(objects.size());
+    const double seconds_shapes = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
 
     Handle(XCAFApp_Application) app = XCAFApp_Application::GetApplication();
     Handle(TDocStd_Document) doc;
@@ -434,9 +435,14 @@ bool store_step(const std::string &path, const std::vector<StepExportItem> &item
         writer.SetNameMode(Standard_True);
         Interface_Static::SetCVal("write.step.unit", "MM");
         Interface_Static::SetCVal("write.step.schema", "AP214IS");
+        // No p-curves: CAD systems rebuild them, and for a faceted B-rep they would double the
+        // file (the source STEP files we re-export rarely carry them either).
+        Interface_Static::SetIVal("write.surfacecurve.mode", 0);
+        const auto t_transfer = std::chrono::steady_clock::now();
         if (!writer.Transfer(doc, STEPControl_AsIs))
             report.error = "the shapes could not be transferred to STEP";
         else {
+            const auto t_write = std::chrono::steady_clock::now();
             APIHeaderSection_MakeHeader header(writer.ChangeWriter().Model());
             header.SetOriginatingSystem(new TCollection_HAsciiString("EdgeSlicer"));
             header.SetName(new TCollection_HAsciiString(boost::filesystem::path(path).filename().string().c_str()));
@@ -444,6 +450,10 @@ bool store_step(const std::string &path, const std::vector<StepExportItem> &item
                 report.error = "cannot write " + path;
             else
                 ok = true;
+            const auto t_end = std::chrono::steady_clock::now();
+            BOOST_LOG_TRIVIAL(info) << "STEP export: shapes " << seconds_shapes << " s, transfer "
+                                    << std::chrono::duration<double>(t_write - t_transfer).count() << " s, write "
+                                    << std::chrono::duration<double>(t_end - t_write).count() << " s";
         }
     } catch (const Standard_Failure &e) {
         report.error = std::string("OCCT failed while writing STEP: ") + (e.GetMessageString() ? e.GetMessageString() : "unknown error");

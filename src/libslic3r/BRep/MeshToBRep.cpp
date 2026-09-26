@@ -8,6 +8,7 @@
 
 #include "libslic3r/Exception.hpp"
 
+#include <BRepTools_ReShape.hxx>
 #include <BRep_Builder.hxx>
 #include <BRepAdaptor_Surface.hxx>
 #include <BRepBndLib.hxx>
@@ -20,14 +21,18 @@
 #include <BRep_Tool.hxx>
 #include <Bnd_Box.hxx>
 #include <GProp_GProps.hxx>
+#include <Geom_Line.hxx>
 #include <Geom_Plane.hxx>
+#include <Geom_TrimmedCurve.hxx>
 #include <Poly_Triangulation.hxx>
 #include <ShapeFix_ShapeTolerance.hxx>
 #include <ShapeUpgrade_UnifySameDomain.hxx>
 #include <Standard_Failure.hxx>
 #include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
+#include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
+#include <TopTools_ListIteratorOfListOfShape.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Compound.hxx>
 #include <TopoDS_Edge.hxx>
@@ -41,6 +46,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <deque>
 #include <cfloat>
 #include <cmath>
 #include <numeric>
@@ -124,6 +130,112 @@ bool box_contains(const Bnd_Box &outer, const Bnd_Box &inner)
     outer.Get(ox0, oy0, oz0, ox1, oy1, oz1);
     inner.Get(ix0, iy0, iz0, ix1, iy1, iz1);
     return ix0 >= ox0 && iy0 >= oy0 && iz0 >= oz0 && ix1 <= ox1 && iy1 <= oy1 && iz1 <= oz1;
+}
+
+bool is_line(const TopoDS_Edge &edge)
+{
+    double                   first, last;
+    const Handle(Geom_Curve) curve = BRep_Tool::Curve(edge, first, last);
+    return !curve.IsNull() && (curve->IsKind(STANDARD_TYPE(Geom_Line)) ||
+                               (curve->IsKind(STANDARD_TYPE(Geom_TrimmedCurve)) &&
+                                Handle(Geom_TrimmedCurve)::DownCast(curve)->BasisCurve()->IsKind(STANDARD_TYPE(Geom_Line))));
+}
+
+// Join chains of straight edges that meet at a vertex nothing else uses, when they are collinear
+// and bound the same faces: after the coplanar merge, the side of a merged face that crossed
+// several triangles is still made of several edges. Linear in the number of edges.
+TopoDS_Shape merge_collinear_edges(const TopoDS_Shape &shape, double tol, double angle)
+{
+    TopTools_IndexedDataMapOfShapeListOfShape vertex_edges, edge_faces;
+    TopExp::MapShapesAndUniqueAncestors(shape, TopAbs_VERTEX, TopAbs_EDGE, vertex_edges);
+    TopExp::MapShapesAndUniqueAncestors(shape, TopAbs_EDGE, TopAbs_FACE, edge_faces);
+    const double sin_tol = std::sin(std::max(angle, 1e-9));
+
+    auto point  = [](const TopoDS_Shape &v) { return BRep_Tool::Pnt(TopoDS::Vertex(v)); };
+    auto first  = [](const TopoDS_Shape &e) { return TopExp::FirstVertex(TopoDS::Edge(e.Oriented(TopAbs_FORWARD))); };
+    auto last   = [](const TopoDS_Shape &e) { return TopExp::LastVertex(TopoDS::Edge(e.Oriented(TopAbs_FORWARD))); };
+    auto other  = [&](const TopoDS_Shape &e, const TopoDS_Shape &v) -> TopoDS_Vertex {
+        const TopoDS_Vertex a = first(e);
+        return a.IsSame(v) ? last(e) : a;
+    };
+    auto same_faces = [&](const TopoDS_Shape &e1, const TopoDS_Shape &e2) {
+        const TopTools_ListOfShape &f1 = edge_faces.FindFromKey(e1), &f2 = edge_faces.FindFromKey(e2);
+        if (f1.Extent() != f2.Extent())
+            return false;
+        for (TopTools_ListIteratorOfListOfShape i(f1); i.More(); i.Next()) {
+            bool found = false;
+            for (TopTools_ListIteratorOfListOfShape j(f2); j.More() && !found; j.Next())
+                found = i.Value().IsSame(j.Value());
+            if (!found)
+                return false;
+        }
+        return true;
+    };
+
+    // A vertex can go when exactly two straight edges meet there, bounding the same faces, in line.
+    std::vector<char> removable(vertex_edges.Extent() + 1, 0);
+    for (int i = 1; i <= vertex_edges.Extent(); ++i) {
+        const TopTools_ListOfShape &edges = vertex_edges(i);
+        if (edges.Extent() != 2)
+            continue;
+        const TopoDS_Shape &e1 = edges.First(), &e2 = edges.Last();
+        if (e1.IsSame(e2) || !is_line(TopoDS::Edge(e1)) || !is_line(TopoDS::Edge(e2)) || !same_faces(e1, e2))
+            continue;
+        const TopoDS_Shape &v = vertex_edges.FindKey(i);
+        const gp_Pnt        p = point(v), a = point(other(e1, v)), b = point(other(e2, v));
+        const gp_Vec        d1(a, p), d2(p, b);
+        if (d1.Magnitude() < tol || d2.Magnitude() < tol)
+            continue;
+        if (d1.Dot(d2) > 0. && d1.Crossed(d2).Magnitude() <= sin_tol * d1.Magnitude() * d2.Magnitude())
+            removable[i] = 1;
+    }
+
+    BRepTools_ReShape          reshape;
+    TopTools_IndexedMapOfShape visited;
+    int                        merged_chains = 0;
+    for (int ie = 1; ie <= edge_faces.Extent(); ++ie) {
+        const TopoDS_Shape &start = edge_faces.FindKey(ie);
+        if (visited.Contains(start))
+            continue;
+        visited.Add(start);
+        auto is_removable = [&](const TopoDS_Shape &v) { const int idx = vertex_edges.FindIndex(v); return idx > 0 && removable[idx]; };
+        // Walk from `start` through removable vertices in both directions.
+        std::deque<TopoDS_Shape>  edges{start};
+        std::deque<TopoDS_Vertex> verts{first(start), last(start)};
+        bool                      loop = false;
+        for (int dir = 0; dir < 2 && !loop; ++dir) {
+            for (;;) {
+                const TopoDS_Vertex end = dir == 0 ? verts.back() : verts.front();
+                if (!is_removable(end))
+                    break;
+                const TopoDS_Shape &cur  = dir == 0 ? edges.back() : edges.front();
+                const TopTools_ListOfShape &at = vertex_edges.FindFromKey(end);
+                const TopoDS_Shape &next = at.First().IsSame(cur) ? at.Last() : at.First();
+                if (next.IsSame(start)) {
+                    loop = true;
+                    break;
+                }
+                visited.Add(next);
+                if (dir == 0) {
+                    edges.push_back(next);
+                    verts.push_back(other(next, end));
+                } else {
+                    edges.push_front(next);
+                    verts.push_front(other(next, end));
+                }
+            }
+        }
+        if (loop || edges.size() < 2)
+            continue;
+        const TopoDS_Edge joined = BRepBuilderAPI_MakeEdge(verts.front(), verts.back()).Edge();
+        const TopoDS_Shape head  = edges.front().Oriented(TopAbs_FORWARD);
+        // The replacement must run the way the edge it replaces runs.
+        reshape.Replace(head, first(head).IsSame(verts.front()) ? TopoDS_Shape(joined) : joined.Reversed());
+        for (size_t k = 1; k < edges.size(); ++k)
+            reshape.Remove(edges[k].Oriented(TopAbs_FORWARD));
+        ++merged_chains;
+    }
+    return merged_chains > 0 ? reshape.Apply(shape) : shape;
 }
 
 } // namespace
@@ -367,14 +479,20 @@ TopoDS_Shape mesh_to_brep(const indexed_triangle_set &its, const MeshToBRepParam
     if (params.merge_angle_deg > 0.) {
         const auto t_merge = clock::now();
         try {
-            ShapeUpgrade_UnifySameDomain unifier(shape, Standard_True, Standard_True, Standard_False);
+            // Faces only: UnifySameDomain's edge unification is far worse than linear (134 s for
+            // the 52k-triangle Stanford bunny against 1.3 s for the faces), so the collinear
+            // edges left on the merged faces' boundaries are joined by merge_collinear_edges().
+            ShapeUpgrade_UnifySameDomain unifier(shape, Standard_False, Standard_True, Standard_False);
             unifier.SetLinearTolerance(tol);
             unifier.SetAngularTolerance(params.merge_angle_deg * M_PI / 180.);
             unifier.AllowInternalEdges(Standard_False);
             unifier.Build();
-            const TopoDS_Shape merged = unifier.Shape();
-            if (!merged.IsNull())
+            TopoDS_Shape merged = unifier.Shape();
+            if (!merged.IsNull()) {
+                merged = merge_collinear_edges(merged, tol, params.merge_angle_deg * M_PI / 180.);
+                ShapeFix_ShapeTolerance().SetTolerance(merged, tol);
                 shape = merged;
+            }
         } catch (const Standard_Failure &) {
             // The merge is cosmetic: keep the exact faceted shape.
             stats.warnings.emplace_back("coplanar faces could not be merged; the faceted shape is kept");

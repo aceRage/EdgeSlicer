@@ -10,8 +10,9 @@
 // BRepBuilderAPI_Sewing pass, and watertightness falls out of the edge-usage counts.
 // EdgeSlicer additions: connected components become separate solids, closed inward-facing
 // components become cavities of the solid that contains them, open components become shells
-// with a warning, and all sub-shape tolerances are set from the mesh's float precision so the
-// coplanar merge yields a valid B-rep.
+// with a warning, all sub-shape tolerances are set from the mesh's float precision so the
+// coplanar merge yields a valid B-rep, and the straight edges left collinear on a merged face's
+// boundary are joined by a linear pass (UnifySameDomain's own edge merge is far from linear).
 
 #include "libslic3r/BoundingBox.hpp"
 #include "libslic3r/TriangleMesh.hpp"
