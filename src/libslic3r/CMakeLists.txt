@@ -666,7 +666,7 @@ target_include_directories(libslic3r PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_
 target_include_directories(libslic3r SYSTEM PUBLIC ${EXPAT_INCLUDE_DIRS})
 
 # Find the OCCT and related libraries
-set(OpenCASCADE_DIR "${CMAKE_PREFIX_PATH}/lib/cmake/occt")
+set(OpenCASCADE_DIR "${OCCT_PREFIX}/lib/cmake/occt")
 find_package(OpenCASCADE REQUIRED)
 target_include_directories(libslic3r SYSTEM PUBLIC ${OpenCASCADE_INCLUDE_DIR})
 
@@ -687,6 +687,11 @@ set(OCCT_LIBS
     TKV3d
     TKService
     TKMesh
+    # ModelingAlgorithms (deps/OCCT/OCCT.cmake): B-rep fillet/chamfer, offset/shell, features.
+    TKFeat
+    TKOffset
+    TKFillet
+    TKBool
     TKBO
     TKPrim
     TKHLR
