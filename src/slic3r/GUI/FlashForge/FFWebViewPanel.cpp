@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <chrono>
 #include <map>
+#include <boost/filesystem.hpp>
 #include <boost/json/src.hpp>
 #include <boost/log/trivial.hpp>
 #include <boost/property_tree/ptree.hpp>
