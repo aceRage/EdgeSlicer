@@ -266,6 +266,16 @@ else ()
     set(IS_CLANG_CL FALSE)
 endif ()
 
+# With a compiler cache as the launcher (-DCMAKE_CXX_COMPILER_LAUNCHER=sccache), pass SYSTEM include
+# directories to MSVC as plain -I: sccache 0.17 hashes the paths of /external:I arguments (it does
+# not hash -I), so otherwise every build directory and every checkout gets cache entries of its own.
+# /external:anglebrackets keeps the <...> dependency headers quiet, as /external:I did.
+if (MSVC AND NOT IS_CLANG_CL AND CMAKE_CXX_COMPILER_LAUNCHER)
+    set(CMAKE_INCLUDE_SYSTEM_FLAG_C "-I")
+    set(CMAKE_INCLUDE_SYSTEM_FLAG_CXX "-I")
+    add_compile_options(/external:anglebrackets /external:W0)
+endif ()
+
 if (MSVC)
     if (SLIC3R_MSVC_COMPILE_PARALLEL AND NOT IS_CLANG_CL)
            add_compile_options(/MP)
