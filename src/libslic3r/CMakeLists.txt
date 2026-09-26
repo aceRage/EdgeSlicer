@@ -240,6 +240,10 @@ set(lisbslic3r_sources
     Format/SL1.hpp
     Format/STEP.cpp
     Format/STEP.hpp
+    Format/STEPExport.cpp
+    Format/STEPExport.hpp
+    BRep/MeshToBRep.cpp
+    BRep/MeshToBRep.hpp
     Format/STL.cpp
     Format/STL.hpp
     Format/svg.cpp
@@ -611,6 +615,8 @@ slic3r_unity_build(libslic3r SKIP
     SLA/Pad.cpp                     # libnest2d headers clash with neighbours
     Support/TreeSupport.cpp         # libnest2d headers clash with neighbours
     Format/STEP.cpp                 # OCCT's Handle() macro breaks CGAL headers in neighbours
+    Format/STEPExport.cpp           # OCCT's Handle() macro breaks CGAL headers in neighbours
+    BRep/MeshToBRep.cpp             # OCCT's Handle() macro breaks CGAL headers in neighbours
     Shape/TextShape.cpp             # OCCT's Handle() macro breaks CGAL headers in neighbours
     Geometry/VoronoiUtilsCgal.cpp   # CGAL must come before OCCT's Handle() macro (Model.hpp -> STEP.hpp)
     FlushVolCalc.cpp                # calls RGB2HSV() from libslic3r_gui; alone it is dropped by the linker in libslic3r_tests
