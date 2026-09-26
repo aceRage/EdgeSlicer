@@ -85,7 +85,11 @@ if(GIT_FOUND AND EXISTS "${CMAKE_SOURCE_DIR}/.git")
         OUTPUT_VARIABLE GIT_COMMIT_HASH
         OUTPUT_STRIP_TRAILING_WHITESPACE
     )
-    add_definitions("-DGIT_COMMIT_HASH=\"${GIT_COMMIT_HASH}\"")
+    # Not passed as a global -DGIT_COMMIT_HASH any more: that put the commit into every compile
+    # command, so each new commit + reconfigure recompiled everything (Ninja and MSBuild both track
+    # command lines) and invalidated every compiler-cache entry. No source reads the macro
+    # (common_func.hpp falls back to "0000000"); a file that needs it should get it through its own
+    # COMPILE_DEFINITIONS source property or a configured header.
 endif()
 
 if(DEFINED ENV{SLIC3R_STATIC})
@@ -108,6 +112,26 @@ option(SLIC3R_MSVC_COMPILE_PARALLEL "Compile on Visual Studio in parallel" 1)
 option(SLIC3R_MSVC_PDB          "Generate PDB files on MSVC in Release mode" 1)
 option(SLIC3R_PERL_XS           "Compile XS Perl module and enable Perl unit and integration tests" 0)
 option(SLIC3R_ASAN              "Enable ASan on Clang and GCC" 0)
+
+# Unity ("jumbo") build of the two big libraries: CMake compiles their sources in batches of
+# SLIC3R_UNITY_BUILD_BATCH_SIZE files per translation unit, so the common headers are parsed once per
+# batch instead of once per file. Off by default, so CI and the Visual Studio workflow are unchanged.
+# Sources that cannot share a translation unit are listed next to each slic3r_unity_build() call.
+option(SLIC3R_UNITY_BUILD       "Unity (jumbo) build of libslic3r and libslic3r_gui" 0)
+set(SLIC3R_UNITY_BUILD_BATCH_SIZE 8 CACHE STRING "Source files per unity translation unit (SLIC3R_UNITY_BUILD; use 16 with /Z7, see src/slic3r)")
+
+# slic3r_unity_build(<target> [SKIP <source>...]): unity-build <target> when SLIC3R_UNITY_BUILD is on;
+# the SKIP sources keep a translation unit of their own. Call it from the directory that owns the sources.
+function(slic3r_unity_build _target)
+    if (NOT SLIC3R_UNITY_BUILD)
+        return()
+    endif ()
+    cmake_parse_arguments(_UB "" "" "SKIP" ${ARGN})
+    set_target_properties(${_target} PROPERTIES UNITY_BUILD ON UNITY_BUILD_BATCH_SIZE ${SLIC3R_UNITY_BUILD_BATCH_SIZE})
+    if (_UB_SKIP)
+        set_source_files_properties(${_UB_SKIP} PROPERTIES SKIP_UNITY_BUILD_INCLUSION ON)
+    endif ()
+endfunction()
 
 # Sentry crash handling - built in on Windows and macOS by default.
 #
@@ -240,6 +264,16 @@ if (MSVC AND CMAKE_CXX_COMPILER_ID STREQUAL Clang)
         -Wno-old-style-cast -Wno-reserved-id-macro -Wno-c++98-compat-pedantic")
 else ()
     set(IS_CLANG_CL FALSE)
+endif ()
+
+# With a compiler cache as the launcher (-DCMAKE_CXX_COMPILER_LAUNCHER=sccache), pass SYSTEM include
+# directories to MSVC as plain -I: sccache 0.17 hashes the paths of /external:I arguments (it does
+# not hash -I), so otherwise every build directory and every checkout gets cache entries of its own.
+# /external:anglebrackets keeps the <...> dependency headers quiet, as /external:I did.
+if (MSVC AND NOT IS_CLANG_CL AND CMAKE_CXX_COMPILER_LAUNCHER)
+    set(CMAKE_INCLUDE_SYSTEM_FLAG_C "-I")
+    set(CMAKE_INCLUDE_SYSTEM_FLAG_CXX "-I")
+    add_compile_options(/external:anglebrackets /external:W0)
 endif ()
 
 if (MSVC)
