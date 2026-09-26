@@ -1,4 +1,5 @@
 #include "MaterialStation.hpp"
+#include <memory>
 #include <slic3r/GUI/wxExtensions.hpp>
 #include <wx/dcbuffer.h>
 #include <wx/display.h>

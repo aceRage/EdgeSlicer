@@ -1,5 +1,6 @@
 #include "PrinterCameraPanel.h"
 #include <memory>
+#include <boost/log/trivial.hpp>
 #include <nlohmann/json.hpp>
 #include <wx/dcclient.h>
 #include <wx/dcgraph.h>

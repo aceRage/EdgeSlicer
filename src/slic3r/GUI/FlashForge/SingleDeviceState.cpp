@@ -1,4 +1,5 @@
 #include "SingleDeviceState.hpp"
+#include <boost/log/trivial.hpp>
 #include "slic3r/GUI/I18N.hpp"
 #include "slic3r/GUI/BitmapCache.hpp"
 #include "slic3r/GUI/GUI.hpp"

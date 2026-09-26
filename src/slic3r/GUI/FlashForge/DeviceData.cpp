@@ -1,4 +1,5 @@
 #include "DeviceData.hpp"
+#include <boost/log/trivial.hpp>
 #include "slic3r/GUI/GUI_App.hpp"
 #include "MultiComMgr.hpp"
 #include "slic3r/GUI/FlashForge/FFConnectPrinter.hpp"

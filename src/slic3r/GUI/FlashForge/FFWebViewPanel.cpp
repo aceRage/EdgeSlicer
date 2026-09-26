@@ -12,6 +12,7 @@
 #include <wx/base64.h>
 #include <wx/file.h>
 #include <wx/filefn.h>
+#include <wx/filename.h>
 #include <wx/object.h>
 #include <wx/sizer.h>
 #include <wx/url.h>

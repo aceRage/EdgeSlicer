@@ -1,4 +1,5 @@
 #include "ExportLogs.hpp"
+#include <memory>
 #include <thread>
 #include <boost/log/trivial.hpp>
 #include <wx/datetime.h>

@@ -3,6 +3,7 @@
 #include <fstream>
 #include <iterator>
 #include <boost/algorithm/hex.hpp>
+#include <boost/log/trivial.hpp>
 #include <openssl/md5.h>
 #include "ComCommand.hpp"
 #include "ComWanConn.hpp"

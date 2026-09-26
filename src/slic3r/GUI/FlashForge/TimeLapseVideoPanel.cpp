@@ -1,6 +1,7 @@
 #include "TimeLapseVideoPanel.hpp"
 #include <cmath>
 #include <algorithm>
+#include <memory>
 #include <wx/dirdlg.h>
 #include <wx/filefn.h>
 #include <wx/filename.h>
