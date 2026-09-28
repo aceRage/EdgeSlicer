@@ -36,8 +36,9 @@ public:
 
     // Wipe-tower entry stagger (Snap #934). Slot is (layer*7 + tc*5) % 17 when enabled.
     // The Edge-safe offset is 0 on the first printed tower layer, on local-Z changes
-    // (tc_idx_in_normal == size_t(-1)), and on tower-interface changes; otherwise it is
-    // min(slot * line_spacing, max(0, required_depth - ramming_depth - 4 * line_width)).
+    // (tc_idx_in_normal == size_t(-1)), on tower-interface changes, and on the extra
+    // end-of-print layer (final purge rams in place; do not walk the start). Otherwise
+    // it is min(slot * line_spacing, max(0, required_depth - ramming_depth - 4 * line_width)).
     static size_t toolchange_entry_stagger_slot(bool enabled, size_t layer_idx, size_t toolchange_idx);
     static float  toolchange_entry_stagger_offset(bool enabled, size_t layer_idx, size_t toolchange_idx, float line_spacing);
     static float  stagger_offset_for(bool     enabled,
@@ -48,7 +49,8 @@ public:
                                      float    line_spacing,
                                      float    required_depth,
                                      float    ramming_depth,
-                                     float    line_width);
+                                     float    line_width,
+                                     bool     is_final_purge = false);
 
     
     // Construct ToolChangeResult from current state of WipeTower2 and WipeTowerWriter2.

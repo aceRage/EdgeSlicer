@@ -335,6 +335,9 @@ TEST_CASE("Edge-safe stagger offset is zero on first layer, local-Z and interfac
                      WithinAbs(0.f, 1e-6f));
         REQUIRE_THAT(WipeTower2::stagger_offset_for(true, 3, first, 0, true, spacing, depth, ram, line_w),
                      WithinAbs(0.f, 1e-6f));
+        // Extra end-of-print layer: rams in the planned box or unloads at object-top (N1).
+        REQUIRE_THAT(WipeTower2::stagger_offset_for(true, 3, first, 0, false, spacing, depth, ram, line_w, true),
+                     WithinAbs(0.f, 1e-6f));
     }
 
     SECTION("index progression matches the slot cycle and is clamped to the box room")
@@ -585,6 +588,19 @@ TEST_CASE("Stagger off is a no-op on non-U1 G-code; stagger on moves the wipe st
     CHECK(count_tag(g_off, "[restore_layer_z_before_toolchange]") ==
           count_tag(g_on, "[restore_layer_z_before_toolchange]"));
     CHECK(count_tag(g_off, "; CP TOOLCHANGE UNLOAD") == count_tag(g_on, "; CP TOOLCHANGE UNLOAD"));
+    CHECK(count_tag(g_off, "Travel back up to the topmost object layer.") ==
+          count_tag(g_on, "Travel back up to the topmost object layer."));
+
+    // Final purge is unload-only. An empty TCR (U1 / skip) must not be used as a stagger source;
+    // a real SEMM final purge must not pick up a Y hop.
+    for (Print *p : {&print_off, &print_on}) {
+        if (!p->wipe_tower_data().final_purge)
+            continue;
+        if (p->wipe_tower_data().final_purge->gcode.empty())
+            CHECK_FALSE(p->wipe_tower_data().final_purge_drop);
+        else
+            CHECK(stagger_hops(p->wipe_tower_data().final_purge->gcode).empty());
+    }
 
     // Tower extrusions stay near the configured tower (140,140) plus brim, not on the cubes at ~40,40.
     {

@@ -75,11 +75,14 @@ float WipeTower2::stagger_offset_for(bool     enabled,
                                      float    line_spacing,
                                      float    required_depth,
                                      float    ramming_depth,
-                                     float    line_width)
+                                     float    line_width,
+                                     bool     is_final_purge)
 {
     // Shared by the wall-gap skip point and the purge start so the two cannot disagree.
     // Local-Z changes (tc_idx_in_normal == size_t(-1)) purge into their own reserve boxes.
-    if (!enabled || layer_id == first_layer_idx || is_interface || tc_idx_in_normal == size_t(-1))
+    // The extra end-of-print layer (N1) either rams on the tower or unloads at object-top;
+    // walking that start would move ramming off the planned box / mid-air path.
+    if (!enabled || layer_id == first_layer_idx || is_interface || tc_idx_in_normal == size_t(-1) || is_final_purge)
         return 0.f;
 
     const float raw  = toolchange_entry_stagger_offset(true, layer_id, tc_idx_in_normal, line_spacing);
@@ -2418,6 +2421,9 @@ void WipeTower2::toolchange_Wipe(WipeTowerWriter2& writer, const WipeTower::box_
         m_left_to_right = !m_left_to_right;
     }
 
+    // tool_change(-1) never reaches Wipe (unload-only). Keep the hop at 0 if it ever does:
+    // m_active_tool_change is null, and the extra set_layer sits at m_num_layer_changes == m_plan.size().
+    // Do not set force_travel on that TCR; finalize decides XY from final_purge_drop / empty gcode.
     size_t tc_idx_in_normal = size_t(-1);
     size_t layer_id         = 0;
     if (m_layer_info != m_plan.end() && m_active_tool_change != nullptr) {
@@ -3109,9 +3115,10 @@ float WipeTower2::cumulative_toolchange_depth_before(const WipeTowerInfo::ToolCh
 
 float WipeTower2::stagger_offset_for(size_t layer_id, const WipeTowerInfo::ToolChange &tc, size_t tc_idx_in_normal) const
 {
+    const bool is_final_purge = !m_plan.empty() && m_num_layer_changes == m_plan.size();
     return WipeTower2::stagger_offset_for(m_stagger_toolchange_start, layer_id, m_first_layer_idx, tc_idx_in_normal, tc.is_interface,
                                           m_perimeter_width * m_extra_spacing_wipe, tc.required_depth, tc.ramming_depth,
-                                          m_perimeter_width * m_extra_flow);
+                                          m_perimeter_width * m_extra_flow, is_final_purge);
 }
 
 static WipeTower::ToolChangeResult merge_tcr(WipeTower::ToolChangeResult& first, WipeTower::ToolChangeResult& second)
