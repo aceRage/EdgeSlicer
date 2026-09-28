@@ -6316,7 +6316,8 @@ void Print::_make_wipe_tower()
         // park on the tower, matching base — skip the final purge entirely.
         const unsigned int last_tool        = m_wipe_tower_data.tool_ordering.last_extruder();
         const bool         need_final_purge = m_config.single_extruder_multi_material ||
-                                      m_config.filament_multitool_ramming.get_at(last_tool);
+                                      (m_config.enable_filament_ramming &&
+                                       m_config.filament_multitool_ramming.get_at(last_tool));
         if (need_final_purge) {
             // Target the tower's own last active layer, not the object's top print_z, so the
             // extra layer sits on the real tower instead of mid-air. finish_layer() runs every

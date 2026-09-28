@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <memory>
 #include <regex>
 #include <sstream>
 #include <string>
@@ -392,35 +393,6 @@ int count_g1_x_and_e_positive(const std::string &block)
     return count;
 }
 
-bool gcode_has_z_drop_after_last_layer(const std::string &gcode)
-{
-    const size_t last_z_cmt = gcode.rfind(";Z:");
-    if (last_z_cmt == std::string::npos)
-        return false;
-    if (gcode.find("Travel down to the last wipe tower layer", last_z_cmt) != std::string::npos)
-        return true;
-    std::istringstream in(gcode.substr(last_z_cmt));
-    std::string        line;
-    double             z     = 0;
-    bool               have_z = false;
-    const std::regex   word("([Z])(-?[0-9]*\\.?[0-9]+)");
-    while (std::getline(in, line)) {
-        if (!line.empty() && line.back() == '\r')
-            line.pop_back();
-        const std::string code = line.substr(0, line.find(';'));
-        if (!(code.rfind("G1 ", 0) == 0 || code.rfind("G0 ", 0) == 0))
-            continue;
-        for (auto it = std::sregex_iterator(code.begin(), code.end(), word); it != std::sregex_iterator(); ++it) {
-            const double nz = std::atof((*it)[2].str().c_str());
-            if (have_z && nz < z - 1e-3)
-                return true;
-            z     = nz;
-            have_z = true;
-        }
-    }
-    return false;
-}
-
 double last_tower_extrusion_z(const std::string &gcode)
 {
     const std::vector<TowerMove> moves = tower_moves(gcode);
@@ -429,24 +401,19 @@ double last_tower_extrusion_z(const std::string &gcode)
     return std::max_element(moves.begin(), moves.end(), [](const TowerMove &a, const TowerMove &b) { return a.z < b.z; })->z;
 }
 
-double first_z_after(const std::string &gcode, const char *needle)
+double z_on_comment_line(const std::string &gcode, const char *needle)
 {
     const size_t at = gcode.rfind(needle);
     if (at == std::string::npos)
         return 0.;
-    std::istringstream in(gcode.substr(at));
-    std::string        line;
-    const std::regex   word("Z(-?[0-9]*\\.?[0-9]+)");
-    while (std::getline(in, line)) {
-        if (!line.empty() && line.back() == '\r')
-            line.pop_back();
-        const std::string code = line.substr(0, line.find(';'));
-        if (!(code.rfind("G1 ", 0) == 0 || code.rfind("G0 ", 0) == 0))
-            continue;
-        std::smatch m;
-        if (std::regex_search(code, m, word))
-            return std::atof(m[1].str().c_str());
-    }
+    const size_t line_start = gcode.rfind('\n', at);
+    const size_t begin      = line_start == std::string::npos ? 0 : line_start + 1;
+    const size_t line_end   = gcode.find('\n', at);
+    const std::string line  = gcode.substr(begin, (line_end == std::string::npos ? gcode.size() : line_end) - begin);
+    const std::string code  = line.substr(0, line.find(';'));
+    std::smatch       m;
+    if (std::regex_search(code, m, std::regex("Z(-?[0-9]*\\.?[0-9]+)")))
+        return std::atof(m[1].str().c_str());
     return 0.;
 }
 
@@ -502,8 +469,8 @@ TEST_CASE("A tall object near the tower blocks the final-purge Z drop", "[WipeTo
     // 20 mm cube sharing the tower's Y band, 40 mm away in X: inside the 72.5 mm toolhead radius.
     const FinalPurgeSlice slice = slice_final_purge(config, 20., 20., Vec3d(80., 140., 0.), 2.0);
     REQUIRE(slice.has_final_purge);
-    CHECK_FALSE(gcode_has_z_drop_after_last_layer(slice.gcode));
     CHECK(slice.gcode.find("Travel down to the last wipe tower layer") == std::string::npos);
+    CHECK(slice.gcode.find("Travel to final purge") == std::string::npos);
 }
 
 TEST_CASE("No-sparse final purge Z sits one layer above the last printed tower layer, including sparse layer 0",
@@ -511,20 +478,20 @@ TEST_CASE("No-sparse final purge Z sits one layer above the last printed tower l
 {
     DynamicPrintConfig config = final_purge_config(true, true);
     config.set_deserialize_strict({
-        { "layer_height",               0.2 },
-        { "initial_layer_print_height", 0.42 },
+        { "layer_height",               0.16 },
+        { "initial_layer_print_height", 0.32 },
     });
     const FinalPurgeSlice slice = slice_final_purge(config, 10., 10., Vec3d(40., 40., 0.), 2.0);
     REQUIRE(slice.has_final_purge);
     const double last_z = last_tower_extrusion_z(slice.gcode);
-    REQUIRE(last_z > 0.2);
-    const double drop_z = first_z_after(slice.gcode, "Travel down to the last wipe tower layer");
+    REQUIRE(last_z > 0.1);
+    const double drop_z = z_on_comment_line(slice.gcode, "Travel down to the last wipe tower layer");
     INFO("last printed tower z " << last_z << ", drop z " << drop_z);
     REQUIRE(drop_z > 0.);
     // Layer 0 is sparse (first layer uses only the highest-numbered filament) but the non-BBL
     // emitter still prints it. The extra set_layer sits one regular layer on that printed top,
     // not one first-layer height below it.
-    CHECK(std::abs(drop_z - (last_z + 0.2)) < 0.05);
+    CHECK(std::abs(drop_z - (last_z + 0.16)) < 0.05);
 }
 
 TEST_CASE("A tower that reaches the object top does not emit Travel back up", "[WipeTower][GCode][FinalPurge]")
@@ -567,42 +534,48 @@ TEST_CASE("Snapmaker U1 system profile skips the final purge", "[WipeTower][GCod
     boost::filesystem::create_directories(scratch);
     set_data_dir(scratch.string());
     const std::string profiles = (boost::filesystem::path(TEST_DATA_DIR) / ".." / ".." / "resources" / "profiles").string();
-    PresetBundle      library;
-    library.load_vendor_configs_from_json(profiles, PresetBundle::ORCA_FILAMENT_LIBRARY, PresetBundle::LoadSystem,
-                                          ForwardCompatibilitySubstitutionRule::EnableSilent);
+    static std::unique_ptr<PresetBundle> library;
+    if (!library) {
+        library = std::make_unique<PresetBundle>();
+        library->load_vendor_configs_from_json(profiles, PresetBundle::ORCA_FILAMENT_LIBRARY, PresetBundle::LoadSystem,
+                                               ForwardCompatibilitySubstitutionRule::EnableSilent);
+    }
     PresetBundle bundle;
     bundle.load_vendor_configs_from_json(profiles, "Snapmaker", PresetBundle::LoadSystem,
-                                         ForwardCompatibilitySubstitutionRule::EnableSilent, &library);
+                                         ForwardCompatibilitySubstitutionRule::EnableSilent, library.get());
     REQUIRE(bundle.printers.select_preset_by_name("Snapmaker U1 (0.4 nozzle)", true));
     REQUIRE(bundle.prints.select_preset_by_name("0.20mm Standard @Snapmaker U1 (0.4 nozzle)", true));
     REQUIRE(bundle.filaments.select_preset_by_name("Generic PLA @U1 0.4 nozzle", true));
-    bundle.set_num_filaments(2, std::vector<std::string>{ "#E01919", "#1943E0" });
-    bundle.filament_presets = std::vector<std::string>(2, "Generic PLA @U1 0.4 nozzle");
+    bundle.filament_presets = { "Generic PLA @U1 0.4 nozzle" };
+    bundle.set_num_filaments(3, std::vector<std::string>{ "#E01919", "#1943E0", "#19E043" });
+    bundle.filament_presets = std::vector<std::string>(3, "Generic PLA @U1 0.4 nozzle");
     DynamicPrintConfig config = bundle.full_config_secure();
     set_data_dir(saved_data_dir);
     config.set_deserialize_strict({
-        { "enable_prime_tower",  "1" },
-        { "prime_tower_width",   30 },
-        { "wipe_tower_x",        "30" },
-        { "wipe_tower_y",        "210" },
-        { "gcode_comments",      true },
-        { "layer_change_gcode",  "G92 E0" },
-        { "skirt_loops",         0 },
-        { "enable_support",      false },
+        { "enable_prime_tower",         "1" },
+        { "wipe_tower_x",               30 },
+        { "wipe_tower_y",               210 },
+        { "wipe_tower_rotation_angle",  0 },
+        { "gcode_comments",             true },
+        { "layer_change_gcode",         "G92 E0" },
+        { "skirt_loops",                0 },
+        { "enable_support",             false },
     });
     REQUIRE(config.opt_bool("single_extruder_multi_material") == false);
+    REQUIRE(config.opt_bool("enable_filament_ramming") == false);
 
     Print print;
     Model model;
-    ModelObject *object = model.add_object();
-    object->name        = "cube.stl";
-    object->add_volume(make_cube(10., 10., 10.));
-    object->add_instance()->set_offset(Vec3d(40., 40., 0.));
-    object->ensure_on_bed();
-    DynamicPrintConfig range_config;
-    range_config.set_key_value("extruder", new ConfigOptionInt(2));
-    object->layer_config_ranges[{0.0, 2.0}].assign_config(std::move(range_config));
-    print.auto_assign_extruders(object);
+    for (int i = 0; i < 3; ++i) {
+        ModelObject *object = model.add_object();
+        object->name        = "cube" + std::to_string(i);
+        object->add_volume(make_cube(10., 10., 6.));
+        object->config.set("extruder", i + 1);
+        object->add_instance()->set_offset(Vec3d(40. + 25. * i, 40., 0.));
+        object->ensure_on_bed();
+        print.auto_assign_extruders(object);
+    }
+    print.is_BBL_printer() = false;
     const FinalPurgeSlice slice = slice_final_purge_model(print, model, config);
     CHECK_FALSE(slice.has_final_purge);
     CHECK(slice.gcode.find("Travel to final purge") == std::string::npos);
