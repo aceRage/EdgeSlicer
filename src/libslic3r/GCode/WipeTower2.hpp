@@ -80,6 +80,15 @@ public:
 	// The extra set_layer used for the end-of-print purge sits one step past m_plan.
 	// Without this flag, is_over_tower_height would skip ramming on that last unload.
 	void set_final_purge_on_tower(bool v = true) { m_final_purge_on_tower = v; }
+	// One-layer towers reset m_num_layer_changes in set_layer (is_first_layer stays true
+	// because the iterator cannot advance past the only plan entry), so the height guard
+	// never trips. The no-drop final-purge variant sets this so toolchange_Unload skips
+	// ramming even then.
+	void set_suppress_ramming(bool v = true) { m_suppress_ramming = v; }
+
+	// Copy that reseats m_layer_info / m_active_tool_change into this instance's m_plan.
+	WipeTower2(const WipeTower2 &other);
+	WipeTower2 &operator=(const WipeTower2 &other);
 
 	// Switch to a next layer.
 	void set_layer(
@@ -291,6 +300,7 @@ private:
 	float           m_depth_traversed = 0.f; // Current y position at the wipe tower.
     bool            m_current_layer_finished = false;
     bool            m_final_purge_on_tower = false;
+    bool            m_suppress_ramming     = false;
 	bool 			m_left_to_right   = true;
 	float			m_extra_flow      = 1.f;
 	float			m_extra_spacing_wipe    = 1.f;
@@ -427,6 +437,9 @@ private:
     Polygon generate_rib_polygon(const WipeTower::box_coordinates& wt_box);
 
     WipeTowerInfo::ToolChange set_toolchange(int old_tool, int new_tool, float layer_height, float wipe_volume);
+
+    void copy_assign_from(const WipeTower2 &other);
+    friend void reseat_wipe_tower2_iterators(WipeTower2 &dst, const WipeTower2 &src);
 };
 
 

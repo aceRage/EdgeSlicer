@@ -11355,6 +11355,8 @@ void GLCanvas3D::_load_wipe_tower_toolpaths(const BuildVolume& build_volume, con
     if (print->wipe_tower_data().priming)
         for (int i=0; i<(int)print->wipe_tower_data().priming.get()->size(); ++i)
             ctxt.priming.emplace_back(print->wipe_tower_data().priming.get()->at(i));
+    // N2: process() re-picks final_purge_drop with current positions / clearance, so
+    // this gate stays in lockstep with finalize() after a drag that skipped the tower step.
     if (print->wipe_tower_data().final_purge && print->wipe_tower_data().final_purge_drop &&
         !print->wipe_tower_data().final_purge->gcode.empty())
         ctxt.final.emplace_back(*print->wipe_tower_data().final_purge.get());

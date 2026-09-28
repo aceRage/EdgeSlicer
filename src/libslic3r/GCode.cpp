@@ -1693,8 +1693,10 @@ std::string WipeTowerIntegration::finalize(GCode& gcodegen)
     }
 
     if (purge_z + EPSILON < current_z) {
-        // Print.cpp already decided whether the drop is safe (and whether ramming will
-        // deposit). Re-checking here would let the two sides disagree.
+        // select_final_purge_variant() ran just before this WipeTowerIntegration was
+        // constructed, so m_final_purge / m_final_purge_drop are the fresh pick.
+        // Do not replace print.wipe_tower_data().final_purge after construction:
+        // m_final_purge is a reference into that unique_ptr.
         if (!m_final_purge_drop) {
             // Tall object near the tower, or SEMM with ramming off: unload at the current
             // (object-top) height. The TCR was generated without on-tower ramming.
@@ -3806,6 +3808,11 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
             std::vector<std::pair<coordf_t, std::vector<LayerToPrint>>> layers_to_print = collect_layers_to_print(print);
             // Prusa Multi-Material wipe tower.
             if (has_wipe_tower && !layers_to_print.empty()) {
+                // Fresh pick immediately before construction. WipeTowerIntegration holds a
+                // reference to final_purge; replacing that unique_ptr after this point
+                // would dangle. process() already picked, but export can run after a
+                // clearance / z_offset / position change that only invalidates G-code.
+                print.select_final_purge_variant();
                 m_wipe_tower.reset(new WipeTowerIntegration(print.config(), print.get_plate_index(), print.get_plate_origin(),
                                                             *print.wipe_tower_data().priming.get(), print.wipe_tower_data().tool_changes,
                                                             print.wipe_tower_data().local_z_tool_changes,
