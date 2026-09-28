@@ -1731,7 +1731,8 @@ bool final_purge_drop_clearance_ok(const Print &print, double purge_z)
 
     for (const PrintObject *object : print.objects()) {
         const double object_top = unscaled<double>(object->max_z());
-        const double rise       = object_top - purge_z;
+        // purge_z is machine-space (includes z_offset); object_top is object-space.
+        const double rise       = object_top - (purge_z - print.config().z_offset.value);
         for (const PrintInstance &instance : object->instances()) {
             const Polygon inst_hull = compacted_tower_print_instance_hull(*object, instance);
             if (inst_hull.points.empty())
@@ -6314,26 +6315,48 @@ void Print::_make_wipe_tower()
         // Unload the current filament over the purge tower when the printer is SEMM, or when the
         // current tool rams on a multi-tool. A toolchanger with ramming off (U1) has nothing to
         // park on the tower, matching base — skip the final purge entirely.
-        const unsigned int last_tool        = m_wipe_tower_data.tool_ordering.last_extruder();
-        const bool         need_final_purge = m_config.single_extruder_multi_material ||
-                                      (m_config.enable_filament_ramming &&
-                                       m_config.filament_multitool_ramming.get_at(last_tool));
+        //
+        // enable_filament_ramming is a printer-head property. Toolchangers (U1) ship it off even
+        // when a filament profile has filament_multitool_ramming on; without the printer flag
+        // there is nothing to park, so do not treat the filament bit as a reason to purge.
+        const unsigned int current_tool = static_cast<unsigned int>(wipe_tower.current_tool());
+        assert(current_tool == m_wipe_tower_data.tool_ordering.last_extruder());
+        const bool printer_rams     = m_config.enable_filament_ramming;
+        const bool filament_rams    = m_config.filament_multitool_ramming.get_at(current_tool);
+        const bool need_final_purge = m_config.single_extruder_multi_material || (printer_rams && filament_rams);
+        // Matches WipeTower2::toolchange_Unload's do_ramming: SEMM rams only with the printer
+        // flag, multi-tool rams from the filament bit. SEMM with ramming off deposits nothing,
+        // so there is no reason to drop onto the tower.
+        const bool will_ram         = (m_config.single_extruder_multi_material && printer_rams) || filament_rams;
+        m_wipe_tower_data.final_purge_drop = false;
         if (need_final_purge) {
             // Target the tower's own last active layer, not the object's top print_z, so the
             // extra layer sits on the real tower instead of mid-air. finish_layer() runs every
             // layer, so layer_finished() is true at the end and the extra set_layer is always
             // taken. Tell WipeTower2 this extra layer is the final purge so is_over_tower_height
-            // does not suppress ramming (B2). BBL's Type1 block above is left on the old
-            // object-top path: Edge's finalize() skips BBL, so that block never reaches G-code.
+            // does not suppress ramming (B2) — but only when the Z drop is actually taken.
+            // BBL's Type1 block above is left on the old object-top path: Edge's finalize()
+            // skips BBL, so that block never reaches G-code.
             coordf_t     layer_height = last_active_wipe_tower_layer_height(m_wipe_tower_data.tool_ordering);
             if (layer_height <= EPSILON)
                 layer_height = m_objects.front()->config().layer_height.value;
-            const bool added_fresh_layer = wipe_tower.layer_finished();
-            wipe_tower.set_final_purge_on_tower(true);
-            if (added_fresh_layer) {
-                const coordf_t last_z = last_active_wipe_tower_layer_z(m_wipe_tower_data.tool_ordering);
+            const coordf_t last_z = last_active_wipe_tower_layer_z(m_wipe_tower_data.tool_ordering);
+            // Machine-space Z GCode::finalize will use for the drop. Sparse: last tower layer
+            // plus one, plus z_offset. No-sparse: last actually-printed compacted Z (layer 0
+            // included) plus one extra layer height.
+            const double purge_z = wipe_tower_sparse_layers_skipped(m_config) ?
+                                       double(last_emitted_wipe_tower_z_nonbbl(m_wipe_tower_data.tool_changes,
+                                                                               float(m_config.z_offset.value))) +
+                                           layer_height :
+                                       last_z + layer_height + m_config.z_offset.value;
+            const bool drop_ok = will_ram && final_purge_drop_clearance_ok(*this, purge_z);
+            m_wipe_tower_data.final_purge_drop = drop_ok;
+            if (drop_ok)
+                wipe_tower.set_final_purge_on_tower(true);
+            // Extra set_layer is always taken so m_num_layer_changes == m_plan.size() and the
+            // over-tower-height guard suppresses ramming when the drop is blocked (N1).
+            if (wipe_tower.layer_finished())
                 wipe_tower.set_layer(float(last_z + layer_height), float(layer_height), 0, false, true);
-            }
             m_wipe_tower_data.final_purge = Slic3r::make_unique<WipeTower::ToolChangeResult>(
                 wipe_tower.tool_change((unsigned int) (-1)));
         } else {

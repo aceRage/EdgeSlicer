@@ -950,6 +950,9 @@ struct WipeTowerData
     std::vector<std::vector<WipeTower::ToolChangeResult>> tool_changes;
     std::vector<std::vector<WipeTower::ToolChangeResult>> local_z_tool_changes;
     std::unique_ptr<WipeTower::ToolChangeResult>          final_purge;
+    // True when the final purge is generated on the tower (clearance passed, ramming will
+    // actually deposit). GCode::finalize must reuse this instead of re-checking clearance.
+    bool                                                  final_purge_drop { false };
     std::vector<float>                                    used_filament;
     int                                                   number_of_toolchanges;
 
@@ -977,6 +980,7 @@ struct WipeTowerData
         tool_changes.clear();
         local_z_tool_changes.clear();
         final_purge.reset(nullptr);
+        final_purge_drop = false;
         used_filament.clear();
         number_of_toolchanges = -1;
         depth = 0.f;

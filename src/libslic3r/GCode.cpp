@@ -1693,12 +1693,11 @@ std::string WipeTowerIntegration::finalize(GCode& gcodegen)
     }
 
     if (purge_z + EPSILON < current_z) {
-        bool can_drop = true;
-        if (gcodegen.m_curr_print != nullptr)
-            can_drop = final_purge_drop_clearance_ok(*gcodegen.m_curr_print, purge_z);
-        if (!can_drop) {
-            // A tall object near the tower would be hit by the toolhead or the rod. Unload at
-            // the current (object-top) height instead of dropping.
+        // Print.cpp already decided whether the drop is safe (and whether ramming will
+        // deposit). Re-checking here would let the two sides disagree.
+        if (!m_final_purge_drop) {
+            // Tall object near the tower, or SEMM with ramming off: unload at the current
+            // (object-top) height. The TCR was generated without on-tower ramming.
             purge_z = current_z;
         } else {
             float alpha     = m_wipe_tower_rotation / 180.f * float(M_PI);
@@ -3811,7 +3810,8 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
                                                             *print.wipe_tower_data().priming.get(), print.wipe_tower_data().tool_changes,
                                                             print.wipe_tower_data().local_z_tool_changes,
                                                             print.wipe_tower_data().local_z_reserve_boxes,
-                                                            *print.wipe_tower_data().final_purge.get()));
+                                                            *print.wipe_tower_data().final_purge.get(),
+                                                            print.wipe_tower_data().final_purge_drop));
                 // BBS
                 file.write(m_writer.travel_to_z(initial_layer_print_height + m_config.z_offset.value, "Move to the first layer height"));
 

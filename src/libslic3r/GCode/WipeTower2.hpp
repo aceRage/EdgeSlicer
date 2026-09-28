@@ -138,6 +138,7 @@ public:
     WipeTower::ToolChangeResult tool_change(size_t new_tool);
     WipeTower::ToolChangeResult local_z_tool_change(size_t new_tool, const WipeTower::box_coordinates& cleaning_box, float wipe_volume);
     void set_current_tool(size_t tool) { m_current_tool = tool; }
+    size_t current_tool() const { return m_current_tool; }
 
 	// Fill the unfilled space with a sparse infill.
 	// Call this method only if layer_finished() is false.

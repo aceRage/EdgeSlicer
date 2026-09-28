@@ -18,6 +18,7 @@
 #include <vector>
 
 #include <boost/filesystem.hpp>
+#include <boost/system/error_code.hpp>
 
 using namespace Slic3r;
 
@@ -283,6 +284,7 @@ struct FinalPurgeSlice
     std::string gcode;
     double      purge_z;
     bool        has_final_purge;
+    bool        final_purge_drop;
     double      obj_xmin, obj_xmax, obj_ymin, obj_ymax;
 };
 
@@ -297,6 +299,7 @@ FinalPurgeSlice slice_final_purge_model(Print &print, Model &model, const Dynami
     print.process();
     FinalPurgeSlice out;
     out.has_final_purge = print.wipe_tower_data().final_purge && !print.wipe_tower_data().final_purge->gcode.empty();
+    out.final_purge_drop = print.wipe_tower_data().final_purge_drop;
     out.purge_z         = out.has_final_purge ? print.wipe_tower_data().final_purge->print_z : 0.;
     out.gcode           = Slic3r::Test::gcode(print);
     return out;
@@ -426,7 +429,7 @@ TEST_CASE("The final unload prints on the tower's last layer, never mid-air", "[
     {
         const FinalPurgeSlice slice = slice_final_purge(final_purge_config(true, no_sparse));
         REQUIRE(slice.has_final_purge);
-        INFO("purge_z " << slice.purge_z);
+        CHECK(slice.final_purge_drop);
         // Filament 2 only on [0, 2] of a 10 mm cube: the tower's last active layer is ~2 mm,
         // not the object's 10 mm top.
         CHECK(slice.purge_z < 5.0);
@@ -446,6 +449,7 @@ TEST_CASE("Final SEMM ramming extrudes X+E on the extra tower layer", "[WipeTowe
 {
     const FinalPurgeSlice slice = slice_final_purge(final_purge_config(true, false));
     REQUIRE(slice.has_final_purge);
+    REQUIRE(slice.final_purge_drop);
     const size_t last_unload = slice.gcode.rfind("; CP TOOLCHANGE UNLOAD");
     REQUIRE(last_unload != std::string::npos);
     const size_t ramming_start = slice.gcode.find("Ramming start", last_unload);
@@ -469,8 +473,17 @@ TEST_CASE("A tall object near the tower blocks the final-purge Z drop", "[WipeTo
     // 20 mm cube sharing the tower's Y band, 40 mm away in X: inside the 72.5 mm toolhead radius.
     const FinalPurgeSlice slice = slice_final_purge(config, 20., 20., Vec3d(80., 140., 0.), 2.0);
     REQUIRE(slice.has_final_purge);
+    CHECK_FALSE(slice.final_purge_drop);
     CHECK(slice.gcode.find("Travel down to the last wipe tower layer") == std::string::npos);
     CHECK(slice.gcode.find("Travel to final purge") == std::string::npos);
+    // N1: without the on-tower flag, the extra set_layer still trips is_over_tower_height, so
+    // ramming must not extrude X+E at object-top height. On 7a97aaf0 this count was ~8.
+    const size_t last_unload = slice.gcode.rfind("; CP TOOLCHANGE UNLOAD");
+    REQUIRE(last_unload != std::string::npos);
+    size_t block_end = slice.gcode.find("Ramming start", last_unload);
+    if (block_end == std::string::npos)
+        block_end = slice.gcode.size();
+    CHECK(count_g1_x_and_e_positive(slice.gcode.substr(last_unload, block_end - last_unload)) == 0);
 }
 
 TEST_CASE("No-sparse final purge Z sits one layer above the last printed tower layer, including sparse layer 0",
@@ -522,6 +535,7 @@ TEST_CASE("Non-SEMM without multitool ramming skips the final purge", "[WipeTowe
 {
     const FinalPurgeSlice slice = slice_final_purge(final_purge_config(false, false));
     CHECK_FALSE(slice.has_final_purge);
+    CHECK_FALSE(slice.final_purge_drop);
     CHECK(slice.gcode.find("Travel to final purge") == std::string::npos);
     CHECK(slice.gcode.find("Travel down to the last wipe tower layer") == std::string::npos);
 }
@@ -532,8 +546,16 @@ TEST_CASE("Snapmaker U1 system profile skips the final purge", "[WipeTower][GCod
     const boost::filesystem::path scratch = boost::filesystem::temp_directory_path() /
                                             boost::filesystem::unique_path("u1_final_purge_%%%%-%%%%");
     boost::filesystem::create_directories(scratch);
+    ScopeGuard restore_data_dir([&] {
+        set_data_dir(saved_data_dir);
+        boost::system::error_code ec;
+        boost::filesystem::remove_all(scratch, ec);
+    });
     set_data_dir(scratch.string());
     const std::string profiles = (boost::filesystem::path(TEST_DATA_DIR) / ".." / ".." / "resources" / "profiles").string();
+    // Inherit flattening still needs the Orca filament library plus the Snapmaker vendor;
+    // there is no per-preset load API. Selecting the U1 printer/process/filament below is
+    // what the test actually uses.
     static std::unique_ptr<PresetBundle> library;
     if (!library) {
         library = std::make_unique<PresetBundle>();
@@ -550,7 +572,6 @@ TEST_CASE("Snapmaker U1 system profile skips the final purge", "[WipeTower][GCod
     bundle.set_num_filaments(3, std::vector<std::string>{ "#E01919", "#1943E0", "#19E043" });
     bundle.filament_presets = std::vector<std::string>(3, "Generic PLA @U1 0.4 nozzle");
     DynamicPrintConfig config = bundle.full_config_secure();
-    set_data_dir(saved_data_dir);
     config.set_deserialize_strict({
         { "enable_prime_tower",         "1" },
         { "wipe_tower_x",               30 },
@@ -578,6 +599,7 @@ TEST_CASE("Snapmaker U1 system profile skips the final purge", "[WipeTower][GCod
     print.is_BBL_printer() = false;
     const FinalPurgeSlice slice = slice_final_purge_model(print, model, config);
     CHECK_FALSE(slice.has_final_purge);
+    CHECK_FALSE(slice.final_purge_drop);
     CHECK(slice.gcode.find("Travel to final purge") == std::string::npos);
     CHECK(slice.gcode.find("Travel down to the last wipe tower layer") == std::string::npos);
 }
