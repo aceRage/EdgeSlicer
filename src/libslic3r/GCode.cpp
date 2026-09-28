@@ -1185,7 +1185,7 @@ std::string WipeTowerIntegration::append_tcr2(GCode& gcodegen, const WipeTower::
     // A phony move to the end position at the wipe tower.
     gcodegen.writer().travel_to_xy((end_pos + plate_origin_2d).cast<double>());
     gcodegen.set_last_pos(wipe_tower_point_to_object_point(gcodegen, end_pos + plate_origin_2d));
-    if (!is_approx(z, current_z)) {
+    if (z + EPSILON < current_z) {
         gcode += gcodegen.writer().retract();
         gcode += gcodegen.writer().travel_to_z(current_z, "Travel back up to the topmost object layer.");
         gcode += gcodegen.writer().unretract();
@@ -1677,24 +1677,42 @@ std::string WipeTowerIntegration::finalize(GCode& gcodegen)
     // Travel XY at the current (safe) height first, then let append_tcr2 descend with a
     // dedicated travel_to_z. Do not call change_layer here.
     const double current_z = gcodegen.writer().get_position().z();
-    // Compacted print_z already includes z_offset (see compute_compacted_wipe_tower_z).
-    // The object-space print_z from WipeTower2 does not.
-    double purge_z = m_final_purge.print_z;
-    if (!m_sparse_layers_skipped)
+    double       purge_z   = m_final_purge.print_z;
+    if (m_sparse_layers_skipped) {
+        // Non-BBL always prints sparse layer 0, so the last actually-printed tower Z is
+        // m_last_wipe_tower_print_z — one first-layer height above compute_compacted_wipe_tower_z
+        // when layer 0 has no toolchange. The extra set_layer sits one layer on top of that.
+        const double layer_height = m_final_purge.layer_height > 0.f ? double(m_final_purge.layer_height)
+                                                                    : (!m_tool_changes.empty() && !m_tool_changes.back().empty() ?
+                                                                           double(m_tool_changes.back().front().layer_height) :
+                                                                           0.);
+        purge_z = m_last_wipe_tower_print_z + layer_height;
+    } else {
+        // The object-space print_z from WipeTower2 does not include z_offset.
         purge_z += gcodegen.config().z_offset.value;
+    }
+
     if (purge_z + EPSILON < current_z) {
-        float alpha = m_wipe_tower_rotation / 180.f * float(M_PI);
-        Vec2f start_pos = m_final_purge.start_pos;
-        if (!m_final_purge.priming) {
-            start_pos = Eigen::Rotation2Df(alpha) * start_pos;
-            start_pos += m_wipe_tower_pos;
+        bool can_drop = true;
+        if (gcodegen.m_curr_print != nullptr)
+            can_drop = final_purge_drop_clearance_ok(*gcodegen.m_curr_print, purge_z);
+        if (!can_drop) {
+            // A tall object near the tower would be hit by the toolhead or the rod. Unload at
+            // the current (object-top) height instead of dropping.
+            purge_z = current_z;
+        } else {
+            float alpha     = m_wipe_tower_rotation / 180.f * float(M_PI);
+            Vec2f start_pos = m_final_purge.start_pos;
+            if (!m_final_purge.priming) {
+                start_pos = Eigen::Rotation2Df(alpha) * start_pos;
+                start_pos += m_wipe_tower_pos;
+            }
+            const Vec2f plate_origin_2d(m_plate_origin(0), m_plate_origin(1));
+            gcode += gcodegen.retract();
+            gcodegen.m_avoid_crossing_perimeters.use_external_mp_once();
+            gcode += gcodegen.travel_to(wipe_tower_point_to_object_point(gcodegen, start_pos + plate_origin_2d), erMixed,
+                                        "Travel to final purge", current_z);
         }
-        const Vec2f plate_origin_2d(m_plate_origin(0), m_plate_origin(1));
-        gcode += gcodegen.retract();
-        gcodegen.m_avoid_crossing_perimeters.use_external_mp_once();
-        gcode += gcodegen.travel_to(wipe_tower_point_to_object_point(gcodegen, start_pos + plate_origin_2d), erMixed,
-                                    "Travel to final purge");
-        gcode += gcodegen.unretract();
     }
 
     gcode += append_tcr2(gcodegen, m_final_purge, -1, purge_z);

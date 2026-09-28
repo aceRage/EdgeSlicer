@@ -77,6 +77,10 @@ public:
 
 
 
+	// The extra set_layer used for the end-of-print purge sits one step past m_plan.
+	// Without this flag, is_over_tower_height would skip ramming on that last unload.
+	void set_final_purge_on_tower(bool v = true) { m_final_purge_on_tower = v; }
+
 	// Switch to a next layer.
 	void set_layer(
 		// Print height of this layer.
@@ -285,6 +289,7 @@ private:
 
 	float           m_depth_traversed = 0.f; // Current y position at the wipe tower.
     bool            m_current_layer_finished = false;
+    bool            m_final_purge_on_tower = false;
 	bool 			m_left_to_right   = true;
 	float			m_extra_flow      = 1.f;
 	float			m_extra_spacing_wipe    = 1.f;

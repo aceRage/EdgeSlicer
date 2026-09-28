@@ -1491,6 +1491,10 @@ struct CompactedTowerClearance
 CompactedTowerClearance compacted_wipe_tower_clearance(const PrintConfig &config, const CompactedTowerZone &zone,
                                                       const Polygon &inst_hull, double object_rise);
 
+// True when dropping the nozzle from each object's top down to purge_z would still pass the
+// compacted-tower clearance rules (toolhead body, nozzle cone, and the rod's shared-Y band).
+bool final_purge_drop_clearance_ok(const Print &print, double purge_z);
+
 // This object was judged on a tier reaching past the bare nozzle cone, so the wide ring is the one its
 // outline has to be drawn against.
 inline bool compacted_tower_body_tier(const CompactedTowerClearance &clearance)

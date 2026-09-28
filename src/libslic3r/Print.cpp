@@ -1684,6 +1684,66 @@ CompactedTowerClearance compacted_wipe_tower_clearance(const PrintConfig &config
     return result;
 }
 
+static Polygon compacted_tower_print_instance_hull(const PrintObject &object, const PrintInstance &instance);
+
+// Printed tower keep-out zone from the actual tool-change extrusions, the same hull both the
+// no-sparse validator and the final-purge drop check measure objects against.
+static CompactedTowerZone compacted_tower_zone_from_tool_changes(const Print &print)
+{
+    const PrintConfig &config = print.config();
+    const std::vector<std::vector<WipeTower::ToolChangeResult>> &tool_changes = print.wipe_tower_data().tool_changes;
+    if (tool_changes.empty())
+        return CompactedTowerZone();
+
+    const Eigen::Rotation2Dd wt_rot(Geometry::deg2rad(config.wipe_tower_rotation_angle.value));
+    const Vec2d              wt_translate(config.wipe_tower_x.get_at(print.get_plate_index()) + print.get_plate_origin()(0),
+                                          config.wipe_tower_y.get_at(print.get_plate_index()) + print.get_plate_origin()(1));
+    auto to_bed = [&wt_rot, &wt_translate](const Vec2d &pt) {
+        return Vec2d(wt_rot * pt + wt_translate);
+    };
+
+    Points tower_pts;
+    for (const std::vector<WipeTower::ToolChangeResult> &layer : tool_changes) {
+        if (layer.empty() || wipe_tower_layer_is_sparse(layer))
+            continue;
+        for (const WipeTower::ToolChangeResult &tcr : layer)
+            for (size_t i = 0; i < tcr.extrusions.size(); ++i) {
+                const WipeTower::Extrusion &e = tcr.extrusions[i];
+                if (e.width == 0.f && (i + 1 == tcr.extrusions.size() || tcr.extrusions[i + 1].width == 0.f))
+                    continue;
+                const Vec2d p = to_bed(Vec2d(e.pos.x(), e.pos.y()));
+                tower_pts.emplace_back(scale_(p.x()), scale_(p.y()));
+            }
+    }
+    if (tower_pts.empty())
+        return CompactedTowerZone();
+    return compacted_wipe_tower_zone(config, Geometry::convex_hull(tower_pts));
+}
+
+bool final_purge_drop_clearance_ok(const Print &print, double purge_z)
+{
+    if (print.objects().empty())
+        return true;
+
+    const CompactedTowerZone zone = compacted_tower_zone_from_tool_changes(print);
+    if (zone.empty())
+        return true;
+
+    for (const PrintObject *object : print.objects()) {
+        const double object_top = unscaled<double>(object->max_z());
+        const double rise       = object_top - purge_z;
+        for (const PrintInstance &instance : object->instances()) {
+            const Polygon inst_hull = compacted_tower_print_instance_hull(*object, instance);
+            if (inst_hull.points.empty())
+                continue;
+            const CompactedTowerClearance clearance = compacted_wipe_tower_clearance(print.config(), zone, inst_hull, rise);
+            if (rise > clearance.allowed_rise + EPSILON)
+                return false;
+        }
+    }
+    return true;
+}
+
 Polygon compacted_wipe_tower_offender_outline(const Polygon &inst_hull, double body_clearance)
 {
     // Exactly the half-clearance the check grew this instance by, so the halo drawn around an object is
@@ -1860,42 +1920,12 @@ void Print::validate_compacted_wipe_tower_clearance() const
     if (tool_changes.empty() || m_objects.empty())
         return;
 
-    // Same accumulation the G-code emitter runs, so validation and output cannot disagree.
+    // Compacted Z schedule used by the BBL (Type1) emitter. The non-BBL emitter always prints
+    // layer 0 even when it is sparse, so its last printed Z can sit one first-layer height above
+    // this schedule when the first layer only uses the highest-numbered filament.
     const std::vector<float> tower_z = compute_compacted_wipe_tower_z(tool_changes, float(m_config.z_offset.value));
 
-    // Wipe tower footprint: build it from the ACTUAL tool-change extrusions rather than the nominal
-    // width x depth rectangle. With a rib/cone wall the printed wall bulges past the nominal box and
-    // the first-layer brim reaches even further. The extrusion end-points are stored in the wipe-tower
-    // local frame, so we map them to the bed frame with the same transform both Edge emitters apply:
-    // rotate, then add the tower position (no rib_offset — Edge's append_tcr / append_tcr2 do not
-    // inject one).
-    const Eigen::Rotation2Dd wt_rot(Geometry::deg2rad(m_config.wipe_tower_rotation_angle.value));
-    const Vec2d              wt_translate(m_config.wipe_tower_x.get_at(m_plate_index) + m_origin(0),
-                                          m_config.wipe_tower_y.get_at(m_plate_index) + m_origin(1));
-    auto to_bed = [&wt_rot, &wt_translate](const Vec2d &pt) {
-        return Vec2d(wt_rot * pt + wt_translate);
-    };
-
-    Points tower_pts;
-    for (const std::vector<WipeTower::ToolChangeResult> &layer : tool_changes) {
-        if (layer.empty() || wipe_tower_layer_is_sparse(layer))
-            continue;
-        for (const WipeTower::ToolChangeResult &tcr : layer)
-            for (size_t i = 0; i < tcr.extrusions.size(); ++i) {
-                // A zero width marks a travel end-point. Keep it only when it opens a real extrusion, so
-                // the hull covers the deposited material and nothing else; travels reach a bit further out
-                // than the walls do.
-                const WipeTower::Extrusion &e = tcr.extrusions[i];
-                if (e.width == 0.f && (i + 1 == tcr.extrusions.size() || tcr.extrusions[i + 1].width == 0.f))
-                    continue;
-                const Vec2d p = to_bed(Vec2d(e.pos.x(), e.pos.y()));
-                tower_pts.emplace_back(scale_(p.x()), scale_(p.y()));
-            }
-    }
-    if (tower_pts.empty())
-        return;
-
-    const CompactedTowerZone zone = compacted_wipe_tower_zone(m_config, Geometry::convex_hull(tower_pts));
+    const CompactedTowerZone zone = compacted_tower_zone_from_tool_changes(*this);
     if (zone.empty())
         return;
 
@@ -5961,6 +5991,14 @@ static coordf_t last_active_wipe_tower_layer_z(ToolOrdering &tool_ordering)
     return tool_ordering.back().print_z;
 }
 
+static coordf_t last_active_wipe_tower_layer_height(ToolOrdering &tool_ordering)
+{
+    for (auto it = tool_ordering.layer_tools().rbegin(); it != tool_ordering.layer_tools().rend(); ++it)
+        if (it->has_wipe_tower && it->wipe_tower_partitions > 0)
+            return it->wipe_tower_layer_height;
+    return tool_ordering.back().wipe_tower_layer_height;
+}
+
 void Print::_make_wipe_tower()
 {
     m_wipe_tower_data.clear();
@@ -6273,38 +6311,32 @@ void Print::_make_wipe_tower()
                                          m_config.wipe_tower_fillet_wall,
                                          m_config.wipe_tower_wall_type.value == WipeTowerWallType::wtwCone ? float(m_config.wipe_tower_cone_angle) : 0.f);
 
-        // Unload the current filament over the purge tower, lifting to a fresh layer first if
-        // the tower's current one is full. Always emit the final purge: skipping it when the
-        // tower stops before the object's last layer (the common case) dropped SEMM ramming
-        // and parked the last filament. Target the tower's own last active layer, not the
-        // object's top print_z, so the extra layer sits on the real tower instead of mid-air.
-        // BBL's Type1 block above is left on the old object-top path: Edge's finalize() skips
-        // BBL, so that block never reaches G-code (Orca #15917).
-        coordf_t     layer_height      = m_objects.front()->config().layer_height.value;
-        const bool   added_fresh_layer = wipe_tower.layer_finished();
-        if (added_fresh_layer) {
-            const coordf_t last_z = last_active_wipe_tower_layer_z(m_wipe_tower_data.tool_ordering);
-            wipe_tower.set_layer(float(last_z + layer_height), float(layer_height), 0, false, true);
-        }
-        m_wipe_tower_data.final_purge = Slic3r::make_unique<WipeTower::ToolChangeResult>(wipe_tower.tool_change((unsigned int) (-1)));
-        // Force XY travel onto the tower before any Z drop. Without this, a non-SEMM
-        // toolchanger (U1) with ramming off would skip should_travel_to_tower and descend
-        // over the finished object. Edge's change_layer is lazy, so that combination is a
-        // collision; Snap #934's stagger toolchange starts from this TCR.
-        m_wipe_tower_data.final_purge->force_travel = true;
-        // wipe_tower_no_sparse_layers compacts the tower below the object-space print_z that
-        // last_active_wipe_tower_layer_z reads. Point the purge at the compacted top so it
-        // does not float above the real tower. TCR gcode itself is XY-only (no Z words), so
-        // append_tcr2's descent to print_z is what places the extrusion.
-        if (wipe_tower_sparse_layers_skipped(m_config) && !m_wipe_tower_data.tool_changes.empty()) {
-            const std::vector<float> compacted = compute_compacted_wipe_tower_z(m_wipe_tower_data.tool_changes,
-                                                                                float(m_config.z_offset.value));
-            if (!compacted.empty()) {
-                float top = compacted.back();
-                if (added_fresh_layer)
-                    top += float(layer_height);
-                m_wipe_tower_data.final_purge->print_z = top;
+        // Unload the current filament over the purge tower when the printer is SEMM, or when the
+        // current tool rams on a multi-tool. A toolchanger with ramming off (U1) has nothing to
+        // park on the tower, matching base — skip the final purge entirely.
+        const unsigned int last_tool        = m_wipe_tower_data.tool_ordering.last_extruder();
+        const bool         need_final_purge = m_config.single_extruder_multi_material ||
+                                      m_config.filament_multitool_ramming.get_at(last_tool);
+        if (need_final_purge) {
+            // Target the tower's own last active layer, not the object's top print_z, so the
+            // extra layer sits on the real tower instead of mid-air. finish_layer() runs every
+            // layer, so layer_finished() is true at the end and the extra set_layer is always
+            // taken. Tell WipeTower2 this extra layer is the final purge so is_over_tower_height
+            // does not suppress ramming (B2). BBL's Type1 block above is left on the old
+            // object-top path: Edge's finalize() skips BBL, so that block never reaches G-code.
+            coordf_t     layer_height = last_active_wipe_tower_layer_height(m_wipe_tower_data.tool_ordering);
+            if (layer_height <= EPSILON)
+                layer_height = m_objects.front()->config().layer_height.value;
+            const bool added_fresh_layer = wipe_tower.layer_finished();
+            wipe_tower.set_final_purge_on_tower(true);
+            if (added_fresh_layer) {
+                const coordf_t last_z = last_active_wipe_tower_layer_z(m_wipe_tower_data.tool_ordering);
+                wipe_tower.set_layer(float(last_z + layer_height), float(layer_height), 0, false, true);
             }
+            m_wipe_tower_data.final_purge = Slic3r::make_unique<WipeTower::ToolChangeResult>(
+                wipe_tower.tool_change((unsigned int) (-1)));
+        } else {
+            m_wipe_tower_data.final_purge = Slic3r::make_unique<WipeTower::ToolChangeResult>(WipeTower::ToolChangeResult{});
         }
 
         m_wipe_tower_data.used_filament         = wipe_tower.get_used_filament();

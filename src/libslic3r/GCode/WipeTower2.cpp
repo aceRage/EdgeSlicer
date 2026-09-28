@@ -2013,7 +2013,7 @@ void WipeTower2::toolchange_Unload(WipeTowerWriter2&                 writer,
     }
 
     bool is_over_tower_height = false;
-    if (m_plan.size() > 0 && m_num_layer_changes == m_plan.size()) {
+    if (!m_final_purge_on_tower && m_plan.size() > 0 && m_num_layer_changes == m_plan.size()) {
         is_over_tower_height = true;
     }
 
