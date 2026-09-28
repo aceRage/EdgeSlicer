@@ -1833,6 +1833,7 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionFloat,              wipe_tower_rib_width))
     ((ConfigOptionBool,               wipe_tower_fillet_wall))
     ((ConfigOptionBool,               wipe_tower_wall_gap))
+    ((ConfigOptionBool,               wipe_tower_stagger_toolchange_start))
     // Tower interface options (GCode/WipeTowerInterface.hpp), each off by default.
     ((ConfigOptionBool,               wipe_tower_interface_temp))
     ((ConfigOptionBool,               wipe_tower_interface_run_in))

@@ -34,6 +34,22 @@ public:
 	// used to reserve wipe tower space before the tower is generated.
 	static float estimate_semm_flush_volume(const ConfigBase& config, size_t filaments_cnt);
 
+    // Wipe-tower entry stagger (Snap #934). Slot is (layer*7 + tc*5) % 17 when enabled.
+    // The Edge-safe offset is 0 on the first printed tower layer, on local-Z changes
+    // (tc_idx_in_normal == size_t(-1)), and on tower-interface changes; otherwise it is
+    // min(slot * line_spacing, max(0, required_depth - ramming_depth - 4 * line_width)).
+    static size_t toolchange_entry_stagger_slot(bool enabled, size_t layer_idx, size_t toolchange_idx);
+    static float  toolchange_entry_stagger_offset(bool enabled, size_t layer_idx, size_t toolchange_idx, float line_spacing);
+    static float  stagger_offset_for(bool     enabled,
+                                     size_t   layer_id,
+                                     size_t   first_layer_idx,
+                                     size_t   tc_idx_in_normal,
+                                     bool     is_interface,
+                                     float    line_spacing,
+                                     float    required_depth,
+                                     float    ramming_depth,
+                                     float    line_width);
+
     
     // Construct ToolChangeResult from current state of WipeTower2 and WipeTowerWriter2.
     // WipeTowerWriter2 is moved from !
@@ -249,6 +265,7 @@ private:
 	int m_wall_type;
     bool   m_used_fillet                  = true;
     bool   m_use_gap_wall                 = true;
+    bool   m_stagger_toolchange_start     = false;
     float  m_rib_width                    = 10;
     float  m_extra_rib_length             = 0;
     std::vector<std::vector<Vec2f>> m_wall_skip_points;
@@ -378,6 +395,7 @@ private:
             const std::vector<WipeTowerInfo::ToolChange>& tool_changes) const;
     bool layer_has_soluble_toolchange(const WipeTowerInfo &layer) const;
     float cumulative_toolchange_depth_before(const WipeTowerInfo::ToolChange *tool_change) const;
+    float stagger_offset_for(size_t layer_id, const WipeTowerInfo::ToolChange &tc, size_t tc_idx_in_normal) const;
     WipeTower::ToolChangeResult emit_planned_tool_change(const WipeTowerInfo::ToolChange *tool_change);
 
 	void toolchange_Unload(

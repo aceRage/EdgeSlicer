@@ -1064,7 +1064,7 @@ static std::vector<std::string> s_Preset_print_options {
      "toolchange_ordering",
      "toolchange_cyclic_order",
      "toolchange_cyclic_first_layer",
-     "wipe_tower_rotation_angle", "wipe_tower_wall_gap",
+     "wipe_tower_rotation_angle", "wipe_tower_wall_gap", "wipe_tower_stagger_toolchange_start",
      "wipe_tower_interface_temp", "wipe_tower_interface_run_in", "wipe_tower_interface_extra_prime", "wipe_tower_interface_trigger",
      "enable_tower_interface_features",
      "tree_support_branch_distance_organic", "tree_support_branch_diameter_organic", "tree_support_branch_angle_organic",

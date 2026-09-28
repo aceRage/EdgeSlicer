@@ -7697,6 +7697,16 @@ void PrintConfigDef::init_fff_params()
     def->mode    = comAdvanced;
     def->set_default_value(new ConfigOptionBool(true));
 
+    def          = this->add("wipe_tower_stagger_toolchange_start", coBool);
+    def->label   = L("Stagger toolchange start");
+    def->tooltip = L("Vary the prime tower entry point for toolchange wiping between layers. "
+                     "This spreads startup ooze and ironing marks across several purge lines instead "
+                     "of stacking them at the same wall gap.\n"
+                     "The tower's first layer, local-Z dithering tool changes, and tower-interface "
+                     "run-in changes keep the legacy start so the wall gap and the purge stay aligned.");
+    def->mode    = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
     // Tower interface options: three behaviours of Bambu Studio's enable_tower_interface_features,
     // each on its own and for both tower generators. See GCode/WipeTowerInterface.hpp.
     def          = this->add("wipe_tower_interface_trigger", coEnum);
