@@ -262,6 +262,8 @@ DynamicPrintConfig final_purge_config(bool semm, bool no_sparse)
         { "purge_in_prime_tower",           "1" },
         { "gcode_comments",                 true },
         { "gcode_flavor",                   semm ? "marlin" : "klipper" },
+        // Marlin relative-E needs a per-layer G92 E0; without it Print::validate fails.
+        { "layer_change_gcode",             "G92 E0" },
         { "single_extruder_multi_material", semm ? "1" : "0" },
         { "enable_filament_ramming",        semm ? "1" : "0" },
         { "wipe_tower_no_sparse_layers",    no_sparse ? "1" : "0" },
