@@ -1666,6 +1666,7 @@ void WipeTower2::copy_assign_from(const WipeTower2 &o)
     m_current_layer_finished             = o.m_current_layer_finished;
     m_final_purge_on_tower               = o.m_final_purge_on_tower;
     m_suppress_ramming                   = o.m_suppress_ramming;
+    m_stagger_toolchange_start           = o.m_stagger_toolchange_start;
     m_left_to_right                      = o.m_left_to_right;
     m_extra_flow                         = o.m_extra_flow;
     m_extra_spacing_wipe                 = o.m_extra_spacing_wipe;
