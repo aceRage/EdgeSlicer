@@ -647,8 +647,14 @@ int last_unload_xe(const std::string &gcode)
 void check_no_drop_no_ram(const FinalPurgeSlice &slice)
 {
     CHECK_FALSE(slice.final_purge_drop);
-    CHECK(slice.gcode.find("Travel down to the last wipe tower layer") == std::string::npos);
     CHECK(slice.gcode.find("Travel to final purge") == std::string::npos);
+    // Mid-print no-sparse returns also use "Travel down to the last wipe tower layer".
+    // Only the suffix after the last object layer is the final-purge drop.
+    const size_t last_z_cmt = slice.gcode.rfind(";Z:");
+    if (last_z_cmt != std::string::npos)
+        CHECK(slice.gcode.find("Travel down to the last wipe tower layer", last_z_cmt) == std::string::npos);
+    else
+        CHECK(slice.gcode.find("Travel down to the last wipe tower layer") == std::string::npos);
     CHECK(last_unload_xe(slice.gcode) == 0);
 }
 
@@ -762,15 +768,20 @@ TEST_CASE("No-sparse Print purge Z matches the G-code drop Z", "[WipeTower][GCod
     print.process();
     REQUIRE(print.wipe_tower_data().final_purge);
     REQUIRE(print.wipe_tower_data().final_purge_drop);
+    const double layer_height = print.wipe_tower_data().final_purge_layer_height;
+    REQUIRE(layer_height > EPSILON);
 
-    const double expected = double(last_emitted_wipe_tower_z_nonbbl(print.wipe_tower_data().tool_changes,
-                                                                   float(print.config().z_offset.value))) +
-                            print.wipe_tower_data().final_purge_layer_height;
     const std::string gcode  = Slic3r::Test::gcode(print);
-    const double      drop_z = z_on_comment_line(gcode, "Travel down to the last wipe tower layer");
-    INFO("Print last_emitted+lh " << expected << ", G-code drop z " << drop_z);
+    const double      last_z = last_tower_extrusion_z(gcode);
+    REQUIRE(last_z > 0.1);
+    // Finalize adds Print's stored extra-layer height to the last printed tower Z.
+    // Search after the last object layer so mid-print compacted descents do not win.
+    const size_t last_z_cmt = gcode.rfind(";Z:");
+    REQUIRE(last_z_cmt != std::string::npos);
+    const double drop_z = z_on_comment_line(gcode.substr(last_z_cmt), "Travel down to the last wipe tower layer");
+    INFO("last printed tower z " << last_z << ", Print layer_height " << layer_height << ", G-code drop z " << drop_z);
     REQUIRE(drop_z > 0.);
-    CHECK(std::abs(drop_z - expected) < 0.05);
+    CHECK(std::abs(drop_z - (last_z + layer_height)) < 0.05);
 }
 
 TEST_CASE("SEMM with ramming off does not drop onto the tower", "[WipeTower][GCode][FinalPurge]")
