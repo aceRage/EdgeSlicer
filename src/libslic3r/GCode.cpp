@@ -1668,12 +1668,36 @@ bool WipeTowerIntegration::is_empty_wipe_tower_gcode(GCode& gcodegen, int extrud
 std::string WipeTowerIntegration::finalize(GCode& gcodegen)
 {
     std::string gcode;
-    if (!gcodegen.is_BBL_Printer()) {
-        if (std::abs(gcodegen.writer().get_position().z() - m_final_purge.print_z) > EPSILON)
-            gcode += gcodegen.change_layer(m_final_purge.print_z);
-        gcode += append_tcr2(gcodegen, m_final_purge, -1);
+    if (gcodegen.is_BBL_Printer() || m_final_purge.gcode.empty())
+        return gcode;
+
+    // Edge's change_layer is lazy: it rewrites the writer's Z (and m_nominal_z) without
+    // emitting a move. A subsequent travel_to_xyz(force_z) would then combine the XY travel
+    // to the tower with that Z drop and drive the nozzle through the finished object.
+    // Travel XY at the current (safe) height first, then let append_tcr2 descend with a
+    // dedicated travel_to_z. Do not call change_layer here.
+    const double current_z = gcodegen.writer().get_position().z();
+    // Compacted print_z already includes z_offset (see compute_compacted_wipe_tower_z).
+    // The object-space print_z from WipeTower2 does not.
+    double purge_z = m_final_purge.print_z;
+    if (!m_sparse_layers_skipped)
+        purge_z += gcodegen.config().z_offset.value;
+    if (purge_z + EPSILON < current_z) {
+        float alpha = m_wipe_tower_rotation / 180.f * float(M_PI);
+        Vec2f start_pos = m_final_purge.start_pos;
+        if (!m_final_purge.priming) {
+            start_pos = Eigen::Rotation2Df(alpha) * start_pos;
+            start_pos += m_wipe_tower_pos;
+        }
+        const Vec2f plate_origin_2d(m_plate_origin(0), m_plate_origin(1));
+        gcode += gcodegen.retract();
+        gcodegen.m_avoid_crossing_perimeters.use_external_mp_once();
+        gcode += gcodegen.travel_to(wipe_tower_point_to_object_point(gcodegen, start_pos + plate_origin_2d), erMixed,
+                                    "Travel to final purge");
+        gcode += gcodegen.unretract();
     }
 
+    gcode += append_tcr2(gcodegen, m_final_purge, -1, purge_z);
     return gcode;
 }
 

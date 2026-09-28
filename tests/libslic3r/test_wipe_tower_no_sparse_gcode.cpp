@@ -232,3 +232,164 @@ TEST_CASE("No-sparse Bambu tower: compacted layers print at tower speed on a sup
     for (const char *wall : { "rectangle", "rib" })
         DYNAMIC_SECTION("wall " << wall) { check_no_sparse_tower(wall); }
 }
+
+// ---------------------------------------------------------------------------------------------
+// Orca #15917: final purge on the tower's own last layer, not the object's top (mid-air).
+// Edge extras: lazy change_layer must not drop Z over the object; no-sparse must sit on the
+// compacted tower; append_tcr2(..., -1) must not wrap empty custom-gcode markers (Edge #170).
+// ---------------------------------------------------------------------------------------------
+
+namespace {
+
+DynamicPrintConfig final_purge_config(bool semm, bool no_sparse)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_num_extruders(2);
+    config.set_num_filaments(2);
+    config.set_deserialize_strict({
+        { "layer_height",                   0.3 },
+        { "initial_layer_print_height",     0.3 },
+        { "wall_loops",                     1 },
+        { "sparse_infill_density",          "0%" },
+        { "bottom_shell_layers",            2 },
+        { "top_shell_layers",               0 },
+        { "enable_support",                 false },
+        { "skirt_loops",                    0 },
+        { "enable_prime_tower",             true },
+        { "prime_tower_width",              30 },
+        { "wipe_tower_x",                   "140" },
+        { "wipe_tower_y",                   "140" },
+        { "purge_in_prime_tower",           "1" },
+        { "gcode_comments",                 true },
+        { "gcode_flavor",                   semm ? "marlin" : "klipper" },
+        { "single_extruder_multi_material", semm ? "1" : "0" },
+        { "enable_filament_ramming",        semm ? "1" : "0" },
+        { "wipe_tower_no_sparse_layers",    no_sparse ? "1" : "0" },
+        { "filament_multitool_ramming",     "0,0" },
+    });
+    return config;
+}
+
+struct FinalPurgeSlice
+{
+    std::string gcode;
+    double      purge_z;
+    double      obj_xmin, obj_xmax, obj_ymin, obj_ymax;
+};
+
+FinalPurgeSlice slice_final_purge(const DynamicPrintConfig &config)
+{
+    Print print;
+    Model model;
+    ModelObject *object = model.add_object();
+    object->name        = "cube.stl";
+    object->add_volume(make_cube(10., 10., 10.));
+    object->add_instance()->set_offset(Vec3d(40., 40., 0.));
+    object->ensure_on_bed();
+    DynamicPrintConfig range_config;
+    range_config.set_key_value("extruder", new ConfigOptionInt(2));
+    range_config.set_key_value("layer_height", new ConfigOptionFloat(0.3));
+    object->layer_config_ranges[{0.0, 2.0}].assign_config(std::move(range_config));
+    print.auto_assign_extruders(object);
+    print.apply(model, config);
+    print.apply(model, config);
+    const StringObjectException err = print.validate();
+    INFO(err.string);
+    REQUIRE(err.string.empty());
+    print.set_status_silent();
+    print.process();
+    REQUIRE(print.wipe_tower_data().final_purge);
+    REQUIRE(!print.wipe_tower_data().final_purge->gcode.empty());
+    FinalPurgeSlice out;
+    out.purge_z  = print.wipe_tower_data().final_purge->print_z;
+    out.obj_xmin = 40.;
+    out.obj_xmax = 50.;
+    out.obj_ymin = 40.;
+    out.obj_ymax = 50.;
+    out.gcode    = Slic3r::Test::gcode(print);
+    return out;
+}
+
+// After the last per-layer ;Z: comment, a Z decrease must not start with XY still over the object.
+void check_no_z_drop_over_object(const std::string &gcode, double obj_xmin, double obj_xmax, double obj_ymin, double obj_ymax)
+{
+    const size_t last_z_cmt = gcode.rfind(";Z:");
+    REQUIRE(last_z_cmt != std::string::npos);
+    std::istringstream in(gcode.substr(last_z_cmt));
+    std::string        line;
+    double             x = 0, y = 0, z = 0;
+    bool               have_xy = false;
+    const std::regex   word("([XYZ])(-?[0-9]*\\.?[0-9]+)");
+    while (std::getline(in, line)) {
+        if (!line.empty() && line.back() == '\r')
+            line.pop_back();
+        const std::string code = line.substr(0, line.find(';'));
+        if (!(code.rfind("G1 ", 0) == 0 || code.rfind("G0 ", 0) == 0 || code.rfind("G2 ", 0) == 0 || code.rfind("G3 ", 0) == 0))
+            continue;
+        double nx = x, ny = y, nz = z;
+        bool   has_z = false;
+        for (auto it = std::sregex_iterator(code.begin(), code.end(), word); it != std::sregex_iterator(); ++it) {
+            const char   axis = (*it)[1].str()[0];
+            const double v    = std::atof((*it)[2].str().c_str());
+            switch (axis) {
+            case 'X': nx = v; break;
+            case 'Y': ny = v; break;
+            case 'Z': nz = v; has_z = true; break;
+            }
+        }
+        if (has_z && have_xy && nz < z - 1e-3) {
+            const bool start_in_object = x + 1e-3 >= obj_xmin && x - 1e-3 <= obj_xmax && y + 1e-3 >= obj_ymin && y - 1e-3 <= obj_ymax;
+            INFO("Z drop from " << z << " to " << nz << " starting at XY " << x << "," << y);
+            CHECK_FALSE(start_in_object);
+        }
+        if (std::abs(nx - x) > 1e-9 || std::abs(ny - y) > 1e-9)
+            have_xy = true;
+        x = nx;
+        y = ny;
+        z = nz;
+    }
+}
+
+void check_no_empty_custom_gcode_markers(const std::string &gcode)
+{
+    const size_t last_z = gcode.rfind(";Z:");
+    REQUIRE(last_z != std::string::npos);
+    const std::string tail = gcode.substr(last_z);
+    CHECK(tail.find("; custom gcode start\n; custom gcode end") == std::string::npos);
+    CHECK(tail.find("; custom gcode start\r\n; custom gcode end") == std::string::npos);
+}
+
+} // namespace
+
+TEST_CASE("The final unload prints on the tower's last layer, never mid-air", "[WipeTower][GCode][FinalPurge]")
+{
+    const bool semm      = GENERATE(true, false);
+    const bool no_sparse = GENERATE(true, false);
+    DYNAMIC_SECTION((semm ? "SEMM" : "U1 toolchanger") << (no_sparse ? " no-sparse" : " sparse-on"))
+    {
+        const FinalPurgeSlice slice = slice_final_purge(final_purge_config(semm, no_sparse));
+        INFO("purge_z " << slice.purge_z);
+        // Filament 2 only on [0, 2] of a 10 mm cube: the tower's last active layer is ~2 mm,
+        // not the object's 10 mm top.
+        CHECK(slice.purge_z < 5.0);
+        CHECK(slice.purge_z > 0.2);
+
+        const size_t last_layer_z_comment = slice.gcode.rfind(";Z:");
+        REQUIRE(last_layer_z_comment != std::string::npos);
+
+        const size_t unload = slice.gcode.find("; CP TOOLCHANGE UNLOAD", last_layer_z_comment);
+        REQUIRE(unload != std::string::npos);
+
+        if (semm) {
+            const size_t first_ramming = slice.gcode.find("Ramming start");
+            REQUIRE(first_ramming != std::string::npos);
+            const size_t final_ramming = slice.gcode.find("Ramming start", first_ramming + 1);
+            REQUIRE(final_ramming != std::string::npos);
+            CHECK(slice.gcode.find("Ramming start", final_ramming + 1) == std::string::npos);
+            CHECK(last_layer_z_comment < final_ramming);
+        }
+
+        check_no_z_drop_over_object(slice.gcode, slice.obj_xmin, slice.obj_xmax, slice.obj_ymin, slice.obj_ymax);
+        check_no_empty_custom_gcode_markers(slice.gcode);
+    }
+}

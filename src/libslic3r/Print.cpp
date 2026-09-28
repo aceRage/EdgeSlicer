@@ -5952,6 +5952,15 @@ bool Print::enable_timelapse_print() const
     return m_config.timelapse_type.value == TimelapseType::tlSmooth;
 }
 
+// print_z of the tower's own last active layer, which is usually below the object's top layer.
+static coordf_t last_active_wipe_tower_layer_z(ToolOrdering &tool_ordering)
+{
+    for (auto it = tool_ordering.layer_tools().rbegin(); it != tool_ordering.layer_tools().rend(); ++it)
+        if (it->has_wipe_tower && it->wipe_tower_partitions > 0)
+            return it->print_z;
+    return tool_ordering.back().print_z;
+}
+
 void Print::_make_wipe_tower()
 {
     m_wipe_tower_data.clear();
@@ -6115,6 +6124,9 @@ void Print::_make_wipe_tower()
         }
 
         // Unload the current filament over the purge tower.
+        // BBL / Type1: Edge's WipeTowerIntegration::finalize() skips BBL printers, so this
+        // final_purge never reaches G-code. Left on the pre-#15917 object-top path to keep
+        // BBL G-code byte-identical to main. WipeTower2 (non-BBL) is the live path below.
         coordf_t layer_height = m_objects.front()->config().layer_height.value;
         if (m_wipe_tower_data.tool_ordering.back().wipe_tower_partitions > 0) {
             // The wipe tower goes up to the last layer of the print.
@@ -6261,24 +6273,39 @@ void Print::_make_wipe_tower()
                                          m_config.wipe_tower_fillet_wall,
                                          m_config.wipe_tower_wall_type.value == WipeTowerWallType::wtwCone ? float(m_config.wipe_tower_cone_angle) : 0.f);
 
-        // Unload the current filament over the purge tower.
-        coordf_t layer_height = m_objects.front()->config().layer_height.value;
-        if (m_wipe_tower_data.tool_ordering.back().wipe_tower_partitions > 0) {
-            // The wipe tower goes up to the last layer of the print.
-            if (wipe_tower.layer_finished()) {
-                // The wipe tower is printed to the top of the print and it has no space left for the final extruder purge.
-                // Lift Z to the next layer.
-                wipe_tower.set_layer(float(m_wipe_tower_data.tool_ordering.back().print_z + layer_height), float(layer_height), 0, false,
-                                     true);
-            } else {
-                // There is yet enough space at this layer of the wipe tower for the final purge.
-            }
-        } else {
-            // The wipe tower does not reach the last print layer, perform the pruge at the last print layer.
-            assert(m_wipe_tower_data.tool_ordering.back().wipe_tower_partitions == 0);
-            wipe_tower.set_layer(float(m_wipe_tower_data.tool_ordering.back().print_z), float(layer_height), 0, false, true);
+        // Unload the current filament over the purge tower, lifting to a fresh layer first if
+        // the tower's current one is full. Always emit the final purge: skipping it when the
+        // tower stops before the object's last layer (the common case) dropped SEMM ramming
+        // and parked the last filament. Target the tower's own last active layer, not the
+        // object's top print_z, so the extra layer sits on the real tower instead of mid-air.
+        // BBL's Type1 block above is left on the old object-top path: Edge's finalize() skips
+        // BBL, so that block never reaches G-code (Orca #15917).
+        coordf_t     layer_height      = m_objects.front()->config().layer_height.value;
+        const bool   added_fresh_layer = wipe_tower.layer_finished();
+        if (added_fresh_layer) {
+            const coordf_t last_z = last_active_wipe_tower_layer_z(m_wipe_tower_data.tool_ordering);
+            wipe_tower.set_layer(float(last_z + layer_height), float(layer_height), 0, false, true);
         }
         m_wipe_tower_data.final_purge = Slic3r::make_unique<WipeTower::ToolChangeResult>(wipe_tower.tool_change((unsigned int) (-1)));
+        // Force XY travel onto the tower before any Z drop. Without this, a non-SEMM
+        // toolchanger (U1) with ramming off would skip should_travel_to_tower and descend
+        // over the finished object. Edge's change_layer is lazy, so that combination is a
+        // collision; Snap #934's stagger toolchange starts from this TCR.
+        m_wipe_tower_data.final_purge->force_travel = true;
+        // wipe_tower_no_sparse_layers compacts the tower below the object-space print_z that
+        // last_active_wipe_tower_layer_z reads. Point the purge at the compacted top so it
+        // does not float above the real tower. TCR gcode itself is XY-only (no Z words), so
+        // append_tcr2's descent to print_z is what places the extrusion.
+        if (wipe_tower_sparse_layers_skipped(m_config) && !m_wipe_tower_data.tool_changes.empty()) {
+            const std::vector<float> compacted = compute_compacted_wipe_tower_z(m_wipe_tower_data.tool_changes,
+                                                                                float(m_config.z_offset.value));
+            if (!compacted.empty()) {
+                float top = compacted.back();
+                if (added_fresh_layer)
+                    top += float(layer_height);
+                m_wipe_tower_data.final_purge->print_z = top;
+            }
+        }
 
         m_wipe_tower_data.used_filament         = wipe_tower.get_used_filament();
         m_wipe_tower_data.number_of_toolchanges = wipe_tower.get_number_of_toolchanges();
