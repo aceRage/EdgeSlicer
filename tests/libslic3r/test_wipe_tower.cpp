@@ -498,7 +498,42 @@ std::string slice_stagger_project(const DynamicPrintConfig &config, Print &print
     return Test::gcode(print);
 }
 
+const std::regex &g1_word()
+{
+    static const std::regex word("([XYZE])(-?[0-9]*\\.?[0-9]+)");
+    return word;
+}
+
+struct G1Move
+{
+    double nx = 0, ny = 0, de = 0;
+    bool   has_e = false, has_x = false, has_y = false, is_g1 = false;
+};
+
+G1Move parse_g1(const std::string &line, double x, double y)
+{
+    G1Move            m;
+    m.nx                   = x;
+    m.ny                   = y;
+    const std::string code = line.substr(0, line.find(';'));
+    if (!(code.rfind("G1 ", 0) == 0 || code.rfind("G0 ", 0) == 0))
+        return m;
+    m.is_g1 = true;
+    for (auto it = std::sregex_iterator(code.begin(), code.end(), g1_word()); it != std::sregex_iterator(); ++it) {
+        const char   axis = (*it)[1].str()[0];
+        const double v    = std::atof((*it)[2].str().c_str());
+        switch (axis) {
+        case 'X': m.nx = v; m.has_x = true; break;
+        case 'Y': m.ny = v; m.has_y = true; break;
+        case 'E': m.has_e = true; m.de = v; break;
+        default: break;
+        }
+    }
+    return m;
+}
+
 // Y-only travels after "; CP TOOLCHANGE WIPE" and before the first extrude: the stagger hop.
+// XY is tracked through the whole file so the delta is from the real pre-hop position.
 std::vector<double> stagger_hops(const std::string &gcode)
 {
     std::vector<double> out;
@@ -506,7 +541,6 @@ std::vector<double> stagger_hops(const std::string &gcode)
     std::string         line;
     bool                in_wipe = false;
     double              x = 0, y = 0;
-    const std::regex    word("([XYZE])(-?[0-9]*\\.?[0-9]+)");
     while (std::getline(in, line)) {
         if (!line.empty() && line.back() == '\r')
             line.pop_back();
@@ -514,32 +548,24 @@ std::vector<double> stagger_hops(const std::string &gcode)
             in_wipe = true;
             continue;
         }
-        if (!in_wipe)
+        const G1Move m = parse_g1(line, x, y);
+        if (!m.is_g1) {
+            if (in_wipe && (line.find("; WIPE_TOWER_END") != std::string::npos ||
+                            (line.find("; CP TOOLCHANGE") != std::string::npos && line.find("WIPE") == std::string::npos)))
+                in_wipe = false;
             continue;
-        const std::string code = line.substr(0, line.find(';'));
-        if (!(code.rfind("G1 ", 0) == 0 || code.rfind("G0 ", 0) == 0))
-            continue;
-        double nx = x, ny = y, de = 0;
-        bool   has_e = false, has_x = false, has_y = false;
-        for (auto it = std::sregex_iterator(code.begin(), code.end(), word); it != std::sregex_iterator(); ++it) {
-            const char   axis = (*it)[1].str()[0];
-            const double v    = std::atof((*it)[2].str().c_str());
-            switch (axis) {
-            case 'X': nx = v; has_x = true; break;
-            case 'Y': ny = v; has_y = true; break;
-            case 'E': has_e = true; de = v; break;
-            default: break;
+        }
+        if (in_wipe) {
+            if (m.has_e && std::abs(m.de) > 1e-6)
+                in_wipe = false;
+            else {
+                const bool y_only = m.has_y && std::abs(m.ny - y) > 1e-4 && (!m.has_x || std::abs(m.nx - x) < 1e-4);
+                if (y_only)
+                    out.push_back(m.ny - y);
             }
         }
-        if (has_e && std::abs(de) > 1e-6) {
-            in_wipe = false;
-            continue;
-        }
-        const bool y_only = has_y && std::abs(ny - y) > 1e-4 && (!has_x || std::abs(nx - x) < 1e-4);
-        if (y_only)
-            out.push_back(ny - y);
-        if (has_x) x = nx;
-        if (has_y) y = ny;
+        if (m.has_x) x = m.nx;
+        if (m.has_y) y = m.ny;
     }
     return out;
 }
@@ -552,12 +578,6 @@ size_t count_tag(const std::string &gcode, const char *tag)
         pos += 1;
     }
     return n;
-}
-
-const std::regex &g1_word()
-{
-    static const std::regex word("([XYZE])(-?[0-9]*\\.?[0-9]+)");
-    return word;
 }
 
 // Positive E summed per "; CP TOOLCHANGE WIPE" block (relative E).
@@ -628,55 +648,51 @@ double wipe_one_line_E(const std::string &gcode)
     return best > 1e-6 ? best : 1.0;
 }
 
-// After the first extrude in a wipe block, a Y-only travel back toward the unstaggered start.
+// After a hop of H, the first non-extruding travel whose Y drop matches H is the wrap-around.
 std::vector<double> wipe_wrap_returns(const std::string &gcode)
 {
     std::vector<double> out;
     std::istringstream  in(gcode);
     std::string         line;
-    bool                in_wipe = false;
+    bool                in_wipe  = false;
     bool                extruded = false;
-    double              x = 0, y = 0;
+    bool                seen_wrap = false;
+    double              hop = 0, x = 0, y = 0;
     while (std::getline(in, line)) {
         if (line.find("; CP TOOLCHANGE WIPE") != std::string::npos) {
-            in_wipe  = true;
-            extruded = false;
+            in_wipe   = true;
+            extruded  = false;
+            seen_wrap = false;
+            hop       = 0;
             continue;
         }
-        if (!in_wipe)
-            continue;
-        if (line.find("; WIPE_TOWER_END") != std::string::npos ||
-            (line.find("; CP TOOLCHANGE") != std::string::npos && line.find("WIPE") == std::string::npos)) {
+        if (in_wipe && (line.find("; WIPE_TOWER_END") != std::string::npos ||
+                        (line.find("; CP TOOLCHANGE") != std::string::npos && line.find("WIPE") == std::string::npos)))
             in_wipe = false;
-            continue;
-        }
-        const std::string code = line.substr(0, line.find(';'));
-        if (!(code.rfind("G1 ", 0) == 0 || code.rfind("G0 ", 0) == 0))
-            continue;
-        double nx = x, ny = y, de = 0;
-        bool   has_e = false, has_x = false, has_y = false;
-        for (auto it = std::sregex_iterator(code.begin(), code.end(), g1_word()); it != std::sregex_iterator(); ++it) {
-            const char   axis = (*it)[1].str()[0];
-            const double v    = std::atof((*it)[2].str().c_str());
-            switch (axis) {
-            case 'X': nx = v; has_x = true; break;
-            case 'Y': ny = v; has_y = true; break;
-            case 'E': has_e = true; de = v; break;
-            default: break;
+        const G1Move m = parse_g1(line, x, y);
+        if (m.is_g1) {
+            if (in_wipe) {
+                const bool y_only = m.has_y && std::abs(m.ny - y) > 1e-4 && (!m.has_x || std::abs(m.nx - x) < 1e-4);
+                if (!extruded && y_only && (m.ny - y) > 1e-4)
+                    hop = m.ny - y;
+                if (extruded && !seen_wrap && !m.has_e && hop > 1e-4 && m.has_y) {
+                    const double drop = y - m.ny;
+                    if (drop > hop - 0.35 && drop < hop + 0.35) {
+                        out.push_back(m.ny - y);
+                        seen_wrap = true;
+                    }
+                }
+                if (m.has_e && std::abs(m.de) > 1e-6)
+                    extruded = true;
             }
+            if (m.has_x) x = m.nx;
+            if (m.has_y) y = m.ny;
         }
-        if (has_e && std::abs(de) > 1e-6)
-            extruded = true;
-        const bool y_only = has_y && std::abs(ny - y) > 1e-4 && (!has_x || std::abs(nx - x) < 1e-4);
-        if (extruded && y_only && !has_e && (ny - y) < -1e-4)
-            out.push_back(ny - y);
-        if (has_x) x = nx;
-        if (has_y) y = ny;
     }
     return out;
 }
 
-// First axis-aligned travel after WIPE and before the first extrude (rotation-safe).
+// Axis-aligned travel after WIPE and before the first extrude (rotation-safe).
 std::vector<double> wipe_entry_axis_hops(const std::string &gcode)
 {
     std::vector<double> out;
@@ -689,35 +705,27 @@ std::vector<double> wipe_entry_axis_hops(const std::string &gcode)
             in_wipe = true;
             continue;
         }
-        if (!in_wipe)
+        const G1Move m = parse_g1(line, x, y);
+        if (!m.is_g1) {
+            if (in_wipe && (line.find("; WIPE_TOWER_END") != std::string::npos ||
+                            (line.find("; CP TOOLCHANGE") != std::string::npos && line.find("WIPE") == std::string::npos)))
+                in_wipe = false;
             continue;
-        const std::string code = line.substr(0, line.find(';'));
-        if (!(code.rfind("G1 ", 0) == 0 || code.rfind("G0 ", 0) == 0))
-            continue;
-        double nx = x, ny = y, de = 0;
-        bool   has_e = false, has_x = false, has_y = false;
-        for (auto it = std::sregex_iterator(code.begin(), code.end(), g1_word()); it != std::sregex_iterator(); ++it) {
-            const char   axis = (*it)[1].str()[0];
-            const double v    = std::atof((*it)[2].str().c_str());
-            switch (axis) {
-            case 'X': nx = v; has_x = true; break;
-            case 'Y': ny = v; has_y = true; break;
-            case 'E': has_e = true; de = v; break;
-            default: break;
+        }
+        if (in_wipe) {
+            if (m.has_e && std::abs(m.de) > 1e-6)
+                in_wipe = false;
+            else {
+                const bool x_only = m.has_x && std::abs(m.nx - x) > 1e-4 && (!m.has_y || std::abs(m.ny - y) < 1e-4);
+                const bool y_only = m.has_y && std::abs(m.ny - y) > 1e-4 && (!m.has_x || std::abs(m.nx - x) < 1e-4);
+                if (x_only)
+                    out.push_back(m.nx - x);
+                else if (y_only)
+                    out.push_back(m.ny - y);
             }
         }
-        if (has_e && std::abs(de) > 1e-6) {
-            in_wipe = false;
-            continue;
-        }
-        const bool x_only = has_x && std::abs(nx - x) > 1e-4 && (!has_y || std::abs(ny - y) < 1e-4);
-        const bool y_only = has_y && std::abs(ny - y) > 1e-4 && (!has_x || std::abs(nx - x) < 1e-4);
-        if (x_only)
-            out.push_back(nx - x);
-        else if (y_only)
-            out.push_back(ny - y);
-        if (has_x) x = nx;
-        if (has_y) y = ny;
+        if (m.has_x) x = m.nx;
+        if (m.has_y) y = m.ny;
     }
     return out;
 }
@@ -773,10 +781,10 @@ void check_wipe_volume(const std::string &g_off, const std::string &g_on)
     size_t cap_i = 0;
     const auto hops = stagger_hops(g_on);
     for (size_t i = 1; i < hops.size(); ++i)
-        if (hops[i] > hops[cap_i])
+        if (std::abs(hops[i]) > std::abs(hops[cap_i]))
             cap_i = i;
     INFO("cap hop index " << cap_i << " hop=" << hops[cap_i] << " one_line=" << one_line);
-    CHECK(hops[cap_i] > 2.0);
+    CHECK(std::abs(hops[cap_i]) > 2.0);
     for (size_t i = 0; i < e_off.size(); ++i) {
         INFO("wipe block " << i << " off=" << e_off[i] << " on=" << e_on[i]);
         CHECK(e_on[i] + 1e-6 >= e_off[i] - one_line);
@@ -869,9 +877,10 @@ TEST_CASE("Stagger keeps tower depth and wall-gap alignment", "[WipeTower][Stagg
 
     const auto hops = stagger_hops(g_on);
     REQUIRE(hops.size() >= 3);
+    // Reversed tower layers flip world Y, so the hop sign follows the layer.
     for (double h : hops) {
-        CHECK(h > 0.05);
-        CHECK(h < print_on.wipe_tower_data().depth);
+        CHECK(std::abs(h) > 0.05);
+        CHECK(std::abs(h) < print_on.wipe_tower_data().depth);
     }
     // Slot cycle: hops share a line-spacing quantum (GCD of micrometre hops).
     long hop_gcd = 0;
