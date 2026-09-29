@@ -861,6 +861,7 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
             || opt_key == "wipe_tower_rib_width"
             || opt_key == "wipe_tower_fillet_wall"
             || opt_key == "wipe_tower_wall_gap"
+            || opt_key == "wipe_tower_stagger_toolchange_start"
             || opt_key == "wipe_tower_interface_temp"
             || opt_key == "wipe_tower_interface_run_in"
             || opt_key == "wipe_tower_interface_extra_prime"

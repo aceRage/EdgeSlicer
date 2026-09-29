@@ -460,31 +460,37 @@ TEST_CASE("Final SEMM ramming extrudes X+E on the extra tower layer", "[WipeTowe
     CHECK(xe > 0);
 }
 
-TEST_CASE("A tall object near the tower blocks the final-purge Z drop", "[WipeTower][GCode][FinalPurge]")
+TEST_CASE("A tall object near the tower blocks the final-purge Z drop", "[WipeTower][GCode][FinalPurge][Stagger]")
 {
-    DynamicPrintConfig config = final_purge_config(true, false);
-    config.set_deserialize_strict({
-        { "extruder_clearance_radius",          72.5 },
-        { "extruder_clearance_height_to_rod",   27.5 },
-        { "nozzle_height",                      2.5 },
-        { "prime_tower_width",                  30 },
-        { "wipe_tower_x",                       "140" },
-        { "wipe_tower_y",                       "140" },
-    });
-    // 20 mm cube sharing the tower's Y band, 40 mm away in X: inside the 72.5 mm toolhead radius.
-    const FinalPurgeSlice slice = slice_final_purge(config, 20., 20., Vec3d(80., 140., 0.), 2.0);
-    REQUIRE(slice.has_final_purge);
-    CHECK_FALSE(slice.final_purge_drop);
-    CHECK(slice.gcode.find("Travel down to the last wipe tower layer") == std::string::npos);
-    CHECK(slice.gcode.find("Travel to final purge") == std::string::npos);
-    // N1: without the on-tower flag, the extra set_layer still trips is_over_tower_height, so
-    // ramming must not extrude X+E at object-top height. On 7a97aaf0 this count was ~8.
-    const size_t last_unload = slice.gcode.rfind("; CP TOOLCHANGE UNLOAD");
-    REQUIRE(last_unload != std::string::npos);
-    size_t block_end = slice.gcode.find("Ramming start", last_unload);
-    if (block_end == std::string::npos)
-        block_end = slice.gcode.size();
-    CHECK(count_g1_x_and_e_positive(slice.gcode.substr(last_unload, block_end - last_unload)) == 0);
+    const bool stagger = GENERATE(false, true);
+    DYNAMIC_SECTION((stagger ? "stagger on" : "stagger off"))
+    {
+        DynamicPrintConfig config = final_purge_config(true, false);
+        config.set_deserialize_strict({
+            { "extruder_clearance_radius",            72.5 },
+            { "extruder_clearance_height_to_rod",     27.5 },
+            { "nozzle_height",                        2.5 },
+            { "prime_tower_width",                    30 },
+            { "wipe_tower_x",                         "140" },
+            { "wipe_tower_y",                         "140" },
+            { "wipe_tower_stagger_toolchange_start",  stagger ? "1" : "0" },
+        });
+        // 20 mm cube sharing the tower's Y band, 40 mm away in X: inside the 72.5 mm toolhead radius.
+        const FinalPurgeSlice slice = slice_final_purge(config, 20., 20., Vec3d(80., 140., 0.), 2.0);
+        REQUIRE(slice.has_final_purge);
+        CHECK_FALSE(slice.final_purge_drop);
+        CHECK(slice.gcode.find("Travel down to the last wipe tower layer") == std::string::npos);
+        CHECK(slice.gcode.find("Travel to final purge") == std::string::npos);
+        // N1: without the on-tower flag, the extra set_layer still trips is_over_tower_height, so
+        // ramming must not extrude X+E at object-top height. Stagger must not add a Y hop that
+        // then rams (force_travel is gone; finalize unloads at current Z when drop is blocked).
+        const size_t last_unload = slice.gcode.rfind("; CP TOOLCHANGE UNLOAD");
+        REQUIRE(last_unload != std::string::npos);
+        size_t block_end = slice.gcode.find("Ramming start", last_unload);
+        if (block_end == std::string::npos)
+            block_end = slice.gcode.size();
+        CHECK(count_g1_x_and_e_positive(slice.gcode.substr(last_unload, block_end - last_unload)) == 0);
+    }
 }
 
 TEST_CASE("No-sparse final purge Z sits one layer above the last printed tower layer, including sparse layer 0",
@@ -607,13 +613,14 @@ TEST_CASE("Snapmaker U1 system profile skips the final purge", "[WipeTower][GCod
 
 namespace {
 
-DynamicPrintConfig n2_clearance_config(bool no_sparse)
+DynamicPrintConfig n2_clearance_config(bool no_sparse, bool stagger = false)
 {
     DynamicPrintConfig config = final_purge_config(true, no_sparse);
     config.set_deserialize_strict({
-        { "extruder_clearance_radius",        72.5 },
-        { "extruder_clearance_height_to_rod", 27.5 },
-        { "nozzle_height",                    2.5 },
+        { "extruder_clearance_radius",           72.5 },
+        { "extruder_clearance_height_to_rod",    27.5 },
+        { "nozzle_height",                       2.5 },
+        { "wipe_tower_stagger_toolchange_start", stagger ? "1" : "0" },
     });
     return config;
 }
@@ -667,57 +674,69 @@ void check_drop_taken(const FinalPurgeSlice &slice)
 
 } // namespace
 
-TEST_CASE("Moving the object next to the tower after a far slice blocks the drop", "[WipeTower][GCode][FinalPurge]")
+TEST_CASE("Moving the object next to the tower after a far slice blocks the drop", "[WipeTower][GCode][FinalPurge][Stagger]")
 {
-    DynamicPrintConfig config = n2_clearance_config(false);
-    Print              print;
-    Model              model;
-    add_final_purge_cube(model, print, 20., 20., Vec3d(40., 40., 0.), 2.0, 0.3);
+    const bool stagger = GENERATE(false, true);
+    DYNAMIC_SECTION((stagger ? "stagger on" : "stagger off"))
+    {
+        DynamicPrintConfig config = n2_clearance_config(false, stagger);
+        Print              print;
+        Model              model;
+        add_final_purge_cube(model, print, 20., 20., Vec3d(40., 40., 0.), 2.0, 0.3);
 
-    const FinalPurgeSlice far = slice_final_purge_model(print, model, config);
-    check_drop_taken(far);
+        const FinalPurgeSlice far = slice_final_purge_model(print, model, config);
+        check_drop_taken(far);
 
-    model.objects.front()->instances.front()->set_offset(Vec3d(80., 140., 0.));
-    model.objects.front()->ensure_on_bed();
-    const FinalPurgeSlice near = slice_final_purge_model(print, model, config);
-    REQUIRE(near.has_final_purge);
-    check_no_drop_no_ram(near);
+        model.objects.front()->instances.front()->set_offset(Vec3d(80., 140., 0.));
+        model.objects.front()->ensure_on_bed();
+        const FinalPurgeSlice near = slice_final_purge_model(print, model, config);
+        REQUIRE(near.has_final_purge);
+        check_no_drop_no_ram(near);
+    }
 }
 
-TEST_CASE("Moving the tower next to the object after a far slice blocks the drop", "[WipeTower][GCode][FinalPurge]")
+TEST_CASE("Moving the tower next to the object after a far slice blocks the drop", "[WipeTower][GCode][FinalPurge][Stagger]")
 {
-    DynamicPrintConfig config = n2_clearance_config(false);
-    Print              print;
-    Model              model;
-    add_final_purge_cube(model, print, 20., 20., Vec3d(40., 40., 0.), 2.0, 0.3);
+    const bool stagger = GENERATE(false, true);
+    DYNAMIC_SECTION((stagger ? "stagger on" : "stagger off"))
+    {
+        DynamicPrintConfig config = n2_clearance_config(false, stagger);
+        Print              print;
+        Model              model;
+        add_final_purge_cube(model, print, 20., 20., Vec3d(40., 40., 0.), 2.0, 0.3);
 
-    const FinalPurgeSlice far = slice_final_purge_model(print, model, config);
-    check_drop_taken(far);
+        const FinalPurgeSlice far = slice_final_purge_model(print, model, config);
+        check_drop_taken(far);
 
-    config.set_deserialize_strict({
-        { "wipe_tower_x", "100" },
-        { "wipe_tower_y", "40" },
-    });
-    const FinalPurgeSlice near = slice_final_purge_model(print, model, config);
-    REQUIRE(near.has_final_purge);
-    check_no_drop_no_ram(near);
+        config.set_deserialize_strict({
+            { "wipe_tower_x", "100" },
+            { "wipe_tower_y", "40" },
+        });
+        const FinalPurgeSlice near = slice_final_purge_model(print, model, config);
+        REQUIRE(near.has_final_purge);
+        check_no_drop_no_ram(near);
+    }
 }
 
-TEST_CASE("Moving the object far from the tower after a near slice restores the drop", "[WipeTower][GCode][FinalPurge]")
+TEST_CASE("Moving the object far from the tower after a near slice restores the drop", "[WipeTower][GCode][FinalPurge][Stagger]")
 {
-    DynamicPrintConfig config = n2_clearance_config(false);
-    Print              print;
-    Model              model;
-    add_final_purge_cube(model, print, 20., 20., Vec3d(80., 140., 0.), 2.0, 0.3);
+    const bool stagger = GENERATE(false, true);
+    DYNAMIC_SECTION((stagger ? "stagger on" : "stagger off"))
+    {
+        DynamicPrintConfig config = n2_clearance_config(false, stagger);
+        Print              print;
+        Model              model;
+        add_final_purge_cube(model, print, 20., 20., Vec3d(80., 140., 0.), 2.0, 0.3);
 
-    const FinalPurgeSlice near = slice_final_purge_model(print, model, config);
-    REQUIRE(near.has_final_purge);
-    check_no_drop_no_ram(near);
+        const FinalPurgeSlice near = slice_final_purge_model(print, model, config);
+        REQUIRE(near.has_final_purge);
+        check_no_drop_no_ram(near);
 
-    model.objects.front()->instances.front()->set_offset(Vec3d(40., 40., 0.));
-    model.objects.front()->ensure_on_bed();
-    const FinalPurgeSlice far = slice_final_purge_model(print, model, config);
-    check_drop_taken(far);
+        model.objects.front()->instances.front()->set_offset(Vec3d(40., 40., 0.));
+        model.objects.front()->ensure_on_bed();
+        const FinalPurgeSlice far = slice_final_purge_model(print, model, config);
+        check_drop_taken(far);
+    }
 }
 
 TEST_CASE("A one-layer tower with a blocked drop suppresses ramming", "[WipeTower][GCode][FinalPurge]")

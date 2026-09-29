@@ -1,16 +1,34 @@
 #include <catch2/catch.hpp>
 
+#include <algorithm>
+#include <cctype>
 #include <cmath>
+#include <numeric>
+#include <regex>
+#include <set>
+#include <sstream>
+#include <string>
+#include <vector>
 
 #include "libslic3r/BoundingBox.hpp"
 #include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/GCode/WipeTower.hpp"
 #include "libslic3r/GCode/WipeTower2.hpp"
+#include "libslic3r/Model.hpp"
+#include "libslic3r/Preset.hpp"
+#include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintConfig.hpp"
+#include "libslic3r/TriangleMesh.hpp"
+#include "libslic3r/Utils.hpp"
+
+#include "../fff_print/test_data.hpp"
+
+#include <boost/filesystem.hpp>
 
 using namespace Slic3r;
 using Catch::Matchers::WithinAbs;
+namespace fs = boost::filesystem;
 
 // A Bambu P1S project that reproduced the off-plate brim: two PLAs priming 30 and 45 mm3 in
 // separate adhesiveness categories on a 35 mm tower, 0.21 mm layers, 0.4 nozzle (0.5 mm lines),
@@ -260,5 +278,681 @@ TEST_CASE("Footprint padding covers the brim and the extrusion half width on eac
     CHECK_THAT(compacted_tower_footprint_padding(cfg, 0.), WithinAbs(2. * 0.4, 1e-9));
     // Callers whose outline already carries the brim pass zero, and a negative one cannot shrink it.
     CHECK_THAT(compacted_tower_footprint_padding(cfg, -5.), WithinAbs(2. * 0.4, 1e-9));
+}
+
+// ---------------------------------------------------------------------------------------------
+// Snap #934: stagger wipe-tower toolchange starts (Edge-safe indices).
+// ---------------------------------------------------------------------------------------------
+
+TEST_CASE("Wipe tower entry stagger distributes start offsets", "[WipeTower][Stagger]")
+{
+    SECTION("disabled stagger keeps the legacy entry point")
+    {
+        REQUIRE_THAT(WipeTower2::toolchange_entry_stagger_offset(false, 10, 3, 0.5f), WithinAbs(0.f, 1e-6f));
+    }
+
+    SECTION("enabled stagger varies by layer and toolchange")
+    {
+        const float line_spacing = 0.5f;
+
+        REQUIRE_THAT(WipeTower2::toolchange_entry_stagger_offset(true, 0, 0, line_spacing), WithinAbs(0.f, 1e-6f));
+        REQUIRE_THAT(WipeTower2::toolchange_entry_stagger_offset(true, 1, 0, line_spacing), WithinAbs(7.f * line_spacing, 1e-6f));
+        REQUIRE_THAT(WipeTower2::toolchange_entry_stagger_offset(true, 0, 1, line_spacing), WithinAbs(5.f * line_spacing, 1e-6f));
+        REQUIRE_THAT(WipeTower2::toolchange_entry_stagger_offset(true, 17, 0, line_spacing), WithinAbs(0.f, 1e-6f));
+    }
+
+    SECTION("enabled stagger spreads starts across a long cycle")
+    {
+        std::set<size_t> slots;
+        for (size_t layer_idx = 0; layer_idx < 17; ++layer_idx)
+            slots.insert(WipeTower2::toolchange_entry_stagger_slot(true, layer_idx, 0));
+
+        REQUIRE(slots.size() == 17);
+    }
+
+    SECTION("non-positive line spacing disables the offset")
+    {
+        REQUIRE_THAT(WipeTower2::toolchange_entry_stagger_offset(true, 2, 1, 0.f), WithinAbs(0.f, 1e-6f));
+        REQUIRE_THAT(WipeTower2::toolchange_entry_stagger_offset(true, 2, 1, -0.5f), WithinAbs(0.f, 1e-6f));
+    }
+}
+
+TEST_CASE("Edge-safe stagger offset is zero on first layer, local-Z and interface", "[WipeTower][Stagger]")
+{
+    const float spacing = 0.5f;
+    const float line_w  = 0.42f;
+    const float depth   = 20.f;
+    const float ram     = 2.f;
+    const size_t first  = 0;
+
+    SECTION("disabled, first layer, local-Z and interface all return 0")
+    {
+        REQUIRE_THAT(WipeTower2::stagger_offset_for(false, 3, first, 0, false, spacing, depth, ram, line_w),
+                     WithinAbs(0.f, 1e-6f));
+        REQUIRE_THAT(WipeTower2::stagger_offset_for(true, 0, first, 0, false, spacing, depth, ram, line_w),
+                     WithinAbs(0.f, 1e-6f));
+        REQUIRE_THAT(WipeTower2::stagger_offset_for(true, 3, first, size_t(-1), false, spacing, depth, ram, line_w),
+                     WithinAbs(0.f, 1e-6f));
+        REQUIRE_THAT(WipeTower2::stagger_offset_for(true, 3, first, 0, true, spacing, depth, ram, line_w),
+                     WithinAbs(0.f, 1e-6f));
+        // Extra end-of-print layer: rams in the planned box or unloads at object-top (N1).
+        REQUIRE_THAT(WipeTower2::stagger_offset_for(true, 3, first, 0, false, spacing, depth, ram, line_w, true),
+                     WithinAbs(0.f, 1e-6f));
+    }
+
+    SECTION("index progression matches the slot cycle and is clamped to the box room")
+    {
+        REQUIRE_THAT(WipeTower2::stagger_offset_for(true, 1, first, 0, false, spacing, depth, ram, line_w),
+                     WithinAbs(7.f * spacing, 1e-6f));
+        REQUIRE_THAT(WipeTower2::stagger_offset_for(true, 2, first, 0, false, spacing, depth, ram, line_w),
+                     WithinAbs(14.f * spacing, 1e-6f));
+        REQUIRE_THAT(WipeTower2::stagger_offset_for(true, 1, first, 1, false, spacing, depth, ram, line_w),
+                     WithinAbs(12.f * spacing, 1e-6f));
+        // room = 3 - 2 - 4*0.5 = -1 → clamped to 0
+        REQUIRE_THAT(WipeTower2::stagger_offset_for(true, 1, first, 0, false, spacing, 3.f, 2.f, 0.5f),
+                     WithinAbs(0.f, 1e-6f));
+        // room = 4.5 - 2 - 4*0.42 = 0.82, slot 7 * 0.5 = 3.5 → clamped to 0.82
+        REQUIRE_THAT(WipeTower2::stagger_offset_for(true, 1, first, 0, false, spacing, 4.5f, 2.f, line_w),
+                     WithinAbs(4.5f - 2.f - 4.f * line_w, 1e-5f));
+    }
+}
+
+TEST_CASE("Stagger option is a print preset key and defaults off", "[WipeTower][Stagger][Config]")
+{
+    CHECK_FALSE(PrintConfig().wipe_tower_stagger_toolchange_start.value);
+    const ConfigOptionDef *def = print_config_def.get("wipe_tower_stagger_toolchange_start");
+    REQUIRE(def != nullptr);
+    CHECK(def->type == coBool);
+    CHECK_FALSE(def->get_default_value<ConfigOptionBool>()->value);
+
+    const auto &options = Preset::print_options();
+    CHECK(std::find(options.begin(), options.end(), "wipe_tower_stagger_toolchange_start") != options.end());
+}
+
+namespace {
+
+const std::string &stagger_profiles_dir()
+{
+    static const std::string dir = (fs::path(TEST_DATA_DIR) / ".." / ".." / "resources" / "profiles").string();
+    return dir;
+}
+
+class DataDirGuard
+{
+public:
+    explicit DataDirGuard(const std::string &dir) : m_prev(data_dir()) { set_data_dir(dir); }
+    ~DataDirGuard() { set_data_dir(m_prev); }
+    DataDirGuard(const DataDirGuard &)            = delete;
+    DataDirGuard &operator=(const DataDirGuard &) = delete;
+
+private:
+    std::string m_prev;
+};
+
+void load_stagger_vendor(PresetBundle &library, PresetBundle &vendor_bundle, const std::string &vendor)
+{
+    const fs::path scratch = fs::temp_directory_path() / fs::unique_path("stagger_profiles_%%%%-%%%%");
+    fs::create_directories(scratch);
+    DataDirGuard guard(scratch.string());
+    library.load_vendor_configs_from_json(stagger_profiles_dir(), PresetBundle::ORCA_FILAMENT_LIBRARY, PresetBundle::LoadSystem,
+                                          ForwardCompatibilitySubstitutionRule::EnableSilent);
+    vendor_bundle.load_vendor_configs_from_json(stagger_profiles_dir(), vendor, PresetBundle::LoadSystem,
+                                                ForwardCompatibilitySubstitutionRule::EnableSilent, &library);
+}
+
+bool process_resolves_stagger(PresetBundle &b, const char *process_name)
+{
+    const Preset *p = b.prints.find_preset(process_name, false);
+    REQUIRE(p != nullptr);
+    if (p->config.has("wipe_tower_stagger_toolchange_start"))
+        return p->config.opt_bool("wipe_tower_stagger_toolchange_start");
+    // Inherited from a parent that carries the key, or the PrintConfig default (false).
+    std::string parent = p->inherits();
+    while (!parent.empty()) {
+        const Preset *up = b.prints.find_preset(parent, false);
+        if (up == nullptr)
+            break;
+        if (up->config.has("wipe_tower_stagger_toolchange_start"))
+            return up->config.opt_bool("wipe_tower_stagger_toolchange_start");
+        parent = up->inherits();
+    }
+    return PrintConfig().wipe_tower_stagger_toolchange_start.value;
+}
+
+std::string without_timestamp(std::string gcode)
+{
+    const size_t at = gcode.find("; generated by ");
+    if (at != std::string::npos)
+        gcode.erase(at, gcode.find('\n', at) - at);
+    return gcode;
+}
+
+std::string moves_of(const std::string &gcode)
+{
+    std::istringstream in(without_timestamp(gcode));
+    std::string        out, line;
+    while (std::getline(in, line)) {
+        const size_t eq      = line.find(" = ");
+        bool         setting = line.rfind("; ", 0) == 0 && eq != std::string::npos;
+        for (size_t i = 2; setting && i < eq; ++i)
+            setting = std::isalnum((unsigned char) line[i]) || line[i] == '_';
+        if (!setting && line.find("label id") == std::string::npos)
+            out += line + "\n";
+    }
+    return out;
+}
+
+DynamicPrintConfig stagger_slice_config(bool stagger)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_num_extruders(2);
+    config.set_num_filaments(2);
+    config.set_deserialize_strict({
+        { "layer_height",                       0.3 },
+        { "initial_layer_print_height",         0.3 },
+        { "wall_loops",                         1 },
+        { "sparse_infill_density",              "0%" },
+        { "bottom_shell_layers",                2 },
+        { "top_shell_layers",                   0 },
+        { "enable_support",                     false },
+        { "skirt_loops",                        0 },
+        { "enable_prime_tower",                 true },
+        { "prime_tower_width",                  30 },
+        { "prime_tower_brim_width",             3 },
+        { "wipe_tower_x",                       "140" },
+        { "wipe_tower_y",                       "140" },
+        { "wipe_tower_rotation_angle",          0 },
+        { "wipe_tower_wall_type",               "rectangle" },
+        { "wipe_tower_cone_angle",              0 },
+        { "wipe_tower_wall_gap",                true },
+        { "wipe_tower_stagger_toolchange_start", stagger },
+        { "purge_in_prime_tower",               "1" },
+        { "gcode_comments",                     true },
+        { "gcode_flavor",                       "marlin" },
+        { "layer_change_gcode",                 "G92 E0" },
+        { "single_extruder_multi_material",     "1" },
+        { "enable_filament_ramming",            "1" },
+        { "wipe_tower_no_sparse_layers",        "0" },
+        { "filament_multitool_ramming",         "0,0" },
+    });
+    return config;
+}
+
+std::string slice_stagger_project(const DynamicPrintConfig &config, Print &print)
+{
+    Model model;
+    for (int i = 0; i < 2; ++i) {
+        ModelObject *object = model.add_object();
+        object->name        = i == 0 ? "cubeA" : "cubeB";
+        object->add_volume(make_cube(10., 10., 6.));
+        object->config.set("extruder", i + 1);
+        object->add_instance()->set_offset(Vec3d(40. + (i == 0 ? -8. : 8.), 40., 0.));
+        object->ensure_on_bed();
+    }
+    print.is_BBL_printer() = false;
+    print.apply(model, config);
+    const StringObjectException err = print.validate();
+    INFO(err.string);
+    REQUIRE(err.string.empty());
+    print.set_status_silent();
+    return Test::gcode(print);
+}
+
+const std::regex &g1_word()
+{
+    static const std::regex word("([XYZE])(-?[0-9]*\\.?[0-9]+)");
+    return word;
+}
+
+struct G1Move
+{
+    double nx = 0, ny = 0, de = 0;
+    bool   has_e = false, has_x = false, has_y = false, is_g1 = false;
+};
+
+G1Move parse_g1(const std::string &line, double x, double y)
+{
+    G1Move            m;
+    m.nx                   = x;
+    m.ny                   = y;
+    const std::string code = line.substr(0, line.find(';'));
+    if (!(code.rfind("G1 ", 0) == 0 || code.rfind("G0 ", 0) == 0))
+        return m;
+    m.is_g1 = true;
+    for (auto it = std::sregex_iterator(code.begin(), code.end(), g1_word()); it != std::sregex_iterator(); ++it) {
+        const char   axis = (*it)[1].str()[0];
+        const double v    = std::atof((*it)[2].str().c_str());
+        switch (axis) {
+        case 'X': m.nx = v; m.has_x = true; break;
+        case 'Y': m.ny = v; m.has_y = true; break;
+        case 'E': m.has_e = true; m.de = v; break;
+        default: break;
+        }
+    }
+    return m;
+}
+
+// Y-only travels after "; CP TOOLCHANGE WIPE" and before the first extrude: the stagger hop.
+// XY is tracked through the whole file so the delta is from the real pre-hop position.
+std::vector<double> stagger_hops(const std::string &gcode)
+{
+    std::vector<double> out;
+    std::istringstream  in(gcode);
+    std::string         line;
+    bool                in_wipe = false;
+    double              x = 0, y = 0;
+    while (std::getline(in, line)) {
+        if (!line.empty() && line.back() == '\r')
+            line.pop_back();
+        if (line.find("; CP TOOLCHANGE WIPE") != std::string::npos) {
+            in_wipe = true;
+            continue;
+        }
+        const G1Move m = parse_g1(line, x, y);
+        if (!m.is_g1) {
+            if (in_wipe && (line.find("; WIPE_TOWER_END") != std::string::npos ||
+                            (line.find("; CP TOOLCHANGE") != std::string::npos && line.find("WIPE") == std::string::npos)))
+                in_wipe = false;
+            continue;
+        }
+        if (in_wipe) {
+            if (m.has_e && std::abs(m.de) > 1e-6)
+                in_wipe = false;
+            else {
+                const bool y_only = m.has_y && std::abs(m.ny - y) > 1e-4 && (!m.has_x || std::abs(m.nx - x) < 1e-4);
+                if (y_only)
+                    out.push_back(m.ny - y);
+            }
+        }
+        if (m.has_x) x = m.nx;
+        if (m.has_y) y = m.ny;
+    }
+    return out;
+}
+
+size_t count_tag(const std::string &gcode, const char *tag)
+{
+    size_t n = 0, pos = 0;
+    while ((pos = gcode.find(tag, pos)) != std::string::npos) {
+        ++n;
+        pos += 1;
+    }
+    return n;
+}
+
+// Positive E summed per "; CP TOOLCHANGE WIPE" block (relative E).
+std::vector<double> wipe_block_E(const std::string &gcode)
+{
+    std::vector<double> out;
+    std::istringstream  in(gcode);
+    std::string         line;
+    bool                in_wipe = false;
+    double              acc     = 0;
+    auto                finish  = [&]() {
+        if (in_wipe) {
+            out.push_back(acc);
+            acc     = 0;
+            in_wipe = false;
+        }
+    };
+    while (std::getline(in, line)) {
+        if (line.find("; CP TOOLCHANGE WIPE") != std::string::npos) {
+            finish();
+            in_wipe = true;
+            continue;
+        }
+        if (in_wipe && (line.find("; WIPE_TOWER_END") != std::string::npos ||
+                        (line.find("; CP TOOLCHANGE") != std::string::npos && line.find("WIPE") == std::string::npos))) {
+            finish();
+            continue;
+        }
+        if (!in_wipe)
+            continue;
+        const std::string code = line.substr(0, line.find(';'));
+        for (auto it = std::sregex_iterator(code.begin(), code.end(), g1_word()); it != std::sregex_iterator(); ++it) {
+            if ((*it)[1].str()[0] == 'E') {
+                const double e = std::atof((*it)[2].str().c_str());
+                if (e > 0)
+                    acc += e;
+            }
+        }
+    }
+    finish();
+    return out;
+}
+
+double wipe_one_line_E(const std::string &gcode)
+{
+    double              best = 0;
+    std::istringstream  in(gcode);
+    std::string         line;
+    bool                in_wipe = false;
+    while (std::getline(in, line)) {
+        if (line.find("; CP TOOLCHANGE WIPE") != std::string::npos) {
+            in_wipe = true;
+            continue;
+        }
+        if (in_wipe && (line.find("; WIPE_TOWER_END") != std::string::npos ||
+                        (line.find("; CP TOOLCHANGE") != std::string::npos && line.find("WIPE") == std::string::npos))) {
+            in_wipe = false;
+            continue;
+        }
+        if (!in_wipe)
+            continue;
+        const std::string code = line.substr(0, line.find(';'));
+        for (auto it = std::sregex_iterator(code.begin(), code.end(), g1_word()); it != std::sregex_iterator(); ++it) {
+            if ((*it)[1].str()[0] == 'E')
+                best = std::max(best, std::atof((*it)[2].str().c_str()));
+        }
+    }
+    return best > 1e-6 ? best : 1.0;
+}
+
+// After a hop of H, the first non-extruding travel whose Y drop matches H is the wrap-around.
+std::vector<double> wipe_wrap_returns(const std::string &gcode)
+{
+    std::vector<double> out;
+    std::istringstream  in(gcode);
+    std::string         line;
+    bool                in_wipe  = false;
+    bool                extruded = false;
+    bool                seen_wrap = false;
+    double              hop = 0, x = 0, y = 0;
+    while (std::getline(in, line)) {
+        if (line.find("; CP TOOLCHANGE WIPE") != std::string::npos) {
+            in_wipe   = true;
+            extruded  = false;
+            seen_wrap = false;
+            hop       = 0;
+            continue;
+        }
+        if (in_wipe && (line.find("; WIPE_TOWER_END") != std::string::npos ||
+                        (line.find("; CP TOOLCHANGE") != std::string::npos && line.find("WIPE") == std::string::npos)))
+            in_wipe = false;
+        const G1Move m = parse_g1(line, x, y);
+        if (m.is_g1) {
+            if (in_wipe) {
+                const bool y_only = m.has_y && std::abs(m.ny - y) > 1e-4 && (!m.has_x || std::abs(m.nx - x) < 1e-4);
+                if (!extruded && y_only && (m.ny - y) > 1e-4)
+                    hop = m.ny - y;
+                if (extruded && !seen_wrap && !m.has_e && hop > 1e-4 && m.has_y) {
+                    const double drop = y - m.ny;
+                    if (drop > hop - 0.35 && drop < hop + 0.35) {
+                        out.push_back(m.ny - y);
+                        seen_wrap = true;
+                    }
+                }
+                if (m.has_e && std::abs(m.de) > 1e-6)
+                    extruded = true;
+            }
+            if (m.has_x) x = m.nx;
+            if (m.has_y) y = m.ny;
+        }
+    }
+    return out;
+}
+
+// Axis-aligned travel after WIPE and before the first extrude (rotation-safe).
+std::vector<double> wipe_entry_axis_hops(const std::string &gcode)
+{
+    std::vector<double> out;
+    std::istringstream  in(gcode);
+    std::string         line;
+    bool                in_wipe = false;
+    double              x = 0, y = 0;
+    while (std::getline(in, line)) {
+        if (line.find("; CP TOOLCHANGE WIPE") != std::string::npos) {
+            in_wipe = true;
+            continue;
+        }
+        const G1Move m = parse_g1(line, x, y);
+        if (!m.is_g1) {
+            if (in_wipe && (line.find("; WIPE_TOWER_END") != std::string::npos ||
+                            (line.find("; CP TOOLCHANGE") != std::string::npos && line.find("WIPE") == std::string::npos)))
+                in_wipe = false;
+            continue;
+        }
+        if (in_wipe) {
+            if (m.has_e && std::abs(m.de) > 1e-6)
+                in_wipe = false;
+            else {
+                const bool x_only = m.has_x && std::abs(m.nx - x) > 1e-4 && (!m.has_y || std::abs(m.ny - y) < 1e-4);
+                const bool y_only = m.has_y && std::abs(m.ny - y) > 1e-4 && (!m.has_x || std::abs(m.nx - x) < 1e-4);
+                if (x_only)
+                    out.push_back(m.nx - x);
+                else if (y_only)
+                    out.push_back(m.ny - y);
+            }
+        }
+        if (m.has_x) x = m.nx;
+        if (m.has_y) y = m.ny;
+    }
+    return out;
+}
+
+void check_tower_extrusions(const std::string &gcode, const Print &print, double x0, double y0)
+{
+    const auto  &wtd = print.wipe_tower_data();
+    const double b   = wtd.brim_width + 2.;
+    const double xmax = x0 + wtd.width + b;
+    const double ymax = y0 + wtd.depth + b;
+    std::istringstream in(gcode);
+    std::string        line;
+    bool               in_tower = false;
+    double             x = 0, y = 0;
+    while (std::getline(in, line)) {
+        if (line.find("; WIPE_TOWER_START") == 0) { in_tower = true; continue; }
+        if (line.find("; WIPE_TOWER_END") == 0) { in_tower = false; continue; }
+        if (!in_tower)
+            continue;
+        const std::string code = line.substr(0, line.find(';'));
+        if (!(code.rfind("G1 ", 0) == 0 || code.rfind("G0 ", 0) == 0 || code.rfind("G2 ", 0) == 0 ||
+              code.rfind("G3 ", 0) == 0))
+            continue;
+        bool has_e = false;
+        for (auto it = std::sregex_iterator(code.begin(), code.end(), g1_word()); it != std::sregex_iterator(); ++it) {
+            const char   axis = (*it)[1].str()[0];
+            const double v    = std::atof((*it)[2].str().c_str());
+            switch (axis) {
+            case 'X': x = v; break;
+            case 'Y': y = v; break;
+            case 'E': has_e = true; break;
+            default: break;
+            }
+        }
+        if (has_e) {
+            INFO("tower extrusion at " << x << "," << y);
+            CHECK(x > x0 - b);
+            CHECK(y > y0 - b);
+            CHECK(x < xmax);
+            CHECK(y < ymax);
+        }
+    }
+}
+
+void check_wipe_volume(const std::string &g_off, const std::string &g_on)
+{
+    const auto   e_off    = wipe_block_E(g_off);
+    const auto   e_on     = wipe_block_E(g_on);
+    const double one_line = wipe_one_line_E(g_off);
+    REQUIRE(e_off.size() == e_on.size());
+    REQUIRE(e_off.size() >= 4);
+    REQUIRE_FALSE(stagger_hops(g_on).empty());
+    size_t cap_i = 0;
+    const auto hops = stagger_hops(g_on);
+    for (size_t i = 1; i < hops.size(); ++i)
+        if (std::abs(hops[i]) > std::abs(hops[cap_i]))
+            cap_i = i;
+    INFO("cap hop index " << cap_i << " hop=" << hops[cap_i] << " one_line=" << one_line);
+    CHECK(std::abs(hops[cap_i]) > 2.0);
+    for (size_t i = 0; i < e_off.size(); ++i) {
+        INFO("wipe block " << i << " off=" << e_off[i] << " on=" << e_on[i]);
+        CHECK(e_on[i] + 1e-6 >= e_off[i] - one_line);
+    }
+}
+
+} // namespace
+
+TEST_CASE("U1 system process profiles turn stagger on; non-U1 stay off", "[WipeTower][Stagger][Profiles]")
+{
+    PresetBundle library;
+    PresetBundle snap;
+    load_stagger_vendor(library, snap, "Snapmaker");
+    CHECK(process_resolves_stagger(snap, "0.20mm Standard @Snapmaker U1 (0.4 nozzle)"));
+    CHECK(process_resolves_stagger(snap, "0.16mm Standard @Snapmaker U1 (0.4 nozzle)"));
+    CHECK_FALSE(process_resolves_stagger(snap, "0.20 Standard @Snapmaker J1 (0.4 nozzle)"));
+    CHECK_FALSE(process_resolves_stagger(snap, "0.20 Standard @Snapmaker Artisan (0.4 nozzle)"));
+    CHECK_FALSE(DynamicPrintConfig::full_print_config().opt_bool("wipe_tower_stagger_toolchange_start"));
+}
+
+TEST_CASE("Stagger off is a no-op on non-U1 G-code; stagger on moves the wipe start", "[WipeTower][Stagger][GCode]")
+{
+    Print              print_off;
+    DynamicPrintConfig cfg_off = stagger_slice_config(false);
+    const std::string  g_off   = slice_stagger_project(cfg_off, print_off);
+    CHECK(stagger_hops(g_off).empty());
+
+    Print              print_on;
+    DynamicPrintConfig cfg_on = stagger_slice_config(true);
+    const std::string  g_on   = slice_stagger_project(cfg_on, print_on);
+    CHECK(moves_of(g_off) != moves_of(g_on));
+    const auto hops = stagger_hops(g_on);
+    REQUIRE(hops.size() >= 3);
+    std::set<long> hop_um;
+    for (double d : hops)
+        hop_um.insert(std::lround(d * 1000.));
+    CHECK(hop_um.size() >= 3);
+
+    // Finalize / restore-Z markers must not change with stagger.
+    CHECK(count_tag(g_off, "[restore_layer_z_before_toolchange]") ==
+          count_tag(g_on, "[restore_layer_z_before_toolchange]"));
+    CHECK(count_tag(g_off, "; CP TOOLCHANGE UNLOAD") == count_tag(g_on, "; CP TOOLCHANGE UNLOAD"));
+    CHECK(count_tag(g_off, "Travel back up to the topmost object layer.") ==
+          count_tag(g_on, "Travel back up to the topmost object layer."));
+
+    // Final purge is unload-only. An empty TCR (U1 / skip) must not be used as a stagger source;
+    // a real SEMM final purge must not pick up a Y hop.
+    for (Print *p : {&print_off, &print_on}) {
+        if (!p->wipe_tower_data().final_purge)
+            continue;
+        if (p->wipe_tower_data().final_purge->gcode.empty())
+            CHECK_FALSE(p->wipe_tower_data().final_purge_drop);
+        else
+            CHECK(stagger_hops(p->wipe_tower_data().final_purge->gcode).empty());
+    }
+
+    // Tower extrusions stay on the configured tower (140,140), not on the cubes at ~40,40.
+    check_tower_extrusions(g_on, print_on, 140., 140.);
+    check_tower_extrusions(g_off, print_off, 140., 140.);
+}
+
+TEST_CASE("Stagger wrap-around keeps wipe volume including the cap slot", "[WipeTower][Stagger][GCode]")
+{
+    Print              print_off;
+    DynamicPrintConfig cfg_off = stagger_slice_config(false);
+    const std::string  g_off   = slice_stagger_project(cfg_off, print_off);
+
+    Print              print_on;
+    DynamicPrintConfig cfg_on = stagger_slice_config(true);
+    const std::string  g_on   = slice_stagger_project(cfg_on, print_on);
+
+    check_wipe_volume(g_off, g_on);
+    REQUIRE_FALSE(wipe_wrap_returns(g_on).empty());
+    CHECK(wipe_wrap_returns(g_off).empty());
+}
+
+TEST_CASE("Stagger keeps tower depth and wall-gap alignment", "[WipeTower][Stagger][GCode]")
+{
+    Print              print_off;
+    DynamicPrintConfig cfg_off = stagger_slice_config(false);
+    const std::string  g_off   = slice_stagger_project(cfg_off, print_off);
+
+    Print              print_on;
+    DynamicPrintConfig cfg_on = stagger_slice_config(true);
+    const std::string  g_on   = slice_stagger_project(cfg_on, print_on);
+
+    CHECK_THAT(print_on.wipe_tower_data().depth, WithinAbs(print_off.wipe_tower_data().depth, 0.05f));
+    CHECK_THAT(print_on.wipe_tower_data().width, WithinAbs(print_off.wipe_tower_data().width, 0.05f));
+    CHECK(count_tag(g_off, "; CP TOOLCHANGE WIPE") == count_tag(g_on, "; CP TOOLCHANGE WIPE"));
+
+    const auto hops = stagger_hops(g_on);
+    REQUIRE(hops.size() >= 3);
+    // Reversed tower layers flip world Y, so the hop sign follows the layer.
+    for (double h : hops) {
+        CHECK(std::abs(h) > 0.05);
+        CHECK(std::abs(h) < print_on.wipe_tower_data().depth);
+    }
+    // Slot cycle: hops share a line-spacing quantum (GCD of micrometre hops).
+    long hop_gcd = 0;
+    for (double h : hops) {
+        const long um = std::lround(std::abs(h) * 1000.);
+        hop_gcd       = hop_gcd == 0 ? um : std::gcd(hop_gcd, um);
+    }
+    REQUIRE(hop_gcd >= 50);
+    for (double h : hops)
+        CHECK(std::lround(std::abs(h) * 1000.) % hop_gcd == 0);
+}
+
+TEST_CASE("Stagger wrap-around works on a rotated tower", "[WipeTower][Stagger][GCode]")
+{
+    Print              print_off;
+    DynamicPrintConfig cfg_off = stagger_slice_config(false);
+    cfg_off.set_deserialize_strict({ { "wipe_tower_rotation_angle", 90 } });
+    const std::string g_off = slice_stagger_project(cfg_off, print_off);
+
+    Print              print_on;
+    DynamicPrintConfig cfg_on = stagger_slice_config(true);
+    cfg_on.set_deserialize_strict({ { "wipe_tower_rotation_angle", 90 } });
+    const std::string g_on = slice_stagger_project(cfg_on, print_on);
+
+    const auto hops_off = wipe_entry_axis_hops(g_off);
+    const auto hops_on  = wipe_entry_axis_hops(g_on);
+    REQUIRE(hops_on.size() > hops_off.size());
+    REQUIRE(hops_on.size() >= 3);
+    const auto   e_off    = wipe_block_E(g_off);
+    const auto   e_on     = wipe_block_E(g_on);
+    const double one_line = wipe_one_line_E(g_off);
+    REQUIRE(e_off.size() == e_on.size());
+    REQUIRE(e_off.size() >= 3);
+    for (size_t i = 0; i < e_off.size(); ++i) {
+        INFO("rotated wipe block " << i << " off=" << e_off[i] << " on=" << e_on[i]);
+        CHECK(e_on[i] + 1e-6 >= e_off[i] - one_line);
+    }
+    CHECK_THAT(print_on.wipe_tower_data().depth, WithinAbs(print_off.wipe_tower_data().depth, 0.05f));
+}
+
+TEST_CASE("Stagger off is a no-op against the #184 path, including near-edge SEMM", "[WipeTower][Stagger][GCode]")
+{
+    Print              print_a;
+    DynamicPrintConfig cfg_a = stagger_slice_config(false);
+    const std::string  g_a   = slice_stagger_project(cfg_a, print_a);
+
+    Print              print_b;
+    DynamicPrintConfig cfg_b = stagger_slice_config(false);
+    const std::string  g_b   = slice_stagger_project(cfg_b, print_b);
+
+    REQUIRE(moves_of(g_a) == moves_of(g_b));
+    CHECK(stagger_hops(g_a).empty());
+    CHECK(wipe_wrap_returns(g_a).empty());
+    CHECK(wipe_entry_axis_hops(g_a).empty());
+
+    // Near-edge MK4-like SEMM layout: tower against the far X of a 250x210 bed.
+    // Stagger-off must keep the unclamped ironing path (clamps are gated on stagger-on).
+    Print              print_edge;
+    DynamicPrintConfig cfg_edge = stagger_slice_config(false);
+    cfg_edge.option<ConfigOptionPoints>("printable_area")->values = {
+        Vec2d(0., 0.), Vec2d(250., 0.), Vec2d(250., 210.), Vec2d(0., 210.)
+    };
+    cfg_edge.set_deserialize_strict({
+        { "wipe_tower_x",          "215" },
+        { "wipe_tower_y",          "10" },
+        { "prime_tower_width",     30 },
+        { "prime_tower_brim_width", 3 },
+    });
+    const std::string g_edge = slice_stagger_project(cfg_edge, print_edge);
+    CHECK(stagger_hops(g_edge).empty());
+    CHECK(wipe_wrap_returns(g_edge).empty());
+    CHECK(count_tag(g_edge, "; CP TOOLCHANGE WIPE") >= 3);
+    check_tower_extrusions(g_edge, print_edge, 215., 10.);
 }
 
