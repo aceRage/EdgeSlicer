@@ -3368,7 +3368,7 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
             this->placeholder_parser().set("curr_physical_extruder_id",      new ConfigOptionInt(shim_physical_extruder));
             this->placeholder_parser().set("most_used_physical_extruder_id", new ConfigOptionInt(shim_physical_extruder));
             this->placeholder_parser().set("new_extruder_retracted_length",  new ConfigOptionFloat(0.));
-            this->placeholder_parser().set("initial_no_support_filament_id", new ConfigOptionInt(int(initial_extruder_id)));
+            this->placeholder_parser().set("initial_no_support_filament_id", new ConfigOptionInt(int(initial_non_support_extruder_id)));
             // *_hotend = the physical-nozzle id for the filament; BBS's NOZZLE_ID_FOR_GCODE returns -1
             // when there is no dynamic nozzle map (our single-mapped case), so all hotend vars are -1.
             this->placeholder_parser().set("initial_no_support_hotend",       new ConfigOptionInt(-1));

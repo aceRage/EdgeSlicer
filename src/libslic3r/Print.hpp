@@ -1257,6 +1257,8 @@ public:
 
 	std::string                 output_filename(const std::string &filename_base = std::string()) const override;
     // Same 0-based index the G-code generator publishes as initial_no_support_extruder.
+    // Background thread / tests only: the ByObject path constructs ToolOrdering and writes
+    // object_first_layer_wall_extruders. The UI reads m_stage1_initial_no_support_extruder.
     unsigned int                initial_no_support_extruder_id() const;
 
 	std::string                 get_model_name() const;
@@ -1399,6 +1401,9 @@ private:
     // Following section will be consumed by the GCodeGenerator.
     ToolOrdering 							m_tool_ordering;
     WipeTowerData                           m_wipe_tower_data {m_tool_ordering};
+    // Cached on the background thread inside the psWipeTower block, before set_done.
+    // output_filename (UI thread) reads this instead of copying m_tool_ordering.
+    unsigned int                            m_stage1_initial_no_support_extruder { 0 };
 
     // Estimated print time, filament consumed.
     PrintStatistics                         m_print_statistics;

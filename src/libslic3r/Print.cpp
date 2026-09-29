@@ -5194,6 +5194,7 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
     if (this->set_started(psWipeTower)) {
         m_wipe_tower_data.clear();
         m_tool_ordering.clear();
+        m_stage1_initial_no_support_extruder = 0;
         if (this->has_wipe_tower()) {
             this->_make_wipe_tower();
         } else if (this->config().print_sequence != PrintSequence::ByObject) {
@@ -5202,6 +5203,11 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
             if (m_tool_ordering.empty() || m_tool_ordering.last_extruder() == unsigned(-1))
                 throw Slic3r::SlicingError("The print is empty. The model is not printable with current print settings.");
         }
+        // Cache on this background thread before set_done so the UI can read an int
+        // without copying m_tool_ordering (Chameleon brim later push_backs into
+        // tools_for_layer().extruders) or constructing ByObject ToolOrdering
+        // (which writes object_first_layer_wall_extruders) while G-code export runs.
+        m_stage1_initial_no_support_extruder = this->initial_no_support_extruder_id();
         this->set_done(psWipeTower);
     }
     if (this->has_wipe_tower()) {
@@ -6330,26 +6336,26 @@ void WipeTowerData::construct_mesh(float width, float depth, float height, float
 
 unsigned int Print::initial_no_support_extruder_id() const
 {
-    ToolOrdering        ordering;
-    unsigned int        initial_extruder_id = (unsigned int) -1;
-    const bool          is_bbl_printers     = is_BBL_printer();
+    unsigned int initial_extruder_id = (unsigned int) -1;
+    const bool   is_bbl_printers     = is_BBL_printer();
 
     if (config().print_sequence == PrintSequence::ByObject) {
+        // Background / tests only: ToolOrdering(PrintObject) writes object_first_layer_wall_extruders.
         for (const PrintInstance *instance : sort_object_instances_by_model_order(*this)) {
-            ordering            = ToolOrdering(*instance->print_object, initial_extruder_id);
+            ToolOrdering ordering(*instance->print_object, initial_extruder_id);
             initial_extruder_id = ordering.first_extruder();
             if (initial_extruder_id != (unsigned int) -1)
-                break;
+                return ordering.first_non_support_extruder(config(), initial_extruder_id);
         }
-    } else {
-        ordering = this->tool_ordering();
-        ordering.assign_custom_gcodes(*this);
-        const bool has_wipe_tower = this->has_wipe_tower() && ordering.has_wipe_tower();
-        if (!is_bbl_printers && has_wipe_tower && !config().single_extruder_multi_material_priming)
-            initial_extruder_id = ordering.all_extruders().empty() ? (unsigned int) -1 : ordering.all_extruders().back();
-        else
-            initial_extruder_id = ordering.first_extruder();
+        return 0;
     }
+
+    const ToolOrdering &ordering       = this->tool_ordering();
+    const bool          has_wipe_tower = this->has_wipe_tower() && ordering.has_wipe_tower();
+    if (!is_bbl_printers && has_wipe_tower && !config().single_extruder_multi_material_priming)
+        initial_extruder_id = ordering.all_extruders().empty() ? (unsigned int) -1 : ordering.all_extruders().back();
+    else
+        initial_extruder_id = ordering.first_extruder();
 
     return ordering.first_non_support_extruder(config(), initial_extruder_id);
 }
@@ -6368,14 +6374,15 @@ std::string Print::output_filename(const std::string &filename_base) const
     config.set_key_value("plate_number", new ConfigOptionString(get_plate_number_formatted()));
     config.set_key_value("model_name", new ConfigOptionString(get_model_name()));
     if (!this->finished()) {
-        // Stage-1 name before export: {filament_type[initial_no_support_extruder]} needs an int index
-        // and {int(total_weight*10)/10.0} needs a number, so the string placeholders cannot stay.
-        // Gate the helper on psWipeTower so we do not copy m_tool_ordering / walk object layers
-        // while the background thread is still building them.
-        const int idx = this->is_step_done(psWipeTower) ? int(this->initial_no_support_extruder_id()) : 0;
+        // Stage-1 name before export: {filament_type[initial_no_support_extruder]} needs an int
+        // index. Read the value cached on the background thread at psWipeTower; do not copy
+        // m_tool_ordering or walk object layers here (UI thread: races brim / G-code).
+        // Force total_weight to 0 so we never publish a stale partial sum while export
+        // clears/rebuilds print_statistics (same 0g bake as a name taken before the slice).
+        const int idx = this->is_step_done(psWipeTower) ? int(m_stage1_initial_no_support_extruder) : 0;
         config.set_key_value("initial_no_support_extruder", new ConfigOptionInt(idx));
         config.set_key_value("initial_no_support_tool",     new ConfigOptionInt(idx));
-        config.set_key_value("total_weight", new ConfigOptionFloat(this->print_statistics().total_weight));
+        config.set_key_value("total_weight", new ConfigOptionFloat(0.0));
     }
 
     return this->PrintBase::output_filename(m_config.filename_format.value, ".gcode", filename_base, &config);
