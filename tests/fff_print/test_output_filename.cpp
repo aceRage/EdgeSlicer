@@ -79,6 +79,13 @@ TEST_CASE("U1 filename_format uses initial non-support extruder after a multi-ma
         Print print;
         Model model;
         init_print({support_capital()}, print, model, two_filament_support_config(support_on_extruder_0));
+
+        // Before process(): psWipeTower is not done, so the gated helper uses index 0.
+        // Pre-slice total_weight is 0, so the U1 template bakes 0g (same as upstream).
+        std::string name_before_slice;
+        REQUIRE_NOTHROW(name_before_slice = print.output_filename("u1_job"));
+        REQUIRE(name_before_slice.find("0g") != std::string::npos);
+
         REQUIRE_NOTHROW(print.process());
         REQUIRE(!print.objects().empty());
         REQUIRE(!print.objects().front()->support_layers().empty());
@@ -87,8 +94,6 @@ TEST_CASE("U1 filename_format uses initial non-support extruder after a multi-ma
         REQUIRE(print.initial_no_support_extruder_id() == expected);
 
         // After slice, before G-code: the index must already be a real variable.
-        // Weight may still be a placeholder string here; Export G-code names the
-        // file after export_gcode(), which is asserted below.
         std::string name_after_slice;
         REQUIRE_NOTHROW(name_after_slice = print.output_filename("u1_job"));
         REQUIRE(name_after_slice.find("PLA") != std::string::npos);
@@ -105,5 +110,14 @@ TEST_CASE("U1 filename_format uses initial non-support extruder after a multi-ma
         // Weight token must resolve to a numeric …Ng… segment.
         const std::regex weight_re(R"(u1_job_PLA_[0-9]+(\.[0-9]+)?g_.+\.gcode)");
         REQUIRE(std::regex_match(name_after_export, weight_re));
+
+        // Stage 2 (PrintHost upload / finalize_gcode): re-parse with PrintStatistics::config() only.
+        REQUIRE(print.print_statistics().config().opt_int("initial_no_support_extruder") ==
+                static_cast<int>(print.initial_no_support_extruder_id()));
+        REQUIRE(print.print_statistics().config().opt_int("initial_no_support_tool") ==
+                static_cast<int>(print.print_statistics().initial_no_support_tool));
+        std::string finalized;
+        REQUIRE_NOTHROW(finalized = print.print_statistics().finalize_output_path(name_after_export));
+        REQUIRE(finalized == name_after_export);
     }
 }

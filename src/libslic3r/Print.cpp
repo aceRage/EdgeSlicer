@@ -6367,14 +6367,16 @@ std::string Print::output_filename(const std::string &filename_base) const
     config.set_key_value("plate_name", new ConfigOptionString(get_plate_name()));
     config.set_key_value("plate_number", new ConfigOptionString(get_plate_number_formatted()));
     config.set_key_value("model_name", new ConfigOptionString(get_model_name()));
-    // GCode.cpp publishes this only on its own parser. Export G-code / plate / print-host
-    // name files through this path, so the U1 filename_format must see the same index here.
-    const int initial_no_support = static_cast<int>(this->initial_no_support_extruder_id());
-    config.set_key_value("initial_no_support_extruder", new ConfigOptionInt(initial_no_support));
-    config.set_key_value("initial_no_support_tool", new ConfigOptionInt(initial_no_support));
-    // U1 filename_format does arithmetic on total_weight. The unfinished-print
-    // placeholder is a string ("{total_weight}"), which would throw here.
-    config.set_key_value("total_weight", new ConfigOptionFloat(this->print_statistics().total_weight));
+    if (!this->finished()) {
+        // Stage-1 name before export: {filament_type[initial_no_support_extruder]} needs an int index
+        // and {int(total_weight*10)/10.0} needs a number, so the string placeholders cannot stay.
+        // Gate the helper on psWipeTower so we do not copy m_tool_ordering / walk object layers
+        // while the background thread is still building them.
+        const int idx = this->is_step_done(psWipeTower) ? int(this->initial_no_support_extruder_id()) : 0;
+        config.set_key_value("initial_no_support_extruder", new ConfigOptionInt(idx));
+        config.set_key_value("initial_no_support_tool",     new ConfigOptionInt(idx));
+        config.set_key_value("total_weight", new ConfigOptionFloat(this->print_statistics().total_weight));
+    }
 
     return this->PrintBase::output_filename(m_config.filename_format.value, ".gcode", filename_base, &config);
 }
@@ -6470,7 +6472,10 @@ DynamicConfig PrintStatistics::config() const
     config.set_key_value("total_weight",              new ConfigOptionFloat(this->total_weight));
     config.set_key_value("total_wipe_tower_cost",     new ConfigOptionFloat(this->total_wipe_tower_cost));
     config.set_key_value("total_wipe_tower_filament", new ConfigOptionFloat(this->total_wipe_tower_filament));
-    config.set_key_value("initial_tool",              new ConfigOptionInt(static_cast<int>(this->initial_tool)));
+    config.set_key_value("initial_tool",                new ConfigOptionInt(static_cast<int>(this->initial_tool)));
+    config.set_key_value("initial_extruder",            new ConfigOptionInt(static_cast<int>(this->initial_tool)));
+    config.set_key_value("initial_no_support_extruder", new ConfigOptionInt(static_cast<int>(this->initial_no_support_tool)));
+    config.set_key_value("initial_no_support_tool",     new ConfigOptionInt(static_cast<int>(this->initial_no_support_tool)));
     return config;
 }
 
@@ -6480,7 +6485,8 @@ DynamicConfig PrintStatistics::placeholders()
     for (const std::string key : {
         "print_time", "normal_print_time", "silent_print_time",
         "used_filament", "extruded_volume", "total_cost", "total_weight",
-        "initial_tool", "total_toolchanges", "total_wipe_tower_cost", "total_wipe_tower_filament"})
+        "initial_tool", "initial_extruder", "initial_no_support_extruder", "initial_no_support_tool",
+        "total_toolchanges", "total_wipe_tower_cost", "total_wipe_tower_filament"})
         config.set_key_value(key, new ConfigOptionString(std::string("{") + key + "}"));
     return config;
 }

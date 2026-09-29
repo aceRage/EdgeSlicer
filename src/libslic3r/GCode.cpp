@@ -2913,7 +2913,7 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
     ToolOrdering tool_ordering;
     unsigned int initial_extruder_id = (unsigned int) -1;
     // BBS: first non-support filament extruder
-    unsigned int                                      initial_non_support_extruder_id;
+    unsigned int initial_non_support_extruder_id = 0;
     unsigned int                                      final_extruder_id = (unsigned int) -1;
     bool                                              has_wipe_tower    = false;
     std::vector<const PrintInstance*>                 print_object_instances_ordering;
@@ -3869,7 +3869,8 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
         has_wipe_tower, print.wipe_tower_data(), m_writer.extruders(),
         // Modifies
         print.m_print_statistics));
-    print.m_print_statistics.initial_tool = initial_extruder_id;
+    print.m_print_statistics.initial_tool                 = initial_extruder_id;
+    print.m_print_statistics.initial_no_support_tool      = initial_non_support_extruder_id;
     if (!is_bbl_printers) {
         // CONFIG_BLOCK first, time estimate after: some firmwares only scan the last N lines for
         // "estimated printing time", and a large config could push an estimate written before it
