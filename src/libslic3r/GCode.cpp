@@ -2913,7 +2913,7 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
     ToolOrdering tool_ordering;
     unsigned int initial_extruder_id = (unsigned int) -1;
     // BBS: first non-support filament extruder
-    unsigned int                                      initial_non_support_extruder_id;
+    unsigned int initial_non_support_extruder_id = 0;
     unsigned int                                      final_extruder_id = (unsigned int) -1;
     bool                                              has_wipe_tower    = false;
     std::vector<const PrintInstance*>                 print_object_instances_ordering;
@@ -2928,29 +2928,7 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
             tool_ordering = ToolOrdering(*(*print_object_instance_sequential_active)->print_object, initial_extruder_id);
             if ((initial_extruder_id = tool_ordering.first_extruder()) != static_cast<unsigned int>(-1)) {
                 // BBS: try to find the non-support filament extruder if is multi color and initial_extruder is support filament
-                initial_non_support_extruder_id = initial_extruder_id;
-                if (tool_ordering.all_extruders().size() > 1 && print.config().filament_is_support.get_at(initial_extruder_id)) {
-                    bool has_non_support_filament = false;
-                    for (unsigned int extruder : tool_ordering.all_extruders()) {
-                        if (!print.config().filament_is_support.get_at(extruder)) {
-                            has_non_support_filament = true;
-                            break;
-                        }
-                    }
-                    // BBS: find the non-support filament extruder of object
-                    if (has_non_support_filament)
-                        for (LayerTools layer_tools : tool_ordering.layer_tools()) {
-                            if (!layer_tools.has_object)
-                                continue;
-                            for (unsigned int extruder : layer_tools.extruders) {
-                                if (print.config().filament_is_support.get_at(extruder))
-                                    continue;
-                                initial_non_support_extruder_id = extruder;
-                                break;
-                            }
-                        }
-                }
-
+                initial_non_support_extruder_id = tool_ordering.first_non_support_extruder(print.config(), initial_extruder_id);
                 break;
             }
         }
@@ -2979,30 +2957,8 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
                                   tool_ordering.first_extruder();
 
         // BBS: try to find the non-support filament extruder if is multi color and initial_extruder is support filament
-        if (initial_extruder_id != static_cast<unsigned int>(-1)) {
-            initial_non_support_extruder_id = initial_extruder_id;
-            if (tool_ordering.all_extruders().size() > 1 && print.config().filament_is_support.get_at(initial_extruder_id)) {
-                bool has_non_support_filament = false;
-                for (unsigned int extruder : tool_ordering.all_extruders()) {
-                    if (!print.config().filament_is_support.get_at(extruder)) {
-                        has_non_support_filament = true;
-                        break;
-                    }
-                }
-                // BBS: find the non-support filament extruder of object
-                if (has_non_support_filament)
-                    for (LayerTools layer_tools : tool_ordering.layer_tools()) {
-                        if (!layer_tools.has_object)
-                            continue;
-                        for (unsigned int extruder : layer_tools.extruders) {
-                            if (print.config().filament_is_support.get_at(extruder))
-                                continue;
-                            initial_non_support_extruder_id = extruder;
-                            break;
-                        }
-                    }
-            }
-        }
+        if (initial_extruder_id != static_cast<unsigned int>(-1))
+            initial_non_support_extruder_id = tool_ordering.first_non_support_extruder(print.config(), initial_extruder_id);
 
         // In non-sequential print, the printing extruders may have been modified by the extruder switches stored in
         // Model::custom_gcode_per_print_z. Therefore initialize the printing extruders from there.
@@ -3412,7 +3368,7 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
             this->placeholder_parser().set("curr_physical_extruder_id",      new ConfigOptionInt(shim_physical_extruder));
             this->placeholder_parser().set("most_used_physical_extruder_id", new ConfigOptionInt(shim_physical_extruder));
             this->placeholder_parser().set("new_extruder_retracted_length",  new ConfigOptionFloat(0.));
-            this->placeholder_parser().set("initial_no_support_filament_id", new ConfigOptionInt(int(initial_extruder_id)));
+            this->placeholder_parser().set("initial_no_support_filament_id", new ConfigOptionInt(int(initial_non_support_extruder_id)));
             // *_hotend = the physical-nozzle id for the filament; BBS's NOZZLE_ID_FOR_GCODE returns -1
             // when there is no dynamic nozzle map (our single-mapped case), so all hotend vars are -1.
             this->placeholder_parser().set("initial_no_support_hotend",       new ConfigOptionInt(-1));
@@ -3913,7 +3869,8 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
         has_wipe_tower, print.wipe_tower_data(), m_writer.extruders(),
         // Modifies
         print.m_print_statistics));
-    print.m_print_statistics.initial_tool = initial_extruder_id;
+    print.m_print_statistics.initial_tool                 = initial_extruder_id;
+    print.m_print_statistics.initial_no_support_tool      = initial_non_support_extruder_id;
     if (!is_bbl_printers) {
         // CONFIG_BLOCK first, time estimate after: some firmwares only scan the last N lines for
         // "estimated printing time", and a large config could push an estimate written before it

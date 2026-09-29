@@ -705,7 +705,6 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
         "support_material_interface_fan_speed",
         "internal_bridge_fan_speed", // ORCA: Add support for separate internal bridge fan speed control
         "ironing_fan_speed",
-        "single_extruder_multi_material_priming",
         "activate_air_filtration",
         "during_print_exhaust_fan_speed",
         "complete_print_exhaust_fan_speed",
@@ -881,6 +880,10 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
             // extruders psWipeTower's ToolOrdering must know about for layer 0 - both
             // steps need to rerun together, same as the other options in this branch.
             || opt_key == "brim_filament_source"
+            // Stage-1 filename index uses this when a wipe tower is present
+            // (all_extruders().back() vs first_extruder()). Toggling it must
+            // recompute m_stage1_initial_no_support_extruder.
+            || opt_key == "single_extruder_multi_material_priming"
             ) {
             steps.emplace_back(psWipeTower);
             steps.emplace_back(psSkirtBrim);
@@ -5194,6 +5197,7 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
     if (this->set_started(psWipeTower)) {
         m_wipe_tower_data.clear();
         m_tool_ordering.clear();
+        m_stage1_initial_no_support_extruder = 0;
         if (this->has_wipe_tower()) {
             this->_make_wipe_tower();
         } else if (this->config().print_sequence != PrintSequence::ByObject) {
@@ -5202,6 +5206,11 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
             if (m_tool_ordering.empty() || m_tool_ordering.last_extruder() == unsigned(-1))
                 throw Slic3r::SlicingError("The print is empty. The model is not printable with current print settings.");
         }
+        // Cache on this background thread before set_done so the UI can read an int
+        // without copying m_tool_ordering (Chameleon brim later push_backs into
+        // tools_for_layer().extruders) or constructing ByObject ToolOrdering
+        // (which writes object_first_layer_wall_extruders) while G-code export runs.
+        m_stage1_initial_no_support_extruder = this->initial_no_support_extruder_id();
         this->set_done(psWipeTower);
     }
     if (this->has_wipe_tower()) {
@@ -6328,6 +6337,32 @@ void WipeTowerData::construct_mesh(float width, float depth, float height, float
     }
 }
 
+unsigned int Print::initial_no_support_extruder_id() const
+{
+    unsigned int initial_extruder_id = (unsigned int) -1;
+    const bool   is_bbl_printers     = is_BBL_printer();
+
+    if (config().print_sequence == PrintSequence::ByObject) {
+        // Background / tests only: ToolOrdering(PrintObject) writes object_first_layer_wall_extruders.
+        for (const PrintInstance *instance : sort_object_instances_by_model_order(*this)) {
+            ToolOrdering ordering(*instance->print_object, initial_extruder_id);
+            initial_extruder_id = ordering.first_extruder();
+            if (initial_extruder_id != (unsigned int) -1)
+                return ordering.first_non_support_extruder(config(), initial_extruder_id);
+        }
+        return 0;
+    }
+
+    const ToolOrdering &ordering       = this->tool_ordering();
+    const bool          has_wipe_tower = this->has_wipe_tower() && ordering.has_wipe_tower();
+    if (!is_bbl_printers && has_wipe_tower && !config().single_extruder_multi_material_priming)
+        initial_extruder_id = ordering.all_extruders().empty() ? (unsigned int) -1 : ordering.all_extruders().back();
+    else
+        initial_extruder_id = ordering.first_extruder();
+
+    return ordering.first_non_support_extruder(config(), initial_extruder_id);
+}
+
 // Generate a recommended G-code output file name based on the format template, default extension, and template parameters
 // (timestamps, object placeholders derived from the model, current placeholder prameters and print statistics.
 // Use the final print statistics if available, or just keep the print statistics placeholders if not available yet (before G-code is finalized).
@@ -6341,6 +6376,17 @@ std::string Print::output_filename(const std::string &filename_base) const
     config.set_key_value("plate_name", new ConfigOptionString(get_plate_name()));
     config.set_key_value("plate_number", new ConfigOptionString(get_plate_number_formatted()));
     config.set_key_value("model_name", new ConfigOptionString(get_model_name()));
+    if (!this->finished()) {
+        // Stage-1 name before export: {filament_type[initial_no_support_extruder]} needs an int
+        // index. Read the value cached on the background thread at psWipeTower; do not copy
+        // m_tool_ordering or walk object layers here (UI thread: races brim / G-code).
+        // Force total_weight to 0 so we never publish a stale partial sum while export
+        // clears/rebuilds print_statistics (same 0g bake as a name taken before the slice).
+        const int idx = this->is_step_done(psWipeTower) ? int(m_stage1_initial_no_support_extruder) : 0;
+        config.set_key_value("initial_no_support_extruder", new ConfigOptionInt(idx));
+        config.set_key_value("initial_no_support_tool",     new ConfigOptionInt(idx));
+        config.set_key_value("total_weight", new ConfigOptionFloat(0.0));
+    }
 
     return this->PrintBase::output_filename(m_config.filename_format.value, ".gcode", filename_base, &config);
 }
@@ -6436,7 +6482,10 @@ DynamicConfig PrintStatistics::config() const
     config.set_key_value("total_weight",              new ConfigOptionFloat(this->total_weight));
     config.set_key_value("total_wipe_tower_cost",     new ConfigOptionFloat(this->total_wipe_tower_cost));
     config.set_key_value("total_wipe_tower_filament", new ConfigOptionFloat(this->total_wipe_tower_filament));
-    config.set_key_value("initial_tool",              new ConfigOptionInt(static_cast<int>(this->initial_tool)));
+    config.set_key_value("initial_tool",                new ConfigOptionInt(static_cast<int>(this->initial_tool)));
+    config.set_key_value("initial_extruder",            new ConfigOptionInt(static_cast<int>(this->initial_tool)));
+    config.set_key_value("initial_no_support_extruder", new ConfigOptionInt(static_cast<int>(this->initial_no_support_tool)));
+    config.set_key_value("initial_no_support_tool",     new ConfigOptionInt(static_cast<int>(this->initial_no_support_tool)));
     return config;
 }
 
@@ -6446,7 +6495,8 @@ DynamicConfig PrintStatistics::placeholders()
     for (const std::string key : {
         "print_time", "normal_print_time", "silent_print_time",
         "used_filament", "extruded_volume", "total_cost", "total_weight",
-        "initial_tool", "total_toolchanges", "total_wipe_tower_cost", "total_wipe_tower_filament"})
+        "initial_tool", "initial_extruder", "initial_no_support_extruder", "initial_no_support_tool",
+        "total_toolchanges", "total_wipe_tower_cost", "total_wipe_tower_filament"})
         config.set_key_value(key, new ConfigOptionString(std::string("{") + key + "}"));
     return config;
 }

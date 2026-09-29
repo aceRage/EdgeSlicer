@@ -1,6 +1,7 @@
 #include <catch2/catch.hpp>
 
 #include "libslic3r/PlaceholderParser.hpp"
+#include "libslic3r/Print.hpp"
 #include "libslic3r/PrintConfig.hpp"
 
 using namespace Slic3r;
@@ -123,4 +124,34 @@ SCENARIO("Placeholder parser scripting", "[PlaceholderParser]") {
     SECTION("complex expression") { REQUIRE(boolean_expression("printer_notes=~/.*PRINTER_VENDOR_PRUSA3D.*/ and printer_notes=~/.*PRINTER_MODEL_MK2.*/ and nozzle_diameter[0]==0.6 and num_extruders>1")); }
     SECTION("complex expression2") { REQUIRE(boolean_expression("printer_notes=~/.*PRINTER_VEwerfNDOR_PRUSA3D.*/ or printer_notes=~/.*PRINTertER_MODEL_MK2.*/ or (nozzle_diameter[0]==0.6 and num_extruders>1)")); }
     SECTION("complex expression3") { REQUIRE(! boolean_expression("printer_notes=~/.*PRINTER_VEwerfNDOR_PRUSA3D.*/ or printer_notes=~/.*PRINTertER_MODEL_MK2.*/ or (nozzle_diameter[0]==0.3 and num_extruders>1)")); }
+}
+
+TEST_CASE("U1 filename_format parses with PrintStatistics", "[PlaceholderParser][output_filename]")
+{
+    PlaceholderParser parser;
+    auto              cfg = DynamicPrintConfig::full_print_config();
+    cfg.set_num_filaments(2);
+    cfg.set_deserialize_strict({{"filament_type", "PVA;PLA"}});
+    parser.apply_config(cfg);
+
+    PrintStatistics ps;
+    ps.initial_no_support_tool      = 1;
+    ps.total_weight                 = 12.34;
+    ps.estimated_normal_print_time  = "1h2m";
+    DynamicConfig over = ps.config();
+    over.set_key_value("input_filename_base", new ConfigOptionString("job"));
+
+    const std::string U1 =
+        "{input_filename_base}_{filament_type[initial_no_support_extruder]}_{int(total_weight*10) / 10.0}g_{print_time}.gcode";
+    std::string out;
+    REQUIRE_NOTHROW(out = parser.process(U1, 0, &over));
+    CHECK(out.rfind("job_PLA_12.3g_", 0) == 0);
+    CHECK(ps.config().opt_int("initial_no_support_tool") == 1);
+    CHECK(ps.config().opt_int("initial_no_support_extruder") == 1);
+    CHECK(PrintStatistics::placeholders().opt_string("initial_no_support_extruder") == "{initial_no_support_extruder}");
+    CHECK(PrintStatistics::placeholders().opt_string("initial_no_support_tool") == "{initial_no_support_tool}");
+
+    std::string finalized;
+    REQUIRE_NOTHROW(finalized = ps.finalize_output_path("job_{initial_no_support_extruder}_{print_time}.gcode"));
+    CHECK(finalized.rfind("job_1_", 0) == 0);
 }

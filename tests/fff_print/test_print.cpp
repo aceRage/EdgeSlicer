@@ -4,11 +4,14 @@
 #include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/ExtrusionEntityCollection.hpp"
 #include "libslic3r/Layer.hpp"
+#include "libslic3r/MixedFilament.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/TriangleMesh.hpp"
 
 #include "test_data.hpp"
 
+#include <boost/filesystem/path.hpp>
+#include <regex>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -320,4 +323,163 @@ TEST_CASE("Arachne inner-outer-inner wall order holds on a narrow wall", "[Print
     });
 
     REQUIRE(count_ioi_sandwiches(print) > 0);
+}
+
+static const char *U1_FILENAME_FORMAT =
+    "{input_filename_base}_{filament_type[initial_no_support_extruder]}_{int(total_weight*10) / 10.0}g_{print_time}.gcode";
+
+// 40x40mm cap on an 8x8mm stem — needs support (same fixture as test_support_material).
+static TriangleMesh support_capital()
+{
+    TriangleMesh model = make_cube(8, 8, 13);
+    model.translate(16., 16., 0.);
+    TriangleMesh cap = make_cube(40, 40, 2);
+    cap.translate(0., 0., 12.);
+    model.merge(cap);
+    return model;
+}
+
+static std::string mixed_ab_definition()
+{
+    MixedFilamentManager mgr;
+    mgr.add_custom_filament(1, 2, 50, {"#FF0000", "#00FF00"});
+    return mgr.serialize_custom_entries();
+}
+
+static DynamicPrintConfig two_filament_support_config(bool support_on_extruder_0, int enable_prime_tower, bool by_object, bool mixed)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_num_extruders(2);
+    config.set_num_filaments(2);
+    config.set_deserialize_strict({
+        {"nozzle_diameter",            "0.4,0.4"},
+        {"filament_diameter",          "1.75,1.75"},
+        {"filament_density",           "1.24,1.24"},
+        {"enable_support",             "1"},
+        {"support_type",               "normal(auto)"},
+        {"enable_prime_tower",         std::to_string(enable_prime_tower)},
+        {"sparse_infill_density",      "0"},
+        {"layer_height",               "0.3"},
+        {"initial_layer_print_height", "0.3"},
+        {"print_sequence",             by_object ? "by object" : "by layer"},
+        {"filename_format",            U1_FILENAME_FORMAT},
+        {"wipe_tower_x",               "100"},
+        {"wipe_tower_y",               "100"},
+        {"printable_area",             "0x0,250x0,250x250,0x250"},
+    });
+    if (support_on_extruder_0) {
+        config.set_deserialize_strict({
+            {"filament_type",              "PVA;PLA"},
+            {"filament_is_support",        "1,0"},
+            {"filament_soluble",           "1,0"},
+            {"support_filament",           "1"},
+            {"support_interface_filament", "1"},
+            // TODO(S1): ByObject + mixed virtual wall_filament=3 SIGSEGVs in G-code
+            // export at Extruder::travel_slope via GCode::needs_retraction
+            // (writer().extruder() is null). Same stack on origin/main f20720e313
+            // and this PR — pre-existing, not fixed here. Keep physical wall ids.
+            {"wall_filament",              "2"},
+            {"sparse_infill_filament",     "2"},
+            {"solid_infill_filament",      "2"},
+        });
+    } else {
+        config.set_deserialize_strict({
+            {"filament_type",              "PLA;PVA"},
+            {"filament_is_support",        "0,1"},
+            {"filament_soluble",           "0,1"},
+            {"support_filament",           "2"},
+            {"support_interface_filament", "2"},
+            {"wall_filament",              "1"},
+            {"sparse_infill_filament",     "1"},
+            {"solid_infill_filament",      "1"},
+        });
+    }
+    if (mixed) {
+        // MixedFilamentManager custom row is loaded so apply() exercises the mixed path.
+        // Walls stay physical: wall_filament=3 (virtual) + ByObject export SIGSEGVs
+        // in Extruder::travel_slope on origin/main f20720e313 too (S1).
+        config.set("mixed_filament_definitions", mixed_ab_definition());
+        config.option<ConfigOptionStrings>("filament_colour")->values = {"#FF0000", "#00FF00"};
+    }
+    return config;
+}
+
+TEST_CASE("U1 filename_format uses initial non-support extruder after a multi-material slice", "[Print][output_filename]")
+{
+    const bool support_on_extruder_0 = GENERATE(true, false);
+    const int  enable_prime_tower    = GENERATE(0, 1);
+    const bool by_object             = GENERATE(true, false);
+    const bool mixed                 = GENERATE(true, false);
+    DYNAMIC_SECTION("support on extruder " << (support_on_extruder_0 ? 0 : 1)
+                    << " tower=" << enable_prime_tower
+                    << " by_object=" << by_object
+                    << " mixed=" << mixed)
+    {
+        Print print;
+        Model model;
+        init_print({support_capital()}, print, model,
+                   two_filament_support_config(support_on_extruder_0, enable_prime_tower, by_object, mixed));
+
+        // Before process(): psWipeTower is not done, so the cached index is 0.
+        // Stage 1 always publishes total_weight=0, so the U1 template bakes 0g.
+        const std::string type0 = support_on_extruder_0 ? "PVA" : "PLA";
+        const std::string expected_before = std::string("u1_job_") + type0 + "_0g_{print_time}.gcode";
+        std::string name_before_slice;
+        REQUIRE_NOTHROW(name_before_slice = print.output_filename("u1_job"));
+        REQUIRE(name_before_slice == expected_before);
+
+        REQUIRE_NOTHROW(print.process());
+        REQUIRE(!print.objects().empty());
+        REQUIRE(!print.objects().front()->support_layers().empty());
+
+        const unsigned int expected = support_on_extruder_0 ? 1u : 0u;
+        REQUIRE(print.initial_no_support_extruder_id() == expected);
+
+        // After slice, before G-code: still unfinished, so weight stays 0g, index is cached.
+        std::string name_after_slice;
+        REQUIRE_NOTHROW(name_after_slice = print.output_filename("u1_job"));
+        REQUIRE(name_after_slice == "u1_job_PLA_0g_{print_time}.gcode");
+
+        const boost::filesystem::path gcode_path = scratch_path();
+        REQUIRE_NOTHROW(print.export_gcode(gcode_path.string(), nullptr, nullptr));
+        REQUIRE(print.finished());
+
+        std::string name_after_export;
+        REQUIRE_NOTHROW(name_after_export = print.output_filename("u1_job"));
+        REQUIRE(name_after_export.find("PLA") != std::string::npos);
+        REQUIRE(name_after_export.find("PVA") == std::string::npos);
+        const std::regex weight_re(R"(u1_job_PLA_[0-9]+(\.[0-9]+)?g_.+\.gcode)");
+        REQUIRE(std::regex_match(name_after_export, weight_re));
+
+        REQUIRE(print.print_statistics().config().opt_int("initial_no_support_extruder") ==
+                static_cast<int>(print.initial_no_support_extruder_id()));
+        REQUIRE(print.print_statistics().config().opt_int("initial_no_support_tool") ==
+                static_cast<int>(print.print_statistics().initial_no_support_tool));
+        std::string finalized;
+        REQUIRE_NOTHROW(finalized = print.print_statistics().finalize_output_path(name_after_export));
+        REQUIRE(finalized == name_after_export);
+    }
+}
+
+TEST_CASE("U1 filename index updates after swapping the support slot", "[Print][output_filename]")
+{
+    Print print;
+    Model model;
+    DynamicPrintConfig cfg = two_filament_support_config(/*support_on_extruder_0=*/true,
+                                                         /*enable_prime_tower=*/0,
+                                                         /*by_object=*/false,
+                                                         /*mixed=*/false);
+    init_print({support_capital()}, print, model, cfg);
+    REQUIRE_NOTHROW(print.process());
+    REQUIRE(print.initial_no_support_extruder_id() == 1u);
+    REQUIRE(print.output_filename("u1_job") == "u1_job_PLA_0g_{print_time}.gcode");
+
+    cfg = two_filament_support_config(/*support_on_extruder_0=*/false,
+                                      /*enable_prime_tower=*/0,
+                                      /*by_object=*/false,
+                                      /*mixed=*/false);
+    print.apply(model, cfg);
+    REQUIRE_NOTHROW(print.process());
+    REQUIRE(print.initial_no_support_extruder_id() == 0u);
+    REQUIRE(print.output_filename("u1_job") == "u1_job_PLA_0g_{print_time}.gcode");
 }
