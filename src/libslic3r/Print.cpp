@@ -705,7 +705,6 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
         "support_material_interface_fan_speed",
         "internal_bridge_fan_speed", // ORCA: Add support for separate internal bridge fan speed control
         "ironing_fan_speed",
-        "single_extruder_multi_material_priming",
         "activate_air_filtration",
         "during_print_exhaust_fan_speed",
         "complete_print_exhaust_fan_speed",
@@ -881,6 +880,10 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
             // extruders psWipeTower's ToolOrdering must know about for layer 0 - both
             // steps need to rerun together, same as the other options in this branch.
             || opt_key == "brim_filament_source"
+            // Stage-1 filename index uses this when a wipe tower is present
+            // (all_extruders().back() vs first_extruder()). Toggling it must
+            // recompute m_stage1_initial_no_support_extruder.
+            || opt_key == "single_extruder_multi_material_priming"
             ) {
             steps.emplace_back(psWipeTower);
             steps.emplace_back(psSkirtBrim);

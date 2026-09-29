@@ -374,6 +374,10 @@ static DynamicPrintConfig two_filament_support_config(bool support_on_extruder_0
             {"filament_soluble",           "1,0"},
             {"support_filament",           "1"},
             {"support_interface_filament", "1"},
+            // TODO(S1): ByObject + mixed virtual wall_filament=3 SIGSEGVs in G-code
+            // export at Extruder::travel_slope via GCode::needs_retraction
+            // (writer().extruder() is null). Same stack on origin/main f20720e313
+            // and this PR — pre-existing, not fixed here. Keep physical wall ids.
             {"wall_filament",              "2"},
             {"sparse_infill_filament",     "2"},
             {"solid_infill_filament",      "2"},
@@ -391,6 +395,9 @@ static DynamicPrintConfig two_filament_support_config(bool support_on_extruder_0
         });
     }
     if (mixed) {
+        // MixedFilamentManager custom row is loaded so apply() exercises the mixed path.
+        // Walls stay physical: wall_filament=3 (virtual) + ByObject export SIGSEGVs
+        // in Extruder::travel_slope on origin/main f20720e313 too (S1).
         config.set("mixed_filament_definitions", mixed_ab_definition());
         config.option<ConfigOptionStrings>("filament_colour")->values = {"#FF0000", "#00FF00"};
     }
@@ -452,4 +459,27 @@ TEST_CASE("U1 filename_format uses initial non-support extruder after a multi-ma
         REQUIRE_NOTHROW(finalized = print.print_statistics().finalize_output_path(name_after_export));
         REQUIRE(finalized == name_after_export);
     }
+}
+
+TEST_CASE("U1 filename index updates after swapping the support slot", "[Print][output_filename]")
+{
+    Print print;
+    Model model;
+    DynamicPrintConfig cfg = two_filament_support_config(/*support_on_extruder_0=*/true,
+                                                         /*enable_prime_tower=*/0,
+                                                         /*by_object=*/false,
+                                                         /*mixed=*/false);
+    init_print({support_capital()}, print, model, cfg);
+    REQUIRE_NOTHROW(print.process());
+    REQUIRE(print.initial_no_support_extruder_id() == 1u);
+    REQUIRE(print.output_filename("u1_job") == "u1_job_PLA_0g_{print_time}.gcode");
+
+    cfg = two_filament_support_config(/*support_on_extruder_0=*/false,
+                                      /*enable_prime_tower=*/0,
+                                      /*by_object=*/false,
+                                      /*mixed=*/false);
+    print.apply(model, cfg);
+    REQUIRE_NOTHROW(print.process());
+    REQUIRE(print.initial_no_support_extruder_id() == 0u);
+    REQUIRE(print.output_filename("u1_job") == "u1_job_PLA_0g_{print_time}.gcode");
 }
