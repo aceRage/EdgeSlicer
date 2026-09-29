@@ -363,6 +363,9 @@ static DynamicPrintConfig two_filament_support_config(bool support_on_extruder_0
         {"initial_layer_print_height", "0.3"},
         {"print_sequence",             by_object ? "by object" : "by layer"},
         {"filename_format",            U1_FILENAME_FORMAT},
+        {"wipe_tower_x",               "100"},
+        {"wipe_tower_y",               "100"},
+        {"printable_area",             "0x0,250x0,250x250,0x250"},
     });
     if (support_on_extruder_0) {
         config.set_deserialize_strict({
@@ -371,9 +374,9 @@ static DynamicPrintConfig two_filament_support_config(bool support_on_extruder_0
             {"filament_soluble",           "1,0"},
             {"support_filament",           "1"},
             {"support_interface_filament", "1"},
-            {"wall_filament",              mixed ? "3" : "2"},
-            {"sparse_infill_filament",     mixed ? "3" : "2"},
-            {"solid_infill_filament",      mixed ? "3" : "2"},
+            {"wall_filament",              "2"},
+            {"sparse_infill_filament",     "2"},
+            {"solid_infill_filament",      "2"},
         });
     } else {
         config.set_deserialize_strict({
@@ -382,9 +385,9 @@ static DynamicPrintConfig two_filament_support_config(bool support_on_extruder_0
             {"filament_soluble",           "0,1"},
             {"support_filament",           "2"},
             {"support_interface_filament", "2"},
-            {"wall_filament",              mixed ? "3" : "1"},
-            {"sparse_infill_filament",     mixed ? "3" : "1"},
-            {"solid_infill_filament",      mixed ? "3" : "1"},
+            {"wall_filament",              "1"},
+            {"sparse_infill_filament",     "1"},
+            {"solid_infill_filament",      "1"},
         });
     }
     if (mixed) {
