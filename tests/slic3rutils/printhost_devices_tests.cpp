@@ -787,7 +787,7 @@ TEST_CASE("Moonraker: parse_moonraker_auth_result rejects bad MQTT TLS fields", 
     CHECK(info.port == 8883);
 
     // One bad field at a time: state is "success" but a single TLS field is the wrong type.
-    // Do not reuse try_parse_json_int here — that helper accepts "8883" as 8883.
+    // Do not reuse try_parse_json_err_int here — that helper accepts "8883" as 8883.
     nlohmann::json bad_port = ok;
     bad_port["port"]        = "8883";
     REQUIRE_NOTHROW(parse_moonraker_auth_result(bad_port, info));
