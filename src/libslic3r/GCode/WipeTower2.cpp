@@ -1527,6 +1527,126 @@ WipeTower2::WipeTower2(const PrintConfig&                     config,
     m_shared_bed = TowerInterface::shared_printable_box(config);
 }
 
+void reseat_wipe_tower2_iterators(WipeTower2 &dst, const WipeTower2 &src)
+{
+    if (dst.m_plan.empty() || src.m_plan.empty() || src.m_layer_info == src.m_plan.end()) {
+        dst.m_layer_info         = dst.m_plan.end();
+        dst.m_active_tool_change = nullptr;
+        return;
+    }
+    const ptrdiff_t idx = src.m_layer_info - src.m_plan.begin();
+    if (idx < 0 || static_cast<size_t>(idx) >= dst.m_plan.size()) {
+        dst.m_layer_info         = dst.m_plan.end();
+        dst.m_active_tool_change = nullptr;
+        return;
+    }
+    dst.m_layer_info         = dst.m_plan.begin() + idx;
+    dst.m_active_tool_change = nullptr;
+    if (src.m_active_tool_change == nullptr)
+        return;
+    auto remap = [&](const std::vector<WipeTower2::WipeTowerInfo::ToolChange> &from,
+                     std::vector<WipeTower2::WipeTowerInfo::ToolChange>       &to) {
+        for (size_t i = 0; i < from.size() && i < to.size(); ++i)
+            if (&from[i] == src.m_active_tool_change) {
+                dst.m_active_tool_change = &to[i];
+                return true;
+            }
+        return false;
+    };
+    if (!remap(src.m_layer_info->tool_changes, dst.m_layer_info->tool_changes))
+        remap(src.m_layer_info->local_z_tool_changes, dst.m_layer_info->local_z_tool_changes);
+}
+
+void WipeTower2::copy_assign_from(const WipeTower2 &o)
+{
+    m_change_pressure                    = o.m_change_pressure;
+    m_change_pressure_value              = o.m_change_pressure_value;
+    m_ramming_width_ratio                = o.m_ramming_width_ratio;
+    m_semm                               = o.m_semm;
+    m_enable_filament_ramming            = o.m_enable_filament_ramming;
+    m_is_mk4mmu3                         = o.m_is_mk4mmu3;
+    m_printer_model                      = o.m_printer_model;
+    m_wipe_tower_pos                     = o.m_wipe_tower_pos;
+    m_wipe_tower_width                   = o.m_wipe_tower_width;
+    m_wipe_tower_depth                   = o.m_wipe_tower_depth;
+    m_wipe_tower_height                  = o.m_wipe_tower_height;
+    m_wipe_tower_cone_angle              = o.m_wipe_tower_cone_angle;
+    m_wipe_tower_brim_width              = o.m_wipe_tower_brim_width;
+    m_wipe_tower_brim_width_real         = o.m_wipe_tower_brim_width_real;
+    m_prime_tower_brim_chamfer           = o.m_prime_tower_brim_chamfer;
+    m_prime_tower_brim_chamfer_max_width = o.m_prime_tower_brim_chamfer_max_width;
+    m_wipe_tower_rotation_angle          = o.m_wipe_tower_rotation_angle;
+    m_internal_rotation                  = o.m_internal_rotation;
+    m_y_shift                            = o.m_y_shift;
+    m_z_pos                              = o.m_z_pos;
+    m_layer_height                       = o.m_layer_height;
+    m_max_color_changes                  = o.m_max_color_changes;
+    m_old_temperature                    = o.m_old_temperature;
+    m_travel_speed                       = o.m_travel_speed;
+    m_infill_speed                       = o.m_infill_speed;
+    m_wipe_tower_max_purge_speed         = o.m_wipe_tower_max_purge_speed;
+    m_perimeter_speed                    = o.m_perimeter_speed;
+    m_first_layer_speed                  = o.m_first_layer_speed;
+    m_first_layer_idx                    = o.m_first_layer_idx;
+    m_wall_type                          = o.m_wall_type;
+    m_used_fillet                        = o.m_used_fillet;
+    m_use_gap_wall                       = o.m_use_gap_wall;
+    m_rib_width                          = o.m_rib_width;
+    m_extra_rib_length                   = o.m_extra_rib_length;
+    m_wall_skip_points                   = o.m_wall_skip_points;
+    m_interface_gap_points               = o.m_interface_gap_points;
+    m_interface                          = o.m_interface;
+    m_shared_bed                         = o.m_shared_bed;
+    m_run_in_reserve                     = o.m_run_in_reserve;
+    m_rib_length                         = o.m_rib_length;
+    m_enable_arc_fitting                 = o.m_enable_arc_fitting;
+    m_outer_wall                         = o.m_outer_wall;
+    m_cooling_tube_retraction            = o.m_cooling_tube_retraction;
+    m_cooling_tube_length                = o.m_cooling_tube_length;
+    m_parking_pos_retraction             = o.m_parking_pos_retraction;
+    m_extra_loading_move                 = o.m_extra_loading_move;
+    m_bridging                           = o.m_bridging;
+    m_sparse_layers_skipped              = o.m_sparse_layers_skipped;
+    m_set_extruder_trimpot               = o.m_set_extruder_trimpot;
+    m_adhesion                           = o.m_adhesion;
+    m_gcode_flavor                       = o.m_gcode_flavor;
+    m_bed_shape                          = o.m_bed_shape;
+    m_bed_width                          = o.m_bed_width;
+    m_bed_bottom_left                    = o.m_bed_bottom_left;
+    m_perimeter_width                    = o.m_perimeter_width;
+    m_extrusion_flow                     = o.m_extrusion_flow;
+    m_filpar                             = o.m_filpar;
+    m_num_layer_changes                  = o.m_num_layer_changes;
+    m_num_tool_changes                   = o.m_num_tool_changes;
+    m_current_shape                      = o.m_current_shape;
+    m_current_tool                       = o.m_current_tool;
+    m_depth_traversed                    = o.m_depth_traversed;
+    m_current_layer_finished             = o.m_current_layer_finished;
+    m_final_purge_on_tower               = o.m_final_purge_on_tower;
+    m_suppress_ramming                   = o.m_suppress_ramming;
+    m_left_to_right                      = o.m_left_to_right;
+    m_extra_flow                         = o.m_extra_flow;
+    m_extra_spacing_wipe                 = o.m_extra_spacing_wipe;
+    m_extra_spacing_ramming              = o.m_extra_spacing_ramming;
+    m_local_z_wipe_tower_purge_lines     = o.m_local_z_wipe_tower_purge_lines;
+    m_plan                               = o.m_plan;
+    m_current_height                     = o.m_current_height;
+    m_used_filament_length               = o.m_used_filament_length;
+    m_used_filament_length_until_layer   = o.m_used_filament_length_until_layer;
+    reseat_wipe_tower2_iterators(*this, o);
+}
+
+WipeTower2::WipeTower2(const WipeTower2 &other) : wipe_volumes(other.wipe_volumes) { copy_assign_from(other); }
+
+WipeTower2 &WipeTower2::operator=(const WipeTower2 &other)
+{
+    if (this == &other)
+        return *this;
+    // wipe_volumes is const and was set at construction; the two towers share the same matrix.
+    copy_assign_from(other);
+    return *this;
+}
+
 void WipeTower2::set_extruder(size_t idx, const PrintConfig& config)
 {
     // while (m_filpar.size() < idx+1)   // makes sure the required element is in the vector
@@ -2013,9 +2133,13 @@ void WipeTower2::toolchange_Unload(WipeTowerWriter2&                 writer,
     }
 
     bool is_over_tower_height = false;
-    if (m_plan.size() > 0 && m_num_layer_changes == m_plan.size()) {
+    if (!m_final_purge_on_tower && m_plan.size() > 0 && m_num_layer_changes == m_plan.size()) {
         is_over_tower_height = true;
     }
+    // One-layer towers reset the layer counter in set_layer, so the height guard
+    // above never fires. The no-drop variant sets suppress_ramming instead.
+    if (m_suppress_ramming)
+        is_over_tower_height = true;
 
     // now the ramming itself:
     while (do_ramming && i < m_filpar[m_current_tool].ramming_speed.size() && !is_over_tower_height) {

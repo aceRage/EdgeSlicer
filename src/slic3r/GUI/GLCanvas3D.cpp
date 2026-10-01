@@ -11406,7 +11406,10 @@ void GLCanvas3D::_load_wipe_tower_toolpaths(const BuildVolume& build_volume, con
     if (print->wipe_tower_data().priming)
         for (int i=0; i<(int)print->wipe_tower_data().priming.get()->size(); ++i)
             ctxt.priming.emplace_back(print->wipe_tower_data().priming.get()->at(i));
-    if (print->wipe_tower_data().final_purge)
+    // N2: process() re-picks final_purge_drop with current positions / clearance, so
+    // this gate stays in lockstep with finalize() after a drag that skipped the tower step.
+    if (print->wipe_tower_data().final_purge && print->wipe_tower_data().final_purge_drop &&
+        !print->wipe_tower_data().final_purge->gcode.empty())
         ctxt.final.emplace_back(*print->wipe_tower_data().final_purge.get());
 
     ctxt.wipe_tower_angle = ctxt.print->config().wipe_tower_rotation_angle.value/180.f * PI;
@@ -11421,7 +11424,8 @@ void GLCanvas3D::_load_wipe_tower_toolpaths(const BuildVolume& build_volume, con
     BOOST_LOG_TRIVIAL(debug) << "Loading wipe tower toolpaths in parallel - start" << m_volumes.log_memory_info() << log_memory_info();
 
     //FIXME Improve the heuristics for a grain size.
-    size_t          n_items = print->wipe_tower_data().tool_changes.size() + (ctxt.priming.empty() ? 0 : 1);
+    size_t          n_items = print->wipe_tower_data().tool_changes.size() + (ctxt.priming.empty() ? 0 : 1) +
+                     (ctxt.final.empty() ? 0 : 1);
     size_t          grain_size = std::max(n_items / 128, size_t(1));
     tbb::spin_mutex new_volume_mutex;
     auto            new_volume = [this, &new_volume_mutex](const ColorRGBA& color) {

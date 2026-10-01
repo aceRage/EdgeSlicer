@@ -1185,7 +1185,7 @@ std::string WipeTowerIntegration::append_tcr2(GCode& gcodegen, const WipeTower::
     // A phony move to the end position at the wipe tower.
     gcodegen.writer().travel_to_xy((end_pos + plate_origin_2d).cast<double>());
     gcodegen.set_last_pos(wipe_tower_point_to_object_point(gcodegen, end_pos + plate_origin_2d));
-    if (!is_approx(z, current_z)) {
+    if (z + EPSILON < current_z) {
         gcode += gcodegen.writer().retract();
         gcode += gcodegen.writer().travel_to_z(current_z, "Travel back up to the topmost object layer.");
         gcode += gcodegen.writer().unretract();
@@ -1668,12 +1668,55 @@ bool WipeTowerIntegration::is_empty_wipe_tower_gcode(GCode& gcodegen, int extrud
 std::string WipeTowerIntegration::finalize(GCode& gcodegen)
 {
     std::string gcode;
-    if (!gcodegen.is_BBL_Printer()) {
-        if (std::abs(gcodegen.writer().get_position().z() - m_final_purge.print_z) > EPSILON)
-            gcode += gcodegen.change_layer(m_final_purge.print_z);
-        gcode += append_tcr2(gcodegen, m_final_purge, -1);
+    if (gcodegen.is_BBL_Printer() || m_final_purge.gcode.empty())
+        return gcode;
+
+    // Edge's change_layer is lazy: it rewrites the writer's Z (and m_nominal_z) without
+    // emitting a move. A subsequent travel_to_xyz(force_z) would then combine the XY travel
+    // to the tower with that Z drop and drive the nozzle through the finished object.
+    // Travel XY at the current (safe) height first, then let append_tcr2 descend with a
+    // dedicated travel_to_z. Do not call change_layer here.
+    const double current_z = gcodegen.writer().get_position().z();
+    double       purge_z   = m_final_purge.print_z;
+    if (m_sparse_layers_skipped) {
+        // Non-BBL always prints sparse layer 0, so the last actually-printed tower Z is
+        // m_last_wipe_tower_print_z — one first-layer height above compute_compacted_wipe_tower_z
+        // when layer 0 has no toolchange. The extra set_layer sits one layer on top of that.
+        const double layer_height = m_final_purge.layer_height > 0.f ? double(m_final_purge.layer_height)
+                                                                    : (!m_tool_changes.empty() && !m_tool_changes.back().empty() ?
+                                                                           double(m_tool_changes.back().front().layer_height) :
+                                                                           0.);
+        purge_z = m_last_wipe_tower_print_z + layer_height;
+    } else {
+        // The object-space print_z from WipeTower2 does not include z_offset.
+        purge_z += gcodegen.config().z_offset.value;
     }
 
+    if (purge_z + EPSILON < current_z) {
+        // select_final_purge_variant() ran just before this WipeTowerIntegration was
+        // constructed, so m_final_purge / m_final_purge_drop are the fresh pick.
+        // Do not replace print.wipe_tower_data().final_purge after construction:
+        // m_final_purge is a reference into that unique_ptr.
+        if (!m_final_purge_drop) {
+            // Tall object near the tower, or SEMM with ramming off: unload at the current
+            // (object-top) height. The TCR was generated without on-tower ramming.
+            purge_z = current_z;
+        } else {
+            float alpha     = m_wipe_tower_rotation / 180.f * float(M_PI);
+            Vec2f start_pos = m_final_purge.start_pos;
+            if (!m_final_purge.priming) {
+                start_pos = Eigen::Rotation2Df(alpha) * start_pos;
+                start_pos += m_wipe_tower_pos;
+            }
+            const Vec2f plate_origin_2d(m_plate_origin(0), m_plate_origin(1));
+            gcode += gcodegen.retract();
+            gcodegen.m_avoid_crossing_perimeters.use_external_mp_once();
+            gcode += gcodegen.travel_to(wipe_tower_point_to_object_point(gcodegen, start_pos + plate_origin_2d), erMixed,
+                                        "Travel to final purge", current_z);
+        }
+    }
+
+    gcode += append_tcr2(gcodegen, m_final_purge, -1, purge_z);
     return gcode;
 }
 
@@ -3784,11 +3827,17 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
             std::vector<std::pair<coordf_t, std::vector<LayerToPrint>>> layers_to_print = collect_layers_to_print(print);
             // Prusa Multi-Material wipe tower.
             if (has_wipe_tower && !layers_to_print.empty()) {
+                // Fresh pick immediately before construction. WipeTowerIntegration holds a
+                // reference to final_purge; replacing that unique_ptr after this point
+                // would dangle. process() already picked, but export can run after a
+                // clearance / z_offset / position change that only invalidates G-code.
+                print.select_final_purge_variant();
                 m_wipe_tower.reset(new WipeTowerIntegration(print.config(), print.get_plate_index(), print.get_plate_origin(),
                                                             *print.wipe_tower_data().priming.get(), print.wipe_tower_data().tool_changes,
                                                             print.wipe_tower_data().local_z_tool_changes,
                                                             print.wipe_tower_data().local_z_reserve_boxes,
-                                                            *print.wipe_tower_data().final_purge.get()));
+                                                            *print.wipe_tower_data().final_purge.get(),
+                                                            print.wipe_tower_data().final_purge_drop));
                 // BBS
                 file.write(m_writer.travel_to_z(initial_layer_print_height + m_config.z_offset.value, "Move to the first layer height"));
 

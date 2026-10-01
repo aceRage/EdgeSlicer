@@ -570,6 +570,11 @@ bool wipe_tower_layer_is_sparse(const std::vector<WipeTower::ToolChangeResult> &
 std::vector<float> compute_compacted_wipe_tower_z(const std::vector<std::vector<WipeTower::ToolChangeResult>> &tool_changes,
                                                   float base_z = 0.f);
 
+// Last Z the non-BBL emitter actually prints (it always prints sparse layer 0; later sparse
+// layers are skipped). Matches GCode.cpp's m_last_wipe_tower_print_z after the last layer.
+float last_emitted_wipe_tower_z_nonbbl(const std::vector<std::vector<WipeTower::ToolChangeResult>> &tool_changes,
+                                       float                                                       base_z = 0.f);
+
 
 
 
