@@ -12,7 +12,9 @@
 
 namespace Slic3r {
 
-// Non-throwing parse. Discarded input leaves `out` as an empty object and returns false.
+// Non-throwing parse of a network body. Distinct from PrintHost.cpp / Flashforge.cpp's
+// file-local try_parse_json_int (integer/numeric-string coercion for {"err": N}).
+// Discarded input leaves `out` as an empty object and returns false.
 // A valid non-object (array, number, string) is stored as-is and returns true.
 inline bool try_parse_json(const std::string &body, nlohmann::json &out)
 {

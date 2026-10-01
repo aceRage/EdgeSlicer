@@ -764,6 +764,23 @@ TEST_CASE("Moonraker: parse_moonraker_auth_result rejects bad MQTT TLS fields", 
     CHECK(info.cert == "CERT");
     CHECK(info.key == "KEY");
     CHECK(info.port == 8883);
+
+    // One bad field at a time: state is "success" but a single TLS field is the wrong type.
+    // Do not reuse try_parse_json_int here — that helper accepts "8883" as 8883.
+    nlohmann::json bad_port = ok;
+    bad_port["port"]        = "8883";
+    REQUIRE_NOTHROW(parse_moonraker_auth_result(bad_port, info));
+    CHECK_FALSE(parse_moonraker_auth_result(bad_port, info));
+
+    nlohmann::json bad_ca = ok;
+    bad_ca["ca"]          = nullptr;
+    REQUIRE_NOTHROW(parse_moonraker_auth_result(bad_ca, info));
+    CHECK_FALSE(parse_moonraker_auth_result(bad_ca, info));
+
+    // Non-object result (number / string) must not throw.
+    REQUIRE_NOTHROW(parse_moonraker_auth_result(nlohmann::json(42), info));
+    CHECK_FALSE(parse_moonraker_auth_result(nlohmann::json(42), info));
+    CHECK_FALSE(parse_moonraker_auth_result(nlohmann::json("success"), info));
 }
 
 TEST_CASE("Moonraker: jsonrpc id and method helpers do not throw", "[Moonraker]")
@@ -779,6 +796,13 @@ TEST_CASE("Moonraker: jsonrpc id and method helpers do not throw", "[Moonraker]"
     CHECK(moonraker_method_for_log(nlohmann::json::object()).empty());
     CHECK(moonraker_method_for_log(nlohmann::json::parse(R"({"method":"notify_status_update"})")) ==
           "notify_status_update");
+    REQUIRE_NOTHROW(moonraker_method_for_log(nlohmann::json::parse(R"({"method":12})")));
     CHECK(moonraker_method_for_log(nlohmann::json::parse(R"({"method":12})")) == "12");
     REQUIRE_NOTHROW(moonraker_method_for_log(nlohmann::json::parse(R"({"method":{"nested":true}})")));
+
+    // Non-object body: no throw, empty log string; id helper rejects it.
+    REQUIRE_NOTHROW(moonraker_method_for_log(nlohmann::json(12)));
+    CHECK(moonraker_method_for_log(nlohmann::json(12)).empty());
+    CHECK_FALSE(moonraker_jsonrpc_id(nlohmann::json(42), id));
+    CHECK_FALSE(moonraker_jsonrpc_id(nlohmann::json::array(), id));
 }

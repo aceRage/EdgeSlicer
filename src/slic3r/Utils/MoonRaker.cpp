@@ -5,6 +5,8 @@
 
 #include <algorithm>
 #include <atomic>
+#include <future>
+#include <memory>
 #include <sstream>
 #include <exception>
 #include <boost/format.hpp>
@@ -1150,15 +1152,18 @@ bool Moonraker_Mqtt::ask_for_tls_info(const nlohmann::json& cn_params)
 
     int64_t seq_id = m_seq_generator.generate_seq_id();
    
-    std::promise<bool> auth_promise;
-    std::future<bool> auth_future = auth_promise.get_future();
+    // Heap promise: the Paho/timeout callbacks can outlive this stack frame
+    // (Publish fail, or wait_for 70 s returning before TimeoutMap's 60 s sweep).
+    // Capturing a stack promise by reference was use-after-free on a late set_value.
+    auto auth_promise = std::make_shared<std::promise<bool>>();
+    std::future<bool> auth_future = auth_promise->get_future();
 
     // set_value twice throws future_error, which on the Paho thread is terminate.
     auto auth_set = std::make_shared<std::atomic<bool>>(false);
-    auto set_auth_once = [auth_set, &auth_promise](bool value) {
+    auto set_auth_once = [auth_set, auth_promise](bool value) {
         bool expected = false;
         if (auth_set->compare_exchange_strong(expected, true))
-            auth_promise.set_value(value);
+            auth_promise->set_value(value);
     };
 
     auto callback = [this, set_auth_once](const nlohmann::json& res) {
@@ -1202,11 +1207,13 @@ bool Moonraker_Mqtt::ask_for_tls_info(const nlohmann::json& cn_params)
 
     std::string pub_msg = "";
     if(!client->Publish(auth_code + m_auth_req_topic, body.dump(), 1, pub_msg)){
+        delete_response_target(seq_id);
         return false;
     }
     
     auto status = auth_future.wait_for(std::chrono::seconds(70));
     if(status == std::future_status::timeout){
+        delete_response_target(seq_id);
         return false;
     }
 
