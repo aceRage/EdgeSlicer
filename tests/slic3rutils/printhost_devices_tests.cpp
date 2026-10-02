@@ -10,6 +10,7 @@
 #include "slic3r/Utils/PrintHostDevices.hpp"
 #include "slic3r/Utils/PrintHostDeviceStatus.hpp"
 #include "slic3r/Utils/PrusaLinkStatus.hpp"
+#include "slic3r/Utils/MoonRakerJson.hpp"
 
 #include <boost/filesystem.hpp>
 #include <boost/nowide/fstream.hpp>
@@ -721,4 +722,108 @@ TEST_CASE("PrintHost: get_err_code_from_body does not throw on malformed JSON", 
     // A successful Duet connect often has no err field; that is success (0), not unknown (-1).
     CHECK(PrintHost::get_err_code_from_body(R"({})") == 0);
     REQUIRE_NOTHROW(PrintHost::get_err_code_from_body("<html>404</html>"));
+}
+
+TEST_CASE("Moonraker: try_parse_json does not throw on malformed printer bodies", "[Moonraker]")
+{
+    // get_machine_info used throwing json::parse in Http on_error / on_complete.
+    nlohmann::json out;
+    REQUIRE_NOTHROW(try_parse_json("<html>404</html>", out));
+    CHECK_FALSE(try_parse_json("<html>404</html>", out));
+    CHECK(out.is_object());
+    CHECK(out.empty());
+
+    CHECK_FALSE(try_parse_json("", out));
+    CHECK_FALSE(try_parse_json("not json", out));
+
+    REQUIRE(try_parse_json(R"({"result":{"status":{}}})", out));
+    CHECK(out.is_object());
+    CHECK(out.contains("result"));
+
+    // A valid non-object is stored, not discarded: callers decide what to do with it.
+    REQUIRE(try_parse_json("[]", out));
+    CHECK(out.is_array());
+}
+
+TEST_CASE("Moonraker: parse_moonraker_auth_result rejects bad MQTT TLS fields", "[Moonraker]")
+{
+    // The auth callback ran on Paho's thread and used .get<std::string>() / .get<int>()
+    // with no type checks. A wrong-typed field threw and terminated the process.
+    MoonrakerAuthInfo info;
+    REQUIRE_NOTHROW(parse_moonraker_auth_result(nlohmann::json(), info));
+    CHECK_FALSE(parse_moonraker_auth_result(nlohmann::json(), info));
+    CHECK_FALSE(parse_moonraker_auth_result(nlohmann::json::object(), info));
+    CHECK_FALSE(parse_moonraker_auth_result(nlohmann::json::array(), info));
+
+    const nlohmann::json missing = {{"state", "success"}, {"sn", "SN1"}};
+    CHECK_FALSE(parse_moonraker_auth_result(missing, info));
+
+    const nlohmann::json wrong_types = {
+        {"state", 1}, {"sn", 2}, {"clientid", true}, {"ca", {}}, {"cert", 0}, {"key", 0}, {"port", "8883"}};
+    CHECK_FALSE(parse_moonraker_auth_result(wrong_types, info));
+
+    const nlohmann::json failed = {{"state", "fail"},
+                                   {"sn", "SN1"},
+                                   {"clientid", "c"},
+                                   {"ca", "CA"},
+                                   {"cert", "CERT"},
+                                   {"key", "KEY"},
+                                   {"port", 8883}};
+    CHECK_FALSE(parse_moonraker_auth_result(failed, info));
+
+    const nlohmann::json ok = {{"state", "success"},
+                               {"sn", "SN1"},
+                               {"clientid", "cid"},
+                               {"ca", "CA"},
+                               {"cert", "CERT"},
+                               {"key", "KEY"},
+                               {"port", 8883}};
+    REQUIRE(parse_moonraker_auth_result(ok, info));
+    CHECK(info.sn == "SN1");
+    CHECK(info.clientid == "cid");
+    CHECK(info.ca == "CA");
+    CHECK(info.cert == "CERT");
+    CHECK(info.key == "KEY");
+    CHECK(info.port == 8883);
+
+    // One bad field at a time: state is "success" but a single TLS field is the wrong type.
+    // Do not reuse try_parse_json_err_int here — that helper accepts "8883" as 8883.
+    nlohmann::json bad_port = ok;
+    bad_port["port"]        = "8883";
+    REQUIRE_NOTHROW(parse_moonraker_auth_result(bad_port, info));
+    CHECK_FALSE(parse_moonraker_auth_result(bad_port, info));
+
+    nlohmann::json bad_ca = ok;
+    bad_ca["ca"]          = nullptr;
+    REQUIRE_NOTHROW(parse_moonraker_auth_result(bad_ca, info));
+    CHECK_FALSE(parse_moonraker_auth_result(bad_ca, info));
+
+    // Non-object result (number / string) must not throw.
+    REQUIRE_NOTHROW(parse_moonraker_auth_result(nlohmann::json(42), info));
+    CHECK_FALSE(parse_moonraker_auth_result(nlohmann::json(42), info));
+    CHECK_FALSE(parse_moonraker_auth_result(nlohmann::json("success"), info));
+}
+
+TEST_CASE("Moonraker: jsonrpc id and method helpers do not throw", "[Moonraker]")
+{
+    int64_t id = -1;
+    REQUIRE_NOTHROW(moonraker_jsonrpc_id(nlohmann::json::object(), id));
+    CHECK_FALSE(moonraker_jsonrpc_id(nlohmann::json::object(), id));
+    CHECK_FALSE(moonraker_jsonrpc_id(nlohmann::json::parse(R"({"id":"x"})"), id));
+    CHECK_FALSE(moonraker_jsonrpc_id(nlohmann::json::parse(R"({"id":1.5})"), id));
+    REQUIRE(moonraker_jsonrpc_id(nlohmann::json::parse(R"({"id":42})"), id));
+    CHECK(id == 42);
+
+    CHECK(moonraker_method_for_log(nlohmann::json::object()).empty());
+    CHECK(moonraker_method_for_log(nlohmann::json::parse(R"({"method":"notify_status_update"})")) ==
+          "notify_status_update");
+    REQUIRE_NOTHROW(moonraker_method_for_log(nlohmann::json::parse(R"({"method":12})")));
+    CHECK(moonraker_method_for_log(nlohmann::json::parse(R"({"method":12})")) == "12");
+    REQUIRE_NOTHROW(moonraker_method_for_log(nlohmann::json::parse(R"({"method":{"nested":true}})")));
+
+    // Non-object body: no throw, empty log string; id helper rejects it.
+    REQUIRE_NOTHROW(moonraker_method_for_log(nlohmann::json(12)));
+    CHECK(moonraker_method_for_log(nlohmann::json(12)).empty());
+    CHECK_FALSE(moonraker_jsonrpc_id(nlohmann::json(42), id));
+    CHECK_FALSE(moonraker_jsonrpc_id(nlohmann::json::array(), id));
 }

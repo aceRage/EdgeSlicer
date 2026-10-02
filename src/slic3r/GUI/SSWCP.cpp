@@ -1509,10 +1509,12 @@ void SSWCP_Instance::update_filament_info(const json& objects, bool send_message
             }
             return;
         } else {
-            json j_value;
-           
-            j_value = json::parse(value);
-           
+            json j_value = json::parse(value, nullptr, false);
+            if (j_value.is_discarded() || !j_value.is_object()) {
+                if (send_message)
+                    handle_general_fail(-1, "value parse failed");
+                return;
+            }
 
             if (!j_value.count("nozzle_diameters") ||!j_value.count("filament_vendor") || !j_value["filament_vendor"].is_array() ||
                 !j_value.count("filament_type") ||
@@ -7382,9 +7384,11 @@ void SSWCP::handle_web_message(std::string message, wxWebView* webview) {
         }
         WCP_Logger::getInstance().add_log(message, false, "", "WCP", "info");
 
-        json j_message = json::parse(message);
+        json j_message = json::parse(message, nullptr, false);
 
-        if (j_message.empty() || !j_message.count("header") || !j_message.count("payload") || !j_message["payload"].count("cmd")) {
+        if (j_message.is_discarded() || !j_message.is_object() || j_message.empty() ||
+            !j_message.count("header") || !j_message.count("payload") ||
+            !j_message["payload"].is_object() || !j_message["payload"].count("cmd")) {
             return;
         }
 
@@ -7396,6 +7400,8 @@ void SSWCP::handle_web_message(std::string message, wxWebView* webview) {
         json params;
 
         if (payload.count("cmd")) {
+            if (!payload["cmd"].is_string())
+                return;
             cmd = payload["cmd"].get<std::string>();
         }
         if (payload.count("params")) {
@@ -7403,6 +7409,8 @@ void SSWCP::handle_web_message(std::string message, wxWebView* webview) {
         }
 
         if (payload.count("event_id") && !payload["event_id"].is_null()) {
+            if (!payload["event_id"].is_string())
+                return;
             event_id = payload["event_id"].get<std::string>();
         }
         std::shared_ptr<SSWCP_Instance> instance = create_sswcp_instance(cmd, header, params, event_id, webview);
@@ -7423,9 +7431,11 @@ void SSWCP::handle_webmsg_for_debug(std::string message) {
     {
         WCP_Logger::getInstance().add_log(message, false, "", "WCP", "info");
 
-        json j_message = json::parse(message);
+        json j_message = json::parse(message, nullptr, false);
 
-        if (j_message.empty() || !j_message.count("header") || !j_message.count("payload") || !j_message["payload"].count("cmd")) {
+        if (j_message.is_discarded() || !j_message.is_object() || j_message.empty() ||
+            !j_message.count("header") || !j_message.count("payload") ||
+            !j_message["payload"].is_object() || !j_message["payload"].count("cmd")) {
             return;
         }
 
@@ -7437,6 +7447,8 @@ void SSWCP::handle_webmsg_for_debug(std::string message) {
         json params;
 
         if (payload.count("cmd")) {
+            if (!payload["cmd"].is_string())
+                return;
             cmd = payload["cmd"].get<std::string>();
         }
         if (payload.count("params")) {
@@ -7444,6 +7456,8 @@ void SSWCP::handle_webmsg_for_debug(std::string message) {
         }
 
         if (payload.count("event_id") && !payload["event_id"].is_null()) {
+            if (!payload["event_id"].is_string())
+                return;
             event_id = payload["event_id"].get<std::string>();
         }
         std::shared_ptr<SSWCP_Instance> instance = create_sswcp_instance(cmd, header, params, event_id, nullptr);
