@@ -4617,10 +4617,16 @@ void HubServer::serve_still(tcp::socket& client, Request& r)
     }
     // The relay's own loopback RTSP: go2rtc already holds the one connection to the printer.
     const std::string url = "rtsp://" + auth + "127.0.0.1:" + std::to_string(rtsp) + "/" + name;
+    // Keyframes only (the decoder skips everything else). `fps` is a ceiling, never a target: a select
+    // filter drops a keyframe that comes sooner than 1/fps after the last one shown and nothing is ever
+    // duplicated (-fps_mode vfr: the mpjpeg muxer would otherwise repeat each picture up to the stream's
+    // nominal 15 fps; ffmpeg 5.1 or newer; -r together with vfr is refused by newer builds). A camera with a 2 s keyframe interval simply gives one picture every 2 s.
+    char interval[16];
+    std::snprintf(interval, sizeof(interval), "%.3f", 1.0 / fps);
+    const std::string vf = std::string("select='isnan(prev_selected_t)+gte(t-prev_selected_t,") + interval + ")',scale=" + std::to_string(w) + ":-2";
     ChildPipe child;
     if (!child.start({ mp.ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-rtsp_transport", "tcp",
-                       "-skip_frame", "nokey", "-i", url, "-an", "-vf", "scale=" + std::to_string(w) + ":-2", "-q:v", "7",
-                       "-fps_mode", "vfr", "-r", std::to_string(fps), "-f", "mpjpeg", "-" })) {
+                       "-skip_frame", "nokey", "-i", url, "-an", "-vf", vf, "-q:v", "7", "-fps_mode", "vfr", "-f", "mpjpeg", "-" })) {
         respond(client, 502, "text/plain", "could not start ffmpeg");
         return;
     }
