@@ -71,5 +71,13 @@ fi
 sleep 20
 docker stats --no-stream --format 'stats: cpu={{.CPUPerc}} mem={{.MemUsage}}' "$C"
 docker exec "$C" uname -m | sed 's/^/arch: /'
-[ $fail = 0 ] && echo "SMOKE OK" || { echo "SMOKE FAILED"; docker logs "$C" 2>&1 | tail -30; }
+if [ $fail = 0 ]; then
+    echo "SMOKE OK"
+else
+    echo "SMOKE FAILED"
+    echo "---- container log"; docker logs "$C" 2>&1 | tail -20
+    echo "---- hub.log (instances)"; docker exec "$C" sh -c "grep -E 'instance|service mode|go2rtc' /data/log/hub.log.0 | tail -20 | cut -c1-240"
+    echo "---- instance log (not the filament noise)"; docker exec "$C" sh -c "for f in /data/log/2*.log*; do echo \$f; grep -v -E 'Load Filament|incorrect keys|WCP' \$f | tail -40 | cut -c1-240; done"
+    echo "---- hub/instance stdout+stderr (not the Gtk noise)"; docker exec "$C" sh -c "grep -v -E 'Gtk-CRITICAL|^$' /tmp/hub.out | tail -25 | cut -c1-240"
+fi
 exit $fail
