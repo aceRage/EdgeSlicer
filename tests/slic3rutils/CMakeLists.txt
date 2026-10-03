@@ -67,6 +67,7 @@ add_executable(${_TEST_NAME}_tests
     service_mode_tests.cpp
     hub_supervisor_tests.cpp
     hub_portable_tests.cpp
+    hub_media_tests.cpp
     # The crash-report scrubber is plain C++ with no library of its own; the test compiles
     # the very file the app does.
     ${CMAKE_CURRENT_SOURCE_DIR}/../../src/sentry_wrapper/SentryScrub.cpp

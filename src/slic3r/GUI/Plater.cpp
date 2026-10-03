@@ -11473,6 +11473,14 @@ Plater::priv::priv(Plater *q, MainFrame *main_frame)
         this->q->Bind(EVT_RESTORE_PROJECT, [this, last = last_backup](wxCommandEvent& e) {
             std::string last_backup = last;
             std::string originfile;
+            // A hidden hub instance registers with the hub before start-up has finished, so a phone (or a
+            // service-mode client) can load a model before this deferred "start from an empty project"
+            // runs; starting a new project then would silently throw that model away ("plate is empty"
+            // on the next slice). Leave a project that already has content alone.
+            if (wxGetApp().is_hub_managed() && RemoteAccess::get().hidden() && !this->model.objects.empty()) {
+                BOOST_LOG_TRIVIAL(info) << "restore project: skipped, a hidden instance already has " << this->model.objects.size() << " object(s) loaded";
+                return;
+            }
             // Ultra: a hidden instance must neither prompt nor delete the backup; a person decides later.
             // It still starts from a named, empty project like a visible one (the title bar and the
             // hub list read "Untitled" instead of nothing).

@@ -10809,6 +10809,36 @@ CLIMiscConfigDef::CLIMiscConfigDef()
     def->cli_params = "option";
     def->set_default_value(new ConfigOptionBool(false));
 
+    def = this->add("hub_max_transcodes", coString);
+    def->label = L("Concurrent camera transcodes");
+    def->tooltip = L("The most Medium/Low camera transcodes the hub runs at once (0 = no limit); further viewers get the full-quality stream. Default by host: 1 on a Pi-class ARM host, 2-6 on x86 depending on cores and hardware encoder, none on Windows (the same as EDGESLICER_MAX_TRANSCODES).");
+    def->cli_params = "n";
+    def->set_default_value(new ConfigOptionString());
+
+    def = this->add("hub_go2rtc_api_port", coString);
+    def->label = L("go2rtc API port");
+    def->tooltip = L("The loopback port of the camera relay's API (the same as EDGESLICER_GO2RTC_API_PORT). Automatic when not set.");
+    def->cli_params = "port";
+    def->set_default_value(new ConfigOptionString());
+
+    def = this->add("hub_go2rtc_rtsp_port", coString);
+    def->label = L("go2rtc RTSP port");
+    def->tooltip = L("The camera relay's RTSP restream port (the same as EDGESLICER_GO2RTC_RTSP_PORT), so Home Assistant or Frigate on the same machine can read the relay instead of opening another connection to the printer. Automatic loopback port when not set.");
+    def->cli_params = "port";
+    def->set_default_value(new ConfigOptionString());
+
+    def = this->add("hub_go2rtc_webrtc_port", coString);
+    def->label = L("go2rtc WebRTC port");
+    def->tooltip = L("The camera relay's WebRTC media port (the same as EDGESLICER_GO2RTC_WEBRTC_PORT). Automatic from 8555 up when not set.");
+    def->cli_params = "port";
+    def->set_default_value(new ConfigOptionString());
+
+    def = this->add("hub_go2rtc_rtsp_listen", coString);
+    def->label = L("go2rtc RTSP address");
+    def->tooltip = L("The address the RTSP restream listens on (the same as EDGESLICER_GO2RTC_RTSP_LISTEN); loopback unless EDGESLICER_GO2RTC_RTSP_USER and _PASS are also set.");
+    def->cli_params = "addr";
+    def->set_default_value(new ConfigOptionString());
+
     def = this->add("hub_public_host", coString);
     def->label = L("Address the hub advertises");
     def->tooltip = L("The host (or host:port) to put in the phone link instead of the one the hub finds on its own interfaces, for a container whose own address is not reachable from the phone (the same as EDGESLICER_HUB_PUBLIC_HOST).");

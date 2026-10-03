@@ -100,8 +100,10 @@ using namespace nlohmann;
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <initializer_list>
 #include <set>
 #include <sstream>
+#include <utility>
 #include "slic3r/Utils/ServiceMode.hpp"
 #include "slic3r/GUI/GLCanvas3D.hpp"
 #include "slic3r/GUI/Camera.hpp"
@@ -1537,6 +1539,13 @@ int CLI::run(int argc, char **argv)
         Slic3r::ServiceMode::enable();
     if (const std::string public_host = m_config.opt_string("hub_public_host"); !public_host.empty())
         Slic3r::ServiceMode::set_env(Slic3r::ServiceMode::ENV_PUBLIC_HOST, public_host);
+    // The camera relay's limits and ports (see HubMedia.hpp); the environment is where RemoteHub reads them.
+    for (const auto& kv : std::initializer_list<std::pair<const char*, const char*>>{
+             { "hub_max_transcodes", "EDGESLICER_MAX_TRANSCODES" }, { "hub_go2rtc_api_port", "EDGESLICER_GO2RTC_API_PORT" },
+             { "hub_go2rtc_rtsp_port", "EDGESLICER_GO2RTC_RTSP_PORT" }, { "hub_go2rtc_webrtc_port", "EDGESLICER_GO2RTC_WEBRTC_PORT" },
+             { "hub_go2rtc_rtsp_listen", "EDGESLICER_GO2RTC_RTSP_LISTEN" } })
+        if (const std::string v = m_config.opt_string(kv.first); !v.empty())
+            Slic3r::ServiceMode::set_env(kv.second, v);
 
     // Ultra: `--hub` runs the phone-access / camera-relay helper instead of the slicer.
     if (const ConfigOptionBool* hub = m_config.opt<ConfigOptionBool>("hub"); hub && hub->value) {

@@ -58,17 +58,69 @@ days; nothing is pushed to a registry. Run the same check locally with `docker/h
 
 ## Camera relay
 
+**Passthrough first.** A camera is relayed as the printer sends it (go2rtc, a few percent of a core per stream). The phone's
+Medium/Low steps are re-encodes, opt-in, started by go2rtc only while someone watches. The hub offers them only when a real
+test encode succeeded at start-up (`ffmpeg -encoders` alone is never trusted) and says what it found in `GET /pair` and the
+admin plane's `GET /hub/info` under `camera`: `{passthrough, quality, transcode, encoder, hardware, reason, max_transcodes,
+active_transcodes, downgraded, still, probes, ports}`; `features` carries `camera_transcode` / `camera_still` accordingly, so
+the app can hide steps that are not available.
+
+| Host | Probe order | Steps offered | Concurrent transcodes (default) |
+| --- | --- | --- | --- |
+| x86 Linux | `h264_qsv`, `h264_vaapi` (both need `/dev/dri`), then software `libx264` / `libopenh264` if there are 4+ cores | Medium, Low | hardware 6; software cores/2, at most 4 |
+| ARM Linux (Pi 4) | `h264_v4l2m2m` (needs `/dev/video11`), then software | Medium, Low | 2 |
+| ARM Linux without a hardware encoder (Pi 5, other aarch64) | software `libopenh264` | **Low only** | **1** |
+| x86 with fewer than 4 cores and no GPU | none | passthrough only | - |
+| Windows / macOS | software, as before | Medium, Low | no cap |
+
+Docker: pass the GPU in with `--device /dev/dri` (and `--group-add` the `render` group) for QSV/VAAPI, `--device /dev/video11`
+on a Pi 4. The hardware paths follow go2rtc's and ffmpeg's documented arguments but have **not** been run on real hardware by
+us; the log (`RemoteHub: encoder probe ...`) shows what each probe did, and a failing probe simply falls through.
+
+* **Cap.** `EDGESLICER_MAX_TRANSCODES` (or `--hub-max-transcodes`, or `"go2rtc": {"max_transcodes": n}` in `hub/settings.json`;
+  0 = no limit). It counts distinct streams: two viewers of the same printer's Low stream share one ffmpeg. When the cap is
+  reached a further viewer is handed the passthrough stream (full quality), never an error. A slot is held while a viewer's
+  stream is open and freed when the last viewer leaves, so switching from printer A to printer B frees A's slot.
+* **Still-image fallback** for H.264 cameras (X1, H2, U1): `GET /r/<token>/still?id=<camera id>&fps=1&w=480` is MJPEG from
+  keyframes only (ffmpeg `-skip_frame nokey`, 1-5 fps, 160-1280 px wide), read from the relay's loopback RTSP, so there is
+  still one connection to the printer. `<img src=...>` plays it. At most `EDGESLICER_MAX_STILLS` at once (4, 2 on ARM); more get a
+  503. The P1/A1 keep their own JPEG relay (`/bambu?id=&fps=`).
 * **go2rtc** (v1.9.14, MIT, AlexxIT) is bundled in the AppImage and the Flatpak, amd64 and arm64, like `go2rtc.exe` on
-  Windows. Pinned with sha256 in `scripts/fetch_go2rtc_linux.sh` (also in the Flatpak manifest). It carries
-  X1/H2 RTSPS cameras and the P1/A1 relay needs none.
+  Windows. Pinned with sha256 in `scripts/fetch_go2rtc_linux.sh` (also in the Flatpak manifest).
 * **ffmpeg** (LGPL-3.0, FFmpeg n8.1.3 static build with libopenh264, from BtbN/FFmpeg-Builds) is bundled next to go2rtc,
-  amd64 and arm64, in the AppImage, the Flatpak and the image: the camera "Quality" steps (Medium/Low re-encode) work
-  everywhere. It is the Linux twin of the LGPL `ffmpeg.exe` the Windows package ships (`--enable-version3`, no
-  `--enable-gpl`, x264/x265 disabled). Pinned by sha256 in `scripts/fetch_ffmpeg_linux.sh` (and the Flatpak manifest);
-  its licence text, source offer and provenance ship beside it (`FFMPEG-LICENSE.txt`, `FFMPEG-NOTICE-LINUX.txt`).
-  BtbN removes old dated release tags after a couple of weeks, so the pinned URL needs bumping from time to time
-  (the script says how; a failed download only warns, a hash mismatch fails the build). A system `ffmpeg` on `PATH`
-  is still used when the bundled one is absent, with its encoder (libx264 or libopenh264) detected.
+  amd64 and arm64, in the AppImage, the Flatpak and the image. It is the Linux twin of the LGPL `ffmpeg.exe` the Windows
+  package ships (`--enable-version3`, no `--enable-gpl`, x264/x265 disabled). Pinned by sha256 in
+  `scripts/fetch_ffmpeg_linux.sh` (and the Flatpak manifest); its licence text, source offer and provenance ship beside it
+  (`FFMPEG-LICENSE.txt`, `FFMPEG-NOTICE-LINUX.txt`). BtbN removes old dated release tags after a couple of weeks, so the
+  pinned URL needs bumping from time to time (the script says how; a failed download only warns, a hash mismatch fails the
+  build). A system `ffmpeg` on `PATH` is still used when the bundled one is absent, with its encoders probed the same way.
+
+### Ports, and sharing the box with Home Assistant or Frigate
+
+Home Assistant's go2rtc, Frigate and a standalone go2rtc all default to 1984 / 8554 / 8555. The hub's go2rtc takes a random
+loopback port for its API (nothing else is exposed), a random loopback port for RTSP, and the first free of 8555-8574 for
+WebRTC, so it does not collide by default. To pin them: environment variable, flag, or `hub/settings.json` (environment wins):
+
+| Listener | Environment | Flag | settings.json `go2rtc` key |
+| --- | --- | --- | --- |
+| API (loopback) | `EDGESLICER_GO2RTC_API_PORT` | `--hub-go2rtc-api-port` | `api_port` |
+| RTSP restream | `EDGESLICER_GO2RTC_RTSP_PORT` | `--hub-go2rtc-rtsp-port` | `rtsp_port` |
+| WebRTC media (UDP+TCP) | `EDGESLICER_GO2RTC_WEBRTC_PORT` | `--hub-go2rtc-webrtc-port` | `webrtc_port` |
+| RTSP address | `EDGESLICER_GO2RTC_RTSP_LISTEN` (+ `_USER`, `_PASS`) | `--hub-go2rtc-rtsp-listen` | `rtsp_listen` |
+
+A port you asked for that is taken is logged (`go2rtc WebRTC port 8555 is already in use ... using 8556 instead`) and the next
+free one is used; **in service mode the hub does not guess**: it refuses to start with that message in the log and in
+`hub/hub_error.txt`, so a container restart loop tells you what is wrong.
+
+**Reading the relay from Home Assistant or Frigate instead of the printer.** Bambu printers allow only a couple of camera
+clients; every extra reader (ha-bambulab, Bambuddy, a phone app) takes one. Let them read the hub's relay instead:
+
+* Same machine, host networking (`--network host`): set `EDGESLICER_GO2RTC_RTSP_PORT=8564` (anything free) and point them at
+  `rtsp://127.0.0.1:8564/<stream name>`. The stream names are the `rname` values in `GET /r/<token>/state` (for a U1, the name
+  of its `/relay/h264` stream). The RTSP port stays on loopback.
+* Another machine or a bridged container: set `EDGESLICER_GO2RTC_RTSP_LISTEN=0.0.0.0`, `EDGESLICER_GO2RTC_RTSP_USER` and
+  `_PASS` (the hub refuses to open it without credentials), publish the port, and use `rtsp://user:pass@<host>:8554/<name>`
+  (the port defaults to 8554 when the address is open). Treat the LAN as trusted: RTSP is not encrypted.
 
 ## Tailscale
 
