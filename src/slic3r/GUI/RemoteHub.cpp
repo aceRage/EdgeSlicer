@@ -5706,6 +5706,14 @@ bool HubServer::start()
         BOOST_LOG_TRIVIAL(error) << "RemoteHub: not starting: " << m_fatal;
         boost::nowide::ofstream f((fs::path(hub_dir()) / "hub_error.txt").string(), std::ios::trunc);
         f << "RemoteHub: " << m_fatal << "\n";
+        f.close();
+        // The workers started above are threads: left running, their destructors at exit call
+        // std::terminate and the refusal ends in an abort and a core dump instead of a clear message
+        // and a non-zero exit.
+        WebPush::stop();
+        AppPush::stop();
+        RemoteNotify::stop();
+        flush_logs();
         return false;
     }
     BambuCamRelay::get().port();
