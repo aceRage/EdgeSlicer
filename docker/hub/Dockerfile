@@ -18,6 +18,9 @@ ARG APPIMAGE=EdgeSlicer_Linux_AppImage_Ubuntu2404.AppImage
 # a slow link) need one. Without it the hub relays cameras as they come (go2rtc is in the AppImage regardless).
 # The Ubuntu ffmpeg is a GPL build; it is installed from the distribution, not bundled by EdgeSlicer.
 ARG WITH_FFMPEG=0
+# 0 = do not generate en_US.UTF-8 (a minimal image): service mode then logs the missing locale and carries on in
+# English instead of stopping on the "Switching language failed" box. Used to test exactly that.
+ARG GEN_LOCALE=1
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Run-time libraries the AppImage expects from the host (it bundles its own openssl/curl/webkit-less runtime):
@@ -32,7 +35,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libgl1-mesa-dri libglx-mesa0 libegl1 libopengl0 libglu1-mesa libgtk-3-0t64 libwebkit2gtk-4.1-0 libsecret-1-0 \
         fonts-dejavu-core \
     && if [ "$WITH_FFMPEG" = "1" ]; then apt-get install -y --no-install-recommends ffmpeg; fi \
-    && sed -i 's/^# *\(en_US.UTF-8\)/\1/' /etc/locale.gen && locale-gen en_US.UTF-8 \
+    && if [ "$GEN_LOCALE" = "1" ]; then sed -i 's/^# *\(en_US.UTF-8\)/\1/' /etc/locale.gen && locale-gen en_US.UTF-8; fi \
     && rm -rf /var/lib/apt/lists/*
 
 # --appimage-extract needs no FUSE. The tree is run through AppRun (it sets LD_LIBRARY_PATH for the bundled libs).

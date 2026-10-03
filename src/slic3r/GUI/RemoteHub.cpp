@@ -3687,7 +3687,7 @@ FirewallState HubServer::firewall_state(bool refresh)
                 std::lock_guard<std::mutex> lock(m_mutex);
                 m_fw = fw;
             }
-            if (fw.state != "allowed")
+            if (k_windows && fw.state != "allowed")
                 BOOST_LOG_TRIVIAL(info) << "RemoteHub: Windows Firewall for go2rtc.exe: " << fw.state << " (" << fw.note
                                          << (fw.command.empty() ? "" : " " + fw.command) << ")";
             m_fw_busy = false;
@@ -3723,7 +3723,7 @@ FirewallState HubServer::lan_firewall_state(bool refresh)
                 std::lock_guard<std::mutex> lock(m_mutex);
                 m_lan_fw = fw;
             }
-            if (fw.state != "allowed")
+            if (k_windows && fw.state != "allowed")
                 BOOST_LOG_TRIVIAL(info) << "RemoteHub: Windows Firewall for the phone/LAN port " << port << ": " << fw.state << " (" << fw.note
                                          << (fw.command.empty() ? "" : " " + fw.command) << ")";
             m_lan_fw_busy = false;

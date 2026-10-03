@@ -1408,9 +1408,28 @@ void GUI_App::post_init()
         BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": hidden instance warm-up = " << warmup;
         if (warmup != "none") {
             flush_logs();
-            if (!plater_->ensure_gl_ready())
-                BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ": hidden instance: OpenGL warm-up FAILED; thumbnail and preview routes will return errors";
-            else
+            if (!plater_->ensure_gl_ready()) {
+                if (Slic3r::ServiceMode::enabled()) {
+                    // The window was shown a moment ago, but GTK only maps and realises it once the
+                    // event loop has run, which it has not yet at this point. Try again from the loop
+                    // (every half second for up to 30 s); the thumbnail and preview routes also
+                    // initialise OpenGL on first use, so this is about a clean log and an early start.
+                    BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": hidden instance: OpenGL not ready yet (window not realised); retrying from the event loop";
+                    wxTimer* gl_retry = new wxTimer(); // owns itself
+                    auto     tries    = std::make_shared<int>(0);
+                    gl_retry->Bind(wxEVT_TIMER, [this, gl_retry, tries](wxTimerEvent&) {
+                        const bool ok = plater_ != nullptr && plater_->ensure_gl_ready();
+                        if (ok || ++*tries >= 60) {
+                            if (ok) BOOST_LOG_TRIVIAL(warning) << "post_init: hidden instance: OpenGL ready after " << *tries + 1 << " retries";
+                            else    BOOST_LOG_TRIVIAL(error) << "post_init: hidden instance: OpenGL still not ready after 30 s; it is set up on first use instead";
+                            gl_retry->Stop();
+                            CallAfter([gl_retry] { delete gl_retry; });
+                        }
+                    });
+                    gl_retry->Start(500);
+                } else
+                    BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ": hidden instance: OpenGL warm-up FAILED; thumbnail and preview routes will return errors";
+            } else
                 BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": hidden instance: OpenGL ready, view3D canvas "
                                            << plater_->get_view3D_canvas3D()->get_canvas_size().get_width() << "x"
                                            << plater_->get_view3D_canvas3D()->get_canvas_size().get_height();

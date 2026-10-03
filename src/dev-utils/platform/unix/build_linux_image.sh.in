@@ -169,6 +169,8 @@ echo -n "[9/9] Generating Linux app..."
     else
         bash "$(cd .. && pwd)/scripts/fetch_go2rtc_linux.sh" "$APPDIR/resources/tools/go2rtc"
     fi
+    # The Windows helpers in the same folder are 19 MB of dead weight here.
+    rm -f "$APPDIR/resources/tools/go2rtc/"*.exe
 
     ORIGINAL_BINARY_LOCATION=""
     if [ -f "src/${CONFIG}/@SLIC3R_APP_CMD@" ]; then
