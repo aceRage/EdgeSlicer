@@ -189,37 +189,63 @@ WSL Ubuntu scratch (`~/es_spike` incl. the 187 MB AppImage and 545 MB extracted 
 
 ## 10. Linux headless blockers: fixes and verification (2026-10-03)
 
-Branch `feat/linux-headless-hub` (on top of the spike). Service mode is `--hub-service` on the hub or `EDGESLICER_SERVICE=1`; nothing changes for a desktop start. Recipe and flags: `docker/hub/README.md`.
+Branch `feat/linux-headless-hub` (on top of the spike). Service mode is `--hub-service` on the hub or `EDGESLICER_SERVICE=1`; nothing changes for a desktop start. Recipe, flags and the camera policy: `docker/hub/README.md`.
 
 | Spike blocker | Fix |
 |---|---|
-| 1. Hidden mode crashes on Linux/GTK | `ImGui::CalcTextSize` (deps_src/imgui) no longer dereferences a missing font or an empty atlas (rough size instead; notifications re-measure on their first real frame), so a hidden or not-yet-realised canvas cannot crash on any platform. On Linux a service-mode instance shows its window on the virtual display (GTK needs a realised canvas for GL) while staying "hidden" for the hub, so every hidden-instance rule (auto-answered dialogs) still applies; `RemoteAccess::raise_attention` does not un-hide it in service mode. The warm-up is retried from the event loop until the window is realised (it is, after one retry). Windows keeps its true hidden mode. |
+| 1. Hidden mode crashes on Linux/GTK | `ImGui::CalcTextSize` (deps_src/imgui) no longer dereferences a missing font or an empty atlas (rough size instead; notifications re-measure on their first real frame), so a hidden or not-yet-realised canvas cannot crash on any platform. On Linux a service-mode instance shows its window on the virtual display (GTK needs a realised canvas for GL) while staying "hidden" for the hub, so every hidden-instance rule (auto-answered dialogs) still applies; `RemoteAccess::raise_attention` does not un-hide it in service mode. The warm-up is retried from the event loop until the window is realised (it is, after one retry). Windows keeps its true hidden mode. A hidden instance also no longer starts a new project over a model loaded before its start-up finished (found by the CI smoke test: "plate is empty"). |
 | 2. First start needs a human | `AppConfig::seed_service_defaults()` writes a minimal `EdgeSlicer.conf` when none exists (first-run answered, Snapmaker U1 0.4 as the one printer); in service mode no wizard, the TLS-store question is answered yes and remembered, a missing locale is logged and the app continues in English, the Bambu setup notice is not shown. |
 | 3. No supervisor | A service-mode hub starts its instance, notices a death (`HubSupervisor.hpp`, unit-tested), respawns with backoff (2 s doubling to 2 min, reset by a minute of health), drops printer rows nobody refreshes for 3 minutes, answers `GET /api/printers` itself and answers a dead `/i/<pid>/api/printers` from its own rows. `/hub/info` shows `service {respawns, failures, next_spawn_in_s}`. |
-| 4. Camera relay | `go2rtc` path cross-platform; `start_go2rtc` no longer Windows-only (tied to the hub with `PR_SET_PDEATHSIG`, reaped in the loop). Official go2rtc v1.9.14 (MIT) amd64/arm64 bundled in the AppImage (`scripts/fetch_go2rtc_linux.sh`, sha256 pinned and checked) and the Flatpak (sources with sha256). ffmpeg: not bundled on Linux; a system ffmpeg on PATH is used, its H.264 encoder (libx264 or libopenh264) detected from `ffmpeg -encoders`, no variants if it has none. |
+| 4. Camera relay | `go2rtc` path cross-platform; `start_go2rtc` no longer Windows-only (tied to the hub with `PR_SET_PDEATHSIG`, reaped in the loop). Official go2rtc v1.9.14 (MIT) amd64/arm64 bundled in the AppImage and the Flatpak (`scripts/fetch_go2rtc_linux.sh`, sha256 pinned and checked; Flatpak sources with sha256). **ffmpeg: an LGPL build exists, so that is what ships** (below). |
 | 5. Tailscale on POSIX | `run_capture` implemented with `posix_spawnp`, a pipe and a deadline; the hub's status/serve controls work when the `tailscale` CLI exists (checked against a stand-in CLI), download link is the Linux one. |
 | 6. LAN URL in containers | `EDGESLICER_HUB_PUBLIC_HOST` / `--hub-public-host`: `host`, `host:port`, `[v6]:port` or a URL; used by `/hub/info`, `/pair`, `/summary`, the tray and push links. The entrypoint still clears stale `.X99-lock` and `hub.json`. |
 
+### ffmpeg on Linux: LGPL, same family as the Windows package
+
+The Windows package ships an LGPL-3.0 BtbN/FFmpeg-Builds static build (`--enable-version3`, no `--enable-gpl`, x264/x265 disabled, H.264 encoder libopenh264; `docs/superpowers/specs/2026-09-12-bundled-ffmpeg.md`). BtbN publishes the same builds for `linux64-lgpl` and `linuxarm64-lgpl`; the FFmpeg 8.1 release-branch static builds contain libopenh264 (and the QSV, VAAPI and V4L2 M2M wrappers) and need only glibc. So the owner's rule (LGPL where it exists) gives: bundle it, no GPL build anywhere.
+
+* Pinned in `scripts/fetch_ffmpeg_linux.sh` and the Flatpak manifest: release `autobuild-2026-10-01-13-06`, `ffmpeg-n8.1.3-14-g330caae0c1-linux64-lgpl-8.1.tar.xz` (sha256 `3c2c4d6066432b2eab54be830d3ce1f5b68a3f34ecaa6d9f2d0230a49e778560`) and `...linuxarm64-lgpl-8.1.tar.xz` (`d407cc9405caf75d67b3a10c9793f1db38d55705d09ac47d279d36d2823cb73d`). Only the `ffmpeg` binary (142 MB / 117 MB) and `LICENSE.txt` are taken.
+* Beside it: `FFMPEG-LICENSE.txt` (the LGPL-3.0 text) and `FFMPEG-NOTICE-LINUX.txt` (what it is, the exact release, archive and sha256, FFmpeg source commit `330caae0c1`, the BtbN recipe, a written offer of the source for three years).
+* **Pin rot.** BtbN deletes its dated tags after a couple of weeks: the Windows pin (`autobuild-2026-09-12-13-12`) already 404s, so the Windows package's ffmpeg cannot be re-fetched either. The Linux script fails the build on a hash mismatch, only warns on a failed download (the package then has no ffmpeg and the hub falls back to the system one or to passthrough), and says how to bump. A durable mirror (a release or bucket of ours) is the real fix and is the owner's call.
+* Sizes: AppImage amd64 241 MB, arm64 about 229 MB; Flatpak x86_64 200 MB, aarch64 188 MB; hub image 1.52 GB on disk (727-756 MB as a `docker save` .tar.gz).
+
+### Camera policy: passthrough first (added after the monitoring comparison)
+
+`tests/research_hub_monitoring_comparison.md` section 4.1 and the owner's follow-up: a phone watches one, or a few, cameras at a time; the target on a Pi-class host is one camera working properly.
+
+* **Passthrough is the default.** Medium/Low are opt-in, lazy (go2rtc starts ffmpeg only while someone watches), and offered only if a real test encode passed at start-up: x86 QSV, VAAPI (need `/dev/dri`), ARM `h264_v4l2m2m` (Pi 4, `/dev/video11`), then software libx264/libopenh264, software only on x86 with 4+ cores. A Pi 5 or other aarch64 host without a hardware encoder gets **one software transcode at Low** (not strictly passthrough-only); x86 with fewer than 4 cores and no GPU is passthrough-only. Windows is unchanged apart from the test encode (software, no cap).
+* **Cap** on concurrent transcodes (`EDGESLICER_MAX_TRANSCODES`, `--hub-max-transcodes`, settings.json): default 1 on Pi-class ARM, 2 with a Pi 4 hardware encoder, cores/2 (at most 4) on x86 software, 6 with x86 hardware, none on Windows. Counted per distinct stream (viewers of one printer's Low stream share one ffmpeg); past the cap a viewer is served the source stream, never an error; the slot is held while the viewer's WebSocket is open, so leaving printer A frees it for printer B.
+* **Advertised** in `/pair` (`features`: `camera_passthrough`, `camera_transcode`, `camera_still`; `camera` object), `/state` and `/hub/info`: encoder, hardware, the steps, the cap, active and downgraded counts, every probe result, the ports.
+* **Still-image fallback** `GET /r/<token>/still?id=&fps=&w=` for H.264 cameras: keyframes only (`-skip_frame nokey`), 160-1280 px, MJPEG, from the relay's loopback RTSP (one connection to the printer); `fps` is a ceiling (no picture is repeated); capped (4, 2 on ARM).
+* **Ports** for go2rtc's API, RTSP and WebRTC are configurable (environment, `--hub-go2rtc-*-port`, settings.json); a taken port moves to the next free one on a desktop hub with a log line and refuses to start in service mode (message in the log and in `hub/hub_error.txt`); the RTSP restream can be opened to Home Assistant or Frigate on another machine only with credentials. Recipe in `docker/hub/README.md`.
+* The hardware encoder paths (QSV, VAAPI, V4L2 M2M) follow ffmpeg's documented arguments and are covered by the probe-ordering unit tests with a mocked probe, but **have not run on real hardware**.
+
+#### Measured cost (one stream, software libopenh264; synthetic `testsrc2` content, so real cameras will cost more)
+
+| Where | still (keyframes to MJPEG, 480 px) | full decode | Low 854 px 10 fps 600 kb/s | Medium 1280 px 15 fps 1.5 Mb/s |
+|---|---|---|---|---|
+| Dev PC, Windows 11, i7-12700K, 720p15 file | 0.3 % of one core | 2.4 % | 7.3 % | 9.5 % |
+| Dev PC, Windows 11, 1080p15 file | 0.2 % | 3.8 % | 8.8 % | 13.7 % |
+| WSL2 on the same CPU, 720p15 mock RTSP camera through the hub | 1.3 % | 2.8 % | 7.5 % (10.9 % measured inside the live hub path) | 8.1 % |
+
+Through the hub on the WSL box: go2rtc itself 0.6 % of a core for a passthrough viewer, 0.8 % while it feeds a transcode. Checked live with two mock cameras and a cap of 1: viewer 1 on `mockcam1_low` gets the transcoder (one ffmpeg child), viewer 2 on `mockcam2_low` is served `mockcam2` at full quality (2 MB in 8 s) with the log line `transcode cap reached (1); mockcam2_low is served as mockcam2`, `active_transcodes` 1 / `downgraded` 1; when the viewers leave there are 0 ffmpeg children and 0 active slots, and the next viewer of the other printer gets a transcoder. A still viewer's ffmpeg is gone when the client closes.
+
+**arm64 (native, GitHub's hosted `ubuntu-24.04-arm` runner, 4 vCPU Neoverse):** the CI smoke test passed there (hub up, instance started by the hub, slice, thumbnail, go2rtc, LGPL ffmpeg with libopenh264, kill and respawn; idle 2 % CPU, 1.0 GiB). No transcode cost was measured on arm64: QEMU emulation was not available on this Docker Desktop at the time and its numbers would not be representative of a Pi anyway, so none are reported.
+
+**What a real Pi 5 (8 GB, NVMe, active cooler) test should check:** `docker run` the arm64 image and read `hub/info` `camera` (expect `encoder: libopenh264`, `quality: [low]`, `max_transcodes: 1`, no probe for v4l2m2m); one 1080p X1/H2 camera and one U1: CPU of the Low transcode (the go2rtc `ffmpeg` child) as a percentage of one of the four cores at 854x480/10 fps, over several minutes and with the SoC temperature; the same for passthrough (go2rtc) and for the still endpoint; a second viewer on another printer while the first holds the slot (expect passthrough, not an error) and the slot freeing within seconds of leaving; a hub with the slicer instance idle plus one transcode: total RSS and whether the phone page stays responsive; on a Pi 4 the `/dev/video11` probe and whether `h264_v4l2m2m` really encodes through go2rtc.
+
 ### Verification
 
-* Windows (shared script, Ninja, JOBS=8): `slic3rutils_tests` 671 cases / 8603 assertions pass (including the 23 new cases for service mode, supervisor, public host, tool lookup, encoder detection); `libslic3r_tests` 1570 of 1573 pass, 3 failed as expected (as before), including the 4 seed cases.
-* Linux: CI AppImage (`build_all.yml` run 37093112479, new `only=appimage` input), WSL "Ubuntu" under Xvfb with Mesa llvmpipe, a data dir with no config, hub on 13645 (13640-13644 held):
-  * no modal dialogs; the log shows the seed, the TLS answer, the instance started by the hub (about 6 s after the hub is up), OpenGL ready after one retry;
-  * a slice of `frog_legs.obj` through the hub, with thumbnail (20 KB PNG) and layer preview: no crash;
-  * `kill -9` of the instance: the hub logs it, starts another within 2 s, the new one registers 6 s later, the mock U1 row is served again, `/api/printers` and the dead-pid route answer from the hub;
-  * with `EDGESLICER_SERVICE_INSTANCES=0` and no instance the mock U1 row went stale and was dropped at 180 s;
-  * go2rtc running (`/hub/info` go2rtc_port, process is a child of the hub), the stand-in tailscale gave `state: ready`.
-* RAM (RSS): hub 162 MB, instance 548 MB idle and 656 MB after the slice, go2rtc 20 MB, Xvfb 81 MB: about 0.8 GB idle, 0.9 GB after the slice.
-* Docker Desktop (linux/amd64, image 2.02 GB, `docker/hub`): default image `-p 13651:13640 -e EDGESLICER_HUB_PUBLIC_HOST=192.168.50.7:13651` from Windows: `/summary` advertised `http://192.168.50.7:13651/r/<token>/`, slice and thumbnail through the published port, instance killed and respawned, `docker restart` came back healthy with the same token, `docker stats` idle 0.3 % CPU and 1.09 GiB after a slice. A second image built with `GEN_LOCALE=0 WITH_FFMPEG=1` (no `en_US` locale, Ubuntu ffmpeg): the language fallback was logged instead of the box, ffmpeg's libx264 was detected and the quality variants were on.
-* Mocks only (`tests/phone/mock_u1_controls.py`); no real printer was contacted.
+* Windows (shared script, Ninja, JOBS=8): `slic3rutils_tests` all pass (the new cases cover service mode, supervisor, public host, tool lookup, encoder detection and, for the camera policy, `hub_media_tests.cpp`: candidate order per host, mocked probe, caps, the gate, query rewriting, ports and RTSP exposure); `libslic3r_tests` 1570 of 1573 pass, 3 failed as expected (as before), including the 4 seed cases.
+* CI (`build_all.yml` with the new `only` input, public repo): AppImage + hub image amd64 and arm64, Flatpak x86_64 and aarch64 (both built; go2rtc inside is the pinned sha256 on both arches). Every Linux run builds `docker/hub` from its own AppImage and runs `docker/hub/smoke.sh` on it.
+* Linux and Docker verification as before (WSL "Ubuntu" under Xvfb with no seeded config; Docker Desktop with `-p` and `EDGESLICER_HUB_PUBLIC_HOST`); mocks only, no real printer or camera was contacted.
 
 ### Still missing
 
-* arm64 image and AppImage (the arm64 go2rtc is pinned and in the Flatpak; no arm64 AppImage exists), UltraNet on aarch64, UltraNet against a real printer on Linux.
+* The hardware encoders (QSV, VAAPI, V4L2 M2M) on real hardware; transcode cost on a real Pi; UltraNet against a real printer on Linux (it builds and passes its loadtest on aarch64).
 * A watchdog for a hung (alive but unresponsive) instance; go2rtc is reaped and logged but not restarted if it exits.
 * A setup flow for the real printers (the seeded U1 is a placeholder; Bambu LAN add has no hub route yet) and a one-time pairing page.
-* Gtk-CRITICAL `gtk_widget_set_size_request` lines (a start-up burst, harmless) and `filament_cooling_before_tower` config noise in the log.
-* The Flatpak change (go2rtc sources and install) was not built here; the first CI run with `only=flatpak` should be the check.
+* The phone page does not use the still endpoint yet (it is advertised in `features`); Gtk-CRITICAL `gtk_widget_set_size_request` lines at start-up (harmless) and `filament_cooling_before_tower` config noise in the log.
 
 ## Sources
 

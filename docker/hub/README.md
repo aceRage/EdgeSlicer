@@ -82,7 +82,7 @@ us; the log (`RemoteHub: encoder probe ...`) shows what each probe did, and a fa
   reached a further viewer is handed the passthrough stream (full quality), never an error. A slot is held while a viewer's
   stream is open and freed when the last viewer leaves, so switching from printer A to printer B frees A's slot.
 * **Still-image fallback** for H.264 cameras (X1, H2, U1): `GET /r/<token>/still?id=<camera id>&fps=1&w=480` is MJPEG from
-  keyframes only (ffmpeg `-skip_frame nokey`, 1-5 fps, 160-1280 px wide), read from the relay's loopback RTSP, so there is
+  keyframes only (ffmpeg `-skip_frame nokey`, 160-1280 px wide; `fps` 1-5 is a ceiling, a picture is never repeated; needs ffmpeg 5.1 or newer, the bundled one is 8.1), read from the relay's loopback RTSP, so there is
   still one connection to the printer. `<img src=...>` plays it. At most `EDGESLICER_MAX_STILLS` at once (4, 2 on ARM); more get a
   503. The P1/A1 keep their own JPEG relay (`/bambu?id=&fps=`).
 * **go2rtc** (v1.9.14, MIT, AlexxIT) is bundled in the AppImage and the Flatpak, amd64 and arm64, like `go2rtc.exe` on
