@@ -1,0 +1,38 @@
+FFmpeg (LGPL build) bundled with EdgeSlicer on Linux
+====================================================
+
+The file `ffmpeg` in this folder is an unmodified, statically linked build of FFmpeg @DESC@ for @ARCH@,
+made by the BtbN/FFmpeg-Builds project and redistributed here as a separate program. EdgeSlicer's phone hub
+runs it as a child process (through go2rtc) to re-encode camera streams for the phone's Quality steps; it is
+not linked into EdgeSlicer.
+
+Licence: GNU Lesser General Public License, version 3 (the text is in FFMPEG-LICENSE.txt in this folder).
+The build is configured with --enable-version3 and WITHOUT --enable-gpl or --enable-nonfree, and with
+--disable-libx264 --disable-libx265, so it contains no GPL components. Its software H.264 encoder is
+libopenh264 (Cisco OpenH264, BSD-2-Clause). It also contains other free libraries that BtbN's build
+statically links (dav1d, libvpx, opus, freetype, zlib, OpenSSL and others); their licences are those of
+the respective projects, listed with the build scripts below.
+
+Where it came from
+  Release:   https://github.com/BtbN/FFmpeg-Builds/releases/tag/@TAG@
+  Archive:   @ASSET@
+  SHA-256:   @SHA256@
+  Build recipe (every library, version and patch used): https://github.com/BtbN/FFmpeg-Builds (scripts.d/ and
+             patches/ at the commit this release was built from, shown on the release page)
+
+Corresponding source
+  FFmpeg:    https://git.ffmpeg.org/ffmpeg.git, commit @COMMIT@ (release branch 8.1, `git describe`: @DESC@).
+             Browse: https://git.ffmpeg.org/gitweb/ffmpeg.git/commit/@COMMIT@
+  The other libraries: from their own projects, at the versions named in the BtbN scripts above.
+
+Written offer
+  If you received this EdgeSlicer package and want the source code of the FFmpeg build in it, or help
+  replacing it with a build of your own (the hub uses whatever executable is at this path), contact the
+  EdgeSlicer maintainers through https://github.com/aceRage/EdgeSlicer/issues and ask for the FFmpeg source;
+  it will be sent for three years from the date of the release you received, at no charge beyond the cost of
+  the medium if one is needed. You may also replace the `ffmpeg` file with any other build: EdgeSlicer
+  only needs an executable named ffmpeg with the libopenh264 encoder here, and falls back to a system ffmpeg
+  or to no re-encoding when it is missing.
+
+FFmpeg is a trademark of Fabrice Bellard, originator of the FFmpeg project. This notice does not imply
+endorsement by the FFmpeg project.

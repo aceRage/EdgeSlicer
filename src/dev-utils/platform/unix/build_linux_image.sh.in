@@ -169,6 +169,22 @@ echo -n "[9/9] Generating Linux app..."
     else
         bash "$(cd .. && pwd)/scripts/fetch_go2rtc_linux.sh" "$APPDIR/resources/tools/go2rtc"
     fi
+    # ffmpeg for the camera Quality steps: the pinned BtbN LGPL-3.0 build with libopenh264 (the owner's
+    # rule: LGPL where an LGPL build exists), with its licence and source offer beside it
+    # (scripts/fetch_ffmpeg_linux.sh). A sha256 mismatch fails the build. A failed download (exit 4,
+    # BtbN prunes old tags) only warns: the package then has no ffmpeg and the hub falls back to a
+    # system one or to no re-encoding. EDGESLICER_SKIP_FFMPEG=1 skips it.
+    if [ "${EDGESLICER_SKIP_FFMPEG:-0}" = "1" ]; then
+        echo "Skipping ffmpeg (EDGESLICER_SKIP_FFMPEG=1) - the package has no camera Quality steps"
+    else
+        rc=0
+        bash "$(cd .. && pwd)/scripts/fetch_ffmpeg_linux.sh" "$APPDIR/resources/tools/go2rtc" || rc=$?
+        if [ "$rc" = "4" ]; then
+            echo "WARNING: could not download the pinned ffmpeg; this package has no bundled ffmpeg (update scripts/fetch_ffmpeg_linux.sh)"
+        elif [ "$rc" != "0" ]; then
+            exit "$rc"
+        fi
+    fi
     # The Windows helpers in the same folder are 19 MB of dead weight here.
     rm -f "$APPDIR/resources/tools/go2rtc/"*.exe
 

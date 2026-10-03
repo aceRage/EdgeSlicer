@@ -4,6 +4,7 @@
 # tests/research_always_on_hub.md ("9. Spike results", "10. Linux headless blockers").
 #
 #   # put an AppImage built from this branch (it carries go2rtc) next to this file, then (linux/amd64):
+#   # (the AppImage carries go2rtc and an LGPL ffmpeg with libopenh264; the arm64 image is built the same way from the arm64 AppImage)
 #   docker build -t edgeslicer-hub docker/hub --build-arg APPIMAGE=EdgeSlicer_Linux_AppImage_Ubuntu2404_<ver>.AppImage
 #   docker run -d --name edgeslicer-hub --network host -v edgeslicer-hub-data:/data edgeslicer-hub
 #
@@ -14,10 +15,6 @@
 FROM ubuntu:24.04
 
 ARG APPIMAGE=EdgeSlicer_Linux_AppImage_Ubuntu2404.AppImage
-# 1 = install the distribution's ffmpeg (~100 MB more): the camera "Quality" steps (re-encoding for a phone on
-# a slow link) need one. Without it the hub relays cameras as they come (go2rtc is in the AppImage regardless).
-# The Ubuntu ffmpeg is a GPL build; it is installed from the distribution, not bundled by EdgeSlicer.
-ARG WITH_FFMPEG=0
 # 0 = do not generate en_US.UTF-8 (a minimal image): service mode then logs the missing locale and carries on in
 # English instead of stopping on the "Switching language failed" box. Used to test exactly that.
 ARG GEN_LOCALE=1
@@ -34,7 +31,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl locales tini procps xvfb xauth \
         libgl1-mesa-dri libglx-mesa0 libegl1 libopengl0 libglu1-mesa libgtk-3-0t64 libwebkit2gtk-4.1-0 libsecret-1-0 \
         fonts-dejavu-core \
-    && if [ "$WITH_FFMPEG" = "1" ]; then apt-get install -y --no-install-recommends ffmpeg; fi \
     && if [ "$GEN_LOCALE" = "1" ]; then sed -i 's/^# *\(en_US.UTF-8\)/\1/' /etc/locale.gen && locale-gen en_US.UTF-8; fi \
     && rm -rf /var/lib/apt/lists/*
 
@@ -42,8 +38,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY ${APPIMAGE} /tmp/app.AppImage
 RUN chmod +x /tmp/app.AppImage && cd /opt && /tmp/app.AppImage --appimage-extract >/dev/null \
     && mv squashfs-root edgeslicer && chmod -R a+rX edgeslicer && rm /tmp/app.AppImage \
-    && (test -x /opt/edgeslicer/resources/tools/go2rtc/go2rtc \
-        || (echo "this AppImage carries no resources/tools/go2rtc/go2rtc - use one built from the feat/linux-headless-hub branch or later" >&2; exit 1))
+    && (test -x /opt/edgeslicer/resources/tools/go2rtc/go2rtc && test -x /opt/edgeslicer/resources/tools/go2rtc/ffmpeg \
+        || (echo "this AppImage carries no resources/tools/go2rtc/go2rtc and ffmpeg - use one built from the feat/linux-headless-hub branch or later" >&2; exit 1))
 
 COPY entrypoint.sh /opt/hub/
 RUN chmod +x /opt/hub/entrypoint.sh && useradd -m -u 1001 hub && mkdir /data && chown hub /data

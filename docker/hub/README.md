@@ -15,7 +15,7 @@ EdgeSlicer --hub --hub-service --hub-phone
 
 ## Build and run
 
-The image is built from an AppImage made from this branch or later (it carries `go2rtc`; the Dockerfile
+The image is built from an AppImage made from this branch or later (it carries `go2rtc` and ffmpeg; the Dockerfile
 refuses one that does not). CI builds one per push (`build_all.yml`, artifact `EdgeSlicer_Linux_ubuntu_2404_*`).
 
 ```
@@ -34,6 +34,13 @@ docker run -d --name edgeslicer-hub -p 13640:13640 -e EDGESLICER_HUB_PUBLIC_HOST
 
 The phone link is `http://<host>:<port>/r/<token>/`; the token is in the volume's `hub/hub.json` and in the log.
 It survives restarts and upgrades as long as the `/data` volume does (the hub identity and push registrations live there too).
+
+## Images and CI
+
+`build_all.yml` (manual run, input `only`): `appimage` builds the x86_64 AppImage and this image, `arm64` the arm64 AppImage and
+an arm64 image on GitHub's hosted arm runner (native, no emulation). Each image is started in CI by `docker/hub/smoke.sh`
+(instance starts, slice, thumbnail, go2rtc and ffmpeg present, kill and respawn) and kept as a workflow artifact for three
+days; nothing is pushed to a registry. Run the same check locally with `docker/hub/smoke.sh <image> tests/data/frog_legs.obj`.
 
 ## Service mode
 
@@ -54,10 +61,14 @@ It survives restarts and upgrades as long as the `/data` volume does (the hub id
 * **go2rtc** (v1.9.14, MIT, AlexxIT) is bundled in the AppImage and the Flatpak, amd64 and arm64, like `go2rtc.exe` on
   Windows. Pinned with sha256 in `scripts/fetch_go2rtc_linux.sh` (also in the Flatpak manifest). It carries
   X1/H2 RTSPS cameras and the P1/A1 relay needs none.
-* **ffmpeg** is *not* bundled on Linux (the common builds are GPL). The camera "Quality" steps (Medium/Low re-encode)
-  use the system's `ffmpeg` when it is on `PATH` and has an H.264 encoder (libx264 or libopenh264); otherwise those
-  steps are off and the cameras stream as they come. In the image: `--build-arg WITH_FFMPEG=1` installs Ubuntu's
-  `ffmpeg` (about 100 MB, GPL build, from the distribution). The Flatpak has none.
+* **ffmpeg** (LGPL-3.0, FFmpeg n8.1.3 static build with libopenh264, from BtbN/FFmpeg-Builds) is bundled next to go2rtc,
+  amd64 and arm64, in the AppImage, the Flatpak and the image: the camera "Quality" steps (Medium/Low re-encode) work
+  everywhere. It is the Linux twin of the LGPL `ffmpeg.exe` the Windows package ships (`--enable-version3`, no
+  `--enable-gpl`, x264/x265 disabled). Pinned by sha256 in `scripts/fetch_ffmpeg_linux.sh` (and the Flatpak manifest);
+  its licence text, source offer and provenance ship beside it (`FFMPEG-LICENSE.txt`, `FFMPEG-NOTICE-LINUX.txt`).
+  BtbN removes old dated release tags after a couple of weeks, so the pinned URL needs bumping from time to time
+  (the script says how; a failed download only warns, a hash mismatch fails the build). A system `ffmpeg` on `PATH`
+  is still used when the bundled one is absent, with its encoder (libx264 or libopenh264) detected.
 
 ## Tailscale
 

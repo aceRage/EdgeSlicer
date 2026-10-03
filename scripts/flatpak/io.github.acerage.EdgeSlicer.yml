@@ -373,6 +373,13 @@ modules:
         rm -f /app/share/EdgeSlicer/tools/go2rtc/go2rtc.exe
         install -Dm755 go2rtc /app/share/EdgeSlicer/tools/go2rtc/go2rtc
 
+      - | # ffmpeg (LGPL, libopenh264) for the camera Quality steps, with its licence and source offer
+        install -Dm755 ffmpeg-linux/bin/ffmpeg /app/share/EdgeSlicer/tools/go2rtc/ffmpeg
+        install -Dm644 ffmpeg-linux/LICENSE.txt /app/share/EdgeSlicer/tools/go2rtc/FFMPEG-LICENSE.txt
+        install -Dm644 scripts/ffmpeg_linux_notice.txt.in /app/share/EdgeSlicer/tools/go2rtc/FFMPEG-NOTICE-LINUX.txt.in
+        sed -i -e "s|@TAG@|autobuild-2026-10-01-13-06|g" -e "s|@DESC@|n8.1.3-14-g330caae0c1|g" -e "s|@COMMIT@|330caae0c1|g"           -e "s|@ARCH@|$(uname -m)|g" -e "s|@ASSET@|ffmpeg-n8.1.3-14-g330caae0c1-linux-lgpl-8.1.tar.xz|g" -e "s|@SHA256@|see scripts/fetch_ffmpeg_linux.sh|g"           /app/share/EdgeSlicer/tools/go2rtc/FFMPEG-NOTICE-LINUX.txt.in
+        mv /app/share/EdgeSlicer/tools/go2rtc/FFMPEG-NOTICE-LINUX.txt.in /app/share/EdgeSlicer/tools/go2rtc/FFMPEG-NOTICE-LINUX.txt
+
     sources:
       # -
       # Section bellow fetches all Snapmaker_Orca dependencies before the build process and stores them in external-packages/*/* .
@@ -399,8 +406,8 @@ modules:
 
       # go2rtc v1.9.14 (AlexxIT, MIT; the licence text ships in resources/tools/go2rtc/go2rtc-LICENSE.txt):
       # the official static Linux binary, the same release as the Windows go2rtc.exe. Pinned by sha256,
-      # also in scripts/fetch_go2rtc_linux.sh which the AppImage build uses. The Flatpak has no ffmpeg
-      # (the runtime does not carry one), so the hub's camera Quality variants stay off here.
+      # also in scripts/fetch_go2rtc_linux.sh which the AppImage build uses. The ffmpeg below is
+      # the Quality-step re-encoder.
       - type: file
         only-arches: [x86_64]
         url: https://github.com/AlexxIT/go2rtc/releases/download/v1.9.14/go2rtc_linux_amd64
@@ -411,3 +418,19 @@ modules:
         url: https://github.com/AlexxIT/go2rtc/releases/download/v1.9.14/go2rtc_linux_arm64
         sha256: 359fabade8a7a51e81a55fe6df6b0ef81764a5e1d63179577534eaaa71904b50
         dest-filename: go2rtc
+
+      # ffmpeg n8.1.3 LGPL-3.0 static build with libopenh264 (BtbN/FFmpeg-Builds), the same archives
+      # scripts/fetch_ffmpeg_linux.sh pins. Extracted whole (the archive also has ffplay/ffprobe, which
+      # post-install does not copy). BtbN prunes old dated tags: when the URL 404s, bump both here and there.
+      - type: archive
+        only-arches: [x86_64]
+        url: https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-10-01-13-06/ffmpeg-n8.1.3-14-g330caae0c1-linux64-lgpl-8.1.tar.xz
+        sha256: 3c2c4d6066432b2eab54be830d3ce1f5b68a3f34ecaa6d9f2d0230a49e778560
+        strip-components: 1
+        dest: ffmpeg-linux
+      - type: archive
+        only-arches: [aarch64]
+        url: https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-10-01-13-06/ffmpeg-n8.1.3-14-g330caae0c1-linuxarm64-lgpl-8.1.tar.xz
+        sha256: d407cc9405caf75d67b3a10c9793f1db38d55705d09ac47d279d36d2823cb73d
+        strip-components: 1
+        dest: ffmpeg-linux

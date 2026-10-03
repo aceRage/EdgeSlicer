@@ -11,4 +11,5 @@ libraries: https://github.com/BtbN/FFmpeg-Builds and https://git.ffmpeg.org/ffmp
 The Linux packages (AppImage, Flatpak, the docker/hub image) carry the same go2rtc version as an unmodified
 static binary (go2rtc_linux_amd64 / go2rtc_linux_arm64 from the v1.9.14 release, sha256 pinned in
 scripts/fetch_go2rtc_linux.sh) next to this note, named go2rtc. The MIT licence text is in go2rtc-LICENSE.txt.
-No ffmpeg is bundled on Linux: the hub uses the system's ffmpeg when there is one (see docker/hub/README.md).
+The Linux packages also carry an unmodified static LGPL-3.0 ffmpeg (named ffmpeg, from BtbN/FFmpeg-Builds, sha256 pinned in
+scripts/fetch_ffmpeg_linux.sh) with FFMPEG-LICENSE.txt and FFMPEG-NOTICE-LINUX.txt (provenance, source offer) beside it.
