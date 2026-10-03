@@ -187,6 +187,40 @@ Read from `aceRage/ultranet` `.github/workflows/posix.yml` / `CMakeLists.txt` / 
 
 WSL Ubuntu scratch (`~/es_spike` incl. the 187 MB AppImage and 545 MB extracted tree, `~/es_hub_data`, `~/es_logs`), the Windows scratch `%TEMP%\spike`, and the Docker container, image and volume named `edgeslicer-hub-spike*`. Apt packages stay installed in the Ubuntu distro (xvfb, mesa-utils, libgtk/webkit, gdb, strace, x11-utils, imagemagick, x11-apps). The `PJARCZAK-BAMBU` distro and the Windows `%APPDATA%\EdgeSlicer` were not touched.
 
+## 10. Linux headless blockers: fixes and verification (2026-10-03)
+
+Branch `feat/linux-headless-hub` (on top of the spike). Service mode is `--hub-service` on the hub or `EDGESLICER_SERVICE=1`; nothing changes for a desktop start. Recipe and flags: `docker/hub/README.md`.
+
+| Spike blocker | Fix |
+|---|---|
+| 1. Hidden mode crashes on Linux/GTK | `ImGui::CalcTextSize` (deps_src/imgui) no longer dereferences a missing font or an empty atlas (rough size instead; notifications re-measure on their first real frame), so a hidden or not-yet-realised canvas cannot crash on any platform. On Linux a service-mode instance shows its window on the virtual display (GTK needs a realised canvas for GL) while staying "hidden" for the hub, so every hidden-instance rule (auto-answered dialogs) still applies; `RemoteAccess::raise_attention` does not un-hide it in service mode. The warm-up is retried from the event loop until the window is realised (it is, after one retry). Windows keeps its true hidden mode. |
+| 2. First start needs a human | `AppConfig::seed_service_defaults()` writes a minimal `EdgeSlicer.conf` when none exists (first-run answered, Snapmaker U1 0.4 as the one printer); in service mode no wizard, the TLS-store question is answered yes and remembered, a missing locale is logged and the app continues in English, the Bambu setup notice is not shown. |
+| 3. No supervisor | A service-mode hub starts its instance, notices a death (`HubSupervisor.hpp`, unit-tested), respawns with backoff (2 s doubling to 2 min, reset by a minute of health), drops printer rows nobody refreshes for 3 minutes, answers `GET /api/printers` itself and answers a dead `/i/<pid>/api/printers` from its own rows. `/hub/info` shows `service {respawns, failures, next_spawn_in_s}`. |
+| 4. Camera relay | `go2rtc` path cross-platform; `start_go2rtc` no longer Windows-only (tied to the hub with `PR_SET_PDEATHSIG`, reaped in the loop). Official go2rtc v1.9.14 (MIT) amd64/arm64 bundled in the AppImage (`scripts/fetch_go2rtc_linux.sh`, sha256 pinned and checked) and the Flatpak (sources with sha256). ffmpeg: not bundled on Linux; a system ffmpeg on PATH is used, its H.264 encoder (libx264 or libopenh264) detected from `ffmpeg -encoders`, no variants if it has none. |
+| 5. Tailscale on POSIX | `run_capture` implemented with `posix_spawnp`, a pipe and a deadline; the hub's status/serve controls work when the `tailscale` CLI exists (checked against a stand-in CLI), download link is the Linux one. |
+| 6. LAN URL in containers | `EDGESLICER_HUB_PUBLIC_HOST` / `--hub-public-host`: `host`, `host:port`, `[v6]:port` or a URL; used by `/hub/info`, `/pair`, `/summary`, the tray and push links. The entrypoint still clears stale `.X99-lock` and `hub.json`. |
+
+### Verification
+
+* Windows (shared script, Ninja, JOBS=8): `slic3rutils_tests` 671 cases / 8603 assertions pass (including the 23 new cases for service mode, supervisor, public host, tool lookup, encoder detection); `libslic3r_tests` 1570 of 1573 pass, 3 failed as expected (as before), including the 4 seed cases.
+* Linux: CI AppImage (`build_all.yml` run 37093112479, new `only=appimage` input), WSL "Ubuntu" under Xvfb with Mesa llvmpipe, a data dir with no config, hub on 13645 (13640-13644 held):
+  * no modal dialogs; the log shows the seed, the TLS answer, the instance started by the hub (about 6 s after the hub is up), OpenGL ready after one retry;
+  * a slice of `frog_legs.obj` through the hub, with thumbnail (20 KB PNG) and layer preview: no crash;
+  * `kill -9` of the instance: the hub logs it, starts another within 2 s, the new one registers 6 s later, the mock U1 row is served again, `/api/printers` and the dead-pid route answer from the hub;
+  * with `EDGESLICER_SERVICE_INSTANCES=0` and no instance the mock U1 row went stale and was dropped at 180 s;
+  * go2rtc running (`/hub/info` go2rtc_port, process is a child of the hub), the stand-in tailscale gave `state: ready`.
+* RAM (RSS): hub 162 MB, instance 548 MB idle and 656 MB after the slice, go2rtc 20 MB, Xvfb 81 MB: about 0.8 GB idle, 0.9 GB after the slice.
+* Docker Desktop (linux/amd64, image 2.02 GB, `docker/hub`): default image `-p 13651:13640 -e EDGESLICER_HUB_PUBLIC_HOST=192.168.50.7:13651` from Windows: `/summary` advertised `http://192.168.50.7:13651/r/<token>/`, slice and thumbnail through the published port, instance killed and respawned, `docker restart` came back healthy with the same token, `docker stats` idle 0.3 % CPU and 1.09 GiB after a slice. A second image built with `GEN_LOCALE=0 WITH_FFMPEG=1` (no `en_US` locale, Ubuntu ffmpeg): the language fallback was logged instead of the box, ffmpeg's libx264 was detected and the quality variants were on.
+* Mocks only (`tests/phone/mock_u1_controls.py`); no real printer was contacted.
+
+### Still missing
+
+* arm64 image and AppImage (the arm64 go2rtc is pinned and in the Flatpak; no arm64 AppImage exists), UltraNet on aarch64, UltraNet against a real printer on Linux.
+* A watchdog for a hung (alive but unresponsive) instance; go2rtc is reaped and logged but not restarted if it exits.
+* A setup flow for the real printers (the seeded U1 is a placeholder; Bambu LAN add has no hub route yet) and a one-time pairing page.
+* Gtk-CRITICAL `gtk_widget_set_size_request` lines (a start-up burst, harmless) and `filament_cooling_before_tower` config noise in the log.
+* The Flatpak change (go2rtc sources and install) was not built here; the first CI run with `only=flatpak` should be the check.
+
 ## Sources
 
 - Repo: `RemoteHub.hpp/.cpp`, `RemoteAccess.hpp/.cpp`, `DeviceManager.cpp`, `docs/superpowers/specs/2026-09-01-headless-slicer-roadmap.md`, `2026-09-02-hidden-service-mode.md`, `tests/plan_bambu_macos_linux.md`, `scripts/flatpak/README.md`, `build_all.yml`/`build_orca.yml`, CI run 36858562565.
