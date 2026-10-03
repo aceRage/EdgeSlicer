@@ -369,6 +369,10 @@ modules:
         install -Dm755 entrypoint /app/bin
         install -Dm755 umount /app/bin
 
+      - | # go2rtc: the phone hub's camera relay (resources/tools/go2rtc/go2rtc.exe is the Windows one)
+        rm -f /app/share/EdgeSlicer/tools/go2rtc/go2rtc.exe
+        install -Dm755 go2rtc /app/share/EdgeSlicer/tools/go2rtc/go2rtc
+
     sources:
       # -
       # Section bellow fetches all Snapmaker_Orca dependencies before the build process and stores them in external-packages/*/* .
@@ -392,3 +396,18 @@ modules:
       # umount wrapper used to redirect umount calls to udisk2
       - type: file
         path: umount
+
+      # go2rtc v1.9.14 (AlexxIT, MIT; the licence text ships in resources/tools/go2rtc/go2rtc-LICENSE.txt):
+      # the official static Linux binary, the same release as the Windows go2rtc.exe. Pinned by sha256,
+      # also in scripts/fetch_go2rtc_linux.sh which the AppImage build uses. The Flatpak has no ffmpeg
+      # (the runtime does not carry one), so the hub's camera Quality variants stay off here.
+      - type: file
+        only-arches: [x86_64]
+        url: https://github.com/AlexxIT/go2rtc/releases/download/v1.9.14/go2rtc_linux_amd64
+        sha256: 32d616af226bd731678ffde328b94cfb94e30339bfefc469cfb76323144615a6
+        dest-filename: go2rtc
+      - type: file
+        only-arches: [aarch64]
+        url: https://github.com/AlexxIT/go2rtc/releases/download/v1.9.14/go2rtc_linux_arm64
+        sha256: 359fabade8a7a51e81a55fe6df6b0ef81764a5e1d63179577534eaaa71904b50
+        dest-filename: go2rtc

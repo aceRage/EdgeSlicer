@@ -4552,6 +4552,8 @@ void ImGui::Render()
 // CalcTextSize("") should return ImVec2(0.0f, g.FontSize)
 ImVec2 ImGui::CalcTextSize(const char* text, const char* text_end, bool hide_text_after_double_hash, float wrap_width)
 {
+    if (GImGui == NULL) // no context yet (EdgeSlicer: see the font guard below)
+        return ImVec2(0.0f, 0.0f);
     ImGuiContext& g = *GImGui;
 
     const char* text_display_end;
@@ -4564,6 +4566,17 @@ ImVec2 ImGui::CalcTextSize(const char* text, const char* text_end, bool hide_tex
     const float font_size = g.FontSize;
     if (text == text_display_end)
         return ImVec2(0.0f, font_size);
+    // EdgeSlicer: a hidden / service-mode instance can measure text (notifications, the slicing
+    // progress bar) before any frame has built the font atlas - nothing has been rendered, so
+    // NewFrame() never ran - and then g.Font is null or has no glyphs, and CalcTextSizeA
+    // dereferences it (SIGSEGV on the first slice). Answer with a rough size instead of crashing;
+    // a notification re-measures itself on its first real frame (its m_line_height no longer matches).
+    if (font == NULL || font->Glyphs.Size == 0 || font->FallbackGlyph == NULL)
+    {
+        const float fallback_size = font_size > 0.0f ? font_size : 16.0f;
+        const char* fallback_end = text_display_end ? text_display_end : text + strlen(text);
+        return ImVec2(IM_FLOOR(0.5f * fallback_size * (float)(fallback_end - text) + 0.99999f), fallback_size);
+    }
     ImVec2 text_size = font->CalcTextSizeA(font_size, FLT_MAX, wrap_width, text, text_display_end, NULL);
 
     // Round

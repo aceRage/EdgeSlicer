@@ -160,6 +160,16 @@ echo -n "[9/9] Generating Linux app..."
 
     cp -Rf ../resources "$APPDIR/resources"
 
+    # The phone hub's camera relay: the official go2rtc binary for this architecture, pinned and
+    # checked by sha256 (scripts/fetch_go2rtc_linux.sh), the way the Windows package carries
+    # go2rtc.exe. EDGESLICER_SKIP_GO2RTC=1 builds without it (offline); the hub then runs with no
+    # camera relay. No ffmpeg is bundled here: Linux uses the system's (docker/hub/README.md).
+    if [ "${EDGESLICER_SKIP_GO2RTC:-0}" = "1" ]; then
+        echo "Skipping go2rtc (EDGESLICER_SKIP_GO2RTC=1) - the package has no camera relay"
+    else
+        bash "$(cd .. && pwd)/scripts/fetch_go2rtc_linux.sh" "$APPDIR/resources/tools/go2rtc"
+    fi
+
     ORIGINAL_BINARY_LOCATION=""
     if [ -f "src/${CONFIG}/@SLIC3R_APP_CMD@" ]; then
         ORIGINAL_BINARY_LOCATION="$(realpath "src/${CONFIG}/@SLIC3R_APP_CMD@")"

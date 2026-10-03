@@ -21,6 +21,11 @@ on:
         description: 'Sentry environment override (blank = release/ci by ref)'
         type: string
         default: ''
+      only:
+        description: 'Limit the run: all (default), appimage (Linux AppImage only, about an hour) or flatpak (both Flatpaks only)'
+        type: choice
+        options: [all, appimage, flatpak]
+        default: all
 
   workflow_call:
     inputs:
@@ -35,6 +40,10 @@ on:
         description: 'Sentry environment compiled into the app'
         type: string
         default: ''
+      only:
+        description: 'all (default), appimage or flatpak; the nightly builds everything'
+        type: string
+        default: all
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -44,16 +53,13 @@ concurrency:
 jobs:
   build_all:
     name: Build All
+    # `only` exists on manual runs; the nightly's workflow_call leaves it unset and builds everything.
+    if: ${{ inputs.only != 'flatpak' }}
     strategy:
       fail-fast: false
       matrix:
-        include:
-          # Deprecate 20.04appimage
-          # - os: ubuntu-20.04
-          - os: ubuntu-24.04
-          - os: windows-2022
-          - os: macos-14
-            arch: arm64
+        # Deprecate 20.04appimage: - os: ubuntu-20.04
+        include: ${{ fromJSON(inputs.only == 'appimage' && '[{"os":"ubuntu-24.04"}]' || '[{"os":"ubuntu-24.04"},{"os":"windows-2022"},{"os":"macos-14","arch":"arm64"}]') }}
     uses: ./.github/workflows/build_check_cache.yml
     with:
       os: ${{ matrix.os }}
@@ -64,6 +70,7 @@ jobs:
     secrets: inherit
   flatpak:
     name: "Flatpak"
+    if: ${{ inputs.only != 'appimage' }}
     # A Flatpak failure must never cost us the mac/Linux/Windows artifacts. The job is
     # already independent of build_all (no `needs:`), so this only stops a red Flatpak
     # from marking the whole workflow run failed.

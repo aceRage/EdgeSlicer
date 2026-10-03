@@ -14,6 +14,7 @@
 #include "libslic3r/AppConfig.hpp"
 #include "libslic3r/PresetBundle.hpp"
 #include "slic3r/Utils/BambuSetupNotice.hpp"
+#include "slic3r/Utils/ServiceMode.hpp"
 
 #include <boost/log/trivial.hpp>
 
@@ -56,8 +57,9 @@ BambuSetup::ShowInputs gather_inputs(BambuSetup::Trigger trigger)
     in.shown_this_session = g_shown_this_session;
     // No modal popup while the app is still starting: the main frame must exist, be on screen and
     // the startup must be over (the startup wizard's own follow-up work runs first).
+    // Service mode: the window is shown on a virtual display nobody looks at, so no popup there.
     in.main_window_ready = app.initialized() && app.mainframe != nullptr && app.mainframe->IsShown() && !app.mainframe->IsIconized() &&
-                           !other_modal_open();
+                           !other_modal_open() && !Slic3r::ServiceMode::enabled();
     if (trigger == BambuSetup::Trigger::DeviceTabOpened) {
         if (DeviceManager* dev = app.getDeviceManager())
             in.devices_found = dev->get_my_machine_list().size() + dev->get_local_machine_list().size();

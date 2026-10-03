@@ -129,6 +129,7 @@
 #include "RemovableDriveManager.hpp"
 #include "InstanceCheck.hpp"
 #include "slic3r/Utils/InstanceRouting.hpp"
+#include "slic3r/Utils/ServiceMode.hpp"
 #include "NotificationManager.hpp"
 #include "UnsavedChangesDialog.hpp"
 #include "SavePresetDialog.hpp"
@@ -3015,6 +3016,18 @@ void GUI_App::init_app_config()
         //app_config = new AppConfig(is_editor() ? AppConfig::EAppMode::Editor : AppConfig::EAppMode::GCodeViewer);
 
     m_config_corrupted = false;
+    // Service mode (an unattended hub): a data dir that has never run is seeded with the answers to
+    // the first-run questions and one printer, so no wizard or prompt waits for a person. Only when
+    // there is no config at all - an existing one, however old or broken, is never overwritten.
+    if (Slic3r::ServiceMode::enabled() && !app_config->exists()) {
+        app_config->seed_service_defaults();
+        try {
+            app_config->save();
+            BOOST_LOG_TRIVIAL(warning) << "service mode: no config in " << data_dir() << ", seeded a minimal one";
+        } catch (const std::exception& e) {
+            BOOST_LOG_TRIVIAL(error) << "service mode: could not write the seed config: " << e.what();
+        }
+    }
 	// load settings
 	m_app_conf_exists = app_config->exists();
 	if (m_app_conf_exists) {
@@ -3479,13 +3492,22 @@ bool GUI_App::on_init_inner()
                     "EdgeSlicer", wxICON_QUESTION | wxYES_NO);
             dlg.ShowCheckBox(_L("Remember my choice"));
             // Ultra: a hidden instance cannot answer and declining would abort start-up: accept (not remembered).
-            const int tls_answer = m_hub_managed ? (int) wxID_YES : dlg.ShowModal();
+            // Service mode (a visible instance on a virtual display has nobody to answer either):
+            // accept and remember, so the question is not asked on every start.
+            const bool service_mode = Slic3r::ServiceMode::enabled();
+            const int tls_answer = (m_hub_managed || service_mode) ? (int) wxID_YES : dlg.ShowModal();
             if (tls_answer != wxID_YES) return false;
 
+            if (service_mode) {
+                BOOST_LOG_TRIVIAL(warning) << "service mode: using the system TLS certificate store " << Slic3r::Http::tls_system_cert_store() << " without asking";
+                app_config->set("tls_cert_store_accepted", "yes");
+                app_config->set("tls_accepted_cert_store_location", Slic3r::Http::tls_system_cert_store());
+            } else {
             app_config->set("tls_cert_store_accepted",
                 dlg.IsCheckBoxChecked() ? "yes" : "no");
             app_config->set("tls_accepted_cert_store_location",
                 dlg.IsCheckBoxChecked() ? Slic3r::Http::tls_system_cert_store() : "");
+            }
         }
     }
 
@@ -4049,6 +4071,18 @@ bool GUI_App::on_init_inner()
     if (!m_hub_managed) {
         mainframe->Show(true);
         BOOST_LOG_TRIVIAL(info) << "main frame firstly shown";
+#if defined(__linux__)
+    } else if (Slic3r::ServiceMode::enabled()) {
+        // GTK cannot make an OpenGL context current on a canvas that was never realised, and a
+        // frame that is never shown never realises its canvases: the hidden warm-up fails, no
+        // shaders or ImGui font get built, and thumbnails, previews and the slicing progress
+        // notification all break. A service-mode instance runs on a virtual display (Xvfb) where
+        // nobody sees the window, so it is shown there - realised - while staying "hidden" as far
+        // as the hub is concerned (no dialogs, the hub-managed rules all still apply). Windows
+        // keeps its true hidden mode, where a never-shown canvas works.
+        mainframe->Show(true);
+        BOOST_LOG_TRIVIAL(warning) << "main frame shown for OpenGL (service-mode instance; the display is virtual)";
+#endif
     } else {
         BOOST_LOG_TRIVIAL(info) << "main frame kept hidden (hub-managed instance)";
     }
@@ -7832,11 +7866,18 @@ bool GUI_App::load_language(wxString language, bool initial)
 #endif
         if (initial)
         	message + "\n\nApplication will close.";
+        if (Slic3r::ServiceMode::enabled()) {
+            // An unattended hub on a minimal image (no locale generated): nobody can click the box,
+            // and English is what the app falls back to anyway. Log it and carry on.
+            BOOST_LOG_TRIVIAL(error) << "service mode: " << message.ToUTF8().data()
+                                     << " - continuing with the built-in English text";
+        } else {
         wxMessageBox(message, "EdgeSlicer - Switching language failed", wxOK | wxICON_ERROR);
         if (initial)
 			std::exit(EXIT_FAILURE);
 		else
 			return false;
+        }
     }
 
     // Release the old locales, create new locales.
@@ -9071,6 +9112,14 @@ bool GUI_App::config_wizard_startup()
     auto isAgree = wxGetApp().app_config->get("app", PRIVACY_POLICY_FLAGS);
     user_update_privacy_notify(isAgree == "true");
     BOOST_LOG_TRIVIAL(warning) << "config_wizard_startup changed the privacy policy with: " << (isAgree);
+    // Service mode: never a wizard. The seeded config answers it; one that did not (a data dir
+    // copied from elsewhere, no printer) is a setup job for a person at the hub page, not a dialog
+    // on a display nobody looks at.
+    if (Slic3r::ServiceMode::enabled()) {
+        if (!m_app_conf_exists || preset_bundle->printers.only_default_printers() || isAgree.empty())
+            BOOST_LOG_TRIVIAL(warning) << "service mode: the printer wizard is skipped (no printer configured or first-run answers missing)";
+        return false;
+    }
     
         if (!m_app_conf_exists || preset_bundle->printers.only_default_printers()) {
             if (m_hub_managed && RemoteAccess::get().hidden()) {

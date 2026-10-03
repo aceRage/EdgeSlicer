@@ -10802,6 +10802,19 @@ CLIMiscConfigDef::CLIMiscConfigDef()
     def->cli_params = "option";
     def->set_default_value(new ConfigOptionBool(false));
 
+    // Service mode: an unattended hub (a Linux box, a container). See slic3r/Utils/ServiceMode.hpp.
+    def = this->add("hub_service", coBool);
+    def->label = L("Run in service mode");
+    def->tooltip = L("For an unattended hub on a headless machine (the same as EDGESLICER_SERVICE=1): the hub starts and keeps a slicer instance running, a data folder that has never run is seeded with a minimal configuration, and no wizard, privacy prompt or other first-run dialog is shown. Never changes how a desktop start behaves.");
+    def->cli_params = "option";
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("hub_public_host", coString);
+    def->label = L("Address the hub advertises");
+    def->tooltip = L("The host (or host:port) to put in the phone link instead of the one the hub finds on its own interfaces, for a container whose own address is not reachable from the phone (the same as EDGESLICER_HUB_PUBLIC_HOST).");
+    def->cli_params = "host[:port]";
+    def->set_default_value(new ConfigOptionString());
+
     // Ultra: start without a window; the hub's tray menu shows it on demand (RemoteHub.hpp).
     def = this->add("hidden", coBool);
     def->label = L("Start hidden");
