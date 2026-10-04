@@ -91,9 +91,9 @@ us; the log (`RemoteHub: encoder probe ...`) shows what each probe did, and a fa
   amd64 and arm64, in the AppImage, the Flatpak and the image. It is the Linux twin of the LGPL `ffmpeg.exe` the Windows
   package ships (`--enable-version3`, no `--enable-gpl`, x264/x265 disabled). Pinned by sha256 in
   `scripts/fetch_ffmpeg_linux.sh` (and the Flatpak manifest); its licence text, source offer and provenance ship beside it
-  (`FFMPEG-LICENSE.txt`, `FFMPEG-NOTICE-LINUX.txt`). BtbN removes old dated release tags after a couple of weeks, so the
-  pinned URL needs bumping from time to time (the script says how; a failed download only warns, a hash mismatch fails the
-  build). A system `ffmpeg` on `PATH` is still used when the bundled one is absent, with its encoders probed the same way.
+  (`FFMPEG-LICENSE.txt`, `FFMPEG-NOTICE-LINUX.txt`). The archives are mirrored, byte-identical, with the FFmpeg source and the BtbN recipe, in
+  [aceRage/edgeslicer-deps](https://github.com/aceRage/edgeslicer-deps) (BtbN deletes its dated releases after a couple of
+  weeks); the scripts fetch from the mirror first and BtbN second, and a sha256 mismatch fails the build. A system `ffmpeg` on `PATH` is still used when the bundled one is absent, with its encoders probed the same way.
 
 ### Ports, and sharing the box with Home Assistant or Frigate
 

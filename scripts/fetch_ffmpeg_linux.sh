@@ -17,16 +17,20 @@
 # which is what RemoteHub.cpp's ffmpeg_h264_template() asks for. Same family as the Windows ffmpeg.exe
 # (docs/superpowers/specs/2026-09-12-bundled-ffmpeg.md); this one is the FFmpeg 8.1 release branch.
 #
-# PINNING. BtbN deletes its dated autobuild tags after a couple of weeks (the Windows pin,
-# autobuild-2026-09-12-13-12, was already gone on 2026-10-03), so this URL will stop working. When the
-# download fails with a 404: pick a current tag at https://github.com/BtbN/FFmpeg-Builds/releases, take the
-# `ffmpeg-n8.1.*-linux64-lgpl-8.1.tar.xz` and `...linuxarm64-lgpl-8.1.tar.xz` assets and their sha256
-# (the release page lists them), update TAG, ASSET and both hashes here, and the commit in
-# FFMPEG-NOTICE-LINUX.txt below. A durable mirror of the pinned archives (a release or bucket of ours) would
-# remove this chore; that is the owner's call.
+# PINNING AND THE MIRROR. BtbN deletes its dated autobuild tags after a couple of weeks (the Windows pin,
+# autobuild-2026-09-12-13-12, was already gone on 2026-10-03), so the BtbN URL below will stop working. The
+# archives are therefore mirrored, byte-identical, in the release ${MIRROR_TAG} of aceRage/edgeslicer-deps and
+# fetched from there first; BtbN is only the fallback. To move to a newer build: pick a current tag at
+# https://github.com/BtbN/FFmpeg-Builds/releases, take the `ffmpeg-n8.1.*-linux64-lgpl-8.1.tar.xz` and
+# `...linuxarm64-lgpl-8.1.tar.xz` assets and their sha256, upload them (with the FFmpeg source at that commit and the
+# BtbN recipe at the tag's commit) to a new release of edgeslicer-deps, then update TAG, MIRROR_TAG, ASSET, both
+# hashes and the commit here, in the Flatpak manifest, and in FFMPEG-NOTICE-LINUX.txt's template.
 set -euo pipefail
 
 TAG="autobuild-2026-10-01-13-06"
+# The same files, kept for good in https://github.com/aceRage/edgeslicer-deps (release below), byte-identical
+# to BtbN's, with the FFmpeg source and the BtbN recipe they were built from.
+MIRROR_TAG="ffmpeg-n8.1.3-btbn-2026-10-01"
 FFMPEG_DESC="n8.1.3-14-g330caae0c1"
 FFMPEG_COMMIT="330caae0c1"
 ASSET_amd64="ffmpeg-${FFMPEG_DESC}-linux64-lgpl-8.1.tar.xz"
@@ -58,10 +62,16 @@ trap 'rm -rf "$TMP"' EXIT
 if [ -n "${FFMPEG_LINUX_ARCHIVE:-}" ]; then
     cp "$FFMPEG_LINUX_ARCHIVE" "$TMP/$ASSET"
 else
-    curl -fSL --retry 3 -o "$TMP/$ASSET" "https://github.com/BtbN/FFmpeg-Builds/releases/download/${TAG}/${ASSET}" || {
-        echo "ffmpeg: download failed - BtbN prunes old dated tags; see the PINNING note in this script" >&2
+    # The durable mirror first, then BtbN itself; the sha256 below is checked either way.
+    got=0
+    for url in "https://github.com/aceRage/edgeslicer-deps/releases/download/${MIRROR_TAG}/${ASSET}"                "https://github.com/BtbN/FFmpeg-Builds/releases/download/${TAG}/${ASSET}"; do
+        if curl -fSL --retry 3 -o "$TMP/$ASSET" "$url"; then got=1; break; fi
+        echo "ffmpeg: could not download $url" >&2
+    done
+    if [ "$got" != 1 ]; then
+        echo "ffmpeg: download failed from the mirror and from BtbN; see the PINNING note in this script" >&2
         exit 4
-    }
+    fi
 fi
 GOT="$(sha256_of "$TMP/$ASSET")"
 if [ "$GOT" != "$WANT" ]; then
