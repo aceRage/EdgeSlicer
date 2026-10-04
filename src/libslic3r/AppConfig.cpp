@@ -105,6 +105,30 @@ void AppConfig::reset()
     set_defaults();
 };
 
+void AppConfig::seed_service_defaults()
+{
+    // The first-run questions, answered. "false" for the privacy policy is "asked, not agreed":
+    // an empty value would send the instance to the wizard to ask again.
+    set_str("app", "privacy_policy_isagree", "false");
+    set_str("app", "language", "en_US");
+    set_str("app", "check_for_updates_on_startup", "false");
+    set_str("app", "show_hints", "false");
+    set_str("firstguide", "finish", "true");
+
+    // One printer so the printer wizard has nothing to ask: the Snapmaker U1, whose profiles are
+    // always in the install. The phone hub does not slice for a printer it cannot see; a person
+    // picks the real ones through the hub afterwards.
+    VendorMap vendors;
+    vendors["Snapmaker"]["Snapmaker U1"].insert("0.4");
+    set_vendors(std::move(vendors));
+    set_str("filaments", "Generic PLA @U1 0.4 nozzle", "true");
+    set_str("filaments", "Generic PETG @U1 0.4 nozzle", "true");
+    set_str("presets", "machine", "Snapmaker U1 (0.4 nozzle)");
+    set_str("presets", "print", "0.20mm Standard @Snapmaker U1 (0.4 nozzle)");
+    set_str("presets", "filament", "Generic PLA @U1 0.4 nozzle");
+    m_dirty = true;
+}
+
 // Override missing or keys with their defaults.
 void AppConfig::set_defaults()
 {

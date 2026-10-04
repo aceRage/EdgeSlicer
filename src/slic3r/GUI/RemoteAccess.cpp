@@ -35,6 +35,7 @@
 #include "libslic3r/TriangleMesh.hpp"
 #include "libslic3r/Utils.hpp"
 #include "slic3r/Utils/UndoRedo.hpp"
+#include "slic3r/Utils/ServiceMode.hpp"
 
 #include <boost/asio.hpp>
 #include <boost/filesystem.hpp>
@@ -357,7 +358,11 @@ void RemoteAccess::raise_attention(const std::string& reason, const char* kind)
         if (m_on) write_instance_file();
     }
     BOOST_LOG_TRIVIAL(warning) << "RemoteAccess: needs attention (" << kind << "): " << reason;
-    if (hidden())
+    // Service mode: nobody is at the display. show_window() would also mark the instance as no
+    // longer hidden, which turns the hidden-instance dialog policy (auto-answer, never block) off
+    // and leaves the next unexpected dialog waiting for a click that cannot come. The flag is
+    // still raised and visible on /api/info and the hub page.
+    if (hidden() && !Slic3r::ServiceMode::enabled())
         show_window(reason);
 }
 

@@ -9,6 +9,7 @@ add_executable(${_TEST_NAME}_tests
 	test_untrusted_input.cpp
 	test_arrange_support_clearance.cpp
 	test_appconfig_trailing_newline.cpp
+	test_service_seed.cpp
 	test_aabbindirect.cpp
 	test_ams_lookup.cpp
 	test_assembly_face_pick.cpp

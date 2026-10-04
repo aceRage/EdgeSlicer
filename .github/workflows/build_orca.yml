@@ -179,6 +179,9 @@ jobs:
 
       - name: UltraNet - build and stage the binaries
         if: inputs.os != 'windows-2022' && steps.ultranet.outputs.enabled == 'true'
+        # The arm64 Linux package is new: a plug-in that does not build on aarch64 must not take the whole
+        # package with it (the failure stays visible as an annotation, and the package says so).
+        continue-on-error: ${{ endsWith(inputs.os, '-arm') }}
         shell: bash
         run: |
           set -euo pipefail
@@ -631,11 +634,11 @@ jobs:
 
 # Ubuntu
       - name: Install dependencies
-        if: inputs.os == 'ubuntu-20.04' || inputs.os == 'ubuntu-24.04'
+        if: startsWith(inputs.os, 'ubuntu')
         env:
-          apt-cmd: ${{ (inputs.os == 'ubuntu-20.04' && 'apt-fast') || (inputs.os == 'ubuntu-24.04' && 'sudo apt-get') || '' }}
-          webkit-ver: ${{ (inputs.os == 'ubuntu-20.04' && '4.0') || (inputs.os == 'ubuntu-24.04' && '4.1') || '' }}
-          libfuse2-pkg: ${{ (inputs.os == 'ubuntu-20.04' && 'libfuse2') || (inputs.os == 'ubuntu-24.04' && 'libfuse2t64') || '' }}
+          apt-cmd: ${{ (inputs.os == 'ubuntu-20.04' && 'apt-fast') || (startsWith(inputs.os, 'ubuntu-24.04') && 'sudo apt-get') || '' }}
+          webkit-ver: ${{ (inputs.os == 'ubuntu-20.04' && '4.0') || (startsWith(inputs.os, 'ubuntu-24.04') && '4.1') || '' }}
+          libfuse2-pkg: ${{ (inputs.os == 'ubuntu-20.04' && 'libfuse2') || (startsWith(inputs.os, 'ubuntu-24.04') && 'libfuse2t64') || '' }}
         run: |
           ${{ env.apt-cmd }} update
           ${{ env.apt-cmd }} install -y autoconf build-essential cmake curl eglexternalplatform-dev \
@@ -645,30 +648,31 @@ jobs:
           libwebkit2gtk-${{ env.webkit-ver }}-dev libxkbcommon-dev locales locales-all m4 pkgconf sudo wayland-protocols wget ${{ env.libfuse2-pkg }}
 
       - name: Install dependencies from build_linux.sh
-        if: inputs.os == 'ubuntu-20.04' || inputs.os == 'ubuntu-24.04'
+        if: startsWith(inputs.os, 'ubuntu')
         shell: bash
         run: sudo ./build_linux.sh -ur
 
       - name: Fix permissions
-        if: inputs.os == 'ubuntu-20.04' || inputs.os == 'ubuntu-24.04'
+        if: startsWith(inputs.os, 'ubuntu')
         shell: bash
         run: sudo chown $USER -R ./
 
       - name: Build slicer
-        if: inputs.os == 'ubuntu-20.04' || inputs.os == 'ubuntu-24.04'
+        if: startsWith(inputs.os, 'ubuntu')
         shell: bash
         env:
-          ubuntu-ver-str: ${{ (inputs.os == 'ubuntu-24.04' && '_Ubuntu2404') || '' }}
+          ubuntu-ver-str: ${{ (startsWith(inputs.os, 'ubuntu-24.04') && '_Ubuntu2404') || '' }}
+          arch-str: ${{ (endsWith(inputs.os, '-arm') && '_arm64') || '' }}
         run: |
           ./build_linux.sh -isr
           # The AppImage is named for SLIC3R_APP_KEY (src/dev-utils/platform/unix/build_appimage.sh.in),
-          # which the rebrand changed from Snapmaker_Orca to EdgeSlicer.
-          mv -n ./build/EdgeSlicer_Linux_V${{ env.ver_pure }}.AppImage ./build/EdgeSlicer_Linux_AppImage${{ env.ubuntu-ver-str }}_${{ env.ver }}.AppImage
-          chmod +x ./build/EdgeSlicer_Linux_AppImage${{ env.ubuntu-ver-str }}_${{ env.ver }}.AppImage
+          # which the rebrand changed from Snapmaker_Orca to EdgeSlicer. The arm64 one is told apart by a suffix.
+          mv -n ./build/EdgeSlicer_Linux_V${{ env.ver_pure }}.AppImage ./build/EdgeSlicer_Linux_AppImage${{ env.ubuntu-ver-str }}${{ env.arch-str }}_${{ env.ver }}.AppImage
+          chmod +x ./build/EdgeSlicer_Linux_AppImage${{ env.ubuntu-ver-str }}${{ env.arch-str }}_${{ env.ver }}.AppImage
 
       # The same guard the Windows pipeline has: a plug-in that was built must be in the package.
       - name: UltraNet - verify it is in the AppImage tree
-        if: (inputs.os == 'ubuntu-20.04' || inputs.os == 'ubuntu-24.04') && steps.ultranet.outputs.enabled == 'true'
+        if: (startsWith(inputs.os, 'ubuntu')) && steps.ultranet.outputs.enabled == 'true' && env.ULTRANET_BIN_DIR != ''
         shell: bash
         run: |
           d=./build/package/bin/ultranet
@@ -678,19 +682,62 @@ jobs:
           echo "bundled: $(sed -n 2p "$d/ultranet.txt")"
 
       - name: Upload artifacts Ubuntu
-        if: ${{ ! env.ACT && inputs.os == 'ubuntu-20.04' || inputs.os == 'ubuntu-24.04' }}
+        if: ${{ ! env.ACT && startsWith(inputs.os, 'ubuntu') }}
         env:
-          ubuntu-ver: ${{ (inputs.os == 'ubuntu-20.04' && '2004') || (inputs.os == 'ubuntu-24.04' && '2404') || '' }}
-          ubuntu-ver-str: ${{ (inputs.os == 'ubuntu-24.04' && '_Ubuntu2404') || '' }}
+          ubuntu-ver: ${{ (inputs.os == 'ubuntu-20.04' && '2004') || (startsWith(inputs.os, 'ubuntu-24.04') && '2404') || '' }}
+          ubuntu-ver-str: ${{ (startsWith(inputs.os, 'ubuntu-24.04') && '_Ubuntu2404') || '' }}
+          arch-str: ${{ (endsWith(inputs.os, '-arm') && '_arm64') || '' }}
         uses: actions/upload-artifact@v4
         with:
-          name: EdgeSlicer_Linux_ubuntu_${{ env.ubuntu-ver }}_${{ env.ver }}
-          path: './build/EdgeSlicer_Linux_AppImage${{ env.ubuntu-ver-str }}_${{ env.ver }}.AppImage'
+          name: EdgeSlicer_Linux_ubuntu_${{ env.ubuntu-ver }}${{ env.arch-str }}_${{ env.ver }}
+          path: './build/EdgeSlicer_Linux_AppImage${{ env.ubuntu-ver-str }}${{ env.arch-str }}_${{ env.ver }}.AppImage'
+
+      # The phone hub as a container image (docker/hub), built from the AppImage above on the same
+      # runner - natively, so the arm64 runner builds an arm64 image, no emulation - and smoke-tested
+      # (starts, the hub starts its instance, slices, go2rtc and the LGPL ffmpeg are there, a killed
+      # instance is respawned). The image is kept as a workflow artifact for three days. It is never
+      # pushed to a registry.
+      - name: Hub image - build and smoke test (not pushed anywhere)
+        if: ${{ ! env.ACT && startsWith(inputs.os, 'ubuntu-24.04') }}
+        shell: bash
+        env:
+          ubuntu-ver-str: ${{ (startsWith(inputs.os, 'ubuntu-24.04') && '_Ubuntu2404') || '' }}
+          arch-str: ${{ (endsWith(inputs.os, '-arm') && '_arm64') || '' }}
+        run: |
+          set +e
+          APPIMAGE=EdgeSlicer_Linux_AppImage${{ env.ubuntu-ver-str }}${{ env.arch-str }}_${{ env.ver }}.AppImage
+          cp "./build/$APPIMAGE" docker/hub/
+          docker build -t edgeslicer-hub-ci docker/hub --build-arg APPIMAGE="$APPIMAGE" 2>&1 | tail -5 || exit 1
+          bash docker/hub/smoke.sh edgeslicer-hub-ci tests/data/frog_legs.obj 2>&1 | tee smoke.log
+          [ "${PIPESTATUS[0]}" = "0" ] || touch smoke.failed
+          docker image inspect edgeslicer-hub-ci --format 'image size: {{.Size}} bytes' | tee -a smoke.log
+          docker save edgeslicer-hub-ci | gzip -1 > edgeslicer-hub-image.tar.gz
+          ls -la edgeslicer-hub-image.tar.gz | tee -a smoke.log
+          exit 0
+
+      - name: Hub image - upload (artifact only)
+        if: ${{ ! env.ACT && startsWith(inputs.os, 'ubuntu-24.04') && always() }}
+        env:
+          arch-str: ${{ (endsWith(inputs.os, '-arm') && 'arm64') || 'amd64' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: EdgeSlicer_hub_image_${{ env.arch-str }}_${{ env.ver }}
+          path: |
+            edgeslicer-hub-image.tar.gz
+            smoke.log
+          retention-days: 3
+          if-no-files-found: ignore
+
+      - name: Hub image - smoke test result
+        if: ${{ ! env.ACT && startsWith(inputs.os, 'ubuntu-24.04') }}
+        shell: bash
+        run: |
+          if [ -f smoke.failed ]; then echo "::error::the hub image smoke test failed (see smoke.log in the artifact)"; exit 1; fi
 
       - name: Upload Snapmaker_Orca_profile_validator Ubuntu
-        if: ${{ ! env.ACT && inputs.os == 'ubuntu-20.04' || inputs.os == 'ubuntu-24.04' }}
+        if: ${{ ! env.ACT && startsWith(inputs.os, 'ubuntu') }}
         env:
-          ubuntu-ver: ${{ (inputs.os == 'ubuntu-20.04' && '2004') || (inputs.os == 'ubuntu-24.04' && '2404') || '' }}
+          ubuntu-ver: ${{ (inputs.os == 'ubuntu-20.04' && '2004') || (startsWith(inputs.os, 'ubuntu-24.04') && '2404') || '' }}
         uses: actions/upload-artifact@v4
         with:
           name: EdgeSlicer_profile_validator_Linux_ubuntu_${{ env.ubuntu-ver }}_${{ env.ver }}
@@ -698,9 +745,9 @@ jobs:
 
       - name: Deploy Ubuntu release
         # See "Deploy Mac release" above: upstream's nightly release, skipped on this fork.
-        if: ${{ ! env.ACT && github.repository == 'Snapmaker/OrcaSlicer' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/2.3.0-final') && (inputs.os == 'ubuntu-20.04' || inputs.os == 'ubuntu-24.04') }}
+        if: ${{ ! env.ACT && github.repository == 'Snapmaker/OrcaSlicer' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/2.3.0-final') && (startsWith(inputs.os, 'ubuntu')) }}
         env:
-          ubuntu-ver-str: ${{ (inputs.os == 'ubuntu-24.04' && '_Ubuntu2404') || '' }}
+          ubuntu-ver-str: ${{ (startsWith(inputs.os, 'ubuntu-24.04') && '_Ubuntu2404') || '' }}
         uses: WebFreak001/deploy-nightly@v3.2.0
         with:
           upload_url: https://uploads.github.com/repos/Snapmaker/OrcaSlicer/releases/169912305/assets{?name,label}
@@ -712,7 +759,7 @@ jobs:
       - name: Deploy Ubuntu release
         # Pushes upstream's "nightly-builds" tag, which this fork's release process (versioned
         # v*-edge tags/releases) does not use - skip here rather than force-push an unrelated tag.
-        if: ${{ ! env.ACT && github.repository == 'Snapmaker/OrcaSlicer' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/2.3.0-final') && inputs.os == 'ubuntu-24.04' }}
+        if: ${{ ! env.ACT && github.repository == 'Snapmaker/OrcaSlicer' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/2.3.0-final') && startsWith(inputs.os, 'ubuntu-24.04') }}
         uses: rickstaa/action-create-tag@v1
         with:
           tag: "nightly-builds"
@@ -721,9 +768,9 @@ jobs:
           message: "nightly-builds"
 
       - name: Deploy Ubuntu Snapmaker_Orca_profile_validator release
-        if: ${{ ! env.ACT && github.repository == 'Snapmaker/OrcaSlicer' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/2.3.0-final') && (inputs.os == 'ubuntu-20.04' || inputs.os == 'ubuntu-24.04') }}
+        if: ${{ ! env.ACT && github.repository == 'Snapmaker/OrcaSlicer' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/2.3.0-final') && (startsWith(inputs.os, 'ubuntu')) }}
         env:
-          ubuntu-ver-str: ${{ (inputs.os == 'ubuntu-24.04' && '_Ubuntu2404') || '' }}
+          ubuntu-ver-str: ${{ (startsWith(inputs.os, 'ubuntu-24.04') && '_Ubuntu2404') || '' }}
         uses: WebFreak001/deploy-nightly@v3.2.0
         with:
           upload_url: https://uploads.github.com/repos/Snapmaker/OrcaSlicer/releases/169912305/assets{?name,label}

@@ -21,6 +21,11 @@ on:
         description: 'Sentry environment override (blank = release/ci by ref)'
         type: string
         default: ''
+      only:
+        description: 'Limit the run: all (default), appimage (x86_64 AppImage + hub image), arm64 (arm64 AppImage + hub image, on a hosted arm runner) or flatpak (both Flatpaks)'
+        type: choice
+        options: [all, appimage, arm64, flatpak]
+        default: all
 
   workflow_call:
     inputs:
@@ -35,25 +40,27 @@ on:
         description: 'Sentry environment compiled into the app'
         type: string
         default: ''
+      only:
+        description: 'all (default), appimage or flatpak; the nightly builds everything'
+        type: string
+        default: all
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  # `only` is part of the group so a Flatpak-only run and an arm64-only run on the same branch do not cancel each other.
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.only }}
   cancel-in-progress: true
   
 
 jobs:
   build_all:
     name: Build All
+    # `only` exists on manual runs; the nightly's workflow_call leaves it unset and builds everything.
+    if: ${{ inputs.only != 'flatpak' }}
     strategy:
       fail-fast: false
       matrix:
-        include:
-          # Deprecate 20.04appimage
-          # - os: ubuntu-20.04
-          - os: ubuntu-24.04
-          - os: windows-2022
-          - os: macos-14
-            arch: arm64
+        # Deprecate 20.04appimage: - os: ubuntu-20.04
+        include: ${{ fromJSON(inputs.only == 'appimage' && '[{"os":"ubuntu-24.04"}]' || inputs.only == 'arm64' && '[{"os":"ubuntu-24.04-arm","arch":"arm64"}]' || '[{"os":"ubuntu-24.04"},{"os":"windows-2022"},{"os":"macos-14","arch":"arm64"}]') }}
     uses: ./.github/workflows/build_check_cache.yml
     with:
       os: ${{ matrix.os }}
@@ -64,6 +71,7 @@ jobs:
     secrets: inherit
   flatpak:
     name: "Flatpak"
+    if: ${{ inputs.only == 'flatpak' || inputs.only == 'all' || inputs.only == '' }}
     # A Flatpak failure must never cost us the mac/Linux/Windows artifacts. The job is
     # already independent of build_all (no `needs:`), so this only stops a red Flatpak
     # from marking the whole workflow run failed.

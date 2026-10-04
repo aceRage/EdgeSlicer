@@ -106,6 +106,11 @@ public:
 	void 			   	reset();
 	// Override missing or keys with their defaults.
 	void 			   	set_defaults();
+	// Service mode (an unattended hub, see slic3r/Utils/ServiceMode.hpp): the minimal answers to the
+	// first-run questions plus one printer, so a data directory that has never run starts without
+	// the printer wizard or the privacy prompt. Called only when no config file exists yet; the
+	// caller saves. Never touches a config that was loaded.
+	void 			   	seed_service_defaults();
 
 	// Load the slic3r.ini from a user profile directory (or a datadir, if configured).
 	// return error string or empty strinf
