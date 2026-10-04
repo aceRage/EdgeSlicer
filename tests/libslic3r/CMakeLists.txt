@@ -60,6 +60,8 @@ add_executable(${_TEST_NAME}_tests
 	test_h2c_rack_nozzle_change.cpp
 	test_h2c_rack_park_preheat.cpp
 	test_h2d_byobject_toolchange.cpp
+	test_h2d_timelapse.cpp
+	test_by_object_max_clearance.cpp
 	test_filament_map_reapply.cpp
 	test_h2_preload_filaments.cpp
 	test_mixed_filament.cpp
@@ -98,6 +100,7 @@ add_executable(${_TEST_NAME}_tests
 	# test_marchingsquares.cpp
 	test_timeutils.cpp
 	test_utils.cpp
+	test_instance_lock.cpp
 	TestMD5.cpp
 	test_voronoi.cpp
     test_optimizers.cpp
@@ -109,6 +112,7 @@ add_executable(${_TEST_NAME}_tests
     test_toolordering_cyclic.cpp
     test_shortest_path.cpp
     test_gcode_import.cpp
+    test_align_math.cpp
     # test_png_io.cpp
     test_indexed_triangle_set.cpp
     ../libnest2d/printer_parts.cpp

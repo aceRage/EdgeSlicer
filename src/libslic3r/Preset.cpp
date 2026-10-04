@@ -47,6 +47,7 @@
 #include <boost/log/trivial.hpp>
 
 #include "libslic3r.h"
+#include "InstanceLock.hpp"
 #include "Utils.hpp"
 #include "Time.hpp"
 #include "PlaceholderParser.hpp"
@@ -55,6 +56,11 @@
 using boost::property_tree::ptree;
 
 namespace Slic3r {
+
+std::string user_presets_lock_path(bool read_only)
+{
+    return read_only || data_dir().empty() ? std::string() : (fs::path(data_dir()) / (PRESET_USER_DIR ".lock")).string();
+}
 
 Semver get_min_version_from_json(std::string file_path)
 {
@@ -603,7 +609,8 @@ void Preset::save_info(std::string file)
     c << "base_id" << " = " << this->base_id << std::endl;
     c << "updated_time" << " = " << std::to_string(this->updated_time) << std::endl;
 
-    std::string err;
+    InstanceLock instance_lock(user_presets_lock_path());
+    std::string  err;
     if (!write_file_atomically(file, c.str(), &err))
         BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ": failed to save " << file << ": " << err;
 }
@@ -613,6 +620,7 @@ void Preset::remove_files()
     //BBS: add project embedded preset logic
     if (this->is_project_embedded)
         return;
+    InstanceLock instance_lock(user_presets_lock_path());
     // Erase the preset file.
     boost::nowide::remove(this->file.c_str());
     fs::path idx_path(this->file);
@@ -622,11 +630,11 @@ void Preset::remove_files()
 }
 
 //BBS: add logic for only difference save
-void Preset::save(DynamicPrintConfig* parent_config)
+bool Preset::save(DynamicPrintConfig* parent_config)
 {
     //BBS: add project embedded preset logic
     if (this->is_project_embedded)
-        return;
+        return true;
     //BBS: change to json format
     //this->config.save(this->file);
     std::string from_str;
@@ -639,6 +647,9 @@ void Preset::save(DynamicPrintConfig* parent_config)
     else
         from_str = std::string("Default");
 
+    // Best effort and per save (upstream Orca #15861): orders this write against
+    // other instances on the data dir, never refuses it.
+    InstanceLock instance_lock(user_presets_lock_path());
     boost::filesystem::create_directories(fs::path(this->file).parent_path());
 
     //BBS: only save difference if it has parent
@@ -680,19 +691,19 @@ void Preset::save(DynamicPrintConfig* parent_config)
         }
         if (!temp_config.save_to_json(this->file, this->name, from_str, this->version.to_string(), this->custom_defined)) {
             BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << " failed to save config for: " << this->name << " file: " << this->file;
-            return;
+            return false;
         }
     } else if (!filament_id.empty() && inherits().empty()) {
         DynamicPrintConfig temp_config = config;
         temp_config.set_key_value(BBL_JSON_KEY_FILAMENT_ID, new ConfigOptionString(filament_id));
         if (!temp_config.save_to_json(this->file, this->name, from_str, this->version.to_string(), this->custom_defined)) {
             BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << " failed to save config for: " << this->name << " file: " << this->file;
-            return;
+            return false;
         }
     } else {
         if (!this->config.save_to_json(this->file, this->name, from_str, this->version.to_string(), this->custom_defined)) {
             BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << " failed to save config for: " << this->name << " file: " << this->file;
-            return;
+            return false;
         }
     }
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " save config for: " << this->name << " and filament_id: " << filament_id << " and base_id: " << this->base_id;
@@ -700,6 +711,7 @@ void Preset::save(DynamicPrintConfig* parent_config)
     fs::path idx_file(this->file);
     idx_file.replace_extension(".info");
     this->save_info(idx_file.string());
+    return true;
 }
 
 void Preset::reload(Preset const &parent)
@@ -1053,7 +1065,7 @@ static std::vector<std::string> s_Preset_print_options {
     "wipe_tower_no_sparse_layers", "compatible_printers", "compatible_printers_condition", "inherits",
     "flush_into_infill", "flush_into_objects", "flush_into_support",
      "tree_support_branch_angle", "tree_support_angle_slow", "tree_support_wall_count",
-     "stabilizer_supports", "stabilizer_ring_spacing", "stabilizer_points_per_ring", "stabilizer_tip_diameter", "stabilizer_tip_gap", "stabilizer_pillar_diameter", "stabilizer_max_island_width", "hollow_interior", "hollow_shell_thickness",
+     "stabilizer_supports", "stabilizer_ring_spacing", "stabilizer_points_per_ring", "stabilizer_tip_diameter", "stabilizer_tip_gap", "stabilizer_pillar_diameter", "stabilizer_max_island_width", "stabilizer_pillar_base_diameter", "stabilizer_bracing", "stabilizer_brace_max_unbraced", "stabilizer_brace_max_span", "stabilizer_column_shape", "stabilizer_column_width", "stabilizer_column_length", "stabilizer_column_min_height", "stabilizer_wall_loops", "stabilizer_infill_density", "stabilizer_infill_pattern", "hollow_interior", "hollow_shell_thickness",
      "tree_support_top_rate", "tree_support_branch_distance", "tree_support_tip_diameter",
      "tree_support_branch_diameter", "tree_support_branch_diameter_angle",
      "detect_narrow_internal_solid_infill",
@@ -1169,12 +1181,12 @@ static std::vector<std::string> s_Preset_printer_options {
     "printable_area", "bed_exclude_area","bed_custom_texture", "bed_custom_model", "gcode_flavor",
     "fan_kickstart", "fan_speedup_time", "fan_speedup_overhangs",
     "single_extruder_multi_material", "manual_filament_change", "machine_start_gcode", "machine_end_gcode", "unload_filaments_at_end", "before_layer_change_gcode", "printing_by_object_gcode", "layer_change_gcode", "time_lapse_gcode", "change_filament_gcode", "change_extrusion_role_gcode",
-    "printer_model", "printer_variant", "printable_height", "extruder_clearance_radius", "extruder_clearance_height_to_lid", "extruder_clearance_height_to_rod", "extruder_clearance_dist_to_rod",
+    "printer_model", "printer_variant", "printable_height", "extruder_clearance_radius", "extruder_clearance_max_radius", "extruder_clearance_height_to_lid", "extruder_clearance_height_to_rod", "extruder_clearance_dist_to_rod",
     "nozzle_height",
     "default_print_profile", "inherits",
     "silent_mode",
     "scan_first_layer", "machine_load_filament_time", "machine_unload_filament_time", "machine_tool_change_time", "machine_prepare_time", "tool_change_temprature_wait", "time_cost", "machine_pause_gcode", "template_custom_gcode",
-    "nozzle_type", "nozzle_hrc","auxiliary_fan", "nozzle_volume","upward_compatible_machine", "z_hop_types", "z_hop_when_prime", "travel_slope", "retract_lift_enforce","support_chamber_temp_control","support_air_filtration","printer_structure",
+    "nozzle_type", "nozzle_hrc","auxiliary_fan", "nozzle_volume","upward_compatible_machine", "z_hop_types", "z_hop_when_prime", "travel_slope", "retract_lift_enforce","support_chamber_temp_control","support_air_filtration","printer_structure","farthest_point_timelapse",
     "best_object_pos","head_wrap_detect_zone",
     "host_type", "print_host", "printhost_apikey", "flashforge_serial_number", "bbl_use_printhost",
     "print_host_webui",
@@ -1828,7 +1840,10 @@ void PresetCollection::set_sync_info_and_save(std::string name, std::string sett
             preset->setting_id = setting_id;
             if (update_time > 0)
                 preset->updated_time = update_time;
-            preset->sync_info == "update" ? preset->save(nullptr) : preset->save_info();
+            if (preset->sync_info == "update")
+                preset->save(nullptr);
+            else
+                preset->save_info();
             break;
         }
     }
@@ -3751,12 +3766,14 @@ void PhysicalPrinter::update_preset_names_in_config()
 
 void PhysicalPrinter::save(DynamicPrintConfig* /*parent_config*/)
 {
+    InstanceLock instance_lock(user_presets_lock_path());
     if (!this->config.save_to_json(this->file, std::string("Physical_Printer"), std::string("User"), std::string(SLIC3R_VERSION)))
         BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << " failed to save physical printer to " << this->file;
 }
 
 void PhysicalPrinter::save(const std::string& file_name_from, const std::string& file_name_to)
 {
+    InstanceLock instance_lock(user_presets_lock_path());
     if (boost::nowide::rename(file_name_from.data(), file_name_to.data()) != 0) {
         BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << " failed to rename " << file_name_from
                                  << " to " << file_name_to << ": " << std::strerror(errno);
@@ -4084,7 +4101,10 @@ bool PhysicalPrinterCollection::delete_printer(const std::string& name)
 
     const PhysicalPrinter& printer = *it;
     // Erase the preset file.
-    boost::nowide::remove(printer.file.c_str());
+    {
+        InstanceLock instance_lock(user_presets_lock_path());
+        boost::nowide::remove(printer.file.c_str());
+    }
     m_printers.erase(it);
     return true;
 }
@@ -4096,7 +4116,10 @@ bool PhysicalPrinterCollection::delete_selected_printer()
     const PhysicalPrinter& printer = this->get_selected_printer();
 
     // Erase the preset file.
-    boost::nowide::remove(printer.file.c_str());
+    {
+        InstanceLock instance_lock(user_presets_lock_path());
+        boost::nowide::remove(printer.file.c_str());
+    }
     // Remove the preset from the list.
     m_printers.erase(m_printers.begin() + m_idx_selected);
     // unselect all printers

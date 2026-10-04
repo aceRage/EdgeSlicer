@@ -175,6 +175,7 @@ set(lisbslic3r_sources
     Feature/Interlocking/VoxelUtils.hpp
     FileParserError.hpp
     AllowlistManager.cpp
+    AlignMath.hpp
     AllowlistManager.hpp
     FilamentColorLibrary.cpp
     FilamentColorLibrary.hpp
@@ -300,6 +301,8 @@ set(lisbslic3r_sources
     GCodeReader.hpp
     GCode/RetractWhenCrossingPerimeters.cpp
     GCode/RetractWhenCrossingPerimeters.hpp
+    GCode/TimelapsePosPicker.cpp
+    GCode/TimelapsePosPicker.hpp
     GCode/PreciseSeam.cpp
     GCode/PreciseSeam.hpp
     GCode/SeamPlacer.cpp
@@ -352,6 +355,8 @@ set(lisbslic3r_sources
     Geometry/VoronoiUtils.hpp
     Geometry/VoronoiVisualUtils.hpp
     Int128.hpp
+    InstanceLock.cpp
+    InstanceLock.hpp
     KDTreeIndirect.hpp
     Layer.cpp
     Layer.hpp
@@ -545,6 +550,10 @@ set(lisbslic3r_sources
     Support/SupportParameters.hpp
     Support/Stabilizers.cpp
     Support/Stabilizers.hpp
+    Support/StabilizerMesh.cpp
+    Support/StabilizerMesh.hpp
+    Support/StabilizerBake.cpp
+    Support/StabilizerBake.hpp
     Support/SupportSpotsGenerator.cpp
     Support/SupportSpotsGenerator.hpp
     Support/TreeModelVolumes.cpp
@@ -619,6 +628,7 @@ slic3r_unity_build(libslic3r SKIP
     SLA/SupportTreeMesher.cpp       # sphere()/Portion clash with a neighbour
     Support/SupportMaterial.cpp     # support_types_interface also defined in SupportCommon.cpp
     utils.cpp                       # needs <windows.h> without a neighbour's lean/extra macros
+    InstanceLock.cpp                # boost::interprocess file_lock pulls in <windows.h>; keep out of unity batches
     Format/bbs_3mf.cpp              # file-local tag/version constants also defined in Format/3mf.cpp
     Emboss.cpp                      # defines STB_TRUETYPE_IMPLEMENTATION before its include
     CodeEmboss.cpp                  # file-local rectangle()/circle()/to_svg() helpers with common names
