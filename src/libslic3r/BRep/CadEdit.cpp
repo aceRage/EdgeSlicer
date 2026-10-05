@@ -73,13 +73,15 @@ std::string write_shape(const TopoDS_Shape &shape)
 {
     std::ostringstream out(std::ios::out | std::ios::binary);
     // No triangulation: it is rebuilt at the precision each use needs, and it would double the size.
-    BinTools::Write(shape, out, Standard_False, Standard_False, BinTools_FormatVersion_CURRENT);
+    BinTools::Write(shape, out, false, false, BinTools_FormatVersion_CURRENT);
     return out.str();
 }
 
 std::string occt_message(const Standard_Failure &e)
 {
     const char *msg = e.GetMessageString();
+    if (msg == nullptr || *msg == 0)
+        msg = e.what();
     std::string out = e.DynamicType()->Name();
     if (msg != nullptr && *msg != 0)
         out += std::string(": ") + msg;
@@ -171,7 +173,7 @@ TopoDS_Shape cad_body_shape(const CadBody &body)
     if (!body.shift.isZero()) {
         gp_Trsf t;
         t.SetTranslation(gp_Vec(body.shift.x(), body.shift.y(), body.shift.z()));
-        shape = BRepBuilderAPI_Transform(shape, t, Standard_True).Shape();
+        shape = BRepBuilderAPI_Transform(shape, t, true).Shape();
     }
     return single_solid_or_self(shape);
 }
@@ -313,10 +315,10 @@ namespace {
 // Outward normal of `face` at the middle of `edge`, which bounds it.
 bool normal_at_edge(const TopoDS_Face &face, const TopoDS_Edge &edge, gp_Dir &normal)
 {
-    BRepAdaptor_Surface surface(face, Standard_False);
+    BRepAdaptor_Surface surface(face, false);
     gp_Pnt2d            uv;
     bool                have_uv = false;
-    Standard_Real       f = 0., l = 0.;
+    double       f = 0., l = 0.;
     const Handle(Geom2d_Curve) pcurve = BRep_Tool::CurveOnSurface(edge, face, f, l);
     if (!pcurve.IsNull()) {
         uv      = pcurve->Value(0.5 * (f + l));
@@ -356,7 +358,7 @@ bool tangent_away_from(const TopoDS_Edge &edge, const TopoDS_Vertex &vertex, gp_
     if (v1.IsSame(v2))
         return false; // a closed edge (full circle) has no single "end" here
     BRepAdaptor_Curve   curve(edge);
-    const Standard_Real t = BRep_Tool::Parameter(vertex, edge);
+    const double t = BRep_Tool::Parameter(vertex, edge);
     gp_Pnt              p;
     gp_Vec              d;
     curve.D1(t, p, d);
@@ -388,12 +390,12 @@ CadTopology cad_topology(const CadBody &body, double linear_deflection, double a
         topo.num_edges = edges.Extent();
 
         // Hit-testing mesh, one face at a time so every triangle knows its face.
-        BRepMesh_IncrementalMesh mesher(shape, linear_deflection, Standard_False, angular_deflection, Standard_True);
+        BRepMesh_IncrementalMesh mesher(shape, linear_deflection, false, angular_deflection, true);
         topo.face_planar.assign(size_t(topo.num_faces), 0);
         topo.face_edges.assign(size_t(topo.num_faces), {});
         for (int fi = 1; fi <= topo.num_faces; ++fi) {
             const TopoDS_Face &face = TopoDS::Face(faces(fi));
-            topo.face_planar[size_t(fi - 1)] = BRepAdaptor_Surface(face, Standard_False).GetType() == GeomAbs_Plane;
+            topo.face_planar[size_t(fi - 1)] = BRepAdaptor_Surface(face, false).GetType() == GeomAbs_Plane;
             TopLoc_Location            loc;
             Handle(Poly_Triangulation) tri = BRep_Tool::Triangulation(face, loc);
             if (tri.IsNull())
@@ -654,7 +656,7 @@ double largest_working_size(const TopoDS_Shape &shape, const TopTools_IndexedMap
 // Outward normal of a planar face (orientation applied), or false when the face is not planar.
 bool planar_outward_normal(const TopoDS_Face &face, gp_Dir &normal)
 {
-    BRepAdaptor_Surface s(face, Standard_False);
+    BRepAdaptor_Surface s(face, false);
     if (s.GetType() != GeomAbs_Plane)
         return false;
     const gp_Pln pl = s.Plane();
@@ -721,7 +723,7 @@ TopoDS_Shape shell_by_core_cut(const TopoDS_Shape &solid, const std::vector<Topo
         normals.push_back(n);
     }
     BRepOffsetAPI_MakeOffsetShape off;
-    off.PerformByJoin(solid, -thickness, 1.e-3, BRepOffset_Skin, Standard_False, Standard_False, GeomAbs_Arc);
+    off.PerformByJoin(solid, -thickness, 1.e-3, BRepOffset_Skin, false, false, GeomAbs_Arc);
     if (!off.IsDone()) {
         why = "the inner wall could not be built (BRepOffset error " + std::to_string(int(off.MakeOffset().Error())) + ")";
         return TopoDS_Shape();
@@ -786,7 +788,7 @@ TopoDS_Shape shell_by_core_cut(const TopoDS_Shape &solid, const std::vector<Topo
         }
     }
     // The booleans split faces along the cut; merge them back.
-    ShapeUpgrade_UnifySameDomain unify(result, Standard_True, Standard_True, Standard_True);
+    ShapeUpgrade_UnifySameDomain unify(result, true, true, true);
     unify.Build();
     return unify.Shape();
 }

@@ -821,3 +821,21 @@ TEST_CASE("An unedited STEP import goes to the CAD program exactly, in its mesh 
         CHECK_FALSE(boost::filesystem::exists(nothing.path));
     }
 }
+
+TEST_CASE("A security classification assignment does not crash import", "[StepExport]")
+{
+    // Rhino / ST-Developer AP203 files write APPLIED_SECURITY_CLASSIFICATION_ASSIGNMENT.
+    // OCCT 7.6 built with clang-cl 22 crashed destroying that array (llvm/llvm-project#183255);
+    // 8.0.1 does not use new[] for it. The solid is a faceted tetrahedron.
+    const std::string path = std::string(TEST_DATA_DIR) + "/security_classification.step";
+    Model             model;
+    bool              cancel = false;
+    REQUIRE(load_step(path.c_str(), &model, cancel));
+    REQUIRE(model.objects.size() == 1);
+    REQUIRE(model.objects.front()->volumes.size() == 1);
+    const size_t facets = model.objects.front()->volumes.front()->mesh().facets_count();
+    REQUIRE(facets > 0);
+    // Four faces; meshing may add a few triangles but must stay a small closed solid.
+    CHECK(facets >= 4);
+    CHECK(facets <= 24);
+}
