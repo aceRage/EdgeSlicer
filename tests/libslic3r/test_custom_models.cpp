@@ -554,6 +554,29 @@ SCENARIO("A library 3MF is prepared for the current project's filaments, and che
             CHECK(bracket->config.has("filename_format"));
         }
     }
+    GIVEN("a volume with part settings including an untrusted key and an out-of-range extruder") {
+        Model        model;
+        ModelObject *object = model.add_object();
+        ModelVolume *volume = object->add_volume(make_cube(10, 10, 10));
+        volume->config.set("wall_loops", 5);
+        volume->config.set_key_value("sparse_infill_density", new ConfigOptionPercent(40));
+        volume->config.set_key_value("post_process", new ConfigOptionStrings({"evil.sh"}));
+        volume->config.set("extruder", 9);
+
+        WHEN("it is prepared for a 4-filament project") {
+            const cm::ImportReport report = cm::prepare_imported_objects({object}, 4);
+            THEN("trusted part settings survive, untrusted keys are removed, and the extruder is clamped to 1") {
+                CHECK(volume->config.opt_int("wall_loops") == 5);
+                const auto *density = volume->config.get().option<ConfigOptionPercent>("sparse_infill_density");
+                REQUIRE(density != nullptr);
+                CHECK(density->value == Approx(40.));
+                CHECK_FALSE(volume->config.has("post_process"));
+                CHECK(volume->config.opt_int("extruder") == 1);
+                CHECK(report.untrusted_settings_removed >= 1);
+                CHECK(report.filaments_clamped());
+            }
+        }
+    }
 }
 
 SCENARIO("The filament keys are the ones a per-object or per-part setting can carry", "[CustomModels]") {

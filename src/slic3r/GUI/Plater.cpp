@@ -12302,12 +12302,13 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                                 show_info(q, text, _L("Newer 3mf version"));
                             }
                         }
-                    } else if (keep_object_settings) {
-                        // Custom model: keep the object / part settings, modifiers and paint. The file's
-                        // project settings and embedded presets are never applied on this path, so what
-                        // is left to check is the settings of the objects themselves, and the filament
-                        // numbers: a project with fewer filaments than the file asks for is not extended,
-                        // the numbers above its count become filament 1.
+                    } else if (keep_object_settings || (!load_config && en_3mf_file_type == En3mfType::From_BBS)) {
+                        // Custom Models (KeepObjectSettings): keep object / part settings, modifiers and paint.
+                        // Snapmaker #962 / #961: adding a project 3MF (From_BBS, model only) used to reset
+                        // every object/volume config except extruder. Keep those settings, but scrub
+                        // untrusted keys (post_process, print-host credentials, ...) and clamp filament
+                        // indexes the same way Add Custom Models does. Mixed filament counts come from
+                        // MixedFilamentManager, never filament_is_mixed.
                         PresetBundle *pb = wxGetApp().preset_bundle;
                         const size_t filament_total = pb != nullptr ? pb->mixed_filaments.total_filaments(pb->filament_presets.size()) : size_t(1);
                         const custom_models::ImportReport report = custom_models::prepare_imported_objects(model.objects, filament_total);
@@ -12321,7 +12322,8 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                                                          from_path(real_filename), report.highest_filament_requested, filament_total)));
                         }
                     } else if (!load_config) {
-                        // reset config except color
+                        // From_Other (non-Orca/Bambu 3MF): reset config except extruder. From_Prusa is
+                        // handled earlier. From_BBS model-only imports now keep settings above.
                         for (ModelObject *model_object : model.objects) {
                             bool has_extruder = model_object->config.has("extruder");
                             int  extruder_id  = -1;
