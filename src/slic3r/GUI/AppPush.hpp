@@ -176,6 +176,36 @@ nlohmann::json providers_json();
 // this module would send, without a mock having to receive one first.
 std::pair<int, std::string> debug_op(const std::string& body);
 
+// ---- hub-driven Live Activity updates (LiveActivityPush.hpp), opt-in per phone ----
+//
+// A phone turns them on with "live_activity": {"enabled": true, "start_token": "<hex, iOS 17.2+>",
+// "frequent": <bool>} on POST /push/device (absent or false: off, and every activity token it gave
+// is forgotten). The hub page can turn them off for every phone (set_options "live_activity").
+
+// POST /r/<token>/push/activity {"platform":"apns","token":<this phone's APNs device token>,
+//   "printer":<printer id, or its push_id>,"job":<the app's job key>,"activity_token":<hex>,
+//   "started_at":<unix s>} - the push token of a Live Activity the app started (or iOS started
+//   from a push-to-start). 404 for an unknown phone, 409 when hub updates are off for it.
+std::pair<int, std::string> register_activity(const std::string& body);
+
+// DELETE /r/<token>/push/activity {"platform","token","printer","dismissed":<bool>} - the app ended
+// that activity (dismissed: the person removed it, so no push-to-start for that print). Always
+// {"ok":true}.
+std::pair<int, std::string> forget_activity(const std::string& body);
+
+// After every poll of the printers (HubServer::printers_json rows): decide, per opted-in phone and
+// printer, what its activity (or Android's progress notification) should be told, and queue it.
+// Sends happen on a worker thread of their own; this returns at once.
+void live_activity_tick(const nlohmann::json& rows);
+
+// True when at least one phone has hub updates on and the hub allows them.
+bool live_activity_wanted();
+
+// The opaque id a Live Activity push may carry for a printer: PushIds::thread_id under this hub's
+// key, the value already visible next to alerts as their thread-id. /summary hands it to the app
+// as "push_id" so the phone can put a name to a push-started activity.
+std::string push_id(const std::string& printer_id);
+
 } // namespace AppPush
 } // namespace GUI
 } // namespace Slic3r
