@@ -40,6 +40,14 @@ struct PushRequest
     // best-effort and low priority, throttled past a few an hour; a print makes 2-6 such events.
     // It reveals nothing: the payload is the same placeholder and ciphertext either way.
     bool content_available { false };
+    // What kind of push this is (LiveActivityPush.hpp): "" an alert, as above; "liveactivity" an
+    // ActivityKit push (APNs) to a Live Activity's own push token or the app's push-to-start
+    // token, carrying `la_aps` instead of ciphertext; "progress" an encrypted progress update for
+    // Android's ongoing notification (FCM), built like an alert. The last two are opt-in per phone.
+    std::string push_type;
+    // The `aps` object of a "liveactivity" push, as JSON. Plaintext to Apple and the push service by
+    // ActivityKit's design, so LiveActivity::aps_* builds it from non-identifying fields only.
+    std::string la_aps;
 };
 
 struct PushResult
@@ -112,6 +120,12 @@ bool debug_routes_on();
 // mutable-content, thread-id and the ciphertext; content-available and interruption-level only when
 // the request asks for them. Pure, so the tests can pin that nothing readable is ever in it.
 std::string apns_alert_payload(const PushRequest& req);
+
+// A "liveactivity" push: {"aps": la_aps}, its apns-topic (the bundle id plus Apple's
+// ".push-type.liveactivity") and its apns-push-type. Alerts get the bundle and "alert".
+std::string apns_liveactivity_payload(const PushRequest& req);
+std::string apns_topic_for(const PushRequest& req, const std::string& bundle);
+const char* apns_push_type_for(const PushRequest& req);
 
 } // namespace detail
 } // namespace AppPush

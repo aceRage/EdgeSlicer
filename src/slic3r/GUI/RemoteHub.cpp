@@ -3310,6 +3310,9 @@ json HubServer::summary_json()
         p["stale"]    = row.value("stale", false);
         p["age_s"]    = row.value("age_s", 0);
         p["instance"] = row.value("instance", 0);
+        // The opaque per-hub id a Live Activity push carries instead of the printer id (the alerts'
+        // thread-id), so the app can put a name to an activity the hub started by push.
+        p["push_id"]  = AppPush::push_id(id);
         // The camera that watches this printer, if any: its own id first, then a LAN camera on the
         // same address (Testing::camera_for_printer - see there for the fallback order).
         std::vector<Testing::CameraCandidate> cam_candidates;
@@ -3371,7 +3374,8 @@ json HubServer::pair_json(bool via_serve_https)
         j["token_version"] = m_token_version;
     }
     // "push_levels": /push/device takes priority_kinds / all_events / level_hint, and /push/test exists.
-    j["features"] = json::array({ "events", "control", "send", "summary", "thumbnail", "webrtc", "quality", "apppush", "hubid", "push_levels" });
+    // "live_activity": /push/activity and the live_activity field on /push/device (hub-driven updates).
+    j["features"] = json::array({ "events", "control", "send", "summary", "thumbnail", "webrtc", "quality", "apppush", "hubid", "push_levels", "live_activity" });
     j["capabilities"] = j["features"];
     return j;
 }
@@ -4842,6 +4846,16 @@ void HubServer::handle_phone(tcp::socket& client, Request& r, const std::string&
         respond_json(client, res.first, res.second);
         return;
     }
+    if (rest == "/push/activity" && (r.method == "POST" || r.method == "DELETE")) {
+        // Hub-driven Live Activity updates (opt-in): the app hands over an activity's push token,
+        // or says it ended one (AppPush::register_activity / forget_activity).
+        if (r.content_type.compare(0, 16, "application/json") != 0) { respond_json(client, 415, json_error("Content-Type must be application/json")); return; }
+        std::string body;
+        if (!read_small_body(client, r, body, 8 * 1024)) { respond_json(client, 413, json_error("that is too large")); return; }
+        const auto res = r.method == "POST" ? AppPush::register_activity(body) : AppPush::forget_activity(body);
+        respond_json(client, res.first, res.second);
+        return;
+    }
     if (rest == "/push/test" && r.method == "POST") {
         // The app's notification test lab: one test of a chosen kind to this device only, built
         // as a real event of that kind would be for it (AppPush::test_device). May wait up to
@@ -4876,7 +4890,9 @@ void HubServer::handle_phone(tcp::socket& client, Request& r, const std::string&
             { {"method", "DELETE"}, {"path", "/push/subscription"}, {"description", "body {endpoint} - this browser unsubscribed"} },
             { {"method", "POST"}, {"path", "/push/device"},        {"description", "the native app's APNs/FCM device token plus its own p256dh/auth; re-post it on every cold launch. Optional: priority_kinds [kind...] (sent at high priority), all_events (past the hub's filter; the phone decides), level_hint (APNs interruption-level on the priority kinds)"} },
             { {"method", "DELETE"}, {"path", "/push/device"},      {"description", "body {platform, token} - this device unpaired"} },
-            { {"method", "POST"}, {"path", "/push/test"},          {"description", "body {platform, token, kind, delay_s 0-30} - one test notification of that kind to this device only, sent as a real one would be; answers {ok, status, priority, ttl, interruption_level}"} }
+            { {"method", "POST"}, {"path", "/push/test"},          {"description", "body {platform, token, kind, delay_s 0-30} - one test notification of that kind to this device only, sent as a real one would be; answers {ok, status, priority, ttl, interruption_level}"} },
+            { {"method", "POST"}, {"path", "/push/activity"},      {"description", "hub-driven Live Activity updates (opt-in with live_activity {enabled, start_token, frequent} on /push/device): body {platform apns, token, printer (id or push_id), job, activity_token, started_at} - the push token of a Live Activity on this phone"} },
+            { {"method", "DELETE"}, {"path", "/push/activity"},    {"description", "body {platform, token, printer, dismissed} - that activity ended (dismissed: the person removed it)"} }
         });
         respond_json(client, 200, j.dump());
         return;
@@ -5353,6 +5369,12 @@ void HubServer::loop(bool idle_exit)
         if (std::chrono::steady_clock::now() - printers_at >= std::chrono::milliseconds(PRINTERS_POLL_MS)) {
             printers_at = std::chrono::steady_clock::now();
             try { poll_printers(); } catch (...) {}
+            // Hub-driven Live Activity updates for the phones that turned them on: decided right
+            // after the poll, so a push carries the freshest row the hub has. The sends run on
+            // AppPush's own worker; this only queues them.
+            if (AppPush::live_activity_wanted()) {
+                try { AppPush::live_activity_tick(printers_json()); } catch (...) {}
+            }
         }
         // A phone subscribed, or the sender pruned one the push service said was gone. Saving
         // from here means the sender thread never has to reach back into HubServer.

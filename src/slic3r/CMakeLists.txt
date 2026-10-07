@@ -557,6 +557,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/HostedProvider.cpp
     GUI/PushIds.cpp
     GUI/PushIds.hpp
+    GUI/LiveActivityPush.cpp
+    GUI/LiveActivityPush.hpp
     GUI/PrintHostDialogs.cpp
     GUI/PrintHostDialogs.hpp
     GUI/PrintHostDevicesDialog.cpp
