@@ -2268,6 +2268,7 @@ void ModelVolume::restore_painting(const std::optional<TriangleSelector::SavedPa
     remap_one(saved->seam,      seam_facets);
     remap_one(saved->mmu,       mmu_segmentation_facets);
     remap_one(saved->fuzzy,     fuzzy_skin_facets);
+}
 
 static void invalidate_translations(ModelObject* object, const ModelInstance* src_instance)
 {
