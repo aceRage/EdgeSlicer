@@ -38,6 +38,8 @@
 #include <array>
 #include <cmath>
 #include <limits>
+#include "slic3r/Utils/ColorSpaceConvert.hpp"
+#include "slic3r/GUI/BitmapCache.hpp"
 #include <queue>
 #include <set>
 
@@ -949,7 +951,7 @@ void GLGizmoTextureDisplacement::render_seam_overlay()
     if (seams_on_top)
         glsafe(::glDisable(GL_DEPTH_TEST));
 #if !SLIC3R_OPENGL_ES
-    const bool wide = !OpenGLManager::get_gl_info().is_core_profile();
+    const bool wide = !false /* EdgeSlicer spike: compatibility profile only */;
     if (wide)
         glsafe(::glLineWidth(4.0f));
 #endif // !SLIC3R_OPENGL_ES
@@ -1007,7 +1009,7 @@ void GLGizmoTextureDisplacement::render_preview_mesh()
         // per-triangle colour this needs.
         for (const PreviewColorRun &run : m_preview_color_runs) {
             m_preview_glmodel.set_color(run.color);
-            m_preview_glmodel.render(run.range, shader);
+            m_preview_glmodel.render(run.range); // EdgeSlicer spike: our GLModel uses the bound shader
         }
     }
     shader->stop_using();
@@ -3071,7 +3073,7 @@ void GLGizmoTextureDisplacement::render_adjust_texture_gizmo()
         m_adjust_arrow_glmodel.init_from(std::move(init_data));
     }
 #if !SLIC3R_OPENGL_ES
-    if (!OpenGLManager::get_gl_info().is_core_profile())
+    if (!false /* EdgeSlicer spike: compatibility profile only */)
         glsafe(::glLineWidth(2.0f));
 #endif // !SLIC3R_OPENGL_ES
 
@@ -4217,9 +4219,22 @@ const std::vector<GLGizmoTextureDisplacement::PaletteEntry> &GLGizmoTextureDispl
     return m_palette_cache;
 }
 
+
+// EdgeSlicer spike: upstream Plater::get_extruders_colors() (not in our tree).
+static std::vector<ColorRGBA> spike_extruders_colors()
+{
+    std::vector<ColorRGBA> out;
+    for (const std::string &c : wxGetApp().plater()->get_extruder_colors_from_plater_config(nullptr, false)) {
+        unsigned char rgba[4] = {};
+        BitmapCache::parse_color4(c, rgba);
+        out.push_back({rgba[0] / 255.f, rgba[1] / 255.f, rgba[2] / 255.f, rgba[3] / 255.f});
+    }
+    return out;
+}
+
 std::vector<ColorRGBA> GLGizmoTextureDisplacement::filament_palette()
 {
-    std::vector<ColorRGBA> palette = wxGetApp().plater()->get_extruders_colors();
+    std::vector<ColorRGBA> palette = spike_extruders_colors();
     // mmu_segmentation_facets encodes the filament in a 6-bit prefix code and stops at Extruder16.
     if (palette.size() > size_t(EnforcerBlockerType::ExtruderMax))
         palette.resize(size_t(EnforcerBlockerType::ExtruderMax));
@@ -6873,7 +6888,7 @@ void GLGizmoTextureDisplacement::on_render_input_window(float x, float y, float 
                                        m_bake_in_progress    ? _u8L("Baking...") :
                                                                into_u8(m_desc.at("bake"));
         ImGui::PushStyleColor(ImGuiCol_Button, orca);
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImGuiWrapper::COL_ORCA_HOVER);
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(38 / 255.f, 166 / 255.f, 154 / 255.f, 1.f) /* upstream COL_ORCA_HOVER */);
         ImGui::PushStyleColor(ImGuiCol_ButtonActive, orca);
         ImGui::PushStyleColor(ImGuiCol_Border, orca);
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.f, 1.f, 1.f, 1.f));

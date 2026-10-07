@@ -82,7 +82,7 @@ std::vector<int> gl_attrib_list()
 {
     int antialiasing_samples = 4;
     if (const AppConfig *app_config = wxGetApp().app_config; app_config != nullptr) {
-        const std::string value = app_config->get(SETTING_OPENGL_AA_SAMPLES);
+        const std::string value = app_config->get("opengl_antialiasing_samples") /* EdgeSlicer spike: no SETTING_ macro */;
         if (value == "0" || value == "2" || value == "4" || value == "8" || value == "16")
             antialiasing_samples = ::atoi(value.c_str());
     }
@@ -1661,7 +1661,7 @@ wxSize drawn_size(const wxBitmap &bmp)
 #ifdef __WXGTK3__
     return bmp.GetLogicalSize();
 #else
-    return ScalableBitmap::GetBmpSize(bmp);
+    return bmp.GetSize(); // EdgeSlicer spike: no static ScalableBitmap::GetBmpSize
 #endif
 }
 
