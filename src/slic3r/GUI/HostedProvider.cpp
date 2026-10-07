@@ -145,6 +145,10 @@ std::string body_for_send(const PushRequest& req, long long ts, const std::strin
     // Additive and only when the device asked for it: the push service ignores fields it does not
     // know, so this is inert until it builds `aps.interruption-level` from it (research note H8).
     if (req.platform == "apns" && !req.interruption_level.empty()) j["level"] = req.interruption_level;
+    // Additive, APNs only: the service adds `aps.content-available: 1` beside the alert, exactly as
+    // ApnsProvider does (PushRequest::content_available). An older service ignores it, and the
+    // alert is delivered as before - only the background wake is missing.
+    if (req.platform == "apns" && req.content_available) j["wake"] = true;
     return j.dump();
 }
 

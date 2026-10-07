@@ -33,6 +33,13 @@ struct PushRequest
     // Extension sets the level itself after decrypting; this is the fallback for when that does
     // not take effect, and it tells Apple no more than apns-priority 10 already does.
     std::string interruption_level;
+    // APNs only: also ask iOS to wake the app in the background (`aps.content-available: 1` next to
+    // the alert), so it can re-read the hub and bring its Live Activity up to date - the "finished"
+    // banner arrives and the activity says Finished, instead of "Finishing" until the app is next
+    // opened. Set for the print-state kinds (AppPush::policy::wakes_app). Apple treats the wake as
+    // best-effort and low priority, throttled past a few an hour; a print makes 2-6 such events.
+    // It reveals nothing: the payload is the same placeholder and ciphertext either way.
+    bool content_available { false };
 };
 
 struct PushResult
@@ -100,6 +107,11 @@ bool read_text_file(const std::string& path, std::string& out, std::string& err)
 // True when SNORCA_DEBUG_ROUTES=1. The gate's mock APNs and mock FCM are only reachable when it
 // is: a shipped hub must not be talkable into posting a device's notifications somewhere else.
 bool debug_routes_on();
+
+// The JSON body ApnsProvider posts for one alert push: the literal placeholder alert,
+// mutable-content, thread-id and the ciphertext; content-available and interruption-level only when
+// the request asks for them. Pure, so the tests can pin that nothing readable is ever in it.
+std::string apns_alert_payload(const PushRequest& req);
 
 } // namespace detail
 } // namespace AppPush

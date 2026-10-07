@@ -137,19 +137,7 @@ public:
         std::string jwt, err;
         if (!provider_token(host, jwt, err)) { res.error = err; return res; }
 
-        // The literal placeholder is the whole of what a push vendor - or a person whose service
-        // extension failed - can read. Everything real is in `e`, encrypted to the device.
-        json payload;
-        payload["aps"]["alert"]["title"]  = "Printer update";
-        payload["aps"]["alert"]["body"]   = "Tap to open";
-        payload["aps"]["mutable-content"] = 1;
-        payload["aps"]["sound"]           = "default";
-        if (!req.thread_id.empty()) payload["aps"]["thread-id"] = req.thread_id;
-        // Only when the device asked for the level hint (see PushRequest::interruption_level).
-        if (!req.interruption_level.empty()) payload["aps"]["interruption-level"] = req.interruption_level;
-        payload["v"] = 1;
-        payload["e"] = req.ciphertext_b64u;
-        const std::string body = payload.dump();
+        const std::string body = detail::apns_alert_payload(req);
 
         const std::string url = host + "/3/device/" + req.device_token;
         std::string       answer;
@@ -273,6 +261,31 @@ private:
 };
 
 std::unique_ptr<Provider> make_apns_provider() { return std::unique_ptr<Provider>(new ApnsProvider()); }
+
+namespace detail {
+
+std::string apns_alert_payload(const PushRequest& req)
+{
+    // The literal placeholder is the whole of what a push vendor - or a person whose service
+    // extension failed - can read. Everything real is in `e`, encrypted to the device.
+    json payload;
+    payload["aps"]["alert"]["title"]  = "Printer update";
+    payload["aps"]["alert"]["body"]   = "Tap to open";
+    payload["aps"]["mutable-content"] = 1;
+    payload["aps"]["sound"]           = "default";
+    if (!req.thread_id.empty()) payload["aps"]["thread-id"] = req.thread_id;
+    // Only when the device asked for the level hint (see PushRequest::interruption_level).
+    if (!req.interruption_level.empty()) payload["aps"]["interruption-level"] = req.interruption_level;
+    // The background wake for the Live Activity (see PushRequest::content_available). The push
+    // stays an alert (apns-push-type alert): Apple allows content-available beside an alert, and
+    // the alert is still shown even when iOS declines to wake the app.
+    if (req.content_available) payload["aps"]["content-available"] = 1;
+    payload["v"] = 1;
+    payload["e"] = req.ciphertext_b64u;
+    return payload.dump();
+}
+
+} // namespace detail
 
 } // namespace AppPush
 } // namespace GUI
