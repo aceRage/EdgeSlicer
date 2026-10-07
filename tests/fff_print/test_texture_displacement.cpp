@@ -1,4 +1,4 @@
-#include <catch2/catch_all.hpp>
+#include <catch2/catch.hpp>
 
 #include <fstream>
 #include <iterator>
@@ -11,7 +11,7 @@
 #include "libslic3r/TextureDisplacement.hpp"
 #include "libslic3r/TriangleSelector.hpp"
 
-#include "test_helpers.hpp"
+#include "test_data.hpp"
 
 using namespace Slic3r;
 using namespace Slic3r::Test;
@@ -100,13 +100,13 @@ size_t count_extrusions(const std::string &gcode_text)
 
 TEST_CASE("A baked texture slices into a print with toolpaths", "[TextureDisplacement]")
 {
-    Model        model = Slic3r::Test::model("cube", Test::cube(20.));
+    Model        model = Slic3r::Test::model("cube", Test::mesh(Test::TestMesh::cube_20x20x20));
     ModelVolume &volume = *model.objects.front()->volumes.front();
     paint_whole_volume(volume, /* depth */ 0.4f, /* tile */ 8.f);
 
     // Coarse on purpose: this test is about the result reaching the slicer, not about how fine it is.
     const size_t baked_triangles = bake_into_volume(volume, /* budget */ 60, /* resolution */ 0.8f);
-    CHECK(baked_triangles > Test::cube(20.).its.indices.size()); // the relief added geometry
+    CHECK(baked_triangles > Test::mesh(Test::TestMesh::cube_20x20x20).its.indices.size()); // the relief added geometry
 
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     config.set_deserialize_strict({ { "layer_height", "0.2" }, { "initial_layer_print_height", "0.2" } });
@@ -130,7 +130,7 @@ TEST_CASE("A baked texture slices the same whether or not the budget capped it",
     // simplification and the repair that follow it. Both have to leave a mesh the slicer can print.
     const int budget_k = GENERATE(10, 400);
 
-    Model        model  = Slic3r::Test::model("cube", Test::cube(20.));
+    Model        model  = Slic3r::Test::model("cube", Test::mesh(Test::TestMesh::cube_20x20x20));
     ModelVolume &volume = *model.objects.front()->volumes.front();
     paint_whole_volume(volume, /* depth */ 0.4f, /* tile */ 8.f);
     bake_into_volume(volume, budget_k, /* resolution */ 0.5f);

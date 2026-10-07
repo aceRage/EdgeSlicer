@@ -18,7 +18,6 @@
 #include "slic3r/GUI/GUI.hpp"
 #include "slic3r/GUI/GUI_App.hpp"
 #include "slic3r/GUI/GUI_ObjectList.hpp"
-#include "slic3r/GUI/GuiColor.hpp"
 #include "slic3r/GUI/ImGuiWrapper.hpp"
 #include "slic3r/GUI/MainFrame.hpp" // wxGetApp().mainframe, as the projector window's parent
 #include "slic3r/GUI/MsgDialog.hpp"
@@ -32,7 +31,6 @@
 #include "slic3r/GUI/Jobs/TextureDisplacementDebugJob.hpp"
 #include "slic3r/GUI/Jobs/TextureDisplacementPreviewJob.hpp"
 #include "slic3r/Utils/UndoRedo.hpp"
-#include "GLGizmoUtils.hpp"
 
 #include <glad/gl.h>
 #include <tbb/parallel_for.h>

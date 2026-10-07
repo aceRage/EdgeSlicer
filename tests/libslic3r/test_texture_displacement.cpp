@@ -1,7 +1,7 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
-#include <catch2/catch_all.hpp>
+#include <catch2/catch.hpp>
 
 #include <algorithm>
 #include <array>
