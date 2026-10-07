@@ -314,6 +314,9 @@ static const std::array<Color, size_t(EGCodeExtrusionRole::COUNT)> DEFAULT_EXTRU
     {   0,  59, 110 }, // Brim
     {   0,  64,   0 }, // SupportTransition
     { 128, 128, 128 }, // Mixed
+    // EDGE
+    { 125, 230, 219 }, // OverSupportPerimeter     (0.49, 0.90, 0.86 in the legacy viewer)
+    {  41, 194, 184 }, // BottomSurfaceOverSupport (0.16, 0.76, 0.72 in the legacy viewer)
 } };
 
 static const std::array<Color, size_t(EOptionType::COUNT)> DEFAULT_OPTIONS_COLORS{ {

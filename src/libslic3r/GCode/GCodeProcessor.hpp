@@ -189,6 +189,13 @@ inline bool is_bbl_special_tool_command(int tool_number)
             Vec3f arc_center_position{ Vec3f::Zero() };      // mm
             std::vector<Vec3f> interpolation_points;     // interpolation points of arc for drawing
 
+            // EDGE (libvgcode spike): what libvgcode needs per move, filled without changing any
+            // existing field. layer_id is 0-based and tag-based (as upstream #10735 stores it), so a
+            // move whose Z rides a ContourZ surface stays in its layer. times holds this move's own
+            // duration per time mode (not the elapsed time), summed from the planner blocks.
+            unsigned int layer_id{ 0 };
+            std::array<float, static_cast<size_t>(PrintEstimatedStatistics::ETimeMode::Count)> times{ 0.0f, 0.0f };
+
             float volumetric_rate() const { return feedrate * mm3_per_mm; }
             //BBS: new function to support arc move
             bool is_arc_move_with_interpolation_points() const {
@@ -433,6 +440,8 @@ inline bool is_bbl_special_tool_command(int tool_number)
             unsigned int g1_line_id{ 0 };
             unsigned int remaining_internal_g1_lines{ 0 };
             unsigned int layer_id{ 0 };
+            // EDGE (libvgcode spike): index into GCodeProcessorResult::moves of the move this block times.
+            unsigned int move_id{ 0 };
             float distance{ 0.0f }; // mm
             float acceleration{ 0.0f }; // mm/s^2
             float max_entry_speed{ 0.0f }; // mm/s
@@ -509,6 +518,9 @@ inline bool is_bbl_special_tool_command(int tool_number)
             CustomGCodeTime gcode_time;
             std::vector<TimeBlock> blocks;
             std::vector<G1LinesCacheItem> g1_times_cache;
+            // EDGE (libvgcode spike): (move index, seconds) for every processed block; finalize() adds
+            // them into MoveVertex::times. Kept separate so the existing totals are untouched.
+            std::vector<std::pair<unsigned int, float>> move_durations;
             std::array<float, static_cast<size_t>(EMoveType::Count)> moves_time;
             std::array<float, static_cast<size_t>(ExtrusionRole::erCount)> roles_time;
             std::vector<float> layers_time;

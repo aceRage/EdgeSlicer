@@ -149,7 +149,9 @@ public:
         EGCodeExtrusionRole::WipeTower, EGCodeExtrusionRole::Custom,
         // ORCA
         EGCodeExtrusionRole::BottomSurface, EGCodeExtrusionRole::InternalBridgeInfill, EGCodeExtrusionRole::Brim,
-        EGCodeExtrusionRole::SupportTransition, EGCodeExtrusionRole::Mixed
+        EGCodeExtrusionRole::SupportTransition, EGCodeExtrusionRole::Mixed,
+        // EDGE
+        EGCodeExtrusionRole::OverSupportPerimeter, EGCodeExtrusionRole::BottomSurfaceOverSupport
     }) const;
 
     bool is_option_visible(EOptionType type) const;

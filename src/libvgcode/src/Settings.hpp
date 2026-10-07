@@ -75,6 +75,9 @@ struct Settings
 		        true, // Brim
 		        true, // SupportTransition
 		        true, // Mixed
+		        // EDGE
+		        true, // OverSupportPerimeter
+		        true, // BottomSurfaceOverSupport
 		};
 };
 

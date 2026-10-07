@@ -156,6 +156,9 @@ enum class EGCodeExtrusionRole : uint8_t
       Brim,
       SupportTransition,
       Mixed,
+      // EDGE (EdgeSlicer over-support roles; appended so the ORCA indices stay unchanged)
+      OverSupportPerimeter,
+      BottomSurfaceOverSupport,
     COUNT
 };
 

@@ -250,6 +250,7 @@ void GCodeProcessor::TimeMachine::reset()
     gcode_time.reset();
     blocks = std::vector<TimeBlock>();
     g1_times_cache = std::vector<G1LinesCacheItem>();
+    move_durations = std::vector<std::pair<unsigned int, float>>();
     std::fill(moves_time.begin(), moves_time.end(), 0.0f);
     std::fill(roles_time.begin(), roles_time.end(), 0.0f);
     layers_time = std::vector<float>();
@@ -361,6 +362,7 @@ void GCodeProcessor::TimeMachine::calculate_time(size_t keep_last_n_blocks, floa
 
         time += block_time;
         gcode_time.cache += block_time;
+        move_durations.emplace_back(block.move_id, block_time);
         //BBS: don't calculate travel of start gcode into travel time
         if (!block.flags.prepare_stage || block.move_type != EMoveType::Travel)
             moves_time[static_cast<size_t>(block.move_type)] += block_time;
@@ -1365,6 +1367,18 @@ void GCodeProcessor::finalize(bool post_process)
         machine.calculate_time();
         if (gcode_time.needed && gcode_time.cache != 0.0f)
             gcode_time.times.push_back({ CustomGCode::ColorChange, gcode_time.cache });
+
+        // EDGE (libvgcode spike): per-move durations. A block's move_id is taken when the block is
+        // created, before a seam vertex may be stored ahead of the move itself, so a duration that
+        // lands on a Seam belongs to the move right after it.
+        for (const auto& [move_id, seconds] : machine.move_durations) {
+            size_t id = move_id;
+            while (id + 1 < m_result.moves.size() && m_result.moves[id].type == EMoveType::Seam)
+                ++id;
+            if (id < m_result.moves.size())
+                m_result.moves[id].times[i] += seconds;
+        }
+        machine.move_durations = std::vector<std::pair<unsigned int, float>>();
     }
 
     m_used_filaments.process_caches(this);
@@ -2820,6 +2834,7 @@ void GCodeProcessor::process_G1(const GCodeReader::GCodeLine& line, const std::o
         block.role = (type != EMoveType::Travel || m_extrusion_role == erCustom) ? m_extrusion_role : erNone;
         block.distance = distance;
         block.g1_line_id = m_g1_line_id;
+        block.move_id = static_cast<unsigned int>(m_result.moves.size());
         block.remaining_internal_g1_lines = remaining_internal_g1_lines.has_value() ? *remaining_internal_g1_lines : 0;
         block.layer_id = std::max<unsigned int>(1, m_layer_id);
         block.flags.prepare_stage = m_processing_start_custom_gcode;
@@ -3275,6 +3290,7 @@ void  GCodeProcessor::process_G2_G3(const GCodeReader::GCodeLine& line)
         block.role = (type != EMoveType::Travel || m_extrusion_role == erCustom) ? m_extrusion_role : erNone;
         block.distance = delta_xyz;
         block.g1_line_id = m_g1_line_id;
+        block.move_id = static_cast<unsigned int>(m_result.moves.size());
         block.layer_id = std::max<unsigned int>(1, m_layer_id);
         block.flags.prepare_stage = m_processing_start_custom_gcode;
 
@@ -5081,6 +5097,8 @@ void GCodeProcessor::store_move_vertex(EMoveType type, EMovePathType path_type)
         Vec3f(m_arc_center(0, 0) + m_x_offset, m_arc_center(1, 0) + m_y_offset, m_arc_center(2, 0)) + m_extruder_offsets[m_extruder_id],
         m_interpolation_points,
     });
+    // EDGE (libvgcode spike)
+    m_result.moves.back().layer_id = std::max<unsigned int>(1, m_layer_id) - 1;
 
     if (type == EMoveType::Seam) {
         m_seams_count++;
