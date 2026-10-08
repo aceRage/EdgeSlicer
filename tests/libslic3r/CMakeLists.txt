@@ -105,6 +105,7 @@ add_executable(${_TEST_NAME}_tests
 	test_project_preset_roundtrip.cpp
 	test_mutable_polygon.cpp
 	test_mutable_priority_queue.cpp
+	test_minimum_spanning_tree.cpp
 	test_gltf.cpp
 	test_obj_color_match.cpp
 	test_scale_to_volume.cpp
