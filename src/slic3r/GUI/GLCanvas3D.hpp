@@ -986,6 +986,9 @@ public:
     // EDGE (core profile): reads the GL error flag after a frame or thumbnail pass and logs it with the canvas
     // and the open gizmo (OpenGLManager::report_gl_errors()).
     void report_frame_gl_errors(const char* pass);
+    // EDGE (core profile): at a thumbnail's entry, logs as "before a thumbnail" what is already in the GL
+    // error flag, so the framebuffer set-up report that follows only covers the set-up.
+    void report_thumbnail_entry_gl_errors(unsigned int w, unsigned int h, bool for_picking);
     bool is_rendering_enabled()
     {
         return m_enable_render;

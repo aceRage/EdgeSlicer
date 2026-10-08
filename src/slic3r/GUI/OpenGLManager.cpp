@@ -23,8 +23,10 @@
 #include <wx/log.h>
 #include <wx/utils.h>
 
+#include <algorithm>
 #include <functional>
 #include <map>
+#include <set>
 #include <sstream>
 
 #ifdef __APPLE__
@@ -272,6 +274,8 @@ bool OpenGLManager::s_force_power_of_two_textures = false;
 OpenGLManager::EMultisampleState OpenGLManager::s_multisample = OpenGLManager::EMultisampleState::Unknown;
 OpenGLManager::EFramebufferType OpenGLManager::s_framebuffers_type = OpenGLManager::EFramebufferType::Unknown;
 unsigned int OpenGLManager::s_default_vao = 0;
+unsigned int OpenGLManager::s_fallback_texture_2d = 0;
+unsigned int OpenGLManager::s_fallback_texture_3d = 0;
 
 #ifdef __APPLE__
 // Part of hack to remove crash when closing the application on OSX 10.9.5 when building against newer wxWidgets
@@ -283,6 +287,9 @@ OpenGLManager::~OpenGLManager()
     m_shaders_manager.shutdown();
     // The VAO dies with its context; just forget it (the context may not be current here).
     s_default_vao = 0;
+    // Same for the fallback textures (1x1 each; they go with the context).
+    s_fallback_texture_2d = 0;
+    s_fallback_texture_3d = 0;
     if (s_active == this)
         s_active = nullptr;
 
@@ -400,6 +407,11 @@ bool OpenGLManager::init_gl(bool popup_error)
             s_compressed_textures_supported = true;
         else
             s_compressed_textures_supported = false;
+        // EDGE: the bed and logo textures take the asynchronous S3TC path only when this is on; say
+        // which one this machine takes, and whether the per-call GL checks are on.
+        BOOST_LOG_TRIVIAL(warning) << "OpenGL textures: S3TC compression " << (s_compressed_textures_supported ? "available" : "not available")
+                                   << ", max texture size " << s_gl_info.get_max_tex_size()
+                                   << "; GL debug checks (EDGESLICER_GL_DEBUG) " << (gl_debug_enabled() ? "ON" : "off");
 
         if (s_gl_info.is_version_greater_or_equal_to(3, 0)) {
             // ARB framebuffer objects are core from 3.0. A core profile (macOS) need not list the
@@ -652,7 +664,7 @@ void OpenGLManager::set_line_width(float width)
         glsafe(::glLineWidth(width));
 }
 
-static const char* gl_error_name(GLenum error)
+const char* OpenGLManager::gl_error_name(unsigned int error)
 {
     switch (error) {
     case GL_INVALID_ENUM:                  return "GL_INVALID_ENUM";
@@ -699,6 +711,182 @@ int OpenGLManager::report_gl_errors(const std::string& where, unsigned int first
             BOOST_LOG_TRIVIAL(warning) << "OpenGL error reports: limit reached, further errors are not logged this session";
     }
     return count;
+}
+
+bool OpenGLManager::gl_debug_enabled()
+{
+    return ::edge_gl_debug_calls;
+}
+
+void OpenGLManager::set_gl_debug_enabled(bool enabled)
+{
+    ::edge_gl_debug_calls = enabled;
+}
+
+unsigned int OpenGLManager::get_fallback_texture(unsigned int target)
+{
+    if (target != GL_TEXTURE_2D && target != GL_TEXTURE_3D)
+        return 0;
+    unsigned int& id = (target == GL_TEXTURE_2D) ? s_fallback_texture_2d : s_fallback_texture_3d;
+    if (id != 0)
+        return id;
+    if (glGenTextures == nullptr || (target == GL_TEXTURE_3D && glTexImage3D == nullptr))
+        return 0;
+
+    // Created on whichever unit is active, then that unit's binding is put back.
+    const GLenum binding = (target == GL_TEXTURE_2D) ? GL_TEXTURE_BINDING_2D : GL_TEXTURE_BINDING_3D;
+    GLint previous = 0;
+    ::glGetIntegerv(binding, &previous);
+    GLint previous_alignment = 4;
+    ::glGetIntegerv(GL_UNPACK_ALIGNMENT, &previous_alignment);
+    const unsigned char white[4] = { 255, 255, 255, 255 };
+    GLuint tex = 0;
+    ::glGenTextures(1, &tex);
+    ::glBindTexture(target, tex);
+    ::glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    // One level, no mipmaps: complete with GL_LINEAR and GL_TEXTURE_MAX_LEVEL 0.
+    ::glTexParameteri(target, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    ::glTexParameteri(target, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    ::glTexParameteri(target, GL_TEXTURE_MAX_LEVEL, 0);
+    if (target == GL_TEXTURE_2D)
+        ::glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, white);
+    else
+        ::glTexImage3D(GL_TEXTURE_3D, 0, GL_RGBA8, 1, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, white);
+    ::glPixelStorei(GL_UNPACK_ALIGNMENT, previous_alignment);
+    ::glBindTexture(target, static_cast<GLuint>(previous));
+    id = tex;
+    BOOST_LOG_TRIVIAL(info) << "OpenGL: " << (target == GL_TEXTURE_2D ? "2D" : "3D") << " fallback texture " << tex << " created";
+    return id;
+}
+
+static const char* gl_min_filter_name(GLint filter)
+{
+    switch (filter) {
+    case GL_NEAREST:                return "GL_NEAREST";
+    case GL_LINEAR:                 return "GL_LINEAR";
+    case GL_NEAREST_MIPMAP_NEAREST: return "GL_NEAREST_MIPMAP_NEAREST";
+    case GL_LINEAR_MIPMAP_NEAREST:  return "GL_LINEAR_MIPMAP_NEAREST";
+    case GL_NEAREST_MIPMAP_LINEAR:  return "GL_NEAREST_MIPMAP_LINEAR (the default)";
+    case GL_LINEAR_MIPMAP_LINEAR:   return "GL_LINEAR_MIPMAP_LINEAR";
+    default:                        return "unknown filter";
+    }
+}
+
+std::string OpenGLManager::describe_texture_incompleteness(unsigned int target, unsigned int unit)
+{
+    GLenum binding = 0;
+    if (target == GL_TEXTURE_2D)
+        binding = GL_TEXTURE_BINDING_2D;
+    else if (target == GL_TEXTURE_3D)
+        binding = GL_TEXTURE_BINDING_3D;
+    else
+        return {};
+
+    GLint previous_unit = GL_TEXTURE0;
+    ::glGetIntegerv(GL_ACTIVE_TEXTURE, &previous_unit);
+    ::glActiveTexture(GL_TEXTURE0 + unit);
+
+    std::ostringstream out;
+    GLint id = 0;
+    ::glGetIntegerv(binding, &id);
+    if (id == 0)
+        out << "texture 0 is bound there, nothing to sample";
+    else {
+        GLint min_filter = 0, base = 0, max_level = 1000;
+        ::glGetTexParameteriv(target, GL_TEXTURE_MIN_FILTER, &min_filter);
+        ::glGetTexParameteriv(target, GL_TEXTURE_BASE_LEVEL, &base);
+        ::glGetTexParameteriv(target, GL_TEXTURE_MAX_LEVEL, &max_level);
+        auto level_size = [target](GLint level, GLint& w, GLint& h, GLint& d) {
+            w = h = d = 0;
+            ::glGetTexLevelParameteriv(target, level, GL_TEXTURE_WIDTH, &w);
+            ::glGetTexLevelParameteriv(target, level, GL_TEXTURE_HEIGHT, &h);
+            if (target == GL_TEXTURE_3D)
+                ::glGetTexLevelParameteriv(target, level, GL_TEXTURE_DEPTH, &d);
+            else
+                d = (w > 0) ? 1 : 0;
+        };
+        GLint w0 = 0, h0 = 0, d0 = 0;
+        level_size(base, w0, h0, d0);
+        const bool mipmapped = min_filter != GL_NEAREST && min_filter != GL_LINEAR;
+        std::string problem;
+        if (w0 <= 0 || h0 <= 0 || d0 <= 0)
+            problem = "no image at its base level " + std::to_string(base);
+        else if (mipmapped) {
+            if (max_level < base)
+                problem = "GL_TEXTURE_MAX_LEVEL " + std::to_string(max_level) + " is below the base level";
+            else {
+                int largest = std::max(w0, std::max(h0, d0));
+                int levels  = 0;
+                while (largest > 1) {
+                    largest >>= 1;
+                    ++levels;
+                }
+                const GLint last = std::min<GLint>(base + levels, max_level);
+                for (GLint level = base + 1; level <= last && problem.empty(); ++level) {
+                    GLint w = 0, h = 0, d = 0;
+                    level_size(level, w, h, d);
+                    const int shift = level - base;
+                    const GLint ew = std::max(1, w0 >> shift), eh = std::max(1, h0 >> shift);
+                    const GLint ed = (target == GL_TEXTURE_3D) ? std::max(1, d0 >> shift) : 1;
+                    if (w <= 0)
+                        problem = "mipmap level " + std::to_string(level) + " of " + std::to_string(base) + ".." + std::to_string(last) + " is missing";
+                    else if (w != ew || h != eh || d != ed)
+                        problem = "mipmap level " + std::to_string(level) + " is " + std::to_string(w) + "x" + std::to_string(h) +
+                                  ", expected " + std::to_string(ew) + "x" + std::to_string(eh);
+                }
+                if (!problem.empty())
+                    problem = "a mipmap min filter needs every level up to GL_TEXTURE_MAX_LEVEL (" + std::to_string(max_level) + "): " + problem;
+            }
+        }
+        if (!problem.empty())
+            out << "texture " << id << " (" << w0 << "x" << h0 << (target == GL_TEXTURE_3D ? "x" + std::to_string(d0) : std::string())
+                << ", min filter " << gl_min_filter_name(min_filter) << ", levels " << base << ".." << max_level << ") is incomplete: " << problem;
+    }
+
+    ::glActiveTexture(static_cast<GLenum>(previous_unit));
+    return out.str();
+}
+
+void OpenGLManager::check_sampled_textures(const GLShaderProgram* shader, const char* what)
+{
+    if (!gl_debug_enabled() || shader == nullptr || shader->get_id() == 0)
+        return;
+    for (const GLShaderProgram::SamplerUniform& sampler : shader->get_samplers()) {
+        const unsigned int target = GLShaderProgram::sampler_target(sampler.type);
+        if (target == 0)
+            continue;
+        GLint unit = 0;
+        ::glGetUniformiv(shader->get_id(), sampler.location, &unit);
+        const std::string problem = describe_texture_incompleteness(target, static_cast<unsigned int>(unit));
+        if (problem.empty())
+            continue;
+        static std::set<std::string> logged;
+        static int                   reports_left = 80;
+        if (reports_left <= 0 || !logged.insert(shader->get_name() + "|" + sampler.name + "|" + what + "|" + problem).second)
+            continue;
+        --reports_left;
+        BOOST_LOG_TRIVIAL(warning) << "OpenGL texture check: " << what << " draws with shader '" << shader->get_name() << "', which samples unit "
+                                   << unit << " ('" << sampler.name << "', " << (target == GL_TEXTURE_2D ? "2D" : "3D") << "): " << problem
+                                   << " (macOS: \"unit " << unit << " GLD_TEXTURE_INDEX_" << (target == GL_TEXTURE_2D ? "2D" : "3D")
+                                   << " is unloadable\")";
+        if (reports_left == 0)
+            BOOST_LOG_TRIVIAL(warning) << "OpenGL texture check: limit reached, further problems are not logged this session";
+    }
+}
+
+void OpenGLManager::query_point_size_range(float range[2])
+{
+    range[0] = 1.0f;
+    range[1] = 1.0f;
+    GLfloat values[2] = { 1.0f, 1.0f };
+    // GL_POINT_SIZE_RANGE (== GL_SMOOTH_POINT_SIZE_RANGE) is in both profiles; the aliased range only
+    // in compatibility ones, where it is what the G-code viewer always used.
+    if (s_gl_info.is_core_profile())
+        ::glGetFloatv(GL_POINT_SIZE_RANGE, values);
+    else
+        ::glGetFloatv(GL_ALIASED_POINT_SIZE_RANGE, values);
+    range[0] = values[0];
+    range[1] = values[1];
 }
 
 } // namespace GUI

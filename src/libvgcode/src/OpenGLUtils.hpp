@@ -25,9 +25,14 @@ inline void glAssertRecentCall() { glAssertRecentCallImpl(__FILE__, __LINE__, __
 #define glsafe(cmd) do { cmd; glAssertRecentCallImpl(__FILE__, __LINE__, __FUNCTION__); } while (false)
 #define glcheck() do { glAssertRecentCallImpl(__FILE__, __LINE__, __FUNCTION__); } while (false)
 #else
+// EDGE: EDGESLICER_GL_DEBUG=1 in the environment checks glGetError() after every call in release
+// builds too and prints each failing call site once to stderr (the app's own GL code logs the same
+// way, see 3DScene.hpp). Off, one flag test per call.
+extern bool s_gl_debug_calls;
+extern void glReportRecentCallImpl(const char* file_name, unsigned int line, const char* function_name);
 inline void glAssertRecentCall() { }
-#define glsafe(cmd) cmd
-#define glcheck()
+#define glsafe(cmd) do { cmd; if (::libvgcode::s_gl_debug_calls) ::libvgcode::glReportRecentCallImpl(__FILE__, __LINE__, __FUNCTION__); } while (false)
+#define glcheck() do { if (::libvgcode::s_gl_debug_calls) ::libvgcode::glReportRecentCallImpl(__FILE__, __LINE__, __FUNCTION__); } while (false)
 #endif // HAS_GLSAFE
 
 class OpenGLWrapper

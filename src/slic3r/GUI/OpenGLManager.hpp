@@ -101,6 +101,9 @@ private:
     static OpenGLManager* s_active;
     // EDGE: see get_default_vao().
     static unsigned int s_default_vao;
+    // EDGE: see get_fallback_texture().
+    static unsigned int s_fallback_texture_2d;
+    static unsigned int s_fallback_texture_3d;
 
 public:
     OpenGLManager() = default;
@@ -126,6 +129,34 @@ public:
     // per-session budget so a broken frame cannot flood the log. first_error: one the caller already
     // read with glGetError() (0 = none). Returns the number of errors.
     static int report_gl_errors(const std::string& where, unsigned int first_error = 0);
+    static const char* gl_error_name(unsigned int error);
+
+    // EDGE: EDGESLICER_GL_DEBUG=1 in the environment (read once, at start-up). Release builds then check
+    // glGetError() after every glsafe() call and log the call site (3DScene.hpp), and every GLModel and
+    // ImGui draw checks that each texture its shader samples is complete (check_sampled_textures()).
+    // Off by default: one flag test per GL call. There is no KHR_debug on macOS core, so this is the
+    // way to name the offending call there.
+    static bool gl_debug_enabled();
+    static void set_gl_debug_enabled(bool enabled);
+
+    // EDGE (core profile): a 1x1 (or 1x1x1) opaque white texture for GL_TEXTURE_2D / GL_TEXTURE_3D, made
+    // on first use with the current context. Bound to a unit a shader samples while it has nothing of
+    // its own there (see GLShaderProgram::set_sampler_units), so the draw never samples texture 0: an
+    // incomplete texture, which macOS reports as "unit N GLD_TEXTURE_INDEX_2D is unloadable ... using
+    // zero texture". 0 for any other target or without GL.
+    static unsigned int get_fallback_texture(unsigned int target);
+    // Why the texture bound to `unit` for `target` (GL_TEXTURE_2D/3D) cannot be sampled: texture 0,
+    // no image at the base level, a mipmap min filter without every level up to GL_TEXTURE_MAX_LEVEL,
+    // or a wrongly sized level. Empty when it is complete. Restores the active texture unit.
+    static std::string describe_texture_incompleteness(unsigned int target, unsigned int unit);
+    // Only with gl_debug_enabled(): logs (once per shader, sampler and reason) every texture `shader`
+    // samples that describe_texture_incompleteness() rejects, naming `what` draws it.
+    static void check_sampled_textures(const GLShaderProgram* shader, const char* what);
+
+    // EDGE: the point size range on either profile. GL_ALIASED_POINT_SIZE_RANGE is gone from core
+    // profiles (GL_INVALID_ENUM on macOS: the G-code viewer's first initialisation asked for it at the
+    // first slice); GL_POINT_SIZE_RANGE is valid on both.
+    static void query_point_size_range(float range[2]);
 
     GLShaderProgram* get_shader(const std::string& shader_name) { return m_shaders_manager.get_shader(shader_name); }
     GLShaderProgram* get_current_shader() { return m_shaders_manager.get_current_shader(); }

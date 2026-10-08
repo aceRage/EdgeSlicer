@@ -1125,18 +1125,29 @@ void GCodeViewer::init(ConfigOptionMode mode, PresetBundle* preset_bundle)
         }
     }
 
+    // EDGE (core profile): this runs once, at the first slice, from load_gcode_preview() or an
+    // only_init render() - both outside any frame, so whatever it leaves in the GL error flag used to
+    // be reported by the next drain, "in a thumbnail's framebuffer set-up". Drain what came before it,
+    // then name each step.
+    OpenGLManager::report_gl_errors("before the G-code viewer's first initialisation");
+
     m_sequential_view.marker.init(filename);
+    OpenGLManager::report_gl_errors("in the G-code viewer's tool marker set-up");
 
     // initializes point sizes
-    std::array<int, 2> point_sizes;
-    ::glGetIntegerv(GL_ALIASED_POINT_SIZE_RANGE, point_sizes.data());
-    m_detected_point_sizes = { static_cast<float>(point_sizes[0]), static_cast<float>(point_sizes[1]) };
+    // EDGE (core profile): GL_ALIASED_POINT_SIZE_RANGE is not a core-profile query: glGetIntegerv()
+    // raised GL_INVALID_ENUM here on macOS (4.1 core) once per session, at the first slice.
+    std::array<float, 2> point_sizes{ 1.0f, 1.0f };
+    OpenGLManager::query_point_size_range(point_sizes.data());
+    m_detected_point_sizes = { point_sizes[0], point_sizes[1] };
+    OpenGLManager::report_gl_errors("in the G-code viewer's point size query");
 
     // BBS initialzed view_type items
     m_user_mode = mode;
     update_by_mode(m_user_mode);
 
     m_layers_slider->init_texture();
+    OpenGLManager::report_gl_errors("in the G-code viewer's layer slider textures");
 
     m_gl_data_initialized = true;
 
@@ -1144,6 +1155,7 @@ void GCodeViewer::init(ConfigOptionMode mode, PresetBundle* preset_bundle)
     {
         m_viewer.init(reinterpret_cast<const char*>(glGetString(GL_VERSION)));
         glcheck();
+        OpenGLManager::report_gl_errors("in libvgcode's initialisation");
     }
     catch (const std::exception& e)
     {

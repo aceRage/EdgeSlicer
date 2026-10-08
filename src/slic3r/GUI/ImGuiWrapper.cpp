@@ -3143,8 +3143,23 @@ void ImGuiWrapper::render_draw_data(ImDrawData *draw_data)
                 // Apply scissor/clipping rectangle (Y is inverted in OpenGL)
                 glsafe(::glScissor((int)clip_min.x, (int)(fb_height - clip_max.y), (int)(clip_max.x - clip_min.x), (int)(clip_max.y - clip_min.y)));
 
+                // EDGE (core profile): an image whose texture was never made (id 0) has nothing to
+                // sample: an incomplete texture, black on most drivers and "unit 0 GLD_TEXTURE_INDEX_2D
+                // is unloadable" on macOS. Skip it.
+                const GLuint tex_id = (GLuint)(intptr_t)pcmd->GetTexID();
+                if (tex_id == 0) {
+                    static bool logged = false;
+                    if (!logged) {
+                        logged = true;
+                        BOOST_LOG_TRIVIAL(warning) << "ImGui: skipped a draw with texture 0 (an image that was never loaded), "
+                                                   << pcmd->ElemCount << " indices; logged once";
+                    }
+                    continue;
+                }
                 // Bind texture, Draw
-                glsafe(::glBindTexture(GL_TEXTURE_2D, (GLuint)(intptr_t)pcmd->GetTexID()));
+                glsafe(::glBindTexture(GL_TEXTURE_2D, tex_id));
+                if (OpenGLManager::gl_debug_enabled())
+                    OpenGLManager::check_sampled_textures(shader, "ImGui");
                 glsafe(::glDrawElements(GL_TRIANGLES, (GLsizei)pcmd->ElemCount, sizeof(ImDrawIdx) == 2 ? GL_UNSIGNED_SHORT : GL_UNSIGNED_INT, (void*)(intptr_t)(pcmd->IdxOffset * sizeof(ImDrawIdx))));
             }
         }
