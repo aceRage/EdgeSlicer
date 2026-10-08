@@ -435,6 +435,41 @@ TEST_CASE("Asking for a nozzle size the U1 has no machine for falls back to the 
     CHECK(exact->name == "Snapmaker U1 (0.6 nozzle)");
 }
 
+TEST_CASE("On the mixed U1 an alias resolves to the variant for the slot's own nozzle", "[Preset][U1][MixedNozzle]")
+{
+    SnapmakerTree &t = tree();
+    AppConfig      config = t.wizard_enabled_u1();
+    PresetBundle::PresetPreferences preferred;
+    preferred.printer_model_id = U1_MODEL;
+    preferred.printer_variant  = "0.4+0.6";
+    t.bundle->load_selections(config, preferred);
+    REQUIRE(t.bundle->printers.get_selected_preset().name == "Snapmaker U1 (0.4+0.6 nozzle)");
+    for (Preset &p : t.bundle->filaments)
+        p.is_visible = true;
+    t.bundle->update_compatible(PresetSelectCompatibleType::Never);
+
+    // Both nozzle variants of one filament are compatible with the mixed machine and share one alias, so the
+    // plain lookup returns whichever was registered first. The slot lookup picks by the slot's nozzle.
+    const std::string plain = t.bundle->filaments.get_preset_name_by_alias("Snapmaker PLA SnapSpeed");
+    CHECK((plain == "Snapmaker PLA SnapSpeed @U1" || plain == "Snapmaker PLA SnapSpeed @U1 0.6 nozzle"));
+    for (size_t slot : { size_t(0), size_t(1) })
+        CHECK(t.bundle->get_filament_name_by_alias_for_slot("Snapmaker PLA SnapSpeed", slot) == "Snapmaker PLA SnapSpeed @U1");
+    for (size_t slot : { size_t(2), size_t(3) })
+        CHECK(t.bundle->get_filament_name_by_alias_for_slot("Snapmaker PLA SnapSpeed", slot) == "Snapmaker PLA SnapSpeed @U1 0.6 nozzle");
+    // A name that is not an alias comes back unchanged.
+    CHECK(t.bundle->get_filament_name_by_alias_for_slot("Snapmaker PLA SnapSpeed @U1 0.6 nozzle", 2) == "Snapmaker PLA SnapSpeed @U1 0.6 nozzle");
+
+    // A single-nozzle U1 behaves exactly as before: the slot makes no difference.
+    preferred.printer_variant = "0.4";
+    t.bundle->load_selections(config, preferred);
+    for (Preset &p : t.bundle->filaments)
+        p.is_visible = true;
+    t.bundle->update_compatible(PresetSelectCompatibleType::Never);
+    const std::string base = t.bundle->filaments.get_preset_name_by_alias("Snapmaker PLA SnapSpeed");
+    for (size_t slot = 0; slot < 4; ++slot)
+        CHECK(t.bundle->get_filament_name_by_alias_for_slot("Snapmaker PLA SnapSpeed", slot) == base);
+}
+
 TEST_CASE("Every U1 filament that fits the 0.4 or 0.6 machine also fits the mixed machine", "[Preset][U1][MixedNozzle]")
 {
     SnapmakerTree &t = tree();

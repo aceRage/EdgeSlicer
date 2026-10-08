@@ -631,9 +631,16 @@ public:
     PresetWithVendorProfile get_edited_preset_with_vendor_profile() const { return this->get_preset_with_vendor_profile(this->get_edited_preset()); }
 
     const std::string& 		get_preset_name_by_alias(const std::string& alias) const;
+    // Same, but only a preset `accept` takes. Several presets can share one alias when a machine is
+    // compatible with more than one nozzle variant of a filament (the U1 0.4+0.6): the plain lookup returns
+    // the first one registered, so a slot that needs the 0.6 variant would get the 0.4. Falls back to the
+    // plain lookup when `accept` takes none.
+    std::string 				get_preset_name_by_alias(const std::string& alias, const std::function<bool(const Preset&)>& accept) const;
 	const std::string*		get_preset_name_renamed(const std::string &old_name) const;
     bool                    is_alias_exist(const std::string &alias, Preset* preset = nullptr);
     void                    set_printer_hold_alias(const std::string &alias, Preset &preset);
+    // One info line per printer that saw repeated aliases, with the count; clears the counters.
+    void                    log_printer_alias_duplicates();
 
 	// used to update preset_choice from Tab
 	const std::deque<Preset>&	get_presets() const	{ return m_presets; }
@@ -857,6 +864,8 @@ private:
     // System profiles may have aliases. Map to the full profile name.
     std::map<std::string, std::vector<std::string>> m_map_alias_to_profile_name;
     std::unordered_map<std::string, std::unordered_set<std::string>> m_printer_hold_alias;
+    // printer name -> how many presets repeated an alias the printer already held (summarised once, not logged per preset)
+    std::map<std::string, size_t> m_printer_alias_duplicates;
     // Map from old system profile name to a current system profile name.
     std::map<std::string, std::string> m_map_system_profile_renamed;
     // Initially this preset contains a copy of the selected preset. Later on, this copy may be modified by the user.

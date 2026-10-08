@@ -89,3 +89,77 @@ TEST_CASE("A mixed report overwrites every head including head 1", "[NozzleSync]
     CHECK(NS::apply_per_head({ 0.2, 0.2, 0.2, 0.2 }, NS::plan({ "0.4", "?", "0.6", "0.6" }).per_head) ==
           std::vector<double>{ 0.4, 0.2, 0.6, 0.6 });
 }
+
+TEST_CASE("The reported heads select the matching U1 machine variant", "[NozzleSync][U1]")
+{
+    const std::vector<NS::MachineVariant> machines = {
+        { "0.2", { 0.2, 0.2, 0.2, 0.2 } }, { "0.4", { 0.4, 0.4, 0.4, 0.4 } }, { "0.4+0.6", { 0.4, 0.4, 0.6, 0.6 } },
+        { "0.6", { 0.6, 0.6, 0.6, 0.6 } }, { "0.8", { 0.8, 0.8, 0.8, 0.8 } } };
+    auto match = [&](std::initializer_list<const char *> reported) {
+        std::vector<std::string> r(reported.begin(), reported.end());
+        return NS::match_machine_variant(NS::plan(r).per_head, machines);
+    };
+    CHECK(match({ "0.4", "0.4", "0.4", "0.4" }) == "0.4");
+    CHECK(match({ "0.4", "0.4", "0.6", "0.6" }) == "0.4+0.6");
+    CHECK(match({ "0.8", "0.8", "0.8", "0.8" }) == "0.8");
+    // No machine for these: the caller falls back to a base machine and writes every head, head 1 included.
+    CHECK(match({ "0.6", "0.4", "0.4", "0.4" }).empty());
+    CHECK(match({ "0.4", "0.6", "0.4", "0.6" }).empty());
+    CHECK(match({ "0.2", "0.4", "0.4", "0.4" }).empty());
+    // An unreadable head matches anything.
+    CHECK(match({ "0.4", "?", "0.6", "0.6" }) == "0.4+0.6");
+    // Heads reported by a two-head machine do not match a four-head one.
+    CHECK(match({ "0.4", "0.4" }).empty());
+    CHECK(NS::match_machine_variant({}, machines).empty());
+    // For a mix with no machine: base machine + per-head write leaves no stale head 1.
+    CHECK(NS::apply_per_head({ 0.2, 0.2, 0.2, 0.2 }, NS::plan({ "0.6", "0.4", "0.4", "0.4" }).per_head) ==
+          std::vector<double>{ 0.6, 0.4, 0.4, 0.4 });
+}
+
+TEST_CASE("Apply-all on a mixed machine lists each filament once and gives each head its own nozzle variant", "[NozzleSync][U1]")
+{
+    const std::vector<NS::FilamentChoice> choices = {
+        { "Snapmaker PLA SnapSpeed @U1", "Snapmaker PLA SnapSpeed", 0.4 },
+        { "Snapmaker PLA SnapSpeed @U1 0.6 nozzle", "Snapmaker PLA SnapSpeed", 0.6 },
+        { "Snapmaker PLA @U1", "Snapmaker PLA", 0.4 },
+        { "Generic PLA", "Generic PLA", 0. },
+        { "Snapmaker TPU High-Flow @U1", "Snapmaker TPU High-Flow", 0.4 },
+        { "Snapmaker TPU High-Flow @U1 0.6 nozzle", "Snapmaker TPU High-Flow", 0.6 },
+    };
+    CHECK(NS::families(choices) == std::vector<std::string>{ "Snapmaker PLA SnapSpeed", "Snapmaker PLA", "Generic PLA", "Snapmaker TPU High-Flow" });
+
+    const std::vector<double> heads = { 0.4, 0.4, 0.6, 0.6 };
+    auto a = NS::assign_family_to_slots(choices, "Snapmaker PLA SnapSpeed", heads);
+    REQUIRE(a.size() == 4);
+    CHECK(a[0].preset == "Snapmaker PLA SnapSpeed @U1");
+    CHECK(a[1].preset == "Snapmaker PLA SnapSpeed @U1");
+    CHECK(a[2].preset == "Snapmaker PLA SnapSpeed @U1 0.6 nozzle");
+    CHECK(a[3].preset == "Snapmaker PLA SnapSpeed @U1 0.6 nozzle");
+
+    // A filament with no 0.6 variant: the 0.6 heads are skipped, not given the 0.4 preset.
+    a = NS::assign_family_to_slots(choices, "Snapmaker PLA", heads);
+    CHECK(a[0].preset == "Snapmaker PLA @U1");
+    CHECK(a[1].preset == "Snapmaker PLA @U1");
+    CHECK(a[2].skipped);
+    CHECK(a[3].skipped);
+    CHECK(a[2].preset.empty());
+
+    // A preset that fits any nozzle goes to every head.
+    a = NS::assign_family_to_slots(choices, "Generic PLA", heads);
+    for (const auto &s : a) {
+        CHECK_FALSE(s.skipped);
+        CHECK(s.preset == "Generic PLA");
+    }
+
+    // Unknown slot nozzle (a slot beyond the machine's heads): the first variant.
+    a = NS::assign_family_to_slots(choices, "Snapmaker PLA SnapSpeed", { 0.4, 0. });
+    CHECK(a[1].preset == "Snapmaker PLA SnapSpeed @U1");
+    // A family that is not offered at all skips everything.
+    a = NS::assign_family_to_slots(choices, "Nope", heads);
+    for (const auto &s : a)
+        CHECK(s.skipped);
+    // Equal nozzles on every head (a normal U1): each slot gets the variant for that size, as before.
+    a = NS::assign_family_to_slots(choices, "Snapmaker TPU High-Flow", { 0.6, 0.6, 0.6, 0.6 });
+    for (const auto &s : a)
+        CHECK(s.preset == "Snapmaker TPU High-Flow @U1 0.6 nozzle");
+}

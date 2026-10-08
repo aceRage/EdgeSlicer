@@ -41,5 +41,43 @@ Plan plan(const std::vector<std::string> &reported);
 // `changed` (optional) tells whether anything differed.
 std::vector<double> apply_per_head(const std::vector<double> &current, const std::vector<double> &reported_per_head, bool *changed = nullptr);
 
+// A machine variant of one printer model: its printer_variant ("0.4", "0.4+0.6") and the per-head nozzle
+// diameters of its preset.
+struct MachineVariant
+{
+    std::string         variant;
+    std::vector<double> nozzles;
+};
+
+// The machine variant whose per-head diameters are exactly what the printer reported ("0.4" x4 -> "0.4",
+// 0.4/0.4/0.6/0.6 -> "0.4+0.6"). A head whose report could not be read (0) matches anything; the machine must
+// have as many heads as were reported. Empty when no machine matches (a mix we have no machine for: the caller
+// picks a base machine and writes the heads over it with apply_per_head).
+std::string match_machine_variant(const std::vector<double> &reported_per_head, const std::vector<MachineVariant> &machines);
+
+// One filament preset a machine offers: its name, the family ("alias") the variants of one filament share,
+// and the nozzle diameter it was cut for (0 = fits any).
+struct FilamentChoice
+{
+    std::string name;
+    std::string family;
+    double      nozzle = 0.;
+};
+
+// The families in the order they first appear: the entries of an "apply to all" list, each filament once.
+std::vector<std::string> families(const std::vector<FilamentChoice> &choices);
+
+struct SlotAssignment
+{
+    std::string preset; // empty when skipped
+    bool        skipped = false;
+};
+
+// Apply a family to every filament slot: the variant cut for the slot's nozzle (`slot_nozzles[i]`, 0 =
+// unknown, takes the first variant), else one that fits any nozzle; a slot with no matching variant is
+// skipped (never given the wrong nozzle size).
+std::vector<SlotAssignment> assign_family_to_slots(const std::vector<FilamentChoice> &choices, const std::string &family,
+                                                   const std::vector<double> &slot_nozzles);
+
 } // namespace NozzleSync
 } // namespace Slic3r

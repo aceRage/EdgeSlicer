@@ -1734,6 +1734,7 @@ std::pair<PresetsConfigSubstitutions, std::string> PresetBundle::load_system_pre
         startup_profile_log("PresetBundle::load_system_presets_from_json end vendor_count=" + std::to_string(vendor_names.size()) +
                             " total_ms=" + std::to_string(total_ms));
     }
+    filaments.log_printer_alias_duplicates();
     return std::make_pair(std::move(substitutions), errors_cummulative);
 }
 
@@ -1927,6 +1928,15 @@ void PresetBundle::load_installed_printers(AppConfig &config)
 	this->update_system_maps();
     for (auto &preset : printers)
         preset.set_visible_from_appconfig(config);
+}
+
+std::string PresetBundle::get_filament_name_by_alias_for_slot(const std::string &alias, size_t filament_slot) const
+{
+    // filament_preset_fits_slot narrows nothing unless the machine really carries different nozzle sizes,
+    // so on every other machine this is the plain alias lookup.
+    return filaments.get_preset_name_by_alias(alias, [this, filament_slot](const Preset &preset) {
+        return filament_preset_fits_slot(preset, printers, unsigned(filament_slot + 1));
+    });
 }
 
 const std::string& PresetBundle::get_preset_name_by_alias( const Preset::Type& preset_type, const std::string& alias) const

@@ -2287,8 +2287,25 @@ Sidebar::Sidebar(Plater *parent)
                 // NozzleSync::plan: uniform when every readable head reports the same diameter (head 1
                 // like the others); then the machine for that diameter is selected and every head gets it.
                 const NozzleSync::Plan sync_plan = NozzleSync::plan(nozzle_diameters);
-                bool res = !sync_plan.uniform;
-                std::string headNozzleSize = sync_plan.uniform ? sync_plan.variant : nozzle_diameters[0];
+                // Every U1 is the one model "Snapmaker U1"; the nozzle size is only a variant of it. Take the
+                // variant whose heads are exactly what was reported (0.4 x4 -> "0.4", 0.4/0.4/0.6/0.6 -> "0.4+0.6").
+                // A mix there is no machine for keeps the picker + per-head write (head 1 included).
+                std::string matched_variant;
+                {
+                    std::vector<NozzleSync::MachineVariant> machines;
+                    const PresetBundle &pb = *wxGetApp().preset_bundle;
+                    const std::string   model = pb.printers.get_edited_preset().config.opt_string("printer_model");
+                    for (const Preset &printer : pb.printers) {
+                        if (!printer.is_system || printer.config.opt_string("printer_model") != model)
+                            continue;
+                        if (const auto *nd = printer.config.option<ConfigOptionFloats>("nozzle_diameter"))
+                            machines.push_back({ printer.config.opt_string("printer_variant"), nd->values });
+                    }
+                    matched_variant = NozzleSync::match_machine_variant(sync_plan.per_head, machines);
+                }
+                bool res = matched_variant.empty() && !sync_plan.uniform;
+                std::string headNozzleSize = !matched_variant.empty() ? matched_variant :
+                                             sync_plan.uniform        ? sync_plan.variant : nozzle_diameters[0];
 
                 if (res)
                 {
@@ -3349,16 +3366,44 @@ Sidebar::Sidebar(Plater *parent)
         ComboBox* all_combo = new ComboBox(apply_all_box, wxID_ANY, wxString(""), wxDefaultPosition, {-1, FromDIP(30)}, 0, nullptr, wxCB_READONLY);
         all_combo->SetToolTip(_L("Filament preset to apply to all filaments"));
 
-        auto populate_all_combo = [all_combo]() {
+        // A machine whose heads carry different nozzles is compatible with several nozzle variants of one
+        // filament. "Apply to all" then lists each filament once (its family) and gives every slot the
+        // variant cut for that slot's nozzle. Every other machine keeps the plain list of presets.
+        auto mixed_nozzles = []() {
+            PresetBundle* pb = wxGetApp().preset_bundle;
+            if (pb == nullptr)
+                return false;
+            const DynamicPrintConfig& cfg = pb->printers.get_edited_preset().config;
+            return supports_mixed_nozzle_diameters(cfg) && has_mixed_nozzle_diameters(cfg);
+        };
+        auto filament_choices = []() {
+            std::vector<NozzleSync::FilamentChoice> out;
+            PresetBundle* pb = wxGetApp().preset_bundle;
+            if (pb == nullptr)
+                return out;
+            for (const Preset& preset : pb->filaments) {
+                if (!preset.is_visible || !preset.is_compatible)
+                    continue;
+                out.push_back({ preset.name, preset.alias.empty() ? preset.name : preset.alias,
+                                filament_preset_nozzle_diameter(preset, pb->printers) });
+            }
+            return out;
+        };
+        auto populate_all_combo = [all_combo, mixed_nozzles, filament_choices]() {
             PresetBundle* pb = wxGetApp().preset_bundle;
             if (pb == nullptr)
                 return;
             wxString cur = all_combo->GetStringSelection();
             all_combo->Clear();
-            for (const Preset& preset : pb->filaments) {
-                if (!preset.is_visible || !preset.is_compatible)
-                    continue;
-                all_combo->AppendString(wxString::FromUTF8(preset.name));
+            if (mixed_nozzles()) {
+                for (const std::string& family : NozzleSync::families(filament_choices()))
+                    all_combo->AppendString(wxString::FromUTF8(family));
+            } else {
+                for (const Preset& preset : pb->filaments) {
+                    if (!preset.is_visible || !preset.is_compatible)
+                        continue;
+                    all_combo->AppendString(wxString::FromUTF8(preset.name));
+                }
             }
             int idx = all_combo->FindString(cur);
             if (idx != wxNOT_FOUND)
@@ -3378,21 +3423,58 @@ Sidebar::Sidebar(Plater *parent)
         Button* apply_all_btn = new Button(apply_all_box, _L("Apply All"));
         apply_all_btn->SetStyle(ButtonStyle::Confirm, ButtonType::Compact);
         apply_all_btn->SetToolTip(_L("Set all filaments to the selected preset"));
-        apply_all_btn->Bind(wxEVT_BUTTON, [this, all_combo](wxCommandEvent&) {
+        apply_all_btn->Bind(wxEVT_BUTTON, [this, all_combo, mixed_nozzles, filament_choices](wxCommandEvent&) {
             int sel = all_combo->GetSelection();
             if (sel == wxNOT_FOUND)
                 return;
             PresetBundle* pb = wxGetApp().preset_bundle;
             std::string preset_name = all_combo->GetString(sel).ToUTF8().data();
-            if (pb == nullptr || pb->filaments.find_preset(preset_name) == nullptr)
+            if (pb == nullptr)
                 return;
             const size_t count = p->combos_filament.size();
+            // Per slot: the preset to set, empty = leave the slot alone.
+            std::vector<std::string> slot_presets(count, preset_name);
+            std::vector<size_t>      skipped_slots;
+            double                   skipped_nozzle = 0.;
+            if (mixed_nozzles()) {
+                const auto* nd = pb->printers.get_edited_preset().config.option<ConfigOptionFloats>("nozzle_diameter");
+                std::vector<double> slot_nozzles(count, 0.);
+                for (size_t i = 0; i < count; ++i)
+                    if (nd != nullptr && i < nd->values.size())
+                        slot_nozzles[i] = nd->values[i];
+                const auto assigned = NozzleSync::assign_family_to_slots(filament_choices(), preset_name, slot_nozzles);
+                for (size_t i = 0; i < count; ++i) {
+                    slot_presets[i] = assigned[i].preset;
+                    if (assigned[i].skipped) {
+                        skipped_slots.push_back(i);
+                        skipped_nozzle = slot_nozzles[i];
+                    }
+                }
+                if (skipped_slots.size() == count) {
+                    wxGetApp().plater()->get_notification_manager()->push_notification(
+                        NotificationType::CustomNotification, NotificationManager::NotificationLevel::RegularNotificationLevel,
+                        _u8L("No variant of this filament fits the nozzles of any filament slot; nothing was changed."));
+                    return;
+                }
+            } else if (pb->filaments.find_preset(preset_name) == nullptr) {
+                return;
+            }
             // Mirror the per-combo path in Plater::priv::on_select_preset, once per slot.
             std::vector<bool> support_flags(count);
             for (size_t i = 0; i < count; ++i)
                 support_flags[i] = is_support_filament(int(i));
             for (size_t i = 0; i < count; ++i)
-                pb->set_filament_preset(i, preset_name);
+                if (!slot_presets[i].empty())
+                    pb->set_filament_preset(i, slot_presets[i]);
+            if (!skipped_slots.empty()) {
+                std::string slots;
+                for (size_t i : skipped_slots)
+                    slots += (slots.empty() ? "" : ", ") + std::to_string(i + 1);
+                wxGetApp().plater()->get_notification_manager()->push_notification(
+                    NotificationType::CustomNotification, NotificationManager::NotificationLevel::RegularNotificationLevel,
+                    (boost::format(_u8L("This filament has no variant for the %1% mm nozzle: filament slot(s) %2% were left unchanged.")) %
+                     format_diameter_to_str(skipped_nozzle) % slots).str());
+            }
             wxGetApp().plater()->update_project_dirty_from_presets();
             pb->export_selections(*wxGetApp().app_config);
             update_dynamic_filament_list();
@@ -9895,9 +9977,13 @@ void Sidebar::update_nozzle_settings(bool switch_machine)
             }
             preset->is_visible = true; // force visible
             
+            // Each head shows its OWN diameter: "0.4+0.6" names the machine, it is not a nozzle size.
+            const auto *target_nozzles = preset->config.option<ConfigOptionFloats>("nozzle_diameter");
             for (size_t i = 0; i < p->m_nozzle_diameter_lists.size(); ++i) {
-                //set all nozzle use the diameter
-                p->m_nozzle_diameter_lists[i]->SetValue(diameter + "mm");
+                wxString head = diameter;
+                if (target_nozzles != nullptr && !target_nozzles->values.empty())
+                    head = from_u8(format_diameter_to_str(target_nozzles->values[std::min(i, target_nozzles->values.size() - 1)]));
+                p->m_nozzle_diameter_lists[i]->SetValue(head + "mm");
             }
 
             wxGetApp().get_tab(Preset::TYPE_PRINTER)->select_preset(preset->name);
@@ -16107,6 +16193,11 @@ void Plater::priv::on_select_preset(wxCommandEvent &evt)
 
     std::string preset_name = wxGetApp().preset_bundle->get_preset_name_by_alias(preset_type,
         Preset::remove_suffix_modified(combo->GetString(selection).ToUTF8().data()));
+    // On a mixed-nozzle machine the combo shows one entry per filament (its alias) and the alias is shared by
+    // the nozzle variants: take the one cut for this slot's nozzle, not the first registered.
+    if (preset_type == Preset::TYPE_FILAMENT)
+        preset_name = wxGetApp().preset_bundle->get_filament_name_by_alias_for_slot(
+            Preset::remove_suffix_modified(combo->GetString(selection).ToUTF8().data()), size_t(idx));
 
     if (preset_type == Preset::TYPE_FILAMENT) {
         wxGetApp().preset_bundle->set_filament_preset(idx, preset_name);
