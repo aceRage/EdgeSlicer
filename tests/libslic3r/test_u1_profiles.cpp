@@ -273,13 +273,17 @@ TEST_CASE("The new Snapmaker-brand U1 filaments resolve to real material setting
     CHECK(type(filament_preset("Snapmaker PLA Lite @U1")) == "PLA");
     CHECK(type(filament_preset("Snapmaker PLA Eco @U1")) == "PLA");
     CHECK(type(filament_preset("Snapmaker PETG @U1")) == "PETG");
+    CHECK(type(filament_preset("Snapmaker PET @U1")) == "PET");
     CHECK(type(filament_preset("Snapmaker TPE @U1")) == "TPU");
     CHECK(type(filament_preset("Snapmaker TPU 95A @U1")) == "TPU");
     CHECK(type(filament_preset("Snapmaker TPU High-Flow @U1")) == "TPU");
-    CHECK(first(filament_preset("Snapmaker TPE @U1"), "nozzle_temperature") >= 230.);
-    CHECK(first(filament_preset("Snapmaker TPU High-Flow @U1"), "nozzle_temperature") >= 230.);
+    // Upstream's Snapmaker TPU base prints at 225 C (the library's generic TPU would be 240).
+    CHECK(first(filament_preset("Snapmaker TPE @U1"), "nozzle_temperature") == Approx(225.));
+    CHECK(first(filament_preset("Snapmaker TPU High-Flow @U1"), "nozzle_temperature") == Approx(225.));
+    CHECK(first(filament_preset("Snapmaker PET @U1"), "nozzle_temperature") == Approx(278.));
     CHECK(first(filament_preset("Snapmaker PLA @U1"), "nozzle_temperature") == Approx(220.));
-    CHECK(first(filament_preset("Snapmaker PETG @U1"), "nozzle_temperature_initial_layer") >= 240.);
+    CHECK(first(filament_preset("Snapmaker PETG @U1"), "nozzle_temperature") == Approx(245.));
+    CHECK(first(filament_preset("Snapmaker PETG @U1"), "nozzle_temperature_initial_layer") >= 250.);
     // TPU High-Flow is the one that also fits the 0.6 and 0.8 machines.
     const auto *compatible = filament_preset("Snapmaker TPU High-Flow @U1").config.option<ConfigOptionStrings>("compatible_printers");
     CHECK(std::find(compatible->values.begin(), compatible->values.end(), "Snapmaker U1 (0.8 nozzle)") != compatible->values.end());
