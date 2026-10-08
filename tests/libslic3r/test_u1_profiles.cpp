@@ -314,6 +314,25 @@ TEST_CASE("On the mixed U1 each head only offers filaments cut for its own nozzl
     }
 }
 
+TEST_CASE("The mixed U1 process is compatible with the mixed machine only and leaves the prime tower off", "[Preset][U1][MixedNozzle]")
+{
+    const Preset *process = tree().bundle->prints.find_preset("0.20mm Standard @Snapmaker U1 (0.4+0.6 nozzle)", false);
+    REQUIRE(process != nullptr);
+    const auto *compatible = process->config.option<ConfigOptionStrings>("compatible_printers");
+    REQUIRE(compatible != nullptr);
+    CHECK(compatible->values == std::vector<std::string>{ "Snapmaker U1 (0.4+0.6 nozzle)" });
+    // Print::validate refuses a prime tower across different nozzle diameters, so the process must not
+    // turn it on (a two-colour job on the mixed machine would otherwise refuse to slice).
+    CHECK_FALSE(process->config.opt_bool("enable_prime_tower"));
+    // Percent line widths follow each tool's own nozzle.
+    CHECK(process->config.option<ConfigOptionFloatOrPercent>("outer_wall_line_width")->percent);
+    // The 0.4 U1 processes do not list the mixed machine.
+    const Preset *p04 = tree().bundle->prints.find_preset("0.20mm Standard @Snapmaker U1 (0.4 nozzle)", false);
+    REQUIRE(p04 != nullptr);
+    const auto *c04 = p04->config.option<ConfigOptionStrings>("compatible_printers");
+    CHECK(std::find(c04->values.begin(), c04->values.end(), "Snapmaker U1 (0.4+0.6 nozzle)") == c04->values.end());
+}
+
 TEST_CASE("Every U1 filament that fits the 0.4 or 0.6 machine also fits the mixed machine", "[Preset][U1][MixedNozzle]")
 {
     SnapmakerTree &t = tree();

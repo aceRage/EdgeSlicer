@@ -5,7 +5,7 @@
     "from": "system",
     "setting_id": "SM_U1_0406_P020",
     "instantiation": "true",
-    "description": "Standard profile for the Snapmaker U1 mixed-nozzle configuration (T0/T1 = 0.4 mm, T2/T3 = 0.6 mm). Line widths are percentages of the nozzle diameter so each tool prints at its own width. Use T0/T1 for detail and outer walls, T2/T3 for fast infill or large structural features.",
+    "description": "Standard profile for the Snapmaker U1 mixed-nozzle configuration (T0/T1 = 0.4 mm, T2/T3 = 0.6 mm). Line widths are percentages of the nozzle diameter so each tool prints at its own width. Use T0/T1 for detail and outer walls, T2/T3 for fast infill or large structural features. The prime tower is off because it cannot be generated across different nozzle diameters.",
     "smooth_coefficient": "150",
     "overhang_totally_speed": "50",
     "compatible_printers": [
@@ -19,6 +19,7 @@
     "internal_solid_infill_line_width": "105%",
     "support_line_width": "105%",
     "top_surface_line_width": "105%",
+    "enable_prime_tower": "0",
     "ooze_prevention": "1",
     "prime_tower_width": "30",
     "prime_volume": "45",
