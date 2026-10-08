@@ -684,6 +684,17 @@ void PartPlate::render_logo_texture(GLTexture &logo_texture, GLModel& logo_buffe
 		logo_texture.send_compressed_data_to_gpu();
 	}
 
+	// EDGE (core profile): the bed type and logo textures are compressed in the background and drawn
+	// from the frame that creates them; until level 0 arrives there is no image to sample (macOS:
+	// "unit 0 GLD_TEXTURE_INDEX_2D is unloadable"). Skip those few frames instead of drawing black.
+	if (!logo_texture.ready_to_sample()) {
+		if (logo_texture.get_id() != 0) {
+			if (GLCanvas3D* canvas = wxGetApp().plater()->get_current_canvas3D(); canvas != nullptr)
+				canvas->request_extra_frame();
+		}
+		return;
+	}
+
 	if (logo_buffer.is_initialized()) {
 		GLShaderProgram* shader = wxGetApp().get_shader("printbed");
 		if (shader != nullptr) {
@@ -1100,6 +1111,9 @@ void PartPlate::render_height_limit(PartPlate::HeightLimitMode mode)
 
 void PartPlate::render_icon_texture(GLModel &buffer, GLTexture &texture)
 {
+	// EDGE (core profile): an icon that failed to load (id 0) has nothing to sample.
+	if (!texture.ready_to_sample())
+		return;
 	GLuint tex_id = (GLuint)texture.get_id();
 	glsafe(::glBindTexture(GL_TEXTURE_2D, tex_id));
     buffer.render();
@@ -1110,6 +1124,9 @@ void PartPlate::render_plate_name_texture()
 {
 	if (m_name_texture.get_id() == 0)
 		generate_plate_name_texture();
+	// EDGE (core profile): still no texture (the text could not be rendered): nothing to sample.
+	if (m_name_texture.get_id() == 0)
+		return;
 
 	GLuint tex_id = (GLuint)m_name_texture.get_id();
 	glsafe(::glBindTexture(GL_TEXTURE_2D, tex_id));
@@ -2983,16 +3000,21 @@ void PartPlate::render(const Transform3d& view_matrix, const Transform3d& projec
         render_grid(bottom, view_matrix, projection_matrix);
 
     if (!bottom && m_selected && !force_background_color) {
-        if (m_partplate_list)
-            render_logo(bottom, m_partplate_list->render_cali_logo && render_cali);
-        else
-            render_logo(bottom);
+        // EDGE: EDGESLICER_GL_SKIP=plate_logo / plate_icons (OpenGLManager::gl_skip).
+        if (!OpenGLManager::gl_skip("plate_logo")) {
+            if (m_partplate_list)
+                render_logo(bottom, m_partplate_list->render_cali_logo && render_cali);
+            else
+                render_logo(bottom);
+        }
         render_extruder_only_labels(bottom);
     }
 
-    render_icons(bottom, only_body, hover_id);
-    if (!force_background_color) {
-        render_only_numbers(bottom);
+    if (!OpenGLManager::gl_skip("plate_icons")) {
+        render_icons(bottom, only_body, hover_id);
+        if (!force_background_color) {
+            render_only_numbers(bottom);
+        }
     }
 
     glsafe(::glDisable(GL_DEPTH_TEST));

@@ -11,6 +11,9 @@
 #include <stdio.h>
 #include <cstring>
 #include <string>
+#include <cstdlib>
+#include <set>
+#include <utility>
 
 namespace libvgcode {
 
@@ -37,7 +40,49 @@ void glAssertRecentCallImpl(const char* file_name, unsigned int line, const char
     std::cout << "OpenGL error in " << file_name << ":" << line << ", function " << function_name << "() : " << (int)err << " - " << sErr << "\n";
     assert(false);
 }
+#else
+static bool read_gl_debug_env()
+{
+    const char* value = ::getenv("EDGESLICER_GL_DEBUG");
+    return value != nullptr && *value != '\0' && std::strcmp(value, "0") != 0 && std::strcmp(value, "off") != 0;
+}
+bool s_gl_debug_calls = read_gl_debug_env();
+
+void glReportRecentCallImpl(const char* file_name, unsigned int line, const char* function_name)
+{
+    const GLenum err = glGetError();
+    if (err == GL_NO_ERROR)
+        return;
+    // Drain the rest, then report each call site once (a per-frame error must not flood stderr).
+    for (int i = 0; i < 8 && glGetError() != GL_NO_ERROR; ++i) {}
+    static std::set<std::pair<std::string, unsigned int>> logged;
+    static int reports_left = 100;
+    if (reports_left <= 0 || !logged.insert({ std::string(file_name), line }).second)
+        return;
+    --reports_left;
+    char code[16];
+    snprintf(code, sizeof(code), "0x%04X", (unsigned int)err);
+    std::cerr << "EdgeSlicer OpenGL debug (libvgcode): GL error " << code << " at " << file_name << ":" << line << " (" << function_name
+              << "()), raised by that call or an unchecked GL call just before it\n";
+}
 #endif // HAS_GLSAFE
+
+DrawCheckHook s_draw_check_hook = nullptr;
+
+void set_sampler_units(unsigned int program, std::initializer_list<std::pair<const char*, int>> units)
+{
+    if (program == 0)
+        return;
+    GLint previous = 0;
+    glsafe(glGetIntegerv(GL_CURRENT_PROGRAM, &previous));
+    glsafe(glUseProgram(program));
+    for (const auto& [name, unit] : units) {
+        const GLint location = glGetUniformLocation(program, name);
+        if (location >= 0)
+            glsafe(glUniform1i(location, unit));
+    }
+    glsafe(glUseProgram(static_cast<GLuint>(previous)));
+}
 
 static const char* OPENGL_ES_PREFIXES[] = { "OpenGL ES-CM ", "OpenGL ES-CL ", "OpenGL ES ", nullptr };
 

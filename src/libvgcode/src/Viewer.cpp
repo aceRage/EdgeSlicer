@@ -4,6 +4,7 @@
 ///|/
 #include "../include/Viewer.hpp"
 #include "ViewerImpl.hpp"
+#include "OpenGLUtils.hpp"
 #include <array>
 #include <string>
 #include <utility>
@@ -22,6 +23,11 @@ Viewer::Viewer()
 Viewer::~Viewer()
 {
     delete m_impl;
+}
+
+void Viewer::set_draw_check_hook(void (*hook)(const char* what))
+{
+    s_draw_check_hook = hook;
 }
 
 void Viewer::init(const std::string& opengl_context_version)

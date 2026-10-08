@@ -796,6 +796,29 @@ void ViewerImpl::init(const std::string& opengl_context_version)
     m_uni_segments_saturation_id             = glGetUniformLocation(m_segments_shader_id, "saturation");
     m_uni_segments_light_top_dir_id          = glGetUniformLocation(m_segments_shader_id, "light_top_dir");
     m_uni_segments_layer_colors.init(m_segments_shader_id);
+    // EDGE (core profile): every sampler on its own unit from the start (see set_sampler_units()).
+    // render_segments() sets the same units again on every draw; shadow_map takes the unit the host
+    // will name in set_shadow_map(), 4 until then.
+    set_sampler_units(m_segments_shader_id, { { "position_tex", 0 }, { "height_width_angle_tex", 1 }, { "color_tex", 2 },
+                                              { "segment_index_tex", 3 }, { "shadow_map", m_shadow_map_texture_unit } });
+    // A complete 1x1 texture for shadow_map while the host has not set a shadow map. White: depth 1,
+    // the far plane, so nothing would be in shadow even if intensity were not 0.
+    {
+        GLint curr_bound_texture = 0;
+        glsafe(glGetIntegerv(GL_TEXTURE_BINDING_2D, &curr_bound_texture));
+        GLint curr_unpack_alignment = 0;
+        glsafe(glGetIntegerv(GL_UNPACK_ALIGNMENT, &curr_unpack_alignment));
+        const unsigned char white[4] = { 255, 255, 255, 255 };
+        glsafe(glGenTextures(1, &m_shadow_fallback_tex_id));
+        glsafe(glBindTexture(GL_TEXTURE_2D, m_shadow_fallback_tex_id));
+        glsafe(glPixelStorei(GL_UNPACK_ALIGNMENT, 1));
+        glsafe(glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST));
+        glsafe(glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST));
+        glsafe(glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0));
+        glsafe(glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, white));
+        glsafe(glPixelStorei(GL_UNPACK_ALIGNMENT, curr_unpack_alignment));
+        glsafe(glBindTexture(GL_TEXTURE_2D, static_cast<GLuint>(curr_bound_texture)));
+    }
     glcheck();
     assert(m_uni_segments.view_matrix != -1 &&
            m_uni_segments.projection_matrix != -1 &&
@@ -814,6 +837,9 @@ void ViewerImpl::init(const std::string& opengl_context_version)
     m_segments_caster_shader_id = init_shader("segments_shadow_caster", Segments_Shadow_Caster_Vertex_Shader, Segments_Shadow_Caster_Fragment_Shader);
 #endif // ENABLE_OPENGL_ES
     m_uni_segments_caster.init(m_segments_caster_shader_id);
+    // EDGE (core profile): see the segments program above.
+    set_sampler_units(m_segments_caster_shader_id, { { "position_tex", 0 }, { "height_width_angle_tex", 1 }, { "color_tex", 2 },
+                                                     { "segment_index_tex", 3 } });
     // The caster pulls its vertices from gl_VertexID, but a core profile needs a vertex array bound to draw.
     glsafe(glGenVertexArrays(1, &m_segments_caster_vao_id));
     glcheck();
@@ -836,6 +862,9 @@ void ViewerImpl::init(const std::string& opengl_context_version)
     // ORCA: section view
     m_uni_options_clipping_plane_id         = glGetUniformLocation(m_options_shader_id, "clipping_plane");
     m_uni_options_layer_colors.init(m_options_shader_id);
+    // EDGE (core profile): see the segments program above.
+    set_sampler_units(m_options_shader_id, { { "position_tex", 0 }, { "height_width_angle_tex", 1 }, { "color_tex", 2 },
+                                             { "segment_index_tex", 3 } });
     glcheck();
     assert(m_uni_options_view_matrix_id != -1 &&
            m_uni_options_projection_matrix_id != -1 &&
@@ -916,6 +945,10 @@ void ViewerImpl::shutdown()
     if (m_segments_caster_vao_id != 0) {
         glsafe(glDeleteVertexArrays(1, &m_segments_caster_vao_id));
         m_segments_caster_vao_id = 0;
+    }
+    if (m_shadow_fallback_tex_id != 0) {
+        glsafe(glDeleteTextures(1, &m_shadow_fallback_tex_id));
+        m_shadow_fallback_tex_id = 0;
     }
     m_initialized = false;
     OpenGLWrapper::unload_opengl();
@@ -1448,6 +1481,7 @@ void ViewerImpl::render_shadow_casters(const Mat4x4& view_matrix, const Mat4x4& 
 void ViewerImpl::set_shadow_map(int texture_unit, const Mat4x4& light_view_projection, float intensity, float texel_size)
 {
     m_shadow_map_texture_unit = texture_unit;
+    m_shadow_map_set = true;
     m_shadow_light_vp = light_view_projection;
     m_shadow_intensity = intensity;
     m_shadow_map_texel = texel_size;
@@ -2144,8 +2178,20 @@ void ViewerImpl::render_segments(const Mat4x4& view_matrix, const Mat4x4& projec
 
     glsafe(glDisable(GL_CULL_FACE));
 
+    // EDGE (core profile): no shadow map from the host yet: a complete 1x1 on its unit instead of
+    // texture 0 (see m_shadow_map_set). Restored below.
+    const bool bind_shadow_fallback = !m_rendering_shadow_casters && !m_shadow_map_set && m_shadow_fallback_tex_id != 0;
+    int curr_shadow_unit_texture = 0;
+    if (bind_shadow_fallback) {
+        glsafe(glActiveTexture(GL_TEXTURE0 + m_shadow_map_texture_unit));
+        glsafe(glGetIntegerv(GL_TEXTURE_BINDING_2D, &curr_shadow_unit_texture));
+        glsafe(glBindTexture(GL_TEXTURE_2D, m_shadow_fallback_tex_id));
+        glsafe(glActiveTexture(GL_TEXTURE0));
+    }
+
     auto draw = [this, &uni](size_t count) {
         glsafe(glUniform1i(uni.instances_count, static_cast<int>(count)));
+        check_draw(m_rendering_shadow_casters ? "libvgcode segments (shadow casters)" : "libvgcode segments");
         if (!m_rendering_shadow_casters) {
             m_segment_template.render(count);
             return;
@@ -2201,6 +2247,11 @@ void ViewerImpl::render_segments(const Mat4x4& view_matrix, const Mat4x4& projec
 
     draw(m_enabled_segments_count);
 #endif // ENABLE_OPENGL_ES
+
+    if (bind_shadow_fallback) {
+        glsafe(glActiveTexture(GL_TEXTURE0 + m_shadow_map_texture_unit));
+        glsafe(glBindTexture(GL_TEXTURE_2D, static_cast<GLuint>(curr_shadow_unit_texture)));
+    }
 
     if (curr_cull_face)
         glsafe(glEnable(GL_CULL_FACE));
@@ -2265,6 +2316,7 @@ void ViewerImpl::render_options(const Mat4x4& view_matrix, const Mat4x4& project
         glsafe(glBindTexture(GL_TEXTURE_2D, m_texture_data.get_colors_tex_id(i).first));
         glsafe(glActiveTexture(GL_TEXTURE3));
         glsafe(glBindTexture(GL_TEXTURE_2D, id));
+        check_draw("libvgcode options");
         m_option_template.render(count);
     }
 #else
@@ -2288,6 +2340,7 @@ void ViewerImpl::render_options(const Mat4x4& view_matrix, const Mat4x4& project
     glsafe(glBindTexture(GL_TEXTURE_BUFFER, m_enabled_options_tex_id));
     glsafe(glTexBuffer(GL_TEXTURE_BUFFER, GL_R32UI, m_enabled_options_buf_id));
 
+    check_draw("libvgcode options");
     m_option_template.render(m_enabled_options_count);
 #endif // ENABLE_OPENGL_ES
 
