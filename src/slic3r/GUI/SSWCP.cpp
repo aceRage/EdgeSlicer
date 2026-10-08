@@ -1,5 +1,6 @@
 // Implementation of web communication protocol for Slicer Studio
 #include "SSWCP.hpp"
+#include "libslic3r/NozzleSync.hpp"
 #include "FilamentColorUtils.hpp"
 #include "SpoolmanDialog.hpp"
 #include "GUI_App.hpp"
@@ -7900,54 +7901,10 @@ bool SSWCP::query_machine_info(std::shared_ptr<PrintHost>& host, std::string& ou
                     out_model = product_info["machine_type"].get<std::string>();
                 }
 
-                // get diameter
-                if(product_info.contains("nozzle_diameter")){
-                    {
-                        if (product_info["nozzle_diameter"].is_array()) {
-                            for (const auto& nozzle : product_info["nozzle_diameter"]) {
-                                // todo not sure is string
-                                if (nozzle.is_number()) {
-                                    double temp = nozzle.get<double>();
-                                    if (fabs(temp - 0.2) < 1e-6) {
-                                        out_nozzle_diameters.push_back("0.2");
-                                    } else if (fabs(temp - 0.4) < 1e-6) {
-                                        out_nozzle_diameters.push_back("0.4");
-                                    } else if (fabs(temp - 0.6) < 1e-6) {
-                                        out_nozzle_diameters.push_back("0.6");
-                                    } else if (fabs(temp - 0.8) < 1e-6) {
-                                        out_nozzle_diameters.push_back("0.8");
-                                    }
-
-                                } else {
-                                    std::string temp = nozzle.get<std::string>();
-                                    if (temp == "0.2" || temp == "0.4" || temp == "0.6" || temp == "0.8") {
-                                        out_nozzle_diameters.push_back(temp);
-                                    }
-                                }
-
-                            }
-                        } else {                            
-                            if (product_info["nozzle_diameter"].is_number()) {
-                                double temp = product_info["nozzle_diameter"].get<double>();
-                                if (fabs(temp - 0.2) < 1e-6) {
-                                    out_nozzle_diameters.push_back("0.2");
-                                } else if (fabs(temp - 0.4) < 1e-6) {
-                                    out_nozzle_diameters.push_back("0.2");
-                                } else if (fabs(temp - 0.6) < 1e-6) {
-                                    out_nozzle_diameters.push_back("0.2");
-                                } else if (fabs(temp - 0.8) < 1e-6) {
-                                    out_nozzle_diameters.push_back("0.2");
-                                }
-
-                            } else {
-                                std::string temp = product_info["nozzle_diameter"].get<std::string>();
-                                if (temp == "0.2" || temp == "0.4" || temp == "0.6" || temp == "0.8") {
-                                    out_nozzle_diameters.push_back(temp);
-                                }
-                            }
-                        }
-                    }
-                }
+                // get diameter (NozzleSync: array or scalar, number or string; a scalar 0.4 / 0.6 / 0.8 used
+                // to come back as "0.2")
+                if (product_info.contains("nozzle_diameter"))
+                    out_nozzle_diameters = NozzleSync::parse_reported_nozzles(product_info["nozzle_diameter"]);
                 if (product_info.contains("device_name")) {
                     device_name = product_info["device_name"].get<std::string>();
                 }

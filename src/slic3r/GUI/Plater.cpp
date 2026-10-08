@@ -9,6 +9,7 @@
 #include "MixedColorMatchHelpers.hpp"
 #include "libslic3r/FilamentColorLibrary.hpp" // kFullSpectrumSlotCount (recommended slot write-back)
 #include "libslic3r/Config.hpp"
+#include "libslic3r/NozzleSync.hpp"
 #include "libslic3r/BambuExtruderMap.hpp"
 #include "libslic3r/BambuFlowSupport.hpp"
 #include "libslic3r/MixedFilament.hpp"
@@ -712,32 +713,10 @@ void apply_reported_nozzle_diameters(const std::vector<std::string> &reported)
     if (nozzle == nullptr || nozzle->values.empty())
         return;
 
-    std::vector<double> diameters = nozzle->values;
-    const size_t        count     = std::min(diameters.size(), reported.size());
+    // NozzleSync is the pure part (tested): head 0 is treated like every other head, and a head whose
+    // report cannot be read keeps the base preset's value without shifting the others.
     bool                changed   = false;
-    for (size_t i = 0; i < count; ++i) {
-        std::string s = reported[i];
-        boost::algorithm::trim(s);
-        if (boost::iends_with(s, "mm")) {
-            s.resize(s.size() - 2);
-            boost::algorithm::trim(s);
-        }
-        double v = 0.;
-        try {
-            size_t used = 0;
-            v = std::stod(s, &used);
-            if (used != s.size())
-                continue; // trailing junk: not a plain number
-        } catch (const std::exception &) {
-            continue; // a head whose report we cannot read keeps the base preset's value
-        }
-        if (v <= 0. || v > 2.)
-            continue; // nonsense reading, not a nozzle diameter
-        if (std::abs(diameters[i] - v) > EPSILON) {
-            diameters[i] = v;
-            changed      = true;
-        }
-    }
+    std::vector<double> diameters = NozzleSync::apply_per_head(nozzle->values, NozzleSync::plan(reported).per_head, &changed);
     if (!changed)
         return;
 
@@ -2305,16 +2284,11 @@ Sidebar::Sidebar(Plater *parent)
                     return;
                 }
 
-                bool res = false;
-                std::string headNozzleSize = nozzle_diameters[0];
-                for (int i = 1; i < nozzle_diameters.size(); i++)
-                {
-                    if (headNozzleSize != nozzle_diameters[i])
-                    {
-                        res = true;
-                        break;
-                    }
-                }
+                // NozzleSync::plan: uniform when every readable head reports the same diameter (head 1
+                // like the others); then the machine for that diameter is selected and every head gets it.
+                const NozzleSync::Plan sync_plan = NozzleSync::plan(nozzle_diameters);
+                bool res = !sync_plan.uniform;
+                std::string headNozzleSize = sync_plan.uniform ? sync_plan.variant : nozzle_diameters[0];
 
                 if (res)
                 {

@@ -416,6 +416,25 @@ TEST_CASE("Generic PETG HF prints at 230 C on every U1 nozzle", "[Preset][U1]")
     }
 }
 
+TEST_CASE("Asking for a nozzle size the U1 has no machine for falls back to the 0.4, not the 0.2", "[Preset][U1]")
+{
+    SnapmakerTree &t = tree();
+    AppConfig      config = t.wizard_enabled_u1();
+    PresetBundle::PresetPreferences preferred;
+    preferred.printer_model_id = U1_MODEL;
+    preferred.printer_variant  = "0.2";
+    t.bundle->load_selections(config, preferred);
+    REQUIRE(t.bundle->printers.get_selected_preset().name == "Snapmaker U1 (0.2 nozzle)");
+    // The map of presets is ordered by name, so its first entry used to win: the 0.2 machine.
+    const Preset *fallback = t.bundle->get_similar_printer_preset({}, "0.9");
+    REQUIRE(fallback != nullptr);
+    CHECK(fallback->name == "Snapmaker U1 (0.4 nozzle)");
+    // A size that exists is still honoured.
+    const Preset *exact = t.bundle->get_similar_printer_preset({}, "0.6");
+    REQUIRE(exact != nullptr);
+    CHECK(exact->name == "Snapmaker U1 (0.6 nozzle)");
+}
+
 TEST_CASE("Every U1 filament that fits the 0.4 or 0.6 machine also fits the mixed machine", "[Preset][U1][MixedNozzle]")
 {
     SnapmakerTree &t = tree();

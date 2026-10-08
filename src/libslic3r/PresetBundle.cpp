@@ -2846,6 +2846,12 @@ Preset *PresetBundle::get_similar_printer_preset(std::string printer_model, std:
         if (preset.second->config.opt_string("printer_variant") == printer_variant)
             return preset.second;
     }
+    // Nothing matches: the map is ordered by name, so its first entry is the smallest nozzle ("0.2" for
+    // the U1). Fall back to the model's default variant (0.4) before that.
+    for (auto& preset : printer_presets) {
+        if (preset.second->config.opt_string("printer_variant") == SM_DEFAULT_PRINTER_VARIANT)
+            return preset.second;
+    }
     return printer_presets.begin()->second;
 }
 
