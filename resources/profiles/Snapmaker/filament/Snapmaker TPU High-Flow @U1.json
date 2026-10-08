@@ -5,36 +5,12 @@
     "name": "Snapmaker TPU High-Flow @U1",
     "filament_id": "5AXIg8WCdcd74S5v",
     "setting_id": "5AXIg8WCdcd74S5v",
-    "inherits": "fdm_filament_tpu",
+    "inherits": "Snapmaker TPU Flex @U1 base",
     "compatible_printers": [
         "Snapmaker U1 (0.4 nozzle)",
         "Snapmaker U1 (0.6 nozzle)",
         "Snapmaker U1 (0.8 nozzle)",
         "Snapmaker U1 (0.4+0.6 nozzle)"
-    ],
-    "filament_end_gcode": [
-        ""
-    ],
-    "filament_loading_speed_start": [
-        "35"
-    ],
-    "filament_loading_speed": [
-        "35"
-    ],
-    "filament_unloading_speed_start": [
-        "35"
-    ],
-    "filament_unloading_speed": [
-        "35"
-    ],
-    "filament_cooling_moves": [
-        "2"
-    ],
-    "filament_cooling_initial_speed": [
-        "35"
-    ],
-    "filament_cooling_final_speed": [
-        "60"
     ],
     "filament_flow_ratio": [
         "0.983",

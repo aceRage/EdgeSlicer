@@ -2,8 +2,8 @@
     "type": "filament",
     "from": "system",
     "instantiation": "false",
-    "name": "Snapmaker PLA Metal @U1 base",
-    "filament_id": "OFtybfNX",
+    "name": "Snapmaker TPU Flex @U1 base",
+    "filament_id": "OF65InrS",
     "inherits": "fdm_filament_common",
     "filament_vendor": [
         "Snapmaker"
@@ -27,25 +27,25 @@
         "Hot Plate"
     ],
     "hot_plate_temp": [
-        "60"
+        "40"
     ],
     "hot_plate_temp_initial_layer": [
-        "60"
+        "45"
     ],
     "overhang_fan_threshold": [
-        "0%"
+        "95%"
     ],
     "overhang_fan_speed": [
-        "100"
+        "70"
     ],
     "slow_down_for_layer_cooling": [
-        "1"
+        "0"
     ],
     "close_fan_the_first_x_layers": [
         "1"
     ],
     "filament_flow_ratio": [
-        "0.98"
+        "1"
     ],
     "reduce_fan_stop_start_freq": [
         "1"
@@ -54,19 +54,19 @@
         "100"
     ],
     "filament_cost": [
-        "90"
+        "80"
     ],
     "filament_density": [
-        "1.25"
+        "1.24"
     ],
     "filament_deretraction_speed": [
-        "nil"
+        "25"
     ],
     "filament_diameter": [
         "1.75"
     ],
     "filament_max_volumetric_speed": [
-        "16"
+        "2.8"
     ],
     "filament_minimal_purge_on_wipe_tower": [
         "0"
@@ -78,22 +78,22 @@
         "nil"
     ],
     "filament_retract_when_changing_layer": [
-        "nil"
+        "0"
     ],
     "filament_retraction_length": [
-        "1.2"
+        "0.5"
     ],
     "filament_z_hop": [
-        "nil"
+        "0"
     ],
     "filament_z_hop_types": [
-        "nil"
+        "Normal Lift"
     ],
     "filament_retract_restart_extra": [
         "nil"
     ],
     "filament_retraction_speed": [
-        "60"
+        "25"
     ],
     "filament_wipe": [
         "nil"
@@ -132,25 +132,25 @@
         "0"
     ],
     "nozzle_temperature_initial_layer": [
-        "220"
+        "230"
     ],
     "nozzle_temperature": [
-        "220"
+        "225"
     ],
     "temperature_vitrification": [
-        "154"
+        "138"
     ],
     "full_fan_speed_layer": [
         "0"
     ],
     "fan_max_speed": [
-        "100"
+        "70"
     ],
     "fan_min_speed": [
-        "100"
+        "70"
     ],
     "slow_down_min_speed": [
-        "15"
+        "10"
     ],
     "slow_down_layer_time": [
         "8"
@@ -159,7 +159,7 @@
         "0"
     ],
     "pressure_advance": [
-        "0.02"
+        "0.01"
     ],
     "cool_plate_temp": [
         "0"
@@ -183,15 +183,18 @@
         ""
     ],
     "filament_type": [
-        "PLA"
-    ],
-    "nozzle_temperature_range_low": [
-        "190"
-    ],
-    "nozzle_temperature_range_high": [
-        "240"
+        "TPU"
     ],
     "additional_cooling_fan_speed": [
         "70"
+    ],
+    "nozzle_temperature_range_low": [
+        "220"
+    ],
+    "nozzle_temperature_range_high": [
+        "250"
+    ],
+    "filament_notes": [
+        "!! It needs to be dried before use.\nSunlu TPU 95A\n"
     ]
 }

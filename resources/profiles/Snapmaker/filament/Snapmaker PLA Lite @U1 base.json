@@ -4,6 +4,7 @@
     "instantiation": "false",
     "name": "Snapmaker PLA Lite @U1 base",
     "filament_id": "OFEOnBj6",
+    "inherits": "fdm_filament_common",
     "filament_end_gcode": [
         ""
     ],
@@ -120,5 +121,8 @@
     ],
     "filament_start_gcode": [
         "; filament start gcode\n"
+    ],
+    "enable_pressure_advance": [
+        "0"
     ]
 }

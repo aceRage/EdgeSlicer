@@ -2045,6 +2045,10 @@
       "sub_path": "filament/Snapmaker PLA Metal @U1.json"
     },
     {
+      "name": "Snapmaker TPU Flex @U1 base",
+      "sub_path": "filament/Snapmaker TPU Flex @U1 base.json"
+    },
+    {
       "name": "Snapmaker TPE @U1",
       "sub_path": "filament/Snapmaker TPE @U1.json"
     },

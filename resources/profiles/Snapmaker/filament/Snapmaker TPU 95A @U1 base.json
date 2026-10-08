@@ -4,6 +4,7 @@
     "instantiation": "false",
     "name": "Snapmaker TPU 95A @U1 base",
     "filament_id": "OFvmwTZE",
+    "inherits": "fdm_filament_common",
     "overhang_fan_threshold": [
         "95%"
     ],
@@ -147,5 +148,8 @@
     ],
     "filament_start_gcode": [
         "; filament start gcode\n"
+    ],
+    "enable_pressure_advance": [
+        "0"
     ]
 }
