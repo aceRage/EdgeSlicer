@@ -570,6 +570,39 @@ bool is_machine_flow_variant_option(const std::string &key);
 
 size_t get_config_idx(const ConfigBase &config, ConfigFlowDomain domain, unsigned int filament_id = 0);
 
+// Bambu's per-extruder-variant layout for printer settings: printer_extruder_id / printer_extruder_variant
+// name one slot per (extruder, variant) pair, extruder-major, and the retraction settings below carry one
+// value per slot (upstream Orca's Custom MyToolChanger: 5 extruders x 3 variants = 15 values).
+bool is_printer_extruder_variant_option(const std::string &key);
+
+// The slots of each extruder in that layout (extruder e's at [e]), or empty when the config has none:
+// printer_extruder_id / printer_extruder_variant missing or of different sizes, ids not grouped as
+// 1, 1, .., 2, 2, .., n, or a single variant per extruder (where per-variant and per-extruder vectors are
+// the same thing).
+std::vector<std::vector<size_t>> printer_extruder_variant_slots(const ConfigBase &config);
+
+// The slot of extruder `extruder_idx`'s current variant (extruder_type + nozzle_volume_type), its first
+// slot when that variant is not listed, or -1 when printer_extruder_id / printer_extruder_variant differ
+// in size or do not list the extruder.
+int printer_extruder_variant_slot(const ConfigBase &config, size_t extruder_idx);
+
+// The G-code reads per-extruder settings by tool index. In a multi-extruder printer config
+// (single_extruder_multi_material off) in the per-variant layout, cut every per-variant vector down to
+// one value per extruder: each extruder's current variant, or, on a Bambu nozzle-grouping machine
+// (support_different_extruders), the first value per extruder index as the slicer has always read them
+// there. Leaves any other config alone.
+class DynamicPrintConfig;
+void resolve_printer_extruder_variants(DynamicPrintConfig &config);
+
+// The slot resolve_printer_extruder_variants reads for each extruder, or empty when it leaves the config alone.
+std::vector<size_t> printer_extruder_variant_sources(const DynamicPrintConfig &config);
+
+// The index of extruder `extruder_idx`'s value of `key` that the slicer uses: its slot from `sources`
+// (printer_extruder_variant_sources) when `key` is a per-variant vector of the layout's length, else
+// `extruder_idx`. The printer tab binds its extruder pages to it.
+size_t printer_extruder_variant_value_index(const ConfigBase &config, const std::vector<size_t> &sources, const std::string &key,
+                                            size_t extruder_idx);
+
 template<typename VectorOption>
 inline auto get_value_at(const ConfigBase &config, const VectorOption &opt, ConfigFlowDomain domain, unsigned int filament_id = 0)
     -> decltype(opt.get_at(0))
@@ -987,7 +1020,7 @@ public:
     // Ultra (dual-nozzle): returns true when the printer's extruders carry more than one distinct
     // extruder variant (H2D/H2C/X2D), i.e. it is a multi-nozzle grouping machine. extruder_count is
     // filled with the nozzle count. Single-nozzle machines and same-variant toolchangers (U1) → false.
-    bool support_different_extruders(int& extruder_count);
+    bool support_different_extruders(int& extruder_count) const;
 };
 
 void handle_legacy_sla(DynamicPrintConfig &config);
