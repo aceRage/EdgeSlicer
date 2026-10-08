@@ -1156,6 +1156,9 @@ void GCodeViewer::init(ConfigOptionMode mode, PresetBundle* preset_bundle)
         m_viewer.init(reinterpret_cast<const char*>(glGetString(GL_VERSION)));
         glcheck();
         OpenGLManager::report_gl_errors("in libvgcode's initialisation");
+        // EDGE: EDGESLICER_GL_DEBUG checks libvgcode's draws too: they bypass GLModel and ImGui.
+        if (OpenGLManager::gl_debug_enabled())
+            libvgcode::Viewer::set_draw_check_hook(&OpenGLManager::check_current_program_samplers);
     }
     catch (const std::exception& e)
     {
@@ -1753,17 +1756,20 @@ void GCodeViewer::reset()
 void GCodeViewer::render(int canvas_width, int canvas_height, int right_margin)
 {
     glsafe(::glEnable(GL_DEPTH_TEST));
-    render_shells(canvas_width, canvas_height);
+    // EDGE: EDGESLICER_GL_SKIP leaves parts out, to bisect a driver message (OpenGLManager::gl_skip).
+    if (!OpenGLManager::gl_skip("shells"))
+        render_shells(canvas_width, canvas_height);
 
     if (m_viewer.get_extrusion_roles().empty())
         return;
 
     // EDGE (#642): the summary-only load (memory guard) has no toolpaths to draw.
-    if (!m_no_render_path)
+    if (!m_no_render_path && !OpenGLManager::gl_skip("libvgcode"))
         render_toolpaths();
 
     float legend_height = 0.0f;
-    render_legend(legend_height, canvas_width, canvas_height, right_margin);
+    if (!OpenGLManager::gl_skip("imgui_legend"))
+        render_legend(legend_height, canvas_width, canvas_height, right_margin);
 
     if (m_user_mode != wxGetApp().get_mode()) {
         update_by_mode(wxGetApp().get_mode());
@@ -1779,7 +1785,8 @@ void GCodeViewer::render(int canvas_width, int canvas_height, int right_margin)
     m_sequential_view.marker.set_world_position(libvgcode::convert(curr_vertex.position));
     m_sequential_view.marker.set_z_offset(m_z_offset + 0.5f);
     // BBS fixed buttom margin. m_moves_slider.pos_y
-    m_sequential_view.render(!m_no_render_path, legend_height, &m_viewer, m_viewer.get_current_vertex().gcode_id, canvas_width, canvas_height - bottom_margin * m_scale, right_margin * m_scale, m_viewer.get_view_type());
+    if (!OpenGLManager::gl_skip("marker"))
+        m_sequential_view.render(!m_no_render_path, legend_height, &m_viewer, m_viewer.get_current_vertex().gcode_id, canvas_width, canvas_height - bottom_margin * m_scale, right_margin * m_scale, m_viewer.get_view_type());
 
 #if VGCODE_ENABLE_COG_AND_TOOL_MARKERS
     if (is_legend_shown()) {
@@ -1817,7 +1824,8 @@ void GCodeViewer::render(int canvas_width, int canvas_height, int right_margin)
 #endif // VGCODE_ENABLE_COG_AND_TOOL_MARKERS
 
     //BBS render slider
-    render_slider(canvas_width, canvas_height);
+    if (!OpenGLManager::gl_skip("slider"))
+        render_slider(canvas_width, canvas_height);
 }
 
 // EDGE (phone / remote preview): the toolpaths alone, with the camera the caller put on the Plater.

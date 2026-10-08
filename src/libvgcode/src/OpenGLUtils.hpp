@@ -12,7 +12,9 @@
 #include <glad/gl.h>
 #endif // ENABLE_OPENGL_ES
 
+#include <initializer_list>
 #include <string>
+#include <utility>
 
 namespace libvgcode {
 #ifndef NDEBUG
@@ -34,6 +36,19 @@ inline void glAssertRecentCall() { }
 #define glsafe(cmd) do { cmd; if (::libvgcode::s_gl_debug_calls) ::libvgcode::glReportRecentCallImpl(__FILE__, __LINE__, __FUNCTION__); } while (false)
 #define glcheck() do { if (::libvgcode::s_gl_debug_calls) ::libvgcode::glReportRecentCallImpl(__FILE__, __LINE__, __FUNCTION__); } while (false)
 #endif // HAS_GLSAFE
+
+// EDGE: a host hook called right before each libvgcode draw, with the draw's name; the program
+// that draws is bound. EdgeSlicer sets it with EDGESLICER_GL_DEBUG=1 to check every sampler of that
+// program against what is bound on its unit (Viewer::set_draw_check_hook()). nullptr: no check.
+using DrawCheckHook = void (*)(const char* what);
+extern DrawCheckHook s_draw_check_hook;
+inline void check_draw(const char* what) { if (s_draw_check_hook != nullptr) s_draw_check_hook(what); }
+
+// EDGE (core profile): sets sampler uniforms of `program` to fixed texture units right after
+// linking. A sampler left at its default unit 0 shares it with the samplerBuffer bound there
+// (position_tex): macOS then reports "unit 0 GLD_TEXTURE_INDEX_2D is unloadable" for a sampler2D.
+// Restores the bound program. Names the linker dropped are skipped.
+void set_sampler_units(unsigned int program, std::initializer_list<std::pair<const char*, int>> units);
 
 class OpenGLWrapper
 {

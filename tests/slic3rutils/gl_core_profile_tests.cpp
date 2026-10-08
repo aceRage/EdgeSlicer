@@ -34,6 +34,8 @@
 #include <sstream>
 
 #include <array>
+#include <map>
+#include <set>
 #include <chrono>
 #include <memory>
 #include <string>
@@ -132,6 +134,48 @@ GLenum drain_gl_errors()
             first = e;
     }
     return first;
+}
+
+// What libvgcode's draw-check hook saw: one line per draw whose program samples something it cannot
+// (a 2D/3D sampler on an incomplete texture or texture 0, a buffer sampler with nothing bound, or two
+// samplers of different types on one unit). macOS reports each as "unit N ... is unloadable".
+std::vector<std::string> s_vgcode_draw_problems;
+int                      s_vgcode_draws_checked = 0;
+
+void check_vgcode_draw(const char* what)
+{
+    ++s_vgcode_draws_checked;
+    GLint program = 0;
+    glGetIntegerv(GL_CURRENT_PROGRAM, &program);
+    if (program == 0) {
+        s_vgcode_draw_problems.push_back(std::string(what) + ": no program bound");
+        return;
+    }
+    std::map<GLint, std::set<unsigned int>> targets_by_unit;
+    for (const GLShaderProgram::SamplerUniform& sampler : GLShaderProgram::list_samplers(GLuint(program))) {
+        const unsigned int target = GLShaderProgram::sampler_target(sampler.type);
+        if (target == 0)
+            continue;
+        GLint unit = -1;
+        glGetUniformiv(GLuint(program), sampler.location, &unit);
+        targets_by_unit[unit].insert(target);
+        std::string problem;
+        if (target == GL_TEXTURE_BUFFER) {
+            GLint previous = GL_TEXTURE0, id = 0;
+            glGetIntegerv(GL_ACTIVE_TEXTURE, &previous);
+            glActiveTexture(GL_TEXTURE0 + unit);
+            glGetIntegerv(GL_TEXTURE_BINDING_BUFFER, &id);
+            glActiveTexture(GLenum(previous));
+            if (id == 0)
+                problem = "no buffer texture bound";
+        } else
+            problem = OpenGLManager::describe_texture_incompleteness(target, GLuint(unit));
+        if (!problem.empty())
+            s_vgcode_draw_problems.push_back(std::string(what) + ": '" + sampler.name + "' on unit " + std::to_string(unit) + ": " + problem);
+    }
+    for (const auto& [unit, targets] : targets_by_unit)
+        if (targets.size() > 1)
+            s_vgcode_draw_problems.push_back(std::string(what) + ": samplers of different types share unit " + std::to_string(unit));
 }
 
 GLint bound_vao()
@@ -536,6 +580,19 @@ TEST_CASE("OpenGL core profile: start-up, shaders, GLModel, plain VBO and dashed
             CHECK(drain_gl_errors() == GL_NO_ERROR);
             viewer.set_view_type(libvgcode::EViewType::FeatureType);
 
+            // Every libvgcode draw checks what its program samples. Nothing of ours on any unit, the
+            // way GCodeViewer leaves it (no set_shadow_map() from the host): the segments program's
+            // shadow_map sampler2D must still see a complete texture, and must not share unit 0 with
+            // the position_tex samplerBuffer.
+            for (GLenum unit = GL_TEXTURE0; unit <= GL_TEXTURE5; ++unit) {
+                glActiveTexture(unit);
+                glBindTexture(GL_TEXTURE_2D, 0);
+            }
+            glActiveTexture(GL_TEXTURE0);
+            s_vgcode_draw_problems.clear();
+            s_vgcode_draws_checked = 0;
+            libvgcode::Viewer::set_draw_check_hook(&check_vgcode_draw);
+
             // Top-down orthographic camera over X/Y 0..70 mm.
             Matrix4f view = Matrix4f::Identity();
             view(2, 3) = -100.f;
@@ -552,6 +609,17 @@ TEST_CASE("OpenGL core profile: start-up, shaders, GLModel, plain VBO and dashed
             scene.clear();
             glEnable(GL_DEPTH_TEST);
             viewer.render(libvgcode::convert(view), libvgcode::convert(proj));
+            libvgcode::Viewer::set_draw_check_hook(nullptr);
+            CHECK(s_vgcode_draws_checked > 0);
+            for (const std::string& problem : s_vgcode_draw_problems)
+                FAIL_CHECK(problem);
+            CHECK(s_vgcode_draw_problems.empty());
+            // The shadow map fallback is put back: unit 4 has what it had before (nothing).
+            glActiveTexture(GL_TEXTURE4);
+            GLint unit4 = -1;
+            glGetIntegerv(GL_TEXTURE_BINDING_2D, &unit4);
+            glActiveTexture(GL_TEXTURE0);
+            CHECK(unit4 == 0);
             glDisable(GL_DEPTH_TEST);
             CHECK(drain_gl_errors() == GL_NO_ERROR);
             // libvgcode restores the VAO it found bound (the app's default VAO).

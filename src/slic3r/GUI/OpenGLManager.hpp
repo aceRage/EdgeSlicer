@@ -152,6 +152,16 @@ public:
     // Only with gl_debug_enabled(): logs (once per shader, sampler and reason) every texture `shader`
     // samples that describe_texture_incompleteness() rejects, naming `what` draws it.
     static void check_sampled_textures(const GLShaderProgram* shader, const char* what);
+    // The same for the program bound now (GL_CURRENT_PROGRAM), whoever made it: the hook libvgcode
+    // calls before each of its draws (libvgcode::Viewer::set_draw_check_hook). Both also flag a texture
+    // unit that two samplers of different types read (a sampler2D and a samplerBuffer, say): an
+    // invalid program at draw time, which macOS reports as an "unloadable" texture on that unit.
+    static void check_current_program_samplers(const char* what);
+
+    // EDGE: EDGESLICER_GL_SKIP=<part>[,<part>...] (read once) leaves parts of the frame out, to bisect a
+    // driver message by elimination: libvgcode, imgui_legend, imgui (every ImGui draw), slider,
+    // marker, shells, plate_logo, plate_icons. Logged at start-up.
+    static bool gl_skip(const char* part);
 
     // EDGE: the point size range on either profile. GL_ALIASED_POINT_SIZE_RANGE is gone from core
     // profiles (GL_INVALID_ENUM on macOS: the G-code viewer's first initialisation asked for it at the

@@ -67,6 +67,23 @@ void glReportRecentCallImpl(const char* file_name, unsigned int line, const char
 }
 #endif // HAS_GLSAFE
 
+DrawCheckHook s_draw_check_hook = nullptr;
+
+void set_sampler_units(unsigned int program, std::initializer_list<std::pair<const char*, int>> units)
+{
+    if (program == 0)
+        return;
+    GLint previous = 0;
+    glsafe(glGetIntegerv(GL_CURRENT_PROGRAM, &previous));
+    glsafe(glUseProgram(program));
+    for (const auto& [name, unit] : units) {
+        const GLint location = glGetUniformLocation(program, name);
+        if (location >= 0)
+            glsafe(glUniform1i(location, unit));
+    }
+    glsafe(glUseProgram(static_cast<GLuint>(previous)));
+}
+
 static const char* OPENGL_ES_PREFIXES[] = { "OpenGL ES-CM ", "OpenGL ES-CL ", "OpenGL ES ", nullptr };
 
 bool OpenGLWrapper::s_valid_context = false;

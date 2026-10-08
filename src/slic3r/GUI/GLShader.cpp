@@ -230,6 +230,10 @@ unsigned int GLShaderProgram::sampler_target(unsigned int sampler_type)
     case GL_INT_SAMPLER_3D:
     case GL_UNSIGNED_INT_SAMPLER_3D:
         return GL_TEXTURE_3D;
+    case GL_SAMPLER_BUFFER:
+    case GL_INT_SAMPLER_BUFFER:
+    case GL_UNSIGNED_INT_SAMPLER_BUFFER:
+        return GL_TEXTURE_BUFFER;
     default:
         return 0;
     }
@@ -240,6 +244,15 @@ const std::vector<GLShaderProgram::SamplerUniform>& GLShaderProgram::get_sampler
     if (m_samplers_listed || m_id == 0)
         return m_samplers;
     m_samplers_listed = true;
+    m_samplers = list_samplers(m_id);
+    return m_samplers;
+}
+
+std::vector<GLShaderProgram::SamplerUniform> GLShaderProgram::list_samplers(unsigned int program)
+{
+    std::vector<SamplerUniform> samplers;
+    if (program == 0)
+        return samplers;
 
     auto is_sampler = [](GLenum type) {
         switch (type) {
@@ -254,24 +267,24 @@ const std::vector<GLShaderProgram::SamplerUniform>& GLShaderProgram::get_sampler
     };
     GLint count = 0;
     GLint max_length = 0;
-    glsafe(::glGetProgramiv(m_id, GL_ACTIVE_UNIFORMS, &count));
-    glsafe(::glGetProgramiv(m_id, GL_ACTIVE_UNIFORM_MAX_LENGTH, &max_length));
+    glsafe(::glGetProgramiv(program, GL_ACTIVE_UNIFORMS, &count));
+    glsafe(::glGetProgramiv(program, GL_ACTIVE_UNIFORM_MAX_LENGTH, &max_length));
     std::vector<char> buffer(std::max<GLint>(max_length, 1) + 1, 0);
     for (GLint i = 0; i < count; ++i) {
         GLsizei length = 0;
         GLint   size   = 0;
         GLenum  type   = 0;
-        glsafe(::glGetActiveUniform(m_id, static_cast<GLuint>(i), static_cast<GLsizei>(buffer.size()), &length, &size, &type, buffer.data()));
+        glsafe(::glGetActiveUniform(program, static_cast<GLuint>(i), static_cast<GLsizei>(buffer.size()), &length, &size, &type, buffer.data()));
         if (!is_sampler(type))
             continue;
         SamplerUniform sampler;
         sampler.name     = std::string(buffer.data(), static_cast<size_t>(length));
         sampler.type     = type;
-        sampler.location = ::glGetUniformLocation(m_id, sampler.name.c_str());
+        sampler.location = ::glGetUniformLocation(program, sampler.name.c_str());
         if (sampler.location >= 0)
-            m_samplers.push_back(std::move(sampler));
+            samplers.push_back(std::move(sampler));
     }
-    return m_samplers;
+    return samplers;
 }
 
 void GLShaderProgram::stop_using() const

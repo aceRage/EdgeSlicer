@@ -3000,16 +3000,21 @@ void PartPlate::render(const Transform3d& view_matrix, const Transform3d& projec
         render_grid(bottom, view_matrix, projection_matrix);
 
     if (!bottom && m_selected && !force_background_color) {
-        if (m_partplate_list)
-            render_logo(bottom, m_partplate_list->render_cali_logo && render_cali);
-        else
-            render_logo(bottom);
+        // EDGE: EDGESLICER_GL_SKIP=plate_logo / plate_icons (OpenGLManager::gl_skip).
+        if (!OpenGLManager::gl_skip("plate_logo")) {
+            if (m_partplate_list)
+                render_logo(bottom, m_partplate_list->render_cali_logo && render_cali);
+            else
+                render_logo(bottom);
+        }
         render_extruder_only_labels(bottom);
     }
 
-    render_icons(bottom, only_body, hover_id);
-    if (!force_background_color) {
-        render_only_numbers(bottom);
+    if (!OpenGLManager::gl_skip("plate_icons")) {
+        render_icons(bottom, only_body, hover_id);
+        if (!force_background_color) {
+            render_only_numbers(bottom);
+        }
     }
 
     glsafe(::glDisable(GL_DEPTH_TEST));

@@ -2444,7 +2444,10 @@ void GLCanvas3D::on_change_color_mode(bool is_dark, bool reinit) {
     // Partplate
     wxGetApp().plater()->get_partplate_list().on_change_color_mode(is_dark);
     // Plates toolbar - Reload All Stats button images
-    _init_select_plate_toolbar();
+    // EDGE: only once it exists. init() calls this before _init_toolbars(), which makes it: the item
+    // was built twice per canvas (8 textures, the first set leaked) at each canvas's first frame.
+    if (m_sel_plate_toolbar.m_all_plates_stats_item != nullptr)
+        _init_select_plate_toolbar();
 
     // Toolbar
     if (m_canvas_type == CanvasView3D) {
@@ -8567,6 +8570,13 @@ bool GLCanvas3D::_init_select_plate_toolbar()
     IMToolbarItem* item = new IMToolbarItem();
     // ORCA add dark mode support and load images with 2x resolution to prevent blurry image on hi-dpi screens
     std::string    ext  = m_is_dark ? "_dark.svg" : ".svg";
+    // EDGE: replacing the item (a colour mode change) frees the old one and its textures, and keeps
+    // its selection.
+    if (IMToolbarItem* old = m_sel_plate_toolbar.m_all_plates_stats_item; old != nullptr) {
+        item->selected = old->selected;
+        delete old;
+        m_sel_plate_toolbar.m_all_plates_stats_item = nullptr;
+    }
     bool result      = item->image_stats.load_from_svg_file(   path + "im_all_plates_stats"   + ext, false, false, false, 200);
     result = result && item->image_idle.load_from_svg_file(    path + "im_all_plates_idle"    + ext, false, false, false, 200);
     result = result && item->image_slicing.load_from_svg_file( path + "im_all_plates_slicing" + ext, false, false, false, 200);

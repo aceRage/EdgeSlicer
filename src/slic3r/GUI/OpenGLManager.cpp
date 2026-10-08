@@ -411,7 +411,9 @@ bool OpenGLManager::init_gl(bool popup_error)
         // which one this machine takes, and whether the per-call GL checks are on.
         BOOST_LOG_TRIVIAL(warning) << "OpenGL textures: S3TC compression " << (s_compressed_textures_supported ? "available" : "not available")
                                    << ", max texture size " << s_gl_info.get_max_tex_size()
-                                   << "; GL debug checks (EDGESLICER_GL_DEBUG) " << (gl_debug_enabled() ? "ON" : "off");
+                                   << "; GL debug checks (EDGESLICER_GL_DEBUG) " << (gl_debug_enabled() ? "ON" : "off")
+                                   << "; skipped parts (EDGESLICER_GL_SKIP) "
+                                   << ((::getenv("EDGESLICER_GL_SKIP") != nullptr && *::getenv("EDGESLICER_GL_SKIP") != '\0') ? ::getenv("EDGESLICER_GL_SKIP") : "none");
 
         if (s_gl_info.is_version_greater_or_equal_to(3, 0)) {
             // ARB framebuffer objects are core from 3.0. A core profile (macOS) need not list the
@@ -847,31 +849,116 @@ std::string OpenGLManager::describe_texture_incompleteness(unsigned int target, 
     return out.str();
 }
 
-void OpenGLManager::check_sampled_textures(const GLShaderProgram* shader, const char* what)
+static const char* sampler_target_name(unsigned int target)
 {
-    if (!gl_debug_enabled() || shader == nullptr || shader->get_id() == 0)
-        return;
-    for (const GLShaderProgram::SamplerUniform& sampler : shader->get_samplers()) {
+    switch (target) {
+    case GL_TEXTURE_2D:     return "2D";
+    case GL_TEXTURE_3D:     return "3D";
+    case GL_TEXTURE_BUFFER: return "buffer";
+    default:                return "?";
+    }
+}
+
+static bool texture_check_budget(const std::string& key)
+{
+    static std::set<std::string> logged;
+    static int                   reports_left = 80;
+    if (reports_left <= 0 || !logged.insert(key).second)
+        return false;
+    if (--reports_left == 0)
+        BOOST_LOG_TRIVIAL(warning) << "OpenGL texture check: limit reached, further problems are not logged this session";
+    return true;
+}
+
+static void check_samplers(unsigned int program, const std::string& program_name,
+                           const std::vector<GLShaderProgram::SamplerUniform>& samplers, const char* what)
+{
+    std::map<GLint, std::vector<std::pair<std::string, unsigned int>>> by_unit;
+    for (const GLShaderProgram::SamplerUniform& sampler : samplers) {
         const unsigned int target = GLShaderProgram::sampler_target(sampler.type);
         if (target == 0)
             continue;
         GLint unit = 0;
-        ::glGetUniformiv(shader->get_id(), sampler.location, &unit);
-        const std::string problem = describe_texture_incompleteness(target, static_cast<unsigned int>(unit));
-        if (problem.empty())
+        ::glGetUniformiv(program, sampler.location, &unit);
+        by_unit[unit].emplace_back(sampler.name, target);
+        std::string problem;
+        if (target == GL_TEXTURE_BUFFER) {
+            GLint previous_unit = GL_TEXTURE0, id = 0;
+            ::glGetIntegerv(GL_ACTIVE_TEXTURE, &previous_unit);
+            ::glActiveTexture(GL_TEXTURE0 + unit);
+            ::glGetIntegerv(GL_TEXTURE_BINDING_BUFFER, &id);
+            ::glActiveTexture(static_cast<GLenum>(previous_unit));
+            if (id == 0)
+                problem = "no buffer texture is bound there";
+        } else
+            problem = OpenGLManager::describe_texture_incompleteness(target, static_cast<unsigned int>(unit));
+        if (problem.empty() || !texture_check_budget(program_name + "|" + sampler.name + "|" + what + "|" + problem))
             continue;
-        static std::set<std::string> logged;
-        static int                   reports_left = 80;
-        if (reports_left <= 0 || !logged.insert(shader->get_name() + "|" + sampler.name + "|" + what + "|" + problem).second)
-            continue;
-        --reports_left;
-        BOOST_LOG_TRIVIAL(warning) << "OpenGL texture check: " << what << " draws with shader '" << shader->get_name() << "', which samples unit "
-                                   << unit << " ('" << sampler.name << "', " << (target == GL_TEXTURE_2D ? "2D" : "3D") << "): " << problem
-                                   << " (macOS: \"unit " << unit << " GLD_TEXTURE_INDEX_" << (target == GL_TEXTURE_2D ? "2D" : "3D")
-                                   << " is unloadable\")";
-        if (reports_left == 0)
-            BOOST_LOG_TRIVIAL(warning) << "OpenGL texture check: limit reached, further problems are not logged this session";
+        BOOST_LOG_TRIVIAL(warning) << "OpenGL texture check: " << what << " draws with shader '" << program_name << "', which samples unit "
+                                   << unit << " ('" << sampler.name << "', " << sampler_target_name(target) << "): " << problem
+                                   << " (macOS: \"unit " << unit << " GLD_TEXTURE_INDEX_" << sampler_target_name(target) << " is unloadable\")";
     }
+    for (const auto& [unit, uses] : by_unit) {
+        bool mixed = false;
+        for (const auto& use : uses)
+            mixed |= use.second != uses.front().second;
+        if (!mixed)
+            continue;
+        std::string list;
+        for (const auto& [name, target] : uses)
+            list += (list.empty() ? "'" : ", '") + name + "' (" + sampler_target_name(target) + ")";
+        if (!texture_check_budget(program_name + "|unit" + std::to_string(unit) + "|" + what))
+            continue;
+        BOOST_LOG_TRIVIAL(warning) << "OpenGL texture check: " << what << " draws with shader '" << program_name
+                                   << "', whose samplers of different types share unit " << unit << ": " << list
+                                   << ". The program is invalid at this draw (GL_INVALID_OPERATION); macOS samples zero for the one"
+                                   << " whose target has nothing complete bound (\"unit " << unit << " ... is unloadable\")";
+    }
+}
+
+void OpenGLManager::check_sampled_textures(const GLShaderProgram* shader, const char* what)
+{
+    if (!gl_debug_enabled() || shader == nullptr || shader->get_id() == 0)
+        return;
+    check_samplers(shader->get_id(), shader->get_name(), shader->get_samplers(), what);
+}
+
+void OpenGLManager::check_current_program_samplers(const char* what)
+{
+    if (!gl_debug_enabled())
+        return;
+    GLint program = 0;
+    ::glGetIntegerv(GL_CURRENT_PROGRAM, &program);
+    if (program == 0) {
+        if (texture_check_budget(std::string("noprogram|") + what))
+            BOOST_LOG_TRIVIAL(warning) << "OpenGL texture check: " << what << " draws with no program bound";
+        return;
+    }
+    check_samplers(static_cast<unsigned int>(program), std::string(what) + " program " + std::to_string(program),
+                   GLShaderProgram::list_samplers(static_cast<unsigned int>(program)), what);
+}
+
+bool OpenGLManager::gl_skip(const char* part)
+{
+    static const std::set<std::string> parts = []() {
+        std::set<std::string> out;
+        const char* value = ::getenv("EDGESLICER_GL_SKIP");
+        if (value == nullptr)
+            return out;
+        std::string token;
+        for (const char* c = value;; ++c) {
+            if (*c == '\0' || *c == ',' || *c == '|' || *c == ';' || *c == ' ') {
+                if (!token.empty())
+                    out.insert(boost::algorithm::to_lower_copy(token));
+                token.clear();
+                if (*c == '\0')
+                    break;
+            } else
+                token += *c;
+        }
+        return out;
+    }();
+    return !parts.empty() && parts.count(part) > 0;
 }
 
 void OpenGLManager::query_point_size_range(float range[2])

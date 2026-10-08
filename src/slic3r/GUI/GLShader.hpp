@@ -77,7 +77,10 @@ public:
     void set_sampler_units(std::initializer_list<std::pair<const char*, int>> units) const;
     // The program's active sampler uniforms, listed once after linking (needs the context).
     const std::vector<SamplerUniform>& get_samplers() const;
-    // GL_TEXTURE_2D / GL_TEXTURE_3D for the 2D / 3D sampler types (float, int, unsigned), 0 otherwise.
+    // The same for any linked program, e.g. one another library made (libvgcode). Not cached.
+    static std::vector<SamplerUniform> list_samplers(unsigned int program);
+    // GL_TEXTURE_2D / GL_TEXTURE_3D / GL_TEXTURE_BUFFER for the 2D / 3D / buffer sampler types (float,
+    // int, unsigned), 0 otherwise.
     static unsigned int sampler_target(unsigned int sampler_type);
     // Returns a description of every pair of active samplers of DIFFERENT types that read the same
     // texture unit, empty if there is none. Such a program is invalid at draw time (GL spec:
