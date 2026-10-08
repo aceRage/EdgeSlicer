@@ -730,6 +730,9 @@ void GLModel::render(const std::pair<size_t, size_t>& range)
     shader->set_uniform("uniform_color", data.color);
 
     glsafe(::glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_render_data.ibo_id));
+    // EDGE: EDGESLICER_GL_DEBUG names any incomplete texture this draw samples.
+    if (OpenGLManager::gl_debug_enabled())
+        OpenGLManager::check_sampled_textures(shader, "a GLModel");
     glsafe(::glDrawElements(mode, range.second - range.first, index_type, (const void*)(range.first * Geometry::index_stride_bytes(data))));
     glsafe(::glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0));
 

@@ -2444,7 +2444,10 @@ void GLCanvas3D::on_change_color_mode(bool is_dark, bool reinit) {
     // Partplate
     wxGetApp().plater()->get_partplate_list().on_change_color_mode(is_dark);
     // Plates toolbar - Reload All Stats button images
-    _init_select_plate_toolbar();
+    // EDGE: only once it exists. init() calls this before _init_toolbars(), which makes it: the item
+    // was built twice per canvas (8 textures, the first set leaked) at each canvas's first frame.
+    if (m_sel_plate_toolbar.m_all_plates_stats_item != nullptr)
+        _init_select_plate_toolbar();
 
     // Toolbar
     if (m_canvas_type == CanvasView3D) {
@@ -3266,6 +3269,9 @@ bool GLCanvas3D::ensure_gl_ready()
         // is tiny: publish something usable once (the offscreen paths never call new_frame()).
         const Size cnv = get_canvas_size();
         wxGetApp().imgui()->set_display_size(std::max(10.0f, float(cnv.get_width())), std::max(10.0f, float(cnv.get_height())));
+        // EDGE (core profile): this first initialisation runs outside any frame (thumbnails, the G-code
+        // preview's first load at the first slice): drain what came before, then name what it leaves.
+        report_frame_gl_errors("off-screen first initialisation (errors from before it)");
         if (!init())
             return false;
         // init() flips m_initialized and on_idle() then runs update_notifications(), which measures
@@ -3274,6 +3280,7 @@ bool GLCanvas3D::ensure_gl_ready()
         ImGuiWrapper* imgui = wxGetApp().imgui();
         imgui->new_frame();
         imgui->render();
+        report_frame_gl_errors("off-screen first initialisation");
     }
     return true;
 }
@@ -3317,6 +3324,10 @@ void GLCanvas3D::render(bool only_init)
     }
     if (!m_main_toolbar.is_enabled())
         m_gcode_viewer.init(wxGetApp().get_mode(), wxGetApp().preset_bundle);
+    // EDGE (core profile): render(true) returns below without a frame, so report what the
+    // initialisation left here rather than in whatever drains next (a thumbnail, at the first slice).
+    if (only_init)
+        report_frame_gl_errors("initialisation (render only_init)");
 
     if (! m_bed.build_volume().valid()) {
         // this happens at startup when no data is still saved under <>\AppData\Roaming\Slic3rPE
@@ -3677,6 +3688,16 @@ void GLCanvas3D::report_frame_gl_errors(const char* pass)
     if (const GLGizmoBase* gizmo = m_gizmos.get_current(); gizmo != nullptr)
         where += " with gizmo " + gizmo->get_icon_filename();
     OpenGLManager::report_gl_errors(where, first_error);
+}
+
+void GLCanvas3D::report_thumbnail_entry_gl_errors(unsigned int w, unsigned int h, bool for_picking)
+{
+    const GLenum first_error = ::glGetError();
+    if (first_error == GL_NO_ERROR)
+        return;
+    OpenGLManager::report_gl_errors(std::string("before a thumbnail (") + std::to_string(w) + "x" + std::to_string(h) +
+                                        (for_picking ? ", picking" : "") + "; raised outside any frame since the last check)",
+                                    first_error);
 }
 
 void GLCanvas3D::render_thumbnail(ThumbnailData &         thumbnail_data,
@@ -4536,6 +4557,7 @@ void GLCanvas3D::load_shells(const Print& print, bool force_previewing)
         _set_shown_canvas_current();
         m_gcode_viewer.load_shells(print, m_initialized, force_previewing);
         m_gcode_viewer.update_shells_color_by_extruder(m_config);
+        report_frame_gl_errors("preview shells load");
     }
 }
 
@@ -4572,6 +4594,8 @@ void GLCanvas3D::load_gcode_preview(const GCodeProcessorResult& gcode_result, co
         _set_warning_notification_if_needed(EWarning::GCodeConflict);
     }
 
+    // EDGE (core profile): outside any frame too (Preview::load_print_as_fff).
+    report_frame_gl_errors("G-code preview load");
     set_as_dirty();
     request_extra_frame();
 }
@@ -7928,6 +7952,9 @@ void GLCanvas3D::render_thumbnail_framebuffer(ThumbnailData& thumbnail_data, uns
     PartPlateList& partplate_list, ModelObjectPtrs& model_objects, const GLVolumeCollection& volumes, std::vector<ColorRGBA>& extruder_colors,
     GLShaderProgram* shader, Camera::EType camera_type, bool use_top_view, bool for_picking, bool ban_light, ThumbnailView view)
 {
+    // EDGE (core profile): anything already in the GL error flag came from before this thumbnail (the
+    // slice-start path, a G-code preview load, ...), not from its framebuffer set-up below.
+    report_thumbnail_entry_gl_errors(w, h, for_picking);
     thumbnail_data.set(w, h);
     if (!thumbnail_data.is_valid())
         return;
@@ -8041,6 +8068,9 @@ void GLCanvas3D::render_thumbnail_framebuffer_ext(ThumbnailData& thumbnail_data,
     PartPlateList& partplate_list, ModelObjectPtrs& model_objects, const GLVolumeCollection& volumes, std::vector<ColorRGBA>& extruder_colors,
     GLShaderProgram* shader, Camera::EType camera_type, bool use_top_view, bool for_picking, bool ban_light, ThumbnailView view)
 {
+    // EDGE (core profile): anything already in the GL error flag came from before this thumbnail (the
+    // slice-start path, a G-code preview load, ...), not from its framebuffer set-up below.
+    report_thumbnail_entry_gl_errors(w, h, for_picking);
     thumbnail_data.set(w, h);
     if (!thumbnail_data.is_valid())
         return;
@@ -8282,6 +8312,7 @@ void GLCanvas3D::render_gcode_preview_image(ThumbnailData& data, unsigned int w,
 
 void GLCanvas3D::render_thumbnail_legacy(ThumbnailData& thumbnail_data, unsigned int w, unsigned int h, const ThumbnailsParams& thumbnail_params, PartPlateList &partplate_list, ModelObjectPtrs& model_objects, const GLVolumeCollection& volumes, std::vector<ColorRGBA>& extruder_colors, GLShaderProgram* shader, Camera::EType camera_type)
 {
+    report_thumbnail_entry_gl_errors(w, h, false);
     // check that thumbnail size does not exceed the default framebuffer size
     const Size& cnv_size = get_canvas_size();
     unsigned int cnv_w = (unsigned int)cnv_size.get_width();
@@ -8539,6 +8570,13 @@ bool GLCanvas3D::_init_select_plate_toolbar()
     IMToolbarItem* item = new IMToolbarItem();
     // ORCA add dark mode support and load images with 2x resolution to prevent blurry image on hi-dpi screens
     std::string    ext  = m_is_dark ? "_dark.svg" : ".svg";
+    // EDGE: replacing the item (a colour mode change) frees the old one and its textures, and keeps
+    // its selection.
+    if (IMToolbarItem* old = m_sel_plate_toolbar.m_all_plates_stats_item; old != nullptr) {
+        item->selected = old->selected;
+        delete old;
+        m_sel_plate_toolbar.m_all_plates_stats_item = nullptr;
+    }
     bool result      = item->image_stats.load_from_svg_file(   path + "im_all_plates_stats"   + ext, false, false, false, 200);
     result = result && item->image_idle.load_from_svg_file(    path + "im_all_plates_idle"    + ext, false, false, false, 200);
     result = result && item->image_slicing.load_from_svg_file( path + "im_all_plates_slicing" + ext, false, false, false, 200);
