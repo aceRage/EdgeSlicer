@@ -9953,17 +9953,21 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
     const bool speed_was_invalid = !(speed >= 1e-6);
     if (speed_was_invalid)
         speed = filament_max_volumetric_speed / _mm3_per_mm;
-    if (this->on_first_layer()) {
+    const auto _layer = layer_id();
+    if (this->on_first_layer() || this->object_layer_over_raft()) {
         // BBS: for solid infill of initial layer, speed can be higher as long as
         // wall lines have be attached
+        // Orca (#13224): the first object layer over a raft takes the first layer speeds too.
         if (path.role() != erBottomSurface) {
             // This OVERRIDES the role speed outright on the first layer, so a bad
-            // initial_layer_speed is the culprit here regardless of which role we are printing.
-            speed_setting = "initial_layer_speed";
-            speed = this->process_flow_value(m_config.initial_layer_speed);
+            // initial_layer_speed / initial_layer_infill_speed is the culprit here
+            // regardless of which role we are printing.
+            const bool perim = is_perimeter(path.role());
+            speed_setting    = perim ? "initial_layer_speed" : "initial_layer_infill_speed";
+            speed            = perim ? this->process_flow_value(m_config.initial_layer_speed) :
+                                       this->process_flow_value(m_config.initial_layer_infill_speed);
         }
-    } else if (m_config.slow_down_layers.values.front() > 1) {
-        const auto _layer = layer_id();
+    } else if (m_config.slow_down_layers.values.front() > 1 && m_config.raft_layers.value == 0) {
         if (_layer > 0 && _layer < m_config.slow_down_layers.values.front()) {
             const bool perim = is_perimeter(path.role());
             const auto first_layer_speed = perim ? this->process_flow_value(m_config.initial_layer_speed) :
@@ -9972,6 +9976,20 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
                 speed = std::min(speed, Slic3r::lerp(first_layer_speed, speed, (double) _layer / m_config.slow_down_layers.values.front()));
                 // The lerp floor is first_layer_speed, so if the result is unusable that key is
                 // what dragged it down.
+                if (!(speed >= 1e-6))
+                    speed_setting = perim ? "initial_layer_speed" : "initial_layer_infill_speed";
+            }
+        }
+    } else if (m_config.slow_down_layers.values.front() > 1 && m_config.raft_layers.value > 0) {
+        // Orca (#13224, #13415): with a raft the slow-down ramp starts at the first object layer
+        // (layer id raft_layers) instead of at layer 1, which would be a raft layer.
+        if (_layer > m_config.raft_layers.value && (_layer - m_config.raft_layers.value) < m_config.slow_down_layers.values.front()) {
+            const bool perim = is_perimeter(path.role());
+            const auto first_layer_speed = perim ? this->process_flow_value(m_config.initial_layer_speed) :
+                                                   this->process_flow_value(m_config.initial_layer_infill_speed);
+            if (first_layer_speed < speed) {
+                speed = std::min(speed, Slic3r::lerp(first_layer_speed, speed,
+                                                     (double) (_layer - m_config.raft_layers.value) / m_config.slow_down_layers.values.front()));
                 if (!(speed >= 1e-6))
                     speed_setting = perim ? "initial_layer_speed" : "initial_layer_infill_speed";
             }
@@ -10032,7 +10050,8 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
     // whole feature. It is excluded here rather than dropped out of is_perimeter(), so seams,
     // travel/retraction and small-perimeter handling still see it as the wall it is.
     // docs/superpowers/specs/2026-09-05-over-support-surfaces.md
-    if (this->process_flow_value(m_config.enable_overhang_speed) && !this->on_first_layer() && path.role() != erOverSupportPerimeter &&
+    if (this->process_flow_value(m_config.enable_overhang_speed) && !this->on_first_layer() && !this->object_layer_over_raft() &&
+        path.role() != erOverSupportPerimeter &&
         (is_bridge(path.role()) || is_perimeter(path.role()))) {
         bool   is_external = is_external_perimeter(path.role());
         double ref_speed   = is_external ? this->process_flow_value(m_config.outer_wall_speed) : this->process_flow_value(m_config.inner_wall_speed);

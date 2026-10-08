@@ -938,6 +938,48 @@ TEST_CASE("enable_pressure_advance follows the High-Flow column", "[PrintGCode][
     }
 }
 
+TEST_CASE("First object layer over a raft takes the first layer speeds and the slow-down ramp starts there",
+          "[PrintGCode][Orca13224]")
+{
+    const std::string gcode = Slic3r::Test::slice({ TestMesh::cube_20x20x20 }, {
+        { "gcode_comments",              "1" },
+        { "machine_start_gcode",         "" },
+        { "enable_arc_fitting",          "0" },
+        { "z_hop",                       "0" },
+        { "layer_height",                "0.2" },
+        { "initial_layer_print_height",  "0.2" },
+        { "raft_layers",                 "2" },
+        { "slow_down_layers",            "3" },
+        { "initial_layer_speed",         "20" },
+        { "initial_layer_infill_speed",  "40" },
+        { "outer_wall_speed",            "60" },
+        { "filament_max_volumetric_speed", "100" },
+        { "enable_overhang_speed",       "0" },
+        { "slow_down_for_layer_cooling", "0" },
+    });
+
+    // First outer wall extrusion feed rate per layer, in layer order.
+    std::map<double, double> outer_wall_feed;
+    std::string              feature;
+    GCodeReader              parser;
+    parser.parse_buffer(gcode, [&](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        feature = feature_after(line.raw(), feature);
+        if (feature == "Outer wall" && line.cmd_is("G1") && line.extruding(self) && line.dist_XY(self) > 0)
+            outer_wall_feed.emplace(double(self.z()), double(line.new_F(self)));
+    });
+
+    REQUIRE(outer_wall_feed.size() >= 5);
+    std::vector<double> feeds;
+    for (const auto &kv : outer_wall_feed)
+        feeds.push_back(kv.second);
+    // initial_layer_speed 20 mm/s = F1200 on the first object layer; the ramp to outer_wall_speed 60 mm/s
+    // (F3600) then takes slow_down_layers = 3 steps: 20 + 40 * 1/3, 20 + 40 * 2/3, 60.
+    CHECK_THAT(feeds[0], Catch::Matchers::WithinAbs(1200., 1.5));
+    CHECK_THAT(feeds[1], Catch::Matchers::WithinAbs(2000., 1.5));
+    CHECK_THAT(feeds[2], Catch::Matchers::WithinAbs(2800., 1.5));
+    CHECK_THAT(feeds[3], Catch::Matchers::WithinAbs(3600., 1.5));
+}
+
 TEST_CASE("AdaptivePAProcessor base PA follows the High-Flow column", "[PrintGCode][GCode][PAVariant]")
 {
     const DynamicPrintConfig config = high_flow_pa_config(true, true, true);
