@@ -358,3 +358,37 @@ TEST_CASE("A system printer in the per-variant layout keeps all its variants thr
     CHECK(floats(plain->config, "retraction_length") == std::vector<double>{ 1., 2., 3., 4., 5. });
     CHECK(floats(plain->config, "z_hop") == std::vector<double>(5, 0.4));
 }
+
+TEST_CASE("printer_extruder_variant_value_index names the value the slicer reads", "[ExtruderVariant][VariantNormalize]")
+{
+    // The printer tab binds extruder N's retraction fields to this index, so an edit there must land in
+    // exactly the slot resolve_printer_extruder_variants hands to tool N.
+    DynamicPrintConfig config = toolchanger_config(5, VARIANTS3);
+    config.option<ConfigOptionEnumsGeneric>("nozzle_volume_type", true)->values = { nvtStandard, nvtHighFlow, nvtStandard, nvtStandard, nvtStandard };
+    config.set_key_value("z_hop", new ConfigOptionFloats(std::vector<double>(5, 0.4))); // per extruder, not per variant
+
+    const std::vector<size_t> sources = printer_extruder_variant_sources(config);
+    REQUIRE(sources == std::vector<size_t>{ 0, 4, 6, 9, 12 });
+    CHECK(printer_extruder_variant_value_index(config, sources, "retraction_length", 1) == 4);
+    CHECK(printer_extruder_variant_value_index(config, sources, "retraction_length", 4) == 12);
+    CHECK(printer_extruder_variant_value_index(config, sources, "z_hop", 1) == 1);
+    CHECK(printer_extruder_variant_value_index(config, sources, "nozzle_diameter", 3) == 3);
+
+    const std::vector<double> all      = floats(config, "retraction_length");
+    DynamicPrintConfig        resolved = config;
+    resolve_printer_extruder_variants(resolved);
+    for (size_t e = 0; e < 5; ++e)
+        CHECK(floats(resolved, "retraction_length")[e] == all[printer_extruder_variant_value_index(config, sources, "retraction_length", e)]);
+
+    SECTION("single-extruder multi-material and grouping machines keep the extruder index") {
+        DynamicPrintConfig semm = config;
+        semm.set_key_value("single_extruder_multi_material", new ConfigOptionBool(true));
+        CHECK(printer_extruder_variant_sources(semm).empty());
+        CHECK(printer_extruder_variant_value_index(semm, {}, "retraction_length", 2) == 2);
+
+        DynamicPrintConfig dual = toolchanger_config(2, { "Direct Drive Standard", "Direct Drive High Flow" });
+        const std::vector<size_t> dual_sources = printer_extruder_variant_sources(dual);
+        CHECK(dual_sources == std::vector<size_t>{ 0, 1 });
+        CHECK(printer_extruder_variant_value_index(dual, dual_sources, "retraction_length", 1) == 1);
+    }
+}
