@@ -835,7 +835,10 @@ TEST_CASE("Z restore after an unknown position uses the nominal Z", "[PrintGCode
     // After a toolchange the position is unknown; the Z that is restored must be the layer Z plus z_offset,
     // not the bare layer Z (which would put the nozzle z_offset below where the layer is printed).
     static const std::regex z_tag_re("^;Z:([0-9.]+)");
-    static const std::regex z_move_re("^G1 Z([0-9.]+).*ensure Z matches planned layer height");
+    // The comment changed with #11011 ("force restore Z after unknown last pos" before it); match both, so the
+    // case fails on the Z value rather than on the comment when run against the unported code.
+    static const std::regex z_move_re(
+        "^G1 Z([0-9.]+).*(ensure Z matches planned layer height|force restore Z after unknown last pos)");
     double layer_z  = 0.;
     size_t restores = 0;
     size_t wrong    = 0;
