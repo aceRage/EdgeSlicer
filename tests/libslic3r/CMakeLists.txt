@@ -16,6 +16,8 @@ add_executable(${_TEST_NAME}_tests
 	test_appconfig_trailing_newline.cpp
 	test_memory_guard_policy.cpp
 	test_aabbindirect.cpp
+	test_arachne_walls.cpp
+	test_skirt_distance.cpp
 	test_ams_lookup.cpp
 	test_assembly_face_pick.cpp
 	test_assembly_exact_footprint.cpp
@@ -95,6 +97,8 @@ add_executable(${_TEST_NAME}_tests
 	test_print_settings_carry.cpp
 	test_filament_variant_autoenable.cpp
 	test_preset_load_determinism.cpp
+	test_preset_variant_load.cpp
+	test_stale_filament_index.cpp
 	test_profile_load_util.cpp
 	test_printer_model_specs.cpp
 	test_project_preset_switch.cpp
