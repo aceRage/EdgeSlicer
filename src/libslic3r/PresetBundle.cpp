@@ -480,6 +480,10 @@ PresetsConfigSubstitutions PresetBundle::load_presets(AppConfig &config, Forward
     const auto total_start     = std::chrono::steady_clock::now();
     auto       phase_start     = total_start;
 
+    // One report for the whole load (system vendors and user presets) of keys that are dropped on
+    // purpose, see PrintConfigDef::unsupported_foreign_key().
+    Preset::ForeignKeyReportScope foreign_key_scope;
+
     // First load the vendor specific system presets.
     PresetsConfigSubstitutions substitutions;
     std::string errors_cummulative;
@@ -1216,6 +1220,7 @@ bool PresetBundle::import_json_presets(PresetsConfigSubstitutions &            s
             BOOST_LOG_TRIVIAL(error) << "Error in a preset file: The preset \"" << preset.file
                                      << "\" contains the following incorrect keys: " << incorrect_keys << ", which were removed";
         }
+        Preset::log_ignored_foreign_keys();
         if (!config_substitutions.empty())
             substitutions.push_back({name, collection->type(), PresetConfigSubstitutions::Source::UserFile, file, std::move(config_substitutions)});
 
@@ -3586,6 +3591,10 @@ std::pair<PresetsConfigSubstitutions, size_t> PresetBundle::load_vendor_configs_
     // The bundled vendor presets keep the shipped meaning of Bambu Studio's tower interface keys
     // (enable_tower_interface_features, prime_tower_skip_points): see SystemPresetTowerKeysScope.
     SystemPresetTowerKeysScope tower_keys_scope;
+
+    // Keys the profiles carry but presets deliberately do not hold are counted, not logged per file;
+    // the totals are written once when the outermost bulk load (load_presets) or this call ends.
+    Preset::ForeignKeyReportScope foreign_key_scope;
 
     // Enable substitutions for user config bundle, throw an exception when loading a system profile.
     ConfigSubstitutionContext  substitution_context { compatibility_rule };

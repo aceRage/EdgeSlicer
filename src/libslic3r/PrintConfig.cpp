@@ -9759,6 +9759,40 @@ void PrintConfigDef::handle_legacy(t_config_option_key &opt_key, std::string &va
     }
 }
 
+// Keys that preset files carry but presets deliberately do not hold. Kept next to the obsolete-key
+// ignore set in handle_legacy() above, but unlike that set these keys stay defined in
+// print_config_def (the G-code placeholders read their defaults), so they are not erased while a
+// config is parsed; Preset::remove_invalid_keys() recognises them and drops them quietly.
+bool PrintConfigDef::unsupported_foreign_key(const std::string &opt_key, ForeignKeyOrigin *origin)
+{
+    static const std::map<std::string, ForeignKeyOrigin> foreign = {
+        // Bambu Studio per-filament flush / wipe-tower cooling settings. The bundled BBL, Orca filament
+        // library and Snapmaker profiles carry them; the fork reads the defaults (0 = use the filament's
+        // max volumetric speed / the top of its temperature range, no cooling before the tower).
+        { "filament_flush_temp",             ForeignKeyOrigin::BambuStudio },
+        { "filament_flush_volumetric_speed", ForeignKeyOrigin::BambuStudio },
+        { "filament_cooling_before_tower",   ForeignKeyOrigin::BambuStudio },
+        // Project-wide mixed-filament rows (PresetBundle::project_config). The edited process preset
+        // picks a copy up when mixed filaments change, and saving the preset writes it to disk.
+        { "mixed_filament_definitions",      ForeignKeyOrigin::ProjectScoped },
+    };
+    const auto it = foreign.find(opt_key);
+    if (it == foreign.end())
+        return false;
+    if (origin != nullptr)
+        *origin = it->second;
+    return true;
+}
+
+const char *PrintConfigDef::foreign_key_origin_label(ForeignKeyOrigin origin)
+{
+    switch (origin) {
+    case ForeignKeyOrigin::BambuStudio:   return "unsupported Bambu Studio keys";
+    case ForeignKeyOrigin::ProjectScoped: return "project-level keys saved into presets";
+    }
+    return "unsupported keys";
+}
+
 // Called after a config is loaded as a whole.
 // Perform composite conversions, for example merging multiple keys into one key.
 // Don't convert single options here, implement such conversion in PrintConfigDef::handle_legacy() instead.

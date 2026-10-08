@@ -1468,6 +1468,8 @@ int CLI::run(int argc, char **argv)
         if (auto* opt = m_config.option<ConfigOptionStrings>("filament_presets"))
             filament_names = opt->values;
         if (!printer_name.empty() || !process_name.empty() || !filament_names.empty()) {
+            // The vendor bundles below drop keys that presets deliberately do not hold; report them once.
+            Preset::ForeignKeyReportScope foreign_key_scope;
             NamedPresets presets;
             const std::string preset_dir = (boost::filesystem::path(temporary_dir()) / ("ultra_cli_presets_" + std::to_string(get_current_pid()))).string();
             auto resolve = [&](const std::string& name, Preset::Type t, int ordinal, std::vector<std::string>& into) -> bool {

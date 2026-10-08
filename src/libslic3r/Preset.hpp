@@ -371,7 +371,29 @@ public:
     static std::string                      remove_suffix_modified(const std::string& name);
     static void                             normalize(DynamicPrintConfig &config);
     // Report configuration fields, which are misplaced into a wrong group, remove them from the config.
+    // Returns the comma separated keys that are genuinely unknown (callers log those as errors).
+    // Keys listed in PrintConfigDef::unsupported_foreign_key() are removed too, but silently: they are
+    // only counted, see log_ignored_foreign_keys().
     static std::string                      remove_invalid_keys(DynamicPrintConfig &config, const DynamicPrintConfig &default_config);
+    // Writes one info line per origin with the number of occurrences dropped since the last call, for
+    // keys not reported before in this session; keys already reported are logged at debug level.
+    // Safe to call from any thread; does nothing when nothing new was dropped, or while a
+    // ForeignKeyReportScope is open (the scope reports when the outermost one closes).
+    static void                             log_ignored_foreign_keys();
+    // Brackets a bulk load (all vendor bundles at startup, a CLI preset lookup) so the dropped foreign
+    // keys are reported once for the whole load, not once per vendor or per file. Nests; thread safe.
+    class ForeignKeyReportScope
+    {
+    public:
+        ForeignKeyReportScope();
+        ~ForeignKeyReportScope();
+        ForeignKeyReportScope(const ForeignKeyReportScope &) = delete;
+        ForeignKeyReportScope &operator=(const ForeignKeyReportScope &) = delete;
+    };
+    // Occurrences of one foreign key dropped so far this session (reported or not).
+    static size_t                           ignored_foreign_key_count(const std::string &key);
+    // Forget all counts and reports (unit tests).
+    static void                             reset_ignored_foreign_keys();
 
     // BBS: move constructor to public
     Preset(Type type, const std::string &name, bool is_default = false) : type(type), is_default(is_default), name(name) {}
