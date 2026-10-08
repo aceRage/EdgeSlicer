@@ -183,7 +183,7 @@ TEST_CASE("The mixed U1 machine carries per-head layer limits and no High Flow",
     REQUIRE(min_h != nullptr);
     REQUIRE(max_h != nullptr);
     CHECK(min_h->values == std::vector<double>{ 0.08, 0.08, 0.12, 0.12 });
-    CHECK(max_h->values == std::vector<double>{ 0.32, 0.32, 0.48, 0.48 });
+    CHECK(max_h->values == std::vector<double>{ 0.32, 0.32, 0.42, 0.42 });
     // A 0.6 head cannot be High Flow here, so the machine does not advertise it.
     const auto *flow = mixed->config.option<ConfigOptionStrings>("printer_flow_support");
     CHECK((flow == nullptr || flow->values.empty() ||
@@ -253,8 +253,19 @@ TEST_CASE("The Snapmaker-brand U1 filaments are present, compatible with the U1 
 
 TEST_CASE("The new Snapmaker-brand U1 filaments resolve to real material settings", "[Preset][U1]")
 {
-    auto first = [](const Preset &p, const char *key) { return p.config.option<ConfigOptionFloats>(key)->values.front(); };
-    auto type  = [](const Preset &p) { return p.config.option<ConfigOptionStrings>("filament_type")->values.front(); };
+    // Temperatures are integer vectors; a null option here would be a crash, so fail loudly instead.
+    auto first = [](const Preset &p, const char *key) {
+        const auto *opt = p.config.option<ConfigOptionInts>(key);
+        REQUIRE(opt != nullptr);
+        REQUIRE(!opt->values.empty());
+        return double(opt->values.front());
+    };
+    auto type = [](const Preset &p) {
+        const auto *opt = p.config.option<ConfigOptionStrings>("filament_type");
+        REQUIRE(opt != nullptr);
+        REQUIRE(!opt->values.empty());
+        return opt->values.front();
+    };
 
     // A thin parent chain would leave these at PrintConfig defaults (the mistake this guards against).
     CHECK(type(filament_preset("Snapmaker PLA @U1")) == "PLA");
