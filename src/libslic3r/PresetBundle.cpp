@@ -286,6 +286,12 @@ PresetBundle::PresetBundle()
     this->filaments.default_preset().inherits();
     // Set all the nullable values to nils.
     this->filaments.default_preset().config.null_nullables();
+    // BBS: except Bambu's flush settings and pre-tower cooling. They are nullable only because some
+    // profiles write "nil" (Anycubic); there is no printer value a nil could fall back to, so a filament
+    // preset that does not set them holds their defaults (flush 0 = derived, 10 degrees of cooling).
+    for (const char *key : { "filament_flush_temp", "filament_flush_temp_fast", "filament_flush_volumetric_speed",
+                             "filament_cooling_before_tower" })
+        this->filaments.default_preset().config.set_key_value(key, print_config_def.get(key)->default_value->clone());
 
     this->sla_materials.default_preset().config.optptr("sla_material_settings_id", true);
     this->sla_materials.default_preset().compatible_printers_condition();

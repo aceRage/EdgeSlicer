@@ -496,10 +496,12 @@ TEST_CASE("a nil High-Flow override uses the Standard slot, then the printer", "
     CHECK(flow_dst.values[1] == Approx(0.95));
 }
 
-// Audit of the 19 filament flow-variant keys: only the six retract overrides are
-// nullable, so only they can hold a nil High-Flow slot. The other 13 are plain
-// vectors whose short presets read the Standard value through get_at.
-TEST_CASE("only the retract overrides among the filament flow-variant keys are nullable", "[FlowVariantEdit][Overrides]")
+// Audit of the 23 filament flow-variant keys: the six retract overrides and Bambu's four
+// flush / pre-tower cooling keys are nullable, so only they can hold a nil High-Flow slot
+// (compose_filament_flow_variant_segment reads it as the Standard value; GCode.cpp reads a
+// nil flush key as its default). The other 13 are plain vectors whose short presets read
+// the Standard value through get_at.
+TEST_CASE("only the retract overrides and the flush keys among the filament flow-variant keys are nullable", "[FlowVariantEdit][Overrides]")
 {
     std::vector<std::string> nullable;
     for (const std::string &key : filament_flow_variant_options()) {
@@ -509,7 +511,9 @@ TEST_CASE("only the retract overrides among the filament flow-variant keys are n
             nullable.push_back(key);
     }
     std::sort(nullable.begin(), nullable.end());
-    CHECK(nullable == std::vector<std::string>{"filament_deretraction_speed", "filament_retract_length_toolchange",
+    CHECK(nullable == std::vector<std::string>{"filament_cooling_before_tower", "filament_deretraction_speed",
+                                               "filament_flush_temp", "filament_flush_temp_fast",
+                                               "filament_flush_volumetric_speed", "filament_retract_length_toolchange",
                                                "filament_retraction_length", "filament_retraction_speed",
                                                "filament_wipe_distance", "filament_z_hop_types"});
 }
