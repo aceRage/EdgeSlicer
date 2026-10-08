@@ -56,6 +56,8 @@ class ImGuiWrapper
     bool m_is_korean{ false };
     float m_font_size{ 18.0 };
     unsigned m_font_texture{ 0 };
+    // EDGE: set_scaling() asked for a new font while a frame was open; new_frame() rebuilds it.
+    bool m_font_rebuild_pending{ false };
     unsigned m_font_another_texture{ 0 };
     float m_style_scaling{ 1.0 };
     unsigned m_mouse_buttons{ 0 };

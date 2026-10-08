@@ -23,6 +23,7 @@
 #include "slic3r/GUI/OpenGLManager.hpp"
 #include "slic3r/GUI/GLModel.hpp"
 #include "slic3r/GUI/GLShader.hpp"
+#include "slic3r/GUI/GLTexture.hpp"
 #include "slic3r/GUI/LibVGCode/LibVGCodeWrapper.hpp"
 #include "libslic3r/GCode/GCodeProcessor.hpp"
 #include "libslic3r/Geometry.hpp"
@@ -33,8 +34,12 @@
 #include <sstream>
 
 #include <array>
+#include <map>
+#include <set>
+#include <chrono>
 #include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace Slic3r;
@@ -129,6 +134,48 @@ GLenum drain_gl_errors()
             first = e;
     }
     return first;
+}
+
+// What libvgcode's draw-check hook saw: one line per draw whose program samples something it cannot
+// (a 2D/3D sampler on an incomplete texture or texture 0, a buffer sampler with nothing bound, or two
+// samplers of different types on one unit). macOS reports each as "unit N ... is unloadable".
+std::vector<std::string> s_vgcode_draw_problems;
+int                      s_vgcode_draws_checked = 0;
+
+void check_vgcode_draw(const char* what)
+{
+    ++s_vgcode_draws_checked;
+    GLint program = 0;
+    glGetIntegerv(GL_CURRENT_PROGRAM, &program);
+    if (program == 0) {
+        s_vgcode_draw_problems.push_back(std::string(what) + ": no program bound");
+        return;
+    }
+    std::map<GLint, std::set<unsigned int>> targets_by_unit;
+    for (const GLShaderProgram::SamplerUniform& sampler : GLShaderProgram::list_samplers(GLuint(program))) {
+        const unsigned int target = GLShaderProgram::sampler_target(sampler.type);
+        if (target == 0)
+            continue;
+        GLint unit = -1;
+        glGetUniformiv(GLuint(program), sampler.location, &unit);
+        targets_by_unit[unit].insert(target);
+        std::string problem;
+        if (target == GL_TEXTURE_BUFFER) {
+            GLint previous = GL_TEXTURE0, id = 0;
+            glGetIntegerv(GL_ACTIVE_TEXTURE, &previous);
+            glActiveTexture(GL_TEXTURE0 + unit);
+            glGetIntegerv(GL_TEXTURE_BINDING_BUFFER, &id);
+            glActiveTexture(GLenum(previous));
+            if (id == 0)
+                problem = "no buffer texture bound";
+        } else
+            problem = OpenGLManager::describe_texture_incompleteness(target, GLuint(unit));
+        if (!problem.empty())
+            s_vgcode_draw_problems.push_back(std::string(what) + ": '" + sampler.name + "' on unit " + std::to_string(unit) + ": " + problem);
+    }
+    for (const auto& [unit, targets] : targets_by_unit)
+        if (targets.size() > 1)
+            s_vgcode_draw_problems.push_back(std::string(what) + ": samplers of different types share unit " + std::to_string(unit));
 }
 
 GLint bound_vao()
@@ -337,6 +384,158 @@ TEST_CASE("OpenGL core profile: start-up, shaders, GLModel, plain VBO and dashed
         CHECK(drain_gl_errors() == GL_NO_ERROR);
     }
 
+    SECTION("the G-code viewer's point size query is valid in a core profile")
+    {
+        // GL_ALIASED_POINT_SIZE_RANGE is not a core-profile query (GL_INVALID_ENUM on macOS at the first slice).
+        float range[2] = { 0.f, 0.f };
+        OpenGLManager::query_point_size_range(range);
+        CHECK(drain_gl_errors() == GL_NO_ERROR);
+        CHECK(range[0] > 0.f);
+        CHECK(range[1] >= range[0]);
+    }
+
+    SECTION("texture completeness: the check itself")
+    {
+        // What macOS reports as "unit N GLD_TEXTURE_INDEX_2D is unloadable ... using zero texture".
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, 0);
+        CHECK_FALSE(OpenGLManager::describe_texture_incompleteness(GL_TEXTURE_2D, 0).empty());
+
+        std::vector<unsigned char> texels(4 * 4 * 4, 255);
+        GLuint tex = 0;
+        glGenTextures(1, &tex);
+        glBindTexture(GL_TEXTURE_2D, tex);
+        // No image yet.
+        CHECK_FALSE(OpenGLManager::describe_texture_incompleteness(GL_TEXTURE_2D, 0).empty());
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 4, 4, 0, GL_RGBA, GL_UNSIGNED_BYTE, texels.data());
+        // Level 0 only, with the default mipmap min filter: incomplete.
+        CHECK_FALSE(OpenGLManager::describe_texture_incompleteness(GL_TEXTURE_2D, 0).empty());
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        CHECK(OpenGLManager::describe_texture_incompleteness(GL_TEXTURE_2D, 0).empty());
+        // A chain that stops above 1x1 (what GLTexture::load_from_svg() allocates) with a mipmap filter
+        // and the default GL_TEXTURE_MAX_LEVEL: incomplete; with GL_TEXTURE_MAX_LEVEL at its last level: complete.
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+        glTexImage2D(GL_TEXTURE_2D, 1, GL_RGBA8, 2, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, texels.data());
+        CHECK_FALSE(OpenGLManager::describe_texture_incompleteness(GL_TEXTURE_2D, 0).empty());
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 1);
+        CHECK(OpenGLManager::describe_texture_incompleteness(GL_TEXTURE_2D, 0).empty());
+        // The full chain with the default GL_TEXTURE_MAX_LEVEL: complete.
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 1000);
+        glTexImage2D(GL_TEXTURE_2D, 2, GL_RGBA8, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, texels.data());
+        CHECK(OpenGLManager::describe_texture_incompleteness(GL_TEXTURE_2D, 0).empty());
+        // A level of the wrong size breaks it again.
+        glTexImage2D(GL_TEXTURE_2D, 1, GL_RGBA8, 4, 4, 0, GL_RGBA, GL_UNSIGNED_BYTE, texels.data());
+        CHECK_FALSE(OpenGLManager::describe_texture_incompleteness(GL_TEXTURE_2D, 0).empty());
+        // The check looks at the unit it is asked about and leaves the active unit alone.
+        glActiveTexture(GL_TEXTURE2);
+        CHECK_FALSE(OpenGLManager::describe_texture_incompleteness(GL_TEXTURE_2D, 0).empty());
+        GLint active = 0;
+        glGetIntegerv(GL_ACTIVE_TEXTURE, &active);
+        CHECK(active == GL_TEXTURE2);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, 0);
+        glDeleteTextures(1, &tex);
+        CHECK(drain_gl_errors() == GL_NO_ERROR);
+
+        // The fallback textures are complete on their own.
+        for (const GLenum target : { GLenum(GL_TEXTURE_2D), GLenum(GL_TEXTURE_3D) }) {
+            const unsigned int fallback = OpenGLManager::get_fallback_texture(target);
+            REQUIRE(fallback != 0);
+            CHECK(OpenGLManager::get_fallback_texture(target) == fallback);
+            glActiveTexture(GL_TEXTURE5);
+            glBindTexture(target, fallback);
+            CHECK(OpenGLManager::describe_texture_incompleteness(target, 5).empty());
+            glBindTexture(target, 0);
+            glActiveTexture(GL_TEXTURE0);
+        }
+        CHECK(drain_gl_errors() == GL_NO_ERROR);
+    }
+
+    SECTION("textures GLTexture makes are complete from the start, compressed ones included")
+    {
+        auto complete = [](const GLTexture& texture) {
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, texture.get_id());
+            const std::string problem = OpenGLManager::describe_texture_incompleteness(GL_TEXTURE_2D, 0);
+            glBindTexture(GL_TEXTURE_2D, 0);
+            INFO(problem);
+            return problem.empty();
+        };
+        std::vector<unsigned char> rgba(size_t(6 * 5 * 4), 200);
+        {
+            GLTexture raw;
+            REQUIRE(raw.load_from_raw_data(rgba, 6, 5, false, /*use_mipmaps=*/true));
+            CHECK(complete(raw));
+            CHECK(raw.ready_to_sample());
+        }
+        {
+            GLTexture raw;
+            REQUIRE(raw.load_from_raw_data(rgba, 6, 5, false, /*use_mipmaps=*/false));
+            CHECK(complete(raw));
+        }
+        // The bed type / plate logo path: an SVG with mipmaps, compressed in the background when S3TC
+        // is there. It is drawn from the frame that creates it, before any level is compressed.
+        const std::string svg = std::string(SLIC3R_TEST_RESOURCES_DIR) + "/images/bbl-3dp-logo.svg";
+        for (const bool compress : { true, false }) {
+            INFO("compress " << compress << ", S3TC " << OpenGLManager::are_compressed_textures_supported());
+            GLTexture logo;
+            REQUIRE(logo.load_from_svg_file(svg, /*use_mipmaps=*/true, compress, /*apply_anisotropy=*/false, 256));
+            CHECK(complete(logo));
+            // Wait for the compressor, sending what it has, as PartPlate::render_logo_texture() does per frame.
+            for (int i = 0; i < 500 && !logo.all_compressed_data_sent_to_gpu(); ++i) {
+                if (logo.unsent_compressed_data_available())
+                    logo.send_compressed_data_to_gpu();
+                else
+                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                CHECK(complete(logo));
+            }
+            CHECK(logo.ready_to_sample());
+            CHECK(complete(logo));
+        }
+        CHECK(drain_gl_errors() == GL_NO_ERROR);
+    }
+
+    SECTION("gouraud: its cut samplers (units 3 and 4) see complete fallback textures while no cut is active")
+    {
+        GLShaderProgram* gouraud = manager->get_shader("gouraud");
+        REQUIRE(gouraud != nullptr);
+        bool has_sheet = false, has_field = false;
+        for (const GLShaderProgram::SamplerUniform& sampler : gouraud->get_samplers()) {
+            has_sheet |= sampler.name == "curved_sheet_tex";
+            has_field |= sampler.name == "draw_field_tex";
+        }
+        CHECK(has_sheet);
+        CHECK(has_field);
+        // Leave nothing on those units, as the app does between cuts.
+        for (const GLenum unit : { GLenum(GL_TEXTURE3), GLenum(GL_TEXTURE4) }) {
+            glActiveTexture(unit);
+            glBindTexture(GL_TEXTURE_2D, 0);
+            glBindTexture(GL_TEXTURE_3D, 0);
+        }
+        glActiveTexture(GL_TEXTURE0);
+        gouraud->start_using();
+        for (const GLShaderProgram::SamplerUniform& sampler : gouraud->get_samplers()) {
+            const unsigned int target = GLShaderProgram::sampler_target(sampler.type);
+            if (target == 0)
+                continue;
+            GLint unit = -1;
+            glGetUniformiv(gouraud->get_id(), sampler.location, &unit);
+            INFO(sampler.name << " on unit " << unit);
+            CHECK(OpenGLManager::describe_texture_incompleteness(target, unit).empty());
+        }
+        GLint active = 0;
+        glGetIntegerv(GL_ACTIVE_TEXTURE, &active);
+        CHECK(active == GL_TEXTURE0);
+        // The debug check runs clean on it too.
+        const bool debug = OpenGLManager::gl_debug_enabled();
+        OpenGLManager::set_gl_debug_enabled(true);
+        OpenGLManager::check_sampled_textures(gouraud, "the core-profile test");
+        OpenGLManager::set_gl_debug_enabled(debug);
+        gouraud->stop_using();
+        CHECK(drain_gl_errors() == GL_NO_ERROR);
+    }
+
     SECTION("libvgcode renders a small G-code scene, then shuts down without unloading the shared GL loader")
     {
         // A square perimeter on two layers, processed by EdgeSlicer's GCodeProcessor.
@@ -381,6 +580,19 @@ TEST_CASE("OpenGL core profile: start-up, shaders, GLModel, plain VBO and dashed
             CHECK(drain_gl_errors() == GL_NO_ERROR);
             viewer.set_view_type(libvgcode::EViewType::FeatureType);
 
+            // Every libvgcode draw checks what its program samples. Nothing of ours on any unit, the
+            // way GCodeViewer leaves it (no set_shadow_map() from the host): the segments program's
+            // shadow_map sampler2D must still see a complete texture, and must not share unit 0 with
+            // the position_tex samplerBuffer.
+            for (GLenum unit = GL_TEXTURE0; unit <= GL_TEXTURE5; ++unit) {
+                glActiveTexture(unit);
+                glBindTexture(GL_TEXTURE_2D, 0);
+            }
+            glActiveTexture(GL_TEXTURE0);
+            s_vgcode_draw_problems.clear();
+            s_vgcode_draws_checked = 0;
+            libvgcode::Viewer::set_draw_check_hook(&check_vgcode_draw);
+
             // Top-down orthographic camera over X/Y 0..70 mm.
             Matrix4f view = Matrix4f::Identity();
             view(2, 3) = -100.f;
@@ -397,6 +609,17 @@ TEST_CASE("OpenGL core profile: start-up, shaders, GLModel, plain VBO and dashed
             scene.clear();
             glEnable(GL_DEPTH_TEST);
             viewer.render(libvgcode::convert(view), libvgcode::convert(proj));
+            libvgcode::Viewer::set_draw_check_hook(nullptr);
+            CHECK(s_vgcode_draws_checked > 0);
+            for (const std::string& problem : s_vgcode_draw_problems)
+                FAIL_CHECK(problem);
+            CHECK(s_vgcode_draw_problems.empty());
+            // The shadow map fallback is put back: unit 4 has what it had before (nothing).
+            glActiveTexture(GL_TEXTURE4);
+            GLint unit4 = -1;
+            glGetIntegerv(GL_TEXTURE_BINDING_2D, &unit4);
+            glActiveTexture(GL_TEXTURE0);
+            CHECK(unit4 == 0);
             glDisable(GL_DEPTH_TEST);
             CHECK(drain_gl_errors() == GL_NO_ERROR);
             // libvgcode restores the VAO it found bound (the app's default VAO).

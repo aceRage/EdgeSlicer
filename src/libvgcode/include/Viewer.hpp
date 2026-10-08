@@ -50,6 +50,11 @@ public:
     //
     void shutdown();
     //
+    // EDGE: debugging aid. `hook` is called right before every draw with the draw's name and its
+    // program bound (nullptr turns it off). Global: it applies to every viewer.
+    //
+    static void set_draw_check_hook(void (*hook)(const char* what));
+    //
     // Reset the contents of the viewer.
     // Automatically called by load() method.
     //

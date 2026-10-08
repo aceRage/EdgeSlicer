@@ -93,6 +93,7 @@ add_executable(${_TEST_NAME}_tests
 	test_local_z_order_optimizer.cpp
 	test_placeholder_parser.cpp
 	test_polygon.cpp
+	test_extruder_variant_normalize.cpp
 	test_preset_diff.cpp
 	test_print_settings_carry.cpp
 	test_filament_variant_autoenable.cpp
