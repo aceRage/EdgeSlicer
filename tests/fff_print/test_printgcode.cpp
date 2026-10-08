@@ -803,6 +803,57 @@ std::string slice_u1_two_tool(DynamicPrintConfig config)
 
 } // namespace
 
+namespace {
+// Role label of a ";TYPE:<role>" / "; FEATURE: <role>" comment line, or `current` for any other line.
+std::string feature_after(const std::string &raw, const std::string &current)
+{
+    size_t skip = 0;
+    if (raw.rfind(";TYPE:", 0) == 0)
+        skip = 6;
+    else if (raw.rfind("; FEATURE: ", 0) == 0)
+        skip = 11;
+    else
+        return current;
+    std::string out = raw.substr(skip);
+    while (!out.empty() && (out.back() == 13 || out.back() == 10))
+        out.pop_back();
+    return out;
+}
+} // namespace
+
+TEST_CASE("Z restore after an unknown position uses the nominal Z", "[PrintGCode][Orca11011]")
+{
+    DynamicPrintConfig config = step_size_2_f0_config();
+    apply_u1_toolchange_markers(config);
+    config.option<ConfigOptionFloat>("z_offset")->value      = 0.1;
+    config.option<ConfigOptionBool>("gcode_comments")->value = true;
+    const double z_offset = 0.1;
+
+    const std::string gcode = slice_u1_two_tool(config);
+
+    // After a toolchange the position is unknown; the Z that is restored must be the layer Z plus z_offset,
+    // not the bare layer Z (which would put the nozzle z_offset below where the layer is printed).
+    static const std::regex z_tag_re("^;Z:([0-9.]+)");
+    static const std::regex z_move_re("^G1 Z([0-9.]+).*ensure Z matches planned layer height");
+    double layer_z  = 0.;
+    size_t restores = 0;
+    size_t wrong    = 0;
+    std::istringstream in(gcode);
+    std::string        line;
+    while (std::getline(in, line)) {
+        std::smatch m;
+        if (std::regex_search(line, m, z_tag_re))
+            layer_z = std::stod(m[1].str());
+        else if (std::regex_search(line, m, z_move_re)) {
+            ++restores;
+            if (std::abs(std::stod(m[1].str()) - (layer_z + z_offset)) > 0.0015)
+                ++wrong;
+        }
+    }
+    REQUIRE(restores > 0);
+    CHECK(wrong == 0);
+}
+
 TEST_CASE("wipe-tower and set_extruder PA follow the High-Flow column", "[PrintGCode][GCode][PAVariant]")
 {
     const DynamicPrintConfig config = high_flow_pa_config(true, true, false);

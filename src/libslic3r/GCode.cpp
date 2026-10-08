@@ -9672,9 +9672,9 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
                                  sloped == nullptr ? ((zaa_contoured || path.z_offset != 0.f) ? zaa_first_z : DBL_MAX)
                                                    : get_sloped_z(sloped->slope_begin.z_ratio));
         m_need_change_layer_lift_z = false;
-        // Orca: force restore Z after unknown last pos
+        // Orca: ensure Z matches planned layer height
         if (_last_pos_undefined && !slope_need_z_travel) {
-            gcode += this->writer().travel_to_z(m_last_layer_z, "force restore Z after unknown last pos", true);
+            gcode += this->writer().travel_to_z(m_nominal_z, "ensure Z matches planned layer height", true);
         }
     }
 
