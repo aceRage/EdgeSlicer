@@ -904,6 +904,20 @@ public:
     static void handle_legacy(t_config_option_key &opt_key, std::string &value);
     static void handle_legacy_composite(DynamicPrintConfig &config);
 
+    // Keys a bundled or user preset file may carry although this build deliberately does not load
+    // them into presets (yet). They are dropped on load exactly like any other key that is not part
+    // of the preset type, but they are expected, so Preset::remove_invalid_keys() reports them once
+    // per session at info level instead of one error per file. A genuinely unknown key is not listed
+    // here and keeps logging as an error. This is a "known to be absent" list, not a support list:
+    // adding a key here never changes a loaded value or the G-code.
+    enum class ForeignKeyOrigin {
+        BambuStudio,   // Bambu Studio option this fork has not implemented in presets (see docs/bambu-flush-keys.md)
+        ProjectScoped, // option that lives in the project config; older saves also wrote it into preset files
+    };
+    // True (and the origin) when opt_key is such a key.
+    static bool unsupported_foreign_key(const std::string &opt_key, ForeignKeyOrigin *origin = nullptr);
+    static const char *foreign_key_origin_label(ForeignKeyOrigin origin);
+
     // Array options growing with the number of extruders
     const std::vector<std::string>& extruder_option_keys() const { return m_extruder_option_keys; }
     // Options defining the extruder retract properties. These keys are sorted lexicographically.
