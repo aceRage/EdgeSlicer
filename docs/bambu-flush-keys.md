@@ -178,7 +178,7 @@ the situation `remove_invalid_keys` exists to report.
   A cleaner follow-up (not done here, it changes saved files): stop writing it into the print preset in
   `set_mixed_string()`.
 
-## Port proposal (not done in this PR)
+## Port proposal (as researched; done in feat/bambu-flush-keys, see below)
 
 Goal: make these profile values take effect so H2D/H2C/H2S/P2S/X2D/A2L output matches Bambu Studio.
 Following the precedent of `filament_pre_cooling_temperature_nc` / `filament_retract_length_nc` (commit
@@ -210,3 +210,50 @@ check, and it should be listed as an accepted behaviour change. Two things to de
   is 10; keep that, since every BBL profile states it explicitly anyway.
 
 Not needed for the log noise, which is fixed independently (fix/preset-key-log-noise).
+
+## The port (feat/bambu-flush-keys)
+
+Done as proposed, with these differences:
+
+* **Per-variant list.** Our per-variant list is `filament_flow_variant_options()` (PrintConfig.cpp), the
+  Standard / High Flow columns that `BambuFlowSupport` maps Bambu's extruder-variant slots onto. All four keys
+  are there, so a composed config packs them per filament and flow column like `nozzle_temperature`. They are
+  **not** in `m_filament_option_keys` (~8508): that list is resized to the filament count by
+  `set_num_filaments()`, which would cut a packed vector.
+* **Reads.** `GCode.cpp` builds `flush_volumetric_speeds`, `flush_temperatures` and
+  `filament_cooling_before_tower` in one helper (`bambu_flush_placeholders`), reading each filament's slot with
+  `get_config_idx(..., ConfigFlowDomain::Filament, id)`. A nil slot reads as the option default. Fast
+  `prime_volume_mode` reads `filament_flush_temp_fast`. A filament switcher feeding extruders of different types
+  adds Bambu's extra 10 degrees. Through the wipe tower the cooling is 0 on the first layer (our tower has no
+  interface contact layers, Bambu's other zeroing case); every other toolchange publishes 0, as Bambu does. The
+  start G-code also gets the unpacked per-filament values of the four keys themselves (Prusa CORE One INDX reads
+  `filament_flush_volumetric_speed[next_extruder]`).
+* **Defaults.** The filament default preset nulls its nullable options (nil = use the printer value, for the
+  retract overrides). These four have no printer value, so the default preset keeps their defaults: a preset
+  that does not set them (all X1/P1/A1 profiles) holds flush 0 and cooling 10, and its G-code templates do not
+  read them.
+* **Invalidation.** The keys only invalidate the G-code export (`steps_gcode`). Bambu also invalidates its wipe
+  tower on `filament_cooling_before_tower` because its tower writes the reheat below; add that if the reheat is
+  ported.
+* **UI.** Filament > Basic information: "Wipe tower cooling" (Develop mode, as in Bambu). Filament >
+  Multimaterial > "Tool change parameters with multi extruder MM printers": the flush temperature, Fast flush
+  temperature and flush volumetric speed, before the extruder-change retraction (Bambu's "Multi Filament"
+  page order). Only one flush temperature line shows: the Fast one when the project's `prime_volume_mode` is
+  Fast (we have no purge-mode switch; a Bambu project can set Fast).
+
+### Follow-up: "Wipe tower reheat before wipe" (not ported)
+
+Bambu's tower copies the value into `m_filpar[idx].filament_cooling_before_tower` (WipeTower.cpp 1980). In
+`toolchange_wipe_new` (4071-4096, called on every BBL tower toolchange) it sets
+`should_heating = cooling > EPSILON && !solid_tool_toolchange && !is_first_layer()` and, at the start of the wipe
+(before the first wipe line, or before the first extrusion after the line/flat ironing pass), writes
+
+    M104 T<physical extruder> S<nozzle_temperature> N0 ;Wipe tower reheat before wipe
+
+through `format_line_M104(target, extruder, is_heating=true, wait_for_moves=true, ...)` (no M400 for heating).
+That raises the nozzle back from the `M620.15 C` pre-tower target to the print temperature while the tower wipe
+prints. Our tower writes nothing like it. With this port the firmware gets the 10 degree lower `M620.15` target;
+the `;VM109 S[new_filament_temp]` virtual wait in the template follows the flush. Whether the nozzle is back at
+print temperature before the part without the tower M104 is what the hardware hand-test has to show. If not,
+port the reheat into our `WipeTower::toolchange_Wipe` with the same conditions (and invalidate `psWipeTower` on
+the key).
