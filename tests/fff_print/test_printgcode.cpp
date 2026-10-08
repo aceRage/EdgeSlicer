@@ -2036,3 +2036,27 @@ TEST_CASE("Custom G-code motion limits are restored before generated moves", "[P
     REQUIRE(gcode.find("M204 S6000 ; adjust acceleration", custom_gcode_pos) != std::string::npos);
     REQUIRE(gcode.find("M205 X8 Y8 ; adjust jerk", custom_gcode_pos) != std::string::npos);
 }
+
+TEST_CASE("G92 E0 reset check is exact about letter case", "[Print][Orca13933]")
+{
+    auto validate_with = [](const std::string &layer_gcode, bool relative_e) {
+        Slic3r::Print print;
+        Slic3r::Model model;
+        Slic3r::Test::init_print({ TestMesh::cube_20x20x20 }, print, model, {
+            { "layer_change_gcode",       layer_gcode },
+            { "use_relative_e_distances", relative_e ? "1" : "0" },
+        });
+        return print.validate().string;
+    };
+
+    // Relative extruder addressing needs the exact upper-case reset; a lower-case one is not a reset
+    // and is reported as such instead of failing later in the G-code processor.
+    CHECK(validate_with("G92 E0", true).empty());
+    CHECK_FALSE(validate_with("g92 e0", true).empty());
+    CHECK_FALSE(validate_with("G92 e0", true).empty());
+    CHECK_FALSE(validate_with("", true).empty());
+    // Absolute addressing refuses a reset in any letter case.
+    CHECK_FALSE(validate_with("G92 E0", false).empty());
+    CHECK_FALSE(validate_with("g92 e0", false).empty());
+    CHECK(validate_with("", false).empty());
+}
