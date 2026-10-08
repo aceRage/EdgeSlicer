@@ -1,0 +1,44 @@
+{
+    "type": "filament",
+    "from": "system",
+    "instantiation": "false",
+    "name": "Snapmaker PLA Metal @U1 base",
+    "filament_id": "OFtybfNX",
+    "inherits": "fdm_filament_pla",
+    "filament_end_gcode": [
+        ""
+    ],
+    "filament_cost": [
+        "90"
+    ],
+    "filament_density": [
+        "1.25"
+    ],
+    "filament_max_volumetric_speed": [
+        "16"
+    ],
+    "filament_loading_speed_start": [
+        "35"
+    ],
+    "filament_loading_speed": [
+        "35"
+    ],
+    "filament_unloading_speed_start": [
+        "35"
+    ],
+    "filament_unloading_speed": [
+        "35"
+    ],
+    "filament_cooling_moves": [
+        "2"
+    ],
+    "filament_cooling_initial_speed": [
+        "35"
+    ],
+    "filament_cooling_final_speed": [
+        "60"
+    ],
+    "nozzle_temperature": [
+        "220"
+    ]
+}

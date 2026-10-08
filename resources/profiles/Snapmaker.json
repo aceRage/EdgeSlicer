@@ -1,6 +1,6 @@
 {
   "name": "Snapmaker",
-  "version": "02.03.03.05",
+  "version": "02.03.03.06",
   "force_update": "0",
   "description": "Snapmaker configurations",
   "machine_model_list": [
@@ -1995,6 +1995,66 @@
     {
       "name": "Polymaker ASA @U1",
       "sub_path": "filament/Polymaker ASA @U1.json"
+    },
+    {
+      "name": "Snapmaker PET @U1 base",
+      "sub_path": "filament/Snapmaker PET @U1 base.json"
+    },
+    {
+      "name": "Snapmaker PET @U1",
+      "sub_path": "filament/Snapmaker PET @U1.json"
+    },
+    {
+      "name": "Snapmaker PETG @U1 base",
+      "sub_path": "filament/Snapmaker PETG @U1 base.json"
+    },
+    {
+      "name": "Snapmaker PETG @U1",
+      "sub_path": "filament/Snapmaker PETG @U1.json"
+    },
+    {
+      "name": "Snapmaker PLA @U1 base",
+      "sub_path": "filament/Snapmaker PLA @U1 base.json"
+    },
+    {
+      "name": "Snapmaker PLA @U1",
+      "sub_path": "filament/Snapmaker PLA @U1.json"
+    },
+    {
+      "name": "Snapmaker PLA Eco @U1",
+      "sub_path": "filament/Snapmaker PLA Eco @U1.json"
+    },
+    {
+      "name": "Snapmaker PLA Lite @U1 base",
+      "sub_path": "filament/Snapmaker PLA Lite @U1 base.json"
+    },
+    {
+      "name": "Snapmaker PLA Lite @U1",
+      "sub_path": "filament/Snapmaker PLA Lite @U1.json"
+    },
+    {
+      "name": "Snapmaker PLA Metal @U1 base",
+      "sub_path": "filament/Snapmaker PLA Metal @U1 base.json"
+    },
+    {
+      "name": "Snapmaker PLA Metal @U1",
+      "sub_path": "filament/Snapmaker PLA Metal @U1.json"
+    },
+    {
+      "name": "Snapmaker TPE @U1",
+      "sub_path": "filament/Snapmaker TPE @U1.json"
+    },
+    {
+      "name": "Snapmaker TPU 95A @U1 base",
+      "sub_path": "filament/Snapmaker TPU 95A @U1 base.json"
+    },
+    {
+      "name": "Snapmaker TPU 95A @U1",
+      "sub_path": "filament/Snapmaker TPU 95A @U1.json"
+    },
+    {
+      "name": "Snapmaker TPU High-Flow @U1",
+      "sub_path": "filament/Snapmaker TPU High-Flow @U1.json"
     }
   ],
   "machine_list": [
