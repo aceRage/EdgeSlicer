@@ -730,7 +730,18 @@ public:
 	wxSizer*	create_bed_shape_widget(wxWindow* parent);
 	void		cache_extruder_cnt(const DynamicPrintConfig* config = nullptr);
 	bool		apply_extruder_cnt_from_cache();
+	// Rebuilds the extruder pages when the per-variant slots they edit have moved (another nozzle flow type).
+	void		update_extruder_variant_pages();
 
+private:
+	// A printer in the per-extruder-variant layout keeps one retraction value per (extruder, variant) slot;
+	// each extruder page edits the slot the slicer reads for that extruder (printer_extruder_variant_value_index).
+	size_t		extruder_field_index(const std::string &key, size_t extruder_idx) const;
+	std::vector<size_t> extruder_variant_sources() const;
+	// (key index, extruder, slot) of every extruder field bound to a slot other than its extruder index.
+	std::vector<size_t> extruder_field_layout() const;
+	std::vector<size_t> m_variant_sources;
+	std::vector<size_t> m_extruder_field_layout;
 };
 
 class TabSLAMaterial : public Tab

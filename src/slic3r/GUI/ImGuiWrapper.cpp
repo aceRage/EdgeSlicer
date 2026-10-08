@@ -4,6 +4,8 @@
 #include <vector>
 #include <cmath>
 #include <stdexcept>
+#include <set>
+#include <string>
 
 #include <boost/format.hpp>
 #include <boost/log/trivial.hpp>
@@ -457,7 +459,15 @@ void ImGuiWrapper::set_scaling(float font_size, float scale_style, float scale_b
     m_style_scaling = scale_style;
 
     //destroy_fonts_texture();
-    destroy_font();
+    // EDGE (core profile): GLCanvas3D::_resize() calls this from inside render(), between new_frame()
+    // and render(). Deleting the font texture there left the text already in this frame's draw
+    // lists bound to a deleted texture name, and set the atlas TexID to 0 for the text still to come:
+    // both are incomplete textures at the draw ("unit 0 GLD_TEXTURE_INDEX_2D is unloadable" on macOS,
+    // the "skipped a draw with texture 0" log line). Rebuild at the next new_frame() instead.
+    if (m_new_frame_open)
+        m_font_rebuild_pending = true;
+    else
+        destroy_font();
 }
 
 bool ImGuiWrapper::update_mouse_data(wxMouseEvent& evt)
@@ -520,7 +530,8 @@ void ImGuiWrapper::new_frame()
         return;
     }
 
-    if (m_font_texture == 0) {
+    if (m_font_texture == 0 || m_font_rebuild_pending) {
+        m_font_rebuild_pending = false;
         init_font(true);
     }
 
@@ -531,7 +542,9 @@ void ImGuiWrapper::new_frame()
 void ImGuiWrapper::render()
 {
     ImGui::Render();
-    render_draw_data(ImGui::GetDrawData());
+    // EDGE: EDGESLICER_GL_SKIP=imgui leaves every ImGui draw out (OpenGLManager::gl_skip).
+    if (!OpenGLManager::gl_skip("imgui"))
+        render_draw_data(ImGui::GetDrawData());
     m_new_frame_open = false;
 }
 
@@ -3143,8 +3156,25 @@ void ImGuiWrapper::render_draw_data(ImDrawData *draw_data)
                 // Apply scissor/clipping rectangle (Y is inverted in OpenGL)
                 glsafe(::glScissor((int)clip_min.x, (int)(fb_height - clip_max.y), (int)(clip_max.x - clip_min.x), (int)(clip_max.y - clip_min.y)));
 
+                // EDGE (core profile): an image whose texture was never made (id 0) has nothing to
+                // sample: an incomplete texture, black on most drivers and "unit 0 GLD_TEXTURE_INDEX_2D
+                // is unloadable" on macOS. Skip it.
+                const GLuint tex_id = (GLuint)(intptr_t)pcmd->GetTexID();
+                if (tex_id == 0) {
+                    // Named by the ImGui window that drew it, once per window (at most 20).
+                    static std::set<std::string> logged;
+                    const std::string owner = cmd_list->_OwnerName != nullptr ? cmd_list->_OwnerName : "(no window)";
+                    if (logged.size() < 20 && logged.insert(owner).second)
+                        BOOST_LOG_TRIVIAL(warning) << "ImGui: skipped a draw with texture 0 in window '" << owner << "', " << pcmd->ElemCount
+                                                   << " indices (" << ((ImTextureID)(intptr_t)0 == ImGui::GetIO().Fonts->TexID ? "the font atlas has no texture now"
+                                                                                                                                : "an image that was never loaded")
+                                                   << "); logged once per window";
+                    continue;
+                }
                 // Bind texture, Draw
-                glsafe(::glBindTexture(GL_TEXTURE_2D, (GLuint)(intptr_t)pcmd->GetTexID()));
+                glsafe(::glBindTexture(GL_TEXTURE_2D, tex_id));
+                if (OpenGLManager::gl_debug_enabled())
+                    OpenGLManager::check_sampled_textures(shader, "ImGui");
                 glsafe(::glDrawElements(GL_TRIANGLES, (GLsizei)pcmd->ElemCount, sizeof(ImDrawIdx) == 2 ? GL_UNSIGNED_SHORT : GL_UNSIGNED_INT, (void*)(intptr_t)(pcmd->IdxOffset * sizeof(ImDrawIdx))));
             }
         }
