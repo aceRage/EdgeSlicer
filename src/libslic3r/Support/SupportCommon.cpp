@@ -149,11 +149,13 @@ std::pair<SupportGeneratorLayersPtr, SupportGeneratorLayersPtr> generate_interfa
         const bool                 smooth_supports        = support_params.support_style != smsGrid;
         SupportGeneratorLayersPtr &interface_layers       = base_and_interface_layers.first;
         SupportGeneratorLayersPtr &base_interface_layers  = base_and_interface_layers.second;
-        // The user-facing interface layer counts include the contact layer. Internally,
-        // contact layers are generated separately, so only the remaining layers are
-        // projected into intermediate interface/base-interface layers here.
-        const size_t num_top_interface_layers    = support_params.has_top_contacts    ? support_params.num_top_interface_layers    - 1 : 0;
-        const size_t num_bottom_interface_layers = support_params.has_bottom_contacts ? support_params.num_bottom_interface_layers - 1 : 0;
+        // Contacts printed separately consume one requested interface layer. Organic
+        // bottom contacts are projection seeds and are not printed separately.
+        const bool organic_tree = support_params.support_style == smsTreeOrganic;
+        const size_t num_top_interface_layers         = support_params.has_top_contacts ?
+                                                        support_params.num_top_interface_layers - 1 : 0;
+        const size_t num_bottom_interface_layers      = support_params.has_bottom_contacts ?
+                                                        support_params.num_bottom_interface_layers - (organic_tree ? 0 : 1) : 0;
         const size_t num_top_base_interface_layers    = std::min(support_params.num_top_base_interface_layers,    num_top_interface_layers);
         const size_t num_bottom_base_interface_layers = std::min(support_params.num_bottom_base_interface_layers, num_bottom_interface_layers);
         const size_t num_top_interface_layers_only    = num_top_interface_layers    - num_top_base_interface_layers;
