@@ -16,6 +16,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <map>
 #include <regex>
 #include <sstream>
@@ -2077,4 +2078,32 @@ TEST_CASE("G92 E0 reset check is exact about letter case", "[Print][Orca13933]")
     CHECK_FALSE(validate_with("G92 E0", false).empty());
     CHECK_FALSE(validate_with("g92 e0", false).empty());
     CHECK(validate_with("", false).empty());
+}
+
+TEST_CASE("Spiral vase drops extrusion segments shorter than the path resolution", "[PrintGCode][SpiralVase][Orca13517]")
+{
+    const double resolution = 0.2;
+    const std::string gcode = Slic3r::Test::slice({ TestMesh::sphere_50mm }, {
+        { "spiral_mode",                "1" },
+        { "resolution",                 "0.2" },
+        { "enable_arc_fitting",         "0" },
+        { "gcode_comments",             "1" },
+        { "machine_start_gcode",        "" },
+        { "z_hop",                      "0" },
+        { "layer_height",               "0.2" },
+        { "initial_layer_print_height", "0.2" },
+    });
+
+    double min_segment = std::numeric_limits<double>::max();
+    size_t segments    = 0;
+    GCodeReader parser;
+    parser.parse_buffer(gcode, [&](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        // Past the first (non spiral) layer only.
+        if (self.z() > 0.5f && line.cmd_is("G1") && line.extruding(self) && line.dist_XY(self) > 0) {
+            min_segment = std::min(min_segment, double(line.dist_XY(self)));
+            ++segments;
+        }
+    });
+    REQUIRE(segments > 100);
+    CHECK(min_segment >= 2. * resolution - 1e-3);
 }
