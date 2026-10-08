@@ -137,6 +137,28 @@ the preset loader that withholds them. The other lines Bambu varies on these key
 purges in the tower (`flush_length` is 0, `SYNC T0`), so they show no difference here. (A project with
 `purge_in_prime_tower` handled by the firmware flush would.)
 
+## Log noise (the PR that goes with this note)
+
+Owner's start log of 2026-10-08 (2,210 `[error]` lines): 1,508 `load_vendor_configs_from_json ... contains
+incorrect keys` (system profiles) + 425 `Error in a preset file` (user presets: 422 flush family, 3
+`mixed_filament_definitions`) = 1,933 key-related lines, i.e. 87.5 percent. The remaining 277 are not key
+problems: 256 `WebPresetDialog::LoadProfileFamily ... GetFilamentInfo Failed`, 16 `PartPlate::calc_exclude_triangles:
+Unable to create exclude triangles`, 3 `Health check is not running`, 1 `file path is null for ... icon-192.png`,
+1 `can not find parent for config ... (a user process preset whose parent is gone)`.
+
+After fix/preset-key-log-noise (scratch datadir, the repo's profile tree loaded through
+`PresetBundle::load_presets`, hidden `[KeyNoiseProbe]` test): **0 error lines** from the system tree, and one info
+line: `Ignored 4,294 occurrences of unsupported Bambu Studio keys (1,508 presets): filament_cooling_before_tower
+(1,337), filament_flush_temp (1,499), filament_flush_volumetric_speed (1,458)`. CLI slice of an X1C: 1,481 error
+lines before, 0 after (log 685 KB to 47 KB); U1: 159 before, 0 after. G-code of a U1 cube, an X1C cube and a
+two-filament H2D plate is identical to a build of origin/main (only the generation timestamp differs).
+
+Note on "unknown" keys: a key that the config *definition* does not know at all (for example
+`filament_flush_temp_fast`, or a typo) is already discarded silently while the file is parsed
+(`PrintConfigDef::handle_legacy`: `print_config_def.has()` false). The error that remains is for keys that are
+defined but sit in the wrong preset type (a process option in a filament preset, for example `layer_height`), which is
+the situation `remove_invalid_keys` exists to report.
+
 ## mixed_filament_definitions
 
 * Origin: the **Snapmaker Orca mixed filament feature**, merged into EdgeSlicer as `ac3dafe08a "Feat:mix
