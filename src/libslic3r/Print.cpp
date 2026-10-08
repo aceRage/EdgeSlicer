@@ -622,6 +622,14 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
         "filament_end_gcode",
         // BBS (H2C rack): only read by change_filament_gcode (M620.11 O1 T<len>).
         "filament_retract_length_nc",
+        // BBS: only read through the change_filament / machine start / end G-code placeholders
+        // (flush_temperatures, flush_volumetric_speeds, filament_cooling_before_tower). Bambu Studio
+        // also invalidates its wipe tower on filament_cooling_before_tower because its tower writes a
+        // reheat M104 from it; ours does not (see the follow-up in docs/bambu-flush-keys.md).
+        "filament_flush_temp",
+        "filament_flush_temp_fast",
+        "filament_flush_volumetric_speed",
+        "filament_cooling_before_tower",
         // BBS: read only by the idle-nozzle pre-cooling / pre-heating of the G-code post-processor.
         "enable_pre_heating",
         "filament_pre_cooling_temperature",

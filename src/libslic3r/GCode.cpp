@@ -433,6 +433,89 @@ static double outgoing_filament_retract_length_nc(const PrintConfig& config, int
     return opt.values[i];
 }
 
+// BBS: one filament's value of a nullable per-flow-variant filament option (filament_flush_temp,
+// filament_flush_volumetric_speed, filament_cooling_before_tower, ...): the slot get_config_idx picks
+// for the filament's Standard / High Flow column, as Bambu Studio's get_filament_config_index picks
+// the extruder-variant slot. A nil slot (Anycubic profiles say ["nil"]) reads as the option default.
+template<typename T, typename NullableVector>
+static T filament_variant_value(const ConfigBase& config, const NullableVector& opt, size_t filament_id, const char* key)
+{
+    const T fallback = T(static_cast<const NullableVector*>(print_config_def.get(key)->default_value.get())->values.front());
+    if (opt.values.empty())
+        return fallback;
+    size_t idx = get_config_idx(config, ConfigFlowDomain::Filament, static_cast<unsigned int>(filament_id));
+    if (idx >= opt.values.size())
+        idx = 0; // ConfigOptionVector::get_at's fallback
+    if (opt.is_nil(idx))
+        return fallback;
+    const T value = T(opt.values[idx]);
+    if constexpr (std::is_floating_point<T>::value) {
+        if (std::isnan(value))
+            return fallback;
+    }
+    return value;
+}
+
+// BBS: Bambu Studio adds this much pre-tower cooling when a filament switcher feeds extruders of
+// different types (GCode.cpp g_filament_switcher_extra_cooling_before_tower).
+static double filament_switcher_extra_cooling_before_tower(const PrintConfig& config)
+{
+    const std::vector<int>& types = config.extruder_type.values;
+    const bool mixed_extruder_types =
+        types.size() > 1 && std::adjacent_find(types.begin(), types.end(), [](int lhs, int rhs) { return lhs != rhs; }) != types.end();
+    return config.has_filament_switcher.value && mixed_extruder_types ? 10. : 0.;
+}
+
+// BBS: the flush / pre-tower cooling placeholders of the BBL machine templates, one entry per
+// filament, as Bambu Studio builds them (GCode.cpp 1001-1026 for a toolchange through the wipe tower,
+// 8318-8337 for any other toolchange, 8061-8075 for the start G-code):
+//   flush_volumetric_speeds        filament_flush_volumetric_speed, 0 = filament_max_volumetric_speed
+//   flush_temperatures             filament_flush_temp (filament_flush_temp_fast in Fast prime-volume
+//                                  mode), 0 = the top of the recommended nozzle temperature range
+//   filament_cooling_before_tower  the drop below the print temperature before the tower
+//                                  (M620.15 C{new_filament_temp - ...}); the callers zero it where
+//                                  Bambu Studio does
+struct BambuFlushPlaceholders
+{
+    std::vector<double> volumetric_speeds;
+    std::vector<int>    temperatures;
+    std::vector<double> cooling_before_tower;
+
+    void set(DynamicConfig& config) const
+    {
+        config.set_key_value("flush_volumetric_speeds", new ConfigOptionFloats(volumetric_speeds));
+        config.set_key_value("flush_temperatures", new ConfigOptionInts(temperatures));
+        config.set_key_value("filament_cooling_before_tower", new ConfigOptionFloats(cooling_before_tower));
+    }
+};
+
+static BambuFlushPlaceholders bambu_flush_placeholders(const PrintConfig& config, double extra_cooling_before_tower = 0.)
+{
+    BambuFlushPlaceholders out;
+    const size_t num_filaments  = flow_variant_filament_count(config);
+    const bool   use_fast_flush = config.prime_volume_mode.value == PrimeVolumeMode::pvmFast;
+    out.volumetric_speeds.reserve(num_filaments);
+    out.temperatures.reserve(num_filaments);
+    out.cooling_before_tower.reserve(num_filaments);
+    for (size_t i = 0; i < num_filaments; ++i) {
+        double speed = filament_variant_value<double>(config, config.filament_flush_volumetric_speed, i, "filament_flush_volumetric_speed");
+        if (speed == 0.)
+            speed = get_value_at(config, config.filament_max_volumetric_speed, ConfigFlowDomain::Filament, static_cast<unsigned int>(i));
+        out.volumetric_speeds.push_back(speed);
+
+        int temp = use_fast_flush ? filament_variant_value<int>(config, config.filament_flush_temp_fast, i, "filament_flush_temp_fast") :
+                                    filament_variant_value<int>(config, config.filament_flush_temp, i, "filament_flush_temp");
+        if (temp == 0)
+            temp = config.nozzle_temperature_range_high.get_at(i);
+        out.temperatures.push_back(temp);
+
+        out.cooling_before_tower.push_back(
+            filament_variant_value<double>(config, config.filament_cooling_before_tower, i, "filament_cooling_before_tower") +
+            extra_cooling_before_tower);
+    }
+    return out;
+}
+
 // Return true if tch_prefix is found in custom_gcode
 static bool custom_gcode_changes_tool(const std::string& custom_gcode, const std::string& tch_prefix, unsigned next_extruder)
 {
@@ -943,25 +1026,15 @@ std::string WipeTowerIntegration::append_tcr(GCode& gcodegen, const WipeTower::T
                 config.set_key_value(key_value, new ConfigOptionFloat(0.f));
             }
         }
-        // Ultra: per-filament flush vectors for BBS 2.x change_filament templates (single-nozzle).
+        // BBS: flush speed / temperature and pre-tower cooling for the change_filament template
+        // (Bambu Studio GCode.cpp 1001-1026). Bambu cools nothing before the tower on the first layer
+        // or on a tower interface (contact) layer; this tower has no interface layers.
         {
             const FullPrintConfig &cfg = gcodegen.config();
-            const auto* ft_opt = cfg.option<ConfigOptionInts>("filament_flush_temp");
-            const auto* vs_opt = cfg.option<ConfigOptionFloats>("filament_flush_volumetric_speed");
-            const auto* rh_opt = cfg.option<ConfigOptionInts>("nozzle_temperature_range_high");
-            const size_t nf = flow_variant_filament_count(cfg);
-            std::vector<int> fts; std::vector<double> vss;
-            for (size_t i = 0; i < nf; ++i) {
-                double vs = (vs_opt && i < vs_opt->size()) ? vs_opt->get_at(int(i)) : 0.;
-                if (vs == 0.)
-                    vs = get_value_at(cfg, cfg.filament_max_volumetric_speed, ConfigFlowDomain::Filament, int(i));
-                vss.push_back(vs);
-                int ft = (ft_opt && i < ft_opt->size()) ? ft_opt->get_at(int(i)) : 0;
-                if (ft == 0 && rh_opt) ft = rh_opt->get_at(int(i));
-                fts.push_back(ft);
-            }
-            config.set_key_value("flush_volumetric_speeds", new ConfigOptionFloats(vss));
-            config.set_key_value("flush_temperatures", new ConfigOptionInts(fts));
+            BambuFlushPlaceholders flush = bambu_flush_placeholders(cfg, filament_switcher_extra_cooling_before_tower(cfg));
+            if (gcodegen.m_layer_index == 0)
+                std::fill(flush.cooling_before_tower.begin(), flush.cooling_before_tower.end(), 0.);
+            flush.set(config);
         }
         // BBS: the extruder-change retraction pair must be published BEFORE the template is
         // expanded - change_filament_gcode is what reads it ({if long_retraction_when_ec} ...
@@ -3467,21 +3540,27 @@ void GCode::_do_export(Print& print, GCodeOutputStream& file, ThumbnailsGenerato
             min_vitrification = 0;
         this->placeholder_parser().set("min_vitrification_temperature", new ConfigOptionInt(min_vitrification));
 
-        const auto* flush_temp_opt = m_config.option<ConfigOptionInts>("filament_flush_temp");
-        const auto* flush_vspd_opt = m_config.option<ConfigOptionFloats>("filament_flush_volumetric_speed");
+        // BBS: flush placeholders of machine_start / machine_end (Bambu Studio GCode.cpp 8044-8075),
+        // and the per-filament values of the four keys themselves: they are stored per flow variant,
+        // so a template indexing them by filament (Prusa CORE One INDX:
+        // filament_flush_volumetric_speed[next_extruder]) must not see the packed vector.
         const size_t num_filaments = flow_variant_filament_count(m_config);
-        std::vector<int>    flush_temps;   flush_temps.reserve(num_filaments);
-        std::vector<double> flush_vspeeds; flush_vspeeds.reserve(num_filaments);
-        for (size_t i = 0; i < num_filaments; ++i) {
-            double vs = (flush_vspd_opt && i < flush_vspd_opt->size()) ? flush_vspd_opt->get_at(int(i)) : 0.;
-            if (vs == 0.) vs = get_value_at(m_config, m_config.filament_max_volumetric_speed, ConfigFlowDomain::Filament, int(i));
-            flush_vspeeds.push_back(vs);
-            int ft = (flush_temp_opt && i < flush_temp_opt->size()) ? flush_temp_opt->get_at(int(i)) : 0;
-            if (ft == 0) ft = m_config.nozzle_temperature_range_high.get_at(int(i));
-            flush_temps.push_back(ft);
+        {
+            const BambuFlushPlaceholders flush = bambu_flush_placeholders(m_config);
+            this->placeholder_parser().set("flush_volumetric_speeds", new ConfigOptionFloats(flush.volumetric_speeds));
+            this->placeholder_parser().set("flush_temperatures", new ConfigOptionInts(flush.temperatures));
+            this->placeholder_parser().set("filament_cooling_before_tower", new ConfigOptionFloats(flush.cooling_before_tower));
+            std::vector<double> flush_speed_raw;
+            std::vector<int>    flush_temp_raw, flush_temp_fast_raw;
+            for (size_t i = 0; i < num_filaments; ++i) {
+                flush_speed_raw.push_back(filament_variant_value<double>(m_config, m_config.filament_flush_volumetric_speed, i, "filament_flush_volumetric_speed"));
+                flush_temp_raw.push_back(filament_variant_value<int>(m_config, m_config.filament_flush_temp, i, "filament_flush_temp"));
+                flush_temp_fast_raw.push_back(filament_variant_value<int>(m_config, m_config.filament_flush_temp_fast, i, "filament_flush_temp_fast"));
+            }
+            this->placeholder_parser().set("filament_flush_volumetric_speed", new ConfigOptionFloats(flush_speed_raw));
+            this->placeholder_parser().set("filament_flush_temp", new ConfigOptionInts(flush_temp_raw));
+            this->placeholder_parser().set("filament_flush_temp_fast", new ConfigOptionInts(flush_temp_fast_raw));
         }
-        this->placeholder_parser().set("flush_volumetric_speeds", new ConfigOptionFloats(flush_vspeeds));
-        this->placeholder_parser().set("flush_temperatures", new ConfigOptionInts(flush_temps));
         // Ultra: A2L time_lapse_gcode reads clear_to_x0 (BBS computes it per-layer via a
         // timelapse position-picker the fork lacks). Single-nozzle shim = always clear.
         this->placeholder_parser().set("clear_to_x0", new ConfigOptionBool(true));
@@ -11414,22 +11493,13 @@ std::string GCode::set_extruder(unsigned int extruder_id, double print_z, bool b
     if (!change_filament_gcode.empty() && !(m_config.manual_filament_change.value && m_toolchange_count == 1)) {
         dyn_config.set_key_value("toolchange_z", new ConfigOptionFloat(print_z));
 
-        // Ultra: per-filament flush vectors for BBS 2.x change_filament templates (single-nozzle).
+        // BBS: flush speed / temperature for the change_filament template (Bambu Studio GCode.cpp
+        // 8318-8337). A toolchange that does not go through the BBL wipe tower never cools before the
+        // tower: Bambu publishes filament_cooling_before_tower as all zeros here.
         {
-            const auto* ft_opt = m_config.option<ConfigOptionInts>("filament_flush_temp");
-            const auto* vs_opt = m_config.option<ConfigOptionFloats>("filament_flush_volumetric_speed");
-            const size_t nf = flow_variant_filament_count(m_config);
-            std::vector<int> fts; std::vector<double> vss;
-            for (size_t i = 0; i < nf; ++i) {
-                double vs = (vs_opt && i < vs_opt->size()) ? vs_opt->get_at(int(i)) : 0.;
-                if (vs == 0.) vs = get_value_at(m_config, m_config.filament_max_volumetric_speed, ConfigFlowDomain::Filament, int(i));
-                vss.push_back(vs);
-                int ft = (ft_opt && i < ft_opt->size()) ? ft_opt->get_at(int(i)) : 0;
-                if (ft == 0) ft = m_config.nozzle_temperature_range_high.get_at(int(i));
-                fts.push_back(ft);
-            }
-            dyn_config.set_key_value("flush_volumetric_speeds", new ConfigOptionFloats(vss));
-            dyn_config.set_key_value("flush_temperatures", new ConfigOptionInts(fts));
+            BambuFlushPlaceholders flush = bambu_flush_placeholders(m_config);
+            std::fill(flush.cooling_before_tower.begin(), flush.cooling_before_tower.end(), 0.);
+            flush.set(dyn_config);
         }
 
         // BBS: as above - the _ec pair has to be in the parser before the template reads it.

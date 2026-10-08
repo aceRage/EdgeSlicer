@@ -2514,34 +2514,54 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloats { 2. });
 
-    // Ultra: BambuStudio 2.x flush tuning, consumed by GCode.cpp to publish
-    // flush_temperatures / flush_volumetric_speeds for newer change_filament templates.
+    // BBS: per-filament flush settings (Bambu Studio PrintConfig.cpp 2547-2575). GCode.cpp turns them
+    // into the flush_temperatures / flush_volumetric_speeds placeholders of the BBL change_filament
+    // and machine_start templates (M620.10 ... T<temp> / F<speed>, M620.11 ... F<speed>). Nullable
+    // like Bambu's (Anycubic profiles say ["nil"]) and stored per flow variant
+    // (filament_flow_variant_options), as Bambu stores them per extruder variant.
     def = this->add("filament_flush_temp", coInts);
     def->label = L("Flush temperature");
-    def->tooltip = L("Temperature when flushing filament. 0 indicates the upper bound of the recommended nozzle temperature range.");
-    def->sidetext = "°C";
+    def->tooltip = L("temperature when flushing filament. 0 indicates the upper bound of the recommended nozzle temperature range");
+    def->mode = comAdvanced;
+    def->nullable = true;
     def->min = 0;
     def->max = max_temp;
+    def->sidetext = "°C";
+    def->set_default_value(new ConfigOptionIntsNullable { 0 });
+
+    // BBS: the flush temperature used instead of filament_flush_temp when the project's
+    // prime_volume_mode is Fast.
+    def = this->add("filament_flush_temp_fast", coInts);
+    def->label = L("Flush temperature");
+    def->tooltip = L("Flush temperature used in fast purge mode.");
     def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionInts { 0 });
+    def->nullable = true;
+    def->min = 0;
+    def->max = max_temp;
+    def->sidetext = "°C";
+    def->set_default_value(new ConfigOptionIntsNullable { 0 });
 
     def = this->add("filament_flush_volumetric_speed", coFloats);
     def->label = L("Flush volumetric speed");
-    def->tooltip = L("Volumetric speed when flushing filament. 0 indicates the max volumetric speed.");
-    def->sidetext = u8"mm³/s";
+    def->tooltip = L("Volumetric speed when flushing filament. 0 indicates the max volumetric speed");
+    def->mode = comAdvanced;
+    def->nullable = true;
     def->min = 0;
     def->max = 200;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloats { 0. });
+    def->sidetext = u8"mm³/s";
+    def->set_default_value(new ConfigOptionFloatsNullable { 0. });
 
-    // Ultra: BBS 2.x change_filament templates reference filament_cooling_before_tower[extruder].
+    // BBS: the drop below the print temperature the hotend cools to before it enters the prime tower
+    // (Bambu Studio PrintConfig.cpp 3034). The BBL change_filament templates read it as
+    // M620.15 C{new_filament_temp - filament_cooling_before_tower[next_filament_id]} and in the
+    // SYNC heat-up compensation; GCode.cpp publishes it per toolchange, 0 on the first layer.
     def = this->add("filament_cooling_before_tower", coFloats);
-    def->label = L("Cooling before tower");
-    def->tooltip = L("Temperature drop applied before entering the prime tower when changing filament.");
+    def->label = L("Wipe tower cooling");
+    def->tooltip = L("Temperature drop before entering filament tower");
     def->sidetext = "°C";
-    def->min = 0;
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloats { 0. });
+    def->mode = comDevelop;
+    def->nullable = true;
+    def->set_default_value(new ConfigOptionFloatsNullable { 10. });
 
     // Ultra (H2C rack): BambuStudio PrintConfig.cpp:3041. The nozzle-change pre-cool target,
     // read by the wipe tower's nozzle-change block (M104 T<e> S<t> N0 ;Wipe tower nozzle change
@@ -9258,6 +9278,12 @@ const std::vector<std::string>& filament_flow_variant_options()
         "filament_multitool_ramming_volume",
         "filament_multitool_ramming_flow",
         "filament_minimal_purge_on_wipe_tower",
+        // BBS: Bambu Studio stores these per extruder variant (filament_options_with_variant,
+        // PrintConfig.cpp 7663); its Standard / High Flow slots are ours (BambuFlowSupport).
+        "filament_flush_volumetric_speed",
+        "filament_flush_temp",
+        "filament_flush_temp_fast",
+        "filament_cooling_before_tower",
     };
     return options;
 }
@@ -9651,12 +9677,8 @@ void PrintConfigDef::handle_legacy(t_config_option_key &opt_key, std::string &va
 bool PrintConfigDef::unsupported_foreign_key(const std::string &opt_key, ForeignKeyOrigin *origin)
 {
     static const std::map<std::string, ForeignKeyOrigin> foreign = {
-        // Bambu Studio per-filament flush / wipe-tower cooling settings. The bundled BBL, Orca filament
-        // library and Snapmaker profiles carry them; the fork reads the defaults (0 = use the filament's
-        // max volumetric speed / the top of its temperature range, no cooling before the tower).
-        { "filament_flush_temp",             ForeignKeyOrigin::BambuStudio },
-        { "filament_flush_volumetric_speed", ForeignKeyOrigin::BambuStudio },
-        { "filament_cooling_before_tower",   ForeignKeyOrigin::BambuStudio },
+        // (Bambu Studio's filament_flush_temp, filament_flush_temp_fast, filament_flush_volumetric_speed
+        // and filament_cooling_before_tower used to be listed here; filament presets hold them now.)
         // Project-wide mixed-filament rows (PresetBundle::project_config). The edited process preset
         // picks a copy up when mixed filaments change, and saving the preset writes it to disk.
         { "mixed_filament_definitions",      ForeignKeyOrigin::ProjectScoped },

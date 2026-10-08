@@ -64,6 +64,7 @@ add_executable(${_TEST_NAME}_tests
 	test_bambu_extruder_map.cpp
 	test_bambu_dual_nozzle_sync.cpp
 	test_bambu_idle_precool.cpp
+	test_bambu_flush_keys.cpp
 	test_export_stl_part.cpp
 	test_step_export.cpp
 	test_cad_edit.cpp
