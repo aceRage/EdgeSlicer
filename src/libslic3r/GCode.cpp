@@ -9735,10 +9735,18 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
                                  sloped == nullptr ? ((zaa_contoured || path.z_offset != 0.f) ? zaa_first_z : DBL_MAX)
                                                    : get_sloped_z(sloped->slope_begin.z_ratio));
         // Orca: ensure Z matches planned layer height
-        if (!slope_need_z_travel && (_last_pos_undefined || m_need_change_layer_lift_z)) {
+        // Ultra: slope_need_z_travel is also set for a flat path whose planned start Z (zaa_first_z: offset
+        // layers, ZAA) differs from the writer's Z, so for a flat path it must not gate a layer-change lift
+        // that travel_to() left pending - it emits nothing when the path starts where the last one ended
+        // (Orca #13327), and that is exactly when the writer's Z differs. A flat path is synced to its own
+        // planned start Z, which is the nominal Z unless offset layers or ZAA raise it.
+        const bool sync_z = sloped == nullptr ?
+            ((_last_pos_undefined && !slope_need_z_travel) || m_need_change_layer_lift_z) :
+            (!slope_need_z_travel && (_last_pos_undefined || m_need_change_layer_lift_z));
+        if (sync_z) {
             const std::string z_sync_comment = _last_pos_undefined ?
                 "ensure Z matches planned layer height" : ""; // no comment for normal layer-Z lift
-            gcode += this->writer().travel_to_z(m_nominal_z, z_sync_comment, true);
+            gcode += this->writer().travel_to_z(sloped == nullptr ? zaa_first_z : m_nominal_z, z_sync_comment, true);
         }
         m_need_change_layer_lift_z = false;
     }
