@@ -54,6 +54,8 @@ class GLModel;
             bool unsent_compressed_data_available() const;
             void send_compressed_data_to_gpu();
             bool all_compressed_data_sent_to_gpu() const { return m_levels.empty(); }
+            // EDGE: level 0 holds its compressed image (or there is nothing pending).
+            bool first_level_sent_to_gpu() const { return m_levels.empty() || m_levels.front().sent_to_gpu; }
 
         private:
             void compress();
@@ -129,6 +131,11 @@ class GLModel;
         bool unsent_compressed_data_available() const { return m_compressor.unsent_compressed_data_available(); }
         void send_compressed_data_to_gpu() { m_compressor.send_compressed_data_to_gpu(); }
         bool all_compressed_data_sent_to_gpu() const { return m_compressor.all_compressed_data_sent_to_gpu(); }
+        // EDGE (core profile): there is something to sample. False for no texture, and for a compressed
+        // texture whose level 0 the background compressor has not delivered yet (its storage exists but
+        // holds no image). Draw code skips the draw rather than sampling it: macOS reports such a draw as
+        // "unit 0 GLD_TEXTURE_INDEX_2D is unloadable", other drivers sample black or garbage.
+        bool ready_to_sample() const { return m_id != 0 && m_compressor.first_level_sent_to_gpu(); }
 
         static void render_texture(unsigned int tex_id, float left, float right, float bottom, float top);
         static void render_sub_texture(unsigned int tex_id, float left, float right, float bottom, float top, const Quad_UVs& uvs);

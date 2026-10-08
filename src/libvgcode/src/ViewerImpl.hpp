@@ -558,6 +558,12 @@ private:
     float  m_shadow_intensity{ 0.0f };
     float  m_shadow_map_texel{ 0.0f };
     bool   m_rendering_shadow_casters{ false };
+    // EDGE (core profile): set_shadow_map() has been called. Until then nothing of the host's is on
+    // m_shadow_map_texture_unit, and render_segments() binds m_shadow_fallback_tex_id there: the
+    // segments program's shadow_map sampler2D is active (the shading calls shadow_shade()) even with
+    // intensity 0, and sampling texture 0 is an incomplete texture ("unloadable" on macOS).
+    bool         m_shadow_map_set{ false };
+    unsigned int m_shadow_fallback_tex_id{ 0 };
 
     //
     // ORCA: realistic view. Tone set by set_tone(), consumed by the segments shader.

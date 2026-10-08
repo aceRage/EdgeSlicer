@@ -673,7 +673,7 @@ std::vector<std::map<NozzleVolumeType, int>> get_extruder_nozzle_stats(const std
 // True when the printer's extruders carry more than one distinct extruder variant (dual-nozzle grouping
 // machine: H2D/H2C/X2D). Same-variant toolchangers (U1) and machines with more than two extruders return
 // false.
-bool DynamicPrintConfig::support_different_extruders(int& extruder_count)
+bool DynamicPrintConfig::support_different_extruders(int& extruder_count) const
 {
     extruder_count = 0;
     std::set<std::string> variant_set;
@@ -9397,25 +9397,44 @@ int printer_extruder_variant_slot(const ConfigBase &config, size_t extruder_idx)
     return first;
 }
 
-void resolve_printer_extruder_variants(DynamicPrintConfig &config)
+std::vector<size_t> printer_extruder_variant_sources(const DynamicPrintConfig &config)
 {
     const auto *semm = config.option<ConfigOptionBool>("single_extruder_multi_material");
     if (semm == nullptr || semm->value)
-        return;
+        return {};
     const std::vector<std::vector<size_t>> slots = printer_extruder_variant_slots(config);
     const auto *nozzle_diameter = dynamic_cast<const ConfigOptionVectorBase *>(config.option("nozzle_diameter"));
     if (slots.empty() || nozzle_diameter == nullptr || nozzle_diameter->size() != slots.size())
-        return;
-    const size_t slot_count = config.option<ConfigOptionInts>("printer_extruder_id")->values.size();
+        return {};
 
     // Which slot each extruder reads. Bambu's grouping machines (H2D, H2C, X2D) index these vectors by
     // filament, not by extruder, so they keep the values Preset::normalize used to cut them down to.
     int        extruder_count = 0;
     const bool grouping       = config.support_different_extruders(extruder_count);
-    std::vector<size_t> source(slots.size());
+    std::vector<size_t> sources(slots.size());
     for (size_t e = 0; e < slots.size(); ++e)
-        source[e] = grouping ? e : size_t(std::max(0, printer_extruder_variant_slot(config, e)));
+        sources[e] = grouping ? e : size_t(std::max(0, printer_extruder_variant_slot(config, e)));
+    return sources;
+}
 
+size_t printer_extruder_variant_value_index(const ConfigBase &config, const std::vector<size_t> &sources, const std::string &key,
+                                            size_t extruder_idx)
+{
+    if (extruder_idx >= sources.size() || !is_printer_extruder_variant_option(key))
+        return extruder_idx;
+    const auto *ids = config.option<ConfigOptionInts>("printer_extruder_id");
+    const auto *opt = dynamic_cast<const ConfigOptionVectorBase *>(config.option(key));
+    if (ids == nullptr || opt == nullptr || opt->size() != ids->values.size())
+        return extruder_idx;
+    return sources[extruder_idx];
+}
+
+void resolve_printer_extruder_variants(DynamicPrintConfig &config)
+{
+    const std::vector<size_t> sources = printer_extruder_variant_sources(config);
+    if (sources.empty())
+        return;
+    const size_t slot_count = config.option<ConfigOptionInts>("printer_extruder_id")->values.size();
     for (const std::string &key : print_config_def.extruder_option_keys()) {
         if (!is_printer_extruder_variant_option(key))
             continue;
@@ -9423,9 +9442,9 @@ void resolve_printer_extruder_variants(DynamicPrintConfig &config)
         if (opt == nullptr || opt->size() != slot_count)
             continue;
         std::unique_ptr<ConfigOption> all(opt->clone());
-        opt->resize(slots.size());
-        for (size_t e = 0; e < slots.size(); ++e)
-            opt->set_at(all.get(), e, source[e]);
+        opt->resize(sources.size());
+        for (size_t e = 0; e < sources.size(); ++e)
+            opt->set_at(all.get(), e, sources[e]);
     }
 }
 
