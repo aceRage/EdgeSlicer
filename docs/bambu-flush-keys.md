@@ -1,0 +1,190 @@
+# Bambu flush keys: filament_flush_temp, filament_flush_volumetric_speed, filament_cooling_before_tower
+
+Researched 2026-10-08 on origin/main 2df3263b01 (EdgeSlicer), against the Bambu Studio reference clone
+at C:\Dev\BambuStudio (HEAD 47a13eeb1) and upstream OrcaSlicer main. Nothing here touched a printer.
+
+## Verdict
+
+| Key | Matters? | Printers | Is our G-code different from Bambu Studio today? |
+| --- | --- | --- | --- |
+| `filament_cooling_before_tower` | Yes, a little | H2D, H2D Pro, H2C, H2S, X2D (M620.15 and the SYNC compensation), P2S (M620.15), A2L (SYNC only, 6 of 178 profiles carry a value). Not X1/P1/A1: no profile carries it and their templates do not read it. | **Yes.** The change_filament_gcode line `M620.15 C{new_filament_temp - filament_cooling_before_tower[next_filament_id]}` is 10 degrees hotter than Bambu Studio's for every profile that says 10 (H2C 279/279 presets, H2D 204/249, H2D Pro 180/183, H2S 206/206, P2S 205/209, X2D 208/208). Measured below: we emit `C245`/`C220` where Bambu emits `C235`/`C210`. |
+| `filament_flush_temp` | Marginal | Only the PLA Silk / Silk+ presets (flush 200 degrees; H2S 4, P2S 8, X2D 5 presets) and the P2S PETG HF family (240,0,240). Everything else says 0 = "top of the nozzle range", which is what we use. | **Yes, for those 17 presets**: `M620.10 ... T<flush temp>` and `M620.10 R...` in machine start / change_filament use the top of the range (for example 240) instead of 200. |
+| `filament_flush_volumetric_speed` | Marginal | H2S 37, P2S 34, X2D 31, H2D 3, H2D Pro 4 presets, all 0.2 mm nozzle variants (3 mm3/s). 0.4/0.6/0.8 nozzle presets say 0 = "use max volumetric speed", which is what we use. | **Yes, 0.2 mm nozzle variants only**: flush feed rate and the `max(flush/2.4053*60, 200)` retract rate in the M620.11 lines come from `filament_max_volumetric_speed` instead of 3 mm3/s. For PLA, PLA-CF and PETG on a 0.2 nozzle the H2D templates hard-code F74.8347 (= 3 mm3/s) so those are already right. |
+
+So for the owner's usual 0.4 mm H2D and H2C slices only one thing differs, the 10 degree
+`M620.15 C` pre-tower temperature target. Whether Bambu's firmware does anything visible with
+that number is hardware behaviour we cannot judge from here (we have no hardware verification).
+Nothing is missing that would make a print fail: all three keys are defined in our PrintConfigDef,
+the placeholders resolve, the slice succeeds. We just always run on the defaults.
+
+The three keys are **not** unknown to the config definition. They are defined (PrintConfig.cpp ~2527 and
+2538, "Ultra" shims, PrintConfig.hpp ~1727) and read by GCode.cpp (lines 949, 3470, 11419). What is
+missing is their presence in `s_Preset_filament_options` (Preset.cpp ~1120). A preset's valid key set is
+exactly that list, so `Preset::remove_invalid_keys()` drops them from every filament preset that carries
+them and logs an error per file, and the G-code only ever sees the defaults (flush temp 0, flush speed 0,
+cooling 0). Compare the sibling keys `filament_pre_cooling_temperature_nc` and `filament_retract_length_nc`,
+which were ported correctly: defined AND listed in `s_Preset_filament_options`.
+
+## Bambu Studio definitions
+
+All in `src/libslic3r/PrintConfig.cpp` of the reference clone.
+
+| Key | Line | Type | Default | Nullable | Per variant | Mode | Label | Tooltip | UI |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `filament_flush_temp` | 2547 | coInts, 0..max_temp, "degC" | {0} | yes | yes | comAdvanced | Flush temperature | temperature when flushing filament. 0 indicates the upper bound of the recommended nozzle temperature range | Tab.cpp 5004, Filament > "Multi Filament" page, group "Multi Filament" (hidden when prime_volume_mode is Fast, 5177-5190) |
+| `filament_flush_temp_fast` (sibling, see below) | 2557 | coInts | {0} | yes | yes | comAdvanced | Flush temperature | Flush temperature used in fast purge mode. | Tab.cpp 5005, shown only in Fast mode |
+| `filament_flush_volumetric_speed` | 2567 | coFloats, 0..200, "mm3/s" | {0} | yes | yes | comAdvanced | Flush volumetric speed | Volumetric speed when flushing filament. 0 indicates the max volumetric speed | Tab.cpp 5006, same group |
+| `filament_cooling_before_tower` | 3034 | coFloats, "degC" | **{10}** | yes | yes | comDevelop | Wipe tower cooling | Temperature drop before entering filament tower | Tab.cpp 4736, Filament > Basic information group |
+
+The per-variant list is `PrintConfig.cpp` 7693-7707 (`filament_options_with_variant`: one value per
+extruder/nozzle-volume variant). All three are also in `Preset.cpp` `s_Preset_filament_options`
+(1129, 1140) and `cooling_before_tower` invalidates the wipe tower step in `Print.cpp` 328. The Plater and
+CalibUtils (Plater.cpp 21430/21572, CalibUtils.cpp 1467/1555) fall back from a 0 flush speed to
+`filament_max_volumetric_speed` for calibration prints.
+
+## Where Bambu Studio uses them
+
+* **GCode.cpp, wipe-tower toolchange** (1005-1026): per filament it builds `flush_volumetric_speeds`
+  (flush speed, 0 -> `filament_max_volumetric_speed`), `flush_temperatures` (flush temp, or the _fast key
+  when `prime_volume_mode == Fast`, 0 -> `nozzle_temperature_range_high`) and the
+  `filament_cooling_before_tower` placeholder vector (the key plus a 'filament switcher' extra, forced to 0
+  on tower contact layers and the first layer). Same three vectors again for the non-tower toolchange
+  (8290-8340, cooling forced to 0) and for machine_start_gcode (8048-8075, `set_placeholder_parser...`).
+* **WipeTower.cpp** 1980 copies the cooling value into `m_filpar`; 4071-4096 emit
+  `M104 S<print temp> ... "Wipe tower reheat before wipe"` when the value is above 0, on every printer
+  that uses the BBL tower and not on the first layer.
+* **Machine templates** (the {...} placeholders in `change_filament_gcode`, `machine_start_gcode`,
+  `machine_end_gcode`): `flush_temperatures[...]` in `M620.10 ... T`, `flush_volumetric_speeds[...]` in
+  `M620.10 F`, `M620.11 ... F`, and `filament_cooling_before_tower[next_filament_id]` in
+  `M620.15 C{new_filament_temp - ...}` and in the "compensate for heating and cooling" `SYNC T` formulas
+  (cooling/heating time to reach the flush temperature).
+
+## Our bundled machine templates that read them
+
+`resources/profiles/BBL/machine/`: the `... 0.4 nozzle template change_filament_gcode.json` and
+`... template machine_start_gcode.json` files for **A2L, H2C, H2D, H2D Pro, H2S, P2S, X2D**, and the H2C
+`machine_end_gcode`. `filament_cooling_before_tower` is in the change_filament templates of A2L, H2C,
+H2D, H2D Pro, H2S, X2D and P2S (M620.15 C only in H2C, H2D, H2D Pro, H2S, P2S, X2D).
+The Prusa Core One INDX machine (`Prusa/machine/fdm_machine_common_coreone_indx.json`) reads
+`filament_flush_volumetric_speed[tool]` directly; no Prusa filament carries the key, so it always sees 0.
+No Snapmaker, Creality, Anycubic or Qidi machine reads any of the three.
+
+**What the export does with a placeholder that does not exist**: `PlaceholderParser` throws "Variable
+does not exist" (PlaceholderParser.cpp 927/962/971) and the G-code export fails with that error. That
+is not the situation here: the three keys exist in the config definition, `flush_temperatures` and
+`flush_volumetric_speeds` are published explicitly by GCode.cpp (the machine_start and toolchange
+paths), and `filament_cooling_before_tower` falls back to its defined default 0. The CLI slice of an
+H2D with both filaments succeeded.
+
+## Profiles that carry them
+
+Counted in `resources/profiles` (this tree):
+
+| Key | BBL | OrcaFilamentLibrary | Anycubic | Qidi | Snapmaker |
+| --- | --- | --- | --- | --- | --- |
+| `filament_cooling_before_tower` | 1,308 | 3 | 0 | 2 | 27 |
+| `filament_flush_temp` | 238 | 132 | 106 (`["nil"]`) | 3 | 27 |
+| `filament_flush_volumetric_speed` | 284 | 132 | 106 (`["nil"]`) | 3 | 27 |
+
+Values: cooling is `10` in about 1,250 of the BBL presets and `0` in about 75 (H2C, H2D, H2S, P2S, X2D,
+A2L families); flush temp is 0 except for the 17 presets above; flush speed is 0 except the 0.2 mm nozzle
+variants (3). The Anycubic and Snapmaker U1 values are `nil`/`0`, i.e. inert. Note the Anycubic `nil`
+spelling needs a **nullable** option type if the keys are ever loaded (test_bambu_nil_override.cpp covers
+the existing nullable support).
+
+A fourth Bambu key rides along in newer profiles: `filament_flush_temp_fast` (BBL 129 files, mostly A2L
+and X2D, plus 2 in OrcaFilamentLibrary). It is not defined in our PrintConfigDef at all, so
+`handle_legacy` discards it while the file is parsed (`print_config_def.has()` is false) and it never
+produced a log line. It matters only for A2L/X2D with `prime_volume_mode = Fast` and is part of the same
+port if one is done.
+
+## Upstream OrcaSlicer
+
+Upstream defines all four keys and lists them in its `s_Preset_filament_options` (Preset.cpp ~1529:
+`"filament_change_length","filament_flush_volumetric_speed","filament_flush_temp","filament_flush_temp_fast",
+"filament_cooling_before_tower"`). Bisecting upstream PrintConfig.cpp by date:
+
+* `filament_flush_temp`, `filament_flush_volumetric_speed`: first present at commit cdf66984dd
+  "ENH: add flush params for multi filament" (2025-09-23), part of **OrcaSlicer PR #10780 "H2D/H2S
+  support"** (merged 2025-10-24). Follow-up 5e8272b0cb "support flush params in machine start GCode",
+  same PR.
+* `filament_cooling_before_tower` and (most likely) `filament_flush_temp_fast`: present by the **X2D
+  Support PR #13388** (merged 2026-05-09).
+
+They are not in tests/orca_pr_audit_*.md or tests/orca_port_plan.md by key name. #10780 is listed in
+orca_pr_audit_2025Q4_2026Q1.md as "not applicable as-is" because EdgeSlicer carries Bambu Studio's own BBL
+profile set; X2D #13388 is not listed, and the X2D machine PR #14778 is noted only as an X2D profile
+gap. So nobody decided "these keys are not needed"; they were skipped as a side effect of the Bambu
+profile import.
+
+## Impact on our output, measured
+
+Method: current main install (C:\Dev\EdgeSlicerBuilds\current, build 36d363ba55), CLI, scratch
+`--datadir`, H2D 0.4 nozzle, `0.20mm Standard @BBL H2D`, filaments `Bambu PLA Basic @BBL H2D` (220 C) and
+`Bambu PETG HF @BBL H2D 0.4 nozzle` (245 C), two 20 mm cubes with `--load-filament-ids 1,2`, Textured PEI.
+The filament presets resolved by `--filament-presets` are written flat; the three keys are gone from them
+(dropped by the preset load), which is the app's behaviour.
+
+| | as shipped (keys dropped) | same flat presets with `filament_cooling_before_tower=10`, `filament_flush_volumetric_speed=3`, `filament_flush_temp=260` added by hand |
+| --- | --- | --- |
+| `; filament_cooling_before_tower` | `0` | `10,10` |
+| `M620.15 C` (PETG, PLA) | `C245`, `C220` | `C235`, `C210` |
+| `M620.10 A1 F... T... P...` (machine start) | `F498.898 T270 P245` (25 mm3/s, top of range) | `F59.8678 T260` (3 mm3/s, 260) |
+
+The second column shows the G-code path already honours the keys when they reach the config; it is only
+the preset loader that withholds them. The other lines Bambu varies on these keys, the
+`SYNC T...` heating/cooling compensation, only run when `flush_length > 0`; in this slice the fork's tower
+purges in the tower (`flush_length` is 0, `SYNC T0`), so they show no difference here. (A project with
+`purge_in_prime_tower` handled by the firmware flush would.)
+
+## mixed_filament_definitions
+
+* Origin: the **Snapmaker Orca mixed filament feature**, merged into EdgeSlicer as `ac3dafe08a "Feat:mix
+  filament (#375)"` (ZhangZheng, 2026-05-26), later hardened by `3f7f3069cb` (adapting upstream Orca
+  #15728). It is a serialized string of custom mixed-filament rows. Upstream OrcaSlicer has no such key
+  (code search: 0 hits).
+* It is a **project** option on purpose: it sits in `PresetBundle::s_project_options` next to the other
+  `mixed_filament_*` keys, is excluded from dirty checks (`skipped_in_dirty`, Preset.cpp), and is read from
+  `project_config`.
+* How it gets into process presets: `PresetBundle.cpp` ~4591-4597, `set_mixed_string()`, writes it with
+  `print_cfg.set_key_value("mixed_filament_definitions", ...)` into the *edited process preset* whenever
+  the filament list changes, and saving that preset serializes every key it holds. So the user process
+  presets that carry it (3 in the owner's log) are our own saves, not another fork's. On the next load the
+  preset's key list excludes it and it is dropped (and, until now, reported as an error).
+* Should we accept it into presets? **No.** It would put project state into a preset, make presets differ
+  by project, and the dirty check already ignores it. Treat it as a known, expected extra key.
+  A cleaner follow-up (not done here, it changes saved files): stop writing it into the print preset in
+  `set_mixed_string()`.
+
+## Port proposal (not done in this PR)
+
+Goal: make these profile values take effect so H2D/H2C/H2S/P2S/X2D/A2L output matches Bambu Studio.
+Following the precedent of `filament_pre_cooling_temperature_nc` / `filament_retract_length_nc` (commit
+history shows the same fix: define + list in filament options):
+
+1. `Preset.cpp` `s_Preset_filament_options`: add the three keys and `filament_flush_temp_fast`. (~4 lines)
+2. `PrintConfig.cpp` / `.hpp`: make the defs nullable (`ConfigOptionIntsNullable`, `FloatsNullable`; the
+   Anycubic `nil` values require it), take Bambu's tooltips/limits, default cooling **10**, add
+   `filament_flush_temp_fast`, and add all four to the per-variant key list next to
+   `filament_retract_length_nc` (PrintConfig.cpp ~8508). (~50 lines)
+3. `Print.cpp`: invalidate the wipe-tower step on `filament_cooling_before_tower` (1 line).
+4. `GCode.cpp`: replace the three `option<ConfigOptionInts>("...")` reads (949, 3470, 11419) with variant
+   aware reads, apply the Fast-mode flush temp, publish `filament_cooling_before_tower` as a placeholder
+   vector with the first-layer zeroing, in all three places. (~60 lines)
+5. `Tab.cpp`: Filament > Multi Filament page entries, Fast-mode toggle, Basic information entry. (~20 lines)
+6. Tests: preset load keeps the values, `M620.15 C` and flush `T/F` for an H2D slice, nullable "nil", 0.2
+   nozzle. (~150 lines)
+
+About 300 changed lines plus tests, one focused PR. It is **behaviour-changing**: about 1,900 profiles
+start carrying real values, so every H2D/H2C/H2S/P2S/X2D slice changes `M620.15 C`, and 17+ presets change
+flush temperature, 0.2 nozzle presets change flush speed. It needs the owner's decision and a hardware
+check, and it should be listed as an accepted behaviour change. Two things to decide with it:
+
+* Bambu's tower also emits `M104 ... "Wipe tower reheat before wipe"` when the cooling value is above 0;
+  our Orca-based tower has no equivalent (see h2c-rack-nozzle-change notes). The minimal port above does
+  not add it. Whether the firmware (`M620.15` + the `;VM109 S[new_filament_temp]` virtual M109 that follows
+  the flush) reheats on its own, or the tower reheat is needed, has to be confirmed on a printer.
+* The default flips 0 -> 10 for any preset that lacks the key (user presets copied before the port). Bambu's
+  is 10; keep that, since every BBL profile states it explicitly anyway.
+
+Not needed for the log noise, which is fixed independently (fix/preset-key-log-noise).
