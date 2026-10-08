@@ -990,6 +990,32 @@ TEST_CASE("AdaptivePAProcessor base PA follows the High-Flow column", "[PrintGCo
     require_filament2_uses_high_flow_pa(gcode, 2);
 }
 
+TEST_CASE("Per-object skirt with a draft shield survives objects of different layer heights", "[PrintGCode][Orca12937]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        { "print_sequence",             "by layer" },
+        { "skirt_type",                 "perobject" },
+        { "skirt_loops",                "1" },
+        { "skirt_height",               "2" },
+        { "draft_shield",               "enabled" },
+        { "layer_height",               "0.2" },
+        { "initial_layer_print_height", "0.2" },
+        { "machine_start_gcode",        "" },
+    });
+
+    Print print;
+    Model model;
+    Slic3r::Test::init_print({ TestMesh::cube_20x20x20, TestMesh::cube_20x20x20 }, print, model, config);
+    REQUIRE(model.objects.size() == 2);
+    model.objects[1]->config.set("layer_height", 0.3);
+    print.apply(model, config);
+
+    std::string gcode;
+    REQUIRE_NOTHROW(gcode = Slic3r::Test::gcode(print));
+    CHECK(gcode.find("TYPE:Skirt") != std::string::npos);
+}
+
 TEST_CASE("AdaptivePA enable follows the High-Flow column", "[PrintGCode][GCode][PAVariant]")
 {
     // Standard=false, High-Flow=true. get_at(1) is false, so this fails if:
