@@ -1125,18 +1125,29 @@ void GCodeViewer::init(ConfigOptionMode mode, PresetBundle* preset_bundle)
         }
     }
 
+    // EDGE (core profile): this runs once, at the first slice, from load_gcode_preview() or an
+    // only_init render() - both outside any frame, so whatever it leaves in the GL error flag used to
+    // be reported by the next drain, "in a thumbnail's framebuffer set-up". Drain what came before it,
+    // then name each step.
+    OpenGLManager::report_gl_errors("before the G-code viewer's first initialisation");
+
     m_sequential_view.marker.init(filename);
+    OpenGLManager::report_gl_errors("in the G-code viewer's tool marker set-up");
 
     // initializes point sizes
-    std::array<int, 2> point_sizes;
-    ::glGetIntegerv(GL_ALIASED_POINT_SIZE_RANGE, point_sizes.data());
-    m_detected_point_sizes = { static_cast<float>(point_sizes[0]), static_cast<float>(point_sizes[1]) };
+    // EDGE (core profile): GL_ALIASED_POINT_SIZE_RANGE is not a core-profile query: glGetIntegerv()
+    // raised GL_INVALID_ENUM here on macOS (4.1 core) once per session, at the first slice.
+    std::array<float, 2> point_sizes{ 1.0f, 1.0f };
+    OpenGLManager::query_point_size_range(point_sizes.data());
+    m_detected_point_sizes = { point_sizes[0], point_sizes[1] };
+    OpenGLManager::report_gl_errors("in the G-code viewer's point size query");
 
     // BBS initialzed view_type items
     m_user_mode = mode;
     update_by_mode(m_user_mode);
 
     m_layers_slider->init_texture();
+    OpenGLManager::report_gl_errors("in the G-code viewer's layer slider textures");
 
     m_gl_data_initialized = true;
 
@@ -1144,6 +1155,10 @@ void GCodeViewer::init(ConfigOptionMode mode, PresetBundle* preset_bundle)
     {
         m_viewer.init(reinterpret_cast<const char*>(glGetString(GL_VERSION)));
         glcheck();
+        OpenGLManager::report_gl_errors("in libvgcode's initialisation");
+        // EDGE: EDGESLICER_GL_DEBUG checks libvgcode's draws too: they bypass GLModel and ImGui.
+        if (OpenGLManager::gl_debug_enabled())
+            libvgcode::Viewer::set_draw_check_hook(&OpenGLManager::check_current_program_samplers);
     }
     catch (const std::exception& e)
     {
@@ -1741,17 +1756,20 @@ void GCodeViewer::reset()
 void GCodeViewer::render(int canvas_width, int canvas_height, int right_margin)
 {
     glsafe(::glEnable(GL_DEPTH_TEST));
-    render_shells(canvas_width, canvas_height);
+    // EDGE: EDGESLICER_GL_SKIP leaves parts out, to bisect a driver message (OpenGLManager::gl_skip).
+    if (!OpenGLManager::gl_skip("shells"))
+        render_shells(canvas_width, canvas_height);
 
     if (m_viewer.get_extrusion_roles().empty())
         return;
 
     // EDGE (#642): the summary-only load (memory guard) has no toolpaths to draw.
-    if (!m_no_render_path)
+    if (!m_no_render_path && !OpenGLManager::gl_skip("libvgcode"))
         render_toolpaths();
 
     float legend_height = 0.0f;
-    render_legend(legend_height, canvas_width, canvas_height, right_margin);
+    if (!OpenGLManager::gl_skip("imgui_legend"))
+        render_legend(legend_height, canvas_width, canvas_height, right_margin);
 
     if (m_user_mode != wxGetApp().get_mode()) {
         update_by_mode(wxGetApp().get_mode());
@@ -1767,7 +1785,8 @@ void GCodeViewer::render(int canvas_width, int canvas_height, int right_margin)
     m_sequential_view.marker.set_world_position(libvgcode::convert(curr_vertex.position));
     m_sequential_view.marker.set_z_offset(m_z_offset + 0.5f);
     // BBS fixed buttom margin. m_moves_slider.pos_y
-    m_sequential_view.render(!m_no_render_path, legend_height, &m_viewer, m_viewer.get_current_vertex().gcode_id, canvas_width, canvas_height - bottom_margin * m_scale, right_margin * m_scale, m_viewer.get_view_type());
+    if (!OpenGLManager::gl_skip("marker"))
+        m_sequential_view.render(!m_no_render_path, legend_height, &m_viewer, m_viewer.get_current_vertex().gcode_id, canvas_width, canvas_height - bottom_margin * m_scale, right_margin * m_scale, m_viewer.get_view_type());
 
 #if VGCODE_ENABLE_COG_AND_TOOL_MARKERS
     if (is_legend_shown()) {
@@ -1805,7 +1824,8 @@ void GCodeViewer::render(int canvas_width, int canvas_height, int right_margin)
 #endif // VGCODE_ENABLE_COG_AND_TOOL_MARKERS
 
     //BBS render slider
-    render_slider(canvas_width, canvas_height);
+    if (!OpenGLManager::gl_skip("slider"))
+        render_slider(canvas_width, canvas_height);
 }
 
 // EDGE (phone / remote preview): the toolpaths alone, with the camera the caller put on the Plater.
@@ -2855,6 +2875,10 @@ void GCodeViewer::render_all_plates_stats(const std::vector<const GCodeProcessor
             all_extruder_ids.insert(it->first);
         for (auto it = support_volume_of_extruders_all_plates.begin(); it != support_volume_of_extruders_all_plates.end(); it++)
             all_extruder_ids.insert(it->first);
+        // Orca #14103: a plate's statistics can still name filaments the current printer no longer has
+        // (sliced before a switch to fewer filaments); the rows below index filament_colors with them.
+        for (auto it = all_extruder_ids.begin(); it != all_extruder_ids.end();)
+            it = (*it < 0 || size_t(*it) >= filament_colors.size()) ? all_extruder_ids.erase(it) : std::next(it);
 
         for (auto it = all_extruder_ids.begin(); it != all_extruder_ids.end(); it++) {
             int extruder_id = *it;
