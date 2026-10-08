@@ -99,36 +99,17 @@ bool parse_nozzle_change(std::string_view line, int &old_filament, int &new_fila
     return true;
 }
 
-std::string extruder_type_name(int type) { return type == int(ExtruderType::etBowden) ? "Bowden" : "Direct Drive"; }
-
 // A per-extruder-variant printer value (hotend_cooling_rate / hotend_heating_rate: one entry per
 // printer_extruder_variant) for logical extruder e. Bambu Studio resolves these to one value per
 // extruder when it loads the preset (update_values_to_printer_extruders); this tree keeps the
-// variant list, so pick the entry of the extruder's variant here.
+// variant list, so pick the entry of the extruder's variant here (printer_extruder_variant_slot).
 double extruder_variant_value(const PrintConfig &cfg, const std::vector<double> &values, size_t e, double fallback)
 {
     if (values.empty())
         return fallback;
-    const std::vector<int>         &ids      = cfg.printer_extruder_id.values;
-    const std::vector<std::string> &variants = cfg.printer_extruder_variant.values;
-    if (ids.size() == values.size() && variants.size() == values.size()) {
-        const int         type = e < cfg.extruder_type.values.size() ? cfg.extruder_type.values[e] : int(ExtruderType::etDirectDrive);
-        NozzleVolumeType  nvt  = e < cfg.nozzle_volume_type.values.size() ? NozzleVolumeType(cfg.nozzle_volume_type.values[e]) :
-                                                                         NozzleVolumeType::nvtStandard;
-        if (nvt == NozzleVolumeType::nvtHybrid)
-            nvt = NozzleVolumeType::nvtStandard; // Bambu: hybrid is not a preset variant
-        const std::string wanted = extruder_type_name(type) + " " + get_nozzle_volume_type_string(nvt);
-        int               first  = -1;
-        for (size_t i = 0; i < ids.size(); ++i) {
-            if (ids[i] != int(e + 1))
-                continue;
-            if (first < 0)
-                first = int(i);
-            if (variants[i] == wanted)
-                return values[i];
-        }
-        if (first >= 0)
-            return values[size_t(first)];
+    if (cfg.printer_extruder_id.values.size() == values.size()) {
+        if (const int slot = printer_extruder_variant_slot(cfg, e); slot >= 0)
+            return values[size_t(slot)];
     }
     return values[std::min(e, values.size() - 1)];
 }

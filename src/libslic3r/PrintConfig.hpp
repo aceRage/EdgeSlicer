@@ -570,6 +570,30 @@ bool is_machine_flow_variant_option(const std::string &key);
 
 size_t get_config_idx(const ConfigBase &config, ConfigFlowDomain domain, unsigned int filament_id = 0);
 
+// Bambu's per-extruder-variant layout for printer settings: printer_extruder_id / printer_extruder_variant
+// name one slot per (extruder, variant) pair, extruder-major, and the retraction settings below carry one
+// value per slot (upstream Orca's Custom MyToolChanger: 5 extruders x 3 variants = 15 values).
+bool is_printer_extruder_variant_option(const std::string &key);
+
+// The slots of each extruder in that layout (extruder e's at [e]), or empty when the config has none:
+// printer_extruder_id / printer_extruder_variant missing or of different sizes, ids not grouped as
+// 1, 1, .., 2, 2, .., n, or a single variant per extruder (where per-variant and per-extruder vectors are
+// the same thing).
+std::vector<std::vector<size_t>> printer_extruder_variant_slots(const ConfigBase &config);
+
+// The slot of extruder `extruder_idx`'s current variant (extruder_type + nozzle_volume_type), its first
+// slot when that variant is not listed, or -1 when printer_extruder_id / printer_extruder_variant differ
+// in size or do not list the extruder.
+int printer_extruder_variant_slot(const ConfigBase &config, size_t extruder_idx);
+
+// The G-code reads per-extruder settings by tool index. In a multi-extruder printer config
+// (single_extruder_multi_material off) in the per-variant layout, cut every per-variant vector down to
+// one value per extruder: each extruder's current variant, or, on a Bambu nozzle-grouping machine
+// (support_different_extruders), the first value per extruder index as the slicer has always read them
+// there. Leaves any other config alone.
+class DynamicPrintConfig;
+void resolve_printer_extruder_variants(DynamicPrintConfig &config);
+
 template<typename VectorOption>
 inline auto get_value_at(const ConfigBase &config, const VectorOption &opt, ConfigFlowDomain domain, unsigned int filament_id = 0)
     -> decltype(opt.get_at(0))
