@@ -9671,11 +9671,13 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
         gcode += this->travel_to(path.first_point(), path.role(), "move to first " + description + " point",
                                  sloped == nullptr ? ((zaa_contoured || path.z_offset != 0.f) ? zaa_first_z : DBL_MAX)
                                                    : get_sloped_z(sloped->slope_begin.z_ratio));
-        m_need_change_layer_lift_z = false;
         // Orca: ensure Z matches planned layer height
-        if (_last_pos_undefined && !slope_need_z_travel) {
-            gcode += this->writer().travel_to_z(m_nominal_z, "ensure Z matches planned layer height", true);
+        if (!slope_need_z_travel && (_last_pos_undefined || m_need_change_layer_lift_z)) {
+            const std::string z_sync_comment = _last_pos_undefined ?
+                "ensure Z matches planned layer height" : ""; // no comment for normal layer-Z lift
+            gcode += this->writer().travel_to_z(m_nominal_z, z_sync_comment, true);
         }
+        m_need_change_layer_lift_z = false;
     }
 
     // ZAA: land on this path's own starting Z whatever the previous path left behind - a contoured
