@@ -189,3 +189,134 @@ TEST_CASE("The mixed U1 machine carries per-head layer limits and no High Flow",
     CHECK((flow == nullptr || flow->values.empty() ||
            std::find(flow->values.begin(), flow->values.end(), "high_flow") == flow->values.end()));
 }
+
+namespace {
+
+const std::vector<std::string> NEW_SNAPMAKER_U1_FILAMENTS = {
+    "Snapmaker PET @U1",       "Snapmaker PETG @U1",       "Snapmaker PLA @U1",
+    "Snapmaker PLA Eco @U1",   "Snapmaker PLA Lite @U1",   "Snapmaker PLA Metal @U1",
+    "Snapmaker TPE @U1",       "Snapmaker TPU 95A @U1",    "Snapmaker TPU High-Flow @U1",
+};
+
+const Preset &filament_preset(const char *name)
+{
+    const Preset *p = tree().bundle->filaments.find_preset(name, false);
+    INFO(name);
+    REQUIRE(p != nullptr);
+    return *p;
+}
+
+} // namespace
+
+TEST_CASE("The Snapmaker-brand U1 filaments are present, compatible with the U1 and keep pressure advance off", "[Preset][U1]")
+{
+    for (const std::string &name : NEW_SNAPMAKER_U1_FILAMENTS) {
+        INFO(name);
+        const Preset &preset = filament_preset(name.c_str());
+        CHECK(preset.is_system);
+        const auto *compatible = preset.config.option<ConfigOptionStrings>("compatible_printers");
+        REQUIRE(compatible != nullptr);
+        auto lists = [&](const char *printer) {
+            return std::find(compatible->values.begin(), compatible->values.end(), printer) != compatible->values.end();
+        };
+        CHECK(lists("Snapmaker U1 (0.4 nozzle)"));
+        CHECK(lists("Snapmaker U1 (0.4+0.6 nozzle)"));
+
+        // Pressure advance stays OFF in every slot (standard and High Flow): a filament that carries its
+        // own pressure advance stops the U1's dynamic flow calibration from taking effect.
+        const auto *pa = preset.config.option<ConfigOptionBools>("enable_pressure_advance");
+        REQUIRE(pa != nullptr);
+        REQUIRE(!pa->values.empty());
+        for (unsigned char on : pa->values)
+            CHECK(on == 0);
+        // ... and no pressure-advance command hides in the filament G-code.
+        for (const char *key : { "filament_start_gcode", "filament_end_gcode" }) {
+            const auto *gcode = preset.config.option<ConfigOptionStrings>(key);
+            if (gcode == nullptr)
+                continue;
+            for (const std::string &g : gcode->values) {
+                CHECK(g.find("PRESSURE_ADVANCE") == std::string::npos);
+                CHECK(g.find("M900") == std::string::npos);
+            }
+        }
+        const auto *adaptive = preset.config.option<ConfigOptionBools>("adaptive_pressure_advance");
+        if (adaptive != nullptr)
+            for (unsigned char on : adaptive->values)
+                CHECK(on == 0);
+
+        // High-Flow aware like the other 0.4 U1 filaments.
+        const auto *flow = preset.config.option<ConfigOptionStrings>("filament_flow_support");
+        REQUIRE(flow != nullptr);
+        CHECK(flow->values == std::vector<std::string>{ "standard", "high_flow" });
+    }
+}
+
+TEST_CASE("The new Snapmaker-brand U1 filaments resolve to real material settings", "[Preset][U1]")
+{
+    auto first = [](const Preset &p, const char *key) { return p.config.option<ConfigOptionFloats>(key)->values.front(); };
+    auto type  = [](const Preset &p) { return p.config.option<ConfigOptionStrings>("filament_type")->values.front(); };
+
+    // A thin parent chain would leave these at PrintConfig defaults (the mistake this guards against).
+    CHECK(type(filament_preset("Snapmaker PLA @U1")) == "PLA");
+    CHECK(type(filament_preset("Snapmaker PLA Metal @U1")) == "PLA");
+    CHECK(type(filament_preset("Snapmaker PLA Lite @U1")) == "PLA");
+    CHECK(type(filament_preset("Snapmaker PLA Eco @U1")) == "PLA");
+    CHECK(type(filament_preset("Snapmaker PETG @U1")) == "PETG");
+    CHECK(type(filament_preset("Snapmaker TPE @U1")) == "TPU");
+    CHECK(type(filament_preset("Snapmaker TPU 95A @U1")) == "TPU");
+    CHECK(type(filament_preset("Snapmaker TPU High-Flow @U1")) == "TPU");
+    CHECK(first(filament_preset("Snapmaker TPE @U1"), "nozzle_temperature") >= 230.);
+    CHECK(first(filament_preset("Snapmaker TPU High-Flow @U1"), "nozzle_temperature") >= 230.);
+    CHECK(first(filament_preset("Snapmaker PLA @U1"), "nozzle_temperature") == Approx(220.));
+    CHECK(first(filament_preset("Snapmaker PETG @U1"), "nozzle_temperature_initial_layer") >= 240.);
+    // TPU High-Flow is the one that also fits the 0.6 and 0.8 machines.
+    const auto *compatible = filament_preset("Snapmaker TPU High-Flow @U1").config.option<ConfigOptionStrings>("compatible_printers");
+    CHECK(std::find(compatible->values.begin(), compatible->values.end(), "Snapmaker U1 (0.8 nozzle)") != compatible->values.end());
+}
+
+TEST_CASE("On the mixed U1 each head only offers filaments cut for its own nozzle", "[Preset][U1][MixedNozzle]")
+{
+    SnapmakerTree &t = tree();
+    AppConfig      config = t.wizard_enabled_u1();
+    PresetBundle::PresetPreferences preferred;
+    preferred.printer_model_id = U1_MODEL;
+    preferred.printer_variant  = "0.4+0.6";
+    t.bundle->load_selections(config, preferred);
+    REQUIRE(t.bundle->printers.get_selected_preset().name == "Snapmaker U1 (0.4+0.6 nozzle)");
+
+    const Preset &for_06 = filament_preset("Snapmaker PLA SnapSpeed @U1 0.6 nozzle");
+    const Preset &for_04 = filament_preset("Snapmaker PLA @U1");
+    CHECK(filament_preset_nozzle_diameter(for_04, t.bundle->printers) == Approx(0.4));
+    CHECK(filament_preset_nozzle_diameter(for_06, t.bundle->printers) == Approx(0.6));
+    // Filament slots are 1-based; heads 1-2 are 0.4, heads 3-4 are 0.6.
+    for (unsigned slot : { 1u, 2u }) {
+        CHECK(filament_preset_fits_slot(for_04, t.bundle->printers, slot));
+        CHECK_FALSE(filament_preset_fits_slot(for_06, t.bundle->printers, slot));
+    }
+    for (unsigned slot : { 3u, 4u }) {
+        CHECK_FALSE(filament_preset_fits_slot(for_04, t.bundle->printers, slot));
+        CHECK(filament_preset_fits_slot(for_06, t.bundle->printers, slot));
+    }
+}
+
+TEST_CASE("Every U1 filament that fits the 0.4 or 0.6 machine also fits the mixed machine", "[Preset][U1][MixedNozzle]")
+{
+    SnapmakerTree &t = tree();
+    size_t         checked = 0;
+    for (const Preset &preset : t.bundle->filaments) {
+        if (!preset.is_system || preset.name.find("@U1") == std::string::npos)
+            continue;
+        const auto *compatible = preset.config.option<ConfigOptionStrings>("compatible_printers");
+        if (compatible == nullptr || compatible->values.empty())
+            continue;
+        const auto &v = compatible->values;
+        const bool  fits_04_or_06 = std::find(v.begin(), v.end(), "Snapmaker U1 (0.4 nozzle)") != v.end() ||
+                                    std::find(v.begin(), v.end(), "Snapmaker U1 (0.6 nozzle)") != v.end();
+        if (!fits_04_or_06)
+            continue;
+        ++checked;
+        INFO(preset.name);
+        CHECK(std::find(v.begin(), v.end(), "Snapmaker U1 (0.4+0.6 nozzle)") != v.end());
+    }
+    CHECK(checked > 100);
+}
