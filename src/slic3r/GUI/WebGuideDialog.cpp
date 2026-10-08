@@ -843,7 +843,7 @@ bool GuideFrame::apply_config(AppConfig *app_config, PresetBundle *preset_bundle
         //for (const auto& vendor_profile : preset_bundle->vendors) {
         for (const auto& model_it: model_maps) {
             if (model_it.second.size() > 0) {
-                variant = *model_it.second.begin();
+                variant = PresetBundle::default_printer_variant(model_it.second);
                 const auto config_old = old_enabled_vendors.find(bundle_name);
                 if (config_old == old_enabled_vendors.end())
                     return model_it.first;
@@ -1394,6 +1394,11 @@ int GuideFrame::LoadProfileFamily(std::string strVendor, std::string strFilePath
                     }
                     OneMachine["model"]  = pm["printer_model"];
                     OneMachine["nozzle"] = (nd.is_array() && !nd.empty()) ? nd[0] : json();
+                    // A mixed-nozzle machine (printer_variant "0.4+0.6") is its own entry in the model's nozzle list.
+                    // Keyed by its first head it would file its filaments under the plain 0.4 variant.
+                    if (pm.contains("printer_variant") && pm["printer_variant"].is_string() &&
+                        pm["printer_variant"].get<std::string>().find('+') != std::string::npos)
+                        OneMachine["nozzle"] = pm["printer_variant"];
 
                     slot["machine"] = std::move(OneMachine);
                 }

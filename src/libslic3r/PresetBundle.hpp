@@ -545,6 +545,12 @@ public:
     static const char *SM_BUNDLE;
     static const char* SM_DEFAULT_PRINTER_MODEL;
     static const char* SM_DEFAULT_PRINTER_VARIANT;
+    // The variant to activate when a printer model is newly enabled with several nozzle variants
+    // (Setup Wizard, Add Printer). The variants arrive as a sorted set, so the first one is the
+    // smallest nozzle ("0.2"); that is never what a user wants by default, and on a four-head U1 it
+    // meant a 0.2 machine on a printer that ships with 0.4 nozzles. Prefers SM_DEFAULT_PRINTER_VARIANT
+    // ("0.4") when the model has it, otherwise the first variant. Empty when there are none.
+    static std::string          default_printer_variant(const std::set<std::string> &variants);
     static const char* SM_DEFAULT_FILAMENT;
     static const char *ORCA_FILAMENT_LIBRARY;
 

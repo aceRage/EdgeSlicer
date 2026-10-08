@@ -2519,7 +2519,7 @@ bool ConfigWizard::priv::apply_config(AppConfig *app_config, PresetBundle *prese
             if (const auto model_it = config->second.find(model.id);
                 model_it != config->second.end() && model_it->second.size() > 0 &&
                 preferred_pt == model.technology) {
-                variant = *model_it->second.begin();
+                variant = PresetBundle::default_printer_variant(model_it->second);
                 const auto config_old = enabled_vendors_old.find(bundle_name);
                 if (config_old == enabled_vendors_old.end())
                     return model.id;

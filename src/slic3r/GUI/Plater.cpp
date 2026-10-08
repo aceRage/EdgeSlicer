@@ -9882,7 +9882,11 @@ void Sidebar::update_nozzle_settings(bool switch_machine)
 
             const auto &printer_config = wxGetApp().preset_bundle->printers.get_edited_preset().config;
 
-            auto diameter = diameter_combo->GetValue().substr(0, 3);
+            // The entry is the printer_variant plus "mm" ("0.4mm", or "0.4+0.6mm" for a mixed-nozzle
+            // machine), so strip the unit instead of cutting at three characters.
+            wxString diameter = diameter_combo->GetValue();
+            if (diameter.EndsWith("mm"))
+                diameter.RemoveLast(2);
 
             // Mixed nozzle sizes (Phase 3): this picker chooses the BASE printer preset (a
             // printer_variant), and selecting one replaces the whole nozzle_diameter vector with
