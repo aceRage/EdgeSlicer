@@ -1643,7 +1643,7 @@ void TreeSupport::generate_toolpaths(const TreeSupportGroupContext *groups)
                     }
                     else {
                         // base_areas
-                        Flow flow               = (layer_id == 0 && m_raft_layers == 0) ? m_object->print()->brim_flow() : support_flow;
+                        Flow flow               = (layer_id == 0 && m_raft_layers == 0) ? m_support_params.first_layer_flow : support_flow;
                         bool need_infill = with_infill;
                         if(m_object_config->support_base_pattern==smpDefault)
                             need_infill &= area_group.need_infill;
@@ -1821,13 +1821,6 @@ void TreeSupport::generate_toolpaths(const TreeSupportGroupContext *groups)
         }
     );
 }
-
-void deleteDirectoryContents(const std::filesystem::path& dir)
-{
-    for (const auto& entry : std::filesystem::directory_iterator(dir))
-        std::filesystem::remove_all(entry.path());
-}
-
 
 void TreeSupport::move_bounds_to_contact_nodes(std::vector<TreeSupport3D::SupportElements> &move_bounds,
                                   PrintObject                             &print_object,
@@ -2380,6 +2373,31 @@ void TreeSupport::draw_circles()
                         floor_areas = std::move(diff_ex(floor_areas, bottom_gap_area));
                     }
                 }
+                // Orca: Hybrid tree first-layer expansion belongs only to the normal-support
+                // part. area_poly is collected from ePolygon nodes above, which are the normal
+                // support nodes in Hybrid mode. Apply the expansion before area_groups and
+                // lslices are built so toolpaths and brim avoidance use the same footprint.
+                if (layer_nr == 0 && m_raft_layers == 0 && m_support_params.support_style == smsTreeHybrid &&
+                    m_object_config->raft_first_layer_expansion.value > 0.f) {
+                    ExPolygons expanded_base_areas;
+                    const float inflate_factor_1st_layer = float(scale_(m_object_config->raft_first_layer_expansion.value));
+                    Polygons trimming = offset(m_object->layers().front()->lslices, float(scale_(m_support_params.gap_xy_first_layer)),
+                                               SUPPORT_SURFACES_OFFSET_PARAMETERS);
+                    // Orca: Match normal support expansion: grow in steps and re-trim against the object each time.
+                    const int nsteps = std::max(5, int(ceil(inflate_factor_1st_layer / m_support_params.first_layer_flow.scaled_width())));
+                    const float step = inflate_factor_1st_layer / nsteps;
+                    for (const ExPolygon &expoly : ts_layer->base_areas) {
+                        if (overlaps({ expoly }, area_poly)) { // normal support in Hybrid mode
+                            Polygons expanded = to_polygons(expoly);
+                            for (int i = 0; i < nsteps; ++i)
+                                expanded = diff(expand(expanded, step), trimming);
+                            append(expanded_base_areas, union_ex(expanded));
+                        } else
+                            expanded_base_areas.emplace_back(expoly);
+                    }
+                    ts_layer->base_areas = std::move(expanded_base_areas);
+                }
+
                 // Orca: Final tree base polygons may be too close above model surfaces.
                 // Enforce bottom Z clearance for non-contact support layers as well.
                 if (!ts_layer->base_areas.empty()) {
@@ -3662,7 +3680,14 @@ void TreeSupport::generate_contact_points()
                     }
 
                     // add supports along contours
-                    libnest2d::placers::EdgeCache<ExPolygon> edge_cache(overhang);
+                    ExPolygon closed_overhang = overhang; // make a copy to add closing point for edge cache
+                    if (closed_overhang.contour.points.size() > 1)
+                        closed_overhang.contour.points.emplace_back(closed_overhang.contour.points.front());
+                    for (Polygon &hole : closed_overhang.holes)
+                        if (hole.points.size() > 1)
+                            hole.points.emplace_back(hole.points.front());
+
+                    libnest2d::placers::EdgeCache<ExPolygon> edge_cache(closed_overhang);
                     for (size_t i = 0; i < edge_cache.holeCount() + 1; i++) {
                         double step     = point_spread / (i == 0 ? edge_cache.circumference() : edge_cache.circumference(i - 1));
                         double distance = 0;
