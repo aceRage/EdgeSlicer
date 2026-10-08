@@ -27,7 +27,7 @@
     ],
     "enable_pressure_advance": [
         "0",
-        "1"
+        "0"
     ],
     "eng_plate_temp": [
         "60"

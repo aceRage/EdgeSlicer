@@ -2009,12 +2009,12 @@
       "sub_path": "filament/Snapmaker PET @U1.json"
     },
     {
-      "name": "Snapmaker PETG @U1 base",
-      "sub_path": "filament/Snapmaker PETG @U1 base.json"
+      "name": "Snapmaker PETG Basic @U1 base",
+      "sub_path": "filament/Snapmaker PETG Basic @U1 base.json"
     },
     {
-      "name": "Snapmaker PETG @U1",
-      "sub_path": "filament/Snapmaker PETG @U1.json"
+      "name": "Snapmaker PETG Basic @U1",
+      "sub_path": "filament/Snapmaker PETG Basic @U1.json"
     },
     {
       "name": "Snapmaker PLA @U1 base",

@@ -260,6 +260,14 @@ const char* PresetBundle::SM_DEFAULT_PRINTER_VARIANT = "0.4";
 const char* PresetBundle::SM_DEFAULT_FILAMENT        = "Snapmaker PLA SnapSpeed";
 const char *PresetBundle::ORCA_FILAMENT_LIBRARY = "OrcaFilamentLibrary";
 
+std::string PresetBundle::variant_to_activate(const std::set<std::string> &previous, const std::set<std::string> &enabled)
+{
+    for (const std::string &variant : enabled)
+        if (previous.find(variant) == previous.end())
+            return default_printer_variant(enabled);
+    return std::string();
+}
+
 std::string PresetBundle::default_printer_variant(const std::set<std::string> &variants)
 {
     if (variants.empty())

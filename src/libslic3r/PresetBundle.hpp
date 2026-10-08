@@ -551,6 +551,10 @@ public:
     // meant a 0.2 machine on a printer that ships with 0.4 nozzles. Prefers SM_DEFAULT_PRINTER_VARIANT
     // ("0.4") when the model has it, otherwise the first variant. Empty when there are none.
     static std::string          default_printer_variant(const std::set<std::string> &variants);
+    // The variant to activate when a model that already had `previous` variants enabled is saved with
+    // `enabled`: empty when nothing was added, otherwise default_printer_variant(enabled) (the first
+    // newly added variant would be the smallest nozzle, "0.2", when only 0.4 was enabled before).
+    static std::string          variant_to_activate(const std::set<std::string> &previous, const std::set<std::string> &enabled);
     static const char* SM_DEFAULT_FILAMENT;
     static const char *ORCA_FILAMENT_LIBRARY;
 

@@ -112,7 +112,7 @@
     "0"
   ],
   "enable_pressure_advance": [
-    "1"
+    "0"
   ],
   "filament_max_volumetric_speed": [
     "10"

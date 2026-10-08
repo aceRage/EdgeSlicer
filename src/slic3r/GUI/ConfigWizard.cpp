@@ -2527,11 +2527,12 @@ bool ConfigWizard::priv::apply_config(AppConfig *app_config, PresetBundle *prese
                 if (model_it_old == config_old->second.end())
                     return model.id;
                 else if (model_it_old->second != model_it->second) {
-                    for (const auto& var : model_it->second)
-                        if (model_it_old->second.find(var) == model_it_old->second.end()) {
-                            variant = var;
-                            return model.id;
-                        }
+                    // Variants were added: activate the default one (0.4) when the model has it, not the first newly
+                    // added one (the smallest nozzle, "0.2", when only 0.4 was enabled before).
+                    if (std::string added = PresetBundle::variant_to_activate(model_it_old->second, model_it->second); !added.empty()) {
+                        variant = added;
+                        return model.id;
+                    }
                 }
             }
         }

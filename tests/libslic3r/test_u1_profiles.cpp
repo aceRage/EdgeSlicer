@@ -111,6 +111,18 @@ TEST_CASE("default_printer_variant prefers the 0.4 nozzle", "[Preset][U1]")
     CHECK(PresetBundle::default_printer_variant({ "0.4HF", "0.6" }) == "0.4HF");
 }
 
+TEST_CASE("Saving the wizard with new variants activates 0.4, not the first new variant", "[Preset][U1]")
+{
+    const std::set<std::string> all = { "0.2", "0.4", "0.4+0.6", "0.6", "0.8" };
+    // Only 0.4 was enabled before (an earlier session): the first NEW variant would be "0.2".
+    CHECK(PresetBundle::variant_to_activate({ "0.4" }, all) == "0.4");
+    CHECK(PresetBundle::variant_to_activate({ "0.4", "0.6" }, all) == "0.4");
+    // Nothing added: the active printer is left alone.
+    CHECK(PresetBundle::variant_to_activate(all, all) == "");
+    // A model without 0.4 still gets its first variant.
+    CHECK(PresetBundle::variant_to_activate({ "0.6" }, { "0.2", "0.6" }) == "0.2");
+}
+
 TEST_CASE("The Snapmaker U1 model offers every nozzle variant, 0.4 default among them", "[Preset][U1]")
 {
     const std::set<std::string> variants = tree().u1_variants();
@@ -193,7 +205,7 @@ TEST_CASE("The mixed U1 machine carries per-head layer limits and no High Flow",
 namespace {
 
 const std::vector<std::string> NEW_SNAPMAKER_U1_FILAMENTS = {
-    "Snapmaker PET @U1",       "Snapmaker PETG @U1",       "Snapmaker PLA @U1",
+    "Snapmaker PET @U1",       "Snapmaker PETG Basic @U1",       "Snapmaker PLA @U1",
     "Snapmaker PLA Eco @U1",   "Snapmaker PLA Lite @U1",   "Snapmaker PLA Metal @U1",
     "Snapmaker TPE @U1",       "Snapmaker TPU 95A @U1",    "Snapmaker TPU High-Flow @U1",
 };
@@ -272,7 +284,7 @@ TEST_CASE("The new Snapmaker-brand U1 filaments resolve to real material setting
     CHECK(type(filament_preset("Snapmaker PLA Metal @U1")) == "PLA");
     CHECK(type(filament_preset("Snapmaker PLA Lite @U1")) == "PLA");
     CHECK(type(filament_preset("Snapmaker PLA Eco @U1")) == "PLA");
-    CHECK(type(filament_preset("Snapmaker PETG @U1")) == "PETG");
+    CHECK(type(filament_preset("Snapmaker PETG Basic @U1")) == "PETG");
     CHECK(type(filament_preset("Snapmaker PET @U1")) == "PET");
     CHECK(type(filament_preset("Snapmaker TPE @U1")) == "TPU");
     CHECK(type(filament_preset("Snapmaker TPU 95A @U1")) == "TPU");
@@ -282,8 +294,8 @@ TEST_CASE("The new Snapmaker-brand U1 filaments resolve to real material setting
     CHECK(first(filament_preset("Snapmaker TPU High-Flow @U1"), "nozzle_temperature") == Approx(225.));
     CHECK(first(filament_preset("Snapmaker PET @U1"), "nozzle_temperature") == Approx(278.));
     CHECK(first(filament_preset("Snapmaker PLA @U1"), "nozzle_temperature") == Approx(220.));
-    CHECK(first(filament_preset("Snapmaker PETG @U1"), "nozzle_temperature") == Approx(245.));
-    CHECK(first(filament_preset("Snapmaker PETG @U1"), "nozzle_temperature_initial_layer") >= 250.);
+    CHECK(first(filament_preset("Snapmaker PETG Basic @U1"), "nozzle_temperature") == Approx(245.));
+    CHECK(first(filament_preset("Snapmaker PETG Basic @U1"), "nozzle_temperature_initial_layer") >= 250.);
     // TPU High-Flow is the one that also fits the 0.6 and 0.8 machines.
     const auto *compatible = filament_preset("Snapmaker TPU High-Flow @U1").config.option<ConfigOptionStrings>("compatible_printers");
     CHECK(std::find(compatible->values.begin(), compatible->values.end(), "Snapmaker U1 (0.8 nozzle)") != compatible->values.end());
@@ -331,6 +343,77 @@ TEST_CASE("The mixed U1 process is compatible with the mixed machine only and le
     REQUIRE(p04 != nullptr);
     const auto *c04 = p04->config.option<ConfigOptionStrings>("compatible_printers");
     CHECK(std::find(c04->values.begin(), c04->values.end(), "Snapmaker U1 (0.4+0.6 nozzle)") == c04->values.end());
+}
+
+namespace {
+bool is_u1_filament(const Preset &preset)
+{
+    if (!preset.is_system)
+        return false;
+    if (preset.name.find("@U1") != std::string::npos)
+        return true;
+    const auto *compatible = preset.config.option<ConfigOptionStrings>("compatible_printers");
+    if (compatible == nullptr)
+        return false;
+    return std::any_of(compatible->values.begin(), compatible->values.end(),
+                       [](const std::string &p) { return p.rfind("Snapmaker U1 (", 0) == 0; });
+}
+} // namespace
+
+// Owner rule: a filament that carries its own pressure advance stops the U1's dynamic flow calibration from
+// taking effect. The presets below are the resolved configs (inherited values included), every slot.
+TEST_CASE("No U1 filament preset enables pressure advance, in any slot", "[Preset][U1]")
+{
+    size_t checked = 0;
+    for (const Preset &preset : tree().bundle->filaments) {
+        if (!is_u1_filament(preset))
+            continue;
+        ++checked;
+        INFO(preset.name);
+        const auto *pa = preset.config.option<ConfigOptionBools>("enable_pressure_advance");
+        if (pa != nullptr)
+            for (unsigned char on : pa->values)
+                CHECK(on == 0);
+        const auto *adaptive = preset.config.option<ConfigOptionBools>("adaptive_pressure_advance");
+        if (adaptive != nullptr)
+            for (unsigned char on : adaptive->values)
+                CHECK(on == 0);
+        for (const char *key : { "filament_start_gcode", "filament_end_gcode" }) {
+            const auto *gcode = preset.config.option<ConfigOptionStrings>(key);
+            if (gcode == nullptr)
+                continue;
+            for (const std::string &g : gcode->values) {
+                CHECK(g.find("PRESSURE_ADVANCE") == std::string::npos);
+                CHECK(g.find("M900") == std::string::npos);
+            }
+        }
+    }
+    CHECK(checked > 150);
+}
+
+TEST_CASE("Snapmaker PETG Basic keeps the old Snapmaker PETG @U1 alias on the HF preset", "[Preset][U1]")
+{
+    Preset *hf = tree().bundle->filaments.find_preset("Snapmaker PETG HF", false);
+    REQUIRE(hf != nullptr);
+    CHECK(std::find(hf->renamed_from.begin(), hf->renamed_from.end(), "Snapmaker PETG @U1") != hf->renamed_from.end());
+    // The alias only works while no live preset takes the name.
+    CHECK(tree().bundle->filaments.find_preset("Snapmaker PETG @U1", false) == nullptr);
+    CHECK(tree().bundle->filaments.find_preset("Snapmaker PETG Basic @U1", false) != nullptr);
+}
+
+TEST_CASE("Generic PETG HF prints at 230 C on every U1 nozzle", "[Preset][U1]")
+{
+    for (const char *nozzle : { "0.2", "0.6", "0.8" }) {
+        const std::string name = std::string("Generic PETG HF @U1 ") + nozzle + " nozzle";
+        const Preset &preset = filament_preset(name.c_str());
+        INFO(name);
+        for (const char *key : { "nozzle_temperature", "nozzle_temperature_initial_layer" }) {
+            const auto *opt = preset.config.option<ConfigOptionInts>(key);
+            REQUIRE(opt != nullptr);
+            for (int v : opt->values)
+                CHECK(v == 230);
+        }
+    }
 }
 
 TEST_CASE("Every U1 filament that fits the 0.4 or 0.6 machine also fits the mixed machine", "[Preset][U1][MixedNozzle]")
