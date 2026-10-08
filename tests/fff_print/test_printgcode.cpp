@@ -1,6 +1,7 @@
 #include <catch2/catch.hpp>
 
 #include "libslic3r/libslic3r.h"
+#include "libslic3r/BoundingBox.hpp"
 #include "libslic3r/Extruder.hpp"
 // ToolOrdering.hpp must come after Print.hpp (it relies on Print.hpp's forward declarations,
 // e.g. ExtrusionEntity), so it is not included on its own here; test_data.hpp pulls in Print.hpp.
@@ -9,6 +10,7 @@
 #include "libslic3r/MixedFilament.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/PresetFlowVariant.hpp"
+#include "libslic3r/TriangleMesh.hpp"
 
 #include "test_data.hpp"
 
@@ -19,6 +21,7 @@
 #include <limits>
 #include <map>
 #include <regex>
+#include <set>
 #include <sstream>
 #include <vector>
 
@@ -2135,4 +2138,210 @@ TEST_CASE("Spiral vase drops extrusion segments shorter than the path resolution
     });
     REQUIRE(segments > 100);
     CHECK(min_segment >= 2. * resolution - 1e-3);
+}
+
+namespace {
+// A 30 x 30 x h plate with a through slot of slot_w x slot_l in its middle (axis aligned, slot along Y).
+TriangleMesh plate_with_slot(float w, float d, float h, float slot_w, float slot_l)
+{
+    const float x0 = 0.5f * (w - slot_w), x1 = 0.5f * (w + slot_w);
+    const float y0 = 0.5f * (d - slot_l), y1 = 0.5f * (d + slot_l);
+    // Outer square O0..O3 and slot H0..H3, both counter-clockwise from above; bottom ring 0..7, top ring 8..15.
+    const std::vector<Vec2f> ring = { { 0.f, 0.f }, { w, 0.f }, { w, d }, { 0.f, d }, { x0, y0 }, { x1, y0 }, { x1, y1 }, { x0, y1 } };
+    std::vector<Vec3f> v;
+    for (float z : { 0.f, h })
+        for (const Vec2f &p : ring)
+            v.emplace_back(p.x(), p.y(), z);
+    auto O = [](int i, bool top) { return (i % 4) + (top ? 8 : 0); };
+    auto H = [](int i, bool top) { return 4 + (i % 4) + (top ? 8 : 0); };
+    std::vector<Vec3i32> f;
+    for (int i = 0; i < 4; ++i) {
+        // top ring (normal +Z) and bottom ring (normal -Z)
+        f.emplace_back(O(i, true), O(i + 1, true), H(i + 1, true));
+        f.emplace_back(O(i, true), H(i + 1, true), H(i, true));
+        f.emplace_back(O(i, false), H(i + 1, false), O(i + 1, false));
+        f.emplace_back(O(i, false), H(i, false), H(i + 1, false));
+        // outer wall (normal away from the plate) and slot wall (normal into the slot)
+        f.emplace_back(O(i, false), O(i + 1, false), O(i + 1, true));
+        f.emplace_back(O(i, false), O(i + 1, true), O(i, true));
+        f.emplace_back(H(i + 1, false), H(i, false), H(i, true));
+        f.emplace_back(H(i + 1, false), H(i, true), H(i + 1, true));
+    }
+    return TriangleMesh(std::move(v), std::move(f));
+}
+} // namespace
+
+// Orca #10942: avoid crossing perimeters dropped every hole up to 2 mm wide from its boundary, so travels went
+// straight over a narrow slot (and across its walls). Holes are only dropped up to 0.2 mm now.
+TEST_CASE("Avoid crossing perimeters keeps a narrow slot as an obstacle", "[PrintGCode][AvoidCrossingPerimeters][Orca10942]")
+{
+    const float  W = 30.f, D = 30.f, slot_w = 1.5f, slot_l = 16.f;
+    const std::string gcode = Slic3r::Test::slice({ plate_with_slot(W, D, 2.f, slot_w, slot_l) }, {
+        { "reduce_crossing_wall",        "1" },
+        { "max_travel_detour_distance",  "0" },
+        { "enable_arc_fitting",          "0" },
+        { "z_hop",                       "0" },
+        { "wall_loops",                  "2" },
+        { "sparse_infill_density",       "20%" },
+        { "layer_height",                "0.2" },
+        { "initial_layer_print_height",  "0.2" },
+        { "gcode_comments",              "1" },
+        { "machine_start_gcode",         "" },
+        { "skirt_loops",                 "0" },
+        { "brim_type",                   "no_brim" },
+    });
+
+    // Where the plate landed on the bed: the bounding box of its outer walls. Also the Z of the last layer.
+    static const std::regex z_tag_re("^;Z:([0-9.]+)");
+    BoundingBoxf bbox;
+    double       top_z = 0.;
+    std::string  feature;
+    GCodeReader  bbox_parser;
+    bbox_parser.parse_buffer(gcode, [&](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        feature = feature_after(line.raw(), feature);
+        std::smatch m;
+        const std::string raw = line.raw();
+        if (std::regex_search(raw, m, z_tag_re))
+            top_z = std::max(top_z, std::stod(m[1].str()));
+        if (feature == "Outer wall" && line.cmd_is("G1") && line.extruding(self) && line.dist_XY(self) > 0)
+            bbox.merge(Vec2d(line.new_X(self), line.new_Y(self)));
+    });
+    REQUIRE(bbox.defined);
+    const Vec2d c = bbox.center();
+    // The slot, shrunk a little so a travel along its walls does not count.
+    const double hx = 0.5 * slot_w - 0.2, hy = 0.5 * slot_l - 0.2;
+
+    // Counted: travels inside the plate (not the approach from the start position) below the last layer. On the
+    // last layer the top surface is taken out of the avoid-crossing boundary, and then a travel may cut across
+    // anyway, slot or not.
+    double      layer_z = 0.;
+    size_t      travels = 0, crossings = 0;
+    GCodeReader parser;
+    parser.parse_buffer(gcode, [&](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        std::smatch m;
+        const std::string raw = line.raw();
+        if (std::regex_search(raw, m, z_tag_re))
+            layer_z = std::stod(m[1].str());
+        if (!(line.cmd_is("G1") || line.cmd_is("G0")) || line.extruding(self) || line.dist_XY(self) <= 0)
+            return;
+        if (layer_z > top_z - 1e-3 || !bbox.contains(Vec2d(self.x(), self.y())) ||
+            !bbox.contains(Vec2d(line.new_X(self), line.new_Y(self))))
+            return;
+        ++travels;
+        const Vec2d a(self.x(), self.y()), b(line.new_X(self), line.new_Y(self));
+        const double len   = (b - a).norm();
+        const int    steps = std::max(2, int(len / 0.05));
+        for (int i = 0; i <= steps; ++i) {
+            const Vec2d p = a + (b - a) * (double(i) / steps) - c;
+            if (std::abs(p.x()) < hx && std::abs(p.y()) < hy) {
+                ++crossings;
+                break;
+            }
+        }
+    });
+    REQUIRE(travels > 20);
+    CHECK(crossings == 0);
+}
+
+// Orca #13327/#13460: when a layer's first path starts exactly where the previous layer ended, the pending
+// layer-change lift was dropped and the path was extruded at the previous layer's Z (seen on support layers).
+// No model here is known to hit that coincidence, so this is a guard: every layer's first extrusion is at the
+// Z of that layer, across rafts and interlaced support layers.
+TEST_CASE("The first extrusion of every layer is at that layer's Z", "[PrintGCode][Orca13327]")
+{
+    auto check = [](const std::string &gcode) {
+        static const std::regex z_tag_re("^;Z:([0-9.]+)");
+        double expected_z = -1.;
+        bool   pending    = false;
+        size_t layers = 0, wrong = 0;
+        GCodeReader parser;
+        parser.parse_buffer(gcode, [&](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+            std::smatch m;
+            const std::string raw = line.raw();
+            if (std::regex_search(raw, m, z_tag_re)) {
+                expected_z = std::stod(m[1].str());
+                pending    = true;
+            } else if (pending && line.cmd_is("G1") && line.extruding(self) && line.dist_XY(self) > 0) {
+                ++layers;
+                if (std::abs(double(self.z()) - expected_z) > 0.0015)
+                    ++wrong;
+                pending = false;
+            }
+        });
+        REQUIRE(layers > 20);
+        CHECK(wrong == 0);
+    };
+    SECTION("normal supports over a raft") {
+        check(Slic3r::Test::slice({ TestMesh::overhang }, {
+            { "enable_support",             "1" },
+            { "support_type",               "normal(auto)" },
+            { "raft_layers",                "3" },
+            { "z_hop",                      "0" },
+            { "layer_height",               "0.2" },
+            { "initial_layer_print_height", "0.2" },
+            { "gcode_comments",             "1" },
+            { "machine_start_gcode",        "" },
+        }));
+    }
+    SECTION("normal supports on their own layer height (interlaced support layers)") {
+        check(Slic3r::Test::slice({ TestMesh::overhang }, {
+            { "enable_support",                   "1" },
+            { "support_type",                     "normal(auto)" },
+            { "independent_support_layer_height", "1" },
+            { "support_top_z_distance",           "0.15" },
+            { "z_hop",                            "0" },
+            { "layer_height",                     "0.2" },
+            { "initial_layer_print_height",       "0.2" },
+            { "gcode_comments",                   "1" },
+            { "machine_start_gcode",              "" },
+        }));
+    }
+}
+
+// Orca #12937: with supports on their own layer height, a per-object skirt / draft shield was also printed on the
+// interlaced support-only layers (and with many objects that could crash). It now follows the object's own layers.
+TEST_CASE("A per-object draft shield follows the object layers, not interlaced support layers", "[PrintGCode][Orca12937]")
+{
+    const std::string gcode = Slic3r::Test::slice({ TestMesh::overhang, TestMesh::overhang }, {
+        { "print_sequence",                   "by layer" },
+        { "skirt_type",                       "perobject" },
+        { "skirt_loops",                      "1" },
+        { "skirt_height",                     "1" },
+        { "draft_shield",                     "enabled" },
+        { "enable_support",                   "1" },
+        { "support_type",                     "normal(auto)" },
+        { "independent_support_layer_height", "1" },
+        { "support_top_z_distance",           "0.15" },
+        { "z_hop",                            "0" },
+        { "layer_height",                     "0.2" },
+        { "initial_layer_print_height",       "0.2" },
+        { "gcode_comments",                   "1" },
+        { "machine_start_gcode",              "" },
+    });
+
+    std::set<long> wall_z, skirt_z, support_z;
+    std::string    feature;
+    GCodeReader    parser;
+    parser.parse_buffer(gcode, [&](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        feature = feature_after(line.raw(), feature);
+        if (!(line.cmd_is("G1") && line.extruding(self) && line.dist_XY(self) > 0))
+            return;
+        const long z = std::lround(double(self.z()) * 1000.);
+        if (feature == "Skirt")
+            skirt_z.insert(z);
+        else if (feature == "Outer wall" || feature == "Inner wall")
+            wall_z.insert(z);
+        else if (feature.rfind("Support", 0) == 0)
+            support_z.insert(z);
+    });
+    // The case only means something if some support layers sit between object layers.
+    size_t support_only = 0;
+    for (long z : support_z)
+        support_only += wall_z.count(z) == 0;
+    REQUIRE(support_only > 0);
+    REQUIRE(skirt_z.size() > 10);
+    size_t skirt_off_object_layers = 0;
+    for (long z : skirt_z)
+        skirt_off_object_layers += wall_z.count(z) == 0;
+    CHECK(skirt_off_object_layers == 0);
 }
