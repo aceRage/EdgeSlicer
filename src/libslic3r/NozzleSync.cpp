@@ -171,5 +171,17 @@ std::vector<SlotAssignment> assign_family_to_slots(const std::vector<FilamentCho
     return out;
 }
 
+std::string first_nozzle(const std::vector<std::string> &reported)
+{
+    return reported.empty() ? std::string() : reported.front();
+}
+
+std::string device_preset_name(const std::string &model, const std::vector<std::string> &reported, const std::string &current)
+{
+    if (reported.empty() || reported.front().empty())
+        return current;
+    return model + " (" + reported.front() + " nozzle)";
+}
+
 } // namespace NozzleSync
 } // namespace Slic3r

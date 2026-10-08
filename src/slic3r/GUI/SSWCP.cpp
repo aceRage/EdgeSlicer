@@ -6831,6 +6831,8 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_set_engine()
                                         DeviceInfo query_info;
                                         bool       exist = wxGetApp().app_config->get_device_info(info.dev_id, query_info);
                                         if (nozzle_diameters.empty()) {
+                                            BOOST_LOG_TRIVIAL(warning) << "[connect] " << machine_type << " at " << ip
+                                                                       << " reported no nozzle sizes: keeping the current preset name, no variant is chosen";
                                             if (exist) {
                                                 query_info.connected = true;
                                                 wxGetApp().app_config->save_device_info(query_info);
@@ -6851,7 +6853,7 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_set_engine()
                                         } else {
 
                                             info.nozzle_sizes = nozzle_diameters;
-                                            info.preset_name  = machine_type + " (" + nozzle_diameters[0] + " nozzle)";
+                                            info.preset_name  = NozzleSync::device_preset_name(machine_type, nozzle_diameters, info.preset_name);
                                             wxGetApp().app_config->save_device_info(info);
 
                                             m_dialog->m_device_id = ip;
@@ -6866,8 +6868,8 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_set_engine()
                                                         isFind                      = true;
                                                         std::string nozzle_selected = m_ProfileJson["model"][m]["nozzle_selected"]
                                                                                               .get<std::string>();
-                                                        std::string se_nozz_selected = nozzle_diameters[0];
-                                                        if (nozzle_selected.find(se_nozz_selected) == std::string::npos) {
+                                                        std::string se_nozz_selected = NozzleSync::first_nozzle(nozzle_diameters);
+                                                        if (!se_nozz_selected.empty() && nozzle_selected.find(se_nozz_selected) == std::string::npos) {
                                                             nozzle_selected += ";" + se_nozz_selected;
                                                             m_ProfileJson["model"][m]["nozzle_selected"] = nozzle_selected;
                                                         }
@@ -6880,7 +6882,7 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_set_engine()
                                                     json new_item;
                                                     new_item["vendor"]          = "Snapmaker";
                                                     new_item["model"]           = info.model_name;
-                                                    new_item["nozzle_selected"] = nozzle_diameters[0];
+                                                    new_item["nozzle_selected"] = NozzleSync::first_nozzle(nozzle_diameters);
                                                     m_ProfileJson["model"].push_back(new_item);
                                                 }
                                             }
@@ -6967,7 +6969,7 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_set_engine()
                                                     if (info.nozzle_sizes.empty())
                                                         info.nozzle_sizes.push_back("0.4");
 
-                                                    info.preset_name = machine_type + " (" + info.nozzle_sizes[0] + " nozzle)";
+                                                    info.preset_name = NozzleSync::device_preset_name(machine_type, info.nozzle_sizes, info.preset_name);
 
                                                     wxGetApp().app_config->save_device_info(info);
                                                 } else {

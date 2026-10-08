@@ -1,4 +1,5 @@
 #include "WebPresetDialog.hpp"
+#include "libslic3r/NozzleSync.hpp"
 #include "ConfigWizard.hpp"
 
 #include <string.h>
@@ -629,7 +630,7 @@ void WebPresetDialog::SendUserGuideProfile()
             if (item.count("nozzle_selected")) {
                 if (item["model"].get<std::string>() == model_name) {
                     if (!nozzle_sizes.empty()) {
-                        item["nozzle_selected"] = nozzle_sizes[0];
+                        item["nozzle_selected"] = NozzleSync::first_nozzle(nozzle_sizes);
                     } else {
                         item["nozzle_selected"] = "";
                     }

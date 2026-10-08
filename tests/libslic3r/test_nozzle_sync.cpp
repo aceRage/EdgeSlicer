@@ -163,3 +163,20 @@ TEST_CASE("Apply-all on a mixed machine lists each filament once and gives each 
     for (const auto &s : a)
         CHECK(s.preset == "Snapmaker TPU High-Flow @U1 0.6 nozzle");
 }
+
+TEST_CASE("A printer that reports no nozzle sizes keeps its preset name and gets no variant", "[NozzleSync][U1]")
+{
+    // The connect flow read nozzle_diameters[0] of whatever came back.
+    CHECK(NS::first_nozzle({}) == "");
+    CHECK(NS::first_nozzle({ "0.4", "0.6" }) == "0.4");
+    CHECK(NS::device_preset_name("Snapmaker U1", {}, "Snapmaker U1 (0.6 nozzle)") == "Snapmaker U1 (0.6 nozzle)");
+    CHECK(NS::device_preset_name("Snapmaker U1", {}, "") == "");
+    CHECK(NS::device_preset_name("Snapmaker U1", { "" }, "keep") == "keep");
+    CHECK(NS::device_preset_name("Snapmaker U1", { "0.4", "0.4", "0.4", "0.4" }, "old") == "Snapmaker U1 (0.4 nozzle)");
+    // A report with nothing readable plans as not uniform and matches no machine: nothing is chosen.
+    const NS::Plan p = NS::plan({});
+    CHECK_FALSE(p.uniform);
+    CHECK(p.variant.empty());
+    CHECK(NS::match_machine_variant(p.per_head, { { "0.4", { 0.4, 0.4, 0.4, 0.4 } } }).empty());
+    CHECK(NS::parse_reported_nozzles(nlohmann::json::array()).empty());
+}

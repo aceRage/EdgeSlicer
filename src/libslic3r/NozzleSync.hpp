@@ -79,5 +79,12 @@ struct SlotAssignment
 std::vector<SlotAssignment> assign_family_to_slots(const std::vector<FilamentChoice> &choices, const std::string &family,
                                                    const std::vector<double> &slot_nozzles);
 
+// The first reported size ("head 1"), or empty when the printer reported none. Never index [0] of a report.
+std::string first_nozzle(const std::vector<std::string> &reported);
+
+// The preset name a connected device is stored under: "<model> (<first size> nozzle)". A printer that
+// reported no sizes keeps `current` (its existing name) - no variant is guessed.
+std::string device_preset_name(const std::string &model, const std::vector<std::string> &reported, const std::string &current);
+
 } // namespace NozzleSync
 } // namespace Slic3r

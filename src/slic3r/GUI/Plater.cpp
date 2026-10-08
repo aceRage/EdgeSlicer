@@ -2305,7 +2305,7 @@ Sidebar::Sidebar(Plater *parent)
                 }
                 bool res = matched_variant.empty() && !sync_plan.uniform;
                 std::string headNozzleSize = !matched_variant.empty() ? matched_variant :
-                                             sync_plan.uniform        ? sync_plan.variant : nozzle_diameters[0];
+                                             sync_plan.uniform        ? sync_plan.variant : NozzleSync::first_nozzle(nozzle_diameters);
 
                 if (res)
                 {
