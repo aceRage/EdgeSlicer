@@ -7,7 +7,8 @@
     "setting_id": "lPmCxsx9EpoLoNEk",
     "inherits": "Snapmaker PLA Metal @U1 base",
     "compatible_printers": [
-        "Snapmaker U1 (0.4 nozzle)"
+        "Snapmaker U1 (0.4 nozzle)",
+        "Snapmaker U1 (0.4+0.6 nozzle)"
     ],
     "fan_min_speed": [
         "100",
