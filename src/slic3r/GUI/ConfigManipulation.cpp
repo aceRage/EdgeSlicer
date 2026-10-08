@@ -601,7 +601,7 @@ void ConfigManipulation::apply_null_fff_config(DynamicPrintConfig *config, std::
 {
     for (auto &k : keys) {
         if (/*k == "adaptive_layer_height" || */ k == "independent_support_layer_height" || k == "enable_support" ||
-            k == "detect_thin_wall" || k == "tree_support_adaptive_layer_height")
+            k == "detect_thin_wall")
             config->set_key_value(k, new ConfigOptionBool(true));
         else if (k == "wall_loops")
             config->set_key_value(k, new ConfigOptionInt(0));
@@ -795,7 +795,7 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
         "support_interface_pattern", "support_interface_top_layers", "support_interface_bottom_layers",
         "bridge_no_support", "max_bridge_length", "support_top_z_distance", "support_bottom_z_distance",
         "support_type", "support_on_build_plate_only", "support_critical_regions_only", "support_interface_not_for_body",
-        "support_object_xy_distance", "support_object_first_layer_gap"/*, "independent_support_layer_height"*/})
+        "support_object_xy_distance", "support_object_first_layer_gap", "independent_support_layer_height"})
         toggle_field(el, have_support_material);
     toggle_line("hollow_shell_thickness", config->opt_bool("hollow_interior"));
     // Side stabilizers print as support, so they need supports on.
@@ -840,7 +840,7 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
     for (auto el : {"tree_support_branch_angle", "tree_support_branch_distance", "tree_support_branch_diameter" })
         toggle_line(el, support_is_normal_tree);
     // settings specific to normal trees
-    for (auto el : {"tree_support_auto_brim", "tree_support_brim_width", "tree_support_adaptive_layer_height"})
+    for (auto el : {"tree_support_auto_brim", "tree_support_brim_width"})
         toggle_line(el, support_is_normal_tree);
     // settings specific to organic trees
     for (auto el : {"tree_support_branch_angle_organic", "tree_support_branch_distance_organic", "tree_support_branch_diameter_organic", "tree_support_angle_slow", "tree_support_tip_diameter", "tree_support_top_rate", "tree_support_branch_diameter_angle"})
