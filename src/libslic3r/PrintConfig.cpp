@@ -10238,10 +10238,15 @@ std::map<std::string, std::string> validate(const FullPrintConfig &cfg, bool und
         cfg.gcode_flavor.value != gcfRepetier)
         error_message.emplace("use_firmware_retraction","--use-firmware-retraction is only supported by Klipper, Marlin, Smoothie, RepRapFirmware, Repetier and Machinekit firmware");
 
+    // Orca #13812 lets the printer tab keep Wipe on with firmware retraction once the whole retraction happens
+    // before the wipe (retract_before_wipe 100%): the G10 runs first and the wipe is a dry move. Only a partial
+    // retraction before the wipe is incompatible; rejecting every wipe here reported a project saved in the
+    // state the tab allows as invalid when it was opened again, and the CLI refused to slice it.
     if (cfg.use_firmware_retraction.value)
-        for (unsigned char wipe : cfg.wipe.values)
-             if (wipe)
-                error_message.emplace("use_firmware_retraction", "--use-firmware-retraction is not compatible with --wipe");
+        for (size_t i = 0; i < cfg.wipe.values.size(); ++i)
+            if (cfg.wipe.values[i] && cfg.retract_before_wipe.get_at(i) < 100. - EPSILON)
+                error_message.emplace("use_firmware_retraction",
+                                      "--use-firmware-retraction is not compatible with --wipe unless --retract-before-wipe is 100%");
                 
     // --gcode-flavor
     if (! print_config_def.get("gcode_flavor")->has_enum_value(cfg.gcode_flavor.serialize())) {
