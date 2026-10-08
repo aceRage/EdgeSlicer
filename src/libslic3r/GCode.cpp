@@ -10753,11 +10753,27 @@ std::string GCode::travel_to(const Point& point, ExtrusionRole role, std::string
             jerk_to_set = this->process_flow_value(m_config.initial_layer_jerk);
         }
     } else {
-        if (this->process_flow_value(m_config.default_acceleration) > 0 && this->process_flow_value(m_config.travel_acceleration) > 0) {
-            acceleration_to_set = (unsigned int) floor(this->process_flow_value(m_config.travel_acceleration) + 0.5);
+        // Orca: a travel shorter than the retraction threshold that leads into an external perimeter keeps the outer wall
+        // acceleration / jerk, so the nozzle does not decelerate to travel limits just before the visible wall starts.
+        const bool short_travel_to_outer_wall = role == erExternalPerimeter &&
+                                                travel.length() < scale_(EXTRUDER_CONFIG(retraction_minimum_travel));
+        if (this->process_flow_value(m_config.default_acceleration) > 0) {
+            if (short_travel_to_outer_wall) {
+                if (this->process_flow_value(m_config.outer_wall_acceleration) > 0)
+                    acceleration_to_set = (unsigned int) floor(this->process_flow_value(m_config.outer_wall_acceleration) + 0.5);
+            } else {
+                if (this->process_flow_value(m_config.travel_acceleration) > 0)
+                    acceleration_to_set = (unsigned int) floor(this->process_flow_value(m_config.travel_acceleration) + 0.5);
+            }
         }
-        if (this->process_flow_value(m_config.default_jerk) > 0 && this->process_flow_value(m_config.travel_jerk) > 0) {
-            jerk_to_set = this->process_flow_value(m_config.travel_jerk);
+        if (this->process_flow_value(m_config.default_jerk) > 0) {
+            if (short_travel_to_outer_wall) {
+                if (this->process_flow_value(m_config.outer_wall_jerk) > 0)
+                    jerk_to_set = this->process_flow_value(m_config.outer_wall_jerk);
+            } else {
+                if (this->process_flow_value(m_config.travel_jerk) > 0)
+                    jerk_to_set = this->process_flow_value(m_config.travel_jerk);
+            }
         }
     }
     if (m_writer.get_gcode_flavor() == gcfKlipper) {

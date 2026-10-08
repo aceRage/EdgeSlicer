@@ -871,6 +871,56 @@ TEST_CASE("wipe-tower and set_extruder PA follow the High-Flow column", "[PrintG
     }
 }
 
+TEST_CASE("Short travels into an external perimeter keep the outer wall acceleration", "[PrintGCode][Orca10722]")
+{
+    const std::string gcode = Slic3r::Test::slice({ TestMesh::cube_20x20x20 }, {
+        { "gcode_flavor",                "marlin" },
+        { "gcode_comments",              "1" },
+        { "machine_start_gcode",         "" },
+        { "enable_arc_fitting",          "0" },
+        { "z_hop",                       "0" },
+        { "layer_height",                "0.2" },
+        { "initial_layer_print_height",  "0.2" },
+        { "default_acceleration",        "2500" },
+        { "initial_layer_acceleration",  "2500" },
+        { "outer_wall_acceleration",     "2000" },
+        { "inner_wall_acceleration",     "3000" },
+        { "travel_acceleration",         "4000" },
+        // Every travel counts as "short" (below the retraction threshold).
+        { "retraction_minimum_travel",   "1000" },
+    });
+
+    int         accel            = 0;
+    int         travel_accel     = -1;
+    bool        after_travel     = false;
+    std::string feature;
+    size_t      outer_wall_moves = 0;
+    size_t      wrong_accel      = 0;
+    GCodeReader parser;
+    parser.parse_buffer(gcode, [&](GCodeReader &self, const GCodeReader::GCodeLine &line) {
+        feature = feature_after(line.raw(), feature);
+        float s = 0.f;
+        if (line.cmd_is("M204") && line.has_value('S', s)) {
+            accel = int(s + 0.5f);
+        } else if (line.cmd_is("G1") && (line.has(X) || line.has(Y))) {
+            if (line.extruding(self)) {
+                // First extrusion after a travel, past the first layer, inside an outer wall.
+                if (after_travel && self.z() > 0.5f && feature == "Outer wall") {
+                    ++outer_wall_moves;
+                    if (travel_accel != 2000)
+                        ++wrong_accel;
+                }
+                after_travel = false;
+            } else {
+                travel_accel = accel;
+                after_travel = true;
+            }
+        }
+    });
+    REQUIRE(outer_wall_moves > 10);
+    CHECK(wrong_accel == 0);
+}
+
 TEST_CASE("enable_pressure_advance follows the High-Flow column", "[PrintGCode][GCode][PAVariant]")
 {
     // Filament 2 Standard=false, High-Flow=true. get_at(1) is false, so the unfixed readers
