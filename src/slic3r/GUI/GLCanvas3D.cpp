@@ -3693,8 +3693,7 @@ void GLCanvas3D::report_thumbnail_entry_gl_errors(unsigned int w, unsigned int h
     if (first_error == GL_NO_ERROR)
         return;
     OpenGLManager::report_gl_errors(std::string("before a thumbnail (") + std::to_string(w) + "x" + std::to_string(h) +
-                                        (for_picking ? ", picking" : "") + ", " + gl_canvas_type_name(m_canvas_type) +
-                                        " canvas; raised outside any frame since the last check)",
+                                        (for_picking ? ", picking" : "") + "; raised outside any frame since the last check)",
                                     first_error);
 }
 

@@ -988,7 +988,8 @@ public:
     void report_frame_gl_errors(const char* pass);
     // EDGE (core profile): at a thumbnail's entry, logs as "before a thumbnail" what is already in the GL
     // error flag, so the framebuffer set-up report that follows only covers the set-up.
-    void report_thumbnail_entry_gl_errors(unsigned int w, unsigned int h, bool for_picking);
+    // Static: the framebuffer thumbnail renderers are static (the CLI calls them without a canvas).
+    static void report_thumbnail_entry_gl_errors(unsigned int w, unsigned int h, bool for_picking);
     bool is_rendering_enabled()
     {
         return m_enable_render;
