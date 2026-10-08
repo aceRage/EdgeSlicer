@@ -9962,10 +9962,11 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
             // This OVERRIDES the role speed outright on the first layer, so a bad
             // initial_layer_speed / initial_layer_infill_speed is the culprit here
             // regardless of which role we are printing.
-            const bool perim = is_perimeter(path.role());
-            speed_setting    = perim ? "initial_layer_speed" : "initial_layer_infill_speed";
-            speed            = perim ? this->process_flow_value(m_config.initial_layer_speed) :
-                                       this->process_flow_value(m_config.initial_layer_infill_speed);
+            // Orca (#14616): brim is attached to the first layer walls like a wall, not like infill.
+            const bool use_first_layer_speed = is_perimeter(path.role()) || path.role() == erBrim;
+            speed_setting = use_first_layer_speed ? "initial_layer_speed" : "initial_layer_infill_speed";
+            speed         = use_first_layer_speed ? this->process_flow_value(m_config.initial_layer_speed) :
+                                                    this->process_flow_value(m_config.initial_layer_infill_speed);
         }
     } else if (m_config.slow_down_layers.values.front() > 1 && m_config.raft_layers.value == 0) {
         if (_layer > 0 && _layer < m_config.slow_down_layers.values.front()) {
