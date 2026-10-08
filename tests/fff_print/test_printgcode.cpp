@@ -1208,14 +1208,10 @@ TEST_CASE("non-SEMM U1 2-tool High-Flow uses per-filament temps retract and plac
     REQUIRE(gcode.find("FLUSH=" + std::to_string(int(kVolF1))) != std::string::npos);
     REQUIRE(gcode.find("FLUSH=" + std::to_string(int(kVolHfF0))) != std::string::npos);
 
-    // GCodeWriter emits "M104 S<temp> T<tool> ; preheat T<tool> ...". Packed get_at(1) would
-    // preheat T1 at F0's High-Flow 230/225.
-    REQUIRE(gcode.find("preheat T1") != std::string::npos);
-    const bool preheat_t1_ok = gcode.find("M104 S" + std::to_string(kTempF1) + " T1 ; preheat") != std::string::npos
-                            || gcode.find("M104 S" + std::to_string(kInitF1) + " T1 ; preheat") != std::string::npos;
-    REQUIRE(preheat_t1_ok);
-    REQUIRE(gcode.find("M104 S" + std::to_string(kTempHfF0) + " T1 ; preheat") == std::string::npos);
-    REQUIRE(gcode.find("M104 S" + std::to_string(kInitHfF0) + " T1 ; preheat") == std::string::npos);
+    // Orca #11791: the G-code processor's backtracked "M104 ... ; preheat T<tool>" lines need ooze_prevention,
+    // which this case keeps off, so none are written. The per-filament preheat temperatures are checked in
+    // "ooze-on U1 2-tool preheat uses the per-filament temperatures" below.
+    REQUIRE(gcode.find("; preheat T") == std::string::npos);
 
     // First-layer writer (~4629-4663), wait=false: "M104 S<temp> T<tool> ; set nozzle temperature".
     // Packed get_at(1) writes S225 T1. U1_WAIT M109 S205 T1 is a different comment.
@@ -1305,6 +1301,28 @@ TEST_CASE("T0 Standard-only plus T1 packed-std uses T1 flow_ratio cap",
     REQUIRE(count_g1_feed(gcode, 6316) >= 1);
     REQUIRE(count_g1_feed(gcode, 9024) == 0);
     REQUIRE(count_g1_feed(gcode, 9309) == 0);
+}
+
+TEST_CASE("ooze-on U1 2-tool preheat uses the per-filament temperatures",
+          "[PrintGCode][GCode][PAVariant][FilamentVariants][Orca11791]")
+{
+    DynamicPrintConfig config = step_size_2_f0_config();
+    apply_u1_toolchange_markers(config);
+    config.option<ConfigOptionBool>("ooze_prevention")->value = true;
+    raise_role_speeds_for_mvs_cap(config);
+    disable_layer_cooling(config);
+
+    const std::string gcode = slice_u1_two_tool(config);
+
+    // GCodeProcessor emits "M104 S<temp> T<tool> ; preheat T<tool> ...". Packed get_at(1) would
+    // preheat T1 at F0's High-Flow 230/225.
+    REQUIRE(gcode.find("; preheat T1") != std::string::npos);
+    CHECK(gcode.find("M104 S" + std::to_string(kTempHfF0) + " T1 ; preheat") == std::string::npos);
+    CHECK(gcode.find("M104 S" + std::to_string(kInitHfF0) + " T1 ; preheat") == std::string::npos);
+
+    // The same slice with ooze prevention off writes no preheat lines at all.
+    config.option<ConfigOptionBool>("ooze_prevention")->value = false;
+    CHECK(slice_u1_two_tool(config).find("; preheat T") == std::string::npos);
 }
 
 TEST_CASE("ooze-on U1 2-tool High-Flow standbys use the active variant",
