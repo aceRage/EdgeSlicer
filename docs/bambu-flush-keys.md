@@ -278,6 +278,6 @@ Paths:
   0 default only the A2L presets that set 10 (PETG Matte, TPU 85A 0.6/0.8) cool, and the tower reheats after them,
   as Bambu's does.
 
-`tests/libslic3r/test_bambu_flush_keys.cpp` `check_reheats()` is the rule: every `M620.15 C` below the print
+`tests/libslic3r/test_h2d_byobject_toolchange.cpp` (`bambu_flush_keys::check_reheats()`) is the rule: every `M620.15 C` below the print
 temperature of the filament being loaded is followed by the reheat to that temperature before the toolchange ends
 and before anything prints, and every reheat answers such a cool-down.
