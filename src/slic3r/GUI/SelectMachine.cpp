@@ -1,4 +1,5 @@
 #include "SelectMachine.hpp"
+#include "DeviceModelCode.hpp"
 #include "I18N.hpp"
 
 #include "libslic3r/Utils.hpp"
@@ -1827,32 +1828,40 @@ void SelectMachineDialog::show_status(PrintDialogStatus status, std::vector<wxSt
             sourcet_print_name.Replace(wxT("Bambu Lab "), wxEmptyString);
             // Ultra: a printer this build has no definition for (resources/printers/<code>.json) names
             // its reported model code instead of a bare "Unknown", so it can be reported and added.
-            if (sourcet_print_name.IsEmpty() || sourcet_print_name == _L("Unknown"))
-                sourcet_print_name = wxString::Format(_L("model code %s, no printer definition in this build"), from_u8(obj_->printer_type));
+            if (obj_->printer_type.empty()) {
+                // Neither the printer's model code nor its serial number identified it: say so rather
+                // than calling it incompatible with an empty model.
+                msg_text = _L("Couldn't identify this printer: it did not report its model. Click Refresh, or wait a "
+                              "few seconds for the printer to announce itself on the network, then try again. If this "
+                              "keeps happening, use Help > Export Logs and send the ZIP file to support.");
+            } else {
+                if (sourcet_print_name.IsEmpty() || sourcet_print_name == _L("Unknown"))
+                    sourcet_print_name = wxString::Format(_L("model code %s, no printer definition in this build"), from_u8(obj_->printer_type));
 
-            //target print
-            std::string target_model_id;
-            if (m_print_type == PrintFromType::FROM_NORMAL){
-                PresetBundle* preset_bundle = wxGetApp().preset_bundle;
-                target_model_id = preset_bundle->printers.get_edited_preset().get_printer_type(preset_bundle);
-            }
-            else if (m_print_type == PrintFromType::FROM_SDCARD_VIEW) {
-                if (m_required_data_plate_data_list.size() > 0) {
-                    target_model_id = m_required_data_plate_data_list[m_print_plate_idx]->printer_model_id;
+                //target print
+                std::string target_model_id;
+                if (m_print_type == PrintFromType::FROM_NORMAL){
+                    PresetBundle* preset_bundle = wxGetApp().preset_bundle;
+                    target_model_id = preset_bundle->printers.get_edited_preset().get_printer_type(preset_bundle);
                 }
+                else if (m_print_type == PrintFromType::FROM_SDCARD_VIEW) {
+                    if (m_required_data_plate_data_list.size() > 0) {
+                        target_model_id = m_required_data_plate_data_list[m_print_plate_idx]->printer_model_id;
+                    }
+                }
+
+                auto target_print_name = wxString(obj_->get_preset_printer_model_name(target_model_id));
+                target_print_name.Replace(wxT("Bambu Lab "), wxEmptyString);
+                if (target_print_name.IsEmpty()) {
+                    // The profile side: name the profile's printer model (or the plate's model id) rather than "()".
+                    std::string model = target_model_id;
+                    if (m_print_type == PrintFromType::FROM_NORMAL)
+                        model = wxGetApp().preset_bundle->printers.get_edited_preset().config.opt_string("printer_model");
+                    target_print_name = wxString::Format(_L("%s, no printer definition in this build"), from_u8(model));
+                }
+                msg_text = wxString::Format(_L("The selected printer (%s) is incompatible with the chosen printer profile in the slicer (%s)."), sourcet_print_name, target_print_name);
             }
 
-            auto target_print_name = wxString(obj_->get_preset_printer_model_name(target_model_id));
-            target_print_name.Replace(wxT("Bambu Lab "), wxEmptyString);
-            if (target_print_name.IsEmpty()) {
-                // The profile side: name the profile's printer model (or the plate's model id) rather than "()".
-                std::string model = target_model_id;
-                if (m_print_type == PrintFromType::FROM_NORMAL)
-                    model = wxGetApp().preset_bundle->printers.get_edited_preset().config.opt_string("printer_model");
-                target_print_name = wxString::Format(_L("%s, no printer definition in this build"), from_u8(model));
-            }
-            msg_text = wxString::Format(_L("The selected printer (%s) is incompatible with the chosen printer profile in the slicer (%s)."), sourcet_print_name, target_print_name);
-            
             update_print_status_msg(msg_text, true, true);
         }
         catch (...){}
@@ -1953,15 +1962,7 @@ bool SelectMachineDialog::is_blocking_printing(MachineObject* obj_)
         }
     }
 
-    if (source_model != target_model) {
-        std::vector<std::string> compatible_machine = dev->get_compatible_machine(target_model);
-        vector<std::string>::iterator it = find(compatible_machine.begin(), compatible_machine.end(), source_model);
-        if (it == compatible_machine.end()) {
-            return true;
-        }
-    }
-
-    return false;
+    return !device_matches_profile_model(source_model, target_model, dev->get_compatible_machine(target_model));
 }
 
 
