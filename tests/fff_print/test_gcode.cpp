@@ -146,6 +146,60 @@ TEST_CASE("Toolchange custom gcode is not split by FanMover", "[GCode][FanMover]
     CHECK(gcode.substr(start, end - start).find("G1 X10 F5000\nG1 X70 F5000") != std::string::npos);
 }
 
+// Orca #15904 Type1 delta: WipeTowerIntegration::append_tcr must bracket change_filament_gcode
+// the same way set_extruder already does (#170). Type1 is the Bambu planner (is_BBL_printer).
+// ;_FORCE_RESUME_FAN_SPEED, the retract prefix and the #15441 Z-restore stay outside the span.
+TEST_CASE("Type1 wipe-tower toolchange custom gcode is not split by FanMover", "[GCode][FanMover][WipeTower]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_num_extruders(2);
+    config.set_num_filaments(2);
+    config.option<ConfigOptionFloats>("filament_diameter")->values = {1.75, 1.75};
+    config.option<ConfigOptionStrings>("filament_colour")->values  = {"#FF0000", "#0000FF"};
+    config.option<ConfigOptionFloats>("nozzle_diameter")->values   = {0.4, 0.4};
+    config.option<ConfigOptionBool>("single_extruder_multi_material")->value = true;
+    config.option<ConfigOptionBool>("enable_prime_tower")->value             = true;
+    config.option<ConfigOptionFloats>("wipe_tower_x")->values                = {15.};
+    config.option<ConfigOptionFloats>("wipe_tower_y")->values                = {15.};
+    config.option<ConfigOptionFloat>("prime_tower_width")->value             = 35.;
+    config.set_key_value("change_filament_gcode", new ConfigOptionString("G1 X10 F5000\nG1 X70 F5000"));
+    config.set_deserialize_strict({
+        {"skirt_loops",                0},
+        {"brim_type",                  "no_brim"},
+        {"fan_speedup_time",           0.5},
+        {"fan_kickstart",              0.5},
+        {"fan_speedup_overhangs",      0},
+        {"machine_start_gcode",        ""},
+        {"wipe_tower_wall_type",       "rectangle"},
+        {"layer_height",               "0.2"},
+        {"initial_layer_print_height", "0.2"},
+    });
+    config.option<ConfigOptionInts>("close_fan_the_first_x_layers")->values = {0, 0};
+    config.option<ConfigOptionFloats>("fan_min_speed")->values              = {50., 50.};
+
+    Print print;
+    Model model;
+    init_print({TestMesh::cube_20x20x20, TestMesh::cube_20x20x20}, print, model, config);
+    REQUIRE(model.objects.size() == 2);
+    model.objects[1]->volumes.front()->config.set("extruder", 2);
+    print.apply(model, config);
+    print.is_BBL_printer() = true;
+    REQUIRE(print.has_wipe_tower());
+
+    const std::string gcode = Test::gcode(print);
+    REQUIRE(gcode.find("CP TOOLCHANGE") != std::string::npos);
+
+    const size_t start = gcode.find("; custom gcode start");
+    REQUIRE(start != std::string::npos);
+    const size_t end = gcode.find("; custom gcode end", start);
+    REQUIRE(end != std::string::npos);
+    const std::string span = gcode.substr(start, end - start);
+    CHECK(span.find("G1 X10 F5000\nG1 X70 F5000") != std::string::npos);
+    CHECK(span.find(";_FORCE_RESUME_FAN_SPEED") == std::string::npos);
+    const size_t resume = gcode.find(";_FORCE_RESUME_FAN_SPEED", end);
+    REQUIRE(resume != std::string::npos);
+}
+
 TEST_CASE("Klipper object labels name each copy without the characters Klipper cannot parse", "[GCode]")
 {
     const std::pair<const char *, const char *> cases[] = {
