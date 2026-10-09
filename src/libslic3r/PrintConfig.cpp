@@ -3322,7 +3322,7 @@ void PrintConfigDef::init_fff_params()
 
     def = this->add("initial_layer_speed", coFloats);
     def->label = L("Initial layer");
-    def->tooltip = L("Speed of initial layer except the solid infill part.");
+    def->tooltip = L("Speed of initial layer except the solid infill part. It also applies to support, support interface and the raft base on the first layer.");
     def->sidetext = "mm/s";	// milimeters per second, don't need translation
     def->min = 1;
     def->mode = comAdvanced;

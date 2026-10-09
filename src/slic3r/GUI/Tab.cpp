@@ -2212,6 +2212,12 @@ void Tab::on_value_change(const std::string& opt_key, const boost::any& value)
         }
     }
 
+    // The first layer is held to the same printer limits as the layer height (same Adjust / Ignore dialog).
+    if (opt_key == "initial_layer_print_height") {
+        if (m_config_manipulation.check_layer_height(m_config, "initial_layer_print_height"))
+            wxGetApp().plater()->update();
+    }
+
     if(opt_key=="layer_height"){
         double layer_height_floor = 0., layer_height_ceil = 0.;
         m_config_manipulation.layer_height_limits(layer_height_floor, layer_height_ceil);
