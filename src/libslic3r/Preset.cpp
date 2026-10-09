@@ -1298,6 +1298,10 @@ static std::vector<std::string> s_Preset_filament_options {
     "filament_retract_length_nc",
     // BBS: idle-nozzle pre-cooling / pre-heating (GCode/PreCoolingInjector); same reason as above.
     "filament_pre_cooling_temperature", "filament_preheat_temperature_delta",
+    // BBS: flush temperature / speed and the pre-tower cooling of the BBL change_filament templates
+    // (M620.10, M620.11, M620.15). The BBL, Orca filament library and Snapmaker profiles carry them;
+    // without them here the loader dropped them and the G-code always ran on the defaults.
+    "filament_flush_volumetric_speed", "filament_flush_temp", "filament_flush_temp_fast", "filament_cooling_before_tower",
     "filament_flow_support"
     };
 
