@@ -260,6 +260,23 @@ const char* PresetBundle::SM_DEFAULT_PRINTER_VARIANT = "0.4";
 const char* PresetBundle::SM_DEFAULT_FILAMENT        = "Snapmaker PLA SnapSpeed";
 const char *PresetBundle::ORCA_FILAMENT_LIBRARY = "OrcaFilamentLibrary";
 
+std::string PresetBundle::variant_to_activate(const std::set<std::string> &previous, const std::set<std::string> &enabled)
+{
+    for (const std::string &variant : enabled)
+        if (previous.find(variant) == previous.end())
+            return default_printer_variant(enabled);
+    return std::string();
+}
+
+std::string PresetBundle::default_printer_variant(const std::set<std::string> &variants)
+{
+    if (variants.empty())
+        return std::string();
+    if (variants.find(SM_DEFAULT_PRINTER_VARIANT) != variants.end())
+        return SM_DEFAULT_PRINTER_VARIANT;
+    return *variants.begin();
+}
+
 PresetBundle::PresetBundle()
     : prints(Preset::TYPE_PRINT, Preset::print_options(), static_cast<const PrintRegionConfig &>(FullPrintConfig::defaults()))
     , filaments(Preset::TYPE_FILAMENT, Preset::filament_options(), static_cast<const PrintRegionConfig &>(FullPrintConfig::defaults()), "Default Filament")
@@ -462,6 +479,10 @@ PresetsConfigSubstitutions PresetBundle::load_presets(AppConfig &config, Forward
     const bool startup_profile = startup_profile_enabled();
     const auto total_start     = std::chrono::steady_clock::now();
     auto       phase_start     = total_start;
+
+    // One report for the whole load (system vendors and user presets) of keys that are dropped on
+    // purpose, see PrintConfigDef::unsupported_foreign_key().
+    Preset::ForeignKeyReportScope foreign_key_scope;
 
     // First load the vendor specific system presets.
     PresetsConfigSubstitutions substitutions;
@@ -1199,6 +1220,7 @@ bool PresetBundle::import_json_presets(PresetsConfigSubstitutions &            s
             BOOST_LOG_TRIVIAL(error) << "Error in a preset file: The preset \"" << preset.file
                                      << "\" contains the following incorrect keys: " << incorrect_keys << ", which were removed";
         }
+        Preset::log_ignored_foreign_keys();
         if (!config_substitutions.empty())
             substitutions.push_back({name, collection->type(), PresetConfigSubstitutions::Source::UserFile, file, std::move(config_substitutions)});
 
@@ -1717,6 +1739,7 @@ std::pair<PresetsConfigSubstitutions, std::string> PresetBundle::load_system_pre
         startup_profile_log("PresetBundle::load_system_presets_from_json end vendor_count=" + std::to_string(vendor_names.size()) +
                             " total_ms=" + std::to_string(total_ms));
     }
+    filaments.log_printer_alias_duplicates();
     return std::make_pair(std::move(substitutions), errors_cummulative);
 }
 
@@ -1910,6 +1933,15 @@ void PresetBundle::load_installed_printers(AppConfig &config)
 	this->update_system_maps();
     for (auto &preset : printers)
         preset.set_visible_from_appconfig(config);
+}
+
+std::string PresetBundle::get_filament_name_by_alias_for_slot(const std::string &alias, size_t filament_slot) const
+{
+    // filament_preset_fits_slot narrows nothing unless the machine really carries different nozzle sizes,
+    // so on every other machine this is the plain alias lookup.
+    return filaments.get_preset_name_by_alias(alias, [this, filament_slot](const Preset &preset) {
+        return filament_preset_fits_slot(preset, printers, unsigned(filament_slot + 1));
+    });
 }
 
 const std::string& PresetBundle::get_preset_name_by_alias( const Preset::Type& preset_type, const std::string& alias) const
@@ -2829,6 +2861,12 @@ Preset *PresetBundle::get_similar_printer_preset(std::string printer_model, std:
         if (preset.second->config.opt_string("printer_variant") == printer_variant)
             return preset.second;
     }
+    // Nothing matches: the map is ordered by name, so its first entry is the smallest nozzle ("0.2" for
+    // the U1). Fall back to the model's default variant (0.4) before that.
+    for (auto& preset : printer_presets) {
+        if (preset.second->config.opt_string("printer_variant") == SM_DEFAULT_PRINTER_VARIANT)
+            return preset.second;
+    }
     return printer_presets.begin()->second;
 }
 
@@ -3553,6 +3591,10 @@ std::pair<PresetsConfigSubstitutions, size_t> PresetBundle::load_vendor_configs_
     // The bundled vendor presets keep the shipped meaning of Bambu Studio's tower interface keys
     // (enable_tower_interface_features, prime_tower_skip_points): see SystemPresetTowerKeysScope.
     SystemPresetTowerKeysScope tower_keys_scope;
+
+    // Keys the profiles carry but presets deliberately do not hold are counted, not logged per file;
+    // the totals are written once when the outermost bulk load (load_presets) or this call ends.
+    Preset::ForeignKeyReportScope foreign_key_scope;
 
     // Enable substitutions for user config bundle, throw an exception when loading a system profile.
     ConfigSubstitutionContext  substitution_context { compatibility_rule };

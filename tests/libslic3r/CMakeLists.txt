@@ -47,6 +47,7 @@ add_executable(${_TEST_NAME}_tests
 	test_edgegrid.cpp
 	test_cut_recipe.cpp
 	test_config_include.cpp
+	test_foreign_preset_keys.cpp
 	test_custom_gcode.cpp
 	test_default_bed_type.cpp
 	test_dual_nozzle_group.cpp
@@ -125,6 +126,8 @@ add_executable(${_TEST_NAME}_tests
 	test_utils.cpp
 	test_instance_lock.cpp
 	TestMD5.cpp
+	test_nozzle_sync.cpp
+	test_u1_profiles.cpp
 	test_voronoi.cpp
     test_optimizers.cpp
     test_wipe_tower.cpp

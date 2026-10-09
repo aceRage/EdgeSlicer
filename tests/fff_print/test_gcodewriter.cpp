@@ -292,3 +292,47 @@ TEST_CASE("GCodeWriter append overloads emit the same line as the returning over
     writer.set_speed(appended, 1800.);
     CHECK(appended == writer.set_speed(1800.));
 }
+
+// Port OrcaSlicer #12824 (#12244): Klipper's SET_VELOCITY_LIMIT ACCEL= limits every kind of motion, so the
+// writer must clamp to the smallest of the extruding limit and the X/Y limits, not the extruding limit alone.
+namespace {
+std::string klipper_accel_line(GCodeFlavor flavor, double extruding, double x, double y, unsigned int requested)
+{
+    PrintConfig print_config;
+    print_config.gcode_flavor.value = flavor;
+    print_config.machine_max_acceleration_extruding.values = { extruding, extruding };
+    print_config.machine_max_acceleration_x.values         = { x, x };
+    print_config.machine_max_acceleration_y.values         = { y, y };
+    GCodeWriter writer;
+    writer.apply_print_config(print_config);
+    return writer.set_print_acceleration(requested);
+}
+} // namespace
+
+TEST_CASE("Klipper acceleration is capped by the X and Y limits too", "[GCodeWriter][Klipper][U1]")
+{
+    SECTION("an X limit below the extruding limit wins") {
+        const std::string gcode = klipper_accel_line(gcfKlipper, 10000., 8700., 10000., 10000);
+        CHECK(gcode.find("SET_VELOCITY_LIMIT ACCEL=8700") != std::string::npos);
+    }
+    SECTION("a Y limit below the extruding limit wins") {
+        const std::string gcode = klipper_accel_line(gcfKlipper, 10000., 10000., 6000., 10000);
+        CHECK(gcode.find("SET_VELOCITY_LIMIT ACCEL=6000") != std::string::npos);
+    }
+    SECTION("the extruding limit still wins when it is the smallest") {
+        const std::string gcode = klipper_accel_line(gcfKlipper, 5000., 20000., 20000., 10000);
+        CHECK(gcode.find("SET_VELOCITY_LIMIT ACCEL=5000") != std::string::npos);
+    }
+    SECTION("equal limits (the U1 profile) change nothing") {
+        const std::string gcode = klipper_accel_line(gcfKlipper, 20000., 20000., 20000., 10000);
+        CHECK(gcode.find("SET_VELOCITY_LIMIT ACCEL=10000") != std::string::npos);
+    }
+    SECTION("a zero axis limit means unset and is ignored") {
+        const std::string gcode = klipper_accel_line(gcfKlipper, 10000., 0., 0., 12000);
+        CHECK(gcode.find("SET_VELOCITY_LIMIT ACCEL=10000") != std::string::npos);
+    }
+    SECTION("other flavours keep using only the extruding limit") {
+        const std::string gcode = klipper_accel_line(gcfMarlinFirmware, 10000., 8700., 8700., 12000);
+        CHECK(gcode.find("M204 P10000") != std::string::npos);
+    }
+}
