@@ -8,7 +8,7 @@
 //
 // The Bambu Studio flush keys (filament_flush_temp, filament_flush_temp_fast,
 // filament_flush_volumetric_speed, filament_cooling_before_tower) were in that list too; filament
-// presets hold them now (test_bambu_flush_keys.cpp), so they load like any other filament setting.
+// presets hold them now (test_h2d_byobject_toolchange.cpp), so they load like any other filament setting.
 
 #include <catch2/catch.hpp>
 
