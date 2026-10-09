@@ -140,6 +140,8 @@ TEST_CASE("post-process lines_ends match newline offsets", "[GCodeProcessor]")
         config.option<ConfigOptionStrings>("filament_colour")->values  = {"#FF0000", "#0000FF"};
         config.option<ConfigOptionBool>("single_extruder_multi_material")->value = false;
         config.option<ConfigOptionFloat>("preheat_time")->value = by_time ? 30. : 0.;
+        // Orca #11791: the processor's backtracked preheat also needs ooze prevention.
+        config.option<ConfigOptionBool>("ooze_prevention")->value = true;
         config.option<ConfigOptionBool>("gcode_comments")->value = true;
         config.set_deserialize_strict({{"brim_type", "no_brim"},
                                        {"skirt_loops", "0"},

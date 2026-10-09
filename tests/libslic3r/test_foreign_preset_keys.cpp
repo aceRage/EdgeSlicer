@@ -1,12 +1,14 @@
 // Keys that bundled or user preset files carry but presets deliberately do not hold.
 //
-// The bundled BBL / Orca filament library / Snapmaker profiles carry filament_flush_temp,
-// filament_flush_volumetric_speed and filament_cooling_before_tower, and user process presets saved
-// while mixed filaments were in use carry mixed_filament_definitions. None of them is part of the
-// preset option lists, so the loader drops them. That used to log one error per file (about 2,200
-// error lines on every start). PrintConfigDef::unsupported_foreign_key() now names them, and
-// Preset::remove_invalid_keys() drops them as before but only counts them; the totals are written
-// once, at info level. A key that is genuinely unknown must still be an error.
+// User process presets saved while mixed filaments were in use carry mixed_filament_definitions, a
+// project key that is not part of the preset option lists, so the loader drops it. That used to log
+// one error per file. PrintConfigDef::unsupported_foreign_key() names it, and
+// Preset::remove_invalid_keys() drops it as before but only counts it; the totals are written once,
+// at info level. A key that is genuinely unknown must still be an error.
+//
+// The Bambu Studio flush keys (filament_flush_temp, filament_flush_temp_fast,
+// filament_flush_volumetric_speed, filament_cooling_before_tower) were in that list too; filament
+// presets hold them now (test_h2d_byobject_toolchange.cpp), so they load like any other filament setting.
 
 #include <catch2/catch.hpp>
 
@@ -191,17 +193,23 @@ bool any_mentions(const std::vector<std::string> &messages, const std::string &n
                        [&](const std::string &m) { return m.find(needle) != std::string::npos; });
 }
 
-const char *const FOREIGN_FILAMENT_KEYS =
-    "\"filament_flush_temp\": [\"0\"],\n  \"filament_flush_volumetric_speed\": [\"0\"],\n  \"filament_cooling_before_tower\": [\"10\"]";
+// Bambu Studio's flush keys, with values that differ from their defaults.
+const char *const BAMBU_FLUSH_KEYS =
+    "\"filament_flush_temp\": [\"200\"],\n  \"filament_flush_temp_fast\": [\"210\"],\n"
+    "  \"filament_flush_volumetric_speed\": [\"3\"],\n  \"filament_cooling_before_tower\": [\"5\"]";
+
+const char *const BAMBU_FLUSH_KEY_NAMES[] = {"filament_flush_temp", "filament_flush_temp_fast", "filament_flush_volumetric_speed",
+                                             "filament_cooling_before_tower"};
 
 } // namespace
 
 TEST_CASE("The known foreign keys are named, an unknown key is not", "[Preset][ForeignKeys]")
 {
     PrintConfigDef::ForeignKeyOrigin origin;
-    for (const char *key : {"filament_flush_temp", "filament_flush_volumetric_speed", "filament_cooling_before_tower"}) {
-        REQUIRE(PrintConfigDef::unsupported_foreign_key(key, &origin));
-        REQUIRE(origin == PrintConfigDef::ForeignKeyOrigin::BambuStudio);
+    // Supported now: filament presets hold them.
+    for (const char *key : BAMBU_FLUSH_KEY_NAMES) {
+        INFO("key: " << key);
+        REQUIRE_FALSE(PrintConfigDef::unsupported_foreign_key(key, &origin));
     }
     REQUIRE(PrintConfigDef::unsupported_foreign_key("mixed_filament_definitions", &origin));
     REQUIRE(origin == PrintConfigDef::ForeignKeyOrigin::ProjectScoped);
@@ -223,23 +231,30 @@ TEST_CASE("remove_invalid_keys drops foreign keys silently and unknown keys as e
         if (const ConfigOption *opt = defaults.option(key))
             filament_defaults.set_key_value(key, opt->clone());
     REQUIRE(filament_defaults.has("filament_flow_ratio"));
-    REQUIRE_FALSE(filament_defaults.has("filament_flush_temp"));
+    for (const char *key : BAMBU_FLUSH_KEY_NAMES) {
+        INFO("key: " << key);
+        REQUIRE(filament_defaults.has(key));
+    }
 
     DynamicPrintConfig config = filament_defaults;
-    config.set_key_value("filament_flush_temp", new ConfigOptionInts({0}));
-    config.set_key_value("filament_flush_volumetric_speed", new ConfigOptionFloats({3.}));
-    config.set_key_value("filament_cooling_before_tower", new ConfigOptionFloats({10.}));
+    config.set_key_value("filament_flush_temp", new ConfigOptionIntsNullable({200}));
+    config.set_key_value("filament_flush_volumetric_speed", new ConfigOptionFloatsNullable({3.}));
+    config.set_key_value("filament_cooling_before_tower", new ConfigOptionFloatsNullable({5.}));
     config.set_key_value("mixed_filament_definitions", new ConfigOptionString("1,2,1,0,50,0,0"));
 
-    SECTION("only foreign keys: nothing is reported as incorrect, the keys are gone, the rest is untouched")
+    SECTION("only foreign keys: nothing is reported as incorrect, they are gone, the flush keys stay")
     {
-        DynamicPrintConfig expected = filament_defaults;
+        DynamicPrintConfig expected = config;
+        expected.erase("mixed_filament_definitions");
         REQUIRE(Preset::remove_invalid_keys(config, filament_defaults).empty());
         REQUIRE(config == expected);
-        for (const char *key : {"filament_flush_temp", "filament_flush_volumetric_speed", "filament_cooling_before_tower",
-                                "mixed_filament_definitions"}) {
-            REQUIRE_FALSE(config.has(key));
-            REQUIRE(Preset::ignored_foreign_key_count(key) == 1);
+        REQUIRE_FALSE(config.has("mixed_filament_definitions"));
+        REQUIRE(Preset::ignored_foreign_key_count("mixed_filament_definitions") == 1);
+        REQUIRE(config.option<ConfigOptionIntsNullable>("filament_flush_temp")->values == std::vector<int>{200});
+        REQUIRE(config.option<ConfigOptionFloatsNullable>("filament_cooling_before_tower")->values == std::vector<double>{5.});
+        for (const char *key : BAMBU_FLUSH_KEY_NAMES) {
+            INFO("key: " << key);
+            REQUIRE(Preset::ignored_foreign_key_count(key) == 0);
         }
     }
 
@@ -249,7 +264,8 @@ TEST_CASE("remove_invalid_keys drops foreign keys silently and unknown keys as e
         const std::string incorrect = Preset::remove_invalid_keys(config, filament_defaults);
         REQUIRE(incorrect == "totally_unknown_key");
         REQUIRE_FALSE(config.has("totally_unknown_key"));
-        REQUIRE_FALSE(config.has("filament_flush_temp"));
+        REQUIRE_FALSE(config.has("mixed_filament_definitions"));
+        REQUIRE(config.has("filament_flush_temp"));
         REQUIRE(Preset::ignored_foreign_key_count("totally_unknown_key") == 0);
     }
 
@@ -258,7 +274,7 @@ TEST_CASE("remove_invalid_keys drops foreign keys silently and unknown keys as e
         DynamicPrintConfig clean = filament_defaults;
         REQUIRE(Preset::remove_invalid_keys(clean, filament_defaults).empty());
         REQUIRE(clean == filament_defaults);
-        REQUIRE(Preset::ignored_foreign_key_count("filament_flush_temp") == 0);
+        REQUIRE(Preset::ignored_foreign_key_count("mixed_filament_definitions") == 0);
     }
 
     Preset::reset_ignored_foreign_keys();
@@ -271,24 +287,43 @@ TEST_CASE("Loading presets that carry foreign keys logs no error and loads the s
 
     TreeSpec plain;
     TreeSpec foreign;
-    foreign.extra_filament_keys = FOREIGN_FILAMENT_KEYS;
-    foreign.extra_user_keys     = "\"mixed_filament_definitions\": \"1,2,1,0,50,0,0\"";
-    TreeSpec unknown = foreign;
+    foreign.extra_user_keys = "\"mixed_filament_definitions\": \"1,2,1,0,50,0,0\"";
+    TreeSpec flush = foreign;
+    flush.extra_filament_keys = BAMBU_FLUSH_KEYS;
+    TreeSpec unknown = flush;
     unknown.extra_filament_keys += ",\n  \"layer_height\": \"0.3\"";
 
-    const Loaded without = load_tree(root / "without", plain);
-    const Loaded with    = load_tree(root / "with", foreign);
+    const Loaded without    = load_tree(root / "without", plain);
+    const Loaded with       = load_tree(root / "with", foreign);
+    const Loaded with_flush = load_tree(root / "flush", flush);
 
-    // The three bundled presets and the user process preset came through in both trees.
-    REQUIRE(without.filament_prints.size() == 3);
-    REQUIRE(with.filament_prints.size() == 3);
-    REQUIRE(without.process_prints.size() == 1);
-    REQUIRE(with.process_prints.size() == 1);
+    // The three bundled presets and the user process preset came through in every tree.
+    for (const Loaded *l : {&without, &with, &with_flush}) {
+        REQUIRE(l->filament_prints.size() == 3);
+        REQUIRE(l->process_prints.size() == 1);
+    }
 
-    SECTION("same loaded values as without the keys")
+    SECTION("same loaded values as without the foreign key")
     {
         REQUIRE(with.filament_prints == without.filament_prints);
         REQUIRE(with.process_prints == without.process_prints);
+    }
+
+    SECTION("the flush keys are kept with their values, the defaults where a preset has none")
+    {
+        for (size_t i = 0; i < 3; ++i) {
+            INFO("preset: " << with_flush.filament_prints[i].substr(0, 40));
+            REQUIRE(with_flush.filament_prints[i].find("filament_flush_temp=200;") != std::string::npos);
+            REQUIRE(with_flush.filament_prints[i].find("filament_flush_temp_fast=210;") != std::string::npos);
+            REQUIRE(with_flush.filament_prints[i].find("filament_flush_volumetric_speed=3;") != std::string::npos);
+            REQUIRE(with_flush.filament_prints[i].find("filament_cooling_before_tower=5;") != std::string::npos);
+            REQUIRE(without.filament_prints[i].find("filament_flush_temp=0;") != std::string::npos);
+            REQUIRE(without.filament_prints[i].find("filament_flush_temp_fast=0;") != std::string::npos);
+            REQUIRE(without.filament_prints[i].find("filament_flush_volumetric_speed=0;") != std::string::npos);
+            // Bambu Studio's fdm_filament_common.json: no cooling for a filament that does not ask for it.
+            REQUIRE(without.filament_prints[i].find("filament_cooling_before_tower=0;") != std::string::npos);
+        }
+        REQUIRE(with_flush.process_prints == without.process_prints);
     }
 
     SECTION("no error-level message names them or complains about incorrect keys")
@@ -297,21 +332,18 @@ TEST_CASE("Loading presets that carry foreign keys logs no error and loads the s
                                 "mixed_filament_definitions", "incorrect keys"}) {
             INFO("key: " << key);
             REQUIRE_FALSE(any_mentions(with.error_messages, key));
+            REQUIRE_FALSE(any_mentions(with_flush.error_messages, key));
         }
     }
 
-    SECTION("they are reported once, with their counts, at info level")
+    SECTION("the foreign key is reported once, with its count, at info level; the flush keys are not")
     {
-        // 3 vendor filaments carry the three Bambu keys; the user process preset carries the project key.
-        REQUIRE(with.info_messages.size() == 2);
-        const std::string &bambu = with.info_messages[0].find("Bambu") != std::string::npos ? with.info_messages[0] : with.info_messages[1];
-        const std::string &proj  = &bambu == &with.info_messages[0] ? with.info_messages[1] : with.info_messages[0];
-        REQUIRE(bambu.find("Ignored 9 occurrences of unsupported Bambu Studio keys (3 presets)") != std::string::npos);
-        REQUIRE(bambu.find("filament_flush_temp (3)") != std::string::npos);
-        REQUIRE(bambu.find("filament_flush_volumetric_speed (3)") != std::string::npos);
-        REQUIRE(bambu.find("filament_cooling_before_tower (3)") != std::string::npos);
+        // The user process preset carries the project key.
+        REQUIRE(with_flush.info_messages.size() == 1);
+        const std::string &proj = with_flush.info_messages[0];
         REQUIRE(proj.find("Ignored 1 occurrences of project-level keys saved into presets (1 preset)") != std::string::npos);
         REQUIRE(proj.find("mixed_filament_definitions (1)") != std::string::npos);
+        REQUIRE(proj.find("filament_flush") == std::string::npos);
         REQUIRE(without.info_messages.empty());
     }
 
@@ -326,8 +358,8 @@ TEST_CASE("Loading presets that carry foreign keys logs no error and loads the s
         REQUIRE(incorrect == 3);
         REQUIRE_FALSE(any_mentions(bad.error_messages, "filament_flush_temp"));
         REQUIRE_FALSE(any_mentions(bad.error_messages, "filament_cooling_before_tower"));
-        // And the values still match the tree without the unknown key.
-        REQUIRE(bad.filament_prints == without.filament_prints);
+        // And the values still match the tree without the misplaced key.
+        REQUIRE(bad.filament_prints == with_flush.filament_prints);
     }
 
     boost::system::error_code ec;
@@ -360,7 +392,7 @@ TEST_CASE("Startup error lines with a real profile tree", "[.][KeyNoiseProbe]")
         for (const auto &m : log.messages(SEV_ERROR, ""))
             std::cout << "KEYNOISE_ERRLINE=" << m.substr(0, 400) << "\n";
     }
-    for (const char *key : {"filament_flush_temp", "filament_flush_volumetric_speed", "filament_cooling_before_tower", "mixed_filament_definitions"})
+    for (const char *key : {"mixed_filament_definitions"})
         std::cout << "KEYNOISE_IGNORED " << key << "=" << Preset::ignored_foreign_key_count(key) << "\n";
     set_data_dir(saved);
 }

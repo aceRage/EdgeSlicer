@@ -37,6 +37,7 @@
             "bed_temperature_limit": 100
         },
         "model_id": "N2S",
+        "sn_prefix": "039",
         "compatible_machine":[],
         "printer_type": "N2S",
         "ftp_folder" : "sdcard/",

@@ -136,7 +136,7 @@ bool ObjectSettings::update_settings_list()
             optgroup->sidetext_width = 5;
 
             optgroup->m_on_change = [this, config](const t_config_option_key& opt_id, const boost::any& value) {
-                                    this->update_config_values(config);
+                                    this->update_config_values(config, opt_id);
                                     wxGetApp().obj_list()->changed_object(); };
 
             // call back for rescaling of the extracolumn control
@@ -322,7 +322,7 @@ bool ObjectSettings::add_missed_options(ModelConfig* config_to, const DynamicPri
     return is_added;
 }
 
-void ObjectSettings::update_config_values(ModelConfig* config)
+void ObjectSettings::update_config_values(ModelConfig* config, const std::string& changed_opt_key)
 {
     const auto objects_model        = wxGetApp().obj_list()->GetModel();
     const auto item                 = wxGetApp().obj_list()->GetSelection();
@@ -400,6 +400,11 @@ void ObjectSettings::update_config_values(ModelConfig* config)
     }
 
     main_config.apply(config->get(), true);
+
+    // Orca (#14369): the layer height limit prompt only runs for the edit that changed the layer height.
+    if (printer_technology == ptFFF && (changed_opt_key == "layer_height" || changed_opt_key == "initial_layer_print_height"))
+        config_manipulation.check_layer_height(&main_config, changed_opt_key);
+
     printer_technology == ptFFF  ?  config_manipulation.update_print_fff_config(&main_config) :
                                     config_manipulation.update_print_sla_config(&main_config) ;
 

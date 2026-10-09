@@ -6,7 +6,6 @@
 #include "libslic3r/AppConfig.hpp"
 #include "I18N.hpp"
 #include "MsgDialog.hpp"
-#include "DownloadProgressDialog.hpp"
 #include "PluginGuard.hpp"
 
 #include <boost/lexical_cast.hpp>
@@ -490,32 +489,12 @@ void MediaPlayCtrl::ToggleStream()
                     wxGetApp().offer_bambu_camera_component(this);
                 return;
             }
-            auto res = MessageDialog(this->GetParent(), _L("Virtual Camera Tools is required for this task!\nDo you want to install them?"), _L("Info"),
-                                    wxOK | wxCANCEL).ShowModal();
-            if (res == wxID_OK) {
-                // download tools
-                struct DownloadProgressDialog2 : DownloadProgressDialog
-                {
-                    MediaPlayCtrl *ctrl;
-                    DownloadProgressDialog2(MediaPlayCtrl *ctrl) : DownloadProgressDialog(_L("Downloading Virtual Camera Tools")), ctrl(ctrl) {}
-                    struct UpgradeNetworkJob2 : UpgradeNetworkJob
-                    {
-                        UpgradeNetworkJob2(std::shared_ptr<ProgressIndicator> pri) : UpgradeNetworkJob() {
-                            name         = "cameratools";
-                            package_name = "camera_tools.zip";
-                        }
-                    };
-                    std::shared_ptr<UpgradeNetworkJob> make_job(std::shared_ptr<ProgressIndicator> pri)
-                    { return std::make_shared<UpgradeNetworkJob2>(pri); }
-                    void                               on_finish() override
-                    {
-                        ctrl->CallAfter([ctrl = this->ctrl] { ctrl->ToggleStream(); });
-                        EndModal(wxID_CLOSE);
-                    }
-                };
-                DownloadProgressDialog2 dlg(this);
-                dlg.ShowModal();
-            }
+            // The virtual camera tools used to be fetched from the Bambu CDN here. EdgeSlicer does not
+            // download Bambu components other than the camera component, so say what is missing.
+            MessageDialog(this->GetParent(),
+                          _L("Virtual Camera Tools are required for this task, and EdgeSlicer does not download them. "
+                             "Reinstall EdgeSlicer to restore them."),
+                          _L("Info"), wxOK | wxICON_INFORMATION).ShowModal();
             return;
         }
     }

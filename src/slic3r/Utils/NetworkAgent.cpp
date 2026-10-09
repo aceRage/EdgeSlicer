@@ -1280,8 +1280,14 @@ std::string NetworkAgent::request_setting_id(std::string name, std::map<std::str
     std::string ret;
     if (network_agent && request_setting_id_ptr) {
         ret = request_setting_id_ptr(network_agent, name, values_map, http_code);
-        BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(" : network_agent=%1%, name=%2%, http_code=%3%, ret.setting_id=%4%")
-                %network_agent %name %(*http_code) %ret;
+        // The preset sync retries on a timer; an empty id with HTTP 200 is the repeating case, so it is debug.
+        // A real id or any other http code stays at info.
+        if (ret.empty() && *http_code == 200)
+            BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << boost::format(" : network_agent=%1%, name=%2%, http_code=%3%, ret.setting_id=%4%")
+                    %network_agent %name %(*http_code) %ret;
+        else
+            BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(" : network_agent=%1%, name=%2%, http_code=%3%, ret.setting_id=%4%")
+                    %network_agent %name %(*http_code) %ret;
     }
     return ret;
 }

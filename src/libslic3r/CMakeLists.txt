@@ -501,10 +501,15 @@ set(lisbslic3r_sources
     PrincipalComponents2D.hpp
     PrinterModelSpecs.cpp
     PrinterModelSpecs.hpp
+    FilamentPresetExport.cpp
+    FilamentPresetExport.hpp
+    ProcessPresetExport.cpp
+    ProcessPresetExport.hpp
     PrintApply.cpp
     PrintBase.cpp
     MemoryGuardPolicy.hpp
     PrintBase.hpp
+    SlicingStatusCollector.hpp
     PrintConfig.cpp
     PrintConfig.hpp
     LayerTimeSpeedSmoothing.cpp

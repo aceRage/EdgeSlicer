@@ -17355,47 +17355,30 @@ void Plater::priv::on_filament_color_changed(wxCommandEvent &event)
 
 void Plater::priv::install_network_plugin(wxCommandEvent &event)
 {
-    // Ultra (plug-in guards): the Device tab's "install network plugin" link. Our own plug-in is
-    // already there in that case, and this dialog would download Bambu's package over it.
-    if (wxGetApp().is_ultranet_plugin_installed()) {
-        BOOST_LOG_TRIVIAL(info) << "[UltraNet] UltraNet present, Bambu CDN download disabled (Device-tab install link ignored)";
-        return;
-    }
-    wxGetApp().ShowDownNetPluginDlg();
-    return;
+    // The Device tab's "install network plugin" link. There is no download any more (EdgeSlicer
+    // never fetches Bambu's plug-in); the link just says the plug-in is missing, and is silent when
+    // our own plug-in is installed.
+    wxGetApp().ShowNetworkPluginMissing(/*user_requested*/ true);
 }
 
 void Plater::priv::update_plugin_when_launch(wxCommandEvent &event)
 {
-    std::string data_dir_str = data_dir();
-    boost::filesystem::path data_dir_path(data_dir_str);
-    auto cache_folder = data_dir_path / "ota";
-    std::string changelog_file = cache_folder.string() + "/network_plugins.json";
-
-    UpdatePluginDialog dlg(wxGetApp().mainframe);
-    dlg.update_info(changelog_file);
-    auto result = dlg.ShowModal();
-
-    auto app_config = wxGetApp().app_config;
-    if (!app_config) return;
-
-    if (result == wxID_OK) {
-        app_config->set("update_network_plugin", "true");
-    }
-    else if (result == wxID_NO) {
+    // The old "new network plug-in available" prompt. Nothing raises it any more (the Bambu update
+    // check is gone) and a Bambu plug-in is never installed, so this only makes sure a stale
+    // request cannot start a download.
+    if (auto app_config = wxGetApp().app_config)
         app_config->set("update_network_plugin", "false");
-    }
 }
 
 void Plater::priv::show_install_plugin_hint(wxCommandEvent &event)
 {
-    // Ultra (plug-in guards): the notification's only action is the Bambu CDN download, so it is
-    // pointless (and would overwrite our plug-in) once UltraNet is installed.
+    // With our own plug-in installed there is nothing to say. Otherwise the plug-in is missing from
+    // this install; the notification carries the explanation and no download link.
     if (wxGetApp().is_ultranet_plugin_installed()) {
-        BOOST_LOG_TRIVIAL(info) << "[UltraNet] UltraNet present, Bambu CDN download disabled (install-plugin hint suppressed)";
+        BOOST_LOG_TRIVIAL(info) << "[UltraNet] UltraNet present, install-plugin hint suppressed";
         return;
     }
-    notification_manager->bbl_show_plugin_install_notification(into_u8(_L("Network Plug-in is not detected. Network related features are unavailable.")));
+    notification_manager->bbl_show_plugin_install_notification(into_u8(GUI_App::network_plugin_missing_text()));
 }
 
 void Plater::priv::show_preview_only_hint(wxCommandEvent &event)
@@ -21918,7 +21901,8 @@ void Plater::export_gcode(bool prefer_removable)
         unsigned int state = this->p->update_restart_background_process(false, false);
         if (state & priv::UPDATE_BACKGROUND_PROCESS_INVALID)
             return;
-        default_output_file = this->p->background_process.output_filepath_for_project("");
+        default_output_file = this->p->background_process.output_filepath_for_project(
+            into_path(this->p->get_project_filename(".3mf")));
     } catch (const Slic3r::PlaceholderParserError &ex) {
         // Show the error with monospaced font.
         show_error(this, ex.what(), true);
@@ -22021,7 +22005,8 @@ void Plater::export_gcode_3mf(bool export_all)
         unsigned int state = this->p->update_restart_background_process(false, false);
         if (state & priv::UPDATE_BACKGROUND_PROCESS_INVALID)
             return;
-        default_output_file = this->p->background_process.output_filepath_for_project("");
+        default_output_file = this->p->background_process.output_filepath_for_project(
+            into_path(this->p->get_project_filename(".3mf")));
     }
     catch (const Slic3r::PlaceholderParserError& ex) {
         // Show the error with monospaced font.
@@ -23696,7 +23681,8 @@ void Plater::send_gcode_legacy(int plate_idx, Export3mfProgressFn proFn, bool us
             unsigned int state = this->p->update_restart_background_process(false, false);
             if (state & priv::UPDATE_BACKGROUND_PROCESS_INVALID)
                 return;
-            default_output_file = this->p->background_process.output_filepath_for_project("");
+            default_output_file = this->p->background_process.output_filepath_for_project(
+                into_path(this->p->get_project_filename(".3mf")));
         } catch (const Slic3r::PlaceholderParserError& ex) {
             // Show the error with monospaced font.
             show_error(this, ex.what(), true);
@@ -23806,7 +23792,8 @@ void Plater::send_gcode_legacy(int plate_idx, Export3mfProgressFn proFn, bool us
         unsigned int state = this->p->update_restart_background_process(false, false);
         if (state & priv::UPDATE_BACKGROUND_PROCESS_INVALID)
             return;
-        default_output_file = this->p->background_process.output_filepath_for_project("");
+        default_output_file = this->p->background_process.output_filepath_for_project(
+            into_path(this->p->get_project_filename(".3mf")));
     } catch (const Slic3r::PlaceholderParserError& ex) {
         // Show the error with monospaced font.
         show_error(this, ex.what(), true);

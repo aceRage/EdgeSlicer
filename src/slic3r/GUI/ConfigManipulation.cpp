@@ -9,7 +9,9 @@
 #include "MsgDialog.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "FlowVariantEdit.hpp"
+#include "Plater.hpp"
 
+#include <algorithm>
 #include <wx/msgdlg.h>
 
 namespace Slic3r {
@@ -210,6 +212,81 @@ void ConfigManipulation::check_chamber_minimal_temperature(DynamicPrintConfig* c
     }
 }
 
+// Orca (#14369): the layer height limits of the edited printer preset; a multi-nozzle printer is bounded by its
+// smallest minimum and its largest maximum.
+void ConfigManipulation::layer_height_limits(double& min_layer_height, double& max_layer_height) const
+{
+    const DynamicPrintConfig& printer_config = GUI::wxGetApp().preset_bundle->printers.get_edited_preset().config;
+    const std::vector<double>& min_limits = printer_config.option<ConfigOptionFloats>("min_layer_height")->values;
+    const std::vector<double>& max_limits = printer_config.option<ConfigOptionFloats>("max_layer_height")->values;
+    min_layer_height = *std::min_element(min_limits.begin(), min_limits.end());
+    max_layer_height = *std::max_element(max_limits.begin(), max_limits.end());
+}
+
+ConfigManipulation::LayerHeightCheck ConfigManipulation::classify_layer_height(double value, double min_limit, double max_limit)
+{
+    if (min_limit > EPSILON && value < EPSILON)
+        return LayerHeightCheck::Zero;
+    if (max_limit > EPSILON && value > max_limit + EPSILON)
+        return LayerHeightCheck::TooHigh;
+    if (min_limit > EPSILON && value < min_limit - EPSILON)
+        return LayerHeightCheck::TooLow;
+    return LayerHeightCheck::InRange;
+}
+
+// Returns true when the value was changed here. opt_key is "layer_height" or, for the first layer,
+// "initial_layer_print_height": both are held to the same printer limits and answer "Ignore" the same way.
+bool ConfigManipulation::check_layer_height(DynamicPrintConfig* config, const std::string& opt_key)
+{
+    double min_layer_height = 0., max_layer_height = 0.;
+    layer_height_limits(min_layer_height, max_layer_height);
+    const bool   is_initial   = opt_key == "initial_layer_print_height";
+    const double layer_height = config->opt_float(opt_key);
+
+    switch (classify_layer_height(layer_height, min_layer_height, max_layer_height)) {
+    case LayerHeightCheck::Zero: {
+        const wxString msg_text = wxString::Format(is_initial ? _L("Initial layer height is too small. It will be set to the minimum (%g mm).") :
+                                                                _L("Layer height is too small. It will be set to the minimum (%g mm)."),
+                                                   min_layer_height);
+        MessageDialog dialog(wxGetApp().plater(), msg_text, "", wxICON_WARNING | wxOK);
+        dialog.SetButtonLabel(wxID_OK, _L("OK"));
+        is_msg_dlg_already_exist = true;
+        dialog.ShowModal();
+        is_msg_dlg_already_exist = false;
+        DynamicPrintConfig new_conf = *config;
+        new_conf.set_key_value(opt_key, new ConfigOptionFloat(min_layer_height));
+        apply(config, &new_conf);
+        return true;
+    }
+    case LayerHeightCheck::TooHigh: return layer_height_out_of_range_dialog(config, max_layer_height, opt_key);
+    case LayerHeightCheck::TooLow:  return layer_height_out_of_range_dialog(config, min_layer_height, opt_key);
+    default: return false;
+    }
+}
+
+// "Ignore" keeps the value as the user typed it; update_print_fff_config() no longer clamps it behind the dialog.
+bool ConfigManipulation::layer_height_out_of_range_dialog(DynamicPrintConfig* config, double clamp_to, const std::string& opt_key)
+{
+    wxString msg_text = opt_key == "initial_layer_print_height" ?
+        _(L("Initial layer height is outside the limits set in Printer Settings -> Extruder -> Layer height limits, "
+            "this may cause printing quality issues.")) :
+        _(L("Layer height is outside the limits set in Printer Settings -> Extruder -> Layer height limits, "
+            "this may cause printing quality issues."));
+    msg_text += "\n\n" + wxString::Format(_L("Adjust it to the limit (%g mm) automatically?"), clamp_to);
+    MessageDialog dialog(wxGetApp().plater(), msg_text, "", wxICON_WARNING | wxYES | wxNO);
+    dialog.SetButtonLabel(wxID_YES, _L("Adjust"));
+    dialog.SetButtonLabel(wxID_NO, _L("Ignore"));
+    is_msg_dlg_already_exist = true;
+    const bool adjust = dialog.ShowModal() == wxID_YES;
+    if (adjust) {
+        DynamicPrintConfig new_conf = *config;
+        new_conf.set_key_value(opt_key, new ConfigOptionFloat(clamp_to));
+        apply(config, &new_conf);
+    }
+    is_msg_dlg_already_exist = false;
+    return adjust;
+}
+
 void ConfigManipulation::update_print_fff_config(DynamicPrintConfig* config, const bool is_global_config, const bool is_plate_config)
 {
     // #ys_FIXME_to_delete
@@ -224,7 +301,6 @@ void ConfigManipulation::update_print_fff_config(DynamicPrintConfig* config, con
 
     // layer_height shouldn't be equal to zero
     auto layer_height = config->opt_float("layer_height");
-    auto gpreset = GUI::wxGetApp().preset_bundle->printers.get_edited_preset();
     if (layer_height < EPSILON)
     {
         const wxString msg_text = _(L("Too small layer height.\nReset to 0.2."));
@@ -237,19 +313,8 @@ void ConfigManipulation::update_print_fff_config(DynamicPrintConfig* config, con
         is_msg_dlg_already_exist = false;
     }
 
-    //BBS: limite the max layer_herght
-    auto max_lh = gpreset.config.opt_float("max_layer_height",0);
-    if (max_lh > 0.2 && layer_height > max_lh+ EPSILON)
-    {
-        const wxString msg_text = wxString::Format(L"Too large layer height.\nReset to %0.3f.", max_lh);
-        MessageDialog dialog(nullptr, msg_text, "", wxICON_WARNING | wxOK);
-        DynamicPrintConfig new_conf = *config;
-        is_msg_dlg_already_exist = true;
-        dialog.ShowModal();
-        new_conf.set_key_value("layer_height", new ConfigOptionFloat(max_lh));
-        apply(config, &new_conf);
-        is_msg_dlg_already_exist = false;
-    }
+    // Orca (#14369): the "layer height above the printer limit" prompt moved to check_layer_height(), which runs when the
+    // layer height is edited. Clamping it here as well undid the "Ignore" answer on the next config update.
 
     //BBS: ironing_spacing shouldn't be too small or equal to zero
     if (config->opt_float("ironing_spacing") < IRONING_SPACING_MIN)
@@ -601,7 +666,7 @@ void ConfigManipulation::apply_null_fff_config(DynamicPrintConfig *config, std::
 {
     for (auto &k : keys) {
         if (/*k == "adaptive_layer_height" || */ k == "independent_support_layer_height" || k == "enable_support" ||
-            k == "detect_thin_wall" || k == "tree_support_adaptive_layer_height")
+            k == "detect_thin_wall")
             config->set_key_value(k, new ConfigOptionBool(true));
         else if (k == "wall_loops")
             config->set_key_value(k, new ConfigOptionInt(0));
@@ -795,7 +860,9 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
         "support_interface_pattern", "support_interface_top_layers", "support_interface_bottom_layers",
         "bridge_no_support", "max_bridge_length", "support_top_z_distance", "support_bottom_z_distance",
         "support_type", "support_on_build_plate_only", "support_critical_regions_only", "support_interface_not_for_body",
-        "support_object_xy_distance", "support_object_first_layer_gap"/*, "independent_support_layer_height"*/})
+        "support_object_xy_distance", "support_object_first_layer_gap", "independent_support_layer_height",
+        // EdgeSlicer: greyed out with the other support options (a raft counts as support here too).
+        "top_z_overrides_xy_distance"})
         toggle_field(el, have_support_material);
     toggle_line("hollow_shell_thickness", config->opt_bool("hollow_interior"));
     // Side stabilizers print as support, so they need supports on.
@@ -840,7 +907,7 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
     for (auto el : {"tree_support_branch_angle", "tree_support_branch_distance", "tree_support_branch_diameter" })
         toggle_line(el, support_is_normal_tree);
     // settings specific to normal trees
-    for (auto el : {"tree_support_auto_brim", "tree_support_brim_width", "tree_support_adaptive_layer_height"})
+    for (auto el : {"tree_support_auto_brim", "tree_support_brim_width"})
         toggle_line(el, support_is_normal_tree);
     // settings specific to organic trees
     for (auto el : {"tree_support_branch_angle_organic", "tree_support_branch_distance_organic", "tree_support_branch_diameter_organic", "tree_support_angle_slow", "tree_support_tip_diameter", "tree_support_top_rate", "tree_support_branch_diameter_angle"})
