@@ -1579,7 +1579,9 @@ void GUI_App::post_init()
     }
 
     // Start preset sync after project opened, otherwise we could have preset change during project opening which could cause crash
-    if (app_config->get("sync_user_preset") == "true") {
+    if (!PresetSync::cloud_sync_enabled()) {
+        BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " user preset cloud sync: disabled";
+    } else if (app_config->get("sync_user_preset") == "true") {
         // BBS loading user preset
         // Always async, not such startup step
         // BOOST_LOG_TRIVIAL(info) << "Loading user presets...";
@@ -7255,6 +7257,10 @@ void  GUI_App::push_notification(wxString msg, wxString title, UserNotificationS
 
 void GUI_App::reload_settings()
 {
+    // load_user_presets() with a cloud list deletes the local presets that list does not know, so it
+    // must never run while the cloud sync is off.
+    if (!PresetSync::cloud_sync_enabled()) return;
+
     if (preset_bundle && m_agent) {
         std::map<std::string, std::map<std::string, std::string>> user_presets;
         m_agent->get_user_presets(&user_presets);
@@ -7280,41 +7286,30 @@ void GUI_App::remove_user_presets()
     }
 }
 
-bool GUI_App::sync_preset(Preset* preset, PresetSync::Backoff* backoff)
+void GUI_App::sync_preset(Preset* preset)
 {
+    // Cloud preset sync is off (PresetSyncPolicy.hpp): never talk to the cloud about a preset.
+    if (!PresetSync::cloud_sync_enabled()) return;
+
     int result = -1;
     unsigned int http_code = 200;
     std::string updated_info;
     long long update_time = 0;
     // only sync user's preset
-    if (!preset->is_user()) return true;
-    if (preset->is_custom_defined()) return true;
+    if (!preset->is_user()) return;
+    if (preset->is_custom_defined()) return;
 
     auto setting_id = preset->setting_id;
     std::map<std::string, std::string> values_map;
-
-    // A cloud call that answered without a setting id (HTTP status < 400) leaves the preset exactly as
-    // it was, so without a memory of it the sync thread asked again for it on every pass, forever (the
-    // UltraNet plug-in's request_setting_id always answers that way). `backoff` remembers the failure
-    // for this session and holds the preset back for a growing delay. A change of its sync_info (the
-    // user saved it again) or a success clears that, so real edits still upload at once.
-    const bool new_id_request = (setting_id.empty() && preset->sync_info.empty()) || preset->sync_info == "create";
-    const int  backoff_type   = int(preset->type);
-    const auto backoff_now    = PresetSync::Backoff::Clock::now();
-    if (backoff && !backoff->may_attempt(backoff_type, preset->name, preset->sync_info, new_id_request, backoff_now))
-        return false;
-    bool cloud_call_failed = false; // the cloud answered, but without the result we need
-    bool cloud_call_ok     = false; // the cloud accepted the request
     if (setting_id.empty() && preset->sync_info.empty()) {
         if (m_create_preset_blocked[preset->type])
-            return true;
+            return;
         int ret = preset_bundle->get_differed_values_to_update(*preset, values_map);
         if (!ret) {
             std::string new_setting_id = m_agent->request_setting_id(preset->name, &values_map, &http_code);
             if (!new_setting_id.empty()) {
                 setting_id = new_setting_id;
                 result = 0;
-                cloud_call_ok = true;
                 auto update_time_str = values_map[BBL_JSON_KEY_UPDATE_TIME];
                 if (!update_time_str.empty())
                     update_time = std::atoll(update_time_str.c_str());
@@ -7325,10 +7320,8 @@ bool GUI_App::sync_preset(Preset* preset, PresetSync::Backoff* backoff)
                 if (http_code >= 400) {
                     result = 0;
                     updated_info = "hold";
-                } else {
+                } else
                     result = -1;
-                    cloud_call_failed = true;
-                }
             }
         }
         else {
@@ -7339,14 +7332,13 @@ bool GUI_App::sync_preset(Preset* preset, PresetSync::Backoff* backoff)
     }
     else if (preset->sync_info.compare("create") == 0) {
         if (m_create_preset_blocked[preset->type])
-            return true;
+            return;
         int ret = preset_bundle->get_differed_values_to_update(*preset, values_map);
         if (!ret) {
             std::string new_setting_id = m_agent->request_setting_id(preset->name, &values_map, &http_code);
             if (!new_setting_id.empty()) {
                 setting_id = new_setting_id;
                 result = 0;
-                cloud_call_ok = true;
                 auto update_time_str = values_map[BBL_JSON_KEY_UPDATE_TIME];
                 if (!update_time_str.empty())
                     update_time = std::atoll(update_time_str.c_str());
@@ -7357,10 +7349,8 @@ bool GUI_App::sync_preset(Preset* preset, PresetSync::Backoff* backoff)
                     result = 0;
                     updated_info = "hold";
                 }
-                else {
+                else
                     result = -1;
-                    cloud_call_failed = true;
-                }
             }
         } else {
             BOOST_LOG_TRIVIAL(trace) << "[sync_preset]create: can not generate differed preset";
@@ -7381,10 +7371,6 @@ bool GUI_App::sync_preset(Preset* preset, PresetSync::Backoff* backoff)
                         updated_info = "hold";
                         BOOST_LOG_TRIVIAL(error) << "[sync_preset] put setting_id = " << setting_id << " failed, http_code = " << http_code;
                     } else {
-                        if (result == 0)
-                            cloud_call_ok = true;
-                        else
-                            cloud_call_failed = true;
                         auto update_time_str = values_map[BBL_JSON_KEY_UPDATE_TIME];
                         if (!update_time_str.empty())
                             update_time = std::atoll(update_time_str.c_str());
@@ -7409,37 +7395,20 @@ bool GUI_App::sync_preset(Preset* preset, PresetSync::Backoff* backoff)
             plater()->get_notification_manager()->push_notification(NotificationType::BBLUserPresetExceedLimit);
             static bool dialog_notified = false;
             if (dialog_notified)
-                return true;
+                return;
             dialog_notified = true;
             if (mainframe == nullptr)
-                return true;
+                return;
             auto msg = _L("The number of user presets cached in the cloud has exceeded the upper limit, newly created user presets can only be used locally.");
             MessageDialog(mainframe, msg, _L("Sync user presets"), wxICON_WARNING | wxOK).ShowModal();
         });
-        return true; // this error not need hold, and should not hold
-    }
-
-    if (backoff) {
-        if (cloud_call_failed) {
-            const bool breaker_closed_now = backoff->record_failure(backoff_type, preset->name, preset->sync_info, new_id_request, backoff_now);
-            // Say it once per preset (and once for the breaker), not on every retry.
-            if (backoff->failures_of(backoff_type, preset->name) == 1)
-                BOOST_LOG_TRIVIAL(info) << "[sync_preset] the cloud returned no result for user preset " << preset->name << " (http code " << http_code
-                                        << "); not asking again for at least "
-                                        << PresetSync::Backoff::delay_for(1).count() << " minutes";
-            if (breaker_closed_now)
-                BOOST_LOG_TRIVIAL(info) << "[sync_preset] " << PresetSync::Backoff::kBreakerThreshold
-                                        << " cloud requests in a row returned no setting id; pausing new-preset requests for "
-                                        << PresetSync::Backoff::delay_for(1).count() << " minutes";
-        } else if (cloud_call_ok) {
-            backoff->record_success(backoff_type, preset->name);
-        }
+        return; // this error not need hold, and should not hold
     }
 
     // update sync_info preset info in file
     if (result == 0) {
         //PresetBundle* preset_bundle = wxGetApp().preset_bundle;
-        if (!this->preset_bundle) return true;
+        if (!this->preset_bundle) return;
 
         BOOST_LOG_TRIVIAL(trace) << "sync_preset: sync operation: " << preset->sync_info << " success! preset = " << preset->name;
         if (preset->type == Preset::Type::TYPE_FILAMENT) {
@@ -7450,11 +7419,18 @@ bool GUI_App::sync_preset(Preset* preset, PresetSync::Backoff* backoff)
             preset_bundle->printers.set_sync_info_and_save(preset->name, setting_id, updated_info, update_time);
         }
     }
-    return true;
 }
 
 void GUI_App::start_sync_user_preset(bool with_progress_dlg)
 {
+    // Cloud preset sync is off (PresetSyncPolicy.hpp): no sync thread, no get_setting_list2 /
+    // request_setting_id / put_setting / delete_setting call, and no cloud list that could remove or
+    // replace a local preset (reload_settings runs only when this thread finishes).
+    if (!PresetSync::cloud_sync_enabled()) {
+        BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << ": user preset cloud sync is disabled";
+        return;
+    }
+
     if (app_config->get_stealth_mode())
         return;
 
@@ -7522,8 +7498,6 @@ void GUI_App::start_sync_user_preset(bool with_progress_dlg)
 
             int count = 0, sync_count = 0;
             std::vector<Preset> presets_to_sync;
-            // Failed cloud requests of this sign-in session; see sync_preset.
-            PresetSync::Backoff sync_backoff;
             while (!t.expired()) {
                 count++;
                 if (count % 20 == 0) {
@@ -7538,8 +7512,8 @@ void GUI_App::start_sync_user_preset(bool with_progress_dlg)
                         sync_count = preset_bundle->prints.get_user_presets(preset_bundle, presets_to_sync);
                         if (sync_count > 0) {
                             for (Preset& preset : presets_to_sync) {
-                                if (sync_preset(&preset, &sync_backoff))
-                                    boost::this_thread::sleep_for(boost::chrono::milliseconds(100));
+                                sync_preset(&preset);
+                                boost::this_thread::sleep_for(boost::chrono::milliseconds(100));
                             }
                         }
                         total_count += sync_count;
@@ -7547,8 +7521,8 @@ void GUI_App::start_sync_user_preset(bool with_progress_dlg)
                         sync_count = preset_bundle->filaments.get_user_presets(preset_bundle, presets_to_sync);
                         if (sync_count > 0) {
                             for (Preset& preset : presets_to_sync) {
-                                if (sync_preset(&preset, &sync_backoff))
-                                    boost::this_thread::sleep_for(boost::chrono::milliseconds(100));
+                                sync_preset(&preset);
+                                boost::this_thread::sleep_for(boost::chrono::milliseconds(100));
                             }
                         }
                         total_count += sync_count;
@@ -7556,8 +7530,8 @@ void GUI_App::start_sync_user_preset(bool with_progress_dlg)
                         sync_count = preset_bundle->printers.get_user_presets(preset_bundle, presets_to_sync);
                         if (sync_count > 0) {
                             for (Preset& preset : presets_to_sync) {
-                                if (sync_preset(&preset, &sync_backoff))
-                                    boost::this_thread::sleep_for(boost::chrono::milliseconds(100));
+                                sync_preset(&preset);
+                                boost::this_thread::sleep_for(boost::chrono::milliseconds(100));
                             }
                         }
                         total_count += sync_count;
@@ -8585,6 +8559,9 @@ std::vector<std::string> GUI_App::get_delete_cache_presets_lock()
 
 void GUI_App::delete_preset_from_cloud(std::string setting_id)
 {
+    // Nothing is deleted in the cloud (cloud preset sync is off); do not queue the id either.
+    if (!PresetSync::cloud_sync_enabled()) return;
+
     std::scoped_lock l(mutex_delete_cache_presets);
     need_delete_presets.push_back(setting_id);
 }

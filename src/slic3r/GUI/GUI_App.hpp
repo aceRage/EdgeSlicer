@@ -11,7 +11,7 @@
 #include "slic3r/GUI/DeviceManager.hpp"
 #include "slic3r/GUI/UserNotification.hpp"
 #include "slic3r/Utils/NetworkAgent.hpp"
-#include "slic3r/Utils/PresetSyncBackoff.hpp"
+#include "slic3r/Utils/PresetSyncPolicy.hpp"
 #include "slic3r/GUI/WebViewDialog.hpp"
 #include "slic3r/GUI/WebUserLoginDialog.hpp"
 #include "slic3r/GUI/WebSMUserLoginDialog.hpp"
@@ -742,8 +742,7 @@ private:
     void            push_notification(wxString msg, wxString title = wxEmptyString, UserNotificationStyle style = UserNotificationStyle::UNS_NORMAL);
     void            reload_settings();
     void            remove_user_presets();
-    // Returns false when the backoff held the preset back (no cloud call was made, so the caller need not pace itself).
-    bool            sync_preset(Preset* preset, PresetSync::Backoff* backoff = nullptr);
+    void            sync_preset(Preset* preset);
     void            start_sync_user_preset(bool with_progress_dlg = false);
     void            stop_sync_user_preset();
     void            start_http_server();

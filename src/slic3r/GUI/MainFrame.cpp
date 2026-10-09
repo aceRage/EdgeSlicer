@@ -4843,6 +4843,10 @@ void MainFrame::update_side_preset_ui()
 
 void MainFrame::on_select_default_preset(SimpleEvent& evt)
 {
+    // The "synchronize from Bambu Cloud" question: user presets are never synced (PresetSyncPolicy.hpp).
+    if (!PresetSync::cloud_sync_enabled())
+        return;
+
     MessageDialog dialog(this,
                     _L("Do you want to synchronize your personal data from Bambu Cloud?\n"
                         "It contains the following information:\n"
