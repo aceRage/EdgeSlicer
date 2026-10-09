@@ -222,38 +222,62 @@ Done as proposed, with these differences:
   `set_num_filaments()`, which would cut a packed vector.
 * **Reads.** `GCode.cpp` builds `flush_volumetric_speeds`, `flush_temperatures` and
   `filament_cooling_before_tower` in one helper (`bambu_flush_placeholders`), reading each filament's slot with
-  `get_config_idx(..., ConfigFlowDomain::Filament, id)`. A nil slot reads as the option default. Fast
-  `prime_volume_mode` reads `filament_flush_temp_fast`. A filament switcher feeding extruders of different types
-  adds Bambu's extra 10 degrees. Through the wipe tower the cooling is 0 on the first layer (our tower has no
-  interface contact layers, Bambu's other zeroing case); every other toolchange publishes 0, as Bambu does. The
-  start G-code also gets the unpacked per-filament values of the four keys themselves (Prusa CORE One INDX reads
+  `get_config_idx(..., ConfigFlowDomain::Filament, id)`. A nil flush slot reads as the option default, a nil
+  cooling slot as 0. Fast `prime_volume_mode` reads `filament_flush_temp_fast`. The cooling comes from
+  `filament_cooling_before_tower_at()` (PrintConfig), which GCode and the tower share; on a tower toolchange it
+  adds Bambu's extra 10 degrees for a filament switcher feeding extruders of different types. The start G-code
+  also gets the unpacked per-filament values of the four keys themselves (Prusa CORE One INDX reads
   `filament_flush_volumetric_speed[next_extruder]`).
 * **Defaults.** The filament default preset nulls its nullable options (nil = use the printer value, for the
-  retract overrides). These four have no printer value, so the default preset keeps their defaults: a preset
-  that does not set them (all X1/P1/A1 profiles) holds flush 0 and cooling 10, and its G-code templates do not
-  read them.
-* **Invalidation.** The keys only invalidate the G-code export (`steps_gcode`). Bambu also invalidates its wipe
-  tower on `filament_cooling_before_tower` because its tower writes the reheat below; add that if the reheat is
-  ported.
+  retract overrides). These four have no printer value, so the default preset holds what Bambu Studio's base
+  filament profile `BBL/filament/fdm_filament_common.json` (which every Bambu filament inherits; ours lacks the
+  keys) says: flush 0, flush speed 0, **cooling 0**. The option default of `filament_cooling_before_tower` stays
+  Bambu's 10; the BBL presets that cool say so explicitly. A first version held 10 here and made A2L PLA / PETG
+  HF slices cool where Bambu does not.
+* **Invalidation.** The flush keys only invalidate the G-code export (`steps_gcode`);
+  `filament_cooling_before_tower` invalidates `psWipeTower`, as in Bambu (Print.cpp 328), because the tower writes
+  the reheat from it.
 * **UI.** Filament > Basic information: "Wipe tower cooling" (Develop mode, as in Bambu). Filament >
   Multimaterial > "Tool change parameters with multi extruder MM printers": the flush temperature, Fast flush
   temperature and flush volumetric speed, before the extruder-change retraction (Bambu's "Multi Filament"
   page order). Only one flush temperature line shows: the Fast one when the project's `prime_volume_mode` is
   Fast (we have no purge-mode switch; a Bambu project can set Fast).
 
-### Follow-up: "Wipe tower reheat before wipe" (not ported)
+### "Wipe tower reheat before wipe" (ported after the H2D hand-test)
 
-Bambu's tower copies the value into `m_filpar[idx].filament_cooling_before_tower` (WipeTower.cpp 1980). In
-`toolchange_wipe_new` (4071-4096, called on every BBL tower toolchange) it sets
-`should_heating = cooling > EPSILON && !solid_tool_toolchange && !is_first_layer()` and, at the start of the wipe
-(before the first wipe line, or before the first extrusion after the line/flat ironing pass), writes
+The first version of the port left the reheat out. The owner's H2D test showed what that does: after
+`M620.15 C210` the nozzle never came back to 220 and the rest of the print ran 10 degrees cold.
+
+Bambu Studio: the tower copies the value into `m_filpar[idx].filament_cooling_before_tower` (WipeTower.cpp 1980).
+`toolchange_wipe_new` (4071-4096, every BBL tower toolchange) sets
+`should_heating = cooling > EPSILON && !solid_tool_toolchange && !is_first_layer()` and, before the first wipe
+extrusion (after the line / flat ironing nub when the gap wall is on), writes
 
     M104 T<physical extruder> S<nozzle_temperature> N0 ;Wipe tower reheat before wipe
 
-through `format_line_M104(target, extruder, is_heating=true, wait_for_moves=true, ...)` (no M400 for heating).
-That raises the nozzle back from the `M620.15 C` pre-tower target to the print temperature while the tower wipe
-prints. Our tower writes nothing like it. With this port the firmware gets the 10 degree lower `M620.15` target;
-the `;VM109 S[new_filament_temp]` virtual wait in the template follows the flush. Whether the nozzle is back at
-print temperature before the part without the tower M104 is what the hardware hand-test has to show. If not,
-port the reheat into our `WipeTower::toolchange_Wipe` with the same conditions (and invalidate `psWipeTower` on
-the key).
+through `format_line_M104(target, extruder, is_heating=true, ...)`: no M400 for heating. GCode.cpp 1001-1026
+publishes the cooling to change_filament_gcode only on such toolchanges (zero on the first layer and on a contact
+toolchange); a toolchange that does not go through the tower publishes zeros (8318-8337).
+
+Ours (`WipeTower::tool_change`): the same line, with the same conditions (the tower's first layer, an interface
+toolchange = Bambu's contact), right after the load, i.e. after the `[change_filament_gcode]` block that carries
+`M620.15 C` and before the new filament's first extrusion on the tower. Bambu's first extrusion after the load is
+the wipe; ours is the tower wall, which our tower prints inside the toolchange, so the M104 goes before the wall.
+The tower reports the decision in `ToolChangeResult::reheats_after_cooling`, and GCode publishes the cooling only
+when it is set (and not on layer 0), so a cool-down without its reheat cannot happen.
+
+Paths:
+* **Tower toolchange** (any BBL printer with the prime tower, by layer, or by object with the tower: the by-object
+  export only takes its own path when there is no tower): cool-down and reheat as above.
+* **No tower / WipeTower2 / by object without the tower**: the toolchange goes through `GCode::set_extruder`, which
+  publishes zeros, so `M620.15 C` is the print temperature and no reheat is due (Bambu: the same).
+* **First layer, interface toolchange**: no cool-down, no reheat.
+* **H2C rack**: the rack nozzle change sits in the same tower toolchange (end-filament slot); the reheat names the
+  physical extruder, which holds the new nozzle.
+* **A2L**: its template has no `M620.15`; the cooling only enters the `SYNC T` heat-up compensation. With the
+  0 default only the A2L presets that set 10 (PETG Matte, TPU 85A 0.6/0.8) cool, and the tower reheats after them,
+  as Bambu's does.
+
+`tests/libslic3r/test_bambu_flush_keys.cpp` `check_reheats()` is the rule: every `M620.15 C` below the print
+temperature of the filament being loaded is followed by the reheat to that temperature before the toolchange ends
+and before anything prints, and every reheat answers such a cool-down.

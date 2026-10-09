@@ -221,8 +221,9 @@ ReheatCheck check_reheats(const std::string &gcode)
         if (std::regex_search(line, m, re_new_temp)) {
             new_temp = std::stoi(m[1].str());
         } else if (std::regex_search(line, m, re_m620_15)) {
+            // The H2C template repeats "M620.15 C{...}" inside one toolchange: the same cool-down.
             if (pending >= 0)
-                out.errors.push_back("line " + std::to_string(n) + ": a second cool-down before the reheat");
+                continue;
             if (new_temp >= 0 && std::stod(m[1].str()) < double(new_temp)) {
                 pending = new_temp;
                 ++out.cooled;
