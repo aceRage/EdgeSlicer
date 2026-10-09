@@ -21,6 +21,7 @@
 #include "ReleaseNote.hpp"
 #include <thread>
 #include <mutex>
+#include <set>
 #include <codecvt>
 #include <algorithm>
 #include <iterator>
@@ -3888,7 +3889,10 @@ int MachineObject::parse_json(std::string payload, bool key_field_only)
 
                     if (!key_field_only) {
                         if (jj.contains("printer_type")) {
-                            printer_type = parse_printer_type(jj["printer_type"].get<std::string>());
+                            // Unidentified and empty: keep the model SSDP or the saved record gave us.
+                            const std::string identified = DeviceManager::identify_printer_type(jj["printer_type"].get<std::string>(), dev_id);
+                            if (! identified.empty() || printer_type.empty())
+                                printer_type = identified;
                         }
 
                         if (jj.contains("layer_num")) {
@@ -6578,7 +6582,15 @@ DeviceManager::DeviceManager(NetworkAgent* agent)
             if (m.is_flashforge())
                 continue;
             MachineObject* obj       = new MachineObject(m_agent, m.dev_name, m.dev_id, m.dev_ip);
-            obj->printer_type        = m.printer_type;
+            // Re-identify the stored code: a printer saved by a build that had no definition for its
+            // model was stored with an empty model (an X2D, 2.4.5.0), which made the send dialog
+            // call it incompatible until its next announcement - or forever, when it is reached by
+            // IP and never announces. The serial number still identifies it.
+            obj->printer_type        = identify_printer_type(m.printer_type, m.dev_id);
+            const bool repaired      = obj->printer_type != m.printer_type;
+            if (repaired)
+                BOOST_LOG_TRIVIAL(info) << "Saved LAN printer " << m.dev_id.substr(0, 3) << "...: stored model '" << m.printer_type
+                                        << "' re-identified as '" << obj->printer_type << "'";
             obj->dev_connection_type = "lan";
             obj->bind_state          = "free";
             obj->bind_sec_link       = "secure";
@@ -6588,6 +6600,12 @@ DeviceManager::DeviceManager(NetworkAgent* agent)
             obj->set_user_access_code(config->get("user_access_code", m.dev_id), false);
             if (obj->has_access_right()) {
                 localMachineList.insert(std::make_pair(m.dev_id, obj));
+                if (repaired) {
+                    // Store the repair, keeping the rest of the saved record as it was.
+                    BBLocalMachine fixed = m;
+                    fixed.printer_type   = obj->printer_type;
+                    config->update_local_machine(fixed);
+                }
             } else {
                 config->erase_local_machine(m.dev_id);
                 delete obj;
@@ -7007,7 +7025,13 @@ void DeviceManager::on_machine_alive(std::string json_str)
             obj->bind_state         = bind_state;
             obj->bind_sec_link      = sec_link;
             obj->bind_ssdp_version = ssdp_version;
-            obj->printer_type = MachineObject::parse_printer_type(printer_type_str);
+            {
+                // An announcement without a usable model code must not blank a model we know (a
+                // saved printer is loaded with its stored code before its first announcement).
+                const std::string identified = identify_printer_type(printer_type_str, dev_id);
+                if (! identified.empty() || obj->printer_type.empty())
+                    obj->printer_type = identified;
+            }
 
             // U0 firmware
             if (obj->dev_connection_type.empty() && obj->bind_state.empty())
@@ -7025,7 +7049,7 @@ void DeviceManager::on_machine_alive(std::string json_str)
         else {
             /* insert a new machine */
             obj = new MachineObject(m_agent, dev_name, dev_id, dev_ip);
-            obj->printer_type = MachineObject::parse_printer_type(printer_type_str);
+            obj->printer_type = identify_printer_type(printer_type_str, dev_id);
             obj->wifi_signal = printer_signal;
             obj->dev_connection_type = connect_type;
             obj->bind_state     = bind_state;
@@ -7067,7 +7091,7 @@ MachineObject* DeviceManager::insert_local_device(const BBLocalMachine& machine,
         obj = new MachineObject(m_agent, machine.dev_name, machine.dev_id, machine.dev_ip);
         localMachineList.insert(std::make_pair(machine.dev_id, obj));
     }
-    obj->printer_type = MachineObject::parse_printer_type(machine.printer_type);
+    obj->printer_type = identify_printer_type(machine.printer_type, machine.dev_id);
     obj->dev_connection_type = connection_type;
     obj->bind_state = bind_state;
     obj->bind_sec_link = "secure";
@@ -7463,9 +7487,7 @@ void DeviceManager::parse_user_print_info(std::string body)
                     // The cloud list reports the same model codes as SSDP, sub-series included, so
                     // it goes through the same resolution; an unknown code keeps the raw value so
                     // the "no printer definition" message can still name it.
-                    const std::string code = elem["dev_model_name"].get<std::string>();
-                    const std::string resolved = MachineObject::parse_printer_type(code);
-                    obj->printer_type = resolved.empty() ? code : resolved;
+                    obj->printer_type = identify_printer_type(elem["dev_model_name"].get<std::string>(), obj->dev_id);
                 }
                 if (!elem["task_status"].is_null())
                     obj->iot_print_status = elem["task_status"].get<std::string>();
@@ -7547,34 +7569,59 @@ json DeviceManager::filaments_blacklist = json::object();
 
 std::string DeviceManager::parse_printer_type(std::string type_str)
 {
-    // The straight case: resources/printers/<code>.json exists.
-    std::string type = get_value_from_config<std::string>(type_str, "printer_type");
-    if (! type.empty() || type_str.empty())
-        return type;
-
-    // A later hardware revision reports a sub-series code ("O1C2-V2" for an H2C) that has no file
-    // of its own; the parent definition lists it under "subseries". Without this an H2C from a
-    // newer batch showed as an unknown model and Send refused with "incompatible model". The
-    // table is read once per run - the folder does not change while the app is running.
+    if (type_str.empty())
+        return "";
+    // resources/printers/<code>.json; else a later hardware revision's sub-series code ("O1C2-V2"
+    // for an H2C), which the parent definition lists under "subseries"; else the code without its
+    // "-V<n>" revision. The table is read once per run - the folder does not change while the app
+    // is running.
     static const std::map<std::string, std::vector<std::string>> subseries =
         GUI::load_model_subseries(Slic3r::resources_dir() + "/printers");
-    std::string parent = GUI::resolve_model_subseries(type_str, subseries);
-    if (parent.empty()) {
-        // A revision newer than the table we ship: "-V<n>" is Bambu's revision suffix, so try the
-        // bare code before giving up.
-        const std::string bare = GUI::strip_model_revision(type_str);
-        if (bare != type_str)
-            parent = bare;
-    }
-    if (! parent.empty()) {
-        type = get_value_from_config<std::string>(parent, "printer_type");
-        if (! type.empty()) {
+    const std::string type = GUI::resolve_model_code(type_str, Slic3r::resources_dir() + "/printers", subseries);
+    if (! type.empty()) {
+        if (type != type_str)
             BOOST_LOG_TRIVIAL(info) << "parse_printer_type: model code " << type_str << " resolved to " << type;
-            return type;
-        }
+        return type;
     }
-    BOOST_LOG_TRIVIAL(warning) << "parse_printer_type: no printer definition for model code " << type_str;
+    // SSDP repeats every few seconds; say it once per code and run, not on every announcement.
+    static std::mutex            warned_mutex;
+    static std::set<std::string> warned;
+    {
+        std::lock_guard<std::mutex> lock(warned_mutex);
+        if (warned.insert(type_str).second)
+            BOOST_LOG_TRIVIAL(warning) << "parse_printer_type: no printer definition for model code " << type_str;
+    }
     return "";
+}
+
+std::string DeviceManager::identify_printer_type(const std::string& code, const std::string& dev_id)
+{
+    // Aliases ("3DPrinter-X1-Carbon"), the code's definition, its sub-series parent or its bare
+    // code without the -V<n> revision.
+    std::string type = MachineObject::parse_printer_type(code);
+    if (! type.empty())
+        return type;
+
+    // Bambu Studio's fallback (DevPrinterConfigUtil::get_printer_type_by_dev_id): the first three
+    // characters of the serial number name the model ("20P" is an X2D). This covers a printer that
+    // reported no model code at all, or one saved before this build knew its code.
+    const std::string printers_dir = Slic3r::resources_dir() + "/printers";
+    static const std::map<std::string, std::vector<std::string>> subseries   = GUI::load_model_subseries(printers_dir);
+    static const std::map<std::string, std::string>              sn_prefixes = GUI::load_model_sn_prefixes(printers_dir);
+    type = GUI::identify_device_model(code, dev_id, printers_dir, subseries, sn_prefixes);
+    if (! type.empty()) {
+        static std::mutex            logged_mutex;
+        static std::set<std::string> logged;
+        std::lock_guard<std::mutex>  lock(logged_mutex);
+        if (logged.insert(code + "|" + type).second)
+            BOOST_LOG_TRIVIAL(info) << "identify_printer_type: model code '" << code << "' identified as " << type
+                                    << " from the serial number prefix";
+        return type;
+    }
+    // Unidentified: keep what the printer reported, as Bambu Studio's _parse_printer_type does, so
+    // the send dialog can name the code instead of showing an empty model. The cloud device list
+    // already kept its raw code this way.
+    return code;
 }
 std::string DeviceManager::get_printer_display_name(std::string type_str)
 {

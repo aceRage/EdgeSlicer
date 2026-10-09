@@ -1459,6 +1459,10 @@ public:
     }
 
     static std::string parse_printer_type(std::string type_str);
+    // The printer_type a device is: parse_printer_type of its reported code, else the model its
+    // serial number's prefix names, else the reported code itself (possibly empty) so a message
+    // can name it. Use this wherever a device's printer_type is set.
+    static std::string identify_printer_type(const std::string& code, const std::string& dev_id);
     static std::string get_printer_display_name(std::string type_str);
     static std::string get_printer_thumbnail_img(std::string type_str);
     static std::string get_printer_ams_type(std::string type_str);
