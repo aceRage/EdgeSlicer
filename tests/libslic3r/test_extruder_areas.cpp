@@ -821,13 +821,19 @@ SCENARIO("the X2D machine model carries Bambu's plate art placement", "[Extruder
         CHECK(boost::filesystem::exists(boost::filesystem::path(TEST_DATA_DIR) / ".." / ".." / "resources" / "images" / art));
     }
 
-    // Machines without their own placement keep the defaults.
-    for (const VendorProfile::PrinterModel &m : vendor->second.models)
-        if (m.id == "Bambu Lab H2D") {
+    // Machines without their own placement keep the defaults; the P2S (single nozzle) only swaps in the "_n" art.
+    for (const VendorProfile::PrinterModel &m : vendor->second.models) {
+        if (m.id == "Bambu Lab H2D" || m.id == "Bambu Lab H2D Pro") {
+            INFO(m.id);
             CHECK(m.bottom_texture_end_name.empty());
             CHECK(m.bottom_texture_rect.empty());
             CHECK(m.middle_texture_rect.empty());
         }
+        if (m.id == "Bambu Lab P2S") {
+            CHECK(m.bottom_texture_end_name == "n");
+            CHECK(m.bottom_texture_rect.empty());
+        }
+    }
 }
 
 TEST_CASE("bed texture rects parse like Bambu Studio's", "[ExtruderAreas]")

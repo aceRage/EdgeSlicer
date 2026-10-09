@@ -3,7 +3,6 @@
 #include <boost/filesystem.hpp>
 #include <boost/nowide/fstream.hpp>
 
-#include <set>
 
 #include "nlohmann/json.hpp"
 
@@ -160,8 +159,11 @@ TEST_CASE("A printer that reports no usable model code is identified by its seri
 
     // Every shipped definition carries Bambu's prefix, and no two share one.
     const auto prefixes = Slic3r::GUI::load_model_sn_prefixes(kPrinters);
-    CHECK(prefixes.size() == 11);
+    CHECK(prefixes.size() == 14);
     CHECK(prefixes.at("20P") == "N6");
+    CHECK(prefixes.at("22E") == "N7");
+    CHECK(prefixes.at("26A") == "N9");
+    CHECK(prefixes.at("239") == "O1E");
 }
 
 TEST_CASE("The X2D machine profile maps to the X2D definition and passes the send dialog's model check", "[DeviceModelCode]")
@@ -190,12 +192,11 @@ TEST_CASE("The X2D machine profile maps to the X2D definition and passes the sen
     CHECK(device_matches_profile_model("O1C", "O1C2", { "O1C" }));
 }
 
-TEST_CASE("Every Bambu machine model has a printer definition, bar the known gaps", "[DeviceModelCode]")
+TEST_CASE("Every Bambu machine model has a printer definition", "[DeviceModelCode]")
 {
     namespace fs = boost::filesystem;
-    // P2S, A2L and H2D Pro profiles ship without a device definition yet: such a printer shows the
-    // same "no printer definition in this build" refusal the X2D did. Shrink this set as they land.
-    const std::set<std::string> known_gaps = { "N7", "N9", "O1E" };
+    // A machine model without one cannot be sent to: its printers show the "no printer definition in
+    // this build" refusal the X2D did (P2S, A2L and H2D Pro had the same gap until 2026-10-09).
     int checked = 0;
     for (fs::directory_iterator it(kResources + "/profiles/BBL/machine"), end; it != end; ++it) {
         if (it->path().extension() != ".json")
@@ -205,10 +206,38 @@ TEST_CASE("Every Bambu machine model has a printer definition, bar the known gap
             continue;
         const std::string id = j.value("model_id", std::string());
         INFO(it->path().filename().string() << " model_id " << id);
-        if (known_gaps.count(id))
-            continue;
         CHECK(Slic3r::GUI::resolve_model_code(id, kPrinters, load_model_subseries(kPrinters)) == id);
         ++checked;
     }
-    CHECK(checked >= 11);
+    CHECK(checked >= 14);
+}
+
+TEST_CASE("The P2S, A2L and H2D Pro model codes resolve to their definitions", "[DeviceModelCode]")
+{
+    struct Model { const char *code, *display, *serial; };
+    const Model models[] = {
+        { "N7", "Bambu Lab P2S", "22E0000000000001" },
+        { "N9", "Bambu Lab A2L", "26A0000000000001" },
+        { "O1E", "Bambu Lab H2D Pro", "2390000000000001" },
+    };
+    const auto subseries = load_model_subseries(kPrinters);
+    for (const Model &m : models) {
+        INFO(m.code);
+        const nlohmann::json def = read_json(kPrinters + "/" + m.code + ".json");
+        REQUIRE(def.is_object());
+        CHECK(def["00.00.00.00"]["display_name"] == m.display);
+        CHECK(Slic3r::GUI::resolve_model_code(m.code, kPrinters, subseries) == m.code);
+        CHECK(identify("", m.serial) == m.code);
+        CHECK(Slic3r::GUI::device_matches_profile_model(m.code, identify(m.code, m.serial), {}));
+    }
+    // Bambu's sub-series for these: the P2S and the H2D Pro have a -V2; the A2L has none.
+    CHECK(resolve_model_subseries("N7-V2", subseries) == "N7");
+    CHECK(resolve_model_subseries("O1E-V2", subseries) == "O1E");
+    // An H2D Pro takes a plate sliced with the H2D profile (its definition lists O1D as compatible).
+    const nlohmann::json o1e = read_json(kPrinters + "/O1E.json");
+    std::vector<std::string> compatible;
+    for (const auto &c : o1e["00.00.00.00"]["compatible_machine"])
+        compatible.push_back(c.get<std::string>());
+    CHECK(Slic3r::GUI::device_matches_profile_model("O1D", "O1E", compatible));
+    CHECK_FALSE(Slic3r::GUI::device_matches_profile_model("N6", "O1E", compatible));
 }
