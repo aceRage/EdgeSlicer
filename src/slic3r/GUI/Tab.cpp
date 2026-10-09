@@ -5912,6 +5912,24 @@ if (is_marlin_flavor)
         m_pages.insert(m_pages.end() - n_after_single_extruder_MM, page);
     }
 
+    // The extruder pages bind each per-variant retraction field to the slot the slicer reads for that
+    // extruder. When those slots move (a preset in the per-extruder-variant layout, another nozzle flow
+    // type), the pages are built again.
+    m_variant_sources = extruder_variant_sources();
+    if (std::vector<size_t> layout = extruder_field_layout(); layout != m_extruder_field_layout) {
+        if (m_extruders_count_old > 0) {
+            const auto first = m_pages.begin() + n_before_extruders;
+            const auto last  = first + m_extruders_count_old;
+            if (std::any_of(first, last, [this](const PageShp &page) { return page.get() == m_active_page; })) {
+                clear_pages();
+                m_active_page = nullptr;
+            }
+            m_pages.erase(first, last);
+            m_extruders_count_old = 0;
+        }
+        m_extruder_field_layout = std::move(layout);
+    }
+
     // Orca: build missed extruder pages
     for (auto extruder_idx = m_extruders_count_old; extruder_idx < m_extruders_count; ++extruder_idx) {
         // auto extruder_idx = 0;
@@ -6037,32 +6055,34 @@ if (is_marlin_flavor)
                 optgroup->append_single_option_line("extruder_offset", "", extruder_idx);
 
                 //BBS: don't show retract related config menu in machine page
+                // Per-variant retraction settings: the slot the slicer reads for this extruder.
+                auto field = [this, extruder_idx](const char *key) { return int(extruder_field_index(key, extruder_idx)); };
                 optgroup = page->new_optgroup(L("Retraction"), L"param_retraction");
-                optgroup->append_single_option_line("retraction_length", "", extruder_idx);
-                optgroup->append_single_option_line("retract_restart_extra", "", extruder_idx);
-                optgroup->append_single_option_line("retraction_speed", "", extruder_idx);
-                optgroup->append_single_option_line("deretraction_speed", "", extruder_idx);
-                optgroup->append_single_option_line("retraction_minimum_travel", "", extruder_idx);
-                optgroup->append_single_option_line("retract_when_changing_layer", "", extruder_idx);
-                optgroup->append_single_option_line("wipe", "", extruder_idx);
-                optgroup->append_single_option_line("wipe_distance", "", extruder_idx);
-                optgroup->append_single_option_line("retract_before_wipe", "", extruder_idx);
+                optgroup->append_single_option_line("retraction_length", "", field("retraction_length"));
+                optgroup->append_single_option_line("retract_restart_extra", "", field("retract_restart_extra"));
+                optgroup->append_single_option_line("retraction_speed", "", field("retraction_speed"));
+                optgroup->append_single_option_line("deretraction_speed", "", field("deretraction_speed"));
+                optgroup->append_single_option_line("retraction_minimum_travel", "", field("retraction_minimum_travel"));
+                optgroup->append_single_option_line("retract_when_changing_layer", "", field("retract_when_changing_layer"));
+                optgroup->append_single_option_line("wipe", "", field("wipe"));
+                optgroup->append_single_option_line("wipe_distance", "", field("wipe_distance"));
+                optgroup->append_single_option_line("retract_before_wipe", "", field("retract_before_wipe"));
 
                 optgroup = page->new_optgroup(L("Z-Hop"), L"param_extruder_lift_enforcement");
-                optgroup->append_single_option_line("retract_lift_enforce", "", extruder_idx);
-                optgroup->append_single_option_line("z_hop_types", "", extruder_idx);
-                optgroup->append_single_option_line("z_hop", "", extruder_idx);
-                optgroup->append_single_option_line("z_hop_when_prime", "", extruder_idx);
-                optgroup->append_single_option_line("travel_slope", "", extruder_idx);
-                optgroup->append_single_option_line("retract_lift_above", "", extruder_idx);
-                optgroup->append_single_option_line("retract_lift_below", "", extruder_idx);
+                optgroup->append_single_option_line("retract_lift_enforce", "", field("retract_lift_enforce"));
+                optgroup->append_single_option_line("z_hop_types", "", field("z_hop_types"));
+                optgroup->append_single_option_line("z_hop", "", field("z_hop"));
+                optgroup->append_single_option_line("z_hop_when_prime", "", field("z_hop_when_prime"));
+                optgroup->append_single_option_line("travel_slope", "", field("travel_slope"));
+                optgroup->append_single_option_line("retract_lift_above", "", field("retract_lift_above"));
+                optgroup->append_single_option_line("retract_lift_below", "", field("retract_lift_below"));
 
                 optgroup = page->new_optgroup(L("Retraction when switching material"), L"param_retraction_material_change");
-                optgroup->append_single_option_line("retract_length_toolchange", "", extruder_idx);
-                optgroup->append_single_option_line("retract_restart_extra_toolchange", "", extruder_idx);
+                optgroup->append_single_option_line("retract_length_toolchange", "", field("retract_length_toolchange"));
+                optgroup->append_single_option_line("retract_restart_extra_toolchange", "", field("retract_restart_extra_toolchange"));
                 // do not display this params now
-                optgroup->append_single_option_line("long_retractions_when_cut", "", extruder_idx);
-                optgroup->append_single_option_line("retraction_distances_when_cut", "", extruder_idx);
+                optgroup->append_single_option_line("long_retractions_when_cut", "", field("long_retractions_when_cut"));
+                optgroup->append_single_option_line("retraction_distances_when_cut", "", field("retraction_distances_when_cut"));
 
     #if 0
                 //optgroup = page->new_optgroup(L("Preview"), -1, true);
@@ -6299,7 +6319,9 @@ void TabPrinter::toggle_options()
         val > 0 && (size_t)val <= m_extruders_count))
     {
         size_t i = size_t(val - 1);
-        bool have_retract_length = m_config->opt_float("retraction_length", i) > 0;
+        // The value index of extruder i for `key` (its variant slot on a per-variant printer).
+        auto at = [this, i](const char *key) { return int(extruder_field_index(key, i)); };
+        bool have_retract_length = m_config->opt_float("retraction_length", at("retraction_length")) > 0;
 
         // when using firmware retraction, firmware decides retraction length
         bool use_firmware_retraction = m_config->opt_bool("use_firmware_retraction");
@@ -6307,20 +6329,20 @@ void TabPrinter::toggle_options()
 
         // user can customize travel length if we have retraction length or we"re using
         // firmware retraction
-        toggle_option("retraction_minimum_travel", have_retract_length || use_firmware_retraction, i);
+        toggle_option("retraction_minimum_travel", have_retract_length || use_firmware_retraction, at("retraction_minimum_travel"));
 
         // user can customize other retraction options if retraction is enabled
         //BBS
         bool retraction = have_retract_length || use_firmware_retraction;
         std::vector<std::string> vec = {"z_hop", "retract_when_changing_layer"};
         for (auto el : vec)
-            toggle_option(el, retraction, i);
+            toggle_option(el, retraction, at(el.c_str()));
 
         // retract lift above / below + enforce only applies if using retract lift
         vec.resize(0);
         vec = {"retract_lift_above", "retract_lift_below", "retract_lift_enforce"};
         for (auto el : vec)
-          toggle_option(el, retraction && (m_config->opt_float("z_hop", i) > 0), i);
+          toggle_option(el, retraction && (m_config->opt_float("z_hop", at("z_hop")) > 0), at(el.c_str()));
 
         // some options only apply when not using firmware retraction
         vec.resize(0);
@@ -6329,14 +6351,15 @@ void TabPrinter::toggle_options()
                "wipe_distance"};
         for (auto el : vec)
             //BBS
-            toggle_option(el, retraction && !use_firmware_retraction, i);
+            toggle_option(el, retraction && !use_firmware_retraction, at(el.c_str()));
 
-        bool wipe = retraction && m_config->opt_bool("wipe", i);
-        toggle_option("retract_before_wipe", wipe, i);
+        bool wipe = retraction && m_config->opt_bool("wipe", at("wipe"));
+        toggle_option("retract_before_wipe", wipe, at("retract_before_wipe"));
         // Orca (#13812): wiping with firmware retraction is fine as long as the whole retraction is done before the wipe.
         const auto* retract_before_wipe_opt = static_cast<const ConfigOptionPercents*>(m_config->option("retract_before_wipe"));
+        const size_t retract_before_wipe_idx = size_t(at("retract_before_wipe"));
         const double retract_before_wipe = retract_before_wipe_opt->values.empty() ? 100. :
-            retract_before_wipe_opt->values[std::min(i, retract_before_wipe_opt->values.size() - 1)];
+            retract_before_wipe_opt->values[std::min(retract_before_wipe_idx, retract_before_wipe_opt->values.size() - 1)];
         if (use_firmware_retraction && wipe && retract_before_wipe < 100.0) {
             //wxMessageDialog dialog(parent(),
             MessageDialog dialog(parent(),
@@ -6361,18 +6384,18 @@ void TabPrinter::toggle_options()
             load_config(new_conf);
         }
         // BBS
-        toggle_option("wipe_distance", wipe, i);
+        toggle_option("wipe_distance", wipe, at("wipe_distance"));
 
-        toggle_option("retract_length_toolchange", have_multiple_extruders, i);
+        toggle_option("retract_length_toolchange", have_multiple_extruders, at("retract_length_toolchange"));
 
-        bool toolchange_retraction = m_config->opt_float("retract_length_toolchange", i) > 0;
-        toggle_option("retract_restart_extra_toolchange", have_multiple_extruders && toolchange_retraction, i);
+        bool toolchange_retraction = m_config->opt_float("retract_length_toolchange", at("retract_length_toolchange")) > 0;
+        toggle_option("retract_restart_extra_toolchange", have_multiple_extruders && toolchange_retraction, at("retract_restart_extra_toolchange"));
 
-        toggle_option("long_retractions_when_cut", !use_firmware_retraction && m_config->opt_int("enable_long_retraction_when_cut"),i);
-        toggle_line("retraction_distances_when_cut#0", m_config->opt_bool("long_retractions_when_cut", i));
+        toggle_option("long_retractions_when_cut", !use_firmware_retraction && m_config->opt_int("enable_long_retraction_when_cut"), at("long_retractions_when_cut"));
+        toggle_line("retraction_distances_when_cut#0", m_config->opt_bool("long_retractions_when_cut", at("long_retractions_when_cut")));
         //toggle_option("retraction_distances_when_cut", m_config->opt_bool("long_retractions_when_cut",i),i);
 
-        toggle_option("travel_slope", m_config->opt_enum("z_hop_types", i) != ZHopType::zhtNormal, i);
+        toggle_option("travel_slope", m_config->opt_enum("z_hop_types", at("z_hop_types")) != ZHopType::zhtNormal, at("travel_slope"));
     }
 
     if (m_active_page->title() == L("Motion ability")) {
@@ -7962,6 +7985,45 @@ void TabPrinter::cache_extruder_cnt(const DynamicPrintConfig* config/* = nullptr
     // get extruders count
     auto* nozzle_diameter = dynamic_cast<const ConfigOptionFloats*>(cached_config.option("nozzle_diameter"));
     m_cache_extruder_count = nozzle_diameter->values.size(); //m_extruders_count;
+}
+
+// The printer settings the slicer resolves per-variant values from: the edited printer preset with the
+// project's nozzle flow types over it, as in PresetBundle::full_fff_config().
+std::vector<size_t> TabPrinter::extruder_variant_sources() const
+{
+    DynamicPrintConfig view;
+    for (const char *key : { "single_extruder_multi_material", "nozzle_diameter", "printer_extruder_id", "printer_extruder_variant",
+                             "extruder_variant_list", "extruder_type", "nozzle_volume_type" })
+        if (const ConfigOption *opt = m_config->option(key))
+            view.set_key_value(key, opt->clone());
+    if (const ConfigOption *opt = m_preset_bundle->project_config.option("nozzle_volume_type"))
+        view.set_key_value("nozzle_volume_type", opt->clone());
+    return printer_extruder_variant_sources(view);
+}
+
+size_t TabPrinter::extruder_field_index(const std::string &key, size_t extruder_idx) const
+{
+    return printer_extruder_variant_value_index(*m_config, m_variant_sources, key, extruder_idx);
+}
+
+std::vector<size_t> TabPrinter::extruder_field_layout() const
+{
+    std::vector<size_t> layout;
+    const std::vector<std::string> &keys = print_config_def.extruder_option_keys();
+    for (size_t k = 0; k < keys.size(); ++k)
+        for (size_t e = 0; e < m_extruders_count; ++e)
+            if (const size_t slot = extruder_field_index(keys[k], e); slot != e)
+                layout.insert(layout.end(), { k, e, slot });
+    return layout;
+}
+
+void TabPrinter::update_extruder_variant_pages()
+{
+    if (m_printer_technology != ptFFF || m_pages.empty())
+        return;
+    m_variant_sources = extruder_variant_sources();
+    if (extruder_field_layout() != m_extruder_field_layout)
+        build_unregular_pages();
 }
 
 bool TabPrinter::apply_extruder_cnt_from_cache()

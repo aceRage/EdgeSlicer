@@ -673,7 +673,7 @@ std::vector<std::map<NozzleVolumeType, int>> get_extruder_nozzle_stats(const std
 // True when the printer's extruders carry more than one distinct extruder variant (dual-nozzle grouping
 // machine: H2D/H2C/X2D). Same-variant toolchangers (U1) and machines with more than two extruders return
 // false.
-bool DynamicPrintConfig::support_different_extruders(int& extruder_count)
+bool DynamicPrintConfig::support_different_extruders(int& extruder_count) const
 {
     extruder_count = 0;
     std::set<std::string> variant_set;
@@ -9333,6 +9333,115 @@ bool is_machine_flow_variant_option(const std::string &key)
     return std::find(options.begin(), options.end(), key) != options.end();
 }
 
+bool is_printer_extruder_variant_option(const std::string &key)
+{
+    // The extruder_option_keys() that upstream Orca stores per variant (printer_options_with_variant_1).
+    static const std::set<std::string> options {
+        "retraction_length", "z_hop", "travel_slope", "retract_lift_above", "retract_lift_below", "retract_lift_enforce",
+        "z_hop_types", "retraction_speed", "deretraction_speed", "retraction_minimum_travel", "retract_when_changing_layer",
+        "wipe", "wipe_distance", "retract_before_wipe", "retract_length_toolchange", "retract_restart_extra",
+        "retract_restart_extra_toolchange", "long_retractions_when_cut", "retraction_distances_when_cut",
+    };
+    return options.count(key) > 0;
+}
+
+std::vector<std::vector<size_t>> printer_extruder_variant_slots(const ConfigBase &config)
+{
+    const auto *ids      = config.option<ConfigOptionInts>("printer_extruder_id");
+    const auto *variants = config.option<ConfigOptionStrings>("printer_extruder_variant");
+    if (ids == nullptr || variants == nullptr || ids->values.empty() || ids->values.size() != variants->values.size())
+        return {};
+    std::vector<std::vector<size_t>> slots;
+    for (size_t i = 0; i < ids->values.size(); ++i) {
+        const int id = ids->values[i];
+        if (id == int(slots.size()) + 1)
+            slots.emplace_back();
+        else if (slots.empty() || id != int(slots.size()))
+            return {};
+        slots.back().push_back(i);
+    }
+    if (slots.size() == ids->values.size())
+        return {};
+    return slots;
+}
+
+int printer_extruder_variant_slot(const ConfigBase &config, size_t extruder_idx)
+{
+    const auto *ids      = config.option<ConfigOptionInts>("printer_extruder_id");
+    const auto *variants = config.option<ConfigOptionStrings>("printer_extruder_variant");
+    if (ids == nullptr || variants == nullptr || ids->values.size() != variants->values.size())
+        return -1;
+    const auto *types   = config.option<ConfigOptionEnumsGeneric>("extruder_type");
+    const auto *volumes = config.option<ConfigOptionEnumsGeneric>("nozzle_volume_type");
+    const int   type    = types != nullptr && extruder_idx < types->values.size() ? types->values[extruder_idx] : int(etDirectDrive);
+    NozzleVolumeType volume = volumes != nullptr && extruder_idx < volumes->values.size() ? NozzleVolumeType(volumes->values[extruder_idx]) :
+                                                                                            nvtStandard;
+    if (volume == nvtHybrid)
+        volume = nvtStandard; // Bambu: hybrid is not a preset variant
+    const std::string wanted = std::string(type == int(etBowden) ? "Bowden" : "Direct Drive") + " " + get_nozzle_volume_type_string(volume);
+    int first = -1;
+    for (size_t i = 0; i < ids->values.size(); ++i) {
+        if (ids->values[i] != int(extruder_idx + 1))
+            continue;
+        if (first < 0)
+            first = int(i);
+        if (variants->values[i] == wanted)
+            return int(i);
+    }
+    return first;
+}
+
+std::vector<size_t> printer_extruder_variant_sources(const DynamicPrintConfig &config)
+{
+    const auto *semm = config.option<ConfigOptionBool>("single_extruder_multi_material");
+    if (semm == nullptr || semm->value)
+        return {};
+    const std::vector<std::vector<size_t>> slots = printer_extruder_variant_slots(config);
+    const auto *nozzle_diameter = dynamic_cast<const ConfigOptionVectorBase *>(config.option("nozzle_diameter"));
+    if (slots.empty() || nozzle_diameter == nullptr || nozzle_diameter->size() != slots.size())
+        return {};
+
+    // Which slot each extruder reads. Bambu's grouping machines (H2D, H2C, X2D) index these vectors by
+    // filament, not by extruder, so they keep the values Preset::normalize used to cut them down to.
+    int        extruder_count = 0;
+    const bool grouping       = config.support_different_extruders(extruder_count);
+    std::vector<size_t> sources(slots.size());
+    for (size_t e = 0; e < slots.size(); ++e)
+        sources[e] = grouping ? e : size_t(std::max(0, printer_extruder_variant_slot(config, e)));
+    return sources;
+}
+
+size_t printer_extruder_variant_value_index(const ConfigBase &config, const std::vector<size_t> &sources, const std::string &key,
+                                            size_t extruder_idx)
+{
+    if (extruder_idx >= sources.size() || !is_printer_extruder_variant_option(key))
+        return extruder_idx;
+    const auto *ids = config.option<ConfigOptionInts>("printer_extruder_id");
+    const auto *opt = dynamic_cast<const ConfigOptionVectorBase *>(config.option(key));
+    if (ids == nullptr || opt == nullptr || opt->size() != ids->values.size())
+        return extruder_idx;
+    return sources[extruder_idx];
+}
+
+void resolve_printer_extruder_variants(DynamicPrintConfig &config)
+{
+    const std::vector<size_t> sources = printer_extruder_variant_sources(config);
+    if (sources.empty())
+        return;
+    const size_t slot_count = config.option<ConfigOptionInts>("printer_extruder_id")->values.size();
+    for (const std::string &key : print_config_def.extruder_option_keys()) {
+        if (!is_printer_extruder_variant_option(key))
+            continue;
+        auto *opt = dynamic_cast<ConfigOptionVectorBase *>(config.option(key));
+        if (opt == nullptr || opt->size() != slot_count)
+            continue;
+        std::unique_ptr<ConfigOption> all(opt->clone());
+        opt->resize(sources.size());
+        for (size_t e = 0; e < sources.size(); ++e)
+            opt->set_at(all.get(), e, sources[e]);
+    }
+}
+
 size_t get_config_idx(const ConfigBase &config, ConfigFlowDomain domain, unsigned int filament_id)
 {
     // An id of -1 (unsigned wrap) used to run the Filament segment loop ~4e9 times.
@@ -9642,6 +9751,40 @@ void PrintConfigDef::handle_legacy(t_config_option_key &opt_key, std::string &va
         opt_key = "";
         return;
     }
+}
+
+// Keys that preset files carry but presets deliberately do not hold. Kept next to the obsolete-key
+// ignore set in handle_legacy() above, but unlike that set these keys stay defined in
+// print_config_def (the G-code placeholders read their defaults), so they are not erased while a
+// config is parsed; Preset::remove_invalid_keys() recognises them and drops them quietly.
+bool PrintConfigDef::unsupported_foreign_key(const std::string &opt_key, ForeignKeyOrigin *origin)
+{
+    static const std::map<std::string, ForeignKeyOrigin> foreign = {
+        // Bambu Studio per-filament flush / wipe-tower cooling settings. The bundled BBL, Orca filament
+        // library and Snapmaker profiles carry them; the fork reads the defaults (0 = use the filament's
+        // max volumetric speed / the top of its temperature range, no cooling before the tower).
+        { "filament_flush_temp",             ForeignKeyOrigin::BambuStudio },
+        { "filament_flush_volumetric_speed", ForeignKeyOrigin::BambuStudio },
+        { "filament_cooling_before_tower",   ForeignKeyOrigin::BambuStudio },
+        // Project-wide mixed-filament rows (PresetBundle::project_config). The edited process preset
+        // picks a copy up when mixed filaments change, and saving the preset writes it to disk.
+        { "mixed_filament_definitions",      ForeignKeyOrigin::ProjectScoped },
+    };
+    const auto it = foreign.find(opt_key);
+    if (it == foreign.end())
+        return false;
+    if (origin != nullptr)
+        *origin = it->second;
+    return true;
+}
+
+const char *PrintConfigDef::foreign_key_origin_label(ForeignKeyOrigin origin)
+{
+    switch (origin) {
+    case ForeignKeyOrigin::BambuStudio:   return "unsupported Bambu Studio keys";
+    case ForeignKeyOrigin::ProjectScoped: return "project-level keys saved into presets";
+    }
+    return "unsupported keys";
 }
 
 // Called after a config is loaded as a whole.
@@ -10055,6 +10198,24 @@ void  handle_legacy_sla(DynamicPrintConfig &config)
 void DynamicPrintConfig::set_num_extruders(unsigned int num_extruders)
 {
     const auto &defaults = FullPrintConfig::defaults();
+    // A printer in the per-extruder-variant layout stores its retraction settings per (extruder, variant)
+    // slot. Cutting those vectors to the extruder count kept extruder 1's variants and the first variants
+    // of extruder 2 and lost the rest, so they are resized per extruder, all of its slots together.
+    const std::vector<std::vector<size_t>> slots      = printer_extruder_variant_slots(*this);
+    const size_t                           slot_count = slots.empty() ? 0 : this->option<ConfigOptionInts>("printer_extruder_id")->values.size();
+    // Extruder e keeps its own slots; an added extruder takes extruder 1's, as resize() gives it
+    // extruder 1's value.
+    std::vector<size_t> kept;
+    for (size_t e = 0; e < num_extruders && !slots.empty(); ++e)
+        for (size_t slot : slots[e < slots.size() ? e : 0])
+            kept.push_back(slot);
+    auto keep_slots = [&kept](ConfigOptionVectorBase &opt) {
+        std::unique_ptr<ConfigOption> all(opt.clone());
+        opt.resize(kept.size());
+        for (size_t i = 0; i < kept.size(); ++i)
+            opt.set_at(all.get(), i, kept[i]);
+    };
+
     for (const std::string &key : print_config_def.extruder_option_keys()) {
         if (key == "default_filament_profile")
             // Don't resize this field, as it is presented to the user at the "Dependencies" page of the Printer profile and we don't want to present
@@ -10063,8 +10224,26 @@ void DynamicPrintConfig::set_num_extruders(unsigned int num_extruders)
         auto *opt = this->option(key, false);
         assert(opt != nullptr);
         assert(opt->is_vector());
-        if (opt != nullptr && opt->is_vector())
-            static_cast<ConfigOptionVectorBase*>(opt)->resize(num_extruders, defaults.option(key));
+        if (opt == nullptr || !opt->is_vector())
+            continue;
+        auto *vec = static_cast<ConfigOptionVectorBase*>(opt);
+        if (slot_count > 0 && is_printer_extruder_variant_option(key) && vec->size() == slot_count) {
+            if (slots.size() != num_extruders)
+                keep_slots(*vec);
+            continue;
+        }
+        vec->resize(num_extruders, defaults.option(key));
+    }
+
+    if (slot_count > 0 && slots.size() != num_extruders) {
+        // The layout follows the new extruder count.
+        keep_slots(*this->option<ConfigOptionStrings>("printer_extruder_variant"));
+        auto  *ids = this->option<ConfigOptionInts>("printer_extruder_id");
+        ids->values.clear();
+        for (size_t e = 0; e < num_extruders; ++e)
+            ids->values.insert(ids->values.end(), slots[e < slots.size() ? e : 0].size(), int(e + 1));
+        if (auto *list = this->option<ConfigOptionStrings>("extruder_variant_list"); list != nullptr && list->values.size() == slots.size())
+            list->resize(num_extruders);
     }
 }
 

@@ -47,6 +47,7 @@ add_executable(${_TEST_NAME}_tests
 	test_edgegrid.cpp
 	test_cut_recipe.cpp
 	test_config_include.cpp
+	test_foreign_preset_keys.cpp
 	test_custom_gcode.cpp
 	test_default_bed_type.cpp
 	test_dual_nozzle_group.cpp
@@ -93,6 +94,7 @@ add_executable(${_TEST_NAME}_tests
 	test_local_z_order_optimizer.cpp
 	test_placeholder_parser.cpp
 	test_polygon.cpp
+	test_extruder_variant_normalize.cpp
 	test_preset_diff.cpp
 	test_print_settings_carry.cpp
 	test_filament_variant_autoenable.cpp
