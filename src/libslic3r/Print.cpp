@@ -2316,11 +2316,12 @@ StringObjectException Print::validate(StringObjectException *warning, Polygons* 
         // #4043
         if (total_copies_count > 1 && m_config.print_sequence != PrintSequence::ByObject)
             return {L("Please select \"By object\" print sequence to print multiple objects in spiral vase mode."), nullptr, "spiral_mode"};
-        // Side stabilizers without supports are support-role layers the vase cannot carry. (With
-        // supports on they were never refused here, and that is left as it was.)
+        // Side stabilizers are support-role layers the vase cannot carry (a layer with support is never
+        // a spiral layer), supports on or off. The spiral settings dialog only clears Enable supports,
+        // so with supports on this combination was reachable from a project or the CLI.
         for (const PrintObject* object : m_objects)
-            if (object->has_stabilizers() && !object->has_support_material())
-                return {L("Side stabilizers cannot be printed in spiral vase mode. Turn the stabilizers off or spiral vase mode off."), object, "stabilizer_supports"};
+            if (object->has_stabilizers())
+                return {L("Spiral vase mode can't be used with side stabilizers. Turn the stabilizers off or spiral vase mode off."), object, "stabilizer_supports"};
         assert(m_objects.size() == 1);
         const auto all_regions = m_objects.front()->all_regions();
         if (all_regions.size() > 1) {

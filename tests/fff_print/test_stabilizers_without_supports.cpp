@@ -273,29 +273,30 @@ TEST_CASE("Side stabilizers alone put the support filament in the print's extrud
     }
 }
 
-TEST_CASE("Side stabilizers without supports refuse spiral vase mode", "[StabilizersNoSupport]")
+TEST_CASE("Side stabilizers refuse spiral vase mode, supports on or off", "[StabilizersNoSupport]")
 {
-    for (bool stabilizers : { false, true }) {
-        DYNAMIC_SECTION("stabilizers " << stabilizers)
-        {
-            DynamicPrintConfig config = pin_config(false, stabilizers);
-            config.set_deserialize_strict({ { "spiral_mode", "1" } });
-            Sliced s;
-            ModelObject *object = s.model.add_object();
-            object->add_volume(pin_mesh());
-            object->add_instance();
-            object->ensure_on_bed();
-            s.print.auto_assign_extruders(object);
-            s.print.apply(s.model, config);
-            const StringObjectException err = s.print.validate();
-            if (stabilizers) {
-                CHECK(err.opt_key == "stabilizer_supports");
-                CHECK_FALSE(err.string.empty());
-            } else {
-                CHECK(err.opt_key != "stabilizer_supports");
+    for (bool supports : { false, true })
+        for (bool stabilizers : { false, true }) {
+            DYNAMIC_SECTION("supports " << supports << ", stabilizers " << stabilizers)
+            {
+                DynamicPrintConfig config = pin_config(supports, stabilizers);
+                config.set_deserialize_strict({ { "spiral_mode", "1" } });
+                Sliced s;
+                ModelObject *object = s.model.add_object();
+                object->add_volume(pin_mesh());
+                object->add_instance();
+                object->ensure_on_bed();
+                s.print.auto_assign_extruders(object);
+                s.print.apply(s.model, config);
+                const StringObjectException err = s.print.validate();
+                if (stabilizers) {
+                    CHECK(err.opt_key == "stabilizer_supports");
+                    CHECK(err.string.find("stabilizers") != std::string::npos);
+                } else {
+                    CHECK(err.opt_key != "stabilizer_supports");
+                }
             }
         }
-    }
 }
 
 TEST_CASE("The stabilizer bake does not need Enable supports", "[StabilizersNoSupport]")
