@@ -6,6 +6,7 @@
 #include "libslic3r.h"
 #include "I18N.hpp"
 #include "GCode.hpp"
+#include "GCodeReader.hpp"
 #include "CostEstimate.hpp"
 #include "LocalZOrderOptimizer.hpp"
 #include "Exception.hpp"
@@ -4878,6 +4879,42 @@ DynamicConfig GCode::build_placeholder_process_config(unsigned int current_extru
     return process_config_override;
 }
 
+// Motion limits (acceleration / jerk) that a custom G-code section changes behind the G-code writer's back.
+struct CustomGCodeMotionStateChanges
+{
+    bool acceleration = false;
+    bool jerk         = false;
+};
+
+static bool custom_gcode_line_has_xy_parameter(const std::string& raw)
+{
+    const size_t           comment_pos = raw.find(';');
+    const std::string_view code(raw.data(), comment_pos == std::string::npos ? raw.size() : comment_pos);
+    return code.find_first_of("XxYy") != std::string_view::npos;
+}
+
+static CustomGCodeMotionStateChanges custom_gcode_motion_state_changes(const std::string& gcode)
+{
+    CustomGCodeMotionStateChanges changes;
+    GCodeReader                   parser;
+    parser.parse_buffer(gcode, [&changes](GCodeReader& parser, const GCodeReader::GCodeLine& line) {
+        const std::string_view cmd = line.cmd();
+        if (boost::iequals(cmd, "M204") || boost::iequals(cmd, "M201") || boost::iequals(cmd, "M202"))
+            changes.acceleration = true;
+        else if ((boost::iequals(cmd, "M205") || boost::iequals(cmd, "M207") || boost::iequals(cmd, "M566")) &&
+                 custom_gcode_line_has_xy_parameter(line.raw()))
+            changes.jerk = true;
+        else if (boost::iequals(cmd, "SET_VELOCITY_LIMIT")) {
+            changes.acceleration |= boost::icontains(line.raw(), "ACCEL=");
+            changes.jerk |= boost::icontains(line.raw(), "SQUARE_CORNER_VELOCITY=");
+        }
+
+        if (changes.acceleration && changes.jerk)
+            parser.quit_parsing();
+    });
+    return changes;
+}
+
 std::string GCode::placeholder_parser_process(const std::string&   name,
                                               const std::string&   templ,
                                               unsigned int         current_extruder_id,
@@ -4928,6 +4965,11 @@ std::string GCode::placeholder_parser_process(const std::string&   name,
         ppi.update_from_gcodewriter(m_writer);
         std::string output = ppi.parser.process(templ, current_extruder_id, &process_config_override, &ppi.output_config, &ppi.context);
         ppi.validate_output_vector_variables();
+        const CustomGCodeMotionStateChanges motion_state_changes = custom_gcode_motion_state_changes(output);
+        if (motion_state_changes.acceleration)
+            m_writer.invalidate_acceleration();
+        if (motion_state_changes.jerk)
+            m_writer.invalidate_jerk();
 
         if (const std::vector<double>& pos = ppi.opt_position->values; ppi.position != pos) {
             // Update G-code writer.
@@ -8586,17 +8628,38 @@ LayerResult GCode::process_layer(const Print& print,
             if (is_anything_overridden && print_wipe_extrusions == 0)
                 gcode += "; PURGING FINISHED\n";
 
+            // Orca (#12937): objects with different layer heights do not share layers, so a per-object skirt / draft
+            // shield has to be generated from the layer of its own object (or of its raft) at this print_z.
+            bool skirt_generated_for_current_print_z = false;
+
             for (InstanceToPrint& instance_to_print : instances_to_print) {
                 if (print.config().skirt_type == stPerObject && !instance_to_print.print_object.object_skirt().empty() &&
-                    print.config().print_sequence == PrintSequence::ByLayer &&
-                    (layer.id() < print.config().skirt_height || print.config().draft_shield == DraftShield::dsEnabled)) {
-                    if (first_layer)
-                        m_skirt_done.clear();
-                    const Point& offset = instance_to_print.print_object.instances()[instance_to_print.instance_id].shift;
-                    gcode += generate_skirt(print, instance_to_print.print_object.object_skirt(), offset,
-                                            instance_to_print.print_object.config().skirt_start_angle, layer_tools, layer, extruder_id);
-                    if (instances_to_print.size() > 1 && &instance_to_print != &*(instances_to_print.end() - 1))
-                        m_skirt_done.pop_back();
+                    print.config().print_sequence == PrintSequence::ByLayer) {
+                    const LayerToPrint& skirt_layer_to_print = layers[instance_to_print.layer_id];
+                    const Layer*        skirt_layer          = skirt_layer_to_print.object_layer;
+                    if (skirt_layer == nullptr && skirt_layer_to_print.support_layer != nullptr &&
+                        skirt_layer_to_print.support_layer->id() <
+                            skirt_layer_to_print.support_layer->object()->slicing_parameters().raft_layers()) {
+                        skirt_layer = skirt_layer_to_print.support_layer;
+                    }
+
+                    if (skirt_layer != nullptr &&
+                        (skirt_layer->id() < print.config().skirt_height || print.config().draft_shield == DraftShield::dsEnabled)) {
+                        const bool skirt_first_layer = (skirt_layer->id() == 0 && std::abs(skirt_layer->bottom_z()) < EPSILON);
+                        if (skirt_first_layer)
+                            m_skirt_done.clear();
+
+                        if (skirt_generated_for_current_print_z && !m_skirt_done.empty())
+                            m_skirt_done.pop_back();
+
+                        const Point& offset      = instance_to_print.print_object.instances()[instance_to_print.instance_id].shift;
+                        std::string  skirt_gcode = generate_skirt(print, instance_to_print.print_object.object_skirt(), offset,
+                                                                  instance_to_print.print_object.config().skirt_start_angle, layer_tools,
+                                                                  *skirt_layer, extruder_id);
+                        if (!skirt_gcode.empty())
+                            skirt_generated_for_current_print_z = true;
+                        gcode += std::move(skirt_gcode);
+                    }
                 }
 
                 const auto&         inst           = instance_to_print.print_object.instances()[instance_to_print.instance_id];
@@ -9742,11 +9805,21 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
         gcode += this->travel_to(path.first_point(), path.role(), "move to first " + description + " point",
                                  sloped == nullptr ? ((zaa_contoured || path.z_offset != 0.f) ? zaa_first_z : DBL_MAX)
                                                    : get_sloped_z(sloped->slope_begin.z_ratio));
-        m_need_change_layer_lift_z = false;
-        // Orca: force restore Z after unknown last pos
-        if (_last_pos_undefined && !slope_need_z_travel) {
-            gcode += this->writer().travel_to_z(m_last_layer_z, "force restore Z after unknown last pos", true);
+        // Orca: ensure Z matches planned layer height
+        // Ultra: slope_need_z_travel is also set for a flat path whose planned start Z (zaa_first_z: offset
+        // layers, ZAA) differs from the writer's Z, so for a flat path it must not gate a layer-change lift
+        // that travel_to() left pending - it emits nothing when the path starts where the last one ended
+        // (Orca #13327), and that is exactly when the writer's Z differs. A flat path is synced to its own
+        // planned start Z, which is the nominal Z unless offset layers or ZAA raise it.
+        const bool sync_z = sloped == nullptr ?
+            ((_last_pos_undefined && !slope_need_z_travel) || m_need_change_layer_lift_z) :
+            (!slope_need_z_travel && (_last_pos_undefined || m_need_change_layer_lift_z));
+        if (sync_z) {
+            const std::string z_sync_comment = _last_pos_undefined ?
+                "ensure Z matches planned layer height" : ""; // no comment for normal layer-Z lift
+            gcode += this->writer().travel_to_z(sloped == nullptr ? zaa_first_z : m_nominal_z, z_sync_comment, true);
         }
+        m_need_change_layer_lift_z = false;
     }
 
     // ZAA: land on this path's own starting Z whatever the previous path left behind - a contoured
@@ -9980,17 +10053,22 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
     const bool speed_was_invalid = !(speed >= 1e-6);
     if (speed_was_invalid)
         speed = filament_max_volumetric_speed / _mm3_per_mm;
-    if (this->on_first_layer()) {
+    const auto _layer = layer_id();
+    if (this->on_first_layer() || this->object_layer_over_raft()) {
         // BBS: for solid infill of initial layer, speed can be higher as long as
         // wall lines have be attached
+        // Orca (#13224): the first object layer over a raft takes the first layer speeds too.
         if (path.role() != erBottomSurface) {
             // This OVERRIDES the role speed outright on the first layer, so a bad
-            // initial_layer_speed is the culprit here regardless of which role we are printing.
-            speed_setting = "initial_layer_speed";
-            speed = this->process_flow_value(m_config.initial_layer_speed);
+            // initial_layer_speed / initial_layer_infill_speed is the culprit here
+            // regardless of which role we are printing.
+            // Orca (#14616): brim is attached to the first layer walls like a wall, not like infill.
+            const bool use_first_layer_speed = is_perimeter(path.role()) || path.role() == erBrim;
+            speed_setting = use_first_layer_speed ? "initial_layer_speed" : "initial_layer_infill_speed";
+            speed         = use_first_layer_speed ? this->process_flow_value(m_config.initial_layer_speed) :
+                                                    this->process_flow_value(m_config.initial_layer_infill_speed);
         }
-    } else if (m_config.slow_down_layers.values.front() > 1) {
-        const auto _layer = layer_id();
+    } else if (m_config.slow_down_layers.values.front() > 1 && m_config.raft_layers.value == 0) {
         if (_layer > 0 && _layer < m_config.slow_down_layers.values.front()) {
             const bool perim = is_perimeter(path.role());
             const auto first_layer_speed = perim ? this->process_flow_value(m_config.initial_layer_speed) :
@@ -9999,6 +10077,20 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
                 speed = std::min(speed, Slic3r::lerp(first_layer_speed, speed, (double) _layer / m_config.slow_down_layers.values.front()));
                 // The lerp floor is first_layer_speed, so if the result is unusable that key is
                 // what dragged it down.
+                if (!(speed >= 1e-6))
+                    speed_setting = perim ? "initial_layer_speed" : "initial_layer_infill_speed";
+            }
+        }
+    } else if (m_config.slow_down_layers.values.front() > 1 && m_config.raft_layers.value > 0) {
+        // Orca (#13224, #13415): with a raft the slow-down ramp starts at the first object layer
+        // (layer id raft_layers) instead of at layer 1, which would be a raft layer.
+        if (_layer > m_config.raft_layers.value && (_layer - m_config.raft_layers.value) < m_config.slow_down_layers.values.front()) {
+            const bool perim = is_perimeter(path.role());
+            const auto first_layer_speed = perim ? this->process_flow_value(m_config.initial_layer_speed) :
+                                                   this->process_flow_value(m_config.initial_layer_infill_speed);
+            if (first_layer_speed < speed) {
+                speed = std::min(speed, Slic3r::lerp(first_layer_speed, speed,
+                                                     (double) (_layer - m_config.raft_layers.value) / m_config.slow_down_layers.values.front()));
                 if (!(speed >= 1e-6))
                     speed_setting = perim ? "initial_layer_speed" : "initial_layer_infill_speed";
             }
@@ -10059,7 +10151,8 @@ std::string GCode::_extrude(const ExtrusionPath& path, const std::string& path_d
     // whole feature. It is excluded here rather than dropped out of is_perimeter(), so seams,
     // travel/retraction and small-perimeter handling still see it as the wall it is.
     // docs/superpowers/specs/2026-09-05-over-support-surfaces.md
-    if (this->process_flow_value(m_config.enable_overhang_speed) && !this->on_first_layer() && path.role() != erOverSupportPerimeter &&
+    if (this->process_flow_value(m_config.enable_overhang_speed) && !this->on_first_layer() && !this->object_layer_over_raft() &&
+        path.role() != erOverSupportPerimeter &&
         (is_bridge(path.role()) || is_perimeter(path.role()))) {
         bool   is_external = is_external_perimeter(path.role());
         double ref_speed   = is_external ? this->process_flow_value(m_config.outer_wall_speed) : this->process_flow_value(m_config.inner_wall_speed);
@@ -10824,11 +10917,27 @@ std::string GCode::travel_to(const Point& point, ExtrusionRole role, std::string
             jerk_to_set = this->process_flow_value(m_config.initial_layer_jerk);
         }
     } else {
-        if (this->process_flow_value(m_config.default_acceleration) > 0 && this->process_flow_value(m_config.travel_acceleration) > 0) {
-            acceleration_to_set = (unsigned int) floor(this->process_flow_value(m_config.travel_acceleration) + 0.5);
+        // Orca: a travel shorter than the retraction threshold that leads into an external perimeter keeps the outer wall
+        // acceleration / jerk, so the nozzle does not decelerate to travel limits just before the visible wall starts.
+        const bool short_travel_to_outer_wall = role == erExternalPerimeter &&
+                                                travel.length() < scale_(EXTRUDER_CONFIG(retraction_minimum_travel));
+        if (this->process_flow_value(m_config.default_acceleration) > 0) {
+            if (short_travel_to_outer_wall) {
+                if (this->process_flow_value(m_config.outer_wall_acceleration) > 0)
+                    acceleration_to_set = (unsigned int) floor(this->process_flow_value(m_config.outer_wall_acceleration) + 0.5);
+            } else {
+                if (this->process_flow_value(m_config.travel_acceleration) > 0)
+                    acceleration_to_set = (unsigned int) floor(this->process_flow_value(m_config.travel_acceleration) + 0.5);
+            }
         }
-        if (this->process_flow_value(m_config.default_jerk) > 0 && this->process_flow_value(m_config.travel_jerk) > 0) {
-            jerk_to_set = this->process_flow_value(m_config.travel_jerk);
+        if (this->process_flow_value(m_config.default_jerk) > 0) {
+            if (short_travel_to_outer_wall) {
+                if (this->process_flow_value(m_config.outer_wall_jerk) > 0)
+                    jerk_to_set = this->process_flow_value(m_config.outer_wall_jerk);
+            } else {
+                if (this->process_flow_value(m_config.travel_jerk) > 0)
+                    jerk_to_set = this->process_flow_value(m_config.travel_jerk);
+            }
         }
     }
     if (m_writer.get_gcode_flavor() == gcfKlipper) {

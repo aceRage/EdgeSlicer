@@ -778,7 +778,8 @@ void GCodeProcessor::apply_config(const PrintConfig& config)
     // PHYSICAL extruder (BambuStudio writes T<physical_extruder_map[e]>): filament 1/2 heated
     // the wrong hotend - on an H2C possibly a nozzle about to be parked. Bambu Studio never
     // emits these lines. Every other tool changer (U1, Prusa XL, ...) keeps them.
-    m_result.backtrace_enabled = m_preheat_time > 0 && !s_IsBBLPrinter &&
+    // Orca (#11791): and only when ooze prevention is on; with it off no preheat lines are wanted.
+    m_result.backtrace_enabled = config.ooze_prevention && m_preheat_time > 0 && !s_IsBBLPrinter &&
                                  (m_is_XL_printer || (!m_single_extruder_multi_material && extruders_count > 1));
 
     m_extruder_offsets.resize(extruders_count);
