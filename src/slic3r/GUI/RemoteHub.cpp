@@ -66,7 +66,10 @@
 #  include <windows.h>
 #  pragma comment(lib, "iphlpapi.lib")
 #else
+#  include <cerrno>
+#  include <fcntl.h>
 #  include <signal.h>
+#  include <sys/file.h>
 #  include <sys/wait.h>
 #  include <unistd.h>
 #endif
@@ -155,6 +158,8 @@ std::string instances_dir() { return (fs::path(hub_dir()) / "instances").string(
 std::string uploads_dir()   { return (fs::path(hub_dir()) / "uploads").string(); }
 std::string saves_dir()     { return (fs::path(hub_dir()) / "saves").string(); }
 static std::string hub_json_path()     { return (fs::path(hub_dir()) / "hub.json").string(); }
+// Held (an OS lock) by the hub process from its first moment to its last: one hub per data dir.
+static std::string hub_lock_path()     { return (fs::path(hub_dir()) / "hub.lock").string(); }
 // Left by a clean quit next to where hub.json was: why the hub quit ("tray", "request", "idle"), so
 // a slicer that finds no hub can say which it was. Removed again when a hub starts.
 static std::string last_exit_json_path() { return (fs::path(hub_dir()) / "last_exit.json").string(); }
@@ -639,10 +644,13 @@ static bool              started_by_hub()
 }
 
 // Start a process that outlives us. `env` entries are added to the child's environment;
-// `job` (Windows Job Object handle) ties the child to OUR lifetime instead.
+// `job` (Windows Job Object handle) ties the child to OUR lifetime instead. `process_out` (Windows)
+// receives the child's process handle, for a caller that may have to stop exactly that process
+// later without trusting a pid that could have been reused; the caller closes it.
 static long spawn_process(const std::vector<std::string>& args, const std::vector<std::pair<std::string, std::string>>& env,
-                          bool hide_console, void* job)
+                          bool hide_console, void* job, void** process_out = nullptr)
 {
+    if (process_out) *process_out = nullptr;
 #ifdef _WIN32
     std::wstring cmd;
     for (const std::string& a : args) {
@@ -678,7 +686,8 @@ static long spawn_process(const std::vector<std::string>& args, const std::vecto
     }
     if (job) ::AssignProcessToJobObject((HANDLE) job, pi.hProcess);
     ::CloseHandle(pi.hThread);
-    ::CloseHandle(pi.hProcess);
+    if (process_out) *process_out = pi.hProcess;
+    else ::CloseHandle(pi.hProcess);
     return (long) pi.dwProcessId;
 #else
     (void) hide_console; (void) job;
@@ -712,6 +721,131 @@ static long spawn_process(const std::vector<std::string>& args, const std::vecto
     ::waitpid(child, &status, 0);
     return gp;
 #endif
+}
+
+// ---- hub.lock: one hub per data dir ----
+// The hub takes an exclusive lock on hub.lock before it does anything else and keeps it until the
+// process ends; an exit, a crash and a kill all release it. A second hub, however it was started
+// (two slicers at once, a slicer that gave up on a slow hub and spawned another, a gate), cannot
+// take it and exits. Checking hub.json or /hub/info instead was racy: a hub that is still starting
+// has written neither. The pid goes into the file for whoever wants to know which process holds
+// it; on Windows the lock sits on a byte 2 GiB in, far past that text, because a locked range
+// cannot be read and readers fetch in buffers (PowerShell's Get-Content failed on a lock at 4096).
+#ifdef _WIN32
+static HANDLE      s_hub_lock    = INVALID_HANDLE_VALUE;
+static const DWORD HUB_LOCK_BYTE = 0x80000000u;
+#else
+static int s_hub_lock = -1;
+#endif
+
+enum class LockTry { Taken, Busy, Error };
+
+// `keep`: the hub taking it for good. Otherwise a probe: take it and let go at once, which tells
+// "held" from "free" without ever making a starting hub fail (it retries for LOCK_RETRY_MS).
+static LockTry try_hub_lock(bool keep)
+{
+#ifdef _WIN32
+    HANDLE h = ::CreateFileW(widen(hub_lock_path()).c_str(), keep ? (GENERIC_READ | GENERIC_WRITE) : GENERIC_READ,
+                             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, keep ? OPEN_ALWAYS : OPEN_EXISTING,
+                             FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return LockTry::Error;
+    OVERLAPPED ov = {};
+    ov.Offset     = HUB_LOCK_BYTE;
+    if (!::LockFileEx(h, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, &ov)) {
+        const DWORD err = ::GetLastError();
+        ::CloseHandle(h);
+        return err == ERROR_LOCK_VIOLATION || err == ERROR_IO_PENDING ? LockTry::Busy : LockTry::Error;
+    }
+    if (keep) {
+        s_hub_lock = h; // never closed: the process ending is what releases it
+        return LockTry::Taken;
+    }
+    ::UnlockFileEx(h, 0, 1, 0, &ov);
+    ::CloseHandle(h);
+    return LockTry::Taken;
+#else
+    const int fd = ::open(hub_lock_path().c_str(), keep ? (O_RDWR | O_CREAT | O_CLOEXEC) : (O_RDONLY | O_CLOEXEC), 0644);
+    if (fd < 0) return LockTry::Error;
+    if (::flock(fd, LOCK_EX | LOCK_NB) != 0) {
+        const int err = errno;
+        ::close(fd);
+        return err == EWOULDBLOCK ? LockTry::Busy : LockTry::Error;
+    }
+    if (keep) {
+        s_hub_lock = fd; // O_CLOEXEC: the slicers this hub starts do not inherit it
+        return LockTry::Taken;
+    }
+    ::flock(fd, LOCK_UN);
+    ::close(fd);
+    return LockTry::Taken;
+#endif
+}
+
+// Record who holds it, once taken.
+static void write_hub_lock_owner()
+{
+    nlohmann::json j;
+    j["pid"] = current_pid();
+    j["exe"] = own_exe_identity();
+    const std::string text = j.dump() + "\n";
+#ifdef _WIN32
+    if (s_hub_lock == INVALID_HANDLE_VALUE) return;
+    DWORD      n  = 0;
+    OVERLAPPED ov = {}; // offset 0
+    ::WriteFile(s_hub_lock, text.data(), (DWORD) text.size(), &n, &ov);
+    LARGE_INTEGER end;
+    end.QuadPart = (LONGLONG) text.size();
+    ::SetFilePointerEx(s_hub_lock, end, nullptr, FILE_BEGIN);
+    ::SetEndOfFile(s_hub_lock);
+#else
+    if (s_hub_lock < 0) return;
+    (void) !::ftruncate(s_hub_lock, 0);
+    (void) !::pwrite(s_hub_lock, text.data(), text.size(), 0);
+#endif
+}
+
+static long hub_lock_owner_pid()
+{
+    try {
+        return nlohmann::json::parse(read_file(hub_lock_path())).value("pid", 0L);
+    } catch (...) {}
+    return 0;
+}
+
+struct HubLockState
+{
+    bool held { false };
+    long pid { 0 }; // 0: held, but the owner has not written itself in yet
+};
+
+// What a slicer sees: is a hub (starting or running) holding the lock, and which pid.
+static HubLockState hub_lock_state()
+{
+    HubLockState s;
+    if (try_hub_lock(false) != LockTry::Busy) return s; // free, or no file: nobody holds it
+    s.held = true;
+    s.pid  = hub_lock_owner_pid();
+    return s;
+}
+
+// The hub's side: take it, riding out a slicer's probe that happens to hold it for a moment.
+// Busy when another hub has it (`holder` its pid, if it wrote one). Error when no lock can be made
+// at all (a read-only data dir, a file system without locks): the caller starts anyway, which is
+// how the hub ran before the lock existed. Runs before the log is set up, so it logs nothing.
+static LockTry take_hub_lock(long& holder)
+{
+    holder           = 0;
+    const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(HubHandover::LOCK_RETRY_MS);
+    for (;;) {
+        const LockTry t = try_hub_lock(true);
+        if (t == LockTry::Taken) write_hub_lock_owner();
+        if (t != LockTry::Busy) return t;
+        if (std::chrono::steady_clock::now() >= until) {
+            holder = hub_lock_owner_pid();
+            return LockTry::Busy;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
 }
 
 // ------------------------------------------------------------ HTTP bits ----
@@ -3484,7 +3618,7 @@ bool HubServer::bind(bool lan)
     // The holder lookup (netstat + tasklist) takes several seconds on a busy PC. It used to run
     // right here, before the listener was published and hub.json written, and that delay was
     // enough for a slicer that had just spawned this hub to give up waiting for it
-    // (ensure_running polls for ~6 s), so its phone-access request never arrived and the
+    // (ensure_running then polled for ~6 s), so its phone-access request never arrived and the
     // hub stayed loopback-only. The lookup is only a diagnostic, so it now runs on its own
     // thread after the listener is up and fills in the note when it is done.
     const bool fell_back = port != HUB_PORT;
@@ -5196,6 +5330,12 @@ void HubServer::serve(std::unique_ptr<tcp::socket> owner, bool admin)
 
 bool HubServer::start()
 {
+    // How long each stretch takes goes into the log when it is slow: a slicer waiting for this hub
+    // gives up at START_DEADLINE_MS, and a fresh install's first start was seen to take 105 s.
+    const auto t_start = std::chrono::steady_clock::now();
+    auto       ms_since = [](std::chrono::steady_clock::time_point t) {
+        return (long long) std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t).count();
+    };
     ensure_dirs();
     {
         // Say it at start-up, not only when a phone first asks: the usual cause is a hub launched
@@ -5298,8 +5438,12 @@ bool HubServer::start()
     AppPush::start(apppush_saved);  // reads the .p8 and the service account, if either is set
     RemoteNotify::start(notify_saved); // the relay worker; deliver() is a no-op until it has one
 
+    const auto t_gc = std::chrono::steady_clock::now();
     gc_uploads(); // whatever last time left behind, before anything new lands
+    if (ms_since(t_gc) > 2000) BOOST_LOG_TRIVIAL(warning) << "RemoteHub: tidying uploads took " << ms_since(t_gc) << " ms";
+    const auto t_go2rtc = std::chrono::steady_clock::now();
     start_go2rtc();
+    if (ms_since(t_go2rtc) > 2000) BOOST_LOG_TRIVIAL(warning) << "RemoteHub: starting go2rtc took " << ms_since(t_go2rtc) << " ms";
     BambuCamRelay::get().port();
     // The control plane first: register_streams() points go2rtc at /relay/h264 on the admin port.
     if (!bind_admin()) return false;
@@ -5310,6 +5454,7 @@ bool HubServer::start()
     // start-up bind and every later rebind from set_phone(), so there is nothing more to do here.
     if (!bind(m_phone)) return false;
     write_hub_json();
+    BOOST_LOG_TRIVIAL(info) << "RemoteHub: up after " << ms_since(t_start) << " ms";
     register_streams();
     return true;
 }
@@ -5386,7 +5531,14 @@ bool HubServer::shutdown()
         write_file(last_exit_json_path(), note.dump());
         BOOST_LOG_TRIVIAL(info) << "RemoteHub: shutting down (" << (reason ? reason : "exit") << ")";
         boost::system::error_code ig;
-        fs::remove(hub_json_path(), ig);
+        long record_pid = 0;
+        try {
+            record_pid = json::parse(read_file(hub_json_path())).value("pid", 0L);
+        } catch (...) {}
+        if (HubHandover::remove_record_on_quit(record_pid, current_pid()))
+            fs::remove(hub_json_path(), ig);
+        else
+            BOOST_LOG_TRIVIAL(warning) << "RemoteHub: hub.json belongs to pid " << record_pid << ", leaving it";
         std::lock_guard<std::mutex> lock(m_mutex);
         if (m_acceptor) m_acceptor->close(ig);
         if (m_admin_acceptor) m_admin_acceptor->close(ig);
@@ -5619,12 +5771,24 @@ int run_server(const std::string& token_hint, bool phone_on)
 {
     ensure_dirs();
     try {
-        set_log_path_and_level("hub.log", 3); // <datadir>/log/hub.log.<n>
+        // Only one hub per data dir. The lock first: it also covers a hub that is still starting
+        // and has no hub.json yet, which the query below cannot see - and it comes before the log,
+        // because opening hub.log truncates it, and a second hub used to wipe the running one's.
+        long          holder = 0;
+        const LockTry lock   = take_hub_lock(holder);
+        set_log_path_and_level(lock == LockTry::Busy ? "hub_refused.log" : "hub.log", 3); // <datadir>/log/hub.log.<n>
         BOOST_LOG_TRIVIAL(info) << "RemoteHub: starting, version " << SLIC3R_VERSION << ", data dir " << data_dir();
+        if (lock == LockTry::Busy) {
+            BOOST_LOG_TRIVIAL(info) << "RemoteHub: another hub (pid " << holder << ") holds " << hub_lock_path()
+                                    << " (starting or running), exiting";
+            return 0;
+        }
+        if (lock == LockTry::Error)
+            BOOST_LOG_TRIVIAL(warning) << "RemoteHub: could not lock " << hub_lock_path() << "; starting without the one-hub lock";
 #ifndef _WIN32
         ::signal(SIGPIPE, SIG_IGN);
 #endif
-        // Only one hub per data dir.
+        // ... and a hub from a build before the lock, which never takes it.
         Info existing = query();
         if (existing.alive) {
             BOOST_LOG_TRIVIAL(info) << "RemoteHub: another hub (pid " << existing.pid << ") is already running, exiting";
@@ -5871,10 +6035,84 @@ static bool post_quit(const HubFile& hf)
 // back and forth on every tab; after its one reclaim a process just uses whatever hub runs.
 static std::atomic<bool> s_handover_used { false };
 
+using SteadyClock = std::chrono::steady_clock;
+static int ms_since(SteadyClock::time_point t)
+{
+    return (int) std::chrono::duration_cast<std::chrono::milliseconds>(SteadyClock::now() - t).count();
+}
+
+// The hub this process spawned that has not answered yet (guarded by s_ensure_mutex). It outlives
+// the ensure_running() call that started it: the next caller waits for it instead of spawning a
+// second hub next to it (the 2026-10-08 orphan), and whoever is waiting when START_DEADLINE_MS
+// runs out stops it rather than leaving it to come up later beside another one.
+struct PendingHub
+{
+    long                    pid { 0 };
+    void*                   process { nullptr }; // Windows: the handle from spawn_process(), so a reused pid is never stopped
+    SteadyClock::time_point since;
+};
+static PendingHub s_pending;
+
+static bool pending_alive()
+{
+    if (s_pending.pid <= 0) return false;
+#ifdef _WIN32
+    if (s_pending.process) return ::WaitForSingleObject((HANDLE) s_pending.process, 0) == WAIT_TIMEOUT;
+#endif
+    return pid_alive(s_pending.pid);
+}
+
+static void forget_pending()
+{
+#ifdef _WIN32
+    if (s_pending.process) ::CloseHandle((HANDLE) s_pending.process);
+#endif
+    s_pending = PendingHub();
+}
+
+// Stop our own spawn that never answered. Only ever this process's own child: a hub anybody else
+// started, or one that answers, is never killed. Its go2rtc goes with it (kill-on-close job).
+static void stop_pending()
+{
+#ifdef _WIN32
+    if (s_pending.process) {
+        ::TerminateProcess((HANDLE) s_pending.process, 1);
+        ::WaitForSingleObject((HANDLE) s_pending.process, 5000);
+    }
+#else
+    if (s_pending.pid > 0) {
+        ::kill((pid_t) s_pending.pid, SIGTERM);
+        for (int n = 0; n < 30 && pid_alive(s_pending.pid); ++n) std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        if (pid_alive(s_pending.pid)) ::kill((pid_t) s_pending.pid, SIGKILL);
+    }
+#endif
+}
+
+// Whether the hub could listen on `port` right now, bound the way try_bind_range() binds it
+// (exclusively on Windows): nothing - not the old hub, not an orphan - still holds it.
+static bool port_free_for_hub(int port)
+{
+    try {
+        asio::io_context ioc;
+        tcp::acceptor    a(ioc);
+        a.open(tcp::v4());
+#ifdef _WIN32
+        a.set_option(asio::detail::socket_option::boolean<SOL_SOCKET, SO_EXCLUSIVEADDRUSE>(true));
+#else
+        a.set_option(tcp::acceptor::reuse_address(true));
+#endif
+        a.bind(tcp::endpoint(asio::ip::address_v4::any(), (unsigned short) port));
+        return true;
+    } catch (...) { return false; }
+}
+
 Info ensure_running(const std::string& token_hint, bool phone_on)
 {
     std::lock_guard<std::mutex> ensure_lock(s_ensure_mutex);
     Info i = query();
+    // A hub answers: an earlier spawn of ours either is that hub or, unable to take hub.lock, is on
+    // its way out.
+    if (i.alive && (i.pid == s_pending.pid || !pending_alive())) forget_pending();
     HubHandover::Facts facts;
     facts.hub_alive       = i.alive;
     facts.version_differs = i.alive && i.version != SLIC3R_VERSION;
@@ -5901,33 +6139,131 @@ Info ensure_running(const std::string& token_hint, bool phone_on)
             BOOST_LOG_TRIVIAL(info) << "RemoteHub: the running hub (pid " << i.pid << ") belongs to another install (" << hub_exe
                                     << "), not " << own_exe_identity() << "; asking it to hand over";
         const long old_pid  = i.pid;
+        const int  old_port = i.port;
         const bool accepted = post_quit(hub_file());
-        for (int n = 0; n < 100 && pid_alive(old_pid); ++n) std::this_thread::sleep_for(std::chrono::milliseconds(100)); // 10 s
-        const bool gone = !pid_alive(old_pid);
-        if (HubHandover::after_quit(gone) == HubHandover::Outcome::SpawnOwn) {
-            i = Info();
-        } else {
+        // Wait for its process to be gone and then for its port: the new hub binds the same one,
+        // and a hub that finds it still held moves to the next port and hands out another link.
+        const auto              asked = SteadyClock::now();
+        SteadyClock::time_point gone_at;
+        bool                    gone_seen = false;
+        HubHandover::QuitStep   step      = HubHandover::QuitStep::Wait;
+        for (;;) {
+            HubHandover::QuitFacts q;
+            q.old_gone = !pid_alive(old_pid);
+            if (q.old_gone && !gone_seen) {
+                gone_seen = true;
+                gone_at   = SteadyClock::now();
+            }
+            q.port_free     = !q.old_gone || old_port <= 0 || port_free_for_hub(old_port);
+            q.waited_ms     = ms_since(asked);
+            q.since_gone_ms = gone_seen ? ms_since(gone_at) : 0;
+            step            = HubHandover::after_quit_step(q);
+            if (step != HubHandover::QuitStep::Wait) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+        if (step == HubHandover::QuitStep::LeaveRunning) {
             // Graceful only: no kill by pid or by name. A second hub next to it would fight for the
             // ports and overwrite hub.json, so this slicer uses the one that is there.
             BOOST_LOG_TRIVIAL(error) << "RemoteHub: the hub (pid " << old_pid << ") "
                                      << (accepted ? "accepted /hub/quit but is still running after 10 s" : "did not accept /hub/quit")
                                      << "; leaving it running and using it as it is";
+        } else {
+            if (step == HubHandover::QuitStep::SpawnOwnPortHeld) {
+                const std::string holder = port_holder_description(old_port);
+                BOOST_LOG_TRIVIAL(warning) << "RemoteHub: the old hub (pid " << old_pid << ") is gone but port " << old_port
+                                           << " is still held" << (holder.empty() ? std::string() : " by " + holder)
+                                           << "; starting this install's hub anyway";
+            } else {
+                BOOST_LOG_TRIVIAL(info) << "RemoteHub: the old hub (pid " << old_pid << ") exited and its port is free after "
+                                        << ms_since(asked) << " ms";
+            }
+            i = Info();
         }
     }
     if (!i.alive) {
-        std::vector<std::string> args = { current_exe(), "--hub", "--datadir", data_dir() };
-        if (valid_token(token_hint)) { args.push_back("--hub-token"); args.push_back(token_hint); }
-        if (phone_on) args.push_back("--hub-phone");
-        const long pid = spawn_process(args, {}, true, nullptr);
-        BOOST_LOG_TRIVIAL(info) << "RemoteHub: spawned hub pid " << pid;
-        if (pid > 0)
-            for (int n = 0; n < 60 && !i.alive; ++n) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(200));
-                i = query();
+        if (s_pending.pid > 0 && !pending_alive()) {
+            BOOST_LOG_TRIVIAL(warning) << "RemoteHub: the hub this slicer started earlier (pid " << s_pending.pid << ") exited without coming up";
+            forget_pending();
+        }
+        HubLockState            lock = hub_lock_state();
+        HubHandover::Starting   st;
+        st.own_pending_pid   = s_pending.pid;
+        st.own_pending_alive = pending_alive();
+        st.lock_held         = lock.held;
+        bool own             = true;
+        long waiting_on      = 0;
+        switch (HubHandover::start_plan(st)) {
+        case HubHandover::StartPlan::Spawn: {
+            std::vector<std::string> args = { current_exe(), "--hub", "--datadir", data_dir() };
+            if (valid_token(token_hint)) { args.push_back("--hub-token"); args.push_back(token_hint); }
+            if (phone_on) args.push_back("--hub-phone");
+            void*      process = nullptr;
+            const long pid     = spawn_process(args, {}, true, nullptr, &process);
+            BOOST_LOG_TRIVIAL(info) << "RemoteHub: spawned hub pid " << pid;
+            if (pid <= 0) {
+                BOOST_LOG_TRIVIAL(error) << "RemoteHub: the hub did not come up (it could not be started)";
+                return i;
             }
-        if (!i.alive) {
-            BOOST_LOG_TRIVIAL(error) << "RemoteHub: the hub did not come up";
-            return i;
+            s_pending.pid     = pid;
+            s_pending.process = process;
+            s_pending.since   = SteadyClock::now();
+            waiting_on        = pid;
+            break;
+        }
+        case HubHandover::StartPlan::WaitOwn:
+            waiting_on = s_pending.pid;
+            BOOST_LOG_TRIVIAL(info) << "RemoteHub: the hub this slicer started (pid " << waiting_on << ") is still starting ("
+                                    << ms_since(s_pending.since) / 1000 << " s); waiting for it, not starting another";
+            break;
+        case HubHandover::StartPlan::WaitOther:
+            own        = false;
+            waiting_on = lock.pid;
+            BOOST_LOG_TRIVIAL(info) << "RemoteHub: another hub (pid " << waiting_on << ") holds hub.lock and is starting; waiting for it, not starting another";
+            break;
+        }
+        auto other_since = SteadyClock::now();
+        for (bool up = false; !up;) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+            i    = query();
+            lock = hub_lock_state();
+            HubHandover::WaitFacts w;
+            w.hub_answers   = i.alive;
+            w.own           = own;
+            w.lock_held     = lock.held;
+            w.process_alive = own ? pending_alive() : lock.held;
+            w.elapsed_ms    = own ? ms_since(s_pending.since) : ms_since(other_since);
+            switch (HubHandover::wait_step(w)) {
+            case HubHandover::WaitStep::Up:
+                if (own) BOOST_LOG_TRIVIAL(info) << "RemoteHub: the hub (pid " << i.pid << ") is up after " << ms_since(s_pending.since) << " ms";
+                if (own || i.pid == s_pending.pid) forget_pending();
+                up = true;
+                break;
+            case HubHandover::WaitStep::Wait: break;
+            case HubHandover::WaitStep::WaitOther:
+                BOOST_LOG_TRIVIAL(info) << "RemoteHub: hub pid " << waiting_on << " exited; another hub (pid " << lock.pid
+                                        << ") holds hub.lock, waiting for that one";
+                forget_pending();
+                own         = false;
+                waiting_on  = lock.pid;
+                other_since = SteadyClock::now();
+                break;
+            case HubHandover::WaitStep::Exited:
+                BOOST_LOG_TRIVIAL(error) << "RemoteHub: the hub did not come up: pid " << waiting_on << " exited first";
+                if (own) forget_pending();
+                return i;
+            case HubHandover::WaitStep::Terminate:
+                BOOST_LOG_TRIVIAL(error) << "RemoteHub: the hub did not come up: pid " << waiting_on << " has not answered "
+                                         << HubHandover::START_DEADLINE_MS / 1000
+                                         << " s after it was started; stopping it so it cannot come up later as a second hub";
+                stop_pending();
+                if (pending_alive()) BOOST_LOG_TRIVIAL(error) << "RemoteHub: hub pid " << waiting_on << " did not stop";
+                forget_pending();
+                return i;
+            case HubHandover::WaitStep::GiveUp:
+                BOOST_LOG_TRIVIAL(error) << "RemoteHub: the hub did not come up: pid " << waiting_on << " (started by another process) has not answered in "
+                                         << HubHandover::START_DEADLINE_MS / 1000 << " s; leaving it to that process";
+                return i;
+            }
         }
     }
     if (phone_on && !i.phone) i = set_phone(true, token_hint);
