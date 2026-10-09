@@ -116,6 +116,14 @@ std::string resolve_model_code(const std::string &code, const std::string &print
 {
     if (code.empty())
         return "";
+    // The X1 family's definitions carry their old product names as printer_type
+    // ("3DPrinter-X1-Carbon" in BL-P001.json); the code is the model id (MachineObject::parse_printer_type).
+    if (code == "BL-P001" || code == "BL-P002")
+        return code;
+    if (code == "3DPrinter-X1-Carbon")
+        return "BL-P001";
+    if (code == "3DPrinter-X1")
+        return "BL-P002";
     std::string type = read_definition_printer_type(printers_dir, code);
     if (! type.empty())
         return type;
@@ -170,7 +178,7 @@ std::string identify_device_model(const std::string &code, const std::string &de
     if (! type.empty())
         return type;
     const std::string by_serial = resolve_model_by_serial(dev_id, sn_prefixes);
-    return by_serial.empty() ? std::string() : read_definition_printer_type(printers_dir, by_serial);
+    return by_serial.empty() ? std::string() : resolve_model_code(by_serial, printers_dir, subseries);
 }
 
 bool device_matches_profile_model(const std::string &profile_model, const std::string &device_model,

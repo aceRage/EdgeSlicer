@@ -7544,20 +7544,18 @@ std::string DeviceManager::identify_printer_type(const std::string& code, const 
     // Bambu Studio's fallback (DevPrinterConfigUtil::get_printer_type_by_dev_id): the first three
     // characters of the serial number name the model ("20P" is an X2D). This covers a printer that
     // reported no model code at all, or one saved before this build knew its code.
-    static const std::map<std::string, std::string> sn_prefixes =
-        GUI::load_model_sn_prefixes(Slic3r::resources_dir() + "/printers");
-    const std::string by_serial = GUI::resolve_model_by_serial(dev_id, sn_prefixes);
-    if (! by_serial.empty()) {
-        type = parse_printer_type(by_serial);
-        if (! type.empty()) {
-            static std::mutex            logged_mutex;
-            static std::set<std::string> logged;
-            std::lock_guard<std::mutex>  lock(logged_mutex);
-            if (logged.insert(code + "|" + type).second)
-                BOOST_LOG_TRIVIAL(info) << "identify_printer_type: model code '" << code << "' identified as " << type
-                                        << " from the serial number prefix";
-            return type;
-        }
+    const std::string printers_dir = Slic3r::resources_dir() + "/printers";
+    static const std::map<std::string, std::vector<std::string>> subseries   = GUI::load_model_subseries(printers_dir);
+    static const std::map<std::string, std::string>              sn_prefixes = GUI::load_model_sn_prefixes(printers_dir);
+    type = GUI::identify_device_model(code, dev_id, printers_dir, subseries, sn_prefixes);
+    if (! type.empty()) {
+        static std::mutex            logged_mutex;
+        static std::set<std::string> logged;
+        std::lock_guard<std::mutex>  lock(logged_mutex);
+        if (logged.insert(code + "|" + type).second)
+            BOOST_LOG_TRIVIAL(info) << "identify_printer_type: model code '" << code << "' identified as " << type
+                                    << " from the serial number prefix";
+        return type;
     }
     // Unidentified: keep what the printer reported, as Bambu Studio's _parse_printer_type does, so
     // the send dialog can name the code instead of showing an empty model. The cloud device list

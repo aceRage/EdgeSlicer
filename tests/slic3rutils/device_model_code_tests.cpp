@@ -133,6 +133,10 @@ TEST_CASE("The X2D's model code N6 and its sub-series resolve to the X2D definit
     CHECK(resolve_model_code("O1C2-V2", kPrinters, subseries) == "O1C2");
     CHECK(resolve_model_code("O1D-V2", kPrinters, subseries) == "O1D");
     CHECK(resolve_model_code("C12", kPrinters, subseries) == "C12");
+    // The X1 family: its definitions name the old product strings as printer_type.
+    CHECK(resolve_model_code("BL-P001", kPrinters, subseries) == "BL-P001");
+    CHECK(resolve_model_code("3DPrinter-X1-Carbon", kPrinters, subseries) == "BL-P001");
+    CHECK(resolve_model_code("3DPrinter-X1", kPrinters, subseries) == "BL-P002");
     CHECK(resolve_model_code("", kPrinters, subseries) == "");
     CHECK(resolve_model_code("ZZ9", kPrinters, subseries) == "");
     // A code is a file name, never a path.
@@ -203,7 +207,7 @@ TEST_CASE("Every Bambu machine model has a printer definition, bar the known gap
         INFO(it->path().filename().string() << " model_id " << id);
         if (known_gaps.count(id))
             continue;
-        CHECK(Slic3r::GUI::read_definition_printer_type(kPrinters, id) == id);
+        CHECK(Slic3r::GUI::resolve_model_code(id, kPrinters, load_model_subseries(kPrinters)) == id);
         ++checked;
     }
     CHECK(checked >= 11);
