@@ -131,3 +131,17 @@ TEST_CASE("Print by object on other printers keeps extruder_clearance_radius", "
         CHECK(min_object_distance(plain) == Approx(35.));
     }
 }
+
+TEST_CASE("min_object_distance reads a deserialized print_sequence through getInt", "[ByObjectClearance]")
+{
+    // Snap #975: a DynamicPrintConfig deserialized from strings stores enums as
+    // ConfigOptionEnumGeneric. min_object_distance must not typed-downcast them.
+    DynamicPrintConfig cfg;
+    cfg.set_deserialize_strict({{"printer_technology", "FFF"}, {"print_sequence", "by object"}, {"extruder_clearance_radius", "35"}});
+    if (dynamic_cast<const ConfigOptionEnumGeneric *>(cfg.option("print_sequence")) == nullptr)
+        WARN("print_sequence was not ConfigOptionEnumGeneric after set_deserialize_strict");
+    CHECK(min_object_distance(cfg) == Approx(35.));
+
+    cfg.erase("print_sequence");
+    CHECK(min_object_distance(cfg) == Approx(0.));
+}
