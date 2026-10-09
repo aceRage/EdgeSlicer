@@ -31,6 +31,7 @@
 #include <fstream>
 #include <map>
 #include <mutex>
+#include <locale>
 #include <sstream>
 #include <stdexcept>
 #include <unordered_map>
@@ -1297,6 +1298,10 @@ static std::vector<std::string> s_Preset_filament_options {
     "filament_retract_length_nc",
     // BBS: idle-nozzle pre-cooling / pre-heating (GCode/PreCoolingInjector); same reason as above.
     "filament_pre_cooling_temperature", "filament_preheat_temperature_delta",
+    // BBS: flush temperature / speed and the pre-tower cooling of the BBL change_filament templates
+    // (M620.10, M620.11, M620.15). The BBL, Orca filament library and Snapmaker profiles carry them;
+    // without them here the loader dropped them and the G-code always ran on the defaults.
+    "filament_flush_volumetric_speed", "filament_flush_temp", "filament_flush_temp_fast", "filament_cooling_before_tower",
     "filament_flow_support"
     };
 
@@ -1822,7 +1827,8 @@ int PresetCollection::get_differed_values_to_update(Preset& preset, std::map<std
             key_values[BBL_JSON_KEY_FILAMENT_ID] = preset.filament_id;
         }
     }
-    BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " uploading user preset name is: " << preset.name << "and create filament_id is: " << preset.filament_id
+    // debug: the cloud preset sync retries on a timer, so this repeats for every unsynced user preset
+    BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << " uploading user preset name is: " << preset.name << "and create filament_id is: " << preset.filament_id
                             << " and base_id is: " << preset.base_id;
     key_values[BBL_JSON_KEY_UPDATE_TIME] = std::to_string(preset.updated_time);
     key_values[BBL_JSON_KEY_TYPE] = Preset::get_iot_type_string(preset.type);
@@ -4492,6 +4498,31 @@ namespace PresetUtils {
         if (out.empty() ||!boost::filesystem::exists(boost::filesystem::path(out)))
             out = Slic3r::resources_dir() + "/profiles/hotend.stl";
         return out;
+    }
+
+    bool parse_bed_texture_rect(const std::string &str, std::array<float, 4> &rect)
+    {
+        std::string s = str;
+        boost::algorithm::erase_all(s, " ");
+        std::vector<std::string> items;
+        boost::split(items, s, boost::is_any_of(","));
+        if (items.size() != 4)
+            return false;
+        std::array<float, 4> out;
+        for (size_t i = 0; i < 4; ++i) {
+            if (items[i].empty())
+                return false;
+            // Independent of the UI's numeric locale: the profiles always write a '.'.
+            std::istringstream iss(items[i]);
+            iss.imbue(std::locale::classic());
+            iss >> out[i];
+            if (iss.fail() || !iss.eof())
+                return false;
+        }
+        if (!(out[2] > 0.f && out[3] > 0.f))
+            return false;
+        rect = out;
+        return true;
     }
 } // namespace PresetUtils
 

@@ -1,0 +1,12 @@
+/* Process presets list of Export Preset Bundle. The table styles are in ../css/printer_table.css. */
+
+body.ep-page {
+	/* Fill the slicer's dialog; the dialog supplies the margins. */
+	background-color: var(--pt-bg);
+}
+
+body.ep-page #PtRoot {
+	padding: 0 2px;
+	height: 100%;
+	box-sizing: border-box;
+}

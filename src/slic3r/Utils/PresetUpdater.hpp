@@ -29,11 +29,11 @@ public:
 	void sync(std::string http_url, std::string language, std::string plugin_version, PresetBundle *preset_bundle);
 
 	// The Bambu Lab part of the startup sync, against api.bambulab.com (or .cn): the printers/ OTA
-	// data and, with plugin_check, the Bambu network plug-in update check. At most once per session,
+	// data. (The Bambu network plug-in update check is gone: EdgeSlicer never downloads it.) At most once per session,
 	// on its own thread. GUI_App::maybe_start_bambu_sync() decides whether and when
 	// (BambuSyncPolicy.hpp): only once a Bambu printer or a Bambu login exists (privacy audit 2026-10).
 	// Returns false if it had already been started.
-	bool sync_bambu(std::string http_url, std::string plugin_version, bool plugin_check);
+	bool sync_bambu(std::string http_url);
 
 	// If version check is enabled, check if chaced online slic3r version is newer, notify if so.
 	void slic3r_update_notify();
