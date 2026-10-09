@@ -69,6 +69,8 @@ private:
     // Loads the picked device's web UI. Uses the preset's print_host_webui only for the device that
     // carries the preset's own address: that override is a property of that one machine's URL.
     void load_picked_device();
+    // A loopback page that failed to load comes back on this timer (WebLoadRetry.hpp).
+    void OnRetryTimer(wxTimerEvent& evt);
 
     wxWebView* m_browser;
     long m_zoomFactor;
@@ -77,6 +79,10 @@ private:
     wxChoice*     m_device_choice { nullptr };
     std::string   m_model_key;
     std::vector<PrintHostDevices::Device> m_devices;
+    wxTimer       m_retry_timer;
+    std::string   m_retry_url;      // the URL to load again when the timer fires
+    std::string   m_retry_page;     // its page (no query), which the retry count belongs to
+    int           m_retry_count { 0 };
 
     // DECLARE_EVENT_TABLE()
 };
