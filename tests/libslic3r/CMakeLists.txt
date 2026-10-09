@@ -126,6 +126,8 @@ add_executable(${_TEST_NAME}_tests
 	test_utils.cpp
 	test_instance_lock.cpp
 	TestMD5.cpp
+	test_nozzle_sync.cpp
+	test_u1_profiles.cpp
 	test_voronoi.cpp
     test_optimizers.cpp
     test_wipe_tower.cpp

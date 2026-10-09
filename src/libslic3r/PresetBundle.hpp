@@ -545,6 +545,20 @@ public:
     static const char *SM_BUNDLE;
     static const char* SM_DEFAULT_PRINTER_MODEL;
     static const char* SM_DEFAULT_PRINTER_VARIANT;
+    // The variant to activate when a printer model is newly enabled with several nozzle variants
+    // (Setup Wizard, Add Printer). The variants arrive as a sorted set, so the first one is the
+    // smallest nozzle ("0.2"); that is never what a user wants by default, and on a four-head U1 it
+    // meant a 0.2 machine on a printer that ships with 0.4 nozzles. Prefers SM_DEFAULT_PRINTER_VARIANT
+    // ("0.4") when the model has it, otherwise the first variant. Empty when there are none.
+    static std::string          default_printer_variant(const std::set<std::string> &variants);
+    // The filament preset an alias stands for in filament slot `filament_slot` (0-based). On a machine with
+    // different nozzle sizes per head only presets cut for that head's nozzle qualify; otherwise (and when
+    // none qualifies) it is the plain alias lookup.
+    std::string                 get_filament_name_by_alias_for_slot(const std::string &alias, size_t filament_slot) const;
+    // The variant to activate when a model that already had `previous` variants enabled is saved with
+    // `enabled`: empty when nothing was added, otherwise default_printer_variant(enabled) (the first
+    // newly added variant would be the smallest nozzle, "0.2", when only 0.4 was enabled before).
+    static std::string          variant_to_activate(const std::set<std::string> &previous, const std::set<std::string> &enabled);
     static const char* SM_DEFAULT_FILAMENT;
     static const char *ORCA_FILAMENT_LIBRARY;
 

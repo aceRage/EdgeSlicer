@@ -1,4 +1,5 @@
 #include "WebPresetDialog.hpp"
+#include "libslic3r/NozzleSync.hpp"
 #include "ConfigWizard.hpp"
 
 #include <string.h>
@@ -629,7 +630,7 @@ void WebPresetDialog::SendUserGuideProfile()
             if (item.count("nozzle_selected")) {
                 if (item["model"].get<std::string>() == model_name) {
                     if (!nozzle_sizes.empty()) {
-                        item["nozzle_selected"] = nozzle_sizes[0];
+                        item["nozzle_selected"] = NozzleSync::first_nozzle(nozzle_sizes);
                     } else {
                         item["nozzle_selected"] = "";
                     }
@@ -955,7 +956,7 @@ bool WebPresetDialog::apply_config(AppConfig* app_config, PresetBundle* preset_b
         // for (const auto& vendor_profile : preset_bundle->vendors) {
         for (const auto& model_it : model_maps) {
             if (model_it.second.size() > 0) {
-                variant               = *model_it.second.begin();
+                variant               = PresetBundle::default_printer_variant(model_it.second);
                 const auto config_old = old_enabled_vendors.find(bundle_name);
                 if (config_old == old_enabled_vendors.end())
                     return model_it.first;
@@ -963,11 +964,12 @@ bool WebPresetDialog::apply_config(AppConfig* app_config, PresetBundle* preset_b
                 if (model_it_old == config_old->second.end())
                     return model_it.first;
                 else if (model_it_old->second != model_it.second) {
-                    for (const auto& var : model_it.second)
-                        if (model_it_old->second.find(var) == model_it_old->second.end()) {
-                            variant = var;
-                            return model_it.first;
-                        }
+                    // Variants were added: activate the default one (0.4) when the model has it, not the first newly
+                    // added one (the smallest nozzle, "0.2", when only 0.4 was enabled before).
+                    if (std::string added = PresetBundle::variant_to_activate(model_it_old->second, model_it.second); !added.empty()) {
+                        variant = added;
+                        return model_it.first;
+                    }
                 }
             }
         }
@@ -1459,6 +1461,11 @@ int WebPresetDialog::LoadProfileFamily(std::string strVendor, std::string strFil
                     }
                     OneMachine["model"]  = pm["printer_model"];
                     OneMachine["nozzle"] = (nd.is_array() && !nd.empty()) ? nd[0] : json();
+                    // A mixed-nozzle machine (printer_variant "0.4+0.6") is its own entry in the model's nozzle list.
+                    // Keyed by its first head it would file its filaments under the plain 0.4 variant.
+                    if (pm.contains("printer_variant") && pm["printer_variant"].is_string() &&
+                        pm["printer_variant"].get<std::string>().find('+') != std::string::npos)
+                        OneMachine["nozzle"] = pm["printer_variant"];
 
                     slot = std::move(OneMachine);
                 }

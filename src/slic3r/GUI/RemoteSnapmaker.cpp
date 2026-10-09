@@ -1,4 +1,5 @@
 #include "RemoteSnapmaker.hpp"
+#include "libslic3r/NozzleSync.hpp"
 
 #include "GUI_App.hpp"
 #include "HttpServer.hpp" // LOCALHOST_URL
@@ -454,7 +455,7 @@ static std::pair<int, std::string> connect_impl(const std::string& dev_id)
                 info.dev_name = device_name;
             if (!nozzles.empty()) {
                 info.nozzle_sizes = nozzles;
-                info.preset_name  = model + " (" + nozzles[0] + " nozzle)";
+                info.preset_name  = NozzleSync::device_preset_name(model, nozzles, info.preset_name);
             }
             wxGetApp().app_config->save_device_info(info);
             announce_connected();

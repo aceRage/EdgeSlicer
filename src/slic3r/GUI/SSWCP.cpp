@@ -1,5 +1,6 @@
 // Implementation of web communication protocol for Slicer Studio
 #include "SSWCP.hpp"
+#include "libslic3r/NozzleSync.hpp"
 #include "FilamentColorUtils.hpp"
 #include "SpoolmanDialog.hpp"
 #include "GUI_App.hpp"
@@ -6830,6 +6831,8 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_set_engine()
                                         DeviceInfo query_info;
                                         bool       exist = wxGetApp().app_config->get_device_info(info.dev_id, query_info);
                                         if (nozzle_diameters.empty()) {
+                                            BOOST_LOG_TRIVIAL(warning) << "[connect] " << machine_type << " at " << ip
+                                                                       << " reported no nozzle sizes: keeping the current preset name, no variant is chosen";
                                             if (exist) {
                                                 query_info.connected = true;
                                                 wxGetApp().app_config->save_device_info(query_info);
@@ -6850,7 +6853,7 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_set_engine()
                                         } else {
 
                                             info.nozzle_sizes = nozzle_diameters;
-                                            info.preset_name  = machine_type + " (" + nozzle_diameters[0] + " nozzle)";
+                                            info.preset_name  = NozzleSync::device_preset_name(machine_type, nozzle_diameters, info.preset_name);
                                             wxGetApp().app_config->save_device_info(info);
 
                                             m_dialog->m_device_id = ip;
@@ -6865,8 +6868,8 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_set_engine()
                                                         isFind                      = true;
                                                         std::string nozzle_selected = m_ProfileJson["model"][m]["nozzle_selected"]
                                                                                               .get<std::string>();
-                                                        std::string se_nozz_selected = nozzle_diameters[0];
-                                                        if (nozzle_selected.find(se_nozz_selected) == std::string::npos) {
+                                                        std::string se_nozz_selected = NozzleSync::first_nozzle(nozzle_diameters);
+                                                        if (!se_nozz_selected.empty() && nozzle_selected.find(se_nozz_selected) == std::string::npos) {
                                                             nozzle_selected += ";" + se_nozz_selected;
                                                             m_ProfileJson["model"][m]["nozzle_selected"] = nozzle_selected;
                                                         }
@@ -6879,7 +6882,7 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_set_engine()
                                                     json new_item;
                                                     new_item["vendor"]          = "Snapmaker";
                                                     new_item["model"]           = info.model_name;
-                                                    new_item["nozzle_selected"] = nozzle_diameters[0];
+                                                    new_item["nozzle_selected"] = NozzleSync::first_nozzle(nozzle_diameters);
                                                     m_ProfileJson["model"].push_back(new_item);
                                                 }
                                             }
@@ -6966,7 +6969,7 @@ void SSWCP_MqttAgent_Instance::sw_mqtt_set_engine()
                                                     if (info.nozzle_sizes.empty())
                                                         info.nozzle_sizes.push_back("0.4");
 
-                                                    info.preset_name = machine_type + " (" + info.nozzle_sizes[0] + " nozzle)";
+                                                    info.preset_name = NozzleSync::device_preset_name(machine_type, info.nozzle_sizes, info.preset_name);
 
                                                     wxGetApp().app_config->save_device_info(info);
                                                 } else {
@@ -7900,54 +7903,10 @@ bool SSWCP::query_machine_info(std::shared_ptr<PrintHost>& host, std::string& ou
                     out_model = product_info["machine_type"].get<std::string>();
                 }
 
-                // get diameter
-                if(product_info.contains("nozzle_diameter")){
-                    {
-                        if (product_info["nozzle_diameter"].is_array()) {
-                            for (const auto& nozzle : product_info["nozzle_diameter"]) {
-                                // todo not sure is string
-                                if (nozzle.is_number()) {
-                                    double temp = nozzle.get<double>();
-                                    if (fabs(temp - 0.2) < 1e-6) {
-                                        out_nozzle_diameters.push_back("0.2");
-                                    } else if (fabs(temp - 0.4) < 1e-6) {
-                                        out_nozzle_diameters.push_back("0.4");
-                                    } else if (fabs(temp - 0.6) < 1e-6) {
-                                        out_nozzle_diameters.push_back("0.6");
-                                    } else if (fabs(temp - 0.8) < 1e-6) {
-                                        out_nozzle_diameters.push_back("0.8");
-                                    }
-
-                                } else {
-                                    std::string temp = nozzle.get<std::string>();
-                                    if (temp == "0.2" || temp == "0.4" || temp == "0.6" || temp == "0.8") {
-                                        out_nozzle_diameters.push_back(temp);
-                                    }
-                                }
-
-                            }
-                        } else {                            
-                            if (product_info["nozzle_diameter"].is_number()) {
-                                double temp = product_info["nozzle_diameter"].get<double>();
-                                if (fabs(temp - 0.2) < 1e-6) {
-                                    out_nozzle_diameters.push_back("0.2");
-                                } else if (fabs(temp - 0.4) < 1e-6) {
-                                    out_nozzle_diameters.push_back("0.2");
-                                } else if (fabs(temp - 0.6) < 1e-6) {
-                                    out_nozzle_diameters.push_back("0.2");
-                                } else if (fabs(temp - 0.8) < 1e-6) {
-                                    out_nozzle_diameters.push_back("0.2");
-                                }
-
-                            } else {
-                                std::string temp = product_info["nozzle_diameter"].get<std::string>();
-                                if (temp == "0.2" || temp == "0.4" || temp == "0.6" || temp == "0.8") {
-                                    out_nozzle_diameters.push_back(temp);
-                                }
-                            }
-                        }
-                    }
-                }
+                // get diameter (NozzleSync: array or scalar, number or string; a scalar 0.4 / 0.6 / 0.8 used
+                // to come back as "0.2")
+                if (product_info.contains("nozzle_diameter"))
+                    out_nozzle_diameters = NozzleSync::parse_reported_nozzles(product_info["nozzle_diameter"]);
                 if (product_info.contains("device_name")) {
                     device_name = product_info["device_name"].get<std::string>();
                 }
