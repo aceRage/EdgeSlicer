@@ -22,6 +22,7 @@
 #include "libslic3r/Emboss.hpp" // heal_shape
 
 #include "libslic3r/NSVGUtils.hpp"
+#include "libslic3r/SvgSplit.hpp" // SVG (Split)
 #include "libslic3r/UntrustedInput.hpp" // SVG size and complexity limits
 #include "libslic3r/Model.hpp"
 #include "libslic3r/ClipperUtils.hpp" // union_ex
@@ -506,6 +507,88 @@ bool GLGizmoSVG::create_image(ModelVolumeType volume_type, const std::optional<V
     }
     std::string object_name = dialog.image_name().empty() ? _u8L("Image") : dialog.image_name();
     return start_create_parts(m_parent, m_raycast_manager, target, std::move(parts), object_name);
+}
+
+namespace {
+// Emboss shape of one part of an SVG split by its shapes, SVG data are generated
+std::optional<EmbossShape> create_split_part_shape(const SvgSplitPart &part, const std::string &group_id, size_t index)
+{
+    EmbossShape shape;
+    // same as the plain SVG import (select_shape)
+    shape.projection.depth       = 10.;
+    shape.projection.use_surface = false;
+    EmbossShape::SvgFile svg;
+    // Generated SVG holds only the outline of the part, never the local path of the file
+    svg.path_in_3mf = svg_split_path_in_3mf(group_id, index);
+    svg.file_data   = std::make_shared<std::string>(part.svg);
+    shape.svg_file  = std::move(svg);
+    if (!ensure_shapes(shape))
+        return {};
+    return shape;
+}
+} // namespace
+
+bool GLGizmoSVG::create_volume_split(ModelVolumeType volume_type, const std::optional<Vec2d> &mouse_pos, const std::string &svg_path)
+{
+    CreateTarget target = capture_create_target(m_parent, volume_type, mouse_pos);
+    volume_type         = target.volume_type;
+
+    EmbossShape::SvgFile svg;
+    svg.path = svg_path.empty() ? choose_svg_file() : svg_path;
+    if (svg.path.empty())
+        return false; // file was not selected
+    const std::string too_complex_msg = GUI::format(
+        _u8L("SVG file is too complex to be loaded, it has too many shapes or points (%1%). Simplify it in a vector editor and try again."),
+        svg.path);
+    SvgRefusal refusal = SvgRefusal::None;
+    if (init_image(svg, &refusal) == nullptr) {
+        const double limit_mb = double(untrusted::SVG_SIZE_LIMIT) / (1024. * 1024.);
+        if (refusal == SvgRefusal::TooLarge)
+            show_error(nullptr, GUI::format(_u8L("SVG file is too large to be loaded (limit %1% MB) (%2%)."), limit_mb, svg.path));
+        else if (refusal == SvgRefusal::TooComplex)
+            show_error(nullptr, too_complex_msg);
+        else
+            show_error(nullptr, GUI::format(_u8L("Nano SVG parser can't load from file (%1%)."), svg.path));
+        return false;
+    }
+
+    NSVGLineParams params{get_tesselation_tolerance(1.)};
+    params.max_flat_points = untrusted::SVG_MAX_FLAT_POINTS;
+    SvgSplitResult split   = split_svg_by_shapes(*svg.image, params);
+    if (split.too_complex) {
+        show_error(nullptr, too_complex_msg);
+        return false;
+    }
+    if (!split.is_valid()) {
+        show_error(nullptr, GUI::format(_u8L("SVG file does NOT contain a single path to be embossed (%1%)."), svg.path));
+        return false;
+    }
+
+    std::string name = get_file_name(svg.path);
+    if (name.empty())
+        name = "SVG shape";
+    const std::string group_id = create_code_group_id();
+    CreateVolumeParts parts;
+    for (size_t i = 0; i < split.parts.size(); ++i) {
+        std::optional<EmbossShape> shape = create_split_part_shape(split.parts[i], group_id, i);
+        if (!shape.has_value()) {
+            // never drop a part silently, the picture would miss it
+            show_error(nullptr, too_complex_msg);
+            return false;
+        }
+        auto cancel = std::make_shared<std::atomic<bool>>(false);
+        // Same names as Bambu Studio: <file name>_<index>
+        auto base        = std::make_unique<DataBase>(name + "_" + std::to_string(i), cancel, std::move(*shape));
+        base->is_outside = volume_type == ModelVolumeType::MODEL_PART;
+        // 0 .. filament of the object, as the plain SVG import
+        CreateVolumePart part{std::move(base), volume_type, 0};
+        // every part is centered by its own bounding box, move it back to its place in the drawing
+        part.offset = split.parts[i].offset;
+        parts.push_back(std::move(part));
+    }
+    BOOST_LOG_TRIVIAL(info) << "SVG (Split): " << split.parts.size() << " parts from " << split.painted << " fills and strokes, "
+                            << split.covered << " covered by later shapes";
+    return start_create_parts(m_parent, m_raycast_manager, target, std::move(parts), name);
 }
 
 bool GLGizmoSVG::is_svg(const ModelVolume &volume) {
@@ -1969,6 +2052,7 @@ void GLGizmoSVG::draw_filename(){
 
     std::string tooltip = "";
     bool import_image = false;
+    bool import_svg_split = false;
     ImGuiComboFlags flags = ImGuiComboFlags_PopupAlignLeft | ImGuiComboFlags_NoPreview;
     ImGui::SameLine();
     ImGuiWrapper::push_combo_style(m_parent.get_scale());
@@ -1996,6 +2080,16 @@ void GLGizmoSVG::draw_filename(){
             import_image = true;
         } else if (ImGui::IsItemHovered()) {
             tooltip = _u8L("Trace a PNG or JPG image into new shapes on this object");
+        }
+
+        if (m_volume->is_model_part()) {
+            draw(get_icon(m_icons, IconType::change_file, IconState::hovered));
+            ImGui::SameLine();
+            if (ImGui::Selectable((_L("Import SVG (Split)") + dots).ToUTF8().data())) {
+                import_svg_split = true;
+            } else if (ImGui::IsItemHovered()) {
+                tooltip = _u8L("Add an SVG file to this object as one part per shape. Shapes painted later cut away what they cover.");
+            }
         }
 
         std::string forget_path = _u8L("Forget the file path");
@@ -2107,6 +2201,10 @@ void GLGizmoSVG::draw_filename(){
         // the dialog is modal, do not open it in the middle of the ImGui frame
         ModelVolumeType type = m_volume->type();
         wxGetApp().plater()->CallAfter([this, type]() { create_image(type); });
+    }
+    if (import_svg_split && m_volume != nullptr) {
+        // the file dialog is modal, do not open it in the middle of the ImGui frame
+        wxGetApp().plater()->CallAfter([this]() { create_volume_split(ModelVolumeType::MODEL_PART); });
     }
 
     if (file_changed) {

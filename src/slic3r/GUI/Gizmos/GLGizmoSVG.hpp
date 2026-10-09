@@ -95,6 +95,18 @@ public:
     bool create_image(ModelVolumeType volume_type, const std::optional<Vec2d> &mouse_pos = {}, const std::string &image_path = {});
 
     /// <summary>
+    /// "SVG (Split)": create one SVG volume per painted shape of the file (fill or stroke), the way
+    /// Bambu Studio imports an SVG. Shapes painted later win: every part loses the area covered by the
+    /// shapes after it, so the parts do not overlap. All parts share one filament (inherited).
+    /// The plain create_volume() keeps embossing the union of all shapes as one volume.
+    /// </summary>
+    /// <param name="volume_type">Object part, INVALID means new object</param>
+    /// <param name="mouse_pos">Position on screen where to create volumes, when not set it is near the selection</param>
+    /// <param name="svg_path">SVG file, empty = ask for the file</param>
+    /// <returns>True on succesfull start creation otherwise False</returns>
+    bool create_volume_split(ModelVolumeType volume_type, const std::optional<Vec2d> &mouse_pos = {}, const std::string &svg_path = {});
+
+    /// <summary>
     /// Check whether volume is object containing only emboss volume
     /// </summary>
     /// <param name="volume">Pointer to volume</param>
