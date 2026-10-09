@@ -9,6 +9,7 @@
 #include <boost/log/trivial.hpp>
 #include "libslic3r/Utils.hpp"
 #include "NetworkAgent.hpp"
+#include "sentry_wrapper/SentryScrub.hpp"
 
 
 
@@ -1578,13 +1579,36 @@ int NetworkAgent::get_model_mall_detail_url(std::string* url, std::string id)
     return ret;
 }
 
+std::string NetworkAgent::login_failure_body_for_log(const std::string& body, const std::string& credential, size_t max_len)
+{
+    // The credential the call carried (sign-in ticket or access token) is cut out by value first,
+    // so it cannot survive even where the scrubber would not recognise it; the scrubber then
+    // removes token/e-mail/account/user values and anything else secret-looking.
+    std::string text = body;
+    if (credential.size() >= 4) {
+        static const std::string marker = "<credential>";
+        for (size_t pos = text.find(credential); pos != std::string::npos; pos = text.find(credential, pos + marker.size()))
+            text.replace(pos, credential.size(), marker);
+    }
+    for (char& c : text)
+        if (c == '\r' || c == '\n')
+            c = ' ';
+    return scrub_for_crash_report(text, max_len);
+}
+
 int NetworkAgent::get_my_profile(std::string token, unsigned int *http_code, std::string *http_body)
 {
     int ret = 0;
     if (network_agent && get_my_profile_ptr) {
         ret = get_my_profile_ptr(network_agent, token, http_code, http_body);
-        if (ret)
-            BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << boost::format("error network_agnet=%1%, ret = %2%") % network_agent % ret;
+        if (ret) {
+            // Failure only, and never the token: http_code (0 = no HTTP answer) and a short,
+            // scrubbed piece of the response body.
+            const std::string body = http_body ? *http_body : std::string();
+            BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ": failed, ret=" << ret
+                                     << " http_code=" << (http_code ? *http_code : 0u) << " body_len=" << body.size()
+                                     << " body=" << login_failure_body_for_log(body, token);
+        }
     }
     return ret;
 }
@@ -1594,8 +1618,14 @@ int NetworkAgent::get_my_token(std::string ticket, unsigned int *http_code, std:
     int ret = 0;
     if (network_agent && get_my_token_ptr) {
         ret = get_my_token_ptr(network_agent, ticket, http_code, http_body);
-        if (ret)
-            BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << boost::format("error network_agnet=%1%, ret = %2%") % network_agent % ret;
+        if (ret) {
+            // Sign-in ticket exchange failed. Failure only, and never the ticket or a token:
+            // http_code (0 = no HTTP answer at all) and a short, scrubbed piece of the response body.
+            const std::string body = http_body ? *http_body : std::string();
+            BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ": ticket exchange failed, ret=" << ret
+                                     << " http_code=" << (http_code ? *http_code : 0u) << " ticket_len=" << ticket.size()
+                                     << " body_len=" << body.size() << " body=" << login_failure_body_for_log(body, ticket);
+        }
     }
     return ret;
 }

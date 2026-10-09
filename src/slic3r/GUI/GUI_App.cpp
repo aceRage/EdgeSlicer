@@ -7576,7 +7576,7 @@ void GUI_App::start_http_server()
         // report of 2026-09-08 carried the URL http://localhost:13650/?ticket=...&redirect_url=...,
         // i.e. Google's redirect reached this port. That 404 was ours - the ticket exchange had no
         // network plugin to run through - and is now a redirect with result=fail instead.
-        m_http_server.setPort(13650);
+        m_http_server.setPort(BBL_LOGIN_CALLBACK_PORT);
         m_http_server.start();
     }
     // The OAuth callback listener is short-lived; the 5s health-check auto-restart can
