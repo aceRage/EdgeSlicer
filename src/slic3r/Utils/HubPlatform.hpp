@@ -113,19 +113,41 @@ inline std::string pick_first_existing(const std::vector<std::string>& candidate
 // The H.264 software encoder an ffmpeg build offers, from `ffmpeg -hide_banner -encoders`. The
 // bundled LGPL build has libopenh264 only; a system build (Homebrew, apt) normally has libx264.
 // OpenH264 wins when both are there because the hub's own encoder template is written for it.
-enum class H264Encoder { None, OpenH264, X264 };
+//
+// On macOS the hardware encoder (VideoToolbox, always present in Homebrew's ffmpeg) is preferred over
+// both: it costs next to no CPU. Elsewhere hardware encoders are left alone (they fail in ways
+// software encoding does not: no GPU in a headless session, a driver that refuses a second session).
+enum class H264Encoder { None, OpenH264, X264, VideoToolbox };
 
-inline H264Encoder choose_h264_encoder(const std::string& ffmpeg_encoders_text)
+inline H264Encoder choose_h264_encoder(const std::string& ffmpeg_encoders_text, Platform p = TailscaleCli::current_platform())
 {
-    bool openh264 = false, x264 = false;
+    bool openh264 = false, x264 = false, videotoolbox = false;
     for (const std::string& line : detail::split_lines(ffmpeg_encoders_text)) {
         const std::vector<std::string> w = detail::split_ws(line);
         // A row is "<6 flag characters> <name> <description...>"; the heading lines are not.
         if (w.size() < 2 || w[0].size() != 6 || (w[0][0] != 'V' && w[0][0] != 'A' && w[0][0] != 'S')) continue;
         if (w[1] == "libopenh264") openh264 = true;
         else if (w[1] == "libx264") x264 = true;
+        else if (w[1] == "h264_videotoolbox") videotoolbox = true;
     }
+    if (videotoolbox && p == Platform::MacOS) return H264Encoder::VideoToolbox;
     return openh264 ? H264Encoder::OpenH264 : x264 ? H264Encoder::X264 : H264Encoder::None;
+}
+
+// The `ffmpeg: h264:` template written into go2rtc's config for a system ffmpeg, "" meaning "leave
+// go2rtc's own built-in template alone" (it is libx264's: `-codec:v libx264 ... -preset superfast
+// -tune zerolatency`). The libopenh264 template is the one the bundled LGPL build needs and lives
+// in RemoteHub.cpp beside its long explanation; it is not repeated here.
+//
+// VideoToolbox: an explicit template rather than go2rtc's `#hardware` selector, so what runs is
+// stated in one place: the hardware H.264 encoder, Main profile (every phone decoder takes it),
+// `-realtime 1` (VideoToolbox's low-latency mode: frames are emitted as they are encoded) and no
+// B-frames. -b:v and -g:v are appended per quality variant by the hub's #raw segments, and
+// VideoToolbox honours both.
+inline std::string h264_template_override(H264Encoder e)
+{
+    if (e == H264Encoder::VideoToolbox) return "-codec:v h264_videotoolbox -profile:v main -realtime 1 -bf 0";
+    return std::string();
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -547,10 +569,10 @@ inline long spawn_child_posix(const std::vector<std::string>& args, const std::s
     }
     if (pid == 0) {
         ::setpgid(0, 0);
-        ::signal(SIGPIPE, SIG_DFL);
+        signal(SIGPIPE, SIG_DFL);
         sigset_t none;
         sigemptyset(&none); // no ::, macOS defines sigemptyset as a macro
-        ::sigprocmask(SIG_SETMASK, &none, nullptr);
+        sigprocmask(SIG_SETMASK, &none, nullptr);
         if (devnull >= 0) ::dup2(devnull, 0);
         if (logfd >= 0) { ::dup2(logfd, 1); ::dup2(logfd, 2); }
         for (int fd = 3; fd < maxfd; ++fd)

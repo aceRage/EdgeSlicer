@@ -45,14 +45,33 @@ TEST_CASE("the H.264 encoder is read from ffmpeg -encoders", "[HubPlatform]")
         " V....D libx264              libx264 H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10 (codec h264)\n"
         " V....D h264_videotoolbox    VideoToolbox H.264 Encoder (codec h264)\n";
     const std::string both = bundled + " V....D libx264              libx264 H.264\n";
-    const std::string none = "Encoders:\n ------\n V....D mpeg4               MPEG-4 part 2\n V....D h264_videotoolbox    VideoToolbox H.264 Encoder (codec h264)\n";
-    REQUIRE(choose_h264_encoder(bundled) == H264Encoder::OpenH264);
-    REQUIRE(choose_h264_encoder(homebrew) == H264Encoder::X264);
-    REQUIRE(choose_h264_encoder(both) == H264Encoder::OpenH264);
-    REQUIRE(choose_h264_encoder(none) == H264Encoder::None);
-    REQUIRE(choose_h264_encoder("") == H264Encoder::None);
-    // A description that merely mentions libx264 is not an encoder row.
-    REQUIRE(choose_h264_encoder("Encoders:\n ------\n V....D mpeg4   an alternative to libx264\n") == H264Encoder::None);
+    const std::string vt_only = "Encoders:\n ------\n V....D mpeg4               MPEG-4 part 2\n V....D h264_videotoolbox    VideoToolbox H.264 Encoder (codec h264)\n";
+    for (Platform p : { Platform::Windows, Platform::Linux, Platform::MacOS }) {
+        REQUIRE(choose_h264_encoder(bundled, p) == H264Encoder::OpenH264);
+        REQUIRE(choose_h264_encoder(both, p) == H264Encoder::OpenH264);
+        REQUIRE(choose_h264_encoder("", p) == H264Encoder::None);
+        // A description that merely mentions libx264 is not an encoder row.
+        REQUIRE(choose_h264_encoder("Encoders:\n ------\n V....D mpeg4   an alternative to libx264\n", p) == H264Encoder::None);
+    }
+    // Homebrew's ffmpeg: libx264 + h264_videotoolbox. The Mac takes the hardware encoder; elsewhere
+    // hardware encoders are left alone and libx264 is used.
+    REQUIRE(choose_h264_encoder(homebrew, Platform::MacOS) == H264Encoder::VideoToolbox);
+    REQUIRE(choose_h264_encoder(homebrew, Platform::Linux) == H264Encoder::X264);
+    REQUIRE(choose_h264_encoder(homebrew, Platform::Windows) == H264Encoder::X264);
+    // VideoToolbox alone (no software encoder at all): usable on a Mac, nothing elsewhere.
+    REQUIRE(choose_h264_encoder(vt_only, Platform::MacOS) == H264Encoder::VideoToolbox);
+    REQUIRE(choose_h264_encoder(vt_only, Platform::Linux) == H264Encoder::None);
+    // VideoToolbox beats openh264 on a Mac, openh264 wins everywhere else.
+    const std::string vt_and_openh264 = bundled + " V....D h264_videotoolbox    VideoToolbox H.264 Encoder (codec h264)\n";
+    REQUIRE(choose_h264_encoder(vt_and_openh264, Platform::MacOS) == H264Encoder::VideoToolbox);
+    REQUIRE(choose_h264_encoder(vt_and_openh264, Platform::Linux) == H264Encoder::OpenH264);
+    // No encoder, hardware or otherwise.
+    REQUIRE(choose_h264_encoder("Encoders:\n ------\n V....D mpeg4               MPEG-4 part 2\n", Platform::MacOS) == H264Encoder::None);
+    // The template only differs for VideoToolbox; libx264 means "leave go2rtc's own".
+    REQUIRE(h264_template_override(H264Encoder::VideoToolbox) == "-codec:v h264_videotoolbox -profile:v main -realtime 1 -bf 0");
+    REQUIRE(h264_template_override(H264Encoder::X264).empty());
+    REQUIRE(h264_template_override(H264Encoder::OpenH264).empty());
+    REQUIRE(h264_template_override(H264Encoder::None).empty());
 }
 
 TEST_CASE("macOS firewall output is parsed", "[HubPlatform]")

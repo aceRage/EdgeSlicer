@@ -220,10 +220,10 @@ inline bool run_capture_posix(const std::vector<std::string>& args, std::string&
     }
     if (pid == 0) {
         // Child: async-signal-safe calls only from here to execv().
-        ::signal(SIGPIPE, SIG_DFL);
+        signal(SIGPIPE, SIG_DFL);
         sigset_t none;
         sigemptyset(&none); // no ::, macOS defines sigemptyset as a macro
-        ::sigprocmask(SIG_SETMASK, &none, nullptr);
+        sigprocmask(SIG_SETMASK, &none, nullptr);
         if (devnull >= 0) ::dup2(devnull, 0);
         ::dup2(outp[1], 1);
         ::dup2(outp[1], 2);

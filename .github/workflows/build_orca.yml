@@ -208,6 +208,43 @@ jobs:
           sudo rm -rf ~/Library/Developer/CoreSimulator/Caches/*
           df -hI /dev/disk3s1s1
 
+      # The remote hub's camera video (RemoteHub.cpp start_go2rtc) runs go2rtc. Windows ships the
+      # committed resources/tools/go2rtc/go2rtc.exe; for the Mac app the same upstream release
+      # (AlexxIT/go2rtc v1.9.14, MIT) is fetched here, checked against pinned digests, joined into
+      # one universal binary and handed to build_release_macos.sh through GO2RTC_BIN_DIR, which
+      # copies it into Contents/Resources/tools/go2rtc (the Developer ID signing step later signs
+      # it with every other nested Mach-O). Digests and provenance: docs/superpowers/specs/2026-10-09-hub-posix-parity.md.
+      # Nothing is executed here - the binaries are hashed, unzipped and lipo'd, never run.
+      # GO2RTC_SHA256 is deliberately not exported: the universal binary is a new file whose digest
+      # is not a pinned value, so build_release_macos.sh's optional binary check is skipped and
+      # the trust is in the two zip digests (and the arm64 inner binary digest) checked below.
+      - name: go2rtc - fetch, verify, make universal
+        if: inputs.os == 'macos-14'
+        shell: bash
+        run: |
+          set -euo pipefail
+          V=v1.9.14
+          ARM64_ZIP_SHA=919b78adc759d6b3883d1e1b2ac915ac0985bb903ff1897b4d228527bd64690c
+          ARM64_BIN_SHA=6e5039d56d652d2d325cb3ce3f7cc20248a34db42fe8abf9bb13488494ac023e
+          AMD64_ZIP_SHA=9b0b9a27a4dc3a5b8b93376e7e8fc2787c6af624a512842622be84aec0171c7a
+          W="$RUNNER_TEMP/go2rtc-mac"
+          rm -rf "$W"; mkdir -p "$W/arm64" "$W/amd64" "$W/ship"
+          for arch in arm64 amd64; do
+            curl -fsSL --retry 3 -o "$W/$arch.zip" "https://github.com/AlexxIT/go2rtc/releases/download/$V/go2rtc_mac_$arch.zip"
+          done
+          echo "$ARM64_ZIP_SHA  $W/arm64.zip" | shasum -a 256 -c -
+          echo "$AMD64_ZIP_SHA  $W/amd64.zip" | shasum -a 256 -c -
+          unzip -q -o "$W/arm64.zip" -d "$W/arm64"
+          unzip -q -o "$W/amd64.zip" -d "$W/amd64"
+          [ -f "$W/arm64/go2rtc" ] || { echo "::error::go2rtc_mac_arm64.zip has no go2rtc in it"; ls -la "$W/arm64"; exit 1; }
+          [ -f "$W/amd64/go2rtc" ] || { echo "::error::go2rtc_mac_amd64.zip has no go2rtc in it"; ls -la "$W/amd64"; exit 1; }
+          echo "$ARM64_BIN_SHA  $W/arm64/go2rtc" | shasum -a 256 -c -
+          lipo -create -output "$W/ship/go2rtc" "$W/arm64/go2rtc" "$W/amd64/go2rtc"
+          chmod 755 "$W/ship/go2rtc"
+          echo "go2rtc archs: $(lipo -archs "$W/ship/go2rtc")"
+          printf 'go2rtc %s (https://github.com/AlexxIT/go2rtc), MIT License. Bundled unmodified (arm64 and amd64 slices joined with lipo) for the remote hub camera video.\n' "$V" > "$W/ship/LICENSE-NOTE.txt"
+          echo "GO2RTC_BIN_DIR=$W/ship" >> "$GITHUB_ENV"
+
       - name: Build slicer mac
         if: inputs.os == 'macos-14'
         working-directory: ${{ github.workspace }}
@@ -216,6 +253,14 @@ jobs:
           EDGESLICER_SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
         run: |
           ./build_release_macos.sh -s -n -x -a universal -t 10.15 -1
+
+      - name: go2rtc - verify it is in the app bundle
+        if: inputs.os == 'macos-14'
+        shell: bash
+        run: |
+          f="${{ github.workspace }}/build/universal/Snapmaker_Orca/EdgeSlicer.app/Contents/Resources/tools/go2rtc/go2rtc"
+          [ -x "$f" ] || { echo "::error::go2rtc was fetched but is not in the app bundle ($f)"; exit 1; }
+          echo "bundled go2rtc: $(lipo -archs "$f")"
 
       # The same guard the Windows pipeline has: a plug-in that was built must be in the package.
       - name: UltraNet - verify it is in the app bundle

@@ -1762,8 +1762,8 @@ static int free_loopback_port()
 
 // Native separators: this path is shown to the user to paste into the firewall dialog.
 // Windows: the bundled go2rtc.exe, as ever. macOS / Linux: the bundled `go2rtc` if the package has
-// one (build_release_macos.sh / CMake, GO2RTC_BIN_DIR), else a system install (Homebrew, /usr/local,
-// /usr/bin), else whatever PATH has; with none of them the bundled path is returned so the "missing"
+// one (CI / build_release_macos.sh / CMake, GO2RTC_BIN_DIR), else a go2rtc in /opt/homebrew/bin,
+// /usr/local/bin or /usr/bin (nothing packages it for macOS, but a hand-installed one works), else PATH; with none of them the bundled path is returned so the "missing"
 // log line names where it was expected.
 static std::string go2rtc_exe_path()
 {
@@ -1803,9 +1803,10 @@ static std::string go2rtc_exe_path()
 #ifndef _WIN32
 // macOS / Linux: the bundled ffmpeg (an LGPL build with libopenh264, the one the encoder template
 // below is written for), else a system one - Homebrew, /usr/local, /usr/bin, PATH - but only if it
-// can encode H.264 in software: `ffmpeg -encoders` is asked once. A system build normally has
-// libx264 and not libopenh264, and then go2rtc's own built-in template is the right one (see
-// ffmpeg_uses_builtin_h264_template()). An ffmpeg with neither is treated as no ffmpeg.
+// can encode H.264: `ffmpeg -encoders` is asked once. On a Mac h264_videotoolbox (hardware) wins; a
+// system build otherwise normally has libx264 and not libopenh264, and then go2rtc's own built-in
+// template is the right one (see ffmpeg_h264_template_for_config()). An ffmpeg with none of them is
+// treated as no ffmpeg. Only the bundled build is ever shipped; a system ffmpeg is a fallback.
 struct FfmpegInfo
 {
     std::string                path;
@@ -1860,15 +1861,20 @@ static std::string ffmpeg_path()
 #endif
 }
 
-// Whether go2rtc's own `h264` template should be left alone: a system ffmpeg whose software
-// encoder is libx264 is exactly what that template was written for, whereas ours is written for the
-// bundled libopenh264 build. Always false on Windows.
-static bool ffmpeg_uses_builtin_h264_template()
+// The `h264` template to write into go2rtc's config for the ffmpeg in use, "" to leave go2rtc's own
+// (libx264's) alone. The bundled / libopenh264 case, and all of Windows, is ffmpeg_h264_template()
+// below as ever; a system ffmpeg with VideoToolbox gets that explicit template; libx264 gets none.
+static std::string ffmpeg_h264_template();
+static std::string ffmpeg_h264_template_for_config()
 {
 #ifdef _WIN32
-    return false;
+    return ffmpeg_h264_template();
 #else
-    return ffmpeg_info_posix().encoder == HubPlatform::H264Encoder::X264;
+    switch (ffmpeg_info_posix().encoder) {
+    case HubPlatform::H264Encoder::X264:         return std::string();
+    case HubPlatform::H264Encoder::VideoToolbox: return HubPlatform::h264_template_override(HubPlatform::H264Encoder::VideoToolbox);
+    default:                                     return ffmpeg_h264_template();
+    }
 #endif
 }
 // The variant suffixes the hub can actually register, in descending quality. Empty without an
@@ -4043,7 +4049,8 @@ void HubServer::start_go2rtc()
             std::string ffy = ff;
             for (auto& c : ffy) if (c == '\\') c = '/'; // YAML-safe, and ffmpeg accepts forward slashes
             cfg << "ffmpeg:\n  bin: \"" << ffy << "\"\n";
-            if (!ffmpeg_uses_builtin_h264_template()) cfg << "  h264: \"" << ffmpeg_h264_template() << "\"\n";
+            const std::string h264_tmpl = ffmpeg_h264_template_for_config();
+            if (!h264_tmpl.empty()) cfg << "  h264: \"" << h264_tmpl << "\"\n";
         }
     }
 #ifdef _WIN32
