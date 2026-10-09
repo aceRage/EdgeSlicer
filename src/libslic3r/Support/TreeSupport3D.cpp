@@ -29,6 +29,7 @@
 #include <optional>
 #include <stdio.h>
 #include <string>
+#include <tuple>
 #include <string_view>
 
 #include <boost/log/trivial.hpp>
@@ -879,7 +880,6 @@ public:
         InterfacePlacer(interface_placer),
         volumes(volumes), force_tip_to_roof(force_tip_to_roof), move_bounds(move_bounds)
     {
-        m_already_inserted.assign(num_support_layers, {});
         this->min_xy_dist = this->config.xy_distance > this->config.xy_min_distance;
         m_base_radius = scaled<coord_t>(0.01);
         m_base_circle = Polygon{ make_circle(m_base_radius, SUPPORT_TREE_CIRCLE_RESOLUTION) };
@@ -991,11 +991,11 @@ private:
         Polygons circle{ m_base_circle };
         circle.front().translate(p.first);
         {
-            Point hash_pos = p.first / ((config.min_radius + 1) / 10);
+            // Tips that are so close that inserting both would achieve nothing are dropped in finalize_tips(). The
+            // decision used to be taken here, under the lock, so which of two such tips survived (and with what
+            // state) depended on which worker thread got here first.
             std::lock_guard<std::mutex> critical_section_movebounds(m_mutex_movebounds);
-            if (!m_already_inserted[insert_layer].count(hash_pos)) {
-                // normalize the point a bit to also catch points which are so close that inserting it would achieve nothing
-                m_already_inserted[insert_layer].emplace(hash_pos);
+            {
                 static constexpr const size_t dtt = 0;
                 SupportElementState state;
                 state.target_height = insert_layer;
@@ -1021,6 +1021,41 @@ private:
         }
     }
 
+public:
+    // Called once after all tips were added by the parallel overhang sampling. The tips of a layer arrive in
+    // whatever order the workers got to them; put them in an order that is a function of the tips alone, and
+    // drop the near duplicates keeping the first of each cell in that order. Everything downstream (merging,
+    // branch directions, the order of the trees) is then independent of thread scheduling.
+    void finalize_tips()
+    {
+        const coord_t cell = std::max<coord_t>(1, (config.min_radius + 1) / 10);
+        auto cell_of = [cell](const Point &pt) { return std::make_pair(pt.x() / cell, pt.y() / cell); };
+        auto key = [](const SupportElement &e) {
+            const SupportElementState &s = e.state;
+            return std::make_tuple(s.target_position.x(), s.target_position.y(), s.target_height, s.layer_idx,
+                int(s.supports_roof), s.dont_move_until, int(s.to_buildplate), int(s.to_model_gracious),
+                int(s.can_use_safe_radius), int(s.skip_ovalisation), int(s.use_min_xy_dist),
+                s.effective_radius_height, s.distance_to_top, s.missing_roof_layers, s.roof_recovery_dtt);
+        };
+        for (SupportElements &layer : move_bounds) {
+            if (layer.size() < 2)
+                continue;
+            std::vector<SupportElement> tips(std::make_move_iterator(layer.begin()), std::make_move_iterator(layer.end()));
+            std::stable_sort(tips.begin(), tips.end(), [&](const SupportElement &l, const SupportElement &r) {
+                const auto cl = cell_of(l.state.target_position), cr = cell_of(r.state.target_position);
+                return cl != cr ? cl < cr : key(l) < key(r);
+            });
+            layer.clear();
+            std::pair<coord_t, coord_t> last_cell{ std::numeric_limits<coord_t>::max(), std::numeric_limits<coord_t>::max() };
+            for (SupportElement &tip : tips)
+                if (const auto c = cell_of(tip.state.target_position); layer.empty() || c != last_cell) {
+                    last_cell = c;
+                    layer.emplace_back(std::move(tip));
+                }
+        }
+    }
+
+private:
     // Outputs
     std::vector<SupportElements>                       &move_bounds;
 
@@ -1030,7 +1065,6 @@ private:
 
     // Mutexes, guards
     std::mutex                                          m_mutex_movebounds;
-    std::vector<std::unordered_set<Point, PointHash>>   m_already_inserted;
 };
 
 int generate_raft_contact(
@@ -1527,6 +1561,7 @@ static void generate_initial_areas(
         }
     });
 
+    rich_interface_placer.finalize_tips();
     finalize_raft_contact(print_object, raft_contact_layer_idx, interface_placer.top_contacts_mutable(), move_bounds);
 }
 
@@ -3657,6 +3692,15 @@ static void generate_support_areas(Print &print, TreeSupport* tree_support, cons
                 throw_on_cancel);
 
             //tree_support->move_bounds_to_contact_nodes(move_bounds, print_object, config);
+
+            // The roof layers were filled by parallel tasks (tip sampling, recover_pending_branch_roofs) that append their
+            // polygons in arrival order. Sort them, so the unions that follow see the same input on every run.
+            for (SupportGeneratorLayersPtr *layers : { &top_contacts, &interface_layers, &base_interface_layers })
+                for (SupportGeneratorLayer *layer : *layers)
+                    if (layer != nullptr && layer->polygons.size() > 1)
+                        std::sort(layer->polygons.begin(), layer->polygons.end(), [](const Polygon &l, const Polygon &r) {
+                            return std::lexicographical_compare(l.points.begin(), l.points.end(), r.points.begin(), r.points.end());
+                        });
 
             remove_undefined_layers();
 
