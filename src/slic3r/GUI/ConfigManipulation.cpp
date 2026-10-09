@@ -785,6 +785,9 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
 
     bool have_raft = config->opt_int("raft_layers") > 0;
     bool have_support_material = config->opt_bool("enable_support") || have_raft;
+    // Side stabilizers do not depend on Enable supports: they are on whenever their own mode is not Off.
+    const StabilizerMode stab_mode = config->opt_enum<StabilizerMode>("stabilizer_supports");
+    const bool           stab_on   = stab_mode != smOff;
 
     SupportType support_type = config->opt_enum<SupportType>("support_type");
     bool have_support_interface = config->opt_int("support_interface_top_layers") > 0 || config->opt_int("support_interface_bottom_layers") > 0;
@@ -798,11 +801,12 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
         "support_object_xy_distance", "support_object_first_layer_gap"/*, "independent_support_layer_height"*/})
         toggle_field(el, have_support_material);
     toggle_line("hollow_shell_thickness", config->opt_bool("hollow_interior"));
-    // Side stabilizers print as support, so they need supports on.
-    toggle_field("stabilizer_supports", have_support_material);
+    // Side stabilizers print with the support filament, speed and line width, but they are their own
+    // feature: the mode is always editable, supports on or off. What they borrow from the support
+    // settings stays editable while stabilizers are on.
+    toggle_field("stabilizer_supports", true);
+    toggle_field("support_object_xy_distance", have_support_material || stab_on);
     {
-        const StabilizerMode stab_mode = config->opt_enum<StabilizerMode>("stabilizer_supports");
-        const bool           stab_on   = have_support_material && stab_mode != smOff;
         for (auto el : {"stabilizer_ring_spacing", "stabilizer_points_per_ring", "stabilizer_tip_diameter", "stabilizer_tip_gap",
                         "stabilizer_pillar_diameter", "stabilizer_max_island_width"})
             toggle_line(el, stab_on);
@@ -873,14 +877,14 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
 
     bool have_skirt_height = have_skirt &&
     (config->opt_int("skirt_height") > 1 || config->opt_enum<DraftShield>("draft_shield") != dsEnabled);
-    toggle_line("support_speed", have_support_material || have_skirt_height);
+    toggle_line("support_speed", have_support_material || have_skirt_height || stab_on);
     toggle_line("support_interface_speed", have_support_material && have_support_interface);
 
     // BBS
     //toggle_field("support_material_synchronize_layers", have_support_soluble);
 
     toggle_field("inner_wall_line_width", have_perimeters || have_skirt || have_brim);
-    toggle_field("support_filament", have_support_material || have_skirt);
+    toggle_field("support_filament", have_support_material || have_skirt || stab_on);
 
     toggle_line("raft_contact_distance", have_raft && !have_support_soluble);
 

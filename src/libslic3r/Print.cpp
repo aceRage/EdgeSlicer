@@ -1074,6 +1074,15 @@ std::vector<unsigned int> Print::support_material_extruders() const
             	unsigned int i = (unsigned int)object->config().support_interface_filament - 1;
                 extruders.emplace_back((i >= num_extruders) ? 0 : i);
             }
+        } else if (object->has_stabilizers()) {
+            // Side stabilizers without supports: they print with the support filament, never the
+            // interface filament.
+            if (object->config().support_filament == 0)
+                support_uses_current_extruder = true;
+            else {
+                unsigned int i = (unsigned int)object->config().support_filament - 1;
+                extruders.emplace_back((i >= num_extruders) ? 0 : i);
+            }
         }
     }
 
@@ -2307,6 +2316,11 @@ StringObjectException Print::validate(StringObjectException *warning, Polygons* 
         // #4043
         if (total_copies_count > 1 && m_config.print_sequence != PrintSequence::ByObject)
             return {L("Please select \"By object\" print sequence to print multiple objects in spiral vase mode."), nullptr, "spiral_mode"};
+        // Side stabilizers without supports are support-role layers the vase cannot carry. (With
+        // supports on they were never refused here, and that is left as it was.)
+        for (const PrintObject* object : m_objects)
+            if (object->has_stabilizers() && !object->has_support_material())
+                return {L("Side stabilizers cannot be printed in spiral vase mode. Turn the stabilizers off or spiral vase mode off."), object, "stabilizer_supports"};
         assert(m_objects.size() == 1);
         const auto all_regions = m_objects.front()->all_regions();
         if (all_regions.size() > 1) {
@@ -2639,6 +2653,13 @@ StringObjectException Print::validate(StringObjectException *warning, Polygons* 
                 if (sup == 0 || supi == 0)
                     // "use whatever filament is current": any filament of the print may print it.
                     append(object_filaments, extruders);
+            } else if (object->has_stabilizers()) {
+                // Side stabilizers without supports print with the support filament only.
+                const int sup = object->config().support_filament.value;
+                if (sup > 0)
+                    object_filaments.emplace_back(unsigned(sup - 1));
+                else
+                    append(object_filaments, extruders);
             }
             if (this->has_wipe_tower())
                 // The prime tower shares this object's layer grid and every filament purges into it.
@@ -2678,9 +2699,11 @@ StringObjectException Print::validate(StringObjectException *warning, Polygons* 
             if (!validate_extrusion_width(object->config().get_abs_value("line_width", object_min_nozzle_diameter),
                                           object_min_nozzle_diameter, layer_height, err_msg))
                 return {err_msg, object, "line_width"};
-            if (object->has_support() || object->has_raft()) {
+            if (object->has_support() || object->has_raft() || object->has_stabilizers()) {
                 const int sup  = object->config().support_filament.value;
-                const int supi = object->config().support_interface_filament.value;
+                // Side stabilizers alone print with the support filament only, so the interface
+                // filament does not enter into the width check then.
+                const int supi = object->has_support_material() ? object->config().support_interface_filament.value : sup;
                 // The support line width has to fit the finer of the two support nozzles; filament 0
                 // ("current filament") could be any of the object's, so fall back to its minimum.
                 double support_nozzle_diameter = std::min(nozzle_dmr_of_filament0(unsigned(std::max(sup, 1) - 1)),
@@ -2976,8 +2999,8 @@ BoundingBox Print::total_bounding_box() const
     Flow perimeter_flow = m_objects.front()->get_layer(0)->get_region(0)->flow(frPerimeter);
     double extra = perimeter_flow.width/2;
 
-    // consider support material
-    if (this->has_support_material()) {
+    // consider support material (and side stabilizers, which print as support)
+    if (this->uses_support_filament()) {
         extra = std::max(extra, SUPPORT_MATERIAL_MARGIN);
     }
 
@@ -3059,21 +3082,30 @@ bool Print::has_support_material() const
     return false;
 }
 
+bool Print::uses_support_filament() const
+{
+    for (const PrintObject *object : m_objects)
+        if (object->uses_support_filament())
+            return true;
+    return false;
+}
+
 // Ultra (H2C 3MF schema): ported verbatim from BambuStudio Print::support_material_on_wipe_tower
 // (src/libslic3r/Print.cpp). Reported in slice_info.config so the printer knows the prime tower
 // carries a support-only filament.
 bool Print::support_material_on_wipe_tower() const
 {
-    if (!this->has_wipe_tower() || !this->has_support_material())
+    if (!this->has_wipe_tower() || !this->uses_support_filament())
         return false;
 
     for (const PrintObject *object : m_objects) {
-        if (!object->has_support_material())
+        if (!object->uses_support_filament())
             continue;
 
         const std::vector<unsigned int> obj_filaments = object->object_extruders();
         const int                       support_fil   = object->config().support_filament;
-        const int                       support_interface_fil = object->config().support_interface_filament;
+        // Side stabilizers alone never print the interface filament.
+        const int                       support_interface_fil = object->has_support_material() ? object->config().support_interface_filament.value : 0;
 
         auto support_differs_from_body = [&](int filament_1based) -> bool {
             if (filament_1based <= 0)
@@ -4022,6 +4054,10 @@ static void chameleon_assign_support_interfaces(Print &print)
         // flag, apply_bucket_caps, storage, emission, logging) applies uniformly to
         // every opted-in object.
         if (!object->config().support_filament_matching.value)
+            continue;
+        // Side stabilizers alone leave support layers behind with no supports or interface: there
+        // is nothing for filament matching to assign, and it must not run on them.
+        if (!object->has_support_material())
             continue;
         if (object->layers().empty() || object->support_layers().empty())
             continue;
