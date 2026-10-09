@@ -525,7 +525,7 @@ void GuideFrame::OnScriptMessage(wxWebViewEvent &evt)
             this->EndModal(wxID_OK);
 
             if (InstallNetplugin)
-                GUI::wxGetApp().CallAfter([this] { GUI::wxGetApp().ShowDownNetPluginDlg(); });
+                GUI::wxGetApp().CallAfter([this] { GUI::wxGetApp().ShowNetworkPluginMissing(/*user_requested*/ true); });
 
             if (bLogin)
                 GUI::wxGetApp().CallAfter([this] { login(); });
@@ -1610,25 +1610,6 @@ bool GuideFrame::LoadFile(std::string jPath, std::string &sContent)
     }
 
     return true;
-}
-
-int GuideFrame::DownloadPlugin()
-{
-    return wxGetApp().download_plugin(
-        "plugins", "network_plugin.zip",
-        [this](int status, int percent, bool& cancel) {
-            return ShowPluginStatus(status, percent, cancel);
-        }
-    , nullptr);
-}
-
-int GuideFrame::InstallPlugin()
-{
-    return wxGetApp().install_plugin("plugins", "network_plugin.zip",
-        [this](int status, int percent, bool &cancel) {
-            return ShowPluginStatus(status, percent, cancel);
-        }
-    );
 }
 
 int GuideFrame::ShowPluginStatus(int status, int percent, bool& cancel)

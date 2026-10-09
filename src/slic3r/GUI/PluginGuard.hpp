@@ -14,11 +14,15 @@ namespace Slic3r { namespace GUI {
 //  1. Sign-in needs SOME plug-in. Bambu cloud sign-in with Google goes login webview -> system
 //     browser -> our loopback on 13650 -> ticket exchange through the plug-in. With no plug-in
 //     loaded the ticket has nowhere to go, so opening the sign-in page at all is a dead end;
-//     offer the download instead.
+//     say so (the plug-in is missing, reinstall EdgeSlicer) instead of opening it.
 //
-//  2. UltraNet must never be overwritten. install_plugin() unzips Bambu's CDN package straight
-//     over data_dir/plugins, and the "plug-in needs updating" path calls into the same code, so
-//     every download entry point has to be shut off while our own plug-in is the one installed.
+//  2. EdgeSlicer NEVER downloads or installs Bambu's network plug-in (owner decision, 2026-10).
+//     There used to be a Bambu CDN download behind the sign-in path, the Device tab, the setup
+//     wizard, Preferences, the home-page banner and the "plug-in needs updating" check; every one
+//     of them now shows the "network plug-in is missing" message (network_plugin_missing_notice()
+//     decides when) and the CDN code itself is gone or refused (bambu_cdn_download_allowed() is
+//     always false). The only package still fetched from the CDN is the camera component, see
+//     bambu_cdn_package_allowed().
 //
 // UltraNet is recognised by a marker file written next to the DLLs (see kUltraNetMarkerName): the
 // DLL name is Bambu's, so the DLL alone cannot tell the two apart. A folder holding
@@ -34,8 +38,9 @@ enum class LoginGuardAction {
     // the plug-in is there and simply did not load, e.g. it needs the restart after a first-run
     // install. Tell the user to restart rather than offering Bambu's CDN.
     RestartRequired,
-    // No agent and no UltraNet: offer the Bambu network plug-in download.
-    OfferPluginDownload,
+    // No agent and no UltraNet: the network plug-in is missing from this install. Say so; there is
+    // nothing to download (see bambu_cdn_download_allowed()).
+    PluginMissing,
 };
 
 // The single decision behind every guarded entry point.
@@ -55,9 +60,30 @@ LoginGuardAction plugin_guard_decision(bool plugin_present,
 // A marker with no DLL beside it is a leftover, not an installation.
 bool is_ultranet_plugin(bool plugin_present, bool ultranet_marker);
 
-// True when the Bambu CDN download/update path may run. It is the exact complement of the above,
-// so an empty plug-in folder or a Bambu-original plug-in keeps working untouched.
+// Whether Bambu's network plug-in may be downloaded from the Bambu CDN. NEVER: EdgeSlicer ships its
+// own plug-in, and a build without one reports it missing rather than fetching Bambu's. The
+// parameters are kept so every call site documents the state it was in; the answer ignores them.
 bool bambu_cdn_download_allowed(bool plugin_present, bool ultranet_marker);
+
+// The one package still fetched through GUI_App::download_plugin(): the Windows camera component
+// (BambuSource), which the user is asked about first. Anything else - network_plugin.zip,
+// camera_tools.zip, a name nobody has thought of yet - is refused.
+bool bambu_cdn_package_allowed(const std::string &package_name);
+
+enum class PluginMissingNotice {
+    Show,     // tell the user the network plug-in is missing
+    Suppress, // say nothing
+};
+
+// When to tell the user "EdgeSlicer's network plug-in is missing".
+//
+//   ultranet_installed - our plug-in is installed. Nothing is missing (if it failed to load, the
+//                        restart prompt of the sign-in path is the right message, not this one).
+//   user_requested     - the user just asked for something that needs the plug-in (clicked Sign in,
+//                        opened the Device tab, ticked the Preferences box). Always answered.
+//   already_shown      - the message was already shown this session. Automatic triggers (start-up
+//                        checks, the home-page banner, notifications) stay quiet after the first.
+PluginMissingNotice network_plugin_missing_notice(bool ultranet_installed, bool user_requested, bool already_shown);
 
 // What the start-up copier does with <data_dir>/plugins, given the sidecar folder ("ultranet"
 // beside the exe) that a released build ships. Decided from four facts so it is testable.
@@ -145,17 +171,18 @@ CameraToolsCopy camera_tools_copy_decision(bool plugins_copy_is_stub,
                                            bool cameratools_up_to_date);
 
 // What copy_network_if_available() does at startup with a plug-in staged in <data_dir>/ota by the
-// Bambu plug-in update check (`update_network_plugin` = true in the app config). Stock code copies
-// ota/bambu_networking.dll, BambuSource and live555 straight over <data_dir>/plugins - over UltraNet,
-// whose library carries the same name. That must never happen unless the user deliberately keeps a
-// foreign plug-in (`ultranet_keep_foreign_plugin`).
+// old Bambu plug-in update check (`update_network_plugin` = true in the app config). Stock code
+// copied ota/bambu_networking.dll, BambuSource and live555 straight over <data_dir>/plugins. No
+// build stages anything there any more, but a data dir written by an older EdgeSlicer can still
+// carry the flag and the files, and installing Bambu's package is never allowed, whatever
+// `ultranet_keep_foreign_plugin` says: that switch keeps a hand-copied DLL, it does not make the
+// CDN package acceptable.
 enum class OtaPluginInstall {
-    NothingStaged, // the flag is not set: nothing to do (stock)
-    Install,       // stock copy: no UltraNet installed, or the user keeps a foreign plug-in on purpose
-    Refuse,        // UltraNet is installed: clear the flag, remove the staged files by exact name, log
+    NothingStaged, // the flag is not set: nothing to do
+    Refuse,        // clear the flag, remove the staged files by exact name, log
 };
 
-OtaPluginInstall ota_plugin_install_decision(bool update_flag, bool ultranet_installed, bool keep_foreign);
+OtaPluginInstall ota_plugin_install_decision(bool update_flag);
 
 // The exact file names in <data_dir>/ota that a refused install removes: the network library,
 // BambuSource and live555 for this platform, and the network_plugins.json that described them.

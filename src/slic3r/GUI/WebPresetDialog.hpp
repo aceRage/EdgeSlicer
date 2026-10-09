@@ -83,8 +83,6 @@ public:
     bool        LoadFile(std::string jPath, std::string& sContent);
 
     // install plugin
-    int DownloadPlugin();
-    int InstallPlugin();
     int ShowPluginStatus(int status, int percent, bool& cancel);
 
     void on_dpi_changed(const wxRect& suggested_rect) {}
