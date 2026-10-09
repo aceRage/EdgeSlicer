@@ -31,6 +31,7 @@
 #include <fstream>
 #include <map>
 #include <mutex>
+#include <locale>
 #include <sstream>
 #include <stdexcept>
 #include <unordered_map>
@@ -4497,6 +4498,31 @@ namespace PresetUtils {
         if (out.empty() ||!boost::filesystem::exists(boost::filesystem::path(out)))
             out = Slic3r::resources_dir() + "/profiles/hotend.stl";
         return out;
+    }
+
+    bool parse_bed_texture_rect(const std::string &str, std::array<float, 4> &rect)
+    {
+        std::string s = str;
+        boost::algorithm::erase_all(s, " ");
+        std::vector<std::string> items;
+        boost::split(items, s, boost::is_any_of(","));
+        if (items.size() != 4)
+            return false;
+        std::array<float, 4> out;
+        for (size_t i = 0; i < 4; ++i) {
+            if (items[i].empty())
+                return false;
+            // Independent of the UI's numeric locale: the profiles always write a '.'.
+            std::istringstream iss(items[i]);
+            iss.imbue(std::locale::classic());
+            iss >> out[i];
+            if (iss.fail() || !iss.eof())
+                return false;
+        }
+        if (!(out[2] > 0.f && out[3] > 0.f))
+            return false;
+        rect = out;
+        return true;
     }
 } // namespace PresetUtils
 

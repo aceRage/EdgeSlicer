@@ -6265,11 +6265,52 @@ void PartPlateList::init_bed_type_info()
 	bed_texture_info[btPTE].parts.push_back(pte_part1);
 	bed_texture_info[btPTE].parts.push_back(pte_part2);
 
+	// The machine model's own art placement (Bambu Studio's bottom_texture_end_name / bottom_texture_rect /
+	// middle_texture_rect). The X2D sets all three: its 256 x 256 plate has a short front lip, so the dual-nozzle
+	// default tab below (45, -14.5, drawn for the H2D's deeper lip) hung off the front edge of its bed model.
+	std::string          bottom_end_name;
+	std::array<float, 4> bottom_rect{}, middle_rect{};
+	bool                 has_bottom_rect = false, has_middle_rect = false;
+	if (const PresetBundle *bundle = wxGetApp().preset_bundle) {
+		const Preset *printer = &bundle->printers.get_selected_preset();
+		if (!printer->is_system)
+			if (const Preset *parent = bundle->printers.get_preset_parent(*printer))
+				printer = parent;
+		if (const VendorProfile::PrinterModel *pm = PresetUtils::system_printer_model(*printer)) {
+			bottom_end_name = pm->bottom_texture_end_name;
+			has_bottom_rect = PresetUtils::parse_bed_texture_rect(pm->bottom_texture_rect, bottom_rect);
+			has_middle_rect = PresetUtils::parse_bed_texture_rect(pm->middle_texture_rect, middle_rect);
+		}
+	}
+	// "bbl_bed_pte_bottom" + "n" -> "bbl_bed_pte_bottom_n.svg", or "" when that art is not shipped (Bambu has no
+	// Cool Plate variant; the X2D does not take that plate).
+	auto bottom_art = [&bottom_end_name](const std::string &base) -> std::string {
+		if (bottom_end_name.empty())
+			return std::string();
+		const std::string name = base + "_" + bottom_end_name + ".svg";
+		boost::system::error_code ec;
+		return boost::filesystem::exists(boost::filesystem::path(resources_dir()) / "images" / name, ec) ? name : std::string();
+	};
+	struct BottomBase { BedType type; const char *base; };
+	const BottomBase bottom_bases[] = {
+		{ btSuperTack, "bbl_bed_st_bottom" }, { btPC, "bbl_bed_pc_bottom" }, { btPCT, "bbl_bed_pc_bottom" },
+		{ btEP, "bbl_bed_ep_bottom" },       { btPEI, "bbl_bed_pei_bottom" }, { btPTE, "bbl_bed_pte_bottom" },
+	};
+
 	auto  bed_ext     = get_extents(m_shape);
 	int   bed_width   = bed_ext.size()(0);
 	int   bed_height  = bed_ext.size()(1);
 	float base_width  = 256;
 	float base_height = 256;
+
+	if (!(m_extruder_areas.multi() && m_extruder_areas.has_exclusive_regions()) && !bottom_end_name.empty()) {
+		// Single-nozzle machine with its own bottom tab art (the P2S): same place, other file.
+		for (const BottomBase &b : bottom_bases) {
+			const std::string art = bottom_art(b.base);
+			if (!art.empty() && bed_texture_info[b.type].parts.size() > 1)
+				bed_texture_info[b.type].parts[1].filename = art;
+		}
+	}
 
 	// Dual-nozzle (H2D / H2C / X2D): the single-nozzle layout runs the plate name sideways down the left edge,
 	// straight over the left-nozzle-only strip and its label. Bambu Studio's dual-nozzle layout puts the name
@@ -6304,8 +6345,23 @@ void PartPlateList::init_bed_type_info()
 		for (const DualTextures &d : dual) {
 			bed_texture_info[d.type].reset();
 			bed_texture_info[d.type].parts.clear();
-			bed_texture_info[d.type].parts.push_back(BedTextureInfo::TexturePart(middle_x, middle_y, middle_w, middle_h, d.middle));
-			bed_texture_info[d.type].parts.push_back(BedTextureInfo::TexturePart(45, -14.5f, d.left_bottom_w, 8, d.left_bottom));
+			if (has_middle_rect)
+				bed_texture_info[d.type].parts.push_back(
+					BedTextureInfo::TexturePart(middle_rect[0], middle_rect[1], middle_rect[2], middle_rect[3], d.middle));
+			else
+				bed_texture_info[d.type].parts.push_back(BedTextureInfo::TexturePart(middle_x, middle_y, middle_w, middle_h, d.middle));
+			if (!bottom_end_name.empty() && has_bottom_rect) {
+				// Bambu Studio (BedTextureInfo::apply_bottom_texture): the machine's own tab art at its own rect;
+				// none when that plate has no such art.
+				std::string art;
+				for (const BottomBase &b : bottom_bases)
+					if (b.type == d.type)
+						art = bottom_art(b.base);
+				if (!art.empty())
+					bed_texture_info[d.type].parts.push_back(
+						BedTextureInfo::TexturePart(bottom_rect[0], bottom_rect[1], bottom_rect[2], bottom_rect[3], art));
+			} else
+				bed_texture_info[d.type].parts.push_back(BedTextureInfo::TexturePart(45, -14.5f, d.left_bottom_w, 8, d.left_bottom));
 		}
 		base_width  = float(bed_width);
 		base_height = float(bed_height);

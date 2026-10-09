@@ -19,9 +19,26 @@ bool is_ultranet_plugin(bool plugin_present, bool ultranet_marker)
     return plugin_present && ultranet_marker;
 }
 
-bool bambu_cdn_download_allowed(bool plugin_present, bool ultranet_marker)
+bool bambu_cdn_download_allowed(bool /*plugin_present*/, bool /*ultranet_marker*/)
 {
-    return ! is_ultranet_plugin(plugin_present, ultranet_marker);
+    // Owner decision (2026-10): Bambu's network plug-in is never downloaded or installed, whatever
+    // is (or is not) in data_dir/plugins. An empty folder is reported as "plug-in missing".
+    return false;
+}
+
+bool bambu_cdn_package_allowed(const std::string &package_name)
+{
+    // Exact name only - this is a whitelist of one, not a pattern.
+    return package_name == "camera_component.zip";
+}
+
+PluginMissingNotice network_plugin_missing_notice(bool ultranet_installed, bool user_requested, bool already_shown)
+{
+    if (ultranet_installed)
+        return PluginMissingNotice::Suppress;
+    if (user_requested)
+        return PluginMissingNotice::Show;
+    return already_shown ? PluginMissingNotice::Suppress : PluginMissingNotice::Show;
 }
 
 PluginSync plugin_sync_decision(bool sidecar_present,
@@ -90,10 +107,10 @@ LoginGuardAction plugin_guard_decision(bool plugin_present,
         return LoginGuardAction::RestartRequired;
 
     // No agent and no plug-in of ours. Either networking is switched off, or the folder is empty,
-    // or a Bambu-original plug-in failed to load - the download dialog is the right answer to all
-    // three, and it is also where the user turns the preference back on.
+    // or a Bambu-original plug-in failed to load. There is no download to offer for any of them:
+    // the plug-in is missing from this install and reinstalling EdgeSlicer is the fix.
     (void) installed_networking;
-    return LoginGuardAction::OfferPluginDownload;
+    return LoginGuardAction::PluginMissing;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -271,15 +288,10 @@ CameraToolsCopy camera_tools_copy_decision(bool plugins_copy_is_stub,
     return cameratools_up_to_date ? CameraToolsCopy::KeepExisting : CameraToolsCopy::CopyFromPlugins;
 }
 
-OtaPluginInstall ota_plugin_install_decision(bool update_flag, bool ultranet_installed, bool keep_foreign)
+OtaPluginInstall ota_plugin_install_decision(bool update_flag)
 {
-    if (! update_flag)
-        return OtaPluginInstall::NothingStaged;
-    // The staged package is Bambu's: with UltraNet installed it would replace ours. Only somebody who
-    // keeps a foreign plug-in on purpose gets the stock copy.
-    if (ultranet_installed && ! keep_foreign)
-        return OtaPluginInstall::Refuse;
-    return OtaPluginInstall::Install;
+    // The staged package is Bambu's, and Bambu's plug-in is never installed.
+    return update_flag ? OtaPluginInstall::Refuse : OtaPluginInstall::NothingStaged;
 }
 
 const char *const *ota_plugin_staged_names(size_t &count)
