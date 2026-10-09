@@ -10,17 +10,3 @@ body.ep-page #PtRoot {
 	height: 100%;
 	box-sizing: border-box;
 }
-
-/* "Printer: [All printers v]" in the toolbar. */
-.pt-printer {
-	display: flex;
-	align-items: center;
-	gap: 6px;
-	margin: 0;
-	font-size: 13px;
-	color: var(--pt-muted);
-}
-
-.pt-printer-lbl {
-	color: var(--pt-muted);
-}

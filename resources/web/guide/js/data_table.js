@@ -30,6 +30,12 @@
 //   onSelectionChange()   after the user changes a tick
 //   onView()              after the shown rows changed (search, filter, sort)
 //   toolbar(bar, api)     lets the page add controls after the search box
+//   selects[]    drop-downs after the search box, each one a "set" filter of a column:
+//                { key, tid, label, allTid, all: 'All printers', nTid, n: '{n} printers' }
+//                (one value, or "All ..."; "{n} ..." when the column's funnel picked several)
+//   storageKey   remember dragged column widths in localStorage under this key
+// Every column but the last can be resized by dragging the right edge of its header (double-click
+// an edge: back to the default widths). Until a column is dragged the layout is cfg.cols[].w.
 // Search matches every word of the box anywhere in r.hay. All / Clear all (and the header
 // checkbox) act on the rows shown.
 var DataTable = (function () {
@@ -113,6 +119,8 @@ var DataTable = (function () {
 		var rowH = 36;
 		var rafPending = false;
 		var api = null;
+		var userW = null;       // px widths once a column was dragged (the last one stays flexible)
+		var selects = [];       // { cfg, node, multi } of the toolbar drop-downs
 
 		function resetFilters() {
 			state.f = {};
@@ -210,6 +218,7 @@ var DataTable = (function () {
 			renderHead();
 			renderChips();
 			renderCounts();
+			syncSelects();
 			if (cfg.onView) cfg.onView();
 		}
 
@@ -229,6 +238,7 @@ var DataTable = (function () {
 			sw.insertAdjacentHTML('beforeend', SEARCH);
 			bar.appendChild(sw);
 			el.bar = bar;
+			(cfg.selects || []).forEach(function (s) { buildSelect(bar, s); });
 			if (cfg.toolbar) cfg.toolbar(bar, api);
 			el.count = h('span', 'pt-count');
 			el.count.setAttribute('role', 'status');
@@ -256,7 +266,6 @@ var DataTable = (function () {
 			var grid = h('div', 'pt-grid' + (cfg.headerCheck ? ' hc' : ''));
 			grid.setAttribute('role', 'grid');
 			grid.setAttribute('aria-label', X('grid'));
-			grid.style.setProperty('--pt-cols', COLS.map(function (c) { return c.w; }).join(' '));
 			el.grid = grid;
 			el.head = h('div', 'pt-row pt-head');
 			el.head.setAttribute('role', 'row');
@@ -296,9 +305,19 @@ var DataTable = (function () {
 						c.fbtn = fb;
 					}
 				}
+				if (COLS.indexOf(c) < COLS.length - 1) {
+					var rz = h('div', 'pt-resize');
+					rz.title = T('pt_resize_tip', 'Drag to resize the column; double-click to reset all widths');
+					rz.addEventListener('mousedown', function (e) { startResize(e, COLS.indexOf(c)); });
+					rz.addEventListener('click', function (e) { e.stopPropagation(); });
+					rz.addEventListener('dblclick', function (e) { e.stopPropagation(); userW = null; applyTemplate(); saveWidths(); schedule(); });
+					th.appendChild(rz);
+				}
 				c.th = th;
 				el.head.appendChild(th);
 			});
+			loadWidths();
+			applyTemplate();
 			grid.appendChild(el.head);
 
 			el.body = h('div', 'pt-body ZScrol');
@@ -309,6 +328,7 @@ var DataTable = (function () {
 			el.body.addEventListener('click', onBodyClick);
 			el.body.addEventListener('change', onBodyChange);
 			el.body.addEventListener('keydown', onBodyKey);
+			el.body.addEventListener('mouseover', onBodyOver);
 			grid.appendChild(el.body);
 			el.empty = h('div', 'pt-empty', X('none_match'));
 			el.empty.style.display = 'none';
@@ -325,6 +345,7 @@ var DataTable = (function () {
 		// ---- data ----
 		function setRows(list) {
 			rows = list;
+			fillSelects();
 			clearRendered();
 			recompute(false);
 		}
@@ -385,7 +406,10 @@ var DataTable = (function () {
 				} else {
 					var cell = c.cell ? c.cell(r) : { text: String(r[c.key]) };
 					td = h('div', 'pt-td' + (c.cls === 'num' ? ' num' : '') + (cell.na ? ' na' : ''), cell.text);
-					if (cell.title) td.title = cell.title;
+					// A title richer than the text (a printer list) always shows; otherwise the full text
+					// shows only when the cell cuts it off (onBodyOver).
+					if (cell.title && cell.title !== cell.text) td.title = cell.title;
+					else td.dataset.full = cell.text;
 				}
 				td.setAttribute('role', 'gridcell');
 				row.appendChild(td);
@@ -434,6 +458,12 @@ var DataTable = (function () {
 			setChecked(rows[+node.dataset.id], e.target.checked);
 			changed();
 		}
+		function onBodyOver(e) {
+			var td = e.target;
+			if (!td || !td.dataset || td.dataset.full === undefined) return;
+			if (td.scrollWidth > td.clientWidth + 1) td.title = td.dataset.full;
+			else td.removeAttribute('title');
+		}
 		function onBodyKey(e) {
 			if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp' && e.key !== 'Home' && e.key !== 'End') return;
 			var node = rowOf(e.target);
@@ -450,6 +480,115 @@ var DataTable = (function () {
 			renderRows(false);
 			var node = rendered[view[pos].id];
 			if (node) node.firstChild.firstChild.focus();
+		}
+
+		// ---- column widths ----
+		function minW(i) { return COLS[i].minW || (COLS[i].key === CHECKED ? 64 : 48); }
+		function colTemplate() {
+			if (!userW) return COLS.map(function (c) { return c.w; }).join(' ');
+			var last = COLS.length - 1;
+			return userW.map(function (w, i) { return i === last ? 'minmax(' + minW(i) + 'px, 1fr)' : Math.round(w) + 'px'; }).join(' ');
+		}
+		function applyTemplate() { if (el.grid) el.grid.style.setProperty('--pt-cols', colTemplate()); }
+		function loadWidths() {
+			if (!cfg.storageKey) return;
+			try {
+				var w = JSON.parse(localStorage.getItem(cfg.storageKey) || 'null');
+				if (w && w.length === COLS.length && w.every(function (x) { return typeof x === 'number' && x > 0; })) userW = w;
+			} catch (e) { }
+		}
+		function saveWidths() {
+			if (!cfg.storageKey) return;
+			try { if (userW) localStorage.setItem(cfg.storageKey, JSON.stringify(userW)); else localStorage.removeItem(cfg.storageKey); } catch (e) { }
+		}
+		// Dragging the right edge of column i: it grows at the expense of the columns to its right
+		// (nearest first, down to their minimum), or shrinks and gives the space to its neighbour.
+		// The total stays; the last column is flexible, so it follows the window.
+		function startResize(e, i) {
+			e.preventDefault();
+			e.stopPropagation();
+			closePopover();
+			var w0 = COLS.map(function (c) { return c.th.getBoundingClientRect().width; });
+			var x0 = e.clientX;
+			document.body.classList.add('pt-resizing');
+			function move(ev) {
+				var dx = ev.clientX - x0, w = w0.slice();
+				if (dx >= 0) {
+					var need = dx, taken = 0;
+					for (var j = i + 1; j < COLS.length && need > 0; j++) {
+						var t = Math.min(Math.max(0, w[j] - minW(j)), need);
+						w[j] -= t; need -= t; taken += t;
+					}
+					w[i] = w0[i] + taken;
+				} else {
+					var give = Math.min(-dx, Math.max(0, w0[i] - minW(i)));
+					w[i] = w0[i] - give;
+					w[i + 1] += give;
+				}
+				userW = w;
+				applyTemplate();
+			}
+			function up() {
+				document.removeEventListener('mousemove', move, true);
+				document.removeEventListener('mouseup', up, true);
+				document.body.classList.remove('pt-resizing');
+				saveWidths();
+				schedule();
+			}
+			document.addEventListener('mousemove', move, true);
+			document.addEventListener('mouseup', up, true);
+		}
+
+		// ---- toolbar drop-downs: a "set" filter of one column as a single choice ----
+		var MULTI = '__several__';
+		function buildSelect(bar, s) {
+			var c = col(s.key);
+			var wrap = h('label', 'pt-printer');
+			wrap.appendChild(h('span', 'pt-printer-lbl', T(s.tid, s.label)));
+			var sel = h('select', 'pt-select');
+			sel.setAttribute('aria-label', T(s.tid, s.label));
+			sel.dataset.key = s.key;
+			var entry = { cfg: s, col: c, node: sel, multi: null };
+			sel.addEventListener('change', function () {
+				if (sel.value === MULTI) return;
+				var f = state.f[s.key];
+				for (var k in f) if (f.hasOwnProperty(k)) delete f[k];
+				if (sel.value !== '') universe(c).forEach(function (k) { if (k !== sel.value) f[k] = 1; });
+				recompute(false);
+			});
+			wrap.appendChild(sel);
+			bar.appendChild(wrap);
+			selects.push(entry);
+		}
+		function fillSelects() {
+			selects.forEach(function (e) {
+				e.node.textContent = '';
+				e.multi = null;
+				var all = h('option', null, T(e.cfg.allTid, e.cfg.all));
+				all.value = '';
+				e.node.appendChild(all);
+				sortKeys(e.col, universe(e.col)).forEach(function (k) {
+					var o = h('option', null, setLabelOf(e.col, k));
+					o.value = k;
+					e.node.appendChild(o);
+				});
+			});
+		}
+		// What the column's filter (maybe set from its funnel or a chip) amounts to.
+		function syncSelects() {
+			selects.forEach(function (e) {
+				var f = state.f[e.cfg.key], all = universe(e.col);
+				var inc = all.filter(function (k) { return !f[k]; });
+				if (e.multi) { e.multi.remove(); e.multi = null; }
+				if (inc.length === all.length) e.node.value = '';
+				else if (inc.length === 1) e.node.value = inc[0];
+				else {
+					e.multi = h('option', null, T(e.cfg.nTid, e.cfg.n, { n: inc.length }));
+					e.multi.value = MULTI;
+					e.node.appendChild(e.multi);
+					e.node.value = MULTI;
+				}
+			});
 		}
 
 		// ---- header, chips, counts ----

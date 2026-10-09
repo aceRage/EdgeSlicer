@@ -501,6 +501,8 @@ set(lisbslic3r_sources
     PrincipalComponents2D.hpp
     PrinterModelSpecs.cpp
     PrinterModelSpecs.hpp
+    FilamentPresetExport.cpp
+    FilamentPresetExport.hpp
     ProcessPresetExport.cpp
     ProcessPresetExport.hpp
     PrintApply.cpp

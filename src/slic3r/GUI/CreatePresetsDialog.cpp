@@ -11,6 +11,7 @@
 #include <boost/nowide/cstdio.hpp>
 #include <wx/webview.h>
 #include <wx/display.h>
+#include <cstdio>
 #include "Widgets/WebView.hpp"
 #include "libslic3r/PresetBundle.hpp"
 #include "I18N.hpp"
@@ -3562,7 +3563,7 @@ void CreatePresetSuccessfulDialog::on_dpi_changed(const wxRect &suggested_rect) 
 }
 
 ExportConfigsDialog::ExportConfigsDialog(wxWindow *parent)
-    : DPIDialog(parent ? parent : nullptr, wxID_ANY, _L("Export Preset Bundle"), wxDefaultPosition, wxDefaultSize, wxCAPTION | wxCLOSE_BOX)
+    : DPIDialog(parent ? parent : nullptr, wxID_ANY, _L("Export Preset Bundle"), wxDefaultPosition, wxDefaultSize, wxCAPTION | wxCLOSE_BOX | wxRESIZE_BORDER | wxMAXIMIZE_BOX)
 {
     m_exprot_type.preset_bundle   = _L("Printer config bundle(.orca_printer)");
     m_exprot_type.filament_bundle = _L("Filament bundle(.orca_filament)");
@@ -3581,7 +3582,7 @@ ExportConfigsDialog::ExportConfigsDialog(wxWindow *parent)
     m_main_sizer->Add(0, 0, 0, wxTOP, FromDIP(5));
 
     m_main_sizer->Add(create_export_config_item(this), 0, wxEXPAND | wxALL, FromDIP(5));
-    m_main_sizer->Add(create_select_printer(this), 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(5));
+    m_main_sizer->Add(create_select_printer(this), 1, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(5));
     m_main_sizer->Add(create_dialog_buttons(this), 0, wxEXPAND);
 
     data_init();
@@ -3597,6 +3598,12 @@ ExportConfigsDialog::ExportConfigsDialog(wxWindow *parent)
 
 ExportConfigsDialog::~ExportConfigsDialog()
 {
+    // The table's window is resizable: remember its size (in DIP) for the next time.
+    if (m_table_size_used && !IsIconized() && !IsMaximized()) {
+        const wxSize size = ToDIP(GetSize());
+        if (size.x > 0 && size.y > 0 && wxGetApp().app_config)
+            wxGetApp().app_config->set("export_presets_dialog_size", std::to_string(size.x) + "," + std::to_string(size.y));
+    }
     for (std::pair<std::string, Preset *> printer_preset : m_printer_presets) {
         Preset *preset = printer_preset.second;
         if (preset) {
@@ -3672,8 +3679,8 @@ void ExportConfigsDialog::show_export_result(const ExportCase &export_case)
 
 bool ExportConfigsDialog::has_check_box_selected()
 {
-    if (m_process_table != nullptr && get_curr_radio_type(m_export_type_btns) == m_exprot_type.process_preset)
-        return !m_process_selected.empty();
+    if (const int table = current_table(); table >= 0)
+        return !m_tables[table].selected.empty();
     for (std::pair<::CheckBox *, Preset *> checkbox_preset : m_preset) {
         if (checkbox_preset.first->GetValue()) return true;
     }
@@ -3911,15 +3918,18 @@ void ExportConfigsDialog::select_curr_radiobox(std::vector<std::pair<RadioBox *,
                                         FromDIP(5));
                 }
                 m_serial_text->SetLabel(_L("Only printer names with user printer presets will be displayed, and each preset you choose will be exported as a zip."));
+            } else if (export_type == m_exprot_type.filament_preset && show_export_table(FILAMENT_TABLE)) {
+                // The table (an embedded web view) takes the place of the checkbox grid.
+                m_serial_text->SetLabel(_L("Tick the user filament presets to export; they are saved as a zip. Filter by printer, vendor or material,\nand Import Preset Bundle reads the zip back."));
             } else if (export_type == m_exprot_type.filament_preset) {
+                // No web view (it could not be created): the earlier filament-name checkboxes.
                 for (std::pair<std::string, std::vector<std::pair<std::string, Preset *>>> filament_name_to_preset : m_filament_name_to_presets) {
                     if (filament_name_to_preset.second.empty()) continue;
                     wxString filament_name = wxString::FromUTF8(filament_name_to_preset.first);
                     m_preset_sizer->Add(create_checkbox(m_presets_window, filament_name, m_printer_name), 0, wxEXPAND | wxTOP | wxLEFT | wxRIGHT, FromDIP(5));
                 }
                 m_serial_text->SetLabel(_L("Only the filament names with user filament presets will be displayed, \nand all user filament presets in each filament name you select will be exported as a zip."));
-            } else if (export_type == m_exprot_type.process_preset && show_process_table(true)) {
-                // The table (an embedded web view) takes the place of the checkbox grid.
+            } else if (export_type == m_exprot_type.process_preset && show_export_table(PROCESS_TABLE)) {
                 m_serial_text->SetLabel(_L("Tick the user process presets to export; they are saved as a zip. Filter by printer or search to find them,\nand Import Preset Bundle reads the zip back."));
             } else if (export_type == m_exprot_type.process_preset) {
                 // No web view (it could not be created): the earlier per-printer checkboxes.
@@ -3939,8 +3949,9 @@ void ExportConfigsDialog::select_curr_radiobox(std::vector<std::pair<RadioBox *,
                 }
                 m_serial_text->SetLabel(_L("Only printer names with changed process presets will be displayed, \nand all user process presets in each printer name you select will be exported as a zip."));
             }
-            if (export_type != m_exprot_type.process_preset || m_process_table == nullptr)
-                show_process_table(false);
+            const bool table_shown = current_table() >= 0;
+            if (!table_shown)
+                hide_export_tables();
             //m_presets_window->SetSizerAndFit(m_preset_sizer);
             m_presets_window->Layout();
             m_presets_window->Fit();
@@ -3952,6 +3963,7 @@ void ExportConfigsDialog::select_curr_radiobox(std::vector<std::pair<RadioBox *,
             this->SetSizerAndFit(m_main_sizer);
             Layout();
             Fit();
+            if (table_shown) apply_table_dialog_size();
             Refresh();
             adjust_dialog_in_screen(this);
             this->Thaw();
@@ -4214,6 +4226,10 @@ ExportConfigsDialog::ExportCase ExportConfigsDialog::archive_filament_preset_to_
     export_file             = initial_file_name(path, export_file);
     if (export_file.empty() || "initial_failed" == export_file) return ExportCase::EXPORT_CANCEL;
 
+    if (m_tables[FILAMENT_TABLE].view != nullptr)
+        return archive_table_selection(FILAMENT_TABLE, export_file);
+
+    // No table (no web view): the filament-name checkboxes.
     std::vector<std::pair<std::string, std::string>> config_paths;
 
     std::set<std::string> filament_presets;
@@ -4257,27 +4273,8 @@ ExportConfigsDialog::ExportCase ExportConfigsDialog::archive_process_preset_to_f
     export_file             = initial_file_name(path, export_file);
     if (export_file.empty() || "initial_failed" == export_file) return ExportCase::EXPORT_CANCEL;
 
-    if (m_process_table != nullptr) {
-        // The table's ticks: exactly those presets, "<name>.json" entries, flat - the layout the
-        // per-printer export wrote and Import Preset Bundle reads.
-        std::vector<std::string>    skipped;
-        std::vector<PresetZipEntry> entries = process_export_entries(m_process_model, m_process_selected, &skipped);
-        if (!skipped.empty()) {
-            wxString names;
-            for (const std::string &s : skipped) names += "\n" + wxString::FromUTF8(s);
-            MessageDialog dlg(this, _L("These process presets could not be exported:") + names, wxString(SLIC3R_APP_FULL_NAME) + " - " + _L("Info"),
-                              wxYES | wxYES_DEFAULT | wxCENTRE);
-            dlg.ShowModal();
-        }
-        switch (write_presets_zip(export_file, entries)) {
-        case PresetZipResult::InitFailed: return ExportCase::INITIALIZE_FAIL;
-        case PresetZipResult::AddFileFailed: return ExportCase::ADD_FILE_FAIL;
-        case PresetZipResult::FinalizeFailed: return ExportCase::FINALIZE_FAIL;
-        case PresetZipResult::Ok: break;
-        }
-        BOOST_LOG_TRIVIAL(info) << "ZIP archive created successfully";
-        return ExportCase::EXPORT_SUCCESS;
-    }
+    if (m_tables[PROCESS_TABLE].view != nullptr)
+        return archive_table_selection(PROCESS_TABLE, export_file);
 
     // No table (no web view): the per-printer checkboxes.
     std::vector<std::pair<std::string, std::string>> config_paths;
@@ -4312,79 +4309,150 @@ ExportConfigsDialog::ExportCase ExportConfigsDialog::archive_process_preset_to_f
     return ExportCase::EXPORT_SUCCESS;
 }
 
-bool ExportConfigsDialog::show_process_table(bool show)
+int ExportConfigsDialog::current_table() const
 {
-    if (!show) {
-        if (m_process_table != nullptr && m_process_table->IsShown()) m_process_table->Hide();
-        if (m_scrolled_preset_window != nullptr) m_scrolled_preset_window->Show();
-        return true;
-    }
-    if (m_process_table_failed || m_select_sizer == nullptr) return false;
+    const wxString type = get_curr_radio_type(const_cast<std::vector<std::pair<RadioBox *, wxString>> &>(m_export_type_btns));
+    if (type == m_exprot_type.process_preset && m_tables[PROCESS_TABLE].view != nullptr) return PROCESS_TABLE;
+    if (type == m_exprot_type.filament_preset && m_tables[FILAMENT_TABLE].view != nullptr) return FILAMENT_TABLE;
+    return -1;
+}
 
-    if (m_process_table == nullptr) {
-        // One row per user process preset (the earlier export grouped them by printer name).
-        ProcessPresetsByPrinter by_printer;
-        for (const std::pair<const std::string, std::vector<Preset *>> &printer_presets : m_process_presets)
-            for (const Preset *preset : printer_presets.second) by_printer[printer_presets.first].push_back(preset);
-        m_process_model = build_process_export_model(by_printer, wxGetApp().preset_bundle->printers);
+void ExportConfigsDialog::hide_export_tables()
+{
+    for (ExportTable &table : m_tables)
+        if (table.view != nullptr && table.view->IsShown()) table.view->Hide();
+    if (m_scrolled_preset_window != nullptr) m_scrolled_preset_window->Show();
+}
 
-        wxString url = file_url_from_path(boost::filesystem::path(resources_dir()) / "web/guide/export_process/index.html");
-        wxString lang = wxGetApp().current_language_code_safe();
-        if (!lang.IsEmpty()) url += "?lang=" + lang;
-        m_process_table = WebView::CreateWebView(this, url);
-        if (m_process_table == nullptr) {
-            BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ": could not create the web view, using the printer checkboxes";
-            m_process_table_failed = true;
+bool ExportConfigsDialog::show_export_table(int which)
+{
+    ExportTable &table = m_tables[which];
+    if (table.failed || m_select_sizer == nullptr) return false;
+
+    if (table.view == nullptr) {
+        // One row per user preset (the earlier export grouped them by printer name / filament name).
+        if (which == PROCESS_TABLE) {
+            UserPresetsByPrinter by_printer;
+            for (const std::pair<const std::string, std::vector<Preset *>> &printer_presets : m_process_presets)
+                for (const Preset *preset : printer_presets.second) by_printer[printer_presets.first].push_back(preset);
+            table.model = build_process_export_model(by_printer, wxGetApp().preset_bundle->printers);
+        } else {
+            UserPresetsByPrinter by_printer;
+            for (const std::pair<const std::string, std::vector<Preset *>> &printer_presets : m_filament_presets)
+                for (const Preset *preset : printer_presets.second) by_printer[printer_presets.first].push_back(preset);
+            std::vector<const Preset *> exportable;
+            for (const auto &name_presets : m_filament_name_to_presets)
+                for (const std::pair<std::string, Preset *> &vendor_preset : name_presets.second) exportable.push_back(vendor_preset.second);
+            table.model = build_filament_export_model(by_printer, exportable, wxGetApp().preset_bundle->printers, wxGetApp().preset_bundle->filaments);
+        }
+
+        wxString url = file_url_from_path(boost::filesystem::path(resources_dir()) / "web/guide/export_presets/index.html");
+        url += which == PROCESS_TABLE ? "?kind=process" : "?kind=filament";
+        const wxString lang = wxGetApp().current_language_code_safe();
+        if (!lang.IsEmpty()) url += "&lang=" + lang;
+        table.view = WebView::CreateWebView(this, url);
+        if (table.view == nullptr) {
+            BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ": could not create the web view, using the checkboxes";
+            table.failed = true;
             return false;
         }
-        Bind(wxEVT_WEBVIEW_SCRIPT_MESSAGE_RECEIVED, &ExportConfigsDialog::on_process_table_message, this, m_process_table->GetId());
-        m_select_sizer->Add(m_process_table, 1, wxEXPAND | wxLEFT | wxRIGHT, FromDIP(10));
+        Bind(wxEVT_WEBVIEW_SCRIPT_MESSAGE_RECEIVED, [this, which](wxWebViewEvent &evt) { on_export_table_message(evt, which); }, table.view->GetId());
+        m_select_sizer->Add(table.view, 1, wxEXPAND | wxLEFT | wxRIGHT, FromDIP(10));
     }
 
-    // Wide enough for the six columns, tall enough for a dozen rows, within the screen.
-    wxSize size = FromDIP(wxSize(900, 400));
+    // Room for the columns and a dozen rows, within the screen; the dialog can be resized from there.
+    wxSize size = FromDIP(wxSize(640, 280));
     const int disp = wxDisplay::GetFromWindow(this);
     const wxRect area = wxDisplay(disp == wxNOT_FOUND ? 0u : unsigned(disp)).GetClientArea();
-    size.x = std::min(size.x, area.width * 85 / 100);
-    size.y = std::max(FromDIP(260), std::min(size.y, area.height * 38 / 100));
-    m_process_table->SetMinSize(size);
+    size.x = std::min(size.x, area.width * 80 / 100);
+    size.y = std::min(size.y, area.height * 30 / 100);
+    table.view->SetMinSize(size);
+    for (int i = 0; i < TABLE_COUNT; ++i)
+        if (i != which && m_tables[i].view != nullptr) m_tables[i].view->Hide();
     m_scrolled_preset_window->Hide();
-    m_process_table->Show();
+    table.view->Show();
     return true;
 }
 
-void ExportConfigsDialog::send_process_rows()
+// Once the sizer has fitted the dialog to its minimum: the size remembered from last time, or a
+// roomier default, within the screen.
+void ExportConfigsDialog::apply_table_dialog_size()
 {
-    nlohmann::json response = process_export_rows_json(m_process_model, m_process_selected); // the ticks: the page may have been reloaded (a theme change)
+    m_table_size_used = true;
+    const int disp = wxDisplay::GetFromWindow(this);
+    const wxRect area = wxDisplay(disp == wxNOT_FOUND ? 0u : unsigned(disp)).GetClientArea();
+    const wxSize best = GetSize();
+    wxSize want(FromDIP(1000), best.y + FromDIP(220));
+    if (wxGetApp().app_config) {
+        int w = 0, h = 0;
+        if (std::sscanf(wxGetApp().app_config->get("export_presets_dialog_size").c_str(), "%d,%d", &w, &h) == 2 && w >= 300 && h >= 300 && w <= 10000 && h <= 10000)
+            want = FromDIP(wxSize(w, h));
+    }
+    want.x = std::min(std::max(want.x, best.x), area.width * 95 / 100);
+    want.y = std::min(std::max(want.y, best.y), area.height * 95 / 100);
+    SetSize(want);
+    Layout();
+}
+
+void ExportConfigsDialog::send_export_rows(int which)
+{
+    ExportTable &table = m_tables[which];
+    // the ticks: the page may have been reloaded (a theme change)
+    nlohmann::json response = export_rows_json(table.model, table.selected);
     nlohmann::json msg;
-    msg["command"]     = "response_process_presets";
+    msg["command"]     = "response_export_rows";
     msg["sequence_id"] = "10001";
     msg["response"]    = std::move(response);
     const wxString js = "HandleStudio(" + wxString::FromUTF8(msg.dump(-1, ' ', true, nlohmann::json::error_handler_t::replace)) + ")";
     // dialog-level CallAfter: discarded on destruction, cannot run on a dangling `this`
-    CallAfter([this, js] {
-        if (m_process_table != nullptr) WebView::RunScript(m_process_table, js);
+    CallAfter([this, which, js] {
+        if (m_tables[which].view != nullptr) WebView::RunScript(m_tables[which].view, js);
     });
 }
 
-void ExportConfigsDialog::on_process_table_message(wxWebViewEvent &evt)
+void ExportConfigsDialog::on_export_table_message(wxWebViewEvent &evt, int which)
 {
     try {
         const nlohmann::json j   = nlohmann::json::parse(into_u8(evt.GetString()));
         const std::string    cmd = j.value("command", std::string());
         if (cmd == "export_table_ready") {
-            send_process_rows();
+            send_export_rows(which);
         } else if (cmd == "export_table_selection") {
-            m_process_selected.clear();
+            std::vector<size_t> &selected = m_tables[which].selected;
+            selected.clear();
             if (j.contains("ids") && j["ids"].is_array())
                 for (const nlohmann::json &id : j["ids"])
-                    if (id.is_number_unsigned()) m_process_selected.push_back(id.get<size_t>());
+                    if (id.is_number_unsigned()) selected.push_back(id.get<size_t>());
         } else if (cmd == "export_table_cancel") {
             CallAfter([this] { EndModal(wxID_CANCEL); });
         }
     } catch (const std::exception &ex) {
-        BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": bad message from the process presets table: " << ex.what();
+        BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": bad message from the export presets table: " << ex.what();
     }
+}
+
+// The table's ticks: exactly those presets, "<name>.json" entries, flat - the layout the earlier
+// exports wrote and Import Preset Bundle reads.
+ExportConfigsDialog::ExportCase ExportConfigsDialog::archive_table_selection(int which, const std::string &export_file)
+{
+    ExportTable &               table = m_tables[which];
+    std::vector<std::string>    skipped;
+    std::vector<PresetZipEntry> entries = preset_export_entries(table.model, table.selected, &skipped);
+    if (!skipped.empty()) {
+        wxString names;
+        for (const std::string &s : skipped) names += "\n" + wxString::FromUTF8(s);
+        MessageDialog dlg(this, _L("These presets could not be exported:") + names, wxString(SLIC3R_APP_FULL_NAME) + " - " + _L("Info"),
+                          wxYES | wxYES_DEFAULT | wxCENTRE);
+        dlg.ShowModal();
+    }
+    switch (write_presets_zip(export_file, entries)) {
+    case PresetZipResult::InitFailed: return ExportCase::INITIALIZE_FAIL;
+    case PresetZipResult::AddFileFailed: return ExportCase::ADD_FILE_FAIL;
+    case PresetZipResult::FinalizeFailed: return ExportCase::FINALIZE_FAIL;
+    case PresetZipResult::Ok: break;
+    }
+    BOOST_LOG_TRIVIAL(info) << "ZIP archive created successfully";
+    return ExportCase::EXPORT_SUCCESS;
 }
 
 wxWindow *ExportConfigsDialog::create_dialog_buttons(wxWindow* parent)
@@ -4392,8 +4460,9 @@ wxWindow *ExportConfigsDialog::create_dialog_buttons(wxWindow* parent)
     auto dlg_btns = new DialogButtons(parent, {"OK", "Cancel"});
     dlg_btns->GetOK()->Bind(wxEVT_BUTTON, [this](wxCommandEvent &e) {
         if (!has_check_box_selected()) {
-            const bool process_table = m_process_table != nullptr && get_curr_radio_type(m_export_type_btns) == m_exprot_type.process_preset;
-            MessageDialog dlg(this, process_table ? _L("Please select at least one process preset.") : _L("Please select at least one printer or filament."),
+            const int table = current_table();
+            MessageDialog dlg(this, table == PROCESS_TABLE ? _L("Please select at least one process preset.") :
+                                    table == FILAMENT_TABLE ? _L("Please select at least one filament preset.") : _L("Please select at least one printer or filament."),
                               wxString(SLIC3R_APP_FULL_NAME) + " - " + _L("Info"), wxYES | wxYES_DEFAULT | wxCENTRE);
             dlg.ShowModal();
             return;

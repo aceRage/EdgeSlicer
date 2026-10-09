@@ -15,9 +15,9 @@
 
 namespace Slic3r {
 
-ProcessPresetsByPrinter collect_user_process_presets(PresetBundle &bundle)
+UserPresetsByPrinter collect_user_process_presets(PresetBundle &bundle)
 {
-    ProcessPresetsByPrinter out;
+    UserPresetsByPrinter out;
     for (const Preset &printer_preset : bundle.printers.get_presets()) {
         const std::string printer_name = printer_preset.name;
         if (!printer_preset.is_visible || printer_preset.is_default || printer_preset.is_project_embedded)
@@ -36,9 +36,7 @@ ProcessPresetsByPrinter collect_user_process_presets(PresetBundle &bundle)
     return out;
 }
 
-namespace {
-
-std::int64_t file_mtime(const std::string &path)
+std::int64_t export_file_mtime(const std::string &path)
 {
     if (path.empty())
         return 0;
@@ -47,75 +45,99 @@ std::int64_t file_mtime(const std::string &path)
     return ec ? 0 : std::int64_t(t);
 }
 
-struct Accumulated
+ExportPrinterIndex::ExportPrinterIndex(const UserPresetsByPrinter &by_printer, const PresetCollection &printers)
 {
-    const Preset          *preset = nullptr;
-    std::set<std::string>  system_printers;
-    std::set<std::string>  user_printers;
-};
-
-} // namespace
-
-ProcessExportModel build_process_export_model(const ProcessPresetsByPrinter &by_printer, const PresetCollection &printers)
-{
-    std::map<std::string, Accumulated> by_name;
-    std::set<std::string>              system_printers; // printers with at least one preset, listed the way the old dialog did
+    std::set<std::string> system_printers; // printers with at least one preset, listed the way the old dialog did
     for (const auto &[printer_name, presets] : by_printer) {
         if (presets.empty())
             continue;
         const Preset *printer = printers.find_preset(printer_name, false);
         if (printer == nullptr)
             continue;
-        // The old per-printer list showed system printer presets that are their own base only.
         const bool listed = printer->is_system && printers.get_preset_base(*printer) == printer;
         if (listed)
             system_printers.insert(printer_name);
-        for (const Preset *process : presets) {
-            if (process == nullptr || process->is_system)
+        for (const Preset *preset : presets) {
+            if (preset == nullptr || preset->is_system)
                 continue;
-            Accumulated &acc = by_name[process->name];
-            if (acc.preset == nullptr)
-                acc.preset = process;
-            (listed ? acc.system_printers : acc.user_printers).insert(printer_name);
+            Listed &l = m_by_preset[preset->name];
+            (listed ? l.system_printers : l.user_printers).insert(printer_name);
         }
     }
+    m_system_printers = system_printers.size();
+}
 
-    ProcessExportModel model;
-    std::set<std::string> all_printers;
-    for (auto &[name, acc] : by_name) {
-        ProcessExportRow row;
-        row.name = name;
-        row.file = acc.preset->file;
-        row.inherits = acc.preset->inherits();
-        if (const auto *lh = acc.preset->config.option<ConfigOptionFloat>("layer_height"))
-            row.layer_height = lh->value;
-        const std::set<std::string> &listed = acc.system_printers.empty() ? acc.user_printers : acc.system_printers;
-        row.printers.assign(listed.begin(), listed.end()); // a std::set: sorted, distinct
-        row.all_printers = !acc.system_printers.empty() && system_printers.size() > 1 && acc.system_printers.size() == system_printers.size();
-        row.mtime = file_mtime(row.file);
-        all_printers.insert(listed.begin(), listed.end());
-        model.rows.push_back(std::move(row));
-    }
-    std::stable_sort(model.rows.begin(), model.rows.end(), [](const ProcessExportRow &a, const ProcessExportRow &b) {
+void ExportPrinterIndex::fill(const std::string &preset_name, PresetExportRow &row) const
+{
+    row.printers.clear();
+    row.all_printers = false;
+    auto it = m_by_preset.find(preset_name);
+    if (it == m_by_preset.end())
+        return;
+    const Listed &l = it->second;
+    const std::set<std::string> &listed = l.system_printers.empty() ? l.user_printers : l.system_printers;
+    row.printers.assign(listed.begin(), listed.end()); // a std::set: sorted, distinct
+    row.all_printers = !l.system_printers.empty() && m_system_printers > 1 && l.system_printers.size() == m_system_printers;
+}
+
+void finish_export_model(PresetExportModel &model)
+{
+    std::stable_sort(model.rows.begin(), model.rows.end(), [](const PresetExportRow &a, const PresetExportRow &b) {
         const std::string la = boost::to_lower_copy(a.name), lb = boost::to_lower_copy(b.name);
         return la != lb ? la < lb : a.name < b.name;
     });
-    for (size_t i = 0; i < model.rows.size(); ++i)
-        model.rows[i].id = i;
-    model.printers.assign(all_printers.begin(), all_printers.end());
+    std::set<std::string> printers, vendors, materials;
+    for (size_t i = 0; i < model.rows.size(); ++i) {
+        PresetExportRow &row = model.rows[i];
+        row.id = i;
+        printers.insert(row.printers.begin(), row.printers.end());
+        if (!row.vendor.empty())
+            vendors.insert(row.vendor);
+        if (!row.material.empty())
+            materials.insert(row.material);
+    }
+    model.printers.assign(printers.begin(), printers.end());
+    model.vendors.assign(vendors.begin(), vendors.end());
+    model.materials.assign(materials.begin(), materials.end());
+}
+
+PresetExportModel build_process_export_model(const UserPresetsByPrinter &by_printer, const PresetCollection &printers)
+{
+    const ExportPrinterIndex index(by_printer, printers);
+    std::map<std::string, const Preset *> by_name;
+    for (const auto &[printer_name, presets] : by_printer)
+        for (const Preset *process : presets)
+            if (process != nullptr && !process->is_system)
+                by_name.emplace(process->name, process);
+
+    PresetExportModel model;
+    for (const auto &[name, preset] : by_name) {
+        PresetExportRow row;
+        row.name     = name;
+        row.file     = preset->file;
+        row.inherits = preset->inherits();
+        if (const auto *lh = preset->config.option<ConfigOptionFloat>("layer_height"))
+            row.layer_height = lh->value;
+        index.fill(name, row);
+        if (row.printers.empty())
+            continue; // listed under no known printer
+        row.mtime = export_file_mtime(row.file);
+        model.rows.push_back(std::move(row));
+    }
+    finish_export_model(model);
     return model;
 }
 
-ProcessExportModel build_process_export_model(PresetBundle &scratch_bundle)
+PresetExportModel build_process_export_model(PresetBundle &scratch_bundle)
 {
-    const ProcessPresetsByPrinter by_printer = collect_user_process_presets(scratch_bundle);
+    const UserPresetsByPrinter by_printer = collect_user_process_presets(scratch_bundle);
     return build_process_export_model(by_printer, scratch_bundle.printers);
 }
 
-nlohmann::json process_export_rows_json(const ProcessExportModel &model, const std::vector<size_t> &selected)
+nlohmann::json export_rows_json(const PresetExportModel &model, const std::vector<size_t> &selected)
 {
     nlohmann::json rows = nlohmann::json::array();
-    for (const ProcessExportRow &r : model.rows) {
+    for (const PresetExportRow &r : model.rows) {
         nlohmann::json o;
         o["id"]       = r.id;
         o["name"]     = r.name;
@@ -124,17 +146,21 @@ nlohmann::json process_export_rows_json(const ProcessExportModel &model, const s
         o["inherits"] = r.inherits;
         o["lh"]       = r.layer_height > 0. ? nlohmann::json(r.layer_height) : nlohmann::json(nullptr);
         o["mtime"]    = r.mtime > 0 ? nlohmann::json(r.mtime) : nlohmann::json(nullptr);
+        o["vendor"]   = r.vendor;
+        o["material"] = r.material;
         rows.push_back(std::move(o));
     }
     nlohmann::json out;
-    out["rows"]     = std::move(rows);
-    out["printers"] = model.printers;
-    out["selected"] = selected;
+    out["rows"]      = std::move(rows);
+    out["printers"]  = model.printers;
+    out["vendors"]   = model.vendors;
+    out["materials"] = model.materials;
+    out["selected"]  = selected;
     return out;
 }
 
-std::vector<PresetZipEntry> process_export_entries(const ProcessExportModel &model, const std::vector<size_t> &selected,
-                                                   std::vector<std::string> *skipped)
+std::vector<PresetZipEntry> preset_export_entries(const PresetExportModel &model, const std::vector<size_t> &selected,
+                                                  std::vector<std::string> *skipped)
 {
     std::vector<bool> chosen(model.rows.size(), false);
     for (const size_t id : selected)
@@ -146,17 +172,17 @@ std::vector<PresetZipEntry> process_export_entries(const ProcessExportModel &mod
     for (size_t i = 0; i < model.rows.size(); ++i) {
         if (!chosen[i])
             continue;
-        const ProcessExportRow &row = model.rows[i];
+        const PresetExportRow &row = model.rows[i];
         const std::string path = boost::filesystem::path(row.file).make_preferred().string();
         if (path.empty()) {
-            BOOST_LOG_TRIVIAL(info) << "Export process preset: " << row.name << " skip because of the preset file path is empty.";
+            BOOST_LOG_TRIVIAL(info) << "Export preset: " << row.name << " skip because of the preset file path is empty.";
             if (skipped)
                 skipped->push_back(row.name + ": no preset file");
             continue;
         }
         const std::string entry = row.name + ".json";
         if (!names.insert(entry).second) {
-            BOOST_LOG_TRIVIAL(warning) << "Export process preset: " << row.name << " skipped, the zip already has an entry named " << entry;
+            BOOST_LOG_TRIVIAL(warning) << "Export preset: " << row.name << " skipped, the zip already has an entry named " << entry;
             if (skipped)
                 skipped->push_back(row.name + ": duplicate zip entry " + entry);
             continue;
@@ -180,7 +206,7 @@ PresetZipResult write_presets_zip(const std::string &zip_path_utf8, const std::v
             mz_zip_writer_end(&zip);
             return PresetZipResult::AddFileFailed;
         }
-        BOOST_LOG_TRIVIAL(info) << "Process preset json add successful: " << entry.name;
+        BOOST_LOG_TRIVIAL(info) << "Preset json add successful: " << entry.name;
     }
     if (mz_zip_writer_finalize_archive(&zip) == MZ_FALSE) {
         BOOST_LOG_TRIVIAL(info) << "Failed to finalize ZIP archive";

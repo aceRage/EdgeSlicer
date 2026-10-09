@@ -190,6 +190,7 @@ body.pt-page #AcceptArea {
 }
 
 .pt-th {
+	position: relative;
 	display: flex;
 	align-items: center;
 	height: 100%;
@@ -525,4 +526,40 @@ body.pt-page #AcceptArea {
 .pt-toolbar .pt-select option {
 	color: var(--pt-fg);
 	background-color: var(--pt-pop-bg);
+}
+
+/* Drag the right edge of a column header to resize it (data_table.js). */
+.pt-resize {
+	position: absolute;
+	top: 0;
+	right: -4px;
+	width: 9px;
+	height: 100%;
+	cursor: col-resize;
+	z-index: 3;
+}
+
+.pt-resize:hover,
+body.pt-resizing .pt-resize:active {
+	background: linear-gradient(to right, transparent 3px, var(--pt-accent) 3px, var(--pt-accent) 5px, transparent 5px);
+}
+
+body.pt-resizing,
+body.pt-resizing * {
+	cursor: col-resize !important;
+	user-select: none !important;
+}
+
+/* The toolbar's drop-down groups. */
+.pt-printer {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	margin: 0;
+	font-size: 13px;
+	color: var(--pt-muted);
+}
+
+.pt-printer-lbl {
+	color: var(--pt-muted);
 }

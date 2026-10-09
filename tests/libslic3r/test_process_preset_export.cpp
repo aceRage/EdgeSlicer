@@ -13,6 +13,7 @@
 #include <boost/nowide/fstream.hpp>
 #include <miniz.h>
 
+#include "libslic3r/FilamentPresetExport.hpp"
 #include "libslic3r/Preset.hpp"
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/ProcessPresetExport.hpp"
@@ -112,6 +113,20 @@ Preset &add_user_process(PresetBundle &bundle, const fs::path &user_dir, const s
     return p;
 }
 
+Preset &add_user_filament(PresetBundle &bundle, const fs::path &user_dir, const std::string &name, const Preset &parent,
+                          const std::vector<std::string> &compatible, const std::string &vendor, const std::string &material)
+{
+    DynamicPrintConfig config = parent.config;
+    config.set_key_value("inherits", new ConfigOptionString(parent.name));
+    config.option<ConfigOptionStrings>("compatible_printers", true)->values = compatible;
+    config.set_key_value("compatible_printers_condition", new ConfigOptionString(""));
+    config.option<ConfigOptionStrings>("filament_vendor", true)->values = { vendor };
+    config.option<ConfigOptionStrings>("filament_type", true)->values = { material };
+    Preset &p = bundle.filaments.load_preset((user_dir / "filament" / (name + ".json")).string(), name, config, false);
+    REQUIRE(p.save(nullptr));
+    return p;
+}
+
 std::string read_bytes(const fs::path &path)
 {
     boost::nowide::ifstream in(path.string(), std::ios::binary);
@@ -140,7 +155,7 @@ std::vector<std::pair<std::string, std::string>> read_zip(const fs::path &zip_pa
 
 // The export as it was before the table: for each ticked printer, its list of user process presets,
 // a preset already added (same name) skipped, an empty file path skipped; entry "<name>.json".
-std::vector<PresetZipEntry> legacy_entries(const ProcessPresetsByPrinter &by_printer, const std::vector<std::string> &ticked_printers)
+std::vector<PresetZipEntry> legacy_entries(const UserPresetsByPrinter &by_printer, const std::vector<std::string> &ticked_printers)
 {
     std::vector<PresetZipEntry> out;
     std::set<std::string>       seen;
@@ -193,6 +208,7 @@ struct Fixture
     std::vector<std::string>     system_printers;      // every listed system printer
     Preset                      *a = nullptr, *b = nullptr, *c = nullptr, *d = nullptr, *embedded = nullptr;
     std::string                  system_process;
+    std::vector<std::string>     system_filaments;  // three system filament presets of different groups
 
     Fixture()
     {
@@ -220,6 +236,31 @@ struct Fixture
         d = &add_user_process(*bundle, user_dir, "ET D user printer only", parent, { user_printer }, 0.28);
         embedded = &add_user_process(*bundle, user_dir, "ET E embedded", parent, { p1 }, 0.3);
         embedded->is_project_embedded = true;
+
+        // Three system filaments with different group names, for the filament tests.
+        std::set<std::string> groups;
+        for (const Preset &f : bundle->filaments.get_presets()) {
+            if (!f.is_system || f.is_default || f.name.find('@') == std::string::npos)
+                continue;
+            if (!groups.insert(filament_group_name(f.name)).second)
+                continue;
+            system_filaments.push_back(f.name);
+            if (system_filaments.size() == 3)
+                break;
+        }
+    }
+
+    // User filament presets, added on demand (they change what the process tests see not at all).
+    void add_filaments()
+    {
+        REQUIRE(system_filaments.size() == 3);
+        const Preset &f1 = *bundle->filaments.find_preset(system_filaments[0], false);
+        const Preset &f2 = *bundle->filaments.find_preset(system_filaments[1], false);
+        const Preset &f3 = *bundle->filaments.find_preset(system_filaments[2], false);
+        add_user_filament(*bundle, user_dir, "ET fil A1", f1, { p1 }, "ET Vendor", "PETG");
+        add_user_filament(*bundle, user_dir, "ET fil A2", f1, { p2 }, "ET Vendor", "PETG");
+        add_user_filament(*bundle, user_dir, "ET fil B all printers", f2, {}, "Other Vendor", "PLA");
+        add_user_filament(*bundle, user_dir, "ET fil C user printer", f3, { user_printer }, "Other Vendor", "ABS");
     }
 
     const ProcessExportRow *row(const ProcessExportModel &m, const std::string &name) const
@@ -301,11 +342,11 @@ TEST_CASE("process export entries: selection -> zip entries", "[ProcessPresetExp
 
     SECTION("nothing selected, nothing exported")
     {
-        CHECK(process_export_entries(model, {}).empty());
+        CHECK(preset_export_entries(model, {}).empty());
     }
     SECTION("entries follow the row order, not the click order; repeated and unknown ids are ignored")
     {
-        const auto e = process_export_entries(model, { 3, 0, 0, 99 });
+        const auto e = preset_export_entries(model, { 3, 0, 0, 99 });
         REQUIRE(e.size() == 2);
         CHECK(e[0].name == "B.json");
         CHECK(e[1].name == "A2.json");
@@ -314,7 +355,7 @@ TEST_CASE("process export entries: selection -> zip entries", "[ProcessPresetExp
     SECTION("a preset without a file is skipped and reported")
     {
         std::vector<std::string> skipped;
-        const auto e = process_export_entries(model, { 1, 2 }, &skipped);
+        const auto e = preset_export_entries(model, { 1, 2 }, &skipped);
         REQUIRE(e.size() == 1);
         CHECK(e[0].name == "A.json");
         REQUIRE(skipped.size() == 1);
@@ -324,7 +365,7 @@ TEST_CASE("process export entries: selection -> zip entries", "[ProcessPresetExp
     {
         const ProcessExportModel dup = hand_model({ { "X", "/p/X1.json" }, { "X", "/q/X2.json" } });
         std::vector<std::string> skipped;
-        const auto e = process_export_entries(dup, { 0, 1 }, &skipped);
+        const auto e = preset_export_entries(dup, { 0, 1 }, &skipped);
         REQUIRE(e.size() == 1);
         CHECK(fs::path(e[0].path).filename() == "X1.json");
         CHECK(skipped.size() == 1);
@@ -341,7 +382,7 @@ TEST_CASE("process export rows json: what the table page receives", "[ProcessPre
     m.rows[1].all_printers  = true; // no layer height, no mtime, no parent
     m.printers              = { "P1", "P2" };
 
-    const nlohmann::json j = process_export_rows_json(m, { 1 });
+    const nlohmann::json j = export_rows_json(m, { 1 });
     REQUIRE(j["rows"].is_array());
     REQUIRE(j["rows"].size() == 2);
     const auto &a = j["rows"][0];
@@ -365,13 +406,13 @@ TEST_CASE("process export rows json: what the table page receives", "[ProcessPre
     name += "set ";
     for (int byte : { 0xE2, 0x80, 0x93, 0xE6, 0xB5, 0x8B }) name += char(byte); // en dash, a CJK character
     ProcessExportModel u = hand_model({ { name, "/p/u.json" } });
-    CHECK(nlohmann::json::parse(process_export_rows_json(u, {}).dump(-1, ' ', true))["rows"][0]["name"] == u.rows[0].name);
+    CHECK(nlohmann::json::parse(export_rows_json(u, {}).dump(-1, ' ', true))["rows"][0]["name"] == u.rows[0].name);
 }
 
 TEST_CASE("process export: all presets of one printer = what the per-printer export wrote", "[ProcessPresetExport]")
 {
     Fixture f;
-    const ProcessPresetsByPrinter by_printer = collect_user_process_presets(*f.bundle);
+    const UserPresetsByPrinter by_printer = collect_user_process_presets(*f.bundle);
     const ProcessExportModel      model      = build_process_export_model(by_printer, f.bundle->printers);
 
     for (const std::string &printer : { f.p1, f.p2, f.system_printers.back() }) {
@@ -384,7 +425,7 @@ TEST_CASE("process export: all presets of one printer = what the per-printer exp
         for (const ProcessExportRow &r : model.rows)
             if (std::find(r.printers.begin(), r.printers.end(), printer) != r.printers.end())
                 ids.push_back(r.id);
-        CHECK(sorted_pairs(process_export_entries(model, ids)) == expected);
+        CHECK(sorted_pairs(preset_export_entries(model, ids)) == expected);
     }
 
     // Two printers ticked in the old dialog = the union, one entry per preset.
@@ -397,14 +438,14 @@ TEST_CASE("process export: all presets of one printer = what the per-printer exp
                     ids.push_back(r.id);
                     break;
                 }
-        CHECK(sorted_pairs(process_export_entries(model, ids)) == expected);
+        CHECK(sorted_pairs(preset_export_entries(model, ids)) == expected);
     }
 }
 
 TEST_CASE("process export: the zip has the old layout and imports back exactly", "[ProcessPresetExport]")
 {
     Fixture f;
-    const ProcessPresetsByPrinter by_printer = collect_user_process_presets(*f.bundle);
+    const UserPresetsByPrinter by_printer = collect_user_process_presets(*f.bundle);
     const ProcessExportModel      model      = build_process_export_model(by_printer, f.bundle->printers);
     ScratchDir                    out("out");
 
@@ -412,7 +453,7 @@ TEST_CASE("process export: the zip has the old layout and imports back exactly",
     std::vector<size_t> ids;
     for (const char *n : { "ET A only p1", "ET B only p2", "ET D user printer only" })
         ids.push_back(f.row(model, n)->id);
-    const auto entries = process_export_entries(model, ids);
+    const auto entries = preset_export_entries(model, ids);
     REQUIRE(entries.size() == 3);
 
     const fs::path zip = out.path() / "Process presets.zip";
@@ -471,5 +512,174 @@ TEST_CASE("process export: the zip has the old layout and imports back exactly",
         CHECK(b->config.opt_float("layer_height") == Approx(0.16));
         // And the files landed in the data dir's user folder.
         CHECK(fs::exists(dest.path() / PRESET_USER_DIR / "default" / "process" / "ET B only p2.json"));
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Filament presets (.zip)
+
+TEST_CASE("filament export model: one row per exportable user filament preset", "[FilamentPresetExport]")
+{
+    Fixture f;
+    f.add_filaments();
+    const PresetExportModel model = build_filament_export_model(*f.bundle);
+
+    REQUIRE(model.rows.size() == 4);
+    std::vector<std::string> names;
+    for (size_t i = 0; i < model.rows.size(); ++i) {
+        CHECK(model.rows[i].id == i);
+        names.push_back(model.rows[i].name);
+    }
+    CHECK(names == std::vector<std::string>{ "ET fil A1", "ET fil A2", "ET fil B all printers", "ET fil C user printer" });
+
+    const PresetExportRow &a1 = model.rows[0];
+    CHECK(a1.printers == std::vector<std::string>{ f.p1 });
+    CHECK(a1.vendor == "ET Vendor");
+    CHECK(a1.material == "PETG");
+    CHECK(a1.group == filament_group_name(f.system_filaments[0]));
+    CHECK(a1.mtime > 0);
+    CHECK(model.rows[1].printers == std::vector<std::string>{ f.p2 });
+    CHECK(model.rows[1].group == a1.group); // same filament name: the old export ticked them together
+    CHECK(model.rows[2].all_printers);
+    CHECK(model.rows[3].printers == std::vector<std::string>{ f.user_printer });
+
+    // The filter lists.
+    CHECK(model.vendors == std::vector<std::string>{ "ET Vendor", "Other Vendor" });
+    CHECK(model.materials == std::vector<std::string>{ "ABS", "PETG", "PLA" });
+    CHECK(std::count(model.printers.begin(), model.printers.end(), f.p1) == 1);
+    CHECK(std::count(model.printers.begin(), model.printers.end(), f.user_printer) == 1);
+    CHECK(std::is_sorted(model.printers.begin(), model.printers.end()));
+}
+
+TEST_CASE("filament group name: the earlier export's grouping", "[FilamentPresetExport]")
+{
+    CHECK(filament_group_name("Generic PLA @U1") == "Generic PLA");
+    CHECK(filament_group_name("Bambu PLA Basic @BBL X1C") == "Bambu PLA Basic");
+    CHECK(filament_group_name("No printer tail") == "No printer tail");
+    CHECK(filament_group_name("@") == "");
+}
+
+TEST_CASE("filament export: what the old per-filament-name export wrote", "[FilamentPresetExport]")
+{
+    Fixture f;
+    f.add_filaments();
+    const UserPresetsByPrinter       by_printer = collect_user_filament_presets(*f.bundle);
+    const std::vector<const Preset *> exportable = collect_exportable_user_filaments(*f.bundle);
+    const PresetExportModel          model      = build_filament_export_model(by_printer, exportable, f.bundle->printers, f.bundle->filaments);
+
+    // The old data: filament name -> its presets, in the order the dialog collected them.
+    std::map<std::string, std::vector<const Preset *>> groups;
+    for (const Preset *p : exportable)
+        groups[filament_group_name(f.bundle->filaments.get_preset_base(*p)->name)].push_back(p);
+    REQUIRE(groups.size() == 3);
+
+    // The old export for a ticked filament name: all presets of the name, a repeated preset name once.
+    auto legacy = [&](const std::vector<std::string> &ticked_names) {
+        std::vector<PresetZipEntry> out;
+        std::set<std::string>       seen;
+        for (const std::string &g : ticked_names)
+            for (const Preset *p : groups[g]) {
+                if (!seen.insert(p->name).second)
+                    continue;
+                const std::string path = fs::path(p->file).make_preferred().string();
+                if (!path.empty())
+                    out.push_back({ p->name + ".json", path });
+            }
+        return out;
+    };
+
+    for (const auto &[group, presets] : groups) {
+        INFO("filament name " << group);
+        std::vector<size_t> ids;
+        for (const PresetExportRow &r : model.rows)
+            if (r.group == group)
+                ids.push_back(r.id);
+        REQUIRE_FALSE(ids.empty());
+        CHECK(sorted_pairs(preset_export_entries(model, ids)) == sorted_pairs(legacy({ group })));
+    }
+    // Two names ticked.
+    {
+        const std::string g0 = groups.begin()->first, g1 = std::next(groups.begin())->first;
+        std::vector<size_t> ids;
+        for (const PresetExportRow &r : model.rows)
+            if (r.group == g0 || r.group == g1)
+                ids.push_back(r.id);
+        CHECK(sorted_pairs(preset_export_entries(model, ids)) == sorted_pairs(legacy({ g0, g1 })));
+    }
+}
+
+TEST_CASE("filament export: all presets of one printer = that printer's compatible user filaments", "[FilamentPresetExport]")
+{
+    Fixture f;
+    f.add_filaments();
+    const UserPresetsByPrinter       by_printer = collect_user_filament_presets(*f.bundle);
+    const std::vector<const Preset *> exportable = collect_exportable_user_filaments(*f.bundle);
+    const PresetExportModel          model      = build_filament_export_model(by_printer, exportable, f.bundle->printers, f.bundle->filaments);
+
+    // What the printer bundle export lists for a printer (its compatible user filaments) that the
+    // filament export can also list (has a base preset): compare entry for entry.
+    std::set<std::string> exportable_names;
+    for (const Preset *p : exportable)
+        exportable_names.insert(p->name);
+    for (const std::string &printer : { f.p1, f.p2 }) {
+        INFO("printer " << printer);
+        std::vector<PresetZipEntry> expected;
+        for (const Preset *p : by_printer.at(printer))
+            if (exportable_names.count(p->name))
+                expected.push_back({ p->name + ".json", fs::path(p->file).make_preferred().string() });
+        REQUIRE_FALSE(expected.empty());
+        std::vector<size_t> ids;
+        for (const PresetExportRow &r : model.rows)
+            if (std::find(r.printers.begin(), r.printers.end(), printer) != r.printers.end())
+                ids.push_back(r.id);
+        CHECK(sorted_pairs(preset_export_entries(model, ids)) == sorted_pairs(expected));
+    }
+}
+
+TEST_CASE("filament export: the zip imports back exactly", "[FilamentPresetExport]")
+{
+    Fixture f;
+    f.add_filaments();
+    const PresetExportModel model = build_filament_export_model(*f.bundle);
+    ScratchDir              out("fil_out");
+
+    // Presets of two printers and the one for the user printer: A1, A2, C but not B.
+    std::vector<size_t> ids;
+    for (const PresetExportRow &r : model.rows)
+        if (r.name != "ET fil B all printers")
+            ids.push_back(r.id);
+    const auto entries = preset_export_entries(model, ids);
+    REQUIRE(entries.size() == 3);
+    const fs::path zip = out.path() / "Filament presets.zip";
+    REQUIRE(write_presets_zip(zip.string(), entries) == PresetZipResult::Ok);
+
+    const auto content = read_zip(zip);
+    REQUIRE(content.size() == 3);
+    for (const auto &[name, bytes] : content) {
+        INFO(name);
+        CHECK(name.find('/') == std::string::npos);
+        const Preset *p = f.bundle->filaments.find_preset(name.substr(0, name.size() - 5), false);
+        REQUIRE(p != nullptr);
+        CHECK(bytes == read_bytes(p->file));
+    }
+
+    ScratchDir dest("fil_dest");
+    {
+        DataDirGuard guard(dest.path());
+        auto target = load_system_bundle();
+        target->update_user_presets_directory("default");
+        std::vector<std::string> files{ zip.string() };
+        target->import_presets(files, [](const std::string &) { return 1; }, ForwardCompatibilitySubstitutionRule::Enable);
+        CHECK(files.size() == 3);
+        std::set<std::string> arrived;
+        for (const Preset &p : target->filaments.get_presets())
+            if (!p.is_system && !p.is_default)
+                arrived.insert(p.name);
+        CHECK(arrived == std::set<std::string>{ "ET fil A1", "ET fil A2", "ET fil C user printer" });
+        const Preset *a1 = target->filaments.find_preset("ET fil A1", false);
+        REQUIRE(a1 != nullptr);
+        CHECK(a1->inherits() == f.system_filaments[0]);
+        CHECK(a1->config.option<ConfigOptionStrings>("filament_vendor")->values.front() == "ET Vendor");
+        CHECK(fs::exists(dest.path() / PRESET_USER_DIR / "default" / "filament" / "ET fil A1.json"));
     }
 }

@@ -1,4 +1,4 @@
-// Gate: the Process presets table of Export Preset Bundle (resources/web/guide/export_process).
+// Gate: the Process presets and Filament presets tables of Export Preset Bundle (resources/web/guide/export_presets).
 //
 // Same harness as printer_table_gate.js: a loopback-only Node http server serves the shipped
 // resources/ folder; a headless Edge / Chrome loads the page over the DevTools protocol (Node 22's
@@ -8,13 +8,17 @@
 //
 // It checks:
 //   * the page loads with no exception and asks for the rows; 600 rows render as a few dozen DOM rows
-//   * the columns (select, preset, printer, inherits from, layer height, last modified) and their text:
+//   * the columns (process: select, preset, printer, layer height, last modified; filament: select, preset,
+//     printer, vendor, material, last modified), the rows start sorted by printer, then preset name, and their text:
 //     "All printers", "first +N", dashes for unknown values, a readable date
 //   * the printer drop-down ("All printers" by default) filters; the search box covers name and printer
 //   * the header checkbox and All / Clear all act on the rows shown only; ticks survive a filter
 //   * presets of two printers can be ticked one by one; the slicer is told exactly the ticked ids
 //   * sorting (preset, printer, layer height numerically, last modified), range filter on layer height,
 //     the Printer funnel keeps the drop-down in step
+//   * dragging a column's header edge resizes it (the neighbours give or take space, the total stays,
+//     double-click resets); a cut-off name gets a tooltip with the full name
+//   * Filament presets: the printer / vendor / material drop-downs, search over vendor and material
 //   * Esc closes an open filter first, then asks the slicer to close the dialog
 //   * an empty list says so; dark mode (the slicer's "dark" user agent)
 //
@@ -63,7 +67,7 @@ function synthetic() {
         else if (n % 9 === 3) printers = [PRINTERS[n % 12], PRINTERS[(n + 5) % 12]].sort(); // two printers
         else printers = [PRINTERS[n % 12]];
         rows.push({
-            id: n, name: 'Preset ' + String(n).padStart(3, '0') + (n % 13 === 0 ? ' fast' : ''), printers, all,
+            id: n, name: 'Preset ' + String(n).padStart(3, '0') + (n % 13 === 0 ? ' fast' : '') + (n === 14 ? ' with a rather long name that will not fit into the preset column of a narrow window' : ''), printers, all,
             inherits: parents[n % 4], lh: n % 31 === 5 ? null : [0.2, 0.16, 0.28, 0.125][n % 4],
             mtime: n % 29 === 4 ? null : 1790000000 + n * 86400,
         });
@@ -93,11 +97,27 @@ class Cdp {
 }
 
 
+// ---- mock filament rows: 240 user filament presets ------------------------------------------------
+const VENDORS = ['Acme', 'Bambu Lab', 'Polymaker', 'Snapmaker', ''];
+const MATERIALS = ['PLA', 'PETG', 'ABS', 'TPU'];
+function filamentMock() {
+    const rows = [];
+    for (let n = 0; n < 240; n++) {
+        let printers, all = false;
+        if (n % 30 === 7) { printers = PRINTERS.slice(); all = true; }
+        else if (n % 7 === 3) printers = [PRINTERS[n % 12], PRINTERS[(n + 3) % 12]].sort();
+        else printers = [PRINTERS[n % 12]];
+        rows.push({ id: n, name: VENDORS[n % 5] + ' ' + MATERIALS[n % 4] + ' user ' + String(n).padStart(3, '0'), printers, all, inherits: '', lh: null,
+            mtime: n % 17 === 4 ? null : 1790000000 + n * 3600, vendor: VENDORS[n % 5], material: MATERIALS[n % 4] });
+    }
+    return { rows, printers: PRINTERS.slice(), vendors: VENDORS.filter(v => v).sort(), materials: MATERIALS.slice().sort() };
+}
+
 function stub(mock) {
     return `window.__sent = []; window.__mock = ${JSON.stringify(mock)};
         window.wx = { postMessage: function (s) { var m = JSON.parse(s); window.__sent.push(m);
             if (m.command === 'export_table_ready') setTimeout(function () {
-                HandleStudio({ command: 'response_process_presets', response: window.__mock }); }, 20); } };`;
+                HandleStudio({ command: 'response_export_rows', response: window.__mock }); }, 20); } };`;
 }
 
 async function main() {
@@ -128,14 +148,14 @@ async function main() {
         });
         await S('Page.enable'); await S('Runtime.enable');
         let stubId = null;
-        const load = async ({ dark = false, mock = synthetic(), w = 1000, h = 560, wait = true } = {}) => {
+        const load = async ({ dark = false, mock = synthetic(), w = 1000, h = 560, wait = true, kind = 'process' } = {}) => {
             await S('Emulation.setDeviceMetricsOverride', { width: w, height: h, deviceScaleFactor: 1, mobile: false });
             await S('Emulation.setUserAgentOverride', { userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36 SM-Slicer/2.4' + (dark ? ' dark' : '') });
             if (stubId) await S('Page.removeScriptToEvaluateOnNewDocument', { identifier: stubId });
             stubId = (await S('Page.addScriptToEvaluateOnNewDocument', { source: stub(mock) })).result.identifier;
             errors.length = 0;
-            await S('Page.navigate', { url: origin + '/web/guide/export_process/index.html?lang=en' });
-            for (let i = 0; i < 50; i++) { await sleep(100); try { if (await evalJs('!!(window.ProcessExport && ProcessExport._state().rows.length)') || (!wait)) break; } catch (e) { } }
+            await S('Page.navigate', { url: origin + '/web/guide/export_presets/index.html?lang=en&kind=' + kind });
+            for (let i = 0; i < 50; i++) { await sleep(100); try { if (await evalJs('!!(window.PresetExport && PresetExport._state().rows.length)') || (!wait)) break; } catch (e) { } }
             await sleep(300);
         };
         const shot = async name => {
@@ -145,12 +165,19 @@ async function main() {
             fs.writeFileSync(path.join(SHOTS, name), Buffer.from(r.result.data, 'base64'));
             console.log('     shot ' + path.join(SHOTS, name));
         };
-        const st = expr => evalJs(`(function(){ var s = ProcessExport._state(); return (${expr}); })()`);
+        const st = expr => evalJs(`(function(){ var s = PresetExport._state(); return (${expr}); })()`);
         const click = sel => evalJs(`(function(){ var e = document.querySelector(${JSON.stringify(sel)}); if (!e) return false; e.click(); return true; })()`);
         const head = key => `.pt-th[data-key="${key}"]`;
         const text = sel => evalJs(`(document.querySelector(${JSON.stringify(sel)}) || {}).textContent`);
         const setVal = (sel, v) => evalJs(`(function(){ var i = document.querySelector(${JSON.stringify(sel)}); i.value = ${JSON.stringify(v)}; i.dispatchEvent(new Event(i.tagName === 'SELECT' ? 'change' : 'input')); })()`);
         const lastSel = () => evalJs(`(function(){ var m = window.__sent.filter(function(m){ return m.command === 'export_table_selection'; }); return m.length ? m[m.length - 1] : null; })()`);
+        const mouse = (type, x, y) => S('Input.dispatchMouseEvent', { type, x, y, button: 'left', buttons: type === 'mouseReleased' ? 0 : 1, clickCount: 1 });
+        const hover = (x, y) => S('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y, button: 'none', buttons: 0 });
+        const widths = () => evalJs(`Array.prototype.map.call(document.querySelectorAll('.pt-head .pt-th'), function(t){ return Math.round(t.getBoundingClientRect().width); })`);
+        const colsVar = () => evalJs(`document.querySelector('.pt-grid').style.getPropertyValue('--pt-cols')`);
+        const centre = sel => evalJs(`(function(){ var r = document.querySelector(${JSON.stringify(sel)}).getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; })()`);
+        // rows are shown in this order: printer (all-printers first, none last), then preset name
+        const DEFAULT_ORDER = 's.view.every(function(r, i){ return i === 0 || r.order > s.view[i - 1].order; })';
         const esc = () => evalJs(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
         const P_A = PRINTERS[0], P_B = PRINTERS[1];
 
@@ -162,31 +189,68 @@ async function main() {
         check('count line: 600 presets, 0 selected', /600 presets .* 0 selected/.test(await text('.pt-count')), await text('.pt-count'));
         const domRows = await evalJs(`document.querySelectorAll('.pt-body .pt-row').length`);
         check('virtualised: a few dozen DOM rows', domRows > 5 && domRows < 60, domRows);
-        check('columns: select, preset, printer, inherits from, layer height, last modified',
-            await evalJs(`Array.prototype.map.call(document.querySelectorAll('.pt-head .pt-th'), function(t){ return t.dataset.key; }).join(',')`) === 'checked,name,printers,inherits,lh,mtime');
-        check('header texts', await evalJs(`Array.prototype.map.call(document.querySelectorAll('.pt-head .pt-sort .lbl'), function(t){ return t.textContent; }).join('|')`) === 'Export|Preset|Printer|Inherits from|Layer height|Last modified');
+        check('columns: select, preset, printer, layer height, last modified (no "Inherits from")',
+            await evalJs(`Array.prototype.map.call(document.querySelectorAll('.pt-head .pt-th'), function(t){ return t.dataset.key; }).join(',')`) === 'checked,name,printers,lh,mtime');
+        check('header texts', await evalJs(`Array.prototype.map.call(document.querySelectorAll('.pt-head .pt-sort .lbl'), function(t){ return t.textContent; }).join('|')`) === 'Export|Preset|Printer|Layer height|Last modified');
+        check('process presets have a printer drop-down only', await evalJs(`document.querySelectorAll('.pt-toolbar select').length === 1`));
         check('the printer drop-down starts on "All printers" and lists every printer',
             await evalJs(`(function(){ var s = document.querySelector('.pt-toolbar select'); return s.value === '' && s.options.length === 13 && s.options[0].textContent === 'All printers'; })()`));
 
         // ---- cell text
-        const cells = n => evalJs(`(function(){ var r = document.querySelector('.pt-body .pt-row[data-id="${n}"]'); return r ? Array.prototype.map.call(r.children, function(c){ return c.textContent; }) : null; })()`);
+        const cells = n => evalJs(`(function(){ var s = PresetExport._state(); var r = s.rows[${n}]; var b = document.querySelector('.pt-body');
+            b.scrollTop = Math.max(0, s.view.indexOf(r) * 36 - 36); b.dispatchEvent(new Event('scroll'));
+            return null; })()`).then(() => sleep(150)).then(() => evalJs(`(function(){ var r = document.querySelector('.pt-body .pt-row[data-id="${n}"]'); return r ? Array.prototype.map.call(r.children, function(c){ return c.textContent; }) : null; })()`));
+        check('the rows start sorted by printer, then preset name', await st(DEFAULT_ORDER) && await st(`(function(){ var v = s.view, i = 0; while (i < v.length && v[i].all) i++;
+            if (i === 0) return false; for (var k = 1; k < i; k++) if (v[k].name < v[k - 1].name) return false;
+            for (var k2 = i + 1; k2 < v.length; k2++) { var a = v[k2 - 1], b = v[k2]; if (a.printers[0] > b.printers[0]) return false; if (a.printers[0] === b.printers[0] && a.name > b.name) return false; }
+            return true; })()`));
         const first = await cells(0);
-        check('row 0: name, printer, inherits, layer height', first && first[1] === 'Preset 000 fast' && first[2] === PRINTERS[0] && first[3] === '0.20mm Standard @Base' && first[4] === '0.20', JSON.stringify(first));
-        check('last modified is a readable date, not "Invalid"', first[5] && !/Invalid|NaN/.test(first[5]) && first[5] !== '\u2014', first[5]);
-        await evalJs(`(function(){ var b = document.querySelector('.pt-body'); b.scrollTop = 7 * 36 - 10; b.dispatchEvent(new Event('scroll')); })()`);
-        await sleep(150);
+        check('row 0: name, printer, layer height', first && first[1] === 'Preset 000 fast' && first[2] === PRINTERS[0] && first[3] === '0.20', JSON.stringify(first));
+        check('last modified is a readable date, not "Invalid"', first[4] && !/Invalid|NaN/.test(first[4]) && first[4] !== '\u2014', first[4]);
         const all7 = await cells(7);
         check('a preset compatible with everything says "All printers"', all7 && all7[2] === 'All printers', JSON.stringify(all7));
-        await evalJs(`(function(){ var b = document.querySelector('.pt-body'); b.scrollTop = 3 * 36 - 10; b.dispatchEvent(new Event('scroll')); })()`);
-        await sleep(150);
         const two = await cells(3);
         check('two printers show the first and +1', two && /^Snap .* \+1$/.test(two[2]), JSON.stringify(two));
-        check('0.125 mm is shown as 0.125', two && two[4] === '0.125', JSON.stringify(two));
-        await evalJs(`(function(){ var b = document.querySelector('.pt-body'); b.scrollTop = 5 * 36 - 10; b.dispatchEvent(new Event('scroll')); })()`);
-        await sleep(150);
+        check('0.125 mm is shown as 0.125', two && two[3] === '0.125', JSON.stringify(two));
         const nul = await cells(5);
-        check('unknown layer height shows a dash, an unknown date too', nul && nul[4] === '—' && nul[5] !== '—' && await cells(4).then(c => c && c[5] === '—'), JSON.stringify(nul));
+        const nul2 = await cells(4);
+        check('unknown layer height shows a dash, an unknown date too', nul && nul[3] === '\u2014' && nul[4] !== '\u2014' && nul2 && nul2[4] === '\u2014', JSON.stringify(nul) + JSON.stringify(nul2));
         await evalJs(`document.querySelector('.pt-body').scrollTop = 0`);
+
+        // ---- column widths: untouched until dragged; dragging an edge; double-click resets
+        const defaultCols = await colsVar();
+        check('before any drag the layout is the default one', /minmax\(200px, 3fr\)/.test(defaultCols), defaultCols);
+        check('every column but the last has a resize handle', await evalJs(`document.querySelectorAll('.pt-head .pt-resize').length === 4 && !document.querySelector('.pt-th[data-key="mtime"] .pt-resize')`));
+        const w0 = await widths();
+        const h1 = await centre(head('name') + ' .pt-resize');
+        await mouse('mousePressed', h1.x, h1.y); await mouse('mouseMoved', h1.x + 30, h1.y); await mouse('mouseMoved', h1.x + 70, h1.y); await mouse('mouseReleased', h1.x + 70, h1.y);
+        const w1 = await widths();
+        check('dragging the Preset edge right widens it by the drag', Math.abs(w1[1] - (w0[1] + 70)) <= 2, w0[1] + ' -> ' + w1[1]);
+        check('the columns to its right give the space: the total stays', Math.abs(w1.reduce((s, x) => s + x, 0) - w0.reduce((s, x) => s + x, 0)) <= 2 && w1[2] + w1[3] + w1[4] < w0[2] + w0[3] + w0[4]);
+        check('columns left of it did not move', w1[0] === w0[0]);
+        check('the rows follow the header', await evalJs(`(function(){ var r = document.querySelector('.pt-body .pt-row'); var h = document.querySelector('.pt-head .pt-th[data-key="name"]');
+            return Math.abs(r.children[1].getBoundingClientRect().width - h.getBoundingClientRect().width) <= 1; })()`));
+        const h2 = await centre(head('name') + ' .pt-resize');
+        await mouse('mousePressed', h2.x, h2.y); await mouse('mouseMoved', h2.x - 400, h2.y); await mouse('mouseReleased', h2.x - 400, h2.y);
+        const w2 = await widths();
+        check('dragging left stops at the column minimum', w2[1] >= 48 && w2[1] < w1[1] - 50, String(w2[1]));
+        await evalJs(`document.querySelector('.pt-th[data-key="name"] .pt-resize').dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))`);
+        check('double-clicking an edge resets the default layout', await colsVar() === defaultCols);
+
+        // ---- a cut-off name gets a tooltip with the full name; a name that fits does not
+        await load({ w: 760 });
+        const longId = await st(`s.rows.filter(function(r){ return r.name.indexOf('rather long') > 0; })[0].id`);
+        await evalJs(`(function(){ var s = PresetExport._state(); var r = s.rows[${longId}]; var b = document.querySelector('.pt-body');
+            b.scrollTop = Math.max(0, s.view.indexOf(r) * 36 - 36); b.dispatchEvent(new Event('scroll')); })()`);
+        await sleep(200);
+        const tp = await centre(`.pt-body .pt-row[data-id="${longId}"] .pt-td:nth-child(2)`);
+        await hover(tp.x, tp.y); await sleep(100);
+        check('a name the column cuts off shows in full as a tooltip', (await evalJs(`document.querySelector('.pt-body .pt-row[data-id="${longId}"] .pt-td:nth-child(2)').title`)).indexOf('will not fit') > 0);
+        await cells(0);
+        const sp = await centre(`.pt-body .pt-row[data-id="0"] .pt-td:nth-child(2)`);
+        await hover(sp.x, sp.y); await sleep(100);
+        check('a name that fits has no tooltip', (await evalJs(`document.querySelector('.pt-body .pt-row[data-id="0"] .pt-td:nth-child(2)').title`)) === '');
+        await load();
 
         // ============================================================ 2. printer drop-down, search
         await setVal('.pt-toolbar select', P_A);
@@ -254,7 +318,7 @@ async function main() {
         await click(head('name') + ' .pt-sort');
         check('and descending', await st('s.view[0].name === "Preset 599"'));
         await click(head('name') + ' .pt-sort');
-        check('a third click restores the original order', await st('s.view[0].id === 0 && s.view[599].id === 599 && s.state.sort.key === null'));
+        check('a third click restores the default order (printer, then name)', await st(DEFAULT_ORDER) && await st('s.state.sort.key === null'));
         await click(head('lh') + ' .pt-sort');
         check('layer height sorts numerically, unknown last', await st('s.view[0].lh === 0.125 && s.view[s.view.length - 1].lh === null'));
         await click(head('lh') + ' .pt-sort');
@@ -285,10 +349,6 @@ async function main() {
         await click('.pt-chips .pt-link');
         check('Clear search and filters sets the drop-down back to "All printers"', await evalJs(`document.querySelector('.pt-toolbar select').value`) === '');
 
-        await click(head('inherits') + ' .pt-filter-btn');
-        check('the Inherits from funnel lists the parents and a dash for none', await evalJs(`Array.prototype.map.call(document.querySelectorAll('.pt-pop .pt-opt span:not(.n)'), function(s){ return s.textContent; }).indexOf('\u2014') >= 0`));
-        await esc();
-
         // ============================================================ 6. Esc
         await evalJs(`window.__sent = []`);
         await click(head('lh') + ' .pt-filter-btn');
@@ -297,6 +357,58 @@ async function main() {
         await esc();
         check('Esc with nothing open asks the slicer to close the dialog', await evalJs(`window.__sent.some(function(m){ return m.command === 'export_table_cancel'; })`));
         check('no uncaught exception during all that', errors.length === 0, errors.join(' | '));
+
+        // ============================================================ 6b. Filament presets
+        await load({ kind: 'filament', mock: filamentMock() });
+        check('the filament page loads with no uncaught exception', errors.length === 0, errors.join(' | '));
+        check('filament columns: select, preset, printer, vendor, material, last modified',
+            await evalJs(`Array.prototype.map.call(document.querySelectorAll('.pt-head .pt-th'), function(t){ return t.dataset.key; }).join(',')`) === 'checked,name,printers,vendor,material,mtime');
+        check('filament header texts', await evalJs(`Array.prototype.map.call(document.querySelectorAll('.pt-head .pt-sort .lbl'), function(t){ return t.textContent; }).join('|')`) === 'Export|Preset|Printer|Vendor|Material|Last modified');
+        check('240 filament presets, count line says so', await st('s.rows.length === 240') && /240 presets .* 0 selected/.test(await text('.pt-count')), await text('.pt-count'));
+        check('printer, vendor and material drop-downs', await evalJs(`Array.prototype.map.call(document.querySelectorAll('.pt-toolbar select'), function(s){ return s.dataset.key + ':' + s.options.length + ':' + s.options[0].textContent; }).join('|')`) === 'printers:13:All printers|vendor:6:All vendors|material:5:All materials',
+            await evalJs(`Array.prototype.map.call(document.querySelectorAll('.pt-toolbar select'), function(s){ return s.dataset.key + ':' + s.options.length + ':' + s.options[0].textContent; }).join('|')`));
+        check('the filament rows start sorted by printer, then name', await st(DEFAULT_ORDER));
+        check('vendor and material cells show the values, a dash for none', await evalJs(`(function(){ var s = PresetExport._state(); var r = s.rows.filter(function(r){ return r.vendor === ''; })[0]; var b = document.querySelector('.pt-body');
+            b.scrollTop = Math.max(0, s.view.indexOf(r) * 36 - 36); b.dispatchEvent(new Event('scroll')); return r.id; })()`).then(async id => { await sleep(150);
+            return evalJs(`(function(){ var n = document.querySelector('.pt-body .pt-row[data-id="${id}"]'); return n.children[3].textContent === '\u2014' && n.children[4].textContent.length > 0; })()`); }));
+        await setVal('.pt-toolbar select[data-key="vendor"]', 'Polymaker');
+        check('the vendor drop-down filters', await st(`s.view.length === 48 && s.view.every(function(r){ return r.vendor === 'Polymaker'; })`), await st('s.view.length'));
+        await setVal('.pt-toolbar select[data-key="material"]', 'PETG');
+        check('vendor and material combine', await st(`s.view.length > 0 && s.view.every(function(r){ return r.vendor === 'Polymaker' && r.material === 'PETG'; })`), await st('s.view.length'));
+        await setVal('.pt-toolbar select[data-key="printers"]', P_B);
+        check('and printer on top of them', await st(`s.view.every(function(r){ return r.vendor === 'Polymaker' && r.material === 'PETG' && r.printers.indexOf(${JSON.stringify(P_B)}) >= 0; })`));
+        await click('.pt-chips .pt-link');
+        check('Clear search and filters resets all three drop-downs', await evalJs(`Array.prototype.every.call(document.querySelectorAll('.pt-toolbar select'), function(s){ return s.value === ''; })`) && await st('s.view.length === 240'));
+        await setVal('.pt-toolbar .searchTerm', 'snapmaker');
+        check('search finds a vendor', await st(`s.view.length > 0 && s.view.every(function(r){ return /snapmaker/i.test(r.name + r.vendor); })`));
+        await setVal('.pt-toolbar .searchTerm', 'tpu');
+        check('search finds a material', await st(`s.view.length > 0 && s.view.every(function(r){ return r.material === 'TPU'; })`));
+        await click('.pt-chips .pt-link');
+        await click(head('material') + ' .pt-filter-btn');
+        check('the Material funnel lists the materials', await evalJs(`document.querySelectorAll('.pt-pop .pt-opt').length === 4`));
+        await esc();
+        // selection across two printers, then the ids
+        await evalJs(`window.__sent = []`);
+        await setVal('.pt-toolbar select[data-key="printers"]', P_A);
+        await click('.pt-head .pt-hcheck');
+        const fa = await st('s.rows.filter(function(r){ return r.checked; }).length');
+        await setVal('.pt-toolbar select[data-key="printers"]', P_B);
+        const fb = await st(`s.view.filter(function(r){ return !r.checked; })[0].id`);
+        await evalJs(`document.querySelector('.pt-body .pt-row[data-id="${fb}"] input').click()`);
+        await setVal('.pt-toolbar select[data-key="printers"]', '');
+        check('filament ticks across two printers: the header ticks the rows shown, the click one more', await st('s.rows.filter(function(r){ return r.checked; }).length') === fa + 1 && (await lastSel()).count === fa + 1);
+        check('the filament count line says N selected', new RegExp((fa + 1) + ' selected').test(await text('.pt-count')), await text('.pt-count'));
+        await click('.pt-toolbar .SmallBtn');
+        check('Clear all with no filter clears them all', await st('s.rows.every(function(r){ return !r.checked; })'));
+        await load({ kind: 'filament', mock: { rows: [], printers: [], vendors: [], materials: [] }, wait: false });
+        await sleep(300);
+        check('an empty filament list says so', /no user filament presets/i.test(await text('.pt-empty')), await text('.pt-empty'));
+        await shot('export_filament.png');
+        await load({ kind: 'filament', mock: filamentMock() });
+        await setVal('.pt-toolbar select[data-key="vendor"]', 'Polymaker');
+        for (const n of [0, 1]) await evalJs(`(function(){ var r = PresetExport._state().view[${n}]; document.querySelector('.pt-body .pt-row[data-id="' + r.id + '"] input').click(); })()`);
+        await shot('export_filament_filtered.png');
+        await load();
 
         // ============================================================ 7. a reloaded page gets its ticks back; empty list; themes
         await load({ mock: Object.assign(synthetic(), { selected: [2, 5, 9] }) });
@@ -322,7 +434,7 @@ async function main() {
         if (SHOTS) {
             await load();
             await setVal('.pt-toolbar select', P_A);
-            for (const n of [0, 1, 2]) await evalJs(`(function(){ var r = ProcessExport._state().view[${n}]; document.querySelector('.pt-body .pt-row[data-id="' + r.id + '"] input').click(); })()`);
+            for (const n of [0, 1, 2]) await evalJs(`(function(){ var r = PresetExport._state().view[${n}]; document.querySelector('.pt-body .pt-row[data-id="' + r.id + '"] input').click(); })()`);
             await sleep(300);
             await shot('export_filtered_selected.png');
             await click(head('printers') + ' .pt-filter-btn');
