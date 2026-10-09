@@ -3,6 +3,7 @@
 
 #include <map>
 #include "libslic3r/Preset.hpp"
+#include "libslic3r/ProcessPresetExport.hpp"
 #include "wxExtensions.hpp"
 #include "GUI_Utils.hpp"
 #include "Widgets/Label.hpp"
@@ -14,6 +15,9 @@
 #include "Widgets/DialogButtons.hpp"
 #include "miniz.h"
 #include "ParamsDialog.hpp"
+
+class wxWebView;
+class wxWebViewEvent;
 
 namespace Slic3r { 
 namespace GUI {
@@ -296,6 +300,12 @@ private:
     ExportCase  archive_printer_preset_to_file(const wxString &path);
     ExportCase  archive_filament_preset_to_file(const wxString &path);
     ExportCase  archive_process_preset_to_file(const wxString &path);
+    // "Process presets(.zip)" is a table (resources/web/guide/export_process): one row per user
+    // process preset, filters, sorting, individual ticks. It lives in an embedded web view that
+    // replaces the checkbox grid below the radio buttons while that export type is chosen.
+    bool        show_process_table(bool show);
+    void        send_process_rows();
+    void        on_process_table_message(wxWebViewEvent &evt);
 
 private:
     std::vector<std::pair<RadioBox *, wxString>>           m_export_type_btns;
@@ -311,6 +321,11 @@ private:
     wxGridSizer *                                          m_preset_sizer   = nullptr;
     wxPanel *                                              m_presets_window = nullptr;
     wxStaticText *                                         m_serial_text    = nullptr;
+    wxBoxSizer *                                           m_select_sizer   = nullptr; // label + the grid / the table
+    wxWebView *                                            m_process_table  = nullptr;
+    bool                                                   m_process_table_failed = false;
+    ProcessExportModel                                     m_process_model;
+    std::vector<size_t>                                    m_process_selected; // row ids ticked in the table
 };
 
 class CreatePresetForPrinterDialog : public DPIDialog

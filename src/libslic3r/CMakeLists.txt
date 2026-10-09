@@ -501,6 +501,8 @@ set(lisbslic3r_sources
     PrincipalComponents2D.hpp
     PrinterModelSpecs.cpp
     PrinterModelSpecs.hpp
+    ProcessPresetExport.cpp
+    ProcessPresetExport.hpp
     PrintApply.cpp
     PrintBase.cpp
     MemoryGuardPolicy.hpp
