@@ -15,6 +15,14 @@
 
 #include <catch2/catch.hpp>
 
+// The thumbnail test's GUI headers come before GLAD and GLFW: they pull <windows.h> and boost.asio,
+// which do not build after glfw3.h has set up its own Windows defines.
+#include "slic3r/GUI/Camera.hpp"
+#include "slic3r/GUI/GLCanvas3D.hpp"
+#include "slic3r/GUI/PartPlate.hpp"
+#include "slic3r/GUI/3DScene.hpp"
+#include "libslic3r/Model.hpp"
+
 #include <glad/gl.h>
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
@@ -762,4 +770,92 @@ TEST_CASE("OpenGL core profile: start-up, shaders, GLModel, plain VBO and dashed
 
     CHECK(OpenGLManager::report_gl_errors("in the core-profile smoke test") == 0);
     gl_test_trace("run end");
+}
+
+// The CLI's thumbnail path (Snapmaker_Orca.cpp, CLI::run): no GUI_App, a PartPlateList with no Plater,
+// GLVolumes loaded from the model, the "thumbnail" shader and GLCanvas3D::render_thumbnail_framebuffer().
+// It used to segfault in Camera::select_view("iso") -> Camera::auto_type(), which read
+// wxGetApp().app_config through a null app, so every CLI slice that rendered thumbnails died right after
+// the G-code was written (--no-thumbnails avoided it).
+TEST_CASE("CLI thumbnail path renders without a GUI_App", "[GL][CoreProfile][Thumbnail]")
+{
+    gl_test_trace("thumbnail run begin");
+    SharedGl& gl = shared_gl();
+    if (gl.window == nullptr) {
+        WARN("No OpenGL 3.3 core context available here (no display or driver); thumbnail test skipped.");
+        return;
+    }
+    // As in the CLI: no wx application at all. (Another test in this binary may have started a plain wxApp.)
+    struct NoWxApp
+    {
+        wxAppConsole* saved{ wxApp::GetInstance() };
+        NoWxApp() { wxApp::SetInstance(nullptr); }
+        ~NoWxApp() { wxApp::SetInstance(saved); }
+    } no_app;
+
+    ResourcesDirOverride resources(SLIC3R_TEST_RESOURCES_DIR);
+    OpenGLManager* manager = gl.manager.get();
+    REQUIRE(manager->init_gl(/*popup_error=*/false));
+    GlStateGuard state_guard;
+
+    SECTION("Camera picks a view without an app")
+    {
+        Camera camera;
+        camera.set_type(Camera::EType::Ortho);
+        for (const char* dir : { "iso", "left", "right", "top", "bottom", "front", "rear", "topfront", "plate" }) {
+            INFO("view " << dir);
+            REQUIRE_NOTHROW(camera.select_view(dir));
+        }
+        // No app, no auto perspective: the projection the caller chose stays.
+        CHECK(camera.get_type() == Camera::EType::Ortho);
+    }
+
+    SECTION("a 20 mm cube on a 256 mm plate, every thumbnail kind the CLI renders")
+    {
+        Model model;
+        ModelObject* object = model.add_object();
+        object->add_volume(make_cube(20., 20., 20.));
+        object->add_instance()->set_offset(Vec3d(118., 118., 0.));
+        object->invalidate_bounding_box();
+
+        Slic3r::GUI::PartPlateList plates(nullptr, &model, ptFFF);
+        plates.reset_size(256, 256, 256, false);
+        plates.set_shapes({ Vec2d(0., 0.), Vec2d(256., 0.), Vec2d(256., 256.), Vec2d(0., 256.) }, {}, "", 120.f, 30.f);
+
+        GLVolumeCollection volumes;
+        volumes.load_object_volume(object, 0, 0, 0, "volume", true, false, true);
+        REQUIRE(volumes.volumes.size() == 1);
+        const ColorRGBA orange(1.f, 0.5f, 0.f, 1.f);
+        volumes.volumes.back()->set_render_color(orange);
+        volumes.volumes.back()->set_color(orange);
+        volumes.volumes.back()->printable = true;
+        std::vector<ColorRGBA> colors{ orange };
+
+        GLShaderProgram* shader = manager->get_shader("thumbnail");
+        REQUIRE(shader != nullptr);
+        REQUIRE(OpenGLManager::get_framebuffers_type() == OpenGLManager::EFramebufferType::Arb);
+
+        // What CLI::run asks for: plate, no-light, top and pick thumbnails, all orthographic.
+        struct Kind { const char* name; bool parts_only; bool top; bool picking; bool ban_light; };
+        for (const Kind& kind : { Kind{ "plate", true, false, false, false }, Kind{ "no light", false, false, false, true },
+                                  Kind{ "top", false, true, false, false }, Kind{ "pick", false, true, true, false } }) {
+            INFO("thumbnail " << kind.name);
+            gl_test_trace(std::string("thumbnail: ") + kind.name);
+            ThumbnailData data;
+            const ThumbnailsParams params{ {}, false, kind.parts_only, true, true, 0 };
+            GLCanvas3D::render_thumbnail_framebuffer(data, 128, 128, params, plates, model.objects, volumes, colors, shader,
+                                                     Camera::EType::Ortho, kind.top, kind.picking, kind.ban_light);
+            REQUIRE(data.is_valid());
+            REQUIRE(data.pixels.size() == size_t(128 * 128 * 4));
+            // The cube covers part of the image, not all of it.
+            size_t covered = 0;
+            for (size_t i = 3; i < data.pixels.size(); i += 4)
+                if (data.pixels[i] != 0)
+                    ++covered;
+            CHECK(covered > 0);
+            CHECK(covered < size_t(128 * 128));
+        }
+        CHECK(drain_gl_errors() == GL_NO_ERROR);
+    }
+    gl_test_trace("thumbnail run end");
 }
