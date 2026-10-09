@@ -1570,7 +1570,9 @@ void GUI_App::post_init()
     }
 
     // Start preset sync after project opened, otherwise we could have preset change during project opening which could cause crash
-    if (app_config->get("sync_user_preset") == "true") {
+    if (!PresetSync::cloud_sync_enabled()) {
+        BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " user preset cloud sync: disabled";
+    } else if (app_config->get("sync_user_preset") == "true") {
         // BBS loading user preset
         // Always async, not such startup step
         // BOOST_LOG_TRIVIAL(info) << "Loading user presets...";
@@ -6976,6 +6978,10 @@ void  GUI_App::push_notification(wxString msg, wxString title, UserNotificationS
 
 void GUI_App::reload_settings()
 {
+    // load_user_presets() with a cloud list deletes the local presets that list does not know, so it
+    // must never run while the cloud sync is off.
+    if (!PresetSync::cloud_sync_enabled()) return;
+
     if (preset_bundle && m_agent) {
         std::map<std::string, std::map<std::string, std::string>> user_presets;
         m_agent->get_user_presets(&user_presets);
@@ -7003,6 +7009,9 @@ void GUI_App::remove_user_presets()
 
 void GUI_App::sync_preset(Preset* preset)
 {
+    // Cloud preset sync is off (PresetSyncPolicy.hpp): never talk to the cloud about a preset.
+    if (!PresetSync::cloud_sync_enabled()) return;
+
     int result = -1;
     unsigned int http_code = 200;
     std::string updated_info;
@@ -7135,6 +7144,14 @@ void GUI_App::sync_preset(Preset* preset)
 
 void GUI_App::start_sync_user_preset(bool with_progress_dlg)
 {
+    // Cloud preset sync is off (PresetSyncPolicy.hpp): no sync thread, no get_setting_list2 /
+    // request_setting_id / put_setting / delete_setting call, and no cloud list that could remove or
+    // replace a local preset (reload_settings runs only when this thread finishes).
+    if (!PresetSync::cloud_sync_enabled()) {
+        BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << ": user preset cloud sync is disabled";
+        return;
+    }
+
     if (app_config->get_stealth_mode())
         return;
 
@@ -8263,6 +8280,9 @@ std::vector<std::string> GUI_App::get_delete_cache_presets_lock()
 
 void GUI_App::delete_preset_from_cloud(std::string setting_id)
 {
+    // Nothing is deleted in the cloud (cloud preset sync is off); do not queue the id either.
+    if (!PresetSync::cloud_sync_enabled()) return;
+
     std::scoped_lock l(mutex_delete_cache_presets);
     need_delete_presets.push_back(setting_id);
 }

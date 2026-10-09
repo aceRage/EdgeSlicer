@@ -977,6 +977,7 @@ set(SLIC3R_GUI_SOURCES
     Utils/SnapmakerSilentLogin.hpp
     Utils/BambuSyncPolicy.cpp
     Utils/BambuSyncPolicy.hpp
+    Utils/PresetSyncPolicy.hpp
     Utils/AccountProviders.cpp
     Utils/AccountProviders.hpp
     Utils/json_diff.cpp

@@ -3504,7 +3504,7 @@ CreatePresetSuccessfulDialog::CreatePresetSuccessfulDialog(wxWindow *parent, con
     wxBoxSizer *success_text_sizer = new wxBoxSizer(wxVERTICAL);
     wxStaticText *success_text = nullptr;
     wxStaticText *next_step_text = nullptr;
-    bool          sync_user_preset_need_enabled = wxGetApp().getAgent() && wxGetApp().app_config->get("sync_user_preset") == "false";
+    bool          sync_user_preset_need_enabled = PresetSync::cloud_sync_enabled() && wxGetApp().getAgent() && wxGetApp().app_config->get("sync_user_preset") == "false";
     switch (create_success_type) {
     case PRINTER: 
         success_text = new wxStaticText(this, wxID_ANY, _L("Printer Created")); 
