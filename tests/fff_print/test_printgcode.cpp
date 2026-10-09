@@ -2211,10 +2211,11 @@ TEST_CASE("Avoid crossing perimeters keeps a narrow slot as an obstacle", "[Prin
     // The slot, shrunk a little so a travel along its walls does not count.
     const double hx = 0.5 * slot_w - 0.2, hy = 0.5 * slot_l - 0.2;
 
-    // Counted: travels inside the plate (not the approach from the start position) below the last layer. On the
-    // last layer the top surface is taken out of the avoid-crossing boundary, and then a travel may cut across
-    // anyway, slot or not.
+    // Counted: travels inside the plate below the last layer, after the first extrusion (the approach from the
+    // start position, which may well be the bed origin under the slot, does not count). On the last layer the top
+    // surface is taken out of the avoid-crossing boundary, and then a travel may cut across anyway, slot or not.
     double      layer_z = 0.;
+    bool        started = false;
     size_t      travels = 0, crossings = 0;
     GCodeReader parser;
     parser.parse_buffer(gcode, [&](GCodeReader &self, const GCodeReader::GCodeLine &line) {
@@ -2222,9 +2223,11 @@ TEST_CASE("Avoid crossing perimeters keeps a narrow slot as an obstacle", "[Prin
         const std::string raw = line.raw();
         if (std::regex_search(raw, m, z_tag_re))
             layer_z = std::stod(m[1].str());
+        if (line.extruding(self) && line.dist_XY(self) > 0)
+            started = true;
         if (!(line.cmd_is("G1") || line.cmd_is("G0")) || line.extruding(self) || line.dist_XY(self) <= 0)
             return;
-        if (layer_z > top_z - 1e-3 || !bbox.contains(Vec2d(self.x(), self.y())) ||
+        if (!started || layer_z > top_z - 1e-3 || !bbox.contains(Vec2d(self.x(), self.y())) ||
             !bbox.contains(Vec2d(line.new_X(self), line.new_Y(self))))
             return;
         ++travels;
