@@ -1096,10 +1096,14 @@ TEST_CASE("The first raft layer follows Initial layer speed, raft layers above a
         }
     CHECK(upper_raft_layers);
 
-    // First object layer over the raft (z = 0.8): walls at Initial layer speed, as before.
-    const std::set<int> *wall = feeds_for(feeds, 800, "Outer wall");
-    REQUIRE(wall != nullptr);
-    CHECK(*wall == std::set<int>{ 1200 });
+    // First object layer over the raft (the lowest layer with an outer wall, above the raft layers):
+    // walls at Initial layer speed, as before.
+    int first_wall_z = -1;
+    for (const auto &kv : feeds)
+        if (kv.first.second == "Outer wall" && (first_wall_z < 0 || kv.first.first < first_wall_z))
+            first_wall_z = kv.first.first;
+    REQUIRE(first_wall_z > 600);
+    CHECK(*feeds_for(feeds, first_wall_z, "Outer wall") == std::set<int>{ 1200 });
 }
 
 TEST_CASE("First layer gap fill stays on Initial layer infill speed", "[PrintGCode][InitialLayerSpeed]")
